@@ -29,4 +29,11 @@ The player is a sphere and it's checked with each mesh in the scene for collisio
  6. Check distance from triangle's center to player
  7. If the distance is less than the radius of the player's sphere collider resolve by simply adding an offset along the face's normal
 
-It's basically "Collide and Slide". The "projected point" part has obviously some issues, and some collisions will go undetected and result snappy when the sphere's center eventually projects. I solved this with some lazy interpolation.
+It's basically "Collide and Slide". The "projected point" part has obviously some issues, and some co
+llisions will go undetected and result snappy when the sphere's center eventually projects. I solved this with some lazy interpolation.
+
+## about the textures
+I'm sorry but I can't include the original textures, as they featured some parts of the textures of the game "The Wizard of Oz: Beyond the Yellow Brick Road".
+
+## the makefile
+The makefile is garbage. That's about it. It works.
