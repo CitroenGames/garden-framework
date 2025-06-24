@@ -8,10 +8,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(TARGET_NAME sdl-test)
 
 # Source files
-file(GLOB_RECURSE SOURCES "*.cpp")
+file(GLOB_RECURSE SOURCES "src/*.cpp" "src/*.hpp")
+file(GLOB_RECURSE MODELS "models/*.hpp")
 
 # Create the executable
-add_executable(${TARGET_NAME} ${SOURCES})
+add_executable(${TARGET_NAME} ${SOURCES} ${MODELS})
 
 # Include directories
 target_include_directories(${TARGET_NAME} PRIVATE
@@ -19,6 +20,9 @@ target_include_directories(${TARGET_NAME} PRIVATE
     "include/SDL2"
     "include/SOIL"
     "include/irrlicht"
+    "include/stb"  # Add stb_image include directory
+    "src"
+    ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 # Library directories
@@ -29,13 +33,10 @@ target_link_directories(${TARGET_NAME} PRIVATE
 # Find OpenGL
 find_package(OpenGL REQUIRED)
 
-# For Visual Studio, you would need .lib files instead of .a files
-# Replace your MinGW libraries with MSVC equivalents:
+# Link libraries
 target_link_libraries(${TARGET_NAME}
-    # MSVC-compiled libraries (you need to obtain these)
-    "${CMAKE_CURRENT_SOURCE_DIR}/lib/x86/SDL2main.lib"   
-    "${CMAKE_CURRENT_SOURCE_DIR}/lib/x86/SDL2.lib"       
-    "${CMAKE_CURRENT_SOURCE_DIR}/lib/x86/SOIL.lib"       
+    # SDL2 - Only link SDL2.lib, NOT SDL2main.lib for custom main
+    "${CMAKE_CURRENT_SOURCE_DIR}/lib/x86/SDL2.lib"
     
     # OpenGL
     ${OPENGL_LIBRARIES}
@@ -58,11 +59,12 @@ target_link_libraries(${TARGET_NAME}
 # Windows-specific settings
 if(WIN32)
     set_target_properties(${TARGET_NAME} PROPERTIES
-        WIN32_EXECUTABLE TRUE
+        WIN32_EXECUTABLE FALSE  # Set to FALSE if you want console output
     )
     
     target_compile_definitions(${TARGET_NAME} PRIVATE
         _CRT_SECURE_NO_WARNINGS
         WIN32_LEAN_AND_MEAN
+        SDL_MAIN_HANDLED  # Tell SDL we're handling main ourselves
     )
 endif()
