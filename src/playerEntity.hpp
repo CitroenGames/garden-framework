@@ -1,5 +1,4 @@
-#ifndef EPLAYERENTITY
-#define EPLAYERENTITY
+#pragma once
 
 #include "gameObject.hpp"
 #include "camera.hpp"
@@ -126,5 +125,3 @@ public:
         player_camera.position = obj.position.getInterpolated(player_camera.position, delta);
     };
 };
-
-#endif

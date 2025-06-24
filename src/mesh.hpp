@@ -1,5 +1,4 @@
-#ifndef EMESH
-#define EMESH
+#pragma once
 
 #include <vector>
 #include <gl/gl.h>
@@ -41,5 +40,3 @@ public:
         texture_set = true;
     };
 };
-
-#endif

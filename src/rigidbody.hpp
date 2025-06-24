@@ -1,9 +1,6 @@
-#ifndef ERIGIDBODY
-#define ERIGIDBODY
+#pragma once
 
 #include <vector>
-#include <gl/gl.h>
-#include <gl/glu.h>
 #include "gameObject.hpp"
 
 class rigidbody : public component
@@ -21,5 +18,3 @@ public:
         apply_gravity = true;
     };
 };
-
-#endif

@@ -1,5 +1,4 @@
-#ifndef EGAMEOBJECT
-#define EGAMEOBJECT
+#pragma once
 
 #include <cstring>
 #include "vector3.h"
@@ -40,5 +39,3 @@ public:
     // explicit forces such declaration : Component c(gameObject);
     component(gameObject& obj) : obj(obj) {};
 };
-
-#endif

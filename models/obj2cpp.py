@@ -73,8 +73,7 @@ def save_model_array(define, vertices, uvs, normals, faces):
     # saving
     m_file = open("%s.hpp" % define_lower, "w")
 
-    m_file.write("#ifndef %s\n" % define.upper())
-    m_file.write("#define %s\n\n" % define.upper())
+    m_file.write("#pragma once\n" % define.upper())
     m_file.write("#include <gl/gl.h>\n")
     m_file.write("#include <gl/glu.h>\n")
     m_file.write("#include <vector>\n\n")
@@ -134,8 +133,6 @@ def save_model_array(define, vertices, uvs, normals, faces):
             m_file.write("%d, " % f)
 
     m_file.write("\n};\n\n")
-    
-    m_file.write("#endif")
     m_file.close()
 
 def save_model_faces(define, faces_buffer):

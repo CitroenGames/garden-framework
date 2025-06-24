@@ -1,44 +1,32 @@
 cmake_minimum_required(VERSION 3.10)
 project(sdl-test)
 
-set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Set the executable name
-set(TARGET_NAME sdl-test)
+add_subdirectory(Thirdparty)
 
 # Source files
 file(GLOB_RECURSE SOURCES "src/*.cpp" "src/*.hpp")
 file(GLOB_RECURSE MODELS "models/*.hpp")
 
 # Create the executable
-add_executable(${TARGET_NAME} ${SOURCES} ${MODELS})
+add_executable(${PROJECT_NAME} ${SOURCES} ${MODELS})
 
 # Include directories
-target_include_directories(${TARGET_NAME} PRIVATE
-    "include"
-    "include/SDL2"
-    "include/SOIL"
-    "include/irrlicht"
-    "include/stb"  # Add stb_image include directory
+target_include_directories(${PROJECT_NAME} PRIVATE
+    "Thirdparty/include"
+    "Thirdparty/include/irrlicht"
     "src"
     ${CMAKE_CURRENT_SOURCE_DIR}
-)
-
-# Library directories
-target_link_directories(${TARGET_NAME} PRIVATE
-    "lib"
 )
 
 # Find OpenGL
 find_package(OpenGL REQUIRED)
 
 # Link libraries
-target_link_libraries(${TARGET_NAME}
-    # SDL2 - Only link SDL2.lib, NOT SDL2main.lib for custom main
-    "${CMAKE_CURRENT_SOURCE_DIR}/lib/x86/SDL2.lib"
-    
-    # OpenGL
+target_link_libraries(${PROJECT_NAME}
+    SDL2Wrapper
     ${OPENGL_LIBRARIES}
     
     # Windows system libraries
@@ -58,11 +46,11 @@ target_link_libraries(${TARGET_NAME}
 
 # Windows-specific settings
 if(WIN32)
-    set_target_properties(${TARGET_NAME} PROPERTIES
+    set_target_properties(${PROJECT_NAME} PROPERTIES
         WIN32_EXECUTABLE FALSE  # Set to FALSE if you want console output
     )
     
-    target_compile_definitions(${TARGET_NAME} PRIVATE
+    target_compile_definitions(${PROJECT_NAME} PRIVATE
         _CRT_SECURE_NO_WARNINGS
         WIN32_LEAN_AND_MEAN
         SDL_MAIN_HANDLED  # Tell SDL we're handling main ourselves
