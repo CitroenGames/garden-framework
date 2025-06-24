@@ -14,6 +14,7 @@ The project grew as wildly as an unmanaged garden. Everything is a header file, 
 | rigidbody.hpp | physics component. whenever attached to a gameObject that gameObject will receive physics (just gravity for now).
 | world.hpp | generic world class. it's meant to be static but I guess there aren't statics in C++. **handles collisions and keeps track off all entities**.
 | camera.hpp | simple camera class with some utility functions. it's managed by the player.
+| renderer.hpp | drawing mesh logic.
 
 ## how did I do collision handling?
 Since I was *very short on time*, I didn't think it was possible to materially comprehend SAT and implement it (I didn't want the easy route with AABB).
@@ -37,3 +38,20 @@ I'm sorry but I can't include the original textures, as they featured some parts
 
 ## the makefile
 The makefile is garbage. That's about it. It works.
+
+## license
+           DO WHAT THE FUCK YOU WANT TO PUBLIC LICENSE
+                   Version 2, December 2004
+ 
+Copyright (C) 2004 Sam Hocevar <sam@hocevar.net>
+
+Everyone is permitted to copy and distribute verbatim or modified
+copies of this license document, and changing it is allowed as long
+as the name is changed.
+ 
+           DO WHAT THE FUCK YOU WANT TO PUBLIC LICENSE
+  TERMS AND CONDITIONS FOR COPYING, DISTRIBUTION AND MODIFICATION
+
+ 0. You just DO WHAT THE FUCK YOU WANT TO.
+
+If you can credit me I would be glad but don't worry about it otherwise ;)
