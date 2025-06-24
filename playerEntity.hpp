@@ -39,47 +39,25 @@ public:
         player_camera.rotation.Y += -xrel / 1000.0f;
     };
     
-    void handle_input_down(SDL_keysym* keysym)
+    void handle_input_down(SDL_Keysym* keysym)
     {
         switch (keysym->sym)
         {
-            case SDLK_w:
-                w = true;
-                break;
-            case SDLK_a:
-                a = true;
-                break;
-            case SDLK_s:
-                s = true;
-                break;
-            case SDLK_d:
-                d = true;
-                break;
-            case SDLK_SPACE:
-                space = true;
-                break;
-        }
-    };
-    
-    void handle_input_up(SDL_keysym* keysym)
-    {
-        switch (keysym->sym)
-        {
-            case SDLK_w:
-                w = false;
-                break;
-            case SDLK_a:
-                a = false;
-                break;
-            case SDLK_s:
-                s = false;
-                break;
-            case SDLK_d:
-                d = false;
-                break;
-            case SDLK_SPACE:
-                space = false;
-                break;
+        case SDLK_w:
+            w = true;
+            break;
+        case SDLK_a:
+            a = true;
+            break;
+        case SDLK_s:
+            s = true;
+            break;
+        case SDLK_d:
+            d = true;
+            break;
+        case SDLK_SPACE:
+            space = true;
+            break;
         }
     };
     

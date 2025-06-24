@@ -103,7 +103,8 @@ public:
             }
         }
 
-        SDL_GL_SwapBuffers();
+        // Replace SDL_GL_SwapBuffers() with:
+        SDL_GL_SwapWindow(window);
     };
 };
 
