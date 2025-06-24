@@ -1,0 +1,6 @@
+textures/*
+models/old/*
+sdl-test.dev
+sdl-test.layout
+stdout.txt
+main.o

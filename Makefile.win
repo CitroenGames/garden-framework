@@ -1,0 +1,30 @@
+# this makefile is pure hot garbage
+# don't look at it. thanks.
+
+CPP  = g++.exe
+CC   = gcc.exe
+WINDRES = windres.exe
+RES  = 
+OBJ  = main.o $(RES)
+LINKOBJ  = main.o $(RES)
+LIBS = -L"C:/Dev-Cpp/lib" lib/libSDLmain.a lib/libSDL.dll.a lib/libSOIL.a -lopengl32 -lglu32
+INCS = -I"C:/Dev-Cpp/include" -I"C:/Documents and Settings/User1/Desktop/projects/sdl-opengl/include" -I"C:/Documents and Settings/User1/Desktop/projects/sdl-opengl/include/SDL" -I"C:/Documents and Settings/User1/Desktop/projects/sdl-opengl/include/SOIL" -I"C:/Documents and Settings/User1/Desktop/projects/sdl-opengl/include/irrlicht"
+CXXINCS = -I"C:/Dev-Cpp/lib/gcc/mingw32/3.4.2/include" -I"C:/Dev-Cpp/include/c++/3.4.2/backward" -I"C:/Dev-Cpp/include/c++/3.4.2/mingw32"  -I"C:/Dev-Cpp/include/c++/3.4.2"  -I"C:/Dev-Cpp/include" -I"C:/Documents and Settings/User1/Desktop/projects/sdl-opengl/include" -I"C:/Documents and Settings/User1/Desktop/projects/sdl-opengl/include/SDL" -I"C:/Documents and Settings/User1/Desktop/projects/sdl-opengl/include/SDL" -I"C:/Documents and Settings/User1/Desktop/projects/sdl-opengl/include/SOIL" -I"C:/Documents and Settings/User1/Desktop/projects/sdl-opengl/include/irrlicht"
+BIN = sdl-test.exe
+CXXFLAGS = $(CXXINCS)  
+CFLAGS = $(INCS)  
+RM = rm -f
+
+.PHONY: all all-before all-after clean clean-custom
+
+all: all-before sdl-test.exe all-after
+
+
+clean: clean-custom
+	${RM} $(OBJ) $(BIN)
+
+$(BIN): $(OBJ)
+	$(CPP) -mwindows $(LINKOBJ) -o "sdl-test.exe" -lmingw32 $(LIBS)
+
+main.o: main.cpp
+	$(CPP) -c main.cpp -o main.o $(CXXFLAGS)
