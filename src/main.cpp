@@ -1,6 +1,6 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
-#include "CrashHandler.hpp"
+#include "Utils/CrashHandler.hpp"
 #include <windows.h>
 #endif
 
@@ -17,7 +17,7 @@
 #include "collider.hpp"
 #include "playerEntity.hpp"
 #include "world.hpp"
-#include "renderer.hpp"
+#include "Graphics/renderer.hpp"
 #include "AudioSystem.h"
 
 static Application app;
