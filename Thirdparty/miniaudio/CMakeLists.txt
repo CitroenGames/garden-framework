@@ -11,7 +11,9 @@ file(GLOB_RECURSE SRC_FILES "src/*.cpp" "src/*.h")
 
 add_library(${PROJECT_NAME} STATIC ${SRC_FILES})
 
-target_include_directories(${PROJECT_NAME} PUBLIC src)
+target_include_directories(${PROJECT_NAME} PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
+)
 
 target_link_libraries(${PROJECT_NAME} miniaudio)
 

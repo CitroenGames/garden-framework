@@ -1,5 +1,3 @@
-#define SDL_MAIN_HANDLED
-
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include "CrashHandler.hpp"
@@ -7,7 +5,6 @@
 #endif
 
 #include "math.h"
-
 #include "SDL.h"
 #include <GL/gl.h>
 #include <GL/glu.h>
@@ -18,52 +15,24 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "Application.hpp"
 #include "gameObject.hpp"
 #include "rigidbody.hpp"
 #include "mesh.hpp"
 #include "collider.hpp"
-
 #include "playerEntity.hpp"
-
 #include "world.hpp"
 #include "renderer.hpp"
+#include "AudioSystem.h"
 
-static int width = 1920;
-static int height = 1080;
-static int target_fps = 60;
-
-static float fov = 75;
-
+static Application app;
 static renderer _renderer;
 static world _world;
 
-// TODO: abstract this...
 static void quit_game(int code)
 {
-    if (gl_context)
-        SDL_GL_DeleteContext(gl_context);
-    
-    if (window)
-        SDL_DestroyWindow(window);
-    
-    SDL_Quit();
-
-    /* Disable capabilities we enabled before. */
-    glDisableClientState(GL_VERTEX_ARRAY);
-    glDisableClientState(GL_NORMAL_ARRAY);
-    glDisableClientState(GL_TEXTURE_COORD_ARRAY);
-
-    /* Exit program. */
+    app.shutdown();
     exit(code);
-}
-
-static void lock_framerate(Uint32 start, Uint32 end, int target)
-{
-    int frame_delay = 1000 / target;
-    float delta = end - start;
-
-    if (delta < frame_delay)
-        SDL_Delay(frame_delay - delta);
 }
 
 static void handle_key_down(SDL_Keysym* keysym)
@@ -105,88 +74,6 @@ static void process_events()
             break;
         }
     }
-}
-
-static void setup_sdl(int width, int height)
-{
-    if (SDL_Init(SDL_INIT_VIDEO) < 0)
-    {
-        fprintf(stderr, "Video initialization failed: %s\n", SDL_GetError());
-        quit_game(1);
-    }
-
-    /* Set OpenGL attributes */
-    SDL_GL_SetAttribute(SDL_GL_RED_SIZE, 5);
-    SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE, 5);
-    SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE, 5);
-    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 16);
-    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-
-    /* Create window */
-    window = SDL_CreateWindow("Game Window",
-                             SDL_WINDOWPOS_CENTERED,
-                             SDL_WINDOWPOS_CENTERED,
-                             width, height,
-                             SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN);
-
-    if (!window)
-    {
-        fprintf(stderr, "Window creation failed: %s\n", SDL_GetError());
-        quit_game(1);
-    }
-
-    /* Create OpenGL context */
-    gl_context = SDL_GL_CreateContext(window);
-    if (!gl_context)
-    {
-        fprintf(stderr, "OpenGL context creation failed: %s\n", SDL_GetError());
-        quit_game(1);
-    }
-
-    /* Input stuff */
-    SDL_SetRelativeMouseMode(SDL_TRUE);
-}
-
-static void setup_opengl(int width, int height)
-{
-    float ratio = (float)width / (float)height;
-
-    // Enable depth testing
-    glEnable(GL_DEPTH_TEST);
-    glDepthFunc(GL_LEQUAL);
-    glClearDepth(1.0);
-
-    // Enable face culling
-    glEnable(GL_CULL_FACE);
-    glCullFace(GL_BACK);
-    glFrontFace(GL_CCW);
-
-    // Shading model
-    glShadeModel(GL_SMOOTH);
-
-    // Enable vertex arrays
-    glEnableClientState(GL_VERTEX_ARRAY);
-    glEnableClientState(GL_NORMAL_ARRAY);
-    glEnableClientState(GL_TEXTURE_COORD_ARRAY);
-
-    // Set clear color (light blue)
-    glClearColor(0.2f, 0.3f, 0.8f, 1.0f);
-
-    // Set up projection matrix
-    glMatrixMode(GL_PROJECTION);
-    glLoadIdentity();
-    gluPerspective(75.0, ratio, 0.1, 200.0);
-
-    // Set up viewport
-    glViewport(0, 0, width, height);
-
-    // Switch to modelview matrix
-    glMatrixMode(GL_MODELVIEW);
-    glLoadIdentity();
-
-    // Enable color material for easy color changes
-    glEnable(GL_COLOR_MATERIAL);
-    glColorMaterial(GL_FRONT, GL_AMBIENT_AND_DIFFUSE);
 }
 
 // Helper function to load textures using stb_image
@@ -267,11 +154,16 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
 int main(int argc, char* argv[])
 #endif
 {
+    TE::AudioSystem audioSystem;
     Paingine2D::CrashHandler* crashHandler = Paingine2D::CrashHandler::GetInstance();
     crashHandler->Initialize("FNaF");
 
-    setup_sdl(width, height);
-    setup_opengl(width, height);
+    // Initialize application
+    app = Application(1920, 1080, 60, 75.0f);
+    if (!app.initialize("Game Window", true))
+    {
+        quit_game(1);
+    }
 
     /* Frame locking */
     Uint32 frame_start_ticks;
@@ -311,7 +203,6 @@ int main(int argc, char* argv[])
 
     std::vector<mesh*> meshes;
     meshes.push_back(&sky_mesh);
-
     meshes.push_back(&map_ground_mesh);
     meshes.push_back(&cube_mesh);
     meshes.push_back(&map_bgtrees_mesh);
@@ -370,11 +261,12 @@ int main(int argc, char* argv[])
 
         // render
         _renderer.render_scene(_world.world_camera);
+        app.swapBuffers();
 
         frame_end_ticks = SDL_GetTicks();
-        lock_framerate(frame_start_ticks, frame_end_ticks, target_fps);
+        app.lockFramerate(frame_start_ticks, frame_end_ticks);
     }
 
-	crashHandler->Shutdown();
+    crashHandler->Shutdown();
     exit(0);
 }

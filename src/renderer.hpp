@@ -1,4 +1,3 @@
-
 #pragma once
 
 #include "camera.hpp"
@@ -9,8 +8,8 @@
 #include <GL/gl.h>
 #include <GL/glu.h>
 
-static SDL_Window* window = NULL;
-static SDL_GLContext gl_context;
+// Forward declaration
+class Application;
 
 class renderer
 {
@@ -136,7 +135,7 @@ public:
             }
         }
 
-        // Swap buffers
-        SDL_GL_SwapWindow(window);
+        // Note: Buffer swapping should be handled by the Application class
+        // SDL_GL_SwapWindow should be called from the main loop via app.swapBuffers()
     };
 };
