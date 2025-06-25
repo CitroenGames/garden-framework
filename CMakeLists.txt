@@ -29,7 +29,9 @@ target_link_libraries(${PROJECT_NAME}
     tinyobjloader
     EnTT
     AudioEngine
-    
+    Freetype::Freetype
+    rmlui
+
     # Windows system libraries
     kernel32.lib
     user32.lib

@@ -2,19 +2,16 @@
 
 #include <vector>
 #include <string>
-#include <gl/gl.h>
-#include <gl/glu.h>
 #include "gameObject.hpp"
+#include "RenderAPI.hpp"
 
-// Include tinyobjloader - make sure to download tiny_obj_loader.h
-#define TINYOBJLOADER_IMPLEMENTATION
 #include "tiny_obj_loader.h"
 
 struct vertex
 {
-    GLfloat vx, vy, vz;
-    GLfloat nx, ny, nz;
-    GLfloat u, v;
+    float vx, vy, vz;
+    float nx, ny, nz;
+    float u, v;
 };
 
 class mesh : public component
@@ -25,8 +22,8 @@ public:
     bool owns_vertices; // Track if we need to delete vertices
     bool is_valid; // Track if mesh loaded successfully
 
+    TextureHandle texture;
     bool texture_set;
-    GLuint texture;
     
     bool visible;
     bool culling;
@@ -43,6 +40,7 @@ public:
         culling = true;
         transparent = false;
         texture_set = false;
+        texture = INVALID_TEXTURE;
     };
 
     // Constructor for loading OBJ files
@@ -56,6 +54,7 @@ public:
         culling = true;
         transparent = false;
         texture_set = false;
+        texture = INVALID_TEXTURE;
         
         load_obj(obj_filename);
     };
@@ -70,11 +69,24 @@ public:
         }
     }
 
-    void set_texture(GLuint texture)
+    void set_texture(TextureHandle tex)
     {
-        this->texture = texture;
-        texture_set = true;
+        this->texture = tex;
+        texture_set = (tex != INVALID_TEXTURE);
     };
+
+    // Get render state for this mesh
+    RenderState getRenderState() const
+    {
+        RenderState state;
+        state.cull_mode = culling ? CullMode::Back : CullMode::None;
+        state.blend_mode = transparent ? BlendMode::Alpha : BlendMode::None;
+        state.depth_test = DepthTest::LessEqual;
+        state.depth_write = !transparent;
+        state.lighting = true;
+        state.color = vector3f(1.0f, 1.0f, 1.0f);
+        return state;
+    }
 
     bool load_obj(const std::string& filename)
     {
@@ -142,7 +154,7 @@ public:
             vertices_len = total_vertices;
             owns_vertices = true;
         }
-        catch (const std::bad_alloc& e) {
+        catch (const std::bad_alloc&) {
             printf("Failed to allocate memory for vertices in OBJ file: %s\n", filename.c_str());
             is_valid = false;
             return false;

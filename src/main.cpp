@@ -6,11 +6,6 @@
 
 #include "math.h"
 #include "SDL.h"
-#include <GL/gl.h>
-#include <GL/glu.h>
-
-#define STB_IMAGE_IMPLEMENTATION
-#include "stb_image.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -76,78 +71,6 @@ static void process_events()
     }
 }
 
-// Helper function to load textures using stb_image
-static GLuint load_texture(const char* filename, bool invert_y = false, bool generate_mipmaps = true)
-{
-    int width, height, channels;
-
-    // Set flip vertically if needed (equivalent to SOIL_FLAG_INVERT_Y)
-    stbi_set_flip_vertically_on_load(invert_y);
-
-    unsigned char* data = stbi_load(filename, &width, &height, &channels, 0);
-    if (!data)
-    {
-        fprintf(stderr, "Failed to load texture: %s\n", filename);
-        return 0;
-    }
-
-    GLuint texture;
-    glGenTextures(1, &texture);
-    glBindTexture(GL_TEXTURE_2D, texture);
-
-    // Determine format based on channels
-    GLenum format;
-    GLenum internal_format;
-    switch (channels)
-    {
-    case 1:
-        format = GL_LUMINANCE;
-        internal_format = GL_LUMINANCE;
-        break;
-    case 3:
-        format = GL_RGB;
-        internal_format = GL_RGB;
-        break;
-    case 4:
-        format = GL_RGBA;
-        internal_format = GL_RGBA;
-        break;
-    default:
-        fprintf(stderr, "Unsupported number of channels: %d\n", channels);
-        stbi_image_free(data);
-        glDeleteTextures(1, &texture);
-        return 0;
-    }
-
-    // Generate mipmaps if requested
-    if (generate_mipmaps)
-    {
-        // Use gluBuild2DMipmaps instead of glGenerateMipmap for OpenGL 1.x
-        gluBuild2DMipmaps(GL_TEXTURE_2D, internal_format, width, height, format, GL_UNSIGNED_BYTE, data);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    }
-    else
-    {
-        // Upload texture data without mipmaps
-        glTexImage2D(GL_TEXTURE_2D, 0, internal_format, width, height, 0, format, GL_UNSIGNED_BYTE, data);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    }
-
-    // Set texture wrapping
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-
-    // Free image data
-    stbi_image_free(data);
-
-    // Unbind texture
-    glBindTexture(GL_TEXTURE_2D, 0);
-
-    return texture;
-}
-
 #if _WIN32
 int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
 #else
@@ -158,10 +81,18 @@ int main(int argc, char* argv[])
     Paingine2D::CrashHandler* crashHandler = Paingine2D::CrashHandler::GetInstance();
     crashHandler->Initialize("FNaF");
 
-    // Initialize application
-    app = Application(1920, 1080, 60, 75.0f);
+    // Initialize application with OpenGL render API
+    app = Application(1920, 1080, 60, 75.0f, RenderAPIType::OpenGL);
     if (!app.initialize("Game Window", true))
     {
+        quit_game(1);
+    }
+
+    // Get the render API from the application
+    IRenderAPI* render_api = app.getRenderAPI();
+    if (!render_api)
+    {
+        fprintf(stderr, "Failed to get render API from application\n");
         quit_game(1);
     }
 
@@ -215,27 +146,29 @@ int main(int argc, char* argv[])
     colliders.push_back(&cube_collider);
     colliders.push_back(&map_collider);
 
-    /* Textures - Updated to use stb_image */
-    GLuint sky_tex = load_texture("textures/t_sky.png", false, true);  // no invert_y for sky
+    /* Textures - Now using the render API */
+    TextureHandle sky_tex = render_api->loadTexture("textures/t_sky.png", false, true);
     sky_mesh.set_texture(sky_tex);
 
-    GLuint ball_tex = load_texture("textures/man.bmp", true, true);  // invert_y for grasscube
+    TextureHandle ball_tex = render_api->loadTexture("textures/man.bmp", true, true);
     cube_mesh.set_texture(ball_tex);
 
-    GLuint tree_bark = load_texture("textures/t_tree_bark.png", true, true);
-    GLuint tree_leaves = load_texture("textures/t_tree_leaves.png", true, true);
-    GLuint groundtexture = load_texture("textures/t_ground.png", true, true);
+    TextureHandle tree_bark = render_api->loadTexture("textures/t_tree_bark.png", true, true);
+    TextureHandle tree_leaves = render_api->loadTexture("textures/t_tree_leaves.png", true, true);
+    TextureHandle groundtexture = render_api->loadTexture("textures/t_ground.png", true, true);
 
     map_trees_mesh.set_texture(tree_bark);
     map_bgtrees_mesh.set_texture(tree_leaves);
     map_ground_mesh.set_texture(groundtexture);
 
-    /* Renderer */
-    _renderer = renderer::renderer(&meshes);
+    /* Renderer - Now takes render API */
+    _renderer = renderer::renderer(&meshes, render_api);
 
     /* Delta time */
     Uint32 delta_last = 0;
     float delta_time = 0;
+
+    printf("Game initialized with %s render API\n", render_api->getAPIName());
 
     atexit(SDL_Quit);
     while (1)

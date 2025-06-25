@@ -3,124 +3,69 @@
 #include "camera.hpp"
 #include "gameObject.hpp"
 #include "mesh.hpp"
+#include "RenderAPI.hpp"
 #include <vector>
-#include <SDL.h>
-#include <GL/gl.h>
-#include <GL/glu.h>
-
-// Forward declaration
-class Application;
 
 class renderer
 {
 public:
     std::vector<mesh*>* p_meshes;
+    IRenderAPI* render_api;
     
-    renderer() : p_meshes(0) {};
-    renderer(std::vector<mesh*>* p_meshes) : p_meshes(p_meshes) {};
+    renderer() : p_meshes(nullptr), render_api(nullptr) {};
+    renderer(std::vector<mesh*>* meshes, IRenderAPI* api) : p_meshes(meshes), render_api(api) {};
 
-    static void render_mesh(mesh& m)
+    void setRenderAPI(IRenderAPI* api) { render_api = api; }
+
+    static void render_mesh_with_api(mesh& m, IRenderAPI* api)
     {
-        if (!m.visible) return;
+        if (!m.visible || !api) return;
         
-        glPushMatrix();
+        // Apply object transformation
+        api->pushMatrix();
+        api->translate(m.obj.position);
+        api->rotate(m.obj.getRotationMatrix());
 
-        // Apply object transformation FIRST
-        glTranslatef(m.obj.position.X, m.obj.position.Y, m.obj.position.Z);
-        glMultMatrixf(m.obj.getRotationMatrix().pointer());
-
-        // Set up vertex arrays
-        GLsizei stride = sizeof(vertex);
-        GLvoid* base = (GLvoid*)&m.vertices[0];
-
-        glVertexPointer(3, GL_FLOAT, stride, (char*)base + 0);
-        glNormalPointer(GL_FLOAT, stride, (char*)base + 3 * sizeof(GLfloat));
-        glTexCoordPointer(2, GL_FLOAT, stride, (char*)base + 6 * sizeof(GLfloat));
-
-        // Texture setup
-        if (m.texture_set && m.texture != 0)
+        // Bind texture if available
+        if (m.texture_set && m.texture != INVALID_TEXTURE)
         {
-            glEnable(GL_TEXTURE_2D);
-            glBindTexture(GL_TEXTURE_2D, m.texture);
-            
-            // Set texture parameters
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            api->bindTexture(m.texture);
         }
         else
         {
-            glDisable(GL_TEXTURE_2D);
-            glBindTexture(GL_TEXTURE_2D, 0);
-            // Set a default color when no texture
-            glColor3f(0.8f, 0.8f, 0.8f);
+            api->unbindTexture();
         }
 
-        // Handle transparency
-        if (m.transparent)
-        {
-            glEnable(GL_BLEND);
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-            glDepthMask(GL_FALSE);
-        }
-        else
-        {
-            glDisable(GL_BLEND);
-            glDepthMask(GL_TRUE);
-        }
+        // Get render state from mesh and render
+        RenderState state = m.getRenderState();
+        api->renderMesh(m, state);
 
-        // Handle culling
-        if (m.culling)
-            glEnable(GL_CULL_FACE);
-        else
-            glDisable(GL_CULL_FACE);
-
-        // Draw the mesh
-        glDrawArrays(GL_TRIANGLES, 0, m.vertices_len);
-
-        // Reset transparency settings
-        if (m.transparent)
-        {
-            glDepthMask(GL_TRUE);
-            glDisable(GL_BLEND);
-        }
-
-        // Reset color
-        glColor3f(1.0f, 1.0f, 1.0f);
-        
-        glPopMatrix();
+        api->popMatrix();
     };
 
     void render_scene(camera& c)
     {
-        // Clear buffers with a visible background color
-        glClearColor(0.2f, 0.3f, 0.8f, 1.0f);  // Light blue background
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        if (!render_api)
+        {
+            printf("Error: No render API set for renderer\n");
+            return;
+        }
+
+        // Begin frame
+        render_api->beginFrame();
+        
+        // Clear with background color
+        render_api->clear(vector3f(0.2f, 0.3f, 0.8f));
 
         // Set up camera
-        glMatrixMode(GL_MODELVIEW);
-        glLoadIdentity();
-        c.apply_camera_inv_matrix();
+        render_api->setCamera(c);
 
-        // Basic lighting setup
-        glEnable(GL_LIGHTING);
-        glEnable(GL_LIGHT0);
-        
-        GLfloat light_ambient[] = { 0.2f, 0.2f, 0.2f, 1.0f };
-        GLfloat light_diffuse[] = { 0.8f, 0.8f, 0.8f, 1.0f };
-        GLfloat light_position[] = { 1.0f, 1.0f, 1.0f, 0.0f };  // Directional light
-        
-        glLightfv(GL_LIGHT0, GL_AMBIENT, light_ambient);
-        glLightfv(GL_LIGHT0, GL_DIFFUSE, light_diffuse);
-        glLightfv(GL_LIGHT0, GL_POSITION, light_position);
-
-        // Material properties
-        GLfloat mat_ambient[] = { 0.2f, 0.2f, 0.2f, 1.0f };
-        GLfloat mat_diffuse[] = { 0.8f, 0.8f, 0.8f, 1.0f };
-        
-        glMaterialfv(GL_FRONT, GL_AMBIENT, mat_ambient);
-        glMaterialfv(GL_FRONT, GL_DIFFUSE, mat_diffuse);
+        // Set up default lighting
+        render_api->setLighting(
+            vector3f(0.2f, 0.2f, 0.2f),  // ambient
+            vector3f(0.8f, 0.8f, 0.8f),  // diffuse
+            vector3f(1.0f, 1.0f, 1.0f)   // position
+        );
 
         // Render all meshes
         if (p_meshes && !p_meshes->empty())
@@ -130,12 +75,14 @@ public:
                 mesh* m = *i;
                 if (m && m->visible)
                 {
-                    render_mesh(*m);
+                    render_mesh_with_api(*m, render_api);
                 }
             }
         }
 
+        // End frame
+        render_api->endFrame();
+
         // Note: Buffer swapping should be handled by the Application class
-        // SDL_GL_SwapWindow should be called from the main loop via app.swapBuffers()
     };
 };

@@ -1,8 +1,7 @@
 #pragma once
 
 #include "SDL.h"
-#include <GL/gl.h>
-#include <GL/glu.h>
+#include "RenderAPI.hpp"
 #include <stdio.h>
 
 class Application
@@ -10,14 +9,16 @@ class Application
 private:
     SDL_Window* window;
     SDL_GLContext gl_context;
+    IRenderAPI* render_api;
     int width;
     int height;
     int target_fps;
     float fov;
+    RenderAPIType api_type;
 
 public:
-    Application(int w = 1920, int h = 1080, int fps = 60, float field_of_view = 75.0f)
-        : window(nullptr), gl_context(nullptr), width(w), height(h), target_fps(fps), fov(field_of_view)
+    Application(int w = 1920, int h = 1080, int fps = 60, float field_of_view = 75.0f, RenderAPIType render_type = RenderAPIType::OpenGL)
+        : window(nullptr), gl_context(nullptr), render_api(nullptr), width(w), height(h), target_fps(fps), fov(field_of_view), api_type(render_type)
     {
     }
 
@@ -34,6 +35,103 @@ public:
             return false;
         }
 
+        // Create render API
+        render_api = CreateRenderAPI(api_type);
+        if (!render_api)
+        {
+            fprintf(stderr, "Failed to create render API\n");
+            return false;
+        }
+
+        // For OpenGL, we still need to setup SDL OpenGL context
+        if (api_type == RenderAPIType::OpenGL)
+        {
+            if (!initializeOpenGL(title, fullscreen))
+                return false;
+        }
+        // Future: Add initialization for other APIs (Vulkan, DirectX, etc.)
+
+        // Initialize the render API
+        if (!render_api->initialize(width, height, fov))
+        {
+            fprintf(stderr, "Failed to initialize render API\n");
+            return false;
+        }
+
+        // Input setup
+        SDL_SetRelativeMouseMode(SDL_TRUE);
+
+        printf("Application initialized with %s render API\n", render_api->getAPIName());
+        return true;
+    }
+
+    void shutdown()
+    {
+        if (render_api)
+        {
+            render_api->shutdown();
+            delete render_api;
+            render_api = nullptr;
+        }
+
+        if (gl_context)
+        {
+            SDL_GL_DeleteContext(gl_context);
+            gl_context = nullptr;
+        }
+
+        if (window)
+        {
+            SDL_DestroyWindow(window);
+            window = nullptr;
+        }
+
+        SDL_Quit();
+    }
+
+    void swapBuffers()
+    {
+        // For OpenGL, use SDL buffer swap
+        if (api_type == RenderAPIType::OpenGL)
+        {
+            SDL_GL_SwapWindow(window);
+        }
+        // Future: Handle buffer swapping for other APIs
+    }
+
+    void lockFramerate(Uint32 start_time, Uint32 end_time)
+    {
+        int frame_delay = 1000 / target_fps;
+        float delta = end_time - start_time;
+
+        if (delta < frame_delay)
+            SDL_Delay(frame_delay - delta);
+    }
+
+    // Getters
+    SDL_Window* getWindow() const { return window; }
+    SDL_GLContext getGLContext() const { return gl_context; }
+    IRenderAPI* getRenderAPI() const { return render_api; }
+    int getWidth() const { return width; }
+    int getHeight() const { return height; }
+    int getTargetFPS() const { return target_fps; }
+    float getFOV() const { return fov; }
+    RenderAPIType getAPIType() const { return api_type; }
+
+    // Setters
+    void setTargetFPS(int fps) { target_fps = fps; }
+    void setFOV(float field_of_view) 
+    { 
+        fov = field_of_view; 
+        if (render_api)
+        {
+            render_api->resize(width, height); // Refresh projection with new FOV
+        }
+    }
+
+private:
+    bool initializeOpenGL(const char* title, bool fullscreen)
+    {
         // Set OpenGL attributes
         SDL_GL_SetAttribute(SDL_GL_RED_SIZE, 5);
         SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE, 5);
@@ -66,103 +164,6 @@ public:
             return false;
         }
 
-        // Input setup
-        SDL_SetRelativeMouseMode(SDL_TRUE);
-
-        // Initialize OpenGL
-        setupOpenGL();
-
         return true;
-    }
-
-    void shutdown()
-    {
-        // Disable OpenGL capabilities
-        glDisableClientState(GL_VERTEX_ARRAY);
-        glDisableClientState(GL_NORMAL_ARRAY);
-        glDisableClientState(GL_TEXTURE_COORD_ARRAY);
-
-        if (gl_context)
-        {
-            SDL_GL_DeleteContext(gl_context);
-            gl_context = nullptr;
-        }
-
-        if (window)
-        {
-            SDL_DestroyWindow(window);
-            window = nullptr;
-        }
-
-        SDL_Quit();
-    }
-
-    void swapBuffers()
-    {
-        SDL_GL_SwapWindow(window);
-    }
-
-    void lockFramerate(Uint32 start_time, Uint32 end_time)
-    {
-        int frame_delay = 1000 / target_fps;
-        float delta = end_time - start_time;
-
-        if (delta < frame_delay)
-            SDL_Delay(frame_delay - delta);
-    }
-
-    // Getters
-    SDL_Window* getWindow() const { return window; }
-    SDL_GLContext getGLContext() const { return gl_context; }
-    int getWidth() const { return width; }
-    int getHeight() const { return height; }
-    int getTargetFPS() const { return target_fps; }
-    float getFOV() const { return fov; }
-
-    // Setters
-    void setTargetFPS(int fps) { target_fps = fps; }
-    void setFOV(float field_of_view) { fov = field_of_view; }
-
-private:
-    void setupOpenGL()
-    {
-        float ratio = (float)width / (float)height;
-
-        // Enable depth testing
-        glEnable(GL_DEPTH_TEST);
-        glDepthFunc(GL_LEQUAL);
-        glClearDepth(1.0);
-
-        // Enable face culling
-        glEnable(GL_CULL_FACE);
-        glCullFace(GL_BACK);
-        glFrontFace(GL_CCW);
-
-        // Shading model
-        glShadeModel(GL_SMOOTH);
-
-        // Enable vertex arrays
-        glEnableClientState(GL_VERTEX_ARRAY);
-        glEnableClientState(GL_NORMAL_ARRAY);
-        glEnableClientState(GL_TEXTURE_COORD_ARRAY);
-
-        // Set clear color (light blue)
-        glClearColor(0.2f, 0.3f, 0.8f, 1.0f);
-
-        // Set up projection matrix
-        glMatrixMode(GL_PROJECTION);
-        glLoadIdentity();
-        gluPerspective(fov, ratio, 0.1, 200.0);
-
-        // Set up viewport
-        glViewport(0, 0, width, height);
-
-        // Switch to modelview matrix
-        glMatrixMode(GL_MODELVIEW);
-        glLoadIdentity();
-
-        // Enable color material for easy color changes
-        glEnable(GL_COLOR_MATERIAL);
-        glColorMaterial(GL_FRONT, GL_AMBIENT_AND_DIFFUSE);
     }
 };

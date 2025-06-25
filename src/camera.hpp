@@ -15,19 +15,20 @@ class camera : public gameObject
 public:
     camera(float x = 0, float y = 0, float z = 0) : gameObject(x, y, z) {}
 
-    quaternion<float> camera_rot_quaternion()
+    quaternion<float> camera_rot_quaternion() const
     {
-        rotation.X = clamp<float>(rotation.X, -1, 1);
-        return quaternion<float>(rotation.X, rotation.Y, rotation.Z);
+        vector3f clamped_rotation = rotation;
+        clamped_rotation.X = clamp<float>(clamped_rotation.X, -1, 1);
+        return quaternion<float>(clamped_rotation.X, clamped_rotation.Y, clamped_rotation.Z);
     };
 
-    vector3f camera_forward()
+    vector3f camera_forward() const
     {
         vector3f forward = vector3f(0.0f, 0.0f, 1.0f);
         return camera_rot_quaternion() * forward;
     };
 
-    void apply_camera_inv_matrix()
+    void apply_camera_inv_matrix() const
     {
         vector3f forward = camera_forward();
         
