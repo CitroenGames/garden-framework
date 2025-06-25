@@ -3,11 +3,15 @@
 #include "camera.hpp"
 #include <stdio.h>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
 OpenGLRenderAPI::OpenGLRenderAPI()
-    : viewport_width(0), viewport_height(0), field_of_view(75.0f)
+    : window_handle(nullptr), gl_context(nullptr), viewport_width(0), viewport_height(0), field_of_view(75.0f)
 {
 }
 
@@ -16,11 +20,18 @@ OpenGLRenderAPI::~OpenGLRenderAPI()
     shutdown();
 }
 
-bool OpenGLRenderAPI::initialize(int width, int height, float fov)
+bool OpenGLRenderAPI::initialize(WindowHandle window, int width, int height, float fov)
 {
+    window_handle = window;
     viewport_width = width;
     viewport_height = height;
     field_of_view = fov;
+
+    if (!createOpenGLContext(window))
+    {
+        printf("Failed to create OpenGL context\n");
+        return false;
+    }
 
     setupOpenGLDefaults();
     resize(width, height);
@@ -40,6 +51,8 @@ void OpenGLRenderAPI::shutdown()
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
     glDisable(GL_COLOR_MATERIAL);
+
+    destroyOpenGLContext();
 }
 
 void OpenGLRenderAPI::resize(int width, int height)
@@ -59,6 +72,71 @@ void OpenGLRenderAPI::resize(int width, int height)
 
     // Switch back to modelview matrix
     glMatrixMode(GL_MODELVIEW);
+}
+
+bool OpenGLRenderAPI::createOpenGLContext(WindowHandle window)
+{
+#ifdef _WIN32
+    HWND hwnd = (HWND)window;
+    HDC hdc = GetDC(hwnd);
+
+    PIXELFORMATDESCRIPTOR pfd = {};
+    pfd.nSize = sizeof(PIXELFORMATDESCRIPTOR);
+    pfd.nVersion = 1;
+    pfd.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
+    pfd.iPixelType = PFD_TYPE_RGBA;
+    pfd.cColorBits = 32;
+    pfd.cDepthBits = 24;
+    pfd.cStencilBits = 8;
+
+    int pixel_format = ChoosePixelFormat(hdc, &pfd);
+    if (!pixel_format)
+    {
+        printf("Failed to choose pixel format\n");
+        return false;
+    }
+
+    if (!SetPixelFormat(hdc, pixel_format, &pfd))
+    {
+        printf("Failed to set pixel format\n");
+        return false;
+    }
+
+    gl_context = wglCreateContext(hdc);
+    if (!gl_context)
+    {
+        printf("Failed to create OpenGL context\n");
+        return false;
+    }
+
+    if (!wglMakeCurrent(hdc, gl_context))
+    {
+        printf("Failed to make OpenGL context current\n");
+        wglDeleteContext(gl_context);
+        gl_context = nullptr;
+        return false;
+    }
+
+    ReleaseDC(hwnd, hdc);
+    return true;
+#else
+    // For other platforms (Linux, macOS), you'd implement X11/GLX or similar here
+    printf("OpenGL context creation not implemented for this platform\n");
+    return false;
+#endif
+}
+
+void OpenGLRenderAPI::destroyOpenGLContext()
+{
+#ifdef _WIN32
+    if (gl_context)
+    {
+        wglMakeCurrent(nullptr, nullptr);
+        wglDeleteContext(gl_context);
+        gl_context = nullptr;
+    }
+#endif
+    window_handle = nullptr;
 }
 
 void OpenGLRenderAPI::setupOpenGLDefaults()
@@ -105,6 +183,19 @@ void OpenGLRenderAPI::endFrame()
     // Nothing specific needed for OpenGL
 }
 
+void OpenGLRenderAPI::present()
+{
+#ifdef _WIN32
+    if (window_handle)
+    {
+        HWND hwnd = (HWND)window_handle;
+        HDC hdc = GetDC(hwnd);
+        SwapBuffers(hdc);
+        ReleaseDC(hwnd, hdc);
+    }
+#endif
+}
+
 void OpenGLRenderAPI::clear(const vector3f& color)
 {
     glClearColor(color.X, color.Y, color.Z, 1.0f);
@@ -113,7 +204,15 @@ void OpenGLRenderAPI::clear(const vector3f& color)
 
 void OpenGLRenderAPI::setCamera(const camera& cam)
 {
-    cam.apply_camera_inv_matrix();
+    vector3f pos = cam.getPosition();
+    vector3f target = cam.getTarget();
+    vector3f up = cam.getUpVector();
+    
+    gluLookAt(
+        pos.X, pos.Y, pos.Z,
+        target.X, target.Y, target.Z,
+        up.X, up.Y, up.Z
+    );
 }
 
 void OpenGLRenderAPI::pushMatrix()

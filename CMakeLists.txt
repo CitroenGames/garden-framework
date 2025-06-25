@@ -29,6 +29,7 @@ target_link_libraries(${PROJECT_NAME}
     tinyobjloader
     EnTT
     AudioEngine
+    glm
     Freetype::Freetype
     rmlui
 

@@ -146,7 +146,7 @@ int main(int argc, char* argv[])
     colliders.push_back(&cube_collider);
     colliders.push_back(&map_collider);
 
-    /* Textures - Now using the render API */
+    /* Textures - Using the abstracted render API */
     TextureHandle sky_tex = render_api->loadTexture("textures/t_sky.png", false, true);
     sky_mesh.set_texture(sky_tex);
 
@@ -161,7 +161,7 @@ int main(int argc, char* argv[])
     map_bgtrees_mesh.set_texture(tree_leaves);
     map_ground_mesh.set_texture(groundtexture);
 
-    /* Renderer - Now takes render API */
+    /* Renderer - Using the abstracted render API */
     _renderer = renderer::renderer(&meshes, render_api);
 
     /* Delta time */

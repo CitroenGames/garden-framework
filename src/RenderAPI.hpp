@@ -16,6 +16,9 @@ class camera;
 typedef unsigned int TextureHandle;
 const TextureHandle INVALID_TEXTURE = 0;
 
+// Window handle - opaque to the user (could be HWND on Windows, Window on X11, etc.)
+typedef void* WindowHandle;
+
 // Render states
 enum class CullMode
 {
@@ -55,13 +58,14 @@ public:
     virtual ~IRenderAPI() = default;
 
     // Initialization and cleanup
-    virtual bool initialize(int width, int height, float fov) = 0;
+    virtual bool initialize(WindowHandle window, int width, int height, float fov) = 0;
     virtual void shutdown() = 0;
     virtual void resize(int width, int height) = 0;
 
     // Frame management
     virtual void beginFrame() = 0;
     virtual void endFrame() = 0;
+    virtual void present() = 0; // Present/swap buffers
     virtual void clear(const vector3f& color = vector3f(0.2f, 0.3f, 0.8f)) = 0;
 
     // Camera and transforms

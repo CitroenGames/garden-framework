@@ -9,15 +9,25 @@
 #include <GL/gl.h>
 #include <GL/glu.h>
 
+#ifdef _WIN32
+typedef HGLRC OpenGLContext;
+#else
+typedef void* OpenGLContext; // For other platforms
+#endif
+
 class OpenGLRenderAPI : public IRenderAPI
 {
 private:
+    WindowHandle window_handle;
+    OpenGLContext gl_context;
     int viewport_width;
     int viewport_height;
     float field_of_view;
     RenderState current_state;
 
     // Internal helper methods
+    bool createOpenGLContext(WindowHandle window);
+    void destroyOpenGLContext();
     void setupOpenGLDefaults();
     void applyRenderState(const RenderState& state);
     GLenum getGLCullMode(CullMode mode);
@@ -29,12 +39,13 @@ public:
     virtual ~OpenGLRenderAPI();
 
     // IRenderAPI implementation
-    virtual bool initialize(int width, int height, float fov) override;
+    virtual bool initialize(WindowHandle window, int width, int height, float fov) override;
     virtual void shutdown() override;
     virtual void resize(int width, int height) override;
 
     virtual void beginFrame() override;
     virtual void endFrame() override;
+    virtual void present() override;
     virtual void clear(const vector3f& color = vector3f(0.2f, 0.3f, 0.8f)) override;
 
     virtual void setCamera(const camera& cam) override;

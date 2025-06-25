@@ -83,6 +83,6 @@ public:
         // End frame
         render_api->endFrame();
 
-        // Note: Buffer swapping should be handled by the Application class
+        // Note: Buffer swapping/presenting should be handled by the Application class
     };
 };

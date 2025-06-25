@@ -1,6 +1,6 @@
 @echo off
 
-echo Generating Solution (32-bit)...
+echo Generating Solution...
 cmake -B build
 
 pause
