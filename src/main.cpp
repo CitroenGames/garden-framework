@@ -35,7 +35,7 @@ static void handle_key_down(SDL_Keysym* keysym)
     switch (keysym->sym)
     {
     case SDLK_ESCAPE:
-        //quit_game(0);
+        quit_game(0);
         break;
 
     default:
