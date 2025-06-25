@@ -26,7 +26,7 @@ public:
     /* Player */
     playerEntity* player_entity;
 
-    float fixed_delta; 
+    float fixed_delta;
 
     world()
     {
@@ -79,17 +79,24 @@ public:
             // foreach mesh in the scene
             for (vector<collider*>::iterator i = cs.begin(); i != cs.end(); i++)
             {
-                collider c = **i;
-                mesh m = c.collider_mesh;
+                collider* c = *i;
+
+                // Check if collider and its mesh are valid
+                if (!c->is_mesh_valid())
+                    continue;
+
+                mesh* m = c->get_mesh();
+                if (!m)
+                    continue;
 
                 // check triangle face of the mesh
-                for (int j = 0; j < m.vertices_len; j += 3)
+                for (int j = 0; j < m->vertices_len; j += 3)
                 {
                     handy_triangle triangle = handy_triangle();
 
-                    vertex v0 = m.vertices[j];
-                    vertex v1 = m.vertices[j + 1];
-                    vertex v2 = m.vertices[j + 2];
+                    vertex v0 = m->vertices[j];
+                    vertex v1 = m->vertices[j + 1];
+                    vertex v2 = m->vertices[j + 2];
 
                     triangle.v0 = vector3f(v0.vx, v0.vy, v0.vz);
                     triangle.v1 = vector3f(v1.vx, v1.vy, v1.vz);
@@ -102,13 +109,13 @@ public:
                     triangle.v2 = (triangle.v2 - triangle_center) * 1.3f + triangle_center;
 
                     // transform and rotate face
-                    matrix4f obj_rotation = c.obj.getRotationMatrix();
+                    matrix4f obj_rotation = c->obj.getRotationMatrix();
                     obj_rotation.transformVect(triangle.v0);
                     obj_rotation.transformVect(triangle.v1);
                     obj_rotation.transformVect(triangle.v2);
-                    triangle.v0 += c.obj.position;
-                    triangle.v1 += c.obj.position;
-                    triangle.v1 += c.obj.position;
+                    triangle.v0 += c->obj.position;
+                    triangle.v1 += c->obj.position;
+                    triangle.v2 += c->obj.position; // Fixed: was triangle.v1 += c->obj.position twice
 
                     vector3f triangle_normal = calculate_surface_normal(triangle);
 

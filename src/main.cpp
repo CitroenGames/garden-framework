@@ -25,9 +25,6 @@
 
 #include "playerEntity.hpp"
 
-#include "models/m_grasscube.hpp"
-#include "models/m_map_collider.hpp"
-
 #include "world.hpp"
 #include "renderer.hpp"
 
@@ -308,9 +305,9 @@ int main(int argc, char* argv[])
     map_trees_mesh.transparent = true;
     mesh map_bgtrees_mesh = mesh::mesh("models/map_bgtrees.obj", map);
     map_bgtrees_mesh.transparent = true;
-    mesh map_collider_mesh = mesh::mesh(m_map_collider_vertices, m_map_collider_vertices_len, map);
+    mesh map_collider_mesh = mesh::mesh("models/map_collider.obj", map);
 
-    mesh cube_mesh = mesh::mesh(m_grasscube_vertices, m_grasscube_vertices_len, cube);
+    mesh cube_mesh = mesh::mesh("models/grasscube.obj", cube);
 
     std::vector<mesh*> meshes;
     meshes.push_back(&sky_mesh);

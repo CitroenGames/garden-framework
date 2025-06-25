@@ -8,10 +8,9 @@ add_subdirectory(Thirdparty)
 
 # Source files
 file(GLOB_RECURSE SOURCES "src/*.cpp" "src/*.hpp")
-file(GLOB_RECURSE MODELS "models/*.hpp")
 
 # Create the executable
-add_executable(${PROJECT_NAME} ${SOURCES} ${MODELS})
+add_executable(${PROJECT_NAME} ${SOURCES})
 
 # Include directories
 target_include_directories(${PROJECT_NAME} PRIVATE
