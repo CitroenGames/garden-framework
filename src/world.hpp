@@ -1,6 +1,6 @@
 #pragma once
 
-#include "vector3.h"
+#include "irrlicht/vector3.h"
 
 #include "camera.hpp"
 #include "gameObject.hpp"

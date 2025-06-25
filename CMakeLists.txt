@@ -15,7 +15,6 @@ add_executable(${PROJECT_NAME} ${SOURCES})
 # Include directories
 target_include_directories(${PROJECT_NAME} PRIVATE
     "Thirdparty/include"
-    "Thirdparty/include/irrlicht"
     "src"
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
@@ -28,6 +27,8 @@ target_link_libraries(${PROJECT_NAME}
     SDL2Wrapper
     ${OPENGL_LIBRARIES}
     tinyobjloader
+    EnTT
+    AudioEngine
     
     # Windows system libraries
     kernel32.lib

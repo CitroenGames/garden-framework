@@ -5,9 +5,9 @@
 #include "rigidbody.hpp"
 
 #include <cstring>
-#include "vector3.h"
-#include "matrix4.h"
-#include "quaternion.h"
+#include "irrlicht/vector3.h"
+#include "irrlicht/matrix4.h"
+#include "irrlicht/quaternion.h"
 
 class playerEntity : public component
 {

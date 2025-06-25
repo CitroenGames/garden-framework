@@ -2,9 +2,9 @@
 
 #include <gl/gl.h>
 #include <gl/glu.h>
-#include "vector3.h"
-#include "quaternion.h"
-#include "irrMath.h"
+#include "irrlicht/vector3.h"
+#include "irrlicht/quaternion.h"
+#include "irrlicht/irrMath.h"
 #include "gameObject.hpp"
 
 using namespace irr;
