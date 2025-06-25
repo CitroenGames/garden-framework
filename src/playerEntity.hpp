@@ -3,11 +3,16 @@
 #include "gameObject.hpp"
 #include "camera.hpp"
 #include "rigidbody.hpp"
+#include "SDL.h"
 
 #include <cstring>
 #include "irrlicht/vector3.h"
 #include "irrlicht/matrix4.h"
 #include "irrlicht/quaternion.h"
+#include "irrlicht/irrMath.h"
+
+using namespace irr;
+using namespace core;
 
 class playerEntity : public component
 {
@@ -15,27 +20,30 @@ public:
     camera& player_camera;
     rigidbody& player_rb;
     bool w, a, s, d, space;
-    
+
     float speed;
     float jump_force;
-    
+
     // updated by the world class whilst colliding
     vector3f ground_normal;
     bool grounded;
     void update_ground_normal(vector3f n) { ground_normal = n; }
     void update_grounded(bool g) { grounded = g; }
-    
+
     playerEntity(camera& pc, rigidbody& prb, gameObject& obj) : component(obj), player_camera(pc), player_rb(prb)
     {
         w = a = s = d = space = false;
         speed = 1.5f;
         jump_force = 3.0f;
     };
-    
+
     void update_camera(float yrel, float xrel)
     {
         player_camera.rotation.X += yrel / 1000.0f;
         player_camera.rotation.Y += -xrel / 1000.0f;
+
+        // Clamp pitch to prevent camera flipping - use explicit float values
+        player_camera.rotation.X = clamp<float>(player_camera.rotation.X, -1.5f, 1.5f);
     };
 
     void handle_input_up(SDL_Keysym* keysym)
@@ -59,7 +67,7 @@ public:
             break;
         }
     };
-    
+
     void handle_input_down(SDL_Keysym* keysym)
     {
         switch (keysym->sym)

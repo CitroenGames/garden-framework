@@ -16,6 +16,9 @@
 #include "mesh.hpp"
 #include "collider.hpp"
 #include "playerEntity.hpp"
+#include "freecamEntity.hpp"
+#include "PlayerController.hpp"
+#include "playerRepresentation.hpp"
 #include "world.hpp"
 #include "Graphics/renderer.hpp"
 #include "AudioSystem.h"
@@ -23,6 +26,7 @@
 static Application app;
 static renderer _renderer;
 static world _world;
+static PlayerController player_controller;
 
 static void quit_game(int code)
 {
@@ -39,6 +43,8 @@ static void handle_key_down(SDL_Keysym* keysym)
         break;
 
     default:
+        // Pass to player controller
+        player_controller.handleKeyDown(keysym);
         break;
     }
 }
@@ -52,16 +58,15 @@ static void process_events()
         switch (event.type)
         {
         case SDL_MOUSEMOTION:
-            _world.player_entity->update_camera(event.motion.yrel, event.motion.xrel);
+            player_controller.handleMouseMotion(event.motion.yrel, event.motion.xrel);
             break;
 
         case SDL_KEYDOWN:
             handle_key_down(&event.key.keysym);
-            _world.player_entity->handle_input_down(&event.key.keysym);
             break;
 
         case SDL_KEYUP:
-            _world.player_entity->handle_input_up(&event.key.keysym);
+            player_controller.handleKeyUp(&event.key.keysym);
             break;
 
         case SDL_QUIT:
@@ -108,6 +113,11 @@ int main(int argc, char* argv[])
     gameObject map = gameObject::gameObject();
     gameObject cube = gameObject::gameObject(14, 3.5f, -3.5f); // test cube
     gameObject player = gameObject::gameObject(0, 2, 0);
+    gameObject freecam_obj = gameObject::gameObject(0, 2, 0);
+    gameObject player_rep_obj = gameObject::gameObject(0, 2, 0); // Player representation object
+
+    /* Cameras */
+    camera freecam_camera = camera::camera(0, 2, 0);
 
     /* Rigidbodies */
     rigidbody player_rb = rigidbody::rigidbody(player);
@@ -115,8 +125,14 @@ int main(int argc, char* argv[])
     std::vector<rigidbody*> rigidbodies;
     rigidbodies.push_back(&player_rb);
 
-    /* Player */
+    /* Player and Freecam entities */
     playerEntity player_entity = playerEntity::playerEntity(_world.world_camera, player_rb, player);
+    freecamEntity freecam_entity = freecamEntity::freecamEntity(freecam_camera, freecam_obj);
+
+    // Set up player controller
+    player_controller.setPossessedPlayer(&player_entity);
+    player_controller.setPossessedFreecam(&freecam_entity);
+
     _world.player_entity = &player_entity;
 
     /* Meshes */
@@ -132,12 +148,20 @@ int main(int argc, char* argv[])
 
     mesh cube_mesh = mesh::mesh("models/grasscube.obj", cube);
 
+    mesh player_rep_mesh = mesh::mesh("models/player_character.obj", player_rep_obj);
+    player_rep_obj.scale = vector3f(0.2f, 0.2f, 0.2f);
+    player_rep_obj.position = vector3f(0, -20, 0);
+
+    // Create player representation component
+    PlayerRepresentation player_representation = PlayerRepresentation(&player_rep_mesh, &player_entity, player_rep_obj);
+
     std::vector<mesh*> meshes;
     meshes.push_back(&sky_mesh);
     meshes.push_back(&map_ground_mesh);
     meshes.push_back(&cube_mesh);
     meshes.push_back(&map_bgtrees_mesh);
     meshes.push_back(&map_trees_mesh);
+    meshes.push_back(&player_rep_mesh); // Add player representation to render list
 
     /* Colliders */
     collider cube_collider = collider::collider(cube_mesh, cube);
@@ -161,6 +185,12 @@ int main(int argc, char* argv[])
     map_bgtrees_mesh.set_texture(tree_leaves);
     map_ground_mesh.set_texture(groundtexture);
 
+    // Set texture for player representation (you can use any texture you want)
+    TextureHandle player_texture = render_api->loadTexture("textures/player.png", true, true);
+    player_rep_mesh.set_texture(player_texture);
+    // If you don't have a player texture, you can reuse an existing one:
+    // player_rep_mesh.set_texture(ball_tex);
+
     /* Renderer - Using the abstracted render API */
     _renderer = renderer::renderer(&meshes, render_api);
 
@@ -169,6 +199,7 @@ int main(int argc, char* argv[])
     float delta_time = 0;
 
     printf("Game initialized with %s render API\n", render_api->getAPIName());
+    printf("Press F to toggle between player and freecam mode\n");
 
     atexit(SDL_Quit);
     while (1)
@@ -182,18 +213,26 @@ int main(int argc, char* argv[])
         delta_time = (frame_start_ticks - delta_last) / 1000.0f;
         delta_last = frame_start_ticks;
 
-        // physics and player collisions
-        _world.step_physics(rigidbodies);
-        _world.player_collisions(player_rb, 1, colliders);
+        // physics and player collisions (only when controlling player)
+        if (!player_controller.isFreecamMode())
+        {
+            _world.step_physics(rigidbodies);
+            _world.player_collisions(player_rb, 1, colliders);
+        }
 
-        // player loop
-        player_entity.update_player(_world.fixed_delta);
+        // Update currently possessed entity through player controller
+        player_controller.update(_world.fixed_delta);
 
-        if (player_entity.obj.position.Y < -5)
+        // Update player representation visibility
+        player_representation.update(player_controller.isFreecamMode());
+
+        // Fall detection (only when controlling player)
+        if (!player_controller.isFreecamMode() && player_entity.obj.position.Y < -5)
             quit_game(0);
 
-        // render
-        _renderer.render_scene(_world.world_camera);
+        // render using the active camera (either player or freecam)
+        camera& active_camera = player_controller.getActiveCamera();
+        _renderer.render_scene(active_camera);
         app.swapBuffers();
 
         frame_end_ticks = SDL_GetTicks();

@@ -3,7 +3,9 @@
 #include "RenderAPI.hpp"
 
 #ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
 #endif
 #include <GL/gl.h>
@@ -53,6 +55,7 @@ public:
     virtual void popMatrix() override;
     virtual void translate(const vector3f& pos) override;
     virtual void rotate(const matrix4f& rotation) override;
+    virtual void multiplyMatrix(const matrix4f& matrix) override;
 
     virtual TextureHandle loadTexture(const std::string& filename, bool invert_y = false, bool generate_mipmaps = true) override;
     virtual void bindTexture(TextureHandle texture) override;

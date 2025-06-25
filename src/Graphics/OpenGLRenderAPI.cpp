@@ -483,3 +483,8 @@ IRenderAPI* CreateRenderAPI(RenderAPIType type)
         return nullptr;
     }
 }
+
+void OpenGLRenderAPI::multiplyMatrix(const matrix4f& matrix)
+{
+    glMultMatrixf(matrix.pointer());
+}

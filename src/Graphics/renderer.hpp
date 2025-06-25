@@ -21,10 +21,12 @@ public:
     {
         if (!m.visible || !api) return;
         
-        // Apply object transformation
+        // Apply object transformation using the complete transform matrix
         api->pushMatrix();
-        api->translate(m.obj.position);
-        api->rotate(m.obj.getRotationMatrix());
+        
+        // Use the complete transformation matrix that includes scale, rotation, and translation
+        matrix4f transform = m.obj.getTransformMatrix();
+        api->multiplyMatrix(transform);
 
         // Bind texture if available
         if (m.texture_set && m.texture != INVALID_TEXTURE)

@@ -3,7 +3,7 @@
 #include <vector>
 #include <string>
 #include "gameObject.hpp"
-#include "RenderAPI.hpp"
+#include "Graphics/RenderAPI.hpp"
 
 #include "tiny_obj_loader.h"
 
@@ -202,9 +202,9 @@ public:
                     vertices[vertex_index].nz = attrib.normals[3 * idx.normal_index + 2];
                     
                     // Validate normal vector (should not be zero length)
-                    float normal_length = sqrt(vertices[vertex_index].nx * vertices[vertex_index].nx +
-                                             vertices[vertex_index].ny * vertices[vertex_index].ny +
-                                             vertices[vertex_index].nz * vertices[vertex_index].nz);
+                    float normal_length = sqrtf(vertices[vertex_index].nx * vertices[vertex_index].nx +
+                        vertices[vertex_index].ny * vertices[vertex_index].ny +
+                        vertices[vertex_index].nz * vertices[vertex_index].nz);
                     if (normal_length < 0.0001f) {
                         // Reset to default up normal if invalid
                         vertices[vertex_index].nx = 0.0f;

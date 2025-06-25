@@ -74,6 +74,7 @@ public:
     virtual void popMatrix() = 0;
     virtual void translate(const vector3f& pos) = 0;
     virtual void rotate(const matrix4f& rotation) = 0;
+    virtual void multiplyMatrix(const matrix4f& matrix) = 0;
 
     // Texture management
     virtual TextureHandle loadTexture(const std::string& filename, bool invert_y = false, bool generate_mipmaps = true) = 0;
