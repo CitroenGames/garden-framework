@@ -28,6 +28,7 @@ find_package(OpenGL REQUIRED)
 target_link_libraries(${PROJECT_NAME}
     SDL2Wrapper
     ${OPENGL_LIBRARIES}
+    tinyobjloader
     
     # Windows system libraries
     kernel32.lib
@@ -47,7 +48,7 @@ target_link_libraries(${PROJECT_NAME}
 # Windows-specific settings
 if(WIN32)
     set_target_properties(${PROJECT_NAME} PROPERTIES
-        WIN32_EXECUTABLE FALSE  # Set to FALSE if you want console output
+        WIN32_EXECUTABLE TRUE  # Set to TRUE for GUI application
     )
     
     target_compile_definitions(${PROJECT_NAME} PRIVATE

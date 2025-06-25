@@ -2,6 +2,7 @@
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
+#include "CrashHandler.hpp"
 #include <windows.h>
 #endif
 
@@ -25,12 +26,6 @@
 #include "playerEntity.hpp"
 
 #include "models/m_grasscube.hpp"
-#include "models/m_sphere.hpp"
-#include "models/m_sky.hpp"
-
-#include "models/m_map_ground.hpp"
-#include "models/m_map_trees.hpp"
-#include "models/m_map_bgtrees.hpp"
 #include "models/m_map_collider.hpp"
 
 #include "world.hpp"
@@ -197,7 +192,7 @@ static void setup_opengl(int width, int height)
     glColorMaterial(GL_FRONT, GL_AMBIENT_AND_DIFFUSE);
 }
 
-// Helper function to load textures using stb_image (add this before main function)
+// Helper function to load textures using stb_image
 static GLuint load_texture(const char* filename, bool invert_y = false, bool generate_mipmaps = true)
 {
     int width, height, channels;
@@ -240,12 +235,6 @@ static GLuint load_texture(const char* filename, bool invert_y = false, bool gen
         return 0;
     }
 
-    // Upload texture data (only if not using mipmaps - gluBuild2DMipmaps handles this)
-    if (!generate_mipmaps)
-    {
-        glTexImage2D(GL_TEXTURE_2D, 0, internal_format, width, height, 0, format, GL_UNSIGNED_BYTE, data);
-    }
-
     // Generate mipmaps if requested
     if (generate_mipmaps)
     {
@@ -275,9 +264,15 @@ static GLuint load_texture(const char* filename, bool invert_y = false, bool gen
     return texture;
 }
 
-// Replace the texture loading section in your main function with this:
+#if _WIN32
+int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
+#else
 int main(int argc, char* argv[])
+#endif
 {
+    Paingine2D::CrashHandler* crashHandler = Paingine2D::CrashHandler::GetInstance();
+    crashHandler->Initialize("FNaF");
+
     setup_sdl(width, height);
     setup_opengl(width, height);
 
@@ -305,13 +300,13 @@ int main(int argc, char* argv[])
     _world.player_entity = &player_entity;
 
     /* Meshes */
-    mesh sky_mesh = mesh::mesh(m_sky_vertices, m_sky_vertices_len, sky);
+    mesh sky_mesh = mesh("models/sky.obj", sky);
 
-    mesh map_ground_mesh = mesh::mesh(m_map_ground_vertices, m_map_ground_vertices_len, map);
-    mesh map_trees_mesh = mesh::mesh(m_map_trees_vertices, m_map_trees_vertices_len, map);
+    mesh map_ground_mesh = mesh::mesh("models/map_ground.obj", map);
+    mesh map_trees_mesh = mesh::mesh("models/map_trees.obj", map);
     map_trees_mesh.culling = false;
     map_trees_mesh.transparent = true;
-    mesh map_bgtrees_mesh = mesh::mesh(m_map_bgtrees_vertices, m_map_bgtrees_vertices_len, map);
+    mesh map_bgtrees_mesh = mesh::mesh("models/map_bgtrees.obj", map);
     map_bgtrees_mesh.transparent = true;
     mesh map_collider_mesh = mesh::mesh(m_map_collider_vertices, m_map_collider_vertices_len, map);
 
@@ -383,5 +378,6 @@ int main(int argc, char* argv[])
         lock_framerate(frame_start_ticks, frame_end_ticks, target_fps);
     }
 
+	crashHandler->Shutdown();
     exit(0);
 }
