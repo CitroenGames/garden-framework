@@ -26,6 +26,7 @@ find_package(OpenGL REQUIRED)
 target_link_libraries(${PROJECT_NAME}
     SDL2Wrapper
     ${OPENGL_LIBRARIES}
+    tinygltf
     tinyobjloader
     EnTT
     AudioEngine

@@ -1,5 +1,7 @@
 #ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include "Utils/CrashHandler.hpp"
 #include <windows.h>
 #endif
@@ -22,6 +24,7 @@
 #include "world.hpp"
 #include "Graphics/renderer.hpp"
 #include "AudioSystem.h"
+#include "Utils/GltfLoader.hpp"
 
 static Application app;
 static renderer _renderer;
@@ -138,7 +141,65 @@ int main(int argc, char* argv[])
     /* Meshes */
     mesh sky_mesh = mesh("models/sky.obj", sky);
 
-    mesh map_ground_mesh = mesh::mesh("models/map_ground.obj", map);
+    // Load glTF file with texture support
+    GltfLoaderConfig gltf_config;
+    gltf_config.verbose_logging = true;
+    gltf_config.flip_uvs = true;
+    gltf_config.generate_normals_if_missing = true;
+
+    printf("Loading glTF file...\n");
+    GltfLoadResult map_result = GltfLoader::loadGltfWithMaterials("models/map.gltf", gltf_config);
+
+    mesh* map_ground_mesh = nullptr;
+
+    if (!map_result.success) {
+        printf("Failed to load glTF file: %s\n", map_result.error_message.c_str());
+        printf("Falling back to OBJ loader...\n");
+        // Fallback to OBJ
+        map_ground_mesh = new mesh("models/map.obj", map);
+    }
+    else {
+        printf("Successfully loaded glTF with %zu vertices and %zu textures\n",
+            map_result.vertex_count, map_result.texture_paths.size());
+
+        // Create mesh from glTF data
+        map_ground_mesh = new mesh(map_result.vertices, map_result.vertex_count, map);
+
+        // Load textures from glTF
+        std::vector<TextureHandle> gltf_textures;
+        std::string texture_base_path = "models/"; // Adjust this to your texture folder
+
+        if (GltfLoader::loadTexturesFromResult(map_result, render_api, gltf_textures, texture_base_path)) {
+            printf("Loaded %zu textures from glTF\n", gltf_textures.size());
+
+            // Apply the first valid texture to the mesh
+            bool texture_applied = false;
+            for (const auto& tex_handle : gltf_textures) {
+                // Check if texture handle is valid (assuming TextureHandle has some way to check validity)
+                // You may need to adjust this based on your TextureHandle implementation
+                // Common approaches: check for non-zero value, or use a specific validation method
+                if (tex_handle != TextureHandle{}) { // Compare against default/empty handle
+                    map_ground_mesh->set_texture(tex_handle);
+                    printf("Applied glTF texture to map mesh\n");
+                    texture_applied = true;
+                    break;
+                }
+            }
+
+            if (!texture_applied) {
+                printf("No valid textures found in glTF, using fallback\n");
+                TextureHandle groundtexture = render_api->loadTexture("textures/t_ground.png", true, true);
+                map_ground_mesh->set_texture(groundtexture);
+            }
+        }
+        else {
+            printf("Failed to load textures from glTF, using fallback\n");
+            TextureHandle groundtexture = render_api->loadTexture("textures/t_ground.png", true, true);
+            map_ground_mesh->set_texture(groundtexture);
+        }
+    }
+
+    // Continue with other mesh loading...
     mesh map_trees_mesh = mesh::mesh("models/map_trees.obj", map);
     map_trees_mesh.culling = false;
     map_trees_mesh.transparent = true;
@@ -157,7 +218,9 @@ int main(int argc, char* argv[])
 
     std::vector<mesh*> meshes;
     meshes.push_back(&sky_mesh);
-    meshes.push_back(&map_ground_mesh);
+    if (map_ground_mesh) {
+        meshes.push_back(map_ground_mesh);
+    }
     meshes.push_back(&cube_mesh);
     meshes.push_back(&map_bgtrees_mesh);
     meshes.push_back(&map_trees_mesh);
@@ -179,13 +242,17 @@ int main(int argc, char* argv[])
 
     TextureHandle tree_bark = render_api->loadTexture("textures/t_tree_bark.png", true, true);
     TextureHandle tree_leaves = render_api->loadTexture("textures/t_tree_leaves.png", true, true);
-    TextureHandle groundtexture = render_api->loadTexture("textures/t_ground.png", true, true);
 
     map_trees_mesh.set_texture(tree_bark);
     map_bgtrees_mesh.set_texture(tree_leaves);
-    map_ground_mesh.set_texture(groundtexture);
 
-    // Set texture for player representation (you can use any texture you want)
+    // Only set fallback ground texture if we didn't load from glTF
+    if (!map_result.success && map_ground_mesh) {
+        TextureHandle groundtexture = render_api->loadTexture("textures/t_ground.png", true, true);
+        map_ground_mesh->set_texture(groundtexture);
+    }
+
+    // Set texture for player representation
     TextureHandle player_texture = render_api->loadTexture("textures/player.png", true, true);
     player_rep_mesh.set_texture(player_texture);
     // If you don't have a player texture, you can reuse an existing one:
@@ -237,6 +304,11 @@ int main(int argc, char* argv[])
 
         frame_end_ticks = SDL_GetTicks();
         app.lockFramerate(frame_start_ticks, frame_end_ticks);
+    }
+
+    // Cleanup
+    if (map_ground_mesh && map_result.success) {
+        delete map_ground_mesh;
     }
 
     crashHandler->Shutdown();
