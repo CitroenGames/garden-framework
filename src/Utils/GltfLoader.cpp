@@ -622,74 +622,71 @@ int GltfLoader::getTextureIndexFromMaterial(const tinygltf::Model& model, int ma
 void GltfLoader::extractTexturePathsFromModel(const tinygltf::Model& model, GltfLoadResult& result)
 {
     result.texture_paths.clear();
-    
+
     // Build a map of texture index to image path
     std::map<int, std::string> texture_to_path;
-    
+
     for (size_t i = 0; i < model.textures.size(); ++i) {
         const auto& texture = model.textures[i];
         if (texture.source >= 0 && texture.source < model.images.size()) {
             const auto& image = model.images[texture.source];
             if (!image.uri.empty()) {
                 texture_to_path[i] = image.uri;
-            } else {
+            }
+            else {
                 texture_to_path[i] = "embedded_texture_" + std::to_string(texture.source);
             }
         }
     }
-    
-    // Extract unique texture paths used by materials
-    std::set<std::string> unique_paths;
-    
-    for (const auto& material : model.materials) {
-        // Base color texture
+
+    // Create a direct mapping: material index -> texture path
+    // This maintains the correct relationship between materials and their textures
+    std::vector<std::string> material_base_textures;
+    std::map<std::string, int> unique_texture_indices;
+
+    // Process each material and extract its primary (base color) texture
+    for (size_t mat_idx = 0; mat_idx < model.materials.size(); ++mat_idx) {
+        const auto& material = model.materials[mat_idx];
+        std::string texture_path = "";
+
+        // Get the base color texture for this material
         if (material.pbrMetallicRoughness.baseColorTexture.index >= 0) {
             int tex_idx = material.pbrMetallicRoughness.baseColorTexture.index;
             if (texture_to_path.find(tex_idx) != texture_to_path.end()) {
-                unique_paths.insert(texture_to_path[tex_idx]);
+                texture_path = texture_to_path[tex_idx];
             }
         }
-        
-        // Normal map
-        if (material.normalTexture.index >= 0) {
-            int tex_idx = material.normalTexture.index;
-            if (texture_to_path.find(tex_idx) != texture_to_path.end()) {
-                unique_paths.insert(texture_to_path[tex_idx]);
-            }
-        }
-        
-        // Metallic roughness texture
-        if (material.pbrMetallicRoughness.metallicRoughnessTexture.index >= 0) {
-            int tex_idx = material.pbrMetallicRoughness.metallicRoughnessTexture.index;
-            if (texture_to_path.find(tex_idx) != texture_to_path.end()) {
-                unique_paths.insert(texture_to_path[tex_idx]);
-            }
-        }
-        
-        // Emissive texture
-        if (material.emissiveTexture.index >= 0) {
-            int tex_idx = material.emissiveTexture.index;
-            if (texture_to_path.find(tex_idx) != texture_to_path.end()) {
-                unique_paths.insert(texture_to_path[tex_idx]);
-            }
-        }
-        
-        // Occlusion texture
-        if (material.occlusionTexture.index >= 0) {
-            int tex_idx = material.occlusionTexture.index;
-            if (texture_to_path.find(tex_idx) != texture_to_path.end()) {
-                unique_paths.insert(texture_to_path[tex_idx]);
-            }
+
+        material_base_textures.push_back(texture_path);
+
+        // Add to unique textures if not empty and not already added
+        if (!texture_path.empty() && unique_texture_indices.find(texture_path) == unique_texture_indices.end()) {
+            unique_texture_indices[texture_path] = result.texture_paths.size();
+            result.texture_paths.push_back(texture_path);
         }
     }
-    
-    // Convert set to vector
-    result.texture_paths.assign(unique_paths.begin(), unique_paths.end());
-    
+
+    // Store the material->texture mapping for later use
+    result.material_texture_mapping = std::move(material_base_textures);
+
     // Extract material names
     result.material_names.clear();
     for (const auto& material : model.materials) {
         result.material_names.push_back(material.name.empty() ? "unnamed_material" : material.name);
+    }
+
+    // Debug logging
+    if (!result.texture_paths.empty()) {
+        logMessage(GltfLoaderConfig(), "Loaded " + std::to_string(result.texture_paths.size()) + " unique textures:");
+        for (size_t i = 0; i < result.texture_paths.size(); ++i) {
+            logMessage(GltfLoaderConfig(), "  [" + std::to_string(i) + "] " + result.texture_paths[i]);
+        }
+
+        logMessage(GltfLoaderConfig(), "Material->Texture mapping:");
+        for (size_t i = 0; i < result.material_names.size() && i < result.material_texture_mapping.size(); ++i) {
+            std::string tex_info = result.material_texture_mapping[i].empty() ? "no texture" : result.material_texture_mapping[i];
+            logMessage(GltfLoaderConfig(), "  Material '" + result.material_names[i] + "' -> " + tex_info);
+        }
     }
 }
 

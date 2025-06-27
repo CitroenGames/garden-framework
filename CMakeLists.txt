@@ -58,6 +58,7 @@ if(WIN32)
     target_compile_definitions(${PROJECT_NAME} PRIVATE
         _CRT_SECURE_NO_WARNINGS
         WIN32_LEAN_AND_MEAN
-        SDL_MAIN_HANDLED  # Tell SDL we're handling main ourselves
+        SDL_MAIN_HANDLED 
+        NOMINMAX
     )
 endif()

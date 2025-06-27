@@ -38,6 +38,7 @@ struct GltfLoadResult
     std::vector<std::string> texture_paths;
     std::vector<std::string> material_names;
     std::vector<int> material_indices; // Which material each vertex group uses
+    std::vector<std::string> material_texture_mapping;
 
     // Default constructor
     GltfLoadResult() = default;
@@ -56,7 +57,8 @@ struct GltfLoadResult
         vertices(other.vertices), vertex_count(other.vertex_count),
         texture_paths(std::move(other.texture_paths)),
         material_names(std::move(other.material_names)),
-        material_indices(std::move(other.material_indices))
+        material_indices(std::move(other.material_indices)),
+        material_texture_mapping(std::move(other.material_texture_mapping))
     {
         other.vertices = nullptr;
         other.vertex_count = 0;
@@ -74,6 +76,7 @@ struct GltfLoadResult
             texture_paths = std::move(other.texture_paths);
             material_names = std::move(other.material_names);
             material_indices = std::move(other.material_indices);
+            material_texture_mapping = std::move(other.material_texture_mapping);
 
             other.vertices = nullptr;
             other.vertex_count = 0;
