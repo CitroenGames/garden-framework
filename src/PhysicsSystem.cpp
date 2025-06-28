@@ -1,5 +1,5 @@
 #include "PhysicsSystem.hpp"
-#include "playerEntity.hpp"
+#include "Components/playerEntity.hpp"
 #include <stdio.h>
 #include <cmath>
 

@@ -1,11 +1,11 @@
 #pragma once
 
 #include "irrlicht/vector3.h"
-#include "camera.hpp"
-#include "gameObject.hpp"
-#include "rigidbody.hpp"
-#include "collider.hpp"
-#include "playerEntity.hpp"
+#include "Components/camera.hpp"
+#include "Components/gameObject.hpp"
+#include "Components/rigidbody.hpp"
+#include "Components/collider.hpp"
+#include "Components/playerEntity.hpp"
 #include "PhysicsSystem.hpp"
 #include <vector>
 

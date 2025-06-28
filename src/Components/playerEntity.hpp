@@ -3,6 +3,7 @@
 #include "gameObject.hpp"
 #include "camera.hpp"
 #include "rigidbody.hpp"
+#include "InputManager.hpp"
 #include "SDL.h"
 
 #include <cstring>
@@ -19,10 +20,12 @@ class playerEntity : public component
 public:
     camera& player_camera;
     rigidbody& player_rb;
-    bool w, a, s, d, space;
+    std::shared_ptr<InputManager> input_manager;
+    bool input_enabled = true;
 
     float speed;
     float jump_force;
+    float mouse_sensitivity;
 
     // updated by the world class whilst colliding
     vector3f ground_normal;
@@ -30,69 +33,42 @@ public:
     void update_ground_normal(vector3f n) { ground_normal = n; }
     void update_grounded(bool g) { grounded = g; }
 
-    playerEntity(camera& pc, rigidbody& prb, gameObject& obj) : component(obj), player_camera(pc), player_rb(prb)
+    playerEntity(camera& pc, rigidbody& prb, gameObject& obj, std::shared_ptr<InputManager> input_mgr) 
+        : component(obj), player_camera(pc), player_rb(prb), input_manager(input_mgr)
     {
-        w = a = s = d = space = false;
         speed = 1.5f;
         jump_force = 3.0f;
-    };
+        mouse_sensitivity = 1.0f;
+    }
+
+    void set_input_enabled(bool enabled) { input_enabled = enabled; }
+    bool is_input_enabled() const { return input_enabled; }
 
     void update_camera(float yrel, float xrel)
     {
-        player_camera.rotation.X += yrel / 1000.0f;
-        player_camera.rotation.Y += -xrel / 1000.0f;
+        if (!input_enabled) return;
+        
+        player_camera.rotation.X += yrel / 1000.0f * mouse_sensitivity;
+        player_camera.rotation.Y += -xrel / 1000.0f * mouse_sensitivity;
 
         // Clamp pitch to prevent camera flipping - use explicit float values
         player_camera.rotation.X = clamp<float>(player_camera.rotation.X, -1.5f, 1.5f);
-    };
-
-    void handle_input_up(SDL_Keysym* keysym)
-    {
-        switch (keysym->sym)
-        {
-        case SDLK_w:
-            w = false;
-            break;
-        case SDLK_a:
-            a = false;
-            break;
-        case SDLK_s:
-            s = false;
-            break;
-        case SDLK_d:
-            d = false;
-            break;
-        case SDLK_SPACE:
-            space = false;
-            break;
-        }
-    };
-
-    void handle_input_down(SDL_Keysym* keysym)
-    {
-        switch (keysym->sym)
-        {
-        case SDLK_w:
-            w = true;
-            break;
-        case SDLK_a:
-            a = true;
-            break;
-        case SDLK_s:
-            s = true;
-            break;
-        case SDLK_d:
-            d = true;
-            break;
-        case SDLK_SPACE:
-            space = true;
-            break;
-        }
-    };
+    }
     
     void update_player(float delta)
     {
-        vector3f wish_dir = vector3f(-1 * d + 1 * a, 0, 1 * w + -1 * s);
+        if (!input_enabled || !input_manager) return;
+        
+        // Get movement input using direct key queries
+        float move_forward = 0.0f;
+        float move_right = 0.0f;
+        
+        if (input_manager->is_key_held(SDL_SCANCODE_W)) move_forward += 1.0f;
+        if (input_manager->is_key_held(SDL_SCANCODE_S)) move_forward -= 1.0f;
+        if (input_manager->is_key_held(SDL_SCANCODE_D)) move_right -= 1.0f;
+        if (input_manager->is_key_held(SDL_SCANCODE_A)) move_right += 1.0f;
+        
+        vector3f wish_dir = vector3f(move_right, 0, move_forward);
 
         // (ive done this so many times its basically second nature rn)
         // rotate wish_dir by camera
@@ -111,8 +87,8 @@ public:
         // finally normalize
         wish_dir = wish_dir.normalize();
         
-        // check for jumping
-        bool wishJump = space;
+        // check for jumping using direct key query
+        bool wishJump = input_manager->is_key_held(SDL_SCANCODE_SPACE);
         bool jump = wishJump && grounded;   // conditions for jumping
         
         player_rb.velocity += wish_dir * speed * delta;
@@ -131,5 +107,9 @@ public:
         }
         
         player_camera.position = obj.position.getInterpolated(player_camera.position, delta);
-    };
+    }
+    
+    // Legacy methods for backward compatibility
+    void handle_input_up(SDL_Keysym* keysym) { /* Deprecated */ }
+    void handle_input_down(SDL_Keysym* keysym) { /* Deprecated */ }
 };

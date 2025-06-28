@@ -1,8 +1,8 @@
 #pragma once
 
-#include "camera.hpp"
-#include "gameObject.hpp"
-#include "mesh.hpp"
+#include "Components/camera.hpp"
+#include "Components/gameObject.hpp"
+#include "Components/mesh.hpp"
 #include "RenderAPI.hpp"
 #include <vector>
 

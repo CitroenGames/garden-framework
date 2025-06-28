@@ -13,70 +13,144 @@
 #include <stdlib.h>
 
 #include "Application.hpp"
-#include "gameObject.hpp"
-#include "rigidbody.hpp"
-#include "mesh.hpp"
-#include "collider.hpp"
-#include "playerEntity.hpp"
+#include "Components/gameObject.hpp"
+#include "Components/rigidbody.hpp"
+#include "Components/mesh.hpp"
+#include "Components/collider.hpp"
+#include "Components/playerEntity.hpp"
 #include "freecamEntity.hpp"
 #include "PlayerController.hpp"
-#include "playerRepresentation.hpp"
+#include "InputHandler.hpp"
+#include "Components/playerRepresentation.hpp"
 #include "world.hpp"
 #include "Graphics/renderer.hpp"
 #include "AudioSystem.h"
 #include "Utils/GltfLoader.hpp"
+#include "Utils/GltfMaterialLoader.hpp"
+
+#include "Utils/Log.hpp"
 
 static Application app;
 static renderer _renderer;
 static world _world;
-static PlayerController player_controller;
+static InputHandler input_handler;
+static std::unique_ptr<PlayerController> player_controller;
 
+// TODO: move this to a better location
 static void quit_game(int code)
 {
     app.shutdown();
     exit(code);
 }
 
-static void handle_key_down(SDL_Keysym* keysym)
-{
-    switch (keysym->sym)
-    {
-    case SDLK_ESCAPE:
-        quit_game(0);
-        break;
-
-    default:
-        // Pass to player controller
-        player_controller.handleKeyDown(keysym);
-        break;
+// TODO: move this to a better location
+// Helper function to get texture type name for logging
+std::string getTextureTypeName(TextureType type) {
+    switch (type) {
+        case TextureType::BASE_COLOR: return "Base Color";
+        case TextureType::METALLIC_ROUGHNESS: return "Metallic-Roughness";
+        case TextureType::NORMAL: return "Normal";
+        case TextureType::OCCLUSION: return "Occlusion";
+        case TextureType::EMISSIVE: return "Emissive";
+        case TextureType::DIFFUSE: return "Diffuse";
+        case TextureType::SPECULAR: return "Specular";
+        default: return "Unknown";
     }
 }
 
-static void process_events()
+// TODO: move this to a better location
+// Function to load glTF
+mesh* loadGltfMeshWithMaterials(const std::string& filename, gameObject& obj, IRenderAPI* render_api)
 {
-    SDL_Event event;
+    // Configure geometry loading
+    GltfLoaderConfig gltf_config;
+    gltf_config.verbose_logging = true;
+    gltf_config.flip_uvs = true;
+    gltf_config.generate_normals_if_missing = true;
+    gltf_config.scale = 1.0f;
 
-    while (SDL_PollEvent(&event))
-    {
-        switch (event.type)
-        {
-        case SDL_MOUSEMOTION:
-            player_controller.handleMouseMotion(event.motion.yrel, event.motion.xrel);
-            break;
+    // Configure material loading with performance optimizations
+    MaterialLoaderConfig material_config;
+    material_config.verbose_logging = true;
+    material_config.load_all_textures = false;  // Only load essential textures for better performance
+    material_config.priority_texture_types = {
+        TextureType::BASE_COLOR,
+        TextureType::DIFFUSE,
+        TextureType::NORMAL
+    };
+    material_config.generate_mipmaps = true;
+    material_config.flip_textures_vertically = true;
+    material_config.cache_textures = true;  // Prevent loading duplicate textures
+    material_config.texture_base_path = "models/";
 
-        case SDL_KEYDOWN:
-            handle_key_down(&event.key.keysym);
-            break;
+    // Load geometry and materials together
+    GltfLoadResult map_result = GltfLoader::loadGltfWithMaterials(filename, render_api, gltf_config, material_config);
 
-        case SDL_KEYUP:
-            player_controller.handleKeyUp(&event.key.keysym);
-            break;
+    if (!map_result.success) {
+        LOG_ENGINE_FATAL("Failed to load glTF file: {}", map_result.error_message.c_str());
+        return nullptr;
+    }
 
-        case SDL_QUIT:
-            quit_game(0);
-            break;
+    LOG_ENGINE_TRACE("Loaded glTF: {}", filename.c_str());
+    LOG_ENGINE_TRACE("Geometry loaded with {} vertices", map_result.vertex_count);
+    
+    if (map_result.materials_loaded) {
+		LOG_ENGINE_TRACE("Materials loaded: {}", map_result.material_data.total_materials);
+		LOG_ENGINE_TRACE("- Textures: {} loaded successfully, {} failed",
+            map_result.material_data.total_textures_loaded,
+            map_result.material_data.total_textures_failed);
+    }
+
+    // Create mesh from glTF data
+    mesh* gltf_mesh = new mesh(map_result.vertices, map_result.vertex_count, obj);
+
+    // Apply textures using the new material system
+    bool texture_applied = false;
+    
+    if (map_result.materials_loaded && !map_result.material_data.materials.empty()) {
+        // Try each material until we find one with a valid texture
+        for (const auto& material : map_result.material_data.materials) {
+            TextureHandle primary_texture = material.getPrimaryTextureHandle();
+            
+            if (primary_texture != INVALID_TEXTURE) {
+                gltf_mesh->set_texture(primary_texture);
+                printf("Applied texture from material: %s\n", material.properties.name.c_str());
+                texture_applied = true;
+                break;
+            }
+        }
+
+        // Print material information for debugging
+        if (material_config.verbose_logging) {
+            printf("Available materials:\n");
+            for (size_t i = 0; i < map_result.material_data.materials.size(); ++i) {
+                const auto& mat = map_result.material_data.materials[i];
+                printf("  [%zu] %s - %s\n", i, mat.properties.name.c_str(),
+                       mat.hasValidTextures() ? "has textures" : "no textures");
+                
+                // Show texture details
+                for (const auto& tex : mat.textures.textures) {
+                    printf("    %s: %s %s\n", 
+                           getTextureTypeName(tex.type).c_str(),
+                           tex.uri.c_str(),
+                           tex.is_loaded ? "(loaded)" : "(failed)");
+                }
+            }
         }
     }
+
+    // Fallback texture if no materials had valid textures
+    if (!texture_applied) {
+        printf("No valid textures found in materials, using fallback\n");
+        TextureHandle fallback_texture = render_api->loadTexture("textures/t_ground.png", true, true);
+        gltf_mesh->set_texture(fallback_texture);
+    }
+
+    // Transfer ownership to prevent cleanup
+    map_result.vertices = nullptr;
+    map_result.vertex_count = 0;
+
+    return gltf_mesh;
 }
 
 #if _WIN32
@@ -87,7 +161,8 @@ int main(int argc, char* argv[])
 {
     TE::AudioSystem audioSystem;
     Paingine2D::CrashHandler* crashHandler = Paingine2D::CrashHandler::GetInstance();
-    crashHandler->Initialize("FNaF");
+    crashHandler->Initialize("Game");
+	EE::CLog::Init();
 
     // Initialize application with OpenGL render API
     app = Application(1920, 1080, 60, 75.0f, RenderAPIType::OpenGL);
@@ -100,9 +175,18 @@ int main(int argc, char* argv[])
     IRenderAPI* render_api = app.getRenderAPI();
     if (!render_api)
     {
-        fprintf(stderr, "Failed to get render API from application\n");
+		LOG_ENGINE_FATAL("Failed to get render API from application");
         quit_game(1);
     }
+
+    LOG_ENGINE_TRACE("Game initialized with {0} render API", render_api->getAPIName());
+
+    // Set up input system
+    input_handler.set_quit_callback([]() {
+        quit_game(0);
+    });
+    
+    auto input_manager = input_handler.get_input_manager();
 
     /* Frame locking */
     Uint32 frame_start_ticks;
@@ -128,93 +212,42 @@ int main(int argc, char* argv[])
     std::vector<rigidbody*> rigidbodies;
     rigidbodies.push_back(&player_rb);
 
-    /* Player and Freecam entities */
-    playerEntity player_entity = playerEntity::playerEntity(_world.world_camera, player_rb, player);
-    freecamEntity freecam_entity = freecamEntity::freecamEntity(freecam_camera, freecam_obj);
+    /* Player and Freecam entities with new input system */
+    playerEntity player_entity = playerEntity::playerEntity(_world.world_camera, player_rb, player, input_manager);
+    freecamEntity freecam_entity = freecamEntity::freecamEntity(freecam_camera, freecam_obj, input_manager);
 
-    // Set up player controller
-    player_controller.setPossessedPlayer(&player_entity);
-    player_controller.setPossessedFreecam(&freecam_entity);
+    // Set up player controller with new input system
+    player_controller = std::make_unique<PlayerController>(input_manager);
+    player_controller->setPossessedPlayer(&player_entity);
+    player_controller->setPossessedFreecam(&freecam_entity);
 
     _world.player_entity = &player_entity;
 
     /* Meshes */
     mesh sky_mesh = mesh("models/sky.obj", sky);
 
-    // Load glTF file with texture support
-    GltfLoaderConfig gltf_config;
-    gltf_config.verbose_logging = true;
-    gltf_config.flip_uvs = true;
-    gltf_config.generate_normals_if_missing = true;
-
-    printf("Loading glTF file...\n");
-    GltfLoadResult map_result = GltfLoader::loadGltfWithMaterials("models/map.gltf", gltf_config);
-
-    mesh* map_ground_mesh = nullptr;
-
-    if (!map_result.success) {
-        printf("Failed to load glTF file: %s\n", map_result.error_message.c_str());
-        printf("Falling back to OBJ loader...\n");
-        // Fallback to OBJ
-        map_ground_mesh = new mesh("models/map.obj", map);
-    }
-    else {
-        printf("Successfully loaded glTF with %zu vertices and %zu textures\n",
-            map_result.vertex_count, map_result.texture_paths.size());
-
-        // Create mesh from glTF data
-        map_ground_mesh = new mesh(map_result.vertices, map_result.vertex_count, map);
-
-        // Load textures from glTF
-        std::vector<TextureHandle> gltf_textures;
-        std::string texture_base_path = "models/"; // Adjust this to your texture folder
-
-        if (GltfLoader::loadTexturesFromResult(map_result, render_api, gltf_textures, texture_base_path)) {
-            printf("Loaded %zu textures from glTF\n", gltf_textures.size());
-
-            // Apply the first valid texture to the mesh
-            bool texture_applied = false;
-            for (const auto& tex_handle : gltf_textures) {
-                // Check if texture handle is valid (assuming TextureHandle has some way to check validity)
-                // You may need to adjust this based on your TextureHandle implementation
-                // Common approaches: check for non-zero value, or use a specific validation method
-                if (tex_handle != TextureHandle{}) { // Compare against default/empty handle
-                    map_ground_mesh->set_texture(tex_handle);
-                    printf("Applied glTF texture to map mesh\n");
-                    texture_applied = true;
-                    break;
-                }
-            }
-
-            if (!texture_applied) {
-                printf("No valid textures found in glTF, using fallback\n");
-                TextureHandle groundtexture = render_api->loadTexture("textures/t_ground.png", true, true);
-                map_ground_mesh->set_texture(groundtexture);
-            }
-        }
-        else {
-            printf("Failed to load textures from glTF, using fallback\n");
-            TextureHandle groundtexture = render_api->loadTexture("textures/t_ground.png", true, true);
-            map_ground_mesh->set_texture(groundtexture);
-        }
-    }
+    // Load glTF files
+    mesh* map_ground_mesh = loadGltfMeshWithMaterials("models/map.gltf", map, render_api);
+    mesh* player_rep_mesh = loadGltfMeshWithMaterials("models/Character.gltf", player_rep_obj, render_api);
 
     // Continue with other mesh loading...
     mesh map_trees_mesh = mesh::mesh("models/map_trees.obj", map);
     map_trees_mesh.culling = false;
     map_trees_mesh.transparent = true;
+
     mesh map_bgtrees_mesh = mesh::mesh("models/map_bgtrees.obj", map);
     map_bgtrees_mesh.transparent = true;
+
     mesh map_collider_mesh = mesh::mesh("models/map_collider.obj", map);
 
     mesh cube_mesh = mesh::mesh("models/grasscube.obj", cube);
 
-    mesh player_rep_mesh = mesh::mesh("models/player_character.obj", player_rep_obj);
+    
     player_rep_obj.scale = vector3f(0.2f, 0.2f, 0.2f);
     player_rep_obj.position = vector3f(0, -20, 0);
 
     // Create player representation component
-    PlayerRepresentation player_representation = PlayerRepresentation(&player_rep_mesh, &player_entity, player_rep_obj);
+    PlayerRepresentation player_representation = PlayerRepresentation(player_rep_mesh, &player_entity, player_rep_obj);
 
     std::vector<mesh*> meshes;
     meshes.push_back(&sky_mesh);
@@ -224,7 +257,7 @@ int main(int argc, char* argv[])
     meshes.push_back(&cube_mesh);
     meshes.push_back(&map_bgtrees_mesh);
     meshes.push_back(&map_trees_mesh);
-    meshes.push_back(&player_rep_mesh); // Add player representation to render list
+    meshes.push_back(player_rep_mesh);
 
     /* Colliders */
     collider cube_collider = collider::collider(cube_mesh, cube);
@@ -246,18 +279,6 @@ int main(int argc, char* argv[])
     map_trees_mesh.set_texture(tree_bark);
     map_bgtrees_mesh.set_texture(tree_leaves);
 
-    // Only set fallback ground texture if we didn't load from glTF
-    if (!map_result.success && map_ground_mesh) {
-        TextureHandle groundtexture = render_api->loadTexture("textures/t_ground.png", true, true);
-        map_ground_mesh->set_texture(groundtexture);
-    }
-
-    // Set texture for player representation
-    TextureHandle player_texture = render_api->loadTexture("textures/player.png", true, true);
-    player_rep_mesh.set_texture(player_texture);
-    // If you don't have a player texture, you can reuse an existing one:
-    // player_rep_mesh.set_texture(ball_tex);
-
     /* Renderer - Using the abstracted render API */
     _renderer = renderer::renderer(&meshes, render_api);
 
@@ -265,40 +286,64 @@ int main(int argc, char* argv[])
     Uint32 delta_last = 0;
     float delta_time = 0;
 
-    printf("Game initialized with %s render API\n", render_api->getAPIName());
-    printf("Press F to toggle between player and freecam mode\n");
+    printf("=== INPUT CONTROLS ===\n");
+    printf("WASD: Move\n");
+    printf("Space: Jump (Player) / Move Up (Freecam)\n");
+    printf("Shift: Move Down (Freecam)\n");
+    printf("F: Toggle between Player and Freecam mode\n");
+    printf("ESC: Quit game\n");
+    printf("Mouse: Look around\n");
+    printf("=====================\n");
 
     atexit(SDL_Quit);
     while (1)
     {
         frame_start_ticks = SDL_GetTicks();
 
-        // player input + extra input
-        process_events();
+        // Process input events through the new input system
+        input_handler.process_events();
+        
+        // Handle mouse motion for camera control
+        if (input_manager)
+        {
+            float mouse_x = input_manager->get_mouse_delta_x();
+            float mouse_y = input_manager->get_mouse_delta_y();
+            
+            if (mouse_x != 0.0f || mouse_y != 0.0f)
+            {
+                player_controller->handleMouseMotion(mouse_y, mouse_x);
+            }
+        }
+        
+        // Check if quit was requested
+        if (input_handler.should_quit_application())
+        {
+            quit_game(0);
+        }
 
         // delta time
         delta_time = (frame_start_ticks - delta_last) / 1000.0f;
         delta_last = frame_start_ticks;
 
         // physics and player collisions (only when controlling player)
-        if (!player_controller.isFreecamMode())
+        if (!player_controller->isFreecamMode())
         {
             _world.step_physics(rigidbodies);
             _world.player_collisions(player_rb, 1, colliders);
         }
 
         // Update currently possessed entity through player controller
-        player_controller.update(_world.fixed_delta);
+        player_controller->update(_world.fixed_delta);
 
         // Update player representation visibility
-        player_representation.update(player_controller.isFreecamMode());
+        player_representation.update(player_controller->isFreecamMode());
 
         // Fall detection (only when controlling player)
-        if (!player_controller.isFreecamMode() && player_entity.obj.position.Y < -5)
+        if (!player_controller->isFreecamMode() && player_entity.obj.position.Y < -5)
             quit_game(0);
 
         // render using the active camera (either player or freecam)
-        camera& active_camera = player_controller.getActiveCamera();
+        camera& active_camera = player_controller->getActiveCamera();
         _renderer.render_scene(active_camera);
         app.swapBuffers();
 
@@ -307,7 +352,7 @@ int main(int argc, char* argv[])
     }
 
     // Cleanup
-    if (map_ground_mesh && map_result.success) {
+    if (map_ground_mesh) {
         delete map_ground_mesh;
     }
 

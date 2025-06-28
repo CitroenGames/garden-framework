@@ -13,68 +13,36 @@
 
 GltfLoadResult GltfLoader::loadGltf(const std::string& filename, const GltfLoaderConfig& config)
 {
-    GltfLoadResult result;
+    return loadGltfGeometry(filename, config);
+}
 
-    logMessage(config, "Loading glTF file: " + filename);
+GltfLoadResult GltfLoader::loadGltfWithMaterials(const std::string& filename,
+                                                IRenderAPI* render_api,
+                                                const GltfLoaderConfig& config,
+                                                const MaterialLoaderConfig& material_config)
+{
+    logMessage(config, "Loading glTF file with materials: " + filename);
 
-    tinygltf::Model model;
-    std::string error;
-
-    if (!loadModel(filename, model, error)) {
-        result.error_message = "Failed to load glTF file: " + error;
-        logError(config, result.error_message);
+    // First load geometry
+    GltfLoadResult result = loadGltfGeometry(filename, config);
+    
+    if (!result.success) {
         return result;
     }
 
-    std::vector<vertex> vertices;
-
-    // Process all scenes and nodes
-    for (const auto& scene : model.scenes) {
-        for (int node_index : scene.nodes) {
-            if (node_index >= 0 && node_index < model.nodes.size()) {
-                if (!processNode(model, model.nodes[node_index], vertices, config)) {
-                    result.error_message = "Failed to process node " + std::to_string(node_index);
-                    logError(config, result.error_message);
-                    return result;
-                }
-            }
-        }
+    // Then load materials
+    if (!loadMaterialsIntoResult(result, filename, render_api, material_config)) {
+        logMessage(config, "Warning: Failed to load materials, continuing with geometry only");
     }
-
-    if (vertices.empty()) {
-        result.error_message = "No geometry found in glTF file";
-        logError(config, result.error_message);
-        return result;
-    }
-
-    // Convert to array format
-    result.vertex_count = vertices.size();
-    result.vertices = new vertex[result.vertex_count];
-
-    for (size_t i = 0; i < result.vertex_count; ++i) {
-        result.vertices[i] = vertices[i];
-
-        if (config.validate_normals || config.validate_texcoords) {
-            if (!validateVertex(result.vertices[i], config)) {
-                logError(config, "Invalid vertex data at index " + std::to_string(i));
-            }
-        }
-    }
-
-    // Extract texture and material information
-    extractTexturePathsFromModel(model, result);
-
-    result.success = true;
-    logMessage(config, "Successfully loaded " + std::to_string(result.vertex_count) + " vertices");
 
     return result;
 }
 
-GltfLoadResult GltfLoader::loadGltfWithMaterials(const std::string& filename, const GltfLoaderConfig& config)
+GltfLoadResult GltfLoader::loadGltfGeometry(const std::string& filename, const GltfLoaderConfig& config)
 {
     GltfLoadResult result;
 
-    logMessage(config, "Loading glTF file with materials: " + filename);
+    logMessage(config, "Loading glTF geometry: " + filename);
 
     tinygltf::Model model;
     std::string error;
@@ -86,7 +54,7 @@ GltfLoadResult GltfLoader::loadGltfWithMaterials(const std::string& filename, co
     }
 
     std::vector<vertex> vertices;
-    std::vector<int> material_indices; // Track which material each vertex group uses
+    std::vector<int> material_indices;
 
     // Process all scenes and nodes
     for (const auto& scene : model.scenes) {
@@ -124,55 +92,47 @@ GltfLoadResult GltfLoader::loadGltfWithMaterials(const std::string& filename, co
     // Store material indices
     result.material_indices = std::move(material_indices);
 
-    // Extract texture paths with proper material mapping
-    extractTexturePathsFromModel(model, result);
+    // Extract basic material names for compatibility
+    result.material_names.clear();
+    for (const auto& material : model.materials) {
+        result.material_names.push_back(material.name.empty() ? "unnamed_material" : material.name);
+    }
 
     result.success = true;
-    logMessage(config, "Successfully loaded " + std::to_string(result.vertex_count) + " vertices with " + 
-               std::to_string(result.texture_paths.size()) + " textures");
+    logMessage(config, "Successfully loaded geometry: " + std::to_string(result.vertex_count) + " vertices");
 
     return result;
 }
 
-bool GltfLoader::loadTexturesFromResult(const GltfLoadResult& result, IRenderAPI* render_api, 
-                                       std::vector<TextureHandle>& textures, const std::string& base_path)
+bool GltfLoader::loadMaterialsIntoResult(GltfLoadResult& result,
+                                       const std::string& filename,
+                                       IRenderAPI* render_api,
+                                       const MaterialLoaderConfig& material_config)
 {
-    textures.clear();
-    
     if (!render_api) {
-        std::cerr << "[GltfLoader Error] Render API is null" << std::endl;
+        logError(GltfLoaderConfig(), "Render API is null");
         return false;
     }
+
+    // Load materials using the dedicated material loader
+    result.material_data = GltfMaterialLoader::loadMaterials(filename, render_api, material_config);
     
-    for (const std::string& texture_path : result.texture_paths) {
-        std::string full_path;
+    if (result.material_data.success) {
+        result.materials_loaded = true;
         
-        // Check if it's an embedded texture
-        if (texture_path.find("embedded_texture_") == 0) {
-            logMessage(GltfLoaderConfig(), "Skipping embedded texture: " + texture_path);
-            textures.push_back(TextureHandle{}); // Add placeholder
-            continue;
-        }
-        
-        // Construct full path
-        if (base_path.empty()) {
-            full_path = texture_path;
-        } else {
-            full_path = base_path;
-            if (full_path.back() != '/' && full_path.back() != '\\') {
-                full_path += "/";
+        // Update legacy texture paths for backward compatibility
+        result.texture_paths.clear();
+        for (const auto& material : result.material_data.materials) {
+            const TextureInfo* primary_tex = material.textures.getPrimaryTexture();
+            if (primary_tex && !primary_tex->uri.empty()) {
+                result.texture_paths.push_back(primary_tex->uri);
             }
-            full_path += texture_path;
         }
         
-        // Load texture using render API
-        TextureHandle tex_handle = render_api->loadTexture(full_path.c_str(), true, true);
-        textures.push_back(tex_handle);
-        
-        logMessage(GltfLoaderConfig(), "Loaded texture: " + full_path);
+        return true;
     }
-    
-    return !textures.empty();
+
+    return false;
 }
 
 GltfLoadResult GltfLoader::loadGltfMesh(const std::string& filename, const std::string& mesh_name, const GltfLoaderConfig& config)
@@ -242,6 +202,36 @@ GltfLoadResult GltfLoader::loadGltfMesh(const std::string& filename, size_t mesh
     return result;
 }
 
+GltfLoadResult GltfLoader::loadGltfMeshWithMaterials(const std::string& filename,
+                                                   const std::string& mesh_name,
+                                                   IRenderAPI* render_api,
+                                                   const GltfLoaderConfig& config,
+                                                   const MaterialLoaderConfig& material_config)
+{
+    GltfLoadResult result = loadGltfMesh(filename, mesh_name, config);
+    
+    if (result.success) {
+        loadMaterialsIntoResult(result, filename, render_api, material_config);
+    }
+    
+    return result;
+}
+
+GltfLoadResult GltfLoader::loadGltfMeshWithMaterials(const std::string& filename,
+                                                   size_t mesh_index,
+                                                   IRenderAPI* render_api,
+                                                   const GltfLoaderConfig& config,
+                                                   const MaterialLoaderConfig& material_config)
+{
+    GltfLoadResult result = loadGltfMesh(filename, mesh_index, config);
+    
+    if (result.success) {
+        loadMaterialsIntoResult(result, filename, render_api, material_config);
+    }
+    
+    return result;
+}
+
 bool GltfLoader::validateGltfFile(const std::string& filename)
 {
     tinygltf::Model model;
@@ -254,7 +244,7 @@ size_t GltfLoader::getGltfVertexCount(const std::string& filename)
     GltfLoaderConfig config;
     config.verbose_logging = false;
 
-    auto result = loadGltf(filename, config);
+    auto result = loadGltfGeometry(filename, config);
     return result.success ? result.vertex_count : 0;
 }
 
@@ -595,99 +585,6 @@ bool GltfLoader::extractIndices(const tinygltf::Model& model, int accessor_index
     }
 
     return true;
-}
-
-int GltfLoader::getTextureIndexFromMaterial(const tinygltf::Model& model, int material_index)
-{
-    if (material_index < 0 || material_index >= model.materials.size()) {
-        return -1;
-    }
-    
-    const auto& material = model.materials[material_index];
-    
-    // Check for base color texture
-    if (material.pbrMetallicRoughness.baseColorTexture.index >= 0) {
-        return material.pbrMetallicRoughness.baseColorTexture.index;
-    }
-    
-    // Check for diffuse texture (older glTF spec)
-    auto diffuse_it = material.values.find("diffuse");
-    if (diffuse_it != material.values.end() && diffuse_it->second.TextureIndex() >= 0) {
-        return diffuse_it->second.TextureIndex();
-    }
-    
-    return -1;
-}
-
-void GltfLoader::extractTexturePathsFromModel(const tinygltf::Model& model, GltfLoadResult& result)
-{
-    result.texture_paths.clear();
-
-    // Build a map of texture index to image path
-    std::map<int, std::string> texture_to_path;
-
-    for (size_t i = 0; i < model.textures.size(); ++i) {
-        const auto& texture = model.textures[i];
-        if (texture.source >= 0 && texture.source < model.images.size()) {
-            const auto& image = model.images[texture.source];
-            if (!image.uri.empty()) {
-                texture_to_path[i] = image.uri;
-            }
-            else {
-                texture_to_path[i] = "embedded_texture_" + std::to_string(texture.source);
-            }
-        }
-    }
-
-    // Create a direct mapping: material index -> texture path
-    // This maintains the correct relationship between materials and their textures
-    std::vector<std::string> material_base_textures;
-    std::map<std::string, int> unique_texture_indices;
-
-    // Process each material and extract its primary (base color) texture
-    for (size_t mat_idx = 0; mat_idx < model.materials.size(); ++mat_idx) {
-        const auto& material = model.materials[mat_idx];
-        std::string texture_path = "";
-
-        // Get the base color texture for this material
-        if (material.pbrMetallicRoughness.baseColorTexture.index >= 0) {
-            int tex_idx = material.pbrMetallicRoughness.baseColorTexture.index;
-            if (texture_to_path.find(tex_idx) != texture_to_path.end()) {
-                texture_path = texture_to_path[tex_idx];
-            }
-        }
-
-        material_base_textures.push_back(texture_path);
-
-        // Add to unique textures if not empty and not already added
-        if (!texture_path.empty() && unique_texture_indices.find(texture_path) == unique_texture_indices.end()) {
-            unique_texture_indices[texture_path] = result.texture_paths.size();
-            result.texture_paths.push_back(texture_path);
-        }
-    }
-
-    // Store the material->texture mapping for later use
-    result.material_texture_mapping = std::move(material_base_textures);
-
-    // Extract material names
-    result.material_names.clear();
-    for (const auto& material : model.materials) {
-        result.material_names.push_back(material.name.empty() ? "unnamed_material" : material.name);
-    }
-
-    // Debug logging
-    if (!result.texture_paths.empty()) {
-        logMessage(GltfLoaderConfig(), "Loaded " + std::to_string(result.texture_paths.size()) + " unique textures:");
-        for (size_t i = 0; i < result.texture_paths.size(); ++i) {
-            logMessage(GltfLoaderConfig(), "  [" + std::to_string(i) + "] " + result.texture_paths[i]);
-        }
-
-        logMessage(GltfLoaderConfig(), "Material->Texture mapping:");
-        for (size_t i = 0; i < result.material_names.size() && i < result.material_texture_mapping.size(); ++i) {
-            std::string tex_info = result.material_texture_mapping[i].empty() ? "no texture" : result.material_texture_mapping[i];
-            logMessage(GltfLoaderConfig(), "  Material '" + result.material_names[i] + "' -> " + tex_info);
-        }
-    }
 }
 
 template<typename T>

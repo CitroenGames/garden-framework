@@ -2,9 +2,9 @@
 
 #include "irrlicht/vector3.h"
 #include "irrlicht/matrix4.h"
-#include "rigidbody.hpp"
-#include "collider.hpp"
-#include "mesh.hpp"
+#include "Components/rigidbody.hpp"
+#include "Components/collider.hpp"
+#include "Components/mesh.hpp"
 #include <vector>
 
 using namespace irr;

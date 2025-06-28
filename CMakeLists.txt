@@ -34,6 +34,8 @@ target_link_libraries(${PROJECT_NAME}
     Freetype::Freetype
     rmlui
 
+    spdlog
+
     # Windows system libraries
     kernel32.lib
     user32.lib
