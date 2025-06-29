@@ -1,6 +1,6 @@
 #include "OpenGLRenderAPI.hpp"
-#include "mesh.hpp"
-#include "camera.hpp"
+#include "Components/mesh.hpp"
+#include "Components/camera.hpp"
 #include <stdio.h>
 
 #ifdef _WIN32
