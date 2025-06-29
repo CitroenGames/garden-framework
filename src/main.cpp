@@ -13,12 +13,15 @@
 #include <stdlib.h>
 
 #include "Application.hpp"
+
+// Components
 #include "Components/gameObject.hpp"
 #include "Components/rigidbody.hpp"
 #include "Components/mesh.hpp"
 #include "Components/collider.hpp"
 #include "Components/playerEntity.hpp"
-#include "freecamEntity.hpp"
+#include "Components/FreecamEntity.hpp"
+
 #include "PlayerController.hpp"
 #include "InputHandler.hpp"
 #include "Components/playerRepresentation.hpp"

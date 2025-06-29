@@ -3,7 +3,7 @@
 #include "Components/gameObject.hpp"
 #include "Components/camera.hpp"
 #include "Components/playerEntity.hpp"
-#include "freecamEntity.hpp"
+#include "Components/FreecamEntity.hpp"
 #include "InputManager.hpp"
 
 enum class PossessedEntityType
