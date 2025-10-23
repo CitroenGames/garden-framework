@@ -200,6 +200,7 @@ int main(int argc, char* argv[])
 
     /* Gameobjects */
     gameObject sky = gameObject::gameObject();  // skybox
+    sky.rotation.X = 180.0f;
     gameObject map = gameObject::gameObject();
     gameObject cube = gameObject::gameObject(14, 3.5f, -3.5f); // test cube
     gameObject player = gameObject::gameObject(0, 2, 0);
