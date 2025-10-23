@@ -51,6 +51,13 @@ target_link_libraries(${PROJECT_NAME}
     odbccp32.lib
 )
 
+if (WIN32 AND MSVC)
+    add_compile_options(
+        /W3
+        /MP
+    )
+endif()
+
 # Windows-specific settings
 if(WIN32)
     set_target_properties(${PROJECT_NAME} PROPERTIES
