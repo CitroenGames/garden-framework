@@ -39,8 +39,9 @@ struct GltfLoadResult
     // Material and texture data
     std::vector<std::string> texture_paths;
     std::vector<std::string> material_names;
-    std::vector<int> material_indices; // Which material each vertex group uses
-    
+    std::vector<int> material_indices; // Which material each primitive uses
+    std::vector<size_t> primitive_vertex_counts; // How many vertices each primitive has
+
     MaterialLoadResult material_data;  // Complete material information
     bool materials_loaded = false;     // Whether materials were loaded separately
 
@@ -62,6 +63,7 @@ struct GltfLoadResult
         texture_paths(std::move(other.texture_paths)),
         material_names(std::move(other.material_names)),
         material_indices(std::move(other.material_indices)),
+        primitive_vertex_counts(std::move(other.primitive_vertex_counts)),
         material_data(std::move(other.material_data)),
         materials_loaded(other.materials_loaded)
     {
@@ -82,6 +84,7 @@ struct GltfLoadResult
             texture_paths = std::move(other.texture_paths);
             material_names = std::move(other.material_names);
             material_indices = std::move(other.material_indices);
+            primitive_vertex_counts = std::move(other.primitive_vertex_counts);
             material_data = std::move(other.material_data);
             materials_loaded = other.materials_loaded;
 
@@ -176,11 +179,11 @@ private:
 
     // Enhanced processing methods that track material indices
     static bool processNodeWithMaterials(const tinygltf::Model& model, const tinygltf::Node& node,
-        std::vector<vertex>& vertices, std::vector<int>& material_indices, const GltfLoaderConfig& config);
+        std::vector<vertex>& vertices, std::vector<int>& material_indices, std::vector<size_t>& primitive_vertex_counts, const GltfLoaderConfig& config);
     static bool processMeshWithMaterials(const tinygltf::Model& model, const tinygltf::Mesh& mesh,
-        std::vector<vertex>& vertices, std::vector<int>& material_indices, const GltfLoaderConfig& config);
+        std::vector<vertex>& vertices, std::vector<int>& material_indices, std::vector<size_t>& primitive_vertex_counts, const GltfLoaderConfig& config);
     static bool processPrimitiveWithMaterial(const tinygltf::Model& model, const tinygltf::Primitive& primitive,
-        std::vector<vertex>& vertices, const GltfLoaderConfig& config, int& material_index);
+        std::vector<vertex>& vertices, const GltfLoaderConfig& config, int& material_index, size_t& vertex_count);
 
     // Data extraction helpers
     static bool extractPositions(const tinygltf::Model& model, int accessor_index,

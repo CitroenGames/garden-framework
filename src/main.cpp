@@ -11,6 +11,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <map>
 
 #include "Application.hpp"
 
@@ -107,35 +108,68 @@ mesh* loadGltfMeshWithMaterials(const std::string& filename, gameObject& obj, IR
     // Create mesh from glTF data
     mesh* gltf_mesh = new mesh(map_result.vertices, map_result.vertex_count, obj);
 
-    // Apply textures using the new material system
+    // Apply textures using the multi-material system
     bool texture_applied = false;
-    
+
     if (map_result.materials_loaded && !map_result.material_data.materials.empty()) {
-        // Try each material until we find one with a valid texture
-        for (const auto& material : map_result.material_data.materials) {
-            TextureHandle primary_texture = material.getPrimaryTextureHandle();
-            
-            if (primary_texture != INVALID_TEXTURE) {
-                gltf_mesh->set_texture(primary_texture);
-                printf("Applied texture from material: %s\n", material.properties.name.c_str());
-                texture_applied = true;
-                break;
+        // Build material ranges from primitive data
+        if (!map_result.material_indices.empty() && !map_result.primitive_vertex_counts.empty()) {
+            LOG_ENGINE_INFO("Building material ranges for GLTF with {} primitives", map_result.material_indices.size());
+
+            std::vector<MaterialRange> material_ranges;
+            size_t current_vertex = 0;
+
+            for (size_t i = 0; i < map_result.material_indices.size(); ++i) {
+                int mat_idx = map_result.material_indices[i];
+                size_t vertex_count = map_result.primitive_vertex_counts[i];
+
+                if (mat_idx >= 0 && mat_idx < map_result.material_data.materials.size()) {
+                    const auto& material = map_result.material_data.materials[mat_idx];
+                    TextureHandle tex = material.getPrimaryTextureHandle();
+
+                    // Create a material range for this primitive
+                    MaterialRange range(current_vertex, vertex_count, tex, material.properties.name);
+                    material_ranges.push_back(range);
+
+                    LOG_ENGINE_TRACE("  Primitive {}: vertices {}-{}, material [{}] '{}'",
+                                    i, current_vertex, current_vertex + vertex_count - 1,
+                                    mat_idx, material.properties.name);
+
+                    if (tex != INVALID_TEXTURE) {
+                        texture_applied = true;
+                    }
+                }
+                else {
+                    // Material index out of range, create range with no texture
+                    MaterialRange range(current_vertex, vertex_count, INVALID_TEXTURE, "unknown");
+                    material_ranges.push_back(range);
+
+                    LOG_ENGINE_WARN("  Primitive {}: invalid material index [{}]", i, mat_idx);
+                }
+
+                current_vertex += vertex_count;
+            }
+
+            // Set the material ranges on the mesh
+            if (!material_ranges.empty()) {
+                gltf_mesh->setMaterialRanges(material_ranges);
+                LOG_ENGINE_INFO("Applied {} material ranges to mesh", material_ranges.size());
             }
         }
 
         // Print material information for debugging
         if (material_config.verbose_logging) {
-            printf("Available materials:\n");
+            LOG_ENGINE_TRACE("Available materials:");
             for (size_t i = 0; i < map_result.material_data.materials.size(); ++i) {
                 const auto& mat = map_result.material_data.materials[i];
-                printf("  [%zu] %s - %s\n", i, mat.properties.name.c_str(),
+                LOG_ENGINE_TRACE("  [{}] {} - {}", i, mat.properties.name,
                        mat.hasValidTextures() ? "has textures" : "no textures");
-                
+
                 // Show texture details
                 for (const auto& tex : mat.textures.textures) {
-                    printf("    %s: %s %s\n", 
-                           getTextureTypeName(tex.type).c_str(),
-                           tex.uri.c_str(),
+                    LOG_ENGINE_TRACE("    {}: {} {}",
+                           getTextureTypeName(tex.type),
+                           tex.uri,
                            tex.is_loaded ? "(loaded)" : "(failed)");
                 }
             }
@@ -144,7 +178,7 @@ mesh* loadGltfMeshWithMaterials(const std::string& filename, gameObject& obj, IR
 
     // Fallback texture if no materials had valid textures
     if (!texture_applied) {
-        printf("No valid textures found in materials, using fallback\n");
+        LOG_ENGINE_WARN("No valid textures found in materials, using fallback");
         TextureHandle fallback_texture = render_api->loadTexture("textures/t_ground.png", true, true);
         gltf_mesh->set_texture(fallback_texture);
     }

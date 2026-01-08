@@ -55,12 +55,13 @@ GltfLoadResult GltfLoader::loadGltfGeometry(const std::string& filename, const G
 
     std::vector<vertex> vertices;
     std::vector<int> material_indices;
+    std::vector<size_t> primitive_vertex_counts;
 
     // Process all scenes and nodes
     for (const auto& scene : model.scenes) {
         for (int node_index : scene.nodes) {
             if (node_index >= 0 && node_index < model.nodes.size()) {
-                if (!processNodeWithMaterials(model, model.nodes[node_index], vertices, material_indices, config)) {
+                if (!processNodeWithMaterials(model, model.nodes[node_index], vertices, material_indices, primitive_vertex_counts, config)) {
                     result.error_message = "Failed to process node " + std::to_string(node_index);
                     logError(config, result.error_message);
                     return result;
@@ -89,8 +90,9 @@ GltfLoadResult GltfLoader::loadGltfGeometry(const std::string& filename, const G
         }
     }
 
-    // Store material indices
+    // Store material indices and vertex counts
     result.material_indices = std::move(material_indices);
+    result.primitive_vertex_counts = std::move(primitive_vertex_counts);
 
     // Extract basic material names for compatibility
     result.material_names.clear();
@@ -309,11 +311,11 @@ bool GltfLoader::loadModel(const std::string& filename, tinygltf::Model& model, 
 }
 
 bool GltfLoader::processNodeWithMaterials(const tinygltf::Model& model, const tinygltf::Node& node,
-    std::vector<vertex>& vertices, std::vector<int>& material_indices, const GltfLoaderConfig& config)
+    std::vector<vertex>& vertices, std::vector<int>& material_indices, std::vector<size_t>& primitive_vertex_counts, const GltfLoaderConfig& config)
 {
     // Process mesh if present
     if (node.mesh >= 0 && node.mesh < model.meshes.size()) {
-        if (!processMeshWithMaterials(model, model.meshes[node.mesh], vertices, material_indices, config)) {
+        if (!processMeshWithMaterials(model, model.meshes[node.mesh], vertices, material_indices, primitive_vertex_counts, config)) {
             return false;
         }
     }
@@ -321,7 +323,7 @@ bool GltfLoader::processNodeWithMaterials(const tinygltf::Model& model, const ti
     // Recursively process children
     for (int child_index : node.children) {
         if (child_index >= 0 && child_index < model.nodes.size()) {
-            if (!processNodeWithMaterials(model, model.nodes[child_index], vertices, material_indices, config)) {
+            if (!processNodeWithMaterials(model, model.nodes[child_index], vertices, material_indices, primitive_vertex_counts, config)) {
                 return false;
             }
         }
@@ -331,14 +333,22 @@ bool GltfLoader::processNodeWithMaterials(const tinygltf::Model& model, const ti
 }
 
 bool GltfLoader::processMeshWithMaterials(const tinygltf::Model& model, const tinygltf::Mesh& mesh,
-    std::vector<vertex>& vertices, std::vector<int>& material_indices, const GltfLoaderConfig& config)
+    std::vector<vertex>& vertices, std::vector<int>& material_indices, std::vector<size_t>& primitive_vertex_counts, const GltfLoaderConfig& config)
 {
     for (const auto& primitive : mesh.primitives) {
         int material_index = -1;
-        if (!processPrimitiveWithMaterial(model, primitive, vertices, config, material_index)) {
+        size_t vertex_count = 0;
+        size_t start_vertex_count = vertices.size();
+
+        if (!processPrimitiveWithMaterial(model, primitive, vertices, config, material_index, vertex_count)) {
             return false;
         }
+
+        // Calculate actual vertex count from this primitive
+        size_t actual_vertex_count = vertices.size() - start_vertex_count;
+
         material_indices.push_back(material_index);
+        primitive_vertex_counts.push_back(actual_vertex_count);
     }
     return true;
 }
@@ -518,13 +528,21 @@ bool GltfLoader::processPrimitive(const tinygltf::Model& model, const tinygltf::
 }
 
 bool GltfLoader::processPrimitiveWithMaterial(const tinygltf::Model& model, const tinygltf::Primitive& primitive,
-    std::vector<vertex>& vertices, const GltfLoaderConfig& config, int& material_index)
+    std::vector<vertex>& vertices, const GltfLoaderConfig& config, int& material_index, size_t& vertex_count)
 {
     // Store material index for this primitive
     material_index = primitive.material;
-    
+
+    // Track vertex count before processing
+    size_t start_count = vertices.size();
+
     // Use the regular primitive processing for geometry
-    return processPrimitive(model, primitive, vertices, config);
+    bool result = processPrimitive(model, primitive, vertices, config);
+
+    // Calculate how many vertices were added
+    vertex_count = vertices.size() - start_count;
+
+    return result;
 }
 
 bool GltfLoader::extractPositions(const tinygltf::Model& model, int accessor_index, std::vector<float>& positions)

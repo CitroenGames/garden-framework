@@ -84,6 +84,7 @@ public:
 
     // Mesh rendering
     virtual void renderMesh(const mesh& m, const RenderState& state = RenderState()) = 0;
+    virtual void renderMeshRange(const mesh& m, size_t start_vertex, size_t vertex_count, const RenderState& state = RenderState()) = 0;
 
     // State management
     virtual void setRenderState(const RenderState& state) = 0;

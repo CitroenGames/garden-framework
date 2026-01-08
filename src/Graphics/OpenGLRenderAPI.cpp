@@ -357,6 +357,43 @@ void OpenGLRenderAPI::renderMesh(const mesh& m, const RenderState& state)
     }
 }
 
+void OpenGLRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t vertex_count, const RenderState& state)
+{
+    if (!m.visible || !m.is_valid || m.vertices_len == 0 || vertex_count == 0) return;
+
+    // Validate range
+    if (start_vertex + vertex_count > m.vertices_len)
+    {
+        // Clamp to valid range
+        vertex_count = m.vertices_len - start_vertex;
+        if (vertex_count == 0) return;
+    }
+
+    // Apply render state before rendering
+    applyRenderState(state);
+
+    // Set up vertex arrays (same as renderMesh)
+    GLsizei stride = sizeof(vertex);
+    GLvoid* base = (GLvoid*)&m.vertices[0];
+
+    glVertexPointer(3, GL_FLOAT, stride, (char*)base + 0);
+    glNormalPointer(GL_FLOAT, stride, (char*)base + 3 * sizeof(GLfloat));
+    glTexCoordPointer(2, GL_FLOAT, stride, (char*)base + 6 * sizeof(GLfloat));
+
+    // Set color (reset to white for textured objects)
+    glColor3f(1.0f, 1.0f, 1.0f);
+
+    // Draw only the specified range of vertices
+    glDrawArrays(GL_TRIANGLES, static_cast<GLint>(start_vertex), static_cast<GLsizei>(vertex_count));
+
+    // Reset some states after rendering to prevent bleeding
+    if (state.blend_mode != BlendMode::None)
+    {
+        glDepthMask(GL_TRUE);
+        glDisable(GL_BLEND);
+    }
+}
+
 void OpenGLRenderAPI::setRenderState(const RenderState& state)
 {
     current_state = state;

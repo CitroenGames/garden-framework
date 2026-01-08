@@ -63,6 +63,7 @@ public:
     virtual void deleteTexture(TextureHandle texture) override;
 
     virtual void renderMesh(const mesh& m, const RenderState& state = RenderState()) override;
+    virtual void renderMeshRange(const mesh& m, size_t start_vertex, size_t vertex_count, const RenderState& state = RenderState()) override;
 
     virtual void setRenderState(const RenderState& state) override;
     virtual void enableLighting(bool enable) override;
