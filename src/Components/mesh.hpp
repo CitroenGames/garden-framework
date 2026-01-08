@@ -4,8 +4,8 @@
 #include <string>
 #include "gameObject.hpp"
 #include "Graphics/RenderAPI.hpp"
-#include "Utils/ObjLoader.hpp" 
-#include "Utils/GltfLoader.hpp" 
+#include "Utils/ObjLoader.hpp"
+#include "Utils/GltfLoader.hpp"
 
 #include <algorithm>
 
@@ -17,6 +17,23 @@ enum class MeshFormat
     Auto  // Detect from file extension
 };
 
+// Material range structure for multi-material support
+struct MaterialRange
+{
+    size_t start_vertex;        // Starting vertex index
+    size_t vertex_count;        // Number of vertices in this range
+    TextureHandle texture;      // Texture for this range
+    std::string material_name;  // Name of the material (for debugging)
+
+    MaterialRange()
+        : start_vertex(0), vertex_count(0), texture(INVALID_TEXTURE), material_name("") {}
+
+    MaterialRange(size_t start, size_t count, TextureHandle tex, const std::string& name = "")
+        : start_vertex(start), vertex_count(count), texture(tex), material_name(name) {}
+
+    bool hasValidTexture() const { return texture != INVALID_TEXTURE; }
+};
+
 class mesh : public component
 {
 public:
@@ -25,8 +42,13 @@ public:
     bool owns_vertices;
     bool is_valid;
 
+    // Single texture mode (for backward compatibility)
     TextureHandle texture;
     bool texture_set;
+
+    // Multi-material support
+    std::vector<MaterialRange> material_ranges;
+    bool uses_material_ranges;
 
     bool visible;
     bool culling;
@@ -44,6 +66,7 @@ public:
         transparent = false;
         texture_set = false;
         texture = INVALID_TEXTURE;
+        uses_material_ranges = false;
     };
 
     // Constructor for loading model files - now supports both OBJ and glTF
@@ -58,6 +81,7 @@ public:
         transparent = false;
         texture_set = false;
         texture = INVALID_TEXTURE;
+        uses_material_ranges = false;
 
         load_model_file(filename, format);
     };
@@ -76,7 +100,37 @@ public:
     {
         this->texture = tex;
         texture_set = (tex != INVALID_TEXTURE);
+        uses_material_ranges = false;  // Disable multi-material mode
     };
+
+    // Add a material range to the mesh
+    void addMaterialRange(size_t start_vertex, size_t vertex_count, TextureHandle texture, const std::string& material_name = "")
+    {
+        material_ranges.emplace_back(start_vertex, vertex_count, texture, material_name);
+        uses_material_ranges = true;
+        texture_set = false;  // Disable single texture mode
+    }
+
+    // Set material ranges from a vector
+    void setMaterialRanges(const std::vector<MaterialRange>& ranges)
+    {
+        material_ranges = ranges;
+        uses_material_ranges = !ranges.empty();
+        texture_set = false;  // Disable single texture mode
+    }
+
+    // Clear material ranges and return to single texture mode
+    void clearMaterialRanges()
+    {
+        material_ranges.clear();
+        uses_material_ranges = false;
+    }
+
+    // Get the number of material ranges
+    size_t getMaterialRangeCount() const
+    {
+        return material_ranges.size();
+    }
 
     // Get render state for this mesh
     RenderState getRenderState() const

@@ -20,27 +20,52 @@ public:
     static void render_mesh_with_api(mesh& m, IRenderAPI* api)
     {
         if (!m.visible || !api) return;
-        
+
         // Apply object transformation using the complete transform matrix
         api->pushMatrix();
-        
+
         // Use the complete transformation matrix that includes scale, rotation, and translation
         matrix4f transform = m.obj.getTransformMatrix();
         api->multiplyMatrix(transform);
 
-        // Bind texture if available
-        if (m.texture_set && m.texture != INVALID_TEXTURE)
+        // Get render state from mesh
+        RenderState state = m.getRenderState();
+
+        // Check if using multi-material mode
+        if (m.uses_material_ranges && !m.material_ranges.empty())
         {
-            api->bindTexture(m.texture);
+            // Render each material range separately
+            for (const auto& range : m.material_ranges)
+            {
+                // Bind the texture for this material range
+                if (range.hasValidTexture())
+                {
+                    api->bindTexture(range.texture);
+                }
+                else
+                {
+                    api->unbindTexture();
+                }
+
+                // Render this specific range of vertices
+                api->renderMeshRange(m, range.start_vertex, range.vertex_count, state);
+            }
         }
         else
         {
-            api->unbindTexture();
-        }
+            // Single texture mode (backward compatibility)
+            if (m.texture_set && m.texture != INVALID_TEXTURE)
+            {
+                api->bindTexture(m.texture);
+            }
+            else
+            {
+                api->unbindTexture();
+            }
 
-        // Get render state from mesh and render
-        RenderState state = m.getRenderState();
-        api->renderMesh(m, state);
+            // Render entire mesh
+            api->renderMesh(m, state);
+        }
 
         api->popMatrix();
     };
