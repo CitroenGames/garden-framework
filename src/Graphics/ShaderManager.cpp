@@ -1,108 +1,6 @@
 #include "ShaderManager.hpp"
 #include <iostream>
 
-// Embedded default shader sources
-namespace DefaultShaders
-{
-    const char* basic_vertex = R"(
-#version 460 core
-
-layout(location = 0) in vec3 aPos;
-layout(location = 1) in vec3 aNormal;
-layout(location = 2) in vec2 aTexCoord;
-
-out vec3 FragPos;
-out vec3 Normal;
-out vec2 TexCoord;
-
-uniform mat4 uModel;
-uniform mat4 uView;
-uniform mat4 uProjection;
-
-void main()
-{
-    FragPos = vec3(uModel * vec4(aPos, 1.0));
-    Normal = mat3(transpose(inverse(uModel))) * aNormal;
-    TexCoord = aTexCoord;
-    gl_Position = uProjection * uView * vec4(FragPos, 1.0);
-}
-)";
-
-    const char* basic_fragment = R"(
-#version 460 core
-
-in vec3 FragPos;
-in vec3 Normal;
-in vec2 TexCoord;
-
-out vec4 FragColor;
-
-uniform sampler2D uTexture;
-uniform bool uUseTexture;
-uniform vec3 uLightPos;
-uniform vec3 uLightAmbient;
-uniform vec3 uLightDiffuse;
-uniform vec3 uColor;
-
-void main()
-{
-    vec3 norm = normalize(Normal);
-    vec3 lightDir = normalize(uLightPos - FragPos);
-    float diff = max(dot(norm, lightDir), 0.0);
-
-    vec3 ambient = uLightAmbient;
-    vec3 diffuse = uLightDiffuse * diff;
-    vec3 lighting = ambient + diffuse;
-
-    vec4 texColor = uUseTexture ? texture(uTexture, TexCoord) : vec4(uColor, 1.0);
-    FragColor = vec4(lighting * texColor.rgb, texColor.a);
-}
-)";
-
-    const char* unlit_vertex = R"(
-#version 460 core
-
-layout(location = 0) in vec3 aPos;
-layout(location = 1) in vec3 aNormal;
-layout(location = 2) in vec2 aTexCoord;
-
-out vec2 TexCoord;
-
-uniform mat4 uModel;
-uniform mat4 uView;
-uniform mat4 uProjection;
-
-void main()
-{
-    TexCoord = aTexCoord;
-    gl_Position = uProjection * uView * uModel * vec4(aPos, 1.0);
-}
-)";
-
-    const char* unlit_fragment = R"(
-#version 460 core
-
-in vec2 TexCoord;
-
-out vec4 FragColor;
-
-uniform sampler2D uTexture;
-uniform bool uUseTexture;
-uniform vec3 uColor;
-
-void main()
-{
-    if (uUseTexture)
-    {
-        FragColor = texture(uTexture, TexCoord);
-    }
-    else
-    {
-        FragColor = vec4(uColor, 1.0);
-    }
-}
-)";
-}
 
 ShaderManager::ShaderManager()
 {
@@ -177,15 +75,21 @@ Shader* ShaderManager::getShader(const std::string& name)
 
 void ShaderManager::createDefaultShaders()
 {
-    printf("Creating default shaders...\n");
+    printf("Creating default shaders from files...\n");
+
+    std::string shader_dir = "assets/shaders/";
 
     // Load basic shader (with lighting)
-    loadShaderFromStrings("basic", DefaultShaders::basic_vertex, DefaultShaders::basic_fragment);
+    if (!loadShader("basic", shader_dir + "basic.vert", shader_dir + "basic.frag")) {
+        printf("ERROR: Failed to load basic shader from %s\n", shader_dir.c_str());
+    }
 
     // Load unlit shader (without lighting)
-    loadShaderFromStrings("unlit", DefaultShaders::unlit_vertex, DefaultShaders::unlit_fragment);
+    if (!loadShader("unlit", shader_dir + "unlit.vert", shader_dir + "unlit.frag")) {
+        printf("ERROR: Failed to load unlit shader from %s\n", shader_dir.c_str());
+    }
 
-    printf("Default shaders created\n");
+    printf("Default shaders loaded\n");
 }
 
 void ShaderManager::clear()
