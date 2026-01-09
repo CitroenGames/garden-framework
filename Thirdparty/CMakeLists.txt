@@ -1,6 +1,9 @@
 #build static
 set(BUILD_SHARED_LIBS OFF)
 
+# OpenGL loader
+add_subdirectory(glad)
+
 add_subdirectory(SDL2)
 
 #model loaders

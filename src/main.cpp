@@ -324,15 +324,6 @@ int main(int argc, char* argv[])
     Uint32 delta_last = 0;
     float delta_time = 0;
 
-    printf("=== INPUT CONTROLS ===\n");
-    printf("WASD: Move\n");
-    printf("Space: Jump (Player) / Move Up (Freecam)\n");
-    printf("Shift: Move Down (Freecam)\n");
-    printf("F: Toggle between Player and Freecam mode\n");
-    printf("ESC: Quit game\n");
-    printf("Mouse: Look around\n");
-    printf("=====================\n");
-
     atexit(SDL_Quit);
     while (1)
     {

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "RenderAPI.hpp"
+#include <glad/glad.h>  // MUST be before any OpenGL headers
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -8,14 +9,22 @@
 #endif
 #include <windows.h>
 #endif
-#include <GL/gl.h>
-#include <GL/glu.h>
+
+// No longer need GL/gl.h or GL/glu.h - GLAD provides everything
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/type_ptr.hpp>
+#include <stack>
 
 #ifdef _WIN32
 typedef HGLRC OpenGLContext;
 #else
 typedef void* OpenGLContext; // For other platforms
 #endif
+
+// Forward declarations
+class Shader;
+class ShaderManager;
 
 class OpenGLRenderAPI : public IRenderAPI
 {
@@ -27,7 +36,29 @@ private:
     float field_of_view;
     RenderState current_state;
 
+    // Modern OpenGL - Matrix management (replaces matrix stack)
+    glm::mat4 projection_matrix;
+    glm::mat4 view_matrix;
+    glm::mat4 current_model_matrix;
+    std::stack<glm::mat4> model_matrix_stack;
+
+    // Lighting state (for shader uniforms)
+    glm::vec3 current_light_position;
+    glm::vec3 current_light_ambient;
+    glm::vec3 current_light_diffuse;
+    bool lighting_enabled;
+
+    // Shader management
+    ShaderManager* shader_manager;
+
     // Internal helper methods
+    glm::mat4 convertToGLM(const matrix4f& m) const;
+    Shader* getShaderForRenderState(const RenderState& state);
+    static void GLAPIENTRY openglDebugCallback(GLenum source, GLenum type, GLuint id,
+                                               GLenum severity, GLsizei length,
+                                               const GLchar* message, const void* userParam);
+
+    // Existing internal helper methods
     bool createOpenGLContext(WindowHandle window);
     void destroyOpenGLContext();
     void setupOpenGLDefaults();

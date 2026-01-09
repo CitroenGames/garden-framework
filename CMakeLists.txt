@@ -24,6 +24,7 @@ find_package(OpenGL REQUIRED)
 
 # Link libraries
 target_link_libraries(${PROJECT_NAME}
+    glad
     SDL2Wrapper
     ${OPENGL_LIBRARIES}
     tinygltf
