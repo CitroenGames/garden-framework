@@ -28,6 +28,7 @@
 #include "Components/playerRepresentation.hpp"
 #include "world.hpp"
 #include "Graphics/renderer.hpp"
+#include "LevelManager.hpp"
 #include "AudioSystem.h"
 #include "Utils/GltfLoader.hpp"
 #include "Utils/GltfMaterialLoader.hpp"
@@ -232,27 +233,78 @@ int main(int argc, char* argv[])
     /* Create world */
     _world = world();
 
-    /* Gameobjects */
-    gameObject sky = gameObject::gameObject();  // skybox
-    sky.rotation.X = 180.0f;
-    gameObject map = gameObject::gameObject();
-    gameObject cube = gameObject::gameObject(14, 3.5f, -3.5f); // test cube
-    gameObject player = gameObject::gameObject(0, 2, 0);
-    gameObject freecam_obj = gameObject::gameObject(0, 2, 0);
-    gameObject player_rep_obj = gameObject::gameObject(0, 2, 0); // Player representation object
+    /* Level loading */
+    LevelManager level_manager;
+    LevelData level_data;
+    std::string level_path = "levels/main.level.json";
 
-    /* Cameras */
-    camera freecam_camera = camera::camera(0, 2, 0);
+    printf("Loading level from: %s\n", level_path.c_str());
+    if (!level_manager.loadLevel(level_path, level_data))
+    {
+        LOG_ENGINE_FATAL("Failed to load level: {}", level_path.c_str());
+        quit_game(1);
+    }
 
-    /* Rigidbodies */
-    rigidbody player_rb = rigidbody::rigidbody(player);
-    player_rb.apply_gravity = false;
+    // Containers for runtime objects
+    std::vector<mesh*> meshes;
     std::vector<rigidbody*> rigidbodies;
-    rigidbodies.push_back(&player_rb);
+    std::vector<collider*> colliders;
+    LevelEntity* player_data = nullptr;
+    LevelEntity* freecam_data = nullptr;
+    LevelEntity* player_rep_data = nullptr;
 
-    /* Player and Freecam entities with new input system */
-    playerEntity player_entity = playerEntity::playerEntity(_world.world_camera, player_rb, player, input_manager);
-    freecamEntity freecam_entity = freecamEntity::freecamEntity(freecam_camera, freecam_obj, input_manager);
+    // Instantiate level entities
+    if (!level_manager.instantiateLevel(
+            level_data, _world, render_api, meshes, rigidbodies, colliders,
+            &player_data, &freecam_data, &player_rep_data))
+    {
+        LOG_ENGINE_FATAL("Failed to instantiate level");
+        quit_game(1);
+    }
+
+    // Verify critical entities exist
+    if (!player_data)
+    {
+        LOG_ENGINE_FATAL("Level does not contain a player entity");
+        quit_game(1);
+    }
+
+    if (!player_data->game_object || !player_data->rigidbody_component)
+    {
+        LOG_ENGINE_FATAL("Player entity is missing required components");
+        quit_game(1);
+    }
+
+    // Create freecam camera
+    camera freecam_camera = camera::camera(
+        freecam_data ? freecam_data->position.X : 0,
+        freecam_data ? freecam_data->position.Y : 2,
+        freecam_data ? freecam_data->position.Z : 0
+    );
+
+    // Create player and freecam entities with input manager
+    playerEntity player_entity = playerEntity::playerEntity(
+        _world.world_camera,
+        *player_data->rigidbody_component,
+        *player_data->game_object,
+        input_manager
+    );
+
+    // Set player properties from level data
+    player_entity.speed = player_data->speed;
+    player_entity.jump_force = player_data->jump_force;
+    player_entity.mouse_sensitivity = player_data->mouse_sensitivity;
+
+    freecamEntity freecam_entity = freecamEntity::freecamEntity(
+        freecam_camera,
+        *freecam_data->game_object,
+        input_manager
+    );
+
+    // Set freecam properties from level data
+    freecam_entity.movement_speed = freecam_data->movement_speed;
+    freecam_entity.fast_movement_speed = freecam_data->fast_movement_speed;
+    freecam_entity.mouse_sensitivity = freecam_data->mouse_sensitivity;
 
     // Set up player controller with new input system
     player_controller = std::make_unique<PlayerController>(input_manager);
@@ -261,61 +313,16 @@ int main(int argc, char* argv[])
 
     _world.player_entity = &player_entity;
 
-    /* Meshes */
-    mesh sky_mesh = mesh("models/sky.obj", sky);
-
-    // Load glTF files
-    mesh* map_ground_mesh = loadGltfMeshWithMaterials("models/map.gltf", map, render_api);
-    mesh* player_rep_mesh = loadGltfMeshWithMaterials("models/Character.gltf", player_rep_obj, render_api);
-
-    // Continue with other mesh loading...
-    mesh map_trees_mesh = mesh::mesh("models/map_trees.obj", map);
-    map_trees_mesh.culling = false;
-    map_trees_mesh.transparent = true;
-
-    mesh map_bgtrees_mesh = mesh::mesh("models/map_bgtrees.obj", map);
-    map_bgtrees_mesh.transparent = true;
-
-    mesh map_collider_mesh = mesh::mesh("models/map_collider.obj", map);
-
-    mesh cube_mesh = mesh::mesh("models/grasscube.obj", cube);
-
-    
-    player_rep_obj.scale = vector3f(0.2f, 0.2f, 0.2f);
-    player_rep_obj.position = vector3f(0, -20, 0);
-
-    // Create player representation component
-    PlayerRepresentation player_representation = PlayerRepresentation(player_rep_mesh, &player_entity, player_rep_obj);
-
-    std::vector<mesh*> meshes;
-    meshes.push_back(&sky_mesh);
-    if (map_ground_mesh) {
-        meshes.push_back(map_ground_mesh);
+    // Create player representation if it exists in level
+    PlayerRepresentation* player_representation = nullptr;
+    if (player_rep_data && player_rep_data->mesh_component)
+    {
+        player_representation = new PlayerRepresentation(
+            player_rep_data->mesh_component,
+            &player_entity,
+            *player_rep_data->game_object
+        );
     }
-    meshes.push_back(&cube_mesh);
-    meshes.push_back(&map_bgtrees_mesh);
-    meshes.push_back(&map_trees_mesh);
-    meshes.push_back(player_rep_mesh);
-
-    /* Colliders */
-    collider cube_collider = collider::collider(cube_mesh, cube);
-    collider map_collider = collider::collider(map_collider_mesh, map);
-    std::vector<collider*> colliders;
-    colliders.push_back(&cube_collider);
-    colliders.push_back(&map_collider);
-
-    /* Textures - Using the abstracted render API */
-    TextureHandle sky_tex = render_api->loadTexture("textures/t_sky.png", false, true);
-    sky_mesh.set_texture(sky_tex);
-
-    TextureHandle ball_tex = render_api->loadTexture("textures/man.bmp", true, true);
-    cube_mesh.set_texture(ball_tex);
-
-    TextureHandle tree_bark = render_api->loadTexture("textures/t_tree_bark.png", true, true);
-    TextureHandle tree_leaves = render_api->loadTexture("textures/t_tree_leaves.png", true, true);
-
-    map_trees_mesh.set_texture(tree_bark);
-    map_bgtrees_mesh.set_texture(tree_leaves);
 
     /* Renderer - Using the abstracted render API */
     _renderer = renderer::renderer(&meshes, render_api);
@@ -358,14 +365,17 @@ int main(int argc, char* argv[])
         if (!player_controller->isFreecamMode())
         {
             _world.step_physics(rigidbodies);
-            _world.player_collisions(player_rb, 1, colliders);
+            _world.player_collisions(*player_data->rigidbody_component, 1, colliders);
         }
 
         // Update currently possessed entity through player controller
         player_controller->update(_world.fixed_delta);
 
         // Update player representation visibility
-        player_representation.update(player_controller->isFreecamMode());
+        if (player_representation)
+        {
+            player_representation->update(player_controller->isFreecamMode());
+        }
 
         // Fall detection (only when controlling player)
         if (!player_controller->isFreecamMode() && player_entity.obj.position.Y < -5)
@@ -381,9 +391,11 @@ int main(int argc, char* argv[])
     }
 
     // Cleanup
-    if (map_ground_mesh) {
-        delete map_ground_mesh;
+    if (player_representation)
+    {
+        delete player_representation;
     }
+    // Level manager cleanup handled by destructor
 
     crashHandler->Shutdown();
     exit(0);

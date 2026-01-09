@@ -1,0 +1,302 @@
+{
+  "metadata": {
+    "level_name": "Main Level",
+    "author": "Garden OpenGL",
+    "version": "1.0",
+    "world": {
+      "gravity": {
+        "x": 0.0,
+        "y": -1.0,
+        "z": 0.0
+      },
+      "fixed_delta": 0.16
+    },
+    "lighting": {
+      "ambient": {
+        "r": 0.2,
+        "g": 0.2,
+        "b": 0.2
+      },
+      "diffuse": {
+        "r": 0.8,
+        "g": 0.8,
+        "b": 0.8
+      },
+      "position": {
+        "x": 1.0,
+        "y": 1.0,
+        "z": 1.0
+      }
+    }
+  },
+  "entities": [
+    {
+      "name": "sky",
+      "type": "Renderable",
+      "transform": {
+        "position": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "rotation": {
+          "x": 180.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "scale": {
+          "x": 1.0,
+          "y": 1.0,
+          "z": 1.0
+        }
+      },
+      "mesh": {
+        "path": "models/sky.obj",
+        "textures": [
+          "textures/t_sky.png"
+        ],
+        "culling": true,
+        "transparent": false,
+        "visible": true
+      }
+    },
+    {
+      "name": "map_ground",
+      "type": "Renderable",
+      "transform": {
+        "position": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "rotation": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "scale": {
+          "x": 1.0,
+          "y": 1.0,
+          "z": 1.0
+        }
+      },
+      "mesh": {
+        "path": "models/map.gltf",
+        "textures": [],
+        "culling": true,
+        "transparent": false,
+        "visible": true
+      }
+    },
+    {
+      "name": "map_trees",
+      "type": "Renderable",
+      "transform": {
+        "position": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "rotation": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "scale": {
+          "x": 1.0,
+          "y": 1.0,
+          "z": 1.0
+        }
+      },
+      "mesh": {
+        "path": "models/map_trees.obj",
+        "textures": [
+          "textures/t_tree_bark.png"
+        ],
+        "culling": false,
+        "transparent": true,
+        "visible": true
+      }
+    },
+    {
+      "name": "map_bgtrees",
+      "type": "Renderable",
+      "transform": {
+        "position": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "rotation": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "scale": {
+          "x": 1.0,
+          "y": 1.0,
+          "z": 1.0
+        }
+      },
+      "mesh": {
+        "path": "models/map_bgtrees.obj",
+        "textures": [
+          "textures/t_tree_leaves.png"
+        ],
+        "culling": true,
+        "transparent": true,
+        "visible": true
+      }
+    },
+    {
+      "name": "map_collider",
+      "type": "Collidable",
+      "transform": {
+        "position": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "rotation": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "scale": {
+          "x": 1.0,
+          "y": 1.0,
+          "z": 1.0
+        }
+      },
+      "collider": {
+        "mesh_path": "models/map_collider.obj"
+      }
+    },
+    {
+      "name": "test_cube",
+      "type": "Physical",
+      "transform": {
+        "position": {
+          "x": 14.0,
+          "y": 3.5,
+          "z": -3.5
+        },
+        "rotation": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "scale": {
+          "x": 1.0,
+          "y": 1.0,
+          "z": 1.0
+        }
+      },
+      "mesh": {
+        "path": "models/grasscube.obj",
+        "textures": [
+          "textures/man.bmp"
+        ],
+        "culling": true,
+        "transparent": false,
+        "visible": true
+      },
+      "rigidbody": {
+        "mass": 1.0,
+        "apply_gravity": true
+      },
+      "collider": {
+        "mesh_path": "models/grasscube.obj"
+      }
+    },
+    {
+      "name": "player",
+      "type": "Player",
+      "transform": {
+        "position": {
+          "x": 0.0,
+          "y": 2.0,
+          "z": 0.0
+        },
+        "rotation": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "scale": {
+          "x": 1.0,
+          "y": 1.0,
+          "z": 1.0
+        }
+      },
+      "player_properties": {
+        "speed": 1.5,
+        "jump_force": 3.0,
+        "mouse_sensitivity": 1.0,
+        "apply_gravity": false
+      }
+    },
+    {
+      "name": "freecam",
+      "type": "Freecam",
+      "transform": {
+        "position": {
+          "x": 0.0,
+          "y": 2.0,
+          "z": 0.0
+        },
+        "rotation": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "scale": {
+          "x": 1.0,
+          "y": 1.0,
+          "z": 1.0
+        }
+      },
+      "freecam_properties": {
+        "movement_speed": 5.0,
+        "fast_movement_speed": 15.0,
+        "mouse_sensitivity": 1.0
+      }
+    },
+    {
+      "name": "player_representation",
+      "type": "PlayerRep",
+      "transform": {
+        "position": {
+          "x": 0.0,
+          "y": -20.0,
+          "z": 0.0
+        },
+        "rotation": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "scale": {
+          "x": 0.2,
+          "y": 0.2,
+          "z": 0.2
+        }
+      },
+      "mesh": {
+        "path": "models/Character.gltf",
+        "textures": [],
+        "culling": true,
+        "transparent": false,
+        "visible": true
+      },
+      "player_rep_properties": {
+        "tracked_player": "player",
+        "position_offset": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        }
+      }
+    }
+  ]
+}
