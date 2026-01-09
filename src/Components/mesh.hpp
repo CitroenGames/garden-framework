@@ -4,6 +4,7 @@
 #include <string>
 #include "gameObject.hpp"
 #include "Graphics/RenderAPI.hpp"
+#include "Graphics/GPUMesh.hpp"
 #include "Utils/ObjLoader.hpp"
 #include "Utils/GltfLoader.hpp"
 
@@ -42,6 +43,9 @@ public:
     bool owns_vertices;
     bool is_valid;
 
+    // GPU-side mesh data (VAO/VBO)
+    GPUMesh* gpu_mesh;
+
     // Single texture mode (for backward compatibility)
     TextureHandle texture;
     bool texture_set;
@@ -61,6 +65,7 @@ public:
         this->vertices_len = vertices_len;
         this->owns_vertices = false;
         this->is_valid = (vertices != nullptr && vertices_len > 0);
+        this->gpu_mesh = nullptr;
         visible = true;
         culling = true;
         transparent = false;
@@ -76,6 +81,7 @@ public:
         vertices_len = 0;
         owns_vertices = true;
         is_valid = false;
+        gpu_mesh = nullptr;
         visible = true;
         culling = true;
         transparent = false;
@@ -94,6 +100,12 @@ public:
             delete[] vertices;
             vertices = nullptr;
         }
+
+        if (gpu_mesh)
+        {
+            delete gpu_mesh;
+            gpu_mesh = nullptr;
+        }
     }
 
     void set_texture(TextureHandle tex)
@@ -102,6 +114,31 @@ public:
         texture_set = (tex != INVALID_TEXTURE);
         uses_material_ranges = false;  // Disable multi-material mode
     };
+
+    // Upload mesh data to GPU (creates GPUMesh if needed)
+    void uploadToGPU()
+    {
+        if (!is_valid || !vertices || vertices_len == 0)
+        {
+            printf("mesh::uploadToGPU() - Invalid mesh data\n");
+            return;
+        }
+
+        // Create GPUMesh if it doesn't exist
+        if (!gpu_mesh)
+        {
+            gpu_mesh = new GPUMesh();
+        }
+
+        // Upload vertex data to GPU
+        gpu_mesh->uploadMeshData(vertices, vertices_len);
+    }
+
+    // Check if mesh has been uploaded to GPU
+    bool isUploadedToGPU() const
+    {
+        return gpu_mesh != nullptr && gpu_mesh->isUploaded();
+    }
 
     // Add a material range to the mesh
     void addMaterialRange(size_t start_vertex, size_t vertex_count, TextureHandle texture, const std::string& material_name = "")
