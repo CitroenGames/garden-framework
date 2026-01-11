@@ -2,13 +2,7 @@
 
 #include "RenderAPI.hpp"
 #include <glad/glad.h>  // MUST be before any OpenGL headers
-
-#ifdef _WIN32
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
-#endif
+#include <SDL.h>
 
 // No longer need GL/gl.h or GL/glu.h - GLAD provides everything
 #include <glm/glm.hpp>
@@ -16,11 +10,8 @@
 #include <glm/gtc/type_ptr.hpp>
 #include <stack>
 
-#ifdef _WIN32
-typedef HGLRC OpenGLContext;
-#else
-typedef void* OpenGLContext; // For other platforms
-#endif
+// Use SDL's OpenGL context type for cross-platform support
+typedef SDL_GLContext OpenGLContext;
 
 // Forward declarations
 class Shader;

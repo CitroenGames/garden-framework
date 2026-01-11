@@ -9,19 +9,6 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
-// WGL_ARB_create_context extension constants
-#ifndef WGL_CONTEXT_MAJOR_VERSION_ARB
-#define WGL_CONTEXT_MAJOR_VERSION_ARB     0x2091
-#define WGL_CONTEXT_MINOR_VERSION_ARB     0x2092
-#define WGL_CONTEXT_LAYER_PLANE_ARB       0x2093
-#define WGL_CONTEXT_FLAGS_ARB             0x2094
-#define WGL_CONTEXT_PROFILE_MASK_ARB      0x9126
-#define WGL_CONTEXT_DEBUG_BIT_ARB         0x0001
-#define WGL_CONTEXT_FORWARD_COMPATIBLE_BIT_ARB 0x0002
-#define WGL_CONTEXT_CORE_PROFILE_BIT_ARB  0x00000001
-#define WGL_CONTEXT_COMPATIBILITY_PROFILE_BIT_ARB 0x00000002
-#endif
-
 OpenGLRenderAPI::OpenGLRenderAPI()
     : window_handle(nullptr), gl_context(nullptr), viewport_width(0), viewport_height(0), field_of_view(75.0f),
       projection_matrix(1.0f), view_matrix(1.0f), current_model_matrix(1.0f),
@@ -68,9 +55,8 @@ void OpenGLRenderAPI::shutdown()
         shader_manager = nullptr;
     }
 
-    // Disable OpenGL capabilities (only Core-compatible calls)
-    glDisable(GL_DEPTH_TEST);
-    glDisable(GL_CULL_FACE);
+    // Note: No need to disable GL capabilities during shutdown
+    // The context is about to be destroyed anyway
 
     destroyOpenGLContext();
 }
@@ -96,97 +82,24 @@ void OpenGLRenderAPI::resize(int width, int height)
 
 bool OpenGLRenderAPI::createOpenGLContext(WindowHandle window)
 {
-#ifdef _WIN32
-    HWND hwnd = (HWND)window;
-    HDC hdc = GetDC(hwnd);
+    // Note: SDL_GL attributes are now set in Application::initialize()
+    // before window creation, which is the proper SDL order.
+    // This ensures attributes that affect window creation are set beforehand.
 
-    PIXELFORMATDESCRIPTOR pfd = {};
-    pfd.nSize = sizeof(PIXELFORMATDESCRIPTOR);
-    pfd.nVersion = 1;
-    pfd.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
-    pfd.iPixelType = PFD_TYPE_RGBA;
-    pfd.cColorBits = 32;
-    pfd.cDepthBits = 24;
-    pfd.cStencilBits = 8;
-
-    int pixel_format = ChoosePixelFormat(hdc, &pfd);
-    if (!pixel_format)
-    {
-        printf("Failed to choose pixel format\n");
-        return false;
-    }
-
-    if (!SetPixelFormat(hdc, pixel_format, &pfd))
-    {
-        printf("Failed to set pixel format\n");
-        return false;
-    }
-
-    // Create a temporary legacy context to load WGL extensions
-    HGLRC temp_context = wglCreateContext(hdc);
-    if (!temp_context)
-    {
-        printf("Failed to create temporary OpenGL context\n");
-        ReleaseDC(hwnd, hdc);
-        return false;
-    }
-
-    if (!wglMakeCurrent(hdc, temp_context))
-    {
-        printf("Failed to make temporary context current\n");
-        wglDeleteContext(temp_context);
-        ReleaseDC(hwnd, hdc);
-        return false;
-    }
-
-    // Load wglCreateContextAttribsARB function
-    typedef HGLRC(WINAPI* PFNWGLCREATECONTEXTATTRIBSARBPROC)(HDC, HGLRC, const int*);
-    PFNWGLCREATECONTEXTATTRIBSARBPROC wglCreateContextAttribsARB =
-        (PFNWGLCREATECONTEXTATTRIBSARBPROC)wglGetProcAddress("wglCreateContextAttribsARB");
-
-    if (!wglCreateContextAttribsARB)
-    {
-        printf("wglCreateContextAttribsARB not available\n");
-        wglMakeCurrent(NULL, NULL);
-        wglDeleteContext(temp_context);
-        ReleaseDC(hwnd, hdc);
-        return false;
-    }
-
-    // Define OpenGL 4.6 Core context attributes
-    int attribs[] = {
-        WGL_CONTEXT_MAJOR_VERSION_ARB, 4,
-        WGL_CONTEXT_MINOR_VERSION_ARB, 6,
-        WGL_CONTEXT_PROFILE_MASK_ARB, WGL_CONTEXT_CORE_PROFILE_BIT_ARB,
-#ifdef _DEBUG
-        WGL_CONTEXT_FLAGS_ARB, WGL_CONTEXT_DEBUG_BIT_ARB,
-#else
-        WGL_CONTEXT_FLAGS_ARB, WGL_CONTEXT_FORWARD_COMPATIBLE_BIT_ARB,
-#endif
-        0
-    };
-
-    // Create the modern OpenGL 4.6 Core context
-    gl_context = wglCreateContextAttribsARB(hdc, 0, attribs);
-
-    // Delete the temporary context
-    wglMakeCurrent(NULL, NULL);
-    wglDeleteContext(temp_context);
-
+    // Create OpenGL context using SDL
+    gl_context = SDL_GL_CreateContext(window);
     if (!gl_context)
     {
-        printf("Failed to create OpenGL 4.6 Core context\n");
-        ReleaseDC(hwnd, hdc);
+        printf("Failed to create OpenGL 4.6 Core context: %s\n", SDL_GetError());
         return false;
     }
 
-    // Make the new context current
-    if (!wglMakeCurrent(hdc, gl_context))
+    // Make the context current
+    if (SDL_GL_MakeCurrent(window, gl_context) != 0)
     {
-        printf("Failed to make OpenGL 4.6 context current\n");
-        wglDeleteContext(gl_context);
+        printf("Failed to make OpenGL context current: %s\n", SDL_GetError());
+        SDL_GL_DeleteContext(gl_context);
         gl_context = nullptr;
-        ReleaseDC(hwnd, hdc);
         return false;
     }
 
@@ -194,10 +107,8 @@ bool OpenGLRenderAPI::createOpenGLContext(WindowHandle window)
     if (!gladLoadGL())
     {
         printf("Failed to load OpenGL functions with GLAD\n");
-        wglMakeCurrent(NULL, NULL);
-        wglDeleteContext(gl_context);
+        SDL_GL_DeleteContext(gl_context);
         gl_context = nullptr;
-        ReleaseDC(hwnd, hdc);
         return false;
     }
 
@@ -217,25 +128,16 @@ bool OpenGLRenderAPI::createOpenGLContext(WindowHandle window)
     }
 #endif
 
-    ReleaseDC(hwnd, hdc);
     return true;
-#else
-    // For other platforms (Linux, macOS), you'd implement X11/GLX or similar here
-    printf("OpenGL context creation not implemented for this platform\n");
-    return false;
-#endif
 }
 
 void OpenGLRenderAPI::destroyOpenGLContext()
 {
-#ifdef _WIN32
     if (gl_context)
     {
-        wglMakeCurrent(nullptr, nullptr);
-        wglDeleteContext(gl_context);
+        SDL_GL_DeleteContext(gl_context);
         gl_context = nullptr;
     }
-#endif
     window_handle = nullptr;
 }
 
@@ -277,15 +179,10 @@ void OpenGLRenderAPI::endFrame()
 
 void OpenGLRenderAPI::present()
 {
-#ifdef _WIN32
     if (window_handle)
     {
-        HWND hwnd = (HWND)window_handle;
-        HDC hdc = GetDC(hwnd);
-        SwapBuffers(hdc);
-        ReleaseDC(hwnd, hdc);
+        SDL_GL_SwapWindow(window_handle);
     }
-#endif
 }
 
 void OpenGLRenderAPI::clear(const vector3f& color)

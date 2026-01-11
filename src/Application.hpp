@@ -3,7 +3,6 @@
 #include "SDL.h"
 #include "Graphics/RenderAPI.hpp"
 #include <stdio.h>
-#include <SDL_syswm.h>
 
 class Application
 {
@@ -35,8 +34,22 @@ public:
             return false;
         }
 
-        // Create window (platform-agnostic)
-        Uint32 window_flags = 0;
+        // Set OpenGL attributes BEFORE creating the window (proper SDL order)
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 6);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+        SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+        SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
+        SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
+
+#ifdef _DEBUG
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_DEBUG_FLAG);
+#else
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG);
+#endif
+
+        // Create window with OpenGL support (SDL_WINDOW_OPENGL is required for SDL_GL_CreateContext)
+        Uint32 window_flags = SDL_WINDOW_OPENGL;
         if (fullscreen)
             window_flags |= SDL_WINDOW_FULLSCREEN;
 
@@ -60,16 +73,8 @@ public:
             return false;
         }
 
-        // Get platform-specific window handle
-        WindowHandle window_handle = getWindowHandle();
-        if (!window_handle)
-        {
-            fprintf(stderr, "Failed to get window handle\n");
-            return false;
-        }
-
-        // Initialize the render API with the window handle
-        if (!render_api->initialize(window_handle, width, height, fov))
+        // Initialize the render API with the SDL window pointer
+        if (!render_api->initialize(window, width, height, fov))
         {
             fprintf(stderr, "Failed to initialize render API\n");
             return false;
@@ -137,31 +142,6 @@ public:
         }
     }
 
-private:
-    WindowHandle getWindowHandle()
-    {
-#ifdef _WIN32
-        SDL_SysWMinfo info;
-        SDL_VERSION(&info.version);
-        if (SDL_GetWindowWMInfo(window, &info))
-        {
-            return (WindowHandle)info.info.win.window;
-        }
-#elif defined(__linux__)
-        SDL_SysWMinfo info;
-        SDL_VERSION(&info.version);
-        if (SDL_GetWindowWMInfo(window, &info))
-        {
-            return (WindowHandle)info.info.x11.window;
-        }
-#elif defined(__APPLE__)
-        SDL_SysWMinfo info;
-        SDL_VERSION(&info.version);
-        if (SDL_GetWindowWMInfo(window, &info))
-        {
-            return (WindowHandle)info.info.cocoa.window;
-        }
-#endif
-        return nullptr;
-    }
+    // Note: getWindowHandle() method removed - we now pass SDL_Window* directly to the render API
+    // This simplifies the code and eliminates platform-specific window handle extraction
 };
