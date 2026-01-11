@@ -33,8 +33,7 @@ target_link_libraries(${PROJECT_NAME}
     AudioEngine
     glm
     Freetype::Freetype
-    rmlui
-
+    
     spdlog
 
     # Windows system libraries
