@@ -4,6 +4,9 @@
 #include "irrlicht/matrix4.h"
 #include <string>
 
+// Forward declaration for SDL
+struct SDL_Window;
+
 using namespace irr;
 using namespace core;
 
@@ -16,8 +19,8 @@ class camera;
 typedef unsigned int TextureHandle;
 const TextureHandle INVALID_TEXTURE = 0;
 
-// Window handle - opaque to the user (could be HWND on Windows, Window on X11, etc.)
-typedef void* WindowHandle;
+// Window handle - now uses SDL_Window for cross-platform support
+typedef SDL_Window* WindowHandle;
 
 // Render states
 enum class CullMode

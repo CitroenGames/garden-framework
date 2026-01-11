@@ -33,23 +33,35 @@ target_link_libraries(${PROJECT_NAME}
     AudioEngine
     glm
     Freetype::Freetype
-    
-    spdlog
 
-    # Windows system libraries
-    kernel32.lib
-    user32.lib
-    gdi32.lib
-    winspool.lib
-    comdlg32.lib
-    advapi32.lib
-    shell32.lib
-    ole32.lib
-    oleaut32.lib
-    uuid.lib
-    odbc32.lib
-    odbccp32.lib
+    spdlog
 )
+
+# Windows system libraries
+if(WIN32)
+    target_link_libraries(${PROJECT_NAME}
+        kernel32.lib
+        user32.lib
+        gdi32.lib
+        winspool.lib
+        comdlg32.lib
+        advapi32.lib
+        shell32.lib
+        ole32.lib
+        oleaut32.lib
+        uuid.lib
+        odbc32.lib
+        odbccp32.lib
+    )
+endif()
+
+# Linux system libraries
+if(UNIX AND NOT APPLE)
+    target_link_libraries(${PROJECT_NAME}
+        dl
+        pthread
+    )
+endif()
 
 if (WIN32 AND MSVC)
     add_compile_options(
