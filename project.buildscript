@@ -19,6 +19,7 @@ target_link_libraries(
     PRIVATE tinygltf
     PRIVATE tinyobjloader
     PRIVATE spdlog
+    PRIVATE entt
 )
 std = 20
 utf8 = true
