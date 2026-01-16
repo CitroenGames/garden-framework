@@ -1,12 +1,12 @@
-#include "GPUMesh.hpp"
+#include "OpenGLMesh.hpp"
 #include <stdio.h>
 
-GPUMesh::GPUMesh()
+OpenGLMesh::OpenGLMesh()
     : vao(0), vbo(0), vertex_count(0), uploaded(false)
 {
 }
 
-GPUMesh::~GPUMesh()
+OpenGLMesh::~OpenGLMesh()
 {
     if (vbo != 0)
     {
@@ -24,11 +24,11 @@ GPUMesh::~GPUMesh()
     uploaded = false;
 }
 
-void GPUMesh::uploadMeshData(const vertex* vertices, size_t count)
+void OpenGLMesh::uploadMeshData(const vertex* vertices, size_t count)
 {
     if (!vertices || count == 0)
     {
-        printf("GPUMesh: Invalid mesh data\n");
+        printf("OpenGLMesh: Invalid mesh data\n");
         return;
     }
 
@@ -78,20 +78,19 @@ void GPUMesh::uploadMeshData(const vertex* vertices, size_t count)
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 
     uploaded = true;
-    // printf("GPUMesh: Uploaded %zu vertices to GPU (VAO: %u, VBO: %u)\n", count, vao, vbo);
 }
 
-void GPUMesh::updateMeshData(const vertex* vertices, size_t count, size_t offset)
+void OpenGLMesh::updateMeshData(const vertex* vertices, size_t count, size_t offset)
 {
     if (!uploaded || vbo == 0)
     {
-        printf("GPUMesh: Cannot update - mesh not uploaded yet\n");
+        printf("OpenGLMesh: Cannot update - mesh not uploaded yet\n");
         return;
     }
 
     if (!vertices || count == 0)
     {
-        printf("GPUMesh: Invalid mesh data for update\n");
+        printf("OpenGLMesh: Invalid mesh data for update\n");
         return;
     }
 
@@ -107,7 +106,7 @@ void GPUMesh::updateMeshData(const vertex* vertices, size_t count, size_t offset
     }
 }
 
-void GPUMesh::bind() const
+void OpenGLMesh::bind() const
 {
     if (vao != 0)
     {
@@ -115,7 +114,7 @@ void GPUMesh::bind() const
     }
 }
 
-void GPUMesh::unbind() const
+void OpenGLMesh::unbind() const
 {
     glBindVertexArray(0);
 }

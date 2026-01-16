@@ -14,6 +14,7 @@ using namespace core;
 struct vertex;
 class mesh;
 class camera;
+class IGPUMesh;
 
 // Texture handle - opaque to the user
 typedef unsigned int TextureHandle;
@@ -96,6 +97,15 @@ public:
 
     virtual void renderSkybox() = 0;
 
+    // Shadow Mapping
+    virtual void beginShadowPass(const vector3f& lightDir) = 0;
+    virtual void endShadowPass() = 0;
+    virtual void bindShadowMap(int textureUnit) = 0;
+    virtual matrix4f getLightSpaceMatrix() = 0;
+
+    // Resource Creation
+    virtual IGPUMesh* createMesh() = 0;
+
     // Utility
     virtual const char* getAPIName() const = 0;
 };
@@ -104,7 +114,7 @@ public:
 enum class RenderAPIType
 {
     OpenGL,
-    // Future: Vulkan, DirectX, etc.
+    Vulkan
 };
 
 IRenderAPI* CreateRenderAPI(RenderAPIType type);

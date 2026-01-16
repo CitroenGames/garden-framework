@@ -50,6 +50,14 @@ private:
     // Skybox
     Skybox* skybox;
 
+    // Shadow Mapping
+    GLuint shadowMapFBO;
+    GLuint shadowMapTexture;
+    const unsigned int SHADOW_WIDTH = 2048;
+    const unsigned int SHADOW_HEIGHT = 2048;
+    glm::mat4 lightSpaceMatrix;
+    bool in_shadow_pass;
+
     // Internal helper methods
     glm::mat4 convertToGLM(const matrix4f& m) const;
     Shader* getShaderForRenderState(const RenderState& state);
@@ -97,9 +105,17 @@ public:
 
     virtual void setRenderState(const RenderState& state) override;
     virtual void enableLighting(bool enable) override;
-    virtual void setLighting(const vector3f& ambient, const vector3f& diffuse, const vector3f& position) override;
+    virtual void setLighting(const vector3f& ambient, const vector3f& diffuse, const vector3f& direction) override;
 
     virtual void renderSkybox() override;
+
+    // Shadow Mapping overrides
+    virtual void beginShadowPass(const vector3f& lightDir) override;
+    virtual void endShadowPass() override;
+    virtual void bindShadowMap(int textureUnit) override;
+    virtual matrix4f getLightSpaceMatrix() override;
+
+    virtual IGPUMesh* createMesh() override;
 
     virtual const char* getAPIName() const override { return "OpenGL"; }
 };
