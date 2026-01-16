@@ -1,22 +1,29 @@
 #include "LevelManager.hpp"
 #include "Thirdparty/tinygltf-2.9.6/json.hpp"
-#include "Components/mesh.hpp"
-#include "Components/rigidbody.hpp"
-#include "Components/collider.hpp"
-#include "Components/playerEntity.hpp"
-#include "Components/FreecamEntity.hpp"
-#include "Components/PlayerRepresentation.hpp"
-#include "Components/camera.hpp"
+#include "Components/Components.hpp"
 #include "world.hpp"
 #include "Graphics/RenderAPI.hpp"
 #include "Utils/GltfLoader.hpp"
+#include "Utils/GltfMaterialLoader.hpp"
+#include "Utils/Log.hpp"
 #include <iostream>
 #include <cstring>
 
-// Forward declaration (defined in main.cpp)
-mesh* loadGltfMeshWithMaterials(const std::string& filename, gameObject& obj, IRenderAPI* render_api);
-
 using json = nlohmann::json;
+
+// Helper to get texture type name for logging (moved from main.cpp)
+static std::string getTextureTypeName(TextureType type) {
+    switch (type) {
+        case TextureType::BASE_COLOR: return "Base Color";
+        case TextureType::METALLIC_ROUGHNESS: return "Metallic-Roughness";
+        case TextureType::NORMAL: return "Normal";
+        case TextureType::OCCLUSION: return "Occlusion";
+        case TextureType::EMISSIVE: return "Emissive";
+        case TextureType::DIFFUSE: return "Diffuse";
+        case TextureType::SPECULAR: return "Specular";
+        default: return "Unknown";
+    }
+}
 
 LevelManager::LevelManager()
 {
@@ -29,16 +36,7 @@ LevelManager::~LevelManager()
 
 void LevelManager::cleanup()
 {
-    // Clean up owned resources
-    for (auto* obj : owned_game_objects) delete obj;
-    for (auto* m : owned_meshes) delete m;
-    for (auto* rb : owned_rigidbodies) delete rb;
-    for (auto* col : owned_colliders) delete col;
-
-    owned_game_objects.clear();
-    owned_meshes.clear();
-    owned_rigidbodies.clear();
-    owned_colliders.clear();
+    stored_entities.clear();
 }
 
 bool LevelManager::loadLevel(const std::string& path, LevelData& out_level_data)
@@ -317,21 +315,18 @@ bool LevelManager::parseEntityFromJSON(const void* json_ptr, LevelEntity& entity
 
 bool LevelManager::saveLevelToJSON(const std::string& json_path, const LevelData& level_data)
 {
-    // TODO: Implement JSON saving for level editor
     printf("JSON saving not yet implemented\n");
     return false;
 }
 
 bool LevelManager::loadLevelFromBinary(const std::string& binary_path, LevelData& out_level_data)
 {
-    // TODO: Implement binary loading
     printf("Binary loading not yet implemented\n");
     return false;
 }
 
 bool LevelManager::saveLevelToBinary(const std::string& binary_path, const LevelData& level_data)
 {
-    // TODO: Implement binary saving
     printf("Binary saving not yet implemented\n");
     return false;
 }
@@ -377,24 +372,14 @@ bool LevelManager::readString(std::ifstream& file, std::string& str)
     return true;
 }
 
-gameObject* LevelManager::createGameObject(const LevelEntity& entity)
-{
-    gameObject* obj = new gameObject(entity.position.X, entity.position.Y, entity.position.Z);
-    obj->rotation = entity.rotation;
-    obj->scale = entity.scale;
-
-    owned_game_objects.push_back(obj);
-    return obj;
-}
-
-mesh* LevelManager::createMesh(const LevelEntity& entity, gameObject& obj, IRenderAPI* render_api)
+std::shared_ptr<mesh> LevelManager::loadMesh(const LevelEntity& entity, IRenderAPI* render_api)
 {
     if (entity.mesh_path.empty())
     {
         return nullptr;
     }
 
-    mesh* m = nullptr;
+    mesh* m_ptr = nullptr;
 
     // Check if glTF file (which might have materials)
     size_t path_len = entity.mesh_path.size();
@@ -403,90 +388,126 @@ mesh* LevelManager::createMesh(const LevelEntity& entity, gameObject& obj, IRend
 
     if (is_gltf)
     {
-        // Use glTF loader with materials
-        m = loadGltfMeshWithMaterials(entity.mesh_path, obj, render_api);
+        // Configure geometry loading
+        GltfLoaderConfig gltf_config;
+        gltf_config.verbose_logging = true;
+        gltf_config.flip_uvs = true;
+        gltf_config.generate_normals_if_missing = true;
+        gltf_config.scale = 1.0f;
+
+        // Configure material loading
+        MaterialLoaderConfig material_config;
+        material_config.verbose_logging = true;
+        material_config.load_all_textures = false;
+        material_config.priority_texture_types = {
+            TextureType::BASE_COLOR,
+            TextureType::DIFFUSE,
+            TextureType::NORMAL
+        };
+        material_config.generate_mipmaps = true;
+        material_config.flip_textures_vertically = true;
+        material_config.cache_textures = true;
+        material_config.texture_base_path = "models/";
+
+        // Load geometry and materials
+        GltfLoadResult map_result = GltfLoader::loadGltfWithMaterials(entity.mesh_path, render_api, gltf_config, material_config);
+
+        if (!map_result.success) {
+            LOG_ENGINE_FATAL("Failed to load glTF file: %s\n", map_result.error_message.c_str());
+            return nullptr;
+        }
+
+        LOG_ENGINE_TRACE("Loaded glTF: %s\n", entity.mesh_path.c_str());
+        
+        // Create mesh from glTF data
+        m_ptr = new mesh(map_result.vertices, map_result.vertex_count);
+
+        // Apply textures
+        bool texture_applied = false;
+
+        if (map_result.materials_loaded && !map_result.material_data.materials.empty()) {
+            std::vector<MaterialRange> material_ranges;
+            size_t current_vertex = 0;
+
+            for (size_t i = 0; i < map_result.material_indices.size(); ++i) {
+                int mat_idx = map_result.material_indices[i];
+                size_t vertex_count = map_result.primitive_vertex_counts[i];
+
+                if (mat_idx >= 0 && mat_idx < map_result.material_data.materials.size()) {
+                    const auto& material = map_result.material_data.materials[mat_idx];
+                    TextureHandle tex = material.getPrimaryTextureHandle();
+
+                    MaterialRange range(current_vertex, vertex_count, tex, material.properties.name);
+                    material_ranges.push_back(range);
+
+                    if (tex != INVALID_TEXTURE) {
+                        texture_applied = true;
+                    }
+                }
+                else {
+                    MaterialRange range(current_vertex, vertex_count, INVALID_TEXTURE, "unknown");
+                    material_ranges.push_back(range);
+                }
+
+                current_vertex += vertex_count;
+            }
+
+            if (!material_ranges.empty()) {
+                m_ptr->setMaterialRanges(material_ranges);
+            }
+        }
+
+        // Fallback texture
+        if (!texture_applied) { 
+             // Logic for fallback? For now just log
+             LOG_ENGINE_WARN("No valid textures found in materials for %s\n", entity.mesh_path.c_str());
+             
+             // Try legacy fallback or load manually
+             if (!entity.texture_paths.empty() && render_api) {
+                 TextureHandle tex = render_api->loadTexture(entity.texture_paths[0], true, true);
+                 m_ptr->set_texture(tex);
+             }
+        }
+        
+        // Transfer ownership cleanup
+        map_result.vertices = nullptr; 
+        map_result.vertex_count = 0;
     }
     else
     {
         // Regular mesh loading (OBJ)
-        m = new mesh(entity.mesh_path, obj);
-    }
-
-    if (m)
-    {
-        // Set mesh properties
-        m->culling = entity.culling;
-        m->transparent = entity.transparent;
-        m->visible = entity.visible;
-
+        m_ptr = new mesh(entity.mesh_path);
+        
         // Load textures
         if (!entity.texture_paths.empty() && render_api)
         {
             for (const auto& tex_path : entity.texture_paths)
             {
                 TextureHandle tex = render_api->loadTexture(tex_path, true, true);
-                m->set_texture(tex);
-                break; // For now, only use first texture
+                m_ptr->set_texture(tex);
+                break; // Use first texture
             }
         }
-
-        owned_meshes.push_back(m);
     }
 
-    return m;
-}
-
-rigidbody* LevelManager::createRigidbody(const LevelEntity& entity, gameObject& obj)
-{
-    if (!entity.has_rigidbody)
+    if (m_ptr)
     {
-        return nullptr;
+        m_ptr->culling = entity.culling;
+        m_ptr->transparent = entity.transparent;
+        m_ptr->visible = entity.visible;
+        return std::shared_ptr<mesh>(m_ptr);
     }
 
-    rigidbody* rb = new rigidbody(obj);
-    rb->mass = entity.mass;
-    rb->apply_gravity = entity.apply_gravity;
-
-    owned_rigidbodies.push_back(rb);
-    return rb;
-}
-
-collider* LevelManager::createCollider(const LevelEntity& entity, mesh* collider_mesh, gameObject& obj)
-{
-    if (!entity.has_collider)
-    {
-        return nullptr;
-    }
-
-    // If no collider mesh provided, we need to load it
-    mesh* col_mesh = collider_mesh;
-    if (!col_mesh && !entity.collider_mesh_path.empty())
-    {
-        col_mesh = new mesh(entity.collider_mesh_path, obj);
-        owned_meshes.push_back(col_mesh);
-    }
-
-    if (!col_mesh)
-    {
-        printf("WARNING: Entity '%s' has collider but no mesh specified\n", entity.name.c_str());
-        return nullptr;
-    }
-
-    collider* col = new collider(*col_mesh, obj);
-    owned_colliders.push_back(col);
-    return col;
+    return nullptr;
 }
 
 bool LevelManager::instantiateLevel(
     const LevelData& level_data,
     world& game_world,
     IRenderAPI* render_api,
-    std::vector<mesh*>& out_meshes,
-    std::vector<rigidbody*>& out_rigidbodies,
-    std::vector<collider*>& out_colliders,
-    LevelEntity** out_player_data,
-    LevelEntity** out_freecam_data,
-    LevelEntity** out_player_rep_data)
+    entt::entity* out_player_entity,
+    entt::entity* out_freecam_entity,
+    entt::entity* out_player_rep_entity)
 {
     printf("Instantiating level: %s\n", level_data.metadata.level_name.c_str());
 
@@ -494,106 +515,155 @@ bool LevelManager::instantiateLevel(
     game_world.setGravity(level_data.metadata.gravity);
     game_world.setFixedDelta(level_data.metadata.fixed_delta);
 
-    // Store entities so pointers remain valid
-    stored_entities = level_data.entities;
-
     // Initialize output pointers
-    if (out_player_data) *out_player_data = nullptr;
-    if (out_freecam_data) *out_freecam_data = nullptr;
-    if (out_player_rep_data) *out_player_rep_data = nullptr;
+    if (out_player_entity) *out_player_entity = entt::null;
+    if (out_freecam_entity) *out_freecam_entity = entt::null;
+    if (out_player_rep_entity) *out_player_rep_entity = entt::null;
+
+    // Map to store entities by name for reference resolution
+    std::map<std::string, entt::entity> entity_map;
+    
+    // Store created entities corresponding to level_data.entities indices
+    std::vector<entt::entity> created_entities;
+    created_entities.reserve(level_data.entities.size());
 
     // Create all entities
-    for (auto& entity : stored_entities)
+    for (const auto& entity_data : level_data.entities)
     {
-        gameObject* obj = createGameObject(entity);
-        entity.game_object = obj;
+        // Create entity in registry
+        auto e = game_world.registry.create();
+        created_entities.push_back(e);
+        
+        if (!entity_data.name.empty()) {
+            entity_map[entity_data.name] = e;
+        }
 
-        // Create mesh if needed
-        if (entity.type == EntityType::Renderable ||
-            entity.type == EntityType::Physical ||
-            entity.type == EntityType::PlayerRep)
+        // Add Transform
+        game_world.registry.emplace<TransformComponent>(e, entity_data.position.X, entity_data.position.Y, entity_data.position.Z);
+        auto& transform = game_world.registry.get<TransformComponent>(e);
+        transform.rotation = entity_data.rotation;
+        transform.scale = entity_data.scale;
+
+        // Add Tag
+        game_world.registry.emplace<TagComponent>(e, entity_data.name);
+
+        // Load and add Mesh
+        if (entity_data.type == EntityType::Renderable ||
+            entity_data.type == EntityType::Physical ||
+            entity_data.type == EntityType::PlayerRep)
         {
-            mesh* m = createMesh(entity, *obj, render_api);
-            entity.mesh_component = m;
-            if (m)
-            {
-                out_meshes.push_back(m);
+            if (!entity_data.mesh_path.empty()) { 
+                auto mesh_ptr = loadMesh(entity_data, render_api);
+                if (mesh_ptr) {
+                    game_world.registry.emplace<MeshComponent>(e, mesh_ptr);
+                }
             }
         }
 
-        // Create rigidbody for physical entities
-        if (entity.type == EntityType::Physical)
+        // Add Physics components
+        if (entity_data.type == EntityType::Physical || 
+            entity_data.type == EntityType::Player)
         {
-            rigidbody* rb = createRigidbody(entity, *obj);
-            entity.rigidbody_component = rb;
-            if (rb)
-            {
-                out_rigidbodies.push_back(rb);
+            // Rigidbody
+            if (entity_data.has_rigidbody) {
+                game_world.registry.emplace<RigidBodyComponent>(e);
+                auto& rb = game_world.registry.get<RigidBodyComponent>(e);
+                rb.mass = entity_data.mass;
+                rb.apply_gravity = entity_data.apply_gravity;
             }
 
-            // Create collider
-            collider* col = createCollider(entity, entity.mesh_component, *obj);
-            entity.collider_component = col;
-            if (col)
-            {
-                out_colliders.push_back(col);
+            // Collider
+            if (entity_data.has_collider) {
+                game_world.registry.emplace<ColliderComponent>(e);
+                auto& col = game_world.registry.get<ColliderComponent>(e);
+                
+                // If it has a separate collider mesh
+                if (!entity_data.collider_mesh_path.empty()) {
+                    LevelEntity col_ent = entity_data;
+                    col_ent.mesh_path = entity_data.collider_mesh_path;
+                    col_ent.texture_paths.clear(); // No texture for collider
+                    col.m_mesh = loadMesh(col_ent, render_api);
+                } else if (game_world.registry.all_of<MeshComponent>(e)) {
+                    // Share visual mesh
+                    col.m_mesh = game_world.registry.get<MeshComponent>(e).m_mesh;
+                }
+            }
+        }
+        
+        // Collidable only (static collider)
+        if (entity_data.type == EntityType::Collidable) {
+             if (entity_data.has_collider) {
+                game_world.registry.emplace<ColliderComponent>(e);
+                auto& col = game_world.registry.get<ColliderComponent>(e);
+                
+                if (!entity_data.collider_mesh_path.empty()) {
+                    LevelEntity col_ent = entity_data;
+                    col_ent.mesh_path = entity_data.collider_mesh_path;
+                    col.m_mesh = loadMesh(col_ent, render_api);
+                } else if (game_world.registry.all_of<MeshComponent>(e)) {
+                    col.m_mesh = game_world.registry.get<MeshComponent>(e).m_mesh;
+                }
             }
         }
 
-        // Create collider-only entities
-        if (entity.type == EntityType::Collidable)
+        // Player
+        if (entity_data.type == EntityType::Player)
         {
-            collider* col = createCollider(entity, nullptr, *obj);
-            entity.collider_component = col;
-            if (col)
-            {
-                out_colliders.push_back(col);
-            }
+            game_world.registry.emplace<PlayerComponent>(e);
+            auto& pc = game_world.registry.get<PlayerComponent>(e);
+            pc.speed = entity_data.speed;
+            pc.jump_force = entity_data.jump_force;
+            pc.mouse_sensitivity = entity_data.mouse_sensitivity;
+            // Gravity handled by RigidBody
+            
+            if (out_player_entity) *out_player_entity = e;
+            printf("NOTE: Player entity '%s' created\n", entity_data.name.c_str());
         }
 
-        // Handle special entity types - store pointers for main.cpp to use
-        if (entity.type == EntityType::Player)
+        // Freecam
+        if (entity_data.type == EntityType::Freecam)
         {
-            // Create player rigidbody
-            rigidbody* player_rb = createRigidbody(entity, *obj);
-            entity.rigidbody_component = player_rb;
-            if (player_rb)
-            {
-                out_rigidbodies.push_back(player_rb);
-            }
-
-            if (out_player_data)
-            {
-                *out_player_data = &entity;
-            }
-
-            printf("NOTE: Player entity '%s' created at position (%.2f, %.2f, %.2f)\n",
-                   entity.name.c_str(), obj->position.X, obj->position.Y, obj->position.Z);
+            game_world.registry.emplace<FreecamComponent>(e);
+            auto& fc = game_world.registry.get<FreecamComponent>(e);
+            fc.movement_speed = entity_data.movement_speed;
+            fc.fast_movement_speed = entity_data.fast_movement_speed;
+            fc.mouse_sensitivity = entity_data.mouse_sensitivity;
+            
+            if (out_freecam_entity) *out_freecam_entity = e;
+            printf("NOTE: Freecam entity '%s' created\n", entity_data.name.c_str());
         }
 
-        if (entity.type == EntityType::Freecam)
+        // Player Rep
+        if (entity_data.type == EntityType::PlayerRep)
         {
-            if (out_freecam_data)
-            {
-                *out_freecam_data = &entity;
-            }
-
-            printf("NOTE: Freecam entity '%s' created at position (%.2f, %.2f, %.2f)\n",
-                   entity.name.c_str(), obj->position.X, obj->position.Y, obj->position.Z);
+             game_world.registry.emplace<PlayerRepresentationComponent>(e);
+             auto& pr = game_world.registry.get<PlayerRepresentationComponent>(e);
+             pr.position_offset = entity_data.position_offset;
+             // tracked_player resolved in second pass
+             
+             if (out_player_rep_entity) *out_player_rep_entity = e;
         }
-
-        if (entity.type == EntityType::PlayerRep)
-        {
-            if (out_player_rep_data)
-            {
-                *out_player_rep_data = &entity;
+    }
+    
+    // Second pass: Resolve references (PlayerRepresentation)
+    for (size_t i = 0; i < level_data.entities.size(); ++i) {
+        const auto& entity_data = level_data.entities[i];
+        if (entity_data.type == EntityType::PlayerRep) {
+            entt::entity e = created_entities[i];
+            auto& pr = game_world.registry.get<PlayerRepresentationComponent>(e);
+            
+            if (!entity_data.tracked_player_name.empty()) {
+                auto it = entity_map.find(entity_data.tracked_player_name);
+                if (it != entity_map.end()) {
+                    pr.tracked_player = it->second;
+                } else {
+                    printf("WARNING: PlayerRepresentation '%s' cannot find tracked player '%s'\n", 
+                           entity_data.name.c_str(), entity_data.tracked_player_name.c_str());
+                }
             }
-
-            printf("NOTE: Player representation '%s' created at position (%.2f, %.2f, %.2f)\n",
-                   entity.name.c_str(), obj->position.X, obj->position.Y, obj->position.Z);
         }
     }
 
-    printf("Level instantiation complete: %d entities\n", (int)stored_entities.size());
+    printf("Level instantiation complete: %d entities\n", (int)level_data.entities.size());
     return true;
 }

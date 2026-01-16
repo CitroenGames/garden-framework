@@ -2,7 +2,6 @@
 
 #include <vector>
 #include <string>
-#include "gameObject.hpp"
 #include "Graphics/RenderAPI.hpp"
 #include "Graphics/GPUMesh.hpp"
 #include "Utils/ObjLoader.hpp"
@@ -35,7 +34,7 @@ struct MaterialRange
     bool hasValidTexture() const { return texture != INVALID_TEXTURE; }
 };
 
-class mesh : public component
+class mesh
 {
 public:
     vertex* vertices;
@@ -59,7 +58,7 @@ public:
     bool transparent;
 
     // Constructor for hardcoded vertex arrays (existing functionality)
-    mesh(vertex* vertices, size_t vertices_len, gameObject& obj) : component(obj)
+    mesh(vertex* vertices, size_t vertices_len)
     {
         this->vertices = vertices;
         this->vertices_len = vertices_len;
@@ -75,7 +74,7 @@ public:
     };
 
     // Constructor for loading model files - now supports both OBJ and glTF
-    mesh(const std::string& filename, gameObject& obj, MeshFormat format = MeshFormat::Auto) : component(obj)
+    mesh(const std::string& filename, MeshFormat format = MeshFormat::Auto)
     {
         vertices = nullptr;
         vertices_len = 0;
@@ -91,6 +90,65 @@ public:
 
         load_model_file(filename, format);
     };
+
+    // Move constructor
+    mesh(mesh&& other) noexcept
+    {
+        vertices = other.vertices;
+        vertices_len = other.vertices_len;
+        owns_vertices = other.owns_vertices;
+        is_valid = other.is_valid;
+        gpu_mesh = other.gpu_mesh;
+        texture = other.texture;
+        texture_set = other.texture_set;
+        material_ranges = std::move(other.material_ranges);
+        uses_material_ranges = other.uses_material_ranges;
+        visible = other.visible;
+        culling = other.culling;
+        transparent = other.transparent;
+
+        // Invalidate source
+        other.vertices = nullptr;
+        other.vertices_len = 0;
+        other.gpu_mesh = nullptr;
+        other.owns_vertices = false;
+    }
+
+    // Move assignment
+    mesh& operator=(mesh&& other) noexcept
+    {
+        if (this != &other)
+        {
+            // Clean up current
+            if (owns_vertices && vertices) delete[] vertices;
+            if (gpu_mesh) delete gpu_mesh;
+
+            // Move from other
+            vertices = other.vertices;
+            vertices_len = other.vertices_len;
+            owns_vertices = other.owns_vertices;
+            is_valid = other.is_valid;
+            gpu_mesh = other.gpu_mesh;
+            texture = other.texture;
+            texture_set = other.texture_set;
+            material_ranges = std::move(other.material_ranges);
+            uses_material_ranges = other.uses_material_ranges;
+            visible = other.visible;
+            culling = other.culling;
+            transparent = other.transparent;
+
+            // Invalidate source
+            other.vertices = nullptr;
+            other.vertices_len = 0;
+            other.gpu_mesh = nullptr;
+            other.owns_vertices = false;
+        }
+        return *this;
+    }
+
+    // Disable copy
+    mesh(const mesh&) = delete;
+    mesh& operator=(const mesh&) = delete;
 
     // Destructor
     ~mesh()

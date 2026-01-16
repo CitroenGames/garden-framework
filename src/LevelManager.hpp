@@ -3,16 +3,12 @@
 #include <string>
 #include <vector>
 #include <fstream>
+#include <memory>
 #include "irrlicht/vector3.h"
-#include "Components/gameObject.hpp"
+#include "Components/Components.hpp" 
+#include <entt/entt.hpp>
 
 // Forward declarations
-class mesh;
-class rigidbody;
-class collider;
-class playerEntity;
-class freecamEntity;
-class PlayerRepresentation;
 class world;
 class IRenderAPI;
 
@@ -70,12 +66,6 @@ struct LevelEntity
     std::string tracked_player_name;  // Name of player to track
     vector3f position_offset;
 
-    // Runtime pointers (populated during load)
-    gameObject* game_object;
-    mesh* mesh_component;
-    rigidbody* rigidbody_component;
-    collider* collider_component;
-
     LevelEntity()
         : type(EntityType::Static)
         , position(0, 0, 0)
@@ -94,10 +84,6 @@ struct LevelEntity
         , movement_speed(5.0f)
         , fast_movement_speed(15.0f)
         , position_offset(0, 0, 0)
-        , game_object(nullptr)
-        , mesh_component(nullptr)
-        , rigidbody_component(nullptr)
-        , collider_component(nullptr)
     {}
 };
 
@@ -157,16 +143,12 @@ public:
     bool compileLevel(const std::string& json_path, const std::string& binary_path);
 
     // Instantiation - creates runtime objects from level data
-    // Returns pointers to player and freecam entity data (for creating entities in main.cpp)
     bool instantiateLevel(const LevelData& level_data,
                          world& game_world,
                          IRenderAPI* render_api,
-                         std::vector<mesh*>& out_meshes,
-                         std::vector<rigidbody*>& out_rigidbodies,
-                         std::vector<collider*>& out_colliders,
-                         LevelEntity** out_player_data,
-                         LevelEntity** out_freecam_data,
-                         LevelEntity** out_player_rep_data);
+                         entt::entity* out_player_entity = nullptr,
+                         entt::entity* out_freecam_entity = nullptr,
+                         entt::entity* out_player_rep_entity = nullptr);
 
     // Cleanup - called before loading new level
     void cleanup();
@@ -186,17 +168,8 @@ private:
     void writeString(std::ofstream& file, const std::string& str);
     bool readString(std::ifstream& file, std::string& str);
 
-    // Entity instantiation helpers
-    gameObject* createGameObject(const LevelEntity& entity);
-    mesh* createMesh(const LevelEntity& entity, gameObject& obj, IRenderAPI* render_api);
-    rigidbody* createRigidbody(const LevelEntity& entity, gameObject& obj);
-    collider* createCollider(const LevelEntity& entity, mesh* collider_mesh, gameObject& obj);
-
-    // Resource management
-    std::vector<gameObject*> owned_game_objects;
-    std::vector<mesh*> owned_meshes;
-    std::vector<rigidbody*> owned_rigidbodies;
-    std::vector<collider*> owned_colliders;
+    // Helper to load mesh (returns shared_ptr)
+    std::shared_ptr<mesh> loadMesh(const LevelEntity& entity, IRenderAPI* render_api);
 
     // Store level data to keep entity references valid
     std::vector<LevelEntity> stored_entities;

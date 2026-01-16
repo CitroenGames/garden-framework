@@ -4,15 +4,23 @@
 #include "irrlicht/quaternion.h"
 #include "irrlicht/matrix4.h"
 #include "irrlicht/irrMath.h"
-#include "gameObject.hpp"
 
 using namespace irr;
 using namespace core;
 
-class camera : public gameObject
+class camera
 {
 public:
-    camera(float x = 0, float y = 0, float z = 0) : gameObject(x, y, z) {}
+    vector3f position;
+    vector3f rotation;
+    vector3f scale; // Kept for consistency, though usually 1,1,1 for camera
+
+    camera(float x = 0, float y = 0, float z = 0) 
+    {
+        position = vector3f(x, y, z);
+        rotation = vector3f(0, 0, 0);
+        scale = vector3f(1, 1, 1);
+    }
 
     quaternion<float> camera_rot_quaternion() const
     {

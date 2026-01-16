@@ -1,13 +1,10 @@
 #pragma once
 
-#include "irrlicht/vector3.h"
+#include "Components/Components.hpp"
 #include "Components/camera.hpp"
-#include "Components/gameObject.hpp"
-#include "Components/rigidbody.hpp"
-#include "Components/collider.hpp"
-#include "Components/playerEntity.hpp"
 #include "PhysicsSystem.hpp"
 #include <vector>
+#include <entt/entt.hpp>
 
 using namespace irr;
 using namespace core;
@@ -19,16 +16,15 @@ private:
     PhysicsSystem physics_system;
 
 public:
+    entt::registry registry;
     camera world_camera;
-    playerEntity* player_entity;
-    float fixed_delta; // Keep for compatibility, but physics system has its own
+    float fixed_delta; 
 
     world()
     {
         world_camera = camera::camera(0, 0, -5);
         fixed_delta = 0.16f;
         physics_system = PhysicsSystem(vector3f(0, -1, 0), fixed_delta);
-        player_entity = nullptr;
     }
 
     // Physics system access
@@ -36,28 +32,21 @@ public:
     const PhysicsSystem& getPhysicsSystem() const { return physics_system; }
 
     // Simplified interface that delegates to physics system
-    void step_physics(vector<rigidbody*>& rigidbodies)
+    void step_physics()
     {
-        physics_system.stepPhysics(rigidbodies);
+        physics_system.stepPhysics(registry);
     }
 
-    void player_collisions(rigidbody& player_rb, float sphere_radius, std::vector<collider*>& colliders)
+    void player_collisions(entt::entity playerEntity, float sphereRadius)
     {
-        physics_system.handlePlayerCollisions(player_rb, sphere_radius, colliders, player_entity);
+        physics_system.handlePlayerCollisions(registry, playerEntity, sphereRadius);
     }
 
     // Utility methods for common physics queries
     bool raycast(const vector3f& origin, const vector3f& direction, float max_distance,
-        std::vector<collider*>& colliders, vector3f& hit_point, vector3f& hit_normal)
-    {
-        return physics_system.raycast(origin, direction, max_distance, colliders, hit_point, hit_normal);
-    }
-
-    bool spherecast(const vector3f& origin, float radius, const vector3f& direction,
-        float max_distance, std::vector<collider*>& colliders,
         vector3f& hit_point, vector3f& hit_normal)
     {
-        return physics_system.spherecast(origin, radius, direction, max_distance, colliders, hit_point, hit_normal);
+        return physics_system.raycast(origin, direction, max_distance, registry, hit_point, hit_normal);
     }
 
     // Configuration methods

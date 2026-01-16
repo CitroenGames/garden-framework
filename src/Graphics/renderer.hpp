@@ -1,23 +1,22 @@
 #pragma once
 
 #include "Components/camera.hpp"
-#include "Components/gameObject.hpp"
+#include "Components/Components.hpp"
 #include "Components/mesh.hpp"
 #include "RenderAPI.hpp"
-#include <vector>
+#include <entt/entt.hpp>
 
 class renderer
 {
 public:
-    std::vector<mesh*>* p_meshes;
     IRenderAPI* render_api;
     
-    renderer() : p_meshes(nullptr), render_api(nullptr) {};
-    renderer(std::vector<mesh*>* meshes, IRenderAPI* api) : p_meshes(meshes), render_api(api) {};
+    renderer() : render_api(nullptr) {};
+    renderer(IRenderAPI* api) : render_api(api) {};
 
     void setRenderAPI(IRenderAPI* api) { render_api = api; }
 
-    static void render_mesh_with_api(mesh& m, IRenderAPI* api)
+    static void render_mesh_with_api(mesh& m, const TransformComponent& transform, IRenderAPI* api)
     {
         if (!m.visible || !api) return;
 
@@ -25,8 +24,8 @@ public:
         api->pushMatrix();
 
         // Use the complete transformation matrix that includes scale, rotation, and translation
-        matrix4f transform = m.obj.getTransformMatrix();
-        api->multiplyMatrix(transform);
+        matrix4f transform_mat = transform.getTransformMatrix();
+        api->multiplyMatrix(transform_mat);
 
         // Get render state from mesh
         RenderState state = m.getRenderState();
@@ -70,7 +69,7 @@ public:
         api->popMatrix();
     };
 
-    void render_scene(camera& c)
+    void render_scene(entt::registry& registry, camera& c)
     {
         if (!render_api)
         {
@@ -94,22 +93,19 @@ public:
             vector3f(1.0f, 1.0f, 1.0f)   // position
         );
 
-        // Render all meshes
-        if (p_meshes && !p_meshes->empty())
-        {
-            for (std::vector<mesh*>::iterator i = p_meshes->begin(); i != p_meshes->end(); i++)
+        // Render all meshes with transforms
+        auto view = registry.view<MeshComponent, TransformComponent>();
+        for(auto entity : view) {
+            auto& mesh_comp = view.get<MeshComponent>(entity);
+            const auto& t = view.get<TransformComponent>(entity);
+            
+            if (mesh_comp.m_mesh && mesh_comp.m_mesh->visible)
             {
-                mesh* m = *i;
-                if (m && m->visible)
-                {
-                    render_mesh_with_api(*m, render_api);
-                }
+                render_mesh_with_api(*mesh_comp.m_mesh, t, render_api);
             }
         }
 
         // End frame
         render_api->endFrame();
-
-        // Note: Buffer swapping/presenting should be handled by the Application class
     };
 };
