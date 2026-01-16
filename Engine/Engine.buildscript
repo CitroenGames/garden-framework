@@ -6,6 +6,7 @@ sources = src/**/*.cpp
 headers = src/**/*.h
 public_includes = src, thirdparty/include, .
 includes = src, thirdparty/include, .
+multiprocessor = true
 target_link_libraries(
     PUBLIC SDL2
     PUBLIC GLM

@@ -10,5 +10,6 @@ includes = src, thirdparty/include, .
 target_link_libraries(
     PRIVATE Engine
 )
+multiprocessor = true
 std = 20
 utf8 = true

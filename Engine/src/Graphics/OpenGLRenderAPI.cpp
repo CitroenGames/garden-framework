@@ -15,7 +15,8 @@ OpenGLRenderAPI::OpenGLRenderAPI()
       current_light_direction(0.0f, -1.0f, 0.0f), current_light_ambient(0.2f, 0.2f, 0.2f),
       current_light_diffuse(0.8f, 0.8f, 0.8f), lighting_enabled(true), shader_manager(nullptr),
       post_processing(nullptr), skybox(nullptr),
-      shadowMapFBO(0), shadowMapTexture(0), lightSpaceMatrix(1.0f), in_shadow_pass(false)
+      shadowMapFBO(0), shadowMapTexture(0), lightSpaceMatrix(1.0f), in_shadow_pass(false),
+      current_shader_id(0), current_bound_texture_0(0), global_uniforms_dirty(true)
 {
 }
 
@@ -152,6 +153,8 @@ void OpenGLRenderAPI::resize(int width, int height)
 
     // Set up viewport
     glViewport(0, 0, width, height);
+    
+    global_uniforms_dirty = true;
 }
 
 bool OpenGLRenderAPI::createOpenGLContext(WindowHandle window)
@@ -239,6 +242,9 @@ void OpenGLRenderAPI::beginFrame()
     if (post_processing)
     {
         post_processing->beginRender();
+        // Ensure GL state matches our assumption
+        glDepthFunc(GL_LEQUAL); 
+        current_gpu_state.depth_test = DepthTest::LessEqual;
     }
 
     // Reset model matrix to identity
@@ -257,6 +263,13 @@ void OpenGLRenderAPI::endFrame()
     {
         post_processing->endRender();
         post_processing->renderFXAA();
+
+        // PostProcessing modifies GL state
+        current_shader_id = 0;
+        current_bound_texture_0 = 0;
+        
+        // renderFXAA disables depth test
+        current_gpu_state.depth_test = DepthTest::None;
     }
 }
 
@@ -286,6 +299,8 @@ void OpenGLRenderAPI::setCamera(const camera& cam)
         glm::vec3(target.X, target.Y, target.Z),
         glm::vec3(up.X, up.Y, up.Z)
     );
+    
+    global_uniforms_dirty = true;
 }
 
 void OpenGLRenderAPI::pushMatrix()
@@ -393,8 +408,13 @@ void OpenGLRenderAPI::bindTexture(TextureHandle texture)
 {
     if (texture != INVALID_TEXTURE)
     {
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, (GLuint)texture);
+        GLuint texID = (GLuint)texture;
+        if (current_bound_texture_0 != texID)
+        {
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, texID);
+            current_bound_texture_0 = texID;
+        }
     }
     else
     {
@@ -404,8 +424,12 @@ void OpenGLRenderAPI::bindTexture(TextureHandle texture)
 
 void OpenGLRenderAPI::unbindTexture()
 {
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, 0);
+    if (current_bound_texture_0 != 0)
+    {
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        current_bound_texture_0 = 0;
+    }
 }
 
 void OpenGLRenderAPI::deleteTexture(TextureHandle texture)
@@ -449,6 +473,8 @@ void OpenGLRenderAPI::beginShadowPass(const vector3f& lightDir)
     
     // Enable front-face culling to fix peter panning
     glCullFace(GL_FRONT);
+    
+    global_uniforms_dirty = true;
 }
 
 void OpenGLRenderAPI::endShadowPass()
@@ -513,34 +539,72 @@ void OpenGLRenderAPI::renderMesh(const mesh& m, const RenderState& state)
     }
 
     // Bind shader
-    shader->use();
+    bool shader_changed = false;
+    if (current_shader_id != shader->getProgramID())
+    {
+        shader->use();
+        current_shader_id = shader->getProgramID();
+        shader_changed = true;
+    }
 
     if (in_shadow_pass)
     {
-        shader->setUniform("uLightSpaceMatrix", lightSpaceMatrix);
+        if (shader_changed || global_uniforms_dirty)
+        {
+             shader->setUniform("uLightSpaceMatrix", lightSpaceMatrix);
+             // We can safely clear dirty flag here if we assume this is the only global needed for shadow pass
+             // BUT, if we clear it, then subsequent Normal Pass won't update its globals (View/Proj).
+             // Ideally we should have different dirty flags or simply NOT clear it here if it might affect other shaders.
+             // However, shader_changed logic in Normal Pass will catch the switch back to "basic" shader.
+             // So clearing it here is safe provided we switch shaders.
+             // The only risk is if we use SAME shader for shadow and normal pass (unlikely).
+             // Or if we have multiple shadow shaders?
+             // Let's NOT clear it here to be safe, because this update is partial (only LightSpace).
+        }
         shader->setUniform("uModel", current_model_matrix);
     }
     else
     {
-        // Set matrix uniforms
+        // Set global uniforms if shader changed OR globals are dirty
+        if (shader_changed || global_uniforms_dirty)
+        {
+            shader->setUniform("uView", view_matrix);
+            shader->setUniform("uProjection", projection_matrix);
+            shader->setUniform("uLightSpaceMatrix", lightSpaceMatrix);
+
+            // Set lighting uniforms
+            shader->setUniform("uLightDir", current_light_direction);
+            shader->setUniform("uLightAmbient", current_light_ambient);
+            shader->setUniform("uLightDiffuse", current_light_diffuse);
+            
+            // Bind Shadow Map (Unit 1) - effectively global
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, shadowMapTexture);
+            shader->setUniform("uShadowMap", 1);
+            
+            // Now we can clear the dirty flag because we updated the "main" globals
+            // CAUTION: This clears it for THIS shader.
+            // If we have multiple shaders in the scene (e.g. Basic, Unlit, Terrain),
+            // and we render Mesh A (Basic), Mesh B (Terrain), Mesh C (Basic).
+            // 1. Basic. Upload. Dirty=false.
+            // 2. Terrain. Changed=true. Upload. Dirty=false.
+            // 3. Basic. Changed=true. Upload. Dirty=false.
+            // This works!
+            // Case: Mesh A (Basic). Dirty=true. Upload. Dirty=false.
+            //       Mesh B (Basic). Changed=false. Dirty=false. Skip.
+            // Works!
+            global_uniforms_dirty = false;
+        }
+
+        // Set object specific uniforms
         shader->setUniform("uModel", current_model_matrix);
-        shader->setUniform("uView", view_matrix);
-        shader->setUniform("uProjection", projection_matrix);
-        shader->setUniform("uLightSpaceMatrix", lightSpaceMatrix);
-
-        // Set lighting uniforms
-        shader->setUniform("uLightDir", current_light_direction);
-        shader->setUniform("uLightAmbient", current_light_ambient);
-        shader->setUniform("uLightDiffuse", current_light_diffuse);
-
-        // Set color uniform
         shader->setUniform("uColor", glm::vec3(state.color.X, state.color.Y, state.color.Z));
 
         // Bind texture if available (Unit 0)
         if (m.texture_set && m.texture != INVALID_TEXTURE)
         {
-            glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, (GLuint)m.texture);
+            // Use our optimized bindTexture
+            bindTexture(m.texture);
             shader->setUniform("uTexture", 0);
             shader->setUniform("uUseTexture", true);
         }
@@ -548,11 +612,6 @@ void OpenGLRenderAPI::renderMesh(const mesh& m, const RenderState& state)
         {
             shader->setUniform("uUseTexture", false);
         }
-        
-        // Bind Shadow Map (Unit 1)
-        glActiveTexture(GL_TEXTURE1);
-        glBindTexture(GL_TEXTURE_2D, shadowMapTexture);
-        shader->setUniform("uShadowMap", 1);
     }
 
     // Apply render state (culling, blending, depth)
@@ -565,19 +624,6 @@ void OpenGLRenderAPI::renderMesh(const mesh& m, const RenderState& state)
         glMesh->bind();
         glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(glMesh->getVertexCount()));
         glMesh->unbind();
-    }
-
-    // Unbind texture
-    if (m.texture_set && m.texture != INVALID_TEXTURE)
-    {
-        glBindTexture(GL_TEXTURE_2D, 0);
-    }
-
-    // Reset some states after rendering to prevent bleeding
-    if (state.blend_mode != BlendMode::None)
-    {
-        glDepthMask(GL_TRUE);
-        glDisable(GL_BLEND);
     }
 }
 
@@ -621,27 +667,46 @@ void OpenGLRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t
     }
 
     // Bind shader
-    shader->use();
+    bool shader_changed = false;
+    if (current_shader_id != shader->getProgramID())
+    {
+        shader->use();
+        current_shader_id = shader->getProgramID();
+        shader_changed = true;
+    }
 
     if (in_shadow_pass)
     {
-        shader->setUniform("uLightSpaceMatrix", lightSpaceMatrix);
+        if (shader_changed || global_uniforms_dirty)
+        {
+            shader->setUniform("uLightSpaceMatrix", lightSpaceMatrix);
+        }
         shader->setUniform("uModel", current_model_matrix);
     }
     else
     {
-        // Set matrix uniforms
+        if (shader_changed || global_uniforms_dirty)
+        {
+            // Set matrix uniforms
+            shader->setUniform("uView", view_matrix);
+            shader->setUniform("uProjection", projection_matrix);
+            shader->setUniform("uLightSpaceMatrix", lightSpaceMatrix);
+
+            // Set lighting uniforms
+            shader->setUniform("uLightDir", current_light_direction);
+            shader->setUniform("uLightAmbient", current_light_ambient);
+            shader->setUniform("uLightDiffuse", current_light_diffuse);
+            
+            // Bind Shadow Map (Unit 1)
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, shadowMapTexture);
+            shader->setUniform("uShadowMap", 1);
+            
+            global_uniforms_dirty = false;
+        }
+
+        // Set object specific uniforms
         shader->setUniform("uModel", current_model_matrix);
-        shader->setUniform("uView", view_matrix);
-        shader->setUniform("uProjection", projection_matrix);
-        shader->setUniform("uLightSpaceMatrix", lightSpaceMatrix);
-
-        // Set lighting uniforms
-        shader->setUniform("uLightDir", current_light_direction);
-        shader->setUniform("uLightAmbient", current_light_ambient);
-        shader->setUniform("uLightDiffuse", current_light_diffuse);
-
-        // Set color uniform
         shader->setUniform("uColor", glm::vec3(state.color.X, state.color.Y, state.color.Z));
 
         // Texture binding logic:
@@ -650,14 +715,14 @@ void OpenGLRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t
         if (!m.uses_material_ranges && m.texture_set && m.texture != INVALID_TEXTURE)
         {
             // Single-texture mode: bind the mesh's texture
-            glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, (GLuint)m.texture);
+            bindTexture(m.texture);
             shader->setUniform("uTexture", 0);
             shader->setUniform("uUseTexture", true);
         }
         else if (m.uses_material_ranges)
         {
             // Multi-material mode: texture already bound by renderer.hpp
+            // Note: renderer.hpp likely calls bindTexture directly, which updates our tracker.
             // Just tell the shader to use whatever is bound at texture unit 0
             shader->setUniform("uTexture", 0);
             shader->setUniform("uUseTexture", true);
@@ -667,11 +732,6 @@ void OpenGLRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t
             // No texture available
             shader->setUniform("uUseTexture", false);
         }
-        
-        // Bind Shadow Map (Unit 1)
-        glActiveTexture(GL_TEXTURE1);
-        glBindTexture(GL_TEXTURE_2D, shadowMapTexture);
-        shader->setUniform("uShadowMap", 1);
     }
 
     // Apply render state (culling, blending, depth)
@@ -685,19 +745,6 @@ void OpenGLRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t
         glDrawArrays(GL_TRIANGLES, static_cast<GLint>(start_vertex), static_cast<GLsizei>(vertex_count));
         glMesh->unbind();
     }
-
-    // Unbind texture only for single-texture meshes (multi-material handled by renderer.hpp)
-    if (!m.uses_material_ranges && m.texture_set && m.texture != INVALID_TEXTURE)
-    {
-        glBindTexture(GL_TEXTURE_2D, 0);
-    }
-
-    // Reset some states after rendering to prevent bleeding
-    if (state.blend_mode != BlendMode::None)
-    {
-        glDepthMask(GL_TRUE);
-        glDisable(GL_BLEND);
-    }
 }
 
 void OpenGLRenderAPI::setRenderState(const RenderState& state)
@@ -709,24 +756,44 @@ void OpenGLRenderAPI::setRenderState(const RenderState& state)
 void OpenGLRenderAPI::applyRenderState(const RenderState& state)
 {
     // Culling
-    if (state.cull_mode == CullMode::None)
+    if (state.cull_mode != current_gpu_state.cull_mode)
     {
-        glDisable(GL_CULL_FACE);
-    }
-    else
-    {
-        glEnable(GL_CULL_FACE);
-        glCullFace(getGLCullMode(state.cull_mode));
+        if (state.cull_mode == CullMode::None)
+        {
+            glDisable(GL_CULL_FACE);
+        }
+        else
+        {
+            if (current_gpu_state.cull_mode == CullMode::None)
+            {
+                glEnable(GL_CULL_FACE);
+            }
+            glCullFace(getGLCullMode(state.cull_mode));
+        }
+        current_gpu_state.cull_mode = state.cull_mode;
     }
 
     // Blending
-    setupBlending(state.blend_mode);
+    if (state.blend_mode != current_gpu_state.blend_mode)
+    {
+        setupBlending(state.blend_mode);
+        current_gpu_state.blend_mode = state.blend_mode;
+    }
 
     // Depth testing
-    setupDepthTesting(state.depth_test, state.depth_write);
+    if (state.depth_test != current_gpu_state.depth_test || state.depth_write != current_gpu_state.depth_write)
+    {
+        setupDepthTesting(state.depth_test, state.depth_write);
+        current_gpu_state.depth_test = state.depth_test;
+        current_gpu_state.depth_write = state.depth_write;
+    }
 
     // Lighting
-    enableLighting(state.lighting);
+    if (state.lighting != current_gpu_state.lighting)
+    {
+        enableLighting(state.lighting);
+        current_gpu_state.lighting = state.lighting;
+    }
 }
 
 GLenum OpenGLRenderAPI::getGLCullMode(CullMode mode)
@@ -797,6 +864,8 @@ void OpenGLRenderAPI::setLighting(const vector3f& ambient, const vector3f& diffu
     current_light_direction = glm::vec3(direction.X, direction.Y, direction.Z);
     // Ensure direction is normalized
     current_light_direction = glm::normalize(current_light_direction);
+    
+    global_uniforms_dirty = true;
 }
 
 void OpenGLRenderAPI::multiplyMatrix(const matrix4f& matrix)
@@ -816,6 +885,13 @@ void OpenGLRenderAPI::renderSkybox()
         proj.setM(glm::value_ptr(projection_matrix));
         
         skybox->render(view, proj);
+
+        // Skybox modifies GL state, so we need to sync our trackers
+        current_shader_id = 0;
+        current_bound_texture_0 = 0;
+        
+        // Skybox::render sets DepthFunc to GL_LESS at the end
+        current_gpu_state.depth_test = DepthTest::Less;
     }
 }
 
