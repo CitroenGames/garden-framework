@@ -2,16 +2,12 @@
 
 #include "irrlicht/vector3.h"
 #include "irrlicht/matrix4.h"
-#include "Components/rigidbody.hpp"
-#include "Components/collider.hpp"
-#include "Components/mesh.hpp"
+#include "Components/Components.hpp"
+#include <entt/entt.hpp>
 #include <vector>
 
 using namespace irr;
 using namespace core;
-
-// Forward declaration
-class playerEntity;
 
 struct PhysicsTriangle
 {
@@ -45,11 +41,10 @@ public:
     float getFixedDelta() const { return fixed_delta; }
 
     // Main physics update
-    void stepPhysics(std::vector<rigidbody*>& rigidbodies);
+    void stepPhysics(entt::registry& registry);
 
     // Collision detection and response
-    void handlePlayerCollisions(rigidbody& playerRigidbody, float sphereRadius,
-        std::vector<collider*>& colliders, playerEntity* player);
+    void handlePlayerCollisions(entt::registry& registry, entt::entity playerEntity, float sphereRadius);
 
     // Sphere-triangle collision detection
     bool checkSphereTriangleCollision(const vector3f& sphereCenter, float sphereRadius,
@@ -58,9 +53,5 @@ public:
 
     // General collision queries
     bool raycast(const vector3f& origin, const vector3f& direction, float maxDistance,
-        std::vector<collider*>& colliders, vector3f& hitPoint, vector3f& hitNormal);
-
-    bool spherecast(const vector3f& origin, float radius, const vector3f& direction,
-        float maxDistance, std::vector<collider*>& colliders,
-        vector3f& hitPoint, vector3f& hitNormal);
+        entt::registry& registry, vector3f& hitPoint, vector3f& hitNormal);
 };

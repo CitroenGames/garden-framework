@@ -1,5 +1,4 @@
 #include "PhysicsSystem.hpp"
-#include "Components/playerEntity.hpp"
 #include <stdio.h>
 #include <cmath>
 
@@ -8,54 +7,60 @@ PhysicsSystem::PhysicsSystem(const vector3f& gravityVector, float deltaTime)
 {
 }
 
-void PhysicsSystem::stepPhysics(std::vector<rigidbody*>& rigidbodies)
+void PhysicsSystem::stepPhysics(entt::registry& registry)
 {
-    // Explicit Euler integration for all rigidbodies
-    if (!rigidbodies.empty())
-    {
-        for (auto& rb : rigidbodies)
-        {
-            if (!rb) continue;
+    auto view = registry.view<RigidBodyComponent, TransformComponent>();
+    
+    for(auto entity : view) {
+        auto& rb = view.get<RigidBodyComponent>(entity);
+        auto& transform = view.get<TransformComponent>(entity);
 
-            // Apply gravity if enabled
-            if (rb->apply_gravity)
-                rb->force += gravity;
+        // Apply gravity if enabled
+        if (rb.apply_gravity)
+            rb.force += gravity;
 
-            // Integrate velocity
-            rb->velocity += rb->force * fixed_delta;
+        // Integrate velocity
+        rb.velocity += rb.force * fixed_delta;
 
-            // Integrate position
-            rb->obj.position += rb->velocity * fixed_delta;
+        // Integrate position
+        transform.position += rb.velocity * fixed_delta;
 
-            // Reset forces for next frame
-            rb->force = vector3f(0, 0, 0);
-        }
+        // Reset forces for next frame
+        rb.force = vector3f(0, 0, 0);
     }
 }
 
-void PhysicsSystem::handlePlayerCollisions(rigidbody& playerRigidbody, float sphereRadius,
-    std::vector<collider*>& colliders, playerEntity* player)
+void PhysicsSystem::handlePlayerCollisions(entt::registry& registry, entt::entity playerEntity, float sphereRadius)
 {
-    if (!player) return;
+    if (!registry.valid(playerEntity)) return;
+
+    // Check if entity has required components
+    if (!registry.all_of<TransformComponent, RigidBodyComponent, PlayerComponent>(playerEntity)) return;
+
+    auto& transform = registry.get<TransformComponent>(playerEntity);
+    // rb unused here but good to know it exists
+    auto& player = registry.get<PlayerComponent>(playerEntity);
 
     // Reset ground state
-    player->update_grounded(false);
-    player->update_ground_normal(vector3f(0, 1, 0));
+    player.grounded = false;
+    player.ground_normal = vector3f(0, 1, 0);
 
-    if (colliders.empty()) return;
-
-    vector3f sphereCenter = playerRigidbody.obj.position;
+    vector3f sphereCenter = transform.position;
 
     // Check collision with each collider
-    for (auto& collider : colliders)
-    {
-        if (!collider || !collider->is_mesh_valid())
-            continue;
+    auto view = registry.view<ColliderComponent, TransformComponent>();
+    
+    for(auto entity : view) {
+        // Skip self
+        if (entity == playerEntity) continue;
+        
+        auto& collider = view.get<ColliderComponent>(entity);
+        auto& col_transform = view.get<TransformComponent>(entity);
+        
+        if (!collider.is_mesh_valid()) continue;
 
-        mesh* colliderMesh = collider->get_mesh();
-        if (!colliderMesh)
-            continue;
-
+        mesh* colliderMesh = collider.get_mesh();
+        
         // Check collision with each triangle in the mesh
         for (size_t i = 0; i < colliderMesh->vertices_len; i += 3)
         {
@@ -70,7 +75,9 @@ void PhysicsSystem::handlePlayerCollisions(rigidbody& playerRigidbody, float sph
             );
 
             // Transform triangle to world space
-            transformTriangle(triangle, collider->obj.getRotationMatrix(), collider->obj.position);
+            matrix4f rotMat;
+            rotMat.setRotationDegrees(col_transform.rotation);
+            transformTriangle(triangle, rotMat, col_transform.position);
 
             // Extrude triangle slightly for better collision detection
             extrudeTriangle(triangle);
@@ -83,24 +90,22 @@ void PhysicsSystem::handlePlayerCollisions(rigidbody& playerRigidbody, float sph
             if (facingDot <= 0)
                 continue; // Sphere is behind the triangle
 
-            // Check for collision
             vector3f collisionNormal;
             float penetrationDepth;
             if (checkSphereTriangleCollision(sphereCenter, sphereRadius, triangle,
                 collisionNormal, penetrationDepth))
             {
-                printf("Collision detected! Penetration: %f\n", penetrationDepth);
-
                 // Resolve collision by moving sphere out of triangle
-                playerRigidbody.obj.position += collisionNormal * penetrationDepth;
+                transform.position += collisionNormal * penetrationDepth;
+                sphereCenter = transform.position;
 
                 // Update ground state if this surface can be considered ground
                 vector3f gravityNormal = -gravity;
                 gravityNormal.normalize();
                 if (triangle.normal.dotProduct(gravityNormal) > 0.5f) // Angle threshold for "ground"
                 {
-                    player->update_grounded(true);
-                    player->update_ground_normal(triangle.normal);
+                    player.grounded = true;
+                    player.ground_normal = triangle.normal;
                 }
             }
         }
@@ -206,22 +211,25 @@ bool PhysicsSystem::isPointInsideTriangle(const vector3f& point, const PhysicsTr
 }
 
 bool PhysicsSystem::raycast(const vector3f& origin, const vector3f& direction, float maxDistance,
-    std::vector<collider*>& colliders, vector3f& hitPoint, vector3f& hitNormal)
+    entt::registry& registry, vector3f& hitPoint, vector3f& hitNormal)
 {
     float closestDistance = maxDistance;
     bool hit = false;
     vector3f normalizedDirection = direction;
     normalizedDirection.normalize();
 
-    for (auto& collider : colliders)
+    auto view = registry.view<ColliderComponent, TransformComponent>();
+
+    for (auto entity : view)
     {
-        if (!collider || !collider->is_mesh_valid())
+        auto& collider = view.get<ColliderComponent>(entity);
+        auto& col_transform = view.get<TransformComponent>(entity);
+
+        if (!collider.is_mesh_valid())
             continue;
 
-        mesh* colliderMesh = collider->get_mesh();
-        if (!colliderMesh)
-            continue;
-
+        mesh* colliderMesh = collider.get_mesh();
+        
         // Check ray against each triangle
         for (size_t i = 0; i < colliderMesh->vertices_len; i += 3)
         {
@@ -234,7 +242,9 @@ bool PhysicsSystem::raycast(const vector3f& origin, const vector3f& direction, f
                 colliderMesh->vertices[i + 2]
             );
 
-            transformTriangle(triangle, collider->obj.getRotationMatrix(), collider->obj.position);
+            matrix4f rotMat;
+            rotMat.setRotationDegrees(col_transform.rotation);
+            transformTriangle(triangle, rotMat, col_transform.position);
 
             // Ray-triangle intersection using Möller-Trumbore algorithm
             vector3f edge1 = triangle.v1 - triangle.v0;
@@ -271,26 +281,4 @@ bool PhysicsSystem::raycast(const vector3f& origin, const vector3f& direction, f
     }
 
     return hit;
-}
-
-bool PhysicsSystem::spherecast(const vector3f& origin, float radius, const vector3f& direction,
-    float maxDistance, std::vector<collider*>& colliders,
-    vector3f& hitPoint, vector3f& hitNormal)
-{
-    // Simple implementation: perform multiple raycasts around the sphere
-    vector3f normalizedDirection = direction;
-    normalizedDirection.normalize();
-
-    // Primary raycast along the center
-    if (raycast(origin, direction, maxDistance, colliders, hitPoint, hitNormal))
-    {
-        // Adjust hit point to account for sphere radius
-        hitPoint -= normalizedDirection * radius;
-        return true;
-    }
-
-    // Additional raycasts could be added here for more accurate spherecasting
-    // For now, this simple implementation should suffice
-
-    return false;
 }
