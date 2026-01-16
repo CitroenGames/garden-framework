@@ -58,6 +58,12 @@ private:
     glm::mat4 lightSpaceMatrix;
     bool in_shadow_pass;
 
+    // Optimization state tracking
+    GLuint current_shader_id;
+    GLuint current_bound_texture_0;
+    RenderState current_gpu_state;
+    bool global_uniforms_dirty;
+
     // Internal helper methods
     glm::mat4 convertToGLM(const matrix4f& m) const;
     Shader* getShaderForRenderState(const RenderState& state);
