@@ -1,0 +1,9 @@
+[project:spdlog]
+type = lib
+std = 11
+utf8 = true
+sources = src/**/*.cpp
+headers = include/**/*.h, include/**/*.hpp
+includes = include
+public_includes = include
+defines = SPDLOG_COMPILED_LIB
