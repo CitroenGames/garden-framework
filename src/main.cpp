@@ -29,7 +29,6 @@
 #include "world.hpp"
 #include "Graphics/renderer.hpp"
 #include "LevelManager.hpp"
-#include "AudioSystem.h"
 #include "Utils/GltfLoader.hpp"
 #include "Utils/GltfMaterialLoader.hpp"
 
@@ -197,7 +196,6 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
 int main(int argc, char* argv[])
 #endif
 {
-    TE::AudioSystem audioSystem;
     Paingine2D::CrashHandler* crashHandler = Paingine2D::CrashHandler::GetInstance();
     crashHandler->Initialize("Game");
 	EE::CLog::Init();

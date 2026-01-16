@@ -1,0 +1,7 @@
+[project:tinyobjloader]
+type = lib
+std = 11
+sources = *.cc
+headers = *.h, **/*.hpp
+includes = .
+public_includes = .

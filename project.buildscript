@@ -1,109 +1,24 @@
 [solution]
-name = sdl-test
-configurations = Debug, Release
-platforms = x64
+name = OpenGL
 
-[project:glad]
-type = lib
-sources = Thirdparty/glad/src/glad.c
-includes = Thirdparty/glad/include
-outdir[Debug|x64] = build/lib/Debug
-outdir[Release|x64] = build/lib/Release
-intdir[Debug|x64] = build/obj/glad/Debug
-intdir[Release|x64] = build/obj/glad/Release
-
-[project:tinyobjloader]
-type = lib
-sources = Thirdparty/tinyobjloader/tiny_obj_loader.cc
-includes = Thirdparty/tinyobjloader
-std = 14
-outdir[Debug|x64] = build/lib/Debug
-outdir[Release|x64] = build/lib/Release
-intdir[Debug|x64] = build/obj/tinyobjloader/Debug
-intdir[Release|x64] = build/obj/tinyobjloader/Release
-
-[project:tinygltf]
-type = lib
-sources = Thirdparty/tinygltf-2.9.6/tiny_gltf.cc
-includes = Thirdparty/tinygltf-2.9.6
-std = 14
-outdir[Debug|x64] = build/lib/Debug
-outdir[Release|x64] = build/lib/Release
-intdir[Debug|x64] = build/obj/tinygltf/Debug
-intdir[Release|x64] = build/obj/tinygltf/Release
-
-[project:spdlog]
-type = lib
-sources = Thirdparty/spdlog-1.15.3/src/spdlog.cpp, Thirdparty/spdlog-1.15.3/src/stdout_sinks.cpp, Thirdparty/spdlog-1.15.3/src/color_sinks.cpp, Thirdparty/spdlog-1.15.3/src/file_sinks.cpp, Thirdparty/spdlog-1.15.3/src/async.cpp, Thirdparty/spdlog-1.15.3/src/cfg.cpp, Thirdparty/spdlog-1.15.3/src/bundled_fmtlib_format.cpp
-includes = Thirdparty/spdlog-1.15.3/include
-std = 14
-defines = SPDLOG_COMPILED_LIB, FMT_UNICODE=0
-outdir[Debug|x64] = build/lib/Debug
-outdir[Release|x64] = build/lib/Release
-intdir[Debug|x64] = build/obj/spdlog/Debug
-intdir[Release|x64] = build/obj/spdlog/Release
-
-[project:miniaudio]
-type = lib
-sources = Thirdparty/miniaudio/3rdparty/miniaudio/miniaudio.c
-includes = Thirdparty/miniaudio/3rdparty/miniaudio
-outdir[Debug|x64] = build/lib/Debug
-outdir[Release|x64] = build/lib/Release
-intdir[Debug|x64] = build/obj/miniaudio/Debug
-intdir[Release|x64] = build/obj/miniaudio/Release
-
-[project:AudioEngine]
-type = lib
-sources = Thirdparty/miniaudio/src/**/*.cpp
-includes = Thirdparty/miniaudio/src, Thirdparty/miniaudio/3rdparty/miniaudio
-depends = miniaudio
-libs = miniaudio.lib
-libdirs[Debug|x64] = build/lib/Debug
-libdirs[Release|x64] = build/lib/Release
-std = 17
-outdir[Debug|x64] = build/lib/Debug
-outdir[Release|x64] = build/lib/Release
-intdir[Debug|x64] = build/obj/AudioEngine/Debug
-intdir[Release|x64] = build/obj/AudioEngine/Release
-
-[project:glm]
-type = lib
-sources = Thirdparty/glm/glm/detail/*.cpp, Thirdparty/glm/glm/ext/*.cpp, Thirdparty/glm/glm/gtc/*.cpp, Thirdparty/glm/glm/gtx/*.cpp
-includes = Thirdparty/glm
-outdir[Debug|x64] = build/lib/Debug
-outdir[Release|x64] = build/lib/Release
-intdir[Debug|x64] = build/obj/glm/Debug
-intdir[Release|x64] = build/obj/glm/Release
-
-[project:freetype]
-type = lib
-sources = Thirdparty/freetype-master/src/autofit/autofit.c, Thirdparty/freetype-master/src/base/ftbase.c, Thirdparty/freetype-master/src/base/ftbbox.c, Thirdparty/freetype-master/src/base/ftbdf.c, Thirdparty/freetype-master/src/base/ftbitmap.c, Thirdparty/freetype-master/src/base/ftcid.c, Thirdparty/freetype-master/src/base/ftfstype.c, Thirdparty/freetype-master/src/base/ftgasp.c, Thirdparty/freetype-master/src/base/ftglyph.c, Thirdparty/freetype-master/src/base/ftgxval.c, Thirdparty/freetype-master/src/base/ftinit.c, Thirdparty/freetype-master/src/base/ftmm.c, Thirdparty/freetype-master/src/base/ftotval.c, Thirdparty/freetype-master/src/base/ftpatent.c, Thirdparty/freetype-master/src/base/ftpfr.c, Thirdparty/freetype-master/src/base/ftstroke.c, Thirdparty/freetype-master/src/base/ftsynth.c, Thirdparty/freetype-master/src/base/fttype1.c, Thirdparty/freetype-master/src/base/ftwinfnt.c, Thirdparty/freetype-master/src/bdf/bdf.c, Thirdparty/freetype-master/src/bzip2/ftbzip2.c, Thirdparty/freetype-master/src/cache/ftcache.c, Thirdparty/freetype-master/src/cff/cff.c, Thirdparty/freetype-master/src/cid/type1cid.c, Thirdparty/freetype-master/src/gzip/ftgzip.c, Thirdparty/freetype-master/src/lzw/ftlzw.c, Thirdparty/freetype-master/src/pcf/pcf.c, Thirdparty/freetype-master/src/pfr/pfr.c, Thirdparty/freetype-master/src/psaux/psaux.c, Thirdparty/freetype-master/src/pshinter/pshinter.c, Thirdparty/freetype-master/src/psnames/psnames.c, Thirdparty/freetype-master/src/raster/raster.c, Thirdparty/freetype-master/src/sdf/sdf.c, Thirdparty/freetype-master/src/sfnt/sfnt.c, Thirdparty/freetype-master/src/smooth/smooth.c, Thirdparty/freetype-master/src/svg/svg.c, Thirdparty/freetype-master/src/truetype/truetype.c, Thirdparty/freetype-master/src/type1/type1.c, Thirdparty/freetype-master/src/type42/type42.c, Thirdparty/freetype-master/src/winfonts/winfnt.c, Thirdparty/freetype-master/builds/windows/ftsystem.c, Thirdparty/freetype-master/builds/windows/ftdebug.c, Thirdparty/freetype-master/src/base/ftver.rc
-includes = Thirdparty/freetype-master/include, build/include, build/include/freetype/config
-defines = FT2_BUILD_LIBRARY, _CRT_SECURE_NO_WARNINGS, _CRT_NONSTDC_NO_WARNINGS
-outdir[Debug|x64] = build/lib/Debug
-outdir[Release|x64] = build/lib/Release
-intdir[Debug|x64] = build/obj/freetype/Debug
-intdir[Release|x64] = build/obj/freetype/Release
+include = thirdparty/3rdparty.buildscript
 
 [project:sdl-test]
 type = exe
+if(Windows)
+{
+    subsystem = Windows
+}
 sources = src/**/*.cpp
-headers = src/**/*.hpp
-includes = src, ., Thirdparty/entt-3.16.0/src, Thirdparty/glad/include, Thirdparty/tinyobjloader, Thirdparty/tinygltf-2.9.6, Thirdparty/spdlog-1.15.3/include, Thirdparty/miniaudio/src, Thirdparty/miniaudio/3rdparty/miniaudio, Thirdparty/glm, Thirdparty/freetype-master/include, build/include, Thirdparty/include, Thirdparty/SDL2/include
+headers = src/**/*.h
+includes = src, thirdparty/include, .
+target_link_libraries(
+    PRIVATE SDL2
+    PRIVATE GLM
+    PRIVATE glad
+    PRIVATE tinygltf
+    PRIVATE tinyobjloader
+    PRIVATE spdlog
+)
 std = 20
-subsystem = Windows
-warning_level = Level3
-multiprocessor = true
-depends = glad, tinyobjloader, tinygltf, spdlog, AudioEngine, glm, freetype
-defines[x64] = _CRT_SECURE_NO_WARNINGS, WIN32_LEAN_AND_MEAN, SDL_MAIN_HANDLED, NOMINMAX, FMT_UNICODE=0
-
-libdirs[Debug|x64] = build/lib/Debug
-libdirs[Release|x64] = build/lib/Release
-libdirs = Thirdparty/SDL2/lib/x64
-libs = glad.lib, tinyobjloader.lib, tinygltf.lib, spdlog.lib, AudioEngine.lib, glm.lib, freetype.lib, SDL2.lib, SDL2main.lib, opengl32.lib
-libs[x64] = kernel32.lib, user32.lib, gdi32.lib, winspool.lib, comdlg32.lib, advapi32.lib, shell32.lib, ole32.lib, oleaut32.lib, uuid.lib, odbc32.lib, odbccp32.lib
-
-outdir[Debug|x64] = build/Debug
-outdir[Release|x64] = build/Release
-intdir[Debug|x64] = build/obj/sdl-test/Debug
-intdir[Release|x64] = build/obj/sdl-test/Release
+utf8 = true

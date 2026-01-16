@@ -1,0 +1,4 @@
+[project:GLM]
+type = lib
+headers = glm/**/*.hpp
+public_includes = .
