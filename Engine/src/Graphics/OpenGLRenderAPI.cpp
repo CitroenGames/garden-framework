@@ -3,7 +3,7 @@
 #include "Components/camera.hpp"
 #include "Graphics/Shader.hpp"
 #include "Graphics/ShaderManager.hpp"
-#include "Graphics/GPUMesh.hpp"
+#include "Graphics/OpenGLMesh.hpp"
 #include <stdio.h>
 
 #define STB_IMAGE_IMPLEMENTATION
@@ -14,7 +14,8 @@ OpenGLRenderAPI::OpenGLRenderAPI()
       projection_matrix(1.0f), view_matrix(1.0f), current_model_matrix(1.0f),
       current_light_direction(0.0f, -1.0f, 0.0f), current_light_ambient(0.2f, 0.2f, 0.2f),
       current_light_diffuse(0.8f, 0.8f, 0.8f), lighting_enabled(true), shader_manager(nullptr),
-      post_processing(nullptr), skybox(nullptr)
+      post_processing(nullptr), skybox(nullptr),
+      shadowMapFBO(0), shadowMapTexture(0), lightSpaceMatrix(1.0f), in_shadow_pass(false)
 {
 }
 
@@ -45,6 +46,29 @@ bool OpenGLRenderAPI::initialize(WindowHandle window, int width, int height, flo
     
     // Load Sky shader
     shader_manager->loadShader("sky", "assets/shaders/sky.vert", "assets/shaders/sky.frag");
+
+    // Load Shadow shader
+    shader_manager->loadShader("shadow", "assets/shaders/shadow.vert", "assets/shaders/shadow.frag");
+
+    // Configure Shadow Map FBO
+    glGenFramebuffers(1, &shadowMapFBO);
+    
+    glGenTextures(1, &shadowMapTexture);
+    glBindTexture(GL_TEXTURE_2D, shadowMapTexture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT, 
+                 SHADOW_WIDTH, SHADOW_HEIGHT, 0, GL_DEPTH_COMPONENT, GL_FLOAT, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER); 
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+    float borderColor[] = { 1.0f, 1.0f, 1.0f, 1.0f };
+    glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderColor);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, shadowMapFBO);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, shadowMapTexture, 0);
+    glDrawBuffer(GL_NONE);
+    glReadBuffer(GL_NONE);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
     // Initialize PostProcessing
     post_processing = new PostProcessing();
@@ -86,6 +110,18 @@ void OpenGLRenderAPI::shutdown()
     {
         delete skybox;
         skybox = nullptr;
+    }
+
+    if (shadowMapFBO) 
+    {
+        glDeleteFramebuffers(1, &shadowMapFBO);
+        shadowMapFBO = 0;
+    }
+    
+    if (shadowMapTexture) 
+    {
+        glDeleteTextures(1, &shadowMapTexture);
+        shadowMapTexture = 0;
     }
 
     // Note: No need to disable GL capabilities during shutdown
@@ -381,6 +417,66 @@ void OpenGLRenderAPI::deleteTexture(TextureHandle texture)
     }
 }
 
+void OpenGLRenderAPI::beginShadowPass(const vector3f& lightDir)
+{
+    in_shadow_pass = true;
+    
+    // Set up light space matrix
+    // Orthographic projection for directional light
+    float near_plane = 1.0f, far_plane = 200.0f;
+    float ortho_size = 50.0f; // Adjust based on scene scale
+    glm::mat4 lightProjection = glm::ortho(-ortho_size, ortho_size, -ortho_size, ortho_size, near_plane, far_plane);
+    
+    // View matrix looking from light direction
+    // For directional light, position can be arbitrary but should cover the scene
+    // We position it 'far away' along the reverse light direction
+    glm::vec3 direction = glm::normalize(glm::vec3(lightDir.X, lightDir.Y, lightDir.Z));
+    // Convention: light direction points FROM light, so negate to look AT origin
+    // Wait, the level data stores direction vector (e.g., 0, -1, 0 for down). 
+    // So light comes FROM -direction * distance.
+    glm::vec3 lightPos = -direction * 100.0f; 
+    
+    glm::mat4 lightView = glm::lookAt(lightPos, 
+                                      glm::vec3(0.0f, 0.0f, 0.0f), 
+                                      glm::vec3(0.0f, 1.0f, 0.0f));
+                                      
+    lightSpaceMatrix = lightProjection * lightView;
+    
+    // Bind FBO and set viewport
+    glViewport(0, 0, SHADOW_WIDTH, SHADOW_HEIGHT);
+    glBindFramebuffer(GL_FRAMEBUFFER, shadowMapFBO);
+    glClear(GL_DEPTH_BUFFER_BIT);
+    
+    // Enable front-face culling to fix peter panning
+    glCullFace(GL_FRONT);
+}
+
+void OpenGLRenderAPI::endShadowPass()
+{
+    in_shadow_pass = false;
+    
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, viewport_width, viewport_height);
+    
+    // Restore back-face culling
+    glCullFace(GL_BACK);
+}
+
+void OpenGLRenderAPI::bindShadowMap(int textureUnit)
+{
+    glActiveTexture(GL_TEXTURE0 + textureUnit);
+    glBindTexture(GL_TEXTURE_2D, shadowMapTexture);
+}
+
+matrix4f OpenGLRenderAPI::getLightSpaceMatrix()
+{
+    matrix4f m;
+    const float* src = glm::value_ptr(lightSpaceMatrix);
+    float* dst = m.pointer();
+    for(int i=0; i<16; ++i) dst[i] = src[i];
+    return m;
+}
+
 void OpenGLRenderAPI::renderMesh(const mesh& m, const RenderState& state)
 {
     if (!m.visible || !m.is_valid || m.vertices_len == 0) return;
@@ -388,7 +484,7 @@ void OpenGLRenderAPI::renderMesh(const mesh& m, const RenderState& state)
     // Ensure mesh is uploaded to GPU (lazy upload)
     if (!m.gpu_mesh || !m.gpu_mesh->isUploaded())
     {
-        const_cast<mesh&>(m).uploadToGPU();
+        const_cast<mesh&>(m).uploadToGPU(this);
         if (!m.gpu_mesh || !m.gpu_mesh->isUploaded())
         {
             return; // Upload failed
@@ -400,7 +496,17 @@ void OpenGLRenderAPI::renderMesh(const mesh& m, const RenderState& state)
     // This function only handles the simple single-texture rendering path.
 
     // Get appropriate shader for this render state
-    Shader* shader = getShaderForRenderState(state);
+    Shader* shader = nullptr;
+    
+    if (in_shadow_pass)
+    {
+        shader = shader_manager->getShader("shadow");
+    }
+    else
+    {
+        shader = getShaderForRenderState(state);
+    }
+    
     if (!shader || !shader->isValid())
     {
         return; // No valid shader
@@ -409,39 +515,57 @@ void OpenGLRenderAPI::renderMesh(const mesh& m, const RenderState& state)
     // Bind shader
     shader->use();
 
-    // Set matrix uniforms
-    shader->setUniform("uModel", current_model_matrix);
-    shader->setUniform("uView", view_matrix);
-    shader->setUniform("uProjection", projection_matrix);
-
-    // Set lighting uniforms
-    shader->setUniform("uLightDir", current_light_direction);
-    shader->setUniform("uLightAmbient", current_light_ambient);
-    shader->setUniform("uLightDiffuse", current_light_diffuse);
-
-    // Set color uniform
-    shader->setUniform("uColor", glm::vec3(state.color.X, state.color.Y, state.color.Z));
-
-    // Bind texture if available
-    if (m.texture_set && m.texture != INVALID_TEXTURE)
+    if (in_shadow_pass)
     {
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, (GLuint)m.texture);
-        shader->setUniform("uTexture", 0);
-        shader->setUniform("uUseTexture", true);
+        shader->setUniform("uLightSpaceMatrix", lightSpaceMatrix);
+        shader->setUniform("uModel", current_model_matrix);
     }
     else
     {
-        shader->setUniform("uUseTexture", false);
+        // Set matrix uniforms
+        shader->setUniform("uModel", current_model_matrix);
+        shader->setUniform("uView", view_matrix);
+        shader->setUniform("uProjection", projection_matrix);
+        shader->setUniform("uLightSpaceMatrix", lightSpaceMatrix);
+
+        // Set lighting uniforms
+        shader->setUniform("uLightDir", current_light_direction);
+        shader->setUniform("uLightAmbient", current_light_ambient);
+        shader->setUniform("uLightDiffuse", current_light_diffuse);
+
+        // Set color uniform
+        shader->setUniform("uColor", glm::vec3(state.color.X, state.color.Y, state.color.Z));
+
+        // Bind texture if available (Unit 0)
+        if (m.texture_set && m.texture != INVALID_TEXTURE)
+        {
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, (GLuint)m.texture);
+            shader->setUniform("uTexture", 0);
+            shader->setUniform("uUseTexture", true);
+        }
+        else
+        {
+            shader->setUniform("uUseTexture", false);
+        }
+        
+        // Bind Shadow Map (Unit 1)
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, shadowMapTexture);
+        shader->setUniform("uShadowMap", 1);
     }
 
     // Apply render state (culling, blending, depth)
     applyRenderState(state);
 
     // Bind VAO and draw
-    m.gpu_mesh->bind();
-    glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(m.gpu_mesh->getVertexCount()));
-    m.gpu_mesh->unbind();
+    OpenGLMesh* glMesh = dynamic_cast<OpenGLMesh*>(m.gpu_mesh);
+    if (glMesh)
+    {
+        glMesh->bind();
+        glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(glMesh->getVertexCount()));
+        glMesh->unbind();
+    }
 
     // Unbind texture
     if (m.texture_set && m.texture != INVALID_TEXTURE)
@@ -472,7 +596,7 @@ void OpenGLRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t
     // Ensure mesh is uploaded to GPU (lazy upload)
     if (!m.gpu_mesh || !m.gpu_mesh->isUploaded())
     {
-        const_cast<mesh&>(m).uploadToGPU();
+        const_cast<mesh&>(m).uploadToGPU(this);
         if (!m.gpu_mesh || !m.gpu_mesh->isUploaded())
         {
             return; // Upload failed
@@ -480,7 +604,17 @@ void OpenGLRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t
     }
 
     // Get appropriate shader for this render state
-    Shader* shader = getShaderForRenderState(state);
+    Shader* shader = nullptr;
+    
+    if (in_shadow_pass)
+    {
+        shader = shader_manager->getShader("shadow");
+    }
+    else
+    {
+        shader = getShaderForRenderState(state);
+    }
+    
     if (!shader || !shader->isValid())
     {
         return; // No valid shader
@@ -489,50 +623,68 @@ void OpenGLRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t
     // Bind shader
     shader->use();
 
-    // Set matrix uniforms
-    shader->setUniform("uModel", current_model_matrix);
-    shader->setUniform("uView", view_matrix);
-    shader->setUniform("uProjection", projection_matrix);
-
-    // Set lighting uniforms
-    shader->setUniform("uLightDir", current_light_direction);
-    shader->setUniform("uLightAmbient", current_light_ambient);
-    shader->setUniform("uLightDiffuse", current_light_diffuse);
-
-    // Set color uniform
-    shader->setUniform("uColor", glm::vec3(state.color.X, state.color.Y, state.color.Z));
-
-    // Texture binding logic:
-    // - For single-texture meshes: bind m.texture
-    // - For multi-material meshes: texture already bound by renderer.hpp, just enable it
-    if (!m.uses_material_ranges && m.texture_set && m.texture != INVALID_TEXTURE)
+    if (in_shadow_pass)
     {
-        // Single-texture mode: bind the mesh's texture
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, (GLuint)m.texture);
-        shader->setUniform("uTexture", 0);
-        shader->setUniform("uUseTexture", true);
-    }
-    else if (m.uses_material_ranges)
-    {
-        // Multi-material mode: texture already bound by renderer.hpp
-        // Just tell the shader to use whatever is bound at texture unit 0
-        shader->setUniform("uTexture", 0);
-        shader->setUniform("uUseTexture", true);
+        shader->setUniform("uLightSpaceMatrix", lightSpaceMatrix);
+        shader->setUniform("uModel", current_model_matrix);
     }
     else
     {
-        // No texture available
-        shader->setUniform("uUseTexture", false);
+        // Set matrix uniforms
+        shader->setUniform("uModel", current_model_matrix);
+        shader->setUniform("uView", view_matrix);
+        shader->setUniform("uProjection", projection_matrix);
+        shader->setUniform("uLightSpaceMatrix", lightSpaceMatrix);
+
+        // Set lighting uniforms
+        shader->setUniform("uLightDir", current_light_direction);
+        shader->setUniform("uLightAmbient", current_light_ambient);
+        shader->setUniform("uLightDiffuse", current_light_diffuse);
+
+        // Set color uniform
+        shader->setUniform("uColor", glm::vec3(state.color.X, state.color.Y, state.color.Z));
+
+        // Texture binding logic:
+        // - For single-texture meshes: bind m.texture
+        // - For multi-material meshes: texture already bound by renderer.hpp, just enable it
+        if (!m.uses_material_ranges && m.texture_set && m.texture != INVALID_TEXTURE)
+        {
+            // Single-texture mode: bind the mesh's texture
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, (GLuint)m.texture);
+            shader->setUniform("uTexture", 0);
+            shader->setUniform("uUseTexture", true);
+        }
+        else if (m.uses_material_ranges)
+        {
+            // Multi-material mode: texture already bound by renderer.hpp
+            // Just tell the shader to use whatever is bound at texture unit 0
+            shader->setUniform("uTexture", 0);
+            shader->setUniform("uUseTexture", true);
+        }
+        else
+        {
+            // No texture available
+            shader->setUniform("uUseTexture", false);
+        }
+        
+        // Bind Shadow Map (Unit 1)
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, shadowMapTexture);
+        shader->setUniform("uShadowMap", 1);
     }
 
     // Apply render state (culling, blending, depth)
     applyRenderState(state);
 
     // Bind VAO and draw range
-    m.gpu_mesh->bind();
-    glDrawArrays(GL_TRIANGLES, static_cast<GLint>(start_vertex), static_cast<GLsizei>(vertex_count));
-    m.gpu_mesh->unbind();
+    OpenGLMesh* glMesh = dynamic_cast<OpenGLMesh*>(m.gpu_mesh);
+    if (glMesh)
+    {
+        glMesh->bind();
+        glDrawArrays(GL_TRIANGLES, static_cast<GLint>(start_vertex), static_cast<GLsizei>(vertex_count));
+        glMesh->unbind();
+    }
 
     // Unbind texture only for single-texture meshes (multi-material handled by renderer.hpp)
     if (!m.uses_material_ranges && m.texture_set && m.texture != INVALID_TEXTURE)
@@ -647,18 +799,6 @@ void OpenGLRenderAPI::setLighting(const vector3f& ambient, const vector3f& diffu
     current_light_direction = glm::normalize(current_light_direction);
 }
 
-// Factory implementation
-IRenderAPI* CreateRenderAPI(RenderAPIType type)
-{
-    switch (type)
-    {
-    case RenderAPIType::OpenGL:
-        return new OpenGLRenderAPI();
-    default:
-        return nullptr;
-    }
-}
-
 void OpenGLRenderAPI::multiplyMatrix(const matrix4f& matrix)
 {
     glm::mat4 mat = convertToGLM(matrix);
@@ -733,6 +873,11 @@ glm::mat4 OpenGLRenderAPI::convertToGLM(const matrix4f& m) const
 {
     const float* ptr = m.pointer();
     return glm::make_mat4(ptr);
+}
+
+IGPUMesh* OpenGLRenderAPI::createMesh()
+{
+    return new OpenGLMesh();
 }
 
 // Get appropriate shader for render state

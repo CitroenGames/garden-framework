@@ -3,7 +3,7 @@
 #include <vector>
 #include <string>
 #include "Graphics/RenderAPI.hpp"
-#include "Graphics/GPUMesh.hpp"
+#include "Graphics/IGPUMesh.hpp"
 #include "Utils/ObjLoader.hpp"
 #include "Utils/GltfLoader.hpp"
 
@@ -43,7 +43,7 @@ public:
     bool is_valid;
 
     // GPU-side mesh data (VAO/VBO)
-    GPUMesh* gpu_mesh;
+    IGPUMesh* gpu_mesh;
 
     // Single texture mode (for backward compatibility)
     TextureHandle texture;
@@ -174,7 +174,7 @@ public:
     };
 
     // Upload mesh data to GPU (creates GPUMesh if needed)
-    void uploadToGPU()
+    void uploadToGPU(IRenderAPI* api)
     {
         if (!is_valid || !vertices || vertices_len == 0)
         {
@@ -182,10 +182,16 @@ public:
             return;
         }
 
+        if (!api)
+        {
+            printf("mesh::uploadToGPU() - Invalid RenderAPI\n");
+            return;
+        }
+
         // Create GPUMesh if it doesn't exist
         if (!gpu_mesh)
         {
-            gpu_mesh = new GPUMesh();
+            gpu_mesh = api->createMesh();
         }
 
         // Upload vertex data to GPU

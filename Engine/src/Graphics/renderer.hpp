@@ -89,6 +89,23 @@ public:
             return;
         }
 
+        auto view = registry.view<MeshComponent, TransformComponent>();
+
+        // 1. Shadow Pass
+        render_api->beginShadowPass(light_direction);
+        for(auto entity : view) {
+            auto& mesh_comp = view.get<MeshComponent>(entity);
+            const auto& t = view.get<TransformComponent>(entity);
+            
+            if (mesh_comp.m_mesh && mesh_comp.m_mesh->visible)
+            {
+                // Render geometry for shadow map
+                render_mesh_with_api(*mesh_comp.m_mesh, t, render_api);
+            }
+        }
+        render_api->endShadowPass();
+
+        // 2. Main Render Pass
         // Begin frame
         render_api->beginFrame();
         
@@ -106,7 +123,7 @@ public:
         );
 
         // Render all meshes with transforms
-        auto view = registry.view<MeshComponent, TransformComponent>();
+        // view is already valid from above
         for(auto entity : view) {
             auto& mesh_comp = view.get<MeshComponent>(entity);
             const auto& t = view.get<TransformComponent>(entity);
