@@ -1,0 +1,5 @@
+[project:entt]
+type = interface
+headers = entt.hpp
+public_includes = src
+includes = src

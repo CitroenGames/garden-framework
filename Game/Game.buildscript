@@ -1,0 +1,14 @@
+[project:Game]
+type = exe
+if(Windows)
+{
+    subsystem = Windows
+}
+sources = src/**/*.cpp
+headers = src/**/*.h
+includes = src, thirdparty/include, .
+target_link_libraries(
+    PRIVATE Engine
+)
+std = 20
+utf8 = true

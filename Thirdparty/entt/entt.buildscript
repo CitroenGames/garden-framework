@@ -1,5 +1,0 @@
-[project:entt]
-type = lib
-headers = entt.hpp
-public_includes = src
-includes = src
