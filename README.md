@@ -1,31 +1,57 @@
 # garden-opengl
 
-## description
+## Description
 
-A simple 3D renderer written in C++ using OpenGL 1.3.
+A 3D rendering engine and game testbed written in C++ using OpenGL 4.6.
 
 ![screenshot](screen.png)
 
-## how the project is organized
+## Features
 
-| script             | function                                                                                                                                                |
-| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `playerEntity.hpp` | Class that manages the player by handling the input through a callback, updating the player position and camera.                                        |
-| `gameObject.hpp`   | Unity knockoff entity. It's basically an object class in the game world, with position, rotation, and so on. Components can be attached to gameObjects. |
-| `mesh.hpp`         | First component I've made. Attaches to a gameObject and keeps track of mesh data to be rendered.                                                        |
-| `rigidbody.hpp`    | Physics component. Whenever attached to a gameObject, that gameObject will receive physics (just gravity for now).                                      |
-| `world.hpp`        | Generic world class. It's meant to be static but I guess there aren't statics in C++. **Handles collisions and keeps track of all entities.**           |
-| `camera.hpp`       | Simple camera class with some utility functions. It's managed by the player.                                                                            |
-| `renderer.hpp`     | Drawing mesh logic.                                                                                                                                     |
+*   **Modern OpenGL 4.6 Renderer**: Uses shaders, VAOs, and modern pipeline practices.
+*   **Directional Lighting**: Configurable ambient, diffuse, and directional lighting.
+*   **Data-Driven Levels**: Levels are loaded from JSON files (`levels/main.level.json`).
+*   **Model Support**: Loads `.gltf`/`.glb` and `.obj` models.
+*   **Entity Component System (ECS)**: Uses `entt` for efficient entity management.
+*   **Physics**: Basic AABB collision and gravity.
+*   **Input System**: Abstracted input handling supporting keyboard and mouse.
 
-## what's new in this fork
+## Build System
 
-* Added support for loading `.obj` and `.gltf` models (previously models were hardcoded using an `obj2cpp` converter).
-* Improved overall code structure.
-* Replaced the old Makefile with a modern CMake build system.
-* Separated the renderer logic behind a proper API (previously hardcoded directly into the game logic).
+This project uses **Sighmake** for build configuration.
 
-## license
+### Prerequisites
+*   Visual Studio 2022 (MSVC)
+*   Sighmake (included or in path)
+
+### How to Build
+1.  Run `Generate SLN.bat` to generate the Visual Studio Solution (`OpenGL_.slnx` or `.sln`).
+2.  Open the solution in Visual Studio.
+3.  Build and Run (Release x64 recommended).
+
+## Level Format (.json)
+
+Levels are defined in JSON format. Example configuration for lighting:
+
+```json
+"lighting": {
+  "ambient": { "r": 0.2, "g": 0.2, "b": 0.2 },
+  "diffuse": { "r": 0.8, "g": 0.8, "b": 0.8 },
+  "direction": { "x": 0.0, "y": -1.0, "z": -0.5 }
+}
+```
+
+## Project Structure
+
+| Component | Function |
+| :--- | :--- |
+| **Engine/** | Core engine code (Graphics, Input, Physics, ECS). |
+| **Game/** | Game-specific logic and entry point. |
+| **assets/** | Shaders (`.vert`, `.frag`) and other raw assets. |
+| **levels/** | JSON level definitions. |
+| **models/** | 3D models and textures. |
+
+## License
 
 ```
            DO WHAT THE FUCK YOU WANT TO PUBLIC LICENSE
