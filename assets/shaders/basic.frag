@@ -8,7 +8,7 @@ out vec4 FragColor;
 
 uniform sampler2D uTexture;
 uniform bool uUseTexture;
-uniform vec3 uLightPos;
+uniform vec3 uLightDir;
 uniform vec3 uLightAmbient;
 uniform vec3 uLightDiffuse;
 uniform vec3 uColor;
@@ -16,7 +16,7 @@ uniform vec3 uColor;
 void main()
 {
     vec3 norm = normalize(Normal);
-    vec3 lightDir = normalize(uLightPos - FragPos);
+    vec3 lightDir = normalize(-uLightDir);
     float diff = max(dot(norm, lightDir), 0.0);
 
     vec3 ambient = uLightAmbient;

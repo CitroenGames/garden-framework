@@ -1,25 +1,6 @@
 [solution]
 name = OpenGL
 
-include = thirdparty/3rdparty.buildscript
+include = Engine/Engine.buildscript
+include = Game/Game.buildscript
 
-[project:sdl-test]
-type = exe
-if(Windows)
-{
-    subsystem = Windows
-}
-sources = src/**/*.cpp
-headers = src/**/*.h
-includes = src, thirdparty/include, .
-target_link_libraries(
-    PRIVATE SDL2
-    PRIVATE GLM
-    PRIVATE glad
-    PRIVATE tinygltf
-    PRIVATE tinyobjloader
-    PRIVATE spdlog
-    PRIVATE entt
-)
-std = 20
-utf8 = true

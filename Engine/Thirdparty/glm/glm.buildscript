@@ -1,0 +1,4 @@
+[project:GLM]
+type = interface
+headers = glm/**/*.hpp
+public_includes = .

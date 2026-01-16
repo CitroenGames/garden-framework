@@ -1,0 +1,19 @@
+include = thirdparty/3rdparty.buildscript
+
+[project:Engine]
+type = lib
+sources = src/**/*.cpp
+headers = src/**/*.h
+public_includes = src, thirdparty/include, .
+includes = src, thirdparty/include, .
+target_link_libraries(
+    PUBLIC SDL2
+    PUBLIC GLM
+    PUBLIC glad
+    PUBLIC tinygltf
+    PUBLIC tinyobjloader
+    PUBLIC spdlog
+    PUBLIC entt
+)
+std = 20
+utf8 = true
