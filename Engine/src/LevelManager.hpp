@@ -4,16 +4,13 @@
 #include <vector>
 #include <fstream>
 #include <memory>
-#include "irrlicht/vector3.h"
-#include "Components/Components.hpp" 
+#include <glm/glm.hpp>
+#include "Components/Components.hpp"
 #include <entt/entt.hpp>
 
 // Forward declarations
 class world;
 class IRenderAPI;
-
-using namespace irr;
-using namespace core;
 
 // Entity types for serialization
 enum class EntityType
@@ -34,9 +31,9 @@ struct LevelEntity
     EntityType type;
 
     // Transform data
-    vector3f position;
-    vector3f rotation;
-    vector3f scale;
+    glm::vec3 position;
+    glm::vec3 rotation;
+    glm::vec3 scale;
 
     // Component data
     std::string mesh_path;                  // Path to OBJ/glTF/GLB file
@@ -64,7 +61,7 @@ struct LevelEntity
 
     // Player representation specific
     std::string tracked_player_name;  // Name of player to track
-    vector3f position_offset;
+    glm::vec3 position_offset;
 
     LevelEntity()
         : type(EntityType::Static)
@@ -96,13 +93,13 @@ struct LevelMetadata
     int entity_count;
 
     // World settings
-    vector3f gravity;
+    glm::vec3 gravity;
     float fixed_delta;
 
     // Lighting
-    vector3f ambient_light;
-    vector3f diffuse_light;
-    vector3f light_direction;
+    glm::vec3 ambient_light;
+    glm::vec3 diffuse_light;
+    glm::vec3 light_direction;
 
     LevelMetadata()
         : level_name("Untitled Level")

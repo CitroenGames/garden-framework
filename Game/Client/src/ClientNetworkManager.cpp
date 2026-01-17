@@ -336,7 +336,7 @@ void ClientNetworkManager::handleSpawnPlayer(BitReader& reader)
     NetworkSerializer::deserialize(reader, msg);
 
     LOG_ENGINE_INFO("Player spawned: client_id={0}, entity_id={1}, pos=({2},{3},{4})",
-        msg.client_id, msg.entity_id, msg.position.X, msg.position.Y, msg.position.Z);
+        msg.client_id, msg.entity_id, msg.position.x, msg.position.y, msg.position.z);
 
     // Create entity
     entt::entity entity = game_world->registry.create();

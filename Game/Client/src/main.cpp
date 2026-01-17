@@ -65,7 +65,7 @@ void update_player_representations(entt::registry& registry, bool is_freecam)
             trans.position = target_trans.position + pr.position_offset;
             
             // Sync rotation (Y only typically for character representation)
-            trans.rotation.Y = target_trans.rotation.Y;
+            trans.rotation.y = target_trans.rotation.y;
             // Or if we want full rotation sync:
             // trans.rotation = target_trans.rotation;
         }
@@ -241,8 +241,8 @@ int main(int argc, char* argv[])
             if (input_manager->is_key_held(SDL_SCANCODE_E)) input_state.buttons |= InputFlags::USE;
 
             // Get camera rotation from world camera
-            input_state.camera_yaw = _world.world_camera.rotation.Y;
-            input_state.camera_pitch = _world.world_camera.rotation.X;
+            input_state.camera_yaw = _world.world_camera.rotation.y;
+            input_state.camera_pitch = _world.world_camera.rotation.x;
             input_state.move_forward = 0.0f;
             input_state.move_right = 0.0f;
 
@@ -271,7 +271,7 @@ int main(int argc, char* argv[])
         // Fall detection (only when controlling player)
         if (!player_controller->isFreecamMode() && _world.registry.valid(player_entity)) {
              auto& t = _world.registry.get<TransformComponent>(player_entity);
-             if (t.position.Y < -50) // Increased threshold
+             if (t.position.y < -50) // Increased threshold
                 quit_game(0);
         }
 

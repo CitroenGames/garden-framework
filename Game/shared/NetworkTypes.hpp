@@ -5,22 +5,22 @@
 #include <cstdint>
 #include <string>
 #include <unordered_map>
-#include "irrlicht/vector3.h"
+#include <glm/glm.hpp>
 #include "enet.h"
 
 // Component snapshot - represents the state of an entity at a specific tick
 struct ComponentSnapshot
 {
-    irr::core::vector3f position = irr::core::vector3f(0, 0, 0);
-    irr::core::vector3f velocity = irr::core::vector3f(0, 0, 0);
+    glm::vec3 position = glm::vec3(0, 0, 0);
+    glm::vec3 velocity = glm::vec3(0, 0, 0);
     bool grounded = false;
-    irr::core::vector3f ground_normal = irr::core::vector3f(0, 1, 0);
+    glm::vec3 ground_normal = glm::vec3(0, 1, 0);
 
     // Comparison for delta compression
     bool operator==(const ComponentSnapshot& other) const {
         const float epsilon = 0.001f;
-        return position.getDistanceFrom(other.position) < epsilon &&
-               velocity.getDistanceFrom(other.velocity) < epsilon &&
+        return glm::distance(position, other.position) < epsilon &&
+               glm::distance(velocity, other.velocity) < epsilon &&
                grounded == other.grounded;
     }
 

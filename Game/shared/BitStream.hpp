@@ -6,7 +6,7 @@
 #include <vector>
 #include <cstring>
 #include <algorithm>
-#include "irrlicht/vector3.h"
+#include <glm/glm.hpp>
 
 // Bit-level writer for efficient network serialization
 class BitWriter
@@ -70,15 +70,15 @@ public:
         writeUInt32(bits);
     }
 
-    // Write a irr::core::vector3f
-    void writeVector3f(const irr::core::vector3f& v) {
-        writeFloat(v.X);
-        writeFloat(v.Y);
-        writeFloat(v.Z);
+    // Write a glm::vec3
+    void writeVector3f(const glm::vec3& v) {
+        writeFloat(v.x);
+        writeFloat(v.y);
+        writeFloat(v.z);
     }
 
-    // Write a compressed irr::core::vector3f (quantized to range with specified precision)
-    void writeVector3f_compressed(const irr::core::vector3f& v, float min_val, float max_val, size_t bits_per_component) {
+    // Write a compressed glm::vec3 (quantized to range with specified precision)
+    void writeVector3f_compressed(const glm::vec3& v, float min_val, float max_val, size_t bits_per_component) {
         auto quantize = [](float value, float min_v, float max_v, size_t bits) -> uint32_t {
             float normalized = (value - min_v) / (max_v - min_v);
             normalized = (std::max)(0.0f, (std::min)(1.0f, normalized));
@@ -86,9 +86,9 @@ public:
             return static_cast<uint32_t>(normalized * max_value);
         };
 
-        writeBits(quantize(v.X, min_val, max_val, bits_per_component), bits_per_component);
-        writeBits(quantize(v.Y, min_val, max_val, bits_per_component), bits_per_component);
-        writeBits(quantize(v.Z, min_val, max_val, bits_per_component), bits_per_component);
+        writeBits(quantize(v.x, min_val, max_val, bits_per_component), bits_per_component);
+        writeBits(quantize(v.y, min_val, max_val, bits_per_component), bits_per_component);
+        writeBits(quantize(v.z, min_val, max_val, bits_per_component), bits_per_component);
     }
 
     // Write a boolean
@@ -198,27 +198,27 @@ public:
         return result;
     }
 
-    // Read a irr::core::vector3f
-    irr::core::vector3f readVector3f() {
-        irr::core::vector3f result;
-        result.X = readFloat();
-        result.Y = readFloat();
-        result.Z = readFloat();
+    // Read a glm::vec3
+    glm::vec3 readVector3f() {
+        glm::vec3 result;
+        result.x = readFloat();
+        result.y = readFloat();
+        result.z = readFloat();
         return result;
     }
 
-    // Read a compressed irr::core::vector3f
-    irr::core::vector3f readVector3f_compressed(float min_val, float max_val, size_t bits_per_component) {
+    // Read a compressed glm::vec3
+    glm::vec3 readVector3f_compressed(float min_val, float max_val, size_t bits_per_component) {
         auto dequantize = [](uint32_t value, float min_v, float max_v, size_t bits) -> float {
             uint32_t max_value = (1u << bits) - 1;
             float normalized = static_cast<float>(value) / static_cast<float>(max_value);
             return min_v + normalized * (max_v - min_v);
         };
 
-        irr::core::vector3f result;
-        result.X = dequantize(static_cast<uint32_t>(readBits(bits_per_component)), min_val, max_val, bits_per_component);
-        result.Y = dequantize(static_cast<uint32_t>(readBits(bits_per_component)), min_val, max_val, bits_per_component);
-        result.Z = dequantize(static_cast<uint32_t>(readBits(bits_per_component)), min_val, max_val, bits_per_component);
+        glm::vec3 result;
+        result.x = dequantize(static_cast<uint32_t>(readBits(bits_per_component)), min_val, max_val, bits_per_component);
+        result.y = dequantize(static_cast<uint32_t>(readBits(bits_per_component)), min_val, max_val, bits_per_component);
+        result.z = dequantize(static_cast<uint32_t>(readBits(bits_per_component)), min_val, max_val, bits_per_component);
         return result;
     }
 

@@ -37,7 +37,7 @@ void VulkanRenderAPI::present()
 {
 }
 
-void VulkanRenderAPI::clear(const vector3f& color)
+void VulkanRenderAPI::clear(const glm::vec3& color)
 {
 }
 
@@ -53,15 +53,15 @@ void VulkanRenderAPI::popMatrix()
 {
 }
 
-void VulkanRenderAPI::translate(const vector3f& pos)
+void VulkanRenderAPI::translate(const glm::vec3& pos)
 {
 }
 
-void VulkanRenderAPI::rotate(const matrix4f& rotation)
+void VulkanRenderAPI::rotate(const glm::mat4& rotation)
 {
 }
 
-void VulkanRenderAPI::multiplyMatrix(const matrix4f& matrix)
+void VulkanRenderAPI::multiplyMatrix(const glm::mat4& matrix)
 {
 }
 
@@ -100,7 +100,7 @@ void VulkanRenderAPI::enableLighting(bool enable)
 {
 }
 
-void VulkanRenderAPI::setLighting(const vector3f& ambient, const vector3f& diffuse, const vector3f& direction)
+void VulkanRenderAPI::setLighting(const glm::vec3& ambient, const glm::vec3& diffuse, const glm::vec3& direction)
 {
 }
 
@@ -108,7 +108,7 @@ void VulkanRenderAPI::renderSkybox()
 {
 }
 
-void VulkanRenderAPI::beginShadowPass(const vector3f& lightDir)
+void VulkanRenderAPI::beginShadowPass(const glm::vec3& lightDir)
 {
 }
 
@@ -120,9 +120,9 @@ void VulkanRenderAPI::bindShadowMap(int textureUnit)
 {
 }
 
-matrix4f VulkanRenderAPI::getLightSpaceMatrix()
+glm::mat4 VulkanRenderAPI::getLightSpaceMatrix()
 {
-    return matrix4f();
+    return glm::mat4(1.0f);
 }
 
 IGPUMesh* VulkanRenderAPI::createMesh()

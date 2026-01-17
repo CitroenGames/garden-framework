@@ -34,7 +34,7 @@ void HeadlessRenderAPI::present()
 {
 }
 
-void HeadlessRenderAPI::clear(const vector3f& color)
+void HeadlessRenderAPI::clear(const glm::vec3& color)
 {
 }
 
@@ -50,15 +50,15 @@ void HeadlessRenderAPI::popMatrix()
 {
 }
 
-void HeadlessRenderAPI::translate(const vector3f& pos)
+void HeadlessRenderAPI::translate(const glm::vec3& pos)
 {
 }
 
-void HeadlessRenderAPI::rotate(const matrix4f& rotation)
+void HeadlessRenderAPI::rotate(const glm::mat4& rotation)
 {
 }
 
-void HeadlessRenderAPI::multiplyMatrix(const matrix4f& matrix)
+void HeadlessRenderAPI::multiplyMatrix(const glm::mat4& matrix)
 {
 }
 
@@ -95,7 +95,7 @@ void HeadlessRenderAPI::enableLighting(bool enable)
 {
 }
 
-void HeadlessRenderAPI::setLighting(const vector3f& ambient, const vector3f& diffuse, const vector3f& direction)
+void HeadlessRenderAPI::setLighting(const glm::vec3& ambient, const glm::vec3& diffuse, const glm::vec3& direction)
 {
 }
 
@@ -103,7 +103,7 @@ void HeadlessRenderAPI::renderSkybox()
 {
 }
 
-void HeadlessRenderAPI::beginShadowPass(const vector3f& lightDir)
+void HeadlessRenderAPI::beginShadowPass(const glm::vec3& lightDir)
 {
 }
 
@@ -115,9 +115,9 @@ void HeadlessRenderAPI::bindShadowMap(int textureUnit)
 {
 }
 
-matrix4f HeadlessRenderAPI::getLightSpaceMatrix()
+glm::mat4 HeadlessRenderAPI::getLightSpaceMatrix()
 {
-    return matrix4f();
+    return glm::mat4(1.0f);
 }
 
 IGPUMesh* HeadlessRenderAPI::createMesh()

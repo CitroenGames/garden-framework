@@ -3,7 +3,7 @@
 #define NOMINMAX  // Prevent Windows.h min/max macros from interfering
 
 #include <cstdint>
-#include "irrlicht/vector3.h"
+#include <glm/glm.hpp>
 
 // Protocol version for compatibility checking
 constexpr uint32_t NETWORK_PROTOCOL_VERSION = 1;
@@ -96,7 +96,7 @@ struct SpawnPlayerMessage
     MessageType type = MessageType::SPAWN_PLAYER;
     uint16_t client_id = 0;
     uint32_t entity_id = 0;  // Network entity ID
-    irr::core::vector3f position = irr::core::vector3f(0, 0, 0);
+    glm::vec3 position = glm::vec3(0, 0, 0);
     float camera_yaw = 0.0f;
 };
 
@@ -124,9 +124,9 @@ struct EntityUpdateData
     uint32_t entity_id = 0;
     uint8_t flags = 0;
     // Conditional fields based on flags:
-    irr::core::vector3f position = irr::core::vector3f(0, 0, 0);     // If FLAG_TRANSFORM
-    irr::core::vector3f velocity = irr::core::vector3f(0, 0, 0);     // If FLAG_VELOCITY
-    uint8_t grounded = 0;                       // If FLAG_GROUNDED
+    glm::vec3 position = glm::vec3(0, 0, 0);     // If FLAG_TRANSFORM
+    glm::vec3 velocity = glm::vec3(0, 0, 0);     // If FLAG_VELOCITY
+    uint8_t grounded = 0;                        // If FLAG_GROUNDED
 
     // Helper to check flags
     bool hasTransform() const { return (flags & ComponentFlags::TRANSFORM) != 0; }

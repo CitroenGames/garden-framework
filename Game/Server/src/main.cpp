@@ -55,7 +55,7 @@ int main(int argc, char* argv[])
         LOG_ENGINE_INFO("Client {0} connected, spawning player", client_id);
 
         // Get spawn point from game rules
-        vector3f spawn_pos = game_rules.getNextSpawnPoint();
+        glm::vec3 spawn_pos = game_rules.getNextSpawnPoint();
 
         // Create player entity
         entt::entity player_entity = _world.registry.create();
@@ -131,7 +131,7 @@ int main(int argc, char* argv[])
         }
 
         LOG_ENGINE_INFO("Spawned player entity (network_id={0}) for client {1} at position {2},{3},{4}",
-            network_id, client_id, spawn_pos.X, spawn_pos.Y, spawn_pos.Z);
+            network_id, client_id, spawn_pos.x, spawn_pos.y, spawn_pos.z);
     });
 
     _network.setOnClientDisconnected([&](uint16_t client_id) {

@@ -5,6 +5,7 @@
 #include "Utils/Log.hpp"
 #include <entt/entt.hpp>
 #include <cstring>
+#include <glm/glm.hpp>
 
 namespace Game {
 
@@ -371,12 +372,12 @@ std::vector<EntityUpdateData> ServerNetworkManager::generateDeltaUpdate(
             // Delta compress - only send changed components
             const float epsilon = 0.01f;
 
-            if (entity_snapshot.components.position.getDistanceFrom(baseline_entity->components.position) > epsilon) {
+            if (glm::distance(entity_snapshot.components.position, baseline_entity->components.position) > epsilon) {
                 update.flags |= ComponentFlags::TRANSFORM;
                 update.position = entity_snapshot.components.position;
             }
 
-            if (entity_snapshot.components.velocity.getDistanceFrom(baseline_entity->components.velocity) > epsilon) {
+            if (glm::distance(entity_snapshot.components.velocity, baseline_entity->components.velocity) > epsilon) {
                 update.flags |= ComponentFlags::VELOCITY;
                 update.velocity = entity_snapshot.components.velocity;
             }

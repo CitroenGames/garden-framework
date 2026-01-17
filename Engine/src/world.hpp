@@ -6,8 +6,6 @@
 #include <vector>
 #include <entt/entt.hpp>
 
-using namespace irr;
-using namespace core;
 using namespace std;
 
 class world
@@ -24,7 +22,7 @@ public:
     {
         world_camera = camera::camera(0, 0, -5);
         fixed_delta = 0.16f;
-        physics_system = PhysicsSystem(vector3f(0, -1, 0), fixed_delta);
+        physics_system = PhysicsSystem(glm::vec3(0, -1, 0), fixed_delta);
     }
 
     // Physics system access
@@ -43,19 +41,19 @@ public:
     }
 
     // Utility methods for common physics queries
-    bool raycast(const vector3f& origin, const vector3f& direction, float max_distance,
-        vector3f& hit_point, vector3f& hit_normal)
+    bool raycast(const glm::vec3& origin, const glm::vec3& direction, float max_distance,
+        glm::vec3& hit_point, glm::vec3& hit_normal)
     {
         return physics_system.raycast(origin, direction, max_distance, registry, hit_point, hit_normal);
     }
 
     // Configuration methods
-    void setGravity(const vector3f& gravity)
+    void setGravity(const glm::vec3& gravity)
     {
         physics_system.setGravity(gravity);
     }
 
-    vector3f getGravity() const
+    glm::vec3 getGravity() const
     {
         return physics_system.getGravity();
     }

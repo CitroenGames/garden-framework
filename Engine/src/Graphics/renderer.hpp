@@ -10,18 +10,18 @@ class renderer
 {
 public:
     IRenderAPI* render_api;
-    
+
     // Lighting settings
-    vector3f ambient_light{0.2f, 0.2f, 0.2f};
-    vector3f diffuse_light{0.8f, 0.8f, 0.8f};
-    vector3f light_direction{0.0f, -1.0f, 0.0f};
+    glm::vec3 ambient_light{0.2f, 0.2f, 0.2f};
+    glm::vec3 diffuse_light{0.8f, 0.8f, 0.8f};
+    glm::vec3 light_direction{0.0f, -1.0f, 0.0f};
 
     renderer() : render_api(nullptr) {};
     renderer(IRenderAPI* api) : render_api(api) {};
 
     void setRenderAPI(IRenderAPI* api) { render_api = api; }
 
-    void set_level_lighting(const vector3f& ambient, const vector3f& diffuse, const vector3f& direction)
+    void set_level_lighting(const glm::vec3& ambient, const glm::vec3& diffuse, const glm::vec3& direction)
     {
         ambient_light = ambient;
         diffuse_light = diffuse;
@@ -36,7 +36,7 @@ public:
         api->pushMatrix();
 
         // Use the complete transformation matrix that includes scale, rotation, and translation
-        matrix4f transform_mat = transform.getTransformMatrix();
+        glm::mat4 transform_mat = transform.getTransformMatrix();
         api->multiplyMatrix(transform_mat);
 
         // Get render state from mesh
@@ -110,7 +110,7 @@ public:
         render_api->beginFrame();
         
         // Clear with background color
-        render_api->clear(vector3f(0.2f, 0.3f, 0.8f));
+        render_api->clear(glm::vec3(0.2f, 0.3f, 0.8f));
 
         // Set up camera
         render_api->setCamera(c);
