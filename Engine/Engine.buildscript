@@ -3,7 +3,7 @@ include = thirdparty/3rdparty.buildscript
 [project:Engine]
 type = lib
 sources = src/**/*.cpp
-headers = src/**/*.h
+headers = src/**/*.h src/**/*.hpp
 public_includes = src, thirdparty/include, .
 includes = src, thirdparty/include, .
 multiprocessor = true
@@ -15,6 +15,7 @@ target_link_libraries(
     PUBLIC tinyobjloader
     PUBLIC spdlog
     PUBLIC entt
+    PUBLIC enet
 )
 std = 20
 utf8 = true

@@ -28,41 +28,53 @@ public:
 
     bool initialize(const char* title = "Game Window", bool fullscreen = true)
     {
-        if (SDL_Init(SDL_INIT_VIDEO) < 0)
+        if (api_type != RenderAPIType::Headless)
         {
-            fprintf(stderr, "Video initialization failed: %s\n", SDL_GetError());
-            return false;
-        }
+            if (SDL_Init(SDL_INIT_VIDEO) < 0)
+            {
+                fprintf(stderr, "Video initialization failed: %s\n", SDL_GetError());
+                return false;
+            }
 
-        // Set OpenGL attributes BEFORE creating the window (proper SDL order)
-        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
-        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 6);
-        SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
-        SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-        SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
-        SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
+            // Set OpenGL attributes BEFORE creating the window (proper SDL order)
+            SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
+            SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 6);
+            SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+            SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+            SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
+            SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
 
 #ifdef _DEBUG
-        SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_DEBUG_FLAG);
+            SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_DEBUG_FLAG);
 #else
-        SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG);
+            SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG);
 #endif
 
-        // Create window with OpenGL support (SDL_WINDOW_OPENGL is required for SDL_GL_CreateContext)
-        Uint32 window_flags = SDL_WINDOW_OPENGL;
-        if (fullscreen)
-            window_flags |= SDL_WINDOW_FULLSCREEN;
+            // Create window with OpenGL support (SDL_WINDOW_OPENGL is required for SDL_GL_CreateContext)
+            Uint32 window_flags = SDL_WINDOW_OPENGL;
+            if (fullscreen)
+                window_flags |= SDL_WINDOW_FULLSCREEN;
 
-        window = SDL_CreateWindow(title,
-                                 SDL_WINDOWPOS_CENTERED,
-                                 SDL_WINDOWPOS_CENTERED,
-                                 width, height,
-                                 window_flags);
+            window = SDL_CreateWindow(title,
+                                     SDL_WINDOWPOS_CENTERED,
+                                     SDL_WINDOWPOS_CENTERED,
+                                     width, height,
+                                     window_flags);
 
-        if (!window)
+            if (!window)
+            {
+                fprintf(stderr, "Window creation failed: %s\n", SDL_GetError());
+                return false;
+            }
+        }
+        else
         {
-            fprintf(stderr, "Window creation failed: %s\n", SDL_GetError());
-            return false;
+            // For headless mode, we might still want to initialize SDL but not VIDEO
+            if (SDL_Init(SDL_INIT_EVENTS) < 0)
+            {
+                fprintf(stderr, "SDL initialization failed: %s\n", SDL_GetError());
+                return false;
+            }
         }
 
         // Create render API
@@ -73,7 +85,7 @@ public:
             return false;
         }
 
-        // Initialize the render API with the SDL window pointer
+        // Initialize the render API with the SDL window pointer (might be null for headless)
         if (!render_api->initialize(window, width, height, fov))
         {
             fprintf(stderr, "Failed to initialize render API\n");
@@ -81,7 +93,10 @@ public:
         }
 
         // Input setup
-        SDL_SetRelativeMouseMode(SDL_TRUE);
+        if (window)
+        {
+            SDL_SetRelativeMouseMode(SDL_TRUE);
+        }
 
         printf("Application initialized with %s render API\n", render_api->getAPIName());
         return true;

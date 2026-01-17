@@ -114,7 +114,8 @@ public:
 enum class RenderAPIType
 {
     OpenGL,
-    Vulkan
+    Vulkan,
+    Headless
 };
 
 IRenderAPI* CreateRenderAPI(RenderAPIType type);
