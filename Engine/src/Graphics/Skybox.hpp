@@ -8,7 +8,6 @@ class Skybox
 {
 private:
     GLuint skyboxVAO, skyboxVBO;
-    TextureHandle skyTexture;
     Shader* skyShader;
     bool initialized;
 
@@ -18,7 +17,7 @@ public:
     Skybox();
     ~Skybox();
 
-    bool initialize(const std::string& texturePath, IRenderAPI* renderAPI, Shader* shader);
-    void render(const matrix4f& view, const matrix4f& projection);
+    bool initialize(Shader* shader);
+    void render(const matrix4f& view, const matrix4f& projection, const vector3f& sunDirection);
     void shutdown();
 };
