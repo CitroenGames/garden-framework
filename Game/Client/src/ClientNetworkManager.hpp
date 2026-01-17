@@ -58,6 +58,20 @@ private:
     float connection_timeout = 0.0f;
     static constexpr float CONNECTION_TIMEOUT_SECONDS = 5.0f;
 
+    // Input rate limiting
+    float input_send_timer = 0.0f;
+    static constexpr float INPUT_SEND_INTERVAL = 1.0f / 60.0f;  // 60Hz max
+    InputState last_sent_input;
+    bool has_pending_input = false;
+
+    // Ping/RTT measurement
+    float ping_timer = 0.0f;
+    static constexpr float PING_INTERVAL = 1.0f;  // Send ping every 1 second
+    uint32_t last_ping_timestamp = 0;
+
+    // Callbacks
+    std::function<void()> on_disconnected;
+
     // Network stats
     NetworkStats stats;
 
@@ -93,6 +107,11 @@ public:
     // Stats
     const NetworkStats& getStats() const { return stats; }
 
+    // Callbacks
+    void setOnDisconnected(std::function<void()> callback) {
+        on_disconnected = callback;
+    }
+
 private:
     // Event handlers
     void handleServerConnect(ENetEvent& event);
@@ -106,6 +125,10 @@ private:
     void handleSpawnPlayer(BitReader& reader);
     void handleDespawnPlayer(BitReader& reader);
     void handleDisconnect(BitReader& reader);
+    void handlePong(BitReader& reader);
+
+    // Ping/RTT
+    void sendPing();
 
     // Entity management
     void createOrUpdateEntity(const EntityUpdateData& update);

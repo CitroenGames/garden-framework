@@ -186,6 +186,10 @@ void ServerNetworkManager::handleClientMessage(ENetEvent& event)
             break;
         }
 
+        case MessageType::PING:
+            handlePing(event.peer, reader);
+            break;
+
         default:
             LOG_ENGINE_WARN("Received unknown message type: {0}", static_cast<int>(msg_type));
             break;
@@ -244,7 +248,10 @@ void ServerNetworkManager::handleConnectRequest(ENetPeer* peer, BitReader& reade
 void ServerNetworkManager::handleInputCommand(uint16_t client_id, BitReader& reader)
 {
     InputCommandMessage msg;
-    NetworkSerializer::deserialize(reader, msg);
+    if (!NetworkSerializer::deserialize(reader, msg)) {
+        LOG_ENGINE_WARN("Failed to deserialize input from client {0}", client_id);
+        return;
+    }
 
     auto it = clients.find(client_id);
     if (it == clients.end()) {
@@ -266,10 +273,39 @@ void ServerNetworkManager::handleInputCommand(uint16_t client_id, BitReader& rea
         return;
     }
 
-    // Apply input to player entity
-    // TODO: This will be implemented in Phase 5
-    // For now, just log that we received input
-    // LOG_ENGINE_TRACE("Received input from client {0}: buttons={1}", client_id, msg.buttons);
+    // Get required components
+    if (!game_world->registry.all_of<PlayerComponent, TransformComponent, RigidBodyComponent>(player_entity)) {
+        return;
+    }
+
+    auto& player = game_world->registry.get<PlayerComponent>(player_entity);
+    auto& transform = game_world->registry.get<TransformComponent>(player_entity);
+    auto& rigidbody = game_world->registry.get<RigidBodyComponent>(player_entity);
+
+    // Apply camera rotation
+    transform.rotation.y = msg.camera_yaw;
+    transform.rotation.x = msg.camera_pitch;
+
+    // Calculate movement direction based on camera yaw
+    float yaw_rad = glm::radians(msg.camera_yaw);
+    glm::vec3 forward = glm::vec3(-sin(yaw_rad), 0.0f, -cos(yaw_rad));
+    glm::vec3 right = glm::vec3(cos(yaw_rad), 0.0f, -sin(yaw_rad));
+
+    // Apply movement
+    glm::vec3 move_direction = forward * msg.move_forward + right * msg.move_right;
+    if (glm::length(move_direction) > 0.0f) {
+        move_direction = glm::normalize(move_direction);
+    }
+
+    // Set horizontal velocity based on input
+    rigidbody.velocity.x = move_direction.x * player.speed;
+    rigidbody.velocity.z = move_direction.z * player.speed;
+
+    // Handle jump
+    if ((msg.buttons & InputFlags::JUMP) && player.grounded) {
+        rigidbody.velocity.y = player.jump_force;
+        player.grounded = false;
+    }
 }
 
 void ServerNetworkManager::handleDisconnect(uint16_t client_id, BitReader& reader)
@@ -280,6 +316,21 @@ void ServerNetworkManager::handleDisconnect(uint16_t client_id, BitReader& reade
     LOG_ENGINE_INFO("Client {0} requested disconnect: {1}", client_id, msg.reason);
 
     disconnectClient(client_id, "Client requested disconnect");
+}
+
+void ServerNetworkManager::handlePing(ENetPeer* peer, BitReader& reader)
+{
+    PingMessage ping;
+    if (!NetworkSerializer::deserialize(reader, ping)) {
+        return;
+    }
+
+    // Respond with PONG, echoing the timestamp
+    BitWriter writer;
+    PongMessage pong;
+    pong.timestamp = ping.timestamp;
+    NetworkSerializer::serialize(writer, pong);
+    sendReliableMessage(peer, writer);
 }
 
 void ServerNetworkManager::broadcastWorldState()

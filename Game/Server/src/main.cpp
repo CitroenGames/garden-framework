@@ -137,14 +137,34 @@ int main(int argc, char* argv[])
     _network.setOnClientDisconnected([&](uint16_t client_id) {
         LOG_ENGINE_INFO("Client {0} disconnected, despawning player", client_id);
 
-        // Find and destroy player entity for this client
+        // Find player entity for this client
         auto view = _world.registry.view<NetworkedEntity>();
         for (auto entity : view) {
             auto& networked = view.get<NetworkedEntity>(entity);
             if (networked.owner_client_id == client_id && networked.is_player) {
+
+                // Broadcast DESPAWN_PLAYER to all other connected clients
+                DespawnPlayerMessage despawn_msg;
+                despawn_msg.client_id = client_id;
+                despawn_msg.entity_id = networked.network_id;
+
+                BitWriter writer;
+                NetworkSerializer::serialize(writer, despawn_msg);
+
+                // Send to all clients except the disconnecting one
+                for (uint16_t i = 1; i < _network.getNextClientId(); i++) {
+                    if (i == client_id) continue;
+
+                    const ClientInfo* other_client = _network.getClientInfo(i);
+                    if (other_client && other_client->peer) {
+                        _network.sendReliableToClient(i, writer);
+                    }
+                }
+
+                // Clean up entity
                 _network.unregisterEntity(entity);
                 _world.registry.destroy(entity);
-                LOG_ENGINE_INFO("Despawned player entity for client {0}", client_id);
+                LOG_ENGINE_INFO("Despawned and broadcast removal of player entity for client {0}", client_id);
                 break;
             }
         }
@@ -195,14 +215,11 @@ int main(int argc, char* argv[])
         delta_time = (frame_start_ticks - delta_last) / 1000.0f;
         delta_last = frame_start_ticks;
 
-        // Network update
+        // Network update (includes rate-limited world state broadcast at ~20Hz)
         _network.update(delta_time);
 
         // Physics step (Server is authority)
         _world.step_physics();
-
-        // Broadcast state to all clients
-        _network.broadcastWorldState();
 
         // Server-only game rules
         game_rules.Update(_world, delta_time);
