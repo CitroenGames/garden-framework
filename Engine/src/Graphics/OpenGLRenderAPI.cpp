@@ -5,6 +5,10 @@
 #include "Graphics/ShaderManager.hpp"
 #include "Graphics/OpenGLMesh.hpp"
 #include <stdio.h>
+#include <cmath>
+#include <limits>
+#include <string>
+#include "Utils/Log.hpp"
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -15,9 +19,17 @@ OpenGLRenderAPI::OpenGLRenderAPI()
       current_light_direction(0.0f, -1.0f, 0.0f), current_light_ambient(0.2f, 0.2f, 0.2f),
       current_light_diffuse(0.8f, 0.8f, 0.8f), lighting_enabled(true), shader_manager(nullptr),
       post_processing(nullptr), skybox(nullptr),
-      shadowMapFBO(0), shadowMapTexture(0), lightSpaceMatrix(1.0f), in_shadow_pass(false),
+      shadowMapFBO(0), shadowMapTextureArray(0), lightSpaceMatrix(1.0f), in_shadow_pass(false),
+      currentCascade(0), cascadeSplitLambda(0.92f), debugCascades(false),
       current_shader_id(0), current_bound_texture_0(0), global_uniforms_dirty(true)
 {
+    // Initialize cascade arrays
+    for (int i = 0; i < NUM_CASCADES; i++) {
+        lightSpaceMatrices[i] = glm::mat4(1.0f);
+    }
+    for (int i = 0; i <= NUM_CASCADES; i++) {
+        cascadeSplitDistances[i] = 0.0f;
+    }
 }
 
 OpenGLRenderAPI::~OpenGLRenderAPI()
@@ -51,25 +63,48 @@ bool OpenGLRenderAPI::initialize(WindowHandle window, int width, int height, flo
     // Load Shadow shader
     shader_manager->loadShader("shadow", "assets/shaders/shadow.vert", "assets/shaders/shadow.frag");
 
-    // Configure Shadow Map FBO
+    // Configure Shadow Map FBO with Cascaded Shadow Maps (texture array)
     glGenFramebuffers(1, &shadowMapFBO);
-    
-    glGenTextures(1, &shadowMapTexture);
-    glBindTexture(GL_TEXTURE_2D, shadowMapTexture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT, 
-                 SHADOW_WIDTH, SHADOW_HEIGHT, 0, GL_DEPTH_COMPONENT, GL_FLOAT, NULL);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER); 
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+
+    // Create 2D texture array for CSM cascades
+    glGenTextures(1, &shadowMapTextureArray);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, shadowMapTextureArray);
+    glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_DEPTH_COMPONENT32F,
+                 SHADOW_WIDTH, SHADOW_HEIGHT, NUM_CASCADES,
+                 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
     float borderColor[] = { 1.0f, 1.0f, 1.0f, 1.0f };
-    glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderColor);
+    glTexParameterfv(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_BORDER_COLOR, borderColor);
 
     glBindFramebuffer(GL_FRAMEBUFFER, shadowMapFBO);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, shadowMapTexture, 0);
+    // Attach first layer initially (will switch per cascade)
+    glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, shadowMapTextureArray, 0, 0);
     glDrawBuffer(GL_NONE);
     glReadBuffer(GL_NONE);
+
+    // Verify FBO is complete
+    GLenum fboStatus = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    if (fboStatus != GL_FRAMEBUFFER_COMPLETE) {
+        LOG_ENGINE_ERROR("CSM Shadow FBO incomplete! Status: {}", fboStatus);
+    } else {
+        LOG_ENGINE_INFO("CSM Shadow FBO created successfully ({}x{} x {} cascades)",
+            SHADOW_WIDTH, SHADOW_HEIGHT, NUM_CASCADES);
+    }
+
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    // Initialize cascade split distances
+    calculateCascadeSplits(0.1f, 1000.0f);
+    LOG_ENGINE_INFO("CSM Cascade splits: {:.2f}, {:.2f}, {:.2f}, {:.2f}, {:.2f}",
+        cascadeSplitDistances[0], cascadeSplitDistances[1],
+        cascadeSplitDistances[2], cascadeSplitDistances[3],
+        cascadeSplitDistances[4]);
+
+    // Debug cascade visualization (toggle via console command later)
+    debugCascades = false;
 
     // Initialize PostProcessing
     post_processing = new PostProcessing();
@@ -113,16 +148,16 @@ void OpenGLRenderAPI::shutdown()
         skybox = nullptr;
     }
 
-    if (shadowMapFBO) 
+    if (shadowMapFBO)
     {
         glDeleteFramebuffers(1, &shadowMapFBO);
         shadowMapFBO = 0;
     }
-    
-    if (shadowMapTexture) 
+
+    if (shadowMapTextureArray)
     {
-        glDeleteTextures(1, &shadowMapTexture);
-        shadowMapTexture = 0;
+        glDeleteTextures(1, &shadowMapTextureArray);
+        shadowMapTextureArray = 0;
     }
 
     // Note: No need to disable GL capabilities during shutdown
@@ -148,7 +183,7 @@ void OpenGLRenderAPI::resize(int width, int height)
         glm::radians(field_of_view),
         ratio,
         0.1f,
-        200.0f
+        1000.0f
     );
 
     // Set up viewport
@@ -436,23 +471,113 @@ void OpenGLRenderAPI::deleteTexture(TextureHandle texture)
     }
 }
 
+// CSM Helper: Calculate cascade split distances using practical split scheme
+void OpenGLRenderAPI::calculateCascadeSplits(float nearPlane, float farPlane)
+{
+    cascadeSplitDistances[0] = nearPlane;
+    for (int i = 1; i <= NUM_CASCADES; i++) {
+        float p = static_cast<float>(i) / static_cast<float>(NUM_CASCADES);
+        float log = nearPlane * std::pow(farPlane / nearPlane, p);
+        float linear = nearPlane + (farPlane - nearPlane) * p;
+        cascadeSplitDistances[i] = cascadeSplitLambda * log + (1.0f - cascadeSplitLambda) * linear;
+    }
+}
+
+// CSM Helper: Get frustum corners in world space
+std::array<glm::vec3, 8> OpenGLRenderAPI::getFrustumCornersWorldSpace(const glm::mat4& proj, const glm::mat4& view)
+{
+    const glm::mat4 inv = glm::inverse(proj * view);
+    std::array<glm::vec3, 8> corners;
+    int idx = 0;
+    for (int x = 0; x < 2; ++x) {
+        for (int y = 0; y < 2; ++y) {
+            for (int z = 0; z < 2; ++z) {
+                glm::vec4 pt = inv * glm::vec4(
+                    2.0f * x - 1.0f,
+                    2.0f * y - 1.0f,
+                    2.0f * z - 1.0f,
+                    1.0f);
+                corners[idx++] = glm::vec3(pt) / pt.w;
+            }
+        }
+    }
+    return corners;
+}
+
+// CSM Helper: Calculate light space matrix for a specific cascade
+glm::mat4 OpenGLRenderAPI::getLightSpaceMatrixForCascade(int cascadeIndex, const glm::vec3& lightDir,
+    const glm::mat4& viewMatrix, float fov, float aspect)
+{
+    // Get cascade near/far
+    float cascadeNear = cascadeSplitDistances[cascadeIndex];
+    float cascadeFar = cascadeSplitDistances[cascadeIndex + 1];
+
+    // Create projection for this cascade's frustum slice
+    glm::mat4 cascadeProj = glm::perspective(glm::radians(fov), aspect, cascadeNear, cascadeFar);
+
+    // Get frustum corners in world space
+    auto corners = getFrustumCornersWorldSpace(cascadeProj, viewMatrix);
+
+    // Calculate frustum center
+    glm::vec3 center(0.0f);
+    for (const auto& c : corners) {
+        center += c;
+    }
+    center /= 8.0f;
+
+    // Light view matrix
+    glm::vec3 direction = glm::normalize(lightDir);
+    glm::vec3 up = glm::vec3(0.0f, 1.0f, 0.0f);
+    if (std::abs(glm::dot(direction, up)) > 0.99f) {
+        up = glm::vec3(0.0f, 0.0f, 1.0f);
+    }
+
+    glm::mat4 lightView = glm::lookAt(
+        center - direction * 100.0f,  // Position light away from center
+        center,
+        up);
+
+    // Find bounding box in light space
+    float minX = std::numeric_limits<float>::max();
+    float maxX = std::numeric_limits<float>::lowest();
+    float minY = std::numeric_limits<float>::max();
+    float maxY = std::numeric_limits<float>::lowest();
+    float minZ = std::numeric_limits<float>::max();
+    float maxZ = std::numeric_limits<float>::lowest();
+
+    for (const auto& c : corners) {
+        glm::vec4 lsCorner = lightView * glm::vec4(c, 1.0f);
+        minX = std::min(minX, lsCorner.x);
+        maxX = std::max(maxX, lsCorner.x);
+        minY = std::min(minY, lsCorner.y);
+        maxY = std::max(maxY, lsCorner.y);
+        minZ = std::min(minZ, lsCorner.z);
+        maxZ = std::max(maxZ, lsCorner.z);
+    }
+
+    // Add padding to prevent edge artifacts
+    // Extend Z-bounds significantly to capture casters in front of the frustum
+    float padding = 10.0f;
+    minZ -= padding;
+    maxZ += 500.0f; // Extend towards light source
+
+    // Orthographic projection tightly fitted to frustum
+    glm::mat4 lightProj = glm::ortho(minX, maxX, minY, maxY, minZ, maxZ);
+
+    return lightProj * lightView;
+}
+
+// Legacy beginShadowPass - uses first cascade only for backwards compatibility
 void OpenGLRenderAPI::beginShadowPass(const glm::vec3& lightDir)
 {
     in_shadow_pass = true;
 
-    // Set up light space matrix
-    // Orthographic projection for directional light
-    float near_plane = 1.0f, far_plane = 200.0f;
-    float ortho_size = 50.0f; // Adjust based on scene scale
+    // Set up light space matrix for cascade 0 only (legacy mode)
+    float near_plane = 1.0f, far_plane = 1000.0f;
+    float ortho_size = 50.0f;
     glm::mat4 lightProjection = glm::ortho(-ortho_size, ortho_size, -ortho_size, ortho_size, near_plane, far_plane);
 
-    // View matrix looking from light direction
-    // For directional light, position can be arbitrary but should cover the scene
-    // We position it 'far away' along the reverse light direction
     glm::vec3 direction = glm::normalize(lightDir);
-    // Convention: light direction points FROM light, so negate to look AT origin
-    // Wait, the level data stores direction vector (e.g., 0, -1, 0 for down).
-    // So light comes FROM -direction * distance.
     glm::vec3 lightPos = -direction * 100.0f;
 
     glm::mat4 lightView = glm::lookAt(lightPos,
@@ -460,25 +585,66 @@ void OpenGLRenderAPI::beginShadowPass(const glm::vec3& lightDir)
                                       glm::vec3(0.0f, 1.0f, 0.0f));
 
     lightSpaceMatrix = lightProjection * lightView;
+    lightSpaceMatrices[0] = lightSpaceMatrix;
 
     // Bind FBO and set viewport
     glViewport(0, 0, SHADOW_WIDTH, SHADOW_HEIGHT);
     glBindFramebuffer(GL_FRAMEBUFFER, shadowMapFBO);
+    glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, shadowMapTextureArray, 0, 0);
     glClear(GL_DEPTH_BUFFER_BIT);
 
-    // Enable front-face culling to fix peter panning
-    glCullFace(GL_FRONT);
+    currentCascade = 0;
+    global_uniforms_dirty = true;
+}
 
+// CSM beginShadowPass - calculates all cascade matrices
+void OpenGLRenderAPI::beginShadowPass(const glm::vec3& lightDir, const camera& cam)
+{
+    in_shadow_pass = true;
+
+    // IMPORTANT: Set view matrix from camera FIRST before calculating cascade matrices
+    // This must happen before getLightSpaceMatrixForCascade() which uses view_matrix
+    glm::vec3 pos = cam.getPosition();
+    glm::vec3 target = cam.getTarget();
+    glm::vec3 up = cam.getUpVector();
+    view_matrix = glm::lookAt(pos, target, up);
+
+    // Calculate cascade splits
+    calculateCascadeSplits(0.1f, 1000.0f);
+
+    // Calculate light space matrices for each cascade
+    float aspect = static_cast<float>(viewport_width) / static_cast<float>(viewport_height);
+    for (int i = 0; i < NUM_CASCADES; i++) {
+        lightSpaceMatrices[i] = getLightSpaceMatrixForCascade(i, lightDir, view_matrix, field_of_view, aspect);
+    }
+
+    // Keep legacy matrix updated (use first cascade)
+    lightSpaceMatrix = lightSpaceMatrices[0];
+
+    // Set up shadow pass state
+    glViewport(0, 0, SHADOW_WIDTH, SHADOW_HEIGHT);
+    glBindFramebuffer(GL_FRAMEBUFFER, shadowMapFBO);
+
+    currentCascade = 0;
+    global_uniforms_dirty = true;
+}
+
+// Begin rendering a specific cascade
+void OpenGLRenderAPI::beginCascade(int cascadeIndex)
+{
+    currentCascade = cascadeIndex;
+    glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, shadowMapTextureArray, 0, cascadeIndex);
+    glClear(GL_DEPTH_BUFFER_BIT);
     global_uniforms_dirty = true;
 }
 
 void OpenGLRenderAPI::endShadowPass()
 {
     in_shadow_pass = false;
-    
+
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport(0, 0, viewport_width, viewport_height);
-    
+
     // Restore back-face culling
     glCullFace(GL_BACK);
 }
@@ -486,12 +652,27 @@ void OpenGLRenderAPI::endShadowPass()
 void OpenGLRenderAPI::bindShadowMap(int textureUnit)
 {
     glActiveTexture(GL_TEXTURE0 + textureUnit);
-    glBindTexture(GL_TEXTURE_2D, shadowMapTexture);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, shadowMapTextureArray);
 }
 
 glm::mat4 OpenGLRenderAPI::getLightSpaceMatrix()
 {
     return lightSpaceMatrix;
+}
+
+int OpenGLRenderAPI::getCascadeCount() const
+{
+    return NUM_CASCADES;
+}
+
+const float* OpenGLRenderAPI::getCascadeSplitDistances() const
+{
+    return cascadeSplitDistances;
+}
+
+const glm::mat4* OpenGLRenderAPI::getLightSpaceMatrices() const
+{
+    return lightSpaceMatrices;
 }
 
 void OpenGLRenderAPI::renderMesh(const mesh& m, const RenderState& state)
@@ -542,15 +723,8 @@ void OpenGLRenderAPI::renderMesh(const mesh& m, const RenderState& state)
     {
         if (shader_changed || global_uniforms_dirty)
         {
-             shader->setUniform("uLightSpaceMatrix", lightSpaceMatrix);
-             // We can safely clear dirty flag here if we assume this is the only global needed for shadow pass
-             // BUT, if we clear it, then subsequent Normal Pass won't update its globals (View/Proj).
-             // Ideally we should have different dirty flags or simply NOT clear it here if it might affect other shaders.
-             // However, shader_changed logic in Normal Pass will catch the switch back to "basic" shader.
-             // So clearing it here is safe provided we switch shaders.
-             // The only risk is if we use SAME shader for shadow and normal pass (unlikely).
-             // Or if we have multiple shadow shaders?
-             // Let's NOT clear it here to be safe, because this update is partial (only LightSpace).
+            // Use current cascade's light space matrix
+            shader->setUniform("uLightSpaceMatrix", lightSpaceMatrices[currentCascade]);
         }
         shader->setUniform("uModel", current_model_matrix);
     }
@@ -561,29 +735,33 @@ void OpenGLRenderAPI::renderMesh(const mesh& m, const RenderState& state)
         {
             shader->setUniform("uView", view_matrix);
             shader->setUniform("uProjection", projection_matrix);
-            shader->setUniform("uLightSpaceMatrix", lightSpaceMatrix);
+
+            // Set CSM uniforms - all cascade matrices and split distances
+            for (int i = 0; i < NUM_CASCADES; i++) {
+                shader->setUniform("uLightSpaceMatrices[" + std::to_string(i) + "]", lightSpaceMatrices[i]);
+            }
+            for (int i = 0; i <= NUM_CASCADES; i++) {
+                shader->setUniform("uCascadeSplits[" + std::to_string(i) + "]", cascadeSplitDistances[i]);
+            }
+            shader->setUniform("uCascadeCount", NUM_CASCADES);
+            shader->setUniform("uDebugCascades", debugCascades);
+
+            static bool csm_logged = false;
+            if (!csm_logged) {
+                LOG_ENGINE_INFO("CSM uniforms set: cascadeCount={}, debugCascades={}", NUM_CASCADES, debugCascades);
+                csm_logged = true;
+            }
 
             // Set lighting uniforms
             shader->setUniform("uLightDir", current_light_direction);
             shader->setUniform("uLightAmbient", current_light_ambient);
             shader->setUniform("uLightDiffuse", current_light_diffuse);
-            
-            // Bind Shadow Map (Unit 1) - effectively global
+
+            // Bind Shadow Map Array (Unit 1)
             glActiveTexture(GL_TEXTURE1);
-            glBindTexture(GL_TEXTURE_2D, shadowMapTexture);
-            shader->setUniform("uShadowMap", 1);
-            
-            // Now we can clear the dirty flag because we updated the "main" globals
-            // CAUTION: This clears it for THIS shader.
-            // If we have multiple shaders in the scene (e.g. Basic, Unlit, Terrain),
-            // and we render Mesh A (Basic), Mesh B (Terrain), Mesh C (Basic).
-            // 1. Basic. Upload. Dirty=false.
-            // 2. Terrain. Changed=true. Upload. Dirty=false.
-            // 3. Basic. Changed=true. Upload. Dirty=false.
-            // This works!
-            // Case: Mesh A (Basic). Dirty=true. Upload. Dirty=false.
-            //       Mesh B (Basic). Changed=false. Dirty=false. Skip.
-            // Works!
+            glBindTexture(GL_TEXTURE_2D_ARRAY, shadowMapTextureArray);
+            shader->setUniform("uShadowMapArray", 1);
+
             global_uniforms_dirty = false;
         }
 
@@ -670,7 +848,8 @@ void OpenGLRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t
     {
         if (shader_changed || global_uniforms_dirty)
         {
-            shader->setUniform("uLightSpaceMatrix", lightSpaceMatrix);
+            // Use current cascade's light space matrix
+            shader->setUniform("uLightSpaceMatrix", lightSpaceMatrices[currentCascade]);
         }
         shader->setUniform("uModel", current_model_matrix);
     }
@@ -681,18 +860,33 @@ void OpenGLRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t
             // Set matrix uniforms
             shader->setUniform("uView", view_matrix);
             shader->setUniform("uProjection", projection_matrix);
-            shader->setUniform("uLightSpaceMatrix", lightSpaceMatrix);
+
+            // Set CSM uniforms - all cascade matrices and split distances
+            for (int i = 0; i < NUM_CASCADES; i++) {
+                shader->setUniform("uLightSpaceMatrices[" + std::to_string(i) + "]", lightSpaceMatrices[i]);
+            }
+            for (int i = 0; i <= NUM_CASCADES; i++) {
+                shader->setUniform("uCascadeSplits[" + std::to_string(i) + "]", cascadeSplitDistances[i]);
+            }
+            shader->setUniform("uCascadeCount", NUM_CASCADES);
+            shader->setUniform("uDebugCascades", debugCascades);
+
+            static bool csm_logged = false;
+            if (!csm_logged) {
+                LOG_ENGINE_INFO("CSM uniforms set: cascadeCount={}, debugCascades={}", NUM_CASCADES, debugCascades);
+                csm_logged = true;
+            }
 
             // Set lighting uniforms
             shader->setUniform("uLightDir", current_light_direction);
             shader->setUniform("uLightAmbient", current_light_ambient);
             shader->setUniform("uLightDiffuse", current_light_diffuse);
-            
-            // Bind Shadow Map (Unit 1)
+
+            // Bind Shadow Map Array (Unit 1)
             glActiveTexture(GL_TEXTURE1);
-            glBindTexture(GL_TEXTURE_2D, shadowMapTexture);
-            shader->setUniform("uShadowMap", 1);
-            
+            glBindTexture(GL_TEXTURE_2D_ARRAY, shadowMapTextureArray);
+            shader->setUniform("uShadowMapArray", 1);
+
             global_uniforms_dirty = false;
         }
 

@@ -1,5 +1,6 @@
 #include "VulkanRenderAPI.hpp"
 #include "VulkanMesh.hpp"
+#include "Components/camera.hpp"
 #include <stdio.h>
 
 VulkanRenderAPI::VulkanRenderAPI()
@@ -112,6 +113,14 @@ void VulkanRenderAPI::beginShadowPass(const glm::vec3& lightDir)
 {
 }
 
+void VulkanRenderAPI::beginShadowPass(const glm::vec3& lightDir, const camera& cam)
+{
+}
+
+void VulkanRenderAPI::beginCascade(int cascadeIndex)
+{
+}
+
 void VulkanRenderAPI::endShadowPass()
 {
 }
@@ -123,6 +132,23 @@ void VulkanRenderAPI::bindShadowMap(int textureUnit)
 glm::mat4 VulkanRenderAPI::getLightSpaceMatrix()
 {
     return glm::mat4(1.0f);
+}
+
+int VulkanRenderAPI::getCascadeCount() const
+{
+    return 4;
+}
+
+const float* VulkanRenderAPI::getCascadeSplitDistances() const
+{
+    static float distances[5] = { 0.1f, 10.0f, 35.0f, 90.0f, 200.0f };
+    return distances;
+}
+
+const glm::mat4* VulkanRenderAPI::getLightSpaceMatrices() const
+{
+    static glm::mat4 matrices[4] = { glm::mat4(1.0f), glm::mat4(1.0f), glm::mat4(1.0f), glm::mat4(1.0f) };
+    return matrices;
 }
 
 IGPUMesh* VulkanRenderAPI::createMesh()

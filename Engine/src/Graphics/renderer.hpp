@@ -91,16 +91,21 @@ public:
 
         auto view = registry.view<MeshComponent, TransformComponent>();
 
-        // 1. Shadow Pass
-        render_api->beginShadowPass(light_direction);
-        for(auto entity : view) {
-            auto& mesh_comp = view.get<MeshComponent>(entity);
-            const auto& t = view.get<TransformComponent>(entity);
-            
-            if (mesh_comp.m_mesh && mesh_comp.m_mesh->visible)
+        // 1. Shadow Pass - CSM (render each cascade)
+        render_api->beginShadowPass(light_direction, c);
+        for (int cascade = 0; cascade < render_api->getCascadeCount(); cascade++)
+        {
+            render_api->beginCascade(cascade);
+            for (auto entity : view)
             {
-                // Render geometry for shadow map
-                render_mesh_with_api(*mesh_comp.m_mesh, t, render_api);
+                auto& mesh_comp = view.get<MeshComponent>(entity);
+                const auto& t = view.get<TransformComponent>(entity);
+
+                if (mesh_comp.m_mesh && mesh_comp.m_mesh->visible)
+                {
+                    // Render geometry for shadow map
+                    render_mesh_with_api(*mesh_comp.m_mesh, t, render_api);
+                }
             }
         }
         render_api->endShadowPass();

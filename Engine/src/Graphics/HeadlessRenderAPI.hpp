@@ -39,11 +39,16 @@ public:
 
     virtual void renderSkybox() override;
 
-    // Shadow Mapping overrides
+    // Shadow Mapping overrides (CSM)
     virtual void beginShadowPass(const glm::vec3& lightDir) override;
+    virtual void beginShadowPass(const glm::vec3& lightDir, const camera& cam) override;
+    virtual void beginCascade(int cascadeIndex) override;
     virtual void endShadowPass() override;
     virtual void bindShadowMap(int textureUnit) override;
     virtual glm::mat4 getLightSpaceMatrix() override;
+    virtual int getCascadeCount() const override;
+    virtual const float* getCascadeSplitDistances() const override;
+    virtual const glm::mat4* getLightSpaceMatrices() const override;
 
     virtual IGPUMesh* createMesh() override;
 
