@@ -17,11 +17,13 @@ namespace NetworkSerializer
     }
 
     inline bool deserialize(BitReader& reader, ConnectRequestMessage& msg) {
+        if (!reader.canRead(8)) return false;
         msg.type = static_cast<MessageType>(reader.readByte());
+        if (msg.type != MessageType::CONNECT_REQUEST) return false;
         msg.protocol_version = reader.readUInt32();
         reader.readString(msg.player_name, 32);
         msg.checksum = reader.readUInt32();
-        return true;
+        return !reader.hasError();
     }
 
     // Serialize ConnectAcceptMessage
@@ -33,11 +35,13 @@ namespace NetworkSerializer
     }
 
     inline bool deserialize(BitReader& reader, ConnectAcceptMessage& msg) {
+        if (!reader.canRead(8)) return false;
         msg.type = static_cast<MessageType>(reader.readByte());
+        if (msg.type != MessageType::CONNECT_ACCEPT) return false;
         msg.client_id = reader.readUInt16();
         msg.server_tick = reader.readUInt32();
         msg.level_hash = reader.readUInt32();
-        return true;
+        return !reader.hasError();
     }
 
     // Serialize ConnectRejectMessage
@@ -47,9 +51,11 @@ namespace NetworkSerializer
     }
 
     inline bool deserialize(BitReader& reader, ConnectRejectMessage& msg) {
+        if (!reader.canRead(8)) return false;
         msg.type = static_cast<MessageType>(reader.readByte());
+        if (msg.type != MessageType::CONNECT_REJECT) return false;
         reader.readString(msg.reason, 64);
-        return true;
+        return !reader.hasError();
     }
 
     // Serialize DisconnectMessage
@@ -59,9 +65,11 @@ namespace NetworkSerializer
     }
 
     inline bool deserialize(BitReader& reader, DisconnectMessage& msg) {
+        if (!reader.canRead(8)) return false;
         msg.type = static_cast<MessageType>(reader.readByte());
+        if (msg.type != MessageType::DISCONNECT) return false;
         reader.readString(msg.reason, 64);
-        return true;
+        return !reader.hasError();
     }
 
     // Serialize SpawnPlayerMessage
@@ -74,12 +82,14 @@ namespace NetworkSerializer
     }
 
     inline bool deserialize(BitReader& reader, SpawnPlayerMessage& msg) {
+        if (!reader.canRead(8)) return false;
         msg.type = static_cast<MessageType>(reader.readByte());
+        if (msg.type != MessageType::SPAWN_PLAYER) return false;
         msg.client_id = reader.readUInt16();
         msg.entity_id = reader.readUInt32();
         msg.position = reader.readVector3f();
         msg.camera_yaw = reader.readFloat();
-        return true;
+        return !reader.hasError();
     }
 
     // Serialize DespawnPlayerMessage
@@ -90,10 +100,12 @@ namespace NetworkSerializer
     }
 
     inline bool deserialize(BitReader& reader, DespawnPlayerMessage& msg) {
+        if (!reader.canRead(8)) return false;
         msg.type = static_cast<MessageType>(reader.readByte());
+        if (msg.type != MessageType::DESPAWN_PLAYER) return false;
         msg.client_id = reader.readUInt16();
         msg.entity_id = reader.readUInt32();
-        return true;
+        return !reader.hasError();
     }
 
     // Serialize InputCommandMessage
@@ -109,7 +121,9 @@ namespace NetworkSerializer
     }
 
     inline bool deserialize(BitReader& reader, InputCommandMessage& msg) {
+        if (!reader.canRead(8)) return false;
         msg.type = static_cast<MessageType>(reader.readByte());
+        if (msg.type != MessageType::INPUT_COMMAND) return false;
         msg.client_tick = reader.readUInt32();
         msg.last_received_tick = reader.readUInt32();
         msg.buttons = reader.readByte();
@@ -117,7 +131,7 @@ namespace NetworkSerializer
         msg.camera_pitch = reader.readFloat();
         msg.move_forward = reader.readFloat();
         msg.move_right = reader.readFloat();
-        return true;
+        return !reader.hasError();
     }
 
     // Serialize EntityUpdateData (used within WorldStateUpdateMessage)
@@ -138,6 +152,7 @@ namespace NetworkSerializer
     }
 
     inline bool deserialize(BitReader& reader, EntityUpdateData& entity) {
+        if (!reader.canRead(40)) return false;  // entity_id(32) + flags(8)
         entity.entity_id = reader.readUInt32();
         entity.flags = reader.readByte();
 
@@ -152,7 +167,7 @@ namespace NetworkSerializer
             entity.grounded = reader.readByte();
         }
 
-        return true;
+        return !reader.hasError();
     }
 
     // Serialize WorldStateUpdateMessage
@@ -168,7 +183,9 @@ namespace NetworkSerializer
     }
 
     inline bool deserialize(BitReader& reader, WorldStateUpdateMessage& msg, std::vector<EntityUpdateData>& entities) {
+        if (!reader.canRead(8)) return false;
         msg.type = static_cast<MessageType>(reader.readByte());
+        if (msg.type != MessageType::WORLD_STATE_UPDATE) return false;
         msg.server_tick = reader.readUInt32();
         uint16_t num_entities = reader.readUInt16();
 
@@ -178,12 +195,13 @@ namespace NetworkSerializer
         // Deserialize each entity
         for (uint16_t i = 0; i < num_entities; i++) {
             EntityUpdateData entity;
-            if (deserialize(reader, entity)) {
-                entities.push_back(entity);
+            if (!deserialize(reader, entity)) {
+                return false;  // Stop on first error
             }
+            entities.push_back(entity);
         }
 
-        return true;
+        return !reader.hasError();
     }
 
     // Serialize PingMessage
@@ -193,9 +211,11 @@ namespace NetworkSerializer
     }
 
     inline bool deserialize(BitReader& reader, PingMessage& msg) {
+        if (!reader.canRead(8)) return false;
         msg.type = static_cast<MessageType>(reader.readByte());
+        if (msg.type != MessageType::PING) return false;
         msg.timestamp = reader.readUInt32();
-        return true;
+        return !reader.hasError();
     }
 
     // Serialize PongMessage
@@ -205,9 +225,11 @@ namespace NetworkSerializer
     }
 
     inline bool deserialize(BitReader& reader, PongMessage& msg) {
+        if (!reader.canRead(8)) return false;
         msg.type = static_cast<MessageType>(reader.readByte());
+        if (msg.type != MessageType::PONG) return false;
         msg.timestamp = reader.readUInt32();
-        return true;
+        return !reader.hasError();
     }
 
     // Helper: Get message type from raw data (peek first byte)

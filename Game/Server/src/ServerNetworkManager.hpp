@@ -141,6 +141,7 @@ private:
     void handleConnectRequest(ENetPeer* peer, BitReader& reader);
     void handleInputCommand(uint16_t client_id, BitReader& reader);
     void handleDisconnect(uint16_t client_id, BitReader& reader);
+    void handlePing(ENetPeer* peer, BitReader& reader);
 
     // State synchronization
     WorldSnapshot generateWorldSnapshot();

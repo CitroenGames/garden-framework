@@ -1,0 +1,5 @@
+[project:SDL3]
+type = lib
+headers = include/**/*.h
+public_includes = include
+public_libs = lib/x64/SDL3.lib

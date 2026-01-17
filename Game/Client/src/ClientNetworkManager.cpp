@@ -5,6 +5,7 @@
 #include "Utils/Log.hpp"
 #include <entt/entt.hpp>
 #include <cstring>
+#include <SDL.h>
 
 namespace Game {
 
@@ -164,6 +165,38 @@ void ClientNetworkManager::update(float delta_time)
         }
     }
 
+    // Rate-limited input sending (60Hz max)
+    if (connection_state == ConnectionState::CONNECTED && has_pending_input) {
+        input_send_timer += delta_time;
+        if (input_send_timer >= INPUT_SEND_INTERVAL) {
+            input_send_timer = 0.0f;
+            has_pending_input = false;
+
+            // Create and send input command
+            BitWriter writer;
+            InputCommandMessage msg;
+            msg.client_tick = client_tick;
+            msg.last_received_tick = last_received_server_tick;
+            msg.buttons = last_sent_input.buttons;
+            msg.camera_yaw = last_sent_input.camera_yaw;
+            msg.camera_pitch = last_sent_input.camera_pitch;
+            msg.move_forward = last_sent_input.move_forward;
+            msg.move_right = last_sent_input.move_right;
+
+            NetworkSerializer::serialize(writer, msg);
+            sendUnreliableMessage(writer);
+        }
+    }
+
+    // Ping/RTT measurement
+    if (connection_state == ConnectionState::CONNECTED) {
+        ping_timer += delta_time;
+        if (ping_timer >= PING_INTERVAL) {
+            ping_timer = 0.0f;
+            sendPing();
+        }
+    }
+
     // Flush all queued packets at end of update
     enet_host_flush(client_host);
 }
@@ -174,19 +207,9 @@ void ClientNetworkManager::sendInputCommand(const InputState& input)
         return;
     }
 
-    // Create input command message
-    BitWriter writer;
-    InputCommandMessage msg;
-    msg.client_tick = client_tick;
-    msg.last_received_tick = last_received_server_tick;
-    msg.buttons = input.buttons;
-    msg.camera_yaw = input.camera_yaw;
-    msg.camera_pitch = input.camera_pitch;
-    msg.move_forward = input.move_forward;
-    msg.move_right = input.move_right;
-
-    NetworkSerializer::serialize(writer, msg);
-    sendUnreliableMessage(writer);
+    // Store input for rate-limited sending
+    last_sent_input = input;
+    has_pending_input = true;
 }
 
 entt::entity ClientNetworkManager::getEntityByNetworkId(uint32_t net_id) const
@@ -237,6 +260,11 @@ void ClientNetworkManager::handleServerDisconnect(ENetEvent& event)
     network_id_to_entity.clear();
     local_player_entity = entt::null;
     local_player_network_id = 0;
+
+    // Notify game layer
+    if (on_disconnected) {
+        on_disconnected();
+    }
 }
 
 void ClientNetworkManager::handleServerMessage(ENetEvent& event)
@@ -267,6 +295,10 @@ void ClientNetworkManager::handleServerMessage(ENetEvent& event)
 
         case MessageType::DISCONNECT:
             handleDisconnect(reader);
+            break;
+
+        case MessageType::PONG:
+            handlePong(reader);
             break;
 
         default:
@@ -391,6 +423,33 @@ void ClientNetworkManager::handleDisconnect(BitReader& reader)
 
     LOG_ENGINE_INFO("Server disconnected: {0}", msg.reason);
     setConnectionState(ConnectionState::DISCONNECTED);
+}
+
+void ClientNetworkManager::handlePong(BitReader& reader)
+{
+    PongMessage msg;
+    if (!NetworkSerializer::deserialize(reader, msg)) {
+        return;
+    }
+
+    // Calculate RTT
+    uint32_t current_time = SDL_GetTicks();
+    stats.ping_ms = static_cast<float>(current_time - msg.timestamp);
+    LOG_ENGINE_TRACE("RTT: {0}ms", stats.ping_ms);
+}
+
+void ClientNetworkManager::sendPing()
+{
+    if (server_peer == nullptr) {
+        return;
+    }
+
+    BitWriter writer;
+    PingMessage msg;
+    msg.timestamp = SDL_GetTicks();
+    last_ping_timestamp = msg.timestamp;
+    NetworkSerializer::serialize(writer, msg);
+    sendReliableMessage(writer);
 }
 
 void ClientNetworkManager::createOrUpdateEntity(const EntityUpdateData& update)

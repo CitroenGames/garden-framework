@@ -215,7 +215,7 @@
 #define ENET_MIN(x, y) ((x) < (y) ? (x) : (y))
 #define ENET_DIFFERENCE(x, y) ((x) < (y) ? (y) - (x) : (x) - (y))
 
-#define ENET_IPV6           0
+#define ENET_IPV6           1
 static const struct in6_addr enet_v4_anyaddr   = {{{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00 }}};
 static const struct in6_addr enet_v4_noaddr    = {{{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff }}};
 static const struct in6_addr enet_v4_localhost = {{{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0x7f, 0x00, 0x00, 0x01 }}};
@@ -5970,7 +5970,6 @@ extern "C" {
     }
 
     int enet_socket_bind(ENetSocket socket, const ENetAddress *address) {
-        #if ENET_IPV6
         struct sockaddr_in6 sin = {0};
         sin.sin6_family = AF_INET6;
 
@@ -5985,21 +5984,6 @@ extern "C" {
         }
 
         return bind(socket, (struct sockaddr *) &sin, sizeof(struct sockaddr_in6)) == SOCKET_ERROR ? -1 : 0;
-        #else
-        struct sockaddr_in sin = {0};
-        sin.sin_family = AF_INET;
-
-        if (address != NULL) {
-            sin.sin_port = ENET_HOST_TO_NET_16(address->port);
-            // Extract IPv4 address from IPv6 structure (last 4 bytes)
-            memcpy(&sin.sin_addr, &address->host.s6_addr[12], 4);
-        } else {
-            sin.sin_port = 0;
-            sin.sin_addr.s_addr = INADDR_ANY;
-        }
-
-        return bind(socket, (struct sockaddr *) &sin, sizeof(struct sockaddr_in)) == SOCKET_ERROR ? -1 : 0;
-        #endif
     }
 
     int enet_socket_get_address(ENetSocket socket, ENetAddress *address) {
@@ -6022,11 +6006,7 @@ extern "C" {
     }
 
     ENetSocket enet_socket_create(ENetSocketType type) {
-        #if ENET_IPV6
         return socket(PF_INET6, type == ENET_SOCKET_TYPE_DATAGRAM ? SOCK_DGRAM : SOCK_STREAM, 0);
-        #else
-        return socket(PF_INET, type == ENET_SOCKET_TYPE_DATAGRAM ? SOCK_DGRAM : SOCK_STREAM, 0);
-        #endif
     }
 
     int enet_socket_set_option(ENetSocket socket, ENetSocketOption option, int value) {

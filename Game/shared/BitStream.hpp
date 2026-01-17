@@ -135,10 +135,14 @@ private:
     const uint8_t* buffer;
     size_t buffer_size;
     size_t bit_position = 0;
+    bool error_state = false;
 
 public:
     BitReader(const uint8_t* data, size_t size)
-        : buffer(data), buffer_size(size), bit_position(0) {}
+        : buffer(data), buffer_size(size), bit_position(0), error_state(false) {}
+
+    // Check if an error has occurred
+    bool hasError() const { return error_state; }
 
     // Read arbitrary number of bits
     uint64_t readBits(size_t num_bits) {
@@ -153,6 +157,7 @@ public:
 
             // Check bounds
             if (byte_index >= buffer_size) {
+                error_state = true;
                 return result;  // Return what we have
             }
 
