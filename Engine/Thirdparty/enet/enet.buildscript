@@ -1,0 +1,5 @@
+[project:enet]
+type = interface
+headers = src/enet.hpp
+public_includes = src
+includes = src

@@ -440,7 +440,7 @@ std::shared_ptr<mesh> LevelManager::loadMesh(const LevelEntity& entity, IRenderA
             return nullptr;
         }
 
-        LOG_ENGINE_TRACE("Loaded glTF: %s\n", entity.mesh_path.c_str());
+        LOG_ENGINE_TRACE("Loaded glTF: {}", entity.mesh_path.c_str());
         
         // Create mesh from glTF data
         m_ptr = new mesh(map_result.vertices, map_result.vertex_count);

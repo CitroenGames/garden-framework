@@ -13,6 +13,9 @@
 #include <stdlib.h>
 #include <map>
 
+#define ENET_IMPLEMENTATION
+#include "enet.h"
+
 #include "Application.hpp"
 
 // Components
@@ -24,6 +27,8 @@
 #include "world.hpp"
 #include "Graphics/renderer.hpp"
 #include "LevelManager.hpp"
+#include "ClientNetworkManager.hpp"
+#include "SharedComponents.hpp"
 
 #include "Utils/Log.hpp"
 
@@ -32,10 +37,14 @@ static renderer _renderer;
 static world _world;
 static InputHandler input_handler;
 static std::unique_ptr<PlayerController> player_controller;
+static Game::ClientNetworkManager _network;
 
 static void quit_game(int code)
 {
+    _network.disconnect("Game closing");
+    _network.shutdown();
     app.shutdown();
+    EE::CLog::Shutdown();
     exit(code);
 }
 
@@ -43,8 +52,8 @@ static void quit_game(int code)
 void update_player_representations(entt::registry& registry, bool is_freecam)
 {
     auto view = registry.view<PlayerRepresentationComponent, TransformComponent, MeshComponent>();
-    
-    for(auto entity : view) {
+
+    for(entt::entity entity : view) {
         auto& pr = view.get<PlayerRepresentationComponent>(entity);
         auto& trans = view.get<TransformComponent>(entity);
         auto& mesh_comp = view.get<MeshComponent>(entity);
@@ -99,7 +108,7 @@ int main(int argc, char* argv[])
     input_handler.set_quit_callback([]() {
         quit_game(0);
     });
-    
+
     auto input_manager = input_handler.get_input_manager();
 
     /* Frame locking */
@@ -108,6 +117,19 @@ int main(int argc, char* argv[])
 
     /* Create world */
     _world = world();
+
+    /* Initialize networking */
+    if (!_network.initialize()) {
+        LOG_ENGINE_FATAL("Failed to initialize Client Network");
+        quit_game(1);
+    }
+
+    if (!_network.connectToServer("127.0.0.1", 7777, "Player")) {
+        LOG_ENGINE_FATAL("Failed to connect to server");
+        quit_game(1);
+    }
+
+    _network.setWorld(&_world);
 
     /* Level loading */
     LevelManager level_manager;
@@ -200,6 +222,38 @@ int main(int argc, char* argv[])
         // delta time
         delta_time = (frame_start_ticks - delta_last) / 1000.0f;
         delta_last = frame_start_ticks;
+
+        // Network update - receive world state and process messages
+        _network.update(delta_time);
+
+        // Send player input to server
+        if (_network.isConnected() && input_manager)
+        {
+            Game::InputState input_state;
+            input_state.buttons = 0;
+
+            // Map input to button flags
+            if (input_manager->is_key_held(SDL_SCANCODE_W)) input_state.buttons |= InputFlags::MOVE_FORWARD;
+            if (input_manager->is_key_held(SDL_SCANCODE_S)) input_state.buttons |= InputFlags::MOVE_BACK;
+            if (input_manager->is_key_held(SDL_SCANCODE_A)) input_state.buttons |= InputFlags::MOVE_LEFT;
+            if (input_manager->is_key_held(SDL_SCANCODE_D)) input_state.buttons |= InputFlags::MOVE_RIGHT;
+            if (input_manager->is_key_held(SDL_SCANCODE_SPACE)) input_state.buttons |= InputFlags::JUMP;
+            if (input_manager->is_key_held(SDL_SCANCODE_E)) input_state.buttons |= InputFlags::USE;
+
+            // Get camera rotation from world camera
+            input_state.camera_yaw = _world.world_camera.rotation.Y;
+            input_state.camera_pitch = _world.world_camera.rotation.X;
+            input_state.move_forward = 0.0f;
+            input_state.move_right = 0.0f;
+
+            // Calculate analog movement values
+            if (input_state.buttons & InputFlags::MOVE_FORWARD) input_state.move_forward += 1.0f;
+            if (input_state.buttons & InputFlags::MOVE_BACK) input_state.move_forward -= 1.0f;
+            if (input_state.buttons & InputFlags::MOVE_RIGHT) input_state.move_right += 1.0f;
+            if (input_state.buttons & InputFlags::MOVE_LEFT) input_state.move_right -= 1.0f;
+
+            _network.sendInputCommand(input_state);
+        }
 
         // physics and player collisions (only when controlling player)
         if (!player_controller->isFreecamMode())

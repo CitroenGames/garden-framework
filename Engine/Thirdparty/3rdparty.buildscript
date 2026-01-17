@@ -5,3 +5,7 @@ include = glm/glm.buildscript
 include = tinygltf-2.9.6/tinygltf.buildscript
 include = tinyobjloader/tinyobjloader.buildscript
 include = spdlog-1.15.3/spdlog.buildscript
+
+include = enet/enet.buildscript
+
+include = imgui-1.92.5/imgui.buildscript

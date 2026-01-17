@@ -1,6 +1,7 @@
 [project:tinygltf]
 type = lib
 std = 11
-sources = *.cc
-headers = *.h, **/*.hpp
+sources = tiny_gltf.cc
+headers = *.h
+includes = .
 public_includes = .

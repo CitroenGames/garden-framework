@@ -80,7 +80,7 @@ bool OpenGLRenderAPI::initialize(WindowHandle window, int width, int height, flo
 
     // Initialize Skybox
     skybox = new Skybox();
-    if (!skybox->initialize("textures/t_sky.png", this, shader_manager->getShader("sky")))
+    if (!skybox->initialize("textures/sky.jpg", this, shader_manager->getShader("sky")))
     {
         printf("Failed to initialize Skybox\n");
     }
