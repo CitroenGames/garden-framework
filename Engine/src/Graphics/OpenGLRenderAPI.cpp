@@ -80,7 +80,7 @@ bool OpenGLRenderAPI::initialize(WindowHandle window, int width, int height, flo
 
     // Initialize Skybox
     skybox = new Skybox();
-    if (!skybox->initialize("textures/sky.jpg", this, shader_manager->getShader("sky")))
+    if (!skybox->initialize(shader_manager->getShader("sky")))
     {
         printf("Failed to initialize Skybox\n");
     }
@@ -880,16 +880,18 @@ void OpenGLRenderAPI::renderSkybox()
     {
         matrix4f view;
         view.setM(glm::value_ptr(view_matrix));
-        
+
         matrix4f proj;
         proj.setM(glm::value_ptr(projection_matrix));
-        
-        skybox->render(view, proj);
+
+        // Sun direction is opposite of light direction (direction TO the sun)
+        vector3f sunDir(-current_light_direction.x, -current_light_direction.y, -current_light_direction.z);
+
+        skybox->render(view, proj, sunDir);
 
         // Skybox modifies GL state, so we need to sync our trackers
         current_shader_id = 0;
-        current_bound_texture_0 = 0;
-        
+
         // Skybox::render sets DepthFunc to GL_LESS at the end
         current_gpu_state.depth_test = DepthTest::Less;
     }
