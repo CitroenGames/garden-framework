@@ -242,7 +242,7 @@ public:
         state.depth_test = DepthTest::LessEqual;
         state.depth_write = !transparent;
         state.lighting = true;
-        state.color = vector3f(1.0f, 1.0f, 1.0f);
+        state.color = glm::vec3(1.0f, 1.0f, 1.0f);
         return state;
     }
 

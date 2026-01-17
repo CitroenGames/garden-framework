@@ -2,14 +2,7 @@
 #include <vector>
 #include <iostream>
 
-#include <glm/glm.hpp>
 #include <glm/gtc/type_ptr.hpp>
-
-static glm::mat4 convertMatrix(const matrix4f& m)
-{
-    const float* ptr = m.pointer();
-    return glm::make_mat4(ptr);
-}
 
 Skybox::Skybox()
     : skyboxVAO(0), skyboxVBO(0), skyShader(nullptr), initialized(false)
@@ -88,7 +81,7 @@ void Skybox::setupMesh()
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
 }
 
-void Skybox::render(const matrix4f& view, const matrix4f& projection, const vector3f& sunDirection)
+void Skybox::render(const glm::mat4& view, const glm::mat4& projection, const glm::vec3& sunDirection)
 {
     if (!initialized || !skyShader) return;
 
@@ -98,11 +91,11 @@ void Skybox::render(const matrix4f& view, const matrix4f& projection, const vect
     skyShader->use();
 
     // Pass matrices
-    skyShader->setUniform("uView", convertMatrix(view));
-    skyShader->setUniform("uProjection", convertMatrix(projection));
+    skyShader->setUniform("uView", view);
+    skyShader->setUniform("uProjection", projection);
 
     // Pass sun direction (negate light direction to get direction TO the sun)
-    skyShader->setUniform("uSunDirection", glm::vec3(sunDirection.X, sunDirection.Y, sunDirection.Z));
+    skyShader->setUniform("uSunDirection", sunDirection);
 
     glBindVertexArray(skyboxVAO);
     glDrawArrays(GL_TRIANGLES, 0, 36);

@@ -1,8 +1,8 @@
 #pragma once
 
 #include <glad/glad.h>
+#include <glm/glm.hpp>
 #include "Shader.hpp"
-#include "RenderAPI.hpp"
 
 class Skybox
 {
@@ -18,6 +18,6 @@ public:
     ~Skybox();
 
     bool initialize(Shader* shader);
-    void render(const matrix4f& view, const matrix4f& projection, const vector3f& sunDirection);
+    void render(const glm::mat4& view, const glm::mat4& projection, const glm::vec3& sunDirection);
     void shutdown();
 };

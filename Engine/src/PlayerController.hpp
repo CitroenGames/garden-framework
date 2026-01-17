@@ -112,12 +112,12 @@ public:
         float effective_sensitivity_x = input_manager ? input_manager->Sensitivity_X * sensitivity : sensitivity;
         float effective_sensitivity_y = input_manager ? input_manager->Sensitivity_Y * sensitivity : sensitivity;
 
-        active_cam.rotation.X += yrel / 1000.0f * effective_sensitivity_y;
-        active_cam.rotation.Y += -xrel / 1000.0f * effective_sensitivity_x;
-        
+        active_cam.rotation.x += yrel / 1000.0f * effective_sensitivity_y;
+        active_cam.rotation.y += -xrel / 1000.0f * effective_sensitivity_x;
+
         // Clamp pitch
-        if (active_cam.rotation.X > 1.5f) active_cam.rotation.X = 1.5f;
-        if (active_cam.rotation.X < -1.5f) active_cam.rotation.X = -1.5f;
+        if (active_cam.rotation.x > 1.5f) active_cam.rotation.x = 1.5f;
+        if (active_cam.rotation.x < -1.5f) active_cam.rotation.x = -1.5f;
     }
 
     void update(float delta)
@@ -153,21 +153,23 @@ private:
         if (input_manager->is_key_held(SDL_SCANCODE_D)) move_right -= 1.0f;
         if (input_manager->is_key_held(SDL_SCANCODE_A)) move_right += 1.0f;
 
-        vector3f wish_dir = vector3f(move_right, 0, move_forward);
-        
+        glm::vec3 wish_dir = glm::vec3(move_right, 0, move_forward);
+
         // Rotate wish_dir by camera
         wish_dir = game_world->world_camera.camera_rot_quaternion() * wish_dir;
 
         if (pc.grounded)
         {
-            wish_dir.projectOnPlane(pc.ground_normal);
+            // Project on plane: v - dot(v, n) * n
+            wish_dir = wish_dir - glm::dot(wish_dir, pc.ground_normal) * pc.ground_normal;
         }
         else
         {
-            wish_dir.Y = 0;
+            wish_dir.y = 0;
         }
 
-        wish_dir = wish_dir.normalize();
+        if (glm::length(wish_dir) > 0.0f)
+            wish_dir = glm::normalize(wish_dir);
 
         bool wishJump = input_manager->is_key_held(SDL_SCANCODE_SPACE);
         bool jump = wishJump && pc.grounded;
@@ -178,14 +180,14 @@ private:
         {
             rb.velocity *= 0.6f; // Friction
             if (jump)
-                rb.velocity.Y = pc.jump_force;
+                rb.velocity.y = pc.jump_force;
             else
-                rb.velocity.Y = 0; // Stick to surfaces
+                rb.velocity.y = 0; // Stick to surfaces
         }
         else
         {
             rb.velocity *= 0.7f; // Air friction
-            rb.velocity.Y -= 2.0f * delta; // Extra gravity? PhysicsSystem already applies gravity.
+            rb.velocity.y -= 2.0f * delta; // Extra gravity? PhysicsSystem already applies gravity.
             // Original code had `velocity.Y -= 2.0f * delta`. PhysicsSystem adds `gravity * delta`.
             // If gravity is (0, -1, 0), it adds -1*delta.
             // This extra -2*delta makes it fall faster?
@@ -194,7 +196,7 @@ private:
 
         // Camera follow
         // Interpolate camera position to player position
-        game_world->world_camera.position = trans.position.getInterpolated(game_world->world_camera.position, delta);
+        game_world->world_camera.position = glm::mix(game_world->world_camera.position, trans.position, delta);
     }
 
     void updateFreecam(float delta)
@@ -206,21 +208,21 @@ private:
 
         if (!fc.input_enabled || !input_manager) return; 
 
-        vector3f local_movement = vector3f(0, 0, 0);
-        
-        if (input_manager->is_key_held(SDL_SCANCODE_W)) local_movement.Z += 1.0f;
-        if (input_manager->is_key_held(SDL_SCANCODE_S)) local_movement.Z -= 1.0f;
-        if (input_manager->is_key_held(SDL_SCANCODE_A)) local_movement.X += 1.0f;
-        if (input_manager->is_key_held(SDL_SCANCODE_D)) local_movement.X -= 1.0f;
-        if (input_manager->is_key_held(SDL_SCANCODE_SPACE)) local_movement.Y += 1.0f;
-        if (input_manager->is_key_held(SDL_SCANCODE_LSHIFT)) local_movement.Y -= 1.0f;
+        glm::vec3 local_movement = glm::vec3(0, 0, 0);
 
-        if (local_movement.getLength() > 0)
-            local_movement = local_movement.normalize();
+        if (input_manager->is_key_held(SDL_SCANCODE_W)) local_movement.z += 1.0f;
+        if (input_manager->is_key_held(SDL_SCANCODE_S)) local_movement.z -= 1.0f;
+        if (input_manager->is_key_held(SDL_SCANCODE_A)) local_movement.x += 1.0f;
+        if (input_manager->is_key_held(SDL_SCANCODE_D)) local_movement.x -= 1.0f;
+        if (input_manager->is_key_held(SDL_SCANCODE_SPACE)) local_movement.y += 1.0f;
+        if (input_manager->is_key_held(SDL_SCANCODE_LSHIFT)) local_movement.y -= 1.0f;
+
+        if (glm::length(local_movement) > 0)
+            local_movement = glm::normalize(local_movement);
 
         float current_speed = input_manager->is_key_held(SDL_SCANCODE_LSHIFT) ? fc.fast_movement_speed : fc.movement_speed;
 
-        vector3f world_movement = game_world->world_camera.camera_rot_quaternion() * local_movement;
+        glm::vec3 world_movement = game_world->world_camera.camera_rot_quaternion() * local_movement;
 
         // Move camera directly (freecam mode moves the camera)
         game_world->world_camera.position += world_movement * current_speed * delta;

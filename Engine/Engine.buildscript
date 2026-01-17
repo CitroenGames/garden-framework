@@ -7,6 +7,7 @@ headers = src/**/*.h src/**/*.hpp
 public_includes = src, thirdparty/include, .
 includes = src, thirdparty/include, .
 multiprocessor = true
+simd = StreamingSIMDExtensions2
 target_link_libraries(
     PUBLIC SDL2
     PUBLIC GLM

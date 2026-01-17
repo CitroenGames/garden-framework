@@ -132,7 +132,7 @@ bool LevelManager::parseMetadataFromJSON(const void* json_ptr, LevelMetadata& me
         if (world_settings.contains("gravity"))
         {
             const auto& g = world_settings["gravity"];
-            metadata.gravity = vector3f(
+            metadata.gravity = glm::vec3(
                 g.value("x", 0.0f),
                 g.value("y", -1.0f),
                 g.value("z", 0.0f)
@@ -151,7 +151,7 @@ bool LevelManager::parseMetadataFromJSON(const void* json_ptr, LevelMetadata& me
         if (lighting.contains("ambient"))
         {
             const auto& a = lighting["ambient"];
-            metadata.ambient_light = vector3f(
+            metadata.ambient_light = glm::vec3(
                 a.value("r", 0.2f),
                 a.value("g", 0.2f),
                 a.value("b", 0.2f)
@@ -160,7 +160,7 @@ bool LevelManager::parseMetadataFromJSON(const void* json_ptr, LevelMetadata& me
         if (lighting.contains("diffuse"))
         {
             const auto& d = lighting["diffuse"];
-            metadata.diffuse_light = vector3f(
+            metadata.diffuse_light = glm::vec3(
                 d.value("r", 0.8f),
                 d.value("g", 0.8f),
                 d.value("b", 0.8f)
@@ -172,13 +172,11 @@ bool LevelManager::parseMetadataFromJSON(const void* json_ptr, LevelMetadata& me
             float x = dir.value("x", 0.0f);
             float y = dir.value("y", -1.0f);
             float z = dir.value("z", 0.0f);
-            metadata.light_direction = vector3f(x, y, z);
+            metadata.light_direction = glm::vec3(x, y, z);
             // Normalize direction
             float length = std::sqrt(x*x + y*y + z*z);
             if (length > 0.0001f) {
-                metadata.light_direction.X /= length;
-                metadata.light_direction.Y /= length;
-                metadata.light_direction.Z /= length;
+                metadata.light_direction = glm::normalize(metadata.light_direction);
             }
         }
         // Backward compatibility: fallback to position if direction not specified
@@ -189,13 +187,11 @@ bool LevelManager::parseMetadataFromJSON(const void* json_ptr, LevelMetadata& me
             float y = pos.value("y", -1.0f);
             float z = pos.value("z", 0.0f);
             // Convert position to direction (pointing toward origin)
-            metadata.light_direction = vector3f(-x, -y, -z);
+            metadata.light_direction = glm::vec3(-x, -y, -z);
             // Normalize
             float length = std::sqrt(x*x + y*y + z*z);
             if (length > 0.0001f) {
-                metadata.light_direction.X /= length;
-                metadata.light_direction.Y /= length;
-                metadata.light_direction.Z /= length;
+                metadata.light_direction = glm::normalize(metadata.light_direction);
             }
         }
     }
@@ -229,7 +225,7 @@ bool LevelManager::parseEntityFromJSON(const void* json_ptr, LevelEntity& entity
         if (transform.contains("position"))
         {
             const auto& pos = transform["position"];
-            entity.position = vector3f(
+            entity.position = glm::vec3(
                 pos.value("x", 0.0f),
                 pos.value("y", 0.0f),
                 pos.value("z", 0.0f)
@@ -238,7 +234,7 @@ bool LevelManager::parseEntityFromJSON(const void* json_ptr, LevelEntity& entity
         if (transform.contains("rotation"))
         {
             const auto& rot = transform["rotation"];
-            entity.rotation = vector3f(
+            entity.rotation = glm::vec3(
                 rot.value("x", 0.0f),
                 rot.value("y", 0.0f),
                 rot.value("z", 0.0f)
@@ -247,7 +243,7 @@ bool LevelManager::parseEntityFromJSON(const void* json_ptr, LevelEntity& entity
         if (transform.contains("scale"))
         {
             const auto& scl = transform["scale"];
-            entity.scale = vector3f(
+            entity.scale = glm::vec3(
                 scl.value("x", 1.0f),
                 scl.value("y", 1.0f),
                 scl.value("z", 1.0f)
@@ -325,7 +321,7 @@ bool LevelManager::parseEntityFromJSON(const void* json_ptr, LevelEntity& entity
         if (pr.contains("position_offset"))
         {
             const auto& offset = pr["position_offset"];
-            entity.position_offset = vector3f(
+            entity.position_offset = glm::vec3(
                 offset.value("x", 0.0f),
                 offset.value("y", 0.0f),
                 offset.value("z", 0.0f)
@@ -562,7 +558,7 @@ bool LevelManager::instantiateLevel(
         }
 
         // Add Transform
-        game_world.registry.emplace<TransformComponent>(e, entity_data.position.X, entity_data.position.Y, entity_data.position.Z);
+        game_world.registry.emplace<TransformComponent>(e, entity_data.position.x, entity_data.position.y, entity_data.position.z);
         auto& transform = game_world.registry.get<TransformComponent>(e);
         transform.rotation = entity_data.rotation;
         transform.scale = entity_data.scale;

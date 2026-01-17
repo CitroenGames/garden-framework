@@ -1,14 +1,14 @@
 #pragma once
 
-#include "irrlicht/vector3.h"
-#include "irrlicht/matrix4.h"
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/type_ptr.hpp>
+#define GLM_ENABLE_EXPERIMENTAL
+#include <glm/gtx/euler_angles.hpp>
 #include <string>
 
 // Forward declaration for SDL
 struct SDL_Window;
-
-using namespace irr;
-using namespace core;
 
 // Forward declarations
 struct vertex;
@@ -52,7 +52,7 @@ struct RenderState
     DepthTest depth_test = DepthTest::LessEqual;
     bool depth_write = true;
     bool lighting = true;
-    vector3f color = vector3f(1.0f, 1.0f, 1.0f);
+    glm::vec3 color = glm::vec3(1.0f, 1.0f, 1.0f);
 };
 
 // Abstract rendering API interface
@@ -70,15 +70,15 @@ public:
     virtual void beginFrame() = 0;
     virtual void endFrame() = 0;
     virtual void present() = 0; // Present/swap buffers
-    virtual void clear(const vector3f& color = vector3f(0.2f, 0.3f, 0.8f)) = 0;
+    virtual void clear(const glm::vec3& color = glm::vec3(0.2f, 0.3f, 0.8f)) = 0;
 
     // Camera and transforms
     virtual void setCamera(const camera& cam) = 0;
     virtual void pushMatrix() = 0;
     virtual void popMatrix() = 0;
-    virtual void translate(const vector3f& pos) = 0;
-    virtual void rotate(const matrix4f& rotation) = 0;
-    virtual void multiplyMatrix(const matrix4f& matrix) = 0;
+    virtual void translate(const glm::vec3& pos) = 0;
+    virtual void rotate(const glm::mat4& rotation) = 0;
+    virtual void multiplyMatrix(const glm::mat4& matrix) = 0;
 
     // Texture management
     virtual TextureHandle loadTexture(const std::string& filename, bool invert_y = false, bool generate_mipmaps = true) = 0;
@@ -93,15 +93,15 @@ public:
     // State management
     virtual void setRenderState(const RenderState& state) = 0;
     virtual void enableLighting(bool enable) = 0;
-    virtual void setLighting(const vector3f& ambient, const vector3f& diffuse, const vector3f& direction) = 0;
+    virtual void setLighting(const glm::vec3& ambient, const glm::vec3& diffuse, const glm::vec3& direction) = 0;
 
     virtual void renderSkybox() = 0;
 
     // Shadow Mapping
-    virtual void beginShadowPass(const vector3f& lightDir) = 0;
+    virtual void beginShadowPass(const glm::vec3& lightDir) = 0;
     virtual void endShadowPass() = 0;
     virtual void bindShadowMap(int textureUnit) = 0;
-    virtual matrix4f getLightSpaceMatrix() = 0;
+    virtual glm::mat4 getLightSpaceMatrix() = 0;
 
     // Resource Creation
     virtual IGPUMesh* createMesh() = 0;

@@ -65,7 +65,6 @@ private:
     bool global_uniforms_dirty;
 
     // Internal helper methods
-    glm::mat4 convertToGLM(const matrix4f& m) const;
     Shader* getShaderForRenderState(const RenderState& state);
     static void GLAPIENTRY openglDebugCallback(GLenum source, GLenum type, GLuint id,
                                                GLenum severity, GLsizei length,
@@ -92,14 +91,14 @@ public:
     virtual void beginFrame() override;
     virtual void endFrame() override;
     virtual void present() override;
-    virtual void clear(const vector3f& color = vector3f(0.2f, 0.3f, 0.8f)) override;
+    virtual void clear(const glm::vec3& color = glm::vec3(0.2f, 0.3f, 0.8f)) override;
 
     virtual void setCamera(const camera& cam) override;
     virtual void pushMatrix() override;
     virtual void popMatrix() override;
-    virtual void translate(const vector3f& pos) override;
-    virtual void rotate(const matrix4f& rotation) override;
-    virtual void multiplyMatrix(const matrix4f& matrix) override;
+    virtual void translate(const glm::vec3& pos) override;
+    virtual void rotate(const glm::mat4& rotation) override;
+    virtual void multiplyMatrix(const glm::mat4& matrix) override;
 
     virtual TextureHandle loadTexture(const std::string& filename, bool invert_y = false, bool generate_mipmaps = true) override;
     virtual void bindTexture(TextureHandle texture) override;
@@ -111,15 +110,15 @@ public:
 
     virtual void setRenderState(const RenderState& state) override;
     virtual void enableLighting(bool enable) override;
-    virtual void setLighting(const vector3f& ambient, const vector3f& diffuse, const vector3f& direction) override;
+    virtual void setLighting(const glm::vec3& ambient, const glm::vec3& diffuse, const glm::vec3& direction) override;
 
     virtual void renderSkybox() override;
 
     // Shadow Mapping overrides
-    virtual void beginShadowPass(const vector3f& lightDir) override;
+    virtual void beginShadowPass(const glm::vec3& lightDir) override;
     virtual void endShadowPass() override;
     virtual void bindShadowMap(int textureUnit) override;
-    virtual matrix4f getLightSpaceMatrix() override;
+    virtual glm::mat4 getLightSpaceMatrix() override;
 
     virtual IGPUMesh* createMesh() override;
 

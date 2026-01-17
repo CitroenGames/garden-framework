@@ -281,25 +281,21 @@ void OpenGLRenderAPI::present()
     }
 }
 
-void OpenGLRenderAPI::clear(const vector3f& color)
+void OpenGLRenderAPI::clear(const glm::vec3& color)
 {
-    glClearColor(color.X, color.Y, color.Z, 1.0f);
+    glClearColor(color.x, color.y, color.z, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 }
 
 void OpenGLRenderAPI::setCamera(const camera& cam)
 {
-    vector3f pos = cam.getPosition();
-    vector3f target = cam.getTarget();
-    vector3f up = cam.getUpVector();
+    glm::vec3 pos = cam.getPosition();
+    glm::vec3 target = cam.getTarget();
+    glm::vec3 up = cam.getUpVector();
 
     // Set up view matrix using GLM
-    view_matrix = glm::lookAt(
-        glm::vec3(pos.X, pos.Y, pos.Z),
-        glm::vec3(target.X, target.Y, target.Z),
-        glm::vec3(up.X, up.Y, up.Z)
-    );
-    
+    view_matrix = glm::lookAt(pos, target, up);
+
     global_uniforms_dirty = true;
 }
 
@@ -317,15 +313,14 @@ void OpenGLRenderAPI::popMatrix()
     }
 }
 
-void OpenGLRenderAPI::translate(const vector3f& pos)
+void OpenGLRenderAPI::translate(const glm::vec3& pos)
 {
-    current_model_matrix = glm::translate(current_model_matrix, glm::vec3(pos.X, pos.Y, pos.Z));
+    current_model_matrix = glm::translate(current_model_matrix, pos);
 }
 
-void OpenGLRenderAPI::rotate(const matrix4f& rotation)
+void OpenGLRenderAPI::rotate(const glm::mat4& rotation)
 {
-    glm::mat4 rot = convertToGLM(rotation);
-    current_model_matrix = current_model_matrix * rot;
+    current_model_matrix = current_model_matrix * rotation;
 }
 
 TextureHandle OpenGLRenderAPI::loadTexture(const std::string& filename, bool invert_y, bool generate_mipmaps)
@@ -441,39 +436,39 @@ void OpenGLRenderAPI::deleteTexture(TextureHandle texture)
     }
 }
 
-void OpenGLRenderAPI::beginShadowPass(const vector3f& lightDir)
+void OpenGLRenderAPI::beginShadowPass(const glm::vec3& lightDir)
 {
     in_shadow_pass = true;
-    
+
     // Set up light space matrix
     // Orthographic projection for directional light
     float near_plane = 1.0f, far_plane = 200.0f;
     float ortho_size = 50.0f; // Adjust based on scene scale
     glm::mat4 lightProjection = glm::ortho(-ortho_size, ortho_size, -ortho_size, ortho_size, near_plane, far_plane);
-    
+
     // View matrix looking from light direction
     // For directional light, position can be arbitrary but should cover the scene
     // We position it 'far away' along the reverse light direction
-    glm::vec3 direction = glm::normalize(glm::vec3(lightDir.X, lightDir.Y, lightDir.Z));
+    glm::vec3 direction = glm::normalize(lightDir);
     // Convention: light direction points FROM light, so negate to look AT origin
-    // Wait, the level data stores direction vector (e.g., 0, -1, 0 for down). 
+    // Wait, the level data stores direction vector (e.g., 0, -1, 0 for down).
     // So light comes FROM -direction * distance.
-    glm::vec3 lightPos = -direction * 100.0f; 
-    
-    glm::mat4 lightView = glm::lookAt(lightPos, 
-                                      glm::vec3(0.0f, 0.0f, 0.0f), 
+    glm::vec3 lightPos = -direction * 100.0f;
+
+    glm::mat4 lightView = glm::lookAt(lightPos,
+                                      glm::vec3(0.0f, 0.0f, 0.0f),
                                       glm::vec3(0.0f, 1.0f, 0.0f));
-                                      
+
     lightSpaceMatrix = lightProjection * lightView;
-    
+
     // Bind FBO and set viewport
     glViewport(0, 0, SHADOW_WIDTH, SHADOW_HEIGHT);
     glBindFramebuffer(GL_FRAMEBUFFER, shadowMapFBO);
     glClear(GL_DEPTH_BUFFER_BIT);
-    
+
     // Enable front-face culling to fix peter panning
     glCullFace(GL_FRONT);
-    
+
     global_uniforms_dirty = true;
 }
 
@@ -494,13 +489,9 @@ void OpenGLRenderAPI::bindShadowMap(int textureUnit)
     glBindTexture(GL_TEXTURE_2D, shadowMapTexture);
 }
 
-matrix4f OpenGLRenderAPI::getLightSpaceMatrix()
+glm::mat4 OpenGLRenderAPI::getLightSpaceMatrix()
 {
-    matrix4f m;
-    const float* src = glm::value_ptr(lightSpaceMatrix);
-    float* dst = m.pointer();
-    for(int i=0; i<16; ++i) dst[i] = src[i];
-    return m;
+    return lightSpaceMatrix;
 }
 
 void OpenGLRenderAPI::renderMesh(const mesh& m, const RenderState& state)
@@ -598,7 +589,7 @@ void OpenGLRenderAPI::renderMesh(const mesh& m, const RenderState& state)
 
         // Set object specific uniforms
         shader->setUniform("uModel", current_model_matrix);
-        shader->setUniform("uColor", glm::vec3(state.color.X, state.color.Y, state.color.Z));
+        shader->setUniform("uColor", state.color);
 
         // Bind texture if available (Unit 0)
         if (m.texture_set && m.texture != INVALID_TEXTURE)
@@ -707,7 +698,7 @@ void OpenGLRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t
 
         // Set object specific uniforms
         shader->setUniform("uModel", current_model_matrix);
-        shader->setUniform("uColor", glm::vec3(state.color.X, state.color.Y, state.color.Z));
+        shader->setUniform("uColor", state.color);
 
         // Texture binding logic:
         // - For single-texture meshes: bind m.texture
@@ -856,38 +847,29 @@ void OpenGLRenderAPI::enableLighting(bool enable)
     lighting_enabled = enable;
 }
 
-void OpenGLRenderAPI::setLighting(const vector3f& ambient, const vector3f& diffuse, const vector3f& direction)
+void OpenGLRenderAPI::setLighting(const glm::vec3& ambient, const glm::vec3& diffuse, const glm::vec3& direction)
 {
     // Store lighting parameters for shader uniforms
-    current_light_ambient = glm::vec3(ambient.X, ambient.Y, ambient.Z);
-    current_light_diffuse = glm::vec3(diffuse.X, diffuse.Y, diffuse.Z);
-    current_light_direction = glm::vec3(direction.X, direction.Y, direction.Z);
-    // Ensure direction is normalized
-    current_light_direction = glm::normalize(current_light_direction);
-    
+    current_light_ambient = ambient;
+    current_light_diffuse = diffuse;
+    current_light_direction = glm::normalize(direction);
+
     global_uniforms_dirty = true;
 }
 
-void OpenGLRenderAPI::multiplyMatrix(const matrix4f& matrix)
+void OpenGLRenderAPI::multiplyMatrix(const glm::mat4& matrix)
 {
-    glm::mat4 mat = convertToGLM(matrix);
-    current_model_matrix = current_model_matrix * mat;
+    current_model_matrix = current_model_matrix * matrix;
 }
 
 void OpenGLRenderAPI::renderSkybox()
 {
     if (skybox)
     {
-        matrix4f view;
-        view.setM(glm::value_ptr(view_matrix));
-
-        matrix4f proj;
-        proj.setM(glm::value_ptr(projection_matrix));
-
         // Sun direction is opposite of light direction (direction TO the sun)
-        vector3f sunDir(-current_light_direction.x, -current_light_direction.y, -current_light_direction.z);
+        glm::vec3 sunDir = -current_light_direction;
 
-        skybox->render(view, proj, sunDir);
+        skybox->render(view_matrix, projection_matrix, sunDir);
 
         // Skybox modifies GL state, so we need to sync our trackers
         current_shader_id = 0;
@@ -944,13 +926,6 @@ void GLAPIENTRY OpenGLRenderAPI::openglDebugCallback(GLenum source, GLenum type,
     printf("\n");
 
     printf("  Message: %s\n\n", message);
-}
-
-// Helper to convert irrlicht matrix4f to glm::mat4
-glm::mat4 OpenGLRenderAPI::convertToGLM(const matrix4f& m) const
-{
-    const float* ptr = m.pointer();
-    return glm::make_mat4(ptr);
 }
 
 IGPUMesh* OpenGLRenderAPI::createMesh()
