@@ -97,11 +97,16 @@ public:
 
     virtual void renderSkybox() = 0;
 
-    // Shadow Mapping
+    // Shadow Mapping (CSM - Cascaded Shadow Maps)
     virtual void beginShadowPass(const glm::vec3& lightDir) = 0;
+    virtual void beginShadowPass(const glm::vec3& lightDir, const camera& cam) = 0;
+    virtual void beginCascade(int cascadeIndex) = 0;
     virtual void endShadowPass() = 0;
     virtual void bindShadowMap(int textureUnit) = 0;
     virtual glm::mat4 getLightSpaceMatrix() = 0;
+    virtual int getCascadeCount() const = 0;
+    virtual const float* getCascadeSplitDistances() const = 0;
+    virtual const glm::mat4* getLightSpaceMatrices() const = 0;
 
     // Resource Creation
     virtual IGPUMesh* createMesh() = 0;

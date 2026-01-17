@@ -11,6 +11,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <stack>
+#include <array>
 
 // Use SDL's OpenGL context type for cross-platform support
 typedef SDL_GLContext OpenGLContext;
@@ -50,13 +51,25 @@ private:
     // Skybox
     Skybox* skybox;
 
-    // Shadow Mapping
+    // Shadow Mapping - CSM (Cascaded Shadow Maps)
+    static const int NUM_CASCADES = 4;
     GLuint shadowMapFBO;
-    GLuint shadowMapTexture;
-    const unsigned int SHADOW_WIDTH = 2048;
-    const unsigned int SHADOW_HEIGHT = 2048;
-    glm::mat4 lightSpaceMatrix;
+    GLuint shadowMapTextureArray;  // GL_TEXTURE_2D_ARRAY for cascades
+    const unsigned int SHADOW_WIDTH = 4096;
+    const unsigned int SHADOW_HEIGHT = 4096;
+    glm::mat4 lightSpaceMatrix;  // Keep for backwards compatibility
+    glm::mat4 lightSpaceMatrices[NUM_CASCADES];
+    float cascadeSplitDistances[NUM_CASCADES + 1];
+    float cascadeSplitLambda = 0.5f;
+    int currentCascade = 0;
     bool in_shadow_pass;
+    bool debugCascades = false;
+
+    // CSM helper methods
+    void calculateCascadeSplits(float nearPlane, float farPlane);
+    std::array<glm::vec3, 8> getFrustumCornersWorldSpace(const glm::mat4& proj, const glm::mat4& view);
+    glm::mat4 getLightSpaceMatrixForCascade(int cascadeIndex, const glm::vec3& lightDir,
+        const glm::mat4& viewMatrix, float fov, float aspect);
 
     // Optimization state tracking
     GLuint current_shader_id;
@@ -114,11 +127,16 @@ public:
 
     virtual void renderSkybox() override;
 
-    // Shadow Mapping overrides
+    // Shadow Mapping overrides (CSM)
     virtual void beginShadowPass(const glm::vec3& lightDir) override;
+    virtual void beginShadowPass(const glm::vec3& lightDir, const camera& cam) override;
+    virtual void beginCascade(int cascadeIndex) override;
     virtual void endShadowPass() override;
     virtual void bindShadowMap(int textureUnit) override;
     virtual glm::mat4 getLightSpaceMatrix() override;
+    virtual int getCascadeCount() const override;
+    virtual const float* getCascadeSplitDistances() const override;
+    virtual const glm::mat4* getLightSpaceMatrices() const override;
 
     virtual IGPUMesh* createMesh() override;
 

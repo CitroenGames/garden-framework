@@ -1,5 +1,6 @@
 #include "HeadlessRenderAPI.hpp"
 #include "HeadlessMesh.hpp"
+#include "Components/camera.hpp"
 
 HeadlessRenderAPI::HeadlessRenderAPI()
 {
@@ -107,6 +108,14 @@ void HeadlessRenderAPI::beginShadowPass(const glm::vec3& lightDir)
 {
 }
 
+void HeadlessRenderAPI::beginShadowPass(const glm::vec3& lightDir, const camera& cam)
+{
+}
+
+void HeadlessRenderAPI::beginCascade(int cascadeIndex)
+{
+}
+
 void HeadlessRenderAPI::endShadowPass()
 {
 }
@@ -118,6 +127,23 @@ void HeadlessRenderAPI::bindShadowMap(int textureUnit)
 glm::mat4 HeadlessRenderAPI::getLightSpaceMatrix()
 {
     return glm::mat4(1.0f);
+}
+
+int HeadlessRenderAPI::getCascadeCount() const
+{
+    return 4;
+}
+
+const float* HeadlessRenderAPI::getCascadeSplitDistances() const
+{
+    static float distances[5] = { 0.1f, 10.0f, 35.0f, 90.0f, 200.0f };
+    return distances;
+}
+
+const glm::mat4* HeadlessRenderAPI::getLightSpaceMatrices() const
+{
+    static glm::mat4 matrices[4] = { glm::mat4(1.0f), glm::mat4(1.0f), glm::mat4(1.0f), glm::mat4(1.0f) };
+    return matrices;
 }
 
 IGPUMesh* HeadlessRenderAPI::createMesh()
