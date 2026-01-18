@@ -1,5 +1,5 @@
 #include "LevelManager.hpp"
-#include "Thirdparty/tinygltf-2.9.6/json.hpp"
+#include "json.hpp"
 #include "Components/Components.hpp"
 #include "world.hpp"
 #include "Graphics/RenderAPI.hpp"

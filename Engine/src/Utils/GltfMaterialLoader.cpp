@@ -482,10 +482,37 @@ TextureHandle GltfMaterialLoader::loadEmbeddedTexture(const tinygltf::Image& ima
                                                      IRenderAPI* render_api,
                                                      const MaterialLoaderConfig& config)
 {
-    // This would require extending the RenderAPI to support loading from memory
-    // For now, we'll skip embedded textures
-    logMessage(config, "Skipping embedded texture (not implemented)");
-    return INVALID_TEXTURE;
+    if (image.image.empty() || image.width <= 0 || image.height <= 0)
+    {
+        logError(config, "Invalid embedded texture data");
+        return INVALID_TEXTURE;
+    }
+
+    logMessage(config, "Loading embedded texture: " +
+               std::to_string(image.width) + "x" + std::to_string(image.height) +
+               " (" + std::to_string(image.component) + " channels)");
+
+    // tinygltf stores image data as unsigned char vector
+    // Use loadTextureFromMemory which both OpenGL and Vulkan support
+    TextureHandle handle = render_api->loadTextureFromMemory(
+        image.image.data(),
+        image.width,
+        image.height,
+        image.component,
+        config.flip_textures_vertically,
+        config.generate_mipmaps
+    );
+
+    if (handle != INVALID_TEXTURE)
+    {
+        logMessage(config, "Successfully loaded embedded texture");
+    }
+    else
+    {
+        logError(config, "Failed to load embedded texture from memory");
+    }
+
+    return handle;
 }
 
 TextureType GltfMaterialLoader::getTextureTypeFromMaterialProperty(const std::string& property_name)
