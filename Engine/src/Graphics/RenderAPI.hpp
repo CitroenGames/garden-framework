@@ -6,6 +6,7 @@
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/gtx/euler_angles.hpp>
 #include <string>
+#include <cstdint>
 
 // Forward declaration for SDL
 struct SDL_Window;
@@ -82,6 +83,8 @@ public:
 
     // Texture management
     virtual TextureHandle loadTexture(const std::string& filename, bool invert_y = false, bool generate_mipmaps = true) = 0;
+    virtual TextureHandle loadTextureFromMemory(const uint8_t* pixels, int width, int height, int channels,
+                                                bool flip_vertically = false, bool generate_mipmaps = true) = 0;
     virtual void bindTexture(TextureHandle texture) = 0;
     virtual void unbindTexture() = 0;
     virtual void deleteTexture(TextureHandle texture) = 0;

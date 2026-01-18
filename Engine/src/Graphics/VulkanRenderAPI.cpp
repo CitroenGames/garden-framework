@@ -72,6 +72,13 @@ TextureHandle VulkanRenderAPI::loadTexture(const std::string& filename, bool inv
     return INVALID_TEXTURE;
 }
 
+TextureHandle VulkanRenderAPI::loadTextureFromMemory(const uint8_t* pixels, int width, int height, int channels,
+                                                     bool flip_vertically, bool generate_mipmaps)
+{
+    printf("VulkanRenderAPI::loadTextureFromMemory not implemented\n");
+    return INVALID_TEXTURE;
+}
+
 void VulkanRenderAPI::bindTexture(TextureHandle texture)
 {
 }

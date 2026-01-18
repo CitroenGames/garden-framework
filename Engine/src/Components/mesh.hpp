@@ -2,10 +2,13 @@
 
 #include <vector>
 #include <string>
+#include <functional>
+#include <memory>
 #include "Graphics/RenderAPI.hpp"
 #include "Graphics/IGPUMesh.hpp"
 #include "Utils/ObjLoader.hpp"
 #include "Utils/GltfLoader.hpp"
+#include "Assets/AssetHandle.hpp"
 
 #include <algorithm>
 
@@ -15,6 +18,14 @@ enum class MeshFormat
     GLTF,
     GLB,
     Auto  // Detect from file extension
+};
+
+enum class MeshLoadState
+{
+    NotLoaded,
+    Loading,
+    Ready,
+    Failed
 };
 
 // Material range structure for multi-material support
@@ -57,6 +68,10 @@ public:
     bool culling;
     bool transparent;
 
+    // Async loading support
+    MeshLoadState load_state;
+    Assets::AssetHandle asset_handle;
+
     // Constructor for hardcoded vertex arrays (existing functionality)
     mesh(vertex* vertices, size_t vertices_len)
     {
@@ -71,6 +86,7 @@ public:
         texture_set = false;
         texture = INVALID_TEXTURE;
         uses_material_ranges = false;
+        load_state = MeshLoadState::Ready;
     };
 
     // Constructor for loading model files - now supports both OBJ and glTF
@@ -87,8 +103,12 @@ public:
         texture_set = false;
         texture = INVALID_TEXTURE;
         uses_material_ranges = false;
+        load_state = MeshLoadState::NotLoaded;
 
         load_model_file(filename, format);
+        if (is_valid) {
+            load_state = MeshLoadState::Ready;
+        }
     };
 
     // Move constructor
@@ -106,12 +126,15 @@ public:
         visible = other.visible;
         culling = other.culling;
         transparent = other.transparent;
+        load_state = other.load_state;
+        asset_handle = other.asset_handle;
 
         // Invalidate source
         other.vertices = nullptr;
         other.vertices_len = 0;
         other.gpu_mesh = nullptr;
         other.owns_vertices = false;
+        other.load_state = MeshLoadState::NotLoaded;
     }
 
     // Move assignment
@@ -136,12 +159,15 @@ public:
             visible = other.visible;
             culling = other.culling;
             transparent = other.transparent;
+            load_state = other.load_state;
+            asset_handle = other.asset_handle;
 
             // Invalidate source
             other.vertices = nullptr;
             other.vertices_len = 0;
             other.gpu_mesh = nullptr;
             other.owns_vertices = false;
+            other.load_state = MeshLoadState::NotLoaded;
         }
         return *this;
     }
@@ -245,6 +271,17 @@ public:
         state.color = glm::vec3(1.0f, 1.0f, 1.0f);
         return state;
     }
+
+    // Async loading state queries
+    bool isReady() const { return load_state == MeshLoadState::Ready; }
+    bool isLoading() const { return load_state == MeshLoadState::Loading; }
+    bool hasFailed() const { return load_state == MeshLoadState::Failed; }
+    MeshLoadState getLoadState() const { return load_state; }
+
+    // Static async loading method - returns a handle that can be checked for completion
+    static Assets::AssetHandle loadAsync(const std::string& filename,
+                                        Assets::LoadPriority priority = Assets::LoadPriority::Normal,
+                                        Assets::LoadCallback on_complete = nullptr);
 
     // Main loading function that handles both OBJ and glTF
     bool load_model_file(const std::string& filename, MeshFormat format = MeshFormat::Auto)

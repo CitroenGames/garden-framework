@@ -32,6 +32,11 @@
 
 #include "Utils/Log.hpp"
 
+// Threading and Asset loading
+#include "Threading/JobSystem.hpp"
+#include "Assets/AssetManager.hpp"
+#include "Assets/GltfAssetLoader.hpp"
+
 static Application app;
 static renderer _renderer;
 static world _world;
@@ -43,6 +48,8 @@ static void quit_game(int code)
 {
     _network.disconnect("Game closing");
     _network.shutdown();
+    Assets::AssetManager::get().shutdown();
+    Threading::JobSystem::get().shutdown();
     app.shutdown();
     EE::CLog::Shutdown();
     exit(code);
@@ -103,6 +110,20 @@ int main(int argc, char* argv[])
     }
 
     LOG_ENGINE_TRACE("Game initialized with {0} render API", render_api->getAPIName());
+
+    // Initialize Job System
+    if (!Threading::JobSystem::get().initialize()) {
+        LOG_ENGINE_FATAL("Failed to initialize Job System");
+        quit_game(1);
+    }
+
+    // Initialize Asset Manager
+    if (!Assets::AssetManager::get().initialize(render_api)) {
+        LOG_ENGINE_FATAL("Failed to initialize Asset Manager");
+        quit_game(1);
+    }
+
+    Assets::AssetManager::get().registerLoader(std::make_unique<Assets::GltfAssetLoader>());
 
     // Set up input system
     input_handler.set_quit_callback([]() {
@@ -200,6 +221,9 @@ int main(int argc, char* argv[])
 
         // Process input events through the new input system
         input_handler.process_events();
+
+        // Process async loading jobs (GPU uploads must happen on main thread)
+        Threading::JobSystem::get().processMainThreadJobs();
         
         // Handle mouse motion for camera control
         if (input_manager)
