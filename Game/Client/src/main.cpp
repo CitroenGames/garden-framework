@@ -123,6 +123,7 @@ int main(int argc, char* argv[])
         quit_game(1);
     }
 
+    // Register GLTF loader
     Assets::AssetManager::get().registerLoader(std::make_unique<Assets::GltfAssetLoader>());
 
     // Set up input system
