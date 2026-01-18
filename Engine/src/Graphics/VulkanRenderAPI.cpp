@@ -26,6 +26,10 @@
 // Logging
 #include "Utils/Log.hpp"
 
+// ImGui for Vulkan rendering
+#include "imgui.h"
+#include "imgui_impl_vulkan.h"
+
 VulkanRenderAPI::VulkanRenderAPI()
 {
 }
@@ -3335,6 +3339,13 @@ void VulkanRenderAPI::endFrame()
         vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
 
         vkCmdDraw(cmd, 6, 1, 0, 0);
+
+        // Render ImGui overlay
+        ImDrawData* draw_data = ImGui::GetDrawData();
+        if (draw_data && draw_data->TotalVtxCount > 0)
+        {
+            ImGui_ImplVulkan_RenderDrawData(draw_data, cmd);
+        }
 
         vkCmdEndRenderPass(cmd);
     }
