@@ -23,6 +23,7 @@ target_link_libraries(
     PUBLIC enet
     PUBLIC vk-bootstrap
     PUBLIC VMA
+    PUBLIC imgui-docking
 )
 std = 20
 utf8 = true

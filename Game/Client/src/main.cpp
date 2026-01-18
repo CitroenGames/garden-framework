@@ -32,6 +32,7 @@
 #include "SharedComponents.hpp"
 
 #include "Utils/Log.hpp"
+#include "ImGui/ImGuiManager.hpp"
 
 // Threading and Asset loading
 #include "Threading/JobSystem.hpp"
@@ -56,6 +57,7 @@ static void quit_game(int code)
     _network.shutdown();
     Assets::AssetManager::get().shutdown();
     Threading::JobSystem::get().shutdown();
+    ImGuiManager::get().shutdown();
     app.shutdown();
     EE::CLog::Shutdown();
     exit(code);
@@ -140,6 +142,13 @@ int main(int argc, char* argv[])
     }
 
     LOG_ENGINE_TRACE("Game initialized with {0} render API", render_api->getAPIName());
+
+    // Initialize ImGui
+    if (!ImGuiManager::get().initialize(app.getWindow(), render_api, api_type))
+    {
+        LOG_ENGINE_FATAL("Failed to initialize ImGui");
+        quit_game(1);
+    }
 
     // Initialize Job System
     if (!Threading::JobSystem::get().initialize()) {
@@ -250,6 +259,9 @@ int main(int argc, char* argv[])
     {
         frame_start_ticks = SDL_GetTicks();
 
+        // Start new ImGui frame
+        ImGuiManager::get().newFrame();
+
         // Process input events through the new input system
         input_handler.process_events();
 
@@ -272,6 +284,15 @@ int main(int argc, char* argv[])
         if (input_handler.should_quit_application())
         {
             quit_game(0);
+        }
+
+        // Toggle mouse mode based on ImGui interaction
+        static bool lastWantMouse = false;
+        bool wantMouse = ImGuiManager::get().wantCaptureMouse();
+        if (wantMouse != lastWantMouse)
+        {
+            SDL_SetRelativeMouseMode(wantMouse ? SDL_FALSE : SDL_TRUE);
+            lastWantMouse = wantMouse;
         }
 
         // F3: Test async model loading - spawn Character.gltf at player position

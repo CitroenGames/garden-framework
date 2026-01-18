@@ -4,6 +4,7 @@
 #include "Components/Components.hpp"
 #include "Components/mesh.hpp"
 #include "RenderAPI.hpp"
+#include "ImGui/ImGuiManager.hpp"
 #include <entt/entt.hpp>
 
 class renderer
@@ -141,6 +142,9 @@ public:
 
         // Render skybox before post-processing
         render_api->renderSkybox();
+
+        // Render ImGui UI
+        ImGuiManager::get().render();
 
         // End frame
         render_api->endFrame();

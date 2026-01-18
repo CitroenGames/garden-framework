@@ -125,6 +125,15 @@ public:
     VkCommandPool getCommandPool() const { return command_pool; }
     VkQueue getGraphicsQueue() const { return graphics_queue; }
 
+    // ImGui accessors
+    VkInstance getInstance() const { return instance; }
+    VkPhysicalDevice getPhysicalDevice() const { return physical_device; }
+    uint32_t getGraphicsQueueFamily() const { return graphics_queue_family; }
+    VkRenderPass getRenderPass() const { return render_pass; }
+    VkRenderPass getFxaaRenderPass() const { return fxaa_render_pass; }
+    uint32_t getSwapchainImageCount() const { return static_cast<uint32_t>(swapchain_images.size()); }
+    VkCommandBuffer getCurrentCommandBuffer() const { return command_buffers[current_frame]; }
+
 private:
     // Initialization helpers
     bool createInstance();

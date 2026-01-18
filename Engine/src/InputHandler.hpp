@@ -1,6 +1,7 @@
 #pragma once
 
 #include "InputManager.hpp"
+#include "ImGui/ImGuiManager.hpp"
 #include "SDL.h"
 #include <memory>
 #include <functional>
@@ -44,10 +45,13 @@ public:
     {
         // Update input manager at start of frame
         input_manager->update();
-        
+
         SDL_Event event;
         while (SDL_PollEvent(&event))
         {
+            // Let ImGui process events first
+            ImGuiManager::get().processEvent(&event);
+
             switch (event.type)
             {
             case SDL_QUIT:
@@ -57,10 +61,14 @@ public:
                     quit_callback();
                 }
                 break;
-                
+
             default:
-                // Let the input manager handle all other events
-                input_manager->process_event(event);
+                // Only pass to game input if ImGui doesn't want input
+                if (!ImGuiManager::get().wantCaptureMouse() &&
+                    !ImGuiManager::get().wantCaptureKeyboard())
+                {
+                    input_manager->process_event(event);
+                }
                 break;
             }
         }
