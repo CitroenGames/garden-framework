@@ -83,6 +83,18 @@ bool ImGuiManager::initVulkan(SDL_Window* window, IRenderAPI* vulkanAPI)
         return false;
     }
 
+    // Get the render pass - prefer FXAA pass for crisp text, fall back to main pass
+    VkRenderPass renderPass = vkAPI->getFxaaRenderPass();
+    if (renderPass == VK_NULL_HANDLE)
+    {
+        renderPass = vkAPI->getRenderPass();
+    }
+    if (renderPass == VK_NULL_HANDLE)
+    {
+        ImGui_ImplSDL2_Shutdown();
+        return false;
+    }
+
     // Fill ImGui_ImplVulkan_InitInfo
     ImGui_ImplVulkan_InitInfo init_info = {};
     init_info.ApiVersion = VK_API_VERSION_1_2;
@@ -91,7 +103,7 @@ bool ImGuiManager::initVulkan(SDL_Window* window, IRenderAPI* vulkanAPI)
     init_info.Device = vkAPI->getDevice();
     init_info.QueueFamily = vkAPI->getGraphicsQueueFamily();
     init_info.Queue = vkAPI->getGraphicsQueue();
-    init_info.RenderPass = vkAPI->getFxaaRenderPass(); // Use FXAA render pass for final output
+    init_info.RenderPass = renderPass;
     init_info.MinImageCount = 2;
     init_info.ImageCount = vkAPI->getSwapchainImageCount();
     init_info.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
