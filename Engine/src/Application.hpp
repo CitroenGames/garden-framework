@@ -45,6 +45,11 @@ public:
                 // Vulkan requires SDL_WINDOW_VULKAN flag
                 window_flags |= SDL_WINDOW_VULKAN;
             }
+            else if (api_type == RenderAPIType::D3D11)
+            {
+                // D3D11 doesn't require any special SDL flags
+                // The window will be created as a regular Win32 window
+            }
             else
             {
                 // Set OpenGL attributes BEFORE creating the window (proper SDL order)

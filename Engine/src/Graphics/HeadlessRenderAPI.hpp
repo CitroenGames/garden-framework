@@ -56,4 +56,10 @@ public:
     virtual IGPUMesh* createMesh() override;
 
     virtual const char* getAPIName() const override { return "Headless"; }
+
+    // Graphics settings (no-op for headless)
+    virtual void setFXAAEnabled(bool enabled) override {}
+    virtual bool isFXAAEnabled() const override { return false; }
+    virtual void setShadowQuality(int quality) override {}
+    virtual int getShadowQuality() const override { return 0; }
 };

@@ -1346,7 +1346,7 @@ bool VulkanRenderAPI::createShadowResources()
     VkImageCreateInfo imageInfo{};
     imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     imageInfo.imageType = VK_IMAGE_TYPE_2D;
-    imageInfo.extent = {SHADOW_MAP_SIZE, SHADOW_MAP_SIZE, 1};
+    imageInfo.extent = {currentShadowSize, currentShadowSize, 1};
     imageInfo.mipLevels = 1;
     imageInfo.arrayLayers = NUM_CASCADES;
     imageInfo.format = VK_FORMAT_D32_SFLOAT;
@@ -1468,8 +1468,8 @@ bool VulkanRenderAPI::createShadowResources()
         fbInfo.renderPass = shadow_render_pass;
         fbInfo.attachmentCount = 1;
         fbInfo.pAttachments = &shadow_cascade_views[i];
-        fbInfo.width = SHADOW_MAP_SIZE;
-        fbInfo.height = SHADOW_MAP_SIZE;
+        fbInfo.width = currentShadowSize;
+        fbInfo.height = currentShadowSize;
         fbInfo.layers = 1;
 
         if (vkCreateFramebuffer(device, &fbInfo, nullptr, &shadow_framebuffers[i]) != VK_SUCCESS) {
@@ -1750,7 +1750,7 @@ bool VulkanRenderAPI::createShadowResources()
         vkUpdateDescriptorSets(device, 1, &shadowWrite, 0, nullptr);
     }
 
-    printf("Shadow resources created (%dx%d, %d cascades)\n", SHADOW_MAP_SIZE, SHADOW_MAP_SIZE, NUM_CASCADES);
+    printf("Shadow resources created (%dx%d, %d cascades)\n", currentShadowSize, currentShadowSize, NUM_CASCADES);
     return true;
 }
 
@@ -3234,8 +3234,8 @@ void VulkanRenderAPI::beginFrame()
     VkRenderPassBeginInfo renderPassInfo{};
     renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
 
-    if (fxaa_initialized) {
-        // Render to offscreen framebuffer
+    if (fxaaEnabled && fxaa_initialized) {
+        // Render to offscreen framebuffer for FXAA
         renderPassInfo.renderPass = offscreen_render_pass;
         renderPassInfo.framebuffer = offscreen_framebuffers[0];
     } else {
@@ -3287,12 +3287,22 @@ void VulkanRenderAPI::endFrame()
     if (!frame_started) return;
 
     if (main_pass_started) {
+        // If FXAA is disabled, render ImGui in the main pass before ending it
+        if (!fxaaEnabled || !fxaa_initialized)
+        {
+            ImDrawData* draw_data = ImGui::GetDrawData();
+            if (draw_data && draw_data->TotalVtxCount > 0)
+            {
+                ImGui_ImplVulkan_RenderDrawData(draw_data, command_buffers[current_frame]);
+            }
+        }
+
         vkCmdEndRenderPass(command_buffers[current_frame]);
         main_pass_started = false;
     }
 
     // Apply FXAA if enabled
-    if (fxaa_initialized) {
+    if (fxaaEnabled && fxaa_initialized) {
         VkCommandBuffer cmd = command_buffers[current_frame];
 
         // Begin FXAA render pass (renders to swapchain)
@@ -3859,6 +3869,13 @@ void VulkanRenderAPI::beginShadowPass(const glm::vec3& lightDir)
 {
     if (!frame_started) return;
 
+    // Skip if shadows are disabled
+    if (shadowQuality == 0 || shadow_map_image == VK_NULL_HANDLE)
+    {
+        in_shadow_pass = false;
+        return;
+    }
+
     in_shadow_pass = true;
 
     // Calculate cascade splits
@@ -3876,6 +3893,13 @@ void VulkanRenderAPI::beginShadowPass(const glm::vec3& lightDir)
 void VulkanRenderAPI::beginShadowPass(const glm::vec3& lightDir, const camera& cam)
 {
     if (!frame_started) return;
+
+    // Skip if shadows are disabled
+    if (shadowQuality == 0 || shadow_map_image == VK_NULL_HANDLE)
+    {
+        in_shadow_pass = false;
+        return;
+    }
 
     in_shadow_pass = true;
 
@@ -3920,7 +3944,7 @@ void VulkanRenderAPI::beginCascade(int cascadeIndex)
     rpInfo.renderPass = shadow_render_pass;
     rpInfo.framebuffer = shadow_framebuffers[cascadeIndex];
     rpInfo.renderArea.offset = {0, 0};
-    rpInfo.renderArea.extent = {SHADOW_MAP_SIZE, SHADOW_MAP_SIZE};
+    rpInfo.renderArea.extent = {currentShadowSize, currentShadowSize};
 
     VkClearValue clearValue{};
     clearValue.depthStencil = {1.0f, 0};
@@ -3940,15 +3964,15 @@ void VulkanRenderAPI::beginCascade(int cascadeIndex)
     VkViewport viewport{};
     viewport.x = 0.0f;
     viewport.y = 0.0f;
-    viewport.width = static_cast<float>(SHADOW_MAP_SIZE);
-    viewport.height = static_cast<float>(SHADOW_MAP_SIZE);
+    viewport.width = static_cast<float>(currentShadowSize);
+    viewport.height = static_cast<float>(currentShadowSize);
     viewport.minDepth = 0.0f;
     viewport.maxDepth = 1.0f;
     vkCmdSetViewport(command_buffers[current_frame], 0, 1, &viewport);
 
     VkRect2D scissor{};
     scissor.offset = {0, 0};
-    scissor.extent = {SHADOW_MAP_SIZE, SHADOW_MAP_SIZE};
+    scissor.extent = {currentShadowSize, currentShadowSize};
     vkCmdSetScissor(command_buffers[current_frame], 0, 1, &scissor);
 }
 
@@ -4028,4 +4052,73 @@ IGPUMesh* VulkanRenderAPI::createMesh()
     VulkanMesh* mesh = new VulkanMesh();
     mesh->setVulkanHandles(device, vma_allocator, command_pool, graphics_queue);
     return mesh;
+}
+
+// Graphics settings implementation
+void VulkanRenderAPI::setFXAAEnabled(bool enabled)
+{
+    fxaaEnabled = enabled;
+}
+
+bool VulkanRenderAPI::isFXAAEnabled() const
+{
+    return fxaaEnabled;
+}
+
+void VulkanRenderAPI::setShadowQuality(int quality)
+{
+    if (quality < 0) quality = 0;
+    if (quality > 3) quality = 3;
+
+    if (quality == shadowQuality) return;
+
+    shadowQuality = quality;
+
+    // Map quality to resolution: 0=Off(0), 1=Low(1024), 2=Medium(2048), 3=High(4096)
+    uint32_t newSize = 0;
+    switch (quality)
+    {
+    case 0: newSize = 0; break;     // Off - no shadow map
+    case 1: newSize = 1024; break;  // Low
+    case 2: newSize = 2048; break;  // Medium
+    case 3: newSize = 4096; break;  // High
+    }
+
+    if (newSize != currentShadowSize)
+    {
+        recreateShadowResources(newSize);
+    }
+}
+
+int VulkanRenderAPI::getShadowQuality() const
+{
+    return shadowQuality;
+}
+
+void VulkanRenderAPI::recreateShadowResources(uint32_t size)
+{
+    // Wait for device to be idle before recreating resources
+    vkDeviceWaitIdle(device);
+
+    // Cleanup existing shadow resources
+    cleanupShadowResources();
+
+    currentShadowSize = size;
+
+    // If size is 0, shadows are disabled
+    if (size == 0)
+    {
+        LOG_ENGINE_INFO("Shadows disabled");
+        return;
+    }
+
+    // Recreate shadow resources at new size
+    if (!createShadowResources())
+    {
+        LOG_ENGINE_ERROR("Failed to recreate shadow resources at size {}", size);
+    }
+    else
+    {
+        LOG_ENGINE_INFO("Shadow map resized to {}x{}", size, size);
+    }
 }

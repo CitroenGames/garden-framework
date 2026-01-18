@@ -13,6 +13,7 @@ private:
     std::shared_ptr<InputManager> input_manager;
     std::function<void()> quit_callback;
     bool should_quit = false;
+    bool ui_mode = false;  // When true, mouse is visible and game input is paused
 
 public:
     InputHandler() 
@@ -40,6 +41,12 @@ public:
         return should_quit;
     }
 
+    // Check if UI mode is active (mouse visible, game input paused)
+    bool is_ui_mode() const
+    {
+        return ui_mode;
+    }
+
     // Process all SDL events for this frame
     void process_events()
     {
@@ -62,9 +69,21 @@ public:
                 }
                 break;
 
+            case SDL_KEYDOWN:
+                // F3 toggles UI mode (mouse visible, game input paused)
+                if (event.key.keysym.scancode == SDL_SCANCODE_F3 && !event.key.repeat)
+                {
+                    ui_mode = !ui_mode;
+                    SDL_SetRelativeMouseMode(ui_mode ? SDL_FALSE : SDL_TRUE);
+                    break;  // Don't pass F3 to game input
+                }
+                // Fall through to default handling for other keys
+                [[fallthrough]];
+
             default:
-                // Only pass to game input if ImGui doesn't want input
-                if (!ImGuiManager::get().wantCaptureMouse() &&
+                // Only pass to game input if not in UI mode and ImGui doesn't want input
+                if (!ui_mode &&
+                    !ImGuiManager::get().wantCaptureMouse() &&
                     !ImGuiManager::get().wantCaptureKeyboard())
                 {
                     input_manager->process_event(event);

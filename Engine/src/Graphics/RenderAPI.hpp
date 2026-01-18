@@ -116,6 +116,12 @@ public:
 
     // Utility
     virtual const char* getAPIName() const = 0;
+
+    // Graphics settings
+    virtual void setFXAAEnabled(bool enabled) = 0;
+    virtual bool isFXAAEnabled() const = 0;
+    virtual void setShadowQuality(int quality) = 0;  // 0=Off, 1=Low(1024), 2=Medium(2048), 3=High(4096)
+    virtual int getShadowQuality() const = 0;
 };
 
 // Factory function to create render API instances
@@ -123,6 +129,7 @@ enum class RenderAPIType
 {
     OpenGL,
     Vulkan,
+    D3D11,
     Headless
 };
 

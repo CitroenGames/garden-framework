@@ -119,6 +119,12 @@ public:
 
     virtual const char* getAPIName() const override { return "Vulkan"; }
 
+    // Graphics settings
+    virtual void setFXAAEnabled(bool enabled) override;
+    virtual bool isFXAAEnabled() const override;
+    virtual void setShadowQuality(int quality) override;
+    virtual int getShadowQuality() const override;
+
     // Vulkan-specific accessors for VulkanMesh
     VkDevice getDevice() const { return device; }
     VmaAllocator getAllocator() const { return vma_allocator; }
@@ -159,6 +165,7 @@ private:
     // Shadow mapping helpers
     bool createShadowResources();
     void cleanupShadowResources();
+    void recreateShadowResources(uint32_t size);
     void calculateCascadeSplits(float nearPlane, float farPlane);
     std::array<glm::vec3, 8> getFrustumCornersWorldSpace(const glm::mat4& proj, const glm::mat4& view);
     glm::mat4 getLightSpaceMatrixForCascade(int cascadeIndex, const glm::vec3& lightDir,
@@ -296,7 +303,9 @@ private:
 
     // CSM shadow mapping
     static const int NUM_CASCADES = 4;
-    static const int SHADOW_MAP_SIZE = 4096;
+    uint32_t currentShadowSize = 4096;  // Runtime configurable shadow resolution
+    int shadowQuality = 3;  // 0=Off, 1=Low(1024), 2=Medium(2048), 3=High(4096)
+    bool fxaaEnabled = true;
     float cascadeSplitDistances[5] = { 0.1f, 10.0f, 35.0f, 90.0f, 200.0f };
     float cascadeSplitLambda = 0.92f;
     glm::mat4 lightSpaceMatrices[4] = { glm::mat4(1.0f), glm::mat4(1.0f), glm::mat4(1.0f), glm::mat4(1.0f) };
