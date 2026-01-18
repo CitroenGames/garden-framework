@@ -9,17 +9,20 @@ layout(location = 2) in vec2 aTexCoord;
 layout(location = 0) out vec3 FragPos;
 layout(location = 1) out vec3 Normal;
 layout(location = 2) out vec2 TexCoord;
+layout(location = 3) out float ViewDepth;  // For CSM cascade selection
 
 // UBO for view/projection (per-frame data)
 layout(set = 0, binding = 0) uniform GlobalUBO {
     mat4 view;
     mat4 projection;
+    mat4 lightSpaceMatrices[4];
+    vec4 cascadeSplits;
     vec3 lightDir;
-    float _pad1;
+    float cascadeSplit4;
     vec3 lightAmbient;
-    float _pad2;
+    int cascadeCount;
     vec3 lightDiffuse;
-    float _pad3;
+    int debugCascades;
     vec3 color;
     int useTexture;
 } ubo;
@@ -39,5 +42,9 @@ void main()
 
     TexCoord = aTexCoord;
 
-    gl_Position = ubo.projection * ubo.view * worldPos;
+    // Calculate view-space depth for cascade selection
+    vec4 viewPos = ubo.view * worldPos;
+    ViewDepth = -viewPos.z;  // Positive depth into screen
+
+    gl_Position = ubo.projection * viewPos;
 }

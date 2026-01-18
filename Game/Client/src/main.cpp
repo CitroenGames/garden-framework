@@ -306,10 +306,29 @@ int main(int argc, char* argv[])
                                 new_mesh->owns_vertices = false;
                                 // Note: We share gpu_mesh, don't set it to nullptr on model
 
-                                // Set texture if available
-                                TextureHandle tex = model->getMaterialPrimaryTexture(0);
-                                if (tex != INVALID_TEXTURE) {
-                                    new_mesh->set_texture(tex);
+                                // Set up material ranges from submeshes for multi-texture support
+                                if (model->mesh_data && !model->mesh_data->submeshes.empty()) {
+                                    std::vector<MaterialRange> ranges;
+
+                                    for (const auto& submesh : model->mesh_data->submeshes) {
+                                        TextureHandle tex = INVALID_TEXTURE;
+                                        if (submesh.material_index >= 0) {
+                                            tex = model->getMaterialPrimaryTexture(submesh.material_index);
+                                        }
+                                        ranges.emplace_back(submesh.start_vertex, submesh.vertex_count, tex, submesh.material_name);
+                                    }
+
+                                    if (!ranges.empty()) {
+                                        new_mesh->setMaterialRanges(ranges);
+                                        LOG_ENGINE_INFO("Set up {} material ranges for multi-texture mesh", ranges.size());
+                                    }
+                                }
+                                // Fallback to single texture if no submeshes
+                                else {
+                                    TextureHandle tex = model->getMaterialPrimaryTexture(0);
+                                    if (tex != INVALID_TEXTURE) {
+                                        new_mesh->set_texture(tex);
+                                    }
                                 }
 
                                 // Create entity in world

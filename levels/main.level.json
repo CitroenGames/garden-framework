@@ -59,66 +59,6 @@
       }
     },
     {
-      "name": "map_trees",
-      "type": "Renderable",
-      "transform": {
-        "position": {
-          "x": 0.0,
-          "y": 0.0,
-          "z": 0.0
-        },
-        "rotation": {
-          "x": 0.0,
-          "y": 0.0,
-          "z": 0.0
-        },
-        "scale": {
-          "x": 1.0,
-          "y": 1.0,
-          "z": 1.0
-        }
-      },
-      "mesh": {
-        "path": "models/map_trees.obj",
-        "textures": [
-          "textures/t_tree_bark.png"
-        ],
-        "culling": false,
-        "transparent": true,
-        "visible": true
-      }
-    },
-    {
-      "name": "map_bgtrees",
-      "type": "Renderable",
-      "transform": {
-        "position": {
-          "x": 0.0,
-          "y": 0.0,
-          "z": 0.0
-        },
-        "rotation": {
-          "x": 0.0,
-          "y": 0.0,
-          "z": 0.0
-        },
-        "scale": {
-          "x": 1.0,
-          "y": 1.0,
-          "z": 1.0
-        }
-      },
-      "mesh": {
-        "path": "models/map_bgtrees.obj",
-        "textures": [
-          "textures/t_tree_leaves.png"
-        ],
-        "culling": true,
-        "transparent": true,
-        "visible": true
-      }
-    },
-    {
       "name": "map_collider",
       "type": "Collidable",
       "transform": {

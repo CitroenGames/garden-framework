@@ -40,14 +40,29 @@ struct VulkanTexture {
 struct GlobalUBO {
     glm::mat4 view;
     glm::mat4 projection;
+    glm::mat4 lightSpaceMatrices[4];     // CSM light space matrices
+    glm::vec4 cascadeSplits;             // Cascade split distances [0-3]
     glm::vec3 lightDir;
-    float _pad1;
+    float cascadeSplit4;                 // 5th cascade split distance
     glm::vec3 lightAmbient;
-    float _pad2;
+    int cascadeCount;
     glm::vec3 lightDiffuse;
-    float _pad3;
+    int debugCascades;
     glm::vec3 color;
     int useTexture;
+};
+
+// Shadow UBO for shadow pass (just light space matrix)
+struct ShadowUBO {
+    glm::mat4 lightSpaceMatrix;
+};
+
+// Skybox UBO
+struct SkyboxUBO {
+    glm::mat4 view;
+    glm::mat4 projection;
+    glm::vec3 sunDirection;
+    float time;
 };
 
 class VulkanRenderAPI : public IRenderAPI
@@ -132,6 +147,23 @@ private:
     bool createDescriptorSets();
     bool createDefaultTexture();
 
+    // Shadow mapping helpers
+    bool createShadowResources();
+    void cleanupShadowResources();
+    void calculateCascadeSplits(float nearPlane, float farPlane);
+    std::array<glm::vec3, 8> getFrustumCornersWorldSpace(const glm::mat4& proj, const glm::mat4& view);
+    glm::mat4 getLightSpaceMatrixForCascade(int cascadeIndex, const glm::vec3& lightDir,
+        const glm::mat4& viewMatrix, float fov, float aspect);
+
+    // Skybox helpers
+    bool createSkyboxResources();
+    void cleanupSkyboxResources();
+
+    // FXAA helpers
+    bool createFxaaResources();
+    void cleanupFxaaResources();
+    void recreateOffscreenResources();
+
     void cleanupSwapchain();
     void recreateSwapchain();
 
@@ -199,10 +231,23 @@ private:
     VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
     VkPipeline graphics_pipeline = VK_NULL_HANDLE;
 
+    // Multiple blend mode pipelines
+    VkPipeline pipeline_no_blend = VK_NULL_HANDLE;
+    VkPipeline pipeline_alpha_blend = VK_NULL_HANDLE;
+    VkPipeline pipeline_additive_blend = VK_NULL_HANDLE;
+
     // Descriptors
     VkDescriptorSetLayout descriptor_set_layout = VK_NULL_HANDLE;
     VkDescriptorPool descriptor_pool = VK_NULL_HANDLE;
     std::vector<VkDescriptorSet> descriptor_sets;
+
+    // Per-draw descriptor sets (to handle multiple textures per frame)
+    static const uint32_t MAX_DESCRIPTOR_SETS_PER_FRAME = 512;
+    std::vector<VkDescriptorSet> per_draw_descriptor_sets;
+    uint32_t current_descriptor_set_index = 0;
+
+    // Cache: texture handle -> descriptor set index (for reuse within a frame)
+    std::unordered_map<TextureHandle, uint32_t> texture_descriptor_cache;
 
     // Uniform buffers (per-frame)
     std::vector<VkBuffer> uniform_buffers;
@@ -240,10 +285,71 @@ private:
     // Clear color (set by clear(), used in beginFrame)
     glm::vec3 clear_color = glm::vec3(0.2f, 0.3f, 0.8f);
 
-    // CSM stub data
+    // CSM shadow mapping
     static const int NUM_CASCADES = 4;
+    static const int SHADOW_MAP_SIZE = 4096;
     float cascadeSplitDistances[5] = { 0.1f, 10.0f, 35.0f, 90.0f, 200.0f };
+    float cascadeSplitLambda = 0.92f;
     glm::mat4 lightSpaceMatrices[4] = { glm::mat4(1.0f), glm::mat4(1.0f), glm::mat4(1.0f), glm::mat4(1.0f) };
+
+    // Shadow map resources
+    VkImage shadow_map_image = VK_NULL_HANDLE;
+    VmaAllocation shadow_map_allocation = nullptr;
+    VkImageView shadow_map_view = VK_NULL_HANDLE;          // Full array view for sampling
+    VkImageView shadow_cascade_views[4] = {};               // Per-cascade views for framebuffer
+    VkSampler shadow_sampler = VK_NULL_HANDLE;
+    VkFramebuffer shadow_framebuffers[4] = {};
+    VkRenderPass shadow_render_pass = VK_NULL_HANDLE;
+
+    // Shadow pipeline
+    VkPipeline shadow_pipeline = VK_NULL_HANDLE;
+    VkPipelineLayout shadow_pipeline_layout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout shadow_descriptor_layout = VK_NULL_HANDLE;
+    VkDescriptorPool shadow_descriptor_pool = VK_NULL_HANDLE;
+    std::vector<VkDescriptorSet> shadow_descriptor_sets;
+    std::vector<VkBuffer> shadow_uniform_buffers;
+    std::vector<VmaAllocation> shadow_uniform_allocations;
+    std::vector<void*> shadow_uniform_mapped;
+
+    // Shadow pass state
+    bool in_shadow_pass = false;
+    int currentCascade = 0;
+    bool main_pass_started = false;
+
+    // Skybox resources
+    VkBuffer skybox_vertex_buffer = VK_NULL_HANDLE;
+    VmaAllocation skybox_vertex_allocation = nullptr;
+    VkPipeline skybox_pipeline = VK_NULL_HANDLE;
+    VkPipelineLayout skybox_pipeline_layout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout skybox_descriptor_layout = VK_NULL_HANDLE;
+    VkDescriptorPool skybox_descriptor_pool = VK_NULL_HANDLE;
+    std::vector<VkDescriptorSet> skybox_descriptor_sets;
+    std::vector<VkBuffer> skybox_uniform_buffers;
+    std::vector<VmaAllocation> skybox_uniform_allocations;
+    std::vector<void*> skybox_uniform_mapped;
+    bool skybox_initialized = false;
+
+    // FXAA / Post-processing resources
+    VkImage offscreen_image = VK_NULL_HANDLE;
+    VmaAllocation offscreen_allocation = nullptr;
+    VkImageView offscreen_view = VK_NULL_HANDLE;
+    VkSampler offscreen_sampler = VK_NULL_HANDLE;
+    VkRenderPass offscreen_render_pass = VK_NULL_HANDLE;
+    std::vector<VkFramebuffer> offscreen_framebuffers;
+    VkImage offscreen_depth_image = VK_NULL_HANDLE;
+    VmaAllocation offscreen_depth_allocation = nullptr;
+    VkImageView offscreen_depth_view = VK_NULL_HANDLE;
+
+    VkBuffer fxaa_vertex_buffer = VK_NULL_HANDLE;
+    VmaAllocation fxaa_vertex_allocation = nullptr;
+    VkPipeline fxaa_pipeline = VK_NULL_HANDLE;
+    VkPipelineLayout fxaa_pipeline_layout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout fxaa_descriptor_layout = VK_NULL_HANDLE;
+    VkDescriptorPool fxaa_descriptor_pool = VK_NULL_HANDLE;
+    std::vector<VkDescriptorSet> fxaa_descriptor_sets;
+    VkRenderPass fxaa_render_pass = VK_NULL_HANDLE;
+    std::vector<VkFramebuffer> fxaa_framebuffers;  // Swapchain-only, no depth
+    bool fxaa_initialized = false;
 
 #ifdef _DEBUG
     VkDebugUtilsMessengerEXT debug_messenger = VK_NULL_HANDLE;

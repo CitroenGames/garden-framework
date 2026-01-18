@@ -141,7 +141,7 @@ struct MaterialLoaderConfig
     bool generate_mipmaps = true;
     bool flip_textures_vertically = true;
     bool cache_textures = true;             // Cache loaded textures to avoid duplicates
-    bool load_embedded_textures = false;    // Whether to handle embedded textures
+    bool load_embedded_textures = true;     // Enable by default for GLB support
     std::string texture_base_path = "";     // Base path for texture files
     
     // Texture filtering options

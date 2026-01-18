@@ -105,7 +105,30 @@ public:
         uses_material_ranges = false;
         load_state = MeshLoadState::NotLoaded;
 
-        load_model_file(filename, format);
+        load_model_file(filename, nullptr, format);
+        if (is_valid) {
+            load_state = MeshLoadState::Ready;
+        }
+    };
+
+    // Constructor for loading model files with full material/texture support
+    // Pass a valid render_api to load materials and textures for multi-material meshes
+    mesh(const std::string& filename, IRenderAPI* render_api, MeshFormat format = MeshFormat::Auto)
+    {
+        vertices = nullptr;
+        vertices_len = 0;
+        owns_vertices = true;
+        is_valid = false;
+        gpu_mesh = nullptr;
+        visible = true;
+        culling = true;
+        transparent = false;
+        texture_set = false;
+        texture = INVALID_TEXTURE;
+        uses_material_ranges = false;
+        load_state = MeshLoadState::NotLoaded;
+
+        load_model_file(filename, render_api, format);
         if (is_valid) {
             load_state = MeshLoadState::Ready;
         }
@@ -284,7 +307,8 @@ public:
                                         Assets::LoadCallback on_complete = nullptr);
 
     // Main loading function that handles both OBJ and glTF
-    bool load_model_file(const std::string& filename, MeshFormat format = MeshFormat::Auto)
+    // Pass render_api for full multi-material support in glTF files
+    bool load_model_file(const std::string& filename, IRenderAPI* render_api = nullptr, MeshFormat format = MeshFormat::Auto)
     {
         MeshFormat detected_format = format;
 
@@ -301,7 +325,7 @@ public:
 
         case MeshFormat::GLTF:
         case MeshFormat::GLB:
-            return load_gltf_file(filename);
+            return load_gltf_file(filename, render_api);
 
         default:
             printf("Unsupported mesh format for file: %s\n", filename.c_str());
@@ -360,7 +384,8 @@ public:
     }
 
     // Load glTF file using the new utility
-    bool load_gltf_file(const std::string& filename)
+    // Pass render_api to load materials and textures for multi-material support
+    bool load_gltf_file(const std::string& filename, IRenderAPI* render_api = nullptr)
     {
         // Clean up existing vertices if any
         if (owns_vertices && vertices)
@@ -370,6 +395,10 @@ public:
             vertices_len = 0;
         }
 
+        // Clear existing material ranges
+        material_ranges.clear();
+        uses_material_ranges = false;
+
         // Configure the glTF loader
         GltfLoaderConfig config;
         config.verbose_logging = true;
@@ -377,12 +406,37 @@ public:
         config.validate_texcoords = false;
         config.generate_normals_if_missing = true;
         config.generate_texcoords_if_missing = false;
-        config.flip_uvs = true;  // Adjust based on your engine's UV convention
+        config.flip_uvs = true;
         config.triangulate = true;
         config.scale = 1.0f;
 
-        // Load the glTF file
-        GltfLoadResult result = GltfLoader::loadGltf(filename, config);
+        GltfLoadResult result;
+
+        if (render_api)
+        {
+            // Load with materials for full multi-texture support
+            MaterialLoaderConfig mat_config;
+            mat_config.verbose_logging = true;
+            mat_config.load_all_textures = false;
+            mat_config.priority_texture_types = { TextureType::BASE_COLOR, TextureType::DIFFUSE };
+            mat_config.generate_mipmaps = true;
+            mat_config.cache_textures = true;
+            mat_config.load_embedded_textures = true;  // Required for GLB files
+
+            // Extract base path from filename for texture loading
+            size_t last_slash = filename.find_last_of("/\\");
+            if (last_slash != std::string::npos)
+            {
+                mat_config.texture_base_path = filename.substr(0, last_slash + 1);
+            }
+
+            result = GltfLoader::loadGltfWithMaterials(filename, render_api, config, mat_config);
+        }
+        else
+        {
+            // Geometry only (backward compatible)
+            result = GltfLoader::loadGltf(filename, config);
+        }
 
         if (!result.success)
         {
@@ -401,17 +455,48 @@ public:
         result.vertices = nullptr;
         result.vertex_count = 0;
 
-        printf("Successfully loaded glTF mesh: %s (%zu vertices)\n", filename.c_str(), vertices_len);
-
-        // Print texture information if available
-        if (!result.texture_paths.empty())
+        // Set up material ranges if materials were loaded
+        if (result.materials_loaded && !result.primitive_vertex_counts.empty())
         {
-            printf("  Textures found: ");
-            for (const auto& tex_path : result.texture_paths)
+            size_t current_vertex = 0;
+
+            for (size_t i = 0; i < result.primitive_vertex_counts.size(); ++i)
             {
-                printf("%s ", tex_path.c_str());
+                size_t vert_count = result.primitive_vertex_counts[i];
+                int mat_idx = (i < result.material_indices.size()) ? result.material_indices[i] : -1;
+
+                TextureHandle tex = INVALID_TEXTURE;
+                std::string mat_name = "";
+
+                if (mat_idx >= 0 && mat_idx < static_cast<int>(result.material_data.materials.size()))
+                {
+                    const auto& mat = result.material_data.materials[mat_idx];
+                    tex = mat.getPrimaryTextureHandle();
+                    mat_name = mat.properties.name;
+                }
+
+                material_ranges.emplace_back(current_vertex, vert_count, tex, mat_name);
+                current_vertex += vert_count;
             }
-            printf("\n");
+
+            uses_material_ranges = !material_ranges.empty();
+            printf("Successfully loaded glTF mesh: %s (%zu vertices, %zu material ranges)\n",
+                   filename.c_str(), vertices_len, material_ranges.size());
+        }
+        else
+        {
+            printf("Successfully loaded glTF mesh: %s (%zu vertices)\n", filename.c_str(), vertices_len);
+
+            // Print texture information if available (geometry-only load)
+            if (!result.texture_paths.empty())
+            {
+                printf("  Textures found: ");
+                for (const auto& tex_path : result.texture_paths)
+                {
+                    printf("%s ", tex_path.c_str());
+                }
+                printf("\n");
+            }
         }
 
         return true;
@@ -498,9 +583,9 @@ public:
     }
 
     // Utility methods
-    bool reload_model_file(const std::string& filename, MeshFormat format = MeshFormat::Auto)
+    bool reload_model_file(const std::string& filename, IRenderAPI* render_api = nullptr, MeshFormat format = MeshFormat::Auto)
     {
-        return load_model_file(filename, format);
+        return load_model_file(filename, render_api, format);
     }
 
     // Static utility methods for file information
