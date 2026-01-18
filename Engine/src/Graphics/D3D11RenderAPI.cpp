@@ -178,9 +178,9 @@ bool D3D11RenderAPI::initialize(WindowHandle window, int width, int height, floa
     viewport.TopLeftY = 0.0f;
     context->RSSetViewports(1, &viewport);
 
-    // Set projection matrix (D3D11 uses left-handed coordinates)
+    // Set projection matrix (D3D11 now using Right-Handed coordinates to match assets)
     float ratio = static_cast<float>(width) / static_cast<float>(height);
-    projection_matrix = glm::perspectiveLH(glm::radians(fov), ratio, 0.1f, 1000.0f);
+    projection_matrix = glm::perspectiveRH_ZO(glm::radians(fov), ratio, 0.1f, 1000.0f);
 
     // Set default render state
     context->RSSetState(rasterizerCullBack.Get());
@@ -230,7 +230,7 @@ void D3D11RenderAPI::resize(int width, int height)
 
     // Update projection matrix
     float ratio = static_cast<float>(width) / static_cast<float>(height);
-    projection_matrix = glm::perspectiveLH(glm::radians(field_of_view), ratio, 0.1f, 1000.0f);
+    projection_matrix = glm::perspectiveRH_ZO(glm::radians(field_of_view), ratio, 0.1f, 1000.0f);
 
     // Update viewport
     D3D11_VIEWPORT viewport = {};
@@ -356,7 +356,7 @@ bool D3D11RenderAPI::createRasterizerStates()
     D3D11_RASTERIZER_DESC rsDesc = {};
     rsDesc.FillMode = D3D11_FILL_SOLID;
     rsDesc.CullMode = D3D11_CULL_BACK;
-    rsDesc.FrontCounterClockwise = false;
+    rsDesc.FrontCounterClockwise = true;
     rsDesc.DepthClipEnable = TRUE;
 
     HRESULT hr = device->CreateRasterizerState(&rsDesc, rasterizerCullBack.GetAddressOf());
@@ -371,7 +371,7 @@ bool D3D11RenderAPI::createRasterizerStates()
     if (FAILED(hr)) return false;
 
     // Shadow rasterizer with depth bias
-    rsDesc.CullMode = D3D11_CULL_BACK;
+    rsDesc.CullMode = D3D11_CULL_FRONT;
     rsDesc.DepthBias = 1000;
     rsDesc.DepthBiasClamp = 0.0f;
     rsDesc.SlopeScaledDepthBias = 1.0f;
@@ -755,8 +755,8 @@ bool D3D11RenderAPI::createPostProcessingResources(int width, int height)
 
     FXAAVertex quadVertices[] = {
         { -1.0f,  1.0f, 0.0f, 1.0f },
-        {  1.0f,  1.0f, 1.0f, 1.0f },
         { -1.0f, -1.0f, 0.0f, 0.0f },
+        {  1.0f,  1.0f, 1.0f, 1.0f },
         {  1.0f, -1.0f, 1.0f, 0.0f }
     };
 
@@ -933,8 +933,8 @@ void D3D11RenderAPI::setCamera(const camera& cam)
     glm::vec3 target = cam.getTarget();
     glm::vec3 up = cam.getUpVector();
 
-    // D3D11 uses left-handed coordinates
-    view_matrix = glm::lookAtLH(pos, target, up);
+    // D3D11 now using Right-Handed coordinates
+    view_matrix = glm::lookAt(pos, target, up);
 }
 
 void D3D11RenderAPI::pushMatrix()
@@ -1464,8 +1464,8 @@ glm::mat4 D3D11RenderAPI::getLightSpaceMatrixForCascade(int cascadeIndex, const 
     float cascadeNear = cascadeSplitDistances[cascadeIndex];
     float cascadeFar = cascadeSplitDistances[cascadeIndex + 1];
 
-    // Use left-handed perspective for D3D11
-    glm::mat4 cascadeProj = glm::perspectiveLH(glm::radians(fov), aspect, cascadeNear, cascadeFar);
+    // Use Right-Handed perspective for D3D11 to match rest of engine
+    glm::mat4 cascadeProj = glm::perspectiveRH_ZO(glm::radians(fov), aspect, cascadeNear, cascadeFar);
 
     auto corners = getFrustumCornersWorldSpace(cascadeProj, viewMatrix);
 
@@ -1483,7 +1483,7 @@ glm::mat4 D3D11RenderAPI::getLightSpaceMatrixForCascade(int cascadeIndex, const 
         up = glm::vec3(0.0f, 0.0f, 1.0f);
     }
 
-    glm::mat4 lightView = glm::lookAtLH(
+    glm::mat4 lightView = glm::lookAt(
         center - direction * 100.0f,
         center,
         up);
@@ -1510,7 +1510,7 @@ glm::mat4 D3D11RenderAPI::getLightSpaceMatrixForCascade(int cascadeIndex, const 
     minZ -= padding;
     maxZ += 500.0f;
 
-    glm::mat4 lightProj = glm::orthoLH_ZO(minX, maxX, minY, maxY, minZ, maxZ);
+    glm::mat4 lightProj = glm::orthoRH_ZO(minX, maxX, minY, maxY, minZ, maxZ);
 
     return lightProj * lightView;
 }
@@ -1529,12 +1529,12 @@ void D3D11RenderAPI::beginShadowPass(const glm::vec3& lightDir)
     // Legacy single-cascade mode
     float near_plane = 1.0f, far_plane = 1000.0f;
     float ortho_size = 50.0f;
-    glm::mat4 lightProjection = glm::orthoLH_ZO(-ortho_size, ortho_size, -ortho_size, ortho_size, near_plane, far_plane);
+    glm::mat4 lightProjection = glm::orthoRH_ZO(-ortho_size, ortho_size, -ortho_size, ortho_size, near_plane, far_plane);
 
     glm::vec3 direction = glm::normalize(lightDir);
     glm::vec3 lightPos = -direction * 100.0f;
 
-    glm::mat4 lightView = glm::lookAtLH(lightPos, glm::vec3(0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+    glm::mat4 lightView = glm::lookAt(lightPos, glm::vec3(0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
 
     lightSpaceMatrix = lightProjection * lightView;
     lightSpaceMatrices[0] = lightSpaceMatrix;
@@ -1568,11 +1568,11 @@ void D3D11RenderAPI::beginShadowPass(const glm::vec3& lightDir, const camera& ca
 
     in_shadow_pass = true;
 
-    // Set view matrix from camera (D3D11 uses left-handed coordinates)
+    // Set view matrix from camera (D3D11 now using Right-Handed coordinates)
     glm::vec3 pos = cam.getPosition();
     glm::vec3 target = cam.getTarget();
     glm::vec3 up = cam.getUpVector();
-    view_matrix = glm::lookAtLH(pos, target, up);
+    view_matrix = glm::lookAt(pos, target, up);
 
     calculateCascadeSplits(0.1f, 1000.0f);
 
