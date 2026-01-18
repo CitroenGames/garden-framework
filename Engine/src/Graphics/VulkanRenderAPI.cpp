@@ -475,7 +475,7 @@ bool VulkanRenderAPI::createSwapchain()
     vkb::SwapchainBuilder swapchain_builder{ physical_device, device, surface };
 
     auto swap_ret = swapchain_builder
-        .set_desired_format({ VK_FORMAT_B8G8R8A8_SRGB, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR })
+        .set_desired_format({ VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR })
         .set_desired_present_mode(VK_PRESENT_MODE_MAILBOX_KHR)
         .set_desired_extent(viewport_width, viewport_height)
         .add_fallback_present_mode(VK_PRESENT_MODE_FIFO_KHR)
