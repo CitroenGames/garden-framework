@@ -1,0 +1,10 @@
+find_package(Vulkan REQUIRED)
+
+[project:VMA]
+type = lib
+sources = src/vma_impl.cpp
+headers = include/vk_mem_alloc.h
+includes = include, ${Vulkan_INCLUDE_DIRS}
+public_includes = include, ${Vulkan_INCLUDE_DIRS}
+libs = ${Vulkan_LIBRARIES}
+std = 17

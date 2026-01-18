@@ -11,6 +11,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <cstring>
 #include <map>
 
 #define ENET_IMPLEMENTATION
@@ -36,6 +37,7 @@
 #include "Threading/JobSystem.hpp"
 #include "Assets/AssetManager.hpp"
 #include "Assets/GltfAssetLoader.hpp"
+#include "Assets/ModelAssetData.hpp"
 
 static Application app;
 static renderer _renderer;
@@ -43,6 +45,10 @@ static world _world;
 static InputHandler input_handler;
 static std::unique_ptr<PlayerController> player_controller;
 static Game::ClientNetworkManager _network;
+
+// Async loading test
+static Assets::AssetHandle g_async_load_handle;
+static bool g_async_load_pending = false;
 
 static void quit_game(int code)
 {
@@ -84,6 +90,23 @@ void update_player_representations(entt::registry& registry, bool is_freecam)
     }
 }
 
+// Parse command line for render API selection
+static RenderAPIType parseRenderAPI(int argc, char* argv[])
+{
+    for (int i = 1; i < argc; i++)
+    {
+        if (strcmp(argv[i], "-vulkan") == 0 || strcmp(argv[i], "--vulkan") == 0)
+        {
+            return RenderAPIType::Vulkan;
+        }
+        if (strcmp(argv[i], "-opengl") == 0 || strcmp(argv[i], "--opengl") == 0)
+        {
+            return RenderAPIType::OpenGL;
+        }
+    }
+    return RenderAPIType::OpenGL; // Default
+}
+
 #if _WIN32
 int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
 #else
@@ -94,8 +117,15 @@ int main(int argc, char* argv[])
     crashHandler->Initialize("Game");
 	EE::CLog::Init();
 
-    // Initialize application with OpenGL render API
-    app = Application(1920, 1080, 60, 75.0f, RenderAPIType::OpenGL);
+    // Parse command line arguments
+#if _WIN32
+    int argc = __argc;
+    char** argv = __argv;
+#endif
+    RenderAPIType api_type = parseRenderAPI(argc, argv);
+
+    // Initialize application with selected render API
+    app = Application(1920, 1080, 60, 75.0f, api_type);
     if (!app.initialize("Game Window", true))
     {
         quit_game(1);
@@ -242,6 +272,70 @@ int main(int argc, char* argv[])
         if (input_handler.should_quit_application())
         {
             quit_game(0);
+        }
+
+        // F3: Test async model loading - spawn Character.gltf at player position
+        if (input_manager && input_manager->is_key_pressed(SDL_SCANCODE_F3))
+        {
+            if (!g_async_load_pending)
+            {
+                // Get player position for spawning
+                glm::vec3 spawn_pos(0.0f);
+                if (_world.registry.valid(player_entity)) {
+                    auto& player_transform = _world.registry.get<TransformComponent>(player_entity);
+                    spawn_pos = player_transform.position;
+                }
+
+                LOG_ENGINE_INFO("F3 pressed - Loading Character.gltf at position ({}, {}, {})",
+                    spawn_pos.x, spawn_pos.y, spawn_pos.z);
+
+                g_async_load_handle = Assets::AssetManager::get().loadAsync(
+                    "models/Character.gltf",
+                    Assets::LoadPriority::High,
+                    [spawn_pos](Assets::AssetId id, bool success, const Assets::AssetData& data) {
+                        if (success) {
+                            auto model = std::get<std::shared_ptr<Assets::ModelAssetData>>(data);
+                            if (model && model->mesh_data && model->mesh_data->gpu_mesh) {
+                                LOG_ENGINE_INFO("Async load completed! Spawning entity...");
+
+                                // Create mesh that shares the GPU data (don't transfer ownership)
+                                auto new_mesh = std::make_shared<mesh>(nullptr, 0);
+                                new_mesh->gpu_mesh = model->mesh_data->gpu_mesh;
+                                new_mesh->vertices_len = model->mesh_data->getVertexCount();
+                                new_mesh->is_valid = true;
+                                new_mesh->owns_vertices = false;
+                                // Note: We share gpu_mesh, don't set it to nullptr on model
+
+                                // Set texture if available
+                                TextureHandle tex = model->getMaterialPrimaryTexture(0);
+                                if (tex != INVALID_TEXTURE) {
+                                    new_mesh->set_texture(tex);
+                                }
+
+                                // Create entity in world
+                                entt::entity new_entity = _world.registry.create();
+                                _world.registry.emplace<TransformComponent>(new_entity,
+                                    spawn_pos.x, spawn_pos.y, spawn_pos.z);
+                                _world.registry.emplace<MeshComponent>(new_entity, new_mesh);
+                                _world.registry.emplace<TagComponent>(new_entity, TagComponent{"AsyncCharacter"});
+
+                                LOG_ENGINE_INFO("Spawned Character at ({}, {}, {})",
+                                    spawn_pos.x, spawn_pos.y, spawn_pos.z);
+                            } else {
+                                LOG_ENGINE_ERROR("Model loaded but mesh data is missing!");
+                            }
+                        } else {
+                            LOG_ENGINE_ERROR("Async load failed!");
+                        }
+                        g_async_load_pending = false;
+                    }
+                );
+                g_async_load_pending = true;
+            }
+            else
+            {
+                LOG_ENGINE_WARN("Async load already in progress...");
+            }
         }
 
         // delta time

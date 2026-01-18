@@ -1,11 +1,15 @@
 include = thirdparty/3rdparty.buildscript
 
+find_package(Vulkan REQUIRED)
+
 [project:Engine]
 type = lib
 sources = src/**/*.cpp
 headers = src/**/*.h src/**/*.hpp
 public_includes = src, thirdparty/include, .
-includes = src, thirdparty/include, .
+includes = src, thirdparty/include, ${Vulkan_INCLUDE_DIRS}
+libs = ${Vulkan_LIBRARIES}
+libdirs = ${Vulkan_LIBRARY_DIRS}
 multiprocessor = true
 simd = StreamingSIMDExtensions2
 target_link_libraries(
@@ -17,6 +21,8 @@ target_link_libraries(
     PUBLIC spdlog
     PUBLIC entt
     PUBLIC enet
+    PUBLIC vk-bootstrap
+    PUBLIC VMA
 )
 std = 20
 utf8 = true

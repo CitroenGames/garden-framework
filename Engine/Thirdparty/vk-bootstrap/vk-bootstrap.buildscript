@@ -1,0 +1,11 @@
+find_package(Vulkan REQUIRED)
+
+[project:vk-bootstrap]
+type = lib
+sources = src/VkBootstrap.cpp
+headers = src/VkBootstrap.h src/VkBootstrapDispatch.h
+includes = src, ${Vulkan_INCLUDE_DIRS}
+public_includes = src, ${Vulkan_INCLUDE_DIRS}
+libs = ${Vulkan_LIBRARIES}
+libdirs = ${Vulkan_LIBRARY_DIRS}
+std = 17
