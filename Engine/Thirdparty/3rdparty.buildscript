@@ -9,3 +9,6 @@ include = spdlog-1.15.3/spdlog.buildscript
 include = enet/enet.buildscript
 
 include = imgui-1.92.5/imgui.buildscript
+
+include = vk-bootstrap/vk-bootstrap.buildscript
+include = vma/vma.buildscript
