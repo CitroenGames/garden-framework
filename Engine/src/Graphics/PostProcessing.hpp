@@ -27,6 +27,7 @@ public:
     void beginRender();
     void endRender();
     void renderFXAA();
-    
+    void renderPassthrough();  // Simple blit without FXAA
+
     void shutdown();
 };

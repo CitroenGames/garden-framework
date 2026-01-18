@@ -117,17 +117,28 @@ void PostProcessing::renderFXAA()
 
     fxaaShader->use();
     fxaaShader->setUniform("uInverseScreenSize", glm::vec2(1.0f / width, 1.0f / height));
-    
+
     glBindVertexArray(quadVAO);
     glDisable(GL_DEPTH_TEST); // Disable depth test for screen quad
-    
+
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, textureColorBuffer);
     fxaaShader->setUniform("screenTexture", 0);
-    
+
     glDrawArrays(GL_TRIANGLES, 0, 6);
-    
+
     glBindVertexArray(0);
+}
+
+void PostProcessing::renderPassthrough()
+{
+    if (!initialized) return;
+
+    // Blit from offscreen framebuffer to default framebuffer without any post-processing
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+    glBlitFramebuffer(0, 0, width, height, 0, 0, width, height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
 void PostProcessing::shutdown()

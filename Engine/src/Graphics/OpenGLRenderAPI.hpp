@@ -56,8 +56,11 @@ private:
     static const int NUM_CASCADES = 4;
     GLuint shadowMapFBO;
     GLuint shadowMapTextureArray;  // GL_TEXTURE_2D_ARRAY for cascades
-    const unsigned int SHADOW_WIDTH = 4096;
-    const unsigned int SHADOW_HEIGHT = 4096;
+    unsigned int currentShadowSize = 4096;  // Runtime configurable shadow resolution
+    int shadowQuality = 3;  // 0=Off, 1=Low(1024), 2=Medium(2048), 3=High(4096)
+
+    // FXAA setting
+    bool fxaaEnabled = true;
     glm::mat4 lightSpaceMatrix;  // Keep for backwards compatibility
     glm::mat4 lightSpaceMatrices[NUM_CASCADES];
     float cascadeSplitDistances[NUM_CASCADES + 1];
@@ -71,6 +74,7 @@ private:
     std::array<glm::vec3, 8> getFrustumCornersWorldSpace(const glm::mat4& proj, const glm::mat4& view);
     glm::mat4 getLightSpaceMatrixForCascade(int cascadeIndex, const glm::vec3& lightDir,
         const glm::mat4& viewMatrix, float fov, float aspect);
+    void recreateShadowMapResources(unsigned int size);
 
     // Optimization state tracking
     GLuint current_shader_id;
@@ -144,4 +148,10 @@ public:
     virtual IGPUMesh* createMesh() override;
 
     virtual const char* getAPIName() const override { return "OpenGL"; }
+
+    // Graphics settings
+    virtual void setFXAAEnabled(bool enabled) override;
+    virtual bool isFXAAEnabled() const override;
+    virtual void setShadowQuality(int quality) override;
+    virtual int getShadowQuality() const override;
 };

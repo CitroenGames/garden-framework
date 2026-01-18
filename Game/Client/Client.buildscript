@@ -1,4 +1,8 @@
 find_package(Vulkan REQUIRED)
+if(Windows)
+{
+find_package(DirectX11 REQUIRED)
+}
 
 [project:Game]
 type = exe
@@ -8,9 +12,9 @@ if(Windows)
 }
 sources = src/**/*.cpp
 headers = src/**/*.h src/**/*.hpp ../shared/**/*.hpp
-includes = src, ../shared/
-libs = ${Vulkan_LIBRARIES}
-libdirs = ${Vulkan_LIBRARY_DIRS}
+includes = src, ../shared, ${DirectX11_INCLUDE_DIRS}
+libs = ${Vulkan_LIBRARIES}, ${DirectX11_LIBRARIES}
+libdirs = ${Vulkan_LIBRARY_DIRS}, ${DirectX11_LIBRARY_DIRS}
 target_link_libraries(
     PRIVATE Engine
 )

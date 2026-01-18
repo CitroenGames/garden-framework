@@ -4,6 +4,8 @@
 #include "Graphics/Shader.hpp"
 #include "Graphics/ShaderManager.hpp"
 #include "Graphics/OpenGLMesh.hpp"
+#include "imgui.h"
+#include "imgui_impl_opengl3.h"
 #include <stdio.h>
 #include <cmath>
 #include <limits>
@@ -72,7 +74,7 @@ bool OpenGLRenderAPI::initialize(WindowHandle window, int width, int height, flo
     glGenTextures(1, &shadowMapTextureArray);
     glBindTexture(GL_TEXTURE_2D_ARRAY, shadowMapTextureArray);
     glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_DEPTH_COMPONENT32F,
-                 SHADOW_WIDTH, SHADOW_HEIGHT, NUM_CASCADES,
+                 currentShadowSize, currentShadowSize, NUM_CASCADES,
                  0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
@@ -93,7 +95,7 @@ bool OpenGLRenderAPI::initialize(WindowHandle window, int width, int height, flo
         LOG_ENGINE_ERROR("CSM Shadow FBO incomplete! Status: {}", fboStatus);
     } else {
         LOG_ENGINE_INFO("CSM Shadow FBO created successfully ({}x{} x {} cascades)",
-            SHADOW_WIDTH, SHADOW_HEIGHT, NUM_CASCADES);
+            currentShadowSize, currentShadowSize, NUM_CASCADES);
     }
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -299,14 +301,29 @@ void OpenGLRenderAPI::endFrame()
     if (post_processing)
     {
         post_processing->endRender();
-        post_processing->renderFXAA();
+
+        if (fxaaEnabled)
+        {
+            post_processing->renderFXAA();
+        }
+        else
+        {
+            post_processing->renderPassthrough();
+        }
 
         // PostProcessing modifies GL state
         current_shader_id = 0;
         current_bound_texture_0 = 0;
-        
+
         // renderFXAA disables depth test
         current_gpu_state.depth_test = DepthTest::None;
+    }
+
+    // Render ImGui AFTER FXAA so UI text stays crisp
+    ImDrawData* draw_data = ImGui::GetDrawData();
+    if (draw_data)
+    {
+        ImGui_ImplOpenGL3_RenderDrawData(draw_data);
     }
 }
 
@@ -653,6 +670,13 @@ glm::mat4 OpenGLRenderAPI::getLightSpaceMatrixForCascade(int cascadeIndex, const
 // Legacy beginShadowPass - uses first cascade only for backwards compatibility
 void OpenGLRenderAPI::beginShadowPass(const glm::vec3& lightDir)
 {
+    // Skip if shadows are disabled
+    if (shadowQuality == 0 || shadowMapFBO == 0)
+    {
+        in_shadow_pass = false;
+        return;
+    }
+
     in_shadow_pass = true;
 
     // Set up light space matrix for cascade 0 only (legacy mode)
@@ -671,7 +695,7 @@ void OpenGLRenderAPI::beginShadowPass(const glm::vec3& lightDir)
     lightSpaceMatrices[0] = lightSpaceMatrix;
 
     // Bind FBO and set viewport
-    glViewport(0, 0, SHADOW_WIDTH, SHADOW_HEIGHT);
+    glViewport(0, 0, currentShadowSize, currentShadowSize);
     glBindFramebuffer(GL_FRAMEBUFFER, shadowMapFBO);
     glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, shadowMapTextureArray, 0, 0);
     glClear(GL_DEPTH_BUFFER_BIT);
@@ -683,6 +707,13 @@ void OpenGLRenderAPI::beginShadowPass(const glm::vec3& lightDir)
 // CSM beginShadowPass - calculates all cascade matrices
 void OpenGLRenderAPI::beginShadowPass(const glm::vec3& lightDir, const camera& cam)
 {
+    // Skip if shadows are disabled
+    if (shadowQuality == 0 || shadowMapFBO == 0)
+    {
+        in_shadow_pass = false;
+        return;
+    }
+
     in_shadow_pass = true;
 
     // IMPORTANT: Set view matrix from camera FIRST before calculating cascade matrices
@@ -705,7 +736,7 @@ void OpenGLRenderAPI::beginShadowPass(const glm::vec3& lightDir, const camera& c
     lightSpaceMatrix = lightSpaceMatrices[0];
 
     // Set up shadow pass state
-    glViewport(0, 0, SHADOW_WIDTH, SHADOW_HEIGHT);
+    glViewport(0, 0, currentShadowSize, currentShadowSize);
     glBindFramebuffer(GL_FRAMEBUFFER, shadowMapFBO);
 
     currentCascade = 0;
@@ -1223,4 +1254,101 @@ Shader* OpenGLRenderAPI::getShaderForRenderState(const RenderState& state)
     {
         return shader_manager->getShader("unlit");
     }
+}
+
+// Graphics settings implementation
+void OpenGLRenderAPI::setFXAAEnabled(bool enabled)
+{
+    fxaaEnabled = enabled;
+}
+
+bool OpenGLRenderAPI::isFXAAEnabled() const
+{
+    return fxaaEnabled;
+}
+
+void OpenGLRenderAPI::setShadowQuality(int quality)
+{
+    if (quality < 0) quality = 0;
+    if (quality > 3) quality = 3;
+
+    if (quality == shadowQuality) return;
+
+    shadowQuality = quality;
+
+    // Map quality to resolution: 0=Off(0), 1=Low(1024), 2=Medium(2048), 3=High(4096)
+    unsigned int newSize = 0;
+    switch (quality)
+    {
+    case 0: newSize = 0; break;     // Off - no shadow map
+    case 1: newSize = 1024; break;  // Low
+    case 2: newSize = 2048; break;  // Medium
+    case 3: newSize = 4096; break;  // High
+    }
+
+    if (newSize != currentShadowSize)
+    {
+        recreateShadowMapResources(newSize);
+    }
+}
+
+int OpenGLRenderAPI::getShadowQuality() const
+{
+    return shadowQuality;
+}
+
+void OpenGLRenderAPI::recreateShadowMapResources(unsigned int size)
+{
+    // Delete existing resources
+    if (shadowMapFBO)
+    {
+        glDeleteFramebuffers(1, &shadowMapFBO);
+        shadowMapFBO = 0;
+    }
+    if (shadowMapTextureArray)
+    {
+        glDeleteTextures(1, &shadowMapTextureArray);
+        shadowMapTextureArray = 0;
+    }
+
+    currentShadowSize = size;
+
+    // If size is 0, shadows are disabled - don't create resources
+    if (size == 0)
+    {
+        LOG_ENGINE_INFO("Shadows disabled");
+        return;
+    }
+
+    // Recreate FBO and texture array at new size
+    glGenFramebuffers(1, &shadowMapFBO);
+    glGenTextures(1, &shadowMapTextureArray);
+
+    glBindTexture(GL_TEXTURE_2D_ARRAY, shadowMapTextureArray);
+    glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_DEPTH_COMPONENT32F,
+                 size, size, NUM_CASCADES,
+                 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+    float borderColor[] = { 1.0f, 1.0f, 1.0f, 1.0f };
+    glTexParameterfv(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_BORDER_COLOR, borderColor);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, shadowMapFBO);
+    glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, shadowMapTextureArray, 0, 0);
+    glDrawBuffer(GL_NONE);
+    glReadBuffer(GL_NONE);
+
+    GLenum fboStatus = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    if (fboStatus != GL_FRAMEBUFFER_COMPLETE)
+    {
+        LOG_ENGINE_ERROR("Failed to recreate shadow FBO at size {}", size);
+    }
+    else
+    {
+        LOG_ENGINE_INFO("Shadow map resized to {}x{}", size, size);
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }

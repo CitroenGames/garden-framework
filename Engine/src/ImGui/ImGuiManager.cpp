@@ -3,6 +3,10 @@
 #include "imgui_impl_sdl2.h"
 #include "imgui_impl_opengl3.h"
 #include "imgui_impl_vulkan.h"
+#ifdef _WIN32
+#include "imgui_impl_dx11.h"
+#include "Graphics/D3D11RenderAPI.hpp"
+#endif
 #include "Graphics/VulkanRenderAPI.hpp"
 #include <SDL.h>
 
@@ -43,6 +47,12 @@ bool ImGuiManager::initialize(SDL_Window* window, IRenderAPI* renderAPI, RenderA
     {
         success = initVulkan(window, renderAPI);
     }
+#ifdef _WIN32
+    else if (apiType == RenderAPIType::D3D11)
+    {
+        success = initD3D11(window, renderAPI);
+    }
+#endif
 
     m_initialized = success;
     return success;
@@ -118,6 +128,33 @@ bool ImGuiManager::initVulkan(SDL_Window* window, IRenderAPI* vulkanAPI)
     return true;
 }
 
+#ifdef _WIN32
+bool ImGuiManager::initD3D11(SDL_Window* window, IRenderAPI* d3d11API)
+{
+    // Initialize SDL2 backend for D3D11
+    if (!ImGui_ImplSDL2_InitForD3D(window))
+    {
+        return false;
+    }
+
+    // Cast to D3D11RenderAPI to access D3D11 handles
+    D3D11RenderAPI* dxAPI = dynamic_cast<D3D11RenderAPI*>(d3d11API);
+    if (!dxAPI)
+    {
+        ImGui_ImplSDL2_Shutdown();
+        return false;
+    }
+
+    if (!ImGui_ImplDX11_Init(dxAPI->getDevice(), dxAPI->getDeviceContext()))
+    {
+        ImGui_ImplSDL2_Shutdown();
+        return false;
+    }
+
+    return true;
+}
+#endif
+
 void ImGuiManager::shutdown()
 {
     if (!m_initialized) return;
@@ -130,6 +167,12 @@ void ImGuiManager::shutdown()
     {
         ImGui_ImplVulkan_Shutdown();
     }
+#ifdef _WIN32
+    else if (m_apiType == RenderAPIType::D3D11)
+    {
+        ImGui_ImplDX11_Shutdown();
+    }
+#endif
 
     ImGui_ImplSDL2_Shutdown();
     ImGui::DestroyContext();
@@ -150,6 +193,12 @@ void ImGuiManager::newFrame()
     {
         ImGui_ImplVulkan_NewFrame();
     }
+#ifdef _WIN32
+    else if (m_apiType == RenderAPIType::D3D11)
+    {
+        ImGui_ImplDX11_NewFrame();
+    }
+#endif
 
     ImGui_ImplSDL2_NewFrame();
     ImGui::NewFrame();
@@ -176,17 +225,37 @@ void ImGuiManager::render()
     }
     ImGui::End();
 
-    // Finalize ImGui rendering
-    ImGui::Render();
-
-    // For OpenGL, render the draw data immediately
-    // For Vulkan, the draw data will be rendered in VulkanRenderAPI::endFrame()
-    if (m_apiType == RenderAPIType::OpenGL)
+    // Graphics Settings panel (only shown in UI mode - F3 to toggle)
+    if (m_showSettings && m_renderAPI)
     {
-        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+        ImGui::SetNextWindowPos(ImVec2(10, 50), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(200, 0), ImGuiCond_FirstUseEver);
+        if (ImGui::Begin("Settings", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+        {
+            if (ImGui::CollapsingHeader("Graphics", ImGuiTreeNodeFlags_DefaultOpen))
+            {
+                // FXAA toggle
+                bool fxaa = m_renderAPI->isFXAAEnabled();
+                if (ImGui::Checkbox("FXAA", &fxaa))
+                {
+                    m_renderAPI->setFXAAEnabled(fxaa);
+                }
+
+                // Shadow quality dropdown
+                const char* shadowOptions[] = { "Off", "Low (1024)", "Medium (2048)", "High (4096)" };
+                int shadowQuality = m_renderAPI->getShadowQuality();
+                if (ImGui::Combo("Shadow Quality", &shadowQuality, shadowOptions, 4))
+                {
+                    m_renderAPI->setShadowQuality(shadowQuality);
+                }
+            }
+        }
+        ImGui::End();
     }
-    // Note: Vulkan rendering is handled in VulkanRenderAPI::endFrame()
-    // because it needs to happen within the active render pass
+
+    // Finalize ImGui rendering - builds the draw data
+    // Actual rendering to screen happens in each RenderAPI's endFrame() AFTER FXAA
+    ImGui::Render();
 }
 
 bool ImGuiManager::processEvent(const SDL_Event* event)

@@ -105,6 +105,13 @@ static RenderAPIType parseRenderAPI(int argc, char* argv[])
         {
             return RenderAPIType::OpenGL;
         }
+#ifdef _WIN32
+        if (strcmp(argv[i], "-d3d11") == 0 || strcmp(argv[i], "--d3d11") == 0 ||
+            strcmp(argv[i], "-dx11") == 0 || strcmp(argv[i], "--dx11") == 0)
+        {
+            return RenderAPIType::D3D11;
+        }
+#endif
     }
     return RenderAPIType::OpenGL; // Default
 }
@@ -265,34 +272,28 @@ int main(int argc, char* argv[])
         // Process input events through the new input system
         input_handler.process_events();
 
+        // Sync UI mode state with ImGuiManager (F3 toggles)
+        ImGuiManager::get().setShowSettings(input_handler.is_ui_mode());
+
         // Process async loading jobs (GPU uploads must happen on main thread)
         Threading::JobSystem::get().processMainThreadJobs();
         
-        // Handle mouse motion for camera control
-        if (input_manager)
+        // Handle mouse motion for camera control (skip in UI mode)
+        if (input_manager && !input_handler.is_ui_mode())
         {
             float mouse_x = input_manager->get_mouse_delta_x();
             float mouse_y = input_manager->get_mouse_delta_y();
-            
+
             if (mouse_x != 0.0f || mouse_y != 0.0f)
             {
                 player_controller->handleMouseMotion(mouse_y, mouse_x);
             }
         }
-        
+
         // Check if quit was requested
         if (input_handler.should_quit_application())
         {
             quit_game(0);
-        }
-
-        // Toggle mouse mode based on ImGui interaction
-        static bool lastWantMouse = false;
-        bool wantMouse = ImGuiManager::get().wantCaptureMouse();
-        if (wantMouse != lastWantMouse)
-        {
-            SDL_SetRelativeMouseMode(wantMouse ? SDL_FALSE : SDL_TRUE);
-            lastWantMouse = wantMouse;
         }
 
         // F3: Test async model loading - spawn Character.gltf at player position
