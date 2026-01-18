@@ -73,7 +73,7 @@ PSInput VSMain(VSInput input)
     output.texcoord = input.texcoord;
 
     float4 viewPos = mul(uView, worldPos);
-    output.viewDepth = viewPos.z;  // Positive in left-handed (into screen)
+    output.viewDepth = -viewPos.z;  // Negate for right-handed coords (z is negative into screen)
 
     output.position = mul(uProjection, viewPos);
     return output;
