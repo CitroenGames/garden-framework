@@ -774,50 +774,50 @@ bool D3D11RenderAPI::createPostProcessingResources(int width, int height)
 
 bool D3D11RenderAPI::createSkyboxResources()
 {
-    // Create skybox cube vertex buffer
+    // Create skybox cube vertex buffer (same winding as OpenGL version)
     float skyboxVertices[] = {
-        // Back face
-        -1.0f, -1.0f, -1.0f,
-         1.0f, -1.0f, -1.0f,
-         1.0f,  1.0f, -1.0f,
-         1.0f,  1.0f, -1.0f,
+        // Back face (z = -1)
         -1.0f,  1.0f, -1.0f,
         -1.0f, -1.0f, -1.0f,
-        // Front face
+         1.0f, -1.0f, -1.0f,
+         1.0f, -1.0f, -1.0f,
+         1.0f,  1.0f, -1.0f,
+        -1.0f,  1.0f, -1.0f,
+        // Left face (x = -1)
         -1.0f, -1.0f,  1.0f,
-         1.0f,  1.0f,  1.0f,
-         1.0f, -1.0f,  1.0f,
-         1.0f,  1.0f,  1.0f,
-        -1.0f, -1.0f,  1.0f,
-        -1.0f,  1.0f,  1.0f,
-        // Left face
-        -1.0f,  1.0f,  1.0f,
         -1.0f, -1.0f, -1.0f,
         -1.0f,  1.0f, -1.0f,
-        -1.0f, -1.0f, -1.0f,
+        -1.0f,  1.0f, -1.0f,
         -1.0f,  1.0f,  1.0f,
         -1.0f, -1.0f,  1.0f,
-        // Right face
+        // Right face (x = 1)
+         1.0f, -1.0f, -1.0f,
+         1.0f, -1.0f,  1.0f,
+         1.0f,  1.0f,  1.0f,
          1.0f,  1.0f,  1.0f,
          1.0f,  1.0f, -1.0f,
          1.0f, -1.0f, -1.0f,
-         1.0f, -1.0f, -1.0f,
-         1.0f, -1.0f,  1.0f,
-         1.0f,  1.0f,  1.0f,
-        // Bottom face
-        -1.0f, -1.0f, -1.0f,
-         1.0f, -1.0f,  1.0f,
-         1.0f, -1.0f, -1.0f,
-         1.0f, -1.0f,  1.0f,
-        -1.0f, -1.0f, -1.0f,
+        // Front face (z = 1)
         -1.0f, -1.0f,  1.0f,
-        // Top face
+        -1.0f,  1.0f,  1.0f,
+         1.0f,  1.0f,  1.0f,
+         1.0f,  1.0f,  1.0f,
+         1.0f, -1.0f,  1.0f,
+        -1.0f, -1.0f,  1.0f,
+        // Top face (y = 1)
         -1.0f,  1.0f, -1.0f,
          1.0f,  1.0f, -1.0f,
          1.0f,  1.0f,  1.0f,
          1.0f,  1.0f,  1.0f,
         -1.0f,  1.0f,  1.0f,
-        -1.0f,  1.0f, -1.0f
+        -1.0f,  1.0f, -1.0f,
+        // Bottom face (y = -1)
+        -1.0f, -1.0f, -1.0f,
+        -1.0f, -1.0f,  1.0f,
+         1.0f, -1.0f, -1.0f,
+         1.0f, -1.0f, -1.0f,
+        -1.0f, -1.0f,  1.0f,
+         1.0f, -1.0f,  1.0f
     };
 
     D3D11_BUFFER_DESC vbDesc = {};
@@ -1409,7 +1409,7 @@ void D3D11RenderAPI::renderSkybox()
 
     // Depth test but no write, render inside of cube
     context->OMSetDepthStencilState(depthStateReadOnly.Get(), 0);
-    context->RSSetState(rasterizerCullFront.Get());  // Cull front faces to render inside
+    context->RSSetState(rasterizerCullBack.Get());  // Standard back-face culling (vertices wound CCW from inside)
 
     // Draw skybox
     context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -1526,6 +1526,9 @@ void D3D11RenderAPI::beginShadowPass(const glm::vec3& lightDir)
 
     in_shadow_pass = true;
 
+    // Restore depth state (may have been disabled by FXAA post-processing)
+    context->OMSetDepthStencilState(depthStateLess.Get(), 0);
+
     // Legacy single-cascade mode
     float near_plane = 1.0f, far_plane = 1000.0f;
     float ortho_size = 50.0f;
@@ -1567,6 +1570,9 @@ void D3D11RenderAPI::beginShadowPass(const glm::vec3& lightDir, const camera& ca
     }
 
     in_shadow_pass = true;
+
+    // Restore depth state (may have been disabled by FXAA post-processing)
+    context->OMSetDepthStencilState(depthStateLess.Get(), 0);
 
     // Set view matrix from camera (D3D11 now using Right-Handed coordinates)
     glm::vec3 pos = cam.getPosition();
