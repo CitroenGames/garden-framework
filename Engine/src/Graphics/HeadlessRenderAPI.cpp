@@ -68,6 +68,12 @@ TextureHandle HeadlessRenderAPI::loadTexture(const std::string& filename, bool i
     return 1; // Return a dummy handle
 }
 
+TextureHandle HeadlessRenderAPI::loadTextureFromMemory(const uint8_t* pixels, int width, int height, int channels,
+                                                       bool flip_vertically, bool generate_mipmaps)
+{
+    return 1; // Return a dummy handle
+}
+
 void HeadlessRenderAPI::bindTexture(TextureHandle texture)
 {
 }

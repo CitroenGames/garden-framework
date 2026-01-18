@@ -8,6 +8,8 @@
 #include <cmath>
 #include <limits>
 #include <string>
+#include <vector>
+#include <cstring>
 #include "Utils/Log.hpp"
 
 #define STB_IMAGE_IMPLEMENTATION
@@ -429,6 +431,87 @@ TextureHandle OpenGLRenderAPI::loadTexture(const std::string& filename, bool inv
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
 
     stbi_image_free(data);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    return (TextureHandle)texture;
+}
+
+TextureHandle OpenGLRenderAPI::loadTextureFromMemory(const uint8_t* pixels, int width, int height, int channels,
+                                                     bool flip_vertically, bool generate_mipmaps)
+{
+    if (!pixels || width <= 0 || height <= 0 || channels < 1 || channels > 4)
+    {
+        fprintf(stderr, "Invalid texture data for loadTextureFromMemory\n");
+        return INVALID_TEXTURE;
+    }
+
+    const uint8_t* data = pixels;
+    std::vector<uint8_t> flipped_data;
+
+    if (flip_vertically)
+    {
+        size_t row_size = static_cast<size_t>(width) * channels;
+        flipped_data.resize(static_cast<size_t>(width) * height * channels);
+        for (int y = 0; y < height; ++y)
+        {
+            std::memcpy(flipped_data.data() + y * row_size,
+                       pixels + (height - 1 - y) * row_size,
+                       row_size);
+        }
+        data = flipped_data.data();
+    }
+
+    GLuint texture;
+    glGenTextures(1, &texture);
+    glBindTexture(GL_TEXTURE_2D, texture);
+
+    GLenum format;
+    GLenum internal_format;
+    switch (channels)
+    {
+    case 1:
+        internal_format = GL_R8;
+        format = GL_RED;
+        break;
+    case 3:
+        internal_format = GL_RGB8;
+        format = GL_RGB;
+        break;
+    case 4:
+        internal_format = GL_RGBA8;
+        format = GL_RGBA;
+        break;
+    default:
+        fprintf(stderr, "Unsupported number of channels: %d\n", channels);
+        glDeleteTextures(1, &texture);
+        return INVALID_TEXTURE;
+    }
+
+    glTexImage2D(GL_TEXTURE_2D, 0, internal_format, width, height, 0, format, GL_UNSIGNED_BYTE, data);
+
+    if (channels == 1)
+    {
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_R, GL_RED);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_G, GL_RED);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_B, GL_RED);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_A, GL_ONE);
+    }
+
+    if (generate_mipmaps)
+    {
+        glGenerateMipmap(GL_TEXTURE_2D);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    }
+    else
+    {
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    }
+
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+
     glBindTexture(GL_TEXTURE_2D, 0);
 
     return (TextureHandle)texture;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "RenderAPI.hpp"
+#include <cstdint>
 
 class HeadlessRenderAPI : public IRenderAPI
 {
@@ -26,6 +27,8 @@ public:
     virtual void multiplyMatrix(const glm::mat4& matrix) override;
 
     virtual TextureHandle loadTexture(const std::string& filename, bool invert_y = false, bool generate_mipmaps = true) override;
+    virtual TextureHandle loadTextureFromMemory(const uint8_t* pixels, int width, int height, int channels,
+                                                bool flip_vertically = false, bool generate_mipmaps = true) override;
     virtual void bindTexture(TextureHandle texture) override;
     virtual void unbindTexture() override;
     virtual void deleteTexture(TextureHandle texture) override;
