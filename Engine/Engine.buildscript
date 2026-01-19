@@ -1,16 +1,37 @@
 include = thirdparty/3rdparty.buildscript
 
 find_package(Vulkan REQUIRED)
-find_package(DirectX11 REQUIRED)
+if(Windows)
+{
+    find_package(DirectX11 REQUIRED)
+}
 
 [project:Engine]
 type = lib
-sources = src/**/*.cpp
-headers = src/**/*.h src/**/*.hpp
+sources = {
+    src/**/*.cpp
+    src/Graphics/D3D11RenderAPI.cpp [windows]
+    src/Graphics/D3D11Mesh.cpp [windows]
+}
+headers = {
+    src/**/*.h 
+    src/**/*.hpp
+    src/Graphics/D3D11RenderAPI.hpp [windows]
+    src/Graphics/D3D11Mesh.hpp [windows]
+}
 public_includes = src, thirdparty/include, .
-includes = src, thirdparty/include, ${Vulkan_INCLUDE_DIRS}, ${DirectX11_INCLUDE_DIRS}
-libs = ${Vulkan_LIBRARIES}, ${DirectX11_LIBRARIES}
-libdirs = ${Vulkan_LIBRARY_DIRS}, ${DirectX11_LIBRARY_DIRS}
+if(Windows)
+{
+    includes = src, thirdparty/include, ${Vulkan_INCLUDE_DIRS}, ${DirectX11_INCLUDE_DIRS}
+    libs = ${Vulkan_LIBRARIES}, ${DirectX11_LIBRARIES}
+    libdirs = ${Vulkan_LIBRARY_DIRS}, ${DirectX11_LIBRARY_DIRS}
+}
+if(Linux)
+{
+    includes = src, thirdparty/include, ${Vulkan_INCLUDE_DIRS}
+    libs = ${Vulkan_LIBRARIES}
+    libdirs = ${Vulkan_LIBRARY_DIRS}
+}
 multiprocessor = true
 simd = StreamingSIMDExtensions2
 target_link_libraries(
