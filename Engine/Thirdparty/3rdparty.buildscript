@@ -1,0 +1,18 @@
+include = glad/glad.buildscript
+if(windows)
+{
+include = sdl2/sdl2.buildscript
+}
+
+include = entt/entt.buildscript
+include = glm/glm.buildscript
+include = tinygltf-2.9.6/tinygltf.buildscript
+include = tinyobjloader/tinyobjloader.buildscript
+include = spdlog-1.15.3/spdlog.buildscript
+
+include = enet/enet.buildscript
+
+include = imgui-docking/imgui.buildscript
+
+include = vk-bootstrap/vk-bootstrap.buildscript
+include = vma/vma.buildscript

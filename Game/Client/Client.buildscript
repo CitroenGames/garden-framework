@@ -1,0 +1,32 @@
+find_package(Vulkan REQUIRED)
+if(Windows)
+{
+find_package(DirectX11 REQUIRED)
+}
+
+[project:Game]
+type = exe
+if(Windows)
+{
+    subsystem = Windows
+}
+sources = src/**/*.cpp
+headers = src/**/*.h src/**/*.hpp ../shared/**/*.hpp
+if(Windows)
+{
+    includes = src, ../shared, ${DirectX11_INCLUDE_DIRS}
+    libs = ${Vulkan_LIBRARIES}, ${DirectX11_LIBRARIES}
+    libdirs = ${Vulkan_LIBRARY_DIRS}, ${DirectX11_LIBRARY_DIRS}
+}
+if(Linux)
+{
+    includes = src, ../shared
+    libs = ${Vulkan_LIBRARIES}
+    libdirs = ${Vulkan_LIBRARY_DIRS}
+}
+target_link_libraries(
+    PRIVATE Engine
+)
+multiprocessor = true
+std = 20
+utf8 = true
