@@ -2,4 +2,14 @@
 type = interface
 headers = include/**/*.h
 public_includes = include
-public_libs = lib/x64/SDL2.lib
+if(Windows)
+{
+    public_libs = lib/x64/SDL2.lib
+}
+if(Linux)
+{
+    find_package(SDL2 REQUIRED)
+    public_includes = ${SDL2_INCLUDE_DIRS}
+    libdirs = ${SDL2_LIBRARY_DIRS}
+    public_libs = ${SDL2_LIBRARIES}
+}
