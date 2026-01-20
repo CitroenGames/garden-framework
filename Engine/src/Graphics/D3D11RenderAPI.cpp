@@ -966,6 +966,16 @@ void D3D11RenderAPI::multiplyMatrix(const glm::mat4& matrix)
     current_model_matrix = current_model_matrix * matrix;
 }
 
+glm::mat4 D3D11RenderAPI::getProjectionMatrix() const
+{
+    return projection_matrix;
+}
+
+glm::mat4 D3D11RenderAPI::getViewMatrix() const
+{
+    return view_matrix;
+}
+
 TextureHandle D3D11RenderAPI::loadTexture(const std::string& filename, bool invert_y, bool generate_mipmaps)
 {
     int width, height, channels;

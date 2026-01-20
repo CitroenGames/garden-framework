@@ -3448,6 +3448,16 @@ void VulkanRenderAPI::multiplyMatrix(const glm::mat4& matrix)
     current_model_matrix = current_model_matrix * matrix;
 }
 
+glm::mat4 VulkanRenderAPI::getProjectionMatrix() const
+{
+    return projection_matrix;
+}
+
+glm::mat4 VulkanRenderAPI::getViewMatrix() const
+{
+    return view_matrix;
+}
+
 // Texture management
 TextureHandle VulkanRenderAPI::loadTexture(const std::string& filename, bool invert_y, bool generate_mipmaps)
 {

@@ -26,6 +26,9 @@ public:
     virtual void rotate(const glm::mat4& rotation) override;
     virtual void multiplyMatrix(const glm::mat4& matrix) override;
 
+    virtual glm::mat4 getProjectionMatrix() const override;
+    virtual glm::mat4 getViewMatrix() const override;
+
     virtual TextureHandle loadTexture(const std::string& filename, bool invert_y = false, bool generate_mipmaps = true) override;
     virtual TextureHandle loadTextureFromMemory(const uint8_t* pixels, int width, int height, int channels,
                                                 bool flip_vertically = false, bool generate_mipmaps = true) override;

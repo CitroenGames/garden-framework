@@ -1170,6 +1170,16 @@ void OpenGLRenderAPI::multiplyMatrix(const glm::mat4& matrix)
     current_model_matrix = current_model_matrix * matrix;
 }
 
+glm::mat4 OpenGLRenderAPI::getProjectionMatrix() const
+{
+    return projection_matrix;
+}
+
+glm::mat4 OpenGLRenderAPI::getViewMatrix() const
+{
+    return view_matrix;
+}
+
 void OpenGLRenderAPI::renderSkybox()
 {
     if (skybox)

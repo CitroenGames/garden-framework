@@ -81,6 +81,10 @@ public:
     virtual void rotate(const glm::mat4& rotation) = 0;
     virtual void multiplyMatrix(const glm::mat4& matrix) = 0;
 
+    // Matrix getters (for frustum culling)
+    virtual glm::mat4 getProjectionMatrix() const = 0;
+    virtual glm::mat4 getViewMatrix() const = 0;
+
     // Texture management
     virtual TextureHandle loadTexture(const std::string& filename, bool invert_y = false, bool generate_mipmaps = true) = 0;
     virtual TextureHandle loadTextureFromMemory(const uint8_t* pixels, int width, int height, int channels,
