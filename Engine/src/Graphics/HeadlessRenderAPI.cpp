@@ -63,6 +63,16 @@ void HeadlessRenderAPI::multiplyMatrix(const glm::mat4& matrix)
 {
 }
 
+glm::mat4 HeadlessRenderAPI::getProjectionMatrix() const
+{
+    return glm::mat4(1.0f);
+}
+
+glm::mat4 HeadlessRenderAPI::getViewMatrix() const
+{
+    return glm::mat4(1.0f);
+}
+
 TextureHandle HeadlessRenderAPI::loadTexture(const std::string& filename, bool invert_y, bool generate_mipmaps)
 {
     return 1; // Return a dummy handle

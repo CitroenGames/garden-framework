@@ -5,6 +5,8 @@
 #include "Components/mesh.hpp"
 #include "RenderAPI.hpp"
 #include "ImGui/ImGuiManager.hpp"
+#include "Frustum.hpp"
+#include "BVH.hpp"
 #include <entt/entt.hpp>
 
 class renderer
@@ -16,6 +18,14 @@ public:
     glm::vec3 ambient_light{0.2f, 0.2f, 0.2f};
     glm::vec3 diffuse_light{0.8f, 0.8f, 0.8f};
     glm::vec3 light_direction{0.0f, -1.0f, 0.0f};
+
+    // BVH for frustum culling
+    SceneBVH scene_bvh;
+    bool bvh_enabled = true;
+
+    // Culling statistics
+    size_t last_total_entities = 0;
+    size_t last_visible_entities = 0;
 
     renderer() : render_api(nullptr) {};
     renderer(IRenderAPI* api) : render_api(api) {};
@@ -93,6 +103,7 @@ public:
         auto view = registry.view<MeshComponent, TransformComponent>();
 
         // 1. Shadow Pass - CSM (render each cascade)
+        // Shadows need all casters, not just visible ones, to ensure shadows from off-screen objects
         render_api->beginShadowPass(light_direction, c);
         for (int cascade = 0; cascade < render_api->getCascadeCount(); cascade++)
         {
@@ -114,7 +125,7 @@ public:
         // 2. Main Render Pass
         // Begin frame
         render_api->beginFrame();
-        
+
         // Clear with background color
         render_api->clear(glm::vec3(0.2f, 0.3f, 0.8f));
 
@@ -128,16 +139,60 @@ public:
             light_direction
         );
 
-        // Render all meshes with transforms
-        // view is already valid from above
-        for(auto entity : view) {
-            auto& mesh_comp = view.get<MeshComponent>(entity);
-            const auto& t = view.get<TransformComponent>(entity);
-            
-            if (mesh_comp.m_mesh && mesh_comp.m_mesh->visible)
+        // Frustum culling with BVH
+        if (bvh_enabled)
+        {
+            // Rebuild BVH if needed (marks dirty on first frame or when markDirty() called)
+            if (scene_bvh.needsRebuild())
             {
-                render_mesh_with_api(*mesh_comp.m_mesh, t, render_api);
+                scene_bvh.build(registry);
             }
+
+            // Extract frustum from view-projection matrix
+            Frustum frustum;
+            glm::mat4 viewProj = render_api->getProjectionMatrix() * render_api->getViewMatrix();
+            frustum.extractFromViewProjection(viewProj);
+
+            // Query visible entities
+            std::vector<entt::entity> visible_entities;
+            scene_bvh.queryFrustum(frustum, visible_entities);
+
+            // Update stats
+            last_total_entities = scene_bvh.getTotalEntities();
+            last_visible_entities = visible_entities.size();
+
+            // Render only visible entities
+            for (auto entity : visible_entities)
+            {
+                if (!registry.valid(entity)) continue;
+
+                auto* mesh_comp = registry.try_get<MeshComponent>(entity);
+                auto* t = registry.try_get<TransformComponent>(entity);
+
+                if (mesh_comp && t && mesh_comp->m_mesh && mesh_comp->m_mesh->visible)
+                {
+                    render_mesh_with_api(*mesh_comp->m_mesh, *t, render_api);
+                }
+            }
+        }
+        else
+        {
+            // No BVH - render all entities (original behavior)
+            last_total_entities = 0;
+            last_visible_entities = 0;
+
+            for (auto entity : view)
+            {
+                auto& mesh_comp = view.get<MeshComponent>(entity);
+                const auto& t = view.get<TransformComponent>(entity);
+
+                if (mesh_comp.m_mesh && mesh_comp.m_mesh->visible)
+                {
+                    render_mesh_with_api(*mesh_comp.m_mesh, t, render_api);
+                    last_total_entities++;
+                }
+            }
+            last_visible_entities = last_total_entities;
         }
 
         // Render skybox before post-processing
@@ -149,4 +204,25 @@ public:
         // End frame
         render_api->endFrame();
     };
+
+    // Mark BVH as needing rebuild (call when entities are added/removed/moved)
+    void markBVHDirty()
+    {
+        scene_bvh.markDirty();
+    }
+
+    // Toggle BVH frustum culling
+    void setBVHEnabled(bool enabled)
+    {
+        bvh_enabled = enabled;
+    }
+
+    bool isBVHEnabled() const
+    {
+        return bvh_enabled;
+    }
+
+    // Get culling statistics
+    size_t getTotalEntities() const { return last_total_entities; }
+    size_t getVisibleEntities() const { return last_visible_entities; }
 };

@@ -4,6 +4,7 @@
 #include <string>
 #include <functional>
 #include <memory>
+#include <limits>
 #include "Graphics/RenderAPI.hpp"
 #include "Graphics/IGPUMesh.hpp"
 #include "Utils/ObjLoader.hpp"
@@ -11,6 +12,7 @@
 #include "Assets/AssetHandle.hpp"
 
 #include <algorithm>
+#include <glm/glm.hpp>
 
 enum class MeshFormat
 {
@@ -72,6 +74,11 @@ public:
     MeshLoadState load_state;
     Assets::AssetHandle asset_handle;
 
+    // AABB for frustum culling
+    glm::vec3 aabb_min{0.0f};
+    glm::vec3 aabb_max{0.0f};
+    bool bounds_computed = false;
+
     // Constructor for hardcoded vertex arrays (existing functionality)
     mesh(vertex* vertices, size_t vertices_len)
     {
@@ -87,6 +94,9 @@ public:
         texture = INVALID_TEXTURE;
         uses_material_ranges = false;
         load_state = MeshLoadState::Ready;
+        aabb_min = glm::vec3(0.0f);
+        aabb_max = glm::vec3(0.0f);
+        bounds_computed = false;
     };
 
     // Constructor for loading model files - now supports both OBJ and glTF
@@ -104,6 +114,9 @@ public:
         texture = INVALID_TEXTURE;
         uses_material_ranges = false;
         load_state = MeshLoadState::NotLoaded;
+        aabb_min = glm::vec3(0.0f);
+        aabb_max = glm::vec3(0.0f);
+        bounds_computed = false;
 
         load_model_file(filename, nullptr, format);
         if (is_valid) {
@@ -127,6 +140,9 @@ public:
         texture = INVALID_TEXTURE;
         uses_material_ranges = false;
         load_state = MeshLoadState::NotLoaded;
+        aabb_min = glm::vec3(0.0f);
+        aabb_max = glm::vec3(0.0f);
+        bounds_computed = false;
 
         load_model_file(filename, render_api, format);
         if (is_valid) {
@@ -151,6 +167,9 @@ public:
         transparent = other.transparent;
         load_state = other.load_state;
         asset_handle = other.asset_handle;
+        aabb_min = other.aabb_min;
+        aabb_max = other.aabb_max;
+        bounds_computed = other.bounds_computed;
 
         // Invalidate source
         other.vertices = nullptr;
@@ -158,6 +177,7 @@ public:
         other.gpu_mesh = nullptr;
         other.owns_vertices = false;
         other.load_state = MeshLoadState::NotLoaded;
+        other.bounds_computed = false;
     }
 
     // Move assignment
@@ -184,6 +204,9 @@ public:
             transparent = other.transparent;
             load_state = other.load_state;
             asset_handle = other.asset_handle;
+            aabb_min = other.aabb_min;
+            aabb_max = other.aabb_max;
+            bounds_computed = other.bounds_computed;
 
             // Invalidate source
             other.vertices = nullptr;
@@ -191,6 +214,7 @@ public:
             other.gpu_mesh = nullptr;
             other.owns_vertices = false;
             other.load_state = MeshLoadState::NotLoaded;
+            other.bounds_computed = false;
         }
         return *this;
     }
@@ -300,6 +324,47 @@ public:
     bool isLoading() const { return load_state == MeshLoadState::Loading; }
     bool hasFailed() const { return load_state == MeshLoadState::Failed; }
     MeshLoadState getLoadState() const { return load_state; }
+
+    // Compute AABB from vertex data
+    void computeBounds()
+    {
+        if (!is_valid || !vertices || vertices_len == 0)
+        {
+            aabb_min = glm::vec3(0.0f);
+            aabb_max = glm::vec3(0.0f);
+            bounds_computed = true;
+            return;
+        }
+
+        aabb_min = glm::vec3(std::numeric_limits<float>::max());
+        aabb_max = glm::vec3(std::numeric_limits<float>::lowest());
+
+        for (size_t i = 0; i < vertices_len; ++i)
+        {
+            glm::vec3 pos(vertices[i].vx, vertices[i].vy, vertices[i].vz);
+            aabb_min = glm::min(aabb_min, pos);
+            aabb_max = glm::max(aabb_max, pos);
+        }
+
+        bounds_computed = true;
+    }
+
+    // Get AABB, computing it lazily if needed
+    void getAABB(glm::vec3& out_min, glm::vec3& out_max)
+    {
+        if (!bounds_computed)
+        {
+            computeBounds();
+        }
+        out_min = aabb_min;
+        out_max = aabb_max;
+    }
+
+    // Invalidate bounds (call when vertices change)
+    void invalidateBounds()
+    {
+        bounds_computed = false;
+    }
 
     // Static async loading method - returns a handle that can be checked for completion
     static Assets::AssetHandle loadAsync(const std::string& filename,
