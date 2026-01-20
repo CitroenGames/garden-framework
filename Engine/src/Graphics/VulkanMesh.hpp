@@ -22,6 +22,7 @@ private:
     VmaAllocator allocator = nullptr;
     VkCommandPool command_pool = VK_NULL_HANDLE;
     VkQueue graphics_queue = VK_NULL_HANDLE;
+    VkFence transfer_fence = VK_NULL_HANDLE;
 
 public:
     VulkanMesh();
