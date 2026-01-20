@@ -300,6 +300,7 @@ private:
     // Current render state
     RenderState current_state;
     bool frame_started = false;
+    bool image_acquired = false;
 
     // Clear color (set by clear(), used in beginFrame)
     glm::vec3 clear_color = glm::vec3(0.2f, 0.3f, 0.8f);

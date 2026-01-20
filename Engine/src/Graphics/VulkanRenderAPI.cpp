@@ -333,6 +333,11 @@ void VulkanRenderAPI::shutdown()
 
 void VulkanRenderAPI::resize(int width, int height)
 {
+    // Ignore zero dimensions (window minimized) - keep previous valid size
+    if (width <= 0 || height <= 0) {
+        return;
+    }
+
     viewport_width = width;
     viewport_height = height;
 
@@ -2939,6 +2944,8 @@ void VulkanRenderAPI::cleanupSwapchain()
         vkDestroyImageView(device, imageView, nullptr);
     }
     swapchain_image_views.clear();
+    swapchain_images.clear();
+    swapchain_extent = {0, 0};
 
     // Destroy swapchain
     if (swapchain != VK_NULL_HANDLE) {
@@ -2949,14 +2956,40 @@ void VulkanRenderAPI::cleanupSwapchain()
 
 void VulkanRenderAPI::recreateSwapchain()
 {
+    // Query SDL for actual window dimensions
+    int width, height;
+    SDL_GetWindowSize(static_cast<SDL_Window*>(window_handle), &width, &height);
+
+    // If window is minimized (size 0), don't recreate
+    if (width == 0 || height == 0) {
+        return;
+    }
+
+    // Update viewport dimensions
+    viewport_width = width;
+    viewport_height = height;
+
     vkDeviceWaitIdle(device);
 
     cleanupSwapchain();
 
-    createSwapchain();
+    if (!createSwapchain()) {
+        return;
+    }
+
+    // Double-check swapchain extent (surface might still report 0)
+    if (swapchain_extent.width == 0 || swapchain_extent.height == 0) {
+        return;
+    }
+
     createImageViews();
     createDepthResources();
     createFramebuffers();
+
+    // Update projection matrix
+    float ratio = (float)viewport_width / (float)viewport_height;
+    projection_matrix = glm::perspective(glm::radians(field_of_view), ratio, 0.1f, 1000.0f);
+    projection_matrix[1][1] *= -1;
 
     // Recreate offscreen resources if FXAA is enabled
     if (fxaa_initialized) {
@@ -3211,6 +3244,16 @@ void VulkanRenderAPI::updateDescriptorSet(uint32_t frameIndex, TextureHandle tex
 // Frame management
 void VulkanRenderAPI::beginFrame()
 {
+    image_acquired = false;
+
+    // Skip rendering if swapchain is invalid (window minimized)
+    if (swapchain_extent.width == 0 || swapchain_extent.height == 0) {
+        frame_started = false;
+        // Try to recreate swapchain (will check if window is restored)
+        recreateSwapchain();
+        return;
+    }
+
     // Wait for previous frame
     vkWaitForFences(device, 1, &in_flight_fences[current_frame], VK_TRUE, UINT64_MAX);
 
@@ -3219,9 +3262,17 @@ void VulkanRenderAPI::beginFrame()
         image_available_semaphores[current_frame], VK_NULL_HANDLE, &current_image_index);
 
     if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+        // Mark swapchain as invalid
+        swapchain_extent = {0, 0};
         recreateSwapchain();
         return;
     }
+
+    if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
+        return;
+    }
+
+    image_acquired = true;
 
     vkResetFences(device, 1, &in_flight_fences[current_frame]);
 
@@ -3376,6 +3427,15 @@ void VulkanRenderAPI::endFrame()
 
 void VulkanRenderAPI::present()
 {
+    // Skip if swapchain is invalid (window minimized)
+    if (swapchain_extent.width == 0 || swapchain_extent.height == 0) {
+        return;
+    }
+
+    if (!image_acquired) {
+        return;
+    }
+
     // Submit command buffer
     VkSubmitInfo submitInfo{};
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -3408,6 +3468,8 @@ void VulkanRenderAPI::present()
     VkResult result = vkQueuePresentKHR(present_queue, &presentInfo);
 
     if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
+        // Mark swapchain as invalid
+        swapchain_extent = {0, 0};
         recreateSwapchain();
     }
 
