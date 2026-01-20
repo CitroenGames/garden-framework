@@ -2,7 +2,7 @@
 
 ## Description
 
-A 3D rendering engine and game testbed written in C++ using OpenGL 4.6.
+A 3D rendering engine and game testbed written in C++ supporting OpenGL 4.6, Vulkan, and DirectX 11 (Windows).
 
 ![screenshot](screen.png)
 
@@ -21,13 +21,35 @@ A 3D rendering engine and game testbed written in C++ using OpenGL 4.6.
 This project uses **Sighmake** for build configuration.
 
 ### Prerequisites
+
+#### Windows
 *   Visual Studio 2022 (MSVC)
 *   Sighmake (included or in path)
+*   Vulkan SDK
+
+#### Linux (Ubuntu)
+*   GCC/Clang
+*   Sighmake
+*   Vulkan SDK - Install with:
+    ```bash
+    sudo rm /etc/apt/sources.list.d/lunarg-vulkan-focal.list
+    wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc
+    sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-noble.list https://packages.lunarg.com/vulkan/lunarg-vulkan-noble.list
+    sudo apt update
+    sudo apt install vulkan-sdk
+    ```
 
 ### How to Build
-1.  Run `Generate SLN.bat` to generate the Visual Studio Solution (`OpenGL_.slnx` or `.sln`).
+
+#### Windows
+1.  Run `Generate SLN.bat` to generate the Visual Studio Solution.
 2.  Open the solution in Visual Studio.
 3.  Build and Run (Release x64 recommended).
+
+#### Linux
+1.  Run `./sighmake project.buildscript` to generate build files.
+2.  Run `make` to build.
+3.  Run `./run_vulkan.sh` to launch.
 
 ## Level Format (.json)
 
