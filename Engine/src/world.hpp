@@ -20,7 +20,7 @@ public:
 
     world()
     {
-        world_camera = camera::camera(0, 0, -5);
+        world_camera = camera(0, 0, -5);
         fixed_delta = 0.16f;
         physics_system = PhysicsSystem(glm::vec3(0, -1, 0), fixed_delta);
     }
