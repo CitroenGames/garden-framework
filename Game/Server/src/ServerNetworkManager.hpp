@@ -131,6 +131,11 @@ public:
     // Stats
     const NetworkStats& getStats() const { return stats; }
 
+    // ConVar replication
+    void broadcastCVar(const std::string& name, const std::string& value);
+    void sendInitialCVarsToClient(uint16_t client_id);
+    void setupCVarCallbacks();
+
 private:
     // Event handlers
     void handleClientConnect(ENetEvent& event);

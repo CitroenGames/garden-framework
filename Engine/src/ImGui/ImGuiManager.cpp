@@ -8,7 +8,11 @@
 #include "Graphics/D3D11RenderAPI.hpp"
 #endif
 #include "Graphics/VulkanRenderAPI.hpp"
+#include "Console/Console.hpp"
+#include "Console/ConVar.hpp"
+#include "Console/ConCommand.hpp"
 #include <SDL.h>
+#include <cstring>
 
 ImGuiManager& ImGuiManager::get()
 {
@@ -225,6 +229,9 @@ void ImGuiManager::render()
     }
     ImGui::End();
 
+    // Console window
+    renderConsole();
+
     // Graphics Settings panel (only shown in UI mode - F3 to toggle)
     if (m_showSettings && m_renderAPI)
     {
@@ -274,4 +281,315 @@ bool ImGuiManager::wantCaptureKeyboard() const
 {
     if (!m_initialized) return false;
     return ImGui::GetIO().WantCaptureKeyboard;
+}
+
+void ImGuiManager::renderConsole()
+{
+    if (!m_showConsole) return;
+
+    ImGui::SetNextWindowSize(ImVec2(800, 400), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(ImVec2(50, 50), ImGuiCond_FirstUseEver);
+
+    if (ImGui::Begin("Console", &m_showConsole, ImGuiWindowFlags_NoCollapse))
+    {
+        // Filter dropdown and clear button
+        const char* filterItems[] = { "All", "Warnings+", "Errors Only" };
+        ImGui::SetNextItemWidth(120);
+        ImGui::Combo("##Filter", &m_logLevelFilter, filterItems, 3);
+        ImGui::SameLine();
+        if (ImGui::Button("Clear"))
+        {
+            Console::get().clear();
+        }
+        ImGui::Separator();
+
+        // Log output area
+        float footerHeight = ImGui::GetStyle().ItemSpacing.y + ImGui::GetFrameHeightWithSpacing();
+        ImGui::BeginChild("LogRegion", ImVec2(0, -footerHeight), true, ImGuiWindowFlags_HorizontalScrollbar);
+
+        const auto& entries = Console::get().getLogEntries();
+        for (const auto& entry : entries)
+        {
+            // Filter by level
+            if (m_logLevelFilter == 1 && entry.level < spdlog::level::warn) continue;
+            if (m_logLevelFilter == 2 && entry.level < spdlog::level::err) continue;
+
+            // Color by level
+            ImVec4 color;
+            switch (entry.level)
+            {
+            case spdlog::level::err:
+            case spdlog::level::critical:
+                color = ImVec4(1.0f, 0.4f, 0.4f, 1.0f);
+                break;
+            case spdlog::level::warn:
+                color = ImVec4(1.0f, 0.8f, 0.4f, 1.0f);
+                break;
+            case spdlog::level::info:
+                color = ImVec4(0.9f, 0.9f, 0.9f, 1.0f);
+                break;
+            default:
+                color = ImVec4(0.6f, 0.6f, 0.6f, 1.0f);
+                break;
+            }
+
+            ImGui::PushStyleColor(ImGuiCol_Text, color);
+            ImGui::TextUnformatted(entry.message.c_str());
+            ImGui::PopStyleColor();
+        }
+
+        if (m_scrollToBottom)
+        {
+            ImGui::SetScrollHereY(1.0f);
+            m_scrollToBottom = false;
+        }
+
+        ImGui::EndChild();
+
+        // Input field
+        ImGui::Separator();
+
+        bool reclaimFocus = false;
+        ImGuiInputTextFlags inputFlags = ImGuiInputTextFlags_EnterReturnsTrue |
+                                         ImGuiInputTextFlags_CallbackHistory |
+                                         ImGuiInputTextFlags_CallbackCompletion |
+                                         ImGuiInputTextFlags_CallbackEdit;
+
+        ImGui::SetNextItemWidth(-1);
+        bool inputSubmitted = ImGui::InputText("##ConsoleInput", m_consoleInput, sizeof(m_consoleInput),
+                             inputFlags, &ImGuiManager::consoleInputCallback, this);
+
+        // Get input field position for autocomplete popup
+        ImVec2 inputPos = ImGui::GetItemRectMin();
+        float inputWidth = ImGui::GetItemRectSize().x;
+
+        // Handle autocomplete selection with arrow keys when popup is visible
+        if (m_showAutocomplete && !m_autocompleteItems.empty())
+        {
+            if (ImGui::IsKeyPressed(ImGuiKey_UpArrow))
+            {
+                if (m_autocompleteSelectedIndex > 0)
+                {
+                    m_autocompleteSelectedIndex--;
+                }
+            }
+            else if (ImGui::IsKeyPressed(ImGuiKey_DownArrow))
+            {
+                if (m_autocompleteSelectedIndex < static_cast<int>(m_autocompleteItems.size()) - 1)
+                {
+                    m_autocompleteSelectedIndex++;
+                }
+            }
+            else if (ImGui::IsKeyPressed(ImGuiKey_Tab) || ImGui::IsKeyPressed(ImGuiKey_Enter))
+            {
+                if (m_autocompleteSelectedIndex >= 0 && m_autocompleteSelectedIndex < static_cast<int>(m_autocompleteItems.size()))
+                {
+                    // Apply selected completion
+                    std::strncpy(m_consoleInput, m_autocompleteItems[m_autocompleteSelectedIndex].c_str(), sizeof(m_consoleInput) - 1);
+                    std::strncat(m_consoleInput, " ", sizeof(m_consoleInput) - strlen(m_consoleInput) - 1);
+                    m_showAutocomplete = false;
+                    m_autocompleteItems.clear();
+                    m_autocompleteSelectedIndex = -1;
+                    reclaimFocus = true;
+
+                    // If Enter was pressed on a selection, don't submit the command
+                    if (ImGui::IsKeyPressed(ImGuiKey_Enter))
+                    {
+                        inputSubmitted = false;
+                    }
+                }
+            }
+            else if (ImGui::IsKeyPressed(ImGuiKey_Escape))
+            {
+                m_showAutocomplete = false;
+                m_autocompleteItems.clear();
+                m_autocompleteSelectedIndex = -1;
+            }
+        }
+
+        if (inputSubmitted)
+        {
+            std::string cmd(m_consoleInput);
+            if (!cmd.empty())
+            {
+                Console::get().submitCommand(cmd);
+                m_scrollToBottom = true;
+            }
+            m_consoleInput[0] = '\0';
+            reclaimFocus = true;
+            m_historyIndex = -1;
+            m_showAutocomplete = false;
+            m_autocompleteItems.clear();
+            m_autocompleteSelectedIndex = -1;
+        }
+
+        // Autocomplete popup
+        if (m_showAutocomplete && !m_autocompleteItems.empty())
+        {
+            ImGui::SetNextWindowPos(ImVec2(inputPos.x, inputPos.y + ImGui::GetFrameHeight()));
+            ImGui::SetNextWindowSize(ImVec2(inputWidth, 0));
+
+            ImGuiWindowFlags popupFlags = ImGuiWindowFlags_NoTitleBar |
+                                          ImGuiWindowFlags_NoMove |
+                                          ImGuiWindowFlags_NoResize |
+                                          ImGuiWindowFlags_NoSavedSettings |
+                                          ImGuiWindowFlags_NoFocusOnAppearing;
+
+            ImGui::Begin("##AutocompletePopup", nullptr, popupFlags);
+
+            for (int i = 0; i < static_cast<int>(m_autocompleteItems.size()) && i < 10; i++)
+            {
+                bool isSelected = (i == m_autocompleteSelectedIndex);
+                if (ImGui::Selectable(m_autocompleteItems[i].c_str(), isSelected))
+                {
+                    std::strncpy(m_consoleInput, m_autocompleteItems[i].c_str(), sizeof(m_consoleInput) - 1);
+                    std::strncat(m_consoleInput, " ", sizeof(m_consoleInput) - strlen(m_consoleInput) - 1);
+                    m_showAutocomplete = false;
+                    m_autocompleteItems.clear();
+                    m_autocompleteSelectedIndex = -1;
+                    reclaimFocus = true;
+                }
+            }
+
+            if (m_autocompleteItems.size() > 10)
+            {
+                ImGui::TextDisabled("... and %d more", static_cast<int>(m_autocompleteItems.size()) - 10);
+            }
+
+            ImGui::End();
+        }
+
+        // Auto-focus on input when console opens
+        if (ImGui::IsWindowAppearing())
+        {
+            ImGui::SetKeyboardFocusHere(-1);
+        }
+
+        if (reclaimFocus)
+        {
+            ImGui::SetKeyboardFocusHere(-1);
+        }
+    }
+    ImGui::End();
+}
+
+int ImGuiManager::consoleInputCallback(ImGuiInputTextCallbackData* data)
+{
+    ImGuiManager* manager = static_cast<ImGuiManager*>(data->UserData);
+
+    switch (data->EventFlag)
+    {
+    case ImGuiInputTextFlags_CallbackHistory:
+    {
+        const int prevIndex = manager->m_historyIndex;
+
+        if (data->EventKey == ImGuiKey_UpArrow)
+        {
+            if (manager->m_historyIndex < Console::get().getHistoryCount() - 1)
+            {
+                manager->m_historyIndex++;
+            }
+        }
+        else if (data->EventKey == ImGuiKey_DownArrow)
+        {
+            if (manager->m_historyIndex > 0)
+            {
+                manager->m_historyIndex--;
+            }
+            else
+            {
+                manager->m_historyIndex = -1;
+            }
+        }
+
+        if (prevIndex != manager->m_historyIndex)
+        {
+            if (manager->m_historyIndex >= 0)
+            {
+                const std::string& history = Console::get().getHistoryItem(manager->m_historyIndex);
+                data->DeleteChars(0, data->BufTextLen);
+                data->InsertChars(0, history.c_str());
+            }
+            else
+            {
+                data->DeleteChars(0, data->BufTextLen);
+            }
+        }
+        break;
+    }
+
+    case ImGuiInputTextFlags_CallbackCompletion:
+    {
+        // Tab completion - apply selected or first completion
+        if (manager->m_showAutocomplete && !manager->m_autocompleteItems.empty())
+        {
+            int idx = manager->m_autocompleteSelectedIndex >= 0 ? manager->m_autocompleteSelectedIndex : 0;
+            if (idx < static_cast<int>(manager->m_autocompleteItems.size()))
+            {
+                data->DeleteChars(0, data->BufTextLen);
+                data->InsertChars(0, manager->m_autocompleteItems[idx].c_str());
+                data->InsertChars(data->CursorPos, " ");
+                manager->m_showAutocomplete = false;
+                manager->m_autocompleteItems.clear();
+                manager->m_autocompleteSelectedIndex = -1;
+            }
+        }
+        else
+        {
+            std::string partial(data->Buf, data->CursorPos);
+            auto completions = Console::get().getCompletions(partial);
+
+            if (completions.size() == 1)
+            {
+                data->DeleteChars(0, data->BufTextLen);
+                data->InsertChars(0, completions[0].c_str());
+                data->InsertChars(data->CursorPos, " ");
+            }
+            else if (completions.size() > 1)
+            {
+                // Find common prefix
+                std::string prefix = completions[0];
+                for (size_t i = 1; i < completions.size(); i++)
+                {
+                    size_t j = 0;
+                    while (j < prefix.size() && j < completions[i].size() &&
+                           prefix[j] == completions[i][j])
+                    {
+                        j++;
+                    }
+                    prefix = prefix.substr(0, j);
+                }
+
+                if (prefix.size() > partial.size())
+                {
+                    data->DeleteChars(0, data->BufTextLen);
+                    data->InsertChars(0, prefix.c_str());
+                }
+            }
+        }
+        break;
+    }
+
+    case ImGuiInputTextFlags_CallbackEdit:
+    {
+        // Update autocomplete as user types
+        std::string partial(data->Buf, data->BufTextLen);
+
+        if (partial.length() >= 2)
+        {
+            manager->m_autocompleteItems = Console::get().getCompletions(partial);
+            manager->m_showAutocomplete = !manager->m_autocompleteItems.empty();
+            manager->m_autocompleteSelectedIndex = manager->m_showAutocomplete ? 0 : -1;
+        }
+        else
+        {
+            manager->m_showAutocomplete = false;
+            manager->m_autocompleteItems.clear();
+            manager->m_autocompleteSelectedIndex = -1;
+        }
+        break;
+    }
+    }
+
+    return 0;
 }

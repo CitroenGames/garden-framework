@@ -126,6 +126,8 @@ private:
     void handleDespawnPlayer(BitReader& reader);
     void handleDisconnect(BitReader& reader);
     void handlePong(BitReader& reader);
+    void handleCVarSync(BitReader& reader);
+    void handleCVarInitialSync(BitReader& reader);
 
     // Ping/RTT
     void sendPing();

@@ -3,6 +3,8 @@
 #include "Components/Components.hpp"
 #include "SharedComponents.hpp"
 #include "Utils/Log.hpp"
+#include "Console/ConVar.hpp"
+#include "Console/Console.hpp"
 #include <entt/entt.hpp>
 #include <cstring>
 #include <glm/glm.hpp>
@@ -603,6 +605,92 @@ void ServerNetworkManager::sendReliableToClient(uint16_t client_id, const BitWri
     } else {
         LOG_ENGINE_WARN("Cannot send to client {0}: not found or no peer", client_id);
     }
+}
+
+void ServerNetworkManager::broadcastCVar(const std::string& name, const std::string& value)
+{
+    if (clients.empty()) {
+        return;
+    }
+
+    CVarSyncMessage msg;
+    std::strncpy(msg.cvar_name, name.c_str(), 63);
+    std::strncpy(msg.cvar_value, value.c_str(), 127);
+
+    BitWriter writer;
+    NetworkSerializer::serialize(writer, msg);
+
+    // Send to all connected clients
+    for (auto& [client_id, connection] : clients) {
+        if (connection.info.peer) {
+            sendReliableMessage(connection.info.peer, writer);
+            stats.packets_sent++;
+            stats.bytes_sent += writer.getByteSize();
+        }
+    }
+
+    LOG_ENGINE_TRACE("Broadcast cvar {} = {} to {} clients", name, value, clients.size());
+}
+
+void ServerNetworkManager::sendInitialCVarsToClient(uint16_t client_id)
+{
+    auto it = clients.find(client_id);
+    if (it == clients.end() || it->second.info.peer == nullptr) {
+        return;
+    }
+
+    auto replicated = ConVarRegistry::get().getReplicatedCvars();
+    if (replicated.empty()) {
+        return;
+    }
+
+    std::vector<std::pair<std::string, std::string>> cvarData;
+    cvarData.reserve(replicated.size());
+    for (auto* cvar : replicated) {
+        cvarData.emplace_back(cvar->getName(), cvar->getValueString());
+    }
+
+    CVarInitialSyncMessage msg;
+    BitWriter writer;
+    NetworkSerializer::serialize(writer, msg, cvarData);
+
+    sendReliableMessage(it->second.info.peer, writer);
+    stats.packets_sent++;
+    stats.bytes_sent += writer.getByteSize();
+
+    LOG_ENGINE_INFO("Sent {} replicated cvars to client {}", replicated.size(), client_id);
+}
+
+void ServerNetworkManager::setupCVarCallbacks()
+{
+    // Register callback for all replicated cvars
+    auto replicated = ConVarRegistry::get().getReplicatedCvars();
+    for (auto* cvar : replicated) {
+        cvar->addChangeCallback([this](ConVarBase* cv, const ConVarValue& oldVal, const ConVarValue& newVal) {
+            broadcastCVar(cv->getName(), cv->getValueString());
+        });
+    }
+
+    // Special handling for sv_cheats
+    ConVarBase* sv_cheats = ConVarRegistry::get().find("sv_cheats");
+    if (sv_cheats) {
+        sv_cheats->addChangeCallback([](ConVarBase* cv, const ConVarValue& oldVal, const ConVarValue& newVal) {
+            bool cheatsEnabled = false;
+            if (std::holds_alternative<int>(newVal)) {
+                cheatsEnabled = std::get<int>(newVal) != 0;
+            } else if (std::holds_alternative<bool>(newVal)) {
+                cheatsEnabled = std::get<bool>(newVal);
+            }
+
+            ConVarRegistry::get().enforceCheatRestrictions(cheatsEnabled);
+
+            if (!cheatsEnabled) {
+                Console::get().print("sv_cheats disabled - all cheat cvars reset to defaults");
+            }
+        });
+    }
+
+    LOG_ENGINE_INFO("Set up cvar callbacks for {} replicated cvars", replicated.size());
 }
 
 } // namespace Game

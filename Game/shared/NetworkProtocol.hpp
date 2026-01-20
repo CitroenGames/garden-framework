@@ -27,7 +27,11 @@ enum class MessageType : uint8_t
 
     // Debugging
     PING = 20,
-    PONG = 21
+    PONG = 21,
+
+    // ConVar synchronization (Reliable)
+    CVAR_SYNC = 30,           // Server -> Client: Single cvar update
+    CVAR_INITIAL_SYNC = 31    // Server -> Client: Batch of all replicated cvars on connect
 };
 
 // Network channels for ENet
@@ -154,6 +158,22 @@ struct PongMessage
 {
     MessageType type = MessageType::PONG;
     uint32_t timestamp = 0;  // Echo back the ping timestamp
+};
+
+// ConVar sync message - single cvar update
+struct CVarSyncMessage
+{
+    MessageType type = MessageType::CVAR_SYNC;
+    char cvar_name[64] = {0};
+    char cvar_value[128] = {0};
+};
+
+// ConVar initial sync header - followed by cvar_count name/value pairs
+struct CVarInitialSyncMessage
+{
+    MessageType type = MessageType::CVAR_INITIAL_SYNC;
+    uint16_t cvar_count = 0;
+    // Followed by cvar_count pairs of (name[64], value[128]) in memory
 };
 
 #pragma pack(pop)

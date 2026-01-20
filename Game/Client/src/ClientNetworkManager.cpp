@@ -3,6 +3,8 @@
 #include "Components/Components.hpp"
 #include "SharedComponents.hpp"
 #include "Utils/Log.hpp"
+#include "Console/ConVar.hpp"
+#include "Console/Console.hpp"
 #include <entt/entt.hpp>
 #include <cstring>
 #include <SDL.h>
@@ -301,6 +303,14 @@ void ClientNetworkManager::handleServerMessage(ENetEvent& event)
             handlePong(reader);
             break;
 
+        case MessageType::CVAR_SYNC:
+            handleCVarSync(reader);
+            break;
+
+        case MessageType::CVAR_INITIAL_SYNC:
+            handleCVarInitialSync(reader);
+            break;
+
         default:
             LOG_ENGINE_WARN("Received unknown message type: {0}", static_cast<int>(msg_type));
             break;
@@ -568,6 +578,47 @@ void ClientNetworkManager::setConnectionState(ConnectionState new_state)
 
         const char* state_names[] = { "DISCONNECTED", "CONNECTING", "CONNECTED" };
         LOG_ENGINE_INFO("Connection state changed: {0}", state_names[static_cast<int>(new_state)]);
+    }
+}
+
+void ClientNetworkManager::handleCVarSync(BitReader& reader)
+{
+    CVarSyncMessage msg;
+    if (!NetworkSerializer::deserialize(reader, msg)) {
+        LOG_ENGINE_WARN("Failed to deserialize CVAR_SYNC message");
+        return;
+    }
+
+    ConVarBase* cvar = ConVarRegistry::get().find(msg.cvar_name);
+    if (cvar) {
+        // Only apply if it's a replicated cvar (server authority)
+        if (cvar->hasFlag(ConVarFlags::REPLICATED)) {
+            cvar->setFromString(msg.cvar_value);
+            LOG_ENGINE_TRACE("CVar synced from server: {} = {}", msg.cvar_name, msg.cvar_value);
+        }
+    } else {
+        LOG_ENGINE_WARN("Server sent unknown cvar: {}", msg.cvar_name);
+    }
+}
+
+void ClientNetworkManager::handleCVarInitialSync(BitReader& reader)
+{
+    CVarInitialSyncMessage msg;
+    std::vector<std::pair<std::string, std::string>> cvars;
+
+    if (!NetworkSerializer::deserialize(reader, msg, cvars)) {
+        LOG_ENGINE_WARN("Failed to deserialize CVAR_INITIAL_SYNC message");
+        return;
+    }
+
+    LOG_ENGINE_INFO("Received {} replicated cvars from server", cvars.size());
+
+    for (const auto& [name, value] : cvars) {
+        ConVarBase* cvar = ConVarRegistry::get().find(name);
+        if (cvar && cvar->hasFlag(ConVarFlags::REPLICATED)) {
+            cvar->setFromString(value);
+            LOG_ENGINE_TRACE("Initial cvar sync: {} = {}", name, value);
+        }
     }
 }
 
