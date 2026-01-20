@@ -23,6 +23,15 @@ void VulkanMesh::setVulkanHandles(VkDevice dev, VmaAllocator alloc, VkCommandPoo
     allocator = alloc;
     command_pool = cmdPool;
     graphics_queue = queue;
+
+    // Create fence for transfer synchronization (avoids blocking entire queue)
+    VkFenceCreateInfo fenceInfo{};
+    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    fenceInfo.flags = 0;
+    if (vkCreateFence(device, &fenceInfo, nullptr, &transfer_fence) != VK_SUCCESS)
+    {
+        printf("VulkanMesh::setVulkanHandles - Failed to create transfer fence!\n");
+    }
 }
 
 void VulkanMesh::uploadMeshData(const vertex* vertices, size_t count)
@@ -171,8 +180,9 @@ void VulkanMesh::updateMeshData(const vertex* vertices, size_t count, size_t off
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &commandBuffer;
 
-    vkQueueSubmit(graphics_queue, 1, &submitInfo, VK_NULL_HANDLE);
-    vkQueueWaitIdle(graphics_queue);
+    vkQueueSubmit(graphics_queue, 1, &submitInfo, transfer_fence);
+    vkWaitForFences(device, 1, &transfer_fence, VK_TRUE, UINT64_MAX);
+    vkResetFences(device, 1, &transfer_fence);
 
     vkFreeCommandBuffers(device, command_pool, 1, &commandBuffer);
 
@@ -207,8 +217,9 @@ void VulkanMesh::copyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &commandBuffer;
 
-    vkQueueSubmit(graphics_queue, 1, &submitInfo, VK_NULL_HANDLE);
-    vkQueueWaitIdle(graphics_queue);
+    vkQueueSubmit(graphics_queue, 1, &submitInfo, transfer_fence);
+    vkWaitForFences(device, 1, &transfer_fence, VK_TRUE, UINT64_MAX);
+    vkResetFences(device, 1, &transfer_fence);
 
     vkFreeCommandBuffers(device, command_pool, 1, &commandBuffer);
 }
@@ -220,6 +231,11 @@ void VulkanMesh::cleanup()
         vmaDestroyBuffer(allocator, vertex_buffer, vertex_allocation);
         vertex_buffer = VK_NULL_HANDLE;
         vertex_allocation = nullptr;
+    }
+    if (transfer_fence != VK_NULL_HANDLE && device != VK_NULL_HANDLE)
+    {
+        vkDestroyFence(device, transfer_fence, nullptr);
+        transfer_fence = VK_NULL_HANDLE;
     }
     vertex_count = 0;
     uploaded = false;

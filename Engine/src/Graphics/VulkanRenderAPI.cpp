@@ -3161,11 +3161,20 @@ void VulkanRenderAPI::updateDescriptorSet(uint32_t frameIndex, TextureHandle tex
     // Cache miss - need to allocate a new descriptor set
     uint32_t setIndex = frameIndex * MAX_DESCRIPTOR_SETS_PER_FRAME + current_descriptor_set_index;
 
+    // Early warning at 80% capacity
+    static bool warned_80_percent = false;
+    if (!warned_80_percent && current_descriptor_set_index >= (MAX_DESCRIPTOR_SETS_PER_FRAME * 8 / 10)) {
+        LOG_ENGINE_WARN("[Vulkan] Approaching descriptor set limit ({}/{})",
+                       current_descriptor_set_index, MAX_DESCRIPTOR_SETS_PER_FRAME);
+        warned_80_percent = true;
+    }
+
     // Safety check - wrap around if we exceed the limit
     if (current_descriptor_set_index >= MAX_DESCRIPTOR_SETS_PER_FRAME) {
         LOG_ENGINE_WARN("[Vulkan] Exceeded max descriptor sets per frame ({}), wrapping", MAX_DESCRIPTOR_SETS_PER_FRAME);
         current_descriptor_set_index = 0;
         setIndex = frameIndex * MAX_DESCRIPTOR_SETS_PER_FRAME;
+        warned_80_percent = false;  // Reset for next overflow
     }
 
     VkDescriptorImageInfo imageInfo{};
