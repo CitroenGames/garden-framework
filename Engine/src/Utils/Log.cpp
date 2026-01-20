@@ -1,8 +1,10 @@
 #include "Log.hpp"
+#include "Console/Console.hpp"
 
 #include "spdlog/sinks/stdout_color_sinks.h"
 #include "spdlog/sinks/callback_sink.h"
 #include "spdlog/sinks/basic_file_sink.h"
+#include <chrono>
 
 #define EE_EngineName "Engine"
 #define EE_AppName "Client"
@@ -34,6 +36,22 @@ namespace EE
         S_EngineLogger->sinks().push_back( file_sink );
         S_ClientLogger->sinks().push_back( file_sink );
 		S_LuaLogger->sinks().push_back( file_sink );
+
+		// Add callback sink to forward logs to Console
+		auto console_callback = std::make_shared<spdlog::sinks::callback_sink_mt>(
+			[](const spdlog::details::log_msg& msg) {
+				ConsoleLogEntry entry;
+				entry.message = std::string(msg.payload.begin(), msg.payload.end());
+				entry.level = msg.level;
+				entry.timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+					msg.time.time_since_epoch()).count();
+				entry.source = std::string(msg.logger_name.begin(), msg.logger_name.end());
+				Console::get().addLogEntry(entry);
+			}
+		);
+		S_EngineLogger->sinks().push_back(console_callback);
+		S_ClientLogger->sinks().push_back(console_callback);
+		S_LuaLogger->sinks().push_back(console_callback);
     }
 
 	void CLog::Shutdown()

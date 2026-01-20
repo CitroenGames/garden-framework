@@ -4,6 +4,8 @@
 #include "NetworkProtocol.hpp"
 #include "NetworkTypes.hpp"
 #include <vector>
+#include <cstring>
+#include <utility>
 
 // Namespace for all serialization functions
 namespace NetworkSerializer
@@ -242,5 +244,55 @@ namespace NetworkSerializer
     inline ENetPacket* createPacket(const BitWriter& writer, bool reliable) {
         ENetPacketFlag flags = reliable ? ENET_PACKET_FLAG_RELIABLE : ENET_PACKET_FLAG_UNSEQUENCED;
         return enet_packet_create(writer.getData(), writer.getByteSize(), flags);
+    }
+
+    // Serialize CVarSyncMessage
+    inline void serialize(BitWriter& writer, const CVarSyncMessage& msg) {
+        writer.writeByte(static_cast<uint8_t>(msg.type));
+        writer.writeString(msg.cvar_name, 64);
+        writer.writeString(msg.cvar_value, 128);
+    }
+
+    inline bool deserialize(BitReader& reader, CVarSyncMessage& msg) {
+        if (!reader.canRead(8)) return false;
+        msg.type = static_cast<MessageType>(reader.readByte());
+        if (msg.type != MessageType::CVAR_SYNC) return false;
+        reader.readString(msg.cvar_name, 64);
+        reader.readString(msg.cvar_value, 128);
+        return !reader.hasError();
+    }
+
+    // Serialize CVarInitialSyncMessage with cvar data
+    inline void serialize(BitWriter& writer, const CVarInitialSyncMessage& msg,
+                          const std::vector<std::pair<std::string, std::string>>& cvars) {
+        writer.writeByte(static_cast<uint8_t>(msg.type));
+        writer.writeUInt16(static_cast<uint16_t>(cvars.size()));
+        for (const auto& [name, value] : cvars) {
+            char nameBuf[64] = {0};
+            char valueBuf[128] = {0};
+            std::strncpy(nameBuf, name.c_str(), 63);
+            std::strncpy(valueBuf, value.c_str(), 127);
+            writer.writeString(nameBuf, 64);
+            writer.writeString(valueBuf, 128);
+        }
+    }
+
+    inline bool deserialize(BitReader& reader, CVarInitialSyncMessage& msg,
+                            std::vector<std::pair<std::string, std::string>>& cvars) {
+        if (!reader.canRead(8)) return false;
+        msg.type = static_cast<MessageType>(reader.readByte());
+        if (msg.type != MessageType::CVAR_INITIAL_SYNC) return false;
+        msg.cvar_count = reader.readUInt16();
+
+        cvars.clear();
+        cvars.reserve(msg.cvar_count);
+        for (uint16_t i = 0; i < msg.cvar_count; i++) {
+            char name[64] = {0};
+            char value[128] = {0};
+            reader.readString(name, 64);
+            reader.readString(value, 128);
+            cvars.emplace_back(name, value);
+        }
+        return !reader.hasError();
     }
 }

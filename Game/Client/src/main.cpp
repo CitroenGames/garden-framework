@@ -272,9 +272,6 @@ int main(int argc, char* argv[])
         // Process input events through the new input system
         input_handler.process_events();
 
-        // Sync UI mode state with ImGuiManager (F3 toggles)
-        ImGuiManager::get().setShowSettings(input_handler.is_ui_mode());
-
         // Process async loading jobs (GPU uploads must happen on main thread)
         Threading::JobSystem::get().processMainThreadJobs();
         
