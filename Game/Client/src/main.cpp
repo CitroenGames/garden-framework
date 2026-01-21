@@ -9,6 +9,8 @@
 #include "math.h"
 #include "SDL.h"
 
+#include "Pak.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <cstring>
@@ -124,6 +126,8 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
 int main(int argc, char* argv[])
 #endif
 {
+	Pakker pak;
+        pak.FileExists("example.pak", "test.txt");
     Paingine2D::CrashHandler* crashHandler = Paingine2D::CrashHandler::GetInstance();
     crashHandler->Initialize("Game");
 	EE::CLog::Init();

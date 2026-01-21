@@ -46,6 +46,7 @@ target_link_libraries(
     PUBLIC vk-bootstrap
     PUBLIC VMA
     PUBLIC imgui-docking
+    PUBLIC Pakker
 )
 std = 20
 utf8 = true

@@ -1,3 +1,5 @@
+include = Pakker/Pakker.buildscript
+
 include = glad/glad.buildscript
 include = sdl2/sdl2.buildscript
 include = entt/entt.buildscript

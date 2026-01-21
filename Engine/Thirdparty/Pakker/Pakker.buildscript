@@ -1,0 +1,7 @@
+[project:Pakker]
+type = lib
+std = 20
+headers = src/**/*.h
+sources = src/**/*.cpp
+public_includes = src
+includes = src
