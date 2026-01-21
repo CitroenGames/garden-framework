@@ -33,6 +33,7 @@
 
 #include "Utils/Log.hpp"
 #include "ImGui/ImGuiManager.hpp"
+#include "Console/ConVar.hpp"
 
 // Threading and Asset loading
 #include "Threading/JobSystem.hpp"
@@ -439,6 +440,14 @@ int main(int argc, char* argv[])
         app.swapBuffers();
 
         frame_end_ticks = SDL_GetTicks();
+
+        // Update target FPS from cvar
+        int fps_max_val = CVAR_INT(fps_max);
+        if (fps_max_val > 0) {
+            app.setTargetFPS(fps_max_val);
+        } else {
+            app.setTargetFPS(10000); // Effectively unlimited
+        }
         app.lockFramerate(frame_start_ticks, frame_end_ticks);
     }
 
