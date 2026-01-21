@@ -48,3 +48,10 @@ CONVAR(developer, 0, ConVarFlags::ARCHIVE,
 
 CONVAR(con_notifytime, 4.0f, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
        "Console notification display time in seconds");
+
+// This function forces the linker to include this translation unit.
+// Without it, static library optimization strips all the static cvar objects.
+void InitializeDefaultCVars()
+{
+    // Intentionally empty - cvars register via static initialization above
+}

@@ -54,6 +54,7 @@ static bool g_async_load_pending = false;
 
 static void quit_game(int code)
 {
+    ConVarRegistry::get().saveArchiveCvars("config.cfg");
     _network.disconnect("Game closing");
     _network.shutdown();
     Assets::AssetManager::get().shutdown();
@@ -126,6 +127,10 @@ int main(int argc, char* argv[])
     Paingine2D::CrashHandler* crashHandler = Paingine2D::CrashHandler::GetInstance();
     crashHandler->Initialize("Game");
 	EE::CLog::Init();
+
+    // Initialize console variables and load config
+    InitializeDefaultCVars();
+    ConVarRegistry::get().loadConfig("config.cfg");
 
     // Parse command line arguments
 #if _WIN32

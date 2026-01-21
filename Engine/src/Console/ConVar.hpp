@@ -163,3 +163,6 @@ public:
 #define CVAR_FLOAT(name) (CVAR_PTR(name) ? CVAR_PTR(name)->getFloat() : 0.0f)
 #define CVAR_BOOL(name) (CVAR_PTR(name) ? CVAR_PTR(name)->getBool() : false)
 #define CVAR_STRING(name) (CVAR_PTR(name) ? CVAR_PTR(name)->getString() : "")
+
+// Force initialization of default cvars (call at startup)
+void InitializeDefaultCVars();

@@ -387,12 +387,10 @@ void ConVarRegistry::registerConVar(ConVarBase* cvar)
 
     if (m_cvars.find(cvar->getName()) != m_cvars.end())
     {
-        LOG_ENGINE_WARN("ConVar '{}' already registered, ignoring duplicate", cvar->getName());
-        return;
+        return;  // Duplicate - can't log here, called during static init
     }
 
     m_cvars[cvar->getName()] = cvar;
-    LOG_ENGINE_TRACE("Registered ConVar: {}", cvar->getName());
 }
 
 void ConVarRegistry::unregisterConVar(const std::string& name)
