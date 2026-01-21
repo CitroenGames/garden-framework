@@ -12,6 +12,9 @@ CONVAR(r_fxaa, 1, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
 CONVAR_BOUNDED(r_shadowquality, 2, 0, 3, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
                "Shadow quality (0=off, 1=low, 2=medium, 3=high)");
 
+CONVAR_BOUNDED(fps_max, 60, 0, 1000, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
+               "Maximum frame rate (0=unlimited)");
+
 // Example cheat cvars
 CONVAR(god, 0, ConVarFlags::CHEAT | ConVarFlags::SERVER_ONLY,
        "God mode - invincibility");
