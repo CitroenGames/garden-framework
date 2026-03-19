@@ -28,6 +28,13 @@ public:
 
     bool initialize(const char* title = "Game Window", bool fullscreen = true)
     {
+#ifdef __APPLE__
+        if (api_type == RenderAPIType::OpenGL)
+        {
+            fprintf(stderr, "OpenGL is not supported on macOS. Use Vulkan instead.\n");
+            return false;
+        }
+#endif
         if (api_type != RenderAPIType::Headless)
         {
             if (SDL_Init(SDL_INIT_VIDEO) < 0)

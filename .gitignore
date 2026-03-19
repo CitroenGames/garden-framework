@@ -433,3 +433,4 @@ FodyWeavers.xsd
 *.vcxproj
 
 /build/
+.DS_Store

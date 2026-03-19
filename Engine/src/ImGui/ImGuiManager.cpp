@@ -70,8 +70,12 @@ bool ImGuiManager::initOpenGL(SDL_Window* window, void* glContext)
         return false;
     }
 
-    // Initialize OpenGL3 backend with GLSL version for OpenGL 4.6
+    // Initialize OpenGL3 backend with appropriate GLSL version
+#ifdef __APPLE__
+    const char* glsl_version = "#version 410";
+#else
     const char* glsl_version = "#version 460";
+#endif
     if (!ImGui_ImplOpenGL3_Init(glsl_version))
     {
         ImGui_ImplSDL2_Shutdown();

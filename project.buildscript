@@ -1,5 +1,6 @@
 [solution]
 name = OpenGL
+platforms = x64, Linux
 
 include = Engine/Engine.buildscript
 include = Game/Game.buildscript
