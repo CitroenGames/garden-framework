@@ -26,6 +26,7 @@
 #endif
 
 #include <fstream>
+#include <iostream>
 #include <string>
 #include <chrono>
 #include <thread>
@@ -479,22 +480,22 @@ namespace Paingine2D {
             }
         }
 
-        static void UnixSignalHandler(int signal, siginfo_t* info, void* context) {
+        static void UnixSignalHandler(int sig, siginfo_t* info, void* context) {
             CrashHandler* handler = CrashHandler::GetInstance();
 
             // Generate the crash report path
             std::string crashReportPath = handler->GenerateCrashReportPath();
 
             // Write crash report
-            handler->WriteUnixCrashReport(signal, info, crashReportPath);
+            handler->WriteUnixCrashReport(sig, info, crashReportPath);
 
             // Show crash info
             std::cerr << "The application has crashed. A crash report has been saved to: "
                 << crashReportPath << ".log" << std::endl;
 
             // Restore default handler and re-raise signal
-            signal(signal, SIG_DFL);
-            raise(signal);
+            ::signal(sig, SIG_DFL);
+            raise(sig);
         }
 #endif
     };

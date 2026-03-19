@@ -1,8 +1,8 @@
+#include "Utils/CrashHandler.hpp"
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
-#include "Utils/CrashHandler.hpp"
 #include <windows.h>
 #endif
 
@@ -117,7 +117,11 @@ static RenderAPIType parseRenderAPI(int argc, char* argv[])
         }
 #endif
     }
+#ifdef __APPLE__
+    return RenderAPIType::Vulkan; // macOS: Vulkan via MoltenVK (OpenGL deprecated)
+#else
     return RenderAPIType::OpenGL; // Default
+#endif
 }
 
 #if _WIN32
@@ -145,7 +149,12 @@ int main(int argc, char* argv[])
 
     // Initialize application with selected render API
     app = Application(1920, 1080, 60, 75.0f, api_type);
-    if (!app.initialize("Game Window", true))
+#ifdef _DEBUG
+    bool start_fullscreen = false;
+#else
+    bool start_fullscreen = true;
+#endif
+    if (!app.initialize("Game Window", start_fullscreen))
     {
         quit_game(1);
     }
@@ -258,7 +267,7 @@ int main(int argc, char* argv[])
     player_controller->setPossessedFreecam(freecam_entity);
 
     /* Renderer - Using the abstracted render API */
-    _renderer = renderer::renderer(render_api);
+    _renderer = renderer(render_api);
     
     // Apply lighting settings from level metadata
     _renderer.set_level_lighting(

@@ -261,7 +261,7 @@ private:
     std::vector<VkDescriptorSet> descriptor_sets;
 
     // Per-draw descriptor sets (to handle multiple textures per frame)
-    static const uint32_t MAX_DESCRIPTOR_SETS_PER_FRAME = 512;
+    static constexpr uint32_t MAX_DESCRIPTOR_SETS_PER_FRAME = 512;
     std::vector<VkDescriptorSet> per_draw_descriptor_sets;
     uint32_t current_descriptor_set_index = 0;
 

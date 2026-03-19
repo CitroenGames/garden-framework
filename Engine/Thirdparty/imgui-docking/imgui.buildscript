@@ -18,8 +18,14 @@ sources = {
     backends/imgui_impl_dx11.cpp [windows]
 }
 headers = *.h
-includes = ., ${Vulkan_INCLUDE_DIRS}, ${DirectX11_INCLUDE_DIRS}
-libs = ${Vulkan_LIBRARIES}, ${DirectX11_LIBRARIES}
-libdirs = ${Vulkan_LIBRARY_DIRS}, ${DirectX11_LIBRARY_DIRS}
+includes = ., ${Vulkan_INCLUDE_DIRS}
+libs = ${Vulkan_LIBRARIES}
+libdirs = ${Vulkan_LIBRARY_DIRS}
+if(Windows)
+{
+    includes = ., ${Vulkan_INCLUDE_DIRS}, ${DirectX11_INCLUDE_DIRS}
+    libs = ${Vulkan_LIBRARIES}, ${DirectX11_LIBRARIES}
+    libdirs = ${Vulkan_LIBRARY_DIRS}, ${DirectX11_LIBRARY_DIRS}
+}
 public_includes = ., backends
 target_link_libraries(SDL2)

@@ -1,6 +1,10 @@
 include = thirdparty/3rdparty.buildscript
 
 find_package(Vulkan REQUIRED)
+if(Linux)
+{
+    find_package(SDL2 REQUIRED)
+}
 if(Windows)
 {
     find_package(DirectX11 REQUIRED)
@@ -30,7 +34,7 @@ if(Linux)
 {
     includes = src, thirdparty/include, ${Vulkan_INCLUDE_DIRS}
     libs = ${Vulkan_LIBRARIES}
-    libdirs = ${Vulkan_LIBRARY_DIRS}
+    libdirs = ${Vulkan_LIBRARY_DIRS}, ${SDL2_LIBRARY_DIRS}
 }
 multiprocessor = true
 simd = StreamingSIMDExtensions2

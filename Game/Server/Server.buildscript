@@ -1,3 +1,9 @@
+find_package(Vulkan REQUIRED)
+if(Linux)
+{
+    find_package(SDL2 REQUIRED)
+}
+
 [project:Server]
 type = exe
 if(Windows)
@@ -7,6 +13,11 @@ if(Windows)
 sources = src/**/*.cpp
 headers = src/**/*.h src/**/*.hpp ../shared/**/*.hpp
 includes = src, ../shared/
+if(Linux)
+{
+    libs = ${Vulkan_LIBRARIES}
+    libdirs = ${Vulkan_LIBRARY_DIRS}, ${SDL2_LIBRARY_DIRS}
+}
 target_link_libraries(
     PRIVATE Engine
 )

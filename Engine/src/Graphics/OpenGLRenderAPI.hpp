@@ -53,7 +53,7 @@ private:
     Skybox* skybox;
 
     // Shadow Mapping - CSM (Cascaded Shadow Maps)
-    static const int NUM_CASCADES = 4;
+    static constexpr int NUM_CASCADES = 4;
     GLuint shadowMapFBO;
     GLuint shadowMapTextureArray;  // GL_TEXTURE_2D_ARRAY for cascades
     unsigned int currentShadowSize = 4096;  // Runtime configurable shadow resolution

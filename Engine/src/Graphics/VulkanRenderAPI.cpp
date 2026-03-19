@@ -358,6 +358,9 @@ bool VulkanRenderAPI::createInstance()
         .set_app_name("Garden Engine")
         .set_engine_name("Garden Engine")
         .require_api_version(1, 2, 0)
+#ifdef __APPLE__
+        .enable_extension(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME)
+#endif
 #ifdef _DEBUG
         .request_validation_layers(true)
         .use_default_debug_messenger()
