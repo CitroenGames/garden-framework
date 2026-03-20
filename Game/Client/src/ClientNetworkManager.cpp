@@ -96,6 +96,9 @@ void ClientNetworkManager::disconnect(const char* reason)
 
 void ClientNetworkManager::shutdown()
 {
+    if (m_shutdown) return;
+    m_shutdown = true;
+
     disconnect("Client shutdown");
 
     if (client_host != nullptr) {

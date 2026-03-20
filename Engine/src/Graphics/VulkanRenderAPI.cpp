@@ -352,6 +352,13 @@ void VulkanRenderAPI::resize(int width, int height)
 
 bool VulkanRenderAPI::createInstance()
 {
+#ifdef __APPLE__
+    // macOS: ensure MoltenVK ICD is discoverable by the Vulkan loader
+    if (!getenv("VK_ICD_FILENAMES") && !getenv("VK_DRIVER_FILES")) {
+        setenv("VK_ICD_FILENAMES", "/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json", 0);
+    }
+#endif
+
     vkb::InstanceBuilder builder;
 
     auto inst_ret = builder

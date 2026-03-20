@@ -51,7 +51,7 @@
         }
       },
       "mesh": {
-        "path": "models/map.gltf",
+        "path": "assets/models/map.gltf",
         "textures": [],
         "culling": true,
         "transparent": false,
@@ -79,7 +79,7 @@
         }
       },
       "collider": {
-        "mesh_path": "models/map_collider.obj"
+        "mesh_path": "assets/models/map_collider.obj"
       }
     },
     {
@@ -103,7 +103,7 @@
         }
       },
       "mesh": {
-        "path": "models/grasscube.obj",
+        "path": "assets/models/grasscube.obj",
         "textures": [
           "textures/man.bmp"
         ],
@@ -116,7 +116,7 @@
         "apply_gravity": true
       },
       "collider": {
-        "mesh_path": "models/grasscube.obj"
+        "mesh_path": "assets/models/grasscube.obj"
       }
     },
     {
@@ -193,7 +193,7 @@
         }
       },
       "mesh": {
-        "path": "models/Character.gltf",
+        "path": "assets/models/Character.gltf",
         "textures": [],
         "culling": true,
         "transparent": false,
