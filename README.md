@@ -2,7 +2,7 @@
 
 ## Description
 
-A 3D rendering engine and game testbed written in C++ supporting OpenGL 4.6, Vulkan, and DirectX 11 (Windows).
+A 3D rendering engine and game testbed written in C++ supporting OpenGL 4.6, Vulkan, and DirectX 11. Runs on Windows, Linux, and macOS.
 
 ![screenshot](screen.png)
 
@@ -10,7 +10,7 @@ A 3D rendering engine and game testbed written in C++ supporting OpenGL 4.6, Vul
 
 *   **Modern OpenGL 4.6 Renderer**: Uses shaders, VAOs, and modern pipeline practices.
 *   **Directional Lighting**: Configurable ambient, diffuse, and directional lighting.
-*   **Data-Driven Levels**: Levels are loaded from JSON files (`levels/main.level.json`).
+*   **Data-Driven Levels**: Levels are loaded from JSON files (`assets/levels/main.level.json`).
 *   **Model Support**: Loads `.gltf`/`.glb` and `.obj` models.
 *   **Entity Component System (ECS)**: Uses `entt` for efficient entity management.
 *   **Physics**: Basic AABB collision and gravity.
@@ -39,6 +39,13 @@ This project uses **Sighmake** for build configuration.
     sudo apt install vulkan-sdk
     ```
 
+#### macOS
+*   Xcode Command Line Tools (`xcode-select --install`)
+*   Homebrew packages:
+    ```bash
+    brew install sdl2 vulkan-headers vulkan-loader molten-vk pkg-config
+    ```
+
 ### How to Build
 
 #### Windows
@@ -47,9 +54,16 @@ This project uses **Sighmake** for build configuration.
 3.  Build and Run (Release x64 recommended).
 
 #### Linux
-1.  Run `./sighmake project.buildscript` to generate build files.
-2.  Run `make` to build.
+1.  Run `./sighmake project.buildscript -g makefile` to generate build files.
+2.  Run `make -C build` to build.
 3.  Run `./run_vulkan.sh` to launch.
+
+#### macOS
+1.  Run `./sighmake_macos project.buildscript -g makefile` to generate build files.
+2.  Run `make -C build` to build.
+3.  Run from the repo root: `build/Debug/Game`
+    *   Uses Vulkan via MoltenVK (OpenGL is not supported on macOS).
+    *   Compile Vulkan shaders first: `./compile_shaders.sh`
 
 ## Level Format (.json)
 
@@ -69,9 +83,7 @@ Levels are defined in JSON format. Example configuration for lighting:
 | :--- | :--- |
 | **Engine/** | Core engine code (Graphics, Input, Physics, ECS). |
 | **Game/** | Game-specific logic and entry point. |
-| **assets/** | Shaders (`.vert`, `.frag`) and other raw assets. |
-| **levels/** | JSON level definitions. |
-| **models/** | 3D models and textures. |
+| **assets/** | Shaders, levels, 3D models, and textures. |
 
 ## License
 
