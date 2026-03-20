@@ -221,7 +221,7 @@ int main(int argc, char* argv[])
     /* Level loading */
     LevelManager level_manager;
     LevelData level_data;
-    std::string level_path = "levels/main.level.json";
+    std::string level_path = "assets/levels/main.level.json";
 
     printf("Loading level from: %s\n", level_path.c_str());
     if (!level_manager.loadLevel(level_path, level_data))
@@ -328,7 +328,7 @@ int main(int argc, char* argv[])
                     spawn_pos.x, spawn_pos.y, spawn_pos.z);
 
                 g_async_load_handle = Assets::AssetManager::get().loadAsync(
-                    "models/Character.gltf",
+                    "assets/models/Character.gltf",
                     Assets::LoadPriority::High,
                     [spawn_pos](Assets::AssetId id, bool success, const Assets::AssetData& data) {
                         if (success) {

@@ -187,7 +187,7 @@ int main(int argc, char* argv[])
     /* Level loading */
     LevelManager level_manager;
     LevelData level_data;
-    std::string level_path = "levels/main.level.json";
+    std::string level_path = "assets/levels/main.level.json";
 
     LOG_ENGINE_INFO("Loading level: {0}", level_path.c_str());
     if (!level_manager.loadLevel(level_path, level_data))

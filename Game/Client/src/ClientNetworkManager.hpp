@@ -38,6 +38,7 @@ struct InputState
 class ClientNetworkManager
 {
 private:
+    bool m_shutdown = false;
     ENetHost* client_host = nullptr;
     ENetPeer* server_peer = nullptr;
     world* game_world = nullptr;

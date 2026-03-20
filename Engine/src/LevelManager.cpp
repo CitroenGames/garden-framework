@@ -426,7 +426,7 @@ std::shared_ptr<mesh> LevelManager::loadMesh(const LevelEntity& entity, IRenderA
         material_config.generate_mipmaps = true;
         material_config.flip_textures_vertically = true;
         material_config.cache_textures = true;
-        material_config.texture_base_path = "models/";
+        material_config.texture_base_path = "assets/models/";
 
         // Load geometry and materials
         GltfLoadResult map_result = GltfLoader::loadGltfWithMaterials(entity.mesh_path, render_api, gltf_config, material_config);

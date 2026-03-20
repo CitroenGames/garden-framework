@@ -17,6 +17,7 @@ if(Linux)
 {
     libs = ${Vulkan_LIBRARIES}
     libdirs = ${Vulkan_LIBRARY_DIRS}, ${SDL2_LIBRARY_DIRS}
+    ldflags = -Wl,-rpath,/opt/homebrew/lib
 }
 target_link_libraries(
     PRIVATE Engine
