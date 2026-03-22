@@ -16,6 +16,7 @@ sources = {
     backends/imgui_impl_opengl3.cpp
     backends/imgui_impl_vulkan.cpp
     backends/imgui_impl_dx11.cpp [windows]
+    backends/imgui_impl_metal.mm [macOS]
 }
 headers = *.h
 includes = ., ${Vulkan_INCLUDE_DIRS}
@@ -29,3 +30,8 @@ if(Windows)
 }
 public_includes = ., backends
 target_link_libraries(SDL2)
+if(macOS)
+{
+    libs = -framework Metal, -framework QuartzCore
+    objcflags = -fobjc-arc
+}

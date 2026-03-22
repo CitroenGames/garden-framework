@@ -437,3 +437,4 @@ FodyWeavers.xsd
 pipeline_cache.bin
 imgui.ini
 Game/Client/config.cfg
+.sighmake_cache

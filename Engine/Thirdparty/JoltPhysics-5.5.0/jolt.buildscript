@@ -1,0 +1,13 @@
+[project:JoltPhysics]
+type = lib
+sources = Jolt/**/*.cpp
+headers = Jolt/**/*.h Jolt/**/*.inl
+includes = .
+public_includes = .
+defines = JPH_OBJECT_STREAM
+if(Linux)
+{
+    cxxflags = -pthread
+    ldflags = -pthread
+}
+std = 17

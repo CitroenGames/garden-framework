@@ -1,0 +1,151 @@
+{
+	"folders": [
+		{
+			"path": "."
+		}
+	],
+	"settings": {
+		"files.associations": {
+			"*.buildscript": "ini"
+		},
+		"files.exclude": {
+			"build": true,
+			"*.exe": true,
+			"*.dll": true,
+			"Log.log": true,
+			"imgui.ini": true
+		},
+		"C_Cpp.default.cppStandard": "c++20",
+		"C_Cpp.default.includePath": [
+			"${workspaceFolder}/Engine/src",
+			"${workspaceFolder}/Engine/Thirdparty/include",
+			"${workspaceFolder}/Game/shared"
+		]
+	},
+	"tasks": {
+		"version": "2.0.0",
+		"tasks": [
+			{
+				"label": "Generate Project Files",
+				"type": "shell",
+				"command": "sighmake",
+				"args": ["project.buildscript", "-g", "makefile"],
+				"group": "build",
+				"problemMatcher": []
+			},
+			{
+				"label": "Build Debug",
+				"type": "shell",
+				"command": "sighmake",
+				"args": ["--build", ".", "--config", "Debug"],
+				"group": {
+					"kind": "build",
+					"isDefault": true
+				},
+				"dependsOn": "Generate Project Files",
+				"problemMatcher": ["$gcc"]
+			},
+			{
+				"label": "Build Release",
+				"type": "shell",
+				"command": "sighmake",
+				"args": ["--build", ".", "--config", "Release"],
+				"group": "build",
+				"dependsOn": "Generate Project Files",
+				"problemMatcher": ["$gcc"]
+			},
+			{
+				"label": "Build Game (Debug)",
+				"type": "shell",
+				"command": "sighmake",
+				"args": ["--build", ".", "--config", "Debug", "--target", "Game"],
+				"group": "build",
+				"dependsOn": "Generate Project Files",
+				"problemMatcher": ["$gcc"]
+			},
+			{
+				"label": "Build Server (Debug)",
+				"type": "shell",
+				"command": "sighmake",
+				"args": ["--build", ".", "--config", "Debug", "--target", "Server"],
+				"group": "build",
+				"dependsOn": "Generate Project Files",
+				"problemMatcher": ["$gcc"]
+			},
+			{
+				"label": "Build Game (Release)",
+				"type": "shell",
+				"command": "sighmake",
+				"args": ["--build", ".", "--config", "Release", "--target", "Game"],
+				"group": "build",
+				"dependsOn": "Generate Project Files",
+				"problemMatcher": ["$gcc"]
+			},
+			{
+				"label": "Build Server (Release)",
+				"type": "shell",
+				"command": "sighmake",
+				"args": ["--build", ".", "--config", "Release", "--target", "Server"],
+				"group": "build",
+				"dependsOn": "Generate Project Files",
+				"problemMatcher": ["$gcc"]
+			},
+			{
+				"label": "Clean & Build Debug",
+				"type": "shell",
+				"command": "sighmake",
+				"args": ["--build", ".", "--config", "Debug", "--clean-first"],
+				"group": "build",
+				"dependsOn": "Generate Project Files",
+				"problemMatcher": ["$gcc"]
+			}
+		]
+	},
+	"launch": {
+		"version": "0.2.0",
+		"configurations": [
+			{
+				"name": "Game (Debug)",
+				"type": "cppdbg",
+				"request": "launch",
+				"program": "${workspaceFolder}/build/Debug/Game",
+				"cwd": "${workspaceFolder}",
+				"preLaunchTask": "Build Game (Debug)",
+				"MIMode": "lldb"
+			},
+			{
+				"name": "Game (Release)",
+				"type": "cppdbg",
+				"request": "launch",
+				"program": "${workspaceFolder}/build/Release/Game",
+				"cwd": "${workspaceFolder}",
+				"preLaunchTask": "Build Game (Release)",
+				"MIMode": "lldb"
+			},
+			{
+				"name": "Server (Debug)",
+				"type": "cppdbg",
+				"request": "launch",
+				"program": "${workspaceFolder}/build/Debug/Server",
+				"cwd": "${workspaceFolder}",
+				"preLaunchTask": "Build Server (Debug)",
+				"MIMode": "lldb"
+			},
+			{
+				"name": "Server (Release)",
+				"type": "cppdbg",
+				"request": "launch",
+				"program": "${workspaceFolder}/build/Release/Server",
+				"cwd": "${workspaceFolder}",
+				"preLaunchTask": "Build Server (Release)",
+				"MIMode": "lldb"
+			}
+		],
+		"compounds": [
+			{
+				"name": "Game + Server (Debug)",
+				"configurations": ["Server (Debug)", "Game (Debug)"]
+			}
+		]
+	}
+}

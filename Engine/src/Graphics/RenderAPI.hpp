@@ -134,6 +134,7 @@ enum class RenderAPIType
     OpenGL,
     Vulkan,
     D3D11,
+    Metal,
     Headless
 };
 

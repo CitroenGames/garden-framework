@@ -47,6 +47,9 @@ private:
 
     bool initOpenGL(SDL_Window* window, void* glContext);
     bool initVulkan(SDL_Window* window, IRenderAPI* vulkanAPI);
+#ifdef __APPLE__
+    bool initMetal(SDL_Window* window, IRenderAPI* metalAPI);
+#endif
 #ifdef _WIN32
     bool initD3D11(SDL_Window* window, IRenderAPI* d3d11API);
 #endif

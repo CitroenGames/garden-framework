@@ -61,6 +61,9 @@ static void quit_game(int code)
     _network.shutdown();
     Assets::AssetManager::get().shutdown();
     Threading::JobSystem::get().shutdown();
+    // Clear world registry before shutting down render API
+    // This ensures GPU mesh resources are released while the device is still valid
+    _world.registry.clear();
     ImGuiManager::get().shutdown();
     app.shutdown();
     EE::CLog::Shutdown();
@@ -109,6 +112,12 @@ static RenderAPIType parseRenderAPI(int argc, char* argv[])
         {
             return RenderAPIType::OpenGL;
         }
+#ifdef __APPLE__
+        if (strcmp(argv[i], "-metal") == 0 || strcmp(argv[i], "--metal") == 0)
+        {
+            return RenderAPIType::Metal;
+        }
+#endif
 #ifdef _WIN32
         if (strcmp(argv[i], "-d3d11") == 0 || strcmp(argv[i], "--d3d11") == 0 ||
             strcmp(argv[i], "-dx11") == 0 || strcmp(argv[i], "--dx11") == 0)
@@ -118,7 +127,7 @@ static RenderAPIType parseRenderAPI(int argc, char* argv[])
 #endif
     }
 #ifdef __APPLE__
-    return RenderAPIType::Vulkan; // macOS: Vulkan via MoltenVK (OpenGL deprecated)
+    return RenderAPIType::Metal; // macOS: Native Metal (default)
 #else
     return RenderAPIType::OpenGL; // Default
 #endif
@@ -204,6 +213,7 @@ int main(int argc, char* argv[])
 
     /* Create world */
     _world = world();
+    _world.initializePhysics();
 
     /* Initialize networking */
     if (!_network.initialize()) {

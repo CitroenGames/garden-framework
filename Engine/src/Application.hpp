@@ -31,7 +31,7 @@ public:
 #ifdef __APPLE__
         if (api_type == RenderAPIType::OpenGL)
         {
-            fprintf(stderr, "OpenGL is not supported on macOS. Use Vulkan instead.\n");
+            fprintf(stderr, "OpenGL is not supported on macOS. Use Metal or Vulkan instead.\n");
             return false;
         }
 #endif
@@ -51,6 +51,12 @@ public:
             {
                 // Vulkan requires SDL_WINDOW_VULKAN flag
                 window_flags |= SDL_WINDOW_VULKAN;
+            }
+            else if (api_type == RenderAPIType::Metal)
+            {
+                // Metal uses CAMetalLayer attached to the native window
+                // SDL_WINDOW_METAL flag for SDL2 Metal support
+                window_flags |= SDL_WINDOW_METAL;
             }
             else if (api_type == RenderAPIType::D3D11)
             {

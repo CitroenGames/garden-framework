@@ -14,3 +14,5 @@ include = imgui-docking/imgui.buildscript
 
 include = vk-bootstrap/vk-bootstrap.buildscript
 include = vma/vma.buildscript
+
+include = JoltPhysics-5.5.0/jolt.buildscript

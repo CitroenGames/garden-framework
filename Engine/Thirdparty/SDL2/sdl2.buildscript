@@ -13,3 +13,10 @@ if(Linux)
     libdirs = ${SDL2_LIBRARY_DIRS}
     public_libs = ${SDL2_LIBRARIES}
 }
+if(macOS)
+{
+    find_package(SDL2 REQUIRED)
+    public_includes = ${SDL2_INCLUDE_DIRS}
+    libdirs = ${SDL2_LIBRARY_DIRS}
+    public_libs = ${SDL2_LIBRARIES}
+}

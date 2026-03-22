@@ -5,6 +5,9 @@
 #ifdef _WIN32
 #include "D3D11RenderAPI.hpp"
 #endif
+#ifdef __APPLE__
+#include "MetalRenderAPI.hpp"
+#endif
 
 // Factory implementation
 IRenderAPI* CreateRenderAPI(RenderAPIType type)
@@ -18,6 +21,10 @@ IRenderAPI* CreateRenderAPI(RenderAPIType type)
 #ifdef _WIN32
     case RenderAPIType::D3D11:
         return new D3D11RenderAPI();
+#endif
+#ifdef __APPLE__
+    case RenderAPIType::Metal:
+        return new MetalRenderAPI();
 #endif
     case RenderAPIType::Headless:
         return new HeadlessRenderAPI();

@@ -3,6 +3,14 @@
 #include "imgui_impl_sdl2.h"
 #include "imgui_impl_opengl3.h"
 #include "imgui_impl_vulkan.h"
+#ifdef __APPLE__
+#include "Graphics/MetalRenderAPI.hpp"
+// Note: Metal ImGui backend calls (init/shutdown/newframe/render) use Objective-C types
+// and are handled through helper functions in MetalRenderAPI.mm
+extern "C" bool ImGuiMetal_Init(void* device);
+extern "C" void ImGuiMetal_Shutdown();
+extern "C" void ImGuiMetal_NewFrame(void* renderPassDescriptor);
+#endif
 #ifdef _WIN32
 #include "imgui_impl_dx11.h"
 #include "Graphics/D3D11RenderAPI.hpp"
@@ -51,6 +59,12 @@ bool ImGuiManager::initialize(SDL_Window* window, IRenderAPI* renderAPI, RenderA
     {
         success = initVulkan(window, renderAPI);
     }
+#ifdef __APPLE__
+    else if (apiType == RenderAPIType::Metal)
+    {
+        success = initMetal(window, renderAPI);
+    }
+#endif
 #ifdef _WIN32
     else if (apiType == RenderAPIType::D3D11)
     {
@@ -136,6 +150,39 @@ bool ImGuiManager::initVulkan(SDL_Window* window, IRenderAPI* vulkanAPI)
     return true;
 }
 
+#ifdef __APPLE__
+bool ImGuiManager::initMetal(SDL_Window* window, IRenderAPI* metalAPI)
+{
+    // Initialize SDL2 backend for Metal
+    if (!ImGui_ImplSDL2_InitForMetal(window))
+    {
+        return false;
+    }
+
+    MetalRenderAPI* mtlAPI = dynamic_cast<MetalRenderAPI*>(metalAPI);
+    if (!mtlAPI)
+    {
+        ImGui_ImplSDL2_Shutdown();
+        return false;
+    }
+
+    void* device = mtlAPI->getDevice();
+    if (!device)
+    {
+        ImGui_ImplSDL2_Shutdown();
+        return false;
+    }
+
+    if (!ImGuiMetal_Init(device))
+    {
+        ImGui_ImplSDL2_Shutdown();
+        return false;
+    }
+
+    return true;
+}
+#endif
+
 #ifdef _WIN32
 bool ImGuiManager::initD3D11(SDL_Window* window, IRenderAPI* d3d11API)
 {
@@ -175,6 +222,12 @@ void ImGuiManager::shutdown()
     {
         ImGui_ImplVulkan_Shutdown();
     }
+#ifdef __APPLE__
+    else if (m_apiType == RenderAPIType::Metal)
+    {
+        ImGuiMetal_Shutdown();
+    }
+#endif
 #ifdef _WIN32
     else if (m_apiType == RenderAPIType::D3D11)
     {
@@ -201,6 +254,12 @@ void ImGuiManager::newFrame()
     {
         ImGui_ImplVulkan_NewFrame();
     }
+#ifdef __APPLE__
+    else if (m_apiType == RenderAPIType::Metal)
+    {
+        // Metal NewFrame is called from MetalRenderAPI::beginFrame() with a valid render pass descriptor
+    }
+#endif
 #ifdef _WIN32
     else if (m_apiType == RenderAPIType::D3D11)
     {
