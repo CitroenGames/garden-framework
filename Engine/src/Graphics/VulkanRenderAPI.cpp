@@ -76,6 +76,12 @@ bool VulkanRenderAPI::initialize(WindowHandle window, int width, int height, flo
         return false;
     }
 
+    // Initialize sampler cache
+    sampler_cache.init(device);
+
+    // Create shared staging buffer
+    ensureStagingBuffer(STAGING_BUFFER_INITIAL_SIZE);
+
     // Create swapchain
     if (!createSwapchain()) {
         printf("Failed to create swapchain\n");
@@ -129,6 +135,9 @@ bool VulkanRenderAPI::initialize(WindowHandle window, int width, int height, flo
         printf("Failed to create descriptor set layout\n");
         return false;
     }
+
+    // Load pipeline cache from disk (or create empty)
+    loadPipelineCache();
 
     // Create graphics pipeline
     if (!createGraphicsPipeline()) {
@@ -194,6 +203,9 @@ void VulkanRenderAPI::shutdown()
         vkDeviceWaitIdle(device);
     }
 
+    // Flush all deferred deletions
+    deletion_queue.flushAll();
+
     // Clean up shadow resources
     cleanupShadowResources();
 
@@ -203,9 +215,8 @@ void VulkanRenderAPI::shutdown()
     // Clean up FXAA resources
     cleanupFxaaResources();
 
-    // Clean up default texture
+    // Clean up default texture (sampler owned by sampler_cache)
     if (default_texture.isValid()) {
-        if (default_texture.sampler) vkDestroySampler(device, default_texture.sampler, nullptr);
         if (default_texture.imageView) vkDestroyImageView(device, default_texture.imageView, nullptr);
         if (default_texture.image && vma_allocator) {
             vmaDestroyImage(vma_allocator, default_texture.image, default_texture.allocation);
@@ -213,16 +224,18 @@ void VulkanRenderAPI::shutdown()
         default_texture = VulkanTexture();
     }
 
-    // Clean up textures
+    // Clean up textures (samplers owned by sampler_cache)
     for (auto& pair : textures) {
         VulkanTexture& tex = pair.second;
-        if (tex.sampler) vkDestroySampler(device, tex.sampler, nullptr);
         if (tex.imageView) vkDestroyImageView(device, tex.imageView, nullptr);
         if (tex.image && vma_allocator) {
             vmaDestroyImage(vma_allocator, tex.image, tex.allocation);
         }
     }
     textures.clear();
+
+    // Destroy all cached samplers
+    sampler_cache.destroyAll();
 
     // Clean up uniform buffers
     for (size_t i = 0; i < uniform_buffers.size(); i++) {
@@ -245,6 +258,9 @@ void VulkanRenderAPI::shutdown()
         vkDestroyDescriptorSetLayout(device, descriptor_set_layout, nullptr);
         descriptor_set_layout = VK_NULL_HANDLE;
     }
+
+    // Save and destroy pipeline cache
+    savePipelineCache();
 
     // Clean up pipelines
     if (pipeline_no_blend != VK_NULL_HANDLE) {
@@ -291,6 +307,15 @@ void VulkanRenderAPI::shutdown()
     if (render_pass != VK_NULL_HANDLE) {
         vkDestroyRenderPass(device, render_pass, nullptr);
         render_pass = VK_NULL_HANDLE;
+    }
+
+    // Clean up shared staging buffer
+    if (staging_buffer != VK_NULL_HANDLE && vma_allocator) {
+        vmaDestroyBuffer(vma_allocator, staging_buffer, staging_allocation);
+        staging_buffer = VK_NULL_HANDLE;
+        staging_allocation = nullptr;
+        staging_mapped = nullptr;
+        staging_capacity = 0;
     }
 
     // Clean up VMA allocator
@@ -350,6 +375,32 @@ void VulkanRenderAPI::resize(int width, int height)
     recreateSwapchain();
 }
 
+static VKAPI_ATTR VkBool32 VKAPI_CALL vulkanDebugCallback(
+    VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
+    VkDebugUtilsMessageTypeFlagsEXT messageType,
+    const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData,
+    void* pUserData)
+{
+    (void)messageType;
+    (void)pUserData;
+
+    switch (messageSeverity) {
+    case VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT:
+        LOG_ENGINE_ERROR("[Vulkan Validation] {}", pCallbackData->pMessage);
+        break;
+    case VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT:
+        LOG_ENGINE_WARN("[Vulkan Validation] {}", pCallbackData->pMessage);
+        break;
+    case VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT:
+        LOG_ENGINE_INFO("[Vulkan Validation] {}", pCallbackData->pMessage);
+        break;
+    default:
+        LOG_ENGINE_TRACE("[Vulkan Validation] {}", pCallbackData->pMessage);
+        break;
+    }
+    return VK_FALSE;
+}
+
 bool VulkanRenderAPI::createInstance()
 {
 #ifdef __APPLE__
@@ -370,7 +421,7 @@ bool VulkanRenderAPI::createInstance()
 #endif
 #ifdef _DEBUG
         .request_validation_layers(true)
-        .use_default_debug_messenger()
+        .set_debug_callback(vulkanDebugCallback)
 #endif
         .build();
 
@@ -812,6 +863,101 @@ VkShaderModule VulkanRenderAPI::createShaderModule(const std::vector<char>& code
     return shaderModule;
 }
 
+bool VulkanRenderAPI::loadPipelineCache()
+{
+    VkPipelineCacheCreateInfo cacheInfo{};
+    cacheInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+
+    // Try to load existing cache from disk
+    std::ifstream file("pipeline_cache.bin", std::ios::ate | std::ios::binary);
+    std::vector<char> cacheData;
+    if (file.is_open()) {
+        size_t fileSize = (size_t)file.tellg();
+        cacheData.resize(fileSize);
+        file.seekg(0);
+        file.read(cacheData.data(), fileSize);
+        file.close();
+
+        cacheInfo.initialDataSize = cacheData.size();
+        cacheInfo.pInitialData = cacheData.data();
+        printf("Loaded pipeline cache from disk (%zu bytes)\n", cacheData.size());
+    }
+
+    if (vkCreatePipelineCache(device, &cacheInfo, nullptr, &vk_pipeline_cache) != VK_SUCCESS) {
+        // If loading failed (e.g. corrupt data), create empty cache
+        cacheInfo.initialDataSize = 0;
+        cacheInfo.pInitialData = nullptr;
+        if (vkCreatePipelineCache(device, &cacheInfo, nullptr, &vk_pipeline_cache) != VK_SUCCESS) {
+            printf("Failed to create pipeline cache\n");
+            return false;
+        }
+    }
+    return true;
+}
+
+void VulkanRenderAPI::ensureStagingBuffer(VkDeviceSize requiredSize)
+{
+    if (staging_buffer != VK_NULL_HANDLE && staging_capacity >= requiredSize) {
+        return; // Current buffer is large enough
+    }
+
+    // Destroy old buffer via deletion queue if it exists
+    if (staging_buffer != VK_NULL_HANDLE) {
+        VkBuffer oldBuf = staging_buffer;
+        VmaAllocation oldAlloc = staging_allocation;
+        VmaAllocator alloc = vma_allocator;
+        deletion_queue.push([alloc, oldBuf, oldAlloc]() {
+            vmaDestroyBuffer(alloc, oldBuf, oldAlloc);
+        });
+        staging_buffer = VK_NULL_HANDLE;
+        staging_allocation = nullptr;
+        staging_mapped = nullptr;
+        staging_capacity = 0;
+    }
+
+    // Allocate new buffer (at least STAGING_BUFFER_INITIAL_SIZE or requiredSize, whichever is larger)
+    VkDeviceSize newSize = std::max(STAGING_BUFFER_INITIAL_SIZE, requiredSize);
+
+    VkBufferCreateInfo bufferInfo{};
+    bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufferInfo.size = newSize;
+    bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+
+    VmaAllocationCreateInfo allocInfo{};
+    allocInfo.usage = VMA_MEMORY_USAGE_CPU_ONLY;
+    allocInfo.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
+
+    VmaAllocationInfo resultInfo;
+    if (vmaCreateBuffer(vma_allocator, &bufferInfo, &allocInfo,
+                        &staging_buffer, &staging_allocation, &resultInfo) == VK_SUCCESS) {
+        staging_mapped = resultInfo.pMappedData;
+        staging_capacity = newSize;
+    }
+}
+
+void VulkanRenderAPI::savePipelineCache()
+{
+    if (vk_pipeline_cache == VK_NULL_HANDLE) return;
+
+    size_t dataSize = 0;
+    vkGetPipelineCacheData(device, vk_pipeline_cache, &dataSize, nullptr);
+
+    if (dataSize > 0) {
+        std::vector<char> data(dataSize);
+        vkGetPipelineCacheData(device, vk_pipeline_cache, &dataSize, data.data());
+
+        std::ofstream file("pipeline_cache.bin", std::ios::binary);
+        if (file.is_open()) {
+            file.write(data.data(), dataSize);
+            file.close();
+            printf("Saved pipeline cache to disk (%zu bytes)\n", dataSize);
+        }
+    }
+
+    vkDestroyPipelineCache(device, vk_pipeline_cache, nullptr);
+    vk_pipeline_cache = VK_NULL_HANDLE;
+}
+
 bool VulkanRenderAPI::createGraphicsPipeline()
 {
     // Load shaders
@@ -967,7 +1113,7 @@ bool VulkanRenderAPI::createGraphicsPipeline()
     noBlendAttachment.blendEnable = VK_FALSE;
 
     colorBlending.pAttachments = &noBlendAttachment;
-    if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline_no_blend) != VK_SUCCESS) {
+    if (vkCreateGraphicsPipelines(device, vk_pipeline_cache, 1, &pipelineInfo, nullptr, &pipeline_no_blend) != VK_SUCCESS) {
         printf("Failed to create no-blend pipeline\n");
         vkDestroyShaderModule(device, fragShaderModule, nullptr);
         vkDestroyShaderModule(device, vertShaderModule, nullptr);
@@ -987,7 +1133,7 @@ bool VulkanRenderAPI::createGraphicsPipeline()
     alphaBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
 
     colorBlending.pAttachments = &alphaBlendAttachment;
-    if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline_alpha_blend) != VK_SUCCESS) {
+    if (vkCreateGraphicsPipelines(device, vk_pipeline_cache, 1, &pipelineInfo, nullptr, &pipeline_alpha_blend) != VK_SUCCESS) {
         printf("Failed to create alpha-blend pipeline\n");
         vkDestroyShaderModule(device, fragShaderModule, nullptr);
         vkDestroyShaderModule(device, vertShaderModule, nullptr);
@@ -1007,7 +1153,7 @@ bool VulkanRenderAPI::createGraphicsPipeline()
     additiveBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
 
     colorBlending.pAttachments = &additiveBlendAttachment;
-    if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline_additive_blend) != VK_SUCCESS) {
+    if (vkCreateGraphicsPipelines(device, vk_pipeline_cache, 1, &pipelineInfo, nullptr, &pipeline_additive_blend) != VK_SUCCESS) {
         printf("Failed to create additive-blend pipeline\n");
         vkDestroyShaderModule(device, fragShaderModule, nullptr);
         vkDestroyShaderModule(device, vertShaderModule, nullptr);
@@ -1166,24 +1312,9 @@ bool VulkanRenderAPI::createDefaultTexture()
 
     VkDeviceSize imageSize = 4;
 
-    // Create staging buffer
-    VkBuffer stagingBuffer;
-    VmaAllocation stagingAllocation;
-
-    VkBufferCreateInfo bufferInfo{};
-    bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    bufferInfo.size = imageSize;
-    bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-
-    VmaAllocationCreateInfo stagingAllocInfo{};
-    stagingAllocInfo.usage = VMA_MEMORY_USAGE_CPU_ONLY;
-    stagingAllocInfo.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
-
-    VmaAllocationInfo stagingAllocInfoOut;
-    vmaCreateBuffer(vma_allocator, &bufferInfo, &stagingAllocInfo,
-                   &stagingBuffer, &stagingAllocation, &stagingAllocInfoOut);
-
-    memcpy(stagingAllocInfoOut.pMappedData, whitePixel, imageSize);
+    // Use shared staging buffer
+    ensureStagingBuffer(imageSize);
+    memcpy(staging_mapped, whitePixel, imageSize);
 
     // Create image
     VkImageCreateInfo imageInfo{};
@@ -1210,14 +1341,12 @@ bool VulkanRenderAPI::createDefaultTexture()
     default_texture.height = 1;
     default_texture.mipLevels = 1;
 
-    // Transition and copy
+    // Transition and copy (uses shared staging_buffer)
     transitionImageLayout(default_texture.image, VK_FORMAT_R8G8B8A8_UNORM,
                          VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1);
-    copyBufferToImage(stagingBuffer, default_texture.image, 1, 1);
+    copyBufferToImage(staging_buffer, default_texture.image, 1, 1);
     transitionImageLayout(default_texture.image, VK_FORMAT_R8G8B8A8_UNORM,
                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 1);
-
-    vmaDestroyBuffer(vma_allocator, stagingBuffer, stagingAllocation);
 
     // Create image view
     VkImageViewCreateInfo viewInfo{};
@@ -1233,23 +1362,22 @@ bool VulkanRenderAPI::createDefaultTexture()
 
     vkCreateImageView(device, &viewInfo, nullptr, &default_texture.imageView);
 
-    // Create sampler
-    VkSamplerCreateInfo samplerInfo{};
-    samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    samplerInfo.magFilter = VK_FILTER_LINEAR;
-    samplerInfo.minFilter = VK_FILTER_LINEAR;
-    samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-    samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-    samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-    samplerInfo.anisotropyEnable = VK_FALSE;
-    samplerInfo.maxAnisotropy = 1.0f;
-    samplerInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
-    samplerInfo.unnormalizedCoordinates = VK_FALSE;
-    samplerInfo.compareEnable = VK_FALSE;
-    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-    samplerInfo.maxLod = 0.0f;
-
-    vkCreateSampler(device, &samplerInfo, nullptr, &default_texture.sampler);
+    // Create sampler via cache
+    SamplerKey defaultSamplerKey{};
+    defaultSamplerKey.magFilter = VK_FILTER_LINEAR;
+    defaultSamplerKey.minFilter = VK_FILTER_LINEAR;
+    defaultSamplerKey.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    defaultSamplerKey.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    defaultSamplerKey.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    defaultSamplerKey.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    defaultSamplerKey.anisotropyEnable = VK_FALSE;
+    defaultSamplerKey.maxAnisotropy = 1.0f;
+    defaultSamplerKey.compareEnable = VK_FALSE;
+    defaultSamplerKey.compareOp = VK_COMPARE_OP_ALWAYS;
+    defaultSamplerKey.minLod = 0.0f;
+    defaultSamplerKey.maxLod = 0.0f;
+    defaultSamplerKey.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+    default_texture.sampler = sampler_cache.getOrCreate(defaultSamplerKey);
 
     // Update all descriptor sets with default texture
     for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
@@ -1415,21 +1543,23 @@ bool VulkanRenderAPI::createShadowResources()
         return false;
     }
 
-    // Create shadow sampler
-    VkSamplerCreateInfo samplerInfo{};
-    samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    samplerInfo.magFilter = VK_FILTER_NEAREST;
-    samplerInfo.minFilter = VK_FILTER_NEAREST;
-    samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
-    samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
-    samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
-    samplerInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
-    samplerInfo.anisotropyEnable = VK_FALSE;
-    samplerInfo.compareEnable = VK_FALSE;
-    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-    samplerInfo.maxLod = 0.0f;
-
-    if (vkCreateSampler(device, &samplerInfo, nullptr, &shadow_sampler) != VK_SUCCESS) {
+    // Create shadow sampler via cache
+    SamplerKey shadowSamplerKey{};
+    shadowSamplerKey.magFilter = VK_FILTER_NEAREST;
+    shadowSamplerKey.minFilter = VK_FILTER_NEAREST;
+    shadowSamplerKey.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    shadowSamplerKey.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    shadowSamplerKey.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    shadowSamplerKey.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    shadowSamplerKey.anisotropyEnable = VK_FALSE;
+    shadowSamplerKey.maxAnisotropy = 1.0f;
+    shadowSamplerKey.compareEnable = VK_FALSE;
+    shadowSamplerKey.compareOp = VK_COMPARE_OP_ALWAYS;
+    shadowSamplerKey.minLod = 0.0f;
+    shadowSamplerKey.maxLod = 0.0f;
+    shadowSamplerKey.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
+    shadow_sampler = sampler_cache.getOrCreate(shadowSamplerKey);
+    if (shadow_sampler == VK_NULL_HANDLE) {
         printf("Failed to create shadow sampler\n");
         return false;
     }
@@ -1454,13 +1584,28 @@ bool VulkanRenderAPI::createShadowResources()
     subpass.colorAttachmentCount = 0;
     subpass.pDepthStencilAttachment = &depthRef;
 
-    VkSubpassDependency dependency{};
-    dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
-    dependency.dstSubpass = 0;
-    dependency.srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-    dependency.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    dependency.dstStageMask = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-    dependency.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    // Two dependencies:
+    // 1. EXTERNAL -> subpass 0: ensure any prior reads of this image are done before we write
+    // 2. subpass 0 -> EXTERNAL: ensure depth writes are visible before the main pass samples the shadow map
+    std::array<VkSubpassDependency, 2> dependencies{};
+
+    // Dependency 1: Wait for prior fragment shader reads before depth writes
+    dependencies[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+    dependencies[0].dstSubpass = 0;
+    dependencies[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    dependencies[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    dependencies[0].dstStageMask = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+    dependencies[0].dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    dependencies[0].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
+
+    // Dependency 2: Ensure depth writes are flushed before fragment shader samples the shadow map
+    dependencies[1].srcSubpass = 0;
+    dependencies[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+    dependencies[1].srcStageMask = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+    dependencies[1].srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    dependencies[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    dependencies[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    dependencies[1].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
 
     VkRenderPassCreateInfo rpInfo{};
     rpInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
@@ -1468,8 +1613,8 @@ bool VulkanRenderAPI::createShadowResources()
     rpInfo.pAttachments = &depthAttachment;
     rpInfo.subpassCount = 1;
     rpInfo.pSubpasses = &subpass;
-    rpInfo.dependencyCount = 1;
-    rpInfo.pDependencies = &dependency;
+    rpInfo.dependencyCount = static_cast<uint32_t>(dependencies.size());
+    rpInfo.pDependencies = dependencies.data();
 
     if (vkCreateRenderPass(device, &rpInfo, nullptr, &shadow_render_pass) != VK_SUCCESS) {
         printf("Failed to create shadow render pass\n");
@@ -1645,7 +1790,7 @@ bool VulkanRenderAPI::createShadowResources()
     pipelineInfo.renderPass = shadow_render_pass;
     pipelineInfo.subpass = 0;
 
-    if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &shadow_pipeline) != VK_SUCCESS) {
+    if (vkCreateGraphicsPipelines(device, vk_pipeline_cache, 1, &pipelineInfo, nullptr, &shadow_pipeline) != VK_SUCCESS) {
         printf("Failed to create shadow pipeline\n");
         vkDestroyShaderModule(device, vertModule, nullptr);
         vkDestroyShaderModule(device, fragModule, nullptr);
@@ -1821,11 +1966,8 @@ void VulkanRenderAPI::cleanupShadowResources()
         shadow_render_pass = VK_NULL_HANDLE;
     }
 
-    // Destroy shadow sampler
-    if (shadow_sampler != VK_NULL_HANDLE) {
-        vkDestroySampler(device, shadow_sampler, nullptr);
-        shadow_sampler = VK_NULL_HANDLE;
-    }
+    // Shadow sampler is owned by sampler_cache, just clear the handle
+    shadow_sampler = VK_NULL_HANDLE;
 
     // Destroy shadow image views
     if (shadow_map_view != VK_NULL_HANDLE) {
@@ -1910,33 +2052,16 @@ bool VulkanRenderAPI::createSkyboxResources()
         return false;
     }
 
-    // Create staging buffer and upload
-    VkBuffer stagingBuffer;
-    VmaAllocation stagingAllocation;
-
-    VkBufferCreateInfo stagingInfo{};
-    stagingInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    stagingInfo.size = sizeof(skyboxVertices);
-    stagingInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-
-    VmaAllocationCreateInfo stagingAllocInfo{};
-    stagingAllocInfo.usage = VMA_MEMORY_USAGE_CPU_ONLY;
-
-    vmaCreateBuffer(vma_allocator, &stagingInfo, &stagingAllocInfo, &stagingBuffer, &stagingAllocation, nullptr);
-
-    void* data;
-    vmaMapMemory(vma_allocator, stagingAllocation, &data);
-    memcpy(data, skyboxVertices, sizeof(skyboxVertices));
-    vmaUnmapMemory(vma_allocator, stagingAllocation);
+    // Upload via shared staging buffer
+    ensureStagingBuffer(sizeof(skyboxVertices));
+    memcpy(staging_mapped, skyboxVertices, sizeof(skyboxVertices));
 
     // Copy to GPU
     VkCommandBuffer cmd = beginSingleTimeCommands();
     VkBufferCopy copyRegion{};
     copyRegion.size = sizeof(skyboxVertices);
-    vkCmdCopyBuffer(cmd, stagingBuffer, skybox_vertex_buffer, 1, &copyRegion);
+    vkCmdCopyBuffer(cmd, staging_buffer, skybox_vertex_buffer, 1, &copyRegion);
     endSingleTimeCommands(cmd);
-
-    vmaDestroyBuffer(vma_allocator, stagingBuffer, stagingAllocation);
 
     // Create skybox descriptor set layout
     VkDescriptorSetLayoutBinding uboBinding{};
@@ -2078,7 +2203,7 @@ bool VulkanRenderAPI::createSkyboxResources()
     pipelineInfo.renderPass = render_pass;
     pipelineInfo.subpass = 0;
 
-    if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &skybox_pipeline) != VK_SUCCESS) {
+    if (vkCreateGraphicsPipelines(device, vk_pipeline_cache, 1, &pipelineInfo, nullptr, &skybox_pipeline) != VK_SUCCESS) {
         printf("Failed to create skybox pipeline\n");
         vkDestroyShaderModule(device, vertModule, nullptr);
         vkDestroyShaderModule(device, fragModule, nullptr);
@@ -2319,21 +2444,23 @@ bool VulkanRenderAPI::createFxaaResources()
         return false;
     }
 
-    // Create sampler for offscreen texture
-    VkSamplerCreateInfo samplerInfo{};
-    samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    samplerInfo.magFilter = VK_FILTER_LINEAR;
-    samplerInfo.minFilter = VK_FILTER_LINEAR;
-    samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    samplerInfo.anisotropyEnable = VK_FALSE;
-    samplerInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
-    samplerInfo.unnormalizedCoordinates = VK_FALSE;
-    samplerInfo.compareEnable = VK_FALSE;
-    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-
-    if (vkCreateSampler(device, &samplerInfo, nullptr, &offscreen_sampler) != VK_SUCCESS) {
+    // Create sampler for offscreen texture via cache
+    SamplerKey offscreenSamplerKey{};
+    offscreenSamplerKey.magFilter = VK_FILTER_LINEAR;
+    offscreenSamplerKey.minFilter = VK_FILTER_LINEAR;
+    offscreenSamplerKey.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    offscreenSamplerKey.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    offscreenSamplerKey.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    offscreenSamplerKey.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    offscreenSamplerKey.anisotropyEnable = VK_FALSE;
+    offscreenSamplerKey.maxAnisotropy = 1.0f;
+    offscreenSamplerKey.compareEnable = VK_FALSE;
+    offscreenSamplerKey.compareOp = VK_COMPARE_OP_ALWAYS;
+    offscreenSamplerKey.minLod = 0.0f;
+    offscreenSamplerKey.maxLod = 0.0f;
+    offscreenSamplerKey.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+    offscreen_sampler = sampler_cache.getOrCreate(offscreenSamplerKey);
+    if (offscreen_sampler == VK_NULL_HANDLE) {
         printf("Failed to create offscreen sampler\n");
         return false;
     }
@@ -2630,7 +2757,7 @@ bool VulkanRenderAPI::createFxaaResources()
     pipelineInfo.renderPass = fxaa_render_pass;
     pipelineInfo.subpass = 0;
 
-    if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &fxaa_pipeline) != VK_SUCCESS) {
+    if (vkCreateGraphicsPipelines(device, vk_pipeline_cache, 1, &pipelineInfo, nullptr, &fxaa_pipeline) != VK_SUCCESS) {
         printf("Failed to create FXAA pipeline\n");
         vkDestroyShaderModule(device, fragShaderModule, nullptr);
         vkDestroyShaderModule(device, vertShaderModule, nullptr);
@@ -2744,10 +2871,8 @@ void VulkanRenderAPI::cleanupFxaaResources()
         offscreen_render_pass = VK_NULL_HANDLE;
     }
 
-    if (offscreen_sampler != VK_NULL_HANDLE) {
-        vkDestroySampler(device, offscreen_sampler, nullptr);
-        offscreen_sampler = VK_NULL_HANDLE;
-    }
+    // Offscreen sampler is owned by sampler_cache, just clear the handle
+    offscreen_sampler = VK_NULL_HANDLE;
 
     if (offscreen_depth_view != VK_NULL_HANDLE) {
         vkDestroyImageView(device, offscreen_depth_view, nullptr);
@@ -3267,6 +3392,9 @@ void VulkanRenderAPI::beginFrame()
     // Wait for previous frame
     vkWaitForFences(device, 1, &in_flight_fences[current_frame], VK_TRUE, UINT64_MAX);
 
+    // Process deferred deletions (safe now that fence has signaled)
+    deletion_queue.flush();
+
     // Acquire next image
     VkResult result = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX,
         image_available_semaphores[current_frame], VK_NULL_HANDLE, &current_image_index);
@@ -3289,6 +3417,11 @@ void VulkanRenderAPI::beginFrame()
     // Reset per-draw descriptor set index and cache for this frame
     current_descriptor_set_index = 0;
     texture_descriptor_cache.clear();
+
+    // Reset redundant bind tracking
+    last_bound_pipeline = VK_NULL_HANDLE;
+    last_bound_descriptor_set = VK_NULL_HANDLE;
+    last_bound_vertex_buffer = VK_NULL_HANDLE;
 
     // Reset command buffer
     vkResetCommandBuffer(command_buffers[current_frame], 0);
@@ -3329,6 +3462,7 @@ void VulkanRenderAPI::beginFrame()
 
     // Bind pipeline
     vkCmdBindPipeline(command_buffers[current_frame], VK_PIPELINE_BIND_POINT_GRAPHICS, graphics_pipeline);
+    last_bound_pipeline = graphics_pipeline;
 
     // Set dynamic viewport and scissor
     VkViewport viewport{};
@@ -3608,24 +3742,9 @@ TextureHandle VulkanRenderAPI::loadTextureFromMemory(const uint8_t* pixels, int 
         srcData = flippedData.data();
     }
 
-    // Create staging buffer
-    VkBuffer stagingBuffer;
-    VmaAllocation stagingAllocation;
-
-    VkBufferCreateInfo bufferInfo{};
-    bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    bufferInfo.size = imageSize;
-    bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-
-    VmaAllocationCreateInfo stagingAllocInfo{};
-    stagingAllocInfo.usage = VMA_MEMORY_USAGE_CPU_ONLY;
-    stagingAllocInfo.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
-
-    VmaAllocationInfo stagingAllocInfoOut;
-    vmaCreateBuffer(vma_allocator, &bufferInfo, &stagingAllocInfo,
-                   &stagingBuffer, &stagingAllocation, &stagingAllocInfoOut);
-
-    memcpy(stagingAllocInfoOut.pMappedData, srcData, imageSize);
+    // Use shared staging buffer
+    ensureStagingBuffer(imageSize);
+    memcpy(staging_mapped, srcData, imageSize);
 
     // Create image
     VkImageCreateInfo imageInfo{};
@@ -3648,10 +3767,10 @@ TextureHandle VulkanRenderAPI::loadTextureFromMemory(const uint8_t* pixels, int 
     vmaCreateImage(vma_allocator, &imageInfo, &imageAllocInfo,
                   &texture.image, &texture.allocation, nullptr);
 
-    // Transition, copy, and generate mipmaps
+    // Transition, copy, and generate mipmaps (uses shared staging_buffer)
     transitionImageLayout(texture.image, VK_FORMAT_R8G8B8A8_UNORM,
                          VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, texture.mipLevels);
-    copyBufferToImage(stagingBuffer, texture.image, width, height);
+    copyBufferToImage(staging_buffer, texture.image, width, height);
 
     if (generate_mipmaps && texture.mipLevels > 1) {
         generateMipmaps(texture.image, VK_FORMAT_R8G8B8A8_UNORM, width, height, texture.mipLevels);
@@ -3659,8 +3778,6 @@ TextureHandle VulkanRenderAPI::loadTextureFromMemory(const uint8_t* pixels, int 
         transitionImageLayout(texture.image, VK_FORMAT_R8G8B8A8_UNORM,
                              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, texture.mipLevels);
     }
-
-    vmaDestroyBuffer(vma_allocator, stagingBuffer, stagingAllocation);
 
     // Create image view
     VkImageViewCreateInfo viewInfo{};
@@ -3676,23 +3793,22 @@ TextureHandle VulkanRenderAPI::loadTextureFromMemory(const uint8_t* pixels, int 
 
     vkCreateImageView(device, &viewInfo, nullptr, &texture.imageView);
 
-    // Create sampler
-    VkSamplerCreateInfo samplerInfo{};
-    samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    samplerInfo.magFilter = VK_FILTER_LINEAR;
-    samplerInfo.minFilter = VK_FILTER_LINEAR;
-    samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-    samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-    samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-    samplerInfo.anisotropyEnable = VK_TRUE;
-    samplerInfo.maxAnisotropy = 16.0f;
-    samplerInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
-    samplerInfo.unnormalizedCoordinates = VK_FALSE;
-    samplerInfo.compareEnable = VK_FALSE;
-    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-    samplerInfo.maxLod = static_cast<float>(texture.mipLevels);
-
-    vkCreateSampler(device, &samplerInfo, nullptr, &texture.sampler);
+    // Create sampler via cache
+    SamplerKey texSamplerKey{};
+    texSamplerKey.magFilter = VK_FILTER_LINEAR;
+    texSamplerKey.minFilter = VK_FILTER_LINEAR;
+    texSamplerKey.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    texSamplerKey.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    texSamplerKey.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    texSamplerKey.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    texSamplerKey.anisotropyEnable = VK_TRUE;
+    texSamplerKey.maxAnisotropy = 16.0f;
+    texSamplerKey.compareEnable = VK_FALSE;
+    texSamplerKey.compareOp = VK_COMPARE_OP_ALWAYS;
+    texSamplerKey.minLod = 0.0f;
+    texSamplerKey.maxLod = static_cast<float>(texture.mipLevels);
+    texSamplerKey.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+    texture.sampler = sampler_cache.getOrCreate(texSamplerKey);
 
     TextureHandle handle = next_texture_handle++;
     textures[handle] = texture;
@@ -3715,14 +3831,19 @@ void VulkanRenderAPI::unbindTexture()
 void VulkanRenderAPI::deleteTexture(TextureHandle texture)
 {
     if (texture != INVALID_TEXTURE && textures.count(texture) > 0) {
-        VulkanTexture& tex = textures[texture];
-        vkDeviceWaitIdle(device);
-        if (tex.sampler) vkDestroySampler(device, tex.sampler, nullptr);
-        if (tex.imageView) vkDestroyImageView(device, tex.imageView, nullptr);
-        if (tex.image && vma_allocator) {
-            vmaDestroyImage(vma_allocator, tex.image, tex.allocation);
-        }
+        VulkanTexture tex = textures[texture]; // copy by value for capture
         textures.erase(texture);
+
+        // Defer destruction until GPU is done with the resource
+        // Sampler is owned by sampler_cache, don't destroy it here
+        VmaAllocator alloc = vma_allocator;
+        VkDevice dev = device;
+        deletion_queue.push([dev, alloc, tex]() {
+            if (tex.imageView) vkDestroyImageView(dev, tex.imageView, nullptr);
+            if (tex.image && alloc) {
+                vmaDestroyImage(alloc, tex.image, tex.allocation);
+            }
+        });
     }
 }
 
@@ -3746,10 +3867,14 @@ void VulkanRenderAPI::renderMesh(const mesh& m, const RenderState& state)
         vkCmdPushConstants(command_buffers[current_frame], shadow_pipeline_layout,
             VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(glm::mat4), &current_model_matrix);
 
-        // Bind vertex buffer and draw
-        VkBuffer vertexBuffers[] = {vulkanMesh->getVertexBuffer()};
-        VkDeviceSize offsets[] = {0};
-        vkCmdBindVertexBuffers(command_buffers[current_frame], 0, 1, vertexBuffers, offsets);
+        // Bind vertex buffer and draw (with redundant bind tracking)
+        VkBuffer vb = vulkanMesh->getVertexBuffer();
+        if (vb != last_bound_vertex_buffer) {
+            VkBuffer vertexBuffers[] = {vb};
+            VkDeviceSize offsets[] = {0};
+            vkCmdBindVertexBuffers(command_buffers[current_frame], 0, 1, vertexBuffers, offsets);
+            last_bound_vertex_buffer = vb;
+        }
         vkCmdDraw(command_buffers[current_frame], static_cast<uint32_t>(vulkanMesh->getVertexCount()), 1, 0, 0);
         return;
     }
@@ -3768,7 +3893,10 @@ void VulkanRenderAPI::renderMesh(const mesh& m, const RenderState& state)
             selectedPipeline = pipeline_no_blend;
             break;
     }
-    vkCmdBindPipeline(command_buffers[current_frame], VK_PIPELINE_BIND_POINT_GRAPHICS, selectedPipeline);
+    if (selectedPipeline != last_bound_pipeline) {
+        vkCmdBindPipeline(command_buffers[current_frame], VK_PIPELINE_BIND_POINT_GRAPHICS, selectedPipeline);
+        last_bound_pipeline = selectedPipeline;
+    }
 
     // Update UBO with CSM data
     GlobalUBO ubo{};
@@ -3797,18 +3925,26 @@ void VulkanRenderAPI::renderMesh(const mesh& m, const RenderState& state)
     // Get the descriptor set index from cache
     uint32_t descSetIndex = texture_descriptor_cache[texHandle];
 
-    // Bind the per-draw descriptor set
-    vkCmdBindDescriptorSets(command_buffers[current_frame], VK_PIPELINE_BIND_POINT_GRAPHICS,
-        pipeline_layout, 0, 1, &per_draw_descriptor_sets[descSetIndex], 0, nullptr);
+    // Bind the per-draw descriptor set (with redundant bind tracking)
+    VkDescriptorSet ds = per_draw_descriptor_sets[descSetIndex];
+    if (ds != last_bound_descriptor_set) {
+        vkCmdBindDescriptorSets(command_buffers[current_frame], VK_PIPELINE_BIND_POINT_GRAPHICS,
+            pipeline_layout, 0, 1, &ds, 0, nullptr);
+        last_bound_descriptor_set = ds;
+    }
 
     // Push model matrix
     vkCmdPushConstants(command_buffers[current_frame], pipeline_layout,
         VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(glm::mat4), &current_model_matrix);
 
-    // Bind vertex buffer and draw
-    VkBuffer vertexBuffers[] = {vulkanMesh->getVertexBuffer()};
-    VkDeviceSize offsets[] = {0};
-    vkCmdBindVertexBuffers(command_buffers[current_frame], 0, 1, vertexBuffers, offsets);
+    // Bind vertex buffer and draw (with redundant bind tracking)
+    VkBuffer vb = vulkanMesh->getVertexBuffer();
+    if (vb != last_bound_vertex_buffer) {
+        VkBuffer vertexBuffers[] = {vb};
+        VkDeviceSize offsets[] = {0};
+        vkCmdBindVertexBuffers(command_buffers[current_frame], 0, 1, vertexBuffers, offsets);
+        last_bound_vertex_buffer = vb;
+    }
 
     vkCmdDraw(command_buffers[current_frame], static_cast<uint32_t>(vulkanMesh->getVertexCount()), 1, 0, 0);
 }
@@ -3837,9 +3973,13 @@ void VulkanRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t
         vkCmdPushConstants(command_buffers[current_frame], shadow_pipeline_layout,
             VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(glm::mat4), &current_model_matrix);
 
-        VkBuffer vertexBuffers[] = {vulkanMesh->getVertexBuffer()};
-        VkDeviceSize offsets[] = {0};
-        vkCmdBindVertexBuffers(command_buffers[current_frame], 0, 1, vertexBuffers, offsets);
+        VkBuffer vb = vulkanMesh->getVertexBuffer();
+        if (vb != last_bound_vertex_buffer) {
+            VkBuffer vertexBuffers[] = {vb};
+            VkDeviceSize offsets[] = {0};
+            vkCmdBindVertexBuffers(command_buffers[current_frame], 0, 1, vertexBuffers, offsets);
+            last_bound_vertex_buffer = vb;
+        }
         vkCmdDraw(command_buffers[current_frame], static_cast<uint32_t>(vertex_count), 1,
                   static_cast<uint32_t>(start_vertex), 0);
         return;
@@ -3859,7 +3999,10 @@ void VulkanRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t
             selectedPipeline = pipeline_no_blend;
             break;
     }
-    vkCmdBindPipeline(command_buffers[current_frame], VK_PIPELINE_BIND_POINT_GRAPHICS, selectedPipeline);
+    if (selectedPipeline != last_bound_pipeline) {
+        vkCmdBindPipeline(command_buffers[current_frame], VK_PIPELINE_BIND_POINT_GRAPHICS, selectedPipeline);
+        last_bound_pipeline = selectedPipeline;
+    }
 
     // Update UBO with CSM data
     GlobalUBO ubo{};
@@ -3887,18 +4030,26 @@ void VulkanRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t
     // Get the descriptor set index from cache
     uint32_t descSetIndex = texture_descriptor_cache[bound_texture];
 
-    // Bind the per-draw descriptor set
-    vkCmdBindDescriptorSets(command_buffers[current_frame], VK_PIPELINE_BIND_POINT_GRAPHICS,
-        pipeline_layout, 0, 1, &per_draw_descriptor_sets[descSetIndex], 0, nullptr);
+    // Bind the per-draw descriptor set (with redundant bind tracking)
+    VkDescriptorSet ds = per_draw_descriptor_sets[descSetIndex];
+    if (ds != last_bound_descriptor_set) {
+        vkCmdBindDescriptorSets(command_buffers[current_frame], VK_PIPELINE_BIND_POINT_GRAPHICS,
+            pipeline_layout, 0, 1, &ds, 0, nullptr);
+        last_bound_descriptor_set = ds;
+    }
 
     // Push model matrix
     vkCmdPushConstants(command_buffers[current_frame], pipeline_layout,
         VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(glm::mat4), &current_model_matrix);
 
-    // Bind vertex buffer and draw range
-    VkBuffer vertexBuffers[] = {vulkanMesh->getVertexBuffer()};
-    VkDeviceSize offsets[] = {0};
-    vkCmdBindVertexBuffers(command_buffers[current_frame], 0, 1, vertexBuffers, offsets);
+    // Bind vertex buffer and draw range (with redundant bind tracking)
+    VkBuffer vb = vulkanMesh->getVertexBuffer();
+    if (vb != last_bound_vertex_buffer) {
+        VkBuffer vertexBuffers[] = {vb};
+        VkDeviceSize offsets[] = {0};
+        vkCmdBindVertexBuffers(command_buffers[current_frame], 0, 1, vertexBuffers, offsets);
+        last_bound_vertex_buffer = vb;
+    }
 
     vkCmdDraw(command_buffers[current_frame], static_cast<uint32_t>(vertex_count), 1,
               static_cast<uint32_t>(start_vertex), 0);
@@ -4044,8 +4195,11 @@ void VulkanRenderAPI::beginCascade(int cascadeIndex)
 
     vkCmdBeginRenderPass(command_buffers[current_frame], &rpInfo, VK_SUBPASS_CONTENTS_INLINE);
 
-    // Bind shadow pipeline
+    // Bind shadow pipeline (reset tracking -- new render pass)
     vkCmdBindPipeline(command_buffers[current_frame], VK_PIPELINE_BIND_POINT_GRAPHICS, shadow_pipeline);
+    last_bound_pipeline = shadow_pipeline;
+    last_bound_descriptor_set = VK_NULL_HANDLE;
+    last_bound_vertex_buffer = VK_NULL_HANDLE;
 
     // Bind shadow descriptor set
     vkCmdBindDescriptorSets(command_buffers[current_frame], VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -4076,11 +4230,18 @@ void VulkanRenderAPI::endShadowPass()
 
     in_shadow_pass = false;
 
-    // Begin main render pass again
+    // Begin main render pass again - use correct target based on FXAA state
     VkRenderPassBeginInfo rpInfo{};
     rpInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-    rpInfo.renderPass = render_pass;
-    rpInfo.framebuffer = framebuffers[current_image_index];
+
+    if (fxaaEnabled && fxaa_initialized) {
+        rpInfo.renderPass = offscreen_render_pass;
+        rpInfo.framebuffer = offscreen_framebuffers[0];
+    } else {
+        rpInfo.renderPass = render_pass;
+        rpInfo.framebuffer = framebuffers[current_image_index];
+    }
+
     rpInfo.renderArea.offset = {0, 0};
     rpInfo.renderArea.extent = swapchain_extent;
 
@@ -4093,8 +4254,11 @@ void VulkanRenderAPI::endShadowPass()
     vkCmdBeginRenderPass(command_buffers[current_frame], &rpInfo, VK_SUBPASS_CONTENTS_INLINE);
     main_pass_started = true;
 
-    // Bind main pipeline
+    // Bind main pipeline (reset tracking -- new render pass)
     vkCmdBindPipeline(command_buffers[current_frame], VK_PIPELINE_BIND_POINT_GRAPHICS, graphics_pipeline);
+    last_bound_pipeline = graphics_pipeline;
+    last_bound_descriptor_set = VK_NULL_HANDLE;
+    last_bound_vertex_buffer = VK_NULL_HANDLE;
 
     // Restore viewport and scissor for main pass
     VkViewport viewport{};

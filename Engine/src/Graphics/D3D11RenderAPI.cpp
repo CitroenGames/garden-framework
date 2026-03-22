@@ -433,11 +433,11 @@ bool D3D11RenderAPI::createDepthStencilStates()
 bool D3D11RenderAPI::createSamplers()
 {
     D3D11_SAMPLER_DESC samplerDesc = {};
-    samplerDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+    samplerDesc.Filter = D3D11_FILTER_ANISOTROPIC;
     samplerDesc.AddressU = D3D11_TEXTURE_ADDRESS_WRAP;
     samplerDesc.AddressV = D3D11_TEXTURE_ADDRESS_WRAP;
     samplerDesc.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
-    samplerDesc.MaxAnisotropy = 1;
+    samplerDesc.MaxAnisotropy = 16;
     samplerDesc.ComparisonFunc = D3D11_COMPARISON_NEVER;
     samplerDesc.MaxLOD = D3D11_FLOAT32_MAX;
 
@@ -860,6 +860,37 @@ void D3D11RenderAPI::beginFrame()
     {
         model_matrix_stack.pop();
     }
+
+    // Reset state tracking (render target change invalidates cached state)
+    last_bound_vs = nullptr;
+    last_bound_ps = nullptr;
+    last_bound_layout = nullptr;
+    last_bound_vb = nullptr;
+    last_bound_rasterizer = nullptr;
+    last_bound_blend = nullptr;
+    last_bound_depth = nullptr;
+    currentBoundTexture = INVALID_TEXTURE;
+
+    // Bind persistent resources for the main pass
+    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    // Bind shadow map SRV and samplers once for the entire main pass
+    context->PSSetShaderResources(1, 1, shadowSRV.GetAddressOf());
+    ID3D11SamplerState* samplers[] = { linearSampler.Get(), shadowSampler.Get() };
+    context->PSSetSamplers(0, 2, samplers);
+
+    // Bind constant buffer slots (contents updated lazily)
+    context->VSSetConstantBuffers(0, 1, globalCBuffer.GetAddressOf());
+    context->VSSetConstantBuffers(1, 1, perObjectCBuffer.GetAddressOf());
+    context->PSSetConstantBuffers(0, 1, globalCBuffer.GetAddressOf());
+    context->PSSetConstantBuffers(1, 1, perObjectCBuffer.GetAddressOf());
+
+    // Flush global CBuffer if dirty (camera/lighting set before beginFrame)
+    if (global_cbuffer_dirty)
+    {
+        updateGlobalCBuffer();
+        global_cbuffer_dirty = false;
+    }
 }
 
 void D3D11RenderAPI::endFrame()
@@ -909,7 +940,7 @@ void D3D11RenderAPI::endFrame()
 
 void D3D11RenderAPI::present()
 {
-    swapChain->Present(1, 0);
+    swapChain->Present(presentInterval, 0);
 }
 
 void D3D11RenderAPI::clear(const glm::vec3& color)
@@ -935,6 +966,7 @@ void D3D11RenderAPI::setCamera(const camera& cam)
 
     // D3D11 now using Right-Handed coordinates
     view_matrix = glm::lookAt(pos, target, up);
+    global_cbuffer_dirty = true;
 }
 
 void D3D11RenderAPI::pushMatrix()
@@ -1100,15 +1132,20 @@ TextureHandle D3D11RenderAPI::loadTextureFromMemory(const uint8_t* pixels, int w
 
 void D3D11RenderAPI::bindTexture(TextureHandle texture)
 {
-    if (texture != INVALID_TEXTURE && textures.count(texture))
+    if (texture == currentBoundTexture)
+        return;
+
+    if (texture != INVALID_TEXTURE)
     {
-        currentBoundTexture = texture;
-        context->PSSetShaderResources(0, 1, textures[texture].srv.GetAddressOf());
+        auto it = textures.find(texture);
+        if (it != textures.end())
+        {
+            currentBoundTexture = texture;
+            context->PSSetShaderResources(0, 1, it->second.srv.GetAddressOf());
+            return;
+        }
     }
-    else
-    {
-        unbindTexture();
-    }
+    unbindTexture();
 }
 
 void D3D11RenderAPI::unbindTexture()
@@ -1177,50 +1214,56 @@ void D3D11RenderAPI::updateShadowCBuffer(const glm::mat4& lightSpace, const glm:
 
 void D3D11RenderAPI::applyRenderState(const RenderState& state)
 {
-    // Culling
+    // Culling - with state tracking
+    ID3D11RasterizerState* desired_rasterizer = nullptr;
     switch (state.cull_mode)
     {
-    case CullMode::None:
-        context->RSSetState(rasterizerCullNone.Get());
-        break;
-    case CullMode::Back:
-        context->RSSetState(rasterizerCullBack.Get());
-        break;
-    case CullMode::Front:
-        context->RSSetState(rasterizerCullFront.Get());
-        break;
+    case CullMode::None:  desired_rasterizer = rasterizerCullNone.Get(); break;
+    case CullMode::Back:  desired_rasterizer = rasterizerCullBack.Get(); break;
+    case CullMode::Front: desired_rasterizer = rasterizerCullFront.Get(); break;
+    }
+    if (desired_rasterizer != last_bound_rasterizer)
+    {
+        context->RSSetState(desired_rasterizer);
+        last_bound_rasterizer = desired_rasterizer;
     }
 
-    // Blending
+    // Blending - with state tracking
+    ID3D11BlendState* desired_blend = nullptr;
     switch (state.blend_mode)
     {
-    case BlendMode::None:
-        context->OMSetBlendState(blendStateNone.Get(), nullptr, 0xffffffff);
-        break;
-    case BlendMode::Alpha:
-        context->OMSetBlendState(blendStateAlpha.Get(), nullptr, 0xffffffff);
-        break;
-    case BlendMode::Additive:
-        context->OMSetBlendState(blendStateAdditive.Get(), nullptr, 0xffffffff);
-        break;
+    case BlendMode::None:     desired_blend = blendStateNone.Get(); break;
+    case BlendMode::Alpha:    desired_blend = blendStateAlpha.Get(); break;
+    case BlendMode::Additive: desired_blend = blendStateAdditive.Get(); break;
+    }
+    if (desired_blend != last_bound_blend)
+    {
+        context->OMSetBlendState(desired_blend, nullptr, 0xffffffff);
+        last_bound_blend = desired_blend;
     }
 
-    // Depth testing
+    // Depth testing - with state tracking
+    ID3D11DepthStencilState* desired_depth = nullptr;
     if (state.depth_test == DepthTest::None)
     {
-        context->OMSetDepthStencilState(depthStateNone.Get(), 0);
+        desired_depth = depthStateNone.Get();
     }
     else if (!state.depth_write)
     {
-        context->OMSetDepthStencilState(depthStateReadOnly.Get(), 0);
+        desired_depth = depthStateReadOnly.Get();
     }
     else if (state.depth_test == DepthTest::Less)
     {
-        context->OMSetDepthStencilState(depthStateLess.Get(), 0);
+        desired_depth = depthStateLess.Get();
     }
     else
     {
-        context->OMSetDepthStencilState(depthStateLessEqual.Get(), 0);
+        desired_depth = depthStateLessEqual.Get();
+    }
+    if (desired_depth != last_bound_depth)
+    {
+        context->OMSetDepthStencilState(desired_depth, 0);
+        last_bound_depth = desired_depth;
     }
 }
 
@@ -1237,67 +1280,72 @@ void D3D11RenderAPI::renderMesh(const mesh& m, const RenderState& state)
             return;
     }
 
-    D3D11Mesh* d3dMesh = dynamic_cast<D3D11Mesh*>(m.gpu_mesh);
-    if (!d3dMesh)
-        return;
+    D3D11Mesh* d3dMesh = static_cast<D3D11Mesh*>(m.gpu_mesh);
 
     if (in_shadow_pass)
     {
-        // Shadow pass rendering
+        // Shadow pass - only update per-object shadow CBuffer
+        // Shaders, layout, and CB slot are already bound in beginCascade()
         updateShadowCBuffer(lightSpaceMatrices[currentCascade], current_model_matrix);
-
-        context->VSSetShader(shadowVertexShader.Get(), nullptr, 0);
-        context->PSSetShader(shadowPixelShader.Get(), nullptr, 0);
-        context->IASetInputLayout(basicInputLayout.Get());
-        context->VSSetConstantBuffers(0, 1, shadowCBuffer.GetAddressOf());
     }
     else
     {
-        // Main pass rendering
-        updateGlobalCBuffer();
+        // Flush global CBuffer if dirty
+        if (global_cbuffer_dirty)
+        {
+            updateGlobalCBuffer();
+            global_cbuffer_dirty = false;
+        }
+
+        // Update per-object data
         bool useTexture = m.texture_set && m.texture != INVALID_TEXTURE;
         updatePerObjectCBuffer(state.color, useTexture);
 
+        // Bind shaders with state tracking
+        ID3D11VertexShader* desired_vs;
+        ID3D11PixelShader* desired_ps;
         if (state.lighting && lighting_enabled)
         {
-            context->VSSetShader(basicVertexShader.Get(), nullptr, 0);
-            context->PSSetShader(basicPixelShader.Get(), nullptr, 0);
+            desired_vs = basicVertexShader.Get();
+            desired_ps = basicPixelShader.Get();
         }
         else
         {
-            context->VSSetShader(unlitVertexShader.Get(), nullptr, 0);
-            context->PSSetShader(unlitPixelShader.Get(), nullptr, 0);
+            desired_vs = unlitVertexShader.Get();
+            desired_ps = unlitPixelShader.Get();
         }
-
-        context->IASetInputLayout(basicInputLayout.Get());
-        context->VSSetConstantBuffers(0, 1, globalCBuffer.GetAddressOf());
-        context->VSSetConstantBuffers(1, 1, perObjectCBuffer.GetAddressOf());
-        context->PSSetConstantBuffers(0, 1, globalCBuffer.GetAddressOf());
-        context->PSSetConstantBuffers(1, 1, perObjectCBuffer.GetAddressOf());
-
-        // Bind texture
-        if (useTexture)
+        if (desired_vs != last_bound_vs)
         {
-            bindTexture(m.texture);
+            context->VSSetShader(desired_vs, nullptr, 0);
+            last_bound_vs = desired_vs;
         }
-        else
+        if (desired_ps != last_bound_ps)
         {
-            bindTexture(defaultTexture);
+            context->PSSetShader(desired_ps, nullptr, 0);
+            last_bound_ps = desired_ps;
         }
 
-        // Bind shadow map
-        context->PSSetShaderResources(1, 1, shadowSRV.GetAddressOf());
+        // Input layout with state tracking
+        if (basicInputLayout.Get() != last_bound_layout)
+        {
+            context->IASetInputLayout(basicInputLayout.Get());
+            last_bound_layout = basicInputLayout.Get();
+        }
 
-        // Set samplers
-        ID3D11SamplerState* samplers[] = { linearSampler.Get(), shadowSampler.Get() };
-        context->PSSetSamplers(0, 2, samplers);
+        // Bind texture (early-out if already bound handled inside bindTexture)
+        bindTexture(useTexture ? m.texture : defaultTexture);
 
         applyRenderState(state);
     }
 
-    // Draw
-    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    d3dMesh->bind();
+    // Bind vertex buffer with state tracking
+    ID3D11Buffer* vb = d3dMesh->getVertexBuffer();
+    if (vb != last_bound_vb)
+    {
+        d3dMesh->bind();
+        last_bound_vb = vb;
+    }
+
     context->Draw(static_cast<UINT>(d3dMesh->getVertexCount()), 0);
 }
 
@@ -1321,55 +1369,67 @@ void D3D11RenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t 
             return;
     }
 
-    D3D11Mesh* d3dMesh = dynamic_cast<D3D11Mesh*>(m.gpu_mesh);
-    if (!d3dMesh)
-        return;
+    D3D11Mesh* d3dMesh = static_cast<D3D11Mesh*>(m.gpu_mesh);
 
     if (in_shadow_pass)
     {
+        // Shadow pass - only update per-object shadow CBuffer
         updateShadowCBuffer(lightSpaceMatrices[currentCascade], current_model_matrix);
-
-        context->VSSetShader(shadowVertexShader.Get(), nullptr, 0);
-        context->PSSetShader(shadowPixelShader.Get(), nullptr, 0);
-        context->IASetInputLayout(basicInputLayout.Get());
-        context->VSSetConstantBuffers(0, 1, shadowCBuffer.GetAddressOf());
     }
     else
     {
-        updateGlobalCBuffer();
+        // Flush global CBuffer if dirty
+        if (global_cbuffer_dirty)
+        {
+            updateGlobalCBuffer();
+            global_cbuffer_dirty = false;
+        }
+
         // For multi-material rendering, texture is already bound by the caller
         updatePerObjectCBuffer(state.color, true);
 
+        // Bind shaders with state tracking
+        ID3D11VertexShader* desired_vs;
+        ID3D11PixelShader* desired_ps;
         if (state.lighting && lighting_enabled)
         {
-            context->VSSetShader(basicVertexShader.Get(), nullptr, 0);
-            context->PSSetShader(basicPixelShader.Get(), nullptr, 0);
+            desired_vs = basicVertexShader.Get();
+            desired_ps = basicPixelShader.Get();
         }
         else
         {
-            context->VSSetShader(unlitVertexShader.Get(), nullptr, 0);
-            context->PSSetShader(unlitPixelShader.Get(), nullptr, 0);
+            desired_vs = unlitVertexShader.Get();
+            desired_ps = unlitPixelShader.Get();
+        }
+        if (desired_vs != last_bound_vs)
+        {
+            context->VSSetShader(desired_vs, nullptr, 0);
+            last_bound_vs = desired_vs;
+        }
+        if (desired_ps != last_bound_ps)
+        {
+            context->PSSetShader(desired_ps, nullptr, 0);
+            last_bound_ps = desired_ps;
         }
 
-        context->IASetInputLayout(basicInputLayout.Get());
-        context->VSSetConstantBuffers(0, 1, globalCBuffer.GetAddressOf());
-        context->VSSetConstantBuffers(1, 1, perObjectCBuffer.GetAddressOf());
-        context->PSSetConstantBuffers(0, 1, globalCBuffer.GetAddressOf());
-        context->PSSetConstantBuffers(1, 1, perObjectCBuffer.GetAddressOf());
-
-        // Bind shadow map
-        context->PSSetShaderResources(1, 1, shadowSRV.GetAddressOf());
-
-        // Set samplers
-        ID3D11SamplerState* samplers[] = { linearSampler.Get(), shadowSampler.Get() };
-        context->PSSetSamplers(0, 2, samplers);
+        // Input layout with state tracking
+        if (basicInputLayout.Get() != last_bound_layout)
+        {
+            context->IASetInputLayout(basicInputLayout.Get());
+            last_bound_layout = basicInputLayout.Get();
+        }
 
         applyRenderState(state);
     }
 
-    // Draw range
-    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    d3dMesh->bind();
+    // Bind vertex buffer with state tracking
+    ID3D11Buffer* vb = d3dMesh->getVertexBuffer();
+    if (vb != last_bound_vb)
+    {
+        d3dMesh->bind();
+        last_bound_vb = vb;
+    }
+
     context->Draw(static_cast<UINT>(vertex_count), static_cast<UINT>(start_vertex));
 }
 
@@ -1389,6 +1449,7 @@ void D3D11RenderAPI::setLighting(const glm::vec3& ambient, const glm::vec3& diff
     current_light_ambient = ambient;
     current_light_diffuse = diffuse;
     current_light_direction = glm::normalize(direction);
+    global_cbuffer_dirty = true;
 }
 
 void D3D11RenderAPI::renderSkybox()
@@ -1431,6 +1492,14 @@ void D3D11RenderAPI::renderSkybox()
     // Restore state
     context->RSSetState(rasterizerCullBack.Get());
     context->OMSetDepthStencilState(depthStateLessEqual.Get(), 0);
+
+    // Invalidate state tracking (skybox changed shaders, layout, CBs, VB)
+    last_bound_vs = skyVertexShader.Get();
+    last_bound_ps = skyPixelShader.Get();
+    last_bound_layout = skyInputLayout.Get();
+    last_bound_vb = skyboxVB.Get();
+    last_bound_rasterizer = rasterizerCullBack.Get();
+    last_bound_depth = depthStateLessEqual.Get();
 }
 
 void D3D11RenderAPI::calculateCascadeSplits(float nearPlane, float farPlane)
@@ -1566,6 +1635,7 @@ void D3D11RenderAPI::beginShadowPass(const glm::vec3& lightDir)
     context->ClearDepthStencilView(shadowDSVs[0].Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
 
     context->RSSetState(rasterizerShadow.Get());
+    last_bound_rasterizer = rasterizerShadow.Get();
 
     currentCascade = 0;
 }
@@ -1609,6 +1679,7 @@ void D3D11RenderAPI::beginShadowPass(const glm::vec3& lightDir, const camera& ca
     context->RSSetViewports(1, &viewport);
 
     context->RSSetState(rasterizerShadow.Get());
+    last_bound_rasterizer = rasterizerShadow.Get();
 
     currentCascade = 0;
 }
@@ -1620,6 +1691,19 @@ void D3D11RenderAPI::beginCascade(int cascadeIndex)
     ID3D11RenderTargetView* nullRTV = nullptr;
     context->OMSetRenderTargets(1, &nullRTV, shadowDSVs[cascadeIndex].Get());
     context->ClearDepthStencilView(shadowDSVs[cascadeIndex].Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
+
+    // Bind shadow pass state once per cascade (null PS for depth-only, enables early-Z/Hi-Z)
+    context->VSSetShader(shadowVertexShader.Get(), nullptr, 0);
+    context->PSSetShader(nullptr, nullptr, 0);
+    context->IASetInputLayout(basicInputLayout.Get());
+    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    context->VSSetConstantBuffers(0, 1, shadowCBuffer.GetAddressOf());
+
+    // Reset VB tracking for this cascade (render target changed)
+    last_bound_vs = shadowVertexShader.Get();
+    last_bound_ps = nullptr;
+    last_bound_layout = basicInputLayout.Get();
+    last_bound_vb = nullptr;
 }
 
 void D3D11RenderAPI::endShadowPass()
@@ -1645,6 +1729,10 @@ void D3D11RenderAPI::endShadowPass()
     }
 
     context->RSSetState(rasterizerCullBack.Get());
+    last_bound_rasterizer = rasterizerCullBack.Get();
+
+    // Mark global CBuffer dirty - shadow pass modified view_matrix
+    global_cbuffer_dirty = true;
 }
 
 void D3D11RenderAPI::bindShadowMap(int textureUnit)

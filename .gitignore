@@ -434,3 +434,6 @@ FodyWeavers.xsd
 
 /build/
 .DS_Store
+pipeline_cache.bin
+imgui.ini
+Game/Client/config.cfg
