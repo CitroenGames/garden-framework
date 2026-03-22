@@ -182,6 +182,7 @@ int main(int argc, char* argv[])
 
     /* Create world */
     _world = world();
+    _world.initializePhysics();
     _network.setWorld(&_world);
 
     /* Level loading */

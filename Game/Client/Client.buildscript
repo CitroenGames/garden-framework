@@ -3,6 +3,10 @@ if(Linux)
 {
     find_package(SDL2 REQUIRED)
 }
+if(macOS)
+{
+    find_package(SDL2 REQUIRED)
+}
 if(Windows)
 {
 find_package(DirectX11 REQUIRED)
@@ -28,6 +32,12 @@ if(Linux)
     libs = ${Vulkan_LIBRARIES}
     libdirs = ${Vulkan_LIBRARY_DIRS}, ${SDL2_LIBRARY_DIRS}
     ldflags = -Wl,-rpath,/opt/homebrew/lib
+}
+if(macOS)
+{
+    includes = src, ../shared
+    libs = ${Vulkan_LIBRARIES}, -framework Metal, -framework QuartzCore, -framework Cocoa, -framework Foundation, -lobjc
+    libdirs = ${Vulkan_LIBRARY_DIRS}, ${SDL2_LIBRARY_DIRS}
 }
 target_link_libraries(
     PRIVATE Engine

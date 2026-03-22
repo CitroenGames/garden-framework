@@ -5,6 +5,10 @@ if(Linux)
 {
     find_package(SDL2 REQUIRED)
 }
+if(macOS)
+{
+    find_package(SDL2 REQUIRED)
+}
 if(Windows)
 {
     find_package(DirectX11 REQUIRED)
@@ -16,14 +20,19 @@ sources = {
     src/**/*.cpp
     src/Graphics/D3D11RenderAPI.cpp [windows]
     src/Graphics/D3D11Mesh.cpp [windows]
+    src/Graphics/MetalRenderAPI.mm [macOS]
+    src/Graphics/MetalMesh.mm [macOS]
 }
 headers = {
-    src/**/*.h 
+    src/**/*.h
     src/**/*.hpp
     src/Graphics/D3D11RenderAPI.hpp [windows]
     src/Graphics/D3D11Mesh.hpp [windows]
+    src/Graphics/MetalRenderAPI.hpp [macOS]
+    src/Graphics/MetalMesh.hpp [macOS]
 }
 public_includes = src, thirdparty/include, .
+defines = JPH_OBJECT_STREAM
 if(Windows)
 {
     includes = src, thirdparty/include, ${Vulkan_INCLUDE_DIRS}, ${DirectX11_INCLUDE_DIRS}
@@ -35,6 +44,13 @@ if(Linux)
     includes = src, thirdparty/include, ${Vulkan_INCLUDE_DIRS}
     libs = ${Vulkan_LIBRARIES}
     libdirs = ${Vulkan_LIBRARY_DIRS}, ${SDL2_LIBRARY_DIRS}
+}
+if(macOS)
+{
+    includes = src, thirdparty/include, ${Vulkan_INCLUDE_DIRS}
+    libs = ${Vulkan_LIBRARIES}, -framework Metal, -framework QuartzCore, -framework Cocoa
+    libdirs = ${Vulkan_LIBRARY_DIRS}, ${SDL2_LIBRARY_DIRS}
+    objcflags = -fobjc-arc
 }
 multiprocessor = true
 simd = StreamingSIMDExtensions2
@@ -51,6 +67,7 @@ target_link_libraries(
     PUBLIC VMA
     PUBLIC imgui-docking
     PUBLIC Pakker
+    PUBLIC JoltPhysics
 )
 std = 20
 utf8 = true

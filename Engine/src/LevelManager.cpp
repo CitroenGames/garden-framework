@@ -625,6 +625,37 @@ bool LevelManager::instantiateLevel(
             }
         }
 
+        // Register collider meshes with Jolt physics
+        if (game_world.registry.all_of<ColliderComponent>(e))
+        {
+            auto& col = game_world.registry.get<ColliderComponent>(e);
+            auto& t = game_world.registry.get<TransformComponent>(e);
+            LOG_ENGINE_INFO("Jolt: entity '{}' has ColliderComponent, mesh_valid={}, vertices={}, len={}",
+                entity_data.name, col.is_mesh_valid(),
+                (void*)( col.m_mesh ? col.m_mesh->vertices : nullptr),
+                col.m_mesh ? col.m_mesh->vertices_len : 0);
+            if (col.is_mesh_valid())
+            {
+                if (entity_data.type == EntityType::Physical)
+                {
+                    // Dynamic body with capsule shape for physical entities
+                    JPH::CapsuleShapeSettings capsule(0.5f, 0.3f);
+                    auto shape_result = capsule.Create();
+                    if (shape_result.IsValid())
+                    {
+                        game_world.getPhysicsSystem().createDynamicBody(
+                            t.position, t.rotation, shape_result.Get(), entity_data.mass, e);
+                    }
+                }
+                else
+                {
+                    // Static mesh collider
+                    game_world.getPhysicsSystem().createStaticMeshBody(
+                        t.position, t.rotation, *col.get_mesh(), e);
+                }
+            }
+        }
+
         // Player
         if (entity_data.type == EntityType::Player)
         {
@@ -633,7 +664,27 @@ bool LevelManager::instantiateLevel(
             pc.speed = entity_data.speed;
             pc.jump_force = entity_data.jump_force;
             pc.mouse_sensitivity = entity_data.mouse_sensitivity;
-            // Gravity handled by RigidBody
+
+            // Ensure player has a RigidBodyComponent
+            if (!game_world.registry.all_of<RigidBodyComponent>(e))
+            {
+                game_world.registry.emplace<RigidBodyComponent>(e);
+                auto& rb = game_world.registry.get<RigidBodyComponent>(e);
+                rb.mass = 80.0f;
+                rb.apply_gravity = true;
+            }
+
+            // Create Jolt capsule body for player collision
+            {
+                auto& t = game_world.registry.get<TransformComponent>(e);
+                JPH::CapsuleShapeSettings capsule(0.9f, 0.3f); // half-height 0.9, radius 0.3
+                auto shape_result = capsule.Create();
+                if (shape_result.IsValid())
+                {
+                    game_world.getPhysicsSystem().createDynamicBody(
+                        t.position, t.rotation, shape_result.Get(), 80.0f, e);
+                }
+            }
             
             if (out_player_entity) *out_player_entity = e;
             printf("NOTE: Player entity '%s' created\n", entity_data.name.c_str());

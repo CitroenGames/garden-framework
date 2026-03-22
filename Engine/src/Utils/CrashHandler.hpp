@@ -25,6 +25,11 @@
 #include <pwd.h>
 #endif
 
+#if defined(__APPLE__) || defined(__linux__)
+#include <fcntl.h>
+#include <string.h>
+#endif
+
 #include <fstream>
 #include <iostream>
 #include <string>
@@ -32,6 +37,37 @@
 #include <thread>
 
 constexpr int MAX_FRAMES = 20; // limit the number of frames for brevity
+
+// ============================================================================
+// Async-signal-safe write helpers (no malloc, no locks, no C++ streams)
+// ============================================================================
+#if defined(__APPLE__) || defined(__linux__)
+namespace CrashHandlerSafe {
+    static inline void safe_write(int fd, const char* s) {
+        if (s) write(fd, s, strlen(s));
+    }
+
+    static inline void safe_write_num(int fd, unsigned long val) {
+        char buf[24];
+        int i = sizeof(buf) - 1;
+        buf[i] = '\0';
+        if (val == 0) { buf[--i] = '0'; }
+        else { while (val > 0 && i > 0) { buf[--i] = '0' + (val % 10); val /= 10; } }
+        safe_write(fd, &buf[i]);
+    }
+
+    static inline void safe_write_hex(int fd, unsigned long val) {
+        static const char hex[] = "0123456789abcdef";
+        char buf[20];
+        int i = sizeof(buf) - 1;
+        buf[i] = '\0';
+        if (val == 0) { buf[--i] = '0'; }
+        else { while (val > 0 && i > 0) { buf[--i] = hex[val & 0xf]; val >>= 4; } }
+        safe_write(fd, "0x");
+        safe_write(fd, &buf[i]);
+    }
+}
+#endif
 
 namespace Paingine2D {
 
@@ -49,10 +85,13 @@ namespace Paingine2D {
         // Unix (macOS/Linux) specific
 #if defined(__APPLE__) || defined(__linux__)
         struct sigaction m_previousSignalActions[NSIG];
+        // Pre-computed path prefix for signal-safe crash reporting (no allocation needed in handler)
+        char m_pathPrefix[512];
+        int m_pathPrefixLen = 0;
 #endif
 
         // Private constructor for singleton
-        CrashHandler() {}
+        CrashHandler() { memset(m_pathPrefix, 0, sizeof(m_pathPrefix)); }
 
     public:
         static CrashHandler* GetInstance() {
@@ -125,6 +164,15 @@ namespace Paingine2D {
 #ifdef _WIN32
             m_previousFilter = SetUnhandledExceptionFilter(WindowsExceptionHandler);
 #elif defined(__APPLE__) || defined(__linux__)
+            // Pre-compute crash report path prefix for async-signal-safe handler
+            {
+                std::string prefix = m_crashReportFolder + m_applicationName + "_";
+                size_t len = prefix.size();
+                if (len >= sizeof(m_pathPrefix)) len = sizeof(m_pathPrefix) - 1;
+                memcpy(m_pathPrefix, prefix.c_str(), len);
+                m_pathPrefix[len] = '\0';
+                m_pathPrefixLen = (int)len;
+            }
             InstallSignalHandlers();
 #endif
 
@@ -480,18 +528,77 @@ namespace Paingine2D {
             }
         }
 
+        // Fully async-signal-safe crash handler — no malloc, no C++ streams, no locks
         static void UnixSignalHandler(int sig, siginfo_t* info, void* context) {
-            CrashHandler* handler = CrashHandler::GetInstance();
+            using namespace CrashHandlerSafe;
 
-            // Generate the crash report path
-            std::string crashReportPath = handler->GenerateCrashReportPath();
+            // Prevent recursive signal handler invocation
+            static volatile sig_atomic_t s_handling = 0;
+            if (s_handling) { _exit(128 + sig); }
+            s_handling = 1;
 
-            // Write crash report
-            handler->WriteUnixCrashReport(sig, info, crashReportPath);
+            CrashHandler* handler = s_instance; // Direct access, no allocation
 
-            // Show crash info
-            std::cerr << "The application has crashed. A crash report has been saved to: "
-                << crashReportPath << ".log" << std::endl;
+            // Build filename on stack: prefix + timestamp + ".log"
+            char filepath[600];
+            memset(filepath, 0, sizeof(filepath));
+            if (handler && handler->m_pathPrefixLen > 0) {
+                memcpy(filepath, handler->m_pathPrefix, handler->m_pathPrefixLen);
+            }
+            // Append timestamp (YYYYMMDD_HHMMSS) using time() — async-signal-safe
+            time_t now = time(nullptr);
+            // Manual formatting without localtime (not async-signal-safe)
+            // Use seconds-since-epoch as a simple unique identifier
+            {
+                char ts[24];
+                int i = sizeof(ts) - 1;
+                ts[i] = '\0';
+                unsigned long t = (unsigned long)now;
+                if (t == 0) { ts[--i] = '0'; }
+                else { while (t > 0 && i > 0) { ts[--i] = '0' + (t % 10); t /= 10; } }
+                size_t plen = strlen(filepath);
+                size_t tlen = strlen(&ts[i]);
+                if (plen + tlen + 5 < sizeof(filepath)) {
+                    memcpy(filepath + plen, &ts[i], tlen);
+                    memcpy(filepath + plen + tlen, ".log", 5); // includes null terminator
+                }
+            }
+
+            // Open crash log file with POSIX open() — async-signal-safe
+            int fd = open(filepath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (fd < 0) fd = STDERR_FILENO; // Fallback to stderr
+
+            // Write crash report header
+            safe_write(fd, "======= Crash Report =======\n");
+            safe_write(fd, "Signal: ");
+            safe_write_num(fd, (unsigned long)sig);
+            safe_write(fd, " (");
+            safe_write(fd, strsignal(sig));
+            safe_write(fd, ")\n");
+
+            if (info) {
+                safe_write(fd, "Signal code: ");
+                safe_write_num(fd, (unsigned long)info->si_code);
+                safe_write(fd, "\nFault address: ");
+                safe_write_hex(fd, (unsigned long)info->si_addr);
+                safe_write(fd, "\n");
+            }
+
+            // Write stack trace using backtrace_symbols_fd — async-signal-safe, no malloc
+            safe_write(fd, "Stack trace:\n");
+            void* stack[64];
+            int frames = backtrace(stack, 64);
+            backtrace_symbols_fd(stack, frames, fd);
+
+            if (fd != STDERR_FILENO) {
+                close(fd);
+            }
+
+            // Print to stderr
+            static const char msg[] = "The application has crashed. A crash report has been saved to: ";
+            write(STDERR_FILENO, msg, sizeof(msg) - 1);
+            write(STDERR_FILENO, filepath, strlen(filepath));
+            write(STDERR_FILENO, "\n", 1);
 
             // Restore default handler and re-raise signal
             ::signal(sig, SIG_DFL);
