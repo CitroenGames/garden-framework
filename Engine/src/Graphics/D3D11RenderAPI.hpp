@@ -188,6 +188,19 @@ private:
     // Default white texture
     TextureHandle defaultTexture = INVALID_TEXTURE;
 
+    // State tracking - avoid redundant D3D11 API calls
+    ID3D11VertexShader* last_bound_vs = nullptr;
+    ID3D11PixelShader* last_bound_ps = nullptr;
+    ID3D11InputLayout* last_bound_layout = nullptr;
+    ID3D11Buffer* last_bound_vb = nullptr;
+    ID3D11RasterizerState* last_bound_rasterizer = nullptr;
+    ID3D11BlendState* last_bound_blend = nullptr;
+    ID3D11DepthStencilState* last_bound_depth = nullptr;
+    bool global_cbuffer_dirty = true;
+
+    // VSync / present interval
+    int presentInterval = 1;
+
     // Internal helper methods
     bool createDevice();
     bool createSwapChain();

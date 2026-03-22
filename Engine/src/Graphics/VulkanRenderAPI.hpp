@@ -1,6 +1,8 @@
 #pragma once
 
 #include "RenderAPI.hpp"
+#include "VkDeletionQueue.hpp"
+#include "VkSamplerCache.hpp"
 #include <cstdint>
 #include <stack>
 #include <vector>
@@ -189,6 +191,13 @@ private:
     VkShaderModule createShaderModule(const std::vector<char>& code);
     std::vector<char> readShaderFile(const std::string& filename);
 
+    // Pipeline cache persistence
+    bool loadPipelineCache();
+    void savePipelineCache();
+
+    // Shared staging buffer
+    void ensureStagingBuffer(VkDeviceSize requiredSize);
+
     void transitionImageLayout(VkImage image, VkFormat format,
                                VkImageLayout oldLayout, VkImageLayout newLayout,
                                uint32_t mipLevels = 1);
@@ -245,6 +254,27 @@ private:
 
     // VMA allocator
     VmaAllocator vma_allocator = nullptr;
+
+    // Deferred deletion queue
+    VkDeletionQueue deletion_queue;
+
+    // Sampler cache
+    VkSamplerCache sampler_cache;
+
+    // Disk-persisted pipeline cache
+    VkPipelineCache vk_pipeline_cache = VK_NULL_HANDLE;
+
+    // Redundant bind tracking
+    VkPipeline last_bound_pipeline = VK_NULL_HANDLE;
+    VkDescriptorSet last_bound_descriptor_set = VK_NULL_HANDLE;
+    VkBuffer last_bound_vertex_buffer = VK_NULL_HANDLE;
+
+    // Shared staging buffer
+    static constexpr VkDeviceSize STAGING_BUFFER_INITIAL_SIZE = 64 * 1024 * 1024; // 64 MB
+    VkBuffer staging_buffer = VK_NULL_HANDLE;
+    VmaAllocation staging_allocation = nullptr;
+    void* staging_mapped = nullptr;
+    VkDeviceSize staging_capacity = 0;
 
     // Pipeline
     VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
