@@ -155,6 +155,9 @@ JPH::BodyID PhysicsSystem::createDynamicBody(const glm::vec3& position, const gl
     settings.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
     settings.mMassPropertiesOverride.mMass = mass;
     settings.mAllowedDOFs = JPH::EAllowedDOFs::TranslationX | JPH::EAllowedDOFs::TranslationY | JPH::EAllowedDOFs::TranslationZ; // Lock rotation
+    settings.mMotionQuality = JPH::EMotionQuality::LinearCast; // CCD to prevent tunneling
+    settings.mFriction = 0.0f; // Disable Jolt contact friction — game code handles its own friction
+    settings.mLinearDamping = 0.0f; // Disable Jolt damping — game code handles velocity damping
 
     JPH::BodyInterface& body_interface = jolt_system->GetBodyInterface();
     JPH::Body* body = body_interface.CreateBody(settings);
@@ -222,6 +225,12 @@ void PhysicsSystem::stepPhysics(entt::registry& registry)
 {
     if (!initialized) return;
 
+    static int frame_count = 0;
+    if (frame_count < 5) {
+        LOG_ENGINE_INFO("Jolt step frame {}: {} bodies in entity_to_body map", frame_count, entity_to_body.size());
+    }
+    frame_count++;
+
     // Sync ECS -> Jolt for dynamic bodies (in case game code moved them)
     syncTransformsToJolt(registry);
 
@@ -272,6 +281,14 @@ void PhysicsSystem::syncTransformsFromJolt(entt::registry& registry)
 
         transform.position = glm::vec3(float(pos.GetX()), float(pos.GetY()), float(pos.GetZ()));
         rb.velocity = toGlm(vel);
+
+        static int from_log = 0;
+        if (from_log < 120 && registry.all_of<PlayerComponent>(entity)) {
+            printf("[FromJolt] pos=(%.4f,%.4f,%.4f) vel=(%.4f,%.4f,%.4f)\n",
+                transform.position.x, transform.position.y, transform.position.z,
+                rb.velocity.x, rb.velocity.y, rb.velocity.z);
+            from_log++;
+        }
     }
 }
 
@@ -287,6 +304,13 @@ void PhysicsSystem::syncTransformsToJolt(entt::registry& registry)
         if (body_interface.GetMotionType(body_id) != JPH::EMotionType::Dynamic) continue;
 
         auto& rb = registry.get<RigidBodyComponent>(entity);
+
+        static int to_log = 0;
+        if (to_log < 120 && registry.all_of<PlayerComponent>(entity)) {
+            printf("[ToJolt] pushing vel=(%.4f,%.4f,%.4f)\n",
+                rb.velocity.x, rb.velocity.y, rb.velocity.z);
+            to_log++;
+        }
 
         // Push velocity from game code (PlayerController) to Jolt
         body_interface.SetLinearVelocity(body_id, toJolt(rb.velocity));
@@ -309,20 +333,35 @@ void PhysicsSystem::handlePlayerCollisions(entt::registry& registry, entt::entit
 
     // Check if player has a Jolt body
     auto it = entity_to_body.find(playerEntity);
+
+    static int collision_log_count = 0;
+
     if (it != entity_to_body.end())
     {
         JPH::BodyInterface& body_interface = jolt_system->GetBodyInterface();
         JPH::Vec3 vel = body_interface.GetLinearVelocity(it->second);
 
-        // Simple ground detection: cast a short ray downward
+        // Ground detection: cast a ray downward, excluding the player's own body
         auto& transform = registry.get<TransformComponent>(playerEntity);
-        JPH::RRayCast ray(toJoltR(transform.position), JPH::Vec3(0, -1, 0) * (sphereRadius + 0.1f));
+        // Ray from player center, extending past the capsule bottom (half_height 0.9 + radius 0.3 + tolerance 0.3 = 1.5)
+        JPH::RRayCast ray(toJoltR(transform.position), JPH::Vec3(0, -1, 0) * 1.5f);
         JPH::RayCastResult hit;
+        JPH::IgnoreSingleBodyFilter body_filter(it->second);
 
-        player.grounded = jolt_system->GetNarrowPhaseQuery().CastRay(ray, hit);
+        player.grounded = jolt_system->GetNarrowPhaseQuery().CastRay(
+            ray, hit,
+            JPH::SpecifiedBroadPhaseLayerFilter(BroadPhaseLayers::NON_MOVING),
+            JPH::SpecifiedObjectLayerFilter(Layers::NON_MOVING),
+            body_filter);
         if (player.grounded)
         {
             player.ground_normal = glm::vec3(0, 1, 0); // Simplified
+        }
+
+        if (collision_log_count < 60) {
+            LOG_ENGINE_INFO("Player collision: has_body=true, grounded={}, pos=({},{},{}), vel_y={}",
+                player.grounded, transform.position.x, transform.position.y, transform.position.z, vel.GetY());
+            collision_log_count++;
         }
     }
     else
@@ -330,6 +369,10 @@ void PhysicsSystem::handlePlayerCollisions(entt::registry& registry, entt::entit
         // Fallback: no Jolt body, just reset ground state
         player.grounded = false;
         player.ground_normal = glm::vec3(0, 1, 0);
+        if (collision_log_count < 60) {
+            LOG_ENGINE_WARN("Player collision: has_body=FALSE — player has no Jolt body, using fallback (no collision!)");
+            collision_log_count++;
+        }
     }
 }
 

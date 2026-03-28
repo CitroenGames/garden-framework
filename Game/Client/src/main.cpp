@@ -67,7 +67,7 @@ static void quit_game(int code)
     ImGuiManager::get().shutdown();
     app.shutdown();
     EE::CLog::Shutdown();
-    exit(code);
+    _exit(code);
 }
 
 // System to update player representations
@@ -253,6 +253,9 @@ int main(int argc, char* argv[])
         quit_game(1);
     }
 
+    // Optimize Jolt broad phase after adding all static bodies
+    _world.getPhysicsSystem().getJoltSystem()->OptimizeBroadPhase();
+
     // Verify critical entities exist
     if (!_world.registry.valid(player_entity))
     {
@@ -290,7 +293,6 @@ int main(int argc, char* argv[])
     Uint32 delta_last = 0;
     float delta_time = 0;
 
-    atexit(SDL_Quit);
     while (1)
     {
         frame_start_ticks = SDL_GetTicks();
@@ -449,7 +451,7 @@ int main(int argc, char* argv[])
         }
 
         // Update currently possessed entity through player controller
-        player_controller->update(_world.fixed_delta);
+        player_controller->update(delta_time);
 
         // Update player representation visibility and sync
         update_player_representations(_world.registry, player_controller->isFreecamMode());
@@ -480,5 +482,5 @@ int main(int argc, char* argv[])
     }
 
     crashHandler->Shutdown();
-    exit(0);
+    _exit(0);
 }

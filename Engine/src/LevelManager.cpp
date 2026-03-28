@@ -268,6 +268,7 @@ bool LevelManager::parseEntityFromJSON(const void* json_ptr, LevelEntity& entity
         entity.culling = mesh_data.value("culling", true);
         entity.transparent = mesh_data.value("transparent", false);
         entity.visible = mesh_data.value("visible", true);
+        entity.use_mesh_collision = mesh_data.value("use_mesh_collision", false);
     }
 
     // Parse rigidbody
@@ -579,8 +580,23 @@ bool LevelManager::instantiateLevel(
             }
         }
 
+        // Renderable with explicit collider (e.g. map with separate collision mesh)
+        if (entity_data.type == EntityType::Renderable && entity_data.has_collider)
+        {
+            game_world.registry.emplace<ColliderComponent>(e);
+            auto& col = game_world.registry.get<ColliderComponent>(e);
+            if (!entity_data.collider_mesh_path.empty()) {
+                LevelEntity col_ent = entity_data;
+                col_ent.mesh_path = entity_data.collider_mesh_path;
+                col_ent.texture_paths.clear();
+                col.m_mesh = loadMesh(col_ent, render_api);
+            } else if (game_world.registry.all_of<MeshComponent>(e)) {
+                col.m_mesh = game_world.registry.get<MeshComponent>(e).m_mesh;
+            }
+        }
+
         // Add Physics components
-        if (entity_data.type == EntityType::Physical || 
+        if (entity_data.type == EntityType::Physical ||
             entity_data.type == EntityType::Player)
         {
             // Rigidbody
@@ -623,6 +639,16 @@ bool LevelManager::instantiateLevel(
                     col.m_mesh = game_world.registry.get<MeshComponent>(e).m_mesh;
                 }
             }
+        }
+
+        // Auto-generate collision from visual mesh if use_mesh_collision is set
+        if (entity_data.use_mesh_collision && !game_world.registry.all_of<ColliderComponent>(e)
+            && game_world.registry.all_of<MeshComponent>(e))
+        {
+            game_world.registry.emplace<ColliderComponent>(e);
+            auto& col = game_world.registry.get<ColliderComponent>(e);
+            col.m_mesh = game_world.registry.get<MeshComponent>(e).m_mesh;
+            LOG_ENGINE_INFO("Entity '{}': using visual mesh as collision (use_mesh_collision=true)", entity_data.name);
         }
 
         // Register collider meshes with Jolt physics

@@ -46,6 +46,7 @@ struct LevelEntity
 
     bool has_collider;
     std::string collider_mesh_path;  // Separate collision mesh
+    bool use_mesh_collision;         // Use visual mesh as collision if no collider specified
 
     // Mesh rendering properties
     bool culling;
@@ -72,6 +73,7 @@ struct LevelEntity
         , mass(1.0f)
         , apply_gravity(true)
         , has_collider(false)
+        , use_mesh_collision(false)
         , culling(true)
         , transparent(false)
         , visible(true)
@@ -107,7 +109,7 @@ struct LevelMetadata
         , version("1.0")
         , entity_count(0)
         , gravity(0, -1, 0)
-        , fixed_delta(0.16f)
+        , fixed_delta(1.0f / 60.0f)
         , ambient_light(0.2f, 0.2f, 0.2f)
         , diffuse_light(0.8f, 0.8f, 0.8f)
         , light_direction(0.0f, -1.0f, 0.0f)

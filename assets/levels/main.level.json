@@ -9,7 +9,7 @@
         "y": -1.0,
         "z": 0.0
       },
-      "fixed_delta": 0.16
+      "fixed_delta": 0.016
     },
     "lighting": {
       "ambient": {
@@ -56,27 +56,6 @@
         "culling": true,
         "transparent": false,
         "visible": true
-      }
-    },
-    {
-      "name": "map_collider",
-      "type": "Collidable",
-      "transform": {
-        "position": {
-          "x": 0.0,
-          "y": 0.0,
-          "z": 0.0
-        },
-        "rotation": {
-          "x": 0.0,
-          "y": 0.0,
-          "z": 0.0
-        },
-        "scale": {
-          "x": 1.0,
-          "y": 1.0,
-          "z": 1.0
-        }
       },
       "collider": {
         "mesh_path": "assets/models/map_collider.obj"
@@ -143,7 +122,7 @@
         "speed": 1.5,
         "jump_force": 3.0,
         "mouse_sensitivity": 1.0,
-        "apply_gravity": false
+        "apply_gravity": true
       }
     },
     {

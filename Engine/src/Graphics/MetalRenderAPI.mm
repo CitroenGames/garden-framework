@@ -991,11 +991,13 @@ void MetalRenderAPI::endFrame()
         [impl->commandBuffer presentDrawable:impl->currentDrawable];
     }
 
+#ifdef _DEBUG
     // Log first few frames for diagnostics
     if (impl->frameNumber < 3) {
         printf("[Metal] Frame %u: %u draw calls\n", impl->frameNumber, impl->drawCallCount);
         fflush(stdout);
     }
+#endif
 
     // Signal semaphore on completion and log GPU errors with enhanced info
     __block dispatch_semaphore_t sem = impl->frameSemaphore;
@@ -1025,14 +1027,12 @@ void MetalRenderAPI::endFrame()
     }];
 
     [impl->commandBuffer commit];
-    printf("[Metal] endFrame: committed\n"); fflush(stdout);
 
     impl->commandBuffer = nil;
     impl->currentDrawable = nil;
     impl->frameStarted = false;
     impl->frameNumber++;
     impl->currentFrame = (impl->currentFrame + 1) % MetalRenderAPIImpl::MAX_FRAMES_IN_FLIGHT;
-    printf("[Metal] endFrame: done\n"); fflush(stdout);
 }
 
 void MetalRenderAPI::present()
@@ -1316,12 +1316,14 @@ void MetalRenderAPI::renderMesh(const mesh& m, const RenderState& state)
                drawCount, maxVertex, (__bridge void*)vertexBuffer, bufLen);
         drawCount = maxVertex;
     }
+#ifdef _DEBUG
     static bool firstDraw = true;
     if (firstDraw) {
         printf("[Metal] First draw: vertices=%zu, buffer=%p, bufLen=%zu bytes (%.1f MB)\n",
                drawCount, (__bridge void*)vertexBuffer, bufLen, bufLen / (1024.0*1024.0));
         firstDraw = false;
     }
+#endif
     [impl->encoder setVertexBuffer:vertexBuffer offset:0 atIndex:0];
     [impl->encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:drawCount];
     impl->drawCallCount++;
