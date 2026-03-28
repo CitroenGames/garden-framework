@@ -174,11 +174,16 @@ private:
         bool wishJump = input_manager->is_key_held(SDL_SCANCODE_SPACE);
         bool jump = wishJump && pc.grounded;
 
-        rb.velocity += wish_dir * pc.speed * delta;
-        
+        // Set horizontal velocity directly (not additive — prevents acceleration stacking)
+        float move_speed = pc.speed;
+        glm::vec3 target_horizontal = wish_dir * move_speed;
+
         if (pc.grounded)
         {
-            rb.velocity *= 0.6f; // Friction
+            // Snap horizontal velocity to input direction with friction blend
+            rb.velocity.x = target_horizontal.x * 0.8f + rb.velocity.x * 0.2f;
+            rb.velocity.z = target_horizontal.z * 0.8f + rb.velocity.z * 0.2f;
+
             if (jump)
                 rb.velocity.y = pc.jump_force;
             else
@@ -186,17 +191,24 @@ private:
         }
         else
         {
-            rb.velocity *= 0.7f; // Air friction
-            rb.velocity.y -= 2.0f * delta; // Extra gravity? PhysicsSystem already applies gravity.
-            // Original code had `velocity.Y -= 2.0f * delta`. PhysicsSystem adds `gravity * delta`.
-            // If gravity is (0, -1, 0), it adds -1*delta.
-            // This extra -2*delta makes it fall faster?
-            // I'll keep it to match original feel.
+            // Air control — less authority
+            rb.velocity.x = target_horizontal.x * 0.3f + rb.velocity.x * 0.7f;
+            rb.velocity.z = target_horizontal.z * 0.3f + rb.velocity.z * 0.7f;
+            // Jolt handles gravity
         }
 
-        // Camera follow
-        // Interpolate camera position to player position
-        game_world->world_camera.position = glm::mix(game_world->world_camera.position, trans.position, delta);
+        static int pc_log = 0;
+        if (pc_log < 120) {
+            printf("[PlayerCtrl] fwd=%.1f right=%.1f wish=(%.3f,%.3f,%.3f) vel=(%.4f,%.4f,%.4f) grounded=%d input_en=%d\n",
+                move_forward, move_right, wish_dir.x, wish_dir.y, wish_dir.z,
+                rb.velocity.x, rb.velocity.y, rb.velocity.z, pc.grounded, pc.input_enabled);
+            pc_log++;
+        }
+
+        // Camera follow — framerate-independent exponential smoothing
+        float camera_speed = 10.0f;
+        float t = 1.0f - std::exp(-camera_speed * delta);
+        game_world->world_camera.position = glm::mix(game_world->world_camera.position, trans.position, t);
     }
 
     void updateFreecam(float delta)
