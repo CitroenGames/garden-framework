@@ -3,6 +3,7 @@
 #include "Components/Components.hpp"
 #include "Components/camera.hpp"
 #include "InputManager.hpp"
+#include "Utils/Log.hpp"
 #include "world.hpp"
 #include <entt/entt.hpp>
 #include <cmath>
@@ -168,8 +169,10 @@ private:
             wish_dir.y = 0;
         }
 
-        if (glm::length(wish_dir) > 0.0f)
+        if (glm::length(wish_dir) > 0.001f)
             wish_dir = glm::normalize(wish_dir);
+        else
+            wish_dir = glm::vec3(0);
 
         bool wishJump = input_manager->is_key_held(SDL_SCANCODE_SPACE);
         bool jump = wishJump && pc.grounded;
@@ -194,16 +197,17 @@ private:
             // Air control — less authority
             rb.velocity.x = target_horizontal.x * 0.3f + rb.velocity.x * 0.7f;
             rb.velocity.z = target_horizontal.z * 0.3f + rb.velocity.z * 0.7f;
-            // Jolt handles gravity
+
+            // Apply gravity manually — game code is velocity authority for player,
+            // so Jolt's gravity integration on velocity is not read back
+            glm::vec3 grav = game_world->getGravity();
+            float gravity_magnitude = glm::length(grav) * 9.81f;
+            rb.velocity.y -= gravity_magnitude * delta;
         }
 
-        static int pc_log = 0;
-        if (pc_log < 120) {
-            printf("[PlayerCtrl] fwd=%.1f right=%.1f wish=(%.3f,%.3f,%.3f) vel=(%.4f,%.4f,%.4f) grounded=%d input_en=%d\n",
-                move_forward, move_right, wish_dir.x, wish_dir.y, wish_dir.z,
-                rb.velocity.x, rb.velocity.y, rb.velocity.z, pc.grounded, pc.input_enabled);
-            pc_log++;
-        }
+        LOG_ENGINE_TRACE("[PlayerCtrl] wish=({},{},{}) vel=({},{},{}) grounded={}",
+            wish_dir.x, wish_dir.y, wish_dir.z,
+            rb.velocity.x, rb.velocity.y, rb.velocity.z, pc.grounded);
 
         // Camera follow — framerate-independent exponential smoothing
         float camera_speed = 10.0f;

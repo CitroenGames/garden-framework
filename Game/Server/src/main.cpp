@@ -220,7 +220,7 @@ int main(int argc, char* argv[])
         _network.update(delta_time);
 
         // Physics step (Server is authority)
-        _world.step_physics();
+        _world.step_physics(delta_time);
 
         // Server-only game rules
         game_rules.Update(_world, delta_time);

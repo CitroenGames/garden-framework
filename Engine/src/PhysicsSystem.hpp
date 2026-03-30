@@ -9,6 +9,7 @@
 #include <vector>
 #include <unordered_map>
 #include <memory>
+#include <cmath>
 
 // Jolt includes
 #include <Jolt/Jolt.h>
@@ -147,6 +148,22 @@ private:
     static JPH::RVec3 toJoltR(const glm::vec3& v) { return JPH::RVec3(v.x, v.y, v.z); }
     static glm::vec3 toGlm(const JPH::Vec3& v) { return glm::vec3(v.GetX(), v.GetY(), v.GetZ()); }
 
+    // Safety helpers
+    static constexpr float MAX_VELOCITY = 100.0f; // m/s
+
+    static bool isValidVec3(const glm::vec3& v)
+    {
+        return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
+    }
+
+    static glm::vec3 clampVelocity(const glm::vec3& v)
+    {
+        float len = glm::length(v);
+        if (len > MAX_VELOCITY)
+            return v * (MAX_VELOCITY / len);
+        return v;
+    }
+
 public:
     PhysicsSystem(const glm::vec3& gravityVector = glm::vec3(0, -1, 0), float deltaTime = 1.0f / 60.0f);
     ~PhysicsSystem();
@@ -171,7 +188,7 @@ public:
     void stepPhysics(entt::registry& registry);
 
     // Collision detection and response
-    void handlePlayerCollisions(entt::registry& registry, entt::entity playerEntity, float sphereRadius);
+    void handlePlayerCollisions(entt::registry& registry, entt::entity playerEntity);
 
     // General collision queries
     bool raycast(const glm::vec3& origin, const glm::vec3& direction, float maxDistance,

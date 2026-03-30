@@ -59,8 +59,12 @@ struct PlayerComponent {
     float jump_force = 3.0f;
     float mouse_sensitivity = 1.0f;
     bool grounded = false;
-    glm::vec3 ground_normal;
+    glm::vec3 ground_normal = glm::vec3(0, 1, 0);
     bool input_enabled = true;
+
+    // Capsule collision dimensions (set by LevelManager on creation)
+    float capsule_half_height = 0.9f;
+    float capsule_radius = 0.3f;
 };
 
 struct FreecamComponent {

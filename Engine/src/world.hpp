@@ -7,12 +7,11 @@
 #include <memory>
 #include <entt/entt.hpp>
 
-using namespace std;
-
 class world
 {
 private:
     std::unique_ptr<PhysicsSystem> physics_system;
+    float physics_accumulator = 0.0f;
 
 public:
     entt::registry registry;
@@ -37,14 +36,25 @@ public:
     const PhysicsSystem& getPhysicsSystem() const { return *physics_system; }
 
     // Simplified interface that delegates to physics system
-    void step_physics()
+    void step_physics(float dt)
     {
-        physics_system->stepPhysics(registry);
+        physics_accumulator += dt;
+
+        // Cap accumulator to prevent spiral of death (max 8 steps per frame)
+        const float max_accumulation = fixed_delta * 8.0f;
+        if (physics_accumulator > max_accumulation)
+            physics_accumulator = max_accumulation;
+
+        while (physics_accumulator >= fixed_delta)
+        {
+            physics_system->stepPhysics(registry);
+            physics_accumulator -= fixed_delta;
+        }
     }
 
-    void player_collisions(entt::entity playerEntity, float sphereRadius)
+    void player_collisions(entt::entity playerEntity)
     {
-        physics_system->handlePlayerCollisions(registry, playerEntity, sphereRadius);
+        physics_system->handlePlayerCollisions(registry, playerEntity);
     }
 
     // Utility methods for common physics queries
