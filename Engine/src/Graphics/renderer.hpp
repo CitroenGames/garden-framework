@@ -7,6 +7,7 @@
 #include "ImGui/ImGuiManager.hpp"
 #include "Frustum.hpp"
 #include "BVH.hpp"
+#include "Debug/DebugDraw.hpp"
 #include <entt/entt.hpp>
 
 class renderer
@@ -197,6 +198,9 @@ public:
 
         // Render skybox before post-processing
         render_api->renderSkybox();
+
+        // Render debug lines (after scene, before UI)
+        DebugDraw::get().render(render_api, c);
 
         // Render ImGui UI
         ImGuiManager::get().render();

@@ -36,6 +36,13 @@
 #include "Utils/Log.hpp"
 #include "ImGui/ImGuiManager.hpp"
 #include "Console/ConVar.hpp"
+#include "Events/EventBus.hpp"
+#include "Events/EngineEvents.hpp"
+#include "Timer/TimerSystem.hpp"
+#include "Debug/DebugDraw.hpp"
+#include "Audio/AudioSystem.hpp"
+#include "GameState/GameStateManager.hpp"
+#include "Animation/AnimationSystem.hpp"
 
 // Threading and Asset loading
 #include "Threading/JobSystem.hpp"
@@ -57,6 +64,8 @@ static bool g_async_load_pending = false;
 static void quit_game(int code)
 {
     ConVarRegistry::get().saveArchiveCvars("config.cfg");
+    GameStateManager::get().clear();
+    AudioSystem::get().shutdown();
     _network.disconnect("Game closing");
     _network.shutdown();
     Assets::AssetManager::get().shutdown();
@@ -199,6 +208,11 @@ int main(int argc, char* argv[])
 
     // Register GLTF loader
     Assets::AssetManager::get().registerLoader(std::make_unique<Assets::GltfAssetLoader>());
+
+    // Initialize Audio System
+    if (!AudioSystem::get().initialize()) {
+        LOG_ENGINE_WARN("Failed to initialize Audio System - continuing without audio");
+    }
 
     // Set up input system
     input_handler.set_quit_callback([]() {
@@ -407,9 +421,18 @@ int main(int argc, char* argv[])
             }
         }
 
+        // Flush deferred events from previous frame
+        EventBus::get().flush();
+
         // delta time
         delta_time = (frame_start_ticks - delta_last) / 1000.0f;
         delta_last = frame_start_ticks;
+
+        // Update timers
+        TimerSystem::get().update(delta_time);
+
+        // Update debug draw (tick persistent line durations)
+        DebugDraw::get().update(delta_time);
 
         // Network update - receive world state and process messages
         _network.update(delta_time);
@@ -463,8 +486,18 @@ int main(int argc, char* argv[])
                 quit_game(0);
         }
 
-        // render using the active camera (either player or freecam)
+        // Update animations
+        AnimationSystem::update(_world.registry, delta_time);
+
+        // Update audio listener to match camera
         camera& active_camera = player_controller->getActiveCamera();
+        AudioSystem::get().setListenerPosition(
+            active_camera.getPosition(),
+            active_camera.camera_forward(),
+            active_camera.getUpVector());
+        AudioSystem::get().update();
+
+        // render using the active camera (either player or freecam)
         _renderer.render_scene(_world.registry, active_camera);
 
         app.swapBuffers();

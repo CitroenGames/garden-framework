@@ -76,6 +76,11 @@ private:
         const glm::mat4& viewMatrix, float fov, float aspect);
     void recreateShadowMapResources(unsigned int size);
 
+    // Debug line rendering resources
+    GLuint debug_vao = 0;
+    GLuint debug_vbo = 0;
+    size_t debug_vbo_capacity = 0;
+
     // Optimization state tracking
     GLuint current_shader_id;
     GLuint current_bound_texture_0;
@@ -149,6 +154,9 @@ public:
     virtual const glm::mat4* getLightSpaceMatrices() const override;
 
     virtual IGPUMesh* createMesh() override;
+
+    // Debug line rendering
+    virtual void renderDebugLines(const vertex* vertices, size_t vertex_count) override;
 
     virtual const char* getAPIName() const override { return "OpenGL"; }
 

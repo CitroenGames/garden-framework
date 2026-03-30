@@ -118,6 +118,10 @@ public:
     // Resource Creation
     virtual IGPUMesh* createMesh() = 0;
 
+    // Debug rendering (lines for debug visualization)
+    // vertices are pairs of {pos, color} packed as vertex structs (normals used as color, uv ignored)
+    virtual void renderDebugLines(const vertex* vertices, size_t vertex_count) { (void)vertices; (void)vertex_count; }
+
     // Utility
     virtual const char* getAPIName() const = 0;
 
