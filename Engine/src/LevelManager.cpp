@@ -703,7 +703,8 @@ bool LevelManager::instantiateLevel(
             // Create Jolt capsule body for player collision
             {
                 auto& t = game_world.registry.get<TransformComponent>(e);
-                JPH::CapsuleShapeSettings capsule(0.9f, 0.3f); // half-height 0.9, radius 0.3
+                auto& pc = game_world.registry.get<PlayerComponent>(e);
+                JPH::CapsuleShapeSettings capsule(pc.capsule_half_height, pc.capsule_radius);
                 auto shape_result = capsule.Create();
                 if (shape_result.IsValid())
                 {

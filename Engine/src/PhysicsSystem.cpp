@@ -4,18 +4,6 @@
 #include <cstdarg>
 #include <cstdlib>
 
-// Jolt memory allocation hooks
-static void* JoltAllocate(size_t inSize) { return malloc(inSize); }
-static void* JoltReallocate(void* inBlock, size_t /*inOldSize*/, size_t inNewSize) { return realloc(inBlock, inNewSize); }
-static void* JoltAllocateAligned(size_t inSize, size_t inAlignment)
-{
-    void* ptr = nullptr;
-    posix_memalign(&ptr, inAlignment, inSize);
-    return ptr;
-}
-static void JoltFree(void* inBlock) { free(inBlock); }
-static void JoltFreeAligned(void* inBlock) { free(inBlock); }
-
 static void JoltTrace(const char* inFMT, ...)
 {
     va_list args;
@@ -225,12 +213,6 @@ void PhysicsSystem::stepPhysics(entt::registry& registry)
 {
     if (!initialized) return;
 
-    static int frame_count = 0;
-    if (frame_count < 5) {
-        LOG_ENGINE_INFO("Jolt step frame {}: {} bodies in entity_to_body map", frame_count, entity_to_body.size());
-    }
-    frame_count++;
-
     // Sync ECS -> Jolt for dynamic bodies (in case game code moved them)
     syncTransformsToJolt(registry);
 
@@ -253,7 +235,7 @@ void PhysicsSystem::stepPhysics(entt::registry& registry)
         auto& transform = view.get<TransformComponent>(entity);
 
         if (rb.apply_gravity)
-            rb.velocity += gravity * fixed_delta;
+            rb.velocity += gravity * 9.81f * fixed_delta;
 
         rb.velocity += rb.force * fixed_delta;
         transform.position += rb.velocity * fixed_delta;
@@ -279,16 +261,23 @@ void PhysicsSystem::syncTransformsFromJolt(entt::registry& registry)
         JPH::RVec3 pos = body_interface.GetCenterOfMassPosition(body_id);
         JPH::Vec3 vel = body_interface.GetLinearVelocity(body_id);
 
-        transform.position = glm::vec3(float(pos.GetX()), float(pos.GetY()), float(pos.GetZ()));
-        rb.velocity = toGlm(vel);
-
-        static int from_log = 0;
-        if (from_log < 120 && registry.all_of<PlayerComponent>(entity)) {
-            printf("[FromJolt] pos=(%.4f,%.4f,%.4f) vel=(%.4f,%.4f,%.4f)\n",
-                transform.position.x, transform.position.y, transform.position.z,
-                rb.velocity.x, rb.velocity.y, rb.velocity.z);
-            from_log++;
+        glm::vec3 new_pos = glm::vec3(float(pos.GetX()), float(pos.GetY()), float(pos.GetZ()));
+        if (!isValidVec3(new_pos))
+        {
+            LOG_ENGINE_ERROR("NaN position read from Jolt, keeping previous position");
+            continue;
         }
+        transform.position = new_pos;
+
+        // Only read velocity for non-player entities — game code is velocity authority for the player
+        if (!registry.all_of<PlayerComponent>(entity))
+        {
+            rb.velocity = toGlm(vel);
+        }
+
+        LOG_ENGINE_TRACE("[FromJolt] pos=({},{},{}) vel=({},{},{})",
+            transform.position.x, transform.position.y, transform.position.z,
+            rb.velocity.x, rb.velocity.y, rb.velocity.z);
     }
 }
 
@@ -305,26 +294,31 @@ void PhysicsSystem::syncTransformsToJolt(entt::registry& registry)
 
         auto& rb = registry.get<RigidBodyComponent>(entity);
 
-        static int to_log = 0;
-        if (to_log < 120 && registry.all_of<PlayerComponent>(entity)) {
-            printf("[ToJolt] pushing vel=(%.4f,%.4f,%.4f)\n",
-                rb.velocity.x, rb.velocity.y, rb.velocity.z);
-            to_log++;
-        }
+        LOG_ENGINE_TRACE("[ToJolt] pushing vel=({},{},{})",
+            rb.velocity.x, rb.velocity.y, rb.velocity.z);
 
-        // Push velocity from game code (PlayerController) to Jolt
+        // Validate and clamp velocity before pushing to Jolt
+        if (!isValidVec3(rb.velocity))
+        {
+            LOG_ENGINE_WARN("NaN velocity detected, resetting to zero");
+            rb.velocity = glm::vec3(0);
+        }
+        rb.velocity = clampVelocity(rb.velocity);
         body_interface.SetLinearVelocity(body_id, toJolt(rb.velocity));
 
-        // If game code applied forces, send them to Jolt
+        // If game code applied forces, send them to Jolt (force = acceleration * mass)
         if (glm::length(rb.force) > 0.001f)
         {
-            body_interface.AddForce(body_id, toJolt(rb.force));
+            if (isValidVec3(rb.force))
+            {
+                body_interface.AddForce(body_id, toJolt(rb.force * rb.mass));
+            }
             rb.force = glm::vec3(0);
         }
     }
 }
 
-void PhysicsSystem::handlePlayerCollisions(entt::registry& registry, entt::entity playerEntity, float sphereRadius)
+void PhysicsSystem::handlePlayerCollisions(entt::registry& registry, entt::entity playerEntity)
 {
     if (!initialized || !registry.valid(playerEntity)) return;
     if (!registry.all_of<TransformComponent, RigidBodyComponent, PlayerComponent>(playerEntity)) return;
@@ -334,17 +328,13 @@ void PhysicsSystem::handlePlayerCollisions(entt::registry& registry, entt::entit
     // Check if player has a Jolt body
     auto it = entity_to_body.find(playerEntity);
 
-    static int collision_log_count = 0;
-
     if (it != entity_to_body.end())
     {
-        JPH::BodyInterface& body_interface = jolt_system->GetBodyInterface();
-        JPH::Vec3 vel = body_interface.GetLinearVelocity(it->second);
-
         // Ground detection: cast a ray downward, excluding the player's own body
         auto& transform = registry.get<TransformComponent>(playerEntity);
-        // Ray from player center, extending past the capsule bottom (half_height 0.9 + radius 0.3 + tolerance 0.3 = 1.5)
-        JPH::RRayCast ray(toJoltR(transform.position), JPH::Vec3(0, -1, 0) * 1.5f);
+        // Ray length derived from capsule dimensions + tolerance
+        float ground_ray_length = player.capsule_half_height + player.capsule_radius + 0.3f;
+        JPH::RRayCast ray(toJoltR(transform.position), JPH::Vec3(0, -1, 0) * ground_ray_length);
         JPH::RayCastResult hit;
         JPH::IgnoreSingleBodyFilter body_filter(it->second);
 
@@ -355,24 +345,36 @@ void PhysicsSystem::handlePlayerCollisions(entt::registry& registry, entt::entit
             body_filter);
         if (player.grounded)
         {
-            player.ground_normal = glm::vec3(0, 1, 0); // Simplified
+            // Get actual surface normal from hit result
+            JPH::RVec3 hitPos = ray.GetPointOnRay(hit.mFraction);
+            JPH::BodyLockRead lock(jolt_system->GetBodyLockInterface(), hit.mBodyID);
+            if (lock.Succeeded())
+            {
+                JPH::Vec3 normal = lock.GetBody().GetWorldSpaceSurfaceNormal(hit.mSubShapeID2, hitPos);
+                player.ground_normal = toGlm(normal);
+            }
+            else
+            {
+                player.ground_normal = glm::vec3(0, 1, 0);
+            }
+
+            // Reject surfaces too steep to stand on (~45 degrees)
+            if (player.ground_normal.y < 0.7f)
+            {
+                player.grounded = false;
+                player.ground_normal = glm::vec3(0, 1, 0);
+            }
         }
 
-        if (collision_log_count < 60) {
-            LOG_ENGINE_INFO("Player collision: has_body=true, grounded={}, pos=({},{},{}), vel_y={}",
-                player.grounded, transform.position.x, transform.position.y, transform.position.z, vel.GetY());
-            collision_log_count++;
-        }
+        LOG_ENGINE_TRACE("Player collision: grounded={}, pos=({},{},{})",
+            player.grounded, transform.position.x, transform.position.y, transform.position.z);
     }
     else
     {
         // Fallback: no Jolt body, just reset ground state
         player.grounded = false;
         player.ground_normal = glm::vec3(0, 1, 0);
-        if (collision_log_count < 60) {
-            LOG_ENGINE_WARN("Player collision: has_body=FALSE — player has no Jolt body, using fallback (no collision!)");
-            collision_log_count++;
-        }
+        LOG_ENGINE_WARN("Player collision: has_body=FALSE — player has no Jolt body, using fallback (no collision!)");
     }
 }
 

@@ -446,8 +446,8 @@ int main(int argc, char* argv[])
         // physics and player collisions (only when controlling player)
         if (!player_controller->isFreecamMode())
         {
-            _world.step_physics();
-            _world.player_collisions(player_entity, 1.0f); // Assuming radius 1
+            _world.step_physics(delta_time);
+            _world.player_collisions(player_entity);
         }
 
         // Update currently possessed entity through player controller
