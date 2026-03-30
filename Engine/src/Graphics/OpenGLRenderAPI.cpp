@@ -1251,6 +1251,78 @@ IGPUMesh* OpenGLRenderAPI::createMesh()
     return new OpenGLMesh();
 }
 
+void OpenGLRenderAPI::renderDebugLines(const vertex* vertices, size_t vertex_count)
+{
+    if (!vertices || vertex_count < 2 || !shader_manager) return;
+
+    // Use unlit shader for debug lines
+    Shader* shader = shader_manager->getShader("unlit");
+    if (!shader || !shader->isValid()) return;
+
+    shader->use();
+    shader->setUniform("uView", view_matrix);
+    shader->setUniform("uProjection", projection_matrix);
+    shader->setUniform("uModel", glm::mat4(1.0f));
+    shader->setUniform("uColor", glm::vec3(1.0f));
+
+    // Unbind any texture
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    // Create/resize debug VAO/VBO as needed
+    if (debug_vao == 0)
+    {
+        glGenVertexArrays(1, &debug_vao);
+        glGenBuffers(1, &debug_vbo);
+
+        glBindVertexArray(debug_vao);
+        glBindBuffer(GL_ARRAY_BUFFER, debug_vbo);
+
+        // Position (location 0)
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(vertex), (void*)0);
+        glEnableVertexAttribArray(0);
+        // Normal - we use this for per-vertex color (location 1)
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(vertex), (void*)(3 * sizeof(float)));
+        glEnableVertexAttribArray(1);
+        // TexCoord (location 2)
+        glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(vertex), (void*)(6 * sizeof(float)));
+        glEnableVertexAttribArray(2);
+
+        glBindVertexArray(0);
+    }
+
+    glBindVertexArray(debug_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, debug_vbo);
+
+    // Upload vertex data
+    size_t data_size = vertex_count * sizeof(vertex);
+    if (data_size > debug_vbo_capacity)
+    {
+        glBufferData(GL_ARRAY_BUFFER, data_size, vertices, GL_DYNAMIC_DRAW);
+        debug_vbo_capacity = data_size;
+    }
+    else
+    {
+        glBufferSubData(GL_ARRAY_BUFFER, 0, data_size, vertices);
+    }
+
+    // Disable depth write but keep depth test so lines render behind geometry correctly
+    glDepthMask(GL_FALSE);
+    glDisable(GL_CULL_FACE);
+
+    glDrawArrays(GL_LINES, 0, static_cast<GLsizei>(vertex_count));
+
+    // Restore state
+    glDepthMask(GL_TRUE);
+    glEnable(GL_CULL_FACE);
+
+    glBindVertexArray(0);
+
+    // Restore shader tracking
+    current_shader_id = 0;
+    global_uniforms_dirty = true;
+}
+
 // Get appropriate shader for render state
 Shader* OpenGLRenderAPI::getShaderForRenderState(const RenderState& state)
 {
