@@ -68,6 +68,7 @@ target_link_libraries(
     PUBLIC imgui-docking
     PUBLIC Pakker
     PUBLIC JoltPhysics
+    PUBLIC miniaudio
 )
 std = 20
 utf8 = true
