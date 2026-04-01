@@ -91,7 +91,11 @@ namespace Paingine2D {
 #endif
 
         // Private constructor for singleton
-        CrashHandler() { memset(m_pathPrefix, 0, sizeof(m_pathPrefix)); }
+        CrashHandler() {
+#if defined(__APPLE__) || defined(__linux__)
+            memset(m_pathPrefix, 0, sizeof(m_pathPrefix));
+#endif
+        }
 
     public:
         static CrashHandler* GetInstance() {

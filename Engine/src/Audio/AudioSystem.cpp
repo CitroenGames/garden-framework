@@ -1,5 +1,5 @@
 #define MINIAUDIO_IMPLEMENTATION
-#include "../../Thirdparty/miniaudio/miniaudio.h"
+#include "miniaudio.h"
 
 #include "AudioSystem.hpp"
 #include "Utils/Log.hpp"

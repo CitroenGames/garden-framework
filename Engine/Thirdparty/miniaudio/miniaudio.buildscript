@@ -1,0 +1,4 @@
+[project:miniaudio]
+type = interface
+headers = miniaudio.h
+public_includes = .
