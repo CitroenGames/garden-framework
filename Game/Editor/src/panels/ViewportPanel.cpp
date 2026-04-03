@@ -43,8 +43,7 @@ void ViewportPanel::draw(ImTextureID scene_texture, EditorState& state)
 
     if (scene_texture)
     {
-        // UV flipped vertically for OpenGL (0,1 -> 1,0)
-        ImGui::Image(scene_texture, avail, ImVec2(0, 1), ImVec2(1, 0));
+        ImGui::Image(scene_texture, avail);
 
         // Draw colored border when simulation is active
         if (play_mode != PlayMode::Editing)
