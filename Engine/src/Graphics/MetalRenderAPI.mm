@@ -149,6 +149,12 @@ struct MetalRenderAPIImpl {
     bool fxaaEnabled = true;
     bool fxaaInitialized = false;
 
+    // Editor viewport render target
+    id<MTLTexture> viewportTexture = nil;
+    id<MTLTexture> viewportDepthTexture = nil;
+    int viewportWidthRT = 0;
+    int viewportHeightRT = 0;
+
     // Shadow mapping
     static constexpr int NUM_CASCADES = 4;
     id<MTLTexture> shadowMapArray = nil;
@@ -559,21 +565,46 @@ struct MetalRenderAPIImpl {
         shadowSampler = [device newSamplerStateWithDescriptor:sampDesc];
     }
 
-    void createOffscreenResources()
+    void createOffscreenResources(int w, int h)
     {
-        if (viewportWidth <= 0 || viewportHeight <= 0) return;
+        if (w <= 0 || h <= 0) return;
 
         // Offscreen color texture for FXAA input
         MTLTextureDescriptor* desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
-                                                                                       width:viewportWidth
-                                                                                      height:viewportHeight
+                                                                                       width:w
+                                                                                      height:h
                                                                                    mipmapped:NO];
         desc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
         desc.storageMode = MTLStorageModePrivate;
         offscreenTexture = [device newTextureWithDescriptor:desc];
 
         // Offscreen depth texture
-        offscreenDepthTexture = createDepthTextureWithSize(viewportWidth, viewportHeight);
+        offscreenDepthTexture = createDepthTextureWithSize(w, h);
+    }
+
+    void createOffscreenResources()
+    {
+        createOffscreenResources(viewportWidth, viewportHeight);
+    }
+
+    void createViewportResources(int w, int h)
+    {
+        viewportTexture = nil;
+        viewportDepthTexture = nil;
+        viewportWidthRT = w;
+        viewportHeightRT = h;
+
+        // Viewport color texture (render target + shader read for ImGui display)
+        MTLTextureDescriptor* desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                                                                       width:w
+                                                                                      height:h
+                                                                                   mipmapped:NO];
+        desc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+        desc.storageMode = MTLStorageModePrivate;
+        viewportTexture = [device newTextureWithDescriptor:desc];
+
+        // Viewport depth texture
+        viewportDepthTexture = createDepthTextureWithSize(w, h);
     }
 
     void createDefaultTexture()
@@ -861,6 +892,8 @@ void MetalRenderAPI::shutdown()
     impl->shadowMapArray = nil;
     impl->offscreenTexture = nil;
     impl->offscreenDepthTexture = nil;
+    impl->viewportTexture = nil;
+    impl->viewportDepthTexture = nil;
     impl->skyboxVertexBuffer = nil;
     impl->fxaaVertexBuffer = nil;
     impl->defaultTexture = nil;
@@ -896,21 +929,32 @@ void MetalRenderAPI::beginFrame()
     // Ensure command buffer exists (may already be created by shadow pass)
     if (!impl->ensureCommandBuffer()) return;
 
-    // Acquire drawable as late as possible (after shadow passes)
-    if (!impl->ensureDrawable()) return;
+    bool editorMode = (impl->viewportTexture != nil);
+
+    // In editor mode, defer drawable acquisition to renderUI
+    if (!editorMode) {
+        if (!impl->ensureDrawable()) return;
+    }
 
     // If shadow pass already created the main render encoder (via endShadowPass), skip
     if (impl->mainPassActive && impl->encoder) {
-        // Just update ImGui with the current render pass info
-        MTLRenderPassDescriptor* desc = [MTLRenderPassDescriptor renderPassDescriptor];
-        if (impl->fxaaEnabled && impl->fxaaInitialized && impl->offscreenTexture) {
-            desc.colorAttachments[0].texture = impl->offscreenTexture;
-        } else {
-            desc.colorAttachments[0].texture = impl->currentDrawable.texture;
+        // In game mode, update ImGui with the current render pass info
+        if (!editorMode) {
+            MTLRenderPassDescriptor* desc = [MTLRenderPassDescriptor renderPassDescriptor];
+            if (impl->fxaaEnabled && impl->fxaaInitialized && impl->offscreenTexture) {
+                desc.colorAttachments[0].texture = impl->offscreenTexture;
+            } else {
+                desc.colorAttachments[0].texture = impl->currentDrawable.texture;
+            }
+            ImGui_ImplMetal_NewFrame(desc);
         }
-        ImGui_ImplMetal_NewFrame(desc);
+        // In editor mode, ImGui_ImplMetal_NewFrame is deferred to renderUI
         return;
     }
+
+    // Determine render target dimensions
+    int rtWidth = editorMode ? impl->viewportWidthRT : impl->viewportWidth;
+    int rtHeight = editorMode ? impl->viewportHeightRT : impl->viewportHeight;
 
     // Start the main render pass
     MTLRenderPassDescriptor* passDesc = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -918,6 +962,9 @@ void MetalRenderAPI::beginFrame()
     if (impl->fxaaEnabled && impl->fxaaInitialized && impl->offscreenTexture) {
         // Render to offscreen texture for FXAA
         passDesc.colorAttachments[0].texture = impl->offscreenTexture;
+    } else if (editorMode) {
+        // Render directly to viewport texture (no FXAA)
+        passDesc.colorAttachments[0].texture = impl->viewportTexture;
     } else {
         passDesc.colorAttachments[0].texture = impl->currentDrawable.texture;
     }
@@ -925,15 +972,24 @@ void MetalRenderAPI::beginFrame()
     passDesc.colorAttachments[0].storeAction = MTLStoreActionStore;
     passDesc.colorAttachments[0].clearColor = MTLClearColorMake(impl->clearColor.r, impl->clearColor.g, impl->clearColor.b, 1.0);
 
-    id<MTLTexture> depthTex = (impl->fxaaEnabled && impl->fxaaInitialized && impl->offscreenDepthTexture)
-        ? impl->offscreenDepthTexture : impl->depthTexture;
+    // Depth texture: editor mode uses viewport depth or offscreen depth
+    id<MTLTexture> depthTex;
+    if (impl->fxaaEnabled && impl->fxaaInitialized && impl->offscreenDepthTexture) {
+        depthTex = impl->offscreenDepthTexture;
+    } else if (editorMode) {
+        depthTex = impl->viewportDepthTexture;
+    } else {
+        depthTex = impl->depthTexture;
+    }
     passDesc.depthAttachment.texture = depthTex;
     passDesc.depthAttachment.loadAction = MTLLoadActionClear;
     passDesc.depthAttachment.storeAction = MTLStoreActionStore;
     passDesc.depthAttachment.clearDepth = 1.0;
 
-    // Update ImGui Metal backend with real render pass descriptor (needs texture for sample count/format)
-    ImGui_ImplMetal_NewFrame(passDesc);
+    // Update ImGui Metal backend (game mode only; editor defers to renderUI)
+    if (!editorMode) {
+        ImGui_ImplMetal_NewFrame(passDesc);
+    }
 
     impl->encoder = [impl->commandBuffer renderCommandEncoderWithDescriptor:passDesc];
     if (!impl->encoder) {
@@ -943,8 +999,8 @@ void MetalRenderAPI::beginFrame()
     impl->encoder.label = @"Main Render Encoder";
     impl->mainPassActive = true;
 
-    // Set viewport
-    MTLViewport viewport = {0, 0, (double)impl->viewportWidth, (double)impl->viewportHeight, 0, 1};
+    // Set viewport to render target dimensions
+    MTLViewport viewport = {0, 0, (double)rtWidth, (double)rtHeight, 0, 1};
     [impl->encoder setViewport:viewport];
 
     // Set default depth stencil state
@@ -974,6 +1030,9 @@ void MetalRenderAPI::beginFrame()
 void MetalRenderAPI::endFrame()
 {
     if (!impl->frameStarted) return;
+
+    // In editor mode, endSceneRender + renderUI handle finalization
+    if (impl->viewportTexture) return;
 
     // End main render encoder
     if (impl->mainPassActive && impl->encoder) {
@@ -1584,7 +1643,9 @@ void MetalRenderAPI::beginShadowPass(const glm::vec3& lightDir)
     impl->frameStarted = true; // Mark as started so renderMesh works during shadow pass
     impl->calculateCascadeSplits(0.1f, 1000.0f);
 
-    float aspect = static_cast<float>(impl->viewportWidth) / static_cast<float>(impl->viewportHeight);
+    int rtWidth = impl->viewportTexture ? impl->viewportWidthRT : impl->viewportWidth;
+    int rtHeight = impl->viewportTexture ? impl->viewportHeightRT : impl->viewportHeight;
+    float aspect = static_cast<float>(rtWidth) / static_cast<float>(rtHeight);
     for (int i = 0; i < MetalRenderAPIImpl::NUM_CASCADES; i++) {
         impl->lightSpaceMatrices[i] = impl->getLightSpaceMatrixForCascade(i, lightDir, impl->viewMatrix, impl->fieldOfView, aspect);
     }
@@ -1612,7 +1673,9 @@ void MetalRenderAPI::beginShadowPass(const glm::vec3& lightDir, const camera& ca
 
     impl->calculateCascadeSplits(0.1f, 1000.0f);
 
-    float aspect = static_cast<float>(impl->viewportWidth) / static_cast<float>(impl->viewportHeight);
+    int rtWidth = impl->viewportTexture ? impl->viewportWidthRT : impl->viewportWidth;
+    int rtHeight = impl->viewportTexture ? impl->viewportHeightRT : impl->viewportHeight;
+    float aspect = static_cast<float>(rtWidth) / static_cast<float>(rtHeight);
     for (int i = 0; i < MetalRenderAPIImpl::NUM_CASCADES; i++) {
         impl->lightSpaceMatrices[i] = impl->getLightSpaceMatrixForCascade(i, lightDir, impl->viewMatrix, impl->fieldOfView, aspect);
     }
@@ -1677,17 +1740,27 @@ void MetalRenderAPI::endShadowPass()
 
     impl->inShadowPass = false;
 
-    // Acquire drawable now (deferred from ensureCommandBuffer for late acquisition)
-    if (!impl->ensureDrawable()) {
-        printf("[Metal] endShadowPass: Failed to acquire drawable\n");
-        return;
+    bool editorMode = (impl->viewportTexture != nil);
+
+    // In editor mode, defer drawable acquisition to renderUI
+    if (!editorMode) {
+        if (!impl->ensureDrawable()) {
+            printf("[Metal] endShadowPass: Failed to acquire drawable\n");
+            return;
+        }
     }
+
+    // Determine render target dimensions
+    int rtWidth = editorMode ? impl->viewportWidthRT : impl->viewportWidth;
+    int rtHeight = editorMode ? impl->viewportHeightRT : impl->viewportHeight;
 
     // Restart main render pass
     MTLRenderPassDescriptor* passDesc = [MTLRenderPassDescriptor renderPassDescriptor];
 
     if (impl->fxaaEnabled && impl->fxaaInitialized && impl->offscreenTexture) {
         passDesc.colorAttachments[0].texture = impl->offscreenTexture;
+    } else if (editorMode) {
+        passDesc.colorAttachments[0].texture = impl->viewportTexture;
     } else {
         passDesc.colorAttachments[0].texture = impl->currentDrawable.texture;
     }
@@ -1695,8 +1768,15 @@ void MetalRenderAPI::endShadowPass()
     passDesc.colorAttachments[0].storeAction = MTLStoreActionStore;
     passDesc.colorAttachments[0].clearColor = MTLClearColorMake(impl->clearColor.r, impl->clearColor.g, impl->clearColor.b, 1.0);
 
-    id<MTLTexture> depthTex = (impl->fxaaEnabled && impl->fxaaInitialized && impl->offscreenDepthTexture)
-        ? impl->offscreenDepthTexture : impl->depthTexture;
+    // Depth texture: editor mode uses viewport depth or offscreen depth
+    id<MTLTexture> depthTex;
+    if (impl->fxaaEnabled && impl->fxaaInitialized && impl->offscreenDepthTexture) {
+        depthTex = impl->offscreenDepthTexture;
+    } else if (editorMode) {
+        depthTex = impl->viewportDepthTexture;
+    } else {
+        depthTex = impl->depthTexture;
+    }
     passDesc.depthAttachment.texture = depthTex;
     passDesc.depthAttachment.loadAction = MTLLoadActionClear;
     passDesc.depthAttachment.storeAction = MTLStoreActionStore;
@@ -1712,7 +1792,7 @@ void MetalRenderAPI::endShadowPass()
     impl->mainPassActive = true;
 
     // Restore viewport
-    MTLViewport viewport = {0, 0, (double)impl->viewportWidth, (double)impl->viewportHeight, 0, 1};
+    MTLViewport viewport = {0, 0, (double)rtWidth, (double)rtHeight, 0, 1};
     [impl->encoder setViewport:viewport];
 
     // Restore default state and reset bind tracking for fresh encoder
@@ -1834,6 +1914,165 @@ void MetalRenderAPI::executeWithAutoreleasePool(std::function<void()> fn)
     @autoreleasepool {
         fn();
     }
+}
+
+// ============================================================================
+// Viewport rendering (for editor)
+// ============================================================================
+
+void MetalRenderAPI::setViewportSize(int width, int height)
+{
+    if (width <= 0 || height <= 0) return;
+    if (width == impl->viewportWidthRT && height == impl->viewportHeightRT) return;
+
+    impl->createViewportResources(width, height);
+
+    // Resize offscreen resources to match viewport panel dimensions (for FXAA)
+    impl->offscreenTexture = nil;
+    impl->offscreenDepthTexture = nil;
+    impl->createOffscreenResources(width, height);
+}
+
+void MetalRenderAPI::endSceneRender()
+{
+    if (!impl->viewportTexture) return;
+
+    // End the main scene encoder
+    if (impl->mainPassActive && impl->encoder) {
+        [impl->encoder endEncoding];
+        impl->encoder = nil;
+        impl->mainPassActive = false;
+    }
+
+    // Apply FXAA from offscreen -> viewportTexture
+    if (impl->fxaaEnabled && impl->fxaaInitialized && impl->fxaaPipeline && impl->offscreenTexture)
+    {
+        MTLRenderPassDescriptor* fxaaPass = [MTLRenderPassDescriptor renderPassDescriptor];
+        fxaaPass.colorAttachments[0].texture = impl->viewportTexture;
+        fxaaPass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+        fxaaPass.colorAttachments[0].storeAction = MTLStoreActionStore;
+
+        id<MTLRenderCommandEncoder> fxaaEncoder =
+            [impl->commandBuffer renderCommandEncoderWithDescriptor:fxaaPass];
+        if (fxaaEncoder) {
+            fxaaEncoder.label = @"FXAA Viewport Encoder";
+
+            [fxaaEncoder setRenderPipelineState:impl->fxaaPipeline];
+
+            MTLViewport viewport = {0, 0,
+                (double)impl->viewportWidthRT, (double)impl->viewportHeightRT, 0, 1};
+            [fxaaEncoder setViewport:viewport];
+
+            [fxaaEncoder setFragmentTexture:impl->offscreenTexture atIndex:0];
+            [fxaaEncoder setFragmentSamplerState:impl->defaultSampler atIndex:0];
+
+            MetalFXAAUniforms fxaaUniforms;
+            fxaaUniforms.inverseScreenSize = glm::vec2(
+                1.0f / impl->viewportWidthRT, 1.0f / impl->viewportHeightRT);
+            [fxaaEncoder setFragmentBytes:&fxaaUniforms length:sizeof(fxaaUniforms) atIndex:0];
+
+            [fxaaEncoder setVertexBuffer:impl->fxaaVertexBuffer offset:0 atIndex:0];
+            [fxaaEncoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+
+            [fxaaEncoder endEncoding];
+        }
+    }
+    // If FXAA is disabled, scene was rendered directly to viewportTexture — nothing to do
+}
+
+uint64_t MetalRenderAPI::getViewportTextureID()
+{
+    if (!impl->viewportTexture) return 0;
+    return (uint64_t)((__bridge void*)impl->viewportTexture);
+}
+
+void MetalRenderAPI::renderUI()
+{
+    if (!impl->viewportTexture) return;  // Not in editor mode
+    if (!impl->commandBuffer) return;
+
+    // Acquire drawable now (deferred from beginFrame/endShadowPass)
+    if (!impl->ensureDrawable()) {
+        printf("[Metal] renderUI: Failed to acquire drawable\n");
+        return;
+    }
+
+    // Create UI render pass targeting the screen drawable
+    MTLRenderPassDescriptor* uiPass = [MTLRenderPassDescriptor renderPassDescriptor];
+    uiPass.colorAttachments[0].texture = impl->currentDrawable.texture;
+    uiPass.colorAttachments[0].loadAction = MTLLoadActionClear;
+    uiPass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    uiPass.colorAttachments[0].clearColor = MTLClearColorMake(0.1, 0.1, 0.1, 1.0);
+
+    // Tell ImGui Metal backend about the UI render pass (for pipeline state selection)
+    ImGui_ImplMetal_NewFrame(uiPass);
+
+    id<MTLRenderCommandEncoder> uiEncoder =
+        [impl->commandBuffer renderCommandEncoderWithDescriptor:uiPass];
+    if (!uiEncoder) {
+        printf("[Metal] renderUI: Failed to create UI encoder\n");
+        return;
+    }
+    uiEncoder.label = @"UI Render Encoder";
+
+    // Render ImGui draw data
+    ImDrawData* drawData = ImGui::GetDrawData();
+    if (drawData && drawData->TotalVtxCount > 0) {
+        ImGui_ImplMetal_RenderDrawData(drawData, impl->commandBuffer, uiEncoder);
+    }
+
+    [uiEncoder endEncoding];
+
+    // Present and commit
+    [impl->commandBuffer presentDrawable:impl->currentDrawable];
+
+    // Signal semaphore on completion and log GPU errors
+    __block dispatch_semaphore_t sem = impl->frameSemaphore;
+    __block uint32_t frameNum = impl->frameNumber;
+    __block uint32_t* errorCountPtr = &impl->gpuErrorCount;
+    __block id<MTLDevice> dev = impl->device;
+    __block id<MTLCommandQueue> __strong* queuePtr = &impl->commandQueue;
+    [impl->commandBuffer addCompletedHandler:^(id<MTLCommandBuffer> buf) {
+        if (buf.status == MTLCommandBufferStatusError) {
+            (*errorCountPtr)++;
+            printf("[Metal] GPU Error (frame %u, total errors: %u): %s\n",
+                   frameNum, *errorCountPtr, [[buf.error localizedDescription] UTF8String]);
+            if (@available(macOS 11.0, *)) {
+                NSArray<id<MTLCommandBufferEncoderInfo>>* encoderInfos =
+                    buf.error.userInfo[MTLCommandBufferEncoderInfoErrorKey];
+                for (id<MTLCommandBufferEncoderInfo> info in encoderInfos) {
+                    NSString* statusStr = @"unknown";
+                    switch (info.errorState) {
+                        case MTLCommandEncoderErrorStateCompleted: statusStr = @"completed"; break;
+                        case MTLCommandEncoderErrorStateAffected: statusStr = @"affected"; break;
+                        case MTLCommandEncoderErrorStateFaulted: statusStr = @"FAULTED"; break;
+                        case MTLCommandEncoderErrorStatePending: statusStr = @"pending"; break;
+                        default: break;
+                    }
+                    printf("[Metal]   Encoder '%s': %s\n",
+                           [info.label UTF8String], [statusStr UTF8String]);
+                }
+            }
+            fflush(stdout);
+            if (*errorCountPtr >= MetalRenderAPIImpl::MAX_GPU_ERRORS_BEFORE_RECOVERY) {
+                printf("[Metal] Too many consecutive GPU errors, recreating command queue\n");
+                *queuePtr = [dev newCommandQueue];
+                *errorCountPtr = 0;
+            }
+        } else {
+            *errorCountPtr = 0;
+        }
+        dispatch_semaphore_signal(sem);
+    }];
+
+    [impl->commandBuffer commit];
+
+    // Reset frame state
+    impl->commandBuffer = nil;
+    impl->currentDrawable = nil;
+    impl->frameStarted = false;
+    impl->frameNumber++;
+    impl->currentFrame = (impl->currentFrame + 1) % MetalRenderAPIImpl::MAX_FRAMES_IN_FLIGHT;
 }
 
 // ============================================================================
