@@ -9,8 +9,6 @@ static RenderAPIType parseRenderAPI(int argc, char* argv[])
     {
         if (strcmp(argv[i], "-vulkan") == 0 || strcmp(argv[i], "--vulkan") == 0)
             return RenderAPIType::Vulkan;
-        if (strcmp(argv[i], "-opengl") == 0 || strcmp(argv[i], "--opengl") == 0)
-            return RenderAPIType::OpenGL;
 #ifdef _WIN32
         if (strcmp(argv[i], "-d3d11") == 0 || strcmp(argv[i], "--d3d11") == 0 ||
             strcmp(argv[i], "-dx11")  == 0 || strcmp(argv[i], "--dx11")  == 0)
@@ -21,15 +19,7 @@ static RenderAPIType parseRenderAPI(int argc, char* argv[])
             return RenderAPIType::Metal;
 #endif
     }
-#ifdef __APPLE__
-    return RenderAPIType::Metal;
-#elif defined(_WIN32)
-    return RenderAPIType::D3D11;
-#elif defined(__linux__)
-    return RenderAPIType::Vulkan;
-#else
-    return RenderAPIType::OpenGL;
-#endif
+    return DefaultRenderAPI;
 }
 
 int main(int argc, char* argv[])

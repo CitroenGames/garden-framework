@@ -57,7 +57,6 @@ simd = StreamingSIMDExtensions2
 target_link_libraries(
     PUBLIC SDL2
     PUBLIC GLM
-    PUBLIC glad
     PUBLIC tinygltf
     PUBLIC tinyobjloader
     PUBLIC spdlog

@@ -20,7 +20,6 @@
 #include <fstream>
 #include <sstream>
 
-// stb_image is already included in OpenGLRenderAPI.cpp with STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
 #pragma comment(lib, "d3d11.lib")
@@ -825,7 +824,7 @@ bool D3D11RenderAPI::createPostProcessingResources(int width, int height)
 
 bool D3D11RenderAPI::createSkyboxResources()
 {
-    // Create skybox cube vertex buffer (same winding as OpenGL version)
+    // Create skybox cube vertex buffer
     float skyboxVertices[] = {
         // Back face (z = -1)
         -1.0f,  1.0f, -1.0f,

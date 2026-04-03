@@ -493,7 +493,7 @@ TextureHandle GltfMaterialLoader::loadEmbeddedTexture(const tinygltf::Image& ima
                " (" + std::to_string(image.component) + " channels)");
 
     // tinygltf stores image data as unsigned char vector
-    // Use loadTextureFromMemory which both OpenGL and Vulkan support
+    // Use loadTextureFromMemory which all render backends support
     TextureHandle handle = render_api->loadTextureFromMemory(
         image.image.data(),
         image.width,
