@@ -12,11 +12,14 @@ cbuffer GlobalCB : register(b0)
     int uCascadeCount;
     float3 uLightDiffuse;
     int uDebugCascades;
+    float2 uShadowMapTexelSize;
+    float2 _shadowPad;
 };
 
 cbuffer PerObjectCB : register(b1)
 {
     matrix uModel;
+    matrix uNormalMatrix;
     float3 uColor;
     int uUseTexture;
 };
@@ -42,23 +45,6 @@ struct PSInput
     float viewDepth : TEXCOORD3;
 };
 
-// Helper to compute inverse of 3x3 part of matrix
-float3x3 inverse3x3(float3x3 m)
-{
-    float det = determinant(m);
-    float3x3 adj;
-    adj[0][0] = m[1][1] * m[2][2] - m[1][2] * m[2][1];
-    adj[0][1] = m[0][2] * m[2][1] - m[0][1] * m[2][2];
-    adj[0][2] = m[0][1] * m[1][2] - m[0][2] * m[1][1];
-    adj[1][0] = m[1][2] * m[2][0] - m[1][0] * m[2][2];
-    adj[1][1] = m[0][0] * m[2][2] - m[0][2] * m[2][0];
-    adj[1][2] = m[0][2] * m[1][0] - m[0][0] * m[1][2];
-    adj[2][0] = m[1][0] * m[2][1] - m[1][1] * m[2][0];
-    adj[2][1] = m[0][1] * m[2][0] - m[0][0] * m[2][1];
-    adj[2][2] = m[0][0] * m[1][1] - m[0][1] * m[1][0];
-    return adj / det;
-}
-
 PSInput VSMain(VSInput input)
 {
     PSInput output;
@@ -66,9 +52,8 @@ PSInput VSMain(VSInput input)
     float4 worldPos = mul(uModel, float4(input.position, 1.0));
     output.fragPos = worldPos.xyz;
 
-    // Transform normal
-    float3x3 normalMatrix = transpose(inverse3x3((float3x3)uModel));
-    output.normal = mul(normalMatrix, input.normal);
+    // Transform normal using precomputed normal matrix
+    output.normal = mul((float3x3)uNormalMatrix, input.normal);
 
     output.texcoord = input.texcoord;
 
@@ -114,9 +99,9 @@ float ShadowCalculation(int cascadeIndex, float3 fragPos, float3 normal)
     float baseBias = max(0.0005 * (1.0 - dot(normalize(normal), lightDir)), 0.00005);
     float bias = baseBias * (1.0 + float(cascadeIndex) * 0.5);
 
-    // PCF 3x3
+    // PCF 3x3 using hardware comparison sampler
     float shadow = 0.0;
-    float2 texelSize = 1.0 / float2(4096.0, 4096.0);
+    float2 texelSize = uShadowMapTexelSize;
 
     [unroll]
     for (int x = -1; x <= 1; x++)
@@ -124,9 +109,8 @@ float ShadowCalculation(int cascadeIndex, float3 fragPos, float3 normal)
         [unroll]
         for (int y = -1; y <= 1; y++)
         {
-            float3 sampleCoord = float3(projCoords.xy + float2(x, y) * texelSize, cascadeIndex);
-            float pcfDepth = shadowMapArray.Sample(linearSampler, sampleCoord).r;
-            shadow += (currentDepth - bias > pcfDepth) ? 1.0 : 0.0;
+            float2 sampleUV = projCoords.xy + float2(x, y) * texelSize;
+            shadow += shadowMapArray.SampleCmpLevelZero(shadowSampler, float3(sampleUV, cascadeIndex), currentDepth - bias);
         }
     }
     return shadow / 9.0;

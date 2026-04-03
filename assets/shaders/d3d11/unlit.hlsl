@@ -12,11 +12,14 @@ cbuffer GlobalCB : register(b0)
     int uCascadeCount;
     float3 uLightDiffuse;
     int uDebugCascades;
+    float2 uShadowMapTexelSize;
+    float2 _shadowPad;
 };
 
 cbuffer PerObjectCB : register(b1)
 {
     matrix uModel;
+    matrix uNormalMatrix;
     float3 uColor;
     int uUseTexture;
 };
