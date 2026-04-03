@@ -4,7 +4,9 @@
 #include "Console/ConVar.hpp"
 #include "Debug/DebugDraw.hpp"
 #include "Utils/Log.hpp"
+#include "Utils/FileDialog.hpp"
 #include "Components/Components.hpp"
+#include "Project/ProjectManager.hpp"
 #include "imgui.h"
 #include "imgui_internal.h"
 #include <SDL.h>
@@ -82,6 +84,35 @@ bool EditorApp::initialize(RenderAPIType api_type)
     m_content_browser.on_open_mesh = [this](const std::string& path) {
         m_lod_settings_panel.open(std::filesystem::path(path));
     };
+
+    // If --project was passed, load it directly.
+    // Otherwise, show the project browser and wait for the user to pick one.
+    if (!m_project_path.empty())
+    {
+        if (m_project_manager.loadProject(m_project_path))
+        {
+            std::filesystem::current_path(m_project_manager.getProjectRoot());
+            LOG_ENGINE_INFO("Project '{}' loaded from '{}'",
+                           m_project_manager.getDescriptor().name,
+                           m_project_manager.getProjectRoot());
+
+            if (!m_project_manager.getDescriptor().default_level.empty())
+                openLevel(m_project_manager.getDescriptor().default_level);
+        }
+        else
+        {
+            LOG_ENGINE_ERROR("Failed to load project: {}", m_project_path);
+        }
+    }
+    else
+    {
+        // Run the project browser — blocks until a project is selected or user quits
+        if (!runProjectBrowser())
+        {
+            m_running = false;
+            return true; // clean exit, not an error
+        }
+    }
 
     m_asset_scanner.scanDirectory("assets");
     m_asset_scanner.processAllPending();
@@ -1046,4 +1077,232 @@ LevelData EditorApp::buildLevelDataFromECS() const
 
     out.metadata.entity_count = static_cast<int>(out.entities.size());
     return out;
+}
+
+// ============================================================================
+// Project Browser — shown on startup when no --project is given
+// ============================================================================
+
+bool EditorApp::runProjectBrowser()
+{
+    // Release mouse capture so the user can interact with the UI
+    SDL_SetRelativeMouseMode(SDL_FALSE);
+
+    // Set window title for the project browser
+    SDL_SetWindowTitle(m_app.getWindow(), "Garden Engine");
+
+    // Initialize default paths
+    std::strncpy(m_new_project_dir, ".", sizeof(m_new_project_dir) - 1);
+    std::strncpy(m_open_project_path, "", sizeof(m_open_project_path) - 1);
+    std::strncpy(m_new_project_name, "MyGame", sizeof(m_new_project_name) - 1);
+
+    bool project_selected = false;
+
+    while (!project_selected)
+    {
+        SDL_Event event;
+        while (SDL_PollEvent(&event))
+        {
+            ImGuiManager::get().processEvent(&event);
+            if (event.type == SDL_QUIT)
+                return false;
+            if (event.type == SDL_WINDOWEVENT &&
+                event.window.event == SDL_WINDOWEVENT_CLOSE)
+                return false;
+        }
+
+        IRenderAPI* render_api = m_app.getRenderAPI();
+
+        // Render an empty scene (sets up the frame properly for the render API)
+        render_api->beginFrame();
+        render_api->clear(glm::vec3(0.10f, 0.10f, 0.12f));
+        render_api->endSceneRender();
+
+        ImGuiManager::get().newFrame();
+
+        ImGuiIO& io = ImGui::GetIO();
+
+        // ---- Fullscreen background window ----
+        ImGui::SetNextWindowPos(ImVec2(0, 0));
+        ImGui::SetNextWindowSize(io.DisplaySize);
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.10f, 0.10f, 0.12f, 1.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+
+        ImGuiWindowFlags bg_flags = ImGuiWindowFlags_NoTitleBar |
+                                    ImGuiWindowFlags_NoResize |
+                                    ImGuiWindowFlags_NoMove |
+                                    ImGuiWindowFlags_NoCollapse |
+                                    ImGuiWindowFlags_NoDocking |
+                                    ImGuiWindowFlags_NoBringToFrontOnFocus |
+                                    ImGuiWindowFlags_NoNavFocus |
+                                    ImGuiWindowFlags_NoScrollbar;
+
+        ImGui::Begin("##ProjectBrowserBG", nullptr, bg_flags);
+
+        // ---- Custom title bar ----
+        {
+            ImDrawList* draw = ImGui::GetWindowDrawList();
+            float title_h = 48.0f;
+            ImVec2 p0 = ImGui::GetCursorScreenPos();
+            ImVec2 p1(p0.x + io.DisplaySize.x, p0.y + title_h);
+
+            // Title bar background
+            draw->AddRectFilled(p0, p1, IM_COL32(22, 22, 26, 255));
+
+            // Title text
+            ImGui::PushFont(nullptr); // default font
+            const char* title = "Garden Engine";
+            ImVec2 text_size = ImGui::CalcTextSize(title);
+            ImVec2 text_pos(p0.x + 20.0f, p0.y + (title_h - text_size.y) * 0.5f);
+            draw->AddText(text_pos, IM_COL32(200, 200, 200, 255), title);
+
+            // Subtitle
+            const char* subtitle = "Project Browser";
+            ImVec2 sub_size = ImGui::CalcTextSize(subtitle);
+            ImVec2 sub_pos(p0.x + 20.0f + text_size.x + 16.0f,
+                           p0.y + (title_h - sub_size.y) * 0.5f);
+            draw->AddText(sub_pos, IM_COL32(120, 120, 130, 255), subtitle);
+            ImGui::PopFont();
+
+            // Bottom border line
+            draw->AddLine(ImVec2(p0.x, p1.y), p1, IM_COL32(50, 50, 60, 255));
+
+            ImGui::Dummy(ImVec2(0, title_h + 1));
+        }
+
+        // ---- Content area ----
+        float panel_w = 560.0f;
+        float panel_h = 420.0f;
+        float pad_x = (io.DisplaySize.x - panel_w) * 0.5f;
+        float pad_y_top = ImGui::GetCursorPosY() + 40.0f;
+
+        ImGui::SetCursorPos(ImVec2(pad_x, pad_y_top));
+        ImGui::BeginChild("##ProjectContent", ImVec2(panel_w, panel_h), false);
+
+        // ---- Open Project section ----
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.85f, 0.88f, 1.0f));
+        ImGui::TextUnformatted("Open Existing Project");
+        ImGui::PopStyleColor();
+        ImGui::Spacing();
+
+        float browse_w = 80.0f;
+        float open_w = 72.0f;
+        float btns_total = browse_w + 4 + open_w + 8;
+        ImGui::SetNextItemWidth(panel_w - btns_total);
+        ImGui::InputTextWithHint("##open_path", "Path to .garden file...",
+                                 m_open_project_path, sizeof(m_open_project_path));
+        ImGui::SameLine();
+        if (ImGui::Button("Browse##open", ImVec2(browse_w, 0)))
+        {
+            std::string result = FileDialog::openFile(
+                "Open Garden Project",
+                "Garden Project (*.garden)\0*.garden\0All Files (*.*)\0*.*\0");
+            if (!result.empty())
+                std::strncpy(m_open_project_path, result.c_str(),
+                             sizeof(m_open_project_path) - 1);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Open", ImVec2(open_w, 0)))
+        {
+            std::string path(m_open_project_path);
+            if (!path.empty() && m_project_manager.loadProject(path))
+            {
+                std::filesystem::current_path(m_project_manager.getProjectRoot());
+                LOG_ENGINE_INFO("Opened project '{}'",
+                               m_project_manager.getDescriptor().name);
+                if (!m_project_manager.getDescriptor().default_level.empty())
+                    openLevel(m_project_manager.getDescriptor().default_level);
+                project_selected = true;
+            }
+            else if (!path.empty())
+            {
+                LOG_ENGINE_ERROR("Failed to open project: {}", path);
+            }
+        }
+
+        ImGui::Spacing();
+        ImGui::Spacing();
+
+        // Divider
+        {
+            ImVec2 cp = ImGui::GetCursorScreenPos();
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            dl->AddLine(ImVec2(cp.x, cp.y), ImVec2(cp.x + panel_w, cp.y),
+                        IM_COL32(50, 50, 60, 255));
+            ImGui::Dummy(ImVec2(0, 1));
+        }
+
+        ImGui::Spacing();
+        ImGui::Spacing();
+
+        // ---- New Project section ----
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.85f, 0.88f, 1.0f));
+        ImGui::TextUnformatted("Create New Project");
+        ImGui::PopStyleColor();
+        ImGui::Spacing();
+
+        ImGui::SetNextItemWidth(panel_w * 0.5f);
+        ImGui::InputTextWithHint("Name", "Project name...",
+                                 m_new_project_name, sizeof(m_new_project_name));
+
+        ImGui::SetNextItemWidth(panel_w - browse_w - 8);
+        ImGui::InputTextWithHint("Directory", "Parent directory...",
+                                 m_new_project_dir, sizeof(m_new_project_dir));
+        ImGui::SameLine();
+        if (ImGui::Button("Browse##dir", ImVec2(browse_w, 0)))
+        {
+            std::string result = FileDialog::openFolder("Select Project Directory");
+            if (!result.empty())
+                std::strncpy(m_new_project_dir, result.c_str(),
+                             sizeof(m_new_project_dir) - 1);
+        }
+
+        ImGui::Spacing();
+        ImGui::Spacing();
+
+        // Create button — accent colored
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.45f, 0.80f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.25f, 0.50f, 0.90f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.15f, 0.40f, 0.75f, 1.0f));
+        if (ImGui::Button("Create Project", ImVec2(160, 36)))
+        {
+            std::string name(m_new_project_name);
+            std::string dir(m_new_project_dir);
+            if (!name.empty() && !dir.empty())
+            {
+                if (m_project_manager.createProject(dir, name))
+                {
+                    std::filesystem::current_path(m_project_manager.getProjectRoot());
+                    LOG_ENGINE_INFO("Created project '{}' at '{}'",
+                                   name, m_project_manager.getProjectRoot());
+                    if (!m_project_manager.getDescriptor().default_level.empty())
+                        openLevel(m_project_manager.getDescriptor().default_level);
+                    project_selected = true;
+                }
+                else
+                {
+                    LOG_ENGINE_ERROR("Failed to create project '{}' in '{}'",
+                                    name, dir);
+                }
+            }
+        }
+        ImGui::PopStyleColor(3);
+
+        ImGui::EndChild(); // ##ProjectContent
+
+        ImGui::End(); // ##ProjectBrowserBG
+        ImGui::PopStyleVar(3);
+        ImGui::PopStyleColor();
+
+        ImGui::Render();
+        render_api->renderUI();
+        m_app.swapBuffers();
+    }
+
+    // Restore window title for the editor
+    SDL_SetWindowTitle(m_app.getWindow(), "Garden Level Editor");
+
+    return true;
 }

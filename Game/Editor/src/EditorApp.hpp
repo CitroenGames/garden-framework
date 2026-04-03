@@ -22,6 +22,7 @@
 #include "panels/PhysicsDebugPanel.hpp"
 #include "panels/LODSettingsPanel.hpp"
 #include "Assets/AssetScanner.hpp"
+#include "Project/ProjectManager.hpp"
 
 class EditorApp
 {
@@ -29,6 +30,9 @@ public:
     bool initialize(RenderAPIType api_type);
     void run();
     void shutdown();
+
+    // Set a .garden project file path to load on init (called before initialize)
+    void setProjectPath(const std::string& path) { m_project_path = path; }
 
 private:
     // Core systems
@@ -61,6 +65,9 @@ private:
     float m_mouse_dx    = 0.0f;
     float m_mouse_dy    = 0.0f;
     float m_delta_time  = 0.0f;
+
+    // Project path (from --project CLI arg)
+    std::string m_project_path;
 
     // Save path
     std::string m_current_save_path;
@@ -114,6 +121,15 @@ private:
     void renderOpenDialog();
     void renderSaveAsDialog();
     void renderGrid();
+
+    // Project browser (shown before editor when no --project given)
+    bool runProjectBrowser();
+    void renderProjectBrowser();
+    ProjectManager m_project_manager;
+    char m_new_project_name[256] = "";
+    char m_new_project_dir[512] = "";
+    char m_open_project_path[512] = "";
+    bool m_show_new_project_popup = false;
 
     // Level operations
     void newLevel();

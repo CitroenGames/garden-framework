@@ -10,6 +10,7 @@ if(macOS)
 
 [project:Server]
 type = exe
+outdir = ../../bin/
 if(Windows)
 {
     subsystem = Console

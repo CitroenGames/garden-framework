@@ -2,6 +2,7 @@
 #include "EditorApp.hpp"
 #include "Graphics/RenderAPI.hpp"
 #include <cstring>
+#include <string>
 
 static RenderAPIType parseRenderAPI(int argc, char* argv[])
 {
@@ -22,11 +23,24 @@ static RenderAPIType parseRenderAPI(int argc, char* argv[])
     return DefaultRenderAPI;
 }
 
+static std::string parseProjectPath(int argc, char* argv[])
+{
+    for (int i = 1; i < argc - 1; i++)
+    {
+        if (strcmp(argv[i], "--project") == 0)
+            return argv[i + 1];
+    }
+    return "";
+}
+
 int main(int argc, char* argv[])
 {
     RenderAPIType api_type = parseRenderAPI(argc, argv);
+    std::string project_path = parseProjectPath(argc, argv);
 
     EditorApp editor;
+    if (!project_path.empty())
+        editor.setProjectPath(project_path);
     if (!editor.initialize(api_type))
         return 1;
 

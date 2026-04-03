@@ -2,6 +2,7 @@
 #include "VulkanMesh.hpp"
 #include "Components/mesh.hpp"
 #include "Components/camera.hpp"
+#include "Utils/EnginePaths.hpp"
 #include <stdio.h>
 #include <cmath>
 #include <fstream>
@@ -985,13 +986,13 @@ void VulkanRenderAPI::savePipelineCache()
 bool VulkanRenderAPI::createGraphicsPipeline()
 {
     // Load shaders
-    auto vertShaderCode = readShaderFile("assets/shaders/vulkan/basic.vert.spv");
-    auto fragShaderCode = readShaderFile("assets/shaders/vulkan/basic.frag.spv");
+    auto vertShaderCode = readShaderFile(EnginePaths::resolveEngineAsset("../assets/shaders/vulkan/basic.vert.spv"));
+    auto fragShaderCode = readShaderFile(EnginePaths::resolveEngineAsset("../assets/shaders/vulkan/basic.frag.spv"));
 
     if (vertShaderCode.empty() || fragShaderCode.empty()) {
         printf("Failed to load shader files. Make sure to compile GLSL shaders to SPIR-V.\n");
-        printf("Run: glslc assets/shaders/vulkan/basic.vert -o assets/shaders/vulkan/basic.vert.spv\n");
-        printf("Run: glslc assets/shaders/vulkan/basic.frag -o assets/shaders/vulkan/basic.frag.spv\n");
+        printf("Run: glslc ../assets/shaders/vulkan/basic.vert -o ../assets/shaders/vulkan/basic.vert.spv\n");
+        printf("Run: glslc ../assets/shaders/vulkan/basic.frag -o ../assets/shaders/vulkan/basic.frag.spv\n");
         return false;
     }
 
@@ -1802,8 +1803,8 @@ bool VulkanRenderAPI::createShadowResources()
     }
 
     // Load shadow shaders
-    auto vertShaderCode = readShaderFile("assets/shaders/vulkan/shadow.vert.spv");
-    auto fragShaderCode = readShaderFile("assets/shaders/vulkan/shadow.frag.spv");
+    auto vertShaderCode = readShaderFile(EnginePaths::resolveEngineAsset("../assets/shaders/vulkan/shadow.vert.spv"));
+    auto fragShaderCode = readShaderFile(EnginePaths::resolveEngineAsset("../assets/shaders/vulkan/shadow.frag.spv"));
 
     if (vertShaderCode.empty() || fragShaderCode.empty()) {
         printf("Failed to load shadow shader files\n");
@@ -2206,8 +2207,8 @@ bool VulkanRenderAPI::createSkyboxResources()
     }
 
     // Load skybox shaders
-    auto vertCode = readShaderFile("assets/shaders/vulkan/sky.vert.spv");
-    auto fragCode = readShaderFile("assets/shaders/vulkan/sky.frag.spv");
+    auto vertCode = readShaderFile(EnginePaths::resolveEngineAsset("../assets/shaders/vulkan/sky.vert.spv"));
+    auto fragCode = readShaderFile(EnginePaths::resolveEngineAsset("../assets/shaders/vulkan/sky.frag.spv"));
 
     if (vertCode.empty() || fragCode.empty()) {
         printf("Failed to load skybox shaders\n");
@@ -2754,8 +2755,8 @@ bool VulkanRenderAPI::createFxaaResources()
     }
 
     // Load FXAA shaders
-    auto vertShaderCode = readShaderFile("assets/shaders/vulkan/fxaa.vert.spv");
-    auto fragShaderCode = readShaderFile("assets/shaders/vulkan/fxaa.frag.spv");
+    auto vertShaderCode = readShaderFile(EnginePaths::resolveEngineAsset("../assets/shaders/vulkan/fxaa.vert.spv"));
+    auto fragShaderCode = readShaderFile(EnginePaths::resolveEngineAsset("../assets/shaders/vulkan/fxaa.frag.spv"));
 
     if (vertShaderCode.empty() || fragShaderCode.empty()) {
         printf("Failed to load FXAA shaders\n");
