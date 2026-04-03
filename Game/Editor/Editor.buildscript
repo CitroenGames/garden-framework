@@ -1,0 +1,49 @@
+find_package(Vulkan REQUIRED)
+if(Linux)
+{
+    find_package(SDL2 REQUIRED)
+}
+if(macOS)
+{
+    find_package(SDL2 REQUIRED)
+}
+if(Windows)
+{
+find_package(DirectX11 REQUIRED)
+}
+
+[project:Editor]
+type = exe
+if(Windows)
+{
+    subsystem = Console
+}
+sources = src/**/*.cpp
+headers = src/**/*.hpp
+if(Windows)
+{
+    includes = src, ${DirectX11_INCLUDE_DIRS}
+    libs = ${Vulkan_LIBRARIES}, ${DirectX11_LIBRARIES}
+    libdirs = ${Vulkan_LIBRARY_DIRS}, ${DirectX11_LIBRARY_DIRS}
+}
+if(Linux)
+{
+    includes = src
+    libs = ${Vulkan_LIBRARIES}
+    libdirs = ${Vulkan_LIBRARY_DIRS}, ${SDL2_LIBRARY_DIRS}
+    ldflags = -Wl,-rpath,/opt/homebrew/lib
+}
+if(macOS)
+{
+    includes = src
+    libs = ${Vulkan_LIBRARIES}, -framework Metal, -framework QuartzCore, -framework Cocoa, -framework Foundation, -lobjc
+    libdirs = ${Vulkan_LIBRARY_DIRS}, ${SDL2_LIBRARY_DIRS}
+}
+target_link_libraries(
+    PRIVATE Engine
+)
+multiprocessor = true
+std = 20
+utf8 = true
+exception_handling = false
+buffer_security_check = false

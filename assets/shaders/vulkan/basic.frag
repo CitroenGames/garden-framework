@@ -64,8 +64,8 @@ float ShadowCalculation(int cascadeIndex)
 
     // Perform perspective divide
     vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
-    // Transform to [0,1] range
-    projCoords = projCoords * 0.5 + 0.5;
+    // Transform XY to [0,1] range for texture sampling (Z is already [0,1] in Vulkan)
+    projCoords.xy = projCoords.xy * 0.5 + 0.5;
 
     // Get depth of current fragment from light's perspective
     float currentDepth = projCoords.z;

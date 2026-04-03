@@ -98,6 +98,7 @@ void PostProcessing::beginRender()
 {
     if (!initialized) return;
     glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+    glViewport(0, 0, width, height);
     glEnable(GL_DEPTH_TEST);
 }
 

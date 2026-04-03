@@ -189,7 +189,7 @@ bool VulkanRenderAPI::initialize(WindowHandle window, int width, int height, flo
 
     // Initialize projection matrix
     float ratio = (float)width / (float)height;
-    projection_matrix = glm::perspective(glm::radians(fov), ratio, 0.1f, 1000.0f);
+    projection_matrix = glm::perspectiveRH_ZO(glm::radians(fov), ratio, 0.1f, 1000.0f);
     // Flip Y for Vulkan coordinate system
     projection_matrix[1][1] *= -1;
 
@@ -368,7 +368,7 @@ void VulkanRenderAPI::resize(int width, int height)
 
     // Update projection matrix
     float ratio = (float)width / (float)height;
-    projection_matrix = glm::perspective(glm::radians(field_of_view), ratio, 0.1f, 1000.0f);
+    projection_matrix = glm::perspectiveRH_ZO(glm::radians(field_of_view), ratio, 0.1f, 1000.0f);
     projection_matrix[1][1] *= -1;  // Flip Y for Vulkan
 
     // Recreate swapchain
@@ -856,7 +856,7 @@ VkShaderModule VulkanRenderAPI::createShaderModule(const std::vector<char>& code
 
     VkShaderModule shaderModule;
     if (vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule) != VK_SUCCESS) {
-        printf("Failed to create shader module\n");
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create shader module");
         return VK_NULL_HANDLE;
     }
 
@@ -880,15 +880,18 @@ bool VulkanRenderAPI::loadPipelineCache()
 
         cacheInfo.initialDataSize = cacheData.size();
         cacheInfo.pInitialData = cacheData.data();
-        printf("Loaded pipeline cache from disk (%zu bytes)\n", cacheData.size());
+        LOG_ENGINE_INFO("[Vulkan] Loaded pipeline cache from disk ({} bytes)", cacheData.size());
     }
 
     if (vkCreatePipelineCache(device, &cacheInfo, nullptr, &vk_pipeline_cache) != VK_SUCCESS) {
-        // If loading failed (e.g. corrupt data), create empty cache
+        // Cache data is invalid or incompatible (wrong GPU/driver) — start fresh
+        LOG_ENGINE_WARN("[Vulkan] Pipeline cache invalid or incompatible. Deleting and starting fresh.");
+        cacheData.clear();
         cacheInfo.initialDataSize = 0;
         cacheInfo.pInitialData = nullptr;
+        std::remove("pipeline_cache.bin");
         if (vkCreatePipelineCache(device, &cacheInfo, nullptr, &vk_pipeline_cache) != VK_SUCCESS) {
-            printf("Failed to create pipeline cache\n");
+            LOG_ENGINE_ERROR("[Vulkan] Failed to create empty pipeline cache.");
             return false;
         }
     }
@@ -975,6 +978,9 @@ bool VulkanRenderAPI::createGraphicsPipeline()
     VkShaderModule fragShaderModule = createShaderModule(fragShaderCode);
 
     if (vertShaderModule == VK_NULL_HANDLE || fragShaderModule == VK_NULL_HANDLE) {
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create shader module(s) for graphics pipeline");
+        if (vertShaderModule != VK_NULL_HANDLE) vkDestroyShaderModule(device, vertShaderModule, nullptr);
+        if (fragShaderModule != VK_NULL_HANDLE) vkDestroyShaderModule(device, fragShaderModule, nullptr);
         return false;
     }
 
@@ -1412,7 +1418,7 @@ std::array<glm::vec3, 8> VulkanRenderAPI::getFrustumCornersWorldSpace(const glm:
                 glm::vec4 pt = inv * glm::vec4(
                     2.0f * x - 1.0f,
                     2.0f * y - 1.0f,
-                    2.0f * z - 1.0f,
+                    static_cast<float>(z),  // Vulkan uses [0,1] depth range
                     1.0f);
                 corners[idx++] = glm::vec3(pt) / pt.w;
             }
@@ -1430,7 +1436,7 @@ glm::mat4 VulkanRenderAPI::getLightSpaceMatrixForCascade(int cascadeIndex, const
     float cascadeFar = cascadeSplitDistances[cascadeIndex + 1];
 
     // Create projection for this cascade's frustum slice
-    glm::mat4 cascadeProj = glm::perspective(glm::radians(fov), aspect, cascadeNear, cascadeFar);
+    glm::mat4 cascadeProj = glm::perspectiveRH_ZO(glm::radians(fov), aspect, cascadeNear, cascadeFar);
 
     // Get frustum corners in world space
     auto corners = getFrustumCornersWorldSpace(cascadeProj, viewMatrix);
@@ -1478,7 +1484,7 @@ glm::mat4 VulkanRenderAPI::getLightSpaceMatrixForCascade(int cascadeIndex, const
     maxZ += 500.0f;
 
     // Orthographic projection tightly fitted to frustum
-    glm::mat4 lightProj = glm::ortho(minX, maxX, minY, maxY, minZ, maxZ);
+    glm::mat4 lightProj = glm::orthoRH_ZO(minX, maxX, minY, maxY, minZ, maxZ);
 
     return lightProj * lightView;
 }
@@ -1686,6 +1692,9 @@ bool VulkanRenderAPI::createShadowResources()
     VkShaderModule fragModule = createShaderModule(fragShaderCode);
 
     if (vertModule == VK_NULL_HANDLE || fragModule == VK_NULL_HANDLE) {
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create shader module(s) for shadow pipeline");
+        if (vertModule != VK_NULL_HANDLE) vkDestroyShaderModule(device, vertModule, nullptr);
+        if (fragModule != VK_NULL_HANDLE) vkDestroyShaderModule(device, fragModule, nullptr);
         return false;
     }
 
@@ -2104,6 +2113,9 @@ bool VulkanRenderAPI::createSkyboxResources()
     VkShaderModule fragModule = createShaderModule(fragCode);
 
     if (vertModule == VK_NULL_HANDLE || fragModule == VK_NULL_HANDLE) {
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create shader module(s) for skybox pipeline");
+        if (vertModule != VK_NULL_HANDLE) vkDestroyShaderModule(device, vertModule, nullptr);
+        if (fragModule != VK_NULL_HANDLE) vkDestroyShaderModule(device, fragModule, nullptr);
         return false;
     }
 
@@ -2648,6 +2660,13 @@ bool VulkanRenderAPI::createFxaaResources()
     VkShaderModule vertShaderModule = createShaderModule(vertShaderCode);
     VkShaderModule fragShaderModule = createShaderModule(fragShaderCode);
 
+    if (vertShaderModule == VK_NULL_HANDLE || fragShaderModule == VK_NULL_HANDLE) {
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create shader module(s) for FXAA pipeline");
+        if (vertShaderModule != VK_NULL_HANDLE) vkDestroyShaderModule(device, vertShaderModule, nullptr);
+        if (fragShaderModule != VK_NULL_HANDLE) vkDestroyShaderModule(device, fragShaderModule, nullptr);
+        return false;
+    }
+
     VkPipelineShaderStageCreateInfo vertShaderStageInfo{};
     vertShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     vertShaderStageInfo.stage = VK_SHADER_STAGE_VERTEX_BIT;
@@ -2929,6 +2948,7 @@ void VulkanRenderAPI::recreateOffscreenResources()
     if (offscreen_depth_image != VK_NULL_HANDLE && vma_allocator) {
         vmaDestroyImage(vma_allocator, offscreen_depth_image, offscreen_depth_allocation);
         offscreen_depth_image = VK_NULL_HANDLE;
+        offscreen_depth_allocation = nullptr;
     }
 
     if (offscreen_view != VK_NULL_HANDLE) {
@@ -2939,6 +2959,7 @@ void VulkanRenderAPI::recreateOffscreenResources()
     if (offscreen_image != VK_NULL_HANDLE && vma_allocator) {
         vmaDestroyImage(vma_allocator, offscreen_image, offscreen_allocation);
         offscreen_image = VK_NULL_HANDLE;
+        offscreen_allocation = nullptr;
     }
 
     // Recreate with new size
@@ -3117,13 +3138,25 @@ void VulkanRenderAPI::recreateSwapchain()
         return;
     }
 
-    createImageViews();
-    createDepthResources();
-    createFramebuffers();
+    if (!createImageViews()) {
+        LOG_ENGINE_ERROR("[Vulkan] recreateSwapchain: createImageViews failed");
+        swapchain_extent = {0, 0};
+        return;
+    }
+    if (!createDepthResources()) {
+        LOG_ENGINE_ERROR("[Vulkan] recreateSwapchain: createDepthResources failed");
+        swapchain_extent = {0, 0};
+        return;
+    }
+    if (!createFramebuffers()) {
+        LOG_ENGINE_ERROR("[Vulkan] recreateSwapchain: createFramebuffers failed");
+        swapchain_extent = {0, 0};
+        return;
+    }
 
     // Update projection matrix
     float ratio = (float)viewport_width / (float)viewport_height;
-    projection_matrix = glm::perspective(glm::radians(field_of_view), ratio, 0.1f, 1000.0f);
+    projection_matrix = glm::perspectiveRH_ZO(glm::radians(field_of_view), ratio, 0.1f, 1000.0f);
     projection_matrix[1][1] *= -1;
 
     // Recreate offscreen resources if FXAA is enabled
@@ -3155,14 +3188,37 @@ void VulkanRenderAPI::endSingleTimeCommands(VkCommandBuffer commandBuffer)
 {
     vkEndCommandBuffer(commandBuffer);
 
+    VkFenceCreateInfo fenceInfo{};
+    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    VkFence fence = VK_NULL_HANDLE;
+
+    if (vkCreateFence(device, &fenceInfo, nullptr, &fence) != VK_SUCCESS) {
+        LOG_ENGINE_ERROR("[Vulkan] endSingleTimeCommands: fence creation failed, "
+                         "falling back to vkQueueWaitIdle");
+        VkSubmitInfo si{};
+        si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        si.commandBufferCount = 1;
+        si.pCommandBuffers = &commandBuffer;
+        vkQueueSubmit(graphics_queue, 1, &si, VK_NULL_HANDLE);
+        vkQueueWaitIdle(graphics_queue);
+        vkFreeCommandBuffers(device, command_pool, 1, &commandBuffer);
+        return;
+    }
+
     VkSubmitInfo submitInfo{};
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &commandBuffer;
 
-    vkQueueSubmit(graphics_queue, 1, &submitInfo, VK_NULL_HANDLE);
-    vkQueueWaitIdle(graphics_queue);
+    vkQueueSubmit(graphics_queue, 1, &submitInfo, fence);
 
+    VkResult r = vkWaitForFences(device, 1, &fence, VK_TRUE, FENCE_TIMEOUT_NS);
+    if (r == VK_TIMEOUT)
+        LOG_ENGINE_ERROR("[Vulkan] endSingleTimeCommands: fence timed out after 5s");
+    else if (r == VK_ERROR_DEVICE_LOST)
+        LOG_ENGINE_ERROR("[Vulkan] endSingleTimeCommands: VK_ERROR_DEVICE_LOST");
+
+    vkDestroyFence(device, fence, nullptr);
     vkFreeCommandBuffers(device, command_pool, 1, &commandBuffer);
 }
 
@@ -3179,7 +3235,15 @@ void VulkanRenderAPI::transitionImageLayout(VkImage image, VkFormat format,
     barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barrier.image = image;
-    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    {
+        VkImageAspectFlags aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        if (format == VK_FORMAT_D32_SFLOAT || format == VK_FORMAT_D16_UNORM) {
+            aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+        } else if (format == VK_FORMAT_D24_UNORM_S8_UINT || format == VK_FORMAT_D32_SFLOAT_S8_UINT) {
+            aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+        }
+        barrier.subresourceRange.aspectMask = aspectMask;
+    }
     barrier.subresourceRange.baseMipLevel = 0;
     barrier.subresourceRange.levelCount = mipLevels;
     barrier.subresourceRange.baseArrayLayer = 0;
@@ -3330,19 +3394,18 @@ void VulkanRenderAPI::updateDescriptorSet(uint32_t frameIndex, TextureHandle tex
     uint32_t setIndex = frameIndex * MAX_DESCRIPTOR_SETS_PER_FRAME + current_descriptor_set_index;
 
     // Early warning at 80% capacity
-    static bool warned_80_percent = false;
-    if (!warned_80_percent && current_descriptor_set_index >= (MAX_DESCRIPTOR_SETS_PER_FRAME * 8 / 10)) {
+    if (!descriptor_limit_warned && current_descriptor_set_index >= (MAX_DESCRIPTOR_SETS_PER_FRAME * 8 / 10)) {
         LOG_ENGINE_WARN("[Vulkan] Approaching descriptor set limit ({}/{})",
                        current_descriptor_set_index, MAX_DESCRIPTOR_SETS_PER_FRAME);
-        warned_80_percent = true;
+        descriptor_limit_warned = true;
     }
 
-    // Safety check - wrap around if we exceed the limit
+    // Hard limit - do not wrap (would corrupt in-use descriptor sets)
     if (current_descriptor_set_index >= MAX_DESCRIPTOR_SETS_PER_FRAME) {
-        LOG_ENGINE_WARN("[Vulkan] Exceeded max descriptor sets per frame ({}), wrapping", MAX_DESCRIPTOR_SETS_PER_FRAME);
-        current_descriptor_set_index = 0;
-        setIndex = frameIndex * MAX_DESCRIPTOR_SETS_PER_FRAME;
-        warned_80_percent = false;  // Reset for next overflow
+        LOG_ENGINE_ERROR("[Vulkan] Descriptor set pool exhausted ({} sets used). "
+                         "Draw call skipped. Increase MAX_DESCRIPTOR_SETS_PER_FRAME.",
+                         MAX_DESCRIPTOR_SETS_PER_FRAME);
+        return;
     }
 
     VkDescriptorImageInfo imageInfo{};
@@ -3377,8 +3440,10 @@ void VulkanRenderAPI::updateDescriptorSet(uint32_t frameIndex, TextureHandle tex
 }
 
 // Frame management
-void VulkanRenderAPI::beginFrame()
+void VulkanRenderAPI::prepareFrame()
 {
+    if (frame_started) return;
+
     image_acquired = false;
 
     // Skip rendering if swapchain is invalid (window minimized)
@@ -3390,13 +3455,25 @@ void VulkanRenderAPI::beginFrame()
     }
 
     // Wait for previous frame
-    vkWaitForFences(device, 1, &in_flight_fences[current_frame], VK_TRUE, UINT64_MAX);
+    VkResult fenceResult = vkWaitForFences(
+        device, 1, &in_flight_fences[current_frame], VK_TRUE, FENCE_TIMEOUT_NS);
+    if (fenceResult == VK_TIMEOUT) {
+        LOG_ENGINE_ERROR("[Vulkan] GPU fence timed out after 5s on frame {}. "
+                         "Device may be hung. Skipping frame.", current_frame);
+        frame_started = false;
+        return;
+    }
+    if (fenceResult == VK_ERROR_DEVICE_LOST) {
+        LOG_ENGINE_ERROR("[Vulkan] VK_ERROR_DEVICE_LOST on fence wait. Renderer shutting down.");
+        frame_started = false;
+        return;
+    }
 
     // Process deferred deletions (safe now that fence has signaled)
     deletion_queue.flush();
 
     // Acquire next image
-    VkResult result = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX,
+    VkResult result = vkAcquireNextImageKHR(device, swapchain, FENCE_TIMEOUT_NS,
         image_available_semaphores[current_frame], VK_NULL_HANDLE, &current_image_index);
 
     if (result == VK_ERROR_OUT_OF_DATE_KHR) {
@@ -3417,6 +3494,7 @@ void VulkanRenderAPI::beginFrame()
     // Reset per-draw descriptor set index and cache for this frame
     current_descriptor_set_index = 0;
     texture_descriptor_cache.clear();
+    descriptor_limit_warned = false;
 
     // Reset redundant bind tracking
     last_bound_pipeline = VK_NULL_HANDLE;
@@ -3432,6 +3510,24 @@ void VulkanRenderAPI::beginFrame()
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 
     vkBeginCommandBuffer(command_buffers[current_frame], &beginInfo);
+
+    // Reset model matrix
+    current_model_matrix = glm::mat4(1.0f);
+    while (!model_matrix_stack.empty()) model_matrix_stack.pop();
+
+    frame_started = true;
+}
+
+void VulkanRenderAPI::beginFrame()
+{
+    // Ensure frame preparation is done (fence, acquire, command buffer)
+    if (!frame_started) {
+        prepareFrame();
+        if (!frame_started) return;
+    }
+
+    // Skip if main render pass is already started
+    if (main_pass_started) return;
 
     // Begin render pass - use offscreen framebuffer if FXAA is enabled
     VkRenderPassBeginInfo renderPassInfo{};
@@ -3478,12 +3574,6 @@ void VulkanRenderAPI::beginFrame()
     scissor.offset = {0, 0};
     scissor.extent = swapchain_extent;
     vkCmdSetScissor(command_buffers[current_frame], 0, 1, &scissor);
-
-    // Reset model matrix
-    current_model_matrix = glm::mat4(1.0f);
-    while (!model_matrix_stack.empty()) model_matrix_stack.pop();
-
-    frame_started = true;
 }
 
 void VulkanRenderAPI::endFrame()
@@ -4106,10 +4196,13 @@ void VulkanRenderAPI::renderSkybox()
     vkCmdDraw(cmd, 36, 1, 0, 0);
 }
 
-// Shadow mapping stubs (MVP - no shadows)
+// Shadow mapping
 void VulkanRenderAPI::beginShadowPass(const glm::vec3& lightDir)
 {
-    if (!frame_started) return;
+    if (!frame_started) {
+        prepareFrame();
+        if (!frame_started) return;
+    }
 
     // Skip if shadows are disabled
     if (shadowQuality == 0 || shadow_map_image == VK_NULL_HANDLE)
@@ -4134,7 +4227,10 @@ void VulkanRenderAPI::beginShadowPass(const glm::vec3& lightDir)
 
 void VulkanRenderAPI::beginShadowPass(const glm::vec3& lightDir, const camera& cam)
 {
-    if (!frame_started) return;
+    if (!frame_started) {
+        prepareFrame();
+        if (!frame_started) return;
+    }
 
     // Skip if shadows are disabled
     if (shadowQuality == 0 || shadow_map_image == VK_NULL_HANDLE)
@@ -4169,7 +4265,11 @@ void VulkanRenderAPI::beginCascade(int cascadeIndex)
 
     currentCascade = cascadeIndex;
 
-    // End current render pass if active
+    // End any currently active render pass
+    if (shadow_pass_active) {
+        vkCmdEndRenderPass(command_buffers[current_frame]);
+        shadow_pass_active = false;
+    }
     if (main_pass_started) {
         vkCmdEndRenderPass(command_buffers[current_frame]);
         main_pass_started = false;
@@ -4194,6 +4294,7 @@ void VulkanRenderAPI::beginCascade(int cascadeIndex)
     rpInfo.pClearValues = &clearValue;
 
     vkCmdBeginRenderPass(command_buffers[current_frame], &rpInfo, VK_SUBPASS_CONTENTS_INLINE);
+    shadow_pass_active = true;
 
     // Bind shadow pipeline (reset tracking -- new render pass)
     vkCmdBindPipeline(command_buffers[current_frame], VK_PIPELINE_BIND_POINT_GRAPHICS, shadow_pipeline);
@@ -4223,57 +4324,15 @@ void VulkanRenderAPI::beginCascade(int cascadeIndex)
 
 void VulkanRenderAPI::endShadowPass()
 {
-    if (!frame_started || !in_shadow_pass) return;
+    if (!in_shadow_pass) return;
 
     // End shadow render pass if active
-    vkCmdEndRenderPass(command_buffers[current_frame]);
-
-    in_shadow_pass = false;
-
-    // Begin main render pass again - use correct target based on FXAA state
-    VkRenderPassBeginInfo rpInfo{};
-    rpInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-
-    if (fxaaEnabled && fxaa_initialized) {
-        rpInfo.renderPass = offscreen_render_pass;
-        rpInfo.framebuffer = offscreen_framebuffers[0];
-    } else {
-        rpInfo.renderPass = render_pass;
-        rpInfo.framebuffer = framebuffers[current_image_index];
+    if (shadow_pass_active) {
+        vkCmdEndRenderPass(command_buffers[current_frame]);
+        shadow_pass_active = false;
     }
 
-    rpInfo.renderArea.offset = {0, 0};
-    rpInfo.renderArea.extent = swapchain_extent;
-
-    std::array<VkClearValue, 2> clearValues{};
-    clearValues[0].color = {{clear_color.r, clear_color.g, clear_color.b, 1.0f}};
-    clearValues[1].depthStencil = {1.0f, 0};
-    rpInfo.clearValueCount = static_cast<uint32_t>(clearValues.size());
-    rpInfo.pClearValues = clearValues.data();
-
-    vkCmdBeginRenderPass(command_buffers[current_frame], &rpInfo, VK_SUBPASS_CONTENTS_INLINE);
-    main_pass_started = true;
-
-    // Bind main pipeline (reset tracking -- new render pass)
-    vkCmdBindPipeline(command_buffers[current_frame], VK_PIPELINE_BIND_POINT_GRAPHICS, graphics_pipeline);
-    last_bound_pipeline = graphics_pipeline;
-    last_bound_descriptor_set = VK_NULL_HANDLE;
-    last_bound_vertex_buffer = VK_NULL_HANDLE;
-
-    // Restore viewport and scissor for main pass
-    VkViewport viewport{};
-    viewport.x = 0.0f;
-    viewport.y = 0.0f;
-    viewport.width = static_cast<float>(swapchain_extent.width);
-    viewport.height = static_cast<float>(swapchain_extent.height);
-    viewport.minDepth = 0.0f;
-    viewport.maxDepth = 1.0f;
-    vkCmdSetViewport(command_buffers[current_frame], 0, 1, &viewport);
-
-    VkRect2D scissor{};
-    scissor.offset = {0, 0};
-    scissor.extent = swapchain_extent;
-    vkCmdSetScissor(command_buffers[current_frame], 0, 1, &scissor);
+    in_shadow_pass = false;
 }
 
 void VulkanRenderAPI::bindShadowMap(int textureUnit)
@@ -4376,4 +4435,44 @@ void VulkanRenderAPI::recreateShadowResources(uint32_t size)
     {
         LOG_ENGINE_INFO("Shadow map resized to {}x{}", size, size);
     }
+}
+
+// --- Viewport render-to-texture stubs (full implementation TODO for Vulkan) ---
+
+void VulkanRenderAPI::createViewportResources(int w, int h)
+{
+    viewport_width_rt = w;
+    viewport_height_rt = h;
+    // TODO: Create Vulkan viewport image, view, sampler, and register with ImGui
+}
+
+void VulkanRenderAPI::destroyViewportResources()
+{
+    viewport_width_rt = 0;
+    viewport_height_rt = 0;
+    // TODO: Destroy viewport Vulkan resources
+}
+
+void VulkanRenderAPI::setViewportSize(int width, int height)
+{
+    if (width <= 0 || height <= 0) return;
+    if (width == viewport_width_rt && height == viewport_height_rt) return;
+    createViewportResources(width, height);
+}
+
+void VulkanRenderAPI::endSceneRender()
+{
+    // For now, fall through to endFrame behavior
+    endFrame();
+}
+
+uint64_t VulkanRenderAPI::getViewportTextureID()
+{
+    // TODO: Return Vulkan descriptor set for viewport texture
+    return 0;
+}
+
+void VulkanRenderAPI::renderUI()
+{
+    // Vulkan viewport mode not yet implemented - ImGui already rendered in endFrame
 }

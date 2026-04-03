@@ -6,9 +6,13 @@ layout(location = 2) in vec2 aTexCoord;
 
 out vec2 TexCoord;
 
+layout(std140, binding = 0) uniform CameraData {
+    mat4 uView;
+    mat4 uProjection;
+    vec4 uCameraPos;
+};
+
 uniform mat4 uModel;
-uniform mat4 uView;
-uniform mat4 uProjection;
 
 void main()
 {

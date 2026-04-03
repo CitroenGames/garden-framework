@@ -21,6 +21,24 @@ typedef SDL_GLContext OpenGLContext;
 class Shader;
 class ShaderManager;
 
+// UBO data structures (std140 layout)
+struct CameraUBOData
+{
+    alignas(16) glm::mat4 view;        // 64 bytes
+    alignas(16) glm::mat4 projection;  // 64 bytes
+    alignas(16) glm::vec4 cameraPos;   // 16 bytes (vec3 padded to vec4)
+};  // Total: 144 bytes
+
+struct LightingUBOData
+{
+    alignas(16) glm::mat4 lightSpaceMatrices[4]; // 256 bytes
+    alignas(16) glm::vec4 cascadeSplits[5];      // 80 bytes (each float in its own vec4 for std140 array)
+    alignas(16) glm::ivec4 cascadeParams;        // 16 bytes (x=cascadeCount, y=debugCascades)
+    alignas(16) glm::vec4 lightDir;              // 16 bytes (vec3 padded)
+    alignas(16) glm::vec4 lightAmbient;          // 16 bytes
+    alignas(16) glm::vec4 lightDiffuse;          // 16 bytes
+};  // Total: 400 bytes
+
 class OpenGLRenderAPI : public IRenderAPI
 {
 private:
@@ -80,6 +98,15 @@ private:
     GLuint debug_vao = 0;
     GLuint debug_vbo = 0;
     size_t debug_vbo_capacity = 0;
+    void* debug_vbo_mapped_ptr = nullptr;
+
+    // Uniform Buffer Objects
+    GLuint camera_ubo = 0;
+    GLuint lighting_ubo = 0;
+    bool camera_ubo_dirty = true;
+    bool lighting_ubo_dirty = true;
+    void uploadCameraUBO();
+    void uploadLightingUBO();
 
     // Optimization state tracking
     GLuint current_shader_id;
@@ -89,6 +116,7 @@ private:
 
     // Internal helper methods
     Shader* getShaderForRenderState(const RenderState& state);
+    void renderMeshInternal(const mesh& m, GLint start_vertex, GLsizei vertex_count, const RenderState& state);
     static void GLAPIENTRY openglDebugCallback(GLenum source, GLenum type, GLuint id,
                                                GLenum severity, GLsizei length,
                                                const GLchar* message, const void* userParam);
@@ -158,6 +186,11 @@ public:
     // Debug line rendering
     virtual void renderDebugLines(const vertex* vertices, size_t vertex_count) override;
 
+    // Depth prepass
+    virtual void beginDepthPrepass() override;
+    virtual void endDepthPrepass() override;
+    virtual void renderMeshDepthOnly(const mesh& m) override;
+
     virtual const char* getAPIName() const override { return "OpenGL"; }
 
     // Graphics settings
@@ -165,4 +198,19 @@ public:
     virtual bool isFXAAEnabled() const override;
     virtual void setShadowQuality(int quality) override;
     virtual int getShadowQuality() const override;
+
+    // Viewport rendering (for editor)
+    virtual void endSceneRender() override;
+    virtual uint64_t getViewportTextureID() override;
+    virtual void setViewportSize(int width, int height) override;
+    virtual void renderUI() override;
+
+private:
+    // Viewport FBO for editor render-to-texture
+    GLuint viewport_fbo = 0;
+    GLuint viewport_texture = 0;
+    int viewport_width_rt = 0;
+    int viewport_height_rt = 0;
+    void createViewportFBO(int w, int h);
+    void destroyViewportFBO();
 };

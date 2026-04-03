@@ -10,16 +10,28 @@ out vec4 FragColor;
 uniform sampler2D uTexture;
 uniform sampler2DArray uShadowMapArray;
 uniform bool uUseTexture;
-uniform vec3 uLightDir;
-uniform vec3 uLightAmbient;
-uniform vec3 uLightDiffuse;
 uniform vec3 uColor;
 
-// CSM uniforms
-uniform mat4 uLightSpaceMatrices[4];
-uniform float uCascadeSplits[5];
-uniform int uCascadeCount;
-uniform bool uDebugCascades;
+layout(std140, binding = 1) uniform LightingData {
+    mat4 uLightSpaceMatrices[4];
+    vec4 uCascadeSplitsArr[5];  // each float stored in .x of a vec4
+    ivec4 uCascadeParams;       // x=cascadeCount, y=debugCascades
+    vec4 uLightDirPacked;
+    vec4 uLightAmbientPacked;
+    vec4 uLightDiffusePacked;
+};
+
+// Unpack from UBO
+#define uLightDir      uLightDirPacked.xyz
+#define uLightAmbient  uLightAmbientPacked.xyz
+#define uLightDiffuse  uLightDiffusePacked.xyz
+#define uCascadeCount  uCascadeParams.x
+#define uDebugCascades (uCascadeParams.y != 0)
+
+// Helper to get cascade split value
+float getCascadeSplit(int i) {
+    return uCascadeSplitsArr[i].x;
+}
 
 // Get the cascade index based on view depth
 int getCascadeIndex()
@@ -29,7 +41,7 @@ int getCascadeIndex()
 
     for (int i = 0; i < uCascadeCount; i++)
     {
-        if (ViewDepth < uCascadeSplits[i + 1])
+        if (ViewDepth < getCascadeSplit(i + 1))
         {
             return i;
         }
@@ -86,8 +98,8 @@ float ShadowCalculationWithBlend()
 
     // Blend between cascades at boundaries for smooth transitions
     float blendRange = 0.1;  // 10% of cascade range
-    float cascadeEnd = uCascadeSplits[cascadeIndex + 1];
-    float cascadeStart = uCascadeSplits[cascadeIndex];
+    float cascadeEnd = getCascadeSplit(cascadeIndex + 1);
+    float cascadeStart = getCascadeSplit(cascadeIndex);
     float cascadeRange = cascadeEnd - cascadeStart;
     float distToEnd = cascadeEnd - ViewDepth;
 

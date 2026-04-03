@@ -11,3 +11,4 @@ if(Linux)
     ldflags = -pthread
 }
 std = 17
+multiprocessor = true

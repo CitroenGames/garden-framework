@@ -9,3 +9,4 @@ public_includes = src, ${Vulkan_INCLUDE_DIRS}
 libs = ${Vulkan_LIBRARIES}
 libdirs = ${Vulkan_LIBRARY_DIRS}
 std = 17
+multiprocessor = true

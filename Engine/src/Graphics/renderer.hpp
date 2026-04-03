@@ -9,6 +9,7 @@
 #include "BVH.hpp"
 #include "Debug/DebugDraw.hpp"
 #include <entt/entt.hpp>
+#include <algorithm>
 
 class renderer
 {
@@ -27,17 +28,54 @@ public:
     // Culling statistics
     size_t last_total_entities = 0;
     size_t last_visible_entities = 0;
+    size_t last_draw_calls = 0;
+
+    bool depth_prepass_enabled = true;
 
     renderer() : render_api(nullptr) {};
     renderer(IRenderAPI* api) : render_api(api) {};
 
     void setRenderAPI(IRenderAPI* api) { render_api = api; }
+    void setDepthPrepassEnabled(bool enabled) { depth_prepass_enabled = enabled; }
+    bool isDepthPrepassEnabled() const { return depth_prepass_enabled; }
 
     void set_level_lighting(const glm::vec3& ambient, const glm::vec3& diffuse, const glm::vec3& direction)
     {
         ambient_light = ambient;
         diffuse_light = diffuse;
         light_direction = direction;
+    }
+
+    // Depth prepass helper: render mesh depth-only with transform
+    static void render_mesh_depth_only(mesh& m, const TransformComponent& transform, IRenderAPI* api)
+    {
+        if (!m.visible || !api) return;
+        api->pushMatrix();
+        api->multiplyMatrix(transform.getTransformMatrix());
+        api->renderMeshDepthOnly(m);
+        api->popMatrix();
+    }
+
+    // Sort entities by texture handle to minimize state changes during rendering
+    void sort_entities_by_state(entt::registry& registry, std::vector<entt::entity>& entities)
+    {
+        std::sort(entities.begin(), entities.end(),
+            [&registry](entt::entity a, entt::entity b) {
+                auto* ma = registry.try_get<MeshComponent>(a);
+                auto* mb = registry.try_get<MeshComponent>(b);
+                if (!ma || !ma->m_mesh) return false;
+                if (!mb || !mb->m_mesh) return true;
+
+                // Sort by primary texture handle
+                TextureHandle tex_a = ma->m_mesh->texture_set ? ma->m_mesh->texture : 0;
+                TextureHandle tex_b = mb->m_mesh->texture_set ? mb->m_mesh->texture : 0;
+                if (ma->m_mesh->uses_material_ranges && !ma->m_mesh->material_ranges.empty())
+                    tex_a = ma->m_mesh->material_ranges[0].texture;
+                if (mb->m_mesh->uses_material_ranges && !mb->m_mesh->material_ranges.empty())
+                    tex_b = mb->m_mesh->material_ranges[0].texture;
+
+                return tex_a < tex_b;
+            });
     }
 
     static void render_mesh_with_api(mesh& m, const TransformComponent& transform, IRenderAPI* api)
@@ -101,6 +139,8 @@ public:
             return;
         }
 
+        last_draw_calls = 0;
+
         auto view = registry.view<MeshComponent, TransformComponent>();
 
         // 1. Shadow Pass - CSM (render each cascade)
@@ -162,7 +202,25 @@ public:
             last_total_entities = scene_bvh.getTotalEntities();
             last_visible_entities = visible_entities.size();
 
-            // Render only visible entities
+            // Sort visible entities by texture to minimize state changes
+            sort_entities_by_state(registry, visible_entities);
+
+            // Depth prepass: render depth-only for all visible entities
+            if (depth_prepass_enabled && !visible_entities.empty())
+            {
+                render_api->beginDepthPrepass();
+                for (auto entity : visible_entities)
+                {
+                    if (!registry.valid(entity)) continue;
+                    auto* mesh_comp = registry.try_get<MeshComponent>(entity);
+                    auto* t = registry.try_get<TransformComponent>(entity);
+                    if (mesh_comp && t && mesh_comp->m_mesh && mesh_comp->m_mesh->visible)
+                        render_mesh_depth_only(*mesh_comp->m_mesh, *t, render_api);
+                }
+                render_api->endDepthPrepass();
+            }
+
+            // Render only visible entities (main lit pass)
             for (auto entity : visible_entities)
             {
                 if (!registry.valid(entity)) continue;
@@ -173,7 +231,15 @@ public:
                 if (mesh_comp && t && mesh_comp->m_mesh && mesh_comp->m_mesh->visible)
                 {
                     render_mesh_with_api(*mesh_comp->m_mesh, *t, render_api);
+                    last_draw_calls++;
                 }
+            }
+
+            // Restore depth state after depth prepass
+            if (depth_prepass_enabled)
+            {
+                // endDepthPrepass set GL_EQUAL + no depth write
+                // Restore for skybox and debug rendering
             }
         }
         else
@@ -191,6 +257,7 @@ public:
                 {
                     render_mesh_with_api(*mesh_comp.m_mesh, t, render_api);
                     last_total_entities++;
+                    last_draw_calls++;
                 }
             }
             last_visible_entities = last_total_entities;
@@ -207,6 +274,108 @@ public:
 
         // End frame
         render_api->endFrame();
+    };
+
+    // Render scene to offscreen viewport texture (for editor).
+    // Does NOT render ImGui or call endFrame. Call endSceneRender() instead.
+    void render_scene_to_texture(entt::registry& registry, camera& c)
+    {
+        if (!render_api)
+        {
+            printf("Error: No render API set for renderer\n");
+            return;
+        }
+
+        last_draw_calls = 0;
+
+        auto view = registry.view<MeshComponent, TransformComponent>();
+
+        // 1. Shadow Pass
+        render_api->beginShadowPass(light_direction, c);
+        for (int cascade = 0; cascade < render_api->getCascadeCount(); cascade++)
+        {
+            render_api->beginCascade(cascade);
+            for (auto entity : view)
+            {
+                auto& mesh_comp = view.get<MeshComponent>(entity);
+                const auto& t = view.get<TransformComponent>(entity);
+                if (mesh_comp.m_mesh && mesh_comp.m_mesh->visible)
+                    render_mesh_with_api(*mesh_comp.m_mesh, t, render_api);
+            }
+        }
+        render_api->endShadowPass();
+
+        // 2. Main Render Pass to offscreen
+        render_api->beginFrame();
+        render_api->clear(glm::vec3(0.2f, 0.3f, 0.8f));
+        render_api->setCamera(c);
+        render_api->setLighting(ambient_light, diffuse_light, light_direction);
+
+        if (bvh_enabled)
+        {
+            if (scene_bvh.needsRebuild()) scene_bvh.build(registry);
+            Frustum frustum;
+            glm::mat4 viewProj = render_api->getProjectionMatrix() * render_api->getViewMatrix();
+            frustum.extractFromViewProjection(viewProj);
+
+            std::vector<entt::entity> visible_entities;
+            scene_bvh.queryFrustum(frustum, visible_entities);
+            last_total_entities = scene_bvh.getTotalEntities();
+            last_visible_entities = visible_entities.size();
+
+            // Sort by state (editor path)
+            sort_entities_by_state(registry, visible_entities);
+
+            // Depth prepass (editor path)
+            if (depth_prepass_enabled && !visible_entities.empty())
+            {
+                render_api->beginDepthPrepass();
+                for (auto entity : visible_entities)
+                {
+                    if (!registry.valid(entity)) continue;
+                    auto* mesh_comp = registry.try_get<MeshComponent>(entity);
+                    auto* t = registry.try_get<TransformComponent>(entity);
+                    if (mesh_comp && t && mesh_comp->m_mesh && mesh_comp->m_mesh->visible)
+                        render_mesh_depth_only(*mesh_comp->m_mesh, *t, render_api);
+                }
+                render_api->endDepthPrepass();
+            }
+
+            for (auto entity : visible_entities)
+            {
+                if (!registry.valid(entity)) continue;
+                auto* mesh_comp = registry.try_get<MeshComponent>(entity);
+                auto* t = registry.try_get<TransformComponent>(entity);
+                if (mesh_comp && t && mesh_comp->m_mesh && mesh_comp->m_mesh->visible)
+                {
+                    render_mesh_with_api(*mesh_comp->m_mesh, *t, render_api);
+                    last_draw_calls++;
+                }
+            }
+        }
+        else
+        {
+            last_total_entities = 0;
+            last_visible_entities = 0;
+            for (auto entity : view)
+            {
+                auto& mesh_comp = view.get<MeshComponent>(entity);
+                const auto& t = view.get<TransformComponent>(entity);
+                if (mesh_comp.m_mesh && mesh_comp.m_mesh->visible)
+                {
+                    render_mesh_with_api(*mesh_comp.m_mesh, t, render_api);
+                    last_total_entities++;
+                    last_draw_calls++;
+                }
+            }
+            last_visible_entities = last_total_entities;
+        }
+
+        render_api->renderSkybox();
+        DebugDraw::get().render(render_api, c);
+
+        // Finalize to viewport texture (NOT screen, NOT ImGui)
+        render_api->endSceneRender();
     };
 
     // Mark BVH as needing rebuild (call when entities are added/removed/moved)
@@ -229,4 +398,5 @@ public:
     // Get culling statistics
     size_t getTotalEntities() const { return last_total_entities; }
     size_t getVisibleEntities() const { return last_visible_entities; }
+    size_t getDrawCalls() const { return last_draw_calls; }
 };

@@ -333,10 +333,114 @@ bool LevelManager::parseEntityFromJSON(const void* json_ptr, LevelEntity& entity
     return true;
 }
 
+static std::string entityTypeToString(EntityType type)
+{
+    switch (type)
+    {
+    case EntityType::Static:     return "Static";
+    case EntityType::Renderable: return "Renderable";
+    case EntityType::Collidable: return "Collidable";
+    case EntityType::Physical:   return "Physical";
+    case EntityType::Player:     return "Player";
+    case EntityType::Freecam:    return "Freecam";
+    case EntityType::PlayerRep:  return "PlayerRep";
+    default:                     return "Static";
+    }
+}
+
 bool LevelManager::saveLevelToJSON(const std::string& json_path, const LevelData& level_data)
 {
-    printf("JSON saving not yet implemented\n");
-    return false;
+    json j;
+
+    // --- Metadata ---
+    const LevelMetadata& meta = level_data.metadata;
+    j["metadata"]["level_name"] = meta.level_name;
+    j["metadata"]["author"]     = meta.author;
+    j["metadata"]["version"]    = meta.version;
+    j["metadata"]["world"]["gravity"] = {
+        {"x", meta.gravity.x}, {"y", meta.gravity.y}, {"z", meta.gravity.z}
+    };
+    j["metadata"]["world"]["fixed_delta"] = meta.fixed_delta;
+    j["metadata"]["lighting"]["ambient"] = {
+        {"r", meta.ambient_light.x}, {"g", meta.ambient_light.y}, {"b", meta.ambient_light.z}
+    };
+    j["metadata"]["lighting"]["diffuse"] = {
+        {"r", meta.diffuse_light.x}, {"g", meta.diffuse_light.y}, {"b", meta.diffuse_light.z}
+    };
+    j["metadata"]["lighting"]["direction"] = {
+        {"x", meta.light_direction.x}, {"y", meta.light_direction.y}, {"z", meta.light_direction.z}
+    };
+
+    // --- Entities ---
+    json entities_array = json::array();
+    for (const auto& le : level_data.entities)
+    {
+        json e;
+        e["name"] = le.name;
+        e["type"] = entityTypeToString(le.type);
+        e["transform"]["position"] = {{"x", le.position.x}, {"y", le.position.y}, {"z", le.position.z}};
+        e["transform"]["rotation"] = {{"x", le.rotation.x}, {"y", le.rotation.y}, {"z", le.rotation.z}};
+        e["transform"]["scale"]    = {{"x", le.scale.x},    {"y", le.scale.y},    {"z", le.scale.z}};
+
+        if (!le.mesh_path.empty())
+        {
+            e["mesh"]["path"]              = le.mesh_path;
+            e["mesh"]["textures"]          = le.texture_paths;
+            e["mesh"]["culling"]           = le.culling;
+            e["mesh"]["transparent"]       = le.transparent;
+            e["mesh"]["visible"]           = le.visible;
+            e["mesh"]["use_mesh_collision"]= le.use_mesh_collision;
+        }
+
+        if (le.has_rigidbody)
+        {
+            e["rigidbody"]["mass"]         = le.mass;
+            e["rigidbody"]["apply_gravity"]= le.apply_gravity;
+        }
+
+        if (le.has_collider && !le.collider_mesh_path.empty())
+        {
+            e["collider"]["mesh_path"] = le.collider_mesh_path;
+        }
+
+        if (le.type == EntityType::Player)
+        {
+            e["player_properties"]["speed"]              = le.speed;
+            e["player_properties"]["jump_force"]         = le.jump_force;
+            e["player_properties"]["mouse_sensitivity"]  = le.mouse_sensitivity;
+            e["player_properties"]["apply_gravity"]      = le.apply_gravity;
+        }
+
+        if (le.type == EntityType::Freecam)
+        {
+            e["freecam_properties"]["movement_speed"]      = le.movement_speed;
+            e["freecam_properties"]["fast_movement_speed"] = le.fast_movement_speed;
+            e["freecam_properties"]["mouse_sensitivity"]   = le.mouse_sensitivity;
+        }
+
+        if (le.type == EntityType::PlayerRep)
+        {
+            e["player_rep_properties"]["tracked_player"] = le.tracked_player_name;
+            e["player_rep_properties"]["position_offset"] = {
+                {"x", le.position_offset.x},
+                {"y", le.position_offset.y},
+                {"z", le.position_offset.z}
+            };
+        }
+
+        entities_array.push_back(e);
+    }
+    j["entities"] = entities_array;
+
+    std::ofstream out_file(json_path);
+    if (!out_file.is_open())
+    {
+        printf("ERROR: Could not open file for writing: %s\n", json_path.c_str());
+        return false;
+    }
+    out_file << j.dump(2);
+    printf("Saved level to: %s (%d entities)\n", json_path.c_str(), (int)level_data.entities.size());
+    return true;
 }
 
 bool LevelManager::loadLevelFromBinary(const std::string& binary_path, LevelData& out_level_data)

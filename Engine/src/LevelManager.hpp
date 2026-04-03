@@ -152,6 +152,9 @@ public:
     // Cleanup - called before loading new level
     void cleanup();
 
+    // Helper to load mesh (returns shared_ptr) - public so editor can use it
+    std::shared_ptr<mesh> loadMesh(const LevelEntity& entity, IRenderAPI* render_api);
+
 private:
     // JSON parsing
     bool parseMetadataFromJSON(const void* json, LevelMetadata& metadata);
@@ -166,9 +169,6 @@ private:
     // String helpers for binary format
     void writeString(std::ofstream& file, const std::string& str);
     bool readString(std::ifstream& file, std::string& str);
-
-    // Helper to load mesh (returns shared_ptr)
-    std::shared_ptr<mesh> loadMesh(const LevelEntity& entity, IRenderAPI* render_api);
 
     // Store level data to keep entity references valid
     std::vector<LevelEntity> stored_entities;

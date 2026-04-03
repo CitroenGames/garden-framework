@@ -79,34 +79,8 @@ static void quit_game(int code)
     _exit(code);
 }
 
-// System to update player representations
-void update_player_representations(entt::registry& registry, bool is_freecam)
-{
-    auto view = registry.view<PlayerRepresentationComponent, TransformComponent, MeshComponent>();
-
-    for(entt::entity entity : view) {
-        auto& pr = view.get<PlayerRepresentationComponent>(entity);
-        auto& trans = view.get<TransformComponent>(entity);
-        auto& mesh_comp = view.get<MeshComponent>(entity);
-        
-        if (registry.valid(pr.tracked_player) && registry.all_of<TransformComponent>(pr.tracked_player)) {
-            const auto& target_trans = registry.get<TransformComponent>(pr.tracked_player);
-            
-            // Sync position with offset
-            trans.position = target_trans.position + pr.position_offset;
-            
-            // Sync rotation (Y only typically for character representation)
-            trans.rotation.y = target_trans.rotation.y;
-            // Or if we want full rotation sync:
-            // trans.rotation = target_trans.rotation;
-        }
-
-        // Visibility
-        if (pr.visible_only_freecam && mesh_comp.m_mesh) {
-            mesh_comp.m_mesh->visible = is_freecam;
-        }
-    }
-}
+// Player representation system (now shared via Engine)
+#include "PlayerRepSystem.hpp"
 
 // Parse command line for render API selection
 static RenderAPIType parseRenderAPI(int argc, char* argv[])

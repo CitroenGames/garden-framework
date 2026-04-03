@@ -2,12 +2,18 @@
 #include <stdio.h>
 
 OpenGLMesh::OpenGLMesh()
-    : vao(0), vbo(0), vertex_count(0), uploaded(false)
+    : vao(0), vbo(0), ebo(0), vertex_count(0), index_count_(0), uploaded(false), indexed(false)
 {
 }
 
 OpenGLMesh::~OpenGLMesh()
 {
+    if (ebo != 0)
+    {
+        glDeleteBuffers(1, &ebo);
+        ebo = 0;
+    }
+
     if (vbo != 0)
     {
         glDeleteBuffers(1, &vbo);
@@ -21,7 +27,9 @@ OpenGLMesh::~OpenGLMesh()
     }
 
     vertex_count = 0;
+    index_count_ = 0;
     uploaded = false;
+    indexed = false;
 }
 
 void OpenGLMesh::uploadMeshData(const vertex* vertices, size_t count)
@@ -33,18 +41,13 @@ void OpenGLMesh::uploadMeshData(const vertex* vertices, size_t count)
     }
 
     // Clean up existing resources if any
-    if (vbo != 0)
-    {
-        glDeleteBuffers(1, &vbo);
-        vbo = 0;
-    }
-    if (vao != 0)
-    {
-        glDeleteVertexArrays(1, &vao);
-        vao = 0;
-    }
+    if (ebo != 0) { glDeleteBuffers(1, &ebo); ebo = 0; }
+    if (vbo != 0) { glDeleteBuffers(1, &vbo); vbo = 0; }
+    if (vao != 0) { glDeleteVertexArrays(1, &vao); vao = 0; }
 
     vertex_count = count;
+    index_count_ = 0;
+    indexed = false;
 
     // Generate and bind VAO
     glGenVertexArrays(1, &vao);
@@ -58,9 +61,6 @@ void OpenGLMesh::uploadMeshData(const vertex* vertices, size_t count)
     glBufferData(GL_ARRAY_BUFFER, count * sizeof(vertex), vertices, GL_STATIC_DRAW);
 
     // Configure vertex attributes
-    // Vertex structure: position (3 floats), normal (3 floats), texcoord (2 floats)
-    // Total: 8 floats = 32 bytes stride
-
     // Position attribute (location = 0)
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(vertex), (void*)0);
     glEnableVertexAttribArray(0);
@@ -73,9 +73,59 @@ void OpenGLMesh::uploadMeshData(const vertex* vertices, size_t count)
     glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(vertex), (void*)(6 * sizeof(float)));
     glEnableVertexAttribArray(2);
 
-    // Unbind VAO (good practice)
+    // Unbind VAO
     glBindVertexArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+    uploaded = true;
+}
+
+void OpenGLMesh::uploadIndexedMeshData(const vertex* vertices, size_t vert_count,
+                                        const uint32_t* indices, size_t idx_count)
+{
+    if (!vertices || vert_count == 0 || !indices || idx_count == 0)
+    {
+        printf("OpenGLMesh: Invalid indexed mesh data\n");
+        return;
+    }
+
+    // Clean up existing resources if any
+    if (ebo != 0) { glDeleteBuffers(1, &ebo); ebo = 0; }
+    if (vbo != 0) { glDeleteBuffers(1, &vbo); vbo = 0; }
+    if (vao != 0) { glDeleteVertexArrays(1, &vao); vao = 0; }
+
+    vertex_count = vert_count;
+    index_count_ = idx_count;
+    indexed = true;
+
+    // Generate and bind VAO
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+
+    // Generate and bind VBO
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, vert_count * sizeof(vertex), vertices, GL_STATIC_DRAW);
+
+    // Generate and bind EBO (must be done while VAO is bound)
+    glGenBuffers(1, &ebo);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, idx_count * sizeof(uint32_t), indices, GL_STATIC_DRAW);
+
+    // Configure vertex attributes
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(vertex), (void*)0);
+    glEnableVertexAttribArray(0);
+
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(vertex), (void*)(3 * sizeof(float)));
+    glEnableVertexAttribArray(1);
+
+    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(vertex), (void*)(6 * sizeof(float)));
+    glEnableVertexAttribArray(2);
+
+    // Unbind VAO (EBO stays bound to VAO)
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    // Note: do NOT unbind EBO while VAO is unbound - it would break the VAO's reference
 
     uploaded = true;
 }

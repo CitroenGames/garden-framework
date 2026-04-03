@@ -5,6 +5,8 @@
 #include <functional>
 #include <memory>
 #include <limits>
+#include <unordered_map>
+#include <cstring>
 #include "Graphics/RenderAPI.hpp"
 #include "Graphics/IGPUMesh.hpp"
 #include "Utils/ObjLoader.hpp"
@@ -246,7 +248,7 @@ public:
         uses_material_ranges = false;  // Disable multi-material mode
     };
 
-    // Upload mesh data to GPU (creates GPUMesh if needed)
+    // Upload mesh data to GPU with automatic vertex deduplication
     void uploadToGPU(IRenderAPI* api)
     {
         if (!is_valid || !vertices || vertices_len == 0)
@@ -267,8 +269,59 @@ public:
             gpu_mesh = api->createMesh();
         }
 
-        // Upload vertex data to GPU
-        gpu_mesh->uploadMeshData(vertices, vertices_len);
+        // Deduplicate vertices and create index buffer
+        struct VertexHash {
+            size_t operator()(const vertex& v) const {
+                // FNV-1a hash over vertex data
+                const uint8_t* data = reinterpret_cast<const uint8_t*>(&v);
+                size_t hash = 14695981039346656037ULL;
+                for (size_t i = 0; i < sizeof(vertex); i++) {
+                    hash ^= data[i];
+                    hash *= 1099511628211ULL;
+                }
+                return hash;
+            }
+        };
+        struct VertexEqual {
+            bool operator()(const vertex& a, const vertex& b) const {
+                return std::memcmp(&a, &b, sizeof(vertex)) == 0;
+            }
+        };
+
+        std::unordered_map<vertex, uint32_t, VertexHash, VertexEqual> vertex_map;
+        vertex_map.reserve(vertices_len);
+        std::vector<vertex> unique_verts;
+        unique_verts.reserve(vertices_len / 2);
+        std::vector<uint32_t> indices;
+        indices.reserve(vertices_len);
+
+        for (size_t i = 0; i < vertices_len; i++)
+        {
+            auto it = vertex_map.find(vertices[i]);
+            if (it != vertex_map.end())
+            {
+                indices.push_back(it->second);
+            }
+            else
+            {
+                uint32_t idx = static_cast<uint32_t>(unique_verts.size());
+                vertex_map[vertices[i]] = idx;
+                unique_verts.push_back(vertices[i]);
+                indices.push_back(idx);
+            }
+        }
+
+        // Only use indexed if we actually saved vertices (>10% savings)
+        if (unique_verts.size() < vertices_len * 9 / 10)
+        {
+            gpu_mesh->uploadIndexedMeshData(unique_verts.data(), unique_verts.size(),
+                                            indices.data(), indices.size());
+        }
+        else
+        {
+            // Not enough deduplication benefit, use raw vertex array
+            gpu_mesh->uploadMeshData(vertices, vertices_len);
+        }
     }
 
     // Check if mesh has been uploaded to GPU

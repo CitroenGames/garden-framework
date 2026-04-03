@@ -1,7 +1,7 @@
 {
   "metadata": {
-    "level_name": "Main Level",
-    "author": "Garden OpenGL",
+    "level_name": "Physics Test Level",
+    "author": "Garden",
     "version": "1.0",
     "world": {
       "gravity": {
@@ -13,85 +13,149 @@
     },
     "lighting": {
       "ambient": {
-        "r": 0.2,
-        "g": 0.2,
-        "b": 0.2
+        "r": 0.3,
+        "g": 0.3,
+        "b": 0.3
       },
       "diffuse": {
-        "r": 0.8,
-        "g": 0.8,
-        "b": 0.8
+        "r": 0.9,
+        "g": 0.9,
+        "b": 0.9
       },
       "direction": {
-        "x": -0.2,
+        "x": -0.3,
         "y": -1.0,
-        "z": -0.3
+        "z": -0.4
       }
     }
   },
   "entities": [
     {
-      "name": "map_ground",
+      "name": "ground",
       "type": "Renderable",
       "transform": {
-        "position": {
-          "x": 0.0,
-          "y": 0.0,
-          "z": 0.0
-        },
-        "rotation": {
-          "x": 0.0,
-          "y": 0.0,
-          "z": 0.0
-        },
-        "scale": {
-          "x": 1.0,
-          "y": 1.0,
-          "z": 1.0
-        }
+        "position": { "x": 0.0, "y": 0.0, "z": 0.0 },
+        "rotation": { "x": 0.0, "y": 0.0, "z": 0.0 },
+        "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }
       },
       "mesh": {
-        "path": "assets/models/map.gltf",
+        "path": "assets/models/ground_plane.obj",
+        "textures": [],
+        "culling": false,
+        "transparent": false,
+        "visible": true,
+        "use_mesh_collision": true
+      }
+    },
+    {
+      "name": "cube_1",
+      "type": "Physical",
+      "transform": {
+        "position": { "x": 3.0, "y": 1.5, "z": 0.0 },
+        "rotation": { "x": 0.0, "y": 0.0, "z": 0.0 },
+        "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }
+      },
+      "mesh": {
+        "path": "assets/models/grasscube.obj",
         "textures": [],
         "culling": true,
         "transparent": false,
         "visible": true
       },
+      "rigidbody": {
+        "mass": 5.0,
+        "apply_gravity": true
+      },
       "collider": {
-        "mesh_path": "assets/models/map_collider.obj"
+        "mesh_path": "assets/models/grasscube.obj"
       }
     },
     {
-      "name": "test_cube",
+      "name": "cube_2",
       "type": "Physical",
       "transform": {
-        "position": {
-          "x": 14.0,
-          "y": 3.5,
-          "z": -3.5
-        },
-        "rotation": {
-          "x": 0.0,
-          "y": 0.0,
-          "z": 0.0
-        },
-        "scale": {
-          "x": 1.0,
-          "y": 1.0,
-          "z": 1.0
-        }
+        "position": { "x": -2.0, "y": 1.5, "z": 3.0 },
+        "rotation": { "x": 0.0, "y": 0.0, "z": 0.0 },
+        "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }
       },
       "mesh": {
         "path": "assets/models/grasscube.obj",
-        "textures": [
-          "textures/man.bmp"
-        ],
+        "textures": [],
         "culling": true,
         "transparent": false,
         "visible": true
       },
       "rigidbody": {
-        "mass": 1.0,
+        "mass": 3.0,
+        "apply_gravity": true
+      },
+      "collider": {
+        "mesh_path": "assets/models/grasscube.obj"
+      }
+    },
+    {
+      "name": "cube_3",
+      "type": "Physical",
+      "transform": {
+        "position": { "x": 0.0, "y": 1.5, "z": -4.0 },
+        "rotation": { "x": 0.0, "y": 0.0, "z": 0.0 },
+        "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }
+      },
+      "mesh": {
+        "path": "assets/models/grasscube.obj",
+        "textures": [],
+        "culling": true,
+        "transparent": false,
+        "visible": true
+      },
+      "rigidbody": {
+        "mass": 2.0,
+        "apply_gravity": true
+      },
+      "collider": {
+        "mesh_path": "assets/models/grasscube.obj"
+      }
+    },
+    {
+      "name": "cube_stack_1",
+      "type": "Physical",
+      "transform": {
+        "position": { "x": 5.0, "y": 1.5, "z": 5.0 },
+        "rotation": { "x": 0.0, "y": 0.0, "z": 0.0 },
+        "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }
+      },
+      "mesh": {
+        "path": "assets/models/grasscube.obj",
+        "textures": [],
+        "culling": true,
+        "transparent": false,
+        "visible": true
+      },
+      "rigidbody": {
+        "mass": 5.0,
+        "apply_gravity": true
+      },
+      "collider": {
+        "mesh_path": "assets/models/grasscube.obj"
+      }
+    },
+    {
+      "name": "cube_stack_2",
+      "type": "Physical",
+      "transform": {
+        "position": { "x": 5.0, "y": 3.0, "z": 5.0 },
+        "rotation": { "x": 0.0, "y": 0.0, "z": 0.0 },
+        "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }
+      },
+      "mesh": {
+        "path": "assets/models/grasscube.obj",
+        "textures": [],
+        "culling": true,
+        "transparent": false,
+        "visible": true
+      },
+      "rigidbody": {
+        "mass": 2.0,
         "apply_gravity": true
       },
       "collider": {
@@ -102,25 +166,13 @@
       "name": "player",
       "type": "Player",
       "transform": {
-        "position": {
-          "x": 0.0,
-          "y": 2.0,
-          "z": 0.0
-        },
-        "rotation": {
-          "x": 0.0,
-          "y": 0.0,
-          "z": 0.0
-        },
-        "scale": {
-          "x": 1.0,
-          "y": 1.0,
-          "z": 1.0
-        }
+        "position": { "x": 0.0, "y": 2.0, "z": 0.0 },
+        "rotation": { "x": 0.0, "y": 0.0, "z": 0.0 },
+        "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }
       },
       "player_properties": {
-        "speed": 1.5,
-        "jump_force": 3.0,
+        "speed": 3.0,
+        "jump_force": 4.0,
         "mouse_sensitivity": 1.0,
         "apply_gravity": true
       }
@@ -129,62 +181,14 @@
       "name": "freecam",
       "type": "Freecam",
       "transform": {
-        "position": {
-          "x": 0.0,
-          "y": 2.0,
-          "z": 0.0
-        },
-        "rotation": {
-          "x": 0.0,
-          "y": 0.0,
-          "z": 0.0
-        },
-        "scale": {
-          "x": 1.0,
-          "y": 1.0,
-          "z": 1.0
-        }
+        "position": { "x": 0.0, "y": 5.0, "z": -8.0 },
+        "rotation": { "x": 0.0, "y": 0.0, "z": 0.0 },
+        "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }
       },
       "freecam_properties": {
         "movement_speed": 5.0,
         "fast_movement_speed": 15.0,
         "mouse_sensitivity": 1.0
-      }
-    },
-    {
-      "name": "player_representation",
-      "type": "PlayerRep",
-      "transform": {
-        "position": {
-          "x": 0.0,
-          "y": -20.0,
-          "z": 0.0
-        },
-        "rotation": {
-          "x": 0.0,
-          "y": 0.0,
-          "z": 0.0
-        },
-        "scale": {
-          "x": 0.2,
-          "y": 0.2,
-          "z": 0.2
-        }
-      },
-      "mesh": {
-        "path": "assets/models/Character.gltf",
-        "textures": [],
-        "culling": true,
-        "transparent": false,
-        "visible": true
-      },
-      "player_rep_properties": {
-        "tracked_player": "player",
-        "position_offset": {
-          "x": 0.0,
-          "y": 0.0,
-          "z": 0.0
-        }
       }
     }
   ]

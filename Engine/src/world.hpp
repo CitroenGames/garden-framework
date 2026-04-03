@@ -80,4 +80,14 @@ public:
         fixed_delta = delta;
         physics_system->setFixedDelta(delta);
     }
+
+    // Full reset: tear down physics, clear ECS, reinitialize.
+    // Used by the editor to restore pre-play state.
+    void resetWorld()
+    {
+        physics_system->shutdown();
+        registry.clear();
+        physics_system->initialize();
+        physics_accumulator = 0.0f;
+    }
 };
