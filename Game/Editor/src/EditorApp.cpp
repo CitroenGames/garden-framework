@@ -20,12 +20,21 @@ bool EditorApp::initialize(RenderAPIType api_type)
     InitializeDefaultCVars();
     ConVarRegistry::get().loadConfig("config.cfg");
 
-    m_app = Application(1600, 900, 60, 75.0f, api_type);
+    int win_w = CVAR_INT(window_width);
+    int win_h = CVAR_INT(window_height);
+    if (win_w <= 0) win_w = 1600;
+    if (win_h <= 0) win_h = 900;
+
+    m_app = Application(win_w, win_h, 60, 75.0f, api_type);
     if (!m_app.initialize("Garden Level Editor", false))
     {
         LOG_ENGINE_FATAL("Failed to initialize Application");
         return false;
     }
+
+    // Restore maximized state from config
+    if (CVAR_BOOL(window_maximized))
+        SDL_MaximizeWindow(m_app.getWindow());
 
     IRenderAPI* render_api = m_app.getRenderAPI();
     if (!render_api)
@@ -57,6 +66,9 @@ bool EditorApp::initialize(RenderAPIType api_type)
     m_toolbar.callbacks.on_stop   = [this]() { stopPlay(); };
     m_toolbar.callbacks.on_eject  = [this]() { ejectFromPlay(); };
     m_toolbar.callbacks.on_return = [this]() { returnToPlay(); };
+
+    m_viewport.toolbar = &m_toolbar;
+    m_viewport.show_toolbar = &m_show_toolbar;
 
     SDL_SetRelativeMouseMode(SDL_FALSE);
 
@@ -139,14 +151,11 @@ void EditorApp::run()
         {
             bool bvh_dirty = false;
 
-            if (m_show_toolbar)
-                m_toolbar.draw(m_state);
-
-            // Viewport panel showing the rendered scene texture
+            // Viewport panel with embedded toolbar
             if (m_show_viewport)
             {
                 ImTextureID tex = (ImTextureID)render_api->getViewportTextureID();
-                m_viewport.draw(tex, m_state.play_mode);
+                m_viewport.draw(tex, m_state);
             }
 
             if (m_show_hierarchy)
@@ -197,6 +206,26 @@ void EditorApp::shutdown()
     // Stop simulation if running
     if (m_state.isSimulationActive())
         stopPlay();
+
+    // Save window geometry to config
+    if (m_app.getWindow())
+    {
+        Uint32 flags = SDL_GetWindowFlags(m_app.getWindow());
+        bool is_maximized = (flags & SDL_WINDOW_MAXIMIZED) != 0;
+
+        if (auto* cvar = CVAR_PTR(window_maximized))
+            cvar->setBool(is_maximized);
+
+        if (!is_maximized)
+        {
+            if (auto* cvar = CVAR_PTR(window_width))
+                cvar->setInt(m_app.getWidth());
+            if (auto* cvar = CVAR_PTR(window_height))
+                cvar->setInt(m_app.getHeight());
+        }
+
+        ConVarRegistry::get().saveArchiveCvars("config.cfg");
+    }
 
     m_world.registry.clear();
     Console::get().shutdown();
@@ -550,6 +579,14 @@ void EditorApp::processEvents()
             }
             break;
 
+        case SDL_WINDOWEVENT:
+            if (event.window.event == SDL_WINDOWEVENT_RESIZED ||
+                event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED)
+            {
+                m_app.onWindowResized(event.window.data1, event.window.data2);
+            }
+            break;
+
         default:
             break;
         }
@@ -588,7 +625,7 @@ void EditorApp::renderDockspace()
     ImGui::Begin("##DockSpaceWindow", nullptr, dockspace_flags);
     ImGui::PopStyleVar(3);
 
-    ImGuiID dockspace_id = ImGui::GetID("MainDockSpace");
+    ImGuiID dockspace_id = ImGui::GetID("MainDockSpaceV2");
 
     // Set up default dock layout only when no saved layout exists
     if (ImGui::DockBuilderGetNode(dockspace_id) == nullptr)
@@ -610,12 +647,7 @@ void EditorApp::renderDockspace()
         ImGuiID dock_right;
         ImGui::DockBuilderSplitNode(dock_main, ImGuiDir_Right, 0.25f, &dock_right, &dock_main);
 
-        // Split a thin toolbar strip at the top of center area
-        ImGuiID dock_toolbar;
-        ImGui::DockBuilderSplitNode(dock_main, ImGuiDir_Up, 0.04f, &dock_toolbar, &dock_main);
-
         // Dock windows to their regions
-        ImGui::DockBuilderDockWindow("Toolbar", dock_toolbar);
         ImGui::DockBuilderDockWindow("Viewport", dock_main);
         ImGui::DockBuilderDockWindow("Scene Hierarchy", dock_left);
         ImGui::DockBuilderDockWindow("Inspector", dock_right);

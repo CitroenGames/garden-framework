@@ -72,9 +72,11 @@ int main(int argc, char* argv[])
         _world.registry.emplace<TransformComponent>(player_entity, transform);
 
         // Add rigidbody component
+        // apply_gravity = false: gravity is handled inside SharedMovement::simulate()
+        // to prevent double-gravity from the physics fallback integrator
         RigidBodyComponent rigidbody;
         rigidbody.mass = 1.0f;
-        rigidbody.apply_gravity = true;
+        rigidbody.apply_gravity = false;
         _world.registry.emplace<RigidBodyComponent>(player_entity, rigidbody);
 
         // Add player component

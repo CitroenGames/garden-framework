@@ -7,7 +7,12 @@ void ToolbarPanel::draw(EditorState& state)
 {
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
     ImGui::Begin("Toolbar", nullptr, flags);
+    drawContent(state);
+    ImGui::End();
+}
 
+void ToolbarPanel::drawContent(EditorState& state)
+{
     // --- Transform mode buttons (disabled during play) ---
     bool editing = !state.isSimulationActive();
     ImDrawList* draw_list = ImGui::GetWindowDrawList();
@@ -202,6 +207,4 @@ void ToolbarPanel::draw(EditorState& state)
 
     // --- Grid toggle ---
     ImGui::Checkbox("Grid", &state.show_grid);
-
-    ImGui::End();
 }

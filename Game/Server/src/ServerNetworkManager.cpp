@@ -2,6 +2,7 @@
 #include "world.hpp"
 #include "Components/Components.hpp"
 #include "SharedComponents.hpp"
+#include "SharedMovement.hpp"
 #include "Utils/Log.hpp"
 #include "Console/ConVar.hpp"
 #include "Console/Console.hpp"
@@ -288,26 +289,30 @@ void ServerNetworkManager::handleInputCommand(uint16_t client_id, BitReader& rea
     transform.rotation.y = msg.camera_yaw;
     transform.rotation.x = msg.camera_pitch;
 
-    // Calculate movement direction based on camera yaw
-    float yaw_rad = glm::radians(msg.camera_yaw);
-    glm::vec3 forward = glm::vec3(-sin(yaw_rad), 0.0f, -cos(yaw_rad));
-    glm::vec3 right = glm::vec3(cos(yaw_rad), 0.0f, -sin(yaw_rad));
+    // Run shared deterministic movement simulation
+    MovementInput movement_input;
+    movement_input.move_forward = msg.move_forward;
+    movement_input.move_right = msg.move_right;
+    movement_input.camera_yaw = msg.camera_yaw;
+    movement_input.camera_pitch = msg.camera_pitch;
+    movement_input.buttons = msg.buttons;
 
-    // Apply movement
-    glm::vec3 move_direction = forward * msg.move_forward + right * msg.move_right;
-    if (glm::length(move_direction) > 0.0f) {
-        move_direction = glm::normalize(move_direction);
-    }
+    MovementState movement_state;
+    movement_state.position = transform.position;
+    movement_state.velocity = rigidbody.velocity;
+    movement_state.grounded = player.grounded;
+    movement_state.ground_normal = player.ground_normal;
 
-    // Set horizontal velocity based on input
-    rigidbody.velocity.x = move_direction.x * player.speed;
-    rigidbody.velocity.z = move_direction.z * player.speed;
+    MovementConfig movement_config;
+    movement_config.speed = player.speed;
+    movement_config.jump_force = player.jump_force;
+    movement_config.fixed_delta = game_world->fixed_delta;
 
-    // Handle jump
-    if ((msg.buttons & InputFlags::JUMP) && player.grounded) {
-        rigidbody.velocity.y = player.jump_force;
-        player.grounded = false;
-    }
+    MovementState result = SharedMovement::simulate(movement_input, movement_state, movement_config);
+
+    transform.position = result.position;
+    rigidbody.velocity = result.velocity;
+    player.grounded = result.grounded;
 }
 
 void ServerNetworkManager::handleDisconnect(uint16_t client_id, BitReader& reader)
@@ -417,6 +422,7 @@ std::vector<EntityUpdateData> ServerNetworkManager::generateDeltaUpdate(
             update.position = entity_snapshot.components.position;
             update.velocity = entity_snapshot.components.velocity;
             update.grounded = entity_snapshot.components.grounded ? 1 : 0;
+            update.ground_normal = entity_snapshot.components.ground_normal;
 
             if (!entity_snapshot.exists) {
                 update.flags |= ComponentFlags::DELETED;
@@ -435,9 +441,11 @@ std::vector<EntityUpdateData> ServerNetworkManager::generateDeltaUpdate(
                 update.velocity = entity_snapshot.components.velocity;
             }
 
-            if (entity_snapshot.components.grounded != baseline_entity->components.grounded) {
+            if (entity_snapshot.components.grounded != baseline_entity->components.grounded ||
+                glm::distance(entity_snapshot.components.ground_normal, baseline_entity->components.ground_normal) > epsilon) {
                 update.flags |= ComponentFlags::GROUNDED;
                 update.grounded = entity_snapshot.components.grounded ? 1 : 0;
+                update.ground_normal = entity_snapshot.components.ground_normal;
             }
         }
 
@@ -480,6 +488,7 @@ void ServerNetworkManager::sendWorldStateToClient(uint16_t client_id, const Worl
     BitWriter writer;
     WorldStateUpdateMessage msg;
     msg.server_tick = snapshot.tick;
+    msg.last_processed_input_tick = it->second.info.last_input_tick;
     NetworkSerializer::serialize(writer, msg, updates);
 
     // Send unreliable

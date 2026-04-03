@@ -9,6 +9,9 @@
 #include "NetworkTypes.hpp"
 #include "BitStream.hpp"
 #include "NetworkSerializer.hpp"
+#include "SharedMovement.hpp"
+#include "PredictionTypes.hpp"
+#include "InterpolationBuffer.hpp"
 #include <entt/entt.hpp>
 
 // Forward declarations
@@ -73,6 +76,16 @@ private:
     // Callbacks
     std::function<void()> on_disconnected;
 
+    // Client-side prediction
+    InputRingBuffer<128> input_history;
+    MovementState last_server_state;           // Authoritative state from server for local player
+    uint32_t last_server_processed_tick = 0;   // Which input tick the server last applied
+    bool has_authoritative_update = false;     // True when new server state is available
+
+    // Entity interpolation for remote players
+    std::unordered_map<uint32_t, EntityInterpolationBuffer> interp_buffers;
+    static constexpr float INTERP_DELAY_TICKS = 2.0f; // Render remote entities 2 ticks behind
+
     // Network stats
     NetworkStats stats;
 
@@ -104,6 +117,14 @@ public:
     // Entity queries
     entt::entity getLocalPlayerEntity() const { return local_player_entity; }
     entt::entity getEntityByNetworkId(uint32_t net_id) const;
+
+    // Client-side prediction
+    void storeInput(uint32_t tick, const MovementInput& input, const MovementState& predicted_state);
+    bool popAuthoritativeUpdate(MovementState& out_state, uint32_t& out_tick);
+    const InputRingBuffer<128>& getInputHistory() const { return input_history; }
+
+    // Entity interpolation — call before rendering to smoothly position remote entities
+    void interpolateRemoteEntities();
 
     // Stats
     const NetworkStats& getStats() const { return stats; }

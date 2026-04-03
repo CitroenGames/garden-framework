@@ -128,9 +128,10 @@ struct EntityUpdateData
     uint32_t entity_id = 0;
     uint8_t flags = 0;
     // Conditional fields based on flags:
-    glm::vec3 position = glm::vec3(0, 0, 0);     // If FLAG_TRANSFORM
-    glm::vec3 velocity = glm::vec3(0, 0, 0);     // If FLAG_VELOCITY
-    uint8_t grounded = 0;                        // If FLAG_GROUNDED
+    glm::vec3 position = glm::vec3(0, 0, 0);         // If FLAG_TRANSFORM
+    glm::vec3 velocity = glm::vec3(0, 0, 0);         // If FLAG_VELOCITY
+    uint8_t grounded = 0;                             // If FLAG_GROUNDED
+    glm::vec3 ground_normal = glm::vec3(0, 1, 0);    // If FLAG_GROUNDED (for prediction reconciliation)
 
     // Helper to check flags
     bool hasTransform() const { return (flags & ComponentFlags::TRANSFORM) != 0; }
@@ -145,6 +146,7 @@ struct WorldStateUpdateMessage
     MessageType type = MessageType::WORLD_STATE_UPDATE;
     uint32_t server_tick = 0;
     uint16_t num_entities = 0;
+    uint32_t last_processed_input_tick = 0; // Per-client: last input tick the server applied
     // EntityUpdateData entities[] follows in memory
 };
 

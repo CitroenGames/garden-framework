@@ -19,4 +19,5 @@ class ToolbarPanel
 public:
     ToolbarCallbacks callbacks;
     void draw(EditorState& state);
+    void drawContent(EditorState& state);
 };

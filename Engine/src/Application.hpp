@@ -52,6 +52,8 @@ public:
             Uint32 window_flags = 0;
             if (fullscreen)
                 window_flags |= SDL_WINDOW_FULLSCREEN;
+            else
+                window_flags |= SDL_WINDOW_RESIZABLE;
 
             if (api_type == RenderAPIType::Vulkan)
             {
@@ -99,6 +101,9 @@ public:
                 fprintf(stderr, "Window creation failed: %s\n", SDL_GetError());
                 return false;
             }
+
+            // Prevent degenerate resizes (0-dimension surfaces crash GPU APIs)
+            SDL_SetWindowMinimumSize(window, 320, 240);
         }
         else
         {
@@ -189,6 +194,16 @@ public:
         }
     }
 
-    // Note: getWindowHandle() method removed - we now pass SDL_Window* directly to the render API
-    // This simplifies the code and eliminates platform-specific window handle extraction
+    // Called when the OS window is resized (by user drag, maximize, etc.)
+    void onWindowResized(int new_width, int new_height)
+    {
+        if (new_width <= 0 || new_height <= 0)
+            return;
+        width = new_width;
+        height = new_height;
+        if (render_api)
+        {
+            render_api->resize(width, height);
+        }
+    }
 };

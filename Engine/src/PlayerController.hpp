@@ -22,6 +22,7 @@ private:
     std::shared_ptr<InputManager> input_manager;
     PossessedEntityType currently_possessed;
     bool freecam_mode_enabled;
+    bool movement_enabled = true; // When false, updatePlayer() only does camera follow (networked mode)
     world* game_world;
 
 public:
@@ -138,13 +139,24 @@ public:
 private:
     void updatePlayer(float delta)
     {
-        if (!game_world->registry.valid(player_entity)) return; 
+        if (!game_world->registry.valid(player_entity)) return;
+
+        auto& trans = game_world->registry.get<TransformComponent>(player_entity);
+
+        // When movement is disabled (networked mode), SharedMovement::simulate()
+        // handles velocity/position. We only do camera follow here.
+        if (!movement_enabled)
+        {
+            float camera_speed = 10.0f;
+            float t = 1.0f - std::exp(-camera_speed * delta);
+            game_world->world_camera.position = glm::mix(game_world->world_camera.position, trans.position, t);
+            return;
+        }
 
         auto& pc = game_world->registry.get<PlayerComponent>(player_entity);
         auto& rb = game_world->registry.get<RigidBodyComponent>(player_entity);
-        auto& trans = game_world->registry.get<TransformComponent>(player_entity);
-        
-        if (!pc.input_enabled || !input_manager) return; 
+
+        if (!pc.input_enabled || !input_manager) return;
 
         float move_forward = 0.0f;
         float move_right = 0.0f;
@@ -255,4 +267,9 @@ public:
     }
     
     bool isFreecamMode() const { return freecam_mode_enabled; }
+
+    // In networked mode, movement is handled by SharedMovement::simulate() externally.
+    // When disabled, updatePlayer() only does camera follow.
+    void setMovementEnabled(bool enabled) { movement_enabled = enabled; }
+    bool isMovementEnabled() const { return movement_enabled; }
 };
