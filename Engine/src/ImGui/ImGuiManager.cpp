@@ -1,7 +1,6 @@
 #include "ImGuiManager.hpp"
 #include "imgui.h"
 #include "imgui_impl_sdl2.h"
-#include "imgui_impl_opengl3.h"
 #include "imgui_impl_vulkan.h"
 #ifdef __APPLE__
 #include "Graphics/MetalRenderAPI.hpp"
@@ -167,11 +166,7 @@ bool ImGuiManager::initialize(SDL_Window* window, IRenderAPI* renderAPI, RenderA
 
     // Initialize platform and renderer backends
     bool success = false;
-    if (apiType == RenderAPIType::OpenGL)
-    {
-        success = initOpenGL(window, SDL_GL_GetCurrentContext());
-    }
-    else if (apiType == RenderAPIType::Vulkan)
+    if (apiType == RenderAPIType::Vulkan)
     {
         success = initVulkan(window, renderAPI);
     }
@@ -190,29 +185,6 @@ bool ImGuiManager::initialize(SDL_Window* window, IRenderAPI* renderAPI, RenderA
 
     m_initialized = success;
     return success;
-}
-
-bool ImGuiManager::initOpenGL(SDL_Window* window, void* glContext)
-{
-    // Initialize SDL2 backend for OpenGL
-    if (!ImGui_ImplSDL2_InitForOpenGL(window, glContext))
-    {
-        return false;
-    }
-
-    // Initialize OpenGL3 backend with appropriate GLSL version
-#ifdef __APPLE__
-    const char* glsl_version = "#version 410";
-#else
-    const char* glsl_version = "#version 460";
-#endif
-    if (!ImGui_ImplOpenGL3_Init(glsl_version))
-    {
-        ImGui_ImplSDL2_Shutdown();
-        return false;
-    }
-
-    return true;
 }
 
 bool ImGuiManager::initVulkan(SDL_Window* window, IRenderAPI* vulkanAPI)
@@ -330,11 +302,7 @@ void ImGuiManager::shutdown()
 {
     if (!m_initialized) return;
 
-    if (m_apiType == RenderAPIType::OpenGL)
-    {
-        ImGui_ImplOpenGL3_Shutdown();
-    }
-    else if (m_apiType == RenderAPIType::Vulkan)
+    if (m_apiType == RenderAPIType::Vulkan)
     {
         ImGui_ImplVulkan_Shutdown();
     }
@@ -362,11 +330,7 @@ void ImGuiManager::newFrame()
     if (!m_initialized) return;
 
     // Start new ImGui frame - order matters!
-    if (m_apiType == RenderAPIType::OpenGL)
-    {
-        ImGui_ImplOpenGL3_NewFrame();
-    }
-    else if (m_apiType == RenderAPIType::Vulkan)
+    if (m_apiType == RenderAPIType::Vulkan)
     {
         ImGui_ImplVulkan_NewFrame();
     }

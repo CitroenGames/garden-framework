@@ -22,6 +22,7 @@
 #include "vk_mem_alloc.h"
 
 // stb_image for texture loading
+#define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
 // Logging

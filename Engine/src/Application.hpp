@@ -34,13 +34,6 @@ public:
 
     bool initialize(const char* title = "Game Window", bool fullscreen = true)
     {
-#ifdef __APPLE__
-        if (api_type == RenderAPIType::OpenGL)
-        {
-            fprintf(stderr, "OpenGL is not supported on macOS. Use Metal or Vulkan instead.\n");
-            return false;
-        }
-#endif
         if (api_type != RenderAPIType::Headless)
         {
             if (SDL_Init(SDL_INIT_VIDEO) < 0)
@@ -70,24 +63,6 @@ public:
             {
                 // D3D11 doesn't require any special SDL flags
                 // The window will be created as a regular Win32 window
-            }
-            else
-            {
-                // Set OpenGL attributes BEFORE creating the window (proper SDL order)
-                SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
-                SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 6);
-                SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
-                SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-                SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
-                SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
-
-#ifdef _DEBUG
-                SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_DEBUG_FLAG);
-#else
-                SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG);
-#endif
-                // OpenGL requires SDL_WINDOW_OPENGL flag
-                window_flags |= SDL_WINDOW_OPENGL;
             }
 
             window = SDL_CreateWindow(title,

@@ -1,8 +1,0 @@
-[project:glad]
-type = lib
-sources = src/glad.c
-headers = include/**/*.h
-includes = include
-public_includes = include
-c_standard = 99
-multiprocessor = true

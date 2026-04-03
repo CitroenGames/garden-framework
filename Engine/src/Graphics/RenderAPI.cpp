@@ -1,5 +1,4 @@
 #include "RenderAPI.hpp"
-#include "OpenGLRenderAPI.hpp"
 #include "VulkanRenderAPI.hpp"
 #include "HeadlessRenderAPI.hpp"
 #ifdef _WIN32
@@ -14,8 +13,6 @@ IRenderAPI* CreateRenderAPI(RenderAPIType type)
 {
     switch (type)
     {
-    case RenderAPIType::OpenGL:
-        return new OpenGLRenderAPI();
     case RenderAPIType::Vulkan:
         return new VulkanRenderAPI();
 #ifdef _WIN32

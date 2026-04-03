@@ -155,7 +155,6 @@ public:
 // Factory function to create render API instances
 enum class RenderAPIType
 {
-    OpenGL,
     Vulkan,
     D3D11,
     Metal,
@@ -166,10 +165,8 @@ enum class RenderAPIType
 constexpr RenderAPIType DefaultRenderAPI = RenderAPIType::Metal;
 #elif defined(_WIN32)
 constexpr RenderAPIType DefaultRenderAPI = RenderAPIType::D3D11;
-#elif defined(__linux__)
-constexpr RenderAPIType DefaultRenderAPI = RenderAPIType::Vulkan;
 #else
-constexpr RenderAPIType DefaultRenderAPI = RenderAPIType::OpenGL;
+constexpr RenderAPIType DefaultRenderAPI = RenderAPIType::Vulkan;
 #endif
 
 IRenderAPI* CreateRenderAPI(RenderAPIType type);

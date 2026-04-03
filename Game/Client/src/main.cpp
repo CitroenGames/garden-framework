@@ -92,10 +92,6 @@ static RenderAPIType parseRenderAPI(int argc, char* argv[])
         {
             return RenderAPIType::Vulkan;
         }
-        if (strcmp(argv[i], "-opengl") == 0 || strcmp(argv[i], "--opengl") == 0)
-        {
-            return RenderAPIType::OpenGL;
-        }
 #ifdef __APPLE__
         if (strcmp(argv[i], "-metal") == 0 || strcmp(argv[i], "--metal") == 0)
         {
@@ -110,15 +106,7 @@ static RenderAPIType parseRenderAPI(int argc, char* argv[])
         }
 #endif
     }
-#ifdef __APPLE__
-    return RenderAPIType::Metal;
-#elif defined(_WIN32)
-    return RenderAPIType::D3D11;
-#elif defined(__linux__)
-    return RenderAPIType::Vulkan;
-#else
-    return RenderAPIType::OpenGL;
-#endif
+    return DefaultRenderAPI;
 }
 
 #if _WIN32

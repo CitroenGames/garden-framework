@@ -238,7 +238,7 @@ public:
             // Restore depth state after depth prepass
             if (depth_prepass_enabled)
             {
-                // endDepthPrepass set GL_EQUAL + no depth write
+                // endDepthPrepass set depth-equal + no depth write
                 // Restore for skybox and debug rendering
             }
         }

@@ -45,7 +45,6 @@ private:
     ImGuiManager(const ImGuiManager&) = delete;
     ImGuiManager& operator=(const ImGuiManager&) = delete;
 
-    bool initOpenGL(SDL_Window* window, void* glContext);
     bool initVulkan(SDL_Window* window, IRenderAPI* vulkanAPI);
 #ifdef __APPLE__
     bool initMetal(SDL_Window* window, IRenderAPI* metalAPI);
@@ -58,7 +57,7 @@ private:
     static int consoleInputCallback(ImGuiInputTextCallbackData* data);
 
     bool m_initialized = false;
-    RenderAPIType m_apiType = RenderAPIType::OpenGL;
+    RenderAPIType m_apiType = DefaultRenderAPI;
     SDL_Window* m_window = nullptr;
     IRenderAPI* m_renderAPI = nullptr;
     bool m_showSettings = false;
