@@ -10,6 +10,9 @@
 #include <string>
 #include <array>
 
+// Logging (needed for VK_CHECK macros)
+#include "Utils/Log.hpp"
+
 // Vulkan headers
 #include <vulkan/vulkan.h>
 
@@ -24,6 +27,56 @@ typedef VmaAllocation_T* VmaAllocation;
 
 // Forward declarations
 class VulkanMesh;
+
+// --- Vulkan error handling utilities ---
+
+inline const char* vkResultToString(VkResult result)
+{
+    switch (result) {
+        case VK_SUCCESS:                        return "VK_SUCCESS";
+        case VK_NOT_READY:                      return "VK_NOT_READY";
+        case VK_TIMEOUT:                        return "VK_TIMEOUT";
+        case VK_EVENT_SET:                      return "VK_EVENT_SET";
+        case VK_EVENT_RESET:                    return "VK_EVENT_RESET";
+        case VK_INCOMPLETE:                     return "VK_INCOMPLETE";
+        case VK_ERROR_OUT_OF_HOST_MEMORY:       return "VK_ERROR_OUT_OF_HOST_MEMORY";
+        case VK_ERROR_OUT_OF_DEVICE_MEMORY:     return "VK_ERROR_OUT_OF_DEVICE_MEMORY";
+        case VK_ERROR_INITIALIZATION_FAILED:    return "VK_ERROR_INITIALIZATION_FAILED";
+        case VK_ERROR_DEVICE_LOST:              return "VK_ERROR_DEVICE_LOST";
+        case VK_ERROR_MEMORY_MAP_FAILED:        return "VK_ERROR_MEMORY_MAP_FAILED";
+        case VK_ERROR_LAYER_NOT_PRESENT:        return "VK_ERROR_LAYER_NOT_PRESENT";
+        case VK_ERROR_EXTENSION_NOT_PRESENT:    return "VK_ERROR_EXTENSION_NOT_PRESENT";
+        case VK_ERROR_FEATURE_NOT_PRESENT:      return "VK_ERROR_FEATURE_NOT_PRESENT";
+        case VK_ERROR_INCOMPATIBLE_DRIVER:      return "VK_ERROR_INCOMPATIBLE_DRIVER";
+        case VK_ERROR_TOO_MANY_OBJECTS:         return "VK_ERROR_TOO_MANY_OBJECTS";
+        case VK_ERROR_FORMAT_NOT_SUPPORTED:     return "VK_ERROR_FORMAT_NOT_SUPPORTED";
+        case VK_ERROR_FRAGMENTED_POOL:          return "VK_ERROR_FRAGMENTED_POOL";
+        case VK_ERROR_OUT_OF_POOL_MEMORY:       return "VK_ERROR_OUT_OF_POOL_MEMORY";
+        case VK_ERROR_SURFACE_LOST_KHR:         return "VK_ERROR_SURFACE_LOST_KHR";
+        case VK_SUBOPTIMAL_KHR:                 return "VK_SUBOPTIMAL_KHR";
+        case VK_ERROR_OUT_OF_DATE_KHR:          return "VK_ERROR_OUT_OF_DATE_KHR";
+        default:                                return "VK_UNKNOWN_ERROR";
+    }
+}
+
+// Log and continue -- use for non-fatal Vulkan calls
+#define VK_CHECK(expr) do { \
+    VkResult _vk_r = (expr); \
+    if (_vk_r != VK_SUCCESS) { \
+        LOG_ENGINE_ERROR("[Vulkan] {} failed at {}:{} => {}", \
+            #expr, __FILE__, __LINE__, vkResultToString(_vk_r)); \
+    } \
+} while(0)
+
+// Log and return false -- use inside functions that return bool
+#define VK_CHECK_BOOL(expr) do { \
+    VkResult _vk_r = (expr); \
+    if (_vk_r != VK_SUCCESS) { \
+        LOG_ENGINE_ERROR("[Vulkan] {} failed at {}:{} => {}", \
+            #expr, __FILE__, __LINE__, vkResultToString(_vk_r)); \
+        return false; \
+    } \
+} while(0)
 
 // Vulkan texture structure
 struct VulkanTexture {
@@ -209,7 +262,10 @@ private:
     void endSingleTimeCommands(VkCommandBuffer commandBuffer);
     void generateMipmaps(VkImage image, VkFormat imageFormat, int32_t texWidth, int32_t texHeight, uint32_t mipLevels);
 
-    void updateDescriptorSet(uint32_t frameIndex, TextureHandle texture);
+    VkDescriptorSet getOrAllocateDescriptorSet(uint32_t frameIndex, TextureHandle texture);
+    VkDescriptorPool createPerDrawDescriptorPool();
+    VkDescriptorSet allocateFromPerDrawPool(uint32_t frameIndex);
+    void initializeDescriptorSet(VkDescriptorSet ds, uint32_t frameIndex, TextureHandle texture);
 
 private:
     // vk-bootstrap handles
@@ -291,17 +347,23 @@ private:
 
     // Descriptors
     VkDescriptorSetLayout descriptor_set_layout = VK_NULL_HANDLE;
-    VkDescriptorPool descriptor_pool = VK_NULL_HANDLE;
+
+    // Per-frame global descriptor sets (UBO-only, on a dedicated pool)
+    VkDescriptorPool global_descriptor_pool = VK_NULL_HANDLE;
     std::vector<VkDescriptorSet> descriptor_sets;
 
-    // Per-draw descriptor sets (to handle multiple textures per frame)
-    static constexpr uint32_t MAX_DESCRIPTOR_SETS_PER_FRAME = 512;
-    std::vector<VkDescriptorSet> per_draw_descriptor_sets;
-    uint32_t current_descriptor_set_index = 0;
+    // Per-draw descriptor pools (dynamically growing, reset each frame)
+    static constexpr uint32_t SETS_PER_POOL = 512;
+    struct PerFrameDescriptorState {
+        std::vector<VkDescriptorPool> pools;
+        uint32_t current_pool = 0;
+        uint32_t sets_allocated_in_pool = 0;
+    };
+    PerFrameDescriptorState frame_descriptor_state[2]; // MAX_FRAMES_IN_FLIGHT
     bool descriptor_limit_warned = false;
 
-    // Cache: texture handle -> descriptor set index (for reuse within a frame)
-    std::unordered_map<TextureHandle, uint32_t> texture_descriptor_cache;
+    // Cache: texture handle -> VkDescriptorSet (for reuse within a frame)
+    std::unordered_map<TextureHandle, VkDescriptorSet> texture_descriptor_cache;
 
     // Uniform buffers (per-frame)
     std::vector<VkBuffer> uniform_buffers;
@@ -336,6 +398,7 @@ private:
     RenderState current_state;
     bool frame_started = false;
     bool image_acquired = false;
+    bool device_lost = false;
 
     // Clear color (set by clear(), used in beginFrame)
     glm::vec3 clear_color = glm::vec3(0.2f, 0.3f, 0.8f);

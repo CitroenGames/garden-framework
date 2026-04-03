@@ -111,9 +111,13 @@ static RenderAPIType parseRenderAPI(int argc, char* argv[])
 #endif
     }
 #ifdef __APPLE__
-    return RenderAPIType::Metal; // macOS: Native Metal (default)
+    return RenderAPIType::Metal;
+#elif defined(_WIN32)
+    return RenderAPIType::D3D11;
+#elif defined(__linux__)
+    return RenderAPIType::Vulkan;
 #else
-    return RenderAPIType::OpenGL; // Default
+    return RenderAPIType::OpenGL;
 #endif
 }
 

@@ -1,3 +1,3 @@
 @echo off
 cd /d "%~dp0"
-Game.exe -dx11
+Game.exe -opengl

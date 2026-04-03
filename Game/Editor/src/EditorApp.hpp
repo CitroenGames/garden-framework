@@ -18,6 +18,7 @@
 #include "panels/ViewportOverlayPanel.hpp"
 #include "panels/StatusBarPanel.hpp"
 #include "panels/ViewportPanel.hpp"
+#include "panels/NavMeshPanel.hpp"
 
 class EditorApp
 {
@@ -49,6 +50,7 @@ private:
     bool m_show_content_browser = true;
     bool m_show_status_bar     = true;
     bool m_show_viewport       = true;
+    bool m_show_navmesh_panel  = false;
 
     // Mouse state (editor camera)
     bool  m_right_mouse = false;
@@ -75,6 +77,7 @@ private:
     ViewportPanel        m_viewport;
     ViewportOverlayPanel m_viewport_overlay;
     StatusBarPanel       m_status_bar;
+    NavMeshPanel         m_navmesh_panel;
 
     // --- Play In Editor (PIE) ---
     std::unique_ptr<GameSimulation> m_game_sim;

@@ -329,6 +329,8 @@ private:
     ComPtr<ID3D11Texture2D> viewportTexture;
     ComPtr<ID3D11RenderTargetView> viewportRTV;
     ComPtr<ID3D11ShaderResourceView> viewportSRV;
+    ComPtr<ID3D11Texture2D> viewportDepthBuffer;
+    ComPtr<ID3D11DepthStencilView> viewportDSV;
     int viewport_width_rt = 0, viewport_height_rt = 0;
     void createViewportResources(int w, int h);
 };
