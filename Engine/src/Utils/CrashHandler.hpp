@@ -98,6 +98,7 @@ namespace Paingine2D {
         }
 
     public:
+        // Intentionally leaked: must outlive all objects to catch shutdown crashes
         static CrashHandler* GetInstance() {
             if (!s_instance)
                 s_instance = new CrashHandler();

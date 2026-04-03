@@ -503,7 +503,7 @@ std::shared_ptr<mesh> LevelManager::loadMesh(const LevelEntity& entity, IRenderA
         return nullptr;
     }
 
-    mesh* m_ptr = nullptr;
+    std::shared_ptr<mesh> m_ptr;
 
     // Check if glTF file (which might have materials)
     size_t path_len = entity.mesh_path.size();
@@ -544,7 +544,7 @@ std::shared_ptr<mesh> LevelManager::loadMesh(const LevelEntity& entity, IRenderA
         LOG_ENGINE_TRACE("Loaded glTF: {}", entity.mesh_path.c_str());
         
         // Create mesh from glTF data
-        m_ptr = new mesh(map_result.vertices, map_result.vertex_count);
+        m_ptr = std::make_shared<mesh>(map_result.vertices, map_result.vertex_count);
 
         // Apply textures
         bool texture_applied = false;
@@ -600,7 +600,7 @@ std::shared_ptr<mesh> LevelManager::loadMesh(const LevelEntity& entity, IRenderA
     else
     {
         // Regular mesh loading (OBJ)
-        m_ptr = new mesh(entity.mesh_path);
+        m_ptr = std::make_shared<mesh>(entity.mesh_path);
         
         // Load textures
         if (!entity.texture_paths.empty() && render_api)
@@ -619,10 +619,9 @@ std::shared_ptr<mesh> LevelManager::loadMesh(const LevelEntity& entity, IRenderA
         m_ptr->culling = entity.culling;
         m_ptr->transparent = entity.transparent;
         m_ptr->visible = entity.visible;
-        return std::shared_ptr<mesh>(m_ptr);
     }
 
-    return nullptr;
+    return m_ptr;
 }
 
 bool LevelManager::instantiateLevel(

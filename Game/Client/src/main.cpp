@@ -291,6 +291,13 @@ int main(int argc, char* argv[])
         // Process input events through the new input system
         input_handler.process_events();
 
+        // Skip rendering while window is minimized to avoid GPU work on a 0x0 surface
+        if (input_handler.is_window_minimized())
+        {
+            SDL_Delay(10);
+            continue;
+        }
+
         // Process async loading jobs (GPU uploads must happen on main thread)
         Threading::JobSystem::get().processMainThreadJobs();
         

@@ -205,6 +205,13 @@ private:
     bool in_depth_prepass = false;
     bool use_equal_depth = false;
 
+    // Device lost flag - set when Present() or resize fails fatally
+    bool device_lost = false;
+
+    // Deferred shadow map recreation (avoid mid-frame resource changes)
+    bool shadow_resources_dirty = false;
+    unsigned int pending_shadow_size = 0;
+
     // VSync / present interval
     int presentInterval = 1;
 

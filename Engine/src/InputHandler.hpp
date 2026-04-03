@@ -14,6 +14,7 @@ private:
     std::function<void()> quit_callback;
     bool should_quit = false;
     bool ui_mode = false;  // When true, mouse is visible and game input is paused
+    bool is_minimized_state = false;
 
 public:
     InputHandler() 
@@ -45,6 +46,12 @@ public:
     bool is_ui_mode() const
     {
         return ui_mode;
+    }
+
+    // Check if the window is currently minimized
+    bool is_window_minimized() const
+    {
+        return is_minimized_state;
     }
 
     // Process all SDL events for this frame
@@ -107,6 +114,13 @@ public:
                 }
                 // Fall through to default handling for other keys
                 [[fallthrough]];
+
+            case SDL_WINDOWEVENT:
+                if (event.window.event == SDL_WINDOWEVENT_MINIMIZED)
+                    is_minimized_state = true;
+                else if (event.window.event == SDL_WINDOWEVENT_RESTORED)
+                    is_minimized_state = false;
+                break;
 
             default:
                 // Only pass to game input if not in UI mode and ImGui doesn't want input

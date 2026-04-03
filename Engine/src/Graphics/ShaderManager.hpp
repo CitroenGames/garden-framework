@@ -2,12 +2,13 @@
 
 #include "Shader.hpp"
 #include <string>
+#include <memory>
 #include <unordered_map>
 
 class ShaderManager
 {
 private:
-    std::unordered_map<std::string, Shader*> shaders;
+    std::unordered_map<std::string, std::unique_ptr<Shader>> shaders;
 
 public:
     ShaderManager();
