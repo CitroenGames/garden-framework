@@ -1,5 +1,6 @@
 #include "PhysicsSystem.hpp"
 #include "Utils/Log.hpp"
+#include <atomic>
 #include <cmath>
 #include <cstdarg>
 #include <cstdlib>
@@ -14,7 +15,7 @@ static void JoltTrace(const char* inFMT, ...)
     va_end(args);
 }
 
-static bool s_jolt_registered = false;
+static std::atomic<bool> s_jolt_registered{false};
 
 PhysicsSystem::PhysicsSystem(const glm::vec3& gravityVector, float deltaTime)
     : gravity(gravityVector), fixed_delta(deltaTime)
@@ -98,6 +99,9 @@ void PhysicsSystem::shutdown()
     jolt_system.reset();
     job_system.reset();
     temp_allocator.reset();
+
+    // Note: Factory and registered types are intentionally NOT cleaned up here.
+    // They are process-lifetime singletons that must outlive all PhysicsSystem instances.
 
     initialized = false;
 }

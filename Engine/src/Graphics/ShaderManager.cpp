@@ -18,22 +18,22 @@ Shader* ShaderManager::loadShader(const std::string& name, const std::string& ve
     if (it != shaders.end())
     {
         printf("Shader '%s' already loaded\n", name.c_str());
-        return it->second;
+        return it->second.get();
     }
 
     // Create and load new shader
-    Shader* shader = new Shader();
+    auto shader = std::make_unique<Shader>();
     if (!shader->loadFromFiles(vertex_path, fragment_path))
     {
-        delete shader;
         printf("Failed to load shader '%s'\n", name.c_str());
         return nullptr;
     }
 
     // Cache the shader
-    shaders[name] = shader;
+    Shader* raw = shader.get();
+    shaders[name] = std::move(shader);
     printf("Shader '%s' loaded and cached\n", name.c_str());
-    return shader;
+    return raw;
 }
 
 Shader* ShaderManager::loadShaderFromStrings(const std::string& name, const std::string& vertex_src, const std::string& fragment_src)
@@ -43,22 +43,22 @@ Shader* ShaderManager::loadShaderFromStrings(const std::string& name, const std:
     if (it != shaders.end())
     {
         printf("Shader '%s' already loaded\n", name.c_str());
-        return it->second;
+        return it->second.get();
     }
 
     // Create and load new shader
-    Shader* shader = new Shader();
+    auto shader = std::make_unique<Shader>();
     if (!shader->loadFromStrings(vertex_src, fragment_src))
     {
-        delete shader;
         printf("Failed to load shader '%s' from strings\n", name.c_str());
         return nullptr;
     }
 
     // Cache the shader
-    shaders[name] = shader;
+    Shader* raw = shader.get();
+    shaders[name] = std::move(shader);
     printf("Shader '%s' loaded and cached from strings\n", name.c_str());
-    return shader;
+    return raw;
 }
 
 Shader* ShaderManager::getShader(const std::string& name)
@@ -66,7 +66,7 @@ Shader* ShaderManager::getShader(const std::string& name)
     auto it = shaders.find(name);
     if (it != shaders.end())
     {
-        return it->second;
+        return it->second.get();
     }
 
     printf("Warning: Shader '%s' not found\n", name.c_str());
@@ -94,9 +94,5 @@ void ShaderManager::createDefaultShaders()
 
 void ShaderManager::clear()
 {
-    for (auto& pair : shaders)
-    {
-        delete pair.second;
-    }
     shaders.clear();
 }

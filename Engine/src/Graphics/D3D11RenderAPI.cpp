@@ -220,7 +220,8 @@ void D3D11RenderAPI::resize(int width, int height)
     HRESULT hr = swapChain->ResizeBuffers(2, width, height, DXGI_FORMAT_R8G8B8A8_UNORM, 0);
     if (FAILED(hr))
     {
-        LOG_ENGINE_ERROR("Failed to resize swap chain buffers");
+        LOG_ENGINE_ERROR("Failed to resize swap chain buffers (HRESULT: 0x{:08X})", static_cast<unsigned>(hr));
+        device_lost = true;
         return;
     }
 
@@ -228,16 +229,19 @@ void D3D11RenderAPI::resize(int width, int height)
     if (!createRenderTargetView())
     {
         LOG_ENGINE_ERROR("Failed to recreate render target view after resize");
+        device_lost = true;
         return;
     }
     if (!createDepthStencilBuffer(width, height))
     {
         LOG_ENGINE_ERROR("Failed to recreate depth stencil buffer after resize");
+        device_lost = true;
         return;
     }
     if (!createPostProcessingResources(width, height))
     {
         LOG_ENGINE_ERROR("Failed to recreate post-processing resources after resize");
+        device_lost = true;
         return;
     }
 
@@ -889,6 +893,15 @@ bool D3D11RenderAPI::createDefaultTexture()
 
 void D3D11RenderAPI::beginFrame()
 {
+    if (device_lost) return;
+
+    // Apply deferred shadow map recreation (safe between frames)
+    if (shadow_resources_dirty)
+    {
+        recreateShadowMapResources(pending_shadow_size);
+        shadow_resources_dirty = false;
+    }
+
     if (fxaaEnabled)
     {
         // Render to offscreen buffer
@@ -944,6 +957,8 @@ void D3D11RenderAPI::beginFrame()
 
 void D3D11RenderAPI::endFrame()
 {
+    if (device_lost) return;
+
     if (fxaaEnabled)
     {
         // Apply FXAA post-processing
@@ -989,11 +1004,25 @@ void D3D11RenderAPI::endFrame()
 
 void D3D11RenderAPI::present()
 {
-    swapChain->Present(presentInterval, 0);
+    if (device_lost) return;
+
+    HRESULT hr = swapChain->Present(presentInterval, 0);
+    if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET)
+    {
+        HRESULT reason = device->GetDeviceRemovedReason();
+        LOG_ENGINE_ERROR("D3D11 device lost during Present (reason: 0x{:08X})", static_cast<unsigned>(reason));
+        device_lost = true;
+    }
+    else if (FAILED(hr))
+    {
+        LOG_ENGINE_ERROR("D3D11 Present failed (HRESULT: 0x{:08X})", static_cast<unsigned>(hr));
+    }
 }
 
 void D3D11RenderAPI::clear(const glm::vec3& color)
 {
+    if (device_lost) return;
+
     float clearColor[4] = { color.r, color.g, color.b, 1.0f };
 
     if (fxaaEnabled)
@@ -1256,7 +1285,11 @@ void D3D11RenderAPI::updatePerObjectCBuffer(const glm::vec3& color, bool useText
     PerObjectCBuffer* cb = static_cast<PerObjectCBuffer*>(mapped.pData);
 
     cb->model = current_model_matrix;
-    cb->normalMatrix = glm::mat4(glm::transpose(glm::inverse(glm::mat3(current_model_matrix))));
+    glm::mat3 modelMat3(current_model_matrix);
+    float det = glm::determinant(modelMat3);
+    cb->normalMatrix = (std::abs(det) > 1e-6f)
+        ? glm::mat4(glm::transpose(glm::inverse(modelMat3)))
+        : glm::mat4(1.0f);
     cb->color = color;
     cb->useTexture = useTexture ? 1 : 0;
 
@@ -1382,6 +1415,8 @@ void D3D11RenderAPI::renderMesh(const mesh& m, const RenderState& state)
             desired_vs = unlitVertexShader.Get();
             desired_ps = unlitPixelShader.Get();
         }
+        if (!desired_vs || !desired_ps) return;
+
         if (desired_vs != last_bound_vs)
         {
             context->VSSetShader(desired_vs, nullptr, 0);
@@ -1476,6 +1511,8 @@ void D3D11RenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t 
             desired_vs = unlitVertexShader.Get();
             desired_ps = unlitPixelShader.Get();
         }
+        if (!desired_vs || !desired_ps) return;
+
         if (desired_vs != last_bound_vs)
         {
             context->VSSetShader(desired_vs, nullptr, 0);
@@ -1978,7 +2015,9 @@ void D3D11RenderAPI::setShadowQuality(int quality)
 
     if (newSize != currentShadowSize)
     {
-        recreateShadowMapResources(newSize);
+        // Defer recreation to start of next frame to avoid mid-frame resource changes
+        shadow_resources_dirty = true;
+        pending_shadow_size = newSize;
     }
 }
 

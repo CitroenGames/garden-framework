@@ -13,6 +13,7 @@
 #include <glm/gtc/type_ptr.hpp>
 #include <stack>
 #include <array>
+#include <memory>
 
 // Use SDL's OpenGL context type for cross-platform support
 typedef SDL_GLContext OpenGLContext;
@@ -62,13 +63,13 @@ private:
     bool lighting_enabled;
 
     // Shader management
-    ShaderManager* shader_manager;
+    std::unique_ptr<ShaderManager> shader_manager;
 
     // Post Processing
-    PostProcessing* post_processing;
+    std::unique_ptr<PostProcessing> post_processing;
 
     // Skybox
-    Skybox* skybox;
+    std::unique_ptr<Skybox> skybox;
 
     // Shadow Mapping - CSM (Cascaded Shadow Maps)
     static constexpr int NUM_CASCADES = 4;

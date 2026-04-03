@@ -55,7 +55,7 @@ bool OpenGLRenderAPI::initialize(WindowHandle window, int width, int height, flo
     }
 
     // Create shader manager and load default shaders
-    shader_manager = new ShaderManager();
+    shader_manager = std::make_unique<ShaderManager>();
     shader_manager->createDefaultShaders();
     
     // Load FXAA shader
@@ -114,14 +114,14 @@ bool OpenGLRenderAPI::initialize(WindowHandle window, int width, int height, flo
     debugCascades = false;
 
     // Initialize PostProcessing
-    post_processing = new PostProcessing();
+    post_processing = std::make_unique<PostProcessing>();
     if (!post_processing->initialize(width, height, shader_manager->getShader("fxaa")))
     {
         printf("Failed to initialize PostProcessing\n");
     }
 
     // Initialize Skybox
-    skybox = new Skybox();
+    skybox = std::make_unique<Skybox>();
     if (!skybox->initialize(shader_manager->getShader("sky")))
     {
         printf("Failed to initialize Skybox\n");
@@ -161,24 +161,10 @@ void OpenGLRenderAPI::shutdown()
     if (debug_vao) { glDeleteVertexArrays(1, &debug_vao); debug_vao = 0; }
     debug_vbo_capacity = 0;
 
-    // Clean up shader manager
-    if (shader_manager)
-    {
-        delete shader_manager;
-        shader_manager = nullptr;
-    }
-
-    if (post_processing)
-    {
-        delete post_processing;
-        post_processing = nullptr;
-    }
-
-    if (skybox)
-    {
-        delete skybox;
-        skybox = nullptr;
-    }
+    // Clean up shader manager and rendering subsystems
+    shader_manager.reset();
+    post_processing.reset();
+    skybox.reset();
 
     destroyViewportFBO();
 

@@ -3,12 +3,13 @@
 #include "SDL.h"
 #include "Graphics/RenderAPI.hpp"
 #include <stdio.h>
+#include <memory>
 
 class Application
 {
 private:
     SDL_Window* window;
-    IRenderAPI* render_api;
+    std::unique_ptr<IRenderAPI> render_api;
     int width;
     int height;
     int target_fps;
@@ -20,6 +21,11 @@ public:
         : window(nullptr), render_api(nullptr), width(w), height(h), target_fps(fps), fov(field_of_view), api_type(render_type)
     {
     }
+
+    Application(const Application&) = delete;
+    Application& operator=(const Application&) = delete;
+    Application(Application&&) = default;
+    Application& operator=(Application&&) = default;
 
     ~Application()
     {
@@ -105,7 +111,7 @@ public:
         }
 
         // Create render API
-        render_api = CreateRenderAPI(api_type);
+        render_api.reset(CreateRenderAPI(api_type));
         if (!render_api)
         {
             fprintf(stderr, "Failed to create render API\n");
@@ -134,8 +140,7 @@ public:
         if (render_api)
         {
             render_api->shutdown();
-            delete render_api;
-            render_api = nullptr;
+            render_api.reset();
         }
 
         if (window)
@@ -166,7 +171,7 @@ public:
 
     // Getters
     SDL_Window* getWindow() const { return window; }
-    IRenderAPI* getRenderAPI() const { return render_api; }
+    IRenderAPI* getRenderAPI() const { return render_api.get(); }
     int getWidth() const { return width; }
     int getHeight() const { return height; }
     int getTargetFPS() const { return target_fps; }
