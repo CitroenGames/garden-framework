@@ -211,6 +211,157 @@ static int cmdOpen(const std::string& garden_path)
     return 0;
 }
 
+static int cmdGenerate(const std::string& garden_path)
+{
+    if (!fs::exists(garden_path))
+    {
+        fprintf(stderr, "Error: File not found: '%s'\n", garden_path.c_str());
+        return 1;
+    }
+
+    GardenProject project;
+    if (!loadGardenProject(garden_path, project))
+        return 1;
+
+    if (project.buildscript.empty())
+    {
+        fprintf(stderr, "Error: No 'buildscript' field in '%s'\n", garden_path.c_str());
+        fprintf(stderr, "  Add a \"buildscript\" field pointing to your project's .buildscript file.\n");
+        return 1;
+    }
+
+    // Resolve buildscript path relative to the .garden file
+    fs::path project_dir = fs::path(garden_path).parent_path();
+    fs::path buildscript_path = project_dir / project.buildscript;
+
+    if (!fs::exists(buildscript_path))
+    {
+        fprintf(stderr, "Error: Buildscript not found: '%s'\n", buildscript_path.string().c_str());
+        return 1;
+    }
+
+    // Resolve engine path from registry
+    EngineRegistry registry;
+    const EngineEntry* engine = nullptr;
+
+    if (!project.engine_id.empty())
+        engine = registry.findEngine(project.engine_id);
+
+    if (!engine)
+    {
+        // Show picker if no engine_id or not found
+        auto engines = registry.listEngines();
+        std::string picked = showEnginePicker(engines, project.name);
+
+        if (picked.empty())
+        {
+            fprintf(stderr, "No engine selected.\n");
+            return 1;
+        }
+
+        if (!setProjectEngineId(garden_path, picked))
+            return 1;
+
+        project.engine_id = picked;
+        engine = registry.findEngine(picked);
+        if (!engine)
+        {
+            fprintf(stderr, "Error: Engine '%s' disappeared from registry.\n", picked.c_str());
+            return 1;
+        }
+    }
+
+    std::string engine_path = engine->path;
+
+    // Normalize backslashes to forward slashes for sighmake
+    for (char& c : engine_path)
+        if (c == '\\') c = '/';
+
+    std::string abs_buildscript = fs::absolute(buildscript_path).string();
+    for (char& c : abs_buildscript)
+        if (c == '\\') c = '/';
+
+    std::string abs_project_dir = fs::absolute(project_dir.empty() ? "." : project_dir).string();
+
+    printf("Generating project files for '%s'...\n", project.name.c_str());
+    printf("  Engine: %s\n", engine_path.c_str());
+    printf("  Buildscript: %s\n", abs_buildscript.c_str());
+
+    // Find sighmake on PATH
+#ifdef _WIN32
+    // Build command line for CreateProcess
+    std::string cmdline = "sighmake \"" + abs_buildscript + "\" -D ENGINE_PATH=" + engine_path;
+    printf("  Running: %s\n\n", cmdline.c_str());
+
+    STARTUPINFOA si = {};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi = {};
+
+    if (!CreateProcessA(
+        nullptr,
+        const_cast<char*>(cmdline.c_str()),
+        nullptr, nullptr, TRUE,
+        0,
+        nullptr,
+        abs_project_dir.c_str(),
+        &si, &pi))
+    {
+        fprintf(stderr, "Error: Failed to launch sighmake (error %lu)\n", GetLastError());
+        fprintf(stderr, "  Make sure sighmake is installed and on your PATH.\n");
+        return 1;
+    }
+
+    WaitForSingleObject(pi.hProcess, INFINITE);
+
+    DWORD exit_code = 1;
+    GetExitCodeProcess(pi.hProcess, &exit_code);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+
+    if (exit_code != 0)
+    {
+        fprintf(stderr, "\nError: sighmake failed (exit code %lu)\n", exit_code);
+        return 1;
+    }
+#else
+    pid_t pid = fork();
+    if (pid < 0)
+    {
+        fprintf(stderr, "Error: fork() failed\n");
+        return 1;
+    }
+    if (pid == 0)
+    {
+        if (chdir(abs_project_dir.c_str()) != 0)
+            _exit(127);
+        std::string d_arg = "ENGINE_PATH=" + engine_path;
+        const char* args[] = {
+            "sighmake",
+            abs_buildscript.c_str(),
+            "-D",
+            d_arg.c_str(),
+            nullptr
+        };
+        execvp(args[0], const_cast<char* const*>(args));
+        fprintf(stderr, "Error: Failed to run sighmake. Make sure it is installed and on your PATH.\n");
+        _exit(127);
+    }
+
+    int status = 0;
+    waitpid(pid, &status, 0);
+
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+    {
+        int code = WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+        fprintf(stderr, "\nError: sighmake failed (exit code %d)\n", code);
+        return 1;
+    }
+#endif
+
+    printf("\nProject files generated successfully.\n");
+    return 0;
+}
+
 static int cmdSetEngine(int argc, char* argv[])
 {
     if (argc < 4)
@@ -249,6 +400,7 @@ static void printHelp()
     printf("  unregister-engine <id>            Remove an engine registration\n");
     printf("  list-engines                      List all registered engines\n");
     printf("  open <file.garden>                Open a project in its associated editor\n");
+    printf("  generate <file.garden>            Generate project files (runs sighmake)\n");
     printf("  set-engine <file.garden> <id>     Set the engine_id in a project file\n");
     printf("  --help, -h                        Show this help\n");
     printf("  --version, -v                     Show version\n");
@@ -291,6 +443,15 @@ int main(int argc, char* argv[])
         return cmdListEngines();
     if (cmd == "open" && argc >= 3)
         return cmdOpen(argv[2]);
+    if (cmd == "generate" && argc >= 3)
+    {
+        int result = cmdGenerate(argv[2]);
+#ifdef _WIN32
+        printf("\n");
+        system("pause");
+#endif
+        return result;
+    }
     if (cmd == "set-engine")
         return cmdSetEngine(argc, argv);
 

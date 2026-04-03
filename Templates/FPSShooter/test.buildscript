@@ -1,3 +1,9 @@
+[solution]
+name = test
+platforms = x64, Linux
+
+include = ${ENGINE_PATH}/Engine/Engine.buildscript
+
 [project:test]
 type = dll
 sources = src/**/*.cpp

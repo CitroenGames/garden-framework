@@ -126,6 +126,8 @@ echo [4/5] Setting up .garden file association...
 reg add "HKCU\Software\Classes\.garden" /ve /d "GardenProject" /f >nul
 reg add "HKCU\Software\Classes\GardenProject" /ve /d "Garden Project File" /f >nul
 reg add "HKCU\Software\Classes\GardenProject\shell\open\command" /ve /d "\"%INSTALL_DIR%\garden.exe\" \"%%1\"" /f >nul
+reg add "HKCU\Software\Classes\GardenProject\shell\generate" /ve /d "Generate Project Files" /f >nul
+reg add "HKCU\Software\Classes\GardenProject\shell\generate\command" /ve /d "\"%INSTALL_DIR%\garden.exe\" generate \"%%1\"" /f >nul
 echo   Associated .garden files with garden.exe
 
 :: ---- Step 5: Register this engine ----

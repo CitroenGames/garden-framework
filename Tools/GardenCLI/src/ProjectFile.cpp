@@ -31,6 +31,7 @@ bool loadGardenProject(const std::string& path, GardenProject& out)
     out.engine_version = j.value("engine_version", "");
     out.default_level = j.value("default_level", "");
     out.game_module = j.value("game_module", "");
+    out.buildscript = j.value("buildscript", "");
     return true;
 }
 
