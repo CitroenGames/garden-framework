@@ -1,0 +1,8 @@
+[project:meshoptimizer]
+type = lib
+std = 11
+sources = src/*.cpp
+headers = src/meshoptimizer.h
+includes = src
+public_includes = src
+multiprocessor = true
