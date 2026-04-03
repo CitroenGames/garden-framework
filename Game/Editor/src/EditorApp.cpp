@@ -70,6 +70,8 @@ bool EditorApp::initialize(RenderAPIType api_type)
     m_viewport.toolbar = &m_toolbar;
     m_viewport.show_toolbar = &m_show_toolbar;
 
+    m_navmesh_panel.registry = &m_world.registry;
+
     SDL_SetRelativeMouseMode(SDL_FALSE);
 
     m_running = true;
@@ -129,6 +131,9 @@ void EditorApp::run()
         if (m_state.show_grid && !m_state.isSimulationActive())
             renderGrid();
 
+        // NavMesh debug visualization (submit lines before scene render)
+        m_navmesh_panel.drawDebugVisualization();
+
         // --- Choose which camera to render with ---
         camera& render_camera = chooseRenderCamera();
 
@@ -179,6 +184,9 @@ void EditorApp::run()
 
             if (m_show_content_browser)
                 m_content_browser.draw();
+
+            if (m_show_navmesh_panel)
+                m_navmesh_panel.draw();
 
             // Viewport overlay (not docked, transparent)
             m_viewport_overlay.draw(m_state);
@@ -711,6 +719,7 @@ void EditorApp::renderMenuBar()
             ImGui::MenuItem("Console",         nullptr, &m_show_console);
             ImGui::MenuItem("Content Browser", nullptr, &m_show_content_browser);
             ImGui::MenuItem("Status Bar",      nullptr, &m_show_status_bar);
+            ImGui::MenuItem("NavMesh",         nullptr, &m_show_navmesh_panel);
             ImGui::Separator();
             ImGui::MenuItem("Viewport Stats",  nullptr, &m_state.show_viewport_stats);
             ImGui::MenuItem("Grid",            nullptr, &m_state.show_grid);

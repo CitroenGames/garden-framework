@@ -162,4 +162,14 @@ enum class RenderAPIType
     Headless
 };
 
+#ifdef __APPLE__
+constexpr RenderAPIType DefaultRenderAPI = RenderAPIType::Metal;
+#elif defined(_WIN32)
+constexpr RenderAPIType DefaultRenderAPI = RenderAPIType::D3D11;
+#elif defined(__linux__)
+constexpr RenderAPIType DefaultRenderAPI = RenderAPIType::Vulkan;
+#else
+constexpr RenderAPIType DefaultRenderAPI = RenderAPIType::OpenGL;
+#endif
+
 IRenderAPI* CreateRenderAPI(RenderAPIType type);

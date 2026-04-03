@@ -17,7 +17,7 @@ private:
     RenderAPIType api_type;
 
 public:
-    Application(int w = 1920, int h = 1080, int fps = 60, float field_of_view = 75.0f, RenderAPIType render_type = RenderAPIType::OpenGL)
+    Application(int w = 1920, int h = 1080, int fps = 60, float field_of_view = 75.0f, RenderAPIType render_type = DefaultRenderAPI)
         : window(nullptr), render_api(nullptr), width(w), height(h), target_fps(fps), fov(field_of_view), api_type(render_type)
     {
     }

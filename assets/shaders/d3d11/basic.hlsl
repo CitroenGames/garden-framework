@@ -128,7 +128,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     // CSM shadow
     int cascadeIndex = getCascadeIndex(input.viewDepth);
     float shadow = ShadowCalculation(cascadeIndex, input.fragPos, input.normal);
-    float3 lighting = ambient + (1.0 - shadow) * diffuse;
+    float3 lighting = ambient + shadow * diffuse;
 
     float4 texColor;
     if (uUseTexture)

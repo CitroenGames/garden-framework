@@ -902,9 +902,20 @@ void D3D11RenderAPI::beginFrame()
         shadow_resources_dirty = false;
     }
 
-    if (fxaaEnabled)
+    if (viewportRTV)
     {
-        // Render to offscreen buffer
+        // Editor mode: always render to offscreen at viewport dimensions
+        context->OMSetRenderTargets(1, offscreenRTV.GetAddressOf(), viewportDSV.Get());
+
+        D3D11_VIEWPORT vp = {};
+        vp.Width = static_cast<float>(viewport_width_rt);
+        vp.Height = static_cast<float>(viewport_height_rt);
+        vp.MaxDepth = 1.0f;
+        context->RSSetViewports(1, &vp);
+    }
+    else if (fxaaEnabled)
+    {
+        // Standalone with FXAA: render to offscreen buffer
         context->OMSetRenderTargets(1, offscreenRTV.GetAddressOf(), depthStencilView.Get());
     }
     else
@@ -1025,15 +1036,22 @@ void D3D11RenderAPI::clear(const glm::vec3& color)
 
     float clearColor[4] = { color.r, color.g, color.b, 1.0f };
 
-    if (fxaaEnabled)
+    if (viewportRTV)
+    {
+        // Editor mode: always clear offscreen + viewport depth
+        context->ClearRenderTargetView(offscreenRTV.Get(), clearColor);
+        context->ClearDepthStencilView(viewportDSV.Get(), D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
+    }
+    else if (fxaaEnabled)
     {
         context->ClearRenderTargetView(offscreenRTV.Get(), clearColor);
+        context->ClearDepthStencilView(depthStencilView.Get(), D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
     }
     else
     {
         context->ClearRenderTargetView(renderTargetView.Get(), clearColor);
+        context->ClearDepthStencilView(depthStencilView.Get(), D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
     }
-    context->ClearDepthStencilView(depthStencilView.Get(), D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
 }
 
 void D3D11RenderAPI::setCamera(const camera& cam)
@@ -1542,7 +1560,14 @@ void D3D11RenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t 
         last_bound_vb = vb;
     }
 
-    context->Draw(static_cast<UINT>(vertex_count), static_cast<UINT>(start_vertex));
+    if (d3dMesh->isIndexed())
+    {
+        context->DrawIndexed(static_cast<UINT>(vertex_count), static_cast<UINT>(start_vertex), 0);
+    }
+    else
+    {
+        context->Draw(static_cast<UINT>(vertex_count), static_cast<UINT>(start_vertex));
+    }
 }
 
 void D3D11RenderAPI::setRenderState(const RenderState& state)
@@ -1777,7 +1802,9 @@ void D3D11RenderAPI::beginShadowPass(const glm::vec3& lightDir, const camera& ca
 
     calculateCascadeSplits(0.1f, 1000.0f);
 
-    float aspect = static_cast<float>(viewport_width) / static_cast<float>(std::max(viewport_height, 1));
+    float aspect = viewportRTV
+        ? static_cast<float>(viewport_width_rt) / static_cast<float>(std::max(viewport_height_rt, 1))
+        : static_cast<float>(viewport_width) / static_cast<float>(std::max(viewport_height, 1));
     for (int i = 0; i < NUM_CASCADES; i++)
     {
         lightSpaceMatrices[i] = getLightSpaceMatrixForCascade(i, lightDir, view_matrix, field_of_view, aspect);
@@ -1830,22 +1857,29 @@ void D3D11RenderAPI::endShadowPass()
 {
     in_shadow_pass = false;
 
-    // Restore main viewport
+    // Restore main viewport and render target
     D3D11_VIEWPORT viewport = {};
-    viewport.Width = static_cast<float>(viewport_width);
-    viewport.Height = static_cast<float>(viewport_height);
     viewport.MinDepth = 0.0f;
     viewport.MaxDepth = 1.0f;
-    context->RSSetViewports(1, &viewport);
 
-    // Restore render target
-    if (fxaaEnabled)
+    if (viewportRTV)
     {
-        context->OMSetRenderTargets(1, offscreenRTV.GetAddressOf(), depthStencilView.Get());
+        // Editor mode: restore to offscreen at viewport dimensions
+        viewport.Width = static_cast<float>(viewport_width_rt);
+        viewport.Height = static_cast<float>(viewport_height_rt);
+        context->RSSetViewports(1, &viewport);
+        context->OMSetRenderTargets(1, offscreenRTV.GetAddressOf(), viewportDSV.Get());
     }
     else
     {
-        context->OMSetRenderTargets(1, renderTargetView.GetAddressOf(), depthStencilView.Get());
+        viewport.Width = static_cast<float>(viewport_width);
+        viewport.Height = static_cast<float>(viewport_height);
+        context->RSSetViewports(1, &viewport);
+
+        if (fxaaEnabled)
+            context->OMSetRenderTargets(1, offscreenRTV.GetAddressOf(), depthStencilView.Get());
+        else
+            context->OMSetRenderTargets(1, renderTargetView.GetAddressOf(), depthStencilView.Get());
     }
 
     context->RSSetState(rasterizerCullBack.Get());
@@ -2100,6 +2134,8 @@ void D3D11RenderAPI::createViewportResources(int w, int h)
     viewportTexture.Reset();
     viewportRTV.Reset();
     viewportSRV.Reset();
+    viewportDepthBuffer.Reset();
+    viewportDSV.Reset();
     viewport_width_rt = w;
     viewport_height_rt = h;
 
@@ -2136,6 +2172,36 @@ void D3D11RenderAPI::createViewportResources(int w, int h)
         viewportTexture.Reset();
         return;
     }
+
+    // Create viewport-sized depth stencil buffer
+    D3D11_TEXTURE2D_DESC depthDesc = {};
+    depthDesc.Width = w;
+    depthDesc.Height = h;
+    depthDesc.MipLevels = 1;
+    depthDesc.ArraySize = 1;
+    depthDesc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+    depthDesc.SampleDesc.Count = 1;
+    depthDesc.Usage = D3D11_USAGE_DEFAULT;
+    depthDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+
+    hr = device->CreateTexture2D(&depthDesc, nullptr, viewportDepthBuffer.GetAddressOf());
+    if (FAILED(hr))
+    {
+        LOG_ENGINE_ERROR("Failed to create viewport depth buffer");
+        return;
+    }
+
+    D3D11_DEPTH_STENCIL_VIEW_DESC dsvDesc = {};
+    dsvDesc.Format = depthDesc.Format;
+    dsvDesc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+
+    hr = device->CreateDepthStencilView(viewportDepthBuffer.Get(), &dsvDesc, viewportDSV.GetAddressOf());
+    if (FAILED(hr))
+    {
+        LOG_ENGINE_ERROR("Failed to create viewport DSV");
+        viewportDepthBuffer.Reset();
+        return;
+    }
 }
 
 void D3D11RenderAPI::setViewportSize(int width, int height)
@@ -2144,14 +2210,15 @@ void D3D11RenderAPI::setViewportSize(int width, int height)
     if (width == viewport_width_rt && height == viewport_height_rt) return;
     createViewportResources(width, height);
 
-    // Resize offscreen post-processing resources too
-    if (offscreenTexture)
-    {
-        offscreenTexture.Reset();
-        offscreenRTV.Reset();
-        offscreenSRV.Reset();
-        createPostProcessingResources(width, height);
-    }
+    // Resize offscreen post-processing resources to match viewport
+    offscreenTexture.Reset();
+    offscreenRTV.Reset();
+    offscreenSRV.Reset();
+    createPostProcessingResources(width, height);
+
+    // Update projection matrix for viewport aspect ratio
+    float ratio = static_cast<float>(width) / static_cast<float>(height);
+    projection_matrix = glm::perspectiveRH_ZO(glm::radians(field_of_view), ratio, 0.1f, 1000.0f);
 }
 
 void D3D11RenderAPI::endSceneRender()

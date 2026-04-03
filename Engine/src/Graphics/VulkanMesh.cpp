@@ -1,4 +1,5 @@
 #include "VulkanMesh.hpp"
+#include "VulkanRenderAPI.hpp"
 #include "Utils/Vertex.hpp"
 #include <cstring>
 #include <stdio.h>
@@ -42,8 +43,8 @@ void VulkanMesh::uploadMeshData(const vertex* vertices, size_t count)
         return;
     }
 
-    // Clean up existing buffer if any
-    if (vertex_buffer != VK_NULL_HANDLE)
+    // Clean up existing buffers
+    if (vertex_buffer != VK_NULL_HANDLE || index_buffer != VK_NULL_HANDLE)
     {
         cleanup();
     }
@@ -110,6 +111,120 @@ void VulkanMesh::uploadMeshData(const vertex* vertices, size_t count)
     uploaded = true;
 }
 
+void VulkanMesh::uploadIndexedMeshData(const vertex* vertices, size_t vert_count,
+                                       const uint32_t* indices, size_t idx_count)
+{
+    if (!allocator || !device)
+    {
+        printf("VulkanMesh::uploadIndexedMeshData - Vulkan handles not set!\n");
+        return;
+    }
+
+    // Clean up existing buffers
+    if (vertex_buffer != VK_NULL_HANDLE || index_buffer != VK_NULL_HANDLE)
+    {
+        cleanup();
+    }
+
+    if (vert_count == 0 || !vertices || idx_count == 0 || !indices)
+    {
+        vertex_count = 0;
+        uploaded = false;
+        return;
+    }
+
+    // --- Upload vertex buffer ---
+    VkDeviceSize vbSize = sizeof(vertex) * vert_count;
+
+    VkBuffer vbStaging;
+    VmaAllocation vbStagingAlloc;
+    VkBufferCreateInfo vbStagingInfo{};
+    vbStagingInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    vbStagingInfo.size = vbSize;
+    vbStagingInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    vbStagingInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    VmaAllocationCreateInfo stagingAllocInfo{};
+    stagingAllocInfo.usage = VMA_MEMORY_USAGE_CPU_ONLY;
+    stagingAllocInfo.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
+
+    VmaAllocationInfo vbStagingAllocResult;
+    if (vmaCreateBuffer(allocator, &vbStagingInfo, &stagingAllocInfo,
+                        &vbStaging, &vbStagingAlloc, &vbStagingAllocResult) != VK_SUCCESS)
+    {
+        printf("VulkanMesh::uploadIndexedMeshData - Failed to create VB staging buffer!\n");
+        return;
+    }
+    memcpy(vbStagingAllocResult.pMappedData, vertices, vbSize);
+
+    VkBufferCreateInfo vbInfo{};
+    vbInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    vbInfo.size = vbSize;
+    vbInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+    vbInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    VmaAllocationCreateInfo gpuAllocInfo{};
+    gpuAllocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+
+    if (vmaCreateBuffer(allocator, &vbInfo, &gpuAllocInfo,
+                        &vertex_buffer, &vertex_allocation, nullptr) != VK_SUCCESS)
+    {
+        printf("VulkanMesh::uploadIndexedMeshData - Failed to create vertex buffer!\n");
+        vmaDestroyBuffer(allocator, vbStaging, vbStagingAlloc);
+        return;
+    }
+    copyBuffer(vbStaging, vertex_buffer, vbSize);
+    vmaDestroyBuffer(allocator, vbStaging, vbStagingAlloc);
+
+    // --- Upload index buffer ---
+    VkDeviceSize ibSize = sizeof(uint32_t) * idx_count;
+
+    VkBuffer ibStaging;
+    VmaAllocation ibStagingAlloc;
+    VkBufferCreateInfo ibStagingInfo{};
+    ibStagingInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    ibStagingInfo.size = ibSize;
+    ibStagingInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    ibStagingInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    VmaAllocationInfo ibStagingAllocResult;
+    if (vmaCreateBuffer(allocator, &ibStagingInfo, &stagingAllocInfo,
+                        &ibStaging, &ibStagingAlloc, &ibStagingAllocResult) != VK_SUCCESS)
+    {
+        printf("VulkanMesh::uploadIndexedMeshData - Failed to create IB staging buffer!\n");
+        // Vertex buffer was already created, clean it up
+        vmaDestroyBuffer(allocator, vertex_buffer, vertex_allocation);
+        vertex_buffer = VK_NULL_HANDLE;
+        vertex_allocation = nullptr;
+        return;
+    }
+    memcpy(ibStagingAllocResult.pMappedData, indices, ibSize);
+
+    VkBufferCreateInfo ibInfo{};
+    ibInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    ibInfo.size = ibSize;
+    ibInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+    ibInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    if (vmaCreateBuffer(allocator, &ibInfo, &gpuAllocInfo,
+                        &index_buffer, &index_allocation, nullptr) != VK_SUCCESS)
+    {
+        printf("VulkanMesh::uploadIndexedMeshData - Failed to create index buffer!\n");
+        vmaDestroyBuffer(allocator, ibStaging, ibStagingAlloc);
+        vmaDestroyBuffer(allocator, vertex_buffer, vertex_allocation);
+        vertex_buffer = VK_NULL_HANDLE;
+        vertex_allocation = nullptr;
+        return;
+    }
+    copyBuffer(ibStaging, index_buffer, ibSize);
+    vmaDestroyBuffer(allocator, ibStaging, ibStagingAlloc);
+
+    vertex_count = vert_count;
+    index_count_ = idx_count;
+    indexed_ = true;
+    uploaded = true;
+}
+
 void VulkanMesh::updateMeshData(const vertex* vertices, size_t count, size_t offset)
 {
     if (!allocator || !device || !uploaded || vertex_buffer == VK_NULL_HANDLE)
@@ -160,7 +275,7 @@ void VulkanMesh::updateMeshData(const vertex* vertices, size_t count, size_t off
     allocInfo.commandBufferCount = 1;
 
     VkCommandBuffer commandBuffer;
-    vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer);
+    VK_CHECK(vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer));
 
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -180,7 +295,7 @@ void VulkanMesh::updateMeshData(const vertex* vertices, size_t count, size_t off
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &commandBuffer;
 
-    vkQueueSubmit(graphics_queue, 1, &submitInfo, transfer_fence);
+    VK_CHECK(vkQueueSubmit(graphics_queue, 1, &submitInfo, transfer_fence));
     {
         VkResult r = vkWaitForFences(device, 1, &transfer_fence, VK_TRUE, 5'000'000'000ULL);
         if (r == VK_TIMEOUT)
@@ -205,7 +320,7 @@ void VulkanMesh::copyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize
     allocInfo.commandBufferCount = 1;
 
     VkCommandBuffer commandBuffer;
-    vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer);
+    VK_CHECK(vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer));
 
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -223,7 +338,7 @@ void VulkanMesh::copyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &commandBuffer;
 
-    vkQueueSubmit(graphics_queue, 1, &submitInfo, transfer_fence);
+    VK_CHECK(vkQueueSubmit(graphics_queue, 1, &submitInfo, transfer_fence));
     {
         VkResult r = vkWaitForFences(device, 1, &transfer_fence, VK_TRUE, 5'000'000'000ULL);
         if (r == VK_TIMEOUT)
@@ -244,11 +359,19 @@ void VulkanMesh::cleanup()
         vertex_buffer = VK_NULL_HANDLE;
         vertex_allocation = nullptr;
     }
+    if (index_buffer != VK_NULL_HANDLE && allocator != nullptr)
+    {
+        vmaDestroyBuffer(allocator, index_buffer, index_allocation);
+        index_buffer = VK_NULL_HANDLE;
+        index_allocation = nullptr;
+    }
     if (transfer_fence != VK_NULL_HANDLE && device != VK_NULL_HANDLE)
     {
         vkDestroyFence(device, transfer_fence, nullptr);
         transfer_fence = VK_NULL_HANDLE;
     }
     vertex_count = 0;
+    index_count_ = 0;
+    indexed_ = false;
     uploaded = false;
 }

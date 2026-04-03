@@ -23,6 +23,10 @@ static RenderAPIType parseRenderAPI(int argc, char* argv[])
     }
 #ifdef __APPLE__
     return RenderAPIType::Metal;
+#elif defined(_WIN32)
+    return RenderAPIType::D3D11;
+#elif defined(__linux__)
+    return RenderAPIType::Vulkan;
 #else
     return RenderAPIType::OpenGL;
 #endif

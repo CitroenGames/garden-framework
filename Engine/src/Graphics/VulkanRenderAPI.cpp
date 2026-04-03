@@ -7,6 +7,7 @@
 #include <fstream>
 #include <cstring>
 #include <algorithm>
+#include <filesystem>
 
 // SDL Vulkan headers
 #include <SDL.h>
@@ -247,10 +248,18 @@ void VulkanRenderAPI::shutdown()
     uniform_buffer_allocations.clear();
     uniform_buffer_mapped.clear();
 
-    // Clean up descriptor pool
-    if (descriptor_pool != VK_NULL_HANDLE) {
-        vkDestroyDescriptorPool(device, descriptor_pool, nullptr);
-        descriptor_pool = VK_NULL_HANDLE;
+    // Clean up descriptor pools
+    if (global_descriptor_pool != VK_NULL_HANDLE) {
+        vkDestroyDescriptorPool(device, global_descriptor_pool, nullptr);
+        global_descriptor_pool = VK_NULL_HANDLE;
+    }
+    for (int f = 0; f < MAX_FRAMES_IN_FLIGHT; f++) {
+        for (auto pool : frame_descriptor_state[f].pools) {
+            vkDestroyDescriptorPool(device, pool, nullptr);
+        }
+        frame_descriptor_state[f].pools.clear();
+        frame_descriptor_state[f].current_pool = 0;
+        frame_descriptor_state[f].sets_allocated_in_pool = 0;
     }
 
     // Clean up descriptor set layout
@@ -889,7 +898,7 @@ bool VulkanRenderAPI::loadPipelineCache()
         cacheData.clear();
         cacheInfo.initialDataSize = 0;
         cacheInfo.pInitialData = nullptr;
-        std::remove("pipeline_cache.bin");
+        std::filesystem::remove("pipeline_cache.bin");
         if (vkCreatePipelineCache(device, &cacheInfo, nullptr, &vk_pipeline_cache) != VK_SUCCESS) {
             LOG_ENGINE_ERROR("[Vulkan] Failed to create empty pipeline cache.");
             return false;
@@ -1178,27 +1187,56 @@ bool VulkanRenderAPI::createGraphicsPipeline()
 
 bool VulkanRenderAPI::createDescriptorPool()
 {
-    // Calculate total sets needed: per-frame sets + per-draw sets for each frame
-    uint32_t totalSets = MAX_FRAMES_IN_FLIGHT + (MAX_FRAMES_IN_FLIGHT * MAX_DESCRIPTOR_SETS_PER_FRAME);
+    // Create a small dedicated pool for per-frame global descriptor sets
+    uint32_t globalSets = MAX_FRAMES_IN_FLIGHT;
 
+    std::array<VkDescriptorPoolSize, 2> globalPoolSizes{};
+    globalPoolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    globalPoolSizes[0].descriptorCount = globalSets;
+    globalPoolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    globalPoolSizes[1].descriptorCount = globalSets * 2;
+
+    VkDescriptorPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    poolInfo.poolSizeCount = static_cast<uint32_t>(globalPoolSizes.size());
+    poolInfo.pPoolSizes = globalPoolSizes.data();
+    poolInfo.maxSets = globalSets;
+
+    if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &global_descriptor_pool) != VK_SUCCESS) {
+        printf("Failed to create global descriptor pool\n");
+        return false;
+    }
+
+    // Create initial per-draw pool for each frame
+    for (int f = 0; f < MAX_FRAMES_IN_FLIGHT; f++) {
+        VkDescriptorPool pool = createPerDrawDescriptorPool();
+        if (pool == VK_NULL_HANDLE) return false;
+        frame_descriptor_state[f].pools.push_back(pool);
+    }
+
+    return true;
+}
+
+VkDescriptorPool VulkanRenderAPI::createPerDrawDescriptorPool()
+{
     std::array<VkDescriptorPoolSize, 2> poolSizes{};
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    poolSizes[0].descriptorCount = totalSets;
+    poolSizes[0].descriptorCount = SETS_PER_POOL;
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSizes[1].descriptorCount = totalSets * 2;  // texture + shadow map per set
+    poolSizes[1].descriptorCount = SETS_PER_POOL * 2; // texture + shadow map
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
     poolInfo.pPoolSizes = poolSizes.data();
-    poolInfo.maxSets = totalSets;
+    poolInfo.maxSets = SETS_PER_POOL;
 
-    if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &descriptor_pool) != VK_SUCCESS) {
-        printf("Failed to create descriptor pool\n");
-        return false;
+    VkDescriptorPool pool = VK_NULL_HANDLE;
+    if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &pool) != VK_SUCCESS) {
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create per-draw descriptor pool");
+        return VK_NULL_HANDLE;
     }
-
-    return true;
+    return pool;
 }
 
 bool VulkanRenderAPI::createUniformBuffers()
@@ -1234,21 +1272,22 @@ bool VulkanRenderAPI::createUniformBuffers()
 
 bool VulkanRenderAPI::createDescriptorSets()
 {
+    // Allocate per-frame global descriptor sets from the dedicated pool
     std::vector<VkDescriptorSetLayout> layouts(MAX_FRAMES_IN_FLIGHT, descriptor_set_layout);
 
     VkDescriptorSetAllocateInfo allocInfo{};
     allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    allocInfo.descriptorPool = descriptor_pool;
+    allocInfo.descriptorPool = global_descriptor_pool;
     allocInfo.descriptorSetCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
     allocInfo.pSetLayouts = layouts.data();
 
     descriptor_sets.resize(MAX_FRAMES_IN_FLIGHT);
     if (vkAllocateDescriptorSets(device, &allocInfo, descriptor_sets.data()) != VK_SUCCESS) {
-        printf("Failed to allocate descriptor sets\n");
+        printf("Failed to allocate global descriptor sets\n");
         return false;
     }
 
-    // Initial descriptor set update (will be updated per-frame with actual textures)
+    // Write UBO binding to each global descriptor set
     for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         VkDescriptorBufferInfo bufferInfo{};
         bufferInfo.buffer = uniform_buffers[i];
@@ -1267,48 +1306,112 @@ bool VulkanRenderAPI::createDescriptorSets()
         vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
     }
 
-    // Allocate per-draw descriptor sets for handling multiple textures per frame
-    uint32_t perDrawSetCount = MAX_FRAMES_IN_FLIGHT * MAX_DESCRIPTOR_SETS_PER_FRAME;
-    std::vector<VkDescriptorSetLayout> perDrawLayouts(perDrawSetCount, descriptor_set_layout);
-
-    VkDescriptorSetAllocateInfo perDrawAllocInfo{};
-    perDrawAllocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    perDrawAllocInfo.descriptorPool = descriptor_pool;
-    perDrawAllocInfo.descriptorSetCount = perDrawSetCount;
-    perDrawAllocInfo.pSetLayouts = perDrawLayouts.data();
-
-    per_draw_descriptor_sets.resize(perDrawSetCount);
-    if (vkAllocateDescriptorSets(device, &perDrawAllocInfo, per_draw_descriptor_sets.data()) != VK_SUCCESS) {
-        printf("Failed to allocate per-draw descriptor sets\n");
-        return false;
-    }
-
-    // Initialize per-draw descriptor sets with UBO bindings
-    // Each frame's draw sets share that frame's UBO
-    for (uint32_t frame = 0; frame < MAX_FRAMES_IN_FLIGHT; frame++) {
-        VkDescriptorBufferInfo bufferInfo{};
-        bufferInfo.buffer = uniform_buffers[frame];
-        bufferInfo.offset = 0;
-        bufferInfo.range = sizeof(GlobalUBO);
-
-        for (uint32_t i = 0; i < MAX_DESCRIPTOR_SETS_PER_FRAME; i++) {
-            uint32_t setIndex = frame * MAX_DESCRIPTOR_SETS_PER_FRAME + i;
-
-            VkWriteDescriptorSet descriptorWrite{};
-            descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            descriptorWrite.dstSet = per_draw_descriptor_sets[setIndex];
-            descriptorWrite.dstBinding = 0;
-            descriptorWrite.dstArrayElement = 0;
-            descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-            descriptorWrite.descriptorCount = 1;
-            descriptorWrite.pBufferInfo = &bufferInfo;
-
-            vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
-        }
-    }
-
-    printf("Allocated %u per-draw descriptor sets\n", perDrawSetCount);
+    // Per-draw descriptor sets are allocated on demand in getOrAllocateDescriptorSet()
+    printf("Descriptor sets initialized (per-draw pools: dynamic growth)\n");
     return true;
+}
+
+VkDescriptorSet VulkanRenderAPI::allocateFromPerDrawPool(uint32_t frameIndex)
+{
+    auto& state = frame_descriptor_state[frameIndex];
+
+    // If current pool is full, create a new one
+    if (state.sets_allocated_in_pool >= SETS_PER_POOL) {
+        state.current_pool++;
+        if (state.current_pool >= state.pools.size()) {
+            VkDescriptorPool newPool = createPerDrawDescriptorPool();
+            if (newPool == VK_NULL_HANDLE) return VK_NULL_HANDLE;
+            state.pools.push_back(newPool);
+
+            uint32_t totalSets = static_cast<uint32_t>(state.pools.size()) * SETS_PER_POOL;
+            if (!descriptor_limit_warned && totalSets > 2048) {
+                LOG_ENGINE_WARN("[Vulkan] Over 2048 descriptor sets allocated this frame -- possible leak?");
+                descriptor_limit_warned = true;
+            }
+        }
+        state.sets_allocated_in_pool = 0;
+    }
+
+    VkDescriptorSetLayout layout = descriptor_set_layout;
+    VkDescriptorSetAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocInfo.descriptorPool = state.pools[state.current_pool];
+    allocInfo.descriptorSetCount = 1;
+    allocInfo.pSetLayouts = &layout;
+
+    VkDescriptorSet ds = VK_NULL_HANDLE;
+    VkResult result = vkAllocateDescriptorSets(device, &allocInfo, &ds);
+    if (result != VK_SUCCESS) {
+        LOG_ENGINE_ERROR("[Vulkan] Failed to allocate per-draw descriptor set: {}", vkResultToString(result));
+        return VK_NULL_HANDLE;
+    }
+
+    state.sets_allocated_in_pool++;
+    return ds;
+}
+
+void VulkanRenderAPI::initializeDescriptorSet(VkDescriptorSet ds, uint32_t frameIndex, TextureHandle texture)
+{
+    // Write UBO (binding 0)
+    VkDescriptorBufferInfo bufferInfo{};
+    bufferInfo.buffer = uniform_buffers[frameIndex];
+    bufferInfo.offset = 0;
+    bufferInfo.range = sizeof(GlobalUBO);
+
+    // Write texture (binding 1)
+    VkDescriptorImageInfo imageInfo{};
+    if (texture != INVALID_TEXTURE && textures.count(texture) > 0) {
+        const VulkanTexture& tex = textures[texture];
+        imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        imageInfo.imageView = tex.imageView;
+        imageInfo.sampler = tex.sampler;
+    } else {
+        imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        imageInfo.imageView = default_texture.imageView;
+        imageInfo.sampler = default_texture.sampler;
+    }
+
+    std::array<VkWriteDescriptorSet, 2> writes{};
+
+    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[0].dstSet = ds;
+    writes[0].dstBinding = 0;
+    writes[0].dstArrayElement = 0;
+    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    writes[0].descriptorCount = 1;
+    writes[0].pBufferInfo = &bufferInfo;
+
+    writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[1].dstSet = ds;
+    writes[1].dstBinding = 1;
+    writes[1].dstArrayElement = 0;
+    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[1].descriptorCount = 1;
+    writes[1].pImageInfo = &imageInfo;
+
+    // Write shadow map (binding 2) if available
+    VkDescriptorImageInfo shadowImageInfo{};
+    bool hasShadowMap = (shadow_map_view != VK_NULL_HANDLE && shadow_sampler != VK_NULL_HANDLE);
+    if (hasShadowMap) {
+        shadowImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        shadowImageInfo.imageView = shadow_map_view;
+        shadowImageInfo.sampler = shadow_sampler;
+
+        VkWriteDescriptorSet shadowWrite{};
+        shadowWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        shadowWrite.dstSet = ds;
+        shadowWrite.dstBinding = 2;
+        shadowWrite.dstArrayElement = 0;
+        shadowWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        shadowWrite.descriptorCount = 1;
+        shadowWrite.pImageInfo = &shadowImageInfo;
+
+        // Write all 3 bindings together
+        std::array<VkWriteDescriptorSet, 3> allWrites = { writes[0], writes[1], shadowWrite };
+        vkUpdateDescriptorSets(device, static_cast<uint32_t>(allWrites.size()), allWrites.data(), 0, nullptr);
+    } else {
+        vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+    }
 }
 
 bool VulkanRenderAPI::createDefaultTexture()
@@ -1340,8 +1443,12 @@ bool VulkanRenderAPI::createDefaultTexture()
     VmaAllocationCreateInfo imageAllocInfo{};
     imageAllocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
 
-    vmaCreateImage(vma_allocator, &imageInfo, &imageAllocInfo,
+    VkResult imgResult = vmaCreateImage(vma_allocator, &imageInfo, &imageAllocInfo,
                   &default_texture.image, &default_texture.allocation, nullptr);
+    if (imgResult != VK_SUCCESS) {
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create default texture image: {}", vkResultToString(imgResult));
+        return false;
+    }
 
     default_texture.width = 1;
     default_texture.height = 1;
@@ -1366,7 +1473,14 @@ bool VulkanRenderAPI::createDefaultTexture()
     viewInfo.subresourceRange.baseArrayLayer = 0;
     viewInfo.subresourceRange.layerCount = 1;
 
-    vkCreateImageView(device, &viewInfo, nullptr, &default_texture.imageView);
+    VkResult viewResult = vkCreateImageView(device, &viewInfo, nullptr, &default_texture.imageView);
+    if (viewResult != VK_SUCCESS) {
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create default texture image view: {}", vkResultToString(viewResult));
+        vmaDestroyImage(vma_allocator, default_texture.image, default_texture.allocation);
+        default_texture.image = VK_NULL_HANDLE;
+        default_texture.allocation = nullptr;
+        return false;
+    }
 
     // Create sampler via cache
     SamplerKey defaultSamplerKey{};
@@ -1385,11 +1499,7 @@ bool VulkanRenderAPI::createDefaultTexture()
     defaultSamplerKey.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
     default_texture.sampler = sampler_cache.getOrCreate(defaultSamplerKey);
 
-    // Update all descriptor sets with default texture
-    for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        updateDescriptorSet(i, INVALID_TEXTURE);
-    }
-
+    // Per-draw descriptor sets are now allocated on demand -- no pre-initialization needed
     printf("Default texture created\n");
     return true;
 }
@@ -1881,7 +1991,7 @@ bool VulkanRenderAPI::createShadowResources()
         vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
     }
 
-    // Update main descriptor sets with shadow map at binding 2
+    // Update global descriptor sets with shadow map at binding 2
     for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         VkDescriptorImageInfo shadowImageInfo{};
         shadowImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -1900,24 +2010,7 @@ bool VulkanRenderAPI::createShadowResources()
         vkUpdateDescriptorSets(device, 1, &shadowWrite, 0, nullptr);
     }
 
-    // Also update all per-draw descriptor sets with shadow map
-    VkDescriptorImageInfo shadowImageInfo{};
-    shadowImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    shadowImageInfo.imageView = shadow_map_view;
-    shadowImageInfo.sampler = shadow_sampler;
-
-    for (uint32_t i = 0; i < per_draw_descriptor_sets.size(); i++) {
-        VkWriteDescriptorSet shadowWrite{};
-        shadowWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        shadowWrite.dstSet = per_draw_descriptor_sets[i];
-        shadowWrite.dstBinding = 2;
-        shadowWrite.dstArrayElement = 0;
-        shadowWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        shadowWrite.descriptorCount = 1;
-        shadowWrite.pImageInfo = &shadowImageInfo;
-
-        vkUpdateDescriptorSets(device, 1, &shadowWrite, 0, nullptr);
-    }
+    // Per-draw descriptor sets get shadow map written in initializeDescriptorSet() on demand
 
     printf("Shadow resources created (%dx%d, %d cascades)\n", currentShadowSize, currentShadowSize, NUM_CASCADES);
     return true;
@@ -2980,8 +3073,8 @@ void VulkanRenderAPI::recreateOffscreenResources()
     VmaAllocationCreateInfo imageAllocInfo{};
     imageAllocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
 
-    vmaCreateImage(vma_allocator, &imageInfo, &imageAllocInfo,
-                   &offscreen_image, &offscreen_allocation, nullptr);
+    VK_CHECK(vmaCreateImage(vma_allocator, &imageInfo, &imageAllocInfo,
+                   &offscreen_image, &offscreen_allocation, nullptr));
 
     VkImageViewCreateInfo viewInfo{};
     viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -2994,7 +3087,7 @@ void VulkanRenderAPI::recreateOffscreenResources()
     viewInfo.subresourceRange.baseArrayLayer = 0;
     viewInfo.subresourceRange.layerCount = 1;
 
-    vkCreateImageView(device, &viewInfo, nullptr, &offscreen_view);
+    VK_CHECK(vkCreateImageView(device, &viewInfo, nullptr, &offscreen_view));
 
     // Create offscreen depth image
     VkImageCreateInfo depthImageInfo{};
@@ -3011,8 +3104,8 @@ void VulkanRenderAPI::recreateOffscreenResources()
     depthImageInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
     depthImageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
-    vmaCreateImage(vma_allocator, &depthImageInfo, &imageAllocInfo,
-                   &offscreen_depth_image, &offscreen_depth_allocation, nullptr);
+    VK_CHECK(vmaCreateImage(vma_allocator, &depthImageInfo, &imageAllocInfo,
+                   &offscreen_depth_image, &offscreen_depth_allocation, nullptr));
 
     VkImageViewCreateInfo depthViewInfo{};
     depthViewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -3025,7 +3118,7 @@ void VulkanRenderAPI::recreateOffscreenResources()
     depthViewInfo.subresourceRange.baseArrayLayer = 0;
     depthViewInfo.subresourceRange.layerCount = 1;
 
-    vkCreateImageView(device, &depthViewInfo, nullptr, &offscreen_depth_view);
+    VK_CHECK(vkCreateImageView(device, &depthViewInfo, nullptr, &offscreen_depth_view));
 
     // Recreate offscreen framebuffer
     offscreen_framebuffers.resize(1);
@@ -3039,7 +3132,7 @@ void VulkanRenderAPI::recreateOffscreenResources()
     framebufferInfo.height = swapchain_extent.height;
     framebufferInfo.layers = 1;
 
-    vkCreateFramebuffer(device, &framebufferInfo, nullptr, &offscreen_framebuffers[0]);
+    VK_CHECK(vkCreateFramebuffer(device, &framebufferInfo, nullptr, &offscreen_framebuffers[0]));
 
     // Update FXAA descriptor sets with new offscreen view
     for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
@@ -3199,7 +3292,7 @@ void VulkanRenderAPI::endSingleTimeCommands(VkCommandBuffer commandBuffer)
         si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
         si.commandBufferCount = 1;
         si.pCommandBuffers = &commandBuffer;
-        vkQueueSubmit(graphics_queue, 1, &si, VK_NULL_HANDLE);
+        VK_CHECK(vkQueueSubmit(graphics_queue, 1, &si, VK_NULL_HANDLE));
         vkQueueWaitIdle(graphics_queue);
         vkFreeCommandBuffers(device, command_pool, 1, &commandBuffer);
         return;
@@ -3210,13 +3303,26 @@ void VulkanRenderAPI::endSingleTimeCommands(VkCommandBuffer commandBuffer)
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &commandBuffer;
 
-    vkQueueSubmit(graphics_queue, 1, &submitInfo, fence);
+    VK_CHECK(vkQueueSubmit(graphics_queue, 1, &submitInfo, fence));
 
     VkResult r = vkWaitForFences(device, 1, &fence, VK_TRUE, FENCE_TIMEOUT_NS);
-    if (r == VK_TIMEOUT)
-        LOG_ENGINE_ERROR("[Vulkan] endSingleTimeCommands: fence timed out after 5s");
-    else if (r == VK_ERROR_DEVICE_LOST)
+    if (r == VK_TIMEOUT) {
+        // Retry once with doubled timeout
+        LOG_ENGINE_WARN("[Vulkan] endSingleTimeCommands: fence timed out after 5s, retrying...");
+        r = vkWaitForFences(device, 1, &fence, VK_TRUE, FENCE_TIMEOUT_NS * 2);
+        if (r == VK_TIMEOUT) {
+            LOG_ENGINE_ERROR("[Vulkan] endSingleTimeCommands: fence timed out after retry -- "
+                             "leaking fence/command buffer to avoid destroying in-use resources");
+            // Intentionally leak rather than destroy resources that may still be in-flight
+            return;
+        }
+    }
+    if (r == VK_ERROR_DEVICE_LOST) {
         LOG_ENGINE_ERROR("[Vulkan] endSingleTimeCommands: VK_ERROR_DEVICE_LOST");
+        device_lost = true;
+        // Don't destroy -- device state is undefined
+        return;
+    }
 
     vkDestroyFence(device, fence, nullptr);
     vkFreeCommandBuffers(device, command_pool, 1, &commandBuffer);
@@ -3381,68 +3487,34 @@ void VulkanRenderAPI::generateMipmaps(VkImage image, VkFormat imageFormat, int32
     endSingleTimeCommands(commandBuffer);
 }
 
-void VulkanRenderAPI::updateDescriptorSet(uint32_t frameIndex, TextureHandle texture)
+VkDescriptorSet VulkanRenderAPI::getOrAllocateDescriptorSet(uint32_t frameIndex, TextureHandle texture)
 {
-    // Check cache first - if we already have a descriptor set for this texture, reuse it
+    // Check cache first - reuse descriptor set for same texture within a frame
     auto cacheIt = texture_descriptor_cache.find(texture);
     if (cacheIt != texture_descriptor_cache.end()) {
-        // Cache hit - no need to update, just return (caller will use cached index)
-        return;
+        return cacheIt->second;
     }
 
-    // Cache miss - need to allocate a new descriptor set
-    uint32_t setIndex = frameIndex * MAX_DESCRIPTOR_SETS_PER_FRAME + current_descriptor_set_index;
-
-    // Early warning at 80% capacity
-    if (!descriptor_limit_warned && current_descriptor_set_index >= (MAX_DESCRIPTOR_SETS_PER_FRAME * 8 / 10)) {
-        LOG_ENGINE_WARN("[Vulkan] Approaching descriptor set limit ({}/{})",
-                       current_descriptor_set_index, MAX_DESCRIPTOR_SETS_PER_FRAME);
-        descriptor_limit_warned = true;
+    // Cache miss - allocate from per-frame pool (grows dynamically)
+    VkDescriptorSet ds = allocateFromPerDrawPool(frameIndex);
+    if (ds == VK_NULL_HANDLE) {
+        LOG_ENGINE_ERROR("[Vulkan] Failed to allocate descriptor set -- draw call skipped");
+        return VK_NULL_HANDLE;
     }
 
-    // Hard limit - do not wrap (would corrupt in-use descriptor sets)
-    if (current_descriptor_set_index >= MAX_DESCRIPTOR_SETS_PER_FRAME) {
-        LOG_ENGINE_ERROR("[Vulkan] Descriptor set pool exhausted ({} sets used). "
-                         "Draw call skipped. Increase MAX_DESCRIPTOR_SETS_PER_FRAME.",
-                         MAX_DESCRIPTOR_SETS_PER_FRAME);
-        return;
-    }
+    // Write UBO, texture, and shadow map bindings
+    initializeDescriptorSet(ds, frameIndex, texture);
 
-    VkDescriptorImageInfo imageInfo{};
-
-    if (texture != INVALID_TEXTURE && textures.count(texture) > 0) {
-        const VulkanTexture& tex = textures[texture];
-        imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        imageInfo.imageView = tex.imageView;
-        imageInfo.sampler = tex.sampler;
-    } else {
-        imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        imageInfo.imageView = default_texture.imageView;
-        imageInfo.sampler = default_texture.sampler;
-    }
-
-    VkWriteDescriptorSet descriptorWrite{};
-    descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    descriptorWrite.dstSet = per_draw_descriptor_sets[setIndex];
-    descriptorWrite.dstBinding = 1;
-    descriptorWrite.dstArrayElement = 0;
-    descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    descriptorWrite.descriptorCount = 1;
-    descriptorWrite.pImageInfo = &imageInfo;
-
-    vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
-
-    // Add to cache
-    texture_descriptor_cache[texture] = setIndex;
-
-    // Increment for next draw call
-    current_descriptor_set_index++;
+    // Cache for reuse within this frame
+    texture_descriptor_cache[texture] = ds;
+    return ds;
 }
 
 // Frame management
 void VulkanRenderAPI::prepareFrame()
 {
     if (frame_started) return;
+    if (device_lost) return;
 
     image_acquired = false;
 
@@ -3465,6 +3537,7 @@ void VulkanRenderAPI::prepareFrame()
     }
     if (fenceResult == VK_ERROR_DEVICE_LOST) {
         LOG_ENGINE_ERROR("[Vulkan] VK_ERROR_DEVICE_LOST on fence wait. Renderer shutting down.");
+        device_lost = true;
         frame_started = false;
         return;
     }
@@ -3491,8 +3564,13 @@ void VulkanRenderAPI::prepareFrame()
 
     vkResetFences(device, 1, &in_flight_fences[current_frame]);
 
-    // Reset per-draw descriptor set index and cache for this frame
-    current_descriptor_set_index = 0;
+    // Reset per-draw descriptor pools for this frame (O(1) per pool)
+    auto& descState = frame_descriptor_state[current_frame];
+    for (auto pool : descState.pools) {
+        vkResetDescriptorPool(device, pool, 0);
+    }
+    descState.current_pool = 0;
+    descState.sets_allocated_in_pool = 0;
     texture_descriptor_cache.clear();
     descriptor_limit_warned = false;
 
@@ -3686,7 +3764,7 @@ void VulkanRenderAPI::present()
     submitInfo.signalSemaphoreCount = 1;
     submitInfo.pSignalSemaphores = signalSemaphores;
 
-    vkQueueSubmit(graphics_queue, 1, &submitInfo, in_flight_fences[current_frame]);
+    VK_CHECK(vkQueueSubmit(graphics_queue, 1, &submitInfo, in_flight_fences[current_frame]));
 
     // Present
     VkPresentInfoKHR presentInfo{};
@@ -3854,8 +3932,12 @@ TextureHandle VulkanRenderAPI::loadTextureFromMemory(const uint8_t* pixels, int 
     VmaAllocationCreateInfo imageAllocInfo{};
     imageAllocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
 
-    vmaCreateImage(vma_allocator, &imageInfo, &imageAllocInfo,
+    VkResult imgResult = vmaCreateImage(vma_allocator, &imageInfo, &imageAllocInfo,
                   &texture.image, &texture.allocation, nullptr);
+    if (imgResult != VK_SUCCESS) {
+        LOG_ENGINE_ERROR("[Vulkan] loadTextureFromMemory: vmaCreateImage failed => {}", vkResultToString(imgResult));
+        return INVALID_TEXTURE;
+    }
 
     // Transition, copy, and generate mipmaps (uses shared staging_buffer)
     transitionImageLayout(texture.image, VK_FORMAT_R8G8B8A8_UNORM,
@@ -3881,7 +3963,12 @@ TextureHandle VulkanRenderAPI::loadTextureFromMemory(const uint8_t* pixels, int 
     viewInfo.subresourceRange.baseArrayLayer = 0;
     viewInfo.subresourceRange.layerCount = 1;
 
-    vkCreateImageView(device, &viewInfo, nullptr, &texture.imageView);
+    VkResult viewResult = vkCreateImageView(device, &viewInfo, nullptr, &texture.imageView);
+    if (viewResult != VK_SUCCESS) {
+        LOG_ENGINE_ERROR("[Vulkan] loadTextureFromMemory: vkCreateImageView failed => {}", vkResultToString(viewResult));
+        vmaDestroyImage(vma_allocator, texture.image, texture.allocation);
+        return INVALID_TEXTURE;
+    }
 
     // Create sampler via cache
     SamplerKey texSamplerKey{};
@@ -3965,7 +4052,12 @@ void VulkanRenderAPI::renderMesh(const mesh& m, const RenderState& state)
             vkCmdBindVertexBuffers(command_buffers[current_frame], 0, 1, vertexBuffers, offsets);
             last_bound_vertex_buffer = vb;
         }
-        vkCmdDraw(command_buffers[current_frame], static_cast<uint32_t>(vulkanMesh->getVertexCount()), 1, 0, 0);
+        if (vulkanMesh->isIndexed()) {
+            vkCmdBindIndexBuffer(command_buffers[current_frame], vulkanMesh->getIndexBuffer(), 0, VK_INDEX_TYPE_UINT32);
+            vkCmdDrawIndexed(command_buffers[current_frame], static_cast<uint32_t>(vulkanMesh->getIndexCount()), 1, 0, 0, 0);
+        } else {
+            vkCmdDraw(command_buffers[current_frame], static_cast<uint32_t>(vulkanMesh->getVertexCount()), 1, 0, 0);
+        }
         return;
     }
 
@@ -4008,15 +4100,12 @@ void VulkanRenderAPI::renderMesh(const mesh& m, const RenderState& state)
 
     memcpy(uniform_buffer_mapped[current_frame], &ubo, sizeof(ubo));
 
-    // Update descriptor set with current texture (uses per-draw pool with caching)
+    // Get or allocate descriptor set for this texture (dynamically growing pools)
     TextureHandle texHandle = (m.texture_set && m.texture != INVALID_TEXTURE) ? m.texture : INVALID_TEXTURE;
-    updateDescriptorSet(current_frame, texHandle);
-
-    // Get the descriptor set index from cache
-    uint32_t descSetIndex = texture_descriptor_cache[texHandle];
+    VkDescriptorSet ds = getOrAllocateDescriptorSet(current_frame, texHandle);
+    if (ds == VK_NULL_HANDLE) return; // Pool allocation failed
 
     // Bind the per-draw descriptor set (with redundant bind tracking)
-    VkDescriptorSet ds = per_draw_descriptor_sets[descSetIndex];
     if (ds != last_bound_descriptor_set) {
         vkCmdBindDescriptorSets(command_buffers[current_frame], VK_PIPELINE_BIND_POINT_GRAPHICS,
             pipeline_layout, 0, 1, &ds, 0, nullptr);
@@ -4036,7 +4125,12 @@ void VulkanRenderAPI::renderMesh(const mesh& m, const RenderState& state)
         last_bound_vertex_buffer = vb;
     }
 
-    vkCmdDraw(command_buffers[current_frame], static_cast<uint32_t>(vulkanMesh->getVertexCount()), 1, 0, 0);
+    if (vulkanMesh->isIndexed()) {
+        vkCmdBindIndexBuffer(command_buffers[current_frame], vulkanMesh->getIndexBuffer(), 0, VK_INDEX_TYPE_UINT32);
+        vkCmdDrawIndexed(command_buffers[current_frame], static_cast<uint32_t>(vulkanMesh->getIndexCount()), 1, 0, 0, 0);
+    } else {
+        vkCmdDraw(command_buffers[current_frame], static_cast<uint32_t>(vulkanMesh->getVertexCount()), 1, 0, 0);
+    }
 }
 
 void VulkanRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t vertex_count, const RenderState& state)
@@ -4070,8 +4164,14 @@ void VulkanRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t
             vkCmdBindVertexBuffers(command_buffers[current_frame], 0, 1, vertexBuffers, offsets);
             last_bound_vertex_buffer = vb;
         }
-        vkCmdDraw(command_buffers[current_frame], static_cast<uint32_t>(vertex_count), 1,
-                  static_cast<uint32_t>(start_vertex), 0);
+        if (vulkanMesh->isIndexed()) {
+            vkCmdBindIndexBuffer(command_buffers[current_frame], vulkanMesh->getIndexBuffer(), 0, VK_INDEX_TYPE_UINT32);
+            vkCmdDrawIndexed(command_buffers[current_frame], static_cast<uint32_t>(vertex_count), 1,
+                             static_cast<uint32_t>(start_vertex), 0, 0);
+        } else {
+            vkCmdDraw(command_buffers[current_frame], static_cast<uint32_t>(vertex_count), 1,
+                      static_cast<uint32_t>(start_vertex), 0);
+        }
         return;
     }
 
@@ -4114,14 +4214,11 @@ void VulkanRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t
 
     memcpy(uniform_buffer_mapped[current_frame], &ubo, sizeof(ubo));
 
-    // Update descriptor set with bound texture (uses per-draw pool with caching)
-    updateDescriptorSet(current_frame, bound_texture);
-
-    // Get the descriptor set index from cache
-    uint32_t descSetIndex = texture_descriptor_cache[bound_texture];
+    // Get or allocate descriptor set for bound texture (dynamically growing pools)
+    VkDescriptorSet ds = getOrAllocateDescriptorSet(current_frame, bound_texture);
+    if (ds == VK_NULL_HANDLE) return; // Pool allocation failed
 
     // Bind the per-draw descriptor set (with redundant bind tracking)
-    VkDescriptorSet ds = per_draw_descriptor_sets[descSetIndex];
     if (ds != last_bound_descriptor_set) {
         vkCmdBindDescriptorSets(command_buffers[current_frame], VK_PIPELINE_BIND_POINT_GRAPHICS,
             pipeline_layout, 0, 1, &ds, 0, nullptr);
@@ -4141,8 +4238,14 @@ void VulkanRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t
         last_bound_vertex_buffer = vb;
     }
 
-    vkCmdDraw(command_buffers[current_frame], static_cast<uint32_t>(vertex_count), 1,
-              static_cast<uint32_t>(start_vertex), 0);
+    if (vulkanMesh->isIndexed()) {
+        vkCmdBindIndexBuffer(command_buffers[current_frame], vulkanMesh->getIndexBuffer(), 0, VK_INDEX_TYPE_UINT32);
+        vkCmdDrawIndexed(command_buffers[current_frame], static_cast<uint32_t>(vertex_count), 1,
+                         static_cast<uint32_t>(start_vertex), 0, 0);
+    } else {
+        vkCmdDraw(command_buffers[current_frame], static_cast<uint32_t>(vertex_count), 1,
+                  static_cast<uint32_t>(start_vertex), 0);
+    }
 }
 
 void VulkanRenderAPI::setRenderState(const RenderState& state)
