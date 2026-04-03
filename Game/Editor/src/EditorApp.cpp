@@ -84,6 +84,9 @@ void EditorApp::run()
 
     while (m_running)
     {
+        // Drain Metal autorelease pool each frame to prevent ObjC temporary object leaks.
+        // On non-Metal backends this is a no-op passthrough.
+        m_app.getRenderAPI()->executeWithAutoreleasePool([&]() {
         Uint32 now = SDL_GetTicks();
         m_delta_time = (now - last_ticks) / 1000.0f;
         last_ticks = now;
@@ -198,6 +201,7 @@ void EditorApp::run()
 
         Uint32 frame_end = SDL_GetTicks();
         m_app.lockFramerate(now, frame_end);
+        }); // executeWithAutoreleasePool
     }
 }
 

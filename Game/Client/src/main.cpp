@@ -287,6 +287,9 @@ int main(int argc, char* argv[])
 
     while (1)
     {
+        // Drain Metal autorelease pool each frame to prevent ObjC temporary object leaks.
+        // On non-Metal backends this is a no-op passthrough.
+        render_api->executeWithAutoreleasePool([&]() {
         frame_start_ticks = SDL_GetTicks();
 
         // Start new ImGui frame
@@ -299,12 +302,12 @@ int main(int argc, char* argv[])
         if (input_handler.is_window_minimized())
         {
             SDL_Delay(10);
-            continue;
+            return;
         }
 
         // Process async loading jobs (GPU uploads must happen on main thread)
         Threading::JobSystem::get().processMainThreadJobs();
-        
+
         // Handle mouse motion for camera control (skip in UI mode)
         if (input_manager && !input_handler.is_ui_mode())
         {
@@ -580,6 +583,7 @@ int main(int argc, char* argv[])
             app.setTargetFPS(10000); // Effectively unlimited
         }
         app.lockFramerate(frame_start_ticks, frame_end_ticks);
+        }); // executeWithAutoreleasePool
     }
 
     crashHandler->Shutdown();

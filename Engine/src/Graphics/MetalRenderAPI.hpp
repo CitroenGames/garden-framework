@@ -69,6 +69,9 @@ public:
     virtual void setShadowQuality(int quality) override;
     virtual int getShadowQuality() const override;
 
+    // Autorelease pool support (drains ObjC temporaries each frame)
+    virtual void executeWithAutoreleasePool(std::function<void()> fn) override;
+
     // Metal-specific accessors for ImGui integration
     void* getDevice() const;           // Returns id<MTLDevice> as void*
     void* getCommandBuffer() const;    // Returns id<MTLCommandBuffer> as void*

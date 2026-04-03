@@ -7,6 +7,7 @@
 #include <glm/gtx/euler_angles.hpp>
 #include <string>
 #include <cstdint>
+#include <functional>
 
 // Forward declaration for SDL
 struct SDL_Window;
@@ -135,6 +136,10 @@ public:
     virtual bool isFXAAEnabled() const = 0;
     virtual void setShadowQuality(int quality) = 0;  // 0=Off, 1=Low(1024), 2=Medium(2048), 3=High(4096)
     virtual int getShadowQuality() const = 0;
+
+    // Autorelease pool support (Metal needs ObjC temporaries drained each frame)
+    // Default implementation just calls the function directly.
+    virtual void executeWithAutoreleasePool(std::function<void()> fn) { fn(); }
 
     // Offscreen viewport rendering (for editor)
     // Finalize scene render to an offscreen viewport texture (applies FXAA if enabled)
