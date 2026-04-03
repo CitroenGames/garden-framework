@@ -72,6 +72,12 @@ public:
     // Autorelease pool support (drains ObjC temporaries each frame)
     virtual void executeWithAutoreleasePool(std::function<void()> fn) override;
 
+    // Viewport rendering (for editor)
+    virtual void endSceneRender() override;
+    virtual uint64_t getViewportTextureID() override;
+    virtual void setViewportSize(int width, int height) override;
+    virtual void renderUI() override;
+
     // Metal-specific accessors for ImGui integration
     void* getDevice() const;           // Returns id<MTLDevice> as void*
     void* getCommandBuffer() const;    // Returns id<MTLCommandBuffer> as void*
