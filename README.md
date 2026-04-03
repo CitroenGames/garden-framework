@@ -2,14 +2,14 @@
 
 ## Description
 
-A cross-platform 3D game engine written in C++20, built as a foundation for FPS-style games. Supports OpenGL 4.6, Vulkan, Direct3D 11, and Metal rendering backends. Runs on Windows, Linux, and macOS.
+A cross-platform 3D game engine written in C++20, built as a foundation for FPS-style games. Supports Vulkan, Direct3D 11, and Metal rendering backends. Runs on Windows, Linux, and macOS.
 
 ![screenshot](screen.png)
 
 ## Features
 
 ### Rendering
-*   **Multi-API Renderer**: OpenGL 4.6, Vulkan, Direct3D 11, Metal, and a headless backend for dedicated servers.
+*   **Multi-API Renderer**: Vulkan, Direct3D 11, Metal, and a headless backend for dedicated servers.
 *   **Cascaded Shadow Maps (CSM)**: 4-cascade directional shadows with PCF filtering and cascade blending.
 *   **Frustum Culling**: BVH-accelerated spatial culling for efficient rendering.
 *   **Post-Processing**: FXAA anti-aliasing via offscreen framebuffer pipeline.
@@ -34,54 +34,9 @@ A cross-platform 3D game engine written in C++20, built as a foundation for FPS-
 *   **Data-Driven Levels**: JSON and binary level formats with per-entity transform, mesh, physics, and component configuration.
 *   **Model Support**: Loads `.gltf`/`.glb` (with materials and skeletal data) and `.obj` models.
 
-## Build System
+## Building
 
-This project uses **Sighmake** for build configuration.
-
-### Prerequisites
-
-#### Windows
-*   Visual Studio 2022 (MSVC)
-*   Sighmake (included or in path)
-*   Vulkan SDK
-
-#### Linux (Ubuntu)
-*   GCC/Clang
-*   Sighmake
-*   Vulkan SDK - Install with:
-    ```bash
-    sudo rm /etc/apt/sources.list.d/lunarg-vulkan-focal.list
-    wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc
-    sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-noble.list https://packages.lunarg.com/vulkan/lunarg-vulkan-noble.list
-    sudo apt update
-    sudo apt install vulkan-sdk
-    ```
-
-#### macOS
-*   Xcode Command Line Tools (`xcode-select --install`)
-*   Homebrew packages:
-    ```bash
-    brew install sdl2 vulkan-headers vulkan-loader molten-vk pkg-config
-    ```
-
-### How to Build
-
-#### Windows
-1.  Run `Generate SLN.bat` to generate the Visual Studio Solution.
-2.  Open the solution in Visual Studio.
-3.  Build and Run (Release x64 recommended).
-
-#### Linux
-1.  Run `./sighmake project.buildscript -g makefile` to generate build files.
-2.  Run `make -C build` to build.
-3.  Run `./run_vulkan.sh` to launch.
-
-#### macOS
-1.  Run `./sighmake_macos project.buildscript -g makefile` to generate build files.
-2.  Run `make -C build` to build.
-3.  Run from the repo root: `build/Debug/Game`
-    *   Uses Vulkan via MoltenVK (OpenGL is not supported on macOS).
-    *   Compile Vulkan shaders first: `./compile_shaders.sh`
+See [build.md](build.md) for prerequisites, build instructions, and running the engine.
 
 ## Level Format (.json)
 
