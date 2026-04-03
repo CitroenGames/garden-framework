@@ -115,7 +115,7 @@ struct MetalRenderAPIImpl {
     id<MTLLibrary> shaderLibrary = nil;
 
     // Per-frame
-    static constexpr int MAX_FRAMES_IN_FLIGHT = 2;
+    static constexpr int MAX_FRAMES_IN_FLIGHT = 3;
     id<MTLCommandBuffer> commandBuffer = nil;
     id<MTLRenderCommandEncoder> encoder = nil;
     id<CAMetalDrawable> currentDrawable = nil;
@@ -203,18 +203,42 @@ struct MetalRenderAPIImpl {
     id<MTLBuffer> lastBoundVertexBuffer = nil;
     TextureHandle lastBoundTextureHandle = INVALID_TEXTURE;
     MTLCullMode lastCullMode = MTLCullModeBack;
+    bool shadowMapBound = false;
 
-    // Per-frame UBO buffers (double-buffered to avoid GPU race)
-    id<MTLBuffer> frameUBOBuffers[MAX_FRAMES_IN_FLIGHT] = {nil, nil};
-    bool frameUBODirty = true;
+    // Per-frame UBO cache (built once, per-draw fields overwritten)
+    MetalGlobalUBO cachedPerFrameUBO{};
+    bool perFrameUBOReady = false;
 
     // Draw call counter for diagnostics
     uint32_t drawCallCount = 0;
     uint32_t frameNumber = 0;
 
+    // GPU error tracking for auto-recovery
+    uint32_t gpuErrorCount = 0;
+    static constexpr uint32_t MAX_GPU_ERRORS_BEFORE_RECOVERY = 5;
+
     // ========================================================================
     // Helper methods
     // ========================================================================
+
+    void updatePerFrameUBO()
+    {
+        if (perFrameUBOReady) return;
+        cachedPerFrameUBO = {};
+        cachedPerFrameUBO.view = viewMatrix;
+        cachedPerFrameUBO.projection = projectionMatrix;
+        for (int i = 0; i < NUM_CASCADES; i++)
+            cachedPerFrameUBO.lightSpaceMatrices[i] = lightSpaceMatrices[i];
+        cachedPerFrameUBO.cascadeSplits = glm::vec4(cascadeSplitDistances[0], cascadeSplitDistances[1],
+                                                     cascadeSplitDistances[2], cascadeSplitDistances[3]);
+        cachedPerFrameUBO.cascadeSplit4 = cascadeSplitDistances[4];
+        cachedPerFrameUBO.lightDir = lightDirection;
+        cachedPerFrameUBO.lightAmbient = lightAmbient;
+        cachedPerFrameUBO.cascadeCount = (shadowQuality > 0) ? NUM_CASCADES : 0;
+        cachedPerFrameUBO.lightDiffuse = lightDiffuse;
+        cachedPerFrameUBO.debugCascades = 0;
+        perFrameUBOReady = true;
+    }
 
     id<MTLTexture> createDepthTextureWithSize(uint32_t w, uint32_t h)
     {
@@ -576,7 +600,7 @@ struct MetalRenderAPIImpl {
         defaultSampler = [device newSamplerStateWithDescriptor:sampDesc];
     }
 
-    // Ensure command buffer and drawable are ready (called before shadow pass or beginFrame)
+    // Create command buffer only (drawable acquired separately, as late as possible)
     bool ensureCommandBuffer()
     {
         if (commandBuffer) return true;
@@ -584,18 +608,29 @@ struct MetalRenderAPIImpl {
         // Wait for a free frame slot
         dispatch_semaphore_wait(frameSemaphore, DISPATCH_TIME_FOREVER);
 
-        // Get next drawable
-        currentDrawable = [metalLayer nextDrawable];
-        if (!currentDrawable) {
-            dispatch_semaphore_signal(frameSemaphore);
-            return false;
-        }
-
         // Create command buffer with enhanced error reporting
         MTLCommandBufferDescriptor* desc = [[MTLCommandBufferDescriptor alloc] init];
         desc.errorOptions = MTLCommandBufferErrorOptionEncoderExecutionStatus;
         commandBuffer = [commandQueue commandBufferWithDescriptor:desc];
+        if (!commandBuffer) {
+            printf("[Metal] Failed to create command buffer\n");
+            dispatch_semaphore_signal(frameSemaphore);
+            return false;
+        }
         commandBuffer.label = @"Frame Command Buffer";
+        return true;
+    }
+
+    // Acquire drawable as late as possible to minimize compositor stalls
+    bool ensureDrawable()
+    {
+        if (currentDrawable) return true;
+
+        currentDrawable = [metalLayer nextDrawable];
+        if (!currentDrawable) {
+            printf("[Metal] Failed to acquire drawable\n");
+            return false;
+        }
         return true;
     }
 
@@ -734,7 +769,7 @@ bool MetalRenderAPI::initialize(WindowHandle window, int width, int height, floa
     impl->metalLayer = [CAMetalLayer layer];
     impl->metalLayer.device = impl->device;
     impl->metalLayer.pixelFormat = MTLPixelFormatBGRA8Unorm;
-    impl->metalLayer.framebufferOnly = NO; // Need to read back for FXAA
+    impl->metalLayer.framebufferOnly = YES; // Drawable is only written to (FXAA uses offscreenTexture)
     impl->metalLayer.drawableSize = CGSizeMake(width, height);
     [contentView setLayer:impl->metalLayer];
 
@@ -797,22 +832,20 @@ void MetalRenderAPI::shutdown()
     // Stop accepting new frames
     impl->frameStarted = false;
 
-    // Wait for any in-flight command buffers to complete
-    if (impl->commandBuffer) {
-        [impl->commandBuffer waitUntilCompleted];
-        impl->commandBuffer = nil;
-    }
-    impl->encoder = nil;
-    impl->currentDrawable = nil;
-    impl->mainPassActive = false;
-
-    // Wait for GPU to finish all frames
+    // Wait for GPU to finish all in-flight frames via semaphore drain
+    // (this is the correct synchronization — commandBuffer may already be nil after endFrame)
     for (int i = 0; i < MetalRenderAPIImpl::MAX_FRAMES_IN_FLIGHT; i++) {
         dispatch_semaphore_wait(impl->frameSemaphore, DISPATCH_TIME_FOREVER);
     }
     for (int i = 0; i < MetalRenderAPIImpl::MAX_FRAMES_IN_FLIGHT; i++) {
         dispatch_semaphore_signal(impl->frameSemaphore);
     }
+
+    // Now safe to release — all GPU work is complete
+    impl->commandBuffer = nil;
+    impl->encoder = nil;
+    impl->currentDrawable = nil;
+    impl->mainPassActive = false;
 
     // Release all textures
     impl->textures.clear();
@@ -842,6 +875,8 @@ void MetalRenderAPI::shutdown()
 
 void MetalRenderAPI::resize(int width, int height)
 {
+    if (width <= 0 || height <= 0) return;
+
     impl->viewportWidth = width;
     impl->viewportHeight = height;
 
@@ -860,6 +895,9 @@ void MetalRenderAPI::beginFrame()
 {
     // Ensure command buffer exists (may already be created by shadow pass)
     if (!impl->ensureCommandBuffer()) return;
+
+    // Acquire drawable as late as possible (after shadow passes)
+    if (!impl->ensureDrawable()) return;
 
     // If shadow pass already created the main render encoder (via endShadowPass), skip
     if (impl->mainPassActive && impl->encoder) {
@@ -898,6 +936,10 @@ void MetalRenderAPI::beginFrame()
     ImGui_ImplMetal_NewFrame(passDesc);
 
     impl->encoder = [impl->commandBuffer renderCommandEncoderWithDescriptor:passDesc];
+    if (!impl->encoder) {
+        printf("[Metal] beginFrame: Failed to create render encoder\n");
+        return;
+    }
     impl->encoder.label = @"Main Render Encoder";
     impl->mainPassActive = true;
 
@@ -922,7 +964,8 @@ void MetalRenderAPI::beginFrame()
     impl->lastBoundVertexBuffer = nil;
     impl->lastBoundTextureHandle = INVALID_TEXTURE;
     impl->lastCullMode = MTLCullModeBack;
-    impl->frameUBODirty = true;
+    impl->shadowMapBound = false;
+    impl->perFrameUBOReady = false;
     impl->drawCallCount = 0;
 
     impl->frameStarted = true;
@@ -957,33 +1000,37 @@ void MetalRenderAPI::endFrame()
         fxaaPass.colorAttachments[0].storeAction = MTLStoreActionStore;
 
         id<MTLRenderCommandEncoder> fxaaEncoder = [impl->commandBuffer renderCommandEncoderWithDescriptor:fxaaPass];
-        fxaaEncoder.label = @"FXAA Render Encoder";
+        if (!fxaaEncoder) {
+            printf("[Metal] endFrame: Failed to create FXAA encoder\n");
+        } else {
+            fxaaEncoder.label = @"FXAA Render Encoder";
 
-        [fxaaEncoder setRenderPipelineState:impl->fxaaPipeline];
+            [fxaaEncoder setRenderPipelineState:impl->fxaaPipeline];
 
-        MTLViewport viewport = {0, 0, (double)impl->viewportWidth, (double)impl->viewportHeight, 0, 1};
-        [fxaaEncoder setViewport:viewport];
+            MTLViewport viewport = {0, 0, (double)impl->viewportWidth, (double)impl->viewportHeight, 0, 1};
+            [fxaaEncoder setViewport:viewport];
 
-        // Bind offscreen texture as input
-        [fxaaEncoder setFragmentTexture:impl->offscreenTexture atIndex:0];
-        [fxaaEncoder setFragmentSamplerState:impl->defaultSampler atIndex:0];
+            // Bind offscreen texture as input
+            [fxaaEncoder setFragmentTexture:impl->offscreenTexture atIndex:0];
+            [fxaaEncoder setFragmentSamplerState:impl->defaultSampler atIndex:0];
 
-        // Push inverse screen size
-        MetalFXAAUniforms fxaaUniforms;
-        fxaaUniforms.inverseScreenSize = glm::vec2(1.0f / impl->viewportWidth, 1.0f / impl->viewportHeight);
-        [fxaaEncoder setFragmentBytes:&fxaaUniforms length:sizeof(fxaaUniforms) atIndex:0];
+            // Push inverse screen size
+            MetalFXAAUniforms fxaaUniforms;
+            fxaaUniforms.inverseScreenSize = glm::vec2(1.0f / impl->viewportWidth, 1.0f / impl->viewportHeight);
+            [fxaaEncoder setFragmentBytes:&fxaaUniforms length:sizeof(fxaaUniforms) atIndex:0];
 
-        // Draw fullscreen quad
-        [fxaaEncoder setVertexBuffer:impl->fxaaVertexBuffer offset:0 atIndex:0];
-        [fxaaEncoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+            // Draw fullscreen quad
+            [fxaaEncoder setVertexBuffer:impl->fxaaVertexBuffer offset:0 atIndex:0];
+            [fxaaEncoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
 
-        // Render ImGui overlay after FXAA
-        ImDrawData* drawData = ImGui::GetDrawData();
-        if (drawData && drawData->TotalVtxCount > 0) {
-            ImGui_ImplMetal_RenderDrawData(drawData, impl->commandBuffer, fxaaEncoder);
+            // Render ImGui overlay after FXAA
+            ImDrawData* drawData = ImGui::GetDrawData();
+            if (drawData && drawData->TotalVtxCount > 0) {
+                ImGui_ImplMetal_RenderDrawData(drawData, impl->commandBuffer, fxaaEncoder);
+            }
+
+            [fxaaEncoder endEncoding];
         }
-
-        [fxaaEncoder endEncoding];
     }
 
     // Present and commit
@@ -1002,9 +1049,14 @@ void MetalRenderAPI::endFrame()
     // Signal semaphore on completion and log GPU errors with enhanced info
     __block dispatch_semaphore_t sem = impl->frameSemaphore;
     __block uint32_t frameNum = impl->frameNumber;
+    __block uint32_t* errorCountPtr = &impl->gpuErrorCount;
+    __block id<MTLDevice> dev = impl->device;
+    __block id<MTLCommandQueue> __strong* queuePtr = &impl->commandQueue;
     [impl->commandBuffer addCompletedHandler:^(id<MTLCommandBuffer> buf) {
         if (buf.status == MTLCommandBufferStatusError) {
-            printf("[Metal] GPU Error (frame %u): %s\n", frameNum, [[buf.error localizedDescription] UTF8String]);
+            (*errorCountPtr)++;
+            printf("[Metal] GPU Error (frame %u, total errors: %u): %s\n",
+                   frameNum, *errorCountPtr, [[buf.error localizedDescription] UTF8String]);
 
             // Log per-encoder execution status
             if (@available(macOS 11.0, *)) {
@@ -1022,6 +1074,16 @@ void MetalRenderAPI::endFrame()
                 }
             }
             fflush(stdout);
+
+            // Auto-recover: recreate command queue after persistent errors
+            if (*errorCountPtr >= MetalRenderAPIImpl::MAX_GPU_ERRORS_BEFORE_RECOVERY) {
+                printf("[Metal] Too many consecutive GPU errors, recreating command queue\n");
+                *queuePtr = [dev newCommandQueue];
+                *errorCountPtr = 0;
+            }
+        } else {
+            // Reset error counter on successful frame
+            *errorCountPtr = 0;
         }
         dispatch_semaphore_signal(sem);
     }];
@@ -1233,7 +1295,16 @@ void MetalRenderAPI::renderMesh(const mesh& m, const RenderState& state)
         [impl->encoder setVertexBytes:&shadowUBO length:sizeof(shadowUBO) atIndex:1];
         [impl->encoder setVertexBytes:&impl->currentModelMatrix length:sizeof(glm::mat4) atIndex:2];
         [impl->encoder setVertexBuffer:vertexBuffer offset:0 atIndex:0];
-        [impl->encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:metalMesh->getVertexCount()];
+        if (metalMesh->isIndexed()) {
+            id<MTLBuffer> indexBuffer = (__bridge id<MTLBuffer>)metalMesh->getIndexBuffer();
+            [impl->encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+                                      indexCount:metalMesh->getIndexCount()
+                                       indexType:MTLIndexTypeUInt32
+                                     indexBuffer:indexBuffer
+                               indexBufferOffset:0];
+        } else {
+            [impl->encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:metalMesh->getVertexCount()];
+        }
         return;
     }
 
@@ -1267,21 +1338,9 @@ void MetalRenderAPI::renderMesh(const mesh& m, const RenderState& state)
         case CullMode::None:  [impl->encoder setCullMode:MTLCullModeNone]; break;
     }
 
-    // Build and set UBO
-    MetalGlobalUBO ubo{};
-    ubo.view = impl->viewMatrix;
-    ubo.projection = impl->projectionMatrix;
-    for (int i = 0; i < MetalRenderAPIImpl::NUM_CASCADES; i++) {
-        ubo.lightSpaceMatrices[i] = impl->lightSpaceMatrices[i];
-    }
-    ubo.cascadeSplits = glm::vec4(impl->cascadeSplitDistances[0], impl->cascadeSplitDistances[1],
-                                   impl->cascadeSplitDistances[2], impl->cascadeSplitDistances[3]);
-    ubo.cascadeSplit4 = impl->cascadeSplitDistances[4];
-    ubo.lightDir = impl->lightDirection;
-    ubo.lightAmbient = impl->lightAmbient;
-    ubo.cascadeCount = (impl->shadowQuality > 0) ? MetalRenderAPIImpl::NUM_CASCADES : 0;
-    ubo.lightDiffuse = impl->lightDiffuse;
-    ubo.debugCascades = 0;
+    // Build UBO from cached per-frame data, update per-draw fields
+    impl->updatePerFrameUBO();
+    MetalGlobalUBO ubo = impl->cachedPerFrameUBO;
     ubo.color = state.color;
     ubo.useTexture = (m.texture_set && m.texture != INVALID_TEXTURE) ? 1 : 0;
 
@@ -1302,30 +1361,46 @@ void MetalRenderAPI::renderMesh(const mesh& m, const RenderState& state)
         [impl->encoder setFragmentSamplerState:impl->defaultSampler atIndex:0];
     }
 
-    if (impl->shadowMapArray) {
+    if (impl->shadowMapArray && !impl->shadowMapBound) {
         [impl->encoder setFragmentTexture:impl->shadowMapArray atIndex:1];
         [impl->encoder setFragmentSamplerState:impl->shadowSampler atIndex:1];
+        impl->shadowMapBound = true;
     }
 
     // Draw
-    size_t bufLen = [vertexBuffer length];
-    size_t drawCount = metalMesh->getVertexCount();
-    size_t maxVertex = bufLen / sizeof(vertex);
-    if (drawCount > maxVertex) {
-        printf("[Metal] WARNING: draw count %zu exceeds buffer capacity %zu (buf=%p, len=%zu)\n",
-               drawCount, maxVertex, (__bridge void*)vertexBuffer, bufLen);
-        drawCount = maxVertex;
+    [impl->encoder setVertexBuffer:vertexBuffer offset:0 atIndex:0];
+    if (metalMesh->isIndexed()) {
+        id<MTLBuffer> indexBuffer = (__bridge id<MTLBuffer>)metalMesh->getIndexBuffer();
+        size_t idxCount = metalMesh->getIndexCount();
+        size_t maxIndex = [indexBuffer length] / sizeof(uint32_t);
+        if (idxCount > maxIndex) {
+            printf("[Metal] WARNING: index count %zu exceeds index buffer capacity %zu\n", idxCount, maxIndex);
+            idxCount = maxIndex;
+        }
+        [impl->encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+                                  indexCount:idxCount
+                                   indexType:MTLIndexTypeUInt32
+                                 indexBuffer:indexBuffer
+                           indexBufferOffset:0];
+    } else {
+        size_t bufLen = [vertexBuffer length];
+        size_t drawCount = metalMesh->getVertexCount();
+        size_t maxVertex = bufLen / sizeof(vertex);
+        if (drawCount > maxVertex) {
+            printf("[Metal] WARNING: draw count %zu exceeds buffer capacity %zu (buf=%p, len=%zu)\n",
+                   drawCount, maxVertex, (__bridge void*)vertexBuffer, bufLen);
+            drawCount = maxVertex;
+        }
+        [impl->encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:drawCount];
     }
 #ifdef _DEBUG
     static bool firstDraw = true;
     if (firstDraw) {
-        printf("[Metal] First draw: vertices=%zu, buffer=%p, bufLen=%zu bytes (%.1f MB)\n",
-               drawCount, (__bridge void*)vertexBuffer, bufLen, bufLen / (1024.0*1024.0));
+        printf("[Metal] First draw: vertices=%zu, indexed=%d, buffer=%p\n",
+               metalMesh->getVertexCount(), metalMesh->isIndexed(), (__bridge void*)vertexBuffer);
         firstDraw = false;
     }
 #endif
-    [impl->encoder setVertexBuffer:vertexBuffer offset:0 atIndex:0];
-    [impl->encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:drawCount];
     impl->drawCallCount++;
 }
 
@@ -1401,20 +1476,9 @@ void MetalRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t 
         impl->lastCullMode = cullMode;
     }
 
-    // Build UBO with per-draw fields included, use setVertexBytes (safe, no race conditions)
-    MetalGlobalUBO ubo{};
-    ubo.view = impl->viewMatrix;
-    ubo.projection = impl->projectionMatrix;
-    for (int i = 0; i < MetalRenderAPIImpl::NUM_CASCADES; i++)
-        ubo.lightSpaceMatrices[i] = impl->lightSpaceMatrices[i];
-    ubo.cascadeSplits = glm::vec4(impl->cascadeSplitDistances[0], impl->cascadeSplitDistances[1],
-                                   impl->cascadeSplitDistances[2], impl->cascadeSplitDistances[3]);
-    ubo.cascadeSplit4 = impl->cascadeSplitDistances[4];
-    ubo.lightDir = impl->lightDirection;
-    ubo.lightAmbient = impl->lightAmbient;
-    ubo.cascadeCount = (impl->shadowQuality > 0) ? MetalRenderAPIImpl::NUM_CASCADES : 0;
-    ubo.lightDiffuse = impl->lightDiffuse;
-    ubo.debugCascades = 0;
+    // Build UBO from cached per-frame data, update per-draw fields
+    impl->updatePerFrameUBO();
+    MetalGlobalUBO ubo = impl->cachedPerFrameUBO;
     ubo.color = state.color;
     ubo.useTexture = (impl->boundTexture != INVALID_TEXTURE) ? 1 : 0;
 
@@ -1438,10 +1502,11 @@ void MetalRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t 
         impl->lastBoundTextureHandle = texHandle;
     }
 
-    // Bind shadow map
-    if (impl->shadowMapArray) {
+    // Bind shadow map (once per encoder, tracked)
+    if (impl->shadowMapArray && !impl->shadowMapBound) {
         [impl->encoder setFragmentTexture:impl->shadowMapArray atIndex:1];
         [impl->encoder setFragmentSamplerState:impl->shadowSampler atIndex:1];
+        impl->shadowMapBound = true;
     }
 
     // Bind vertex buffer (with tracking)
@@ -1612,6 +1677,12 @@ void MetalRenderAPI::endShadowPass()
 
     impl->inShadowPass = false;
 
+    // Acquire drawable now (deferred from ensureCommandBuffer for late acquisition)
+    if (!impl->ensureDrawable()) {
+        printf("[Metal] endShadowPass: Failed to acquire drawable\n");
+        return;
+    }
+
     // Restart main render pass
     MTLRenderPassDescriptor* passDesc = [MTLRenderPassDescriptor renderPassDescriptor];
 
@@ -1632,6 +1703,11 @@ void MetalRenderAPI::endShadowPass()
     passDesc.depthAttachment.clearDepth = 1.0;
 
     impl->encoder = [impl->commandBuffer renderCommandEncoderWithDescriptor:passDesc];
+    if (!impl->encoder) {
+        printf("[Metal] endShadowPass: Failed to create main encoder\n");
+        impl->mainPassActive = false;
+        return;
+    }
     impl->encoder.label = @"Main Render Encoder (Post-Shadow)";
     impl->mainPassActive = true;
 
@@ -1646,6 +1722,8 @@ void MetalRenderAPI::endShadowPass()
     impl->lastBoundVertexBuffer = nil;
     impl->lastBoundTextureHandle = INVALID_TEXTURE;
     impl->lastCullMode = MTLCullModeBack;
+    impl->shadowMapBound = false;
+    impl->perFrameUBOReady = false;
     impl->drawCallCount = 0;
     [impl->encoder setCullMode:MTLCullModeBack];
     [impl->encoder setFrontFacingWinding:MTLWindingCounterClockwise];
@@ -1745,6 +1823,17 @@ void* MetalRenderAPI::getRenderPassDescriptor() const
 void* MetalRenderAPI::getRenderCommandEncoder() const
 {
     return (__bridge void*)impl->encoder;
+}
+
+// ============================================================================
+// Autorelease Pool
+// ============================================================================
+
+void MetalRenderAPI::executeWithAutoreleasePool(std::function<void()> fn)
+{
+    @autoreleasepool {
+        fn();
+    }
 }
 
 // ============================================================================
