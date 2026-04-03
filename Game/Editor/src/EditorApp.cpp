@@ -1,5 +1,6 @@
 #include "EditorApp.hpp"
 #include "ImGui/ImGuiManager.hpp"
+#include "UI/RmlUiManager.h"
 #include "Console/Console.hpp"
 #include "Console/ConVar.hpp"
 #include "Debug/DebugDraw.hpp"
@@ -50,6 +51,12 @@ bool EditorApp::initialize(RenderAPIType api_type)
     {
         LOG_ENGINE_FATAL("Failed to initialize ImGui");
         return false;
+    }
+
+    // Initialize RmlUi
+    if (!RmlUiManager::get().initialize(m_app.getWindow(), render_api, api_type))
+    {
+        LOG_ENGINE_WARN("Failed to initialize RmlUi - continuing without UI");
     }
 
     // Disable built-in console overlay since we have our own panel
@@ -200,6 +207,7 @@ void EditorApp::run()
 
         // --- Phase 2: Build ImGui UI ---
         ImGuiManager::get().newFrame();
+        RmlUiManager::get().beginFrame();
 
         renderDockspace();
 
@@ -295,6 +303,7 @@ void EditorApp::shutdown()
 
     m_world.registry.clear();
     Console::get().shutdown();
+    RmlUiManager::get().shutdown();
     ImGuiManager::get().shutdown();
     m_app.shutdown();
     EE::CLog::Shutdown();
@@ -1119,6 +1128,7 @@ bool EditorApp::runProjectBrowser()
         render_api->endSceneRender();
 
         ImGuiManager::get().newFrame();
+        RmlUiManager::get().beginFrame();
 
         ImGuiIO& io = ImGui::GetIO();
 

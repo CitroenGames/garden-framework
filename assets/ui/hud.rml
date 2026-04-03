@@ -1,0 +1,35 @@
+<rml>
+<head>
+    <link type="text/rcss" href="hud.rcss"/>
+</head>
+<body data-model="hud">
+    <!-- Top-left: FPS and position -->
+    <div id="info-panel">
+        <div class="label">FPS</div>
+        <div class="value fps" data-if="true">{{ fps }}</div>
+        <div class="label">POSITION</div>
+        <div class="value">{{ pos_x }}, {{ pos_y }}, {{ pos_z }}</div>
+        <div class="label">SPEED</div>
+        <div class="value">{{ speed }}</div>
+    </div>
+
+    <!-- Crosshair -->
+    <div id="crosshair">+</div>
+
+    <!-- Bottom-left: grounded status -->
+    <div id="status-bar">
+        <div class="status-text" data-if="grounded">
+            <span class="grounded">GROUNDED</span>
+        </div>
+        <div class="status-text" data-if="!grounded">
+            <span class="airborne">AIRBORNE</span>
+        </div>
+    </div>
+
+    <!-- Bottom-right: network info -->
+    <div id="net-panel" data-if="connected">
+        <div class="label">PING</div>
+        <div class="value">{{ ping }} ms</div>
+    </div>
+</body>
+</rml>

@@ -36,6 +36,9 @@
 
 #include "Utils/Log.hpp"
 #include "ImGui/ImGuiManager.hpp"
+#include "UI/RmlUiManager.h"
+#include "GameHUD.hpp"
+#include "Utils/EnginePaths.hpp"
 #include "Console/ConVar.hpp"
 #include "Events/EventBus.hpp"
 #include "Events/EngineEvents.hpp"
@@ -57,6 +60,7 @@ static world _world;
 static InputHandler input_handler;
 static std::unique_ptr<PlayerController> player_controller;
 static Game::ClientNetworkManager _network;
+static GameHUD _hud;
 
 // Async loading test
 static Assets::AssetHandle g_async_load_handle;
@@ -74,6 +78,8 @@ static void quit_game(int code)
     // Clear world registry before shutting down render API
     // This ensures GPU mesh resources are released while the device is still valid
     _world.registry.clear();
+    _hud.shutdown();
+    RmlUiManager::get().shutdown();
     ImGuiManager::get().shutdown();
     app.shutdown();
     EE::CLog::Shutdown();
@@ -159,6 +165,22 @@ int main(int argc, char* argv[])
     {
         LOG_ENGINE_FATAL("Failed to initialize ImGui");
         quit_game(1);
+    }
+
+    // Initialize RmlUi
+    if (!RmlUiManager::get().initialize(app.getWindow(), render_api, api_type))
+    {
+        LOG_ENGINE_WARN("Failed to initialize RmlUi - continuing without UI");
+    }
+
+    // Initialize HUD
+    if (RmlUiManager::get().isInitialized())
+    {
+        if (!_hud.initialize(RmlUiManager::get().getContext(),
+                EnginePaths::resolveEngineAsset("assets/ui/hud.rml")))
+        {
+            LOG_ENGINE_WARN("Failed to load HUD document");
+        }
     }
 
     // Initialize Job System
@@ -286,6 +308,7 @@ int main(int argc, char* argv[])
 
         // Start new ImGui frame
         ImGuiManager::get().newFrame();
+        RmlUiManager::get().beginFrame();
 
         // Process input events through the new input system
         input_handler.process_events();
@@ -558,6 +581,25 @@ int main(int argc, char* argv[])
         // Interpolate remote entities for smooth rendering
         if (_network.isConnected()) {
             _network.interpolateRemoteEntities();
+        }
+
+        // Update HUD data
+        {
+            float fps = (delta_time > 0.0f) ? 1.0f / delta_time : 0.0f;
+            glm::vec3 pos(0.0f);
+            float speed = 0.0f;
+            bool grounded = false;
+            if (_world.registry.valid(player_entity))
+            {
+                auto& t = _world.registry.get<TransformComponent>(player_entity);
+                pos = t.position;
+                if (_world.registry.all_of<RigidBodyComponent>(player_entity))
+                    speed = glm::length(_world.registry.get<RigidBodyComponent>(player_entity).velocity);
+                if (_world.registry.all_of<PlayerComponent>(player_entity))
+                    grounded = _world.registry.get<PlayerComponent>(player_entity).grounded;
+            }
+            _hud.update(fps, pos, speed, grounded, _network.isConnected(),
+                        _network.isConnected() ? _network.getStats().ping_ms : 0.0f);
         }
 
         // render using the active camera (either player or freecam)

@@ -5,6 +5,7 @@
 #include "Components/mesh.hpp"
 #include "RenderAPI.hpp"
 #include "ImGui/ImGuiManager.hpp"
+#include "UI/RmlUiManager.h"
 #include "Frustum.hpp"
 #include "BVH.hpp"
 #include "Debug/DebugDraw.hpp"
@@ -314,7 +315,10 @@ public:
         // Render debug lines (after scene, before UI)
         DebugDraw::get().render(render_api, c);
 
-        // Render ImGui UI
+        // Render RmlUi (game UI)
+        RmlUiManager::get().render();
+
+        // Render ImGui UI (dev tools)
         ImGuiManager::get().render();
 
         // End frame
@@ -425,6 +429,9 @@ public:
 
         render_api->renderSkybox();
         DebugDraw::get().render(render_api, c);
+
+        // Render RmlUi (game UI)
+        RmlUiManager::get().render();
 
         // Finalize to viewport texture (NOT screen, NOT ImGui)
         render_api->endSceneRender();

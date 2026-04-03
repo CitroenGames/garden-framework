@@ -1,0 +1,91 @@
+body {
+    font-family: LatoLatin;
+    font-size: 16dp;
+    color: #ffffffdd;
+}
+
+/* Top-left info panel */
+#info-panel {
+    position: absolute;
+    top: 12dp;
+    left: 12dp;
+    padding: 10dp 14dp;
+    background-color: #00000066;
+    border-radius: 6dp;
+    min-width: 200dp;
+}
+
+#info-panel .label {
+    font-size: 12dp;
+    color: #aaaaaa;
+    margin-bottom: 2dp;
+}
+
+#info-panel .value {
+    font-size: 14dp;
+    font-weight: bold;
+    color: #ffffff;
+    margin-bottom: 8dp;
+}
+
+#info-panel .value.fps {
+    color: #66ff66;
+}
+
+/* Bottom-center crosshair */
+#crosshair {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    margin-top: -8dp;
+    margin-left: -8dp;
+    width: 16dp;
+    height: 16dp;
+    text-align: center;
+    font-size: 16dp;
+    color: #ffffffaa;
+}
+
+/* Bottom-left status bar */
+#status-bar {
+    position: absolute;
+    bottom: 12dp;
+    left: 12dp;
+    padding: 8dp 14dp;
+    background-color: #00000066;
+    border-radius: 6dp;
+}
+
+#status-bar .status-text {
+    font-size: 13dp;
+    color: #cccccc;
+}
+
+#status-bar .grounded {
+    color: #66ff66;
+}
+
+#status-bar .airborne {
+    color: #ff6666;
+}
+
+/* Bottom-right network info */
+#net-panel {
+    position: absolute;
+    bottom: 12dp;
+    right: 12dp;
+    padding: 8dp 14dp;
+    background-color: #00000066;
+    border-radius: 6dp;
+    text-align: right;
+}
+
+#net-panel .label {
+    font-size: 11dp;
+    color: #888888;
+}
+
+#net-panel .value {
+    font-size: 13dp;
+    color: #88ccff;
+}

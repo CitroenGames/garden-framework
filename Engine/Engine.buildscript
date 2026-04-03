@@ -22,6 +22,7 @@ sources = {
     src/Graphics/D3D11Mesh.cpp [windows]
     src/Graphics/MetalRenderAPI.mm [macOS]
     src/Graphics/MetalMesh.mm [macOS]
+    src/UI/RmlRenderer_Metal.mm [macOS]
 }
 headers = {
     src/**/*.h
@@ -30,9 +31,10 @@ headers = {
     src/Graphics/D3D11Mesh.hpp [windows]
     src/Graphics/MetalRenderAPI.hpp [macOS]
     src/Graphics/MetalMesh.hpp [macOS]
+    src/UI/RmlRenderer_Metal.h [macOS]
 }
 public_includes = src, thirdparty/include, .
-defines = JPH_OBJECT_STREAM
+defines = JPH_OBJECT_STREAM, RMLUI_STATIC_LIB, RMLUI_SDL_VERSION_MAJOR=2
 if(Windows)
 {
     includes = src, thirdparty/include, ${Vulkan_INCLUDE_DIRS}, ${DirectX11_INCLUDE_DIRS}
@@ -69,6 +71,7 @@ target_link_libraries(
     PUBLIC JoltPhysics
     PUBLIC miniaudio
     PUBLIC meshoptimizer
+    PUBLIC RmlUi
 )
 std = 20
 utf8 = true
