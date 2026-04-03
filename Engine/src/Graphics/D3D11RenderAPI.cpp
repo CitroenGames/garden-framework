@@ -8,6 +8,7 @@
 #include "Components/camera.hpp"
 #include "Graphics/D3D11Mesh.hpp"
 #include "Utils/Log.hpp"
+#include "Utils/EnginePaths.hpp"
 #include "imgui.h"
 #include "imgui_impl_dx11.h"
 #include <stdio.h>
@@ -564,7 +565,7 @@ bool D3D11RenderAPI::loadShaders()
 {
     // Basic shader
     std::string basicSource;
-    if (!loadShaderFromFile("assets/shaders/d3d11/basic.hlsl", basicSource))
+    if (!loadShaderFromFile(EnginePaths::resolveEngineAsset("../assets/shaders/d3d11/basic.hlsl"), basicSource))
         return false;
 
     auto basicVSBlob = compileShader(basicSource, "VSMain", "vs_5_0", "basic.hlsl");
@@ -595,7 +596,7 @@ bool D3D11RenderAPI::loadShaders()
 
     // Unlit shader
     std::string unlitSource;
-    if (!loadShaderFromFile("assets/shaders/d3d11/unlit.hlsl", unlitSource))
+    if (!loadShaderFromFile(EnginePaths::resolveEngineAsset("../assets/shaders/d3d11/unlit.hlsl"), unlitSource))
         return false;
 
     auto unlitVSBlob = compileShader(unlitSource, "VSMain", "vs_5_0", "unlit.hlsl");
@@ -614,7 +615,7 @@ bool D3D11RenderAPI::loadShaders()
 
     // Shadow shader
     std::string shadowSource;
-    if (!loadShaderFromFile("assets/shaders/d3d11/shadow.hlsl", shadowSource))
+    if (!loadShaderFromFile(EnginePaths::resolveEngineAsset("../assets/shaders/d3d11/shadow.hlsl"), shadowSource))
         return false;
 
     auto shadowVSBlob = compileShader(shadowSource, "VSMain", "vs_5_0", "shadow.hlsl");
@@ -639,7 +640,7 @@ bool D3D11RenderAPI::loadShaders()
 
     // Sky shader
     std::string skySource;
-    if (!loadShaderFromFile("assets/shaders/d3d11/sky.hlsl", skySource))
+    if (!loadShaderFromFile(EnginePaths::resolveEngineAsset("../assets/shaders/d3d11/sky.hlsl"), skySource))
         return false;
 
     auto skyVSBlob = compileShader(skySource, "VSMain", "vs_5_0", "sky.hlsl");
@@ -668,7 +669,7 @@ bool D3D11RenderAPI::loadShaders()
 
     // FXAA shader
     std::string fxaaSource;
-    if (!loadShaderFromFile("assets/shaders/d3d11/fxaa.hlsl", fxaaSource))
+    if (!loadShaderFromFile(EnginePaths::resolveEngineAsset("../assets/shaders/d3d11/fxaa.hlsl"), fxaaSource))
         return false;
 
     auto fxaaVSBlob = compileShader(fxaaSource, "VSMain", "vs_5_0", "fxaa.hlsl");

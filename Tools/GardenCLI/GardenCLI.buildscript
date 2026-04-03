@@ -1,0 +1,22 @@
+[project:GardenCLI]
+type = exe
+outdir = ../../bin/
+if(Windows)
+{
+    subsystem = Console
+}
+sources = {
+    src/**/*.cpp
+    ../../Engine/Thirdparty/imgui-docking/imgui.cpp
+    ../../Engine/Thirdparty/imgui-docking/imgui_draw.cpp
+    ../../Engine/Thirdparty/imgui-docking/imgui_widgets.cpp
+    ../../Engine/Thirdparty/imgui-docking/imgui_tables.cpp
+    ../../Engine/Thirdparty/imgui-docking/backends/imgui_impl_sdl2.cpp
+    ../../Engine/Thirdparty/imgui-docking/backends/imgui_impl_sdlrenderer2.cpp
+}
+headers = src/**/*.hpp
+includes = src, ../../Engine/Thirdparty/tinygltf-2.9.6, ../../Engine/Thirdparty/imgui-docking, ../../Engine/Thirdparty/imgui-docking/backends
+std = 20
+utf8 = true
+multiprocessor = true
+target_link_libraries(SDL2)

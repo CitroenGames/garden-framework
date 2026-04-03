@@ -1,8 +1,9 @@
 [solution]
-name = OpenGL
+name = Garden
 platforms = x64, Linux
 
 include = Engine/Engine.buildscript
 include = Game/Game.buildscript
 include = Game/Editor/Editor.buildscript
+include = Tools/GardenCLI/GardenCLI.buildscript
 

@@ -1,0 +1,12 @@
+{
+    "asset_directories": [
+        "assets/"
+    ],
+    "buildscript": "test.buildscript",
+    "default_level": "assets/levels/main.level.json",
+    "engine_id": "d199bb235026",
+    "engine_version": "1.0",
+    "game_module": "bin/test",
+    "name": "test",
+    "source_directory": "src/"
+}

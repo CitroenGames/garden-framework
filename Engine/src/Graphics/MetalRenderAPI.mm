@@ -13,6 +13,7 @@
 #include "Components/camera.hpp"
 #include "Utils/Log.hpp"
 #include "Utils/Vertex.hpp"
+#include "Utils/EnginePaths.hpp"
 
 #include "imgui.h"
 #include "imgui_impl_metal.h"
@@ -262,7 +263,7 @@ struct MetalRenderAPIImpl {
         NSError* error = nil;
 
         // Try loading precompiled metallib
-        NSString* libPath = @"assets/shaders/metal/shaders.metallib";
+        NSString* libPath = [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/metal/shaders.metallib").c_str()];
         NSURL* libURL = [NSURL fileURLWithPath:libPath];
 
         if ([[NSFileManager defaultManager] fileExistsAtPath:libPath]) {
@@ -276,10 +277,11 @@ struct MetalRenderAPIImpl {
 
         // Fallback: compile from source
         // Read all .metal files and concatenate
-        NSArray<NSString*>* shaderFiles = @[@"assets/shaders/metal/basic.metal",
-                                             @"assets/shaders/metal/shadow.metal",
-                                             @"assets/shaders/metal/sky.metal",
-                                             @"assets/shaders/metal/fxaa.metal"];
+        NSArray<NSString*>* shaderFiles = @[
+            [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/metal/basic.metal").c_str()],
+            [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/metal/shadow.metal").c_str()],
+            [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/metal/sky.metal").c_str()],
+            [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/metal/fxaa.metal").c_str()]];
 
         NSMutableString* allSource = [NSMutableString string];
         // Add common header once

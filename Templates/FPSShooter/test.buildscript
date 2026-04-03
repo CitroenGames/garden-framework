@@ -1,0 +1,10 @@
+[project:test]
+type = dll
+sources = src/**/*.cpp
+headers = src/**/*.hpp
+includes = src
+target_link_libraries(
+    PRIVATE Engine
+)
+std = 20
+utf8 = true
