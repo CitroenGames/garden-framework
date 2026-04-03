@@ -11,6 +11,7 @@
 #include "imgui.h"
 #include "imgui_impl_dx11.h"
 #include <stdio.h>
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <string>
@@ -224,9 +225,21 @@ void D3D11RenderAPI::resize(int width, int height)
     }
 
     // Recreate render target view
-    createRenderTargetView();
-    createDepthStencilBuffer(width, height);
-    createPostProcessingResources(width, height);
+    if (!createRenderTargetView())
+    {
+        LOG_ENGINE_ERROR("Failed to recreate render target view after resize");
+        return;
+    }
+    if (!createDepthStencilBuffer(width, height))
+    {
+        LOG_ENGINE_ERROR("Failed to recreate depth stencil buffer after resize");
+        return;
+    }
+    if (!createPostProcessingResources(width, height))
+    {
+        LOG_ENGINE_ERROR("Failed to recreate post-processing resources after resize");
+        return;
+    }
 
     // Update projection matrix
     float ratio = static_cast<float>(width) / static_cast<float>(height);
@@ -282,13 +295,28 @@ bool D3D11RenderAPI::createSwapChain()
 {
     // Get DXGI Factory
     ComPtr<IDXGIDevice> dxgiDevice;
-    device.As(&dxgiDevice);
+    HRESULT hr = device.As(&dxgiDevice);
+    if (FAILED(hr))
+    {
+        LOG_ENGINE_ERROR("Failed to query IDXGIDevice from device");
+        return false;
+    }
 
     ComPtr<IDXGIAdapter> dxgiAdapter;
-    dxgiDevice->GetAdapter(dxgiAdapter.GetAddressOf());
+    hr = dxgiDevice->GetAdapter(dxgiAdapter.GetAddressOf());
+    if (FAILED(hr))
+    {
+        LOG_ENGINE_ERROR("Failed to get DXGI adapter");
+        return false;
+    }
 
     ComPtr<IDXGIFactory> dxgiFactory;
-    dxgiAdapter->GetParent(IID_PPV_ARGS(dxgiFactory.GetAddressOf()));
+    hr = dxgiAdapter->GetParent(IID_PPV_ARGS(dxgiFactory.GetAddressOf()));
+    if (FAILED(hr))
+    {
+        LOG_ENGINE_ERROR("Failed to get DXGI factory");
+        return false;
+    }
 
     DXGI_SWAP_CHAIN_DESC scd = {};
     scd.BufferCount = 2;
@@ -304,7 +332,7 @@ bool D3D11RenderAPI::createSwapChain()
     scd.Windowed = TRUE;
     scd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
 
-    HRESULT hr = dxgiFactory->CreateSwapChain(device.Get(), &scd, swapChain.GetAddressOf());
+    hr = dxgiFactory->CreateSwapChain(device.Get(), &scd, swapChain.GetAddressOf());
     if (FAILED(hr))
     {
         LOG_ENGINE_ERROR("CreateSwapChain failed with HRESULT: {:#x}", static_cast<unsigned int>(hr));
@@ -401,6 +429,13 @@ bool D3D11RenderAPI::createBlendStates()
 
     blendDesc.RenderTarget[0].DestBlend = D3D11_BLEND_ONE;
     hr = device->CreateBlendState(&blendDesc, blendStateAdditive.GetAddressOf());
+    if (FAILED(hr)) return false;
+
+    // Color write disabled (for depth prepass)
+    D3D11_BLEND_DESC noColorDesc = {};
+    noColorDesc.RenderTarget[0].BlendEnable = FALSE;
+    noColorDesc.RenderTarget[0].RenderTargetWriteMask = 0;
+    hr = device->CreateBlendState(&noColorDesc, blendStateColorWriteDisabled.GetAddressOf());
     return SUCCEEDED(hr);
 }
 
@@ -427,6 +462,12 @@ bool D3D11RenderAPI::createDepthStencilStates()
     dsDesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
     dsDesc.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;
     hr = device->CreateDepthStencilState(&dsDesc, depthStateReadOnly.GetAddressOf());
+    if (FAILED(hr)) return false;
+
+    dsDesc.DepthEnable = TRUE;
+    dsDesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+    dsDesc.DepthFunc = D3D11_COMPARISON_EQUAL;
+    hr = device->CreateDepthStencilState(&dsDesc, depthStateEqual.GetAddressOf());
     return SUCCEEDED(hr);
 }
 
@@ -483,6 +524,8 @@ ComPtr<ID3DBlob> D3D11RenderAPI::compileShader(const std::string& source, const 
     UINT compileFlags = D3DCOMPILE_ENABLE_STRICTNESS;
 #ifdef _DEBUG
     compileFlags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#else
+    compileFlags |= D3DCOMPILE_OPTIMIZATION_LEVEL3;
 #endif
 
     ComPtr<ID3DBlob> shaderBlob;
@@ -585,6 +628,10 @@ bool D3D11RenderAPI::loadShaders()
     {
         hr = device->CreatePixelShader(shadowPSBlob->GetBufferPointer(), shadowPSBlob->GetBufferSize(),
                                         nullptr, shadowPixelShader.GetAddressOf());
+        if (FAILED(hr))
+        {
+            LOG_ENGINE_ERROR("Failed to create shadow pixel shader");
+        }
     }
 
     // Sky shader
@@ -870,6 +917,8 @@ void D3D11RenderAPI::beginFrame()
     last_bound_blend = nullptr;
     last_bound_depth = nullptr;
     currentBoundTexture = INVALID_TEXTURE;
+    use_equal_depth = false;
+    in_depth_prepass = false;
 
     // Bind persistent resources for the main pass
     context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -902,9 +951,9 @@ void D3D11RenderAPI::endFrame()
 
         // Update FXAA constant buffer
         D3D11_MAPPED_SUBRESOURCE mapped;
-        context->Map(fxaaCBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
+        if (!mapBuffer(fxaaCBuffer.Get(), mapped)) return;
         FXAACBuffer* cb = static_cast<FXAACBuffer*>(mapped.pData);
-        cb->inverseScreenSize = glm::vec2(1.0f / viewport_width, 1.0f / viewport_height);
+        cb->inverseScreenSize = glm::vec2(1.0f / std::max(viewport_width, 1), 1.0f / std::max(viewport_height, 1));
         context->Unmap(fxaaCBuffer.Get(), 0);
 
         // Set up FXAA render state
@@ -1163,10 +1212,21 @@ void D3D11RenderAPI::deleteTexture(TextureHandle texture)
     }
 }
 
+bool D3D11RenderAPI::mapBuffer(ID3D11Buffer* buffer, D3D11_MAPPED_SUBRESOURCE& mapped)
+{
+    HRESULT hr = context->Map(buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
+    if (FAILED(hr))
+    {
+        LOG_ENGINE_ERROR("Failed to map buffer with HRESULT: {:#x}", static_cast<unsigned int>(hr));
+        return false;
+    }
+    return true;
+}
+
 void D3D11RenderAPI::updateGlobalCBuffer()
 {
     D3D11_MAPPED_SUBRESOURCE mapped;
-    context->Map(globalCBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
+    if (!mapBuffer(globalCBuffer.Get(), mapped)) return;
     GlobalCBuffer* cb = static_cast<GlobalCBuffer*>(mapped.pData);
 
     cb->view = view_matrix;
@@ -1183,6 +1243,8 @@ void D3D11RenderAPI::updateGlobalCBuffer()
     cb->cascadeCount = NUM_CASCADES;
     cb->lightDiffuse = current_light_diffuse;
     cb->debugCascades = debugCascades ? 1 : 0;
+    cb->shadowMapTexelSize = glm::vec2(1.0f / std::max(currentShadowSize, 1u));
+    cb->padding_shadow = glm::vec2(0.0f);
 
     context->Unmap(globalCBuffer.Get(), 0);
 }
@@ -1190,10 +1252,11 @@ void D3D11RenderAPI::updateGlobalCBuffer()
 void D3D11RenderAPI::updatePerObjectCBuffer(const glm::vec3& color, bool useTexture)
 {
     D3D11_MAPPED_SUBRESOURCE mapped;
-    context->Map(perObjectCBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
+    if (!mapBuffer(perObjectCBuffer.Get(), mapped)) return;
     PerObjectCBuffer* cb = static_cast<PerObjectCBuffer*>(mapped.pData);
 
     cb->model = current_model_matrix;
+    cb->normalMatrix = glm::mat4(glm::transpose(glm::inverse(glm::mat3(current_model_matrix))));
     cb->color = color;
     cb->useTexture = useTexture ? 1 : 0;
 
@@ -1203,7 +1266,7 @@ void D3D11RenderAPI::updatePerObjectCBuffer(const glm::vec3& color, bool useText
 void D3D11RenderAPI::updateShadowCBuffer(const glm::mat4& lightSpace, const glm::mat4& model)
 {
     D3D11_MAPPED_SUBRESOURCE mapped;
-    context->Map(shadowCBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
+    if (!mapBuffer(shadowCBuffer.Get(), mapped)) return;
     ShadowCBuffer* cb = static_cast<ShadowCBuffer*>(mapped.pData);
 
     cb->lightSpaceMatrix = lightSpace;
@@ -1244,7 +1307,12 @@ void D3D11RenderAPI::applyRenderState(const RenderState& state)
 
     // Depth testing - with state tracking
     ID3D11DepthStencilState* desired_depth = nullptr;
-    if (state.depth_test == DepthTest::None)
+    if (use_equal_depth)
+    {
+        // After depth prepass: read-only LESS_EQUAL (no depth write, avoids EQUAL precision issues)
+        desired_depth = depthStateReadOnly.Get();
+    }
+    else if (state.depth_test == DepthTest::None)
     {
         desired_depth = depthStateNone.Get();
     }
@@ -1346,7 +1414,14 @@ void D3D11RenderAPI::renderMesh(const mesh& m, const RenderState& state)
         last_bound_vb = vb;
     }
 
-    context->Draw(static_cast<UINT>(d3dMesh->getVertexCount()), 0);
+    if (d3dMesh->isIndexed())
+    {
+        context->DrawIndexed(static_cast<UINT>(d3dMesh->getIndexCount()), 0, 0);
+    }
+    else
+    {
+        context->Draw(static_cast<UINT>(d3dMesh->getVertexCount()), 0);
+    }
 }
 
 void D3D11RenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t vertex_count, const RenderState& state)
@@ -1454,12 +1529,14 @@ void D3D11RenderAPI::setLighting(const glm::vec3& ambient, const glm::vec3& diff
 
 void D3D11RenderAPI::renderSkybox()
 {
-    // Save current render state
+    // Clear depth prepass equal-depth mode before skybox
+    use_equal_depth = false;
+
     // Render skybox with depth test but no depth write
 
     // Update skybox constant buffer
     D3D11_MAPPED_SUBRESOURCE mapped;
-    context->Map(skyboxCBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
+    if (!mapBuffer(skyboxCBuffer.Get(), mapped)) return;
     SkyboxCBuffer* cb = static_cast<SkyboxCBuffer*>(mapped.pData);
 
     cb->projection = projection_matrix;
@@ -1555,7 +1632,8 @@ glm::mat4 D3D11RenderAPI::getLightSpaceMatrixForCascade(int cascadeIndex, const 
     }
     center /= 8.0f;
 
-    glm::vec3 direction = glm::normalize(lightDir);
+    float dirLength = glm::length(lightDir);
+    glm::vec3 direction = (dirLength > 1e-6f) ? (lightDir / dirLength) : glm::vec3(0.0f, -1.0f, 0.0f);
     glm::vec3 up = glm::vec3(0.0f, 1.0f, 0.0f);
     if (std::abs(glm::dot(direction, up)) > 0.99f)
     {
@@ -1662,7 +1740,7 @@ void D3D11RenderAPI::beginShadowPass(const glm::vec3& lightDir, const camera& ca
 
     calculateCascadeSplits(0.1f, 1000.0f);
 
-    float aspect = static_cast<float>(viewport_width) / static_cast<float>(viewport_height);
+    float aspect = static_cast<float>(viewport_width) / static_cast<float>(std::max(viewport_height, 1));
     for (int i = 0; i < NUM_CASCADES; i++)
     {
         lightSpaceMatrices[i] = getLightSpaceMatrixForCascade(i, lightDir, view_matrix, field_of_view, aspect);
@@ -1686,6 +1764,11 @@ void D3D11RenderAPI::beginShadowPass(const glm::vec3& lightDir, const camera& ca
 
 void D3D11RenderAPI::beginCascade(int cascadeIndex)
 {
+    if (cascadeIndex < 0 || cascadeIndex >= NUM_CASCADES)
+    {
+        LOG_ENGINE_WARN("beginCascade() called with out-of-range index {}, clamping to [0, {}]", cascadeIndex, NUM_CASCADES - 1);
+        cascadeIndex = std::clamp(cascadeIndex, 0, NUM_CASCADES - 1);
+    }
     currentCascade = cascadeIndex;
 
     ID3D11RenderTargetView* nullRTV = nullptr;
@@ -1758,6 +1841,102 @@ const float* D3D11RenderAPI::getCascadeSplitDistances() const
 const glm::mat4* D3D11RenderAPI::getLightSpaceMatrices() const
 {
     return lightSpaceMatrices;
+}
+
+// --- Depth Prepass ---
+
+void D3D11RenderAPI::beginDepthPrepass()
+{
+    in_depth_prepass = true;
+
+    // Bind basic vertex shader with null pixel shader (depth-only)
+    context->VSSetShader(basicVertexShader.Get(), nullptr, 0);
+    context->PSSetShader(nullptr, nullptr, 0);
+    context->IASetInputLayout(basicInputLayout.Get());
+    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    // Disable color writes
+    context->OMSetBlendState(blendStateColorWriteDisabled.Get(), nullptr, 0xffffffff);
+
+    // Depth write enabled with LESS_EQUAL test
+    context->OMSetDepthStencilState(depthStateLessEqual.Get(), 0);
+
+    // Bind constant buffers for vertex shader
+    context->VSSetConstantBuffers(0, 1, globalCBuffer.GetAddressOf());
+    context->VSSetConstantBuffers(1, 1, perObjectCBuffer.GetAddressOf());
+
+    // Flush global CBuffer if dirty
+    if (global_cbuffer_dirty)
+    {
+        updateGlobalCBuffer();
+        global_cbuffer_dirty = false;
+    }
+
+    // Update state tracking
+    last_bound_vs = basicVertexShader.Get();
+    last_bound_ps = nullptr;
+    last_bound_layout = basicInputLayout.Get();
+    last_bound_blend = blendStateColorWriteDisabled.Get();
+    last_bound_depth = depthStateLessEqual.Get();
+    last_bound_vb = nullptr;
+}
+
+void D3D11RenderAPI::endDepthPrepass()
+{
+    in_depth_prepass = false;
+    use_equal_depth = true;
+
+    // Restore color writes
+    context->OMSetBlendState(blendStateNone.Get(), nullptr, 0xffffffff);
+    last_bound_blend = blendStateNone.Get();
+
+    // Switch to read-only depth (LESS_EQUAL, no depth write) for main lit pass.
+    // Using LESS_EQUAL instead of EQUAL avoids precision mismatches across
+    // D3D11 drivers that can cause fragments to fail a strict EQUAL test.
+    context->OMSetDepthStencilState(depthStateReadOnly.Get(), 0);
+    last_bound_depth = depthStateReadOnly.Get();
+
+    // Reset shader state tracking so main pass rebinds lit shaders
+    last_bound_vs = nullptr;
+    last_bound_ps = nullptr;
+    last_bound_layout = nullptr;
+    last_bound_vb = nullptr;
+}
+
+void D3D11RenderAPI::renderMeshDepthOnly(const mesh& m)
+{
+    if (!m.visible || !m.is_valid || m.vertices_len == 0)
+        return;
+
+    // Ensure mesh is uploaded
+    if (!m.gpu_mesh || !m.gpu_mesh->isUploaded())
+    {
+        const_cast<mesh&>(m).uploadToGPU(this);
+        if (!m.gpu_mesh || !m.gpu_mesh->isUploaded())
+            return;
+    }
+
+    D3D11Mesh* d3dMesh = static_cast<D3D11Mesh*>(m.gpu_mesh);
+
+    // Update per-object CBuffer with model matrix only (color/texture irrelevant)
+    updatePerObjectCBuffer(glm::vec3(1.0f), false);
+
+    // Bind vertex buffer with state tracking
+    ID3D11Buffer* vb = d3dMesh->getVertexBuffer();
+    if (vb != last_bound_vb)
+    {
+        d3dMesh->bind();
+        last_bound_vb = vb;
+    }
+
+    if (d3dMesh->isIndexed())
+    {
+        context->DrawIndexed(static_cast<UINT>(d3dMesh->getIndexCount()), 0, 0);
+    }
+    else
+    {
+        context->Draw(static_cast<UINT>(d3dMesh->getVertexCount()), 0);
+    }
 }
 
 IGPUMesh* D3D11RenderAPI::createMesh()
@@ -1863,7 +2042,16 @@ void D3D11RenderAPI::recreateShadowMapResources(unsigned int size)
     srvDesc.Texture2DArray.FirstArraySlice = 0;
     srvDesc.Texture2DArray.ArraySize = NUM_CASCADES;
 
-    device->CreateShaderResourceView(shadowMapArray.Get(), &srvDesc, shadowSRV.GetAddressOf());
+    hr = device->CreateShaderResourceView(shadowMapArray.Get(), &srvDesc, shadowSRV.GetAddressOf());
+    if (FAILED(hr))
+    {
+        LOG_ENGINE_ERROR("Failed to create shadow map SRV during recreation");
+        shadowSRV.Reset();
+        for (int i = 0; i < NUM_CASCADES; i++)
+            shadowDSVs[i].Reset();
+        shadowMapArray.Reset();
+        currentShadowSize = 0;
+    }
 }
 
 // --- Viewport render-to-texture (for editor) ---
@@ -1887,10 +2075,28 @@ void D3D11RenderAPI::createViewportResources(int w, int h)
     texDesc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
 
     HRESULT hr = device->CreateTexture2D(&texDesc, nullptr, viewportTexture.GetAddressOf());
-    if (FAILED(hr)) return;
+    if (FAILED(hr))
+    {
+        LOG_ENGINE_ERROR("Failed to create viewport texture");
+        return;
+    }
 
-    device->CreateRenderTargetView(viewportTexture.Get(), nullptr, viewportRTV.GetAddressOf());
-    device->CreateShaderResourceView(viewportTexture.Get(), nullptr, viewportSRV.GetAddressOf());
+    hr = device->CreateRenderTargetView(viewportTexture.Get(), nullptr, viewportRTV.GetAddressOf());
+    if (FAILED(hr))
+    {
+        LOG_ENGINE_ERROR("Failed to create viewport RTV");
+        viewportTexture.Reset();
+        return;
+    }
+
+    hr = device->CreateShaderResourceView(viewportTexture.Get(), nullptr, viewportSRV.GetAddressOf());
+    if (FAILED(hr))
+    {
+        LOG_ENGINE_ERROR("Failed to create viewport SRV");
+        viewportRTV.Reset();
+        viewportTexture.Reset();
+        return;
+    }
 }
 
 void D3D11RenderAPI::setViewportSize(int width, int height)
@@ -1925,9 +2131,9 @@ void D3D11RenderAPI::endSceneRender()
         context->RSSetViewports(1, &vp);
 
         D3D11_MAPPED_SUBRESOURCE mapped;
-        context->Map(fxaaCBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
+        if (!mapBuffer(fxaaCBuffer.Get(), mapped)) return;
         FXAACBuffer* cb = static_cast<FXAACBuffer*>(mapped.pData);
-        cb->inverseScreenSize = glm::vec2(1.0f / viewport_width_rt, 1.0f / viewport_height_rt);
+        cb->inverseScreenSize = glm::vec2(1.0f / std::max(viewport_width_rt, 1), 1.0f / std::max(viewport_height_rt, 1));
         context->Unmap(fxaaCBuffer.Get(), 0);
 
         context->VSSetShader(fxaaVertexShader.Get(), nullptr, 0);

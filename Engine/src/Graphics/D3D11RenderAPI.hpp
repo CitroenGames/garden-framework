@@ -44,11 +44,14 @@ struct alignas(16) GlobalCBuffer
     int cascadeCount;
     glm::vec3 lightDiffuse;
     int debugCascades;
+    glm::vec2 shadowMapTexelSize;
+    glm::vec2 padding_shadow;
 };
 
 struct alignas(16) PerObjectCBuffer
 {
     glm::mat4 model;
+    glm::mat4 normalMatrix;  // Precomputed transpose(inverse(mat3(model))), only upper-left 3x3 used
     glm::vec3 color;
     int useTexture;
 };
@@ -101,12 +104,14 @@ private:
     ComPtr<ID3D11BlendState> blendStateNone;
     ComPtr<ID3D11BlendState> blendStateAlpha;
     ComPtr<ID3D11BlendState> blendStateAdditive;
+    ComPtr<ID3D11BlendState> blendStateColorWriteDisabled;
 
     // Depth stencil states
     ComPtr<ID3D11DepthStencilState> depthStateLess;
     ComPtr<ID3D11DepthStencilState> depthStateLessEqual;
     ComPtr<ID3D11DepthStencilState> depthStateNone;
     ComPtr<ID3D11DepthStencilState> depthStateReadOnly;
+    ComPtr<ID3D11DepthStencilState> depthStateEqual;
 
     // Samplers
     ComPtr<ID3D11SamplerState> linearSampler;
@@ -197,6 +202,8 @@ private:
     ID3D11BlendState* last_bound_blend = nullptr;
     ID3D11DepthStencilState* last_bound_depth = nullptr;
     bool global_cbuffer_dirty = true;
+    bool in_depth_prepass = false;
+    bool use_equal_depth = false;
 
     // VSync / present interval
     int presentInterval = 1;
@@ -222,6 +229,7 @@ private:
     bool loadShaderFromFile(const std::string& filepath, std::string& outSource);
 
     void applyRenderState(const RenderState& state);
+    bool mapBuffer(ID3D11Buffer* buffer, D3D11_MAPPED_SUBRESOURCE& mapped);
     void updateGlobalCBuffer();
     void updatePerObjectCBuffer(const glm::vec3& color, bool useTexture);
     void updateShadowCBuffer(const glm::mat4& lightSpace, const glm::mat4& model);
@@ -283,6 +291,11 @@ public:
     virtual int getCascadeCount() const override;
     virtual const float* getCascadeSplitDistances() const override;
     virtual const glm::mat4* getLightSpaceMatrices() const override;
+
+    // Depth prepass
+    virtual void beginDepthPrepass() override;
+    virtual void endDepthPrepass() override;
+    virtual void renderMeshDepthOnly(const mesh& m) override;
 
     virtual IGPUMesh* createMesh() override;
 
