@@ -478,10 +478,17 @@ private:
     VkImageView viewport_view = VK_NULL_HANDLE;
     VkSampler viewport_sampler = VK_NULL_HANDLE;
     VkDescriptorSet viewport_imgui_ds = VK_NULL_HANDLE;
+    VkImage viewport_depth_image = VK_NULL_HANDLE;
+    VmaAllocation viewport_depth_allocation = nullptr;
+    VkImageView viewport_depth_view = VK_NULL_HANDLE;
+    VkRenderPass viewport_resolve_pass = VK_NULL_HANDLE;
+    VkFramebuffer viewport_framebuffer = VK_NULL_HANDLE;
+    VkRenderPass ui_render_pass = VK_NULL_HANDLE;
     int viewport_width_rt = 0;
     int viewport_height_rt = 0;
     void createViewportResources(int w, int h);
     void destroyViewportResources();
+    bool isViewportMode() const { return viewport_image != VK_NULL_HANDLE; }
 
 #ifdef _DEBUG
     VkDebugUtilsMessengerEXT debug_messenger = VK_NULL_HANDLE;

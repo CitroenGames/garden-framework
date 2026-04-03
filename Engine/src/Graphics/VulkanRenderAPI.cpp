@@ -216,6 +216,17 @@ void VulkanRenderAPI::shutdown()
     // Clean up FXAA resources
     cleanupFxaaResources();
 
+    // Clean up viewport resources
+    destroyViewportResources();
+    if (viewport_resolve_pass != VK_NULL_HANDLE) {
+        vkDestroyRenderPass(device, viewport_resolve_pass, nullptr);
+        viewport_resolve_pass = VK_NULL_HANDLE;
+    }
+    if (ui_render_pass != VK_NULL_HANDLE) {
+        vkDestroyRenderPass(device, ui_render_pass, nullptr);
+        ui_render_pass = VK_NULL_HANDLE;
+    }
+
     // Clean up default texture (sampler owned by sampler_cache)
     if (default_texture.isValid()) {
         if (default_texture.imageView) vkDestroyImageView(device, default_texture.imageView, nullptr);
@@ -3247,14 +3258,38 @@ void VulkanRenderAPI::recreateSwapchain()
         return;
     }
 
-    // Update projection matrix
-    float ratio = (float)viewport_width / (float)viewport_height;
-    projection_matrix = glm::perspectiveRH_ZO(glm::radians(field_of_view), ratio, 0.1f, 1000.0f);
-    projection_matrix[1][1] *= -1;
+    // Update projection matrix (viewport mode manages its own projection)
+    if (!isViewportMode()) {
+        float ratio = (float)viewport_width / (float)viewport_height;
+        projection_matrix = glm::perspectiveRH_ZO(glm::radians(field_of_view), ratio, 0.1f, 1000.0f);
+        projection_matrix[1][1] *= -1;
+    }
 
     // Recreate offscreen resources if FXAA is enabled
     if (fxaa_initialized) {
-        recreateOffscreenResources();
+        if (isViewportMode()) {
+            // Viewport mode: only rebuild fxaa_framebuffers (they wrap swapchain images, used by renderUI).
+            // Offscreen resources are managed by createViewportResources at viewport dimensions.
+            for (auto fb : fxaa_framebuffers) {
+                if (fb != VK_NULL_HANDLE) vkDestroyFramebuffer(device, fb, nullptr);
+            }
+            fxaa_framebuffers.clear();
+
+            fxaa_framebuffers.resize(swapchain_image_views.size());
+            for (size_t i = 0; i < swapchain_image_views.size(); i++) {
+                VkFramebufferCreateInfo fbInfo{};
+                fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+                fbInfo.renderPass = fxaa_render_pass;
+                fbInfo.attachmentCount = 1;
+                fbInfo.pAttachments = &swapchain_image_views[i];
+                fbInfo.width = swapchain_extent.width;
+                fbInfo.height = swapchain_extent.height;
+                fbInfo.layers = 1;
+                VK_CHECK(vkCreateFramebuffer(device, &fbInfo, nullptr, &fxaa_framebuffers[i]));
+            }
+        } else {
+            recreateOffscreenResources();
+        }
     }
 }
 
@@ -3611,7 +3646,15 @@ void VulkanRenderAPI::beginFrame()
     VkRenderPassBeginInfo renderPassInfo{};
     renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
 
-    if (fxaaEnabled && fxaa_initialized) {
+    // Determine render extent for viewport/scissor
+    VkExtent2D renderExtent = swapchain_extent;
+
+    if (isViewportMode()) {
+        // Editor viewport mode: always render to offscreen at viewport dimensions
+        renderPassInfo.renderPass = offscreen_render_pass;
+        renderPassInfo.framebuffer = offscreen_framebuffers[0];
+        renderExtent = { (uint32_t)viewport_width_rt, (uint32_t)viewport_height_rt };
+    } else if (fxaaEnabled && fxaa_initialized) {
         // Render to offscreen framebuffer for FXAA
         renderPassInfo.renderPass = offscreen_render_pass;
         renderPassInfo.framebuffer = offscreen_framebuffers[0];
@@ -3622,7 +3665,7 @@ void VulkanRenderAPI::beginFrame()
     }
 
     renderPassInfo.renderArea.offset = {0, 0};
-    renderPassInfo.renderArea.extent = swapchain_extent;
+    renderPassInfo.renderArea.extent = renderExtent;
 
     std::array<VkClearValue, 2> clearValues{};
     clearValues[0].color = {{clear_color.r, clear_color.g, clear_color.b, 1.0f}};
@@ -3642,21 +3685,32 @@ void VulkanRenderAPI::beginFrame()
     VkViewport viewport{};
     viewport.x = 0.0f;
     viewport.y = 0.0f;
-    viewport.width = static_cast<float>(swapchain_extent.width);
-    viewport.height = static_cast<float>(swapchain_extent.height);
+    viewport.width = static_cast<float>(renderExtent.width);
+    viewport.height = static_cast<float>(renderExtent.height);
     viewport.minDepth = 0.0f;
     viewport.maxDepth = 1.0f;
     vkCmdSetViewport(command_buffers[current_frame], 0, 1, &viewport);
 
     VkRect2D scissor{};
     scissor.offset = {0, 0};
-    scissor.extent = swapchain_extent;
+    scissor.extent = renderExtent;
     vkCmdSetScissor(command_buffers[current_frame], 0, 1, &scissor);
 }
 
 void VulkanRenderAPI::endFrame()
 {
     if (!frame_started) return;
+
+    // In viewport mode, endSceneRender() + renderUI() handle the full pipeline
+    if (isViewportMode()) {
+        if (main_pass_started) {
+            vkCmdEndRenderPass(command_buffers[current_frame]);
+            main_pass_started = false;
+        }
+        vkEndCommandBuffer(command_buffers[current_frame]);
+        frame_started = false;
+        return;
+    }
 
     if (main_pass_started) {
         // If FXAA is disabled, render ImGui in the main pass before ending it
@@ -4354,7 +4408,9 @@ void VulkanRenderAPI::beginShadowPass(const glm::vec3& lightDir, const camera& c
     calculateCascadeSplits(0.1f, 1000.0f);
 
     // Calculate light space matrices for each cascade
-    float aspect = static_cast<float>(viewport_width) / static_cast<float>(viewport_height);
+    float aspect = isViewportMode()
+        ? static_cast<float>(viewport_width_rt) / static_cast<float>(viewport_height_rt)
+        : static_cast<float>(viewport_width) / static_cast<float>(viewport_height);
     for (int i = 0; i < NUM_CASCADES; i++) {
         lightSpaceMatrices[i] = getLightSpaceMatrixForCascade(i, lightDir, view_matrix, field_of_view, aspect);
     }
@@ -4540,20 +4596,389 @@ void VulkanRenderAPI::recreateShadowResources(uint32_t size)
     }
 }
 
-// --- Viewport render-to-texture stubs (full implementation TODO for Vulkan) ---
+// --- Viewport render-to-texture for editor ---
 
 void VulkanRenderAPI::createViewportResources(int w, int h)
 {
+    vkDeviceWaitIdle(device);
+    destroyViewportResources();
+
     viewport_width_rt = w;
     viewport_height_rt = h;
-    // TODO: Create Vulkan viewport image, view, sampler, and register with ImGui
+
+    // Ensure FXAA infrastructure exists (we need offscreen_render_pass, FXAA pipeline, etc.)
+    if (!fxaa_initialized) {
+        if (!createFxaaResources()) {
+            LOG_ENGINE_ERROR("[Vulkan] Failed to create FXAA resources for viewport mode");
+            return;
+        }
+    }
+
+    VmaAllocationCreateInfo gpuAllocInfo{};
+    gpuAllocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+
+    // --- Viewport color image ---
+    VkImageCreateInfo imageInfo{};
+    imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imageInfo.imageType = VK_IMAGE_TYPE_2D;
+    imageInfo.format = swapchain_format;
+    imageInfo.extent = { (uint32_t)w, (uint32_t)h, 1 };
+    imageInfo.mipLevels = 1;
+    imageInfo.arrayLayers = 1;
+    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    if (vmaCreateImage(vma_allocator, &imageInfo, &gpuAllocInfo,
+                       &viewport_image, &viewport_allocation, nullptr) != VK_SUCCESS) {
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create viewport image");
+        return;
+    }
+
+    VkImageViewCreateInfo viewInfo{};
+    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewInfo.image = viewport_image;
+    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    viewInfo.format = swapchain_format;
+    viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    viewInfo.subresourceRange.baseMipLevel = 0;
+    viewInfo.subresourceRange.levelCount = 1;
+    viewInfo.subresourceRange.baseArrayLayer = 0;
+    viewInfo.subresourceRange.layerCount = 1;
+
+    if (vkCreateImageView(device, &viewInfo, nullptr, &viewport_view) != VK_SUCCESS) {
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create viewport image view");
+        return;
+    }
+
+    // --- Viewport sampler (via cache) ---
+    SamplerKey samplerKey{};
+    samplerKey.magFilter = VK_FILTER_LINEAR;
+    samplerKey.minFilter = VK_FILTER_LINEAR;
+    samplerKey.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerKey.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerKey.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerKey.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    samplerKey.anisotropyEnable = VK_FALSE;
+    samplerKey.maxAnisotropy = 1.0f;
+    samplerKey.compareEnable = VK_FALSE;
+    samplerKey.compareOp = VK_COMPARE_OP_ALWAYS;
+    samplerKey.minLod = 0.0f;
+    samplerKey.maxLod = 0.0f;
+    samplerKey.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+    viewport_sampler = sampler_cache.getOrCreate(samplerKey);
+
+    // --- Viewport depth image ---
+    VkImageCreateInfo depthInfo{};
+    depthInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    depthInfo.imageType = VK_IMAGE_TYPE_2D;
+    depthInfo.format = depth_format;
+    depthInfo.extent = { (uint32_t)w, (uint32_t)h, 1 };
+    depthInfo.mipLevels = 1;
+    depthInfo.arrayLayers = 1;
+    depthInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    depthInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    depthInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    depthInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    if (vmaCreateImage(vma_allocator, &depthInfo, &gpuAllocInfo,
+                       &viewport_depth_image, &viewport_depth_allocation, nullptr) != VK_SUCCESS) {
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create viewport depth image");
+        return;
+    }
+
+    VkImageViewCreateInfo depthViewInfo{};
+    depthViewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    depthViewInfo.image = viewport_depth_image;
+    depthViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    depthViewInfo.format = depth_format;
+    depthViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    depthViewInfo.subresourceRange.baseMipLevel = 0;
+    depthViewInfo.subresourceRange.levelCount = 1;
+    depthViewInfo.subresourceRange.baseArrayLayer = 0;
+    depthViewInfo.subresourceRange.layerCount = 1;
+
+    if (vkCreateImageView(device, &depthViewInfo, nullptr, &viewport_depth_view) != VK_SUCCESS) {
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create viewport depth view");
+        return;
+    }
+
+    // --- Register with ImGui ---
+    viewport_imgui_ds = ImGui_ImplVulkan_AddTexture(viewport_sampler, viewport_view,
+                                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+    // --- Create viewport_resolve_pass (FXAA -> viewport, finalLayout = SHADER_READ_ONLY) ---
+    if (viewport_resolve_pass == VK_NULL_HANDLE) {
+        VkAttachmentDescription colorAtt{};
+        colorAtt.format = swapchain_format;
+        colorAtt.samples = VK_SAMPLE_COUNT_1_BIT;
+        colorAtt.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        colorAtt.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        colorAtt.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        colorAtt.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        colorAtt.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        colorAtt.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+        VkAttachmentReference colorRef{};
+        colorRef.attachment = 0;
+        colorRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+        VkSubpassDescription subpass{};
+        subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        subpass.colorAttachmentCount = 1;
+        subpass.pColorAttachments = &colorRef;
+
+        VkSubpassDependency dep{};
+        dep.srcSubpass = VK_SUBPASS_EXTERNAL;
+        dep.dstSubpass = 0;
+        dep.srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        dep.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        dep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
+        VkRenderPassCreateInfo rpInfo{};
+        rpInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+        rpInfo.attachmentCount = 1;
+        rpInfo.pAttachments = &colorAtt;
+        rpInfo.subpassCount = 1;
+        rpInfo.pSubpasses = &subpass;
+        rpInfo.dependencyCount = 1;
+        rpInfo.pDependencies = &dep;
+
+        if (vkCreateRenderPass(device, &rpInfo, nullptr, &viewport_resolve_pass) != VK_SUCCESS) {
+            LOG_ENGINE_ERROR("[Vulkan] Failed to create viewport resolve render pass");
+            return;
+        }
+    }
+
+    // --- Create viewport framebuffer ---
+    VkFramebufferCreateInfo fbInfo{};
+    fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+    fbInfo.renderPass = viewport_resolve_pass;
+    fbInfo.attachmentCount = 1;
+    fbInfo.pAttachments = &viewport_view;
+    fbInfo.width = (uint32_t)w;
+    fbInfo.height = (uint32_t)h;
+    fbInfo.layers = 1;
+
+    if (vkCreateFramebuffer(device, &fbInfo, nullptr, &viewport_framebuffer) != VK_SUCCESS) {
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create viewport framebuffer");
+        return;
+    }
+
+    // --- Create ui_render_pass (ImGui -> swapchain, loadOp=CLEAR, finalLayout=PRESENT_SRC) ---
+    if (ui_render_pass == VK_NULL_HANDLE) {
+        VkAttachmentDescription colorAtt{};
+        colorAtt.format = swapchain_format;
+        colorAtt.samples = VK_SAMPLE_COUNT_1_BIT;
+        colorAtt.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        colorAtt.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        colorAtt.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        colorAtt.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        colorAtt.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        colorAtt.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+        VkAttachmentReference colorRef{};
+        colorRef.attachment = 0;
+        colorRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+        VkSubpassDescription subpass{};
+        subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        subpass.colorAttachmentCount = 1;
+        subpass.pColorAttachments = &colorRef;
+
+        VkSubpassDependency dep{};
+        dep.srcSubpass = VK_SUBPASS_EXTERNAL;
+        dep.dstSubpass = 0;
+        dep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dep.srcAccessMask = 0;
+        dep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
+        VkRenderPassCreateInfo rpInfo{};
+        rpInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+        rpInfo.attachmentCount = 1;
+        rpInfo.pAttachments = &colorAtt;
+        rpInfo.subpassCount = 1;
+        rpInfo.pSubpasses = &subpass;
+        rpInfo.dependencyCount = 1;
+        rpInfo.pDependencies = &dep;
+
+        if (vkCreateRenderPass(device, &rpInfo, nullptr, &ui_render_pass) != VK_SUCCESS) {
+            LOG_ENGINE_ERROR("[Vulkan] Failed to create UI render pass");
+            return;
+        }
+    }
+
+    // --- Resize offscreen resources to viewport dimensions ---
+    // Destroy old offscreen framebuffers and images (keep pipeline/shaders/render pass)
+    for (auto fb : offscreen_framebuffers) {
+        if (fb != VK_NULL_HANDLE) vkDestroyFramebuffer(device, fb, nullptr);
+    }
+    offscreen_framebuffers.clear();
+
+    if (offscreen_depth_view != VK_NULL_HANDLE) {
+        vkDestroyImageView(device, offscreen_depth_view, nullptr);
+        offscreen_depth_view = VK_NULL_HANDLE;
+    }
+    if (offscreen_depth_image != VK_NULL_HANDLE && vma_allocator) {
+        vmaDestroyImage(vma_allocator, offscreen_depth_image, offscreen_depth_allocation);
+        offscreen_depth_image = VK_NULL_HANDLE;
+        offscreen_depth_allocation = nullptr;
+    }
+    if (offscreen_view != VK_NULL_HANDLE) {
+        vkDestroyImageView(device, offscreen_view, nullptr);
+        offscreen_view = VK_NULL_HANDLE;
+    }
+    if (offscreen_image != VK_NULL_HANDLE && vma_allocator) {
+        vmaDestroyImage(vma_allocator, offscreen_image, offscreen_allocation);
+        offscreen_image = VK_NULL_HANDLE;
+        offscreen_allocation = nullptr;
+    }
+
+    // Recreate offscreen color image at viewport dimensions
+    VkImageCreateInfo offColorInfo{};
+    offColorInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    offColorInfo.imageType = VK_IMAGE_TYPE_2D;
+    offColorInfo.format = swapchain_format;
+    offColorInfo.extent = { (uint32_t)w, (uint32_t)h, 1 };
+    offColorInfo.mipLevels = 1;
+    offColorInfo.arrayLayers = 1;
+    offColorInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    offColorInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    offColorInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    offColorInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    VK_CHECK(vmaCreateImage(vma_allocator, &offColorInfo, &gpuAllocInfo,
+                   &offscreen_image, &offscreen_allocation, nullptr));
+
+    VkImageViewCreateInfo offViewInfo{};
+    offViewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    offViewInfo.image = offscreen_image;
+    offViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    offViewInfo.format = swapchain_format;
+    offViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    offViewInfo.subresourceRange.baseMipLevel = 0;
+    offViewInfo.subresourceRange.levelCount = 1;
+    offViewInfo.subresourceRange.baseArrayLayer = 0;
+    offViewInfo.subresourceRange.layerCount = 1;
+
+    VK_CHECK(vkCreateImageView(device, &offViewInfo, nullptr, &offscreen_view));
+
+    // Recreate offscreen depth image at viewport dimensions
+    VkImageCreateInfo offDepthInfo{};
+    offDepthInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    offDepthInfo.imageType = VK_IMAGE_TYPE_2D;
+    offDepthInfo.format = depth_format;
+    offDepthInfo.extent = { (uint32_t)w, (uint32_t)h, 1 };
+    offDepthInfo.mipLevels = 1;
+    offDepthInfo.arrayLayers = 1;
+    offDepthInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    offDepthInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    offDepthInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    offDepthInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    VK_CHECK(vmaCreateImage(vma_allocator, &offDepthInfo, &gpuAllocInfo,
+                   &offscreen_depth_image, &offscreen_depth_allocation, nullptr));
+
+    VkImageViewCreateInfo offDepthViewInfo{};
+    offDepthViewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    offDepthViewInfo.image = offscreen_depth_image;
+    offDepthViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    offDepthViewInfo.format = depth_format;
+    offDepthViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    offDepthViewInfo.subresourceRange.baseMipLevel = 0;
+    offDepthViewInfo.subresourceRange.levelCount = 1;
+    offDepthViewInfo.subresourceRange.baseArrayLayer = 0;
+    offDepthViewInfo.subresourceRange.layerCount = 1;
+
+    VK_CHECK(vkCreateImageView(device, &offDepthViewInfo, nullptr, &offscreen_depth_view));
+
+    // Recreate offscreen framebuffer at viewport dimensions
+    offscreen_framebuffers.resize(1);
+    std::array<VkImageView, 2> offFbAttachments = { offscreen_view, offscreen_depth_view };
+    VkFramebufferCreateInfo offFbInfo{};
+    offFbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+    offFbInfo.renderPass = offscreen_render_pass;
+    offFbInfo.attachmentCount = static_cast<uint32_t>(offFbAttachments.size());
+    offFbInfo.pAttachments = offFbAttachments.data();
+    offFbInfo.width = (uint32_t)w;
+    offFbInfo.height = (uint32_t)h;
+    offFbInfo.layers = 1;
+
+    VK_CHECK(vkCreateFramebuffer(device, &offFbInfo, nullptr, &offscreen_framebuffers[0]));
+
+    // Update FXAA descriptor sets to point to new offscreen image
+    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        VkDescriptorImageInfo fxaaImageInfo{};
+        fxaaImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        fxaaImageInfo.imageView = offscreen_view;
+        fxaaImageInfo.sampler = offscreen_sampler;
+
+        VkWriteDescriptorSet descriptorWrite{};
+        descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        descriptorWrite.dstSet = fxaa_descriptor_sets[i];
+        descriptorWrite.dstBinding = 0;
+        descriptorWrite.dstArrayElement = 0;
+        descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        descriptorWrite.descriptorCount = 1;
+        descriptorWrite.pImageInfo = &fxaaImageInfo;
+
+        vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+    }
+
+    // Update projection matrix for viewport aspect ratio
+    float ratio = static_cast<float>(w) / static_cast<float>(h);
+    projection_matrix = glm::perspectiveRH_ZO(glm::radians(field_of_view), ratio, 0.1f, 1000.0f);
+    projection_matrix[1][1] *= -1;
+
+    LOG_ENGINE_INFO("[Vulkan] Viewport resources created ({}x{})", w, h);
 }
 
 void VulkanRenderAPI::destroyViewportResources()
 {
+    if (viewport_image == VK_NULL_HANDLE) {
+        viewport_width_rt = 0;
+        viewport_height_rt = 0;
+        return;
+    }
+
+    vkDeviceWaitIdle(device);
+
+    if (viewport_imgui_ds != VK_NULL_HANDLE) {
+        ImGui_ImplVulkan_RemoveTexture(viewport_imgui_ds);
+        viewport_imgui_ds = VK_NULL_HANDLE;
+    }
+
+    if (viewport_framebuffer != VK_NULL_HANDLE) {
+        vkDestroyFramebuffer(device, viewport_framebuffer, nullptr);
+        viewport_framebuffer = VK_NULL_HANDLE;
+    }
+
+    if (viewport_depth_view != VK_NULL_HANDLE) {
+        vkDestroyImageView(device, viewport_depth_view, nullptr);
+        viewport_depth_view = VK_NULL_HANDLE;
+    }
+    if (viewport_depth_image != VK_NULL_HANDLE && vma_allocator) {
+        vmaDestroyImage(vma_allocator, viewport_depth_image, viewport_depth_allocation);
+        viewport_depth_image = VK_NULL_HANDLE;
+        viewport_depth_allocation = nullptr;
+    }
+
+    if (viewport_view != VK_NULL_HANDLE) {
+        vkDestroyImageView(device, viewport_view, nullptr);
+        viewport_view = VK_NULL_HANDLE;
+    }
+    if (viewport_image != VK_NULL_HANDLE && vma_allocator) {
+        vmaDestroyImage(vma_allocator, viewport_image, viewport_allocation);
+        viewport_image = VK_NULL_HANDLE;
+        viewport_allocation = VK_NULL_HANDLE;
+    }
+
+    viewport_sampler = VK_NULL_HANDLE;  // Owned by sampler cache
     viewport_width_rt = 0;
     viewport_height_rt = 0;
-    // TODO: Destroy viewport Vulkan resources
 }
 
 void VulkanRenderAPI::setViewportSize(int width, int height)
@@ -4565,17 +4990,172 @@ void VulkanRenderAPI::setViewportSize(int width, int height)
 
 void VulkanRenderAPI::endSceneRender()
 {
-    // For now, fall through to endFrame behavior
-    endFrame();
+    if (!isViewportMode()) {
+        endFrame();
+        return;
+    }
+
+    if (!frame_started) return;
+
+    VkCommandBuffer cmd = command_buffers[current_frame];
+
+    // End the main render pass (scene was rendered to offscreen)
+    if (main_pass_started) {
+        vkCmdEndRenderPass(cmd);
+        main_pass_started = false;
+    }
+
+    // Resolve offscreen -> viewport image
+    if (fxaaEnabled && fxaa_initialized) {
+        // FXAA pass: sample offscreen, write to viewport via fullscreen quad
+        VkRenderPassBeginInfo rpBegin{};
+        rpBegin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        rpBegin.renderPass = viewport_resolve_pass;
+        rpBegin.framebuffer = viewport_framebuffer;
+        rpBegin.renderArea.offset = {0, 0};
+        rpBegin.renderArea.extent = { (uint32_t)viewport_width_rt, (uint32_t)viewport_height_rt };
+        rpBegin.clearValueCount = 0;
+
+        vkCmdBeginRenderPass(cmd, &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
+
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, fxaa_pipeline);
+
+        VkViewport vp{};
+        vp.x = 0.0f;
+        vp.y = 0.0f;
+        vp.width = static_cast<float>(viewport_width_rt);
+        vp.height = static_cast<float>(viewport_height_rt);
+        vp.minDepth = 0.0f;
+        vp.maxDepth = 1.0f;
+        vkCmdSetViewport(cmd, 0, 1, &vp);
+
+        VkRect2D scissor{};
+        scissor.offset = {0, 0};
+        scissor.extent = { (uint32_t)viewport_width_rt, (uint32_t)viewport_height_rt };
+        vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, fxaa_pipeline_layout,
+                                0, 1, &fxaa_descriptor_sets[current_frame], 0, nullptr);
+
+        glm::vec2 inverseScreenSize(1.0f / viewport_width_rt, 1.0f / viewport_height_rt);
+        vkCmdPushConstants(cmd, fxaa_pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, sizeof(glm::vec2), &inverseScreenSize);
+
+        VkBuffer vertexBuffers[] = { fxaa_vertex_buffer };
+        VkDeviceSize offsets[] = { 0 };
+        vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
+
+        vkCmdDraw(cmd, 6, 1, 0, 0);
+
+        vkCmdEndRenderPass(cmd);
+    } else {
+        // No FXAA: copy offscreen -> viewport via image copy
+        // Transition offscreen: SHADER_READ_ONLY -> TRANSFER_SRC
+        VkImageMemoryBarrier barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        barrier.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image = offscreen_image;
+        barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        barrier.subresourceRange.baseMipLevel = 0;
+        barrier.subresourceRange.levelCount = 1;
+        barrier.subresourceRange.baseArrayLayer = 0;
+        barrier.subresourceRange.layerCount = 1;
+
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+        // Transition viewport: UNDEFINED -> TRANSFER_DST
+        VkImageMemoryBarrier vpBarrier = barrier;
+        vpBarrier.srcAccessMask = 0;
+        vpBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        vpBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        vpBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        vpBarrier.image = viewport_image;
+
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &vpBarrier);
+
+        // Copy
+        VkImageCopy region{};
+        region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.srcSubresource.layerCount = 1;
+        region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.dstSubresource.layerCount = 1;
+        region.extent = { (uint32_t)viewport_width_rt, (uint32_t)viewport_height_rt, 1 };
+
+        vkCmdCopyImage(cmd,
+            offscreen_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            viewport_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            1, &region);
+
+        // Transition viewport: TRANSFER_DST -> SHADER_READ_ONLY
+        vpBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        vpBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vpBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        vpBarrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &vpBarrier);
+    }
+
+    // Command buffer stays open for renderUI()
 }
 
 uint64_t VulkanRenderAPI::getViewportTextureID()
 {
-    // TODO: Return Vulkan descriptor set for viewport texture
-    return 0;
+    return (uint64_t)viewport_imgui_ds;
 }
 
 void VulkanRenderAPI::renderUI()
 {
-    // Vulkan viewport mode not yet implemented - ImGui already rendered in endFrame
+    if (!isViewportMode()) return;
+    if (!frame_started || !image_acquired) return;
+
+    VkCommandBuffer cmd = command_buffers[current_frame];
+
+    // Begin UI render pass targeting swapchain (reuse fxaa_framebuffers, ui_render_pass is compatible)
+    VkRenderPassBeginInfo rpBegin{};
+    rpBegin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    rpBegin.renderPass = ui_render_pass;
+    rpBegin.framebuffer = fxaa_framebuffers[current_image_index];
+    rpBegin.renderArea.offset = {0, 0};
+    rpBegin.renderArea.extent = swapchain_extent;
+
+    VkClearValue clearValue{};
+    clearValue.color = {{0.1f, 0.1f, 0.1f, 1.0f}};
+    rpBegin.clearValueCount = 1;
+    rpBegin.pClearValues = &clearValue;
+
+    vkCmdBeginRenderPass(cmd, &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
+
+    VkViewport vp{};
+    vp.x = 0.0f;
+    vp.y = 0.0f;
+    vp.width = static_cast<float>(swapchain_extent.width);
+    vp.height = static_cast<float>(swapchain_extent.height);
+    vp.minDepth = 0.0f;
+    vp.maxDepth = 1.0f;
+    vkCmdSetViewport(cmd, 0, 1, &vp);
+
+    VkRect2D scissor{};
+    scissor.offset = {0, 0};
+    scissor.extent = swapchain_extent;
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+    ImDrawData* draw_data = ImGui::GetDrawData();
+    if (draw_data && draw_data->TotalVtxCount > 0) {
+        ImGui_ImplVulkan_RenderDrawData(draw_data, cmd);
+    }
+
+    vkCmdEndRenderPass(cmd);
+    vkEndCommandBuffer(cmd);
+    frame_started = false;
 }
