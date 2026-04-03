@@ -1,4 +1,4 @@
-# garden-opengl
+# Garden Framework
 
 ## Description
 
