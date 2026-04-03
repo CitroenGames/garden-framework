@@ -1492,7 +1492,25 @@ void MetalRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t 
             [impl->encoder setVertexBuffer:vertexBuffer offset:0 atIndex:0];
             impl->lastBoundVertexBuffer = vertexBuffer;
         }
-        [impl->encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:start_vertex vertexCount:vertex_count];
+        if (metalMesh->isIndexed()) {
+            id<MTLBuffer> indexBuffer = (__bridge id<MTLBuffer>)metalMesh->getIndexBuffer();
+            if (indexBuffer) {
+                size_t maxIndex = [indexBuffer length] / sizeof(uint32_t);
+                size_t endOffset = start_vertex + vertex_count;
+                if (endOffset > maxIndex) {
+                    vertex_count = maxIndex > start_vertex ? maxIndex - start_vertex : 0;
+                }
+                if (vertex_count > 0) {
+                    [impl->encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+                                              indexCount:vertex_count
+                                               indexType:MTLIndexTypeUInt32
+                                             indexBuffer:indexBuffer
+                                       indexBufferOffset:start_vertex * sizeof(uint32_t)];
+                }
+            }
+        } else {
+            [impl->encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:start_vertex vertexCount:vertex_count];
+        }
         impl->drawCallCount++;
         return;
     }
@@ -1574,7 +1592,25 @@ void MetalRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t 
         impl->lastBoundVertexBuffer = vertexBuffer;
     }
 
-    [impl->encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:start_vertex vertexCount:vertex_count];
+    if (metalMesh->isIndexed()) {
+        id<MTLBuffer> indexBuffer = (__bridge id<MTLBuffer>)metalMesh->getIndexBuffer();
+        if (indexBuffer) {
+            size_t maxIndex = [indexBuffer length] / sizeof(uint32_t);
+            size_t endOffset = start_vertex + vertex_count;
+            if (endOffset > maxIndex) {
+                vertex_count = maxIndex > start_vertex ? maxIndex - start_vertex : 0;
+            }
+            if (vertex_count > 0) {
+                [impl->encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+                                          indexCount:vertex_count
+                                           indexType:MTLIndexTypeUInt32
+                                         indexBuffer:indexBuffer
+                                   indexBufferOffset:start_vertex * sizeof(uint32_t)];
+            }
+        }
+    } else {
+        [impl->encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:start_vertex vertexCount:vertex_count];
+    }
     impl->drawCallCount++;
 }
 
@@ -1931,6 +1967,10 @@ void MetalRenderAPI::setViewportSize(int width, int height)
     impl->offscreenTexture = nil;
     impl->offscreenDepthTexture = nil;
     impl->createOffscreenResources(width, height);
+
+    // Update projection matrix to match viewport aspect ratio
+    float ratio = (float)width / (float)height;
+    impl->projectionMatrix = glm::perspectiveRH_ZO(glm::radians(impl->fieldOfView), ratio, 0.1f, 1000.0f);
 }
 
 void MetalRenderAPI::endSceneRender()
