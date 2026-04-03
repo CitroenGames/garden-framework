@@ -9,6 +9,7 @@ struct GardenProject
     std::string engine_version;
     std::string default_level;
     std::string game_module;
+    std::string buildscript;
 };
 
 // Lightweight .garden file reader — no Engine dependency.

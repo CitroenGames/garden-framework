@@ -155,6 +155,12 @@ GAME_API void gardenOnPlayStop()
     std::ofstream bs_file(buildscript_path);
     if (bs_file.is_open())
     {
+        bs_file << "[solution]\n";
+        bs_file << "name = " << name << "\n";
+        bs_file << "platforms = x64, Linux\n";
+        bs_file << "\n";
+        bs_file << "include = ${ENGINE_PATH}/Engine/Engine.buildscript\n";
+        bs_file << "\n";
         bs_file << "[project:" << name << "]\n";
         bs_file << "type = dll\n";
         bs_file << "sources = src/**/*.cpp\n";
