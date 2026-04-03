@@ -197,6 +197,8 @@ public:
     VkRenderPass getFxaaRenderPass() const { return fxaa_render_pass; }
     uint32_t getSwapchainImageCount() const { return static_cast<uint32_t>(swapchain_images.size()); }
     VkCommandBuffer getCurrentCommandBuffer() const { return command_buffers[current_frame]; }
+    VkFormat getSwapchainFormat() const { return swapchain_format; }
+    uint32_t getCurrentFrameIndex() const { return current_frame; }
 
 private:
     // Initialization helpers

@@ -27,5 +27,10 @@ for shader in basic shadow sky fxaa; do
     "$GLSLC" "$SHADER_DIR/$shader.frag" -o "$SHADER_DIR/$shader.frag.spv"
 done
 
+echo "Compiling RmlUi shaders..."
+"$GLSLC" "$SHADER_DIR/rmlui.vert" -o "$SHADER_DIR/rmlui.vert.spv"
+"$GLSLC" "$SHADER_DIR/rmlui_color.frag" -o "$SHADER_DIR/rmlui_color.frag.spv"
+"$GLSLC" "$SHADER_DIR/rmlui_texture.frag" -o "$SHADER_DIR/rmlui_texture.frag.spv"
+
 echo ""
 echo "Shader compilation successful!"

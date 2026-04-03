@@ -1,0 +1,32 @@
+[project:RmlUi]
+type = lib
+std = 17
+sources = {
+    Source/Core/*.cpp
+    Source/Core/Elements/*.cpp
+    Source/Core/Layout/*.cpp
+    Source/Core/FontEngineDefault/*.cpp
+    Source/Debugger/Debugger.cpp
+    Source/Debugger/DebuggerPlugin.cpp
+    Source/Debugger/DebuggerSystemInterface.cpp
+    Source/Debugger/ElementContextHook.cpp
+    Source/Debugger/ElementDataModels.cpp
+    Source/Debugger/ElementDebugDocument.cpp
+    Source/Debugger/ElementInfo.cpp
+    Source/Debugger/ElementLog.cpp
+    Source/Debugger/DebuggerGeometry.cpp
+    Backends/RmlUi_Platform_SDL.cpp
+}
+headers = {
+    Include/RmlUi/**/*.h
+    Include/RmlUi/**/*.hpp
+    Include/RmlUi/**/*.inl
+    Source/Core/**/*.h
+    Source/Debugger/**/*.h
+    Backends/RmlUi_Platform_SDL.h
+}
+includes = Include, Source, Backends
+public_includes = Include, Backends
+defines = RMLUI_STATIC_LIB, RMLUI_SDL_VERSION_MAJOR=2, RMLUI_FONT_ENGINE_FREETYPE
+multiprocessor = true
+target_link_libraries(freetype, SDL2)

@@ -43,6 +43,7 @@ if(macOS)
 target_link_libraries(
     PRIVATE Engine
 )
+defines = RMLUI_STATIC_LIB, RMLUI_SDL_VERSION_MAJOR=2
 multiprocessor = true
 std = 20
 utf8 = true

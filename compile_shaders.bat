@@ -77,6 +77,25 @@ if %ERRORLEVEL% NEQ 0 (
     exit /b 1
 )
 
+echo Compiling RmlUi shaders...
+"%GLSLC%" "%SHADER_DIR%\rmlui.vert" -o "%OUT_DIR%\rmlui.vert.spv"
+if %ERRORLEVEL% NEQ 0 (
+    echo ERROR: Failed to compile rmlui.vert
+    exit /b 1
+)
+
+"%GLSLC%" "%SHADER_DIR%\rmlui_color.frag" -o "%OUT_DIR%\rmlui_color.frag.spv"
+if %ERRORLEVEL% NEQ 0 (
+    echo ERROR: Failed to compile rmlui_color.frag
+    exit /b 1
+)
+
+"%GLSLC%" "%SHADER_DIR%\rmlui_texture.frag" -o "%OUT_DIR%\rmlui_texture.frag.spv"
+if %ERRORLEVEL% NEQ 0 (
+    echo ERROR: Failed to compile rmlui_texture.frag
+    exit /b 1
+)
+
 echo.
 echo Shader compilation successful!
 echo Output files:
@@ -88,5 +107,8 @@ echo   %OUT_DIR%\sky.vert.spv
 echo   %OUT_DIR%\sky.frag.spv
 echo   %OUT_DIR%\fxaa.vert.spv
 echo   %OUT_DIR%\fxaa.frag.spv
+echo   %OUT_DIR%\rmlui.vert.spv
+echo   %OUT_DIR%\rmlui_color.frag.spv
+echo   %OUT_DIR%\rmlui_texture.frag.spv
 
 endlocal
