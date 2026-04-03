@@ -3,6 +3,8 @@
 #include "imgui.h"
 #include "EditorState.hpp"
 
+class ToolbarPanel;
+
 class ViewportPanel
 {
 public:
@@ -10,5 +12,9 @@ public:
     int width = 800;
     int height = 600;
 
-    void draw(ImTextureID scene_texture, PlayMode play_mode = PlayMode::Editing);
+    // Set by EditorApp during initialization
+    ToolbarPanel* toolbar = nullptr;
+    bool* show_toolbar = nullptr;
+
+    void draw(ImTextureID scene_texture, EditorState& state);
 };

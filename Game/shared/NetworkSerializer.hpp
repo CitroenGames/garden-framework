@@ -150,6 +150,7 @@ namespace NetworkSerializer
         }
         if (entity.flags & ComponentFlags::GROUNDED) {
             writer.writeByte(entity.grounded);
+            writer.writeVector3f(entity.ground_normal);
         }
     }
 
@@ -167,6 +168,7 @@ namespace NetworkSerializer
         }
         if (entity.flags & ComponentFlags::GROUNDED) {
             entity.grounded = reader.readByte();
+            entity.ground_normal = reader.readVector3f();
         }
 
         return !reader.hasError();
@@ -177,6 +179,7 @@ namespace NetworkSerializer
         writer.writeByte(static_cast<uint8_t>(msg.type));
         writer.writeUInt32(msg.server_tick);
         writer.writeUInt16(static_cast<uint16_t>(entities.size()));
+        writer.writeUInt32(msg.last_processed_input_tick);
 
         // Serialize each entity
         for (const auto& entity : entities) {
@@ -190,6 +193,7 @@ namespace NetworkSerializer
         if (msg.type != MessageType::WORLD_STATE_UPDATE) return false;
         msg.server_tick = reader.readUInt32();
         uint16_t num_entities = reader.readUInt16();
+        msg.last_processed_input_tick = reader.readUInt32();
 
         entities.clear();
         entities.reserve(num_entities);

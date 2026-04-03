@@ -12,6 +12,7 @@ class InputHandler
 private:
     std::shared_ptr<InputManager> input_manager;
     std::function<void()> quit_callback;
+    std::function<void(int, int)> resize_callback;
     bool should_quit = false;
     bool ui_mode = false;  // When true, mouse is visible and game input is paused
     bool is_minimized_state = false;
@@ -28,6 +29,12 @@ public:
     void set_quit_callback(std::function<void()> callback)
     {
         quit_callback = callback;
+    }
+
+    // Set a callback for when the window is resized
+    void set_resize_callback(std::function<void(int, int)> callback)
+    {
+        resize_callback = callback;
     }
 
     // Get the shared input manager
@@ -112,14 +119,19 @@ public:
                     ImGuiManager::get().setShowSettings(ui_mode);
                     break;  // Don't pass F3 to game input
                 }
-                // Fall through to default handling for other keys
-                [[fallthrough]];
+                break;
 
             case SDL_WINDOWEVENT:
                 if (event.window.event == SDL_WINDOWEVENT_MINIMIZED)
                     is_minimized_state = true;
                 else if (event.window.event == SDL_WINDOWEVENT_RESTORED)
                     is_minimized_state = false;
+                else if (event.window.event == SDL_WINDOWEVENT_RESIZED ||
+                         event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED)
+                {
+                    if (resize_callback)
+                        resize_callback(event.window.data1, event.window.data2);
+                }
                 break;
 
             default:

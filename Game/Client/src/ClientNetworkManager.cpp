@@ -365,8 +365,43 @@ void ClientNetworkManager::handleWorldStateUpdate(BitReader& reader)
     for (const auto& update : entities) {
         if (update.shouldDelete()) {
             deleteEntity(update.entity_id);
+            continue;
+        }
+
+        // For the local player: store authoritative state for reconciliation
+        // instead of directly applying position/velocity
+        if (update.entity_id == local_player_network_id && local_player_network_id != 0) {
+            // Store the server's authoritative state
+            if (update.hasTransform()) {
+                last_server_state.position = update.position;
+            }
+            if (update.hasVelocity()) {
+                last_server_state.velocity = update.velocity;
+            }
+            if (update.hasGrounded()) {
+                last_server_state.grounded = (update.grounded != 0);
+                last_server_state.ground_normal = update.ground_normal;
+            }
+
+            last_server_processed_tick = msg.last_processed_input_tick;
+            has_authoritative_update = true;
+
+            // Discard acknowledged inputs from prediction history
+            input_history.discardUpTo(msg.last_processed_input_tick);
         } else {
+            // Remote entities: ensure entity exists, then push to interpolation buffer
             createOrUpdateEntity(update);
+
+            // Push snapshot into interpolation buffer for smooth rendering
+            if (update.hasTransform()) {
+                auto& buf = interp_buffers[update.entity_id];
+                buf.addSnapshot(
+                    msg.server_tick,
+                    update.position,
+                    update.hasVelocity() ? update.velocity : glm::vec3(0.0f),
+                    update.hasGrounded() ? (update.grounded != 0) : false
+                );
+            }
         }
     }
 }
@@ -518,6 +553,7 @@ void ClientNetworkManager::createOrUpdateEntity(const EntityUpdateData& update)
         if (game_world->registry.all_of<PlayerComponent>(entity)) {
             auto& player = game_world->registry.get<PlayerComponent>(entity);
             player.grounded = (update.grounded != 0);
+            player.ground_normal = update.ground_normal;
         }
     }
 }
@@ -536,6 +572,9 @@ void ClientNetworkManager::deleteEntity(uint32_t network_id)
         }
         network_id_to_entity.erase(it);
     }
+
+    // Clean up interpolation buffer
+    interp_buffers.erase(network_id);
 }
 
 void ClientNetworkManager::sendReliableMessage(const BitWriter& writer)
@@ -623,6 +662,61 @@ void ClientNetworkManager::handleCVarInitialSync(BitReader& reader)
             LOG_ENGINE_TRACE("Initial cvar sync: {} = {}", name, value);
         }
     }
+}
+
+void ClientNetworkManager::interpolateRemoteEntities()
+{
+    if (game_world == nullptr || last_received_server_tick == 0)
+        return;
+
+    // Render remote entities slightly in the past to ensure we have two snapshots to lerp between
+    float render_tick = static_cast<float>(last_received_server_tick) - INTERP_DELAY_TICKS;
+    if (render_tick < 0.0f)
+        render_tick = 0.0f;
+
+    for (auto& [net_id, buffer] : interp_buffers) {
+        // Skip local player — handled by prediction
+        if (net_id == local_player_network_id)
+            continue;
+
+        auto it = network_id_to_entity.find(net_id);
+        if (it == network_id_to_entity.end())
+            continue;
+
+        entt::entity entity = it->second;
+        if (!game_world->registry.valid(entity))
+            continue;
+
+        if (!game_world->registry.all_of<TransformComponent>(entity))
+            continue;
+
+        glm::vec3 interpolated_pos;
+        if (buffer.interpolate(render_tick, interpolated_pos)) {
+            auto& transform = game_world->registry.get<TransformComponent>(entity);
+            transform.position = interpolated_pos;
+        }
+    }
+}
+
+void ClientNetworkManager::storeInput(uint32_t tick, const MovementInput& input, const MovementState& predicted_state)
+{
+    PredictionEntry entry;
+    entry.tick = tick;
+    entry.input = input;
+    entry.predicted_state = predicted_state;
+    entry.valid = true;
+    input_history.push(entry);
+}
+
+bool ClientNetworkManager::popAuthoritativeUpdate(MovementState& out_state, uint32_t& out_tick)
+{
+    if (!has_authoritative_update)
+        return false;
+
+    out_state = last_server_state;
+    out_tick = last_server_processed_tick;
+    has_authoritative_update = false;
+    return true;
 }
 
 } // namespace Game

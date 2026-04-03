@@ -49,6 +49,16 @@ CONVAR(developer, 0, ConVarFlags::ARCHIVE,
 CONVAR(con_notifytime, 4.0f, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
        "Console notification display time in seconds");
 
+// Window settings
+CONVAR_BOUNDED(window_width, 1600, 320, 7680, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
+               "Window width");
+
+CONVAR_BOUNDED(window_height, 900, 240, 4320, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
+               "Window height");
+
+CONVAR(window_maximized, 0, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
+       "Window maximized state");
+
 // This function forces the linker to include this translation unit.
 // Without it, static library optimization strips all the static cvar objects.
 void InitializeDefaultCVars()

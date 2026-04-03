@@ -32,6 +32,7 @@
 #include "LevelManager.hpp"
 #include "ClientNetworkManager.hpp"
 #include "SharedComponents.hpp"
+#include "SharedMovement.hpp"
 
 #include "Utils/Log.hpp"
 #include "ImGui/ImGuiManager.hpp"
@@ -191,6 +192,9 @@ int main(int argc, char* argv[])
     // Set up input system
     input_handler.set_quit_callback([]() {
         quit_game(0);
+    });
+    input_handler.set_resize_callback([](int w, int h) {
+        app.onWindowResized(w, h);
     });
 
     auto input_manager = input_handler.get_input_manager();
@@ -418,9 +422,12 @@ int main(int argc, char* argv[])
         // Network update - receive world state and process messages
         _network.update(delta_time);
 
-        // Send player input to server
+        // Send player input to server and run client-side prediction
         if (_network.isConnected() && input_manager)
         {
+            // Disable PlayerController's built-in movement — SharedMovement handles it
+            player_controller->setMovementEnabled(false);
+
             Game::InputState input_state;
             input_state.buttons = 0;
 
@@ -444,10 +451,85 @@ int main(int argc, char* argv[])
             if (input_state.buttons & InputFlags::MOVE_RIGHT) input_state.move_right += 1.0f;
             if (input_state.buttons & InputFlags::MOVE_LEFT) input_state.move_right -= 1.0f;
 
+            // Client-side prediction: run the same movement code as the server
+            if (_world.registry.valid(player_entity) &&
+                _world.registry.all_of<TransformComponent, RigidBodyComponent, PlayerComponent>(player_entity))
+            {
+                auto& trans = _world.registry.get<TransformComponent>(player_entity);
+                auto& rb = _world.registry.get<RigidBodyComponent>(player_entity);
+                auto& pc = _world.registry.get<PlayerComponent>(player_entity);
+
+                MovementInput move_input;
+                move_input.move_forward = input_state.move_forward;
+                move_input.move_right = input_state.move_right;
+                move_input.camera_yaw = input_state.camera_yaw;
+                move_input.camera_pitch = input_state.camera_pitch;
+                move_input.buttons = input_state.buttons;
+
+                MovementState move_state;
+                move_state.position = trans.position;
+                move_state.velocity = rb.velocity;
+                move_state.grounded = pc.grounded;
+                move_state.ground_normal = pc.ground_normal;
+
+                MovementConfig move_config;
+                move_config.speed = pc.speed;
+                move_config.jump_force = pc.jump_force;
+                move_config.fixed_delta = _world.fixed_delta;
+
+                // Predict: run shared simulation locally
+                MovementState result = SharedMovement::simulate(move_input, move_state, move_config);
+
+                // Store input + predicted result for later reconciliation
+                uint32_t prediction_tick = _network.getClientTick();
+                _network.storeInput(prediction_tick, move_input, result);
+
+                // Apply predicted state to local entity
+                trans.position = result.position;
+                rb.velocity = result.velocity;
+                pc.grounded = result.grounded;
+
+                // --- Server Reconciliation ---
+                // If the server sent us an authoritative update, compare and correct
+                MovementState server_state;
+                uint32_t server_tick;
+                if (_network.popAuthoritativeUpdate(server_state, server_tick))
+                {
+                    // Check if prediction error exceeds threshold
+                    float pos_error = glm::distance(server_state.position, trans.position);
+
+                    // Only reconcile if the error is significant
+                    if (pos_error > 0.01f)
+                    {
+                        // Reset to server's authoritative state
+                        MovementState replay_state = server_state;
+
+                        // Replay all unacknowledged inputs on top of server state
+                        _network.getInputHistory().forEachFrom(server_tick, [&](const PredictionEntry& entry) {
+                            // Use the stored ground state from original prediction for replay
+                            replay_state.grounded = entry.predicted_state.grounded;
+                            replay_state.ground_normal = entry.predicted_state.ground_normal;
+                            replay_state = SharedMovement::simulate(entry.input, replay_state, move_config);
+                        });
+
+                        // Apply corrected state
+                        trans.position = replay_state.position;
+                        rb.velocity = replay_state.velocity;
+                        pc.grounded = replay_state.grounded;
+                        pc.ground_normal = replay_state.ground_normal;
+                    }
+                }
+            }
+
             _network.sendInputCommand(input_state);
         }
+        else
+        {
+            // Not connected — let PlayerController handle movement directly
+            player_controller->setMovementEnabled(true);
+        }
 
-        // physics and player collisions (only when controlling player)
+        // Physics and player collisions (only when controlling player)
         if (!player_controller->isFreecamMode())
         {
             _world.step_physics(delta_time);
@@ -477,6 +559,11 @@ int main(int argc, char* argv[])
             active_camera.camera_forward(),
             active_camera.getUpVector());
         AudioSystem::get().update();
+
+        // Interpolate remote entities for smooth rendering
+        if (_network.isConnected()) {
+            _network.interpolateRemoteEntities();
+        }
 
         // render using the active camera (either player or freecam)
         _renderer.render_scene(_world.registry, active_camera);
