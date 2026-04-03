@@ -5,3 +5,4 @@ headers = src/**/*.h
 sources = src/**/*.cpp
 public_includes = src
 includes = src
+multiprocessor = true

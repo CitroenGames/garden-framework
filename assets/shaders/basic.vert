@@ -9,9 +9,13 @@ out vec3 Normal;
 out vec2 TexCoord;
 out float ViewDepth;  // For CSM cascade selection
 
+layout(std140, binding = 0) uniform CameraData {
+    mat4 uView;
+    mat4 uProjection;
+    vec4 uCameraPos;
+};
+
 uniform mat4 uModel;
-uniform mat4 uView;
-uniform mat4 uProjection;
 
 void main()
 {

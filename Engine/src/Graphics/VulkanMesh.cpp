@@ -181,7 +181,13 @@ void VulkanMesh::updateMeshData(const vertex* vertices, size_t count, size_t off
     submitInfo.pCommandBuffers = &commandBuffer;
 
     vkQueueSubmit(graphics_queue, 1, &submitInfo, transfer_fence);
-    vkWaitForFences(device, 1, &transfer_fence, VK_TRUE, UINT64_MAX);
+    {
+        VkResult r = vkWaitForFences(device, 1, &transfer_fence, VK_TRUE, 5'000'000'000ULL);
+        if (r == VK_TIMEOUT)
+            printf("[VulkanMesh] Transfer fence timed out after 5s\n");
+        else if (r == VK_ERROR_DEVICE_LOST)
+            printf("[VulkanMesh] VK_ERROR_DEVICE_LOST on transfer fence\n");
+    }
     vkResetFences(device, 1, &transfer_fence);
 
     vkFreeCommandBuffers(device, command_pool, 1, &commandBuffer);
@@ -218,7 +224,13 @@ void VulkanMesh::copyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize
     submitInfo.pCommandBuffers = &commandBuffer;
 
     vkQueueSubmit(graphics_queue, 1, &submitInfo, transfer_fence);
-    vkWaitForFences(device, 1, &transfer_fence, VK_TRUE, UINT64_MAX);
+    {
+        VkResult r = vkWaitForFences(device, 1, &transfer_fence, VK_TRUE, 5'000'000'000ULL);
+        if (r == VK_TIMEOUT)
+            printf("[VulkanMesh] copyBuffer fence timed out after 5s\n");
+        else if (r == VK_ERROR_DEVICE_LOST)
+            printf("[VulkanMesh] VK_ERROR_DEVICE_LOST on copyBuffer fence\n");
+    }
     vkResetFences(device, 1, &transfer_fence);
 
     vkFreeCommandBuffers(device, command_pool, 1, &commandBuffer);

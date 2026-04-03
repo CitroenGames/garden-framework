@@ -1,0 +1,980 @@
+#include "EditorApp.hpp"
+#include "ImGui/ImGuiManager.hpp"
+#include "Console/Console.hpp"
+#include "Console/ConVar.hpp"
+#include "Debug/DebugDraw.hpp"
+#include "Utils/Log.hpp"
+#include "Components/Components.hpp"
+#include "imgui.h"
+#include "imgui_internal.h"
+#include <SDL.h>
+#include <cstring>
+
+bool EditorApp::initialize(RenderAPIType api_type)
+{
+    std::strncpy(m_open_path_buf, "assets/levels/", sizeof(m_open_path_buf) - 1);
+    std::strncpy(m_save_path_buf, "assets/levels/", sizeof(m_save_path_buf) - 1);
+
+    EE::CLog::Init();
+    Console::get().initialize();
+    InitializeDefaultCVars();
+    ConVarRegistry::get().loadConfig("config.cfg");
+
+    m_app = Application(1600, 900, 60, 75.0f, api_type);
+    if (!m_app.initialize("Garden Level Editor", false))
+    {
+        LOG_ENGINE_FATAL("Failed to initialize Application");
+        return false;
+    }
+
+    IRenderAPI* render_api = m_app.getRenderAPI();
+    if (!render_api)
+    {
+        LOG_ENGINE_FATAL("Failed to get render API");
+        return false;
+    }
+
+    if (!ImGuiManager::get().initialize(m_app.getWindow(), render_api, api_type))
+    {
+        LOG_ENGINE_FATAL("Failed to initialize ImGui");
+        return false;
+    }
+
+    // Disable built-in console overlay since we have our own panel
+    ImGuiManager::get().setShowConsole(false);
+
+    m_world.initializePhysics();
+
+    m_renderer = renderer(render_api);
+
+    // Set up content browser callback
+    m_content_browser.on_open_level = [this](const std::string& path) { openLevel(path); };
+
+    // Wire up toolbar callbacks for PIE
+    m_toolbar.callbacks.on_play   = [this]() { beginPlay(); };
+    m_toolbar.callbacks.on_pause  = [this]() { pausePlay(); };
+    m_toolbar.callbacks.on_resume = [this]() { resumePlay(); };
+    m_toolbar.callbacks.on_stop   = [this]() { stopPlay(); };
+    m_toolbar.callbacks.on_eject  = [this]() { ejectFromPlay(); };
+    m_toolbar.callbacks.on_return = [this]() { returnToPlay(); };
+
+    SDL_SetRelativeMouseMode(SDL_FALSE);
+
+    m_running = true;
+
+    LOG_ENGINE_INFO("Editor initialized successfully");
+    return true;
+}
+
+void EditorApp::run()
+{
+    Uint32 last_ticks = SDL_GetTicks();
+
+    while (m_running)
+    {
+        Uint32 now = SDL_GetTicks();
+        m_delta_time = (now - last_ticks) / 1000.0f;
+        last_ticks = now;
+
+        // Reset per-frame mouse accumulators
+        m_mouse_dx = 0.0f;
+        m_mouse_dy = 0.0f;
+
+        processEvents();
+
+        // --- Simulation tick (when active and running) ---
+        if (m_state.isSimulationRunning() && m_game_sim)
+        {
+            // Forward mouse motion to player controller (only when mouse is captured)
+            if (m_mouse_captured_for_game && m_game_input_manager)
+            {
+                float mx = m_game_input_manager->get_mouse_delta_x();
+                float my = m_game_input_manager->get_mouse_delta_y();
+                if (mx != 0.0f || my != 0.0f)
+                    m_game_sim->handleMouseMotion(my, mx);
+            }
+
+            m_game_sim->update(m_delta_time);
+            m_renderer.markBVHDirty(); // entities moved during simulation
+        }
+
+        // --- Editor camera update (editing or ejected) ---
+        if (!m_state.isSimulationActive() || m_state.play_mode == PlayMode::Ejected)
+        {
+            const Uint8* keys = SDL_GetKeyboardState(nullptr);
+            m_editor_cam.update(m_delta_time, m_right_mouse, m_mouse_dx, m_mouse_dy, keys);
+        }
+
+        applyLightingFromMetadata();
+
+        // Update debug draw (tick persistent lines)
+        DebugDraw::get().update(m_delta_time);
+
+        // Draw grid if enabled (only in editing mode)
+        if (m_state.show_grid && !m_state.isSimulationActive())
+            renderGrid();
+
+        // --- Choose which camera to render with ---
+        camera& render_camera = chooseRenderCamera();
+
+        // --- Phase 1: Render 3D scene to viewport texture ---
+        IRenderAPI* render_api = m_app.getRenderAPI();
+        render_api->setViewportSize(m_viewport.width, m_viewport.height);
+        m_renderer.render_scene_to_texture(m_world.registry, render_camera);
+
+        // Update editor state stats (after scene render so stats are current)
+        m_state.fps = ImGui::GetIO().Framerate;
+        m_state.delta_time = m_delta_time;
+        m_state.total_entities = m_renderer.getTotalEntities();
+        m_state.visible_entities = m_renderer.getVisibleEntities();
+        m_state.draw_calls = m_renderer.getDrawCalls();
+        m_state.current_save_path = m_current_save_path;
+
+        // --- Phase 2: Build ImGui UI ---
+        ImGuiManager::get().newFrame();
+
+        renderDockspace();
+
+        if (m_show_ui)
+        {
+            bool bvh_dirty = false;
+
+            if (m_show_toolbar)
+                m_toolbar.draw(m_state);
+
+            // Viewport panel showing the rendered scene texture
+            if (m_show_viewport)
+            {
+                ImTextureID tex = (ImTextureID)render_api->getViewportTextureID();
+                m_viewport.draw(tex, m_state.play_mode);
+            }
+
+            if (m_show_hierarchy)
+                m_hierarchy.draw(m_world.registry, &bvh_dirty);
+
+            if (m_show_inspector)
+            {
+                bool transform_changed = m_inspector.draw(m_world.registry, m_hierarchy.selected_entity);
+                if (transform_changed)
+                    bvh_dirty = true;
+            }
+
+            if (m_show_level_settings)
+                m_level_settings.draw();
+
+            if (m_show_console)
+                m_console.draw();
+
+            if (m_show_content_browser)
+                m_content_browser.draw();
+
+            // Viewport overlay (not docked, transparent)
+            m_viewport_overlay.draw(m_state);
+
+            // Status bar (fixed at bottom)
+            if (m_show_status_bar)
+                m_status_bar.draw(m_state);
+
+            renderOpenDialog();
+            renderSaveAsDialog();
+
+            if (bvh_dirty)
+                m_renderer.markBVHDirty();
+        }
+
+        // --- Phase 3: Render ImGui to screen ---
+        ImGui::Render();
+        render_api->renderUI();
+        m_app.swapBuffers();
+
+        Uint32 frame_end = SDL_GetTicks();
+        m_app.lockFramerate(now, frame_end);
+    }
+}
+
+void EditorApp::shutdown()
+{
+    // Stop simulation if running
+    if (m_state.isSimulationActive())
+        stopPlay();
+
+    m_world.registry.clear();
+    Console::get().shutdown();
+    ImGuiManager::get().shutdown();
+    m_app.shutdown();
+    EE::CLog::Shutdown();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Play In Editor (PIE) state transitions
+// ─────────────────────────────────────────────────────────────────────────────
+
+void EditorApp::beginPlay()
+{
+    if (m_state.isSimulationActive())
+        return; // already playing
+
+    // Guard: nothing to play
+    auto view = m_world.registry.view<TagComponent, TransformComponent>();
+    if (view.size_hint() == 0)
+    {
+        LOG_ENGINE_WARN("Cannot play: no entities in the level");
+        return;
+    }
+
+    LOG_ENGINE_INFO("--- PIE: Starting play mode ---");
+
+    // 1. Snapshot current state
+    m_play_snapshot = buildLevelDataFromECS();
+    m_pre_play_editor_cam = m_editor_cam.cam;
+
+    // Save selected entity name for restoration
+    m_pre_play_selected_name.clear();
+    if (m_hierarchy.selected_entity != entt::null &&
+        m_world.registry.valid(m_hierarchy.selected_entity) &&
+        m_world.registry.all_of<TagComponent>(m_hierarchy.selected_entity))
+    {
+        m_pre_play_selected_name = m_world.registry.get<TagComponent>(m_hierarchy.selected_entity).name;
+    }
+
+    // 2. Create input manager for game simulation
+    m_game_input_manager = std::make_shared<InputManager>();
+
+    // 3. Create and initialize game simulation
+    m_game_sim = std::make_unique<GameSimulation>(&m_world, m_game_input_manager);
+    m_game_sim->initialize();
+
+    // 4. Enter playing state (mouse stays free until user clicks viewport)
+    m_state.play_mode = PlayMode::Playing;
+    m_mouse_captured_for_game = false;
+
+    m_renderer.markBVHDirty();
+
+    LOG_ENGINE_INFO("--- PIE: Play mode started (click viewport to capture mouse) ---");
+}
+
+void EditorApp::stopPlay()
+{
+    if (!m_state.isSimulationActive())
+        return; // not playing
+
+    LOG_ENGINE_INFO("--- PIE: Stopping play mode ---");
+
+    // 1. Destroy simulation
+    m_game_sim.reset();
+    m_game_input_manager.reset();
+
+    // 2. Reset world (shutdown physics, clear registry, reinitialize)
+    m_world.resetWorld();
+    m_level_manager.cleanup();
+    m_inspector.mesh_path_cache.clear();
+    m_hierarchy.selected_entity = entt::null;
+
+    // 3. Restore from snapshot
+    m_level_data = m_play_snapshot;
+    m_level_settings.metadata = &m_level_data.metadata;
+
+    m_level_manager.instantiateLevel(
+        m_play_snapshot, m_world, m_app.getRenderAPI(),
+        nullptr, nullptr, nullptr);
+
+    // 4. Rebuild caches
+    buildMeshPathCache();
+
+    // 5. Restore editor camera
+    m_editor_cam.cam = m_pre_play_editor_cam;
+
+    // 6. Restore selection by name (best-effort)
+    if (!m_pre_play_selected_name.empty())
+    {
+        auto tag_view = m_world.registry.view<TagComponent>();
+        for (auto entity : tag_view)
+        {
+            if (tag_view.get<TagComponent>(entity).name == m_pre_play_selected_name)
+            {
+                m_hierarchy.selected_entity = entity;
+                break;
+            }
+        }
+    }
+
+    // 7. Restore state
+    m_state.play_mode = PlayMode::Editing;
+    m_mouse_captured_for_game = false;
+    SDL_SetRelativeMouseMode(SDL_FALSE);
+
+    applyLightingFromMetadata();
+    m_renderer.markBVHDirty();
+
+    LOG_ENGINE_INFO("--- PIE: Play mode stopped, state restored ---");
+}
+
+void EditorApp::pausePlay()
+{
+    if (m_state.play_mode != PlayMode::Playing)
+        return;
+
+    if (m_game_sim)
+        m_game_sim->setPaused(true);
+
+    m_state.play_mode = PlayMode::Paused;
+    m_mouse_captured_for_game = false;
+    SDL_SetRelativeMouseMode(SDL_FALSE);
+
+    LOG_ENGINE_INFO("PIE: Paused");
+}
+
+void EditorApp::resumePlay()
+{
+    if (m_state.play_mode != PlayMode::Paused)
+        return;
+
+    if (m_game_sim)
+        m_game_sim->setPaused(false);
+
+    m_state.play_mode = PlayMode::Playing;
+    // Don't auto-capture mouse, user clicks viewport to recapture
+
+    LOG_ENGINE_INFO("PIE: Resumed");
+}
+
+void EditorApp::ejectFromPlay()
+{
+    if (m_state.play_mode != PlayMode::Playing)
+        return;
+
+    m_state.play_mode = PlayMode::Ejected;
+    m_mouse_captured_for_game = false;
+    SDL_SetRelativeMouseMode(SDL_FALSE);
+
+    // Sync editor camera to current game camera so user starts flying from there
+    if (m_game_sim)
+        m_editor_cam.cam = m_game_sim->getActiveCamera();
+
+    LOG_ENGINE_INFO("PIE: Ejected (editor camera, simulation continues)");
+}
+
+void EditorApp::returnToPlay()
+{
+    if (m_state.play_mode != PlayMode::Ejected)
+        return;
+
+    m_state.play_mode = PlayMode::Playing;
+    // Don't auto-capture mouse, user clicks viewport to recapture
+
+    LOG_ENGINE_INFO("PIE: Returned to play");
+}
+
+camera& EditorApp::chooseRenderCamera()
+{
+    switch (m_state.play_mode)
+    {
+    case PlayMode::Playing:
+    case PlayMode::Paused:
+        if (m_game_sim)
+            return m_game_sim->getActiveCamera();
+        return m_editor_cam.cam;
+
+    case PlayMode::Ejected:
+        return m_editor_cam.cam;
+
+    case PlayMode::Editing:
+    default:
+        return m_editor_cam.cam;
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Event processing with input routing
+// ─────────────────────────────────────────────────────────────────────────────
+
+void EditorApp::processEvents()
+{
+    // Update game input manager at start of frame (resets deltas)
+    if (m_game_input_manager)
+        m_game_input_manager->update();
+
+    SDL_Event event;
+    while (SDL_PollEvent(&event))
+    {
+        ImGuiManager::get().processEvent(&event);
+
+        switch (event.type)
+        {
+        case SDL_QUIT:
+            if (m_state.isSimulationActive())
+                stopPlay();
+            m_running = false;
+            break;
+
+        case SDL_KEYDOWN:
+            if (!event.key.repeat)
+            {
+                // --- Global hotkeys (work in any mode) ---
+
+                // F1: toggle UI
+                if (event.key.keysym.scancode == SDL_SCANCODE_F1)
+                {
+                    m_show_ui = !m_show_ui;
+                    break;
+                }
+
+                // Escape during play: first release mouse, second press stops play
+                if (event.key.keysym.scancode == SDL_SCANCODE_ESCAPE &&
+                    m_state.isSimulationActive())
+                {
+                    if (m_mouse_captured_for_game)
+                    {
+                        // First Escape: release mouse capture
+                        m_mouse_captured_for_game = false;
+                        SDL_SetRelativeMouseMode(SDL_FALSE);
+                    }
+                    else
+                    {
+                        // Second Escape (or Escape when not captured): stop play
+                        stopPlay();
+                    }
+                    break;
+                }
+
+                // F8: eject/return toggle during play
+                if (event.key.keysym.scancode == SDL_SCANCODE_F8)
+                {
+                    if (m_state.play_mode == PlayMode::Playing)
+                    {
+                        ejectFromPlay();
+                        break;
+                    }
+                    else if (m_state.play_mode == PlayMode::Ejected)
+                    {
+                        returnToPlay();
+                        break;
+                    }
+                }
+
+                // Ctrl+S: save (only in editing mode)
+                if (event.key.keysym.scancode == SDL_SCANCODE_S &&
+                    (SDL_GetModState() & KMOD_CTRL) &&
+                    !m_state.isSimulationActive())
+                {
+                    saveLevel();
+                    break;
+                }
+
+                // --- Editor-only hotkeys (transform mode) ---
+                if (!m_state.isSimulationActive() || m_state.play_mode == PlayMode::Ejected)
+                {
+                    if (!ImGui::GetIO().WantCaptureKeyboard)
+                    {
+                        if (event.key.keysym.scancode == SDL_SCANCODE_W)
+                            m_state.transform_mode = EditorState::TransformMode::Translate;
+                        if (event.key.keysym.scancode == SDL_SCANCODE_E)
+                            m_state.transform_mode = EditorState::TransformMode::Rotate;
+                        if (event.key.keysym.scancode == SDL_SCANCODE_R)
+                            m_state.transform_mode = EditorState::TransformMode::Scale;
+                    }
+                }
+            }
+
+            // Route keyboard to game input during Playing mode
+            if (m_state.play_mode == PlayMode::Playing && m_game_input_manager &&
+                !ImGui::GetIO().WantCaptureKeyboard)
+            {
+                m_game_input_manager->process_event(event);
+            }
+            break;
+
+        case SDL_KEYUP:
+            // Route key release to game input during Playing mode
+            if (m_state.play_mode == PlayMode::Playing && m_game_input_manager &&
+                !ImGui::GetIO().WantCaptureKeyboard)
+            {
+                m_game_input_manager->process_event(event);
+            }
+            break;
+
+        case SDL_MOUSEMOTION:
+            if (m_mouse_captured_for_game && m_game_input_manager)
+            {
+                // Route mouse motion to game input when captured
+                m_game_input_manager->process_event(event);
+            }
+            else
+            {
+                // Editor camera motion accumulation
+                m_mouse_dx += static_cast<float>(event.motion.xrel);
+                m_mouse_dy += static_cast<float>(event.motion.yrel);
+            }
+            break;
+
+        case SDL_MOUSEBUTTONDOWN:
+            // During Playing mode: left-click in viewport captures mouse for game
+            if (m_state.play_mode == PlayMode::Playing && !m_mouse_captured_for_game)
+            {
+                if (event.button.button == SDL_BUTTON_LEFT &&
+                    !ImGui::GetIO().WantCaptureMouse)
+                {
+                    m_mouse_captured_for_game = true;
+                    SDL_SetRelativeMouseMode(SDL_TRUE);
+                    break;
+                }
+            }
+
+            if (m_mouse_captured_for_game && m_game_input_manager)
+            {
+                m_game_input_manager->process_event(event);
+            }
+            else if (!m_state.isSimulationActive() || m_state.play_mode == PlayMode::Ejected)
+            {
+                // Editor camera: right-click to fly
+                if (event.button.button == SDL_BUTTON_RIGHT)
+                {
+                    m_right_mouse = true;
+                    SDL_SetRelativeMouseMode(SDL_TRUE);
+                }
+            }
+            break;
+
+        case SDL_MOUSEBUTTONUP:
+            if (m_mouse_captured_for_game && m_game_input_manager)
+            {
+                m_game_input_manager->process_event(event);
+            }
+            else if (!m_state.isSimulationActive() || m_state.play_mode == PlayMode::Ejected)
+            {
+                if (event.button.button == SDL_BUTTON_RIGHT)
+                {
+                    m_right_mouse = false;
+                    SDL_SetRelativeMouseMode(SDL_FALSE);
+                }
+            }
+            break;
+
+        default:
+            break;
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Dockspace, menus, dialogs (mostly unchanged, with play-mode guards)
+// ─────────────────────────────────────────────────────────────────────────────
+
+void EditorApp::renderDockspace()
+{
+    ImGuiWindowFlags dockspace_flags =
+        ImGuiWindowFlags_MenuBar        |
+        ImGuiWindowFlags_NoDocking      |
+        ImGuiWindowFlags_NoTitleBar     |
+        ImGuiWindowFlags_NoCollapse     |
+        ImGuiWindowFlags_NoResize       |
+        ImGuiWindowFlags_NoMove         |
+        ImGuiWindowFlags_NoBringToFrontOnFocus |
+        ImGuiWindowFlags_NoNavFocus;
+
+    ImGuiViewport* viewport = ImGui::GetMainViewport();
+
+    // Account for status bar at bottom
+    float status_bar_height = m_show_status_bar ? (ImGui::GetFrameHeight() + ImGui::GetStyle().WindowPadding.y * 2.0f) : 0.0f;
+
+    ImGui::SetNextWindowPos(viewport->Pos);
+    ImGui::SetNextWindowSize(ImVec2(viewport->Size.x, viewport->Size.y - status_bar_height));
+    ImGui::SetNextWindowViewport(viewport->ID);
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+
+    ImGui::Begin("##DockSpaceWindow", nullptr, dockspace_flags);
+    ImGui::PopStyleVar(3);
+
+    ImGuiID dockspace_id = ImGui::GetID("MainDockSpace");
+
+    // Set up default dock layout only when no saved layout exists
+    if (ImGui::DockBuilderGetNode(dockspace_id) == nullptr)
+    {
+        ImGui::DockBuilderAddNode(dockspace_id, ImGuiDockNodeFlags_DockSpace);
+        ImGui::DockBuilderSetNodeSize(dockspace_id, ImVec2(viewport->Size.x, viewport->Size.y - status_bar_height));
+
+        ImGuiID dock_main = dockspace_id;
+
+        // Split bottom panel (25% height)
+        ImGuiID dock_bottom;
+        ImGui::DockBuilderSplitNode(dock_main, ImGuiDir_Down, 0.25f, &dock_bottom, &dock_main);
+
+        // Split left panel (20% width)
+        ImGuiID dock_left;
+        ImGui::DockBuilderSplitNode(dock_main, ImGuiDir_Left, 0.2f, &dock_left, &dock_main);
+
+        // Split right panel (25% width of remaining)
+        ImGuiID dock_right;
+        ImGui::DockBuilderSplitNode(dock_main, ImGuiDir_Right, 0.25f, &dock_right, &dock_main);
+
+        // Split a thin toolbar strip at the top of center area
+        ImGuiID dock_toolbar;
+        ImGui::DockBuilderSplitNode(dock_main, ImGuiDir_Up, 0.04f, &dock_toolbar, &dock_main);
+
+        // Dock windows to their regions
+        ImGui::DockBuilderDockWindow("Toolbar", dock_toolbar);
+        ImGui::DockBuilderDockWindow("Viewport", dock_main);
+        ImGui::DockBuilderDockWindow("Scene Hierarchy", dock_left);
+        ImGui::DockBuilderDockWindow("Inspector", dock_right);
+        ImGui::DockBuilderDockWindow("Level Settings", dock_right);
+        ImGui::DockBuilderDockWindow("Console", dock_bottom);
+        ImGui::DockBuilderDockWindow("Content Browser", dock_bottom);
+
+        ImGui::DockBuilderFinish(dockspace_id);
+    }
+
+    ImGui::DockSpace(dockspace_id, ImVec2(0.0f, 0.0f));
+
+    renderMenuBar();
+
+    ImGui::End();
+}
+
+void EditorApp::renderMenuBar()
+{
+    if (ImGui::BeginMenuBar())
+    {
+        if (ImGui::BeginMenu("File"))
+        {
+            bool can_edit = !m_state.isSimulationActive();
+
+            if (ImGui::MenuItem("New", nullptr, false, can_edit))
+                newLevel();
+
+            if (ImGui::MenuItem("Open Level...", nullptr, false, can_edit))
+                m_show_open_dialog = true;
+
+            if (ImGui::MenuItem("Save", "Ctrl+S", false, can_edit))
+                saveLevel();
+
+            if (ImGui::MenuItem("Save As...", nullptr, false, can_edit))
+                m_show_save_as_dialog = true;
+
+            ImGui::Separator();
+
+            if (ImGui::MenuItem("Quit"))
+            {
+                if (m_state.isSimulationActive())
+                    stopPlay();
+                m_running = false;
+            }
+
+            ImGui::EndMenu();
+        }
+
+        if (ImGui::BeginMenu("View"))
+        {
+            ImGui::MenuItem("Viewport",        nullptr, &m_show_viewport);
+            ImGui::MenuItem("Toolbar",         nullptr, &m_show_toolbar);
+            ImGui::MenuItem("Hierarchy",       nullptr, &m_show_hierarchy);
+            ImGui::MenuItem("Inspector",       nullptr, &m_show_inspector);
+            ImGui::MenuItem("Level Settings",  nullptr, &m_show_level_settings);
+            ImGui::MenuItem("Console",         nullptr, &m_show_console);
+            ImGui::MenuItem("Content Browser", nullptr, &m_show_content_browser);
+            ImGui::MenuItem("Status Bar",      nullptr, &m_show_status_bar);
+            ImGui::Separator();
+            ImGui::MenuItem("Viewport Stats",  nullptr, &m_state.show_viewport_stats);
+            ImGui::MenuItem("Grid",            nullptr, &m_state.show_grid);
+            ImGui::Separator();
+            ImGui::MenuItem("All Panels (F1)", nullptr, &m_show_ui);
+            ImGui::EndMenu();
+        }
+
+        // Display current file in the menu bar
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 20.0f);
+        if (m_current_save_path.empty())
+            ImGui::TextDisabled("(unsaved)");
+        else
+            ImGui::TextDisabled("%s", m_current_save_path.c_str());
+
+        ImGui::EndMenuBar();
+    }
+}
+
+void EditorApp::renderOpenDialog()
+{
+    if (!m_show_open_dialog) return;
+
+    ImGui::SetNextWindowSize(ImVec2(500.0f, 110.0f), ImGuiCond_Always);
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+
+    if (ImGui::Begin("Open Level##dialog", &m_show_open_dialog,
+                     ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDocking))
+    {
+        ImGui::Text("Level path:");
+        ImGui::SetNextItemWidth(-1.0f);
+        bool enter = ImGui::InputText("##open_path", m_open_path_buf, sizeof(m_open_path_buf),
+                                      ImGuiInputTextFlags_EnterReturnsTrue);
+
+        if (ImGui::Button("Open", ImVec2(80.0f, 0.0f)) || enter)
+        {
+            openLevel(std::string(m_open_path_buf));
+            m_show_open_dialog = false;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(80.0f, 0.0f)))
+            m_show_open_dialog = false;
+    }
+    ImGui::End();
+}
+
+void EditorApp::renderSaveAsDialog()
+{
+    if (!m_show_save_as_dialog) return;
+
+    ImGui::SetNextWindowSize(ImVec2(500.0f, 110.0f), ImGuiCond_Always);
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+
+    if (ImGui::Begin("Save Level As##dialog", &m_show_save_as_dialog,
+                     ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDocking))
+    {
+        ImGui::Text("Save path:");
+        ImGui::SetNextItemWidth(-1.0f);
+        bool enter = ImGui::InputText("##save_path", m_save_path_buf, sizeof(m_save_path_buf),
+                                      ImGuiInputTextFlags_EnterReturnsTrue);
+
+        if (ImGui::Button("Save", ImVec2(80.0f, 0.0f)) || enter)
+        {
+            saveLevelAs(std::string(m_save_path_buf));
+            m_show_save_as_dialog = false;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(80.0f, 0.0f)))
+            m_show_save_as_dialog = false;
+    }
+    ImGui::End();
+}
+
+void EditorApp::renderGrid()
+{
+    const int half_extent = 50;
+    const float spacing = 1.0f;
+    const float y = 0.0f;
+
+    glm::vec3 grid_color(0.35f, 0.35f, 0.35f);
+    glm::vec3 axis_x_color(0.8f, 0.2f, 0.2f);
+    glm::vec3 axis_z_color(0.2f, 0.2f, 0.8f);
+
+    for (int i = -half_extent; i <= half_extent; i++)
+    {
+        float pos = static_cast<float>(i) * spacing;
+
+        // Lines along Z axis
+        glm::vec3 color_z = (i == 0) ? axis_x_color : grid_color;
+        DebugDraw::get().drawLine(
+            glm::vec3(pos, y, -half_extent * spacing),
+            glm::vec3(pos, y, half_extent * spacing),
+            color_z);
+
+        // Lines along X axis
+        glm::vec3 color_x = (i == 0) ? axis_z_color : grid_color;
+        DebugDraw::get().drawLine(
+            glm::vec3(-half_extent * spacing, y, pos),
+            glm::vec3(half_extent * spacing, y, pos),
+            color_x);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Level operations
+// ─────────────────────────────────────────────────────────────────────────────
+
+void EditorApp::newLevel()
+{
+    m_world.registry.clear();
+    m_level_manager.cleanup();
+    m_inspector.mesh_path_cache.clear();
+    m_hierarchy.selected_entity = entt::null;
+
+    m_level_data = LevelData{};
+    m_level_settings.metadata = &m_level_data.metadata;
+    m_current_save_path.clear();
+
+    applyLightingFromMetadata();
+    m_renderer.markBVHDirty();
+
+    LOG_ENGINE_INFO("New level created");
+}
+
+void EditorApp::openLevel(const std::string& path)
+{
+    LevelData new_data;
+    if (!m_level_manager.loadLevel(path, new_data))
+    {
+        LOG_ENGINE_ERROR("Failed to load level: {}", path);
+        return;
+    }
+
+    m_world.registry.clear();
+    m_level_manager.cleanup();
+    m_inspector.mesh_path_cache.clear();
+    m_hierarchy.selected_entity = entt::null;
+
+    m_level_data = std::move(new_data);
+    m_level_settings.metadata = &m_level_data.metadata;
+
+    m_level_manager.instantiateLevel(
+        m_level_data, m_world, m_app.getRenderAPI(),
+        nullptr, nullptr, nullptr);
+
+    buildMeshPathCache();
+
+    m_current_save_path = path;
+    std::strncpy(m_save_path_buf, path.c_str(), sizeof(m_save_path_buf) - 1);
+
+    applyLightingFromMetadata();
+    m_renderer.markBVHDirty();
+
+    LOG_ENGINE_INFO("Opened level: {}", path);
+}
+
+void EditorApp::saveLevel()
+{
+    if (m_current_save_path.empty())
+    {
+        m_show_save_as_dialog = true;
+        return;
+    }
+
+    LevelData data = buildLevelDataFromECS();
+    if (m_level_manager.saveLevelToJSON(m_current_save_path, data))
+        LOG_ENGINE_INFO("Saved level: {}", m_current_save_path);
+    else
+        LOG_ENGINE_ERROR("Failed to save level: {}", m_current_save_path);
+}
+
+void EditorApp::saveLevelAs(const std::string& path)
+{
+    m_current_save_path = path;
+    std::strncpy(m_save_path_buf, path.c_str(), sizeof(m_save_path_buf) - 1);
+    saveLevel();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Serialization helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+void EditorApp::buildMeshPathCache()
+{
+    m_inspector.mesh_path_cache.clear();
+    auto view = m_world.registry.view<TagComponent>();
+    for (auto entity : view)
+    {
+        const auto& tag = view.get<TagComponent>(entity);
+        const LevelEntity* le = findOriginalLevelEntity(tag.name);
+        if (le && !le->mesh_path.empty())
+            m_inspector.mesh_path_cache[entity] = le->mesh_path;
+    }
+}
+
+void EditorApp::applyLightingFromMetadata()
+{
+    m_renderer.set_level_lighting(
+        m_level_data.metadata.ambient_light,
+        m_level_data.metadata.diffuse_light,
+        m_level_data.metadata.light_direction);
+}
+
+const LevelEntity* EditorApp::findOriginalLevelEntity(const std::string& name) const
+{
+    for (const auto& le : m_level_data.entities)
+        if (le.name == name) return &le;
+    return nullptr;
+}
+
+LevelData EditorApp::buildLevelDataFromECS() const
+{
+    LevelData out;
+    out.metadata = m_level_data.metadata;
+
+    auto view = m_world.registry.view<TagComponent, TransformComponent>();
+    for (auto entity : view)
+    {
+        const auto& tag = view.get<TagComponent>(entity);
+        const auto& t   = view.get<TransformComponent>(entity);
+
+        LevelEntity le;
+        le.name     = tag.name;
+        le.position = t.position;
+        le.rotation = t.rotation;
+        le.scale    = t.scale;
+
+        // Determine entity type from component presence
+        bool has_player  = m_world.registry.all_of<PlayerComponent>(entity);
+        bool has_freecam = m_world.registry.all_of<FreecamComponent>(entity);
+        bool has_rb      = m_world.registry.all_of<RigidBodyComponent>(entity);
+        bool has_mesh    = m_world.registry.all_of<MeshComponent>(entity);
+        bool has_collider= m_world.registry.all_of<ColliderComponent>(entity);
+        bool has_prep    = m_world.registry.all_of<PlayerRepresentationComponent>(entity);
+
+        if      (has_player)               le.type = EntityType::Player;
+        else if (has_freecam)              le.type = EntityType::Freecam;
+        else if (has_prep)                 le.type = EntityType::PlayerRep;
+        else if (has_rb && has_collider)   le.type = EntityType::Physical;
+        else if (has_collider && !has_mesh)le.type = EntityType::Collidable;
+        else if (has_mesh)                 le.type = EntityType::Renderable;
+        else                               le.type = EntityType::Static;
+
+        // Mesh path from cache
+        auto it = m_inspector.mesh_path_cache.find(entity);
+        if (it != m_inspector.mesh_path_cache.end())
+            le.mesh_path = it->second;
+
+        // Preserve fields not exposed in inspector from original LevelEntity
+        const LevelEntity* orig = findOriginalLevelEntity(tag.name);
+        if (orig)
+        {
+            le.texture_paths      = orig->texture_paths;
+            le.collider_mesh_path = orig->collider_mesh_path;
+            le.use_mesh_collision = orig->use_mesh_collision;
+            le.culling            = orig->culling;
+            le.transparent        = orig->transparent;
+            le.visible            = orig->visible;
+            le.tracked_player_name = orig->tracked_player_name;
+            le.position_offset    = orig->position_offset;
+        }
+        else
+        {
+            le.culling = true;
+            le.visible = true;
+        }
+
+        // RigidBody
+        if (has_rb)
+        {
+            const auto& rb = m_world.registry.get<RigidBodyComponent>(entity);
+            le.has_rigidbody = true;
+            le.mass          = rb.mass;
+            le.apply_gravity = rb.apply_gravity;
+        }
+
+        if (has_collider)
+            le.has_collider = true;
+
+        // Player component
+        if (has_player)
+        {
+            const auto& pc = m_world.registry.get<PlayerComponent>(entity);
+            le.speed             = pc.speed;
+            le.jump_force        = pc.jump_force;
+            le.mouse_sensitivity = pc.mouse_sensitivity;
+        }
+
+        // Freecam component
+        if (has_freecam)
+        {
+            const auto& fc = m_world.registry.get<FreecamComponent>(entity);
+            le.movement_speed      = fc.movement_speed;
+            le.fast_movement_speed = fc.fast_movement_speed;
+            le.mouse_sensitivity   = fc.mouse_sensitivity;
+        }
+
+        out.entities.push_back(le);
+    }
+
+    out.metadata.entity_count = static_cast<int>(out.entities.size());
+    return out;
+}

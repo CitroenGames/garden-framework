@@ -294,7 +294,21 @@ public:
     virtual void setShadowQuality(int quality) override;
     virtual int getShadowQuality() const override;
 
+    // Viewport rendering (for editor)
+    virtual void endSceneRender() override;
+    virtual uint64_t getViewportTextureID() override;
+    virtual void setViewportSize(int width, int height) override;
+    virtual void renderUI() override;
+
     // D3D11 specific accessors (for ImGui integration)
     ID3D11Device* getDevice() const { return device.Get(); }
     ID3D11DeviceContext* getDeviceContext() const { return context.Get(); }
+
+private:
+    // Viewport render target for editor
+    ComPtr<ID3D11Texture2D> viewportTexture;
+    ComPtr<ID3D11RenderTargetView> viewportRTV;
+    ComPtr<ID3D11ShaderResourceView> viewportSRV;
+    int viewport_width_rt = 0, viewport_height_rt = 0;
+    void createViewportResources(int w, int h);
 };

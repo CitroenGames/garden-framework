@@ -29,6 +29,7 @@ if(Windows)
     libdirs = ${Vulkan_LIBRARY_DIRS}, ${DirectX11_LIBRARY_DIRS}
 }
 public_includes = ., backends
+multiprocessor = true
 target_link_libraries(SDL2)
 if(macOS)
 {

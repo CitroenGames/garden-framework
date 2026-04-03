@@ -5,3 +5,4 @@ sources = tiny_obj_loader.cc
 headers = *.h
 includes = .
 public_includes = .
+multiprocessor = true

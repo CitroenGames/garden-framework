@@ -67,6 +67,9 @@ bool OpenGLRenderAPI::initialize(WindowHandle window, int width, int height, flo
     // Load Shadow shader
     shader_manager->loadShader("shadow", "assets/shaders/shadow.vert", "assets/shaders/shadow.frag");
 
+    // Load Depth prepass shader
+    shader_manager->loadShader("depth", "assets/shaders/depth.vert", "assets/shaders/depth.frag");
+
     // Configure Shadow Map FBO with Cascaded Shadow Maps (texture array)
     glGenFramebuffers(1, &shadowMapFBO);
 
@@ -124,6 +127,20 @@ bool OpenGLRenderAPI::initialize(WindowHandle window, int width, int height, flo
         printf("Failed to initialize Skybox\n");
     }
 
+    // Create Uniform Buffer Objects
+    glGenBuffers(1, &camera_ubo);
+    glBindBuffer(GL_UNIFORM_BUFFER, camera_ubo);
+    glBufferData(GL_UNIFORM_BUFFER, sizeof(CameraUBOData), nullptr, GL_DYNAMIC_DRAW);
+    glBindBufferBase(GL_UNIFORM_BUFFER, 0, camera_ubo);
+
+    glGenBuffers(1, &lighting_ubo);
+    glBindBuffer(GL_UNIFORM_BUFFER, lighting_ubo);
+    glBufferData(GL_UNIFORM_BUFFER, sizeof(LightingUBOData), nullptr, GL_DYNAMIC_DRAW);
+    glBindBufferBase(GL_UNIFORM_BUFFER, 1, lighting_ubo);
+
+    glBindBuffer(GL_UNIFORM_BUFFER, 0);
+    LOG_ENGINE_INFO("UBOs created: CameraData={}B, LightingData={}B", sizeof(CameraUBOData), sizeof(LightingUBOData));
+
     setupOpenGLDefaults();
     resize(width, height);
 
@@ -133,6 +150,17 @@ bool OpenGLRenderAPI::initialize(WindowHandle window, int width, int height, flo
 
 void OpenGLRenderAPI::shutdown()
 {
+    // Clean up debug line VBO persistent mapping
+    if (debug_vbo_mapped_ptr && debug_vbo)
+    {
+        glBindBuffer(GL_ARRAY_BUFFER, debug_vbo);
+        glUnmapBuffer(GL_ARRAY_BUFFER);
+        debug_vbo_mapped_ptr = nullptr;
+    }
+    if (debug_vbo) { glDeleteBuffers(1, &debug_vbo); debug_vbo = 0; }
+    if (debug_vao) { glDeleteVertexArrays(1, &debug_vao); debug_vao = 0; }
+    debug_vbo_capacity = 0;
+
     // Clean up shader manager
     if (shader_manager)
     {
@@ -152,6 +180,19 @@ void OpenGLRenderAPI::shutdown()
         skybox = nullptr;
     }
 
+    destroyViewportFBO();
+
+    if (camera_ubo)
+    {
+        glDeleteBuffers(1, &camera_ubo);
+        camera_ubo = 0;
+    }
+    if (lighting_ubo)
+    {
+        glDeleteBuffers(1, &lighting_ubo);
+        lighting_ubo = 0;
+    }
+
     if (shadowMapFBO)
     {
         glDeleteFramebuffers(1, &shadowMapFBO);
@@ -163,9 +204,6 @@ void OpenGLRenderAPI::shutdown()
         glDeleteTextures(1, &shadowMapTextureArray);
         shadowMapTextureArray = 0;
     }
-
-    // Note: No need to disable GL capabilities during shutdown
-    // The context is about to be destroyed anyway
 
     destroyOpenGLContext();
 }
@@ -192,7 +230,8 @@ void OpenGLRenderAPI::resize(int width, int height)
 
     // Set up viewport
     glViewport(0, 0, width, height);
-    
+
+    camera_ubo_dirty = true;
     global_uniforms_dirty = true;
 }
 
@@ -276,6 +315,37 @@ void OpenGLRenderAPI::setupOpenGLDefaults()
     current_light_direction = glm::vec3(0.0f, -1.0f, 0.0f);
 }
 
+void OpenGLRenderAPI::uploadCameraUBO()
+{
+    CameraUBOData data;
+    data.view = view_matrix;
+    data.projection = projection_matrix;
+    data.cameraPos = glm::vec4(0.0f); // camera pos not currently used in shaders
+
+    glBindBuffer(GL_UNIFORM_BUFFER, camera_ubo);
+    glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(CameraUBOData), &data);
+    glBindBuffer(GL_UNIFORM_BUFFER, 0);
+    camera_ubo_dirty = false;
+}
+
+void OpenGLRenderAPI::uploadLightingUBO()
+{
+    LightingUBOData data;
+    for (int i = 0; i < NUM_CASCADES; i++)
+        data.lightSpaceMatrices[i] = lightSpaceMatrices[i];
+    for (int i = 0; i <= NUM_CASCADES; i++)
+        data.cascadeSplits[i] = glm::vec4(cascadeSplitDistances[i], 0.0f, 0.0f, 0.0f);
+    data.cascadeParams = glm::ivec4(NUM_CASCADES, debugCascades ? 1 : 0, 0, 0);
+    data.lightDir = glm::vec4(current_light_direction, 0.0f);
+    data.lightAmbient = glm::vec4(current_light_ambient, 0.0f);
+    data.lightDiffuse = glm::vec4(current_light_diffuse, 0.0f);
+
+    glBindBuffer(GL_UNIFORM_BUFFER, lighting_ubo);
+    glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(LightingUBOData), &data);
+    glBindBuffer(GL_UNIFORM_BUFFER, 0);
+    lighting_ubo_dirty = false;
+}
+
 void OpenGLRenderAPI::beginFrame()
 {
     if (post_processing)
@@ -285,6 +355,16 @@ void OpenGLRenderAPI::beginFrame()
         glDepthFunc(GL_LEQUAL); 
         current_gpu_state.depth_test = DepthTest::LessEqual;
     }
+
+    // Upload UBOs if dirty
+    if (camera_ubo_dirty)
+        uploadCameraUBO();
+    if (lighting_ubo_dirty)
+        uploadLightingUBO();
+
+    // Bind shadow map array to texture unit 1 once per frame
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, shadowMapTextureArray);
 
     // Reset model matrix to identity
     current_model_matrix = glm::mat4(1.0f);
@@ -335,6 +415,135 @@ void OpenGLRenderAPI::present()
     }
 }
 
+// --- Viewport render-to-texture (for editor) ---
+
+void OpenGLRenderAPI::createViewportFBO(int w, int h)
+{
+    if (viewport_fbo) destroyViewportFBO();
+
+    viewport_width_rt = w;
+    viewport_height_rt = h;
+
+    glGenFramebuffers(1, &viewport_fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, viewport_fbo);
+
+    glGenTextures(1, &viewport_texture);
+    glBindTexture(GL_TEXTURE_2D, viewport_texture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, viewport_texture, 0);
+
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+        printf("ERROR: Viewport framebuffer not complete!\n");
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+void OpenGLRenderAPI::destroyViewportFBO()
+{
+    if (viewport_fbo) { glDeleteFramebuffers(1, &viewport_fbo); viewport_fbo = 0; }
+    if (viewport_texture) { glDeleteTextures(1, &viewport_texture); viewport_texture = 0; }
+    viewport_width_rt = 0;
+    viewport_height_rt = 0;
+}
+
+void OpenGLRenderAPI::setViewportSize(int width, int height)
+{
+    if (width <= 0 || height <= 0) return;
+    if (width == viewport_width_rt && height == viewport_height_rt) return;
+
+    createViewportFBO(width, height);
+
+    // Also resize the post-processing FBO to match the scene render size
+    if (post_processing)
+        post_processing->resize(width, height);
+}
+
+void OpenGLRenderAPI::endSceneRender()
+{
+    if (!post_processing) return;
+
+    // End scene rendering to post-processing FBO
+    post_processing->endRender();
+
+    // Now apply FXAA (or passthrough) to the viewport texture
+    if (viewport_fbo)
+    {
+        glBindFramebuffer(GL_FRAMEBUFFER, viewport_fbo);
+        glViewport(0, 0, viewport_width_rt, viewport_height_rt);
+    }
+    else
+    {
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glViewport(0, 0, viewport_width, viewport_height);
+    }
+
+    if (fxaaEnabled)
+    {
+        Shader* fxaa_shader = post_processing->getFXAAShader();
+        if (fxaa_shader)
+        {
+            glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+            glClear(GL_COLOR_BUFFER_BIT);
+
+            fxaa_shader->use();
+            fxaa_shader->setUniform("uInverseScreenSize",
+                glm::vec2(1.0f / viewport_width_rt, 1.0f / viewport_height_rt));
+
+            glBindVertexArray(post_processing->getQuadVAO());
+            glDisable(GL_DEPTH_TEST);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, post_processing->getColorTexture());
+            fxaa_shader->setUniform("screenTexture", 0);
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+            glBindVertexArray(0);
+        }
+    }
+    else
+    {
+        // Blit from post-processing FBO to viewport FBO
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, post_processing->getFramebuffer());
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, viewport_fbo ? viewport_fbo : 0);
+        glBlitFramebuffer(0, 0, post_processing->getWidth(), post_processing->getHeight(),
+                          0, 0, viewport_width_rt, viewport_height_rt,
+                          GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    }
+
+    // Unbind and restore
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, viewport_width, viewport_height);
+
+    // Reset state tracking since we modified GL state
+    current_shader_id = 0;
+    current_bound_texture_0 = 0;
+    current_gpu_state.depth_test = DepthTest::None;
+}
+
+uint64_t OpenGLRenderAPI::getViewportTextureID()
+{
+    return static_cast<ImU64>(viewport_texture);
+}
+
+void OpenGLRenderAPI::renderUI()
+{
+    // Bind screen backbuffer
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, viewport_width, viewport_height);
+    glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDisable(GL_DEPTH_TEST);
+
+    // Render ImGui draw data to screen
+    ImDrawData* draw_data = ImGui::GetDrawData();
+    if (draw_data)
+    {
+        ImGui_ImplOpenGL3_RenderDrawData(draw_data);
+    }
+}
+
 void OpenGLRenderAPI::clear(const glm::vec3& color)
 {
     glClearColor(color.x, color.y, color.z, 1.0f);
@@ -350,6 +559,7 @@ void OpenGLRenderAPI::setCamera(const camera& cam)
     // Set up view matrix using GLM
     view_matrix = glm::lookAt(pos, target, up);
 
+    camera_ubo_dirty = true;
     global_uniforms_dirty = true;
 }
 
@@ -740,6 +950,7 @@ void OpenGLRenderAPI::beginShadowPass(const glm::vec3& lightDir, const camera& c
     glBindFramebuffer(GL_FRAMEBUFFER, shadowMapFBO);
 
     currentCascade = 0;
+    lighting_ubo_dirty = true;
     global_uniforms_dirty = true;
 }
 
@@ -798,116 +1009,15 @@ void OpenGLRenderAPI::renderMesh(const mesh& m, const RenderState& state)
     {
         const_cast<mesh&>(m).uploadToGPU(this);
         if (!m.gpu_mesh || !m.gpu_mesh->isUploaded())
-        {
-            return; // Upload failed
-        }
+            return;
     }
 
-    // NOTE: Multi-material rendering is handled by renderer.hpp which calls
-    // bindTexture() then renderMeshRange() for each material range.
-    // This function only handles the simple single-texture rendering path.
+    // For indexed meshes, draw_count is the index count; for non-indexed, it's vertex count
+    GLsizei draw_count = m.gpu_mesh->isIndexed()
+        ? static_cast<GLsizei>(m.gpu_mesh->getIndexCount())
+        : static_cast<GLsizei>(m.gpu_mesh->getVertexCount());
 
-    // Get appropriate shader for this render state
-    Shader* shader = nullptr;
-    
-    if (in_shadow_pass)
-    {
-        shader = shader_manager->getShader("shadow");
-    }
-    else
-    {
-        shader = getShaderForRenderState(state);
-    }
-    
-    if (!shader || !shader->isValid())
-    {
-        return; // No valid shader
-    }
-
-    // Bind shader
-    bool shader_changed = false;
-    if (current_shader_id != shader->getProgramID())
-    {
-        shader->use();
-        current_shader_id = shader->getProgramID();
-        shader_changed = true;
-    }
-
-    if (in_shadow_pass)
-    {
-        if (shader_changed || global_uniforms_dirty)
-        {
-            // Use current cascade's light space matrix
-            shader->setUniform("uLightSpaceMatrix", lightSpaceMatrices[currentCascade]);
-        }
-        shader->setUniform("uModel", current_model_matrix);
-    }
-    else
-    {
-        // Set global uniforms if shader changed OR globals are dirty
-        if (shader_changed || global_uniforms_dirty)
-        {
-            shader->setUniform("uView", view_matrix);
-            shader->setUniform("uProjection", projection_matrix);
-
-            // Set CSM uniforms - all cascade matrices and split distances
-            for (int i = 0; i < NUM_CASCADES; i++) {
-                shader->setUniform("uLightSpaceMatrices[" + std::to_string(i) + "]", lightSpaceMatrices[i]);
-            }
-            for (int i = 0; i <= NUM_CASCADES; i++) {
-                shader->setUniform("uCascadeSplits[" + std::to_string(i) + "]", cascadeSplitDistances[i]);
-            }
-            shader->setUniform("uCascadeCount", NUM_CASCADES);
-            shader->setUniform("uDebugCascades", debugCascades);
-
-            static bool csm_logged = false;
-            if (!csm_logged) {
-                LOG_ENGINE_INFO("CSM uniforms set: cascadeCount={}, debugCascades={}", NUM_CASCADES, debugCascades);
-                csm_logged = true;
-            }
-
-            // Set lighting uniforms
-            shader->setUniform("uLightDir", current_light_direction);
-            shader->setUniform("uLightAmbient", current_light_ambient);
-            shader->setUniform("uLightDiffuse", current_light_diffuse);
-
-            // Bind Shadow Map Array (Unit 1)
-            glActiveTexture(GL_TEXTURE1);
-            glBindTexture(GL_TEXTURE_2D_ARRAY, shadowMapTextureArray);
-            shader->setUniform("uShadowMapArray", 1);
-
-            global_uniforms_dirty = false;
-        }
-
-        // Set object specific uniforms
-        shader->setUniform("uModel", current_model_matrix);
-        shader->setUniform("uColor", state.color);
-
-        // Bind texture if available (Unit 0)
-        if (m.texture_set && m.texture != INVALID_TEXTURE)
-        {
-            // Use our optimized bindTexture
-            bindTexture(m.texture);
-            shader->setUniform("uTexture", 0);
-            shader->setUniform("uUseTexture", true);
-        }
-        else
-        {
-            shader->setUniform("uUseTexture", false);
-        }
-    }
-
-    // Apply render state (culling, blending, depth)
-    applyRenderState(state);
-
-    // Bind VAO and draw
-    OpenGLMesh* glMesh = dynamic_cast<OpenGLMesh*>(m.gpu_mesh);
-    if (glMesh)
-    {
-        glMesh->bind();
-        glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(glMesh->getVertexCount()));
-        glMesh->unbind();
-    }
+    renderMeshInternal(m, 0, draw_count, state);
 }
 
 void OpenGLRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t vertex_count, const RenderState& state)
@@ -917,7 +1027,6 @@ void OpenGLRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t
     // Validate range
     if (start_vertex + vertex_count > m.vertices_len)
     {
-        // Clamp to valid range
         vertex_count = m.vertices_len - start_vertex;
         if (vertex_count == 0) return;
     }
@@ -927,29 +1036,23 @@ void OpenGLRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t
     {
         const_cast<mesh&>(m).uploadToGPU(this);
         if (!m.gpu_mesh || !m.gpu_mesh->isUploaded())
-        {
-            return; // Upload failed
-        }
+            return;
     }
 
-    // Get appropriate shader for this render state
-    Shader* shader = nullptr;
-    
-    if (in_shadow_pass)
-    {
-        shader = shader_manager->getShader("shadow");
-    }
-    else
-    {
-        shader = getShaderForRenderState(state);
-    }
-    
+    renderMeshInternal(m, static_cast<GLint>(start_vertex), static_cast<GLsizei>(vertex_count), state);
+}
+
+void OpenGLRenderAPI::renderMeshInternal(const mesh& m, GLint start_vertex, GLsizei draw_count, const RenderState& state)
+{
+    // Get appropriate shader
+    Shader* shader = in_shadow_pass
+        ? shader_manager->getShader("shadow")
+        : getShaderForRenderState(state);
+
     if (!shader || !shader->isValid())
-    {
-        return; // No valid shader
-    }
+        return;
 
-    // Bind shader
+    // Bind shader (tracked to avoid redundant switches)
     bool shader_changed = false;
     if (current_shader_id != shader->getProgramID())
     {
@@ -960,88 +1063,64 @@ void OpenGLRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t
 
     if (in_shadow_pass)
     {
+        // Shadow pass: only needs per-cascade light matrix + model matrix
         if (shader_changed || global_uniforms_dirty)
         {
-            // Use current cascade's light space matrix
             shader->setUniform("uLightSpaceMatrix", lightSpaceMatrices[currentCascade]);
+            global_uniforms_dirty = false;
         }
         shader->setUniform("uModel", current_model_matrix);
     }
     else
     {
+        // Main pass: global uniforms are in UBOs, only set per-object uniforms
         if (shader_changed || global_uniforms_dirty)
         {
-            // Set matrix uniforms
-            shader->setUniform("uView", view_matrix);
-            shader->setUniform("uProjection", projection_matrix);
-
-            // Set CSM uniforms - all cascade matrices and split distances
-            for (int i = 0; i < NUM_CASCADES; i++) {
-                shader->setUniform("uLightSpaceMatrices[" + std::to_string(i) + "]", lightSpaceMatrices[i]);
-            }
-            for (int i = 0; i <= NUM_CASCADES; i++) {
-                shader->setUniform("uCascadeSplits[" + std::to_string(i) + "]", cascadeSplitDistances[i]);
-            }
-            shader->setUniform("uCascadeCount", NUM_CASCADES);
-            shader->setUniform("uDebugCascades", debugCascades);
-
-            static bool csm_logged = false;
-            if (!csm_logged) {
-                LOG_ENGINE_INFO("CSM uniforms set: cascadeCount={}, debugCascades={}", NUM_CASCADES, debugCascades);
-                csm_logged = true;
-            }
-
-            // Set lighting uniforms
-            shader->setUniform("uLightDir", current_light_direction);
-            shader->setUniform("uLightAmbient", current_light_ambient);
-            shader->setUniform("uLightDiffuse", current_light_diffuse);
-
-            // Bind Shadow Map Array (Unit 1)
-            glActiveTexture(GL_TEXTURE1);
-            glBindTexture(GL_TEXTURE_2D_ARRAY, shadowMapTextureArray);
+            // Shadow map array sampler binding (texture unit 1 already bound in beginFrame)
             shader->setUniform("uShadowMapArray", 1);
-
             global_uniforms_dirty = false;
         }
 
-        // Set object specific uniforms
+        // Per-object uniforms
         shader->setUniform("uModel", current_model_matrix);
         shader->setUniform("uColor", state.color);
 
-        // Texture binding logic:
-        // - For single-texture meshes: bind m.texture
-        // - For multi-material meshes: texture already bound by renderer.hpp, just enable it
+        // Texture binding
         if (!m.uses_material_ranges && m.texture_set && m.texture != INVALID_TEXTURE)
         {
-            // Single-texture mode: bind the mesh's texture
             bindTexture(m.texture);
             shader->setUniform("uTexture", 0);
             shader->setUniform("uUseTexture", true);
         }
         else if (m.uses_material_ranges)
         {
-            // Multi-material mode: texture already bound by renderer.hpp
-            // Note: renderer.hpp likely calls bindTexture directly, which updates our tracker.
-            // Just tell the shader to use whatever is bound at texture unit 0
+            // Multi-material: texture already bound by renderer.hpp
             shader->setUniform("uTexture", 0);
             shader->setUniform("uUseTexture", true);
         }
         else
         {
-            // No texture available
             shader->setUniform("uUseTexture", false);
         }
     }
 
-    // Apply render state (culling, blending, depth)
+    // Apply render state
     applyRenderState(state);
 
-    // Bind VAO and draw range
+    // Draw
     OpenGLMesh* glMesh = dynamic_cast<OpenGLMesh*>(m.gpu_mesh);
     if (glMesh)
     {
         glMesh->bind();
-        glDrawArrays(GL_TRIANGLES, static_cast<GLint>(start_vertex), static_cast<GLsizei>(vertex_count));
+        if (glMesh->isIndexed())
+        {
+            glDrawElements(GL_TRIANGLES, draw_count, GL_UNSIGNED_INT,
+                           (void*)(start_vertex * sizeof(uint32_t)));
+        }
+        else
+        {
+            glDrawArrays(GL_TRIANGLES, start_vertex, draw_count);
+        }
         glMesh->unbind();
     }
 }
@@ -1162,6 +1241,7 @@ void OpenGLRenderAPI::setLighting(const glm::vec3& ambient, const glm::vec3& dif
     current_light_diffuse = diffuse;
     current_light_direction = glm::normalize(direction);
 
+    lighting_ubo_dirty = true;
     global_uniforms_dirty = true;
 }
 
@@ -1184,13 +1264,20 @@ void OpenGLRenderAPI::renderSkybox()
 {
     if (skybox)
     {
+        // Restore depth state in case depth prepass left it as GL_EQUAL / no-write
+        glDepthFunc(GL_LEQUAL);
+        glDepthMask(GL_TRUE);
+        current_gpu_state.depth_test = DepthTest::LessEqual;
+        current_gpu_state.depth_write = true;
+
         // Sun direction is opposite of light direction (direction TO the sun)
         glm::vec3 sunDir = -current_light_direction;
 
         skybox->render(view_matrix, projection_matrix, sunDir);
 
-        // Skybox modifies GL state, so we need to sync our trackers
-        current_shader_id = 0;
+        // Skybox uses its own shader - invalidate our tracker
+        Shader* sky_shader = shader_manager->getShader("sky");
+        current_shader_id = sky_shader ? sky_shader->getProgramID() : 0;
 
         // Skybox::render sets DepthFunc to GL_LESS at the end
         current_gpu_state.depth_test = DepthTest::Less;
@@ -1251,6 +1338,83 @@ IGPUMesh* OpenGLRenderAPI::createMesh()
     return new OpenGLMesh();
 }
 
+void OpenGLRenderAPI::beginDepthPrepass()
+{
+    Shader* depth_shader = shader_manager->getShader("depth");
+    if (!depth_shader || !depth_shader->isValid()) return;
+
+    depth_shader->use();
+    current_shader_id = depth_shader->getProgramID();
+
+    // Depth prepass: write depth only, no color
+    glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+    glDepthFunc(GL_LEQUAL);
+    glDepthMask(GL_TRUE);
+}
+
+void OpenGLRenderAPI::endDepthPrepass()
+{
+    // Restore color writes
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+
+    // Main pass uses EQUAL depth test - only shade fragments matching depth buffer
+    glDepthFunc(GL_EQUAL);
+    glDepthMask(GL_FALSE);
+    current_gpu_state.depth_test = DepthTest::LessEqual; // approximate
+    current_gpu_state.depth_write = false;
+}
+
+void OpenGLRenderAPI::renderMeshDepthOnly(const mesh& m)
+{
+    if (!m.visible || !m.is_valid || m.vertices_len == 0) return;
+
+    // Ensure mesh is uploaded
+    if (!m.gpu_mesh || !m.gpu_mesh->isUploaded())
+    {
+        const_cast<mesh&>(m).uploadToGPU(this);
+        if (!m.gpu_mesh || !m.gpu_mesh->isUploaded())
+            return;
+    }
+
+    Shader* depth_shader = shader_manager->getShader("depth");
+    if (!depth_shader) return;
+
+    // Only set per-object model matrix
+    depth_shader->setUniform("uModel", current_model_matrix);
+
+    // Apply culling
+    RenderState state = m.getRenderState();
+    if (state.cull_mode != current_gpu_state.cull_mode)
+    {
+        if (state.cull_mode == CullMode::None)
+            glDisable(GL_CULL_FACE);
+        else
+        {
+            if (current_gpu_state.cull_mode == CullMode::None)
+                glEnable(GL_CULL_FACE);
+            glCullFace(getGLCullMode(state.cull_mode));
+        }
+        current_gpu_state.cull_mode = state.cull_mode;
+    }
+
+    // Draw
+    OpenGLMesh* glMesh = dynamic_cast<OpenGLMesh*>(m.gpu_mesh);
+    if (glMesh)
+    {
+        glMesh->bind();
+        if (glMesh->isIndexed())
+        {
+            glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(glMesh->getIndexCount()),
+                           GL_UNSIGNED_INT, nullptr);
+        }
+        else
+        {
+            glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(glMesh->getVertexCount()));
+        }
+        glMesh->unbind();
+    }
+}
+
 void OpenGLRenderAPI::renderDebugLines(const vertex* vertices, size_t vertex_count)
 {
     if (!vertices || vertex_count < 2 || !shader_manager) return;
@@ -1260,8 +1424,7 @@ void OpenGLRenderAPI::renderDebugLines(const vertex* vertices, size_t vertex_cou
     if (!shader || !shader->isValid()) return;
 
     shader->use();
-    shader->setUniform("uView", view_matrix);
-    shader->setUniform("uProjection", projection_matrix);
+    // View/Projection are in UBO binding 0 (CameraData) - already uploaded
     shader->setUniform("uModel", glm::mat4(1.0f));
     shader->setUniform("uColor", glm::vec3(1.0f));
 
@@ -1269,19 +1432,28 @@ void OpenGLRenderAPI::renderDebugLines(const vertex* vertices, size_t vertex_cou
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, 0);
 
-    // Create/resize debug VAO/VBO as needed
+    // Create debug VAO/VBO with persistent mapping
+    size_t data_size = vertex_count * sizeof(vertex);
+
     if (debug_vao == 0)
     {
         glGenVertexArrays(1, &debug_vao);
-        glGenBuffers(1, &debug_vbo);
-
         glBindVertexArray(debug_vao);
+
+        glGenBuffers(1, &debug_vbo);
         glBindBuffer(GL_ARRAY_BUFFER, debug_vbo);
+
+        // Allocate with persistent mapping - start with 64KB or what we need
+        debug_vbo_capacity = std::max(data_size, (size_t)(64 * 1024));
+        glBufferStorage(GL_ARRAY_BUFFER, debug_vbo_capacity, nullptr,
+                        GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT);
+        debug_vbo_mapped_ptr = glMapBufferRange(GL_ARRAY_BUFFER, 0, debug_vbo_capacity,
+                        GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT);
 
         // Position (location 0)
         glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(vertex), (void*)0);
         glEnableVertexAttribArray(0);
-        // Normal - we use this for per-vertex color (location 1)
+        // Normal - per-vertex color (location 1)
         glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(vertex), (void*)(3 * sizeof(float)));
         glEnableVertexAttribArray(1);
         // TexCoord (location 2)
@@ -1291,20 +1463,42 @@ void OpenGLRenderAPI::renderDebugLines(const vertex* vertices, size_t vertex_cou
         glBindVertexArray(0);
     }
 
-    glBindVertexArray(debug_vao);
-    glBindBuffer(GL_ARRAY_BUFFER, debug_vbo);
-
-    // Upload vertex data
-    size_t data_size = vertex_count * sizeof(vertex);
+    // Resize if needed (rare - only when debug data exceeds 64KB)
     if (data_size > debug_vbo_capacity)
     {
-        glBufferData(GL_ARRAY_BUFFER, data_size, vertices, GL_DYNAMIC_DRAW);
-        debug_vbo_capacity = data_size;
+        glBindBuffer(GL_ARRAY_BUFFER, debug_vbo);
+        if (debug_vbo_mapped_ptr)
+            glUnmapBuffer(GL_ARRAY_BUFFER);
+
+        glDeleteBuffers(1, &debug_vbo);
+        glGenBuffers(1, &debug_vbo);
+        glBindVertexArray(debug_vao);
+        glBindBuffer(GL_ARRAY_BUFFER, debug_vbo);
+
+        debug_vbo_capacity = data_size * 2;
+        glBufferStorage(GL_ARRAY_BUFFER, debug_vbo_capacity, nullptr,
+                        GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT);
+        debug_vbo_mapped_ptr = glMapBufferRange(GL_ARRAY_BUFFER, 0, debug_vbo_capacity,
+                        GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT);
+
+        // Re-setup vertex attribs
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(vertex), (void*)0);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(vertex), (void*)(3 * sizeof(float)));
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(vertex), (void*)(6 * sizeof(float)));
+        glEnableVertexAttribArray(2);
+
+        glBindVertexArray(0);
     }
-    else
+
+    // Write directly to persistently mapped buffer (no glBufferSubData needed)
+    if (debug_vbo_mapped_ptr)
     {
-        glBufferSubData(GL_ARRAY_BUFFER, 0, data_size, vertices);
+        std::memcpy(debug_vbo_mapped_ptr, vertices, data_size);
     }
+
+    glBindVertexArray(debug_vao);
 
     // Disable depth write but keep depth test so lines render behind geometry correctly
     glDepthMask(GL_FALSE);

@@ -30,4 +30,12 @@ public:
     void renderPassthrough();  // Simple blit without FXAA
 
     void shutdown();
+
+    // Getters for reuse by viewport rendering
+    GLuint getFramebuffer() const { return framebuffer; }
+    GLuint getColorTexture() const { return textureColorBuffer; }
+    GLuint getQuadVAO() const { return quadVAO; }
+    Shader* getFXAAShader() const { return fxaaShader; }
+    int getWidth() const { return width; }
+    int getHeight() const { return height; }
 };

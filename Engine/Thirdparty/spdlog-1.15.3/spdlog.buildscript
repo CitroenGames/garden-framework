@@ -7,3 +7,4 @@ headers = include/**/*.h, include/**/*.hpp
 includes = include
 public_includes = include
 defines = SPDLOG_COMPILED_LIB
+multiprocessor = true

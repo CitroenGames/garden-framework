@@ -167,6 +167,9 @@ private:
     bool createDescriptorSets();
     bool createDefaultTexture();
 
+    // Frame preparation (fence, acquire, command buffer begin)
+    void prepareFrame();
+
     // Shadow mapping helpers
     bool createShadowResources();
     void cleanupShadowResources();
@@ -246,6 +249,7 @@ private:
 
     // Synchronization
     static const int MAX_FRAMES_IN_FLIGHT = 2;
+    static constexpr uint64_t FENCE_TIMEOUT_NS = 5'000'000'000ULL; // 5 seconds
     std::vector<VkSemaphore> image_available_semaphores;
     std::vector<VkSemaphore> render_finished_semaphores;
     std::vector<VkFence> in_flight_fences;
@@ -294,6 +298,7 @@ private:
     static constexpr uint32_t MAX_DESCRIPTOR_SETS_PER_FRAME = 512;
     std::vector<VkDescriptorSet> per_draw_descriptor_sets;
     uint32_t current_descriptor_set_index = 0;
+    bool descriptor_limit_warned = false;
 
     // Cache: texture handle -> descriptor set index (for reuse within a frame)
     std::unordered_map<TextureHandle, uint32_t> texture_descriptor_cache;
@@ -367,6 +372,7 @@ private:
     bool in_shadow_pass = false;
     int currentCascade = 0;
     bool main_pass_started = false;
+    bool shadow_pass_active = false;
 
     // Skybox resources
     VkBuffer skybox_vertex_buffer = VK_NULL_HANDLE;
@@ -403,7 +409,25 @@ private:
     std::vector<VkFramebuffer> fxaa_framebuffers;  // Swapchain-only, no depth
     bool fxaa_initialized = false;
 
+    // Viewport render target for editor
+    VkImage viewport_image = VK_NULL_HANDLE;
+    VmaAllocation viewport_allocation = VK_NULL_HANDLE;
+    VkImageView viewport_view = VK_NULL_HANDLE;
+    VkSampler viewport_sampler = VK_NULL_HANDLE;
+    VkDescriptorSet viewport_imgui_ds = VK_NULL_HANDLE;
+    int viewport_width_rt = 0;
+    int viewport_height_rt = 0;
+    void createViewportResources(int w, int h);
+    void destroyViewportResources();
+
 #ifdef _DEBUG
     VkDebugUtilsMessengerEXT debug_messenger = VK_NULL_HANDLE;
 #endif
+
+public:
+    // Viewport rendering (for editor)
+    virtual void endSceneRender() override;
+    virtual uint64_t getViewportTextureID() override;
+    virtual void setViewportSize(int width, int height) override;
+    virtual void renderUI() override;
 };

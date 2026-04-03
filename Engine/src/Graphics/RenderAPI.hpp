@@ -122,6 +122,11 @@ public:
     // vertices are pairs of {pos, color} packed as vertex structs (normals used as color, uv ignored)
     virtual void renderDebugLines(const vertex* vertices, size_t vertex_count) { (void)vertices; (void)vertex_count; }
 
+    // Depth prepass support
+    virtual void beginDepthPrepass() {}
+    virtual void endDepthPrepass() {}
+    virtual void renderMeshDepthOnly(const mesh& m) { (void)m; }
+
     // Utility
     virtual const char* getAPIName() const = 0;
 
@@ -130,6 +135,16 @@ public:
     virtual bool isFXAAEnabled() const = 0;
     virtual void setShadowQuality(int quality) = 0;  // 0=Off, 1=Low(1024), 2=Medium(2048), 3=High(4096)
     virtual int getShadowQuality() const = 0;
+
+    // Offscreen viewport rendering (for editor)
+    // Finalize scene render to an offscreen viewport texture (applies FXAA if enabled)
+    virtual void endSceneRender() {}
+    // Get the rendered scene as an ImGui-compatible texture ID (cast to ImTextureID by caller)
+    virtual uint64_t getViewportTextureID() { return 0; }
+    // Resize the offscreen viewport render target
+    virtual void setViewportSize(int width, int height) { (void)width; (void)height; }
+    // Render ImGui draw data to the screen backbuffer
+    virtual void renderUI() {}
 };
 
 // Factory function to create render API instances

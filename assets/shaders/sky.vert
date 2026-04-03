@@ -3,8 +3,11 @@ layout (location = 0) in vec3 aPos;
 
 out vec3 WorldPos;
 
-uniform mat4 uProjection;
-uniform mat4 uView;
+layout(std140, binding = 0) uniform CameraData {
+    mat4 uView;
+    mat4 uProjection;
+    vec4 uCameraPos;
+};
 
 void main()
 {
