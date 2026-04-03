@@ -8,6 +8,7 @@
 #include "Frustum.hpp"
 #include "BVH.hpp"
 #include "Debug/DebugDraw.hpp"
+#include "LODSelector.hpp"
 #include <entt/entt.hpp>
 #include <algorithm>
 
@@ -131,6 +132,43 @@ public:
         api->popMatrix();
     };
 
+    // LOD-aware rendering: selects appropriate LOD before drawing
+    static void render_mesh_with_lod(mesh& m, const TransformComponent& transform,
+                                      IRenderAPI* api, const glm::vec3& camera_pos,
+                                      const glm::mat4& projection)
+    {
+        if (!m.visible || !api) return;
+
+        // LOD selection
+        if (!m.lod_levels.empty() && m.bounds_computed)
+        {
+            int lod_count = m.getLODCount();
+            std::vector<float> thresholds(lod_count, 0.0f);
+            for (int i = 0; i < static_cast<int>(m.lod_levels.size()); ++i)
+                thresholds[i + 1] = m.lod_levels[i].screen_threshold;
+
+            int lod = LODSelector::selectLOD(
+                camera_pos, transform.position,
+                m.aabb_min, m.aabb_max,
+                projection, lod_count, thresholds.data()
+            );
+            m.selectLOD(lod);
+
+            // Swap gpu_mesh to active LOD for rendering (renderMesh accesses m.gpu_mesh directly)
+            IGPUMesh* active = m.getActiveGPUMesh();
+            if (active && active != m.gpu_mesh)
+            {
+                IGPUMesh* original = m.gpu_mesh;
+                m.gpu_mesh = active;
+                render_mesh_with_api(m, transform, api);
+                m.gpu_mesh = original;
+                return;
+            }
+        }
+
+        render_mesh_with_api(m, transform, api);
+    }
+
     void render_scene(entt::registry& registry, camera& c)
     {
         if (!render_api)
@@ -220,7 +258,11 @@ public:
                 render_api->endDepthPrepass();
             }
 
-            // Render only visible entities (main lit pass)
+            // LOD selection data
+            glm::mat4 proj = render_api->getProjectionMatrix();
+            glm::vec3 cam_pos = c.getPosition();
+
+            // Render only visible entities (main lit pass) with LOD
             for (auto entity : visible_entities)
             {
                 if (!registry.valid(entity)) continue;
@@ -230,7 +272,7 @@ public:
 
                 if (mesh_comp && t && mesh_comp->m_mesh && mesh_comp->m_mesh->visible)
                 {
-                    render_mesh_with_api(*mesh_comp->m_mesh, *t, render_api);
+                    render_mesh_with_lod(*mesh_comp->m_mesh, *t, render_api, cam_pos, proj);
                     last_draw_calls++;
                 }
             }
@@ -248,6 +290,9 @@ public:
             last_total_entities = 0;
             last_visible_entities = 0;
 
+            glm::mat4 proj = render_api->getProjectionMatrix();
+            glm::vec3 cam_pos = c.getPosition();
+
             for (auto entity : view)
             {
                 auto& mesh_comp = view.get<MeshComponent>(entity);
@@ -255,7 +300,7 @@ public:
 
                 if (mesh_comp.m_mesh && mesh_comp.m_mesh->visible)
                 {
-                    render_mesh_with_api(*mesh_comp.m_mesh, t, render_api);
+                    render_mesh_with_lod(*mesh_comp.m_mesh, t, render_api, cam_pos, proj);
                     last_total_entities++;
                     last_draw_calls++;
                 }
@@ -341,6 +386,9 @@ public:
                 render_api->endDepthPrepass();
             }
 
+            glm::mat4 proj = render_api->getProjectionMatrix();
+            glm::vec3 cam_pos = c.getPosition();
+
             for (auto entity : visible_entities)
             {
                 if (!registry.valid(entity)) continue;
@@ -348,7 +396,7 @@ public:
                 auto* t = registry.try_get<TransformComponent>(entity);
                 if (mesh_comp && t && mesh_comp->m_mesh && mesh_comp->m_mesh->visible)
                 {
-                    render_mesh_with_api(*mesh_comp->m_mesh, *t, render_api);
+                    render_mesh_with_lod(*mesh_comp->m_mesh, *t, render_api, cam_pos, proj);
                     last_draw_calls++;
                 }
             }
@@ -357,13 +405,17 @@ public:
         {
             last_total_entities = 0;
             last_visible_entities = 0;
+
+            glm::mat4 proj = render_api->getProjectionMatrix();
+            glm::vec3 cam_pos = c.getPosition();
+
             for (auto entity : view)
             {
                 auto& mesh_comp = view.get<MeshComponent>(entity);
                 const auto& t = view.get<TransformComponent>(entity);
                 if (mesh_comp.m_mesh && mesh_comp.m_mesh->visible)
                 {
-                    render_mesh_with_api(*mesh_comp.m_mesh, t, render_api);
+                    render_mesh_with_lod(*mesh_comp.m_mesh, t, render_api, cam_pos, proj);
                     last_total_entities++;
                     last_draw_calls++;
                 }

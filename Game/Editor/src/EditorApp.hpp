@@ -19,6 +19,9 @@
 #include "panels/StatusBarPanel.hpp"
 #include "panels/ViewportPanel.hpp"
 #include "panels/NavMeshPanel.hpp"
+#include "panels/PhysicsDebugPanel.hpp"
+#include "panels/LODSettingsPanel.hpp"
+#include "Assets/AssetScanner.hpp"
 
 class EditorApp
 {
@@ -51,6 +54,7 @@ private:
     bool m_show_status_bar     = true;
     bool m_show_viewport       = true;
     bool m_show_navmesh_panel  = false;
+    bool m_show_physics_debug  = false;
 
     // Mouse state (editor camera)
     bool  m_right_mouse = false;
@@ -78,6 +82,11 @@ private:
     ViewportOverlayPanel m_viewport_overlay;
     StatusBarPanel       m_status_bar;
     NavMeshPanel         m_navmesh_panel;
+    PhysicsDebugPanel    m_physics_debug_panel;
+
+    // Asset management
+    Assets::AssetScanner m_asset_scanner;
+    LODSettingsPanel     m_lod_settings_panel;
 
     // --- Play In Editor (PIE) ---
     std::unique_ptr<GameSimulation> m_game_sim;

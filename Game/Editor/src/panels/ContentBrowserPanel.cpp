@@ -1,4 +1,5 @@
 #include "ContentBrowserPanel.hpp"
+#include "Assets/AssetScanner.hpp"
 #include <algorithm>
 
 namespace fs = std::filesystem;
@@ -7,7 +8,6 @@ void ContentBrowserPanel::drawDirectoryTree(const fs::path& dir)
 {
     if (!fs::exists(dir) || !fs::is_directory(dir)) return;
 
-    // Sort entries: directories first, then alphabetical
     std::vector<fs::directory_entry> entries;
     for (const auto& entry : fs::directory_iterator(dir))
     {
@@ -25,7 +25,6 @@ void ContentBrowserPanel::drawDirectoryTree(const fs::path& dir)
         if (is_selected)
             node_flags |= ImGuiTreeNodeFlags_Selected;
 
-        // Check if has subdirectories
         bool has_children = false;
         for (const auto& child : fs::directory_iterator(entry.path()))
         {
@@ -49,7 +48,6 @@ void ContentBrowserPanel::drawDirectoryTree(const fs::path& dir)
 
 void ContentBrowserPanel::drawBreadcrumbs()
 {
-    // Build path segments relative to base
     fs::path relative = fs::relative(m_current_dir, m_base_path.parent_path());
     fs::path accumulated = m_base_path.parent_path();
 
@@ -83,7 +81,6 @@ void ContentBrowserPanel::drawFileIcon(ImDrawList* draw_list, ImVec2 center, flo
 
     if (fs::is_directory(path))
     {
-        // Folder: two overlapping rectangles
         draw_list->AddRectFilled(ImVec2(center.x - hs, center.y - hs * 0.6f),
                                  ImVec2(center.x - hs * 0.2f, center.y - hs * 0.3f), color, 2.0f);
         draw_list->AddRectFilled(ImVec2(center.x - hs, center.y - hs * 0.3f),
@@ -96,16 +93,12 @@ void ContentBrowserPanel::drawFileIcon(ImDrawList* draw_list, ImVec2 center, flo
 
     if (ext == ".gltf" || ext == ".glb" || ext == ".obj")
     {
-        // Model: cube wireframe
         float s = hs * 0.7f;
         float off = s * 0.35f;
-        // Front face
         draw_list->AddRect(ImVec2(center.x - s + off, center.y - s + off),
                            ImVec2(center.x + s * 0.6f + off, center.y + s * 0.6f + off), color, 0, 0, 1.5f);
-        // Back face
         draw_list->AddRect(ImVec2(center.x - s - off, center.y - s - off),
                            ImVec2(center.x + s * 0.6f - off, center.y + s * 0.6f - off), color, 0, 0, 1.5f);
-        // Connecting lines
         draw_list->AddLine(ImVec2(center.x - s + off, center.y - s + off),
                            ImVec2(center.x - s - off, center.y - s - off), color, 1.5f);
         draw_list->AddLine(ImVec2(center.x + s * 0.6f + off, center.y - s + off),
@@ -113,7 +106,6 @@ void ContentBrowserPanel::drawFileIcon(ImDrawList* draw_list, ImVec2 center, flo
     }
     else if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" || ext == ".tga")
     {
-        // Texture: filled square with diagonal
         draw_list->AddRectFilled(ImVec2(center.x - hs * 0.6f, center.y - hs * 0.6f),
                                  ImVec2(center.x + hs * 0.6f, center.y + hs * 0.6f), color, 2.0f);
         draw_list->AddLine(ImVec2(center.x - hs * 0.6f, center.y + hs * 0.6f),
@@ -122,7 +114,6 @@ void ContentBrowserPanel::drawFileIcon(ImDrawList* draw_list, ImVec2 center, flo
     }
     else if (path.string().find(".level.json") != std::string::npos)
     {
-        // Level: 3x3 grid of dots
         for (int gx = -1; gx <= 1; gx++)
             for (int gy = -1; gy <= 1; gy++)
                 draw_list->AddCircleFilled(ImVec2(center.x + gx * hs * 0.4f, center.y + gy * hs * 0.4f),
@@ -130,7 +121,6 @@ void ContentBrowserPanel::drawFileIcon(ImDrawList* draw_list, ImVec2 center, flo
     }
     else if (ext == ".vert" || ext == ".frag" || ext == ".hlsl" || ext == ".metal" || ext == ".spv" || ext == ".glsl")
     {
-        // Shader: diamond
         draw_list->AddQuadFilled(ImVec2(center.x, center.y - hs * 0.7f),
                                  ImVec2(center.x + hs * 0.6f, center.y),
                                  ImVec2(center.x, center.y + hs * 0.7f),
@@ -138,7 +128,6 @@ void ContentBrowserPanel::drawFileIcon(ImDrawList* draw_list, ImVec2 center, flo
     }
     else
     {
-        // Default: plain rectangle outline
         draw_list->AddRect(ImVec2(center.x - hs * 0.4f, center.y - hs * 0.6f),
                            ImVec2(center.x + hs * 0.4f, center.y + hs * 0.6f), color, 2.0f, 0, 1.5f);
     }
@@ -146,40 +135,39 @@ void ContentBrowserPanel::drawFileIcon(ImDrawList* draw_list, ImVec2 center, flo
 
 ImVec4 ContentBrowserPanel::getFileColor(const fs::path& path) const
 {
-    if (fs::is_directory(path)) return ImVec4(1.0f, 0.9f, 0.3f, 1.0f);  // Yellow
+    if (fs::is_directory(path)) return ImVec4(1.0f, 0.9f, 0.3f, 1.0f);
 
     std::string ext = path.extension().string();
     std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
 
-    if (ext == ".gltf" || ext == ".glb" || ext == ".obj") return ImVec4(0.3f, 0.9f, 0.9f, 1.0f);  // Cyan
-    if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" || ext == ".tga") return ImVec4(0.3f, 0.9f, 0.3f, 1.0f);  // Green
-    if (ext == ".json" && path.string().find(".level.json") != std::string::npos) return ImVec4(1.0f, 0.6f, 0.2f, 1.0f);  // Orange
-    if (ext == ".vert" || ext == ".frag" || ext == ".hlsl" || ext == ".metal" || ext == ".spv" || ext == ".glsl") return ImVec4(0.7f, 0.4f, 1.0f, 1.0f);  // Purple
-    if (ext == ".bin") return ImVec4(0.5f, 0.5f, 0.5f, 1.0f);  // Grey
+    if (ext == ".gltf" || ext == ".glb" || ext == ".obj") return ImVec4(0.3f, 0.9f, 0.9f, 1.0f);
+    if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" || ext == ".tga") return ImVec4(0.3f, 0.9f, 0.3f, 1.0f);
+    if (ext == ".json" && path.string().find(".level.json") != std::string::npos) return ImVec4(1.0f, 0.6f, 0.2f, 1.0f);
+    if (ext == ".vert" || ext == ".frag" || ext == ".hlsl" || ext == ".metal" || ext == ".spv" || ext == ".glsl") return ImVec4(0.7f, 0.4f, 1.0f, 1.0f);
+    if (ext == ".bin") return ImVec4(0.5f, 0.5f, 0.5f, 1.0f);
 
-    return ImVec4(0.6f, 0.6f, 0.6f, 1.0f);  // Default grey
+    return ImVec4(0.6f, 0.6f, 0.6f, 1.0f);
 }
 
 bool ContentBrowserPanel::passesFilter(const fs::path& path) const
 {
-    if (m_filter_mode == 0) return true;
     if (fs::is_directory(path)) return true;
+
+    // Always hide generated files (.meta, .lodbin)
+    if (isGeneratedFile(path)) return false;
+
+    if (m_filter_mode == 0) return true;
 
     std::string ext = path.extension().string();
     std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
 
     switch (m_filter_mode)
     {
-    case 1: // Levels
-        return path.string().find(".level.json") != std::string::npos;
-    case 2: // Models
-        return ext == ".gltf" || ext == ".glb" || ext == ".obj";
-    case 3: // Textures
-        return ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" || ext == ".tga";
-    case 4: // Shaders
-        return ext == ".vert" || ext == ".frag" || ext == ".hlsl" || ext == ".metal" || ext == ".spv" || ext == ".glsl";
-    default:
-        return true;
+    case 1: return path.string().find(".level.json") != std::string::npos;
+    case 2: return ext == ".gltf" || ext == ".glb" || ext == ".obj";
+    case 3: return ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" || ext == ".tga";
+    case 4: return ext == ".vert" || ext == ".frag" || ext == ".hlsl" || ext == ".metal" || ext == ".spv" || ext == ".glsl";
+    default: return true;
     }
 }
 
@@ -192,11 +180,140 @@ void ContentBrowserPanel::handleFileAction(const fs::path& path)
     else
     {
         std::string path_str = path.string();
+
         if (path_str.find(".level.json") != std::string::npos && on_open_level)
         {
             std::replace(path_str.begin(), path_str.end(), '\\', '/');
             on_open_level(path_str);
         }
+        else if (isMeshFile(path) && on_open_mesh)
+        {
+            std::replace(path_str.begin(), path_str.end(), '\\', '/');
+            on_open_mesh(path_str);
+        }
+    }
+}
+
+bool ContentBrowserPanel::isGeneratedFile(const fs::path& path) const
+{
+    std::string ext = path.extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+
+    if (ext == ".lodbin") return true;
+    if (ext == ".meta") return true;
+
+    // Also check for .gltf.meta, .obj.meta pattern
+    std::string filename = path.filename().string();
+    if (filename.size() > 5 && filename.substr(filename.size() - 5) == ".meta")
+        return true;
+
+    return false;
+}
+
+bool ContentBrowserPanel::isMeshFile(const fs::path& path) const
+{
+    std::string ext = path.extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+    return ext == ".gltf" || ext == ".glb" || ext == ".obj";
+}
+
+void ContentBrowserPanel::drawMetadataStatusDot(ImDrawList* draw_list, ImVec2 pos, const fs::path& path) const
+{
+    if (!isMeshFile(path)) return;
+
+    std::string path_str = path.string();
+    std::string meta_path = Assets::AssetMetadataSerializer::getMetaPath(path_str);
+
+    ImU32 dot_color;
+    if (fs::exists(meta_path))
+        dot_color = IM_COL32(80, 220, 80, 255);  // Green: meta exists
+    else
+        dot_color = IM_COL32(220, 180, 40, 255);  // Yellow: no meta
+
+    draw_list->AddCircleFilled(pos, 4.0f, dot_color);
+}
+
+void ContentBrowserPanel::drawMetadataInfo()
+{
+    if (!m_has_selected_metadata) return;
+
+    ImGui::Separator();
+    ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.9f, 1.0f), "Mesh: %s", m_selected_mesh.filename().string().c_str());
+
+    const auto& meta = m_selected_metadata;
+
+    ImGui::Text("Vertices: %zu", meta.vertex_count);
+    ImGui::SameLine(0, 16.0f);
+    ImGui::Text("Triangles: %zu", meta.triangle_count);
+
+    // AABB
+    glm::vec3 size = meta.aabb_max - meta.aabb_min;
+    ImGui::Text("AABB: %.1f x %.1f x %.1f", size.x, size.y, size.z);
+
+    // LOD levels
+    if (!meta.lod_levels.empty())
+    {
+        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "LOD Levels: %zu", meta.lod_levels.size());
+
+        if (ImGui::BeginTable("##lod_table", 3, ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_RowBg))
+        {
+            ImGui::TableSetupColumn("LOD");
+            ImGui::TableSetupColumn("Triangles");
+            ImGui::TableSetupColumn("Ratio");
+            ImGui::TableHeadersRow();
+
+            for (const auto& lod : meta.lod_levels)
+            {
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::Text("LOD%d", lod.level);
+                ImGui::TableNextColumn();
+                ImGui::Text("%zu", lod.triangle_count);
+                ImGui::TableNextColumn();
+                ImGui::Text("%.0f%%", lod.target_ratio * 100.0f);
+            }
+
+            ImGui::EndTable();
+        }
+    }
+
+    if (!meta.generated_at.empty())
+    {
+        ImGui::TextDisabled("Generated: %s", meta.generated_at.c_str());
+    }
+}
+
+void ContentBrowserPanel::drawContextMenu(const fs::path& path)
+{
+    if (!isMeshFile(path)) return;
+
+    if (ImGui::BeginPopupContextItem())
+    {
+        std::string path_str = path.string();
+        std::string meta_path = Assets::AssetMetadataSerializer::getMetaPath(path_str);
+        bool has_meta = fs::exists(meta_path);
+
+        if (ImGui::MenuItem("LOD Settings..."))
+        {
+            if (on_open_mesh)
+            {
+                std::string normalized = path_str;
+                std::replace(normalized.begin(), normalized.end(), '\\', '/');
+                on_open_mesh(normalized);
+            }
+        }
+
+        if (ImGui::MenuItem(has_meta ? "Regenerate LODs" : "Generate Metadata"))
+        {
+            if (asset_scanner)
+            {
+                std::string normalized = path_str;
+                std::replace(normalized.begin(), normalized.end(), '\\', '/');
+                asset_scanner->regenerateAsset(normalized);
+            }
+        }
+
+        ImGui::EndPopup();
     }
 }
 
@@ -255,12 +372,11 @@ void ContentBrowserPanel::draw()
 
     ImGui::SameLine();
 
-    // Right pane: file grid or list
+    // Right pane: file grid or list + metadata info
     ImGui::BeginChild("FileGrid", ImVec2(0, 0), true);
 
     if (fs::exists(m_current_dir) && fs::is_directory(m_current_dir))
     {
-        // Collect and sort entries: directories first, then files
         std::vector<fs::directory_entry> dirs, files;
         for (const auto& entry : fs::directory_iterator(m_current_dir))
         {
@@ -275,16 +391,14 @@ void ContentBrowserPanel::draw()
         std::sort(dirs.begin(), dirs.end(), sortByName);
         std::sort(files.begin(), files.end(), sortByName);
 
-        // Combine into one list: back button (if not root) + dirs + files
         std::vector<fs::path> all_items;
         if (m_current_dir != m_base_path)
-            all_items.push_back(m_current_dir.parent_path()); // ".." entry
+            all_items.push_back(m_current_dir.parent_path());
         for (const auto& d : dirs) all_items.push_back(d.path());
         for (const auto& f : files) all_items.push_back(f.path());
 
         if (m_grid_view)
         {
-            // --- Grid/Card view ---
             float padding = 8.0f;
             float cell_size = m_thumbnail_size + padding;
             float avail_width = ImGui::GetContentRegionAvail().x;
@@ -304,31 +418,36 @@ void ContentBrowserPanel::draw()
 
                     ImGui::PushID((int)i);
 
-                    // Card background
                     ImVec2 card_pos = ImGui::GetCursorScreenPos();
                     ImVec2 card_size(m_thumbnail_size, m_thumbnail_size + 20.0f);
 
-                    // Invisible button for interaction
                     if (ImGui::InvisibleButton("##card", card_size))
                     {
-                        // Single click — no action in grid mode (double-click to navigate)
+                        // Single click on mesh: select it and show metadata
+                        if (!is_back && isMeshFile(item))
+                        {
+                            m_selected_mesh = item;
+                            std::string meta_path = Assets::AssetMetadataSerializer::getMetaPath(item.string());
+                            m_has_selected_metadata = Assets::AssetMetadataSerializer::load(m_selected_metadata, meta_path);
+                        }
                     }
                     bool hovered = ImGui::IsItemHovered();
                     bool double_clicked = hovered && ImGui::IsMouseDoubleClicked(0);
 
-                    // Draw card background
+                    // Right-click context menu for mesh files
+                    if (!is_back)
+                        drawContextMenu(item);
+
                     ImU32 bg_col = hovered ? IM_COL32(50, 50, 50, 255) : IM_COL32(35, 35, 35, 255);
                     draw_list->AddRectFilled(card_pos, ImVec2(card_pos.x + card_size.x, card_pos.y + card_size.y),
                                              bg_col, 4.0f);
 
-                    // Draw icon
                     ImVec2 icon_center(card_pos.x + m_thumbnail_size * 0.5f,
                                        card_pos.y + m_thumbnail_size * 0.4f);
                     float icon_size = m_thumbnail_size * 0.45f;
 
                     if (is_back)
                     {
-                        // Back arrow: simple arrow shape
                         ImU32 arrow_col = IM_COL32(255, 230, 77, 255);
                         draw_list->AddTriangleFilled(
                             ImVec2(icon_center.x - icon_size * 0.5f, icon_center.y),
@@ -345,7 +464,14 @@ void ContentBrowserPanel::draw()
                         drawFileIcon(draw_list, icon_center, icon_size, item);
                     }
 
-                    // Draw filename (truncated)
+                    // Metadata status dot (top-right of card) for mesh files
+                    if (!is_back && isMeshFile(item))
+                    {
+                        drawMetadataStatusDot(draw_list,
+                            ImVec2(card_pos.x + card_size.x - 8.0f, card_pos.y + 8.0f), item);
+                    }
+
+                    // Filename
                     float text_y = card_pos.y + m_thumbnail_size - 4.0f;
                     float text_max_w = m_thumbnail_size - 4.0f;
                     ImVec2 text_pos(card_pos.x + 2.0f, text_y);
@@ -383,7 +509,6 @@ void ContentBrowserPanel::draw()
 
                 ImGui::PushID((int)i);
 
-                // Small icon via DrawList
                 ImVec2 icon_pos = ImGui::GetCursorScreenPos();
                 float line_h = ImGui::GetTextLineHeight();
                 ImVec2 icon_center(icon_pos.x + 8.0f, icon_pos.y + line_h * 0.5f);
@@ -401,13 +526,28 @@ void ContentBrowserPanel::draw()
                     drawFileIcon(draw_list, icon_center, 12.0f, item);
                 }
 
-                ImGui::Dummy(ImVec2(18.0f, line_h));
+                // Metadata status dot after icon for mesh files
+                if (!is_back && isMeshFile(item))
+                {
+                    drawMetadataStatusDot(draw_list,
+                        ImVec2(icon_center.x + 12.0f, icon_center.y), item);
+                }
+
+                ImGui::Dummy(ImVec2(is_back ? 18.0f : (isMeshFile(item) ? 28.0f : 18.0f), line_h));
                 ImGui::SameLine();
 
                 ImVec4 color = is_back ? ImVec4(1.0f, 0.9f, 0.3f, 1.0f) : getFileColor(item);
                 ImGui::PushStyleColor(ImGuiCol_Text, color);
                 if (ImGui::Selectable(filename.c_str(), false, ImGuiSelectableFlags_AllowDoubleClick))
                 {
+                    // Single click on mesh: select it and show metadata
+                    if (!is_back && isMeshFile(item))
+                    {
+                        m_selected_mesh = item;
+                        std::string meta_path = Assets::AssetMetadataSerializer::getMetaPath(item.string());
+                        m_has_selected_metadata = Assets::AssetMetadataSerializer::load(m_selected_metadata, meta_path);
+                    }
+
                     if (ImGui::IsMouseDoubleClicked(0))
                     {
                         if (is_back)
@@ -418,10 +558,17 @@ void ContentBrowserPanel::draw()
                 }
                 ImGui::PopStyleColor();
 
+                // Right-click context menu
+                if (!is_back)
+                    drawContextMenu(item);
+
                 ImGui::PopID();
             }
         }
     }
+
+    // Draw metadata info at bottom when a mesh is selected
+    drawMetadataInfo();
 
     ImGui::EndChild();
 

@@ -81,6 +81,40 @@ public:
     glm::vec3 aabb_max{0.0f};
     bool bounds_computed = false;
 
+    // LOD support
+    struct LODLevel {
+        IGPUMesh* gpu_mesh = nullptr;
+        size_t vertex_count = 0;
+        size_t index_count = 0;
+        float screen_threshold = 0.0f;
+
+        LODLevel() = default;
+        LODLevel(LODLevel&& other) noexcept
+            : gpu_mesh(other.gpu_mesh), vertex_count(other.vertex_count)
+            , index_count(other.index_count), screen_threshold(other.screen_threshold)
+        {
+            other.gpu_mesh = nullptr;
+        }
+        LODLevel& operator=(LODLevel&& other) noexcept
+        {
+            if (this != &other)
+            {
+                if (gpu_mesh) delete gpu_mesh;
+                gpu_mesh = other.gpu_mesh;
+                vertex_count = other.vertex_count;
+                index_count = other.index_count;
+                screen_threshold = other.screen_threshold;
+                other.gpu_mesh = nullptr;
+            }
+            return *this;
+        }
+        ~LODLevel() { if (gpu_mesh) { delete gpu_mesh; gpu_mesh = nullptr; } }
+        LODLevel(const LODLevel&) = delete;
+        LODLevel& operator=(const LODLevel&) = delete;
+    };
+    std::vector<LODLevel> lod_levels; // LOD1+, LOD0 is the main gpu_mesh
+    int current_lod = 0;
+
     // Constructor for hardcoded vertex arrays (existing functionality)
     mesh(vertex* vertices, size_t vertices_len)
     {
@@ -172,6 +206,8 @@ public:
         aabb_min = other.aabb_min;
         aabb_max = other.aabb_max;
         bounds_computed = other.bounds_computed;
+        lod_levels = std::move(other.lod_levels);
+        current_lod = other.current_lod;
 
         // Invalidate source
         other.vertices = nullptr;
@@ -180,6 +216,7 @@ public:
         other.owns_vertices = false;
         other.load_state = MeshLoadState::NotLoaded;
         other.bounds_computed = false;
+        other.current_lod = 0;
     }
 
     // Move assignment
@@ -209,6 +246,8 @@ public:
             aabb_min = other.aabb_min;
             aabb_max = other.aabb_max;
             bounds_computed = other.bounds_computed;
+            lod_levels = std::move(other.lod_levels);
+            current_lod = other.current_lod;
 
             // Invalidate source
             other.vertices = nullptr;
@@ -217,6 +256,7 @@ public:
             other.owns_vertices = false;
             other.load_state = MeshLoadState::NotLoaded;
             other.bounds_computed = false;
+            other.current_lod = 0;
         }
         return *this;
     }
@@ -417,6 +457,40 @@ public:
     void invalidateBounds()
     {
         bounds_computed = false;
+    }
+
+    // LOD selection
+    void selectLOD(int level)
+    {
+        if (level < 0) level = 0;
+        int max_level = static_cast<int>(lod_levels.size());
+        if (level > max_level) level = max_level;
+        current_lod = level;
+    }
+
+    IGPUMesh* getActiveGPUMesh() const
+    {
+        if (current_lod == 0 || lod_levels.empty())
+            return gpu_mesh;
+        int idx = current_lod - 1;
+        if (idx >= 0 && idx < static_cast<int>(lod_levels.size()) && lod_levels[idx].gpu_mesh)
+            return lod_levels[idx].gpu_mesh;
+        return gpu_mesh;
+    }
+
+    size_t getActiveVertexCount() const
+    {
+        if (current_lod == 0 || lod_levels.empty())
+            return vertices_len;
+        int idx = current_lod - 1;
+        if (idx >= 0 && idx < static_cast<int>(lod_levels.size()))
+            return lod_levels[idx].vertex_count;
+        return vertices_len;
+    }
+
+    int getLODCount() const
+    {
+        return static_cast<int>(lod_levels.size()) + 1; // +1 for LOD0
     }
 
     // Static async loading method - returns a handle that can be checked for completion
