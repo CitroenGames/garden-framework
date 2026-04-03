@@ -6,8 +6,11 @@
 #include "Utils/GltfLoader.hpp"
 #include "Utils/GltfMaterialLoader.hpp"
 #include "Utils/Log.hpp"
+#include "Assets/AssetMetadataSerializer.hpp"
+#include "Assets/LODMeshSerializer.hpp"
 #include <iostream>
 #include <cstring>
+#include <filesystem>
 
 using json = nlohmann::json;
 
@@ -619,6 +622,50 @@ std::shared_ptr<mesh> LevelManager::loadMesh(const LevelEntity& entity, IRenderA
         m_ptr->culling = entity.culling;
         m_ptr->transparent = entity.transparent;
         m_ptr->visible = entity.visible;
+
+        // Load LOD data from .meta file if available
+        if (render_api && !entity.mesh_path.empty())
+        {
+            std::string meta_path = Assets::AssetMetadataSerializer::getMetaPath(entity.mesh_path);
+            Assets::AssetMetadata metadata;
+            if (Assets::AssetMetadataSerializer::load(metadata, meta_path) && metadata.lod_enabled)
+            {
+                std::string mesh_dir = std::filesystem::path(entity.mesh_path).parent_path().string();
+                if (!mesh_dir.empty() && mesh_dir.back() != '/' && mesh_dir.back() != '\\')
+                    mesh_dir += "/";
+
+                for (size_t i = 1; i < metadata.lod_levels.size(); ++i)
+                {
+                    const auto& lod_info = metadata.lod_levels[i];
+                    if (lod_info.file_path.empty()) continue;
+
+                    std::string lod_path = mesh_dir + lod_info.file_path;
+                    Assets::LODMeshData lod_data;
+                    if (Assets::LODMeshSerializer::load(lod_data, lod_path))
+                    {
+                        mesh::LODLevel level;
+                        level.screen_threshold = lod_info.screen_threshold;
+                        level.vertex_count = lod_data.vertices.size();
+                        level.index_count = lod_data.indices.size();
+                        level.gpu_mesh = render_api->createMesh();
+                        if (level.gpu_mesh)
+                        {
+                            level.gpu_mesh->uploadIndexedMeshData(
+                                lod_data.vertices.data(), lod_data.vertices.size(),
+                                lod_data.indices.data(), lod_data.indices.size()
+                            );
+                        }
+                        m_ptr->lod_levels.push_back(std::move(level));
+                    }
+                }
+
+                if (!m_ptr->lod_levels.empty())
+                {
+                    m_ptr->computeBounds();
+                    LOG_ENGINE_TRACE("Loaded {} LOD levels for {}", m_ptr->lod_levels.size(), entity.mesh_path);
+                }
+            }
+        }
     }
 
     return m_ptr;

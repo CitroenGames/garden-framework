@@ -36,6 +36,35 @@ struct MeshAssetData {
 
     std::string source_path;
 
+    // LOD support
+    struct MeshLODLevel {
+        std::vector<vertex> vertices;
+        std::vector<uint32_t> indices;
+        IGPUMesh* gpu_mesh = nullptr;
+        bool uploaded = false;
+        float screen_threshold = 0.0f;
+
+        MeshLODLevel() = default;
+        ~MeshLODLevel() { if (gpu_mesh) { delete gpu_mesh; gpu_mesh = nullptr; } }
+        MeshLODLevel(MeshLODLevel&& o) noexcept
+            : vertices(std::move(o.vertices)), indices(std::move(o.indices))
+            , gpu_mesh(o.gpu_mesh), uploaded(o.uploaded), screen_threshold(o.screen_threshold)
+        { o.gpu_mesh = nullptr; o.uploaded = false; }
+        MeshLODLevel& operator=(MeshLODLevel&& o) noexcept {
+            if (this != &o) {
+                if (gpu_mesh) delete gpu_mesh;
+                vertices = std::move(o.vertices); indices = std::move(o.indices);
+                gpu_mesh = o.gpu_mesh; uploaded = o.uploaded; screen_threshold = o.screen_threshold;
+                o.gpu_mesh = nullptr; o.uploaded = false;
+            }
+            return *this;
+        }
+        MeshLODLevel(const MeshLODLevel&) = delete;
+        MeshLODLevel& operator=(const MeshLODLevel&) = delete;
+    };
+    std::vector<MeshLODLevel> lod_levels; // LOD1+, LOD0 is the main mesh data
+    bool has_lods = false;
+
     MeshAssetData() = default;
 
     ~MeshAssetData() {
@@ -55,9 +84,12 @@ struct MeshAssetData {
         , gpu_mesh(other.gpu_mesh)
         , uploaded(other.uploaded)
         , source_path(std::move(other.source_path))
+        , lod_levels(std::move(other.lod_levels))
+        , has_lods(other.has_lods)
     {
         other.gpu_mesh = nullptr;
         other.uploaded = false;
+        other.has_lods = false;
     }
 
     MeshAssetData& operator=(MeshAssetData&& other) noexcept {
@@ -73,9 +105,12 @@ struct MeshAssetData {
             gpu_mesh = other.gpu_mesh;
             uploaded = other.uploaded;
             source_path = std::move(other.source_path);
+            lod_levels = std::move(other.lod_levels);
+            has_lods = other.has_lods;
 
             other.gpu_mesh = nullptr;
             other.uploaded = false;
+            other.has_lods = false;
         }
         return *this;
     }

@@ -9,6 +9,7 @@
 #include "imgui_internal.h"
 #include <SDL.h>
 #include <cstring>
+#include <filesystem>
 
 bool EditorApp::initialize(RenderAPIType api_type)
 {
@@ -71,6 +72,19 @@ bool EditorApp::initialize(RenderAPIType api_type)
     m_viewport.show_toolbar = &m_show_toolbar;
 
     m_navmesh_panel.registry = &m_world.registry;
+    m_physics_debug_panel.registry = &m_world.registry;
+
+    // Asset scanner: scan and process new/changed mesh assets
+    m_content_browser.asset_scanner = &m_asset_scanner;
+    m_lod_settings_panel.asset_scanner = &m_asset_scanner;
+
+    // Content browser: double-click on mesh opens LOD settings
+    m_content_browser.on_open_mesh = [this](const std::string& path) {
+        m_lod_settings_panel.open(std::filesystem::path(path));
+    };
+
+    m_asset_scanner.scanDirectory("assets");
+    m_asset_scanner.processAllPending();
 
     SDL_SetRelativeMouseMode(SDL_FALSE);
 
@@ -134,6 +148,9 @@ void EditorApp::run()
         // NavMesh debug visualization (submit lines before scene render)
         m_navmesh_panel.drawDebugVisualization();
 
+        // Physics debug visualization
+        m_physics_debug_panel.drawDebugVisualization();
+
         // --- Choose which camera to render with ---
         camera& render_camera = chooseRenderCamera();
 
@@ -187,6 +204,12 @@ void EditorApp::run()
 
             if (m_show_navmesh_panel)
                 m_navmesh_panel.draw();
+
+            if (m_show_physics_debug)
+                m_physics_debug_panel.draw();
+
+            // LOD settings panel (opens when double-clicking a mesh in content browser)
+            m_lod_settings_panel.draw();
 
             // Viewport overlay (not docked, transparent)
             m_viewport_overlay.draw(m_state);
@@ -519,7 +542,7 @@ void EditorApp::processEvents()
 
             // Route keyboard to game input during Playing mode
             if (m_state.play_mode == PlayMode::Playing && m_game_input_manager &&
-                !ImGui::GetIO().WantCaptureKeyboard)
+                (m_mouse_captured_for_game || !ImGui::GetIO().WantCaptureKeyboard))
             {
                 m_game_input_manager->process_event(event);
             }
@@ -528,7 +551,7 @@ void EditorApp::processEvents()
         case SDL_KEYUP:
             // Route key release to game input during Playing mode
             if (m_state.play_mode == PlayMode::Playing && m_game_input_manager &&
-                !ImGui::GetIO().WantCaptureKeyboard)
+                (m_mouse_captured_for_game || !ImGui::GetIO().WantCaptureKeyboard))
             {
                 m_game_input_manager->process_event(event);
             }
@@ -553,7 +576,7 @@ void EditorApp::processEvents()
             if (m_state.play_mode == PlayMode::Playing && !m_mouse_captured_for_game)
             {
                 if (event.button.button == SDL_BUTTON_LEFT &&
-                    !ImGui::GetIO().WantCaptureMouse)
+                    m_viewport.is_hovered)
                 {
                     m_mouse_captured_for_game = true;
                     SDL_SetRelativeMouseMode(SDL_TRUE);
@@ -720,6 +743,7 @@ void EditorApp::renderMenuBar()
             ImGui::MenuItem("Content Browser", nullptr, &m_show_content_browser);
             ImGui::MenuItem("Status Bar",      nullptr, &m_show_status_bar);
             ImGui::MenuItem("NavMesh",         nullptr, &m_show_navmesh_panel);
+            ImGui::MenuItem("Physics Debug",   nullptr, &m_show_physics_debug);
             ImGui::Separator();
             ImGui::MenuItem("Viewport Stats",  nullptr, &m_state.show_viewport_stats);
             ImGui::MenuItem("Grid",            nullptr, &m_state.show_grid);

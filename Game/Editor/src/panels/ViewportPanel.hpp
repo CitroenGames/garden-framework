@@ -11,6 +11,7 @@ public:
     // Current viewport content size (used by EditorApp to resize render target)
     int width = 800;
     int height = 600;
+    bool is_hovered = false;
 
     // Set by EditorApp during initialization
     ToolbarPanel* toolbar = nullptr;

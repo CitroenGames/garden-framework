@@ -68,6 +68,7 @@ target_link_libraries(
     PUBLIC Pakker
     PUBLIC JoltPhysics
     PUBLIC miniaudio
+    PUBLIC meshoptimizer
 )
 std = 20
 utf8 = true

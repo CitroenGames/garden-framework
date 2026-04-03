@@ -4,6 +4,7 @@
 
 void ViewportPanel::draw(ImTextureID scene_texture, EditorState& state)
 {
+    is_hovered = false;
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
     ImGui::Begin("Viewport");
 
@@ -44,6 +45,7 @@ void ViewportPanel::draw(ImTextureID scene_texture, EditorState& state)
     if (scene_texture)
     {
         ImGui::Image(scene_texture, avail);
+        is_hovered = ImGui::IsItemHovered();
 
         // Draw colored border when simulation is active
         if (play_mode != PlayMode::Editing)

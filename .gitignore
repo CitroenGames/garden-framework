@@ -440,3 +440,4 @@ imgui.ini
 Game/Client/config.cfg
 .sighmake_cache
 imgui.ini
+*.lodbin
