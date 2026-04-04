@@ -41,7 +41,7 @@ if(macOS)
     libdirs = ${Vulkan_LIBRARY_DIRS}, ${SDL2_LIBRARY_DIRS}
 }
 target_link_libraries(
-    PRIVATE Engine
+    PRIVATE EngineGraphics
 )
 multiprocessor = true
 std = 20

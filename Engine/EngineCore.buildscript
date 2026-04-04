@@ -1,0 +1,51 @@
+[project:EngineCore]
+type = lib
+sources = {
+    src/Animation/**/*.cpp
+    src/Assets/**/*.cpp
+    src/Audio/**/*.cpp
+    src/Components/**/*.cpp
+    src/Console/**/*.cpp
+    src/Debug/**/*.cpp
+    src/Events/**/*.cpp
+    src/GameState/**/*.cpp
+    src/Graphics/HeadlessRenderAPI.cpp
+    src/Graphics/HeadlessMesh.cpp
+    src/Navigation/**/*.cpp
+    src/Plugin/**/*.cpp
+    src/Project/**/*.cpp
+    src/Reflection/ReflectionRegistry.cpp
+    src/Reflection/EngineReflection.cpp
+    src/Reflection/ReflectionSerializer.cpp
+    src/Scene/**/*.cpp
+    src/Threading/**/*.cpp
+    src/Timer/**/*.cpp
+    src/Utils/**/*.cpp
+    src/InputManager.cpp
+    src/GameSimulation.cpp
+    src/PhysicsSystem.cpp
+    src/LevelManager.cpp
+}
+headers = src/**/*.h, src/**/*.hpp
+includes = src, thirdparty/include
+public_includes = src, thirdparty/include, .
+defines = JPH_OBJECT_STREAM
+target_link_libraries(
+    PUBLIC SDL2
+    PUBLIC GLM
+    PUBLIC tinygltf
+    PUBLIC tinyobjloader
+    PUBLIC spdlog
+    PUBLIC entt
+    PUBLIC enet
+    PUBLIC Pakker
+    PUBLIC JoltPhysics
+    PUBLIC miniaudio
+    PUBLIC meshoptimizer
+)
+multiprocessor = true
+simd = StreamingSIMDExtensions2
+std = 20
+utf8 = true
+exception_handling = false
+buffer_security_check = false
