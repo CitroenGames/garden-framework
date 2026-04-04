@@ -2,11 +2,11 @@
     "asset_directories": [
         "assets/"
     ],
-    "buildscript": "test.buildscript",
+    "buildscript": "FPSShooter.buildscript",
     "default_level": "assets/levels/main.level.json",
     "engine_id": "d199bb235026",
     "engine_version": "1.0",
-    "game_module": "bin/test",
-    "name": "test",
+    "game_module": "bin/FPSShooter",
+    "name": "FPSShooter",
     "source_directory": "src/"
 }

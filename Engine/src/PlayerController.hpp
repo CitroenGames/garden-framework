@@ -1,5 +1,6 @@
 #pragma once
 
+#include "EngineExport.h"
 #include "Components/Components.hpp"
 #include "Components/camera.hpp"
 #include "InputManager.hpp"
@@ -14,7 +15,7 @@ enum class PossessedEntityType
     Freecam
 };
 
-class PlayerController
+class ENGINE_API PlayerController
 {
 private:
     entt::entity player_entity;

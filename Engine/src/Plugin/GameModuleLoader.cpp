@@ -124,7 +124,9 @@ bool GameModuleLoader::load(const std::string& dll_path)
         return false;
     }
 
-    printf("[GameModule] Loaded '%s' (game: %s)\n", dll_path.c_str(), getGameName());
+    printf("[GameModule] Loaded '%s' (game: %s, server: %s)\n",
+           dll_path.c_str(), getGameName(),
+           hasServerSupport() ? "yes" : "no");
     return true;
 }
 
@@ -157,6 +159,7 @@ bool GameModuleLoader::reload(const std::string& dll_path)
 
 bool GameModuleLoader::resolveFunctions()
 {
+    // Required client exports
     m_fnGetAPIVersion     = (FnGetAPIVersion)    platformGetProc(m_handle, "gardenGetAPIVersion");
     m_fnGetGameName       = (FnGetGameName)      platformGetProc(m_handle, "gardenGetGameName");
     m_fnGameInit          = (FnGameInit)         platformGetProc(m_handle, "gardenGameInit");
@@ -167,7 +170,15 @@ bool GameModuleLoader::resolveFunctions()
     m_fnOnPlayStart       = (FnOnPlayStart)      platformGetProc(m_handle, "gardenOnPlayStart");
     m_fnOnPlayStop        = (FnOnPlayStop)       platformGetProc(m_handle, "gardenOnPlayStop");
 
-    // Required exports
+    // Optional server exports (nullptr if absent — that's fine)
+    m_fnServerInit              = (FnServerInit)             platformGetProc(m_handle, "gardenServerInit");
+    m_fnServerShutdown          = (FnServerShutdown)         platformGetProc(m_handle, "gardenServerShutdown");
+    m_fnServerUpdate            = (FnServerUpdate)           platformGetProc(m_handle, "gardenServerUpdate");
+    m_fnServerOnLevelLoaded     = (FnServerOnLevelLoaded)    platformGetProc(m_handle, "gardenServerOnLevelLoaded");
+    m_fnServerOnClientConnected    = (FnServerOnClientConnected)   platformGetProc(m_handle, "gardenServerOnClientConnected");
+    m_fnServerOnClientDisconnected = (FnServerOnClientDisconnected)platformGetProc(m_handle, "gardenServerOnClientDisconnected");
+
+    // Only the client exports are required
     return m_fnGetAPIVersion && m_fnGetGameName && m_fnGameInit &&
            m_fnGameShutdown && m_fnRegisterComponents && m_fnGameUpdate;
 }
@@ -183,9 +194,16 @@ void GameModuleLoader::clearFunctionPointers()
     m_fnOnLevelLoaded      = nullptr;
     m_fnOnPlayStart        = nullptr;
     m_fnOnPlayStop         = nullptr;
+
+    m_fnServerInit              = nullptr;
+    m_fnServerShutdown          = nullptr;
+    m_fnServerUpdate            = nullptr;
+    m_fnServerOnLevelLoaded     = nullptr;
+    m_fnServerOnClientConnected    = nullptr;
+    m_fnServerOnClientDisconnected = nullptr;
 }
 
-// ---- Typed wrappers ----
+// ---- Client wrappers ----
 
 int32_t GameModuleLoader::getAPIVersion()
 {
@@ -230,4 +248,36 @@ void GameModuleLoader::onPlayStart()
 void GameModuleLoader::onPlayStop()
 {
     if (m_fnOnPlayStop) m_fnOnPlayStop();
+}
+
+// ---- Server wrappers ----
+
+bool GameModuleLoader::serverInit(EngineServices* services)
+{
+    return m_fnServerInit ? m_fnServerInit(services) : false;
+}
+
+void GameModuleLoader::serverShutdown()
+{
+    if (m_fnServerShutdown) m_fnServerShutdown();
+}
+
+void GameModuleLoader::serverUpdate(float delta_time)
+{
+    if (m_fnServerUpdate) m_fnServerUpdate(delta_time);
+}
+
+void GameModuleLoader::serverOnLevelLoaded()
+{
+    if (m_fnServerOnLevelLoaded) m_fnServerOnLevelLoaded();
+}
+
+void GameModuleLoader::serverOnClientConnected(uint16_t client_id)
+{
+    if (m_fnServerOnClientConnected) m_fnServerOnClientConnected(client_id);
+}
+
+void GameModuleLoader::serverOnClientDisconnected(uint16_t client_id)
+{
+    if (m_fnServerOnClientDisconnected) m_fnServerOnClientDisconnected(client_id);
 }

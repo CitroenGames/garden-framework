@@ -1,5 +1,6 @@
 #pragma once
 
+#include "EngineExport.h"
 #include <string>
 #include <vector>
 #include "Vertex.hpp"
@@ -71,7 +72,7 @@ struct ObjLoaderConfig
     std::string mtl_search_path = "./";    // Path to search for material files
 };
 
-class ObjLoader
+class ENGINE_API ObjLoader
 {
 public:
     // Load OBJ file with optimized performance

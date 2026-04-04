@@ -1,5 +1,6 @@
 #pragma once
 
+#include "EngineExport.h"
 #include <cstdint>
 #include <functional>
 #include <vector>
@@ -10,7 +11,7 @@ constexpr TimerId INVALID_TIMER = 0;
 
 using TimerCallback = std::function<void(TimerId)>;
 
-class TimerSystem
+class ENGINE_API TimerSystem
 {
 public:
     static TimerSystem& get()

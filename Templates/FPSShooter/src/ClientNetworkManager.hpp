@@ -5,13 +5,13 @@
 #include <unordered_map>
 #include <functional>
 #include "enet.h"
-#include "NetworkProtocol.hpp"
-#include "NetworkTypes.hpp"
-#include "BitStream.hpp"
-#include "NetworkSerializer.hpp"
-#include "SharedMovement.hpp"
-#include "PredictionTypes.hpp"
-#include "InterpolationBuffer.hpp"
+#include "shared/NetworkProtocol.hpp"
+#include "shared/NetworkTypes.hpp"
+#include "shared/BitStream.hpp"
+#include "shared/NetworkSerializer.hpp"
+#include "shared/SharedMovement.hpp"
+#include "shared/PredictionTypes.hpp"
+#include "shared/InterpolationBuffer.hpp"
 #include <entt/entt.hpp>
 
 // Forward declarations

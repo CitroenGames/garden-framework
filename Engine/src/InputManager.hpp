@@ -1,5 +1,6 @@
 #pragma once
 
+#include "EngineExport.h"
 #include "SDL.h"
 #include <unordered_map>
 #include <vector>
@@ -24,7 +25,7 @@ struct ActionMapping
     SDL_Scancode key;
 };
 
-class InputManager
+class ENGINE_API InputManager
 {
 private:
     // Direct key state tracking (no keyboard repeat issues)

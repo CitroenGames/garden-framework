@@ -1,5 +1,6 @@
 #pragma once
 
+#include "EngineExport.h"
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #define GLM_ENABLE_EXPERIMENTAL
@@ -121,7 +122,7 @@ public:
     }
 };
 
-class PhysicsSystem
+class ENGINE_API PhysicsSystem
 {
 private:
     glm::vec3 gravity;

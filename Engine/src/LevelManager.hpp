@@ -1,5 +1,6 @@
 #pragma once
 
+#include "EngineExport.h"
 #include <string>
 #include <vector>
 #include <fstream>
@@ -123,7 +124,7 @@ struct LevelData
     std::vector<LevelEntity> entities;
 };
 
-class LevelManager
+class ENGINE_API LevelManager
 {
 public:
     LevelManager();

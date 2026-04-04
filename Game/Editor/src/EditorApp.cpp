@@ -6,6 +6,7 @@
 #include "Debug/DebugDraw.hpp"
 #include "Utils/Log.hpp"
 #include "Utils/FileDialog.hpp"
+#include "Utils/EnginePaths.hpp"
 #include "Components/Components.hpp"
 #include "Project/ProjectManager.hpp"
 #include "imgui.h"
@@ -1330,6 +1331,14 @@ bool EditorApp::runProjectBrowser()
     std::strncpy(m_open_project_path, "", sizeof(m_open_project_path) - 1);
     std::strncpy(m_new_project_name, "MyGame", sizeof(m_new_project_name) - 1);
 
+    // Discover available templates
+    {
+        std::filesystem::path exe_dir = EnginePaths::getExecutableDir();
+        std::filesystem::path templates_dir = exe_dir / ".." / "Templates";
+        m_available_templates = ProjectManager::discoverTemplates(templates_dir.string());
+        m_selected_template = 0;
+    }
+
     bool project_selected = false;
 
     while (!project_selected)
@@ -1482,6 +1491,34 @@ bool EditorApp::runProjectBrowser()
         ImGui::InputTextWithHint("Name", "Project name...",
                                  m_new_project_name, sizeof(m_new_project_name));
 
+        // Template selection
+        if (!m_available_templates.empty())
+        {
+            ImGui::SetNextItemWidth(panel_w * 0.5f);
+            const char* preview = m_selected_template >= 0 && m_selected_template < (int)m_available_templates.size()
+                ? m_available_templates[m_selected_template].name.c_str()
+                : "Blank Project";
+            if (ImGui::BeginCombo("Template", preview))
+            {
+                // Blank project option
+                bool is_blank = (m_selected_template < 0);
+                if (ImGui::Selectable("Blank Project", is_blank))
+                    m_selected_template = -1;
+                if (is_blank)
+                    ImGui::SetItemDefaultFocus();
+
+                for (int i = 0; i < (int)m_available_templates.size(); i++)
+                {
+                    bool is_selected = (m_selected_template == i);
+                    if (ImGui::Selectable(m_available_templates[i].name.c_str(), is_selected))
+                        m_selected_template = i;
+                    if (is_selected)
+                        ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+        }
+
         ImGui::SetNextItemWidth(panel_w - browse_w - 8);
         ImGui::InputTextWithHint("Directory", "Parent directory...",
                                  m_new_project_dir, sizeof(m_new_project_dir));
@@ -1507,7 +1544,20 @@ bool EditorApp::runProjectBrowser()
             std::string dir(m_new_project_dir);
             if (!name.empty() && !dir.empty())
             {
-                if (m_project_manager.createProject(dir, name))
+                bool success = false;
+                if (m_selected_template >= 0 && m_selected_template < (int)m_available_templates.size())
+                {
+                    // Create from template
+                    success = m_project_manager.createProjectFromTemplate(
+                        m_available_templates[m_selected_template].path, dir, name);
+                }
+                else
+                {
+                    // Create blank project
+                    success = m_project_manager.createProject(dir, name);
+                }
+
+                if (success)
                 {
                     std::filesystem::current_path(m_project_manager.getProjectRoot());
                     LOG_ENGINE_INFO("Created project '{}' at '{}'",

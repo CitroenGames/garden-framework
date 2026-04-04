@@ -1,16 +1,17 @@
 [solution]
-name = test
+name = FPSShooter
 platforms = x64, Linux
 
 include = ${ENGINE_PATH}/Engine/Engine.buildscript
 
-[project:test]
+[project:FPSShooter]
 type = dll
 sources = src/**/*.cpp
 headers = src/**/*.hpp
-includes = src
+includes = src, src/shared
 target_link_libraries(
-    PRIVATE Engine
+    PRIVATE EngineGraphics
 )
+defines = RMLUI_SDL_VERSION_MAJOR=2
 std = 20
 utf8 = true

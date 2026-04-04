@@ -1,9 +1,10 @@
 #pragma once
 
+#include "EngineExport.h"
 #include <entt/entt.hpp>
 #include <functional>
 
-class EventBus
+class ENGINE_API EventBus
 {
 public:
     static EventBus& get()

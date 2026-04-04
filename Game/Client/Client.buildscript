@@ -19,31 +19,32 @@ if(Windows)
 {
     subsystem = Windows
 }
-sources = src/**/*.cpp
-headers = src/**/*.h src/**/*.hpp ../shared/**/*.hpp
+sources = src/main.cpp
+headers = src/**/*.hpp
 if(Windows)
 {
-    includes = src, ../shared, ${DirectX11_INCLUDE_DIRS}
+    includes = src, ${DirectX11_INCLUDE_DIRS}
     libs = ${Vulkan_LIBRARIES}, ${DirectX11_LIBRARIES}
     libdirs = ${Vulkan_LIBRARY_DIRS}, ${DirectX11_LIBRARY_DIRS}
 }
 if(Linux)
 {
-    includes = src, ../shared
+    includes = src
     libs = ${Vulkan_LIBRARIES}
     libdirs = ${Vulkan_LIBRARY_DIRS}, ${SDL2_LIBRARY_DIRS}
     ldflags = -Wl,-rpath,/opt/homebrew/lib
 }
 if(macOS)
 {
-    includes = src, ../shared
+    includes = src
     libs = ${Vulkan_LIBRARIES}, -framework Metal, -framework QuartzCore, -framework Cocoa, -framework Foundation, -lobjc
     libdirs = ${Vulkan_LIBRARY_DIRS}, ${SDL2_LIBRARY_DIRS}
 }
 target_link_libraries(
+    PRIVATE EngineCore
     PRIVATE EngineGraphics
 )
-defines = RMLUI_STATIC_LIB, RMLUI_SDL_VERSION_MAJOR=2
+defines = RMLUI_SDL_VERSION_MAJOR=2
 multiprocessor = true
 std = 20
 utf8 = true

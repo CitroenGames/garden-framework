@@ -1,7 +1,7 @@
 #include "ClientNetworkManager.hpp"
 #include "world.hpp"
 #include "Components/Components.hpp"
-#include "SharedComponents.hpp"
+#include "shared/SharedComponents.hpp"
 #include "Utils/Log.hpp"
 #include "Console/ConVar.hpp"
 #include "Console/Console.hpp"

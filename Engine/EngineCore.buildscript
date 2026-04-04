@@ -1,5 +1,6 @@
 [project:EngineCore]
-type = lib
+type = dll
+outdir = ../bin/
 sources = {
     src/Animation/**/*.cpp
     src/Assets/**/*.cpp
@@ -29,7 +30,7 @@ sources = {
 headers = src/**/*.h, src/**/*.hpp
 includes = src, thirdparty/include
 public_includes = src, thirdparty/include, .
-defines = JPH_OBJECT_STREAM
+defines = JPH_OBJECT_STREAM, ENGINECORE_BUILDING_DLL
 target_link_libraries(
     PUBLIC SDL2
     PUBLIC GLM

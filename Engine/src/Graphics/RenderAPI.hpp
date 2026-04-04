@@ -1,5 +1,7 @@
 #pragma once
 
+#include "EngineExport.h"
+#include "EngineGraphicsExport.h"
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
@@ -58,7 +60,7 @@ struct RenderState
 };
 
 // Abstract rendering API interface
-class IRenderAPI
+class ENGINE_API IRenderAPI
 {
 public:
     virtual ~IRenderAPI() = default;
@@ -169,4 +171,4 @@ constexpr RenderAPIType DefaultRenderAPI = RenderAPIType::D3D11;
 constexpr RenderAPIType DefaultRenderAPI = RenderAPIType::Vulkan;
 #endif
 
-IRenderAPI* CreateRenderAPI(RenderAPIType type);
+ENGINE_GRAPHICS_API IRenderAPI* CreateRenderAPI(RenderAPIType type);

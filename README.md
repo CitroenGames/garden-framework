@@ -38,7 +38,7 @@ A cross-platform 3D game engine written in C++20, built as a foundation for FPS-
 
 ## Building
 
-See [build.md](build.md) for prerequisites, build instructions, and running the engine.
+See [build.md](Documentation/build.md) for prerequisites, build instructions, and running the engine.
 
 ## Level Format (.json)
 

@@ -2,6 +2,8 @@
 type = lib
 sources = ImGuizmo.cpp
 headers = ImGuizmo.h
+includes = ../imgui-docking
 public_includes = .
+defines = ENGINEGRAPHICS_BUILDING_DLL, USE_IMGUI_API
 multiprocessor = true
 target_link_libraries(imgui-docking)

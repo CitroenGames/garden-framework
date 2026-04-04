@@ -1,18 +1,20 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <cstring>
+#include <filesystem>
 
 #define SDL_MAIN_HANDLED
-#define ENET_IMPLEMENTATION
-#include "enet.h"
+#include "SDL.h"
 
 #include "Utils/CrashHandler.hpp"
 #include "Utils/Log.hpp"
+#include "Utils/EnginePaths.hpp"
 #include "Application.hpp"
 #include "world.hpp"
 #include "LevelManager.hpp"
-#include "SharedComponents.hpp"
-#include "GameRules.hpp"
-#include "ServerNetworkManager.hpp"
+#include "Plugin/GameModuleLoader.hpp"
+#include "Project/ProjectManager.hpp"
+#include "Reflection/ReflectionRegistry.hpp"
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -21,16 +23,48 @@
 #include <windows.h>
 #endif
 
+namespace fs = std::filesystem;
+
 static Application app;
 static world _world;
-static Game::ServerNetworkManager _network;
+static GameModuleLoader game_module;
+static ProjectManager project_manager;
+static LevelManager level_manager;
+static ReflectionRegistry reflection;
 
 static void shutdown_server(int code)
 {
-    _network.shutdown();
+    if (game_module.isLoaded())
+    {
+        game_module.serverShutdown();
+        game_module.unload();
+    }
+    _world.registry.clear();
     app.shutdown();
     EE::CLog::Shutdown();
     exit(code);
+}
+
+static std::string parseProjectPath(int argc, char* argv[])
+{
+    for (int i = 1; i < argc - 1; i++)
+    {
+        if (strcmp(argv[i], "--project") == 0)
+            return argv[i + 1];
+    }
+    return "";
+}
+
+static std::string findGardenFile(const fs::path& dir)
+{
+    if (!fs::exists(dir) || !fs::is_directory(dir))
+        return "";
+    for (const auto& entry : fs::directory_iterator(dir))
+    {
+        if (entry.is_regular_file() && entry.path().extension() == ".garden")
+            return entry.path().string();
+    }
+    return "";
 }
 
 int main(int argc, char* argv[])
@@ -39,204 +73,118 @@ int main(int argc, char* argv[])
     crashHandler->Initialize("Server");
     EE::CLog::Init();
 
-    LOG_ENGINE_INFO("Starting Headless Server...");
+    LOG_ENGINE_INFO("Starting Dedicated Server...");
 
-    // Initialize game rules
-    Game::GameRules game_rules;
+    // Find the .garden project file
+    std::string garden_path = parseProjectPath(argc, argv);
+    if (garden_path.empty())
+    {
+        fs::path exe_dir = EnginePaths::getExecutableDir();
+        garden_path = findGardenFile(exe_dir / "..");
+    }
 
-    // Initialize Network
-    if (!_network.initialize() || !_network.startServer(7777)) {
-        LOG_ENGINE_FATAL("Failed to initialize Server Network");
+    if (garden_path.empty())
+    {
+        LOG_ENGINE_FATAL("No .garden project file found. Pass --project <path> or place a .garden file in the parent directory.");
         return 1;
     }
 
-    // Set up network callbacks
-    _network.setOnClientConnected([&](uint16_t client_id) {
-        LOG_ENGINE_INFO("Client {0} connected, spawning player", client_id);
+    if (!project_manager.loadProject(garden_path))
+    {
+        LOG_ENGINE_FATAL("Failed to load project: {}", garden_path);
+        return 1;
+    }
 
-        // Get spawn point from game rules
-        glm::vec3 spawn_pos = game_rules.getNextSpawnPoint();
+    fs::current_path(project_manager.getProjectRoot());
+    LOG_ENGINE_INFO("Project '{}' loaded", project_manager.getDescriptor().name);
 
-        // Create player entity
-        entt::entity player_entity = _world.registry.create();
-
-        // Register entity with network manager and get network ID
-        uint32_t network_id = _network.registerEntity(player_entity);
-
-        // Add networked entity component
-        _world.registry.emplace<NetworkedEntity>(player_entity, network_id, client_id, true);
-
-        // Add transform component
-        TransformComponent transform;
-        transform.position = spawn_pos;
-        _world.registry.emplace<TransformComponent>(player_entity, transform);
-
-        // Add rigidbody component
-        // apply_gravity = false: gravity is handled inside SharedMovement::simulate()
-        // to prevent double-gravity from the physics fallback integrator
-        RigidBodyComponent rigidbody;
-        rigidbody.mass = 1.0f;
-        rigidbody.apply_gravity = false;
-        _world.registry.emplace<RigidBodyComponent>(player_entity, rigidbody);
-
-        // Add player component
-        PlayerComponent player;
-        player.speed = 10.0f;
-        player.jump_force = 5.0f;
-        player.mouse_sensitivity = 1.0f;
-        player.grounded = false;
-        player.input_enabled = true;
-        _world.registry.emplace<PlayerComponent>(player_entity, player);
-
-        // Update client info with player entity network ID
-        _network.setClientPlayerEntity(client_id, network_id);
-
-        // Send SPAWN_PLAYER message to all clients (so they see the new player)
-        SpawnPlayerMessage spawn_msg;
-        spawn_msg.client_id = client_id;
-        spawn_msg.entity_id = network_id;
-        spawn_msg.position = spawn_pos;
-        spawn_msg.camera_yaw = 0.0f;
-
-        BitWriter writer;
-        NetworkSerializer::serialize(writer, spawn_msg);
-
-        // Broadcast to all connected clients
-        for (uint16_t i = 1; i < _network.getNextClientId(); i++) {
-            const ClientInfo* other_client = _network.getClientInfo(i);
-            if (other_client && other_client->peer) {
-                _network.sendReliableToClient(i, writer);
-            }
-        }
-
-        // Send existing players to the newly connected client
-        auto view = _world.registry.view<NetworkedEntity, TransformComponent, PlayerComponent>();
-        for (auto entity : view) {
-            auto& networked = view.get<NetworkedEntity>(entity);
-            auto& transform = view.get<TransformComponent>(entity);
-
-            // Skip the newly spawned player (already sent above)
-            if (networked.owner_client_id == client_id) {
-                continue;
-            }
-
-            // Send SPAWN_PLAYER for this existing player
-            SpawnPlayerMessage existing_msg;
-            existing_msg.client_id = networked.owner_client_id;
-            existing_msg.entity_id = networked.network_id;
-            existing_msg.position = transform.position;
-            existing_msg.camera_yaw = 0.0f;
-
-            BitWriter existing_writer;
-            NetworkSerializer::serialize(existing_writer, existing_msg);
-            _network.sendReliableToClient(client_id, existing_writer);
-        }
-
-        LOG_ENGINE_INFO("Spawned player entity (network_id={0}) for client {1} at position {2},{3},{4}",
-            network_id, client_id, spawn_pos.x, spawn_pos.y, spawn_pos.z);
-    });
-
-    _network.setOnClientDisconnected([&](uint16_t client_id) {
-        LOG_ENGINE_INFO("Client {0} disconnected, despawning player", client_id);
-
-        // Find player entity for this client
-        auto view = _world.registry.view<NetworkedEntity>();
-        for (auto entity : view) {
-            auto& networked = view.get<NetworkedEntity>(entity);
-            if (networked.owner_client_id == client_id && networked.is_player) {
-
-                // Broadcast DESPAWN_PLAYER to all other connected clients
-                DespawnPlayerMessage despawn_msg;
-                despawn_msg.client_id = client_id;
-                despawn_msg.entity_id = networked.network_id;
-
-                BitWriter writer;
-                NetworkSerializer::serialize(writer, despawn_msg);
-
-                // Send to all clients except the disconnecting one
-                for (uint16_t i = 1; i < _network.getNextClientId(); i++) {
-                    if (i == client_id) continue;
-
-                    const ClientInfo* other_client = _network.getClientInfo(i);
-                    if (other_client && other_client->peer) {
-                        _network.sendReliableToClient(i, writer);
-                    }
-                }
-
-                // Clean up entity
-                _network.unregisterEntity(entity);
-                _world.registry.destroy(entity);
-                LOG_ENGINE_INFO("Despawned and broadcast removal of player entity for client {0}", client_id);
-                break;
-            }
-        }
-    });
-
-    // Initialize application with Headless render API
-    app = Application(1280, 720, 60, 75.0f, RenderAPIType::Headless);
+    // Initialize headless application (no window, no GPU)
+    app = Application(1, 1, 60, 75.0f, RenderAPIType::Headless);
     if (!app.initialize("Server", false))
     {
-        LOG_ENGINE_FATAL("Failed to initialize Server Application");
+        LOG_ENGINE_FATAL("Failed to initialize server application");
         return 1;
     }
 
     IRenderAPI* render_api = app.getRenderAPI();
 
-    /* Create world */
+    // Initialize world and physics
     _world = world();
     _world.initializePhysics();
-    _network.setWorld(&_world);
 
-    /* Level loading */
-    LevelManager level_manager;
+    // Load level
     LevelData level_data;
-    std::string level_path = "assets/levels/main.level.json";
-
-    LOG_ENGINE_INFO("Loading level: {0}", level_path.c_str());
-    if (!level_manager.loadLevel(level_path, level_data))
+    std::string level_path = project_manager.getDescriptor().default_level;
+    if (!level_path.empty())
     {
-        LOG_ENGINE_FATAL("Failed to load level");
+        if (!level_manager.loadLevel(level_path, level_data))
+        {
+            LOG_ENGINE_FATAL("Failed to load level: {}", level_path);
+            shutdown_server(1);
+        }
+
+        if (!level_manager.instantiateLevel(level_data, _world, render_api))
+        {
+            LOG_ENGINE_FATAL("Failed to instantiate level");
+            shutdown_server(1);
+        }
+    }
+
+    // Load game DLL
+    std::string dll_path = project_manager.getAbsoluteModulePath();
+    if (!game_module.load(dll_path))
+    {
+        LOG_ENGINE_FATAL("Failed to load game module: {}", dll_path);
         shutdown_server(1);
     }
 
-    if (!level_manager.instantiateLevel(level_data, _world, render_api))
+    if (!game_module.hasServerSupport())
     {
-        LOG_ENGINE_FATAL("Failed to instantiate level");
+        LOG_ENGINE_FATAL("Game module '{}' does not export server hooks", game_module.getGameName());
         shutdown_server(1);
     }
+
+    // Initialize server via DLL
+    EngineServices services{};
+    services.game_world = &_world;
+    services.render_api = render_api;
+    services.input_manager = nullptr;  // no input on server
+    services.reflection = &reflection;
+    services.application = &app;
+    services.level_manager = &level_manager;
+    services.api_version = GARDEN_MODULE_API_VERSION;
+
+    game_module.registerComponents(&reflection);
+
+    if (!game_module.serverInit(&services))
+    {
+        LOG_ENGINE_FATAL("Server module initialization failed");
+        shutdown_server(1);
+    }
+
+    game_module.serverOnLevelLoaded();
 
     LOG_ENGINE_INFO("Server started successfully");
 
-    /* Delta time */
+    // Server loop
     Uint32 delta_last = SDL_GetTicks();
-    float delta_time = 0;
-
     bool running = true;
+
     while (running)
     {
-        Uint32 frame_start_ticks = SDL_GetTicks();
-        delta_time = (frame_start_ticks - delta_last) / 1000.0f;
-        delta_last = frame_start_ticks;
+        Uint32 frame_start = SDL_GetTicks();
+        float delta_time = (frame_start - delta_last) / 1000.0f;
+        delta_last = frame_start;
 
-        // Network update (includes rate-limited world state broadcast at ~20Hz)
-        _network.update(delta_time);
+        game_module.serverUpdate(delta_time);
 
-        // Physics step (Server is authority)
-        _world.step_physics(delta_time);
+        Uint32 frame_end = SDL_GetTicks();
+        app.lockFramerate(frame_start, frame_end);
 
-        // Server-only game rules
-        game_rules.Update(_world, delta_time);
-
-        // Limit server tick rate
-        Uint32 frame_end_ticks = SDL_GetTicks();
-        app.lockFramerate(frame_start_ticks, frame_end_ticks);
-
-        // Simple exit condition (could be replaced with signal handling)
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
-            if (event.type == SDL_QUIT) {
+            if (event.type == SDL_QUIT)
                 running = false;
-            }
         }
     }
 

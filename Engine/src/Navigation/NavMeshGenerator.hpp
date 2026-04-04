@@ -1,12 +1,13 @@
 #pragma once
 
+#include "EngineExport.h"
 #include "NavMesh.hpp"
 #include <entt/entt.hpp>
 
 namespace Navigation
 {
 
-class NavMeshGenerator
+class ENGINE_API NavMeshGenerator
 {
 public:
     struct GenerationStats

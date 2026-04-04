@@ -1,11 +1,12 @@
 #pragma once
 
+#include "EngineExport.h"
 #include "NavMesh.hpp"
 
 namespace Navigation
 {
 
-class NavMeshPathfinder
+class ENGINE_API NavMeshPathfinder
 {
 public:
     static NavPath findPath(const NavMesh& navmesh,

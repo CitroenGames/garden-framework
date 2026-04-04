@@ -1,5 +1,6 @@
 #pragma once
 
+#include "EngineExport.h"
 #include <glm/glm.hpp>
 #include <vector>
 #include <cmath>
@@ -8,7 +9,7 @@
 class IRenderAPI;
 class camera;
 
-class DebugDraw
+class ENGINE_API DebugDraw
 {
 public:
     static DebugDraw& get()

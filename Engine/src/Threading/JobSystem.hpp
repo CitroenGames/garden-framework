@@ -1,5 +1,6 @@
 #pragma once
 
+#include "EngineExport.h"
 #include "Job.hpp"
 #include "ThreadPool.hpp"
 #include "MainThreadQueue.hpp"
@@ -9,7 +10,7 @@
 
 namespace Threading {
 
-class JobSystem {
+class ENGINE_API JobSystem {
 public:
     static JobSystem& get();
 

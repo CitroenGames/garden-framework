@@ -1,5 +1,6 @@
 #pragma once
 
+#include "EngineExport.h"
 #include "ReflectionTypes.hpp"
 #include <vector>
 #include <string>
@@ -7,7 +8,7 @@
 // Non-singleton reflection registry.
 // The host (Editor/Game exe) creates one instance and passes it to game DLLs
 // via EngineServices. This avoids the duplicate-static-lib singleton problem.
-class ReflectionRegistry
+class ENGINE_API ReflectionRegistry
 {
 public:
     ReflectionRegistry() = default;

@@ -2,6 +2,7 @@
 #include <fstream>
 #include <filesystem>
 #include <cstdio>
+#include <regex>
 
 // nlohmann json is available via tinygltf
 #include "json.hpp"
@@ -167,7 +168,7 @@ GAME_API void gardenOnPlayStop()
         bs_file << "headers = src/**/*.hpp\n";
         bs_file << "includes = src\n";
         bs_file << "target_link_libraries(\n";
-        bs_file << "    PRIVATE Engine\n";
+        bs_file << "    PRIVATE EngineGraphics\n";
         bs_file << ")\n";
         bs_file << "std = 20\n";
         bs_file << "utf8 = true\n";
@@ -192,6 +193,146 @@ GAME_API void gardenOnPlayStop()
 
     // Now load the project we just created
     return loadProject(garden_path.string());
+}
+
+bool ProjectManager::createProjectFromTemplate(const std::string& template_path,
+                                                const std::string& destination_dir,
+                                                const std::string& project_name)
+{
+    fs::path src_dir = fs::path(template_path);
+    fs::path dst_dir = fs::path(destination_dir) / project_name;
+
+    // Find the .garden file in the template to detect the original name
+    std::string original_name;
+    std::string garden_filename;
+    for (const auto& entry : fs::directory_iterator(src_dir))
+    {
+        if (entry.is_regular_file() && entry.path().extension() == ".garden")
+        {
+            garden_filename = entry.path().filename().string();
+
+            std::ifstream f(entry.path());
+            if (f.is_open())
+            {
+                try {
+                    json j;
+                    f >> j;
+                    original_name = j.value("name", "");
+                } catch (...) {}
+            }
+            break;
+        }
+    }
+
+    if (original_name.empty())
+    {
+        fprintf(stderr, "[ProjectManager] Template at '%s' has no valid .garden file\n",
+                template_path.c_str());
+        return false;
+    }
+
+    // Copy entire template directory to destination
+    std::error_code ec;
+    fs::create_directories(dst_dir, ec);
+    fs::copy(src_dir, dst_dir, fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
+    if (ec)
+    {
+        fprintf(stderr, "[ProjectManager] Failed to copy template: %s\n", ec.message().c_str());
+        return false;
+    }
+
+    // Rename files: original_name.garden -> project_name.garden, etc.
+    fs::path old_garden = dst_dir / (original_name + ".garden");
+    fs::path new_garden = dst_dir / (project_name + ".garden");
+    if (fs::exists(old_garden))
+        fs::rename(old_garden, new_garden, ec);
+
+    fs::path old_bs = dst_dir / (original_name + ".buildscript");
+    fs::path new_bs = dst_dir / (project_name + ".buildscript");
+    if (fs::exists(old_bs))
+        fs::rename(old_bs, new_bs, ec);
+
+    // Helper: replace all occurrences of original_name with project_name in a file
+    auto replaceInFile = [&](const fs::path& file_path) {
+        std::ifstream in(file_path);
+        if (!in.is_open()) return;
+        std::string content((std::istreambuf_iterator<char>(in)),
+                             std::istreambuf_iterator<char>());
+        in.close();
+
+        // Replace all occurrences
+        std::string::size_type pos = 0;
+        while ((pos = content.find(original_name, pos)) != std::string::npos)
+        {
+            content.replace(pos, original_name.length(), project_name);
+            pos += project_name.length();
+        }
+
+        std::ofstream out(file_path);
+        if (out.is_open())
+            out << content;
+    };
+
+    // Update file contents
+    replaceInFile(new_garden);
+    replaceInFile(new_bs);
+
+    // Update GameModule.cpp (gardenGetGameName return value)
+    fs::path module_cpp = dst_dir / "src" / "GameModule.cpp";
+    if (fs::exists(module_cpp))
+        replaceInFile(module_cpp);
+
+    printf("[ProjectManager] Created project '%s' from template '%s'\n",
+           project_name.c_str(), original_name.c_str());
+
+    return loadProject(new_garden.string());
+}
+
+std::vector<TemplateInfo> ProjectManager::discoverTemplates(const std::string& templates_dir)
+{
+    std::vector<TemplateInfo> templates;
+
+    if (!fs::exists(templates_dir) || !fs::is_directory(templates_dir))
+        return templates;
+
+    for (const auto& entry : fs::directory_iterator(templates_dir))
+    {
+        if (!entry.is_directory())
+            continue;
+
+        // Look for a .garden file in this subdirectory
+        for (const auto& file : fs::directory_iterator(entry.path()))
+        {
+            if (file.is_regular_file() && file.path().extension() == ".garden")
+            {
+                TemplateInfo info;
+                info.path = fs::absolute(entry.path()).string();
+                info.garden_file = fs::absolute(file.path()).string();
+
+                // Parse the .garden file to get the name
+                std::ifstream f(file.path());
+                if (f.is_open())
+                {
+                    try {
+                        json j;
+                        f >> j;
+                        info.name = j.value("name", entry.path().filename().string());
+                    } catch (...) {
+                        info.name = entry.path().filename().string();
+                    }
+                }
+                else
+                {
+                    info.name = entry.path().filename().string();
+                }
+
+                templates.push_back(info);
+                break; // Only one .garden per template directory
+            }
+        }
+    }
+
+    return templates;
 }
 
 bool ProjectManager::saveProject()

@@ -20,12 +20,17 @@
 //#define IM_ASSERT(_EXPR)  ((void)(_EXPR))     // Disable asserts
 
 //---- Define attributes of all API symbols declarations, e.g. for DLL under Windows
-// Using Dear ImGui via a shared library is not recommended, because of function call overhead and because we don't guarantee backward nor forward ABI compatibility.
-// - Windows DLL users: heaps and globals are not shared across DLL boundaries! You will need to call SetCurrentContext() + SetAllocatorFunctions()
-//   for each static/DLL boundary you are calling from. Read "Context and Memory Allocators" section of imgui.cpp for more details.
-//#define IMGUI_API __declspec(dllexport)                   // MSVC Windows: DLL export
-//#define IMGUI_API __declspec(dllimport)                   // MSVC Windows: DLL import
-//#define IMGUI_API __attribute__((visibility("default")))  // GCC/Clang: override visibility when set is hidden
+// Garden Engine: ImGui is compiled into EngineGraphics.dll.
+// ENGINE_BUILDING_DLL is defined when building the engine DLL, absent when consuming it.
+#if defined(_WIN32)
+#   if defined(ENGINEGRAPHICS_BUILDING_DLL)
+#       define IMGUI_API __declspec(dllexport)
+#   else
+#       define IMGUI_API __declspec(dllimport)
+#   endif
+#else
+#   define IMGUI_API __attribute__((visibility("default")))
+#endif
 
 //---- Don't define obsolete functions/enums/behaviors. Consider enabling from time to time after updating to clean your code of obsolete function/names.
 //#define IMGUI_DISABLE_OBSOLETE_FUNCTIONS

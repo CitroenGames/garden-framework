@@ -3,7 +3,7 @@
 #include "RenderAPI.hpp"
 #include <cstdint>
 
-class HeadlessRenderAPI : public IRenderAPI
+class ENGINE_API HeadlessRenderAPI : public IRenderAPI
 {
 public:
     HeadlessRenderAPI();

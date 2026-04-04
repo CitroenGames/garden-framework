@@ -1,5 +1,6 @@
 #pragma once
 
+#include "EngineExport.h"
 #include <vector>
 #include <string>
 #include <functional>
@@ -49,7 +50,7 @@ struct MaterialRange
     bool hasValidTexture() const { return texture != INVALID_TEXTURE; }
 };
 
-class mesh
+class ENGINE_API mesh
 {
 public:
     vertex* vertices;
