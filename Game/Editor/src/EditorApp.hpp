@@ -23,6 +23,7 @@
 #include "panels/LODSettingsPanel.hpp"
 #include "Assets/AssetScanner.hpp"
 #include "Project/ProjectManager.hpp"
+#include "Project/ProjectPackager.hpp"
 #include "UndoSystem.hpp"
 
 class EditorApp
@@ -141,6 +142,14 @@ private:
     // Template selection
     std::vector<TemplateInfo> m_available_templates;
     int m_selected_template = 0;
+
+    // Packaging
+    bool m_show_package_dialog = false;
+    bool m_package_compile_levels = false;
+    char m_package_output_dir[512] = "";
+    char m_package_name[256] = "";
+    void renderPackageDialog();
+    void executePackageProject();
 
     // Level operations
     void newLevel();

@@ -188,6 +188,7 @@ int main(int argc, char* argv[])
         LOG_ENGINE_FATAL("Failed to initialize Asset Manager");
         quit_game(1);
     }
+    Assets::AssetManager::get().setAssetRoot(project_manager.getProjectRoot());
     Assets::AssetManager::get().registerLoader(std::make_unique<Assets::GltfAssetLoader>());
 
     if (!AudioSystem::get().initialize())

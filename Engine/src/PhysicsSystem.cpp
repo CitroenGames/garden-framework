@@ -120,6 +120,12 @@ JPH::BodyInterface& PhysicsSystem::getBodyInterface()
     return jolt_system->GetBodyInterface();
 }
 
+void PhysicsSystem::optimizeBroadPhase()
+{
+    if (jolt_system)
+        jolt_system->OptimizeBroadPhase();
+}
+
 JPH::BodyID PhysicsSystem::createStaticBody(const glm::vec3& position, const glm::vec3& rotation, const JPH::ShapeRefC& shape, entt::entity entity)
 {
     if (!initialized) initialize();

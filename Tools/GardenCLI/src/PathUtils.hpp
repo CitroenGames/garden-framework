@@ -73,4 +73,36 @@ inline fs::path findEditorPath(const fs::path& engine_root)
     return {}; // Not found
 }
 
+// Returns the platform-specific client (game) executable name
+inline std::string getClientExeName()
+{
+#ifdef _WIN32
+    return "Game.exe";
+#else
+    return "Game";
+#endif
+}
+
+// Search for the client (game) executable relative to an engine root.
+// Checks common build output locations.
+inline fs::path findClientPath(const fs::path& engine_root)
+{
+    fs::path candidates[] = {
+        engine_root / "bin" / getClientExeName(),
+        engine_root / getClientExeName(),
+        engine_root / "x64" / "Release" / getClientExeName(),
+        engine_root / "x64" / "Debug" / getClientExeName(),
+        engine_root / "build" / "Release" / getClientExeName(),
+        engine_root / "build" / "Debug" / getClientExeName(),
+    };
+
+    for (auto& candidate : candidates)
+    {
+        if (fs::exists(candidate))
+            return fs::canonical(candidate);
+    }
+
+    return {}; // Not found
+}
+
 } // namespace PathUtils

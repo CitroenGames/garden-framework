@@ -1,0 +1,305 @@
+#include "ProjectPackager.hpp"
+#include "ProjectManager.hpp"
+#include "LevelManager.hpp"
+#include "Assets/AssetManager.hpp"
+#include "Utils/EnginePaths.hpp"
+#include "Utils/Log.hpp"
+#include "json.hpp"
+
+#include <filesystem>
+#include <fstream>
+
+namespace fs = std::filesystem;
+using json = nlohmann::json;
+
+static std::string shaderSubdir(RenderAPIType api)
+{
+    switch (api)
+    {
+    case RenderAPIType::D3D11:  return "d3d11";
+    case RenderAPIType::Vulkan: return "vulkan";
+    case RenderAPIType::Metal:  return "metal";
+    default:                    return "d3d11";
+    }
+}
+
+static int copyDirectoryRecursive(const fs::path& src, const fs::path& dst)
+{
+    if (!fs::exists(src) || !fs::is_directory(src))
+        return 0;
+
+    std::error_code ec;
+    fs::create_directories(dst, ec);
+    if (ec)
+    {
+        LOG_ENGINE_ERROR("[Packager] Failed to create directory '{}': {}", dst.string(), ec.message());
+        return 0;
+    }
+
+    int count = 0;
+    for (const auto& entry : fs::recursive_directory_iterator(src, fs::directory_options::skip_permission_denied, ec))
+    {
+        if (ec) break;
+
+        fs::path relative = fs::relative(entry.path(), src, ec);
+        if (ec) continue;
+
+        fs::path dest_path = dst / relative;
+
+        if (entry.is_directory())
+        {
+            fs::create_directories(dest_path, ec);
+        }
+        else if (entry.is_regular_file())
+        {
+            fs::create_directories(dest_path.parent_path(), ec);
+            fs::copy_file(entry.path(), dest_path, fs::copy_options::overwrite_existing, ec);
+            if (ec)
+                LOG_ENGINE_WARN("[Packager] Failed to copy '{}': {}", entry.path().string(), ec.message());
+            else
+                ++count;
+        }
+    }
+    return count;
+}
+
+static bool copySingleFile(const fs::path& src, const fs::path& dst, const char* label)
+{
+    if (!fs::exists(src))
+    {
+        LOG_ENGINE_ERROR("[Packager] {} not found: {}", label, src.string());
+        return false;
+    }
+
+    std::error_code ec;
+    fs::create_directories(dst.parent_path(), ec);
+    fs::copy_file(src, dst, fs::copy_options::overwrite_existing, ec);
+    if (ec)
+    {
+        LOG_ENGINE_ERROR("[Packager] Failed to copy {}: {}", label, ec.message());
+        return false;
+    }
+    return true;
+}
+
+PackageResult ProjectPackager::packageProject(
+    const ProjectManager& project_manager,
+    LevelManager& level_manager,
+    const PackageConfig& config)
+{
+    PackageResult result;
+
+    // --- Validate ---
+    if (!project_manager.isLoaded())
+    {
+        result.error_message = "No project loaded.";
+        return result;
+    }
+
+    if (config.output_directory.empty() || config.package_name.empty())
+    {
+        result.error_message = "Output directory and package name are required.";
+        return result;
+    }
+
+    const auto& desc = project_manager.getDescriptor();
+    const fs::path project_root = project_manager.getProjectRoot();
+    const fs::path output_root = fs::path(config.output_directory) / config.package_name;
+
+    // Check game module DLL exists
+    std::string module_path = project_manager.getAbsoluteModulePath();
+    if (!module_path.empty() && !fs::exists(module_path))
+    {
+        result.error_message = "Game module DLL not found: " + module_path +
+            "\nBuild the game module before packaging.";
+        return result;
+    }
+
+    // Prevent output inside project asset directories
+    for (const auto& asset_dir : desc.asset_directories)
+    {
+        fs::path abs_asset = fs::absolute(project_root / asset_dir);
+        fs::path abs_output = fs::absolute(output_root);
+        std::error_code ec;
+        fs::path rel = fs::relative(abs_output, abs_asset, ec);
+        if (!ec && !rel.empty() && rel.native()[0] != '.')
+        {
+            result.error_message = "Output directory cannot be inside project asset directory: " + abs_asset.string();
+            return result;
+        }
+    }
+
+    LOG_ENGINE_INFO("[Packager] Packaging '{}' to '{}'...", desc.name, output_root.string());
+
+    // --- Create output structure ---
+    std::error_code ec;
+    fs::create_directories(output_root / "bin", ec);
+    fs::create_directories(output_root / "assets", ec);
+    if (ec)
+    {
+        result.error_message = "Failed to create output directories: " + ec.message();
+        return result;
+    }
+
+    // --- Copy engine binaries ---
+    fs::path engine_bin = EnginePaths::getExecutableDir();
+
+#ifdef _WIN32
+    const char* engine_files[] = { "Game.exe", "EngineCore.dll", "EngineGraphics.dll", "SDL2.dll" };
+#elif defined(__APPLE__)
+    const char* engine_files[] = { "Game", "libEngineCore.dylib", "libEngineGraphics.dylib" };
+#else
+    const char* engine_files[] = { "Game", "libEngineCore.so", "libEngineGraphics.so" };
+#endif
+
+    for (const char* file : engine_files)
+    {
+        if (copySingleFile(engine_bin / file, output_root / "bin" / file, file))
+            result.files_copied++;
+        else
+            LOG_ENGINE_WARN("[Packager] Missing engine binary: {}", file);
+    }
+
+    // --- Copy game module DLL ---
+    if (!module_path.empty() && fs::exists(module_path))
+    {
+        fs::path module_filename = fs::path(module_path).filename();
+        if (copySingleFile(module_path, output_root / "bin" / module_filename, "Game module"))
+            result.files_copied++;
+    }
+
+    // --- Copy engine assets ---
+    fs::path engine_assets = fs::path(engine_bin) / ".." / "assets";
+    engine_assets = fs::weakly_canonical(engine_assets);
+
+    // Shaders for target platform
+    std::string shader_dir = shaderSubdir(config.target_render_api);
+    fs::path shader_src = engine_assets / "shaders" / shader_dir;
+    fs::path shader_dst = output_root / "assets" / "shaders" / shader_dir;
+    LOG_ENGINE_INFO("[Packager] Copying {} shaders...", shader_dir);
+    result.files_copied += copyDirectoryRecursive(shader_src, shader_dst);
+
+    // Fonts
+    fs::path fonts_src = engine_assets / "fonts";
+    if (fs::exists(fonts_src))
+    {
+        LOG_ENGINE_INFO("[Packager] Copying fonts...");
+        result.files_copied += copyDirectoryRecursive(fonts_src, output_root / "assets" / "fonts");
+    }
+
+    // UI
+    fs::path ui_src = engine_assets / "ui";
+    if (fs::exists(ui_src))
+    {
+        LOG_ENGINE_INFO("[Packager] Copying UI assets...");
+        result.files_copied += copyDirectoryRecursive(ui_src, output_root / "assets" / "ui");
+    }
+
+    // --- Copy project assets ---
+    for (const auto& asset_dir : desc.asset_directories)
+    {
+        fs::path src = project_root / asset_dir;
+        if (!fs::exists(src))
+        {
+            LOG_ENGINE_WARN("[Packager] Asset directory not found: {}", src.string());
+            continue;
+        }
+
+        // Project asset_directories are typically "assets/", so copy contents into output/assets/
+        fs::path dst = output_root / asset_dir;
+        LOG_ENGINE_INFO("[Packager] Copying project assets from '{}'...", asset_dir);
+        result.files_copied += copyDirectoryRecursive(src, dst);
+    }
+
+    // --- Validate referenced assets ---
+    {
+        // Scan all level files in the output to find referenced asset paths
+        fs::path output_levels = output_root / "assets" / "levels";
+        if (fs::exists(output_levels))
+        {
+            auto referenced = Assets::AssetManager::collectLevelAssets(output_levels.string());
+            int missing = 0;
+            for (const auto& asset_path : referenced)
+            {
+                fs::path full = output_root / asset_path;
+                if (!fs::exists(full))
+                {
+                    LOG_ENGINE_WARN("[Packager] Referenced asset missing from package: {}", asset_path);
+                    ++missing;
+                }
+            }
+            if (missing > 0)
+                LOG_ENGINE_WARN("[Packager] {} referenced asset(s) missing from package", missing);
+            else if (!referenced.empty())
+                LOG_ENGINE_INFO("[Packager] All {} referenced assets validated", referenced.size());
+        }
+    }
+
+    // --- Optionally compile levels to binary ---
+    std::string default_level = desc.default_level;
+
+    if (config.compile_levels_to_binary)
+    {
+        LOG_ENGINE_INFO("[Packager] Compiling levels to binary...");
+
+        // Find all .level.json files in the output
+        for (const auto& entry : fs::recursive_directory_iterator(output_root / "assets", ec))
+        {
+            if (ec) break;
+            if (!entry.is_regular_file()) continue;
+
+            std::string filename = entry.path().filename().string();
+            if (filename.size() > 11 && filename.substr(filename.size() - 11) == ".level.json")
+            {
+                std::string json_path = entry.path().string();
+                std::string binary_path = json_path.substr(0, json_path.size() - 11) + ".level";
+
+                if (level_manager.compileLevel(json_path, binary_path))
+                {
+                    result.levels_compiled++;
+                    // Remove the JSON original
+                    fs::remove(entry.path(), ec);
+                    LOG_ENGINE_INFO("[Packager] Compiled: {}", filename);
+                }
+                else
+                {
+                    LOG_ENGINE_WARN("[Packager] Failed to compile: {}", filename);
+                }
+            }
+        }
+
+        // Update default_level extension
+        if (default_level.size() > 11 &&
+            default_level.substr(default_level.size() - 11) == ".level.json")
+        {
+            default_level = default_level.substr(0, default_level.size() - 11) + ".level";
+        }
+    }
+
+    // --- Write .garden file ---
+    json j;
+    j["name"] = desc.name;
+    j["engine_id"] = desc.engine_id;
+    j["engine_version"] = desc.engine_version;
+    j["game_module"] = desc.game_module;
+    j["default_level"] = default_level;
+    j["asset_directories"] = desc.asset_directories;
+
+    fs::path garden_path = output_root / (desc.name + ".garden");
+    std::ofstream garden_file(garden_path);
+    if (!garden_file.is_open())
+    {
+        result.error_message = "Failed to write .garden file: " + garden_path.string();
+        return result;
+    }
+    garden_file << j.dump(4);
+    garden_file.close();
+    result.files_copied++;
+
+    LOG_ENGINE_INFO("[Packager] Package complete! {} files copied, {} levels compiled.",
+                    result.files_copied, result.levels_compiled);
+    LOG_ENGINE_INFO("[Packager] Output: {}", output_root.string());
+
+    result.success = true;
+    return result;
+}

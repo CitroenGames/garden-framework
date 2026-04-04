@@ -112,6 +112,15 @@ Comment=Open Garden project files
 Exec=$INSTALL_DIR/garden %f
 MimeType=application/x-garden-project;
 NoDisplay=true
+Actions=run;generate;
+
+[Desktop Action run]
+Name=Run Game
+Exec=$INSTALL_DIR/garden run %f
+
+[Desktop Action generate]
+Name=Generate Project Files
+Exec=$INSTALL_DIR/garden generate %f
 DESKTOP_EOF
 
         cat > "$MIME_DIR/garden-project.xml" << MIME_EOF

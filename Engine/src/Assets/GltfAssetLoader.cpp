@@ -98,6 +98,12 @@ LoadResult GltfAssetLoader::loadFromFile(const std::string& path,
         setupMaterialMappings(model, gltf_result);
     }
 
+    // Track referenced assets (textures loaded from disk)
+    for (const auto& tex_path : gltf_result.texture_paths) {
+        if (!tex_path.empty())
+            result.referenced_assets.push_back(context.base_path + tex_path);
+    }
+
     result.success = true;
     result.data = model;
     return result;
