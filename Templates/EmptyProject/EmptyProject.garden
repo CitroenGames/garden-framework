@@ -1,0 +1,12 @@
+{
+    "name": "EmptyProject",
+    "engine_id": "",
+    "engine_version": "1.0",
+    "game_module": "bin/EmptyProject",
+    "default_level": "assets/levels/main.level.json",
+    "asset_directories": [
+        "assets/"
+    ],
+    "source_directory": "src/",
+    "buildscript": "EmptyProject.buildscript"
+}

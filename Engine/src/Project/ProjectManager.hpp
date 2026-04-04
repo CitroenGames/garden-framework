@@ -33,9 +33,6 @@ public:
     // Load a .garden project file (JSON)
     bool loadProject(const std::string& project_file_path);
 
-    // Create a new project from the built-in template (blank project)
-    bool createProject(const std::string& directory, const std::string& name);
-
     // Create a new project by copying an existing template directory.
     // All references to the template name are replaced with project_name.
     bool createProjectFromTemplate(const std::string& template_path,

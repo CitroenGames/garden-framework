@@ -1678,18 +1678,11 @@ bool EditorApp::runProjectBrowser()
         if (!m_available_templates.empty())
         {
             ImGui::SetNextItemWidth(panel_w * 0.5f);
-            const char* preview = m_selected_template >= 0 && m_selected_template < (int)m_available_templates.size()
+            const char* preview = (m_selected_template >= 0 && m_selected_template < (int)m_available_templates.size())
                 ? m_available_templates[m_selected_template].name.c_str()
-                : "Blank Project";
+                : "Select Template...";
             if (ImGui::BeginCombo("Template", preview))
             {
-                // Blank project option
-                bool is_blank = (m_selected_template < 0);
-                if (ImGui::Selectable("Blank Project", is_blank))
-                    m_selected_template = -1;
-                if (is_blank)
-                    ImGui::SetItemDefaultFocus();
-
                 for (int i = 0; i < (int)m_available_templates.size(); i++)
                 {
                     bool is_selected = (m_selected_template == i);
@@ -1700,6 +1693,11 @@ bool EditorApp::runProjectBrowser()
                 }
                 ImGui::EndCombo();
             }
+        }
+        else
+        {
+            ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.2f, 1.0f),
+                "No project templates found. Check your Templates/ directory.");
         }
 
         ImGui::SetNextItemWidth(panel_w - browse_w - 8);
@@ -1721,24 +1719,18 @@ bool EditorApp::runProjectBrowser()
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.45f, 0.80f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.25f, 0.50f, 0.90f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.15f, 0.40f, 0.75f, 1.0f));
+        bool can_create = !m_available_templates.empty() &&
+                          m_selected_template >= 0 &&
+                          m_selected_template < (int)m_available_templates.size();
+        if (!can_create) ImGui::BeginDisabled();
         if (ImGui::Button("Create Project", ImVec2(160, 36)))
         {
             std::string name(m_new_project_name);
             std::string dir(m_new_project_dir);
             if (!name.empty() && !dir.empty())
             {
-                bool success = false;
-                if (m_selected_template >= 0 && m_selected_template < (int)m_available_templates.size())
-                {
-                    // Create from template
-                    success = m_project_manager.createProjectFromTemplate(
-                        m_available_templates[m_selected_template].path, dir, name);
-                }
-                else
-                {
-                    // Create blank project
-                    success = m_project_manager.createProject(dir, name);
-                }
+                bool success = m_project_manager.createProjectFromTemplate(
+                    m_available_templates[m_selected_template].path, dir, name);
 
                 if (success)
                 {
@@ -1757,6 +1749,7 @@ bool EditorApp::runProjectBrowser()
             }
         }
         ImGui::PopStyleColor(3);
+        if (!can_create) ImGui::EndDisabled();
 
         ImGui::EndChild(); // ##ProjectContent
 
