@@ -5,11 +5,12 @@ if(Windows)
 {
     subsystem = Console
 }
-sources = src/**/*.cpp
-headers = src/**/*.h src/**/*.hpp ../shared/**/*.hpp
-includes = src, ../shared/
+sources = src/main.cpp
+headers = src/**/*.hpp
+includes = src
 target_link_libraries(
     PRIVATE EngineCore
+    PRIVATE EngineGraphics
 )
 multiprocessor = true
 std = 20

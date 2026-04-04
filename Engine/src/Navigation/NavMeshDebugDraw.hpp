@@ -1,5 +1,6 @@
 #pragma once
 
+#include "EngineExport.h"
 #include "NavMesh.hpp"
 
 namespace Navigation
@@ -21,7 +22,7 @@ struct NavMeshDebugConfig
     float wireframe_y_offset = 0.02f;
 };
 
-class NavMeshDebugDraw
+class ENGINE_API NavMeshDebugDraw
 {
 public:
     static void draw(const NavMesh& navmesh, const NavMeshDebugConfig& config);

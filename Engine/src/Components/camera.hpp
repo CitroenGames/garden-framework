@@ -1,11 +1,12 @@
 #pragma once
 
+#include "EngineExport.h"
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <algorithm>
 
-class camera
+class ENGINE_API camera
 {
 public:
     glm::vec3 position;

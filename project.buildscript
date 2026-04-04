@@ -3,7 +3,8 @@ name = Garden
 platforms = x64, Linux
 
 include = Engine/Engine.buildscript
-include = Game/Game.buildscript
+include = Game/Client/Client.buildscript
+include = Game/Server/Server.buildscript
 include = Game/Editor/Editor.buildscript
 include = Tools/GardenCLI/GardenCLI.buildscript
 

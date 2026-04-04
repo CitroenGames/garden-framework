@@ -1,5 +1,6 @@
 #pragma once
 
+#include "EngineExport.h"
 #include "AssetTypes.hpp"
 #include "AssetHandle.hpp"
 #include "IAssetLoader.hpp"
@@ -39,7 +40,7 @@ struct AssetState {
     }
 };
 
-class AssetManager {
+class ENGINE_API AssetManager {
     friend class AssetHandle;
 
 public:

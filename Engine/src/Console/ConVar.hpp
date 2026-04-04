@@ -1,5 +1,6 @@
 #pragma once
 
+#include "EngineExport.h"
 #include <string>
 #include <functional>
 #include <variant>
@@ -32,7 +33,7 @@ class ConVarBase;
 using ConVarCallback = std::function<void(ConVarBase* cvar, const ConVarValue& oldValue, const ConVarValue& newValue)>;
 
 // Base class for all ConVars
-class ConVarBase
+class ENGINE_API ConVarBase
 {
 protected:
     std::string m_name;
@@ -98,7 +99,7 @@ protected:
 };
 
 // ConVar Registry (Singleton)
-class ConVarRegistry
+class ENGINE_API ConVarRegistry
 {
 public:
     static ConVarRegistry& get();
@@ -165,4 +166,4 @@ public:
 #define CVAR_STRING(name) (CVAR_PTR(name) ? CVAR_PTR(name)->getString() : "")
 
 // Force initialization of default cvars (call at startup)
-void InitializeDefaultCVars();
+ENGINE_API void InitializeDefaultCVars();

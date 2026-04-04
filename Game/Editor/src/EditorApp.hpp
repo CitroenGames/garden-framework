@@ -138,6 +138,10 @@ private:
     char m_open_project_path[512] = "";
     bool m_show_new_project_popup = false;
 
+    // Template selection
+    std::vector<TemplateInfo> m_available_templates;
+    int m_selected_template = 0;
+
     // Level operations
     void newLevel();
     void openLevel(const std::string& path);

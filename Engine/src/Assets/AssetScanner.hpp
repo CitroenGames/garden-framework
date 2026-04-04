@@ -1,5 +1,6 @@
 #pragma once
 
+#include "EngineExport.h"
 #include "AssetMetadata.hpp"
 #include <string>
 #include <vector>
@@ -22,7 +23,7 @@ struct ScannedAsset {
     std::string error_message;
 };
 
-class AssetScanner {
+class ENGINE_API AssetScanner {
 public:
     void scanDirectory(const std::string& root_dir);
     bool processAsset(const std::string& asset_path);

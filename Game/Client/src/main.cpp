@@ -6,79 +6,52 @@
 #include <windows.h>
 #endif
 
-#include "math.h"
 #include "SDL.h"
-
-#include "Pak.h"
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <cstring>
-#include <map>
-
-#define ENET_IMPLEMENTATION
-#include "enet.h"
+#include <filesystem>
 
 #include "Application.hpp"
-
-// Components
-#include "Components/Components.hpp"
-#include "Components/camera.hpp" // Keep camera for now as it's used in world/renderer
-
-#include "PlayerController.hpp"
-#include "InputHandler.hpp"
 #include "world.hpp"
-#include "Graphics/renderer.hpp"
 #include "LevelManager.hpp"
-#include "ClientNetworkManager.hpp"
-#include "SharedComponents.hpp"
-#include "SharedMovement.hpp"
-
+#include "Graphics/renderer.hpp"
+#include "Plugin/GameModuleLoader.hpp"
+#include "Project/ProjectManager.hpp"
+#include "InputHandler.hpp"
 #include "Utils/Log.hpp"
+#include "Utils/EnginePaths.hpp"
 #include "ImGui/ImGuiManager.hpp"
 #include "UI/RmlUiManager.h"
-#include "GameHUD.hpp"
-#include "Utils/EnginePaths.hpp"
 #include "Console/ConVar.hpp"
-#include "Events/EventBus.hpp"
-#include "Events/EngineEvents.hpp"
-#include "Timer/TimerSystem.hpp"
-#include "Debug/DebugDraw.hpp"
-#include "Audio/AudioSystem.hpp"
-#include "GameState/GameStateManager.hpp"
-#include "Animation/AnimationSystem.hpp"
-
-// Threading and Asset loading
 #include "Threading/JobSystem.hpp"
 #include "Assets/AssetManager.hpp"
 #include "Assets/GltfAssetLoader.hpp"
-#include "Assets/ModelAssetData.hpp"
+#include "Audio/AudioSystem.hpp"
+#include "Reflection/ReflectionRegistry.hpp"
+
+namespace fs = std::filesystem;
 
 static Application app;
 static renderer _renderer;
 static world _world;
 static InputHandler input_handler;
-static std::unique_ptr<PlayerController> player_controller;
-static Game::ClientNetworkManager _network;
-static GameHUD _hud;
-
-// Async loading test
-static Assets::AssetHandle g_async_load_handle;
-static bool g_async_load_pending = false;
+static GameModuleLoader game_module;
+static ProjectManager project_manager;
+static LevelManager level_manager;
+static ReflectionRegistry reflection;
 
 static void quit_game(int code)
 {
-    ConVarRegistry::get().saveArchiveCvars("config.cfg");
-    GameStateManager::get().clear();
+    if (game_module.isLoaded())
+    {
+        game_module.shutdown();
+        game_module.unload();
+    }
     AudioSystem::get().shutdown();
-    _network.disconnect("Game closing");
-    _network.shutdown();
     Assets::AssetManager::get().shutdown();
     Threading::JobSystem::get().shutdown();
-    // Clear world registry before shutting down render API
-    // This ensures GPU mesh resources are released while the device is still valid
     _world.registry.clear();
-    _hud.shutdown();
     RmlUiManager::get().shutdown();
     ImGuiManager::get().shutdown();
     app.shutdown();
@@ -86,33 +59,47 @@ static void quit_game(int code)
     _exit(code);
 }
 
-// Player representation system (now shared via Engine)
-#include "PlayerRepSystem.hpp"
-
-// Parse command line for render API selection
 static RenderAPIType parseRenderAPI(int argc, char* argv[])
 {
     for (int i = 1; i < argc; i++)
     {
         if (strcmp(argv[i], "-vulkan") == 0 || strcmp(argv[i], "--vulkan") == 0)
-        {
             return RenderAPIType::Vulkan;
-        }
 #ifdef __APPLE__
         if (strcmp(argv[i], "-metal") == 0 || strcmp(argv[i], "--metal") == 0)
-        {
             return RenderAPIType::Metal;
-        }
 #endif
 #ifdef _WIN32
         if (strcmp(argv[i], "-d3d11") == 0 || strcmp(argv[i], "--d3d11") == 0 ||
             strcmp(argv[i], "-dx11") == 0 || strcmp(argv[i], "--dx11") == 0)
-        {
             return RenderAPIType::D3D11;
-        }
 #endif
     }
     return DefaultRenderAPI;
+}
+
+static std::string parseProjectPath(int argc, char* argv[])
+{
+    for (int i = 1; i < argc - 1; i++)
+    {
+        if (strcmp(argv[i], "--project") == 0)
+            return argv[i + 1];
+    }
+    return "";
+}
+
+// Find a .garden file in the given directory
+static std::string findGardenFile(const fs::path& dir)
+{
+    if (!fs::exists(dir) || !fs::is_directory(dir))
+        return "";
+
+    for (const auto& entry : fs::directory_iterator(dir))
+    {
+        if (entry.is_regular_file() && entry.path().extension() == ".garden")
+            return entry.path().string();
+    }
+    return "";
 }
 
 #if _WIN32
@@ -121,503 +108,203 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
 int main(int argc, char* argv[])
 #endif
 {
-	Pakker pak;
-        pak.FileExists("example.pak", "test.txt");
     Paingine2D::CrashHandler* crashHandler = Paingine2D::CrashHandler::GetInstance();
     crashHandler->Initialize("Game");
-	EE::CLog::Init();
+    EE::CLog::Init();
 
-    // Initialize console variables and load config
     InitializeDefaultCVars();
     ConVarRegistry::get().loadConfig("config.cfg");
 
-    // Parse command line arguments
 #if _WIN32
     int argc = __argc;
     char** argv = __argv;
 #endif
     RenderAPIType api_type = parseRenderAPI(argc, argv);
 
-    // Initialize application with selected render API
+    // Find the .garden project file
+    std::string garden_path = parseProjectPath(argc, argv);
+    if (garden_path.empty())
+    {
+        // Look in ../ relative to the executable
+        fs::path exe_dir = EnginePaths::getExecutableDir();
+        garden_path = findGardenFile(exe_dir / "..");
+    }
+
+    if (garden_path.empty())
+    {
+        LOG_ENGINE_FATAL("No .garden project file found. Pass --project <path> or place a .garden file in the parent directory.");
+        _exit(1);
+    }
+
+    // Load the project
+    if (!project_manager.loadProject(garden_path))
+    {
+        LOG_ENGINE_FATAL("Failed to load project: {}", garden_path);
+        _exit(1);
+    }
+
+    // Change working directory to project root
+    fs::current_path(project_manager.getProjectRoot());
+    LOG_ENGINE_INFO("Project '{}' loaded from '{}'",
+                    project_manager.getDescriptor().name,
+                    project_manager.getProjectRoot());
+
+    // Initialize application
     app = Application(1920, 1080, 60, 75.0f, api_type);
 #ifdef _DEBUG
     bool start_fullscreen = false;
 #else
     bool start_fullscreen = true;
 #endif
-    if (!app.initialize("Game Window", start_fullscreen))
-    {
+    if (!app.initialize(project_manager.getDescriptor().name.c_str(), start_fullscreen))
         quit_game(1);
-    }
 
-    // Get the render API from the application
     IRenderAPI* render_api = app.getRenderAPI();
     if (!render_api)
     {
-		LOG_ENGINE_FATAL("Failed to get render API from application");
+        LOG_ENGINE_FATAL("Failed to get render API");
         quit_game(1);
     }
 
-    LOG_ENGINE_TRACE("Game initialized with {0} render API", render_api->getAPIName());
+    LOG_ENGINE_TRACE("Game initialized with {} render API", render_api->getAPIName());
 
-    // Initialize ImGui
     if (!ImGuiManager::get().initialize(app.getWindow(), render_api, api_type))
     {
         LOG_ENGINE_FATAL("Failed to initialize ImGui");
         quit_game(1);
     }
 
-    // Initialize RmlUi
     if (!RmlUiManager::get().initialize(app.getWindow(), render_api, api_type))
-    {
         LOG_ENGINE_WARN("Failed to initialize RmlUi - continuing without UI");
-    }
 
-    // Initialize HUD
-    if (RmlUiManager::get().isInitialized())
+    if (!Threading::JobSystem::get().initialize())
     {
-        if (!_hud.initialize(RmlUiManager::get().getContext(),
-                EnginePaths::resolveEngineAsset("assets/ui/hud.rml")))
-        {
-            LOG_ENGINE_WARN("Failed to load HUD document");
-        }
-    }
-
-    // Initialize Job System
-    if (!Threading::JobSystem::get().initialize()) {
         LOG_ENGINE_FATAL("Failed to initialize Job System");
         quit_game(1);
     }
 
-    // Initialize Asset Manager
-    if (!Assets::AssetManager::get().initialize(render_api)) {
+    if (!Assets::AssetManager::get().initialize(render_api))
+    {
         LOG_ENGINE_FATAL("Failed to initialize Asset Manager");
         quit_game(1);
     }
-
-    // Register GLTF loader
     Assets::AssetManager::get().registerLoader(std::make_unique<Assets::GltfAssetLoader>());
 
-    // Initialize Audio System
-    if (!AudioSystem::get().initialize()) {
+    if (!AudioSystem::get().initialize())
         LOG_ENGINE_WARN("Failed to initialize Audio System - continuing without audio");
-    }
 
-    // Set up input system
-    input_handler.set_quit_callback([]() {
-        quit_game(0);
-    });
-    input_handler.set_resize_callback([](int w, int h) {
-        app.onWindowResized(w, h);
-    });
-
+    // Set up input
+    input_handler.set_quit_callback([]() { quit_game(0); });
+    input_handler.set_resize_callback([](int w, int h) { app.onWindowResized(w, h); });
     auto input_manager = input_handler.get_input_manager();
 
-    /* Frame locking */
-    Uint32 frame_start_ticks;
-    Uint32 frame_end_ticks;
-
-    /* Create world */
+    // Initialize world and physics
     _world = world();
     _world.initializePhysics();
 
-    /* Initialize networking */
-    if (!_network.initialize()) {
-        LOG_ENGINE_FATAL("Failed to initialize Client Network");
-        quit_game(1);
-    }
-
-    if (!_network.connectToServer("127.0.0.1", 7777, "Player")) {
-        LOG_ENGINE_FATAL("Failed to connect to server");
-        quit_game(1);
-    }
-
-    _network.setWorld(&_world);
-
-    /* Level loading */
-    LevelManager level_manager;
+    // Load default level
     LevelData level_data;
-    std::string level_path = "assets/levels/main.level.json";
-
-    printf("Loading level from: %s\n", level_path.c_str());
-    if (!level_manager.loadLevel(level_path, level_data))
+    std::string level_path = project_manager.getDescriptor().default_level;
+    if (!level_path.empty())
     {
-        LOG_ENGINE_FATAL("Failed to load level: {}", level_path.c_str());
-        quit_game(1);
+        if (!level_manager.loadLevel(level_path, level_data))
+        {
+            LOG_ENGINE_FATAL("Failed to load level: {}", level_path);
+            quit_game(1);
+        }
+
+        entt::entity player_entity = entt::null;
+        entt::entity freecam_entity = entt::null;
+        entt::entity player_rep_entity = entt::null;
+
+        if (!level_manager.instantiateLevel(level_data, _world, render_api,
+                &player_entity, &freecam_entity, &player_rep_entity))
+        {
+            LOG_ENGINE_FATAL("Failed to instantiate level");
+            quit_game(1);
+        }
     }
 
-    entt::entity player_entity = entt::null;
-    entt::entity freecam_entity = entt::null;
-    entt::entity player_rep_entity = entt::null;
-
-    // Instantiate level entities
-    if (!level_manager.instantiateLevel(
-            level_data, _world, render_api,
-            &player_entity, &freecam_entity, &player_rep_entity))
-    {
-        LOG_ENGINE_FATAL("Failed to instantiate level");
-        quit_game(1);
-    }
-
-    // Optimize Jolt broad phase after adding all static bodies
-    _world.getPhysicsSystem().getJoltSystem()->OptimizeBroadPhase();
-
-    // Verify critical entities exist
-    if (!_world.registry.valid(player_entity))
-    {
-        LOG_ENGINE_FATAL("Level does not contain a player entity");
-        quit_game(1);
-    }
-    
-    // Set up cameras based on entities (if they have transforms)
-    if (_world.registry.valid(player_entity)) {
-        auto& t = _world.registry.get<TransformComponent>(player_entity);
-        _world.world_camera.position = t.position;
-        _world.world_camera.rotation = t.rotation;
-    }
-
-    if (_world.registry.valid(freecam_entity)) {
-        // Just ensure it exists, position is synced on toggle if needed
-    }
-
-    // Set up player controller with new input system
-    player_controller = std::make_unique<PlayerController>(input_manager, &_world);
-    player_controller->setPossessedPlayer(player_entity);
-    player_controller->setPossessedFreecam(freecam_entity);
-
-    /* Renderer - Using the abstracted render API */
+    // Initialize renderer
     _renderer = renderer(render_api);
-    
-    // Apply lighting settings from level metadata
+
+    // Apply lighting from level
     _renderer.set_level_lighting(
         level_data.metadata.ambient_light,
         level_data.metadata.diffuse_light,
-        level_data.metadata.light_direction
-    );
+        level_data.metadata.light_direction);
 
-    /* Delta time */
-    Uint32 delta_last = 0;
-    float delta_time = 0;
-
-    while (1)
+    // Load game DLL
+    std::string dll_path = project_manager.getAbsoluteModulePath();
+    if (!game_module.load(dll_path))
     {
-        // Drain Metal autorelease pool each frame to prevent ObjC temporary object leaks.
-        // On non-Metal backends this is a no-op passthrough.
+        LOG_ENGINE_FATAL("Failed to load game module: {}", dll_path);
+        quit_game(1);
+    }
+
+    // Initialize game module
+    EngineServices services{};
+    services.game_world = &_world;
+    services.render_api = render_api;
+    services.input_manager = input_manager.get();
+    services.reflection = &reflection;
+    services.application = &app;
+    services.level_manager = &level_manager;
+    services.api_version = GARDEN_MODULE_API_VERSION;
+
+    game_module.registerComponents(&reflection);
+
+    if (!game_module.init(&services))
+    {
+        LOG_ENGINE_FATAL("Game module initialization failed");
+        quit_game(1);
+    }
+
+    game_module.onLevelLoaded();
+
+    // Main game loop
+    Uint32 delta_last = SDL_GetTicks();
+
+    while (true)
+    {
         render_api->executeWithAutoreleasePool([&]() {
-        frame_start_ticks = SDL_GetTicks();
+            Uint32 frame_start = SDL_GetTicks();
 
-        // Start new ImGui frame
-        ImGuiManager::get().newFrame();
-        RmlUiManager::get().beginFrame();
+            ImGuiManager::get().newFrame();
+            RmlUiManager::get().beginFrame();
 
-        // Process input events through the new input system
-        input_handler.process_events();
+            input_handler.process_events();
 
-        // Skip rendering while window is minimized to avoid GPU work on a 0x0 surface
-        if (input_handler.is_window_minimized())
-        {
-            SDL_Delay(10);
-            return;
-        }
-
-        // Process async loading jobs (GPU uploads must happen on main thread)
-        Threading::JobSystem::get().processMainThreadJobs();
-
-        // Handle mouse motion for camera control (skip in UI mode)
-        if (input_manager && !input_handler.is_ui_mode())
-        {
-            float mouse_x = input_manager->get_mouse_delta_x();
-            float mouse_y = input_manager->get_mouse_delta_y();
-
-            if (mouse_x != 0.0f || mouse_y != 0.0f)
+            if (input_handler.is_window_minimized())
             {
-                player_controller->handleMouseMotion(mouse_y, mouse_x);
-            }
-        }
-
-        // Check if quit was requested
-        if (input_handler.should_quit_application())
-        {
-            quit_game(0);
-        }
-
-        // F3: Test async model loading - spawn Character.gltf at player position
-        if (input_manager && input_manager->is_key_pressed(SDL_SCANCODE_F3))
-        {
-            if (!g_async_load_pending)
-            {
-                // Get player position for spawning
-                glm::vec3 spawn_pos(0.0f);
-                if (_world.registry.valid(player_entity)) {
-                    auto& player_transform = _world.registry.get<TransformComponent>(player_entity);
-                    spawn_pos = player_transform.position;
-                }
-
-                LOG_ENGINE_INFO("F3 pressed - Loading Character.gltf at position ({}, {}, {})",
-                    spawn_pos.x, spawn_pos.y, spawn_pos.z);
-
-                g_async_load_handle = Assets::AssetManager::get().loadAsync(
-                    "assets/models/Character.gltf",
-                    Assets::LoadPriority::High,
-                    [spawn_pos](Assets::AssetId id, bool success, const Assets::AssetData& data) {
-                        if (success) {
-                            auto model = std::get<std::shared_ptr<Assets::ModelAssetData>>(data);
-                            if (model && model->mesh_data && model->mesh_data->gpu_mesh) {
-                                LOG_ENGINE_INFO("Async load completed! Spawning entity...");
-
-                                // Create mesh that shares the GPU data (don't transfer ownership)
-                                auto new_mesh = std::make_shared<mesh>(nullptr, 0);
-                                new_mesh->gpu_mesh = model->mesh_data->gpu_mesh;
-                                new_mesh->vertices_len = model->mesh_data->getVertexCount();
-                                new_mesh->is_valid = true;
-                                new_mesh->owns_vertices = false;
-                                // Note: We share gpu_mesh, don't set it to nullptr on model
-
-                                // Set up material ranges from submeshes for multi-texture support
-                                if (model->mesh_data && !model->mesh_data->submeshes.empty()) {
-                                    std::vector<MaterialRange> ranges;
-
-                                    for (const auto& submesh : model->mesh_data->submeshes) {
-                                        TextureHandle tex = INVALID_TEXTURE;
-                                        if (submesh.material_index >= 0) {
-                                            tex = model->getMaterialPrimaryTexture(submesh.material_index);
-                                        }
-                                        ranges.emplace_back(submesh.start_vertex, submesh.vertex_count, tex, submesh.material_name);
-                                    }
-
-                                    if (!ranges.empty()) {
-                                        new_mesh->setMaterialRanges(ranges);
-                                        LOG_ENGINE_INFO("Set up {} material ranges for multi-texture mesh", ranges.size());
-                                    }
-                                }
-                                // Fallback to single texture if no submeshes
-                                else {
-                                    TextureHandle tex = model->getMaterialPrimaryTexture(0);
-                                    if (tex != INVALID_TEXTURE) {
-                                        new_mesh->set_texture(tex);
-                                    }
-                                }
-
-                                // Create entity in world
-                                entt::entity new_entity = _world.registry.create();
-                                _world.registry.emplace<TransformComponent>(new_entity,
-                                    spawn_pos.x, spawn_pos.y, spawn_pos.z);
-                                _world.registry.emplace<MeshComponent>(new_entity, new_mesh);
-                                _world.registry.emplace<TagComponent>(new_entity, TagComponent{"AsyncCharacter"});
-
-                                LOG_ENGINE_INFO("Spawned Character at ({}, {}, {})",
-                                    spawn_pos.x, spawn_pos.y, spawn_pos.z);
-                            } else {
-                                LOG_ENGINE_ERROR("Model loaded but mesh data is missing!");
-                            }
-                        } else {
-                            LOG_ENGINE_ERROR("Async load failed!");
-                        }
-                        g_async_load_pending = false;
-                    }
-                );
-                g_async_load_pending = true;
-            }
-            else
-            {
-                LOG_ENGINE_WARN("Async load already in progress...");
-            }
-        }
-
-        // Flush deferred events from previous frame
-        EventBus::get().flush();
-
-        // delta time
-        delta_time = (frame_start_ticks - delta_last) / 1000.0f;
-        delta_last = frame_start_ticks;
-
-        // Update timers
-        TimerSystem::get().update(delta_time);
-
-        // Update debug draw (tick persistent line durations)
-        DebugDraw::get().update(delta_time);
-
-        // Network update - receive world state and process messages
-        _network.update(delta_time);
-
-        // Send player input to server and run client-side prediction
-        if (_network.isConnected() && input_manager)
-        {
-            // Disable PlayerController's built-in movement — SharedMovement handles it
-            player_controller->setMovementEnabled(false);
-
-            Game::InputState input_state;
-            input_state.buttons = 0;
-
-            // Map input to button flags
-            if (input_manager->is_key_held(SDL_SCANCODE_W)) input_state.buttons |= InputFlags::MOVE_FORWARD;
-            if (input_manager->is_key_held(SDL_SCANCODE_S)) input_state.buttons |= InputFlags::MOVE_BACK;
-            if (input_manager->is_key_held(SDL_SCANCODE_A)) input_state.buttons |= InputFlags::MOVE_LEFT;
-            if (input_manager->is_key_held(SDL_SCANCODE_D)) input_state.buttons |= InputFlags::MOVE_RIGHT;
-            if (input_manager->is_key_held(SDL_SCANCODE_SPACE)) input_state.buttons |= InputFlags::JUMP;
-            if (input_manager->is_key_held(SDL_SCANCODE_E)) input_state.buttons |= InputFlags::USE;
-
-            // Get camera rotation from world camera
-            input_state.camera_yaw = _world.world_camera.rotation.y;
-            input_state.camera_pitch = _world.world_camera.rotation.x;
-            input_state.move_forward = 0.0f;
-            input_state.move_right = 0.0f;
-
-            // Calculate analog movement values
-            if (input_state.buttons & InputFlags::MOVE_FORWARD) input_state.move_forward += 1.0f;
-            if (input_state.buttons & InputFlags::MOVE_BACK) input_state.move_forward -= 1.0f;
-            if (input_state.buttons & InputFlags::MOVE_RIGHT) input_state.move_right += 1.0f;
-            if (input_state.buttons & InputFlags::MOVE_LEFT) input_state.move_right -= 1.0f;
-
-            // Client-side prediction: run the same movement code as the server
-            if (_world.registry.valid(player_entity) &&
-                _world.registry.all_of<TransformComponent, RigidBodyComponent, PlayerComponent>(player_entity))
-            {
-                auto& trans = _world.registry.get<TransformComponent>(player_entity);
-                auto& rb = _world.registry.get<RigidBodyComponent>(player_entity);
-                auto& pc = _world.registry.get<PlayerComponent>(player_entity);
-
-                MovementInput move_input;
-                move_input.move_forward = input_state.move_forward;
-                move_input.move_right = input_state.move_right;
-                move_input.camera_yaw = input_state.camera_yaw;
-                move_input.camera_pitch = input_state.camera_pitch;
-                move_input.buttons = input_state.buttons;
-
-                MovementState move_state;
-                move_state.position = trans.position;
-                move_state.velocity = rb.velocity;
-                move_state.grounded = pc.grounded;
-                move_state.ground_normal = pc.ground_normal;
-
-                MovementConfig move_config;
-                move_config.speed = pc.speed;
-                move_config.jump_force = pc.jump_force;
-                move_config.fixed_delta = _world.fixed_delta;
-
-                // Predict: run shared simulation locally
-                MovementState result = SharedMovement::simulate(move_input, move_state, move_config);
-
-                // Store input + predicted result for later reconciliation
-                uint32_t prediction_tick = _network.getClientTick();
-                _network.storeInput(prediction_tick, move_input, result);
-
-                // Apply predicted state to local entity
-                trans.position = result.position;
-                rb.velocity = result.velocity;
-                pc.grounded = result.grounded;
-
-                // --- Server Reconciliation ---
-                // If the server sent us an authoritative update, compare and correct
-                MovementState server_state;
-                uint32_t server_tick;
-                if (_network.popAuthoritativeUpdate(server_state, server_tick))
-                {
-                    // Check if prediction error exceeds threshold
-                    float pos_error = glm::distance(server_state.position, trans.position);
-
-                    // Only reconcile if the error is significant
-                    if (pos_error > 0.01f)
-                    {
-                        // Reset to server's authoritative state
-                        MovementState replay_state = server_state;
-
-                        // Replay all unacknowledged inputs on top of server state
-                        _network.getInputHistory().forEachFrom(server_tick, [&](const PredictionEntry& entry) {
-                            // Use the stored ground state from original prediction for replay
-                            replay_state.grounded = entry.predicted_state.grounded;
-                            replay_state.ground_normal = entry.predicted_state.ground_normal;
-                            replay_state = SharedMovement::simulate(entry.input, replay_state, move_config);
-                        });
-
-                        // Apply corrected state
-                        trans.position = replay_state.position;
-                        rb.velocity = replay_state.velocity;
-                        pc.grounded = replay_state.grounded;
-                        pc.ground_normal = replay_state.ground_normal;
-                    }
-                }
+                SDL_Delay(10);
+                return;
             }
 
-            _network.sendInputCommand(input_state);
-        }
-        else
-        {
-            // Not connected — let PlayerController handle movement directly
-            player_controller->setMovementEnabled(true);
-        }
+            Threading::JobSystem::get().processMainThreadJobs();
 
-        // Physics and player collisions (only when controlling player)
-        if (!player_controller->isFreecamMode())
-        {
-            _world.step_physics(delta_time);
-            _world.player_collisions(player_entity);
-        }
-
-        // Update currently possessed entity through player controller
-        player_controller->update(delta_time);
-
-        // Update player representation visibility and sync
-        update_player_representations(_world.registry, player_controller->isFreecamMode());
-
-        // Fall detection (only when controlling player)
-        if (!player_controller->isFreecamMode() && _world.registry.valid(player_entity)) {
-             auto& t = _world.registry.get<TransformComponent>(player_entity);
-             if (t.position.y < -50) // Increased threshold
+            if (input_handler.should_quit_application())
                 quit_game(0);
-        }
 
-        // Update animations
-        AnimationSystem::update(_world.registry, delta_time);
+            float delta_time = (frame_start - delta_last) / 1000.0f;
+            delta_last = frame_start;
 
-        // Update audio listener to match camera
-        camera& active_camera = player_controller->getActiveCamera();
-        AudioSystem::get().setListenerPosition(
-            active_camera.getPosition(),
-            active_camera.camera_forward(),
-            active_camera.getUpVector());
-        AudioSystem::get().update();
+            // Let the game DLL handle all game logic
+            game_module.update(delta_time);
 
-        // Interpolate remote entities for smooth rendering
-        if (_network.isConnected()) {
-            _network.interpolateRemoteEntities();
-        }
+            // Render using the world camera (updated by the game DLL)
+            _renderer.render_scene(_world.registry, _world.world_camera);
 
-        // Update HUD data
-        {
-            float fps = (delta_time > 0.0f) ? 1.0f / delta_time : 0.0f;
-            glm::vec3 pos(0.0f);
-            float speed = 0.0f;
-            bool grounded = false;
-            if (_world.registry.valid(player_entity))
-            {
-                auto& t = _world.registry.get<TransformComponent>(player_entity);
-                pos = t.position;
-                if (_world.registry.all_of<RigidBodyComponent>(player_entity))
-                    speed = glm::length(_world.registry.get<RigidBodyComponent>(player_entity).velocity);
-                if (_world.registry.all_of<PlayerComponent>(player_entity))
-                    grounded = _world.registry.get<PlayerComponent>(player_entity).grounded;
-            }
-            _hud.update(fps, pos, speed, grounded, _network.isConnected(),
-                        _network.isConnected() ? _network.getStats().ping_ms : 0.0f);
-        }
+            app.swapBuffers();
 
-        // render using the active camera (either player or freecam)
-        _renderer.render_scene(_world.registry, active_camera);
-
-        app.swapBuffers();
-
-        frame_end_ticks = SDL_GetTicks();
-
-        // Update target FPS from cvar
-        int fps_max_val = CVAR_INT(fps_max);
-        if (fps_max_val > 0) {
-            app.setTargetFPS(fps_max_val);
-        } else {
-            app.setTargetFPS(10000); // Effectively unlimited
-        }
-        app.lockFramerate(frame_start_ticks, frame_end_ticks);
-        }); // executeWithAutoreleasePool
+            Uint32 frame_end = SDL_GetTicks();
+            int fps_max_val = CVAR_INT(fps_max);
+            if (fps_max_val > 0)
+                app.setTargetFPS(fps_max_val);
+            else
+                app.setTargetFPS(10000);
+            app.lockFramerate(frame_start, frame_end);
+        });
     }
 
     crashHandler->Shutdown();

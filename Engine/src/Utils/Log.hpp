@@ -1,12 +1,13 @@
 #pragma once
 
+#include "EngineExport.h"
 #include "spdlog/spdlog.h"
 #include <memory>
 
 namespace EE
 {
     // this class is a wrapper around the spdlog library
-    class CLog
+    class ENGINE_API CLog
     {
     public:
         static void Init();

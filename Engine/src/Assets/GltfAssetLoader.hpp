@@ -1,5 +1,6 @@
 #pragma once
 
+#include "EngineExport.h"
 #include "IAssetLoader.hpp"
 #include "ModelAssetData.hpp"
 #include "Utils/GltfLoader.hpp"
@@ -24,7 +25,7 @@ struct GltfLoadConfig {
     };
 };
 
-class GltfAssetLoader : public IAssetLoader {
+class ENGINE_API GltfAssetLoader : public IAssetLoader {
 public:
     GltfAssetLoader();
     virtual ~GltfAssetLoader() = default;

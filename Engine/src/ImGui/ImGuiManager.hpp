@@ -1,5 +1,6 @@
 #pragma once
 
+#include "EngineGraphicsExport.h"
 #include "imgui.h"
 #include "Graphics/RenderAPI.hpp"
 #include <SDL.h>
@@ -9,7 +10,7 @@
 // Forward declarations
 union SDL_Event;
 
-class ImGuiManager
+class ENGINE_GRAPHICS_API ImGuiManager
 {
 public:
     static ImGuiManager& get();

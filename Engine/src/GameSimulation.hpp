@@ -1,5 +1,6 @@
 #pragma once
 
+#include "EngineExport.h"
 #include "world.hpp"
 #include "InputManager.hpp"
 #include "PlayerController.hpp"
@@ -12,7 +13,7 @@
 // animation, audio, timers, events, debug draw.
 // Does NOT own the world -- operates on one passed to it.
 // Does NOT handle rendering or window management.
-class GameSimulation
+class ENGINE_API GameSimulation
 {
 public:
     GameSimulation(world* game_world, std::shared_ptr<InputManager> input_mgr);

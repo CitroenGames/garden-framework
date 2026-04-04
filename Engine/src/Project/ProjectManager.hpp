@@ -1,9 +1,10 @@
 #pragma once
 
+#include "EngineExport.h"
 #include <string>
 #include <vector>
 
-struct ProjectDescriptor
+struct ENGINE_API ProjectDescriptor
 {
     std::string name;
     std::string engine_id;         // Unique ID linking to a registered engine installation
@@ -15,8 +16,16 @@ struct ProjectDescriptor
     std::string buildscript;       // e.g. "MyGame.buildscript"
 };
 
+// Info about a discovered project template.
+struct ENGINE_API TemplateInfo
+{
+    std::string name;          // from .garden "name" field
+    std::string path;          // absolute path to template directory
+    std::string garden_file;   // absolute path to the .garden file
+};
+
 // Manages .garden project files: loading, creating, and resolving paths.
-class ProjectManager
+class ENGINE_API ProjectManager
 {
 public:
     ProjectManager() = default;
@@ -24,11 +33,20 @@ public:
     // Load a .garden project file (JSON)
     bool loadProject(const std::string& project_file_path);
 
-    // Create a new project from the built-in template
+    // Create a new project from the built-in template (blank project)
     bool createProject(const std::string& directory, const std::string& name);
+
+    // Create a new project by copying an existing template directory.
+    // All references to the template name are replaced with project_name.
+    bool createProjectFromTemplate(const std::string& template_path,
+                                   const std::string& destination_dir,
+                                   const std::string& project_name);
 
     // Save current descriptor back to file
     bool saveProject();
+
+    // Scan a directory for template subdirectories (each containing a .garden file)
+    static std::vector<TemplateInfo> discoverTemplates(const std::string& templates_dir);
 
     // Accessors
     const ProjectDescriptor& getDescriptor() const { return m_descriptor; }

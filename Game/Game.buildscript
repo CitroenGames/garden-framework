@@ -1,2 +1,0 @@
-include = Client/Client.buildscript
-include = Server/Server.buildscript

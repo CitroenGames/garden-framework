@@ -432,6 +432,7 @@ FodyWeavers.xsd
 *.sln
 *.slnx
 *.vcxproj
+*.vcxproj.filters
 
 /build/
 .DS_Store
@@ -439,7 +440,65 @@ pipeline_cache.bin
 imgui.ini
 Game/Client/config.cfg
 .sighmake_cache
-imgui.ini
 *.lodbin
 
 /bin/
+
+# C/C++ compiled binaries and libraries
+*.exe
+*.dll
+*.lib
+*.a
+*.so
+*.so.*
+*.dylib
+*.exp
+
+# Allow pre-built thirdparty libraries
+!Engine/Thirdparty/SDL2/lib/**
+!Engine/Thirdparty/SDL3-3.4.0/lib/**
+
+# C/C++ build artifacts
+*.o
+*.d
+*.gch
+*.pch.gch
+*.dSYM/
+
+# Build output directories
+x64/
+x86/
+cmake-build-*/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CMakeSettings.json
+CTestTestfile.cmake
+Makefile
+
+# Clangd / C++ tooling
+.cache/
+compile_commands.json
+.clangd/
+.ccls-cache/
+
+# Coredumps
+core
+core.*
+vgcore.*
+
+# OS files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+._*
+.Spotlight-V100
+.Trashes
+
+# Crash reports
+hs_err_pid*
+
+# Config files generated at runtime
+config.cfg

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "EngineExport.h"
 #include <glm/glm.hpp>
 #include <string>
 #include <vector>
@@ -41,7 +42,7 @@ struct Play3DParams
     float max_distance = 50.0f;
 };
 
-class AudioSystem
+class ENGINE_API AudioSystem
 {
 public:
     static AudioSystem& get()

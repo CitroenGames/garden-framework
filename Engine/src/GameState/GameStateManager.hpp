@@ -1,11 +1,12 @@
 #pragma once
 
+#include "EngineExport.h"
 #include "IGameState.hpp"
 #include <vector>
 #include <memory>
 #include <string>
 
-class GameStateManager
+class ENGINE_API GameStateManager
 {
 public:
     static GameStateManager& get()

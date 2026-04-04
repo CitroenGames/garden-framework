@@ -1,5 +1,6 @@
 #pragma once
 
+#include "EngineGraphicsExport.h"
 #include "Graphics/RenderAPI.hpp"
 #include <SDL.h>
 
@@ -7,7 +8,7 @@
 namespace Rml { class Context; class RenderInterface; }
 class SystemInterface_SDL;
 
-class RmlUiManager
+class ENGINE_GRAPHICS_API RmlUiManager
 {
 public:
     static RmlUiManager& get();

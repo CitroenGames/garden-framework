@@ -13,7 +13,8 @@ if(Windows)
 }
 
 [project:EngineGraphics]
-type = lib
+type = dll
+outdir = ../bin/
 sources = {
     src/Graphics/RenderAPI.cpp
     src/Graphics/VulkanRenderAPI.cpp
@@ -22,12 +23,14 @@ sources = {
     src/Graphics/D3D11Mesh.cpp [windows]
     src/Graphics/MetalRenderAPI.mm [macOS]
     src/Graphics/MetalMesh.mm [macOS]
+    src/Graphics/stb_impl.cpp
     src/ImGui/ImGuiManager.cpp
     src/UI/RmlUiManager.cpp
     src/UI/RmlRenderer_VK.cpp
     src/UI/RmlRenderer_D3D11.cpp
     src/UI/RmlRenderer_Metal.mm [macOS]
     src/Reflection/ReflectionWidgets.cpp
+    Thirdparty/ImGuizmo/ImGuizmo.cpp
 }
 headers = {
     src/Graphics/**/*.hpp
@@ -35,7 +38,7 @@ headers = {
     src/ImGui/**/*.hpp
     src/UI/**/*.h
 }
-defines = RMLUI_STATIC_LIB, RMLUI_SDL_VERSION_MAJOR=2
+defines = RMLUI_SDL_VERSION_MAJOR=2, ENGINEGRAPHICS_BUILDING_DLL, RMLUI_CORE_EXPORTS, RMLUI_DEBUGGER_EXPORTS, USE_IMGUI_API
 if(Windows)
 {
     includes = ${Vulkan_INCLUDE_DIRS}, ${DirectX11_INCLUDE_DIRS}

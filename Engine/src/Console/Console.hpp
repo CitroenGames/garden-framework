@@ -1,5 +1,6 @@
 #pragma once
 
+#include "EngineExport.h"
 #include <string>
 #include <deque>
 #include <mutex>
@@ -15,7 +16,7 @@ struct ConsoleLogEntry
     std::string source;  // "Engine", "Client", "LUA", etc.
 };
 
-class Console
+class ENGINE_API Console
 {
 public:
     static Console& get();

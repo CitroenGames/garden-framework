@@ -16,6 +16,7 @@ sources = {
 }
 headers = src/**/*.hpp
 includes = src, ../../Engine/Thirdparty/tinygltf-2.9.6, ../../Engine/Thirdparty/imgui-docking, ../../Engine/Thirdparty/imgui-docking/backends
+defines = ENGINEGRAPHICS_BUILDING_DLL
 std = 20
 utf8 = true
 multiprocessor = true

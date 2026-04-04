@@ -1,5 +1,6 @@
 #pragma once
 
+#include "EngineExport.h"
 #include <string>
 #include <vector>
 #include <map>
@@ -115,7 +116,7 @@ struct GltfLoadResult
     }
 };
 
-class GltfLoader
+class ENGINE_API GltfLoader
 {
 public:
     // Main loading methods (geometry only - for backward compatibility)
