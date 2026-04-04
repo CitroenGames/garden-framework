@@ -14,6 +14,9 @@
 
 using json = nlohmann::json;
 
+static constexpr uint32_t LEVEL_BINARY_MAGIC   = 0x47444E4C; // "GDNL"
+static constexpr uint32_t LEVEL_BINARY_VERSION  = 1;
+
 // Helper to get texture type name for logging (moved from main.cpp)
 static std::string getTextureTypeName(TextureType type) {
     switch (type) {
@@ -448,14 +451,60 @@ bool LevelManager::saveLevelToJSON(const std::string& json_path, const LevelData
 
 bool LevelManager::loadLevelFromBinary(const std::string& binary_path, LevelData& out_level_data)
 {
-    printf("Binary loading not yet implemented\n");
-    return false;
+    printf("Loading level from binary: %s\n", binary_path.c_str());
+
+    std::ifstream file(binary_path, std::ios::binary);
+    if (!file.is_open())
+    {
+        printf("ERROR: Could not open binary level file: %s\n", binary_path.c_str());
+        return false;
+    }
+
+    if (!readBinaryHeader(file, out_level_data.metadata))
+    {
+        printf("ERROR: Failed to read binary level header: %s\n", binary_path.c_str());
+        return false;
+    }
+
+    int count = out_level_data.metadata.entity_count;
+    out_level_data.entities.reserve(count);
+
+    for (int i = 0; i < count; i++)
+    {
+        LevelEntity entity;
+        if (!readBinaryEntity(file, entity))
+        {
+            printf("ERROR: Failed to read entity %d from binary level: %s\n", i, binary_path.c_str());
+            return false;
+        }
+        out_level_data.entities.push_back(std::move(entity));
+    }
+
+    printf("Loaded %d entities from binary level\n", count);
+    return true;
 }
 
 bool LevelManager::saveLevelToBinary(const std::string& binary_path, const LevelData& level_data)
 {
-    printf("Binary saving not yet implemented\n");
-    return false;
+    std::ofstream file(binary_path, std::ios::binary);
+    if (!file.is_open())
+    {
+        printf("ERROR: Could not open file for binary writing: %s\n", binary_path.c_str());
+        return false;
+    }
+
+    LevelMetadata meta_copy = level_data.metadata;
+    meta_copy.entity_count = (int)level_data.entities.size();
+
+    writeBinaryHeader(file, meta_copy);
+
+    for (const auto& entity : level_data.entities)
+    {
+        writeBinaryEntity(file, entity);
+    }
+
+    printf("Saved binary level to: %s (%d entities)\n", binary_path.c_str(), (int)level_data.entities.size());
+    return file.good();
 }
 
 bool LevelManager::compileLevel(const std::string& json_path, const std::string& binary_path)
@@ -497,6 +546,174 @@ bool LevelManager::readString(std::ifstream& file, std::string& str)
     }
 
     return true;
+}
+
+void LevelManager::writeBinaryHeader(std::ofstream& file, const LevelMetadata& metadata)
+{
+    file.write(reinterpret_cast<const char*>(&LEVEL_BINARY_MAGIC), sizeof(uint32_t));
+    file.write(reinterpret_cast<const char*>(&LEVEL_BINARY_VERSION), sizeof(uint32_t));
+
+    writeString(file, metadata.level_name);
+    writeString(file, metadata.author);
+    writeString(file, metadata.version);
+
+    uint32_t entity_count = (uint32_t)metadata.entity_count;
+    file.write(reinterpret_cast<const char*>(&entity_count), sizeof(uint32_t));
+
+    file.write(reinterpret_cast<const char*>(&metadata.gravity), sizeof(glm::vec3));
+    file.write(reinterpret_cast<const char*>(&metadata.fixed_delta), sizeof(float));
+    file.write(reinterpret_cast<const char*>(&metadata.ambient_light), sizeof(glm::vec3));
+    file.write(reinterpret_cast<const char*>(&metadata.diffuse_light), sizeof(glm::vec3));
+    file.write(reinterpret_cast<const char*>(&metadata.light_direction), sizeof(glm::vec3));
+}
+
+void LevelManager::writeBinaryEntity(std::ofstream& file, const LevelEntity& entity)
+{
+    writeString(file, entity.name);
+
+    uint8_t type = static_cast<uint8_t>(entity.type);
+    file.write(reinterpret_cast<const char*>(&type), sizeof(uint8_t));
+
+    file.write(reinterpret_cast<const char*>(&entity.position), sizeof(glm::vec3));
+    file.write(reinterpret_cast<const char*>(&entity.rotation), sizeof(glm::vec3));
+    file.write(reinterpret_cast<const char*>(&entity.scale), sizeof(glm::vec3));
+
+    writeString(file, entity.mesh_path);
+
+    uint32_t texture_count = (uint32_t)entity.texture_paths.size();
+    file.write(reinterpret_cast<const char*>(&texture_count), sizeof(uint32_t));
+    for (const auto& tex : entity.texture_paths)
+    {
+        writeString(file, tex);
+    }
+
+    uint8_t has_rigidbody    = entity.has_rigidbody ? 1 : 0;
+    uint8_t apply_gravity    = entity.apply_gravity ? 1 : 0;
+    uint8_t has_collider     = entity.has_collider ? 1 : 0;
+    uint8_t use_mesh_col     = entity.use_mesh_collision ? 1 : 0;
+    uint8_t culling          = entity.culling ? 1 : 0;
+    uint8_t transparent      = entity.transparent ? 1 : 0;
+    uint8_t visible          = entity.visible ? 1 : 0;
+
+    file.write(reinterpret_cast<const char*>(&has_rigidbody), sizeof(uint8_t));
+    file.write(reinterpret_cast<const char*>(&entity.mass), sizeof(float));
+    file.write(reinterpret_cast<const char*>(&apply_gravity), sizeof(uint8_t));
+
+    file.write(reinterpret_cast<const char*>(&has_collider), sizeof(uint8_t));
+    writeString(file, entity.collider_mesh_path);
+    file.write(reinterpret_cast<const char*>(&use_mesh_col), sizeof(uint8_t));
+
+    file.write(reinterpret_cast<const char*>(&culling), sizeof(uint8_t));
+    file.write(reinterpret_cast<const char*>(&transparent), sizeof(uint8_t));
+    file.write(reinterpret_cast<const char*>(&visible), sizeof(uint8_t));
+
+    file.write(reinterpret_cast<const char*>(&entity.speed), sizeof(float));
+    file.write(reinterpret_cast<const char*>(&entity.jump_force), sizeof(float));
+    file.write(reinterpret_cast<const char*>(&entity.mouse_sensitivity), sizeof(float));
+    file.write(reinterpret_cast<const char*>(&entity.movement_speed), sizeof(float));
+    file.write(reinterpret_cast<const char*>(&entity.fast_movement_speed), sizeof(float));
+
+    writeString(file, entity.tracked_player_name);
+    file.write(reinterpret_cast<const char*>(&entity.position_offset), sizeof(glm::vec3));
+}
+
+bool LevelManager::readBinaryHeader(std::ifstream& file, LevelMetadata& metadata)
+{
+    uint32_t magic;
+    file.read(reinterpret_cast<char*>(&magic), sizeof(uint32_t));
+    if (file.fail() || magic != LEVEL_BINARY_MAGIC)
+    {
+        printf("ERROR: Invalid binary level magic (expected 0x%08X, got 0x%08X)\n", LEVEL_BINARY_MAGIC, magic);
+        return false;
+    }
+
+    uint32_t version;
+    file.read(reinterpret_cast<char*>(&version), sizeof(uint32_t));
+    if (file.fail() || version != LEVEL_BINARY_VERSION)
+    {
+        printf("ERROR: Unsupported binary level version (expected %u, got %u)\n", LEVEL_BINARY_VERSION, version);
+        return false;
+    }
+
+    if (!readString(file, metadata.level_name)) return false;
+    if (!readString(file, metadata.author)) return false;
+    if (!readString(file, metadata.version)) return false;
+
+    uint32_t entity_count;
+    file.read(reinterpret_cast<char*>(&entity_count), sizeof(uint32_t));
+    if (file.fail()) return false;
+    metadata.entity_count = (int)entity_count;
+
+    file.read(reinterpret_cast<char*>(&metadata.gravity), sizeof(glm::vec3));
+    file.read(reinterpret_cast<char*>(&metadata.fixed_delta), sizeof(float));
+    file.read(reinterpret_cast<char*>(&metadata.ambient_light), sizeof(glm::vec3));
+    file.read(reinterpret_cast<char*>(&metadata.diffuse_light), sizeof(glm::vec3));
+    file.read(reinterpret_cast<char*>(&metadata.light_direction), sizeof(glm::vec3));
+
+    return !file.fail();
+}
+
+bool LevelManager::readBinaryEntity(std::ifstream& file, LevelEntity& entity)
+{
+    if (!readString(file, entity.name)) return false;
+
+    uint8_t type;
+    file.read(reinterpret_cast<char*>(&type), sizeof(uint8_t));
+    if (file.fail()) return false;
+    entity.type = static_cast<EntityType>(type);
+
+    file.read(reinterpret_cast<char*>(&entity.position), sizeof(glm::vec3));
+    file.read(reinterpret_cast<char*>(&entity.rotation), sizeof(glm::vec3));
+    file.read(reinterpret_cast<char*>(&entity.scale), sizeof(glm::vec3));
+    if (file.fail()) return false;
+
+    if (!readString(file, entity.mesh_path)) return false;
+
+    uint32_t texture_count;
+    file.read(reinterpret_cast<char*>(&texture_count), sizeof(uint32_t));
+    if (file.fail() || texture_count > 1024) return false;
+
+    entity.texture_paths.resize(texture_count);
+    for (uint32_t i = 0; i < texture_count; i++)
+    {
+        if (!readString(file, entity.texture_paths[i])) return false;
+    }
+
+    uint8_t has_rigidbody, apply_gravity, has_collider, use_mesh_col;
+    uint8_t culling, transparent, visible;
+
+    file.read(reinterpret_cast<char*>(&has_rigidbody), sizeof(uint8_t));
+    file.read(reinterpret_cast<char*>(&entity.mass), sizeof(float));
+    file.read(reinterpret_cast<char*>(&apply_gravity), sizeof(uint8_t));
+
+    file.read(reinterpret_cast<char*>(&has_collider), sizeof(uint8_t));
+    if (!readString(file, entity.collider_mesh_path)) return false;
+    file.read(reinterpret_cast<char*>(&use_mesh_col), sizeof(uint8_t));
+
+    file.read(reinterpret_cast<char*>(&culling), sizeof(uint8_t));
+    file.read(reinterpret_cast<char*>(&transparent), sizeof(uint8_t));
+    file.read(reinterpret_cast<char*>(&visible), sizeof(uint8_t));
+    if (file.fail()) return false;
+
+    entity.has_rigidbody    = has_rigidbody != 0;
+    entity.apply_gravity    = apply_gravity != 0;
+    entity.has_collider     = has_collider != 0;
+    entity.use_mesh_collision = use_mesh_col != 0;
+    entity.culling          = culling != 0;
+    entity.transparent      = transparent != 0;
+    entity.visible          = visible != 0;
+
+    file.read(reinterpret_cast<char*>(&entity.speed), sizeof(float));
+    file.read(reinterpret_cast<char*>(&entity.jump_force), sizeof(float));
+    file.read(reinterpret_cast<char*>(&entity.mouse_sensitivity), sizeof(float));
+    file.read(reinterpret_cast<char*>(&entity.movement_speed), sizeof(float));
+    file.read(reinterpret_cast<char*>(&entity.fast_movement_speed), sizeof(float));
+    if (file.fail()) return false;
+
+    if (!readString(file, entity.tracked_player_name)) return false;
+    file.read(reinterpret_cast<char*>(&entity.position_offset), sizeof(glm::vec3));
+
+    return !file.fail();
 }
 
 std::shared_ptr<mesh> LevelManager::loadMesh(const LevelEntity& entity, IRenderAPI* render_api)
