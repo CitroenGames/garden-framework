@@ -4,7 +4,9 @@
 
 A cross-platform 3D game engine written in C++20, built as a foundation for FPS-style games. Supports Vulkan, Direct3D 11, and Metal rendering backends. Runs on Windows, Linux, and macOS.
 
-![screenshot](screen.png)
+![screenshot](IMG/screen.png)
+![screenshot](IMG/editor.png)
+
 
 ## Features
 
