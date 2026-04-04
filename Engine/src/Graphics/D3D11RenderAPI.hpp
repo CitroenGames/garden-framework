@@ -320,6 +320,12 @@ public:
     virtual void setViewportSize(int width, int height) override;
     virtual void renderUI() override;
 
+    // Preview render target (for asset preview panel)
+    virtual void beginPreviewFrame(int width, int height) override;
+    virtual void endPreviewFrame() override;
+    virtual uint64_t getPreviewTextureID() override;
+    virtual void destroyPreviewTarget() override;
+
     // D3D11 specific accessors (for ImGui integration)
     ID3D11Device* getDevice() const { return device.Get(); }
     ID3D11DeviceContext* getDeviceContext() const { return context.Get(); }
@@ -333,4 +339,13 @@ private:
     ComPtr<ID3D11DepthStencilView> viewportDSV;
     int viewport_width_rt = 0, viewport_height_rt = 0;
     void createViewportResources(int w, int h);
+
+    // Preview render target for asset preview panel
+    ComPtr<ID3D11Texture2D> previewTexture;
+    ComPtr<ID3D11RenderTargetView> previewRTV;
+    ComPtr<ID3D11ShaderResourceView> previewSRV;
+    ComPtr<ID3D11Texture2D> previewDepthBuffer;
+    ComPtr<ID3D11DepthStencilView> previewDSV;
+    int preview_width_rt = 0, preview_height_rt = 0;
+    void createPreviewResources(int w, int h);
 };

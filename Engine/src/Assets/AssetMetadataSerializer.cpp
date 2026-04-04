@@ -52,6 +52,8 @@ bool AssetMetadataSerializer::save(const AssetMetadata& metadata, const std::str
     j["lod"]["config"]["target_ratios"] = metadata.lod_config.target_ratios;
     j["lod"]["config"]["error_threshold"] = metadata.lod_config.target_error_threshold;
     j["lod"]["config"]["lock_borders"] = metadata.lod_config.lock_borders;
+    j["lod"]["config"]["allow_attribute_collapse"] = metadata.lod_config.allow_attribute_collapse;
+    j["lod"]["config"]["prune_disconnected"] = metadata.lod_config.prune_disconnected;
 
     // Timestamp
     j["generated_at"] = metadata.generated_at;
@@ -157,8 +159,10 @@ bool AssetMetadataSerializer::load(AssetMetadata& metadata, const std::string& m
                 for (const auto& r : cfg["target_ratios"])
                     metadata.lod_config.target_ratios.push_back(r.get<float>());
             }
-            metadata.lod_config.target_error_threshold = cfg.value("error_threshold", 0.01f);
+            metadata.lod_config.target_error_threshold = cfg.value("error_threshold", 0.05f);
             metadata.lod_config.lock_borders = cfg.value("lock_borders", false);
+            metadata.lod_config.allow_attribute_collapse = cfg.value("allow_attribute_collapse", false);
+            metadata.lod_config.prune_disconnected = cfg.value("prune_disconnected", false);
         }
     }
 

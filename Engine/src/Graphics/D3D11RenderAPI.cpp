@@ -2297,3 +2297,106 @@ void D3D11RenderAPI::renderUI()
         ImGui_ImplDX11_RenderDrawData(draw_data);
     }
 }
+
+// ── Preview render target (asset preview panel) ─────────────────────────────
+
+void D3D11RenderAPI::createPreviewResources(int w, int h)
+{
+    previewTexture.Reset();
+    previewRTV.Reset();
+    previewSRV.Reset();
+    previewDepthBuffer.Reset();
+    previewDSV.Reset();
+    preview_width_rt = w;
+    preview_height_rt = h;
+
+    D3D11_TEXTURE2D_DESC texDesc = {};
+    texDesc.Width = w;
+    texDesc.Height = h;
+    texDesc.MipLevels = 1;
+    texDesc.ArraySize = 1;
+    texDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    texDesc.SampleDesc.Count = 1;
+    texDesc.Usage = D3D11_USAGE_DEFAULT;
+    texDesc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+
+    HRESULT hr = device->CreateTexture2D(&texDesc, nullptr, previewTexture.GetAddressOf());
+    if (FAILED(hr)) return;
+
+    hr = device->CreateRenderTargetView(previewTexture.Get(), nullptr, previewRTV.GetAddressOf());
+    if (FAILED(hr)) { previewTexture.Reset(); return; }
+
+    hr = device->CreateShaderResourceView(previewTexture.Get(), nullptr, previewSRV.GetAddressOf());
+    if (FAILED(hr)) { previewRTV.Reset(); previewTexture.Reset(); return; }
+
+    D3D11_TEXTURE2D_DESC depthDesc = {};
+    depthDesc.Width = w;
+    depthDesc.Height = h;
+    depthDesc.MipLevels = 1;
+    depthDesc.ArraySize = 1;
+    depthDesc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+    depthDesc.SampleDesc.Count = 1;
+    depthDesc.Usage = D3D11_USAGE_DEFAULT;
+    depthDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+
+    hr = device->CreateTexture2D(&depthDesc, nullptr, previewDepthBuffer.GetAddressOf());
+    if (FAILED(hr)) return;
+
+    D3D11_DEPTH_STENCIL_VIEW_DESC dsvDesc = {};
+    dsvDesc.Format = depthDesc.Format;
+    dsvDesc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+
+    hr = device->CreateDepthStencilView(previewDepthBuffer.Get(), &dsvDesc, previewDSV.GetAddressOf());
+    if (FAILED(hr)) { previewDepthBuffer.Reset(); return; }
+}
+
+void D3D11RenderAPI::beginPreviewFrame(int width, int height)
+{
+    if (width <= 0 || height <= 0) return;
+
+    // Recreate if size changed
+    if (width != preview_width_rt || height != preview_height_rt)
+        createPreviewResources(width, height);
+
+    if (!previewRTV || !previewDSV) return;
+
+    // Bind preview render target
+    context->OMSetRenderTargets(1, previewRTV.GetAddressOf(), previewDSV.Get());
+
+    // Set viewport
+    D3D11_VIEWPORT vp = {};
+    vp.Width = (float)width;
+    vp.Height = (float)height;
+    vp.MaxDepth = 1.0f;
+    context->RSSetViewports(1, &vp);
+
+    // Clear with dark background
+    float clearColor[4] = { 0.12f, 0.12f, 0.14f, 1.0f };
+    context->ClearRenderTargetView(previewRTV.Get(), clearColor);
+    context->ClearDepthStencilView(previewDSV.Get(), D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
+
+    // Reset model matrix stack
+    model_matrix_stack = std::stack<glm::mat4>();
+    model_matrix_stack.push(glm::mat4(1.0f));
+}
+
+void D3D11RenderAPI::endPreviewFrame()
+{
+    // Nothing special needed — next beginFrame or renderUI will rebind the appropriate target
+}
+
+uint64_t D3D11RenderAPI::getPreviewTextureID()
+{
+    return reinterpret_cast<uint64_t>(previewSRV.Get());
+}
+
+void D3D11RenderAPI::destroyPreviewTarget()
+{
+    previewTexture.Reset();
+    previewRTV.Reset();
+    previewSRV.Reset();
+    previewDepthBuffer.Reset();
+    previewDSV.Reset();
+    preview_width_rt = 0;
+    preview_height_rt = 0;
+}

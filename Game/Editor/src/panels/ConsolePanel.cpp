@@ -61,8 +61,8 @@ void ConsolePanel::draw()
 {
     ImGui::Begin("Console");
 
-    // --- Filter bar with pill-shaped buttons ---
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.0f);
+    // --- Filter bar with flat toggle buttons (UE5 style) ---
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 2.0f);
 
     auto filterToggle = [](const char* label, bool* value, const ImVec4& color)
     {
@@ -100,6 +100,7 @@ void ConsolePanel::draw()
 
     // --- Log display with alternating row tint ---
     float footer_height = ImGui::GetStyle().ItemSpacing.y + ImGui::GetFrameHeightWithSpacing();
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4.0f, 1.0f));
     ImGui::BeginChild("LogRegion", ImVec2(0, -footer_height), false, ImGuiWindowFlags_HorizontalScrollbar);
 
     ImDrawList* draw_list = ImGui::GetWindowDrawList();
@@ -169,6 +170,7 @@ void ConsolePanel::draw()
         ImGui::SetScrollHereY(1.0f);
 
     ImGui::EndChild();
+    ImGui::PopStyleVar(); // ItemSpacing
 
     // --- Command input with distinct background ---
     ImGui::Separator();
@@ -181,7 +183,9 @@ void ConsolePanel::draw()
     cb_data.panel = this;
     cb_data.history_index = &m_history_index;
 
-    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.14f, 0.14f, 0.14f, 1.0f));
+    ImGui::TextDisabled(">");
+    ImGui::SameLine();
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.10f, 0.09f, 0.08f, 1.0f));
     ImGui::SetNextItemWidth(-1.0f);
     if (ImGui::InputText("##console_input", m_input_buf, sizeof(m_input_buf), input_flags, inputCallback, &cb_data))
     {

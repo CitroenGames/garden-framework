@@ -21,10 +21,12 @@
 #include "panels/NavMeshPanel.hpp"
 #include "panels/PhysicsDebugPanel.hpp"
 #include "panels/LODSettingsPanel.hpp"
+#include "panels/ModelPreviewPanel.hpp"
 #include "Assets/AssetScanner.hpp"
 #include "Project/ProjectManager.hpp"
 #include "Project/ProjectPackager.hpp"
 #include "UndoSystem.hpp"
+#include "EditorConfig.hpp"
 
 class EditorApp
 {
@@ -35,6 +37,9 @@ public:
 
     // Set a .garden project file path to load on init (called before initialize)
     void setProjectPath(const std::string& path) { m_project_path = path; }
+
+    // Set the persistent editor config (called before initialize, owned by main)
+    void setEditorConfig(EditorConfig* cfg) { m_editor_config = cfg; }
 
 private:
     // Core systems
@@ -61,6 +66,7 @@ private:
     bool m_show_viewport       = true;
     bool m_show_navmesh_panel  = false;
     bool m_show_physics_debug  = false;
+    bool m_show_model_preview  = true;
 
     // Mouse state (editor camera)
     bool  m_right_mouse = false;
@@ -70,6 +76,10 @@ private:
 
     // Project path (from --project CLI arg)
     std::string m_project_path;
+
+    // Persistent editor config (owned by main(), lives next to exe)
+    EditorConfig* m_editor_config = nullptr;
+    bool m_show_editor_settings = false;
 
     // Save path
     std::string m_current_save_path;
@@ -99,6 +109,7 @@ private:
     // Asset management
     Assets::AssetScanner m_asset_scanner;
     LODSettingsPanel     m_lod_settings_panel;
+    ModelPreviewPanel    m_model_preview;
 
     // Undo/Redo
     UndoSystem m_undo;
@@ -122,12 +133,16 @@ private:
     void returnToPlay();
     camera& chooseRenderCamera();
 
+    // LOD hot-reload
+    void reloadLODsForMesh(const std::string& mesh_path);
+
     // Per-frame helpers
     void processEvents();
     void renderDockspace();
     void renderMenuBar();
     void renderOpenDialog();
     void renderSaveAsDialog();
+    void renderEditorSettings();
     void renderGrid();
 
     // Project browser (shown before editor when no --project given)

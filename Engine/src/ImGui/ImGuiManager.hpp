@@ -40,6 +40,9 @@ public:
     bool getShowConsole() const { return m_showConsole; }
     void toggleConsole() { m_showConsole = !m_showConsole; }
 
+    // Fonts
+    ImFont* getBoldFont() const { return m_boldFont; }
+
 private:
     ImGuiManager() = default;
     ~ImGuiManager() = default;
@@ -74,4 +77,7 @@ private:
     std::vector<std::string> m_autocompleteItems;
     int m_autocompleteSelectedIndex = -1;
     bool m_showAutocomplete = false;
+
+    // Fonts
+    ImFont* m_boldFont = nullptr;
 };

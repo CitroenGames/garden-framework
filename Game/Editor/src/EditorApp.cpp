@@ -8,6 +8,7 @@
 #include "Utils/FileDialog.hpp"
 #include "Utils/EnginePaths.hpp"
 #include "Components/Components.hpp"
+#include "Assets/LODMeshSerializer.hpp"
 #include "Project/ProjectManager.hpp"
 #include "imgui.h"
 #include "imgui_internal.h"
@@ -82,6 +83,42 @@ bool EditorApp::initialize(RenderAPIType api_type)
     m_viewport.toolbar = &m_toolbar;
     m_viewport.show_toolbar = &m_show_toolbar;
 
+    // Content browser drag-drop: spawn mesh entity when dropped onto viewport
+    m_viewport.on_mesh_dropped = [this](const std::string& mesh_path) {
+        IRenderAPI* api = m_app.getRenderAPI();
+        if (!api) return;
+
+        // Take undo snapshot before creating the entity
+        m_undo.snapshotIfNeeded([this]() { return buildLevelDataFromECS(); });
+
+        // Derive entity name from filename stem
+        std::filesystem::path p(mesh_path);
+        std::string entity_name = p.stem().string();
+
+        // Create entity with Tag + Transform + MeshComponent
+        auto entity = m_world.registry.create();
+        m_world.registry.emplace<TagComponent>(entity, entity_name);
+        m_world.registry.emplace<TransformComponent>(entity);
+        auto& mc = m_world.registry.emplace<MeshComponent>(entity);
+
+        // Load mesh with materials
+        auto mesh_ptr = std::make_shared<mesh>(mesh_path, api);
+        if (mesh_ptr->is_valid)
+        {
+            mesh_ptr->uploadToGPU(api);
+            mc.m_mesh = mesh_ptr;
+        }
+
+        // Update mesh path cache so save/serialize works
+        m_inspector.mesh_path_cache[entity] = mesh_path;
+
+        // Select the new entity
+        m_hierarchy.selected_entity = entity;
+
+        m_state.unsaved_changes = true;
+        m_renderer.markBVHDirty();
+    };
+
     m_navmesh_panel.registry = &m_world.registry;
     m_physics_debug_panel.registry = &m_world.registry;
 
@@ -92,6 +129,17 @@ bool EditorApp::initialize(RenderAPIType api_type)
     // Content browser: double-click on mesh opens LOD settings
     m_content_browser.on_open_mesh = [this](const std::string& path) {
         m_lod_settings_panel.open(std::filesystem::path(path));
+    };
+
+    // Content browser: single-click on mesh triggers preview
+    m_model_preview.render_api = render_api;
+    m_content_browser.on_preview_mesh = [this](const std::string& path) {
+        m_model_preview.setPreviewMesh(path);
+    };
+
+    // Hot-reload LODs into live meshes after generation
+    m_lod_settings_panel.on_lods_generated = [this](const std::string& mesh_path) {
+        reloadLODsForMesh(mesh_path);
     };
 
     // If --project was passed, load it directly.
@@ -255,6 +303,10 @@ void EditorApp::run()
 
             if (m_show_inspector)
             {
+                // Feed camera info for LOD debug display
+                m_inspector.debug_cam_pos = chooseRenderCamera().getPosition();
+                m_inspector.debug_projection = render_api->getProjectionMatrix();
+
                 bool edit_started = false;
                 bool transform_changed = m_inspector.draw(m_world.registry, m_hierarchy.selected_entity,
                                                           &m_state.unsaved_changes, &edit_started);
@@ -272,6 +324,9 @@ void EditorApp::run()
 
             if (m_show_content_browser)
                 m_content_browser.draw();
+
+            if (m_show_model_preview)
+                m_model_preview.draw();
 
             if (m_show_navmesh_panel)
                 m_navmesh_panel.draw();
@@ -292,6 +347,7 @@ void EditorApp::run()
             renderOpenDialog();
             renderSaveAsDialog();
             renderPackageDialog();
+            renderEditorSettings();
 
             if (bvh_dirty)
                 m_renderer.markBVHDirty();
@@ -305,6 +361,65 @@ void EditorApp::run()
         Uint32 frame_end = SDL_GetTicks();
         m_app.lockFramerate(now, frame_end);
         }); // executeWithAutoreleasePool
+    }
+}
+
+void EditorApp::reloadLODsForMesh(const std::string& mesh_path)
+{
+    IRenderAPI* render_api = m_app.getRenderAPI();
+    if (!render_api) return;
+
+    std::string meta_path = Assets::AssetMetadataSerializer::getMetaPath(mesh_path);
+    Assets::AssetMetadata metadata;
+    if (!Assets::AssetMetadataSerializer::load(metadata, meta_path) || !metadata.lod_enabled)
+        return;
+
+    std::string mesh_dir = std::filesystem::path(mesh_path).parent_path().string();
+    if (!mesh_dir.empty() && mesh_dir.back() != '/' && mesh_dir.back() != '\\')
+        mesh_dir += "/";
+
+    for (const auto& [entity, cached_path] : m_inspector.mesh_path_cache)
+    {
+        if (cached_path != mesh_path) continue;
+        if (!m_world.registry.valid(entity)) continue;
+
+        auto* mc = m_world.registry.try_get<MeshComponent>(entity);
+        if (!mc || !mc->m_mesh) continue;
+
+        mesh& m = *mc->m_mesh;
+
+        // Clear existing LOD levels (LODLevel destructor frees GPU resources)
+        m.lod_levels.clear();
+        m.current_lod = 0;
+
+        // Load LOD levels from .lodbin files
+        for (size_t i = 1; i < metadata.lod_levels.size(); ++i)
+        {
+            const auto& lod_info = metadata.lod_levels[i];
+            if (lod_info.file_path.empty()) continue;
+
+            std::string lod_path = mesh_dir + lod_info.file_path;
+            Assets::LODMeshData lod_data;
+            if (Assets::LODMeshSerializer::load(lod_data, lod_path))
+            {
+                mesh::LODLevel level;
+                level.screen_threshold = lod_info.screen_threshold;
+                level.vertex_count = lod_data.vertices.size();
+                level.index_count = lod_data.indices.size();
+                level.gpu_mesh = render_api->createMesh();
+                if (level.gpu_mesh)
+                {
+                    level.gpu_mesh->uploadIndexedMeshData(
+                        lod_data.vertices.data(), lod_data.vertices.size(),
+                        lod_data.indices.data(), lod_data.indices.size()
+                    );
+                }
+                m.lod_levels.push_back(std::move(level));
+            }
+        }
+
+        if (!m.lod_levels.empty())
+            m.computeBounds();
     }
 }
 
@@ -333,6 +448,9 @@ void EditorApp::shutdown()
 
         ConVarRegistry::get().saveArchiveCvars("config.cfg");
     }
+
+    if (m_editor_config)
+        m_editor_config->save();
 
     m_world.registry.clear();
     Console::get().shutdown();
@@ -821,9 +939,11 @@ void EditorApp::renderDockspace()
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+    ImGui::PushStyleColor(ImGuiCol_MenuBarBg, ImVec4(0.11f, 0.10f, 0.09f, 1.0f));
 
     ImGui::Begin("##DockSpaceWindow", nullptr, dockspace_flags);
     ImGui::PopStyleVar(3);
+    ImGui::PopStyleColor();
 
     ImGuiID dockspace_id = ImGui::GetID("MainDockSpaceV2");
 
@@ -981,6 +1101,7 @@ void EditorApp::renderMenuBar()
             ImGui::MenuItem("Level Settings",  nullptr, &m_show_level_settings);
             ImGui::MenuItem("Console",         nullptr, &m_show_console);
             ImGui::MenuItem("Content Browser", nullptr, &m_show_content_browser);
+            ImGui::MenuItem("Asset Preview",   nullptr, &m_show_model_preview);
             ImGui::MenuItem("Status Bar",      nullptr, &m_show_status_bar);
             ImGui::MenuItem("NavMesh",         nullptr, &m_show_navmesh_panel);
             ImGui::MenuItem("Physics Debug",   nullptr, &m_show_physics_debug);
@@ -989,6 +1110,13 @@ void EditorApp::renderMenuBar()
             ImGui::MenuItem("Grid",            nullptr, &m_state.show_grid);
             ImGui::Separator();
             ImGui::MenuItem("All Panels (F1)", nullptr, &m_show_ui);
+            ImGui::EndMenu();
+        }
+
+        if (ImGui::BeginMenu("Settings"))
+        {
+            if (ImGui::MenuItem("Editor Settings..."))
+                m_show_editor_settings = true;
             ImGui::EndMenu();
         }
 
@@ -1026,6 +1154,57 @@ void EditorApp::renderOpenDialog()
         ImGui::SameLine();
         if (ImGui::Button("Cancel", ImVec2(80.0f, 0.0f)))
             m_show_open_dialog = false;
+    }
+    ImGui::End();
+}
+
+void EditorApp::renderEditorSettings()
+{
+    if (!m_show_editor_settings || !m_editor_config) return;
+
+    ImGui::SetNextWindowSize(ImVec2(420.0f, 0.0f), ImGuiCond_Once);
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+
+    if (ImGui::Begin("Editor Settings", &m_show_editor_settings,
+                     ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        ImGui::SeparatorText("Graphics");
+
+        auto backends = EditorConfig::availableBackends();
+        int current_idx = 0;
+        for (int i = 0; i < (int)backends.size(); i++)
+        {
+            if (backends[i] == m_editor_config->render_backend)
+                current_idx = i;
+        }
+
+        ImGui::Text("Render Backend");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(200.0f);
+        if (ImGui::BeginCombo("##render_backend", EditorConfig::backendDisplayName(backends[current_idx])))
+        {
+            for (int i = 0; i < (int)backends.size(); i++)
+            {
+                bool selected = (i == current_idx);
+                if (ImGui::Selectable(EditorConfig::backendDisplayName(backends[i]), selected))
+                {
+                    m_editor_config->render_backend = backends[i];
+                    m_editor_config->save();
+                }
+                if (selected)
+                    ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+
+        if (m_editor_config->render_backend != m_app.getAPIType())
+        {
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f),
+                "Restart the editor for the backend change to take effect.");
+        }
+
+        ImGui::Spacing();
+        ImGui::TextDisabled("Config: %s", EditorConfig::getConfigPath().string().c_str());
     }
     ImGui::End();
 }
@@ -1441,6 +1620,20 @@ LevelData EditorApp::buildLevelDataFromECS() const
         if (it != m_inspector.mesh_path_cache.end())
             le.mesh_path = it->second;
 
+        // Read live mesh rendering properties (may have been edited in inspector)
+        if (has_mesh)
+        {
+            auto& mc = m_world.registry.get<MeshComponent>(entity);
+            if (mc.m_mesh)
+            {
+                le.culling      = mc.m_mesh->culling;
+                le.transparent  = mc.m_mesh->transparent;
+                le.visible      = mc.m_mesh->visible;
+                le.casts_shadow = mc.m_mesh->casts_shadow;
+                le.force_lod    = mc.m_mesh->force_lod;
+            }
+        }
+
         // Preserve fields not exposed in inspector from original LevelEntity
         const LevelEntity* orig = findOriginalLevelEntity(tag.name);
         if (orig)
@@ -1448,16 +1641,8 @@ LevelData EditorApp::buildLevelDataFromECS() const
             le.texture_paths      = orig->texture_paths;
             le.collider_mesh_path = orig->collider_mesh_path;
             le.use_mesh_collision = orig->use_mesh_collision;
-            le.culling            = orig->culling;
-            le.transparent        = orig->transparent;
-            le.visible            = orig->visible;
             le.tracked_player_name = orig->tracked_player_name;
             le.position_offset    = orig->position_offset;
-        }
-        else
-        {
-            le.culling = true;
-            le.visible = true;
         }
 
         // RigidBody

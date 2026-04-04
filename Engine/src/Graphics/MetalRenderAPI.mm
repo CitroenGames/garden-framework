@@ -156,6 +156,12 @@ struct MetalRenderAPIImpl {
     int viewportWidthRT = 0;
     int viewportHeightRT = 0;
 
+    // Preview render target (asset preview panel)
+    id<MTLTexture> previewTexture = nil;
+    id<MTLTexture> previewDepthTexture = nil;
+    int previewWidthRT = 0;
+    int previewHeightRT = 0;
+
     // Shadow mapping
     static constexpr int NUM_CASCADES = 4;
     id<MTLTexture> shadowMapArray = nil;
@@ -2026,6 +2032,92 @@ uint64_t MetalRenderAPI::getViewportTextureID()
 {
     if (!impl->viewportTexture) return 0;
     return (uint64_t)((__bridge void*)impl->viewportTexture);
+}
+
+// ── Preview render target (asset preview panel) ─────────────────────────────
+
+void MetalRenderAPI::beginPreviewFrame(int width, int height)
+{
+    if (width <= 0 || height <= 0) return;
+    if (!impl->commandBuffer) return;
+
+    // Recreate if size changed
+    if (width != impl->previewWidthRT || height != impl->previewHeightRT || !impl->previewTexture)
+    {
+        impl->previewTexture = nil;
+        impl->previewDepthTexture = nil;
+        impl->previewWidthRT = width;
+        impl->previewHeightRT = height;
+
+        MTLTextureDescriptor* desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                                                                       width:width
+                                                                                      height:height
+                                                                                   mipmapped:NO];
+        desc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+        desc.storageMode = MTLStorageModePrivate;
+        impl->previewTexture = [impl->device newTextureWithDescriptor:desc];
+
+        impl->previewDepthTexture = impl->createDepthTextureWithSize(width, height);
+    }
+
+    if (!impl->previewTexture) return;
+
+    // End any current encoder
+    if (impl->renderEncoder) {
+        [impl->renderEncoder endEncoding];
+        impl->renderEncoder = nil;
+    }
+
+    // Create preview render pass
+    MTLRenderPassDescriptor* passDesc = [MTLRenderPassDescriptor renderPassDescriptor];
+    passDesc.colorAttachments[0].texture = impl->previewTexture;
+    passDesc.colorAttachments[0].loadAction = MTLLoadActionClear;
+    passDesc.colorAttachments[0].storeAction = MTLStoreActionStore;
+    passDesc.colorAttachments[0].clearColor = MTLClearColorMake(0.12, 0.12, 0.14, 1.0);
+    passDesc.depthAttachment.texture = impl->previewDepthTexture;
+    passDesc.depthAttachment.loadAction = MTLLoadActionClear;
+    passDesc.depthAttachment.storeAction = MTLStoreActionDontCare;
+    passDesc.depthAttachment.clearDepth = 1.0;
+
+    impl->renderEncoder = [impl->commandBuffer renderCommandEncoderWithDescriptor:passDesc];
+    if (!impl->renderEncoder) return;
+    impl->renderEncoder.label = @"Preview Render Encoder";
+
+    // Set viewport
+    MTLViewport vp = { 0, 0, (double)width, (double)height, 0.0, 1.0 };
+    [impl->renderEncoder setViewport:vp];
+
+    // Bind pipeline and buffers
+    [impl->renderEncoder setRenderPipelineState:impl->pipelineState];
+    [impl->renderEncoder setDepthStencilState:impl->depthStencilState];
+    [impl->renderEncoder setCullMode:MTLCullModeBack];
+    [impl->renderEncoder setFrontFacingWinding:MTLWindingCounterClockwise];
+
+    // Reset model matrix stack
+    impl->modelMatrixStack = std::stack<glm::mat4>();
+    impl->modelMatrixStack.push(glm::mat4(1.0f));
+}
+
+void MetalRenderAPI::endPreviewFrame()
+{
+    if (impl->renderEncoder) {
+        [impl->renderEncoder endEncoding];
+        impl->renderEncoder = nil;
+    }
+}
+
+uint64_t MetalRenderAPI::getPreviewTextureID()
+{
+    if (!impl->previewTexture) return 0;
+    return (uint64_t)((__bridge void*)impl->previewTexture);
+}
+
+void MetalRenderAPI::destroyPreviewTarget()
+{
+    impl->previewTexture = nil;
+    impl->previewDepthTexture = nil;
+    impl->previewWidthRT = 0;
+    impl->previewHeightRT = 0;
 }
 
 void MetalRenderAPI::renderUI()

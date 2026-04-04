@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 #include <functional>
 #include <filesystem>
 #include "imgui.h"
@@ -14,6 +15,7 @@ class ContentBrowserPanel
 public:
     std::function<void(const std::string&)> on_open_level;
     std::function<void(const std::string&)> on_open_mesh;
+    std::function<void(const std::string&)> on_preview_mesh;
 
     // Set by EditorApp so we can trigger regeneration
     Assets::AssetScanner* asset_scanner = nullptr;
@@ -32,15 +34,58 @@ private:
     Assets::AssetMetadata m_selected_metadata;
     bool m_has_selected_metadata = false;
 
+    // Search
+    char m_search_buf[256] = {0};
+
+    // Sources panel toggle
+    bool m_show_sources = true;
+
+    // Navigation history (back/forward)
+    std::vector<std::filesystem::path> m_nav_history;
+    int m_nav_history_index = -1;
+    bool m_nav_suppress_history = false;
+
+    // Item counts (updated each frame)
+    int m_visible_item_count = 0;
+
+    // Tooltip cache
+    std::filesystem::path m_tooltip_path;
+    struct TooltipCache {
+        std::string file_type;
+        std::string file_size_str;
+        int img_width = 0, img_height = 0;
+        size_t vertex_count = 0;
+        size_t triangle_count = 0;
+        size_t lod_count = 0;
+        bool has_metadata = false;
+        bool loaded = false;
+    } m_tooltip_cache;
+
+    // Navigation
+    void navigateTo(const std::filesystem::path& dir);
+    void navigateBack();
+    void navigateForward();
+
+    // Drawing helpers
     void drawDirectoryTree(const std::filesystem::path& dir);
-    void drawBreadcrumbs();
+    void drawBreadcrumbBar();
+    void drawStatusBar();
     void drawFileIcon(ImDrawList* draw_list, ImVec2 center, float size, const std::filesystem::path& path) const;
+    void drawAssetTooltip(const std::filesystem::path& path);
     ImVec4 getFileColor(const std::filesystem::path& path) const;
+
+    // Filtering
     bool passesFilter(const std::filesystem::path& path) const;
+    bool passesSearchFilter(const std::filesystem::path& path) const;
+
+    // File helpers
     void handleFileAction(const std::filesystem::path& path);
     bool isGeneratedFile(const std::filesystem::path& path) const;
     bool isMeshFile(const std::filesystem::path& path) const;
+    bool isTextureFile(const std::filesystem::path& path) const;
     void drawMetadataStatusDot(ImDrawList* draw_list, ImVec2 pos, const std::filesystem::path& path) const;
     void drawMetadataInfo();
     void drawContextMenu(const std::filesystem::path& path);
+
+    static std::string formatFileSize(uintmax_t bytes);
 };

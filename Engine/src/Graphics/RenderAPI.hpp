@@ -152,6 +152,12 @@ public:
     virtual void setViewportSize(int width, int height) { (void)width; (void)height; }
     // Render ImGui draw data to the screen backbuffer
     virtual void renderUI() {}
+
+    // Preview render target (for asset preview panel)
+    virtual void beginPreviewFrame(int width, int height) { (void)width; (void)height; }
+    virtual void endPreviewFrame() {}
+    virtual uint64_t getPreviewTextureID() { return 0; }
+    virtual void destroyPreviewTarget() {}
 };
 
 // Factory function to create render API instances

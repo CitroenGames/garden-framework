@@ -3,6 +3,8 @@
 #include "imgui.h"
 #include "EditorState.hpp"
 #include <entt/entt.hpp>
+#include <functional>
+#include <string>
 
 class ToolbarPanel;
 class camera;
@@ -26,6 +28,9 @@ public:
     // Set by EditorApp during initialization
     ToolbarPanel* toolbar = nullptr;
     bool* show_toolbar = nullptr;
+
+    // Callback for when a mesh asset is dropped onto the viewport
+    std::function<void(const std::string&)> on_mesh_dropped;
 
     GizmoResult draw(ImTextureID scene_texture, EditorState& state,
                      entt::registry& registry, entt::entity& selected,
