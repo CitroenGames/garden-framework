@@ -534,7 +534,13 @@ std::shared_ptr<mesh> LevelManager::loadMesh(const LevelEntity& entity, IRenderA
         material_config.generate_mipmaps = true;
         material_config.flip_textures_vertically = true;
         material_config.cache_textures = true;
-        material_config.texture_base_path = "assets/models/";
+        // Derive texture base path from the mesh file's directory
+        {
+            size_t last_sep = entity.mesh_path.find_last_of("/\\");
+            material_config.texture_base_path = (last_sep != std::string::npos)
+                ? entity.mesh_path.substr(0, last_sep + 1)
+                : "";
+        }
 
         // Load geometry and materials
         GltfLoadResult map_result = GltfLoader::loadGltfWithMaterials(entity.mesh_path, render_api, gltf_config, material_config);

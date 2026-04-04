@@ -162,7 +162,7 @@ GAME_API void gardenServerUpdate(float delta_time)
 GAME_API void gardenServerOnLevelLoaded()
 {
     if (!g_server_services) return;
-    g_server_services->game_world->getPhysicsSystem().getJoltSystem()->OptimizeBroadPhase();
+    g_server_services->game_world->getPhysicsSystem().optimizeBroadPhase();
     LOG_ENGINE_INFO("Server level loaded");
 }
 

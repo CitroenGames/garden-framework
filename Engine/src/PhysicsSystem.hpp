@@ -199,6 +199,9 @@ public:
     JPH::PhysicsSystem* getJoltSystem() { return jolt_system.get(); }
     JPH::BodyInterface& getBodyInterface();
 
+    // Broad phase optimization (call after loading a level)
+    void optimizeBroadPhase();
+
     // Sync ECS transforms from Jolt
     void syncTransformsFromJolt(entt::registry& registry);
     void syncTransformsToJolt(entt::registry& registry);

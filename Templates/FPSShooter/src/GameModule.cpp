@@ -306,7 +306,7 @@ GAME_API void gardenOnLevelLoaded()
     }
 
     // Optimize broad phase after level load
-    game_world->getPhysicsSystem().getJoltSystem()->OptimizeBroadPhase();
+    game_world->getPhysicsSystem().optimizeBroadPhase();
 
     // Set up player controller
     if (g_player_controller)

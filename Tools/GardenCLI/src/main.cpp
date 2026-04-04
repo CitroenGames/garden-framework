@@ -83,6 +83,65 @@ static bool launchEditor(const std::string& editor_path, const std::string& proj
 #endif
 }
 
+static bool launchClient(const std::string& client_path, const std::string& project_path)
+{
+    if (!fs::exists(client_path))
+    {
+        fprintf(stderr, "Error: Client not found at '%s'\n", client_path.c_str());
+        fprintf(stderr, "  Build the client first, then try again.\n");
+        return false;
+    }
+
+    std::string abs_project = fs::absolute(project_path).string();
+    std::string project_dir = fs::path(abs_project).parent_path().string();
+
+#ifdef _WIN32
+    std::string cmdline = "\"" + client_path + "\" --project \"" + abs_project + "\"";
+
+    STARTUPINFOA si = {};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi = {};
+
+    if (!CreateProcessA(
+        nullptr,
+        const_cast<char*>(cmdline.c_str()),
+        nullptr, nullptr, FALSE,
+        DETACHED_PROCESS,
+        nullptr,
+        project_dir.c_str(),
+        &si, &pi))
+    {
+        fprintf(stderr, "Error: Failed to launch client (error %lu)\n", GetLastError());
+        return false;
+    }
+
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    return true;
+#else
+    pid_t pid = fork();
+    if (pid < 0)
+    {
+        fprintf(stderr, "Error: fork() failed\n");
+        return false;
+    }
+    if (pid == 0)
+    {
+        if (chdir(project_dir.c_str()) != 0)
+            _exit(127);
+        const char* args[] = {
+            client_path.c_str(),
+            "--project",
+            abs_project.c_str(),
+            nullptr
+        };
+        execvp(args[0], const_cast<char* const*>(args));
+        _exit(127);
+    }
+    return true;
+#endif
+}
+
 // ---- Commands ----
 
 static int cmdRegisterEngine(int argc, char* argv[])
@@ -206,6 +265,63 @@ static int cmdOpen(const std::string& garden_path)
     printf("Opening '%s' with engine at '%s'...\n", project.name.c_str(), engine->path.c_str());
 
     if (!launchEditor(editor_path, garden_path))
+        return 1;
+
+    return 0;
+}
+
+static int cmdRun(const std::string& garden_path)
+{
+    if (!fs::exists(garden_path))
+    {
+        fprintf(stderr, "Error: File not found: '%s'\n", garden_path.c_str());
+        return 1;
+    }
+
+    GardenProject project;
+    if (!loadGardenProject(garden_path, project))
+        return 1;
+
+    EngineRegistry registry;
+    const EngineEntry* engine = nullptr;
+
+    if (!project.engine_id.empty())
+        engine = registry.findEngine(project.engine_id);
+
+    if (!engine)
+    {
+        auto engines = registry.listEngines();
+        std::string picked = showEnginePicker(engines, project.name);
+
+        if (picked.empty())
+        {
+            fprintf(stderr, "No engine selected.\n");
+            return 1;
+        }
+
+        if (!setProjectEngineId(garden_path, picked))
+            return 1;
+
+        project.engine_id = picked;
+        engine = registry.findEngine(picked);
+        if (!engine)
+        {
+            fprintf(stderr, "Error: Engine '%s' disappeared from registry.\n", picked.c_str());
+            return 1;
+        }
+    }
+
+    fs::path resolved_client = PathUtils::findClientPath(engine->path);
+    if (resolved_client.empty())
+    {
+        fprintf(stderr, "Error: Client executable not found in engine at '%s'\n", engine->path.c_str());
+        fprintf(stderr, "  Build the client first, then try again.\n");
+        return 1;
+    }
+
+    printf("Running '%s' with engine at '%s'...\n", project.name.c_str(), engine->path.c_str());
+
+    if (!launchClient(resolved_client.string(), garden_path))
         return 1;
 
     return 0;
@@ -400,6 +516,7 @@ static void printHelp()
     printf("  unregister-engine <id>            Remove an engine registration\n");
     printf("  list-engines                      List all registered engines\n");
     printf("  open <file.garden>                Open a project in its associated editor\n");
+    printf("  run <file.garden>                 Run the game for a project\n");
     printf("  generate <file.garden>            Generate project files (runs sighmake)\n");
     printf("  set-engine <file.garden> <id>     Set the engine_id in a project file\n");
     printf("  --help, -h                        Show this help\n");
@@ -443,6 +560,18 @@ int main(int argc, char* argv[])
         return cmdListEngines();
     if (cmd == "open" && argc >= 3)
         return cmdOpen(argv[2]);
+    if (cmd == "run" && argc >= 3)
+    {
+        int result = cmdRun(argv[2]);
+#ifdef _WIN32
+        if (result != 0)
+        {
+            fprintf(stderr, "\n");
+            system("pause");
+        }
+#endif
+        return result;
+    }
     if (cmd == "generate" && argc >= 3)
     {
         int result = cmdGenerate(argv[2]);

@@ -2,7 +2,11 @@
 #include "Utils/Log.hpp"
 
 #include <RmlUi/Core.h>
+#include <RmlUi/Core/Traits.h>
 #include <RmlUi/Debugger.h>
+
+// Force Rml::FamilyBase::GetNewId into this DLL so game modules can use DataModelConstructor::Bind
+static volatile auto s_force_rml_family = &Rml::Family<int>::Id;
 #include "Utils/EnginePaths.hpp"
 #include <RmlUi_Platform_SDL.h>
 

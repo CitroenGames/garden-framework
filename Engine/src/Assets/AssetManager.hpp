@@ -50,6 +50,19 @@ public:
     void shutdown();
     bool isInitialized() const { return m_initialized.load(std::memory_order_acquire); }
 
+    // Asset root directory for resolving relative asset paths.
+    // When set, resolveAssetPath() uses this as the base instead of CWD.
+    void setAssetRoot(const std::string& root);
+    const std::string& getAssetRoot() const { return m_asset_root; }
+
+    // Resolve a relative asset path to an absolute path using the asset root.
+    // If no asset root is set, returns the path as-is (CWD-relative).
+    std::string resolveAssetPath(const std::string& relative_path) const;
+
+    // Scan level files and collect all referenced asset paths (mesh, texture, collider).
+    // Useful for packaging validation.
+    static std::vector<std::string> collectLevelAssets(const std::string& levels_directory);
+
     void registerLoader(std::unique_ptr<IAssetLoader> loader);
 
     AssetHandle loadAsync(const std::string& path,
@@ -103,6 +116,8 @@ private:
 
     std::atomic<AssetId> m_next_id{1};
     std::atomic<bool> m_initialized{false};
+
+    std::string m_asset_root;  // Base directory for asset resolution
 };
 
 } // namespace Assets
