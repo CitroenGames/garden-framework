@@ -1,0 +1,7 @@
+[project:imguizmo]
+type = lib
+sources = ImGuizmo.cpp
+headers = ImGuizmo.h
+public_includes = .
+multiprocessor = true
+target_link_libraries(imgui-docking)

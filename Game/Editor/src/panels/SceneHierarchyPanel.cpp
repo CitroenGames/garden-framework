@@ -36,6 +36,7 @@ void SceneHierarchyPanel::draw(entt::registry& registry, bool* out_dirty, bool* 
             registry.emplace<TransformComponent>(e);
             selected_entity = e;
             if (out_dirty) *out_dirty = true;
+            if (out_unsaved) *out_unsaved = true;
         }
         if (ImGui::MenuItem("Mesh Entity"))
         {
@@ -45,6 +46,7 @@ void SceneHierarchyPanel::draw(entt::registry& registry, bool* out_dirty, bool* 
             registry.emplace<MeshComponent>(e);
             selected_entity = e;
             if (out_dirty) *out_dirty = true;
+            if (out_unsaved) *out_unsaved = true;
         }
         if (ImGui::MenuItem("Physical Entity"))
         {
@@ -55,6 +57,7 @@ void SceneHierarchyPanel::draw(entt::registry& registry, bool* out_dirty, bool* 
             registry.emplace<ColliderComponent>(e);
             selected_entity = e;
             if (out_dirty) *out_dirty = true;
+            if (out_unsaved) *out_unsaved = true;
         }
         if (ImGui::MenuItem("Player"))
         {
@@ -64,6 +67,7 @@ void SceneHierarchyPanel::draw(entt::registry& registry, bool* out_dirty, bool* 
             registry.emplace<PlayerComponent>(e);
             selected_entity = e;
             if (out_dirty) *out_dirty = true;
+            if (out_unsaved) *out_unsaved = true;
         }
         if (ImGui::MenuItem("Freecam"))
         {
@@ -73,6 +77,7 @@ void SceneHierarchyPanel::draw(entt::registry& registry, bool* out_dirty, bool* 
             registry.emplace<FreecamComponent>(e);
             selected_entity = e;
             if (out_dirty) *out_dirty = true;
+            if (out_unsaved) *out_unsaved = true;
         }
         ImGui::EndPopup();
     }
@@ -144,9 +149,48 @@ void SceneHierarchyPanel::draw(entt::registry& registry, bool* out_dirty, bool* 
         ImGui::Dummy(ImVec2(radius * 2.0f + 4.0f, line_h));
         ImGui::SameLine();
 
-        if (ImGui::Selectable(tag.name.c_str(), is_selected))
+        // Inline rename mode
+        if (entity == m_renaming_entity)
         {
-            selected_entity = entity;
+            if (!m_rename_focus_set)
+            {
+                ImGui::SetKeyboardFocusHere();
+                m_rename_focus_set = true;
+            }
+            ImGui::SetNextItemWidth(-1.0f);
+            if (ImGui::InputText("##rename", m_rename_buf, sizeof(m_rename_buf),
+                ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll))
+            {
+                // Enter pressed — apply rename
+                auto* rename_tag = registry.try_get<TagComponent>(m_renaming_entity);
+                if (rename_tag)
+                {
+                    rename_tag->name = m_rename_buf;
+                    if (out_unsaved) *out_unsaved = true;
+                }
+                m_renaming_entity = entt::null;
+            }
+            // Click away — cancel rename
+            if (!ImGui::IsItemActive() && m_rename_focus_set && m_renaming_entity != entt::null)
+            {
+                m_renaming_entity = entt::null;
+            }
+        }
+        else
+        {
+            if (ImGui::Selectable(tag.name.c_str(), is_selected))
+            {
+                selected_entity = entity;
+            }
+
+            // Double-click to start inline rename
+            if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0))
+            {
+                m_renaming_entity = entity;
+                m_rename_focus_set = false;
+                std::strncpy(m_rename_buf, tag.name.c_str(), sizeof(m_rename_buf) - 1);
+                m_rename_buf[sizeof(m_rename_buf) - 1] = '\0';
+            }
         }
 
         if (ImGui::BeginPopupContextItem("entity_ctx"))
@@ -154,6 +198,13 @@ void SceneHierarchyPanel::draw(entt::registry& registry, bool* out_dirty, bool* 
             if (ImGui::MenuItem("Duplicate Entity"))
             {
                 to_duplicate = entity;
+            }
+            if (ImGui::MenuItem("Rename"))
+            {
+                m_renaming_entity = entity;
+                m_rename_focus_set = false;
+                std::strncpy(m_rename_buf, tag.name.c_str(), sizeof(m_rename_buf) - 1);
+                m_rename_buf[sizeof(m_rename_buf) - 1] = '\0';
             }
             ImGui::Separator();
             if (ImGui::MenuItem("Delete Entity"))
@@ -169,35 +220,9 @@ void SceneHierarchyPanel::draw(entt::registry& registry, bool* out_dirty, bool* 
     // Deferred duplication
     if (registry.valid(to_duplicate))
     {
-        auto new_entity = registry.create();
-
-        // Copy TagComponent with modified name
-        if (auto* tag = registry.try_get<TagComponent>(to_duplicate))
-            registry.emplace<TagComponent>(new_entity, tag->name + " (Copy)");
-
-        if (auto* t = registry.try_get<TransformComponent>(to_duplicate))
-            registry.emplace<TransformComponent>(new_entity, *t);
-
-        if (auto* mc = registry.try_get<MeshComponent>(to_duplicate))
-            registry.emplace<MeshComponent>(new_entity, *mc);
-
-        if (auto* rb = registry.try_get<RigidBodyComponent>(to_duplicate))
-            registry.emplace<RigidBodyComponent>(new_entity, *rb);
-
-        if (auto* col = registry.try_get<ColliderComponent>(to_duplicate))
-            registry.emplace<ColliderComponent>(new_entity, *col);
-
-        if (auto* pc = registry.try_get<PlayerComponent>(to_duplicate))
-            registry.emplace<PlayerComponent>(new_entity, *pc);
-
-        if (auto* fc = registry.try_get<FreecamComponent>(to_duplicate))
-            registry.emplace<FreecamComponent>(new_entity, *fc);
-
-        if (auto* pr = registry.try_get<PlayerRepresentationComponent>(to_duplicate))
-            registry.emplace<PlayerRepresentationComponent>(new_entity, *pr);
-
-        selected_entity = new_entity;
+        duplicateEntity(registry, to_duplicate);
         if (out_dirty) *out_dirty = true;
+        if (out_unsaved) *out_unsaved = true;
     }
 
     // Deferred deletion
@@ -207,7 +232,43 @@ void SceneHierarchyPanel::draw(entt::registry& registry, bool* out_dirty, bool* 
             selected_entity = entt::null;
         registry.destroy(to_delete);
         if (out_dirty) *out_dirty = true;
+        if (out_unsaved) *out_unsaved = true;
     }
 
     ImGui::End();
+}
+
+entt::entity SceneHierarchyPanel::duplicateEntity(entt::registry& registry, entt::entity source)
+{
+    if (!registry.valid(source))
+        return entt::null;
+
+    auto new_entity = registry.create();
+
+    if (auto* tag = registry.try_get<TagComponent>(source))
+        registry.emplace<TagComponent>(new_entity, tag->name + " (Copy)");
+
+    if (auto* t = registry.try_get<TransformComponent>(source))
+        registry.emplace<TransformComponent>(new_entity, *t);
+
+    if (auto* mc = registry.try_get<MeshComponent>(source))
+        registry.emplace<MeshComponent>(new_entity, *mc);
+
+    if (auto* rb = registry.try_get<RigidBodyComponent>(source))
+        registry.emplace<RigidBodyComponent>(new_entity, *rb);
+
+    if (auto* col = registry.try_get<ColliderComponent>(source))
+        registry.emplace<ColliderComponent>(new_entity, *col);
+
+    if (auto* pc = registry.try_get<PlayerComponent>(source))
+        registry.emplace<PlayerComponent>(new_entity, *pc);
+
+    if (auto* fc = registry.try_get<FreecamComponent>(source))
+        registry.emplace<FreecamComponent>(new_entity, *fc);
+
+    if (auto* pr = registry.try_get<PlayerRepresentationComponent>(source))
+        registry.emplace<PlayerRepresentationComponent>(new_entity, *pr);
+
+    selected_entity = new_entity;
+    return new_entity;
 }

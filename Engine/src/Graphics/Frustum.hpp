@@ -61,6 +61,36 @@ struct AABB
         max = glm::vec3(std::numeric_limits<float>::lowest());
     }
 
+    // Ray-AABB intersection using slab method.
+    // Returns true if ray hits the AABB, and sets tMin to the entry distance.
+    bool intersectsRay(const glm::vec3& origin, const glm::vec3& dir, float& tMin) const
+    {
+        float tmax = std::numeric_limits<float>::max();
+        tMin = -std::numeric_limits<float>::max();
+
+        for (int i = 0; i < 3; ++i)
+        {
+            if (std::abs(dir[i]) < 1e-8f)
+            {
+                // Ray parallel to slab — miss if origin outside
+                if (origin[i] < min[i] || origin[i] > max[i])
+                    return false;
+            }
+            else
+            {
+                float inv_d = 1.0f / dir[i];
+                float t1 = (min[i] - origin[i]) * inv_d;
+                float t2 = (max[i] - origin[i]) * inv_d;
+                if (t1 > t2) std::swap(t1, t2);
+                tMin = std::max(tMin, t1);
+                tmax = std::min(tmax, t2);
+                if (tMin > tmax)
+                    return false;
+            }
+        }
+        return tmax >= 0.0f; // hit is in front of or at ray origin
+    }
+
     // Transform a local-space AABB by a model matrix to get world-space AABB
     // This transforms all 8 corners and computes a new axis-aligned bounding box
     static AABB fromTransformedAABB(const glm::vec3& localMin, const glm::vec3& localMax, const glm::mat4& transform)

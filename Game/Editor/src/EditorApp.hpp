@@ -23,6 +23,7 @@
 #include "panels/LODSettingsPanel.hpp"
 #include "Assets/AssetScanner.hpp"
 #include "Project/ProjectManager.hpp"
+#include "UndoSystem.hpp"
 
 class EditorApp
 {
@@ -72,6 +73,9 @@ private:
     // Save path
     std::string m_current_save_path;
 
+    // Cached window title (to avoid SDL_SetWindowTitle every frame)
+    std::string m_last_window_title;
+
     // File dialog state
     char m_open_path_buf[512];
     char m_save_path_buf[512];
@@ -94,6 +98,9 @@ private:
     // Asset management
     Assets::AssetScanner m_asset_scanner;
     LODSettingsPanel     m_lod_settings_panel;
+
+    // Undo/Redo
+    UndoSystem m_undo;
 
     // --- Play In Editor (PIE) ---
     std::unique_ptr<GameSimulation> m_game_sim;
@@ -136,6 +143,9 @@ private:
     void openLevel(const std::string& path);
     void saveLevel();
     void saveLevelAs(const std::string& path);
+
+    // Undo/redo restore
+    void restoreFromSnapshot(const LevelData& snapshot);
 
     // Serialization helpers
     LevelData          buildLevelDataFromECS() const;

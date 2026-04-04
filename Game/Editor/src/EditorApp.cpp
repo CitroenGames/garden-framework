@@ -10,6 +10,7 @@
 #include "Project/ProjectManager.hpp"
 #include "imgui.h"
 #include "imgui_internal.h"
+#include "ImGuizmo.h"
 #include <SDL.h>
 #include <cstring>
 #include <filesystem>
@@ -149,6 +150,8 @@ void EditorApp::run()
         m_mouse_dx = 0.0f;
         m_mouse_dy = 0.0f;
 
+        m_undo.beginFrame();
+
         processEvents();
 
         // --- Simulation tick (when active and running) ---
@@ -205,8 +208,23 @@ void EditorApp::run()
         m_state.draw_calls = m_renderer.getDrawCalls();
         m_state.current_save_path = m_current_save_path;
 
+        // Update window title with dirty indicator
+        {
+            std::string title = "Garden Level Editor";
+            if (!m_current_save_path.empty())
+                title += " - " + m_current_save_path;
+            if (m_state.unsaved_changes)
+                title += " *";
+            if (title != m_last_window_title)
+            {
+                SDL_SetWindowTitle(m_app.getWindow(), title.c_str());
+                m_last_window_title = title;
+            }
+        }
+
         // --- Phase 2: Build ImGui UI ---
         ImGuiManager::get().newFrame();
+        ImGuizmo::BeginFrame();
         RmlUiManager::get().beginFrame();
 
         renderDockspace();
@@ -215,21 +233,34 @@ void EditorApp::run()
         {
             bool bvh_dirty = false;
 
-            // Viewport panel with embedded toolbar
+            // Viewport panel with embedded toolbar, gizmo, and click-to-select
             if (m_show_viewport)
             {
                 ImTextureID tex = (ImTextureID)render_api->getViewportTextureID();
-                m_viewport.draw(tex, m_state);
+                GizmoResult gizmo = m_viewport.draw(tex, m_state,
+                    m_world.registry, m_hierarchy.selected_entity,
+                    chooseRenderCamera(), render_api, m_renderer.getSceneBVH());
+                if (gizmo.drag_started)
+                    m_undo.snapshotIfNeeded([this]() { return buildLevelDataFromECS(); });
+                if (gizmo.transform_changed)
+                {
+                    bvh_dirty = true;
+                    m_state.unsaved_changes = true;
+                }
             }
 
             if (m_show_hierarchy)
-                m_hierarchy.draw(m_world.registry, &bvh_dirty);
+                m_hierarchy.draw(m_world.registry, &bvh_dirty, &m_state.unsaved_changes);
 
             if (m_show_inspector)
             {
-                bool transform_changed = m_inspector.draw(m_world.registry, m_hierarchy.selected_entity);
+                bool edit_started = false;
+                bool transform_changed = m_inspector.draw(m_world.registry, m_hierarchy.selected_entity,
+                                                          &m_state.unsaved_changes, &edit_started);
                 if (transform_changed)
                     bvh_dirty = true;
+                if (edit_started)
+                    m_undo.snapshotIfNeeded([this]() { return buildLevelDataFromECS(); });
             }
 
             if (m_show_level_settings)
@@ -565,10 +596,62 @@ void EditorApp::processEvents()
                     break;
                 }
 
-                // --- Editor-only hotkeys (transform mode) ---
+                // Ctrl+N: new level (only in editing mode)
+                if (event.key.keysym.scancode == SDL_SCANCODE_N &&
+                    (SDL_GetModState() & KMOD_CTRL) &&
+                    !m_state.isSimulationActive())
+                {
+                    newLevel();
+                    break;
+                }
+
+                // Ctrl+D: duplicate selected entity (only in editing mode)
+                if (event.key.keysym.scancode == SDL_SCANCODE_D &&
+                    (SDL_GetModState() & KMOD_CTRL) &&
+                    !m_state.isSimulationActive())
+                {
+                    if (m_hierarchy.selected_entity != entt::null &&
+                        m_world.registry.valid(m_hierarchy.selected_entity))
+                    {
+                        m_undo.pushState(buildLevelDataFromECS(), "duplicate entity");
+                        m_hierarchy.duplicateEntity(m_world.registry, m_hierarchy.selected_entity);
+                        m_renderer.markBVHDirty();
+                        m_state.unsaved_changes = true;
+                    }
+                    break;
+                }
+
+                // Ctrl+Z: undo (only in editing mode)
+                if (event.key.keysym.scancode == SDL_SCANCODE_Z &&
+                    (SDL_GetModState() & KMOD_CTRL) &&
+                    !(SDL_GetModState() & KMOD_SHIFT) &&
+                    !m_state.isSimulationActive())
+                {
+                    if (m_undo.canUndo())
+                    {
+                        const LevelData& snapshot = m_undo.undo();
+                        restoreFromSnapshot(snapshot);
+                    }
+                    break;
+                }
+
+                // Ctrl+Y / Ctrl+Shift+Z: redo (only in editing mode)
+                if (((event.key.keysym.scancode == SDL_SCANCODE_Y && (SDL_GetModState() & KMOD_CTRL)) ||
+                     (event.key.keysym.scancode == SDL_SCANCODE_Z && (SDL_GetModState() & KMOD_CTRL) && (SDL_GetModState() & KMOD_SHIFT))) &&
+                    !m_state.isSimulationActive())
+                {
+                    if (m_undo.canRedo())
+                    {
+                        const LevelData& snapshot = m_undo.redo();
+                        restoreFromSnapshot(snapshot);
+                    }
+                    break;
+                }
+
+                // --- Editor-only hotkeys (transform mode, delete, focus) ---
                 if (!m_state.isSimulationActive() || m_state.play_mode == PlayMode::Ejected)
                 {
-                    if (!ImGui::GetIO().WantCaptureKeyboard)
+                    if (!ImGui::GetIO().WantCaptureKeyboard && !m_state.gizmo_using)
                     {
                         if (event.key.keysym.scancode == SDL_SCANCODE_W)
                             m_state.transform_mode = EditorState::TransformMode::Translate;
@@ -576,6 +659,46 @@ void EditorApp::processEvents()
                             m_state.transform_mode = EditorState::TransformMode::Rotate;
                         if (event.key.keysym.scancode == SDL_SCANCODE_R)
                             m_state.transform_mode = EditorState::TransformMode::Scale;
+
+                        // Delete: delete selected entity
+                        if (event.key.keysym.scancode == SDL_SCANCODE_DELETE)
+                        {
+                            if (m_hierarchy.selected_entity != entt::null &&
+                                m_world.registry.valid(m_hierarchy.selected_entity))
+                            {
+                                m_undo.pushState(buildLevelDataFromECS(), "delete entity");
+                                m_world.registry.destroy(m_hierarchy.selected_entity);
+                                m_hierarchy.selected_entity = entt::null;
+                                m_renderer.markBVHDirty();
+                                m_state.unsaved_changes = true;
+                            }
+                        }
+
+                        // F: focus/frame selected entity
+                        if (event.key.keysym.scancode == SDL_SCANCODE_F)
+                        {
+                            if (m_hierarchy.selected_entity != entt::null &&
+                                m_world.registry.valid(m_hierarchy.selected_entity))
+                            {
+                                auto* t = m_world.registry.try_get<TransformComponent>(m_hierarchy.selected_entity);
+                                if (t)
+                                {
+                                    glm::vec3 center = t->position;
+                                    float distance = 5.0f;
+
+                                    auto* mc = m_world.registry.try_get<MeshComponent>(m_hierarchy.selected_entity);
+                                    if (mc && mc->m_mesh && mc->m_mesh->bounds_computed)
+                                    {
+                                        glm::vec3 extents = (mc->m_mesh->aabb_max - mc->m_mesh->aabb_min) * t->scale;
+                                        distance = glm::length(extents) * 1.5f;
+                                        if (distance < 2.0f) distance = 2.0f;
+                                        center = t->position + (mc->m_mesh->aabb_min + mc->m_mesh->aabb_max) * 0.5f * t->scale;
+                                    }
+
+                                    m_editor_cam.cam.position = center - m_editor_cam.cam.camera_forward() * distance;
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -630,8 +753,8 @@ void EditorApp::processEvents()
             }
             else if (!m_state.isSimulationActive() || m_state.play_mode == PlayMode::Ejected)
             {
-                // Editor camera: right-click to fly
-                if (event.button.button == SDL_BUTTON_RIGHT)
+                // Editor camera: right-click to fly (blocked during gizmo drag)
+                if (event.button.button == SDL_BUTTON_RIGHT && !m_state.gizmo_using)
                 {
                     m_right_mouse = true;
                     SDL_SetRelativeMouseMode(SDL_TRUE);
@@ -752,13 +875,23 @@ void EditorApp::renderMenuBar()
                 newLevel();
 
             if (ImGui::MenuItem("Open Level...", nullptr, false, can_edit))
-                m_show_open_dialog = true;
+            {
+                std::string path = FileDialog::openFile("Open Level",
+                    "Level Files (*.level.json)\0*.level.json\0All Files (*.*)\0*.*\0");
+                if (!path.empty())
+                    openLevel(path);
+            }
 
             if (ImGui::MenuItem("Save", "Ctrl+S", false, can_edit))
                 saveLevel();
 
             if (ImGui::MenuItem("Save As...", nullptr, false, can_edit))
-                m_show_save_as_dialog = true;
+            {
+                std::string path = FileDialog::saveFile("Save Level As",
+                    "Level Files (*.level.json)\0*.level.json\0All Files (*.*)\0*.*\0");
+                if (!path.empty())
+                    saveLevelAs(path);
+            }
 
             ImGui::Separator();
 
@@ -767,6 +900,45 @@ void EditorApp::renderMenuBar()
                 if (m_state.isSimulationActive())
                     stopPlay();
                 m_running = false;
+            }
+
+            ImGui::EndMenu();
+        }
+
+        if (ImGui::BeginMenu("Edit"))
+        {
+            bool can_edit = !m_state.isSimulationActive();
+
+            if (ImGui::MenuItem("Undo", "Ctrl+Z", false, can_edit && m_undo.canUndo()))
+            {
+                const LevelData& snapshot = m_undo.undo();
+                restoreFromSnapshot(snapshot);
+            }
+            if (ImGui::MenuItem("Redo", "Ctrl+Y", false, can_edit && m_undo.canRedo()))
+            {
+                const LevelData& snapshot = m_undo.redo();
+                restoreFromSnapshot(snapshot);
+            }
+
+            ImGui::Separator();
+
+            if (ImGui::MenuItem("Duplicate", "Ctrl+D", false,
+                can_edit && m_hierarchy.selected_entity != entt::null))
+            {
+                m_undo.pushState(buildLevelDataFromECS(), "duplicate entity");
+                m_hierarchy.duplicateEntity(m_world.registry, m_hierarchy.selected_entity);
+                m_renderer.markBVHDirty();
+                m_state.unsaved_changes = true;
+            }
+
+            if (ImGui::MenuItem("Delete", "Del", false,
+                can_edit && m_hierarchy.selected_entity != entt::null))
+            {
+                m_undo.pushState(buildLevelDataFromECS(), "delete entity");
+                m_world.registry.destroy(m_hierarchy.selected_entity);
+                m_hierarchy.selected_entity = entt::null;
+                m_renderer.markBVHDirty();
+                m_state.unsaved_changes = true;
             }
 
             ImGui::EndMenu();
@@ -792,12 +964,12 @@ void EditorApp::renderMenuBar()
             ImGui::EndMenu();
         }
 
-        // Display current file in the menu bar
+        // Display current file in the menu bar (with dirty indicator)
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 20.0f);
         if (m_current_save_path.empty())
-            ImGui::TextDisabled("(unsaved)");
+            ImGui::TextDisabled(m_state.unsaved_changes ? "* (unsaved)" : "(unsaved)");
         else
-            ImGui::TextDisabled("%s", m_current_save_path.c_str());
+            ImGui::TextDisabled(m_state.unsaved_changes ? "* %s" : "%s", m_current_save_path.c_str());
 
         ImGui::EndMenuBar();
     }
@@ -901,6 +1073,8 @@ void EditorApp::newLevel()
     m_level_data = LevelData{};
     m_level_settings.metadata = &m_level_data.metadata;
     m_current_save_path.clear();
+    m_state.unsaved_changes = false;
+    m_undo.clear();
 
     applyLightingFromMetadata();
     m_renderer.markBVHDirty();
@@ -933,6 +1107,9 @@ void EditorApp::openLevel(const std::string& path)
 
     m_current_save_path = path;
     std::strncpy(m_save_path_buf, path.c_str(), sizeof(m_save_path_buf) - 1);
+    m_state.unsaved_changes = false;
+    m_undo.clear();
+    m_undo.pushState(m_level_data, "initial state");
 
     applyLightingFromMetadata();
     m_renderer.markBVHDirty();
@@ -950,7 +1127,10 @@ void EditorApp::saveLevel()
 
     LevelData data = buildLevelDataFromECS();
     if (m_level_manager.saveLevelToJSON(m_current_save_path, data))
+    {
+        m_state.unsaved_changes = false;
         LOG_ENGINE_INFO("Saved level: {}", m_current_save_path);
+    }
     else
         LOG_ENGINE_ERROR("Failed to save level: {}", m_current_save_path);
 }
@@ -960,6 +1140,51 @@ void EditorApp::saveLevelAs(const std::string& path)
     m_current_save_path = path;
     std::strncpy(m_save_path_buf, path.c_str(), sizeof(m_save_path_buf) - 1);
     saveLevel();
+}
+
+void EditorApp::restoreFromSnapshot(const LevelData& snapshot)
+{
+    // Save selected entity name for best-effort re-selection
+    std::string prev_selected_name;
+    if (m_hierarchy.selected_entity != entt::null &&
+        m_world.registry.valid(m_hierarchy.selected_entity) &&
+        m_world.registry.all_of<TagComponent>(m_hierarchy.selected_entity))
+    {
+        prev_selected_name = m_world.registry.get<TagComponent>(m_hierarchy.selected_entity).name;
+    }
+
+    // Clear and restore
+    m_world.registry.clear();
+    m_level_manager.cleanup();
+    m_inspector.mesh_path_cache.clear();
+    m_hierarchy.selected_entity = entt::null;
+
+    m_level_data = snapshot;
+    m_level_settings.metadata = &m_level_data.metadata;
+
+    m_level_manager.instantiateLevel(
+        m_level_data, m_world, m_app.getRenderAPI(),
+        nullptr, nullptr, nullptr);
+
+    buildMeshPathCache();
+    applyLightingFromMetadata();
+    m_renderer.markBVHDirty();
+
+    // Re-select entity by name
+    if (!prev_selected_name.empty())
+    {
+        auto tag_view = m_world.registry.view<TagComponent>();
+        for (auto entity : tag_view)
+        {
+            if (tag_view.get<TagComponent>(entity).name == prev_selected_name)
+            {
+                m_hierarchy.selected_entity = entity;
+                break;
+            }
+        }
+    }
+
+    m_state.unsaved_changes = true;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

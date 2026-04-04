@@ -53,9 +53,14 @@ bool InspectorPanel::drawComponentHeader(const char* label, bool can_remove, boo
     return open;
 }
 
-bool InspectorPanel::draw(entt::registry& registry, entt::entity selected)
+bool InspectorPanel::draw(entt::registry& registry, entt::entity selected,
+                          bool* out_unsaved, bool* out_edit_started)
 {
     bool transform_dirty = false;
+
+    // Helper lambdas
+    auto markUnsaved = [&]() { if (out_unsaved) *out_unsaved = true; };
+    auto markEditStarted = [&]() { if (out_edit_started) *out_edit_started = true; };
 
     ImGui::Begin("Inspector");
 
@@ -77,7 +82,11 @@ bool InspectorPanel::draw(entt::registry& registry, entt::entity selected)
             buf[sizeof(buf) - 1] = '\0';
             ImGui::SetNextItemWidth(-1.0f);
             if (ImGui::InputText("##tag_name", buf, sizeof(buf)))
+            {
                 tag->name = buf;
+                markUnsaved();
+            }
+            if (ImGui::IsItemActivated()) markEditStarted();
         }
     }
 
@@ -91,11 +100,17 @@ bool InspectorPanel::draw(entt::registry& registry, entt::entity selected)
         {
             ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.65f);
             if (ImGui::DragFloat3("Position", &t->position.x, 0.01f))
-                transform_dirty = true;
+            { transform_dirty = true; markUnsaved(); }
+            if (ImGui::IsItemActivated()) markEditStarted();
+
             if (ImGui::DragFloat3("Rotation", &t->rotation.x, 0.5f))
-                transform_dirty = true;
+            { transform_dirty = true; markUnsaved(); }
+            if (ImGui::IsItemActivated()) markEditStarted();
+
             if (ImGui::DragFloat3("Scale", &t->scale.x, 0.01f, 0.001f, 1000.0f))
-                transform_dirty = true;
+            { transform_dirty = true; markUnsaved(); }
+            if (ImGui::IsItemActivated()) markEditStarted();
+
             ImGui::PopItemWidth();
         }
     }
@@ -118,6 +133,7 @@ bool InspectorPanel::draw(entt::registry& registry, entt::entity selected)
         {
             registry.remove<MeshComponent>(selected);
             transform_dirty = true;
+            markUnsaved();
         }
         ImGui::Spacing();
     }
@@ -131,7 +147,7 @@ bool InspectorPanel::draw(entt::registry& registry, entt::entity selected)
             ImGui::TextDisabled("Collider component present");
         }
         if (removed)
-            registry.remove<ColliderComponent>(selected);
+        { registry.remove<ColliderComponent>(selected); markUnsaved(); }
         ImGui::Spacing();
     }
 
@@ -142,12 +158,17 @@ bool InspectorPanel::draw(entt::registry& registry, entt::entity selected)
         if (drawComponentHeader("RigidBody", true, &removed, ImVec4(1.0f, 0.5f, 0.2f, 1.0f)))
         {
             ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.65f);
-            ImGui::DragFloat("Mass", &rb->mass, 0.1f, 0.001f, 100000.0f);
-            ImGui::Checkbox("Apply Gravity", &rb->apply_gravity);
+            if (ImGui::DragFloat("Mass", &rb->mass, 0.1f, 0.001f, 100000.0f))
+                markUnsaved();
+            if (ImGui::IsItemActivated()) markEditStarted();
+
+            if (ImGui::Checkbox("Apply Gravity", &rb->apply_gravity))
+                markUnsaved();
+
             ImGui::PopItemWidth();
         }
         if (removed)
-            registry.remove<RigidBodyComponent>(selected);
+        { registry.remove<RigidBodyComponent>(selected); markUnsaved(); }
         ImGui::Spacing();
     }
 
@@ -158,13 +179,22 @@ bool InspectorPanel::draw(entt::registry& registry, entt::entity selected)
         if (drawComponentHeader("Player", true, &removed, ImVec4(0.3f, 0.5f, 1.0f, 1.0f)))
         {
             ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.65f);
-            ImGui::DragFloat("Speed", &pc->speed, 0.1f, 0.0f, 100.0f);
-            ImGui::DragFloat("Jump Force", &pc->jump_force, 0.1f, 0.0f, 100.0f);
-            ImGui::DragFloat("Mouse Sensitivity", &pc->mouse_sensitivity, 0.01f, 0.01f, 10.0f);
+            if (ImGui::DragFloat("Speed", &pc->speed, 0.1f, 0.0f, 100.0f))
+                markUnsaved();
+            if (ImGui::IsItemActivated()) markEditStarted();
+
+            if (ImGui::DragFloat("Jump Force", &pc->jump_force, 0.1f, 0.0f, 100.0f))
+                markUnsaved();
+            if (ImGui::IsItemActivated()) markEditStarted();
+
+            if (ImGui::DragFloat("Mouse Sensitivity", &pc->mouse_sensitivity, 0.01f, 0.01f, 10.0f))
+                markUnsaved();
+            if (ImGui::IsItemActivated()) markEditStarted();
+
             ImGui::PopItemWidth();
         }
         if (removed)
-            registry.remove<PlayerComponent>(selected);
+        { registry.remove<PlayerComponent>(selected); markUnsaved(); }
         ImGui::Spacing();
     }
 
@@ -175,13 +205,22 @@ bool InspectorPanel::draw(entt::registry& registry, entt::entity selected)
         if (drawComponentHeader("Freecam", true, &removed, ImVec4(0.3f, 0.9f, 0.3f, 1.0f)))
         {
             ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.65f);
-            ImGui::DragFloat("Move Speed", &fc->movement_speed, 0.1f, 0.0f, 100.0f);
-            ImGui::DragFloat("Fast Speed", &fc->fast_movement_speed, 0.5f, 0.0f, 500.0f);
-            ImGui::DragFloat("Mouse Sensitivity", &fc->mouse_sensitivity, 0.01f, 0.01f, 10.0f);
+            if (ImGui::DragFloat("Move Speed", &fc->movement_speed, 0.1f, 0.0f, 100.0f))
+                markUnsaved();
+            if (ImGui::IsItemActivated()) markEditStarted();
+
+            if (ImGui::DragFloat("Fast Speed", &fc->fast_movement_speed, 0.5f, 0.0f, 500.0f))
+                markUnsaved();
+            if (ImGui::IsItemActivated()) markEditStarted();
+
+            if (ImGui::DragFloat("Mouse Sensitivity", &fc->mouse_sensitivity, 0.01f, 0.01f, 10.0f))
+                markUnsaved();
+            if (ImGui::IsItemActivated()) markEditStarted();
+
             ImGui::PopItemWidth();
         }
         if (removed)
-            registry.remove<FreecamComponent>(selected);
+        { registry.remove<FreecamComponent>(selected); markUnsaved(); }
         ImGui::Spacing();
     }
 
@@ -194,7 +233,7 @@ bool InspectorPanel::draw(entt::registry& registry, entt::entity selected)
             ImGui::TextDisabled("Tracks another player entity");
         }
         if (removed)
-            registry.remove<PlayerRepresentationComponent>(selected);
+        { registry.remove<PlayerRepresentationComponent>(selected); markUnsaved(); }
         ImGui::Spacing();
     }
 
@@ -211,25 +250,23 @@ bool InspectorPanel::draw(entt::registry& registry, entt::entity selected)
     {
         if (!registry.all_of<MeshComponent>(selected))
             if (ImGui::MenuItem("Mesh"))
-                registry.emplace<MeshComponent>(selected);
+            { registry.emplace<MeshComponent>(selected); markUnsaved(); }
 
         if (!registry.all_of<ColliderComponent>(selected))
             if (ImGui::MenuItem("Collider"))
-                registry.emplace<ColliderComponent>(selected);
+            { registry.emplace<ColliderComponent>(selected); markUnsaved(); }
 
         if (!registry.all_of<RigidBodyComponent>(selected))
             if (ImGui::MenuItem("RigidBody"))
-            {
-                registry.emplace<RigidBodyComponent>(selected);
-            }
+            { registry.emplace<RigidBodyComponent>(selected); markUnsaved(); }
 
         if (!registry.all_of<PlayerComponent>(selected))
             if (ImGui::MenuItem("Player"))
-                registry.emplace<PlayerComponent>(selected);
+            { registry.emplace<PlayerComponent>(selected); markUnsaved(); }
 
         if (!registry.all_of<FreecamComponent>(selected))
             if (ImGui::MenuItem("Freecam"))
-                registry.emplace<FreecamComponent>(selected);
+            { registry.emplace<FreecamComponent>(selected); markUnsaved(); }
 
         ImGui::EndPopup();
     }

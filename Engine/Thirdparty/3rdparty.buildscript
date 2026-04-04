@@ -12,6 +12,7 @@ include = spdlog-1.15.3/spdlog.buildscript
 include = enet/enet.buildscript
 
 include = imgui-docking/imgui.buildscript
+include = ImGuizmo/imguizmo.buildscript
 
 include = vk-bootstrap/vk-bootstrap.buildscript
 include = vma/vma.buildscript
