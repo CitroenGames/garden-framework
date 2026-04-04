@@ -15,7 +15,7 @@ static bool containsCaseInsensitive(const std::string& str, const char* filter)
     return lower_str.find(lower_filter) != std::string::npos;
 }
 
-void SceneHierarchyPanel::draw(entt::registry& registry, bool* out_dirty)
+void SceneHierarchyPanel::draw(entt::registry& registry, bool* out_dirty, bool* out_unsaved)
 {
     ImGui::Begin("Scene Hierarchy");
 
