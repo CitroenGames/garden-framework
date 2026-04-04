@@ -1,0 +1,70 @@
+find_package(Vulkan REQUIRED)
+if(Linux)
+{
+    find_package(SDL2 REQUIRED)
+}
+if(macOS)
+{
+    find_package(SDL2 REQUIRED)
+}
+if(Windows)
+{
+    find_package(DirectX11 REQUIRED)
+}
+
+[project:EngineGraphics]
+type = lib
+sources = {
+    src/Graphics/RenderAPI.cpp
+    src/Graphics/VulkanRenderAPI.cpp
+    src/Graphics/VulkanMesh.cpp
+    src/Graphics/D3D11RenderAPI.cpp [windows]
+    src/Graphics/D3D11Mesh.cpp [windows]
+    src/Graphics/MetalRenderAPI.mm [macOS]
+    src/Graphics/MetalMesh.mm [macOS]
+    src/ImGui/ImGuiManager.cpp
+    src/UI/RmlUiManager.cpp
+    src/UI/RmlRenderer_VK.cpp
+    src/UI/RmlRenderer_D3D11.cpp
+    src/UI/RmlRenderer_Metal.mm [macOS]
+    src/Reflection/ReflectionWidgets.cpp
+}
+headers = {
+    src/Graphics/**/*.hpp
+    src/Graphics/**/*.h
+    src/ImGui/**/*.hpp
+    src/UI/**/*.h
+}
+defines = RMLUI_STATIC_LIB, RMLUI_SDL_VERSION_MAJOR=2
+if(Windows)
+{
+    includes = ${Vulkan_INCLUDE_DIRS}, ${DirectX11_INCLUDE_DIRS}
+    libs = ${Vulkan_LIBRARIES}, ${DirectX11_LIBRARIES}
+    libdirs = ${Vulkan_LIBRARY_DIRS}, ${DirectX11_LIBRARY_DIRS}
+}
+if(Linux)
+{
+    includes = ${Vulkan_INCLUDE_DIRS}
+    libs = ${Vulkan_LIBRARIES}
+    libdirs = ${Vulkan_LIBRARY_DIRS}
+}
+if(macOS)
+{
+    includes = ${Vulkan_INCLUDE_DIRS}
+    libs = ${Vulkan_LIBRARIES}, -framework Metal, -framework QuartzCore, -framework Cocoa
+    libdirs = ${Vulkan_LIBRARY_DIRS}
+    objcflags = -fobjc-arc
+}
+target_link_libraries(
+    PUBLIC EngineCore
+    PUBLIC vk-bootstrap
+    PUBLIC VMA
+    PUBLIC imgui-docking
+    PUBLIC RmlUi
+)
+multiprocessor = true
+simd = StreamingSIMDExtensions2
+std = 20
+utf8 = true
+exception_handling = false
+buffer_security_check = false

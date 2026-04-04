@@ -7,7 +7,7 @@
 
 // Don't define any STB_IMAGE implementations - use existing ones
 // Configure tinygltf to use external STB_IMAGE
-#define TINYGLTF_IMPLEMENTATION
+// Implementation is provided by tinygltf.lib (tiny_gltf.cc)
 #define TINYGLTF_NO_STB_IMAGE_WRITE
 #include <tiny_gltf.h>
 

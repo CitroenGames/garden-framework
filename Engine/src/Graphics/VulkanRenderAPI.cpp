@@ -22,8 +22,7 @@
 #define VMA_DYNAMIC_VULKAN_FUNCTIONS 1
 #include "vk_mem_alloc.h"
 
-// stb_image for texture loading
-#define STB_IMAGE_IMPLEMENTATION
+// stb_image for texture loading (implementation provided by tinygltf.lib)
 #include "stb_image.h"
 
 // Logging
