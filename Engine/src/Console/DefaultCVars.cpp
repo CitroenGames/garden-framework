@@ -49,6 +49,10 @@ CONVAR(developer, 0, ConVarFlags::ARCHIVE,
 CONVAR(con_notifytime, 4.0f, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
        "Console notification display time in seconds");
 
+// Editor packaging
+CONVAR(editor_package_output_dir, "", ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
+       "Last used packaging output directory");
+
 // Window settings
 CONVAR_BOUNDED(window_width, 1600, 320, 7680, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
                "Window width");

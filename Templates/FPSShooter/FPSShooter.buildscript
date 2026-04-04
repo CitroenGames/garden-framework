@@ -14,5 +14,6 @@ target_link_libraries(
     PRIVATE EngineGraphics
 )
 defines = RMLUI_SDL_VERSION_MAJOR=2
+outdir = bin
 std = 20
 utf8 = true

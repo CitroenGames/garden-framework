@@ -170,6 +170,7 @@ GAME_API void gardenOnPlayStop()
         bs_file << "target_link_libraries(\n";
         bs_file << "    PRIVATE EngineGraphics\n";
         bs_file << ")\n";
+        bs_file << "outdir = bin\n";
         bs_file << "std = 20\n";
         bs_file << "utf8 = true\n";
         bs_file.close();
