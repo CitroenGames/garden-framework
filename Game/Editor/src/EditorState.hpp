@@ -16,6 +16,10 @@ struct EditorState
     enum class TransformMode { Translate, Rotate, Scale };
     TransformMode transform_mode = TransformMode::Translate;
 
+    enum class GizmoSpace { Local, World };
+    GizmoSpace gizmo_space = GizmoSpace::World;
+    bool gizmo_using = false; // true while ImGuizmo drag is active
+
     // Snapping
     bool snap_enabled = false;
     float snap_translate = 0.5f;

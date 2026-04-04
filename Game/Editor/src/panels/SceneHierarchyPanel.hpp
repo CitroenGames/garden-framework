@@ -16,4 +16,9 @@ public:
 
 private:
     char m_filter_buf[256] = {0};
+
+    // Inline rename state
+    entt::entity m_renaming_entity = entt::null;
+    char m_rename_buf[256] = {0};
+    bool m_rename_focus_set = false;
 };

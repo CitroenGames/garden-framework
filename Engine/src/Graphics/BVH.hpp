@@ -33,6 +33,9 @@ public:
     // Query all entities visible in the frustum
     void queryFrustum(const Frustum& frustum, std::vector<entt::entity>& results) const;
 
+    // Pick the closest entity hit by a ray. Returns entt::null if nothing hit.
+    entt::entity rayPick(const glm::vec3& origin, const glm::vec3& direction) const;
+
     // Mark the BVH as needing rebuild (e.g., when entities move or are added/removed)
     void markDirty() { dirty = true; }
 
@@ -62,6 +65,10 @@ private:
 
     // Recursive frustum query
     void queryFrustumRecursive(int nodeIndex, const Frustum& frustum, std::vector<entt::entity>& results) const;
+
+    // Recursive ray pick (returns closest hit entity)
+    void rayPickRecursive(int nodeIndex, const glm::vec3& origin, const glm::vec3& direction,
+                          float& closest_t, entt::entity& closest_entity) const;
 };
 
 // Implementation
@@ -241,4 +248,50 @@ inline void SceneBVH::queryFrustumRecursive(int nodeIndex, const Frustum& frustu
     {
         queryFrustumRecursive(node.right_child, frustum, results);
     }
+}
+
+inline entt::entity SceneBVH::rayPick(const glm::vec3& origin, const glm::vec3& direction) const
+{
+    if (root_index < 0 || nodes.empty())
+        return entt::null;
+
+    float closest_t = std::numeric_limits<float>::max();
+    entt::entity closest_entity = entt::null;
+    rayPickRecursive(root_index, origin, direction, closest_t, closest_entity);
+    return closest_entity;
+}
+
+inline void SceneBVH::rayPickRecursive(int nodeIndex, const glm::vec3& origin, const glm::vec3& direction,
+                                        float& closest_t, entt::entity& closest_entity) const
+{
+    if (nodeIndex < 0 || nodeIndex >= static_cast<int>(nodes.size()))
+        return;
+
+    const BVHNode& node = nodes[nodeIndex];
+
+    // Test ray against this node's AABB
+    float tMin;
+    if (!node.bounds.intersectsRay(origin, direction, tMin))
+        return; // Ray misses this subtree entirely
+
+    // If the closest possible hit in this subtree is farther than our current best, skip
+    if (tMin > closest_t)
+        return;
+
+    // Leaf node: this entity is a candidate
+    if (node.isLeaf())
+    {
+        if (tMin < closest_t)
+        {
+            closest_t = tMin;
+            closest_entity = node.entity;
+        }
+        return;
+    }
+
+    // Recurse into both children
+    if (node.left_child >= 0)
+        rayPickRecursive(node.left_child, origin, direction, closest_t, closest_entity);
+    if (node.right_child >= 0)
+        rayPickRecursive(node.right_child, origin, direction, closest_t, closest_entity);
 }

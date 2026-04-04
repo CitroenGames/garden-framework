@@ -13,7 +13,10 @@ public:
 
     // Draw the inspector for the selected entity.
     // Returns true if any transform was modified (so caller can mark BVH dirty).
-    bool draw(entt::registry& registry, entt::entity selected);
+    // out_unsaved: set to true when any property is modified.
+    // out_edit_started: set to true when a drag/edit operation begins (for undo snapshots).
+    bool draw(entt::registry& registry, entt::entity selected,
+              bool* out_unsaved = nullptr, bool* out_edit_started = nullptr);
 
 private:
     // Helper to draw a removable component header with an accent color bar.

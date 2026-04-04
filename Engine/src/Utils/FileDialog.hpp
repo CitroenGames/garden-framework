@@ -10,6 +10,10 @@ namespace FileDialog
 // Returns empty string if cancelled.
 std::string openFile(const char* title, const char* filter = nullptr);
 
+// Open a save-file dialog.
+// Returns empty string if cancelled.
+std::string saveFile(const char* title, const char* filter = nullptr);
+
 // Open a folder picker dialog.
 // Returns empty string if cancelled.
 std::string openFolder(const char* title);

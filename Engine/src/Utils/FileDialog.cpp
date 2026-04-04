@@ -37,6 +37,25 @@ std::string openFile(const char* title, const char* filter)
     return "";
 }
 
+std::string saveFile(const char* title, const char* filter)
+{
+    char path[MAX_PATH] = {};
+
+    OPENFILENAMEA ofn = {};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = nullptr;
+    ofn.lpstrFile = path;
+    ofn.nMaxFile = sizeof(path);
+    ofn.lpstrTitle = title;
+    ofn.lpstrFilter = filter ? filter : "All Files (*.*)\0*.*\0";
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR;
+
+    if (GetSaveFileNameA(&ofn))
+        return std::string(path);
+
+    return "";
+}
+
 std::string openFolder(const char* title)
 {
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
@@ -84,6 +103,27 @@ std::string openFile(const char* title, const char* filter)
     return std::string(buf);
 }
 
+std::string saveFile(const char* title, const char* filter)
+{
+    (void)filter;
+    char cmd[1024];
+    snprintf(cmd, sizeof(cmd),
+        "osascript -e 'set f to POSIX path of (choose file name with prompt \"%s\")' 2>/dev/null",
+        title ? title : "Save File");
+
+    FILE* pipe = popen(cmd, "r");
+    if (!pipe) return "";
+
+    char buf[1024] = {};
+    fgets(buf, sizeof(buf), pipe);
+    pclose(pipe);
+
+    size_t len = strlen(buf);
+    if (len > 0 && buf[len - 1] == '\n') buf[len - 1] = '\0';
+
+    return std::string(buf);
+}
+
 std::string openFolder(const char* title)
 {
     char cmd[1024];
@@ -114,6 +154,27 @@ std::string openFile(const char* title, const char* filter)
     snprintf(cmd, sizeof(cmd),
         "zenity --file-selection --title=\"%s\" 2>/dev/null",
         title ? title : "Open File");
+
+    FILE* pipe = popen(cmd, "r");
+    if (!pipe) return "";
+
+    char buf[1024] = {};
+    fgets(buf, sizeof(buf), pipe);
+    pclose(pipe);
+
+    size_t len = strlen(buf);
+    if (len > 0 && buf[len - 1] == '\n') buf[len - 1] = '\0';
+
+    return std::string(buf);
+}
+
+std::string saveFile(const char* title, const char* filter)
+{
+    (void)filter;
+    char cmd[1024];
+    snprintf(cmd, sizeof(cmd),
+        "zenity --file-selection --save --confirm-overwrite --title=\"%s\" 2>/dev/null",
+        title ? title : "Save File");
 
     FILE* pipe = popen(cmd, "r");
     if (!pipe) return "";

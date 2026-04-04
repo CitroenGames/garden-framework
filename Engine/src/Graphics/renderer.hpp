@@ -437,6 +437,10 @@ public:
         render_api->endSceneRender();
     };
 
+    // Access the scene BVH (for ray picking, etc.)
+    SceneBVH& getSceneBVH() { return scene_bvh; }
+    const SceneBVH& getSceneBVH() const { return scene_bvh; }
+
     // Mark BVH as needing rebuild (call when entities are added/removed/moved)
     void markBVHDirty()
     {

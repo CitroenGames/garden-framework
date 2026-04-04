@@ -109,6 +109,37 @@ void ToolbarPanel::drawContent(EditorState& state)
     }
     ImGui::SameLine();
 
+    // --- Local/World space toggle ---
+    if (!editing)
+        ImGui::BeginDisabled();
+
+    {
+        bool is_local = (state.gizmo_space == EditorState::GizmoSpace::Local);
+        const char* label = is_local ? "Local" : "World";
+        if (ImGui::Button(label, ImVec2(50, 28)))
+        {
+            state.gizmo_space = is_local
+                ? EditorState::GizmoSpace::World
+                : EditorState::GizmoSpace::Local;
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
+            ImGui::SetTooltip("Toggle Local/World transform space");
+    }
+
+    if (!editing)
+        ImGui::EndDisabled();
+
+    // Custom vertical separator
+    ImGui::SameLine();
+    {
+        ImVec2 p = ImGui::GetCursorScreenPos();
+        float h = ImGui::GetFrameHeight();
+        draw_list->AddLine(ImVec2(p.x + 4, p.y + 2), ImVec2(p.x + 4, p.y + h - 2),
+                           IM_COL32(60, 60, 60, 255), 1.0f);
+        ImGui::Dummy(ImVec2(10, h));
+    }
+    ImGui::SameLine();
+
     // --- Play / Pause / Stop / Eject ---
     switch (state.play_mode)
     {

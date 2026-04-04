@@ -60,6 +60,7 @@ target_link_libraries(
     PUBLIC vk-bootstrap
     PUBLIC VMA
     PUBLIC imgui-docking
+    PUBLIC imguizmo
     PUBLIC RmlUi
 )
 multiprocessor = true
