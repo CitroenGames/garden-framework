@@ -23,7 +23,8 @@ static std::string shaderSubdir(RenderAPIType api)
     }
 }
 
-static int copyDirectoryRecursive(const fs::path& src, const fs::path& dst)
+static int copyDirectoryRecursive(const fs::path& src, const fs::path& dst,
+                                  std::vector<std::string>* warnings_out = nullptr)
 {
     if (!fs::exists(src) || !fs::is_directory(src))
         return 0;
@@ -32,7 +33,9 @@ static int copyDirectoryRecursive(const fs::path& src, const fs::path& dst)
     fs::create_directories(dst, ec);
     if (ec)
     {
-        LOG_ENGINE_ERROR("[Packager] Failed to create directory '{}': {}", dst.string(), ec.message());
+        std::string msg = "Failed to create directory '" + dst.string() + "': " + ec.message();
+        LOG_ENGINE_ERROR("[Packager] {}", msg);
+        if (warnings_out) warnings_out->push_back(msg);
         return 0;
     }
 
@@ -55,7 +58,11 @@ static int copyDirectoryRecursive(const fs::path& src, const fs::path& dst)
             fs::create_directories(dest_path.parent_path(), ec);
             fs::copy_file(entry.path(), dest_path, fs::copy_options::overwrite_existing, ec);
             if (ec)
-                LOG_ENGINE_WARN("[Packager] Failed to copy '{}': {}", entry.path().string(), ec.message());
+            {
+                std::string msg = "Failed to copy '" + entry.path().string() + "': " + ec.message();
+                LOG_ENGINE_WARN("[Packager] {}", msg);
+                if (warnings_out) warnings_out->push_back(msg);
+            }
             else
                 ++count;
         }
@@ -63,11 +70,14 @@ static int copyDirectoryRecursive(const fs::path& src, const fs::path& dst)
     return count;
 }
 
-static bool copySingleFile(const fs::path& src, const fs::path& dst, const char* label)
+static bool copySingleFile(const fs::path& src, const fs::path& dst, const char* label,
+                           std::vector<std::string>* warnings_out = nullptr)
 {
     if (!fs::exists(src))
     {
-        LOG_ENGINE_ERROR("[Packager] {} not found: {}", label, src.string());
+        std::string msg = std::string(label) + " not found: " + src.string();
+        LOG_ENGINE_ERROR("[Packager] {}", msg);
+        if (warnings_out) warnings_out->push_back(msg);
         return false;
     }
 
@@ -76,7 +86,9 @@ static bool copySingleFile(const fs::path& src, const fs::path& dst, const char*
     fs::copy_file(src, dst, fs::copy_options::overwrite_existing, ec);
     if (ec)
     {
-        LOG_ENGINE_ERROR("[Packager] Failed to copy {}: {}", label, ec.message());
+        std::string msg = std::string("Failed to copy ") + label + ": " + ec.message();
+        LOG_ENGINE_ERROR("[Packager] {}", msg);
+        if (warnings_out) warnings_out->push_back(msg);
         return false;
     }
     return true;
@@ -154,17 +166,21 @@ PackageResult ProjectPackager::packageProject(
 
     for (const char* file : engine_files)
     {
-        if (copySingleFile(engine_bin / file, output_root / "bin" / file, file))
+        if (copySingleFile(engine_bin / file, output_root / "bin" / file, file, &result.warnings))
             result.files_copied++;
         else
-            LOG_ENGINE_WARN("[Packager] Missing engine binary: {}", file);
+        {
+            std::string msg = std::string("Missing engine binary: ") + file;
+            LOG_ENGINE_WARN("[Packager] {}", msg);
+            result.warnings.push_back(msg);
+        }
     }
 
     // --- Copy game module DLL ---
     if (!module_path.empty() && fs::exists(module_path))
     {
         fs::path module_filename = fs::path(module_path).filename();
-        if (copySingleFile(module_path, output_root / "bin" / module_filename, "Game module"))
+        if (copySingleFile(module_path, output_root / "bin" / module_filename, "Game module", &result.warnings))
             result.files_copied++;
     }
 
@@ -177,14 +193,14 @@ PackageResult ProjectPackager::packageProject(
     fs::path shader_src = engine_assets / "shaders" / shader_dir;
     fs::path shader_dst = output_root / "assets" / "shaders" / shader_dir;
     LOG_ENGINE_INFO("[Packager] Copying {} shaders...", shader_dir);
-    result.files_copied += copyDirectoryRecursive(shader_src, shader_dst);
+    result.files_copied += copyDirectoryRecursive(shader_src, shader_dst, &result.warnings);
 
     // Fonts
     fs::path fonts_src = engine_assets / "fonts";
     if (fs::exists(fonts_src))
     {
         LOG_ENGINE_INFO("[Packager] Copying fonts...");
-        result.files_copied += copyDirectoryRecursive(fonts_src, output_root / "assets" / "fonts");
+        result.files_copied += copyDirectoryRecursive(fonts_src, output_root / "assets" / "fonts", &result.warnings);
     }
 
     // UI
@@ -192,7 +208,7 @@ PackageResult ProjectPackager::packageProject(
     if (fs::exists(ui_src))
     {
         LOG_ENGINE_INFO("[Packager] Copying UI assets...");
-        result.files_copied += copyDirectoryRecursive(ui_src, output_root / "assets" / "ui");
+        result.files_copied += copyDirectoryRecursive(ui_src, output_root / "assets" / "ui", &result.warnings);
     }
 
     // --- Copy project assets ---
@@ -201,14 +217,16 @@ PackageResult ProjectPackager::packageProject(
         fs::path src = project_root / asset_dir;
         if (!fs::exists(src))
         {
-            LOG_ENGINE_WARN("[Packager] Asset directory not found: {}", src.string());
+            std::string msg = "Asset directory not found: " + src.string();
+            LOG_ENGINE_WARN("[Packager] {}", msg);
+            result.warnings.push_back(msg);
             continue;
         }
 
         // Project asset_directories are typically "assets/", so copy contents into output/assets/
         fs::path dst = output_root / asset_dir;
         LOG_ENGINE_INFO("[Packager] Copying project assets from '{}'...", asset_dir);
-        result.files_copied += copyDirectoryRecursive(src, dst);
+        result.files_copied += copyDirectoryRecursive(src, dst, &result.warnings);
     }
 
     // --- Validate referenced assets ---
@@ -224,7 +242,9 @@ PackageResult ProjectPackager::packageProject(
                 fs::path full = output_root / asset_path;
                 if (!fs::exists(full))
                 {
-                    LOG_ENGINE_WARN("[Packager] Referenced asset missing from package: {}", asset_path);
+                    std::string msg = "Referenced asset missing from package: " + asset_path;
+                    LOG_ENGINE_WARN("[Packager] {}", msg);
+                    result.warnings.push_back(msg);
                     ++missing;
                 }
             }
@@ -263,7 +283,9 @@ PackageResult ProjectPackager::packageProject(
                 }
                 else
                 {
-                    LOG_ENGINE_WARN("[Packager] Failed to compile: {}", filename);
+                    std::string msg = "Failed to compile level: " + filename;
+                    LOG_ENGINE_WARN("[Packager] {}", msg);
+                    result.warnings.push_back(msg);
                 }
             }
         }
@@ -302,4 +324,48 @@ PackageResult ProjectPackager::packageProject(
 
     result.success = true;
     return result;
+}
+
+std::vector<std::string> ProjectPackager::validateBeforePackage(
+    const ProjectManager& project_manager,
+    const PackageConfig& config)
+{
+    std::vector<std::string> warnings;
+
+    if (!project_manager.isLoaded())
+        return warnings;
+
+    const auto& desc = project_manager.getDescriptor();
+    const fs::path project_root = project_manager.getProjectRoot();
+
+    // Check game module DLL
+    std::string module_path = project_manager.getAbsoluteModulePath();
+    if (!module_path.empty() && !fs::exists(module_path))
+        warnings.push_back("Game module DLL not found: " + module_path);
+
+    // Check asset directories
+    for (const auto& asset_dir : desc.asset_directories)
+    {
+        fs::path src = project_root / asset_dir;
+        if (!fs::exists(src))
+            warnings.push_back("Asset directory not found: " + src.string());
+    }
+
+    // Check default level
+    if (!desc.default_level.empty())
+    {
+        fs::path level_path = project_root / desc.default_level;
+        if (!fs::exists(level_path))
+            warnings.push_back("Default level not found: " + desc.default_level);
+    }
+
+    // Check if output already exists
+    if (!config.output_directory.empty() && !config.package_name.empty())
+    {
+        fs::path output_root = fs::path(config.output_directory) / config.package_name;
+        if (fs::exists(output_root))
+            warnings.push_back("Output directory already exists and will be overwritten");
+    }
+
+    return warnings;
 }

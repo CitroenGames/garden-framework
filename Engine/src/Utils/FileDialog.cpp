@@ -5,6 +5,7 @@
 #   include <windows.h>
 #   include <commdlg.h>
 #   include <shlobj.h>
+#   include <shellapi.h>
 #   pragma comment(lib, "comdlg32.lib")
 #   pragma comment(lib, "shell32.lib")
 #   pragma comment(lib, "ole32.lib")
@@ -78,6 +79,11 @@ std::string openFolder(const char* title)
     return std::string(path);
 }
 
+void openFolderInExplorer(const std::string& path)
+{
+    ShellExecuteA(nullptr, "open", path.c_str(), nullptr, nullptr, SW_SHOWDEFAULT);
+}
+
 #elif defined(__APPLE__)
 
 // macOS: use osascript (AppleScript) for simplicity without ObjC bridging
@@ -144,6 +150,12 @@ std::string openFolder(const char* title)
     return std::string(buf);
 }
 
+void openFolderInExplorer(const std::string& path)
+{
+    std::string cmd = "open \"" + path + "\"";
+    system(cmd.c_str());
+}
+
 #else
 
 // Linux: use zenity or kdialog
@@ -207,6 +219,12 @@ std::string openFolder(const char* title)
     if (len > 0 && buf[len - 1] == '\n') buf[len - 1] = '\0';
 
     return std::string(buf);
+}
+
+void openFolderInExplorer(const std::string& path)
+{
+    std::string cmd = "xdg-open \"" + path + "\"";
+    system(cmd.c_str());
 }
 
 #endif

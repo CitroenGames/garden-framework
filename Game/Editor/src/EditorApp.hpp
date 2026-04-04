@@ -148,6 +148,13 @@ private:
     bool m_package_compile_levels = false;
     char m_package_output_dir[512] = "";
     char m_package_name[256] = "";
+
+    enum class PackagePhase { Configure, Results };
+    PackagePhase m_package_phase = PackagePhase::Configure;
+    PackageResult m_package_result;
+    std::vector<std::string> m_package_pre_warnings;
+    std::string m_package_output_path;
+
     void renderPackageDialog();
     void executePackageProject();
 

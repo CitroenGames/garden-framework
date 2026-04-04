@@ -19,4 +19,7 @@ ENGINE_API std::string saveFile(const char* title, const char* filter = nullptr)
 // Returns empty string if cancelled.
 ENGINE_API std::string openFolder(const char* title);
 
+// Open a folder in the OS file explorer.
+ENGINE_API void openFolderInExplorer(const std::string& path);
+
 } // namespace FileDialog

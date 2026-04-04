@@ -3,6 +3,7 @@
 #include "EngineExport.h"
 #include "Graphics/RenderAPI.hpp"
 #include <string>
+#include <vector>
 
 class ProjectManager;
 class LevelManager;
@@ -21,6 +22,7 @@ struct ENGINE_API PackageResult
     std::string error_message;
     int files_copied = 0;
     int levels_compiled = 0;
+    std::vector<std::string> warnings;
 };
 
 class ENGINE_API ProjectPackager
@@ -29,5 +31,9 @@ public:
     static PackageResult packageProject(
         const ProjectManager& project_manager,
         LevelManager& level_manager,
+        const PackageConfig& config);
+
+    static std::vector<std::string> validateBeforePackage(
+        const ProjectManager& project_manager,
         const PackageConfig& config);
 };

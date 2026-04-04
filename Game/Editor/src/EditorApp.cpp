@@ -904,6 +904,20 @@ void EditorApp::renderMenuBar()
                     m_project_manager.getDescriptor().name.c_str(),
                     sizeof(m_package_name) - 1);
                 m_package_name[sizeof(m_package_name) - 1] = '\0';
+
+                // Load last output directory from ConVar if empty
+                if (m_package_output_dir[0] == '\0')
+                {
+                    std::string last_dir = CVAR_STRING(editor_package_output_dir);
+                    if (!last_dir.empty())
+                        std::strncpy(m_package_output_dir, last_dir.c_str(), sizeof(m_package_output_dir) - 1);
+                }
+
+                m_package_phase = PackagePhase::Configure;
+                m_package_result = {};
+                m_package_pre_warnings = ProjectPackager::validateBeforePackage(
+                    m_project_manager, PackageConfig{m_package_output_dir, m_package_name,
+                        m_package_compile_levels, m_app.getAPIType()});
                 m_show_package_dialog = true;
             }
 
@@ -1047,56 +1061,133 @@ void EditorApp::renderPackageDialog()
 {
     if (!m_show_package_dialog) return;
 
-    ImGui::SetNextWindowSize(ImVec2(520.0f, 230.0f), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(520.0f, 330.0f), ImGuiCond_Always);
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
 
     if (ImGui::Begin("Package Project##dialog", &m_show_package_dialog,
                      ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDocking))
     {
-        ImGui::Text("Output Directory:");
-        ImGui::SetNextItemWidth(-80.0f);
-        ImGui::InputText("##pkg_output", m_package_output_dir, sizeof(m_package_output_dir));
-        ImGui::SameLine();
-        if (ImGui::Button("Browse..."))
+        if (m_package_phase == PackagePhase::Configure)
         {
-            std::string folder = FileDialog::openFolder("Select Output Directory");
-            if (!folder.empty())
-                std::strncpy(m_package_output_dir, folder.c_str(), sizeof(m_package_output_dir) - 1);
+            // --- Configure Phase ---
+            ImGui::Text("Output Directory:");
+            ImGui::SetNextItemWidth(-80.0f);
+            ImGui::InputText("##pkg_output", m_package_output_dir, sizeof(m_package_output_dir));
+            ImGui::SameLine();
+            if (ImGui::Button("Browse..."))
+            {
+                std::string folder = FileDialog::openFolder("Select Output Directory");
+                if (!folder.empty())
+                {
+                    std::strncpy(m_package_output_dir, folder.c_str(), sizeof(m_package_output_dir) - 1);
+                    // Re-run pre-validation after directory change
+                    m_package_pre_warnings = ProjectPackager::validateBeforePackage(
+                        m_project_manager, PackageConfig{m_package_output_dir, m_package_name,
+                            m_package_compile_levels, m_app.getAPIType()});
+                }
+            }
+
+            ImGui::Text("Package Name:");
+            ImGui::SetNextItemWidth(-1.0f);
+            ImGui::InputText("##pkg_name", m_package_name, sizeof(m_package_name));
+
+            ImGui::Checkbox("Compile levels to binary", &m_package_compile_levels);
+
+            // Show current render API
+            const char* api_name = "Unknown";
+            switch (m_app.getAPIType())
+            {
+            case RenderAPIType::D3D11:  api_name = "Direct3D 11"; break;
+            case RenderAPIType::Vulkan: api_name = "Vulkan"; break;
+            case RenderAPIType::Metal:  api_name = "Metal"; break;
+            default: break;
+            }
+            ImGui::TextDisabled("Shaders: %s", api_name);
+
+            // Pre-validation warnings
+            if (!m_package_pre_warnings.empty())
+            {
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+                for (const auto& warning : m_package_pre_warnings)
+                    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "! %s", warning.c_str());
+            }
+
+            ImGui::Spacing();
+
+            bool can_package = m_package_output_dir[0] != '\0' && m_package_name[0] != '\0';
+            if (!can_package) ImGui::BeginDisabled();
+
+            if (ImGui::Button("Package", ImVec2(100.0f, 0.0f)))
+            {
+                executePackageProject();
+                m_package_phase = PackagePhase::Results;
+            }
+
+            if (!can_package) ImGui::EndDisabled();
+
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(100.0f, 0.0f)))
+                m_show_package_dialog = false;
         }
-
-        ImGui::Text("Package Name:");
-        ImGui::SetNextItemWidth(-1.0f);
-        ImGui::InputText("##pkg_name", m_package_name, sizeof(m_package_name));
-
-        ImGui::Checkbox("Compile levels to binary", &m_package_compile_levels);
-
-        // Show current render API
-        const char* api_name = "Unknown";
-        switch (m_app.getAPIType())
+        else
         {
-        case RenderAPIType::D3D11:  api_name = "Direct3D 11"; break;
-        case RenderAPIType::Vulkan: api_name = "Vulkan"; break;
-        case RenderAPIType::Metal:  api_name = "Metal"; break;
-        default: break;
+            // --- Results Phase ---
+            if (m_package_result.success)
+            {
+                ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "Package Complete!");
+                ImGui::Spacing();
+                ImGui::Text("Files copied: %d", m_package_result.files_copied);
+                if (m_package_result.levels_compiled > 0)
+                    ImGui::Text("Levels compiled: %d", m_package_result.levels_compiled);
+
+                ImGui::Spacing();
+                ImGui::Text("Output:");
+                ImGui::SameLine();
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.7f, 0.7f, 0.7f, 1.0f));
+                ImGui::TextWrapped("%s", m_package_output_path.c_str());
+                ImGui::PopStyleColor();
+            }
+            else
+            {
+                ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Packaging Failed");
+                ImGui::Spacing();
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.4f, 0.4f, 1.0f));
+                ImGui::TextWrapped("%s", m_package_result.error_message.c_str());
+                ImGui::PopStyleColor();
+            }
+
+            // Show warnings if any
+            if (!m_package_result.warnings.empty())
+            {
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+                ImGui::Text("Warnings (%d):", (int)m_package_result.warnings.size());
+                ImGui::BeginChild("##pkg_warnings", ImVec2(0, 80), true);
+                for (const auto& warning : m_package_result.warnings)
+                    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "! %s", warning.c_str());
+                ImGui::EndChild();
+            }
+
+            ImGui::Spacing();
+
+            // Action buttons
+            if (m_package_result.success)
+            {
+                if (ImGui::Button("Open Output Folder", ImVec2(160.0f, 0.0f)))
+                    FileDialog::openFolderInExplorer(m_package_output_path);
+                ImGui::SameLine();
+            }
+
+            if (ImGui::Button("Package Again", ImVec2(120.0f, 0.0f)))
+                m_package_phase = PackagePhase::Configure;
+
+            ImGui::SameLine();
+            if (ImGui::Button("Close", ImVec2(80.0f, 0.0f)))
+                m_show_package_dialog = false;
         }
-        ImGui::TextDisabled("Shaders: %s", api_name);
-
-        ImGui::Spacing();
-
-        bool can_package = m_package_output_dir[0] != '\0' && m_package_name[0] != '\0';
-        if (!can_package) ImGui::BeginDisabled();
-
-        if (ImGui::Button("Package", ImVec2(100.0f, 0.0f)))
-        {
-            executePackageProject();
-            m_show_package_dialog = false;
-        }
-
-        if (!can_package) ImGui::EndDisabled();
-
-        ImGui::SameLine();
-        if (ImGui::Button("Cancel", ImVec2(100.0f, 0.0f)))
-            m_show_package_dialog = false;
     }
     ImGui::End();
 }
@@ -1109,11 +1200,17 @@ void EditorApp::executePackageProject()
     config.compile_levels_to_binary = m_package_compile_levels;
     config.target_render_api = m_app.getAPIType();
 
-    PackageResult result = ProjectPackager::packageProject(
+    m_package_output_path = (std::filesystem::path(config.output_directory) / config.package_name).string();
+
+    m_package_result = ProjectPackager::packageProject(
         m_project_manager, m_level_manager, config);
 
-    if (!result.success)
-        LOG_ENGINE_ERROR("[Packager] Failed: {}", result.error_message);
+    // Persist the output directory
+    if (auto* cvar = CVAR_PTR(editor_package_output_dir))
+        cvar->setString(m_package_output_dir);
+
+    if (!m_package_result.success)
+        LOG_ENGINE_ERROR("[Packager] Failed: {}", m_package_result.error_message);
 }
 
 void EditorApp::renderGrid()
