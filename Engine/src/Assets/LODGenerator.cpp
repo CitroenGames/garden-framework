@@ -1,6 +1,6 @@
 #include "LODGenerator.hpp"
+#include "Utils/Log.hpp"
 #include "meshoptimizer.h"
-#include <cstdio>
 #include <cstring>
 
 namespace Assets {
@@ -45,7 +45,7 @@ LODGenerationResult LODGenerator::generate(const LODGenerationInput& input)
         meshopt_remapVertexBuffer(base_vertices.data(), input.vertices, total_verts, vertex_size, remap.data());
         meshopt_remapIndexBuffer(base_indices.data(), nullptr, total_verts, remap.data());
 
-        printf("LODGenerator: Deduplicated %zu -> %zu vertices\n", total_verts, unique_count);
+        LOG_ENGINE_INFO("LODGenerator: Deduplicated {} -> {} vertices", total_verts, unique_count);
     }
 
     // Step 2: Optimize LOD0 (vertex cache, overdraw, vertex fetch)
@@ -86,6 +86,14 @@ LODGenerationResult LODGenerator::generate(const LODGenerationInput& input)
     // Step 3: Generate simplified LOD levels
     float scale = meshopt_simplifyScale(&base_vertices[0].vx, base_vertices.size(), position_stride);
 
+    LOG_ENGINE_INFO("LODGenerator: Config - error_threshold={:.6f}, lock_borders={}, collapse_seams={}, prune={}",
+                    input.config.target_error_threshold,
+                    input.config.lock_borders,
+                    input.config.allow_attribute_collapse,
+                    input.config.prune_disconnected);
+    LOG_ENGINE_INFO("LODGenerator: Base mesh - {} verts, {} indices ({} tris), scale={:.6f}",
+                    base_vertices.size(), base_indices.size(), base_indices.size() / 3, scale);
+
     for (int i = 1; i < input.config.max_lod_levels; ++i)
     {
         if (i >= static_cast<int>(input.config.target_ratios.size()))
@@ -105,6 +113,13 @@ LODGenerationResult LODGenerator::generate(const LODGenerationInput& input)
         unsigned int options = 0;
         if (input.config.lock_borders)
             options |= meshopt_SimplifyLockBorder;
+        if (input.config.allow_attribute_collapse)
+            options |= meshopt_SimplifyPermissive;
+        if (input.config.prune_disconnected)
+            options |= meshopt_SimplifyPrune;
+
+        LOG_ENGINE_INFO("LODGenerator: LOD{} - target ratio={:.0f}%, target indices={} (of {}), error limit={:.6f}, options=0x{:x}",
+                        i, target_ratio * 100.0f, target_index_count, base_indices.size(), target_error, options);
 
         size_t simplified_count = meshopt_simplify(
             simplified_indices.data(),
@@ -113,19 +128,37 @@ LODGenerationResult LODGenerator::generate(const LODGenerationInput& input)
             target_index_count, target_error, options, &result_error
         );
 
+        float achieved_pct = 100.0f * static_cast<float>(simplified_count) / static_cast<float>(base_indices.size());
+
+        LOG_ENGINE_INFO("LODGenerator: LOD{} - meshopt returned {} indices ({:.1f}% of base), error={:.6f} (relative), {:.6f} (absolute)",
+                        i, simplified_count, achieved_pct, result_error, result_error * scale);
+
         if (simplified_count == 0)
         {
-            printf("LODGenerator: LOD%d simplification produced 0 indices, stopping\n", i);
+            LOG_ENGINE_WARN("LODGenerator: LOD{} produced 0 indices, stopping", i);
             break;
+        }
+
+        if (simplified_count >= base_indices.size())
+        {
+            LOG_ENGINE_WARN("LODGenerator: LOD{} - no reduction! Error budget ({:.6f}) is too tight for this mesh", i, target_error);
+        }
+        else if (achieved_pct > target_ratio * 100.0f + 5.0f)
+        {
+            LOG_ENGINE_WARN("LODGenerator: LOD{} - achieved {:.1f}% but target was {:.0f}%. Error threshold ({:.6f}) is limiting simplification",
+                            i, achieved_pct, target_ratio * 100.0f, target_error);
+            if (!input.config.allow_attribute_collapse)
+                LOG_ENGINE_WARN("LODGenerator: LOD{} - try enabling 'Collapse Across Seams' for more aggressive reduction", i);
+            else
+                LOG_ENGINE_WARN("LODGenerator: LOD{} - try increasing the Quality (error threshold) value", i);
         }
 
         simplified_indices.resize(simplified_count);
 
         // Compact the vertex buffer for this LOD level
-        // Build a remap from old indices to new compacted indices
         std::vector<uint32_t> vertex_remap(base_vertices.size(), UINT32_MAX);
         std::vector<vertex> compact_vertices;
-        compact_vertices.reserve(simplified_count); // upper bound
+        compact_vertices.reserve(simplified_count);
 
         for (size_t j = 0; j < simplified_count; ++j)
         {
@@ -146,14 +179,14 @@ LODGenerationResult LODGenerator::generate(const LODGenerationInput& input)
         lod.achieved_error = result_error * scale;
         lod.achieved_ratio = achieved_ratio;
 
-        printf("LODGenerator: LOD%d - %zu indices (%zu tris), ratio=%.2f, error=%.6f\n",
-               i, lod.indices.size(), lod.indices.size() / 3, achieved_ratio, result_error * scale);
+        LOG_ENGINE_INFO("LODGenerator: LOD{} result - {} tris, {} verts, ratio={:.2f}, error={:.6f}",
+                        i, lod.indices.size() / 3, lod.vertices.size(), achieved_ratio, lod.achieved_error);
 
         result.lod_meshes.push_back(std::move(lod));
     }
 
     result.success = true;
-    printf("LODGenerator: Generated %zu LOD levels\n", result.lod_meshes.size());
+    LOG_ENGINE_INFO("LODGenerator: Generated {} LOD levels", result.lod_meshes.size());
     return result;
 }
 

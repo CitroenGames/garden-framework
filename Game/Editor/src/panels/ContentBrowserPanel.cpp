@@ -4,6 +4,55 @@
 
 namespace fs = std::filesystem;
 
+// ── Navigation ──────────────────────────────────────────────────────────────
+
+void ContentBrowserPanel::navigateTo(const fs::path& dir)
+{
+    if (dir == m_current_dir) return;
+
+    if (!m_nav_suppress_history)
+    {
+        // Trim forward history
+        if (m_nav_history_index >= 0 && m_nav_history_index < (int)m_nav_history.size() - 1)
+            m_nav_history.erase(m_nav_history.begin() + m_nav_history_index + 1, m_nav_history.end());
+
+        m_nav_history.push_back(dir);
+        m_nav_history_index = (int)m_nav_history.size() - 1;
+
+        if (m_nav_history.size() > 50)
+        {
+            m_nav_history.erase(m_nav_history.begin());
+            m_nav_history_index--;
+        }
+    }
+
+    m_current_dir = dir;
+}
+
+void ContentBrowserPanel::navigateBack()
+{
+    if (m_nav_history_index > 0)
+    {
+        m_nav_suppress_history = true;
+        m_nav_history_index--;
+        m_current_dir = m_nav_history[m_nav_history_index];
+        m_nav_suppress_history = false;
+    }
+}
+
+void ContentBrowserPanel::navigateForward()
+{
+    if (m_nav_history_index < (int)m_nav_history.size() - 1)
+    {
+        m_nav_suppress_history = true;
+        m_nav_history_index++;
+        m_current_dir = m_nav_history[m_nav_history_index];
+        m_nav_suppress_history = false;
+    }
+}
+
+// ── Directory tree ──────────────────────────────────────────────────────────
+
 void ContentBrowserPanel::drawDirectoryTree(const fs::path& dir)
 {
     if (!fs::exists(dir) || !fs::is_directory(dir)) return;
@@ -36,7 +85,7 @@ void ContentBrowserPanel::drawDirectoryTree(const fs::path& dir)
         bool open = ImGui::TreeNodeEx(entry.path().filename().string().c_str(), node_flags);
 
         if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen())
-            m_current_dir = entry.path();
+            navigateTo(entry.path());
 
         if (open)
         {
@@ -46,8 +95,23 @@ void ContentBrowserPanel::drawDirectoryTree(const fs::path& dir)
     }
 }
 
-void ContentBrowserPanel::drawBreadcrumbs()
+// ── Breadcrumb bar ──────────────────────────────────────────────────────────
+
+void ContentBrowserPanel::drawBreadcrumbBar()
 {
+    ImVec2 bar_pos = ImGui::GetCursorScreenPos();
+    float bar_height = ImGui::GetFrameHeight();
+    float bar_width = ImGui::GetContentRegionAvail().x;
+    ImDrawList* draw_list = ImGui::GetWindowDrawList();
+
+    // Background bar
+    draw_list->AddRectFilled(
+        bar_pos,
+        ImVec2(bar_pos.x + bar_width, bar_pos.y + bar_height),
+        IM_COL32(22, 21, 19, 255), 2.0f);
+
+    ImGui::SetCursorScreenPos(ImVec2(bar_pos.x + 6.0f, bar_pos.y + 2.0f));
+
     fs::path relative = fs::relative(m_current_dir, m_base_path.parent_path());
     fs::path accumulated = m_base_path.parent_path();
 
@@ -57,7 +121,7 @@ void ContentBrowserPanel::drawBreadcrumbs()
         if (!first)
         {
             ImGui::SameLine(0, 2.0f);
-            ImGui::TextDisabled("/");
+            ImGui::TextDisabled(">");
             ImGui::SameLine(0, 2.0f);
         }
         first = false;
@@ -65,13 +129,42 @@ void ContentBrowserPanel::drawBreadcrumbs()
         accumulated /= part;
         fs::path target = accumulated;
 
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.25f, 0.24f, 0.22f, 1.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 2.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4.0f, 1.0f));
+
         if (ImGui::SmallButton(part.string().c_str()))
         {
             if (fs::exists(target) && fs::is_directory(target))
-                m_current_dir = target;
+                navigateTo(target);
         }
+
+        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor(2);
     }
+
+    // Reserve bar height
+    ImGui::SetCursorScreenPos(ImVec2(bar_pos.x, bar_pos.y + bar_height + 2.0f));
 }
+
+// ── Status bar (bottom of file area) ────────────────────────────────────────
+
+void ContentBrowserPanel::drawStatusBar()
+{
+    ImGui::Separator();
+
+    ImGui::Text("%d items", m_visible_item_count);
+
+    // Right-align the thumbnail slider
+    float slider_width = 120.0f;
+    float avail = ImGui::GetContentRegionAvail().x;
+    ImGui::SameLine(avail - slider_width + ImGui::GetCursorPosX());
+    ImGui::SetNextItemWidth(slider_width);
+    ImGui::SliderFloat("##thumb_size", &m_thumbnail_size, 48.0f, 160.0f, "%.0fpx");
+}
+
+// ── Icons ───────────────────────────────────────────────────────────────────
 
 void ContentBrowserPanel::drawFileIcon(ImDrawList* draw_list, ImVec2 center, float size, const fs::path& path) const
 {
@@ -133,6 +226,8 @@ void ContentBrowserPanel::drawFileIcon(ImDrawList* draw_list, ImVec2 center, flo
     }
 }
 
+// ── Colors ──────────────────────────────────────────────────────────────────
+
 ImVec4 ContentBrowserPanel::getFileColor(const fs::path& path) const
 {
     if (fs::is_directory(path)) return ImVec4(1.0f, 0.9f, 0.3f, 1.0f);
@@ -148,6 +243,8 @@ ImVec4 ContentBrowserPanel::getFileColor(const fs::path& path) const
 
     return ImVec4(0.6f, 0.6f, 0.6f, 1.0f);
 }
+
+// ── Filtering ───────────────────────────────────────────────────────────────
 
 bool ContentBrowserPanel::passesFilter(const fs::path& path) const
 {
@@ -171,11 +268,27 @@ bool ContentBrowserPanel::passesFilter(const fs::path& path) const
     }
 }
 
+bool ContentBrowserPanel::passesSearchFilter(const fs::path& path) const
+{
+    if (m_search_buf[0] == '\0') return true;
+
+    std::string filename = path.filename().string();
+    std::string search = m_search_buf;
+
+    // Case-insensitive substring match
+    std::transform(filename.begin(), filename.end(), filename.begin(), ::tolower);
+    std::transform(search.begin(), search.end(), search.begin(), ::tolower);
+
+    return filename.find(search) != std::string::npos;
+}
+
+// ── File actions & helpers ──────────────────────────────────────────────────
+
 void ContentBrowserPanel::handleFileAction(const fs::path& path)
 {
     if (fs::is_directory(path))
     {
-        m_current_dir = path;
+        navigateTo(path);
     }
     else
     {
@@ -202,7 +315,6 @@ bool ContentBrowserPanel::isGeneratedFile(const fs::path& path) const
     if (ext == ".lodbin") return true;
     if (ext == ".meta") return true;
 
-    // Also check for .gltf.meta, .obj.meta pattern
     std::string filename = path.filename().string();
     if (filename.size() > 5 && filename.substr(filename.size() - 5) == ".meta")
         return true;
@@ -217,6 +329,24 @@ bool ContentBrowserPanel::isMeshFile(const fs::path& path) const
     return ext == ".gltf" || ext == ".glb" || ext == ".obj";
 }
 
+bool ContentBrowserPanel::isTextureFile(const fs::path& path) const
+{
+    std::string ext = path.extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+    return ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" || ext == ".tga";
+}
+
+std::string ContentBrowserPanel::formatFileSize(uintmax_t bytes)
+{
+    if (bytes < 1024) return std::to_string(bytes) + " B";
+    if (bytes < 1048576) return std::to_string(bytes / 1024) + " KB";
+    uintmax_t mb_whole = bytes / 1048576;
+    uintmax_t mb_frac = (bytes % 1048576) * 10 / 1048576;
+    return std::to_string(mb_whole) + "." + std::to_string(mb_frac) + " MB";
+}
+
+// ── Metadata display ────────────────────────────────────────────────────────
+
 void ContentBrowserPanel::drawMetadataStatusDot(ImDrawList* draw_list, ImVec2 pos, const fs::path& path) const
 {
     if (!isMeshFile(path)) return;
@@ -226,9 +356,9 @@ void ContentBrowserPanel::drawMetadataStatusDot(ImDrawList* draw_list, ImVec2 po
 
     ImU32 dot_color;
     if (fs::exists(meta_path))
-        dot_color = IM_COL32(80, 220, 80, 255);  // Green: meta exists
+        dot_color = IM_COL32(80, 220, 80, 255);
     else
-        dot_color = IM_COL32(220, 180, 40, 255);  // Yellow: no meta
+        dot_color = IM_COL32(220, 180, 40, 255);
 
     draw_list->AddCircleFilled(pos, 4.0f, dot_color);
 }
@@ -246,11 +376,9 @@ void ContentBrowserPanel::drawMetadataInfo()
     ImGui::SameLine(0, 16.0f);
     ImGui::Text("Triangles: %zu", meta.triangle_count);
 
-    // AABB
     glm::vec3 size = meta.aabb_max - meta.aabb_min;
     ImGui::Text("AABB: %.1f x %.1f x %.1f", size.x, size.y, size.z);
 
-    // LOD levels
     if (!meta.lod_levels.empty())
     {
         ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "LOD Levels: %zu", meta.lod_levels.size());
@@ -317,12 +445,127 @@ void ContentBrowserPanel::drawContextMenu(const fs::path& path)
     }
 }
 
+// ── Asset tooltip ───────────────────────────────────────────────────────────
+
+void ContentBrowserPanel::drawAssetTooltip(const fs::path& path)
+{
+    // Cache tooltip data (only reload when hovered path changes)
+    if (m_tooltip_path != path)
+    {
+        m_tooltip_path = path;
+        m_tooltip_cache = {};
+        m_tooltip_cache.loaded = true;
+
+        // File size
+        if (fs::exists(path) && fs::is_regular_file(path))
+            m_tooltip_cache.file_size_str = formatFileSize(fs::file_size(path));
+
+        // File type
+        std::string ext = path.extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+
+        if (isMeshFile(path))
+        {
+            m_tooltip_cache.file_type = "3D Model (" + ext + ")";
+            std::string meta_path = Assets::AssetMetadataSerializer::getMetaPath(path.string());
+            Assets::AssetMetadata meta;
+            if (Assets::AssetMetadataSerializer::load(meta, meta_path))
+            {
+                m_tooltip_cache.has_metadata = true;
+                m_tooltip_cache.vertex_count = meta.vertex_count;
+                m_tooltip_cache.triangle_count = meta.triangle_count;
+                m_tooltip_cache.lod_count = meta.lod_levels.size();
+            }
+        }
+        else if (isTextureFile(path))
+        {
+            m_tooltip_cache.file_type = "Texture (" + ext + ")";
+        }
+        else if (path.string().find(".level.json") != std::string::npos)
+        {
+            m_tooltip_cache.file_type = "Level";
+        }
+        else if (ext == ".vert" || ext == ".frag" || ext == ".hlsl" || ext == ".metal" || ext == ".spv" || ext == ".glsl")
+        {
+            m_tooltip_cache.file_type = "Shader (" + ext + ")";
+        }
+        else
+        {
+            m_tooltip_cache.file_type = ext.empty() ? "File" : ext.substr(1) + " file";
+        }
+    }
+
+    ImGui::BeginTooltip();
+    ImGui::PushTextWrapPos(300.0f);
+
+    ImGui::TextColored(ImVec4(0.88f, 0.88f, 0.88f, 1.0f), "%s", path.filename().string().c_str());
+    ImGui::Separator();
+    ImGui::TextDisabled("Type: %s", m_tooltip_cache.file_type.c_str());
+    if (!m_tooltip_cache.file_size_str.empty())
+        ImGui::TextDisabled("Size: %s", m_tooltip_cache.file_size_str.c_str());
+
+    if (m_tooltip_cache.has_metadata)
+    {
+        ImGui::Spacing();
+        ImGui::Text("Vertices: %zu", m_tooltip_cache.vertex_count);
+        ImGui::Text("Triangles: %zu", m_tooltip_cache.triangle_count);
+        if (m_tooltip_cache.lod_count > 0)
+            ImGui::Text("LOD Levels: %zu", m_tooltip_cache.lod_count);
+    }
+
+    ImGui::PopTextWrapPos();
+    ImGui::EndTooltip();
+}
+
+// ── Main draw ───────────────────────────────────────────────────────────────
+
 void ContentBrowserPanel::draw()
 {
+    // Seed navigation history on first draw
+    if (m_nav_history.empty())
+    {
+        m_nav_history.push_back(m_current_dir);
+        m_nav_history_index = 0;
+    }
+
     ImGui::Begin("Content Browser");
 
-    // --- Header: filter + view toggle + breadcrumbs ---
-    ImGui::SetNextItemWidth(120.0f);
+    // === Top toolbar row ===
+
+    // Back/Forward buttons
+    {
+        bool can_back = m_nav_history_index > 0;
+        bool can_fwd = m_nav_history_index < (int)m_nav_history.size() - 1;
+
+        if (!can_back) ImGui::BeginDisabled();
+        if (ImGui::SmallButton("<")) navigateBack();
+        if (!can_back) ImGui::EndDisabled();
+        ImGui::SameLine(0, 2.0f);
+
+        if (!can_fwd) ImGui::BeginDisabled();
+        if (ImGui::SmallButton(">")) navigateForward();
+        if (!can_fwd) ImGui::EndDisabled();
+        ImGui::SameLine(0, 8.0f);
+    }
+
+    // Sources toggle
+    {
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.0f);
+        if (m_show_sources)
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.4f, 0.68f, 1.0f));
+        else
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.19f, 0.17f, 1.0f));
+
+        if (ImGui::SmallButton("Sources"))
+            m_show_sources = !m_show_sources;
+
+        ImGui::PopStyleColor();
+        ImGui::PopStyleVar();
+        ImGui::SameLine(0, 8.0f);
+    }
+
+    // Filter dropdown
+    ImGui::SetNextItemWidth(100.0f);
     const char* filter_items[] = { "All", "Levels", "Models", "Textures", "Shaders" };
     ImGui::Combo("##filter", &m_filter_mode, filter_items, 5);
     ImGui::SameLine();
@@ -347,33 +590,47 @@ void ContentBrowserPanel::draw()
 
         ImGui::PopStyleVar();
     }
-    ImGui::SameLine();
 
-    drawBreadcrumbs();
+    // === Breadcrumb bar (full width) ===
+    drawBreadcrumbBar();
 
     ImGui::Separator();
 
-    // --- Two-pane layout ---
+    // === Two-pane layout ===
     float tree_width = 180.0f;
 
-    // Left pane: directory tree
-    ImGui::BeginChild("DirTree", ImVec2(tree_width, 0), true);
-    ImGuiTreeNodeFlags root_flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_SpanAvailWidth;
-    if (m_current_dir == m_base_path) root_flags |= ImGuiTreeNodeFlags_Selected;
-    bool root_open = ImGui::TreeNodeEx("assets", root_flags);
-    if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen())
-        m_current_dir = m_base_path;
-    if (root_open)
+    // Left pane: directory tree (collapsible)
+    if (m_show_sources)
     {
-        drawDirectoryTree(m_base_path);
-        ImGui::TreePop();
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.11f, 0.10f, 0.09f, 1.0f));
+        ImGui::BeginChild("DirTree", ImVec2(tree_width, 0), true);
+        ImGuiTreeNodeFlags root_flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_SpanAvailWidth;
+        if (m_current_dir == m_base_path) root_flags |= ImGuiTreeNodeFlags_Selected;
+        bool root_open = ImGui::TreeNodeEx("assets", root_flags);
+        if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen())
+            navigateTo(m_base_path);
+        if (root_open)
+        {
+            drawDirectoryTree(m_base_path);
+            ImGui::TreePop();
+        }
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+
+        ImGui::SameLine();
     }
-    ImGui::EndChild();
 
-    ImGui::SameLine();
-
-    // Right pane: file grid or list + metadata info
+    // Right pane: file area
     ImGui::BeginChild("FileGrid", ImVec2(0, 0), true);
+
+    // Search bar
+    ImGui::SetNextItemWidth(-1.0f);
+    ImGui::InputTextWithHint("##search", "Search assets...", m_search_buf, sizeof(m_search_buf));
+    ImGui::Spacing();
+
+    // File area (with room for status bar at bottom)
+    float status_bar_height = ImGui::GetFrameHeightWithSpacing() + 4.0f;
+    ImGui::BeginChild("FileArea", ImVec2(0, -status_bar_height - (m_has_selected_metadata ? 140.0f : 0.0f)), false);
 
     if (fs::exists(m_current_dir) && fs::is_directory(m_current_dir))
     {
@@ -381,6 +638,7 @@ void ContentBrowserPanel::draw()
         for (const auto& entry : fs::directory_iterator(m_current_dir))
         {
             if (!passesFilter(entry.path())) continue;
+            if (!passesSearchFilter(entry.path())) continue;
             if (entry.is_directory()) dirs.push_back(entry);
             else files.push_back(entry);
         }
@@ -396,6 +654,8 @@ void ContentBrowserPanel::draw()
             all_items.push_back(m_current_dir.parent_path());
         for (const auto& d : dirs) all_items.push_back(d.path());
         for (const auto& f : files) all_items.push_back(f.path());
+
+        m_visible_item_count = (int)all_items.size();
 
         if (m_grid_view)
         {
@@ -423,25 +683,84 @@ void ContentBrowserPanel::draw()
 
                     if (ImGui::InvisibleButton("##card", card_size))
                     {
-                        // Single click on mesh: select it and show metadata
                         if (!is_back && isMeshFile(item))
                         {
                             m_selected_mesh = item;
                             std::string meta_path = Assets::AssetMetadataSerializer::getMetaPath(item.string());
                             m_has_selected_metadata = Assets::AssetMetadataSerializer::load(m_selected_metadata, meta_path);
+
+                            if (on_preview_mesh)
+                            {
+                                std::string p = item.string();
+                                std::replace(p.begin(), p.end(), '\\', '/');
+                                on_preview_mesh(p);
+                            }
                         }
                     }
+
+                    // Drag source for mesh files
+                    if (!is_back && isMeshFile(item) && ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
+                    {
+                        std::string path_str = item.string();
+                        std::replace(path_str.begin(), path_str.end(), '\\', '/');
+                        ImGui::SetDragDropPayload("ASSET_MESH_PATH", path_str.c_str(), path_str.size() + 1);
+                        ImVec4 fc = getFileColor(item);
+                        ImGui::TextColored(fc, "[M]");
+                        ImGui::SameLine();
+                        ImGui::Text("%s", item.filename().string().c_str());
+                        ImGui::EndDragDropSource();
+                    }
+
                     bool hovered = ImGui::IsItemHovered();
                     bool double_clicked = hovered && ImGui::IsMouseDoubleClicked(0);
+
+                    // Asset tooltip on hover (with delay)
+                    if (!is_back && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
+                        drawAssetTooltip(item);
 
                     // Right-click context menu for mesh files
                     if (!is_back)
                         drawContextMenu(item);
 
-                    ImU32 bg_col = hovered ? IM_COL32(50, 50, 50, 255) : IM_COL32(35, 35, 35, 255);
-                    draw_list->AddRectFilled(card_pos, ImVec2(card_pos.x + card_size.x, card_pos.y + card_size.y),
-                                             bg_col, 4.0f);
+                    bool is_card_selected = (!is_back && isMeshFile(item) && m_selected_mesh == item);
 
+                    // Card background
+                    ImVec2 card_max(card_pos.x + card_size.x, card_pos.y + card_size.y);
+                    if (is_card_selected)
+                    {
+                        draw_list->AddRectFilled(card_pos, card_max, IM_COL32(38, 38, 42, 255), 3.0f);
+                    }
+                    else
+                    {
+                        ImU32 bg_col = hovered ? IM_COL32(52, 52, 56, 255) : IM_COL32(30, 30, 33, 255);
+                        draw_list->AddRectFilled(card_pos, card_max, bg_col, 3.0f);
+                    }
+
+                    // Hover border
+                    if (hovered && !is_card_selected)
+                        draw_list->AddRect(card_pos, card_max, IM_COL32(60, 60, 65, 180), 3.0f, 0, 1.0f);
+
+                    // Type-colored bottom strip (4px)
+                    if (!is_back)
+                    {
+                        ImVec4 fc = getFileColor(item);
+                        ImU32 strip_col = IM_COL32((int)(fc.x * 255), (int)(fc.y * 255), (int)(fc.z * 255), 180);
+                        draw_list->AddRectFilled(
+                            ImVec2(card_pos.x, card_max.y - 4.0f), card_max, strip_col, 3.0f,
+                            ImDrawFlags_RoundCornersBottom);
+                    }
+
+                    // Selection glow
+                    if (is_card_selected)
+                    {
+                        draw_list->AddRect(
+                            ImVec2(card_pos.x - 1, card_pos.y - 1),
+                            ImVec2(card_max.x + 1, card_max.y + 1),
+                            IM_COL32(66, 150, 250, 100), 4.0f, 0, 3.0f);
+                        draw_list->AddRect(card_pos, card_max, IM_COL32(66, 150, 250, 220), 3.0f, 0, 1.5f);
+                    }
+
+                    // Icon
                     ImVec2 icon_center(card_pos.x + m_thumbnail_size * 0.5f,
                                        card_pos.y + m_thumbnail_size * 0.4f);
                     float icon_size = m_thumbnail_size * 0.45f;
@@ -464,29 +783,50 @@ void ContentBrowserPanel::draw()
                         drawFileIcon(draw_list, icon_center, icon_size, item);
                     }
 
-                    // Metadata status dot (top-right of card) for mesh files
+                    // Metadata status dot
                     if (!is_back && isMeshFile(item))
                     {
                         drawMetadataStatusDot(draw_list,
                             ImVec2(card_pos.x + card_size.x - 8.0f, card_pos.y + 8.0f), item);
                     }
 
-                    // Filename
-                    float text_y = card_pos.y + m_thumbnail_size - 4.0f;
-                    float text_max_w = m_thumbnail_size - 4.0f;
-                    ImVec2 text_pos(card_pos.x + 2.0f, text_y);
+                    // Filename with ellipsis truncation
+                    {
+                        float text_y = card_pos.y + m_thumbnail_size - 4.0f;
+                        float text_max_w = m_thumbnail_size - 6.0f;
+                        ImVec2 text_pos(card_pos.x + 3.0f, text_y);
 
-                    draw_list->PushClipRect(text_pos, ImVec2(text_pos.x + text_max_w, text_pos.y + 18.0f), true);
-                    ImVec4 text_color4 = is_back ? ImVec4(1.0f, 0.9f, 0.3f, 1.0f) : getFileColor(item);
-                    ImU32 text_col = IM_COL32((int)(text_color4.x * 255), (int)(text_color4.y * 255),
-                                              (int)(text_color4.z * 255), 255);
-                    draw_list->AddText(text_pos, text_col, filename.c_str());
-                    draw_list->PopClipRect();
+                        ImU32 text_col = is_back ? IM_COL32(255, 230, 77, 255) : IM_COL32(210, 210, 210, 255);
+
+                        ImVec2 text_size = ImGui::CalcTextSize(filename.c_str());
+                        if (text_size.x > text_max_w)
+                        {
+                            // Truncate with ellipsis
+                            float ellipsis_w = ImGui::CalcTextSize("...").x;
+                            float avail = text_max_w - ellipsis_w;
+                            // Binary search for truncation point using CalcTextSize
+                            int truncate_at = 0;
+                            for (int c = 1; c <= (int)filename.size(); c++)
+                            {
+                                float w = ImGui::CalcTextSize(filename.c_str(), filename.c_str() + c).x;
+                                if (w > avail) break;
+                                truncate_at = c;
+                            }
+                            std::string truncated = filename.substr(0, truncate_at) + "...";
+                            draw_list->AddText(text_pos, text_col, truncated.c_str());
+                        }
+                        else
+                        {
+                            // Center text
+                            float offset_x = (text_max_w - text_size.x) * 0.5f;
+                            draw_list->AddText(ImVec2(text_pos.x + offset_x, text_y), text_col, filename.c_str());
+                        }
+                    }
 
                     if (double_clicked)
                     {
                         if (is_back)
-                            m_current_dir = m_current_dir.parent_path();
+                            navigateTo(m_current_dir.parent_path());
                         else
                             handleFileAction(item);
                     }
@@ -498,7 +838,7 @@ void ContentBrowserPanel::draw()
         }
         else
         {
-            // --- List view ---
+            // === List view ===
             ImDrawList* draw_list = ImGui::GetWindowDrawList();
 
             for (size_t i = 0; i < all_items.size(); i++)
@@ -526,7 +866,7 @@ void ContentBrowserPanel::draw()
                     drawFileIcon(draw_list, icon_center, 12.0f, item);
                 }
 
-                // Metadata status dot after icon for mesh files
+                // Metadata status dot after icon
                 if (!is_back && isMeshFile(item))
                 {
                     drawMetadataStatusDot(draw_list,
@@ -540,25 +880,48 @@ void ContentBrowserPanel::draw()
                 ImGui::PushStyleColor(ImGuiCol_Text, color);
                 if (ImGui::Selectable(filename.c_str(), false, ImGuiSelectableFlags_AllowDoubleClick))
                 {
-                    // Single click on mesh: select it and show metadata
                     if (!is_back && isMeshFile(item))
                     {
                         m_selected_mesh = item;
                         std::string meta_path = Assets::AssetMetadataSerializer::getMetaPath(item.string());
                         m_has_selected_metadata = Assets::AssetMetadataSerializer::load(m_selected_metadata, meta_path);
+
+                        if (on_preview_mesh)
+                        {
+                            std::string p = item.string();
+                            std::replace(p.begin(), p.end(), '\\', '/');
+                            on_preview_mesh(p);
+                        }
                     }
 
                     if (ImGui::IsMouseDoubleClicked(0))
                     {
                         if (is_back)
-                            m_current_dir = m_current_dir.parent_path();
+                            navigateTo(m_current_dir.parent_path());
                         else
                             handleFileAction(item);
                     }
                 }
+
+                // Asset tooltip
+                if (!is_back && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
+                    drawAssetTooltip(item);
+
+                // Drag source for mesh files
+                if (!is_back && isMeshFile(item) && ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
+                {
+                    std::string path_str = item.string();
+                    std::replace(path_str.begin(), path_str.end(), '\\', '/');
+                    ImGui::SetDragDropPayload("ASSET_MESH_PATH", path_str.c_str(), path_str.size() + 1);
+                    ImVec4 fc = getFileColor(item);
+                    ImGui::TextColored(fc, "[M]");
+                    ImGui::SameLine();
+                    ImGui::Text("%s", item.filename().string().c_str());
+                    ImGui::EndDragDropSource();
+                }
+
                 ImGui::PopStyleColor();
 
-                // Right-click context menu
                 if (!is_back)
                     drawContextMenu(item);
 
@@ -567,10 +930,15 @@ void ContentBrowserPanel::draw()
         }
     }
 
-    // Draw metadata info at bottom when a mesh is selected
+    ImGui::EndChild(); // FileArea
+
+    // Status bar
+    drawStatusBar();
+
+    // Metadata info at bottom
     drawMetadataInfo();
 
-    ImGui::EndChild();
+    ImGui::EndChild(); // FileGrid
 
     ImGui::End();
 }

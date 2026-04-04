@@ -44,8 +44,10 @@ struct AssetMetadata {
     struct LODConfig {
         int max_lod_levels = 4;
         std::vector<float> target_ratios = {1.0f, 0.5f, 0.25f, 0.1f};
-        float target_error_threshold = 0.01f;
+        float target_error_threshold = 0.05f;
         bool lock_borders = false;
+        bool allow_attribute_collapse = false; // meshopt_SimplifyPermissive: collapse across UV seams/hard edges
+        bool prune_disconnected = false;       // meshopt_SimplifyPrune: remove small disconnected parts
     };
     LODConfig lod_config;
 

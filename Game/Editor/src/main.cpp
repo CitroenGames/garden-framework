@@ -1,15 +1,20 @@
 #define SDL_MAIN_HANDLED
 #include "EditorApp.hpp"
+#include "EditorConfig.hpp"
 #include "Graphics/RenderAPI.hpp"
 #include <cstring>
 #include <string>
+#include <optional>
 
-static RenderAPIType parseRenderAPI(int argc, char* argv[])
+// Returns a specific backend if the user passed a CLI flag, or nullopt to use config.
+static std::optional<RenderAPIType> parseRenderAPICLI(int argc, char* argv[])
 {
     for (int i = 1; i < argc; i++)
     {
+#ifndef __APPLE__
         if (strcmp(argv[i], "-vulkan") == 0 || strcmp(argv[i], "--vulkan") == 0)
             return RenderAPIType::Vulkan;
+#endif
 #ifdef _WIN32
         if (strcmp(argv[i], "-d3d11") == 0 || strcmp(argv[i], "--d3d11") == 0 ||
             strcmp(argv[i], "-dx11")  == 0 || strcmp(argv[i], "--dx11")  == 0)
@@ -20,7 +25,7 @@ static RenderAPIType parseRenderAPI(int argc, char* argv[])
             return RenderAPIType::Metal;
 #endif
     }
-    return DefaultRenderAPI;
+    return std::nullopt;
 }
 
 static std::string parseProjectPath(int argc, char* argv[])
@@ -35,10 +40,18 @@ static std::string parseProjectPath(int argc, char* argv[])
 
 int main(int argc, char* argv[])
 {
-    RenderAPIType api_type = parseRenderAPI(argc, argv);
+    // Load persistent editor config (lives next to exe, shared across projects)
+    EditorConfig editor_config;
+    editor_config.load();
+
+    // CLI flags override the saved config
+    auto cli_api = parseRenderAPICLI(argc, argv);
+    RenderAPIType api_type = cli_api.value_or(editor_config.render_backend);
+
     std::string project_path = parseProjectPath(argc, argv);
 
     EditorApp editor;
+    editor.setEditorConfig(&editor_config);
     if (!project_path.empty())
         editor.setProjectPath(project_path);
     if (!editor.initialize(api_type))

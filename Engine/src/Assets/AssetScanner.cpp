@@ -167,7 +167,7 @@ static bool buildAndSaveMetadata(const std::string& asset_path,
 
         LODLevelInfo info;
         info.level = static_cast<int>(i);
-        info.target_ratio = lod.achieved_ratio;
+        info.target_ratio = (i < lod_config.target_ratios.size()) ? lod_config.target_ratios[i] : lod.achieved_ratio;
         info.target_error = lod.achieved_error;
         info.vertex_count = lod.vertices.size();
         info.index_count = lod.indices.size();

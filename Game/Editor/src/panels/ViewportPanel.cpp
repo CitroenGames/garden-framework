@@ -37,7 +37,7 @@ GizmoResult ViewportPanel::draw(ImTextureID scene_texture, EditorState& state,
         ImVec2 p = ImGui::GetCursorScreenPos();
         float w = ImGui::GetContentRegionAvail().x;
         dl->AddLine(ImVec2(p.x, p.y), ImVec2(p.x + w, p.y),
-                    IM_COL32(60, 60, 60, 200), 1.0f);
+                    IM_COL32(50, 46, 40, 180), 1.0f);
     }
 
     // --- Scene image (fills remaining space) ---
@@ -58,6 +58,18 @@ GizmoResult ViewportPanel::draw(ImTextureID scene_texture, EditorState& state,
         ImGui::Image(scene_texture, avail);
         is_hovered = ImGui::IsItemHovered();
         bool image_clicked = ImGui::IsItemClicked(ImGuiMouseButton_Left);
+
+        // Accept mesh asset drops onto the viewport
+        if (!state.isSimulationActive() && ImGui::BeginDragDropTarget())
+        {
+            if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_MESH_PATH"))
+            {
+                std::string mesh_path(static_cast<const char*>(payload->Data));
+                if (on_mesh_dropped)
+                    on_mesh_dropped(mesh_path);
+            }
+            ImGui::EndDragDropTarget();
+        }
 
         // Cache the image rect for gizmo overlay and picking
         m_image_min = ImGui::GetItemRectMin();
@@ -83,7 +95,7 @@ GizmoResult ViewportPanel::draw(ImTextureID scene_texture, EditorState& state,
                 break;
             }
 
-            ImGui::GetWindowDrawList()->AddRect(m_image_min, m_image_max, border_color, 0.0f, 0, 3.0f);
+            ImGui::GetWindowDrawList()->AddRect(m_image_min, m_image_max, border_color, 0.0f, 0, 2.0f);
         }
 
         // --- Draw gizmo over the viewport ---

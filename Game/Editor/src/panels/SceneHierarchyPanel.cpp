@@ -84,11 +84,26 @@ void SceneHierarchyPanel::draw(entt::registry& registry, bool* out_dirty, bool* 
 
     ImGui::Separator();
 
+    // Entity count
+    {
+        size_t count = 0;
+        auto count_view = registry.view<TagComponent>();
+        for (auto e : count_view) { (void)e; count++; }
+        ImGui::TextDisabled("(%zu entities)", count);
+    }
+
     // --- Entity list ---
+    // UE5-style selection highlight
+    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.22f, 0.35f, 0.55f, 0.80f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.26f, 0.40f, 0.60f, 0.80f));
+
     auto view = registry.view<TagComponent>();
 
     entt::entity to_delete = entt::null;
     entt::entity to_duplicate = entt::null;
+    int visible_row = 0;
+
+    ImDrawList* draw_list = ImGui::GetWindowDrawList();
 
     for (auto entity : view)
     {
@@ -101,8 +116,17 @@ void SceneHierarchyPanel::draw(entt::registry& registry, bool* out_dirty, bool* 
         bool is_selected = (entity == selected_entity);
         ImGui::PushID(static_cast<int>(static_cast<uint32_t>(entity)));
 
-        // Entity type icon — draw colored shape via ImDrawList
-        ImDrawList* draw_list = ImGui::GetWindowDrawList();
+        // Alternating row backgrounds
+        if (visible_row % 2 == 1)
+        {
+            ImVec2 row_min = ImGui::GetCursorScreenPos();
+            float row_height = ImGui::GetTextLineHeightWithSpacing();
+            ImVec2 row_max(row_min.x + ImGui::GetContentRegionAvail().x, row_min.y + row_height);
+            draw_list->AddRectFilled(row_min, row_max, IM_COL32(255, 255, 255, 6));
+        }
+        visible_row++;
+
+        // Entity type icon — draw colored shape via ImDrawList (muted UE5 palette)
         ImVec2 icon_pos = ImGui::GetCursorScreenPos();
         float line_h = ImGui::GetTextLineHeight();
         float radius = 5.0f;
@@ -110,40 +134,40 @@ void SceneHierarchyPanel::draw(entt::registry& registry, bool* out_dirty, bool* 
 
         if (registry.all_of<PlayerComponent>(entity))
         {
-            // Filled circle — blue
-            draw_list->AddCircleFilled(center, radius, IM_COL32(77, 128, 255, 255));
+            // Filled circle — soft blue
+            draw_list->AddCircleFilled(center, radius, IM_COL32(100, 140, 230, 255));
         }
         else if (registry.all_of<FreecamComponent>(entity))
         {
-            // Filled triangle — green
+            // Filled triangle — soft green
             draw_list->AddTriangleFilled(
                 ImVec2(center.x, center.y - radius),
                 ImVec2(center.x - radius, center.y + radius * 0.7f),
                 ImVec2(center.x + radius, center.y + radius * 0.7f),
-                IM_COL32(77, 230, 77, 255));
+                IM_COL32(100, 200, 100, 255));
         }
         else if (registry.all_of<RigidBodyComponent>(entity))
         {
-            // Filled square — orange
+            // Filled square — soft orange
             draw_list->AddRectFilled(
                 ImVec2(center.x - radius + 1, center.y - radius + 1),
                 ImVec2(center.x + radius - 1, center.y + radius - 1),
-                IM_COL32(255, 153, 51, 255));
+                IM_COL32(230, 160, 70, 255));
         }
         else if (registry.all_of<MeshComponent>(entity))
         {
-            // Filled diamond — cyan
+            // Filled diamond — soft cyan
             draw_list->AddQuadFilled(
                 ImVec2(center.x, center.y - radius),
                 ImVec2(center.x + radius, center.y),
                 ImVec2(center.x, center.y + radius),
                 ImVec2(center.x - radius, center.y),
-                IM_COL32(77, 230, 230, 255));
+                IM_COL32(100, 200, 200, 255));
         }
         else
         {
-            // Unfilled circle — grey
-            draw_list->AddCircle(center, radius, IM_COL32(128, 128, 128, 255), 0, 1.5f);
+            // Unfilled circle — slightly brighter grey
+            draw_list->AddCircle(center, radius, IM_COL32(110, 110, 110, 255), 0, 1.5f);
         }
 
         ImGui::Dummy(ImVec2(radius * 2.0f + 4.0f, line_h));
@@ -216,6 +240,8 @@ void SceneHierarchyPanel::draw(entt::registry& registry, bool* out_dirty, bool* 
 
         ImGui::PopID();
     }
+
+    ImGui::PopStyleColor(2); // Header, HeaderHovered
 
     // Deferred duplication
     if (registry.valid(to_duplicate))

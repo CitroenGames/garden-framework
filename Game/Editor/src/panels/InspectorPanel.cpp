@@ -1,52 +1,47 @@
 #include "InspectorPanel.hpp"
 #include "Components/Components.hpp"
+#include "Graphics/LODSelector.hpp"
+#include "ImGui/ImGuiManager.hpp"
 #include "imgui.h"
 #include "imgui_internal.h"
 #include <cstring>
 
 bool InspectorPanel::drawComponentHeader(const char* label, bool can_remove, bool* removed, ImVec4 accent_color)
 {
+    (void)accent_color; // UE5 style: no accent bars
+
     ImGui::PushID(label);
 
-    // Slightly tinted header background
-    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.18f, 0.18f, 0.18f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.24f, 0.24f, 0.24f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0.28f, 0.28f, 0.28f, 1.0f));
+    // Full-width darker header bar (UE5 style)
+    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.11f, 0.10f, 0.09f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.16f, 0.15f, 0.13f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0.19f, 0.18f, 0.16f, 1.0f));
 
     bool open = ImGui::CollapsingHeader("##header", ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_AllowOverlap);
 
     ImGui::PopStyleColor(3);
 
-    // Draw accent bar on the left edge of the header
-    ImDrawList* draw_list = ImGui::GetWindowDrawList();
-    ImVec2 h_min = ImGui::GetItemRectMin();
-    ImVec2 h_max = ImGui::GetItemRectMax();
-    ImU32 accent_col = IM_COL32((int)(accent_color.x * 255), (int)(accent_color.y * 255),
-                                (int)(accent_color.z * 255), 255);
-    draw_list->AddRectFilled(h_min, ImVec2(h_min.x + 3.0f, h_max.y), accent_col);
+    bool header_hovered = ImGui::IsItemHovered();
 
-    // Draw colored dot indicator
-    float dot_y = (h_min.y + h_max.y) * 0.5f;
-    draw_list->AddCircleFilled(ImVec2(h_min.x + 14.0f, dot_y), 4.0f, accent_col);
-
-    // Draw label after the dot
+    // Draw label with bold font
     ImGui::SameLine();
-    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 10.0f);
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 4.0f);
+    ImFont* bold = ImGuiManager::get().getBoldFont();
+    if (bold) ImGui::PushFont(bold);
     ImGui::TextUnformatted(label);
+    if (bold) ImGui::PopFont();
 
-    // Remove button on the right — rounded pill style
-    if (can_remove)
+    // Remove button — only visible on hover
+    if (can_remove && header_hovered)
     {
         float avail = ImGui::GetContentRegionAvail().x;
         ImGui::SameLine(avail - 5.0f);
-        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 10.0f);
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.5f, 0.1f, 0.1f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.7f, 0.2f, 0.2f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.6f, 0.0f, 0.0f, 1.0f));
         if (ImGui::SmallButton("X"))
             *removed = true;
         ImGui::PopStyleColor(3);
-        ImGui::PopStyleVar();
     }
 
     ImGui::PopID();
@@ -70,6 +65,14 @@ bool InspectorPanel::draw(entt::registry& registry, entt::entity selected,
         ImGui::End();
         return false;
     }
+
+    // Search/filter bar
+    ImGui::SetNextItemWidth(-1.0f);
+    ImGui::InputTextWithHint("##inspector_filter", "Search components...", m_filter_buf, sizeof(m_filter_buf));
+    ImGui::Spacing();
+
+    // Tighter property spacing inside sections
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6.0f, 2.0f));
 
     // --- Tag (always present, not removable) ---
     if (auto* tag = registry.try_get<TagComponent>(selected))
@@ -128,6 +131,74 @@ bool InspectorPanel::draw(entt::registry& registry, entt::entity selected,
             auto it = mesh_path_cache.find(selected);
             const char* path = (it != mesh_path_cache.end()) ? it->second.c_str() : "(unknown)";
             ImGui::LabelText("Path", "%s", path);
+
+            auto& mc = registry.get<MeshComponent>(selected);
+            if (mc.m_mesh)
+            {
+                if (ImGui::Checkbox("Visible", &mc.m_mesh->visible)) markUnsaved();
+                ImGui::SameLine();
+                if (ImGui::Checkbox("Transparent", &mc.m_mesh->transparent)) markUnsaved();
+                if (ImGui::Checkbox("Casts Shadow", &mc.m_mesh->casts_shadow)) markUnsaved();
+                ImGui::SameLine();
+                if (ImGui::Checkbox("Culling", &mc.m_mesh->culling)) markUnsaved();
+
+                // LOD info and controls (only show when mesh has LOD levels)
+                if (mc.m_mesh->getLODCount() > 1)
+                {
+                    ImGui::TextColored(ImVec4(0.6f, 0.85f, 1.0f, 1.0f), "LOD: %d/%d",
+                        mc.m_mesh->current_lod, mc.m_mesh->getLODCount() - 1);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled(mc.m_mesh->force_lod >= 0 ? "(forced)" : "(auto)");
+                }
+                if (mc.m_mesh->getLODCount() > 1)
+                {
+                    int max_lod = mc.m_mesh->getLODCount() - 1;
+                    const char* preview = "Auto";
+                    char lod_buf[16];
+                    if (mc.m_mesh->force_lod >= 0)
+                    {
+                        snprintf(lod_buf, sizeof(lod_buf), "LOD %d", mc.m_mesh->force_lod);
+                        preview = lod_buf;
+                    }
+                    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.65f);
+                    if (ImGui::BeginCombo("Force LOD", preview))
+                    {
+                        if (ImGui::Selectable("Auto", mc.m_mesh->force_lod == -1))
+                        { mc.m_mesh->force_lod = -1; markUnsaved(); }
+                        for (int i = 0; i <= max_lod; ++i)
+                        {
+                            char label[16];
+                            snprintf(label, sizeof(label), "LOD %d", i);
+                            if (ImGui::Selectable(label, mc.m_mesh->force_lod == i))
+                            { mc.m_mesh->force_lod = i; markUnsaved(); }
+                        }
+                        ImGui::EndCombo();
+                    }
+
+                    // LOD debug: show computed screen coverage and thresholds
+                    auto* t = registry.try_get<TransformComponent>(selected);
+                    if (t && mc.m_mesh->bounds_computed)
+                    {
+                        float coverage = LODSelector::computeScreenCoverage(
+                            debug_cam_pos, t->position,
+                            mc.m_mesh->aabb_min, mc.m_mesh->aabb_max,
+                            debug_projection, t->scale);
+                        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.3f, 1.0f),
+                            "Coverage: %.3f", coverage);
+                        for (int li = 0; li < static_cast<int>(mc.m_mesh->lod_levels.size()); ++li)
+                        {
+                            ImGui::TextDisabled("  LOD%d thr=%.3f gpu=%s",
+                                li + 1, mc.m_mesh->lod_levels[li].screen_threshold,
+                                mc.m_mesh->lod_levels[li].gpu_mesh ? "OK" : "NULL");
+                        }
+                    }
+                    else if (t)
+                    {
+                        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
+                            "bounds_computed=false");
+                    }
+                }
+            }
         }
         if (removed)
         {
@@ -237,14 +308,20 @@ bool InspectorPanel::draw(entt::registry& registry, entt::entity selected,
         ImGui::Spacing();
     }
 
+    ImGui::PopStyleVar(); // ItemSpacing
+
     ImGui::Spacing();
     ImGui::Separator();
     ImGui::Spacing();
 
-    // --- Add Component ---
+    // --- Add Component --- (blue-tinted UE5 style)
     float btn_width = ImGui::GetContentRegionAvail().x;
-    if (ImGui::Button("Add Component", ImVec2(btn_width, 0)))
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.16f, 0.26f, 0.40f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.20f, 0.34f, 0.52f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.14f, 0.22f, 0.36f, 1.0f));
+    if (ImGui::Button("+ Add Component", ImVec2(btn_width, 0)))
         ImGui::OpenPopup("AddComponentPopup");
+    ImGui::PopStyleColor(3);
 
     if (ImGui::BeginPopup("AddComponentPopup"))
     {

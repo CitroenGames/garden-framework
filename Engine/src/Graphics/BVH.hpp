@@ -66,6 +66,9 @@ private:
     // Recursive frustum query
     void queryFrustumRecursive(int nodeIndex, const Frustum& frustum, std::vector<entt::entity>& results) const;
 
+    // Collect all leaf entities in a subtree (no frustum tests)
+    void collectAllLeaves(int nodeIndex, std::vector<entt::entity>& results) const;
+
     // Recursive ray pick (returns closest hit entity)
     void rayPickRecursive(int nodeIndex, const glm::vec3& origin, const glm::vec3& direction,
                           float& closest_t, entt::entity& closest_entity) const;
@@ -217,6 +220,15 @@ inline void SceneBVH::queryFrustum(const Frustum& frustum, std::vector<entt::ent
     queryFrustumRecursive(root_index, frustum, results);
 }
 
+inline void SceneBVH::collectAllLeaves(int nodeIndex, std::vector<entt::entity>& results) const
+{
+    if (nodeIndex < 0 || nodeIndex >= static_cast<int>(nodes.size())) return;
+    const BVHNode& node = nodes[nodeIndex];
+    if (node.isLeaf()) { results.push_back(node.entity); return; }
+    if (node.left_child >= 0) collectAllLeaves(node.left_child, results);
+    if (node.right_child >= 0) collectAllLeaves(node.right_child, results);
+}
+
 inline void SceneBVH::queryFrustumRecursive(int nodeIndex, const Frustum& frustum, std::vector<entt::entity>& results) const
 {
     if (nodeIndex < 0 || nodeIndex >= static_cast<int>(nodes.size()))
@@ -230,6 +242,13 @@ inline void SceneBVH::queryFrustumRecursive(int nodeIndex, const Frustum& frustu
     if (!frustum.intersectsAABB(node.bounds))
     {
         return;  // Entire subtree is outside frustum
+    }
+
+    // If fully inside frustum, add all leaves without further tests
+    if (frustum.containsAABB(node.bounds))
+    {
+        collectAllLeaves(nodeIndex, results);
+        return;
     }
 
     // If this is a leaf node, add the entity to results

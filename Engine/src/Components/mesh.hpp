@@ -72,6 +72,7 @@ public:
     bool visible;
     bool culling;
     bool transparent;
+    bool casts_shadow;
 
     // Async loading support
     MeshLoadState load_state;
@@ -115,6 +116,7 @@ public:
     };
     std::vector<LODLevel> lod_levels; // LOD1+, LOD0 is the main gpu_mesh
     int current_lod = 0;
+    int force_lod = -1; // -1 = auto, 0+ = forced LOD level
 
     // Constructor for hardcoded vertex arrays (existing functionality)
     mesh(vertex* vertices, size_t vertices_len)
@@ -127,6 +129,7 @@ public:
         visible = true;
         culling = true;
         transparent = false;
+        casts_shadow = true;
         texture_set = false;
         texture = INVALID_TEXTURE;
         uses_material_ranges = false;
@@ -147,6 +150,7 @@ public:
         visible = true;
         culling = true;
         transparent = false;
+        casts_shadow = true;
         texture_set = false;
         texture = INVALID_TEXTURE;
         uses_material_ranges = false;
@@ -173,6 +177,7 @@ public:
         visible = true;
         culling = true;
         transparent = false;
+        casts_shadow = true;
         texture_set = false;
         texture = INVALID_TEXTURE;
         uses_material_ranges = false;
@@ -209,6 +214,7 @@ public:
         bounds_computed = other.bounds_computed;
         lod_levels = std::move(other.lod_levels);
         current_lod = other.current_lod;
+        force_lod = other.force_lod;
 
         // Invalidate source
         other.vertices = nullptr;
@@ -218,6 +224,7 @@ public:
         other.load_state = MeshLoadState::NotLoaded;
         other.bounds_computed = false;
         other.current_lod = 0;
+        other.force_lod = -1;
     }
 
     // Move assignment
@@ -249,6 +256,7 @@ public:
             bounds_computed = other.bounds_computed;
             lod_levels = std::move(other.lod_levels);
             current_lod = other.current_lod;
+            force_lod = other.force_lod;
 
             // Invalidate source
             other.vertices = nullptr;
@@ -258,6 +266,7 @@ public:
             other.load_state = MeshLoadState::NotLoaded;
             other.bounds_computed = false;
             other.current_lod = 0;
+            other.force_lod = -1;
         }
         return *this;
     }

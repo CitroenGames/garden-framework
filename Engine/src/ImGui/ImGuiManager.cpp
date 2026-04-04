@@ -18,6 +18,7 @@ extern "C" void ImGuiMetal_NewFrame(void* renderPassDescriptor);
 #include "Console/Console.hpp"
 #include "Console/ConVar.hpp"
 #include "Console/ConCommand.hpp"
+#include "Utils/EnginePaths.hpp"
 #include <SDL.h>
 #include <cstring>
 
@@ -33,111 +34,117 @@ static void ApplyEditorTheme()
 
     ImGuiStyle& style = ImGui::GetStyle();
 
-    // Rounding
-    style.WindowRounding    = 4.0f;
-    style.ChildRounding     = 4.0f;
-    style.FrameRounding     = 3.0f;
-    style.PopupRounding     = 4.0f;
-    style.ScrollbarRounding = 6.0f;
-    style.GrabRounding      = 3.0f;
-    style.TabRounding       = 4.0f;
+    // Rounding — flat / angular (UE5 signature)
+    style.WindowRounding    = 0.0f;
+    style.ChildRounding     = 0.0f;
+    style.FrameRounding     = 1.0f;
+    style.PopupRounding     = 1.0f;
+    style.ScrollbarRounding = 2.0f;
+    style.GrabRounding      = 1.0f;
+    style.TabRounding       = 0.0f;
 
-    // Sizing
-    style.FramePadding      = ImVec2(6.0f, 4.0f);
-    style.ItemSpacing       = ImVec2(8.0f, 5.0f);
-    style.ItemInnerSpacing  = ImVec2(6.0f, 4.0f);
-    style.IndentSpacing     = 20.0f;
-    style.ScrollbarSize     = 14.0f;
-    style.GrabMinSize       = 12.0f;
+    // Sizing — compact
+    style.WindowPadding     = ImVec2(6.0f, 6.0f);
+    style.FramePadding      = ImVec2(5.0f, 3.0f);
+    style.CellPadding       = ImVec2(4.0f, 2.0f);
+    style.ItemSpacing       = ImVec2(6.0f, 3.0f);
+    style.ItemInnerSpacing  = ImVec2(4.0f, 3.0f);
+    style.IndentSpacing     = 16.0f;
+    style.ScrollbarSize     = 8.0f;
+    style.GrabMinSize       = 8.0f;
 
-    // Borders
-    style.WindowBorderSize  = 1.0f;
-    style.ChildBorderSize   = 1.0f;
-    style.FrameBorderSize   = 0.0f;
-    style.TabBarBorderSize  = 1.0f;
+    // Borders — minimal (UE5 signature)
+    style.WindowBorderSize      = 0.0f;
+    style.ChildBorderSize       = 0.0f;
+    style.FrameBorderSize       = 0.0f;
+    style.TabBorderSize         = 0.0f;
+    style.TabBarBorderSize      = 1.0f;
+    style.TabBarOverlineSize    = 1.5f;
+    style.DockingSeparatorSize  = 1.0f;
 
-    // Colors — Unreal Engine 5 inspired dark theme
+    // Colors — UE5 warm-grey palette (R >= G > B)
     ImVec4* c = style.Colors;
 
     // Text
-    c[ImGuiCol_Text]                  = ImVec4(0.86f, 0.86f, 0.86f, 1.00f);
-    c[ImGuiCol_TextDisabled]          = ImVec4(0.45f, 0.45f, 0.45f, 1.00f);
+    c[ImGuiCol_Text]                  = ImVec4(0.88f, 0.88f, 0.88f, 1.00f);
+    c[ImGuiCol_TextDisabled]          = ImVec4(0.50f, 0.50f, 0.50f, 1.00f);
 
-    // Backgrounds
-    c[ImGuiCol_WindowBg]              = ImVec4(0.10f, 0.10f, 0.10f, 1.00f);
-    c[ImGuiCol_ChildBg]               = ImVec4(0.10f, 0.10f, 0.10f, 1.00f);
-    c[ImGuiCol_PopupBg]               = ImVec4(0.11f, 0.11f, 0.11f, 0.94f);
+    // Backgrounds — warm grey tones
+    c[ImGuiCol_WindowBg]              = ImVec4(0.14f, 0.13f, 0.12f, 1.00f);
+    c[ImGuiCol_ChildBg]               = ImVec4(0.14f, 0.13f, 0.12f, 1.00f);
+    c[ImGuiCol_PopupBg]               = ImVec4(0.16f, 0.15f, 0.14f, 0.96f);
 
-    // Borders
-    c[ImGuiCol_Border]                = ImVec4(0.20f, 0.20f, 0.20f, 0.50f);
+    // Borders — nearly invisible, warm
+    c[ImGuiCol_Border]                = ImVec4(0.18f, 0.17f, 0.15f, 0.40f);
     c[ImGuiCol_BorderShadow]          = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
 
-    // Frames (input fields, checkboxes, etc.)
-    c[ImGuiCol_FrameBg]               = ImVec4(0.16f, 0.16f, 0.16f, 1.00f);
-    c[ImGuiCol_FrameBgHovered]        = ImVec4(0.22f, 0.22f, 0.22f, 1.00f);
-    c[ImGuiCol_FrameBgActive]         = ImVec4(0.28f, 0.28f, 0.28f, 1.00f);
+    // Frames — darker warm inset
+    c[ImGuiCol_FrameBg]               = ImVec4(0.09f, 0.08f, 0.07f, 1.00f);
+    c[ImGuiCol_FrameBgHovered]        = ImVec4(0.17f, 0.16f, 0.15f, 1.00f);
+    c[ImGuiCol_FrameBgActive]         = ImVec4(0.22f, 0.20f, 0.18f, 1.00f);
 
-    // Title bar
-    c[ImGuiCol_TitleBg]               = ImVec4(0.08f, 0.08f, 0.08f, 1.00f);
-    c[ImGuiCol_TitleBgActive]         = ImVec4(0.12f, 0.12f, 0.12f, 1.00f);
-    c[ImGuiCol_TitleBgCollapsed]      = ImVec4(0.08f, 0.08f, 0.08f, 0.75f);
+    // Title bar — warm dark
+    c[ImGuiCol_TitleBg]               = ImVec4(0.09f, 0.08f, 0.07f, 1.00f);
+    c[ImGuiCol_TitleBgActive]         = ImVec4(0.09f, 0.08f, 0.07f, 1.00f);
+    c[ImGuiCol_TitleBgCollapsed]      = ImVec4(0.09f, 0.08f, 0.07f, 0.75f);
 
     // Menu bar
-    c[ImGuiCol_MenuBarBg]             = ImVec4(0.11f, 0.11f, 0.11f, 1.00f);
+    c[ImGuiCol_MenuBarBg]             = ImVec4(0.11f, 0.10f, 0.09f, 1.00f);
 
-    // Scrollbar
-    c[ImGuiCol_ScrollbarBg]           = ImVec4(0.10f, 0.10f, 0.10f, 1.00f);
-    c[ImGuiCol_ScrollbarGrab]         = ImVec4(0.30f, 0.30f, 0.30f, 1.00f);
-    c[ImGuiCol_ScrollbarGrabHovered]  = ImVec4(0.38f, 0.38f, 0.38f, 1.00f);
-    c[ImGuiCol_ScrollbarGrabActive]   = ImVec4(0.45f, 0.45f, 0.45f, 1.00f);
+    // Scrollbar — thin and unobtrusive
+    c[ImGuiCol_ScrollbarBg]           = ImVec4(0.06f, 0.05f, 0.05f, 0.60f);
+    c[ImGuiCol_ScrollbarGrab]         = ImVec4(0.30f, 0.28f, 0.26f, 1.00f);
+    c[ImGuiCol_ScrollbarGrabHovered]  = ImVec4(0.38f, 0.36f, 0.34f, 1.00f);
+    c[ImGuiCol_ScrollbarGrabActive]   = ImVec4(0.46f, 0.44f, 0.42f, 1.00f);
 
-    // Checkmark, slider grab
-    c[ImGuiCol_CheckMark]             = ImVec4(0.30f, 0.55f, 0.85f, 1.00f);
-    c[ImGuiCol_SliderGrab]            = ImVec4(0.30f, 0.55f, 0.85f, 1.00f);
-    c[ImGuiCol_SliderGrabActive]      = ImVec4(0.40f, 0.65f, 0.95f, 1.00f);
+    // Checkmark, slider grab — bright UE5 blue accent
+    c[ImGuiCol_CheckMark]             = ImVec4(0.26f, 0.59f, 0.98f, 1.00f);
+    c[ImGuiCol_SliderGrab]            = ImVec4(0.26f, 0.59f, 0.98f, 1.00f);
+    c[ImGuiCol_SliderGrabActive]      = ImVec4(0.40f, 0.68f, 1.00f, 1.00f);
 
-    // Buttons
-    c[ImGuiCol_Button]                = ImVec4(0.22f, 0.22f, 0.22f, 1.00f);
-    c[ImGuiCol_ButtonHovered]         = ImVec4(0.30f, 0.30f, 0.30f, 1.00f);
-    c[ImGuiCol_ButtonActive]          = ImVec4(0.18f, 0.36f, 0.60f, 1.00f);
+    // Buttons — warm tinted
+    c[ImGuiCol_Button]                = ImVec4(0.20f, 0.19f, 0.17f, 1.00f);
+    c[ImGuiCol_ButtonHovered]         = ImVec4(0.28f, 0.26f, 0.24f, 1.00f);
+    c[ImGuiCol_ButtonActive]          = ImVec4(0.22f, 0.42f, 0.70f, 1.00f);
 
-    // Headers (collapsing headers, selectable, menu items)
-    c[ImGuiCol_Header]                = ImVec4(0.16f, 0.30f, 0.52f, 0.70f);
-    c[ImGuiCol_HeaderHovered]         = ImVec4(0.20f, 0.40f, 0.68f, 0.80f);
-    c[ImGuiCol_HeaderActive]          = ImVec4(0.20f, 0.40f, 0.68f, 1.00f);
+    // Headers — warm grey default, blue on active
+    c[ImGuiCol_Header]                = ImVec4(0.20f, 0.19f, 0.17f, 1.00f);
+    c[ImGuiCol_HeaderHovered]         = ImVec4(0.28f, 0.26f, 0.24f, 1.00f);
+    c[ImGuiCol_HeaderActive]          = ImVec4(0.22f, 0.42f, 0.70f, 1.00f);
 
-    // Separator
-    c[ImGuiCol_Separator]             = ImVec4(0.24f, 0.24f, 0.24f, 1.00f);
-    c[ImGuiCol_SeparatorHovered]      = ImVec4(0.30f, 0.55f, 0.85f, 0.78f);
-    c[ImGuiCol_SeparatorActive]       = ImVec4(0.30f, 0.55f, 0.85f, 1.00f);
+    // Separator — warm
+    c[ImGuiCol_Separator]             = ImVec4(0.20f, 0.19f, 0.17f, 1.00f);
+    c[ImGuiCol_SeparatorHovered]      = ImVec4(0.26f, 0.59f, 0.98f, 0.78f);
+    c[ImGuiCol_SeparatorActive]       = ImVec4(0.26f, 0.59f, 0.98f, 1.00f);
 
     // Resize grip
-    c[ImGuiCol_ResizeGrip]            = ImVec4(0.20f, 0.40f, 0.68f, 0.25f);
-    c[ImGuiCol_ResizeGripHovered]     = ImVec4(0.20f, 0.40f, 0.68f, 0.67f);
-    c[ImGuiCol_ResizeGripActive]      = ImVec4(0.20f, 0.40f, 0.68f, 0.95f);
+    c[ImGuiCol_ResizeGrip]            = ImVec4(0.26f, 0.59f, 0.98f, 0.25f);
+    c[ImGuiCol_ResizeGripHovered]     = ImVec4(0.26f, 0.59f, 0.98f, 0.67f);
+    c[ImGuiCol_ResizeGripActive]      = ImVec4(0.26f, 0.59f, 0.98f, 0.95f);
 
-    // Tabs
-    c[ImGuiCol_Tab]                   = ImVec4(0.12f, 0.12f, 0.12f, 1.00f);
-    c[ImGuiCol_TabHovered]            = ImVec4(0.24f, 0.24f, 0.24f, 1.00f);
-    c[ImGuiCol_TabSelected]           = ImVec4(0.18f, 0.18f, 0.18f, 1.00f);
-    c[ImGuiCol_TabSelectedOverline]   = ImVec4(0.30f, 0.55f, 0.85f, 1.00f);
-    c[ImGuiCol_TabDimmed]             = ImVec4(0.10f, 0.10f, 0.10f, 1.00f);
-    c[ImGuiCol_TabDimmedSelected]     = ImVec4(0.14f, 0.14f, 0.14f, 1.00f);
+    // Tabs — selected merges seamlessly with panel body (must match WindowBg)
+    c[ImGuiCol_Tab]                   = ImVec4(0.09f, 0.08f, 0.07f, 1.00f);
+    c[ImGuiCol_TabHovered]            = ImVec4(0.18f, 0.17f, 0.15f, 1.00f);
+    c[ImGuiCol_TabSelected]           = ImVec4(0.14f, 0.13f, 0.12f, 1.00f);
+    c[ImGuiCol_TabSelectedOverline]   = ImVec4(0.42f, 0.62f, 0.85f, 1.00f);
+    c[ImGuiCol_TabDimmed]             = ImVec4(0.08f, 0.07f, 0.07f, 1.00f);
+    c[ImGuiCol_TabDimmedSelected]     = ImVec4(0.12f, 0.11f, 0.10f, 1.00f);
+    c[ImGuiCol_TabDimmedSelectedOverline] = ImVec4(0.30f, 0.45f, 0.65f, 1.00f);
 
     // Docking
-    c[ImGuiCol_DockingPreview]        = ImVec4(0.20f, 0.40f, 0.68f, 0.70f);
-    c[ImGuiCol_DockingEmptyBg]        = ImVec4(0.08f, 0.08f, 0.08f, 1.00f);
+    c[ImGuiCol_DockingPreview]        = ImVec4(0.26f, 0.59f, 0.98f, 0.70f);
+    c[ImGuiCol_DockingEmptyBg]        = ImVec4(0.07f, 0.06f, 0.06f, 1.00f);
 
     // Tables
-    c[ImGuiCol_TableHeaderBg]         = ImVec4(0.14f, 0.14f, 0.14f, 1.00f);
-    c[ImGuiCol_TableBorderStrong]     = ImVec4(0.22f, 0.22f, 0.22f, 1.00f);
-    c[ImGuiCol_TableBorderLight]      = ImVec4(0.18f, 0.18f, 0.18f, 1.00f);
+    c[ImGuiCol_TableHeaderBg]         = ImVec4(0.14f, 0.13f, 0.12f, 1.00f);
+    c[ImGuiCol_TableBorderStrong]     = ImVec4(0.22f, 0.21f, 0.19f, 1.00f);
+    c[ImGuiCol_TableBorderLight]      = ImVec4(0.18f, 0.17f, 0.16f, 1.00f);
     c[ImGuiCol_TableRowBg]            = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
     c[ImGuiCol_TableRowBgAlt]         = ImVec4(1.00f, 1.00f, 1.00f, 0.03f);
 
     // Misc
-    c[ImGuiCol_DragDropTarget]        = ImVec4(0.30f, 0.55f, 0.85f, 0.90f);
-    c[ImGuiCol_NavCursor]             = ImVec4(0.30f, 0.55f, 0.85f, 1.00f);
+    c[ImGuiCol_DragDropTarget]        = ImVec4(0.26f, 0.59f, 0.98f, 0.90f);
+    c[ImGuiCol_NavCursor]             = ImVec4(0.26f, 0.59f, 0.98f, 1.00f);
     c[ImGuiCol_NavWindowingHighlight] = ImVec4(1.00f, 1.00f, 1.00f, 0.70f);
     c[ImGuiCol_NavWindowingDimBg]     = ImVec4(0.80f, 0.80f, 0.80f, 0.20f);
     c[ImGuiCol_ModalWindowDimBg]      = ImVec4(0.00f, 0.00f, 0.00f, 0.55f);
@@ -163,6 +170,20 @@ bool ImGuiManager::initialize(SDL_Window* window, IRenderAPI* renderAPI, RenderA
 
     // Setup style
     ApplyEditorTheme();
+
+    // Load sans-serif font for UE5-like appearance
+    {
+        std::string fontPath = EnginePaths::resolveEngineAsset("../assets/fonts/LatoLatin-Regular.ttf");
+        ImFont* font = io.Fonts->AddFontFromFileTTF(fontPath.c_str(), 15.0f);
+        if (!font)
+            io.Fonts->AddFontDefault();
+
+        // Load bold font for section headers
+        std::string boldFontPath = EnginePaths::resolveEngineAsset("../assets/fonts/LatoLatin-Bold.ttf");
+        m_boldFont = io.Fonts->AddFontFromFileTTF(boldFontPath.c_str(), 15.0f);
+        if (!m_boldFont)
+            m_boldFont = io.Fonts->Fonts[0];
+    }
 
     // Initialize platform and renderer backends
     bool success = false;

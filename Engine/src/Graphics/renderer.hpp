@@ -58,17 +58,18 @@ public:
         api->popMatrix();
     }
 
-    // Sort entities by texture handle to minimize state changes during rendering
-    void sort_entities_by_state(entt::registry& registry, std::vector<entt::entity>& entities)
+    // Sort entities by texture handle (primary) and distance (secondary, front-to-back)
+    void sort_entities_by_state(entt::registry& registry, std::vector<entt::entity>& entities,
+                                const glm::vec3& cam_pos)
     {
         std::sort(entities.begin(), entities.end(),
-            [&registry](entt::entity a, entt::entity b) {
+            [&registry, &cam_pos](entt::entity a, entt::entity b) {
                 auto* ma = registry.try_get<MeshComponent>(a);
                 auto* mb = registry.try_get<MeshComponent>(b);
                 if (!ma || !ma->m_mesh) return false;
                 if (!mb || !mb->m_mesh) return true;
 
-                // Sort by primary texture handle
+                // Primary: sort by texture handle
                 TextureHandle tex_a = ma->m_mesh->texture_set ? ma->m_mesh->texture : 0;
                 TextureHandle tex_b = mb->m_mesh->texture_set ? mb->m_mesh->texture : 0;
                 if (ma->m_mesh->uses_material_ranges && !ma->m_mesh->material_ranges.empty())
@@ -76,7 +77,14 @@ public:
                 if (mb->m_mesh->uses_material_ranges && !mb->m_mesh->material_ranges.empty())
                     tex_b = mb->m_mesh->material_ranges[0].texture;
 
-                return tex_a < tex_b;
+                if (tex_a != tex_b)
+                    return tex_a < tex_b;
+
+                // Secondary: front-to-back within same texture group
+                auto* ta = registry.try_get<TransformComponent>(a);
+                auto* tb = registry.try_get<TransformComponent>(b);
+                if (!ta || !tb) return false;
+                return glm::dot(cam_pos - ta->position, cam_pos - ta->position) < glm::dot(cam_pos - tb->position, cam_pos - tb->position);
             });
     }
 
@@ -133,6 +141,20 @@ public:
         api->popMatrix();
     };
 
+    // Render a LOD mesh: temporarily swaps gpu_mesh and disables material ranges
+    // (LOD meshes have different vertex layouts so material ranges from LOD0 don't apply)
+    static void render_lod_mesh(mesh& m, const TransformComponent& transform,
+                                 IRenderAPI* api, IGPUMesh* lod_gpu_mesh)
+    {
+        IGPUMesh* original_gpu = m.gpu_mesh;
+        bool original_mat_ranges = m.uses_material_ranges;
+        m.gpu_mesh = lod_gpu_mesh;
+        m.uses_material_ranges = false;
+        render_mesh_with_api(m, transform, api);
+        m.gpu_mesh = original_gpu;
+        m.uses_material_ranges = original_mat_ranges;
+    }
+
     // LOD-aware rendering: selects appropriate LOD before drawing
     static void render_mesh_with_lod(mesh& m, const TransformComponent& transform,
                                       IRenderAPI* api, const glm::vec3& camera_pos,
@@ -143,30 +165,74 @@ public:
         // LOD selection
         if (!m.lod_levels.empty() && m.bounds_computed)
         {
-            int lod_count = m.getLODCount();
-            std::vector<float> thresholds(lod_count, 0.0f);
-            for (int i = 0; i < static_cast<int>(m.lod_levels.size()); ++i)
-                thresholds[i + 1] = m.lod_levels[i].screen_threshold;
+            int lod;
+            if (m.force_lod >= 0)
+            {
+                lod = m.force_lod;
+            }
+            else
+            {
+                int lod_count = m.getLODCount();
+                std::vector<float> thresholds(lod_count, 0.0f);
+                for (int i = 0; i < static_cast<int>(m.lod_levels.size()); ++i)
+                    thresholds[i + 1] = m.lod_levels[i].screen_threshold;
 
-            int lod = LODSelector::selectLOD(
-                camera_pos, transform.position,
-                m.aabb_min, m.aabb_max,
-                projection, lod_count, thresholds.data()
-            );
+                lod = LODSelector::selectLOD(
+                    camera_pos, transform.position,
+                    m.aabb_min, m.aabb_max,
+                    projection, lod_count, thresholds.data(),
+                    transform.scale
+                );
+            }
             m.selectLOD(lod);
 
-            // Swap gpu_mesh to active LOD for rendering (renderMesh accesses m.gpu_mesh directly)
             IGPUMesh* active = m.getActiveGPUMesh();
             if (active && active != m.gpu_mesh)
             {
-                IGPUMesh* original = m.gpu_mesh;
-                m.gpu_mesh = active;
-                render_mesh_with_api(m, transform, api);
-                m.gpu_mesh = original;
+                render_lod_mesh(m, transform, api, active);
                 return;
             }
         }
 
+        render_mesh_with_api(m, transform, api);
+    }
+
+    // Shadow-pass LOD: use coarser LODs for farther cascades
+    static void render_mesh_shadow_lod(mesh& m, const TransformComponent& transform,
+                                        IRenderAPI* api, int cascade_index)
+    {
+        if (!m.visible || !m.casts_shadow || !api) return;
+
+        if (!m.lod_levels.empty())
+        {
+            int shadow_lod = std::min(cascade_index, static_cast<int>(m.lod_levels.size()));
+            m.selectLOD(shadow_lod);
+            IGPUMesh* active = m.getActiveGPUMesh();
+            if (active && active != m.gpu_mesh)
+            {
+                render_lod_mesh(m, transform, api, active);
+                return;
+            }
+        }
+        render_mesh_with_api(m, transform, api);
+    }
+
+    // Render mesh at a pre-selected LOD level
+    static void render_mesh_at_lod(mesh& m, const TransformComponent& transform,
+                                    IRenderAPI* api, int lod_level)
+    {
+        if (!m.visible || !api) return;
+
+        if (!m.lod_levels.empty() && lod_level > 0)
+        {
+            m.selectLOD(lod_level);
+            IGPUMesh* active = m.getActiveGPUMesh();
+            if (active && active != m.gpu_mesh)
+            {
+                render_lod_mesh(m, transform, api, active);
+                return;
+            }
+        }
         render_mesh_with_api(m, transform, api);
     }
 
@@ -182,107 +248,186 @@ public:
 
         auto view = registry.view<MeshComponent, TransformComponent>();
 
-        // 1. Shadow Pass - CSM (render each cascade)
-        // Shadows need all casters, not just visible ones, to ensure shadows from off-screen objects
+        // Ensure BVH is built before shadow pass (both passes share the same BVH)
+        if (bvh_enabled && scene_bvh.needsRebuild())
+            scene_bvh.build(registry);
+
+        // 1. Shadow Pass - CSM with per-cascade frustum culling
         render_api->beginShadowPass(light_direction, c);
+        const glm::mat4* cascade_matrices = render_api->getLightSpaceMatrices();
+
         for (int cascade = 0; cascade < render_api->getCascadeCount(); cascade++)
         {
             render_api->beginCascade(cascade);
-            for (auto entity : view)
-            {
-                auto& mesh_comp = view.get<MeshComponent>(entity);
-                const auto& t = view.get<TransformComponent>(entity);
 
-                if (mesh_comp.m_mesh && mesh_comp.m_mesh->visible)
+            if (bvh_enabled && cascade_matrices)
+            {
+                // Extract frustum from this cascade's light-space matrix and cull
+                Frustum shadow_frustum;
+                shadow_frustum.extractFromViewProjection(cascade_matrices[cascade]);
+
+                std::vector<entt::entity> shadow_entities;
+                scene_bvh.queryFrustum(shadow_frustum, shadow_entities);
+
+                for (auto entity : shadow_entities)
                 {
-                    // Render geometry for shadow map
-                    render_mesh_with_api(*mesh_comp.m_mesh, t, render_api);
+                    if (!registry.valid(entity)) continue;
+                    auto* mesh_comp = registry.try_get<MeshComponent>(entity);
+                    auto* t = registry.try_get<TransformComponent>(entity);
+                    if (mesh_comp && t && mesh_comp->m_mesh && mesh_comp->m_mesh->visible
+                        && mesh_comp->m_mesh->casts_shadow)
+                    {
+                        render_mesh_shadow_lod(*mesh_comp->m_mesh, *t, render_api, cascade);
+                    }
+                }
+            }
+            else
+            {
+                // Fallback: render all (no BVH or no cascade matrices)
+                for (auto entity : view)
+                {
+                    auto& mesh_comp = view.get<MeshComponent>(entity);
+                    const auto& t = view.get<TransformComponent>(entity);
+                    if (mesh_comp.m_mesh && mesh_comp.m_mesh->visible && mesh_comp.m_mesh->casts_shadow)
+                        render_mesh_with_api(*mesh_comp.m_mesh, t, render_api);
                 }
             }
         }
         render_api->endShadowPass();
 
         // 2. Main Render Pass
-        // Begin frame
         render_api->beginFrame();
-
-        // Clear with background color
         render_api->clear(glm::vec3(0.2f, 0.3f, 0.8f));
-
-        // Set up camera
         render_api->setCamera(c);
+        render_api->setLighting(ambient_light, diffuse_light, light_direction);
 
-        // Set up lighting from level data
-        render_api->setLighting(
-            ambient_light,
-            diffuse_light,
-            light_direction
-        );
+        glm::mat4 proj = render_api->getProjectionMatrix();
+        glm::vec3 cam_pos = c.getPosition();
 
-        // Frustum culling with BVH
         if (bvh_enabled)
         {
-            // Rebuild BVH if needed (marks dirty on first frame or when markDirty() called)
-            if (scene_bvh.needsRebuild())
-            {
-                scene_bvh.build(registry);
-            }
-
-            // Extract frustum from view-projection matrix
+            // Extract camera frustum and query visible entities
             Frustum frustum;
-            glm::mat4 viewProj = render_api->getProjectionMatrix() * render_api->getViewMatrix();
+            glm::mat4 viewProj = proj * render_api->getViewMatrix();
             frustum.extractFromViewProjection(viewProj);
 
-            // Query visible entities
             std::vector<entt::entity> visible_entities;
             scene_bvh.queryFrustum(frustum, visible_entities);
 
-            // Update stats
             last_total_entities = scene_bvh.getTotalEntities();
             last_visible_entities = visible_entities.size();
 
-            // Sort visible entities by texture to minimize state changes
-            sort_entities_by_state(registry, visible_entities);
+            // Partition into opaque and transparent
+            std::vector<entt::entity> opaque_entities;
+            std::vector<entt::entity> transparent_entities;
+            opaque_entities.reserve(visible_entities.size());
 
-            // Depth prepass: render depth-only for all visible entities
-            if (depth_prepass_enabled && !visible_entities.empty())
+            for (auto entity : visible_entities)
+            {
+                auto* mesh_comp = registry.try_get<MeshComponent>(entity);
+                if (mesh_comp && mesh_comp->m_mesh && mesh_comp->m_mesh->transparent)
+                    transparent_entities.push_back(entity);
+                else
+                    opaque_entities.push_back(entity);
+            }
+
+            // Sort opaques by texture (primary) + distance (secondary)
+            sort_entities_by_state(registry, opaque_entities, cam_pos);
+
+            // Sort transparents back-to-front
+            std::sort(transparent_entities.begin(), transparent_entities.end(),
+                [&registry, &cam_pos](entt::entity a, entt::entity b) {
+                    auto* ta = registry.try_get<TransformComponent>(a);
+                    auto* tb = registry.try_get<TransformComponent>(b);
+                    if (!ta) return false;
+                    if (!tb) return true;
+                    return glm::dot(cam_pos - ta->position, cam_pos - ta->position) > glm::dot(cam_pos - tb->position, cam_pos - tb->position);
+                });
+
+            // Pre-select LOD for opaque entities (coherent between depth prepass and main pass)
+            std::vector<int> opaque_lod(opaque_entities.size(), 0);
+            for (size_t i = 0; i < opaque_entities.size(); ++i)
+            {
+                auto* mesh_comp = registry.try_get<MeshComponent>(opaque_entities[i]);
+                auto* t = registry.try_get<TransformComponent>(opaque_entities[i]);
+                if (!mesh_comp || !t || !mesh_comp->m_mesh) continue;
+                mesh& m = *mesh_comp->m_mesh;
+
+                if (!m.lod_levels.empty() && m.bounds_computed)
+                {
+                    if (m.force_lod >= 0)
+                    {
+                        opaque_lod[i] = m.force_lod;
+                    }
+                    else
+                    {
+                        int lod_count = m.getLODCount();
+                        std::vector<float> thresholds(lod_count, 0.0f);
+                        for (int j = 0; j < static_cast<int>(m.lod_levels.size()); ++j)
+                            thresholds[j + 1] = m.lod_levels[j].screen_threshold;
+
+                        opaque_lod[i] = LODSelector::selectLOD(
+                            cam_pos, t->position, m.aabb_min, m.aabb_max,
+                            proj, lod_count, thresholds.data(),
+                            t->scale
+                        );
+                    }
+                }
+            }
+
+            // Depth prepass: opaque entities only, using pre-selected LOD
+            if (depth_prepass_enabled && !opaque_entities.empty())
             {
                 render_api->beginDepthPrepass();
-                for (auto entity : visible_entities)
+                for (size_t i = 0; i < opaque_entities.size(); ++i)
                 {
-                    if (!registry.valid(entity)) continue;
-                    auto* mesh_comp = registry.try_get<MeshComponent>(entity);
-                    auto* t = registry.try_get<TransformComponent>(entity);
-                    if (mesh_comp && t && mesh_comp->m_mesh && mesh_comp->m_mesh->visible)
-                        render_mesh_depth_only(*mesh_comp->m_mesh, *t, render_api);
+                    if (!registry.valid(opaque_entities[i])) continue;
+                    auto* mesh_comp = registry.try_get<MeshComponent>(opaque_entities[i]);
+                    auto* t = registry.try_get<TransformComponent>(opaque_entities[i]);
+                    if (!mesh_comp || !t || !mesh_comp->m_mesh || !mesh_comp->m_mesh->visible) continue;
+
+                    mesh& m = *mesh_comp->m_mesh;
+                    if (opaque_lod[i] > 0 && !m.lod_levels.empty())
+                    {
+                        m.selectLOD(opaque_lod[i]);
+                        IGPUMesh* active = m.getActiveGPUMesh();
+                        if (active && active != m.gpu_mesh)
+                        {
+                            IGPUMesh* original = m.gpu_mesh;
+                            m.gpu_mesh = active;
+                            render_mesh_depth_only(m, *t, render_api);
+                            m.gpu_mesh = original;
+                            continue;
+                        }
+                    }
+                    render_mesh_depth_only(m, *t, render_api);
                 }
                 render_api->endDepthPrepass();
             }
 
-            // LOD selection data
-            glm::mat4 proj = render_api->getProjectionMatrix();
-            glm::vec3 cam_pos = c.getPosition();
+            // Main lit pass: opaques with pre-selected LOD
+            for (size_t i = 0; i < opaque_entities.size(); ++i)
+            {
+                if (!registry.valid(opaque_entities[i])) continue;
+                auto* mesh_comp = registry.try_get<MeshComponent>(opaque_entities[i]);
+                auto* t = registry.try_get<TransformComponent>(opaque_entities[i]);
+                if (!mesh_comp || !t || !mesh_comp->m_mesh || !mesh_comp->m_mesh->visible) continue;
 
-            // Render only visible entities (main lit pass) with LOD
-            for (auto entity : visible_entities)
+                render_mesh_at_lod(*mesh_comp->m_mesh, *t, render_api, opaque_lod[i]);
+                last_draw_calls++;
+            }
+
+            // Main lit pass: transparents (back-to-front, with LOD)
+            for (auto entity : transparent_entities)
             {
                 if (!registry.valid(entity)) continue;
-
                 auto* mesh_comp = registry.try_get<MeshComponent>(entity);
                 auto* t = registry.try_get<TransformComponent>(entity);
-
                 if (mesh_comp && t && mesh_comp->m_mesh && mesh_comp->m_mesh->visible)
                 {
                     render_mesh_with_lod(*mesh_comp->m_mesh, *t, render_api, cam_pos, proj);
                     last_draw_calls++;
                 }
-            }
-
-            // Restore depth state after depth prepass
-            if (depth_prepass_enabled)
-            {
-                // endDepthPrepass set depth-equal + no depth write
-                // Restore for skybox and debug rendering
             }
         }
         else
@@ -290,9 +435,6 @@ public:
             // No BVH - render all entities (original behavior)
             last_total_entities = 0;
             last_visible_entities = 0;
-
-            glm::mat4 proj = render_api->getProjectionMatrix();
-            glm::vec3 cam_pos = c.getPosition();
 
             for (auto entity : view)
             {
@@ -339,17 +481,47 @@ public:
 
         auto view = registry.view<MeshComponent, TransformComponent>();
 
-        // 1. Shadow Pass
+        // Ensure BVH is built before shadow pass
+        if (bvh_enabled && scene_bvh.needsRebuild())
+            scene_bvh.build(registry);
+
+        // 1. Shadow Pass - CSM with per-cascade frustum culling
         render_api->beginShadowPass(light_direction, c);
+        const glm::mat4* cascade_matrices = render_api->getLightSpaceMatrices();
+
         for (int cascade = 0; cascade < render_api->getCascadeCount(); cascade++)
         {
             render_api->beginCascade(cascade);
-            for (auto entity : view)
+
+            if (bvh_enabled && cascade_matrices)
             {
-                auto& mesh_comp = view.get<MeshComponent>(entity);
-                const auto& t = view.get<TransformComponent>(entity);
-                if (mesh_comp.m_mesh && mesh_comp.m_mesh->visible)
-                    render_mesh_with_api(*mesh_comp.m_mesh, t, render_api);
+                Frustum shadow_frustum;
+                shadow_frustum.extractFromViewProjection(cascade_matrices[cascade]);
+
+                std::vector<entt::entity> shadow_entities;
+                scene_bvh.queryFrustum(shadow_frustum, shadow_entities);
+
+                for (auto entity : shadow_entities)
+                {
+                    if (!registry.valid(entity)) continue;
+                    auto* mesh_comp = registry.try_get<MeshComponent>(entity);
+                    auto* t = registry.try_get<TransformComponent>(entity);
+                    if (mesh_comp && t && mesh_comp->m_mesh && mesh_comp->m_mesh->visible
+                        && mesh_comp->m_mesh->casts_shadow)
+                    {
+                        render_mesh_shadow_lod(*mesh_comp->m_mesh, *t, render_api, cascade);
+                    }
+                }
+            }
+            else
+            {
+                for (auto entity : view)
+                {
+                    auto& mesh_comp = view.get<MeshComponent>(entity);
+                    const auto& t = view.get<TransformComponent>(entity);
+                    if (mesh_comp.m_mesh && mesh_comp.m_mesh->visible && mesh_comp.m_mesh->casts_shadow)
+                        render_mesh_with_api(*mesh_comp.m_mesh, t, render_api);
+                }
             }
         }
         render_api->endShadowPass();
@@ -360,11 +532,13 @@ public:
         render_api->setCamera(c);
         render_api->setLighting(ambient_light, diffuse_light, light_direction);
 
+        glm::mat4 proj = render_api->getProjectionMatrix();
+        glm::vec3 cam_pos = c.getPosition();
+
         if (bvh_enabled)
         {
-            if (scene_bvh.needsRebuild()) scene_bvh.build(registry);
             Frustum frustum;
-            glm::mat4 viewProj = render_api->getProjectionMatrix() * render_api->getViewMatrix();
+            glm::mat4 viewProj = proj * render_api->getViewMatrix();
             frustum.extractFromViewProjection(viewProj);
 
             std::vector<entt::entity> visible_entities;
@@ -372,28 +546,106 @@ public:
             last_total_entities = scene_bvh.getTotalEntities();
             last_visible_entities = visible_entities.size();
 
-            // Sort by state (editor path)
-            sort_entities_by_state(registry, visible_entities);
+            // Partition into opaque and transparent
+            std::vector<entt::entity> opaque_entities;
+            std::vector<entt::entity> transparent_entities;
+            opaque_entities.reserve(visible_entities.size());
 
-            // Depth prepass (editor path)
-            if (depth_prepass_enabled && !visible_entities.empty())
+            for (auto entity : visible_entities)
+            {
+                auto* mesh_comp = registry.try_get<MeshComponent>(entity);
+                if (mesh_comp && mesh_comp->m_mesh && mesh_comp->m_mesh->transparent)
+                    transparent_entities.push_back(entity);
+                else
+                    opaque_entities.push_back(entity);
+            }
+
+            sort_entities_by_state(registry, opaque_entities, cam_pos);
+
+            std::sort(transparent_entities.begin(), transparent_entities.end(),
+                [&registry, &cam_pos](entt::entity a, entt::entity b) {
+                    auto* ta = registry.try_get<TransformComponent>(a);
+                    auto* tb = registry.try_get<TransformComponent>(b);
+                    if (!ta) return false;
+                    if (!tb) return true;
+                    return glm::dot(cam_pos - ta->position, cam_pos - ta->position) > glm::dot(cam_pos - tb->position, cam_pos - tb->position);
+                });
+
+            // Pre-select LOD for opaque entities
+            std::vector<int> opaque_lod(opaque_entities.size(), 0);
+            for (size_t i = 0; i < opaque_entities.size(); ++i)
+            {
+                auto* mesh_comp = registry.try_get<MeshComponent>(opaque_entities[i]);
+                auto* t = registry.try_get<TransformComponent>(opaque_entities[i]);
+                if (!mesh_comp || !t || !mesh_comp->m_mesh) continue;
+                mesh& m = *mesh_comp->m_mesh;
+
+                if (!m.lod_levels.empty() && m.bounds_computed)
+                {
+                    if (m.force_lod >= 0)
+                    {
+                        opaque_lod[i] = m.force_lod;
+                    }
+                    else
+                    {
+                        int lod_count = m.getLODCount();
+                        std::vector<float> thresholds(lod_count, 0.0f);
+                        for (int j = 0; j < static_cast<int>(m.lod_levels.size()); ++j)
+                            thresholds[j + 1] = m.lod_levels[j].screen_threshold;
+
+                        opaque_lod[i] = LODSelector::selectLOD(
+                            cam_pos, t->position, m.aabb_min, m.aabb_max,
+                            proj, lod_count, thresholds.data(),
+                            t->scale
+                        );
+                    }
+                }
+            }
+
+            // Depth prepass: opaque entities only, using pre-selected LOD
+            if (depth_prepass_enabled && !opaque_entities.empty())
             {
                 render_api->beginDepthPrepass();
-                for (auto entity : visible_entities)
+                for (size_t i = 0; i < opaque_entities.size(); ++i)
                 {
-                    if (!registry.valid(entity)) continue;
-                    auto* mesh_comp = registry.try_get<MeshComponent>(entity);
-                    auto* t = registry.try_get<TransformComponent>(entity);
-                    if (mesh_comp && t && mesh_comp->m_mesh && mesh_comp->m_mesh->visible)
-                        render_mesh_depth_only(*mesh_comp->m_mesh, *t, render_api);
+                    if (!registry.valid(opaque_entities[i])) continue;
+                    auto* mesh_comp = registry.try_get<MeshComponent>(opaque_entities[i]);
+                    auto* t = registry.try_get<TransformComponent>(opaque_entities[i]);
+                    if (!mesh_comp || !t || !mesh_comp->m_mesh || !mesh_comp->m_mesh->visible) continue;
+
+                    mesh& m = *mesh_comp->m_mesh;
+                    if (opaque_lod[i] > 0 && !m.lod_levels.empty())
+                    {
+                        m.selectLOD(opaque_lod[i]);
+                        IGPUMesh* active = m.getActiveGPUMesh();
+                        if (active && active != m.gpu_mesh)
+                        {
+                            IGPUMesh* original = m.gpu_mesh;
+                            m.gpu_mesh = active;
+                            render_mesh_depth_only(m, *t, render_api);
+                            m.gpu_mesh = original;
+                            continue;
+                        }
+                    }
+                    render_mesh_depth_only(m, *t, render_api);
                 }
                 render_api->endDepthPrepass();
             }
 
-            glm::mat4 proj = render_api->getProjectionMatrix();
-            glm::vec3 cam_pos = c.getPosition();
+            // Main lit pass: opaques
+            for (size_t i = 0; i < opaque_entities.size(); ++i)
+            {
+                if (!registry.valid(opaque_entities[i])) continue;
+                auto* mesh_comp = registry.try_get<MeshComponent>(opaque_entities[i]);
+                auto* t = registry.try_get<TransformComponent>(opaque_entities[i]);
+                if (!mesh_comp || !t || !mesh_comp->m_mesh || !mesh_comp->m_mesh->visible) continue;
 
-            for (auto entity : visible_entities)
+                render_mesh_at_lod(*mesh_comp->m_mesh, *t, render_api, opaque_lod[i]);
+                last_draw_calls++;
+            }
+
+            // Main lit pass: transparents (back-to-front)
+            for (auto entity : transparent_entities)
             {
                 if (!registry.valid(entity)) continue;
                 auto* mesh_comp = registry.try_get<MeshComponent>(entity);
@@ -409,9 +661,6 @@ public:
         {
             last_total_entities = 0;
             last_visible_entities = 0;
-
-            glm::mat4 proj = render_api->getProjectionMatrix();
-            glm::vec3 cam_pos = c.getPosition();
 
             for (auto entity : view)
             {

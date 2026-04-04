@@ -5160,3 +5160,277 @@ void VulkanRenderAPI::renderUI()
     vkEndCommandBuffer(cmd);
     frame_started = false;
 }
+
+// ── Preview render target (asset preview panel) ─────────────────────────────
+
+void VulkanRenderAPI::createPreviewResources(int w, int h)
+{
+    vkDeviceWaitIdle(device);
+    destroyPreviewResources();
+
+    preview_width_rt = w;
+    preview_height_rt = h;
+
+    VmaAllocationCreateInfo gpuAllocInfo{};
+    gpuAllocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+
+    // Color image
+    VkImageCreateInfo imageInfo{};
+    imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imageInfo.imageType = VK_IMAGE_TYPE_2D;
+    imageInfo.format = swapchain_format;
+    imageInfo.extent = { (uint32_t)w, (uint32_t)h, 1 };
+    imageInfo.mipLevels = 1;
+    imageInfo.arrayLayers = 1;
+    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    if (vmaCreateImage(vma_allocator, &imageInfo, &gpuAllocInfo,
+                       &preview_image, &preview_allocation, nullptr) != VK_SUCCESS) {
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create preview image");
+        return;
+    }
+
+    VkImageViewCreateInfo viewInfo{};
+    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewInfo.image = preview_image;
+    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    viewInfo.format = swapchain_format;
+    viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    viewInfo.subresourceRange.levelCount = 1;
+    viewInfo.subresourceRange.layerCount = 1;
+
+    if (vkCreateImageView(device, &viewInfo, nullptr, &preview_view) != VK_SUCCESS) {
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create preview image view");
+        return;
+    }
+
+    // Sampler
+    SamplerKey samplerKey{};
+    samplerKey.magFilter = VK_FILTER_LINEAR;
+    samplerKey.minFilter = VK_FILTER_LINEAR;
+    samplerKey.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerKey.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerKey.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerKey.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    samplerKey.anisotropyEnable = VK_FALSE;
+    samplerKey.maxAnisotropy = 1.0f;
+    samplerKey.compareEnable = VK_FALSE;
+    samplerKey.compareOp = VK_COMPARE_OP_ALWAYS;
+    samplerKey.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+    preview_sampler = sampler_cache.getOrCreate(samplerKey);
+
+    // Depth image
+    VkImageCreateInfo depthInfo{};
+    depthInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    depthInfo.imageType = VK_IMAGE_TYPE_2D;
+    depthInfo.format = depth_format;
+    depthInfo.extent = { (uint32_t)w, (uint32_t)h, 1 };
+    depthInfo.mipLevels = 1;
+    depthInfo.arrayLayers = 1;
+    depthInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    depthInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    depthInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    depthInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    if (vmaCreateImage(vma_allocator, &depthInfo, &gpuAllocInfo,
+                       &preview_depth_image, &preview_depth_allocation, nullptr) != VK_SUCCESS) {
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create preview depth image");
+        return;
+    }
+
+    VkImageViewCreateInfo depthViewInfo{};
+    depthViewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    depthViewInfo.image = preview_depth_image;
+    depthViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    depthViewInfo.format = depth_format;
+    depthViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    depthViewInfo.subresourceRange.levelCount = 1;
+    depthViewInfo.subresourceRange.layerCount = 1;
+
+    VkImageView preview_depth_view_local = VK_NULL_HANDLE;
+    if (vkCreateImageView(device, &depthViewInfo, nullptr, &preview_depth_view_local) != VK_SUCCESS) {
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create preview depth view");
+        return;
+    }
+    preview_depth_view = preview_depth_view_local;
+
+    // Register with ImGui
+    preview_imgui_ds = ImGui_ImplVulkan_AddTexture(preview_sampler, preview_view,
+                                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+    // Create framebuffer using viewport_resolve_pass (color-only, finalLayout = SHADER_READ_ONLY)
+    // This pass was created in createViewportResources — ensure it exists
+    if (viewport_resolve_pass == VK_NULL_HANDLE) {
+        LOG_ENGINE_ERROR("[Vulkan] viewport_resolve_pass not available for preview");
+        return;
+    }
+
+    VkFramebufferCreateInfo fbInfo{};
+    fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+    fbInfo.renderPass = viewport_resolve_pass;
+    fbInfo.attachmentCount = 1;
+    fbInfo.pAttachments = &preview_view;
+    fbInfo.width = (uint32_t)w;
+    fbInfo.height = (uint32_t)h;
+    fbInfo.layers = 1;
+
+    if (vkCreateFramebuffer(device, &fbInfo, nullptr, &preview_framebuffer) != VK_SUCCESS) {
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create preview framebuffer");
+        return;
+    }
+}
+
+void VulkanRenderAPI::destroyPreviewResources()
+{
+    if (preview_image == VK_NULL_HANDLE) return;
+
+    vkDeviceWaitIdle(device);
+
+    if (preview_imgui_ds != VK_NULL_HANDLE) {
+        ImGui_ImplVulkan_RemoveTexture(preview_imgui_ds);
+        preview_imgui_ds = VK_NULL_HANDLE;
+    }
+
+    if (preview_framebuffer != VK_NULL_HANDLE) {
+        vkDestroyFramebuffer(device, preview_framebuffer, nullptr);
+        preview_framebuffer = VK_NULL_HANDLE;
+    }
+
+    if (preview_depth_view != VK_NULL_HANDLE) {
+        vkDestroyImageView(device, preview_depth_view, nullptr);
+        preview_depth_view = VK_NULL_HANDLE;
+    }
+    if (preview_depth_image != VK_NULL_HANDLE && vma_allocator) {
+        vmaDestroyImage(vma_allocator, preview_depth_image, preview_depth_allocation);
+        preview_depth_image = VK_NULL_HANDLE;
+        preview_depth_allocation = nullptr;
+    }
+
+    if (preview_view != VK_NULL_HANDLE) {
+        vkDestroyImageView(device, preview_view, nullptr);
+        preview_view = VK_NULL_HANDLE;
+    }
+    if (preview_image != VK_NULL_HANDLE && vma_allocator) {
+        vmaDestroyImage(vma_allocator, preview_image, preview_allocation);
+        preview_image = VK_NULL_HANDLE;
+        preview_allocation = VK_NULL_HANDLE;
+    }
+
+    preview_sampler = VK_NULL_HANDLE;
+    preview_width_rt = 0;
+    preview_height_rt = 0;
+}
+
+void VulkanRenderAPI::beginPreviewFrame(int width, int height)
+{
+    if (width <= 0 || height <= 0) return;
+    if (!frame_started) return;
+
+    // Recreate if size changed
+    if (width != preview_width_rt || height != preview_height_rt)
+        createPreviewResources(width, height);
+
+    if (preview_framebuffer == VK_NULL_HANDLE) return;
+
+    VkCommandBuffer cmd = command_buffers[current_frame];
+
+    // End main pass if still active
+    if (main_pass_started) {
+        vkCmdEndRenderPass(cmd);
+        main_pass_started = false;
+    }
+
+    // Transition preview image to color attachment
+    VkImageMemoryBarrier barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = preview_image;
+    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    barrier.subresourceRange.levelCount = 1;
+    barrier.subresourceRange.layerCount = 1;
+    barrier.srcAccessMask = 0;
+    barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
+    vkCmdPipelineBarrier(cmd,
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+    // Begin render pass using offscreen_render_pass (color + depth)
+    // We need a framebuffer with both color and depth for the offscreen pass
+    // But our preview_framebuffer was created with viewport_resolve_pass (color only).
+    // Instead, use the viewport_resolve_pass for a simple blit.
+    // For proper 3D rendering, we start a render pass with just the color attachment.
+    VkRenderPassBeginInfo rpBegin{};
+    rpBegin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    rpBegin.renderPass = viewport_resolve_pass;
+    rpBegin.framebuffer = preview_framebuffer;
+    rpBegin.renderArea.offset = {0, 0};
+    rpBegin.renderArea.extent = { (uint32_t)width, (uint32_t)height };
+
+    VkClearValue clearValue{};
+    clearValue.color = {{0.12f, 0.12f, 0.14f, 1.0f}};
+    rpBegin.clearValueCount = 1;
+    rpBegin.pClearValues = &clearValue;
+
+    vkCmdBeginRenderPass(cmd, &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
+
+    // Bind graphics pipeline and set viewport/scissor
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, graphics_pipeline);
+    last_bound_pipeline = graphics_pipeline;
+
+    VkViewport vp{};
+    vp.width = static_cast<float>(width);
+    vp.height = static_cast<float>(height);
+    vp.maxDepth = 1.0f;
+    vkCmdSetViewport(cmd, 0, 1, &vp);
+
+    VkRect2D scissor{};
+    scissor.extent = { (uint32_t)width, (uint32_t)height };
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+    // Reset model matrix stack
+    model_matrix_stack = std::stack<glm::mat4>();
+    model_matrix_stack.push(glm::mat4(1.0f));
+}
+
+void VulkanRenderAPI::endPreviewFrame()
+{
+    if (!frame_started) return;
+
+    VkCommandBuffer cmd = command_buffers[current_frame];
+    vkCmdEndRenderPass(cmd);
+
+    // Transition preview image to shader-read for ImGui sampling
+    VkImageMemoryBarrier barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = preview_image;
+    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    barrier.subresourceRange.levelCount = 1;
+    barrier.subresourceRange.layerCount = 1;
+    barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+    vkCmdPipelineBarrier(cmd,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        0, 0, nullptr, 0, nullptr, 1, &barrier);
+}
+
+uint64_t VulkanRenderAPI::getPreviewTextureID()
+{
+    return reinterpret_cast<uint64_t>(preview_imgui_ds);
+}
+
+void VulkanRenderAPI::destroyPreviewTarget()
+{
+    destroyPreviewResources();
+}

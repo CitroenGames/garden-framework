@@ -3,6 +3,7 @@
 #include "Assets/AssetMetadata.hpp"
 #include "Assets/AssetMetadataSerializer.hpp"
 #include <string>
+#include <functional>
 #include <filesystem>
 
 namespace Assets { class AssetScanner; }
@@ -11,6 +12,7 @@ class LODSettingsPanel
 {
 public:
     Assets::AssetScanner* asset_scanner = nullptr;
+    std::function<void(const std::string&)> on_lods_generated;
 
     // Open the panel for a given mesh asset
     void open(const std::filesystem::path& mesh_path);
@@ -37,8 +39,13 @@ private:
         size_t vertex_count = 0;
     };
     std::vector<EditableLODLevel> m_lod_levels; // LOD1+, LOD0 is implicit (ratio=1.0)
-    float m_target_error = 0.01f;
+    float m_target_error = 0.05f;
     bool m_lock_borders = false;
+    bool m_allow_attribute_collapse = false;
+    bool m_prune_disconnected = false;
+
+    // LOD0 stats for computing achieved percentages
+    size_t m_lod0_triangle_count = 0;
 
     // Status
     bool m_needs_apply = false;

@@ -30,11 +30,15 @@ void LODSettingsPanel::close()
 void LODSettingsPanel::loadFromMetadata()
 {
     m_lod_levels.clear();
+    m_lod0_triangle_count = 0;
 
     if (m_has_metadata)
     {
         m_target_error = m_metadata.lod_config.target_error_threshold;
         m_lock_borders = m_metadata.lod_config.lock_borders;
+        m_allow_attribute_collapse = m_metadata.lod_config.allow_attribute_collapse;
+        m_prune_disconnected = m_metadata.lod_config.prune_disconnected;
+        m_lod0_triangle_count = m_metadata.triangle_count;
 
         // Skip LOD0 (it's always the original)
         for (size_t i = 1; i < m_metadata.lod_levels.size(); ++i)
@@ -50,8 +54,10 @@ void LODSettingsPanel::loadFromMetadata()
     else
     {
         // Default: 3 LOD levels
-        m_target_error = 0.01f;
+        m_target_error = 0.05f;
         m_lock_borders = false;
+        m_allow_attribute_collapse = false;
+        m_prune_disconnected = false;
         m_lod_levels.push_back({0.5f, 0.3f, 0, 0});
         m_lod_levels.push_back({0.25f, 0.15f, 0, 0});
         m_lod_levels.push_back({0.1f, 0.05f, 0, 0});
@@ -98,6 +104,8 @@ void LODSettingsPanel::applyChanges()
         config.target_ratios.push_back(level.target_ratio);
     config.target_error_threshold = m_target_error;
     config.lock_borders = m_lock_borders;
+    config.allow_attribute_collapse = m_allow_attribute_collapse;
+    config.prune_disconnected = m_prune_disconnected;
 
     // Collect screen thresholds to write back after generation
     std::vector<float> screen_thresholds;
@@ -125,6 +133,10 @@ void LODSettingsPanel::applyChanges()
         std::string meta_path = Assets::AssetMetadataSerializer::getMetaPath(path_str);
         m_has_metadata = Assets::AssetMetadataSerializer::load(m_metadata, meta_path);
         loadFromMetadata();
+
+        // Hot-reload LODs into live meshes
+        if (on_lods_generated)
+            on_lods_generated(path_str);
     }
     else
     {
@@ -157,6 +169,49 @@ void LODSettingsPanel::draw()
         ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.2f, 1.0f), "No metadata generated yet");
     }
 
+    ImGui::Separator();
+
+    // --- Simplification Quality (promoted from Advanced — most impactful control) ---
+    ImGui::SetNextItemWidth(200.0f);
+    if (ImGui::SliderFloat("Quality", &m_target_error, 0.001f, 1.0f, "%.3f", ImGuiSliderFlags_Logarithmic))
+        m_needs_apply = true;
+    ImGui::SameLine();
+    ImGui::TextDisabled("(?)");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip(
+            "Controls how much the mesh shape can change during simplification.\n"
+            "Lower values preserve detail but may not reach the target triangle count.\n"
+            "Higher values allow more aggressive reduction.\n\n"
+            "Recommended: 0.01 - 0.1 for most meshes.\n"
+            "If LODs aren't reaching their target %%, increase this value.");
+
+    if (ImGui::Checkbox("Lock Borders", &m_lock_borders))
+        m_needs_apply = true;
+    ImGui::SameLine();
+    ImGui::TextDisabled("(?)");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Prevents simplification from collapsing border edges.\nUseful for tiling meshes or modular geometry.");
+
+    if (ImGui::Checkbox("Collapse Across Seams", &m_allow_attribute_collapse))
+        m_needs_apply = true;
+    ImGui::SameLine();
+    ImGui::TextDisabled("(?)");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip(
+            "Allow simplification to collapse edges across UV seams and hard edges.\n"
+            "Enables much more aggressive reduction on complex models.\n"
+            "May cause minor UV/normal artifacts at seam boundaries.");
+
+    if (ImGui::Checkbox("Prune Disconnected", &m_prune_disconnected))
+        m_needs_apply = true;
+    ImGui::SameLine();
+    ImGui::TextDisabled("(?)");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip(
+            "Remove small disconnected parts of the mesh during simplification.\n"
+            "Useful for models with floating geometry or debris.");
+
+    ImGui::Spacing();
     ImGui::Separator();
 
     // --- LOD0 (always present, not editable) ---
@@ -208,8 +263,31 @@ void LODSettingsPanel::draw()
         ImGui::SameLine();
         ImGui::TextDisabled("(switch when below this)");
 
-        // Stats (read-only, from last generation)
-        if (level.triangle_count > 0)
+        // Stats with achieved vs target comparison
+        if (level.triangle_count > 0 && m_lod0_triangle_count > 0)
+        {
+            float achieved_pct = static_cast<float>(level.triangle_count) / static_cast<float>(m_lod0_triangle_count) * 100.0f;
+            float target_pct = level.target_ratio * 100.0f;
+            float diff = achieved_pct - target_pct;
+
+            ImGui::Text("Triangles: %zu  |  Vertices: %zu", level.triangle_count, level.vertex_count);
+
+            // Show achieved percentage with color coding
+            if (diff > 5.0f)
+            {
+                // Achieved is significantly higher than target — simplification couldn't reach target
+                ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.2f, 1.0f),
+                    "Achieved: %.0f%%  (target: %.0f%% - increase Quality to reach target)",
+                    achieved_pct, target_pct);
+            }
+            else
+            {
+                // Close to target
+                ImGui::TextColored(ImVec4(0.5f, 0.8f, 0.5f, 1.0f),
+                    "Achieved: %.0f%%", achieved_pct);
+            }
+        }
+        else if (level.triangle_count > 0)
         {
             ImGui::TextDisabled("Triangles: %zu  |  Vertices: %zu", level.triangle_count, level.vertex_count);
         }
@@ -228,30 +306,6 @@ void LODSettingsPanel::draw()
     // --- Add LOD button ---
     if (ImGui::Button("+ Add LOD Level"))
         addLODLevel();
-
-    ImGui::Spacing();
-    ImGui::Separator();
-
-    // --- Advanced Settings ---
-    if (ImGui::TreeNode("Advanced"))
-    {
-        ImGui::SetNextItemWidth(200.0f);
-        if (ImGui::SliderFloat("Error Threshold", &m_target_error, 0.001f, 0.1f, "%.4f"))
-            m_needs_apply = true;
-        ImGui::SameLine();
-        ImGui::TextDisabled("(?)");
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Maximum simplification error allowed.\nLower = more accurate but fewer triangles removed.\nHigher = more aggressive simplification.");
-
-        if (ImGui::Checkbox("Lock Borders", &m_lock_borders))
-            m_needs_apply = true;
-        ImGui::SameLine();
-        ImGui::TextDisabled("(?)");
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Prevents simplification from collapsing border edges.\nUseful for tiling meshes or modular geometry.");
-
-        ImGui::TreePop();
-    }
 
     ImGui::Spacing();
     ImGui::Separator();

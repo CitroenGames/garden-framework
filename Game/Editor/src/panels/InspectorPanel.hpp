@@ -3,6 +3,7 @@
 #include <entt/entt.hpp>
 #include <unordered_map>
 #include <string>
+#include <glm/glm.hpp>
 #include "imgui.h"
 
 class InspectorPanel
@@ -10,6 +11,10 @@ class InspectorPanel
 public:
     // entity -> original mesh file path (ECS holds GPU ptr, not a string)
     std::unordered_map<entt::entity, std::string> mesh_path_cache;
+
+    // Set by EditorApp each frame for LOD debug display
+    glm::vec3 debug_cam_pos{0.0f};
+    glm::mat4 debug_projection{1.0f};
 
     // Draw the inspector for the selected entity.
     // Returns true if any transform was modified (so caller can mark BVH dirty).
@@ -19,7 +24,9 @@ public:
               bool* out_unsaved = nullptr, bool* out_edit_started = nullptr);
 
 private:
-    // Helper to draw a removable component header with an accent color bar.
+    char m_filter_buf[256] = {0};
+
+    // Helper to draw a UE5-style component header.
     // Returns true if the section is open.
     // Sets *removed = true if the user clicks the remove button.
     bool drawComponentHeader(const char* label, bool can_remove, bool* removed,

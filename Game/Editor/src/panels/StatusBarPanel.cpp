@@ -20,7 +20,7 @@ void StatusBarPanel::draw(const EditorState& state)
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.08f, 0.08f, 0.08f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.09f, 0.08f, 0.07f, 1.0f));
 
     if (ImGui::Begin("##StatusBar", nullptr, flags))
     {
@@ -28,7 +28,7 @@ void StatusBarPanel::draw(const EditorState& state)
         ImDrawList* draw_list = ImGui::GetWindowDrawList();
         ImVec2 win_pos = ImGui::GetWindowPos();
         draw_list->AddLine(win_pos, ImVec2(win_pos.x + viewport->Size.x, win_pos.y),
-                           IM_COL32(50, 50, 50, 255), 1.0f);
+                           IM_COL32(45, 42, 38, 255), 1.0f);
 
         // Left side: stats
         ImGui::Text("FPS: %.0f | Entities: %zu | Visible: %zu | Draws: %zu",

@@ -15,15 +15,17 @@ public:
                          const glm::vec3& aabb_max,
                          const glm::mat4& projection,
                          int lod_count,
-                         const float* screen_thresholds)
+                         const float* screen_thresholds,
+                         const glm::vec3& scale = glm::vec3(1.0f))
     {
         if (lod_count <= 1)
             return 0;
 
-        float coverage = computeScreenCoverage(camera_pos, object_pos, aabb_min, aabb_max, projection);
+        float coverage = computeScreenCoverage(camera_pos, object_pos, aabb_min, aabb_max, projection, scale);
 
-        // Walk from lowest LOD to highest, find the first LOD whose threshold
-        // is less than or equal to the coverage
+        // Walk from coarsest LOD to finest. Thresholds should decrease
+        // (LOD1 highest, LODn lowest). Return the coarsest LOD where
+        // coverage <= threshold.
         for (int i = lod_count - 1; i >= 1; --i)
         {
             if (coverage <= screen_thresholds[i])
@@ -39,17 +41,18 @@ public:
                                         const glm::vec3& object_pos,
                                         const glm::vec3& aabb_min,
                                         const glm::vec3& aabb_max,
-                                        const glm::mat4& projection)
+                                        const glm::mat4& projection,
+                                        const glm::vec3& scale = glm::vec3(1.0f))
     {
-        // Bounding sphere radius from AABB
-        glm::vec3 extent = (aabb_max - aabb_min) * 0.5f;
+        // Bounding sphere radius from AABB, scaled to world space
+        glm::vec3 extent = (aabb_max - aabb_min) * 0.5f * glm::abs(scale);
         float radius = glm::length(extent);
 
         if (radius <= 0.0f)
             return 0.0f;
 
-        // Distance from camera to object center
-        glm::vec3 center = (aabb_min + aabb_max) * 0.5f + object_pos;
+        // Distance from camera to object center (scaled local center + world position)
+        glm::vec3 center = (aabb_min + aabb_max) * 0.5f * scale + object_pos;
         float distance = glm::length(center - camera_pos);
 
         if (distance <= radius)

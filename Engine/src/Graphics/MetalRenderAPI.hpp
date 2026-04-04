@@ -78,6 +78,12 @@ public:
     virtual void setViewportSize(int width, int height) override;
     virtual void renderUI() override;
 
+    // Preview render target (for asset preview panel)
+    virtual void beginPreviewFrame(int width, int height) override;
+    virtual void endPreviewFrame() override;
+    virtual uint64_t getPreviewTextureID() override;
+    virtual void destroyPreviewTarget() override;
+
     // Metal-specific accessors for ImGui integration
     void* getDevice() const;           // Returns id<MTLDevice> as void*
     void* getCommandBuffer() const;    // Returns id<MTLCommandBuffer> as void*

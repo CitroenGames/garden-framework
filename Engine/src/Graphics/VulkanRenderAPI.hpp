@@ -502,4 +502,25 @@ public:
     virtual uint64_t getViewportTextureID() override;
     virtual void setViewportSize(int width, int height) override;
     virtual void renderUI() override;
+
+    // Preview render target (for asset preview panel)
+    virtual void beginPreviewFrame(int width, int height) override;
+    virtual void endPreviewFrame() override;
+    virtual uint64_t getPreviewTextureID() override;
+    virtual void destroyPreviewTarget() override;
+
+private:
+    // Preview render target resources
+    VkImage preview_image = VK_NULL_HANDLE;
+    VmaAllocation preview_allocation = VK_NULL_HANDLE;
+    VkImageView preview_view = VK_NULL_HANDLE;
+    VkSampler preview_sampler = VK_NULL_HANDLE;
+    VkDescriptorSet preview_imgui_ds = VK_NULL_HANDLE;
+    VkImage preview_depth_image = VK_NULL_HANDLE;
+    VmaAllocation preview_depth_allocation = nullptr;
+    VkImageView preview_depth_view = VK_NULL_HANDLE;
+    VkFramebuffer preview_framebuffer = VK_NULL_HANDLE;
+    int preview_width_rt = 0, preview_height_rt = 0;
+    void createPreviewResources(int w, int h);
+    void destroyPreviewResources();
 };
