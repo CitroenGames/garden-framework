@@ -65,4 +65,12 @@ public:
     virtual bool isFXAAEnabled() const override { return false; }
     virtual void setShadowQuality(int quality) override {}
     virtual int getShadowQuality() const override { return 0; }
+
+    // PIE viewport render targets (no-op for headless)
+    int createPIEViewport(int, int) override { return -1; }
+    void destroyPIEViewport(int) override {}
+    void destroyAllPIEViewports() override {}
+    void setPIEViewportSize(int, int, int) override {}
+    void setActiveSceneTarget(int) override {}
+    uint64_t getPIEViewportTextureID(int) override { return 0; }
 };

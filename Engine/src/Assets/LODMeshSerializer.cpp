@@ -6,7 +6,7 @@
 namespace Assets {
 
 static constexpr uint32_t LODBIN_MAGIC = 0x4C4F4446; // "LODF"
-static constexpr uint32_t LODBIN_VERSION = 1;
+static constexpr uint32_t LODBIN_VERSION = 2;
 
 bool LODMeshSerializer::save(const LODMeshData& lod_data, const std::string& filepath)
 {
@@ -37,6 +37,19 @@ bool LODMeshSerializer::save(const LODMeshData& lod_data, const std::string& fil
     if (index_count > 0)
         file.write(reinterpret_cast<const char*>(lod_data.indices.data()), index_count * sizeof(uint32_t));
 
+    // V2: Write submesh ranges
+    uint32_t submesh_count = static_cast<uint32_t>(lod_data.submesh_ranges.size());
+    file.write(reinterpret_cast<const char*>(&submesh_count), sizeof(submesh_count));
+    for (const auto& range : lod_data.submesh_ranges)
+    {
+        uint32_t start = static_cast<uint32_t>(range.start_index);
+        uint32_t count = static_cast<uint32_t>(range.index_count);
+        uint32_t id = static_cast<uint32_t>(range.submesh_id);
+        file.write(reinterpret_cast<const char*>(&start), sizeof(start));
+        file.write(reinterpret_cast<const char*>(&count), sizeof(count));
+        file.write(reinterpret_cast<const char*>(&id), sizeof(id));
+    }
+
     return true;
 }
 
@@ -59,7 +72,7 @@ bool LODMeshSerializer::load(LODMeshData& lod_data, const std::string& filepath)
     }
 
     file.read(reinterpret_cast<char*>(&version), sizeof(version));
-    if (version != LODBIN_VERSION)
+    if (version != 1 && version != 2)
     {
         printf("LODMeshSerializer: Unsupported version %u in %s\n", version, filepath.c_str());
         return false;
@@ -78,6 +91,22 @@ bool LODMeshSerializer::load(LODMeshData& lod_data, const std::string& filepath)
 
     if (index_count > 0)
         file.read(reinterpret_cast<char*>(lod_data.indices.data()), index_count * sizeof(uint32_t));
+
+    // V2: Read submesh ranges
+    lod_data.submesh_ranges.clear();
+    if (version >= 2)
+    {
+        uint32_t submesh_count = 0;
+        file.read(reinterpret_cast<char*>(&submesh_count), sizeof(submesh_count));
+        for (uint32_t i = 0; i < submesh_count; ++i)
+        {
+            uint32_t start = 0, count = 0, id = 0;
+            file.read(reinterpret_cast<char*>(&start), sizeof(start));
+            file.read(reinterpret_cast<char*>(&count), sizeof(count));
+            file.read(reinterpret_cast<char*>(&id), sizeof(id));
+            lod_data.submesh_ranges.push_back({start, count, id});
+        }
+    }
 
     if (!file)
     {

@@ -55,6 +55,16 @@ static std::string parseProjectPath(int argc, char* argv[])
     return "";
 }
 
+static uint16_t parsePort(int argc, char* argv[])
+{
+    for (int i = 1; i < argc - 1; i++)
+    {
+        if (strcmp(argv[i], "--port") == 0)
+            return static_cast<uint16_t>(atoi(argv[i + 1]));
+    }
+    return 0;
+}
+
 static std::string findGardenFile(const fs::path& dir)
 {
     if (!fs::exists(dir) || !fs::is_directory(dir))
@@ -145,6 +155,8 @@ int main(int argc, char* argv[])
     }
 
     // Initialize server via DLL
+    uint16_t listen_port = parsePort(argc, argv);
+
     EngineServices services{};
     services.game_world = &_world;
     services.render_api = render_api;
@@ -153,6 +165,7 @@ int main(int argc, char* argv[])
     services.application = &app;
     services.level_manager = &level_manager;
     services.api_version = GARDEN_MODULE_API_VERSION;
+    services.listen_port = listen_port;
 
     game_module.registerComponents(&reflection);
 

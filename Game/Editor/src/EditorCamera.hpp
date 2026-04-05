@@ -9,7 +9,6 @@ class EditorCamera
 public:
     camera cam;
     float movement_speed = 8.0f;
-    float fast_speed = 24.0f;
     float sensitivity = 0.002f;   // radians per pixel
 
     EditorCamera();
@@ -21,4 +20,7 @@ public:
     void update(float dt, bool looking_active,
                 float mouse_dx, float mouse_dy,
                 const Uint8* keyboard_state);
+
+    // Adjust movement speed via scroll wheel (each notch ≈ 10% change).
+    void adjustSpeed(float scroll_delta);
 };

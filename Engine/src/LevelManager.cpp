@@ -896,6 +896,23 @@ std::shared_ptr<mesh> LevelManager::loadMesh(const LevelEntity& entity, IRenderA
                                 lod_data.indices.data(), lod_data.indices.size()
                             );
                         }
+
+                        // Map LOD submesh ranges to original mesh's material textures
+                        if (!lod_data.submesh_ranges.empty() && m_ptr->uses_material_ranges)
+                        {
+                            for (const auto& sr : lod_data.submesh_ranges)
+                            {
+                                TextureHandle tex = INVALID_TEXTURE;
+                                std::string mat_name = "";
+                                if (sr.submesh_id < m_ptr->material_ranges.size())
+                                {
+                                    tex = m_ptr->material_ranges[sr.submesh_id].texture;
+                                    mat_name = m_ptr->material_ranges[sr.submesh_id].material_name;
+                                }
+                                level.material_ranges.emplace_back(sr.start_index, sr.index_count, tex, mat_name);
+                            }
+                        }
+
                         m_ptr->lod_levels.push_back(std::move(level));
                     }
                 }

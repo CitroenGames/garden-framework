@@ -17,6 +17,14 @@
 #include <cstring>
 #include <filesystem>
 
+#ifdef _WIN32
+static constexpr const char* PIE_GAME_EXE_NAME   = "Game.exe";
+static constexpr const char* PIE_SERVER_EXE_NAME  = "Server.exe";
+#else
+static constexpr const char* PIE_GAME_EXE_NAME   = "Game";
+static constexpr const char* PIE_SERVER_EXE_NAME  = "Server";
+#endif
+
 bool EditorApp::initialize(RenderAPIType api_type)
 {
     std::strncpy(m_open_path_buf, "assets/levels/", sizeof(m_open_path_buf) - 1);
@@ -79,6 +87,12 @@ bool EditorApp::initialize(RenderAPIType api_type)
     m_toolbar.callbacks.on_stop   = [this]() { stopPlay(); };
     m_toolbar.callbacks.on_eject  = [this]() { ejectFromPlay(); };
     m_toolbar.callbacks.on_return = [this]() { returnToPlay(); };
+
+    // Check if project has a game module DLL for network PIE
+    {
+        std::string dll_path = m_project_manager.getAbsoluteModulePath();
+        m_toolbar.has_game_module = !dll_path.empty() && std::filesystem::exists(dll_path);
+    }
 
     m_viewport.toolbar = &m_toolbar;
     m_viewport.show_toolbar = &m_show_toolbar;
@@ -204,19 +218,39 @@ void EditorApp::run()
         processEvents();
 
         // --- Simulation tick (when active and running) ---
-        if (m_state.isSimulationRunning() && m_game_sim)
+        if (m_state.isSimulationRunning())
         {
-            // Forward mouse motion to player controller (only when mouse is captured)
-            if (m_mouse_captured_for_game && m_game_input_manager)
+            if (m_network_pie_active)
             {
-                float mx = m_game_input_manager->get_mouse_delta_x();
-                float my = m_game_input_manager->get_mouse_delta_y();
-                if (mx != 0.0f || my != 0.0f)
-                    m_game_sim->handleMouseMotion(my, mx);
-            }
+                // Network PIE: tick server (if listen server), then all clients
+                if (m_state.network_pie.net_mode == PIENetMode::ListenServer)
+                    m_game_module.serverUpdate(m_delta_time);
 
-            m_game_sim->update(m_delta_time);
-            m_renderer.markBVHDirty(); // entities moved during simulation
+                // Tick Player 1 (main editor viewport)
+                m_game_module.update(m_delta_time);
+                m_renderer.markBVHDirty();
+
+                // Tick additional in-editor PIE clients
+                for (auto& inst : m_pie_clients)
+                {
+                    if (inst && inst->initialized)
+                        inst->game_module.update(m_delta_time);
+                }
+            }
+            else if (m_game_sim)
+            {
+                // Standalone: existing GameSimulation path
+                if (m_mouse_captured_for_game && m_game_input_manager)
+                {
+                    float mx = m_game_input_manager->get_mouse_delta_x();
+                    float my = m_game_input_manager->get_mouse_delta_y();
+                    if (mx != 0.0f || my != 0.0f)
+                        m_game_sim->handleMouseMotion(my, mx);
+                }
+
+                m_game_sim->update(m_delta_time);
+                m_renderer.markBVHDirty();
+            }
         }
 
         // --- Editor camera update (editing or ejected) ---
@@ -248,6 +282,30 @@ void EditorApp::run()
         IRenderAPI* render_api = m_app.getRenderAPI();
         render_api->setViewportSize(m_viewport.width, m_viewport.height);
         m_renderer.render_scene_to_texture(m_world.registry, render_camera);
+
+        // --- Phase 1b: Render additional PIE client viewports ---
+        for (auto& inst : m_pie_clients)
+        {
+            if (!inst || !inst->initialized || inst->viewport_id < 0)
+                continue;
+
+            // Resize PIE viewport if needed
+            render_api->setPIEViewportSize(inst->viewport_id, inst->viewport_width, inst->viewport_height);
+
+            // Redirect the next render to this PIE viewport's render target
+            render_api->setActiveSceneTarget(inst->viewport_id);
+            render_api->setViewportSize(inst->viewport_width, inst->viewport_height);
+
+            // Render the client's world using its camera
+            m_renderer.render_scene_to_texture(inst->client_world.registry,
+                                                inst->client_world.world_camera);
+
+            // setActiveSceneTarget(-1) is called inside endSceneRender() automatically
+        }
+
+        // Restore main viewport size
+        if (!m_pie_clients.empty())
+            render_api->setViewportSize(m_viewport.width, m_viewport.height);
 
         // Update editor state stats (after scene render so stats are current)
         m_state.fps = ImGui::GetIO().Framerate;
@@ -298,6 +356,43 @@ void EditorApp::run()
                 }
             }
 
+            // --- PIE client viewports (additional players, rendered as dockable windows) ---
+            for (auto& inst : m_pie_clients)
+            {
+                if (!inst || !inst->initialized || inst->viewport_id < 0)
+                    continue;
+
+                ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+                bool open = true;
+                ImGui::Begin(inst->window_title.c_str(), &open,
+                    ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+
+                // Track available size for this viewport
+                ImVec2 avail = ImGui::GetContentRegionAvail();
+                int new_w = static_cast<int>(avail.x);
+                int new_h = static_cast<int>(avail.y);
+                if (new_w > 0 && new_h > 0)
+                {
+                    inst->viewport_width = new_w;
+                    inst->viewport_height = new_h;
+                }
+
+                // Display the PIE viewport texture
+                ImTextureID pie_tex = (ImTextureID)render_api->getPIEViewportTextureID(inst->viewport_id);
+                if (pie_tex)
+                    ImGui::Image(pie_tex, avail);
+
+                // Show a colored border to indicate this is a PIE client
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                ImVec2 win_min = ImGui::GetWindowPos();
+                ImVec2 win_max = ImVec2(win_min.x + ImGui::GetWindowSize().x,
+                                        win_min.y + ImGui::GetWindowSize().y);
+                dl->AddRect(win_min, win_max, IM_COL32(51, 204, 51, 180), 0.0f, 0, 2.0f);
+
+                ImGui::End();
+                ImGui::PopStyleVar();
+            }
+
             if (m_show_hierarchy)
                 m_hierarchy.draw(m_world.registry, &bvh_dirty, &m_state.unsaved_changes);
 
@@ -342,7 +437,11 @@ void EditorApp::run()
 
             // Status bar (fixed at bottom)
             if (m_show_status_bar)
+            {
+                m_status_bar.network_pie_active = m_network_pie_active;
+                m_status_bar.spawned_processes = m_pie_processes.countRunning();
                 m_status_bar.draw(m_state);
+            }
 
             renderOpenDialog();
             renderSaveAsDialog();
@@ -414,6 +513,23 @@ void EditorApp::reloadLODsForMesh(const std::string& mesh_path)
                         lod_data.indices.data(), lod_data.indices.size()
                     );
                 }
+
+                // Map LOD submesh ranges to original mesh's material textures
+                if (!lod_data.submesh_ranges.empty() && m.uses_material_ranges)
+                {
+                    for (const auto& sr : lod_data.submesh_ranges)
+                    {
+                        TextureHandle tex = INVALID_TEXTURE;
+                        std::string mat_name = "";
+                        if (sr.submesh_id < m.material_ranges.size())
+                        {
+                            tex = m.material_ranges[sr.submesh_id].texture;
+                            mat_name = m.material_ranges[sr.submesh_id].material_name;
+                        }
+                        level.material_ranges.emplace_back(sr.start_index, sr.index_count, tex, mat_name);
+                    }
+                }
+
                 m.lod_levels.push_back(std::move(level));
             }
         }
@@ -492,14 +608,323 @@ void EditorApp::beginPlay()
         m_pre_play_selected_name = m_world.registry.get<TagComponent>(m_hierarchy.selected_entity).name;
     }
 
-    // 2. Create input manager for game simulation
-    m_game_input_manager = std::make_shared<InputManager>();
+    // Determine if we should use the game DLL for network PIE
+    bool use_network_pie = (m_state.network_pie.net_mode != PIENetMode::Standalone);
+    std::string dll_path = m_project_manager.getAbsoluteModulePath();
 
-    // 3. Create and initialize game simulation
-    m_game_sim = std::make_unique<GameSimulation>(&m_world, m_game_input_manager);
-    m_game_sim->initialize();
+    if (use_network_pie && (dll_path.empty() || !std::filesystem::exists(dll_path)))
+    {
+        LOG_ENGINE_WARN("Network PIE requested but no game module found — falling back to Standalone");
+        use_network_pie = false;
+    }
 
-    // 4. Enter playing state (mouse stays free until user clicks viewport)
+    if (use_network_pie)
+    {
+        // ---- Network PIE path: load game DLL, run server + client ----
+
+        // Load game DLL
+        if (!m_game_module.load(dll_path))
+        {
+            LOG_ENGINE_ERROR("Failed to load game module '{}' — falling back to Standalone", dll_path);
+            use_network_pie = false;
+        }
+    }
+
+    if (use_network_pie && m_state.network_pie.net_mode == PIENetMode::ListenServer)
+    {
+        // --- Listen Server: server + client in-process ---
+
+        if (!m_game_module.hasServerSupport())
+        {
+            LOG_ENGINE_WARN("Game module has no server support — falling back to Standalone");
+            m_game_module.unload();
+            use_network_pie = false;
+        }
+        else
+        {
+            uint16_t port = m_state.network_pie.server_port;
+
+            // Initialize a separate server world
+            m_server_world = world();
+            m_server_world.initializePhysics();
+
+            // Instantiate level into server world
+            m_level_manager.instantiateLevel(m_play_snapshot, m_server_world,
+                m_app.getRenderAPI(), nullptr, nullptr, nullptr);
+
+            // Set up server EngineServices
+            m_server_services = {};
+            m_server_services.game_world    = &m_server_world;
+            m_server_services.render_api    = m_app.getRenderAPI();
+            m_server_services.input_manager = nullptr;
+            m_server_services.reflection    = &m_reflection;
+            m_server_services.application   = &m_app;
+            m_server_services.level_manager = &m_level_manager;
+            m_server_services.api_version   = GARDEN_MODULE_API_VERSION;
+            m_server_services.listen_port   = port;
+
+            m_game_module.registerComponents(&m_reflection);
+
+            if (!m_game_module.serverInit(&m_server_services))
+            {
+                LOG_ENGINE_ERROR("Server initialization failed — falling back to Standalone");
+                m_server_world.resetWorld();
+                m_game_module.unload();
+                use_network_pie = false;
+            }
+            else
+            {
+                m_game_module.serverOnLevelLoaded();
+
+                // Create input manager for client
+                m_game_input_manager = std::make_shared<InputManager>();
+
+                // Set up client EngineServices
+                m_client_services = {};
+                m_client_services.game_world      = &m_world;
+                m_client_services.render_api       = m_app.getRenderAPI();
+                m_client_services.input_manager    = m_game_input_manager.get();
+                m_client_services.reflection       = &m_reflection;
+                m_client_services.application      = &m_app;
+                m_client_services.level_manager    = &m_level_manager;
+                m_client_services.api_version      = GARDEN_MODULE_API_VERSION;
+                m_client_services.connect_address  = "127.0.0.1";
+                m_client_services.connect_port     = port;
+
+                if (!m_game_module.init(&m_client_services))
+                {
+                    LOG_ENGINE_ERROR("Client initialization failed");
+                    m_game_module.serverShutdown();
+                    m_server_world.resetWorld();
+                    m_game_module.unload();
+                    use_network_pie = false;
+                }
+                else
+                {
+                    m_game_module.onLevelLoaded();
+                    m_network_pie_active = true;
+
+                    // Launch additional players based on run mode
+                    if (m_state.network_pie.num_players > 1)
+                    {
+                        if (m_state.network_pie.run_mode == PIERunMode::InEditor)
+                        {
+                            // In-Editor mode: load DLL copies for each additional client
+                            for (int i = 2; i <= m_state.network_pie.num_players; i++)
+                            {
+                                auto inst = std::make_unique<PIEClientInstance>();
+                                inst->player_index = i;
+                                inst->window_title = "Player " + std::to_string(i);
+
+                                // Create isolated world
+                                inst->client_world = world();
+                                inst->client_world.initializePhysics();
+                                m_level_manager.instantiateLevel(m_play_snapshot, inst->client_world,
+                                    m_app.getRenderAPI(), nullptr, nullptr, nullptr);
+
+                                // Load a separate DLL copy (hot-reload mechanism gives us isolation)
+                                if (!inst->game_module.load(dll_path))
+                                {
+                                    LOG_ENGINE_WARN("Failed to load DLL copy for Player {}", i);
+                                    inst->client_world.resetWorld();
+                                    continue;
+                                }
+
+                                // Create render target
+                                inst->viewport_id = m_app.getRenderAPI()->createPIEViewport(640, 480);
+                                if (inst->viewport_id < 0)
+                                {
+                                    LOG_ENGINE_WARN("Failed to create PIE viewport for Player {}", i);
+                                    inst->game_module.unload();
+                                    inst->client_world.resetWorld();
+                                    continue;
+                                }
+
+                                // Set up input and services
+                                inst->input_manager = std::make_shared<InputManager>();
+                                inst->services = {};
+                                inst->services.game_world      = &inst->client_world;
+                                inst->services.render_api       = m_app.getRenderAPI();
+                                inst->services.input_manager    = inst->input_manager.get();
+                                inst->services.reflection       = &m_reflection;
+                                inst->services.application      = &m_app;
+                                inst->services.level_manager    = &m_level_manager;
+                                inst->services.api_version      = GARDEN_MODULE_API_VERSION;
+                                inst->services.connect_address  = "127.0.0.1";
+                                inst->services.connect_port     = port;
+
+                                inst->game_module.registerComponents(&m_reflection);
+                                if (!inst->game_module.init(&inst->services))
+                                {
+                                    LOG_ENGINE_WARN("Client init failed for Player {}", i);
+                                    m_app.getRenderAPI()->destroyPIEViewport(inst->viewport_id);
+                                    inst->game_module.unload();
+                                    inst->client_world.resetWorld();
+                                    continue;
+                                }
+
+                                inst->game_module.onLevelLoaded();
+                                inst->initialized = true;
+                                LOG_ENGINE_INFO("PIE: Player {} initialized in-editor", i);
+
+                                m_pie_clients.push_back(std::move(inst));
+                            }
+                        }
+                        else
+                        {
+                            // Separate Windows mode: spawn Game.exe for each additional player
+                            std::filesystem::path exe_dir = EnginePaths::getExecutableDir();
+                            std::string game_exe = (exe_dir / PIE_GAME_EXE_NAME).string();
+                            std::string project_path = m_project_manager.getProjectFilePath();
+
+                            for (int i = 2; i <= m_state.network_pie.num_players; i++)
+                            {
+                                if (!m_pie_processes.spawnClient(i, game_exe, project_path, "127.0.0.1", port))
+                                    LOG_ENGINE_WARN("Failed to spawn Player {}", i);
+                            }
+                        }
+                    }
+
+                    LOG_ENGINE_INFO("--- PIE: Listen Server started on port {} ---", port);
+                }
+            }
+        }
+    }
+    else if (use_network_pie && m_state.network_pie.net_mode == PIENetMode::DedicatedServer)
+    {
+        // --- Dedicated Server: spawn Server.exe, editor runs as client ---
+
+        uint16_t port = m_state.network_pie.server_port;
+        std::filesystem::path exe_dir = EnginePaths::getExecutableDir();
+        std::string server_exe = (exe_dir / PIE_SERVER_EXE_NAME).string();
+        std::string game_exe = (exe_dir / PIE_GAME_EXE_NAME).string();
+        std::string project_path = m_project_manager.getProjectFilePath();
+
+        // Spawn dedicated server process
+        if (!m_pie_processes.spawnServer(server_exe, project_path, port))
+        {
+            LOG_ENGINE_ERROR("Failed to spawn dedicated server — falling back to Standalone");
+            m_game_module.unload();
+            use_network_pie = false;
+        }
+        else
+        {
+            // Give server a brief moment to start listening
+            SDL_Delay(500);
+
+            // Create input manager for client
+            m_game_input_manager = std::make_shared<InputManager>();
+
+            // Register components
+            m_game_module.registerComponents(&m_reflection);
+
+            // Set up client EngineServices
+            m_client_services = {};
+            m_client_services.game_world      = &m_world;
+            m_client_services.render_api       = m_app.getRenderAPI();
+            m_client_services.input_manager    = m_game_input_manager.get();
+            m_client_services.reflection       = &m_reflection;
+            m_client_services.application      = &m_app;
+            m_client_services.level_manager    = &m_level_manager;
+            m_client_services.api_version      = GARDEN_MODULE_API_VERSION;
+            m_client_services.connect_address  = "127.0.0.1";
+            m_client_services.connect_port     = port;
+
+            if (!m_game_module.init(&m_client_services))
+            {
+                LOG_ENGINE_ERROR("Client initialization failed");
+                m_pie_processes.killAll();
+                m_game_module.unload();
+                use_network_pie = false;
+            }
+            else
+            {
+                m_game_module.onLevelLoaded();
+                m_network_pie_active = true;
+
+                // Launch additional players based on run mode
+                if (m_state.network_pie.num_players > 1)
+                {
+                    if (m_state.network_pie.run_mode == PIERunMode::InEditor)
+                    {
+                        for (int i = 2; i <= m_state.network_pie.num_players; i++)
+                        {
+                            auto inst = std::make_unique<PIEClientInstance>();
+                            inst->player_index = i;
+                            inst->window_title = "Player " + std::to_string(i);
+                            inst->client_world = world();
+                            inst->client_world.initializePhysics();
+                            m_level_manager.instantiateLevel(m_play_snapshot, inst->client_world,
+                                m_app.getRenderAPI(), nullptr, nullptr, nullptr);
+
+                            if (!inst->game_module.load(dll_path))
+                            {
+                                LOG_ENGINE_WARN("Failed to load DLL copy for Player {}", i);
+                                inst->client_world.resetWorld();
+                                continue;
+                            }
+
+                            inst->viewport_id = m_app.getRenderAPI()->createPIEViewport(640, 480);
+                            if (inst->viewport_id < 0)
+                            {
+                                LOG_ENGINE_WARN("Failed to create PIE viewport for Player {}", i);
+                                inst->game_module.unload();
+                                inst->client_world.resetWorld();
+                                continue;
+                            }
+
+                            inst->input_manager = std::make_shared<InputManager>();
+                            inst->services = {};
+                            inst->services.game_world      = &inst->client_world;
+                            inst->services.render_api       = m_app.getRenderAPI();
+                            inst->services.input_manager    = inst->input_manager.get();
+                            inst->services.reflection       = &m_reflection;
+                            inst->services.application      = &m_app;
+                            inst->services.level_manager    = &m_level_manager;
+                            inst->services.api_version      = GARDEN_MODULE_API_VERSION;
+                            inst->services.connect_address  = "127.0.0.1";
+                            inst->services.connect_port     = port;
+
+                            inst->game_module.registerComponents(&m_reflection);
+                            if (!inst->game_module.init(&inst->services))
+                            {
+                                LOG_ENGINE_WARN("Client init failed for Player {}", i);
+                                m_app.getRenderAPI()->destroyPIEViewport(inst->viewport_id);
+                                inst->game_module.unload();
+                                inst->client_world.resetWorld();
+                                continue;
+                            }
+
+                            inst->game_module.onLevelLoaded();
+                            inst->initialized = true;
+                            LOG_ENGINE_INFO("PIE: Player {} initialized in-editor", i);
+                            m_pie_clients.push_back(std::move(inst));
+                        }
+                    }
+                    else
+                    {
+                        for (int i = 2; i <= m_state.network_pie.num_players; i++)
+                        {
+                            if (!m_pie_processes.spawnClient(i, game_exe, project_path, "127.0.0.1", port))
+                                LOG_ENGINE_WARN("Failed to spawn Player {}", i);
+                        }
+                    }
+                }
+
+                LOG_ENGINE_INFO("--- PIE: Dedicated Server mode on port {} ---", port);
+            }
+        }
+    }
+
+    if (!use_network_pie && !m_network_pie_active)
+    {
+        // ---- Standalone path: existing GameSimulation ----
+        m_game_input_manager = std::make_shared<InputManager>();
+        m_game_sim = std::make_unique<GameSimulation>(&m_world, m_game_input_manager);
+        m_game_sim->initialize();
+    }
+
+    // Enter playing state (mouse stays free until user clicks viewport)
     m_state.play_mode = PlayMode::Playing;
     m_mouse_captured_for_game = false;
 
@@ -515,9 +940,49 @@ void EditorApp::stopPlay()
 
     LOG_ENGINE_INFO("--- PIE: Stopping play mode ---");
 
-    // 1. Destroy simulation
-    m_game_sim.reset();
-    m_game_input_manager.reset();
+    // 1. Tear down network PIE or standalone simulation
+    if (m_network_pie_active)
+    {
+        // Kill spawned processes first (clients disconnect before server shuts down)
+        m_pie_processes.killAll();
+
+        // Tear down additional in-editor PIE client instances
+        for (auto& inst : m_pie_clients)
+        {
+            if (inst && inst->initialized)
+            {
+                inst->game_module.shutdown();
+                inst->game_module.unload();
+                if (inst->viewport_id >= 0)
+                    m_app.getRenderAPI()->destroyPIEViewport(inst->viewport_id);
+                inst->client_world.resetWorld();
+                inst->initialized = false;
+            }
+        }
+        m_pie_clients.clear();
+        m_focused_pie_client = -1;
+
+        // Shutdown Player 1 client
+        m_game_module.shutdown();
+
+        // Shutdown server (only for listen server — dedicated server was a separate process)
+        if (m_state.network_pie.net_mode == PIENetMode::ListenServer)
+        {
+            m_game_module.serverShutdown();
+            m_server_world.resetWorld();
+        }
+
+        m_game_module.unload();
+        m_game_input_manager.reset();
+        m_network_pie_active = false;
+
+        LOG_ENGINE_INFO("Network PIE shutdown complete");
+    }
+    else
+    {
+        m_game_sim.reset();
+        m_game_input_manager.reset();
+    }
 
     // 2. Reset world (shutdown physics, clear registry, reinitialize)
     m_world.resetWorld();
@@ -569,8 +1034,15 @@ void EditorApp::pausePlay()
     if (m_state.play_mode != PlayMode::Playing)
         return;
 
-    if (m_game_sim)
+    if (m_network_pie_active)
+    {
+        // Network PIE: can't truly pause networking, but stop ticking locally
+        LOG_ENGINE_INFO("PIE: Paused (network connections remain active)");
+    }
+    else if (m_game_sim)
+    {
         m_game_sim->setPaused(true);
+    }
 
     m_state.play_mode = PlayMode::Paused;
     m_mouse_captured_for_game = false;
@@ -584,7 +1056,7 @@ void EditorApp::resumePlay()
     if (m_state.play_mode != PlayMode::Paused)
         return;
 
-    if (m_game_sim)
+    if (!m_network_pie_active && m_game_sim)
         m_game_sim->setPaused(false);
 
     m_state.play_mode = PlayMode::Playing;
@@ -626,6 +1098,8 @@ camera& EditorApp::chooseRenderCamera()
     {
     case PlayMode::Playing:
     case PlayMode::Paused:
+        if (m_network_pie_active)
+            return m_world.world_camera; // game DLL updates world_camera
         if (m_game_sim)
             return m_game_sim->getActiveCamera();
         return m_editor_cam.cam;
@@ -894,6 +1368,14 @@ void EditorApp::processEvents()
                     m_right_mouse = false;
                     SDL_SetRelativeMouseMode(SDL_FALSE);
                 }
+            }
+            break;
+
+        case SDL_MOUSEWHEEL:
+            // Scroll wheel adjusts editor camera speed while in fly mode (RMB held)
+            if (m_right_mouse && event.wheel.y != 0)
+            {
+                m_editor_cam.adjustSpeed(static_cast<float>(event.wheel.y));
             }
             break;
 

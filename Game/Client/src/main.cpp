@@ -88,6 +88,26 @@ static std::string parseProjectPath(int argc, char* argv[])
     return "";
 }
 
+static std::string parseConnectAddress(int argc, char* argv[])
+{
+    for (int i = 1; i < argc - 1; i++)
+    {
+        if (strcmp(argv[i], "--connect") == 0)
+            return argv[i + 1];
+    }
+    return "";
+}
+
+static uint16_t parsePort(int argc, char* argv[])
+{
+    for (int i = 1; i < argc - 1; i++)
+    {
+        if (strcmp(argv[i], "--port") == 0)
+            return static_cast<uint16_t>(atoi(argv[i + 1]));
+    }
+    return 0;
+}
+
 // Find a .garden file in the given directory
 static std::string findGardenFile(const fs::path& dir)
 {
@@ -243,6 +263,10 @@ int main(int argc, char* argv[])
         quit_game(1);
     }
 
+    // Parse network CLI args
+    std::string connect_addr = parseConnectAddress(argc, argv);
+    uint16_t connect_port = parsePort(argc, argv);
+
     // Initialize game module
     EngineServices services{};
     services.game_world = &_world;
@@ -252,6 +276,8 @@ int main(int argc, char* argv[])
     services.application = &app;
     services.level_manager = &level_manager;
     services.api_version = GARDEN_MODULE_API_VERSION;
+    services.connect_address = connect_addr.empty() ? nullptr : connect_addr.c_str();
+    services.connect_port = connect_port;
 
     game_module.registerComponents(&reflection);
 

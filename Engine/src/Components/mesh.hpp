@@ -89,11 +89,13 @@ public:
         size_t vertex_count = 0;
         size_t index_count = 0;
         float screen_threshold = 0.0f;
+        std::vector<MaterialRange> material_ranges; // Per-submesh texture ranges for this LOD
 
         LODLevel() = default;
         LODLevel(LODLevel&& other) noexcept
             : gpu_mesh(other.gpu_mesh), vertex_count(other.vertex_count)
             , index_count(other.index_count), screen_threshold(other.screen_threshold)
+            , material_ranges(std::move(other.material_ranges))
         {
             other.gpu_mesh = nullptr;
         }
@@ -106,6 +108,7 @@ public:
                 vertex_count = other.vertex_count;
                 index_count = other.index_count;
                 screen_threshold = other.screen_threshold;
+                material_ranges = std::move(other.material_ranges);
                 other.gpu_mesh = nullptr;
             }
             return *this;

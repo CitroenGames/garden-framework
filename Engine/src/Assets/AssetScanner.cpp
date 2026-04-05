@@ -68,7 +68,8 @@ AssetScanStatus AssetScanner::checkAsset(const std::string& asset_path)
 
 // Internal: load mesh vertices from file
 static bool loadMeshVertices(const std::string& asset_path, vertex*& out_vertices,
-                             size_t& out_vertex_count, size_t& out_submesh_count)
+                             size_t& out_vertex_count, size_t& out_submesh_count,
+                             std::vector<SubmeshInfo>& out_submeshes)
 {
     std::string ext = fs::path(asset_path).extension().string();
     std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
@@ -76,6 +77,7 @@ static bool loadMeshVertices(const std::string& asset_path, vertex*& out_vertice
     out_vertices = nullptr;
     out_vertex_count = 0;
     out_submesh_count = 0;
+    out_submeshes.clear();
 
     if (ext == ".gltf" || ext == ".glb")
     {
@@ -91,6 +93,18 @@ static bool loadMeshVertices(const std::string& asset_path, vertex*& out_vertice
             out_vertices = result.vertices;
             out_vertex_count = result.vertex_count;
             out_submesh_count = result.primitive_vertex_counts.size();
+
+            // Build submesh info for per-submesh LOD generation
+            size_t current_vertex = 0;
+            for (size_t i = 0; i < result.primitive_vertex_counts.size(); ++i)
+            {
+                SubmeshInfo sub;
+                sub.start_vertex = current_vertex;
+                sub.vertex_count = result.primitive_vertex_counts[i];
+                out_submeshes.push_back(sub);
+                current_vertex += result.primitive_vertex_counts[i];
+            }
+
             result.vertices = nullptr;
             return true;
         }
@@ -219,8 +233,9 @@ bool AssetScanner::processAsset(const std::string& asset_path)
     vertex* vertices = nullptr;
     size_t vertex_count = 0;
     size_t submesh_count = 0;
+    std::vector<SubmeshInfo> submeshes;
 
-    if (!loadMeshVertices(asset_path, vertices, vertex_count, submesh_count))
+    if (!loadMeshVertices(asset_path, vertices, vertex_count, submesh_count, submeshes))
     {
         if (vertices) delete[] vertices;
         return false;
@@ -232,6 +247,7 @@ bool AssetScanner::processAsset(const std::string& asset_path)
     lod_input.indices = nullptr;
     lod_input.index_count = 0;
     lod_input.config = m_default_lod_config;
+    lod_input.submeshes = std::move(submeshes);
 
     LODGenerationResult lod_result = LODGenerator::generate(lod_input);
     delete[] vertices;
@@ -256,8 +272,9 @@ bool AssetScanner::processAssetWithConfig(const std::string& asset_path,
     vertex* vertices = nullptr;
     size_t vertex_count = 0;
     size_t submesh_count = 0;
+    std::vector<SubmeshInfo> submeshes;
 
-    if (!loadMeshVertices(asset_path, vertices, vertex_count, submesh_count))
+    if (!loadMeshVertices(asset_path, vertices, vertex_count, submesh_count, submeshes))
     {
         if (vertices) delete[] vertices;
         return false;
@@ -269,6 +286,7 @@ bool AssetScanner::processAssetWithConfig(const std::string& asset_path,
     lod_input.indices = nullptr;
     lod_input.index_count = 0;
     lod_input.config = config;
+    lod_input.submeshes = std::move(submeshes);
 
     LODGenerationResult lod_result = LODGenerator::generate(lod_input);
     delete[] vertices;

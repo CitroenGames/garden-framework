@@ -64,8 +64,12 @@ GAME_API bool gardenGameInit(EngineServices* services)
         return false;
     }
 
-    if (!g_network.connectToServer("127.0.0.1", 7777, "Player")) {
-        LOG_ENGINE_WARN("Failed to connect to server - running in offline mode");
+    const char* address = (services->connect_address && services->connect_address[0])
+                          ? services->connect_address : "127.0.0.1";
+    uint16_t port = services->connect_port ? services->connect_port : 7777;
+
+    if (!g_network.connectToServer(address, port, "Player")) {
+        LOG_ENGINE_WARN("Failed to connect to server at {}:{} - running in offline mode", address, port);
     }
 
     g_network.setWorld(services->game_world);

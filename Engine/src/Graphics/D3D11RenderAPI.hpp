@@ -326,6 +326,14 @@ public:
     virtual uint64_t getPreviewTextureID() override;
     virtual void destroyPreviewTarget() override;
 
+    // PIE viewport render targets (for multi-player Play-In-Editor)
+    virtual int  createPIEViewport(int width, int height) override;
+    virtual void destroyPIEViewport(int id) override;
+    virtual void destroyAllPIEViewports() override;
+    virtual void setPIEViewportSize(int id, int width, int height) override;
+    virtual void setActiveSceneTarget(int pie_viewport_id) override;
+    virtual uint64_t getPIEViewportTextureID(int id) override;
+
     // D3D11 specific accessors (for ImGui integration)
     ID3D11Device* getDevice() const { return device.Get(); }
     ID3D11DeviceContext* getDeviceContext() const { return context.Get(); }
@@ -348,4 +356,22 @@ private:
     ComPtr<ID3D11DepthStencilView> previewDSV;
     int preview_width_rt = 0, preview_height_rt = 0;
     void createPreviewResources(int w, int h);
+
+    // PIE viewport render targets
+    struct PIEViewportTarget {
+        ComPtr<ID3D11Texture2D> texture;
+        ComPtr<ID3D11RenderTargetView> rtv;
+        ComPtr<ID3D11ShaderResourceView> srv;
+        ComPtr<ID3D11Texture2D> depthBuffer;
+        ComPtr<ID3D11DepthStencilView> dsv;
+        // Offscreen buffer for FXAA intermediate rendering
+        ComPtr<ID3D11Texture2D> offscreenTexture;
+        ComPtr<ID3D11RenderTargetView> offscreenRTV;
+        ComPtr<ID3D11ShaderResourceView> offscreenSRV;
+        int width = 0, height = 0;
+    };
+    std::unordered_map<int, PIEViewportTarget> m_pie_viewports;
+    int m_next_pie_id = 0;
+    int m_active_scene_target = -1; // -1 = main viewport
+    void createPIEViewportResources(PIEViewportTarget& target, int w, int h);
 };
