@@ -2,7 +2,8 @@
 
 #include <vulkan/vulkan.h>
 #include <unordered_map>
-#include <cstring>
+#include <functional>
+#include <cstdio>
 
 struct SamplerKey {
     VkFilter magFilter;
@@ -20,20 +21,42 @@ struct SamplerKey {
     VkBorderColor borderColor;
 
     bool operator==(const SamplerKey& other) const {
-        return std::memcmp(this, &other, sizeof(SamplerKey)) == 0;
+        return magFilter == other.magFilter
+            && minFilter == other.minFilter
+            && addressModeU == other.addressModeU
+            && addressModeV == other.addressModeV
+            && addressModeW == other.addressModeW
+            && mipmapMode == other.mipmapMode
+            && anisotropyEnable == other.anisotropyEnable
+            && maxAnisotropy == other.maxAnisotropy
+            && compareEnable == other.compareEnable
+            && compareOp == other.compareOp
+            && minLod == other.minLod
+            && maxLod == other.maxLod
+            && borderColor == other.borderColor;
     }
 };
 
 struct SamplerKeyHash {
     size_t operator()(const SamplerKey& key) const {
-        // FNV-1a hash
-        const uint8_t* data = reinterpret_cast<const uint8_t*>(&key);
-        size_t hash = 14695981039346656037ULL;
-        for (size_t i = 0; i < sizeof(SamplerKey); i++) {
-            hash ^= static_cast<size_t>(data[i]);
-            hash *= 1099511628211ULL;
-        }
-        return hash;
+        size_t h = 0;
+        auto combine = [&](size_t v) {
+            h ^= v + 0x9e3779b9 + (h << 6) + (h >> 2);
+        };
+        combine(std::hash<int>{}(key.magFilter));
+        combine(std::hash<int>{}(key.minFilter));
+        combine(std::hash<int>{}(key.addressModeU));
+        combine(std::hash<int>{}(key.addressModeV));
+        combine(std::hash<int>{}(key.addressModeW));
+        combine(std::hash<int>{}(key.mipmapMode));
+        combine(std::hash<uint32_t>{}(key.anisotropyEnable));
+        combine(std::hash<float>{}(key.maxAnisotropy));
+        combine(std::hash<uint32_t>{}(key.compareEnable));
+        combine(std::hash<int>{}(key.compareOp));
+        combine(std::hash<float>{}(key.minLod));
+        combine(std::hash<float>{}(key.maxLod));
+        combine(std::hash<int>{}(key.borderColor));
+        return h;
     }
 };
 
@@ -68,7 +91,11 @@ public:
         info.mipLodBias = 0.0f;
 
         VkSampler sampler = VK_NULL_HANDLE;
-        vkCreateSampler(device_, &info, nullptr, &sampler);
+        VkResult result = vkCreateSampler(device_, &info, nullptr, &sampler);
+        if (result != VK_SUCCESS) {
+            fprintf(stderr, "[VkSamplerCache] vkCreateSampler failed (%d)\n", result);
+            return VK_NULL_HANDLE;
+        }
         cache_[key] = sampler;
         return sampler;
     }

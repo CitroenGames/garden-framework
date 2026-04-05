@@ -90,32 +90,21 @@ All binaries are placed in `bin/`:
 
 ## Shader Compilation
 
-Vulkan shaders must be compiled to SPIR-V before running with the Vulkan backend. HLSL and Metal shaders are loaded from source at runtime.
+All shaders are written in Slang (`assets/shaders/slang/`) and cross-compiled to DXBC (D3D11), SPIR-V (Vulkan), and Metal using `slangc`.
 
 **Windows:**
 ```bash
-compile_shaders.bat
+compile_shaders_slang.bat
 ```
-Requires `%VULKAN_SDK%\Bin\glslc.exe` or `glslc` on PATH.
+Requires `Tools\slang-2026.5.2\bin\slangc.exe`.
 
-**Linux/macOS:**
-```bash
-./compile_shaders.sh
-```
-
-**Metal (macOS only):**
-```bash
-./compile_metal_shaders.sh
-```
-Compiles `.metal` files to `shaders.metallib` using `xcrun`.
-
-Shader sources are in `assets/shaders/`:
+Compiled output is written to `assets/shaders/compiled/`:
 
 | Directory | Format | Backend |
 | :--- | :--- | :--- |
-| `assets/shaders/vulkan/` | GLSL &rarr; SPIR-V | Vulkan |
-| `assets/shaders/d3d11/` | HLSL | Direct3D 11 |
-| `assets/shaders/metal/` | Metal | Metal |
+| `assets/shaders/compiled/vulkan/` | SPIR-V | Vulkan |
+| `assets/shaders/compiled/d3d11/` | DXBC | Direct3D 11 |
+| `assets/shaders/compiled/metal/` | Metal source | Metal |
 
 ## Running
 

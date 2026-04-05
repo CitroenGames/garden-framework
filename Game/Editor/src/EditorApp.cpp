@@ -78,6 +78,13 @@ bool EditorApp::initialize(RenderAPIType api_type)
 
     m_renderer = renderer(render_api);
 
+    // Apply graphics CVars from config.cfg
+    render_api->setFXAAEnabled(CVAR_BOOL(r_fxaa));
+    render_api->setShadowQuality(CVAR_INT(r_shadowquality));
+    render_api->enableLighting(CVAR_BOOL(r_lighting));
+    m_renderer.setDepthPrepassEnabled(CVAR_BOOL(r_depthprepass));
+    m_renderer.setBVHEnabled(CVAR_BOOL(r_frustumculling));
+
     // Set up content browser callback
     m_content_browser.on_open_level = [this](const std::string& path) { openLevel(path); };
 
@@ -1688,6 +1695,109 @@ void EditorApp::renderEditorSettings()
         {
             ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f),
                 "Restart the editor for the backend change to take effect.");
+        }
+
+        ImGui::Spacing();
+        ImGui::SeparatorText("Rendering Features");
+
+        // FXAA toggle
+        {
+            auto* cvar = CVAR_PTR(r_fxaa);
+            bool fxaa = cvar ? cvar->getBool() : true;
+            if (ImGui::Checkbox("FXAA Anti-aliasing", &fxaa))
+            {
+                if (cvar) cvar->setInt(fxaa ? 1 : 0);
+                m_app.getRenderAPI()->setFXAAEnabled(fxaa);
+            }
+        }
+
+        // Shadow Quality combo
+        {
+            auto* cvar = CVAR_PTR(r_shadowquality);
+            int shadow_q = cvar ? cvar->getInt() : 2;
+            const char* shadow_opts[] = { "Off", "Low (1024)", "Medium (2048)", "High (4096)" };
+            ImGui::SetNextItemWidth(200.0f);
+            if (ImGui::Combo("Shadow Quality", &shadow_q, shadow_opts, 4))
+            {
+                if (cvar) cvar->setInt(shadow_q);
+                m_app.getRenderAPI()->setShadowQuality(shadow_q);
+            }
+        }
+
+        // Skybox toggle
+        {
+            auto* cvar = CVAR_PTR(r_sky);
+            bool sky = cvar ? cvar->getBool() : true;
+            if (ImGui::Checkbox("Skybox", &sky))
+            {
+                if (cvar) cvar->setInt(sky ? 1 : 0);
+            }
+        }
+
+        // Lighting toggle
+        {
+            auto* cvar = CVAR_PTR(r_lighting);
+            bool lighting = cvar ? cvar->getBool() : true;
+            if (ImGui::Checkbox("Lighting", &lighting))
+            {
+                if (cvar) cvar->setInt(lighting ? 1 : 0);
+                m_app.getRenderAPI()->enableLighting(lighting);
+            }
+            if (!lighting)
+                ImGui::TextDisabled("  All objects render unlit (flat color).");
+        }
+
+        // Dynamic Lights toggle
+        {
+            auto* cvar = CVAR_PTR(r_dynamiclights);
+            bool dyn = cvar ? cvar->getBool() : true;
+            if (ImGui::Checkbox("Dynamic Lights (Point/Spot)", &dyn))
+            {
+                if (cvar) cvar->setInt(dyn ? 1 : 0);
+            }
+        }
+
+        ImGui::Spacing();
+        ImGui::SeparatorText("Performance");
+
+        // Depth Prepass toggle
+        {
+            auto* cvar = CVAR_PTR(r_depthprepass);
+            bool prepass = cvar ? cvar->getBool() : true;
+            if (ImGui::Checkbox("Depth Prepass", &prepass))
+            {
+                if (cvar) cvar->setInt(prepass ? 1 : 0);
+                m_renderer.setDepthPrepassEnabled(prepass);
+            }
+        }
+
+        // Frustum Culling / BVH toggle
+        {
+            auto* cvar = CVAR_PTR(r_frustumculling);
+            bool culling = cvar ? cvar->getBool() : true;
+            if (ImGui::Checkbox("Frustum Culling (BVH)", &culling))
+            {
+                if (cvar) cvar->setInt(culling ? 1 : 0);
+                m_renderer.setBVHEnabled(culling);
+            }
+        }
+
+        // Reset to Defaults
+        ImGui::Spacing();
+        if (ImGui::Button("Reset to Defaults"))
+        {
+            const char* cvar_names[] = { "r_fxaa", "r_shadowquality", "r_sky", "r_lighting",
+                                          "r_dynamiclights", "r_depthprepass", "r_frustumculling" };
+            for (const char* name : cvar_names)
+            {
+                if (auto* cv = ConVarRegistry::get().find(name))
+                    cv->reset();
+            }
+            m_app.getRenderAPI()->setFXAAEnabled(CVAR_BOOL(r_fxaa));
+            m_app.getRenderAPI()->setShadowQuality(CVAR_INT(r_shadowquality));
+            m_app.getRenderAPI()->enableLighting(CVAR_BOOL(r_lighting));
+            m_renderer.setDepthPrepassEnabled(CVAR_BOOL(r_depthprepass));
+            m_renderer.setBVHEnabled(CVAR_BOOL(r_frustumculling));
         }
 
         ImGui::Spacing();

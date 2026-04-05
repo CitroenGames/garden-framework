@@ -60,14 +60,22 @@ bool RmlRenderer_Metal::Init(MetalRenderAPI* renderAPI)
         return false;
 
     // Load shader
-    NSString* shaderPath = [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/metal/rmlui.metal").c_str()];
-    NSError* error = nil;
-    NSString* source = [NSString stringWithContentsOfFile:shaderPath encoding:NSUTF8StringEncoding error:&error];
-    if (!source) {
-        printf("[RmlUi Metal] Failed to load shader: %s\n", [[error localizedDescription] UTF8String]);
-        return false;
+    // Load Slang-generated Metal shader sources and concatenate
+    NSMutableString* source = [NSMutableString string];
+    [source appendString:@"#include <metal_stdlib>\nusing namespace metal;\n\n"];
+    NSArray* rmlShaderFiles = @[
+        [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/rmlui_vertex.metal").c_str()],
+        [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/rmlui_fragment_textured.metal").c_str()],
+        [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/rmlui_fragment_color.metal").c_str()]];
+    for (NSString* path in rmlShaderFiles) {
+        NSString* src = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
+        if (src) {
+            NSString* stripped = [src stringByReplacingOccurrencesOfString:@"#include <metal_stdlib>" withString:@""];
+            stripped = [stripped stringByReplacingOccurrencesOfString:@"using namespace metal;" withString:@""];
+            [source appendFormat:@"\n%@\n", stripped];
+        }
     }
-
+    NSError* error = nil;
     MTLCompileOptions* opts = [[MTLCompileOptions alloc] init];
     m_impl->shaderLibrary = [m_impl->device newLibraryWithSource:source options:opts error:&error];
     if (!m_impl->shaderLibrary) {

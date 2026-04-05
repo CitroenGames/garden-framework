@@ -25,12 +25,7 @@ bool RmlRenderer_VK::Init(VulkanRenderAPI* renderAPI)
     if (!m_device || !m_allocator)
         return false;
 
-    if (!CreateDescriptorResources())
-        return false;
-    if (!CreatePipelines())
-        return false;
-
-    // Create sampler
+    // Create sampler (needed before descriptor resources)
     VkSamplerCreateInfo samplerInfo = {};
     samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
     samplerInfo.magFilter = VK_FILTER_LINEAR;
@@ -39,6 +34,11 @@ bool RmlRenderer_VK::Init(VulkanRenderAPI* renderAPI)
     samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     if (vkCreateSampler(m_device, &samplerInfo, nullptr, &m_sampler) != VK_SUCCESS)
+        return false;
+
+    if (!CreateDescriptorResources())
+        return false;
+    if (!CreatePipelines())
         return false;
 
     return true;
@@ -73,6 +73,8 @@ void RmlRenderer_VK::Shutdown()
     if (m_pipelineLayout) { vkDestroyPipelineLayout(m_device, m_pipelineLayout, nullptr); m_pipelineLayout = VK_NULL_HANDLE; }
     if (m_textureSetLayout) { vkDestroyDescriptorSetLayout(m_device, m_textureSetLayout, nullptr); m_textureSetLayout = VK_NULL_HANDLE; }
     if (m_descriptorPool) { vkDestroyDescriptorPool(m_device, m_descriptorPool, nullptr); m_descriptorPool = VK_NULL_HANDLE; }
+    if (m_dummyImageView) { vkDestroyImageView(m_device, m_dummyImageView, nullptr); m_dummyImageView = VK_NULL_HANDLE; }
+    if (m_dummyImage) { vmaDestroyImage(m_allocator, m_dummyImage, m_dummyAllocation); m_dummyImage = VK_NULL_HANDLE; }
 
     m_device = VK_NULL_HANDLE;
     m_allocator = nullptr;
@@ -118,7 +120,7 @@ VkShaderModule RmlRenderer_VK::CreateShaderModule(const std::vector<char>& code)
 
 bool RmlRenderer_VK::CreateDescriptorResources()
 {
-    // Descriptor set layout: one combined image sampler
+    // Descriptor set layout: only texture sampler (UBO replaced by push constants)
     VkDescriptorSetLayoutBinding binding = {};
     binding.binding = 0;
     binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -132,7 +134,7 @@ bool RmlRenderer_VK::CreateDescriptorResources()
     if (vkCreateDescriptorSetLayout(m_device, &layoutInfo, nullptr, &m_textureSetLayout) != VK_SUCCESS)
         return false;
 
-    // Descriptor pool
+    // Descriptor pool: texture samplers only (UBO removed - now using push constants)
     VkDescriptorPoolSize poolSize = {};
     poolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     poolSize.descriptorCount = 1024;
@@ -146,15 +148,66 @@ bool RmlRenderer_VK::CreateDescriptorResources()
     if (vkCreateDescriptorPool(m_device, &poolInfo, nullptr, &m_descriptorPool) != VK_SUCCESS)
         return false;
 
+    // Create 1x1 white dummy texture for color-only descriptor set
+    VkImageCreateInfo imgInfo = {};
+    imgInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imgInfo.imageType = VK_IMAGE_TYPE_2D;
+    imgInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+    imgInfo.extent = {1, 1, 1};
+    imgInfo.mipLevels = 1;
+    imgInfo.arrayLayers = 1;
+    imgInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    imgInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imgInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+
+    VmaAllocationCreateInfo imgAllocInfo = {};
+    imgAllocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+    if (vmaCreateImage(m_allocator, &imgInfo, &imgAllocInfo, &m_dummyImage, &m_dummyAllocation, nullptr) != VK_SUCCESS)
+        return false;
+
+    VkImageViewCreateInfo viewInfo = {};
+    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewInfo.image = m_dummyImage;
+    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    viewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+    viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    if (vkCreateImageView(m_device, &viewInfo, nullptr, &m_dummyImageView) != VK_SUCCESS)
+        return false;
+
+    // Allocate color-only descriptor set
+    VkDescriptorSetAllocateInfo colorDsAlloc = {};
+    colorDsAlloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    colorDsAlloc.descriptorPool = m_descriptorPool;
+    colorDsAlloc.descriptorSetCount = 1;
+    colorDsAlloc.pSetLayouts = &m_textureSetLayout;
+    if (vkAllocateDescriptorSets(m_device, &colorDsAlloc, &m_colorOnlyDescriptorSet) != VK_SUCCESS)
+        return false;
+
+    // Write dummy texture to color-only descriptor set
+    VkDescriptorImageInfo dummyImgInfo = {};
+    dummyImgInfo.sampler = m_sampler;
+    dummyImgInfo.imageView = m_dummyImageView;
+    dummyImgInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    VkWriteDescriptorSet colorWrite = {};
+    colorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    colorWrite.dstSet = m_colorOnlyDescriptorSet;
+    colorWrite.dstBinding = 0;
+    colorWrite.descriptorCount = 1;
+    colorWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    colorWrite.pImageInfo = &dummyImgInfo;
+
+    vkUpdateDescriptorSets(m_device, 1, &colorWrite, 0, nullptr);
+
     return true;
 }
 
 bool RmlRenderer_VK::CreatePipelines()
 {
     // Load shaders
-    auto vertCode = ReadShaderFile(EnginePaths::resolveEngineAsset("../assets/shaders/vulkan/rmlui.vert.spv"));
-    auto fragTexCode = ReadShaderFile(EnginePaths::resolveEngineAsset("../assets/shaders/vulkan/rmlui_texture.frag.spv"));
-    auto fragColCode = ReadShaderFile(EnginePaths::resolveEngineAsset("../assets/shaders/vulkan/rmlui_color.frag.spv"));
+    auto vertCode = ReadShaderFile(EnginePaths::resolveEngineAsset("../assets/shaders/compiled/vulkan/rmlui.vert.spv"));
+    auto fragTexCode = ReadShaderFile(EnginePaths::resolveEngineAsset("../assets/shaders/compiled/vulkan/rmlui_texture.frag.spv"));
+    auto fragColCode = ReadShaderFile(EnginePaths::resolveEngineAsset("../assets/shaders/compiled/vulkan/rmlui_color.frag.spv"));
 
     if (vertCode.empty() || fragTexCode.empty() || fragColCode.empty())
     {
@@ -172,13 +225,12 @@ bool RmlRenderer_VK::CreatePipelines()
         return false;
     }
 
-    // Push constant range
+    // Pipeline layout: single descriptor set with texture (binding 0) + UBO (binding 1)
     VkPushConstantRange pushRange = {};
     pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
     pushRange.offset = 0;
-    pushRange.size = sizeof(PushConstantData);
+    pushRange.size = sizeof(RmlUBO);
 
-    // Pipeline layout
     VkPipelineLayoutCreateInfo layoutInfo = {};
     layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     layoutInfo.setLayoutCount = 1;
@@ -399,37 +451,39 @@ void RmlRenderer_VK::RenderGeometry(Rml::CompiledGeometryHandle handle, Rml::Vec
 
     const auto& geo = it->second;
 
-    // Build push constants
-    PushConstantData pc = {};
+    // Build UBO data
+    RmlUBO ubo = {};
 
     // Orthographic projection (top-left origin, Vulkan clip space)
+    // Stored in row-major order for Slang RowMajor SPIR-V (transposed from column-major)
     float L = 0.0f, R = (float)m_viewportWidth;
     float T = 0.0f, B = (float)m_viewportHeight;
     float ortho[16] = {
-        2.0f / (R - L),    0.0f,              0.0f, 0.0f,
-        0.0f,              2.0f / (B - T),    0.0f, 0.0f,
+        2.0f / (R - L),    0.0f,              0.0f, (L + R) / (L - R),
+        0.0f,              2.0f / (B - T),    0.0f, (T + B) / (T - B),
         0.0f,              0.0f,              1.0f, 0.0f,
-        (L + R) / (L - R), (T + B) / (T - B), 0.0f, 1.0f
+        0.0f,              0.0f,              0.0f, 1.0f
     };
 
     if (m_transformEnabled)
     {
+        // Multiply ortho * m_transform, result in row-major for Slang
         const float* b = m_transform.data();
         for (int i = 0; i < 4; i++)
             for (int j = 0; j < 4; j++)
             {
-                pc.transform[j * 4 + i] = 0.0f;
+                ubo.transform[i * 4 + j] = 0.0f;
                 for (int k = 0; k < 4; k++)
-                    pc.transform[j * 4 + i] += ortho[k * 4 + i] * b[j * 4 + k];
+                    ubo.transform[i * 4 + j] += ortho[i * 4 + k] * b[k * 4 + j];
             }
     }
     else
     {
-        memcpy(pc.transform, ortho, sizeof(ortho));
+        memcpy(ubo.transform, ortho, sizeof(ortho));
     }
 
-    pc.translation[0] = translation.x;
-    pc.translation[1] = translation.y;
+    ubo.translation[0] = translation.x;
+    ubo.translation[1] = translation.y;
 
     // Set viewport
     VkViewport viewport = {};
@@ -459,10 +513,10 @@ void RmlRenderer_VK::RenderGeometry(Rml::CompiledGeometryHandle handle, Rml::Vec
     else
         vkCmdBindPipeline(m_currentCmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineColor);
 
-    // Push constants
-    vkCmdPushConstants(m_currentCmdBuffer, m_pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
+    // Upload UBO via push constants (per-draw, recorded inline in command buffer)
+    vkCmdPushConstants(m_currentCmdBuffer, m_pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(RmlUBO), &ubo);
 
-    // Bind texture descriptor if textured
+    // Bind descriptor set (set 0 with texture binding 0 + UBO binding 1)
     if (texture)
     {
         auto tex_it = m_textures.find((uintptr_t)texture);
@@ -471,6 +525,12 @@ void RmlRenderer_VK::RenderGeometry(Rml::CompiledGeometryHandle handle, Rml::Vec
             vkCmdBindDescriptorSets(m_currentCmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                 m_pipelineLayout, 0, 1, &tex_it->second.descriptorSet, 0, nullptr);
         }
+    }
+    else
+    {
+        // Color-only: bind descriptor set with dummy texture + UBO
+        vkCmdBindDescriptorSets(m_currentCmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+            m_pipelineLayout, 0, 1, &m_colorOnlyDescriptorSet, 0, nullptr);
     }
 
     // Bind geometry
@@ -488,9 +548,15 @@ void RmlRenderer_VK::ReleaseGeometry(Rml::CompiledGeometryHandle handle)
     if (it == m_geometries.end())
         return;
 
-    vmaDestroyBuffer(m_allocator, it->second.vertexBuffer, it->second.vertexAlloc);
-    vmaDestroyBuffer(m_allocator, it->second.indexBuffer, it->second.indexAlloc);
+    // Defer destruction until GPU is done with these buffers
+    auto geo = it->second;
     m_geometries.erase(it);
+
+    VmaAllocator alloc = m_allocator;
+    m_renderAPI->getDeletionQueue().push([alloc, geo]() {
+        vmaDestroyBuffer(alloc, geo.vertexBuffer, geo.vertexAlloc);
+        vmaDestroyBuffer(alloc, geo.indexBuffer, geo.indexAlloc);
+    });
 }
 
 Rml::TextureHandle RmlRenderer_VK::LoadTexture(Rml::Vector2i& texture_dimensions, const Rml::String& source)
@@ -617,8 +683,17 @@ Rml::TextureHandle RmlRenderer_VK::GenerateTexture(Rml::Span<const Rml::byte> so
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &cmd;
-    vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
-    vkQueueWaitIdle(queue);
+    VkFenceCreateInfo fenceInfo{};
+    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    VkFence uploadFence = VK_NULL_HANDLE;
+    if (vkCreateFence(m_device, &fenceInfo, nullptr, &uploadFence) == VK_SUCCESS) {
+        vkQueueSubmit(queue, 1, &submitInfo, uploadFence);
+        vkWaitForFences(m_device, 1, &uploadFence, VK_TRUE, 5'000'000'000ULL);
+        vkDestroyFence(m_device, uploadFence, nullptr);
+    } else {
+        vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
+        vkQueueWaitIdle(queue);
+    }
 
     vkFreeCommandBuffers(m_device, cmdPool, 1, &cmd);
     vmaDestroyBuffer(m_allocator, stagingBuffer, stagingAlloc);
@@ -649,7 +724,7 @@ Rml::TextureHandle RmlRenderer_VK::GenerateTexture(Rml::Span<const Rml::byte> so
         return 0;
     }
 
-    // Update descriptor set
+    // Update descriptor set: binding 0 = texture (UBO removed, now via push constants)
     VkDescriptorImageInfo descImage = {};
     descImage.sampler = m_sampler;
     descImage.imageView = tex.imageView;
@@ -662,6 +737,7 @@ Rml::TextureHandle RmlRenderer_VK::GenerateTexture(Rml::Span<const Rml::byte> so
     write.descriptorCount = 1;
     write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     write.pImageInfo = &descImage;
+
     vkUpdateDescriptorSets(m_device, 1, &write, 0, nullptr);
 
     uintptr_t handle = m_nextTextureHandle++;
@@ -675,13 +751,19 @@ void RmlRenderer_VK::ReleaseTexture(Rml::TextureHandle texture)
     if (it == m_textures.end())
         return;
 
-    vkDeviceWaitIdle(m_device);
-
-    if (it->second.descriptorSet)
-        vkFreeDescriptorSets(m_device, m_descriptorPool, 1, &it->second.descriptorSet);
-    vkDestroyImageView(m_device, it->second.imageView, nullptr);
-    vmaDestroyImage(m_allocator, it->second.image, it->second.allocation);
+    // Defer destruction until GPU is done with these resources
+    auto tex = it->second;
     m_textures.erase(it);
+
+    VkDevice dev = m_device;
+    VmaAllocator alloc = m_allocator;
+    VkDescriptorPool pool = m_descriptorPool;
+    m_renderAPI->getDeletionQueue().push([dev, alloc, pool, tex]() {
+        if (tex.descriptorSet)
+            vkFreeDescriptorSets(dev, pool, 1, &tex.descriptorSet);
+        vkDestroyImageView(dev, tex.imageView, nullptr);
+        vmaDestroyImage(alloc, tex.image, tex.allocation);
+    });
 }
 
 void RmlRenderer_VK::EnableScissorRegion(bool enable)

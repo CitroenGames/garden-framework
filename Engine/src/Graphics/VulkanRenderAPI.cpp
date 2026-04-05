@@ -49,8 +49,9 @@ bool VulkanRenderAPI::initialize(WindowHandle window, int width, int height, flo
     field_of_view = fov;
 
     // Create Vulkan instance
+    LOG_ENGINE_INFO("[Vulkan] Initializing Vulkan backend...");
     if (!createInstance()) {
-        printf("Failed to create Vulkan instance\n");
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create Vulkan instance");
         return false;
     }
 
@@ -133,8 +134,9 @@ bool VulkanRenderAPI::initialize(WindowHandle window, int width, int height, flo
     }
 
     // Create descriptor set layout
+    LOG_ENGINE_INFO("[Vulkan] Creating descriptor set layout...");
     if (!createDescriptorSetLayout()) {
-        printf("Failed to create descriptor set layout\n");
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create descriptor set layout");
         return false;
     }
 
@@ -142,50 +144,59 @@ bool VulkanRenderAPI::initialize(WindowHandle window, int width, int height, flo
     loadPipelineCache();
 
     // Create graphics pipeline
+    LOG_ENGINE_INFO("[Vulkan] Creating graphics pipeline...");
     if (!createGraphicsPipeline()) {
-        printf("Failed to create graphics pipeline\n");
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create graphics pipeline");
         return false;
     }
 
     // Create descriptor pool
+    LOG_ENGINE_INFO("[Vulkan] Creating descriptor pool...");
     if (!createDescriptorPool()) {
-        printf("Failed to create descriptor pool\n");
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create descriptor pool");
         return false;
     }
 
     // Create uniform buffers
+    LOG_ENGINE_INFO("[Vulkan] Creating uniform buffers (GlobalUBO={}, LightUBO={}, PerObjectUBO={})...",
+                    sizeof(GlobalUBO), sizeof(VulkanLightUBO), sizeof(PerObjectUBO));
     if (!createUniformBuffers()) {
-        printf("Failed to create uniform buffers\n");
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create uniform buffers");
         return false;
     }
 
     // Create descriptor sets
+    LOG_ENGINE_INFO("[Vulkan] Creating descriptor sets...");
     if (!createDescriptorSets()) {
-        printf("Failed to create descriptor sets\n");
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create descriptor sets");
         return false;
     }
 
     // Create default texture
+    LOG_ENGINE_INFO("[Vulkan] Creating default texture...");
     if (!createDefaultTexture()) {
-        printf("Failed to create default texture\n");
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create default texture");
         return false;
     }
 
     // Create shadow resources
+    LOG_ENGINE_INFO("[Vulkan] Creating shadow resources...");
     if (!createShadowResources()) {
-        printf("Failed to create shadow resources\n");
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create shadow resources");
         return false;
     }
 
     // Create skybox resources
+    LOG_ENGINE_INFO("[Vulkan] Creating skybox resources...");
     if (!createSkyboxResources()) {
-        printf("Failed to create skybox resources\n");
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create skybox resources");
         return false;
     }
 
     // Create FXAA resources
+    LOG_ENGINE_INFO("[Vulkan] Creating FXAA resources...");
     if (!createFxaaResources()) {
-        printf("Failed to create FXAA resources\n");
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create FXAA resources");
         return false;
     }
 
@@ -195,7 +206,7 @@ bool VulkanRenderAPI::initialize(WindowHandle window, int width, int height, flo
     // Flip Y for Vulkan coordinate system
     projection_matrix[1][1] *= -1;
 
-    printf("Vulkan Render API initialized (%dx%d, FOV: %.1f)\n", width, height, fov);
+    LOG_ENGINE_INFO("[Vulkan] Vulkan Render API initialized ({}x{}, FOV: {:.1f})", width, height, fov);
     return true;
 }
 
@@ -262,6 +273,26 @@ void VulkanRenderAPI::shutdown()
     uniform_buffers.clear();
     uniform_buffer_allocations.clear();
     uniform_buffer_mapped.clear();
+
+    // Clean up light uniform buffers
+    for (size_t i = 0; i < light_uniform_buffers.size(); i++) {
+        if (light_uniform_buffers[i] && vma_allocator) {
+            vmaDestroyBuffer(vma_allocator, light_uniform_buffers[i], light_uniform_allocations[i]);
+        }
+    }
+    light_uniform_buffers.clear();
+    light_uniform_allocations.clear();
+    light_uniform_mapped.clear();
+
+    // Clean up per-object uniform buffers
+    for (size_t i = 0; i < per_object_uniform_buffers.size(); i++) {
+        if (per_object_uniform_buffers[i] && vma_allocator) {
+            vmaDestroyBuffer(vma_allocator, per_object_uniform_buffers[i], per_object_uniform_allocations[i]);
+        }
+    }
+    per_object_uniform_buffers.clear();
+    per_object_uniform_allocations.clear();
+    per_object_uniform_mapped.clear();
 
     // Clean up descriptor pools
     if (global_descriptor_pool != VK_NULL_HANDLE) {
@@ -813,7 +844,7 @@ bool VulkanRenderAPI::createSyncObjects()
 
 bool VulkanRenderAPI::createDescriptorSetLayout()
 {
-    // Binding 0: Uniform buffer
+    // Binding 0: GlobalUBO (view, projection, CSM, lighting direction)
     VkDescriptorSetLayoutBinding uboLayoutBinding{};
     uboLayoutBinding.binding = 0;
     uboLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
@@ -821,7 +852,7 @@ bool VulkanRenderAPI::createDescriptorSetLayout()
     uboLayoutBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     uboLayoutBinding.pImmutableSamplers = nullptr;
 
-    // Binding 1: Texture sampler
+    // Binding 1: Diffuse texture sampler
     VkDescriptorSetLayoutBinding samplerLayoutBinding{};
     samplerLayoutBinding.binding = 1;
     samplerLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -837,7 +868,25 @@ bool VulkanRenderAPI::createDescriptorSetLayout()
     shadowMapBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     shadowMapBinding.pImmutableSamplers = nullptr;
 
-    std::array<VkDescriptorSetLayoutBinding, 3> bindings = { uboLayoutBinding, samplerLayoutBinding, shadowMapBinding };
+    // Binding 3: VulkanLightUBO (point/spot lights, camera position)
+    VkDescriptorSetLayoutBinding lightUboBinding{};
+    lightUboBinding.binding = 3;
+    lightUboBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    lightUboBinding.descriptorCount = 1;
+    lightUboBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    lightUboBinding.pImmutableSamplers = nullptr;
+
+    // Binding 4: PerObjectUBO (model, normalMatrix, color, useTexture) - DYNAMIC for per-draw offsets
+    VkDescriptorSetLayoutBinding perObjectUboBinding{};
+    perObjectUboBinding.binding = 4;
+    perObjectUboBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+    perObjectUboBinding.descriptorCount = 1;
+    perObjectUboBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    perObjectUboBinding.pImmutableSamplers = nullptr;
+
+    std::array<VkDescriptorSetLayoutBinding, 5> bindings = {
+        uboLayoutBinding, samplerLayoutBinding, shadowMapBinding, lightUboBinding, perObjectUboBinding
+    };
 
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -988,15 +1037,19 @@ void VulkanRenderAPI::savePipelineCache()
 bool VulkanRenderAPI::createGraphicsPipeline()
 {
     // Load shaders
-    auto vertShaderCode = readShaderFile(EnginePaths::resolveEngineAsset("../assets/shaders/vulkan/basic.vert.spv"));
-    auto fragShaderCode = readShaderFile(EnginePaths::resolveEngineAsset("../assets/shaders/vulkan/basic.frag.spv"));
+    std::string vertPath = EnginePaths::resolveEngineAsset("../assets/shaders/compiled/vulkan/basic.vert.spv");
+    std::string fragPath = EnginePaths::resolveEngineAsset("../assets/shaders/compiled/vulkan/basic.frag.spv");
+    LOG_ENGINE_INFO("[Vulkan] Loading shaders: {} and {}", vertPath, fragPath);
+
+    auto vertShaderCode = readShaderFile(vertPath);
+    auto fragShaderCode = readShaderFile(fragPath);
 
     if (vertShaderCode.empty() || fragShaderCode.empty()) {
-        printf("Failed to load shader files. Make sure to compile GLSL shaders to SPIR-V.\n");
-        printf("Run: glslc ../assets/shaders/vulkan/basic.vert -o ../assets/shaders/vulkan/basic.vert.spv\n");
-        printf("Run: glslc ../assets/shaders/vulkan/basic.frag -o ../assets/shaders/vulkan/basic.frag.spv\n");
+        LOG_ENGINE_ERROR("[Vulkan] Failed to load shader files (vert={} bytes, frag={} bytes). Run compile_shaders_slang.bat",
+                         vertShaderCode.size(), fragShaderCode.size());
         return false;
     }
+    LOG_ENGINE_INFO("[Vulkan] Loaded shaders: vert={} bytes, frag={} bytes", vertShaderCode.size(), fragShaderCode.size());
 
     VkShaderModule vertShaderModule = createShaderModule(vertShaderCode);
     VkShaderModule fragShaderModule = createShaderModule(fragShaderCode);
@@ -1100,25 +1153,22 @@ bool VulkanRenderAPI::createGraphicsPipeline()
     dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
     dynamicState.pDynamicStates = dynamicStates.data();
 
-    // Push constants for model matrix
-    VkPushConstantRange pushConstantRange{};
-    pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-    pushConstantRange.offset = 0;
-    pushConstantRange.size = sizeof(glm::mat4);
-
+    // No push constants - per-object data is now in PerObjectUBO at binding 4
     VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
     pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     pipelineLayoutInfo.setLayoutCount = 1;
     pipelineLayoutInfo.pSetLayouts = &descriptor_set_layout;
-    pipelineLayoutInfo.pushConstantRangeCount = 1;
-    pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
+    pipelineLayoutInfo.pushConstantRangeCount = 0;
+    pipelineLayoutInfo.pPushConstantRanges = nullptr;
 
-    if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipeline_layout) != VK_SUCCESS) {
-        printf("Failed to create pipeline layout\n");
+    VkResult layoutResult = vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipeline_layout);
+    if (layoutResult != VK_SUCCESS) {
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create pipeline layout: {}", vkResultToString(layoutResult));
         vkDestroyShaderModule(device, fragShaderModule, nullptr);
         vkDestroyShaderModule(device, vertShaderModule, nullptr);
         return false;
     }
+    LOG_ENGINE_INFO("[Vulkan] Pipeline layout created successfully");
 
     VkGraphicsPipelineCreateInfo pipelineInfo{};
     pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
@@ -1143,8 +1193,9 @@ bool VulkanRenderAPI::createGraphicsPipeline()
     noBlendAttachment.blendEnable = VK_FALSE;
 
     colorBlending.pAttachments = &noBlendAttachment;
-    if (vkCreateGraphicsPipelines(device, vk_pipeline_cache, 1, &pipelineInfo, nullptr, &pipeline_no_blend) != VK_SUCCESS) {
-        printf("Failed to create no-blend pipeline\n");
+    VkResult pipeResult = vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline_no_blend);
+    if (pipeResult != VK_SUCCESS) {
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create no-blend pipeline: {}", vkResultToString(pipeResult));
         vkDestroyShaderModule(device, fragShaderModule, nullptr);
         vkDestroyShaderModule(device, vertShaderModule, nullptr);
         return false;
@@ -1163,8 +1214,9 @@ bool VulkanRenderAPI::createGraphicsPipeline()
     alphaBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
 
     colorBlending.pAttachments = &alphaBlendAttachment;
-    if (vkCreateGraphicsPipelines(device, vk_pipeline_cache, 1, &pipelineInfo, nullptr, &pipeline_alpha_blend) != VK_SUCCESS) {
-        printf("Failed to create alpha-blend pipeline\n");
+    pipeResult = vkCreateGraphicsPipelines(device, vk_pipeline_cache, 1, &pipelineInfo, nullptr, &pipeline_alpha_blend);
+    if (pipeResult != VK_SUCCESS) {
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create alpha-blend pipeline: {}", vkResultToString(pipeResult));
         vkDestroyShaderModule(device, fragShaderModule, nullptr);
         vkDestroyShaderModule(device, vertShaderModule, nullptr);
         return false;
@@ -1203,13 +1255,16 @@ bool VulkanRenderAPI::createGraphicsPipeline()
 bool VulkanRenderAPI::createDescriptorPool()
 {
     // Create a small dedicated pool for per-frame global descriptor sets
+    // Each set needs 3 UBOs (GlobalUBO, LightUBO, PerObjectUBO) and 2 samplers (texture, shadow)
     uint32_t globalSets = MAX_FRAMES_IN_FLIGHT;
 
-    std::array<VkDescriptorPoolSize, 2> globalPoolSizes{};
+    std::array<VkDescriptorPoolSize, 3> globalPoolSizes{};
     globalPoolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    globalPoolSizes[0].descriptorCount = globalSets;
+    globalPoolSizes[0].descriptorCount = globalSets * 2; // GlobalUBO + LightUBO
     globalPoolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     globalPoolSizes[1].descriptorCount = globalSets * 2;
+    globalPoolSizes[2].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+    globalPoolSizes[2].descriptorCount = globalSets * 1; // PerObjectUBO (dynamic)
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -1234,11 +1289,13 @@ bool VulkanRenderAPI::createDescriptorPool()
 
 VkDescriptorPool VulkanRenderAPI::createPerDrawDescriptorPool()
 {
-    std::array<VkDescriptorPoolSize, 2> poolSizes{};
+    std::array<VkDescriptorPoolSize, 3> poolSizes{};
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    poolSizes[0].descriptorCount = SETS_PER_POOL;
+    poolSizes[0].descriptorCount = SETS_PER_POOL * 2; // GlobalUBO + LightUBO
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     poolSizes[1].descriptorCount = SETS_PER_POOL * 2; // texture + shadow map
+    poolSizes[2].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+    poolSizes[2].descriptorCount = SETS_PER_POOL * 1; // PerObjectUBO (dynamic)
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -1256,30 +1313,92 @@ VkDescriptorPool VulkanRenderAPI::createPerDrawDescriptorPool()
 
 bool VulkanRenderAPI::createUniformBuffers()
 {
-    VkDeviceSize bufferSize = sizeof(GlobalUBO);
+    // GlobalUBO buffers (binding 0)
+    {
+        VkDeviceSize bufferSize = sizeof(GlobalUBO);
+        uniform_buffers.resize(MAX_FRAMES_IN_FLIGHT);
+        uniform_buffer_allocations.resize(MAX_FRAMES_IN_FLIGHT);
+        uniform_buffer_mapped.resize(MAX_FRAMES_IN_FLIGHT);
 
-    uniform_buffers.resize(MAX_FRAMES_IN_FLIGHT);
-    uniform_buffer_allocations.resize(MAX_FRAMES_IN_FLIGHT);
-    uniform_buffer_mapped.resize(MAX_FRAMES_IN_FLIGHT);
+        for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+            VkBufferCreateInfo bufferInfo{};
+            bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+            bufferInfo.size = bufferSize;
+            bufferInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
 
-    for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        VkBufferCreateInfo bufferInfo{};
-        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-        bufferInfo.size = bufferSize;
-        bufferInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+            VmaAllocationCreateInfo allocInfo{};
+            allocInfo.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
+            allocInfo.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
 
-        VmaAllocationCreateInfo allocInfo{};
-        allocInfo.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
-        allocInfo.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
-
-        VmaAllocationInfo allocInfoOut;
-        if (vmaCreateBuffer(vma_allocator, &bufferInfo, &allocInfo,
-                           &uniform_buffers[i], &uniform_buffer_allocations[i], &allocInfoOut) != VK_SUCCESS) {
-            printf("Failed to create uniform buffer %d\n", i);
-            return false;
+            VmaAllocationInfo allocInfoOut;
+            if (vmaCreateBuffer(vma_allocator, &bufferInfo, &allocInfo,
+                               &uniform_buffers[i], &uniform_buffer_allocations[i], &allocInfoOut) != VK_SUCCESS) {
+                printf("Failed to create GlobalUBO buffer %d\n", i);
+                return false;
+            }
+            uniform_buffer_mapped[i] = allocInfoOut.pMappedData;
         }
+    }
 
-        uniform_buffer_mapped[i] = allocInfoOut.pMappedData;
+    // VulkanLightUBO buffers (binding 3)
+    {
+        VkDeviceSize bufferSize = sizeof(VulkanLightUBO);
+        light_uniform_buffers.resize(MAX_FRAMES_IN_FLIGHT);
+        light_uniform_allocations.resize(MAX_FRAMES_IN_FLIGHT);
+        light_uniform_mapped.resize(MAX_FRAMES_IN_FLIGHT);
+
+        for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+            VkBufferCreateInfo bufferInfo{};
+            bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+            bufferInfo.size = bufferSize;
+            bufferInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+
+            VmaAllocationCreateInfo allocInfo{};
+            allocInfo.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
+            allocInfo.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
+
+            VmaAllocationInfo allocInfoOut;
+            if (vmaCreateBuffer(vma_allocator, &bufferInfo, &allocInfo,
+                               &light_uniform_buffers[i], &light_uniform_allocations[i], &allocInfoOut) != VK_SUCCESS) {
+                printf("Failed to create LightUBO buffer %d\n", i);
+                return false;
+            }
+            light_uniform_mapped[i] = allocInfoOut.pMappedData;
+        }
+    }
+
+    // PerObjectUBO dynamic ring buffers (binding 4) - one large buffer per frame
+    {
+        // Query minUniformBufferOffsetAlignment for dynamic UBO offsets
+        VkPhysicalDeviceProperties props;
+        vkGetPhysicalDeviceProperties(physical_device, &props);
+        VkDeviceSize minAlignment = props.limits.minUniformBufferOffsetAlignment;
+        per_object_alignment = (sizeof(PerObjectUBO) + minAlignment - 1) & ~(minAlignment - 1);
+
+        VkDeviceSize bufferSize = per_object_alignment * MAX_PER_OBJECT_DRAWS;
+        per_object_uniform_buffers.resize(MAX_FRAMES_IN_FLIGHT);
+        per_object_uniform_allocations.resize(MAX_FRAMES_IN_FLIGHT);
+        per_object_uniform_mapped.resize(MAX_FRAMES_IN_FLIGHT);
+
+        for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+            VkBufferCreateInfo bufferInfo{};
+            bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+            bufferInfo.size = bufferSize;
+            bufferInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+
+            VmaAllocationCreateInfo allocInfo{};
+            allocInfo.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
+            allocInfo.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
+
+            VmaAllocationInfo allocInfoOut;
+            if (vmaCreateBuffer(vma_allocator, &bufferInfo, &allocInfo,
+                               &per_object_uniform_buffers[i], &per_object_uniform_allocations[i], &allocInfoOut) != VK_SUCCESS) {
+                printf("Failed to create PerObjectUBO ring buffer %d\n", i);
+                return false;
+            }
+            per_object_uniform_mapped[i] = allocInfoOut.pMappedData;
+            per_object_draw_index[i] = 0;
+        }
     }
 
     return true;
@@ -1302,23 +1421,53 @@ bool VulkanRenderAPI::createDescriptorSets()
         return false;
     }
 
-    // Write UBO binding to each global descriptor set
+    // Write UBO bindings (0, 3, 4) to each global descriptor set
     for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        VkDescriptorBufferInfo bufferInfo{};
-        bufferInfo.buffer = uniform_buffers[i];
-        bufferInfo.offset = 0;
-        bufferInfo.range = sizeof(GlobalUBO);
+        VkDescriptorBufferInfo globalBufferInfo{};
+        globalBufferInfo.buffer = uniform_buffers[i];
+        globalBufferInfo.offset = 0;
+        globalBufferInfo.range = sizeof(GlobalUBO);
 
-        VkWriteDescriptorSet descriptorWrite{};
-        descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        descriptorWrite.dstSet = descriptor_sets[i];
-        descriptorWrite.dstBinding = 0;
-        descriptorWrite.dstArrayElement = 0;
-        descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        descriptorWrite.descriptorCount = 1;
-        descriptorWrite.pBufferInfo = &bufferInfo;
+        VkDescriptorBufferInfo lightBufferInfo{};
+        lightBufferInfo.buffer = light_uniform_buffers[i];
+        lightBufferInfo.offset = 0;
+        lightBufferInfo.range = sizeof(VulkanLightUBO);
 
-        vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+        VkDescriptorBufferInfo perObjectBufferInfo{};
+        perObjectBufferInfo.buffer = per_object_uniform_buffers[i];
+        perObjectBufferInfo.offset = 0;
+        perObjectBufferInfo.range = per_object_alignment; // dynamic UBO: range = one slot
+
+        std::array<VkWriteDescriptorSet, 3> writes{};
+
+        // Binding 0: GlobalUBO
+        writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[0].dstSet = descriptor_sets[i];
+        writes[0].dstBinding = 0;
+        writes[0].dstArrayElement = 0;
+        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        writes[0].descriptorCount = 1;
+        writes[0].pBufferInfo = &globalBufferInfo;
+
+        // Binding 3: VulkanLightUBO
+        writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[1].dstSet = descriptor_sets[i];
+        writes[1].dstBinding = 3;
+        writes[1].dstArrayElement = 0;
+        writes[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        writes[1].descriptorCount = 1;
+        writes[1].pBufferInfo = &lightBufferInfo;
+
+        // Binding 4: PerObjectUBO (dynamic)
+        writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[2].dstSet = descriptor_sets[i];
+        writes[2].dstBinding = 4;
+        writes[2].dstArrayElement = 0;
+        writes[2].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+        writes[2].descriptorCount = 1;
+        writes[2].pBufferInfo = &perObjectBufferInfo;
+
+        vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
     }
 
     // Per-draw descriptor sets are allocated on demand in getOrAllocateDescriptorSet()
@@ -1367,13 +1516,13 @@ VkDescriptorSet VulkanRenderAPI::allocateFromPerDrawPool(uint32_t frameIndex)
 
 void VulkanRenderAPI::initializeDescriptorSet(VkDescriptorSet ds, uint32_t frameIndex, TextureHandle texture)
 {
-    // Write UBO (binding 0)
-    VkDescriptorBufferInfo bufferInfo{};
-    bufferInfo.buffer = uniform_buffers[frameIndex];
-    bufferInfo.offset = 0;
-    bufferInfo.range = sizeof(GlobalUBO);
+    // Binding 0: GlobalUBO
+    VkDescriptorBufferInfo globalBufferInfo{};
+    globalBufferInfo.buffer = uniform_buffers[frameIndex];
+    globalBufferInfo.offset = 0;
+    globalBufferInfo.range = sizeof(GlobalUBO);
 
-    // Write texture (binding 1)
+    // Binding 1: Diffuse texture
     VkDescriptorImageInfo imageInfo{};
     if (texture != INVALID_TEXTURE && textures.count(texture) > 0) {
         const VulkanTexture& tex = textures[texture];
@@ -1386,16 +1535,31 @@ void VulkanRenderAPI::initializeDescriptorSet(VkDescriptorSet ds, uint32_t frame
         imageInfo.sampler = default_texture.sampler;
     }
 
-    std::array<VkWriteDescriptorSet, 2> writes{};
+    // Binding 3: VulkanLightUBO
+    VkDescriptorBufferInfo lightBufferInfo{};
+    lightBufferInfo.buffer = light_uniform_buffers[frameIndex];
+    lightBufferInfo.offset = 0;
+    lightBufferInfo.range = sizeof(VulkanLightUBO);
 
+    // Binding 4: PerObjectUBO (dynamic - offset provided at bind time)
+    VkDescriptorBufferInfo perObjectBufferInfo{};
+    perObjectBufferInfo.buffer = per_object_uniform_buffers[frameIndex];
+    perObjectBufferInfo.offset = 0;
+    perObjectBufferInfo.range = per_object_alignment; // one aligned slot
+
+    // Build descriptor writes for bindings 0, 1, 3, 4
+    std::array<VkWriteDescriptorSet, 4> writes{};
+
+    // Binding 0: GlobalUBO
     writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[0].dstSet = ds;
     writes[0].dstBinding = 0;
     writes[0].dstArrayElement = 0;
     writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     writes[0].descriptorCount = 1;
-    writes[0].pBufferInfo = &bufferInfo;
+    writes[0].pBufferInfo = &globalBufferInfo;
 
+    // Binding 1: Diffuse texture
     writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[1].dstSet = ds;
     writes[1].dstBinding = 1;
@@ -1404,7 +1568,25 @@ void VulkanRenderAPI::initializeDescriptorSet(VkDescriptorSet ds, uint32_t frame
     writes[1].descriptorCount = 1;
     writes[1].pImageInfo = &imageInfo;
 
-    // Write shadow map (binding 2) if available
+    // Binding 3: VulkanLightUBO
+    writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[2].dstSet = ds;
+    writes[2].dstBinding = 3;
+    writes[2].dstArrayElement = 0;
+    writes[2].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    writes[2].descriptorCount = 1;
+    writes[2].pBufferInfo = &lightBufferInfo;
+
+    // Binding 4: PerObjectUBO (dynamic)
+    writes[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[3].dstSet = ds;
+    writes[3].dstBinding = 4;
+    writes[3].dstArrayElement = 0;
+    writes[3].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+    writes[3].descriptorCount = 1;
+    writes[3].pBufferInfo = &perObjectBufferInfo;
+
+    // Binding 2: Shadow map (optional)
     VkDescriptorImageInfo shadowImageInfo{};
     bool hasShadowMap = (shadow_map_view != VK_NULL_HANDLE && shadow_sampler != VK_NULL_HANDLE);
     if (hasShadowMap) {
@@ -1421,8 +1603,8 @@ void VulkanRenderAPI::initializeDescriptorSet(VkDescriptorSet ds, uint32_t frame
         shadowWrite.descriptorCount = 1;
         shadowWrite.pImageInfo = &shadowImageInfo;
 
-        // Write all 3 bindings together
-        std::array<VkWriteDescriptorSet, 3> allWrites = { writes[0], writes[1], shadowWrite };
+        // Write all 5 bindings together
+        std::array<VkWriteDescriptorSet, 5> allWrites = { writes[0], writes[1], shadowWrite, writes[2], writes[3] };
         vkUpdateDescriptorSets(device, static_cast<uint32_t>(allWrites.size()), allWrites.data(), 0, nullptr);
     } else {
         vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
@@ -1435,10 +1617,6 @@ bool VulkanRenderAPI::createDefaultTexture()
     uint8_t whitePixel[4] = { 255, 255, 255, 255 };
 
     VkDeviceSize imageSize = 4;
-
-    // Use shared staging buffer
-    ensureStagingBuffer(imageSize);
-    memcpy(staging_mapped, whitePixel, imageSize);
 
     // Create image
     VkImageCreateInfo imageInfo{};
@@ -1469,12 +1647,18 @@ bool VulkanRenderAPI::createDefaultTexture()
     default_texture.height = 1;
     default_texture.mipLevels = 1;
 
-    // Transition and copy (uses shared staging_buffer)
-    transitionImageLayout(default_texture.image, VK_FORMAT_R8G8B8A8_UNORM,
-                         VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1);
-    copyBufferToImage(staging_buffer, default_texture.image, 1, 1);
-    transitionImageLayout(default_texture.image, VK_FORMAT_R8G8B8A8_UNORM,
-                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 1);
+    // Use shared staging buffer (lock for thread safety)
+    {
+        std::lock_guard<std::mutex> staging_lock(staging_mutex);
+        ensureStagingBuffer(imageSize);
+        memcpy(staging_mapped, whitePixel, imageSize);
+
+        transitionImageLayout(default_texture.image, VK_FORMAT_R8G8B8A8_UNORM,
+                             VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1);
+        copyBufferToImage(staging_buffer, default_texture.image, 1, 1);
+        transitionImageLayout(default_texture.image, VK_FORMAT_R8G8B8A8_UNORM,
+                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 1);
+    }
 
     // Create image view
     VkImageViewCreateInfo viewInfo{};
@@ -1684,8 +1868,8 @@ bool VulkanRenderAPI::createShadowResources()
     shadowSamplerKey.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
     shadowSamplerKey.anisotropyEnable = VK_FALSE;
     shadowSamplerKey.maxAnisotropy = 1.0f;
-    shadowSamplerKey.compareEnable = VK_FALSE;
-    shadowSamplerKey.compareOp = VK_COMPARE_OP_ALWAYS;
+    shadowSamplerKey.compareEnable = VK_TRUE;
+    shadowSamplerKey.compareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
     shadowSamplerKey.minLod = 0.0f;
     shadowSamplerKey.maxLod = 0.0f;
     shadowSamplerKey.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
@@ -1730,13 +1914,15 @@ bool VulkanRenderAPI::createShadowResources()
     dependencies[0].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
 
     // Dependency 2: Ensure depth writes are flushed before fragment shader samples the shadow map
+    // Note: no VK_DEPENDENCY_BY_REGION_BIT here -- shadow maps are sampled at arbitrary
+    // coordinates by the main pass, so the dependency is not region-local.
     dependencies[1].srcSubpass = 0;
     dependencies[1].dstSubpass = VK_SUBPASS_EXTERNAL;
     dependencies[1].srcStageMask = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
     dependencies[1].srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
     dependencies[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
     dependencies[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    dependencies[1].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
+    dependencies[1].dependencyFlags = 0;
 
     VkRenderPassCreateInfo rpInfo{};
     rpInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
@@ -1785,33 +1971,35 @@ bool VulkanRenderAPI::createShadowResources()
         printf("Failed to create shadow descriptor set layout\n");
         return false;
     }
+    // NOTE: skinned_shadow.slang also requires binding 1 (BoneCB).
+    // When implementing a skinned shadow pipeline, create a separate
+    // descriptor layout that includes both binding 0 (ShadowCB) and
+    // binding 1 (BoneCB), or extend this layout.
 
-    // Create shadow pipeline layout
-    VkPushConstantRange pushConstantRange{};
-    pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-    pushConstantRange.offset = 0;
-    pushConstantRange.size = sizeof(glm::mat4);
-
+    // Create shadow pipeline layout (no push constants - model is in ShadowUBO)
     VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
     pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     pipelineLayoutInfo.setLayoutCount = 1;
     pipelineLayoutInfo.pSetLayouts = &shadow_descriptor_layout;
-    pipelineLayoutInfo.pushConstantRangeCount = 1;
-    pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
+    pipelineLayoutInfo.pushConstantRangeCount = 0;
+    pipelineLayoutInfo.pPushConstantRanges = nullptr;
 
     if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &shadow_pipeline_layout) != VK_SUCCESS) {
         printf("Failed to create shadow pipeline layout\n");
         return false;
     }
 
+    LOG_ENGINE_INFO("[Vulkan] Shadow render pass, framebuffers, descriptor layout, pipeline layout created");
+
     // Load shadow shaders
-    auto vertShaderCode = readShaderFile(EnginePaths::resolveEngineAsset("../assets/shaders/vulkan/shadow.vert.spv"));
-    auto fragShaderCode = readShaderFile(EnginePaths::resolveEngineAsset("../assets/shaders/vulkan/shadow.frag.spv"));
+    auto vertShaderCode = readShaderFile(EnginePaths::resolveEngineAsset("../assets/shaders/compiled/vulkan/shadow.vert.spv"));
+    auto fragShaderCode = readShaderFile(EnginePaths::resolveEngineAsset("../assets/shaders/compiled/vulkan/shadow.frag.spv"));
 
     if (vertShaderCode.empty() || fragShaderCode.empty()) {
-        printf("Failed to load shadow shader files\n");
+        LOG_ENGINE_ERROR("[Vulkan] Failed to load shadow shader files");
         return false;
     }
+    LOG_ENGINE_INFO("[Vulkan] Shadow shaders loaded: vert={} bytes, frag={} bytes", vertShaderCode.size(), fragShaderCode.size());
 
     VkShaderModule vertModule = createShaderModule(vertShaderCode);
     VkShaderModule fragModule = createShaderModule(fragShaderCode);
@@ -1924,12 +2112,14 @@ bool VulkanRenderAPI::createShadowResources()
     pipelineInfo.renderPass = shadow_render_pass;
     pipelineInfo.subpass = 0;
 
-    if (vkCreateGraphicsPipelines(device, vk_pipeline_cache, 1, &pipelineInfo, nullptr, &shadow_pipeline) != VK_SUCCESS) {
-        printf("Failed to create shadow pipeline\n");
+    VkResult shadowPipeResult = vkCreateGraphicsPipelines(device, vk_pipeline_cache, 1, &pipelineInfo, nullptr, &shadow_pipeline);
+    if (shadowPipeResult != VK_SUCCESS) {
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create shadow pipeline: {}", vkResultToString(shadowPipeResult));
         vkDestroyShaderModule(device, vertModule, nullptr);
         vkDestroyShaderModule(device, fragModule, nullptr);
         return false;
     }
+    LOG_ENGINE_INFO("[Vulkan] Shadow pipeline created successfully");
 
     vkDestroyShaderModule(device, vertModule, nullptr);
     vkDestroyShaderModule(device, fragModule, nullptr);
@@ -2169,16 +2359,18 @@ bool VulkanRenderAPI::createSkyboxResources()
         return false;
     }
 
-    // Upload via shared staging buffer
-    ensureStagingBuffer(sizeof(skyboxVertices));
-    memcpy(staging_mapped, skyboxVertices, sizeof(skyboxVertices));
+    // Upload via shared staging buffer (lock for thread safety)
+    {
+        std::lock_guard<std::mutex> staging_lock(staging_mutex);
+        ensureStagingBuffer(sizeof(skyboxVertices));
+        memcpy(staging_mapped, skyboxVertices, sizeof(skyboxVertices));
 
-    // Copy to GPU
-    VkCommandBuffer cmd = beginSingleTimeCommands();
-    VkBufferCopy copyRegion{};
-    copyRegion.size = sizeof(skyboxVertices);
-    vkCmdCopyBuffer(cmd, staging_buffer, skybox_vertex_buffer, 1, &copyRegion);
-    endSingleTimeCommands(cmd);
+        VkCommandBuffer cmd = beginSingleTimeCommands();
+        VkBufferCopy copyRegion{};
+        copyRegion.size = sizeof(skyboxVertices);
+        vkCmdCopyBuffer(cmd, staging_buffer, skybox_vertex_buffer, 1, &copyRegion);
+        endSingleTimeCommands(cmd);
+    }
 
     // Create skybox descriptor set layout
     VkDescriptorSetLayoutBinding uboBinding{};
@@ -2209,8 +2401,8 @@ bool VulkanRenderAPI::createSkyboxResources()
     }
 
     // Load skybox shaders
-    auto vertCode = readShaderFile(EnginePaths::resolveEngineAsset("../assets/shaders/vulkan/sky.vert.spv"));
-    auto fragCode = readShaderFile(EnginePaths::resolveEngineAsset("../assets/shaders/vulkan/sky.frag.spv"));
+    auto vertCode = readShaderFile(EnginePaths::resolveEngineAsset("../assets/shaders/compiled/vulkan/sky.vert.spv"));
+    auto fragCode = readShaderFile(EnginePaths::resolveEngineAsset("../assets/shaders/compiled/vulkan/sky.frag.spv"));
 
     if (vertCode.empty() || fragCode.empty()) {
         printf("Failed to load skybox shaders\n");
@@ -2722,34 +2914,36 @@ bool VulkanRenderAPI::createFxaaResources()
     }
 
     // Create FXAA descriptor set layout
-    VkDescriptorSetLayoutBinding samplerBinding{};
-    samplerBinding.binding = 0;
-    samplerBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    samplerBinding.descriptorCount = 1;
-    samplerBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    // Binding 0: screen texture (combined image sampler)
+    // Binding 1: FXAA UBO (inverse screen size)
+    std::array<VkDescriptorSetLayoutBinding, 2> fxaaBindings{};
+    fxaaBindings[0].binding = 0;
+    fxaaBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    fxaaBindings[0].descriptorCount = 1;
+    fxaaBindings[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+    fxaaBindings[1].binding = 1;
+    fxaaBindings[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    fxaaBindings[1].descriptorCount = 1;
+    fxaaBindings[1].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layoutInfo.bindingCount = 1;
-    layoutInfo.pBindings = &samplerBinding;
+    layoutInfo.bindingCount = static_cast<uint32_t>(fxaaBindings.size());
+    layoutInfo.pBindings = fxaaBindings.data();
 
     if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &fxaa_descriptor_layout) != VK_SUCCESS) {
         printf("Failed to create FXAA descriptor set layout\n");
         return false;
     }
 
-    // Create FXAA pipeline layout with push constants
-    VkPushConstantRange pushConstantRange{};
-    pushConstantRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-    pushConstantRange.offset = 0;
-    pushConstantRange.size = sizeof(glm::vec2);
-
+    // Create FXAA pipeline layout (no push constants - UBO at binding 1)
     VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
     pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     pipelineLayoutInfo.setLayoutCount = 1;
     pipelineLayoutInfo.pSetLayouts = &fxaa_descriptor_layout;
-    pipelineLayoutInfo.pushConstantRangeCount = 1;
-    pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
+    pipelineLayoutInfo.pushConstantRangeCount = 0;
+    pipelineLayoutInfo.pPushConstantRanges = nullptr;
 
     if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &fxaa_pipeline_layout) != VK_SUCCESS) {
         printf("Failed to create FXAA pipeline layout\n");
@@ -2757,8 +2951,8 @@ bool VulkanRenderAPI::createFxaaResources()
     }
 
     // Load FXAA shaders
-    auto vertShaderCode = readShaderFile(EnginePaths::resolveEngineAsset("../assets/shaders/vulkan/fxaa.vert.spv"));
-    auto fragShaderCode = readShaderFile(EnginePaths::resolveEngineAsset("../assets/shaders/vulkan/fxaa.frag.spv"));
+    auto vertShaderCode = readShaderFile(EnginePaths::resolveEngineAsset("../assets/shaders/compiled/vulkan/fxaa.vert.spv"));
+    auto fragShaderCode = readShaderFile(EnginePaths::resolveEngineAsset("../assets/shaders/compiled/vulkan/fxaa.frag.spv"));
 
     if (vertShaderCode.empty() || fragShaderCode.empty()) {
         printf("Failed to load FXAA shaders\n");
@@ -2869,6 +3063,17 @@ bool VulkanRenderAPI::createFxaaResources()
     depthStencil.depthTestEnable = VK_FALSE;
     depthStencil.depthWriteEnable = VK_FALSE;
 
+    // Dynamic viewport/scissor so FXAA works correctly after window resize
+    std::vector<VkDynamicState> fxaaDynamicStates = {
+        VK_DYNAMIC_STATE_VIEWPORT,
+        VK_DYNAMIC_STATE_SCISSOR
+    };
+
+    VkPipelineDynamicStateCreateInfo fxaaDynamicState{};
+    fxaaDynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    fxaaDynamicState.dynamicStateCount = static_cast<uint32_t>(fxaaDynamicStates.size());
+    fxaaDynamicState.pDynamicStates = fxaaDynamicStates.data();
+
     VkGraphicsPipelineCreateInfo pipelineInfo{};
     pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
     pipelineInfo.stageCount = 2;
@@ -2880,6 +3085,7 @@ bool VulkanRenderAPI::createFxaaResources()
     pipelineInfo.pMultisampleState = &multisampling;
     pipelineInfo.pDepthStencilState = &depthStencil;
     pipelineInfo.pColorBlendState = &colorBlending;
+    pipelineInfo.pDynamicState = &fxaaDynamicState;
     pipelineInfo.layout = fxaa_pipeline_layout;
     pipelineInfo.renderPass = fxaa_render_pass;
     pipelineInfo.subpass = 0;
@@ -2894,15 +3100,44 @@ bool VulkanRenderAPI::createFxaaResources()
     vkDestroyShaderModule(device, fragShaderModule, nullptr);
     vkDestroyShaderModule(device, vertShaderModule, nullptr);
 
-    // Create FXAA descriptor pool
-    VkDescriptorPoolSize poolSize{};
-    poolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSize.descriptorCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
+    // Create FXAA UBO buffers
+    {
+        VkDeviceSize bufferSize = sizeof(FXAAUbo);
+        fxaa_uniform_buffers.resize(MAX_FRAMES_IN_FLIGHT);
+        fxaa_uniform_allocations.resize(MAX_FRAMES_IN_FLIGHT);
+        fxaa_uniform_mapped.resize(MAX_FRAMES_IN_FLIGHT);
+
+        for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+            VkBufferCreateInfo bufInfo{};
+            bufInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+            bufInfo.size = bufferSize;
+            bufInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+
+            VmaAllocationCreateInfo uboAllocInfo{};
+            uboAllocInfo.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
+            uboAllocInfo.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
+
+            VmaAllocationInfo uboAllocOut;
+            if (vmaCreateBuffer(vma_allocator, &bufInfo, &uboAllocInfo,
+                               &fxaa_uniform_buffers[i], &fxaa_uniform_allocations[i], &uboAllocOut) != VK_SUCCESS) {
+                LOG_ENGINE_ERROR("[Vulkan] Failed to create FXAA UBO buffer {}", i);
+                return false;
+            }
+            fxaa_uniform_mapped[i] = uboAllocOut.pMappedData;
+        }
+    }
+
+    // Create FXAA descriptor pool (needs samplers + UBOs)
+    std::array<VkDescriptorPoolSize, 2> fxaaPoolSizes{};
+    fxaaPoolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    fxaaPoolSizes[0].descriptorCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
+    fxaaPoolSizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    fxaaPoolSizes[1].descriptorCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.poolSizeCount = 1;
-    poolInfo.pPoolSizes = &poolSize;
+    poolInfo.poolSizeCount = static_cast<uint32_t>(fxaaPoolSizes.size());
+    poolInfo.pPoolSizes = fxaaPoolSizes.data();
     poolInfo.maxSets = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
 
     if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &fxaa_descriptor_pool) != VK_SUCCESS) {
@@ -2924,27 +3159,40 @@ bool VulkanRenderAPI::createFxaaResources()
         return false;
     }
 
-    // Update FXAA descriptor sets
+    // Update FXAA descriptor sets (binding 0: texture, binding 1: UBO)
     for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         VkDescriptorImageInfo imageInfo{};
         imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         imageInfo.imageView = offscreen_view;
         imageInfo.sampler = offscreen_sampler;
 
-        VkWriteDescriptorSet descriptorWrite{};
-        descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        descriptorWrite.dstSet = fxaa_descriptor_sets[i];
-        descriptorWrite.dstBinding = 0;
-        descriptorWrite.dstArrayElement = 0;
-        descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        descriptorWrite.descriptorCount = 1;
-        descriptorWrite.pImageInfo = &imageInfo;
+        VkDescriptorBufferInfo uboInfo{};
+        uboInfo.buffer = fxaa_uniform_buffers[i];
+        uboInfo.offset = 0;
+        uboInfo.range = sizeof(FXAAUbo);
 
-        vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+        std::array<VkWriteDescriptorSet, 2> writes{};
+        writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[0].dstSet = fxaa_descriptor_sets[i];
+        writes[0].dstBinding = 0;
+        writes[0].dstArrayElement = 0;
+        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[0].descriptorCount = 1;
+        writes[0].pImageInfo = &imageInfo;
+
+        writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[1].dstSet = fxaa_descriptor_sets[i];
+        writes[1].dstBinding = 1;
+        writes[1].dstArrayElement = 0;
+        writes[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        writes[1].descriptorCount = 1;
+        writes[1].pBufferInfo = &uboInfo;
+
+        vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
     }
 
     fxaa_initialized = true;
-    printf("FXAA resources created\n");
+    LOG_ENGINE_INFO("[Vulkan] FXAA resources created");
     return true;
 }
 
@@ -2953,6 +3201,15 @@ void VulkanRenderAPI::cleanupFxaaResources()
     if (device == VK_NULL_HANDLE) return;
 
     fxaa_initialized = false;
+
+    for (size_t i = 0; i < fxaa_uniform_buffers.size(); i++) {
+        if (fxaa_uniform_buffers[i] && vma_allocator) {
+            vmaDestroyBuffer(vma_allocator, fxaa_uniform_buffers[i], fxaa_uniform_allocations[i]);
+        }
+    }
+    fxaa_uniform_buffers.clear();
+    fxaa_uniform_allocations.clear();
+    fxaa_uniform_mapped.clear();
 
     if (fxaa_descriptor_pool != VK_NULL_HANDLE) {
         vkDestroyDescriptorPool(device, fxaa_descriptor_pool, nullptr);
@@ -3408,10 +3665,12 @@ void VulkanRenderAPI::transitionImageLayout(VkImage image, VkFormat format,
         sourceStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
         destinationStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
     } else {
-        barrier.srcAccessMask = 0;
-        barrier.dstAccessMask = 0;
-        sourceStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-        destinationStage = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+        LOG_ENGINE_WARN("[Vulkan] transitionImageLayout: unhandled transition {} -> {} -- using conservative barrier",
+                        (int)oldLayout, (int)newLayout);
+        barrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+        sourceStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+        destinationStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
     }
 
     vkCmdPipelineBarrier(
@@ -3617,6 +3876,10 @@ void VulkanRenderAPI::prepareFrame()
     last_bound_pipeline = VK_NULL_HANDLE;
     last_bound_descriptor_set = VK_NULL_HANDLE;
     last_bound_vertex_buffer = VK_NULL_HANDLE;
+    last_bound_dynamic_offset = UINT32_MAX;
+
+    // Reset per-object dynamic UBO draw counter
+    per_object_draw_index[current_frame] = 0;
 
     // Reset command buffer
     vkResetCommandBuffer(command_buffers[current_frame], 0);
@@ -3783,10 +4046,10 @@ void VulkanRenderAPI::endFrame()
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, fxaa_pipeline_layout,
                                 0, 1, &fxaa_descriptor_sets[current_frame], 0, nullptr);
 
-        // Push inverse screen size
-        glm::vec2 inverseScreenSize(1.0f / swapchain_extent.width, 1.0f / swapchain_extent.height);
-        vkCmdPushConstants(cmd, fxaa_pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT,
-                           0, sizeof(glm::vec2), &inverseScreenSize);
+        // Update FXAA UBO with inverse screen size
+        FXAAUbo fxaaUbo{};
+        fxaaUbo.inverseScreenSize = glm::vec2(1.0f / swapchain_extent.width, 1.0f / swapchain_extent.height);
+        memcpy(fxaa_uniform_mapped[current_frame], &fxaaUbo, sizeof(FXAAUbo));
 
         // Bind fullscreen quad and draw
         VkBuffer vertexBuffers[] = { fxaa_vertex_buffer };
@@ -3983,10 +4246,6 @@ TextureHandle VulkanRenderAPI::loadTextureFromMemory(const uint8_t* pixels, int 
         srcData = flippedData.data();
     }
 
-    // Use shared staging buffer
-    ensureStagingBuffer(imageSize);
-    memcpy(staging_mapped, srcData, imageSize);
-
     // Create image
     VkImageCreateInfo imageInfo{};
     imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -4012,10 +4271,16 @@ TextureHandle VulkanRenderAPI::loadTextureFromMemory(const uint8_t* pixels, int 
         return INVALID_TEXTURE;
     }
 
-    // Transition, copy, and generate mipmaps (uses shared staging_buffer)
-    transitionImageLayout(texture.image, VK_FORMAT_R8G8B8A8_UNORM,
-                         VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, texture.mipLevels);
-    copyBufferToImage(staging_buffer, texture.image, width, height);
+    // Use shared staging buffer (lock for thread safety)
+    {
+        std::lock_guard<std::mutex> staging_lock(staging_mutex);
+        ensureStagingBuffer(imageSize);
+        memcpy(staging_mapped, srcData, imageSize);
+
+        transitionImageLayout(texture.image, VK_FORMAT_R8G8B8A8_UNORM,
+                             VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, texture.mipLevels);
+        copyBufferToImage(staging_buffer, texture.image, width, height);
+    }
 
     if (generate_mipmaps && texture.mipLevels > 1) {
         generateMipmaps(texture.image, VK_FORMAT_R8G8B8A8_UNORM, width, height, texture.mipLevels);
@@ -4112,10 +4377,11 @@ void VulkanRenderAPI::renderMesh(const mesh& m, const RenderState& state)
     if (!vulkanMesh || vulkanMesh->getVertexBuffer() == VK_NULL_HANDLE) return;
 
     if (in_shadow_pass) {
-        // Shadow pass - use shadow pipeline
-        // Push model matrix using shadow pipeline layout
-        vkCmdPushConstants(command_buffers[current_frame], shadow_pipeline_layout,
-            VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(glm::mat4), &current_model_matrix);
+        // Shadow pass - update model matrix in shadow UBO
+        ShadowUBO shadowUbo{};
+        shadowUbo.lightSpaceMatrix = glm::transpose(lightSpaceMatrices[currentCascade]);
+        shadowUbo.model = glm::transpose(current_model_matrix);
+        memcpy(shadow_uniform_mapped[current_frame], &shadowUbo, sizeof(ShadowUBO));
 
         // Bind vertex buffer and draw (with redundant bind tracking)
         VkBuffer vb = vulkanMesh->getVertexBuffer();
@@ -4153,64 +4419,90 @@ void VulkanRenderAPI::renderMesh(const mesh& m, const RenderState& state)
         last_bound_pipeline = selectedPipeline;
     }
 
-    // Update UBO with CSM data
-    GlobalUBO ubo{};
-    ubo.view = view_matrix;
-    ubo.projection = projection_matrix;
-    for (int i = 0; i < NUM_CASCADES; i++) {
-        ubo.lightSpaceMatrices[i] = lightSpaceMatrices[i];
+    // Upload GlobalUBO (binding 0) - view/projection/CSM/directional light
+    // Note: Slang generates RowMajor SPIR-V, GLM is column-major -> transpose all matrices
+    {
+        GlobalUBO ubo{};
+        ubo.view = glm::transpose(view_matrix);
+        ubo.projection = glm::transpose(projection_matrix);
+        for (int i = 0; i < NUM_CASCADES; i++) {
+            ubo.lightSpaceMatrices[i] = glm::transpose(lightSpaceMatrices[i]);
+        }
+        ubo.cascadeSplits = glm::vec4(cascadeSplitDistances[0], cascadeSplitDistances[1],
+                                       cascadeSplitDistances[2], cascadeSplitDistances[3]);
+        ubo.cascadeSplit4 = cascadeSplitDistances[4];
+        ubo.lightDir = light_direction;
+        ubo.lightAmbient = light_ambient;
+        ubo.cascadeCount = NUM_CASCADES;
+        ubo.lightDiffuse = light_diffuse;
+        ubo.debugCascades = 0;
+        ubo.shadowMapTexelSize = (currentShadowSize > 0)
+            ? glm::vec2(1.0f / static_cast<float>(currentShadowSize))
+            : glm::vec2(0.0f);
+        ubo._shadowPad = glm::vec2(0.0f);
+        memcpy(uniform_buffer_mapped[current_frame], &ubo, sizeof(ubo));
     }
-    ubo.cascadeSplits = glm::vec4(cascadeSplitDistances[0], cascadeSplitDistances[1],
-                                   cascadeSplitDistances[2], cascadeSplitDistances[3]);
-    ubo.cascadeSplit4 = cascadeSplitDistances[4];
-    ubo.lightDir = light_direction;
-    ubo.lightAmbient = light_ambient;
-    ubo.cascadeCount = NUM_CASCADES;
-    ubo.lightDiffuse = light_diffuse;
-    ubo.debugCascades = 0;
-    ubo.color = state.color;
-    ubo.useTexture = (m.texture_set && m.texture != INVALID_TEXTURE) ? 1 : 0;
 
-    // Point and spot light data
-    for (int i = 0; i < current_lights.numPointLights && i < 16; i++) {
-        ubo.pointLights[i].position = current_lights.pointLights[i].position;
-        ubo.pointLights[i].range = current_lights.pointLights[i].range;
-        ubo.pointLights[i].color = current_lights.pointLights[i].color;
-        ubo.pointLights[i].intensity = current_lights.pointLights[i].intensity;
-        ubo.pointLights[i].attenuation = current_lights.pointLights[i].attenuation;
-        ubo.pointLights[i]._pad0 = 0.0f;
+    // Upload VulkanLightUBO (binding 3) - point/spot lights + camera
+    {
+        VulkanLightUBO lightUbo{};
+        for (int i = 0; i < current_lights.numPointLights && i < 16; i++) {
+            lightUbo.pointLights[i].position = current_lights.pointLights[i].position;
+            lightUbo.pointLights[i].range = current_lights.pointLights[i].range;
+            lightUbo.pointLights[i].color = current_lights.pointLights[i].color;
+            lightUbo.pointLights[i].intensity = current_lights.pointLights[i].intensity;
+            lightUbo.pointLights[i].attenuation = current_lights.pointLights[i].attenuation;
+            lightUbo.pointLights[i]._pad0 = 0.0f;
+        }
+        for (int i = 0; i < current_lights.numSpotLights && i < 16; i++) {
+            lightUbo.spotLights[i].position = current_lights.spotLights[i].position;
+            lightUbo.spotLights[i].range = current_lights.spotLights[i].range;
+            lightUbo.spotLights[i].direction = current_lights.spotLights[i].direction;
+            lightUbo.spotLights[i].intensity = current_lights.spotLights[i].intensity;
+            lightUbo.spotLights[i].color = current_lights.spotLights[i].color;
+            lightUbo.spotLights[i].innerCutoff = current_lights.spotLights[i].innerCutoff;
+            lightUbo.spotLights[i].attenuation = current_lights.spotLights[i].attenuation;
+            lightUbo.spotLights[i].outerCutoff = current_lights.spotLights[i].outerCutoff;
+        }
+        lightUbo.numPointLights = current_lights.numPointLights;
+        lightUbo.numSpotLights = current_lights.numSpotLights;
+        lightUbo.cameraPos = current_lights.cameraPos;
+        memcpy(light_uniform_mapped[current_frame], &lightUbo, sizeof(lightUbo));
     }
-    for (int i = 0; i < current_lights.numSpotLights && i < 16; i++) {
-        ubo.spotLights[i].position = current_lights.spotLights[i].position;
-        ubo.spotLights[i].range = current_lights.spotLights[i].range;
-        ubo.spotLights[i].direction = current_lights.spotLights[i].direction;
-        ubo.spotLights[i].intensity = current_lights.spotLights[i].intensity;
-        ubo.spotLights[i].color = current_lights.spotLights[i].color;
-        ubo.spotLights[i].innerCutoff = current_lights.spotLights[i].innerCutoff;
-        ubo.spotLights[i].attenuation = current_lights.spotLights[i].attenuation;
-        ubo.spotLights[i].outerCutoff = current_lights.spotLights[i].outerCutoff;
-    }
-    ubo.numPointLights = current_lights.numPointLights;
-    ubo.numSpotLights = current_lights.numSpotLights;
-    ubo.cameraPos = current_lights.cameraPos;
 
-    memcpy(uniform_buffer_mapped[current_frame], &ubo, sizeof(ubo));
+    // Upload PerObjectUBO to next slot in dynamic ring buffer (binding 4)
+    uint32_t perObjectDynamicOffset;
+    {
+        uint32_t drawIdx = per_object_draw_index[current_frame];
+        if (drawIdx >= MAX_PER_OBJECT_DRAWS) {
+            LOG_ENGINE_ERROR("[Vulkan] Exceeded MAX_PER_OBJECT_DRAWS ({}) -- draw call skipped", MAX_PER_OBJECT_DRAWS);
+            return;
+        }
+        perObjectDynamicOffset = static_cast<uint32_t>(drawIdx * per_object_alignment);
+
+        PerObjectUBO objUbo{};
+        objUbo.model = glm::transpose(current_model_matrix);
+        objUbo.normalMatrix = glm::inverse(current_model_matrix); // transpose(transpose(inverse(M))) = inverse(M)
+        objUbo.color = state.color;
+        objUbo.useTexture = (m.texture_set && m.texture != INVALID_TEXTURE) ? 1 : 0;
+
+        void* dst = static_cast<char*>(per_object_uniform_mapped[current_frame]) + perObjectDynamicOffset;
+        memcpy(dst, &objUbo, sizeof(objUbo));
+        per_object_draw_index[current_frame]++;
+    }
 
     // Get or allocate descriptor set for this texture (dynamically growing pools)
     TextureHandle texHandle = (m.texture_set && m.texture != INVALID_TEXTURE) ? m.texture : INVALID_TEXTURE;
     VkDescriptorSet ds = getOrAllocateDescriptorSet(current_frame, texHandle);
     if (ds == VK_NULL_HANDLE) return; // Pool allocation failed
 
-    // Bind the per-draw descriptor set (with redundant bind tracking)
-    if (ds != last_bound_descriptor_set) {
+    // Bind the per-draw descriptor set with dynamic offset (rebind if set or offset changed)
+    if (ds != last_bound_descriptor_set || perObjectDynamicOffset != last_bound_dynamic_offset) {
         vkCmdBindDescriptorSets(command_buffers[current_frame], VK_PIPELINE_BIND_POINT_GRAPHICS,
-            pipeline_layout, 0, 1, &ds, 0, nullptr);
+            pipeline_layout, 0, 1, &ds, 1, &perObjectDynamicOffset);
         last_bound_descriptor_set = ds;
+        last_bound_dynamic_offset = perObjectDynamicOffset;
     }
-
-    // Push model matrix
-    vkCmdPushConstants(command_buffers[current_frame], pipeline_layout,
-        VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(glm::mat4), &current_model_matrix);
 
     // Bind vertex buffer and draw (with redundant bind tracking)
     VkBuffer vb = vulkanMesh->getVertexBuffer();
@@ -4249,9 +4541,11 @@ void VulkanRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t
     if (!vulkanMesh || vulkanMesh->getVertexBuffer() == VK_NULL_HANDLE) return;
 
     if (in_shadow_pass) {
-        // Shadow pass - use shadow pipeline
-        vkCmdPushConstants(command_buffers[current_frame], shadow_pipeline_layout,
-            VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(glm::mat4), &current_model_matrix);
+        // Shadow pass - update model matrix in shadow UBO
+        ShadowUBO shadowUbo{};
+        shadowUbo.lightSpaceMatrix = glm::transpose(lightSpaceMatrices[currentCascade]);
+        shadowUbo.model = glm::transpose(current_model_matrix);
+        memcpy(shadow_uniform_mapped[current_frame], &shadowUbo, sizeof(ShadowUBO));
 
         VkBuffer vb = vulkanMesh->getVertexBuffer();
         if (vb != last_bound_vertex_buffer) {
@@ -4290,63 +4584,88 @@ void VulkanRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t
         last_bound_pipeline = selectedPipeline;
     }
 
-    // Update UBO with CSM data
-    GlobalUBO ubo{};
-    ubo.view = view_matrix;
-    ubo.projection = projection_matrix;
-    for (int i = 0; i < NUM_CASCADES; i++) {
-        ubo.lightSpaceMatrices[i] = lightSpaceMatrices[i];
+    // Upload GlobalUBO (binding 0) - transpose matrices for Slang RowMajor SPIR-V
+    {
+        GlobalUBO ubo{};
+        ubo.view = glm::transpose(view_matrix);
+        ubo.projection = glm::transpose(projection_matrix);
+        for (int i = 0; i < NUM_CASCADES; i++) {
+            ubo.lightSpaceMatrices[i] = glm::transpose(lightSpaceMatrices[i]);
+        }
+        ubo.cascadeSplits = glm::vec4(cascadeSplitDistances[0], cascadeSplitDistances[1],
+                                       cascadeSplitDistances[2], cascadeSplitDistances[3]);
+        ubo.cascadeSplit4 = cascadeSplitDistances[4];
+        ubo.lightDir = light_direction;
+        ubo.lightAmbient = light_ambient;
+        ubo.cascadeCount = NUM_CASCADES;
+        ubo.lightDiffuse = light_diffuse;
+        ubo.debugCascades = 0;
+        ubo.shadowMapTexelSize = (currentShadowSize > 0)
+            ? glm::vec2(1.0f / static_cast<float>(currentShadowSize))
+            : glm::vec2(0.0f);
+        ubo._shadowPad = glm::vec2(0.0f);
+        memcpy(uniform_buffer_mapped[current_frame], &ubo, sizeof(ubo));
     }
-    ubo.cascadeSplits = glm::vec4(cascadeSplitDistances[0], cascadeSplitDistances[1],
-                                   cascadeSplitDistances[2], cascadeSplitDistances[3]);
-    ubo.cascadeSplit4 = cascadeSplitDistances[4];
-    ubo.lightDir = light_direction;
-    ubo.lightAmbient = light_ambient;
-    ubo.cascadeCount = NUM_CASCADES;
-    ubo.lightDiffuse = light_diffuse;
-    ubo.debugCascades = 0;
-    ubo.color = state.color;
-    ubo.useTexture = (bound_texture != INVALID_TEXTURE) ? 1 : 0;
 
-    // Point and spot light data
-    for (int i = 0; i < current_lights.numPointLights && i < 16; i++) {
-        ubo.pointLights[i].position = current_lights.pointLights[i].position;
-        ubo.pointLights[i].range = current_lights.pointLights[i].range;
-        ubo.pointLights[i].color = current_lights.pointLights[i].color;
-        ubo.pointLights[i].intensity = current_lights.pointLights[i].intensity;
-        ubo.pointLights[i].attenuation = current_lights.pointLights[i].attenuation;
-        ubo.pointLights[i]._pad0 = 0.0f;
+    // Upload VulkanLightUBO (binding 3) - point/spot lights + camera
+    {
+        VulkanLightUBO lightUbo{};
+        for (int i = 0; i < current_lights.numPointLights && i < 16; i++) {
+            lightUbo.pointLights[i].position = current_lights.pointLights[i].position;
+            lightUbo.pointLights[i].range = current_lights.pointLights[i].range;
+            lightUbo.pointLights[i].color = current_lights.pointLights[i].color;
+            lightUbo.pointLights[i].intensity = current_lights.pointLights[i].intensity;
+            lightUbo.pointLights[i].attenuation = current_lights.pointLights[i].attenuation;
+            lightUbo.pointLights[i]._pad0 = 0.0f;
+        }
+        for (int i = 0; i < current_lights.numSpotLights && i < 16; i++) {
+            lightUbo.spotLights[i].position = current_lights.spotLights[i].position;
+            lightUbo.spotLights[i].range = current_lights.spotLights[i].range;
+            lightUbo.spotLights[i].direction = current_lights.spotLights[i].direction;
+            lightUbo.spotLights[i].intensity = current_lights.spotLights[i].intensity;
+            lightUbo.spotLights[i].color = current_lights.spotLights[i].color;
+            lightUbo.spotLights[i].innerCutoff = current_lights.spotLights[i].innerCutoff;
+            lightUbo.spotLights[i].attenuation = current_lights.spotLights[i].attenuation;
+            lightUbo.spotLights[i].outerCutoff = current_lights.spotLights[i].outerCutoff;
+        }
+        lightUbo.numPointLights = current_lights.numPointLights;
+        lightUbo.numSpotLights = current_lights.numSpotLights;
+        lightUbo.cameraPos = current_lights.cameraPos;
+        memcpy(light_uniform_mapped[current_frame], &lightUbo, sizeof(lightUbo));
     }
-    for (int i = 0; i < current_lights.numSpotLights && i < 16; i++) {
-        ubo.spotLights[i].position = current_lights.spotLights[i].position;
-        ubo.spotLights[i].range = current_lights.spotLights[i].range;
-        ubo.spotLights[i].direction = current_lights.spotLights[i].direction;
-        ubo.spotLights[i].intensity = current_lights.spotLights[i].intensity;
-        ubo.spotLights[i].color = current_lights.spotLights[i].color;
-        ubo.spotLights[i].innerCutoff = current_lights.spotLights[i].innerCutoff;
-        ubo.spotLights[i].attenuation = current_lights.spotLights[i].attenuation;
-        ubo.spotLights[i].outerCutoff = current_lights.spotLights[i].outerCutoff;
-    }
-    ubo.numPointLights = current_lights.numPointLights;
-    ubo.numSpotLights = current_lights.numSpotLights;
-    ubo.cameraPos = current_lights.cameraPos;
 
-    memcpy(uniform_buffer_mapped[current_frame], &ubo, sizeof(ubo));
+    // Upload PerObjectUBO to next slot in dynamic ring buffer (binding 4)
+    uint32_t perObjectDynamicOffset;
+    {
+        uint32_t drawIdx = per_object_draw_index[current_frame];
+        if (drawIdx >= MAX_PER_OBJECT_DRAWS) {
+            LOG_ENGINE_ERROR("[Vulkan] Exceeded MAX_PER_OBJECT_DRAWS ({}) -- draw call skipped", MAX_PER_OBJECT_DRAWS);
+            return;
+        }
+        perObjectDynamicOffset = static_cast<uint32_t>(drawIdx * per_object_alignment);
+
+        PerObjectUBO objUbo{};
+        objUbo.model = glm::transpose(current_model_matrix);
+        objUbo.normalMatrix = glm::inverse(current_model_matrix);
+        objUbo.color = state.color;
+        objUbo.useTexture = (bound_texture != INVALID_TEXTURE) ? 1 : 0;
+
+        void* dst = static_cast<char*>(per_object_uniform_mapped[current_frame]) + perObjectDynamicOffset;
+        memcpy(dst, &objUbo, sizeof(objUbo));
+        per_object_draw_index[current_frame]++;
+    }
 
     // Get or allocate descriptor set for bound texture (dynamically growing pools)
     VkDescriptorSet ds = getOrAllocateDescriptorSet(current_frame, bound_texture);
     if (ds == VK_NULL_HANDLE) return; // Pool allocation failed
 
-    // Bind the per-draw descriptor set (with redundant bind tracking)
-    if (ds != last_bound_descriptor_set) {
+    // Bind the per-draw descriptor set with dynamic offset (rebind if set or offset changed)
+    if (ds != last_bound_descriptor_set || perObjectDynamicOffset != last_bound_dynamic_offset) {
         vkCmdBindDescriptorSets(command_buffers[current_frame], VK_PIPELINE_BIND_POINT_GRAPHICS,
-            pipeline_layout, 0, 1, &ds, 0, nullptr);
+            pipeline_layout, 0, 1, &ds, 1, &perObjectDynamicOffset);
         last_bound_descriptor_set = ds;
+        last_bound_dynamic_offset = perObjectDynamicOffset;
     }
-
-    // Push model matrix
-    vkCmdPushConstants(command_buffers[current_frame], pipeline_layout,
-        VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(glm::mat4), &current_model_matrix);
 
     // Bind vertex buffer and draw range (with redundant bind tracking)
     VkBuffer vb = vulkanMesh->getVertexBuffer();
@@ -4400,8 +4719,8 @@ void VulkanRenderAPI::renderSkybox()
 
     // Update skybox UBO
     SkyboxUBO skyboxUbo{};
-    skyboxUbo.view = view_matrix;
-    skyboxUbo.projection = projection_matrix;
+    skyboxUbo.view = glm::transpose(view_matrix);
+    skyboxUbo.projection = glm::transpose(projection_matrix);
     skyboxUbo.sunDirection = -light_direction;  // Sun direction is opposite to light direction
     skyboxUbo.time = 0.0f;  // Could be animated if desired
 
@@ -4421,6 +4740,11 @@ void VulkanRenderAPI::renderSkybox()
 
     // Draw skybox cube (36 vertices)
     vkCmdDraw(cmd, 36, 1, 0, 0);
+
+    // Invalidate state tracking — skybox used different pipeline/descriptors
+    last_bound_pipeline = VK_NULL_HANDLE;
+    last_bound_descriptor_set = VK_NULL_HANDLE;
+    last_bound_vertex_buffer = VK_NULL_HANDLE;
 }
 
 // Shadow mapping
@@ -4444,7 +4768,7 @@ void VulkanRenderAPI::beginShadowPass(const glm::vec3& lightDir)
     calculateCascadeSplits(0.1f, 1000.0f);
 
     // Calculate light space matrices
-    float aspect = static_cast<float>(viewport_width) / static_cast<float>(viewport_height);
+    float aspect = static_cast<float>(viewport_width) / static_cast<float>(std::max(viewport_height, 1));
     for (int i = 0; i < NUM_CASCADES; i++) {
         lightSpaceMatrices[i] = getLightSpaceMatrixForCascade(i, lightDir, view_matrix, field_of_view, aspect);
     }
@@ -4479,8 +4803,8 @@ void VulkanRenderAPI::beginShadowPass(const glm::vec3& lightDir, const camera& c
 
     // Calculate light space matrices for each cascade
     float aspect = isViewportMode()
-        ? static_cast<float>(viewport_width_rt) / static_cast<float>(viewport_height_rt)
-        : static_cast<float>(viewport_width) / static_cast<float>(viewport_height);
+        ? static_cast<float>(viewport_width_rt) / static_cast<float>(std::max(viewport_height_rt, 1))
+        : static_cast<float>(viewport_width) / static_cast<float>(std::max(viewport_height, 1));
     for (int i = 0; i < NUM_CASCADES; i++) {
         lightSpaceMatrices[i] = getLightSpaceMatrixForCascade(i, lightDir, view_matrix, field_of_view, aspect);
     }
@@ -4491,6 +4815,11 @@ void VulkanRenderAPI::beginShadowPass(const glm::vec3& lightDir, const camera& c
 void VulkanRenderAPI::beginCascade(int cascadeIndex)
 {
     if (!frame_started || !in_shadow_pass) return;
+
+    if (cascadeIndex < 0 || cascadeIndex >= NUM_CASCADES) {
+        LOG_ENGINE_WARN("beginCascade() called with out-of-range index {}, clamping to [0, {}]", cascadeIndex, NUM_CASCADES - 1);
+        cascadeIndex = std::clamp(cascadeIndex, 0, NUM_CASCADES - 1);
+    }
 
     currentCascade = cascadeIndex;
 
@@ -4506,7 +4835,7 @@ void VulkanRenderAPI::beginCascade(int cascadeIndex)
 
     // Update shadow UBO with current cascade's light space matrix
     ShadowUBO shadowUbo{};
-    shadowUbo.lightSpaceMatrix = lightSpaceMatrices[cascadeIndex];
+    shadowUbo.lightSpaceMatrix = glm::transpose(lightSpaceMatrices[cascadeIndex]);
     memcpy(shadow_uniform_mapped[current_frame], &shadowUbo, sizeof(ShadowUBO));
 
     // Begin shadow render pass for this cascade
@@ -5134,9 +5463,9 @@ void VulkanRenderAPI::endSceneRender()
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, fxaa_pipeline_layout,
                                 0, 1, &fxaa_descriptor_sets[current_frame], 0, nullptr);
 
-        glm::vec2 inverseScreenSize(1.0f / viewport_width_rt, 1.0f / viewport_height_rt);
-        vkCmdPushConstants(cmd, fxaa_pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT,
-                           0, sizeof(glm::vec2), &inverseScreenSize);
+        FXAAUbo fxaaUbo{};
+        fxaaUbo.inverseScreenSize = glm::vec2(1.0f / viewport_width_rt, 1.0f / viewport_height_rt);
+        memcpy(fxaa_uniform_mapped[current_frame], &fxaaUbo, sizeof(FXAAUbo));
 
         VkBuffer vertexBuffers[] = { fxaa_vertex_buffer };
         VkDeviceSize offsets[] = { 0 };

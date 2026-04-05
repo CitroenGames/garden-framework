@@ -63,11 +63,18 @@ private:
     // Sampler
     VkSampler m_sampler = VK_NULL_HANDLE;
 
-    // Push constant data
-    struct PushConstantData {
+    // Push constant data matching Slang RmlCB (80 bytes)
+    struct RmlUBO {
         float transform[16]; // mat4
         float translation[2]; // vec2
+        float _pad[2];        // padding to match float4x4 + float2 + float2
     };
+
+    // Default descriptor set for color-only (no texture) rendering
+    VkDescriptorSet m_colorOnlyDescriptorSet = VK_NULL_HANDLE;
+    VkImage m_dummyImage = VK_NULL_HANDLE;
+    VmaAllocation m_dummyAllocation = nullptr;
+    VkImageView m_dummyImageView = VK_NULL_HANDLE;
 
     // Geometry storage
     struct GeometryData {

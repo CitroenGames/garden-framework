@@ -3,7 +3,6 @@
 #include "RenderAPI.hpp"
 #include <d3d11.h>
 #include <dxgi.h>
-#include <d3dcompiler.h>
 #include <wrl/client.h>
 #include <SDL.h>
 #include <SDL_syswm.h>
@@ -233,9 +232,7 @@ private:
     bool createSkyboxResources();
     bool createDefaultTexture();
 
-    ComPtr<ID3DBlob> compileShader(const std::string& source, const std::string& entryPoint,
-                                    const std::string& target, const std::string& filename = "shader");
-    bool loadShaderFromFile(const std::string& filepath, std::string& outSource);
+    std::vector<char> readShaderBinary(const std::string& filepath);
 
     void applyRenderState(const RenderState& state);
     bool mapBuffer(ID3D11Buffer* buffer, D3D11_MAPPED_SUBRESOURCE& mapped);

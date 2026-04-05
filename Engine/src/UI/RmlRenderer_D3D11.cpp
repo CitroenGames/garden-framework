@@ -2,49 +2,11 @@
 
 #include "RmlRenderer_D3D11.h"
 #include "Graphics/D3D11RenderAPI.hpp"
-#include <d3dcompiler.h>
+#include "Utils/EnginePaths.hpp"
 
 #include "stb_image.h"
 
-static const char* s_shaderSource = R"(
-cbuffer RmlCB : register(b0) {
-    matrix uTransform;
-    float2 uTranslation;
-    float2 _pad;
-};
-
-struct VSInput {
-    float2 position : POSITION;
-    float4 color    : COLOR;
-    float2 texcoord : TEXCOORD0;
-};
-
-struct PSInput {
-    float4 position : SV_POSITION;
-    float4 color    : COLOR;
-    float2 texcoord : TEXCOORD0;
-};
-
-Texture2D rmlTexture : register(t0);
-SamplerState rmlSampler : register(s0);
-
-PSInput VSMain(VSInput input) {
-    PSInput output;
-    float2 p = input.position + uTranslation;
-    output.position = mul(uTransform, float4(p, 0.0, 1.0));
-    output.color = input.color;
-    output.texcoord = input.texcoord;
-    return output;
-}
-
-float4 PSTextured(PSInput input) : SV_TARGET {
-    return input.color * rmlTexture.Sample(rmlSampler, input.texcoord);
-}
-
-float4 PSColor(PSInput input) : SV_TARGET {
-    return input.color;
-}
-)";
+#include <fstream>
 
 RmlRenderer_D3D11::RmlRenderer_D3D11() = default;
 RmlRenderer_D3D11::~RmlRenderer_D3D11() { Shutdown(); }
@@ -91,19 +53,25 @@ void RmlRenderer_D3D11::Shutdown()
     m_context = nullptr;
 }
 
+static std::vector<char> readBinary(const std::string& path)
+{
+    std::ifstream file(path, std::ios::ate | std::ios::binary);
+    if (!file.is_open()) return {};
+    size_t sz = static_cast<size_t>(file.tellg());
+    std::vector<char> buf(sz);
+    file.seekg(0);
+    file.read(buf.data(), sz);
+    return buf;
+}
+
 bool RmlRenderer_D3D11::CreateShaders()
 {
-    UINT flags = D3DCOMPILE_ENABLE_STRICTNESS;
-#ifdef _DEBUG
-    flags |= D3DCOMPILE_DEBUG;
-#endif
+    std::string dir = EnginePaths::resolveEngineAsset("../assets/shaders/compiled/d3d11/");
 
     // Vertex shader
-    ComPtr<ID3DBlob> vsBlob, errBlob;
-    if (FAILED(D3DCompile(s_shaderSource, strlen(s_shaderSource), "rmlui.hlsl", nullptr, nullptr,
-            "VSMain", "vs_5_0", flags, 0, vsBlob.GetAddressOf(), errBlob.GetAddressOf())))
-        return false;
-    if (FAILED(m_device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, m_vertexShader.GetAddressOf())))
+    auto vsBlob = readBinary(dir + "rmlui_vs.dxbc");
+    if (vsBlob.empty()) return false;
+    if (FAILED(m_device->CreateVertexShader(vsBlob.data(), vsBlob.size(), nullptr, m_vertexShader.GetAddressOf())))
         return false;
 
     // Input layout: position (float2), color (R8G8B8A8_UNORM), texcoord (float2)
@@ -112,23 +80,19 @@ bool RmlRenderer_D3D11::CreateShaders()
         { "COLOR",    0, DXGI_FORMAT_R8G8B8A8_UNORM,     0, offsetof(Rml::Vertex, colour),   D3D11_INPUT_PER_VERTEX_DATA, 0 },
         { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,       0, offsetof(Rml::Vertex, tex_coord),D3D11_INPUT_PER_VERTEX_DATA, 0 },
     };
-    if (FAILED(m_device->CreateInputLayout(layout, 3, vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), m_inputLayout.GetAddressOf())))
+    if (FAILED(m_device->CreateInputLayout(layout, 3, vsBlob.data(), vsBlob.size(), m_inputLayout.GetAddressOf())))
         return false;
 
     // Textured pixel shader
-    ComPtr<ID3DBlob> psTexBlob;
-    if (FAILED(D3DCompile(s_shaderSource, strlen(s_shaderSource), "rmlui.hlsl", nullptr, nullptr,
-            "PSTextured", "ps_5_0", flags, 0, psTexBlob.GetAddressOf(), errBlob.ReleaseAndGetAddressOf())))
-        return false;
-    if (FAILED(m_device->CreatePixelShader(psTexBlob->GetBufferPointer(), psTexBlob->GetBufferSize(), nullptr, m_psTextured.GetAddressOf())))
+    auto psTexBlob = readBinary(dir + "rmlui_ps_textured.dxbc");
+    if (psTexBlob.empty()) return false;
+    if (FAILED(m_device->CreatePixelShader(psTexBlob.data(), psTexBlob.size(), nullptr, m_psTextured.GetAddressOf())))
         return false;
 
     // Color-only pixel shader
-    ComPtr<ID3DBlob> psColBlob;
-    if (FAILED(D3DCompile(s_shaderSource, strlen(s_shaderSource), "rmlui.hlsl", nullptr, nullptr,
-            "PSColor", "ps_5_0", flags, 0, psColBlob.GetAddressOf(), errBlob.ReleaseAndGetAddressOf())))
-        return false;
-    if (FAILED(m_device->CreatePixelShader(psColBlob->GetBufferPointer(), psColBlob->GetBufferSize(), nullptr, m_psColor.GetAddressOf())))
+    auto psColBlob = readBinary(dir + "rmlui_ps_color.dxbc");
+    if (psColBlob.empty()) return false;
+    if (FAILED(m_device->CreatePixelShader(psColBlob.data(), psColBlob.size(), nullptr, m_psColor.GetAddressOf())))
         return false;
 
     return true;
