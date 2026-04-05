@@ -1,5 +1,7 @@
 #include "ContentBrowserPanel.hpp"
 #include "Assets/AssetScanner.hpp"
+#include "EditorIcons.hpp"
+#include "ImGui/ImGuiManager.hpp"
 #include <algorithm>
 
 namespace fs = std::filesystem;
@@ -108,7 +110,7 @@ void ContentBrowserPanel::drawBreadcrumbBar()
     draw_list->AddRectFilled(
         bar_pos,
         ImVec2(bar_pos.x + bar_width, bar_pos.y + bar_height),
-        IM_COL32(22, 21, 19, 255), 2.0f);
+        IM_COL32(20, 20, 20, 255), 2.0f);
 
     ImGui::SetCursorScreenPos(ImVec2(bar_pos.x + 6.0f, bar_pos.y + 2.0f));
 
@@ -121,7 +123,7 @@ void ContentBrowserPanel::drawBreadcrumbBar()
         if (!first)
         {
             ImGui::SameLine(0, 2.0f);
-            ImGui::TextDisabled(">");
+            ImGui::TextDisabled(ICON_FA_CHEVRON_RIGHT);
             ImGui::SameLine(0, 2.0f);
         }
         first = false;
@@ -130,7 +132,7 @@ void ContentBrowserPanel::drawBreadcrumbBar()
         fs::path target = accumulated;
 
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.25f, 0.24f, 0.22f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.24f, 0.24f, 0.24f, 1.0f));
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 2.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4.0f, 1.0f));
 
@@ -170,59 +172,46 @@ void ContentBrowserPanel::drawFileIcon(ImDrawList* draw_list, ImVec2 center, flo
 {
     ImVec4 color4 = getFileColor(path);
     ImU32 color = IM_COL32((int)(color4.x * 255), (int)(color4.y * 255), (int)(color4.z * 255), 255);
-    float hs = size * 0.5f;
+
+    // Determine the FA icon string based on file type
+    const char* icon = ICON_FA_FILE;
 
     if (fs::is_directory(path))
     {
-        draw_list->AddRectFilled(ImVec2(center.x - hs, center.y - hs * 0.6f),
-                                 ImVec2(center.x - hs * 0.2f, center.y - hs * 0.3f), color, 2.0f);
-        draw_list->AddRectFilled(ImVec2(center.x - hs, center.y - hs * 0.3f),
-                                 ImVec2(center.x + hs, center.y + hs * 0.6f), color, 2.0f);
-        return;
-    }
-
-    std::string ext = path.extension().string();
-    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-
-    if (ext == ".gltf" || ext == ".glb" || ext == ".obj")
-    {
-        float s = hs * 0.7f;
-        float off = s * 0.35f;
-        draw_list->AddRect(ImVec2(center.x - s + off, center.y - s + off),
-                           ImVec2(center.x + s * 0.6f + off, center.y + s * 0.6f + off), color, 0, 0, 1.5f);
-        draw_list->AddRect(ImVec2(center.x - s - off, center.y - s - off),
-                           ImVec2(center.x + s * 0.6f - off, center.y + s * 0.6f - off), color, 0, 0, 1.5f);
-        draw_list->AddLine(ImVec2(center.x - s + off, center.y - s + off),
-                           ImVec2(center.x - s - off, center.y - s - off), color, 1.5f);
-        draw_list->AddLine(ImVec2(center.x + s * 0.6f + off, center.y - s + off),
-                           ImVec2(center.x + s * 0.6f - off, center.y - s - off), color, 1.5f);
-    }
-    else if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" || ext == ".tga")
-    {
-        draw_list->AddRectFilled(ImVec2(center.x - hs * 0.6f, center.y - hs * 0.6f),
-                                 ImVec2(center.x + hs * 0.6f, center.y + hs * 0.6f), color, 2.0f);
-        draw_list->AddLine(ImVec2(center.x - hs * 0.6f, center.y + hs * 0.6f),
-                           ImVec2(center.x + hs * 0.6f, center.y - hs * 0.6f),
-                           IM_COL32(0, 0, 0, 120), 1.5f);
-    }
-    else if (path.string().find(".level.json") != std::string::npos)
-    {
-        for (int gx = -1; gx <= 1; gx++)
-            for (int gy = -1; gy <= 1; gy++)
-                draw_list->AddCircleFilled(ImVec2(center.x + gx * hs * 0.4f, center.y + gy * hs * 0.4f),
-                                           2.5f, color);
-    }
-    else if (ext == ".vert" || ext == ".frag" || ext == ".hlsl" || ext == ".metal" || ext == ".spv" || ext == ".glsl")
-    {
-        draw_list->AddQuadFilled(ImVec2(center.x, center.y - hs * 0.7f),
-                                 ImVec2(center.x + hs * 0.6f, center.y),
-                                 ImVec2(center.x, center.y + hs * 0.7f),
-                                 ImVec2(center.x - hs * 0.6f, center.y), color);
+        icon = ICON_FA_FOLDER;
     }
     else
     {
-        draw_list->AddRect(ImVec2(center.x - hs * 0.4f, center.y - hs * 0.6f),
-                           ImVec2(center.x + hs * 0.4f, center.y + hs * 0.6f), color, 2.0f, 0, 1.5f);
+        std::string ext = path.extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+
+        if (ext == ".gltf" || ext == ".glb" || ext == ".obj")
+            icon = ICON_FA_CUBE;
+        else if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" || ext == ".tga")
+            icon = ICON_FA_FILE_IMAGE;
+        else if (path.string().find(".level.json") != std::string::npos)
+            icon = ICON_FA_MAP;
+        else if (ext == ".vert" || ext == ".frag" || ext == ".hlsl" || ext == ".metal" || ext == ".spv" || ext == ".glsl" || ext == ".slang")
+            icon = ICON_FA_FILE_CODE;
+    }
+
+    // Render the icon centered using the icon font at the appropriate size
+    ImFont* iconFont = ImGuiManager::get().getIconFont();
+    if (iconFont)
+    {
+        float fontSize = size * 0.9f;
+        if (fontSize < 14.0f) fontSize = 14.0f;
+        if (fontSize > 40.0f) fontSize = 40.0f;
+        ImVec2 text_size = iconFont->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, icon);
+        ImVec2 text_pos(center.x - text_size.x * 0.5f, center.y - text_size.y * 0.5f);
+        draw_list->AddText(iconFont, fontSize, text_pos, color, icon);
+    }
+    else
+    {
+        // Fallback: render with default font
+        ImVec2 text_size = ImGui::CalcTextSize(icon);
+        ImVec2 text_pos(center.x - text_size.x * 0.5f, center.y - text_size.y * 0.5f);
+        draw_list->AddText(text_pos, color, icon);
     }
 }
 
@@ -421,7 +410,7 @@ void ContentBrowserPanel::drawContextMenu(const fs::path& path)
         std::string meta_path = Assets::AssetMetadataSerializer::getMetaPath(path_str);
         bool has_meta = fs::exists(meta_path);
 
-        if (ImGui::MenuItem("LOD Settings..."))
+        if (ImGui::MenuItem(ICON_FA_GEAR "  LOD Settings..."))
         {
             if (on_open_mesh)
             {
@@ -431,7 +420,7 @@ void ContentBrowserPanel::drawContextMenu(const fs::path& path)
             }
         }
 
-        if (ImGui::MenuItem(has_meta ? "Regenerate LODs" : "Generate Metadata"))
+        if (ImGui::MenuItem(has_meta ? (ICON_FA_ROTATE "  Regenerate LODs") : (ICON_FA_PLUS "  Generate Metadata")))
         {
             if (asset_scanner)
             {
@@ -538,12 +527,12 @@ void ContentBrowserPanel::draw()
         bool can_fwd = m_nav_history_index < (int)m_nav_history.size() - 1;
 
         if (!can_back) ImGui::BeginDisabled();
-        if (ImGui::SmallButton("<")) navigateBack();
+        if (ImGui::SmallButton(ICON_FA_ARROW_LEFT)) navigateBack();
         if (!can_back) ImGui::EndDisabled();
         ImGui::SameLine(0, 2.0f);
 
         if (!can_fwd) ImGui::BeginDisabled();
-        if (ImGui::SmallButton(">")) navigateForward();
+        if (ImGui::SmallButton(ICON_FA_ARROW_RIGHT)) navigateForward();
         if (!can_fwd) ImGui::EndDisabled();
         ImGui::SameLine(0, 8.0f);
     }
@@ -554,9 +543,9 @@ void ContentBrowserPanel::draw()
         if (m_show_sources)
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.4f, 0.68f, 1.0f));
         else
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.19f, 0.17f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.19f, 0.19f, 0.19f, 1.0f));
 
-        if (ImGui::SmallButton("Sources"))
+        if (ImGui::SmallButton(ICON_FA_FOLDER " Sources"))
             m_show_sources = !m_show_sources;
 
         ImGui::PopStyleColor();
@@ -577,16 +566,18 @@ void ContentBrowserPanel::draw()
         bool list_active = !m_grid_view;
 
         if (grid_active) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.4f, 0.68f, 1.0f));
-        if (ImGui::SmallButton("Grid"))
+        if (ImGui::SmallButton(ICON_FA_TABLE_CELLS))
             m_grid_view = true;
         if (grid_active) ImGui::PopStyleColor();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("Grid View");
 
         ImGui::SameLine();
 
         if (list_active) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.4f, 0.68f, 1.0f));
-        if (ImGui::SmallButton("List"))
+        if (ImGui::SmallButton(ICON_FA_LIST))
             m_grid_view = false;
         if (list_active) ImGui::PopStyleColor();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("List View");
 
         ImGui::PopStyleVar();
     }
@@ -602,7 +593,7 @@ void ContentBrowserPanel::draw()
     // Left pane: directory tree (collapsible)
     if (m_show_sources)
     {
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.11f, 0.10f, 0.09f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.10f, 0.10f, 0.10f, 1.0f));
         ImGui::BeginChild("DirTree", ImVec2(tree_width, 0), true);
         ImGuiTreeNodeFlags root_flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_SpanAvailWidth;
         if (m_current_dir == m_base_path) root_flags |= ImGuiTreeNodeFlags_Selected;
@@ -623,7 +614,9 @@ void ContentBrowserPanel::draw()
     // Right pane: file area
     ImGui::BeginChild("FileGrid", ImVec2(0, 0), true);
 
-    // Search bar
+    // Search bar with icon
+    ImGui::TextDisabled(ICON_FA_SEARCH);
+    ImGui::SameLine();
     ImGui::SetNextItemWidth(-1.0f);
     ImGui::InputTextWithHint("##search", "Search assets...", m_search_buf, sizeof(m_search_buf));
     ImGui::Spacing();
@@ -768,15 +761,16 @@ void ContentBrowserPanel::draw()
                     if (is_back)
                     {
                         ImU32 arrow_col = IM_COL32(255, 230, 77, 255);
-                        draw_list->AddTriangleFilled(
-                            ImVec2(icon_center.x - icon_size * 0.5f, icon_center.y),
-                            ImVec2(icon_center.x + icon_size * 0.2f, icon_center.y - icon_size * 0.4f),
-                            ImVec2(icon_center.x + icon_size * 0.2f, icon_center.y + icon_size * 0.4f),
-                            arrow_col);
-                        draw_list->AddRectFilled(
-                            ImVec2(icon_center.x + icon_size * 0.1f, icon_center.y - icon_size * 0.15f),
-                            ImVec2(icon_center.x + icon_size * 0.5f, icon_center.y + icon_size * 0.15f),
-                            arrow_col);
+                        ImFont* iconFont = ImGuiManager::get().getIconFont();
+                        if (iconFont)
+                        {
+                            float fontSize = icon_size * 0.9f;
+                            if (fontSize < 14.0f) fontSize = 14.0f;
+                            if (fontSize > 40.0f) fontSize = 40.0f;
+                            ImVec2 text_size = iconFont->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, ICON_FA_ARROW_LEFT);
+                            ImVec2 text_pos(icon_center.x - text_size.x * 0.5f, icon_center.y - text_size.y * 0.5f);
+                            draw_list->AddText(iconFont, fontSize, text_pos, arrow_col, ICON_FA_ARROW_LEFT);
+                        }
                     }
                     else
                     {

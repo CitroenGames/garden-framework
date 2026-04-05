@@ -170,6 +170,7 @@ public:
     // IRenderAPI implementation
     virtual bool initialize(WindowHandle window, int width, int height, float fov) override;
     virtual void shutdown() override;
+    virtual void waitForGPU() override;
     virtual void resize(int width, int height) override;
 
     virtual void beginFrame() override;
@@ -468,7 +469,9 @@ private:
     static const int NUM_CASCADES = 4;
     uint32_t currentShadowSize = 4096;  // Runtime configurable shadow resolution
     int shadowQuality = 3;  // 0=Off, 1=Low(1024), 2=Medium(2048), 3=High(4096)
+    int pendingShadowQuality = -1;  // Deferred quality change (-1 = none pending)
     bool fxaaEnabled = true;
+    bool debugCascades = false;
     float cascadeSplitDistances[5] = { 0.1f, 10.0f, 35.0f, 90.0f, 200.0f };
     float cascadeSplitLambda = 0.92f;
     glm::mat4 lightSpaceMatrices[4] = { glm::mat4(1.0f), glm::mat4(1.0f), glm::mat4(1.0f), glm::mat4(1.0f) };
@@ -554,9 +557,7 @@ private:
     void destroyViewportResources();
     bool isViewportMode() const { return viewport_image != VK_NULL_HANDLE; }
 
-#ifdef _DEBUG
     VkDebugUtilsMessengerEXT debug_messenger = VK_NULL_HANDLE;
-#endif
 
 public:
     // Viewport rendering (for editor)

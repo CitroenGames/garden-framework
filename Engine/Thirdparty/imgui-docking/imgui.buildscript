@@ -2,6 +2,7 @@ find_package(Vulkan REQUIRED)
 if(Windows)
 {
 find_package(DirectX11 REQUIRED)
+find_package(DirectX12 REQUIRED)
 }
 
 [project:imgui-docking]
@@ -16,6 +17,7 @@ sources = {
     backends/imgui_impl_opengl3.cpp
     backends/imgui_impl_vulkan.cpp
     backends/imgui_impl_dx11.cpp [windows]
+    backends/imgui_impl_dx12.cpp [windows]
     backends/imgui_impl_metal.mm [macOS]
 }
 headers = *.h
@@ -24,9 +26,9 @@ libs = ${Vulkan_LIBRARIES}
 libdirs = ${Vulkan_LIBRARY_DIRS}
 if(Windows)
 {
-    includes = ., ${Vulkan_INCLUDE_DIRS}, ${DirectX11_INCLUDE_DIRS}
-    libs = ${Vulkan_LIBRARIES}, ${DirectX11_LIBRARIES}
-    libdirs = ${Vulkan_LIBRARY_DIRS}, ${DirectX11_LIBRARY_DIRS}
+    includes = ., ${Vulkan_INCLUDE_DIRS}, ${DirectX11_INCLUDE_DIRS}, ${DirectX12_INCLUDE_DIRS}
+    libs = ${Vulkan_LIBRARIES}, ${DirectX11_LIBRARIES}, ${DirectX12_LIBRARIES}
+    libdirs = ${Vulkan_LIBRARY_DIRS}, ${DirectX11_LIBRARY_DIRS}, ${DirectX12_LIBRARY_DIRS}
 }
 public_includes = ., backends
 defines = ENGINEGRAPHICS_BUILDING_DLL

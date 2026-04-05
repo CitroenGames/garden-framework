@@ -1,5 +1,5 @@
 @echo off
-REM Compile all Slang shaders to DXBC and SPIR-V
+REM Compile all Slang shaders to DXBC, DXIL, and SPIR-V
 REM Requires slangc in Tools\slang-2026.5.2\bin\
 REM Metal output can be added when targeting macOS
 
@@ -8,6 +8,7 @@ setlocal enabledelayedexpansion
 set SLANGC=%~dp0Tools\slang-2026.5.2\bin\slangc.exe
 set SHADER_DIR=%~dp0assets\shaders\slang
 set OUT_D3D11=%~dp0assets\shaders\compiled\d3d11
+set OUT_D3D12=%~dp0assets\shaders\compiled\d3d12
 set OUT_VK=%~dp0assets\shaders\compiled\vulkan
 
 if not exist "%SLANGC%" (
@@ -16,6 +17,7 @@ if not exist "%SLANGC%" (
 )
 
 if not exist "%OUT_D3D11%" mkdir "%OUT_D3D11%"
+if not exist "%OUT_D3D12%" mkdir "%OUT_D3D12%"
 if not exist "%OUT_VK%" mkdir "%OUT_VK%"
 
 set ERRORS=0
@@ -46,6 +48,12 @@ if errorlevel 1 set /a ERRORS+=1
 if errorlevel 1 set /a ERRORS+=1
 "%SLANGC%" "%SHADER_DIR%\rmlui.slang" -DTARGET_HLSL -target dxbc -profile sm_5_0 -entry fragmentColor -stage fragment -o "%OUT_D3D11%\rmlui_ps_color.dxbc" 2>nul
 if errorlevel 1 set /a ERRORS+=1
+"%SLANGC%" "%SHADER_DIR%\rmlui.slang" -DTARGET_HLSL -target dxil -profile sm_6_0 -entry vertexMain -stage vertex -o "%OUT_D3D12%\rmlui_vs.dxil" 2>nul
+if errorlevel 1 set /a ERRORS+=1
+"%SLANGC%" "%SHADER_DIR%\rmlui.slang" -DTARGET_HLSL -target dxil -profile sm_6_0 -entry fragmentTextured -stage fragment -o "%OUT_D3D12%\rmlui_ps_textured.dxil" 2>nul
+if errorlevel 1 set /a ERRORS+=1
+"%SLANGC%" "%SHADER_DIR%\rmlui.slang" -DTARGET_HLSL -target dxil -profile sm_6_0 -entry fragmentColor -stage fragment -o "%OUT_D3D12%\rmlui_ps_color.dxil" 2>nul
+if errorlevel 1 set /a ERRORS+=1
 "%SLANGC%" "%SHADER_DIR%\rmlui.slang" -DTARGET_SPIRV -target spirv -profile glsl_450 -entry vertexMain -stage vertex -o "%OUT_VK%\rmlui.vert.spv" 2>nul
 if errorlevel 1 set /a ERRORS+=1
 "%SLANGC%" "%SHADER_DIR%\rmlui.slang" -DTARGET_SPIRV -target spirv -profile glsl_450 -entry fragmentTextured -stage fragment -o "%OUT_VK%\rmlui_texture.frag.spv" 2>nul
@@ -69,6 +77,10 @@ set PS_ENTRY=%~3
 "%SLANGC%" "%SHADER_DIR%\%NAME%.slang" -DTARGET_HLSL -target dxbc -profile sm_5_0 -entry %VS_ENTRY% -stage vertex -o "%OUT_D3D11%\%NAME%_vs.dxbc" 2>nul
 if errorlevel 1 set /a ERRORS+=1
 "%SLANGC%" "%SHADER_DIR%\%NAME%.slang" -DTARGET_HLSL -target dxbc -profile sm_5_0 -entry %PS_ENTRY% -stage fragment -o "%OUT_D3D11%\%NAME%_ps.dxbc" 2>nul
+if errorlevel 1 set /a ERRORS+=1
+"%SLANGC%" "%SHADER_DIR%\%NAME%.slang" -DTARGET_HLSL -target dxil -profile sm_6_0 -entry %VS_ENTRY% -stage vertex -o "%OUT_D3D12%\%NAME%_vs.dxil" 2>nul
+if errorlevel 1 set /a ERRORS+=1
+"%SLANGC%" "%SHADER_DIR%\%NAME%.slang" -DTARGET_HLSL -target dxil -profile sm_6_0 -entry %PS_ENTRY% -stage fragment -o "%OUT_D3D12%\%NAME%_ps.dxil" 2>nul
 if errorlevel 1 set /a ERRORS+=1
 "%SLANGC%" "%SHADER_DIR%\%NAME%.slang" -DTARGET_SPIRV -target spirv -profile glsl_450 -entry %VS_ENTRY% -stage vertex -o "%OUT_VK%\%NAME%.vert.spv" 2>nul
 if errorlevel 1 set /a ERRORS+=1

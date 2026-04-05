@@ -8,6 +8,10 @@
 #include <fstream>
 #include <cstring>
 #include <algorithm>
+#include <thread>
+#include <atomic>
+#include <chrono>
+#include <memory>
 #include <filesystem>
 
 // SDL Vulkan headers
@@ -210,6 +214,29 @@ bool VulkanRenderAPI::initialize(WindowHandle window, int width, int height, flo
     return true;
 }
 
+void VulkanRenderAPI::waitForGPU()
+{
+    if (device == VK_NULL_HANDLE)
+        return;
+
+    auto done = std::make_shared<std::atomic<bool>>(false);
+    std::thread waiter([dev = device, done]() {
+        vkDeviceWaitIdle(dev);
+        done->store(true);
+    });
+
+    auto start = std::chrono::steady_clock::now();
+    while (!done->load()) {
+        if (std::chrono::steady_clock::now() - start >= std::chrono::seconds(10)) {
+            LOG_ENGINE_WARN("[Vulkan] waitForGPU timed out after 10 seconds, proceeding with shutdown");
+            waiter.detach();
+            return;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    waiter.join();
+}
+
 void VulkanRenderAPI::shutdown()
 {
     if (device != VK_NULL_HANDLE) {
@@ -391,7 +418,6 @@ void VulkanRenderAPI::shutdown()
         surface = VK_NULL_HANDLE;
     }
 
-#ifdef _DEBUG
     // Clean up debug messenger
     if (debug_messenger != VK_NULL_HANDLE) {
         auto func = (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT");
@@ -400,7 +426,6 @@ void VulkanRenderAPI::shutdown()
         }
         debug_messenger = VK_NULL_HANDLE;
     }
-#endif
 
     // Clean up instance
     if (instance != VK_NULL_HANDLE) {
@@ -474,10 +499,8 @@ bool VulkanRenderAPI::createInstance()
 #ifdef __APPLE__
         .enable_extension(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME)
 #endif
-#ifdef _DEBUG
         .request_validation_layers(true)
         .set_debug_callback(vulkanDebugCallback)
-#endif
         .build();
 
     if (!inst_ret) {
@@ -488,9 +511,7 @@ bool VulkanRenderAPI::createInstance()
     vkb_instance = inst_ret.value();
     instance = vkb_instance.instance;
 
-#ifdef _DEBUG
     debug_messenger = vkb_instance.debug_messenger;
-#endif
 
     printf("Vulkan instance created\n");
     return true;
@@ -510,9 +531,13 @@ bool VulkanRenderAPI::selectPhysicalDevice()
 {
     vkb::PhysicalDeviceSelector selector{ vkb_instance };
 
+    VkPhysicalDeviceFeatures required_features{};
+    required_features.samplerAnisotropy = VK_TRUE;
+
     auto phys_ret = selector
         .set_surface(surface)
         .set_minimum_version(1, 2)
+        .set_required_features(required_features)
         .prefer_gpu_device_type(vkb::PreferredDeviceType::discrete)
         .select();
 
@@ -1122,7 +1147,7 @@ bool VulkanRenderAPI::createGraphicsPipeline()
     rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
     rasterizer.lineWidth = 1.0f;
     rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
-    rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
     rasterizer.depthBiasEnable = VK_FALSE;
 
     VkPipelineMultisampleStateCreateInfo multisampling{};
@@ -2032,19 +2057,12 @@ bool VulkanRenderAPI::createShadowResources()
     bindingDesc.stride = sizeof(vertex);
     bindingDesc.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-    std::array<VkVertexInputAttributeDescription, 3> attrDesc{};
+    // Shadow shader only reads position — omit normal/texcoord to avoid validation warnings
+    std::array<VkVertexInputAttributeDescription, 1> attrDesc{};
     attrDesc[0].binding = 0;
     attrDesc[0].location = 0;
     attrDesc[0].format = VK_FORMAT_R32G32B32_SFLOAT;
     attrDesc[0].offset = offsetof(vertex, vx);
-    attrDesc[1].binding = 0;
-    attrDesc[1].location = 1;
-    attrDesc[1].format = VK_FORMAT_R32G32B32_SFLOAT;
-    attrDesc[1].offset = offsetof(vertex, nx);
-    attrDesc[2].binding = 0;
-    attrDesc[2].location = 2;
-    attrDesc[2].format = VK_FORMAT_R32G32_SFLOAT;
-    attrDesc[2].offset = offsetof(vertex, u);
 
     VkPipelineVertexInputStateCreateInfo vertexInput{};
     vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
@@ -3814,6 +3832,11 @@ void VulkanRenderAPI::prepareFrame()
     if (frame_started) return;
     if (device_lost) return;
 
+    // Apply deferred shadow quality change before recording begins
+    if (pendingShadowQuality >= 0) {
+        setShadowQuality(pendingShadowQuality);
+    }
+
     image_acquired = false;
 
     // Skip rendering if swapchain is invalid (window minimized)
@@ -4719,7 +4742,7 @@ void VulkanRenderAPI::renderSkybox()
 
     // Update skybox UBO
     SkyboxUBO skyboxUbo{};
-    skyboxUbo.view = glm::transpose(view_matrix);
+    skyboxUbo.view = glm::transpose(glm::mat4(glm::mat3(view_matrix)));
     skyboxUbo.projection = glm::transpose(projection_matrix);
     skyboxUbo.sunDirection = -light_direction;  // Sun direction is opposite to light direction
     skyboxUbo.time = 0.0f;  // Could be animated if desired
@@ -4939,22 +4962,23 @@ bool VulkanRenderAPI::isFXAAEnabled() const
 
 void VulkanRenderAPI::setShadowQuality(int quality)
 {
-    if (quality < 0) quality = 0;
-    if (quality > 3) quality = 3;
+    quality = std::clamp(quality, 0, 3);
+
+    // Defer resource recreation if a command buffer is currently recording,
+    // since destroying Vulkan objects mid-frame invalidates the command buffer.
+    if (frame_started) {
+        pendingShadowQuality = quality;
+        return;
+    }
+
+    pendingShadowQuality = -1;
 
     if (quality == shadowQuality) return;
 
     shadowQuality = quality;
 
-    // Map quality to resolution: 0=Off(0), 1=Low(1024), 2=Medium(2048), 3=High(4096)
-    uint32_t newSize = 0;
-    switch (quality)
-    {
-    case 0: newSize = 0; break;     // Off - no shadow map
-    case 1: newSize = 1024; break;  // Low
-    case 2: newSize = 2048; break;  // Medium
-    case 3: newSize = 4096; break;  // High
-    }
+    static constexpr uint32_t sizeTable[] = { 0, 1024, 2048, 4096 };
+    uint32_t newSize = sizeTable[quality];
 
     if (newSize != currentShadowSize)
     {
@@ -4964,11 +4988,16 @@ void VulkanRenderAPI::setShadowQuality(int quality)
 
 int VulkanRenderAPI::getShadowQuality() const
 {
-    return shadowQuality;
+    return (pendingShadowQuality >= 0) ? pendingShadowQuality : shadowQuality;
 }
 
 void VulkanRenderAPI::recreateShadowResources(uint32_t size)
 {
+    if (frame_started) {
+        LOG_ENGINE_ERROR("[Vulkan] recreateShadowResources called while command buffer is recording — skipping");
+        return;
+    }
+
     // Wait for device to be idle before recreating resources
     vkDeviceWaitIdle(device);
 
@@ -5190,8 +5219,8 @@ void VulkanRenderAPI::createViewportResources(int w, int h)
         VkSubpassDependency dep{};
         dep.srcSubpass = VK_SUBPASS_EXTERNAL;
         dep.dstSubpass = 0;
-        dep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-        dep.srcAccessMask = 0;
+        dep.srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        dep.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
         dep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
         dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
 

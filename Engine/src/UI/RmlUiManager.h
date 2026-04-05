@@ -41,6 +41,7 @@ private:
     RmlUiManager& operator=(const RmlUiManager&) = delete;
 
     bool initD3D11(SDL_Window* window, IRenderAPI* api);
+    bool initD3D12(SDL_Window* window, IRenderAPI* api);
     bool initVulkan(SDL_Window* window, IRenderAPI* api);
     bool initMetal(SDL_Window* window, IRenderAPI* api);
 

@@ -4,6 +4,7 @@
 #include "ImGui/ImGuiManager.hpp"
 #include "Reflection/ReflectionRegistry.hpp"
 #include "Reflection/ReflectionWidgets.hpp"
+#include "EditorIcons.hpp"
 #include "imgui.h"
 #include "imgui_internal.h"
 #include <cstring>
@@ -15,9 +16,9 @@ bool InspectorPanel::drawComponentHeader(const char* label, bool can_remove, boo
     ImGui::PushID(label);
 
     // Full-width darker header bar (UE5 style)
-    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.11f, 0.10f, 0.09f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.16f, 0.15f, 0.13f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0.19f, 0.18f, 0.16f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.10f, 0.10f, 0.10f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.15f, 0.15f, 0.15f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0.18f, 0.18f, 0.18f, 1.0f));
 
     bool open = ImGui::CollapsingHeader("##header", ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_AllowOverlap);
 
@@ -41,7 +42,7 @@ bool InspectorPanel::drawComponentHeader(const char* label, bool can_remove, boo
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.5f, 0.1f, 0.1f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.7f, 0.2f, 0.2f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.6f, 0.0f, 0.0f, 1.0f));
-        if (ImGui::SmallButton("X"))
+        if (ImGui::SmallButton(ICON_FA_XMARK))
             *removed = true;
         ImGui::PopStyleColor(3);
     }
@@ -68,7 +69,9 @@ bool InspectorPanel::draw(entt::registry& registry, entt::entity selected,
         return false;
     }
 
-    // Search/filter bar
+    // Search/filter bar with icon
+    ImGui::TextDisabled(ICON_FA_SEARCH);
+    ImGui::SameLine();
     ImGui::SetNextItemWidth(-1.0f);
     ImGui::InputTextWithHint("##inspector_filter", "Search components...", m_filter_buf, sizeof(m_filter_buf));
     ImGui::Spacing();

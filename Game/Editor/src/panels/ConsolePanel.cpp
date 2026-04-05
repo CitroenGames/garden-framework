@@ -1,5 +1,6 @@
 #include "ConsolePanel.hpp"
 #include "Console/Console.hpp"
+#include "EditorIcons.hpp"
 #include "imgui.h"
 #include <cstring>
 #include <algorithm>
@@ -76,21 +77,21 @@ void ConsolePanel::draw()
         ImGui::PopStyleColor();
     };
 
-    filterToggle("Info", &m_show_info, ImVec4(0.3f, 0.3f, 0.6f, 1.0f));
+    filterToggle(ICON_FA_CIRCLE_INFO " Info", &m_show_info, ImVec4(0.3f, 0.3f, 0.6f, 1.0f));
     ImGui::SameLine();
-    filterToggle("Warn", &m_show_warn, ImVec4(0.6f, 0.5f, 0.1f, 1.0f));
+    filterToggle(ICON_FA_TRIANGLE_EXCLAMATION " Warn", &m_show_warn, ImVec4(0.6f, 0.5f, 0.1f, 1.0f));
     ImGui::SameLine();
-    filterToggle("Error", &m_show_error, ImVec4(0.6f, 0.1f, 0.1f, 1.0f));
+    filterToggle(ICON_FA_CIRCLE_EXCLAMATION " Error", &m_show_error, ImVec4(0.6f, 0.1f, 0.1f, 1.0f));
 
     ImGui::PopStyleVar();
 
     ImGui::SameLine();
 
     ImGui::SetNextItemWidth(150.0f);
-    ImGui::InputTextWithHint("##filter", "Filter...", m_filter_buf, sizeof(m_filter_buf));
+    ImGui::InputTextWithHint("##filter", ICON_FA_SEARCH " Filter...", m_filter_buf, sizeof(m_filter_buf));
     ImGui::SameLine();
 
-    if (ImGui::SmallButton("Clear"))
+    if (ImGui::SmallButton(ICON_FA_TRASH " Clear"))
         Console::get().clear();
     ImGui::SameLine();
 
@@ -183,9 +184,9 @@ void ConsolePanel::draw()
     cb_data.panel = this;
     cb_data.history_index = &m_history_index;
 
-    ImGui::TextDisabled(">");
+    ImGui::TextDisabled(ICON_FA_CHEVRON_RIGHT);
     ImGui::SameLine();
-    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.10f, 0.09f, 0.08f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.08f, 0.08f, 0.08f, 1.0f));
     ImGui::SetNextItemWidth(-1.0f);
     if (ImGui::InputText("##console_input", m_input_buf, sizeof(m_input_buf), input_flags, inputCallback, &cb_data))
     {
