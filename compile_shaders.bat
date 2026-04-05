@@ -77,6 +77,13 @@ if %ERRORLEVEL% NEQ 0 (
     exit /b 1
 )
 
+echo Compiling skinned shaders...
+"%GLSLC%" "%SHADER_DIR%\skinned.vert" -o "%OUT_DIR%\skinned.vert.spv"
+if %ERRORLEVEL% NEQ 0 (
+    echo ERROR: Failed to compile skinned.vert
+    exit /b 1
+)
+
 echo Compiling RmlUi shaders...
 "%GLSLC%" "%SHADER_DIR%\rmlui.vert" -o "%OUT_DIR%\rmlui.vert.spv"
 if %ERRORLEVEL% NEQ 0 (
@@ -101,6 +108,7 @@ echo Shader compilation successful!
 echo Output files:
 echo   %OUT_DIR%\basic.vert.spv
 echo   %OUT_DIR%\basic.frag.spv
+echo   %OUT_DIR%\skinned.vert.spv
 echo   %OUT_DIR%\shadow.vert.spv
 echo   %OUT_DIR%\shadow.frag.spv
 echo   %OUT_DIR%\sky.vert.spv

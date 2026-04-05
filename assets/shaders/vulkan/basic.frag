@@ -9,6 +9,19 @@ layout(location = 3) in float ViewDepth;
 // Output
 layout(location = 0) out vec4 FragColor;
 
+struct PointLightData {
+    vec3 position; float range;
+    vec3 color; float intensity;
+    vec3 attenuation; float _pad;
+};
+
+struct SpotLightData {
+    vec3 position; float range;
+    vec3 direction; float intensity;
+    vec3 color; float innerCutoff;
+    vec3 attenuation; float outerCutoff;
+};
+
 // UBO for lighting and material (per-frame data)
 layout(set = 0, binding = 0) uniform GlobalUBO {
     mat4 view;
@@ -23,6 +36,13 @@ layout(set = 0, binding = 0) uniform GlobalUBO {
     int debugCascades;
     vec3 color;
     int useTexture;
+    PointLightData pointLights[16];
+    SpotLightData  spotLights[16];
+    int numPointLights;
+    int numSpotLights;
+    vec2 _lightPad;
+    vec3 cameraPos;
+    float _lightPad2;
 } ubo;
 
 // Texture sampler
@@ -120,6 +140,38 @@ float ShadowCalculationWithBlend()
     return shadow;
 }
 
+vec3 CalcPointLight(PointLightData light, vec3 normal, vec3 fragPos)
+{
+    vec3 toLight = light.position - fragPos;
+    float distance = length(toLight);
+    if (distance > light.range) return vec3(0.0);
+    toLight = normalize(toLight);
+
+    float diff = max(dot(normal, toLight), 0.0);
+    float atten = 1.0 / (light.attenuation.x + light.attenuation.y * distance
+                         + light.attenuation.z * distance * distance);
+
+    return light.color * light.intensity * diff * atten;
+}
+
+vec3 CalcSpotLight(SpotLightData light, vec3 normal, vec3 fragPos)
+{
+    vec3 toLight = light.position - fragPos;
+    float distance = length(toLight);
+    if (distance > light.range) return vec3(0.0);
+    toLight = normalize(toLight);
+
+    float theta = dot(toLight, normalize(-light.direction));
+    float epsilon = light.innerCutoff - light.outerCutoff;
+    float spotIntensity = clamp((theta - light.outerCutoff) / epsilon, 0.0, 1.0);
+
+    float diff = max(dot(normal, toLight), 0.0);
+    float atten = 1.0 / (light.attenuation.x + light.attenuation.y * distance
+                         + light.attenuation.z * distance * distance);
+
+    return light.color * light.intensity * diff * atten * spotIntensity;
+}
+
 void main()
 {
     vec3 norm = normalize(Normal);
@@ -136,6 +188,14 @@ void main()
         shadow = ShadowCalculationWithBlend();
     }
     vec3 lighting = ambient + (1.0 - shadow) * diffuse;
+
+    // Point lights
+    for (int i = 0; i < ubo.numPointLights; i++)
+        lighting += CalcPointLight(ubo.pointLights[i], norm, FragPos);
+
+    // Spot lights
+    for (int j = 0; j < ubo.numSpotLights; j++)
+        lighting += CalcSpotLight(ubo.spotLights[j], norm, FragPos);
 
     vec4 texColor;
     if (ubo.useTexture != 0)

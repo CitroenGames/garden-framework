@@ -2088,10 +2088,14 @@ LevelData EditorApp::buildLevelDataFromECS() const
         bool has_mesh    = m_world.registry.all_of<MeshComponent>(entity);
         bool has_collider= m_world.registry.all_of<ColliderComponent>(entity);
         bool has_prep    = m_world.registry.all_of<PlayerRepresentationComponent>(entity);
+        bool has_pointlight = m_world.registry.all_of<PointLightComponent>(entity);
+        bool has_spotlight  = m_world.registry.all_of<SpotLightComponent>(entity);
 
         if      (has_player)               le.type = EntityType::Player;
         else if (has_freecam)              le.type = EntityType::Freecam;
         else if (has_prep)                 le.type = EntityType::PlayerRep;
+        else if (has_pointlight)           le.type = EntityType::PointLight;
+        else if (has_spotlight)            le.type = EntityType::SpotLight;
         else if (has_rb && has_collider)   le.type = EntityType::Physical;
         else if (has_collider && !has_mesh)le.type = EntityType::Collidable;
         else if (has_mesh)                 le.type = EntityType::Renderable;
@@ -2155,6 +2159,32 @@ LevelData EditorApp::buildLevelDataFromECS() const
             le.movement_speed      = fc.movement_speed;
             le.fast_movement_speed = fc.fast_movement_speed;
             le.mouse_sensitivity   = fc.mouse_sensitivity;
+        }
+
+        // Point light component
+        if (has_pointlight)
+        {
+            const auto& pl = m_world.registry.get<PointLightComponent>(entity);
+            le.light_color = pl.color;
+            le.light_intensity = pl.intensity;
+            le.light_range = pl.range;
+            le.light_constant_attenuation = pl.constant_attenuation;
+            le.light_linear_attenuation = pl.linear_attenuation;
+            le.light_quadratic_attenuation = pl.quadratic_attenuation;
+        }
+
+        // Spot light component
+        if (has_spotlight)
+        {
+            const auto& sl = m_world.registry.get<SpotLightComponent>(entity);
+            le.light_color = sl.color;
+            le.light_intensity = sl.intensity;
+            le.light_range = sl.range;
+            le.light_inner_cone_angle = sl.inner_cone_angle;
+            le.light_outer_cone_angle = sl.outer_cone_angle;
+            le.light_constant_attenuation = sl.constant_attenuation;
+            le.light_linear_attenuation = sl.linear_attenuation;
+            le.light_quadratic_attenuation = sl.quadratic_attenuation;
         }
 
         out.entities.push_back(le);

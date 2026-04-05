@@ -15,7 +15,7 @@
 using json = nlohmann::json;
 
 static constexpr uint32_t LEVEL_BINARY_MAGIC   = 0x47444E4C; // "GDNL"
-static constexpr uint32_t LEVEL_BINARY_VERSION  = 2;
+static constexpr uint32_t LEVEL_BINARY_VERSION  = 3;
 
 // Helper to get texture type name for logging (moved from main.cpp)
 static std::string getTextureTypeName(TextureType type) {
@@ -222,6 +222,8 @@ bool LevelManager::parseEntityFromJSON(const void* json_ptr, LevelEntity& entity
         else if (type_str == "Player") entity.type = EntityType::Player;
         else if (type_str == "Freecam") entity.type = EntityType::Freecam;
         else if (type_str == "PlayerRep") entity.type = EntityType::PlayerRep;
+        else if (type_str == "PointLight") entity.type = EntityType::PointLight;
+        else if (type_str == "SpotLight") entity.type = EntityType::SpotLight;
     }
 
     // Parse transform
@@ -338,6 +340,40 @@ bool LevelManager::parseEntityFromJSON(const void* json_ptr, LevelEntity& entity
         }
     }
 
+    // Parse point light properties
+    if (j.contains("point_light"))
+    {
+        const auto& pl = j["point_light"];
+        if (pl.contains("color"))
+        {
+            const auto& c = pl["color"];
+            entity.light_color = glm::vec3(c.value("r", 1.0f), c.value("g", 1.0f), c.value("b", 1.0f));
+        }
+        entity.light_intensity = pl.value("intensity", 1.0f);
+        entity.light_range = pl.value("range", 10.0f);
+        entity.light_constant_attenuation = pl.value("constant_attenuation", 1.0f);
+        entity.light_linear_attenuation = pl.value("linear_attenuation", 0.09f);
+        entity.light_quadratic_attenuation = pl.value("quadratic_attenuation", 0.032f);
+    }
+
+    // Parse spot light properties
+    if (j.contains("spot_light"))
+    {
+        const auto& sl = j["spot_light"];
+        if (sl.contains("color"))
+        {
+            const auto& c = sl["color"];
+            entity.light_color = glm::vec3(c.value("r", 1.0f), c.value("g", 1.0f), c.value("b", 1.0f));
+        }
+        entity.light_intensity = sl.value("intensity", 1.0f);
+        entity.light_range = sl.value("range", 15.0f);
+        entity.light_inner_cone_angle = sl.value("inner_cone_angle", 12.5f);
+        entity.light_outer_cone_angle = sl.value("outer_cone_angle", 17.5f);
+        entity.light_constant_attenuation = sl.value("constant_attenuation", 1.0f);
+        entity.light_linear_attenuation = sl.value("linear_attenuation", 0.09f);
+        entity.light_quadratic_attenuation = sl.value("quadratic_attenuation", 0.032f);
+    }
+
     return true;
 }
 
@@ -352,6 +388,8 @@ static std::string entityTypeToString(EntityType type)
     case EntityType::Player:     return "Player";
     case EntityType::Freecam:    return "Freecam";
     case EntityType::PlayerRep:  return "PlayerRep";
+    case EntityType::PointLight: return "PointLight";
+    case EntityType::SpotLight:  return "SpotLight";
     default:                     return "Static";
     }
 }
@@ -436,6 +474,28 @@ bool LevelManager::saveLevelToJSON(const std::string& json_path, const LevelData
                 {"y", le.position_offset.y},
                 {"z", le.position_offset.z}
             };
+        }
+
+        if (le.type == EntityType::PointLight)
+        {
+            e["point_light"]["color"] = {{"r", le.light_color.x}, {"g", le.light_color.y}, {"b", le.light_color.z}};
+            e["point_light"]["intensity"] = le.light_intensity;
+            e["point_light"]["range"] = le.light_range;
+            e["point_light"]["constant_attenuation"] = le.light_constant_attenuation;
+            e["point_light"]["linear_attenuation"] = le.light_linear_attenuation;
+            e["point_light"]["quadratic_attenuation"] = le.light_quadratic_attenuation;
+        }
+
+        if (le.type == EntityType::SpotLight)
+        {
+            e["spot_light"]["color"] = {{"r", le.light_color.x}, {"g", le.light_color.y}, {"b", le.light_color.z}};
+            e["spot_light"]["intensity"] = le.light_intensity;
+            e["spot_light"]["range"] = le.light_range;
+            e["spot_light"]["inner_cone_angle"] = le.light_inner_cone_angle;
+            e["spot_light"]["outer_cone_angle"] = le.light_outer_cone_angle;
+            e["spot_light"]["constant_attenuation"] = le.light_constant_attenuation;
+            e["spot_light"]["linear_attenuation"] = le.light_linear_attenuation;
+            e["spot_light"]["quadratic_attenuation"] = le.light_quadratic_attenuation;
         }
 
         entities_array.push_back(e);
@@ -624,6 +684,16 @@ void LevelManager::writeBinaryEntity(std::ofstream& file, const LevelEntity& ent
 
     writeString(file, entity.tracked_player_name);
     file.write(reinterpret_cast<const char*>(&entity.position_offset), sizeof(glm::vec3));
+
+    // Light data
+    file.write(reinterpret_cast<const char*>(&entity.light_color), sizeof(glm::vec3));
+    file.write(reinterpret_cast<const char*>(&entity.light_intensity), sizeof(float));
+    file.write(reinterpret_cast<const char*>(&entity.light_range), sizeof(float));
+    file.write(reinterpret_cast<const char*>(&entity.light_constant_attenuation), sizeof(float));
+    file.write(reinterpret_cast<const char*>(&entity.light_linear_attenuation), sizeof(float));
+    file.write(reinterpret_cast<const char*>(&entity.light_quadratic_attenuation), sizeof(float));
+    file.write(reinterpret_cast<const char*>(&entity.light_inner_cone_angle), sizeof(float));
+    file.write(reinterpret_cast<const char*>(&entity.light_outer_cone_angle), sizeof(float));
 }
 
 bool LevelManager::readBinaryHeader(std::ifstream& file, LevelMetadata& metadata)
@@ -728,6 +798,16 @@ bool LevelManager::readBinaryEntity(std::ifstream& file, LevelEntity& entity)
 
     if (!readString(file, entity.tracked_player_name)) return false;
     file.read(reinterpret_cast<char*>(&entity.position_offset), sizeof(glm::vec3));
+
+    // Light data (v3+)
+    file.read(reinterpret_cast<char*>(&entity.light_color), sizeof(glm::vec3));
+    file.read(reinterpret_cast<char*>(&entity.light_intensity), sizeof(float));
+    file.read(reinterpret_cast<char*>(&entity.light_range), sizeof(float));
+    file.read(reinterpret_cast<char*>(&entity.light_constant_attenuation), sizeof(float));
+    file.read(reinterpret_cast<char*>(&entity.light_linear_attenuation), sizeof(float));
+    file.read(reinterpret_cast<char*>(&entity.light_quadratic_attenuation), sizeof(float));
+    file.read(reinterpret_cast<char*>(&entity.light_inner_cone_angle), sizeof(float));
+    file.read(reinterpret_cast<char*>(&entity.light_outer_cone_angle), sizeof(float));
 
     return !file.fail();
 }
@@ -1145,8 +1225,32 @@ bool LevelManager::instantiateLevel(
              auto& pr = game_world.registry.get<PlayerRepresentationComponent>(e);
              pr.position_offset = entity_data.position_offset;
              // tracked_player resolved in second pass
-             
+
              if (out_player_rep_entity) *out_player_rep_entity = e;
+        }
+
+        if (entity_data.type == EntityType::PointLight)
+        {
+            auto& pl = game_world.registry.emplace<PointLightComponent>(e);
+            pl.color = entity_data.light_color;
+            pl.intensity = entity_data.light_intensity;
+            pl.range = entity_data.light_range;
+            pl.constant_attenuation = entity_data.light_constant_attenuation;
+            pl.linear_attenuation = entity_data.light_linear_attenuation;
+            pl.quadratic_attenuation = entity_data.light_quadratic_attenuation;
+        }
+
+        if (entity_data.type == EntityType::SpotLight)
+        {
+            auto& sl = game_world.registry.emplace<SpotLightComponent>(e);
+            sl.color = entity_data.light_color;
+            sl.intensity = entity_data.light_intensity;
+            sl.range = entity_data.light_range;
+            sl.inner_cone_angle = entity_data.light_inner_cone_angle;
+            sl.outer_cone_angle = entity_data.light_outer_cone_angle;
+            sl.constant_attenuation = entity_data.light_constant_attenuation;
+            sl.linear_attenuation = entity_data.light_linear_attenuation;
+            sl.quadratic_attenuation = entity_data.light_quadratic_attenuation;
         }
     }
     

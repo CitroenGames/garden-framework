@@ -13,6 +13,19 @@ layout(location = 1) out vec3 Normal;
 layout(location = 2) out vec2 TexCoord;
 layout(location = 3) out float ViewDepth;
 
+struct PointLightData {
+    vec3 position; float range;
+    vec3 color; float intensity;
+    vec3 attenuation; float _pad;
+};
+
+struct SpotLightData {
+    vec3 position; float range;
+    vec3 direction; float intensity;
+    vec3 color; float innerCutoff;
+    vec3 attenuation; float outerCutoff;
+};
+
 // UBO for view/projection (per-frame data)
 layout(set = 0, binding = 0) uniform GlobalUBO {
     mat4 view;
@@ -27,6 +40,13 @@ layout(set = 0, binding = 0) uniform GlobalUBO {
     int debugCascades;
     vec3 color;
     int useTexture;
+    PointLightData pointLights[16];
+    SpotLightData  spotLights[16];
+    int numPointLights;
+    int numSpotLights;
+    vec2 _lightPad;
+    vec3 cameraPos;
+    float _lightPad2;
 } ubo;
 
 // Push constants for model matrix (per-draw data)

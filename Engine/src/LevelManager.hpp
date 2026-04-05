@@ -22,7 +22,9 @@ enum class EntityType
     Physical,    // Has rigidbody and collider
     Player,      // Player entity
     Freecam,     // Freecam entity
-    PlayerRep    // Player representation
+    PlayerRep,   // Player representation
+    PointLight,  // Point light source
+    SpotLight    // Spot light source
 };
 
 // Level entity structure (runtime representation)
@@ -66,6 +68,16 @@ struct LevelEntity
     // Player representation specific
     std::string tracked_player_name;  // Name of player to track
     glm::vec3 position_offset;
+
+    // Light properties (point and spot lights)
+    glm::vec3 light_color{1.0f, 1.0f, 1.0f};
+    float light_intensity = 1.0f;
+    float light_range = 10.0f;
+    float light_constant_attenuation = 1.0f;
+    float light_linear_attenuation = 0.09f;
+    float light_quadratic_attenuation = 0.032f;
+    float light_inner_cone_angle = 12.5f;  // Spot light only
+    float light_outer_cone_angle = 17.5f;  // Spot light only
 
     LevelEntity()
         : type(EntityType::Static)

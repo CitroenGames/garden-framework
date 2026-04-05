@@ -733,6 +733,11 @@ bool D3D11RenderAPI::createConstantBuffers()
     // FXAA constant buffer
     cbDesc.ByteWidth = sizeof(FXAACBuffer);
     hr = device->CreateBuffer(&cbDesc, nullptr, fxaaCBuffer.GetAddressOf());
+    if (FAILED(hr)) return false;
+
+    // Light constant buffer (point/spot lights)
+    cbDesc.ByteWidth = sizeof(LightCBuffer);
+    hr = device->CreateBuffer(&cbDesc, nullptr, lightCBuffer_gpu.GetAddressOf());
     return SUCCEEDED(hr);
 }
 
@@ -1607,6 +1612,21 @@ void D3D11RenderAPI::setLighting(const glm::vec3& ambient, const glm::vec3& diff
     current_light_diffuse = diffuse;
     current_light_direction = glm::normalize(direction);
     global_cbuffer_dirty = true;
+}
+
+void D3D11RenderAPI::setPointAndSpotLights(const LightCBuffer& lights)
+{
+    current_lights = lights;
+    // Upload light buffer to GPU
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    HRESULT hr = context->Map(lightCBuffer_gpu.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
+    if (SUCCEEDED(hr))
+    {
+        memcpy(mapped.pData, &current_lights, sizeof(LightCBuffer));
+        context->Unmap(lightCBuffer_gpu.Get(), 0);
+    }
+    // Bind to pixel shader slot b3
+    context->PSSetConstantBuffers(3, 1, lightCBuffer_gpu.GetAddressOf());
 }
 
 void D3D11RenderAPI::renderSkybox()

@@ -48,6 +48,57 @@ public:
         light_direction = direction;
     }
 
+    void gatherAndSetLights(entt::registry& registry, camera& cam)
+    {
+        LightCBuffer light_buffer{};
+        int point_count = 0;
+        int spot_count = 0;
+
+        auto point_view = registry.view<PointLightComponent, TransformComponent>();
+        for (auto entity : point_view)
+        {
+            if (point_count >= MAX_LIGHTS) break;
+            const auto& pl = point_view.get<PointLightComponent>(entity);
+            const auto& t = point_view.get<TransformComponent>(entity);
+            auto& gpu = light_buffer.pointLights[point_count];
+            gpu.position = t.position;
+            gpu.range = pl.range;
+            gpu.color = pl.color;
+            gpu.intensity = pl.intensity;
+            gpu.attenuation = glm::vec3(pl.constant_attenuation, pl.linear_attenuation, pl.quadratic_attenuation);
+            gpu._pad0 = 0.0f;
+            point_count++;
+        }
+
+        auto spot_view = registry.view<SpotLightComponent, TransformComponent>();
+        for (auto entity : spot_view)
+        {
+            if (spot_count >= MAX_LIGHTS) break;
+            const auto& sl = spot_view.get<SpotLightComponent>(entity);
+            const auto& t = spot_view.get<TransformComponent>(entity);
+            auto& gpu = light_buffer.spotLights[spot_count];
+            gpu.position = t.position;
+            gpu.range = sl.range;
+            // Derive forward direction from rotation euler angles
+            glm::mat4 rot = glm::eulerAngleYXZ(
+                glm::radians(t.rotation.y), glm::radians(t.rotation.x), glm::radians(t.rotation.z));
+            gpu.direction = glm::normalize(glm::vec3(rot * glm::vec4(0.0f, 0.0f, -1.0f, 0.0f)));
+            gpu.intensity = sl.intensity;
+            gpu.color = sl.color;
+            gpu.innerCutoff = glm::cos(glm::radians(sl.inner_cone_angle));
+            gpu.attenuation = glm::vec3(sl.constant_attenuation, sl.linear_attenuation, sl.quadratic_attenuation);
+            gpu.outerCutoff = glm::cos(glm::radians(sl.outer_cone_angle));
+            spot_count++;
+        }
+
+        light_buffer.numPointLights = point_count;
+        light_buffer.numSpotLights = spot_count;
+        light_buffer.cameraPos = cam.getPosition();
+        light_buffer._pad2 = 0.0f;
+
+        render_api->setPointAndSpotLights(light_buffer);
+    }
+
     // Depth prepass helper: render mesh depth-only with transform
     static void render_mesh_depth_only(mesh& m, const TransformComponent& transform, IRenderAPI* api)
     {
@@ -338,6 +389,7 @@ public:
         render_api->clear(glm::vec3(0.2f, 0.3f, 0.8f));
         render_api->setCamera(c);
         render_api->setLighting(ambient_light, diffuse_light, light_direction);
+        gatherAndSetLights(registry, c);
 
         glm::mat4 proj = render_api->getProjectionMatrix();
         glm::vec3 cam_pos = c.getPosition();
@@ -569,6 +621,7 @@ public:
         render_api->clear(glm::vec3(0.2f, 0.3f, 0.8f));
         render_api->setCamera(c);
         render_api->setLighting(ambient_light, diffuse_light, light_direction);
+        gatherAndSetLights(registry, c);
 
         glm::mat4 proj = render_api->getProjectionMatrix();
         glm::vec3 cam_pos = c.getPosition();
