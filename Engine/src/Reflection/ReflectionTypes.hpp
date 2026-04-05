@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <vector>
 #include <entt/entt.hpp>
 
 // ---- Property specifiers (Unreal-style) ----
@@ -92,15 +93,15 @@ struct ComponentDescriptor
     const char* source_id;      // "engine" or DLL name (for unload tracking)
     uint32_t type_id;           // entt::type_hash<T>::value()
     size_t size;                // sizeof(T)
+    bool removable = true;      // Can be removed in editor inspector
 
-    PropertyDescriptor* properties;
-    uint32_t property_count;
+    std::vector<PropertyDescriptor> properties;
 
     // ECS bridge — function pointers compiled where T is known
-    void  (*add)(entt::registry&, entt::entity);
-    void  (*remove)(entt::registry&, entt::entity);
-    bool  (*has)(entt::registry&, entt::entity);
-    void* (*get)(entt::registry&, entt::entity);     // nullptr if absent
-    void  (*construct_default)(void* dest);           // placement-new
-    void  (*destruct)(void* dest);                    // destructor call
+    void  (*add)(entt::registry&, entt::entity)      = nullptr;
+    void  (*remove)(entt::registry&, entt::entity)   = nullptr;
+    bool  (*has)(entt::registry&, entt::entity)       = nullptr;
+    void* (*get)(entt::registry&, entt::entity)      = nullptr;  // nullptr if absent
+    void  (*construct_default)(void* dest)            = nullptr;  // placement-new
+    void  (*destruct)(void* dest)                     = nullptr;  // destructor call
 };

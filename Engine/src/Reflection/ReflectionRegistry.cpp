@@ -4,16 +4,28 @@
 
 void ReflectionRegistry::registerComponent(const ComponentDescriptor& desc)
 {
-    // Avoid duplicates
     for (auto& existing : m_components)
     {
         if (existing.type_id == desc.type_id)
         {
-            existing = desc; // update in-place
+            existing = desc;
             return;
         }
     }
     m_components.push_back(desc);
+}
+
+void ReflectionRegistry::registerComponent(ComponentDescriptor&& desc)
+{
+    for (auto& existing : m_components)
+    {
+        if (existing.type_id == desc.type_id)
+        {
+            existing = std::move(desc);
+            return;
+        }
+    }
+    m_components.push_back(std::move(desc));
 }
 
 void ReflectionRegistry::unregisterComponent(uint32_t type_id)

@@ -148,11 +148,8 @@ json ReflectionSerializer::serializeComponent(
     const void* component)
 {
     json j = json::object();
-    for (uint32_t i = 0; i < desc.property_count; i++)
-    {
-        const PropertyDescriptor& prop = desc.properties[i];
+    for (const auto& prop : desc.properties)
         j[prop.name] = serializeProperty(prop, component);
-    }
     return j;
 }
 
@@ -161,9 +158,8 @@ void ReflectionSerializer::deserializeComponent(
     void* component,
     const json& j)
 {
-    for (uint32_t i = 0; i < desc.property_count; i++)
+    for (const auto& prop : desc.properties)
     {
-        const PropertyDescriptor& prop = desc.properties[i];
         if (j.contains(prop.name))
             deserializeProperty(prop, component, j[prop.name]);
         // Missing fields keep their default values

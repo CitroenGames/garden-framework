@@ -2,6 +2,8 @@
 #include "Components/Components.hpp"
 #include "Graphics/LODSelector.hpp"
 #include "ImGui/ImGuiManager.hpp"
+#include "Reflection/ReflectionRegistry.hpp"
+#include "Reflection/ReflectionWidgets.hpp"
 #include "imgui.h"
 #include "imgui_internal.h"
 #include <cstring>
@@ -74,59 +76,77 @@ bool InspectorPanel::draw(entt::registry& registry, entt::entity selected,
     // Tighter property spacing inside sections
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6.0f, 2.0f));
 
-    // --- Tag (always present, not removable) ---
-    if (auto* tag = registry.try_get<TagComponent>(selected))
+    // Type IDs for components with custom UI (not reflection-driven)
+    static const uint32_t mesh_type_id     = entt::type_hash<MeshComponent>::value();
+    static const uint32_t collider_type_id = entt::type_hash<ColliderComponent>::value();
+    static const uint32_t transform_type_id = entt::type_hash<TransformComponent>::value();
+
+    // ---- Reflection-driven components ----
+    if (reflection)
     {
-        bool unused = false;
-        if (drawComponentHeader("Tag", false, &unused, ImVec4(0.86f, 0.86f, 0.86f, 1.0f)))
+        for (const auto& desc : reflection->getAll())
         {
-            char buf[256];
-            std::strncpy(buf, tag->name.c_str(), sizeof(buf) - 1);
-            buf[sizeof(buf) - 1] = '\0';
-            ImGui::SetNextItemWidth(-1.0f);
-            if (ImGui::InputText("##tag_name", buf, sizeof(buf)))
+            // Skip non-reflected custom-UI components
+            if (desc.type_id == mesh_type_id || desc.type_id == collider_type_id)
+                continue;
+
+            if (!desc.has(registry, selected))
+                continue;
+
+            void* comp = desc.get(registry, selected);
+            if (!comp) continue;
+
+            // Filter by search text
+            if (m_filter_buf[0] != '\0')
             {
-                tag->name = buf;
+                // Case-insensitive check against display name
+                bool match = false;
+                const char* haystack = desc.display_name;
+                const char* needle = m_filter_buf;
+                // Simple case-insensitive substring
+                for (const char* h = haystack; *h; ++h)
+                {
+                    const char* hi = h;
+                    const char* ni = needle;
+                    while (*hi && *ni && ((*hi | 32) == (*ni | 32))) { ++hi; ++ni; }
+                    if (!*ni) { match = true; break; }
+                }
+                if (!match) continue;
+            }
+
+            bool removed = false;
+            if (drawComponentHeader(desc.display_name, desc.removable, &removed))
+            {
+                ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.65f);
+
+                bool edit_started = false;
+                if (drawReflectedComponent(desc, comp, &edit_started))
+                {
+                    markUnsaved();
+                    if (desc.type_id == transform_type_id)
+                        transform_dirty = true;
+                }
+                if (edit_started)
+                    markEditStarted();
+
+                ImGui::PopItemWidth();
+            }
+
+            if (removed && desc.removable)
+            {
+                desc.remove(registry, selected);
                 markUnsaved();
             }
-            if (ImGui::IsItemActivated()) markEditStarted();
+
+            ImGui::Spacing();
         }
     }
 
-    ImGui::Spacing();
-
-    // --- Transform (always present, not removable) ---
-    if (auto* t = registry.try_get<TransformComponent>(selected))
-    {
-        bool unused = false;
-        if (drawComponentHeader("Transform", false, &unused, ImVec4(1.0f, 0.6f, 0.2f, 1.0f)))
-        {
-            ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.65f);
-            if (ImGui::DragFloat3("Position", &t->position.x, 0.01f))
-            { transform_dirty = true; markUnsaved(); }
-            if (ImGui::IsItemActivated()) markEditStarted();
-
-            if (ImGui::DragFloat3("Rotation", &t->rotation.x, 0.5f))
-            { transform_dirty = true; markUnsaved(); }
-            if (ImGui::IsItemActivated()) markEditStarted();
-
-            if (ImGui::DragFloat3("Scale", &t->scale.x, 0.01f, 0.001f, 1000.0f))
-            { transform_dirty = true; markUnsaved(); }
-            if (ImGui::IsItemActivated()) markEditStarted();
-
-            ImGui::PopItemWidth();
-        }
-    }
-
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
-
-    // --- Mesh ---
+    // ---- Mesh (custom UI — non-reflectable shared_ptr data) ----
     if (registry.all_of<MeshComponent>(selected))
     {
         bool removed = false;
-        if (drawComponentHeader("Mesh", true, &removed, ImVec4(0.3f, 0.9f, 0.9f, 1.0f)))
+        if (drawComponentHeader("Mesh", true, &removed))
         {
             auto it = mesh_path_cache.find(selected);
             const char* path = (it != mesh_path_cache.end()) ? it->second.c_str() : "(unknown)";
@@ -209,158 +229,16 @@ bool InspectorPanel::draw(entt::registry& registry, entt::entity selected,
         ImGui::Spacing();
     }
 
-    // --- Collider ---
+    // ---- Collider (custom UI — non-reflectable shared_ptr data) ----
     if (registry.all_of<ColliderComponent>(selected))
     {
         bool removed = false;
-        if (drawComponentHeader("Collider", true, &removed, ImVec4(0.3f, 0.9f, 0.3f, 1.0f)))
+        if (drawComponentHeader("Collider", true, &removed))
         {
             ImGui::TextDisabled("Collider component present");
         }
         if (removed)
         { registry.remove<ColliderComponent>(selected); markUnsaved(); }
-        ImGui::Spacing();
-    }
-
-    // --- RigidBody ---
-    if (auto* rb = registry.try_get<RigidBodyComponent>(selected))
-    {
-        bool removed = false;
-        if (drawComponentHeader("RigidBody", true, &removed, ImVec4(1.0f, 0.5f, 0.2f, 1.0f)))
-        {
-            ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.65f);
-            if (ImGui::DragFloat("Mass", &rb->mass, 0.1f, 0.001f, 100000.0f))
-                markUnsaved();
-            if (ImGui::IsItemActivated()) markEditStarted();
-
-            if (ImGui::Checkbox("Apply Gravity", &rb->apply_gravity))
-                markUnsaved();
-
-            ImGui::PopItemWidth();
-        }
-        if (removed)
-        { registry.remove<RigidBodyComponent>(selected); markUnsaved(); }
-        ImGui::Spacing();
-    }
-
-    // --- Player ---
-    if (auto* pc = registry.try_get<PlayerComponent>(selected))
-    {
-        bool removed = false;
-        if (drawComponentHeader("Player", true, &removed, ImVec4(0.3f, 0.5f, 1.0f, 1.0f)))
-        {
-            ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.65f);
-            if (ImGui::DragFloat("Speed", &pc->speed, 0.1f, 0.0f, 100.0f))
-                markUnsaved();
-            if (ImGui::IsItemActivated()) markEditStarted();
-
-            if (ImGui::DragFloat("Jump Force", &pc->jump_force, 0.1f, 0.0f, 100.0f))
-                markUnsaved();
-            if (ImGui::IsItemActivated()) markEditStarted();
-
-            if (ImGui::DragFloat("Mouse Sensitivity", &pc->mouse_sensitivity, 0.01f, 0.01f, 10.0f))
-                markUnsaved();
-            if (ImGui::IsItemActivated()) markEditStarted();
-
-            ImGui::PopItemWidth();
-        }
-        if (removed)
-        { registry.remove<PlayerComponent>(selected); markUnsaved(); }
-        ImGui::Spacing();
-    }
-
-    // --- Freecam ---
-    if (auto* fc = registry.try_get<FreecamComponent>(selected))
-    {
-        bool removed = false;
-        if (drawComponentHeader("Freecam", true, &removed, ImVec4(0.3f, 0.9f, 0.3f, 1.0f)))
-        {
-            ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.65f);
-            if (ImGui::DragFloat("Move Speed", &fc->movement_speed, 0.1f, 0.0f, 100.0f))
-                markUnsaved();
-            if (ImGui::IsItemActivated()) markEditStarted();
-
-            if (ImGui::DragFloat("Fast Speed", &fc->fast_movement_speed, 0.5f, 0.0f, 500.0f))
-                markUnsaved();
-            if (ImGui::IsItemActivated()) markEditStarted();
-
-            if (ImGui::DragFloat("Mouse Sensitivity", &fc->mouse_sensitivity, 0.01f, 0.01f, 10.0f))
-                markUnsaved();
-            if (ImGui::IsItemActivated()) markEditStarted();
-
-            ImGui::PopItemWidth();
-        }
-        if (removed)
-        { registry.remove<FreecamComponent>(selected); markUnsaved(); }
-        ImGui::Spacing();
-    }
-
-    // --- Player Representation ---
-    if (registry.all_of<PlayerRepresentationComponent>(selected))
-    {
-        bool removed = false;
-        if (drawComponentHeader("Player Representation", true, &removed, ImVec4(0.5f, 0.3f, 0.9f, 1.0f)))
-        {
-            ImGui::TextDisabled("Tracks another player entity");
-        }
-        if (removed)
-        { registry.remove<PlayerRepresentationComponent>(selected); markUnsaved(); }
-        ImGui::Spacing();
-    }
-
-    // --- Point Light ---
-    if (auto* pl = registry.try_get<PointLightComponent>(selected))
-    {
-        bool removed = false;
-        if (drawComponentHeader("Point Light", true, &removed, ImVec4(1.0f, 0.85f, 0.2f, 1.0f)))
-        {
-            ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.65f);
-            if (ImGui::ColorEdit3("Color", &pl->color.x)) markUnsaved();
-            if (ImGui::DragFloat("Intensity", &pl->intensity, 0.1f, 0.0f, 100.0f)) markUnsaved();
-            if (ImGui::IsItemActivated()) markEditStarted();
-            if (ImGui::DragFloat("Range", &pl->range, 0.1f, 0.1f, 1000.0f)) markUnsaved();
-            if (ImGui::IsItemActivated()) markEditStarted();
-            if (ImGui::TreeNode("Attenuation"))
-            {
-                if (ImGui::DragFloat("Constant", &pl->constant_attenuation, 0.01f, 0.0f, 10.0f)) markUnsaved();
-                if (ImGui::DragFloat("Linear", &pl->linear_attenuation, 0.001f, 0.0f, 2.0f)) markUnsaved();
-                if (ImGui::DragFloat("Quadratic", &pl->quadratic_attenuation, 0.001f, 0.0f, 2.0f)) markUnsaved();
-                ImGui::TreePop();
-            }
-            ImGui::PopItemWidth();
-        }
-        if (removed)
-        { registry.remove<PointLightComponent>(selected); markUnsaved(); }
-        ImGui::Spacing();
-    }
-
-    // --- Spot Light ---
-    if (auto* sl = registry.try_get<SpotLightComponent>(selected))
-    {
-        bool removed = false;
-        if (drawComponentHeader("Spot Light", true, &removed, ImVec4(1.0f, 0.8f, 0.15f, 1.0f)))
-        {
-            ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.65f);
-            if (ImGui::ColorEdit3("Color", &sl->color.x)) markUnsaved();
-            if (ImGui::DragFloat("Intensity", &sl->intensity, 0.1f, 0.0f, 100.0f)) markUnsaved();
-            if (ImGui::IsItemActivated()) markEditStarted();
-            if (ImGui::DragFloat("Range", &sl->range, 0.1f, 0.1f, 1000.0f)) markUnsaved();
-            if (ImGui::IsItemActivated()) markEditStarted();
-            if (ImGui::DragFloat("Inner Cone", &sl->inner_cone_angle, 0.5f, 0.0f, 90.0f)) markUnsaved();
-            if (ImGui::IsItemActivated()) markEditStarted();
-            if (ImGui::DragFloat("Outer Cone", &sl->outer_cone_angle, 0.5f, 0.0f, 90.0f)) markUnsaved();
-            if (ImGui::IsItemActivated()) markEditStarted();
-            if (ImGui::TreeNode("Attenuation"))
-            {
-                if (ImGui::DragFloat("Constant", &sl->constant_attenuation, 0.01f, 0.0f, 10.0f)) markUnsaved();
-                if (ImGui::DragFloat("Linear", &sl->linear_attenuation, 0.001f, 0.0f, 2.0f)) markUnsaved();
-                if (ImGui::DragFloat("Quadratic", &sl->quadratic_attenuation, 0.001f, 0.0f, 2.0f)) markUnsaved();
-                ImGui::TreePop();
-            }
-            ImGui::PopItemWidth();
-        }
-        if (removed)
-        { registry.remove<SpotLightComponent>(selected); markUnsaved(); }
         ImGui::Spacing();
     }
 
@@ -381,6 +259,7 @@ bool InspectorPanel::draw(entt::registry& registry, entt::entity selected,
 
     if (ImGui::BeginPopup("AddComponentPopup"))
     {
+        // Custom non-reflected components
         if (!registry.all_of<MeshComponent>(selected))
             if (ImGui::MenuItem("Mesh"))
             { registry.emplace<MeshComponent>(selected); markUnsaved(); }
@@ -389,27 +268,27 @@ bool InspectorPanel::draw(entt::registry& registry, entt::entity selected,
             if (ImGui::MenuItem("Collider"))
             { registry.emplace<ColliderComponent>(selected); markUnsaved(); }
 
-        if (!registry.all_of<RigidBodyComponent>(selected))
-            if (ImGui::MenuItem("RigidBody"))
-            { registry.emplace<RigidBodyComponent>(selected); markUnsaved(); }
+        // Reflected components from registry
+        if (reflection)
+        {
+            bool need_separator = true;
+            for (const auto& desc : reflection->getAll())
+            {
+                if (desc.type_id == mesh_type_id || desc.type_id == collider_type_id)
+                    continue;
 
-        if (!registry.all_of<PlayerComponent>(selected))
-            if (ImGui::MenuItem("Player"))
-            { registry.emplace<PlayerComponent>(selected); markUnsaved(); }
+                if (desc.has(registry, selected))
+                    continue;
 
-        if (!registry.all_of<FreecamComponent>(selected))
-            if (ImGui::MenuItem("Freecam"))
-            { registry.emplace<FreecamComponent>(selected); markUnsaved(); }
+                if (need_separator) { ImGui::Separator(); need_separator = false; }
 
-        ImGui::Separator();
-
-        if (!registry.all_of<PointLightComponent>(selected))
-            if (ImGui::MenuItem("Point Light"))
-            { registry.emplace<PointLightComponent>(selected); markUnsaved(); }
-
-        if (!registry.all_of<SpotLightComponent>(selected))
-            if (ImGui::MenuItem("Spot Light"))
-            { registry.emplace<SpotLightComponent>(selected); markUnsaved(); }
+                if (ImGui::MenuItem(desc.display_name))
+                {
+                    desc.add(registry, selected);
+                    markUnsaved();
+                }
+            }
+        }
 
         ImGui::EndPopup();
     }
