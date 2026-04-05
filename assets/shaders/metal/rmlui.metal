@@ -8,7 +8,7 @@ struct RmlUniforms {
 
 struct RmlVertexIn {
     float2 position [[attribute(0)]];
-    uchar4 color    [[attribute(1)]];
+    float4 color    [[attribute(1)]];
     float2 texcoord [[attribute(2)]];
 };
 
@@ -23,7 +23,7 @@ vertex RmlVertexOut rmlui_vertex(RmlVertexIn in [[stage_in]],
     RmlVertexOut out;
     float2 translated = in.position + uniforms.translation;
     out.position = uniforms.transform * float4(translated, 0.0, 1.0);
-    out.color = float4(in.color) / 255.0;
+    out.color = in.color;
     out.texcoord = in.texcoord;
     return out;
 }
