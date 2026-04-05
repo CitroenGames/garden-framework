@@ -6,6 +6,8 @@
 #include <glm/glm.hpp>
 #include "imgui.h"
 
+class ReflectionRegistry;
+
 class InspectorPanel
 {
 public:
@@ -15,6 +17,9 @@ public:
     // Set by EditorApp each frame for LOD debug display
     glm::vec3 debug_cam_pos{0.0f};
     glm::mat4 debug_projection{1.0f};
+
+    // Reflection registry for data-driven component rendering
+    ReflectionRegistry* reflection = nullptr;
 
     // Draw the inspector for the selected entity.
     // Returns true if any transform was modified (so caller can mark BVH dirty).

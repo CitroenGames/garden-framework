@@ -1,57 +1,28 @@
 #pragma once
 
 #include "ReflectionTypes.hpp"
-#include "ReflectionRegistry.hpp"
+#include "Reflector.hpp"
 #include <entt/entt.hpp>
-#include <cstddef>
 #include <new>
 
 // ============================================================================
-// GPROPERTY — Unreal-style property annotation.
-// Place before fields in struct headers. Expands to nothing at compile time;
-// serves as documentation and intent marker (like Unreal's UPROPERTY).
-//
-// Usage:
-//   GPROPERTY(EditAnywhere, Category = "Movement")
-//   float speed = 1.5f;
-// ============================================================================
-#define GPROPERTY(...)
-
-// ============================================================================
-// GCLASS — Unreal-style class annotation.
-// Place inside component structs. Expands to nothing at compile time.
-//
-// Usage:
-//   struct PlayerComponent
-//   {
-//       GCLASS(PlayerComponent)
-//       ...
-//   };
-// ============================================================================
-#define GCLASS(...)
-
-// ============================================================================
-// Helper template — builds ComponentDescriptor with ECS bridge functions.
+// Helper template — builds a ComponentDescriptor with ECS bridge functions.
+// Properties are populated by Reflector<T> via the component's reflect() method.
 // ============================================================================
 
 template<typename T>
 ComponentDescriptor makeComponentDescriptor(
     const char* name,
-    const char* display_name,
-    const char* category,
-    const char* source_id,
-    PropertyDescriptor* props,
-    uint32_t prop_count)
+    const char* source_id)
 {
     ComponentDescriptor desc{};
     desc.name = name;
-    desc.display_name = display_name;
-    desc.category = category;
+    desc.display_name = name;   // Overridden by Reflector::display()
+    desc.category = "";         // Overridden by Reflector::category()
     desc.source_id = source_id;
     desc.type_id = entt::type_hash<T>::value();
     desc.size = sizeof(T);
-    desc.properties = props;
-    desc.property_count = prop_count;
+    desc.removable = true;
 
     desc.add = [](entt::registry& r, entt::entity e) {
         if (!r.all_of<T>(e)) r.emplace<T>(e);
@@ -74,67 +45,3 @@ ComponentDescriptor makeComponentDescriptor(
 
     return desc;
 }
-
-// ============================================================================
-// Registration macros — used in .cpp files to define reflection data.
-// Auto-computes field offsets via offsetof().
-//
-// Usage:
-//   REFLECT_BEGIN(PlayerComponent, "Player", "Gameplay", "engine")
-//       REFLECT_PROP(speed,      Float, EditAnywhere,    "Movement")
-//       REFLECT_PROP(jump_force,  Float, EditAnywhere,    "Movement")
-//       REFLECT_PROP(grounded,    Bool,  VisibleAnywhere, "State")
-//   REFLECT_END(PlayerComponent, "Player", "Gameplay", "engine")
-//
-// This generates:  void registerReflection_PlayerComponent(ReflectionRegistry&);
-// Call it to register the component.
-// ============================================================================
-
-#define REFLECT_BEGIN(Type, DisplayName, CategoryStr, SourceId)              \
-    namespace _Refl_##Type {                                                 \
-        using _Self = Type;                                                  \
-        static PropertyDescriptor _props[] = {
-
-// Basic property — widget auto-inferred from type
-#define REFLECT_PROP(Name, PropType, Spec, Cat)                              \
-    {                                                                        \
-        #Name,                                                               \
-        EPropertyType::PropType,                                             \
-        (uint32_t)offsetof(_Self, Name),                                     \
-        (uint32_t)sizeof(_Self::Name),                                       \
-        PropertyMeta{ EPropertySpecifier::Spec, EPropertyWidget::Auto, Cat } \
-    },
-
-// Extended property — explicit widget, tooltip, drag speed, clamp range
-#define REFLECT_PROP_EX(Name, PropType, Spec, Widget, Cat, Tip,              \
-                        Speed, Min, Max)                                     \
-    {                                                                        \
-        #Name,                                                               \
-        EPropertyType::PropType,                                             \
-        (uint32_t)offsetof(_Self, Name),                                     \
-        (uint32_t)sizeof(_Self::Name),                                       \
-        PropertyMeta{                                                        \
-            EPropertySpecifier::Spec,                                        \
-            EPropertyWidget::Widget,                                         \
-            Cat, nullptr, Tip,                                               \
-            Min, Max, (Min != Max), Speed                                    \
-        }                                                                    \
-    },
-
-#define REFLECT_END(Type, DisplayName, CategoryStr, SourceId)                \
-        };                                                                   \
-        static constexpr uint32_t _prop_count =                              \
-            sizeof(_props) / sizeof(_props[0]);                              \
-        static ComponentDescriptor _desc =                                   \
-            makeComponentDescriptor<_Self>(                                   \
-                #Type, DisplayName, CategoryStr, SourceId,                   \
-                _props, _prop_count);                                        \
-    }                                                                        \
-    void registerReflection_##Type(ReflectionRegistry& registry)             \
-    {                                                                        \
-        registry.registerComponent(_Refl_##Type::_desc);                     \
-    }
-
-// Forward-declare a registration function (for use in headers)
-#define DECLARE_REFLECT(Type)                                                \
-    void registerReflection_##Type(ReflectionRegistry& registry);

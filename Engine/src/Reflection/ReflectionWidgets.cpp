@@ -28,7 +28,8 @@ static EPropertyWidget resolveWidget(const PropertyDescriptor& prop)
     }
 }
 
-bool drawReflectedProperty(const PropertyDescriptor& prop, void* component)
+bool drawReflectedProperty(const PropertyDescriptor& prop, void* component,
+                           bool* out_edit_started)
 {
     void* field_ptr = static_cast<char*>(component) + prop.offset;
     const char* label = prop.meta.display_name ? prop.meta.display_name : prop.name;
@@ -172,6 +173,10 @@ bool drawReflectedProperty(const PropertyDescriptor& prop, void* component)
         break;
     }
 
+    // Track edit-started for undo snapshots
+    if (out_edit_started && ImGui::IsItemActivated())
+        *out_edit_started = true;
+
     if (read_only)
         ImGui::EndDisabled();
 
@@ -182,15 +187,14 @@ bool drawReflectedProperty(const PropertyDescriptor& prop, void* component)
     return changed;
 }
 
-bool drawReflectedComponent(const ComponentDescriptor& desc, void* component)
+bool drawReflectedComponent(const ComponentDescriptor& desc, void* component,
+                            bool* out_edit_started)
 {
     bool any_changed = false;
     const char* current_category = nullptr;
 
-    for (uint32_t i = 0; i < desc.property_count; i++)
+    for (const auto& prop : desc.properties)
     {
-        const PropertyDescriptor& prop = desc.properties[i];
-
         // Category separator
         if (prop.meta.category && prop.meta.category[0] != '\0')
         {
@@ -203,7 +207,7 @@ bool drawReflectedComponent(const ComponentDescriptor& desc, void* component)
             }
         }
 
-        if (drawReflectedProperty(prop, component))
+        if (drawReflectedProperty(prop, component, out_edit_started))
             any_changed = true;
     }
 

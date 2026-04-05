@@ -8,6 +8,7 @@
 #include "Utils/FileDialog.hpp"
 #include "Utils/EnginePaths.hpp"
 #include "Components/Components.hpp"
+#include "Reflection/EngineReflection.hpp"
 #include "Assets/LODMeshSerializer.hpp"
 #include "Project/ProjectManager.hpp"
 #include "imgui.h"
@@ -132,6 +133,10 @@ bool EditorApp::initialize(RenderAPIType api_type)
         m_state.unsaved_changes = true;
         m_renderer.markBVHDirty();
     };
+
+    // Register engine reflection and wire up inspector
+    registerEngineReflection(m_reflection);
+    m_inspector.reflection = &m_reflection;
 
     m_navmesh_panel.registry = &m_world.registry;
     m_physics_debug_panel.registry = &m_world.registry;

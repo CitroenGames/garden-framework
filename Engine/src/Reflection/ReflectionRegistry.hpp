@@ -2,6 +2,7 @@
 
 #include "EngineExport.h"
 #include "ReflectionTypes.hpp"
+#include "Reflect.hpp"
 #include <vector>
 #include <string>
 
@@ -14,9 +15,22 @@ public:
     ReflectionRegistry() = default;
     ~ReflectionRegistry() = default;
 
-    // Register a component descriptor. Ownership of the PropertyDescriptor
-    // array must outlive the registry (typically static storage).
+    // Register a component descriptor (copy).
     void registerComponent(const ComponentDescriptor& desc);
+
+    // Register a component descriptor (move — preferred for builder pattern).
+    void registerComponent(ComponentDescriptor&& desc);
+
+    // Reflect and register a component type using its static reflect() method.
+    // Usage: registry.reflect<PlayerComponent>("PlayerComponent");
+    template<typename T>
+    void reflect(const char* name, const char* source_id = "engine")
+    {
+        ComponentDescriptor desc = makeComponentDescriptor<T>(name, source_id);
+        Reflector<T> reflector(desc);
+        T::reflect(reflector);
+        registerComponent(std::move(desc));
+    }
 
     // Unregister a single component by type_id
     void unregisterComponent(uint32_t type_id);

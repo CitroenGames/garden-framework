@@ -28,7 +28,7 @@ GAME_API void gardenGameShutdown()
 GAME_API void gardenRegisterComponents(ReflectionRegistry* registry)
 {
     // Register your game components here:
-    // registerReflection_MyComponent(*registry);
+    // registry->reflect<MyComponent>("MyComponent", "MyGame.dll");
 }
 
 GAME_API void gardenGameUpdate(float delta_time)
