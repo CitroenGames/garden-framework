@@ -15,6 +15,29 @@ struct GlobalUBO {
     packed_float3 color; int useTexture;
 };
 
+struct MetalGPUPointLight {
+    packed_float3 position; float range;
+    packed_float3 color; float intensity;
+    packed_float3 attenuation; float _pad;
+};
+
+struct MetalGPUSpotLight {
+    packed_float3 position; float range;
+    packed_float3 direction; float intensity;
+    packed_float3 color; float innerCutoff;
+    packed_float3 attenuation; float outerCutoff;
+};
+
+struct LightBuffer {
+    MetalGPUPointLight pointLights[16];
+    MetalGPUSpotLight  spotLights[16];
+    int numPointLights;
+    int numSpotLights;
+    float _pad[2];
+    packed_float3 cameraPos;
+    float _pad2;
+};
+
 struct BasicVertexIn {
     float3 position [[attribute(0)]];
     float3 normal   [[attribute(1)]];
@@ -127,12 +150,45 @@ float ShadowCalculationWithBlend(constant GlobalUBO& ubo, float3 fragPos, float3
     return shadow;
 }
 
+float3 CalcPointLight(MetalGPUPointLight light, float3 normal, float3 fragPos)
+{
+    float3 toLight = float3(light.position) - fragPos;
+    float distance = length(toLight);
+    if (distance > light.range) return float3(0.0);
+    toLight = normalize(toLight);
+
+    float diff = max(dot(normal, toLight), 0.0);
+    float3 atten_vec = float3(light.attenuation);
+    float atten = 1.0 / (atten_vec.x + atten_vec.y * distance + atten_vec.z * distance * distance);
+
+    return float3(light.color) * light.intensity * diff * atten;
+}
+
+float3 CalcSpotLight(MetalGPUSpotLight light, float3 normal, float3 fragPos)
+{
+    float3 toLight = float3(light.position) - fragPos;
+    float distance = length(toLight);
+    if (distance > light.range) return float3(0.0);
+    toLight = normalize(toLight);
+
+    float theta = dot(toLight, normalize(-float3(light.direction)));
+    float epsilon = light.innerCutoff - light.outerCutoff;
+    float spotIntensity = clamp((theta - light.outerCutoff) / epsilon, 0.0, 1.0);
+
+    float diff = max(dot(normal, toLight), 0.0);
+    float3 atten_vec = float3(light.attenuation);
+    float atten = 1.0 / (atten_vec.x + atten_vec.y * distance + atten_vec.z * distance * distance);
+
+    return float3(light.color) * light.intensity * diff * atten * spotIntensity;
+}
+
 fragment float4 basic_fragment(BasicVertexOut in [[stage_in]],
                                 constant GlobalUBO& ubo [[buffer(0)]],
                                 texture2d<float> tex [[texture(0)]],
                                 sampler texSampler [[sampler(0)]],
                                 depth2d_array<float> shadowMap [[texture(1)]],
-                                sampler shadowSampler [[sampler(1)]])
+                                sampler shadowSampler [[sampler(1)]],
+                                constant LightBuffer& lightBuf [[buffer(3)]])
 {
     float3 norm = normalize(in.normal);
     float3 lightDir = normalize(-ubo.lightDir);
@@ -147,6 +203,14 @@ fragment float4 basic_fragment(BasicVertexOut in [[stage_in]],
         shadow = ShadowCalculationWithBlend(ubo, in.fragPos, norm, in.viewDepth, shadowMap, shadowSampler);
     }
     float3 lighting = ambient + shadow * diffuse;
+
+    // Point lights
+    for (int i = 0; i < lightBuf.numPointLights; i++)
+        lighting += CalcPointLight(lightBuf.pointLights[i], norm, in.fragPos);
+
+    // Spot lights
+    for (int j = 0; j < lightBuf.numSpotLights; j++)
+        lighting += CalcSpotLight(lightBuf.spotLights[j], norm, in.fragPos);
 
     float4 texColor;
     if (ubo.useTexture != 0) {

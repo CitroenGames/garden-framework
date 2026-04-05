@@ -4171,6 +4171,29 @@ void VulkanRenderAPI::renderMesh(const mesh& m, const RenderState& state)
     ubo.color = state.color;
     ubo.useTexture = (m.texture_set && m.texture != INVALID_TEXTURE) ? 1 : 0;
 
+    // Point and spot light data
+    for (int i = 0; i < current_lights.numPointLights && i < 16; i++) {
+        ubo.pointLights[i].position = current_lights.pointLights[i].position;
+        ubo.pointLights[i].range = current_lights.pointLights[i].range;
+        ubo.pointLights[i].color = current_lights.pointLights[i].color;
+        ubo.pointLights[i].intensity = current_lights.pointLights[i].intensity;
+        ubo.pointLights[i].attenuation = current_lights.pointLights[i].attenuation;
+        ubo.pointLights[i]._pad0 = 0.0f;
+    }
+    for (int i = 0; i < current_lights.numSpotLights && i < 16; i++) {
+        ubo.spotLights[i].position = current_lights.spotLights[i].position;
+        ubo.spotLights[i].range = current_lights.spotLights[i].range;
+        ubo.spotLights[i].direction = current_lights.spotLights[i].direction;
+        ubo.spotLights[i].intensity = current_lights.spotLights[i].intensity;
+        ubo.spotLights[i].color = current_lights.spotLights[i].color;
+        ubo.spotLights[i].innerCutoff = current_lights.spotLights[i].innerCutoff;
+        ubo.spotLights[i].attenuation = current_lights.spotLights[i].attenuation;
+        ubo.spotLights[i].outerCutoff = current_lights.spotLights[i].outerCutoff;
+    }
+    ubo.numPointLights = current_lights.numPointLights;
+    ubo.numSpotLights = current_lights.numSpotLights;
+    ubo.cameraPos = current_lights.cameraPos;
+
     memcpy(uniform_buffer_mapped[current_frame], &ubo, sizeof(ubo));
 
     // Get or allocate descriptor set for this texture (dynamically growing pools)
@@ -4285,6 +4308,29 @@ void VulkanRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t
     ubo.color = state.color;
     ubo.useTexture = (bound_texture != INVALID_TEXTURE) ? 1 : 0;
 
+    // Point and spot light data
+    for (int i = 0; i < current_lights.numPointLights && i < 16; i++) {
+        ubo.pointLights[i].position = current_lights.pointLights[i].position;
+        ubo.pointLights[i].range = current_lights.pointLights[i].range;
+        ubo.pointLights[i].color = current_lights.pointLights[i].color;
+        ubo.pointLights[i].intensity = current_lights.pointLights[i].intensity;
+        ubo.pointLights[i].attenuation = current_lights.pointLights[i].attenuation;
+        ubo.pointLights[i]._pad0 = 0.0f;
+    }
+    for (int i = 0; i < current_lights.numSpotLights && i < 16; i++) {
+        ubo.spotLights[i].position = current_lights.spotLights[i].position;
+        ubo.spotLights[i].range = current_lights.spotLights[i].range;
+        ubo.spotLights[i].direction = current_lights.spotLights[i].direction;
+        ubo.spotLights[i].intensity = current_lights.spotLights[i].intensity;
+        ubo.spotLights[i].color = current_lights.spotLights[i].color;
+        ubo.spotLights[i].innerCutoff = current_lights.spotLights[i].innerCutoff;
+        ubo.spotLights[i].attenuation = current_lights.spotLights[i].attenuation;
+        ubo.spotLights[i].outerCutoff = current_lights.spotLights[i].outerCutoff;
+    }
+    ubo.numPointLights = current_lights.numPointLights;
+    ubo.numSpotLights = current_lights.numSpotLights;
+    ubo.cameraPos = current_lights.cameraPos;
+
     memcpy(uniform_buffer_mapped[current_frame], &ubo, sizeof(ubo));
 
     // Get or allocate descriptor set for bound texture (dynamically growing pools)
@@ -4337,6 +4383,11 @@ void VulkanRenderAPI::setLighting(const glm::vec3& ambient, const glm::vec3& dif
     light_ambient = ambient;
     light_diffuse = diffuse;
     light_direction = glm::normalize(direction);
+}
+
+void VulkanRenderAPI::setPointAndSpotLights(const LightCBuffer& lights)
+{
+    current_lights = lights;
 }
 
 void VulkanRenderAPI::renderSkybox()

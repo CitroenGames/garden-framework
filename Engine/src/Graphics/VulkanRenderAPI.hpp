@@ -91,6 +91,20 @@ struct VulkanTexture {
     bool isValid() const { return image != VK_NULL_HANDLE; }
 };
 
+// GPU light structs for Vulkan UBO (matches GLSL std140 layout)
+struct VkGPUPointLight {
+    glm::vec3 position;    float range;
+    glm::vec3 color;       float intensity;
+    glm::vec3 attenuation; float _pad0;
+};
+
+struct VkGPUSpotLight {
+    glm::vec3 position;    float range;
+    glm::vec3 direction;   float intensity;
+    glm::vec3 color;       float innerCutoff;
+    glm::vec3 attenuation; float outerCutoff;
+};
+
 // Global UBO structure (matches shader layout)
 struct GlobalUBO {
     glm::mat4 view;
@@ -105,6 +119,14 @@ struct GlobalUBO {
     int debugCascades;
     glm::vec3 color;
     int useTexture;
+    // Point and spot light data
+    VkGPUPointLight pointLights[16];
+    VkGPUSpotLight  spotLights[16];
+    int numPointLights;
+    int numSpotLights;
+    float _lightPad[2];
+    glm::vec3 cameraPos;
+    float _lightPad2;
 };
 
 // Shadow UBO for shadow pass (just light space matrix)
@@ -159,6 +181,7 @@ public:
     virtual void setRenderState(const RenderState& state) override;
     virtual void enableLighting(bool enable) override;
     virtual void setLighting(const glm::vec3& ambient, const glm::vec3& diffuse, const glm::vec3& direction) override;
+    virtual void setPointAndSpotLights(const LightCBuffer& lights) override;
 
     virtual void renderSkybox() override;
 
@@ -383,6 +406,7 @@ private:
     glm::vec3 light_ambient = glm::vec3(0.2f);
     glm::vec3 light_diffuse = glm::vec3(0.8f);
     bool lighting_enabled = true;
+    LightCBuffer current_lights{};
 
     // Texture management
     std::unordered_map<TextureHandle, VulkanTexture> textures;

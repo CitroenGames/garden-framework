@@ -232,6 +232,7 @@ struct MetalRenderAPIImpl {
     glm::vec3 lightAmbient = glm::vec3(0.2f);
     glm::vec3 lightDiffuse = glm::vec3(0.8f);
     bool lightingEnabled = true;
+    LightCBuffer currentLights{};
 
     // Window state
     WindowHandle windowHandle = nullptr;
@@ -1490,6 +1491,7 @@ void MetalRenderAPI::renderMesh(const mesh& m, const RenderState& state)
 
     [impl->encoder setVertexBytes:&ubo length:sizeof(ubo) atIndex:1];
     [impl->encoder setFragmentBytes:&ubo length:sizeof(ubo) atIndex:0];
+    [impl->encoder setFragmentBytes:&impl->currentLights length:sizeof(LightCBuffer) atIndex:3];
 
     // Set model matrix
     [impl->encoder setVertexBytes:&impl->currentModelMatrix length:sizeof(glm::mat4) atIndex:2];
@@ -1646,6 +1648,7 @@ void MetalRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t 
 
     [impl->encoder setVertexBytes:&ubo length:sizeof(ubo) atIndex:1];
     [impl->encoder setFragmentBytes:&ubo length:sizeof(ubo) atIndex:0];
+    [impl->encoder setFragmentBytes:&impl->currentLights length:sizeof(LightCBuffer) atIndex:3];
 
     // Model matrix per draw
     [impl->encoder setVertexBytes:&impl->currentModelMatrix length:sizeof(glm::mat4) atIndex:2];
@@ -1718,6 +1721,11 @@ void MetalRenderAPI::setLighting(const glm::vec3& ambient, const glm::vec3& diff
     impl->lightAmbient = ambient;
     impl->lightDiffuse = diffuse;
     impl->lightDirection = glm::normalize(direction);
+}
+
+void MetalRenderAPI::setPointAndSpotLights(const LightCBuffer& lights)
+{
+    impl->currentLights = lights;
 }
 
 // ============================================================================

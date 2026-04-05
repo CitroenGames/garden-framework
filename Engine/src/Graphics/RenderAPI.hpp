@@ -59,6 +59,32 @@ struct RenderState
     glm::vec3 color = glm::vec3(1.0f, 1.0f, 1.0f);
 };
 
+// GPU light structures for point/spot light constant buffers
+static const int MAX_LIGHTS = 16;
+
+struct alignas(16) GPUPointLight {
+    glm::vec3 position;    float range;
+    glm::vec3 color;       float intensity;
+    glm::vec3 attenuation; float _pad0;
+};
+
+struct alignas(16) GPUSpotLight {
+    glm::vec3 position;    float range;
+    glm::vec3 direction;   float intensity;
+    glm::vec3 color;       float innerCutoff;
+    glm::vec3 attenuation; float outerCutoff;
+};
+
+struct alignas(16) LightCBuffer {
+    GPUPointLight pointLights[MAX_LIGHTS];
+    GPUSpotLight  spotLights[MAX_LIGHTS];
+    int numPointLights;
+    int numSpotLights;
+    float _pad[2];
+    glm::vec3 cameraPos;
+    float _pad2;
+};
+
 // Abstract rendering API interface
 class ENGINE_API IRenderAPI
 {
@@ -104,6 +130,7 @@ public:
     virtual void setRenderState(const RenderState& state) = 0;
     virtual void enableLighting(bool enable) = 0;
     virtual void setLighting(const glm::vec3& ambient, const glm::vec3& diffuse, const glm::vec3& direction) = 0;
+    virtual void setPointAndSpotLights(const LightCBuffer& lights) { (void)lights; }
 
     virtual void renderSkybox() = 0;
 

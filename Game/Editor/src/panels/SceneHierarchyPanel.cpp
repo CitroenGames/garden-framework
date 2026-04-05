@@ -79,6 +79,27 @@ void SceneHierarchyPanel::draw(entt::registry& registry, bool* out_dirty, bool* 
             if (out_dirty) *out_dirty = true;
             if (out_unsaved) *out_unsaved = true;
         }
+        ImGui::Separator();
+        if (ImGui::MenuItem("Point Light"))
+        {
+            auto e = registry.create();
+            registry.emplace<TagComponent>(e, "New Point Light");
+            registry.emplace<TransformComponent>(e);
+            registry.emplace<PointLightComponent>(e);
+            selected_entity = e;
+            if (out_dirty) *out_dirty = true;
+            if (out_unsaved) *out_unsaved = true;
+        }
+        if (ImGui::MenuItem("Spot Light"))
+        {
+            auto e = registry.create();
+            registry.emplace<TagComponent>(e, "New Spot Light");
+            registry.emplace<TransformComponent>(e);
+            registry.emplace<SpotLightComponent>(e);
+            selected_entity = e;
+            if (out_dirty) *out_dirty = true;
+            if (out_unsaved) *out_unsaved = true;
+        }
         ImGui::EndPopup();
     }
 
@@ -145,6 +166,20 @@ void SceneHierarchyPanel::draw(entt::registry& registry, bool* out_dirty, bool* 
                 ImVec2(center.x - radius, center.y + radius * 0.7f),
                 ImVec2(center.x + radius, center.y + radius * 0.7f),
                 IM_COL32(100, 200, 100, 255));
+        }
+        else if (registry.all_of<PointLightComponent>(entity))
+        {
+            // Filled circle — warm yellow
+            draw_list->AddCircleFilled(center, radius, IM_COL32(255, 220, 60, 255));
+        }
+        else if (registry.all_of<SpotLightComponent>(entity))
+        {
+            // Filled triangle pointing down — warm yellow
+            draw_list->AddTriangleFilled(
+                ImVec2(center.x, center.y + radius),
+                ImVec2(center.x - radius, center.y - radius * 0.7f),
+                ImVec2(center.x + radius, center.y - radius * 0.7f),
+                IM_COL32(255, 200, 40, 255));
         }
         else if (registry.all_of<RigidBodyComponent>(entity))
         {
@@ -294,6 +329,12 @@ entt::entity SceneHierarchyPanel::duplicateEntity(entt::registry& registry, entt
 
     if (auto* pr = registry.try_get<PlayerRepresentationComponent>(source))
         registry.emplace<PlayerRepresentationComponent>(new_entity, *pr);
+
+    if (auto* pl = registry.try_get<PointLightComponent>(source))
+        registry.emplace<PointLightComponent>(new_entity, *pl);
+
+    if (auto* sl = registry.try_get<SpotLightComponent>(source))
+        registry.emplace<SpotLightComponent>(new_entity, *sl);
 
     selected_entity = new_entity;
     return new_entity;

@@ -308,6 +308,62 @@ bool InspectorPanel::draw(entt::registry& registry, entt::entity selected,
         ImGui::Spacing();
     }
 
+    // --- Point Light ---
+    if (auto* pl = registry.try_get<PointLightComponent>(selected))
+    {
+        bool removed = false;
+        if (drawComponentHeader("Point Light", true, &removed, ImVec4(1.0f, 0.85f, 0.2f, 1.0f)))
+        {
+            ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.65f);
+            if (ImGui::ColorEdit3("Color", &pl->color.x)) markUnsaved();
+            if (ImGui::DragFloat("Intensity", &pl->intensity, 0.1f, 0.0f, 100.0f)) markUnsaved();
+            if (ImGui::IsItemActivated()) markEditStarted();
+            if (ImGui::DragFloat("Range", &pl->range, 0.1f, 0.1f, 1000.0f)) markUnsaved();
+            if (ImGui::IsItemActivated()) markEditStarted();
+            if (ImGui::TreeNode("Attenuation"))
+            {
+                if (ImGui::DragFloat("Constant", &pl->constant_attenuation, 0.01f, 0.0f, 10.0f)) markUnsaved();
+                if (ImGui::DragFloat("Linear", &pl->linear_attenuation, 0.001f, 0.0f, 2.0f)) markUnsaved();
+                if (ImGui::DragFloat("Quadratic", &pl->quadratic_attenuation, 0.001f, 0.0f, 2.0f)) markUnsaved();
+                ImGui::TreePop();
+            }
+            ImGui::PopItemWidth();
+        }
+        if (removed)
+        { registry.remove<PointLightComponent>(selected); markUnsaved(); }
+        ImGui::Spacing();
+    }
+
+    // --- Spot Light ---
+    if (auto* sl = registry.try_get<SpotLightComponent>(selected))
+    {
+        bool removed = false;
+        if (drawComponentHeader("Spot Light", true, &removed, ImVec4(1.0f, 0.8f, 0.15f, 1.0f)))
+        {
+            ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.65f);
+            if (ImGui::ColorEdit3("Color", &sl->color.x)) markUnsaved();
+            if (ImGui::DragFloat("Intensity", &sl->intensity, 0.1f, 0.0f, 100.0f)) markUnsaved();
+            if (ImGui::IsItemActivated()) markEditStarted();
+            if (ImGui::DragFloat("Range", &sl->range, 0.1f, 0.1f, 1000.0f)) markUnsaved();
+            if (ImGui::IsItemActivated()) markEditStarted();
+            if (ImGui::DragFloat("Inner Cone", &sl->inner_cone_angle, 0.5f, 0.0f, 90.0f)) markUnsaved();
+            if (ImGui::IsItemActivated()) markEditStarted();
+            if (ImGui::DragFloat("Outer Cone", &sl->outer_cone_angle, 0.5f, 0.0f, 90.0f)) markUnsaved();
+            if (ImGui::IsItemActivated()) markEditStarted();
+            if (ImGui::TreeNode("Attenuation"))
+            {
+                if (ImGui::DragFloat("Constant", &sl->constant_attenuation, 0.01f, 0.0f, 10.0f)) markUnsaved();
+                if (ImGui::DragFloat("Linear", &sl->linear_attenuation, 0.001f, 0.0f, 2.0f)) markUnsaved();
+                if (ImGui::DragFloat("Quadratic", &sl->quadratic_attenuation, 0.001f, 0.0f, 2.0f)) markUnsaved();
+                ImGui::TreePop();
+            }
+            ImGui::PopItemWidth();
+        }
+        if (removed)
+        { registry.remove<SpotLightComponent>(selected); markUnsaved(); }
+        ImGui::Spacing();
+    }
+
     ImGui::PopStyleVar(); // ItemSpacing
 
     ImGui::Spacing();
@@ -344,6 +400,16 @@ bool InspectorPanel::draw(entt::registry& registry, entt::entity selected,
         if (!registry.all_of<FreecamComponent>(selected))
             if (ImGui::MenuItem("Freecam"))
             { registry.emplace<FreecamComponent>(selected); markUnsaved(); }
+
+        ImGui::Separator();
+
+        if (!registry.all_of<PointLightComponent>(selected))
+            if (ImGui::MenuItem("Point Light"))
+            { registry.emplace<PointLightComponent>(selected); markUnsaved(); }
+
+        if (!registry.all_of<SpotLightComponent>(selected))
+            if (ImGui::MenuItem("Spot Light"))
+            { registry.emplace<SpotLightComponent>(selected); markUnsaved(); }
 
         ImGui::EndPopup();
     }

@@ -45,6 +45,7 @@ public:
     virtual void setRenderState(const RenderState& state) override;
     virtual void enableLighting(bool enable) override;
     virtual void setLighting(const glm::vec3& ambient, const glm::vec3& diffuse, const glm::vec3& direction) override;
+    virtual void setPointAndSpotLights(const LightCBuffer& lights) override;
 
     virtual void renderSkybox() override;
 

@@ -132,3 +132,53 @@ struct PlayerRepresentationComponent {
     GPROPERTY(EditAnywhere, Category = "Tracking")
     bool visible_only_freecam = true;
 };
+
+struct PointLightComponent {
+    GCLASS(PointLightComponent)
+
+    GPROPERTY(EditAnywhere, Category = "Light")
+    glm::vec3 color{1.0f, 1.0f, 1.0f};
+
+    GPROPERTY(EditAnywhere, Category = "Light")
+    float intensity = 1.0f;
+
+    GPROPERTY(EditAnywhere, Category = "Light")
+    float range = 10.0f;
+
+    GPROPERTY(EditAnywhere, Category = "Attenuation")
+    float constant_attenuation = 1.0f;
+
+    GPROPERTY(EditAnywhere, Category = "Attenuation")
+    float linear_attenuation = 0.09f;
+
+    GPROPERTY(EditAnywhere, Category = "Attenuation")
+    float quadratic_attenuation = 0.032f;
+};
+
+struct SpotLightComponent {
+    GCLASS(SpotLightComponent)
+
+    GPROPERTY(EditAnywhere, Category = "Light")
+    glm::vec3 color{1.0f, 1.0f, 1.0f};
+
+    GPROPERTY(EditAnywhere, Category = "Light")
+    float intensity = 1.0f;
+
+    GPROPERTY(EditAnywhere, Category = "Light")
+    float range = 15.0f;
+
+    GPROPERTY(EditAnywhere, Category = "Light")
+    float inner_cone_angle = 12.5f;
+
+    GPROPERTY(EditAnywhere, Category = "Light")
+    float outer_cone_angle = 17.5f;
+
+    GPROPERTY(EditAnywhere, Category = "Attenuation")
+    float constant_attenuation = 1.0f;
+
+    GPROPERTY(EditAnywhere, Category = "Attenuation")
+    float linear_attenuation = 0.09f;
+
+    GPROPERTY(EditAnywhere, Category = "Attenuation")
+    float quadratic_attenuation = 0.032f;
+};

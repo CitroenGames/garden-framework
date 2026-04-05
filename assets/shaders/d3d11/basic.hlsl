@@ -24,6 +24,34 @@ cbuffer PerObjectCB : register(b1)
     int uUseTexture;
 };
 
+#define MAX_LIGHTS 16
+
+struct PointLightData
+{
+    float3 position; float range;
+    float3 color; float intensity;
+    float3 attenuation; float _pad;
+};
+
+struct SpotLightData
+{
+    float3 position; float range;
+    float3 direction; float intensity;
+    float3 color; float innerCutoff;
+    float3 attenuation; float outerCutoff;
+};
+
+cbuffer LightCB : register(b3)
+{
+    PointLightData pointLights[MAX_LIGHTS];
+    SpotLightData  spotLights[MAX_LIGHTS];
+    int numPointLights;
+    int numSpotLights;
+    float2 _lightPad;
+    float3 uCameraPos;
+    float _lightPad2;
+};
+
 Texture2D diffuseTexture : register(t0);
 Texture2DArray shadowMapArray : register(t1);
 SamplerState linearSampler : register(s0);
@@ -116,6 +144,38 @@ float ShadowCalculation(int cascadeIndex, float3 fragPos, float3 normal)
     return shadow / 9.0;
 }
 
+float3 CalcPointLight(PointLightData light, float3 normal, float3 fragPos)
+{
+    float3 toLight = light.position - fragPos;
+    float distance = length(toLight);
+    if (distance > light.range) return float3(0, 0, 0);
+    toLight = normalize(toLight);
+
+    float diff = max(dot(normal, toLight), 0.0);
+    float atten = 1.0 / (light.attenuation.x + light.attenuation.y * distance
+                         + light.attenuation.z * distance * distance);
+
+    return light.color * light.intensity * diff * atten;
+}
+
+float3 CalcSpotLight(SpotLightData light, float3 normal, float3 fragPos)
+{
+    float3 toLight = light.position - fragPos;
+    float distance = length(toLight);
+    if (distance > light.range) return float3(0, 0, 0);
+    toLight = normalize(toLight);
+
+    float theta = dot(toLight, normalize(-light.direction));
+    float epsilon = light.innerCutoff - light.outerCutoff;
+    float spotIntensity = saturate((theta - light.outerCutoff) / epsilon);
+
+    float diff = max(dot(normal, toLight), 0.0);
+    float atten = 1.0 / (light.attenuation.x + light.attenuation.y * distance
+                         + light.attenuation.z * distance * distance);
+
+    return light.color * light.intensity * diff * atten * spotIntensity;
+}
+
 float4 PSMain(PSInput input) : SV_TARGET
 {
     float3 norm = normalize(input.normal);
@@ -129,6 +189,14 @@ float4 PSMain(PSInput input) : SV_TARGET
     int cascadeIndex = getCascadeIndex(input.viewDepth);
     float shadow = ShadowCalculation(cascadeIndex, input.fragPos, input.normal);
     float3 lighting = ambient + shadow * diffuse;
+
+    // Point lights
+    for (int i = 0; i < numPointLights; i++)
+        lighting += CalcPointLight(pointLights[i], norm, input.fragPos);
+
+    // Spot lights
+    for (int j = 0; j < numSpotLights; j++)
+        lighting += CalcSpotLight(spotLights[j], norm, input.fragPos);
 
     float4 texColor;
     if (uUseTexture)

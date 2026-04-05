@@ -64,6 +64,46 @@ REFLECT_BEGIN(FreecamComponent, "Freecam", "Gameplay", "engine")
 REFLECT_END(FreecamComponent, "Freecam", "Gameplay", "engine")
 
 // ============================================================================
+// PointLightComponent
+// ============================================================================
+REFLECT_BEGIN(PointLightComponent, "Point Light", "Lighting", "engine")
+    REFLECT_PROP_EX(color,                   Vec3,  EditAnywhere, ColorEdit3, "Light",
+                    "Light color", 0.0f, 0.0f, 0.0f)
+    REFLECT_PROP_EX(intensity,               Float, EditAnywhere, DragFloat, "Light",
+                    "Light intensity", 0.1f, 0.0f, 100.0f)
+    REFLECT_PROP_EX(range,                   Float, EditAnywhere, DragFloat, "Light",
+                    "Light range", 0.1f, 0.1f, 1000.0f)
+    REFLECT_PROP_EX(constant_attenuation,    Float, EditAnywhere, DragFloat, "Attenuation",
+                    "Constant", 0.01f, 0.0f, 10.0f)
+    REFLECT_PROP_EX(linear_attenuation,      Float, EditAnywhere, DragFloat, "Attenuation",
+                    "Linear", 0.001f, 0.0f, 2.0f)
+    REFLECT_PROP_EX(quadratic_attenuation,   Float, EditAnywhere, DragFloat, "Attenuation",
+                    "Quadratic", 0.001f, 0.0f, 2.0f)
+REFLECT_END(PointLightComponent, "Point Light", "Lighting", "engine")
+
+// ============================================================================
+// SpotLightComponent
+// ============================================================================
+REFLECT_BEGIN(SpotLightComponent, "Spot Light", "Lighting", "engine")
+    REFLECT_PROP_EX(color,                   Vec3,  EditAnywhere, ColorEdit3, "Light",
+                    "Light color", 0.0f, 0.0f, 0.0f)
+    REFLECT_PROP_EX(intensity,               Float, EditAnywhere, DragFloat, "Light",
+                    "Light intensity", 0.1f, 0.0f, 100.0f)
+    REFLECT_PROP_EX(range,                   Float, EditAnywhere, DragFloat, "Light",
+                    "Light range", 0.1f, 0.1f, 1000.0f)
+    REFLECT_PROP_EX(inner_cone_angle,        Float, EditAnywhere, DragFloat, "Light",
+                    "Inner cone angle (degrees)", 0.5f, 0.0f, 90.0f)
+    REFLECT_PROP_EX(outer_cone_angle,        Float, EditAnywhere, DragFloat, "Light",
+                    "Outer cone angle (degrees)", 0.5f, 0.0f, 90.0f)
+    REFLECT_PROP_EX(constant_attenuation,    Float, EditAnywhere, DragFloat, "Attenuation",
+                    "Constant", 0.01f, 0.0f, 10.0f)
+    REFLECT_PROP_EX(linear_attenuation,      Float, EditAnywhere, DragFloat, "Attenuation",
+                    "Linear", 0.001f, 0.0f, 2.0f)
+    REFLECT_PROP_EX(quadratic_attenuation,   Float, EditAnywhere, DragFloat, "Attenuation",
+                    "Quadratic", 0.001f, 0.0f, 2.0f)
+REFLECT_END(SpotLightComponent, "Spot Light", "Lighting", "engine")
+
+// ============================================================================
 // Aggregate registration
 // ============================================================================
 void registerEngineReflection(ReflectionRegistry& registry)
@@ -73,4 +113,6 @@ void registerEngineReflection(ReflectionRegistry& registry)
     registerReflection_RigidBodyComponent(registry);
     registerReflection_PlayerComponent(registry);
     registerReflection_FreecamComponent(registry);
+    registerReflection_PointLightComponent(registry);
+    registerReflection_SpotLightComponent(registry);
 }
