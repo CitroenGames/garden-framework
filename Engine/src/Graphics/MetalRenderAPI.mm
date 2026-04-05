@@ -310,7 +310,7 @@ struct MetalRenderAPIImpl {
         NSError* error = nil;
 
         // Try loading precompiled metallib
-        NSString* libPath = [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/metal/shaders.metallib").c_str()];
+        NSString* libPath = [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/shaders.metallib").c_str()];
         NSURL* libURL = [NSURL fileURLWithPath:libPath];
 
         if ([[NSFileManager defaultManager] fileExistsAtPath:libPath]) {
@@ -325,10 +325,14 @@ struct MetalRenderAPIImpl {
         // Fallback: compile from source
         // Read all .metal files and concatenate
         NSArray<NSString*>* shaderFiles = @[
-            [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/metal/basic.metal").c_str()],
-            [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/metal/shadow.metal").c_str()],
-            [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/metal/sky.metal").c_str()],
-            [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/metal/fxaa.metal").c_str()]];
+            [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/basic_vertex.metal").c_str()],
+            [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/basic_fragment.metal").c_str()],
+            [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/shadow_vertex.metal").c_str()],
+            [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/shadow_fragment.metal").c_str()],
+            [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/sky_vertex.metal").c_str()],
+            [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/sky_fragment.metal").c_str()],
+            [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/fxaa_vertex.metal").c_str()],
+            [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/fxaa_fragment.metal").c_str()]];
 
         NSMutableString* allSource = [NSMutableString string];
         // Add common header once

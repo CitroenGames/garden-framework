@@ -410,6 +410,8 @@ void ImGuiManager::render()
                 if (ImGui::Checkbox("FXAA", &fxaa))
                 {
                     m_renderAPI->setFXAAEnabled(fxaa);
+                    if (auto* cvar = CVAR_PTR(r_fxaa))
+                        cvar->setInt(fxaa ? 1 : 0);
                 }
 
                 // Shadow quality dropdown
@@ -418,6 +420,8 @@ void ImGuiManager::render()
                 if (ImGui::Combo("Shadow Quality", &shadowQuality, shadowOptions, 4))
                 {
                     m_renderAPI->setShadowQuality(shadowQuality);
+                    if (auto* cvar = CVAR_PTR(r_shadowquality))
+                        cvar->setInt(shadowQuality);
                 }
             }
         }

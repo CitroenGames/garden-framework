@@ -9,6 +9,7 @@
 #include <unordered_map>
 #include <string>
 #include <array>
+#include <mutex>
 
 // Logging (needed for VK_CHECK macros)
 #include "Utils/Log.hpp"
@@ -105,7 +106,7 @@ struct VkGPUSpotLight {
     glm::vec3 attenuation; float outerCutoff;
 };
 
-// Global UBO structure (matches shader layout)
+// Global UBO structure (matches Slang shader GlobalCB at binding 0)
 struct GlobalUBO {
     glm::mat4 view;
     glm::mat4 projection;
@@ -117,9 +118,12 @@ struct GlobalUBO {
     int cascadeCount;
     glm::vec3 lightDiffuse;
     int debugCascades;
-    glm::vec3 color;
-    int useTexture;
-    // Point and spot light data
+    glm::vec2 shadowMapTexelSize;
+    glm::vec2 _shadowPad;
+};
+
+// Light UBO structure (matches Slang shader LightCB at binding 3)
+struct VulkanLightUBO {
     VkGPUPointLight pointLights[16];
     VkGPUSpotLight  spotLights[16];
     int numPointLights;
@@ -129,15 +133,30 @@ struct GlobalUBO {
     float _lightPad2;
 };
 
-// Shadow UBO for shadow pass (just light space matrix)
-struct ShadowUBO {
-    glm::mat4 lightSpaceMatrix;
+// Per-object UBO structure (matches Slang shader PerObjectCB at binding 4)
+struct PerObjectUBO {
+    glm::mat4 model;
+    glm::mat4 normalMatrix;
+    glm::vec3 color;
+    int useTexture;
 };
 
-// Skybox UBO
+// Shadow UBO for shadow pass (matches Slang shader ShadowCB)
+struct ShadowUBO {
+    glm::mat4 lightSpaceMatrix;
+    glm::mat4 model;
+};
+
+// FXAA UBO (matches Slang shader FXAACB)
+struct FXAAUbo {
+    glm::vec2 inverseScreenSize;
+    glm::vec2 padding;
+};
+
+// Skybox UBO (matches Slang SkyboxCB: projection, view, sunDirection, time)
 struct SkyboxUBO {
-    glm::mat4 view;
     glm::mat4 projection;
+    glm::mat4 view;
     glm::vec3 sunDirection;
     float time;
 };
@@ -222,6 +241,7 @@ public:
     VkCommandBuffer getCurrentCommandBuffer() const { return command_buffers[current_frame]; }
     VkFormat getSwapchainFormat() const { return swapchain_format; }
     uint32_t getCurrentFrameIndex() const { return current_frame; }
+    VkDeletionQueue& getDeletionQueue() { return deletion_queue; }
 
 private:
     // Initialization helpers
@@ -353,8 +373,10 @@ private:
     VkPipeline last_bound_pipeline = VK_NULL_HANDLE;
     VkDescriptorSet last_bound_descriptor_set = VK_NULL_HANDLE;
     VkBuffer last_bound_vertex_buffer = VK_NULL_HANDLE;
+    uint32_t last_bound_dynamic_offset = UINT32_MAX;
 
-    // Shared staging buffer
+    // Shared staging buffer (guarded by staging_mutex for thread safety)
+    std::mutex staging_mutex;
     static constexpr VkDeviceSize STAGING_BUFFER_INITIAL_SIZE = 64 * 1024 * 1024; // 64 MB
     VkBuffer staging_buffer = VK_NULL_HANDLE;
     VmaAllocation staging_allocation = nullptr;
@@ -390,10 +412,23 @@ private:
     // Cache: texture handle -> VkDescriptorSet (for reuse within a frame)
     std::unordered_map<TextureHandle, VkDescriptorSet> texture_descriptor_cache;
 
-    // Uniform buffers (per-frame)
+    // Uniform buffers (per-frame) - GlobalUBO at binding 0
     std::vector<VkBuffer> uniform_buffers;
     std::vector<VmaAllocation> uniform_buffer_allocations;
     std::vector<void*> uniform_buffer_mapped;
+
+    // Light UBO buffers (per-frame) - LightUBO at binding 3
+    std::vector<VkBuffer> light_uniform_buffers;
+    std::vector<VmaAllocation> light_uniform_allocations;
+    std::vector<void*> light_uniform_mapped;
+
+    // Per-object dynamic UBO ring buffer (per-frame) - PerObjectUBO at binding 4
+    static constexpr uint32_t MAX_PER_OBJECT_DRAWS = 4096;
+    VkDeviceSize per_object_alignment = 0; // minUniformBufferOffsetAlignment-aligned size
+    std::vector<VkBuffer> per_object_uniform_buffers;
+    std::vector<VmaAllocation> per_object_uniform_allocations;
+    std::vector<void*> per_object_uniform_mapped;
+    uint32_t per_object_draw_index[2] = {0, 0}; // per-frame draw counter
 
     // Matrix stack (CPU-side)
     glm::mat4 projection_matrix = glm::mat4(1.0f);
@@ -494,6 +529,9 @@ private:
     VkDescriptorSetLayout fxaa_descriptor_layout = VK_NULL_HANDLE;
     VkDescriptorPool fxaa_descriptor_pool = VK_NULL_HANDLE;
     std::vector<VkDescriptorSet> fxaa_descriptor_sets;
+    std::vector<VkBuffer> fxaa_uniform_buffers;
+    std::vector<VmaAllocation> fxaa_uniform_allocations;
+    std::vector<void*> fxaa_uniform_mapped;
     VkRenderPass fxaa_render_pass = VK_NULL_HANDLE;
     std::vector<VkFramebuffer> fxaa_framebuffers;  // Swapchain-only, no depth
     bool fxaa_initialized = false;

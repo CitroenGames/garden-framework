@@ -25,7 +25,6 @@
 
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
-#pragma comment(lib, "d3dcompiler.lib")
 
 D3D11RenderAPI::D3D11RenderAPI()
     : window_handle(nullptr)
@@ -511,78 +510,38 @@ bool D3D11RenderAPI::createSamplers()
     return SUCCEEDED(hr);
 }
 
-bool D3D11RenderAPI::loadShaderFromFile(const std::string& filepath, std::string& outSource)
+std::vector<char> D3D11RenderAPI::readShaderBinary(const std::string& filepath)
 {
-    std::ifstream file(filepath);
+    std::ifstream file(filepath, std::ios::ate | std::ios::binary);
     if (!file.is_open())
     {
-        LOG_ENGINE_ERROR("Failed to open shader file: {}", filepath);
-        return false;
+        LOG_ENGINE_ERROR("Failed to open shader binary: {}", filepath);
+        return {};
     }
 
-    std::stringstream buffer;
-    buffer << file.rdbuf();
-    outSource = buffer.str();
-    return true;
-}
-
-ComPtr<ID3DBlob> D3D11RenderAPI::compileShader(const std::string& source, const std::string& entryPoint,
-                                                const std::string& target, const std::string& filename)
-{
-    UINT compileFlags = D3DCOMPILE_ENABLE_STRICTNESS;
-#ifdef _DEBUG
-    compileFlags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
-#else
-    compileFlags |= D3DCOMPILE_OPTIMIZATION_LEVEL3;
-#endif
-
-    ComPtr<ID3DBlob> shaderBlob;
-    ComPtr<ID3DBlob> errorBlob;
-
-    HRESULT hr = D3DCompile(
-        source.c_str(),
-        source.length(),
-        filename.c_str(),
-        nullptr,
-        D3D_COMPILE_STANDARD_FILE_INCLUDE,
-        entryPoint.c_str(),
-        target.c_str(),
-        compileFlags,
-        0,
-        shaderBlob.GetAddressOf(),
-        errorBlob.GetAddressOf()
-    );
-
-    if (FAILED(hr))
-    {
-        if (errorBlob)
-        {
-            LOG_ENGINE_ERROR("Shader compilation failed: {}", static_cast<char*>(errorBlob->GetBufferPointer()));
-        }
-        return nullptr;
-    }
-
-    return shaderBlob;
+    size_t fileSize = static_cast<size_t>(file.tellg());
+    std::vector<char> buffer(fileSize);
+    file.seekg(0);
+    file.read(buffer.data(), fileSize);
+    return buffer;
 }
 
 bool D3D11RenderAPI::loadShaders()
 {
+    std::string shaderDir = EnginePaths::resolveEngineAsset("../assets/shaders/compiled/d3d11/");
+
     // Basic shader
-    std::string basicSource;
-    if (!loadShaderFromFile(EnginePaths::resolveEngineAsset("../assets/shaders/d3d11/basic.hlsl"), basicSource))
-        return false;
+    auto basicVSBlob = readShaderBinary(shaderDir + "basic_vs.dxbc");
+    if (basicVSBlob.empty()) return false;
 
-    auto basicVSBlob = compileShader(basicSource, "VSMain", "vs_5_0", "basic.hlsl");
-    if (!basicVSBlob) return false;
+    auto basicPSBlob = readShaderBinary(shaderDir + "basic_ps.dxbc");
+    if (basicPSBlob.empty()) return false;
 
-    auto basicPSBlob = compileShader(basicSource, "PSMain", "ps_5_0", "basic.hlsl");
-    if (!basicPSBlob) return false;
-
-    HRESULT hr = device->CreateVertexShader(basicVSBlob->GetBufferPointer(), basicVSBlob->GetBufferSize(),
+    HRESULT hr = device->CreateVertexShader(basicVSBlob.data(), basicVSBlob.size(),
                                              nullptr, basicVertexShader.GetAddressOf());
     if (FAILED(hr)) return false;
 
-    hr = device->CreatePixelShader(basicPSBlob->GetBufferPointer(), basicPSBlob->GetBufferSize(),
+    hr = device->CreatePixelShader(basicPSBlob.data(), basicPSBlob.size(),
                                     nullptr, basicPixelShader.GetAddressOf());
     if (FAILED(hr)) return false;
 
@@ -594,47 +553,38 @@ bool D3D11RenderAPI::loadShaders()
     };
 
     hr = device->CreateInputLayout(inputLayoutDesc, ARRAYSIZE(inputLayoutDesc),
-                                    basicVSBlob->GetBufferPointer(), basicVSBlob->GetBufferSize(),
+                                    basicVSBlob.data(), basicVSBlob.size(),
                                     basicInputLayout.GetAddressOf());
     if (FAILED(hr)) return false;
 
     // Unlit shader
-    std::string unlitSource;
-    if (!loadShaderFromFile(EnginePaths::resolveEngineAsset("../assets/shaders/d3d11/unlit.hlsl"), unlitSource))
-        return false;
+    auto unlitVSBlob = readShaderBinary(shaderDir + "unlit_vs.dxbc");
+    if (unlitVSBlob.empty()) return false;
 
-    auto unlitVSBlob = compileShader(unlitSource, "VSMain", "vs_5_0", "unlit.hlsl");
-    if (!unlitVSBlob) return false;
+    auto unlitPSBlob = readShaderBinary(shaderDir + "unlit_ps.dxbc");
+    if (unlitPSBlob.empty()) return false;
 
-    auto unlitPSBlob = compileShader(unlitSource, "PSMain", "ps_5_0", "unlit.hlsl");
-    if (!unlitPSBlob) return false;
-
-    hr = device->CreateVertexShader(unlitVSBlob->GetBufferPointer(), unlitVSBlob->GetBufferSize(),
+    hr = device->CreateVertexShader(unlitVSBlob.data(), unlitVSBlob.size(),
                                      nullptr, unlitVertexShader.GetAddressOf());
     if (FAILED(hr)) return false;
 
-    hr = device->CreatePixelShader(unlitPSBlob->GetBufferPointer(), unlitPSBlob->GetBufferSize(),
+    hr = device->CreatePixelShader(unlitPSBlob.data(), unlitPSBlob.size(),
                                     nullptr, unlitPixelShader.GetAddressOf());
     if (FAILED(hr)) return false;
 
     // Shadow shader
-    std::string shadowSource;
-    if (!loadShaderFromFile(EnginePaths::resolveEngineAsset("../assets/shaders/d3d11/shadow.hlsl"), shadowSource))
-        return false;
+    auto shadowVSBlob = readShaderBinary(shaderDir + "shadow_vs.dxbc");
+    if (shadowVSBlob.empty()) return false;
 
-    auto shadowVSBlob = compileShader(shadowSource, "VSMain", "vs_5_0", "shadow.hlsl");
-    if (!shadowVSBlob) return false;
+    auto shadowPSBlob = readShaderBinary(shaderDir + "shadow_ps.dxbc");
 
-    // Shadow pixel shader can be null for depth-only pass, but we'll create one anyway
-    auto shadowPSBlob = compileShader(shadowSource, "PSMain", "ps_5_0", "shadow.hlsl");
-
-    hr = device->CreateVertexShader(shadowVSBlob->GetBufferPointer(), shadowVSBlob->GetBufferSize(),
+    hr = device->CreateVertexShader(shadowVSBlob.data(), shadowVSBlob.size(),
                                      nullptr, shadowVertexShader.GetAddressOf());
     if (FAILED(hr)) return false;
 
-    if (shadowPSBlob)
+    if (!shadowPSBlob.empty())
     {
-        hr = device->CreatePixelShader(shadowPSBlob->GetBufferPointer(), shadowPSBlob->GetBufferSize(),
+        hr = device->CreatePixelShader(shadowPSBlob.data(), shadowPSBlob.size(),
                                         nullptr, shadowPixelShader.GetAddressOf());
         if (FAILED(hr))
         {
@@ -643,21 +593,17 @@ bool D3D11RenderAPI::loadShaders()
     }
 
     // Sky shader
-    std::string skySource;
-    if (!loadShaderFromFile(EnginePaths::resolveEngineAsset("../assets/shaders/d3d11/sky.hlsl"), skySource))
-        return false;
+    auto skyVSBlob = readShaderBinary(shaderDir + "sky_vs.dxbc");
+    if (skyVSBlob.empty()) return false;
 
-    auto skyVSBlob = compileShader(skySource, "VSMain", "vs_5_0", "sky.hlsl");
-    if (!skyVSBlob) return false;
+    auto skyPSBlob = readShaderBinary(shaderDir + "sky_ps.dxbc");
+    if (skyPSBlob.empty()) return false;
 
-    auto skyPSBlob = compileShader(skySource, "PSMain", "ps_5_0", "sky.hlsl");
-    if (!skyPSBlob) return false;
-
-    hr = device->CreateVertexShader(skyVSBlob->GetBufferPointer(), skyVSBlob->GetBufferSize(),
+    hr = device->CreateVertexShader(skyVSBlob.data(), skyVSBlob.size(),
                                      nullptr, skyVertexShader.GetAddressOf());
     if (FAILED(hr)) return false;
 
-    hr = device->CreatePixelShader(skyPSBlob->GetBufferPointer(), skyPSBlob->GetBufferSize(),
+    hr = device->CreatePixelShader(skyPSBlob.data(), skyPSBlob.size(),
                                     nullptr, skyPixelShader.GetAddressOf());
     if (FAILED(hr)) return false;
 
@@ -667,26 +613,22 @@ bool D3D11RenderAPI::loadShaders()
     };
 
     hr = device->CreateInputLayout(skyLayoutDesc, ARRAYSIZE(skyLayoutDesc),
-                                    skyVSBlob->GetBufferPointer(), skyVSBlob->GetBufferSize(),
+                                    skyVSBlob.data(), skyVSBlob.size(),
                                     skyInputLayout.GetAddressOf());
     if (FAILED(hr)) return false;
 
     // FXAA shader
-    std::string fxaaSource;
-    if (!loadShaderFromFile(EnginePaths::resolveEngineAsset("../assets/shaders/d3d11/fxaa.hlsl"), fxaaSource))
-        return false;
+    auto fxaaVSBlob = readShaderBinary(shaderDir + "fxaa_vs.dxbc");
+    if (fxaaVSBlob.empty()) return false;
 
-    auto fxaaVSBlob = compileShader(fxaaSource, "VSMain", "vs_5_0", "fxaa.hlsl");
-    if (!fxaaVSBlob) return false;
+    auto fxaaPSBlob = readShaderBinary(shaderDir + "fxaa_ps.dxbc");
+    if (fxaaPSBlob.empty()) return false;
 
-    auto fxaaPSBlob = compileShader(fxaaSource, "PSMain", "ps_5_0", "fxaa.hlsl");
-    if (!fxaaPSBlob) return false;
-
-    hr = device->CreateVertexShader(fxaaVSBlob->GetBufferPointer(), fxaaVSBlob->GetBufferSize(),
+    hr = device->CreateVertexShader(fxaaVSBlob.data(), fxaaVSBlob.size(),
                                      nullptr, fxaaVertexShader.GetAddressOf());
     if (FAILED(hr)) return false;
 
-    hr = device->CreatePixelShader(fxaaPSBlob->GetBufferPointer(), fxaaPSBlob->GetBufferSize(),
+    hr = device->CreatePixelShader(fxaaPSBlob.data(), fxaaPSBlob.size(),
                                     nullptr, fxaaPixelShader.GetAddressOf());
     if (FAILED(hr)) return false;
 
@@ -697,7 +639,7 @@ bool D3D11RenderAPI::loadShaders()
     };
 
     hr = device->CreateInputLayout(fxaaLayoutDesc, ARRAYSIZE(fxaaLayoutDesc),
-                                    fxaaVSBlob->GetBufferPointer(), fxaaVSBlob->GetBufferSize(),
+                                    fxaaVSBlob.data(), fxaaVSBlob.size(),
                                     fxaaInputLayout.GetAddressOf());
     return SUCCEEDED(hr);
 }

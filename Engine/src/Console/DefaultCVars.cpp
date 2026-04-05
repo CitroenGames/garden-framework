@@ -12,6 +12,21 @@ CONVAR(r_fxaa, 1, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
 CONVAR_BOUNDED(r_shadowquality, 2, 0, 3, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
                "Shadow quality (0=off, 1=low, 2=medium, 3=high)");
 
+CONVAR(r_sky, 1, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
+       "Enable skybox rendering");
+
+CONVAR(r_lighting, 1, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
+       "Enable lighting (0=unlit mode)");
+
+CONVAR(r_dynamiclights, 1, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
+       "Enable dynamic point and spot lights");
+
+CONVAR(r_depthprepass, 1, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
+       "Enable depth prepass for early-Z optimization");
+
+CONVAR(r_frustumculling, 1, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
+       "Enable BVH frustum culling");
+
 CONVAR_BOUNDED(fps_max, 60, 0, 1000, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
                "Maximum frame rate (0=unlimited)");
 

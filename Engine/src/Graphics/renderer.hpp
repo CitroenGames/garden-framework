@@ -10,6 +10,7 @@
 #include "BVH.hpp"
 #include "Debug/DebugDraw.hpp"
 #include "LODSelector.hpp"
+#include "Console/ConVar.hpp"
 #include <entt/entt.hpp>
 #include <algorithm>
 
@@ -333,6 +334,15 @@ public:
             return;
         }
 
+        // Sync renderer state from CVars
+        bvh_enabled = CVAR_BOOL(r_frustumculling);
+        depth_prepass_enabled = CVAR_BOOL(r_depthprepass);
+        bool sky_enabled = CVAR_BOOL(r_sky);
+        bool dynamic_lights_enabled = CVAR_BOOL(r_dynamiclights);
+        render_api->setFXAAEnabled(CVAR_BOOL(r_fxaa));
+        render_api->setShadowQuality(CVAR_INT(r_shadowquality));
+        render_api->enableLighting(CVAR_BOOL(r_lighting));
+
         last_draw_calls = 0;
 
         auto view = registry.view<MeshComponent, TransformComponent>();
@@ -342,6 +352,8 @@ public:
             scene_bvh.build(registry);
 
         // 1. Shadow Pass - CSM with per-cascade frustum culling
+        if (render_api->getShadowQuality() > 0)
+        {
         render_api->beginShadowPass(light_direction, c);
         const glm::mat4* cascade_matrices = render_api->getLightSpaceMatrices();
 
@@ -383,13 +395,23 @@ public:
             }
         }
         render_api->endShadowPass();
+        } // shadow quality > 0
 
         // 2. Main Render Pass
         render_api->beginFrame();
         render_api->clear(glm::vec3(0.2f, 0.3f, 0.8f));
         render_api->setCamera(c);
         render_api->setLighting(ambient_light, diffuse_light, light_direction);
-        gatherAndSetLights(registry, c);
+        if (dynamic_lights_enabled)
+        {
+            gatherAndSetLights(registry, c);
+        }
+        else
+        {
+            LightCBuffer empty_lights{};
+            empty_lights.cameraPos = c.getPosition();
+            render_api->setPointAndSpotLights(empty_lights);
+        }
 
         glm::mat4 proj = render_api->getProjectionMatrix();
         glm::vec3 cam_pos = c.getPosition();
@@ -542,7 +564,8 @@ public:
         }
 
         // Render skybox before post-processing
-        render_api->renderSkybox();
+        if (sky_enabled)
+            render_api->renderSkybox();
 
         // Render debug lines (after scene, before UI)
         DebugDraw::get().render(render_api, c);
@@ -567,6 +590,15 @@ public:
             return;
         }
 
+        // Sync renderer state from CVars
+        bvh_enabled = CVAR_BOOL(r_frustumculling);
+        depth_prepass_enabled = CVAR_BOOL(r_depthprepass);
+        bool sky_enabled = CVAR_BOOL(r_sky);
+        bool dynamic_lights_enabled = CVAR_BOOL(r_dynamiclights);
+        render_api->setFXAAEnabled(CVAR_BOOL(r_fxaa));
+        render_api->setShadowQuality(CVAR_INT(r_shadowquality));
+        render_api->enableLighting(CVAR_BOOL(r_lighting));
+
         last_draw_calls = 0;
 
         auto view = registry.view<MeshComponent, TransformComponent>();
@@ -576,6 +608,8 @@ public:
             scene_bvh.build(registry);
 
         // 1. Shadow Pass - CSM with per-cascade frustum culling
+        if (render_api->getShadowQuality() > 0)
+        {
         render_api->beginShadowPass(light_direction, c);
         const glm::mat4* cascade_matrices = render_api->getLightSpaceMatrices();
 
@@ -615,13 +649,23 @@ public:
             }
         }
         render_api->endShadowPass();
+        } // shadow quality > 0
 
         // 2. Main Render Pass to offscreen
         render_api->beginFrame();
         render_api->clear(glm::vec3(0.2f, 0.3f, 0.8f));
         render_api->setCamera(c);
         render_api->setLighting(ambient_light, diffuse_light, light_direction);
-        gatherAndSetLights(registry, c);
+        if (dynamic_lights_enabled)
+        {
+            gatherAndSetLights(registry, c);
+        }
+        else
+        {
+            LightCBuffer empty_lights{};
+            empty_lights.cameraPos = c.getPosition();
+            render_api->setPointAndSpotLights(empty_lights);
+        }
 
         glm::mat4 proj = render_api->getProjectionMatrix();
         glm::vec3 cam_pos = c.getPosition();
@@ -767,7 +811,8 @@ public:
             last_visible_entities = last_total_entities;
         }
 
-        render_api->renderSkybox();
+        if (sky_enabled)
+            render_api->renderSkybox();
         DebugDraw::get().render(render_api, c);
 
         // Render RmlUi (game UI)
