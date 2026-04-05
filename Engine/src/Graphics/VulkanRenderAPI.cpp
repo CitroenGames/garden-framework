@@ -217,6 +217,9 @@ void VulkanRenderAPI::shutdown()
     // Clean up FXAA resources
     cleanupFxaaResources();
 
+    // Clean up PIE viewport resources
+    destroyAllPIEViewports();
+
     // Clean up viewport resources
     destroyViewportResources();
     if (viewport_resolve_pass != VK_NULL_HANDLE) {
@@ -3650,19 +3653,34 @@ void VulkanRenderAPI::beginFrame()
     // Determine render extent for viewport/scissor
     VkExtent2D renderExtent = swapchain_extent;
 
-    if (isViewportMode()) {
-        // Editor viewport mode: always render to offscreen at viewport dimensions
-        renderPassInfo.renderPass = offscreen_render_pass;
-        renderPassInfo.framebuffer = offscreen_framebuffers[0];
-        renderExtent = { (uint32_t)viewport_width_rt, (uint32_t)viewport_height_rt };
-    } else if (fxaaEnabled && fxaa_initialized) {
-        // Render to offscreen framebuffer for FXAA
-        renderPassInfo.renderPass = offscreen_render_pass;
-        renderPassInfo.framebuffer = offscreen_framebuffers[0];
-    } else {
-        // Render directly to swapchain
-        renderPassInfo.renderPass = render_pass;
-        renderPassInfo.framebuffer = framebuffers[current_image_index];
+    // Check for active PIE viewport target
+    bool pie_target_active = false;
+    if (m_active_scene_target >= 0) {
+        auto it = m_pie_viewports.find(m_active_scene_target);
+        if (it != m_pie_viewports.end() && it->second.framebuffer != VK_NULL_HANDLE) {
+            // PIE viewport mode: render to PIE viewport's offscreen framebuffer
+            renderPassInfo.renderPass = offscreen_render_pass;
+            renderPassInfo.framebuffer = it->second.framebuffer;
+            renderExtent = { (uint32_t)it->second.width, (uint32_t)it->second.height };
+            pie_target_active = true;
+        }
+    }
+
+    if (!pie_target_active) {
+        if (isViewportMode()) {
+            // Editor viewport mode: always render to offscreen at viewport dimensions
+            renderPassInfo.renderPass = offscreen_render_pass;
+            renderPassInfo.framebuffer = offscreen_framebuffers[0];
+            renderExtent = { (uint32_t)viewport_width_rt, (uint32_t)viewport_height_rt };
+        } else if (fxaaEnabled && fxaa_initialized) {
+            // Render to offscreen framebuffer for FXAA
+            renderPassInfo.renderPass = offscreen_render_pass;
+            renderPassInfo.framebuffer = offscreen_framebuffers[0];
+        } else {
+            // Render directly to swapchain
+            renderPassInfo.renderPass = render_pass;
+            renderPassInfo.framebuffer = framebuffers[current_image_index];
+        }
     }
 
     renderPassInfo.renderArea.offset = {0, 0};
@@ -4991,6 +5009,33 @@ void VulkanRenderAPI::setViewportSize(int width, int height)
 
 void VulkanRenderAPI::endSceneRender()
 {
+    // Handle PIE viewport resolve
+    if (m_active_scene_target >= 0) {
+        auto it = m_pie_viewports.find(m_active_scene_target);
+        m_active_scene_target = -1;  // Reset early so subsequent calls go to normal path
+
+        if (it == m_pie_viewports.end() || !frame_started) return;
+
+        PIEViewportTarget& target = it->second;
+        VkCommandBuffer cmd = command_buffers[current_frame];
+
+        // End the main render pass (scene was rendered to PIE's offscreen framebuffer).
+        // The offscreen_render_pass transitions the color attachment to SHADER_READ_ONLY_OPTIMAL
+        // automatically via its finalLayout, so the PIE viewport image is ready for ImGui sampling.
+        if (main_pass_started) {
+            vkCmdEndRenderPass(cmd);
+            main_pass_started = false;
+        }
+
+        // Note: The scene was rendered directly to target.image via the PIE viewport's
+        // offscreen framebuffer. The offscreen_render_pass finalLayout already transitions
+        // the image to SHADER_READ_ONLY_OPTIMAL, which is what ImGui needs.
+        // FXAA is not applied to PIE viewports (would require a separate intermediate buffer).
+
+        // Command buffer stays open for renderUI()
+        return;
+    }
+
     if (!isViewportMode()) {
         endFrame();
         return;
@@ -5433,4 +5478,281 @@ uint64_t VulkanRenderAPI::getPreviewTextureID()
 void VulkanRenderAPI::destroyPreviewTarget()
 {
     destroyPreviewResources();
+}
+
+// ── PIE (Play-In-Editor) viewport render targets ──────────────────────────────
+
+void VulkanRenderAPI::createPIEViewportResources(PIEViewportTarget& target, int w, int h)
+{
+    target.width = w;
+    target.height = h;
+
+    VmaAllocationCreateInfo gpuAllocInfo{};
+    gpuAllocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+
+    // --- Color image (sampled for ImGui, used as color attachment and transfer dst) ---
+    VkImageCreateInfo imageInfo{};
+    imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imageInfo.imageType = VK_IMAGE_TYPE_2D;
+    imageInfo.format = swapchain_format;
+    imageInfo.extent = { (uint32_t)w, (uint32_t)h, 1 };
+    imageInfo.mipLevels = 1;
+    imageInfo.arrayLayers = 1;
+    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    if (vmaCreateImage(vma_allocator, &imageInfo, &gpuAllocInfo,
+                       &target.image, &target.allocation, nullptr) != VK_SUCCESS) {
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create PIE viewport image");
+        return;
+    }
+
+    // --- Color image view ---
+    VkImageViewCreateInfo viewInfo{};
+    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewInfo.image = target.image;
+    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    viewInfo.format = swapchain_format;
+    viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    viewInfo.subresourceRange.baseMipLevel = 0;
+    viewInfo.subresourceRange.levelCount = 1;
+    viewInfo.subresourceRange.baseArrayLayer = 0;
+    viewInfo.subresourceRange.layerCount = 1;
+
+    if (vkCreateImageView(device, &viewInfo, nullptr, &target.view) != VK_SUCCESS) {
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create PIE viewport image view");
+        return;
+    }
+
+    // --- Sampler (via cache) ---
+    SamplerKey samplerKey{};
+    samplerKey.magFilter = VK_FILTER_LINEAR;
+    samplerKey.minFilter = VK_FILTER_LINEAR;
+    samplerKey.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerKey.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerKey.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerKey.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    samplerKey.anisotropyEnable = VK_FALSE;
+    samplerKey.maxAnisotropy = 1.0f;
+    samplerKey.compareEnable = VK_FALSE;
+    samplerKey.compareOp = VK_COMPARE_OP_ALWAYS;
+    samplerKey.minLod = 0.0f;
+    samplerKey.maxLod = 0.0f;
+    samplerKey.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+    target.sampler = sampler_cache.getOrCreate(samplerKey);
+
+    // --- Depth image ---
+    VkImageCreateInfo depthInfo{};
+    depthInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    depthInfo.imageType = VK_IMAGE_TYPE_2D;
+    depthInfo.format = depth_format;
+    depthInfo.extent = { (uint32_t)w, (uint32_t)h, 1 };
+    depthInfo.mipLevels = 1;
+    depthInfo.arrayLayers = 1;
+    depthInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    depthInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    depthInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    depthInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    if (vmaCreateImage(vma_allocator, &depthInfo, &gpuAllocInfo,
+                       &target.depth_image, &target.depth_allocation, nullptr) != VK_SUCCESS) {
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create PIE viewport depth image");
+        return;
+    }
+
+    // --- Depth image view ---
+    VkImageViewCreateInfo depthViewInfo{};
+    depthViewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    depthViewInfo.image = target.depth_image;
+    depthViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    depthViewInfo.format = depth_format;
+    depthViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    depthViewInfo.subresourceRange.baseMipLevel = 0;
+    depthViewInfo.subresourceRange.levelCount = 1;
+    depthViewInfo.subresourceRange.baseArrayLayer = 0;
+    depthViewInfo.subresourceRange.layerCount = 1;
+
+    if (vkCreateImageView(device, &depthViewInfo, nullptr, &target.depth_view) != VK_SUCCESS) {
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create PIE viewport depth view");
+        return;
+    }
+
+    // --- Register with ImGui ---
+    target.imgui_ds = ImGui_ImplVulkan_AddTexture(target.sampler, target.view,
+                                                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+    // --- Offscreen framebuffer (color + depth, for main scene render) ---
+    if (offscreen_render_pass == VK_NULL_HANDLE) {
+        LOG_ENGINE_ERROR("[Vulkan] offscreen_render_pass not available for PIE viewport");
+        return;
+    }
+
+    std::array<VkImageView, 2> offscreenAttachments = { target.view, target.depth_view };
+    VkFramebufferCreateInfo offFbInfo{};
+    offFbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+    offFbInfo.renderPass = offscreen_render_pass;
+    offFbInfo.attachmentCount = static_cast<uint32_t>(offscreenAttachments.size());
+    offFbInfo.pAttachments = offscreenAttachments.data();
+    offFbInfo.width = (uint32_t)w;
+    offFbInfo.height = (uint32_t)h;
+    offFbInfo.layers = 1;
+
+    if (vkCreateFramebuffer(device, &offFbInfo, nullptr, &target.framebuffer) != VK_SUCCESS) {
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create PIE viewport offscreen framebuffer");
+        return;
+    }
+
+    // --- Resolve framebuffer (color only, for FXAA resolve pass) ---
+    if (viewport_resolve_pass == VK_NULL_HANDLE) {
+        LOG_ENGINE_ERROR("[Vulkan] viewport_resolve_pass not available for PIE viewport");
+        return;
+    }
+
+    VkFramebufferCreateInfo resolveFbInfo{};
+    resolveFbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+    resolveFbInfo.renderPass = viewport_resolve_pass;
+    resolveFbInfo.attachmentCount = 1;
+    resolveFbInfo.pAttachments = &target.view;
+    resolveFbInfo.width = (uint32_t)w;
+    resolveFbInfo.height = (uint32_t)h;
+    resolveFbInfo.layers = 1;
+
+    if (vkCreateFramebuffer(device, &resolveFbInfo, nullptr, &target.resolve_framebuffer) != VK_SUCCESS) {
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create PIE viewport resolve framebuffer");
+        return;
+    }
+}
+
+void VulkanRenderAPI::destroyPIEViewportResources(PIEViewportTarget& target)
+{
+    if (target.imgui_ds != VK_NULL_HANDLE) {
+        ImGui_ImplVulkan_RemoveTexture(target.imgui_ds);
+        target.imgui_ds = VK_NULL_HANDLE;
+    }
+
+    if (target.resolve_framebuffer != VK_NULL_HANDLE) {
+        vkDestroyFramebuffer(device, target.resolve_framebuffer, nullptr);
+        target.resolve_framebuffer = VK_NULL_HANDLE;
+    }
+
+    if (target.framebuffer != VK_NULL_HANDLE) {
+        vkDestroyFramebuffer(device, target.framebuffer, nullptr);
+        target.framebuffer = VK_NULL_HANDLE;
+    }
+
+    if (target.depth_view != VK_NULL_HANDLE) {
+        vkDestroyImageView(device, target.depth_view, nullptr);
+        target.depth_view = VK_NULL_HANDLE;
+    }
+    if (target.depth_image != VK_NULL_HANDLE && vma_allocator) {
+        vmaDestroyImage(vma_allocator, target.depth_image, target.depth_allocation);
+        target.depth_image = VK_NULL_HANDLE;
+        target.depth_allocation = nullptr;
+    }
+
+    if (target.view != VK_NULL_HANDLE) {
+        vkDestroyImageView(device, target.view, nullptr);
+        target.view = VK_NULL_HANDLE;
+    }
+    if (target.image != VK_NULL_HANDLE && vma_allocator) {
+        vmaDestroyImage(vma_allocator, target.image, target.allocation);
+        target.image = VK_NULL_HANDLE;
+        target.allocation = VK_NULL_HANDLE;
+    }
+
+    target.sampler = VK_NULL_HANDLE;  // Owned by sampler cache
+    target.width = 0;
+    target.height = 0;
+}
+
+int VulkanRenderAPI::createPIEViewport(int width, int height)
+{
+    if (width <= 0 || height <= 0) return -1;
+
+    // Ensure FXAA infrastructure exists (we need offscreen_render_pass, viewport_resolve_pass, etc.)
+    if (!fxaa_initialized) {
+        if (!createFxaaResources()) {
+            LOG_ENGINE_ERROR("[Vulkan] Failed to create FXAA resources for PIE viewport");
+            return -1;
+        }
+    }
+
+    // Ensure viewport_resolve_pass exists (created in createViewportResources)
+    if (viewport_resolve_pass == VK_NULL_HANDLE) {
+        // Create a temporary viewport to bootstrap the render passes
+        createViewportResources(width, height);
+        if (viewport_resolve_pass == VK_NULL_HANDLE) {
+            LOG_ENGINE_ERROR("[Vulkan] Failed to bootstrap viewport_resolve_pass for PIE viewport");
+            return -1;
+        }
+    }
+
+    int id = m_next_pie_id++;
+    PIEViewportTarget target{};
+    createPIEViewportResources(target, width, height);
+
+    if (target.framebuffer == VK_NULL_HANDLE || target.resolve_framebuffer == VK_NULL_HANDLE) {
+        destroyPIEViewportResources(target);
+        return -1;
+    }
+
+    m_pie_viewports[id] = target;
+    return id;
+}
+
+void VulkanRenderAPI::destroyPIEViewport(int id)
+{
+    auto it = m_pie_viewports.find(id);
+    if (it == m_pie_viewports.end()) return;
+
+    vkDeviceWaitIdle(device);
+
+    if (m_active_scene_target == id) {
+        m_active_scene_target = -1;
+    }
+
+    destroyPIEViewportResources(it->second);
+    m_pie_viewports.erase(it);
+}
+
+void VulkanRenderAPI::destroyAllPIEViewports()
+{
+    if (m_pie_viewports.empty()) return;
+
+    vkDeviceWaitIdle(device);
+
+    m_active_scene_target = -1;
+
+    for (auto& pair : m_pie_viewports) {
+        destroyPIEViewportResources(pair.second);
+    }
+    m_pie_viewports.clear();
+}
+
+void VulkanRenderAPI::setPIEViewportSize(int id, int width, int height)
+{
+    if (width <= 0 || height <= 0) return;
+
+    auto it = m_pie_viewports.find(id);
+    if (it == m_pie_viewports.end()) return;
+
+    if (it->second.width == width && it->second.height == height) return;
+
+    vkDeviceWaitIdle(device);
+    destroyPIEViewportResources(it->second);
+    createPIEViewportResources(it->second, width, height);
+}
+
+void VulkanRenderAPI::setActiveSceneTarget(int pie_viewport_id)
+{
+    m_active_scene_target = pie_viewport_id;
+}
+
+uint64_t VulkanRenderAPI::getPIEViewportTextureID(int id)
+{
+    auto it = m_pie_viewports.find(id);
+    if (it == m_pie_viewports.end()) return 0;
+    return reinterpret_cast<uint64_t>(it->second.imgui_ds);
 }

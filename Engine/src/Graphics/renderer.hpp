@@ -141,18 +141,56 @@ public:
         api->popMatrix();
     };
 
-    // Render a LOD mesh: temporarily swaps gpu_mesh and disables material ranges
-    // (LOD meshes have different vertex layouts so material ranges from LOD0 don't apply)
+    // Render a LOD mesh: temporarily swaps gpu_mesh and uses LOD-specific material ranges
     static void render_lod_mesh(mesh& m, const TransformComponent& transform,
                                  IRenderAPI* api, IGPUMesh* lod_gpu_mesh)
     {
         IGPUMesh* original_gpu = m.gpu_mesh;
         bool original_mat_ranges = m.uses_material_ranges;
+        std::vector<MaterialRange> original_ranges;
+        TextureHandle original_texture = m.texture;
+        bool original_texture_set = m.texture_set;
+
         m.gpu_mesh = lod_gpu_mesh;
-        m.uses_material_ranges = false;
+
+        // Check if this LOD level has per-submesh material ranges
+        int lod_idx = m.current_lod - 1;
+        bool has_lod_materials = (lod_idx >= 0 && lod_idx < static_cast<int>(m.lod_levels.size())
+                                  && !m.lod_levels[lod_idx].material_ranges.empty());
+
+        if (has_lod_materials)
+        {
+            // Swap in LOD-specific material ranges
+            original_ranges = std::move(m.material_ranges);
+            m.material_ranges = m.lod_levels[lod_idx].material_ranges;
+            m.uses_material_ranges = true;
+        }
+        else
+        {
+            // No per-submesh LOD data — fall back to first valid texture
+            m.uses_material_ranges = false;
+            if (original_mat_ranges && !m.material_ranges.empty())
+            {
+                for (const auto& range : m.material_ranges)
+                {
+                    if (range.hasValidTexture())
+                    {
+                        m.texture = range.texture;
+                        m.texture_set = true;
+                        break;
+                    }
+                }
+            }
+        }
+
         render_mesh_with_api(m, transform, api);
+
         m.gpu_mesh = original_gpu;
+        if (has_lod_materials)
+            m.material_ranges = std::move(original_ranges);
         m.uses_material_ranges = original_mat_ranges;
+        m.texture = original_texture;
+        m.texture_set = original_texture_set;
     }
 
     // LOD-aware rendering: selects appropriate LOD before drawing

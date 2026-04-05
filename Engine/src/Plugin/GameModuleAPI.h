@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-#define GARDEN_MODULE_API_VERSION 2
+#define GARDEN_MODULE_API_VERSION 3
 
 // Forward declarations
 class world;
@@ -23,6 +23,12 @@ struct EngineServices
     Application*         application;
     LevelManager*        level_manager;
     uint32_t             api_version;
+
+    // Network PIE fields (added in API version 3).
+    // nullptr / 0 means "use default" for backward compatibility.
+    const char*          connect_address = nullptr;  // server address to connect to
+    uint16_t             connect_port    = 0;        // server port to connect to
+    uint16_t             listen_port     = 0;        // port for server to listen on
 };
 
 // Platform export macro for game DLLs

@@ -162,6 +162,46 @@ struct MetalRenderAPIImpl {
     int previewWidthRT = 0;
     int previewHeightRT = 0;
 
+    // PIE viewport render targets (for multi-player Play-In-Editor)
+    struct PIEViewportTarget {
+        id<MTLTexture> colorTexture = nil;
+        id<MTLTexture> depthTexture = nil;
+        // Offscreen texture for FXAA intermediate rendering
+        id<MTLTexture> offscreenTexture = nil;
+        id<MTLTexture> offscreenDepthTexture = nil;
+        int width = 0;
+        int height = 0;
+    };
+    std::unordered_map<int, PIEViewportTarget> pieViewports;
+    int nextPIEId = 0;
+    int activeSceneTarget = -1; // -1 = main viewport
+
+    void createPIEViewportTextures(PIEViewportTarget& target, int w, int h)
+    {
+        target.colorTexture = nil;
+        target.depthTexture = nil;
+        target.offscreenTexture = nil;
+        target.offscreenDepthTexture = nil;
+        target.width = w;
+        target.height = h;
+
+        // Final output color texture (what ImGui will sample)
+        MTLTextureDescriptor* desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                                                                       width:w
+                                                                                      height:h
+                                                                                   mipmapped:NO];
+        desc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+        desc.storageMode = MTLStorageModePrivate;
+        target.colorTexture = [device newTextureWithDescriptor:desc];
+
+        // Depth texture
+        target.depthTexture = createDepthTextureWithSize(w, h);
+
+        // Offscreen texture for FXAA intermediate rendering
+        target.offscreenTexture = [device newTextureWithDescriptor:desc];
+        target.offscreenDepthTexture = createDepthTextureWithSize(w, h);
+    }
+
     // Shadow mapping
     static constexpr int NUM_CASCADES = 4;
     id<MTLTexture> shadowMapArray = nil;
@@ -889,6 +929,10 @@ void MetalRenderAPI::shutdown()
     // Release all textures
     impl->textures.clear();
 
+    // Release PIE viewport resources
+    impl->pieViewports.clear();
+    impl->activeSceneTarget = -1;
+
     // Nil out Metal objects (ARC handles cleanup)
     impl->basicPipeline = nil;
     impl->basicPipelineAlpha = nil;
@@ -960,14 +1004,41 @@ void MetalRenderAPI::beginFrame()
         return;
     }
 
+    // Check if rendering to a PIE viewport
+    bool pieMode = false;
+    MetalRenderAPIImpl::PIEViewportTarget* pieTarget = nullptr;
+    if (impl->activeSceneTarget >= 0) {
+        auto it = impl->pieViewports.find(impl->activeSceneTarget);
+        if (it != impl->pieViewports.end() && it->second.colorTexture) {
+            pieMode = true;
+            pieTarget = &it->second;
+        }
+    }
+
     // Determine render target dimensions
-    int rtWidth = editorMode ? impl->viewportWidthRT : impl->viewportWidth;
-    int rtHeight = editorMode ? impl->viewportHeightRT : impl->viewportHeight;
+    int rtWidth, rtHeight;
+    if (pieMode) {
+        rtWidth = pieTarget->width;
+        rtHeight = pieTarget->height;
+    } else if (editorMode) {
+        rtWidth = impl->viewportWidthRT;
+        rtHeight = impl->viewportHeightRT;
+    } else {
+        rtWidth = impl->viewportWidth;
+        rtHeight = impl->viewportHeight;
+    }
 
     // Start the main render pass
     MTLRenderPassDescriptor* passDesc = [MTLRenderPassDescriptor renderPassDescriptor];
 
-    if (impl->fxaaEnabled && impl->fxaaInitialized && impl->offscreenTexture) {
+    if (pieMode) {
+        // PIE viewport: render to offscreen texture (for FXAA) or directly to color texture
+        if (impl->fxaaEnabled && impl->fxaaInitialized && pieTarget->offscreenTexture) {
+            passDesc.colorAttachments[0].texture = pieTarget->offscreenTexture;
+        } else {
+            passDesc.colorAttachments[0].texture = pieTarget->colorTexture;
+        }
+    } else if (impl->fxaaEnabled && impl->fxaaInitialized && impl->offscreenTexture) {
         // Render to offscreen texture for FXAA
         passDesc.colorAttachments[0].texture = impl->offscreenTexture;
     } else if (editorMode) {
@@ -980,9 +1051,15 @@ void MetalRenderAPI::beginFrame()
     passDesc.colorAttachments[0].storeAction = MTLStoreActionStore;
     passDesc.colorAttachments[0].clearColor = MTLClearColorMake(impl->clearColor.r, impl->clearColor.g, impl->clearColor.b, 1.0);
 
-    // Depth texture: editor mode uses viewport depth or offscreen depth
+    // Depth texture
     id<MTLTexture> depthTex;
-    if (impl->fxaaEnabled && impl->fxaaInitialized && impl->offscreenDepthTexture) {
+    if (pieMode) {
+        if (impl->fxaaEnabled && impl->fxaaInitialized && pieTarget->offscreenDepthTexture) {
+            depthTex = pieTarget->offscreenDepthTexture;
+        } else {
+            depthTex = pieTarget->depthTexture;
+        }
+    } else if (impl->fxaaEnabled && impl->fxaaInitialized && impl->offscreenDepthTexture) {
         depthTex = impl->offscreenDepthTexture;
     } else if (editorMode) {
         depthTex = impl->viewportDepthTexture;
@@ -1983,6 +2060,68 @@ void MetalRenderAPI::setViewportSize(int width, int height)
 
 void MetalRenderAPI::endSceneRender()
 {
+    // Check if we are rendering to a PIE viewport
+    if (impl->activeSceneTarget >= 0)
+    {
+        auto it = impl->pieViewports.find(impl->activeSceneTarget);
+        if (it != impl->pieViewports.end())
+        {
+            auto& pie = it->second;
+
+            // End the main scene encoder
+            if (impl->mainPassActive && impl->encoder) {
+                [impl->encoder endEncoding];
+                impl->encoder = nil;
+                impl->mainPassActive = false;
+            }
+
+            // Apply FXAA from PIE offscreen -> PIE color texture
+            if (impl->fxaaEnabled && impl->fxaaInitialized && impl->fxaaPipeline && pie.offscreenTexture)
+            {
+                MTLRenderPassDescriptor* fxaaPass = [MTLRenderPassDescriptor renderPassDescriptor];
+                fxaaPass.colorAttachments[0].texture = pie.colorTexture;
+                fxaaPass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+                fxaaPass.colorAttachments[0].storeAction = MTLStoreActionStore;
+
+                id<MTLRenderCommandEncoder> fxaaEncoder =
+                    [impl->commandBuffer renderCommandEncoderWithDescriptor:fxaaPass];
+                if (fxaaEncoder) {
+                    fxaaEncoder.label = @"FXAA PIE Viewport Encoder";
+
+                    [fxaaEncoder setRenderPipelineState:impl->fxaaPipeline];
+
+                    MTLViewport viewport = {0, 0, (double)pie.width, (double)pie.height, 0, 1};
+                    [fxaaEncoder setViewport:viewport];
+
+                    [fxaaEncoder setFragmentTexture:pie.offscreenTexture atIndex:0];
+                    [fxaaEncoder setFragmentSamplerState:impl->defaultSampler atIndex:0];
+
+                    MetalFXAAUniforms fxaaUniforms;
+                    fxaaUniforms.inverseScreenSize = glm::vec2(
+                        1.0f / std::max(pie.width, 1), 1.0f / std::max(pie.height, 1));
+                    [fxaaEncoder setFragmentBytes:&fxaaUniforms length:sizeof(fxaaUniforms) atIndex:0];
+
+                    [fxaaEncoder setVertexBuffer:impl->fxaaVertexBuffer offset:0 atIndex:0];
+                    [fxaaEncoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+
+                    [fxaaEncoder endEncoding];
+                }
+            }
+            // If FXAA is disabled, scene was rendered directly to PIE colorTexture — nothing to do
+        }
+
+        // Reset active scene target back to main viewport
+        impl->activeSceneTarget = -1;
+
+        // Reset bind tracking
+        impl->lastBoundPipeline = nil;
+        impl->lastBoundDepthStencil = nil;
+        impl->lastBoundVertexBuffer = nil;
+        impl->lastBoundTextureHandle = INVALID_TEXTURE;
+        impl->perFrameUBOReady = false;
+        return;
+    }
+
     if (!impl->viewportTexture) return;
 
     // End the main scene encoder
@@ -2120,6 +2259,72 @@ void MetalRenderAPI::destroyPreviewTarget()
     impl->previewDepthTexture = nil;
     impl->previewWidthRT = 0;
     impl->previewHeightRT = 0;
+}
+
+// ── PIE viewport render targets (multi-player Play-In-Editor) ──────────────
+
+int MetalRenderAPI::createPIEViewport(int width, int height)
+{
+    if (width <= 0 || height <= 0) return -1;
+
+    int id = impl->nextPIEId++;
+    auto& target = impl->pieViewports[id];
+    impl->createPIEViewportTextures(target, width, height);
+
+    if (!target.colorTexture || !target.depthTexture)
+    {
+        impl->pieViewports.erase(id);
+        return -1;
+    }
+
+    return id;
+}
+
+void MetalRenderAPI::destroyPIEViewport(int id)
+{
+    auto it = impl->pieViewports.find(id);
+    if (it == impl->pieViewports.end()) return;
+
+    it->second.colorTexture = nil;
+    it->second.depthTexture = nil;
+    it->second.offscreenTexture = nil;
+    it->second.offscreenDepthTexture = nil;
+
+    impl->pieViewports.erase(it);
+
+    // If we just destroyed the active target, reset to main viewport
+    if (impl->activeSceneTarget == id)
+        impl->activeSceneTarget = -1;
+}
+
+void MetalRenderAPI::destroyAllPIEViewports()
+{
+    impl->pieViewports.clear();
+    impl->activeSceneTarget = -1;
+}
+
+void MetalRenderAPI::setPIEViewportSize(int id, int width, int height)
+{
+    if (width <= 0 || height <= 0) return;
+
+    auto it = impl->pieViewports.find(id);
+    if (it == impl->pieViewports.end()) return;
+
+    if (it->second.width == width && it->second.height == height) return;
+
+    impl->createPIEViewportTextures(it->second, width, height);
+}
+
+void MetalRenderAPI::setActiveSceneTarget(int pie_viewport_id)
+{
+    impl->activeSceneTarget = pie_viewport_id;
+}
+
+uint64_t MetalRenderAPI::getPIEViewportTextureID(int id)
+{
+    auto it = impl->pieViewports.find(id);
+    if (it == impl->pieViewports.end() || !it->second.colorTexture) return 0;
+    return (uint64_t)((__bridge void*)it->second.colorTexture);
 }
 
 void MetalRenderAPI::renderUI()

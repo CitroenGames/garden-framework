@@ -1,5 +1,6 @@
 #include "ToolbarPanel.hpp"
 #include "EditorState.hpp"
+#include "NetworkPIESettings.hpp"
 #include "imgui.h"
 #include "imgui_internal.h"
 
@@ -147,8 +148,29 @@ void ToolbarPanel::drawContent(EditorState& state)
         switch (state.play_mode)
         {
         case PlayMode::Editing:
-            play_group_width = ImGui::CalcTextSize("Play").x + s.FramePadding.x * 2.0f;
+        {
+            // Account for dynamic play label + dropdown arrow
+            float arrow_w = ImGui::GetFrameHeight(); // ArrowButton is square
+            if (state.network_pie.net_mode != PIENetMode::Standalone && state.network_pie.num_players > 1)
+            {
+                char buf[64];
+                const char* ms = (state.network_pie.net_mode == PIENetMode::ListenServer) ? "Listen" : "Dedicated";
+                snprintf(buf, sizeof(buf), "Play (%dP %s)", state.network_pie.num_players, ms);
+                play_group_width = ImGui::CalcTextSize(buf).x + s.FramePadding.x * 2.0f + arrow_w;
+            }
+            else if (state.network_pie.net_mode != PIENetMode::Standalone)
+            {
+                char buf[64];
+                const char* ms = (state.network_pie.net_mode == PIENetMode::ListenServer) ? "Listen" : "Dedicated";
+                snprintf(buf, sizeof(buf), "Play (%s)", ms);
+                play_group_width = ImGui::CalcTextSize(buf).x + s.FramePadding.x * 2.0f + arrow_w;
+            }
+            else
+            {
+                play_group_width = ImGui::CalcTextSize("Play").x + s.FramePadding.x * 2.0f + arrow_w;
+            }
             break;
+        }
         case PlayMode::Playing:
             play_group_width = ImGui::CalcTextSize("Pause").x + ImGui::CalcTextSize("Stop").x
                              + ImGui::CalcTextSize("Eject (F8)").x
@@ -174,13 +196,89 @@ void ToolbarPanel::drawContent(EditorState& state)
     {
     case PlayMode::Editing:
     {
+        // Build play button label based on network PIE settings
+        const char* play_label = "Play";
+        char play_buf[64] = "Play";
+        if (state.network_pie.net_mode != PIENetMode::Standalone && state.network_pie.num_players > 1)
+        {
+            const char* mode_short = (state.network_pie.net_mode == PIENetMode::ListenServer)
+                                     ? "Listen" : "Dedicated";
+            snprintf(play_buf, sizeof(play_buf), "Play (%dP %s)", state.network_pie.num_players, mode_short);
+            play_label = play_buf;
+        }
+        else if (state.network_pie.net_mode != PIENetMode::Standalone)
+        {
+            const char* mode_short = (state.network_pie.net_mode == PIENetMode::ListenServer)
+                                     ? "Listen" : "Dedicated";
+            snprintf(play_buf, sizeof(play_buf), "Play (%s)", mode_short);
+            play_label = play_buf;
+        }
+
         // Green "Play" button
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.1f, 0.6f, 0.1f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.2f, 0.7f, 0.2f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.0f, 0.5f, 0.0f, 1.0f));
-        if (ImGui::Button("Play"))
+        if (ImGui::Button(play_label))
             if (callbacks.on_play) callbacks.on_play();
         ImGui::PopStyleColor(3);
+
+        // Small dropdown arrow for network PIE settings
+        ImGui::SameLine(0, 0);
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.08f, 0.50f, 0.08f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.15f, 0.60f, 0.15f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.0f, 0.45f, 0.0f, 1.0f));
+        if (ImGui::ArrowButton("##pie_settings", ImGuiDir_Down))
+            ImGui::OpenPopup("PIENetSettings");
+        ImGui::PopStyleColor(3);
+
+        if (ImGui::BeginPopup("PIENetSettings"))
+        {
+            ImGui::Text("Multiplayer Settings");
+            ImGui::Separator();
+
+            // Net Mode combo
+            const char* mode_names[] = { "Standalone", "Listen Server", "Dedicated Server" };
+            int mode_idx = static_cast<int>(state.network_pie.net_mode);
+            ImGui::SetNextItemWidth(160.0f);
+            if (ImGui::Combo("Net Mode", &mode_idx, mode_names, 3))
+                state.network_pie.net_mode = static_cast<PIENetMode>(mode_idx);
+
+            // Only show extra settings for network modes
+            bool is_network = (state.network_pie.net_mode != PIENetMode::Standalone);
+
+            if (!is_network) ImGui::BeginDisabled();
+
+            // Run Mode combo
+            const char* run_names[] = { "In Editor", "Separate Windows" };
+            int run_idx = static_cast<int>(state.network_pie.run_mode);
+            ImGui::SetNextItemWidth(160.0f);
+            if (ImGui::Combo("Run Mode", &run_idx, run_names, 2))
+                state.network_pie.run_mode = static_cast<PIERunMode>(run_idx);
+
+            ImGui::SetNextItemWidth(160.0f);
+            ImGui::SliderInt("Players", &state.network_pie.num_players, 1, 4);
+
+            int port_val = static_cast<int>(state.network_pie.server_port);
+            ImGui::SetNextItemWidth(160.0f);
+            if (ImGui::InputInt("Port", &port_val, 1, 100))
+            {
+                if (port_val < 1024) port_val = 1024;
+                if (port_val > 65535) port_val = 65535;
+                state.network_pie.server_port = static_cast<uint16_t>(port_val);
+            }
+
+            if (!is_network) ImGui::EndDisabled();
+
+            if (!has_game_module && is_network)
+            {
+                ImGui::Spacing();
+                ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.2f, 1.0f),
+                    "No game module loaded.\nNetwork modes require a game DLL.");
+            }
+
+            ImGui::EndPopup();
+        }
+
         break;
     }
     case PlayMode::Playing:

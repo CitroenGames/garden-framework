@@ -27,6 +27,10 @@
 #include "Project/ProjectPackager.hpp"
 #include "UndoSystem.hpp"
 #include "EditorConfig.hpp"
+#include "Plugin/GameModuleLoader.hpp"
+#include "Reflection/ReflectionRegistry.hpp"
+#include "PIEProcessManager.hpp"
+#include "PIEClientInstance.hpp"
 
 class EditorApp
 {
@@ -123,6 +127,19 @@ private:
     camera      m_pre_play_editor_cam;
     std::string m_pre_play_selected_name;
     bool        m_mouse_captured_for_game = false; // true when mouse is locked for game input
+
+    // --- Network PIE ---
+    GameModuleLoader   m_game_module;              // Player 1 DLL (or only DLL in listen server)
+    ReflectionRegistry m_reflection;
+    world              m_server_world;             // separate ECS world for listen server
+    EngineServices     m_server_services{};
+    EngineServices     m_client_services{};
+    bool               m_network_pie_active = false; // true when using game DLL for network PIE
+    PIEProcessManager  m_pie_processes;
+
+    // Multi-viewport PIE: additional client instances (Player 2-4) for InEditor mode
+    std::vector<std::unique_ptr<PIEClientInstance>> m_pie_clients;
+    int m_focused_pie_client = -1;                 // -1 = Player 1 (main viewport)
 
     // PIE state transitions
     void beginPlay();

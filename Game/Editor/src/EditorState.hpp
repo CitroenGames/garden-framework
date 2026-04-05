@@ -2,6 +2,7 @@
 
 #include <string>
 #include <cstddef>
+#include "NetworkPIESettings.hpp"
 
 enum class PlayMode
 {
@@ -58,4 +59,7 @@ struct EditorState
     // Level info
     std::string current_save_path;
     bool unsaved_changes = false;
+
+    // Network PIE
+    NetworkPIESettings network_pie;
 };

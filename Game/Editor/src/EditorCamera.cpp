@@ -1,6 +1,7 @@
 #include "EditorCamera.hpp"
 #include <glm/gtc/quaternion.hpp>
 #include <algorithm>
+#include <cmath>
 
 EditorCamera::EditorCamera()
 {
@@ -34,8 +35,14 @@ void EditorCamera::update(float dt, bool looking_active,
         if (len > 0.001f)
         {
             local /= len;
-            float speed = keyboard_state[SDL_SCANCODE_LSHIFT] ? fast_speed : movement_speed;
+            float speed = keyboard_state[SDL_SCANCODE_LSHIFT] ? movement_speed * 3.0f : movement_speed;
             cam.position += cam.camera_rot_quaternion() * local * speed * dt;
         }
     }
+}
+
+void EditorCamera::adjustSpeed(float scroll_delta)
+{
+    movement_speed *= std::pow(1.1f, scroll_delta);
+    movement_speed = std::clamp(movement_speed, 0.1f, 500.0f);
 }

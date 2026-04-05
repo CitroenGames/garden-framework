@@ -158,6 +158,19 @@ public:
     virtual void endPreviewFrame() {}
     virtual uint64_t getPreviewTextureID() { return 0; }
     virtual void destroyPreviewTarget() {}
+
+    // PIE viewport render targets (for multi-player Play-In-Editor).
+    // These allow rendering full scenes to additional offscreen textures.
+    // When a PIE viewport is active, beginFrame()/endSceneRender() render to it
+    // instead of the main viewport, making render_scene_to_texture() work transparently.
+    virtual int  createPIEViewport(int width, int height) { (void)width; (void)height; return -1; }
+    virtual void destroyPIEViewport(int id) { (void)id; }
+    virtual void destroyAllPIEViewports() {}
+    virtual void setPIEViewportSize(int id, int width, int height) { (void)id; (void)width; (void)height; }
+    // Set the active scene target. -1 = main viewport (default), 0+ = PIE viewport.
+    // When set, the next beginFrame()/endSceneRender() cycle renders to this target.
+    virtual void setActiveSceneTarget(int pie_viewport_id) { (void)pie_viewport_id; }
+    virtual uint64_t getPIEViewportTextureID(int id) { (void)id; return 0; }
 };
 
 // Factory function to create render API instances

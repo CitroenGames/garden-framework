@@ -1,5 +1,6 @@
 #include "StatusBarPanel.hpp"
 #include "EditorState.hpp"
+#include "NetworkPIESettings.hpp"
 #include "imgui.h"
 
 void StatusBarPanel::draw(const EditorState& state)
@@ -68,6 +69,22 @@ void StatusBarPanel::draw(const EditorState& state)
             ImGui::SameLine();
 
             ImGui::TextColored(color, "%s", mode_label);
+
+            // Show network PIE info
+            if (network_pie_active)
+            {
+                ImGui::SameLine();
+                const char* net_mode = (state.network_pie.net_mode == PIENetMode::ListenServer)
+                                       ? "Listen" : "Dedicated";
+                ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "| %s :%d",
+                    net_mode, state.network_pie.server_port);
+                if (spawned_processes > 0)
+                {
+                    ImGui::SameLine();
+                    ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "| %d ext. client%s",
+                        spawned_processes, spawned_processes > 1 ? "s" : "");
+                }
+            }
         }
         else
         {

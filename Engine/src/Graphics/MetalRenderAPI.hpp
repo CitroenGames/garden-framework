@@ -84,6 +84,14 @@ public:
     virtual uint64_t getPreviewTextureID() override;
     virtual void destroyPreviewTarget() override;
 
+    // PIE viewport render targets (for multi-player Play-In-Editor)
+    virtual int  createPIEViewport(int width, int height) override;
+    virtual void destroyPIEViewport(int id) override;
+    virtual void destroyAllPIEViewports() override;
+    virtual void setPIEViewportSize(int id, int width, int height) override;
+    virtual void setActiveSceneTarget(int pie_viewport_id) override;
+    virtual uint64_t getPIEViewportTextureID(int id) override;
+
     // Metal-specific accessors for ImGui integration
     void* getDevice() const;           // Returns id<MTLDevice> as void*
     void* getCommandBuffer() const;    // Returns id<MTLCommandBuffer> as void*

@@ -8,11 +8,23 @@
 
 namespace Assets {
 
+struct LODSubmeshRange {
+    size_t start_index = 0;   // Start in the index buffer
+    size_t index_count = 0;   // Number of indices in this submesh
+    size_t submesh_id = 0;    // Maps back to original submesh index
+};
+
 struct LODMeshData {
     std::vector<vertex> vertices;
     std::vector<uint32_t> indices;
     float achieved_error = 0.0f;
     float achieved_ratio = 0.0f;
+    std::vector<LODSubmeshRange> submesh_ranges; // Per-submesh index ranges
+};
+
+struct SubmeshInfo {
+    size_t start_vertex = 0;
+    size_t vertex_count = 0;
 };
 
 struct LODGenerationInput {
@@ -21,6 +33,7 @@ struct LODGenerationInput {
     const uint32_t* indices = nullptr; // nullable — generates index buffer if null
     size_t index_count = 0;
     AssetMetadata::LODConfig config;
+    std::vector<SubmeshInfo> submeshes; // If non-empty, simplify per-submesh
 };
 
 struct LODGenerationResult {

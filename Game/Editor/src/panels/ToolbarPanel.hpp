@@ -3,6 +3,7 @@
 #include <functional>
 
 struct EditorState;
+struct NetworkPIESettings;
 
 struct ToolbarCallbacks
 {
@@ -18,6 +19,7 @@ class ToolbarPanel
 {
 public:
     ToolbarCallbacks callbacks;
+    bool has_game_module = false;      // true when project has a loadable game DLL
     void draw(EditorState& state);
     void drawContent(EditorState& state);
 };

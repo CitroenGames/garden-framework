@@ -123,8 +123,10 @@ GAME_API bool gardenServerInit(EngineServices* services)
 {
     g_server_services = services;
 
-    if (!g_server_network.initialize() || !g_server_network.startServer(7777)) {
-        LOG_ENGINE_FATAL("Failed to initialize server network");
+    uint16_t port = services->listen_port ? services->listen_port : 7777;
+
+    if (!g_server_network.initialize() || !g_server_network.startServer(port)) {
+        LOG_ENGINE_FATAL("Failed to initialize server network on port {}", port);
         return false;
     }
 
@@ -138,7 +140,7 @@ GAME_API bool gardenServerInit(EngineServices* services)
         despawnPlayerForClient(client_id);
     });
 
-    LOG_ENGINE_INFO("Server initialized on port 7777");
+    LOG_ENGINE_INFO("Server initialized on port {}", port);
     return true;
 }
 

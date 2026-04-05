@@ -523,4 +523,34 @@ private:
     int preview_width_rt = 0, preview_height_rt = 0;
     void createPreviewResources(int w, int h);
     void destroyPreviewResources();
+
+public:
+    // PIE (Play-In-Editor) viewport render targets
+    virtual int  createPIEViewport(int width, int height) override;
+    virtual void destroyPIEViewport(int id) override;
+    virtual void destroyAllPIEViewports() override;
+    virtual void setPIEViewportSize(int id, int width, int height) override;
+    virtual void setActiveSceneTarget(int pie_viewport_id) override;
+    virtual uint64_t getPIEViewportTextureID(int id) override;
+
+private:
+    struct PIEViewportTarget {
+        VkImage image = VK_NULL_HANDLE;
+        VmaAllocation allocation = VK_NULL_HANDLE;
+        VkImageView view = VK_NULL_HANDLE;
+        VkSampler sampler = VK_NULL_HANDLE;
+        VkDescriptorSet imgui_ds = VK_NULL_HANDLE;
+        VkImage depth_image = VK_NULL_HANDLE;
+        VmaAllocation depth_allocation = nullptr;
+        VkImageView depth_view = VK_NULL_HANDLE;
+        VkFramebuffer framebuffer = VK_NULL_HANDLE;          // offscreen pass framebuffer (color+depth)
+        VkFramebuffer resolve_framebuffer = VK_NULL_HANDLE;  // resolve pass framebuffer (color only, for FXAA)
+        int width = 0, height = 0;
+    };
+    std::unordered_map<int, PIEViewportTarget> m_pie_viewports;
+    int m_next_pie_id = 0;
+    int m_active_scene_target = -1;
+
+    void createPIEViewportResources(PIEViewportTarget& target, int w, int h);
+    void destroyPIEViewportResources(PIEViewportTarget& target);
 };
