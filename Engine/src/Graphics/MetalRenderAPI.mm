@@ -2063,9 +2063,10 @@ void MetalRenderAPI::beginPreviewFrame(int width, int height)
     if (!impl->previewTexture) return;
 
     // End any current encoder
-    if (impl->renderEncoder) {
-        [impl->renderEncoder endEncoding];
-        impl->renderEncoder = nil;
+    if (impl->encoder) {
+        [impl->encoder endEncoding];
+        impl->encoder = nil;
+        impl->mainPassActive = false;
     }
 
     // Create preview render pass
@@ -2079,19 +2080,19 @@ void MetalRenderAPI::beginPreviewFrame(int width, int height)
     passDesc.depthAttachment.storeAction = MTLStoreActionDontCare;
     passDesc.depthAttachment.clearDepth = 1.0;
 
-    impl->renderEncoder = [impl->commandBuffer renderCommandEncoderWithDescriptor:passDesc];
-    if (!impl->renderEncoder) return;
-    impl->renderEncoder.label = @"Preview Render Encoder";
+    impl->encoder = [impl->commandBuffer renderCommandEncoderWithDescriptor:passDesc];
+    if (!impl->encoder) return;
+    impl->encoder.label = @"Preview Render Encoder";
 
     // Set viewport
     MTLViewport vp = { 0, 0, (double)width, (double)height, 0.0, 1.0 };
-    [impl->renderEncoder setViewport:vp];
+    [impl->encoder setViewport:vp];
 
     // Bind pipeline and buffers
-    [impl->renderEncoder setRenderPipelineState:impl->pipelineState];
-    [impl->renderEncoder setDepthStencilState:impl->depthStencilState];
-    [impl->renderEncoder setCullMode:MTLCullModeBack];
-    [impl->renderEncoder setFrontFacingWinding:MTLWindingCounterClockwise];
+    [impl->encoder setRenderPipelineState:impl->basicPipeline];
+    [impl->encoder setDepthStencilState:impl->depthLessEqual];
+    [impl->encoder setCullMode:MTLCullModeBack];
+    [impl->encoder setFrontFacingWinding:MTLWindingCounterClockwise];
 
     // Reset model matrix stack
     impl->modelMatrixStack = std::stack<glm::mat4>();
@@ -2100,9 +2101,10 @@ void MetalRenderAPI::beginPreviewFrame(int width, int height)
 
 void MetalRenderAPI::endPreviewFrame()
 {
-    if (impl->renderEncoder) {
-        [impl->renderEncoder endEncoding];
-        impl->renderEncoder = nil;
+    if (impl->encoder) {
+        [impl->encoder endEncoding];
+        impl->encoder = nil;
+        impl->mainPassActive = false;
     }
 }
 

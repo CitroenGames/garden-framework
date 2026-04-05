@@ -1943,8 +1943,11 @@ bool EditorApp::runProjectBrowser()
         ImGui::PopStyleColor();
 
         ImGui::Render();
-        render_api->renderUI();
-        m_app.swapBuffers();
+
+        // Project browser renders directly to screen (no viewport texture),
+        // so use endFrame() which commits the command buffer and presents.
+        // renderUI() is for editor mode only (renders to viewport texture).
+        render_api->endFrame();
     }
 
     // Restore window title for the editor
