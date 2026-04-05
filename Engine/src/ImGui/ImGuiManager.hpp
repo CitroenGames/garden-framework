@@ -42,6 +42,7 @@ public:
 
     // Fonts
     ImFont* getBoldFont() const { return m_boldFont; }
+    ImFont* getIconFont() const { return m_iconFont; }
 
 private:
     ImGuiManager() = default;
@@ -55,6 +56,7 @@ private:
 #endif
 #ifdef _WIN32
     bool initD3D11(SDL_Window* window, IRenderAPI* d3d11API);
+    bool initD3D12(SDL_Window* window, IRenderAPI* d3d12API);
 #endif
 
     void renderConsole();
@@ -80,4 +82,5 @@ private:
 
     // Fonts
     ImFont* m_boldFont = nullptr;
+    ImFont* m_iconFont = nullptr;
 };

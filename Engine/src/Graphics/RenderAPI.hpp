@@ -94,6 +94,7 @@ public:
     // Initialization and cleanup
     virtual bool initialize(WindowHandle window, int width, int height, float fov) = 0;
     virtual void shutdown() = 0;
+    virtual void waitForGPU() {}
     virtual void resize(int width, int height) = 0;
 
     // Frame management
@@ -205,6 +206,7 @@ enum class RenderAPIType
 {
     Vulkan,
     D3D11,
+    D3D12,
     Metal,
     Headless
 };

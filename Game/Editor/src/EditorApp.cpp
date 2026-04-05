@@ -1,4 +1,5 @@
 #include "EditorApp.hpp"
+#include "EditorIcons.hpp"
 #include "ImGui/ImGuiManager.hpp"
 #include "UI/RmlUiManager.h"
 #include "Console/Console.hpp"
@@ -580,6 +581,8 @@ void EditorApp::shutdown()
     if (m_editor_config)
         m_editor_config->save();
 
+    if (auto* api = m_app.getRenderAPI())
+        api->waitForGPU();
     m_world.registry.clear();
     Console::get().shutdown();
     RmlUiManager::get().shutdown();
@@ -1433,7 +1436,7 @@ void EditorApp::renderDockspace()
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
-    ImGui::PushStyleColor(ImGuiCol_MenuBarBg, ImVec4(0.11f, 0.10f, 0.09f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_MenuBarBg, ImVec4(0.10f, 0.10f, 0.10f, 1.0f));
 
     ImGui::Begin("##DockSpaceWindow", nullptr, dockspace_flags);
     ImGui::PopStyleVar(3);
@@ -1874,6 +1877,7 @@ void EditorApp::renderPackageDialog()
             switch (m_app.getAPIType())
             {
             case RenderAPIType::D3D11:  api_name = "Direct3D 11"; break;
+            case RenderAPIType::D3D12:  api_name = "Direct3D 12"; break;
             case RenderAPIType::Vulkan: api_name = "Vulkan"; break;
             case RenderAPIType::Metal:  api_name = "Metal"; break;
             default: break;

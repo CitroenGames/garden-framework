@@ -14,7 +14,9 @@ static volatile auto s_force_rml_family = &Rml::Family<int>::Id;
 #include "RmlRenderer_VK.h"
 #ifdef _WIN32
 #include "RmlRenderer_D3D11.h"
+#include "RmlRenderer_D3D12.h"
 #include "Graphics/D3D11RenderAPI.hpp"
+#include "Graphics/D3D12RenderAPI.hpp"
 #endif
 #ifdef __APPLE__
 #include "RmlRenderer_Metal.h"
@@ -51,6 +53,10 @@ bool RmlUiManager::initialize(SDL_Window* window, IRenderAPI* renderAPI, RenderA
     else if (apiType == RenderAPIType::D3D11)
     {
         success = initD3D11(window, renderAPI);
+    }
+    else if (apiType == RenderAPIType::D3D12)
+    {
+        success = initD3D12(window, renderAPI);
     }
 #endif
 #ifdef __APPLE__
@@ -121,6 +127,28 @@ bool RmlUiManager::initD3D11(SDL_Window* window, IRenderAPI* api)
         return false;
 
     auto* renderer = new RmlRenderer_D3D11();
+    if (!renderer->Init(d3dAPI))
+    {
+        delete renderer;
+        return false;
+    }
+
+    int w, h;
+    SDL_GetWindowSize(m_window, &w, &h);
+    renderer->SetViewport(w, h);
+
+    m_renderInterface = renderer;
+    return true;
+}
+
+bool RmlUiManager::initD3D12(SDL_Window* window, IRenderAPI* api)
+{
+    (void)window;
+    auto* d3dAPI = dynamic_cast<D3D12RenderAPI*>(api);
+    if (!d3dAPI)
+        return false;
+
+    auto* renderer = new RmlRenderer_D3D12();
     if (!renderer->Init(d3dAPI))
     {
         delete renderer;
@@ -205,6 +233,8 @@ void RmlUiManager::shutdown()
 #ifdef _WIN32
         else if (m_apiType == RenderAPIType::D3D11)
             static_cast<RmlRenderer_D3D11*>(m_renderInterface)->Shutdown();
+        else if (m_apiType == RenderAPIType::D3D12)
+            static_cast<RmlRenderer_D3D12*>(m_renderInterface)->Shutdown();
 #endif
 #ifdef __APPLE__
         else if (m_apiType == RenderAPIType::Metal)
@@ -242,6 +272,10 @@ void RmlUiManager::beginFrame()
     else if (m_apiType == RenderAPIType::D3D11)
     {
         static_cast<RmlRenderer_D3D11*>(m_renderInterface)->SetViewport(w, h);
+    }
+    else if (m_apiType == RenderAPIType::D3D12)
+    {
+        static_cast<RmlRenderer_D3D12*>(m_renderInterface)->SetViewport(w, h);
     }
 #endif
 #ifdef __APPLE__

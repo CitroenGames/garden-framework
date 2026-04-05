@@ -1,5 +1,6 @@
 #include "SceneHierarchyPanel.hpp"
 #include "Components/Components.hpp"
+#include "EditorIcons.hpp"
 #include "imgui.h"
 #include <algorithm>
 #include <string>
@@ -19,17 +20,19 @@ void SceneHierarchyPanel::draw(entt::registry& registry, bool* out_dirty, bool* 
 {
     ImGui::Begin("Scene Hierarchy");
 
-    // --- Search bar ---
+    // --- Search bar with icon ---
+    ImGui::TextDisabled(ICON_FA_SEARCH);
+    ImGui::SameLine();
     ImGui::SetNextItemWidth(-1.0f);
     ImGui::InputTextWithHint("##filter", "Search entities...", m_filter_buf, sizeof(m_filter_buf));
 
     // --- Add Entity button ---
-    if (ImGui::Button("+ Add Entity"))
+    if (ImGui::Button(ICON_FA_PLUS " Add Entity"))
         ImGui::OpenPopup("AddEntityPopup");
 
     if (ImGui::BeginPopup("AddEntityPopup"))
     {
-        if (ImGui::MenuItem("Empty Entity"))
+        if (ImGui::MenuItem(ICON_FA_CIRCLE "  Empty Entity"))
         {
             auto e = registry.create();
             registry.emplace<TagComponent>(e, "New Entity");
@@ -38,7 +41,7 @@ void SceneHierarchyPanel::draw(entt::registry& registry, bool* out_dirty, bool* 
             if (out_dirty) *out_dirty = true;
             if (out_unsaved) *out_unsaved = true;
         }
-        if (ImGui::MenuItem("Mesh Entity"))
+        if (ImGui::MenuItem(ICON_FA_CUBE "  Mesh Entity"))
         {
             auto e = registry.create();
             registry.emplace<TagComponent>(e, "New Mesh Entity");
@@ -48,7 +51,7 @@ void SceneHierarchyPanel::draw(entt::registry& registry, bool* out_dirty, bool* 
             if (out_dirty) *out_dirty = true;
             if (out_unsaved) *out_unsaved = true;
         }
-        if (ImGui::MenuItem("Physical Entity"))
+        if (ImGui::MenuItem(ICON_FA_BOX "  Physical Entity"))
         {
             auto e = registry.create();
             registry.emplace<TagComponent>(e, "New Physical Entity");
@@ -59,7 +62,7 @@ void SceneHierarchyPanel::draw(entt::registry& registry, bool* out_dirty, bool* 
             if (out_dirty) *out_dirty = true;
             if (out_unsaved) *out_unsaved = true;
         }
-        if (ImGui::MenuItem("Player"))
+        if (ImGui::MenuItem(ICON_FA_USER "  Player"))
         {
             auto e = registry.create();
             registry.emplace<TagComponent>(e, "New Player");
@@ -69,7 +72,7 @@ void SceneHierarchyPanel::draw(entt::registry& registry, bool* out_dirty, bool* 
             if (out_dirty) *out_dirty = true;
             if (out_unsaved) *out_unsaved = true;
         }
-        if (ImGui::MenuItem("Freecam"))
+        if (ImGui::MenuItem(ICON_FA_CAMERA "  Freecam"))
         {
             auto e = registry.create();
             registry.emplace<TagComponent>(e, "New Freecam");
@@ -80,7 +83,7 @@ void SceneHierarchyPanel::draw(entt::registry& registry, bool* out_dirty, bool* 
             if (out_unsaved) *out_unsaved = true;
         }
         ImGui::Separator();
-        if (ImGui::MenuItem("Point Light"))
+        if (ImGui::MenuItem(ICON_FA_LIGHTBULB "  Point Light"))
         {
             auto e = registry.create();
             registry.emplace<TagComponent>(e, "New Point Light");
@@ -90,7 +93,7 @@ void SceneHierarchyPanel::draw(entt::registry& registry, bool* out_dirty, bool* 
             if (out_dirty) *out_dirty = true;
             if (out_unsaved) *out_unsaved = true;
         }
-        if (ImGui::MenuItem("Spot Light"))
+        if (ImGui::MenuItem(ICON_FA_BOLT "  Spot Light"))
         {
             auto e = registry.create();
             registry.emplace<TagComponent>(e, "New Spot Light");
@@ -147,65 +150,42 @@ void SceneHierarchyPanel::draw(entt::registry& registry, bool* out_dirty, bool* 
         }
         visible_row++;
 
-        // Entity type icon — draw colored shape via ImDrawList (muted UE5 palette)
-        ImVec2 icon_pos = ImGui::GetCursorScreenPos();
-        float line_h = ImGui::GetTextLineHeight();
-        float radius = 5.0f;
-        ImVec2 center(icon_pos.x + radius + 1.0f, icon_pos.y + line_h * 0.5f);
+        // Entity type icon — Font Awesome icons with colored text
+        const char* icon = ICON_FA_CIRCLE;
+        ImVec4 icon_color(0.43f, 0.43f, 0.43f, 1.0f);
 
         if (registry.all_of<PlayerComponent>(entity))
         {
-            // Filled circle — soft blue
-            draw_list->AddCircleFilled(center, radius, IM_COL32(100, 140, 230, 255));
+            icon = ICON_FA_USER;
+            icon_color = ImVec4(0.39f, 0.55f, 0.90f, 1.0f);
         }
         else if (registry.all_of<FreecamComponent>(entity))
         {
-            // Filled triangle — soft green
-            draw_list->AddTriangleFilled(
-                ImVec2(center.x, center.y - radius),
-                ImVec2(center.x - radius, center.y + radius * 0.7f),
-                ImVec2(center.x + radius, center.y + radius * 0.7f),
-                IM_COL32(100, 200, 100, 255));
+            icon = ICON_FA_CAMERA;
+            icon_color = ImVec4(0.39f, 0.78f, 0.39f, 1.0f);
         }
         else if (registry.all_of<PointLightComponent>(entity))
         {
-            // Filled circle — warm yellow
-            draw_list->AddCircleFilled(center, radius, IM_COL32(255, 220, 60, 255));
+            icon = ICON_FA_LIGHTBULB;
+            icon_color = ImVec4(1.0f, 0.86f, 0.24f, 1.0f);
         }
         else if (registry.all_of<SpotLightComponent>(entity))
         {
-            // Filled triangle pointing down — warm yellow
-            draw_list->AddTriangleFilled(
-                ImVec2(center.x, center.y + radius),
-                ImVec2(center.x - radius, center.y - radius * 0.7f),
-                ImVec2(center.x + radius, center.y - radius * 0.7f),
-                IM_COL32(255, 200, 40, 255));
+            icon = ICON_FA_BOLT;
+            icon_color = ImVec4(1.0f, 0.78f, 0.16f, 1.0f);
         }
         else if (registry.all_of<RigidBodyComponent>(entity))
         {
-            // Filled square — soft orange
-            draw_list->AddRectFilled(
-                ImVec2(center.x - radius + 1, center.y - radius + 1),
-                ImVec2(center.x + radius - 1, center.y + radius - 1),
-                IM_COL32(230, 160, 70, 255));
+            icon = ICON_FA_BOX;
+            icon_color = ImVec4(0.90f, 0.63f, 0.27f, 1.0f);
         }
         else if (registry.all_of<MeshComponent>(entity))
         {
-            // Filled diamond — soft cyan
-            draw_list->AddQuadFilled(
-                ImVec2(center.x, center.y - radius),
-                ImVec2(center.x + radius, center.y),
-                ImVec2(center.x, center.y + radius),
-                ImVec2(center.x - radius, center.y),
-                IM_COL32(100, 200, 200, 255));
-        }
-        else
-        {
-            // Unfilled circle — slightly brighter grey
-            draw_list->AddCircle(center, radius, IM_COL32(110, 110, 110, 255), 0, 1.5f);
+            icon = ICON_FA_CUBE;
+            icon_color = ImVec4(0.39f, 0.78f, 0.78f, 1.0f);
         }
 
-        ImGui::Dummy(ImVec2(radius * 2.0f + 4.0f, line_h));
+        ImGui::TextColored(icon_color, "%s", icon);
         ImGui::SameLine();
 
         // Inline rename mode
@@ -216,7 +196,7 @@ void SceneHierarchyPanel::draw(entt::registry& registry, bool* out_dirty, bool* 
                 ImGui::SetKeyboardFocusHere();
                 m_rename_focus_set = true;
             }
-            ImGui::SetNextItemWidth(-1.0f);
+            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 24.0f);
             if (ImGui::InputText("##rename", m_rename_buf, sizeof(m_rename_buf),
                 ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll))
             {
@@ -237,7 +217,11 @@ void SceneHierarchyPanel::draw(entt::registry& registry, bool* out_dirty, bool* 
         }
         else
         {
-            if (ImGui::Selectable(tag.name.c_str(), is_selected))
+            // Reserve space for eye icon on the right
+            float eye_width = 24.0f;
+            float selectable_width = ImGui::GetContentRegionAvail().x - eye_width;
+
+            if (ImGui::Selectable(tag.name.c_str(), is_selected, 0, ImVec2(selectable_width, 0)))
             {
                 selected_entity = entity;
             }
@@ -250,15 +234,31 @@ void SceneHierarchyPanel::draw(entt::registry& registry, bool* out_dirty, bool* 
                 std::strncpy(m_rename_buf, tag.name.c_str(), sizeof(m_rename_buf) - 1);
                 m_rename_buf[sizeof(m_rename_buf) - 1] = '\0';
             }
+
+            // Visibility eye toggle (right-aligned)
+            ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - 18.0f);
+            bool is_hidden = m_hidden_entities.count(entity) > 0;
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.3f, 0.3f, 0.5f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.3f, 0.3f, 0.3f, 0.8f));
+            ImGui::PushStyleColor(ImGuiCol_Text, is_hidden ? ImVec4(0.3f, 0.3f, 0.3f, 1.0f) : ImVec4(0.6f, 0.6f, 0.6f, 1.0f));
+            if (ImGui::SmallButton(is_hidden ? ICON_FA_EYE_SLASH "##vis" : ICON_FA_EYE "##vis"))
+            {
+                if (is_hidden)
+                    m_hidden_entities.erase(entity);
+                else
+                    m_hidden_entities.insert(entity);
+            }
+            ImGui::PopStyleColor(4);
         }
 
         if (ImGui::BeginPopupContextItem("entity_ctx"))
         {
-            if (ImGui::MenuItem("Duplicate Entity"))
+            if (ImGui::MenuItem(ICON_FA_COPY "  Duplicate Entity"))
             {
                 to_duplicate = entity;
             }
-            if (ImGui::MenuItem("Rename"))
+            if (ImGui::MenuItem(ICON_FA_PENCIL "  Rename"))
             {
                 m_renaming_entity = entity;
                 m_rename_focus_set = false;
@@ -266,7 +266,7 @@ void SceneHierarchyPanel::draw(entt::registry& registry, bool* out_dirty, bool* 
                 m_rename_buf[sizeof(m_rename_buf) - 1] = '\0';
             }
             ImGui::Separator();
-            if (ImGui::MenuItem("Delete Entity"))
+            if (ImGui::MenuItem(ICON_FA_TRASH "  Delete Entity"))
             {
                 to_delete = entity;
             }
@@ -291,6 +291,7 @@ void SceneHierarchyPanel::draw(entt::registry& registry, bool* out_dirty, bool* 
     {
         if (selected_entity == to_delete)
             selected_entity = entt::null;
+        m_hidden_entities.erase(to_delete);
         registry.destroy(to_delete);
         if (out_dirty) *out_dirty = true;
         if (out_unsaved) *out_unsaved = true;

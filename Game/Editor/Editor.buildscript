@@ -10,6 +10,7 @@ if(macOS)
 if(Windows)
 {
 find_package(DirectX11 REQUIRED)
+find_package(DirectX12 REQUIRED)
 }
 
 [project:Editor]
@@ -23,9 +24,9 @@ sources = src/**/*.cpp
 headers = src/**/*.hpp
 if(Windows)
 {
-    includes = src, ${DirectX11_INCLUDE_DIRS}
-    libs = ${Vulkan_LIBRARIES}, ${DirectX11_LIBRARIES}
-    libdirs = ${Vulkan_LIBRARY_DIRS}, ${DirectX11_LIBRARY_DIRS}
+    includes = src, ${DirectX11_INCLUDE_DIRS}, ${DirectX12_INCLUDE_DIRS}
+    libs = ${Vulkan_LIBRARIES}, ${DirectX11_LIBRARIES}, ${DirectX12_LIBRARIES}
+    libdirs = ${Vulkan_LIBRARY_DIRS}, ${DirectX11_LIBRARY_DIRS}, ${DirectX12_LIBRARY_DIRS}
 }
 if(Linux)
 {

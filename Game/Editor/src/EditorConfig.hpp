@@ -80,6 +80,7 @@ public:
         std::vector<RenderAPIType> list;
 #ifdef _WIN32
         list.push_back(RenderAPIType::D3D11);
+        list.push_back(RenderAPIType::D3D12);
         list.push_back(RenderAPIType::Vulkan);
 #elif defined(__APPLE__)
         list.push_back(RenderAPIType::Metal);
@@ -95,6 +96,7 @@ public:
         {
         case RenderAPIType::Vulkan:   return "vulkan";
         case RenderAPIType::D3D11:    return "d3d11";
+        case RenderAPIType::D3D12:    return "d3d12";
         case RenderAPIType::Metal:    return "metal";
         case RenderAPIType::Headless: return "headless";
         }
@@ -107,6 +109,7 @@ public:
         {
         case RenderAPIType::Vulkan:   return "Vulkan";
         case RenderAPIType::D3D11:    return "Direct3D 11";
+        case RenderAPIType::D3D12:    return "Direct3D 12";
         case RenderAPIType::Metal:    return "Metal";
         case RenderAPIType::Headless: return "Headless";
         }
@@ -122,6 +125,8 @@ private:
         if (lower == "vulkan")   return RenderAPIType::Vulkan;
         if (lower == "d3d11" || lower == "dx11" || lower == "direct3d11")
             return RenderAPIType::D3D11;
+        if (lower == "d3d12" || lower == "dx12" || lower == "direct3d12")
+            return RenderAPIType::D3D12;
         if (lower == "metal")    return RenderAPIType::Metal;
         if (lower == "headless") return RenderAPIType::Headless;
 

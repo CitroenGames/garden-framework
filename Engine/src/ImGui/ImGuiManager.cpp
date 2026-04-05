@@ -12,7 +12,9 @@ extern "C" void ImGuiMetal_NewFrame(void* renderPassDescriptor);
 #endif
 #ifdef _WIN32
 #include "imgui_impl_dx11.h"
+#include "imgui_impl_dx12.h"
 #include "Graphics/D3D11RenderAPI.hpp"
+#include "Graphics/D3D12RenderAPI.hpp"
 #endif
 #include "Graphics/VulkanRenderAPI.hpp"
 #include "Console/Console.hpp"
@@ -62,58 +64,58 @@ static void ApplyEditorTheme()
     style.TabBarOverlineSize    = 1.5f;
     style.DockingSeparatorSize  = 1.0f;
 
-    // Colors — UE5 warm-grey palette (R >= G > B)
+    // Colors — UE5 neutral-grey palette with blue accents
     ImVec4* c = style.Colors;
 
     // Text
     c[ImGuiCol_Text]                  = ImVec4(0.88f, 0.88f, 0.88f, 1.00f);
     c[ImGuiCol_TextDisabled]          = ImVec4(0.50f, 0.50f, 0.50f, 1.00f);
 
-    // Backgrounds — warm grey tones
-    c[ImGuiCol_WindowBg]              = ImVec4(0.14f, 0.13f, 0.12f, 1.00f);
-    c[ImGuiCol_ChildBg]               = ImVec4(0.14f, 0.13f, 0.12f, 1.00f);
-    c[ImGuiCol_PopupBg]               = ImVec4(0.16f, 0.15f, 0.14f, 0.96f);
+    // Backgrounds — neutral dark grey
+    c[ImGuiCol_WindowBg]              = ImVec4(0.12f, 0.12f, 0.12f, 1.00f);
+    c[ImGuiCol_ChildBg]               = ImVec4(0.12f, 0.12f, 0.12f, 1.00f);
+    c[ImGuiCol_PopupBg]               = ImVec4(0.15f, 0.15f, 0.15f, 0.96f);
 
-    // Borders — nearly invisible, warm
-    c[ImGuiCol_Border]                = ImVec4(0.18f, 0.17f, 0.15f, 0.40f);
+    // Borders — subtle neutral
+    c[ImGuiCol_Border]                = ImVec4(0.17f, 0.17f, 0.17f, 0.40f);
     c[ImGuiCol_BorderShadow]          = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
 
-    // Frames — darker warm inset
-    c[ImGuiCol_FrameBg]               = ImVec4(0.09f, 0.08f, 0.07f, 1.00f);
-    c[ImGuiCol_FrameBgHovered]        = ImVec4(0.17f, 0.16f, 0.15f, 1.00f);
-    c[ImGuiCol_FrameBgActive]         = ImVec4(0.22f, 0.20f, 0.18f, 1.00f);
+    // Frames — darker neutral inset
+    c[ImGuiCol_FrameBg]               = ImVec4(0.07f, 0.07f, 0.07f, 1.00f);
+    c[ImGuiCol_FrameBgHovered]        = ImVec4(0.16f, 0.16f, 0.16f, 1.00f);
+    c[ImGuiCol_FrameBgActive]         = ImVec4(0.20f, 0.20f, 0.20f, 1.00f);
 
-    // Title bar — warm dark
-    c[ImGuiCol_TitleBg]               = ImVec4(0.09f, 0.08f, 0.07f, 1.00f);
-    c[ImGuiCol_TitleBgActive]         = ImVec4(0.09f, 0.08f, 0.07f, 1.00f);
-    c[ImGuiCol_TitleBgCollapsed]      = ImVec4(0.09f, 0.08f, 0.07f, 0.75f);
+    // Title bar — dark
+    c[ImGuiCol_TitleBg]               = ImVec4(0.08f, 0.08f, 0.08f, 1.00f);
+    c[ImGuiCol_TitleBgActive]         = ImVec4(0.08f, 0.08f, 0.08f, 1.00f);
+    c[ImGuiCol_TitleBgCollapsed]      = ImVec4(0.08f, 0.08f, 0.08f, 0.75f);
 
     // Menu bar
-    c[ImGuiCol_MenuBarBg]             = ImVec4(0.11f, 0.10f, 0.09f, 1.00f);
+    c[ImGuiCol_MenuBarBg]             = ImVec4(0.10f, 0.10f, 0.10f, 1.00f);
 
     // Scrollbar — thin and unobtrusive
-    c[ImGuiCol_ScrollbarBg]           = ImVec4(0.06f, 0.05f, 0.05f, 0.60f);
-    c[ImGuiCol_ScrollbarGrab]         = ImVec4(0.30f, 0.28f, 0.26f, 1.00f);
-    c[ImGuiCol_ScrollbarGrabHovered]  = ImVec4(0.38f, 0.36f, 0.34f, 1.00f);
-    c[ImGuiCol_ScrollbarGrabActive]   = ImVec4(0.46f, 0.44f, 0.42f, 1.00f);
+    c[ImGuiCol_ScrollbarBg]           = ImVec4(0.05f, 0.05f, 0.05f, 0.60f);
+    c[ImGuiCol_ScrollbarGrab]         = ImVec4(0.28f, 0.28f, 0.28f, 1.00f);
+    c[ImGuiCol_ScrollbarGrabHovered]  = ImVec4(0.36f, 0.36f, 0.36f, 1.00f);
+    c[ImGuiCol_ScrollbarGrabActive]   = ImVec4(0.44f, 0.44f, 0.44f, 1.00f);
 
     // Checkmark, slider grab — bright UE5 blue accent
     c[ImGuiCol_CheckMark]             = ImVec4(0.26f, 0.59f, 0.98f, 1.00f);
     c[ImGuiCol_SliderGrab]            = ImVec4(0.26f, 0.59f, 0.98f, 1.00f);
     c[ImGuiCol_SliderGrabActive]      = ImVec4(0.40f, 0.68f, 1.00f, 1.00f);
 
-    // Buttons — warm tinted
-    c[ImGuiCol_Button]                = ImVec4(0.20f, 0.19f, 0.17f, 1.00f);
-    c[ImGuiCol_ButtonHovered]         = ImVec4(0.28f, 0.26f, 0.24f, 1.00f);
+    // Buttons — neutral grey
+    c[ImGuiCol_Button]                = ImVec4(0.19f, 0.19f, 0.19f, 1.00f);
+    c[ImGuiCol_ButtonHovered]         = ImVec4(0.26f, 0.26f, 0.26f, 1.00f);
     c[ImGuiCol_ButtonActive]          = ImVec4(0.22f, 0.42f, 0.70f, 1.00f);
 
-    // Headers — warm grey default, blue on active
-    c[ImGuiCol_Header]                = ImVec4(0.20f, 0.19f, 0.17f, 1.00f);
-    c[ImGuiCol_HeaderHovered]         = ImVec4(0.28f, 0.26f, 0.24f, 1.00f);
+    // Headers — neutral grey, blue on active
+    c[ImGuiCol_Header]                = ImVec4(0.19f, 0.19f, 0.19f, 1.00f);
+    c[ImGuiCol_HeaderHovered]         = ImVec4(0.26f, 0.26f, 0.26f, 1.00f);
     c[ImGuiCol_HeaderActive]          = ImVec4(0.22f, 0.42f, 0.70f, 1.00f);
 
-    // Separator — warm
-    c[ImGuiCol_Separator]             = ImVec4(0.20f, 0.19f, 0.17f, 1.00f);
+    // Separator — neutral
+    c[ImGuiCol_Separator]             = ImVec4(0.19f, 0.19f, 0.19f, 1.00f);
     c[ImGuiCol_SeparatorHovered]      = ImVec4(0.26f, 0.59f, 0.98f, 0.78f);
     c[ImGuiCol_SeparatorActive]       = ImVec4(0.26f, 0.59f, 0.98f, 1.00f);
 
@@ -122,23 +124,23 @@ static void ApplyEditorTheme()
     c[ImGuiCol_ResizeGripHovered]     = ImVec4(0.26f, 0.59f, 0.98f, 0.67f);
     c[ImGuiCol_ResizeGripActive]      = ImVec4(0.26f, 0.59f, 0.98f, 0.95f);
 
-    // Tabs — selected merges seamlessly with panel body (must match WindowBg)
-    c[ImGuiCol_Tab]                   = ImVec4(0.09f, 0.08f, 0.07f, 1.00f);
-    c[ImGuiCol_TabHovered]            = ImVec4(0.18f, 0.17f, 0.15f, 1.00f);
-    c[ImGuiCol_TabSelected]           = ImVec4(0.14f, 0.13f, 0.12f, 1.00f);
-    c[ImGuiCol_TabSelectedOverline]   = ImVec4(0.42f, 0.62f, 0.85f, 1.00f);
-    c[ImGuiCol_TabDimmed]             = ImVec4(0.08f, 0.07f, 0.07f, 1.00f);
-    c[ImGuiCol_TabDimmedSelected]     = ImVec4(0.12f, 0.11f, 0.10f, 1.00f);
-    c[ImGuiCol_TabDimmedSelectedOverline] = ImVec4(0.30f, 0.45f, 0.65f, 1.00f);
+    // Tabs — selected merges seamlessly with panel body (match WindowBg)
+    c[ImGuiCol_Tab]                   = ImVec4(0.08f, 0.08f, 0.08f, 1.00f);
+    c[ImGuiCol_TabHovered]            = ImVec4(0.17f, 0.17f, 0.17f, 1.00f);
+    c[ImGuiCol_TabSelected]           = ImVec4(0.12f, 0.12f, 0.12f, 1.00f);
+    c[ImGuiCol_TabSelectedOverline]   = ImVec4(0.10f, 0.46f, 0.82f, 1.00f);
+    c[ImGuiCol_TabDimmed]             = ImVec4(0.07f, 0.07f, 0.07f, 1.00f);
+    c[ImGuiCol_TabDimmedSelected]     = ImVec4(0.11f, 0.11f, 0.11f, 1.00f);
+    c[ImGuiCol_TabDimmedSelectedOverline] = ImVec4(0.10f, 0.36f, 0.65f, 1.00f);
 
     // Docking
     c[ImGuiCol_DockingPreview]        = ImVec4(0.26f, 0.59f, 0.98f, 0.70f);
-    c[ImGuiCol_DockingEmptyBg]        = ImVec4(0.07f, 0.06f, 0.06f, 1.00f);
+    c[ImGuiCol_DockingEmptyBg]        = ImVec4(0.06f, 0.06f, 0.06f, 1.00f);
 
     // Tables
-    c[ImGuiCol_TableHeaderBg]         = ImVec4(0.14f, 0.13f, 0.12f, 1.00f);
-    c[ImGuiCol_TableBorderStrong]     = ImVec4(0.22f, 0.21f, 0.19f, 1.00f);
-    c[ImGuiCol_TableBorderLight]      = ImVec4(0.18f, 0.17f, 0.16f, 1.00f);
+    c[ImGuiCol_TableHeaderBg]         = ImVec4(0.12f, 0.12f, 0.12f, 1.00f);
+    c[ImGuiCol_TableBorderStrong]     = ImVec4(0.20f, 0.20f, 0.20f, 1.00f);
+    c[ImGuiCol_TableBorderLight]      = ImVec4(0.17f, 0.17f, 0.17f, 1.00f);
     c[ImGuiCol_TableRowBg]            = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
     c[ImGuiCol_TableRowBgAlt]         = ImVec4(1.00f, 1.00f, 1.00f, 0.03f);
 
@@ -171,18 +173,43 @@ bool ImGuiManager::initialize(SDL_Window* window, IRenderAPI* renderAPI, RenderA
     // Setup style
     ApplyEditorTheme();
 
-    // Load sans-serif font for UE5-like appearance
+    // Load sans-serif font for UE5-like appearance + merge Font Awesome icons
     {
         std::string fontPath = EnginePaths::resolveEngineAsset("../assets/fonts/LatoLatin-Regular.ttf");
+        std::string iconFontPath = EnginePaths::resolveEngineAsset("../assets/fonts/fa-solid-900.ttf");
+        static const ImWchar icons_ranges[] = { 0xF000, 0xF900, 0 };
+
+        // Regular font
         ImFont* font = io.Fonts->AddFontFromFileTTF(fontPath.c_str(), 15.0f);
         if (!font)
             io.Fonts->AddFontDefault();
 
-        // Load bold font for section headers
+        // Merge FA icons into regular font
+        {
+            ImFontConfig icons_config;
+            icons_config.MergeMode = true;
+            icons_config.PixelSnapH = true;
+            icons_config.GlyphMinAdvanceX = 15.0f;
+            io.Fonts->AddFontFromFileTTF(iconFontPath.c_str(), 14.0f, &icons_config, icons_ranges);
+        }
+
+        // Bold font for section headers
         std::string boldFontPath = EnginePaths::resolveEngineAsset("../assets/fonts/LatoLatin-Bold.ttf");
         m_boldFont = io.Fonts->AddFontFromFileTTF(boldFontPath.c_str(), 15.0f);
         if (!m_boldFont)
             m_boldFont = io.Fonts->Fonts[0];
+
+        // Merge FA icons into bold font
+        {
+            ImFontConfig icons_config;
+            icons_config.MergeMode = true;
+            icons_config.PixelSnapH = true;
+            icons_config.GlyphMinAdvanceX = 15.0f;
+            io.Fonts->AddFontFromFileTTF(iconFontPath.c_str(), 14.0f, &icons_config, icons_ranges);
+        }
+
+        // Larger standalone icon font for toolbar buttons and content browser grid
+        m_iconFont = io.Fonts->AddFontFromFileTTF(iconFontPath.c_str(), 20.0f, nullptr, icons_ranges);
     }
 
     // Initialize platform and renderer backends
@@ -201,6 +228,10 @@ bool ImGuiManager::initialize(SDL_Window* window, IRenderAPI* renderAPI, RenderA
     else if (apiType == RenderAPIType::D3D11)
     {
         success = initD3D11(window, renderAPI);
+    }
+    else if (apiType == RenderAPIType::D3D12)
+    {
+        success = initD3D12(window, renderAPI);
     }
 #endif
 
@@ -317,6 +348,56 @@ bool ImGuiManager::initD3D11(SDL_Window* window, IRenderAPI* d3d11API)
 
     return true;
 }
+
+bool ImGuiManager::initD3D12(SDL_Window* window, IRenderAPI* d3d12API)
+{
+    if (!ImGui_ImplSDL2_InitForD3D(window))
+    {
+        return false;
+    }
+
+    D3D12RenderAPI* dxAPI = dynamic_cast<D3D12RenderAPI*>(d3d12API);
+    if (!dxAPI)
+    {
+        ImGui_ImplSDL2_Shutdown();
+        return false;
+    }
+
+    ImGui_ImplDX12_InitInfo init_info = {};
+    init_info.Device = dxAPI->getDevice();
+    init_info.CommandQueue = dxAPI->getCommandQueue();
+    init_info.NumFramesInFlight = D3D12RenderAPI::NUM_FRAMES_IN_FLIGHT;
+    init_info.RTVFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+    init_info.DSVFormat = DXGI_FORMAT_UNKNOWN;
+    init_info.SrvDescriptorHeap = dxAPI->getSrvDescriptorHeap();
+
+    // Use ImGui's descriptor allocation callbacks via the engine's allocator
+    init_info.SrvDescriptorAllocFn = [](ImGui_ImplDX12_InitInfo* info, D3D12_CPU_DESCRIPTOR_HANDLE* out_cpu, D3D12_GPU_DESCRIPTOR_HANDLE* out_gpu)
+    {
+        D3D12RenderAPI* api = static_cast<D3D12RenderAPI*>(info->UserData);
+        auto& alloc = api->getSrvAllocator();
+        UINT idx = alloc.allocate();
+        *out_cpu = alloc.getCPU(idx);
+        *out_gpu = alloc.getGPU(idx);
+    };
+    init_info.SrvDescriptorFreeFn = [](ImGui_ImplDX12_InitInfo* info, D3D12_CPU_DESCRIPTOR_HANDLE cpu, D3D12_GPU_DESCRIPTOR_HANDLE gpu)
+    {
+        D3D12RenderAPI* api = static_cast<D3D12RenderAPI*>(info->UserData);
+        auto& alloc = api->getSrvAllocator();
+        // Calculate index from CPU handle
+        UINT idx = static_cast<UINT>((cpu.ptr - alloc.getCPU(0).ptr) / alloc.descriptorSize);
+        alloc.free(idx);
+    };
+    init_info.UserData = dxAPI;
+
+    if (!ImGui_ImplDX12_Init(&init_info))
+    {
+        ImGui_ImplSDL2_Shutdown();
+        return false;
+    }
+
+    return true;
+}
 #endif
 
 void ImGuiManager::shutdown()
@@ -337,6 +418,10 @@ void ImGuiManager::shutdown()
     else if (m_apiType == RenderAPIType::D3D11)
     {
         ImGui_ImplDX11_Shutdown();
+    }
+    else if (m_apiType == RenderAPIType::D3D12)
+    {
+        ImGui_ImplDX12_Shutdown();
     }
 #endif
 
@@ -365,6 +450,10 @@ void ImGuiManager::newFrame()
     else if (m_apiType == RenderAPIType::D3D11)
     {
         ImGui_ImplDX11_NewFrame();
+    }
+    else if (m_apiType == RenderAPIType::D3D12)
+    {
+        ImGui_ImplDX12_NewFrame();
     }
 #endif
 

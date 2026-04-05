@@ -19,6 +19,9 @@ static std::optional<RenderAPIType> parseRenderAPICLI(int argc, char* argv[])
         if (strcmp(argv[i], "-d3d11") == 0 || strcmp(argv[i], "--d3d11") == 0 ||
             strcmp(argv[i], "-dx11")  == 0 || strcmp(argv[i], "--dx11")  == 0)
             return RenderAPIType::D3D11;
+        if (strcmp(argv[i], "-d3d12") == 0 || strcmp(argv[i], "--d3d12") == 0 ||
+            strcmp(argv[i], "-dx12")  == 0 || strcmp(argv[i], "--dx12")  == 0)
+            return RenderAPIType::D3D12;
 #endif
 #ifdef __APPLE__
         if (strcmp(argv[i], "-metal") == 0 || strcmp(argv[i], "--metal") == 0)

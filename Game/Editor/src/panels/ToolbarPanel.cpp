@@ -1,6 +1,7 @@
 #include "ToolbarPanel.hpp"
 #include "EditorState.hpp"
 #include "NetworkPIESettings.hpp"
+#include "EditorIcons.hpp"
 #include "imgui.h"
 #include "imgui_internal.h"
 
@@ -18,7 +19,7 @@ void ToolbarPanel::drawContent(EditorState& state)
     bool editing = !state.isSimulationActive();
     ImDrawList* draw_list = ImGui::GetWindowDrawList();
 
-    auto modeButton = [&](const char* label, const char* tooltip, EditorState::TransformMode mode)
+    auto modeButton = [&](const char* icon, const char* tooltip, EditorState::TransformMode mode)
     {
         bool active = (state.transform_mode == mode);
         if (active)
@@ -31,7 +32,7 @@ void ToolbarPanel::drawContent(EditorState& state)
         if (!editing)
             ImGui::BeginDisabled();
 
-        if (ImGui::Button(label, ImVec2(28, 28)))
+        if (ImGui::Button(icon, ImVec2(32, 32)))
             state.transform_mode = mode;
 
         // Tooltip
@@ -56,11 +57,11 @@ void ToolbarPanel::drawContent(EditorState& state)
             ImGui::PopStyleColor(3);
     };
 
-    modeButton("W", "Translate (W)", EditorState::TransformMode::Translate);
+    modeButton(ICON_FA_UP_DOWN_LEFT_RIGHT, "Translate (W)", EditorState::TransformMode::Translate);
     ImGui::SameLine();
-    modeButton("E", "Rotate (E)", EditorState::TransformMode::Rotate);
+    modeButton(ICON_FA_ROTATE, "Rotate (E)", EditorState::TransformMode::Rotate);
     ImGui::SameLine();
-    modeButton("R", "Scale (R)", EditorState::TransformMode::Scale);
+    modeButton(ICON_FA_EXPAND, "Scale (R)", EditorState::TransformMode::Scale);
 
     // Custom vertical separator
     ImGui::SameLine();
@@ -68,7 +69,7 @@ void ToolbarPanel::drawContent(EditorState& state)
         ImVec2 p = ImGui::GetCursorScreenPos();
         float h = ImGui::GetFrameHeight();
         draw_list->AddLine(ImVec2(p.x + 4, p.y + 2), ImVec2(p.x + 4, p.y + h - 2),
-                           IM_COL32(45, 42, 38, 200), 1.0f);
+                           IM_COL32(42, 42, 42, 200), 1.0f);
         ImGui::Dummy(ImVec2(10, h));
     }
     ImGui::SameLine();
@@ -77,7 +78,7 @@ void ToolbarPanel::drawContent(EditorState& state)
     if (!editing)
         ImGui::BeginDisabled();
 
-    ImGui::Checkbox("Snap", &state.snap_enabled);
+    ImGui::Checkbox(ICON_FA_MAGNET " Snap", &state.snap_enabled);
     if (state.snap_enabled)
     {
         ImGui::SameLine();
@@ -105,7 +106,7 @@ void ToolbarPanel::drawContent(EditorState& state)
         ImVec2 p = ImGui::GetCursorScreenPos();
         float h = ImGui::GetFrameHeight();
         draw_list->AddLine(ImVec2(p.x + 4, p.y + 2), ImVec2(p.x + 4, p.y + h - 2),
-                           IM_COL32(45, 42, 38, 200), 1.0f);
+                           IM_COL32(42, 42, 42, 200), 1.0f);
         ImGui::Dummy(ImVec2(10, h));
     }
     ImGui::SameLine();
@@ -116,15 +117,16 @@ void ToolbarPanel::drawContent(EditorState& state)
 
     {
         bool is_local = (state.gizmo_space == EditorState::GizmoSpace::Local);
-        const char* label = is_local ? "Local" : "World";
-        if (ImGui::Button(label, ImVec2(50, 28)))
+        const char* icon = is_local ? ICON_FA_CROSSHAIRS : ICON_FA_GLOBE;
+        const char* tooltip = is_local ? "Local Space (click to switch to World)" : "World Space (click to switch to Local)";
+        if (ImGui::Button(icon, ImVec2(32, 32)))
         {
             state.gizmo_space = is_local
                 ? EditorState::GizmoSpace::World
                 : EditorState::GizmoSpace::Local;
         }
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
-            ImGui::SetTooltip("Toggle Local/World transform space");
+            ImGui::SetTooltip("%s", tooltip);
     }
 
     if (!editing)
@@ -136,7 +138,7 @@ void ToolbarPanel::drawContent(EditorState& state)
         ImVec2 p = ImGui::GetCursorScreenPos();
         float h = ImGui::GetFrameHeight();
         draw_list->AddLine(ImVec2(p.x + 4, p.y + 2), ImVec2(p.x + 4, p.y + h - 2),
-                           IM_COL32(45, 42, 38, 200), 1.0f);
+                           IM_COL32(42, 42, 42, 200), 1.0f);
         ImGui::Dummy(ImVec2(10, h));
     }
     ImGui::SameLine();
@@ -145,43 +147,43 @@ void ToolbarPanel::drawContent(EditorState& state)
     {
         ImGuiStyle& s = ImGui::GetStyle();
         float play_group_width = 0.0f;
+        float btn_h = 32.0f;
         switch (state.play_mode)
         {
         case PlayMode::Editing:
         {
-            // Account for dynamic play label + dropdown arrow
-            float arrow_w = ImGui::GetFrameHeight(); // ArrowButton is square
+            float arrow_w = ImGui::GetFrameHeight();
             if (state.network_pie.net_mode != PIENetMode::Standalone && state.network_pie.num_players > 1)
             {
                 char buf[64];
                 const char* ms = (state.network_pie.net_mode == PIENetMode::ListenServer) ? "Listen" : "Dedicated";
-                snprintf(buf, sizeof(buf), "Play (%dP %s)", state.network_pie.num_players, ms);
+                snprintf(buf, sizeof(buf), ICON_FA_PLAY " %dP %s", state.network_pie.num_players, ms);
                 play_group_width = ImGui::CalcTextSize(buf).x + s.FramePadding.x * 2.0f + arrow_w;
             }
             else if (state.network_pie.net_mode != PIENetMode::Standalone)
             {
                 char buf[64];
                 const char* ms = (state.network_pie.net_mode == PIENetMode::ListenServer) ? "Listen" : "Dedicated";
-                snprintf(buf, sizeof(buf), "Play (%s)", ms);
+                snprintf(buf, sizeof(buf), ICON_FA_PLAY " %s", ms);
                 play_group_width = ImGui::CalcTextSize(buf).x + s.FramePadding.x * 2.0f + arrow_w;
             }
             else
             {
-                play_group_width = ImGui::CalcTextSize("Play").x + s.FramePadding.x * 2.0f + arrow_w;
+                play_group_width = ImGui::CalcTextSize(ICON_FA_PLAY).x + s.FramePadding.x * 2.0f + arrow_w;
             }
             break;
         }
         case PlayMode::Playing:
-            play_group_width = ImGui::CalcTextSize("Pause").x + ImGui::CalcTextSize("Stop").x
-                             + ImGui::CalcTextSize("Eject (F8)").x
+            play_group_width = ImGui::CalcTextSize(ICON_FA_PAUSE).x + ImGui::CalcTextSize(ICON_FA_STOP).x
+                             + ImGui::CalcTextSize(ICON_FA_EJECT " F8").x
                              + s.FramePadding.x * 6.0f + s.ItemSpacing.x * 2.0f;
             break;
         case PlayMode::Paused:
-            play_group_width = ImGui::CalcTextSize("Resume").x + ImGui::CalcTextSize("Stop").x
+            play_group_width = ImGui::CalcTextSize(ICON_FA_PLAY).x + ImGui::CalcTextSize(ICON_FA_STOP).x
                              + s.FramePadding.x * 4.0f + s.ItemSpacing.x;
             break;
         case PlayMode::Ejected:
-            play_group_width = ImGui::CalcTextSize("Return (F8)").x + ImGui::CalcTextSize("Stop").x
+            play_group_width = ImGui::CalcTextSize(ICON_FA_ARROW_ROTATE_LEFT " F8").x + ImGui::CalcTextSize(ICON_FA_STOP).x
                              + s.FramePadding.x * 4.0f + s.ItemSpacing.x;
             break;
         }
@@ -197,24 +199,25 @@ void ToolbarPanel::drawContent(EditorState& state)
     case PlayMode::Editing:
     {
         // Build play button label based on network PIE settings
-        const char* play_label = "Play";
-        char play_buf[64] = "Play";
+        const char* play_label = ICON_FA_PLAY;
+        char play_buf[64];
+        snprintf(play_buf, sizeof(play_buf), "%s", ICON_FA_PLAY);
         if (state.network_pie.net_mode != PIENetMode::Standalone && state.network_pie.num_players > 1)
         {
             const char* mode_short = (state.network_pie.net_mode == PIENetMode::ListenServer)
                                      ? "Listen" : "Dedicated";
-            snprintf(play_buf, sizeof(play_buf), "Play (%dP %s)", state.network_pie.num_players, mode_short);
+            snprintf(play_buf, sizeof(play_buf), ICON_FA_PLAY " %dP %s", state.network_pie.num_players, mode_short);
             play_label = play_buf;
         }
         else if (state.network_pie.net_mode != PIENetMode::Standalone)
         {
             const char* mode_short = (state.network_pie.net_mode == PIENetMode::ListenServer)
                                      ? "Listen" : "Dedicated";
-            snprintf(play_buf, sizeof(play_buf), "Play (%s)", mode_short);
+            snprintf(play_buf, sizeof(play_buf), ICON_FA_PLAY " %s", mode_short);
             play_label = play_buf;
         }
 
-        // Green "Play" button
+        // Green Play button
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.1f, 0.6f, 0.1f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.2f, 0.7f, 0.2f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.0f, 0.5f, 0.0f, 1.0f));
@@ -233,7 +236,7 @@ void ToolbarPanel::drawContent(EditorState& state)
 
         if (ImGui::BeginPopup("PIENetSettings"))
         {
-            ImGui::Text("Multiplayer Settings");
+            ImGui::Text(ICON_FA_GLOBE " Multiplayer Settings");
             ImGui::Separator();
 
             // Net Mode combo
@@ -273,7 +276,7 @@ void ToolbarPanel::drawContent(EditorState& state)
             {
                 ImGui::Spacing();
                 ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.2f, 1.0f),
-                    "No game module loaded.\nNetwork modes require a game DLL.");
+                    ICON_FA_TRIANGLE_EXCLAMATION " No game module loaded.\nNetwork modes require a game DLL.");
             }
 
             ImGui::EndPopup();
@@ -283,74 +286,81 @@ void ToolbarPanel::drawContent(EditorState& state)
     }
     case PlayMode::Playing:
     {
-        // Yellow "Pause" button
+        // Yellow Pause button
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.7f, 0.0f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.9f, 0.8f, 0.1f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.7f, 0.6f, 0.0f, 1.0f));
-        if (ImGui::Button("Pause"))
+        if (ImGui::Button(ICON_FA_PAUSE))
             if (callbacks.on_pause) callbacks.on_pause();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("Pause");
         ImGui::PopStyleColor(3);
 
         ImGui::SameLine();
 
-        // Red "Stop" button
+        // Red Stop button
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.1f, 0.1f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.8f, 0.2f, 0.2f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.6f, 0.0f, 0.0f, 1.0f));
-        if (ImGui::Button("Stop"))
+        if (ImGui::Button(ICON_FA_STOP))
             if (callbacks.on_stop) callbacks.on_stop();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("Stop");
         ImGui::PopStyleColor(3);
 
         ImGui::SameLine();
 
-        // Blue "Eject" button
+        // Blue Eject button
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.5f, 0.9f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.6f, 1.0f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.1f, 0.4f, 0.8f, 1.0f));
-        if (ImGui::Button("Eject (F8)"))
+        if (ImGui::Button(ICON_FA_EJECT " F8"))
             if (callbacks.on_eject) callbacks.on_eject();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("Eject from player (F8)");
         ImGui::PopStyleColor(3);
         break;
     }
     case PlayMode::Paused:
     {
-        // Green "Resume" button
+        // Green Resume button
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.1f, 0.6f, 0.1f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.2f, 0.7f, 0.2f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.0f, 0.5f, 0.0f, 1.0f));
-        if (ImGui::Button("Resume"))
+        if (ImGui::Button(ICON_FA_PLAY))
             if (callbacks.on_resume) callbacks.on_resume();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("Resume");
         ImGui::PopStyleColor(3);
 
         ImGui::SameLine();
 
-        // Red "Stop" button
+        // Red Stop button
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.1f, 0.1f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.8f, 0.2f, 0.2f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.6f, 0.0f, 0.0f, 1.0f));
-        if (ImGui::Button("Stop"))
+        if (ImGui::Button(ICON_FA_STOP "##stop_paused"))
             if (callbacks.on_stop) callbacks.on_stop();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("Stop");
         ImGui::PopStyleColor(3);
         break;
     }
     case PlayMode::Ejected:
     {
-        // Blue "Return" button
+        // Blue Return button
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.5f, 0.9f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.6f, 1.0f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.1f, 0.4f, 0.8f, 1.0f));
-        if (ImGui::Button("Return (F8)"))
+        if (ImGui::Button(ICON_FA_ARROW_ROTATE_LEFT " F8"))
             if (callbacks.on_return) callbacks.on_return();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("Return to player (F8)");
         ImGui::PopStyleColor(3);
 
         ImGui::SameLine();
 
-        // Red "Stop" button
+        // Red Stop button
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.1f, 0.1f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.8f, 0.2f, 0.2f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.6f, 0.0f, 0.0f, 1.0f));
-        if (ImGui::Button("Stop"))
+        if (ImGui::Button(ICON_FA_STOP "##stop_ejected"))
             if (callbacks.on_stop) callbacks.on_stop();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("Stop");
         ImGui::PopStyleColor(3);
         break;
     }
@@ -362,11 +372,11 @@ void ToolbarPanel::drawContent(EditorState& state)
         ImVec2 p = ImGui::GetCursorScreenPos();
         float h = ImGui::GetFrameHeight();
         draw_list->AddLine(ImVec2(p.x + 4, p.y + 2), ImVec2(p.x + 4, p.y + h - 2),
-                           IM_COL32(45, 42, 38, 200), 1.0f);
+                           IM_COL32(42, 42, 42, 200), 1.0f);
         ImGui::Dummy(ImVec2(10, h));
     }
     ImGui::SameLine();
 
     // --- Grid toggle ---
-    ImGui::Checkbox("Grid", &state.show_grid);
+    ImGui::Checkbox(ICON_FA_BORDER_ALL " Grid", &state.show_grid);
 }
