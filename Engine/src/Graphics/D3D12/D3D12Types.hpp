@@ -1,0 +1,118 @@
+#pragma once
+
+#include <d3d12.h>
+#include <wrl/client.h>
+#include <glm/glm.hpp>
+#include <vector>
+#include <cstdint>
+#include <cstring>
+
+using Microsoft::WRL::ComPtr;
+
+// Align value up to the nearest multiple of alignment
+static inline size_t AlignUp(size_t value, size_t alignment)
+{
+    return (value + alignment - 1) & ~(alignment - 1);
+}
+
+// Set a debug name on a D3D12 object (visible in debug layer output and GPU profilers)
+static inline void SetD3D12DebugName(ID3D12Object* obj, const wchar_t* name)
+{
+    if (obj && name)
+        obj->SetName(name);
+}
+
+static inline void SetD3D12DebugName(ID3D12Object* obj, const char* name)
+{
+    if (!obj || !name) return;
+    wchar_t wname[256];
+    MultiByteToWideChar(CP_UTF8, 0, name, -1, wname, 256);
+    obj->SetName(wname);
+}
+
+// Descriptor heap linear allocator
+struct DescriptorHeapAllocator
+{
+    ID3D12DescriptorHeap* heap = nullptr;
+    D3D12_DESCRIPTOR_HEAP_TYPE type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    UINT descriptorSize = 0;
+    UINT capacity = 0;
+    UINT nextFreeIndex = 0;
+    D3D12_CPU_DESCRIPTOR_HANDLE cpuStart = {};
+    D3D12_GPU_DESCRIPTOR_HANDLE gpuStart = {};
+    std::vector<UINT> freeList;
+
+    void init(ID3D12Device* device, ID3D12DescriptorHeap* heap, UINT capacity);
+    UINT allocate();
+    void free(UINT index);
+    D3D12_CPU_DESCRIPTOR_HANDLE getCPU(UINT index) const;
+    D3D12_GPU_DESCRIPTOR_HANDLE getGPU(UINT index) const;
+};
+
+// Per-frame upload ring buffer for constant data
+struct UploadRingBuffer
+{
+    ComPtr<ID3D12Resource> resource;
+    uint8_t* mappedData = nullptr;
+    size_t capacity = 0;
+    size_t offset = 0;
+    D3D12_GPU_VIRTUAL_ADDRESS gpuAddress = 0;
+
+    bool init(ID3D12Device* device, size_t size);
+    void reset() { offset = 0; }
+    D3D12_GPU_VIRTUAL_ADDRESS allocate(size_t size, const void* data);
+};
+
+// D3D12 Texture wrapper
+struct D3D12Texture
+{
+    ComPtr<ID3D12Resource> resource;
+    UINT srvIndex = UINT(-1); // Index into shader-visible SRV heap
+    uint32_t width = 0;
+    uint32_t height = 0;
+};
+
+// Constant buffer structures (must match D3D11 / shader layout, 16-byte aligned)
+struct alignas(16) D3D12GlobalCBuffer
+{
+    glm::mat4 view;
+    glm::mat4 projection;
+    glm::mat4 lightSpaceMatrices[4];
+    glm::vec4 cascadeSplits;
+    glm::vec3 lightDir;
+    float cascadeSplit4;
+    glm::vec3 lightAmbient;
+    int cascadeCount;
+    glm::vec3 lightDiffuse;
+    int debugCascades;
+    glm::vec2 shadowMapTexelSize;
+    glm::vec2 padding_shadow;
+};
+
+struct alignas(16) D3D12PerObjectCBuffer
+{
+    glm::mat4 model;
+    glm::mat4 normalMatrix;
+    glm::vec3 color;
+    int useTexture;
+};
+
+struct alignas(16) D3D12ShadowCBuffer
+{
+    glm::mat4 lightSpaceMatrix;
+    glm::mat4 model;
+};
+
+struct alignas(16) D3D12SkyboxCBuffer
+{
+    glm::mat4 projection;
+    glm::mat4 view;
+    glm::vec3 sunDirection;
+    float time;
+};
+
+struct alignas(16) D3D12FXAACBuffer
+{
+    glm::vec2 inverseScreenSize;
+    glm::vec2 padding;
+};
