@@ -68,6 +68,12 @@ GizmoResult ViewportPanel::draw(ImTextureID scene_texture, EditorState& state,
                 if (on_mesh_dropped)
                     on_mesh_dropped(mesh_path);
             }
+            if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_PREFAB_PATH"))
+            {
+                std::string prefab_path(static_cast<const char*>(payload->Data));
+                if (on_prefab_dropped)
+                    on_prefab_dropped(prefab_path);
+            }
             ImGui::EndDragDropTarget();
         }
 

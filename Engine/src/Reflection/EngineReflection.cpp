@@ -1,6 +1,7 @@
 #include "EngineReflection.hpp"
 #include "ReflectionRegistry.hpp"
 #include "Components/Components.hpp"
+#include "Components/PrefabInstanceComponent.hpp"
 
 void registerEngineReflection(ReflectionRegistry& registry)
 {
@@ -12,4 +13,5 @@ void registerEngineReflection(ReflectionRegistry& registry)
     registry.reflect<PlayerRepresentationComponent>("PlayerRepresentationComponent");
     registry.reflect<PointLightComponent>("PointLightComponent");
     registry.reflect<SpotLightComponent>("SpotLightComponent");
+    registry.reflect<PrefabInstanceComponent>("PrefabInstanceComponent");
 }

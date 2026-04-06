@@ -26,6 +26,7 @@
 #include "Project/ProjectManager.hpp"
 #include "Project/ProjectPackager.hpp"
 #include "UndoSystem.hpp"
+#include <optional>
 #include "EditorConfig.hpp"
 #include "Plugin/GameModuleLoader.hpp"
 #include "Reflection/ReflectionRegistry.hpp"
@@ -118,6 +119,10 @@ private:
     // Undo/Redo
     UndoSystem m_undo;
 
+    // Entity clipboard (Ctrl+C / Ctrl+V)
+    std::optional<LevelEntity> m_entity_clipboard;
+    std::string m_clipboard_mesh_path;
+
     // --- Play In Editor (PIE) ---
     std::unique_ptr<GameSimulation> m_game_sim;
     std::shared_ptr<InputManager>   m_game_input_manager;
@@ -201,7 +206,12 @@ private:
 
     // Serialization helpers
     LevelData          buildLevelDataFromECS() const;
+    LevelEntity        buildLevelEntityFromECS(entt::entity entity) const;
     const LevelEntity* findOriginalLevelEntity(const std::string& name) const;
     void               buildMeshPathCache();
     void               applyLightingFromMetadata();
+
+    // Copy/paste
+    void copySelectedEntity();
+    void pasteEntity();
 };

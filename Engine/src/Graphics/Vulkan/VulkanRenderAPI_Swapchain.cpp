@@ -9,6 +9,7 @@
 #define VMA_STATIC_VULKAN_FUNCTIONS 0
 #define VMA_DYNAMIC_VULKAN_FUNCTIONS 1
 #include "vk_mem_alloc.h"
+#include "VkInitHelpers.hpp"
 
 // ImGui for Vulkan rendering
 #include "imgui.h"
@@ -44,29 +45,13 @@ bool VulkanRenderAPI::createSwapchain()
 bool VulkanRenderAPI::createImageViews()
 {
     swapchain_image_views.resize(swapchain_images.size());
-
     for (size_t i = 0; i < swapchain_images.size(); i++) {
-        VkImageViewCreateInfo createInfo{};
-        createInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-        createInfo.image = swapchain_images[i];
-        createInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        createInfo.format = swapchain_format;
-        createInfo.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
-        createInfo.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
-        createInfo.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
-        createInfo.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
-        createInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        createInfo.subresourceRange.baseMipLevel = 0;
-        createInfo.subresourceRange.levelCount = 1;
-        createInfo.subresourceRange.baseArrayLayer = 0;
-        createInfo.subresourceRange.layerCount = 1;
-
-        if (vkCreateImageView(device, &createInfo, nullptr, &swapchain_image_views[i]) != VK_SUCCESS) {
+        swapchain_image_views[i] = vkutil::createImageView(device, swapchain_images[i], swapchain_format, VK_IMAGE_ASPECT_COLOR_BIT);
+        if (swapchain_image_views[i] == VK_NULL_HANDLE) {
             printf("Failed to create image view %zu\n", i);
             return false;
         }
     }
-
     return true;
 }
 
@@ -74,41 +59,15 @@ bool VulkanRenderAPI::createDepthResources()
 {
     depth_format = VK_FORMAT_D32_SFLOAT;
 
-    VkImageCreateInfo imageInfo{};
-    imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    imageInfo.imageType = VK_IMAGE_TYPE_2D;
-    imageInfo.extent.width = swapchain_extent.width;
-    imageInfo.extent.height = swapchain_extent.height;
-    imageInfo.extent.depth = 1;
-    imageInfo.mipLevels = 1;
-    imageInfo.arrayLayers = 1;
-    imageInfo.format = depth_format;
-    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    imageInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-
-    VmaAllocationCreateInfo allocInfo{};
-    allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
-
-    if (vmaCreateImage(vma_allocator, &imageInfo, &allocInfo,
-                       &depth_image, &depth_image_allocation, nullptr) != VK_SUCCESS) {
+    if (vkutil::createImage(vma_allocator, swapchain_extent.width, swapchain_extent.height,
+                            depth_format, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                            depth_image, depth_image_allocation) != VK_SUCCESS) {
         printf("Failed to create depth image\n");
         return false;
     }
 
-    VkImageViewCreateInfo viewInfo{};
-    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    viewInfo.image = depth_image;
-    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    viewInfo.format = depth_format;
-    viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-    viewInfo.subresourceRange.baseMipLevel = 0;
-    viewInfo.subresourceRange.levelCount = 1;
-    viewInfo.subresourceRange.baseArrayLayer = 0;
-    viewInfo.subresourceRange.layerCount = 1;
-
-    if (vkCreateImageView(device, &viewInfo, nullptr, &depth_image_view) != VK_SUCCESS) {
+    depth_image_view = vkutil::createImageView(device, depth_image, depth_format, VK_IMAGE_ASPECT_DEPTH_BIT);
+    if (depth_image_view == VK_NULL_HANDLE) {
         printf("Failed to create depth image view\n");
         return false;
     }
@@ -182,28 +141,15 @@ bool VulkanRenderAPI::createRenderPass()
 bool VulkanRenderAPI::createFramebuffers()
 {
     framebuffers.resize(swapchain_image_views.size());
-
     for (size_t i = 0; i < swapchain_image_views.size(); i++) {
-        std::array<VkImageView, 2> attachments = {
-            swapchain_image_views[i],
-            depth_image_view
-        };
-
-        VkFramebufferCreateInfo framebufferInfo{};
-        framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-        framebufferInfo.renderPass = render_pass;
-        framebufferInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
-        framebufferInfo.pAttachments = attachments.data();
-        framebufferInfo.width = swapchain_extent.width;
-        framebufferInfo.height = swapchain_extent.height;
-        framebufferInfo.layers = 1;
-
-        if (vkCreateFramebuffer(device, &framebufferInfo, nullptr, &framebuffers[i]) != VK_SUCCESS) {
+        VkImageView attachments[] = { swapchain_image_views[i], depth_image_view };
+        framebuffers[i] = vkutil::createFramebuffer(device, render_pass, attachments, 2,
+                                                     swapchain_extent.width, swapchain_extent.height);
+        if (framebuffers[i] == VK_NULL_HANDLE) {
             printf("Failed to create framebuffer %zu\n", i);
             return false;
         }
     }
-
     return true;
 }
 
@@ -362,15 +308,9 @@ void VulkanRenderAPI::recreateSwapchain()
 
             fxaa_framebuffers.resize(swapchain_image_views.size());
             for (size_t i = 0; i < swapchain_image_views.size(); i++) {
-                VkFramebufferCreateInfo fbInfo{};
-                fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-                fbInfo.renderPass = fxaa_render_pass;
-                fbInfo.attachmentCount = 1;
-                fbInfo.pAttachments = &swapchain_image_views[i];
-                fbInfo.width = swapchain_extent.width;
-                fbInfo.height = swapchain_extent.height;
-                fbInfo.layers = 1;
-                VK_CHECK(vkCreateFramebuffer(device, &fbInfo, nullptr, &fxaa_framebuffers[i]));
+                fxaa_framebuffers[i] = vkutil::createFramebuffer(device, fxaa_render_pass,
+                                                                  &swapchain_image_views[i], 1,
+                                                                  swapchain_extent.width, swapchain_extent.height);
             }
         } else {
             recreateOffscreenResources();

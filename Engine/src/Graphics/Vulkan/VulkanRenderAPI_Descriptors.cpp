@@ -8,6 +8,8 @@
 #define VMA_STATIC_VULKAN_FUNCTIONS 0
 #define VMA_DYNAMIC_VULKAN_FUNCTIONS 1
 #include "vk_mem_alloc.h"
+#include "VkDescriptorWriter.hpp"
+#include "VkInitHelpers.hpp"
 
 bool VulkanRenderAPI::createDescriptorPool()
 {
@@ -193,38 +195,13 @@ bool VulkanRenderAPI::createDescriptorSets()
         VkDescriptorBufferInfo perObjectBufferInfo{};
         perObjectBufferInfo.buffer = per_object_uniform_buffers[i];
         perObjectBufferInfo.offset = 0;
-        perObjectBufferInfo.range = per_object_alignment; // dynamic UBO: range = one slot
+        perObjectBufferInfo.range = per_object_alignment;
 
-        std::array<VkWriteDescriptorSet, 3> writes{};
-
-        // Binding 0: GlobalUBO
-        writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[0].dstSet = descriptor_sets[i];
-        writes[0].dstBinding = 0;
-        writes[0].dstArrayElement = 0;
-        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        writes[0].descriptorCount = 1;
-        writes[0].pBufferInfo = &globalBufferInfo;
-
-        // Binding 3: VulkanLightUBO
-        writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[1].dstSet = descriptor_sets[i];
-        writes[1].dstBinding = 3;
-        writes[1].dstArrayElement = 0;
-        writes[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        writes[1].descriptorCount = 1;
-        writes[1].pBufferInfo = &lightBufferInfo;
-
-        // Binding 4: PerObjectUBO (dynamic)
-        writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[2].dstSet = descriptor_sets[i];
-        writes[2].dstBinding = 4;
-        writes[2].dstArrayElement = 0;
-        writes[2].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
-        writes[2].descriptorCount = 1;
-        writes[2].pBufferInfo = &perObjectBufferInfo;
-
-        vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+        VkDescriptorWriter(descriptor_sets[i])
+            .writeBuffer(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &globalBufferInfo)
+            .writeBuffer(3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &lightBufferInfo)
+            .writeBuffer(4, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, &perObjectBufferInfo)
+            .update(device);
     }
 
     // Per-draw descriptor sets are allocated on demand in getOrAllocateDescriptorSet()
@@ -292,6 +269,17 @@ void VulkanRenderAPI::initializeDescriptorSet(VkDescriptorSet ds, uint32_t frame
         imageInfo.sampler = default_texture.sampler;
     }
 
+    // Binding 2: Shadow map (fall back to default depth texture + comparison sampler)
+    VkDescriptorImageInfo shadowImageInfo{};
+    shadowImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    if (shadow_map_view != VK_NULL_HANDLE && shadow_sampler != VK_NULL_HANDLE) {
+        shadowImageInfo.imageView = shadow_map_view;
+        shadowImageInfo.sampler = shadow_sampler;
+    } else {
+        shadowImageInfo.imageView = default_shadow_view;
+        shadowImageInfo.sampler = default_shadow_sampler;
+    }
+
     // Binding 3: VulkanLightUBO
     VkDescriptorBufferInfo lightBufferInfo{};
     lightBufferInfo.buffer = light_uniform_buffers[frameIndex];
@@ -302,85 +290,15 @@ void VulkanRenderAPI::initializeDescriptorSet(VkDescriptorSet ds, uint32_t frame
     VkDescriptorBufferInfo perObjectBufferInfo{};
     perObjectBufferInfo.buffer = per_object_uniform_buffers[frameIndex];
     perObjectBufferInfo.offset = 0;
-    perObjectBufferInfo.range = per_object_alignment; // one aligned slot
+    perObjectBufferInfo.range = per_object_alignment;
 
-    // Build descriptor writes for bindings 0, 1, 3, 4
-    std::array<VkWriteDescriptorSet, 4> writes{};
-
-    // Binding 0: GlobalUBO
-    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[0].dstSet = ds;
-    writes[0].dstBinding = 0;
-    writes[0].dstArrayElement = 0;
-    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    writes[0].descriptorCount = 1;
-    writes[0].pBufferInfo = &globalBufferInfo;
-
-    // Binding 1: Diffuse texture
-    writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[1].dstSet = ds;
-    writes[1].dstBinding = 1;
-    writes[1].dstArrayElement = 0;
-    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[1].descriptorCount = 1;
-    writes[1].pImageInfo = &imageInfo;
-
-    // Binding 3: VulkanLightUBO
-    writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[2].dstSet = ds;
-    writes[2].dstBinding = 3;
-    writes[2].dstArrayElement = 0;
-    writes[2].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    writes[2].descriptorCount = 1;
-    writes[2].pBufferInfo = &lightBufferInfo;
-
-    // Binding 4: PerObjectUBO (dynamic)
-    writes[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[3].dstSet = ds;
-    writes[3].dstBinding = 4;
-    writes[3].dstArrayElement = 0;
-    writes[3].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
-    writes[3].descriptorCount = 1;
-    writes[3].pBufferInfo = &perObjectBufferInfo;
-
-    // Binding 2: Shadow map (optional)
-    VkDescriptorImageInfo shadowImageInfo{};
-    bool hasShadowMap = (shadow_map_view != VK_NULL_HANDLE && shadow_sampler != VK_NULL_HANDLE);
-    if (hasShadowMap) {
-        shadowImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        shadowImageInfo.imageView = shadow_map_view;
-        shadowImageInfo.sampler = shadow_sampler;
-
-        VkWriteDescriptorSet shadowWrite{};
-        shadowWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        shadowWrite.dstSet = ds;
-        shadowWrite.dstBinding = 2;
-        shadowWrite.dstArrayElement = 0;
-        shadowWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        shadowWrite.descriptorCount = 1;
-        shadowWrite.pImageInfo = &shadowImageInfo;
-
-        // Write all 5 bindings together
-        std::array<VkWriteDescriptorSet, 5> allWrites = { writes[0], writes[1], shadowWrite, writes[2], writes[3] };
-        vkUpdateDescriptorSets(device, static_cast<uint32_t>(allWrites.size()), allWrites.data(), 0, nullptr);
-    } else {
-        // Bind default texture as shadow map placeholder to avoid uninitialized descriptor
-        shadowImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        shadowImageInfo.imageView = default_texture.imageView;
-        shadowImageInfo.sampler = default_texture.sampler;
-
-        VkWriteDescriptorSet shadowWrite{};
-        shadowWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        shadowWrite.dstSet = ds;
-        shadowWrite.dstBinding = 2;
-        shadowWrite.dstArrayElement = 0;
-        shadowWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        shadowWrite.descriptorCount = 1;
-        shadowWrite.pImageInfo = &shadowImageInfo;
-
-        std::array<VkWriteDescriptorSet, 5> allWrites = { writes[0], writes[1], shadowWrite, writes[2], writes[3] };
-        vkUpdateDescriptorSets(device, static_cast<uint32_t>(allWrites.size()), allWrites.data(), 0, nullptr);
-    }
+    VkDescriptorWriter(ds)
+        .writeBuffer(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &globalBufferInfo)
+        .writeImage(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &imageInfo)
+        .writeImage(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &shadowImageInfo)
+        .writeBuffer(3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &lightBufferInfo)
+        .writeBuffer(4, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, &perObjectBufferInfo)
+        .update(device);
 }
 
 bool VulkanRenderAPI::createDefaultTexture()
@@ -391,25 +309,9 @@ bool VulkanRenderAPI::createDefaultTexture()
     VkDeviceSize imageSize = 4;
 
     // Create image
-    VkImageCreateInfo imageInfo{};
-    imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    imageInfo.imageType = VK_IMAGE_TYPE_2D;
-    imageInfo.extent.width = 1;
-    imageInfo.extent.height = 1;
-    imageInfo.extent.depth = 1;
-    imageInfo.mipLevels = 1;
-    imageInfo.arrayLayers = 1;
-    imageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
-    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-
-    VmaAllocationCreateInfo imageAllocInfo{};
-    imageAllocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
-
-    VkResult imgResult = vmaCreateImage(vma_allocator, &imageInfo, &imageAllocInfo,
-                  &default_texture.image, &default_texture.allocation, nullptr);
+    VkResult imgResult = vkutil::createImage(vma_allocator, 1, 1, VK_FORMAT_R8G8B8A8_UNORM,
+        VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        default_texture.image, default_texture.allocation);
     if (imgResult != VK_SUCCESS) {
         LOG_ENGINE_ERROR("[Vulkan] Failed to create default texture image: {}", vkResultToString(imgResult));
         return false;
@@ -433,20 +335,10 @@ bool VulkanRenderAPI::createDefaultTexture()
     }
 
     // Create image view
-    VkImageViewCreateInfo viewInfo{};
-    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    viewInfo.image = default_texture.image;
-    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    viewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
-    viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    viewInfo.subresourceRange.baseMipLevel = 0;
-    viewInfo.subresourceRange.levelCount = 1;
-    viewInfo.subresourceRange.baseArrayLayer = 0;
-    viewInfo.subresourceRange.layerCount = 1;
-
-    VkResult viewResult = vkCreateImageView(device, &viewInfo, nullptr, &default_texture.imageView);
-    if (viewResult != VK_SUCCESS) {
-        LOG_ENGINE_ERROR("[Vulkan] Failed to create default texture image view: {}", vkResultToString(viewResult));
+    default_texture.imageView = vkutil::createImageView(device, default_texture.image,
+        VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT);
+    if (default_texture.imageView == VK_NULL_HANDLE) {
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create default texture image view");
         vmaDestroyImage(vma_allocator, default_texture.image, default_texture.allocation);
         default_texture.image = VK_NULL_HANDLE;
         default_texture.allocation = nullptr;
@@ -470,7 +362,46 @@ bool VulkanRenderAPI::createDefaultTexture()
     defaultSamplerKey.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
     default_texture.sampler = sampler_cache.getOrCreate(defaultSamplerKey);
 
-    // Per-draw descriptor sets are now allocated on demand -- no pre-initialization needed
+    // Create 1x1 depth texture + comparison sampler for shadow fallback
+    // (shader uses SamplerComparisonState, so binding 2 must always have a comparison sampler)
+    {
+        VkResult shadowImgResult = vkutil::createImage(vma_allocator, 1, 1, VK_FORMAT_D32_SFLOAT,
+            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+            default_shadow_image, default_shadow_allocation, 1, 1);
+        if (shadowImgResult != VK_SUCCESS) {
+            LOG_ENGINE_ERROR("[Vulkan] Failed to create default shadow image: {}", vkResultToString(shadowImgResult));
+            return false;
+        }
+
+        // Transition to shader-readable layout
+        transitionImageLayout(default_shadow_image, VK_FORMAT_D32_SFLOAT,
+                             VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 1);
+
+        default_shadow_view = vkutil::createImageView(device, default_shadow_image,
+            VK_FORMAT_D32_SFLOAT, VK_IMAGE_ASPECT_DEPTH_BIT);
+        if (default_shadow_view == VK_NULL_HANDLE) {
+            LOG_ENGINE_ERROR("[Vulkan] Failed to create default shadow image view");
+            return false;
+        }
+
+        // Comparison sampler that always returns 1.0 (fully lit = no shadow)
+        SamplerKey shadowSamplerKey{};
+        shadowSamplerKey.magFilter = VK_FILTER_NEAREST;
+        shadowSamplerKey.minFilter = VK_FILTER_NEAREST;
+        shadowSamplerKey.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+        shadowSamplerKey.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+        shadowSamplerKey.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+        shadowSamplerKey.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        shadowSamplerKey.anisotropyEnable = VK_FALSE;
+        shadowSamplerKey.maxAnisotropy = 1.0f;
+        shadowSamplerKey.compareEnable = VK_TRUE;
+        shadowSamplerKey.compareOp = VK_COMPARE_OP_ALWAYS;
+        shadowSamplerKey.minLod = 0.0f;
+        shadowSamplerKey.maxLod = 0.0f;
+        shadowSamplerKey.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
+        default_shadow_sampler = sampler_cache.getOrCreate(shadowSamplerKey);
+    }
+
     printf("Default texture created\n");
     return true;
 }

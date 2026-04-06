@@ -14,6 +14,7 @@ sources = {
     src/Graphics/HeadlessMesh.cpp
     src/Navigation/**/*.cpp
     src/Plugin/**/*.cpp
+    src/Prefab/**/*.cpp
     src/Project/**/*.cpp
     src/Reflection/ReflectionRegistry.cpp
     src/Reflection/EngineReflection.cpp

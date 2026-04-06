@@ -39,15 +39,11 @@ cbuffer LightCB : register(b3)
     float _lightPad2;
 };
 
-[[vk::binding(1, 0)]] [[vk::combinedImageSampler]]
-Texture2D diffuseTexture : register(t0);
-[[vk::binding(1, 0)]] [[vk::combinedImageSampler]]
-SamplerState linearSampler : register(s0);
+[[vk::binding(1, 0)]]Texture2D diffuseTexture : register(t0);
+[[vk::binding(1, 0)]]SamplerState linearSampler : register(s0);
 
-[[vk::binding(2, 0)]] [[vk::combinedImageSampler]]
-Texture2DArray shadowMapArray : register(t1);
-[[vk::binding(2, 0)]] [[vk::combinedImageSampler]]
-SamplerComparisonState shadowSampler : register(s1);
+[[vk::binding(2, 0)]]Texture2DArray shadowMapArray : register(t1);
+[[vk::binding(2, 0)]]SamplerComparisonState shadowSampler : register(s1);
 
 struct VSInput
 {

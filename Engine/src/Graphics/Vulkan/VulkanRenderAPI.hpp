@@ -332,6 +332,12 @@ private:
     TextureHandle bound_texture = INVALID_TEXTURE;
     VulkanTexture default_texture;
 
+    // Default shadow fallback (1x1 depth texture + comparison sampler)
+    VkImage default_shadow_image = VK_NULL_HANDLE;
+    VmaAllocation default_shadow_allocation = nullptr;
+    VkImageView default_shadow_view = VK_NULL_HANDLE;
+    VkSampler default_shadow_sampler = VK_NULL_HANDLE;
+
     // Window/viewport state
     WindowHandle window_handle = nullptr;
     int viewport_width = 0;

@@ -16,6 +16,8 @@
 // stb_image for texture loading
 #include "stb_image.h"
 
+#include "VkInitHelpers.hpp"
+
 // Camera and transforms
 void VulkanRenderAPI::setCamera(const camera& cam)
 {
@@ -134,25 +136,10 @@ TextureHandle VulkanRenderAPI::loadTextureFromMemory(const uint8_t* pixels, int 
     }
 
     // Create image
-    VkImageCreateInfo imageInfo{};
-    imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    imageInfo.imageType = VK_IMAGE_TYPE_2D;
-    imageInfo.extent.width = width;
-    imageInfo.extent.height = height;
-    imageInfo.extent.depth = 1;
-    imageInfo.mipLevels = texture.mipLevels;
-    imageInfo.arrayLayers = 1;
-    imageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
-    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-
-    VmaAllocationCreateInfo imageAllocInfo{};
-    imageAllocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
-
-    VkResult imgResult = vmaCreateImage(vma_allocator, &imageInfo, &imageAllocInfo,
-                  &texture.image, &texture.allocation, nullptr);
+    VkResult imgResult = vkutil::createImage(vma_allocator, width, height,
+        VK_FORMAT_R8G8B8A8_UNORM,
+        VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        texture.image, texture.allocation, texture.mipLevels);
     if (imgResult != VK_SUCCESS) {
         LOG_ENGINE_ERROR("[Vulkan] loadTextureFromMemory: vmaCreateImage failed => {}", vkResultToString(imgResult));
         return INVALID_TEXTURE;
@@ -177,20 +164,10 @@ TextureHandle VulkanRenderAPI::loadTextureFromMemory(const uint8_t* pixels, int 
     }
 
     // Create image view
-    VkImageViewCreateInfo viewInfo{};
-    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    viewInfo.image = texture.image;
-    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    viewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
-    viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    viewInfo.subresourceRange.baseMipLevel = 0;
-    viewInfo.subresourceRange.levelCount = texture.mipLevels;
-    viewInfo.subresourceRange.baseArrayLayer = 0;
-    viewInfo.subresourceRange.layerCount = 1;
-
-    VkResult viewResult = vkCreateImageView(device, &viewInfo, nullptr, &texture.imageView);
-    if (viewResult != VK_SUCCESS) {
-        LOG_ENGINE_ERROR("[Vulkan] loadTextureFromMemory: vkCreateImageView failed => {}", vkResultToString(viewResult));
+    texture.imageView = vkutil::createImageView(device, texture.image, VK_FORMAT_R8G8B8A8_UNORM,
+                                                 VK_IMAGE_ASPECT_COLOR_BIT, texture.mipLevels);
+    if (texture.imageView == VK_NULL_HANDLE) {
+        LOG_ENGINE_ERROR("[Vulkan] loadTextureFromMemory: vkCreateImageView failed");
         vmaDestroyImage(vma_allocator, texture.image, texture.allocation);
         return INVALID_TEXTURE;
     }
@@ -266,8 +243,8 @@ void VulkanRenderAPI::renderMesh(const mesh& m, const RenderState& state)
     if (in_shadow_pass) {
         // Shadow pass - update model matrix in shadow UBO
         ShadowUBO shadowUbo{};
-        shadowUbo.lightSpaceMatrix = glm::transpose(lightSpaceMatrices[currentCascade]);
-        shadowUbo.model = glm::transpose(current_model_matrix);
+        shadowUbo.lightSpaceMatrix = lightSpaceMatrices[currentCascade];
+        shadowUbo.model = current_model_matrix;
         memcpy(shadow_uniform_mapped[current_frame], &shadowUbo, sizeof(ShadowUBO));
 
         // Bind vertex buffer and draw (with redundant bind tracking)
@@ -295,13 +272,14 @@ void VulkanRenderAPI::renderMesh(const mesh& m, const RenderState& state)
     }
 
     // Upload GlobalUBO (binding 0) - view/projection/CSM/directional light
-    // Note: Slang generates RowMajor SPIR-V, GLM is column-major -> transpose all matrices
+    // Slang emits OpVectorTimesMatrix for mul(M,v), so GLM column-major data
+    // uploaded to RowMajor SPIR-V works correctly WITHOUT transposing.
     {
         GlobalUBO ubo{};
-        ubo.view = glm::transpose(view_matrix);
-        ubo.projection = glm::transpose(projection_matrix);
+        ubo.view = view_matrix;
+        ubo.projection = projection_matrix;
         for (int i = 0; i < NUM_CASCADES; i++) {
-            ubo.lightSpaceMatrices[i] = glm::transpose(lightSpaceMatrices[i]);
+            ubo.lightSpaceMatrices[i] = lightSpaceMatrices[i];
         }
         ubo.cascadeSplits = glm::vec4(cascadeSplitDistances[0], cascadeSplitDistances[1],
                                        cascadeSplitDistances[2], cascadeSplitDistances[3]);
@@ -356,8 +334,8 @@ void VulkanRenderAPI::renderMesh(const mesh& m, const RenderState& state)
         perObjectDynamicOffset = static_cast<uint32_t>(drawIdx * per_object_alignment);
 
         PerObjectUBO objUbo{};
-        objUbo.model = glm::transpose(current_model_matrix);
-        objUbo.normalMatrix = glm::inverse(current_model_matrix); // transpose(transpose(inverse(M))) = inverse(M)
+        objUbo.model = current_model_matrix;
+        objUbo.normalMatrix = glm::transpose(glm::inverse(current_model_matrix));
         objUbo.color = state.color;
         objUbo.useTexture = (m.texture_set && m.texture != INVALID_TEXTURE) ? 1 : 0;
 
@@ -418,8 +396,8 @@ void VulkanRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t
     if (in_shadow_pass) {
         // Shadow pass - update model matrix in shadow UBO
         ShadowUBO shadowUbo{};
-        shadowUbo.lightSpaceMatrix = glm::transpose(lightSpaceMatrices[currentCascade]);
-        shadowUbo.model = glm::transpose(current_model_matrix);
+        shadowUbo.lightSpaceMatrix = lightSpaceMatrices[currentCascade];
+        shadowUbo.model = current_model_matrix;
         memcpy(shadow_uniform_mapped[current_frame], &shadowUbo, sizeof(ShadowUBO));
 
         VkBuffer vb = vulkanMesh->getVertexBuffer();
@@ -447,13 +425,13 @@ void VulkanRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t
         last_bound_pipeline = selectedPipeline;
     }
 
-    // Upload GlobalUBO (binding 0) - transpose matrices for Slang RowMajor SPIR-V
+    // Upload GlobalUBO (binding 0)
     {
         GlobalUBO ubo{};
-        ubo.view = glm::transpose(view_matrix);
-        ubo.projection = glm::transpose(projection_matrix);
+        ubo.view = view_matrix;
+        ubo.projection = projection_matrix;
         for (int i = 0; i < NUM_CASCADES; i++) {
-            ubo.lightSpaceMatrices[i] = glm::transpose(lightSpaceMatrices[i]);
+            ubo.lightSpaceMatrices[i] = lightSpaceMatrices[i];
         }
         ubo.cascadeSplits = glm::vec4(cascadeSplitDistances[0], cascadeSplitDistances[1],
                                        cascadeSplitDistances[2], cascadeSplitDistances[3]);
@@ -508,8 +486,8 @@ void VulkanRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t
         perObjectDynamicOffset = static_cast<uint32_t>(drawIdx * per_object_alignment);
 
         PerObjectUBO objUbo{};
-        objUbo.model = glm::transpose(current_model_matrix);
-        objUbo.normalMatrix = glm::inverse(current_model_matrix);
+        objUbo.model = current_model_matrix;
+        objUbo.normalMatrix = glm::transpose(glm::inverse(current_model_matrix));
         objUbo.color = state.color;
         objUbo.useTexture = (bound_texture != INVALID_TEXTURE) ? 1 : 0;
 
@@ -604,10 +582,10 @@ void VulkanRenderAPI::renderDebugLines(const vertex* vertices, size_t vertex_cou
     // Upload GlobalUBO (view/projection)
     {
         GlobalUBO ubo{};
-        ubo.view = glm::transpose(view_matrix);
-        ubo.projection = glm::transpose(projection_matrix);
+        ubo.view = view_matrix;
+        ubo.projection = projection_matrix;
         for (int i = 0; i < NUM_CASCADES; i++)
-            ubo.lightSpaceMatrices[i] = glm::transpose(lightSpaceMatrices[i]);
+            ubo.lightSpaceMatrices[i] = lightSpaceMatrices[i];
         ubo.cascadeSplits = glm::vec4(cascadeSplitDistances[0], cascadeSplitDistances[1],
                                        cascadeSplitDistances[2], cascadeSplitDistances[3]);
         ubo.cascadeSplit4 = cascadeSplitDistances[4];
@@ -652,7 +630,7 @@ void VulkanRenderAPI::renderDebugLines(const vertex* vertices, size_t vertex_cou
         uint32_t perObjectDynamicOffset = static_cast<uint32_t>(drawIdx * per_object_alignment);
 
         PerObjectUBO objUbo{};
-        objUbo.model = glm::transpose(current_model_matrix);
+        objUbo.model = current_model_matrix;
         objUbo.normalMatrix = glm::mat4(1.0f);
         objUbo.color = color;
         objUbo.useTexture = 0;

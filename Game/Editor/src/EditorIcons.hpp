@@ -74,5 +74,8 @@
 #define ICON_FA_LAYER_GROUP         "\xef\x97\xbd"  // U+F5FD  (collapse duplicates)
 #define ICON_FA_TERMINAL            "\xef\x84\xa0"  // U+F120  (command echo)
 
+// --- Prefab ---
+#define ICON_FA_PUZZLE_PIECE        "\xef\x84\xae"  // U+F12E  (prefab)
+
 // --- Misc ---
 #define ICON_FA_MUSIC               "\xef\x80\x81"  // U+F001  (audio)

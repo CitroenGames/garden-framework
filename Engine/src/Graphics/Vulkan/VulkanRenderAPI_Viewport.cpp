@@ -8,6 +8,8 @@
 #define VMA_STATIC_VULKAN_FUNCTIONS 0
 #define VMA_DYNAMIC_VULKAN_FUNCTIONS 1
 #include "vk_mem_alloc.h"
+#include "VkInitHelpers.hpp"
+#include "VkDescriptorWriter.hpp"
 
 // ImGui for Vulkan rendering
 #include "imgui.h"
@@ -29,40 +31,16 @@ void VulkanRenderAPI::createViewportResources(int w, int h)
         }
     }
 
-    VmaAllocationCreateInfo gpuAllocInfo{};
-    gpuAllocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
-
     // --- Viewport color image ---
-    VkImageCreateInfo imageInfo{};
-    imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    imageInfo.imageType = VK_IMAGE_TYPE_2D;
-    imageInfo.format = swapchain_format;
-    imageInfo.extent = { (uint32_t)w, (uint32_t)h, 1 };
-    imageInfo.mipLevels = 1;
-    imageInfo.arrayLayers = 1;
-    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-    imageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-
-    if (vmaCreateImage(vma_allocator, &imageInfo, &gpuAllocInfo,
-                       &viewport_image, &viewport_allocation, nullptr) != VK_SUCCESS) {
+    if (vkutil::createImage(vma_allocator, (uint32_t)w, (uint32_t)h, swapchain_format,
+                            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                            viewport_image, viewport_allocation) != VK_SUCCESS) {
         LOG_ENGINE_ERROR("[Vulkan] Failed to create viewport image");
         return;
     }
 
-    VkImageViewCreateInfo viewInfo{};
-    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    viewInfo.image = viewport_image;
-    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    viewInfo.format = swapchain_format;
-    viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    viewInfo.subresourceRange.baseMipLevel = 0;
-    viewInfo.subresourceRange.levelCount = 1;
-    viewInfo.subresourceRange.baseArrayLayer = 0;
-    viewInfo.subresourceRange.layerCount = 1;
-
-    if (vkCreateImageView(device, &viewInfo, nullptr, &viewport_view) != VK_SUCCESS) {
+    viewport_view = vkutil::createImageView(device, viewport_image, swapchain_format, VK_IMAGE_ASPECT_COLOR_BIT);
+    if (viewport_view == VK_NULL_HANDLE) {
         LOG_ENGINE_ERROR("[Vulkan] Failed to create viewport image view");
         return;
     }
@@ -85,36 +63,15 @@ void VulkanRenderAPI::createViewportResources(int w, int h)
     viewport_sampler = sampler_cache.getOrCreate(samplerKey);
 
     // --- Viewport depth image ---
-    VkImageCreateInfo depthInfo{};
-    depthInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    depthInfo.imageType = VK_IMAGE_TYPE_2D;
-    depthInfo.format = depth_format;
-    depthInfo.extent = { (uint32_t)w, (uint32_t)h, 1 };
-    depthInfo.mipLevels = 1;
-    depthInfo.arrayLayers = 1;
-    depthInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-    depthInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-    depthInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-    depthInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-
-    if (vmaCreateImage(vma_allocator, &depthInfo, &gpuAllocInfo,
-                       &viewport_depth_image, &viewport_depth_allocation, nullptr) != VK_SUCCESS) {
+    if (vkutil::createImage(vma_allocator, (uint32_t)w, (uint32_t)h, depth_format,
+                            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                            viewport_depth_image, viewport_depth_allocation) != VK_SUCCESS) {
         LOG_ENGINE_ERROR("[Vulkan] Failed to create viewport depth image");
         return;
     }
 
-    VkImageViewCreateInfo depthViewInfo{};
-    depthViewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    depthViewInfo.image = viewport_depth_image;
-    depthViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    depthViewInfo.format = depth_format;
-    depthViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-    depthViewInfo.subresourceRange.baseMipLevel = 0;
-    depthViewInfo.subresourceRange.levelCount = 1;
-    depthViewInfo.subresourceRange.baseArrayLayer = 0;
-    depthViewInfo.subresourceRange.layerCount = 1;
-
-    if (vkCreateImageView(device, &depthViewInfo, nullptr, &viewport_depth_view) != VK_SUCCESS) {
+    viewport_depth_view = vkutil::createImageView(device, viewport_depth_image, depth_format, VK_IMAGE_ASPECT_DEPTH_BIT);
+    if (viewport_depth_view == VK_NULL_HANDLE) {
         LOG_ENGINE_ERROR("[Vulkan] Failed to create viewport depth view");
         return;
     }
@@ -168,16 +125,8 @@ void VulkanRenderAPI::createViewportResources(int w, int h)
     }
 
     // --- Create viewport framebuffer ---
-    VkFramebufferCreateInfo fbInfo{};
-    fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-    fbInfo.renderPass = viewport_resolve_pass;
-    fbInfo.attachmentCount = 1;
-    fbInfo.pAttachments = &viewport_view;
-    fbInfo.width = (uint32_t)w;
-    fbInfo.height = (uint32_t)h;
-    fbInfo.layers = 1;
-
-    if (vkCreateFramebuffer(device, &fbInfo, nullptr, &viewport_framebuffer) != VK_SUCCESS) {
+    viewport_framebuffer = vkutil::createFramebuffer(device, viewport_resolve_pass, &viewport_view, 1, (uint32_t)w, (uint32_t)h);
+    if (viewport_framebuffer == VK_NULL_HANDLE) {
         LOG_ENGINE_ERROR("[Vulkan] Failed to create viewport framebuffer");
         return;
     }
@@ -253,76 +202,24 @@ void VulkanRenderAPI::createViewportResources(int w, int h)
     }
 
     // Recreate offscreen color image at viewport dimensions
-    VkImageCreateInfo offColorInfo{};
-    offColorInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    offColorInfo.imageType = VK_IMAGE_TYPE_2D;
-    offColorInfo.format = swapchain_format;
-    offColorInfo.extent = { (uint32_t)w, (uint32_t)h, 1 };
-    offColorInfo.mipLevels = 1;
-    offColorInfo.arrayLayers = 1;
-    offColorInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-    offColorInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-    offColorInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-    offColorInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VK_CHECK(vkutil::createImage(vma_allocator, (uint32_t)w, (uint32_t)h, swapchain_format,
+                   VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                   offscreen_image, offscreen_allocation));
 
-    VK_CHECK(vmaCreateImage(vma_allocator, &offColorInfo, &gpuAllocInfo,
-                   &offscreen_image, &offscreen_allocation, nullptr));
-
-    VkImageViewCreateInfo offViewInfo{};
-    offViewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    offViewInfo.image = offscreen_image;
-    offViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    offViewInfo.format = swapchain_format;
-    offViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    offViewInfo.subresourceRange.baseMipLevel = 0;
-    offViewInfo.subresourceRange.levelCount = 1;
-    offViewInfo.subresourceRange.baseArrayLayer = 0;
-    offViewInfo.subresourceRange.layerCount = 1;
-
-    VK_CHECK(vkCreateImageView(device, &offViewInfo, nullptr, &offscreen_view));
+    offscreen_view = vkutil::createImageView(device, offscreen_image, swapchain_format, VK_IMAGE_ASPECT_COLOR_BIT);
 
     // Recreate offscreen depth image at viewport dimensions
-    VkImageCreateInfo offDepthInfo{};
-    offDepthInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    offDepthInfo.imageType = VK_IMAGE_TYPE_2D;
-    offDepthInfo.format = depth_format;
-    offDepthInfo.extent = { (uint32_t)w, (uint32_t)h, 1 };
-    offDepthInfo.mipLevels = 1;
-    offDepthInfo.arrayLayers = 1;
-    offDepthInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-    offDepthInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-    offDepthInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-    offDepthInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VK_CHECK(vkutil::createImage(vma_allocator, (uint32_t)w, (uint32_t)h, depth_format,
+                   VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                   offscreen_depth_image, offscreen_depth_allocation));
 
-    VK_CHECK(vmaCreateImage(vma_allocator, &offDepthInfo, &gpuAllocInfo,
-                   &offscreen_depth_image, &offscreen_depth_allocation, nullptr));
-
-    VkImageViewCreateInfo offDepthViewInfo{};
-    offDepthViewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    offDepthViewInfo.image = offscreen_depth_image;
-    offDepthViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    offDepthViewInfo.format = depth_format;
-    offDepthViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-    offDepthViewInfo.subresourceRange.baseMipLevel = 0;
-    offDepthViewInfo.subresourceRange.levelCount = 1;
-    offDepthViewInfo.subresourceRange.baseArrayLayer = 0;
-    offDepthViewInfo.subresourceRange.layerCount = 1;
-
-    VK_CHECK(vkCreateImageView(device, &offDepthViewInfo, nullptr, &offscreen_depth_view));
+    offscreen_depth_view = vkutil::createImageView(device, offscreen_depth_image, depth_format, VK_IMAGE_ASPECT_DEPTH_BIT);
 
     // Recreate offscreen framebuffer at viewport dimensions
     offscreen_framebuffers.resize(1);
     std::array<VkImageView, 2> offFbAttachments = { offscreen_view, offscreen_depth_view };
-    VkFramebufferCreateInfo offFbInfo{};
-    offFbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-    offFbInfo.renderPass = offscreen_render_pass;
-    offFbInfo.attachmentCount = static_cast<uint32_t>(offFbAttachments.size());
-    offFbInfo.pAttachments = offFbAttachments.data();
-    offFbInfo.width = (uint32_t)w;
-    offFbInfo.height = (uint32_t)h;
-    offFbInfo.layers = 1;
-
-    VK_CHECK(vkCreateFramebuffer(device, &offFbInfo, nullptr, &offscreen_framebuffers[0]));
+    offscreen_framebuffers[0] = vkutil::createFramebuffer(device, offscreen_render_pass, offFbAttachments.data(),
+                                                          static_cast<uint32_t>(offFbAttachments.size()), (uint32_t)w, (uint32_t)h);
 
     // Update FXAA descriptor sets to point to new offscreen image
     for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
@@ -331,16 +228,9 @@ void VulkanRenderAPI::createViewportResources(int w, int h)
         fxaaImageInfo.imageView = offscreen_view;
         fxaaImageInfo.sampler = offscreen_sampler;
 
-        VkWriteDescriptorSet descriptorWrite{};
-        descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        descriptorWrite.dstSet = fxaa_descriptor_sets[i];
-        descriptorWrite.dstBinding = 0;
-        descriptorWrite.dstArrayElement = 0;
-        descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        descriptorWrite.descriptorCount = 1;
-        descriptorWrite.pImageInfo = &fxaaImageInfo;
-
-        vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+        VkDescriptorWriter(fxaa_descriptor_sets[i])
+            .writeImage(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &fxaaImageInfo)
+            .update(device);
     }
 
     // Update projection matrix for viewport aspect ratio
@@ -612,38 +502,16 @@ void VulkanRenderAPI::createPreviewResources(int w, int h)
     preview_width_rt = w;
     preview_height_rt = h;
 
-    VmaAllocationCreateInfo gpuAllocInfo{};
-    gpuAllocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
-
     // Color image
-    VkImageCreateInfo imageInfo{};
-    imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    imageInfo.imageType = VK_IMAGE_TYPE_2D;
-    imageInfo.format = swapchain_format;
-    imageInfo.extent = { (uint32_t)w, (uint32_t)h, 1 };
-    imageInfo.mipLevels = 1;
-    imageInfo.arrayLayers = 1;
-    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-    imageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-
-    if (vmaCreateImage(vma_allocator, &imageInfo, &gpuAllocInfo,
-                       &preview_image, &preview_allocation, nullptr) != VK_SUCCESS) {
+    if (vkutil::createImage(vma_allocator, (uint32_t)w, (uint32_t)h, swapchain_format,
+                            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                            preview_image, preview_allocation) != VK_SUCCESS) {
         LOG_ENGINE_ERROR("[Vulkan] Failed to create preview image");
         return;
     }
 
-    VkImageViewCreateInfo viewInfo{};
-    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    viewInfo.image = preview_image;
-    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    viewInfo.format = swapchain_format;
-    viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    viewInfo.subresourceRange.levelCount = 1;
-    viewInfo.subresourceRange.layerCount = 1;
-
-    if (vkCreateImageView(device, &viewInfo, nullptr, &preview_view) != VK_SUCCESS) {
+    preview_view = vkutil::createImageView(device, preview_image, swapchain_format, VK_IMAGE_ASPECT_COLOR_BIT);
+    if (preview_view == VK_NULL_HANDLE) {
         LOG_ENGINE_ERROR("[Vulkan] Failed to create preview image view");
         return;
     }
@@ -664,39 +532,18 @@ void VulkanRenderAPI::createPreviewResources(int w, int h)
     preview_sampler = sampler_cache.getOrCreate(samplerKey);
 
     // Depth image
-    VkImageCreateInfo depthInfo{};
-    depthInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    depthInfo.imageType = VK_IMAGE_TYPE_2D;
-    depthInfo.format = depth_format;
-    depthInfo.extent = { (uint32_t)w, (uint32_t)h, 1 };
-    depthInfo.mipLevels = 1;
-    depthInfo.arrayLayers = 1;
-    depthInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-    depthInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-    depthInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-    depthInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-
-    if (vmaCreateImage(vma_allocator, &depthInfo, &gpuAllocInfo,
-                       &preview_depth_image, &preview_depth_allocation, nullptr) != VK_SUCCESS) {
+    if (vkutil::createImage(vma_allocator, (uint32_t)w, (uint32_t)h, depth_format,
+                            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                            preview_depth_image, preview_depth_allocation) != VK_SUCCESS) {
         LOG_ENGINE_ERROR("[Vulkan] Failed to create preview depth image");
         return;
     }
 
-    VkImageViewCreateInfo depthViewInfo{};
-    depthViewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    depthViewInfo.image = preview_depth_image;
-    depthViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    depthViewInfo.format = depth_format;
-    depthViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-    depthViewInfo.subresourceRange.levelCount = 1;
-    depthViewInfo.subresourceRange.layerCount = 1;
-
-    VkImageView preview_depth_view_local = VK_NULL_HANDLE;
-    if (vkCreateImageView(device, &depthViewInfo, nullptr, &preview_depth_view_local) != VK_SUCCESS) {
+    preview_depth_view = vkutil::createImageView(device, preview_depth_image, depth_format, VK_IMAGE_ASPECT_DEPTH_BIT);
+    if (preview_depth_view == VK_NULL_HANDLE) {
         LOG_ENGINE_ERROR("[Vulkan] Failed to create preview depth view");
         return;
     }
-    preview_depth_view = preview_depth_view_local;
 
     // Register with ImGui
     preview_imgui_ds = ImGui_ImplVulkan_AddTexture(preview_sampler, preview_view,
@@ -709,16 +556,8 @@ void VulkanRenderAPI::createPreviewResources(int w, int h)
         return;
     }
 
-    VkFramebufferCreateInfo fbInfo{};
-    fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-    fbInfo.renderPass = viewport_resolve_pass;
-    fbInfo.attachmentCount = 1;
-    fbInfo.pAttachments = &preview_view;
-    fbInfo.width = (uint32_t)w;
-    fbInfo.height = (uint32_t)h;
-    fbInfo.layers = 1;
-
-    if (vkCreateFramebuffer(device, &fbInfo, nullptr, &preview_framebuffer) != VK_SUCCESS) {
+    preview_framebuffer = vkutil::createFramebuffer(device, viewport_resolve_pass, &preview_view, 1, (uint32_t)w, (uint32_t)h);
+    if (preview_framebuffer == VK_NULL_HANDLE) {
         LOG_ENGINE_ERROR("[Vulkan] Failed to create preview framebuffer");
         return;
     }
@@ -883,41 +722,17 @@ void VulkanRenderAPI::createPIEViewportResources(PIEViewportTarget& target, int 
     target.width = w;
     target.height = h;
 
-    VmaAllocationCreateInfo gpuAllocInfo{};
-    gpuAllocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
-
     // --- Color image (sampled for ImGui, used as color attachment and transfer dst) ---
-    VkImageCreateInfo imageInfo{};
-    imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    imageInfo.imageType = VK_IMAGE_TYPE_2D;
-    imageInfo.format = swapchain_format;
-    imageInfo.extent = { (uint32_t)w, (uint32_t)h, 1 };
-    imageInfo.mipLevels = 1;
-    imageInfo.arrayLayers = 1;
-    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-    imageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-
-    if (vmaCreateImage(vma_allocator, &imageInfo, &gpuAllocInfo,
-                       &target.image, &target.allocation, nullptr) != VK_SUCCESS) {
+    if (vkutil::createImage(vma_allocator, (uint32_t)w, (uint32_t)h, swapchain_format,
+                            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                            target.image, target.allocation) != VK_SUCCESS) {
         LOG_ENGINE_ERROR("[Vulkan] Failed to create PIE viewport image");
         return;
     }
 
     // --- Color image view ---
-    VkImageViewCreateInfo viewInfo{};
-    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    viewInfo.image = target.image;
-    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    viewInfo.format = swapchain_format;
-    viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    viewInfo.subresourceRange.baseMipLevel = 0;
-    viewInfo.subresourceRange.levelCount = 1;
-    viewInfo.subresourceRange.baseArrayLayer = 0;
-    viewInfo.subresourceRange.layerCount = 1;
-
-    if (vkCreateImageView(device, &viewInfo, nullptr, &target.view) != VK_SUCCESS) {
+    target.view = vkutil::createImageView(device, target.image, swapchain_format, VK_IMAGE_ASPECT_COLOR_BIT);
+    if (target.view == VK_NULL_HANDLE) {
         LOG_ENGINE_ERROR("[Vulkan] Failed to create PIE viewport image view");
         return;
     }
@@ -940,37 +755,16 @@ void VulkanRenderAPI::createPIEViewportResources(PIEViewportTarget& target, int 
     target.sampler = sampler_cache.getOrCreate(samplerKey);
 
     // --- Depth image ---
-    VkImageCreateInfo depthInfo{};
-    depthInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    depthInfo.imageType = VK_IMAGE_TYPE_2D;
-    depthInfo.format = depth_format;
-    depthInfo.extent = { (uint32_t)w, (uint32_t)h, 1 };
-    depthInfo.mipLevels = 1;
-    depthInfo.arrayLayers = 1;
-    depthInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-    depthInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-    depthInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-    depthInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-
-    if (vmaCreateImage(vma_allocator, &depthInfo, &gpuAllocInfo,
-                       &target.depth_image, &target.depth_allocation, nullptr) != VK_SUCCESS) {
+    if (vkutil::createImage(vma_allocator, (uint32_t)w, (uint32_t)h, depth_format,
+                            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                            target.depth_image, target.depth_allocation) != VK_SUCCESS) {
         LOG_ENGINE_ERROR("[Vulkan] Failed to create PIE viewport depth image");
         return;
     }
 
     // --- Depth image view ---
-    VkImageViewCreateInfo depthViewInfo{};
-    depthViewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    depthViewInfo.image = target.depth_image;
-    depthViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    depthViewInfo.format = depth_format;
-    depthViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-    depthViewInfo.subresourceRange.baseMipLevel = 0;
-    depthViewInfo.subresourceRange.levelCount = 1;
-    depthViewInfo.subresourceRange.baseArrayLayer = 0;
-    depthViewInfo.subresourceRange.layerCount = 1;
-
-    if (vkCreateImageView(device, &depthViewInfo, nullptr, &target.depth_view) != VK_SUCCESS) {
+    target.depth_view = vkutil::createImageView(device, target.depth_image, depth_format, VK_IMAGE_ASPECT_DEPTH_BIT);
+    if (target.depth_view == VK_NULL_HANDLE) {
         LOG_ENGINE_ERROR("[Vulkan] Failed to create PIE viewport depth view");
         return;
     }
@@ -986,16 +780,9 @@ void VulkanRenderAPI::createPIEViewportResources(PIEViewportTarget& target, int 
     }
 
     std::array<VkImageView, 2> offscreenAttachments = { target.view, target.depth_view };
-    VkFramebufferCreateInfo offFbInfo{};
-    offFbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-    offFbInfo.renderPass = offscreen_render_pass;
-    offFbInfo.attachmentCount = static_cast<uint32_t>(offscreenAttachments.size());
-    offFbInfo.pAttachments = offscreenAttachments.data();
-    offFbInfo.width = (uint32_t)w;
-    offFbInfo.height = (uint32_t)h;
-    offFbInfo.layers = 1;
-
-    if (vkCreateFramebuffer(device, &offFbInfo, nullptr, &target.framebuffer) != VK_SUCCESS) {
+    target.framebuffer = vkutil::createFramebuffer(device, offscreen_render_pass, offscreenAttachments.data(),
+                                                   static_cast<uint32_t>(offscreenAttachments.size()), (uint32_t)w, (uint32_t)h);
+    if (target.framebuffer == VK_NULL_HANDLE) {
         LOG_ENGINE_ERROR("[Vulkan] Failed to create PIE viewport offscreen framebuffer");
         return;
     }
@@ -1006,16 +793,8 @@ void VulkanRenderAPI::createPIEViewportResources(PIEViewportTarget& target, int 
         return;
     }
 
-    VkFramebufferCreateInfo resolveFbInfo{};
-    resolveFbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-    resolveFbInfo.renderPass = viewport_resolve_pass;
-    resolveFbInfo.attachmentCount = 1;
-    resolveFbInfo.pAttachments = &target.view;
-    resolveFbInfo.width = (uint32_t)w;
-    resolveFbInfo.height = (uint32_t)h;
-    resolveFbInfo.layers = 1;
-
-    if (vkCreateFramebuffer(device, &resolveFbInfo, nullptr, &target.resolve_framebuffer) != VK_SUCCESS) {
+    target.resolve_framebuffer = vkutil::createFramebuffer(device, viewport_resolve_pass, &target.view, 1, (uint32_t)w, (uint32_t)h);
+    if (target.resolve_framebuffer == VK_NULL_HANDLE) {
         LOG_ENGINE_ERROR("[Vulkan] Failed to create PIE viewport resolve framebuffer");
         return;
     }

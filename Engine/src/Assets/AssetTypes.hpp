@@ -15,7 +15,8 @@ enum class AssetType : uint8_t {
     Model,
     Shader,
     Sound,
-    Animation
+    Animation,
+    Prefab
 };
 
 enum class LoadState : uint8_t {
@@ -68,6 +69,7 @@ inline const char* assetTypeToString(AssetType type) {
         case AssetType::Shader: return "Shader";
         case AssetType::Sound: return "Sound";
         case AssetType::Animation: return "Animation";
+        case AssetType::Prefab: return "Prefab";
         default: return "Unknown";
     }
 }

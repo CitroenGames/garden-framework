@@ -49,7 +49,7 @@ bool D3D12RenderAPI::createShadowMapResources()
     // Create DSV for each cascade
     for (int i = 0; i < NUM_CASCADES; i++)
     {
-        if (m_shadowDSVIndices[i] == UINT(-1) || m_shadowDSVIndices[i] == 0)
+        if (m_shadowDSVIndices[i] == UINT(-1))
             m_shadowDSVIndices[i] = m_dsvAllocator.allocate();
 
         D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc = {};

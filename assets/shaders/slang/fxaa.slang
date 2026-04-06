@@ -7,10 +7,8 @@ cbuffer FXAACB : register(b0)
     float2 padding;
 };
 
-[[vk::binding(0, 0)]] [[vk::combinedImageSampler]]
-Texture2D screenTexture : register(t0);
-[[vk::binding(0, 0)]] [[vk::combinedImageSampler]]
-SamplerState linearSampler : register(s0);
+[[vk::binding(0, 0)]]Texture2D screenTexture : register(t0);
+[[vk::binding(0, 0)]]SamplerState linearSampler : register(s0);
 
 struct VSInput
 {
