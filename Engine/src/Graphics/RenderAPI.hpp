@@ -10,6 +10,7 @@
 #include <string>
 #include <cstdint>
 #include <functional>
+#include <algorithm>
 
 // Forward declaration for SDL
 struct SDL_Window;
@@ -218,5 +219,52 @@ constexpr RenderAPIType DefaultRenderAPI = RenderAPIType::D3D11;
 #else
 constexpr RenderAPIType DefaultRenderAPI = RenderAPIType::Vulkan;
 #endif
+
+// String conversion utilities for RenderAPIType
+inline const char* RenderAPITypeToString(RenderAPIType type)
+{
+    switch (type)
+    {
+    case RenderAPIType::Vulkan:   return "vulkan";
+    case RenderAPIType::D3D11:    return "d3d11";
+    case RenderAPIType::D3D12:    return "d3d12";
+    case RenderAPIType::Metal:    return "metal";
+    case RenderAPIType::Headless: return "headless";
+    }
+    return "vulkan";
+}
+
+inline RenderAPIType ParseRenderAPIType(const std::string& str)
+{
+    std::string lower = str;
+    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+
+    if (lower == "vulkan")   return RenderAPIType::Vulkan;
+    if (lower == "d3d11" || lower == "dx11" || lower == "direct3d11")
+        return RenderAPIType::D3D11;
+    if (lower == "d3d12" || lower == "dx12" || lower == "direct3d12")
+        return RenderAPIType::D3D12;
+    if (lower == "metal")    return RenderAPIType::Metal;
+    if (lower == "headless") return RenderAPIType::Headless;
+
+    return DefaultRenderAPI;
+}
+
+inline bool IsRenderAPIPlatformAvailable(RenderAPIType type)
+{
+    switch (type)
+    {
+#ifdef _WIN32
+    case RenderAPIType::D3D11:  return true;
+    case RenderAPIType::D3D12:  return true;
+#endif
+#ifdef __APPLE__
+    case RenderAPIType::Metal:  return true;
+#endif
+    case RenderAPIType::Vulkan:   return true;
+    case RenderAPIType::Headless: return true;
+    default: return false;
+    }
+}
 
 ENGINE_GRAPHICS_API IRenderAPI* CreateRenderAPI(RenderAPIType type);

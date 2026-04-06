@@ -189,6 +189,7 @@ private:
     ComPtr<ID3D12PipelineState> m_psoSky;
     ComPtr<ID3D12PipelineState> m_psoFXAA;
     ComPtr<ID3D12PipelineState> m_psoDepthPrepass;
+    ComPtr<ID3D12PipelineState> m_psoDebugLines;
 
     // Shader bytecode (DXIL)
     std::vector<char> m_basicVS, m_basicPS;
@@ -386,6 +387,9 @@ public:
     void renderMeshDepthOnly(const mesh& m) override;
 
     IGPUMesh* createMesh() override;
+
+    // Debug line rendering
+    void renderDebugLines(const vertex* vertices, size_t vertex_count) override;
 
     const char* getAPIName() const override { return "D3D12"; }
 

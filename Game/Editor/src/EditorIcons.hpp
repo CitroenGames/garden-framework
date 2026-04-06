@@ -68,5 +68,11 @@
 #define ICON_FA_TRIANGLE_EXCLAMATION "\xef\x81\xb1" // U+F071  (warning)
 #define ICON_FA_CIRCLE_EXCLAMATION  "\xef\x81\xaa"  // U+F06A  (error)
 
+// --- Console ---
+#define ICON_FA_CLOCK               "\xef\x80\x97"  // U+F017  (timestamp)
+#define ICON_FA_ANGLES_DOWN         "\xef\x84\x83"  // U+F103  (scroll to bottom)
+#define ICON_FA_LAYER_GROUP         "\xef\x97\xbd"  // U+F5FD  (collapse duplicates)
+#define ICON_FA_TERMINAL            "\xef\x84\xa0"  // U+F120  (command echo)
+
 // --- Misc ---
 #define ICON_FA_MUSIC               "\xef\x80\x81"  // U+F001  (audio)

@@ -20,11 +20,13 @@ void Console::initialize()
     }
 
     m_initialized = true;
+    loadHistory("config/console_history.txt");
     LOG_ENGINE_INFO("Console initialized");
 }
 
 void Console::shutdown()
 {
+    saveHistory("config/console_history.txt");
     m_initialized = false;
 }
 
@@ -33,12 +35,34 @@ void Console::addLogEntry(const ConsoleLogEntry& entry)
     std::lock_guard<std::mutex> lock(m_mutex);
 
     m_logEntries.push_back(entry);
+    incrementCounter(entry.level);
 
     // Trim old entries
     while (m_logEntries.size() > m_maxLogEntries)
     {
+        decrementCounter(m_logEntries.front().level);
         m_logEntries.pop_front();
     }
+}
+
+void Console::incrementCounter(spdlog::level::level_enum level)
+{
+    if (level >= spdlog::level::err)
+        m_errorCount++;
+    else if (level == spdlog::level::warn)
+        m_warnCount++;
+    else
+        m_infoCount++;
+}
+
+void Console::decrementCounter(spdlog::level::level_enum level)
+{
+    if (level >= spdlog::level::err)
+        m_errorCount = std::max(0, m_errorCount - 1);
+    else if (level == spdlog::level::warn)
+        m_warnCount = std::max(0, m_warnCount - 1);
+    else
+        m_infoCount = std::max(0, m_infoCount - 1);
 }
 
 void Console::print(const std::string& msg)
@@ -75,6 +99,9 @@ void Console::clear()
 {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_logEntries.clear();
+    m_infoCount = 0;
+    m_warnCount = 0;
+    m_errorCount = 0;
 }
 
 void Console::addToHistory(const std::string& command)
@@ -119,8 +146,14 @@ void Console::submitCommand(const std::string& command)
     // Add to history
     addToHistory(command);
 
-    // Print the command to console
-    print("] {}", command);
+    // Echo the command with distinct type for styling
+    ConsoleLogEntry echo;
+    echo.message = command;
+    echo.level = spdlog::level::info;
+    echo.timestamp = getCurrentTimestamp();
+    echo.source = "Console";
+    echo.type = ConsoleEntryType::CommandEcho;
+    addLogEntry(echo);
 
     // Execute via CommandRegistry
     CommandRegistry::get().execute(command);
@@ -203,6 +236,48 @@ void Console::execFile(const std::string& filename)
 
         // Execute command
         CommandRegistry::get().execute(line);
+    }
+}
+
+void Console::saveHistory(const std::string& filepath)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+
+    std::ofstream file(filepath);
+    if (!file.is_open())
+    {
+        return;
+    }
+
+    for (const auto& cmd : m_commandHistory)
+    {
+        file << cmd << "\n";
+    }
+}
+
+void Console::loadHistory(const std::string& filepath)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+
+    std::ifstream file(filepath);
+    if (!file.is_open())
+    {
+        return;
+    }
+
+    m_commandHistory.clear();
+    std::string line;
+    while (std::getline(file, line))
+    {
+        if (!line.empty())
+        {
+            m_commandHistory.push_back(line);
+        }
+
+        if (m_commandHistory.size() >= m_maxHistoryItems)
+        {
+            break;
+        }
     }
 }
 

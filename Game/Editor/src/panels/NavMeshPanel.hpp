@@ -20,6 +20,7 @@ private:
     Navigation::NavMeshDebugConfig m_debug_config;
 
     bool m_show_visualization = true;
+    bool m_show_advanced = false;
 
     // Path testing
     bool m_path_test_mode = false;
@@ -32,6 +33,6 @@ private:
 
     // Stats
     int m_total_source_tris  = 0;
-    int m_walkable_tris      = 0;
+    int m_total_polys        = 0;
     float m_generation_time_ms = 0.0f;
 };

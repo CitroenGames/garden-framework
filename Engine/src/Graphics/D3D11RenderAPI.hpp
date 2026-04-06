@@ -186,6 +186,10 @@ private:
     // Skybox
     ComPtr<ID3D11Buffer> skyboxVB;
 
+    // Debug line rendering
+    ComPtr<ID3D11Buffer> debugLineVB;
+    size_t debugLineVBCapacity = 0;
+
     // Texture management
     std::unordered_map<TextureHandle, D3D11Texture> textures;
     TextureHandle nextTextureHandle = 1;
@@ -305,6 +309,9 @@ public:
     virtual void renderMeshDepthOnly(const mesh& m) override;
 
     virtual IGPUMesh* createMesh() override;
+
+    // Debug line rendering
+    virtual void renderDebugLines(const vertex* vertices, size_t vertex_count) override;
 
     virtual const char* getAPIName() const override { return "D3D11"; }
 

@@ -5,6 +5,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/gtx/euler_angles.hpp>
+#include <glm/gtc/quaternion.hpp>
 #include "Components/Components.hpp"
 #include <entt/entt.hpp>
 #include <vector>
@@ -27,6 +28,7 @@
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
 #include <Jolt/Physics/Collision/Shape/MeshShape.h>
+#include <Jolt/Physics/Collision/Shape/ScaledShape.h>
 #include <Jolt/Physics/Collision/Shape/StaticCompoundShape.h>
 #include <Jolt/Physics/Collision/RayCast.h>
 #include <Jolt/Physics/Collision/CastResult.h>
@@ -149,6 +151,17 @@ private:
     static JPH::RVec3 toJoltR(const glm::vec3& v) { return JPH::RVec3(v.x, v.y, v.z); }
     static glm::vec3 toGlm(const JPH::Vec3& v) { return glm::vec3(v.GetX(), v.GetY(), v.GetZ()); }
 
+    // Convert engine Euler angles (degrees, YXZ order) to Jolt quaternion
+    static JPH::Quat toJoltQuat(const glm::vec3& euler_degrees)
+    {
+        glm::mat4 rot = glm::eulerAngleYXZ(
+            glm::radians(euler_degrees.y),
+            glm::radians(euler_degrees.x),
+            glm::radians(euler_degrees.z));
+        glm::quat q = glm::quat_cast(rot);
+        return JPH::Quat(q.x, q.y, q.z, q.w);
+    }
+
     // Safety helpers
     static constexpr float MAX_VELOCITY = 100.0f; // m/s
 
@@ -182,7 +195,7 @@ public:
     // Body management
     JPH::BodyID createStaticBody(const glm::vec3& position, const glm::vec3& rotation, const JPH::ShapeRefC& shape, entt::entity entity);
     JPH::BodyID createDynamicBody(const glm::vec3& position, const glm::vec3& rotation, const JPH::ShapeRefC& shape, float mass, entt::entity entity);
-    JPH::BodyID createStaticMeshBody(const glm::vec3& position, const glm::vec3& rotation, const mesh& colliderMesh, entt::entity entity);
+    JPH::BodyID createStaticMeshBody(const glm::vec3& position, const glm::vec3& rotation, const glm::vec3& scale, const mesh& colliderMesh, entt::entity entity);
     void removeBody(entt::entity entity);
 
     // Main physics update

@@ -218,6 +218,9 @@ public:
 
     virtual IGPUMesh* createMesh() override;
 
+    // Debug line rendering
+    virtual void renderDebugLines(const vertex* vertices, size_t vertex_count) override;
+
     virtual const char* getAPIName() const override { return "Vulkan"; }
 
     // Graphics settings
@@ -292,6 +295,9 @@ private:
 
     VkShaderModule createShaderModule(const std::vector<char>& code);
     std::vector<char> readShaderFile(const std::string& filename);
+
+    // Pipeline selection based on render state (lighting, blend mode, cull mode)
+    VkPipeline selectPipeline(const RenderState& state) const;
 
     // Pipeline cache persistence
     bool loadPipelineCache();
@@ -388,10 +394,29 @@ private:
     VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
     VkPipeline graphics_pipeline = VK_NULL_HANDLE;
 
-    // Multiple blend mode pipelines
-    VkPipeline pipeline_no_blend = VK_NULL_HANDLE;
-    VkPipeline pipeline_alpha_blend = VK_NULL_HANDLE;
-    VkPipeline pipeline_additive_blend = VK_NULL_HANDLE;
+    // Lit pipeline variants (basic shader)
+    VkPipeline pipeline_lit_noblend_cullback = VK_NULL_HANDLE;
+    VkPipeline pipeline_lit_noblend_cullfront = VK_NULL_HANDLE;
+    VkPipeline pipeline_lit_noblend_cullnone = VK_NULL_HANDLE;
+    VkPipeline pipeline_lit_alpha_cullback = VK_NULL_HANDLE;
+    VkPipeline pipeline_lit_alpha_cullnone = VK_NULL_HANDLE;
+    VkPipeline pipeline_lit_additive = VK_NULL_HANDLE;
+
+    // Unlit pipeline variants (unlit shader)
+    VkPipeline pipeline_unlit_noblend_cullback = VK_NULL_HANDLE;
+    VkPipeline pipeline_unlit_noblend_cullnone = VK_NULL_HANDLE;
+    VkPipeline pipeline_unlit_alpha_cullback = VK_NULL_HANDLE;
+    VkPipeline pipeline_unlit_alpha_cullnone = VK_NULL_HANDLE;
+    VkPipeline pipeline_unlit_additive = VK_NULL_HANDLE;
+
+    // Debug line pipeline (unlit shader, LINE_LIST topology)
+    VkPipeline pipeline_debug_lines = VK_NULL_HANDLE;
+
+    // Debug line vertex buffer (CPU-visible, recreated per frame)
+    VkBuffer debug_line_buffer = VK_NULL_HANDLE;
+    VmaAllocation debug_line_allocation = nullptr;
+    void* debug_line_mapped = nullptr;
+    size_t debug_line_buffer_capacity = 0;
 
     // Descriptors
     VkDescriptorSetLayout descriptor_set_layout = VK_NULL_HANDLE;

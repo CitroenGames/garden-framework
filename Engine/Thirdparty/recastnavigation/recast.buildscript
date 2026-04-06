@@ -1,0 +1,14 @@
+[project:RecastNavigation]
+type = lib
+sources = {
+    Recast/Source/*.cpp
+    Detour/Source/*.cpp
+}
+headers = {
+    Recast/Include/*.h
+    Detour/Include/*.h
+}
+includes = Recast/Include, Detour/Include
+public_includes = Recast/Include, Detour/Include
+std = 17
+multiprocessor = true

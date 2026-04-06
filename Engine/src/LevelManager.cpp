@@ -1163,9 +1163,9 @@ bool LevelManager::instantiateLevel(
                 }
                 else
                 {
-                    // Static mesh collider
+                    // Static mesh collider (apply entity scale)
                     game_world.getPhysicsSystem().createStaticMeshBody(
-                        t.position, t.rotation, *col.get_mesh(), e);
+                        t.position, t.rotation, t.scale, *col.get_mesh(), e);
                 }
             }
         }
