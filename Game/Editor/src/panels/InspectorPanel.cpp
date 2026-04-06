@@ -3,11 +3,15 @@
 #include "Graphics/LODSelector.hpp"
 #include "ImGui/ImGuiManager.hpp"
 #include "Reflection/ReflectionRegistry.hpp"
+#include "Reflection/ReflectionTypes.hpp"
 #include "Reflection/ReflectionWidgets.hpp"
 #include "EditorIcons.hpp"
 #include "imgui.h"
 #include "imgui_internal.h"
 #include <cstring>
+#include <cassert>
+#include <algorithm>
+#include <filesystem>
 
 bool InspectorPanel::drawComponentHeader(const char* label, bool can_remove, bool* removed, ImVec4 accent_color)
 {
@@ -133,6 +137,38 @@ bool InspectorPanel::draw(entt::registry& registry, entt::entity selected,
                 ImGui::PopItemWidth();
             }
 
+            // Component context menu (right-click on header)
+            if (ImGui::BeginPopupContextItem("##comp_ctx"))
+            {
+                if (ImGui::MenuItem(ICON_FA_ROTATE_LEFT "  Reset to Defaults"))
+                {
+                    resetComponentToDefaults(desc, comp);
+                    markUnsaved();
+                    if (desc.type_id == transform_type_id)
+                        transform_dirty = true;
+                }
+                ImGui::Separator();
+                if (ImGui::MenuItem(ICON_FA_CLIPBOARD "  Copy Component"))
+                {
+                    copyComponentToClipboard(desc, comp);
+                }
+                bool can_paste = m_has_clipboard && m_clipboard_type_id == desc.type_id;
+                if (ImGui::MenuItem(ICON_FA_PASTE "  Paste Values", nullptr, false, can_paste))
+                {
+                    pasteComponentFromClipboard(desc, comp);
+                    markUnsaved();
+                    if (desc.type_id == transform_type_id)
+                        transform_dirty = true;
+                }
+                if (desc.removable)
+                {
+                    ImGui::Separator();
+                    if (ImGui::MenuItem(ICON_FA_TRASH "  Remove"))
+                        removed = true;
+                }
+                ImGui::EndPopup();
+            }
+
             if (removed && desc.removable)
             {
                 desc.remove(registry, selected);
@@ -150,8 +186,19 @@ bool InspectorPanel::draw(entt::registry& registry, entt::entity selected,
         if (drawComponentHeader("Mesh", true, &removed))
         {
             auto it = mesh_path_cache.find(selected);
-            const char* path = (it != mesh_path_cache.end()) ? it->second.c_str() : "(unknown)";
+            const char* path = (it != mesh_path_cache.end()) ? it->second.c_str() : "(none)";
+
+            float browse_w = ImGui::CalcTextSize(ICON_FA_FOLDER_OPEN " Browse").x + ImGui::GetStyle().FramePadding.x * 2.0f;
+            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - browse_w - ImGui::GetStyle().ItemSpacing.x);
             ImGui::LabelText("Path", "%s", path);
+            ImGui::SameLine();
+            if (ImGui::Button(ICON_FA_FOLDER_OPEN " Browse"))
+            {
+                m_mesh_picker_entity = selected;
+                m_mesh_picker_search[0] = '\0';
+                refreshMeshFileCache();
+                m_mesh_picker_open = true;
+            }
 
             auto& mc = registry.get<MeshComponent>(selected);
             if (mc.m_mesh)
@@ -221,6 +268,14 @@ bool InspectorPanel::draw(entt::registry& registry, entt::entity selected,
                 }
             }
         }
+        // Mesh context menu (right-click on header)
+        if (ImGui::BeginPopupContextItem("##mesh_ctx"))
+        {
+            if (ImGui::MenuItem(ICON_FA_TRASH "  Remove"))
+                removed = true;
+            ImGui::EndPopup();
+        }
+
         if (removed)
         {
             registry.remove<MeshComponent>(selected);
@@ -230,6 +285,9 @@ bool InspectorPanel::draw(entt::registry& registry, entt::entity selected,
         ImGui::Spacing();
     }
 
+    // Mesh asset picker popup (rendered outside the mesh component section)
+    drawMeshPickerPopup();
+
     // ---- Collider (custom UI — non-reflectable shared_ptr data) ----
     if (registry.all_of<ColliderComponent>(selected))
     {
@@ -238,6 +296,15 @@ bool InspectorPanel::draw(entt::registry& registry, entt::entity selected,
         {
             ImGui::TextDisabled("Collider component present");
         }
+
+        // Collider context menu (right-click on header)
+        if (ImGui::BeginPopupContextItem("##collider_ctx"))
+        {
+            if (ImGui::MenuItem(ICON_FA_TRASH "  Remove"))
+                removed = true;
+            ImGui::EndPopup();
+        }
+
         if (removed)
         { registry.remove<ColliderComponent>(selected); markUnsaved(); }
         ImGui::Spacing();
@@ -296,4 +363,141 @@ bool InspectorPanel::draw(entt::registry& registry, entt::entity selected,
 
     ImGui::End();
     return transform_dirty;
+}
+
+void InspectorPanel::copyComponentToClipboard(const ComponentDescriptor& desc, void* src)
+{
+    m_clipboard_type_id = desc.type_id;
+    m_clipboard_data.resize(desc.size);
+
+    // Construct a default in the buffer so any std::string members are valid
+    desc.construct_default(m_clipboard_data.data());
+
+    // Copy each property field-by-field
+    for (const auto& prop : desc.properties)
+    {
+        void* src_field = static_cast<char*>(src) + prop.offset;
+        void* dst_field = m_clipboard_data.data() + prop.offset;
+        if (prop.type == EPropertyType::String)
+            *static_cast<std::string*>(dst_field) = *static_cast<std::string*>(src_field);
+        else
+            std::memcpy(dst_field, src_field, prop.size);
+    }
+    m_has_clipboard = true;
+}
+
+void InspectorPanel::pasteComponentFromClipboard(const ComponentDescriptor& desc, void* dest)
+{
+    if (!m_has_clipboard || m_clipboard_type_id != desc.type_id) return;
+
+    for (const auto& prop : desc.properties)
+    {
+        void* src_field = m_clipboard_data.data() + prop.offset;
+        void* dst_field = static_cast<char*>(dest) + prop.offset;
+        if (prop.type == EPropertyType::String)
+            *static_cast<std::string*>(dst_field) = *static_cast<std::string*>(src_field);
+        else
+            std::memcpy(dst_field, src_field, prop.size);
+    }
+}
+
+void InspectorPanel::resetComponentToDefaults(const ComponentDescriptor& desc, void* dest)
+{
+    assert(desc.size <= 4096);
+    std::vector<uint8_t> temp(desc.size);
+    desc.construct_default(temp.data());
+
+    for (const auto& prop : desc.properties)
+    {
+        void* src_field = temp.data() + prop.offset;
+        void* dst_field = static_cast<char*>(dest) + prop.offset;
+        if (prop.type == EPropertyType::String)
+            *static_cast<std::string*>(dst_field) = *static_cast<std::string*>(src_field);
+        else
+            std::memcpy(dst_field, src_field, prop.size);
+    }
+
+    desc.destruct(temp.data());
+}
+
+void InspectorPanel::refreshMeshFileCache()
+{
+    namespace fs = std::filesystem;
+    m_mesh_file_cache.clear();
+
+    if (!fs::exists(asset_base_path) || !fs::is_directory(asset_base_path))
+        return;
+
+    for (const auto& entry : fs::recursive_directory_iterator(asset_base_path))
+    {
+        if (!entry.is_regular_file()) continue;
+        std::string ext = entry.path().extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+        if (ext == ".obj" || ext == ".gltf" || ext == ".glb")
+        {
+            std::string p = entry.path().string();
+            std::replace(p.begin(), p.end(), '\\', '/');
+            m_mesh_file_cache.push_back(p);
+        }
+    }
+    std::sort(m_mesh_file_cache.begin(), m_mesh_file_cache.end());
+}
+
+void InspectorPanel::drawMeshPickerPopup()
+{
+    if (m_mesh_picker_open)
+    {
+        ImGui::OpenPopup("##MeshPicker");
+        m_mesh_picker_open = false;
+    }
+
+    ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(450, 400), ImGuiCond_Appearing);
+
+    if (ImGui::BeginPopupModal("##MeshPicker", nullptr, ImGuiWindowFlags_NoTitleBar))
+    {
+        ImGui::Text(ICON_FA_CUBE "  Select Mesh");
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::InputTextWithHint("##mesh_search", "Search...", m_mesh_picker_search, sizeof(m_mesh_picker_search));
+        ImGui::Spacing();
+
+        std::string filter_lower;
+        if (m_mesh_picker_search[0] != '\0')
+        {
+            filter_lower = m_mesh_picker_search;
+            std::transform(filter_lower.begin(), filter_lower.end(), filter_lower.begin(), ::tolower);
+        }
+
+        float footer_h = ImGui::GetFrameHeightWithSpacing() + ImGui::GetStyle().ItemSpacing.y;
+        ImGui::BeginChild("##mesh_list", ImVec2(0, -footer_h), true);
+
+        for (const auto& mesh_path : m_mesh_file_cache)
+        {
+            if (!filter_lower.empty())
+            {
+                std::string path_lower = mesh_path;
+                std::transform(path_lower.begin(), path_lower.end(), path_lower.begin(), ::tolower);
+                if (path_lower.find(filter_lower) == std::string::npos)
+                    continue;
+            }
+
+            if (ImGui::Selectable((std::string(ICON_FA_CUBE "  ") + mesh_path).c_str()))
+            {
+                if (on_browse_mesh)
+                    on_browse_mesh(m_mesh_picker_entity, mesh_path);
+                ImGui::CloseCurrentPopup();
+            }
+        }
+
+        ImGui::EndChild();
+
+        if (ImGui::Button("Cancel", ImVec2(-1, 0)))
+            ImGui::CloseCurrentPopup();
+
+        ImGui::EndPopup();
+    }
 }

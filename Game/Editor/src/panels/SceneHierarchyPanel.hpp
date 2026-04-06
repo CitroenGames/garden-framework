@@ -5,6 +5,8 @@
 #include <functional>
 #include <string>
 
+class ReflectionRegistry;
+
 class SceneHierarchyPanel
 {
 public:
@@ -12,6 +14,9 @@ public:
 
     // Callback: editor wires this to open save dialog and write .prefab file
     std::function<void(entt::entity)> on_save_as_prefab;
+
+    // Reflection registry for Add Component submenu in context menu
+    ReflectionRegistry* reflection = nullptr;
 
     // Draw the hierarchy panel. Pass a dirty flag pointer so changes can trigger BVH rebuild.
     // out_unsaved: set to true when any scene mutation occurs.

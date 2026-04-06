@@ -16,7 +16,7 @@ public:
     std::function<void(const std::string&)> on_open_level;
     std::function<void(const std::string&)> on_open_mesh;
     std::function<void(const std::string&)> on_preview_mesh;
-    std::function<void(const std::string&)> on_spawn_prefab;
+    std::function<void(const std::string&)> on_open_prefab;
 
     // Set by EditorApp so we can trigger regeneration
     Assets::AssetScanner* asset_scanner = nullptr;
@@ -40,6 +40,15 @@ private:
 
     // Sources panel toggle
     bool m_show_sources = true;
+
+    // Inline rename state (files/folders)
+    std::filesystem::path m_renaming_path;
+    char m_rename_buf[256] = {0};
+    bool m_rename_focus_set = false;
+
+    // Deferred filesystem operations
+    std::filesystem::path m_pending_delete;
+    bool m_confirm_delete_open = false;
 
     // Navigation history (back/forward)
     std::vector<std::filesystem::path> m_nav_history;
@@ -87,7 +96,13 @@ private:
     bool isTextureFile(const std::filesystem::path& path) const;
     void drawMetadataStatusDot(ImDrawList* draw_list, ImVec2 pos, const std::filesystem::path& path) const;
     void drawMetadataInfo();
-    void drawContextMenu(const std::filesystem::path& path);
+    void drawItemContextMenu(const std::filesystem::path& path);
+    void drawBackgroundContextMenu();
+
+    // File/folder creation helpers
+    void createNewFolder(const std::filesystem::path& dir);
+    void createEmptyPrefab(const std::filesystem::path& dir);
+    void createEmptyLevel(const std::filesystem::path& dir);
 
     static std::string formatFileSize(uintmax_t bytes);
 };

@@ -131,9 +131,16 @@ void D3D12RenderAPI::endSceneRender()
                 D3D12FXAACBuffer fxaaCB = {};
                 fxaaCB.inverseScreenSize = glm::vec2(1.0f / pie.width, 1.0f / pie.height);
                 auto cbAddr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(fxaaCB), &fxaaCB);
-                bindDummyRootParams();
+                // Minimal root param bindings for FXAA (shader only reads b0 and t0)
                 commandList->SetGraphicsRootConstantBufferView(0, cbAddr);
+                commandList->SetGraphicsRootConstantBufferView(1, cbAddr); // dummy
                 commandList->SetGraphicsRootDescriptorTable(2, m_srvAllocator.getGPU(pie.offscreenSRVIndex));
+                if (defaultTexture != INVALID_TEXTURE) {
+                    auto it = textures.find(defaultTexture);
+                    if (it != textures.end())
+                        commandList->SetGraphicsRootDescriptorTable(3, m_srvAllocator.getGPU(it->second.srvIndex));
+                }
+                commandList->SetGraphicsRootConstantBufferView(4, cbAddr); // dummy
 
                 commandList->IASetVertexBuffers(0, 1, &m_fxaaQuadVBV);
                 commandList->DrawInstanced(4, 1, 0, 0);
@@ -182,9 +189,16 @@ void D3D12RenderAPI::endSceneRender()
             D3D12FXAACBuffer fxaaCB = {};
             fxaaCB.inverseScreenSize = glm::vec2(1.0f / viewport_width_rt, 1.0f / viewport_height_rt);
             auto cbAddr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(fxaaCB), &fxaaCB);
-            bindDummyRootParams();
+            // Minimal root param bindings for FXAA (shader only reads b0 and t0)
             commandList->SetGraphicsRootConstantBufferView(0, cbAddr);
+            commandList->SetGraphicsRootConstantBufferView(1, cbAddr); // dummy
             commandList->SetGraphicsRootDescriptorTable(2, m_srvAllocator.getGPU(m_offscreenSRVIndex));
+            if (defaultTexture != INVALID_TEXTURE) {
+                auto it = textures.find(defaultTexture);
+                if (it != textures.end())
+                    commandList->SetGraphicsRootDescriptorTable(3, m_srvAllocator.getGPU(it->second.srvIndex));
+            }
+            commandList->SetGraphicsRootConstantBufferView(4, cbAddr); // dummy
 
             commandList->IASetVertexBuffers(0, 1, &m_fxaaQuadVBV);
             commandList->DrawInstanced(4, 1, 0, 0);

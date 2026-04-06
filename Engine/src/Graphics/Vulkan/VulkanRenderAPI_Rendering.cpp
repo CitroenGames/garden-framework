@@ -241,11 +241,10 @@ void VulkanRenderAPI::renderMesh(const mesh& m, const RenderState& state)
     if (!vulkanMesh || vulkanMesh->getVertexBuffer() == VK_NULL_HANDLE) return;
 
     if (in_shadow_pass) {
-        // Shadow pass - update model matrix in shadow UBO
-        ShadowUBO shadowUbo{};
-        shadowUbo.lightSpaceMatrix = lightSpaceMatrices[currentCascade];
-        shadowUbo.model = current_model_matrix;
-        memcpy(shadow_uniform_mapped[current_frame], &shadowUbo, sizeof(ShadowUBO));
+        // Shadow pass - push model matrix per draw call via push constants
+        // (UBO only has lightSpaceMatrix, set once per cascade in beginCascade)
+        vkCmdPushConstants(command_buffers[current_frame], shadow_pipeline_layout,
+                           VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(glm::mat4), &current_model_matrix);
 
         // Bind vertex buffer and draw (with redundant bind tracking)
         VkBuffer vb = vulkanMesh->getVertexBuffer();
@@ -394,11 +393,9 @@ void VulkanRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t
     if (!vulkanMesh || vulkanMesh->getVertexBuffer() == VK_NULL_HANDLE) return;
 
     if (in_shadow_pass) {
-        // Shadow pass - update model matrix in shadow UBO
-        ShadowUBO shadowUbo{};
-        shadowUbo.lightSpaceMatrix = lightSpaceMatrices[currentCascade];
-        shadowUbo.model = current_model_matrix;
-        memcpy(shadow_uniform_mapped[current_frame], &shadowUbo, sizeof(ShadowUBO));
+        // Shadow pass - push model matrix per draw call via push constants
+        vkCmdPushConstants(command_buffers[current_frame], shadow_pipeline_layout,
+                           VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(glm::mat4), &current_model_matrix);
 
         VkBuffer vb = vulkanMesh->getVertexBuffer();
         if (vb != last_bound_vertex_buffer) {

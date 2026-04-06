@@ -148,8 +148,31 @@ bool EditorApp::initialize(RenderAPIType api_type)
     registerEngineReflection(m_reflection);
     m_inspector.reflection = &m_reflection;
 
+    // Inspector: browse button loads mesh for existing entity
+    m_inspector.on_browse_mesh = [this](entt::entity entity, const std::string& mesh_path) {
+        IRenderAPI* api = m_app.getRenderAPI();
+        if (!api) return;
+
+        m_undo.snapshotIfNeeded([this]() { return buildLevelDataFromECS(); });
+
+        auto& mc = m_world.registry.get<MeshComponent>(entity);
+        auto mesh_ptr = std::make_shared<mesh>(mesh_path, api);
+        if (mesh_ptr->is_valid)
+        {
+            mesh_ptr->uploadToGPU(api);
+            mc.m_mesh = mesh_ptr;
+        }
+
+        m_inspector.mesh_path_cache[entity] = mesh_path;
+        m_state.unsaved_changes = true;
+        m_renderer.markBVHDirty();
+    };
+
     // Initialize prefab manager (singleton, same pattern as SceneManager)
     PrefabManager::get().initialize(&m_reflection, render_api);
+
+    // Initialize prefab editor manager
+    m_prefab_editor.initialize(render_api, &m_reflection);
 
     // Prefab drag-drop: spawn prefab entity when dropped onto viewport
     m_viewport.on_prefab_dropped = [this](const std::string& prefab_path) {
@@ -172,24 +195,9 @@ bool EditorApp::initialize(RenderAPIType api_type)
         }
     };
 
-    // Content browser: double-click prefab to spawn
-    m_content_browser.on_spawn_prefab = [this](const std::string& prefab_path) {
-        m_undo.snapshotIfNeeded([this]() { return buildLevelDataFromECS(); });
-
-        auto entity = PrefabManager::get().spawn(m_world.registry, prefab_path);
-        if (entity != entt::null)
-        {
-            PrefabData data;
-            if (PrefabManager::loadPrefab(prefab_path, data))
-            {
-                if (data.json.contains("mesh") && data.json["mesh"].contains("path"))
-                    m_inspector.mesh_path_cache[entity] = data.json["mesh"]["path"].get<std::string>();
-            }
-
-            m_hierarchy.selected_entity = entity;
-            m_state.unsaved_changes = true;
-            m_renderer.markBVHDirty();
-        }
+    // Content browser: double-click prefab to open in Prefab Editor
+    m_content_browser.on_open_prefab = [this](const std::string& prefab_path) {
+        m_prefab_editor.openPrefab(prefab_path);
     };
 
     // Hierarchy: save entity as prefab file
@@ -222,6 +230,7 @@ bool EditorApp::initialize(RenderAPIType api_type)
             path, mesh_path, collider_path);
     };
 
+    m_hierarchy.reflection = &m_reflection;
     m_navmesh_panel.registry = &m_world.registry;
     m_physics_debug_panel.registry = &m_world.registry;
 
@@ -396,6 +405,13 @@ void EditorApp::run()
         if (!m_pie_clients.empty())
             render_api->setViewportSize(m_viewport.width, m_viewport.height);
 
+        // --- Phase 1c: Render prefab editor 3D previews ---
+        m_prefab_editor.renderAllPreviews();
+
+        // Restore main viewport size after prefab editor rendering
+        if (m_prefab_editor.hasOpenEditors())
+            render_api->setViewportSize(m_viewport.width, m_viewport.height);
+
         // Update editor state stats (after scene render so stats are current)
         m_state.fps = ImGui::GetIO().Framerate;
         m_state.delta_time = m_delta_time;
@@ -537,6 +553,9 @@ void EditorApp::run()
             renderPackageDialog();
             renderEditorSettings();
 
+            // Prefab editor windows (each is its own dockable window)
+            m_prefab_editor.drawAll();
+
             if (bvh_dirty)
                 m_renderer.markBVHDirty();
         }
@@ -544,6 +563,15 @@ void EditorApp::run()
         // --- Phase 3: Render ImGui to screen ---
         ImGui::Render();
         render_api->renderUI();
+
+        // Multi-viewport: update and render platform windows (second monitor support)
+        ImGuiIO& io = ImGui::GetIO();
+        if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
+        {
+            ImGui::UpdatePlatformWindows();
+            ImGui::RenderPlatformWindowsDefault();
+        }
+
         m_app.swapBuffers();
 
         Uint32 frame_end = SDL_GetTicks();
@@ -656,6 +684,9 @@ void EditorApp::shutdown()
 
     if (m_editor_config)
         m_editor_config->save();
+
+    // Cleanup prefab editors (destroy PIE viewport resources)
+    m_prefab_editor.shutdown();
 
     if (auto* api = m_app.getRenderAPI())
         api->waitForGPU();
@@ -1471,7 +1502,7 @@ void EditorApp::processEvents()
             else if (!m_state.isSimulationActive() || m_state.play_mode == PlayMode::Ejected)
             {
                 // Editor camera: right-click to fly (blocked during gizmo drag)
-                if (event.button.button == SDL_BUTTON_RIGHT && !m_state.gizmo_using)
+                if (event.button.button == SDL_BUTTON_RIGHT && !m_state.gizmo_using && m_viewport.is_hovered)
                 {
                     m_right_mouse = true;
                     SDL_SetRelativeMouseMode(SDL_TRUE);

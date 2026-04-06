@@ -32,6 +32,7 @@
 #include "Reflection/ReflectionRegistry.hpp"
 #include "PIEProcessManager.hpp"
 #include "PIEClientInstance.hpp"
+#include "PrefabEditor/PrefabEditorManager.hpp"
 
 class EditorApp
 {
@@ -115,6 +116,7 @@ private:
     Assets::AssetScanner m_asset_scanner;
     LODSettingsPanel     m_lod_settings_panel;
     ModelPreviewPanel    m_model_preview;
+    PrefabEditorManager  m_prefab_editor;
 
     // Undo/Redo
     UndoSystem m_undo;

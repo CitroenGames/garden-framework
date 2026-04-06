@@ -167,8 +167,8 @@ bool ImGuiManager::initialize(SDL_Window* window, IRenderAPI* renderAPI, RenderA
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
-    // Multi-viewport can be enabled later if needed:
-    // io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
+    // Multi-viewport: allows ImGui windows to be dragged to separate OS windows (second monitor)
+    io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
 
     // Setup style
     ApplyEditorTheme();

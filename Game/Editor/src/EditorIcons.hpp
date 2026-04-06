@@ -77,5 +77,11 @@
 // --- Prefab ---
 #define ICON_FA_PUZZLE_PIECE        "\xef\x84\xae"  // U+F12E  (prefab)
 
+// --- Context menu actions ---
+#define ICON_FA_FOLDER_PLUS         "\xef\x99\x9e"  // U+F65E  (create folder)
+#define ICON_FA_CLIPBOARD           "\xef\x8c\xa8"  // U+F328  (clipboard/copy)
+#define ICON_FA_PASTE               "\xef\x83\xaa"  // U+F0EA  (paste)
+#define ICON_FA_ROTATE_LEFT         "\xef\x8b\xa2"  // U+F2EA  (reset to defaults)
+
 // --- Misc ---
 #define ICON_FA_MUSIC               "\xef\x80\x81"  // U+F001  (audio)
