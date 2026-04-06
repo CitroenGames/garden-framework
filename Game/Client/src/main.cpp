@@ -30,6 +30,7 @@
 #include "Assets/GltfAssetLoader.hpp"
 #include "Audio/AudioSystem.hpp"
 #include "Reflection/ReflectionRegistry.hpp"
+#include "Prefab/PrefabManager.hpp"
 
 namespace fs = std::filesystem;
 
@@ -333,6 +334,8 @@ int main(int argc, char* argv[])
     services.connect_port = connect_port;
 
     game_module.registerComponents(&reflection);
+
+    PrefabManager::get().initialize(&reflection, render_api);
 
     if (!game_module.init(&services))
     {

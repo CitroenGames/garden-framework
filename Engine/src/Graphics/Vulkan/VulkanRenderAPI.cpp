@@ -259,6 +259,18 @@ void VulkanRenderAPI::shutdown()
         default_texture = VulkanTexture();
     }
 
+    // Clean up default shadow fallback (sampler owned by sampler_cache)
+    if (default_shadow_view != VK_NULL_HANDLE) {
+        vkDestroyImageView(device, default_shadow_view, nullptr);
+        default_shadow_view = VK_NULL_HANDLE;
+    }
+    if (default_shadow_image != VK_NULL_HANDLE && vma_allocator) {
+        vmaDestroyImage(vma_allocator, default_shadow_image, default_shadow_allocation);
+        default_shadow_image = VK_NULL_HANDLE;
+        default_shadow_allocation = nullptr;
+    }
+    default_shadow_sampler = VK_NULL_HANDLE;
+
     // Clean up textures (samplers owned by sampler_cache)
     for (auto& pair : textures) {
         VulkanTexture& tex = pair.second;

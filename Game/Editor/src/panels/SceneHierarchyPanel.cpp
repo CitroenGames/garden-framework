@@ -1,5 +1,6 @@
 #include "SceneHierarchyPanel.hpp"
 #include "Components/Components.hpp"
+#include "Components/PrefabInstanceComponent.hpp"
 #include "EditorIcons.hpp"
 #include "imgui.h"
 #include <algorithm>
@@ -154,7 +155,12 @@ void SceneHierarchyPanel::draw(entt::registry& registry, bool* out_dirty, bool* 
         const char* icon = ICON_FA_CIRCLE;
         ImVec4 icon_color(0.43f, 0.43f, 0.43f, 1.0f);
 
-        if (registry.all_of<PlayerComponent>(entity))
+        if (registry.all_of<PrefabInstanceComponent>(entity))
+        {
+            icon = ICON_FA_PUZZLE_PIECE;
+            icon_color = ImVec4(0.75f, 0.40f, 1.0f, 1.0f);
+        }
+        else if (registry.all_of<PlayerComponent>(entity))
         {
             icon = ICON_FA_USER;
             icon_color = ImVec4(0.39f, 0.55f, 0.90f, 1.0f);
@@ -258,6 +264,11 @@ void SceneHierarchyPanel::draw(entt::registry& registry, bool* out_dirty, bool* 
             {
                 to_duplicate = entity;
             }
+            if (ImGui::MenuItem(ICON_FA_PUZZLE_PIECE "  Save as Prefab"))
+            {
+                if (on_save_as_prefab)
+                    on_save_as_prefab(entity);
+            }
             if (ImGui::MenuItem(ICON_FA_PENCIL "  Rename"))
             {
                 m_renaming_entity = entity;
@@ -277,6 +288,10 @@ void SceneHierarchyPanel::draw(entt::registry& registry, bool* out_dirty, bool* 
     }
 
     ImGui::PopStyleColor(2); // Header, HeaderHovered
+
+    // Click empty space in hierarchy to deselect
+    if (ImGui::IsWindowHovered() && ImGui::IsMouseClicked(0) && !ImGui::IsAnyItemHovered())
+        selected_entity = entt::null;
 
     // Deferred duplication
     if (registry.valid(to_duplicate))

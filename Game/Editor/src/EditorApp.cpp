@@ -9,6 +9,8 @@
 #include "Utils/FileDialog.hpp"
 #include "Utils/EnginePaths.hpp"
 #include "Components/Components.hpp"
+#include "Components/PrefabInstanceComponent.hpp"
+#include "Prefab/PrefabManager.hpp"
 #include "Reflection/EngineReflection.hpp"
 #include "Assets/LODMeshSerializer.hpp"
 #include "Project/ProjectManager.hpp"
@@ -145,6 +147,80 @@ bool EditorApp::initialize(RenderAPIType api_type)
     // Register engine reflection and wire up inspector
     registerEngineReflection(m_reflection);
     m_inspector.reflection = &m_reflection;
+
+    // Initialize prefab manager (singleton, same pattern as SceneManager)
+    PrefabManager::get().initialize(&m_reflection, render_api);
+
+    // Prefab drag-drop: spawn prefab entity when dropped onto viewport
+    m_viewport.on_prefab_dropped = [this](const std::string& prefab_path) {
+        m_undo.snapshotIfNeeded([this]() { return buildLevelDataFromECS(); });
+
+        auto entity = PrefabManager::get().spawn(m_world.registry, prefab_path);
+        if (entity != entt::null)
+        {
+            // Update mesh path cache so save/serialize works
+            PrefabData data;
+            if (PrefabManager::loadPrefab(prefab_path, data))
+            {
+                if (data.json.contains("mesh") && data.json["mesh"].contains("path"))
+                    m_inspector.mesh_path_cache[entity] = data.json["mesh"]["path"].get<std::string>();
+            }
+
+            m_hierarchy.selected_entity = entity;
+            m_state.unsaved_changes = true;
+            m_renderer.markBVHDirty();
+        }
+    };
+
+    // Content browser: double-click prefab to spawn
+    m_content_browser.on_spawn_prefab = [this](const std::string& prefab_path) {
+        m_undo.snapshotIfNeeded([this]() { return buildLevelDataFromECS(); });
+
+        auto entity = PrefabManager::get().spawn(m_world.registry, prefab_path);
+        if (entity != entt::null)
+        {
+            PrefabData data;
+            if (PrefabManager::loadPrefab(prefab_path, data))
+            {
+                if (data.json.contains("mesh") && data.json["mesh"].contains("path"))
+                    m_inspector.mesh_path_cache[entity] = data.json["mesh"]["path"].get<std::string>();
+            }
+
+            m_hierarchy.selected_entity = entity;
+            m_state.unsaved_changes = true;
+            m_renderer.markBVHDirty();
+        }
+    };
+
+    // Hierarchy: save entity as prefab file
+    m_hierarchy.on_save_as_prefab = [this](entt::entity entity) {
+        std::string path = FileDialog::saveFile("Save as Prefab",
+            "Prefab Files (*.prefab)\0*.prefab\0All Files (*.*)\0*.*\0");
+        if (path.empty()) return;
+
+        // Ensure .prefab extension
+        if (path.size() < 7 || path.substr(path.size() - 7) != ".prefab")
+            path += ".prefab";
+
+        // Get mesh path from cache
+        std::string mesh_path;
+        auto it = m_inspector.mesh_path_cache.find(entity);
+        if (it != m_inspector.mesh_path_cache.end())
+            mesh_path = it->second;
+
+        // Get collider mesh path from original level entity if available
+        std::string collider_path;
+        if (auto* tag = m_world.registry.try_get<TagComponent>(entity))
+        {
+            const LevelEntity* orig = findOriginalLevelEntity(tag->name);
+            if (orig)
+                collider_path = orig->collider_mesh_path;
+        }
+
+        PrefabManager::get().savePrefab(
+            m_world.registry, entity,
+            path, mesh_path, collider_path);
+    };
 
     m_navmesh_panel.registry = &m_world.registry;
     m_physics_debug_panel.registry = &m_world.registry;
@@ -1185,6 +1261,16 @@ void EditorApp::processEvents()
                     break;
                 }
 
+                // Escape in editing mode: deselect selected entity
+                if (event.key.keysym.scancode == SDL_SCANCODE_ESCAPE &&
+                    !m_state.isSimulationActive() &&
+                    !ImGui::GetIO().WantTextInput)
+                {
+                    if (m_hierarchy.selected_entity != entt::null)
+                        m_hierarchy.selected_entity = entt::null;
+                    break;
+                }
+
                 // F8: eject/return toggle during play
                 if (event.key.keysym.scancode == SDL_SCANCODE_F8)
                 {
@@ -1215,6 +1301,24 @@ void EditorApp::processEvents()
                     !m_state.isSimulationActive())
                 {
                     newLevel();
+                    break;
+                }
+
+                // Ctrl+C: copy selected entity (only in editing mode)
+                if (event.key.keysym.scancode == SDL_SCANCODE_C &&
+                    (SDL_GetModState() & KMOD_CTRL) &&
+                    !m_state.isSimulationActive())
+                {
+                    copySelectedEntity();
+                    break;
+                }
+
+                // Ctrl+V: paste entity (only in editing mode)
+                if (event.key.keysym.scancode == SDL_SCANCODE_V &&
+                    (SDL_GetModState() & KMOD_CTRL) &&
+                    !m_state.isSimulationActive())
+                {
+                    pasteEntity();
                     break;
                 }
 
@@ -1264,7 +1368,7 @@ void EditorApp::processEvents()
                 // --- Editor-only hotkeys (transform mode, delete, focus) ---
                 if (!m_state.isSimulationActive() || m_state.play_mode == PlayMode::Ejected)
                 {
-                    if (!ImGui::GetIO().WantCaptureKeyboard && !m_state.gizmo_using)
+                    if (!ImGui::GetIO().WantTextInput && !m_state.gizmo_using)
                     {
                         if (event.key.keysym.scancode == SDL_SCANCODE_W)
                             m_state.transform_mode = EditorState::TransformMode::Translate;
@@ -1570,6 +1674,18 @@ void EditorApp::renderMenuBar()
             }
 
             ImGui::Separator();
+
+            if (ImGui::MenuItem("Copy", "Ctrl+C", false,
+                can_edit && m_hierarchy.selected_entity != entt::null))
+            {
+                copySelectedEntity();
+            }
+
+            if (ImGui::MenuItem("Paste", "Ctrl+V", false,
+                can_edit && m_entity_clipboard.has_value()))
+            {
+                pasteEntity();
+            }
 
             if (ImGui::MenuItem("Duplicate", "Ctrl+D", false,
                 can_edit && m_hierarchy.selected_entity != entt::null))
@@ -2187,6 +2303,126 @@ const LevelEntity* EditorApp::findOriginalLevelEntity(const std::string& name) c
     return nullptr;
 }
 
+LevelEntity EditorApp::buildLevelEntityFromECS(entt::entity entity) const
+{
+    const auto& tag = m_world.registry.get<TagComponent>(entity);
+    const auto& t   = m_world.registry.get<TransformComponent>(entity);
+
+    LevelEntity le;
+    le.name     = tag.name;
+    le.position = t.position;
+    le.rotation = t.rotation;
+    le.scale    = t.scale;
+
+    // Determine entity type from component presence
+    bool has_player  = m_world.registry.all_of<PlayerComponent>(entity);
+    bool has_freecam = m_world.registry.all_of<FreecamComponent>(entity);
+    bool has_rb      = m_world.registry.all_of<RigidBodyComponent>(entity);
+    bool has_mesh    = m_world.registry.all_of<MeshComponent>(entity);
+    bool has_collider= m_world.registry.all_of<ColliderComponent>(entity);
+    bool has_prep    = m_world.registry.all_of<PlayerRepresentationComponent>(entity);
+    bool has_pointlight = m_world.registry.all_of<PointLightComponent>(entity);
+    bool has_spotlight  = m_world.registry.all_of<SpotLightComponent>(entity);
+
+    if      (has_player)               le.type = EntityType::Player;
+    else if (has_freecam)              le.type = EntityType::Freecam;
+    else if (has_prep)                 le.type = EntityType::PlayerRep;
+    else if (has_pointlight)           le.type = EntityType::PointLight;
+    else if (has_spotlight)            le.type = EntityType::SpotLight;
+    else if (has_rb && has_collider)   le.type = EntityType::Physical;
+    else if (has_collider && !has_mesh)le.type = EntityType::Collidable;
+    else if (has_mesh)                 le.type = EntityType::Renderable;
+    else                               le.type = EntityType::Static;
+
+    // Mesh path from cache
+    auto it = m_inspector.mesh_path_cache.find(entity);
+    if (it != m_inspector.mesh_path_cache.end())
+        le.mesh_path = it->second;
+
+    // Read live mesh rendering properties (may have been edited in inspector)
+    if (has_mesh)
+    {
+        auto& mc = m_world.registry.get<MeshComponent>(entity);
+        if (mc.m_mesh)
+        {
+            le.culling      = mc.m_mesh->culling;
+            le.transparent  = mc.m_mesh->transparent;
+            le.visible      = mc.m_mesh->visible;
+            le.casts_shadow = mc.m_mesh->casts_shadow;
+            le.force_lod    = mc.m_mesh->force_lod;
+        }
+    }
+
+    // Preserve fields not exposed in inspector from original LevelEntity
+    const LevelEntity* orig = findOriginalLevelEntity(tag.name);
+    if (orig)
+    {
+        le.texture_paths      = orig->texture_paths;
+        le.collider_mesh_path = orig->collider_mesh_path;
+        le.use_mesh_collision = orig->use_mesh_collision;
+        le.tracked_player_name = orig->tracked_player_name;
+        le.position_offset    = orig->position_offset;
+    }
+
+    // RigidBody
+    if (has_rb)
+    {
+        const auto& rb = m_world.registry.get<RigidBodyComponent>(entity);
+        le.has_rigidbody = true;
+        le.mass          = rb.mass;
+        le.apply_gravity = rb.apply_gravity;
+    }
+
+    if (has_collider)
+        le.has_collider = true;
+
+    // Player component
+    if (has_player)
+    {
+        const auto& pc = m_world.registry.get<PlayerComponent>(entity);
+        le.speed             = pc.speed;
+        le.jump_force        = pc.jump_force;
+        le.mouse_sensitivity = pc.mouse_sensitivity;
+    }
+
+    // Freecam component
+    if (has_freecam)
+    {
+        const auto& fc = m_world.registry.get<FreecamComponent>(entity);
+        le.movement_speed      = fc.movement_speed;
+        le.fast_movement_speed = fc.fast_movement_speed;
+        le.mouse_sensitivity   = fc.mouse_sensitivity;
+    }
+
+    // Point light component
+    if (has_pointlight)
+    {
+        const auto& pl = m_world.registry.get<PointLightComponent>(entity);
+        le.light_color = pl.color;
+        le.light_intensity = pl.intensity;
+        le.light_range = pl.range;
+        le.light_constant_attenuation = pl.constant_attenuation;
+        le.light_linear_attenuation = pl.linear_attenuation;
+        le.light_quadratic_attenuation = pl.quadratic_attenuation;
+    }
+
+    // Spot light component
+    if (has_spotlight)
+    {
+        const auto& sl = m_world.registry.get<SpotLightComponent>(entity);
+        le.light_color = sl.color;
+        le.light_intensity = sl.intensity;
+        le.light_range = sl.range;
+        le.light_inner_cone_angle = sl.inner_cone_angle;
+        le.light_outer_cone_angle = sl.outer_cone_angle;
+        le.light_constant_attenuation = sl.constant_attenuation;
+        le.light_linear_attenuation = sl.linear_attenuation;
+        le.light_quadratic_attenuation = sl.quadratic_attenuation;
+    }
+
+    return le;
+}
+
 LevelData EditorApp::buildLevelDataFromECS() const
 {
     LevelData out;
@@ -2194,127 +2430,132 @@ LevelData EditorApp::buildLevelDataFromECS() const
 
     auto view = m_world.registry.view<TagComponent, TransformComponent>();
     for (auto entity : view)
-    {
-        const auto& tag = view.get<TagComponent>(entity);
-        const auto& t   = view.get<TransformComponent>(entity);
-
-        LevelEntity le;
-        le.name     = tag.name;
-        le.position = t.position;
-        le.rotation = t.rotation;
-        le.scale    = t.scale;
-
-        // Determine entity type from component presence
-        bool has_player  = m_world.registry.all_of<PlayerComponent>(entity);
-        bool has_freecam = m_world.registry.all_of<FreecamComponent>(entity);
-        bool has_rb      = m_world.registry.all_of<RigidBodyComponent>(entity);
-        bool has_mesh    = m_world.registry.all_of<MeshComponent>(entity);
-        bool has_collider= m_world.registry.all_of<ColliderComponent>(entity);
-        bool has_prep    = m_world.registry.all_of<PlayerRepresentationComponent>(entity);
-        bool has_pointlight = m_world.registry.all_of<PointLightComponent>(entity);
-        bool has_spotlight  = m_world.registry.all_of<SpotLightComponent>(entity);
-
-        if      (has_player)               le.type = EntityType::Player;
-        else if (has_freecam)              le.type = EntityType::Freecam;
-        else if (has_prep)                 le.type = EntityType::PlayerRep;
-        else if (has_pointlight)           le.type = EntityType::PointLight;
-        else if (has_spotlight)            le.type = EntityType::SpotLight;
-        else if (has_rb && has_collider)   le.type = EntityType::Physical;
-        else if (has_collider && !has_mesh)le.type = EntityType::Collidable;
-        else if (has_mesh)                 le.type = EntityType::Renderable;
-        else                               le.type = EntityType::Static;
-
-        // Mesh path from cache
-        auto it = m_inspector.mesh_path_cache.find(entity);
-        if (it != m_inspector.mesh_path_cache.end())
-            le.mesh_path = it->second;
-
-        // Read live mesh rendering properties (may have been edited in inspector)
-        if (has_mesh)
-        {
-            auto& mc = m_world.registry.get<MeshComponent>(entity);
-            if (mc.m_mesh)
-            {
-                le.culling      = mc.m_mesh->culling;
-                le.transparent  = mc.m_mesh->transparent;
-                le.visible      = mc.m_mesh->visible;
-                le.casts_shadow = mc.m_mesh->casts_shadow;
-                le.force_lod    = mc.m_mesh->force_lod;
-            }
-        }
-
-        // Preserve fields not exposed in inspector from original LevelEntity
-        const LevelEntity* orig = findOriginalLevelEntity(tag.name);
-        if (orig)
-        {
-            le.texture_paths      = orig->texture_paths;
-            le.collider_mesh_path = orig->collider_mesh_path;
-            le.use_mesh_collision = orig->use_mesh_collision;
-            le.tracked_player_name = orig->tracked_player_name;
-            le.position_offset    = orig->position_offset;
-        }
-
-        // RigidBody
-        if (has_rb)
-        {
-            const auto& rb = m_world.registry.get<RigidBodyComponent>(entity);
-            le.has_rigidbody = true;
-            le.mass          = rb.mass;
-            le.apply_gravity = rb.apply_gravity;
-        }
-
-        if (has_collider)
-            le.has_collider = true;
-
-        // Player component
-        if (has_player)
-        {
-            const auto& pc = m_world.registry.get<PlayerComponent>(entity);
-            le.speed             = pc.speed;
-            le.jump_force        = pc.jump_force;
-            le.mouse_sensitivity = pc.mouse_sensitivity;
-        }
-
-        // Freecam component
-        if (has_freecam)
-        {
-            const auto& fc = m_world.registry.get<FreecamComponent>(entity);
-            le.movement_speed      = fc.movement_speed;
-            le.fast_movement_speed = fc.fast_movement_speed;
-            le.mouse_sensitivity   = fc.mouse_sensitivity;
-        }
-
-        // Point light component
-        if (has_pointlight)
-        {
-            const auto& pl = m_world.registry.get<PointLightComponent>(entity);
-            le.light_color = pl.color;
-            le.light_intensity = pl.intensity;
-            le.light_range = pl.range;
-            le.light_constant_attenuation = pl.constant_attenuation;
-            le.light_linear_attenuation = pl.linear_attenuation;
-            le.light_quadratic_attenuation = pl.quadratic_attenuation;
-        }
-
-        // Spot light component
-        if (has_spotlight)
-        {
-            const auto& sl = m_world.registry.get<SpotLightComponent>(entity);
-            le.light_color = sl.color;
-            le.light_intensity = sl.intensity;
-            le.light_range = sl.range;
-            le.light_inner_cone_angle = sl.inner_cone_angle;
-            le.light_outer_cone_angle = sl.outer_cone_angle;
-            le.light_constant_attenuation = sl.constant_attenuation;
-            le.light_linear_attenuation = sl.linear_attenuation;
-            le.light_quadratic_attenuation = sl.quadratic_attenuation;
-        }
-
-        out.entities.push_back(le);
-    }
+        out.entities.push_back(buildLevelEntityFromECS(entity));
 
     out.metadata.entity_count = static_cast<int>(out.entities.size());
     return out;
+}
+
+// ============================================================================
+// Copy / Paste
+// ============================================================================
+
+void EditorApp::copySelectedEntity()
+{
+    if (m_hierarchy.selected_entity == entt::null ||
+        !m_world.registry.valid(m_hierarchy.selected_entity))
+        return;
+
+    m_entity_clipboard = buildLevelEntityFromECS(m_hierarchy.selected_entity);
+
+    auto it = m_inspector.mesh_path_cache.find(m_hierarchy.selected_entity);
+    m_clipboard_mesh_path = (it != m_inspector.mesh_path_cache.end()) ? it->second : "";
+}
+
+void EditorApp::pasteEntity()
+{
+    if (!m_entity_clipboard.has_value())
+        return;
+
+    IRenderAPI* api = m_app.getRenderAPI();
+    if (!api) return;
+
+    m_undo.pushState(buildLevelDataFromECS(), "paste entity");
+
+    const LevelEntity& le = *m_entity_clipboard;
+
+    auto entity = m_world.registry.create();
+    m_world.registry.emplace<TagComponent>(entity, le.name + " (Pasted)");
+    m_world.registry.emplace<TransformComponent>(entity, le.position.x, le.position.y, le.position.z);
+    auto& t = m_world.registry.get<TransformComponent>(entity);
+    t.rotation = le.rotation;
+    t.scale    = le.scale;
+
+    // Mesh
+    if (!m_clipboard_mesh_path.empty() &&
+        (le.type == EntityType::Renderable || le.type == EntityType::Physical || le.type == EntityType::PlayerRep))
+    {
+        auto& mc = m_world.registry.emplace<MeshComponent>(entity);
+        auto mesh_ptr = std::make_shared<mesh>(m_clipboard_mesh_path, api);
+        if (mesh_ptr->is_valid)
+        {
+            mesh_ptr->uploadToGPU(api);
+            mesh_ptr->culling      = le.culling;
+            mesh_ptr->transparent  = le.transparent;
+            mesh_ptr->visible      = le.visible;
+            mesh_ptr->casts_shadow = le.casts_shadow;
+            mesh_ptr->force_lod    = le.force_lod;
+            mc.m_mesh = mesh_ptr;
+        }
+        m_inspector.mesh_path_cache[entity] = m_clipboard_mesh_path;
+    }
+
+    // RigidBody
+    if (le.has_rigidbody)
+    {
+        auto& rb = m_world.registry.emplace<RigidBodyComponent>(entity);
+        rb.mass          = le.mass;
+        rb.apply_gravity = le.apply_gravity;
+    }
+
+    // Collider
+    if (le.has_collider)
+        m_world.registry.emplace<ColliderComponent>(entity);
+
+    // Player
+    if (le.type == EntityType::Player)
+    {
+        auto& pc = m_world.registry.emplace<PlayerComponent>(entity);
+        pc.speed             = le.speed;
+        pc.jump_force        = le.jump_force;
+        pc.mouse_sensitivity = le.mouse_sensitivity;
+    }
+
+    // Freecam
+    if (le.type == EntityType::Freecam)
+    {
+        auto& fc = m_world.registry.emplace<FreecamComponent>(entity);
+        fc.movement_speed      = le.movement_speed;
+        fc.fast_movement_speed = le.fast_movement_speed;
+        fc.mouse_sensitivity   = le.mouse_sensitivity;
+    }
+
+    // PlayerRep
+    if (le.type == EntityType::PlayerRep)
+    {
+        auto& pr = m_world.registry.emplace<PlayerRepresentationComponent>(entity);
+        pr.position_offset = le.position_offset;
+    }
+
+    // Point Light
+    if (le.type == EntityType::PointLight)
+    {
+        auto& pl = m_world.registry.emplace<PointLightComponent>(entity);
+        pl.color = le.light_color;
+        pl.intensity = le.light_intensity;
+        pl.range = le.light_range;
+        pl.constant_attenuation = le.light_constant_attenuation;
+        pl.linear_attenuation = le.light_linear_attenuation;
+        pl.quadratic_attenuation = le.light_quadratic_attenuation;
+    }
+
+    // Spot Light
+    if (le.type == EntityType::SpotLight)
+    {
+        auto& sl = m_world.registry.emplace<SpotLightComponent>(entity);
+        sl.color = le.light_color;
+        sl.intensity = le.light_intensity;
+        sl.range = le.light_range;
+        sl.inner_cone_angle = le.light_inner_cone_angle;
+        sl.outer_cone_angle = le.light_outer_cone_angle;
+        sl.constant_attenuation = le.light_constant_attenuation;
+        sl.linear_attenuation = le.light_linear_attenuation;
+        sl.quadratic_attenuation = le.light_quadratic_attenuation;
+    }
+
+    m_hierarchy.selected_entity = entity;
+    m_state.unsaved_changes = true;
+    m_renderer.markBVHDirty();
 }
 
 // ============================================================================

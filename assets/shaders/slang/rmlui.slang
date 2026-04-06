@@ -12,10 +12,8 @@ cbuffer RmlCB : register(b0)
     float2 _pad;
 };
 
-[[vk::binding(0, 0)]] [[vk::combinedImageSampler]]
-Texture2D rmlTexture : register(t0);
-[[vk::binding(0, 0)]] [[vk::combinedImageSampler]]
-SamplerState rmlSampler : register(s0);
+[[vk::binding(0, 0)]]Texture2D rmlTexture : register(t0);
+[[vk::binding(0, 0)]]SamplerState rmlSampler : register(s0);
 
 struct VSInput
 {

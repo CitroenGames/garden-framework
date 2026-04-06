@@ -24,8 +24,6 @@ bool InspectorPanel::drawComponentHeader(const char* label, bool can_remove, boo
 
     ImGui::PopStyleColor(3);
 
-    bool header_hovered = ImGui::IsItemHovered();
-
     // Draw label with bold font
     ImGui::SameLine();
     ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 4.0f);
@@ -34,11 +32,11 @@ bool InspectorPanel::drawComponentHeader(const char* label, bool can_remove, boo
     ImGui::TextUnformatted(label);
     if (bold) ImGui::PopFont();
 
-    // Remove button — only visible on hover
-    if (can_remove && header_hovered)
+    // Remove button
+    if (can_remove)
     {
-        float avail = ImGui::GetContentRegionAvail().x;
-        ImGui::SameLine(avail - 5.0f);
+        float btn_pos = ImGui::GetWindowContentRegionMax().x - 20.0f;
+        ImGui::SameLine(btn_pos);
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.5f, 0.1f, 0.1f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.7f, 0.2f, 0.2f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.6f, 0.0f, 0.0f, 1.0f));

@@ -11,6 +11,10 @@
 #define VMA_DYNAMIC_VULKAN_FUNCTIONS 1
 #include "vk_mem_alloc.h"
 
+#include "VkPipelineBuilder.hpp"
+#include "VkDescriptorWriter.hpp"
+#include "VkInitHelpers.hpp"
+
 bool VulkanRenderAPI::createFxaaResources()
 {
     // Fullscreen quad vertices (position + texcoord)
@@ -46,79 +50,32 @@ bool VulkanRenderAPI::createFxaaResources()
     vmaUnmapMemory(vma_allocator, fxaa_vertex_allocation);
 
     // Create offscreen color image
-    VkImageCreateInfo imageInfo{};
-    imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    imageInfo.imageType = VK_IMAGE_TYPE_2D;
-    imageInfo.format = swapchain_format;
-    imageInfo.extent.width = swapchain_extent.width;
-    imageInfo.extent.height = swapchain_extent.height;
-    imageInfo.extent.depth = 1;
-    imageInfo.mipLevels = 1;
-    imageInfo.arrayLayers = 1;
-    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-    imageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-
-    VmaAllocationCreateInfo imageAllocInfo{};
-    imageAllocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
-
-    if (vmaCreateImage(vma_allocator, &imageInfo, &imageAllocInfo,
-                       &offscreen_image, &offscreen_allocation, nullptr) != VK_SUCCESS) {
+    if (vkutil::createImage(vma_allocator, swapchain_extent.width, swapchain_extent.height,
+                            swapchain_format,
+                            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                            offscreen_image, offscreen_allocation) != VK_SUCCESS) {
         printf("Failed to create offscreen image\n");
         return false;
     }
 
     // Create offscreen image view
-    VkImageViewCreateInfo viewInfo{};
-    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    viewInfo.image = offscreen_image;
-    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    viewInfo.format = swapchain_format;
-    viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    viewInfo.subresourceRange.baseMipLevel = 0;
-    viewInfo.subresourceRange.levelCount = 1;
-    viewInfo.subresourceRange.baseArrayLayer = 0;
-    viewInfo.subresourceRange.layerCount = 1;
-
-    if (vkCreateImageView(device, &viewInfo, nullptr, &offscreen_view) != VK_SUCCESS) {
+    offscreen_view = vkutil::createImageView(device, offscreen_image, swapchain_format, VK_IMAGE_ASPECT_COLOR_BIT);
+    if (offscreen_view == VK_NULL_HANDLE) {
         printf("Failed to create offscreen image view\n");
         return false;
     }
 
     // Create offscreen depth image
-    VkImageCreateInfo depthImageInfo{};
-    depthImageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    depthImageInfo.imageType = VK_IMAGE_TYPE_2D;
-    depthImageInfo.format = depth_format;
-    depthImageInfo.extent.width = swapchain_extent.width;
-    depthImageInfo.extent.height = swapchain_extent.height;
-    depthImageInfo.extent.depth = 1;
-    depthImageInfo.mipLevels = 1;
-    depthImageInfo.arrayLayers = 1;
-    depthImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-    depthImageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-    depthImageInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-    depthImageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-
-    if (vmaCreateImage(vma_allocator, &depthImageInfo, &imageAllocInfo,
-                       &offscreen_depth_image, &offscreen_depth_allocation, nullptr) != VK_SUCCESS) {
+    if (vkutil::createImage(vma_allocator, swapchain_extent.width, swapchain_extent.height,
+                            depth_format,
+                            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                            offscreen_depth_image, offscreen_depth_allocation) != VK_SUCCESS) {
         printf("Failed to create offscreen depth image\n");
         return false;
     }
 
-    VkImageViewCreateInfo depthViewInfo{};
-    depthViewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    depthViewInfo.image = offscreen_depth_image;
-    depthViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    depthViewInfo.format = depth_format;
-    depthViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-    depthViewInfo.subresourceRange.baseMipLevel = 0;
-    depthViewInfo.subresourceRange.levelCount = 1;
-    depthViewInfo.subresourceRange.baseArrayLayer = 0;
-    depthViewInfo.subresourceRange.layerCount = 1;
-
-    if (vkCreateImageView(device, &depthViewInfo, nullptr, &offscreen_depth_view) != VK_SUCCESS) {
+    offscreen_depth_view = vkutil::createImageView(device, offscreen_depth_image, depth_format, VK_IMAGE_ASPECT_DEPTH_BIT);
+    if (offscreen_depth_view == VK_NULL_HANDLE) {
         printf("Failed to create offscreen depth view\n");
         return false;
     }
@@ -205,16 +162,10 @@ bool VulkanRenderAPI::createFxaaResources()
     // Create offscreen framebuffer
     offscreen_framebuffers.resize(1);
     std::array<VkImageView, 2> fbAttachments = { offscreen_view, offscreen_depth_view };
-    VkFramebufferCreateInfo framebufferInfo{};
-    framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-    framebufferInfo.renderPass = offscreen_render_pass;
-    framebufferInfo.attachmentCount = static_cast<uint32_t>(fbAttachments.size());
-    framebufferInfo.pAttachments = fbAttachments.data();
-    framebufferInfo.width = swapchain_extent.width;
-    framebufferInfo.height = swapchain_extent.height;
-    framebufferInfo.layers = 1;
-
-    if (vkCreateFramebuffer(device, &framebufferInfo, nullptr, &offscreen_framebuffers[0]) != VK_SUCCESS) {
+    offscreen_framebuffers[0] = vkutil::createFramebuffer(device, offscreen_render_pass,
+                                                          fbAttachments.data(), static_cast<uint32_t>(fbAttachments.size()),
+                                                          swapchain_extent.width, swapchain_extent.height);
+    if (offscreen_framebuffers[0] == VK_NULL_HANDLE) {
         printf("Failed to create offscreen framebuffer\n");
         return false;
     }
@@ -265,16 +216,10 @@ bool VulkanRenderAPI::createFxaaResources()
     // Create FXAA framebuffers (swapchain images only, no depth)
     fxaa_framebuffers.resize(swapchain_image_views.size());
     for (size_t i = 0; i < swapchain_image_views.size(); i++) {
-        VkFramebufferCreateInfo fbInfo{};
-        fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-        fbInfo.renderPass = fxaa_render_pass;
-        fbInfo.attachmentCount = 1;
-        fbInfo.pAttachments = &swapchain_image_views[i];
-        fbInfo.width = swapchain_extent.width;
-        fbInfo.height = swapchain_extent.height;
-        fbInfo.layers = 1;
-
-        if (vkCreateFramebuffer(device, &fbInfo, nullptr, &fxaa_framebuffers[i]) != VK_SUCCESS) {
+        fxaa_framebuffers[i] = vkutil::createFramebuffer(device, fxaa_render_pass,
+                                                         &swapchain_image_views[i], 1,
+                                                         swapchain_extent.width, swapchain_extent.height);
+        if (fxaa_framebuffers[i] == VK_NULL_HANDLE) {
             printf("Failed to create FXAA framebuffer %zu\n", i);
             return false;
         }
@@ -336,20 +281,6 @@ bool VulkanRenderAPI::createFxaaResources()
         return false;
     }
 
-    VkPipelineShaderStageCreateInfo vertShaderStageInfo{};
-    vertShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    vertShaderStageInfo.stage = VK_SHADER_STAGE_VERTEX_BIT;
-    vertShaderStageInfo.module = vertShaderModule;
-    vertShaderStageInfo.pName = "main";
-
-    VkPipelineShaderStageCreateInfo fragShaderStageInfo{};
-    fragShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    fragShaderStageInfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-    fragShaderStageInfo.module = fragShaderModule;
-    fragShaderStageInfo.pName = "main";
-
-    VkPipelineShaderStageCreateInfo shaderStages[] = { vertShaderStageInfo, fragShaderStageInfo };
-
     // Vertex input (vec2 pos, vec2 texCoord)
     VkVertexInputBindingDescription bindingDescription{};
     bindingDescription.binding = 0;
@@ -367,97 +298,24 @@ bool VulkanRenderAPI::createFxaaResources()
     attributeDescriptions[1].format = VK_FORMAT_R32G32_SFLOAT;
     attributeDescriptions[1].offset = 2 * sizeof(float);
 
-    VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
-    vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-    vertexInputInfo.vertexBindingDescriptionCount = 1;
-    vertexInputInfo.pVertexBindingDescriptions = &bindingDescription;
-    vertexInputInfo.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributeDescriptions.size());
-    vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions.data();
-
-    VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
-    inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-    inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-    inputAssembly.primitiveRestartEnable = VK_FALSE;
-
-    VkViewport viewport{};
-    viewport.x = 0.0f;
-    viewport.y = 0.0f;
-    viewport.width = (float)swapchain_extent.width;
-    viewport.height = (float)swapchain_extent.height;
-    viewport.minDepth = 0.0f;
-    viewport.maxDepth = 1.0f;
-
-    VkRect2D scissor{};
-    scissor.offset = { 0, 0 };
-    scissor.extent = swapchain_extent;
-
-    VkPipelineViewportStateCreateInfo viewportState{};
-    viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
-    viewportState.viewportCount = 1;
-    viewportState.pViewports = &viewport;
-    viewportState.scissorCount = 1;
-    viewportState.pScissors = &scissor;
-
-    VkPipelineRasterizationStateCreateInfo rasterizer{};
-    rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-    rasterizer.depthClampEnable = VK_FALSE;
-    rasterizer.rasterizerDiscardEnable = VK_FALSE;
-    rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
-    rasterizer.lineWidth = 1.0f;
-    rasterizer.cullMode = VK_CULL_MODE_NONE;
-    rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-    rasterizer.depthBiasEnable = VK_FALSE;
-
-    VkPipelineMultisampleStateCreateInfo multisampling{};
-    multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-    multisampling.sampleShadingEnable = VK_FALSE;
-    multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-
     VkPipelineColorBlendAttachmentState colorBlendAttachment{};
     colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                                           VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
     colorBlendAttachment.blendEnable = VK_FALSE;
 
-    VkPipelineColorBlendStateCreateInfo colorBlending{};
-    colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-    colorBlending.logicOpEnable = VK_FALSE;
-    colorBlending.attachmentCount = 1;
-    colorBlending.pAttachments = &colorBlendAttachment;
+    VkPipelineBuilder builder(device, vk_pipeline_cache);
+    VkResult pipelineResult = builder
+        .setShaders(vertShaderModule, fragShaderModule)
+        .setVertexInput(&bindingDescription, 1, attributeDescriptions.data(), static_cast<uint32_t>(attributeDescriptions.size()))
+        .setCullMode(VK_CULL_MODE_NONE)
+        .setFrontFace(VK_FRONT_FACE_COUNTER_CLOCKWISE)
+        .setDepthTest(VK_FALSE, VK_FALSE)
+        .setColorBlend(&colorBlendAttachment)
+        .setRenderPass(fxaa_render_pass, 0)
+        .setLayout(fxaa_pipeline_layout)
+        .build(&fxaa_pipeline);
 
-    // No depth testing for FXAA pass
-    VkPipelineDepthStencilStateCreateInfo depthStencil{};
-    depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-    depthStencil.depthTestEnable = VK_FALSE;
-    depthStencil.depthWriteEnable = VK_FALSE;
-
-    // Dynamic viewport/scissor so FXAA works correctly after window resize
-    std::vector<VkDynamicState> fxaaDynamicStates = {
-        VK_DYNAMIC_STATE_VIEWPORT,
-        VK_DYNAMIC_STATE_SCISSOR
-    };
-
-    VkPipelineDynamicStateCreateInfo fxaaDynamicState{};
-    fxaaDynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-    fxaaDynamicState.dynamicStateCount = static_cast<uint32_t>(fxaaDynamicStates.size());
-    fxaaDynamicState.pDynamicStates = fxaaDynamicStates.data();
-
-    VkGraphicsPipelineCreateInfo pipelineInfo{};
-    pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-    pipelineInfo.stageCount = 2;
-    pipelineInfo.pStages = shaderStages;
-    pipelineInfo.pVertexInputState = &vertexInputInfo;
-    pipelineInfo.pInputAssemblyState = &inputAssembly;
-    pipelineInfo.pViewportState = &viewportState;
-    pipelineInfo.pRasterizationState = &rasterizer;
-    pipelineInfo.pMultisampleState = &multisampling;
-    pipelineInfo.pDepthStencilState = &depthStencil;
-    pipelineInfo.pColorBlendState = &colorBlending;
-    pipelineInfo.pDynamicState = &fxaaDynamicState;
-    pipelineInfo.layout = fxaa_pipeline_layout;
-    pipelineInfo.renderPass = fxaa_render_pass;
-    pipelineInfo.subpass = 0;
-
-    if (vkCreateGraphicsPipelines(device, vk_pipeline_cache, 1, &pipelineInfo, nullptr, &fxaa_pipeline) != VK_SUCCESS) {
+    if (pipelineResult != VK_SUCCESS) {
         printf("Failed to create FXAA pipeline\n");
         vkDestroyShaderModule(device, fragShaderModule, nullptr);
         vkDestroyShaderModule(device, vertShaderModule, nullptr);
@@ -538,24 +396,10 @@ bool VulkanRenderAPI::createFxaaResources()
         uboInfo.offset = 0;
         uboInfo.range = sizeof(FXAAUbo);
 
-        std::array<VkWriteDescriptorSet, 2> writes{};
-        writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[0].dstSet = fxaa_descriptor_sets[i];
-        writes[0].dstBinding = 0;
-        writes[0].dstArrayElement = 0;
-        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        writes[0].descriptorCount = 1;
-        writes[0].pImageInfo = &imageInfo;
-
-        writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[1].dstSet = fxaa_descriptor_sets[i];
-        writes[1].dstBinding = 1;
-        writes[1].dstArrayElement = 0;
-        writes[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        writes[1].descriptorCount = 1;
-        writes[1].pBufferInfo = &uboInfo;
-
-        vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+        VkDescriptorWriter(fxaa_descriptor_sets[i])
+            .writeImage(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &imageInfo)
+            .writeBuffer(1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &uboInfo)
+            .update(device);
     }
 
     fxaa_initialized = true;
@@ -695,83 +539,27 @@ void VulkanRenderAPI::recreateOffscreenResources()
     }
 
     // Recreate with new size
-    VkImageCreateInfo imageInfo{};
-    imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    imageInfo.imageType = VK_IMAGE_TYPE_2D;
-    imageInfo.format = swapchain_format;
-    imageInfo.extent.width = swapchain_extent.width;
-    imageInfo.extent.height = swapchain_extent.height;
-    imageInfo.extent.depth = 1;
-    imageInfo.mipLevels = 1;
-    imageInfo.arrayLayers = 1;
-    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-    imageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    vkutil::createImage(vma_allocator, swapchain_extent.width, swapchain_extent.height,
+                        swapchain_format,
+                        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                        offscreen_image, offscreen_allocation);
 
-    VmaAllocationCreateInfo imageAllocInfo{};
-    imageAllocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
-
-    VK_CHECK(vmaCreateImage(vma_allocator, &imageInfo, &imageAllocInfo,
-                   &offscreen_image, &offscreen_allocation, nullptr));
-
-    VkImageViewCreateInfo viewInfo{};
-    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    viewInfo.image = offscreen_image;
-    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    viewInfo.format = swapchain_format;
-    viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    viewInfo.subresourceRange.baseMipLevel = 0;
-    viewInfo.subresourceRange.levelCount = 1;
-    viewInfo.subresourceRange.baseArrayLayer = 0;
-    viewInfo.subresourceRange.layerCount = 1;
-
-    VK_CHECK(vkCreateImageView(device, &viewInfo, nullptr, &offscreen_view));
+    offscreen_view = vkutil::createImageView(device, offscreen_image, swapchain_format, VK_IMAGE_ASPECT_COLOR_BIT);
 
     // Create offscreen depth image
-    VkImageCreateInfo depthImageInfo{};
-    depthImageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    depthImageInfo.imageType = VK_IMAGE_TYPE_2D;
-    depthImageInfo.format = depth_format;
-    depthImageInfo.extent.width = swapchain_extent.width;
-    depthImageInfo.extent.height = swapchain_extent.height;
-    depthImageInfo.extent.depth = 1;
-    depthImageInfo.mipLevels = 1;
-    depthImageInfo.arrayLayers = 1;
-    depthImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-    depthImageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-    depthImageInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-    depthImageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    vkutil::createImage(vma_allocator, swapchain_extent.width, swapchain_extent.height,
+                        depth_format,
+                        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                        offscreen_depth_image, offscreen_depth_allocation);
 
-    VK_CHECK(vmaCreateImage(vma_allocator, &depthImageInfo, &imageAllocInfo,
-                   &offscreen_depth_image, &offscreen_depth_allocation, nullptr));
-
-    VkImageViewCreateInfo depthViewInfo{};
-    depthViewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    depthViewInfo.image = offscreen_depth_image;
-    depthViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    depthViewInfo.format = depth_format;
-    depthViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-    depthViewInfo.subresourceRange.baseMipLevel = 0;
-    depthViewInfo.subresourceRange.levelCount = 1;
-    depthViewInfo.subresourceRange.baseArrayLayer = 0;
-    depthViewInfo.subresourceRange.layerCount = 1;
-
-    VK_CHECK(vkCreateImageView(device, &depthViewInfo, nullptr, &offscreen_depth_view));
+    offscreen_depth_view = vkutil::createImageView(device, offscreen_depth_image, depth_format, VK_IMAGE_ASPECT_DEPTH_BIT);
 
     // Recreate offscreen framebuffer
     offscreen_framebuffers.resize(1);
     std::array<VkImageView, 2> fbAttachments = { offscreen_view, offscreen_depth_view };
-    VkFramebufferCreateInfo framebufferInfo{};
-    framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-    framebufferInfo.renderPass = offscreen_render_pass;
-    framebufferInfo.attachmentCount = static_cast<uint32_t>(fbAttachments.size());
-    framebufferInfo.pAttachments = fbAttachments.data();
-    framebufferInfo.width = swapchain_extent.width;
-    framebufferInfo.height = swapchain_extent.height;
-    framebufferInfo.layers = 1;
-
-    VK_CHECK(vkCreateFramebuffer(device, &framebufferInfo, nullptr, &offscreen_framebuffers[0]));
+    offscreen_framebuffers[0] = vkutil::createFramebuffer(device, offscreen_render_pass,
+                                                          fbAttachments.data(), static_cast<uint32_t>(fbAttachments.size()),
+                                                          swapchain_extent.width, swapchain_extent.height);
 
     // Update FXAA descriptor sets with new offscreen view
     for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
@@ -780,31 +568,17 @@ void VulkanRenderAPI::recreateOffscreenResources()
         fxaaImageInfo.imageView = offscreen_view;
         fxaaImageInfo.sampler = offscreen_sampler;
 
-        VkWriteDescriptorSet descriptorWrite{};
-        descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        descriptorWrite.dstSet = fxaa_descriptor_sets[i];
-        descriptorWrite.dstBinding = 0;
-        descriptorWrite.dstArrayElement = 0;
-        descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        descriptorWrite.descriptorCount = 1;
-        descriptorWrite.pImageInfo = &fxaaImageInfo;
-
-        vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+        VkDescriptorWriter(fxaa_descriptor_sets[i])
+            .writeImage(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &fxaaImageInfo)
+            .update(device);
     }
 
     // Recreate FXAA framebuffers (swapchain images only, no depth)
     fxaa_framebuffers.resize(swapchain_image_views.size());
     for (size_t i = 0; i < swapchain_image_views.size(); i++) {
-        VkFramebufferCreateInfo fbInfo{};
-        fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-        fbInfo.renderPass = fxaa_render_pass;
-        fbInfo.attachmentCount = 1;
-        fbInfo.pAttachments = &swapchain_image_views[i];
-        fbInfo.width = swapchain_extent.width;
-        fbInfo.height = swapchain_extent.height;
-        fbInfo.layers = 1;
-
-        vkCreateFramebuffer(device, &fbInfo, nullptr, &fxaa_framebuffers[i]);
+        fxaa_framebuffers[i] = vkutil::createFramebuffer(device, fxaa_render_pass,
+                                                         &swapchain_image_views[i], 1,
+                                                         swapchain_extent.width, swapchain_extent.height);
     }
 }
 

@@ -1,4 +1,6 @@
 #include "VulkanRenderAPI.hpp"
+#include "VkPipelineBuilder.hpp"
+#include "VkDescriptorWriter.hpp"
 #include "Utils/Log.hpp"
 #include "Utils/EnginePaths.hpp"
 #include <stdio.h>
@@ -133,22 +135,7 @@ bool VulkanRenderAPI::createSkyboxResources()
         return false;
     }
 
-    // Create skybox pipeline
-    VkPipelineShaderStageCreateInfo vertStage{};
-    vertStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    vertStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
-    vertStage.module = vertModule;
-    vertStage.pName = "main";
-
-    VkPipelineShaderStageCreateInfo fragStage{};
-    fragStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    fragStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-    fragStage.module = fragModule;
-    fragStage.pName = "main";
-
-    VkPipelineShaderStageCreateInfo shaderStages[] = {vertStage, fragStage};
-
-    // Vertex input - position only (vec3)
+    // Create skybox pipeline using VkPipelineBuilder
     VkVertexInputBindingDescription bindingDesc{};
     bindingDesc.binding = 0;
     bindingDesc.stride = 3 * sizeof(float);
@@ -160,76 +147,24 @@ bool VulkanRenderAPI::createSkyboxResources()
     attrDesc.format = VK_FORMAT_R32G32B32_SFLOAT;
     attrDesc.offset = 0;
 
-    VkPipelineVertexInputStateCreateInfo vertexInput{};
-    vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-    vertexInput.vertexBindingDescriptionCount = 1;
-    vertexInput.pVertexBindingDescriptions = &bindingDesc;
-    vertexInput.vertexAttributeDescriptionCount = 1;
-    vertexInput.pVertexAttributeDescriptions = &attrDesc;
-
-    VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
-    inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-    inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-
-    VkPipelineViewportStateCreateInfo viewportState{};
-    viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
-    viewportState.viewportCount = 1;
-    viewportState.scissorCount = 1;
-
-    VkPipelineRasterizationStateCreateInfo rasterizer{};
-    rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-    rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
-    rasterizer.lineWidth = 1.0f;
-    rasterizer.cullMode = VK_CULL_MODE_NONE;  // No culling for skybox
-    rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-
-    VkPipelineMultisampleStateCreateInfo multisampling{};
-    multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-    multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-
-    VkPipelineDepthStencilStateCreateInfo depthStencil{};
-    depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-    depthStencil.depthTestEnable = VK_TRUE;
-    depthStencil.depthWriteEnable = VK_FALSE;  // Don't write depth
-    depthStencil.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;  // LEQUAL
-
     VkPipelineColorBlendAttachmentState colorBlendAttachment{};
     colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                                           VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
     colorBlendAttachment.blendEnable = VK_FALSE;
 
-    VkPipelineColorBlendStateCreateInfo colorBlending{};
-    colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-    colorBlending.attachmentCount = 1;
-    colorBlending.pAttachments = &colorBlendAttachment;
+    VkPipelineBuilder builder(device, vk_pipeline_cache);
+    VkResult pipelineResult = builder
+        .setShaders(vertModule, fragModule)
+        .setVertexInput(&bindingDesc, 1, &attrDesc, 1)
+        .setCullMode(VK_CULL_MODE_NONE)
+        .setFrontFace(VK_FRONT_FACE_COUNTER_CLOCKWISE)
+        .setDepthTest(VK_TRUE, VK_FALSE, VK_COMPARE_OP_LESS_OR_EQUAL)
+        .setColorBlend(&colorBlendAttachment)
+        .setRenderPass(render_pass, 0)
+        .setLayout(skybox_pipeline_layout)
+        .build(&skybox_pipeline);
 
-    std::vector<VkDynamicState> dynamicStates = {
-        VK_DYNAMIC_STATE_VIEWPORT,
-        VK_DYNAMIC_STATE_SCISSOR
-    };
-
-    VkPipelineDynamicStateCreateInfo dynamicState{};
-    dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-    dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
-    dynamicState.pDynamicStates = dynamicStates.data();
-
-    VkGraphicsPipelineCreateInfo pipelineInfo{};
-    pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-    pipelineInfo.stageCount = 2;
-    pipelineInfo.pStages = shaderStages;
-    pipelineInfo.pVertexInputState = &vertexInput;
-    pipelineInfo.pInputAssemblyState = &inputAssembly;
-    pipelineInfo.pViewportState = &viewportState;
-    pipelineInfo.pRasterizationState = &rasterizer;
-    pipelineInfo.pMultisampleState = &multisampling;
-    pipelineInfo.pDepthStencilState = &depthStencil;
-    pipelineInfo.pColorBlendState = &colorBlending;
-    pipelineInfo.pDynamicState = &dynamicState;
-    pipelineInfo.layout = skybox_pipeline_layout;
-    pipelineInfo.renderPass = render_pass;
-    pipelineInfo.subpass = 0;
-
-    if (vkCreateGraphicsPipelines(device, vk_pipeline_cache, 1, &pipelineInfo, nullptr, &skybox_pipeline) != VK_SUCCESS) {
+    if (pipelineResult != VK_SUCCESS) {
         printf("Failed to create skybox pipeline\n");
         vkDestroyShaderModule(device, vertModule, nullptr);
         vkDestroyShaderModule(device, fragModule, nullptr);
@@ -293,22 +228,16 @@ bool VulkanRenderAPI::createSkyboxResources()
         return false;
     }
 
-    // Update descriptor sets
+    // Update descriptor sets using VkDescriptorWriter
     for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        VkDescriptorBufferInfo bufferInfo{};
-        bufferInfo.buffer = skybox_uniform_buffers[i];
-        bufferInfo.offset = 0;
-        bufferInfo.range = sizeof(SkyboxUBO);
+        VkDescriptorBufferInfo descBufferInfo{};
+        descBufferInfo.buffer = skybox_uniform_buffers[i];
+        descBufferInfo.offset = 0;
+        descBufferInfo.range = sizeof(SkyboxUBO);
 
-        VkWriteDescriptorSet descriptorWrite{};
-        descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        descriptorWrite.dstSet = skybox_descriptor_sets[i];
-        descriptorWrite.dstBinding = 0;
-        descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        descriptorWrite.descriptorCount = 1;
-        descriptorWrite.pBufferInfo = &bufferInfo;
-
-        vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+        VkDescriptorWriter(skybox_descriptor_sets[i])
+            .writeBuffer(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &descBufferInfo)
+            .update(device);
     }
 
     skybox_initialized = true;
@@ -368,8 +297,8 @@ void VulkanRenderAPI::renderSkybox()
 
     // Update skybox UBO
     SkyboxUBO skyboxUbo{};
-    skyboxUbo.view = glm::transpose(glm::mat4(glm::mat3(view_matrix)));
-    skyboxUbo.projection = glm::transpose(projection_matrix);
+    skyboxUbo.view = glm::mat4(glm::mat3(view_matrix));
+    skyboxUbo.projection = projection_matrix;
     skyboxUbo.sunDirection = -light_direction;  // Sun direction is opposite to light direction
     skyboxUbo.time = 0.0f;  // Could be animated if desired
 

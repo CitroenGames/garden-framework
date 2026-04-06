@@ -32,6 +32,9 @@ public:
     // Callback for when a mesh asset is dropped onto the viewport
     std::function<void(const std::string&)> on_mesh_dropped;
 
+    // Callback for when a prefab asset is dropped onto the viewport
+    std::function<void(const std::string&)> on_prefab_dropped;
+
     GizmoResult draw(ImTextureID scene_texture, EditorState& state,
                      entt::registry& registry, entt::entity& selected,
                      camera& cam, IRenderAPI* render_api, SceneBVH& bvh);

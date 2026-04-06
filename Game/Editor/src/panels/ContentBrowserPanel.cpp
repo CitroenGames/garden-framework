@@ -187,6 +187,8 @@ void ContentBrowserPanel::drawFileIcon(ImDrawList* draw_list, ImVec2 center, flo
 
         if (ext == ".gltf" || ext == ".glb" || ext == ".obj")
             icon = ICON_FA_CUBE;
+        else if (ext == ".prefab")
+            icon = ICON_FA_PUZZLE_PIECE;
         else if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" || ext == ".tga")
             icon = ICON_FA_FILE_IMAGE;
         else if (path.string().find(".level.json") != std::string::npos)
@@ -225,6 +227,7 @@ ImVec4 ContentBrowserPanel::getFileColor(const fs::path& path) const
     std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
 
     if (ext == ".gltf" || ext == ".glb" || ext == ".obj") return ImVec4(0.3f, 0.9f, 0.9f, 1.0f);
+    if (ext == ".prefab") return ImVec4(0.75f, 0.40f, 1.0f, 1.0f);
     if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" || ext == ".tga") return ImVec4(0.3f, 0.9f, 0.3f, 1.0f);
     if (ext == ".json" && path.string().find(".level.json") != std::string::npos) return ImVec4(1.0f, 0.6f, 0.2f, 1.0f);
     if (ext == ".vert" || ext == ".frag" || ext == ".hlsl" || ext == ".metal" || ext == ".spv" || ext == ".glsl") return ImVec4(0.7f, 0.4f, 1.0f, 1.0f);
@@ -253,6 +256,7 @@ bool ContentBrowserPanel::passesFilter(const fs::path& path) const
     case 2: return ext == ".gltf" || ext == ".glb" || ext == ".obj";
     case 3: return ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" || ext == ".tga";
     case 4: return ext == ".vert" || ext == ".frag" || ext == ".hlsl" || ext == ".metal" || ext == ".spv" || ext == ".glsl";
+    case 5: return ext == ".prefab";
     default: return true;
     }
 }
@@ -293,6 +297,11 @@ void ContentBrowserPanel::handleFileAction(const fs::path& path)
             std::replace(path_str.begin(), path_str.end(), '\\', '/');
             on_open_mesh(path_str);
         }
+        else if (isPrefabFile(path) && on_spawn_prefab)
+        {
+            std::replace(path_str.begin(), path_str.end(), '\\', '/');
+            on_spawn_prefab(path_str);
+        }
     }
 }
 
@@ -316,6 +325,13 @@ bool ContentBrowserPanel::isMeshFile(const fs::path& path) const
     std::string ext = path.extension().string();
     std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
     return ext == ".gltf" || ext == ".glb" || ext == ".obj";
+}
+
+bool ContentBrowserPanel::isPrefabFile(const fs::path& path) const
+{
+    std::string ext = path.extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+    return ext == ".prefab";
 }
 
 bool ContentBrowserPanel::isTextureFile(const fs::path& path) const
@@ -555,8 +571,8 @@ void ContentBrowserPanel::draw()
 
     // Filter dropdown
     ImGui::SetNextItemWidth(100.0f);
-    const char* filter_items[] = { "All", "Levels", "Models", "Textures", "Shaders" };
-    ImGui::Combo("##filter", &m_filter_mode, filter_items, 5);
+    const char* filter_items[] = { "All", "Levels", "Models", "Textures", "Shaders", "Prefabs" };
+    ImGui::Combo("##filter", &m_filter_mode, filter_items, 6);
     ImGui::SameLine();
 
     // Grid/List view toggle
@@ -699,6 +715,19 @@ void ContentBrowserPanel::draw()
                         ImGui::SetDragDropPayload("ASSET_MESH_PATH", path_str.c_str(), path_str.size() + 1);
                         ImVec4 fc = getFileColor(item);
                         ImGui::TextColored(fc, "[M]");
+                        ImGui::SameLine();
+                        ImGui::Text("%s", item.filename().string().c_str());
+                        ImGui::EndDragDropSource();
+                    }
+
+                    // Drag source for prefab files
+                    if (!is_back && isPrefabFile(item) && ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
+                    {
+                        std::string path_str = item.string();
+                        std::replace(path_str.begin(), path_str.end(), '\\', '/');
+                        ImGui::SetDragDropPayload("ASSET_PREFAB_PATH", path_str.c_str(), path_str.size() + 1);
+                        ImVec4 fc = getFileColor(item);
+                        ImGui::TextColored(fc, "[P]");
                         ImGui::SameLine();
                         ImGui::Text("%s", item.filename().string().c_str());
                         ImGui::EndDragDropSource();
@@ -909,6 +938,19 @@ void ContentBrowserPanel::draw()
                     ImGui::SetDragDropPayload("ASSET_MESH_PATH", path_str.c_str(), path_str.size() + 1);
                     ImVec4 fc = getFileColor(item);
                     ImGui::TextColored(fc, "[M]");
+                    ImGui::SameLine();
+                    ImGui::Text("%s", item.filename().string().c_str());
+                    ImGui::EndDragDropSource();
+                }
+
+                // Drag source for prefab files
+                if (!is_back && isPrefabFile(item) && ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
+                {
+                    std::string path_str = item.string();
+                    std::replace(path_str.begin(), path_str.end(), '\\', '/');
+                    ImGui::SetDragDropPayload("ASSET_PREFAB_PATH", path_str.c_str(), path_str.size() + 1);
+                    ImVec4 fc = getFileColor(item);
+                    ImGui::TextColored(fc, "[P]");
                     ImGui::SameLine();
                     ImGui::Text("%s", item.filename().string().c_str());
                     ImGui::EndDragDropSource();

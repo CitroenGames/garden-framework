@@ -15,6 +15,7 @@
 #include "Plugin/GameModuleLoader.hpp"
 #include "Project/ProjectManager.hpp"
 #include "Reflection/ReflectionRegistry.hpp"
+#include "Prefab/PrefabManager.hpp"
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -168,6 +169,8 @@ int main(int argc, char* argv[])
     services.listen_port = listen_port;
 
     game_module.registerComponents(&reflection);
+
+    PrefabManager::get().initialize(&reflection, render_api);
 
     if (!game_module.serverInit(&services))
     {

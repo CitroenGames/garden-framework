@@ -2,11 +2,16 @@
 
 #include <entt/entt.hpp>
 #include <unordered_set>
+#include <functional>
+#include <string>
 
 class SceneHierarchyPanel
 {
 public:
     entt::entity selected_entity = entt::null;
+
+    // Callback: editor wires this to open save dialog and write .prefab file
+    std::function<void(entt::entity)> on_save_as_prefab;
 
     // Draw the hierarchy panel. Pass a dirty flag pointer so changes can trigger BVH rebuild.
     // out_unsaved: set to true when any scene mutation occurs.
