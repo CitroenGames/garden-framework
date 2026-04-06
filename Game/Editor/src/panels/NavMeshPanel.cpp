@@ -42,13 +42,29 @@ void NavMeshPanel::draw()
         return;
     }
 
-    // ── Generation Settings ──────────────────────────────────────────────
-    drawSectionHeader("Generation Settings", ImVec4(0.3f, 0.8f, 0.5f, 1.0f));
+    // ── Agent Settings ──────────────────────────────────────────────────
+    drawSectionHeader("Agent Settings", ImVec4(0.3f, 0.8f, 0.5f, 1.0f));
 
     ImGui::DragFloat("Max Slope Angle", &m_config.max_slope_angle, 0.5f, 0.0f, 90.0f, "%.1f deg");
     ImGui::DragFloat("Agent Height",    &m_config.agent_height, 0.05f, 0.1f, 10.0f, "%.2f");
     ImGui::DragFloat("Agent Radius",    &m_config.agent_radius, 0.01f, 0.01f, 5.0f, "%.2f");
-    ImGui::DragFloat("Merge Distance",  &m_config.merge_distance, 0.0001f, 0.0001f, 1.0f, "%.4f");
+    ImGui::DragFloat("Max Climb",       &m_config.max_climb, 0.01f, 0.0f, 5.0f, "%.2f");
+
+    // ── Advanced Recast Settings ────────────────────────────────────────
+    ImGui::Spacing();
+    if (ImGui::CollapsingHeader("Advanced (Recast)"))
+    {
+        m_show_advanced = true;
+        ImGui::DragFloat("Cell Size",        &m_config.cell_size, 0.01f, 0.05f, 2.0f, "%.2f");
+        ImGui::DragFloat("Cell Height",      &m_config.cell_height, 0.01f, 0.05f, 2.0f, "%.2f");
+        ImGui::DragFloat("Max Edge Length",   &m_config.max_edge_len, 0.5f, 0.0f, 50.0f, "%.1f");
+        ImGui::DragFloat("Max Edge Error",    &m_config.max_edge_error, 0.1f, 0.0f, 10.0f, "%.1f");
+        ImGui::DragInt("Min Region Area",     &m_config.min_region_area, 1, 0, 1000);
+        ImGui::DragInt("Merge Region Area",   &m_config.merge_region_area, 1, 0, 1000);
+        ImGui::DragInt("Max Verts/Poly",      &m_config.max_verts_per_poly, 1, 3, 6);
+        ImGui::DragFloat("Detail Sample Dist",      &m_config.detail_sample_dist, 0.5f, 0.0f, 50.0f, "%.1f");
+        ImGui::DragFloat("Detail Sample Max Error",  &m_config.detail_sample_max_error, 0.1f, 0.0f, 10.0f, "%.1f");
+    }
 
     ImGui::Spacing();
     if (ImGui::Button("Generate NavMesh", ImVec2(-1.0f, 0.0f)))
@@ -56,27 +72,21 @@ void NavMeshPanel::draw()
         Navigation::NavMeshGenerator::GenerationStats stats;
         navmesh = Navigation::NavMeshGenerator::generate(*registry, m_config, &stats);
         m_total_source_tris = stats.source_triangles;
-        m_walkable_tris = stats.walkable_triangles;
+        m_total_polys = stats.total_polys;
         m_generation_time_ms = stats.time_ms;
-        m_test_path = Navigation::NavPath{}; // Reset path test
+        m_test_path = Navigation::NavPath{};
     }
 
     // ── Stats ────────────────────────────────────────────────────────────
     drawSectionHeader("Stats", ImVec4(0.3f, 0.55f, 0.85f, 1.0f));
 
-    ImGui::Text("Source triangles:   %d", m_total_source_tris);
-    ImGui::Text("Walkable triangles: %d", m_walkable_tris);
-    ImGui::Text("Generation time:    %.1f ms", m_generation_time_ms);
+    ImGui::Text("Source triangles: %d", m_total_source_tris);
+    ImGui::Text("NavMesh polygons: %d", m_total_polys);
+    ImGui::Text("Generation time:  %.1f ms", m_generation_time_ms);
 
     if (navmesh.valid)
     {
-        // Count adjacency
-        int connected_edges = 0;
-        for (auto& tri : navmesh.triangles)
-            for (int i = 0; i < 3; i++)
-                if (tri.neighbors[i] >= 0)
-                    connected_edges++;
-        ImGui::Text("Connected edges:    %d", connected_edges / 2);
+        ImGui::Text("Debug polys:      %d", static_cast<int>(navmesh.debug_polys.size()));
     }
 
     // ── Visualization ────────────────────────────────────────────────────
@@ -129,10 +139,14 @@ void NavMeshPanel::draw()
         if (Navigation::NavMeshSerializer::load(navmesh, m_filepath_buf))
         {
             m_config = navmesh.config;
-            m_walkable_tris = static_cast<int>(navmesh.triangles.size());
-            m_total_source_tris = 0; // Unknown after load
+            m_total_polys = navmesh.total_polys;
+            m_total_source_tris = 0;
             m_generation_time_ms = 0.0f;
             m_test_path = Navigation::NavPath{};
+
+            // Re-extract debug polys after load
+            // (They aren't serialized - regenerate from Detour data)
+            Navigation::NavMeshGenerator::extractDebugPolys(navmesh);
         }
     }
 

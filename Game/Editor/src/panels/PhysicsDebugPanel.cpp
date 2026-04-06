@@ -2,6 +2,7 @@
 #include "Components/Components.hpp"
 #include "Debug/DebugDraw.hpp"
 #include "imgui.h"
+#include <limits>
 
 static void drawSectionHeader(const char* label, ImVec4 accent_color = ImVec4(0.30f, 0.55f, 0.85f, 1.0f))
 {
@@ -91,6 +92,28 @@ void PhysicsDebugPanel::draw()
     ImGui::End();
 }
 
+// Transform a local-space AABB through a full model matrix and compute a world-space AABB
+static void transformAABB(const glm::vec3& local_min, const glm::vec3& local_max,
+                          const glm::mat4& model, glm::vec3& world_min, glm::vec3& world_max)
+{
+    glm::vec3 corners[8] = {
+        {local_min.x, local_min.y, local_min.z}, {local_max.x, local_min.y, local_min.z},
+        {local_max.x, local_max.y, local_min.z}, {local_min.x, local_max.y, local_min.z},
+        {local_min.x, local_min.y, local_max.z}, {local_max.x, local_min.y, local_max.z},
+        {local_max.x, local_max.y, local_max.z}, {local_min.x, local_max.y, local_max.z}
+    };
+
+    world_min = glm::vec3(std::numeric_limits<float>::max());
+    world_max = glm::vec3(std::numeric_limits<float>::lowest());
+
+    for (int i = 0; i < 8; i++)
+    {
+        glm::vec3 w = glm::vec3(model * glm::vec4(corners[i], 1.0f));
+        world_min = glm::min(world_min, w);
+        world_max = glm::max(world_max, w);
+    }
+}
+
 void PhysicsDebugPanel::drawDebugVisualization()
 {
     if (!m_config.enabled || !registry)
@@ -116,8 +139,8 @@ void PhysicsDebugPanel::drawDebugVisualization()
             glm::vec3 mesh_min, mesh_max;
             collider.get_mesh()->getAABB(mesh_min, mesh_max);
 
-            glm::vec3 world_min = mesh_min + transform.position;
-            glm::vec3 world_max = mesh_max + transform.position;
+            glm::vec3 world_min, world_max;
+            transformAABB(mesh_min, mesh_max, transform.getTransformMatrix(), world_min, world_max);
 
             dd.drawAABB(world_min, world_max, m_config.collider_color);
         }
@@ -179,8 +202,8 @@ void PhysicsDebugPanel::drawDebugVisualization()
             glm::vec3 mesh_min, mesh_max;
             mc.m_mesh->getAABB(mesh_min, mesh_max);
 
-            glm::vec3 world_min = mesh_min + transform.position;
-            glm::vec3 world_max = mesh_max + transform.position;
+            glm::vec3 world_min, world_max;
+            transformAABB(mesh_min, mesh_max, transform.getTransformMatrix(), world_min, world_max);
 
             dd.drawAABB(world_min, world_max, m_config.rigidbody_color);
         }

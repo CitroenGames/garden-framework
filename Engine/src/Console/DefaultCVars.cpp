@@ -1,5 +1,18 @@
 // Default ConVar definitions for the engine
 #include "ConVar.hpp"
+#include "Graphics/RenderAPI.hpp"
+
+// Render backend selection (persisted, takes effect on next launch)
+#ifdef __APPLE__
+CONVAR(r_renderapi, "metal", ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
+       "Rendering backend (vulkan, metal). Changes take effect on next launch.");
+#elif defined(_WIN32)
+CONVAR(r_renderapi, "d3d11", ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
+       "Rendering backend (vulkan, d3d11, d3d12). Changes take effect on next launch.");
+#else
+CONVAR(r_renderapi, "vulkan", ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
+       "Rendering backend (vulkan). Changes take effect on next launch.");
+#endif
 
 // Server control
 CONVAR(sv_cheats, 0, ConVarFlags::SERVER_ONLY | ConVarFlags::REPLICATED | ConVarFlags::NOTIFY,
@@ -63,6 +76,15 @@ CONVAR(developer, 0, ConVarFlags::ARCHIVE,
 
 CONVAR(con_notifytime, 4.0f, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
        "Console notification display time in seconds");
+
+CONVAR(con_timestamps, 0, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
+       "Show timestamps in console log");
+
+CONVAR(con_collapse_duplicates, 0, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
+       "Collapse duplicate consecutive messages in console");
+
+CONVAR(con_clear_on_play, 0, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
+       "Clear console when entering play mode");
 
 // Editor packaging
 CONVAR(editor_package_output_dir, "", ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,

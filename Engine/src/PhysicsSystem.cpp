@@ -130,7 +130,7 @@ JPH::BodyID PhysicsSystem::createStaticBody(const glm::vec3& position, const glm
 {
     if (!initialized) initialize();
 
-    JPH::BodyCreationSettings settings(shape, toJoltR(position), JPH::Quat::sIdentity(), JPH::EMotionType::Static, Layers::NON_MOVING);
+    JPH::BodyCreationSettings settings(shape, toJoltR(position), toJoltQuat(rotation), JPH::EMotionType::Static, Layers::NON_MOVING);
 
     JPH::BodyInterface& body_interface = jolt_system->GetBodyInterface();
     JPH::Body* body = body_interface.CreateBody(settings);
@@ -149,7 +149,7 @@ JPH::BodyID PhysicsSystem::createDynamicBody(const glm::vec3& position, const gl
 {
     if (!initialized) initialize();
 
-    JPH::BodyCreationSettings settings(shape, toJoltR(position), JPH::Quat::sIdentity(), JPH::EMotionType::Dynamic, Layers::MOVING);
+    JPH::BodyCreationSettings settings(shape, toJoltR(position), toJoltQuat(rotation), JPH::EMotionType::Dynamic, Layers::MOVING);
     settings.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
     settings.mMassPropertiesOverride.mMass = mass;
     settings.mAllowedDOFs = JPH::EAllowedDOFs::TranslationX | JPH::EAllowedDOFs::TranslationY | JPH::EAllowedDOFs::TranslationZ; // Lock rotation
@@ -171,12 +171,12 @@ JPH::BodyID PhysicsSystem::createDynamicBody(const glm::vec3& position, const gl
     return body_id;
 }
 
-JPH::BodyID PhysicsSystem::createStaticMeshBody(const glm::vec3& position, const glm::vec3& rotation, const mesh& colliderMesh, entt::entity entity)
+JPH::BodyID PhysicsSystem::createStaticMeshBody(const glm::vec3& position, const glm::vec3& rotation, const glm::vec3& scale, const mesh& colliderMesh, entt::entity entity)
 {
     if (!initialized) initialize();
     if (!colliderMesh.vertices || colliderMesh.vertices_len < 3) return JPH::BodyID();
 
-    // Build Jolt triangle list from mesh vertices
+    // Build Jolt triangle list from mesh vertices (in local space)
     JPH::TriangleList triangles;
     triangles.reserve(colliderMesh.vertices_len / 3);
 
@@ -193,7 +193,8 @@ JPH::BodyID PhysicsSystem::createStaticMeshBody(const glm::vec3& position, const
         ));
     }
 
-    LOG_ENGINE_INFO("Creating Jolt mesh body: {} triangles at ({}, {}, {})", triangles.size(), position.x, position.y, position.z);
+    LOG_ENGINE_INFO("Creating Jolt mesh body: {} triangles at ({}, {}, {}), scale=({}, {}, {})",
+        triangles.size(), position.x, position.y, position.z, scale.x, scale.y, scale.z);
 
     JPH::MeshShapeSettings mesh_settings(triangles);
     JPH::ShapeSettings::ShapeResult result = mesh_settings.Create();
@@ -203,7 +204,21 @@ JPH::BodyID PhysicsSystem::createStaticMeshBody(const glm::vec3& position, const
         return JPH::BodyID();
     }
 
-    return createStaticBody(position, rotation, result.Get(), entity);
+    // Apply scale via ScaledShape if not identity
+    JPH::ShapeRefC final_shape = result.Get();
+    if (scale.x != 1.0f || scale.y != 1.0f || scale.z != 1.0f)
+    {
+        JPH::ScaledShapeSettings scaled_settings(final_shape, toJolt(scale));
+        JPH::ShapeSettings::ShapeResult scaled_result = scaled_settings.Create();
+        if (!scaled_result.IsValid())
+        {
+            LOG_ENGINE_ERROR("Failed to create scaled mesh shape: {}", scaled_result.GetError().c_str());
+            return JPH::BodyID();
+        }
+        final_shape = scaled_result.Get();
+    }
+
+    return createStaticBody(position, rotation, final_shape, entity);
 }
 
 void PhysicsSystem::removeBody(entt::entity entity)

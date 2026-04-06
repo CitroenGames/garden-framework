@@ -14,36 +14,52 @@ void NavMeshDebugDraw::draw(const NavMesh& navmesh, const NavMeshDebugConfig& co
 
     if (config.show_wireframe)
     {
-        for (auto& tri : navmesh.triangles)
+        for (auto& poly : navmesh.debug_polys)
         {
-            dd.drawLine(tri.vertices[0] + y_off, tri.vertices[1] + y_off, config.wireframe_color);
-            dd.drawLine(tri.vertices[1] + y_off, tri.vertices[2] + y_off, config.wireframe_color);
-            dd.drawLine(tri.vertices[2] + y_off, tri.vertices[0] + y_off, config.wireframe_color);
+            size_t n = poly.vertices.size();
+            for (size_t i = 0; i < n; i++)
+            {
+                size_t j = (i + 1) % n;
+                dd.drawLine(poly.vertices[i] + y_off,
+                             poly.vertices[j] + y_off,
+                             config.wireframe_color);
+            }
         }
     }
 
     if (config.show_normals)
     {
-        for (auto& tri : navmesh.triangles)
+        for (auto& poly : navmesh.debug_polys)
         {
-            glm::vec3 tip = tri.centroid + tri.normal * config.normal_length;
-            dd.drawLine(tri.centroid + y_off, tip + y_off, config.normal_color);
+            // Approximate normal from first 3 vertices
+            if (poly.vertices.size() >= 3)
+            {
+                glm::vec3 edge1 = poly.vertices[1] - poly.vertices[0];
+                glm::vec3 edge2 = poly.vertices[2] - poly.vertices[0];
+                glm::vec3 normal = glm::normalize(glm::cross(edge1, edge2));
+
+                glm::vec3 tip = poly.centroid + normal * config.normal_length;
+                dd.drawLine(poly.centroid + y_off, tip + y_off, config.normal_color);
+            }
         }
     }
 
     if (config.show_adjacency)
     {
-        for (size_t i = 0; i < navmesh.triangles.size(); i++)
+        // Draw centroid-to-centroid connections between adjacent polygons
+        for (size_t i = 0; i < navmesh.debug_polys.size(); i++)
         {
-            auto& tri = navmesh.triangles[i];
-            for (int ei = 0; ei < 3; ei++)
+            for (size_t j = i + 1; j < navmesh.debug_polys.size(); j++)
             {
-                int32_t n = tri.neighbors[ei];
-                if (n > static_cast<int32_t>(i)) // Only draw once per pair
+                // Check if polygons share an edge (simple distance heuristic)
+                float dist = glm::distance(navmesh.debug_polys[i].centroid,
+                                            navmesh.debug_polys[j].centroid);
+                // Only draw for nearby polygons (likely adjacent)
+                if (dist < navmesh.config.cell_size * navmesh.config.max_edge_len * 1.5f)
                 {
-                    dd.drawLine(tri.centroid + y_off,
-                                navmesh.triangles[n].centroid + y_off,
-                                config.adjacency_color);
+                    dd.drawLine(navmesh.debug_polys[i].centroid + y_off,
+                                 navmesh.debug_polys[j].centroid + y_off,
+                                 config.adjacency_color);
                 }
             }
         }

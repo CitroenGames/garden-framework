@@ -345,17 +345,18 @@ void VulkanRenderAPI::shutdown()
     savePipelineCache();
 
     // Clean up pipelines
-    if (pipeline_no_blend != VK_NULL_HANDLE) {
-        vkDestroyPipeline(device, pipeline_no_blend, nullptr);
-        pipeline_no_blend = VK_NULL_HANDLE;
-    }
-    if (pipeline_alpha_blend != VK_NULL_HANDLE) {
-        vkDestroyPipeline(device, pipeline_alpha_blend, nullptr);
-        pipeline_alpha_blend = VK_NULL_HANDLE;
-    }
-    if (pipeline_additive_blend != VK_NULL_HANDLE) {
-        vkDestroyPipeline(device, pipeline_additive_blend, nullptr);
-        pipeline_additive_blend = VK_NULL_HANDLE;
+    VkPipeline* allPipelines[] = {
+        &pipeline_lit_noblend_cullback, &pipeline_lit_noblend_cullfront, &pipeline_lit_noblend_cullnone,
+        &pipeline_lit_alpha_cullback, &pipeline_lit_alpha_cullnone, &pipeline_lit_additive,
+        &pipeline_unlit_noblend_cullback, &pipeline_unlit_noblend_cullnone,
+        &pipeline_unlit_alpha_cullback, &pipeline_unlit_alpha_cullnone, &pipeline_unlit_additive,
+        &pipeline_debug_lines,
+    };
+    for (VkPipeline* p : allPipelines) {
+        if (*p != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, *p, nullptr);
+            *p = VK_NULL_HANDLE;
+        }
     }
     graphics_pipeline = VK_NULL_HANDLE;
     if (pipeline_layout != VK_NULL_HANDLE) {
@@ -389,6 +390,15 @@ void VulkanRenderAPI::shutdown()
     if (render_pass != VK_NULL_HANDLE) {
         vkDestroyRenderPass(device, render_pass, nullptr);
         render_pass = VK_NULL_HANDLE;
+    }
+
+    // Clean up debug line buffer
+    if (debug_line_buffer != VK_NULL_HANDLE && vma_allocator) {
+        vmaDestroyBuffer(vma_allocator, debug_line_buffer, debug_line_allocation);
+        debug_line_buffer = VK_NULL_HANDLE;
+        debug_line_allocation = nullptr;
+        debug_line_mapped = nullptr;
+        debug_line_buffer_capacity = 0;
     }
 
     // Clean up shared staging buffer
@@ -1211,22 +1221,12 @@ bool VulkanRenderAPI::createGraphicsPipeline()
     pipelineInfo.renderPass = render_pass;
     pipelineInfo.subpass = 0;
 
-    // Create pipeline with NO blending
+    // Blend attachment presets
     VkPipelineColorBlendAttachmentState noBlendAttachment{};
     noBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                                        VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
     noBlendAttachment.blendEnable = VK_FALSE;
 
-    colorBlending.pAttachments = &noBlendAttachment;
-    VkResult pipeResult = vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline_no_blend);
-    if (pipeResult != VK_SUCCESS) {
-        LOG_ENGINE_ERROR("[Vulkan] Failed to create no-blend pipeline: {}", vkResultToString(pipeResult));
-        vkDestroyShaderModule(device, fragShaderModule, nullptr);
-        vkDestroyShaderModule(device, vertShaderModule, nullptr);
-        return false;
-    }
-
-    // Create pipeline with ALPHA blending
     VkPipelineColorBlendAttachmentState alphaBlendAttachment{};
     alphaBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                                           VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
@@ -1238,16 +1238,6 @@ bool VulkanRenderAPI::createGraphicsPipeline()
     alphaBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
     alphaBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
 
-    colorBlending.pAttachments = &alphaBlendAttachment;
-    pipeResult = vkCreateGraphicsPipelines(device, vk_pipeline_cache, 1, &pipelineInfo, nullptr, &pipeline_alpha_blend);
-    if (pipeResult != VK_SUCCESS) {
-        LOG_ENGINE_ERROR("[Vulkan] Failed to create alpha-blend pipeline: {}", vkResultToString(pipeResult));
-        vkDestroyShaderModule(device, fragShaderModule, nullptr);
-        vkDestroyShaderModule(device, vertShaderModule, nullptr);
-        return false;
-    }
-
-    // Create pipeline with ADDITIVE blending
     VkPipelineColorBlendAttachmentState additiveBlendAttachment{};
     additiveBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                                              VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
@@ -1259,21 +1249,83 @@ bool VulkanRenderAPI::createGraphicsPipeline()
     additiveBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
     additiveBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
 
-    colorBlending.pAttachments = &additiveBlendAttachment;
-    if (vkCreateGraphicsPipelines(device, vk_pipeline_cache, 1, &pipelineInfo, nullptr, &pipeline_additive_blend) != VK_SUCCESS) {
-        printf("Failed to create additive-blend pipeline\n");
-        vkDestroyShaderModule(device, fragShaderModule, nullptr);
-        vkDestroyShaderModule(device, vertShaderModule, nullptr);
-        return false;
-    }
+    // Helper to create a pipeline variant
+    auto createVariant = [&](VkCullModeFlags cullMode, VkPipelineColorBlendAttachmentState* blend,
+                             VkPipeline* outPipeline) -> bool {
+        rasterizer.cullMode = cullMode;
+        colorBlending.pAttachments = blend;
+        VkResult r = vkCreateGraphicsPipelines(device, vk_pipeline_cache, 1, &pipelineInfo, nullptr, outPipeline);
+        if (r != VK_SUCCESS) {
+            LOG_ENGINE_ERROR("[Vulkan] Failed to create pipeline variant: {}", vkResultToString(r));
+            return false;
+        }
+        return true;
+    };
 
-    // Set default graphics_pipeline to no_blend for backwards compatibility
-    graphics_pipeline = pipeline_no_blend;
+    // --- Lit pipelines (basic shader) ---
+    if (!createVariant(VK_CULL_MODE_BACK_BIT,  &noBlendAttachment,       &pipeline_lit_noblend_cullback))  { vkDestroyShaderModule(device, fragShaderModule, nullptr); vkDestroyShaderModule(device, vertShaderModule, nullptr); return false; }
+    if (!createVariant(VK_CULL_MODE_FRONT_BIT, &noBlendAttachment,       &pipeline_lit_noblend_cullfront)) { vkDestroyShaderModule(device, fragShaderModule, nullptr); vkDestroyShaderModule(device, vertShaderModule, nullptr); return false; }
+    if (!createVariant(VK_CULL_MODE_NONE,      &noBlendAttachment,       &pipeline_lit_noblend_cullnone))  { vkDestroyShaderModule(device, fragShaderModule, nullptr); vkDestroyShaderModule(device, vertShaderModule, nullptr); return false; }
+    if (!createVariant(VK_CULL_MODE_BACK_BIT,  &alphaBlendAttachment,    &pipeline_lit_alpha_cullback))    { vkDestroyShaderModule(device, fragShaderModule, nullptr); vkDestroyShaderModule(device, vertShaderModule, nullptr); return false; }
+    if (!createVariant(VK_CULL_MODE_NONE,      &alphaBlendAttachment,    &pipeline_lit_alpha_cullnone))    { vkDestroyShaderModule(device, fragShaderModule, nullptr); vkDestroyShaderModule(device, vertShaderModule, nullptr); return false; }
+    if (!createVariant(VK_CULL_MODE_BACK_BIT,  &additiveBlendAttachment, &pipeline_lit_additive))          { vkDestroyShaderModule(device, fragShaderModule, nullptr); vkDestroyShaderModule(device, vertShaderModule, nullptr); return false; }
 
+    LOG_ENGINE_INFO("[Vulkan] Created 6 lit pipeline variants");
+
+    // Done with basic shader modules
     vkDestroyShaderModule(device, fragShaderModule, nullptr);
     vkDestroyShaderModule(device, vertShaderModule, nullptr);
 
-    printf("Graphics pipelines created (no-blend, alpha, additive)\n");
+    // --- Load unlit shaders ---
+    auto unlitVertCode = readShaderFile(EnginePaths::resolveEngineAsset("../assets/shaders/compiled/vulkan/unlit.vert.spv"));
+    auto unlitFragCode = readShaderFile(EnginePaths::resolveEngineAsset("../assets/shaders/compiled/vulkan/unlit.frag.spv"));
+
+    if (unlitVertCode.empty() || unlitFragCode.empty()) {
+        LOG_ENGINE_ERROR("[Vulkan] Failed to load unlit shader files. Run compile_shaders_slang.bat");
+        return false;
+    }
+
+    VkShaderModule unlitVertModule = createShaderModule(unlitVertCode);
+    VkShaderModule unlitFragModule = createShaderModule(unlitFragCode);
+
+    if (unlitVertModule == VK_NULL_HANDLE || unlitFragModule == VK_NULL_HANDLE) {
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create unlit shader modules");
+        if (unlitVertModule != VK_NULL_HANDLE) vkDestroyShaderModule(device, unlitVertModule, nullptr);
+        if (unlitFragModule != VK_NULL_HANDLE) vkDestroyShaderModule(device, unlitFragModule, nullptr);
+        return false;
+    }
+
+    // Update shader stages to unlit
+    shaderStages[0].module = unlitVertModule;
+    shaderStages[1].module = unlitFragModule;
+
+    // --- Unlit pipelines ---
+    if (!createVariant(VK_CULL_MODE_BACK_BIT, &noBlendAttachment,       &pipeline_unlit_noblend_cullback)) { vkDestroyShaderModule(device, unlitFragModule, nullptr); vkDestroyShaderModule(device, unlitVertModule, nullptr); return false; }
+    if (!createVariant(VK_CULL_MODE_NONE,     &noBlendAttachment,       &pipeline_unlit_noblend_cullnone)) { vkDestroyShaderModule(device, unlitFragModule, nullptr); vkDestroyShaderModule(device, unlitVertModule, nullptr); return false; }
+    if (!createVariant(VK_CULL_MODE_BACK_BIT, &alphaBlendAttachment,    &pipeline_unlit_alpha_cullback))   { vkDestroyShaderModule(device, unlitFragModule, nullptr); vkDestroyShaderModule(device, unlitVertModule, nullptr); return false; }
+    if (!createVariant(VK_CULL_MODE_NONE,     &alphaBlendAttachment,    &pipeline_unlit_alpha_cullnone))   { vkDestroyShaderModule(device, unlitFragModule, nullptr); vkDestroyShaderModule(device, unlitVertModule, nullptr); return false; }
+    if (!createVariant(VK_CULL_MODE_BACK_BIT, &additiveBlendAttachment, &pipeline_unlit_additive))         { vkDestroyShaderModule(device, unlitFragModule, nullptr); vkDestroyShaderModule(device, unlitVertModule, nullptr); return false; }
+
+    LOG_ENGINE_INFO("[Vulkan] Created 5 unlit pipeline variants");
+
+    // --- Debug line pipeline (unlit shader, LINE_LIST topology, no cull) ---
+    inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+    if (!createVariant(VK_CULL_MODE_NONE, &noBlendAttachment, &pipeline_debug_lines)) {
+        vkDestroyShaderModule(device, unlitFragModule, nullptr);
+        vkDestroyShaderModule(device, unlitVertModule, nullptr);
+        return false;
+    }
+    inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST; // Restore
+
+    LOG_ENGINE_INFO("[Vulkan] Created debug line pipeline");
+
+    vkDestroyShaderModule(device, unlitFragModule, nullptr);
+    vkDestroyShaderModule(device, unlitVertModule, nullptr);
+
+    // Set default graphics_pipeline for backwards compatibility
+    graphics_pipeline = pipeline_lit_noblend_cullback;
+
+    LOG_ENGINE_INFO("[Vulkan] All 12 graphics pipelines created successfully");
     return true;
 }
 
@@ -1632,7 +1684,22 @@ void VulkanRenderAPI::initializeDescriptorSet(VkDescriptorSet ds, uint32_t frame
         std::array<VkWriteDescriptorSet, 5> allWrites = { writes[0], writes[1], shadowWrite, writes[2], writes[3] };
         vkUpdateDescriptorSets(device, static_cast<uint32_t>(allWrites.size()), allWrites.data(), 0, nullptr);
     } else {
-        vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+        // Bind default texture as shadow map placeholder to avoid uninitialized descriptor
+        shadowImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        shadowImageInfo.imageView = default_texture.imageView;
+        shadowImageInfo.sampler = default_texture.sampler;
+
+        VkWriteDescriptorSet shadowWrite{};
+        shadowWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        shadowWrite.dstSet = ds;
+        shadowWrite.dstBinding = 2;
+        shadowWrite.dstArrayElement = 0;
+        shadowWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        shadowWrite.descriptorCount = 1;
+        shadowWrite.pImageInfo = &shadowImageInfo;
+
+        std::array<VkWriteDescriptorSet, 5> allWrites = { writes[0], writes[1], shadowWrite, writes[2], writes[3] };
+        vkUpdateDescriptorSets(device, static_cast<uint32_t>(allWrites.size()), allWrites.data(), 0, nullptr);
     }
 }
 
@@ -2085,7 +2152,7 @@ bool VulkanRenderAPI::createShadowResources()
     rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
     rasterizer.lineWidth = 1.0f;
     rasterizer.cullMode = VK_CULL_MODE_FRONT_BIT;  // Cull front faces for shadows
-    rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
     rasterizer.depthBiasEnable = VK_TRUE;
     rasterizer.depthBiasConstantFactor = 1.25f;
     rasterizer.depthBiasSlopeFactor = 1.75f;
@@ -4385,6 +4452,36 @@ void VulkanRenderAPI::deleteTexture(TextureHandle texture)
     }
 }
 
+// Pipeline selection based on render state
+VkPipeline VulkanRenderAPI::selectPipeline(const RenderState& state) const
+{
+    bool use_unlit = !state.lighting || !lighting_enabled;
+
+    if (use_unlit) {
+        switch (state.blend_mode) {
+            case BlendMode::Alpha:
+                return (state.cull_mode == CullMode::None) ? pipeline_unlit_alpha_cullnone : pipeline_unlit_alpha_cullback;
+            case BlendMode::Additive:
+                return pipeline_unlit_additive;
+            default:
+                return (state.cull_mode == CullMode::None) ? pipeline_unlit_noblend_cullnone : pipeline_unlit_noblend_cullback;
+        }
+    }
+
+    switch (state.blend_mode) {
+        case BlendMode::Alpha:
+            return (state.cull_mode == CullMode::None) ? pipeline_lit_alpha_cullnone : pipeline_lit_alpha_cullback;
+        case BlendMode::Additive:
+            return pipeline_lit_additive;
+        default:
+            switch (state.cull_mode) {
+                case CullMode::Front: return pipeline_lit_noblend_cullfront;
+                case CullMode::None:  return pipeline_lit_noblend_cullnone;
+                default:              return pipeline_lit_noblend_cullback;
+            }
+    }
+}
+
 // Mesh rendering
 void VulkanRenderAPI::renderMesh(const mesh& m, const RenderState& state)
 {
@@ -4423,20 +4520,8 @@ void VulkanRenderAPI::renderMesh(const mesh& m, const RenderState& state)
         return;
     }
 
-    // Main pass - select pipeline based on blend mode
-    VkPipeline selectedPipeline = pipeline_no_blend;
-    switch (state.blend_mode) {
-        case BlendMode::Alpha:
-            selectedPipeline = pipeline_alpha_blend;
-            break;
-        case BlendMode::Additive:
-            selectedPipeline = pipeline_additive_blend;
-            break;
-        case BlendMode::None:
-        default:
-            selectedPipeline = pipeline_no_blend;
-            break;
-    }
+    // Main pass - select pipeline based on lighting, blend mode, and cull mode
+    VkPipeline selectedPipeline = selectPipeline(state);
     if (selectedPipeline != last_bound_pipeline) {
         vkCmdBindPipeline(command_buffers[current_frame], VK_PIPELINE_BIND_POINT_GRAPHICS, selectedPipeline);
         last_bound_pipeline = selectedPipeline;
@@ -4588,20 +4673,8 @@ void VulkanRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t
         return;
     }
 
-    // Main pass - select pipeline based on blend mode
-    VkPipeline selectedPipeline = pipeline_no_blend;
-    switch (state.blend_mode) {
-        case BlendMode::Alpha:
-            selectedPipeline = pipeline_alpha_blend;
-            break;
-        case BlendMode::Additive:
-            selectedPipeline = pipeline_additive_blend;
-            break;
-        case BlendMode::None:
-        default:
-            selectedPipeline = pipeline_no_blend;
-            break;
-    }
+    // Main pass - select pipeline based on lighting, blend mode, and cull mode
+    VkPipeline selectedPipeline = selectPipeline(state);
     if (selectedPipeline != last_bound_pipeline) {
         vkCmdBindPipeline(command_buffers[current_frame], VK_PIPELINE_BIND_POINT_GRAPHICS, selectedPipeline);
         last_bound_pipeline = selectedPipeline;
@@ -4707,6 +4780,133 @@ void VulkanRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t
         vkCmdDraw(command_buffers[current_frame], static_cast<uint32_t>(vertex_count), 1,
                   static_cast<uint32_t>(start_vertex), 0);
     }
+}
+
+void VulkanRenderAPI::renderDebugLines(const vertex* vertices, size_t vertex_count)
+{
+    if (!vertices || vertex_count < 2 || !frame_started || device_lost) return;
+    if (in_shadow_pass) return;
+    if (pipeline_debug_lines == VK_NULL_HANDLE) return;
+
+    VkCommandBuffer cmd = command_buffers[current_frame];
+
+    // Ensure debug line buffer is large enough (CPU_TO_GPU for direct write)
+    size_t requiredSize = vertex_count * sizeof(vertex);
+    if (!debug_line_buffer || debug_line_buffer_capacity < vertex_count)
+    {
+        // Free old buffer
+        if (debug_line_buffer)
+        {
+            vmaDestroyBuffer(vma_allocator, debug_line_buffer, debug_line_allocation);
+            debug_line_buffer = VK_NULL_HANDLE;
+            debug_line_allocation = nullptr;
+            debug_line_mapped = nullptr;
+        }
+
+        debug_line_buffer_capacity = std::max(vertex_count, size_t(1024));
+
+        VkBufferCreateInfo bufferInfo{};
+        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bufferInfo.size = debug_line_buffer_capacity * sizeof(vertex);
+        bufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+        bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+        VmaAllocationCreateInfo allocInfo{};
+        allocInfo.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
+        allocInfo.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
+
+        VmaAllocationInfo allocResult{};
+        if (vmaCreateBuffer(vma_allocator, &bufferInfo, &allocInfo,
+                            &debug_line_buffer, &debug_line_allocation, &allocResult) != VK_SUCCESS)
+        {
+            LOG_ENGINE_ERROR("[Vulkan] Failed to create debug line buffer");
+            return;
+        }
+        debug_line_mapped = allocResult.pMappedData;
+    }
+
+    // Upload vertices
+    memcpy(debug_line_mapped, vertices, requiredSize);
+
+    // Bind debug line pipeline
+    if (pipeline_debug_lines != last_bound_pipeline) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_debug_lines);
+        last_bound_pipeline = pipeline_debug_lines;
+    }
+
+    // Upload GlobalUBO (view/projection)
+    {
+        GlobalUBO ubo{};
+        ubo.view = glm::transpose(view_matrix);
+        ubo.projection = glm::transpose(projection_matrix);
+        for (int i = 0; i < NUM_CASCADES; i++)
+            ubo.lightSpaceMatrices[i] = glm::transpose(lightSpaceMatrices[i]);
+        ubo.cascadeSplits = glm::vec4(cascadeSplitDistances[0], cascadeSplitDistances[1],
+                                       cascadeSplitDistances[2], cascadeSplitDistances[3]);
+        ubo.cascadeSplit4 = cascadeSplitDistances[4];
+        ubo.lightDir = light_direction;
+        ubo.lightAmbient = light_ambient;
+        ubo.cascadeCount = NUM_CASCADES;
+        ubo.lightDiffuse = light_diffuse;
+        ubo.shadowMapTexelSize = (currentShadowSize > 0)
+            ? glm::vec2(1.0f / static_cast<float>(currentShadowSize))
+            : glm::vec2(0.0f);
+        memcpy(uniform_buffer_mapped[current_frame], &ubo, sizeof(ubo));
+    }
+
+    // Bind debug line vertex buffer
+    VkBuffer vertexBuffers[] = {debug_line_buffer};
+    VkDeviceSize offsets[] = {0};
+    vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
+    last_bound_vertex_buffer = debug_line_buffer;
+
+    // Save model matrix
+    glm::mat4 saved_model = current_model_matrix;
+    current_model_matrix = glm::mat4(1.0f);
+
+    // Batch draw by color
+    size_t i = 0;
+    while (i < vertex_count)
+    {
+        glm::vec3 color(vertices[i].nx, vertices[i].ny, vertices[i].nz);
+        size_t batch_start = i;
+
+        while (i < vertex_count &&
+               vertices[i].nx == color.r &&
+               vertices[i].ny == color.g &&
+               vertices[i].nz == color.b)
+        {
+            i++;
+        }
+
+        // Upload PerObjectUBO for this color batch
+        uint32_t drawIdx = per_object_draw_index[current_frame];
+        if (drawIdx >= MAX_PER_OBJECT_DRAWS) break;
+        uint32_t perObjectDynamicOffset = static_cast<uint32_t>(drawIdx * per_object_alignment);
+
+        PerObjectUBO objUbo{};
+        objUbo.model = glm::transpose(current_model_matrix);
+        objUbo.normalMatrix = glm::mat4(1.0f);
+        objUbo.color = color;
+        objUbo.useTexture = 0;
+
+        void* dst = static_cast<char*>(per_object_uniform_mapped[current_frame]) + perObjectDynamicOffset;
+        memcpy(dst, &objUbo, sizeof(objUbo));
+        per_object_draw_index[current_frame]++;
+
+        // Get descriptor set (default texture)
+        VkDescriptorSet ds = getOrAllocateDescriptorSet(current_frame, INVALID_TEXTURE);
+        if (ds == VK_NULL_HANDLE) break;
+
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+            pipeline_layout, 0, 1, &ds, 1, &perObjectDynamicOffset);
+        last_bound_descriptor_set = ds;
+        last_bound_dynamic_offset = perObjectDynamicOffset;
+
+        vkCmdDraw(cmd, static_cast<uint32_t>(i - batch_start), 1, static_cast<uint32_t>(batch_start), 0);
+    }
+
+    current_model_matrix = saved_model;
 }
 
 void VulkanRenderAPI::setRenderState(const RenderState& state)

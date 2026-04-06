@@ -7,6 +7,13 @@
 #include <cstdint>
 #include "spdlog/spdlog.h"
 
+// Entry type for display styling
+enum class ConsoleEntryType : uint8_t
+{
+    Log,         // Normal log entry from spdlog
+    CommandEcho  // User-submitted command (displayed as "> command")
+};
+
 // Log entry with level and timestamp
 struct ConsoleLogEntry
 {
@@ -14,6 +21,7 @@ struct ConsoleLogEntry
     spdlog::level::level_enum level = spdlog::level::info;
     uint64_t timestamp = 0;
     std::string source;  // "Engine", "Client", "LUA", etc.
+    ConsoleEntryType type = ConsoleEntryType::Log;
 };
 
 class ENGINE_API Console
@@ -74,6 +82,15 @@ public:
     // Config file execution
     void execFile(const std::string& filename);
 
+    // Message counts by level
+    int getInfoCount() const { return m_infoCount; }
+    int getWarnCount() const { return m_warnCount; }
+    int getErrorCount() const { return m_errorCount; }
+
+    // History persistence
+    void saveHistory(const std::string& filepath);
+    void loadHistory(const std::string& filepath);
+
     // Settings
     void setMaxLogEntries(size_t max) { m_maxLogEntries = max; }
     size_t getMaxLogEntries() const { return m_maxLogEntries; }
@@ -90,4 +107,12 @@ private:
     size_t m_maxHistoryItems = 100;
     mutable std::mutex m_mutex;
     bool m_initialized = false;
+
+    // Level counters
+    int m_infoCount = 0;
+    int m_warnCount = 0;
+    int m_errorCount = 0;
+
+    void incrementCounter(spdlog::level::level_enum level);
+    void decrementCounter(spdlog::level::level_enum level);
 };

@@ -20,3 +20,4 @@ include = vma/vma.buildscript
 include = JoltPhysics-5.5.0/jolt.buildscript
 include = miniaudio/miniaudio.buildscript
 include = meshoptimizer/meshoptimizer.buildscript
+include = recastnavigation/recast.buildscript

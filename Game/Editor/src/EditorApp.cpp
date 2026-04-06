@@ -610,6 +610,10 @@ void EditorApp::beginPlay()
 
     LOG_ENGINE_INFO("--- PIE: Starting play mode ---");
 
+    // Clear console if requested
+    if (m_console.shouldClearOnPlay())
+        Console::get().clear();
+
     // 1. Snapshot current state
     m_play_snapshot = buildLevelDataFromECS();
     m_pre_play_editor_cam = m_editor_cam.cam;

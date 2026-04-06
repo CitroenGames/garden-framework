@@ -1537,6 +1537,98 @@ void D3D11RenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t 
     }
 }
 
+void D3D11RenderAPI::renderDebugLines(const vertex* vertices, size_t vertex_count)
+{
+    if (!vertices || vertex_count < 2 || device_lost) return;
+
+    // Ensure dynamic vertex buffer is large enough
+    if (!debugLineVB || debugLineVBCapacity < vertex_count)
+    {
+        debugLineVB.Reset();
+        debugLineVBCapacity = std::max(vertex_count, size_t(1024));
+
+        D3D11_BUFFER_DESC bd{};
+        bd.Usage = D3D11_USAGE_DYNAMIC;
+        bd.ByteWidth = static_cast<UINT>(debugLineVBCapacity * sizeof(vertex));
+        bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+        bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+
+        HRESULT hr = device->CreateBuffer(&bd, nullptr, debugLineVB.GetAddressOf());
+        if (FAILED(hr)) return;
+    }
+
+    // Upload all vertices
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    if (!mapBuffer(debugLineVB.Get(), mapped)) return;
+    memcpy(mapped.pData, vertices, vertex_count * sizeof(vertex));
+    context->Unmap(debugLineVB.Get(), 0);
+
+    // Flush global CBuffer if dirty (need view/projection)
+    if (global_cbuffer_dirty)
+    {
+        updateGlobalCBuffer();
+        global_cbuffer_dirty = false;
+    }
+
+    // Set up state for line rendering
+    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_LINELIST);
+    context->VSSetShader(unlitVertexShader.Get(), nullptr, 0);
+    context->PSSetShader(unlitPixelShader.Get(), nullptr, 0);
+    context->IASetInputLayout(basicInputLayout.Get());
+
+    UINT stride = sizeof(vertex);
+    UINT offset = 0;
+    context->IASetVertexBuffers(0, 1, debugLineVB.GetAddressOf(), &stride, &offset);
+
+    // Rebind constant buffers (skybox rendering replaces slot 0 with skyboxCBuffer)
+    context->VSSetConstantBuffers(0, 1, globalCBuffer.GetAddressOf());
+    context->VSSetConstantBuffers(1, 1, perObjectCBuffer.GetAddressOf());
+    context->PSSetConstantBuffers(0, 1, globalCBuffer.GetAddressOf());
+    context->PSSetConstantBuffers(1, 1, perObjectCBuffer.GetAddressOf());
+
+    // No culling, no blending, depth test with write
+    context->RSSetState(rasterizerCullNone.Get());
+    context->OMSetBlendState(blendStateNone.Get(), nullptr, 0xFFFFFFFF);
+    context->OMSetDepthStencilState(depthStateLessEqual.Get(), 0);
+
+    // Save model matrix
+    glm::mat4 saved_model = current_model_matrix;
+    current_model_matrix = glm::mat4(1.0f);
+
+    // Batch draw by color (both endpoints of a line share the same color in nx,ny,nz)
+    size_t i = 0;
+    while (i < vertex_count)
+    {
+        glm::vec3 color(vertices[i].nx, vertices[i].ny, vertices[i].nz);
+        size_t batch_start = i;
+
+        // Scan forward while vertices share this color
+        while (i < vertex_count &&
+               vertices[i].nx == color.r &&
+               vertices[i].ny == color.g &&
+               vertices[i].nz == color.b)
+        {
+            i++;
+        }
+
+        updatePerObjectCBuffer(color, false);
+        context->Draw(static_cast<UINT>(i - batch_start), static_cast<UINT>(batch_start));
+    }
+
+    // Restore model matrix and topology
+    current_model_matrix = saved_model;
+    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    // Invalidate state tracking (we changed shaders, layout, VB, rasterizer, etc.)
+    last_bound_vs = nullptr;
+    last_bound_ps = nullptr;
+    last_bound_layout = nullptr;
+    last_bound_vb = nullptr;
+    last_bound_rasterizer = nullptr;
+    last_bound_blend = nullptr;
+    last_bound_depth = nullptr;
+}
+
 void D3D11RenderAPI::setRenderState(const RenderState& state)
 {
     current_state = state;

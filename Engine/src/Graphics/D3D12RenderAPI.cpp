@@ -835,9 +835,17 @@ void D3D12RenderAPI::bindDummyRootParams()
             commandList->SetGraphicsRootDescriptorTable(2, m_srvAllocator.getGPU(it->second.srvIndex));
     }
 
-    // [3] Shadow map SRV
-    if (m_shadowSRVIndex != UINT(-1))
+    // [3] Shadow map SRV — bind dummy texture during shadow pass to avoid resource hazard
+    if (m_shadowSRVIndex != UINT(-1) && !in_shadow_pass)
+    {
         commandList->SetGraphicsRootDescriptorTable(3, m_srvAllocator.getGPU(m_shadowSRVIndex));
+    }
+    else if (defaultTexture != INVALID_TEXTURE)
+    {
+        auto it = textures.find(defaultTexture);
+        if (it != textures.end())
+            commandList->SetGraphicsRootDescriptorTable(3, m_srvAllocator.getGPU(it->second.srvIndex));
+    }
 
     // [4] LightCBuffer
     LightCBuffer dummyLights = {};
@@ -1189,6 +1197,15 @@ bool D3D12RenderAPI::createPipelineStates()
         rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
         HRESULT hr = device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(m_psoUnlitAdditive.GetAddressOf()));
         if (FAILED(hr)) { LOG_ENGINE_ERROR("Failed to create PSO: UnlitAdditive"); return false; }
+    }
+
+    // Debug lines (unlit, line list, no cull)
+    {
+        auto desc = CreateBasePSODesc(m_rootSignature.Get(), m_unlitVS, m_unlitPS);
+        desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+        desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE;
+        HRESULT hr = device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(m_psoDebugLines.GetAddressOf()));
+        if (FAILED(hr)) { LOG_ENGINE_ERROR("Failed to create PSO: DebugLines"); return false; }
     }
 
     // Shadow (depth-only, cull front with depth bias)
@@ -1897,9 +1914,9 @@ void D3D12RenderAPI::updateGlobalCBuffer()
     cb.projection = projection_matrix;
     for (int i = 0; i < NUM_CASCADES; i++)
         cb.lightSpaceMatrices[i] = lightSpaceMatrices[i];
-    cb.cascadeSplits = glm::vec4(cascadeSplitDistances[1], cascadeSplitDistances[2],
-                                  cascadeSplitDistances[3], cascadeSplitDistances[4]);
-    cb.cascadeSplit4 = (NUM_CASCADES > 4) ? cascadeSplitDistances[5] : cascadeSplitDistances[NUM_CASCADES];
+    cb.cascadeSplits = glm::vec4(cascadeSplitDistances[0], cascadeSplitDistances[1],
+                                  cascadeSplitDistances[2], cascadeSplitDistances[3]);
+    cb.cascadeSplit4 = cascadeSplitDistances[NUM_CASCADES];
     cb.lightDir = current_light_direction;
     cb.cascadeCount = NUM_CASCADES;
     cb.lightAmbient = current_light_ambient;
@@ -2404,6 +2421,69 @@ void D3D12RenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t 
     }
 }
 
+void D3D12RenderAPI::renderDebugLines(const vertex* vertices, size_t vertex_count)
+{
+    if (!vertices || vertex_count < 2 || device_lost) return;
+    if (in_shadow_pass) return;
+    if (!m_psoDebugLines) return;
+
+    if (global_cbuffer_dirty)
+    {
+        updateGlobalCBuffer();
+        global_cbuffer_dirty = false;
+    }
+
+    // Upload vertex data to the upload ring buffer (it's in upload heap, can be used as VB)
+    size_t dataSize = vertex_count * sizeof(vertex);
+    auto vbAddr = m_cbUploadBuffer[m_frameIndex].allocate(dataSize, vertices);
+    if (vbAddr == 0) return; // Ring buffer full
+
+    D3D12_VERTEX_BUFFER_VIEW vbv{};
+    vbv.BufferLocation = vbAddr;
+    vbv.SizeInBytes = static_cast<UINT>(dataSize);
+    vbv.StrideInBytes = sizeof(vertex);
+
+    // Bind debug line PSO
+    if (m_psoDebugLines.Get() != last_bound_pso)
+    {
+        commandList->SetPipelineState(m_psoDebugLines.Get());
+        last_bound_pso = m_psoDebugLines.Get();
+    }
+
+    commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_LINELIST);
+    commandList->IASetVertexBuffers(0, 1, &vbv);
+
+    // Save model matrix
+    glm::mat4 saved_model = current_model_matrix;
+    current_model_matrix = glm::mat4(1.0f);
+
+    // Batch draw by color
+    size_t i = 0;
+    while (i < vertex_count)
+    {
+        glm::vec3 color(vertices[i].nx, vertices[i].ny, vertices[i].nz);
+        size_t batch_start = i;
+
+        while (i < vertex_count &&
+               vertices[i].nx == color.r &&
+               vertices[i].ny == color.g &&
+               vertices[i].nz == color.b)
+        {
+            i++;
+        }
+
+        updatePerObjectCBuffer(color, false);
+        commandList->DrawInstanced(static_cast<UINT>(i - batch_start), 1,
+                                    static_cast<UINT>(batch_start), 0);
+    }
+
+    current_model_matrix = saved_model;
+
+    // Restore triangle topology for subsequent mesh draws
+    commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    last_bound_pso = nullptr; // Force rebind next mesh draw
+}
+
 // ============================================================================
 // Render State / Lighting
 // ============================================================================
@@ -2562,7 +2642,9 @@ void D3D12RenderAPI::beginShadowPass(const glm::vec3& lightDir)
     D3D12_RECT scissor = { 0, 0, static_cast<LONG>(currentShadowSize), static_cast<LONG>(currentShadowSize) };
     commandList->RSSetScissorRects(1, &scissor);
 
-    // Bind shadow PSO
+    // Bind shadow PSO and ensure all root params are valid
+    // (ensureCommandListOpen resets root signature, leaving params undefined)
+    bindDummyRootParams();
     commandList->SetPipelineState(m_psoShadow.Get());
     last_bound_pso = m_psoShadow.Get();
 }
@@ -2601,6 +2683,7 @@ void D3D12RenderAPI::beginShadowPass(const glm::vec3& lightDir, const camera& ca
     D3D12_RECT scissor = { 0, 0, static_cast<LONG>(currentShadowSize), static_cast<LONG>(currentShadowSize) };
     commandList->RSSetScissorRects(1, &scissor);
 
+    bindDummyRootParams();
     commandList->SetPipelineState(m_psoShadow.Get());
     last_bound_pso = m_psoShadow.Get();
 }
@@ -2634,6 +2717,14 @@ void D3D12RenderAPI::endShadowPass()
     {
         w = viewport_width_rt;
         h = viewport_height_rt;
+
+        // Transition offscreen texture to RENDER_TARGET before binding as RTV
+        if (m_offscreenState != D3D12_RESOURCE_STATE_RENDER_TARGET)
+        {
+            transitionResource(m_offscreenTexture.Get(), m_offscreenState, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            m_offscreenState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        }
+
         rtvHandle = m_rtvAllocator.getCPU(m_offscreenRTVIndex);
         dsvHandle = m_dsvAllocator.getCPU(m_viewportDSVIndex);
     }
@@ -2641,9 +2732,29 @@ void D3D12RenderAPI::endShadowPass()
     {
         w = viewport_width;
         h = viewport_height;
-        rtvHandle = fxaaEnabled
-            ? m_rtvAllocator.getCPU(m_offscreenRTVIndex)
-            : m_rtvAllocator.getCPU(m_backBufferRTVs[m_backBufferIndex]);
+
+        if (fxaaEnabled)
+        {
+            // Transition offscreen texture to RENDER_TARGET before binding as RTV
+            if (m_offscreenState != D3D12_RESOURCE_STATE_RENDER_TARGET)
+            {
+                transitionResource(m_offscreenTexture.Get(), m_offscreenState, D3D12_RESOURCE_STATE_RENDER_TARGET);
+                m_offscreenState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+            }
+            rtvHandle = m_rtvAllocator.getCPU(m_offscreenRTVIndex);
+        }
+        else
+        {
+            // Transition back buffer to RENDER_TARGET before binding as RTV
+            if (m_backBufferState[m_backBufferIndex] != D3D12_RESOURCE_STATE_RENDER_TARGET)
+            {
+                transitionResource(m_backBuffers[m_backBufferIndex].Get(),
+                                   m_backBufferState[m_backBufferIndex], D3D12_RESOURCE_STATE_RENDER_TARGET);
+                m_backBufferState[m_backBufferIndex] = D3D12_RESOURCE_STATE_RENDER_TARGET;
+            }
+            rtvHandle = m_rtvAllocator.getCPU(m_backBufferRTVs[m_backBufferIndex]);
+        }
+
         dsvHandle = m_dsvAllocator.getCPU(m_mainDSVIndex);
     }
 

@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <cstring>
 #include <filesystem>
+#include <optional>
 
 #include "Application.hpp"
 #include "world.hpp"
@@ -43,6 +44,8 @@ static ReflectionRegistry reflection;
 
 static void quit_game(int code)
 {
+    ConVarRegistry::get().saveArchiveCvars("config.cfg");
+
     if (game_module.isLoaded())
     {
         game_module.shutdown();
@@ -59,7 +62,7 @@ static void quit_game(int code)
     _exit(code);
 }
 
-static RenderAPIType parseRenderAPI(int argc, char* argv[])
+static std::optional<RenderAPIType> parseRenderAPICLI(int argc, char* argv[])
 {
     for (int i = 1; i < argc; i++)
     {
@@ -73,8 +76,50 @@ static RenderAPIType parseRenderAPI(int argc, char* argv[])
         if (strcmp(argv[i], "-d3d11") == 0 || strcmp(argv[i], "--d3d11") == 0 ||
             strcmp(argv[i], "-dx11") == 0 || strcmp(argv[i], "--dx11") == 0)
             return RenderAPIType::D3D11;
+        if (strcmp(argv[i], "-d3d12") == 0 || strcmp(argv[i], "--d3d12") == 0 ||
+            strcmp(argv[i], "-dx12") == 0 || strcmp(argv[i], "--dx12") == 0)
+            return RenderAPIType::D3D12;
 #endif
     }
+    return std::nullopt;
+}
+
+static RenderAPIType resolveRenderAPI(int argc, char* argv[])
+{
+    // 1. CLI flags take highest priority
+    auto cli_override = parseRenderAPICLI(argc, argv);
+    if (cli_override.has_value())
+    {
+        RenderAPIType api = cli_override.value();
+        if (IsRenderAPIPlatformAvailable(api))
+        {
+            if (auto* cvar = CVAR_PTR(r_renderapi))
+                cvar->setString(RenderAPITypeToString(api));
+            LOG_ENGINE_INFO("Render API override from CLI: {}", RenderAPITypeToString(api));
+            return api;
+        }
+        LOG_ENGINE_WARN("CLI-specified render API '{}' not available on this platform, falling back",
+                        RenderAPITypeToString(api));
+    }
+
+    // 2. Read from the r_renderapi convar (loaded from config.cfg)
+    if (auto* cvar = CVAR_PTR(r_renderapi))
+    {
+        const std::string& saved = cvar->getString();
+        if (!saved.empty())
+        {
+            RenderAPIType api = ParseRenderAPIType(saved);
+            if (IsRenderAPIPlatformAvailable(api))
+            {
+                LOG_ENGINE_INFO("Render API from config: {}", RenderAPITypeToString(api));
+                return api;
+            }
+            LOG_ENGINE_WARN("Saved render API '{}' not available on this platform, using default", saved);
+        }
+    }
+
+    // 3. Platform default
+    LOG_ENGINE_INFO("Using default render API: {}", RenderAPITypeToString(DefaultRenderAPI));
     return DefaultRenderAPI;
 }
 
@@ -135,11 +180,19 @@ int main(int argc, char* argv[])
     InitializeDefaultCVars();
     ConVarRegistry::get().loadConfig("config.cfg");
 
+    // Warn that r_renderapi changes require a restart
+    if (auto* cvar = CVAR_PTR(r_renderapi))
+    {
+        cvar->addChangeCallback([](ConVarBase*, const ConVarValue&, const ConVarValue&) {
+            LOG_ENGINE_WARN("r_renderapi changed. Restart the game for the change to take effect.");
+        });
+    }
+
 #if _WIN32
     int argc = __argc;
     char** argv = __argv;
 #endif
-    RenderAPIType api_type = parseRenderAPI(argc, argv);
+    RenderAPIType api_type = resolveRenderAPI(argc, argv);
 
     // Find the .garden project file
     std::string garden_path = parseProjectPath(argc, argv);

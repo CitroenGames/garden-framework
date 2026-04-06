@@ -1,21 +1,29 @@
 #include "NavMeshGenerator.hpp"
 #include "Components/Components.hpp"
+#include "Utils/Log.hpp"
 #include <glm/gtc/matrix_transform.hpp>
-#include <unordered_map>
-#include <cmath>
 #include <chrono>
+#include <cmath>
+#include <cstring>
+
+// Recast
+#include <Recast.h>
+
+// Detour
+#include <DetourNavMesh.h>
+#include <DetourNavMeshBuilder.h>
+#include <DetourNavMeshQuery.h>
 
 namespace Navigation
 {
 
-// ─── Geometry extraction ─────────────────────────────────────────────────────
+// ─── Geometry extraction (reused from previous implementation) ───────────────
 
 std::vector<NavMeshGenerator::RawTriangle>
 NavMeshGenerator::extractWorldTriangles(entt::registry& registry)
 {
     std::vector<RawTriangle> out;
 
-    // Prefer ColliderComponent mesh, fall back to MeshComponent
     auto view = registry.view<TransformComponent>();
 
     for (auto entity : view)
@@ -38,7 +46,7 @@ NavMeshGenerator::extractWorldTriangles(entt::registry& registry)
         if (!m || !m->is_valid || !m->vertices || m->vertices_len < 3)
             continue;
 
-        // Skip dynamic entities (those with rigidbodies and gravity)
+        // Skip dynamic entities
         if (registry.all_of<RigidBodyComponent>(entity))
         {
             auto& rb = registry.get<RigidBodyComponent>(entity);
@@ -47,7 +55,6 @@ NavMeshGenerator::extractWorldTriangles(entt::registry& registry)
         }
 
         glm::mat4 transform = registry.get<TransformComponent>(entity).getTransformMatrix();
-        glm::mat3 normal_matrix = glm::transpose(glm::inverse(glm::mat3(transform)));
 
         for (size_t i = 0; i + 2 < m->vertices_len; i += 3)
         {
@@ -64,7 +71,6 @@ NavMeshGenerator::extractWorldTriangles(entt::registry& registry)
             glm::vec3 cross = glm::cross(edge1, edge2);
             float len = glm::length(cross);
 
-            // Skip degenerate triangles
             if (len < 1e-6f)
                 continue;
 
@@ -76,165 +82,315 @@ NavMeshGenerator::extractWorldTriangles(entt::registry& registry)
     return out;
 }
 
-// ─── Slope filtering ─────────────────────────────────────────────────────────
+// ─── Extract debug polygons from Detour navmesh ─────────────────────────────
 
-std::vector<NavMeshGenerator::RawTriangle>
-NavMeshGenerator::filterBySlope(const std::vector<RawTriangle>& tris, float max_slope_degrees)
+void NavMeshGenerator::extractDebugPolys(NavMesh& navmesh)
 {
-    std::vector<RawTriangle> out;
-    out.reserve(tris.size() / 2);
+    navmesh.debug_polys.clear();
+    if (!navmesh.dt_navmesh) return;
 
-    const glm::vec3 up(0.0f, 1.0f, 0.0f);
-    const float max_cos = std::cos(glm::radians(max_slope_degrees));
+    const dtNavMesh* nm = navmesh.dt_navmesh;
 
-    for (auto& tri : tris)
+    for (int ti = 0; ti < nm->getMaxTiles(); ti++)
     {
-        float d = glm::dot(tri.normal, up);
-        if (d >= max_cos)
-            out.push_back(tri);
-    }
+        const dtMeshTile* tile = nm->getTile(ti);
+        if (!tile || !tile->header) continue;
 
-    return out;
-}
-
-// ─── Adjacency building ─────────────────────────────────────────────────────
-
-struct SnappedVertex
-{
-    int32_t x, y, z;
-
-    bool operator==(const SnappedVertex& o) const { return x == o.x && y == o.y && z == o.z; }
-    bool operator<(const SnappedVertex& o) const
-    {
-        if (x != o.x) return x < o.x;
-        if (y != o.y) return y < o.y;
-        return z < o.z;
-    }
-};
-
-struct EdgeKey
-{
-    SnappedVertex a, b; // a <= b (canonical ordering)
-
-    bool operator==(const EdgeKey& o) const { return a == o.a && b == o.b; }
-};
-
-struct EdgeKeyHash
-{
-    size_t operator()(const EdgeKey& k) const
-    {
-        // FNV-1a over the 6 ints
-        size_t h = 14695981039346656037ULL;
-        auto mix = [&](int32_t v) {
-            h ^= static_cast<size_t>(v);
-            h *= 1099511628211ULL;
-        };
-        mix(k.a.x); mix(k.a.y); mix(k.a.z);
-        mix(k.b.x); mix(k.b.y); mix(k.b.z);
-        return h;
-    }
-};
-
-struct EdgeEntry
-{
-    int32_t tri_index;
-    int32_t edge_index; // 0, 1, or 2
-};
-
-void NavMeshGenerator::buildAdjacency(NavMesh& navmesh, float merge_distance)
-{
-    float eps = merge_distance;
-    if (eps <= 0.0f) eps = 0.001f;
-
-    auto snap = [eps](const glm::vec3& v) -> SnappedVertex {
-        return {
-            static_cast<int32_t>(std::round(v.x / eps)),
-            static_cast<int32_t>(std::round(v.y / eps)),
-            static_cast<int32_t>(std::round(v.z / eps))
-        };
-    };
-
-    auto makeEdgeKey = [](SnappedVertex a, SnappedVertex b) -> EdgeKey {
-        if (b < a) { auto t = a; a = b; b = t; }
-        return {a, b};
-    };
-
-    std::unordered_map<EdgeKey, std::vector<EdgeEntry>, EdgeKeyHash> edge_map;
-    edge_map.reserve(navmesh.triangles.size() * 3);
-
-    // Edge indices: edge 0 = v0-v1, edge 1 = v1-v2, edge 2 = v2-v0
-    static const int edge_verts[3][2] = {{0, 1}, {1, 2}, {2, 0}};
-
-    for (int32_t ti = 0; ti < static_cast<int32_t>(navmesh.triangles.size()); ti++)
-    {
-        auto& tri = navmesh.triangles[ti];
-        tri.centroid = (tri.vertices[0] + tri.vertices[1] + tri.vertices[2]) / 3.0f;
-
-        for (int ei = 0; ei < 3; ei++)
+        for (int pi = 0; pi < tile->header->polyCount; pi++)
         {
-            SnappedVertex sa = snap(tri.vertices[edge_verts[ei][0]]);
-            SnappedVertex sb = snap(tri.vertices[edge_verts[ei][1]]);
-            EdgeKey key = makeEdgeKey(sa, sb);
-            edge_map[key].push_back({ti, ei});
-        }
-    }
+            const dtPoly* poly = &tile->polys[pi];
+            if (poly->getType() == DT_POLYTYPE_OFFMESH_CONNECTION)
+                continue;
 
-    // Link adjacent triangles
-    for (auto& [key, entries] : edge_map)
-    {
-        if (entries.size() == 2)
-        {
-            auto& a = entries[0];
-            auto& b = entries[1];
-            navmesh.triangles[a.tri_index].neighbors[a.edge_index] = b.tri_index;
-            navmesh.triangles[a.tri_index].shared_edge[a.edge_index] = b.edge_index;
-            navmesh.triangles[b.tri_index].neighbors[b.edge_index] = a.tri_index;
-            navmesh.triangles[b.tri_index].shared_edge[b.edge_index] = a.edge_index;
+            DebugPoly dp;
+            dp.centroid = glm::vec3(0.0f);
+
+            for (int vi = 0; vi < poly->vertCount; vi++)
+            {
+                const float* v = &tile->verts[poly->verts[vi] * 3];
+                glm::vec3 pos(v[0], v[1], v[2]);
+                dp.vertices.push_back(pos);
+                dp.centroid += pos;
+            }
+
+            if (!dp.vertices.empty())
+                dp.centroid /= static_cast<float>(dp.vertices.size());
+
+            navmesh.debug_polys.push_back(std::move(dp));
         }
     }
 }
 
-// ─── Main generation ─────────────────────────────────────────────────────────
+// ─── Main Recast/Detour generation pipeline ─────────────────────────────────
 
 NavMesh NavMeshGenerator::generate(entt::registry& registry, const NavMeshConfig& config,
-                                   GenerationStats* stats)
+                                    GenerationStats* stats)
 {
     auto t0 = std::chrono::high_resolution_clock::now();
 
     NavMesh navmesh;
     navmesh.config = config;
 
-    // Step 1: Extract all world-space triangles
+    // Step 1: Extract world triangles
     auto raw = extractWorldTriangles(registry);
-
     int source_count = static_cast<int>(raw.size());
 
-    // Step 2: Filter by slope
-    auto walkable = filterBySlope(raw, config.max_slope_angle);
-
-    // Step 3: Build NavTriangle array
-    navmesh.triangles.resize(walkable.size());
-    for (size_t i = 0; i < walkable.size(); i++)
+    if (raw.empty())
     {
-        auto& nt = navmesh.triangles[i];
-        nt.vertices[0] = walkable[i].v[0];
-        nt.vertices[1] = walkable[i].v[1];
-        nt.vertices[2] = walkable[i].v[2];
-        nt.normal = walkable[i].normal;
+        if (stats)
+        {
+            stats->source_triangles = 0;
+            stats->walkable_triangles = 0;
+            stats->total_polys = 0;
+            stats->time_ms = 0.0f;
+        }
+        return navmesh;
     }
 
-    // Step 4: Build adjacency
-    buildAdjacency(navmesh, config.merge_distance);
+    // Flatten triangles into vertex and index arrays for Recast
+    int ntris = static_cast<int>(raw.size());
+    int nverts = ntris * 3;
 
-    navmesh.valid = !navmesh.triangles.empty();
+    std::vector<float> verts(nverts * 3);
+    std::vector<int> tris(ntris * 3);
+
+    for (int i = 0; i < ntris; i++)
+    {
+        for (int j = 0; j < 3; j++)
+        {
+            int vi = i * 3 + j;
+            verts[vi * 3 + 0] = raw[i].v[j].x;
+            verts[vi * 3 + 1] = raw[i].v[j].y;
+            verts[vi * 3 + 2] = raw[i].v[j].z;
+            tris[i * 3 + j] = vi;
+        }
+    }
+
+    // Step 2: Calculate bounds
+    float bmin[3], bmax[3];
+    rcCalcBounds(verts.data(), nverts, bmin, bmax);
+
+    // Step 3: Configure Recast
+    rcConfig cfg{};
+    cfg.cs = config.cell_size;
+    cfg.ch = config.cell_height;
+    cfg.walkableSlopeAngle = config.max_slope_angle;
+    cfg.walkableHeight = static_cast<int>(std::ceil(config.agent_height / config.cell_height));
+    cfg.walkableClimb = static_cast<int>(std::floor(config.max_climb / config.cell_height));
+    cfg.walkableRadius = static_cast<int>(std::ceil(config.agent_radius / config.cell_size));
+    cfg.maxEdgeLen = static_cast<int>(config.max_edge_len / config.cell_size);
+    cfg.maxSimplificationError = config.max_edge_error;
+    cfg.minRegionArea = config.min_region_area;
+    cfg.mergeRegionArea = config.merge_region_area;
+    cfg.maxVertsPerPoly = config.max_verts_per_poly;
+    cfg.detailSampleDist = config.detail_sample_dist < 0.9f ? 0 : config.cell_size * config.detail_sample_dist;
+    cfg.detailSampleMaxError = config.cell_height * config.detail_sample_max_error;
+
+    rcVcopy(cfg.bmin, bmin);
+    rcVcopy(cfg.bmax, bmax);
+    rcCalcGridSize(cfg.bmin, cfg.bmax, cfg.cs, &cfg.width, &cfg.height);
+
+    LOG_ENGINE_INFO("[NavMesh] Grid: {}x{}, {} source triangles", cfg.width, cfg.height, ntris);
+
+    rcContext ctx;
+
+    // Step 4: Create heightfield
+    rcHeightfield* solid = rcAllocHeightfield();
+    if (!solid || !rcCreateHeightfield(&ctx, *solid, cfg.width, cfg.height,
+                                       cfg.bmin, cfg.bmax, cfg.cs, cfg.ch))
+    {
+        LOG_ENGINE_ERROR("[NavMesh] Failed to create heightfield");
+        rcFreeHeightField(solid);
+        return navmesh;
+    }
+
+    // Mark walkable triangles
+    std::vector<unsigned char> tri_areas(ntris, 0);
+    rcMarkWalkableTriangles(&ctx, cfg.walkableSlopeAngle,
+                            verts.data(), nverts, tris.data(), ntris, tri_areas.data());
+
+    // Rasterize triangles
+    if (!rcRasterizeTriangles(&ctx, verts.data(), nverts, tris.data(),
+                              tri_areas.data(), ntris, *solid, cfg.walkableClimb))
+    {
+        LOG_ENGINE_ERROR("[NavMesh] Failed to rasterize triangles");
+        rcFreeHeightField(solid);
+        return navmesh;
+    }
+
+    // Step 5: Filter walkable surfaces
+    rcFilterLowHangingWalkableObstacles(&ctx, cfg.walkableClimb, *solid);
+    rcFilterLedgeSpans(&ctx, cfg.walkableHeight, cfg.walkableClimb, *solid);
+    rcFilterWalkableLowHeightSpans(&ctx, cfg.walkableHeight, *solid);
+
+    // Step 6: Build compact heightfield
+    rcCompactHeightfield* chf = rcAllocCompactHeightfield();
+    if (!chf || !rcBuildCompactHeightfield(&ctx, cfg.walkableHeight, cfg.walkableClimb, *solid, *chf))
+    {
+        LOG_ENGINE_ERROR("[NavMesh] Failed to build compact heightfield");
+        rcFreeHeightField(solid);
+        rcFreeCompactHeightfield(chf);
+        return navmesh;
+    }
+    rcFreeHeightField(solid);
+    solid = nullptr;
+
+    // Erode walkable area by agent radius
+    if (!rcErodeWalkableArea(&ctx, cfg.walkableRadius, *chf))
+    {
+        LOG_ENGINE_ERROR("[NavMesh] Failed to erode walkable area");
+        rcFreeCompactHeightfield(chf);
+        return navmesh;
+    }
+
+    // Step 7: Build regions
+    if (!rcBuildDistanceField(&ctx, *chf))
+    {
+        LOG_ENGINE_ERROR("[NavMesh] Failed to build distance field");
+        rcFreeCompactHeightfield(chf);
+        return navmesh;
+    }
+
+    if (!rcBuildRegions(&ctx, *chf, 0, cfg.minRegionArea, cfg.mergeRegionArea))
+    {
+        LOG_ENGINE_ERROR("[NavMesh] Failed to build regions");
+        rcFreeCompactHeightfield(chf);
+        return navmesh;
+    }
+
+    // Step 8: Build contours
+    rcContourSet* cset = rcAllocContourSet();
+    if (!cset || !rcBuildContours(&ctx, *chf, cfg.maxSimplificationError, cfg.maxEdgeLen, *cset))
+    {
+        LOG_ENGINE_ERROR("[NavMesh] Failed to build contours");
+        rcFreeCompactHeightfield(chf);
+        rcFreeContourSet(cset);
+        return navmesh;
+    }
+
+    // Step 9: Build polygon mesh
+    rcPolyMesh* pmesh = rcAllocPolyMesh();
+    if (!pmesh || !rcBuildPolyMesh(&ctx, *cset, cfg.maxVertsPerPoly, *pmesh))
+    {
+        LOG_ENGINE_ERROR("[NavMesh] Failed to build poly mesh");
+        rcFreeCompactHeightfield(chf);
+        rcFreeContourSet(cset);
+        rcFreePolyMesh(pmesh);
+        return navmesh;
+    }
+
+    // Step 10: Build detail mesh
+    rcPolyMeshDetail* dmesh = rcAllocPolyMeshDetail();
+    if (!dmesh || !rcBuildPolyMeshDetail(&ctx, *pmesh, *chf,
+                                          cfg.detailSampleDist, cfg.detailSampleMaxError, *dmesh))
+    {
+        LOG_ENGINE_ERROR("[NavMesh] Failed to build detail mesh");
+        rcFreeCompactHeightfield(chf);
+        rcFreeContourSet(cset);
+        rcFreePolyMesh(pmesh);
+        rcFreePolyMeshDetail(dmesh);
+        return navmesh;
+    }
+
+    rcFreeCompactHeightfield(chf);
+    rcFreeContourSet(cset);
+
+    LOG_ENGINE_INFO("[NavMesh] Poly mesh: {} polygons, {} vertices", pmesh->npolys, pmesh->nverts);
+
+    // Step 11: Create Detour navmesh data
+    // Set polygon flags (all walkable)
+    for (int i = 0; i < pmesh->npolys; i++)
+    {
+        pmesh->flags[i] = 1; // walkable
+    }
+
+    dtNavMeshCreateParams params{};
+    params.verts = pmesh->verts;
+    params.vertCount = pmesh->nverts;
+    params.polys = pmesh->polys;
+    params.polyAreas = pmesh->areas;
+    params.polyFlags = pmesh->flags;
+    params.polyCount = pmesh->npolys;
+    params.nvp = pmesh->nvp;
+    params.detailMeshes = dmesh->meshes;
+    params.detailVerts = dmesh->verts;
+    params.detailVertsCount = dmesh->nverts;
+    params.detailTris = dmesh->tris;
+    params.detailTriCount = dmesh->ntris;
+    params.walkableHeight = config.agent_height;
+    params.walkableRadius = config.agent_radius;
+    params.walkableClimb = config.max_climb;
+    rcVcopy(params.bmin, pmesh->bmin);
+    rcVcopy(params.bmax, pmesh->bmax);
+    params.cs = cfg.cs;
+    params.ch = cfg.ch;
+    params.buildBvTree = true;
+
+    unsigned char* navData = nullptr;
+    int navDataSize = 0;
+    if (!dtCreateNavMeshData(&params, &navData, &navDataSize))
+    {
+        LOG_ENGINE_ERROR("[NavMesh] Failed to create Detour navmesh data");
+        rcFreePolyMesh(pmesh);
+        rcFreePolyMeshDetail(dmesh);
+        return navmesh;
+    }
+
+    rcFreePolyMesh(pmesh);
+    rcFreePolyMeshDetail(dmesh);
+
+    // Step 12: Initialize Detour navmesh
+    navmesh.dt_navmesh = dtAllocNavMesh();
+    if (!navmesh.dt_navmesh)
+    {
+        dtFree(navData);
+        LOG_ENGINE_ERROR("[NavMesh] Failed to allocate Detour navmesh");
+        return navmesh;
+    }
+
+    dtStatus status = navmesh.dt_navmesh->init(navData, navDataSize, DT_TILE_FREE_DATA);
+    if (dtStatusFailed(status))
+    {
+        dtFree(navData);
+        dtFreeNavMesh(navmesh.dt_navmesh);
+        navmesh.dt_navmesh = nullptr;
+        LOG_ENGINE_ERROR("[NavMesh] Failed to init Detour navmesh");
+        return navmesh;
+    }
+
+    // Step 13: Create query object
+    navmesh.dt_query = dtAllocNavMeshQuery();
+    if (!navmesh.dt_query)
+    {
+        LOG_ENGINE_ERROR("[NavMesh] Failed to allocate Detour query");
+        navmesh.clear();
+        return navmesh;
+    }
+
+    status = navmesh.dt_query->init(navmesh.dt_navmesh, 2048);
+    if (dtStatusFailed(status))
+    {
+        LOG_ENGINE_ERROR("[NavMesh] Failed to init Detour query");
+        navmesh.clear();
+        return navmesh;
+    }
+
+    navmesh.valid = true;
+    navmesh.total_polys = params.polyCount;
+
+    // Extract debug polys for visualization
+    extractDebugPolys(navmesh);
 
     auto t1 = std::chrono::high_resolution_clock::now();
     float ms = std::chrono::duration<float, std::milli>(t1 - t0).count();
 
+    LOG_ENGINE_INFO("[NavMesh] Generated: {} polys in {:.1f} ms", navmesh.total_polys, ms);
+
     if (stats)
     {
         stats->source_triangles = source_count;
-        stats->walkable_triangles = static_cast<int>(navmesh.triangles.size());
+        stats->walkable_triangles = 0; // Not directly available with Recast
+        stats->total_polys = navmesh.total_polys;
         stats->time_ms = ms;
     }
 
