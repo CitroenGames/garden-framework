@@ -1,0 +1,451 @@
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
+#include "D3D12RenderAPI.hpp"
+#include "Components/camera.hpp"
+#include "Utils/Log.hpp"
+#include "imgui.h"
+#include "imgui_impl_dx12.h"
+#include <algorithm>
+#include <cmath>
+
+// ============================================================================
+// Frame Management
+// ============================================================================
+
+void D3D12RenderAPI::beginFrame()
+{
+    if (device_lost) return;
+
+    // Ensure command list is open (may already be open from shadow pass)
+    // Note: deferred resource recreation happens inside ensureCommandListOpen()
+    ensureCommandListOpen();
+
+    // Determine render target
+    D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle;
+    D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle;
+
+    if (m_active_scene_target >= 0)
+    {
+        auto it = m_pie_viewports.find(m_active_scene_target);
+        if (it != m_pie_viewports.end())
+        {
+            auto& pie = it->second;
+            rtvHandle = m_rtvAllocator.getCPU(pie.offscreenRTVIndex);
+            dsvHandle = m_dsvAllocator.getCPU(pie.dsvIndex);
+            commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, &dsvHandle);
+
+            D3D12_VIEWPORT vp = {};
+            vp.Width = static_cast<float>(pie.width);
+            vp.Height = static_cast<float>(pie.height);
+            vp.MaxDepth = 1.0f;
+            commandList->RSSetViewports(1, &vp);
+
+            D3D12_RECT scissor = { 0, 0, pie.width, pie.height };
+            commandList->RSSetScissorRects(1, &scissor);
+            goto setup_done;
+        }
+    }
+
+    if (m_viewportTexture)
+    {
+        // Editor mode: render to offscreen at viewport dimensions
+        // Ensure offscreen is in RENDER_TARGET state
+        if (m_offscreenState != D3D12_RESOURCE_STATE_RENDER_TARGET)
+        {
+            transitionResource(m_offscreenTexture.Get(), m_offscreenState, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            m_offscreenState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        }
+
+        rtvHandle = m_rtvAllocator.getCPU(m_offscreenRTVIndex);
+        dsvHandle = m_dsvAllocator.getCPU(m_viewportDSVIndex);
+        commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, &dsvHandle);
+
+        D3D12_VIEWPORT vp = {};
+        vp.Width = static_cast<float>(viewport_width_rt);
+        vp.Height = static_cast<float>(viewport_height_rt);
+        vp.MaxDepth = 1.0f;
+        commandList->RSSetViewports(1, &vp);
+
+        D3D12_RECT scissor = { 0, 0, viewport_width_rt, viewport_height_rt };
+        commandList->RSSetScissorRects(1, &scissor);
+    }
+    else if (fxaaEnabled)
+    {
+        // Standalone with FXAA: render to offscreen
+        if (m_offscreenState != D3D12_RESOURCE_STATE_RENDER_TARGET)
+        {
+            transitionResource(m_offscreenTexture.Get(), m_offscreenState, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            m_offscreenState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        }
+
+        rtvHandle = m_rtvAllocator.getCPU(m_offscreenRTVIndex);
+        dsvHandle = m_dsvAllocator.getCPU(m_mainDSVIndex);
+        commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, &dsvHandle);
+
+        D3D12_VIEWPORT vp = {};
+        vp.Width = static_cast<float>(viewport_width);
+        vp.Height = static_cast<float>(viewport_height);
+        vp.MaxDepth = 1.0f;
+        commandList->RSSetViewports(1, &vp);
+
+        D3D12_RECT scissor = { 0, 0, static_cast<LONG>(viewport_width), static_cast<LONG>(viewport_height) };
+        commandList->RSSetScissorRects(1, &scissor);
+    }
+    else
+    {
+        // Direct to back buffer
+        if (m_backBufferState[m_backBufferIndex] != D3D12_RESOURCE_STATE_RENDER_TARGET)
+        {
+            transitionResource(m_backBuffers[m_backBufferIndex].Get(),
+                               m_backBufferState[m_backBufferIndex], D3D12_RESOURCE_STATE_RENDER_TARGET);
+            m_backBufferState[m_backBufferIndex] = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        }
+
+        rtvHandle = m_rtvAllocator.getCPU(m_backBufferRTVs[m_backBufferIndex]);
+        dsvHandle = m_dsvAllocator.getCPU(m_mainDSVIndex);
+        commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, &dsvHandle);
+
+        D3D12_VIEWPORT vp = {};
+        vp.Width = static_cast<float>(viewport_width);
+        vp.Height = static_cast<float>(viewport_height);
+        vp.MaxDepth = 1.0f;
+        commandList->RSSetViewports(1, &vp);
+
+        D3D12_RECT scissor = { 0, 0, static_cast<LONG>(viewport_width), static_cast<LONG>(viewport_height) };
+        commandList->RSSetScissorRects(1, &scissor);
+    }
+
+setup_done:
+    // Reset model matrix
+    current_model_matrix = glm::mat4(1.0f);
+    while (!model_matrix_stack.empty())
+        model_matrix_stack.pop();
+
+    // Reset state tracking
+    last_bound_pso = nullptr;
+    currentBoundTexture = INVALID_TEXTURE;
+    in_depth_prepass = false;
+
+    commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    // Bind shadow map SRV
+    if (m_shadowSRVIndex != UINT(-1))
+        commandList->SetGraphicsRootDescriptorTable(3, m_srvAllocator.getGPU(m_shadowSRVIndex));
+
+    // Flush global CBuffer if dirty
+    if (global_cbuffer_dirty)
+    {
+        updateGlobalCBuffer();
+        global_cbuffer_dirty = false;
+    }
+}
+
+void D3D12RenderAPI::endFrame()
+{
+    if (device_lost) return;
+
+    // Re-bind engine root signature (RmlUI may have overridden it)
+    commandList->SetGraphicsRootSignature(m_rootSignature.Get());
+
+    if (fxaaEnabled && !m_viewportTexture)
+    {
+        // Transition offscreen to SRV for FXAA sampling
+        if (m_offscreenState != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)
+        {
+            transitionResource(m_offscreenTexture.Get(), m_offscreenState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            m_offscreenState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        }
+
+        // Transition back buffer to render target
+        if (m_backBufferState[m_backBufferIndex] != D3D12_RESOURCE_STATE_RENDER_TARGET)
+        {
+            transitionResource(m_backBuffers[m_backBufferIndex].Get(),
+                               m_backBufferState[m_backBufferIndex], D3D12_RESOURCE_STATE_RENDER_TARGET);
+            m_backBufferState[m_backBufferIndex] = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        }
+
+        D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvAllocator.getCPU(m_backBufferRTVs[m_backBufferIndex]);
+        commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
+
+        D3D12_VIEWPORT vp = {};
+        vp.Width = static_cast<float>(viewport_width);
+        vp.Height = static_cast<float>(viewport_height);
+        vp.MaxDepth = 1.0f;
+        commandList->RSSetViewports(1, &vp);
+
+        D3D12_RECT scissor = { 0, 0, static_cast<LONG>(viewport_width), static_cast<LONG>(viewport_height) };
+        commandList->RSSetScissorRects(1, &scissor);
+
+        // Draw FXAA fullscreen quad
+        commandList->SetPipelineState(m_psoFXAA.Get());
+        commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+
+        D3D12FXAACBuffer fxaaCB = {};
+        fxaaCB.inverseScreenSize = glm::vec2(1.0f / std::max(viewport_width, 1), 1.0f / std::max(viewport_height, 1));
+        auto cbAddr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(fxaaCB), &fxaaCB);
+        bindDummyRootParams();
+        commandList->SetGraphicsRootConstantBufferView(0, cbAddr);
+        commandList->SetGraphicsRootDescriptorTable(2, m_srvAllocator.getGPU(m_offscreenSRVIndex));
+
+        commandList->IASetVertexBuffers(0, 1, &m_fxaaQuadVBV);
+        commandList->DrawInstanced(4, 1, 0, 0);
+
+        commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    }
+
+    // Render ImGui AFTER FXAA so UI text stays crisp (standalone mode only)
+    ImDrawData* draw_data = ImGui::GetDrawData();
+    if (draw_data && !m_viewportTexture)
+    {
+        // Ensure back buffer is in render target state for ImGui
+        if (m_backBufferState[m_backBufferIndex] != D3D12_RESOURCE_STATE_RENDER_TARGET)
+        {
+            transitionResource(m_backBuffers[m_backBufferIndex].Get(),
+                               m_backBufferState[m_backBufferIndex], D3D12_RESOURCE_STATE_RENDER_TARGET);
+            m_backBufferState[m_backBufferIndex] = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        }
+        ImGui_ImplDX12_RenderDrawData(draw_data, commandList.Get());
+    }
+
+    // Transition back buffer to present
+    if (m_backBufferState[m_backBufferIndex] != D3D12_RESOURCE_STATE_PRESENT)
+    {
+        transitionResource(m_backBuffers[m_backBufferIndex].Get(),
+                           m_backBufferState[m_backBufferIndex], D3D12_RESOURCE_STATE_PRESENT);
+        m_backBufferState[m_backBufferIndex] = D3D12_RESOURCE_STATE_PRESENT;
+    }
+
+    // Close and execute command list
+    commandList->Close();
+    m_commandListOpen = false;
+    ID3D12CommandList* lists[] = { commandList.Get() };
+    commandQueue->ExecuteCommandLists(1, lists);
+}
+
+void D3D12RenderAPI::present()
+{
+    if (device_lost) return;
+
+    // Close and execute command list if still open
+    // (editor flow: renderUI -> present, skipping endFrame)
+    if (m_commandListOpen)
+    {
+        // Ensure back buffer is in PRESENT state
+        if (m_backBufferState[m_backBufferIndex] != D3D12_RESOURCE_STATE_PRESENT)
+        {
+            transitionResource(m_backBuffers[m_backBufferIndex].Get(),
+                               m_backBufferState[m_backBufferIndex], D3D12_RESOURCE_STATE_PRESENT);
+            m_backBufferState[m_backBufferIndex] = D3D12_RESOURCE_STATE_PRESENT;
+        }
+
+        commandList->Close();
+        m_commandListOpen = false;
+        ID3D12CommandList* lists[] = { commandList.Get() };
+        commandQueue->ExecuteCommandLists(1, lists);
+    }
+
+    HRESULT hr = swapChain->Present(presentInterval, 0);
+    if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET)
+    {
+        HRESULT reason = device->GetDeviceRemovedReason();
+        LOG_ENGINE_ERROR("[D3D12] Device removed during Present (reason: 0x{:08X})", static_cast<unsigned>(reason));
+
+        // Log DRED data if available
+        ComPtr<ID3D12DeviceRemovedExtendedData> dred;
+        if (SUCCEEDED(device.As(&dred)))
+        {
+            D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT breadcrumbs = {};
+            if (SUCCEEDED(dred->GetAutoBreadcrumbsOutput(&breadcrumbs)))
+            {
+                const D3D12_AUTO_BREADCRUMB_NODE* node = breadcrumbs.pHeadAutoBreadcrumbNode;
+                while (node)
+                {
+                    if (node->pCommandListDebugNameW)
+                    {
+                        char name[256];
+                        WideCharToMultiByte(CP_UTF8, 0, node->pCommandListDebugNameW, -1, name, 256, nullptr, nullptr);
+                        LOG_ENGINE_ERROR("[D3D12] DRED breadcrumb - command list: {}, completed: {}/{}",
+                                          name, *node->pLastBreadcrumbValue, node->BreadcrumbCount);
+                    }
+                    else
+                    {
+                        LOG_ENGINE_ERROR("[D3D12] DRED breadcrumb - (unnamed), completed: {}/{}",
+                                          *node->pLastBreadcrumbValue, node->BreadcrumbCount);
+                    }
+                    node = node->pNext;
+                }
+            }
+
+            D3D12_DRED_PAGE_FAULT_OUTPUT pageFault = {};
+            if (SUCCEEDED(dred->GetPageFaultAllocationOutput(&pageFault)))
+            {
+                LOG_ENGINE_ERROR("[D3D12] DRED page fault at VA: 0x{:016X}",
+                                  pageFault.PageFaultVA);
+            }
+        }
+
+        device_lost = true;
+        return;
+    }
+    else if (FAILED(hr))
+    {
+        LOG_ENGINE_ERROR("[D3D12] Present failed (HRESULT: 0x{:08X})", static_cast<unsigned>(hr));
+    }
+
+    // Signal fence for this frame
+    m_fenceValue++;
+    m_frameContexts[m_frameIndex].fenceValue = m_fenceValue;
+    commandQueue->Signal(m_fence.Get(), m_fenceValue);
+
+    // Advance frame index
+    m_frameIndex = (m_frameIndex + 1) % NUM_FRAMES_IN_FLIGHT;
+}
+
+void D3D12RenderAPI::clear(const glm::vec3& color)
+{
+    if (device_lost) return;
+
+    float clearColor[4] = { color.r, color.g, color.b, 1.0f };
+
+    if (m_viewportTexture)
+    {
+        commandList->ClearRenderTargetView(m_rtvAllocator.getCPU(m_offscreenRTVIndex), clearColor, 0, nullptr);
+        commandList->ClearDepthStencilView(m_dsvAllocator.getCPU(m_viewportDSVIndex),
+                                            D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, nullptr);
+    }
+    else if (fxaaEnabled)
+    {
+        commandList->ClearRenderTargetView(m_rtvAllocator.getCPU(m_offscreenRTVIndex), clearColor, 0, nullptr);
+        commandList->ClearDepthStencilView(m_dsvAllocator.getCPU(m_mainDSVIndex),
+                                            D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, nullptr);
+    }
+    else
+    {
+        commandList->ClearRenderTargetView(m_rtvAllocator.getCPU(m_backBufferRTVs[m_backBufferIndex]), clearColor, 0, nullptr);
+        commandList->ClearDepthStencilView(m_dsvAllocator.getCPU(m_mainDSVIndex),
+                                            D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, nullptr);
+    }
+}
+
+// ============================================================================
+// Camera / Matrix Operations
+// ============================================================================
+
+void D3D12RenderAPI::setCamera(const camera& cam)
+{
+    glm::vec3 pos = cam.getPosition();
+    glm::vec3 target = cam.getTarget();
+    glm::vec3 up = cam.getUpVector();
+    view_matrix = glm::lookAt(pos, target, up);
+    global_cbuffer_dirty = true;
+}
+
+void D3D12RenderAPI::pushMatrix() { model_matrix_stack.push(current_model_matrix); }
+
+void D3D12RenderAPI::popMatrix()
+{
+    if (!model_matrix_stack.empty())
+    {
+        current_model_matrix = model_matrix_stack.top();
+        model_matrix_stack.pop();
+    }
+}
+
+void D3D12RenderAPI::translate(const glm::vec3& pos)
+{
+    current_model_matrix = glm::translate(current_model_matrix, pos);
+}
+
+void D3D12RenderAPI::rotate(const glm::mat4& rotation)
+{
+    current_model_matrix = current_model_matrix * rotation;
+}
+
+void D3D12RenderAPI::multiplyMatrix(const glm::mat4& matrix)
+{
+    current_model_matrix = current_model_matrix * matrix;
+}
+
+glm::mat4 D3D12RenderAPI::getProjectionMatrix() const { return projection_matrix; }
+glm::mat4 D3D12RenderAPI::getViewMatrix() const { return view_matrix; }
+
+// ============================================================================
+// Constant Buffer Updates
+// ============================================================================
+
+void D3D12RenderAPI::updateGlobalCBuffer()
+{
+    D3D12GlobalCBuffer cb = {};
+    cb.view = view_matrix;
+    cb.projection = projection_matrix;
+    for (int i = 0; i < NUM_CASCADES; i++)
+        cb.lightSpaceMatrices[i] = lightSpaceMatrices[i];
+    cb.cascadeSplits = glm::vec4(cascadeSplitDistances[0], cascadeSplitDistances[1],
+                                  cascadeSplitDistances[2], cascadeSplitDistances[3]);
+    cb.cascadeSplit4 = cascadeSplitDistances[NUM_CASCADES];
+    cb.lightDir = current_light_direction;
+    cb.cascadeCount = NUM_CASCADES;
+    cb.lightAmbient = current_light_ambient;
+    cb.lightDiffuse = current_light_diffuse;
+    cb.debugCascades = debugCascades ? 1 : 0;
+    cb.shadowMapTexelSize = glm::vec2(1.0f / static_cast<float>(currentShadowSize));
+
+    auto addr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(cb), &cb);
+    commandList->SetGraphicsRootConstantBufferView(0, addr);
+}
+
+void D3D12RenderAPI::updatePerObjectCBuffer(const glm::vec3& color, bool useTexture)
+{
+    D3D12PerObjectCBuffer cb = {};
+    cb.model = current_model_matrix;
+    glm::mat3 normalMat3 = glm::mat3(current_model_matrix);
+    float det = glm::determinant(normalMat3);
+    if (std::abs(det) > 1e-6f)
+        cb.normalMatrix = glm::mat4(glm::transpose(glm::inverse(normalMat3)));
+    else
+        cb.normalMatrix = glm::mat4(1.0f);
+    cb.color = color;
+    cb.useTexture = useTexture ? 1 : 0;
+
+    auto addr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(cb), &cb);
+    commandList->SetGraphicsRootConstantBufferView(1, addr);
+}
+
+void D3D12RenderAPI::updateShadowCBuffer(const glm::mat4& lightSpace, const glm::mat4& model)
+{
+    D3D12ShadowCBuffer cb = {};
+    cb.lightSpaceMatrix = lightSpace;
+    cb.model = model;
+
+    auto addr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(cb), &cb);
+    commandList->SetGraphicsRootConstantBufferView(0, addr);
+}
+
+// ============================================================================
+// Render State / Lighting
+// ============================================================================
+
+void D3D12RenderAPI::setRenderState(const RenderState& state)
+{
+    current_state = state;
+}
+
+void D3D12RenderAPI::enableLighting(bool enable)
+{
+    lighting_enabled = enable;
+}
+
+void D3D12RenderAPI::setLighting(const glm::vec3& ambient, const glm::vec3& diffuse, const glm::vec3& direction)
+{
+    current_light_ambient = ambient;
+    current_light_diffuse = diffuse;
+    current_light_direction = glm::normalize(direction);
+    global_cbuffer_dirty = true;
+}
+
+void D3D12RenderAPI::setPointAndSpotLights(const LightCBuffer& lights)
+{
+    current_lights = lights;
+}
