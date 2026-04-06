@@ -2,7 +2,9 @@
 #include "Assets/AssetScanner.hpp"
 #include "EditorIcons.hpp"
 #include "ImGui/ImGuiManager.hpp"
+#include "json.hpp"
 #include <algorithm>
+#include <fstream>
 
 namespace fs = std::filesystem;
 
@@ -297,10 +299,10 @@ void ContentBrowserPanel::handleFileAction(const fs::path& path)
             std::replace(path_str.begin(), path_str.end(), '\\', '/');
             on_open_mesh(path_str);
         }
-        else if (isPrefabFile(path) && on_spawn_prefab)
+        else if (isPrefabFile(path) && on_open_prefab)
         {
             std::replace(path_str.begin(), path_str.end(), '\\', '/');
-            on_spawn_prefab(path_str);
+            on_open_prefab(path_str);
         }
     }
 }
@@ -416,38 +418,150 @@ void ContentBrowserPanel::drawMetadataInfo()
     }
 }
 
-void ContentBrowserPanel::drawContextMenu(const fs::path& path)
+void ContentBrowserPanel::drawItemContextMenu(const fs::path& path)
 {
-    if (!isMeshFile(path)) return;
-
     if (ImGui::BeginPopupContextItem())
     {
-        std::string path_str = path.string();
-        std::string meta_path = Assets::AssetMetadataSerializer::getMetaPath(path_str);
-        bool has_meta = fs::exists(meta_path);
-
-        if (ImGui::MenuItem(ICON_FA_GEAR "  LOD Settings..."))
+        // --- Common actions for all items ---
+        if (ImGui::MenuItem(ICON_FA_PENCIL "  Rename"))
         {
-            if (on_open_mesh)
-            {
-                std::string normalized = path_str;
-                std::replace(normalized.begin(), normalized.end(), '\\', '/');
-                on_open_mesh(normalized);
-            }
+            m_renaming_path = path;
+            m_rename_focus_set = false;
+            std::string name = path.filename().string();
+            std::strncpy(m_rename_buf, name.c_str(), sizeof(m_rename_buf) - 1);
+            m_rename_buf[sizeof(m_rename_buf) - 1] = '\0';
+        }
+        if (ImGui::MenuItem(ICON_FA_TRASH "  Delete"))
+        {
+            m_pending_delete = path;
+            m_confirm_delete_open = true;
         }
 
-        if (ImGui::MenuItem(has_meta ? (ICON_FA_ROTATE "  Regenerate LODs") : (ICON_FA_PLUS "  Generate Metadata")))
+        // --- Directory-specific: create sub-items ---
+        if (fs::is_directory(path))
         {
-            if (asset_scanner)
+            ImGui::Separator();
+            if (ImGui::MenuItem(ICON_FA_FOLDER_PLUS "  New Folder"))
+                createNewFolder(path);
+            if (ImGui::MenuItem(ICON_FA_PUZZLE_PIECE "  New Prefab"))
+                createEmptyPrefab(path);
+            if (ImGui::MenuItem(ICON_FA_MAP "  New Level"))
+                createEmptyLevel(path);
+        }
+
+        // --- Mesh-specific actions ---
+        if (isMeshFile(path))
+        {
+            ImGui::Separator();
+            std::string path_str = path.string();
+            std::string meta_path = Assets::AssetMetadataSerializer::getMetaPath(path_str);
+            bool has_meta = fs::exists(meta_path);
+
+            if (ImGui::MenuItem(ICON_FA_GEAR "  LOD Settings..."))
             {
-                std::string normalized = path_str;
-                std::replace(normalized.begin(), normalized.end(), '\\', '/');
-                asset_scanner->regenerateAsset(normalized);
+                if (on_open_mesh)
+                {
+                    std::string normalized = path_str;
+                    std::replace(normalized.begin(), normalized.end(), '\\', '/');
+                    on_open_mesh(normalized);
+                }
+            }
+
+            if (ImGui::MenuItem(has_meta ? (ICON_FA_ROTATE "  Regenerate LODs") : (ICON_FA_PLUS "  Generate Metadata")))
+            {
+                if (asset_scanner)
+                {
+                    std::string normalized = path_str;
+                    std::replace(normalized.begin(), normalized.end(), '\\', '/');
+                    asset_scanner->regenerateAsset(normalized);
+                }
             }
         }
 
         ImGui::EndPopup();
     }
+}
+
+void ContentBrowserPanel::drawBackgroundContextMenu()
+{
+    if (ImGui::BeginPopupContextWindow("bg_ctx", ImGuiPopupFlags_MouseButtonRight | ImGuiPopupFlags_NoOpenOverItems))
+    {
+        if (ImGui::MenuItem(ICON_FA_FOLDER_PLUS "  New Folder"))
+            createNewFolder(m_current_dir);
+        if (ImGui::MenuItem(ICON_FA_PUZZLE_PIECE "  New Prefab"))
+            createEmptyPrefab(m_current_dir);
+        if (ImGui::MenuItem(ICON_FA_MAP "  New Level"))
+            createEmptyLevel(m_current_dir);
+        ImGui::EndPopup();
+    }
+}
+
+void ContentBrowserPanel::createNewFolder(const fs::path& dir)
+{
+    fs::path folder = dir / "New Folder";
+    if (fs::exists(folder))
+    {
+        for (int i = 1; i < 100; i++)
+        {
+            folder = dir / ("New Folder (" + std::to_string(i) + ")");
+            if (!fs::exists(folder)) break;
+        }
+    }
+    fs::create_directory(folder);
+}
+
+void ContentBrowserPanel::createEmptyPrefab(const fs::path& dir)
+{
+    fs::path file = dir / "New Prefab.prefab";
+    if (fs::exists(file))
+    {
+        for (int i = 1; i < 100; i++)
+        {
+            file = dir / ("New Prefab (" + std::to_string(i) + ").prefab");
+            if (!fs::exists(file)) break;
+        }
+    }
+
+    nlohmann::json j;
+    j["format"] = "garden_prefab";
+    j["version"] = 1;
+    j["name"] = "New Prefab";
+    j["components"]["TagComponent"]["name"] = "New Prefab";
+    j["components"]["TransformComponent"]["position"] = {0, 0, 0};
+    j["components"]["TransformComponent"]["rotation"] = {0, 0, 0};
+    j["components"]["TransformComponent"]["scale"] = {1, 1, 1};
+
+    std::ofstream out(file);
+    if (out.is_open())
+        out << j.dump(2);
+}
+
+void ContentBrowserPanel::createEmptyLevel(const fs::path& dir)
+{
+    fs::path file = dir / "New Level.level.json";
+    if (fs::exists(file))
+    {
+        for (int i = 1; i < 100; i++)
+        {
+            file = dir / ("New Level (" + std::to_string(i) + ").level.json");
+            if (!fs::exists(file)) break;
+        }
+    }
+
+    nlohmann::json j;
+    j["metadata"]["level_name"] = "New Level";
+    j["metadata"]["author"] = "";
+    j["metadata"]["version"] = "1.0";
+    j["metadata"]["world"]["gravity"] = {{"x", 0.0}, {"y", -1.0}, {"z", 0.0}};
+    j["metadata"]["world"]["fixed_delta"] = 0.016;
+    j["metadata"]["lighting"]["ambient"] = {{"r", 0.2}, {"g", 0.2}, {"b", 0.2}};
+    j["metadata"]["lighting"]["diffuse"] = {{"r", 0.8}, {"g", 0.8}, {"b", 0.8}};
+    j["metadata"]["lighting"]["direction"] = {{"x", -0.2}, {"y", -1.0}, {"z", -0.3}};
+    j["entities"] = nlohmann::json::array();
+
+    std::ofstream out(file);
+    if (out.is_open())
+        out << j.dump(2);
 }
 
 // ── Asset tooltip ───────────────────────────────────────────────────────────
@@ -740,9 +854,9 @@ void ContentBrowserPanel::draw()
                     if (!is_back && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
                         drawAssetTooltip(item);
 
-                    // Right-click context menu for mesh files
+                    // Right-click context menu
                     if (!is_back)
-                        drawContextMenu(item);
+                        drawItemContextMenu(item);
 
                     bool is_card_selected = (!is_back && isMeshFile(item) && m_selected_mesh == item);
 
@@ -813,7 +927,30 @@ void ContentBrowserPanel::draw()
                             ImVec2(card_pos.x + card_size.x - 8.0f, card_pos.y + 8.0f), item);
                     }
 
-                    // Filename with ellipsis truncation
+                    // Filename with ellipsis truncation (or inline rename)
+                    if (!is_back && m_renaming_path == item)
+                    {
+                        // Inline rename mode
+                        float text_y = card_pos.y + m_thumbnail_size - 4.0f;
+                        ImGui::SetCursorScreenPos(ImVec2(card_pos.x + 2.0f, text_y));
+                        ImGui::SetNextItemWidth(m_thumbnail_size - 4.0f);
+                        if (!m_rename_focus_set)
+                        {
+                            ImGui::SetKeyboardFocusHere();
+                            m_rename_focus_set = true;
+                        }
+                        if (ImGui::InputText("##rename_grid", m_rename_buf, sizeof(m_rename_buf),
+                            ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll))
+                        {
+                            fs::path new_path = m_renaming_path.parent_path() / m_rename_buf;
+                            if (new_path != m_renaming_path && !fs::exists(new_path))
+                                fs::rename(m_renaming_path, new_path);
+                            m_renaming_path.clear();
+                        }
+                        if (!ImGui::IsItemActive() && m_rename_focus_set && !m_renaming_path.empty())
+                            m_renaming_path.clear();
+                    }
+                    else
                     {
                         float text_y = card_pos.y + m_thumbnail_size - 4.0f;
                         float text_max_w = m_thumbnail_size - 6.0f;
@@ -827,7 +964,6 @@ void ContentBrowserPanel::draw()
                             // Truncate with ellipsis
                             float ellipsis_w = ImGui::CalcTextSize("...").x;
                             float avail = text_max_w - ellipsis_w;
-                            // Binary search for truncation point using CalcTextSize
                             int truncate_at = 0;
                             for (int c = 1; c <= (int)filename.size(); c++)
                             {
@@ -846,7 +982,7 @@ void ContentBrowserPanel::draw()
                         }
                     }
 
-                    if (double_clicked)
+                    if (double_clicked && m_renaming_path.empty())
                     {
                         if (is_back)
                             navigateTo(m_current_dir.parent_path());
@@ -901,72 +1037,127 @@ void ContentBrowserPanel::draw()
 
                 ImVec4 color = is_back ? ImVec4(1.0f, 0.9f, 0.3f, 1.0f) : getFileColor(item);
                 ImGui::PushStyleColor(ImGuiCol_Text, color);
-                if (ImGui::Selectable(filename.c_str(), false, ImGuiSelectableFlags_AllowDoubleClick))
-                {
-                    if (!is_back && isMeshFile(item))
-                    {
-                        m_selected_mesh = item;
-                        std::string meta_path = Assets::AssetMetadataSerializer::getMetaPath(item.string());
-                        m_has_selected_metadata = Assets::AssetMetadataSerializer::load(m_selected_metadata, meta_path);
 
-                        if (on_preview_mesh)
+                if (!is_back && m_renaming_path == item)
+                {
+                    // Inline rename mode
+                    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+                    if (!m_rename_focus_set)
+                    {
+                        ImGui::SetKeyboardFocusHere();
+                        m_rename_focus_set = true;
+                    }
+                    if (ImGui::InputText("##rename_list", m_rename_buf, sizeof(m_rename_buf),
+                        ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll))
+                    {
+                        fs::path new_path = m_renaming_path.parent_path() / m_rename_buf;
+                        if (new_path != m_renaming_path && !fs::exists(new_path))
+                            fs::rename(m_renaming_path, new_path);
+                        m_renaming_path.clear();
+                    }
+                    if (!ImGui::IsItemActive() && m_rename_focus_set && !m_renaming_path.empty())
+                        m_renaming_path.clear();
+                }
+                else
+                {
+                    if (ImGui::Selectable(filename.c_str(), false, ImGuiSelectableFlags_AllowDoubleClick))
+                    {
+                        if (!is_back && isMeshFile(item))
                         {
-                            std::string p = item.string();
-                            std::replace(p.begin(), p.end(), '\\', '/');
-                            on_preview_mesh(p);
+                            m_selected_mesh = item;
+                            std::string meta_path = Assets::AssetMetadataSerializer::getMetaPath(item.string());
+                            m_has_selected_metadata = Assets::AssetMetadataSerializer::load(m_selected_metadata, meta_path);
+
+                            if (on_preview_mesh)
+                            {
+                                std::string p = item.string();
+                                std::replace(p.begin(), p.end(), '\\', '/');
+                                on_preview_mesh(p);
+                            }
+                        }
+
+                        if (ImGui::IsMouseDoubleClicked(0) && m_renaming_path.empty())
+                        {
+                            if (is_back)
+                                navigateTo(m_current_dir.parent_path());
+                            else
+                                handleFileAction(item);
                         }
                     }
 
-                    if (ImGui::IsMouseDoubleClicked(0))
+                    // Asset tooltip
+                    if (!is_back && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
+                        drawAssetTooltip(item);
+
+                    // Drag source for mesh files
+                    if (!is_back && isMeshFile(item) && ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
                     {
-                        if (is_back)
-                            navigateTo(m_current_dir.parent_path());
-                        else
-                            handleFileAction(item);
+                        std::string path_str = item.string();
+                        std::replace(path_str.begin(), path_str.end(), '\\', '/');
+                        ImGui::SetDragDropPayload("ASSET_MESH_PATH", path_str.c_str(), path_str.size() + 1);
+                        ImVec4 fc = getFileColor(item);
+                        ImGui::TextColored(fc, "[M]");
+                        ImGui::SameLine();
+                        ImGui::Text("%s", item.filename().string().c_str());
+                        ImGui::EndDragDropSource();
                     }
-                }
 
-                // Asset tooltip
-                if (!is_back && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
-                    drawAssetTooltip(item);
-
-                // Drag source for mesh files
-                if (!is_back && isMeshFile(item) && ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
-                {
-                    std::string path_str = item.string();
-                    std::replace(path_str.begin(), path_str.end(), '\\', '/');
-                    ImGui::SetDragDropPayload("ASSET_MESH_PATH", path_str.c_str(), path_str.size() + 1);
-                    ImVec4 fc = getFileColor(item);
-                    ImGui::TextColored(fc, "[M]");
-                    ImGui::SameLine();
-                    ImGui::Text("%s", item.filename().string().c_str());
-                    ImGui::EndDragDropSource();
-                }
-
-                // Drag source for prefab files
-                if (!is_back && isPrefabFile(item) && ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
-                {
-                    std::string path_str = item.string();
-                    std::replace(path_str.begin(), path_str.end(), '\\', '/');
-                    ImGui::SetDragDropPayload("ASSET_PREFAB_PATH", path_str.c_str(), path_str.size() + 1);
-                    ImVec4 fc = getFileColor(item);
-                    ImGui::TextColored(fc, "[P]");
-                    ImGui::SameLine();
-                    ImGui::Text("%s", item.filename().string().c_str());
-                    ImGui::EndDragDropSource();
+                    // Drag source for prefab files
+                    if (!is_back && isPrefabFile(item) && ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
+                    {
+                        std::string path_str = item.string();
+                        std::replace(path_str.begin(), path_str.end(), '\\', '/');
+                        ImGui::SetDragDropPayload("ASSET_PREFAB_PATH", path_str.c_str(), path_str.size() + 1);
+                        ImVec4 fc = getFileColor(item);
+                        ImGui::TextColored(fc, "[P]");
+                        ImGui::SameLine();
+                        ImGui::Text("%s", item.filename().string().c_str());
+                        ImGui::EndDragDropSource();
+                    }
                 }
 
                 ImGui::PopStyleColor();
 
                 if (!is_back)
-                    drawContextMenu(item);
+                    drawItemContextMenu(item);
 
                 ImGui::PopID();
             }
         }
     }
 
+    // Background context menu (right-click empty space)
+    drawBackgroundContextMenu();
+
     ImGui::EndChild(); // FileArea
+
+    // Delete confirmation modal
+    if (m_confirm_delete_open && !m_pending_delete.empty())
+    {
+        ImGui::OpenPopup("ConfirmDelete##cb");
+        m_confirm_delete_open = false;
+    }
+    if (ImGui::BeginPopupModal("ConfirmDelete##cb", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        ImGui::Text("Delete '%s'?", m_pending_delete.filename().string().c_str());
+        if (fs::is_directory(m_pending_delete))
+            ImGui::TextDisabled("This will delete the folder and all its contents.");
+        ImGui::Spacing();
+
+        if (ImGui::Button("Delete", ImVec2(120, 0)))
+        {
+            fs::remove_all(m_pending_delete);
+            m_pending_delete.clear();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(120, 0)))
+        {
+            m_pending_delete.clear();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
 
     // Status bar
     drawStatusBar();

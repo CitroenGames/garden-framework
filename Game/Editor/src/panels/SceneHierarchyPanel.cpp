@@ -1,6 +1,7 @@
 #include "SceneHierarchyPanel.hpp"
 #include "Components/Components.hpp"
 #include "Components/PrefabInstanceComponent.hpp"
+#include "Reflection/ReflectionRegistry.hpp"
 #include "EditorIcons.hpp"
 #include "imgui.h"
 #include <algorithm>
@@ -268,6 +269,38 @@ void SceneHierarchyPanel::draw(entt::registry& registry, bool* out_dirty, bool* 
             {
                 if (on_save_as_prefab)
                     on_save_as_prefab(entity);
+            }
+            if (ImGui::BeginMenu(ICON_FA_PLUS "  Add Component"))
+            {
+                static const uint32_t mesh_type_id     = entt::type_hash<MeshComponent>::value();
+                static const uint32_t collider_type_id = entt::type_hash<ColliderComponent>::value();
+
+                if (!registry.all_of<MeshComponent>(entity))
+                    if (ImGui::MenuItem("Mesh"))
+                    { registry.emplace<MeshComponent>(entity); if (out_unsaved) *out_unsaved = true; }
+
+                if (!registry.all_of<ColliderComponent>(entity))
+                    if (ImGui::MenuItem("Collider"))
+                    { registry.emplace<ColliderComponent>(entity); if (out_unsaved) *out_unsaved = true; }
+
+                if (reflection)
+                {
+                    bool need_separator = true;
+                    for (const auto& desc : reflection->getAll())
+                    {
+                        if (desc.type_id == mesh_type_id || desc.type_id == collider_type_id)
+                            continue;
+                        if (desc.has(registry, entity))
+                            continue;
+                        if (need_separator) { ImGui::Separator(); need_separator = false; }
+                        if (ImGui::MenuItem(desc.display_name))
+                        {
+                            desc.add(registry, entity);
+                            if (out_unsaved) *out_unsaved = true;
+                        }
+                    }
+                }
+                ImGui::EndMenu();
             }
             if (ImGui::MenuItem(ICON_FA_PENCIL "  Rename"))
             {

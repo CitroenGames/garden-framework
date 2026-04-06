@@ -185,9 +185,17 @@ void D3D12RenderAPI::endFrame()
         D3D12FXAACBuffer fxaaCB = {};
         fxaaCB.inverseScreenSize = glm::vec2(1.0f / std::max(viewport_width, 1), 1.0f / std::max(viewport_height, 1));
         auto cbAddr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(fxaaCB), &fxaaCB);
-        bindDummyRootParams();
+        // Minimal root param bindings for FXAA (shader only reads b0 and t0)
         commandList->SetGraphicsRootConstantBufferView(0, cbAddr);
+        commandList->SetGraphicsRootConstantBufferView(1, cbAddr); // dummy, reuse FXAA cb
         commandList->SetGraphicsRootDescriptorTable(2, m_srvAllocator.getGPU(m_offscreenSRVIndex));
+        // Bind default Texture2D SRV (NOT shadow Texture2DArray) for unused t1 slot
+        if (defaultTexture != INVALID_TEXTURE) {
+            auto it = textures.find(defaultTexture);
+            if (it != textures.end())
+                commandList->SetGraphicsRootDescriptorTable(3, m_srvAllocator.getGPU(it->second.srvIndex));
+        }
+        commandList->SetGraphicsRootConstantBufferView(4, cbAddr); // dummy, reuse FXAA cb
 
         commandList->IASetVertexBuffers(0, 1, &m_fxaaQuadVBV);
         commandList->DrawInstanced(4, 1, 0, 0);

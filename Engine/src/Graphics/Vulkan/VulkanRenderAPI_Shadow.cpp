@@ -254,13 +254,18 @@ bool VulkanRenderAPI::createShadowResources()
     // descriptor layout that includes both binding 0 (ShadowCB) and
     // binding 1 (BoneCB), or extend this layout.
 
-    // Create shadow pipeline layout (no push constants - model is in ShadowUBO)
+    // Create shadow pipeline layout with push constant for per-draw model matrix
+    VkPushConstantRange shadowPushRange{};
+    shadowPushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    shadowPushRange.offset = 0;
+    shadowPushRange.size = sizeof(glm::mat4); // 64 bytes for model matrix
+
     VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
     pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     pipelineLayoutInfo.setLayoutCount = 1;
     pipelineLayoutInfo.pSetLayouts = &shadow_descriptor_layout;
-    pipelineLayoutInfo.pushConstantRangeCount = 0;
-    pipelineLayoutInfo.pPushConstantRanges = nullptr;
+    pipelineLayoutInfo.pushConstantRangeCount = 1;
+    pipelineLayoutInfo.pPushConstantRanges = &shadowPushRange;
 
     if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &shadow_pipeline_layout) != VK_SUCCESS) {
         printf("Failed to create shadow pipeline layout\n");

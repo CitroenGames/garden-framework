@@ -4,8 +4,18 @@
 cbuffer ShadowCB : register(b0)
 {
     float4x4 uLightSpaceMatrix;
-    float4x4 uModel;
+#ifndef TARGET_SPIRV
+    float4x4 uModel;       // D3D11/D3D12: model stays in UBO
+#endif
 };
+
+#ifdef TARGET_SPIRV
+[[vk::push_constant]]
+cbuffer ShadowPush
+{
+    float4x4 uModel;       // Vulkan: model via push constant (per-draw)
+};
+#endif
 
 struct VSInput
 {
