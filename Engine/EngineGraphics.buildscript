@@ -18,8 +18,19 @@ type = dll
 outdir = ../bin/
 sources = {
     src/Graphics/RenderAPI.cpp
-    src/Graphics/VulkanRenderAPI.cpp
-    src/Graphics/VulkanMesh.cpp
+    src/Graphics/Vulkan/VulkanRenderAPI.cpp
+    src/Graphics/Vulkan/VulkanRenderAPI_Device.cpp
+    src/Graphics/Vulkan/VulkanRenderAPI_Swapchain.cpp
+    src/Graphics/Vulkan/VulkanRenderAPI_Pipeline.cpp
+    src/Graphics/Vulkan/VulkanRenderAPI_Descriptors.cpp
+    src/Graphics/Vulkan/VulkanRenderAPI_Frame.cpp
+    src/Graphics/Vulkan/VulkanRenderAPI_Rendering.cpp
+    src/Graphics/Vulkan/VulkanRenderAPI_Commands.cpp
+    src/Graphics/Vulkan/VulkanRenderAPI_Shadow.cpp
+    src/Graphics/Vulkan/VulkanRenderAPI_Skybox.cpp
+    src/Graphics/Vulkan/VulkanRenderAPI_FXAA.cpp
+    src/Graphics/Vulkan/VulkanRenderAPI_Viewport.cpp
+    src/Graphics/Vulkan/VulkanMesh.cpp
     src/Graphics/D3D11RenderAPI.cpp [windows]
     src/Graphics/D3D11Mesh.cpp [windows]
     src/Graphics/D3D12RenderAPI.cpp [windows]

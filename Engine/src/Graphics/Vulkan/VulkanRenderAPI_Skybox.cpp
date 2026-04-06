@@ -1,0 +1,397 @@
+#include "VulkanRenderAPI.hpp"
+#include "Utils/Log.hpp"
+#include "Utils/EnginePaths.hpp"
+#include <stdio.h>
+#include <cstring>
+#include <fstream>
+#include <array>
+
+// VMA
+#define VMA_STATIC_VULKAN_FUNCTIONS 0
+#define VMA_DYNAMIC_VULKAN_FUNCTIONS 1
+#include "vk_mem_alloc.h"
+
+bool VulkanRenderAPI::createSkyboxResources()
+{
+    // Skybox cube vertices (36 vertices, position only)
+    float skyboxVertices[] = {
+        -1.0f,  1.0f, -1.0f,
+        -1.0f, -1.0f, -1.0f,
+         1.0f, -1.0f, -1.0f,
+         1.0f, -1.0f, -1.0f,
+         1.0f,  1.0f, -1.0f,
+        -1.0f,  1.0f, -1.0f,
+
+        -1.0f, -1.0f,  1.0f,
+        -1.0f, -1.0f, -1.0f,
+        -1.0f,  1.0f, -1.0f,
+        -1.0f,  1.0f, -1.0f,
+        -1.0f,  1.0f,  1.0f,
+        -1.0f, -1.0f,  1.0f,
+
+         1.0f, -1.0f, -1.0f,
+         1.0f, -1.0f,  1.0f,
+         1.0f,  1.0f,  1.0f,
+         1.0f,  1.0f,  1.0f,
+         1.0f,  1.0f, -1.0f,
+         1.0f, -1.0f, -1.0f,
+
+        -1.0f, -1.0f,  1.0f,
+        -1.0f,  1.0f,  1.0f,
+         1.0f,  1.0f,  1.0f,
+         1.0f,  1.0f,  1.0f,
+         1.0f, -1.0f,  1.0f,
+        -1.0f, -1.0f,  1.0f,
+
+        -1.0f,  1.0f, -1.0f,
+         1.0f,  1.0f, -1.0f,
+         1.0f,  1.0f,  1.0f,
+         1.0f,  1.0f,  1.0f,
+        -1.0f,  1.0f,  1.0f,
+        -1.0f,  1.0f, -1.0f,
+
+        -1.0f, -1.0f, -1.0f,
+        -1.0f, -1.0f,  1.0f,
+         1.0f, -1.0f, -1.0f,
+         1.0f, -1.0f, -1.0f,
+        -1.0f, -1.0f,  1.0f,
+         1.0f, -1.0f,  1.0f
+    };
+
+    // Create vertex buffer
+    VkBufferCreateInfo bufferInfo{};
+    bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufferInfo.size = sizeof(skyboxVertices);
+    bufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+
+    VmaAllocationCreateInfo allocInfo{};
+    allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+
+    if (vmaCreateBuffer(vma_allocator, &bufferInfo, &allocInfo,
+                        &skybox_vertex_buffer, &skybox_vertex_allocation, nullptr) != VK_SUCCESS) {
+        printf("Failed to create skybox vertex buffer\n");
+        return false;
+    }
+
+    // Upload via shared staging buffer (lock for thread safety)
+    {
+        std::lock_guard<std::mutex> staging_lock(staging_mutex);
+        ensureStagingBuffer(sizeof(skyboxVertices));
+        memcpy(staging_mapped, skyboxVertices, sizeof(skyboxVertices));
+
+        VkCommandBuffer cmd = beginSingleTimeCommands();
+        VkBufferCopy copyRegion{};
+        copyRegion.size = sizeof(skyboxVertices);
+        vkCmdCopyBuffer(cmd, staging_buffer, skybox_vertex_buffer, 1, &copyRegion);
+        endSingleTimeCommands(cmd);
+    }
+
+    // Create skybox descriptor set layout
+    VkDescriptorSetLayoutBinding uboBinding{};
+    uboBinding.binding = 0;
+    uboBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    uboBinding.descriptorCount = 1;
+    uboBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+
+    VkDescriptorSetLayoutCreateInfo layoutInfo{};
+    layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layoutInfo.bindingCount = 1;
+    layoutInfo.pBindings = &uboBinding;
+
+    if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &skybox_descriptor_layout) != VK_SUCCESS) {
+        printf("Failed to create skybox descriptor set layout\n");
+        return false;
+    }
+
+    // Create skybox pipeline layout
+    VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+    pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pipelineLayoutInfo.setLayoutCount = 1;
+    pipelineLayoutInfo.pSetLayouts = &skybox_descriptor_layout;
+
+    if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &skybox_pipeline_layout) != VK_SUCCESS) {
+        printf("Failed to create skybox pipeline layout\n");
+        return false;
+    }
+
+    // Load skybox shaders
+    auto vertCode = readShaderFile(EnginePaths::resolveEngineAsset("../assets/shaders/compiled/vulkan/sky.vert.spv"));
+    auto fragCode = readShaderFile(EnginePaths::resolveEngineAsset("../assets/shaders/compiled/vulkan/sky.frag.spv"));
+
+    if (vertCode.empty() || fragCode.empty()) {
+        printf("Failed to load skybox shaders\n");
+        return false;
+    }
+
+    VkShaderModule vertModule = createShaderModule(vertCode);
+    VkShaderModule fragModule = createShaderModule(fragCode);
+
+    if (vertModule == VK_NULL_HANDLE || fragModule == VK_NULL_HANDLE) {
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create shader module(s) for skybox pipeline");
+        if (vertModule != VK_NULL_HANDLE) vkDestroyShaderModule(device, vertModule, nullptr);
+        if (fragModule != VK_NULL_HANDLE) vkDestroyShaderModule(device, fragModule, nullptr);
+        return false;
+    }
+
+    // Create skybox pipeline
+    VkPipelineShaderStageCreateInfo vertStage{};
+    vertStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    vertStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
+    vertStage.module = vertModule;
+    vertStage.pName = "main";
+
+    VkPipelineShaderStageCreateInfo fragStage{};
+    fragStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    fragStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    fragStage.module = fragModule;
+    fragStage.pName = "main";
+
+    VkPipelineShaderStageCreateInfo shaderStages[] = {vertStage, fragStage};
+
+    // Vertex input - position only (vec3)
+    VkVertexInputBindingDescription bindingDesc{};
+    bindingDesc.binding = 0;
+    bindingDesc.stride = 3 * sizeof(float);
+    bindingDesc.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+    VkVertexInputAttributeDescription attrDesc{};
+    attrDesc.binding = 0;
+    attrDesc.location = 0;
+    attrDesc.format = VK_FORMAT_R32G32B32_SFLOAT;
+    attrDesc.offset = 0;
+
+    VkPipelineVertexInputStateCreateInfo vertexInput{};
+    vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    vertexInput.vertexBindingDescriptionCount = 1;
+    vertexInput.pVertexBindingDescriptions = &bindingDesc;
+    vertexInput.vertexAttributeDescriptionCount = 1;
+    vertexInput.pVertexAttributeDescriptions = &attrDesc;
+
+    VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+    inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    VkPipelineViewportStateCreateInfo viewportState{};
+    viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    viewportState.viewportCount = 1;
+    viewportState.scissorCount = 1;
+
+    VkPipelineRasterizationStateCreateInfo rasterizer{};
+    rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+    rasterizer.lineWidth = 1.0f;
+    rasterizer.cullMode = VK_CULL_MODE_NONE;  // No culling for skybox
+    rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+
+    VkPipelineMultisampleStateCreateInfo multisampling{};
+    multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    VkPipelineDepthStencilStateCreateInfo depthStencil{};
+    depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    depthStencil.depthTestEnable = VK_TRUE;
+    depthStencil.depthWriteEnable = VK_FALSE;  // Don't write depth
+    depthStencil.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;  // LEQUAL
+
+    VkPipelineColorBlendAttachmentState colorBlendAttachment{};
+    colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                          VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    colorBlendAttachment.blendEnable = VK_FALSE;
+
+    VkPipelineColorBlendStateCreateInfo colorBlending{};
+    colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    colorBlending.attachmentCount = 1;
+    colorBlending.pAttachments = &colorBlendAttachment;
+
+    std::vector<VkDynamicState> dynamicStates = {
+        VK_DYNAMIC_STATE_VIEWPORT,
+        VK_DYNAMIC_STATE_SCISSOR
+    };
+
+    VkPipelineDynamicStateCreateInfo dynamicState{};
+    dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
+    dynamicState.pDynamicStates = dynamicStates.data();
+
+    VkGraphicsPipelineCreateInfo pipelineInfo{};
+    pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipelineInfo.stageCount = 2;
+    pipelineInfo.pStages = shaderStages;
+    pipelineInfo.pVertexInputState = &vertexInput;
+    pipelineInfo.pInputAssemblyState = &inputAssembly;
+    pipelineInfo.pViewportState = &viewportState;
+    pipelineInfo.pRasterizationState = &rasterizer;
+    pipelineInfo.pMultisampleState = &multisampling;
+    pipelineInfo.pDepthStencilState = &depthStencil;
+    pipelineInfo.pColorBlendState = &colorBlending;
+    pipelineInfo.pDynamicState = &dynamicState;
+    pipelineInfo.layout = skybox_pipeline_layout;
+    pipelineInfo.renderPass = render_pass;
+    pipelineInfo.subpass = 0;
+
+    if (vkCreateGraphicsPipelines(device, vk_pipeline_cache, 1, &pipelineInfo, nullptr, &skybox_pipeline) != VK_SUCCESS) {
+        printf("Failed to create skybox pipeline\n");
+        vkDestroyShaderModule(device, vertModule, nullptr);
+        vkDestroyShaderModule(device, fragModule, nullptr);
+        return false;
+    }
+
+    vkDestroyShaderModule(device, vertModule, nullptr);
+    vkDestroyShaderModule(device, fragModule, nullptr);
+
+    // Create descriptor pool
+    VkDescriptorPoolSize poolSize{};
+    poolSize.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    poolSize.descriptorCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
+
+    VkDescriptorPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    poolInfo.poolSizeCount = 1;
+    poolInfo.pPoolSizes = &poolSize;
+    poolInfo.maxSets = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
+
+    if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &skybox_descriptor_pool) != VK_SUCCESS) {
+        printf("Failed to create skybox descriptor pool\n");
+        return false;
+    }
+
+    // Create uniform buffers
+    skybox_uniform_buffers.resize(MAX_FRAMES_IN_FLIGHT);
+    skybox_uniform_allocations.resize(MAX_FRAMES_IN_FLIGHT);
+    skybox_uniform_mapped.resize(MAX_FRAMES_IN_FLIGHT);
+
+    for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        VkBufferCreateInfo bufInfo{};
+        bufInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bufInfo.size = sizeof(SkyboxUBO);
+        bufInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+
+        VmaAllocationCreateInfo allocCreateInfo{};
+        allocCreateInfo.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
+        allocCreateInfo.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
+
+        VmaAllocationInfo allocInfoOut;
+        if (vmaCreateBuffer(vma_allocator, &bufInfo, &allocCreateInfo,
+                           &skybox_uniform_buffers[i], &skybox_uniform_allocations[i], &allocInfoOut) != VK_SUCCESS) {
+            printf("Failed to create skybox uniform buffer %d\n", i);
+            return false;
+        }
+        skybox_uniform_mapped[i] = allocInfoOut.pMappedData;
+    }
+
+    // Allocate descriptor sets
+    std::vector<VkDescriptorSetLayout> layouts(MAX_FRAMES_IN_FLIGHT, skybox_descriptor_layout);
+    VkDescriptorSetAllocateInfo allocSetInfo{};
+    allocSetInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocSetInfo.descriptorPool = skybox_descriptor_pool;
+    allocSetInfo.descriptorSetCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
+    allocSetInfo.pSetLayouts = layouts.data();
+
+    skybox_descriptor_sets.resize(MAX_FRAMES_IN_FLIGHT);
+    if (vkAllocateDescriptorSets(device, &allocSetInfo, skybox_descriptor_sets.data()) != VK_SUCCESS) {
+        printf("Failed to allocate skybox descriptor sets\n");
+        return false;
+    }
+
+    // Update descriptor sets
+    for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        VkDescriptorBufferInfo bufferInfo{};
+        bufferInfo.buffer = skybox_uniform_buffers[i];
+        bufferInfo.offset = 0;
+        bufferInfo.range = sizeof(SkyboxUBO);
+
+        VkWriteDescriptorSet descriptorWrite{};
+        descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        descriptorWrite.dstSet = skybox_descriptor_sets[i];
+        descriptorWrite.dstBinding = 0;
+        descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        descriptorWrite.descriptorCount = 1;
+        descriptorWrite.pBufferInfo = &bufferInfo;
+
+        vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+    }
+
+    skybox_initialized = true;
+    printf("Skybox resources created\n");
+    return true;
+}
+
+void VulkanRenderAPI::cleanupSkyboxResources()
+{
+    if (device == VK_NULL_HANDLE) return;
+
+    skybox_initialized = false;
+
+    for (size_t i = 0; i < skybox_uniform_buffers.size(); i++) {
+        if (skybox_uniform_buffers[i] && vma_allocator) {
+            vmaDestroyBuffer(vma_allocator, skybox_uniform_buffers[i], skybox_uniform_allocations[i]);
+        }
+    }
+    skybox_uniform_buffers.clear();
+    skybox_uniform_allocations.clear();
+    skybox_uniform_mapped.clear();
+
+    if (skybox_descriptor_pool != VK_NULL_HANDLE) {
+        vkDestroyDescriptorPool(device, skybox_descriptor_pool, nullptr);
+        skybox_descriptor_pool = VK_NULL_HANDLE;
+    }
+
+    if (skybox_pipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(device, skybox_pipeline, nullptr);
+        skybox_pipeline = VK_NULL_HANDLE;
+    }
+
+    if (skybox_pipeline_layout != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(device, skybox_pipeline_layout, nullptr);
+        skybox_pipeline_layout = VK_NULL_HANDLE;
+    }
+
+    if (skybox_descriptor_layout != VK_NULL_HANDLE) {
+        vkDestroyDescriptorSetLayout(device, skybox_descriptor_layout, nullptr);
+        skybox_descriptor_layout = VK_NULL_HANDLE;
+    }
+
+    if (skybox_vertex_buffer != VK_NULL_HANDLE && vma_allocator) {
+        vmaDestroyBuffer(vma_allocator, skybox_vertex_buffer, skybox_vertex_allocation);
+        skybox_vertex_buffer = VK_NULL_HANDLE;
+        skybox_vertex_allocation = nullptr;
+    }
+}
+
+void VulkanRenderAPI::renderSkybox()
+{
+    if (!frame_started || !skybox_initialized || in_shadow_pass) {
+        return;
+    }
+
+    VkCommandBuffer cmd = command_buffers[current_frame];
+
+    // Update skybox UBO
+    SkyboxUBO skyboxUbo{};
+    skyboxUbo.view = glm::transpose(glm::mat4(glm::mat3(view_matrix)));
+    skyboxUbo.projection = glm::transpose(projection_matrix);
+    skyboxUbo.sunDirection = -light_direction;  // Sun direction is opposite to light direction
+    skyboxUbo.time = 0.0f;  // Could be animated if desired
+
+    memcpy(skybox_uniform_mapped[current_frame], &skyboxUbo, sizeof(SkyboxUBO));
+
+    // Bind skybox pipeline
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, skybox_pipeline);
+
+    // Bind skybox descriptor set
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, skybox_pipeline_layout,
+                            0, 1, &skybox_descriptor_sets[current_frame], 0, nullptr);
+
+    // Bind skybox vertex buffer
+    VkBuffer vertexBuffers[] = { skybox_vertex_buffer };
+    VkDeviceSize offsets[] = { 0 };
+    vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
+
+    // Draw skybox cube (36 vertices)
+    vkCmdDraw(cmd, 36, 1, 0, 0);
+
+    // Invalidate state tracking — skybox used different pipeline/descriptors
+    last_bound_pipeline = VK_NULL_HANDLE;
+    last_bound_descriptor_set = VK_NULL_HANDLE;
+    last_bound_vertex_buffer = VK_NULL_HANDLE;
+}
