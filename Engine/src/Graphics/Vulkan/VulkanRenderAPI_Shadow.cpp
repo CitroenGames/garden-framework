@@ -1,0 +1,838 @@
+#include "VulkanRenderAPI.hpp"
+#include "Utils/Log.hpp"
+#include "Utils/EnginePaths.hpp"
+#include "Utils/Vertex.hpp"
+#include "Components/camera.hpp"
+#include <stdio.h>
+#include <cmath>
+#include <cstring>
+#include <array>
+#include <fstream>
+
+// VMA
+#define VMA_STATIC_VULKAN_FUNCTIONS 0
+#define VMA_DYNAMIC_VULKAN_FUNCTIONS 1
+#include "vk_mem_alloc.h"
+
+// CSM Helper: Calculate cascade split distances using practical split scheme
+void VulkanRenderAPI::calculateCascadeSplits(float nearPlane, float farPlane)
+{
+    cascadeSplitDistances[0] = nearPlane;
+    for (int i = 1; i <= NUM_CASCADES; i++) {
+        float p = static_cast<float>(i) / static_cast<float>(NUM_CASCADES);
+        float log = nearPlane * std::pow(farPlane / nearPlane, p);
+        float linear = nearPlane + (farPlane - nearPlane) * p;
+        cascadeSplitDistances[i] = cascadeSplitLambda * log + (1.0f - cascadeSplitLambda) * linear;
+    }
+}
+
+// CSM Helper: Get frustum corners in world space
+std::array<glm::vec3, 8> VulkanRenderAPI::getFrustumCornersWorldSpace(const glm::mat4& proj, const glm::mat4& view)
+{
+    const glm::mat4 inv = glm::inverse(proj * view);
+    std::array<glm::vec3, 8> corners;
+    int idx = 0;
+    for (int x = 0; x < 2; ++x) {
+        for (int y = 0; y < 2; ++y) {
+            for (int z = 0; z < 2; ++z) {
+                glm::vec4 pt = inv * glm::vec4(
+                    2.0f * x - 1.0f,
+                    2.0f * y - 1.0f,
+                    static_cast<float>(z),  // Vulkan uses [0,1] depth range
+                    1.0f);
+                corners[idx++] = glm::vec3(pt) / pt.w;
+            }
+        }
+    }
+    return corners;
+}
+
+// CSM Helper: Calculate light space matrix for a specific cascade
+glm::mat4 VulkanRenderAPI::getLightSpaceMatrixForCascade(int cascadeIndex, const glm::vec3& lightDir,
+    const glm::mat4& viewMatrix, float fov, float aspect)
+{
+    // Get cascade near/far
+    float cascadeNear = cascadeSplitDistances[cascadeIndex];
+    float cascadeFar = cascadeSplitDistances[cascadeIndex + 1];
+
+    // Create projection for this cascade's frustum slice
+    glm::mat4 cascadeProj = glm::perspectiveRH_ZO(glm::radians(fov), aspect, cascadeNear, cascadeFar);
+
+    // Get frustum corners in world space
+    auto corners = getFrustumCornersWorldSpace(cascadeProj, viewMatrix);
+
+    // Calculate frustum center
+    glm::vec3 center(0.0f);
+    for (const auto& c : corners) {
+        center += c;
+    }
+    center /= 8.0f;
+
+    // Light view matrix
+    glm::vec3 direction = glm::normalize(lightDir);
+    glm::vec3 up = glm::vec3(0.0f, 1.0f, 0.0f);
+    if (std::abs(glm::dot(direction, up)) > 0.99f) {
+        up = glm::vec3(0.0f, 0.0f, 1.0f);
+    }
+
+    glm::mat4 lightView = glm::lookAt(
+        center - direction * 100.0f,
+        center,
+        up);
+
+    // Find bounding box in light space
+    float minX = std::numeric_limits<float>::max();
+    float maxX = std::numeric_limits<float>::lowest();
+    float minY = std::numeric_limits<float>::max();
+    float maxY = std::numeric_limits<float>::lowest();
+    float minZ = std::numeric_limits<float>::max();
+    float maxZ = std::numeric_limits<float>::lowest();
+
+    for (const auto& c : corners) {
+        glm::vec4 lsCorner = lightView * glm::vec4(c, 1.0f);
+        minX = std::min(minX, lsCorner.x);
+        maxX = std::max(maxX, lsCorner.x);
+        minY = std::min(minY, lsCorner.y);
+        maxY = std::max(maxY, lsCorner.y);
+        minZ = std::min(minZ, lsCorner.z);
+        maxZ = std::max(maxZ, lsCorner.z);
+    }
+
+    // Add padding to prevent edge artifacts
+    float padding = 10.0f;
+    minZ -= padding;
+    maxZ += 500.0f;
+
+    // Orthographic projection tightly fitted to frustum
+    glm::mat4 lightProj = glm::orthoRH_ZO(minX, maxX, minY, maxY, minZ, maxZ);
+
+    return lightProj * lightView;
+}
+
+bool VulkanRenderAPI::createShadowResources()
+{
+    // Create shadow map image (2D array for cascades)
+    VkImageCreateInfo imageInfo{};
+    imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imageInfo.imageType = VK_IMAGE_TYPE_2D;
+    imageInfo.extent = {currentShadowSize, currentShadowSize, 1};
+    imageInfo.mipLevels = 1;
+    imageInfo.arrayLayers = NUM_CASCADES;
+    imageInfo.format = VK_FORMAT_D32_SFLOAT;
+    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    imageInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+
+    VmaAllocationCreateInfo allocInfo{};
+    allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+
+    if (vmaCreateImage(vma_allocator, &imageInfo, &allocInfo,
+                       &shadow_map_image, &shadow_map_allocation, nullptr) != VK_SUCCESS) {
+        printf("Failed to create shadow map image\n");
+        return false;
+    }
+
+    // Create per-cascade image views (for framebuffer attachment)
+    for (int i = 0; i < NUM_CASCADES; i++) {
+        VkImageViewCreateInfo viewInfo{};
+        viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        viewInfo.image = shadow_map_image;
+        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        viewInfo.format = VK_FORMAT_D32_SFLOAT;
+        viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+        viewInfo.subresourceRange.baseMipLevel = 0;
+        viewInfo.subresourceRange.levelCount = 1;
+        viewInfo.subresourceRange.baseArrayLayer = i;
+        viewInfo.subresourceRange.layerCount = 1;
+
+        if (vkCreateImageView(device, &viewInfo, nullptr, &shadow_cascade_views[i]) != VK_SUCCESS) {
+            printf("Failed to create shadow cascade view %d\n", i);
+            return false;
+        }
+    }
+
+    // Create full array view for sampling in main shader
+    VkImageViewCreateInfo arrayViewInfo{};
+    arrayViewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    arrayViewInfo.image = shadow_map_image;
+    arrayViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+    arrayViewInfo.format = VK_FORMAT_D32_SFLOAT;
+    arrayViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    arrayViewInfo.subresourceRange.baseMipLevel = 0;
+    arrayViewInfo.subresourceRange.levelCount = 1;
+    arrayViewInfo.subresourceRange.baseArrayLayer = 0;
+    arrayViewInfo.subresourceRange.layerCount = NUM_CASCADES;
+
+    if (vkCreateImageView(device, &arrayViewInfo, nullptr, &shadow_map_view) != VK_SUCCESS) {
+        printf("Failed to create shadow map array view\n");
+        return false;
+    }
+
+    // Create shadow sampler via cache
+    SamplerKey shadowSamplerKey{};
+    shadowSamplerKey.magFilter = VK_FILTER_NEAREST;
+    shadowSamplerKey.minFilter = VK_FILTER_NEAREST;
+    shadowSamplerKey.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    shadowSamplerKey.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    shadowSamplerKey.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    shadowSamplerKey.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    shadowSamplerKey.anisotropyEnable = VK_FALSE;
+    shadowSamplerKey.maxAnisotropy = 1.0f;
+    shadowSamplerKey.compareEnable = VK_TRUE;
+    shadowSamplerKey.compareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+    shadowSamplerKey.minLod = 0.0f;
+    shadowSamplerKey.maxLod = 0.0f;
+    shadowSamplerKey.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
+    shadow_sampler = sampler_cache.getOrCreate(shadowSamplerKey);
+    if (shadow_sampler == VK_NULL_HANDLE) {
+        printf("Failed to create shadow sampler\n");
+        return false;
+    }
+
+    // Create shadow render pass (depth-only)
+    VkAttachmentDescription depthAttachment{};
+    depthAttachment.format = VK_FORMAT_D32_SFLOAT;
+    depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    depthAttachment.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    VkAttachmentReference depthRef{};
+    depthRef.attachment = 0;
+    depthRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+    VkSubpassDescription subpass{};
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 0;
+    subpass.pDepthStencilAttachment = &depthRef;
+
+    // Two dependencies:
+    // 1. EXTERNAL -> subpass 0: ensure any prior reads of this image are done before we write
+    // 2. subpass 0 -> EXTERNAL: ensure depth writes are visible before the main pass samples the shadow map
+    std::array<VkSubpassDependency, 2> dependencies{};
+
+    // Dependency 1: Wait for prior fragment shader reads before depth writes
+    dependencies[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+    dependencies[0].dstSubpass = 0;
+    dependencies[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    dependencies[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    dependencies[0].dstStageMask = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+    dependencies[0].dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    dependencies[0].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
+
+    // Dependency 2: Ensure depth writes are flushed before fragment shader samples the shadow map
+    // Note: no VK_DEPENDENCY_BY_REGION_BIT here -- shadow maps are sampled at arbitrary
+    // coordinates by the main pass, so the dependency is not region-local.
+    dependencies[1].srcSubpass = 0;
+    dependencies[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+    dependencies[1].srcStageMask = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+    dependencies[1].srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    dependencies[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    dependencies[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    dependencies[1].dependencyFlags = 0;
+
+    VkRenderPassCreateInfo rpInfo{};
+    rpInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    rpInfo.attachmentCount = 1;
+    rpInfo.pAttachments = &depthAttachment;
+    rpInfo.subpassCount = 1;
+    rpInfo.pSubpasses = &subpass;
+    rpInfo.dependencyCount = static_cast<uint32_t>(dependencies.size());
+    rpInfo.pDependencies = dependencies.data();
+
+    if (vkCreateRenderPass(device, &rpInfo, nullptr, &shadow_render_pass) != VK_SUCCESS) {
+        printf("Failed to create shadow render pass\n");
+        return false;
+    }
+
+    // Create shadow framebuffers
+    for (int i = 0; i < NUM_CASCADES; i++) {
+        VkFramebufferCreateInfo fbInfo{};
+        fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+        fbInfo.renderPass = shadow_render_pass;
+        fbInfo.attachmentCount = 1;
+        fbInfo.pAttachments = &shadow_cascade_views[i];
+        fbInfo.width = currentShadowSize;
+        fbInfo.height = currentShadowSize;
+        fbInfo.layers = 1;
+
+        if (vkCreateFramebuffer(device, &fbInfo, nullptr, &shadow_framebuffers[i]) != VK_SUCCESS) {
+            printf("Failed to create shadow framebuffer %d\n", i);
+            return false;
+        }
+    }
+
+    // Create shadow descriptor set layout
+    VkDescriptorSetLayoutBinding shadowUboBinding{};
+    shadowUboBinding.binding = 0;
+    shadowUboBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    shadowUboBinding.descriptorCount = 1;
+    shadowUboBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+
+    VkDescriptorSetLayoutCreateInfo layoutInfo{};
+    layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layoutInfo.bindingCount = 1;
+    layoutInfo.pBindings = &shadowUboBinding;
+
+    if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &shadow_descriptor_layout) != VK_SUCCESS) {
+        printf("Failed to create shadow descriptor set layout\n");
+        return false;
+    }
+    // NOTE: skinned_shadow.slang also requires binding 1 (BoneCB).
+    // When implementing a skinned shadow pipeline, create a separate
+    // descriptor layout that includes both binding 0 (ShadowCB) and
+    // binding 1 (BoneCB), or extend this layout.
+
+    // Create shadow pipeline layout (no push constants - model is in ShadowUBO)
+    VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+    pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pipelineLayoutInfo.setLayoutCount = 1;
+    pipelineLayoutInfo.pSetLayouts = &shadow_descriptor_layout;
+    pipelineLayoutInfo.pushConstantRangeCount = 0;
+    pipelineLayoutInfo.pPushConstantRanges = nullptr;
+
+    if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &shadow_pipeline_layout) != VK_SUCCESS) {
+        printf("Failed to create shadow pipeline layout\n");
+        return false;
+    }
+
+    LOG_ENGINE_INFO("[Vulkan] Shadow render pass, framebuffers, descriptor layout, pipeline layout created");
+
+    // Load shadow shaders
+    auto vertShaderCode = readShaderFile(EnginePaths::resolveEngineAsset("../assets/shaders/compiled/vulkan/shadow.vert.spv"));
+    auto fragShaderCode = readShaderFile(EnginePaths::resolveEngineAsset("../assets/shaders/compiled/vulkan/shadow.frag.spv"));
+
+    if (vertShaderCode.empty() || fragShaderCode.empty()) {
+        LOG_ENGINE_ERROR("[Vulkan] Failed to load shadow shader files");
+        return false;
+    }
+    LOG_ENGINE_INFO("[Vulkan] Shadow shaders loaded: vert={} bytes, frag={} bytes", vertShaderCode.size(), fragShaderCode.size());
+
+    VkShaderModule vertModule = createShaderModule(vertShaderCode);
+    VkShaderModule fragModule = createShaderModule(fragShaderCode);
+
+    if (vertModule == VK_NULL_HANDLE || fragModule == VK_NULL_HANDLE) {
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create shader module(s) for shadow pipeline");
+        if (vertModule != VK_NULL_HANDLE) vkDestroyShaderModule(device, vertModule, nullptr);
+        if (fragModule != VK_NULL_HANDLE) vkDestroyShaderModule(device, fragModule, nullptr);
+        return false;
+    }
+
+    // Create shadow pipeline
+    VkPipelineShaderStageCreateInfo vertStage{};
+    vertStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    vertStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
+    vertStage.module = vertModule;
+    vertStage.pName = "main";
+
+    VkPipelineShaderStageCreateInfo fragStage{};
+    fragStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    fragStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    fragStage.module = fragModule;
+    fragStage.pName = "main";
+
+    VkPipelineShaderStageCreateInfo shaderStages[] = {vertStage, fragStage};
+
+    // Vertex input - same as main pipeline
+    VkVertexInputBindingDescription bindingDesc{};
+    bindingDesc.binding = 0;
+    bindingDesc.stride = sizeof(vertex);
+    bindingDesc.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+    // Shadow shader only reads position — omit normal/texcoord to avoid validation warnings
+    std::array<VkVertexInputAttributeDescription, 1> attrDesc{};
+    attrDesc[0].binding = 0;
+    attrDesc[0].location = 0;
+    attrDesc[0].format = VK_FORMAT_R32G32B32_SFLOAT;
+    attrDesc[0].offset = offsetof(vertex, vx);
+
+    VkPipelineVertexInputStateCreateInfo vertexInput{};
+    vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    vertexInput.vertexBindingDescriptionCount = 1;
+    vertexInput.pVertexBindingDescriptions = &bindingDesc;
+    vertexInput.vertexAttributeDescriptionCount = static_cast<uint32_t>(attrDesc.size());
+    vertexInput.pVertexAttributeDescriptions = attrDesc.data();
+
+    VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+    inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    VkPipelineViewportStateCreateInfo viewportState{};
+    viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    viewportState.viewportCount = 1;
+    viewportState.scissorCount = 1;
+
+    VkPipelineRasterizationStateCreateInfo rasterizer{};
+    rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+    rasterizer.lineWidth = 1.0f;
+    rasterizer.cullMode = VK_CULL_MODE_FRONT_BIT;  // Cull front faces for shadows
+    rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
+    rasterizer.depthBiasEnable = VK_TRUE;
+    rasterizer.depthBiasConstantFactor = 1.25f;
+    rasterizer.depthBiasSlopeFactor = 1.75f;
+
+    VkPipelineMultisampleStateCreateInfo multisampling{};
+    multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    VkPipelineDepthStencilStateCreateInfo depthStencil{};
+    depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    depthStencil.depthTestEnable = VK_TRUE;
+    depthStencil.depthWriteEnable = VK_TRUE;
+    depthStencil.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+
+    VkPipelineColorBlendStateCreateInfo colorBlending{};
+    colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    colorBlending.attachmentCount = 0;  // No color attachments
+
+    std::vector<VkDynamicState> dynamicStates = {
+        VK_DYNAMIC_STATE_VIEWPORT,
+        VK_DYNAMIC_STATE_SCISSOR
+    };
+
+    VkPipelineDynamicStateCreateInfo dynamicState{};
+    dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
+    dynamicState.pDynamicStates = dynamicStates.data();
+
+    VkGraphicsPipelineCreateInfo pipelineInfo{};
+    pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipelineInfo.stageCount = 2;
+    pipelineInfo.pStages = shaderStages;
+    pipelineInfo.pVertexInputState = &vertexInput;
+    pipelineInfo.pInputAssemblyState = &inputAssembly;
+    pipelineInfo.pViewportState = &viewportState;
+    pipelineInfo.pRasterizationState = &rasterizer;
+    pipelineInfo.pMultisampleState = &multisampling;
+    pipelineInfo.pDepthStencilState = &depthStencil;
+    pipelineInfo.pColorBlendState = &colorBlending;
+    pipelineInfo.pDynamicState = &dynamicState;
+    pipelineInfo.layout = shadow_pipeline_layout;
+    pipelineInfo.renderPass = shadow_render_pass;
+    pipelineInfo.subpass = 0;
+
+    VkResult shadowPipeResult = vkCreateGraphicsPipelines(device, vk_pipeline_cache, 1, &pipelineInfo, nullptr, &shadow_pipeline);
+    if (shadowPipeResult != VK_SUCCESS) {
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create shadow pipeline: {}", vkResultToString(shadowPipeResult));
+        vkDestroyShaderModule(device, vertModule, nullptr);
+        vkDestroyShaderModule(device, fragModule, nullptr);
+        return false;
+    }
+    LOG_ENGINE_INFO("[Vulkan] Shadow pipeline created successfully");
+
+    vkDestroyShaderModule(device, vertModule, nullptr);
+    vkDestroyShaderModule(device, fragModule, nullptr);
+
+    // Create shadow descriptor pool
+    VkDescriptorPoolSize poolSize{};
+    poolSize.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    poolSize.descriptorCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
+
+    VkDescriptorPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    poolInfo.poolSizeCount = 1;
+    poolInfo.pPoolSizes = &poolSize;
+    poolInfo.maxSets = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
+
+    if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &shadow_descriptor_pool) != VK_SUCCESS) {
+        printf("Failed to create shadow descriptor pool\n");
+        return false;
+    }
+
+    // Create shadow uniform buffers
+    shadow_uniform_buffers.resize(MAX_FRAMES_IN_FLIGHT);
+    shadow_uniform_allocations.resize(MAX_FRAMES_IN_FLIGHT);
+    shadow_uniform_mapped.resize(MAX_FRAMES_IN_FLIGHT);
+
+    for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        VkBufferCreateInfo bufInfo{};
+        bufInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bufInfo.size = sizeof(ShadowUBO);
+        bufInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+
+        VmaAllocationCreateInfo allocCreateInfo{};
+        allocCreateInfo.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
+        allocCreateInfo.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
+
+        VmaAllocationInfo allocInfoOut;
+        if (vmaCreateBuffer(vma_allocator, &bufInfo, &allocCreateInfo,
+                           &shadow_uniform_buffers[i], &shadow_uniform_allocations[i], &allocInfoOut) != VK_SUCCESS) {
+            printf("Failed to create shadow uniform buffer %d\n", i);
+            return false;
+        }
+        shadow_uniform_mapped[i] = allocInfoOut.pMappedData;
+    }
+
+    // Allocate shadow descriptor sets
+    std::vector<VkDescriptorSetLayout> layouts(MAX_FRAMES_IN_FLIGHT, shadow_descriptor_layout);
+    VkDescriptorSetAllocateInfo allocSetInfo{};
+    allocSetInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocSetInfo.descriptorPool = shadow_descriptor_pool;
+    allocSetInfo.descriptorSetCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
+    allocSetInfo.pSetLayouts = layouts.data();
+
+    shadow_descriptor_sets.resize(MAX_FRAMES_IN_FLIGHT);
+    if (vkAllocateDescriptorSets(device, &allocSetInfo, shadow_descriptor_sets.data()) != VK_SUCCESS) {
+        printf("Failed to allocate shadow descriptor sets\n");
+        return false;
+    }
+
+    // Update shadow descriptor sets
+    for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        VkDescriptorBufferInfo bufferInfo{};
+        bufferInfo.buffer = shadow_uniform_buffers[i];
+        bufferInfo.offset = 0;
+        bufferInfo.range = sizeof(ShadowUBO);
+
+        VkWriteDescriptorSet descriptorWrite{};
+        descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        descriptorWrite.dstSet = shadow_descriptor_sets[i];
+        descriptorWrite.dstBinding = 0;
+        descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        descriptorWrite.descriptorCount = 1;
+        descriptorWrite.pBufferInfo = &bufferInfo;
+
+        vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+    }
+
+    // Update global descriptor sets with shadow map at binding 2
+    for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        VkDescriptorImageInfo shadowImageInfo{};
+        shadowImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        shadowImageInfo.imageView = shadow_map_view;
+        shadowImageInfo.sampler = shadow_sampler;
+
+        VkWriteDescriptorSet shadowWrite{};
+        shadowWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        shadowWrite.dstSet = descriptor_sets[i];
+        shadowWrite.dstBinding = 2;
+        shadowWrite.dstArrayElement = 0;
+        shadowWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        shadowWrite.descriptorCount = 1;
+        shadowWrite.pImageInfo = &shadowImageInfo;
+
+        vkUpdateDescriptorSets(device, 1, &shadowWrite, 0, nullptr);
+    }
+
+    // Per-draw descriptor sets get shadow map written in initializeDescriptorSet() on demand
+
+    printf("Shadow resources created (%dx%d, %d cascades)\n", currentShadowSize, currentShadowSize, NUM_CASCADES);
+    return true;
+}
+
+void VulkanRenderAPI::cleanupShadowResources()
+{
+    if (device == VK_NULL_HANDLE) return;
+
+    // Destroy shadow uniform buffers
+    for (size_t i = 0; i < shadow_uniform_buffers.size(); i++) {
+        if (shadow_uniform_buffers[i] && vma_allocator) {
+            vmaDestroyBuffer(vma_allocator, shadow_uniform_buffers[i], shadow_uniform_allocations[i]);
+        }
+    }
+    shadow_uniform_buffers.clear();
+    shadow_uniform_allocations.clear();
+    shadow_uniform_mapped.clear();
+
+    // Destroy shadow descriptor pool (also frees descriptor sets)
+    if (shadow_descriptor_pool != VK_NULL_HANDLE) {
+        vkDestroyDescriptorPool(device, shadow_descriptor_pool, nullptr);
+        shadow_descriptor_pool = VK_NULL_HANDLE;
+    }
+
+    // Destroy shadow pipeline
+    if (shadow_pipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(device, shadow_pipeline, nullptr);
+        shadow_pipeline = VK_NULL_HANDLE;
+    }
+
+    // Destroy shadow pipeline layout
+    if (shadow_pipeline_layout != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(device, shadow_pipeline_layout, nullptr);
+        shadow_pipeline_layout = VK_NULL_HANDLE;
+    }
+
+    // Destroy shadow descriptor set layout
+    if (shadow_descriptor_layout != VK_NULL_HANDLE) {
+        vkDestroyDescriptorSetLayout(device, shadow_descriptor_layout, nullptr);
+        shadow_descriptor_layout = VK_NULL_HANDLE;
+    }
+
+    // Destroy shadow framebuffers
+    for (int i = 0; i < NUM_CASCADES; i++) {
+        if (shadow_framebuffers[i] != VK_NULL_HANDLE) {
+            vkDestroyFramebuffer(device, shadow_framebuffers[i], nullptr);
+            shadow_framebuffers[i] = VK_NULL_HANDLE;
+        }
+    }
+
+    // Destroy shadow render pass
+    if (shadow_render_pass != VK_NULL_HANDLE) {
+        vkDestroyRenderPass(device, shadow_render_pass, nullptr);
+        shadow_render_pass = VK_NULL_HANDLE;
+    }
+
+    // Shadow sampler is owned by sampler_cache, just clear the handle
+    shadow_sampler = VK_NULL_HANDLE;
+
+    // Destroy shadow image views
+    if (shadow_map_view != VK_NULL_HANDLE) {
+        vkDestroyImageView(device, shadow_map_view, nullptr);
+        shadow_map_view = VK_NULL_HANDLE;
+    }
+
+    for (int i = 0; i < NUM_CASCADES; i++) {
+        if (shadow_cascade_views[i] != VK_NULL_HANDLE) {
+            vkDestroyImageView(device, shadow_cascade_views[i], nullptr);
+            shadow_cascade_views[i] = VK_NULL_HANDLE;
+        }
+    }
+
+    // Destroy shadow image
+    if (shadow_map_image != VK_NULL_HANDLE && vma_allocator) {
+        vmaDestroyImage(vma_allocator, shadow_map_image, shadow_map_allocation);
+        shadow_map_image = VK_NULL_HANDLE;
+        shadow_map_allocation = nullptr;
+    }
+}
+
+// Shadow mapping
+void VulkanRenderAPI::beginShadowPass(const glm::vec3& lightDir)
+{
+    if (!frame_started) {
+        prepareFrame();
+        if (!frame_started) return;
+    }
+
+    // Skip if shadows are disabled
+    if (shadowQuality == 0 || shadow_map_image == VK_NULL_HANDLE)
+    {
+        in_shadow_pass = false;
+        return;
+    }
+
+    in_shadow_pass = true;
+
+    // Calculate cascade splits
+    calculateCascadeSplits(0.1f, 1000.0f);
+
+    // Calculate light space matrices
+    float aspect = static_cast<float>(viewport_width) / static_cast<float>(std::max(viewport_height, 1));
+    for (int i = 0; i < NUM_CASCADES; i++) {
+        lightSpaceMatrices[i] = getLightSpaceMatrixForCascade(i, lightDir, view_matrix, field_of_view, aspect);
+    }
+
+    currentCascade = 0;
+}
+
+void VulkanRenderAPI::beginShadowPass(const glm::vec3& lightDir, const camera& cam)
+{
+    if (!frame_started) {
+        prepareFrame();
+        if (!frame_started) return;
+    }
+
+    // Skip if shadows are disabled
+    if (shadowQuality == 0 || shadow_map_image == VK_NULL_HANDLE)
+    {
+        in_shadow_pass = false;
+        return;
+    }
+
+    in_shadow_pass = true;
+
+    // Set view matrix from camera FIRST before calculating cascade matrices
+    glm::vec3 pos = cam.getPosition();
+    glm::vec3 target = cam.getTarget();
+    glm::vec3 up = cam.getUpVector();
+    view_matrix = glm::lookAt(pos, target, up);
+
+    // Calculate cascade splits
+    calculateCascadeSplits(0.1f, 1000.0f);
+
+    // Calculate light space matrices for each cascade
+    float aspect = isViewportMode()
+        ? static_cast<float>(viewport_width_rt) / static_cast<float>(std::max(viewport_height_rt, 1))
+        : static_cast<float>(viewport_width) / static_cast<float>(std::max(viewport_height, 1));
+    for (int i = 0; i < NUM_CASCADES; i++) {
+        lightSpaceMatrices[i] = getLightSpaceMatrixForCascade(i, lightDir, view_matrix, field_of_view, aspect);
+    }
+
+    currentCascade = 0;
+}
+
+void VulkanRenderAPI::beginCascade(int cascadeIndex)
+{
+    if (!frame_started || !in_shadow_pass) return;
+
+    if (cascadeIndex < 0 || cascadeIndex >= NUM_CASCADES) {
+        LOG_ENGINE_WARN("beginCascade() called with out-of-range index {}, clamping to [0, {}]", cascadeIndex, NUM_CASCADES - 1);
+        cascadeIndex = std::clamp(cascadeIndex, 0, NUM_CASCADES - 1);
+    }
+
+    currentCascade = cascadeIndex;
+
+    // End any currently active render pass
+    if (shadow_pass_active) {
+        vkCmdEndRenderPass(command_buffers[current_frame]);
+        shadow_pass_active = false;
+    }
+    if (main_pass_started) {
+        vkCmdEndRenderPass(command_buffers[current_frame]);
+        main_pass_started = false;
+    }
+
+    // Update shadow UBO with current cascade's light space matrix
+    ShadowUBO shadowUbo{};
+    shadowUbo.lightSpaceMatrix = glm::transpose(lightSpaceMatrices[cascadeIndex]);
+    memcpy(shadow_uniform_mapped[current_frame], &shadowUbo, sizeof(ShadowUBO));
+
+    // Begin shadow render pass for this cascade
+    VkRenderPassBeginInfo rpInfo{};
+    rpInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    rpInfo.renderPass = shadow_render_pass;
+    rpInfo.framebuffer = shadow_framebuffers[cascadeIndex];
+    rpInfo.renderArea.offset = {0, 0};
+    rpInfo.renderArea.extent = {currentShadowSize, currentShadowSize};
+
+    VkClearValue clearValue{};
+    clearValue.depthStencil = {1.0f, 0};
+    rpInfo.clearValueCount = 1;
+    rpInfo.pClearValues = &clearValue;
+
+    vkCmdBeginRenderPass(command_buffers[current_frame], &rpInfo, VK_SUBPASS_CONTENTS_INLINE);
+    shadow_pass_active = true;
+
+    // Bind shadow pipeline (reset tracking -- new render pass)
+    vkCmdBindPipeline(command_buffers[current_frame], VK_PIPELINE_BIND_POINT_GRAPHICS, shadow_pipeline);
+    last_bound_pipeline = shadow_pipeline;
+    last_bound_descriptor_set = VK_NULL_HANDLE;
+    last_bound_vertex_buffer = VK_NULL_HANDLE;
+
+    // Bind shadow descriptor set
+    vkCmdBindDescriptorSets(command_buffers[current_frame], VK_PIPELINE_BIND_POINT_GRAPHICS,
+        shadow_pipeline_layout, 0, 1, &shadow_descriptor_sets[current_frame], 0, nullptr);
+
+    // Set viewport and scissor for shadow map
+    VkViewport viewport{};
+    viewport.x = 0.0f;
+    viewport.y = 0.0f;
+    viewport.width = static_cast<float>(currentShadowSize);
+    viewport.height = static_cast<float>(currentShadowSize);
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+    vkCmdSetViewport(command_buffers[current_frame], 0, 1, &viewport);
+
+    VkRect2D scissor{};
+    scissor.offset = {0, 0};
+    scissor.extent = {currentShadowSize, currentShadowSize};
+    vkCmdSetScissor(command_buffers[current_frame], 0, 1, &scissor);
+}
+
+void VulkanRenderAPI::endShadowPass()
+{
+    if (!in_shadow_pass) return;
+
+    // End shadow render pass if active
+    if (shadow_pass_active) {
+        vkCmdEndRenderPass(command_buffers[current_frame]);
+        shadow_pass_active = false;
+    }
+
+    in_shadow_pass = false;
+}
+
+void VulkanRenderAPI::bindShadowMap(int textureUnit)
+{
+    // Shadow map is already bound via descriptor set at binding 2
+    // This function is kept for API compatibility
+}
+
+glm::mat4 VulkanRenderAPI::getLightSpaceMatrix()
+{
+    return lightSpaceMatrices[0];
+}
+
+int VulkanRenderAPI::getCascadeCount() const
+{
+    return NUM_CASCADES;
+}
+
+const float* VulkanRenderAPI::getCascadeSplitDistances() const
+{
+    return cascadeSplitDistances;
+}
+
+const glm::mat4* VulkanRenderAPI::getLightSpaceMatrices() const
+{
+    return lightSpaceMatrices;
+}
+
+void VulkanRenderAPI::setShadowQuality(int quality)
+{
+    quality = std::clamp(quality, 0, 3);
+
+    // Defer resource recreation if a command buffer is currently recording,
+    // since destroying Vulkan objects mid-frame invalidates the command buffer.
+    if (frame_started) {
+        pendingShadowQuality = quality;
+        return;
+    }
+
+    pendingShadowQuality = -1;
+
+    if (quality == shadowQuality) return;
+
+    shadowQuality = quality;
+
+    static constexpr uint32_t sizeTable[] = { 0, 1024, 2048, 4096 };
+    uint32_t newSize = sizeTable[quality];
+
+    if (newSize != currentShadowSize)
+    {
+        recreateShadowResources(newSize);
+    }
+}
+
+int VulkanRenderAPI::getShadowQuality() const
+{
+    return (pendingShadowQuality >= 0) ? pendingShadowQuality : shadowQuality;
+}
+
+void VulkanRenderAPI::recreateShadowResources(uint32_t size)
+{
+    if (frame_started) {
+        LOG_ENGINE_ERROR("[Vulkan] recreateShadowResources called while command buffer is recording — skipping");
+        return;
+    }
+
+    // Wait for device to be idle before recreating resources
+    vkDeviceWaitIdle(device);
+
+    // Cleanup existing shadow resources
+    cleanupShadowResources();
+
+    currentShadowSize = size;
+
+    // If size is 0, shadows are disabled
+    if (size == 0)
+    {
+        LOG_ENGINE_INFO("Shadows disabled");
+        return;
+    }
+
+    // Recreate shadow resources at new size
+    if (!createShadowResources())
+    {
+        LOG_ENGINE_ERROR("Failed to recreate shadow resources at size {}", size);
+    }
+    else
+    {
+        LOG_ENGINE_INFO("Shadow map resized to {}x{}", size, size);
+    }
+}

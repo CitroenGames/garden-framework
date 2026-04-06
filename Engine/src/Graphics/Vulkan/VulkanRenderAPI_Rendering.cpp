@@ -1,0 +1,707 @@
+#include "VulkanRenderAPI.hpp"
+#include "VulkanMesh.hpp"
+#include "Components/mesh.hpp"
+#include "Components/camera.hpp"
+#include "Utils/Log.hpp"
+#include <stdio.h>
+#include <cstring>
+#include <cmath>
+#include <algorithm>
+
+// VMA
+#define VMA_STATIC_VULKAN_FUNCTIONS 0
+#define VMA_DYNAMIC_VULKAN_FUNCTIONS 1
+#include "vk_mem_alloc.h"
+
+// stb_image for texture loading
+#include "stb_image.h"
+
+// Camera and transforms
+void VulkanRenderAPI::setCamera(const camera& cam)
+{
+    glm::vec3 pos = cam.getPosition();
+    glm::vec3 target = cam.getTarget();
+    glm::vec3 up = cam.getUpVector();
+
+    view_matrix = glm::lookAt(pos, target, up);
+}
+
+void VulkanRenderAPI::pushMatrix()
+{
+    model_matrix_stack.push(current_model_matrix);
+}
+
+void VulkanRenderAPI::popMatrix()
+{
+    if (!model_matrix_stack.empty()) {
+        current_model_matrix = model_matrix_stack.top();
+        model_matrix_stack.pop();
+    }
+}
+
+void VulkanRenderAPI::translate(const glm::vec3& pos)
+{
+    current_model_matrix = glm::translate(current_model_matrix, pos);
+}
+
+void VulkanRenderAPI::rotate(const glm::mat4& rotation)
+{
+    current_model_matrix = current_model_matrix * rotation;
+}
+
+void VulkanRenderAPI::multiplyMatrix(const glm::mat4& matrix)
+{
+    current_model_matrix = current_model_matrix * matrix;
+}
+
+glm::mat4 VulkanRenderAPI::getProjectionMatrix() const
+{
+    return projection_matrix;
+}
+
+glm::mat4 VulkanRenderAPI::getViewMatrix() const
+{
+    return view_matrix;
+}
+
+// Texture management
+TextureHandle VulkanRenderAPI::loadTexture(const std::string& filename, bool invert_y, bool generate_mipmaps)
+{
+    int width, height, channels;
+    stbi_set_flip_vertically_on_load(invert_y);
+    unsigned char* pixels = stbi_load(filename.c_str(), &width, &height, &channels, STBI_rgb_alpha);
+
+    if (!pixels) {
+        LOG_ENGINE_ERROR("[Vulkan] Failed to load texture: {}", filename);
+        return INVALID_TEXTURE;
+    }
+
+    LOG_ENGINE_TRACE("[Vulkan] loadTexture: {} ({}x{}, original channels: {}, forced to RGBA)",
+                     filename, width, height, channels);
+
+    TextureHandle handle = loadTextureFromMemory(pixels, width, height, 4, false, generate_mipmaps);
+    stbi_image_free(pixels);
+
+    LOG_ENGINE_TRACE("[Vulkan] loadTexture: {} -> handle {}", filename, handle);
+    return handle;
+}
+
+TextureHandle VulkanRenderAPI::loadTextureFromMemory(const uint8_t* pixels, int width, int height, int channels,
+                                                      bool flip_vertically, bool generate_mipmaps)
+{
+    LOG_ENGINE_TRACE("[Vulkan] loadTextureFromMemory: {}x{}, {} channels, flip={}, mipmaps={}",
+                     width, height, channels, flip_vertically, generate_mipmaps);
+
+    if (!pixels || width <= 0 || height <= 0) {
+        LOG_ENGINE_ERROR("[Vulkan] loadTextureFromMemory: INVALID - null pixels or bad dimensions");
+        return INVALID_TEXTURE;
+    }
+
+    VulkanTexture texture;
+    texture.width = width;
+    texture.height = height;
+    texture.mipLevels = generate_mipmaps ?
+        static_cast<uint32_t>(std::floor(std::log2(std::max(width, height)))) + 1 : 1;
+
+    VkDeviceSize imageSize = width * height * 4;
+
+    // Convert to RGBA if needed
+    std::vector<uint8_t> rgbaData;
+    const uint8_t* srcData = pixels;
+    if (channels != 4) {
+        LOG_ENGINE_TRACE("[Vulkan] loadTextureFromMemory: Converting {} channels -> 4 (RGBA)", channels);
+        rgbaData.resize(width * height * 4);
+        for (int i = 0; i < width * height; i++) {
+            rgbaData[i * 4 + 0] = pixels[i * channels + 0];
+            rgbaData[i * 4 + 1] = channels > 1 ? pixels[i * channels + 1] : pixels[i * channels];
+            rgbaData[i * 4 + 2] = channels > 2 ? pixels[i * channels + 2] : pixels[i * channels];
+            rgbaData[i * 4 + 3] = channels > 3 ? pixels[i * channels + 3] : 255;
+        }
+        srcData = rgbaData.data();
+    }
+
+    // Handle vertical flip if needed
+    std::vector<uint8_t> flippedData;
+    if (flip_vertically) {
+        flippedData.resize(width * height * 4);
+        size_t row_size = width * 4;
+        for (int y = 0; y < height; ++y) {
+            memcpy(flippedData.data() + y * row_size,
+                   srcData + (height - 1 - y) * row_size,
+                   row_size);
+        }
+        srcData = flippedData.data();
+    }
+
+    // Create image
+    VkImageCreateInfo imageInfo{};
+    imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imageInfo.imageType = VK_IMAGE_TYPE_2D;
+    imageInfo.extent.width = width;
+    imageInfo.extent.height = height;
+    imageInfo.extent.depth = 1;
+    imageInfo.mipLevels = texture.mipLevels;
+    imageInfo.arrayLayers = 1;
+    imageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+
+    VmaAllocationCreateInfo imageAllocInfo{};
+    imageAllocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+
+    VkResult imgResult = vmaCreateImage(vma_allocator, &imageInfo, &imageAllocInfo,
+                  &texture.image, &texture.allocation, nullptr);
+    if (imgResult != VK_SUCCESS) {
+        LOG_ENGINE_ERROR("[Vulkan] loadTextureFromMemory: vmaCreateImage failed => {}", vkResultToString(imgResult));
+        return INVALID_TEXTURE;
+    }
+
+    // Use shared staging buffer (lock for thread safety)
+    {
+        std::lock_guard<std::mutex> staging_lock(staging_mutex);
+        ensureStagingBuffer(imageSize);
+        memcpy(staging_mapped, srcData, imageSize);
+
+        transitionImageLayout(texture.image, VK_FORMAT_R8G8B8A8_UNORM,
+                             VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, texture.mipLevels);
+        copyBufferToImage(staging_buffer, texture.image, width, height);
+    }
+
+    if (generate_mipmaps && texture.mipLevels > 1) {
+        generateMipmaps(texture.image, VK_FORMAT_R8G8B8A8_UNORM, width, height, texture.mipLevels);
+    } else {
+        transitionImageLayout(texture.image, VK_FORMAT_R8G8B8A8_UNORM,
+                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, texture.mipLevels);
+    }
+
+    // Create image view
+    VkImageViewCreateInfo viewInfo{};
+    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewInfo.image = texture.image;
+    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    viewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+    viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    viewInfo.subresourceRange.baseMipLevel = 0;
+    viewInfo.subresourceRange.levelCount = texture.mipLevels;
+    viewInfo.subresourceRange.baseArrayLayer = 0;
+    viewInfo.subresourceRange.layerCount = 1;
+
+    VkResult viewResult = vkCreateImageView(device, &viewInfo, nullptr, &texture.imageView);
+    if (viewResult != VK_SUCCESS) {
+        LOG_ENGINE_ERROR("[Vulkan] loadTextureFromMemory: vkCreateImageView failed => {}", vkResultToString(viewResult));
+        vmaDestroyImage(vma_allocator, texture.image, texture.allocation);
+        return INVALID_TEXTURE;
+    }
+
+    // Create sampler via cache
+    SamplerKey texSamplerKey{};
+    texSamplerKey.magFilter = VK_FILTER_LINEAR;
+    texSamplerKey.minFilter = VK_FILTER_LINEAR;
+    texSamplerKey.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    texSamplerKey.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    texSamplerKey.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    texSamplerKey.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    texSamplerKey.anisotropyEnable = VK_TRUE;
+    texSamplerKey.maxAnisotropy = 16.0f;
+    texSamplerKey.compareEnable = VK_FALSE;
+    texSamplerKey.compareOp = VK_COMPARE_OP_ALWAYS;
+    texSamplerKey.minLod = 0.0f;
+    texSamplerKey.maxLod = static_cast<float>(texture.mipLevels);
+    texSamplerKey.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+    texture.sampler = sampler_cache.getOrCreate(texSamplerKey);
+
+    TextureHandle handle = next_texture_handle++;
+    textures[handle] = texture;
+
+    LOG_ENGINE_TRACE("[Vulkan] loadTextureFromMemory: SUCCESS -> handle {} (mipLevels={})",
+                     handle, texture.mipLevels);
+    return handle;
+}
+
+void VulkanRenderAPI::bindTexture(TextureHandle texture)
+{
+    bound_texture = texture;
+}
+
+void VulkanRenderAPI::unbindTexture()
+{
+    bound_texture = INVALID_TEXTURE;
+}
+
+void VulkanRenderAPI::deleteTexture(TextureHandle texture)
+{
+    if (texture != INVALID_TEXTURE && textures.count(texture) > 0) {
+        VulkanTexture tex = textures[texture]; // copy by value for capture
+        textures.erase(texture);
+
+        // Defer destruction until GPU is done with the resource
+        // Sampler is owned by sampler_cache, don't destroy it here
+        VmaAllocator alloc = vma_allocator;
+        VkDevice dev = device;
+        deletion_queue.push([dev, alloc, tex]() {
+            if (tex.imageView) vkDestroyImageView(dev, tex.imageView, nullptr);
+            if (tex.image && alloc) {
+                vmaDestroyImage(alloc, tex.image, tex.allocation);
+            }
+        });
+    }
+}
+
+// Mesh rendering
+void VulkanRenderAPI::renderMesh(const mesh& m, const RenderState& state)
+{
+    if (!frame_started || !m.visible || !m.is_valid || m.vertices_len == 0) return;
+
+    // Ensure mesh is uploaded
+    if (!m.gpu_mesh || !m.gpu_mesh->isUploaded()) {
+        const_cast<mesh&>(m).uploadToGPU(const_cast<VulkanRenderAPI*>(this));
+        if (!m.gpu_mesh || !m.gpu_mesh->isUploaded()) return;
+    }
+
+    VulkanMesh* vulkanMesh = dynamic_cast<VulkanMesh*>(m.gpu_mesh);
+    if (!vulkanMesh || vulkanMesh->getVertexBuffer() == VK_NULL_HANDLE) return;
+
+    if (in_shadow_pass) {
+        // Shadow pass - update model matrix in shadow UBO
+        ShadowUBO shadowUbo{};
+        shadowUbo.lightSpaceMatrix = glm::transpose(lightSpaceMatrices[currentCascade]);
+        shadowUbo.model = glm::transpose(current_model_matrix);
+        memcpy(shadow_uniform_mapped[current_frame], &shadowUbo, sizeof(ShadowUBO));
+
+        // Bind vertex buffer and draw (with redundant bind tracking)
+        VkBuffer vb = vulkanMesh->getVertexBuffer();
+        if (vb != last_bound_vertex_buffer) {
+            VkBuffer vertexBuffers[] = {vb};
+            VkDeviceSize offsets[] = {0};
+            vkCmdBindVertexBuffers(command_buffers[current_frame], 0, 1, vertexBuffers, offsets);
+            last_bound_vertex_buffer = vb;
+        }
+        if (vulkanMesh->isIndexed()) {
+            vkCmdBindIndexBuffer(command_buffers[current_frame], vulkanMesh->getIndexBuffer(), 0, VK_INDEX_TYPE_UINT32);
+            vkCmdDrawIndexed(command_buffers[current_frame], static_cast<uint32_t>(vulkanMesh->getIndexCount()), 1, 0, 0, 0);
+        } else {
+            vkCmdDraw(command_buffers[current_frame], static_cast<uint32_t>(vulkanMesh->getVertexCount()), 1, 0, 0);
+        }
+        return;
+    }
+
+    // Main pass - select pipeline based on lighting, blend mode, and cull mode
+    VkPipeline selectedPipeline = selectPipeline(state);
+    if (selectedPipeline != last_bound_pipeline) {
+        vkCmdBindPipeline(command_buffers[current_frame], VK_PIPELINE_BIND_POINT_GRAPHICS, selectedPipeline);
+        last_bound_pipeline = selectedPipeline;
+    }
+
+    // Upload GlobalUBO (binding 0) - view/projection/CSM/directional light
+    // Note: Slang generates RowMajor SPIR-V, GLM is column-major -> transpose all matrices
+    {
+        GlobalUBO ubo{};
+        ubo.view = glm::transpose(view_matrix);
+        ubo.projection = glm::transpose(projection_matrix);
+        for (int i = 0; i < NUM_CASCADES; i++) {
+            ubo.lightSpaceMatrices[i] = glm::transpose(lightSpaceMatrices[i]);
+        }
+        ubo.cascadeSplits = glm::vec4(cascadeSplitDistances[0], cascadeSplitDistances[1],
+                                       cascadeSplitDistances[2], cascadeSplitDistances[3]);
+        ubo.cascadeSplit4 = cascadeSplitDistances[4];
+        ubo.lightDir = light_direction;
+        ubo.lightAmbient = light_ambient;
+        ubo.cascadeCount = NUM_CASCADES;
+        ubo.lightDiffuse = light_diffuse;
+        ubo.debugCascades = 0;
+        ubo.shadowMapTexelSize = (currentShadowSize > 0)
+            ? glm::vec2(1.0f / static_cast<float>(currentShadowSize))
+            : glm::vec2(0.0f);
+        ubo._shadowPad = glm::vec2(0.0f);
+        memcpy(uniform_buffer_mapped[current_frame], &ubo, sizeof(ubo));
+    }
+
+    // Upload VulkanLightUBO (binding 3) - point/spot lights + camera
+    {
+        VulkanLightUBO lightUbo{};
+        for (int i = 0; i < current_lights.numPointLights && i < 16; i++) {
+            lightUbo.pointLights[i].position = current_lights.pointLights[i].position;
+            lightUbo.pointLights[i].range = current_lights.pointLights[i].range;
+            lightUbo.pointLights[i].color = current_lights.pointLights[i].color;
+            lightUbo.pointLights[i].intensity = current_lights.pointLights[i].intensity;
+            lightUbo.pointLights[i].attenuation = current_lights.pointLights[i].attenuation;
+            lightUbo.pointLights[i]._pad0 = 0.0f;
+        }
+        for (int i = 0; i < current_lights.numSpotLights && i < 16; i++) {
+            lightUbo.spotLights[i].position = current_lights.spotLights[i].position;
+            lightUbo.spotLights[i].range = current_lights.spotLights[i].range;
+            lightUbo.spotLights[i].direction = current_lights.spotLights[i].direction;
+            lightUbo.spotLights[i].intensity = current_lights.spotLights[i].intensity;
+            lightUbo.spotLights[i].color = current_lights.spotLights[i].color;
+            lightUbo.spotLights[i].innerCutoff = current_lights.spotLights[i].innerCutoff;
+            lightUbo.spotLights[i].attenuation = current_lights.spotLights[i].attenuation;
+            lightUbo.spotLights[i].outerCutoff = current_lights.spotLights[i].outerCutoff;
+        }
+        lightUbo.numPointLights = current_lights.numPointLights;
+        lightUbo.numSpotLights = current_lights.numSpotLights;
+        lightUbo.cameraPos = current_lights.cameraPos;
+        memcpy(light_uniform_mapped[current_frame], &lightUbo, sizeof(lightUbo));
+    }
+
+    // Upload PerObjectUBO to next slot in dynamic ring buffer (binding 4)
+    uint32_t perObjectDynamicOffset;
+    {
+        uint32_t drawIdx = per_object_draw_index[current_frame];
+        if (drawIdx >= MAX_PER_OBJECT_DRAWS) {
+            LOG_ENGINE_ERROR("[Vulkan] Exceeded MAX_PER_OBJECT_DRAWS ({}) -- draw call skipped", MAX_PER_OBJECT_DRAWS);
+            return;
+        }
+        perObjectDynamicOffset = static_cast<uint32_t>(drawIdx * per_object_alignment);
+
+        PerObjectUBO objUbo{};
+        objUbo.model = glm::transpose(current_model_matrix);
+        objUbo.normalMatrix = glm::inverse(current_model_matrix); // transpose(transpose(inverse(M))) = inverse(M)
+        objUbo.color = state.color;
+        objUbo.useTexture = (m.texture_set && m.texture != INVALID_TEXTURE) ? 1 : 0;
+
+        void* dst = static_cast<char*>(per_object_uniform_mapped[current_frame]) + perObjectDynamicOffset;
+        memcpy(dst, &objUbo, sizeof(objUbo));
+        per_object_draw_index[current_frame]++;
+    }
+
+    // Get or allocate descriptor set for this texture (dynamically growing pools)
+    TextureHandle texHandle = (m.texture_set && m.texture != INVALID_TEXTURE) ? m.texture : INVALID_TEXTURE;
+    VkDescriptorSet ds = getOrAllocateDescriptorSet(current_frame, texHandle);
+    if (ds == VK_NULL_HANDLE) return; // Pool allocation failed
+
+    // Bind the per-draw descriptor set with dynamic offset (rebind if set or offset changed)
+    if (ds != last_bound_descriptor_set || perObjectDynamicOffset != last_bound_dynamic_offset) {
+        vkCmdBindDescriptorSets(command_buffers[current_frame], VK_PIPELINE_BIND_POINT_GRAPHICS,
+            pipeline_layout, 0, 1, &ds, 1, &perObjectDynamicOffset);
+        last_bound_descriptor_set = ds;
+        last_bound_dynamic_offset = perObjectDynamicOffset;
+    }
+
+    // Bind vertex buffer and draw (with redundant bind tracking)
+    VkBuffer vb = vulkanMesh->getVertexBuffer();
+    if (vb != last_bound_vertex_buffer) {
+        VkBuffer vertexBuffers[] = {vb};
+        VkDeviceSize offsets[] = {0};
+        vkCmdBindVertexBuffers(command_buffers[current_frame], 0, 1, vertexBuffers, offsets);
+        last_bound_vertex_buffer = vb;
+    }
+
+    if (vulkanMesh->isIndexed()) {
+        vkCmdBindIndexBuffer(command_buffers[current_frame], vulkanMesh->getIndexBuffer(), 0, VK_INDEX_TYPE_UINT32);
+        vkCmdDrawIndexed(command_buffers[current_frame], static_cast<uint32_t>(vulkanMesh->getIndexCount()), 1, 0, 0, 0);
+    } else {
+        vkCmdDraw(command_buffers[current_frame], static_cast<uint32_t>(vulkanMesh->getVertexCount()), 1, 0, 0);
+    }
+}
+
+void VulkanRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t vertex_count, const RenderState& state)
+{
+    if (!frame_started || !m.visible || !m.is_valid || m.vertices_len == 0 || vertex_count == 0) return;
+
+    // Validate range
+    if (start_vertex + vertex_count > m.vertices_len) {
+        vertex_count = m.vertices_len - start_vertex;
+        if (vertex_count == 0) return;
+    }
+
+    // Ensure mesh is uploaded
+    if (!m.gpu_mesh || !m.gpu_mesh->isUploaded()) {
+        const_cast<mesh&>(m).uploadToGPU(const_cast<VulkanRenderAPI*>(this));
+        if (!m.gpu_mesh || !m.gpu_mesh->isUploaded()) return;
+    }
+
+    VulkanMesh* vulkanMesh = dynamic_cast<VulkanMesh*>(m.gpu_mesh);
+    if (!vulkanMesh || vulkanMesh->getVertexBuffer() == VK_NULL_HANDLE) return;
+
+    if (in_shadow_pass) {
+        // Shadow pass - update model matrix in shadow UBO
+        ShadowUBO shadowUbo{};
+        shadowUbo.lightSpaceMatrix = glm::transpose(lightSpaceMatrices[currentCascade]);
+        shadowUbo.model = glm::transpose(current_model_matrix);
+        memcpy(shadow_uniform_mapped[current_frame], &shadowUbo, sizeof(ShadowUBO));
+
+        VkBuffer vb = vulkanMesh->getVertexBuffer();
+        if (vb != last_bound_vertex_buffer) {
+            VkBuffer vertexBuffers[] = {vb};
+            VkDeviceSize offsets[] = {0};
+            vkCmdBindVertexBuffers(command_buffers[current_frame], 0, 1, vertexBuffers, offsets);
+            last_bound_vertex_buffer = vb;
+        }
+        if (vulkanMesh->isIndexed()) {
+            vkCmdBindIndexBuffer(command_buffers[current_frame], vulkanMesh->getIndexBuffer(), 0, VK_INDEX_TYPE_UINT32);
+            vkCmdDrawIndexed(command_buffers[current_frame], static_cast<uint32_t>(vertex_count), 1,
+                             static_cast<uint32_t>(start_vertex), 0, 0);
+        } else {
+            vkCmdDraw(command_buffers[current_frame], static_cast<uint32_t>(vertex_count), 1,
+                      static_cast<uint32_t>(start_vertex), 0);
+        }
+        return;
+    }
+
+    // Main pass - select pipeline based on lighting, blend mode, and cull mode
+    VkPipeline selectedPipeline = selectPipeline(state);
+    if (selectedPipeline != last_bound_pipeline) {
+        vkCmdBindPipeline(command_buffers[current_frame], VK_PIPELINE_BIND_POINT_GRAPHICS, selectedPipeline);
+        last_bound_pipeline = selectedPipeline;
+    }
+
+    // Upload GlobalUBO (binding 0) - transpose matrices for Slang RowMajor SPIR-V
+    {
+        GlobalUBO ubo{};
+        ubo.view = glm::transpose(view_matrix);
+        ubo.projection = glm::transpose(projection_matrix);
+        for (int i = 0; i < NUM_CASCADES; i++) {
+            ubo.lightSpaceMatrices[i] = glm::transpose(lightSpaceMatrices[i]);
+        }
+        ubo.cascadeSplits = glm::vec4(cascadeSplitDistances[0], cascadeSplitDistances[1],
+                                       cascadeSplitDistances[2], cascadeSplitDistances[3]);
+        ubo.cascadeSplit4 = cascadeSplitDistances[4];
+        ubo.lightDir = light_direction;
+        ubo.lightAmbient = light_ambient;
+        ubo.cascadeCount = NUM_CASCADES;
+        ubo.lightDiffuse = light_diffuse;
+        ubo.debugCascades = 0;
+        ubo.shadowMapTexelSize = (currentShadowSize > 0)
+            ? glm::vec2(1.0f / static_cast<float>(currentShadowSize))
+            : glm::vec2(0.0f);
+        ubo._shadowPad = glm::vec2(0.0f);
+        memcpy(uniform_buffer_mapped[current_frame], &ubo, sizeof(ubo));
+    }
+
+    // Upload VulkanLightUBO (binding 3) - point/spot lights + camera
+    {
+        VulkanLightUBO lightUbo{};
+        for (int i = 0; i < current_lights.numPointLights && i < 16; i++) {
+            lightUbo.pointLights[i].position = current_lights.pointLights[i].position;
+            lightUbo.pointLights[i].range = current_lights.pointLights[i].range;
+            lightUbo.pointLights[i].color = current_lights.pointLights[i].color;
+            lightUbo.pointLights[i].intensity = current_lights.pointLights[i].intensity;
+            lightUbo.pointLights[i].attenuation = current_lights.pointLights[i].attenuation;
+            lightUbo.pointLights[i]._pad0 = 0.0f;
+        }
+        for (int i = 0; i < current_lights.numSpotLights && i < 16; i++) {
+            lightUbo.spotLights[i].position = current_lights.spotLights[i].position;
+            lightUbo.spotLights[i].range = current_lights.spotLights[i].range;
+            lightUbo.spotLights[i].direction = current_lights.spotLights[i].direction;
+            lightUbo.spotLights[i].intensity = current_lights.spotLights[i].intensity;
+            lightUbo.spotLights[i].color = current_lights.spotLights[i].color;
+            lightUbo.spotLights[i].innerCutoff = current_lights.spotLights[i].innerCutoff;
+            lightUbo.spotLights[i].attenuation = current_lights.spotLights[i].attenuation;
+            lightUbo.spotLights[i].outerCutoff = current_lights.spotLights[i].outerCutoff;
+        }
+        lightUbo.numPointLights = current_lights.numPointLights;
+        lightUbo.numSpotLights = current_lights.numSpotLights;
+        lightUbo.cameraPos = current_lights.cameraPos;
+        memcpy(light_uniform_mapped[current_frame], &lightUbo, sizeof(lightUbo));
+    }
+
+    // Upload PerObjectUBO to next slot in dynamic ring buffer (binding 4)
+    uint32_t perObjectDynamicOffset;
+    {
+        uint32_t drawIdx = per_object_draw_index[current_frame];
+        if (drawIdx >= MAX_PER_OBJECT_DRAWS) {
+            LOG_ENGINE_ERROR("[Vulkan] Exceeded MAX_PER_OBJECT_DRAWS ({}) -- draw call skipped", MAX_PER_OBJECT_DRAWS);
+            return;
+        }
+        perObjectDynamicOffset = static_cast<uint32_t>(drawIdx * per_object_alignment);
+
+        PerObjectUBO objUbo{};
+        objUbo.model = glm::transpose(current_model_matrix);
+        objUbo.normalMatrix = glm::inverse(current_model_matrix);
+        objUbo.color = state.color;
+        objUbo.useTexture = (bound_texture != INVALID_TEXTURE) ? 1 : 0;
+
+        void* dst = static_cast<char*>(per_object_uniform_mapped[current_frame]) + perObjectDynamicOffset;
+        memcpy(dst, &objUbo, sizeof(objUbo));
+        per_object_draw_index[current_frame]++;
+    }
+
+    // Get or allocate descriptor set for bound texture (dynamically growing pools)
+    VkDescriptorSet ds = getOrAllocateDescriptorSet(current_frame, bound_texture);
+    if (ds == VK_NULL_HANDLE) return; // Pool allocation failed
+
+    // Bind the per-draw descriptor set with dynamic offset (rebind if set or offset changed)
+    if (ds != last_bound_descriptor_set || perObjectDynamicOffset != last_bound_dynamic_offset) {
+        vkCmdBindDescriptorSets(command_buffers[current_frame], VK_PIPELINE_BIND_POINT_GRAPHICS,
+            pipeline_layout, 0, 1, &ds, 1, &perObjectDynamicOffset);
+        last_bound_descriptor_set = ds;
+        last_bound_dynamic_offset = perObjectDynamicOffset;
+    }
+
+    // Bind vertex buffer and draw range (with redundant bind tracking)
+    VkBuffer vb = vulkanMesh->getVertexBuffer();
+    if (vb != last_bound_vertex_buffer) {
+        VkBuffer vertexBuffers[] = {vb};
+        VkDeviceSize offsets[] = {0};
+        vkCmdBindVertexBuffers(command_buffers[current_frame], 0, 1, vertexBuffers, offsets);
+        last_bound_vertex_buffer = vb;
+    }
+
+    if (vulkanMesh->isIndexed()) {
+        vkCmdBindIndexBuffer(command_buffers[current_frame], vulkanMesh->getIndexBuffer(), 0, VK_INDEX_TYPE_UINT32);
+        vkCmdDrawIndexed(command_buffers[current_frame], static_cast<uint32_t>(vertex_count), 1,
+                         static_cast<uint32_t>(start_vertex), 0, 0);
+    } else {
+        vkCmdDraw(command_buffers[current_frame], static_cast<uint32_t>(vertex_count), 1,
+                  static_cast<uint32_t>(start_vertex), 0);
+    }
+}
+
+void VulkanRenderAPI::renderDebugLines(const vertex* vertices, size_t vertex_count)
+{
+    if (!vertices || vertex_count < 2 || !frame_started || device_lost) return;
+    if (in_shadow_pass) return;
+    if (pipeline_debug_lines == VK_NULL_HANDLE) return;
+
+    VkCommandBuffer cmd = command_buffers[current_frame];
+
+    // Ensure debug line buffer is large enough (CPU_TO_GPU for direct write)
+    size_t requiredSize = vertex_count * sizeof(vertex);
+    if (!debug_line_buffer || debug_line_buffer_capacity < vertex_count)
+    {
+        // Free old buffer
+        if (debug_line_buffer)
+        {
+            vmaDestroyBuffer(vma_allocator, debug_line_buffer, debug_line_allocation);
+            debug_line_buffer = VK_NULL_HANDLE;
+            debug_line_allocation = nullptr;
+            debug_line_mapped = nullptr;
+        }
+
+        debug_line_buffer_capacity = std::max(vertex_count, size_t(1024));
+
+        VkBufferCreateInfo bufferInfo{};
+        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bufferInfo.size = debug_line_buffer_capacity * sizeof(vertex);
+        bufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+        bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+        VmaAllocationCreateInfo allocInfo{};
+        allocInfo.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
+        allocInfo.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
+
+        VmaAllocationInfo allocResult{};
+        if (vmaCreateBuffer(vma_allocator, &bufferInfo, &allocInfo,
+                            &debug_line_buffer, &debug_line_allocation, &allocResult) != VK_SUCCESS)
+        {
+            LOG_ENGINE_ERROR("[Vulkan] Failed to create debug line buffer");
+            return;
+        }
+        debug_line_mapped = allocResult.pMappedData;
+    }
+
+    // Upload vertices
+    memcpy(debug_line_mapped, vertices, requiredSize);
+
+    // Bind debug line pipeline
+    if (pipeline_debug_lines != last_bound_pipeline) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_debug_lines);
+        last_bound_pipeline = pipeline_debug_lines;
+    }
+
+    // Upload GlobalUBO (view/projection)
+    {
+        GlobalUBO ubo{};
+        ubo.view = glm::transpose(view_matrix);
+        ubo.projection = glm::transpose(projection_matrix);
+        for (int i = 0; i < NUM_CASCADES; i++)
+            ubo.lightSpaceMatrices[i] = glm::transpose(lightSpaceMatrices[i]);
+        ubo.cascadeSplits = glm::vec4(cascadeSplitDistances[0], cascadeSplitDistances[1],
+                                       cascadeSplitDistances[2], cascadeSplitDistances[3]);
+        ubo.cascadeSplit4 = cascadeSplitDistances[4];
+        ubo.lightDir = light_direction;
+        ubo.lightAmbient = light_ambient;
+        ubo.cascadeCount = NUM_CASCADES;
+        ubo.lightDiffuse = light_diffuse;
+        ubo.shadowMapTexelSize = (currentShadowSize > 0)
+            ? glm::vec2(1.0f / static_cast<float>(currentShadowSize))
+            : glm::vec2(0.0f);
+        memcpy(uniform_buffer_mapped[current_frame], &ubo, sizeof(ubo));
+    }
+
+    // Bind debug line vertex buffer
+    VkBuffer vertexBuffers[] = {debug_line_buffer};
+    VkDeviceSize offsets[] = {0};
+    vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
+    last_bound_vertex_buffer = debug_line_buffer;
+
+    // Save model matrix
+    glm::mat4 saved_model = current_model_matrix;
+    current_model_matrix = glm::mat4(1.0f);
+
+    // Batch draw by color
+    size_t i = 0;
+    while (i < vertex_count)
+    {
+        glm::vec3 color(vertices[i].nx, vertices[i].ny, vertices[i].nz);
+        size_t batch_start = i;
+
+        while (i < vertex_count &&
+               vertices[i].nx == color.r &&
+               vertices[i].ny == color.g &&
+               vertices[i].nz == color.b)
+        {
+            i++;
+        }
+
+        // Upload PerObjectUBO for this color batch
+        uint32_t drawIdx = per_object_draw_index[current_frame];
+        if (drawIdx >= MAX_PER_OBJECT_DRAWS) break;
+        uint32_t perObjectDynamicOffset = static_cast<uint32_t>(drawIdx * per_object_alignment);
+
+        PerObjectUBO objUbo{};
+        objUbo.model = glm::transpose(current_model_matrix);
+        objUbo.normalMatrix = glm::mat4(1.0f);
+        objUbo.color = color;
+        objUbo.useTexture = 0;
+
+        void* dst = static_cast<char*>(per_object_uniform_mapped[current_frame]) + perObjectDynamicOffset;
+        memcpy(dst, &objUbo, sizeof(objUbo));
+        per_object_draw_index[current_frame]++;
+
+        // Get descriptor set (default texture)
+        VkDescriptorSet ds = getOrAllocateDescriptorSet(current_frame, INVALID_TEXTURE);
+        if (ds == VK_NULL_HANDLE) break;
+
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+            pipeline_layout, 0, 1, &ds, 1, &perObjectDynamicOffset);
+        last_bound_descriptor_set = ds;
+        last_bound_dynamic_offset = perObjectDynamicOffset;
+
+        vkCmdDraw(cmd, static_cast<uint32_t>(i - batch_start), 1, static_cast<uint32_t>(batch_start), 0);
+    }
+
+    current_model_matrix = saved_model;
+}
+
+void VulkanRenderAPI::setRenderState(const RenderState& state)
+{
+    current_state = state;
+    // Note: Blend modes are handled via pipeline selection in renderMesh/renderMeshRange
+}
+
+void VulkanRenderAPI::enableLighting(bool enable)
+{
+    lighting_enabled = enable;
+}
+
+void VulkanRenderAPI::setLighting(const glm::vec3& ambient, const glm::vec3& diffuse, const glm::vec3& direction)
+{
+    light_ambient = ambient;
+    light_diffuse = diffuse;
+    light_direction = glm::normalize(direction);
+}
+
+void VulkanRenderAPI::setPointAndSpotLights(const LightCBuffer& lights)
+{
+    current_lights = lights;
+}
+
+IGPUMesh* VulkanRenderAPI::createMesh()
+{
+    VulkanMesh* mesh = new VulkanMesh();
+    mesh->setVulkanHandles(device, vma_allocator, command_pool, graphics_queue);
+    return mesh;
+}
