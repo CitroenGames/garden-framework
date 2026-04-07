@@ -1,0 +1,8 @@
+[project:bc7enc]
+type = lib
+std = 11
+sources = *.cpp
+headers = *.h
+includes = .
+public_includes = .
+multiprocessor = true

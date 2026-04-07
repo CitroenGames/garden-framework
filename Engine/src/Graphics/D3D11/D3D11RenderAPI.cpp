@@ -611,6 +611,74 @@ TextureHandle D3D11RenderAPI::loadTextureFromMemory(const uint8_t* pixels, int w
     return handle;
 }
 
+TextureHandle D3D11RenderAPI::loadCompressedTexture(int width, int height, uint32_t format, int mip_count,
+                                                     const std::vector<const uint8_t*>& mip_data,
+                                                     const std::vector<size_t>& mip_sizes,
+                                                     const std::vector<std::pair<int,int>>& mip_dimensions)
+{
+    if (mip_count <= 0 || mip_data.empty()) return INVALID_TEXTURE;
+
+    // Map compression format to DXGI
+    DXGI_FORMAT dxgiFormat;
+    UINT blockSize = 0;
+    switch (format) {
+    case 0: dxgiFormat = DXGI_FORMAT_R8G8B8A8_UNORM; break;
+    case 1: dxgiFormat = DXGI_FORMAT_BC1_UNORM; blockSize = 8; break;
+    case 2: dxgiFormat = DXGI_FORMAT_BC3_UNORM; blockSize = 16; break;
+    case 3: dxgiFormat = DXGI_FORMAT_BC5_UNORM; blockSize = 16; break;
+    case 4: dxgiFormat = DXGI_FORMAT_BC7_UNORM; blockSize = 16; break;
+    default: return INVALID_TEXTURE;
+    }
+
+    // Build subresource data for each mip level
+    std::vector<D3D11_SUBRESOURCE_DATA> initData(mip_count);
+    for (int i = 0; i < mip_count; ++i) {
+        initData[i].pSysMem = mip_data[i];
+        if (format == 0) {
+            // Uncompressed RGBA8
+            initData[i].SysMemPitch = mip_dimensions[i].first * 4;
+        } else {
+            // BC compressed: pitch = (width / 4) * blockSize
+            initData[i].SysMemPitch = ((mip_dimensions[i].first + 3) / 4) * blockSize;
+        }
+        initData[i].SysMemSlicePitch = 0;
+    }
+
+    D3D11Texture tex;
+    tex.width = width;
+    tex.height = height;
+
+    D3D11_TEXTURE2D_DESC texDesc = {};
+    texDesc.Width = width;
+    texDesc.Height = height;
+    texDesc.MipLevels = mip_count;
+    texDesc.ArraySize = 1;
+    texDesc.Format = dxgiFormat;
+    texDesc.SampleDesc.Count = 1;
+    texDesc.Usage = D3D11_USAGE_IMMUTABLE;
+    texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+
+    HRESULT hr = device->CreateTexture2D(&texDesc, initData.data(), tex.texture.GetAddressOf());
+    if (FAILED(hr)) {
+        LOG_ENGINE_ERROR("[D3D11] loadCompressedTexture: CreateTexture2D failed ({}x{}, format {})", width, height, format);
+        return INVALID_TEXTURE;
+    }
+
+    D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+    srvDesc.Format = dxgiFormat;
+    srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Texture2D.MostDetailedMip = 0;
+    srvDesc.Texture2D.MipLevels = mip_count;
+
+    hr = device->CreateShaderResourceView(tex.texture.Get(), &srvDesc, tex.srv.GetAddressOf());
+    if (FAILED(hr)) return INVALID_TEXTURE;
+
+    TextureHandle handle = nextTextureHandle++;
+    textures[handle] = std::move(tex);
+    LOG_ENGINE_TRACE("[D3D11] loadCompressedTexture: handle {} ({}x{}, {} mips, format {})", handle, width, height, mip_count, format);
+    return handle;
+}
+
 void D3D11RenderAPI::bindTexture(TextureHandle texture)
 {
     if (texture == currentBoundTexture)

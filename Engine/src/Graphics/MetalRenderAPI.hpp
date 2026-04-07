@@ -35,6 +35,10 @@ public:
     virtual TextureHandle loadTexture(const std::string& filename, bool invert_y = false, bool generate_mipmaps = true) override;
     virtual TextureHandle loadTextureFromMemory(const uint8_t* pixels, int width, int height, int channels,
                                                 bool flip_vertically = false, bool generate_mipmaps = true) override;
+    virtual TextureHandle loadCompressedTexture(int width, int height, uint32_t format, int mip_count,
+                                                const std::vector<const uint8_t*>& mip_data,
+                                                const std::vector<size_t>& mip_sizes,
+                                                const std::vector<std::pair<int,int>>& mip_dimensions) override;
     virtual void bindTexture(TextureHandle texture) override;
     virtual void unbindTexture() override;
     virtual void deleteTexture(TextureHandle texture) override;

@@ -2022,6 +2022,14 @@ void EditorApp::renderPackageDialog()
             ImGui::InputText("##pkg_name", m_package_name, sizeof(m_package_name));
 
             ImGui::Checkbox("Compile levels to binary", &m_package_compile_levels);
+            ImGui::Checkbox("Compile assets (models + textures)", &m_package_compile_assets);
+            if (m_package_compile_assets)
+            {
+                ImGui::Indent();
+                ImGui::Combo("Texture quality", &m_package_texture_quality, "Fast\0Balanced\0Best\0");
+                ImGui::Checkbox("Incremental (skip unchanged)", &m_package_incremental);
+                ImGui::Unindent();
+            }
 
             // Show current render API
             const char* api_name = "Unknown";
@@ -2072,6 +2080,12 @@ void EditorApp::renderPackageDialog()
                 ImGui::Text("Files copied: %d", m_package_result.files_copied);
                 if (m_package_result.levels_compiled > 0)
                     ImGui::Text("Levels compiled: %d", m_package_result.levels_compiled);
+                if (m_package_result.models_compiled > 0)
+                    ImGui::Text("Models compiled: %d", m_package_result.models_compiled);
+                if (m_package_result.textures_compiled > 0)
+                    ImGui::Text("Textures compiled: %d", m_package_result.textures_compiled);
+                if (m_package_result.assets_skipped > 0)
+                    ImGui::Text("Assets unchanged: %d", m_package_result.assets_skipped);
 
                 ImGui::Spacing();
                 ImGui::Text("Output:");
@@ -2130,6 +2144,9 @@ void EditorApp::executePackageProject()
     config.package_name = m_package_name;
     config.compile_levels_to_binary = m_package_compile_levels;
     config.target_render_api = m_app.getAPIType();
+    config.compile_assets = m_package_compile_assets;
+    config.compile_config.bc7_quality = m_package_texture_quality;
+    config.compile_config.incremental = m_package_incremental;
 
     m_package_output_path = (std::filesystem::path(config.output_directory) / config.package_name).string();
 

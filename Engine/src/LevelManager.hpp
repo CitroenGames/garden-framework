@@ -171,6 +171,7 @@ public:
 
     // Helper to load mesh (returns shared_ptr) - public so editor can use it
     std::shared_ptr<mesh> loadMesh(const LevelEntity& entity, IRenderAPI* render_api);
+    std::shared_ptr<mesh> loadCompiledMesh(const std::string& cmesh_path, IRenderAPI* render_api);
 
 private:
     // JSON parsing

@@ -267,6 +267,170 @@ TextureHandle D3D12RenderAPI::loadTextureFromMemory(const uint8_t* pixels, int w
     return handle;
 }
 
+TextureHandle D3D12RenderAPI::loadCompressedTexture(int width, int height, uint32_t format, int mip_count,
+                                                     const std::vector<const uint8_t*>& mip_data,
+                                                     const std::vector<size_t>& mip_sizes,
+                                                     const std::vector<std::pair<int,int>>& mip_dimensions)
+{
+    if (mip_count <= 0 || mip_data.empty()) return INVALID_TEXTURE;
+
+    DXGI_FORMAT dxgiFormat;
+    UINT blockSize = 0;
+    bool isBC = false;
+    switch (format) {
+    case 0: dxgiFormat = DXGI_FORMAT_R8G8B8A8_UNORM; break;
+    case 1: dxgiFormat = DXGI_FORMAT_BC1_UNORM; blockSize = 8; isBC = true; break;
+    case 2: dxgiFormat = DXGI_FORMAT_BC3_UNORM; blockSize = 16; isBC = true; break;
+    case 3: dxgiFormat = DXGI_FORMAT_BC5_UNORM; blockSize = 16; isBC = true; break;
+    case 4: dxgiFormat = DXGI_FORMAT_BC7_UNORM; blockSize = 16; isBC = true; break;
+    default: return INVALID_TEXTURE;
+    }
+
+    D3D12_HEAP_PROPERTIES heapProps = {};
+    heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+    D3D12_RESOURCE_DESC texDesc = {};
+    texDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    texDesc.Width = width;
+    texDesc.Height = height;
+    texDesc.DepthOrArraySize = 1;
+    texDesc.MipLevels = static_cast<UINT16>(mip_count);
+    texDesc.Format = dxgiFormat;
+    texDesc.SampleDesc.Count = 1;
+
+    D3D12Texture tex;
+    HRESULT hr = device->CreateCommittedResource(
+        &heapProps, D3D12_HEAP_FLAG_NONE, &texDesc,
+        D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+        IID_PPV_ARGS(tex.resource.GetAddressOf()));
+    if (FAILED(hr)) return INVALID_TEXTURE;
+
+    // Calculate total upload buffer size
+    size_t totalUploadSize = 0;
+    for (int i = 0; i < mip_count; i++) {
+        UINT64 rowPitch;
+        if (isBC) {
+            UINT blockWidth = (mip_dimensions[i].first + 3) / 4;
+            rowPitch = AlignUp(static_cast<size_t>(blockWidth) * blockSize, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
+            UINT blockHeight = (mip_dimensions[i].second + 3) / 4;
+            totalUploadSize = AlignUp(totalUploadSize, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
+            totalUploadSize += rowPitch * blockHeight;
+        } else {
+            rowPitch = AlignUp(static_cast<size_t>(mip_dimensions[i].first) * 4, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
+            totalUploadSize = AlignUp(totalUploadSize, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
+            totalUploadSize += rowPitch * mip_dimensions[i].second;
+        }
+    }
+    totalUploadSize = AlignUp(totalUploadSize, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
+
+    // Create upload buffer
+    D3D12_HEAP_PROPERTIES uploadHeap = {};
+    uploadHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
+
+    D3D12_RESOURCE_DESC uploadDesc = {};
+    uploadDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    uploadDesc.Width = totalUploadSize + D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT * mip_count;
+    uploadDesc.Height = 1;
+    uploadDesc.DepthOrArraySize = 1;
+    uploadDesc.MipLevels = 1;
+    uploadDesc.SampleDesc.Count = 1;
+    uploadDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+    ComPtr<ID3D12Resource> uploadBuffer;
+    hr = device->CreateCommittedResource(
+        &uploadHeap, D3D12_HEAP_FLAG_NONE, &uploadDesc,
+        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+        IID_PPV_ARGS(uploadBuffer.GetAddressOf()));
+    if (FAILED(hr)) return INVALID_TEXTURE;
+
+    uint8_t* mapped = nullptr;
+    uploadBuffer->Map(0, nullptr, reinterpret_cast<void**>(&mapped));
+
+    m_uploadCmdAllocator->Reset();
+    m_uploadCmdList->Reset(m_uploadCmdAllocator.Get(), nullptr);
+
+    size_t uploadOffset = 0;
+    for (int i = 0; i < mip_count; i++) {
+        uploadOffset = AlignUp(uploadOffset, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
+
+        int mw = mip_dimensions[i].first;
+        int mh = mip_dimensions[i].second;
+        UINT64 rowPitch;
+        int numRows;
+
+        if (isBC) {
+            UINT blockWidth = (mw + 3) / 4;
+            numRows = (mh + 3) / 4;
+            UINT srcRowBytes = blockWidth * blockSize;
+            rowPitch = AlignUp(static_cast<size_t>(srcRowBytes), D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
+
+            // Copy row-of-blocks by row-of-blocks
+            const uint8_t* src = mip_data[i];
+            for (int row = 0; row < numRows; row++) {
+                memcpy(mapped + uploadOffset + row * rowPitch,
+                       src + row * srcRowBytes, srcRowBytes);
+            }
+        } else {
+            numRows = mh;
+            rowPitch = AlignUp(static_cast<size_t>(mw) * 4, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
+            const uint8_t* src = mip_data[i];
+            for (int y = 0; y < mh; y++) {
+                memcpy(mapped + uploadOffset + y * rowPitch,
+                       src + y * mw * 4, mw * 4);
+            }
+        }
+
+        D3D12_TEXTURE_COPY_LOCATION dst = {};
+        dst.pResource = tex.resource.Get();
+        dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        dst.SubresourceIndex = i;
+
+        D3D12_TEXTURE_COPY_LOCATION srcLoc = {};
+        srcLoc.pResource = uploadBuffer.Get();
+        srcLoc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        srcLoc.PlacedFootprint.Offset = uploadOffset;
+        srcLoc.PlacedFootprint.Footprint.Format = dxgiFormat;
+        srcLoc.PlacedFootprint.Footprint.Width = mw;
+        srcLoc.PlacedFootprint.Footprint.Height = mh;
+        srcLoc.PlacedFootprint.Footprint.Depth = 1;
+        srcLoc.PlacedFootprint.Footprint.RowPitch = static_cast<UINT>(rowPitch);
+
+        m_uploadCmdList->CopyTextureRegion(&dst, 0, 0, 0, &srcLoc, nullptr);
+        uploadOffset += rowPitch * numRows;
+    }
+
+    uploadBuffer->Unmap(0, nullptr);
+
+    D3D12_RESOURCE_BARRIER barrier = {};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource = tex.resource.Get();
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    m_uploadCmdList->ResourceBarrier(1, &barrier);
+
+    executeUploadCommandList();
+
+    // Create SRV
+    tex.srvIndex = m_srvAllocator.allocate();
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+    srvDesc.Format = dxgiFormat;
+    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvDesc.Texture2D.MipLevels = mip_count;
+    device->CreateShaderResourceView(tex.resource.Get(), &srvDesc,
+                                      m_srvAllocator.getCPU(tex.srvIndex));
+
+    tex.width = width;
+    tex.height = height;
+
+    TextureHandle handle = nextTextureHandle++;
+    textures[handle] = std::move(tex);
+    LOG_ENGINE_TRACE("[D3D12] loadCompressedTexture: handle {} ({}x{}, {} mips, format {})",
+                      handle, width, height, mip_count, format);
+    return handle;
+}
+
 void D3D12RenderAPI::bindTexture(TextureHandle texture)
 {
     if (texture == currentBoundTexture) return;

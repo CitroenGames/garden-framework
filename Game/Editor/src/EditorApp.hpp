@@ -185,6 +185,9 @@ private:
     // Packaging
     bool m_show_package_dialog = false;
     bool m_package_compile_levels = false;
+    bool m_package_compile_assets = true;
+    int  m_package_texture_quality = 1;  // 0=Fast, 1=Balanced, 2=Best
+    bool m_package_incremental = true;
     char m_package_output_dir[512] = "";
     char m_package_name[256] = "";
 

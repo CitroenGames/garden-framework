@@ -3,9 +3,9 @@
 [[vk::binding(0, 0)]]
 cbuffer ShadowCB : register(b0)
 {
-    float4x4 uLightSpaceMatrix;
 #ifndef TARGET_SPIRV
-    float4x4 uModel;       // D3D11/D3D12: model stays in UBO
+    float4x4 uLightSpaceMatrix;  // D3D11/D3D12: light space in UBO
+    float4x4 uModel;             // D3D11/D3D12: model in UBO
 #endif
 };
 
@@ -13,7 +13,8 @@ cbuffer ShadowCB : register(b0)
 [[vk::push_constant]]
 cbuffer ShadowPush
 {
-    float4x4 uModel;       // Vulkan: model via push constant (per-draw)
+    float4x4 uLightSpaceMatrix;  // Vulkan: light space via push constant (per-cascade)
+    float4x4 uModel;             // Vulkan: model via push constant (per-draw)
 };
 #endif
 
