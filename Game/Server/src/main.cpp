@@ -16,6 +16,7 @@
 #include "Project/ProjectManager.hpp"
 #include "Reflection/ReflectionRegistry.hpp"
 #include "Prefab/PrefabManager.hpp"
+#include "Assets/AssetManager.hpp"
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -119,6 +120,14 @@ int main(int argc, char* argv[])
 
     IRenderAPI* render_api = app.getRenderAPI();
 
+    // Initialize AssetManager for path resolution
+    Assets::AssetManager::get().initialize(render_api);
+    {
+        const auto& asset_dir = project_manager.getDescriptor().asset_directories[0];
+        Assets::AssetManager::get().setAssetRoot(project_manager.resolveProjectPath(asset_dir));
+        Assets::AssetManager::get().setAssetPrefix(asset_dir);
+    }
+
     // Initialize world and physics
     _world = world();
     _world.initializePhysics();
@@ -128,6 +137,7 @@ int main(int argc, char* argv[])
     std::string level_path = project_manager.getDescriptor().default_level;
     if (!level_path.empty())
     {
+        level_path = Assets::AssetManager::get().resolveAssetPath(level_path);
         if (!level_manager.loadLevel(level_path, level_data))
         {
             LOG_ENGINE_FATAL("Failed to load level: {}", level_path);

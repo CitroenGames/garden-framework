@@ -63,10 +63,33 @@ void AssetManager::setAssetRoot(const std::string& root) {
     LOG_ENGINE_INFO("AssetManager: Asset root set to '{}'", m_asset_root);
 }
 
-std::string AssetManager::resolveAssetPath(const std::string& relative_path) const {
+void AssetManager::setAssetPrefix(const std::string& prefix) {
+    m_asset_prefix = prefix;
+    // Normalize trailing separator
+    if (!m_asset_prefix.empty() && m_asset_prefix.back() != '/' && m_asset_prefix.back() != '\\')
+        m_asset_prefix += '/';
+}
+
+std::string AssetManager::resolveAssetPath(const std::string& path) const {
+    if (path.empty())
+        return path;
+
+    // Already absolute — return as-is
+    if (fs::path(path).is_absolute())
+        return path;
+
+    // No asset root — return as-is (CWD-relative)
     if (m_asset_root.empty())
-        return relative_path;
-    return (fs::path(m_asset_root) / relative_path).string();
+        return path;
+
+    // Strip asset prefix if the path starts with it (e.g. "assets/models/foo" -> "models/foo")
+    std::string resolved = path;
+    if (!m_asset_prefix.empty() && resolved.size() > m_asset_prefix.size() &&
+        resolved.compare(0, m_asset_prefix.size(), m_asset_prefix) == 0) {
+        resolved = resolved.substr(m_asset_prefix.size());
+    }
+
+    return (fs::path(m_asset_root) / resolved).string();
 }
 
 std::vector<std::string> AssetManager::collectLevelAssets(const std::string& levels_directory) {

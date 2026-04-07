@@ -5,6 +5,9 @@
 #include "Assets/AssetCompiler.hpp"
 #include <string>
 #include <vector>
+#include <atomic>
+#include <mutex>
+#include <memory>
 
 class ProjectManager;
 class LevelManager;
@@ -33,6 +36,34 @@ struct ENGINE_API PackageResult
     std::vector<std::string> warnings;
 };
 
+struct ENGINE_API PackageProgress
+{
+    enum class Phase {
+        CopyingBinaries,
+        CompilingAssets,
+        ValidatingAssets,
+        CompilingLevels,
+        WritingManifest,
+        Complete,
+        Failed
+    };
+
+    std::atomic<Phase> current_phase{Phase::CopyingBinaries};
+
+    // Asset compilation counters (updated from worker threads)
+    std::atomic<int> total_assets{0};
+    std::atomic<int> completed_assets{0};
+    std::atomic<int> skipped_assets{0};
+    std::atomic<int> failed_assets{0};
+
+    std::mutex current_asset_mutex;
+    std::string current_asset; // protected by current_asset_mutex
+
+    // Result — only valid after finished == true
+    std::atomic<bool> finished{false};
+    PackageResult result;
+};
+
 class ENGINE_API ProjectPackager
 {
 public:
@@ -41,7 +72,21 @@ public:
         LevelManager& level_manager,
         const PackageConfig& config);
 
+    // Launches packaging on a background thread. Poll progress->finished for completion.
+    static void packageProjectAsync(
+        const ProjectManager& project_manager,
+        LevelManager& level_manager,
+        const PackageConfig& config,
+        std::shared_ptr<PackageProgress> progress);
+
     static std::vector<std::string> validateBeforePackage(
         const ProjectManager& project_manager,
         const PackageConfig& config);
+
+private:
+    static PackageResult packageProjectInternal(
+        const ProjectManager& project_manager,
+        LevelManager& level_manager,
+        const PackageConfig& config,
+        std::shared_ptr<PackageProgress> progress);
 };

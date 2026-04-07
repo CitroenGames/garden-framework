@@ -13,13 +13,18 @@
 #include "Prefab/PrefabManager.hpp"
 #include "Reflection/EngineReflection.hpp"
 #include "Assets/LODMeshSerializer.hpp"
+#include "Assets/AssetManager.hpp"
 #include "Project/ProjectManager.hpp"
 #include "imgui.h"
 #include "imgui_internal.h"
 #include "ImGuizmo.h"
 #include <SDL.h>
+#include "Threading/JobSystem.hpp"
 #include <cstring>
+#include <chrono>
 #include <filesystem>
+#include <mutex>
+#include <thread>
 
 #ifdef _WIN32
 static constexpr const char* PIE_GAME_EXE_NAME   = "Game.exe";
@@ -38,6 +43,11 @@ bool EditorApp::initialize(RenderAPIType api_type)
     Console::get().initialize();
     InitializeDefaultCVars();
     ConVarRegistry::get().loadConfig("config.cfg");
+
+    if (!Threading::JobSystem::get().initialize()) {
+        LOG_ENGINE_FATAL("Failed to initialize Job System");
+        return false;
+    }
 
     int win_w = CVAR_INT(window_width);
     int win_h = CVAR_INT(window_height);
@@ -261,6 +271,12 @@ bool EditorApp::initialize(RenderAPIType api_type)
         if (m_project_manager.loadProject(m_project_path))
         {
             std::filesystem::current_path(m_project_manager.getProjectRoot());
+            {
+                const auto& asset_dir = m_project_manager.getDescriptor().asset_directories[0];
+                Assets::AssetManager::get().initialize(m_app.getRenderAPI());
+                Assets::AssetManager::get().setAssetRoot(m_project_manager.resolveProjectPath(asset_dir));
+                Assets::AssetManager::get().setAssetPrefix(asset_dir);
+            }
             LOG_ENGINE_INFO("Project '{}' loaded from '{}'",
                            m_project_manager.getDescriptor().name,
                            m_project_manager.getProjectRoot());
@@ -658,6 +674,15 @@ void EditorApp::reloadLODsForMesh(const std::string& mesh_path)
 
 void EditorApp::shutdown()
 {
+    // Wait for any in-flight packaging to complete before tearing down
+    if (m_package_progress)
+    {
+        LOG_ENGINE_INFO("[Editor] Waiting for packaging to finish before shutdown...");
+        while (!m_package_progress->finished.load(std::memory_order_acquire))
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        m_package_progress.reset();
+    }
+
     // Stop simulation if running
     if (m_state.isSimulationActive())
         stopPlay();
@@ -691,6 +716,7 @@ void EditorApp::shutdown()
     if (auto* api = m_app.getRenderAPI())
         api->waitForGPU();
     m_world.registry.clear();
+    Threading::JobSystem::get().shutdown();
     Console::get().shutdown();
     RmlUiManager::get().shutdown();
     ImGuiManager::get().shutdown();
@@ -1994,7 +2020,9 @@ void EditorApp::renderPackageDialog()
     ImGui::SetNextWindowSize(ImVec2(520.0f, 330.0f), ImGuiCond_Always);
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
 
-    if (ImGui::Begin("Package Project##dialog", &m_show_package_dialog,
+    // Prevent closing via X button while packaging is in progress
+    bool* p_open = (m_package_phase == PackagePhase::InProgress) ? nullptr : &m_show_package_dialog;
+    if (ImGui::Begin("Package Project##dialog", p_open,
                      ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDocking))
     {
         if (m_package_phase == PackagePhase::Configure)
@@ -2061,7 +2089,7 @@ void EditorApp::renderPackageDialog()
             if (ImGui::Button("Package", ImVec2(100.0f, 0.0f)))
             {
                 executePackageProject();
-                m_package_phase = PackagePhase::Results;
+                // Phase is set to InProgress inside executePackageProject()
             }
 
             if (!can_package) ImGui::EndDisabled();
@@ -2069,6 +2097,62 @@ void EditorApp::renderPackageDialog()
             ImGui::SameLine();
             if (ImGui::Button("Cancel", ImVec2(100.0f, 0.0f)))
                 m_show_package_dialog = false;
+        }
+        else if (m_package_phase == PackagePhase::InProgress)
+        {
+            // --- In Progress Phase ---
+            if (m_package_progress)
+            {
+                auto phase = m_package_progress->current_phase.load(std::memory_order_acquire);
+                int total     = m_package_progress->total_assets.load(std::memory_order_relaxed);
+                int completed = m_package_progress->completed_assets.load(std::memory_order_relaxed);
+                int skipped   = m_package_progress->skipped_assets.load(std::memory_order_relaxed);
+                int failed    = m_package_progress->failed_assets.load(std::memory_order_relaxed);
+
+                std::string current_asset;
+                {
+                    std::lock_guard<std::mutex> lock(m_package_progress->current_asset_mutex);
+                    current_asset = m_package_progress->current_asset;
+                }
+
+                // Phase label
+                const char* phase_name = "Preparing...";
+                switch (phase) {
+                case PackageProgress::Phase::CopyingBinaries:  phase_name = "Copying engine binaries..."; break;
+                case PackageProgress::Phase::CompilingAssets:   phase_name = "Compiling assets..."; break;
+                case PackageProgress::Phase::ValidatingAssets:  phase_name = "Validating assets..."; break;
+                case PackageProgress::Phase::CompilingLevels:   phase_name = "Compiling levels..."; break;
+                case PackageProgress::Phase::WritingManifest:   phase_name = "Writing project file..."; break;
+                default: break;
+                }
+
+                ImGui::Text("%s", phase_name);
+                ImGui::Spacing();
+
+                // Progress bar
+                float fraction = (total > 0) ? static_cast<float>(completed) / static_cast<float>(total) : 0.0f;
+                char overlay[64];
+                snprintf(overlay, sizeof(overlay), "%d / %d", completed, total);
+                ImGui::ProgressBar(fraction, ImVec2(-1.0f, 0.0f), overlay);
+
+                // Stats
+                ImGui::Text("%d completed, %d skipped, %d failed", completed, skipped, failed);
+
+                // Current asset name
+                if (!current_asset.empty())
+                    ImGui::TextDisabled("Current: %s", current_asset.c_str());
+
+                // Check for completion
+                if (m_package_progress->finished.load(std::memory_order_acquire))
+                {
+                    m_package_result = std::move(m_package_progress->result);
+                    m_package_progress.reset();
+                    m_package_phase = PackagePhase::Results;
+
+                    if (!m_package_result.success)
+                        LOG_ENGINE_ERROR("[Packager] Failed: {}", m_package_result.error_message);
+                }
+            }
         }
         else
         {
@@ -2150,15 +2234,16 @@ void EditorApp::executePackageProject()
 
     m_package_output_path = (std::filesystem::path(config.output_directory) / config.package_name).string();
 
-    m_package_result = ProjectPackager::packageProject(
-        m_project_manager, m_level_manager, config);
+    // Launch packaging asynchronously
+    m_package_progress = std::make_shared<PackageProgress>();
+    m_package_phase = PackagePhase::InProgress;
+
+    ProjectPackager::packageProjectAsync(
+        m_project_manager, m_level_manager, config, m_package_progress);
 
     // Persist the output directory
     if (auto* cvar = CVAR_PTR(editor_package_output_dir))
         cvar->setString(m_package_output_dir);
-
-    if (!m_package_result.success)
-        LOG_ENGINE_ERROR("[Packager] Failed: {}", m_package_result.error_message);
 }
 
 void EditorApp::renderGrid()
@@ -2746,6 +2831,12 @@ bool EditorApp::runProjectBrowser()
             if (!path.empty() && m_project_manager.loadProject(path))
             {
                 std::filesystem::current_path(m_project_manager.getProjectRoot());
+                {
+                    const auto& asset_dir = m_project_manager.getDescriptor().asset_directories[0];
+                    Assets::AssetManager::get().initialize(m_app.getRenderAPI());
+                    Assets::AssetManager::get().setAssetRoot(m_project_manager.resolveProjectPath(asset_dir));
+                    Assets::AssetManager::get().setAssetPrefix(asset_dir);
+                }
                 LOG_ENGINE_INFO("Opened project '{}'",
                                m_project_manager.getDescriptor().name);
                 if (!m_project_manager.getDescriptor().default_level.empty())
@@ -2844,6 +2935,12 @@ bool EditorApp::runProjectBrowser()
                 if (success)
                 {
                     std::filesystem::current_path(m_project_manager.getProjectRoot());
+                    {
+                        const auto& asset_dir = m_project_manager.getDescriptor().asset_directories[0];
+                        Assets::AssetManager::get().initialize(m_app.getRenderAPI());
+                        Assets::AssetManager::get().setAssetRoot(m_project_manager.resolveProjectPath(asset_dir));
+                        Assets::AssetManager::get().setAssetPrefix(asset_dir);
+                    }
                     LOG_ENGINE_INFO("Created project '{}' at '{}'",
                                    name, m_project_manager.getProjectRoot());
                     if (!m_project_manager.getDescriptor().default_level.empty())

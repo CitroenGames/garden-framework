@@ -5,6 +5,7 @@
 #include "Components/PrefabInstanceComponent.hpp"
 #include "Components/mesh.hpp"
 #include "Graphics/RenderAPI.hpp"
+#include "Assets/AssetManager.hpp"
 #include "Utils/Log.hpp"
 #include <fstream>
 
@@ -116,7 +117,8 @@ bool PrefabManager::loadPrefab(
     const std::string& file_path,
     PrefabData& out_data)
 {
-    std::ifstream file(file_path);
+    std::string resolved = Assets::AssetManager::get().resolveAssetPath(file_path);
+    std::ifstream file(resolved);
     if (!file.is_open())
     {
         LOG_ENGINE_ERROR("PrefabManager::loadPrefab — could not open: {}", file_path);
@@ -179,7 +181,8 @@ entt::entity PrefabManager::spawn(
     if (data.json.contains("mesh") && data.json["mesh"].contains("path"))
     {
         const auto& mesh_json = data.json["mesh"];
-        std::string mesh_file = mesh_json["path"].get<std::string>();
+        std::string mesh_file = Assets::AssetManager::get().resolveAssetPath(
+            mesh_json["path"].get<std::string>());
 
         if (!mesh_file.empty())
         {
@@ -209,7 +212,8 @@ entt::entity PrefabManager::spawn(
     // Load collider mesh (non-reflectable)
     if (data.json.contains("collider") && data.json["collider"].contains("mesh_path"))
     {
-        std::string collider_file = data.json["collider"]["mesh_path"].get<std::string>();
+        std::string collider_file = Assets::AssetManager::get().resolveAssetPath(
+            data.json["collider"]["mesh_path"].get<std::string>());
         if (!collider_file.empty())
         {
             auto col_mesh = std::make_shared<mesh>(collider_file, m_render_api);

@@ -262,7 +262,11 @@ int main(int argc, char* argv[])
         LOG_ENGINE_FATAL("Failed to initialize Asset Manager");
         quit_game(1);
     }
-    Assets::AssetManager::get().setAssetRoot(project_manager.getProjectRoot());
+    {
+        const auto& asset_dir = project_manager.getDescriptor().asset_directories[0];
+        Assets::AssetManager::get().setAssetRoot(project_manager.resolveProjectPath(asset_dir));
+        Assets::AssetManager::get().setAssetPrefix(asset_dir);
+    }
     Assets::AssetManager::get().registerLoader(std::make_unique<Assets::GltfAssetLoader>());
 
     if (!AudioSystem::get().initialize())
@@ -282,6 +286,7 @@ int main(int argc, char* argv[])
     std::string level_path = project_manager.getDescriptor().default_level;
     if (!level_path.empty())
     {
+        level_path = Assets::AssetManager::get().resolveAssetPath(level_path);
         if (!level_manager.loadLevel(level_path, level_data))
         {
             LOG_ENGINE_FATAL("Failed to load level: {}", level_path);

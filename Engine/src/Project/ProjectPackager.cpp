@@ -8,6 +8,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <thread>
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
@@ -100,18 +101,49 @@ PackageResult ProjectPackager::packageProject(
     LevelManager& level_manager,
     const PackageConfig& config)
 {
+    // Synchronous overload — no progress reporting
+    return packageProjectInternal(project_manager, level_manager, config, nullptr);
+}
+
+void ProjectPackager::packageProjectAsync(
+    const ProjectManager& project_manager,
+    LevelManager& level_manager,
+    const PackageConfig& config,
+    std::shared_ptr<PackageProgress> progress)
+{
+    std::thread([&project_manager, &level_manager, config, progress]() {
+        PackageResult result = packageProjectInternal(
+            project_manager, level_manager, config, progress);
+        progress->result = std::move(result);
+        progress->finished.store(true, std::memory_order_release);
+    }).detach();
+}
+
+PackageResult ProjectPackager::packageProjectInternal(
+    const ProjectManager& project_manager,
+    LevelManager& level_manager,
+    const PackageConfig& config,
+    std::shared_ptr<PackageProgress> progress)
+{
     PackageResult result;
+
+    auto setPhase = [&](PackageProgress::Phase phase) {
+        if (progress)
+            progress->current_phase.store(phase, std::memory_order_release);
+    };
 
     // --- Validate ---
     if (!project_manager.isLoaded())
     {
         result.error_message = "No project loaded.";
+        setPhase(PackageProgress::Phase::Failed);
         return result;
     }
 
     if (config.output_directory.empty() || config.package_name.empty())
     {
         result.error_message = "Output directory and package name are required.";
+        setPhase(PackageProgress::Phase::Failed);
         return result;
     }
 
@@ -125,6 +157,7 @@ PackageResult ProjectPackager::packageProject(
     {
         result.error_message = "Game module DLL not found: " + module_path +
             "\nBuild the game module before packaging.";
+        setPhase(PackageProgress::Phase::Failed);
         return result;
     }
 
@@ -138,6 +171,7 @@ PackageResult ProjectPackager::packageProject(
         if (!ec && !rel.empty() && rel.native()[0] != '.')
         {
             result.error_message = "Output directory cannot be inside project asset directory: " + abs_asset.string();
+            setPhase(PackageProgress::Phase::Failed);
             return result;
         }
     }
@@ -151,10 +185,13 @@ PackageResult ProjectPackager::packageProject(
     if (ec)
     {
         result.error_message = "Failed to create output directories: " + ec.message();
+        setPhase(PackageProgress::Phase::Failed);
         return result;
     }
 
     // --- Copy engine binaries ---
+    setPhase(PackageProgress::Phase::CopyingBinaries);
+
     fs::path engine_bin = EnginePaths::getExecutableDir();
 
 #ifdef _WIN32
@@ -225,6 +262,8 @@ PackageResult ProjectPackager::packageProject(
     }
 
     // --- Copy/compile project assets ---
+    setPhase(PackageProgress::Phase::CompilingAssets);
+
     for (const auto& asset_dir : desc.asset_directories)
     {
         fs::path src = project_root / asset_dir;
@@ -241,8 +280,24 @@ PackageResult ProjectPackager::packageProject(
         if (config.compile_assets)
         {
             LOG_ENGINE_INFO("[Packager] Compiling project assets from '{}'...", asset_dir);
+
+            // Build progress callback that forwards to PackageProgress
+            Assets::CompileProgressCallback compile_cb = nullptr;
+            if (progress) {
+                compile_cb = [&progress](const Assets::CompileProgress& cp) {
+                    progress->total_assets.store(cp.total_assets, std::memory_order_relaxed);
+                    progress->completed_assets.store(cp.completed_assets, std::memory_order_relaxed);
+                    progress->skipped_assets.store(cp.skipped_assets, std::memory_order_relaxed);
+                    progress->failed_assets.store(cp.failed_assets, std::memory_order_relaxed);
+                    {
+                        std::lock_guard<std::mutex> lock(progress->current_asset_mutex);
+                        progress->current_asset = cp.current_asset;
+                    }
+                };
+            }
+
             Assets::CompileProgress compile_result = Assets::AssetCompiler::compileAll(
-                src.string(), dst.string(), config.compile_config);
+                src.string(), dst.string(), config.compile_config, compile_cb);
 
             result.models_compiled  += compile_result.models_compiled;
             result.textures_compiled += compile_result.textures_compiled;
@@ -268,6 +323,7 @@ PackageResult ProjectPackager::packageProject(
     }
 
     // --- Validate referenced assets ---
+    setPhase(PackageProgress::Phase::ValidatingAssets);
     {
         // Scan all level files in the output to find referenced asset paths
         fs::path output_levels = output_root / "assets" / "levels";
@@ -298,6 +354,7 @@ PackageResult ProjectPackager::packageProject(
 
     if (config.compile_levels_to_binary)
     {
+        setPhase(PackageProgress::Phase::CompilingLevels);
         LOG_ENGINE_INFO("[Packager] Compiling levels to binary...");
 
         // Find all .level.json files in the output
@@ -337,6 +394,8 @@ PackageResult ProjectPackager::packageProject(
     }
 
     // --- Write .garden file ---
+    setPhase(PackageProgress::Phase::WritingManifest);
+
     json j;
     j["name"] = desc.name;
     j["engine_id"] = desc.engine_id;
@@ -350,6 +409,7 @@ PackageResult ProjectPackager::packageProject(
     if (!garden_file.is_open())
     {
         result.error_message = "Failed to write .garden file: " + garden_path.string();
+        setPhase(PackageProgress::Phase::Failed);
         return result;
     }
     garden_file << j.dump(4);
@@ -361,6 +421,7 @@ PackageResult ProjectPackager::packageProject(
     LOG_ENGINE_INFO("[Packager] Output: {}", output_root.string());
 
     result.success = true;
+    setPhase(PackageProgress::Phase::Complete);
     return result;
 }
 
