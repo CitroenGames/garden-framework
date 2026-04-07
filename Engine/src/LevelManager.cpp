@@ -8,6 +8,8 @@
 #include "Utils/Log.hpp"
 #include "Assets/AssetMetadataSerializer.hpp"
 #include "Assets/LODMeshSerializer.hpp"
+#include "Assets/CompiledMeshSerializer.hpp"
+#include "Assets/CompiledTextureSerializer.hpp"
 #include <iostream>
 #include <cstring>
 #include <filesystem>
@@ -819,6 +821,25 @@ std::shared_ptr<mesh> LevelManager::loadMesh(const LevelEntity& entity, IRenderA
         return nullptr;
     }
 
+    // Try compiled mesh (.cmesh) first
+    {
+        std::filesystem::path p(entity.mesh_path);
+        std::string cmesh_path = (p.parent_path() / p.stem()).string() + ".cmesh";
+        if (std::filesystem::exists(cmesh_path))
+        {
+            auto compiled = loadCompiledMesh(cmesh_path, render_api);
+            if (compiled)
+            {
+                compiled->culling = entity.culling;
+                compiled->transparent = entity.transparent;
+                compiled->visible = entity.visible;
+                compiled->casts_shadow = entity.casts_shadow;
+                compiled->force_lod = entity.force_lod;
+                return compiled;
+            }
+        }
+    }
+
     std::shared_ptr<mesh> m_ptr;
 
     // Check if glTF file (which might have materials)
@@ -1006,6 +1027,183 @@ std::shared_ptr<mesh> LevelManager::loadMesh(const LevelEntity& entity, IRenderA
         }
     }
 
+    return m_ptr;
+}
+
+// Helper: load a .ctex compiled texture via the render API
+static TextureHandle loadCompiledTexture(IRenderAPI* render_api, const std::string& ctex_path)
+{
+    Assets::CompiledTextureData tex_data;
+    if (!Assets::CompiledTextureSerializer::load(tex_data, ctex_path))
+        return INVALID_TEXTURE;
+
+    std::vector<const uint8_t*> mip_ptrs;
+    std::vector<size_t> mip_sizes;
+    std::vector<std::pair<int,int>> mip_dims;
+
+    for (const auto& mip : tex_data.mip_levels) {
+        mip_ptrs.push_back(mip.data.data());
+        mip_sizes.push_back(mip.data.size());
+        mip_dims.push_back({static_cast<int>(mip.width), static_cast<int>(mip.height)});
+    }
+
+    return render_api->loadCompressedTexture(
+        static_cast<int>(tex_data.header.width),
+        static_cast<int>(tex_data.header.height),
+        static_cast<uint32_t>(tex_data.header.format),
+        static_cast<int>(tex_data.header.mip_count),
+        mip_ptrs, mip_sizes, mip_dims);
+}
+
+// Helper: load texture with .ctex fallback
+static TextureHandle loadTextureWithFallback(IRenderAPI* render_api, const std::string& path)
+{
+    // Try .ctex first
+    std::filesystem::path p(path);
+    std::string ctex_path = (p.parent_path() / p.stem()).string() + ".ctex";
+    if (std::filesystem::exists(ctex_path)) {
+        TextureHandle h = loadCompiledTexture(render_api, ctex_path);
+        if (h != INVALID_TEXTURE) return h;
+    }
+    // Fallback to original format
+    return render_api->loadTexture(path, true, true);
+}
+
+std::shared_ptr<mesh> LevelManager::loadCompiledMesh(const std::string& cmesh_path, IRenderAPI* render_api)
+{
+    Assets::CompiledMeshData cmesh;
+    if (!Assets::CompiledMeshSerializer::load(cmesh, cmesh_path)) {
+        LOG_ENGINE_ERROR("Failed to load compiled mesh: {}", cmesh_path);
+        return nullptr;
+    }
+
+    if (cmesh.lod_levels.empty() || cmesh.lod_levels[0].vertices.empty()) {
+        LOG_ENGINE_ERROR("Compiled mesh has no LOD0 data: {}", cmesh_path);
+        return nullptr;
+    }
+
+    // Create mesh from LOD0
+    const auto& lod0 = cmesh.lod_levels[0];
+    auto m_ptr = std::make_shared<mesh>(cmesh_path);
+
+    // Upload LOD0 to GPU
+    if (render_api && !lod0.vertices.empty()) {
+        m_ptr->gpu_mesh = render_api->createMesh();
+        if (m_ptr->gpu_mesh) {
+            if (!lod0.indices.empty()) {
+                m_ptr->gpu_mesh->uploadIndexedMeshData(
+                    lod0.vertices.data(), lod0.vertices.size(),
+                    lod0.indices.data(), lod0.indices.size());
+            } else {
+                m_ptr->gpu_mesh->uploadMeshData(lod0.vertices.data(), lod0.vertices.size());
+            }
+        }
+    }
+
+    // Set AABB from header
+    m_ptr->aabb_min = glm::vec3(cmesh.header.aabb_min[0], cmesh.header.aabb_min[1], cmesh.header.aabb_min[2]);
+    m_ptr->aabb_max = glm::vec3(cmesh.header.aabb_max[0], cmesh.header.aabb_max[1], cmesh.header.aabb_max[2]);
+    m_ptr->bounds_computed = true;
+
+    // Resolve material textures
+    std::string mesh_dir = std::filesystem::path(cmesh_path).parent_path().string();
+    if (!mesh_dir.empty() && mesh_dir.back() != '/' && mesh_dir.back() != '\\')
+        mesh_dir += "/";
+
+    if (!cmesh.material_refs.empty() && render_api) {
+        // Build material ranges from submeshes and LOD0 submesh_ranges
+        std::vector<MaterialRange> material_ranges;
+
+        if (!lod0.submesh_ranges.empty()) {
+            for (const auto& sr : lod0.submesh_ranges) {
+                TextureHandle tex = INVALID_TEXTURE;
+                std::string mat_name;
+
+                if (sr.submesh_id < cmesh.material_refs.size()) {
+                    const auto& mat = cmesh.material_refs[sr.submesh_id];
+                    mat_name = mat.name;
+                    // Load first texture reference
+                    for (const auto& tr : mat.textures) {
+                        std::string tex_path = mesh_dir + tr.path;
+                        tex = loadTextureWithFallback(render_api, tex_path);
+                        if (tex != INVALID_TEXTURE) break;
+                    }
+                }
+
+                material_ranges.emplace_back(sr.start_index, sr.index_count, tex, mat_name);
+            }
+        } else if (!cmesh.submeshes.empty()) {
+            // Fallback: use submesh table with LOD0 vertex data
+            size_t current = 0;
+            for (const auto& sub : cmesh.submeshes) {
+                TextureHandle tex = INVALID_TEXTURE;
+                std::string mat_name = sub.name;
+
+                if (sub.material_index < cmesh.material_refs.size()) {
+                    const auto& mat = cmesh.material_refs[sub.material_index];
+                    mat_name = mat.name;
+                    for (const auto& tr : mat.textures) {
+                        std::string tex_path = mesh_dir + tr.path;
+                        tex = loadTextureWithFallback(render_api, tex_path);
+                        if (tex != INVALID_TEXTURE) break;
+                    }
+                }
+
+                // We don't have per-submesh ranges without indexed info
+                material_ranges.emplace_back(current, 0, tex, mat_name);
+            }
+        }
+
+        if (!material_ranges.empty()) {
+            m_ptr->setMaterialRanges(material_ranges);
+        }
+    }
+
+    // Load LOD1+ levels
+    for (size_t i = 1; i < cmesh.lod_levels.size(); ++i) {
+        const auto& lod = cmesh.lod_levels[i];
+        if (lod.vertices.empty()) continue;
+
+        mesh::LODLevel level;
+        level.screen_threshold = lod.screen_threshold;
+        level.vertex_count = lod.vertices.size();
+        level.index_count = lod.indices.size();
+
+        if (render_api) {
+            level.gpu_mesh = render_api->createMesh();
+            if (level.gpu_mesh) {
+                if (!lod.indices.empty()) {
+                    level.gpu_mesh->uploadIndexedMeshData(
+                        lod.vertices.data(), lod.vertices.size(),
+                        lod.indices.data(), lod.indices.size());
+                } else {
+                    level.gpu_mesh->uploadMeshData(lod.vertices.data(), lod.vertices.size());
+                }
+            }
+        }
+
+        // Map submesh ranges to material textures
+        if (!lod.submesh_ranges.empty() && m_ptr->uses_material_ranges) {
+            for (const auto& sr : lod.submesh_ranges) {
+                TextureHandle tex = INVALID_TEXTURE;
+                std::string mat_name;
+                if (sr.submesh_id < m_ptr->material_ranges.size()) {
+                    tex = m_ptr->material_ranges[sr.submesh_id].texture;
+                    mat_name = m_ptr->material_ranges[sr.submesh_id].material_name;
+                }
+                level.material_ranges.emplace_back(sr.start_index, sr.index_count, tex, mat_name);
+            }
+        }
+
+        m_ptr->lod_levels.push_back(std::move(level));
+    }
+
+    if (!m_ptr->lod_levels.empty()) {
+        LOG_ENGINE_TRACE("Loaded {} LOD levels from compiled mesh {}", m_ptr->lod_levels.size(), cmesh_path);
+    }
+
+    LOG_ENGINE_TRACE("Loaded compiled mesh: {} ({} verts, {} LODs)",
+                     cmesh_path, lod0.vertices.size(), cmesh.lod_levels.size());
     return m_ptr;
 }
 

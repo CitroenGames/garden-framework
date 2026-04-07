@@ -197,6 +197,113 @@ TextureHandle VulkanRenderAPI::loadTextureFromMemory(const uint8_t* pixels, int 
     return handle;
 }
 
+TextureHandle VulkanRenderAPI::loadCompressedTexture(int width, int height, uint32_t format, int mip_count,
+                                                      const std::vector<const uint8_t*>& mip_data,
+                                                      const std::vector<size_t>& mip_sizes,
+                                                      const std::vector<std::pair<int,int>>& mip_dimensions)
+{
+    if (mip_count <= 0 || mip_data.empty()) return INVALID_TEXTURE;
+
+    // Map format enum to VkFormat
+    VkFormat vkFormat;
+    switch (format) {
+    case 0: vkFormat = VK_FORMAT_R8G8B8A8_UNORM; break;
+    case 1: vkFormat = VK_FORMAT_BC1_RGBA_UNORM_BLOCK; break;
+    case 2: vkFormat = VK_FORMAT_BC3_UNORM_BLOCK; break;
+    case 3: vkFormat = VK_FORMAT_BC5_UNORM_BLOCK; break;
+    case 4: vkFormat = VK_FORMAT_BC7_UNORM_BLOCK; break;
+    default: return INVALID_TEXTURE;
+    }
+
+    VulkanTexture texture;
+    texture.width = width;
+    texture.height = height;
+    texture.mipLevels = static_cast<uint32_t>(mip_count);
+
+    // Create image
+    VkResult imgResult = vkutil::createImage(vma_allocator, width, height, vkFormat,
+        VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        texture.image, texture.allocation, texture.mipLevels);
+    if (imgResult != VK_SUCCESS) {
+        LOG_ENGINE_ERROR("[Vulkan] loadCompressedTexture: vmaCreateImage failed");
+        return INVALID_TEXTURE;
+    }
+
+    // Transition entire image to TRANSFER_DST
+    transitionImageLayout(texture.image, vkFormat,
+                         VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, texture.mipLevels);
+
+    // Upload each mip level via staging buffer
+    {
+        std::lock_guard<std::mutex> staging_lock(staging_mutex);
+
+        for (int i = 0; i < mip_count; ++i) {
+            VkDeviceSize mipSize = static_cast<VkDeviceSize>(mip_sizes[i]);
+            ensureStagingBuffer(mipSize);
+            memcpy(staging_mapped, mip_data[i], mipSize);
+
+            VkCommandBuffer cmd = beginSingleTimeCommands();
+
+            VkBufferImageCopy region{};
+            region.bufferOffset = 0;
+            region.bufferRowLength = 0;
+            region.bufferImageHeight = 0;
+            region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            region.imageSubresource.mipLevel = static_cast<uint32_t>(i);
+            region.imageSubresource.baseArrayLayer = 0;
+            region.imageSubresource.layerCount = 1;
+            region.imageOffset = {0, 0, 0};
+            region.imageExtent = {
+                static_cast<uint32_t>(mip_dimensions[i].first),
+                static_cast<uint32_t>(mip_dimensions[i].second),
+                1
+            };
+
+            vkCmdCopyBufferToImage(cmd, staging_buffer, texture.image,
+                                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+            endSingleTimeCommands(cmd);
+        }
+    }
+
+    // Transition to shader read
+    transitionImageLayout(texture.image, vkFormat,
+                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, texture.mipLevels);
+
+    // Create image view
+    texture.imageView = vkutil::createImageView(device, texture.image, vkFormat,
+                                                 VK_IMAGE_ASPECT_COLOR_BIT, texture.mipLevels);
+    if (texture.imageView == VK_NULL_HANDLE) {
+        LOG_ENGINE_ERROR("[Vulkan] loadCompressedTexture: vkCreateImageView failed");
+        vmaDestroyImage(vma_allocator, texture.image, texture.allocation);
+        return INVALID_TEXTURE;
+    }
+
+    // Create sampler
+    SamplerKey texSamplerKey{};
+    texSamplerKey.magFilter = VK_FILTER_LINEAR;
+    texSamplerKey.minFilter = VK_FILTER_LINEAR;
+    texSamplerKey.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    texSamplerKey.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    texSamplerKey.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    texSamplerKey.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    texSamplerKey.anisotropyEnable = VK_TRUE;
+    texSamplerKey.maxAnisotropy = 16.0f;
+    texSamplerKey.compareEnable = VK_FALSE;
+    texSamplerKey.compareOp = VK_COMPARE_OP_ALWAYS;
+    texSamplerKey.minLod = 0.0f;
+    texSamplerKey.maxLod = static_cast<float>(texture.mipLevels);
+    texSamplerKey.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+    texture.sampler = sampler_cache.getOrCreate(texSamplerKey);
+
+    TextureHandle handle = next_texture_handle++;
+    textures[handle] = texture;
+
+    LOG_ENGINE_TRACE("[Vulkan] loadCompressedTexture: handle {} ({}x{}, {} mips, format {})",
+                     handle, width, height, mip_count, format);
+    return handle;
+}
+
 void VulkanRenderAPI::bindTexture(TextureHandle texture)
 {
     bound_texture = texture;
@@ -241,10 +348,10 @@ void VulkanRenderAPI::renderMesh(const mesh& m, const RenderState& state)
     if (!vulkanMesh || vulkanMesh->getVertexBuffer() == VK_NULL_HANDLE) return;
 
     if (in_shadow_pass) {
-        // Shadow pass - push model matrix per draw call via push constants
-        // (UBO only has lightSpaceMatrix, set once per cascade in beginCascade)
+        // Shadow pass - push model matrix per draw call via push constants (offset 64)
+        // Light space matrix is at offset 0, pushed once per cascade in beginCascade()
         vkCmdPushConstants(command_buffers[current_frame], shadow_pipeline_layout,
-                           VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(glm::mat4), &current_model_matrix);
+                           VK_SHADER_STAGE_VERTEX_BIT, sizeof(glm::mat4), sizeof(glm::mat4), &current_model_matrix);
 
         // Bind vertex buffer and draw (with redundant bind tracking)
         VkBuffer vb = vulkanMesh->getVertexBuffer();
@@ -393,9 +500,10 @@ void VulkanRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t
     if (!vulkanMesh || vulkanMesh->getVertexBuffer() == VK_NULL_HANDLE) return;
 
     if (in_shadow_pass) {
-        // Shadow pass - push model matrix per draw call via push constants
+        // Shadow pass - push model matrix per draw call via push constants (offset 64)
+        // Light space matrix is at offset 0, pushed once per cascade in beginCascade()
         vkCmdPushConstants(command_buffers[current_frame], shadow_pipeline_layout,
-                           VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(glm::mat4), &current_model_matrix);
+                           VK_SHADER_STAGE_VERTEX_BIT, sizeof(glm::mat4), sizeof(glm::mat4), &current_model_matrix);
 
         VkBuffer vb = vulkanMesh->getVertexBuffer();
         if (vb != last_bound_vertex_buffer) {

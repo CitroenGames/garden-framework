@@ -1401,6 +1401,76 @@ TextureHandle MetalRenderAPI::loadTextureFromMemory(const uint8_t* pixels, int w
     return handle;
 }
 
+TextureHandle MetalRenderAPI::loadCompressedTexture(int width, int height, uint32_t format, int mip_count,
+                                                     const std::vector<const uint8_t*>& mip_data,
+                                                     const std::vector<size_t>& mip_sizes,
+                                                     const std::vector<std::pair<int,int>>& mip_dimensions)
+{
+    if (mip_count <= 0 || mip_data.empty()) return INVALID_TEXTURE;
+
+    MTLPixelFormat mtlFormat;
+    NSUInteger blockSize = 0;
+    bool isBC = false;
+    switch (format) {
+    case 0: mtlFormat = MTLPixelFormatRGBA8Unorm; break;
+    case 1: mtlFormat = MTLPixelFormatBC1_RGBA; blockSize = 8; isBC = true; break;
+    case 2: mtlFormat = MTLPixelFormatBC3_RGBA; blockSize = 16; isBC = true; break;
+    case 3: mtlFormat = MTLPixelFormatBC5_RGUnorm; blockSize = 16; isBC = true; break;
+    case 4: mtlFormat = MTLPixelFormatBC7_RGBAUnorm; blockSize = 16; isBC = true; break;
+    default: return INVALID_TEXTURE;
+    }
+
+    MTLTextureDescriptor* desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:mtlFormat
+                                                                                   width:width
+                                                                                  height:height
+                                                                               mipmapped:(mip_count > 1)];
+    desc.usage = MTLTextureUsageShaderRead;
+    desc.mipmapLevelCount = mip_count;
+    desc.storageMode = MTLStorageModeManaged;
+
+    id<MTLTexture> texture = [impl->device newTextureWithDescriptor:desc];
+    if (!texture) return INVALID_TEXTURE;
+
+    for (int i = 0; i < mip_count; ++i) {
+        int mw = mip_dimensions[i].first;
+        int mh = mip_dimensions[i].second;
+        NSUInteger bytesPerRow;
+
+        if (isBC) {
+            NSUInteger blockWidth = (mw + 3) / 4;
+            bytesPerRow = blockWidth * blockSize;
+        } else {
+            bytesPerRow = mw * 4;
+        }
+
+        [texture replaceRegion:MTLRegionMake2D(0, 0, mw, mh)
+                   mipmapLevel:i
+                     withBytes:mip_data[i]
+                   bytesPerRow:bytesPerRow];
+    }
+
+    MTLSamplerDescriptor* sampDesc = [[MTLSamplerDescriptor alloc] init];
+    sampDesc.minFilter = MTLSamplerMinMagFilterLinear;
+    sampDesc.magFilter = MTLSamplerMinMagFilterLinear;
+    sampDesc.mipFilter = (mip_count > 1) ? MTLSamplerMipFilterLinear : MTLSamplerMipFilterNotMipmapped;
+    sampDesc.sAddressMode = MTLSamplerAddressModeRepeat;
+    sampDesc.tAddressMode = MTLSamplerAddressModeRepeat;
+    sampDesc.maxAnisotropy = 16;
+    id<MTLSamplerState> sampler = [impl->device newSamplerStateWithDescriptor:sampDesc];
+
+    MetalTexture metalTex;
+    metalTex.texture = texture;
+    metalTex.sampler = sampler;
+    metalTex.width = width;
+    metalTex.height = height;
+    metalTex.mipLevels = mip_count;
+
+    TextureHandle handle = impl->nextTextureHandle++;
+    impl->textures[handle] = metalTex;
+    LOG_ENGINE_TRACE("[Metal] loadCompressedTexture: handle {} ({}x{}, {} mips, format {})", handle, width, height, mip_count, format);
+    return handle;
+}
+
 void MetalRenderAPI::bindTexture(TextureHandle texture)
 {
     impl->boundTexture = texture;

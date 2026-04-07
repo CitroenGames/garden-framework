@@ -211,7 +211,7 @@ PackageResult ProjectPackager::packageProject(
         result.files_copied += copyDirectoryRecursive(ui_src, output_root / "assets" / "ui", &result.warnings);
     }
 
-    // --- Copy project assets ---
+    // --- Copy/compile project assets ---
     for (const auto& asset_dir : desc.asset_directories)
     {
         fs::path src = project_root / asset_dir;
@@ -223,10 +223,35 @@ PackageResult ProjectPackager::packageProject(
             continue;
         }
 
-        // Project asset_directories are typically "assets/", so copy contents into output/assets/
         fs::path dst = output_root / asset_dir;
-        LOG_ENGINE_INFO("[Packager] Copying project assets from '{}'...", asset_dir);
-        result.files_copied += copyDirectoryRecursive(src, dst, &result.warnings);
+
+        if (config.compile_assets)
+        {
+            LOG_ENGINE_INFO("[Packager] Compiling project assets from '{}'...", asset_dir);
+            Assets::CompileProgress compile_result = Assets::AssetCompiler::compileAll(
+                src.string(), dst.string(), config.compile_config);
+
+            result.models_compiled  += compile_result.models_compiled;
+            result.textures_compiled += compile_result.textures_compiled;
+            result.assets_skipped   += compile_result.skipped_assets;
+            result.files_copied     += compile_result.completed_assets;
+
+            for (const auto& err : compile_result.errors)
+                result.warnings.push_back(err);
+            for (const auto& warn : compile_result.warnings)
+                result.warnings.push_back(warn);
+
+            if (compile_result.failed_assets > 0)
+                LOG_ENGINE_WARN("[Packager] {} asset(s) failed to compile", compile_result.failed_assets);
+            else
+                LOG_ENGINE_INFO("[Packager] Asset compilation complete: {} models, {} textures, {} skipped",
+                                compile_result.models_compiled, compile_result.textures_compiled, compile_result.skipped_assets);
+        }
+        else
+        {
+            LOG_ENGINE_INFO("[Packager] Copying project assets from '{}'...", asset_dir);
+            result.files_copied += copyDirectoryRecursive(src, dst, &result.warnings);
+        }
     }
 
     // --- Validate referenced assets ---

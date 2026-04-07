@@ -258,7 +258,7 @@ bool VulkanRenderAPI::createShadowResources()
     VkPushConstantRange shadowPushRange{};
     shadowPushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
     shadowPushRange.offset = 0;
-    shadowPushRange.size = sizeof(glm::mat4); // 64 bytes for model matrix
+    shadowPushRange.size = 2 * sizeof(glm::mat4); // 128 bytes: lightSpaceMatrix + model
 
     VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
     pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -574,10 +574,9 @@ void VulkanRenderAPI::beginCascade(int cascadeIndex)
         main_pass_started = false;
     }
 
-    // Update shadow UBO with current cascade's light space matrix
-    ShadowUBO shadowUbo{};
-    shadowUbo.lightSpaceMatrix = lightSpaceMatrices[cascadeIndex];
-    memcpy(shadow_uniform_mapped[current_frame], &shadowUbo, sizeof(ShadowUBO));
+    // Push light space matrix for this cascade (offset 0, embedded in command buffer)
+    // Note: UBO approach was broken because all cascades overwrote the same mapped buffer
+    // during command recording, and only the last cascade's matrix survived to GPU execution.
 
     // Begin shadow render pass for this cascade
     VkRenderPassBeginInfo rpInfo{};
@@ -604,6 +603,10 @@ void VulkanRenderAPI::beginCascade(int cascadeIndex)
     // Bind shadow descriptor set
     vkCmdBindDescriptorSets(command_buffers[current_frame], VK_PIPELINE_BIND_POINT_GRAPHICS,
         shadow_pipeline_layout, 0, 1, &shadow_descriptor_sets[current_frame], 0, nullptr);
+
+    // Push light space matrix for this cascade (offset 0, size 64)
+    vkCmdPushConstants(command_buffers[current_frame], shadow_pipeline_layout,
+        VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(glm::mat4), &lightSpaceMatrices[cascadeIndex]);
 
     // Set viewport and scissor for shadow map
     VkViewport viewport{};
