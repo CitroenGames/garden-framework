@@ -17,6 +17,7 @@ static std::string shaderSubdir(RenderAPIType api)
     switch (api)
     {
     case RenderAPIType::D3D11:  return "d3d11";
+    case RenderAPIType::D3D12:  return "d3d12";
     case RenderAPIType::Vulkan: return "vulkan";
     case RenderAPIType::Metal:  return "metal";
     default:                    return "d3d11";
@@ -188,12 +189,24 @@ PackageResult ProjectPackager::packageProject(
     fs::path engine_assets = fs::path(engine_bin) / ".." / "assets";
     engine_assets = fs::weakly_canonical(engine_assets);
 
-    // Shaders for target platform
-    std::string shader_dir = shaderSubdir(config.target_render_api);
-    fs::path shader_src = engine_assets / "shaders" / shader_dir;
-    fs::path shader_dst = output_root / "assets" / "shaders" / shader_dir;
-    LOG_ENGINE_INFO("[Packager] Copying {} shaders...", shader_dir);
-    result.files_copied += copyDirectoryRecursive(shader_src, shader_dst, &result.warnings);
+    // Shaders – copy all platform variants available on this OS
+#ifdef _WIN32
+    const std::vector<std::string> shader_dirs = { "d3d11", "d3d12", "vulkan" };
+#elif __APPLE__
+    const std::vector<std::string> shader_dirs = { "metal" };
+#else
+    const std::vector<std::string> shader_dirs = { "vulkan" };
+#endif
+    for (const auto& sd : shader_dirs)
+    {
+        fs::path shader_src = engine_assets / "shaders" / "compiled" / sd;
+        fs::path shader_dst = output_root / "assets" / "shaders" / "compiled" / sd;
+        if (fs::exists(shader_src))
+        {
+            LOG_ENGINE_INFO("[Packager] Copying {} shaders...", sd);
+            result.files_copied += copyDirectoryRecursive(shader_src, shader_dst, &result.warnings);
+        }
+    }
 
     // Fonts
     fs::path fonts_src = engine_assets / "fonts";
