@@ -55,9 +55,15 @@ public:
     void setAssetRoot(const std::string& root);
     const std::string& getAssetRoot() const { return m_asset_root; }
 
-    // Resolve a relative asset path to an absolute path using the asset root.
-    // If no asset root is set, returns the path as-is (CWD-relative).
-    std::string resolveAssetPath(const std::string& relative_path) const;
+    // Set the asset directory prefix (e.g. "assets/") that appears in stored paths.
+    // resolveAssetPath() automatically strips this prefix before resolving.
+    void setAssetPrefix(const std::string& prefix);
+
+    // Resolve an asset path to an absolute path using the asset root.
+    // Handles paths with or without the asset prefix (e.g. "assets/models/foo.glb"
+    // and "models/foo.glb" both resolve to "<asset_root>/models/foo.glb").
+    // Already-absolute paths are returned as-is.
+    std::string resolveAssetPath(const std::string& path) const;
 
     // Scan level files and collect all referenced asset paths (mesh, texture, collider).
     // Useful for packaging validation.
@@ -117,7 +123,8 @@ private:
     std::atomic<AssetId> m_next_id{1};
     std::atomic<bool> m_initialized{false};
 
-    std::string m_asset_root;  // Base directory for asset resolution
+    std::string m_asset_root;    // Base directory for asset resolution (e.g. "project/assets/")
+    std::string m_asset_prefix;  // Prefix to strip from stored paths (e.g. "assets/")
 };
 
 } // namespace Assets

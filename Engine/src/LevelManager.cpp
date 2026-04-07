@@ -10,6 +10,7 @@
 #include "Assets/LODMeshSerializer.hpp"
 #include "Assets/CompiledMeshSerializer.hpp"
 #include "Assets/CompiledTextureSerializer.hpp"
+#include "Assets/AssetManager.hpp"
 #include <iostream>
 #include <cstring>
 #include <filesystem>
@@ -821,9 +822,12 @@ std::shared_ptr<mesh> LevelManager::loadMesh(const LevelEntity& entity, IRenderA
         return nullptr;
     }
 
+    // Resolve mesh path through AssetManager
+    std::string resolved_path = Assets::AssetManager::get().resolveAssetPath(entity.mesh_path);
+
     // Try compiled mesh (.cmesh) first
     {
-        std::filesystem::path p(entity.mesh_path);
+        std::filesystem::path p(resolved_path);
         std::string cmesh_path = (p.parent_path() / p.stem()).string() + ".cmesh";
         if (std::filesystem::exists(cmesh_path))
         {
@@ -843,9 +847,9 @@ std::shared_ptr<mesh> LevelManager::loadMesh(const LevelEntity& entity, IRenderA
     std::shared_ptr<mesh> m_ptr;
 
     // Check if glTF file (which might have materials)
-    size_t path_len = entity.mesh_path.size();
-    bool is_gltf = (path_len >= 5 && entity.mesh_path.substr(path_len - 5) == ".gltf") ||
-                   (path_len >= 4 && entity.mesh_path.substr(path_len - 4) == ".glb");
+    size_t path_len = resolved_path.size();
+    bool is_gltf = (path_len >= 5 && resolved_path.substr(path_len - 5) == ".gltf") ||
+                   (path_len >= 4 && resolved_path.substr(path_len - 4) == ".glb");
 
     if (is_gltf)
     {
@@ -870,21 +874,21 @@ std::shared_ptr<mesh> LevelManager::loadMesh(const LevelEntity& entity, IRenderA
         material_config.cache_textures = true;
         // Derive texture base path from the mesh file's directory
         {
-            size_t last_sep = entity.mesh_path.find_last_of("/\\");
+            size_t last_sep = resolved_path.find_last_of("/\\");
             material_config.texture_base_path = (last_sep != std::string::npos)
-                ? entity.mesh_path.substr(0, last_sep + 1)
+                ? resolved_path.substr(0, last_sep + 1)
                 : "";
         }
 
         // Load geometry and materials
-        GltfLoadResult map_result = GltfLoader::loadGltfWithMaterials(entity.mesh_path, render_api, gltf_config, material_config);
+        GltfLoadResult map_result = GltfLoader::loadGltfWithMaterials(resolved_path, render_api, gltf_config, material_config);
 
         if (!map_result.success) {
             LOG_ENGINE_FATAL("Failed to load glTF file: %s\n", map_result.error_message.c_str());
             return nullptr;
         }
 
-        LOG_ENGINE_TRACE("Loaded glTF: {}", entity.mesh_path.c_str());
+        LOG_ENGINE_TRACE("Loaded glTF: {}", resolved_path.c_str());
         
         // Create mesh from glTF data
         m_ptr = std::make_shared<mesh>(map_result.vertices, map_result.vertex_count);
@@ -925,13 +929,13 @@ std::shared_ptr<mesh> LevelManager::loadMesh(const LevelEntity& entity, IRenderA
         }
 
         // Fallback texture
-        if (!texture_applied) { 
-             // Logic for fallback? For now just log
-             LOG_ENGINE_WARN("No valid textures found in materials for %s\n", entity.mesh_path.c_str());
-             
+        if (!texture_applied) {
+             LOG_ENGINE_WARN("No valid textures found in materials for %s\n", resolved_path.c_str());
+
              // Try legacy fallback or load manually
              if (!entity.texture_paths.empty() && render_api) {
-                 TextureHandle tex = render_api->loadTexture(entity.texture_paths[0], true, true);
+                 std::string tex_resolved = Assets::AssetManager::get().resolveAssetPath(entity.texture_paths[0]);
+                 TextureHandle tex = render_api->loadTexture(tex_resolved, true, true);
                  m_ptr->set_texture(tex);
              }
         }
@@ -943,14 +947,15 @@ std::shared_ptr<mesh> LevelManager::loadMesh(const LevelEntity& entity, IRenderA
     else
     {
         // Regular mesh loading (OBJ)
-        m_ptr = std::make_shared<mesh>(entity.mesh_path);
-        
+        m_ptr = std::make_shared<mesh>(resolved_path);
+
         // Load textures
         if (!entity.texture_paths.empty() && render_api)
         {
             for (const auto& tex_path : entity.texture_paths)
             {
-                TextureHandle tex = render_api->loadTexture(tex_path, true, true);
+                std::string tex_resolved = Assets::AssetManager::get().resolveAssetPath(tex_path);
+                TextureHandle tex = render_api->loadTexture(tex_resolved, true, true);
                 m_ptr->set_texture(tex);
                 break; // Use first texture
             }
@@ -966,13 +971,13 @@ std::shared_ptr<mesh> LevelManager::loadMesh(const LevelEntity& entity, IRenderA
         m_ptr->force_lod = entity.force_lod;
 
         // Load LOD data from .meta file if available
-        if (render_api && !entity.mesh_path.empty())
+        if (render_api && !resolved_path.empty())
         {
-            std::string meta_path = Assets::AssetMetadataSerializer::getMetaPath(entity.mesh_path);
+            std::string meta_path = Assets::AssetMetadataSerializer::getMetaPath(resolved_path);
             Assets::AssetMetadata metadata;
             if (Assets::AssetMetadataSerializer::load(metadata, meta_path) && metadata.lod_enabled)
             {
-                std::string mesh_dir = std::filesystem::path(entity.mesh_path).parent_path().string();
+                std::string mesh_dir = std::filesystem::path(resolved_path).parent_path().string();
                 if (!mesh_dir.empty() && mesh_dir.back() != '/' && mesh_dir.back() != '\\')
                     mesh_dir += "/";
 
@@ -1021,7 +1026,7 @@ std::shared_ptr<mesh> LevelManager::loadMesh(const LevelEntity& entity, IRenderA
                 if (!m_ptr->lod_levels.empty())
                 {
                     m_ptr->computeBounds();
-                    LOG_ENGINE_TRACE("Loaded {} LOD levels for {}", m_ptr->lod_levels.size(), entity.mesh_path);
+                    LOG_ENGINE_TRACE("Loaded {} LOD levels for {}", m_ptr->lod_levels.size(), resolved_path);
                 }
             }
         }

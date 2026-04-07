@@ -15,10 +15,14 @@
 #include <stb_image.h>
 #include <stb_image_resize2.h>
 
+#include "Threading/JobSystem.hpp"
+
 #include <filesystem>
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
+#include <mutex>
 
 namespace fs = std::filesystem;
 
@@ -28,19 +32,14 @@ namespace Assets {
 // Helpers
 // ================================================================
 
-static bool s_bc7enc_initialised = false;
-static bool s_rgbcx_initialised  = false;
+static std::once_flag s_encoder_init_flag;
 
 static void ensureEncodersInitialised()
 {
-    if (!s_bc7enc_initialised) {
+    std::call_once(s_encoder_init_flag, []() {
         bc7enc_compress_block_init();
-        s_bc7enc_initialised = true;
-    }
-    if (!s_rgbcx_initialised) {
         rgbcx::init();
-        s_rgbcx_initialised = true;
-    }
+    });
 }
 
 static std::string toLower(const std::string& s) {
@@ -243,7 +242,7 @@ bool AssetCompiler::compileTexture(
 
     // Load source image as RGBA
     int w, h, channels;
-    stbi_set_flip_vertically_on_load(false);
+    stbi_set_flip_vertically_on_load_thread(false);
     uint8_t* raw = stbi_load(source_path.c_str(), &w, &h, &channels, 4);
     if (!raw) {
         LOG_ENGINE_ERROR("[AssetCompiler] Failed to load texture: {}", source_path);
@@ -644,6 +643,69 @@ bool AssetCompiler::compileModel(
 // compileAll
 // ================================================================
 
+// ----------------------------------------------------------------
+// Thread-safe progress tracking for parallel compileAll
+// ----------------------------------------------------------------
+
+struct SharedCompileProgress {
+    std::atomic<int> total_assets{0};
+    std::atomic<int> completed_assets{0};
+    std::atomic<int> skipped_assets{0};
+    std::atomic<int> failed_assets{0};
+    std::atomic<int> models_compiled{0};
+    std::atomic<int> textures_compiled{0};
+
+    std::mutex string_mutex;
+    std::string current_asset;
+    std::vector<std::string> errors;
+    std::vector<std::string> warnings;
+
+    CompileProgressCallback callback;
+
+    void notifyProgress(const std::string& asset_name) {
+        {
+            std::lock_guard<std::mutex> lock(string_mutex);
+            current_asset = asset_name;
+        }
+        if (callback)
+            callback(takeSnapshot());
+    }
+
+    CompileProgress takeSnapshot() {
+        CompileProgress p;
+        p.total_assets     = total_assets.load(std::memory_order_relaxed);
+        p.completed_assets = completed_assets.load(std::memory_order_relaxed);
+        p.skipped_assets   = skipped_assets.load(std::memory_order_relaxed);
+        p.failed_assets    = failed_assets.load(std::memory_order_relaxed);
+        p.models_compiled  = models_compiled.load(std::memory_order_relaxed);
+        p.textures_compiled = textures_compiled.load(std::memory_order_relaxed);
+        std::lock_guard<std::mutex> lock(string_mutex);
+        p.current_asset = current_asset;
+        p.errors   = errors;
+        p.warnings = warnings;
+        return p;
+    }
+
+    void addError(const std::string& msg) {
+        std::lock_guard<std::mutex> lock(string_mutex);
+        errors.push_back(msg);
+    }
+
+    void addWarning(const std::string& msg) {
+        std::lock_guard<std::mutex> lock(string_mutex);
+        warnings.push_back(msg);
+    }
+};
+
+struct AssetWorkItem {
+    std::string source_path;
+    std::string output_path;
+    std::string relative_path;
+    fs::path    source_fs_path; // original path for copy-as-is
+    enum Type { Model, Texture, Copy } type;
+    bool is_normal_map = false;
+};
+
 CompileProgress AssetCompiler::compileAll(
     const std::string& source_root,
     const std::string& output_root,
@@ -654,108 +716,175 @@ CompileProgress AssetCompiler::compileAll(
 
     if (!fs::exists(source_root) || !fs::is_directory(source_root)) {
         progress.errors.push_back("Source directory not found: " + source_root);
+        LOG_ENGINE_ERROR("[AssetCompiler] Source directory not found: {}", source_root);
         return progress;
     }
 
-    // First pass: count assets
-    for (const auto& entry : fs::recursive_directory_iterator(
-             source_root, fs::directory_options::skip_permission_denied))
-    {
-        if (!entry.is_regular_file()) continue;
-        std::string ext = toLower(entry.path().extension().string());
-        if (isIntermediateFile(ext)) continue;
-        progress.total_assets++;
-    }
+    LOG_ENGINE_INFO("[AssetCompiler] compileAll: source='{}' output='{}'", source_root, output_root);
 
-    // Second pass: compile/copy
+    // --- Collect work items ---
+    std::vector<AssetWorkItem> work_items;
+
     std::error_code ec;
     for (const auto& entry : fs::recursive_directory_iterator(
              source_root, fs::directory_options::skip_permission_denied, ec))
     {
-        if (ec) break;
+        if (ec) {
+            LOG_ENGINE_ERROR("[AssetCompiler] Directory iteration error: {}", ec.message());
+            break;
+        }
         if (!entry.is_regular_file()) continue;
 
+        std::string ext = toLower(entry.path().extension().string());
+        if (isIntermediateFile(ext)) continue;
+
         fs::path relative = fs::relative(entry.path(), source_root, ec);
-        if (ec) continue;
+        if (ec) { ec.clear(); continue; }
 
         std::string src_path = entry.path().string();
         std::replace(src_path.begin(), src_path.end(), '\\', '/');
 
-        std::string ext = toLower(entry.path().extension().string());
-
-        // Skip intermediate files
-        if (isIntermediateFile(ext))
-            continue;
-
-        // Determine output path
-        fs::path out_path;
+        AssetWorkItem item;
+        item.source_path   = src_path;
+        item.relative_path = relative.string();
+        item.source_fs_path = entry.path();
 
         if (config.compile_models && isMeshFile(ext)) {
-            out_path = fs::path(output_root) / relative;
-            out_path.replace_extension(".cmesh");
-            std::string out_str = out_path.string();
-            std::replace(out_str.begin(), out_str.end(), '\\', '/');
-
-            progress.current_asset = relative.string();
-            if (progress_cb) progress_cb(progress);
-
-            // Incremental check
-            if (config.incremental && isUpToDate(src_path, out_str)) {
-                progress.skipped_assets++;
-                progress.completed_assets++;
-                if (progress_cb) progress_cb(progress);
-                continue;
-            }
-
-            if (compileModel(src_path, out_str, config)) {
-                progress.models_compiled++;
-                progress.completed_assets++;
-            } else {
-                progress.failed_assets++;
-                progress.errors.push_back("Failed to compile model: " + relative.string());
-            }
+            fs::path out = fs::path(output_root) / relative;
+            out.replace_extension(".cmesh");
+            item.output_path = out.string();
+            std::replace(item.output_path.begin(), item.output_path.end(), '\\', '/');
+            item.type = AssetWorkItem::Model;
+            LOG_ENGINE_TRACE("[AssetCompiler] Queued model: {} -> {}", item.relative_path, item.output_path);
         }
         else if (config.compile_textures && isTextureFile(ext)) {
-            out_path = fs::path(output_root) / relative;
-            out_path.replace_extension(".ctex");
-            std::string out_str = out_path.string();
-            std::replace(out_str.begin(), out_str.end(), '\\', '/');
-
-            progress.current_asset = relative.string();
-            if (progress_cb) progress_cb(progress);
-
-            if (config.incremental && isUpToDate(src_path, out_str)) {
-                progress.skipped_assets++;
-                progress.completed_assets++;
-                if (progress_cb) progress_cb(progress);
-                continue;
-            }
-
-            bool is_nrm = looksLikeNormalMap(src_path);
-            if (compileTexture(src_path, out_str, config, is_nrm)) {
-                progress.textures_compiled++;
-                progress.completed_assets++;
-            } else {
-                progress.failed_assets++;
-                progress.errors.push_back("Failed to compile texture: " + relative.string());
-            }
+            fs::path out = fs::path(output_root) / relative;
+            out.replace_extension(".ctex");
+            item.output_path = out.string();
+            std::replace(item.output_path.begin(), item.output_path.end(), '\\', '/');
+            item.type = AssetWorkItem::Texture;
+            item.is_normal_map = looksLikeNormalMap(src_path);
+            LOG_ENGINE_TRACE("[AssetCompiler] Queued texture: {} -> {}", item.relative_path, item.output_path);
         }
         else {
-            // Copy as-is
-            out_path = fs::path(output_root) / relative;
-            fs::create_directories(out_path.parent_path(), ec);
-            fs::copy_file(entry.path(), out_path, fs::copy_options::overwrite_existing, ec);
-            if (ec) {
-                progress.warnings.push_back("Failed to copy: " + relative.string() + " - " + ec.message());
-                ec.clear();
-            }
-            progress.completed_assets++;
+            fs::path out = fs::path(output_root) / relative;
+            item.output_path = out.string();
+            item.type = AssetWorkItem::Copy;
+            LOG_ENGINE_TRACE("[AssetCompiler] Queued copy: {} -> {}", item.relative_path, item.output_path);
         }
 
-        if (progress_cb) progress_cb(progress);
+        work_items.push_back(std::move(item));
     }
 
-    return progress;
+    LOG_ENGINE_INFO("[AssetCompiler] Collected {} work items ({} from '{}')",
+                    work_items.size(), source_root, output_root);
+
+    // --- Set up shared progress ---
+    auto shared = std::make_shared<SharedCompileProgress>();
+    shared->total_assets.store(static_cast<int>(work_items.size()), std::memory_order_relaxed);
+    shared->callback = progress_cb;
+
+    // --- Dispatch jobs in parallel ---
+    std::vector<Threading::JobHandle> handles;
+    handles.reserve(work_items.size());
+
+    // Copy config by value so jobs don't hold a dangling reference
+    // (compileAll receives config as const&, which may alias a temporary)
+    CompileConfig cfg = config;
+
+    for (size_t i = 0; i < work_items.size(); ++i) {
+        // Capture work item by value — the job runs asynchronously on a worker thread
+        AssetWorkItem item = work_items[i];
+
+        auto handle = Threading::JobSystem::get().createJob()
+            .setName("Compile: " + item.relative_path)
+            .setPriority(Threading::JobPriority::Normal)
+            .setContext(Threading::JobContext::Worker)
+            .setWork([item, cfg, shared]() {
+                shared->notifyProgress(item.relative_path);
+
+                if (item.type == AssetWorkItem::Model) {
+                    if (cfg.incremental && isUpToDate(item.source_path, item.output_path)) {
+                        LOG_ENGINE_TRACE("[AssetCompiler] Skipped (up-to-date): {}", item.relative_path);
+                        shared->skipped_assets.fetch_add(1, std::memory_order_relaxed);
+                        shared->completed_assets.fetch_add(1, std::memory_order_relaxed);
+                        if (shared->callback) shared->callback(shared->takeSnapshot());
+                        return;
+                    }
+
+                    std::error_code local_ec;
+                    fs::create_directories(fs::path(item.output_path).parent_path(), local_ec);
+
+                    if (compileModel(item.source_path, item.output_path, cfg)) {
+                        LOG_ENGINE_INFO("[AssetCompiler] Compiled model: {}", item.relative_path);
+                        shared->models_compiled.fetch_add(1, std::memory_order_relaxed);
+                        shared->completed_assets.fetch_add(1, std::memory_order_relaxed);
+                    } else {
+                        LOG_ENGINE_ERROR("[AssetCompiler] FAILED model: {}", item.relative_path);
+                        shared->failed_assets.fetch_add(1, std::memory_order_relaxed);
+                        shared->addError("Failed to compile model: " + item.relative_path);
+                    }
+                }
+                else if (item.type == AssetWorkItem::Texture) {
+                    if (cfg.incremental && isUpToDate(item.source_path, item.output_path)) {
+                        LOG_ENGINE_TRACE("[AssetCompiler] Skipped (up-to-date): {}", item.relative_path);
+                        shared->skipped_assets.fetch_add(1, std::memory_order_relaxed);
+                        shared->completed_assets.fetch_add(1, std::memory_order_relaxed);
+                        if (shared->callback) shared->callback(shared->takeSnapshot());
+                        return;
+                    }
+
+                    std::error_code local_ec;
+                    fs::create_directories(fs::path(item.output_path).parent_path(), local_ec);
+
+                    if (compileTexture(item.source_path, item.output_path, cfg, item.is_normal_map)) {
+                        LOG_ENGINE_INFO("[AssetCompiler] Compiled texture: {}", item.relative_path);
+                        shared->textures_compiled.fetch_add(1, std::memory_order_relaxed);
+                        shared->completed_assets.fetch_add(1, std::memory_order_relaxed);
+                    } else {
+                        LOG_ENGINE_ERROR("[AssetCompiler] FAILED texture: {}", item.relative_path);
+                        shared->failed_assets.fetch_add(1, std::memory_order_relaxed);
+                        shared->addError("Failed to compile texture: " + item.relative_path);
+                    }
+                }
+                else {
+                    // Copy as-is
+                    std::error_code local_ec;
+                    fs::create_directories(fs::path(item.output_path).parent_path(), local_ec);
+                    if (local_ec) {
+                        LOG_ENGINE_ERROR("[AssetCompiler] Failed to create dir for copy: {} - {}",
+                                         item.output_path, local_ec.message());
+                    }
+                    fs::copy_file(item.source_fs_path, item.output_path,
+                                  fs::copy_options::overwrite_existing, local_ec);
+                    if (local_ec) {
+                        LOG_ENGINE_ERROR("[AssetCompiler] Failed to copy: {} -> {} - {}",
+                                         item.source_path, item.output_path, local_ec.message());
+                        shared->addWarning("Failed to copy: " + item.relative_path + " - " + local_ec.message());
+                    } else {
+                        LOG_ENGINE_INFO("[AssetCompiler] Copied: {} -> {}", item.relative_path, item.output_path);
+                    }
+                    shared->completed_assets.fetch_add(1, std::memory_order_relaxed);
+                }
+
+                if (shared->callback) shared->callback(shared->takeSnapshot());
+            })
+            .submit();
+
+        handles.push_back(handle);
+    }
+
+    LOG_ENGINE_INFO("[AssetCompiler] Dispatched {} jobs, waiting for completion...", handles.size());
+
+    // --- Wait for all jobs to complete ---
+    Threading::JobSystem::get().waitForJobs(handles);
+
+    // --- Return aggregated result ---
+    CompileProgress result = shared->takeSnapshot();
+    LOG_ENGINE_INFO("[AssetCompiler] Done: {} completed, {} models, {} textures, {} skipped, {} failed",
+                    result.completed_assets, result.models_compiled, result.textures_compiled,
+                    result.skipped_assets, result.failed_assets);
+    return result;
 }
 
 } // namespace Assets

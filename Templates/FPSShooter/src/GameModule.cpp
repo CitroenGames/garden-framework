@@ -16,7 +16,7 @@
 #include "PlayerRepSystem.hpp"
 
 #include "Utils/Log.hpp"
-#include "Utils/EnginePaths.hpp"
+#include "Assets/AssetManager.hpp"
 #include "UI/RmlUiManager.h"
 #include "Console/ConVar.hpp"
 #include "Events/EventBus.hpp"
@@ -78,7 +78,7 @@ GAME_API bool gardenGameInit(EngineServices* services)
     if (RmlUiManager::get().isInitialized())
     {
         if (!g_hud.initialize(RmlUiManager::get().getContext(),
-                EnginePaths::resolveEngineAsset("assets/ui/hud.rml")))
+                Assets::AssetManager::get().resolveAssetPath("ui/hud.rml")))
         {
             LOG_ENGINE_WARN("Failed to load HUD document");
         }
