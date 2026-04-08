@@ -193,6 +193,7 @@ namespace NetworkSerializer
         if (msg.type != MessageType::WORLD_STATE_UPDATE) return false;
         msg.server_tick = reader.readUInt32();
         uint16_t num_entities = reader.readUInt16();
+        if (num_entities > MAX_NETWORKED_ENTITIES) return false;
         msg.last_processed_input_tick = reader.readUInt32();
 
         entities.clear();
@@ -287,6 +288,7 @@ namespace NetworkSerializer
         msg.type = static_cast<MessageType>(reader.readByte());
         if (msg.type != MessageType::CVAR_INITIAL_SYNC) return false;
         msg.cvar_count = reader.readUInt16();
+        if (msg.cvar_count > MAX_SYNCED_CVARS) return false;
 
         cvars.clear();
         cvars.reserve(msg.cvar_count);

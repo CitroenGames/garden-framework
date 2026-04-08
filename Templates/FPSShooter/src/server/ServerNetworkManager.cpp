@@ -107,12 +107,14 @@ void ServerNetworkManager::update(float delta_time)
                 handleClientConnect(event);
                 break;
 
-            case ENET_EVENT_TYPE_RECEIVE:
+            case ENET_EVENT_TYPE_RECEIVE: {
+                size_t packet_size = event.packet->dataLength;
                 handleClientMessage(event);
                 enet_packet_destroy(event.packet);
                 stats.packets_received++;
-                stats.bytes_received += event.packet->dataLength;
+                stats.bytes_received += packet_size;
                 break;
+            }
 
             case ENET_EVENT_TYPE_DISCONNECT:
             case ENET_EVENT_TYPE_DISCONNECT_TIMEOUT:
@@ -202,7 +204,11 @@ void ServerNetworkManager::handleClientMessage(ENetEvent& event)
 void ServerNetworkManager::handleConnectRequest(ENetPeer* peer, BitReader& reader)
 {
     ConnectRequestMessage msg;
-    NetworkSerializer::deserialize(reader, msg);
+    if (!NetworkSerializer::deserialize(reader, msg)) {
+        LOG_ENGINE_WARN("Failed to deserialize CONNECT_REQUEST from peer");
+        enet_peer_disconnect_later(peer, 0);
+        return;
+    }
 
     // Check protocol version
     if (msg.protocol_version != NETWORK_PROTOCOL_VERSION) {
@@ -416,17 +422,16 @@ std::vector<EntityUpdateData> ServerNetworkManager::generateDeltaUpdate(
         // If no baseline or entity is new, send all data
         const EntitySnapshot* baseline_entity = baseline ? baseline->getEntity(entity_id) : nullptr;
 
-        if (!baseline_entity || !entity_snapshot.exists) {
-            // Send all data
+        if (!entity_snapshot.exists) {
+            // Entity deleted - only send DELETED flag, no component data needed
+            update.flags = ComponentFlags::DELETED;
+        } else if (!baseline_entity) {
+            // New entity - send all data
             update.flags |= ComponentFlags::TRANSFORM | ComponentFlags::VELOCITY | ComponentFlags::GROUNDED;
             update.position = entity_snapshot.components.position;
             update.velocity = entity_snapshot.components.velocity;
             update.grounded = entity_snapshot.components.grounded ? 1 : 0;
             update.ground_normal = entity_snapshot.components.ground_normal;
-
-            if (!entity_snapshot.exists) {
-                update.flags |= ComponentFlags::DELETED;
-            }
         } else {
             // Delta compress - only send changed components
             const float epsilon = 0.01f;
@@ -575,7 +580,8 @@ void ServerNetworkManager::disconnectClient(uint16_t client_id, const char* reas
         // Send disconnect message
         BitWriter writer;
         DisconnectMessage msg;
-        std::strncpy(msg.reason, reason, 64);
+        std::strncpy(msg.reason, reason, 63);
+        msg.reason[63] = '\0';
         NetworkSerializer::serialize(writer, msg);
         sendReliableMessage(peer, writer);
 

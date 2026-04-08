@@ -7,6 +7,8 @@
 
 // Protocol version for compatibility checking
 constexpr uint32_t NETWORK_PROTOCOL_VERSION = 1;
+constexpr uint16_t MAX_NETWORKED_ENTITIES = 2048;
+constexpr uint16_t MAX_SYNCED_CVARS = 1024;
 
 // Message type enumeration
 enum class MessageType : uint8_t

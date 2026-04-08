@@ -234,8 +234,9 @@ public:
 
     // Read a null-terminated string
     void readString(char* output, size_t max_length) {
+        if (max_length == 0) return;
         size_t i = 0;
-        while (i < max_length - 1) {
+        while (i < max_length - 1 && !hasError()) {
             uint8_t ch = readByte();
             if (ch == 0) break;
             output[i++] = ch;
