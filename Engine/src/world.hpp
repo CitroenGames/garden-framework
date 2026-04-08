@@ -64,6 +64,19 @@ public:
         return physics_system->raycast(origin, direction, max_distance, registry, hit_point, hit_normal);
     }
 
+    // Shape casting convenience wrappers
+    PhysicsSystem::ShapeCastResult sphereCast(const glm::vec3& origin, float radius,
+        const glm::vec3& direction, float maxDistance)
+    {
+        return physics_system->sphereCast(origin, radius, direction, maxDistance);
+    }
+
+    PhysicsSystem::ShapeCastResult boxCast(const glm::vec3& origin, const glm::vec3& halfExtents,
+        const glm::vec3& rotation, const glm::vec3& direction, float maxDistance)
+    {
+        return physics_system->boxCast(origin, halfExtents, rotation, direction, maxDistance);
+    }
+
     // Configuration methods
     void setGravity(const glm::vec3& gravity)
     {

@@ -67,7 +67,10 @@
         "apply_gravity": true
       },
       "collider": {
-        "mesh_path": "assets/models/grasscube.obj"
+        "shape_type": "Box",
+        "box_half_extents": { "x": 0.5, "y": 0.5, "z": 0.5 },
+        "friction": 0.5,
+        "restitution": 0.3
       }
     },
     {
@@ -90,11 +93,14 @@
         "apply_gravity": true
       },
       "collider": {
-        "mesh_path": "assets/models/grasscube.obj"
+        "shape_type": "Box",
+        "box_half_extents": { "x": 0.5, "y": 0.5, "z": 0.5 },
+        "friction": 0.5,
+        "restitution": 0.3
       }
     },
     {
-      "name": "cube_3",
+      "name": "sphere_1",
       "type": "Physical",
       "transform": {
         "position": { "x": 0.0, "y": 1.5, "z": -4.0 },
@@ -113,7 +119,10 @@
         "apply_gravity": true
       },
       "collider": {
-        "mesh_path": "assets/models/grasscube.obj"
+        "shape_type": "Sphere",
+        "sphere_radius": 0.5,
+        "friction": 0.3,
+        "restitution": 0.8
       }
     },
     {
@@ -136,7 +145,10 @@
         "apply_gravity": true
       },
       "collider": {
-        "mesh_path": "assets/models/grasscube.obj"
+        "shape_type": "Box",
+        "box_half_extents": { "x": 0.5, "y": 0.5, "z": 0.5 },
+        "friction": 0.5,
+        "restitution": 0.1
       }
     },
     {
@@ -159,7 +171,153 @@
         "apply_gravity": true
       },
       "collider": {
-        "mesh_path": "assets/models/grasscube.obj"
+        "shape_type": "Box",
+        "box_half_extents": { "x": 0.5, "y": 0.5, "z": 0.5 },
+        "friction": 0.5,
+        "restitution": 0.1
+      }
+    },
+    {
+      "name": "capsule_1",
+      "type": "Physical",
+      "transform": {
+        "position": { "x": -5.0, "y": 2.0, "z": -2.0 },
+        "rotation": { "x": 0.0, "y": 0.0, "z": 0.0 },
+        "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }
+      },
+      "mesh": {
+        "path": "assets/models/grasscube.obj",
+        "textures": [],
+        "culling": true,
+        "transparent": false,
+        "visible": true
+      },
+      "rigidbody": {
+        "mass": 3.0,
+        "apply_gravity": true
+      },
+      "collider": {
+        "shape_type": "Capsule",
+        "capsule_half_height": 0.5,
+        "capsule_radius": 0.3,
+        "friction": 0.4,
+        "restitution": 0.2
+      }
+    },
+    {
+      "name": "cylinder_1",
+      "type": "Physical",
+      "transform": {
+        "position": { "x": -5.0, "y": 2.0, "z": 3.0 },
+        "rotation": { "x": 0.0, "y": 0.0, "z": 0.0 },
+        "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }
+      },
+      "mesh": {
+        "path": "assets/models/grasscube.obj",
+        "textures": [],
+        "culling": true,
+        "transparent": false,
+        "visible": true
+      },
+      "rigidbody": {
+        "mass": 4.0,
+        "apply_gravity": true
+      },
+      "collider": {
+        "shape_type": "Cylinder",
+        "cylinder_half_height": 0.5,
+        "cylinder_radius": 0.4,
+        "friction": 0.5,
+        "restitution": 0.1
+      }
+    },
+    {
+      "name": "hinge_base",
+      "type": "Physical",
+      "transform": {
+        "position": { "x": -8.0, "y": 1.0, "z": 0.0 },
+        "rotation": { "x": 0.0, "y": 0.0, "z": 0.0 },
+        "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }
+      },
+      "mesh": {
+        "path": "assets/models/grasscube.obj",
+        "textures": [],
+        "culling": true,
+        "transparent": false,
+        "visible": true
+      },
+      "rigidbody": {
+        "mass": 0.0,
+        "apply_gravity": false,
+        "motion_type": "Kinematic"
+      },
+      "collider": {
+        "shape_type": "Box",
+        "box_half_extents": { "x": 0.1, "y": 1.0, "z": 0.1 },
+        "friction": 0.5,
+        "restitution": 0.0
+      }
+    },
+    {
+      "name": "hinge_door",
+      "type": "Physical",
+      "transform": {
+        "position": { "x": -7.0, "y": 1.0, "z": 0.0 },
+        "rotation": { "x": 0.0, "y": 0.0, "z": 0.0 },
+        "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }
+      },
+      "mesh": {
+        "path": "assets/models/grasscube.obj",
+        "textures": [],
+        "culling": true,
+        "transparent": false,
+        "visible": true
+      },
+      "rigidbody": {
+        "mass": 10.0,
+        "apply_gravity": false
+      },
+      "collider": {
+        "shape_type": "Box",
+        "box_half_extents": { "x": 1.0, "y": 1.0, "z": 0.05 },
+        "friction": 0.5,
+        "restitution": 0.0
+      },
+      "constraint": {
+        "type": "Hinge",
+        "target": "hinge_base",
+        "anchor_1": { "x": -1.0, "y": 0.0, "z": 0.0 },
+        "anchor_2": { "x": 0.0, "y": 0.0, "z": 0.0 },
+        "hinge_axis": { "x": 0.0, "y": 1.0, "z": 0.0 },
+        "min_limit": -90.0,
+        "max_limit": 90.0
+      }
+    },
+    {
+      "name": "kinematic_platform",
+      "type": "Physical",
+      "transform": {
+        "position": { "x": 8.0, "y": 0.5, "z": 0.0 },
+        "rotation": { "x": 0.0, "y": 0.0, "z": 0.0 },
+        "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }
+      },
+      "mesh": {
+        "path": "assets/models/grasscube.obj",
+        "textures": [],
+        "culling": true,
+        "transparent": false,
+        "visible": true
+      },
+      "rigidbody": {
+        "mass": 0.0,
+        "apply_gravity": false,
+        "motion_type": "Kinematic"
+      },
+      "collider": {
+        "shape_type": "Box",
+        "box_half_extents": { "x": 2.0, "y": 0.1, "z": 2.0 },
+        "friction": 0.8,
+        "restitution": 0.0
       }
     },
     {

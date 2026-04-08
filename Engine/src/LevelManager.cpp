@@ -18,7 +18,10 @@
 using json = nlohmann::json;
 
 static constexpr uint32_t LEVEL_BINARY_MAGIC   = 0x47444E4C; // "GDNL"
-static constexpr uint32_t LEVEL_BINARY_VERSION  = 3;
+static constexpr uint32_t LEVEL_BINARY_VERSION  = 4;
+static constexpr uint32_t LEVEL_BINARY_VERSION_V3 = 3; // Previous version for backward compat
+
+// stringToColliderShapeType and colliderShapeTypeToString are inline in Components.hpp
 
 // Helper to get texture type name for logging (moved from main.cpp)
 static std::string getTextureTypeName(TextureType type) {
@@ -291,6 +294,7 @@ bool LevelManager::parseEntityFromJSON(const void* json_ptr, LevelEntity& entity
         const auto& rb = j["rigidbody"];
         entity.mass = rb.value("mass", 1.0f);
         entity.apply_gravity = rb.value("apply_gravity", true);
+        entity.body_motion_type = rb.value("motion_type", "Dynamic");
     }
 
     // Parse collider
@@ -302,6 +306,47 @@ bool LevelManager::parseEntityFromJSON(const void* json_ptr, LevelEntity& entity
         {
             entity.collider_mesh_path = col["mesh_path"].get<std::string>();
         }
+
+        // Shape type (defaults to "Mesh" for backward compat)
+        entity.collider_shape_type = col.value("shape_type", "Mesh");
+
+        if (col.contains("box_half_extents")) {
+            const auto& b = col["box_half_extents"];
+            entity.collider_box_half_extents = glm::vec3(b.value("x", 0.5f), b.value("y", 0.5f), b.value("z", 0.5f));
+        }
+        entity.collider_sphere_radius = col.value("sphere_radius", 0.5f);
+        entity.collider_capsule_half_height = col.value("capsule_half_height", 0.5f);
+        entity.collider_capsule_radius = col.value("capsule_radius", 0.3f);
+        entity.collider_cylinder_half_height = col.value("cylinder_half_height", 0.5f);
+        entity.collider_cylinder_radius = col.value("cylinder_radius", 0.5f);
+        entity.collider_friction = col.value("friction", 0.2f);
+        entity.collider_restitution = col.value("restitution", 0.0f);
+    }
+
+    // Parse constraint
+    if (j.contains("constraint"))
+    {
+        entity.has_constraint = true;
+        const auto& con = j["constraint"];
+        entity.constraint_type = con.value("type", "Fixed");
+        if (con.contains("target"))
+            entity.constraint_target_name = con["target"].get<std::string>();
+        if (con.contains("anchor_1")) {
+            const auto& a = con["anchor_1"];
+            entity.constraint_anchor_1 = glm::vec3(a.value("x", 0.0f), a.value("y", 0.0f), a.value("z", 0.0f));
+        }
+        if (con.contains("anchor_2")) {
+            const auto& a = con["anchor_2"];
+            entity.constraint_anchor_2 = glm::vec3(a.value("x", 0.0f), a.value("y", 0.0f), a.value("z", 0.0f));
+        }
+        if (con.contains("hinge_axis")) {
+            const auto& a = con["hinge_axis"];
+            entity.constraint_hinge_axis = glm::vec3(a.value("x", 0.0f), a.value("y", 1.0f), a.value("z", 0.0f));
+        }
+        entity.constraint_hinge_min = con.value("min_limit", -180.0f);
+        entity.constraint_hinge_max = con.value("max_limit", 180.0f);
+        entity.constraint_min_distance = con.value("min_distance", -1.0f);
+        entity.constraint_max_distance = con.value("max_distance", -1.0f);
     }
 
     // Parse player properties
@@ -447,11 +492,53 @@ bool LevelManager::saveLevelToJSON(const std::string& json_path, const LevelData
         {
             e["rigidbody"]["mass"]         = le.mass;
             e["rigidbody"]["apply_gravity"]= le.apply_gravity;
+            e["rigidbody"]["motion_type"]  = le.body_motion_type;
         }
 
-        if (le.has_collider && !le.collider_mesh_path.empty())
+        if (le.has_collider)
         {
-            e["collider"]["mesh_path"] = le.collider_mesh_path;
+            if (!le.collider_mesh_path.empty())
+                e["collider"]["mesh_path"] = le.collider_mesh_path;
+
+            e["collider"]["shape_type"] = le.collider_shape_type;
+
+            if (le.collider_shape_type == "Box") {
+                e["collider"]["box_half_extents"] = {
+                    {"x", le.collider_box_half_extents.x},
+                    {"y", le.collider_box_half_extents.y},
+                    {"z", le.collider_box_half_extents.z}
+                };
+            }
+            if (le.collider_shape_type == "Sphere")
+                e["collider"]["sphere_radius"] = le.collider_sphere_radius;
+            if (le.collider_shape_type == "Capsule") {
+                e["collider"]["capsule_half_height"] = le.collider_capsule_half_height;
+                e["collider"]["capsule_radius"] = le.collider_capsule_radius;
+            }
+            if (le.collider_shape_type == "Cylinder") {
+                e["collider"]["cylinder_half_height"] = le.collider_cylinder_half_height;
+                e["collider"]["cylinder_radius"] = le.collider_cylinder_radius;
+            }
+
+            e["collider"]["friction"] = le.collider_friction;
+            e["collider"]["restitution"] = le.collider_restitution;
+        }
+
+        if (le.has_constraint)
+        {
+            e["constraint"]["type"] = le.constraint_type;
+            e["constraint"]["target"] = le.constraint_target_name;
+            e["constraint"]["anchor_1"] = {{"x", le.constraint_anchor_1.x}, {"y", le.constraint_anchor_1.y}, {"z", le.constraint_anchor_1.z}};
+            e["constraint"]["anchor_2"] = {{"x", le.constraint_anchor_2.x}, {"y", le.constraint_anchor_2.y}, {"z", le.constraint_anchor_2.z}};
+            if (le.constraint_type == "Hinge") {
+                e["constraint"]["hinge_axis"] = {{"x", le.constraint_hinge_axis.x}, {"y", le.constraint_hinge_axis.y}, {"z", le.constraint_hinge_axis.z}};
+                e["constraint"]["min_limit"] = le.constraint_hinge_min;
+                e["constraint"]["max_limit"] = le.constraint_hinge_max;
+            }
+            if (le.constraint_type == "Distance") {
+                e["constraint"]["min_distance"] = le.constraint_min_distance;
+                e["constraint"]["max_distance"] = le.constraint_max_distance;
+            }
         }
 
         if (le.type == EntityType::Player)
@@ -697,6 +784,31 @@ void LevelManager::writeBinaryEntity(std::ofstream& file, const LevelEntity& ent
     file.write(reinterpret_cast<const char*>(&entity.light_quadratic_attenuation), sizeof(float));
     file.write(reinterpret_cast<const char*>(&entity.light_inner_cone_angle), sizeof(float));
     file.write(reinterpret_cast<const char*>(&entity.light_outer_cone_angle), sizeof(float));
+
+    // v4: Motion type, collider shape, and constraint data
+    writeString(file, entity.body_motion_type);
+    writeString(file, entity.collider_shape_type);
+    file.write(reinterpret_cast<const char*>(&entity.collider_box_half_extents), sizeof(glm::vec3));
+    file.write(reinterpret_cast<const char*>(&entity.collider_sphere_radius), sizeof(float));
+    file.write(reinterpret_cast<const char*>(&entity.collider_capsule_half_height), sizeof(float));
+    file.write(reinterpret_cast<const char*>(&entity.collider_capsule_radius), sizeof(float));
+    file.write(reinterpret_cast<const char*>(&entity.collider_cylinder_half_height), sizeof(float));
+    file.write(reinterpret_cast<const char*>(&entity.collider_cylinder_radius), sizeof(float));
+    file.write(reinterpret_cast<const char*>(&entity.collider_friction), sizeof(float));
+    file.write(reinterpret_cast<const char*>(&entity.collider_restitution), sizeof(float));
+
+    // Constraint data
+    uint8_t has_constraint = entity.has_constraint ? 1 : 0;
+    file.write(reinterpret_cast<const char*>(&has_constraint), sizeof(uint8_t));
+    writeString(file, entity.constraint_type);
+    writeString(file, entity.constraint_target_name);
+    file.write(reinterpret_cast<const char*>(&entity.constraint_anchor_1), sizeof(glm::vec3));
+    file.write(reinterpret_cast<const char*>(&entity.constraint_anchor_2), sizeof(glm::vec3));
+    file.write(reinterpret_cast<const char*>(&entity.constraint_hinge_axis), sizeof(glm::vec3));
+    file.write(reinterpret_cast<const char*>(&entity.constraint_hinge_min), sizeof(float));
+    file.write(reinterpret_cast<const char*>(&entity.constraint_hinge_max), sizeof(float));
+    file.write(reinterpret_cast<const char*>(&entity.constraint_min_distance), sizeof(float));
+    file.write(reinterpret_cast<const char*>(&entity.constraint_max_distance), sizeof(float));
 }
 
 bool LevelManager::readBinaryHeader(std::ifstream& file, LevelMetadata& metadata)
@@ -711,11 +823,12 @@ bool LevelManager::readBinaryHeader(std::ifstream& file, LevelMetadata& metadata
 
     uint32_t version;
     file.read(reinterpret_cast<char*>(&version), sizeof(uint32_t));
-    if (file.fail() || version != LEVEL_BINARY_VERSION)
+    if (file.fail() || (version != LEVEL_BINARY_VERSION && version != LEVEL_BINARY_VERSION_V3))
     {
-        printf("ERROR: Unsupported binary level version (expected %u, got %u)\n", LEVEL_BINARY_VERSION, version);
+        printf("ERROR: Unsupported binary level version (expected %u or %u, got %u)\n", LEVEL_BINARY_VERSION, LEVEL_BINARY_VERSION_V3, version);
         return false;
     }
+    binary_read_version = version;
 
     if (!readString(file, metadata.level_name)) return false;
     if (!readString(file, metadata.author)) return false;
@@ -811,6 +924,35 @@ bool LevelManager::readBinaryEntity(std::ifstream& file, LevelEntity& entity)
     file.read(reinterpret_cast<char*>(&entity.light_quadratic_attenuation), sizeof(float));
     file.read(reinterpret_cast<char*>(&entity.light_inner_cone_angle), sizeof(float));
     file.read(reinterpret_cast<char*>(&entity.light_outer_cone_angle), sizeof(float));
+
+    // v4: Motion type and collider shape data
+    if (binary_read_version >= LEVEL_BINARY_VERSION)
+    {
+        if (!readString(file, entity.body_motion_type)) return false;
+        if (!readString(file, entity.collider_shape_type)) return false;
+        file.read(reinterpret_cast<char*>(&entity.collider_box_half_extents), sizeof(glm::vec3));
+        file.read(reinterpret_cast<char*>(&entity.collider_sphere_radius), sizeof(float));
+        file.read(reinterpret_cast<char*>(&entity.collider_capsule_half_height), sizeof(float));
+        file.read(reinterpret_cast<char*>(&entity.collider_capsule_radius), sizeof(float));
+        file.read(reinterpret_cast<char*>(&entity.collider_cylinder_half_height), sizeof(float));
+        file.read(reinterpret_cast<char*>(&entity.collider_cylinder_radius), sizeof(float));
+        file.read(reinterpret_cast<char*>(&entity.collider_friction), sizeof(float));
+        file.read(reinterpret_cast<char*>(&entity.collider_restitution), sizeof(float));
+
+        // Constraint data
+        uint8_t has_constraint;
+        file.read(reinterpret_cast<char*>(&has_constraint), sizeof(uint8_t));
+        entity.has_constraint = has_constraint != 0;
+        if (!readString(file, entity.constraint_type)) return false;
+        if (!readString(file, entity.constraint_target_name)) return false;
+        file.read(reinterpret_cast<char*>(&entity.constraint_anchor_1), sizeof(glm::vec3));
+        file.read(reinterpret_cast<char*>(&entity.constraint_anchor_2), sizeof(glm::vec3));
+        file.read(reinterpret_cast<char*>(&entity.constraint_hinge_axis), sizeof(glm::vec3));
+        file.read(reinterpret_cast<char*>(&entity.constraint_hinge_min), sizeof(float));
+        file.read(reinterpret_cast<char*>(&entity.constraint_hinge_max), sizeof(float));
+        file.read(reinterpret_cast<char*>(&entity.constraint_min_distance), sizeof(float));
+        file.read(reinterpret_cast<char*>(&entity.constraint_max_distance), sizeof(float));
+    }
 
     return !file.fail();
 }
@@ -1276,6 +1418,18 @@ bool LevelManager::instantiateLevel(
         {
             game_world.registry.emplace<ColliderComponent>(e);
             auto& col = game_world.registry.get<ColliderComponent>(e);
+
+            // Copy shape parameters
+            col.shape_type = stringToColliderShapeType(entity_data.collider_shape_type);
+            col.box_half_extents = entity_data.collider_box_half_extents;
+            col.sphere_radius = entity_data.collider_sphere_radius;
+            col.capsule_half_height = entity_data.collider_capsule_half_height;
+            col.capsule_radius = entity_data.collider_capsule_radius;
+            col.cylinder_half_height = entity_data.collider_cylinder_half_height;
+            col.cylinder_radius = entity_data.collider_cylinder_radius;
+            col.friction = entity_data.collider_friction;
+            col.restitution = entity_data.collider_restitution;
+
             if (!entity_data.collider_mesh_path.empty()) {
                 LevelEntity col_ent = entity_data;
                 col_ent.mesh_path = entity_data.collider_mesh_path;
@@ -1296,13 +1450,25 @@ bool LevelManager::instantiateLevel(
                 auto& rb = game_world.registry.get<RigidBodyComponent>(e);
                 rb.mass = entity_data.mass;
                 rb.apply_gravity = entity_data.apply_gravity;
+                rb.motion_type = stringToBodyMotionType(entity_data.body_motion_type);
             }
 
             // Collider
             if (entity_data.has_collider) {
                 game_world.registry.emplace<ColliderComponent>(e);
                 auto& col = game_world.registry.get<ColliderComponent>(e);
-                
+
+                // Copy shape parameters from level data
+                col.shape_type = stringToColliderShapeType(entity_data.collider_shape_type);
+                col.box_half_extents = entity_data.collider_box_half_extents;
+                col.sphere_radius = entity_data.collider_sphere_radius;
+                col.capsule_half_height = entity_data.collider_capsule_half_height;
+                col.capsule_radius = entity_data.collider_capsule_radius;
+                col.cylinder_half_height = entity_data.collider_cylinder_half_height;
+                col.cylinder_radius = entity_data.collider_cylinder_radius;
+                col.friction = entity_data.collider_friction;
+                col.restitution = entity_data.collider_restitution;
+
                 // If it has a separate collider mesh
                 if (!entity_data.collider_mesh_path.empty()) {
                     LevelEntity col_ent = entity_data;
@@ -1321,7 +1487,18 @@ bool LevelManager::instantiateLevel(
              if (entity_data.has_collider) {
                 game_world.registry.emplace<ColliderComponent>(e);
                 auto& col = game_world.registry.get<ColliderComponent>(e);
-                
+
+                // Copy shape parameters
+                col.shape_type = stringToColliderShapeType(entity_data.collider_shape_type);
+                col.box_half_extents = entity_data.collider_box_half_extents;
+                col.sphere_radius = entity_data.collider_sphere_radius;
+                col.capsule_half_height = entity_data.collider_capsule_half_height;
+                col.capsule_radius = entity_data.collider_capsule_radius;
+                col.cylinder_half_height = entity_data.collider_cylinder_half_height;
+                col.cylinder_radius = entity_data.collider_cylinder_radius;
+                col.friction = entity_data.collider_friction;
+                col.restitution = entity_data.collider_restitution;
+
                 if (!entity_data.collider_mesh_path.empty()) {
                     LevelEntity col_ent = entity_data;
                     col_ent.mesh_path = entity_data.collider_mesh_path;
@@ -1342,33 +1519,75 @@ bool LevelManager::instantiateLevel(
             LOG_ENGINE_INFO("Entity '{}': using visual mesh as collision (use_mesh_collision=true)", entity_data.name);
         }
 
-        // Register collider meshes with Jolt physics
+        // Register collider shapes with Jolt physics
         if (game_world.registry.all_of<ColliderComponent>(e))
         {
             auto& col = game_world.registry.get<ColliderComponent>(e);
             auto& t = game_world.registry.get<TransformComponent>(e);
-            LOG_ENGINE_INFO("Jolt: entity '{}' has ColliderComponent, mesh_valid={}, vertices={}, len={}",
-                entity_data.name, col.is_mesh_valid(),
-                (void*)( col.m_mesh ? col.m_mesh->vertices : nullptr),
-                col.m_mesh ? col.m_mesh->vertices_len : 0);
-            if (col.is_mesh_valid())
+            LOG_ENGINE_INFO("Jolt: entity '{}' has ColliderComponent, shape_type={}, mesh_valid={}",
+                entity_data.name, colliderShapeTypeToString(col.shape_type), col.is_mesh_valid());
+
+            if (entity_data.type == EntityType::Physical)
             {
-                if (entity_data.type == EntityType::Physical)
+                // Determine motion type from RigidBodyComponent
+                BodyMotionType motion = BodyMotionType::Dynamic;
+                if (game_world.registry.all_of<RigidBodyComponent>(e))
+                    motion = game_world.registry.get<RigidBodyComponent>(e).motion_type;
+
+                if (motion == BodyMotionType::Kinematic)
                 {
-                    // Dynamic body with capsule shape for physical entities
-                    JPH::CapsuleShapeSettings capsule(0.5f, 0.3f);
-                    auto shape_result = capsule.Create();
-                    if (shape_result.IsValid())
+                    // Kinematic body
+                    JPH::ShapeRefC shape = PhysicsSystem::createShapeFromCollider(col, t.scale);
+                    if (!shape && col.shape_type == ColliderShapeType::Mesh && col.is_mesh_valid())
                     {
-                        game_world.getPhysicsSystem().createDynamicBody(
-                            t.position, t.rotation, shape_result.Get(), entity_data.mass, e);
+                        // Use mesh as static for kinematic (rare case)
+                        game_world.getPhysicsSystem().createStaticMeshBody(
+                            t.position, t.rotation, t.scale, *col.get_mesh(), e);
+                    }
+                    else if (shape)
+                    {
+                        game_world.getPhysicsSystem().createKinematicBody(
+                            t.position, t.rotation, shape, e);
                     }
                 }
                 else
                 {
+                    // Dynamic body: use shape from ColliderComponent
+                    if (col.shape_type == ColliderShapeType::Mesh)
+                    {
+                        // Mesh shapes cannot be dynamic in Jolt; fall back to ConvexHull
+                        if (col.is_mesh_valid()) {
+                            col.shape_type = ColliderShapeType::ConvexHull;
+                            LOG_ENGINE_WARN("Entity '{}': Mesh collider on dynamic body not supported, using ConvexHull", entity_data.name);
+                        }
+                    }
+
+                    JPH::ShapeRefC shape = PhysicsSystem::createShapeFromCollider(col, t.scale);
+                    if (shape)
+                    {
+                        game_world.getPhysicsSystem().createDynamicBody(
+                            t.position, t.rotation, shape, entity_data.mass, e,
+                            col.friction, col.restitution);
+                    }
+                }
+            }
+            else
+            {
+                // Static body
+                if (col.shape_type == ColliderShapeType::Mesh && col.is_mesh_valid())
+                {
                     // Static mesh collider (apply entity scale)
                     game_world.getPhysicsSystem().createStaticMeshBody(
                         t.position, t.rotation, t.scale, *col.get_mesh(), e);
+                }
+                else
+                {
+                    JPH::ShapeRefC shape = PhysicsSystem::createShapeFromCollider(col, t.scale);
+                    if (shape)
+                    {
+                        game_world.getPhysicsSystem().createStaticBody(
+                            t.position, t.rotation, shape, e);
+                    }
                 }
             }
         }
@@ -1455,8 +1674,22 @@ bool LevelManager::instantiateLevel(
             sl.linear_attenuation = entity_data.light_linear_attenuation;
             sl.quadratic_attenuation = entity_data.light_quadratic_attenuation;
         }
+        // Constraint (data only — resolved in third pass)
+        if (entity_data.has_constraint)
+        {
+            auto& cc = game_world.registry.emplace<ConstraintComponent>(e);
+            cc.type = stringToConstraintType(entity_data.constraint_type);
+            cc.target_entity_name = entity_data.constraint_target_name;
+            cc.anchor_1 = entity_data.constraint_anchor_1;
+            cc.anchor_2 = entity_data.constraint_anchor_2;
+            cc.hinge_axis = entity_data.constraint_hinge_axis;
+            cc.hinge_min_limit = entity_data.constraint_hinge_min;
+            cc.hinge_max_limit = entity_data.constraint_hinge_max;
+            cc.min_distance = entity_data.constraint_min_distance;
+            cc.max_distance = entity_data.constraint_max_distance;
+        }
     }
-    
+
     // Second pass: Resolve references (PlayerRepresentation)
     for (size_t i = 0; i < level_data.entities.size(); ++i) {
         const auto& entity_data = level_data.entities[i];
@@ -1471,6 +1704,25 @@ bool LevelManager::instantiateLevel(
                 } else {
                     printf("WARNING: PlayerRepresentation '%s' cannot find tracked player '%s'\n", 
                            entity_data.name.c_str(), entity_data.tracked_player_name.c_str());
+                }
+            }
+        }
+    }
+
+    // Third pass: Create constraints (requires both bodies to exist)
+    for (size_t i = 0; i < level_data.entities.size(); ++i) {
+        const auto& entity_data = level_data.entities[i];
+        if (entity_data.has_constraint) {
+            entt::entity e = created_entities[i];
+            if (game_world.registry.all_of<ConstraintComponent>(e)) {
+                auto& cc = game_world.registry.get<ConstraintComponent>(e);
+                auto target_it = entity_map.find(entity_data.constraint_target_name);
+                if (target_it != entity_map.end()) {
+                    cc.target_entity = target_it->second;
+                    game_world.getPhysicsSystem().createConstraint(e, cc.target_entity, cc);
+                } else {
+                    printf("WARNING: Constraint on '%s' cannot find target '%s'\n",
+                           entity_data.name.c_str(), entity_data.constraint_target_name.c_str());
                 }
             }
         }

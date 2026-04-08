@@ -95,7 +95,10 @@
         "apply_gravity": true
       },
       "collider": {
-        "mesh_path": "assets/models/grasscube.obj"
+        "shape_type": "Box",
+        "box_half_extents": { "x": 0.5, "y": 0.5, "z": 0.5 },
+        "friction": 0.5,
+        "restitution": 0.3
       }
     },
     {

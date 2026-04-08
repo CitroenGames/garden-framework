@@ -1,4 +1,5 @@
 #include "AnimationClip.hpp"
+#include "Pose.hpp"
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtx/quaternion.hpp>
@@ -81,5 +82,25 @@ void AnimationClip::sample(float time, int bone_count, std::vector<glm::mat4>& o
         glm::mat4 s = glm::scale(glm::mat4(1.0f), scl);
 
         out_local_poses[channel.bone_index] = t * r * s;
+    }
+}
+
+void AnimationClip::samplePose(float time, int bone_count, Pose& out_pose) const
+{
+    out_pose.resize(bone_count);
+
+    // Initialize all bones to identity
+    for (int i = 0; i < bone_count; i++)
+    {
+        out_pose[i] = BonePose::identity();
+    }
+
+    for (const auto& channel : channels)
+    {
+        if (channel.bone_index < 0 || channel.bone_index >= bone_count) continue;
+
+        out_pose[channel.bone_index].translation = channel.samplePosition(time);
+        out_pose[channel.bone_index].rotation = channel.sampleRotation(time);
+        out_pose[channel.bone_index].scale = channel.sampleScale(time);
     }
 }

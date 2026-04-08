@@ -1,4 +1,5 @@
 #include "Skeleton.hpp"
+#include "Pose.hpp"
 
 void Skeleton::addBone(const Bone& bone)
 {
@@ -56,5 +57,53 @@ void Skeleton::computeFinalMatrices(const std::vector<glm::mat4>& local_poses,
 
         // Final matrix = global_transform * inverse_bind_matrix
         out_final[i] = global_transforms[i] * bones[i].inverse_bind_matrix;
+    }
+}
+
+void Skeleton::computeFinalMatrices(const Pose& local_pose,
+                                     std::vector<glm::mat4>& out_final) const
+{
+    int count = static_cast<int>(bones.size());
+    out_final.resize(count, glm::mat4(1.0f));
+
+    std::vector<glm::mat4> global_transforms(count, glm::mat4(1.0f));
+
+    for (int i = 0; i < count; i++)
+    {
+        const glm::mat4 local = (i < local_pose.getBoneCount())
+            ? local_pose[i].toMatrix() : bones[i].local_transform;
+
+        if (bones[i].parent_id >= 0 && bones[i].parent_id < count)
+        {
+            global_transforms[i] = global_transforms[bones[i].parent_id] * local;
+        }
+        else
+        {
+            global_transforms[i] = local;
+        }
+
+        out_final[i] = global_transforms[i] * bones[i].inverse_bind_matrix;
+    }
+}
+
+void Skeleton::computeGlobalTransforms(const Pose& local_pose,
+                                        std::vector<glm::mat4>& out_global) const
+{
+    int count = static_cast<int>(bones.size());
+    out_global.resize(count, glm::mat4(1.0f));
+
+    for (int i = 0; i < count; i++)
+    {
+        const glm::mat4 local = (i < local_pose.getBoneCount())
+            ? local_pose[i].toMatrix() : bones[i].local_transform;
+
+        if (bones[i].parent_id >= 0 && bones[i].parent_id < count)
+        {
+            out_global[i] = out_global[bones[i].parent_id] * local;
+        }
+        else
+        {
+            out_global[i] = local;
+        }
     }
 }

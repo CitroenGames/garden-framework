@@ -1,93 +1,163 @@
 #include "AnimationBlender.hpp"
 #include <algorithm>
 
+// ---- Internal helpers ----
+
+void AnimationBlender::ensureBaseLayer()
+{
+    if (layers.empty())
+    {
+        layers.emplace_back();
+    }
+}
+
+// ---- Legacy API (delegates to layer 0) ----
+
 void AnimationBlender::play(std::shared_ptr<AnimationClip> clip, float blend_time)
 {
-    if (!clip) return;
-
-    if (blend_time > 0.0f && current_clip && playing)
-    {
-        // Crossfade: old clip becomes blend_clip
-        blend_clip = current_clip;
-        blend_from_time = playback_time;
-        blend_duration = blend_time;
-        blend_elapsed = 0.0f;
-        blend_factor = 0.0f;
-    }
-    else
-    {
-        blend_clip = nullptr;
-        blend_factor = 1.0f;
-    }
-
-    current_clip = std::move(clip);
-    playback_time = 0.0f;
-    playing = true;
+    ensureBaseLayer();
+    layers[0].play(std::move(clip), blend_time);
 }
 
 void AnimationBlender::stop()
 {
-    playing = false;
-    blend_clip = nullptr;
-    blend_factor = 1.0f;
+    if (!layers.empty())
+    {
+        layers[0].stop();
+    }
+}
+
+void AnimationBlender::setSpeed(float speed)
+{
+    ensureBaseLayer();
+    layers[0].playback_speed = speed;
+}
+
+float AnimationBlender::getSpeed() const
+{
+    return layers.empty() ? 1.0f : layers[0].playback_speed;
+}
+
+void AnimationBlender::setLooping(bool loop)
+{
+    ensureBaseLayer();
+    layers[0].looping = loop;
+}
+
+bool AnimationBlender::isLooping() const
+{
+    return layers.empty() ? true : layers[0].looping;
+}
+
+bool AnimationBlender::isPlaying() const
+{
+    return !layers.empty() && layers[0].playing;
+}
+
+bool AnimationBlender::isBlending() const
+{
+    return !layers.empty() && layers[0].blend_from_clip != nullptr && layers[0].blend_factor < 1.0f;
+}
+
+float AnimationBlender::getPlaybackTime() const
+{
+    return layers.empty() ? 0.0f : layers[0].playback_time;
+}
+
+const AnimationClip* AnimationBlender::getCurrentClip() const
+{
+    return layers.empty() ? nullptr : layers[0].clip.get();
 }
 
 void AnimationBlender::update(float dt, int bone_count, std::vector<glm::mat4>& out_local_poses)
 {
-    if (!playing || !current_clip)
+    Pose pose(bone_count);
+    updatePose(dt, bone_count, pose);
+    pose.toMatrices(out_local_poses);
+}
+
+// ---- New Pose-based API ----
+
+void AnimationBlender::updatePose(float dt, int bone_count, Pose& out_pose)
+{
+    out_pose.resize(bone_count);
+
+    // Initialize to identity
+    for (int i = 0; i < bone_count; i++)
     {
-        out_local_poses.resize(bone_count, glm::mat4(1.0f));
-        return;
+        out_pose[i] = BonePose::identity();
     }
 
-    // Advance time
-    playback_time += dt * playback_speed;
+    if (layers.empty()) return;
 
-    if (playback_time >= current_clip->duration)
+    // Evaluate layer 0 (base layer)
+    Pose base_pose(bone_count);
+    bool has_base = layers[0].update(dt, bone_count, base_pose);
+
+    if (has_base)
     {
-        if (looping)
-        {
-            playback_time = std::fmod(playback_time, current_clip->duration);
-        }
-        else
-        {
-            playback_time = current_clip->duration;
-            playing = false;
-        }
+        out_pose = base_pose;
     }
 
-    // Sample current clip
-    current_clip->sample(playback_time, bone_count, out_local_poses);
-
-    // Handle crossfade blending
-    if (blend_clip && blend_factor < 1.0f)
+    // Evaluate additional layers and combine
+    for (int layer_idx = 1; layer_idx < static_cast<int>(layers.size()); layer_idx++)
     {
-        blend_elapsed += dt;
-        blend_factor = std::min(blend_elapsed / blend_duration, 1.0f);
+        auto& layer = layers[layer_idx];
 
-        // Sample old clip
-        std::vector<glm::mat4> old_poses;
-        float old_time = blend_from_time + blend_elapsed * playback_speed;
-        if (old_time > blend_clip->duration)
+        Pose layer_pose(bone_count);
+        bool has_pose = layer.update(dt, bone_count, layer_pose);
+        if (!has_pose) continue;
+
+        const auto& mask_weights = layer.mask.getWeights();
+
+        if (layer.mode == BlendMode::Override)
         {
-            old_time = std::fmod(old_time, blend_clip->duration);
+            out_pose = Pose::maskedBlend(out_pose, layer_pose, layer.weight, mask_weights);
         }
-        blend_clip->sample(old_time, bone_count, old_poses);
-
-        // Lerp between old and new poses per-bone
-        // Simple matrix lerp (not ideal for large rotations, but good enough for short blends)
-        for (int i = 0; i < bone_count && i < static_cast<int>(old_poses.size()); i++)
+        else // BlendMode::Additive
         {
-            // Component-wise lerp of matrices
-            for (int col = 0; col < 4; col++)
+            // Compute additive result
+            Pose additive_result = Pose::additiveBlend(out_pose, layer_pose,
+                                                        layer.reference_pose, layer.weight);
+
+            // Apply mask: blend between current accumulated and additive result
+            if (!mask_weights.empty())
             {
-                out_local_poses[i][col] = glm::mix(old_poses[i][col], out_local_poses[i][col], blend_factor);
+                out_pose = Pose::maskedBlend(out_pose, additive_result, 1.0f, mask_weights);
+            }
+            else
+            {
+                out_pose = additive_result;
             }
         }
+    }
+}
 
-        if (blend_factor >= 1.0f)
-        {
-            blend_clip = nullptr;
-        }
+// ---- Layer management ----
+
+int AnimationBlender::addLayer(BlendMode mode)
+{
+    ensureBaseLayer(); // make sure layer 0 exists
+    AnimationLayer layer;
+    layer.mode = mode;
+    layers.push_back(std::move(layer));
+    return static_cast<int>(layers.size()) - 1;
+}
+
+AnimationLayer& AnimationBlender::getLayer(int index)
+{
+    return layers[index];
+}
+
+const AnimationLayer& AnimationBlender::getLayer(int index) const
+{
+    return layers[index];
+}
+
+void AnimationBlender::removeLayer(int index)
+{
+    if (index > 0 && index < static_cast<int>(layers.size()))
+    {
+        layers.erase(layers.begin() + index);
     }
 }

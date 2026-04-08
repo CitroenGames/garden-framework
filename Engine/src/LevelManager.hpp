@@ -46,10 +46,34 @@ struct LevelEntity
     bool has_rigidbody;
     float mass;
     bool apply_gravity;
+    std::string body_motion_type = "Dynamic";
 
     bool has_collider;
     std::string collider_mesh_path;  // Separate collision mesh
     bool use_mesh_collision;         // Use visual mesh as collision if no collider specified
+
+    // Collider shape data
+    std::string collider_shape_type = "Mesh";
+    glm::vec3 collider_box_half_extents = glm::vec3(0.5f);
+    float collider_sphere_radius = 0.5f;
+    float collider_capsule_half_height = 0.5f;
+    float collider_capsule_radius = 0.3f;
+    float collider_cylinder_half_height = 0.5f;
+    float collider_cylinder_radius = 0.5f;
+    float collider_friction = 0.2f;
+    float collider_restitution = 0.0f;
+
+    // Constraint data
+    bool has_constraint = false;
+    std::string constraint_type = "Fixed";
+    std::string constraint_target_name;
+    glm::vec3 constraint_anchor_1 = glm::vec3(0.0f);
+    glm::vec3 constraint_anchor_2 = glm::vec3(0.0f);
+    glm::vec3 constraint_hinge_axis = glm::vec3(0.0f, 1.0f, 0.0f);
+    float constraint_hinge_min = -180.0f;
+    float constraint_hinge_max = 180.0f;
+    float constraint_min_distance = -1.0f;
+    float constraint_max_distance = -1.0f;
 
     // Mesh rendering properties
     bool culling;
@@ -190,4 +214,7 @@ private:
 
     // Store level data to keep entity references valid
     std::vector<LevelEntity> stored_entities;
+
+    // Binary format version (set during readBinaryHeader for readBinaryEntity)
+    uint32_t binary_read_version = 0;
 };

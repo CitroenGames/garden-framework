@@ -2504,10 +2504,39 @@ LevelEntity EditorApp::buildLevelEntityFromECS(entt::entity entity) const
         le.has_rigidbody = true;
         le.mass          = rb.mass;
         le.apply_gravity = rb.apply_gravity;
+        le.body_motion_type = bodyMotionTypeToString(rb.motion_type);
     }
 
     if (has_collider)
+    {
         le.has_collider = true;
+        const auto& col = m_world.registry.get<ColliderComponent>(entity);
+        le.collider_shape_type = colliderShapeTypeToString(col.shape_type);
+        le.collider_box_half_extents = col.box_half_extents;
+        le.collider_sphere_radius = col.sphere_radius;
+        le.collider_capsule_half_height = col.capsule_half_height;
+        le.collider_capsule_radius = col.capsule_radius;
+        le.collider_cylinder_half_height = col.cylinder_half_height;
+        le.collider_cylinder_radius = col.cylinder_radius;
+        le.collider_friction = col.friction;
+        le.collider_restitution = col.restitution;
+    }
+
+    // Constraint component
+    if (m_world.registry.all_of<ConstraintComponent>(entity))
+    {
+        const auto& cc = m_world.registry.get<ConstraintComponent>(entity);
+        le.has_constraint = true;
+        le.constraint_type = constraintTypeToString(cc.type);
+        le.constraint_target_name = cc.target_entity_name;
+        le.constraint_anchor_1 = cc.anchor_1;
+        le.constraint_anchor_2 = cc.anchor_2;
+        le.constraint_hinge_axis = cc.hinge_axis;
+        le.constraint_hinge_min = cc.hinge_min_limit;
+        le.constraint_hinge_max = cc.hinge_max_limit;
+        le.constraint_min_distance = cc.min_distance;
+        le.constraint_max_distance = cc.max_distance;
+    }
 
     // Player component
     if (has_player)

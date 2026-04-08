@@ -74,6 +74,11 @@ void PhysicsSystem::initialize()
     // Let's scale to realistic: -9.81 m/s^2 on Y
     jolt_system->SetGravity(JPH::Vec3(gravity.x * 9.81f, gravity.y * 9.81f, gravity.z * 9.81f));
 
+    // Set up contact listener for collision events
+    contact_listener = std::make_unique<EngineContactListener>();
+    contact_listener->setBodyToEntityMap(&body_to_entity);
+    jolt_system->SetContactListener(contact_listener.get());
+
     initialized = true;
     LOG_ENGINE_INFO("Jolt Physics initialized ({} threads)", std::thread::hardware_concurrency() - 1);
 }
@@ -81,6 +86,14 @@ void PhysicsSystem::initialize()
 void PhysicsSystem::shutdown()
 {
     if (!initialized) return;
+
+    // Remove all constraints
+    if (jolt_system)
+    {
+        for (auto& [entity, constraint] : entity_to_constraint)
+            jolt_system->RemoveConstraint(constraint);
+    }
+    entity_to_constraint.clear();
 
     // Remove all bodies
     if (jolt_system)
@@ -96,6 +109,7 @@ void PhysicsSystem::shutdown()
     entity_to_body.clear();
     body_to_entity.clear();
 
+    contact_listener.reset();
     jolt_system.reset();
     job_system.reset();
     temp_allocator.reset();
@@ -145,16 +159,80 @@ JPH::BodyID PhysicsSystem::createStaticBody(const glm::vec3& position, const glm
     return body_id;
 }
 
-JPH::BodyID PhysicsSystem::createDynamicBody(const glm::vec3& position, const glm::vec3& rotation, const JPH::ShapeRefC& shape, float mass, entt::entity entity)
+JPH::ShapeRefC PhysicsSystem::createShapeFromCollider(const ColliderComponent& collider, const glm::vec3& scale)
+{
+    JPH::ShapeRefC shape;
+
+    switch (collider.shape_type)
+    {
+    case ColliderShapeType::Box: {
+        JPH::BoxShapeSettings settings(toJolt(collider.box_half_extents));
+        auto result = settings.Create();
+        if (result.IsValid()) shape = result.Get();
+        break;
+    }
+    case ColliderShapeType::Sphere: {
+        JPH::SphereShapeSettings settings(collider.sphere_radius);
+        auto result = settings.Create();
+        if (result.IsValid()) shape = result.Get();
+        break;
+    }
+    case ColliderShapeType::Capsule: {
+        JPH::CapsuleShapeSettings settings(collider.capsule_half_height, collider.capsule_radius);
+        auto result = settings.Create();
+        if (result.IsValid()) shape = result.Get();
+        break;
+    }
+    case ColliderShapeType::Cylinder: {
+        JPH::CylinderShapeSettings settings(collider.cylinder_half_height, collider.cylinder_radius);
+        auto result = settings.Create();
+        if (result.IsValid()) shape = result.Get();
+        break;
+    }
+    case ColliderShapeType::ConvexHull: {
+        if (collider.m_mesh && collider.m_mesh->is_valid && collider.m_mesh->vertices_len > 0) {
+            JPH::Array<JPH::Vec3> points;
+            points.reserve(collider.m_mesh->vertices_len);
+            for (size_t i = 0; i < collider.m_mesh->vertices_len; i++) {
+                const auto& v = collider.m_mesh->vertices[i];
+                points.push_back(JPH::Vec3(v.vx, v.vy, v.vz));
+            }
+            JPH::ConvexHullShapeSettings settings(points.data(), (int)points.size());
+            auto result = settings.Create();
+            if (result.IsValid()) shape = result.Get();
+        }
+        break;
+    }
+    case ColliderShapeType::Mesh:
+    default:
+        // Mesh shapes are handled by createStaticMeshBody path
+        return nullptr;
+    }
+
+    // Apply scale via ScaledShape if non-identity
+    if (shape && (scale.x != 1.0f || scale.y != 1.0f || scale.z != 1.0f))
+    {
+        JPH::ScaledShapeSettings scaled(shape, toJolt(scale));
+        auto result = scaled.Create();
+        if (result.IsValid()) return result.Get();
+    }
+
+    return shape;
+}
+
+JPH::BodyID PhysicsSystem::createDynamicBody(const glm::vec3& position, const glm::vec3& rotation, const JPH::ShapeRefC& shape, float mass, entt::entity entity,
+    float friction, float restitution, bool lock_rotation)
 {
     if (!initialized) initialize();
 
     JPH::BodyCreationSettings settings(shape, toJoltR(position), toJoltQuat(rotation), JPH::EMotionType::Dynamic, Layers::MOVING);
     settings.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
     settings.mMassPropertiesOverride.mMass = mass;
-    settings.mAllowedDOFs = JPH::EAllowedDOFs::TranslationX | JPH::EAllowedDOFs::TranslationY | JPH::EAllowedDOFs::TranslationZ; // Lock rotation
+    if (lock_rotation)
+        settings.mAllowedDOFs = JPH::EAllowedDOFs::TranslationX | JPH::EAllowedDOFs::TranslationY | JPH::EAllowedDOFs::TranslationZ;
     settings.mMotionQuality = JPH::EMotionQuality::LinearCast; // CCD to prevent tunneling
-    settings.mFriction = 0.0f; // Disable Jolt contact friction — game code handles its own friction
+    settings.mFriction = friction;
+    settings.mRestitution = restitution;
     settings.mLinearDamping = 0.0f; // Disable Jolt damping — game code handles velocity damping
 
     JPH::BodyInterface& body_interface = jolt_system->GetBodyInterface();
@@ -168,6 +246,27 @@ JPH::BodyID PhysicsSystem::createDynamicBody(const glm::vec3& position, const gl
     body_to_entity[body_id] = entity;
 
     LOG_ENGINE_INFO("Created Jolt dynamic body at ({}, {}, {}), mass={}", position.x, position.y, position.z, mass);
+    return body_id;
+}
+
+JPH::BodyID PhysicsSystem::createKinematicBody(const glm::vec3& position, const glm::vec3& rotation, const JPH::ShapeRefC& shape, entt::entity entity)
+{
+    if (!initialized) initialize();
+
+    JPH::BodyCreationSettings settings(shape, toJoltR(position), toJoltQuat(rotation), JPH::EMotionType::Kinematic, Layers::MOVING);
+    settings.mMotionQuality = JPH::EMotionQuality::LinearCast;
+
+    JPH::BodyInterface& body_interface = jolt_system->GetBodyInterface();
+    JPH::Body* body = body_interface.CreateBody(settings);
+    if (!body) return JPH::BodyID();
+
+    JPH::BodyID body_id = body->GetID();
+    body_interface.AddBody(body_id, JPH::EActivation::Activate);
+
+    entity_to_body[entity] = body_id;
+    body_to_entity[body_id] = entity;
+
+    LOG_ENGINE_INFO("Created Jolt kinematic body at ({}, {}, {})", position.x, position.y, position.z);
     return body_id;
 }
 
@@ -221,8 +320,151 @@ JPH::BodyID PhysicsSystem::createStaticMeshBody(const glm::vec3& position, const
     return createStaticBody(position, rotation, final_shape, entity);
 }
 
+PhysicsSystem::ShapeCastResult PhysicsSystem::shapeCast(const JPH::ShapeRefC& shape, const glm::vec3& position,
+    const glm::vec3& rotation, const glm::vec3& direction)
+{
+    ShapeCastResult result;
+    if (!initialized || !shape) return result;
+
+    JPH::RMat44 com_start = JPH::RMat44::sRotationTranslation(
+        toJoltQuat(rotation), toJoltR(position));
+
+    JPH::RShapeCast shape_cast = JPH::RShapeCast::sFromWorldTransform(
+        shape, JPH::Vec3::sReplicate(1.0f), com_start, toJolt(direction));
+
+    JPH::ShapeCastSettings settings;
+    settings.mBackFaceModeTriangles = JPH::EBackFaceMode::IgnoreBackFaces;
+    settings.mBackFaceModeConvex = JPH::EBackFaceMode::IgnoreBackFaces;
+
+    JPH::ClosestHitCollisionCollector<JPH::CastShapeCollector> collector;
+
+    jolt_system->GetNarrowPhaseQuery().CastShape(
+        shape_cast, settings, com_start.GetTranslation(), collector);
+
+    if (collector.HadHit())
+    {
+        result.hit = true;
+        result.fraction = collector.mHit.mFraction;
+
+        // Compute contact point along the cast direction
+        JPH::RVec3 hit_point = com_start.GetTranslation() + JPH::Vec3(toJolt(direction)) * collector.mHit.mFraction;
+        result.contact_point = glm::vec3(float(hit_point.GetX()), float(hit_point.GetY()), float(hit_point.GetZ()));
+
+        if (collector.mHit.mPenetrationAxis.LengthSq() > 0.0f)
+            result.contact_normal = toGlm(collector.mHit.mPenetrationAxis.Normalized());
+
+        auto it = body_to_entity.find(collector.mHit.mBodyID2);
+        if (it != body_to_entity.end())
+            result.entity = it->second;
+    }
+
+    return result;
+}
+
+PhysicsSystem::ShapeCastResult PhysicsSystem::sphereCast(const glm::vec3& origin, float radius,
+    const glm::vec3& direction, float maxDistance)
+{
+    JPH::SphereShapeSettings sphere(radius);
+    auto shape_result = sphere.Create();
+    if (!shape_result.IsValid()) return {};
+
+    glm::vec3 dir = glm::normalize(direction) * maxDistance;
+    return shapeCast(shape_result.Get(), origin, glm::vec3(0), dir);
+}
+
+PhysicsSystem::ShapeCastResult PhysicsSystem::boxCast(const glm::vec3& origin, const glm::vec3& halfExtents,
+    const glm::vec3& rotation, const glm::vec3& direction, float maxDistance)
+{
+    JPH::BoxShapeSettings box(toJolt(halfExtents));
+    auto shape_result = box.Create();
+    if (!shape_result.IsValid()) return {};
+
+    glm::vec3 dir = glm::normalize(direction) * maxDistance;
+    return shapeCast(shape_result.Get(), origin, rotation, dir);
+}
+
+JPH::Constraint* PhysicsSystem::createConstraint(entt::entity entityA, entt::entity entityB, const ConstraintComponent& constraint)
+{
+    if (!initialized) return nullptr;
+
+    auto itA = entity_to_body.find(entityA);
+    auto itB = entity_to_body.find(entityB);
+    if (itA == entity_to_body.end() || itB == entity_to_body.end()) return nullptr;
+
+    JPH::BodyLockWrite lockA(jolt_system->GetBodyLockInterface(), itA->second);
+    JPH::BodyLockWrite lockB(jolt_system->GetBodyLockInterface(), itB->second);
+    if (!lockA.Succeeded() || !lockB.Succeeded()) return nullptr;
+
+    JPH::TwoBodyConstraint* jolt_constraint = nullptr;
+
+    switch (constraint.type)
+    {
+    case ConstraintType::Fixed: {
+        JPH::FixedConstraintSettings settings;
+        settings.mAutoDetectPoint = true;
+        jolt_constraint = settings.Create(lockA.GetBody(), lockB.GetBody());
+        break;
+    }
+    case ConstraintType::Hinge: {
+        JPH::HingeConstraintSettings settings;
+        settings.mSpace = JPH::EConstraintSpace::LocalToBodyCOM;
+        settings.mPoint1 = toJolt(constraint.anchor_1);
+        settings.mPoint2 = toJolt(constraint.anchor_2);
+        settings.mHingeAxis1 = toJolt(glm::normalize(constraint.hinge_axis));
+        settings.mHingeAxis2 = toJolt(glm::normalize(constraint.hinge_axis));
+        settings.mNormalAxis1 = JPH::Vec3::sAxisX();
+        settings.mNormalAxis2 = JPH::Vec3::sAxisX();
+        settings.mLimitsMin = glm::radians(constraint.hinge_min_limit);
+        settings.mLimitsMax = glm::radians(constraint.hinge_max_limit);
+        jolt_constraint = settings.Create(lockA.GetBody(), lockB.GetBody());
+        break;
+    }
+    case ConstraintType::Point: {
+        JPH::PointConstraintSettings settings;
+        settings.mSpace = JPH::EConstraintSpace::LocalToBodyCOM;
+        settings.mPoint1 = toJolt(constraint.anchor_1);
+        settings.mPoint2 = toJolt(constraint.anchor_2);
+        jolt_constraint = settings.Create(lockA.GetBody(), lockB.GetBody());
+        break;
+    }
+    case ConstraintType::Distance: {
+        JPH::DistanceConstraintSettings settings;
+        settings.mSpace = JPH::EConstraintSpace::LocalToBodyCOM;
+        settings.mPoint1 = toJolt(constraint.anchor_1);
+        settings.mPoint2 = toJolt(constraint.anchor_2);
+        if (constraint.min_distance >= 0.0f) settings.mMinDistance = constraint.min_distance;
+        if (constraint.max_distance >= 0.0f) settings.mMaxDistance = constraint.max_distance;
+        jolt_constraint = settings.Create(lockA.GetBody(), lockB.GetBody());
+        break;
+    }
+    }
+
+    if (jolt_constraint)
+    {
+        jolt_system->AddConstraint(jolt_constraint);
+        entity_to_constraint[entityA] = jolt_constraint;
+        LOG_ENGINE_INFO("Created {} constraint between entities", constraintTypeToString(constraint.type));
+    }
+
+    return jolt_constraint;
+}
+
+void PhysicsSystem::removeConstraint(entt::entity entity)
+{
+    auto it = entity_to_constraint.find(entity);
+    if (it == entity_to_constraint.end()) return;
+
+    if (jolt_system)
+        jolt_system->RemoveConstraint(it->second);
+
+    entity_to_constraint.erase(it);
+}
+
 void PhysicsSystem::removeBody(entt::entity entity)
 {
+    // Remove any constraint associated with this entity first
+    removeConstraint(entity);
+
     auto it = entity_to_body.find(entity);
     if (it == entity_to_body.end()) return;
 
@@ -244,6 +486,10 @@ void PhysicsSystem::stepPhysics(entt::registry& registry)
     // Step Jolt physics
     const int cCollisionSteps = 1;
     jolt_system->Update(fixed_delta, cCollisionSteps, temp_allocator.get(), job_system.get());
+
+    // Drain collision events to EventBus (main thread)
+    if (contact_listener)
+        contact_listener->drainEvents();
 
     // Sync Jolt -> ECS for bodies managed by Jolt
     syncTransformsFromJolt(registry);
@@ -315,7 +561,17 @@ void PhysicsSystem::syncTransformsToJolt(entt::registry& registry)
         if (!registry.valid(entity)) continue;
         if (!registry.all_of<TransformComponent, RigidBodyComponent>(entity)) continue;
 
-        if (body_interface.GetMotionType(body_id) != JPH::EMotionType::Dynamic) continue;
+        auto motion_type = body_interface.GetMotionType(body_id);
+
+        // Kinematic bodies: game code moves them via position, use MoveKinematic
+        if (motion_type == JPH::EMotionType::Kinematic)
+        {
+            auto& transform = registry.get<TransformComponent>(entity);
+            body_interface.MoveKinematic(body_id, toJoltR(transform.position), toJoltQuat(transform.rotation), fixed_delta);
+            continue;
+        }
+
+        if (motion_type != JPH::EMotionType::Dynamic) continue;
 
         auto& rb = registry.get<RigidBodyComponent>(entity);
 

@@ -1,11 +1,16 @@
 #pragma once
 
 #include "AnimationClip.hpp"
+#include "AnimationLayer.hpp"
+#include "Pose.hpp"
 #include <memory>
+#include <vector>
 
 class AnimationBlender
 {
 public:
+    // --- Legacy API (operates on layer 0) ---
+
     // Play a clip (optionally with crossfade from current)
     void play(std::shared_ptr<AnimationClip> clip, float blend_time = 0.0f);
 
@@ -13,34 +18,38 @@ public:
     void stop();
 
     // Set playback speed (1.0 = normal)
-    void setSpeed(float speed) { playback_speed = speed; }
-    float getSpeed() const { return playback_speed; }
+    void setSpeed(float speed);
+    float getSpeed() const;
 
     // Set looping
-    void setLooping(bool loop) { looping = loop; }
-    bool isLooping() const { return looping; }
+    void setLooping(bool loop);
+    bool isLooping() const;
 
     // Query
-    bool isPlaying() const { return playing; }
-    bool isBlending() const { return blend_clip != nullptr && blend_factor < 1.0f; }
-    float getPlaybackTime() const { return playback_time; }
-    const AnimationClip* getCurrentClip() const { return current_clip.get(); }
+    bool isPlaying() const;
+    bool isBlending() const;
+    float getPlaybackTime() const;
+    const AnimationClip* getCurrentClip() const;
 
-    // Advance time and produce local pose matrices
+    // Advance time and produce local pose matrices (legacy path)
     void update(float dt, int bone_count, std::vector<glm::mat4>& out_local_poses);
 
+    // --- New Pose-based API ---
+
+    // Advance time and produce a decomposed Pose (proper quaternion blending)
+    void updatePose(float dt, int bone_count, Pose& out_pose);
+
+    // --- Layer management ---
+
+    int addLayer(BlendMode mode = BlendMode::Override);
+    AnimationLayer& getLayer(int index);
+    const AnimationLayer& getLayer(int index) const;
+    void removeLayer(int index);
+    int getLayerCount() const { return static_cast<int>(layers.size()); }
+
 private:
-    std::shared_ptr<AnimationClip> current_clip;
-    std::shared_ptr<AnimationClip> blend_clip; // clip we're blending FROM
+    std::vector<AnimationLayer> layers;
 
-    float playback_time = 0.0f;
-    float playback_speed = 1.0f;
-    bool playing = false;
-    bool looping = true;
-
-    // Crossfade state
-    float blend_factor = 1.0f;   // 1.0 = fully on current_clip
-    float blend_duration = 0.0f;
-    float blend_elapsed = 0.0f;
-    float blend_from_time = 0.0f; // time in the old clip when blend started
+    // Ensure layer 0 exists
+    void ensureBaseLayer();
 };
