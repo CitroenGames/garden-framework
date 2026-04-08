@@ -220,6 +220,7 @@ std::vector<std::shared_ptr<AnimationClip>> loadAnimations(
 
             if (channel.target_path == "translation")
             {
+                if (value_count < time_count * 3) continue;
                 bone_anim->position_keys.reserve(time_count);
                 for (size_t i = 0; i < time_count; i++)
                 {
@@ -231,6 +232,7 @@ std::vector<std::shared_ptr<AnimationClip>> loadAnimations(
             }
             else if (channel.target_path == "rotation")
             {
+                if (value_count < time_count * 4) continue;
                 bone_anim->rotation_keys.reserve(time_count);
                 for (size_t i = 0; i < time_count; i++)
                 {
@@ -247,6 +249,7 @@ std::vector<std::shared_ptr<AnimationClip>> loadAnimations(
             }
             else if (channel.target_path == "scale")
             {
+                if (value_count < time_count * 3) continue;
                 bone_anim->scale_keys.reserve(time_count);
                 for (size_t i = 0; i < time_count; i++)
                 {
