@@ -107,12 +107,14 @@ void ServerNetworkManager::update(float delta_time)
                 handleClientConnect(event);
                 break;
 
-            case ENET_EVENT_TYPE_RECEIVE:
+            case ENET_EVENT_TYPE_RECEIVE: {
+                size_t packet_size = event.packet->dataLength;
                 handleClientMessage(event);
                 enet_packet_destroy(event.packet);
                 stats.packets_received++;
-                stats.bytes_received += event.packet->dataLength;
+                stats.bytes_received += packet_size;
                 break;
+            }
 
             case ENET_EVENT_TYPE_DISCONNECT:
             case ENET_EVENT_TYPE_DISCONNECT_TIMEOUT:
@@ -202,7 +204,11 @@ void ServerNetworkManager::handleClientMessage(ENetEvent& event)
 void ServerNetworkManager::handleConnectRequest(ENetPeer* peer, BitReader& reader)
 {
     ConnectRequestMessage msg;
-    NetworkSerializer::deserialize(reader, msg);
+    if (!NetworkSerializer::deserialize(reader, msg)) {
+        LOG_ENGINE_WARN("Failed to deserialize CONNECT_REQUEST from peer");
+        enet_peer_disconnect_later(peer, 0);
+        return;
+    }
 
     // Check protocol version
     if (msg.protocol_version != NETWORK_PROTOCOL_VERSION) {
