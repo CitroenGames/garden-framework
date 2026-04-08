@@ -1,3 +1,5 @@
-include = thirdparty/3rdparty.buildscript
+folder("ThirdParty") {
+    include = thirdparty/3rdparty.buildscript
+}
 include = EngineCore.buildscript
 include = EngineGraphics.buildscript
