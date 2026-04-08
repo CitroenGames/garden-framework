@@ -1,4 +1,5 @@
 #include "PrefabEditorManager.hpp"
+#include "panels/ColliderWidgets.hpp"
 #include "Graphics/RenderAPI.hpp"
 #include "Graphics/renderer.hpp"
 #include "Reflection/ReflectionRegistry.hpp"
@@ -548,8 +549,11 @@ void PrefabEditorManager::drawDetailsPanel(PrefabEditorInstance& inst)
 
         if (inst.registry.all_of<ColliderComponent>(inst.entity))
         {
-            const char* path = inst.collider_mesh_path.empty() ? "(uses visual mesh)" : inst.collider_mesh_path.c_str();
-            ImGui::LabelText("Mesh", "%s", path);
+            auto& col = inst.registry.get<ColliderComponent>(inst.entity);
+            ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.65f);
+            if (drawColliderUI(col))
+                inst.unsaved_changes = true;
+            ImGui::PopItemWidth();
         }
         else
         {

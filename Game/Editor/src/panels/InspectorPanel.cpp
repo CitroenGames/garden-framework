@@ -1,4 +1,5 @@
 #include "InspectorPanel.hpp"
+#include "ColliderWidgets.hpp"
 #include "Components/Components.hpp"
 #include "Graphics/LODSelector.hpp"
 #include "ImGui/ImGuiManager.hpp"
@@ -294,7 +295,11 @@ bool InspectorPanel::draw(entt::registry& registry, entt::entity selected,
         bool removed = false;
         if (drawComponentHeader("Collider", true, &removed))
         {
-            ImGui::TextDisabled("Collider component present");
+            auto& col = registry.get<ColliderComponent>(selected);
+            ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.65f);
+            if (drawColliderUI(col))
+                markUnsaved();
+            ImGui::PopItemWidth();
         }
 
         // Collider context menu (right-click on header)
