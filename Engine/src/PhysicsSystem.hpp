@@ -30,6 +30,12 @@
 #include <Jolt/Physics/Collision/Shape/MeshShape.h>
 #include <Jolt/Physics/Collision/Shape/ScaledShape.h>
 #include <Jolt/Physics/Collision/Shape/StaticCompoundShape.h>
+#include <Jolt/Physics/Collision/Shape/CylinderShape.h>
+#include <Jolt/Physics/Collision/Shape/ConvexHullShape.h>
+#include <Jolt/Physics/Constraints/FixedConstraint.h>
+#include <Jolt/Physics/Constraints/HingeConstraint.h>
+#include <Jolt/Physics/Constraints/PointConstraint.h>
+#include <Jolt/Physics/Constraints/DistanceConstraint.h>
 #include <Jolt/Physics/Collision/RayCast.h>
 #include <Jolt/Physics/Collision/CastResult.h>
 #include <Jolt/Physics/Collision/CollisionCollectorImpl.h>
@@ -38,6 +44,14 @@
 #include <Jolt/Physics/Collision/ObjectLayerPairFilterMask.h>
 #include <Jolt/Physics/Character/CharacterVirtual.h>
 #include <Jolt/Physics/Body/BodyFilter.h>
+#include <Jolt/Physics/Collision/ContactListener.h>
+#include <Jolt/Physics/Collision/ShapeCast.h>
+#include <Jolt/Physics/Collision/CollideShape.h>
+#include <Jolt/Physics/Collision/NarrowPhaseQuery.h>
+
+#include "Events/EngineEvents.hpp"
+#include "Events/EventBus.hpp"
+#include <mutex>
 
 // Jolt object layers
 namespace Layers
@@ -124,6 +138,63 @@ public:
     }
 };
 
+// Contact listener that queues CollisionEvents for main-thread dispatch
+class EngineContactListener : public JPH::ContactListener
+{
+public:
+    void setBodyToEntityMap(const std::unordered_map<JPH::BodyID, entt::entity>* map) { m_map = map; }
+
+    virtual void OnContactAdded(const JPH::Body& inBody1, const JPH::Body& inBody2,
+        const JPH::ContactManifold& inManifold, JPH::ContactSettings& ioSettings) override
+    {
+        if (!m_map) return;
+
+        CollisionEvent evt;
+        auto it1 = m_map->find(inBody1.GetID());
+        auto it2 = m_map->find(inBody2.GetID());
+        evt.entity_a = (it1 != m_map->end()) ? it1->second : entt::null;
+        evt.entity_b = (it2 != m_map->end()) ? it2->second : entt::null;
+
+        // Contact point (use base offset for world-space approximation)
+        evt.contact_normal = glm::vec3(
+            inManifold.mWorldSpaceNormal.GetX(),
+            inManifold.mWorldSpaceNormal.GetY(),
+            inManifold.mWorldSpaceNormal.GetZ());
+
+        if (inManifold.mRelativeContactPointsOn1.size() > 0)
+        {
+            JPH::Vec3 world_pt = inManifold.mBaseOffset + inManifold.mRelativeContactPointsOn1[0];
+            evt.contact_point = glm::vec3(world_pt.GetX(), world_pt.GetY(), world_pt.GetZ());
+        }
+
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_pending.push_back(evt);
+    }
+
+    virtual void OnContactPersisted(const JPH::Body& /*inBody1*/, const JPH::Body& /*inBody2*/,
+        const JPH::ContactManifold& /*inManifold*/, JPH::ContactSettings& /*ioSettings*/) override
+    {
+        // Only fire on new contacts, not persisted ones
+    }
+
+    // Drain queued events to EventBus (call from main thread after physics step)
+    void drainEvents()
+    {
+        std::vector<CollisionEvent> events;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            events.swap(m_pending);
+        }
+        for (auto& e : events)
+            EventBus::get().queue(std::move(e));
+    }
+
+private:
+    const std::unordered_map<JPH::BodyID, entt::entity>* m_map = nullptr;
+    std::mutex m_mutex;
+    std::vector<CollisionEvent> m_pending;
+};
+
 class ENGINE_API PhysicsSystem
 {
 private:
@@ -143,6 +214,12 @@ private:
     // Entity <-> Jolt body mapping
     std::unordered_map<entt::entity, JPH::BodyID> entity_to_body;
     std::unordered_map<JPH::BodyID, entt::entity> body_to_entity;
+
+    // Contact listener
+    std::unique_ptr<EngineContactListener> contact_listener;
+
+    // Constraint management
+    std::unordered_map<entt::entity, JPH::Ref<JPH::Constraint>> entity_to_constraint;
 
     bool initialized = false;
 
@@ -192,9 +269,14 @@ public:
     void setFixedDelta(float deltaTime) { fixed_delta = deltaTime; }
     float getFixedDelta() const { return fixed_delta; }
 
+    // Shape creation
+    static JPH::ShapeRefC createShapeFromCollider(const ColliderComponent& collider, const glm::vec3& scale);
+
     // Body management
     JPH::BodyID createStaticBody(const glm::vec3& position, const glm::vec3& rotation, const JPH::ShapeRefC& shape, entt::entity entity);
-    JPH::BodyID createDynamicBody(const glm::vec3& position, const glm::vec3& rotation, const JPH::ShapeRefC& shape, float mass, entt::entity entity);
+    JPH::BodyID createDynamicBody(const glm::vec3& position, const glm::vec3& rotation, const JPH::ShapeRefC& shape, float mass, entt::entity entity,
+        float friction = 0.0f, float restitution = 0.0f, bool lock_rotation = true);
+    JPH::BodyID createKinematicBody(const glm::vec3& position, const glm::vec3& rotation, const JPH::ShapeRefC& shape, entt::entity entity);
     JPH::BodyID createStaticMeshBody(const glm::vec3& position, const glm::vec3& rotation, const glm::vec3& scale, const mesh& colliderMesh, entt::entity entity);
     void removeBody(entt::entity entity);
 
@@ -207,6 +289,27 @@ public:
     // General collision queries
     bool raycast(const glm::vec3& origin, const glm::vec3& direction, float maxDistance,
         entt::registry& registry, glm::vec3& hitPoint, glm::vec3& hitNormal);
+
+    // Shape casting result
+    struct ShapeCastResult {
+        bool hit = false;
+        entt::entity entity = entt::null;
+        glm::vec3 contact_point{0.0f};
+        glm::vec3 contact_normal{0.0f};
+        float fraction = 1.0f;
+    };
+
+    // Shape casting queries
+    ShapeCastResult shapeCast(const JPH::ShapeRefC& shape, const glm::vec3& position,
+        const glm::vec3& rotation, const glm::vec3& direction);
+    ShapeCastResult sphereCast(const glm::vec3& origin, float radius,
+        const glm::vec3& direction, float maxDistance);
+    ShapeCastResult boxCast(const glm::vec3& origin, const glm::vec3& halfExtents,
+        const glm::vec3& rotation, const glm::vec3& direction, float maxDistance);
+
+    // Constraint management
+    JPH::Constraint* createConstraint(entt::entity entityA, entt::entity entityB, const ConstraintComponent& constraint);
+    void removeConstraint(entt::entity entity);
 
     // Access Jolt system
     JPH::PhysicsSystem* getJoltSystem() { return jolt_system.get(); }

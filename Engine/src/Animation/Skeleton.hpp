@@ -6,6 +6,8 @@
 #include <vector>
 #include <unordered_map>
 
+class Pose;
+
 static constexpr int MAX_BONES = 128;
 
 struct Bone
@@ -32,6 +34,15 @@ public:
     // walking the hierarchy from root to leaf
     void computeFinalMatrices(const std::vector<glm::mat4>& local_poses,
                               std::vector<glm::mat4>& out_final) const;
+
+    // Pose-based overload: same hierarchy walk but takes decomposed Pose
+    void computeFinalMatrices(const Pose& local_pose,
+                              std::vector<glm::mat4>& out_final) const;
+
+    // Compute model-space global transforms WITHOUT inverse bind matrix
+    // (needed by IK solvers which operate in model space)
+    void computeGlobalTransforms(const Pose& local_pose,
+                                  std::vector<glm::mat4>& out_global) const;
 
     const std::vector<Bone>& getBones() const { return bones; }
 

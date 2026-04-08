@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 
+class Pose;
+
 struct PositionKey
 {
     float time;
@@ -54,4 +56,7 @@ public:
     // Sample all bone local transforms at the given time
     // Returns a vector of local transform matrices indexed by bone index
     void sample(float time, int bone_count, std::vector<glm::mat4>& out_local_poses) const;
+
+    // Sample into decomposed Pose (translation/rotation/scale per bone)
+    void samplePose(float time, int bone_count, Pose& out_pose) const;
 };
