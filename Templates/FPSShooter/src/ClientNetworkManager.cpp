@@ -153,12 +153,14 @@ void ClientNetworkManager::update(float delta_time)
                 handleServerConnect(event);
                 break;
 
-            case ENET_EVENT_TYPE_RECEIVE:
+            case ENET_EVENT_TYPE_RECEIVE: {
+                size_t packet_size = event.packet->dataLength;
                 handleServerMessage(event);
                 enet_packet_destroy(event.packet);
                 stats.packets_received++;
-                stats.bytes_received += event.packet->dataLength;
+                stats.bytes_received += packet_size;
                 break;
+            }
 
             case ENET_EVENT_TYPE_DISCONNECT:
             case ENET_EVENT_TYPE_DISCONNECT_TIMEOUT:
@@ -413,7 +415,10 @@ void ClientNetworkManager::handleSpawnPlayer(BitReader& reader)
     }
 
     SpawnPlayerMessage msg;
-    NetworkSerializer::deserialize(reader, msg);
+    if (!NetworkSerializer::deserialize(reader, msg)) {
+        LOG_ENGINE_WARN("Failed to deserialize SPAWN_PLAYER message");
+        return;
+    }
 
     LOG_ENGINE_INFO("Player spawned: client_id={0}, entity_id={1}, pos=({2},{3},{4})",
         msg.client_id, msg.entity_id, msg.position.x, msg.position.y, msg.position.z);
@@ -451,7 +456,10 @@ void ClientNetworkManager::handleDespawnPlayer(BitReader& reader)
     }
 
     DespawnPlayerMessage msg;
-    NetworkSerializer::deserialize(reader, msg);
+    if (!NetworkSerializer::deserialize(reader, msg)) {
+        LOG_ENGINE_WARN("Failed to deserialize DESPAWN_PLAYER message");
+        return;
+    }
 
     LOG_ENGINE_INFO("Player despawned: client_id={0}, entity_id={1}", msg.client_id, msg.entity_id);
 

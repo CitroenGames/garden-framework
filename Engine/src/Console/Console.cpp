@@ -193,6 +193,11 @@ void Console::execFile(const std::string& filename)
 {
     std::string filepath = filename;
 
+    if (filepath.empty()) {
+        error("execFile: empty filename");
+        return;
+    }
+
     // Add config/ prefix if not absolute path
     if (filepath.find(':') == std::string::npos && filepath[0] != '/' && filepath[0] != '\\')
     {
