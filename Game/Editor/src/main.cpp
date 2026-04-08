@@ -1,6 +1,7 @@
 #define SDL_MAIN_HANDLED
 #include "EditorApp.hpp"
 #include "EditorConfig.hpp"
+#include "ProjectSelector.hpp"
 #include "Graphics/RenderAPI.hpp"
 #include <cstring>
 #include <string>
@@ -53,10 +54,18 @@ int main(int argc, char* argv[])
 
     std::string project_path = parseProjectPath(argc, argv);
 
+    // If no --project given, run the lightweight project selector first
+    if (project_path.empty())
+    {
+        ProjectSelector selector;
+        project_path = selector.run();
+        if (project_path.empty())
+            return 0; // user closed the selector
+    }
+
     EditorApp editor;
     editor.setEditorConfig(&editor_config);
-    if (!project_path.empty())
-        editor.setProjectPath(project_path);
+    editor.setProjectPath(project_path);
     if (!editor.initialize(api_type))
         return 1;
 

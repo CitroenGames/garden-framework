@@ -169,18 +169,8 @@ private:
     void renderEditorSettings();
     void renderGrid();
 
-    // Project browser (shown before editor when no --project given)
-    bool runProjectBrowser();
-    void renderProjectBrowser();
+    // Project manager
     ProjectManager m_project_manager;
-    char m_new_project_name[256] = "";
-    char m_new_project_dir[512] = "";
-    char m_open_project_path[512] = "";
-    bool m_show_new_project_popup = false;
-
-    // Template selection
-    std::vector<TemplateInfo> m_available_templates;
-    int m_selected_template = 0;
 
     // Packaging
     bool m_show_package_dialog = false;

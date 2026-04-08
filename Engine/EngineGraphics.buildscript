@@ -93,7 +93,7 @@ target_link_libraries(
     PUBLIC EngineCore
     PUBLIC vk-bootstrap
     PUBLIC VMA
-    PUBLIC imgui-docking
+    PUBLIC WHOLE_ARCHIVE imgui-docking
     PUBLIC imguizmo
     PUBLIC RmlUi
 )

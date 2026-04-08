@@ -19,6 +19,7 @@ sources = {
     backends/imgui_impl_dx11.cpp [windows]
     backends/imgui_impl_dx12.cpp [windows]
     backends/imgui_impl_metal.mm [macOS]
+    backends/imgui_impl_sdlrenderer2.cpp
 }
 headers = *.h
 includes = ., ${Vulkan_INCLUDE_DIRS}
