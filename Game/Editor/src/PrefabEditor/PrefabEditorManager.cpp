@@ -132,6 +132,9 @@ void PrefabEditorManager::renderAllPreviews()
         if (!mc || !mc->m_mesh || !mc->m_mesh->gpu_mesh)
             continue;
 
+        if (!m_render_api)
+            continue;
+
         if (inst->viewport_width > 0 && inst->viewport_height > 0)
             m_render_api->setPIEViewportSize(inst->viewport_id, inst->viewport_width, inst->viewport_height);
 
