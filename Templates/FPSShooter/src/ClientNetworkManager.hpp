@@ -10,6 +10,7 @@
 #include "shared/BitStream.hpp"
 #include "shared/NetworkSerializer.hpp"
 #include "shared/SharedMovement.hpp"
+#include "shared/SharedComponents.hpp"
 #include "shared/PredictionTypes.hpp"
 #include "shared/InterpolationBuffer.hpp"
 #include <entt/entt.hpp>
@@ -75,6 +76,16 @@ private:
 
     // Callbacks
     std::function<void()> on_disconnected;
+    std::function<void(const ShootResultMessage&)> on_shoot_result;
+    std::function<void(const DamageEventMessage&)> on_damage_event;
+    std::function<void(const PlayerDiedMessage&)> on_player_died;
+    std::function<void(const PlayerRespawnMessage&)> on_player_respawn;
+    std::function<void(const WeaponStateMessage&)> on_weapon_state;
+
+    // Input redundancy: store last few inputs to resend
+    static constexpr int INPUT_REDUNDANCY_COUNT = 2; // Send current + 2 older
+    InputSample recent_inputs[3] = {};  // Ring: [0]=current, [1]=prev, [2]=prev-prev
+    uint8_t recent_input_count = 0;
 
     // Client-side prediction
     InputRingBuffer<128> input_history;
@@ -129,9 +140,27 @@ public:
     // Stats
     const NetworkStats& getStats() const { return stats; }
 
+    // Send shoot command to server
+    void sendShootCommand(const glm::vec3& ray_origin, const glm::vec3& ray_direction, uint8_t weapon_type);
+
     // Callbacks
     void setOnDisconnected(std::function<void()> callback) {
         on_disconnected = callback;
+    }
+    void setOnShootResult(std::function<void(const ShootResultMessage&)> callback) {
+        on_shoot_result = callback;
+    }
+    void setOnDamageEvent(std::function<void(const DamageEventMessage&)> callback) {
+        on_damage_event = callback;
+    }
+    void setOnPlayerDied(std::function<void(const PlayerDiedMessage&)> callback) {
+        on_player_died = callback;
+    }
+    void setOnPlayerRespawn(std::function<void(const PlayerRespawnMessage&)> callback) {
+        on_player_respawn = callback;
+    }
+    void setOnWeaponState(std::function<void(const WeaponStateMessage&)> callback) {
+        on_weapon_state = callback;
     }
 
 private:
@@ -150,6 +179,11 @@ private:
     void handlePong(BitReader& reader);
     void handleCVarSync(BitReader& reader);
     void handleCVarInitialSync(BitReader& reader);
+    void handleShootResult(BitReader& reader);
+    void handleDamageEvent(BitReader& reader);
+    void handlePlayerDied(BitReader& reader);
+    void handlePlayerRespawn(BitReader& reader);
+    void handleWeaponState(BitReader& reader);
 
     // Ping/RTT
     void sendPing();

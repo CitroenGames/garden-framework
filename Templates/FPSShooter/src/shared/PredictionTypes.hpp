@@ -1,9 +1,42 @@
 #pragma once
 
 #include "SharedMovement.hpp"
+#include <glm/glm.hpp>
 #include <array>
 #include <cstdint>
 #include <cstddef>
+
+// Tracks visual smoothing offset for reconciliation.
+// When the server corrects our position, instead of snapping we blend the visual
+// offset to zero over ~100ms for a smooth correction.
+struct ReconciliationSmoothing
+{
+    glm::vec3 visual_offset = glm::vec3(0.0f);  // Current visual offset from logical position
+    static constexpr float DECAY_RATE = 0.85f;   // Per-frame decay (~100ms at 60fps to reach near-zero)
+    static constexpr float MIN_OFFSET = 0.001f;   // Below this, snap to zero
+
+    // Call when reconciliation produces a corrected position.
+    // old_display_pos: where we were visually before correction
+    // new_logical_pos: where correction says we should be
+    void onCorrection(const glm::vec3& old_display_pos, const glm::vec3& new_logical_pos)
+    {
+        visual_offset = old_display_pos - new_logical_pos;
+    }
+
+    // Decay the offset each frame
+    void update()
+    {
+        visual_offset *= DECAY_RATE;
+        if (glm::length(visual_offset) < MIN_OFFSET)
+            visual_offset = glm::vec3(0.0f);
+    }
+
+    // Get the smoothed display position
+    glm::vec3 getDisplayPosition(const glm::vec3& logical_position) const
+    {
+        return logical_position + visual_offset;
+    }
+};
 
 // One entry in the client's prediction history.
 // Stores the input that was sent and the predicted state that resulted.

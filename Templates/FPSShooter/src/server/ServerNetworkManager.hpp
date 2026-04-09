@@ -84,6 +84,7 @@ private:
     // Callbacks
     std::function<void(uint16_t)> on_client_connected;
     std::function<void(uint16_t)> on_client_disconnected;
+    std::function<void(uint16_t, const ShootCommandMessage&)> on_shoot_command;
 
     // Network stats
     NetworkStats stats;
@@ -121,6 +122,10 @@ public:
         on_client_disconnected = callback;
     }
 
+    void setOnShootCommand(std::function<void(uint16_t, const ShootCommandMessage&)> callback) {
+        on_shoot_command = callback;
+    }
+
     // Client management
     const ClientInfo* getClientInfo(uint16_t client_id) const;
     size_t getClientCount() const { return clients.size(); }
@@ -147,6 +152,7 @@ private:
     void handleInputCommand(uint16_t client_id, BitReader& reader);
     void handleDisconnect(uint16_t client_id, BitReader& reader);
     void handlePing(ENetPeer* peer, BitReader& reader);
+    void handleShootCommand(uint16_t client_id, BitReader& reader);
 
     // State synchronization
     WorldSnapshot generateWorldSnapshot();

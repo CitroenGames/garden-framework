@@ -172,14 +172,25 @@ void ClientNetworkManager::update(float delta_time)
         }
     }
 
-    // Rate-limited input sending (60Hz max)
+    // Rate-limited input sending (60Hz max) with redundant inputs
     if (connection_state == ConnectionState::CONNECTED && has_pending_input) {
         input_send_timer += delta_time;
         if (input_send_timer >= INPUT_SEND_INTERVAL) {
             input_send_timer = 0.0f;
             has_pending_input = false;
 
-            // Create and send input command
+            // Shift recent inputs history
+            recent_inputs[2] = recent_inputs[1];
+            recent_inputs[1] = recent_inputs[0];
+            recent_inputs[0].tick = client_tick;
+            recent_inputs[0].buttons = last_sent_input.buttons;
+            recent_inputs[0].camera_yaw = last_sent_input.camera_yaw;
+            recent_inputs[0].camera_pitch = last_sent_input.camera_pitch;
+            recent_inputs[0].move_forward = last_sent_input.move_forward;
+            recent_inputs[0].move_right = last_sent_input.move_right;
+            if (recent_input_count < 3) recent_input_count++;
+
+            // Create and send input command with redundant older inputs
             BitWriter writer;
             InputCommandMessage msg;
             msg.client_tick = client_tick;
@@ -190,7 +201,10 @@ void ClientNetworkManager::update(float delta_time)
             msg.move_forward = last_sent_input.move_forward;
             msg.move_right = last_sent_input.move_right;
 
-            NetworkSerializer::serialize(writer, msg);
+            // Include up to 2 older inputs for redundancy
+            uint8_t redundant_count = (recent_input_count > 1) ? static_cast<uint8_t>(recent_input_count - 1) : 0;
+            if (redundant_count > INPUT_REDUNDANCY_COUNT) redundant_count = INPUT_REDUNDANCY_COUNT;
+            NetworkSerializer::serialize(writer, msg, &recent_inputs[1], redundant_count);
             sendUnreliableMessage(writer);
         }
     }
@@ -316,6 +330,26 @@ void ClientNetworkManager::handleServerMessage(ENetEvent& event)
             handleCVarInitialSync(reader);
             break;
 
+        case MessageType::SHOOT_RESULT:
+            handleShootResult(reader);
+            break;
+
+        case MessageType::DAMAGE_EVENT:
+            handleDamageEvent(reader);
+            break;
+
+        case MessageType::PLAYER_DIED:
+            handlePlayerDied(reader);
+            break;
+
+        case MessageType::PLAYER_RESPAWN:
+            handlePlayerRespawn(reader);
+            break;
+
+        case MessageType::WEAPON_STATE:
+            handleWeaponState(reader);
+            break;
+
         default:
             LOG_ENGINE_WARN("Received unknown message type: {0}", static_cast<int>(msg_type));
             break;
@@ -395,13 +429,14 @@ void ClientNetworkManager::handleWorldStateUpdate(BitReader& reader)
             createOrUpdateEntity(update);
 
             // Push snapshot into interpolation buffer for smooth rendering
-            if (update.hasTransform()) {
+            if (update.hasTransform() || update.hasRotation()) {
                 auto& buf = interp_buffers[update.entity_id];
                 buf.addSnapshot(
                     msg.server_tick,
-                    update.position,
+                    update.hasTransform() ? update.position : glm::vec3(0.0f),
                     update.hasVelocity() ? update.velocity : glm::vec3(0.0f),
-                    update.hasGrounded() ? (update.grounded != 0) : false
+                    update.hasGrounded() ? (update.grounded != 0) : false,
+                    update.hasRotation() ? update.rotation_y : 0.0f
                 );
             }
         }
@@ -541,6 +576,14 @@ void ClientNetworkManager::createOrUpdateEntity(const EntityUpdateData& update)
             TransformComponent transform;
             transform.position = update.position;
             game_world->registry.emplace<TransformComponent>(entity, transform);
+        }
+    }
+
+    // Update rotation if present
+    if (update.hasRotation()) {
+        if (game_world->registry.all_of<TransformComponent>(entity)) {
+            auto& transform = game_world->registry.get<TransformComponent>(entity);
+            transform.rotation.y = update.rotation_y;
         }
     }
 
@@ -699,9 +742,11 @@ void ClientNetworkManager::interpolateRemoteEntities()
             continue;
 
         glm::vec3 interpolated_pos;
-        if (buffer.interpolate(render_tick, interpolated_pos)) {
+        float interpolated_rot;
+        if (buffer.interpolate(render_tick, interpolated_pos, interpolated_rot)) {
             auto& transform = game_world->registry.get<TransformComponent>(entity);
             transform.position = interpolated_pos;
+            transform.rotation.y = interpolated_rot;
         }
     }
 }
@@ -725,6 +770,88 @@ bool ClientNetworkManager::popAuthoritativeUpdate(MovementState& out_state, uint
     out_tick = last_server_processed_tick;
     has_authoritative_update = false;
     return true;
+}
+
+void ClientNetworkManager::sendShootCommand(const glm::vec3& ray_origin, const glm::vec3& ray_direction, uint8_t weapon_type)
+{
+    if (!isConnected() || server_peer == nullptr) return;
+
+    BitWriter writer;
+    ShootCommandMessage msg;
+    msg.client_tick = client_tick;
+    msg.ray_origin = ray_origin;
+    msg.ray_direction = ray_direction;
+    msg.weapon_type = weapon_type;
+    NetworkSerializer::serialize(writer, msg);
+    sendUnreliableMessage(writer);
+}
+
+void ClientNetworkManager::handleShootResult(BitReader& reader)
+{
+    ShootResultMessage msg;
+    if (!NetworkSerializer::deserialize(reader, msg)) {
+        LOG_ENGINE_WARN("Failed to deserialize SHOOT_RESULT");
+        return;
+    }
+    if (on_shoot_result) on_shoot_result(msg);
+}
+
+void ClientNetworkManager::handleDamageEvent(BitReader& reader)
+{
+    DamageEventMessage msg;
+    if (!NetworkSerializer::deserialize(reader, msg)) {
+        LOG_ENGINE_WARN("Failed to deserialize DAMAGE_EVENT");
+        return;
+    }
+    if (on_damage_event) on_damage_event(msg);
+}
+
+void ClientNetworkManager::handlePlayerDied(BitReader& reader)
+{
+    PlayerDiedMessage msg;
+    if (!NetworkSerializer::deserialize(reader, msg)) {
+        LOG_ENGINE_WARN("Failed to deserialize PLAYER_DIED");
+        return;
+    }
+    LOG_ENGINE_INFO("Player {} killed by player {}", msg.victim_client_id, msg.killer_client_id);
+    if (on_player_died) on_player_died(msg);
+}
+
+void ClientNetworkManager::handlePlayerRespawn(BitReader& reader)
+{
+    PlayerRespawnMessage msg;
+    if (!NetworkSerializer::deserialize(reader, msg)) {
+        LOG_ENGINE_WARN("Failed to deserialize PLAYER_RESPAWN");
+        return;
+    }
+
+    // Update entity position
+    auto it = network_id_to_entity.find(msg.entity_id);
+    if (it != network_id_to_entity.end() && game_world != nullptr) {
+        entt::entity entity = it->second;
+        if (game_world->registry.valid(entity)) {
+            if (game_world->registry.all_of<TransformComponent>(entity)) {
+                game_world->registry.get<TransformComponent>(entity).position = msg.spawn_position;
+            }
+            if (game_world->registry.all_of<RigidBodyComponent>(entity)) {
+                game_world->registry.get<RigidBodyComponent>(entity).velocity = glm::vec3(0);
+            }
+        }
+    }
+
+    LOG_ENGINE_INFO("Player {} respawned at ({},{},{})", msg.client_id,
+        msg.spawn_position.x, msg.spawn_position.y, msg.spawn_position.z);
+    if (on_player_respawn) on_player_respawn(msg);
+}
+
+void ClientNetworkManager::handleWeaponState(BitReader& reader)
+{
+    WeaponStateMessage msg;
+    if (!NetworkSerializer::deserialize(reader, msg)) {
+        LOG_ENGINE_WARN("Failed to deserialize WEAPON_STATE");
+        return;
+    }
+    if (on_weapon_state) on_weapon_state(msg);
 }
 
 } // namespace Game
