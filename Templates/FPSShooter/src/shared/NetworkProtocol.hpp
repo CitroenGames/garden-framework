@@ -27,6 +27,14 @@ enum class MessageType : uint8_t
     INPUT_COMMAND = 10,       // Client → Server
     WORLD_STATE_UPDATE = 11,  // Server → Clients
 
+    // Combat (Reliable unless noted)
+    SHOOT_COMMAND = 12,       // Client → Server (Unreliable): player fired weapon
+    SHOOT_RESULT = 13,        // Server → Clients (Unreliable): hit/miss result for effects
+    DAMAGE_EVENT = 14,        // Server → Client (Reliable): damage dealt notification
+    PLAYER_DIED = 15,         // Server → Clients (Reliable): player killed
+    PLAYER_RESPAWN = 16,      // Server → Clients (Reliable): player respawned
+    WEAPON_STATE = 17,        // Server → Client (Unreliable): ammo/reload sync
+
     // Debugging
     PING = 20,
     PONG = 21,
@@ -113,16 +121,30 @@ struct DespawnPlayerMessage
     uint32_t entity_id = 0;  // Network entity ID
 };
 
-struct InputCommandMessage
+// Single input sample for redundant input sending
+struct InputSample
 {
-    MessageType type = MessageType::INPUT_COMMAND;
-    uint32_t client_tick = 0;     // For lag compensation
-    uint32_t last_received_tick = 0;  // Acknowledge server tick
-    uint8_t buttons = 0;          // Bitfield of input buttons
+    uint32_t tick = 0;
+    uint8_t buttons = 0;
     float camera_yaw = 0.0f;
     float camera_pitch = 0.0f;
     float move_forward = 0.0f;
     float move_right = 0.0f;
+};
+
+struct InputCommandMessage
+{
+    MessageType type = MessageType::INPUT_COMMAND;
+    uint32_t client_tick = 0;         // Latest tick in this packet
+    uint32_t last_received_tick = 0;  // Acknowledge server tick
+    uint8_t input_count = 1;          // Number of inputs (1-3 for redundancy)
+    // Primary input (always present)
+    uint8_t buttons = 0;
+    float camera_yaw = 0.0f;
+    float camera_pitch = 0.0f;
+    float move_forward = 0.0f;
+    float move_right = 0.0f;
+    // Redundant inputs stored separately during serialization
 };
 
 struct EntityUpdateData
@@ -134,11 +156,13 @@ struct EntityUpdateData
     glm::vec3 velocity = glm::vec3(0, 0, 0);         // If FLAG_VELOCITY
     uint8_t grounded = 0;                             // If FLAG_GROUNDED
     glm::vec3 ground_normal = glm::vec3(0, 1, 0);    // If FLAG_GROUNDED (for prediction reconciliation)
+    float rotation_y = 0.0f;                          // If FLAG_ROTATION (yaw in radians)
 
     // Helper to check flags
     bool hasTransform() const { return (flags & ComponentFlags::TRANSFORM) != 0; }
     bool hasVelocity() const { return (flags & ComponentFlags::VELOCITY) != 0; }
     bool hasGrounded() const { return (flags & ComponentFlags::GROUNDED) != 0; }
+    bool hasRotation() const { return (flags & ComponentFlags::ROTATION) != 0; }
     bool shouldDelete() const { return (flags & ComponentFlags::DELETED) != 0; }
 };
 
@@ -162,6 +186,67 @@ struct PongMessage
 {
     MessageType type = MessageType::PONG;
     uint32_t timestamp = 0;  // Echo back the ping timestamp
+};
+
+// Shoot command: client tells server it fired
+struct ShootCommandMessage
+{
+    MessageType type = MessageType::SHOOT_COMMAND;
+    uint32_t client_tick = 0;         // Tick when client fired (for lag compensation)
+    glm::vec3 ray_origin = glm::vec3(0);   // Camera position
+    glm::vec3 ray_direction = glm::vec3(0, 0, -1); // Camera forward
+    uint8_t weapon_type = 0;          // WeaponType enum value
+};
+
+// Shoot result: server broadcasts hit/miss for visual effects
+struct ShootResultMessage
+{
+    MessageType type = MessageType::SHOOT_RESULT;
+    uint16_t shooter_client_id = 0;
+    glm::vec3 ray_origin = glm::vec3(0);
+    glm::vec3 hit_position = glm::vec3(0);  // End point of tracer (hit point or max range)
+    uint32_t hit_entity_id = 0;       // 0 = miss
+    uint8_t weapon_type = 0;
+};
+
+// Damage event: server tells specific client they took damage
+struct DamageEventMessage
+{
+    MessageType type = MessageType::DAMAGE_EVENT;
+    uint16_t attacker_client_id = 0;
+    uint16_t victim_client_id = 0;
+    int32_t damage = 0;
+    int32_t health_remaining = 0;
+    glm::vec3 hit_position = glm::vec3(0);
+};
+
+// Player died: broadcast to all clients
+struct PlayerDiedMessage
+{
+    MessageType type = MessageType::PLAYER_DIED;
+    uint16_t victim_client_id = 0;
+    uint16_t killer_client_id = 0;
+    glm::vec3 death_position = glm::vec3(0);
+};
+
+// Player respawned: broadcast to all clients
+struct PlayerRespawnMessage
+{
+    MessageType type = MessageType::PLAYER_RESPAWN;
+    uint16_t client_id = 0;
+    uint32_t entity_id = 0;
+    glm::vec3 spawn_position = glm::vec3(0);
+    int32_t health = 100;
+};
+
+// Weapon state sync: server periodically syncs weapon state
+struct WeaponStateMessage
+{
+    MessageType type = MessageType::WEAPON_STATE;
+    int32_t ammo = 0;
+    int32_t max_ammo = 0;
+    uint8_t weapon_type = 0;
+    uint8_t reloading = 0;
 };
 
 // ConVar sync message - single cvar update

@@ -15,13 +15,15 @@ struct ComponentSnapshot
     glm::vec3 velocity = glm::vec3(0, 0, 0);
     bool grounded = false;
     glm::vec3 ground_normal = glm::vec3(0, 1, 0);
+    float rotation_y = 0.0f;  // Yaw rotation in degrees
 
     // Comparison for delta compression
     bool operator==(const ComponentSnapshot& other) const {
         const float epsilon = 0.001f;
         return glm::distance(position, other.position) < epsilon &&
                glm::distance(velocity, other.velocity) < epsilon &&
-               grounded == other.grounded;
+               grounded == other.grounded &&
+               std::abs(rotation_y - other.rotation_y) < epsilon;
     }
 
     bool operator!=(const ComponentSnapshot& other) const {

@@ -8,6 +8,7 @@
 #include "Console/Console.hpp"
 #include <entt/entt.hpp>
 #include <cstring>
+#include <cmath>
 #include <glm/glm.hpp>
 
 namespace Game {
@@ -191,6 +192,14 @@ void ServerNetworkManager::handleClientMessage(ENetEvent& event)
             break;
         }
 
+        case MessageType::SHOOT_COMMAND: {
+            auto it = peer_to_client_id.find(event.peer);
+            if (it != peer_to_client_id.end()) {
+                handleShootCommand(it->second, reader);
+            }
+            break;
+        }
+
         case MessageType::PING:
             handlePing(event.peer, reader);
             break;
@@ -257,7 +266,8 @@ void ServerNetworkManager::handleConnectRequest(ENetPeer* peer, BitReader& reade
 void ServerNetworkManager::handleInputCommand(uint16_t client_id, BitReader& reader)
 {
     InputCommandMessage msg;
-    if (!NetworkSerializer::deserialize(reader, msg)) {
+    std::vector<InputSample> redundant_inputs;
+    if (!NetworkSerializer::deserialize(reader, msg, redundant_inputs)) {
         LOG_ENGINE_WARN("Failed to deserialize input from client {0}", client_id);
         return;
     }
@@ -269,7 +279,6 @@ void ServerNetworkManager::handleInputCommand(uint16_t client_id, BitReader& rea
 
     // Update acknowledged tick
     it->second.acknowledgeSnapshot(msg.last_received_tick);
-    it->second.info.last_input_tick = msg.client_tick;
 
     // Get player entity for this client
     uint32_t player_net_id = it->second.info.player_entity_network_id;
@@ -287,38 +296,87 @@ void ServerNetworkManager::handleInputCommand(uint16_t client_id, BitReader& rea
         return;
     }
 
+    // Don't process movement for dead players
+    if (game_world->registry.all_of<HealthComponent>(player_entity)) {
+        auto& health = game_world->registry.get<HealthComponent>(player_entity);
+        if (!health.alive) return;
+    }
+
     auto& player = game_world->registry.get<PlayerComponent>(player_entity);
     auto& transform = game_world->registry.get<TransformComponent>(player_entity);
     auto& rigidbody = game_world->registry.get<RigidBodyComponent>(player_entity);
-
-    // Apply camera rotation
-    transform.rotation.y = msg.camera_yaw;
-    transform.rotation.x = msg.camera_pitch;
-
-    // Run shared deterministic movement simulation
-    MovementInput movement_input;
-    movement_input.move_forward = msg.move_forward;
-    movement_input.move_right = msg.move_right;
-    movement_input.camera_yaw = msg.camera_yaw;
-    movement_input.camera_pitch = msg.camera_pitch;
-    movement_input.buttons = msg.buttons;
-
-    MovementState movement_state;
-    movement_state.position = transform.position;
-    movement_state.velocity = rigidbody.velocity;
-    movement_state.grounded = player.grounded;
-    movement_state.ground_normal = player.ground_normal;
 
     MovementConfig movement_config;
     movement_config.speed = player.speed;
     movement_config.jump_force = player.jump_force;
     movement_config.fixed_delta = game_world->fixed_delta;
 
-    MovementState result = SharedMovement::simulate(movement_input, movement_state, movement_config);
+    // Process redundant (older) inputs first if they haven't been processed yet
+    for (const auto& sample : redundant_inputs) {
+        if (sample.tick > it->second.info.last_input_tick) {
+            transform.rotation.y = sample.camera_yaw;
+            transform.rotation.x = sample.camera_pitch;
 
-    transform.position = result.position;
-    rigidbody.velocity = result.velocity;
-    player.grounded = result.grounded;
+            MovementInput move_input;
+            move_input.move_forward = sample.move_forward;
+            move_input.move_right = sample.move_right;
+            move_input.camera_yaw = sample.camera_yaw;
+            move_input.camera_pitch = sample.camera_pitch;
+            move_input.buttons = sample.buttons;
+
+            MovementState move_state;
+            move_state.position = transform.position;
+            move_state.velocity = rigidbody.velocity;
+            move_state.grounded = player.grounded;
+            move_state.ground_normal = player.ground_normal;
+
+            MovementState result = SharedMovement::simulate(move_input, move_state, movement_config);
+            transform.position = result.position;
+            rigidbody.velocity = result.velocity;
+            player.grounded = result.grounded;
+
+            it->second.info.last_input_tick = sample.tick;
+        }
+    }
+
+    // Process the primary (latest) input
+    if (msg.client_tick > it->second.info.last_input_tick) {
+        transform.rotation.y = msg.camera_yaw;
+        transform.rotation.x = msg.camera_pitch;
+
+        MovementInput movement_input;
+        movement_input.move_forward = msg.move_forward;
+        movement_input.move_right = msg.move_right;
+        movement_input.camera_yaw = msg.camera_yaw;
+        movement_input.camera_pitch = msg.camera_pitch;
+        movement_input.buttons = msg.buttons;
+
+        MovementState movement_state;
+        movement_state.position = transform.position;
+        movement_state.velocity = rigidbody.velocity;
+        movement_state.grounded = player.grounded;
+        movement_state.ground_normal = player.ground_normal;
+
+        MovementState result = SharedMovement::simulate(movement_input, movement_state, movement_config);
+        transform.position = result.position;
+        rigidbody.velocity = result.velocity;
+        player.grounded = result.grounded;
+
+        it->second.info.last_input_tick = msg.client_tick;
+    }
+}
+
+void ServerNetworkManager::handleShootCommand(uint16_t client_id, BitReader& reader)
+{
+    ShootCommandMessage msg;
+    if (!NetworkSerializer::deserialize(reader, msg)) {
+        LOG_ENGINE_WARN("Failed to deserialize shoot command from client {0}", client_id);
+        return;
+    }
+
+    if (on_shoot_command) {
+        on_shoot_command(client_id, msg);
+    }
 }
 
 void ServerNetworkManager::handleDisconnect(uint16_t client_id, BitReader& reader)
@@ -380,6 +438,7 @@ WorldSnapshot ServerNetworkManager::generateWorldSnapshot()
 
         ComponentSnapshot comp_snapshot;
         comp_snapshot.position = transform.position;
+        comp_snapshot.rotation_y = transform.rotation.y;
 
         // Add velocity if entity has rigidbody
         if (game_world->registry.all_of<RigidBodyComponent>(entity)) {
@@ -427,11 +486,12 @@ std::vector<EntityUpdateData> ServerNetworkManager::generateDeltaUpdate(
             update.flags = ComponentFlags::DELETED;
         } else if (!baseline_entity) {
             // New entity - send all data
-            update.flags |= ComponentFlags::TRANSFORM | ComponentFlags::VELOCITY | ComponentFlags::GROUNDED;
+            update.flags |= ComponentFlags::TRANSFORM | ComponentFlags::VELOCITY | ComponentFlags::GROUNDED | ComponentFlags::ROTATION;
             update.position = entity_snapshot.components.position;
             update.velocity = entity_snapshot.components.velocity;
             update.grounded = entity_snapshot.components.grounded ? 1 : 0;
             update.ground_normal = entity_snapshot.components.ground_normal;
+            update.rotation_y = entity_snapshot.components.rotation_y;
         } else {
             // Delta compress - only send changed components
             const float epsilon = 0.01f;
@@ -451,6 +511,11 @@ std::vector<EntityUpdateData> ServerNetworkManager::generateDeltaUpdate(
                 update.flags |= ComponentFlags::GROUNDED;
                 update.grounded = entity_snapshot.components.grounded ? 1 : 0;
                 update.ground_normal = entity_snapshot.components.ground_normal;
+            }
+
+            if (std::abs(entity_snapshot.components.rotation_y - baseline_entity->components.rotation_y) > epsilon) {
+                update.flags |= ComponentFlags::ROTATION;
+                update.rotation_y = entity_snapshot.components.rotation_y;
             }
         }
 
