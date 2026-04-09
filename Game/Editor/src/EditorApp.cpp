@@ -2248,14 +2248,14 @@ void EditorApp::renderGrid()
         float pos = static_cast<float>(i) * spacing;
 
         // Lines along Z axis
-        glm::vec3 color_z = (i == 0) ? axis_x_color : grid_color;
+        glm::vec3 color_z = (i == 0) ? axis_z_color : grid_color;
         DebugDraw::get().drawLine(
             glm::vec3(pos, y, -half_extent * spacing),
             glm::vec3(pos, y, half_extent * spacing),
             color_z);
 
         // Lines along X axis
-        glm::vec3 color_x = (i == 0) ? axis_z_color : grid_color;
+        glm::vec3 color_x = (i == 0) ? axis_x_color : grid_color;
         DebugDraw::get().drawLine(
             glm::vec3(-half_extent * spacing, y, pos),
             glm::vec3(half_extent * spacing, y, pos),
@@ -2645,11 +2645,38 @@ void EditorApp::pasteEntity()
         auto& rb = m_world.registry.emplace<RigidBodyComponent>(entity);
         rb.mass          = le.mass;
         rb.apply_gravity = le.apply_gravity;
+        rb.motion_type   = stringToBodyMotionType(le.body_motion_type);
     }
 
     // Collider
     if (le.has_collider)
-        m_world.registry.emplace<ColliderComponent>(entity);
+    {
+        auto& col = m_world.registry.emplace<ColliderComponent>(entity);
+        col.shape_type = stringToColliderShapeType(le.collider_shape_type);
+        col.box_half_extents = le.collider_box_half_extents;
+        col.sphere_radius = le.collider_sphere_radius;
+        col.capsule_half_height = le.collider_capsule_half_height;
+        col.capsule_radius = le.collider_capsule_radius;
+        col.cylinder_half_height = le.collider_cylinder_half_height;
+        col.cylinder_radius = le.collider_cylinder_radius;
+        col.friction = le.collider_friction;
+        col.restitution = le.collider_restitution;
+    }
+
+    // Constraint
+    if (le.has_constraint)
+    {
+        auto& cc = m_world.registry.emplace<ConstraintComponent>(entity);
+        cc.type = stringToConstraintType(le.constraint_type);
+        cc.target_entity_name = le.constraint_target_name;
+        cc.anchor_1 = le.constraint_anchor_1;
+        cc.anchor_2 = le.constraint_anchor_2;
+        cc.hinge_axis = le.constraint_hinge_axis;
+        cc.hinge_min_limit = le.constraint_hinge_min;
+        cc.hinge_max_limit = le.constraint_hinge_max;
+        cc.min_distance = le.constraint_min_distance;
+        cc.max_distance = le.constraint_max_distance;
+    }
 
     // Player
     if (le.type == EntityType::Player)
