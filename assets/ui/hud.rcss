@@ -4,7 +4,7 @@ body {
     color: #ffffffdd;
 }
 
-/* Top-left info panel */
+/* Top-left debug info panel */
 #info-panel {
     position: absolute;
     top: 12dp;
@@ -32,7 +32,25 @@ body {
     color: #66ff66;
 }
 
-/* Bottom-center crosshair */
+/* Top-right kill feed */
+#kill-feed {
+    position: absolute;
+    top: 12dp;
+    right: 12dp;
+    padding: 8dp 14dp;
+    background-color: #00000066;
+    border-radius: 6dp;
+    text-align: right;
+    max-width: 300dp;
+}
+
+.kill-feed-text {
+    font-size: 13dp;
+    color: #ffcc66;
+    white-space: pre-wrap;
+}
+
+/* Center crosshair */
 #crosshair {
     position: absolute;
     top: 50%;
@@ -43,34 +61,57 @@ body {
     height: 16dp;
     text-align: center;
     font-size: 16dp;
-    color: #ffffffaa;
+    color: #ffffffcc;
 }
 
-/* Bottom-left status bar */
-#status-bar {
+/* Bottom-left health panel */
+#health-panel {
     position: absolute;
     bottom: 12dp;
     left: 12dp;
     padding: 8dp 14dp;
     background-color: #00000066;
     border-radius: 6dp;
+    min-width: 220dp;
 }
 
-#status-bar .status-text {
+.health-bar-bg {
+    width: 200dp;
+    height: 8dp;
+    background-color: #333333;
+    border-radius: 4dp;
+    margin-bottom: 4dp;
+}
+
+.health-bar-fill {
+    height: 8dp;
+    background-color: #44cc44;
+    border-radius: 4dp;
+    min-width: 0dp;
+}
+
+.health-text {
+    font-size: 18dp;
+    font-weight: bold;
+    color: #ffffff;
+    margin-bottom: 4dp;
+}
+
+.status-text {
     font-size: 13dp;
     color: #cccccc;
 }
 
-#status-bar .grounded {
+.grounded {
     color: #66ff66;
 }
 
-#status-bar .airborne {
+.airborne {
     color: #ff6666;
 }
 
-/* Bottom-right network info */
-#net-panel {
+/* Bottom-right ammo + network panel */
+#ammo-panel {
     position: absolute;
     bottom: 12dp;
     right: 12dp;
@@ -78,14 +119,52 @@ body {
     background-color: #00000066;
     border-radius: 6dp;
     text-align: right;
+    min-width: 140dp;
 }
 
-#net-panel .label {
+.ammo-text {
+    font-size: 22dp;
+    font-weight: bold;
+    color: #ffffff;
+    margin-bottom: 4dp;
+}
+
+.score-text {
+    font-size: 13dp;
+    color: #88ccff;
+    margin-bottom: 6dp;
+}
+
+#ammo-panel .label {
     font-size: 11dp;
     color: #888888;
 }
 
-#net-panel .value {
+#ammo-panel .value {
     font-size: 13dp;
     color: #88ccff;
+}
+
+/* Death overlay */
+#death-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background-color: #00000088;
+    text-align: center;
+}
+
+.death-text {
+    font-size: 48dp;
+    font-weight: bold;
+    color: #ff4444;
+    margin-top: 35%;
+}
+
+.respawn-text {
+    font-size: 20dp;
+    color: #ffffffcc;
+    margin-top: 16dp;
 }

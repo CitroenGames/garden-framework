@@ -11,6 +11,8 @@
 #include "Components/camera.hpp"
 #include "shared/SharedComponents.hpp"
 #include "shared/SharedMovement.hpp"
+#include "shared/WeaponTypes.hpp"
+#include "shared/WeaponSystem.hpp"
 #include "ClientNetworkManager.hpp"
 #include "GameHUD.hpp"
 #include "PlayerRepSystem.hpp"
@@ -41,6 +43,28 @@ static GameHUD g_hud;
 static entt::entity g_player_entity = entt::null;
 static entt::entity g_freecam_entity = entt::null;
 static entt::entity g_player_rep_entity = entt::null;
+
+// Combat state
+static ReconciliationSmoothing g_recon_smoothing;
+static int32_t g_local_health = 100;
+static int32_t g_local_max_health = 100;
+static bool g_local_alive = true;
+static int32_t g_local_ammo = 30;
+static int32_t g_local_max_ammo = 30;
+static bool g_local_reloading = false;
+static float g_local_fire_cooldown = 0.0f;
+static int32_t g_local_kills = 0;
+static int32_t g_local_deaths = 0;
+static float g_death_timer = 0.0f; // Countdown shown on death screen
+static constexpr float RESPAWN_DELAY = 3.0f;
+
+// Kill feed entries
+struct KillFeedEntry {
+    std::string killer_name;
+    std::string victim_name;
+    float timer = 5.0f;
+};
+static std::vector<KillFeedEntry> g_kill_feed;
 
 // ---- DLL exports ----
 
@@ -73,6 +97,62 @@ GAME_API bool gardenGameInit(EngineServices* services)
     }
 
     g_network.setWorld(services->game_world);
+
+    // Set up combat callbacks
+    g_network.setOnShootResult([](const ShootResultMessage& msg) {
+        // Draw tracer line for visual feedback
+        glm::vec3 color = (msg.hit_entity_id != 0) ? glm::vec3(1.0f, 0.3f, 0.0f) : glm::vec3(1.0f, 1.0f, 0.5f);
+        DebugDraw::get().addLine(msg.ray_origin, msg.hit_position, color, 0.15f);
+    });
+
+    g_network.setOnDamageEvent([](const DamageEventMessage& msg) {
+        if (msg.victim_client_id == g_network.getClientId()) {
+            g_local_health = msg.health_remaining;
+            LOG_ENGINE_INFO("Took {} damage! Health: {}", msg.damage, g_local_health);
+        }
+    });
+
+    g_network.setOnPlayerDied([](const PlayerDiedMessage& msg) {
+        // Add kill feed entry
+        KillFeedEntry entry;
+        entry.killer_name = "Player " + std::to_string(msg.killer_client_id);
+        entry.victim_name = "Player " + std::to_string(msg.victim_client_id);
+        entry.timer = 5.0f;
+        g_kill_feed.push_back(entry);
+
+        if (msg.victim_client_id == g_network.getClientId()) {
+            g_local_alive = false;
+            g_local_health = 0;
+            g_local_deaths++;
+            g_death_timer = RESPAWN_DELAY;
+            LOG_ENGINE_INFO("You died! Killed by Player {}", msg.killer_client_id);
+        }
+        if (msg.killer_client_id == g_network.getClientId() &&
+            msg.killer_client_id != msg.victim_client_id) {
+            g_local_kills++;
+        }
+    });
+
+    g_network.setOnPlayerRespawn([](const PlayerRespawnMessage& msg) {
+        if (msg.client_id == g_network.getClientId()) {
+            g_local_alive = true;
+            g_local_health = msg.health;
+            g_local_max_health = msg.health;
+            g_death_timer = 0.0f;
+            g_local_fire_cooldown = 0.0f;
+            g_local_reloading = false;
+
+            // Reset weapon
+            const auto& def = getWeaponDef(WeaponType::RIFLE);
+            g_local_ammo = def.max_ammo;
+            g_local_max_ammo = def.max_ammo;
+
+            // Reset reconciliation smoothing
+            g_recon_smoothing.visual_offset = glm::vec3(0.0f);
+
+            LOG_ENGINE_INFO("Respawned with {} health", msg.health);
+        }
+    });
 
     // Initialize HUD
     if (RmlUiManager::get().isInitialized())
@@ -127,6 +207,24 @@ GAME_API void gardenGameUpdate(float delta_time)
     // Network update
     g_network.update(delta_time);
 
+    // Update kill feed timers
+    for (auto it = g_kill_feed.begin(); it != g_kill_feed.end(); ) {
+        it->timer -= delta_time;
+        if (it->timer <= 0.0f) {
+            it = g_kill_feed.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    // Update death timer
+    if (!g_local_alive && g_death_timer > 0.0f) {
+        g_death_timer -= delta_time;
+    }
+
+    // Update local weapon cooldowns
+    if (g_local_fire_cooldown > 0.0f) g_local_fire_cooldown -= delta_time;
+
     // Send player input to server and run client-side prediction
     if (g_network.isConnected() && input_manager)
     {
@@ -136,12 +234,14 @@ GAME_API void gardenGameUpdate(float delta_time)
         Game::InputState input_state;
         input_state.buttons = 0;
 
-        if (input_manager->is_key_held(SDL_SCANCODE_W)) input_state.buttons |= InputFlags::MOVE_FORWARD;
-        if (input_manager->is_key_held(SDL_SCANCODE_S)) input_state.buttons |= InputFlags::MOVE_BACK;
-        if (input_manager->is_key_held(SDL_SCANCODE_A)) input_state.buttons |= InputFlags::MOVE_LEFT;
-        if (input_manager->is_key_held(SDL_SCANCODE_D)) input_state.buttons |= InputFlags::MOVE_RIGHT;
-        if (input_manager->is_key_held(SDL_SCANCODE_SPACE)) input_state.buttons |= InputFlags::JUMP;
-        if (input_manager->is_key_held(SDL_SCANCODE_E)) input_state.buttons |= InputFlags::USE;
+        if (g_local_alive) {
+            if (input_manager->is_key_held(SDL_SCANCODE_W)) input_state.buttons |= InputFlags::MOVE_FORWARD;
+            if (input_manager->is_key_held(SDL_SCANCODE_S)) input_state.buttons |= InputFlags::MOVE_BACK;
+            if (input_manager->is_key_held(SDL_SCANCODE_A)) input_state.buttons |= InputFlags::MOVE_LEFT;
+            if (input_manager->is_key_held(SDL_SCANCODE_D)) input_state.buttons |= InputFlags::MOVE_RIGHT;
+            if (input_manager->is_key_held(SDL_SCANCODE_SPACE)) input_state.buttons |= InputFlags::JUMP;
+            if (input_manager->is_key_held(SDL_SCANCODE_E)) input_state.buttons |= InputFlags::USE;
+        }
 
         input_state.camera_yaw = game_world->world_camera.rotation.y;
         input_state.camera_pitch = game_world->world_camera.rotation.x;
@@ -153,8 +253,38 @@ GAME_API void gardenGameUpdate(float delta_time)
         if (input_state.buttons & InputFlags::MOVE_RIGHT) input_state.move_right += 1.0f;
         if (input_state.buttons & InputFlags::MOVE_LEFT) input_state.move_right -= 1.0f;
 
-        // Client-side prediction
-        if (game_world->registry.valid(g_player_entity) &&
+        // Handle shooting (Mouse1 / ATTACK)
+        if (g_local_alive && input_manager->is_mouse_button_held(1) && g_local_fire_cooldown <= 0.0f && !g_local_reloading && g_local_ammo > 0)
+        {
+            const auto& weapon_def = getWeaponDef(WeaponType::RIFLE);
+
+            // Consume ammo locally (client prediction)
+            g_local_ammo--;
+            g_local_fire_cooldown = weapon_def.fire_rate;
+
+            // Auto-reload
+            if (g_local_ammo <= 0) {
+                g_local_reloading = true;
+            }
+
+            // Send shoot command to server
+            glm::vec3 cam_pos = game_world->world_camera.getPosition();
+            glm::vec3 cam_fwd = game_world->world_camera.camera_forward();
+            g_network.sendShootCommand(cam_pos, cam_fwd, static_cast<uint8_t>(WeaponType::RIFLE));
+        }
+
+        // Handle reload (R key)
+        if (g_local_alive && input_manager->is_key_pressed(SDL_SCANCODE_R) && !g_local_reloading) {
+            const auto& weapon_def = getWeaponDef(WeaponType::RIFLE);
+            if (g_local_ammo < weapon_def.max_ammo) {
+                g_local_reloading = true;
+                // Reload timer handled by server, client just shows the state
+            }
+        }
+
+        // Client-side prediction for movement
+        if (g_local_alive &&
+            game_world->registry.valid(g_player_entity) &&
             game_world->registry.all_of<TransformComponent, RigidBodyComponent, PlayerComponent>(g_player_entity))
         {
             auto& trans = game_world->registry.get<TransformComponent>(g_player_entity);
@@ -188,11 +318,14 @@ GAME_API void gardenGameUpdate(float delta_time)
             rb.velocity = result.velocity;
             pc.grounded = result.grounded;
 
-            // Server reconciliation
+            // Server reconciliation with smooth visual correction
             MovementState server_state;
             uint32_t server_tick;
             if (g_network.popAuthoritativeUpdate(server_state, server_tick))
             {
+                // Save current display position before correction
+                glm::vec3 old_display_pos = g_recon_smoothing.getDisplayPosition(trans.position);
+
                 float pos_error = glm::distance(server_state.position, trans.position);
                 if (pos_error > 0.01f)
                 {
@@ -207,8 +340,14 @@ GAME_API void gardenGameUpdate(float delta_time)
                     rb.velocity = replay_state.velocity;
                     pc.grounded = replay_state.grounded;
                     pc.ground_normal = replay_state.ground_normal;
+
+                    // Apply smooth visual correction instead of snap
+                    g_recon_smoothing.onCorrection(old_display_pos, trans.position);
                 }
             }
+
+            // Decay visual smoothing offset each frame
+            g_recon_smoothing.update();
         }
 
         g_network.sendInputCommand(input_state);
@@ -230,18 +369,28 @@ GAME_API void gardenGameUpdate(float delta_time)
     if (g_player_controller)
         g_player_controller->update(delta_time);
 
+    // Apply visual smoothing offset to camera position
+    if (g_network.isConnected() && game_world->registry.valid(g_player_entity) &&
+        game_world->registry.all_of<TransformComponent>(g_player_entity))
+    {
+        auto& trans = game_world->registry.get<TransformComponent>(g_player_entity);
+        glm::vec3 display_pos = g_recon_smoothing.getDisplayPosition(trans.position);
+        // Offset camera by the smoothing delta
+        glm::vec3 offset = display_pos - trans.position;
+        game_world->world_camera.position += offset;
+    }
+
     // Update player representations
     update_player_representations(game_world->registry,
         g_player_controller ? g_player_controller->isFreecamMode() : false);
 
-    // Fall detection
-    if (g_player_controller && !g_player_controller->isFreecamMode() &&
+    // Fall detection (client-side, for offline mode)
+    if (!g_network.isConnected() && g_player_controller && !g_player_controller->isFreecamMode() &&
         game_world->registry.valid(g_player_entity))
     {
         auto& t = game_world->registry.get<TransformComponent>(g_player_entity);
         if (t.position.y < -50)
         {
-            // Respawn at origin instead of quitting
             t.position = glm::vec3(0, 5, 0);
             if (game_world->registry.all_of<RigidBodyComponent>(g_player_entity))
                 game_world->registry.get<RigidBodyComponent>(g_player_entity).velocity = glm::vec3(0);
@@ -281,8 +430,20 @@ GAME_API void gardenGameUpdate(float delta_time)
             if (game_world->registry.all_of<PlayerComponent>(g_player_entity))
                 grounded = game_world->registry.get<PlayerComponent>(g_player_entity).grounded;
         }
+
+        // Build kill feed text (last 5 entries)
+        std::string kill_feed_text;
+        int count = 0;
+        for (auto it = g_kill_feed.rbegin(); it != g_kill_feed.rend() && count < 5; ++it, ++count) {
+            if (!kill_feed_text.empty()) kill_feed_text += "\n";
+            kill_feed_text += it->killer_name + " killed " + it->victim_name;
+        }
+
         g_hud.update(fps, pos, speed, grounded, g_network.isConnected(),
-                     g_network.isConnected() ? g_network.getStats().ping_ms : 0.0f);
+                     g_network.isConnected() ? g_network.getStats().ping_ms : 0.0f,
+                     g_local_health, g_local_max_health, g_local_ammo, g_local_max_ammo,
+                     g_local_alive, g_death_timer, g_local_kills, g_local_deaths,
+                     kill_feed_text, g_local_reloading);
     }
 }
 
@@ -326,6 +487,22 @@ GAME_API void gardenOnLevelLoaded()
         game_world->world_camera.position = t.position;
         game_world->world_camera.rotation = t.rotation;
     }
+
+    // Reset combat state
+    g_local_health = 100;
+    g_local_max_health = 100;
+    g_local_alive = true;
+    g_local_kills = 0;
+    g_local_deaths = 0;
+    g_death_timer = 0.0f;
+    g_recon_smoothing.visual_offset = glm::vec3(0.0f);
+    g_kill_feed.clear();
+
+    const auto& def = getWeaponDef(WeaponType::RIFLE);
+    g_local_ammo = def.max_ammo;
+    g_local_max_ammo = def.max_ammo;
+    g_local_reloading = false;
+    g_local_fire_cooldown = 0.0f;
 }
 
 GAME_API void gardenOnPlayStart()
