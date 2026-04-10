@@ -316,23 +316,22 @@ struct MetalRenderAPIImpl {
         if ([[NSFileManager defaultManager] fileExistsAtPath:libPath]) {
             shaderLibrary = [device newLibraryWithURL:libURL error:&error];
             if (shaderLibrary) {
-                printf("[Metal] Loaded precompiled shader library\n");
+                LOG_ENGINE_INFO("[Metal] Loaded precompiled shader library");
                 return true;
             }
-            printf("[Metal] Failed to load metallib: %s\n", [[error localizedDescription] UTF8String]);
+            LOG_ENGINE_WARN("[Metal] Failed to load metallib: {}", [[error localizedDescription] UTF8String]);
         }
 
         // Fallback: compile from source
-        // Read all .metal files and concatenate
+        // Read common.metal first (shared types/functions), then individual shader files
         NSArray<NSString*>* shaderFiles = @[
-            [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/basic_vertex.metal").c_str()],
-            [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/basic_fragment.metal").c_str()],
-            [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/shadow_vertex.metal").c_str()],
-            [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/shadow_fragment.metal").c_str()],
-            [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/sky_vertex.metal").c_str()],
-            [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/sky_fragment.metal").c_str()],
-            [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/fxaa_vertex.metal").c_str()],
-            [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/fxaa_fragment.metal").c_str()]];
+            [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/common.metal").c_str()],
+            [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/basic.metal").c_str()],
+            [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/shadow.metal").c_str()],
+            [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/sky.metal").c_str()],
+            [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/fxaa.metal").c_str()],
+            [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/skinned.metal").c_str()],
+            [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/skinned_shadow.metal").c_str()]];
 
         NSMutableString* allSource = [NSMutableString string];
         // Add common header once
@@ -346,23 +345,23 @@ struct MetalRenderAPIImpl {
                 stripped = [stripped stringByReplacingOccurrencesOfString:@"using namespace metal;" withString:@""];
                 [allSource appendFormat:@"\n// === %@ ===\n%@\n", path, stripped];
             } else {
-                printf("[Metal] Warning: Could not read shader file: %s\n", [path UTF8String]);
+                LOG_ENGINE_WARN("[Metal] Could not read shader file: {}", [path UTF8String]);
             }
         }
 
         if ([allSource length] == 0) {
-            printf("[Metal] No shader sources found\n");
+            LOG_ENGINE_FATAL("[Metal] No shader sources found");
             return false;
         }
 
         MTLCompileOptions* opts = [[MTLCompileOptions alloc] init];
         shaderLibrary = [device newLibraryWithSource:allSource options:opts error:&error];
         if (!shaderLibrary) {
-            printf("[Metal] Shader compilation failed: %s\n", [[error localizedDescription] UTF8String]);
+            LOG_ENGINE_FATAL("[Metal] Shader compilation failed: {}", [[error localizedDescription] UTF8String]);
             return false;
         }
 
-        printf("[Metal] Compiled shaders from source\n");
+        LOG_ENGINE_INFO("[Metal] Compiled shaders from source");
         return true;
     }
 
@@ -817,21 +816,21 @@ bool MetalRenderAPI::initialize(WindowHandle window, int width, int height, floa
     // Create Metal device
     impl->device = MTLCreateSystemDefaultDevice();
     if (!impl->device) {
-        printf("[Metal] Failed to create Metal device\n");
+        LOG_ENGINE_FATAL("[Metal] Failed to create Metal device");
         return false;
     }
-    printf("[Metal] Using device: %s\n", [[impl->device name] UTF8String]);
-    printf("[Metal] GPU Family: Apple %s\n",
+    LOG_ENGINE_INFO("[Metal] Using device: {}", [[impl->device name] UTF8String]);
+    LOG_ENGINE_INFO("[Metal] GPU Family: Apple {}",
            [impl->device supportsFamily:MTLGPUFamilyApple7] ? "7+" :
            [impl->device supportsFamily:MTLGPUFamilyApple6] ? "6+" :
            [impl->device supportsFamily:MTLGPUFamilyApple5] ? "5+" : "< 5");
-    printf("[Metal] Max buffer length: %lu MB\n", (unsigned long)([impl->device maxBufferLength] / (1024 * 1024)));
-    printf("[Metal] Recommended max working set: %lu MB\n", (unsigned long)([impl->device recommendedMaxWorkingSetSize] / (1024 * 1024)));
+    LOG_ENGINE_INFO("[Metal] Max buffer length: {} MB", (unsigned long)([impl->device maxBufferLength] / (1024 * 1024)));
+    LOG_ENGINE_INFO("[Metal] Recommended max working set: {} MB", (unsigned long)([impl->device recommendedMaxWorkingSetSize] / (1024 * 1024)));
 
     // Create command queue
     impl->commandQueue = [impl->device newCommandQueue];
     if (!impl->commandQueue) {
-        printf("[Metal] Failed to create command queue\n");
+        LOG_ENGINE_FATAL("[Metal] Failed to create command queue");
         return false;
     }
 
@@ -842,7 +841,7 @@ bool MetalRenderAPI::initialize(WindowHandle window, int width, int height, floa
     SDL_SysWMinfo wmInfo;
     SDL_VERSION(&wmInfo.version);
     if (!SDL_GetWindowWMInfo(window, &wmInfo)) {
-        printf("[Metal] Failed to get window info: %s\n", SDL_GetError());
+        LOG_ENGINE_FATAL("[Metal] Failed to get window info: {}", SDL_GetError());
         return false;
     }
 
@@ -860,19 +859,19 @@ bool MetalRenderAPI::initialize(WindowHandle window, int width, int height, floa
     // Create depth texture
     impl->depthTexture = impl->createDepthTextureWithSize(width, height);
     if (!impl->depthTexture) {
-        printf("[Metal] Failed to create depth texture\n");
+        LOG_ENGINE_FATAL("[Metal] Failed to create depth texture");
         return false;
     }
 
     // Load shaders
     if (!impl->loadShaderLibrary()) {
-        printf("[Metal] Failed to load shader library\n");
+        LOG_ENGINE_FATAL("[Metal] Failed to load shader library");
         return false;
     }
 
     // Create pipeline states
     if (!impl->createPipelines()) {
-        printf("[Metal] Failed to create pipelines\n");
+        LOG_ENGINE_FATAL("[Metal] Failed to create pipelines");
         return false;
     }
 
@@ -902,10 +901,10 @@ bool MetalRenderAPI::initialize(WindowHandle window, int width, int height, floa
     float ratio = (float)width / (float)height;
     impl->projectionMatrix = glm::perspectiveRH_ZO(glm::radians(fov), ratio, 0.1f, 1000.0f);
 
-    printf("[Metal] Shadow map: %ux%u (%d cascades, quality=%d)\n",
+    LOG_ENGINE_INFO("[Metal] Shadow map: {}x{} ({} cascades, quality={})",
            impl->shadowMapSize, impl->shadowMapSize, MetalRenderAPIImpl::NUM_CASCADES, impl->shadowQuality);
-    printf("[Metal] FXAA: %s\n", impl->fxaaInitialized ? "enabled" : "disabled");
-    printf("[Metal] Render API initialized (%dx%d, FOV: %.1f)\n", width, height, fov);
+    LOG_ENGINE_INFO("[Metal] FXAA: {}", impl->fxaaInitialized ? "enabled" : "disabled");
+    LOG_ENGINE_INFO("[Metal] Render API initialized ({}x{}, FOV: {:.1f})", width, height, fov);
     return true;
 }
 

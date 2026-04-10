@@ -53,6 +53,10 @@ bld/
 # (https://github.com/github/gitignore/pull/3736)
 #!**/[Bb]in/*.refresh
 
+# Allow Slang compiler binaries and libraries
+!Tools/slang-*/bin/**
+!Tools/slang-*/lib/**
+
 # Visual Studio 2015/2017 cache/options directory
 .vs/
 # Uncomment if you have tasks that create the project's static files in wwwroot
@@ -439,6 +443,7 @@ FodyWeavers.xsd
 pipeline_cache.bin
 imgui.ini
 Game/Client/config.cfg
+*.metallib
 .sighmake_cache
 *.lodbin
 

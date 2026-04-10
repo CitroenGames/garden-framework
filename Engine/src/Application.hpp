@@ -2,7 +2,7 @@
 
 #include "SDL.h"
 #include "Graphics/RenderAPI.hpp"
-#include <stdio.h>
+#include "Utils/Log.hpp"
 #include <memory>
 
 class Application
@@ -38,7 +38,7 @@ public:
         {
             if (SDL_Init(SDL_INIT_VIDEO) < 0)
             {
-                fprintf(stderr, "Video initialization failed: %s\n", SDL_GetError());
+                LOG_ENGINE_FATAL("SDL video initialization failed: {}", SDL_GetError());
                 return false;
             }
 
@@ -73,7 +73,7 @@ public:
 
             if (!window)
             {
-                fprintf(stderr, "Window creation failed: %s\n", SDL_GetError());
+                LOG_ENGINE_FATAL("Window creation failed: {}", SDL_GetError());
                 return false;
             }
 
@@ -85,7 +85,7 @@ public:
             // For headless mode, we might still want to initialize SDL but not VIDEO
             if (SDL_Init(SDL_INIT_EVENTS) < 0)
             {
-                fprintf(stderr, "SDL initialization failed: %s\n", SDL_GetError());
+                LOG_ENGINE_FATAL("SDL initialization failed: {}", SDL_GetError());
                 return false;
             }
         }
@@ -94,14 +94,16 @@ public:
         render_api.reset(CreateRenderAPI(api_type));
         if (!render_api)
         {
-            fprintf(stderr, "Failed to create render API\n");
+            LOG_ENGINE_FATAL("Failed to create render API (type={})", static_cast<int>(api_type));
             return false;
         }
+
+        LOG_ENGINE_INFO("Created render API: {}", render_api->getAPIName());
 
         // Initialize the render API with the SDL window pointer (might be null for headless)
         if (!render_api->initialize(window, width, height, fov))
         {
-            fprintf(stderr, "Failed to initialize render API\n");
+            LOG_ENGINE_FATAL("Failed to initialize render API");
             return false;
         }
 
@@ -111,7 +113,7 @@ public:
             SDL_SetRelativeMouseMode(SDL_TRUE);
         }
 
-        printf("Application initialized with %s render API\n", render_api->getAPIName());
+        LOG_ENGINE_INFO("Application initialized with {} render API", render_api->getAPIName());
         return true;
     }
 

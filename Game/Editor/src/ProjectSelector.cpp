@@ -151,6 +151,7 @@ std::string ProjectSelector::run()
         ImGui::Spacing();
 
         float browse_w = 80.0f;
+        float label_col = 80.0f;
         float open_w = 72.0f;
         float btns_total = browse_w + 4 + open_w + 8;
         ImGui::SetNextItemWidth(panel_w - btns_total);
@@ -198,19 +199,25 @@ std::string ProjectSelector::run()
         ImGui::PopStyleColor();
         ImGui::Spacing();
 
-        ImGui::SetNextItemWidth(panel_w * 0.5f);
-        ImGui::InputTextWithHint("Name", "Project name...",
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Name");
+        ImGui::SameLine(label_col);
+        ImGui::SetNextItemWidth(panel_w - label_col);
+        ImGui::InputTextWithHint("##new_name", "Project name...",
                                  new_project_name, sizeof(new_project_name));
 
         // Template selection
         if (!available_templates.empty())
         {
-            ImGui::SetNextItemWidth(panel_w * 0.5f);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted("Template");
+            ImGui::SameLine(label_col);
             const char* preview = (selected_template >= 0 &&
                                    selected_template < (int)available_templates.size())
                 ? available_templates[selected_template].name.c_str()
                 : "Select Template...";
-            if (ImGui::BeginCombo("Template", preview))
+            ImGui::SetNextItemWidth(panel_w - label_col);
+            if (ImGui::BeginCombo("##new_template", preview))
             {
                 for (int i = 0; i < (int)available_templates.size(); i++)
                 {
@@ -229,8 +236,11 @@ std::string ProjectSelector::run()
                 "No project templates found. Check your Templates/ directory.");
         }
 
-        ImGui::SetNextItemWidth(panel_w - browse_w - 8);
-        ImGui::InputTextWithHint("Directory", "Parent directory...",
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Directory");
+        ImGui::SameLine(label_col);
+        ImGui::SetNextItemWidth(panel_w - label_col - browse_w - 8);
+        ImGui::InputTextWithHint("##new_dir", "Parent directory...",
                                  new_project_dir, sizeof(new_project_dir));
         ImGui::SameLine();
         if (ImGui::Button("Browse##dir", ImVec2(browse_w, 0)))

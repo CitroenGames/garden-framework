@@ -139,8 +139,135 @@ MIME_EOF
         echo "  Registered .garden MIME type and desktop entry."
         ;;
     Darwin)
-        echo "  macOS: File association requires an .app bundle."
-        echo "  For now, use 'garden open <file.garden>' from the terminal."
+        APP_NAME="Garden Opener"
+        APP_DIR="$HOME/Applications/${APP_NAME}.app"
+        BUNDLE_ID="com.garden-engine.opener"
+        GARDEN_CLI="$INSTALL_DIR/garden"
+        PLIST_BUDDY="/usr/libexec/PlistBuddy"
+        LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister"
+
+        if ! command -v osacompile &>/dev/null; then
+            echo "  WARNING: osacompile not found. Cannot create .app bundle."
+            echo "  Install Xcode Command Line Tools: xcode-select --install"
+            echo "  For now, use 'garden open <file.garden>' from the terminal."
+        else
+            mkdir -p "$HOME/Applications"
+
+            if [ -d "$APP_DIR" ]; then
+                echo "  Updating existing ${APP_NAME}.app..."
+                rm -rf "$APP_DIR"
+            else
+                echo "  Creating ${APP_NAME}.app..."
+            fi
+
+            # Write AppleScript source (expand $GARDEN_CLI to absolute path)
+            APPLESCRIPT_SRC=$(mktemp /tmp/garden_opener.XXXXXX.applescript)
+            cat > "$APPLESCRIPT_SRC" << APPLESCRIPT_EOF
+on open theFiles
+    repeat with aFile in theFiles
+        set filePath to POSIX path of aFile
+        do shell script "${GARDEN_CLI} open " & quoted form of filePath & " > /dev/null 2>&1 &"
+    end repeat
+end open
+
+on run
+    display dialog "Garden Opener" & return & return & "Double-click a .garden file in Finder to open it in the editor." buttons {"OK"} default button "OK" with title "Garden Engine"
+end run
+APPLESCRIPT_EOF
+
+            osacompile -o "$APP_DIR" "$APPLESCRIPT_SRC"
+            rm -f "$APPLESCRIPT_SRC"
+
+            # Patch Info.plist with file type declarations
+            PLIST="$APP_DIR/Contents/Info.plist"
+
+            $PLIST_BUDDY -c "Add :CFBundleIdentifier string ${BUNDLE_ID}" "$PLIST" 2>/dev/null || \
+                $PLIST_BUDDY -c "Set :CFBundleIdentifier ${BUNDLE_ID}" "$PLIST"
+            $PLIST_BUDDY -c "Set :CFBundleName ${APP_NAME}" "$PLIST" 2>/dev/null || \
+                $PLIST_BUDDY -c "Add :CFBundleName string ${APP_NAME}" "$PLIST"
+
+            # Remove existing entries so re-runs are clean
+            $PLIST_BUDDY -c "Delete :UTExportedTypeDeclarations" "$PLIST" 2>/dev/null || true
+            $PLIST_BUDDY -c "Delete :CFBundleDocumentTypes" "$PLIST" 2>/dev/null || true
+
+            # Define the .garden UTI
+            $PLIST_BUDDY -c "Add :UTExportedTypeDeclarations array" "$PLIST"
+            $PLIST_BUDDY -c "Add :UTExportedTypeDeclarations:0 dict" "$PLIST"
+            $PLIST_BUDDY -c "Add :UTExportedTypeDeclarations:0:UTTypeIdentifier string com.garden-engine.project" "$PLIST"
+            $PLIST_BUDDY -c "Add :UTExportedTypeDeclarations:0:UTTypeDescription string Garden Project File" "$PLIST"
+            $PLIST_BUDDY -c "Add :UTExportedTypeDeclarations:0:UTTypeConformsTo array" "$PLIST"
+            $PLIST_BUDDY -c "Add :UTExportedTypeDeclarations:0:UTTypeConformsTo:0 string public.json" "$PLIST"
+            $PLIST_BUDDY -c "Add :UTExportedTypeDeclarations:0:UTTypeConformsTo:1 string public.data" "$PLIST"
+            $PLIST_BUDDY -c "Add :UTExportedTypeDeclarations:0:UTTypeTagSpecification dict" "$PLIST"
+            $PLIST_BUDDY -c "Add :UTExportedTypeDeclarations:0:UTTypeTagSpecification:public.filename-extension array" "$PLIST"
+            $PLIST_BUDDY -c "Add :UTExportedTypeDeclarations:0:UTTypeTagSpecification:public.filename-extension:0 string garden" "$PLIST"
+
+            # Declare that this app opens .garden files
+            $PLIST_BUDDY -c "Add :CFBundleDocumentTypes array" "$PLIST"
+            $PLIST_BUDDY -c "Add :CFBundleDocumentTypes:0 dict" "$PLIST"
+            $PLIST_BUDDY -c "Add :CFBundleDocumentTypes:0:CFBundleTypeName string Garden Project File" "$PLIST"
+            $PLIST_BUDDY -c "Add :CFBundleDocumentTypes:0:CFBundleTypeRole string Editor" "$PLIST"
+            $PLIST_BUDDY -c "Add :CFBundleDocumentTypes:0:LSHandlerRank string Owner" "$PLIST"
+            $PLIST_BUDDY -c "Add :CFBundleDocumentTypes:0:LSItemContentTypes array" "$PLIST"
+            $PLIST_BUDDY -c "Add :CFBundleDocumentTypes:0:LSItemContentTypes:0 string com.garden-engine.project" "$PLIST"
+            $PLIST_BUDDY -c "Add :CFBundleDocumentTypes:0:CFBundleTypeExtensions array" "$PLIST"
+            $PLIST_BUDDY -c "Add :CFBundleDocumentTypes:0:CFBundleTypeExtensions:0 string garden" "$PLIST"
+
+            # Ad-hoc code sign (required on macOS Sequoia 15.1+)
+            codesign --force --deep --sign - "$APP_DIR" 2>/dev/null && \
+                echo "  Code signed app bundle." || \
+                echo "  WARNING: Code signing failed. File associations may not work."
+
+            # Register with LaunchServices
+            if [ -x "$LSREGISTER" ]; then
+                "$LSREGISTER" -kill -r -domain local -domain system -domain user 2>/dev/null || true
+                "$LSREGISTER" -f -R "$APP_DIR" 2>/dev/null
+                echo "  Registered with LaunchServices."
+            fi
+
+            # Refresh Finder to pick up new file associations
+            killall Finder 2>/dev/null || true
+
+            # Set as default handler for .garden files
+            SWIFT_HELPER=$(mktemp /tmp/garden_setdefault.XXXXXX.swift)
+            cat > "$SWIFT_HELPER" << 'SWIFT_EOF'
+import AppKit
+import UniformTypeIdentifiers
+
+let args = CommandLine.arguments
+guard args.count == 3 else { exit(1) }
+let appURL = URL(fileURLWithPath: args[1])
+let ext = args[2]
+let sema = DispatchSemaphore(value: 0)
+var exitCode: Int32 = 0
+NSWorkspace.shared.setDefaultApplication(at: appURL, toOpenFileExtension: ext) { error in
+    if error != nil { exitCode = 1 }
+    sema.signal()
+}
+sema.wait()
+exit(exitCode)
+SWIFT_EOF
+            if swiftc -o /tmp/garden_setdefault "$SWIFT_HELPER" -framework AppKit 2>/dev/null; then
+                if /tmp/garden_setdefault "$APP_DIR" "garden" 2>/dev/null; then
+                    echo "  Set as default handler for .garden files."
+                else
+                    echo "  WARNING: Could not set default handler automatically."
+                    echo "  TIP: Right-click a .garden file in Finder, choose 'Get Info',"
+                    echo "       change 'Open with' to '${APP_NAME}', then click 'Change All...'."
+                fi
+                rm -f /tmp/garden_setdefault
+            elif command -v duti &>/dev/null; then
+                duti -s "$BUNDLE_ID" .garden all 2>/dev/null
+                echo "  Set as default handler for .garden files."
+            else
+                echo "  TIP: To set as default handler, right-click a .garden file in Finder,"
+                echo "       choose 'Get Info', change 'Open with' to '${APP_NAME}', then"
+                echo "       click 'Change All...'."
+            fi
+            rm -f "$SWIFT_HELPER"
+
+            echo "  Installed ${APP_NAME}.app to ~/Applications/"
+        fi
         ;;
     *)
         echo "  Unknown OS: $OS. Skipping file association."
@@ -162,4 +289,7 @@ echo "Usage:"
 echo "  garden list-engines              List registered engines"
 echo "  garden open <file.garden>        Open a project"
 echo "  garden set-engine <file> <id>    Link project to engine"
+if [ "$(uname -s)" = "Darwin" ]; then
+echo "  Double-click any .garden file in Finder to open it."
+fi
 echo ""
