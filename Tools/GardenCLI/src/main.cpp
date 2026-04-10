@@ -203,6 +203,7 @@ static int cmdListEngines()
     }
 
     printf("Registered engines:\n\n");
+    int missing = 0;
     for (auto& e : engines)
     {
         printf("  ID:         %s\n", e.id.c_str());
@@ -210,8 +211,15 @@ static int cmdListEngines()
         printf("  Editor:     %s\n", e.editor.c_str());
         printf("  Version:    %s\n", e.version.c_str());
         printf("  Registered: %s\n", e.registered_at.c_str());
+        if (!e.path_exists)
+        {
+            printf("  Status:     ** MISSING ** (directory not found)\n");
+            missing++;
+        }
         printf("\n");
     }
+    if (missing > 0)
+        printf("  %d engine(s) marked MISSING. Run 'garden clean-engines' to remove them.\n", missing);
     return 0;
 }
 
@@ -232,6 +240,14 @@ static int cmdOpen(const std::string& garden_path)
 
     if (!project.engine_id.empty())
         engine = registry.findEngine(project.engine_id);
+
+    if (engine && !engine->path_exists)
+    {
+        fprintf(stderr, "Warning: Engine '%s' directory no longer exists: %s\n",
+                engine->id.c_str(), engine->path.c_str());
+        fprintf(stderr, "  Please select a different engine.\n");
+        engine = nullptr;
+    }
 
     // If no engine_id set, or the ID wasn't found -> show picker
     if (!engine)
@@ -287,6 +303,14 @@ static int cmdRun(const std::string& garden_path)
 
     if (!project.engine_id.empty())
         engine = registry.findEngine(project.engine_id);
+
+    if (engine && !engine->path_exists)
+    {
+        fprintf(stderr, "Warning: Engine '%s' directory no longer exists: %s\n",
+                engine->id.c_str(), engine->path.c_str());
+        fprintf(stderr, "  Please select a different engine.\n");
+        engine = nullptr;
+    }
 
     if (!engine)
     {
@@ -362,6 +386,14 @@ static int cmdGenerate(const std::string& garden_path)
 
     if (!project.engine_id.empty())
         engine = registry.findEngine(project.engine_id);
+
+    if (engine && !engine->path_exists)
+    {
+        fprintf(stderr, "Warning: Engine '%s' directory no longer exists: %s\n",
+                engine->id.c_str(), engine->path.c_str());
+        fprintf(stderr, "  Please select a different engine.\n");
+        engine = nullptr;
+    }
 
     if (!engine)
     {
@@ -507,6 +539,64 @@ static int cmdSetEngine(int argc, char* argv[])
     return 0;
 }
 
+static int cmdCleanEngines()
+{
+    EngineRegistry registry;
+    int removed = registry.removeStaleEngines();
+    if (removed == 0)
+        printf("All engines are valid. Nothing to clean.\n");
+    else
+        printf("Removed %d stale engine(s).\n", removed);
+    return 0;
+}
+
+static int cmdChangeEngine(const std::string& garden_path)
+{
+    if (!fs::exists(garden_path))
+    {
+        fprintf(stderr, "Error: File not found: '%s'\n", garden_path.c_str());
+        return 1;
+    }
+
+    GardenProject project;
+    if (!loadGardenProject(garden_path, project))
+        return 1;
+
+    EngineRegistry registry;
+    auto engines = registry.listEngines();
+
+    if (engines.empty())
+    {
+        fprintf(stderr, "No engines registered.\n");
+        fprintf(stderr, "Run 'garden register-engine' from your engine directory.\n");
+        return 1;
+    }
+
+    printf("Current engine for '%s': %s\n", project.name.c_str(),
+           project.engine_id.empty() ? "(none)" : project.engine_id.c_str());
+
+    std::string picked = showEnginePicker(engines, project.name);
+
+    if (picked.empty())
+    {
+        fprintf(stderr, "No engine selected.\n");
+        return 1;
+    }
+
+    const EngineEntry* engine = registry.findEngine(picked);
+    if (!engine)
+    {
+        fprintf(stderr, "Error: Engine '%s' disappeared from registry.\n", picked.c_str());
+        return 1;
+    }
+
+    if (!setProjectEngineId(garden_path, picked))
+        return 1;
+
+    printf("Engine changed to '%s' (%s)\n", picked.c_str(), engine->path.c_str());
+    return 0;
+}
+
 static void printHelp()
 {
     printf("Garden Engine CLI\n\n");
@@ -515,10 +605,12 @@ static void printHelp()
     printf("  register-engine [--path <dir>]    Register an engine installation (default: cwd)\n");
     printf("  unregister-engine <id>            Remove an engine registration\n");
     printf("  list-engines                      List all registered engines\n");
+    printf("  clean-engines                     Remove engines whose directories no longer exist\n");
     printf("  open <file.garden>                Open a project in its associated editor\n");
     printf("  run <file.garden>                 Run the game for a project\n");
     printf("  generate <file.garden>            Generate project files (runs sighmake)\n");
     printf("  set-engine <file.garden> <id>     Set the engine_id in a project file\n");
+    printf("  change-engine <file.garden>       Pick a new engine for a project (GUI)\n");
     printf("  --help, -h                        Show this help\n");
     printf("  --version, -v                     Show version\n");
     printf("\nFile association:\n");
@@ -558,6 +650,8 @@ int main(int argc, char* argv[])
         return cmdUnregisterEngine(argc, argv);
     if (cmd == "list-engines")
         return cmdListEngines();
+    if (cmd == "clean-engines")
+        return cmdCleanEngines();
     if (cmd == "open" && argc >= 3)
         return cmdOpen(argv[2]);
     if (cmd == "run" && argc >= 3)
@@ -583,6 +677,8 @@ int main(int argc, char* argv[])
     }
     if (cmd == "set-engine")
         return cmdSetEngine(argc, argv);
+    if (cmd == "change-engine" && argc >= 3)
+        return cmdChangeEngine(argv[2]);
 
     // Implicit open: if argument ends with .garden, treat as 'open'
     if (cmd.size() > 7 && cmd.substr(cmd.size() - 7) == ".garden")

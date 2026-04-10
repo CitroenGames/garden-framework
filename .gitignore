@@ -450,7 +450,7 @@ Game/Client/config.cfg
 /bin/
 
 # C/C++ compiled binaries and libraries
-
+*.exe
 *.dll
 *.lib
 *.a

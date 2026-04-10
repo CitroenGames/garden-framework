@@ -10,6 +10,7 @@ struct EngineEntry
     std::string editor;         // Absolute path to editor executable
     std::string version;
     std::string registered_at;  // ISO 8601 timestamp
+    bool path_exists = true;    // Runtime-only, not persisted to JSON
 };
 
 class EngineRegistry
@@ -28,6 +29,9 @@ public:
     // Find a specific engine by ID. Returns nullptr if not found.
     // The returned pointer is only valid until the next mutating call.
     const EngineEntry* findEngine(const std::string& id) const;
+
+    // Remove engines whose directories no longer exist. Returns count removed.
+    int removeStaleEngines();
 
 private:
     mutable std::vector<EngineEntry> m_entries;

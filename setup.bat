@@ -130,6 +130,8 @@ reg add "HKCU\Software\Classes\GardenProject\shell\run" /ve /d "Run Game" /f >nu
 reg add "HKCU\Software\Classes\GardenProject\shell\run\command" /ve /d "\"%INSTALL_DIR%\garden.exe\" run \"%%1\"" /f >nul
 reg add "HKCU\Software\Classes\GardenProject\shell\generate" /ve /d "Generate Project Files" /f >nul
 reg add "HKCU\Software\Classes\GardenProject\shell\generate\command" /ve /d "\"%INSTALL_DIR%\garden.exe\" generate \"%%1\"" /f >nul
+reg add "HKCU\Software\Classes\GardenProject\shell\change-engine" /ve /d "Change Engine" /f >nul
+reg add "HKCU\Software\Classes\GardenProject\shell\change-engine\command" /ve /d "\"%INSTALL_DIR%\garden.exe\" change-engine \"%%1\"" /f >nul
 echo   Associated .garden files with garden.exe
 
 :: ---- Step 5: Register this engine ----

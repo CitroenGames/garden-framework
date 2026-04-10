@@ -108,21 +108,31 @@ std::string showEnginePicker(const std::vector<EngineEntry>& engines, const std:
             {
                 const auto& e = engines[i];
                 bool is_selected = (selected_index == i);
+                bool is_missing = !e.path_exists;
 
                 ImGui::PushID(i);
 
-                // Two-line selectable: ID on first line, path on second
-                char label[1024];
-                snprintf(label, sizeof(label), "%s\n  %s", e.id.c_str(), e.path.c_str());
+                if (is_missing)
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 0.7f));
 
-                if (ImGui::Selectable(label, is_selected, 0,
+                // Two-line selectable: ID + version on first line, path on second
+                char label[1024];
+                snprintf(label, sizeof(label), "%s  (v%s)%s\n  %s",
+                    e.id.c_str(),
+                    e.version.c_str(),
+                    is_missing ? "  [MISSING]" : "",
+                    e.path.c_str());
+
+                if (ImGui::Selectable(label, is_selected,
+                    is_missing ? ImGuiSelectableFlags_Disabled : 0,
                     ImVec2(0, ImGui::GetTextLineHeight() * 2.5f)))
                 {
-                    selected_index = i;
+                    if (!is_missing)
+                        selected_index = i;
                 }
 
                 // Double-click to confirm immediately
-                if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0))
+                if (!is_missing && ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0))
                 {
                     selected_id = e.id;
                     done = true;
@@ -130,6 +140,9 @@ std::string showEnginePicker(const std::vector<EngineEntry>& engines, const std:
 
                 if (is_selected)
                     ImGui::SetItemDefaultFocus();
+
+                if (is_missing)
+                    ImGui::PopStyleColor();
 
                 ImGui::PopID();
             }

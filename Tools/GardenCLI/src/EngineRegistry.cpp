@@ -39,6 +39,7 @@ void EngineRegistry::ensureLoaded() const
         e.editor = entry.value("editor", "");
         e.version = entry.value("version", "");
         e.registered_at = entry.value("registered_at", "");
+        e.path_exists = fs::is_directory(e.path);
         m_entries.push_back(std::move(e));
     }
 }
@@ -167,4 +168,18 @@ const EngineEntry* EngineRegistry::findEngine(const std::string& id) const
         if (e.id == id)
             return &e;
     return nullptr;
+}
+
+int EngineRegistry::removeStaleEngines()
+{
+    ensureLoaded();
+    auto it = std::remove_if(m_entries.begin(), m_entries.end(),
+        [](const EngineEntry& e) { return !e.path_exists; });
+    int count = (int)std::distance(it, m_entries.end());
+    if (count > 0)
+    {
+        m_entries.erase(it, m_entries.end());
+        save();
+    }
+    return count;
 }
