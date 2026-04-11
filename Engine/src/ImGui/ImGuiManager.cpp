@@ -11,9 +11,7 @@ extern "C" void ImGuiMetal_Shutdown();
 extern "C" void ImGuiMetal_NewFrame(void* renderPassDescriptor);
 #endif
 #ifdef _WIN32
-#include "imgui_impl_dx11.h"
 #include "imgui_impl_dx12.h"
-#include "Graphics/D3D11RenderAPI.hpp"
 #include "Graphics/D3D12RenderAPI.hpp"
 #endif
 #include "Graphics/VulkanRenderAPI.hpp"
@@ -227,10 +225,6 @@ bool ImGuiManager::initialize(SDL_Window* window, IRenderAPI* renderAPI, RenderA
     }
 #endif
 #ifdef _WIN32
-    else if (apiType == RenderAPIType::D3D11)
-    {
-        success = initD3D11(window, renderAPI);
-    }
     else if (apiType == RenderAPIType::D3D12)
     {
         success = initD3D12(window, renderAPI);
@@ -327,47 +321,6 @@ bool ImGuiManager::initMetal(SDL_Window* window, IRenderAPI* metalAPI)
 
 #ifdef _WIN32
 
-// Forward declare (intentionally not in imgui_impl_dx11.h per ImGui docs)
-void ImGui_ImplDX11_SetSwapChainDescs(const DXGI_SWAP_CHAIN_DESC* desc_templates, int desc_templates_count);
-
-bool ImGuiManager::initD3D11(SDL_Window* window, IRenderAPI* d3d11API)
-{
-    // Initialize SDL3 backend for D3D11
-    if (!ImGui_ImplSDL3_InitForD3D(window))
-    {
-        return false;
-    }
-
-    // Cast to D3D11RenderAPI to access D3D11 handles
-    D3D11RenderAPI* dxAPI = dynamic_cast<D3D11RenderAPI*>(d3d11API);
-    if (!dxAPI)
-    {
-        ImGui_ImplSDL3_Shutdown();
-        return false;
-    }
-
-    if (!ImGui_ImplDX11_Init(dxAPI->getDevice(), dxAPI->getDeviceContext()))
-    {
-        ImGui_ImplSDL3_Shutdown();
-        return false;
-    }
-
-    // Match secondary viewport swap chains to the engine's main swap chain settings.
-    // Without this, ImGui defaults to DXGI_SWAP_EFFECT_DISCARD which conflicts with
-    // the engine's DXGI_SWAP_EFFECT_FLIP_DISCARD, causing black viewports when
-    // dragging panels out (see ocornut/imgui#5437).
-    DXGI_SWAP_CHAIN_DESC sd = {};
-    sd.BufferCount = 2;
-    sd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    sd.SampleDesc.Count = 1;
-    sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    sd.Windowed = TRUE;
-    sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-    ImGui_ImplDX11_SetSwapChainDescs(&sd, 1);
-
-    return true;
-}
-
 bool ImGuiManager::initD3D12(SDL_Window* window, IRenderAPI* d3d12API)
 {
     if (!ImGui_ImplSDL3_InitForD3D(window))
@@ -434,10 +387,6 @@ void ImGuiManager::shutdown()
     }
 #endif
 #ifdef _WIN32
-    else if (m_apiType == RenderAPIType::D3D11)
-    {
-        ImGui_ImplDX11_Shutdown();
-    }
     else if (m_apiType == RenderAPIType::D3D12)
     {
         ImGui_ImplDX12_Shutdown();
@@ -466,10 +415,6 @@ void ImGuiManager::newFrame()
     }
 #endif
 #ifdef _WIN32
-    else if (m_apiType == RenderAPIType::D3D11)
-    {
-        ImGui_ImplDX11_NewFrame();
-    }
     else if (m_apiType == RenderAPIType::D3D12)
     {
         ImGui_ImplDX12_NewFrame();

@@ -58,9 +58,9 @@ public:
                 // Metal uses CAMetalLayer attached to the native window
                 window_flags |= SDL_WINDOW_METAL;
             }
-            else if (api_type == RenderAPIType::D3D11 || api_type == RenderAPIType::D3D12)
+            else if (api_type == RenderAPIType::D3D12)
             {
-                // D3D11/D3D12 don't require any special SDL flags
+                // D3D12 doesn't require any special SDL flags
                 // The window will be created as a regular Win32 window
             }
 

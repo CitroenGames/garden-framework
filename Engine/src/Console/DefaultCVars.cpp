@@ -7,8 +7,8 @@
 CONVAR(r_renderapi, "metal", ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
        "Rendering backend (vulkan, metal). Changes take effect on next launch.");
 #elif defined(_WIN32)
-CONVAR(r_renderapi, "d3d11", ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
-       "Rendering backend (vulkan, d3d11, d3d12). Changes take effect on next launch.");
+CONVAR(r_renderapi, "d3d12", ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
+       "Rendering backend (vulkan, d3d12). Changes take effect on next launch.");
 #else
 CONVAR(r_renderapi, "vulkan", ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
        "Rendering backend (vulkan). Changes take effect on next launch.");

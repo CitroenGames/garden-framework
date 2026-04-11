@@ -58,7 +58,6 @@ private:
     bool initMetal(SDL_Window* window, IRenderAPI* metalAPI);
 #endif
 #ifdef _WIN32
-    bool initD3D11(SDL_Window* window, IRenderAPI* d3d11API);
     bool initD3D12(SDL_Window* window, IRenderAPI* d3d12API);
 #endif
 

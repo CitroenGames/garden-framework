@@ -209,7 +209,7 @@ void D3D12RenderAPI::beginShadowPass(const glm::vec3& lightDir, const camera& ca
 
     calculateCascadeSplits(0.1f, 1000.0f);
 
-    // Use viewport render target dimensions in editor mode (match D3D11 behavior)
+    // Use viewport render target dimensions in editor mode
     float aspect = m_viewportTexture
         ? static_cast<float>(viewport_width_rt) / static_cast<float>(std::max(viewport_height_rt, 1))
         : static_cast<float>(viewport_width) / static_cast<float>(std::max(viewport_height, 1));
@@ -256,7 +256,7 @@ void D3D12RenderAPI::beginCascade(int cascadeIndex)
     commandList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
     commandList->OMSetRenderTargets(0, nullptr, FALSE, &dsvHandle);
 
-    // Re-bind shadow PSO per cascade (matches D3D11 which re-binds shaders/layout per cascade)
+    // Re-bind shadow PSO per cascade
     commandList->SetPipelineState(m_psoShadow.Get());
     last_bound_pso = m_psoShadow.Get();
     commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);

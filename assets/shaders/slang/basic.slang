@@ -86,7 +86,7 @@ float ShadowCalculation(int cascadeIndex, float3 fragPos, float3 normal)
     // Transform to [0,1] range for texture sampling
     projCoords.xy = projCoords.xy * 0.5 + 0.5;
 #ifdef TARGET_HLSL
-    projCoords.y = 1.0 - projCoords.y; // Flip Y for D3D11 texture sampling
+    projCoords.y = 1.0 - projCoords.y; // Flip Y for D3D texture sampling
 #endif
 
     float currentDepth = projCoords.z;

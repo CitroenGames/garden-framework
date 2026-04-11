@@ -73,7 +73,7 @@ struct D3D12Texture
     uint32_t height = 0;
 };
 
-// Constant buffer structures (must match D3D11 / shader layout, 16-byte aligned)
+// Constant buffer structures (must match shader layout, 16-byte aligned)
 struct alignas(16) D3D12GlobalCBuffer
 {
     glm::mat4 view;

@@ -2,7 +2,6 @@
 #include "VulkanRenderAPI.hpp"
 #include "HeadlessRenderAPI.hpp"
 #ifdef _WIN32
-#include "D3D11RenderAPI.hpp"
 #include "D3D12RenderAPI.hpp"
 #endif
 #ifdef __APPLE__
@@ -17,8 +16,6 @@ IRenderAPI* CreateRenderAPI(RenderAPIType type)
     case RenderAPIType::Vulkan:
         return new VulkanRenderAPI();
 #ifdef _WIN32
-    case RenderAPIType::D3D11:
-        return new D3D11RenderAPI();
     case RenderAPIType::D3D12:
         return new D3D12RenderAPI();
 #endif

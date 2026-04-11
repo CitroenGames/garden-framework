@@ -286,7 +286,7 @@ bool D3D12RenderAPI::initialize(WindowHandle window, int width, int height, floa
     // Initialize cascade split distances
     calculateCascadeSplits(0.1f, 1000.0f);
 
-    // Set projection matrix (Right-Handed, ZO to match D3D11)
+    // Set projection matrix (Right-Handed, ZO)
     float ratio = static_cast<float>(width) / static_cast<float>(height);
     projection_matrix = glm::perspectiveRH_ZO(glm::radians(fov), ratio, 0.1f, 1000.0f);
 

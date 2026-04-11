@@ -215,7 +215,6 @@ public:
 enum class RenderAPIType
 {
     Vulkan,
-    D3D11,
     D3D12,
     Metal,
     Headless
@@ -224,7 +223,7 @@ enum class RenderAPIType
 #ifdef __APPLE__
 constexpr RenderAPIType DefaultRenderAPI = RenderAPIType::Metal;
 #elif defined(_WIN32)
-constexpr RenderAPIType DefaultRenderAPI = RenderAPIType::D3D11;
+constexpr RenderAPIType DefaultRenderAPI = RenderAPIType::D3D12;
 #else
 constexpr RenderAPIType DefaultRenderAPI = RenderAPIType::Vulkan;
 #endif
@@ -235,7 +234,6 @@ inline const char* RenderAPITypeToString(RenderAPIType type)
     switch (type)
     {
     case RenderAPIType::Vulkan:   return "vulkan";
-    case RenderAPIType::D3D11:    return "d3d11";
     case RenderAPIType::D3D12:    return "d3d12";
     case RenderAPIType::Metal:    return "metal";
     case RenderAPIType::Headless: return "headless";
@@ -249,8 +247,6 @@ inline RenderAPIType ParseRenderAPIType(const std::string& str)
     std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
 
     if (lower == "vulkan")   return RenderAPIType::Vulkan;
-    if (lower == "d3d11" || lower == "dx11" || lower == "direct3d11")
-        return RenderAPIType::D3D11;
     if (lower == "d3d12" || lower == "dx12" || lower == "direct3d12")
         return RenderAPIType::D3D12;
     if (lower == "metal")    return RenderAPIType::Metal;
@@ -264,7 +260,6 @@ inline bool IsRenderAPIPlatformAvailable(RenderAPIType type)
     switch (type)
     {
 #ifdef _WIN32
-    case RenderAPIType::D3D11:  return true;
     case RenderAPIType::D3D12:  return true;
 #endif
 #ifdef __APPLE__

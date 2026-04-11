@@ -74,9 +74,6 @@ static std::optional<RenderAPIType> parseRenderAPICLI(int argc, char* argv[])
             return RenderAPIType::Metal;
 #endif
 #ifdef _WIN32
-        if (strcmp(argv[i], "-d3d11") == 0 || strcmp(argv[i], "--d3d11") == 0 ||
-            strcmp(argv[i], "-dx11") == 0 || strcmp(argv[i], "--dx11") == 0)
-            return RenderAPIType::D3D11;
         if (strcmp(argv[i], "-d3d12") == 0 || strcmp(argv[i], "--d3d12") == 0 ||
             strcmp(argv[i], "-dx12") == 0 || strcmp(argv[i], "--dx12") == 0)
             return RenderAPIType::D3D12;

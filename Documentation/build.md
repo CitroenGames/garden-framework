@@ -42,7 +42,7 @@ sighmake --build . --config Release
 compile_shaders.bat
 
 # 4. Run
-bin\Editor.exe -d3d11
+bin\Editor.exe -d3d12
 ```
 
 Or use `Generate SLN.bat` to generate the solution, then open it in Visual Studio and build from there.
@@ -81,7 +81,7 @@ All binaries are placed in `bin/`:
 | Binary | Description |
 | :--- | :--- |
 | `EngineCore.dll` | Core engine: ECS, physics, audio, assets, networking |
-| `EngineGraphics.dll` | Rendering: Vulkan, D3D11, Metal, ImGui, RmlUi |
+| `EngineGraphics.dll` | Rendering: Vulkan, D3D12, Metal, ImGui, RmlUi |
 | `Game.exe` | Standalone game client |
 | `Editor.exe` | Level editor |
 | `Server.exe` | Headless dedicated server |
@@ -90,7 +90,7 @@ All binaries are placed in `bin/`:
 
 ## Shader Compilation
 
-All shaders are written in Slang (`assets/shaders/slang/`) and cross-compiled to DXBC (D3D11), SPIR-V (Vulkan), and Metal using `slangc`.
+All shaders are written in Slang (`assets/shaders/slang/`) and cross-compiled to DXIL (D3D12), SPIR-V (Vulkan), and Metal using `slangc`.
 
 **Windows:**
 ```bash
@@ -103,7 +103,7 @@ Compiled output is written to `assets/shaders/compiled/`:
 | Directory | Format | Backend |
 | :--- | :--- | :--- |
 | `assets/shaders/compiled/vulkan/` | SPIR-V | Vulkan |
-| `assets/shaders/compiled/d3d11/` | DXBC | Direct3D 11 |
+| `assets/shaders/compiled/d3d12/` | DXIL | Direct3D 12 |
 | `assets/shaders/compiled/metal/` | Metal source | Metal |
 
 ## Running
@@ -121,10 +121,10 @@ If `--project` is not specified, the client looks for a `.garden` file in the pa
 | Flag | Backend | Platforms |
 | :--- | :--- | :--- |
 | `-vulkan` / `--vulkan` | Vulkan | Windows, Linux, macOS |
-| `-d3d11` / `--d3d11` / `-dx11` | Direct3D 11 | Windows |
+| `-d3d12` / `--d3d12` / `-dx12` | Direct3D 12 | Windows |
 | `-metal` / `--metal` | Metal | macOS |
 
-Default: D3D11 on Windows, Vulkan on Linux, Metal on macOS.
+Default: D3D12 on Windows, Vulkan on Linux, Metal on macOS.
 
 ### Editor
 

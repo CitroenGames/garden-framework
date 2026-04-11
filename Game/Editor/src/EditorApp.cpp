@@ -2159,7 +2159,6 @@ void EditorApp::renderPackageDialog()
             const char* api_name = "Unknown";
             switch (m_app.getAPIType())
             {
-            case RenderAPIType::D3D11:  api_name = "Direct3D 11"; break;
             case RenderAPIType::D3D12:  api_name = "Direct3D 12"; break;
             case RenderAPIType::Vulkan: api_name = "Vulkan"; break;
             case RenderAPIType::Metal:  api_name = "Metal"; break;

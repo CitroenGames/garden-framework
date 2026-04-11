@@ -17,11 +17,10 @@ static std::string shaderSubdir(RenderAPIType api)
 {
     switch (api)
     {
-    case RenderAPIType::D3D11:  return "d3d11";
     case RenderAPIType::D3D12:  return "d3d12";
     case RenderAPIType::Vulkan: return "vulkan";
     case RenderAPIType::Metal:  return "metal";
-    default:                    return "d3d11";
+    default:                    return "d3d12";
     }
 }
 
@@ -228,7 +227,7 @@ PackageResult ProjectPackager::packageProjectInternal(
 
     // Shaders – copy all platform variants available on this OS
 #ifdef _WIN32
-    const std::vector<std::string> shader_dirs = { "d3d11", "d3d12", "vulkan" };
+    const std::vector<std::string> shader_dirs = { "d3d12", "vulkan" };
 #elif __APPLE__
     const std::vector<std::string> shader_dirs = { "metal" };
 #else

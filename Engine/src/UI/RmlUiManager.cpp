@@ -13,9 +13,7 @@ static volatile auto s_force_rml_family = &Rml::Family<int>::Id;
 // Render interface headers (platform-guarded)
 #include "RmlRenderer_VK.h"
 #ifdef _WIN32
-#include "RmlRenderer_D3D11.h"
 #include "RmlRenderer_D3D12.h"
-#include "Graphics/D3D11RenderAPI.hpp"
 #include "Graphics/D3D12RenderAPI.hpp"
 #endif
 #ifdef __APPLE__
@@ -50,10 +48,6 @@ bool RmlUiManager::initialize(SDL_Window* window, IRenderAPI* renderAPI, RenderA
         success = initVulkan(window, renderAPI);
     }
 #ifdef _WIN32
-    else if (apiType == RenderAPIType::D3D11)
-    {
-        success = initD3D11(window, renderAPI);
-    }
     else if (apiType == RenderAPIType::D3D12)
     {
         success = initD3D12(window, renderAPI);
@@ -119,28 +113,6 @@ bool RmlUiManager::initialize(SDL_Window* window, IRenderAPI* renderAPI, RenderA
 }
 
 #ifdef _WIN32
-bool RmlUiManager::initD3D11(SDL_Window* window, IRenderAPI* api)
-{
-    (void)window;
-    auto* d3dAPI = dynamic_cast<D3D11RenderAPI*>(api);
-    if (!d3dAPI)
-        return false;
-
-    auto* renderer = new RmlRenderer_D3D11();
-    if (!renderer->Init(d3dAPI))
-    {
-        delete renderer;
-        return false;
-    }
-
-    int w, h;
-    SDL_GetWindowSize(m_window, &w, &h);
-    renderer->SetViewport(w, h);
-
-    m_renderInterface = renderer;
-    return true;
-}
-
 bool RmlUiManager::initD3D12(SDL_Window* window, IRenderAPI* api)
 {
     (void)window;
@@ -231,8 +203,6 @@ void RmlUiManager::shutdown()
         if (m_apiType == RenderAPIType::Vulkan)
             static_cast<RmlRenderer_VK*>(m_renderInterface)->Shutdown();
 #ifdef _WIN32
-        else if (m_apiType == RenderAPIType::D3D11)
-            static_cast<RmlRenderer_D3D11*>(m_renderInterface)->Shutdown();
         else if (m_apiType == RenderAPIType::D3D12)
             static_cast<RmlRenderer_D3D12*>(m_renderInterface)->Shutdown();
 #endif
@@ -269,10 +239,6 @@ void RmlUiManager::beginFrame()
         vkRenderer->BeginFrame();
     }
 #ifdef _WIN32
-    else if (m_apiType == RenderAPIType::D3D11)
-    {
-        static_cast<RmlRenderer_D3D11*>(m_renderInterface)->SetViewport(w, h);
-    }
     else if (m_apiType == RenderAPIType::D3D12)
     {
         static_cast<RmlRenderer_D3D12*>(m_renderInterface)->SetViewport(w, h);

@@ -4,8 +4,8 @@
 cbuffer ShadowCB : register(b0)
 {
 #ifndef TARGET_SPIRV
-    float4x4 uLightSpaceMatrix;  // D3D11/D3D12: light space in UBO
-    float4x4 uModel;             // D3D11/D3D12: model in UBO
+    float4x4 uLightSpaceMatrix;  // D3D12: light space in UBO
+    float4x4 uModel;             // D3D12: model in UBO
 #endif
 };
 

@@ -28,7 +28,7 @@ PSInput vertexMain(VSInput input)
     PSInput output;
     output.position = float4(input.position, 0.0, 1.0);
 #ifdef TARGET_HLSL
-    // D3D11: flip Y for texture sampling
+    // D3D: flip Y for texture sampling
     output.texcoord = float2(input.texcoord.x, 1.0 - input.texcoord.y);
 #else
     output.texcoord = input.texcoord;

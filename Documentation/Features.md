@@ -1,8 +1,8 @@
 # Features
 
 ### Rendering
-*   **Multi-API Renderer**: Vulkan, Direct3D 12, Direct3D 11, Metal, and a headless backend for dedicated servers.
-*   **Slang Shader System**: Unified shader source compiled to SPIR-V (Vulkan), DXIL (D3D12), DXBC (D3D11), and MSL (Metal) via Slang 2026.5.2.
+*   **Multi-API Renderer**: Vulkan, Direct3D 12, Metal, and a headless backend for dedicated servers.
+*   **Slang Shader System**: Unified shader source compiled to SPIR-V (Vulkan), DXIL (D3D12), and MSL (Metal) via Slang 2026.5.2.
 *   **Cascaded Shadow Maps (CSM)**: 4-cascade directional shadows at 4096x4096 with PCF filtering and cascade blending.
 *   **Frustum Culling**: BVH-accelerated spatial culling for efficient rendering.
 *   **Post-Processing**: FXAA anti-aliasing via offscreen framebuffer pipeline.
@@ -30,7 +30,7 @@
 *   **Toolbar & Status Bar**: Quick-access editor actions and status information.
 
 ### UI
-*   **RmlUi Integration**: HTML/CSS-based game UI for HUDs, menus, and other in-game interfaces. Per-backend renderers for Vulkan, D3D12, D3D11, and Metal.
+*   **RmlUi Integration**: HTML/CSS-based game UI for HUDs, menus, and other in-game interfaces. Per-backend renderers for Vulkan, D3D12, and Metal.
 
 ### Engine Systems
 *   **Entity Component System (ECS)**: `entt`-based with transform, mesh, rigidbody, collider, audio source, animation, IK, input, camera, and prefab instance components.
@@ -64,6 +64,6 @@
 *   **FPSShooter**: Complete networked FPS template with client-server architecture, weapon system, character animation, HUD, movement prediction, and delta-compressed replication.
 
 ### Platforms
-*   **Windows**: Direct3D 11, Direct3D 12, and Vulkan.
+*   **Windows**: Direct3D 12 and Vulkan.
 *   **Linux**: Vulkan.
 *   **macOS**: Metal and Vulkan.
