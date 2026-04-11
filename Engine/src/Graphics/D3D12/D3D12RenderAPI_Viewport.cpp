@@ -128,6 +128,7 @@ void D3D12RenderAPI::endSceneRender()
                 transitionResource(pie.offscreenTexture.Get(),
                                    D3D12_RESOURCE_STATE_RENDER_TARGET,
                                    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                flushBarriers();
 
                 D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvAllocator.getCPU(pie.rtvIndex);
                 commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
@@ -156,6 +157,7 @@ void D3D12RenderAPI::endSceneRender()
                     transitionResource(pie.texture.Get(),
                                        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
                                        D3D12_RESOURCE_STATE_COPY_DEST);
+                    flushBarriers();
                     commandList->CopyResource(pie.texture.Get(), pie.offscreenTexture.Get());
                     transitionResource(pie.texture.Get(),
                                        D3D12_RESOURCE_STATE_COPY_DEST,
@@ -163,6 +165,7 @@ void D3D12RenderAPI::endSceneRender()
                     transitionResource(pie.offscreenTexture.Get(),
                                        D3D12_RESOURCE_STATE_COPY_SOURCE,
                                        D3D12_RESOURCE_STATE_RENDER_TARGET);
+                    flushBarriers();
                 }
                 else
                 {
@@ -181,6 +184,7 @@ void D3D12RenderAPI::endSceneRender()
                     transitionResource(pie.offscreenTexture.Get(),
                                        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
                                        D3D12_RESOURCE_STATE_RENDER_TARGET);
+                    flushBarriers();
                 }
             }
             else
@@ -204,6 +208,8 @@ void D3D12RenderAPI::endSceneRender()
             transitionResource(m_viewportTexture.Get(),
                                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
                                D3D12_RESOURCE_STATE_RENDER_TARGET);
+            // Flush batched barriers (offscreen→SRV + viewport→RT in one call)
+            flushBarriers();
 
             D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvAllocator.getCPU(m_viewportRTVIndex);
             commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
@@ -231,6 +237,7 @@ void D3D12RenderAPI::endSceneRender()
                                    D3D12_RESOURCE_STATE_COPY_DEST);
                 transitionResource(m_offscreenTexture.Get(),
                                    m_offscreenState, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                flushBarriers();
                 commandList->CopyResource(m_viewportTexture.Get(), m_offscreenTexture.Get());
                 transitionResource(m_viewportTexture.Get(),
                                    D3D12_RESOURCE_STATE_COPY_DEST,
@@ -239,6 +246,7 @@ void D3D12RenderAPI::endSceneRender()
                                    D3D12_RESOURCE_STATE_COPY_SOURCE,
                                    D3D12_RESOURCE_STATE_RENDER_TARGET);
                 m_offscreenState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+                flushBarriers();
             }
             else
             {
@@ -260,6 +268,7 @@ void D3D12RenderAPI::endSceneRender()
                 // Restore offscreen to render target for next frame
                 transitionResource(m_offscreenTexture.Get(), m_offscreenState, D3D12_RESOURCE_STATE_RENDER_TARGET);
                 m_offscreenState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+                flushBarriers();
             }
         }
         else
@@ -269,6 +278,7 @@ void D3D12RenderAPI::endSceneRender()
                                D3D12_RESOURCE_STATE_COPY_DEST);
             transitionResource(m_offscreenTexture.Get(),
                                m_offscreenState, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            flushBarriers();
 
             commandList->CopyResource(m_viewportTexture.Get(), m_offscreenTexture.Get());
 
@@ -279,6 +289,7 @@ void D3D12RenderAPI::endSceneRender()
                                D3D12_RESOURCE_STATE_COPY_SOURCE,
                                D3D12_RESOURCE_STATE_RENDER_TARGET);
             m_offscreenState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+            flushBarriers();
         }
     }
 
@@ -302,6 +313,8 @@ void D3D12RenderAPI::renderUI()
                            m_backBufferState[m_backBufferIndex], D3D12_RESOURCE_STATE_RENDER_TARGET);
         m_backBufferState[m_backBufferIndex] = D3D12_RESOURCE_STATE_RENDER_TARGET;
     }
+
+    flushBarriers();
 
     D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvAllocator.getCPU(m_backBufferRTVs[m_backBufferIndex]);
     commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
@@ -416,6 +429,7 @@ void D3D12RenderAPI::beginPreviewFrame(int width, int height)
     transitionResource(m_previewTexture.Get(),
                        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
                        D3D12_RESOURCE_STATE_RENDER_TARGET);
+    flushBarriers();
 
     D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvAllocator.getCPU(m_previewRTVIndex);
     D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = m_dsvAllocator.getCPU(m_previewDSVIndex);
@@ -443,6 +457,7 @@ void D3D12RenderAPI::endPreviewFrame()
     transitionResource(m_previewTexture.Get(),
                        D3D12_RESOURCE_STATE_RENDER_TARGET,
                        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    flushBarriers();
 }
 
 uint64_t D3D12RenderAPI::getPreviewTextureID()

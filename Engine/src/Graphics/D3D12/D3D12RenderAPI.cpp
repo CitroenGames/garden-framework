@@ -429,6 +429,7 @@ void D3D12RenderAPI::ensureCommandListOpen()
     }
 
     m_cbUploadBuffer[m_frameIndex].reset();
+    m_dummyCBAddr = 0;
 
     fc.commandAllocator->Reset();
     commandList->Reset(fc.commandAllocator.Get(), nullptr);
@@ -446,27 +447,27 @@ void D3D12RenderAPI::transitionResource(ID3D12Resource* resource,
                                          D3D12_RESOURCE_STATES before,
                                          D3D12_RESOURCE_STATES after)
 {
-    if (before == after) return;
+    m_barrierBatch.add(resource, before, after);
+}
 
-    D3D12_RESOURCE_BARRIER barrier = {};
-    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    barrier.Transition.pResource = resource;
-    barrier.Transition.StateBefore = before;
-    barrier.Transition.StateAfter = after;
-    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    commandList->ResourceBarrier(1, &barrier);
+void D3D12RenderAPI::flushBarriers()
+{
+    m_barrierBatch.flush(commandList.Get());
 }
 
 void D3D12RenderAPI::bindDummyRootParams()
 {
     // D3D12 requires all root params to be valid before Draw.
     // Bind safe placeholders so every slot has a valid descriptor/address.
-    // Use a single small allocation shared across all CBV params to minimize
-    // ring buffer consumption (this is called multiple times per frame).
+    // Allocate the dummy CB once per frame and reuse across all calls.
 
-    alignas(16) char dummyData[256] = {};
-    auto dummyAddr = m_cbUploadBuffer[m_frameIndex].allocate(256, dummyData);
-    if (dummyAddr == 0) return;
+    if (m_dummyCBAddr == 0)
+    {
+        alignas(16) char dummyData[256] = {};
+        m_dummyCBAddr = m_cbUploadBuffer[m_frameIndex].allocate(256, dummyData);
+        if (m_dummyCBAddr == 0) return;
+    }
+    auto dummyAddr = m_dummyCBAddr;
 
     // [0] GlobalCBuffer / ShadowCBuffer / SkyboxCBuffer placeholder
     commandList->SetGraphicsRootConstantBufferView(0, dummyAddr);

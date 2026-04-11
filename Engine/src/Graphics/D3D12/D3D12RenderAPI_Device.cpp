@@ -369,7 +369,7 @@ bool D3D12RenderAPI::createConstantBufferUploadHeaps()
 {
     for (int i = 0; i < NUM_FRAMES_IN_FLIGHT; i++)
     {
-        if (!m_cbUploadBuffer[i].init(device.Get(), 4 * 1024 * 1024)) // 4 MB per frame
+        if (!m_cbUploadBuffer[i].init(device.Get(), 8 * 1024 * 1024)) // 8 MB per frame
             return false;
     }
     return true;

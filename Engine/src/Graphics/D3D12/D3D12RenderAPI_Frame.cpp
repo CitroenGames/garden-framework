@@ -63,6 +63,7 @@ void D3D12RenderAPI::beginFrame()
             m_offscreenState = D3D12_RESOURCE_STATE_RENDER_TARGET;
         }
 
+        flushBarriers();
         rtvHandle = m_rtvAllocator.getCPU(m_offscreenRTVIndex);
         dsvHandle = m_dsvAllocator.getCPU(m_viewportDSVIndex);
         commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, &dsvHandle);
@@ -85,6 +86,7 @@ void D3D12RenderAPI::beginFrame()
             m_offscreenState = D3D12_RESOURCE_STATE_RENDER_TARGET;
         }
 
+        flushBarriers();
         rtvHandle = m_rtvAllocator.getCPU(m_offscreenRTVIndex);
         dsvHandle = m_dsvAllocator.getCPU(m_mainDSVIndex);
         commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, &dsvHandle);
@@ -108,6 +110,7 @@ void D3D12RenderAPI::beginFrame()
             m_backBufferState[m_backBufferIndex] = D3D12_RESOURCE_STATE_RENDER_TARGET;
         }
 
+        flushBarriers();
         rtvHandle = m_rtvAllocator.getCPU(m_backBufferRTVs[m_backBufferIndex]);
         dsvHandle = m_dsvAllocator.getCPU(m_mainDSVIndex);
         commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, &dsvHandle);
@@ -172,6 +175,9 @@ void D3D12RenderAPI::endFrame()
             m_backBufferState[m_backBufferIndex] = D3D12_RESOURCE_STATE_RENDER_TARGET;
         }
 
+        // Flush batched barriers (offscreen→SRV + backbuffer→RT in one call)
+        flushBarriers();
+
         D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvAllocator.getCPU(m_backBufferRTVs[m_backBufferIndex]);
         commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
 
@@ -199,12 +205,14 @@ void D3D12RenderAPI::endFrame()
             transitionResource(m_backBuffers[m_backBufferIndex].Get(),
                                m_backBufferState[m_backBufferIndex], D3D12_RESOURCE_STATE_COPY_DEST);
             m_backBufferState[m_backBufferIndex] = D3D12_RESOURCE_STATE_COPY_DEST;
+            flushBarriers();
             commandList->CopyResource(m_backBuffers[m_backBufferIndex].Get(), m_offscreenTexture.Get());
             transitionResource(m_offscreenTexture.Get(), m_offscreenState, D3D12_RESOURCE_STATE_RENDER_TARGET);
             m_offscreenState = D3D12_RESOURCE_STATE_RENDER_TARGET;
             transitionResource(m_backBuffers[m_backBufferIndex].Get(),
                                m_backBufferState[m_backBufferIndex], D3D12_RESOURCE_STATE_RENDER_TARGET);
             m_backBufferState[m_backBufferIndex] = D3D12_RESOURCE_STATE_RENDER_TARGET;
+            flushBarriers();
         }
         else
         {
@@ -235,6 +243,7 @@ void D3D12RenderAPI::endFrame()
                                m_backBufferState[m_backBufferIndex], D3D12_RESOURCE_STATE_RENDER_TARGET);
             m_backBufferState[m_backBufferIndex] = D3D12_RESOURCE_STATE_RENDER_TARGET;
         }
+        flushBarriers();
         ImGui_ImplDX12_RenderDrawData(draw_data, commandList.Get());
     }
 
@@ -247,6 +256,7 @@ void D3D12RenderAPI::endFrame()
     }
 
     // Close and execute command list
+    flushBarriers();
     commandList->Close();
     m_commandListOpen = false;
     ID3D12CommandList* lists[] = { commandList.Get() };
@@ -269,6 +279,7 @@ void D3D12RenderAPI::present()
             m_backBufferState[m_backBufferIndex] = D3D12_RESOURCE_STATE_PRESENT;
         }
 
+        flushBarriers();
         commandList->Close();
         m_commandListOpen = false;
         ID3D12CommandList* lists[] = { commandList.Get() };

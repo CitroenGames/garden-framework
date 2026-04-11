@@ -180,6 +180,7 @@ void D3D12RenderAPI::beginShadowPass(const glm::vec3& lightDir)
         transitionResource(m_shadowMapArray.Get(), m_shadowMapState, D3D12_RESOURCE_STATE_DEPTH_WRITE);
         m_shadowMapState = D3D12_RESOURCE_STATE_DEPTH_WRITE;
     }
+    flushBarriers();
 
     // Set shadow viewport
     D3D12_VIEWPORT vp = {};
@@ -224,6 +225,7 @@ void D3D12RenderAPI::beginShadowPass(const glm::vec3& lightDir, const camera& ca
         transitionResource(m_shadowMapArray.Get(), m_shadowMapState, D3D12_RESOURCE_STATE_DEPTH_WRITE);
         m_shadowMapState = D3D12_RESOURCE_STATE_DEPTH_WRITE;
     }
+    flushBarriers();
 
     // Set shadow viewport
     D3D12_VIEWPORT vp = {};
@@ -325,6 +327,9 @@ void D3D12RenderAPI::endShadowPass()
 
         dsvHandle = m_dsvAllocator.getCPU(m_mainDSVIndex);
     }
+
+    // Flush batched barriers (shadow→SRV + render target transitions in one call)
+    flushBarriers();
 
     commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, &dsvHandle);
 

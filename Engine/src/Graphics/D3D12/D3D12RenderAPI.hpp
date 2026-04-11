@@ -2,6 +2,7 @@
 
 #include "Graphics/RenderAPI.hpp"
 #include "D3D12Types.hpp"
+#include "D3D12BarrierBatch.hpp"
 #include <d3d12.h>
 #include <d3d12sdklayers.h>
 #include <dxgi1_4.h>
@@ -174,6 +175,7 @@ private:
     bool global_cbuffer_dirty = true;
     bool in_depth_prepass = false;
     D3D12_GPU_VIRTUAL_ADDRESS m_cachedLightCBAddr = 0; // Uploaded once per frame, reused per mesh
+    D3D12_GPU_VIRTUAL_ADDRESS m_dummyCBAddr = 0;       // Dummy CB for bindDummyRootParams, allocated once per frame
 
     // Command list lifecycle
     bool m_commandListOpen = false;
@@ -223,6 +225,9 @@ private:
     void transitionResource(ID3D12Resource* resource,
                             D3D12_RESOURCE_STATES before,
                             D3D12_RESOURCE_STATES after);
+    void flushBarriers();
+    BarrierBatch m_barrierBatch;
+
     void bindDummyRootParams();
 
     ID3D12PipelineState* selectPSO(const RenderState& state, bool unlit);
