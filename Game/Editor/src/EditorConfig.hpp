@@ -16,6 +16,9 @@ public:
     // The render backend to use (platform-dependent options)
     RenderAPIType render_backend = DefaultRenderAPI;
 
+    // UI scale factor (1.0 = 100%, 1.25 = 125%, etc.)
+    float ui_scale = 1.0f;
+
     // Returns the path to editorconfig.cfg next to the executable
     static std::filesystem::path getConfigPath()
     {
@@ -58,6 +61,8 @@ public:
 
             if (key == "render_backend")
                 render_backend = parseBackend(value);
+            else if (key == "ui_scale")
+                ui_scale = std::clamp(std::stof(value), 0.5f, 3.0f);
         }
     }
 
@@ -72,6 +77,7 @@ public:
         file << "// This file is saved next to the editor executable and persists across projects.\n";
         file << "// Changes to render_backend take effect on next launch.\n\n";
         file << "render_backend = " << backendToString(render_backend) << "\n";
+        file << "ui_scale = " << ui_scale << "\n";
     }
 
     // Platform-available backends (for UI display)

@@ -20,6 +20,7 @@
 #include "ImGuizmo.h"
 #include <SDL3/SDL.h>
 #include "Threading/JobSystem.hpp"
+#include <algorithm>
 #include <cstring>
 #include <chrono>
 #include <filesystem>
@@ -77,6 +78,10 @@ bool EditorApp::initialize(RenderAPIType api_type)
         LOG_ENGINE_FATAL("Failed to initialize ImGui");
         return false;
     }
+
+    // Apply persisted UI scale
+    if (m_editor_config && m_editor_config->ui_scale != 1.0f)
+        applyUIScale(m_editor_config->ui_scale);
 
     // Initialize RmlUi
     if (!RmlUiManager::get().initialize(m_app.getWindow(), render_api, api_type))
@@ -1269,6 +1274,7 @@ void EditorApp::processEvents()
 
         switch (event.type)
         {
+        case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
         case SDL_EVENT_QUIT:
             if (m_state.isSimulationActive())
                 stopPlay();
@@ -1817,138 +1823,238 @@ void EditorApp::renderOpenDialog()
     ImGui::End();
 }
 
+void EditorApp::applyUIScale(float scale)
+{
+    scale = std::clamp(scale, 0.5f, 3.0f);
+    ImGuiManager::applyTheme();               // Reset style to 1x baseline
+    ImGuiStyle& style = ImGui::GetStyle();
+    if (scale != 1.0f)
+    {
+        // Save hit-test padding values before scaling — ScaleAllSizes inflates these,
+        // causing ImGui to detect window edge grabs far from the actual border.
+        float savedBorderHoverPad = style.WindowBorderHoverPadding;
+        ImVec2 savedTouchPad      = style.TouchExtraPadding;
+
+        style.ScaleAllSizes(scale);           // Scale padding, spacing, rounding
+
+        // Restore hit-test values — they control invisible grab zones, not visual sizes
+        style.WindowBorderHoverPadding = savedBorderHoverPad;
+        style.TouchExtraPadding        = savedTouchPad;
+    }
+    style.FontScaleMain = scale;              // Scale font rendering (ImGui 1.92)
+}
+
 void EditorApp::renderEditorSettings()
 {
     if (!m_show_editor_settings || !m_editor_config) return;
 
-    ImGui::SetNextWindowSize(ImVec2(420.0f, 0.0f), ImGuiCond_Once);
+    ImGui::SetNextWindowSize(ImVec2(560.0f, 400.0f), ImGuiCond_Once);
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
 
     if (ImGui::Begin("Editor Settings", &m_show_editor_settings,
-                     ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_AlwaysAutoResize))
+                     ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDocking))
     {
-        ImGui::SeparatorText("Graphics");
+        float footer_h = ImGui::GetFrameHeightWithSpacing() + ImGui::GetStyle().ItemSpacing.y;
 
-        auto backends = EditorConfig::availableBackends();
-        int current_idx = 0;
-        for (int i = 0; i < (int)backends.size(); i++)
+        // --- Left sidebar: category list ---
+        ImGui::BeginChild("##settings_sidebar", ImVec2(150.0f, -footer_h), ImGuiChildFlags_Borders);
         {
-            if (backends[i] == m_editor_config->render_backend)
-                current_idx = i;
-        }
-
-        ImGui::Text("Render Backend");
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(200.0f);
-        if (ImGui::BeginCombo("##render_backend", EditorConfig::backendDisplayName(backends[current_idx])))
-        {
-            for (int i = 0; i < (int)backends.size(); i++)
+            struct CategoryEntry { const char* label; SettingsCategory cat; };
+            CategoryEntry categories[] = {
+                { ICON_FA_DISPLAY    "  Graphics",    SettingsCategory::Graphics },
+                { ICON_FA_EYE        "  Rendering",   SettingsCategory::Rendering },
+                { ICON_FA_GAUGE_HIGH "  Performance",  SettingsCategory::Performance },
+                { ICON_FA_PALETTE    "  Appearance",   SettingsCategory::Appearance },
+            };
+            for (auto& c : categories)
             {
-                bool selected = (i == current_idx);
-                if (ImGui::Selectable(EditorConfig::backendDisplayName(backends[i]), selected))
+                if (ImGui::Selectable(c.label, m_settings_category == c.cat, 0, ImVec2(0, 24.0f)))
+                    m_settings_category = c.cat;
+            }
+        }
+        ImGui::EndChild();
+
+        // --- Right content pane ---
+        ImGui::SameLine();
+        ImGui::BeginChild("##settings_content", ImVec2(0, -footer_h), ImGuiChildFlags_Borders);
+        {
+            switch (m_settings_category)
+            {
+            case SettingsCategory::Graphics:
+            {
+                ImGui::SeparatorText("Graphics");
+
+                auto backends = EditorConfig::availableBackends();
+                int current_idx = 0;
+                for (int i = 0; i < (int)backends.size(); i++)
                 {
-                    m_editor_config->render_backend = backends[i];
+                    if (backends[i] == m_editor_config->render_backend)
+                        current_idx = i;
+                }
+
+                ImGui::Text("Render Backend");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(-1.0f);
+                if (ImGui::BeginCombo("##render_backend", EditorConfig::backendDisplayName(backends[current_idx])))
+                {
+                    for (int i = 0; i < (int)backends.size(); i++)
+                    {
+                        bool selected = (i == current_idx);
+                        if (ImGui::Selectable(EditorConfig::backendDisplayName(backends[i]), selected))
+                        {
+                            m_editor_config->render_backend = backends[i];
+                            m_editor_config->save();
+                        }
+                        if (selected)
+                            ImGui::SetItemDefaultFocus();
+                    }
+                    ImGui::EndCombo();
+                }
+
+                if (m_editor_config->render_backend != m_app.getAPIType())
+                {
+                    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f),
+                        "Restart the editor for the backend change to take effect.");
+                }
+                break;
+            }
+
+            case SettingsCategory::Rendering:
+            {
+                ImGui::SeparatorText("Rendering Features");
+
+                // FXAA toggle
+                {
+                    auto* cvar = CVAR_PTR(r_fxaa);
+                    bool fxaa = cvar ? cvar->getBool() : true;
+                    if (ImGui::Checkbox("FXAA Anti-aliasing", &fxaa))
+                    {
+                        if (cvar) cvar->setInt(fxaa ? 1 : 0);
+                        m_app.getRenderAPI()->setFXAAEnabled(fxaa);
+                    }
+                }
+
+                // Shadow Quality combo
+                {
+                    auto* cvar = CVAR_PTR(r_shadowquality);
+                    int shadow_q = cvar ? cvar->getInt() : 2;
+                    const char* shadow_opts[] = { "Off", "Low (1024)", "Medium (2048)", "High (4096)" };
+                    ImGui::SetNextItemWidth(-1.0f);
+                    if (ImGui::Combo("Shadow Quality", &shadow_q, shadow_opts, 4))
+                    {
+                        if (cvar) cvar->setInt(shadow_q);
+                        m_app.getRenderAPI()->setShadowQuality(shadow_q);
+                    }
+                }
+
+                // Skybox toggle
+                {
+                    auto* cvar = CVAR_PTR(r_sky);
+                    bool sky = cvar ? cvar->getBool() : true;
+                    if (ImGui::Checkbox("Skybox", &sky))
+                    {
+                        if (cvar) cvar->setInt(sky ? 1 : 0);
+                    }
+                }
+
+                // Lighting toggle
+                {
+                    auto* cvar = CVAR_PTR(r_lighting);
+                    bool lighting = cvar ? cvar->getBool() : true;
+                    if (ImGui::Checkbox("Lighting", &lighting))
+                    {
+                        if (cvar) cvar->setInt(lighting ? 1 : 0);
+                        m_app.getRenderAPI()->enableLighting(lighting);
+                    }
+                    if (!lighting)
+                        ImGui::TextDisabled("  All objects render unlit (flat color).");
+                }
+
+                // Dynamic Lights toggle
+                {
+                    auto* cvar = CVAR_PTR(r_dynamiclights);
+                    bool dyn = cvar ? cvar->getBool() : true;
+                    if (ImGui::Checkbox("Dynamic Lights (Point/Spot)", &dyn))
+                    {
+                        if (cvar) cvar->setInt(dyn ? 1 : 0);
+                    }
+                }
+                break;
+            }
+
+            case SettingsCategory::Performance:
+            {
+                ImGui::SeparatorText("Performance");
+
+                // Depth Prepass toggle
+                {
+                    auto* cvar = CVAR_PTR(r_depthprepass);
+                    bool prepass = cvar ? cvar->getBool() : true;
+                    if (ImGui::Checkbox("Depth Prepass", &prepass))
+                    {
+                        if (cvar) cvar->setInt(prepass ? 1 : 0);
+                        m_renderer.setDepthPrepassEnabled(prepass);
+                    }
+                }
+
+                // Frustum Culling / BVH toggle
+                {
+                    auto* cvar = CVAR_PTR(r_frustumculling);
+                    bool culling = cvar ? cvar->getBool() : true;
+                    if (ImGui::Checkbox("Frustum Culling (BVH)", &culling))
+                    {
+                        if (cvar) cvar->setInt(culling ? 1 : 0);
+                        m_renderer.setBVHEnabled(culling);
+                    }
+                }
+                break;
+            }
+
+            case SettingsCategory::Appearance:
+            {
+                ImGui::SeparatorText("UI Scale");
+
+                int percent = (int)(m_editor_config->ui_scale * 100.0f + 0.5f);
+                ImGui::Text("Scale");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(-1.0f);
+                ImGui::SliderInt("##ui_scale", &percent, 75, 250, "%d%%");
+                if (ImGui::IsItemDeactivatedAfterEdit())
+                {
+                    percent = ((percent + 12) / 25) * 25;  // Snap to nearest 25%
+                    m_editor_config->ui_scale = percent / 100.0f;
+                    applyUIScale(m_editor_config->ui_scale);
                     m_editor_config->save();
                 }
-                if (selected)
-                    ImGui::SetItemDefaultFocus();
+
+                ImGui::Spacing();
+                const float presets[] = { 1.0f, 1.25f, 1.5f, 1.75f, 2.0f };
+                const char* preset_labels[] = { "100%", "125%", "150%", "175%", "200%" };
+                for (int i = 0; i < 5; i++)
+                {
+                    if (i > 0) ImGui::SameLine();
+                    bool is_current = (std::abs(m_editor_config->ui_scale - presets[i]) < 0.01f);
+                    if (is_current)
+                        ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+                    if (ImGui::Button(preset_labels[i]))
+                    {
+                        m_editor_config->ui_scale = presets[i];
+                        applyUIScale(presets[i]);
+                        m_editor_config->save();
+                    }
+                    if (is_current)
+                        ImGui::PopStyleColor();
+                }
+
+                ImGui::Spacing();
+                ImGui::TextDisabled("Scales the editor UI elements and text.");
+                break;
             }
-            ImGui::EndCombo();
-        }
-
-        if (m_editor_config->render_backend != m_app.getAPIType())
-        {
-            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f),
-                "Restart the editor for the backend change to take effect.");
-        }
-
-        ImGui::Spacing();
-        ImGui::SeparatorText("Rendering Features");
-
-        // FXAA toggle
-        {
-            auto* cvar = CVAR_PTR(r_fxaa);
-            bool fxaa = cvar ? cvar->getBool() : true;
-            if (ImGui::Checkbox("FXAA Anti-aliasing", &fxaa))
-            {
-                if (cvar) cvar->setInt(fxaa ? 1 : 0);
-                m_app.getRenderAPI()->setFXAAEnabled(fxaa);
-            }
-        }
-
-        // Shadow Quality combo
-        {
-            auto* cvar = CVAR_PTR(r_shadowquality);
-            int shadow_q = cvar ? cvar->getInt() : 2;
-            const char* shadow_opts[] = { "Off", "Low (1024)", "Medium (2048)", "High (4096)" };
-            ImGui::SetNextItemWidth(200.0f);
-            if (ImGui::Combo("Shadow Quality", &shadow_q, shadow_opts, 4))
-            {
-                if (cvar) cvar->setInt(shadow_q);
-                m_app.getRenderAPI()->setShadowQuality(shadow_q);
             }
         }
+        ImGui::EndChild();
 
-        // Skybox toggle
-        {
-            auto* cvar = CVAR_PTR(r_sky);
-            bool sky = cvar ? cvar->getBool() : true;
-            if (ImGui::Checkbox("Skybox", &sky))
-            {
-                if (cvar) cvar->setInt(sky ? 1 : 0);
-            }
-        }
-
-        // Lighting toggle
-        {
-            auto* cvar = CVAR_PTR(r_lighting);
-            bool lighting = cvar ? cvar->getBool() : true;
-            if (ImGui::Checkbox("Lighting", &lighting))
-            {
-                if (cvar) cvar->setInt(lighting ? 1 : 0);
-                m_app.getRenderAPI()->enableLighting(lighting);
-            }
-            if (!lighting)
-                ImGui::TextDisabled("  All objects render unlit (flat color).");
-        }
-
-        // Dynamic Lights toggle
-        {
-            auto* cvar = CVAR_PTR(r_dynamiclights);
-            bool dyn = cvar ? cvar->getBool() : true;
-            if (ImGui::Checkbox("Dynamic Lights (Point/Spot)", &dyn))
-            {
-                if (cvar) cvar->setInt(dyn ? 1 : 0);
-            }
-        }
-
-        ImGui::Spacing();
-        ImGui::SeparatorText("Performance");
-
-        // Depth Prepass toggle
-        {
-            auto* cvar = CVAR_PTR(r_depthprepass);
-            bool prepass = cvar ? cvar->getBool() : true;
-            if (ImGui::Checkbox("Depth Prepass", &prepass))
-            {
-                if (cvar) cvar->setInt(prepass ? 1 : 0);
-                m_renderer.setDepthPrepassEnabled(prepass);
-            }
-        }
-
-        // Frustum Culling / BVH toggle
-        {
-            auto* cvar = CVAR_PTR(r_frustumculling);
-            bool culling = cvar ? cvar->getBool() : true;
-            if (ImGui::Checkbox("Frustum Culling (BVH)", &culling))
-            {
-                if (cvar) cvar->setInt(culling ? 1 : 0);
-                m_renderer.setBVHEnabled(culling);
-            }
-        }
-
-        // Reset to Defaults
-        ImGui::Spacing();
+        // --- Footer ---
         if (ImGui::Button("Reset to Defaults"))
         {
             const char* cvar_names[] = { "r_fxaa", "r_shadowquality", "r_sky", "r_lighting",
@@ -1963,9 +2069,12 @@ void EditorApp::renderEditorSettings()
             m_app.getRenderAPI()->enableLighting(CVAR_BOOL(r_lighting));
             m_renderer.setDepthPrepassEnabled(CVAR_BOOL(r_depthprepass));
             m_renderer.setBVHEnabled(CVAR_BOOL(r_frustumculling));
-        }
 
-        ImGui::Spacing();
+            m_editor_config->ui_scale = 1.0f;
+            applyUIScale(1.0f);
+            m_editor_config->save();
+        }
+        ImGui::SameLine();
         ImGui::TextDisabled("Config: %s", EditorConfig::getConfigPath().string().c_str());
     }
     ImGui::End();

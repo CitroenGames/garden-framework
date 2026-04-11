@@ -83,5 +83,10 @@
 #define ICON_FA_PASTE               "\xef\x83\xaa"  // U+F0EA  (paste)
 #define ICON_FA_ROTATE_LEFT         "\xef\x8b\xa2"  // U+F2EA  (reset to defaults)
 
+// --- Settings categories ---
+#define ICON_FA_DISPLAY             "\xef\x8c\x90"  // U+F390  (monitor/display)
+#define ICON_FA_GAUGE_HIGH          "\xef\x98\xa5"  // U+F625  (performance)
+#define ICON_FA_PALETTE             "\xef\x94\xbf"  // U+F53F  (appearance)
+
 // --- Misc ---
 #define ICON_FA_MUSIC               "\xef\x80\x81"  // U+F001  (audio)

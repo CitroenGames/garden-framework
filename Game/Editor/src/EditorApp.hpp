@@ -87,6 +87,10 @@ private:
     EditorConfig* m_editor_config = nullptr;
     bool m_show_editor_settings = false;
 
+    // Settings window category navigation
+    enum class SettingsCategory { Graphics, Rendering, Performance, Appearance };
+    SettingsCategory m_settings_category = SettingsCategory::Graphics;
+
     // Save path
     std::string m_current_save_path;
 
@@ -167,6 +171,7 @@ private:
     void renderOpenDialog();
     void renderSaveAsDialog();
     void renderEditorSettings();
+    void applyUIScale(float scale);
     void renderGrid();
 
     // Project manager

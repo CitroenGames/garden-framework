@@ -152,6 +152,8 @@ static void ApplyEditorTheme()
     c[ImGuiCol_ModalWindowDimBg]      = ImVec4(0.00f, 0.00f, 0.00f, 0.55f);
 }
 
+void ImGuiManager::applyTheme() { ApplyEditorTheme(); }
+
 bool ImGuiManager::initialize(SDL_Window* window, IRenderAPI* renderAPI, RenderAPIType apiType)
 {
     if (m_initialized) return true;

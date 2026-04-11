@@ -40,6 +40,9 @@ public:
     bool getShowConsole() const { return m_showConsole; }
     void toggleConsole() { m_showConsole = !m_showConsole; }
 
+    // Reapply the base editor theme (resets all style sizes/colors to 1x defaults)
+    static void applyTheme();
+
     // Fonts
     ImFont* getBoldFont() const { return m_boldFont; }
     ImFont* getIconFont() const { return m_iconFont; }
