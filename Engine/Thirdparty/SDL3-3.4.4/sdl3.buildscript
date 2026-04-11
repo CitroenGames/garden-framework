@@ -1,0 +1,22 @@
+[project:SDL3]
+type = interface
+headers = include/**/*.h
+public_includes = include
+if(Windows)
+{
+    public_libs = lib/x64/SDL3.lib
+}
+if(Linux)
+{
+    find_package(SDL3 REQUIRED)
+    public_includes = ${SDL3_INCLUDE_DIRS}
+    libdirs = ${SDL3_LIBRARY_DIRS}
+    public_libs = ${SDL3_LIBRARIES}
+}
+if(macOS)
+{
+    find_package(SDL3 REQUIRED)
+    public_includes = ${SDL3_INCLUDE_DIRS}
+    libdirs = ${SDL3_LIBRARY_DIRS}
+    public_libs = ${SDL3_LIBRARIES}
+}

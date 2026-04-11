@@ -4,7 +4,7 @@
 #include "Utils/Log.hpp"
 #include <algorithm>
 #include <sstream>
-#include <SDL.h>
+#include <SDL3/SDL.h>
 
 // CommandArgs implementation
 static const std::string s_emptyString;
@@ -375,14 +375,14 @@ void CommandRegistry::registerBuiltinCommands()
     // quit / exit - Exit application
     static ConCommand quitCmd("quit", [](const CommandArgs&) {
         SDL_Event quit_event;
-        quit_event.type = SDL_QUIT;
+        quit_event.type = SDL_EVENT_QUIT;
         SDL_PushEvent(&quit_event);
     }, 0, "Exit the application");
     m_commands["quit"] = &quitCmd;
 
     static ConCommand exitCmd("exit", [](const CommandArgs&) {
         SDL_Event quit_event;
-        quit_event.type = SDL_QUIT;
+        quit_event.type = SDL_EVENT_QUIT;
         SDL_PushEvent(&quit_event);
     }, 0, "Exit the application");
     m_commands["exit"] = &exitCmd;

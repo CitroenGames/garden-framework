@@ -6,7 +6,7 @@
 #include <windows.h>
 #endif
 
-#include "SDL.h"
+#include <SDL3/SDL.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <cstring>
@@ -273,6 +273,7 @@ int main(int argc, char* argv[])
         LOG_ENGINE_WARN("Failed to initialize Audio System - continuing without audio");
 
     // Set up input
+    input_handler.set_window(app.getWindow());
     input_handler.set_quit_callback([]() { quit_game(0); });
     input_handler.set_resize_callback([](int w, int h) { app.onWindowResized(w, h); });
     auto input_manager = input_handler.get_input_manager();
@@ -351,12 +352,12 @@ int main(int argc, char* argv[])
     game_module.onLevelLoaded();
 
     // Main game loop
-    Uint32 delta_last = SDL_GetTicks();
+    Uint64 delta_last = SDL_GetTicks();
 
     while (true)
     {
         render_api->executeWithAutoreleasePool([&]() {
-            Uint32 frame_start = SDL_GetTicks();
+            Uint64 frame_start = SDL_GetTicks();
 
             ImGuiManager::get().newFrame();
             RmlUiManager::get().beginFrame();
@@ -385,7 +386,7 @@ int main(int argc, char* argv[])
 
             app.swapBuffers();
 
-            Uint32 frame_end = SDL_GetTicks();
+            Uint64 frame_end = SDL_GetTicks();
             int fps_max_val = CVAR_INT(fps_max);
             if (fps_max_val > 0)
                 app.setTargetFPS(fps_max_val);

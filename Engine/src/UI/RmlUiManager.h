@@ -2,7 +2,7 @@
 
 #include "EngineGraphicsExport.h"
 #include "Graphics/RenderAPI.hpp"
-#include <SDL.h>
+#include <SDL3/SDL.h>
 
 // Forward declarations
 namespace Rml { class Context; class RenderInterface; }

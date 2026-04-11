@@ -114,9 +114,9 @@ if %ERRORLEVEL% neq 0 (
 
 :: ---- Copy runtime dependencies to bin/ ----
 if not exist "%GARDEN_ROOT%\bin" mkdir "%GARDEN_ROOT%\bin"
-if exist "%GARDEN_ROOT%\Engine\Thirdparty\SDL2\lib\x64\SDL2.dll" (
-    copy /Y "%GARDEN_ROOT%\Engine\Thirdparty\SDL2\lib\x64\SDL2.dll" "%GARDEN_ROOT%\bin\SDL2.dll" >nul
-    echo   Copied SDL2.dll to bin/
+if exist "%GARDEN_ROOT%\Engine\Thirdparty\SDL3-3.4.4\lib\x64\SDL3.dll" (
+    copy /Y "%GARDEN_ROOT%\Engine\Thirdparty\SDL3-3.4.4\lib\x64\SDL3.dll" "%GARDEN_ROOT%\bin\SDL3.dll" >nul
+    echo   Copied SDL3.dll to bin/
 )
 
 :: ---- Step 4: File association ----

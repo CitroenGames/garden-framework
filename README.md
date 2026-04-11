@@ -10,46 +10,9 @@ A cross-platform 3D game engine written in C++20, built as a foundation for FPS-
 
 ## Features
 
-### Rendering
-*   **Multi-API Renderer**: Vulkan, Direct3D 11, Metal, and a headless backend for dedicated servers.
-*   **Cascaded Shadow Maps (CSM)**: 4-cascade directional shadows with PCF filtering and cascade blending.
-*   **Frustum Culling**: BVH-accelerated spatial culling for efficient rendering.
-*   **Post-Processing**: FXAA anti-aliasing via offscreen framebuffer pipeline.
-*   **Skybox**: Procedural atmosphere rendering.
-*   **Multi-Material Meshes**: Per-submesh textures and material ranges from glTF.
-*   **Debug Drawing**: Wireframe lines, boxes, spheres, capsules, and rays for visualizing physics and spatial data.
+Multi-backend rendering (Vulkan, D3D11, Metal), an Unreal-style level editor with dockable panels and Play-In-Editor, ECS with physics, audio, skeletal animation, networking, and a full asset pipeline.
 
-### Editor
-*   **Dockable Panel Layout**: ImGui-based editor with viewport, scene hierarchy, inspector, content browser, console, and more.
-*   **Scene Viewport**: Renders the scene to an offscreen texture with an orbiting editor camera (WASD + right-click).
-*   **Gizmos**: Translate, rotate, and scale via ImGuizmo with snap support and a view orientation cube.
-*   **Scene Hierarchy & Inspector**: Select entities, edit transforms, mesh, physics, and audio components per-entity.
-*   **Content Browser**: Browse project assets with metadata display and context-menu reimport.
-*   **LOD Settings Panel**: Configure mesh LOD levels and thresholds with meshoptimizer integration.
-*   **NavMesh Panel**: Generate, visualize, save/load navigation meshes and test pathfinding.
-*   **Physics Debug Panel**: Visualize colliders, AABBs, and contact points at runtime.
-*   **Play In Editor (PIE)**: Enter play mode with world snapshot/restore, pause, eject to free-cam, and re-enter.
-*   **Undo/Redo**: Action-based undo system for editor operations.
-*   **Project Browser**: Create new projects from templates or open existing `.garden` project files.
-*   **Level Serialization**: New, open, save, and save-as for JSON level files with native file dialogs.
-*   **Console Panel**: Integrated developer console with command input, tab completion, and log filtering.
-
-### Engine Systems
-*   **Entity Component System (ECS)**: `entt`-based with transform, mesh, rigidbody, collider, player, audio source, and animation components.
-*   **Physics**: Jolt Physics 5.5.0 with rigid bodies, capsule character controllers, raycasting, collision layers, and fixed-timestep simulation.
-*   **Audio**: miniaudio-based spatial audio system with 3D positional sound, audio groups (SFX, Music, Voice, UI), and per-group volume control.
-*   **Animation**: Skeletal animation with bone hierarchies, keyframe interpolation (SLERP), animation blending/crossfade, and glTF skin/animation loading. Skinned vertex shaders for all backends.
-*   **Event Bus**: Decoupled communication between systems via `entt::dispatcher` with immediate and deferred event dispatch.
-*   **Timer System**: Gameplay timers with cooldowns, delays, pause/resume, and global time scaling.
-*   **Game State Manager**: Stack-based state machine for game flow (playing, paused, menus) with transparent overlay support.
-*   **Scene Manager**: Level lifecycle management with load/unload/transition, wrapping the JSON-based level system.
-*   **Networking**: ENet-based client-server multiplayer with world state replication, delta compression, and input command streaming.
-*   **Asset Pipeline**: Async asset loading with thread pool, GPU upload scheduling, and loader plugin architecture. Supports glTF/GLB and OBJ.
-*   **Console System**: Source Engine-style ConVars with typed values, flags (ARCHIVE, REPLICATED, CHEAT), bounds validation, config save/load, and network replication.
-*   **Job System**: Multi-threaded work scheduling with priorities, dependencies, barriers, and a main-thread queue for GPU operations.
-*   **Input System**: SDL2-based with per-frame key state tracking, mouse delta, action mapping, and delegate callbacks.
-*   **Data-Driven Levels**: JSON and binary level formats with per-entity transform, mesh, physics, and component configuration.
-*   **Model Support**: Loads `.gltf`/`.glb` (with materials and skeletal data) and `.obj` models.
+See [Features.md](Documentation/Features.md) for the complete feature list.
 
 ## Architecture
 
@@ -69,7 +32,7 @@ EngineCore.dll          EngineGraphics.dll
            (Client)  (Editor)   (Headless)
 ```
 
-**EngineCore** (`EngineCore.dll`) contains all platform-independent game logic: the ECS (entt), Jolt physics, miniaudio, skeletal animation, asset pipeline, navigation, console/ConVar system, job system, level serialization, networking, and input management. It exports symbols via `ENGINE_API` and links SDL2, GLM, spdlog, entt, ENet, Jolt Physics, miniaudio, meshoptimizer, tinygltf, and tinyobjloader.
+**EngineCore** (`EngineCore.dll`) contains all platform-independent game logic: the ECS (entt), Jolt physics, miniaudio, skeletal animation, asset pipeline, navigation, console/ConVar system, job system, level serialization, networking, and input management. It exports symbols via `ENGINE_API` and links SDL3, GLM, spdlog, entt, ENet, Jolt Physics, miniaudio, meshoptimizer, tinygltf, and tinyobjloader.
 
 **EngineGraphics** (`EngineGraphics.dll`) contains all rendering and UI code: the multi-backend render API (Vulkan, D3D11, Metal, headless factory), ImGui integration, RmlUi integration, and ImGuizmo gizmos. It exports symbols via `ENGINE_GRAPHICS_API` and links EngineCore, vk-bootstrap, VMA, Dear ImGui, ImGuizmo, and RmlUi.
 

@@ -30,7 +30,7 @@
 #include "Threading/JobSystem.hpp"
 #include "Assets/AssetManager.hpp"
 
-#include <SDL.h>
+#include <SDL3/SDL.h>
 #include <memory>
 
 // ---- Module state ----

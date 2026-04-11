@@ -1,6 +1,6 @@
 #include "ImGuiManager.hpp"
 #include "imgui.h"
-#include "imgui_impl_sdl2.h"
+#include "imgui_impl_sdl3.h"
 #include "imgui_impl_vulkan.h"
 #ifdef __APPLE__
 #include "Graphics/MetalRenderAPI.hpp"
@@ -21,7 +21,7 @@ extern "C" void ImGuiMetal_NewFrame(void* renderPassDescriptor);
 #include "Console/ConVar.hpp"
 #include "Console/ConCommand.hpp"
 #include "Utils/EnginePaths.hpp"
-#include <SDL.h>
+#include <SDL3/SDL.h>
 #include <cstring>
 
 ImGuiManager& ImGuiManager::get()
@@ -241,8 +241,8 @@ bool ImGuiManager::initialize(SDL_Window* window, IRenderAPI* renderAPI, RenderA
 
 bool ImGuiManager::initVulkan(SDL_Window* window, IRenderAPI* vulkanAPI)
 {
-    // Initialize SDL2 backend for Vulkan
-    if (!ImGui_ImplSDL2_InitForVulkan(window))
+    // Initialize SDL3 backend for Vulkan
+    if (!ImGui_ImplSDL3_InitForVulkan(window))
     {
         return false;
     }
@@ -251,7 +251,7 @@ bool ImGuiManager::initVulkan(SDL_Window* window, IRenderAPI* vulkanAPI)
     VulkanRenderAPI* vkAPI = dynamic_cast<VulkanRenderAPI*>(vulkanAPI);
     if (!vkAPI)
     {
-        ImGui_ImplSDL2_Shutdown();
+        ImGui_ImplSDL3_Shutdown();
         return false;
     }
 
@@ -263,7 +263,7 @@ bool ImGuiManager::initVulkan(SDL_Window* window, IRenderAPI* vulkanAPI)
     }
     if (renderPass == VK_NULL_HANDLE)
     {
-        ImGui_ImplSDL2_Shutdown();
+        ImGui_ImplSDL3_Shutdown();
         return false;
     }
 
@@ -275,15 +275,15 @@ bool ImGuiManager::initVulkan(SDL_Window* window, IRenderAPI* vulkanAPI)
     init_info.Device = vkAPI->getDevice();
     init_info.QueueFamily = vkAPI->getGraphicsQueueFamily();
     init_info.Queue = vkAPI->getGraphicsQueue();
-    init_info.RenderPass = renderPass;
+    init_info.PipelineInfoMain.RenderPass = renderPass;
     init_info.MinImageCount = 2;
     init_info.ImageCount = vkAPI->getSwapchainImageCount();
-    init_info.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
+    init_info.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
     init_info.DescriptorPoolSize = 1000; // Let ImGui create its own pool
 
     if (!ImGui_ImplVulkan_Init(&init_info))
     {
-        ImGui_ImplSDL2_Shutdown();
+        ImGui_ImplSDL3_Shutdown();
         return false;
     }
 
@@ -293,8 +293,8 @@ bool ImGuiManager::initVulkan(SDL_Window* window, IRenderAPI* vulkanAPI)
 #ifdef __APPLE__
 bool ImGuiManager::initMetal(SDL_Window* window, IRenderAPI* metalAPI)
 {
-    // Initialize SDL2 backend for Metal
-    if (!ImGui_ImplSDL2_InitForMetal(window))
+    // Initialize SDL3 backend for Metal
+    if (!ImGui_ImplSDL3_InitForMetal(window))
     {
         return false;
     }
@@ -302,20 +302,20 @@ bool ImGuiManager::initMetal(SDL_Window* window, IRenderAPI* metalAPI)
     MetalRenderAPI* mtlAPI = dynamic_cast<MetalRenderAPI*>(metalAPI);
     if (!mtlAPI)
     {
-        ImGui_ImplSDL2_Shutdown();
+        ImGui_ImplSDL3_Shutdown();
         return false;
     }
 
     void* device = mtlAPI->getDevice();
     if (!device)
     {
-        ImGui_ImplSDL2_Shutdown();
+        ImGui_ImplSDL3_Shutdown();
         return false;
     }
 
     if (!ImGuiMetal_Init(device))
     {
-        ImGui_ImplSDL2_Shutdown();
+        ImGui_ImplSDL3_Shutdown();
         return false;
     }
 
@@ -324,10 +324,14 @@ bool ImGuiManager::initMetal(SDL_Window* window, IRenderAPI* metalAPI)
 #endif
 
 #ifdef _WIN32
+
+// Forward declare (intentionally not in imgui_impl_dx11.h per ImGui docs)
+void ImGui_ImplDX11_SetSwapChainDescs(const DXGI_SWAP_CHAIN_DESC* desc_templates, int desc_templates_count);
+
 bool ImGuiManager::initD3D11(SDL_Window* window, IRenderAPI* d3d11API)
 {
-    // Initialize SDL2 backend for D3D11
-    if (!ImGui_ImplSDL2_InitForD3D(window))
+    // Initialize SDL3 backend for D3D11
+    if (!ImGui_ImplSDL3_InitForD3D(window))
     {
         return false;
     }
@@ -336,22 +340,35 @@ bool ImGuiManager::initD3D11(SDL_Window* window, IRenderAPI* d3d11API)
     D3D11RenderAPI* dxAPI = dynamic_cast<D3D11RenderAPI*>(d3d11API);
     if (!dxAPI)
     {
-        ImGui_ImplSDL2_Shutdown();
+        ImGui_ImplSDL3_Shutdown();
         return false;
     }
 
     if (!ImGui_ImplDX11_Init(dxAPI->getDevice(), dxAPI->getDeviceContext()))
     {
-        ImGui_ImplSDL2_Shutdown();
+        ImGui_ImplSDL3_Shutdown();
         return false;
     }
+
+    // Match secondary viewport swap chains to the engine's main swap chain settings.
+    // Without this, ImGui defaults to DXGI_SWAP_EFFECT_DISCARD which conflicts with
+    // the engine's DXGI_SWAP_EFFECT_FLIP_DISCARD, causing black viewports when
+    // dragging panels out (see ocornut/imgui#5437).
+    DXGI_SWAP_CHAIN_DESC sd = {};
+    sd.BufferCount = 2;
+    sd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    sd.SampleDesc.Count = 1;
+    sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    sd.Windowed = TRUE;
+    sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    ImGui_ImplDX11_SetSwapChainDescs(&sd, 1);
 
     return true;
 }
 
 bool ImGuiManager::initD3D12(SDL_Window* window, IRenderAPI* d3d12API)
 {
-    if (!ImGui_ImplSDL2_InitForD3D(window))
+    if (!ImGui_ImplSDL3_InitForD3D(window))
     {
         return false;
     }
@@ -359,7 +376,7 @@ bool ImGuiManager::initD3D12(SDL_Window* window, IRenderAPI* d3d12API)
     D3D12RenderAPI* dxAPI = dynamic_cast<D3D12RenderAPI*>(d3d12API);
     if (!dxAPI)
     {
-        ImGui_ImplSDL2_Shutdown();
+        ImGui_ImplSDL3_Shutdown();
         return false;
     }
 
@@ -392,7 +409,7 @@ bool ImGuiManager::initD3D12(SDL_Window* window, IRenderAPI* d3d12API)
 
     if (!ImGui_ImplDX12_Init(&init_info))
     {
-        ImGui_ImplSDL2_Shutdown();
+        ImGui_ImplSDL3_Shutdown();
         return false;
     }
 
@@ -425,7 +442,7 @@ void ImGuiManager::shutdown()
     }
 #endif
 
-    ImGui_ImplSDL2_Shutdown();
+    ImGui_ImplSDL3_Shutdown();
     ImGui::DestroyContext();
 
     m_initialized = false;
@@ -457,7 +474,7 @@ void ImGuiManager::newFrame()
     }
 #endif
 
-    ImGui_ImplSDL2_NewFrame();
+    ImGui_ImplSDL3_NewFrame();
     ImGui::NewFrame();
 }
 
@@ -525,7 +542,7 @@ void ImGuiManager::render()
 bool ImGuiManager::processEvent(const SDL_Event* event)
 {
     if (!m_initialized) return false;
-    return ImGui_ImplSDL2_ProcessEvent(event);
+    return ImGui_ImplSDL3_ProcessEvent(event);
 }
 
 bool ImGuiManager::wantCaptureMouse() const

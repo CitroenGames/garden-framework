@@ -27,6 +27,6 @@ headers = {
 }
 includes = Include, Source, Backends
 public_includes = Include, Backends
-defines = RMLUI_CORE_EXPORTS, RMLUI_DEBUGGER_EXPORTS, RMLUI_SDL_VERSION_MAJOR=2, RMLUI_FONT_ENGINE_FREETYPE
+defines = RMLUI_CORE_EXPORTS, RMLUI_DEBUGGER_EXPORTS, RMLUI_SDL_VERSION_MAJOR=3, RMLUI_FONT_ENGINE_FREETYPE
 multiprocessor = true
-target_link_libraries(freetype, SDL2)
+target_link_libraries(freetype, SDL3)

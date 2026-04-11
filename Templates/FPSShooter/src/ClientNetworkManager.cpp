@@ -7,7 +7,7 @@
 #include "Console/Console.hpp"
 #include <entt/entt.hpp>
 #include <cstring>
-#include <SDL.h>
+#include <SDL3/SDL.h>
 
 namespace Game {
 

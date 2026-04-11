@@ -4,7 +4,7 @@
 #include <filesystem>
 
 #define SDL_MAIN_HANDLED
-#include "SDL.h"
+#include <SDL3/SDL.h>
 
 #include "Utils/CrashHandler.hpp"
 #include "Utils/Log.hpp"
@@ -193,23 +193,23 @@ int main(int argc, char* argv[])
     LOG_ENGINE_INFO("Server started successfully");
 
     // Server loop
-    Uint32 delta_last = SDL_GetTicks();
+    Uint64 delta_last = SDL_GetTicks();
     bool running = true;
 
     while (running)
     {
-        Uint32 frame_start = SDL_GetTicks();
+        Uint64 frame_start = SDL_GetTicks();
         float delta_time = (frame_start - delta_last) / 1000.0f;
         delta_last = frame_start;
 
         game_module.serverUpdate(delta_time);
 
-        Uint32 frame_end = SDL_GetTicks();
+        Uint64 frame_end = SDL_GetTicks();
         app.lockFramerate(frame_start, frame_end);
 
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
-            if (event.type == SDL_QUIT)
+            if (event.type == SDL_EVENT_QUIT)
                 running = false;
         }
     }

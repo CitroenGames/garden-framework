@@ -3,7 +3,7 @@
 #include "EngineGraphicsExport.h"
 #include "imgui.h"
 #include "Graphics/RenderAPI.hpp"
-#include <SDL.h>
+#include <SDL3/SDL.h>
 #include <vector>
 #include <string>
 

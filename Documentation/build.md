@@ -11,7 +11,7 @@ This project uses [Sighmake](https://github.com/CitroenGames/sighmake) for build
 
 ### Linux (Ubuntu/Debian)
 *   GCC 12+ or Clang 15+ with C++20 support
-*   SDL2 development libraries (`sudo apt install libsdl2-dev`)
+*   SDL3 development libraries (`sudo apt install libsdl3-dev`)
 *   Sighmake on your PATH
 *   Vulkan SDK:
     ```bash
@@ -25,7 +25,7 @@ This project uses [Sighmake](https://github.com/CitroenGames/sighmake) for build
 *   Xcode Command Line Tools (`xcode-select --install`)
 *   Homebrew packages:
     ```bash
-    brew install sdl2 pkg-config
+    brew install sdl3 pkg-config
     ```
 *   [Vulkan SDK](https://vulkan.lunarg.com/) (for Vulkan backend) or use Metal natively
 
@@ -57,7 +57,7 @@ sighmake project.buildscript
 
 This generates a Visual Studio solution (`.slnx`) on Windows or Makefiles on Linux/macOS. It also reads all `.buildscript` files under `Engine/`, `Game/`, and `Tools/`.
 
-On Windows, `Generate SLN.bat` wraps this command and copies `SDL2.dll` to `bin/`.
+On Windows, `Generate SLN.bat` wraps this command and copies `SDL3.dll` to `bin/`.
 
 ### Build
 
@@ -86,7 +86,7 @@ All binaries are placed in `bin/`:
 | `Editor.exe` | Level editor |
 | `Server.exe` | Headless dedicated server |
 | `GardenCLI.exe` | CLI tool for project management |
-| `SDL2.dll` | Runtime dependency (Windows) |
+| `SDL3.dll` | Runtime dependency (Windows) |
 
 ## Shader Compilation
 
@@ -171,7 +171,7 @@ All dependencies are vendored under `Engine/Thirdparty/`:
 
 | Library | Version | Purpose |
 | :--- | :--- | :--- |
-| SDL2 | 2.x | Windowing, input, audio device |
+| SDL3 | 3.4.4 | Windowing, input, audio device |
 | Vulkan SDK | 1.2+ | Vulkan rendering |
 | vk-bootstrap | | Vulkan instance/device setup |
 | VMA | | Vulkan memory allocation |

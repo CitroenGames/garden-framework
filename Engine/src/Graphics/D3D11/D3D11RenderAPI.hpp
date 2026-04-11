@@ -4,8 +4,7 @@
 #include <d3d11.h>
 #include <dxgi.h>
 #include <wrl/client.h>
-#include <SDL.h>
-#include <SDL_syswm.h>
+#include <SDL3/SDL.h>
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>

@@ -1,7 +1,7 @@
 #pragma once
 
 #include "Components/camera.hpp"
-#include <SDL.h>
+#include <SDL3/SDL.h>
 #include <glm/glm.hpp>
 
 class EditorCamera
@@ -19,7 +19,7 @@ public:
     // keyboard_state: from SDL_GetKeyboardState(nullptr).
     void update(float dt, bool looking_active,
                 float mouse_dx, float mouse_dy,
-                const Uint8* keyboard_state);
+                const bool* keyboard_state);
 
     // Adjust movement speed via scroll wheel (each notch ≈ 10% change).
     void adjustSpeed(float scroll_delta);

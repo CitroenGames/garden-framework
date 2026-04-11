@@ -1,6 +1,6 @@
 #pragma once
 
-#include "SDL.h"
+#include <SDL3/SDL.h>
 #include "Graphics/RenderAPI.hpp"
 #include "Utils/Log.hpp"
 #include <memory>
@@ -36,13 +36,13 @@ public:
     {
         if (api_type != RenderAPIType::Headless)
         {
-            if (SDL_Init(SDL_INIT_VIDEO) < 0)
+            if (!SDL_Init(SDL_INIT_VIDEO))
             {
                 LOG_ENGINE_FATAL("SDL video initialization failed: {}", SDL_GetError());
                 return false;
             }
 
-            Uint32 window_flags = 0;
+            SDL_WindowFlags window_flags = 0;
             if (fullscreen)
                 window_flags |= SDL_WINDOW_FULLSCREEN;
             else
@@ -56,7 +56,6 @@ public:
             else if (api_type == RenderAPIType::Metal)
             {
                 // Metal uses CAMetalLayer attached to the native window
-                // SDL_WINDOW_METAL flag for SDL2 Metal support
                 window_flags |= SDL_WINDOW_METAL;
             }
             else if (api_type == RenderAPIType::D3D11 || api_type == RenderAPIType::D3D12)
@@ -65,11 +64,9 @@ public:
                 // The window will be created as a regular Win32 window
             }
 
-            window = SDL_CreateWindow(title,
-                                     SDL_WINDOWPOS_CENTERED,
-                                     SDL_WINDOWPOS_CENTERED,
-                                     width, height,
-                                     window_flags);
+            window = SDL_CreateWindow(title, width, height, window_flags);
+            if (window)
+                SDL_SetWindowPosition(window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
 
             if (!window)
             {
@@ -83,7 +80,7 @@ public:
         else
         {
             // For headless mode, we might still want to initialize SDL but not VIDEO
-            if (SDL_Init(SDL_INIT_EVENTS) < 0)
+            if (!SDL_Init(SDL_INIT_EVENTS))
             {
                 LOG_ENGINE_FATAL("SDL initialization failed: {}", SDL_GetError());
                 return false;
@@ -110,7 +107,7 @@ public:
         // Input setup
         if (window)
         {
-            SDL_SetRelativeMouseMode(SDL_TRUE);
+            SDL_SetWindowRelativeMouseMode(window, true);
         }
 
         LOG_ENGINE_INFO("Application initialized with {} render API", render_api->getAPIName());
@@ -142,13 +139,13 @@ public:
         }
     }
 
-    void lockFramerate(Uint32 start_time, Uint32 end_time)
+    void lockFramerate(Uint64 start_time, Uint64 end_time)
     {
-        int frame_delay = 1000 / target_fps;
-        float delta = end_time - start_time;
+        Uint64 frame_delay = 1000 / target_fps;
+        Uint64 delta = end_time - start_time;
 
         if (delta < frame_delay)
-            SDL_Delay(frame_delay - delta);
+            SDL_Delay(static_cast<Uint32>(frame_delay - delta));
     }
 
     // Getters

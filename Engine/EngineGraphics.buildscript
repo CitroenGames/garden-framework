@@ -1,11 +1,11 @@
 find_package(Vulkan REQUIRED)
 if(Linux)
 {
-    find_package(SDL2 REQUIRED)
+    find_package(SDL3 REQUIRED)
 }
 if(macOS)
 {
-    find_package(SDL2 REQUIRED)
+    find_package(SDL3 REQUIRED)
 }
 if(Windows)
 {
@@ -69,7 +69,7 @@ headers = {
     src/ImGui/**/*.hpp
     src/UI/**/*.h
 }
-defines = RMLUI_SDL_VERSION_MAJOR=2, ENGINEGRAPHICS_BUILDING_DLL, RMLUI_CORE_EXPORTS, RMLUI_DEBUGGER_EXPORTS, USE_IMGUI_API
+defines = RMLUI_SDL_VERSION_MAJOR=3, ENGINEGRAPHICS_BUILDING_DLL, RMLUI_CORE_EXPORTS, RMLUI_DEBUGGER_EXPORTS, USE_IMGUI_API
 if(Windows)
 {
     includes = ${Vulkan_INCLUDE_DIRS}, ${DirectX11_INCLUDE_DIRS}, ${DirectX12_INCLUDE_DIRS}

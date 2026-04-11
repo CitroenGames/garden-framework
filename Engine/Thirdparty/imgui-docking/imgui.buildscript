@@ -13,13 +13,13 @@ sources = {
     imgui_widgets.cpp
     imgui_tables.cpp
     imgui_demo.cpp
-    backends/imgui_impl_sdl2.cpp
+    backends/imgui_impl_sdl3.cpp
     backends/imgui_impl_opengl3.cpp
     backends/imgui_impl_vulkan.cpp
     backends/imgui_impl_dx11.cpp [windows]
     backends/imgui_impl_dx12.cpp [windows]
     backends/imgui_impl_metal.mm [macOS]
-    backends/imgui_impl_sdlrenderer2.cpp
+    backends/imgui_impl_sdlrenderer3.cpp
 }
 headers = *.h
 includes = ., ${Vulkan_INCLUDE_DIRS}
@@ -34,7 +34,7 @@ if(Windows)
 public_includes = ., backends
 defines = ENGINEGRAPHICS_BUILDING_DLL
 multiprocessor = true
-target_link_libraries(SDL2)
+target_link_libraries(SDL3)
 if(macOS)
 {
     libs = -framework Metal, -framework QuartzCore

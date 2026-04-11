@@ -1,7 +1,7 @@
 #pragma once
 
 #include "EngineExport.h"
-#include "SDL.h"
+#include <SDL3/SDL.h>
 #include <unordered_map>
 #include <vector>
 #include <functional>

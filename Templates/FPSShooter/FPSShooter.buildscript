@@ -13,7 +13,7 @@ target_link_libraries(
     PRIVATE EngineCore
     PRIVATE EngineGraphics
 )
-defines = RMLUI_SDL_VERSION_MAJOR=2
+defines = RMLUI_SDL_VERSION_MAJOR=3
 outdir = bin
 std = 20
 utf8 = true

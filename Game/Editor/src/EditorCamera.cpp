@@ -10,7 +10,7 @@ EditorCamera::EditorCamera()
 
 void EditorCamera::update(float dt, bool looking_active,
                            float mouse_dx, float mouse_dy,
-                           const Uint8* keyboard_state)
+                           const bool* keyboard_state)
 {
     if (looking_active)
     {

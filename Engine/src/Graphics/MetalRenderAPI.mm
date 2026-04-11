@@ -1,7 +1,6 @@
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
-#include <SDL.h>
-#include <SDL_syswm.h>
+#include <SDL3/SDL.h>
 #ifdef __APPLE__
 #import <Cocoa/Cocoa.h>
 #endif
@@ -838,14 +837,12 @@ bool MetalRenderAPI::initialize(WindowHandle window, int width, int height, floa
     impl->frameSemaphore = dispatch_semaphore_create(MetalRenderAPIImpl::MAX_FRAMES_IN_FLIGHT);
 
     // Set up CAMetalLayer on the SDL window
-    SDL_SysWMinfo wmInfo;
-    SDL_VERSION(&wmInfo.version);
-    if (!SDL_GetWindowWMInfo(window, &wmInfo)) {
+    SDL_PropertiesID props = SDL_GetWindowProperties(window);
+    NSWindow* nsWindow = (__bridge NSWindow*)SDL_GetPointerProperty(props, SDL_PROP_WINDOW_COCOA_WINDOW_POINTER, NULL);
+    if (!nsWindow) {
         LOG_ENGINE_FATAL("[Metal] Failed to get window info: {}", SDL_GetError());
         return false;
     }
-
-    NSWindow* nsWindow = wmInfo.info.cocoa.window;
     NSView* contentView = [nsWindow contentView];
     [contentView setWantsLayer:YES];
 

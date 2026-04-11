@@ -19,15 +19,15 @@ void InputManager::process_event(const SDL_Event& event)
 {
     switch (event.type)
     {
-    case SDL_KEYDOWN:
+    case SDL_EVENT_KEY_DOWN:
         if (!event.key.repeat) // Ignore key repeat events
         {
-            current_key_states[event.key.keysym.scancode] = true;
-            
+            current_key_states[event.key.scancode] = true;
+
             // Fire action pressed delegates
             for (const auto& mapping : action_mappings)
             {
-                if (mapping.key == event.key.keysym.scancode)
+                if (mapping.key == event.key.scancode)
                 {
                     auto it = action_delegates.find(mapping.action_name);
                     if (it != action_delegates.end())
@@ -41,14 +41,14 @@ void InputManager::process_event(const SDL_Event& event)
             }
         }
         break;
-        
-    case SDL_KEYUP:
-        current_key_states[event.key.keysym.scancode] = false;
-        
+
+    case SDL_EVENT_KEY_UP:
+        current_key_states[event.key.scancode] = false;
+
         // Fire action released delegates
         for (const auto& mapping : action_mappings)
         {
-            if (mapping.key == event.key.keysym.scancode)
+            if (mapping.key == event.key.scancode)
             {
                 auto it = action_delegates.find(mapping.action_name);
                 if (it != action_delegates.end())
@@ -61,10 +61,10 @@ void InputManager::process_event(const SDL_Event& event)
             }
         }
         break;
-        
-    case SDL_MOUSEMOTION:
-        mouse_delta_x = static_cast<float>(event.motion.xrel);
-        mouse_delta_y = static_cast<float>(event.motion.yrel);
+
+    case SDL_EVENT_MOUSE_MOTION:
+        mouse_delta_x = event.motion.xrel;
+        mouse_delta_y = event.motion.yrel;
         break;
     }
 }

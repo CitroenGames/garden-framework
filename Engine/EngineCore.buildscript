@@ -33,7 +33,7 @@ includes = src, thirdparty/include
 public_includes = src, thirdparty/include, .
 defines = JPH_OBJECT_STREAM, ENGINECORE_BUILDING_DLL
 target_link_libraries(
-    PUBLIC SDL2
+    PUBLIC SDL3
     PUBLIC GLM
     PUBLIC tinygltf
     PUBLIC tinyobjloader

@@ -2,7 +2,7 @@
 
 #include "InputManager.hpp"
 #include "ImGui/ImGuiManager.hpp"
-#include "SDL.h"
+#include <SDL3/SDL.h>
 #include <memory>
 #include <functional>
 
@@ -13,17 +13,24 @@ private:
     std::shared_ptr<InputManager> input_manager;
     std::function<void()> quit_callback;
     std::function<void(int, int)> resize_callback;
+    SDL_Window* window = nullptr;
     bool should_quit = false;
     bool ui_mode = false;  // When true, mouse is visible and game input is paused
     bool is_minimized_state = false;
 
 public:
-    InputHandler() 
+    InputHandler()
     {
         input_manager = std::make_shared<InputManager>();
     }
-    
+
     ~InputHandler() = default;
+
+    // Set the SDL window pointer (needed for SDL3 per-window mouse mode)
+    void set_window(SDL_Window* w)
+    {
+        window = w;
+    }
 
     // Set a callback for when the application should quit
     void set_quit_callback(std::function<void()> callback)
@@ -75,7 +82,7 @@ public:
 
             switch (event.type)
             {
-            case SDL_QUIT:
+            case SDL_EVENT_QUIT:
                 should_quit = true;
                 if (quit_callback)
                 {
@@ -83,21 +90,21 @@ public:
                 }
                 break;
 
-            case SDL_KEYDOWN:
+            case SDL_EVENT_KEY_DOWN:
                 // Backtick (`) toggles console
-                if (event.key.keysym.scancode == SDL_SCANCODE_GRAVE && !event.key.repeat)
+                if (event.key.scancode == SDL_SCANCODE_GRAVE && !event.key.repeat)
                 {
                     ImGuiManager::get().toggleConsole();
                     // If console is now open, enable UI mode
                     if (ImGuiManager::get().getShowConsole() && !ui_mode)
                     {
                         ui_mode = true;
-                        SDL_SetRelativeMouseMode(SDL_FALSE);
+                        SDL_SetWindowRelativeMouseMode(window, false);
                     }
                     break;  // Don't pass backtick to game input
                 }
                 // Escape closes console if open
-                if (event.key.keysym.scancode == SDL_SCANCODE_ESCAPE && !event.key.repeat)
+                if (event.key.scancode == SDL_SCANCODE_ESCAPE && !event.key.repeat)
                 {
                     if (ImGuiManager::get().getShowConsole())
                     {
@@ -106,32 +113,33 @@ public:
                         if (!ImGuiManager::get().getShowSettings())
                         {
                             ui_mode = false;
-                            SDL_SetRelativeMouseMode(SDL_TRUE);
+                            SDL_SetWindowRelativeMouseMode(window, true);
                         }
                         break;  // Don't pass Escape to game input
                     }
                 }
                 // F3 toggles UI mode (mouse visible, game input paused)
-                if (event.key.keysym.scancode == SDL_SCANCODE_F3 && !event.key.repeat)
+                if (event.key.scancode == SDL_SCANCODE_F3 && !event.key.repeat)
                 {
                     ui_mode = !ui_mode;
-                    SDL_SetRelativeMouseMode(ui_mode ? SDL_FALSE : SDL_TRUE);
+                    SDL_SetWindowRelativeMouseMode(window, !ui_mode);
                     ImGuiManager::get().setShowSettings(ui_mode);
                     break;  // Don't pass F3 to game input
                 }
                 break;
 
-            case SDL_WINDOWEVENT:
-                if (event.window.event == SDL_WINDOWEVENT_MINIMIZED)
-                    is_minimized_state = true;
-                else if (event.window.event == SDL_WINDOWEVENT_RESTORED)
-                    is_minimized_state = false;
-                else if (event.window.event == SDL_WINDOWEVENT_RESIZED ||
-                         event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED)
-                {
-                    if (resize_callback)
-                        resize_callback(event.window.data1, event.window.data2);
-                }
+            case SDL_EVENT_WINDOW_MINIMIZED:
+                is_minimized_state = true;
+                break;
+
+            case SDL_EVENT_WINDOW_RESTORED:
+                is_minimized_state = false;
+                break;
+
+            case SDL_EVENT_WINDOW_RESIZED:
+            case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+                if (resize_callback && window && event.window.windowID == SDL_GetWindowID(window))
+                    resize_callback(event.window.data1, event.window.data2);
                 break;
 
             default:

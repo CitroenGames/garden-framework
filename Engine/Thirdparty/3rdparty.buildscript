@@ -1,6 +1,6 @@
 include = Pakker/Pakker.buildscript
 
-include = sdl2/sdl2.buildscript
+include = SDL3-3.4.4/sdl3.buildscript
 include = freetype/freetype.buildscript
 include = RmlUi-6.2/rmlui.buildscript
 include = entt/entt.buildscript

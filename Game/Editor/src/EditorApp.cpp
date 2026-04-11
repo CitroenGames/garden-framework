@@ -18,7 +18,7 @@
 #include "imgui.h"
 #include "imgui_internal.h"
 #include "ImGuizmo.h"
-#include <SDL.h>
+#include <SDL3/SDL.h>
 #include "Threading/JobSystem.hpp"
 #include <cstring>
 #include <chrono>
@@ -289,7 +289,7 @@ bool EditorApp::initialize(RenderAPIType api_type)
     m_asset_scanner.scanDirectory("assets");
     m_asset_scanner.processAllPending();
 
-    SDL_SetRelativeMouseMode(SDL_FALSE);
+    SDL_SetWindowRelativeMouseMode(m_app.getWindow(), false);
 
     m_running = true;
 
@@ -299,14 +299,14 @@ bool EditorApp::initialize(RenderAPIType api_type)
 
 void EditorApp::run()
 {
-    Uint32 last_ticks = SDL_GetTicks();
+    Uint64 last_ticks = SDL_GetTicks();
 
     while (m_running)
     {
         // Drain Metal autorelease pool each frame to prevent ObjC temporary object leaks.
         // On non-Metal backends this is a no-op passthrough.
         m_app.getRenderAPI()->executeWithAutoreleasePool([&]() {
-        Uint32 now = SDL_GetTicks();
+        Uint64 now = SDL_GetTicks();
         m_delta_time = (now - last_ticks) / 1000.0f;
         last_ticks = now;
 
@@ -357,7 +357,7 @@ void EditorApp::run()
         // --- Editor camera update (editing or ejected) ---
         if (!m_state.isSimulationActive() || m_state.play_mode == PlayMode::Ejected)
         {
-            const Uint8* keys = SDL_GetKeyboardState(nullptr);
+            const bool* keys = SDL_GetKeyboardState(nullptr);
             m_editor_cam.update(m_delta_time, m_right_mouse, m_mouse_dx, m_mouse_dy, keys);
         }
 
@@ -577,7 +577,7 @@ void EditorApp::run()
 
         m_app.swapBuffers();
 
-        Uint32 frame_end = SDL_GetTicks();
+        Uint64 frame_end = SDL_GetTicks();
         m_app.lockFramerate(now, frame_end);
         }); // executeWithAutoreleasePool
     }
@@ -1160,7 +1160,7 @@ void EditorApp::stopPlay()
     // 7. Restore state
     m_state.play_mode = PlayMode::Editing;
     m_mouse_captured_for_game = false;
-    SDL_SetRelativeMouseMode(SDL_FALSE);
+    SDL_SetWindowRelativeMouseMode(m_app.getWindow(), false);
 
     applyLightingFromMetadata();
     m_renderer.markBVHDirty();
@@ -1185,7 +1185,7 @@ void EditorApp::pausePlay()
 
     m_state.play_mode = PlayMode::Paused;
     m_mouse_captured_for_game = false;
-    SDL_SetRelativeMouseMode(SDL_FALSE);
+    SDL_SetWindowRelativeMouseMode(m_app.getWindow(), false);
 
     LOG_ENGINE_INFO("PIE: Paused");
 }
@@ -1211,7 +1211,7 @@ void EditorApp::ejectFromPlay()
 
     m_state.play_mode = PlayMode::Ejected;
     m_mouse_captured_for_game = false;
-    SDL_SetRelativeMouseMode(SDL_FALSE);
+    SDL_SetWindowRelativeMouseMode(m_app.getWindow(), false);
 
     // Sync editor camera to current game camera so user starts flying from there
     if (m_game_sim)
@@ -1269,33 +1269,33 @@ void EditorApp::processEvents()
 
         switch (event.type)
         {
-        case SDL_QUIT:
+        case SDL_EVENT_QUIT:
             if (m_state.isSimulationActive())
                 stopPlay();
             m_running = false;
             break;
 
-        case SDL_KEYDOWN:
+        case SDL_EVENT_KEY_DOWN:
             if (!event.key.repeat)
             {
                 // --- Global hotkeys (work in any mode) ---
 
                 // F1: toggle UI
-                if (event.key.keysym.scancode == SDL_SCANCODE_F1)
+                if (event.key.scancode == SDL_SCANCODE_F1)
                 {
                     m_show_ui = !m_show_ui;
                     break;
                 }
 
                 // Escape during play: first release mouse, second press stops play
-                if (event.key.keysym.scancode == SDL_SCANCODE_ESCAPE &&
+                if (event.key.scancode == SDL_SCANCODE_ESCAPE &&
                     m_state.isSimulationActive())
                 {
                     if (m_mouse_captured_for_game)
                     {
                         // First Escape: release mouse capture
                         m_mouse_captured_for_game = false;
-                        SDL_SetRelativeMouseMode(SDL_FALSE);
+                        SDL_SetWindowRelativeMouseMode(m_app.getWindow(), false);
                     }
                     else
                     {
@@ -1306,7 +1306,7 @@ void EditorApp::processEvents()
                 }
 
                 // Escape in editing mode: deselect selected entity
-                if (event.key.keysym.scancode == SDL_SCANCODE_ESCAPE &&
+                if (event.key.scancode == SDL_SCANCODE_ESCAPE &&
                     !m_state.isSimulationActive() &&
                     !ImGui::GetIO().WantTextInput)
                 {
@@ -1316,7 +1316,7 @@ void EditorApp::processEvents()
                 }
 
                 // F8: eject/return toggle during play
-                if (event.key.keysym.scancode == SDL_SCANCODE_F8)
+                if (event.key.scancode == SDL_SCANCODE_F8)
                 {
                     if (m_state.play_mode == PlayMode::Playing)
                     {
@@ -1331,8 +1331,8 @@ void EditorApp::processEvents()
                 }
 
                 // Ctrl+S: save (only in editing mode)
-                if (event.key.keysym.scancode == SDL_SCANCODE_S &&
-                    (SDL_GetModState() & KMOD_CTRL) &&
+                if (event.key.scancode == SDL_SCANCODE_S &&
+                    (SDL_GetModState() & SDL_KMOD_CTRL) &&
                     !m_state.isSimulationActive())
                 {
                     saveLevel();
@@ -1340,8 +1340,8 @@ void EditorApp::processEvents()
                 }
 
                 // Ctrl+N: new level (only in editing mode)
-                if (event.key.keysym.scancode == SDL_SCANCODE_N &&
-                    (SDL_GetModState() & KMOD_CTRL) &&
+                if (event.key.scancode == SDL_SCANCODE_N &&
+                    (SDL_GetModState() & SDL_KMOD_CTRL) &&
                     !m_state.isSimulationActive())
                 {
                     newLevel();
@@ -1349,8 +1349,8 @@ void EditorApp::processEvents()
                 }
 
                 // Ctrl+C: copy selected entity (only in editing mode)
-                if (event.key.keysym.scancode == SDL_SCANCODE_C &&
-                    (SDL_GetModState() & KMOD_CTRL) &&
+                if (event.key.scancode == SDL_SCANCODE_C &&
+                    (SDL_GetModState() & SDL_KMOD_CTRL) &&
                     !m_state.isSimulationActive())
                 {
                     copySelectedEntity();
@@ -1358,8 +1358,8 @@ void EditorApp::processEvents()
                 }
 
                 // Ctrl+V: paste entity (only in editing mode)
-                if (event.key.keysym.scancode == SDL_SCANCODE_V &&
-                    (SDL_GetModState() & KMOD_CTRL) &&
+                if (event.key.scancode == SDL_SCANCODE_V &&
+                    (SDL_GetModState() & SDL_KMOD_CTRL) &&
                     !m_state.isSimulationActive())
                 {
                     pasteEntity();
@@ -1367,8 +1367,8 @@ void EditorApp::processEvents()
                 }
 
                 // Ctrl+D: duplicate selected entity (only in editing mode)
-                if (event.key.keysym.scancode == SDL_SCANCODE_D &&
-                    (SDL_GetModState() & KMOD_CTRL) &&
+                if (event.key.scancode == SDL_SCANCODE_D &&
+                    (SDL_GetModState() & SDL_KMOD_CTRL) &&
                     !m_state.isSimulationActive())
                 {
                     if (m_hierarchy.selected_entity != entt::null &&
@@ -1383,9 +1383,9 @@ void EditorApp::processEvents()
                 }
 
                 // Ctrl+Z: undo (only in editing mode)
-                if (event.key.keysym.scancode == SDL_SCANCODE_Z &&
-                    (SDL_GetModState() & KMOD_CTRL) &&
-                    !(SDL_GetModState() & KMOD_SHIFT) &&
+                if (event.key.scancode == SDL_SCANCODE_Z &&
+                    (SDL_GetModState() & SDL_KMOD_CTRL) &&
+                    !(SDL_GetModState() & SDL_KMOD_SHIFT) &&
                     !m_state.isSimulationActive())
                 {
                     if (m_undo.canUndo())
@@ -1397,8 +1397,8 @@ void EditorApp::processEvents()
                 }
 
                 // Ctrl+Y / Ctrl+Shift+Z: redo (only in editing mode)
-                if (((event.key.keysym.scancode == SDL_SCANCODE_Y && (SDL_GetModState() & KMOD_CTRL)) ||
-                     (event.key.keysym.scancode == SDL_SCANCODE_Z && (SDL_GetModState() & KMOD_CTRL) && (SDL_GetModState() & KMOD_SHIFT))) &&
+                if (((event.key.scancode == SDL_SCANCODE_Y && (SDL_GetModState() & SDL_KMOD_CTRL)) ||
+                     (event.key.scancode == SDL_SCANCODE_Z && (SDL_GetModState() & SDL_KMOD_CTRL) && (SDL_GetModState() & SDL_KMOD_SHIFT))) &&
                     !m_state.isSimulationActive())
                 {
                     if (m_undo.canRedo())
@@ -1414,15 +1414,15 @@ void EditorApp::processEvents()
                 {
                     if (!ImGui::GetIO().WantTextInput && !m_state.gizmo_using)
                     {
-                        if (event.key.keysym.scancode == SDL_SCANCODE_W)
+                        if (event.key.scancode == SDL_SCANCODE_W)
                             m_state.transform_mode = EditorState::TransformMode::Translate;
-                        if (event.key.keysym.scancode == SDL_SCANCODE_E)
+                        if (event.key.scancode == SDL_SCANCODE_E)
                             m_state.transform_mode = EditorState::TransformMode::Rotate;
-                        if (event.key.keysym.scancode == SDL_SCANCODE_R)
+                        if (event.key.scancode == SDL_SCANCODE_R)
                             m_state.transform_mode = EditorState::TransformMode::Scale;
 
                         // Delete: delete selected entity
-                        if (event.key.keysym.scancode == SDL_SCANCODE_DELETE)
+                        if (event.key.scancode == SDL_SCANCODE_DELETE)
                         {
                             if (m_hierarchy.selected_entity != entt::null &&
                                 m_world.registry.valid(m_hierarchy.selected_entity))
@@ -1436,7 +1436,7 @@ void EditorApp::processEvents()
                         }
 
                         // F: focus/frame selected entity
-                        if (event.key.keysym.scancode == SDL_SCANCODE_F)
+                        if (event.key.scancode == SDL_SCANCODE_F)
                         {
                             if (m_hierarchy.selected_entity != entt::null &&
                                 m_world.registry.valid(m_hierarchy.selected_entity))
@@ -1472,7 +1472,7 @@ void EditorApp::processEvents()
             }
             break;
 
-        case SDL_KEYUP:
+        case SDL_EVENT_KEY_UP:
             // Route key release to game input during Playing mode
             if (m_state.play_mode == PlayMode::Playing && m_game_input_manager &&
                 (m_mouse_captured_for_game || !ImGui::GetIO().WantCaptureKeyboard))
@@ -1481,7 +1481,7 @@ void EditorApp::processEvents()
             }
             break;
 
-        case SDL_MOUSEMOTION:
+        case SDL_EVENT_MOUSE_MOTION:
             if (m_mouse_captured_for_game && m_game_input_manager)
             {
                 // Route mouse motion to game input when captured
@@ -1490,12 +1490,12 @@ void EditorApp::processEvents()
             else
             {
                 // Editor camera motion accumulation
-                m_mouse_dx += static_cast<float>(event.motion.xrel);
-                m_mouse_dy += static_cast<float>(event.motion.yrel);
+                m_mouse_dx += event.motion.xrel;
+                m_mouse_dy += event.motion.yrel;
             }
             break;
 
-        case SDL_MOUSEBUTTONDOWN:
+        case SDL_EVENT_MOUSE_BUTTON_DOWN:
             // During Playing mode: left-click in viewport captures mouse for game
             if (m_state.play_mode == PlayMode::Playing && !m_mouse_captured_for_game)
             {
@@ -1503,7 +1503,7 @@ void EditorApp::processEvents()
                     m_viewport.is_hovered)
                 {
                     m_mouse_captured_for_game = true;
-                    SDL_SetRelativeMouseMode(SDL_TRUE);
+                    SDL_SetWindowRelativeMouseMode(m_app.getWindow(), true);
                     break;
                 }
             }
@@ -1518,12 +1518,12 @@ void EditorApp::processEvents()
                 if (event.button.button == SDL_BUTTON_RIGHT && !m_state.gizmo_using && m_viewport.is_hovered)
                 {
                     m_right_mouse = true;
-                    SDL_SetRelativeMouseMode(SDL_TRUE);
+                    SDL_SetWindowRelativeMouseMode(m_app.getWindow(), true);
                 }
             }
             break;
 
-        case SDL_MOUSEBUTTONUP:
+        case SDL_EVENT_MOUSE_BUTTON_UP:
             if (m_mouse_captured_for_game && m_game_input_manager)
             {
                 m_game_input_manager->process_event(event);
@@ -1533,12 +1533,12 @@ void EditorApp::processEvents()
                 if (event.button.button == SDL_BUTTON_RIGHT)
                 {
                     m_right_mouse = false;
-                    SDL_SetRelativeMouseMode(SDL_FALSE);
+                    SDL_SetWindowRelativeMouseMode(m_app.getWindow(), false);
                 }
             }
             break;
 
-        case SDL_MOUSEWHEEL:
+        case SDL_EVENT_MOUSE_WHEEL:
             // Scroll wheel adjusts editor camera speed while in fly mode (RMB held)
             if (m_right_mouse && event.wheel.y != 0)
             {
@@ -1546,12 +1546,10 @@ void EditorApp::processEvents()
             }
             break;
 
-        case SDL_WINDOWEVENT:
-            if (event.window.event == SDL_WINDOWEVENT_RESIZED ||
-                event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED)
-            {
+        case SDL_EVENT_WINDOW_RESIZED:
+        case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+            if (event.window.windowID == SDL_GetWindowID(m_app.getWindow()))
                 m_app.onWindowResized(event.window.data1, event.window.data2);
-            }
             break;
 
         default:

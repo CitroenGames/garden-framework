@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include <array>
 
-#include <SDL.h>
+#include <SDL3/SDL.h>
 
 // VMA
 #define VMA_STATIC_VULKAN_FUNCTIONS 0

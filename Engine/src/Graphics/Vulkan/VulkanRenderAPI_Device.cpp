@@ -3,8 +3,8 @@
 #include <stdio.h>
 
 // SDL Vulkan headers
-#include <SDL.h>
-#include <SDL_vulkan.h>
+#include <SDL3/SDL.h>
+#include <SDL3/SDL_vulkan.h>
 
 // vk-bootstrap
 #include "VkBootstrap.h"
@@ -78,7 +78,7 @@ bool VulkanRenderAPI::createInstance()
 
 bool VulkanRenderAPI::createSurface()
 {
-    if (!SDL_Vulkan_CreateSurface(window_handle, instance, &surface)) {
+    if (!SDL_Vulkan_CreateSurface(window_handle, instance, NULL, &surface)) {
         printf("Failed to create Vulkan surface: %s\n", SDL_GetError());
         return false;
     }

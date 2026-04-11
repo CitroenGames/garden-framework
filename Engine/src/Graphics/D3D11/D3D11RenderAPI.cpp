@@ -69,14 +69,13 @@ bool D3D11RenderAPI::initialize(WindowHandle window, int width, int height, floa
     field_of_view = fov;
 
     // Get native window handle from SDL
-    SDL_SysWMinfo wmInfo;
-    SDL_VERSION(&wmInfo.version);
-    if (!SDL_GetWindowWMInfo(window, &wmInfo))
+    SDL_PropertiesID props = SDL_GetWindowProperties(window);
+    hwnd = (HWND)SDL_GetPointerProperty(props, SDL_PROP_WINDOW_WIN32_HWND_POINTER, NULL);
+    if (!hwnd)
     {
         LOG_ENGINE_ERROR("Failed to get window info from SDL: {}", SDL_GetError());
         return false;
     }
-    hwnd = wmInfo.info.win.window;
 
     if (!createDevice())
     {
