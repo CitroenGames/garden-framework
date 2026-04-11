@@ -459,7 +459,8 @@ void EditorApp::run()
                 ImTextureID tex = (ImTextureID)render_api->getViewportTextureID();
                 GizmoResult gizmo = m_viewport.draw(tex, m_state,
                     m_world.registry, m_hierarchy.selected_entity,
-                    chooseRenderCamera(), render_api, m_renderer.getSceneBVH());
+                    chooseRenderCamera(), render_api, m_renderer.getSceneBVH(),
+                    &m_show_viewport);
                 if (gizmo.drag_started)
                     m_undo.snapshotIfNeeded([this]() { return buildLevelDataFromECS(); });
                 if (gizmo.transform_changed)
@@ -507,7 +508,7 @@ void EditorApp::run()
             }
 
             if (m_show_hierarchy)
-                m_hierarchy.draw(m_world.registry, &bvh_dirty, &m_state.unsaved_changes);
+                m_hierarchy.draw(m_world.registry, &bvh_dirty, &m_state.unsaved_changes, &m_show_hierarchy);
 
             if (m_show_inspector)
             {
@@ -517,7 +518,8 @@ void EditorApp::run()
 
                 bool edit_started = false;
                 bool transform_changed = m_inspector.draw(m_world.registry, m_hierarchy.selected_entity,
-                                                          &m_state.unsaved_changes, &edit_started);
+                                                          &m_state.unsaved_changes, &edit_started,
+                                                          &m_show_inspector);
                 if (transform_changed)
                     bvh_dirty = true;
                 if (edit_started)
@@ -525,22 +527,22 @@ void EditorApp::run()
             }
 
             if (m_show_level_settings)
-                m_level_settings.draw();
+                m_level_settings.draw(&m_show_level_settings);
 
             if (m_show_console)
-                m_console.draw();
+                m_console.draw(&m_show_console);
 
             if (m_show_content_browser)
-                m_content_browser.draw();
+                m_content_browser.draw(&m_show_content_browser);
 
             if (m_show_model_preview)
-                m_model_preview.draw();
+                m_model_preview.draw(&m_show_model_preview);
 
             if (m_show_navmesh_panel)
-                m_navmesh_panel.draw();
+                m_navmesh_panel.draw(&m_show_navmesh_panel);
 
             if (m_show_physics_debug)
-                m_physics_debug_panel.draw();
+                m_physics_debug_panel.draw(&m_show_physics_debug);
 
             // LOD settings panel (opens when double-clicking a mesh in content browser)
             m_lod_settings_panel.draw();

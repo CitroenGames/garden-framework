@@ -20,7 +20,7 @@ public:
 
     // Draw the hierarchy panel. Pass a dirty flag pointer so changes can trigger BVH rebuild.
     // out_unsaved: set to true when any scene mutation occurs.
-    void draw(entt::registry& registry, bool* out_dirty = nullptr, bool* out_unsaved = nullptr);
+    void draw(entt::registry& registry, bool* out_dirty = nullptr, bool* out_unsaved = nullptr, bool* p_open = nullptr);
 
     // Duplicate an entity, selecting the copy. Returns the new entity.
     entt::entity duplicateEntity(entt::registry& registry, entt::entity source);

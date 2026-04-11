@@ -1,4 +1,5 @@
 #include "InspectorPanel.hpp"
+#include "PanelUtils.hpp"
 #include "ColliderWidgets.hpp"
 #include "Components/Components.hpp"
 #include "Graphics/LODSelector.hpp"
@@ -55,7 +56,8 @@ bool InspectorPanel::drawComponentHeader(const char* label, bool can_remove, boo
 }
 
 bool InspectorPanel::draw(entt::registry& registry, entt::entity selected,
-                          bool* out_unsaved, bool* out_edit_started)
+                          bool* out_unsaved, bool* out_edit_started,
+                          bool* p_open)
 {
     bool transform_dirty = false;
 
@@ -63,7 +65,8 @@ bool InspectorPanel::draw(entt::registry& registry, entt::entity selected,
     auto markUnsaved = [&]() { if (out_unsaved) *out_unsaved = true; };
     auto markEditStarted = [&]() { if (out_edit_started) *out_edit_started = true; };
 
-    ImGui::Begin("Inspector");
+    ImGui::Begin("Inspector", p_open);
+    PanelMaximizeButton();
 
     if (selected == entt::null || !registry.valid(selected))
     {

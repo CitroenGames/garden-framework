@@ -1,4 +1,5 @@
 #include "SceneHierarchyPanel.hpp"
+#include "PanelUtils.hpp"
 #include "Components/Components.hpp"
 #include "Components/PrefabInstanceComponent.hpp"
 #include "Reflection/ReflectionRegistry.hpp"
@@ -18,9 +19,10 @@ static bool containsCaseInsensitive(const std::string& str, const char* filter)
     return lower_str.find(lower_filter) != std::string::npos;
 }
 
-void SceneHierarchyPanel::draw(entt::registry& registry, bool* out_dirty, bool* out_unsaved)
+void SceneHierarchyPanel::draw(entt::registry& registry, bool* out_dirty, bool* out_unsaved, bool* p_open)
 {
-    ImGui::Begin("Scene Hierarchy");
+    ImGui::Begin("Scene Hierarchy", p_open);
+    PanelMaximizeButton();
 
     // --- Search bar with icon ---
     ImGui::TextDisabled(ICON_FA_SEARCH);

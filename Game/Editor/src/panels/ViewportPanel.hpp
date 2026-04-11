@@ -37,7 +37,8 @@ public:
 
     GizmoResult draw(ImTextureID scene_texture, EditorState& state,
                      entt::registry& registry, entt::entity& selected,
-                     camera& cam, IRenderAPI* render_api, SceneBVH& bvh);
+                     camera& cam, IRenderAPI* render_api, SceneBVH& bvh,
+                     bool* p_open = nullptr);
 
 private:
     // Gizmo drag-start detection

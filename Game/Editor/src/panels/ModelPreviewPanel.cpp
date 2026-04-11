@@ -1,4 +1,5 @@
 #include "ModelPreviewPanel.hpp"
+#include "PanelUtils.hpp"
 #include "Graphics/RenderAPI.hpp"
 #include "Graphics/renderer.hpp"
 #include "Components/Components.hpp"
@@ -95,9 +96,10 @@ void ModelPreviewPanel::clearPreview()
     m_display_lod = 0;
 }
 
-void ModelPreviewPanel::draw()
+void ModelPreviewPanel::draw(bool* p_open)
 {
-    ImGui::Begin("Asset Preview");
+    ImGui::Begin("Asset Preview", p_open);
+    PanelMaximizeButton();
 
     if (!m_mesh || !render_api)
     {

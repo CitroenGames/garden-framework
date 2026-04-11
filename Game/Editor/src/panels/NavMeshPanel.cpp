@@ -1,4 +1,5 @@
 #include "NavMeshPanel.hpp"
+#include "PanelUtils.hpp"
 #include "Navigation/NavMeshGenerator.hpp"
 #include "Navigation/NavMeshPathfinder.hpp"
 #include "Navigation/NavMeshSerializer.hpp"
@@ -31,9 +32,10 @@ static void drawSectionHeader(const char* label, ImVec4 accent_color = ImVec4(0.
     ImGui::Spacing();
 }
 
-void NavMeshPanel::draw()
+void NavMeshPanel::draw(bool* p_open)
 {
-    ImGui::Begin("NavMesh");
+    ImGui::Begin("NavMesh", p_open);
+    PanelMaximizeButton();
 
     if (!registry)
     {

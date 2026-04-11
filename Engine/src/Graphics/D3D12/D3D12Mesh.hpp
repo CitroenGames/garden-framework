@@ -21,13 +21,22 @@ private:
     ID3D12Device* device = nullptr;
     ID3D12CommandQueue* commandQueue = nullptr;
 
+    // Shared upload infrastructure (borrowed from D3D12RenderAPI)
+    ID3D12CommandAllocator* uploadCmdAllocator = nullptr;
+    ID3D12GraphicsCommandList* uploadCmdList = nullptr;
+    ID3D12Fence* uploadFence = nullptr;
+    HANDLE uploadFenceEvent = nullptr;
+    UINT64* uploadFenceValue = nullptr;
+
     ComPtr<ID3D12Resource> uploadToDefaultHeap(const void* data, size_t dataSize);
 
 public:
     D3D12Mesh() = default;
     ~D3D12Mesh() override = default;
 
-    void setD3D12Handles(ID3D12Device* dev, ID3D12CommandQueue* queue);
+    void setD3D12Handles(ID3D12Device* dev, ID3D12CommandQueue* queue,
+                         ID3D12CommandAllocator* cmdAlloc, ID3D12GraphicsCommandList* cmdList,
+                         ID3D12Fence* fence, HANDLE fenceEvent, UINT64* fenceVal);
 
     // IGPUMesh implementation
     void uploadMeshData(const vertex* vertices, size_t count) override;

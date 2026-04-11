@@ -31,9 +31,14 @@ void D3D12RenderAPI::createViewportResources(int w, int h)
         D3D12_CLEAR_VALUE cv = {};
         cv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
 
-        device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &desc,
+        HRESULT hr = device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &desc,
                                          D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &cv,
                                          IID_PPV_ARGS(m_viewportTexture.GetAddressOf()));
+        if (FAILED(hr))
+        {
+            LOG_ENGINE_ERROR("[D3D12] Failed to create viewport color texture ({}x{}, HRESULT: 0x{:08X})", w, h, static_cast<unsigned>(hr));
+            return;
+        }
     }
 
     // Depth texture
@@ -52,15 +57,26 @@ void D3D12RenderAPI::createViewportResources(int w, int h)
         cv.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
         cv.DepthStencil.Depth = 1.0f;
 
-        device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &desc,
+        HRESULT hr = device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &desc,
                                          D3D12_RESOURCE_STATE_DEPTH_WRITE, &cv,
                                          IID_PPV_ARGS(m_viewportDepthBuffer.GetAddressOf()));
+        if (FAILED(hr))
+        {
+            LOG_ENGINE_ERROR("[D3D12] Failed to create viewport depth texture ({}x{}, HRESULT: 0x{:08X})", w, h, static_cast<unsigned>(hr));
+            return;
+        }
     }
 
     // Allocate descriptors
     if (m_viewportRTVIndex == UINT(-1)) m_viewportRTVIndex = m_rtvAllocator.allocate();
     if (m_viewportSRVIndex == UINT(-1)) m_viewportSRVIndex = m_srvAllocator.allocate();
     if (m_viewportDSVIndex == UINT(-1)) m_viewportDSVIndex = m_dsvAllocator.allocate();
+
+    if (m_viewportRTVIndex == UINT(-1) || m_viewportSRVIndex == UINT(-1) || m_viewportDSVIndex == UINT(-1))
+    {
+        LOG_ENGINE_ERROR("[D3D12] Failed to allocate descriptors for viewport resources");
+        return;
+    }
 
     device->CreateRenderTargetView(m_viewportTexture.Get(), nullptr, m_rtvAllocator.getCPU(m_viewportRTVIndex));
 
@@ -131,23 +147,41 @@ void D3D12RenderAPI::endSceneRender()
                 D3D12FXAACBuffer fxaaCB = {};
                 fxaaCB.inverseScreenSize = glm::vec2(1.0f / pie.width, 1.0f / pie.height);
                 auto cbAddr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(fxaaCB), &fxaaCB);
-                // Minimal root param bindings for FXAA (shader only reads b0 and t0)
-                commandList->SetGraphicsRootConstantBufferView(0, cbAddr);
-                commandList->SetGraphicsRootConstantBufferView(1, cbAddr); // dummy
-                commandList->SetGraphicsRootDescriptorTable(2, m_srvAllocator.getGPU(pie.offscreenSRVIndex));
-                if (defaultTexture != INVALID_TEXTURE) {
-                    auto it = textures.find(defaultTexture);
-                    if (it != textures.end())
-                        commandList->SetGraphicsRootDescriptorTable(3, m_srvAllocator.getGPU(it->second.srvIndex));
+                if (cbAddr == 0)
+                {
+                    // Ring buffer exhausted - fall back to direct copy
+                    transitionResource(pie.offscreenTexture.Get(),
+                                       D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                                       D3D12_RESOURCE_STATE_COPY_SOURCE);
+                    transitionResource(pie.texture.Get(),
+                                       D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                                       D3D12_RESOURCE_STATE_COPY_DEST);
+                    commandList->CopyResource(pie.texture.Get(), pie.offscreenTexture.Get());
+                    transitionResource(pie.texture.Get(),
+                                       D3D12_RESOURCE_STATE_COPY_DEST,
+                                       D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                    transitionResource(pie.offscreenTexture.Get(),
+                                       D3D12_RESOURCE_STATE_COPY_SOURCE,
+                                       D3D12_RESOURCE_STATE_RENDER_TARGET);
                 }
-                commandList->SetGraphicsRootConstantBufferView(4, cbAddr); // dummy
+                else
+                {
+                    // Minimal root param bindings for FXAA (shader only reads b0 and t0)
+                    commandList->SetGraphicsRootConstantBufferView(0, cbAddr);
+                    commandList->SetGraphicsRootConstantBufferView(1, cbAddr); // dummy
+                    commandList->SetGraphicsRootDescriptorTable(2, m_srvAllocator.getGPU(pie.offscreenSRVIndex));
+                    // Bind dummy Texture2DArray SRV for unused t1 slot (must match SRV dimension)
+                    if (m_dummyShadowSRVIndex != UINT(-1))
+                        commandList->SetGraphicsRootDescriptorTable(3, m_srvAllocator.getGPU(m_dummyShadowSRVIndex));
+                    commandList->SetGraphicsRootConstantBufferView(4, cbAddr); // dummy
 
-                commandList->IASetVertexBuffers(0, 1, &m_fxaaQuadVBV);
-                commandList->DrawInstanced(4, 1, 0, 0);
+                    commandList->IASetVertexBuffers(0, 1, &m_fxaaQuadVBV);
+                    commandList->DrawInstanced(4, 1, 0, 0);
 
-                transitionResource(pie.offscreenTexture.Get(),
-                                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-                                   D3D12_RESOURCE_STATE_RENDER_TARGET);
+                    transitionResource(pie.offscreenTexture.Get(),
+                                       D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                                       D3D12_RESOURCE_STATE_RENDER_TARGET);
+                }
             }
             else
             {
@@ -189,26 +223,44 @@ void D3D12RenderAPI::endSceneRender()
             D3D12FXAACBuffer fxaaCB = {};
             fxaaCB.inverseScreenSize = glm::vec2(1.0f / viewport_width_rt, 1.0f / viewport_height_rt);
             auto cbAddr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(fxaaCB), &fxaaCB);
-            // Minimal root param bindings for FXAA (shader only reads b0 and t0)
-            commandList->SetGraphicsRootConstantBufferView(0, cbAddr);
-            commandList->SetGraphicsRootConstantBufferView(1, cbAddr); // dummy
-            commandList->SetGraphicsRootDescriptorTable(2, m_srvAllocator.getGPU(m_offscreenSRVIndex));
-            if (defaultTexture != INVALID_TEXTURE) {
-                auto it = textures.find(defaultTexture);
-                if (it != textures.end())
-                    commandList->SetGraphicsRootDescriptorTable(3, m_srvAllocator.getGPU(it->second.srvIndex));
+            if (cbAddr == 0)
+            {
+                // Ring buffer exhausted - fall back to direct copy (no FXAA)
+                transitionResource(m_viewportTexture.Get(),
+                                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                                   D3D12_RESOURCE_STATE_COPY_DEST);
+                transitionResource(m_offscreenTexture.Get(),
+                                   m_offscreenState, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                commandList->CopyResource(m_viewportTexture.Get(), m_offscreenTexture.Get());
+                transitionResource(m_viewportTexture.Get(),
+                                   D3D12_RESOURCE_STATE_COPY_DEST,
+                                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                transitionResource(m_offscreenTexture.Get(),
+                                   D3D12_RESOURCE_STATE_COPY_SOURCE,
+                                   D3D12_RESOURCE_STATE_RENDER_TARGET);
+                m_offscreenState = D3D12_RESOURCE_STATE_RENDER_TARGET;
             }
-            commandList->SetGraphicsRootConstantBufferView(4, cbAddr); // dummy
+            else
+            {
+                // Minimal root param bindings for FXAA (shader only reads b0 and t0)
+                commandList->SetGraphicsRootConstantBufferView(0, cbAddr);
+                commandList->SetGraphicsRootConstantBufferView(1, cbAddr); // dummy
+                commandList->SetGraphicsRootDescriptorTable(2, m_srvAllocator.getGPU(m_offscreenSRVIndex));
+                // Bind dummy Texture2DArray SRV for unused t1 slot (must match SRV dimension)
+                if (m_dummyShadowSRVIndex != UINT(-1))
+                    commandList->SetGraphicsRootDescriptorTable(3, m_srvAllocator.getGPU(m_dummyShadowSRVIndex));
+                commandList->SetGraphicsRootConstantBufferView(4, cbAddr); // dummy
 
-            commandList->IASetVertexBuffers(0, 1, &m_fxaaQuadVBV);
-            commandList->DrawInstanced(4, 1, 0, 0);
+                commandList->IASetVertexBuffers(0, 1, &m_fxaaQuadVBV);
+                commandList->DrawInstanced(4, 1, 0, 0);
 
-            transitionResource(m_viewportTexture.Get(),
-                               D3D12_RESOURCE_STATE_RENDER_TARGET,
-                               D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-            // Restore offscreen to render target for next frame
-            transitionResource(m_offscreenTexture.Get(), m_offscreenState, D3D12_RESOURCE_STATE_RENDER_TARGET);
-            m_offscreenState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+                transitionResource(m_viewportTexture.Get(),
+                                   D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                // Restore offscreen to render target for next frame
+                transitionResource(m_offscreenTexture.Get(), m_offscreenState, D3D12_RESOURCE_STATE_RENDER_TARGET);
+                m_offscreenState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+            }
         }
         else
         {
@@ -296,9 +348,14 @@ void D3D12RenderAPI::createPreviewResources(int w, int h)
         desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
 
         D3D12_CLEAR_VALUE cv = {}; cv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-        device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &desc,
+        HRESULT hr = device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &desc,
                                          D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &cv,
                                          IID_PPV_ARGS(m_previewTexture.GetAddressOf()));
+        if (FAILED(hr))
+        {
+            LOG_ENGINE_ERROR("[D3D12] Failed to create preview color texture (HRESULT: 0x{:08X})", static_cast<unsigned>(hr));
+            return;
+        }
     }
     {
         D3D12_RESOURCE_DESC desc = {};
@@ -310,14 +367,25 @@ void D3D12RenderAPI::createPreviewResources(int w, int h)
         desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
 
         D3D12_CLEAR_VALUE cv = {}; cv.Format = DXGI_FORMAT_D24_UNORM_S8_UINT; cv.DepthStencil.Depth = 1.0f;
-        device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &desc,
+        HRESULT hr = device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &desc,
                                          D3D12_RESOURCE_STATE_DEPTH_WRITE, &cv,
                                          IID_PPV_ARGS(m_previewDepthBuffer.GetAddressOf()));
+        if (FAILED(hr))
+        {
+            LOG_ENGINE_ERROR("[D3D12] Failed to create preview depth texture (HRESULT: 0x{:08X})", static_cast<unsigned>(hr));
+            return;
+        }
     }
 
     if (m_previewRTVIndex == UINT(-1)) m_previewRTVIndex = m_rtvAllocator.allocate();
     if (m_previewSRVIndex == UINT(-1)) m_previewSRVIndex = m_srvAllocator.allocate();
     if (m_previewDSVIndex == UINT(-1)) m_previewDSVIndex = m_dsvAllocator.allocate();
+
+    if (m_previewRTVIndex == UINT(-1) || m_previewSRVIndex == UINT(-1) || m_previewDSVIndex == UINT(-1))
+    {
+        LOG_ENGINE_ERROR("[D3D12] Failed to allocate descriptors for preview resources");
+        return;
+    }
 
     device->CreateRenderTargetView(m_previewTexture.Get(), nullptr, m_rtvAllocator.getCPU(m_previewRTVIndex));
 
@@ -386,6 +454,9 @@ uint64_t D3D12RenderAPI::getPreviewTextureID()
 void D3D12RenderAPI::destroyPreviewTarget()
 {
     flushGPU();
+    if (m_previewRTVIndex != UINT(-1)) { m_rtvAllocator.free(m_previewRTVIndex); m_previewRTVIndex = UINT(-1); }
+    if (m_previewSRVIndex != UINT(-1)) { m_srvAllocator.free(m_previewSRVIndex); m_previewSRVIndex = UINT(-1); }
+    if (m_previewDSVIndex != UINT(-1)) { m_dsvAllocator.free(m_previewDSVIndex); m_previewDSVIndex = UINT(-1); }
     m_previewTexture.Reset();
     m_previewDepthBuffer.Reset();
     preview_width_rt = 0;
@@ -416,9 +487,14 @@ void D3D12RenderAPI::createPIEViewportResources(PIEViewportTarget& target, int w
         desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
 
         D3D12_CLEAR_VALUE cv = {}; cv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-        device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &desc,
+        HRESULT hr = device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &desc,
                                          D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &cv,
                                          IID_PPV_ARGS(target.texture.GetAddressOf()));
+        if (FAILED(hr))
+        {
+            LOG_ENGINE_ERROR("[D3D12] Failed to create PIE output texture ({}x{}, HRESULT: 0x{:08X})", w, h, static_cast<unsigned>(hr));
+            return;
+        }
     }
 
     // Offscreen texture (FXAA intermediate)
@@ -432,9 +508,14 @@ void D3D12RenderAPI::createPIEViewportResources(PIEViewportTarget& target, int w
         desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
 
         D3D12_CLEAR_VALUE cv = {}; cv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-        device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &desc,
+        HRESULT hr = device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &desc,
                                          D3D12_RESOURCE_STATE_RENDER_TARGET, &cv,
                                          IID_PPV_ARGS(target.offscreenTexture.GetAddressOf()));
+        if (FAILED(hr))
+        {
+            LOG_ENGINE_ERROR("[D3D12] Failed to create PIE offscreen texture ({}x{}, HRESULT: 0x{:08X})", w, h, static_cast<unsigned>(hr));
+            return;
+        }
     }
 
     // Depth buffer
@@ -448,9 +529,14 @@ void D3D12RenderAPI::createPIEViewportResources(PIEViewportTarget& target, int w
         desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
 
         D3D12_CLEAR_VALUE cv = {}; cv.Format = DXGI_FORMAT_D24_UNORM_S8_UINT; cv.DepthStencil.Depth = 1.0f;
-        device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &desc,
+        HRESULT hr = device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &desc,
                                          D3D12_RESOURCE_STATE_DEPTH_WRITE, &cv,
                                          IID_PPV_ARGS(target.depthBuffer.GetAddressOf()));
+        if (FAILED(hr))
+        {
+            LOG_ENGINE_ERROR("[D3D12] Failed to create PIE depth buffer ({}x{}, HRESULT: 0x{:08X})", w, h, static_cast<unsigned>(hr));
+            return;
+        }
     }
 
     // Descriptors
@@ -459,6 +545,13 @@ void D3D12RenderAPI::createPIEViewportResources(PIEViewportTarget& target, int w
     if (target.dsvIndex == UINT(-1)) target.dsvIndex = m_dsvAllocator.allocate();
     if (target.offscreenRTVIndex == UINT(-1)) target.offscreenRTVIndex = m_rtvAllocator.allocate();
     if (target.offscreenSRVIndex == UINT(-1)) target.offscreenSRVIndex = m_srvAllocator.allocate();
+
+    if (target.rtvIndex == UINT(-1) || target.srvIndex == UINT(-1) || target.dsvIndex == UINT(-1) ||
+        target.offscreenRTVIndex == UINT(-1) || target.offscreenSRVIndex == UINT(-1))
+    {
+        LOG_ENGINE_ERROR("[D3D12] Failed to allocate descriptors for PIE viewport ({}x{})", w, h);
+        return;
+    }
 
     device->CreateRenderTargetView(target.texture.Get(), nullptr, m_rtvAllocator.getCPU(target.rtvIndex));
     device->CreateRenderTargetView(target.offscreenTexture.Get(), nullptr, m_rtvAllocator.getCPU(target.offscreenRTVIndex));
@@ -496,6 +589,12 @@ void D3D12RenderAPI::destroyPIEViewport(int id)
     if (it != m_pie_viewports.end())
     {
         flushGPU();
+        auto& target = it->second;
+        if (target.rtvIndex != UINT(-1)) m_rtvAllocator.free(target.rtvIndex);
+        if (target.srvIndex != UINT(-1)) m_srvAllocator.free(target.srvIndex);
+        if (target.dsvIndex != UINT(-1)) m_dsvAllocator.free(target.dsvIndex);
+        if (target.offscreenRTVIndex != UINT(-1)) m_rtvAllocator.free(target.offscreenRTVIndex);
+        if (target.offscreenSRVIndex != UINT(-1)) m_srvAllocator.free(target.offscreenSRVIndex);
         m_pie_viewports.erase(it);
         if (m_active_scene_target == id)
             m_active_scene_target = -1;
@@ -505,6 +604,14 @@ void D3D12RenderAPI::destroyPIEViewport(int id)
 void D3D12RenderAPI::destroyAllPIEViewports()
 {
     flushGPU();
+    for (auto& [id, target] : m_pie_viewports)
+    {
+        if (target.rtvIndex != UINT(-1)) m_rtvAllocator.free(target.rtvIndex);
+        if (target.srvIndex != UINT(-1)) m_srvAllocator.free(target.srvIndex);
+        if (target.dsvIndex != UINT(-1)) m_dsvAllocator.free(target.dsvIndex);
+        if (target.offscreenRTVIndex != UINT(-1)) m_rtvAllocator.free(target.offscreenRTVIndex);
+        if (target.offscreenSRVIndex != UINT(-1)) m_srvAllocator.free(target.offscreenSRVIndex);
+    }
     m_pie_viewports.clear();
     m_active_scene_target = -1;
 }

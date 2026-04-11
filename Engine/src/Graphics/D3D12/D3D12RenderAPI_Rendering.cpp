@@ -248,6 +248,11 @@ TextureHandle D3D12RenderAPI::loadTextureFromMemory(const uint8_t* pixels, int w
 
     // Create SRV
     tex.srvIndex = m_srvAllocator.allocate();
+    if (tex.srvIndex == UINT(-1))
+    {
+        LOG_ENGINE_ERROR("[D3D12] Failed to allocate SRV for texture ({}x{}, {} mips)", width, height, mipLevels);
+        return INVALID_TEXTURE;
+    }
     D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
     srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
@@ -413,6 +418,12 @@ TextureHandle D3D12RenderAPI::loadCompressedTexture(int width, int height, uint3
 
     // Create SRV
     tex.srvIndex = m_srvAllocator.allocate();
+    if (tex.srvIndex == UINT(-1))
+    {
+        LOG_ENGINE_ERROR("[D3D12] Failed to allocate SRV for compressed texture ({}x{}, {} mips, format {})",
+                          width, height, mip_count, format);
+        return INVALID_TEXTURE;
+    }
     D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
     srvDesc.Format = dxgiFormat;
     srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
@@ -459,6 +470,7 @@ void D3D12RenderAPI::deleteTexture(TextureHandle texture)
     auto it = textures.find(texture);
     if (it != textures.end())
     {
+        flushGPU(); // Ensure GPU is done with this texture before releasing
         if (it->second.srvIndex != UINT(-1))
             m_srvAllocator.free(it->second.srvIndex);
         textures.erase(it);
@@ -511,9 +523,13 @@ void D3D12RenderAPI::renderMesh(const mesh& m, const RenderState& state)
     bool useTexture = (m.texture != INVALID_TEXTURE);
     updatePerObjectCBuffer(state.color, useTexture);
 
-    // Upload light data
-    auto lightAddr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(LightCBuffer), &current_lights);
-    commandList->SetGraphicsRootConstantBufferView(4, lightAddr);
+    // Upload light data once per frame, reuse cached address for subsequent meshes
+    if (m_cachedLightCBAddr == 0)
+    {
+        m_cachedLightCBAddr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(LightCBuffer), &current_lights);
+        if (m_cachedLightCBAddr == 0) return;
+    }
+    commandList->SetGraphicsRootConstantBufferView(4, m_cachedLightCBAddr);
 
     // Select and bind PSO
     bool unlit = !state.lighting || !lighting_enabled;
@@ -580,8 +596,13 @@ void D3D12RenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t 
 
     updatePerObjectCBuffer(state.color, true);
 
-    auto lightAddr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(LightCBuffer), &current_lights);
-    commandList->SetGraphicsRootConstantBufferView(4, lightAddr);
+    // Upload light data once per frame, reuse cached address for subsequent meshes
+    if (m_cachedLightCBAddr == 0)
+    {
+        m_cachedLightCBAddr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(LightCBuffer), &current_lights);
+        if (m_cachedLightCBAddr == 0) return;
+    }
+    commandList->SetGraphicsRootConstantBufferView(4, m_cachedLightCBAddr);
 
     bool unlit = !state.lighting || !lighting_enabled;
     ID3D12PipelineState* pso = selectPSO(state, unlit);
@@ -717,6 +738,9 @@ void D3D12RenderAPI::renderMeshDepthOnly(const mesh& m)
 IGPUMesh* D3D12RenderAPI::createMesh()
 {
     D3D12Mesh* mesh = new D3D12Mesh();
-    mesh->setD3D12Handles(device.Get(), commandQueue.Get());
+    mesh->setD3D12Handles(device.Get(), commandQueue.Get(),
+                          m_uploadCmdAllocator.Get(), m_uploadCmdList.Get(),
+                          m_uploadFence.Get(), m_uploadFenceEvent,
+                          &m_uploadFenceValue);
     return mesh;
 }

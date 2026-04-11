@@ -2,10 +2,17 @@
 #include "Utils/Vertex.hpp"
 #include <cstring>
 
-void D3D12Mesh::setD3D12Handles(ID3D12Device* dev, ID3D12CommandQueue* queue)
+void D3D12Mesh::setD3D12Handles(ID3D12Device* dev, ID3D12CommandQueue* queue,
+                                ID3D12CommandAllocator* cmdAlloc, ID3D12GraphicsCommandList* cmdList,
+                                ID3D12Fence* fence, HANDLE fenceEvent, UINT64* fenceVal)
 {
     device = dev;
     commandQueue = queue;
+    uploadCmdAllocator = cmdAlloc;
+    uploadCmdList = cmdList;
+    uploadFence = fence;
+    uploadFenceEvent = fenceEvent;
+    uploadFenceValue = fenceVal;
 }
 
 ComPtr<ID3D12Resource> D3D12Mesh::uploadToDefaultHeap(const void* data, size_t dataSize)
@@ -49,44 +56,73 @@ ComPtr<ID3D12Resource> D3D12Mesh::uploadToDefaultHeap(const void* data, size_t d
     memcpy(mapped, data, dataSize);
     uploadBuffer->Unmap(0, nullptr);
 
-    // Create temp command allocator and list for the upload
-    ComPtr<ID3D12CommandAllocator> cmdAlloc;
-    ComPtr<ID3D12GraphicsCommandList> cmdList;
-    ComPtr<ID3D12Fence> fence;
-
-    hr = device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(cmdAlloc.GetAddressOf()));
-    if (FAILED(hr)) return nullptr;
-
-    hr = device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, cmdAlloc.Get(), nullptr, IID_PPV_ARGS(cmdList.GetAddressOf()));
-    if (FAILED(hr)) return nullptr;
-
-    hr = device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(fence.GetAddressOf()));
-    if (FAILED(hr)) return nullptr;
-
-    cmdList->CopyBufferRegion(resource.Get(), 0, uploadBuffer.Get(), 0, dataSize);
-
-    // Transition to appropriate state
-    D3D12_RESOURCE_BARRIER barrier = {};
-    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    barrier.Transition.pResource = resource.Get();
-    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
-    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    cmdList->ResourceBarrier(1, &barrier);
-
-    cmdList->Close();
-    ID3D12CommandList* lists[] = { cmdList.Get() };
-    commandQueue->ExecuteCommandLists(1, lists);
-
-    // Wait for upload to complete
-    commandQueue->Signal(fence.Get(), 1);
-    HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    if (fence->GetCompletedValue() < 1)
+    // Use shared upload infrastructure if available, otherwise fall back to per-mesh
+    if (uploadCmdAllocator && uploadCmdList && uploadFence && uploadFenceEvent && uploadFenceValue)
     {
-        fence->SetEventOnCompletion(1, event);
-        WaitForSingleObject(event, INFINITE);
+        uploadCmdAllocator->Reset();
+        uploadCmdList->Reset(uploadCmdAllocator, nullptr);
+
+        uploadCmdList->CopyBufferRegion(resource.Get(), 0, uploadBuffer.Get(), 0, dataSize);
+
+        D3D12_RESOURCE_BARRIER barrier = {};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = resource.Get();
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        uploadCmdList->ResourceBarrier(1, &barrier);
+
+        uploadCmdList->Close();
+        ID3D12CommandList* lists[] = { uploadCmdList };
+        commandQueue->ExecuteCommandLists(1, lists);
+
+        (*uploadFenceValue)++;
+        commandQueue->Signal(uploadFence, *uploadFenceValue);
+        if (uploadFence->GetCompletedValue() < *uploadFenceValue)
+        {
+            uploadFence->SetEventOnCompletion(*uploadFenceValue, uploadFenceEvent);
+            WaitForSingleObject(uploadFenceEvent, INFINITE);
+        }
     }
-    CloseHandle(event);
+    else
+    {
+        // Fallback: create temporary upload infrastructure (legacy path)
+        ComPtr<ID3D12CommandAllocator> cmdAlloc;
+        ComPtr<ID3D12GraphicsCommandList> cmdList;
+        ComPtr<ID3D12Fence> fence;
+
+        hr = device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(cmdAlloc.GetAddressOf()));
+        if (FAILED(hr)) return nullptr;
+
+        hr = device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, cmdAlloc.Get(), nullptr, IID_PPV_ARGS(cmdList.GetAddressOf()));
+        if (FAILED(hr)) return nullptr;
+
+        hr = device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(fence.GetAddressOf()));
+        if (FAILED(hr)) return nullptr;
+
+        cmdList->CopyBufferRegion(resource.Get(), 0, uploadBuffer.Get(), 0, dataSize);
+
+        D3D12_RESOURCE_BARRIER barrier = {};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = resource.Get();
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        cmdList->ResourceBarrier(1, &barrier);
+
+        cmdList->Close();
+        ID3D12CommandList* lists[] = { cmdList.Get() };
+        commandQueue->ExecuteCommandLists(1, lists);
+
+        commandQueue->Signal(fence.Get(), 1);
+        HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        if (fence->GetCompletedValue() < 1)
+        {
+            fence->SetEventOnCompletion(1, event);
+            WaitForSingleObject(event, INFINITE);
+        }
+        CloseHandle(event);
+    }
 
     return resource;
 }

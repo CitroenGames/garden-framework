@@ -1,4 +1,5 @@
 #include "PhysicsDebugPanel.hpp"
+#include "PanelUtils.hpp"
 #include "Components/Components.hpp"
 #include "Debug/DebugDraw.hpp"
 #include "imgui.h"
@@ -29,9 +30,10 @@ static void drawSectionHeader(const char* label, ImVec4 accent_color = ImVec4(0.
     ImGui::Spacing();
 }
 
-void PhysicsDebugPanel::draw()
+void PhysicsDebugPanel::draw(bool* p_open)
 {
-    ImGui::Begin("Physics Debug");
+    ImGui::Begin("Physics Debug", p_open);
+    PanelMaximizeButton();
 
     if (!registry)
     {

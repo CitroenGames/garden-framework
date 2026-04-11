@@ -226,9 +226,7 @@ bool D3D12RenderAPI::createBackBufferRTVs()
         if (FAILED(hr)) return false;
 
         // Allocate or reuse RTV descriptor
-        if (m_backBufferRTVs[i] == 0 && i == 0)
-            m_backBufferRTVs[i] = m_rtvAllocator.allocate();
-        else if (m_backBufferRTVs[i] == UINT(-1) || (i > 0 && m_backBufferRTVs[i] == 0))
+        if (m_backBufferRTVs[i] == UINT(-1))
             m_backBufferRTVs[i] = m_rtvAllocator.allocate();
 
         device->CreateRenderTargetView(m_backBuffers[i].Get(), nullptr,
@@ -443,4 +441,57 @@ bool D3D12RenderAPI::createDefaultTexture()
     uint8_t whitePixel[] = { 255, 255, 255, 255 };
     defaultTexture = loadTextureFromMemory(whitePixel, 1, 1, 4, false, false);
     return defaultTexture != INVALID_TEXTURE;
+}
+
+bool D3D12RenderAPI::createDummyShadowTexture()
+{
+    // Create a 1x1 Texture2DArray (single slice) as a type-correct placeholder for the
+    // shadow map descriptor slot (t1). The root signature defines slot [3] as an SRV for
+    // Texture2DArray, so we must bind a Texture2DArray SRV even when the actual shadow map
+    // is unavailable (e.g. during shadow pass or when shadows are disabled). Binding a
+    // Texture2D here is an SRV dimension mismatch that causes device removal on some GPUs.
+
+    D3D12_HEAP_PROPERTIES heapProps = {};
+    heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+    D3D12_RESOURCE_DESC texDesc = {};
+    texDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    texDesc.Width = 1;
+    texDesc.Height = 1;
+    texDesc.DepthOrArraySize = 1;
+    texDesc.MipLevels = 1;
+    texDesc.Format = DXGI_FORMAT_R32_FLOAT;
+    texDesc.SampleDesc.Count = 1;
+
+    HRESULT hr = device->CreateCommittedResource(
+        &heapProps, D3D12_HEAP_FLAG_NONE, &texDesc,
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr,
+        IID_PPV_ARGS(m_dummyShadowTexture.GetAddressOf()));
+    if (FAILED(hr))
+    {
+        LOG_ENGINE_ERROR("[D3D12] Failed to create dummy shadow texture (HRESULT: 0x{:08X})", static_cast<unsigned>(hr));
+        return false;
+    }
+
+    m_dummyShadowSRVIndex = m_srvAllocator.allocate();
+    if (m_dummyShadowSRVIndex == UINT(-1))
+    {
+        LOG_ENGINE_ERROR("[D3D12] Failed to allocate SRV for dummy shadow texture");
+        return false;
+    }
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+    srvDesc.Format = DXGI_FORMAT_R32_FLOAT;
+    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvDesc.Texture2DArray.MostDetailedMip = 0;
+    srvDesc.Texture2DArray.MipLevels = 1;
+    srvDesc.Texture2DArray.FirstArraySlice = 0;
+    srvDesc.Texture2DArray.ArraySize = 1;
+    device->CreateShaderResourceView(m_dummyShadowTexture.Get(), &srvDesc,
+                                      m_srvAllocator.getCPU(m_dummyShadowSRVIndex));
+
+    LOG_ENGINE_TRACE("[D3D12] Created dummy shadow Texture2DArray (1x1, R32_FLOAT, SRV index {})",
+                      m_dummyShadowSRVIndex);
+    return true;
 }

@@ -37,7 +37,8 @@ public:
     // out_unsaved: set to true when any property is modified.
     // out_edit_started: set to true when a drag/edit operation begins (for undo snapshots).
     bool draw(entt::registry& registry, entt::entity selected,
-              bool* out_unsaved = nullptr, bool* out_edit_started = nullptr);
+              bool* out_unsaved = nullptr, bool* out_edit_started = nullptr,
+              bool* p_open = nullptr);
 
 private:
     char m_filter_buf[256] = {0};

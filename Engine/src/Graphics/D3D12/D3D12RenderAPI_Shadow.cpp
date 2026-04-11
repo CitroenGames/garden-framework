@@ -51,6 +51,11 @@ bool D3D12RenderAPI::createShadowMapResources()
     {
         if (m_shadowDSVIndices[i] == UINT(-1))
             m_shadowDSVIndices[i] = m_dsvAllocator.allocate();
+        if (m_shadowDSVIndices[i] == UINT(-1))
+        {
+            LOG_ENGINE_ERROR("[D3D12] Failed to allocate DSV for shadow cascade {}", i);
+            return false;
+        }
 
         D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc = {};
         dsvDesc.Format = DXGI_FORMAT_D32_FLOAT;
@@ -65,6 +70,11 @@ bool D3D12RenderAPI::createShadowMapResources()
     // Create SRV for all cascades
     if (m_shadowSRVIndex == UINT(-1))
         m_shadowSRVIndex = m_srvAllocator.allocate();
+    if (m_shadowSRVIndex == UINT(-1))
+    {
+        LOG_ENGINE_ERROR("[D3D12] Failed to allocate SRV for shadow map array");
+        return false;
+    }
 
     D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
     srvDesc.Format = DXGI_FORMAT_R32_FLOAT;
@@ -104,7 +114,9 @@ std::array<glm::vec3, 8> D3D12RenderAPI::getFrustumCornersWorldSpace(const glm::
         for (int y = 0; y <= 1; y++)
             for (int z = 0; z <= 1; z++)
             {
-                glm::vec4 pt = inv * glm::vec4(2.0f * x - 1.0f, 2.0f * y - 1.0f, 2.0f * z - 1.0f, 1.0f);
+                // X,Y: NDC range [-1,1] for both ZO and NO projections
+                // Z: NDC range [0,1] for ZO (perspectiveRH_ZO), [-1,1] for NO
+                glm::vec4 pt = inv * glm::vec4(2.0f * x - 1.0f, 2.0f * y - 1.0f, static_cast<float>(z), 1.0f);
                 corners[idx++] = glm::vec3(pt) / pt.w;
             }
     return corners;
@@ -199,7 +211,10 @@ void D3D12RenderAPI::beginShadowPass(const glm::vec3& lightDir, const camera& ca
 
     calculateCascadeSplits(0.1f, 1000.0f);
 
-    float aspect = static_cast<float>(viewport_width) / static_cast<float>(std::max(viewport_height, 1));
+    // Use viewport render target dimensions in editor mode (match D3D11 behavior)
+    float aspect = m_viewportTexture
+        ? static_cast<float>(viewport_width_rt) / static_cast<float>(std::max(viewport_height_rt, 1))
+        : static_cast<float>(viewport_width) / static_cast<float>(std::max(viewport_height, 1));
     for (int i = 0; i < NUM_CASCADES; i++)
         lightSpaceMatrices[i] = getLightSpaceMatrixForCascade(i, current_light_direction, view_matrix, field_of_view, aspect);
 
@@ -223,6 +238,19 @@ void D3D12RenderAPI::beginShadowPass(const glm::vec3& lightDir, const camera& ca
     bindDummyRootParams();
     commandList->SetPipelineState(m_psoShadow.Get());
     last_bound_pso = m_psoShadow.Get();
+
+    static bool logged_shadow_init = false;
+    if (!logged_shadow_init)
+    {
+        LOG_ENGINE_INFO("[D3D12 Shadow] beginShadowPass: shadowSize={}, cascades={}, mainDSV={}, shadowDSV=[{},{},{},{}], shadowSRV={}",
+                         currentShadowSize, NUM_CASCADES, m_mainDSVIndex,
+                         m_shadowDSVIndices[0], m_shadowDSVIndices[1], m_shadowDSVIndices[2], m_shadowDSVIndices[3],
+                         m_shadowSRVIndex);
+        LOG_ENGINE_INFO("[D3D12 Shadow] lightDir=({:.2f},{:.2f},{:.2f}), aspect={:.3f}, viewportRT={}x{}, viewport={}x{}",
+                         current_light_direction.x, current_light_direction.y, current_light_direction.z,
+                         aspect, viewport_width_rt, viewport_height_rt, viewport_width, viewport_height);
+        logged_shadow_init = true;
+    }
 }
 
 void D3D12RenderAPI::beginCascade(int cascadeIndex)
@@ -234,6 +262,9 @@ void D3D12RenderAPI::beginCascade(int cascadeIndex)
     commandList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
     commandList->OMSetRenderTargets(0, nullptr, FALSE, &dsvHandle);
 
+    // Re-bind shadow PSO per cascade (matches D3D11 which re-binds shaders/layout per cascade)
+    commandList->SetPipelineState(m_psoShadow.Get());
+    last_bound_pso = m_psoShadow.Get();
     commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 }
 
@@ -306,8 +337,10 @@ void D3D12RenderAPI::endShadowPass()
     D3D12_RECT scissor = { 0, 0, static_cast<LONG>(w), static_cast<LONG>(h) };
     commandList->RSSetScissorRects(1, &scissor);
 
-    // Re-bind shadow map SRV
-    commandList->SetGraphicsRootDescriptorTable(3, m_srvAllocator.getGPU(m_shadowSRVIndex));
+    // Restore all root params to valid state (shadow pass left them pointing at
+    // shadow-specific data). This also binds the shadow map SRV to slot [3] since
+    // in_shadow_pass is now false.
+    bindDummyRootParams();
 
     global_cbuffer_dirty = true;
     last_bound_pso = nullptr;

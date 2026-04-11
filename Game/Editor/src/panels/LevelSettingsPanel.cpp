@@ -1,4 +1,5 @@
 #include "LevelSettingsPanel.hpp"
+#include "PanelUtils.hpp"
 #include "imgui.h"
 #include <glm/glm.hpp>
 #include <cstring>
@@ -31,9 +32,10 @@ static void drawSectionHeader(const char* label, ImVec4 accent_color = ImVec4(0.
     ImGui::Spacing();
 }
 
-void LevelSettingsPanel::draw()
+void LevelSettingsPanel::draw(bool* p_open)
 {
-    ImGui::Begin("Level Settings");
+    ImGui::Begin("Level Settings", p_open);
+    PanelMaximizeButton();
 
     if (!metadata)
     {

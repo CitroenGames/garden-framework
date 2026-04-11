@@ -21,7 +21,7 @@ public:
     // Set by EditorApp so we can trigger regeneration
     Assets::AssetScanner* asset_scanner = nullptr;
 
-    void draw();
+    void draw(bool* p_open = nullptr);
 
 private:
     std::filesystem::path m_base_path = "assets";

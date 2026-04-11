@@ -1,4 +1,5 @@
 #include "ContentBrowserPanel.hpp"
+#include "PanelUtils.hpp"
 #include "Assets/AssetScanner.hpp"
 #include "EditorIcons.hpp"
 #include "ImGui/ImGuiManager.hpp"
@@ -638,7 +639,7 @@ void ContentBrowserPanel::drawAssetTooltip(const fs::path& path)
 
 // ── Main draw ───────────────────────────────────────────────────────────────
 
-void ContentBrowserPanel::draw()
+void ContentBrowserPanel::draw(bool* p_open)
 {
     // Seed navigation history on first draw
     if (m_nav_history.empty())
@@ -647,7 +648,8 @@ void ContentBrowserPanel::draw()
         m_nav_history_index = 0;
     }
 
-    ImGui::Begin("Content Browser");
+    ImGui::Begin("Content Browser", p_open);
+    PanelMaximizeButton();
 
     // === Top toolbar row ===
 

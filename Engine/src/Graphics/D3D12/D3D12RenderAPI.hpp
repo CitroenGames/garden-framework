@@ -17,7 +17,7 @@
 #include <unordered_map>
 #include <string>
 #include <vector>
-#include <mutex>
+
 
 using Microsoft::WRL::ComPtr;
 
@@ -78,7 +78,7 @@ private:
     DescriptorHeapAllocator m_srvAllocator;
 
     // RTV indices for back buffers
-    UINT m_backBufferRTVs[NUM_BACK_BUFFERS] = {};
+    UINT m_backBufferRTVs[NUM_BACK_BUFFERS] = { UINT(-1), UINT(-1) };
 
     // DSV index for main depth buffer
     UINT m_mainDSVIndex = UINT(-1);
@@ -139,8 +139,10 @@ private:
     unsigned int currentShadowSize = 4096;
     int shadowQuality = 3;
     ComPtr<ID3D12Resource> m_shadowMapArray;
-    UINT m_shadowDSVIndices[NUM_CASCADES] = {};
+    UINT m_shadowDSVIndices[NUM_CASCADES] = { UINT(-1), UINT(-1), UINT(-1), UINT(-1) };
     UINT m_shadowSRVIndex = UINT(-1);
+    ComPtr<ID3D12Resource> m_dummyShadowTexture;  // 1x1 Texture2DArray placeholder for shadow map slot
+    UINT m_dummyShadowSRVIndex = UINT(-1);
     glm::mat4 lightSpaceMatrix = glm::mat4(1.0f);
     glm::mat4 lightSpaceMatrices[NUM_CASCADES];
     float cascadeSplitDistances[NUM_CASCADES + 1] = {};
@@ -171,6 +173,7 @@ private:
     ID3D12PipelineState* last_bound_pso = nullptr;
     bool global_cbuffer_dirty = true;
     bool in_depth_prepass = false;
+    D3D12_GPU_VIRTUAL_ADDRESS m_cachedLightCBAddr = 0; // Uploaded once per frame, reused per mesh
 
     // Command list lifecycle
     bool m_commandListOpen = false;
@@ -209,6 +212,7 @@ private:
     bool createPostProcessingResources(int width, int height);
     bool createSkyboxResources();
     bool createDefaultTexture();
+    bool createDummyShadowTexture();
 
     void waitForFence(UINT64 fenceValue);
     void flushGPU();

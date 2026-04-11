@@ -22,6 +22,11 @@ void D3D12RenderAPI::beginFrame()
     // Note: deferred resource recreation happens inside ensureCommandListOpen()
     ensureCommandListOpen();
 
+    // Initialize all root params to valid state. When shadows ran, params are stale
+    // from the shadow pass. When shadows are disabled, ensureCommandListOpen() reset the
+    // root signature which invalidates all params. Either way, this makes them valid.
+    bindDummyRootParams();
+
     // Determine render target
     D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle;
     D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle;
@@ -127,6 +132,7 @@ setup_done:
     last_bound_pso = nullptr;
     currentBoundTexture = INVALID_TEXTURE;
     in_depth_prepass = false;
+    m_cachedLightCBAddr = 0;
 
     commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
@@ -185,20 +191,35 @@ void D3D12RenderAPI::endFrame()
         D3D12FXAACBuffer fxaaCB = {};
         fxaaCB.inverseScreenSize = glm::vec2(1.0f / std::max(viewport_width, 1), 1.0f / std::max(viewport_height, 1));
         auto cbAddr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(fxaaCB), &fxaaCB);
-        // Minimal root param bindings for FXAA (shader only reads b0 and t0)
-        commandList->SetGraphicsRootConstantBufferView(0, cbAddr);
-        commandList->SetGraphicsRootConstantBufferView(1, cbAddr); // dummy, reuse FXAA cb
-        commandList->SetGraphicsRootDescriptorTable(2, m_srvAllocator.getGPU(m_offscreenSRVIndex));
-        // Bind default Texture2D SRV (NOT shadow Texture2DArray) for unused t1 slot
-        if (defaultTexture != INVALID_TEXTURE) {
-            auto it = textures.find(defaultTexture);
-            if (it != textures.end())
-                commandList->SetGraphicsRootDescriptorTable(3, m_srvAllocator.getGPU(it->second.srvIndex));
+        if (cbAddr == 0)
+        {
+            // Ring buffer exhausted - skip FXAA, copy offscreen directly to back buffer
+            transitionResource(m_offscreenTexture.Get(), m_offscreenState, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            m_offscreenState = D3D12_RESOURCE_STATE_COPY_SOURCE;
+            transitionResource(m_backBuffers[m_backBufferIndex].Get(),
+                               m_backBufferState[m_backBufferIndex], D3D12_RESOURCE_STATE_COPY_DEST);
+            m_backBufferState[m_backBufferIndex] = D3D12_RESOURCE_STATE_COPY_DEST;
+            commandList->CopyResource(m_backBuffers[m_backBufferIndex].Get(), m_offscreenTexture.Get());
+            transitionResource(m_offscreenTexture.Get(), m_offscreenState, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            m_offscreenState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+            transitionResource(m_backBuffers[m_backBufferIndex].Get(),
+                               m_backBufferState[m_backBufferIndex], D3D12_RESOURCE_STATE_RENDER_TARGET);
+            m_backBufferState[m_backBufferIndex] = D3D12_RESOURCE_STATE_RENDER_TARGET;
         }
-        commandList->SetGraphicsRootConstantBufferView(4, cbAddr); // dummy, reuse FXAA cb
+        else
+        {
+            // Minimal root param bindings for FXAA (shader only reads b0 and t0)
+            commandList->SetGraphicsRootConstantBufferView(0, cbAddr);
+            commandList->SetGraphicsRootConstantBufferView(1, cbAddr); // dummy, reuse FXAA cb
+            commandList->SetGraphicsRootDescriptorTable(2, m_srvAllocator.getGPU(m_offscreenSRVIndex));
+            // Bind dummy Texture2DArray SRV for unused t1 slot (must match SRV dimension)
+            if (m_dummyShadowSRVIndex != UINT(-1))
+                commandList->SetGraphicsRootDescriptorTable(3, m_srvAllocator.getGPU(m_dummyShadowSRVIndex));
+            commandList->SetGraphicsRootConstantBufferView(4, cbAddr); // dummy, reuse FXAA cb
 
-        commandList->IASetVertexBuffers(0, 1, &m_fxaaQuadVBV);
-        commandList->DrawInstanced(4, 1, 0, 0);
+            commandList->IASetVertexBuffers(0, 1, &m_fxaaQuadVBV);
+            commandList->DrawInstanced(4, 1, 0, 0);
+        }
 
         commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     }
@@ -401,6 +422,7 @@ void D3D12RenderAPI::updateGlobalCBuffer()
     cb.shadowMapTexelSize = glm::vec2(1.0f / static_cast<float>(currentShadowSize));
 
     auto addr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(cb), &cb);
+    if (addr == 0) return;
     commandList->SetGraphicsRootConstantBufferView(0, addr);
 }
 
@@ -418,6 +440,7 @@ void D3D12RenderAPI::updatePerObjectCBuffer(const glm::vec3& color, bool useText
     cb.useTexture = useTexture ? 1 : 0;
 
     auto addr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(cb), &cb);
+    if (addr == 0) return;
     commandList->SetGraphicsRootConstantBufferView(1, addr);
 }
 
@@ -428,6 +451,7 @@ void D3D12RenderAPI::updateShadowCBuffer(const glm::mat4& lightSpace, const glm:
     cb.model = model;
 
     auto addr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(cb), &cb);
+    if (addr == 0) return;
     commandList->SetGraphicsRootConstantBufferView(0, addr);
 }
 
@@ -456,4 +480,5 @@ void D3D12RenderAPI::setLighting(const glm::vec3& ambient, const glm::vec3& diff
 void D3D12RenderAPI::setPointAndSpotLights(const LightCBuffer& lights)
 {
     current_lights = lights;
+    m_cachedLightCBAddr = 0; // Force re-upload with new light data
 }

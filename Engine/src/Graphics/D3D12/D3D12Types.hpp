@@ -57,9 +57,10 @@ struct UploadRingBuffer
     size_t capacity = 0;
     size_t offset = 0;
     D3D12_GPU_VIRTUAL_ADDRESS gpuAddress = 0;
+    bool overflowLogged = false;
 
     bool init(ID3D12Device* device, size_t size);
-    void reset() { offset = 0; }
+    void reset() { offset = 0; overflowLogged = false; }
     D3D12_GPU_VIRTUAL_ADDRESS allocate(size_t size, const void* data);
 };
 

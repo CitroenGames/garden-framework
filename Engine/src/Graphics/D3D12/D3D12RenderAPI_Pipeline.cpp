@@ -345,10 +345,10 @@ bool D3D12RenderAPI::createPipelineStates()
     // Shadow (depth-only, cull front with depth bias)
     {
         auto desc = CreateBasePSODesc(m_rootSignature.Get(), m_shadowVS, m_shadowPS);
-        desc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
-        desc.RasterizerState.DepthBias = 100;
+        desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+        desc.RasterizerState.DepthBias = 1000;
         desc.RasterizerState.DepthBiasClamp = 0.0f;
-        desc.RasterizerState.SlopeScaledDepthBias = 1.5f;
+        desc.RasterizerState.SlopeScaledDepthBias = 1.0f;
         desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
         desc.NumRenderTargets = 0;
         desc.RTVFormats[0] = DXGI_FORMAT_UNKNOWN;

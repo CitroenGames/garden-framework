@@ -1,4 +1,5 @@
 #include "ViewportPanel.hpp"
+#include "PanelUtils.hpp"
 #include "ToolbarPanel.hpp"
 #include "imgui_internal.h"
 #include "ImGuizmo.h"
@@ -11,13 +12,15 @@
 
 GizmoResult ViewportPanel::draw(ImTextureID scene_texture, EditorState& state,
                                 entt::registry& registry, entt::entity& selected,
-                                camera& cam, IRenderAPI* render_api, SceneBVH& bvh)
+                                camera& cam, IRenderAPI* render_api, SceneBVH& bvh,
+                                bool* p_open)
 {
     GizmoResult result;
     is_hovered = false;
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-    ImGui::Begin("Viewport");
+    ImGui::Begin("Viewport", p_open);
+    PanelMaximizeButton();
 
     // --- Toolbar strip (inside the viewport window) ---
     if (toolbar && show_toolbar && *show_toolbar)

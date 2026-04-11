@@ -15,7 +15,7 @@ class ModelPreviewPanel
 public:
     IRenderAPI* render_api = nullptr;
 
-    void draw();
+    void draw(bool* p_open = nullptr);
 
     void setPreviewMesh(const std::string& path);
     void clearPreview();

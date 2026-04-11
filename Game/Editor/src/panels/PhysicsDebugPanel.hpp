@@ -25,7 +25,7 @@ class PhysicsDebugPanel
 public:
     entt::registry* registry = nullptr;
 
-    void draw();
+    void draw(bool* p_open = nullptr);
     void drawDebugVisualization();
 
 private:

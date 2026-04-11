@@ -100,7 +100,7 @@ float ShadowCalculation(int cascadeIndex, float3 fragPos, float3 normal)
 
     float currentDepth = projCoords.z;
     if (currentDepth > 1.0 || currentDepth < 0.0)
-        return 0.0;
+        return 1.0; // Outside cascade frustum — treat as fully lit, not shadowed
 
     float3 lightDir = normalize(-uLightDir);
     float baseBias = max(0.0005 * (1.0 - dot(normalize(normal), lightDir)), 0.00005);

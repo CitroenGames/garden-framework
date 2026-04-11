@@ -6,7 +6,7 @@
 class ConsolePanel
 {
 public:
-    void draw();
+    void draw(bool* p_open = nullptr);
 
     // QOL
     bool shouldClearOnPlay() const { return m_clear_on_play; }

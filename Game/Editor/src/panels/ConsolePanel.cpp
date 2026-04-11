@@ -1,4 +1,5 @@
 #include "ConsolePanel.hpp"
+#include "PanelUtils.hpp"
 #include "Console/Console.hpp"
 #include "EditorIcons.hpp"
 #include "imgui.h"
@@ -148,9 +149,10 @@ static bool PassesSourceFilter(const std::string& source,
     return true; // unknown sources always shown
 }
 
-void ConsolePanel::draw()
+void ConsolePanel::draw(bool* p_open)
 {
-    ImGui::Begin("Console");
+    ImGui::Begin("Console", p_open);
+    PanelMaximizeButton();
 
     Console& console = Console::get();
 

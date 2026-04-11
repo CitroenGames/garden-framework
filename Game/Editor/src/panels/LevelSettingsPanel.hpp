@@ -7,5 +7,5 @@ class LevelSettingsPanel
 public:
     LevelMetadata* metadata = nullptr;
 
-    void draw();
+    void draw(bool* p_open = nullptr);
 };

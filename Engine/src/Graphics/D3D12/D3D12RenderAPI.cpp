@@ -52,7 +52,10 @@ UINT DescriptorHeapAllocator::allocate()
         return index;
     }
     if (nextFreeIndex >= capacity)
+    {
+        LOG_ENGINE_ERROR("[D3D12] Descriptor heap full! Type={}, capacity={}", static_cast<int>(type), capacity);
         return UINT(-1);
+    }
     return nextFreeIndex++;
 }
 
@@ -114,7 +117,15 @@ D3D12_GPU_VIRTUAL_ADDRESS UploadRingBuffer::allocate(size_t size, const void* da
 {
     size_t aligned = AlignUp(size, 256);
     if (offset + aligned > capacity)
-        return 0; // Out of space
+    {
+        if (!overflowLogged)
+        {
+            LOG_ENGINE_WARN("[D3D12] Upload ring buffer exhausted (capacity: {} KB, requested: {} bytes)",
+                             capacity / 1024, size);
+            overflowLogged = true;
+        }
+        return 0;
+    }
 
     memcpy(mappedData + offset, data, size);
     D3D12_GPU_VIRTUAL_ADDRESS addr = gpuAddress + offset;
@@ -254,6 +265,12 @@ bool D3D12RenderAPI::initialize(WindowHandle window, int width, int height, floa
     if (!createDefaultTexture())
     {
         LOG_ENGINE_ERROR("Failed to create default texture");
+        return false;
+    }
+
+    if (!createDummyShadowTexture())
+    {
+        LOG_ENGINE_ERROR("Failed to create dummy shadow texture");
         return false;
     }
 
@@ -443,12 +460,20 @@ void D3D12RenderAPI::transitionResource(ID3D12Resource* resource,
 void D3D12RenderAPI::bindDummyRootParams()
 {
     // D3D12 requires all root params to be valid before Draw.
-    // Bind safe placeholders for params the current shader doesn't use.
+    // Bind safe placeholders so every slot has a valid descriptor/address.
+    // Use a single small allocation shared across all CBV params to minimize
+    // ring buffer consumption (this is called multiple times per frame).
 
-    // [1] PerObjectCBuffer
-    D3D12PerObjectCBuffer dummyObj = {};
-    auto objAddr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(dummyObj), &dummyObj);
-    commandList->SetGraphicsRootConstantBufferView(1, objAddr);
+    alignas(16) char dummyData[256] = {};
+    auto dummyAddr = m_cbUploadBuffer[m_frameIndex].allocate(256, dummyData);
+    if (dummyAddr == 0) return;
+
+    // [0] GlobalCBuffer / ShadowCBuffer / SkyboxCBuffer placeholder
+    commandList->SetGraphicsRootConstantBufferView(0, dummyAddr);
+    // [1] PerObjectCBuffer placeholder
+    commandList->SetGraphicsRootConstantBufferView(1, dummyAddr);
+    // [4] LightCBuffer placeholder
+    commandList->SetGraphicsRootConstantBufferView(4, dummyAddr);
 
     // [2] Diffuse texture SRV - bind default white texture
     if (defaultTexture != INVALID_TEXTURE)
@@ -458,22 +483,18 @@ void D3D12RenderAPI::bindDummyRootParams()
             commandList->SetGraphicsRootDescriptorTable(2, m_srvAllocator.getGPU(it->second.srvIndex));
     }
 
-    // [3] Shadow map SRV — bind dummy texture during shadow pass to avoid resource hazard
+    // [3] Shadow map SRV (Texture2DArray)
+    // When not in shadow pass and real shadow map is available, bind it.
+    // Otherwise bind the dummy Texture2DArray to avoid SRV dimension mismatch
+    // (binding a Texture2D where Texture2DArray is expected causes device removal).
     if (m_shadowSRVIndex != UINT(-1) && !in_shadow_pass)
     {
         commandList->SetGraphicsRootDescriptorTable(3, m_srvAllocator.getGPU(m_shadowSRVIndex));
     }
-    else if (defaultTexture != INVALID_TEXTURE)
+    else if (m_dummyShadowSRVIndex != UINT(-1))
     {
-        auto it = textures.find(defaultTexture);
-        if (it != textures.end())
-            commandList->SetGraphicsRootDescriptorTable(3, m_srvAllocator.getGPU(it->second.srvIndex));
+        commandList->SetGraphicsRootDescriptorTable(3, m_srvAllocator.getGPU(m_dummyShadowSRVIndex));
     }
-
-    // [4] LightCBuffer
-    LightCBuffer dummyLights = {};
-    auto lightAddr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(dummyLights), &dummyLights);
-    commandList->SetGraphicsRootConstantBufferView(4, lightAddr);
 }
 
 std::vector<char> D3D12RenderAPI::readShaderBinary(const std::string& filepath)

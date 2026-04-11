@@ -1,4 +1,5 @@
 #include "LODSettingsPanel.hpp"
+#include "PanelUtils.hpp"
 #include "Assets/AssetScanner.hpp"
 #include "imgui.h"
 #include <algorithm>
@@ -154,6 +155,7 @@ void LODSettingsPanel::draw()
         ImGui::End();
         return;
     }
+    PanelMaximizeButton();
 
     // --- Mesh Info Header ---
     ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.9f, 1.0f), "Mesh: %s", m_mesh_name.c_str());

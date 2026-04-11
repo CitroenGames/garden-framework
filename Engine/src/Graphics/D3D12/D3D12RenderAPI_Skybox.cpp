@@ -47,6 +47,7 @@ void D3D12RenderAPI::renderSkybox()
     cb.time = 0.0f;
 
     auto addr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(cb), &cb);
+    if (addr == 0) return;
     bindDummyRootParams();
     commandList->SetGraphicsRootConstantBufferView(0, addr);
 
