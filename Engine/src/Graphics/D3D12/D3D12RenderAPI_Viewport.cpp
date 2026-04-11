@@ -128,6 +128,9 @@ void D3D12RenderAPI::endSceneRender()
                 transitionResource(pie.offscreenTexture.Get(),
                                    D3D12_RESOURCE_STATE_RENDER_TARGET,
                                    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                transitionResource(pie.texture.Get(),
+                                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                                   D3D12_RESOURCE_STATE_RENDER_TARGET);
                 flushBarriers();
 
                 D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvAllocator.getCPU(pie.rtvIndex);
@@ -184,12 +187,31 @@ void D3D12RenderAPI::endSceneRender()
                     transitionResource(pie.offscreenTexture.Get(),
                                        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
                                        D3D12_RESOURCE_STATE_RENDER_TARGET);
+                    transitionResource(pie.texture.Get(),
+                                       D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                       D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
                     flushBarriers();
                 }
             }
             else
             {
+                transitionResource(pie.offscreenTexture.Get(),
+                                   D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                   D3D12_RESOURCE_STATE_COPY_SOURCE);
+                transitionResource(pie.texture.Get(),
+                                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                                   D3D12_RESOURCE_STATE_COPY_DEST);
+                flushBarriers();
+
                 commandList->CopyResource(pie.texture.Get(), pie.offscreenTexture.Get());
+
+                transitionResource(pie.texture.Get(),
+                                   D3D12_RESOURCE_STATE_COPY_DEST,
+                                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                transitionResource(pie.offscreenTexture.Get(),
+                                   D3D12_RESOURCE_STATE_COPY_SOURCE,
+                                   D3D12_RESOURCE_STATE_RENDER_TARGET);
+                flushBarriers();
             }
         }
         m_active_scene_target = -1;
