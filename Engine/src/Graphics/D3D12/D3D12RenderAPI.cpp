@@ -220,6 +220,12 @@ bool D3D12RenderAPI::initialize(WindowHandle window, int width, int height, floa
         return false;
     }
 
+    if (!m_copyQueue.init(device.Get()))
+    {
+        LOG_ENGINE_ERROR("Failed to create copy queue");
+        return false;
+    }
+
     if (!createRootSignature())
     {
         LOG_ENGINE_ERROR("Failed to create root signature");
@@ -274,6 +280,9 @@ bool D3D12RenderAPI::initialize(WindowHandle window, int width, int height, floa
         return false;
     }
 
+    // Flush any texture uploads queued during initialization
+    m_copyQueue.flushSync();
+
     // Initialize cascade split distances
     calculateCascadeSplits(0.1f, 1000.0f);
 
@@ -294,6 +303,7 @@ bool D3D12RenderAPI::initialize(WindowHandle window, int width, int height, floa
 void D3D12RenderAPI::shutdown()
 {
     LOG_ENGINE_INFO("[D3D12] Shutting down...");
+    m_copyQueue.flushSync();
     flushGPU();
 
     LOG_ENGINE_TRACE("[D3D12] Releasing {} textures, {} PIE viewports",
@@ -301,6 +311,8 @@ void D3D12RenderAPI::shutdown()
     textures.clear();
     m_pie_viewports.clear();
     m_active_scene_target = -1;
+
+    m_copyQueue.shutdown();
 
     if (m_fenceEvent)
     {
@@ -431,6 +443,13 @@ void D3D12RenderAPI::ensureCommandListOpen()
     m_cbUploadBuffer[m_frameIndex].reset();
     m_dummyCBAddr = 0;
 
+    // Submit pending async texture uploads and sync with graphics queue
+    if (m_copyQueue.hasPendingWork())
+        m_copyQueue.submit();
+    if (m_copyQueue.hasSubmittedWork())
+        m_copyQueue.waitOnGraphicsQueue(commandQueue.Get());
+    m_copyQueue.releaseStagingBuffers();
+
     fc.commandAllocator->Reset();
     commandList->Reset(fc.commandAllocator.Get(), nullptr);
 
@@ -439,6 +458,9 @@ void D3D12RenderAPI::ensureCommandListOpen()
     ID3D12DescriptorHeap* heaps[] = { m_srvHeap.Get() };
     commandList->SetDescriptorHeaps(1, heaps);
     commandList->SetGraphicsRootSignature(m_rootSignature.Get());
+
+    // Apply pending texture transitions (COMMON -> PIXEL_SHADER_RESOURCE)
+    m_copyQueue.applyPendingTransitions(commandList.Get());
 
     m_commandListOpen = true;
 }

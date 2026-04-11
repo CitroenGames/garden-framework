@@ -3,6 +3,7 @@
 #include "Graphics/RenderAPI.hpp"
 #include "D3D12Types.hpp"
 #include "D3D12BarrierBatch.hpp"
+#include "D3D12CopyQueue.hpp"
 #include <d3d12.h>
 #include <d3d12sdklayers.h>
 #include <dxgi1_4.h>
@@ -115,7 +116,10 @@ private:
     // Per-frame upload ring buffers for constant data
     UploadRingBuffer m_cbUploadBuffer[NUM_FRAMES_IN_FLIGHT];
 
-    // Upload command infrastructure (for textures/meshes)
+    // Async copy queue for texture uploads
+    D3D12CopyQueue m_copyQueue;
+
+    // Upload command infrastructure (for meshes and init-time buffer creation)
     ComPtr<ID3D12CommandAllocator> m_uploadCmdAllocator;
     ComPtr<ID3D12GraphicsCommandList> m_uploadCmdList;
     ComPtr<ID3D12Fence> m_uploadFence;

@@ -141,7 +141,7 @@ TextureHandle D3D12RenderAPI::loadTextureFromMemory(const uint8_t* pixels, int w
     D3D12Texture tex;
     HRESULT hr = device->CreateCommittedResource(
         &heapProps, D3D12_HEAP_FLAG_NONE, &texDesc,
-        D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+        D3D12_RESOURCE_STATE_COMMON, nullptr,
         IID_PPV_ARGS(tex.resource.GetAddressOf()));
     if (FAILED(hr)) return INVALID_TEXTURE;
 
@@ -197,8 +197,7 @@ TextureHandle D3D12RenderAPI::loadTextureFromMemory(const uint8_t* pixels, int w
     uint8_t* mapped = nullptr;
     uploadBuffer->Map(0, nullptr, reinterpret_cast<void**>(&mapped));
 
-    m_uploadCmdAllocator->Reset();
-    m_uploadCmdList->Reset(m_uploadCmdAllocator.Get(), nullptr);
+    auto* copyCmdList = m_copyQueue.getCommandList();
 
     size_t uploadOffset = 0;
     for (int i = 0; i < mipLevels; i++)
@@ -229,22 +228,15 @@ TextureHandle D3D12RenderAPI::loadTextureFromMemory(const uint8_t* pixels, int w
         src.PlacedFootprint.Footprint.Depth = 1;
         src.PlacedFootprint.Footprint.RowPitch = static_cast<UINT>(rowPitch);
 
-        m_uploadCmdList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        copyCmdList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
         uploadOffset += rowPitch * mips[i].height;
     }
 
     uploadBuffer->Unmap(0, nullptr);
 
-    // Transition to shader resource
-    D3D12_RESOURCE_BARRIER barrier = {};
-    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    barrier.Transition.pResource = tex.resource.Get();
-    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    m_uploadCmdList->ResourceBarrier(1, &barrier);
-
-    executeUploadCommandList();
+    // Track staging buffer and schedule transition on graphics queue
+    m_copyQueue.retainStagingBuffer(std::move(uploadBuffer));
+    m_copyQueue.addPendingTransition(tex.resource.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 
     // Create SRV
     tex.srvIndex = m_srvAllocator.allocate();
@@ -306,7 +298,7 @@ TextureHandle D3D12RenderAPI::loadCompressedTexture(int width, int height, uint3
     D3D12Texture tex;
     HRESULT hr = device->CreateCommittedResource(
         &heapProps, D3D12_HEAP_FLAG_NONE, &texDesc,
-        D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+        D3D12_RESOURCE_STATE_COMMON, nullptr,
         IID_PPV_ARGS(tex.resource.GetAddressOf()));
     if (FAILED(hr)) return INVALID_TEXTURE;
 
@@ -351,8 +343,7 @@ TextureHandle D3D12RenderAPI::loadCompressedTexture(int width, int height, uint3
     uint8_t* mapped = nullptr;
     uploadBuffer->Map(0, nullptr, reinterpret_cast<void**>(&mapped));
 
-    m_uploadCmdAllocator->Reset();
-    m_uploadCmdList->Reset(m_uploadCmdAllocator.Get(), nullptr);
+    auto* copyCmdList = m_copyQueue.getCommandList();
 
     size_t uploadOffset = 0;
     for (int i = 0; i < mip_count; i++) {
@@ -400,21 +391,15 @@ TextureHandle D3D12RenderAPI::loadCompressedTexture(int width, int height, uint3
         srcLoc.PlacedFootprint.Footprint.Depth = 1;
         srcLoc.PlacedFootprint.Footprint.RowPitch = static_cast<UINT>(rowPitch);
 
-        m_uploadCmdList->CopyTextureRegion(&dst, 0, 0, 0, &srcLoc, nullptr);
+        copyCmdList->CopyTextureRegion(&dst, 0, 0, 0, &srcLoc, nullptr);
         uploadOffset += rowPitch * numRows;
     }
 
     uploadBuffer->Unmap(0, nullptr);
 
-    D3D12_RESOURCE_BARRIER barrier = {};
-    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    barrier.Transition.pResource = tex.resource.Get();
-    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    m_uploadCmdList->ResourceBarrier(1, &barrier);
-
-    executeUploadCommandList();
+    // Track staging buffer and schedule transition on graphics queue
+    m_copyQueue.retainStagingBuffer(std::move(uploadBuffer));
+    m_copyQueue.addPendingTransition(tex.resource.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 
     // Create SRV
     tex.srvIndex = m_srvAllocator.allocate();
