@@ -306,6 +306,10 @@ void D3D12RenderAPI::shutdown()
     m_copyQueue.flushSync();
     flushGPU();
 
+    // Save PSO cache before releasing PSOs
+    if (!m_psoCachePath.empty())
+        m_psoCache.saveToDisk(m_psoCachePath);
+
     LOG_ENGINE_TRACE("[D3D12] Releasing {} textures, {} PIE viewports",
                       textures.size(), m_pie_viewports.size());
     textures.clear();

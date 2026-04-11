@@ -4,6 +4,7 @@
 #include "D3D12Types.hpp"
 #include "D3D12BarrierBatch.hpp"
 #include "D3D12CopyQueue.hpp"
+#include "D3D12PSOCache.hpp"
 #include <d3d12.h>
 #include <d3d12sdklayers.h>
 #include <dxgi1_4.h>
@@ -87,6 +88,10 @@ private:
 
     // Root signature
     ComPtr<ID3D12RootSignature> m_rootSignature;
+
+    // PSO cache
+    D3D12PSOCache m_psoCache;
+    std::string m_psoCachePath;
 
     // Pipeline State Objects
     ComPtr<ID3D12PipelineState> m_psoBasicLit;

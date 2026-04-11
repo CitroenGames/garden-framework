@@ -1,6 +1,7 @@
 #include "D3D12RenderAPI.hpp"
 #include "Utils/Log.hpp"
 #include "Utils/EnginePaths.hpp"
+#include <filesystem>
 
 // ============================================================================
 // Root Signature
@@ -200,30 +201,66 @@ static D3D12_GRAPHICS_PIPELINE_STATE_DESC CreateBasePSODesc(
     return desc;
 }
 
+// Helper: try loading a PSO from cache, fall back to creation, then store in cache.
+static ComPtr<ID3D12PipelineState> CreateOrLoadPSO(
+    ID3D12Device* device, D3D12PSOCache& cache,
+    const wchar_t* name, const D3D12_GRAPHICS_PIPELINE_STATE_DESC& desc)
+{
+    auto pso = cache.loadGraphicsPSO(name, desc);
+    if (pso) return pso;
+
+    HRESULT hr = device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(pso.GetAddressOf()));
+    if (FAILED(hr)) return nullptr;
+
+    cache.storePSO(name, pso.Get());
+    return pso;
+}
+
 bool D3D12RenderAPI::createPipelineStates()
 {
     LOG_ENGINE_TRACE("[D3D12] Creating pipeline state objects...");
+
+    // Initialize PSO cache
+    std::string cacheDir = EnginePaths::resolveEngineAsset("../cache/");
+    std::filesystem::create_directories(cacheDir);
+    m_psoCachePath = cacheDir + "d3d12_pso_cache.bin";
+    m_psoCache.loadFromDisk(device.Get(), m_psoCachePath);
+
+    int cached = 0, compiled = 0;
+
+    // Helper lambda to track cache hits
+    auto createPSO = [&](const wchar_t* name, const D3D12_GRAPHICS_PIPELINE_STATE_DESC& desc) -> ComPtr<ID3D12PipelineState>
+    {
+        auto pso = m_psoCache.loadGraphicsPSO(name, desc);
+        if (pso) { cached++; return pso; }
+        HRESULT hr = device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(pso.GetAddressOf()));
+        if (FAILED(hr)) return nullptr;
+        m_psoCache.storePSO(name, pso.Get());
+        compiled++;
+        return pso;
+    };
+
     // Basic lit (cull back)
     {
         auto desc = CreateBasePSODesc(m_rootSignature.Get(), m_basicVS, m_basicPS);
-        HRESULT hr = device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(m_psoBasicLit.GetAddressOf()));
-        if (FAILED(hr)) { LOG_ENGINE_ERROR("Failed to create PSO: BasicLit"); return false; }
+        m_psoBasicLit = createPSO(L"BasicLit", desc);
+        if (!m_psoBasicLit) { LOG_ENGINE_ERROR("Failed to create PSO: BasicLit"); return false; }
     }
 
     // Basic lit (cull front)
     {
         auto desc = CreateBasePSODesc(m_rootSignature.Get(), m_basicVS, m_basicPS);
         desc.RasterizerState.CullMode = D3D12_CULL_MODE_FRONT;
-        HRESULT hr = device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(m_psoBasicLitCullFront.GetAddressOf()));
-        if (FAILED(hr)) { LOG_ENGINE_ERROR("Failed to create PSO: BasicLitCullFront"); return false; }
+        m_psoBasicLitCullFront = createPSO(L"BasicLitCullFront", desc);
+        if (!m_psoBasicLitCullFront) { LOG_ENGINE_ERROR("Failed to create PSO: BasicLitCullFront"); return false; }
     }
 
     // Basic lit (cull none)
     {
         auto desc = CreateBasePSODesc(m_rootSignature.Get(), m_basicVS, m_basicPS);
         desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-        HRESULT hr = device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(m_psoBasicLitCullNone.GetAddressOf()));
-        if (FAILED(hr)) { LOG_ENGINE_ERROR("Failed to create PSO: BasicLitCullNone"); return false; }
+        m_psoBasicLitCullNone = createPSO(L"BasicLitCullNone", desc);
+        if (!m_psoBasicLitCullNone) { LOG_ENGINE_ERROR("Failed to create PSO: BasicLitCullNone"); return false; }
     }
 
     // Basic lit alpha blend
@@ -237,8 +274,8 @@ bool D3D12RenderAPI::createPipelineStates()
         rt.SrcBlendAlpha = D3D12_BLEND_ONE;
         rt.DestBlendAlpha = D3D12_BLEND_ZERO;
         rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
-        HRESULT hr = device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(m_psoBasicLitAlpha.GetAddressOf()));
-        if (FAILED(hr)) { LOG_ENGINE_ERROR("Failed to create PSO: BasicLitAlpha"); return false; }
+        m_psoBasicLitAlpha = createPSO(L"BasicLitAlpha", desc);
+        if (!m_psoBasicLitAlpha) { LOG_ENGINE_ERROR("Failed to create PSO: BasicLitAlpha"); return false; }
     }
 
     // Basic lit alpha (cull none)
@@ -253,8 +290,8 @@ bool D3D12RenderAPI::createPipelineStates()
         rt.SrcBlendAlpha = D3D12_BLEND_ONE;
         rt.DestBlendAlpha = D3D12_BLEND_ZERO;
         rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
-        HRESULT hr = device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(m_psoBasicLitAlphaCullNone.GetAddressOf()));
-        if (FAILED(hr)) { LOG_ENGINE_ERROR("Failed to create PSO: BasicLitAlphaCullNone"); return false; }
+        m_psoBasicLitAlphaCullNone = createPSO(L"BasicLitAlphaCullNone", desc);
+        if (!m_psoBasicLitAlphaCullNone) { LOG_ENGINE_ERROR("Failed to create PSO: BasicLitAlphaCullNone"); return false; }
     }
 
     // Basic lit additive
@@ -268,23 +305,23 @@ bool D3D12RenderAPI::createPipelineStates()
         rt.SrcBlendAlpha = D3D12_BLEND_ONE;
         rt.DestBlendAlpha = D3D12_BLEND_ZERO;
         rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
-        HRESULT hr = device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(m_psoBasicLitAdditive.GetAddressOf()));
-        if (FAILED(hr)) { LOG_ENGINE_ERROR("Failed to create PSO: BasicLitAdditive"); return false; }
+        m_psoBasicLitAdditive = createPSO(L"BasicLitAdditive", desc);
+        if (!m_psoBasicLitAdditive) { LOG_ENGINE_ERROR("Failed to create PSO: BasicLitAdditive"); return false; }
     }
 
     // Unlit (cull back)
     {
         auto desc = CreateBasePSODesc(m_rootSignature.Get(), m_unlitVS, m_unlitPS);
-        HRESULT hr = device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(m_psoUnlit.GetAddressOf()));
-        if (FAILED(hr)) { LOG_ENGINE_ERROR("Failed to create PSO: Unlit"); return false; }
+        m_psoUnlit = createPSO(L"Unlit", desc);
+        if (!m_psoUnlit) { LOG_ENGINE_ERROR("Failed to create PSO: Unlit"); return false; }
     }
 
     // Unlit (cull none)
     {
         auto desc = CreateBasePSODesc(m_rootSignature.Get(), m_unlitVS, m_unlitPS);
         desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-        HRESULT hr = device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(m_psoUnlitCullNone.GetAddressOf()));
-        if (FAILED(hr)) { LOG_ENGINE_ERROR("Failed to create PSO: UnlitCullNone"); return false; }
+        m_psoUnlitCullNone = createPSO(L"UnlitCullNone", desc);
+        if (!m_psoUnlitCullNone) { LOG_ENGINE_ERROR("Failed to create PSO: UnlitCullNone"); return false; }
     }
 
     // Unlit alpha
@@ -298,8 +335,8 @@ bool D3D12RenderAPI::createPipelineStates()
         rt.SrcBlendAlpha = D3D12_BLEND_ONE;
         rt.DestBlendAlpha = D3D12_BLEND_ZERO;
         rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
-        HRESULT hr = device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(m_psoUnlitAlpha.GetAddressOf()));
-        if (FAILED(hr)) { LOG_ENGINE_ERROR("Failed to create PSO: UnlitAlpha"); return false; }
+        m_psoUnlitAlpha = createPSO(L"UnlitAlpha", desc);
+        if (!m_psoUnlitAlpha) { LOG_ENGINE_ERROR("Failed to create PSO: UnlitAlpha"); return false; }
     }
 
     // Unlit alpha (cull none)
@@ -314,8 +351,8 @@ bool D3D12RenderAPI::createPipelineStates()
         rt.SrcBlendAlpha = D3D12_BLEND_ONE;
         rt.DestBlendAlpha = D3D12_BLEND_ZERO;
         rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
-        HRESULT hr = device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(m_psoUnlitAlphaCullNone.GetAddressOf()));
-        if (FAILED(hr)) { LOG_ENGINE_ERROR("Failed to create PSO: UnlitAlphaCullNone"); return false; }
+        m_psoUnlitAlphaCullNone = createPSO(L"UnlitAlphaCullNone", desc);
+        if (!m_psoUnlitAlphaCullNone) { LOG_ENGINE_ERROR("Failed to create PSO: UnlitAlphaCullNone"); return false; }
     }
 
     // Unlit additive
@@ -329,8 +366,8 @@ bool D3D12RenderAPI::createPipelineStates()
         rt.SrcBlendAlpha = D3D12_BLEND_ONE;
         rt.DestBlendAlpha = D3D12_BLEND_ZERO;
         rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
-        HRESULT hr = device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(m_psoUnlitAdditive.GetAddressOf()));
-        if (FAILED(hr)) { LOG_ENGINE_ERROR("Failed to create PSO: UnlitAdditive"); return false; }
+        m_psoUnlitAdditive = createPSO(L"UnlitAdditive", desc);
+        if (!m_psoUnlitAdditive) { LOG_ENGINE_ERROR("Failed to create PSO: UnlitAdditive"); return false; }
     }
 
     // Debug lines (unlit, line list, no cull)
@@ -338,8 +375,8 @@ bool D3D12RenderAPI::createPipelineStates()
         auto desc = CreateBasePSODesc(m_rootSignature.Get(), m_unlitVS, m_unlitPS);
         desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
         desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE;
-        HRESULT hr = device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(m_psoDebugLines.GetAddressOf()));
-        if (FAILED(hr)) { LOG_ENGINE_ERROR("Failed to create PSO: DebugLines"); return false; }
+        m_psoDebugLines = createPSO(L"DebugLines", desc);
+        if (!m_psoDebugLines) { LOG_ENGINE_ERROR("Failed to create PSO: DebugLines"); return false; }
     }
 
     // Shadow (depth-only, cull front with depth bias)
@@ -353,8 +390,8 @@ bool D3D12RenderAPI::createPipelineStates()
         desc.NumRenderTargets = 0;
         desc.RTVFormats[0] = DXGI_FORMAT_UNKNOWN;
         desc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-        HRESULT hr = device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(m_psoShadow.GetAddressOf()));
-        if (FAILED(hr)) { LOG_ENGINE_ERROR("Failed to create PSO: Shadow"); return false; }
+        m_psoShadow = createPSO(L"Shadow", desc);
+        if (!m_psoShadow) { LOG_ENGINE_ERROR("Failed to create PSO: Shadow"); return false; }
     }
 
     // Sky (depth read-only, cull back)
@@ -362,8 +399,8 @@ bool D3D12RenderAPI::createPipelineStates()
         auto desc = CreateBasePSODesc(m_rootSignature.Get(), m_skyVS, m_skyPS, false);
         desc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
         desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
-        HRESULT hr = device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(m_psoSky.GetAddressOf()));
-        if (FAILED(hr)) { LOG_ENGINE_ERROR("Failed to create PSO: Sky"); return false; }
+        m_psoSky = createPSO(L"Sky", desc);
+        if (!m_psoSky) { LOG_ENGINE_ERROR("Failed to create PSO: Sky"); return false; }
     }
 
     // FXAA (no depth, fullscreen quad)
@@ -390,8 +427,8 @@ bool D3D12RenderAPI::createPipelineStates()
         desc.DSVFormat = DXGI_FORMAT_UNKNOWN;
         desc.SampleDesc.Count = 1;
 
-        HRESULT hr = device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(m_psoFXAA.GetAddressOf()));
-        if (FAILED(hr)) { LOG_ENGINE_ERROR("Failed to create PSO: FXAA"); return false; }
+        m_psoFXAA = createPSO(L"FXAA", desc);
+        if (!m_psoFXAA) { LOG_ENGINE_ERROR("Failed to create PSO: FXAA"); return false; }
     }
 
     // Depth prepass (depth-only, no color output)
@@ -399,11 +436,11 @@ bool D3D12RenderAPI::createPipelineStates()
         auto desc = CreateBasePSODesc(m_rootSignature.Get(), m_basicVS, {}); // No PS
         desc.BlendState.RenderTarget[0].RenderTargetWriteMask = 0;
         desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
-        HRESULT hr = device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(m_psoDepthPrepass.GetAddressOf()));
-        if (FAILED(hr)) { LOG_ENGINE_ERROR("Failed to create PSO: DepthPrepass"); return false; }
+        m_psoDepthPrepass = createPSO(L"DepthPrepass", desc);
+        if (!m_psoDepthPrepass) { LOG_ENGINE_ERROR("Failed to create PSO: DepthPrepass"); return false; }
     }
 
-    LOG_ENGINE_TRACE("[D3D12] Created 15 pipeline state objects");
+    LOG_ENGINE_INFO("[D3D12] Pipeline states: {} cached, {} compiled", cached, compiled);
     return true;
 }
 
