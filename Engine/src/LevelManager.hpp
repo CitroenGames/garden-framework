@@ -5,9 +5,16 @@
 #include <vector>
 #include <fstream>
 #include <memory>
+#include <unordered_map>
 #include <glm/glm.hpp>
 #include "Components/Components.hpp"
 #include <entt/entt.hpp>
+
+// Includes for parallel loading data structures
+#include "Assets/CompiledMeshSerializer.hpp"
+#include "Assets/CompiledTextureSerializer.hpp"
+#include "Assets/AssetMetadata.hpp"
+#include "Assets/LODGenerator.hpp"
 
 // Forward declarations
 class world;
@@ -164,6 +171,45 @@ struct LevelData
     std::vector<LevelEntity> entities;
 };
 
+// CPU-side pre-loaded mesh data (no GPU resources) for parallel loading
+struct MeshPreloadData {
+    enum class Type { None, GLTF, OBJ, Compiled };
+    Type type = Type::None;
+    std::string resolved_path;
+
+    // GLTF: geometry-only result (from loadGltfGeometry, no render_api needed)
+    std::unique_ptr<GltfLoadResult> gltf_geometry;
+
+    // OBJ: parsed vertex data (CPU only)
+    std::unique_ptr<ObjLoadResult> obj_result;
+
+    // Compiled mesh: deserialized binary data (CPU only)
+    std::unique_ptr<Assets::CompiledMeshData> compiled_data;
+
+    // LOD data pre-loaded from disk
+    bool has_lod_metadata = false;
+    std::unique_ptr<Assets::AssetMetadata> lod_metadata;
+    std::vector<Assets::LODMeshData> lod_mesh_data;
+
+    // Pre-loaded compiled texture data (.ctex files, for compiled meshes)
+    // Key: absolute texture file path
+    struct PreloadedTexture {
+        bool is_compiled = false;
+        Assets::CompiledTextureData compiled_tex;
+        bool success = false;
+    };
+    std::unordered_map<std::string, PreloadedTexture> preloaded_textures;
+
+    bool success = false;
+    std::string error_message;
+
+    MeshPreloadData() = default;
+    MeshPreloadData(MeshPreloadData&&) = default;
+    MeshPreloadData& operator=(MeshPreloadData&&) = default;
+    MeshPreloadData(const MeshPreloadData&) = delete;
+    MeshPreloadData& operator=(const MeshPreloadData&) = delete;
+};
+
 class ENGINE_API LevelManager
 {
 public:
@@ -190,6 +236,15 @@ public:
                          entt::entity* out_freecam_entity = nullptr,
                          entt::entity* out_player_rep_entity = nullptr);
 
+    // Parallel instantiation - reads all meshes from disk in parallel, then
+    // finalizes GPU uploads and entity creation on the main thread.
+    bool instantiateLevelParallel(const LevelData& level_data,
+                                  world& game_world,
+                                  IRenderAPI* render_api,
+                                  entt::entity* out_player_entity = nullptr,
+                                  entt::entity* out_freecam_entity = nullptr,
+                                  entt::entity* out_player_rep_entity = nullptr);
+
     // Cleanup - called before loading new level
     void cleanup();
 
@@ -211,6 +266,15 @@ private:
     // String helpers for binary format
     void writeString(std::ofstream& file, const std::string& str);
     bool readString(std::ifstream& file, std::string& str);
+
+    // Parallel loading helpers (called from instantiateLevelParallel)
+    void preloadMeshCPU(MeshPreloadData& data);
+    std::shared_ptr<mesh> finalizeMeshGPU(MeshPreloadData& preload,
+                                           const LevelEntity& entity,
+                                           IRenderAPI* render_api);
+    std::shared_ptr<mesh> finalizeCompiledMeshGPU(MeshPreloadData& preload,
+                                                   const LevelEntity& entity,
+                                                   IRenderAPI* render_api);
 
     // Store level data to keep entity references valid
     std::vector<LevelEntity> stored_entities;

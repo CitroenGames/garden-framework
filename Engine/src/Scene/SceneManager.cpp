@@ -80,8 +80,8 @@ bool SceneManager::activateScene(SceneId id)
     entt::entity freecam = entt::null;
     entt::entity player_rep = entt::null;
 
-    if (!level_manager.instantiateLevel(scene.level_data, *game_world, render_api,
-                                         &player, &freecam, &player_rep))
+    if (!level_manager.instantiateLevelParallel(scene.level_data, *game_world, render_api,
+                                                &player, &freecam, &player_rep))
     {
         LOG_ENGINE_ERROR("SceneManager: failed to instantiate scene '{}'", scene.level_path);
         return false;
@@ -108,6 +108,10 @@ bool SceneManager::activateScene(SceneId id)
 
 bool SceneManager::transition(const std::string& level_path, TransitionType type)
 {
+    // Ensure GPU is idle before destroying resources referenced by in-flight frames
+    if (render_api)
+        render_api->waitForGPU();
+
     // Unload current scene if one exists
     if (active_scene_id != INVALID_SCENE)
     {
@@ -165,6 +169,10 @@ SceneLoadState SceneManager::getSceneState(SceneId id) const
 
 void SceneManager::clear()
 {
+    // Ensure GPU is idle before destroying resources referenced by in-flight frames
+    if (render_api)
+        render_api->waitForGPU();
+
     // Unload all scenes
     for (auto& [id, scene] : scenes)
     {

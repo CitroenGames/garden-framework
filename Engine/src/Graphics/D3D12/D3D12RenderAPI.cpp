@@ -344,6 +344,8 @@ void D3D12RenderAPI::shutdown()
 
 void D3D12RenderAPI::waitForGPU()
 {
+    if (device_lost) return;
+    m_copyQueue.flushSync();
     flushGPU();
 }
 

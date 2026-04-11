@@ -298,7 +298,7 @@ int main(int argc, char* argv[])
         entt::entity freecam_entity = entt::null;
         entt::entity player_rep_entity = entt::null;
 
-        if (!level_manager.instantiateLevel(level_data, _world, render_api,
+        if (!level_manager.instantiateLevelParallel(level_data, _world, render_api,
                 &player_entity, &freecam_entity, &player_rep_entity))
         {
             LOG_ENGINE_FATAL("Failed to instantiate level");

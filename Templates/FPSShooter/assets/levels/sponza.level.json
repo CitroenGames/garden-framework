@@ -1,0 +1,65 @@
+{
+  "entities": [
+    {
+      "mesh": {
+        "casts_shadow": true,
+        "culling": true,
+        "force_lod": -1,
+        "path": "assets/models/sponza/Sponza.gltf",
+        "textures": [],
+        "transparent": false,
+        "use_mesh_collision": false,
+        "visible": true
+      },
+      "name": "Sponza",
+      "transform": {
+        "position": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "rotation": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "scale": {
+          "x": 0.019999999552965164,
+          "y": 0.019999999552965164,
+          "z": 0.019999999552965164
+        }
+      },
+      "type": "Renderable"
+    }
+  ],
+  "metadata": {
+    "author": "",
+    "level_name": "New Level",
+    "lighting": {
+      "ambient": {
+        "b": 0.20000000298023224,
+        "g": 0.20000000298023224,
+        "r": 0.20000000298023224
+      },
+      "diffuse": {
+        "b": 0.800000011920929,
+        "g": 0.800000011920929,
+        "r": 0.800000011920929
+      },
+      "direction": {
+        "x": -0.18814417719841003,
+        "y": -0.9407208561897278,
+        "z": -0.28221628069877625
+      }
+    },
+    "version": "1.0",
+    "world": {
+      "fixed_delta": 0.01600000075995922,
+      "gravity": {
+        "x": 0.0,
+        "y": -1.0,
+        "z": 0.0
+      }
+    }
+  }
+}

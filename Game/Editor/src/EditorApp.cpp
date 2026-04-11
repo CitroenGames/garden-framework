@@ -2378,6 +2378,8 @@ void EditorApp::renderGrid()
 
 void EditorApp::newLevel()
 {
+    if (auto* api = m_app.getRenderAPI())
+        api->waitForGPU();
     m_world.registry.clear();
     m_level_manager.cleanup();
     m_inspector.mesh_path_cache.clear();
@@ -2404,6 +2406,8 @@ void EditorApp::openLevel(const std::string& path)
         return;
     }
 
+    if (auto* api = m_app.getRenderAPI())
+        api->waitForGPU();
     m_world.registry.clear();
     m_level_manager.cleanup();
     m_inspector.mesh_path_cache.clear();
@@ -2467,6 +2471,8 @@ void EditorApp::restoreFromSnapshot(const LevelData& snapshot)
     }
 
     // Clear and restore
+    if (auto* api = m_app.getRenderAPI())
+        api->waitForGPU();
     m_world.registry.clear();
     m_level_manager.cleanup();
     m_inspector.mesh_path_cache.clear();
