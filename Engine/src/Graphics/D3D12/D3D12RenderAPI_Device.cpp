@@ -231,6 +231,8 @@ bool D3D12RenderAPI::createBackBufferRTVs()
 
         device->CreateRenderTargetView(m_backBuffers[i].Get(), nullptr,
                                         m_rtvAllocator.getCPU(m_backBufferRTVs[i]));
+
+        m_stateTracker.track(m_backBuffers[i].Get(), D3D12_RESOURCE_STATE_PRESENT);
     }
     return true;
 }

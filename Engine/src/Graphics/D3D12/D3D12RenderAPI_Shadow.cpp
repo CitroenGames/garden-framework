@@ -46,6 +46,8 @@ bool D3D12RenderAPI::createShadowMapResources()
         IID_PPV_ARGS(m_shadowMapArray.GetAddressOf()));
     if (FAILED(hr)) return false;
 
+    m_stateTracker.track(m_shadowMapArray.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE);
+
     // Create DSV for each cascade
     for (int i = 0; i < NUM_CASCADES; i++)
     {
@@ -174,12 +176,7 @@ void D3D12RenderAPI::beginShadowPass(const glm::vec3& lightDir)
     lightSpaceMatrix = lightProj * lightView;
     lightSpaceMatrices[0] = lightSpaceMatrix;
 
-    // Transition shadow map to depth write if needed
-    if (m_shadowMapState != D3D12_RESOURCE_STATE_DEPTH_WRITE)
-    {
-        transitionResource(m_shadowMapArray.Get(), m_shadowMapState, D3D12_RESOURCE_STATE_DEPTH_WRITE);
-        m_shadowMapState = D3D12_RESOURCE_STATE_DEPTH_WRITE;
-    }
+    transitionResource(m_shadowMapArray.Get(), {}, D3D12_RESOURCE_STATE_DEPTH_WRITE);
     flushBarriers();
 
     // Set shadow viewport
@@ -219,12 +216,7 @@ void D3D12RenderAPI::beginShadowPass(const glm::vec3& lightDir, const camera& ca
     for (int i = 0; i < NUM_CASCADES; i++)
         lightSpaceMatrices[i] = getLightSpaceMatrixForCascade(i, current_light_direction, view_matrix, field_of_view, aspect);
 
-    // Transition shadow map to depth write if needed
-    if (m_shadowMapState != D3D12_RESOURCE_STATE_DEPTH_WRITE)
-    {
-        transitionResource(m_shadowMapArray.Get(), m_shadowMapState, D3D12_RESOURCE_STATE_DEPTH_WRITE);
-        m_shadowMapState = D3D12_RESOURCE_STATE_DEPTH_WRITE;
-    }
+    transitionResource(m_shadowMapArray.Get(), {}, D3D12_RESOURCE_STATE_DEPTH_WRITE);
     flushBarriers();
 
     // Set shadow viewport
@@ -275,10 +267,9 @@ void D3D12RenderAPI::endShadowPass()
     in_shadow_pass = false;
 
     // Transition shadow map to shader resource
-    transitionResource(m_shadowMapArray.Get(), m_shadowMapState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    m_shadowMapState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    // Transition shadow map to SRV and restore main render target
+    transitionResource(m_shadowMapArray.Get(), {}, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 
-    // Restore main render target and viewport
     int w, h;
     D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle;
     D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle;
@@ -287,14 +278,7 @@ void D3D12RenderAPI::endShadowPass()
     {
         w = viewport_width_rt;
         h = viewport_height_rt;
-
-        // Transition offscreen texture to RENDER_TARGET before binding as RTV
-        if (m_offscreenState != D3D12_RESOURCE_STATE_RENDER_TARGET)
-        {
-            transitionResource(m_offscreenTexture.Get(), m_offscreenState, D3D12_RESOURCE_STATE_RENDER_TARGET);
-            m_offscreenState = D3D12_RESOURCE_STATE_RENDER_TARGET;
-        }
-
+        transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
         rtvHandle = m_rtvAllocator.getCPU(m_offscreenRTVIndex);
         dsvHandle = m_dsvAllocator.getCPU(m_viewportDSVIndex);
     }
@@ -305,23 +289,12 @@ void D3D12RenderAPI::endShadowPass()
 
         if (fxaaEnabled)
         {
-            // Transition offscreen texture to RENDER_TARGET before binding as RTV
-            if (m_offscreenState != D3D12_RESOURCE_STATE_RENDER_TARGET)
-            {
-                transitionResource(m_offscreenTexture.Get(), m_offscreenState, D3D12_RESOURCE_STATE_RENDER_TARGET);
-                m_offscreenState = D3D12_RESOURCE_STATE_RENDER_TARGET;
-            }
+            transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
             rtvHandle = m_rtvAllocator.getCPU(m_offscreenRTVIndex);
         }
         else
         {
-            // Transition back buffer to RENDER_TARGET before binding as RTV
-            if (m_backBufferState[m_backBufferIndex] != D3D12_RESOURCE_STATE_RENDER_TARGET)
-            {
-                transitionResource(m_backBuffers[m_backBufferIndex].Get(),
-                                   m_backBufferState[m_backBufferIndex], D3D12_RESOURCE_STATE_RENDER_TARGET);
-                m_backBufferState[m_backBufferIndex] = D3D12_RESOURCE_STATE_RENDER_TARGET;
-            }
+            transitionResource(m_backBuffers[m_backBufferIndex].Get(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
             rtvHandle = m_rtvAllocator.getCPU(m_backBufferRTVs[m_backBufferIndex]);
         }
 
@@ -386,9 +359,10 @@ void D3D12RenderAPI::recreateShadowMapResources(unsigned int size)
     LOG_ENGINE_TRACE("[D3D12] Recreating shadow map resources: {} -> {}",
                       currentShadowSize, size);
     flushGPU();
+    if (m_shadowMapArray)
+        m_stateTracker.untrack(m_shadowMapArray.Get());
     m_shadowMapArray.Reset();
     currentShadowSize = size;
-    m_shadowMapState = D3D12_RESOURCE_STATE_DEPTH_WRITE;
 
     if (size > 0)
     {
@@ -419,7 +393,7 @@ void D3D12RenderAPI::recreateShadowMapResources(unsigned int size)
             &heapProps, D3D12_HEAP_FLAG_NONE, &texDesc,
             D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &clearValue,
             IID_PPV_ARGS(m_shadowMapArray.GetAddressOf()));
-        m_shadowMapState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        m_stateTracker.track(m_shadowMapArray.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 
         // Recreate SRV pointing to the dummy
         if (m_shadowSRVIndex != UINT(-1))

@@ -7,6 +7,8 @@
 
 bool D3D12RenderAPI::createPostProcessingResources(int width, int height)
 {
+    if (m_offscreenTexture)
+        m_stateTracker.untrack(m_offscreenTexture.Get());
     m_offscreenTexture.Reset();
 
     D3D12_HEAP_PROPERTIES heapProps = {};
@@ -30,6 +32,8 @@ bool D3D12RenderAPI::createPostProcessingResources(int width, int height)
         D3D12_RESOURCE_STATE_RENDER_TARGET, &clearValue,
         IID_PPV_ARGS(m_offscreenTexture.GetAddressOf()));
     if (FAILED(hr)) return false;
+
+    m_stateTracker.track(m_offscreenTexture.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
 
     // RTV
     if (m_offscreenRTVIndex == UINT(-1))

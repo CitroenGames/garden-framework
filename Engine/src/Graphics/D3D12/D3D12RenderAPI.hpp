@@ -5,6 +5,7 @@
 #include "D3D12BarrierBatch.hpp"
 #include "D3D12CopyQueue.hpp"
 #include "D3D12PSOCache.hpp"
+#include "D3D12ResourceStateTracker.hpp"
 #include <d3d12.h>
 #include <d3d12sdklayers.h>
 #include <dxgi1_4.h>
@@ -190,10 +191,8 @@ private:
     bool m_commandListOpen = false;
     void ensureCommandListOpen();
 
-    // Resource state tracking
-    D3D12_RESOURCE_STATES m_offscreenState = D3D12_RESOURCE_STATE_RENDER_TARGET;
-    D3D12_RESOURCE_STATES m_shadowMapState = D3D12_RESOURCE_STATE_DEPTH_WRITE;
-    D3D12_RESOURCE_STATES m_backBufferState[NUM_BACK_BUFFERS] = { D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_PRESENT };
+    // Automatic resource state tracking
+    D3D12ResourceStateTracker m_stateTracker;
 
     // Device lost flag
     bool device_lost = false;

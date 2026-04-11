@@ -53,6 +53,7 @@ sources = {
     src/Graphics/D3D12/D3D12Mesh.cpp [windows]
     src/Graphics/D3D12/D3D12CopyQueue.cpp [windows]
     src/Graphics/D3D12/D3D12PSOCache.cpp [windows]
+    src/Graphics/D3D12/D3D12ResourceStateTracker.cpp [windows]
     src/Graphics/MetalRenderAPI.mm [macOS]
     src/Graphics/MetalMesh.mm [macOS]
     src/Graphics/stb_impl.cpp

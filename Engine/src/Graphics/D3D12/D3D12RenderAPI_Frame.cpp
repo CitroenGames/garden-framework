@@ -56,12 +56,7 @@ void D3D12RenderAPI::beginFrame()
     if (m_viewportTexture)
     {
         // Editor mode: render to offscreen at viewport dimensions
-        // Ensure offscreen is in RENDER_TARGET state
-        if (m_offscreenState != D3D12_RESOURCE_STATE_RENDER_TARGET)
-        {
-            transitionResource(m_offscreenTexture.Get(), m_offscreenState, D3D12_RESOURCE_STATE_RENDER_TARGET);
-            m_offscreenState = D3D12_RESOURCE_STATE_RENDER_TARGET;
-        }
+        transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
 
         flushBarriers();
         rtvHandle = m_rtvAllocator.getCPU(m_offscreenRTVIndex);
@@ -80,11 +75,7 @@ void D3D12RenderAPI::beginFrame()
     else if (fxaaEnabled)
     {
         // Standalone with FXAA: render to offscreen
-        if (m_offscreenState != D3D12_RESOURCE_STATE_RENDER_TARGET)
-        {
-            transitionResource(m_offscreenTexture.Get(), m_offscreenState, D3D12_RESOURCE_STATE_RENDER_TARGET);
-            m_offscreenState = D3D12_RESOURCE_STATE_RENDER_TARGET;
-        }
+        transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
 
         flushBarriers();
         rtvHandle = m_rtvAllocator.getCPU(m_offscreenRTVIndex);
@@ -103,12 +94,7 @@ void D3D12RenderAPI::beginFrame()
     else
     {
         // Direct to back buffer
-        if (m_backBufferState[m_backBufferIndex] != D3D12_RESOURCE_STATE_RENDER_TARGET)
-        {
-            transitionResource(m_backBuffers[m_backBufferIndex].Get(),
-                               m_backBufferState[m_backBufferIndex], D3D12_RESOURCE_STATE_RENDER_TARGET);
-            m_backBufferState[m_backBufferIndex] = D3D12_RESOURCE_STATE_RENDER_TARGET;
-        }
+        transitionResource(m_backBuffers[m_backBufferIndex].Get(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
 
         flushBarriers();
         rtvHandle = m_rtvAllocator.getCPU(m_backBufferRTVs[m_backBufferIndex]);
@@ -160,20 +146,9 @@ void D3D12RenderAPI::endFrame()
 
     if (fxaaEnabled && !m_viewportTexture)
     {
-        // Transition offscreen to SRV for FXAA sampling
-        if (m_offscreenState != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)
-        {
-            transitionResource(m_offscreenTexture.Get(), m_offscreenState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-            m_offscreenState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-        }
-
-        // Transition back buffer to render target
-        if (m_backBufferState[m_backBufferIndex] != D3D12_RESOURCE_STATE_RENDER_TARGET)
-        {
-            transitionResource(m_backBuffers[m_backBufferIndex].Get(),
-                               m_backBufferState[m_backBufferIndex], D3D12_RESOURCE_STATE_RENDER_TARGET);
-            m_backBufferState[m_backBufferIndex] = D3D12_RESOURCE_STATE_RENDER_TARGET;
-        }
+        // Transition offscreen to SRV for FXAA sampling + back buffer to RT
+        transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        transitionResource(m_backBuffers[m_backBufferIndex].Get(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
 
         // Flush batched barriers (offscreen→SRV + backbuffer→RT in one call)
         flushBarriers();
@@ -200,18 +175,12 @@ void D3D12RenderAPI::endFrame()
         if (cbAddr == 0)
         {
             // Ring buffer exhausted - skip FXAA, copy offscreen directly to back buffer
-            transitionResource(m_offscreenTexture.Get(), m_offscreenState, D3D12_RESOURCE_STATE_COPY_SOURCE);
-            m_offscreenState = D3D12_RESOURCE_STATE_COPY_SOURCE;
-            transitionResource(m_backBuffers[m_backBufferIndex].Get(),
-                               m_backBufferState[m_backBufferIndex], D3D12_RESOURCE_STATE_COPY_DEST);
-            m_backBufferState[m_backBufferIndex] = D3D12_RESOURCE_STATE_COPY_DEST;
+            transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            transitionResource(m_backBuffers[m_backBufferIndex].Get(), {}, D3D12_RESOURCE_STATE_COPY_DEST);
             flushBarriers();
             commandList->CopyResource(m_backBuffers[m_backBufferIndex].Get(), m_offscreenTexture.Get());
-            transitionResource(m_offscreenTexture.Get(), m_offscreenState, D3D12_RESOURCE_STATE_RENDER_TARGET);
-            m_offscreenState = D3D12_RESOURCE_STATE_RENDER_TARGET;
-            transitionResource(m_backBuffers[m_backBufferIndex].Get(),
-                               m_backBufferState[m_backBufferIndex], D3D12_RESOURCE_STATE_RENDER_TARGET);
-            m_backBufferState[m_backBufferIndex] = D3D12_RESOURCE_STATE_RENDER_TARGET;
+            transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            transitionResource(m_backBuffers[m_backBufferIndex].Get(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
             flushBarriers();
         }
         else
@@ -237,23 +206,13 @@ void D3D12RenderAPI::endFrame()
     if (draw_data && !m_viewportTexture)
     {
         // Ensure back buffer is in render target state for ImGui
-        if (m_backBufferState[m_backBufferIndex] != D3D12_RESOURCE_STATE_RENDER_TARGET)
-        {
-            transitionResource(m_backBuffers[m_backBufferIndex].Get(),
-                               m_backBufferState[m_backBufferIndex], D3D12_RESOURCE_STATE_RENDER_TARGET);
-            m_backBufferState[m_backBufferIndex] = D3D12_RESOURCE_STATE_RENDER_TARGET;
-        }
+        transitionResource(m_backBuffers[m_backBufferIndex].Get(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
         flushBarriers();
         ImGui_ImplDX12_RenderDrawData(draw_data, commandList.Get());
     }
 
     // Transition back buffer to present
-    if (m_backBufferState[m_backBufferIndex] != D3D12_RESOURCE_STATE_PRESENT)
-    {
-        transitionResource(m_backBuffers[m_backBufferIndex].Get(),
-                           m_backBufferState[m_backBufferIndex], D3D12_RESOURCE_STATE_PRESENT);
-        m_backBufferState[m_backBufferIndex] = D3D12_RESOURCE_STATE_PRESENT;
-    }
+    transitionResource(m_backBuffers[m_backBufferIndex].Get(), {}, D3D12_RESOURCE_STATE_PRESENT);
 
     // Close and execute command list
     flushBarriers();
@@ -272,12 +231,7 @@ void D3D12RenderAPI::present()
     if (m_commandListOpen)
     {
         // Ensure back buffer is in PRESENT state
-        if (m_backBufferState[m_backBufferIndex] != D3D12_RESOURCE_STATE_PRESENT)
-        {
-            transitionResource(m_backBuffers[m_backBufferIndex].Get(),
-                               m_backBufferState[m_backBufferIndex], D3D12_RESOURCE_STATE_PRESENT);
-            m_backBufferState[m_backBufferIndex] = D3D12_RESOURCE_STATE_PRESENT;
-        }
+        transitionResource(m_backBuffers[m_backBufferIndex].Get(), {}, D3D12_RESOURCE_STATE_PRESENT);
 
         flushBarriers();
         commandList->Close();

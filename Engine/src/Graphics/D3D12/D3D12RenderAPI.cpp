@@ -380,14 +380,20 @@ void D3D12RenderAPI::resize(int width, int height)
     viewport_width = width;
     viewport_height = height;
 
-    // Release back buffer references
+    // Untrack and release back buffer references
     for (int i = 0; i < NUM_BACK_BUFFERS; i++)
+    {
+        if (m_backBuffers[i])
+            m_stateTracker.untrack(m_backBuffers[i].Get());
         m_backBuffers[i].Reset();
+    }
 
     // Release depth buffer
     m_depthStencilBuffer.Reset();
 
-    // Release offscreen resources
+    // Untrack and release offscreen resources
+    if (m_offscreenTexture)
+        m_stateTracker.untrack(m_offscreenTexture.Get());
     m_offscreenTexture.Reset();
 
     // Resize swap chain
@@ -473,11 +479,17 @@ void D3D12RenderAPI::transitionResource(ID3D12Resource* resource,
                                          D3D12_RESOURCE_STATES before,
                                          D3D12_RESOURCE_STATES after)
 {
-    m_barrierBatch.add(resource, before, after);
+    // If the resource is tracked, use the tracker (ignores 'before' — it knows the current state).
+    // Otherwise fall back to the raw barrier batch for untracked resources.
+    if (m_stateTracker.isTracked(resource))
+        m_stateTracker.transition(resource, after);
+    else
+        m_barrierBatch.add(resource, before, after);
 }
 
 void D3D12RenderAPI::flushBarriers()
 {
+    m_stateTracker.flush(commandList.Get());
     m_barrierBatch.flush(commandList.Get());
 }
 
