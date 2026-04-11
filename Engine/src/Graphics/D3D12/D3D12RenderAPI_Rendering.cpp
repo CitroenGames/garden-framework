@@ -5,6 +5,7 @@
 #include "D3D12RenderAPI.hpp"
 #include "D3D12Mesh.hpp"
 #include "Components/mesh.hpp"
+#include "Graphics/RenderCommandBuffer.hpp"
 #include "Utils/Log.hpp"
 #include <algorithm>
 #include <cmath>
@@ -608,6 +609,141 @@ void D3D12RenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t 
     {
         commandList->DrawInstanced(static_cast<UINT>(vertex_count), 1,
                                     static_cast<UINT>(start_vertex), 0);
+    }
+}
+
+// ============================================================================
+// Command Buffer Replay (Multicore Rendering)
+// ============================================================================
+
+void D3D12RenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
+{
+    if (cmds.empty() || device_lost) return;
+
+    for (const auto& cmd : cmds)
+    {
+        if (!cmd.gpu_mesh || !cmd.gpu_mesh->isUploaded()) continue;
+
+        D3D12Mesh* gpuMesh = dynamic_cast<D3D12Mesh*>(cmd.gpu_mesh);
+        if (!gpuMesh || !gpuMesh->isUploaded()) continue;
+
+        if (cmd.pso_key.shadow)
+        {
+            // Shadow pass draw: update shadow CBuffer with model matrix
+            updateShadowCBuffer(lightSpaceMatrices[currentCascade], cmd.model_matrix);
+
+            commandList->IASetVertexBuffers(0, 1, &gpuMesh->getVertexBufferView());
+            if (gpuMesh->isIndexed())
+            {
+                commandList->IASetIndexBuffer(&gpuMesh->getIndexBufferView());
+                if (cmd.vertex_count > 0)
+                    commandList->DrawIndexedInstanced(static_cast<UINT>(cmd.vertex_count), 1,
+                                                      static_cast<UINT>(cmd.start_vertex), 0, 0);
+                else
+                    commandList->DrawIndexedInstanced(static_cast<UINT>(gpuMesh->getIndexCount()), 1, 0, 0, 0);
+            }
+            else
+            {
+                if (cmd.vertex_count > 0)
+                    commandList->DrawInstanced(static_cast<UINT>(cmd.vertex_count), 1,
+                                                static_cast<UINT>(cmd.start_vertex), 0);
+                else
+                    commandList->DrawInstanced(static_cast<UINT>(gpuMesh->getVertexCount()), 1, 0, 0);
+            }
+            continue;
+        }
+
+        if (cmd.pso_key.depth_only)
+        {
+            // Depth prepass draw: update per-object CBuffer with identity color
+            // Temporarily set model matrix for the CBuffer upload
+            glm::mat4 saved_model = current_model_matrix;
+            current_model_matrix = cmd.model_matrix;
+            updatePerObjectCBuffer(glm::vec3(1.0f), false);
+            current_model_matrix = saved_model;
+
+            commandList->IASetVertexBuffers(0, 1, &gpuMesh->getVertexBufferView());
+            if (gpuMesh->isIndexed())
+            {
+                commandList->IASetIndexBuffer(&gpuMesh->getIndexBufferView());
+                if (cmd.vertex_count > 0)
+                    commandList->DrawIndexedInstanced(static_cast<UINT>(cmd.vertex_count), 1,
+                                                      static_cast<UINT>(cmd.start_vertex), 0, 0);
+                else
+                    commandList->DrawIndexedInstanced(static_cast<UINT>(gpuMesh->getIndexCount()), 1, 0, 0, 0);
+            }
+            else
+            {
+                if (cmd.vertex_count > 0)
+                    commandList->DrawInstanced(static_cast<UINT>(cmd.vertex_count), 1,
+                                                static_cast<UINT>(cmd.start_vertex), 0);
+                else
+                    commandList->DrawInstanced(static_cast<UINT>(gpuMesh->getVertexCount()), 1, 0, 0);
+            }
+            continue;
+        }
+
+        // Main pass draw
+        if (global_cbuffer_dirty)
+        {
+            updateGlobalCBuffer();
+            global_cbuffer_dirty = false;
+        }
+
+        // Upload per-object CBuffer with the command's model matrix
+        {
+            glm::mat4 saved_model = current_model_matrix;
+            current_model_matrix = cmd.model_matrix;
+            updatePerObjectCBuffer(cmd.color, cmd.use_texture);
+            current_model_matrix = saved_model;
+        }
+
+        // Upload light data once per frame
+        if (m_cachedLightCBAddr == 0)
+        {
+            m_cachedLightCBAddr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(LightCBuffer), &current_lights);
+            if (m_cachedLightCBAddr == 0) continue;
+        }
+        commandList->SetGraphicsRootConstantBufferView(4, m_cachedLightCBAddr);
+
+        // Select PSO from PSOKey
+        RenderState rs;
+        rs.blend_mode = cmd.pso_key.blend;
+        rs.cull_mode = cmd.pso_key.cull;
+        rs.lighting = cmd.pso_key.lighting;
+        bool unlit = !cmd.pso_key.lighting;
+        ID3D12PipelineState* pso = selectPSO(rs, unlit);
+        if (pso != last_bound_pso)
+        {
+            commandList->SetPipelineState(pso);
+            last_bound_pso = pso;
+        }
+
+        // Bind texture
+        if (cmd.use_texture && cmd.texture != INVALID_TEXTURE)
+            bindTexture(cmd.texture);
+        else if (defaultTexture != INVALID_TEXTURE)
+            bindTexture(defaultTexture);
+
+        // Draw
+        commandList->IASetVertexBuffers(0, 1, &gpuMesh->getVertexBufferView());
+        if (gpuMesh->isIndexed())
+        {
+            commandList->IASetIndexBuffer(&gpuMesh->getIndexBufferView());
+            if (cmd.vertex_count > 0)
+                commandList->DrawIndexedInstanced(static_cast<UINT>(cmd.vertex_count), 1,
+                                                  static_cast<UINT>(cmd.start_vertex), 0, 0);
+            else
+                commandList->DrawIndexedInstanced(static_cast<UINT>(gpuMesh->getIndexCount()), 1, 0, 0, 0);
+        }
+        else
+        {
+            if (cmd.vertex_count > 0)
+                commandList->DrawInstanced(static_cast<UINT>(cmd.vertex_count), 1,
+                                            static_cast<UINT>(cmd.start_vertex), 0);
+            else
+                commandList->DrawInstanced(static_cast<UINT>(gpuMesh->getVertexCount()), 1, 0, 0);
+        }
     }
 }
 

@@ -14,6 +14,9 @@
 #include <functional>
 #include <algorithm>
 
+// Forward declaration for command buffer
+class RenderCommandBuffer;
+
 // Forward declaration for SDL
 struct SDL_Window;
 
@@ -167,6 +170,11 @@ public:
     virtual void beginDepthPrepass() {}
     virtual void endDepthPrepass() {}
     virtual void renderMeshDepthOnly(const mesh& m) { (void)m; }
+
+    // Command buffer replay (for multicore rendering)
+    // Replays a pre-recorded command buffer of self-contained draw commands.
+    // Commands must be recorded with pre-computed model matrices and textures.
+    virtual void replayCommandBuffer(const RenderCommandBuffer& cmds) { (void)cmds; }
 
     // Utility
     virtual const char* getAPIName() const = 0;

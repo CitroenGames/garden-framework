@@ -6,6 +6,7 @@
 #include <vector>
 #include <cstdint>
 #include <cstring>
+#include <atomic>
 
 using Microsoft::WRL::ComPtr;
 
@@ -49,18 +50,19 @@ struct DescriptorHeapAllocator
     D3D12_GPU_DESCRIPTOR_HANDLE getGPU(UINT index) const;
 };
 
-// Per-frame upload ring buffer for constant data
+// Per-frame upload ring buffer for constant data.
+// Uses atomic offset for lock-free concurrent allocation (multicore rendering).
 struct UploadRingBuffer
 {
     ComPtr<ID3D12Resource> resource;
     uint8_t* mappedData = nullptr;
     size_t capacity = 0;
-    size_t offset = 0;
+    std::atomic<size_t> offset{0};
     D3D12_GPU_VIRTUAL_ADDRESS gpuAddress = 0;
     bool overflowLogged = false;
 
     bool init(ID3D12Device* device, size_t size);
-    void reset() { offset = 0; overflowLogged = false; }
+    void reset() { offset.store(0, std::memory_order_relaxed); overflowLogged = false; }
     D3D12_GPU_VIRTUAL_ADDRESS allocate(size_t size, const void* data);
 };
 

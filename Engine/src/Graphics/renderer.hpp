@@ -4,6 +4,8 @@
 #include "Components/Components.hpp"
 #include "Components/mesh.hpp"
 #include "RenderAPI.hpp"
+#include "RenderCommandBuffer.hpp"
+#include "RenderContext.hpp"
 #include "ImGui/ImGuiManager.hpp"
 #include "UI/RmlUiManager.h"
 #include "Frustum.hpp"
@@ -13,6 +15,8 @@
 #include "Console/ConVar.hpp"
 #include <entt/entt.hpp>
 #include <algorithm>
+#include <future>
+#include <thread>
 
 class renderer
 {
@@ -100,7 +104,7 @@ public:
         render_api->setPointAndSpotLights(light_buffer);
     }
 
-    // Depth prepass helper: render mesh depth-only with transform
+    // Depth prepass helper: render mesh depth-only with transform (immediate mode, legacy)
     static void render_mesh_depth_only(mesh& m, const TransformComponent& transform, IRenderAPI* api)
     {
         if (!m.visible || !api) return;
@@ -108,6 +112,320 @@ public:
         api->multiplyMatrix(transform.getTransformMatrix());
         api->renderMeshDepthOnly(m);
         api->popMatrix();
+    }
+
+    // ========================================================================
+    // Command buffer recording helpers (for multicore rendering path)
+    // ========================================================================
+
+    // Ensure a mesh is uploaded to the GPU. Must be called on main thread
+    // before recording draw commands (recording is GPU-free).
+    static void ensure_mesh_uploaded(mesh& m, IRenderAPI* api)
+    {
+        if (!m.visible || !m.is_valid || m.vertices_len == 0) return;
+        if (!m.gpu_mesh || !m.gpu_mesh->isUploaded())
+            m.uploadToGPU(api);
+    }
+
+    // Record a single mesh draw into a command buffer (replaces render_mesh_with_api)
+    static void record_mesh_draw(mesh& m, const TransformComponent& transform,
+                                 RenderCommandBuffer& cmds, bool global_lighting)
+    {
+        if (!m.visible || !m.gpu_mesh || !m.gpu_mesh->isUploaded()) return;
+
+        glm::mat4 model = transform.getTransformMatrix();
+        RenderState state = m.getRenderState();
+        PSOKey key = PSOKey::fromRenderState(state, global_lighting);
+
+        if (m.uses_material_ranges && !m.material_ranges.empty())
+        {
+            for (const auto& range : m.material_ranges)
+            {
+                bool has_tex = range.hasValidTexture();
+                cmds.recordDrawRange(m.gpu_mesh, model,
+                                     has_tex ? range.texture : INVALID_TEXTURE, has_tex,
+                                     key, range.start_vertex, range.vertex_count,
+                                     state.color);
+            }
+        }
+        else
+        {
+            bool has_tex = (m.texture_set && m.texture != INVALID_TEXTURE);
+            cmds.recordDraw(m.gpu_mesh, model,
+                            has_tex ? m.texture : INVALID_TEXTURE, has_tex,
+                            key, state.color);
+        }
+    }
+
+    // Record a LOD mesh draw into a command buffer (replaces render_lod_mesh)
+    static void record_lod_mesh_draw(mesh& m, const TransformComponent& transform,
+                                     RenderCommandBuffer& cmds, bool global_lighting,
+                                     IGPUMesh* lod_gpu_mesh)
+    {
+        if (!lod_gpu_mesh || !lod_gpu_mesh->isUploaded()) return;
+
+        glm::mat4 model = transform.getTransformMatrix();
+        RenderState state = m.getRenderState();
+        PSOKey key = PSOKey::fromRenderState(state, global_lighting);
+
+        // Check for LOD-specific material ranges
+        int lod_idx = m.current_lod - 1;
+        bool has_lod_materials = (lod_idx >= 0 && lod_idx < static_cast<int>(m.lod_levels.size())
+                                  && !m.lod_levels[lod_idx].material_ranges.empty());
+
+        if (has_lod_materials)
+        {
+            const auto& ranges = m.lod_levels[lod_idx].material_ranges;
+            for (const auto& range : ranges)
+            {
+                bool has_tex = range.hasValidTexture();
+                cmds.recordDrawRange(lod_gpu_mesh, model,
+                                     has_tex ? range.texture : INVALID_TEXTURE, has_tex,
+                                     key, range.start_vertex, range.vertex_count,
+                                     state.color);
+            }
+        }
+        else
+        {
+            // Fall back to first valid texture from original material ranges
+            TextureHandle tex = INVALID_TEXTURE;
+            bool has_tex = false;
+            if (m.uses_material_ranges && !m.material_ranges.empty())
+            {
+                for (const auto& range : m.material_ranges)
+                {
+                    if (range.hasValidTexture())
+                    {
+                        tex = range.texture;
+                        has_tex = true;
+                        break;
+                    }
+                }
+            }
+            else if (m.texture_set && m.texture != INVALID_TEXTURE)
+            {
+                tex = m.texture;
+                has_tex = true;
+            }
+            cmds.recordDraw(lod_gpu_mesh, model, tex, has_tex, key, state.color);
+        }
+    }
+
+    // Record a mesh at a specific LOD level (replaces render_mesh_at_lod)
+    static void record_mesh_at_lod(mesh& m, const TransformComponent& transform,
+                                   RenderCommandBuffer& cmds, bool global_lighting, int lod_level)
+    {
+        if (!m.visible) return;
+
+        if (!m.lod_levels.empty() && lod_level > 0)
+        {
+            m.selectLOD(lod_level);
+            IGPUMesh* active = m.getActiveGPUMesh();
+            if (active && active != m.gpu_mesh)
+            {
+                record_lod_mesh_draw(m, transform, cmds, global_lighting, active);
+                return;
+            }
+        }
+        record_mesh_draw(m, transform, cmds, global_lighting);
+    }
+
+    // Record a mesh with automatic LOD selection (replaces render_mesh_with_lod)
+    static void record_mesh_with_lod(mesh& m, const TransformComponent& transform,
+                                     RenderCommandBuffer& cmds, bool global_lighting,
+                                     const glm::vec3& camera_pos, const glm::mat4& projection)
+    {
+        if (!m.visible) return;
+
+        if (!m.lod_levels.empty() && m.bounds_computed)
+        {
+            int lod;
+            if (m.force_lod >= 0)
+            {
+                lod = m.force_lod;
+            }
+            else
+            {
+                int lod_count = m.getLODCount();
+                std::vector<float> thresholds(lod_count, 0.0f);
+                for (int i = 0; i < static_cast<int>(m.lod_levels.size()); ++i)
+                    thresholds[i + 1] = m.lod_levels[i].screen_threshold;
+
+                lod = LODSelector::selectLOD(
+                    camera_pos, transform.position,
+                    m.aabb_min, m.aabb_max,
+                    projection, lod_count, thresholds.data(),
+                    transform.scale
+                );
+            }
+            m.selectLOD(lod);
+
+            IGPUMesh* active = m.getActiveGPUMesh();
+            if (active && active != m.gpu_mesh)
+            {
+                record_lod_mesh_draw(m, transform, cmds, global_lighting, active);
+                return;
+            }
+        }
+
+        record_mesh_draw(m, transform, cmds, global_lighting);
+    }
+
+    // Record a depth-prepass draw command
+    static void record_depth_draw(mesh& m, const TransformComponent& transform,
+                                  RenderCommandBuffer& cmds)
+    {
+        if (!m.visible || !m.gpu_mesh || !m.gpu_mesh->isUploaded()) return;
+        glm::mat4 model = transform.getTransformMatrix();
+        PSOKey key = PSOKey::depthPrepass();
+        cmds.recordDraw(m.gpu_mesh, model, INVALID_TEXTURE, false, key);
+    }
+
+    // Record a depth-prepass draw at a specific LOD
+    static void record_depth_draw_at_lod(mesh& m, const TransformComponent& transform,
+                                         RenderCommandBuffer& cmds, int lod_level)
+    {
+        if (!m.visible || !m.gpu_mesh) return;
+        PSOKey key = PSOKey::depthPrepass();
+        glm::mat4 model = transform.getTransformMatrix();
+
+        if (lod_level > 0 && !m.lod_levels.empty())
+        {
+            m.selectLOD(lod_level);
+            IGPUMesh* active = m.getActiveGPUMesh();
+            if (active && active != m.gpu_mesh && active->isUploaded())
+            {
+                cmds.recordDraw(active, model, INVALID_TEXTURE, false, key);
+                return;
+            }
+        }
+        if (m.gpu_mesh->isUploaded())
+            cmds.recordDraw(m.gpu_mesh, model, INVALID_TEXTURE, false, key);
+    }
+
+    // Record a shadow pass draw command
+    static void record_shadow_draw(mesh& m, const TransformComponent& transform,
+                                   RenderCommandBuffer& cmds, int cascade_index)
+    {
+        if (!m.visible || !m.casts_shadow) return;
+        if (!m.gpu_mesh || !m.gpu_mesh->isUploaded()) return;
+
+        PSOKey key = PSOKey::shadowPass();
+        glm::mat4 model = transform.getTransformMatrix();
+
+        if (!m.lod_levels.empty())
+        {
+            int shadow_lod = std::min(cascade_index, static_cast<int>(m.lod_levels.size()));
+            m.selectLOD(shadow_lod);
+            IGPUMesh* active = m.getActiveGPUMesh();
+            if (active && active != m.gpu_mesh && active->isUploaded())
+            {
+                cmds.recordDraw(active, model, INVALID_TEXTURE, false, key);
+                return;
+            }
+        }
+        cmds.recordDraw(m.gpu_mesh, model, INVALID_TEXTURE, false, key);
+    }
+
+    // Ensure all meshes in an entity list are uploaded to the GPU (main thread pre-pass).
+    // This must be called before recording draw commands since recording is GPU-free.
+    void ensure_meshes_uploaded(entt::registry& registry, const std::vector<entt::entity>& entities)
+    {
+        for (auto entity : entities)
+        {
+            if (!registry.valid(entity)) continue;
+            auto* mc = registry.try_get<MeshComponent>(entity);
+            if (!mc || !mc->m_mesh) continue;
+            ensure_mesh_uploaded(*mc->m_mesh, render_api);
+
+            // Also ensure LOD meshes are uploaded
+            for (auto& lod : mc->m_mesh->lod_levels)
+            {
+                if (lod.gpu_mesh && !lod.gpu_mesh->isUploaded())
+                {
+                    // LOD meshes are pre-uploaded during level loading, but check anyway
+                }
+            }
+        }
+    }
+
+    // ========================================================================
+    // Parallel command recording (multicore rendering)
+    // ========================================================================
+
+    // Minimum entities per chunk for parallel recording to be worthwhile.
+    // Below this threshold, single-threaded recording is faster due to job overhead.
+    static constexpr size_t PARALLEL_CHUNK_SIZE = 256;
+
+    // Record opaque entity draws in parallel using std::async.
+    // Entities must be pre-uploaded and LOD pre-selected before calling.
+    // Returns a merged, sorted command buffer ready for replay.
+    RenderCommandBuffer record_opaque_parallel(
+        entt::registry& registry,
+        const std::vector<entt::entity>& entities,
+        const std::vector<int>& lod_levels,
+        bool global_lighting)
+    {
+        // For small entity counts, single-threaded recording is faster
+        if (entities.size() < PARALLEL_CHUNK_SIZE)
+        {
+            RenderCommandBuffer cmds;
+            cmds.reserve(entities.size());
+            for (size_t i = 0; i < entities.size(); ++i)
+            {
+                if (!registry.valid(entities[i])) continue;
+                auto* mc = registry.try_get<MeshComponent>(entities[i]);
+                auto* t = registry.try_get<TransformComponent>(entities[i]);
+                if (!mc || !t || !mc->m_mesh || !mc->m_mesh->visible) continue;
+                record_mesh_at_lod(*mc->m_mesh, *t, cmds, global_lighting, lod_levels[i]);
+            }
+            cmds.sort();
+            return cmds;
+        }
+
+        // Split entities into chunks for parallel recording
+        size_t num_chunks = (entities.size() + PARALLEL_CHUNK_SIZE - 1) / PARALLEL_CHUNK_SIZE;
+        std::vector<RenderContext> contexts(num_chunks);
+        std::vector<std::future<void>> futures;
+        futures.reserve(num_chunks);
+
+        for (size_t c = 0; c < num_chunks; ++c)
+        {
+            contexts[c].context_index = static_cast<uint32_t>(c);
+            size_t start = c * PARALLEL_CHUNK_SIZE;
+            size_t end = std::min(start + PARALLEL_CHUNK_SIZE, entities.size());
+            contexts[c].command_buffer.reserve(end - start);
+
+            futures.push_back(std::async(std::launch::async,
+                [&, c, start, end]() {
+                    for (size_t i = start; i < end; ++i)
+                    {
+                        if (!registry.valid(entities[i])) continue;
+                        auto* mc = registry.try_get<MeshComponent>(entities[i]);
+                        auto* t = registry.try_get<TransformComponent>(entities[i]);
+                        if (!mc || !t || !mc->m_mesh || !mc->m_mesh->visible) continue;
+                        record_mesh_at_lod(*mc->m_mesh, *t,
+                                           contexts[c].command_buffer, global_lighting, lod_levels[i]);
+                    }
+                }));
+        }
+
+        // Wait for all recording tasks to complete
+        for (auto& f : futures)
+            f.get();
+
+        // Merge all command buffers and sort
+        RenderCommandBuffer merged;
+        size_t total = 0;
+        for (const auto& ctx : contexts)
+            total += ctx.command_buffer.size();
+        merged.reserve(total);
+
+        for (auto& ctx : contexts)
+            merged.append(std::move(ctx.command_buffer));
+
+        merged.sort(); // Sort by PSO+texture to minimize state changes
+        return merged;
     }
 
     // Sort entities by texture handle (primary) and distance (secondary, front-to-back)
@@ -339,9 +657,10 @@ public:
         depth_prepass_enabled = CVAR_BOOL(r_depthprepass);
         bool sky_enabled = CVAR_BOOL(r_sky);
         bool dynamic_lights_enabled = CVAR_BOOL(r_dynamiclights);
+        bool global_lighting = CVAR_BOOL(r_lighting);
         render_api->setFXAAEnabled(CVAR_BOOL(r_fxaa));
         render_api->setShadowQuality(CVAR_INT(r_shadowquality));
-        render_api->enableLighting(CVAR_BOOL(r_lighting));
+        render_api->enableLighting(global_lighting);
 
         last_draw_calls = 0;
 
@@ -351,7 +670,7 @@ public:
         if (bvh_enabled && scene_bvh.needsRebuild())
             scene_bvh.build(registry);
 
-        // 1. Shadow Pass - CSM with per-cascade frustum culling
+        // 1. Shadow Pass - CSM with per-cascade frustum culling (command buffer path)
         if (render_api->getShadowQuality() > 0)
         {
         render_api->beginShadowPass(light_direction, c);
@@ -361,15 +680,20 @@ public:
         {
             render_api->beginCascade(cascade);
 
+            RenderCommandBuffer shadow_cmds;
+
             if (bvh_enabled && cascade_matrices)
             {
-                // Extract frustum from this cascade's light-space matrix and cull
                 Frustum shadow_frustum;
                 shadow_frustum.extractFromViewProjection(cascade_matrices[cascade]);
 
                 std::vector<entt::entity> shadow_entities;
                 scene_bvh.queryFrustum(shadow_frustum, shadow_entities);
 
+                // Ensure all shadow caster meshes are uploaded
+                ensure_meshes_uploaded(registry, shadow_entities);
+
+                shadow_cmds.reserve(shadow_entities.size());
                 for (auto entity : shadow_entities)
                 {
                     if (!registry.valid(entity)) continue;
@@ -378,21 +702,25 @@ public:
                     if (mesh_comp && t && mesh_comp->m_mesh && mesh_comp->m_mesh->visible
                         && mesh_comp->m_mesh->casts_shadow)
                     {
-                        render_mesh_shadow_lod(*mesh_comp->m_mesh, *t, render_api, cascade);
+                        record_shadow_draw(*mesh_comp->m_mesh, *t, shadow_cmds, cascade);
                     }
                 }
             }
             else
             {
-                // Fallback: render all (no BVH or no cascade matrices)
                 for (auto entity : view)
                 {
                     auto& mesh_comp = view.get<MeshComponent>(entity);
                     const auto& t = view.get<TransformComponent>(entity);
                     if (mesh_comp.m_mesh && mesh_comp.m_mesh->visible && mesh_comp.m_mesh->casts_shadow)
-                        render_mesh_with_api(*mesh_comp.m_mesh, t, render_api);
+                    {
+                        ensure_mesh_uploaded(*mesh_comp.m_mesh, render_api);
+                        record_shadow_draw(*mesh_comp.m_mesh, t, shadow_cmds, cascade);
+                    }
                 }
             }
+
+            render_api->replayCommandBuffer(shadow_cmds);
         }
         render_api->endShadowPass();
         } // shadow quality > 0
@@ -456,6 +784,10 @@ public:
                     return glm::dot(cam_pos - ta->position, cam_pos - ta->position) > glm::dot(cam_pos - tb->position, cam_pos - tb->position);
                 });
 
+            // Ensure all visible meshes are uploaded before recording
+            ensure_meshes_uploaded(registry, opaque_entities);
+            ensure_meshes_uploaded(registry, transparent_entities);
+
             // Pre-select LOD for opaque entities (coherent between depth prepass and main pass)
             std::vector<int> opaque_lod(opaque_entities.size(), 0);
             for (size_t i = 0; i < opaque_entities.size(); ++i)
@@ -487,10 +819,12 @@ public:
                 }
             }
 
-            // Depth prepass: opaque entities only, using pre-selected LOD
+            // Depth prepass: record into command buffer, then replay
             if (depth_prepass_enabled && !opaque_entities.empty())
             {
-                render_api->beginDepthPrepass();
+                RenderCommandBuffer depth_cmds;
+                depth_cmds.reserve(opaque_entities.size());
+
                 for (size_t i = 0; i < opaque_entities.size(); ++i)
                 {
                     if (!registry.valid(opaque_entities[i])) continue;
@@ -498,55 +832,51 @@ public:
                     auto* t = registry.try_get<TransformComponent>(opaque_entities[i]);
                     if (!mesh_comp || !t || !mesh_comp->m_mesh || !mesh_comp->m_mesh->visible) continue;
 
-                    mesh& m = *mesh_comp->m_mesh;
-                    if (opaque_lod[i] > 0 && !m.lod_levels.empty())
-                    {
-                        m.selectLOD(opaque_lod[i]);
-                        IGPUMesh* active = m.getActiveGPUMesh();
-                        if (active && active != m.gpu_mesh)
-                        {
-                            IGPUMesh* original = m.gpu_mesh;
-                            m.gpu_mesh = active;
-                            render_mesh_depth_only(m, *t, render_api);
-                            m.gpu_mesh = original;
-                            continue;
-                        }
-                    }
-                    render_mesh_depth_only(m, *t, render_api);
+                    record_depth_draw_at_lod(*mesh_comp->m_mesh, *t, depth_cmds, opaque_lod[i]);
                 }
+
+                render_api->beginDepthPrepass();
+                render_api->replayCommandBuffer(depth_cmds);
                 render_api->endDepthPrepass();
             }
 
-            // Main lit pass: opaques with pre-selected LOD
-            for (size_t i = 0; i < opaque_entities.size(); ++i)
+            // Main lit pass: opaques - parallel recording, merge, sort, replay
             {
-                if (!registry.valid(opaque_entities[i])) continue;
-                auto* mesh_comp = registry.try_get<MeshComponent>(opaque_entities[i]);
-                auto* t = registry.try_get<TransformComponent>(opaque_entities[i]);
-                if (!mesh_comp || !t || !mesh_comp->m_mesh || !mesh_comp->m_mesh->visible) continue;
-
-                render_mesh_at_lod(*mesh_comp->m_mesh, *t, render_api, opaque_lod[i]);
-                last_draw_calls++;
+                RenderCommandBuffer opaque_cmds = record_opaque_parallel(
+                    registry, opaque_entities, opaque_lod, global_lighting);
+                last_draw_calls += opaque_cmds.size();
+                render_api->replayCommandBuffer(opaque_cmds);
             }
 
-            // Main lit pass: transparents (back-to-front, with LOD)
-            for (auto entity : transparent_entities)
+            // Main lit pass: transparents (back-to-front, no sort - order matters)
+            // Transparent entities must maintain ordering, so record sequentially.
             {
-                if (!registry.valid(entity)) continue;
-                auto* mesh_comp = registry.try_get<MeshComponent>(entity);
-                auto* t = registry.try_get<TransformComponent>(entity);
-                if (mesh_comp && t && mesh_comp->m_mesh && mesh_comp->m_mesh->visible)
+                RenderCommandBuffer transparent_cmds;
+                transparent_cmds.reserve(transparent_entities.size());
+
+                for (auto entity : transparent_entities)
                 {
-                    render_mesh_with_lod(*mesh_comp->m_mesh, *t, render_api, cam_pos, proj);
-                    last_draw_calls++;
+                    if (!registry.valid(entity)) continue;
+                    auto* mesh_comp = registry.try_get<MeshComponent>(entity);
+                    auto* t = registry.try_get<TransformComponent>(entity);
+                    if (mesh_comp && t && mesh_comp->m_mesh && mesh_comp->m_mesh->visible)
+                    {
+                        record_mesh_with_lod(*mesh_comp->m_mesh, *t, transparent_cmds,
+                                             global_lighting, cam_pos, proj);
+                    }
                 }
+
+                last_draw_calls += transparent_cmds.size();
+                render_api->replayCommandBuffer(transparent_cmds);
             }
         }
         else
         {
-            // No BVH - render all entities (original behavior)
+            // No BVH - record all entities into command buffer
             last_total_entities = 0;
             last_visible_entities = 0;
+
+            RenderCommandBuffer all_cmds;
 
             for (auto entity : view)
             {
@@ -555,15 +885,18 @@ public:
 
                 if (mesh_comp.m_mesh && mesh_comp.m_mesh->visible)
                 {
-                    render_mesh_with_lod(*mesh_comp.m_mesh, t, render_api, cam_pos, proj);
+                    ensure_mesh_uploaded(*mesh_comp.m_mesh, render_api);
+                    record_mesh_with_lod(*mesh_comp.m_mesh, t, all_cmds,
+                                         global_lighting, cam_pos, proj);
                     last_total_entities++;
-                    last_draw_calls++;
                 }
             }
             last_visible_entities = last_total_entities;
+            last_draw_calls = all_cmds.size();
+            render_api->replayCommandBuffer(all_cmds);
         }
 
-        // Render skybox before post-processing
+        // Render skybox before post-processing (immediate mode - small sequential workload)
         if (sky_enabled)
             render_api->renderSkybox();
 
@@ -595,9 +928,10 @@ public:
         depth_prepass_enabled = CVAR_BOOL(r_depthprepass);
         bool sky_enabled = CVAR_BOOL(r_sky);
         bool dynamic_lights_enabled = CVAR_BOOL(r_dynamiclights);
+        bool global_lighting = CVAR_BOOL(r_lighting);
         render_api->setFXAAEnabled(CVAR_BOOL(r_fxaa));
         render_api->setShadowQuality(CVAR_INT(r_shadowquality));
-        render_api->enableLighting(CVAR_BOOL(r_lighting));
+        render_api->enableLighting(global_lighting);
 
         last_draw_calls = 0;
 
@@ -607,7 +941,7 @@ public:
         if (bvh_enabled && scene_bvh.needsRebuild())
             scene_bvh.build(registry);
 
-        // 1. Shadow Pass - CSM with per-cascade frustum culling
+        // 1. Shadow Pass - CSM with per-cascade frustum culling (command buffer path)
         if (render_api->getShadowQuality() > 0)
         {
         render_api->beginShadowPass(light_direction, c);
@@ -617,6 +951,8 @@ public:
         {
             render_api->beginCascade(cascade);
 
+            RenderCommandBuffer shadow_cmds;
+
             if (bvh_enabled && cascade_matrices)
             {
                 Frustum shadow_frustum;
@@ -624,6 +960,9 @@ public:
 
                 std::vector<entt::entity> shadow_entities;
                 scene_bvh.queryFrustum(shadow_frustum, shadow_entities);
+
+                ensure_meshes_uploaded(registry, shadow_entities);
+                shadow_cmds.reserve(shadow_entities.size());
 
                 for (auto entity : shadow_entities)
                 {
@@ -633,7 +972,7 @@ public:
                     if (mesh_comp && t && mesh_comp->m_mesh && mesh_comp->m_mesh->visible
                         && mesh_comp->m_mesh->casts_shadow)
                     {
-                        render_mesh_shadow_lod(*mesh_comp->m_mesh, *t, render_api, cascade);
+                        record_shadow_draw(*mesh_comp->m_mesh, *t, shadow_cmds, cascade);
                     }
                 }
             }
@@ -644,9 +983,14 @@ public:
                     auto& mesh_comp = view.get<MeshComponent>(entity);
                     const auto& t = view.get<TransformComponent>(entity);
                     if (mesh_comp.m_mesh && mesh_comp.m_mesh->visible && mesh_comp.m_mesh->casts_shadow)
-                        render_mesh_with_api(*mesh_comp.m_mesh, t, render_api);
+                    {
+                        ensure_mesh_uploaded(*mesh_comp.m_mesh, render_api);
+                        record_shadow_draw(*mesh_comp.m_mesh, t, shadow_cmds, cascade);
+                    }
                 }
             }
+
+            render_api->replayCommandBuffer(shadow_cmds);
         }
         render_api->endShadowPass();
         } // shadow quality > 0
@@ -706,6 +1050,10 @@ public:
                     return glm::dot(cam_pos - ta->position, cam_pos - ta->position) > glm::dot(cam_pos - tb->position, cam_pos - tb->position);
                 });
 
+            // Ensure all visible meshes are uploaded
+            ensure_meshes_uploaded(registry, opaque_entities);
+            ensure_meshes_uploaded(registry, transparent_entities);
+
             // Pre-select LOD for opaque entities
             std::vector<int> opaque_lod(opaque_entities.size(), 0);
             for (size_t i = 0; i < opaque_entities.size(); ++i)
@@ -737,10 +1085,12 @@ public:
                 }
             }
 
-            // Depth prepass: opaque entities only, using pre-selected LOD
+            // Depth prepass: record + replay
             if (depth_prepass_enabled && !opaque_entities.empty())
             {
-                render_api->beginDepthPrepass();
+                RenderCommandBuffer depth_cmds;
+                depth_cmds.reserve(opaque_entities.size());
+
                 for (size_t i = 0; i < opaque_entities.size(); ++i)
                 {
                     if (!registry.valid(opaque_entities[i])) continue;
@@ -748,48 +1098,41 @@ public:
                     auto* t = registry.try_get<TransformComponent>(opaque_entities[i]);
                     if (!mesh_comp || !t || !mesh_comp->m_mesh || !mesh_comp->m_mesh->visible) continue;
 
-                    mesh& m = *mesh_comp->m_mesh;
-                    if (opaque_lod[i] > 0 && !m.lod_levels.empty())
-                    {
-                        m.selectLOD(opaque_lod[i]);
-                        IGPUMesh* active = m.getActiveGPUMesh();
-                        if (active && active != m.gpu_mesh)
-                        {
-                            IGPUMesh* original = m.gpu_mesh;
-                            m.gpu_mesh = active;
-                            render_mesh_depth_only(m, *t, render_api);
-                            m.gpu_mesh = original;
-                            continue;
-                        }
-                    }
-                    render_mesh_depth_only(m, *t, render_api);
+                    record_depth_draw_at_lod(*mesh_comp->m_mesh, *t, depth_cmds, opaque_lod[i]);
                 }
+
+                render_api->beginDepthPrepass();
+                render_api->replayCommandBuffer(depth_cmds);
                 render_api->endDepthPrepass();
             }
 
-            // Main lit pass: opaques
-            for (size_t i = 0; i < opaque_entities.size(); ++i)
+            // Main lit pass: opaques - parallel recording
             {
-                if (!registry.valid(opaque_entities[i])) continue;
-                auto* mesh_comp = registry.try_get<MeshComponent>(opaque_entities[i]);
-                auto* t = registry.try_get<TransformComponent>(opaque_entities[i]);
-                if (!mesh_comp || !t || !mesh_comp->m_mesh || !mesh_comp->m_mesh->visible) continue;
-
-                render_mesh_at_lod(*mesh_comp->m_mesh, *t, render_api, opaque_lod[i]);
-                last_draw_calls++;
+                RenderCommandBuffer opaque_cmds = record_opaque_parallel(
+                    registry, opaque_entities, opaque_lod, global_lighting);
+                last_draw_calls += opaque_cmds.size();
+                render_api->replayCommandBuffer(opaque_cmds);
             }
 
-            // Main lit pass: transparents (back-to-front)
-            for (auto entity : transparent_entities)
+            // Main lit pass: transparents (back-to-front, sequential)
             {
-                if (!registry.valid(entity)) continue;
-                auto* mesh_comp = registry.try_get<MeshComponent>(entity);
-                auto* t = registry.try_get<TransformComponent>(entity);
-                if (mesh_comp && t && mesh_comp->m_mesh && mesh_comp->m_mesh->visible)
+                RenderCommandBuffer transparent_cmds;
+                transparent_cmds.reserve(transparent_entities.size());
+
+                for (auto entity : transparent_entities)
                 {
-                    render_mesh_with_lod(*mesh_comp->m_mesh, *t, render_api, cam_pos, proj);
-                    last_draw_calls++;
+                    if (!registry.valid(entity)) continue;
+                    auto* mesh_comp = registry.try_get<MeshComponent>(entity);
+                    auto* t = registry.try_get<TransformComponent>(entity);
+                    if (mesh_comp && t && mesh_comp->m_mesh && mesh_comp->m_mesh->visible)
+                    {
+                        record_mesh_with_lod(*mesh_comp->m_mesh, *t, transparent_cmds,
+                                             global_lighting, cam_pos, proj);
+                    }
                 }
+
+                last_draw_calls += transparent_cmds.size();
+                render_api->replayCommandBuffer(transparent_cmds);
             }
         }
         else
@@ -797,18 +1140,23 @@ public:
             last_total_entities = 0;
             last_visible_entities = 0;
 
+            RenderCommandBuffer all_cmds;
+
             for (auto entity : view)
             {
                 auto& mesh_comp = view.get<MeshComponent>(entity);
                 const auto& t = view.get<TransformComponent>(entity);
                 if (mesh_comp.m_mesh && mesh_comp.m_mesh->visible)
                 {
-                    render_mesh_with_lod(*mesh_comp.m_mesh, t, render_api, cam_pos, proj);
+                    ensure_mesh_uploaded(*mesh_comp.m_mesh, render_api);
+                    record_mesh_with_lod(*mesh_comp.m_mesh, t, all_cmds,
+                                         global_lighting, cam_pos, proj);
                     last_total_entities++;
-                    last_draw_calls++;
                 }
             }
             last_visible_entities = last_total_entities;
+            last_draw_calls = all_cmds.size();
+            render_api->replayCommandBuffer(all_cmds);
         }
 
         if (sky_enabled)

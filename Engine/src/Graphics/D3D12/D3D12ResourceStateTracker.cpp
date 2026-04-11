@@ -3,17 +3,20 @@
 void D3D12ResourceStateTracker::track(ID3D12Resource* resource, D3D12_RESOURCE_STATES initialState)
 {
     if (!resource) return;
+    std::unique_lock lock(m_mutex);
     m_states[resource] = { initialState, initialState, false };
 }
 
 void D3D12ResourceStateTracker::untrack(ID3D12Resource* resource)
 {
+    std::unique_lock lock(m_mutex);
     m_states.erase(resource);
 }
 
 void D3D12ResourceStateTracker::transition(ID3D12Resource* resource, D3D12_RESOURCE_STATES newState)
 {
     if (!resource) return;
+    std::unique_lock lock(m_mutex);
     auto it = m_states.find(resource);
     if (it == m_states.end()) return;
 
@@ -28,6 +31,7 @@ void D3D12ResourceStateTracker::beginSplit(ID3D12Resource* resource, D3D12_RESOU
                                             ID3D12GraphicsCommandList* cmdList)
 {
     if (!resource || !cmdList) return;
+    std::unique_lock lock(m_mutex);
     auto it = m_states.find(resource);
     if (it == m_states.end()) return;
 
@@ -46,12 +50,13 @@ void D3D12ResourceStateTracker::beginSplit(ID3D12Resource* resource, D3D12_RESOU
 
     state.splitTarget = newState;
     state.inSplit = true;
-    // Don't update current yet — it changes when endSplit is called
+    // Don't update current yet -- it changes when endSplit is called
 }
 
 void D3D12ResourceStateTracker::endSplit(ID3D12Resource* resource, ID3D12GraphicsCommandList* cmdList)
 {
     if (!resource || !cmdList) return;
+    std::unique_lock lock(m_mutex);
     auto it = m_states.find(resource);
     if (it == m_states.end()) return;
 
@@ -74,11 +79,13 @@ void D3D12ResourceStateTracker::endSplit(ID3D12Resource* resource, ID3D12Graphic
 
 void D3D12ResourceStateTracker::flush(ID3D12GraphicsCommandList* cmdList)
 {
+    // No lock needed: flush only touches m_batch which is main-thread-only
     m_batch.flush(cmdList);
 }
 
 D3D12_RESOURCE_STATES D3D12ResourceStateTracker::getState(ID3D12Resource* resource) const
 {
+    std::shared_lock lock(m_mutex);
     auto it = m_states.find(resource);
     if (it != m_states.end())
         return it->second.current;
@@ -87,5 +94,27 @@ D3D12_RESOURCE_STATES D3D12ResourceStateTracker::getState(ID3D12Resource* resour
 
 bool D3D12ResourceStateTracker::isTracked(ID3D12Resource* resource) const
 {
+    std::shared_lock lock(m_mutex);
     return m_states.find(resource) != m_states.end();
+}
+
+void D3D12ResourceStateTracker::resolvePendingTransitions(const std::vector<PendingTransition>& pending,
+                                                           ID3D12GraphicsCommandList* cmdList)
+{
+    if (pending.empty() || !cmdList) return;
+
+    std::unique_lock lock(m_mutex);
+    for (const auto& pt : pending)
+    {
+        auto it = m_states.find(pt.resource);
+        if (it == m_states.end()) continue;
+
+        auto& state = it->second;
+        if (state.current == pt.desiredState) continue;
+
+        m_batch.add(pt.resource, state.current, pt.desiredState);
+        state.current = pt.desiredState;
+    }
+
+    m_batch.flush(cmdList);
 }

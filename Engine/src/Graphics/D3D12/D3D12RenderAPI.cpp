@@ -116,7 +116,12 @@ bool UploadRingBuffer::init(ID3D12Device* device, size_t size)
 D3D12_GPU_VIRTUAL_ADDRESS UploadRingBuffer::allocate(size_t size, const void* data)
 {
     size_t aligned = AlignUp(size, 256);
-    if (offset + aligned > capacity)
+
+    // Atomic bump allocation: each thread gets a non-overlapping region.
+    // fetch_add returns the old value, which is our allocation offset.
+    size_t alloc_offset = offset.fetch_add(aligned, std::memory_order_relaxed);
+
+    if (alloc_offset + aligned > capacity)
     {
         if (!overflowLogged)
         {
@@ -127,9 +132,9 @@ D3D12_GPU_VIRTUAL_ADDRESS UploadRingBuffer::allocate(size_t size, const void* da
         return 0;
     }
 
-    memcpy(mappedData + offset, data, size);
-    D3D12_GPU_VIRTUAL_ADDRESS addr = gpuAddress + offset;
-    offset += aligned;
+    // Each thread writes to its own non-overlapping slice -- no lock needed.
+    memcpy(mappedData + alloc_offset, data, size);
+    D3D12_GPU_VIRTUAL_ADDRESS addr = gpuAddress + alloc_offset;
     return addr;
 }
 

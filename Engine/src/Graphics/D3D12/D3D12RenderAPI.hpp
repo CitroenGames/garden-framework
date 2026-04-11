@@ -1,8 +1,10 @@
 #pragma once
 
 #include "Graphics/RenderAPI.hpp"
+#include "Graphics/RenderCommandBuffer.hpp"
 #include "D3D12Types.hpp"
 #include "D3D12BarrierBatch.hpp"
+#include "D3D12CommandListPool.hpp"
 #include "D3D12CopyQueue.hpp"
 #include "D3D12PSOCache.hpp"
 #include "D3D12ResourceStateTracker.hpp"
@@ -124,6 +126,9 @@ private:
 
     // Async copy queue for texture uploads
     D3D12CopyQueue m_copyQueue;
+
+    // Command list pool for parallel replay (multicore rendering)
+    D3D12CommandListPool m_commandListPool;
 
     // Upload command infrastructure (for meshes and init-time buffer creation)
     ComPtr<ID3D12CommandAllocator> m_uploadCmdAllocator;
@@ -321,6 +326,9 @@ public:
     void renderMeshDepthOnly(const mesh& m) override;
 
     IGPUMesh* createMesh() override;
+
+    // Command buffer replay (multicore rendering)
+    void replayCommandBuffer(const RenderCommandBuffer& cmds) override;
 
     // Debug line rendering
     void renderDebugLines(const vertex* vertices, size_t vertex_count) override;

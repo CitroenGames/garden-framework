@@ -2,6 +2,7 @@
 #include "VulkanMesh.hpp"
 #include "Components/mesh.hpp"
 #include "Components/camera.hpp"
+#include "Graphics/RenderCommandBuffer.hpp"
 #include "Utils/Log.hpp"
 #include <stdio.h>
 #include <cstring>
@@ -629,6 +630,172 @@ void VulkanRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t
     } else {
         vkCmdDraw(command_buffers[current_frame], static_cast<uint32_t>(vertex_count), 1,
                   static_cast<uint32_t>(start_vertex), 0);
+    }
+}
+
+// ============================================================================
+// Command Buffer Replay (Multicore Rendering)
+// ============================================================================
+
+void VulkanRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
+{
+    if (cmds.empty() || !frame_started || device_lost) return;
+
+    VkCommandBuffer cmd = command_buffers[current_frame];
+
+    // Upload GlobalUBO once (binding 0) - shared across all draws
+    {
+        GlobalUBO ubo{};
+        ubo.view = view_matrix;
+        ubo.projection = projection_matrix;
+        for (int i = 0; i < NUM_CASCADES; i++)
+            ubo.lightSpaceMatrices[i] = lightSpaceMatrices[i];
+        ubo.cascadeSplits = glm::vec4(cascadeSplitDistances[0], cascadeSplitDistances[1],
+                                       cascadeSplitDistances[2], cascadeSplitDistances[3]);
+        ubo.cascadeSplit4 = cascadeSplitDistances[4];
+        ubo.lightDir = light_direction;
+        ubo.lightAmbient = light_ambient;
+        ubo.cascadeCount = NUM_CASCADES;
+        ubo.lightDiffuse = light_diffuse;
+        ubo.debugCascades = 0;
+        ubo.shadowMapTexelSize = (currentShadowSize > 0)
+            ? glm::vec2(1.0f / static_cast<float>(currentShadowSize))
+            : glm::vec2(0.0f);
+        ubo._shadowPad = glm::vec2(0.0f);
+        memcpy(uniform_buffer_mapped[current_frame], &ubo, sizeof(ubo));
+    }
+
+    // Upload VulkanLightUBO once (binding 3)
+    {
+        VulkanLightUBO lightUbo{};
+        for (int i = 0; i < current_lights.numPointLights && i < 16; i++) {
+            lightUbo.pointLights[i].position = current_lights.pointLights[i].position;
+            lightUbo.pointLights[i].range = current_lights.pointLights[i].range;
+            lightUbo.pointLights[i].color = current_lights.pointLights[i].color;
+            lightUbo.pointLights[i].intensity = current_lights.pointLights[i].intensity;
+            lightUbo.pointLights[i].attenuation = current_lights.pointLights[i].attenuation;
+            lightUbo.pointLights[i]._pad0 = 0.0f;
+        }
+        for (int i = 0; i < current_lights.numSpotLights && i < 16; i++) {
+            lightUbo.spotLights[i].position = current_lights.spotLights[i].position;
+            lightUbo.spotLights[i].range = current_lights.spotLights[i].range;
+            lightUbo.spotLights[i].direction = current_lights.spotLights[i].direction;
+            lightUbo.spotLights[i].intensity = current_lights.spotLights[i].intensity;
+            lightUbo.spotLights[i].color = current_lights.spotLights[i].color;
+            lightUbo.spotLights[i].innerCutoff = current_lights.spotLights[i].innerCutoff;
+            lightUbo.spotLights[i].attenuation = current_lights.spotLights[i].attenuation;
+            lightUbo.spotLights[i].outerCutoff = current_lights.spotLights[i].outerCutoff;
+        }
+        lightUbo.numPointLights = current_lights.numPointLights;
+        lightUbo.numSpotLights = current_lights.numSpotLights;
+        lightUbo.cameraPos = current_lights.cameraPos;
+        memcpy(light_uniform_mapped[current_frame], &lightUbo, sizeof(lightUbo));
+    }
+
+    for (const auto& drawCmd : cmds)
+    {
+        if (!drawCmd.gpu_mesh || !drawCmd.gpu_mesh->isUploaded()) continue;
+
+        VulkanMesh* vulkanMesh = dynamic_cast<VulkanMesh*>(drawCmd.gpu_mesh);
+        if (!vulkanMesh || vulkanMesh->getVertexBuffer() == VK_NULL_HANDLE) continue;
+
+        if (drawCmd.pso_key.shadow)
+        {
+            // Shadow pass: push model matrix via push constants
+            vkCmdPushConstants(cmd, shadow_pipeline_layout,
+                               VK_SHADER_STAGE_VERTEX_BIT, sizeof(glm::mat4), sizeof(glm::mat4),
+                               &drawCmd.model_matrix);
+
+            VkBuffer vb = vulkanMesh->getVertexBuffer();
+            if (vb != last_bound_vertex_buffer) {
+                VkBuffer vertexBuffers[] = {vb};
+                VkDeviceSize offsets[] = {0};
+                vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
+                last_bound_vertex_buffer = vb;
+            }
+            if (vulkanMesh->isIndexed()) {
+                vkCmdBindIndexBuffer(cmd, vulkanMesh->getIndexBuffer(), 0, VK_INDEX_TYPE_UINT32);
+                if (drawCmd.vertex_count > 0)
+                    vkCmdDrawIndexed(cmd, static_cast<uint32_t>(drawCmd.vertex_count), 1,
+                                     static_cast<uint32_t>(drawCmd.start_vertex), 0, 0);
+                else
+                    vkCmdDrawIndexed(cmd, static_cast<uint32_t>(vulkanMesh->getIndexCount()), 1, 0, 0, 0);
+            } else {
+                if (drawCmd.vertex_count > 0)
+                    vkCmdDraw(cmd, static_cast<uint32_t>(drawCmd.vertex_count), 1,
+                              static_cast<uint32_t>(drawCmd.start_vertex), 0);
+                else
+                    vkCmdDraw(cmd, static_cast<uint32_t>(vulkanMesh->getVertexCount()), 1, 0, 0);
+            }
+            continue;
+        }
+
+        // Main pass / depth prepass: select pipeline from PSOKey
+        RenderState rs;
+        rs.blend_mode = drawCmd.pso_key.blend;
+        rs.cull_mode = drawCmd.pso_key.cull;
+        rs.lighting = drawCmd.pso_key.lighting;
+        VkPipeline selectedPipeline = selectPipeline(rs);
+        if (selectedPipeline != last_bound_pipeline) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, selectedPipeline);
+            last_bound_pipeline = selectedPipeline;
+        }
+
+        // Upload PerObjectUBO to dynamic ring buffer (atomic increment for multicore safety)
+        uint32_t perObjectDynamicOffset;
+        {
+            uint32_t drawIdx = per_object_draw_index[current_frame].fetch_add(1, std::memory_order_relaxed);
+            if (drawIdx >= MAX_PER_OBJECT_DRAWS) {
+                LOG_ENGINE_ERROR("[Vulkan] Exceeded MAX_PER_OBJECT_DRAWS ({}) in replay -- draw skipped", MAX_PER_OBJECT_DRAWS);
+                continue;
+            }
+            perObjectDynamicOffset = static_cast<uint32_t>(drawIdx * per_object_alignment);
+
+            PerObjectUBO objUbo{};
+            objUbo.model = drawCmd.model_matrix;
+            objUbo.normalMatrix = glm::transpose(glm::inverse(drawCmd.model_matrix));
+            objUbo.color = drawCmd.color;
+            objUbo.useTexture = drawCmd.use_texture ? 1 : 0;
+
+            void* dst = static_cast<char*>(per_object_uniform_mapped[current_frame]) + perObjectDynamicOffset;
+            memcpy(dst, &objUbo, sizeof(objUbo));
+        }
+
+        // Get or allocate descriptor set for this draw's texture
+        TextureHandle texHandle = drawCmd.use_texture ? drawCmd.texture : INVALID_TEXTURE;
+        VkDescriptorSet ds = getOrAllocateDescriptorSet(current_frame, texHandle);
+        if (ds == VK_NULL_HANDLE) continue;
+
+        if (ds != last_bound_descriptor_set || perObjectDynamicOffset != last_bound_dynamic_offset) {
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                pipeline_layout, 0, 1, &ds, 1, &perObjectDynamicOffset);
+            last_bound_descriptor_set = ds;
+            last_bound_dynamic_offset = perObjectDynamicOffset;
+        }
+
+        // Bind vertex buffer and draw
+        VkBuffer vb = vulkanMesh->getVertexBuffer();
+        if (vb != last_bound_vertex_buffer) {
+            VkBuffer vertexBuffers[] = {vb};
+            VkDeviceSize offsets[] = {0};
+            vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
+            last_bound_vertex_buffer = vb;
+        }
+
+        if (vulkanMesh->isIndexed()) {
+            vkCmdBindIndexBuffer(cmd, vulkanMesh->getIndexBuffer(), 0, VK_INDEX_TYPE_UINT32);
+            if (drawCmd.vertex_count > 0)
+                vkCmdDrawIndexed(cmd, static_cast<uint32_t>(drawCmd.vertex_count), 1,
+                                 static_cast<uint32_t>(drawCmd.start_vertex), 0, 0);
+            else
+                vkCmdDrawIndexed(cmd, static_cast<uint32_t>(vulkanMesh->getIndexCount()), 1, 0, 0, 0);
+        } else {
+            if (drawCmd.vertex_count > 0)
+                vkCmdDraw(cmd, static_cast<uint32_t>(drawCmd.vertex_count), 1,
+                          static_cast<uint32_t>(drawCmd.start_vertex), 0);
+            else
+                vkCmdDraw(cmd, static_cast<uint32_t>(vulkanMesh->getVertexCount()), 1, 0, 0);
+        }
     }
 }
 

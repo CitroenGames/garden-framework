@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Graphics/RenderAPI.hpp"
+#include "Graphics/RenderCommandBuffer.hpp"
 #include "VulkanTypes.hpp"
 #include "VkDeletionQueue.hpp"
 #include "VkSamplerCache.hpp"
@@ -10,6 +11,7 @@
 #include <unordered_map>
 #include <string>
 #include <array>
+#include <atomic>
 #include <mutex>
 
 // vk-bootstrap
@@ -78,6 +80,9 @@ public:
     virtual const glm::mat4* getLightSpaceMatrices() const override;
 
     virtual IGPUMesh* createMesh() override;
+
+    // Command buffer replay (multicore rendering)
+    virtual void replayCommandBuffer(const RenderCommandBuffer& cmds) override;
 
     // Debug line rendering
     virtual void renderDebugLines(const vertex* vertices, size_t vertex_count) override;
@@ -216,6 +221,17 @@ private:
     VkCommandPool command_pool = VK_NULL_HANDLE;
     std::vector<VkCommandBuffer> command_buffers;
 
+    // Per-thread command pools for parallel secondary command buffer recording.
+    // Vulkan command pools are NOT thread-safe, so each worker thread needs its own.
+    // Secondary command buffers are recorded with RENDER_PASS_CONTINUE_BIT and
+    // executed from the primary command buffer via vkCmdExecuteCommands().
+    struct PerThreadCommandPool {
+        VkCommandPool pool = VK_NULL_HANDLE;
+        VkCommandBuffer secondary_buffer = VK_NULL_HANDLE; // one per frame in flight
+        bool in_use = false;
+    };
+    std::vector<PerThreadCommandPool> m_threadCommandPools;
+
     // Synchronization
     static const int MAX_FRAMES_IN_FLIGHT = 2;
     static constexpr uint64_t FENCE_TIMEOUT_NS = 5'000'000'000ULL; // 5 seconds
@@ -286,13 +302,37 @@ private:
     VkDescriptorPool global_descriptor_pool = VK_NULL_HANDLE;
     std::vector<VkDescriptorSet> descriptor_sets;
 
-    // Per-draw descriptor pools (dynamically growing, reset each frame)
+    // Per-draw descriptor pools (dynamically growing, reset each frame).
+    // Structured as a per-context allocator for future multicore rendering:
+    // each parallel recording context can get its own VulkanDescriptorContext
+    // to eliminate contention on descriptor allocation.
     static constexpr uint32_t SETS_PER_POOL = 512;
     struct PerFrameDescriptorState {
         std::vector<VkDescriptorPool> pools;
         uint32_t current_pool = 0;
         uint32_t sets_allocated_in_pool = 0;
     };
+
+    // A self-contained descriptor allocation context.
+    // For single-threaded use, one context per frame is used (context index 0).
+    // For multicore rendering, additional contexts can be created per worker thread.
+    struct VulkanDescriptorContext {
+        PerFrameDescriptorState state[2]; // One per frame in flight
+        std::unordered_map<TextureHandle, VkDescriptorSet> texture_cache;
+        bool limit_warned = false;
+
+        void reset(uint32_t frame_index) {
+            auto& s = state[frame_index];
+            for (auto pool : s.pools) {
+                vkResetDescriptorPool(VK_NULL_HANDLE, pool, 0); // Device set at reset time
+            }
+            s.current_pool = 0;
+            s.sets_allocated_in_pool = 0;
+            texture_cache.clear();
+        }
+    };
+
+    // Primary descriptor context (used for single-threaded and as pool[0] for multicore)
     PerFrameDescriptorState frame_descriptor_state[2]; // MAX_FRAMES_IN_FLIGHT
     bool descriptor_limit_warned = false;
 
@@ -315,7 +355,7 @@ private:
     std::vector<VkBuffer> per_object_uniform_buffers;
     std::vector<VmaAllocation> per_object_uniform_allocations;
     std::vector<void*> per_object_uniform_mapped;
-    uint32_t per_object_draw_index[2] = {0, 0}; // per-frame draw counter
+    std::atomic<uint32_t> per_object_draw_index[2] = {0, 0}; // per-frame draw counter (atomic for multicore)
 
     // Matrix stack (CPU-side)
     glm::mat4 projection_matrix = glm::mat4(1.0f);
