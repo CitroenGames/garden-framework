@@ -428,3 +428,59 @@ VkDescriptorSet VulkanRenderAPI::getOrAllocateDescriptorSet(uint32_t frameIndex,
     texture_descriptor_cache[texture] = ds;
     return ds;
 }
+
+// ========================================================================
+// Worker-local descriptor allocation for parallel replay
+// ========================================================================
+
+VkDescriptorSet VulkanRenderAPI::workerAllocateFromPool(PerThreadCommandPool& worker, uint32_t frameIndex)
+{
+    auto& state = worker.descriptor_state[frameIndex];
+
+    // If current pool is full, create or advance to next pool
+    if (state.sets_allocated_in_pool >= SETS_PER_POOL) {
+        state.current_pool++;
+        if (state.current_pool >= state.pools.size()) {
+            // Thread-safe: vkCreateDescriptorPool only requires VkDevice externally
+            // synchronized, and pool creation doesn't mutate shared device state
+            VkDescriptorPool newPool = createPerDrawDescriptorPool();
+            if (newPool == VK_NULL_HANDLE) return VK_NULL_HANDLE;
+            state.pools.push_back(newPool);
+        }
+        state.sets_allocated_in_pool = 0;
+    }
+
+    VkDescriptorSetLayout layout = descriptor_set_layout;
+    VkDescriptorSetAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocInfo.descriptorPool = state.pools[state.current_pool];
+    allocInfo.descriptorSetCount = 1;
+    allocInfo.pSetLayouts = &layout;
+
+    VkDescriptorSet ds = VK_NULL_HANDLE;
+    if (vkAllocateDescriptorSets(device, &allocInfo, &ds) != VK_SUCCESS)
+        return VK_NULL_HANDLE;
+
+    state.sets_allocated_in_pool++;
+    return ds;
+}
+
+VkDescriptorSet VulkanRenderAPI::workerGetOrAllocateDescriptorSet(
+    PerThreadCommandPool& worker, uint32_t frameIndex, TextureHandle texture)
+{
+    // Check worker-local cache first
+    auto it = worker.texture_cache.find(texture);
+    if (it != worker.texture_cache.end())
+        return it->second;
+
+    // Allocate from worker's own descriptor pool
+    VkDescriptorSet ds = workerAllocateFromPool(worker, frameIndex);
+    if (ds == VK_NULL_HANDLE) return VK_NULL_HANDLE;
+
+    // initializeDescriptorSet is thread-safe: writes to freshly allocated set,
+    // reads only immutable state (UBO handles, texture map, shadow map)
+    initializeDescriptorSet(ds, frameIndex, texture);
+
+    worker.texture_cache[texture] = ds;
+    return ds;
+}

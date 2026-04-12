@@ -33,6 +33,9 @@ struct MetalGlobalUBO {
     glm::vec3 lightAmbient; int cascadeCount;
     glm::vec3 lightDiffuse; int debugCascades;
     glm::vec3 color; int useTexture;
+    float alphaCutoff;
+    float _globalPad1;
+    glm::vec2 shadowMapTexelSize;
 };
 
 struct MetalShadowUBO {

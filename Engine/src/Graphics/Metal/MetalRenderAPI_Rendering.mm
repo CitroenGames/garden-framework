@@ -132,15 +132,14 @@ TextureHandle MetalRenderAPI::loadTextureFromMemory(const uint8_t* pixels, int w
         [blitCmd waitUntilCompleted];
     }
 
-    // Create sampler
-    MTLSamplerDescriptor* sampDesc = [[MTLSamplerDescriptor alloc] init];
-    sampDesc.minFilter = MTLSamplerMinMagFilterLinear;
-    sampDesc.magFilter = MTLSamplerMinMagFilterLinear;
-    sampDesc.mipFilter = (mipLevels > 1) ? MTLSamplerMipFilterLinear : MTLSamplerMipFilterNotMipmapped;
-    sampDesc.sAddressMode = MTLSamplerAddressModeRepeat;
-    sampDesc.tAddressMode = MTLSamplerAddressModeRepeat;
-    sampDesc.maxAnisotropy = 16;
-    id<MTLSamplerState> sampler = [impl->device newSamplerStateWithDescriptor:sampDesc];
+    // Get cached sampler
+    MetalSamplerKey samplerKey{
+        MTLSamplerMinMagFilterLinear, MTLSamplerMinMagFilterLinear,
+        (mipLevels > 1) ? MTLSamplerMipFilterLinear : MTLSamplerMipFilterNotMipmapped,
+        MTLSamplerAddressModeRepeat, MTLSamplerAddressModeRepeat, 16,
+        MTLCompareFunctionNever
+    };
+    id<MTLSamplerState> sampler = impl->samplerCache.getOrCreate(samplerKey);
 
     MetalTexture metalTex;
     metalTex.texture = texture;
@@ -204,14 +203,13 @@ TextureHandle MetalRenderAPI::loadCompressedTexture(int width, int height, uint3
                    bytesPerRow:bytesPerRow];
     }
 
-    MTLSamplerDescriptor* sampDesc = [[MTLSamplerDescriptor alloc] init];
-    sampDesc.minFilter = MTLSamplerMinMagFilterLinear;
-    sampDesc.magFilter = MTLSamplerMinMagFilterLinear;
-    sampDesc.mipFilter = (mip_count > 1) ? MTLSamplerMipFilterLinear : MTLSamplerMipFilterNotMipmapped;
-    sampDesc.sAddressMode = MTLSamplerAddressModeRepeat;
-    sampDesc.tAddressMode = MTLSamplerAddressModeRepeat;
-    sampDesc.maxAnisotropy = 16;
-    id<MTLSamplerState> sampler = [impl->device newSamplerStateWithDescriptor:sampDesc];
+    MetalSamplerKey samplerKey{
+        MTLSamplerMinMagFilterLinear, MTLSamplerMinMagFilterLinear,
+        (mip_count > 1) ? MTLSamplerMipFilterLinear : MTLSamplerMipFilterNotMipmapped,
+        MTLSamplerAddressModeRepeat, MTLSamplerAddressModeRepeat, 16,
+        MTLCompareFunctionNever
+    };
+    id<MTLSamplerState> sampler = impl->samplerCache.getOrCreate(samplerKey);
 
     MetalTexture metalTex;
     metalTex.texture = texture;
@@ -238,8 +236,13 @@ void MetalRenderAPI::unbindTexture()
 
 void MetalRenderAPI::deleteTexture(TextureHandle texture)
 {
-    if (texture != INVALID_TEXTURE) {
+    if (texture != INVALID_TEXTURE && impl->textures.count(texture)) {
+        MetalTexture tex = impl->textures[texture]; // copy by value (ARC retains)
         impl->textures.erase(texture);
+        impl->deletionQueue.push([tex]() {
+            // ARC releases the id<MTLTexture> and id<MTLSamplerState> when the
+            // lambda (and its captured MetalTexture copy) is destroyed
+        }, MetalRenderAPIImpl::MAX_FRAMES_IN_FLIGHT);
     }
 }
 
@@ -322,8 +325,11 @@ void MetalRenderAPI::renderMesh(const mesh& m, const RenderState& state)
     [impl->encoder setFragmentBytes:&ubo length:sizeof(ubo) atIndex:0];
     [impl->encoder setFragmentBytes:&impl->currentLights length:sizeof(LightCBuffer) atIndex:3];
 
-    // Set model matrix
-    [impl->encoder setVertexBytes:&impl->currentModelMatrix length:sizeof(glm::mat4) atIndex:2];
+    // Set model + normal matrix
+    struct { glm::mat4 model; glm::mat4 normalMatrix; } modelData;
+    modelData.model = impl->currentModelMatrix;
+    modelData.normalMatrix = glm::transpose(glm::inverse(impl->currentModelMatrix));
+    [impl->encoder setVertexBytes:&modelData length:sizeof(modelData) atIndex:2];
 
     // Bind texture
     TextureHandle texHandle = (m.texture_set && m.texture != INVALID_TEXTURE) ? m.texture : INVALID_TEXTURE;
@@ -479,8 +485,11 @@ void MetalRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t 
     [impl->encoder setFragmentBytes:&ubo length:sizeof(ubo) atIndex:0];
     [impl->encoder setFragmentBytes:&impl->currentLights length:sizeof(LightCBuffer) atIndex:3];
 
-    // Model matrix per draw
-    [impl->encoder setVertexBytes:&impl->currentModelMatrix length:sizeof(glm::mat4) atIndex:2];
+    // Model + normal matrix per draw
+    struct { glm::mat4 model; glm::mat4 normalMatrix; } modelData;
+    modelData.model = impl->currentModelMatrix;
+    modelData.normalMatrix = glm::transpose(glm::inverse(impl->currentModelMatrix));
+    [impl->encoder setVertexBytes:&modelData length:sizeof(modelData) atIndex:2];
 
     // Bind texture (with tracking)
     TextureHandle texHandle = impl->boundTexture;

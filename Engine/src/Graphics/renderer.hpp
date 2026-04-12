@@ -726,7 +726,7 @@ public:
         m.gpu_mesh = lod_gpu_mesh;
 
         // Check if this LOD level has per-submesh material ranges
-        int lod_idx = m.current_lod - 1;
+        int lod_idx = m.current_lod.load(std::memory_order_relaxed) - 1;
         bool has_lod_materials = (lod_idx >= 0 && lod_idx < static_cast<int>(m.lod_levels.size())
                                   && !m.lod_levels[lod_idx].material_ranges.empty());
 

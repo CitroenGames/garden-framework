@@ -1,6 +1,8 @@
 #pragma once
 
 #include "MetalTypes.hpp"
+#include "MetalDeletionQueue.hpp"
+#include "MetalSamplerCache.hpp"
 #include "Graphics/RenderAPI.hpp"
 #include "Graphics/RenderCommandBuffer.hpp"
 #include "Utils/Log.hpp"
@@ -32,6 +34,7 @@ struct MetalRenderAPIImpl {
     id<MTLRenderPipelineState> basicPipelineAlpha = nil;
     id<MTLRenderPipelineState> basicPipelineAdditive = nil;
     id<MTLRenderPipelineState> shadowPipeline = nil;
+    id<MTLRenderPipelineState> shadowAlphaTestPipeline = nil;
     id<MTLRenderPipelineState> skyboxPipeline = nil;
     id<MTLRenderPipelineState> fxaaPipeline = nil;
 
@@ -107,6 +110,12 @@ struct MetalRenderAPIImpl {
     float cascadeSplitDistances[5] = { 0.1f, 10.0f, 35.0f, 90.0f, 200.0f };
     float cascadeSplitLambda = 0.92f;
     glm::mat4 lightSpaceMatrices[4];
+
+    // Deferred deletion queue (waits for GPU to finish before destroying resources)
+    MetalDeletionQueue deletionQueue;
+
+    // Sampler cache (deduplicates identical sampler states)
+    MetalSamplerCache samplerCache;
 
     // Texture management
     std::unordered_map<TextureHandle, MetalTexture> textures;
@@ -185,6 +194,8 @@ struct MetalRenderAPIImpl {
         cachedPerFrameUBO.cascadeCount = (shadowQuality > 0) ? NUM_CASCADES : 0;
         cachedPerFrameUBO.lightDiffuse = lightDiffuse;
         cachedPerFrameUBO.debugCascades = 0;
+        cachedPerFrameUBO.alphaCutoff = 0.0f;
+        cachedPerFrameUBO.shadowMapTexelSize = glm::vec2(1.0f / static_cast<float>(shadowMapSize));
         perFrameUBOReady = true;
     }
 

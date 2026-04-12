@@ -34,6 +34,9 @@ void MetalRenderAPI::beginFrame()
     // Reset per-object ring buffer allocation for this frame
     impl->perObjectDrawIndex.store(0, std::memory_order_relaxed);
 
+    // Process deferred deletions (safe after semaphore wait in ensureCommandBuffer)
+    impl->deletionQueue.flush();
+
     bool editorMode = (impl->viewportTexture != nil);
 
     // In editor mode, defer drawable acquisition to renderUI

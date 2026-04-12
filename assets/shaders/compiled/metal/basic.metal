@@ -21,18 +21,24 @@ struct BasicVertexOut {
     float viewDepth;
 };
 
+struct ModelData {
+    float4x4 model;
+    float4x4 normalMatrix;
+};
+
 vertex BasicVertexOut basic_vertex(BasicVertexIn in [[stage_in]],
                                     constant GlobalUBO& ubo [[buffer(1)]],
-                                    constant float4x4& model [[buffer(2)]])
+                                    constant ModelData& modelData [[buffer(2)]])
 {
     BasicVertexOut out;
 
-    float4 worldPos = model * float4(in.position, 1.0);
+    float4 worldPos = modelData.model * float4(in.position, 1.0);
     out.fragPos = worldPos.xyz;
 
-    // Transform normal to world space
-    float3x3 normalMatrix = float3x3(model[0].xyz, model[1].xyz, model[2].xyz);
-    // Use cofactor matrix (transpose of inverse) for non-uniform scale
+    // Transform normal using pre-computed normal matrix (inverse-transpose)
+    float3x3 normalMatrix = float3x3(modelData.normalMatrix[0].xyz,
+                                      modelData.normalMatrix[1].xyz,
+                                      modelData.normalMatrix[2].xyz);
     out.normal = normalize(normalMatrix * in.normal);
 
     out.texCoord = in.texCoord;
@@ -51,7 +57,8 @@ fragment float4 basic_fragment(BasicVertexOut in [[stage_in]],
                                 texture2d<float> tex [[texture(0)]],
                                 sampler texSampler [[sampler(0)]],
                                 depth2d_array<float> shadowMap [[texture(1)]],
-                                sampler shadowSampler [[sampler(1)]])
+                                sampler shadowSampler [[sampler(1)]],
+                                constant LightCBuffer& lights [[buffer(3)]])
 {
     float3 lighting;
     if (enableLighting) {
@@ -68,6 +75,14 @@ fragment float4 basic_fragment(BasicVertexOut in [[stage_in]],
             shadow = ShadowCalculationWithBlend(ubo, in.fragPos, norm, in.viewDepth, shadowMap, shadowSampler);
         }
         lighting = ambient + shadow * diffuse;
+
+        // Point lights
+        for (int i = 0; i < lights.numPointLights; i++)
+            lighting += CalcPointLight(lights.pointLights[i], norm, in.fragPos);
+
+        // Spot lights
+        for (int j = 0; j < lights.numSpotLights; j++)
+            lighting += CalcSpotLight(lights.spotLights[j], norm, in.fragPos);
     } else {
         lighting = float3(1.0);
     }
@@ -75,8 +90,23 @@ fragment float4 basic_fragment(BasicVertexOut in [[stage_in]],
     float4 texColor;
     if (ubo.useTexture != 0) {
         texColor = tex.sample(texSampler, in.texCoord);
+        // Alpha cutoff discard
+        if (ubo.alphaCutoff > 0.0 && texColor.a < ubo.alphaCutoff)
+            discard_fragment();
     } else {
         texColor = float4(ubo.color, 1.0);
+    }
+
+    // Debug cascade visualization
+    if (enableLighting && ubo.debugCascades != 0) {
+        constant float3 cascadeColors[] = {
+            float3(1.0, 0.0, 0.0),
+            float3(0.0, 1.0, 0.0),
+            float3(0.0, 0.0, 1.0),
+            float3(1.0, 1.0, 0.0)
+        };
+        int cascadeIdx = getCascadeIndex(ubo, in.viewDepth);
+        texColor.rgb = mix(texColor.rgb, cascadeColors[cascadeIdx], 0.3);
     }
 
     return float4(lighting * texColor.rgb, texColor.a);

@@ -9,6 +9,9 @@ struct GlobalUBO {
     packed_float3 lightAmbient; int cascadeCount;
     packed_float3 lightDiffuse; int debugCascades;
     packed_float3 color; int useTexture;
+    float alphaCutoff;
+    float _globalPad1;
+    float2 shadowMapTexelSize;
 };
 
 struct ShadowUBO {
@@ -19,6 +22,64 @@ struct BoneUBO {
     float4x4 bones[128];
     int hasBones;
 };
+
+// Point/spot light structures matching CPU-side LightCBuffer layout
+struct PointLightData {
+    packed_float3 position; float range;
+    packed_float3 color;    float intensity;
+    packed_float3 attenuation; float _pad;
+};
+
+struct SpotLightData {
+    packed_float3 position;  float range;
+    packed_float3 direction; float intensity;
+    packed_float3 color;     float innerCutoff;
+    packed_float3 attenuation; float outerCutoff;
+};
+
+struct LightCBuffer {
+    PointLightData pointLights[16];
+    SpotLightData  spotLights[16];
+    int numPointLights;
+    int numSpotLights;
+    float _pad[2];
+    packed_float3 cameraPos;
+    float _pad2;
+};
+
+float3 CalcPointLight(PointLightData light, float3 normal, float3 fragPos)
+{
+    float3 toLight = float3(light.position) - fragPos;
+    float distance = length(toLight);
+    if (distance > light.range) return float3(0, 0, 0);
+    toLight = normalize(toLight);
+
+    float diff = max(dot(normal, toLight), 0.0);
+    float3 atten_vec = float3(light.attenuation);
+    float atten = 1.0 / (atten_vec.x + atten_vec.y * distance
+                         + atten_vec.z * distance * distance);
+
+    return float3(light.color) * light.intensity * diff * atten;
+}
+
+float3 CalcSpotLight(SpotLightData light, float3 normal, float3 fragPos)
+{
+    float3 toLight = float3(light.position) - fragPos;
+    float distance = length(toLight);
+    if (distance > light.range) return float3(0, 0, 0);
+    toLight = normalize(toLight);
+
+    float theta = dot(toLight, normalize(-float3(light.direction)));
+    float epsilon = light.innerCutoff - light.outerCutoff;
+    float spotIntensity = saturate((theta - light.outerCutoff) / epsilon);
+
+    float diff = max(dot(normal, toLight), 0.0);
+    float3 atten_vec = float3(light.attenuation);
+    float atten = 1.0 / (atten_vec.x + atten_vec.y * distance
+                         + atten_vec.z * distance * distance);
+
+    return float3(light.color) * light.intensity * diff * atten * spotIntensity;
+}
 
 // Get cascade split distance by index
 float getCascadeSplit(constant GlobalUBO& ubo, int index)
@@ -61,7 +122,7 @@ float ShadowCalculation(constant GlobalUBO& ubo, float3 fragPos, float3 normal,
 
     // PCF 3x3 using hardware sample_compare (faster than manual comparison)
     float shadow = 0.0;
-    float2 texelSize = float2(1.0) / float2(shadowMap.get_width(), shadowMap.get_height());
+    float2 texelSize = ubo.shadowMapTexelSize;
     for (int x = -1; x <= 1; ++x) {
         for (int y = -1; y <= 1; ++y) {
             shadow += shadowMap.sample_compare(shadowSampler, projCoords.xy + float2(x, y) * texelSize, cascadeIndex, biasedDepth);

@@ -311,6 +311,25 @@ void VulkanRenderAPI::endSceneRender()
         if (main_pass_started) {
             vkCmdEndRenderPass(cmd);
             main_pass_started = false;
+
+            // Continuation pass leaves image in COLOR_ATTACHMENT_OPTIMAL; transition to SHADER_READ_ONLY
+            if (using_continuation_pass) {
+                VkImageMemoryBarrier barrier{};
+                barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+                barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+                barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                barrier.image = target.image;
+                barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+                barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                vkCmdPipelineBarrier(cmd,
+                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                    0, 0, nullptr, 0, nullptr, 1, &barrier);
+                using_continuation_pass = false;
+            }
         }
 
         // Note: The scene was rendered directly to target.image via the PIE viewport's
@@ -335,6 +354,25 @@ void VulkanRenderAPI::endSceneRender()
     if (main_pass_started) {
         vkCmdEndRenderPass(cmd);
         main_pass_started = false;
+
+        // Continuation pass leaves image in COLOR_ATTACHMENT_OPTIMAL; transition to SHADER_READ_ONLY
+        if (using_continuation_pass) {
+            VkImageMemoryBarrier barrier{};
+            barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+            barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            barrier.image = offscreen_image;
+            barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            vkCmdPipelineBarrier(cmd,
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                0, 0, nullptr, 0, nullptr, 1, &barrier);
+            using_continuation_pass = false;
+        }
     }
 
     // Resolve offscreen -> viewport image

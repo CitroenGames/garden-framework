@@ -86,6 +86,20 @@ void VulkanRenderAPI::prepareFrame()
     // Reset per-object dynamic UBO draw counter
     per_object_draw_index[current_frame] = 0;
 
+    // Reset per-thread command pools and descriptor pools for parallel replay
+    for (auto& tp : m_threadCommandPools) {
+        if (tp.pool != VK_NULL_HANDLE)
+            vkResetCommandPool(device, tp.pool, 0);
+        tp.in_use.store(false, std::memory_order_release);
+        auto& ds = tp.descriptor_state[current_frame];
+        for (auto pool : ds.pools)
+            vkResetDescriptorPool(device, pool, 0);
+        ds.current_pool = 0;
+        ds.sets_allocated_in_pool = 0;
+        tp.texture_cache.clear();
+    }
+    using_continuation_pass = false;
+
     // Reset command buffer
     vkResetCommandBuffer(command_buffers[current_frame], 0);
 
@@ -161,6 +175,10 @@ void VulkanRenderAPI::beginFrame()
     renderPassInfo.clearValueCount = static_cast<uint32_t>(clearValues.size());
     renderPassInfo.pClearValues = clearValues.data();
 
+    // Cache framebuffer info for parallel replay's render pass split
+    current_active_framebuffer = renderPassInfo.framebuffer;
+    current_render_extent = renderExtent;
+
     vkCmdBeginRenderPass(command_buffers[current_frame], &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
     main_pass_started = true;
 
@@ -193,6 +211,24 @@ void VulkanRenderAPI::endFrame()
         if (main_pass_started) {
             vkCmdEndRenderPass(command_buffers[current_frame]);
             main_pass_started = false;
+            // Safety: if continuation pass is still active, transition the layout
+            if (using_continuation_pass) {
+                VkImageMemoryBarrier barrier{};
+                barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+                barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+                barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                barrier.image = offscreen_image;
+                barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+                barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                vkCmdPipelineBarrier(command_buffers[current_frame],
+                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                    0, 0, nullptr, 0, nullptr, 1, &barrier);
+                using_continuation_pass = false;
+            }
         }
         vkEndCommandBuffer(command_buffers[current_frame]);
         frame_started = false;
@@ -212,6 +248,39 @@ void VulkanRenderAPI::endFrame()
 
         vkCmdEndRenderPass(command_buffers[current_frame]);
         main_pass_started = false;
+
+        // When using continuation pass, the finalLayout is COLOR_ATTACHMENT_OPTIMAL
+        // instead of the original pass's finalLayout. Insert a barrier to fix the layout.
+        if (using_continuation_pass) {
+            VkImageMemoryBarrier barrier{};
+            barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+            barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
+            if (fxaaEnabled && fxaa_initialized) {
+                // Offscreen path: FXAA pass needs SHADER_READ_ONLY_OPTIMAL
+                barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                barrier.image = offscreen_image;
+                barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                vkCmdPipelineBarrier(command_buffers[current_frame],
+                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                    0, 0, nullptr, 0, nullptr, 1, &barrier);
+            } else {
+                // Direct swapchain: presentation needs PRESENT_SRC_KHR
+                barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+                barrier.image = swapchain_images[current_image_index];
+                barrier.dstAccessMask = 0;
+                vkCmdPipelineBarrier(command_buffers[current_frame],
+                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                    VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                    0, 0, nullptr, 0, nullptr, 1, &barrier);
+            }
+            using_continuation_pass = false;
+        }
     }
 
     // Apply FXAA if enabled

@@ -218,7 +218,7 @@ bool InspectorPanel::draw(entt::registry& registry, entt::entity selected,
                 if (mc.m_mesh->getLODCount() > 1)
                 {
                     ImGui::TextColored(ImVec4(0.6f, 0.85f, 1.0f, 1.0f), "LOD: %d/%d",
-                        mc.m_mesh->current_lod, mc.m_mesh->getLODCount() - 1);
+                        mc.m_mesh->current_lod.load(std::memory_order_relaxed), mc.m_mesh->getLODCount() - 1);
                     ImGui::SameLine();
                     ImGui::TextDisabled(mc.m_mesh->force_lod >= 0 ? "(forced)" : "(auto)");
                 }

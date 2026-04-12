@@ -616,7 +616,7 @@ void EditorApp::reloadLODsForMesh(const std::string& mesh_path)
 
         // Clear existing LOD levels (LODLevel destructor frees GPU resources)
         m.lod_levels.clear();
-        m.current_lod = 0;
+        m.current_lod.store(0, std::memory_order_relaxed);
 
         // Load LOD levels from .lodbin files
         for (size_t i = 1; i < metadata.lod_levels.size(); ++i)

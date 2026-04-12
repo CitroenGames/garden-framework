@@ -52,6 +52,18 @@ void MetalRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
         // --- Shadow pass draw ---
         if (drawCmd.pso_key.shadow)
         {
+            // Select alpha-test or opaque shadow pipeline
+            if (drawCmd.pso_key.alpha_test && impl->shadowAlphaTestPipeline) {
+                [enc setRenderPipelineState:impl->shadowAlphaTestPipeline];
+                // Bind texture for alpha sampling
+                TextureHandle texHandle = drawCmd.use_texture ? drawCmd.texture : INVALID_TEXTURE;
+                if (texHandle != INVALID_TEXTURE && impl->textures.count(texHandle)) {
+                    auto& tex = impl->textures[texHandle];
+                    [enc setFragmentTexture:tex.texture atIndex:0];
+                    [enc setFragmentSamplerState:tex.sampler atIndex:0];
+                }
+            }
+
             MetalShadowUBO shadowUBO;
             shadowUBO.lightSpaceMatrix = impl->lightSpaceMatrices[impl->currentCascade];
             [enc setVertexBytes:&shadowUBO length:sizeof(shadowUBO) atIndex:1];
@@ -86,6 +98,12 @@ void MetalRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
                             vertexStart:0
                             vertexCount:metalMesh->getVertexCount()];
             }
+
+            // Restore opaque shadow pipeline if we switched to alpha-test
+            if (drawCmd.pso_key.alpha_test && impl->shadowAlphaTestPipeline) {
+                [enc setRenderPipelineState:impl->shadowPipeline];
+            }
+
             impl->drawCallCount++;
             continue;
         }
@@ -125,13 +143,16 @@ void MetalRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
         MetalGlobalUBO ubo = globalUBO;
         ubo.color = drawCmd.color;
         ubo.useTexture = drawCmd.use_texture ? 1 : 0;
+        ubo.alphaCutoff = drawCmd.alpha_cutoff;
 
         [enc setVertexBytes:&ubo length:sizeof(ubo) atIndex:1];
         [enc setFragmentBytes:&ubo length:sizeof(ubo) atIndex:0];
 
-        // Set model matrix
-        glm::mat4 model = drawCmd.model_matrix;
-        [enc setVertexBytes:&model length:sizeof(glm::mat4) atIndex:2];
+        // Set model + normal matrix
+        struct { glm::mat4 model; glm::mat4 normalMatrix; } modelData;
+        modelData.model = drawCmd.model_matrix;
+        modelData.normalMatrix = glm::transpose(glm::inverse(drawCmd.model_matrix));
+        [enc setVertexBytes:&modelData length:sizeof(modelData) atIndex:2];
 
         // Bind texture (only if changed)
         TextureHandle texHandle = drawCmd.use_texture ? drawCmd.texture : INVALID_TEXTURE;
@@ -254,12 +275,15 @@ static void replayCommandRange(MetalRenderAPIImpl* impl,
         MetalGlobalUBO ubo = globalUBO;
         ubo.color = drawCmd.color;
         ubo.useTexture = drawCmd.use_texture ? 1 : 0;
+        ubo.alphaCutoff = drawCmd.alpha_cutoff;
         [enc setVertexBytes:&ubo length:sizeof(ubo) atIndex:1];
         [enc setFragmentBytes:&ubo length:sizeof(ubo) atIndex:0];
 
-        // Model matrix
-        glm::mat4 model = drawCmd.model_matrix;
-        [enc setVertexBytes:&model length:sizeof(glm::mat4) atIndex:2];
+        // Model + normal matrix
+        struct { glm::mat4 model; glm::mat4 normalMatrix; } modelData;
+        modelData.model = drawCmd.model_matrix;
+        modelData.normalMatrix = glm::transpose(glm::inverse(drawCmd.model_matrix));
+        [enc setVertexBytes:&modelData length:sizeof(modelData) atIndex:2];
 
         // Texture
         TextureHandle texHandle = drawCmd.use_texture ? drawCmd.texture : INVALID_TEXTURE;
@@ -620,8 +644,11 @@ void MetalRenderAPI::renderMeshDepthOnly(const mesh& m)
     id<MTLBuffer> vertexBuffer = (__bridge id<MTLBuffer>)metalMesh->getVertexBuffer();
     if (!vertexBuffer) return;
 
-    // Upload model matrix
-    [impl->encoder setVertexBytes:&impl->currentModelMatrix length:sizeof(glm::mat4) atIndex:2];
+    // Upload model + normal matrix (vertex shader expects ModelData at buffer 2)
+    struct { glm::mat4 model; glm::mat4 normalMatrix; } modelData;
+    modelData.model = impl->currentModelMatrix;
+    modelData.normalMatrix = glm::transpose(glm::inverse(impl->currentModelMatrix));
+    [impl->encoder setVertexBytes:&modelData length:sizeof(modelData) atIndex:2];
 
     // Bind vertex buffer and draw
     [impl->encoder setVertexBuffer:vertexBuffer offset:0 atIndex:0];

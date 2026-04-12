@@ -37,7 +37,8 @@ bool MetalRenderAPIImpl::loadShaderLibrary()
         [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/sky.metal").c_str()],
         [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/fxaa.metal").c_str()],
         [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/skinned.metal").c_str()],
-        [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/skinned_shadow.metal").c_str()]];
+        [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/skinned_shadow.metal").c_str()],
+        [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/shadow_alphatest.metal").c_str()]];
 
     NSMutableString* allSource = [NSMutableString string];
     // Add common header once
@@ -324,6 +325,30 @@ bool MetalRenderAPIImpl::createPipelines()
         }
     }
 
+    // --- Shadow alpha-test pipeline ---
+    {
+        id<MTLFunction> satVertFn = [shaderLibrary newFunctionWithName:@"shadow_alphatest_vertex"];
+        id<MTLFunction> satFragFn = [shaderLibrary newFunctionWithName:@"shadow_alphatest_fragment"];
+        if (satVertFn && satFragFn) {
+            MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
+            desc.rasterSampleCount = 1;
+            desc.vertexFunction = satVertFn;
+            desc.fragmentFunction = satFragFn;
+            desc.vertexDescriptor = vertexDesc;
+            desc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+            desc.label = @"Shadow Alpha-Test Pipeline";
+
+            shadowAlphaTestPipeline = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+            if (!shadowAlphaTestPipeline) {
+                printf("[Metal] Failed to create shadow alpha-test pipeline: %s\n", [[error localizedDescription] UTF8String]);
+            } else {
+                printf("[Metal] Pipeline created: Shadow Alpha-Test\n");
+            }
+        } else {
+            printf("[Metal] Warning: shadow_alphatest functions not found, alpha-test shadows disabled\n");
+        }
+    }
+
     // --- Skybox pipeline ---
     {
         MTLVertexDescriptor* skyDesc = [[MTLVertexDescriptor alloc] init];
@@ -477,6 +502,9 @@ bool MetalRenderAPI::initialize(WindowHandle window, int width, int height, floa
     LOG_ENGINE_INFO("[Metal] Max buffer length: {} MB", (unsigned long)([impl->device maxBufferLength] / (1024 * 1024)));
     LOG_ENGINE_INFO("[Metal] Recommended max working set: {} MB", (unsigned long)([impl->device recommendedMaxWorkingSetSize] / (1024 * 1024)));
 
+    // Initialize sampler cache
+    impl->samplerCache.init(impl->device);
+
     // Create command queue
     impl->commandQueue = [impl->device newCommandQueue];
     if (!impl->commandQueue) {
@@ -587,8 +615,12 @@ void MetalRenderAPI::shutdown()
     impl->currentDrawable = nil;
     impl->mainPassActive = false;
 
-    // Release all textures
+    // Flush all deferred deletions
+    impl->deletionQueue.flushAll();
+
+    // Release all textures and sampler cache
     impl->textures.clear();
+    impl->samplerCache.destroyAll();
 
     // Release PIE viewport resources
     impl->pieViewports.clear();
@@ -604,6 +636,7 @@ void MetalRenderAPI::shutdown()
     impl->debugLinePipeline = nil;
     impl->depthPrepassPipeline = nil;
     impl->shadowPipeline = nil;
+    impl->shadowAlphaTestPipeline = nil;
     impl->skyboxPipeline = nil;
     impl->fxaaPipeline = nil;
     for (int i = 0; i < MetalRenderAPIImpl::MAX_FRAMES_IN_FLIGHT; i++) {

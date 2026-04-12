@@ -13,6 +13,7 @@
 #include <array>
 #include <atomic>
 #include <mutex>
+#include <future>
 
 // vk-bootstrap
 #include "VkBootstrap.h"
@@ -83,6 +84,7 @@ public:
 
     // Command buffer replay (multicore rendering)
     virtual void replayCommandBuffer(const RenderCommandBuffer& cmds) override;
+    virtual void replayCommandBufferParallel(const RenderCommandBuffer& cmds) override;
 
     // Debug line rendering
     virtual void renderDebugLines(const vertex* vertices, size_t vertex_count) override;
@@ -185,6 +187,12 @@ private:
     VkDescriptorSet allocateFromPerDrawPool(uint32_t frameIndex);
     void initializeDescriptorSet(VkDescriptorSet ds, uint32_t frameIndex, TextureHandle texture);
 
+    // Parallel replay helpers (declarations that don't reference PerThreadCommandPool)
+    bool createContinuationRenderPass();
+    bool createThreadCommandPools();
+    void restoreDynamicState(VkCommandBuffer cmd, VkExtent2D extent);
+    // Remaining parallel replay helpers declared after PerThreadCommandPool definition below
+
 private:
     // vk-bootstrap handles
     vkb::Instance vkb_instance;
@@ -221,16 +229,65 @@ private:
     VkCommandPool command_pool = VK_NULL_HANDLE;
     std::vector<VkCommandBuffer> command_buffers;
 
+    // Per-draw descriptor pool state (needed before PerThreadCommandPool)
+    static constexpr uint32_t SETS_PER_POOL = 512;
+    struct PerFrameDescriptorState {
+        std::vector<VkDescriptorPool> pools;
+        uint32_t current_pool = 0;
+        uint32_t sets_allocated_in_pool = 0;
+    };
+
     // Per-thread command pools for parallel secondary command buffer recording.
     // Vulkan command pools are NOT thread-safe, so each worker thread needs its own.
     // Secondary command buffers are recorded with RENDER_PASS_CONTINUE_BIT and
     // executed from the primary command buffer via vkCmdExecuteCommands().
     struct PerThreadCommandPool {
         VkCommandPool pool = VK_NULL_HANDLE;
-        VkCommandBuffer secondary_buffer = VK_NULL_HANDLE; // one per frame in flight
-        bool in_use = false;
+        VkCommandBuffer secondary_buffer = VK_NULL_HANDLE;
+        std::atomic<bool> in_use{false};
+
+        // Per-worker descriptor allocation (avoids contention on shared pools)
+        PerFrameDescriptorState descriptor_state[2]; // one per frame-in-flight
+        std::unordered_map<TextureHandle, VkDescriptorSet> texture_cache;
+
+        PerThreadCommandPool() = default;
+        PerThreadCommandPool(PerThreadCommandPool&& o) noexcept
+            : pool(o.pool), secondary_buffer(o.secondary_buffer)
+        {
+            in_use.store(o.in_use.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            for (int i = 0; i < 2; i++)
+                descriptor_state[i] = std::move(o.descriptor_state[i]);
+            texture_cache = std::move(o.texture_cache);
+            o.pool = VK_NULL_HANDLE;
+            o.secondary_buffer = VK_NULL_HANDLE;
+        }
+        PerThreadCommandPool& operator=(PerThreadCommandPool&& o) noexcept {
+            pool = o.pool; secondary_buffer = o.secondary_buffer;
+            in_use.store(o.in_use.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            for (int i = 0; i < 2; i++)
+                descriptor_state[i] = std::move(o.descriptor_state[i]);
+            texture_cache = std::move(o.texture_cache);
+            o.pool = VK_NULL_HANDLE; o.secondary_buffer = VK_NULL_HANDLE;
+            return *this;
+        }
+        PerThreadCommandPool(const PerThreadCommandPool&) = delete;
+        PerThreadCommandPool& operator=(const PerThreadCommandPool&) = delete;
     };
     std::vector<PerThreadCommandPool> m_threadCommandPools;
+
+    // Parallel replay helpers that reference PerThreadCommandPool
+    PerThreadCommandPool* acquireThreadPool();
+    VkDescriptorSet workerAllocateFromPool(PerThreadCommandPool& worker, uint32_t frameIndex);
+    VkDescriptorSet workerGetOrAllocateDescriptorSet(PerThreadCommandPool& worker, uint32_t frameIndex, TextureHandle texture);
+
+    // Continuation render pass for parallel replay (loadOp=LOAD to preserve prior content)
+    VkRenderPass continuation_render_pass = VK_NULL_HANDLE;
+    static constexpr size_t VK_PARALLEL_REPLAY_THRESHOLD = 512;
+
+    // Cached framebuffer state from beginFrame() for use in replayCommandBufferParallel()
+    VkFramebuffer current_active_framebuffer = VK_NULL_HANDLE;
+    VkExtent2D current_render_extent = {0, 0};
+    bool using_continuation_pass = false;
 
     // Synchronization
     static const int MAX_FRAMES_IN_FLIGHT = 2;
@@ -306,12 +363,6 @@ private:
     // Structured as a per-context allocator for future multicore rendering:
     // each parallel recording context can get its own VulkanDescriptorContext
     // to eliminate contention on descriptor allocation.
-    static constexpr uint32_t SETS_PER_POOL = 512;
-    struct PerFrameDescriptorState {
-        std::vector<VkDescriptorPool> pools;
-        uint32_t current_pool = 0;
-        uint32_t sets_allocated_in_pool = 0;
-    };
 
     // A self-contained descriptor allocation context.
     // For single-threaded use, one context per frame is used (context index 0).

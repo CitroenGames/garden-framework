@@ -8,6 +8,7 @@
 #include <cstring>
 #include <cmath>
 #include <algorithm>
+#include <future>
 
 // VMA
 #define VMA_STATIC_VULKAN_FUNCTIONS 0
@@ -821,6 +822,286 @@ void VulkanRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
                 vkCmdDraw(cmd, static_cast<uint32_t>(vulkanMesh->getVertexCount()), 1, 0, 0);
         }
     }
+}
+
+// ========================================================================
+// Parallel replay: splits command buffer across secondary command buffers
+// recorded on worker threads.
+// ========================================================================
+
+void VulkanRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds)
+{
+    if (cmds.empty() || !frame_started || device_lost) return;
+
+    // Fall back to single-threaded for small buffers or if parallel infra not initialized
+    if (cmds.size() < VK_PARALLEL_REPLAY_THRESHOLD ||
+        m_threadCommandPools.empty() ||
+        continuation_render_pass == VK_NULL_HANDLE)
+    {
+        replayCommandBuffer(cmds);
+        return;
+    }
+
+    VkCommandBuffer cmd = command_buffers[current_frame];
+
+    // 1. Upload GlobalUBO (binding 0) — shared across all draws
+    {
+        GlobalUBO ubo{};
+        ubo.view = view_matrix;
+        ubo.projection = projection_matrix;
+        for (int i = 0; i < NUM_CASCADES; i++)
+            ubo.lightSpaceMatrices[i] = lightSpaceMatrices[i];
+        ubo.cascadeSplits = glm::vec4(cascadeSplitDistances[0], cascadeSplitDistances[1],
+                                       cascadeSplitDistances[2], cascadeSplitDistances[3]);
+        ubo.cascadeSplit4 = cascadeSplitDistances[4];
+        ubo.lightDir = light_direction;
+        ubo.lightAmbient = light_ambient;
+        ubo.cascadeCount = NUM_CASCADES;
+        ubo.lightDiffuse = light_diffuse;
+        ubo.debugCascades = 0;
+        ubo.shadowMapTexelSize = (currentShadowSize > 0)
+            ? glm::vec2(1.0f / static_cast<float>(currentShadowSize))
+            : glm::vec2(0.0f);
+        ubo._shadowPad = glm::vec2(0.0f);
+        memcpy(uniform_buffer_mapped[current_frame], &ubo, sizeof(ubo));
+    }
+
+    // Upload VulkanLightUBO (binding 3)
+    {
+        VulkanLightUBO lightUbo{};
+        for (int i = 0; i < current_lights.numPointLights && i < 16; i++) {
+            lightUbo.pointLights[i].position = current_lights.pointLights[i].position;
+            lightUbo.pointLights[i].range = current_lights.pointLights[i].range;
+            lightUbo.pointLights[i].color = current_lights.pointLights[i].color;
+            lightUbo.pointLights[i].intensity = current_lights.pointLights[i].intensity;
+            lightUbo.pointLights[i].attenuation = current_lights.pointLights[i].attenuation;
+            lightUbo.pointLights[i]._pad0 = 0.0f;
+        }
+        for (int i = 0; i < current_lights.numSpotLights && i < 16; i++) {
+            lightUbo.spotLights[i].position = current_lights.spotLights[i].position;
+            lightUbo.spotLights[i].range = current_lights.spotLights[i].range;
+            lightUbo.spotLights[i].direction = current_lights.spotLights[i].direction;
+            lightUbo.spotLights[i].intensity = current_lights.spotLights[i].intensity;
+            lightUbo.spotLights[i].color = current_lights.spotLights[i].color;
+            lightUbo.spotLights[i].innerCutoff = current_lights.spotLights[i].innerCutoff;
+            lightUbo.spotLights[i].attenuation = current_lights.spotLights[i].attenuation;
+            lightUbo.spotLights[i].outerCutoff = current_lights.spotLights[i].outerCutoff;
+        }
+        lightUbo.numPointLights = current_lights.numPointLights;
+        lightUbo.numSpotLights = current_lights.numSpotLights;
+        lightUbo.cameraPos = current_lights.cameraPos;
+        memcpy(light_uniform_mapped[current_frame], &lightUbo, sizeof(lightUbo));
+    }
+
+    // 2. End current INLINE render pass
+    if (main_pass_started) {
+        vkCmdEndRenderPass(cmd);
+        main_pass_started = false;
+    }
+
+    // 3. Begin continuation render pass with SECONDARY_COMMAND_BUFFERS
+    VkRenderPassBeginInfo contInfo{};
+    contInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    contInfo.renderPass = continuation_render_pass;
+    contInfo.framebuffer = current_active_framebuffer;
+    contInfo.renderArea.offset = {0, 0};
+    contInfo.renderArea.extent = current_render_extent;
+    contInfo.clearValueCount = 0; // LOAD_OP_LOAD, no clears
+
+    vkCmdBeginRenderPass(cmd, &contInfo, VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
+
+    // 4. Calculate worker distribution (same chunking as D3D12)
+    uint32_t max_workers = static_cast<uint32_t>(m_threadCommandPools.size());
+    uint32_t num_workers = std::min(max_workers,
+        static_cast<uint32_t>((cmds.size() + VK_PARALLEL_REPLAY_THRESHOLD - 1) / VK_PARALLEL_REPLAY_THRESHOLD));
+    num_workers = std::max(num_workers, 1u);
+    size_t chunk_size = (cmds.size() + num_workers - 1) / num_workers;
+
+    // 5. Acquire per-worker pools (lock-free atomic compare-exchange)
+    struct WorkerData {
+        PerThreadCommandPool* pool = nullptr;
+        size_t start = 0;
+        size_t end = 0;
+    };
+    std::vector<WorkerData> workers(num_workers);
+
+    for (uint32_t w = 0; w < num_workers; w++) {
+        workers[w].pool = acquireThreadPool();
+        if (!workers[w].pool) {
+            num_workers = w;
+            break;
+        }
+        workers[w].start = w * chunk_size;
+        workers[w].end = std::min(workers[w].start + chunk_size, cmds.size());
+    }
+
+    if (num_workers == 0) {
+        // Pool exhausted — end secondary pass, restart inline, fall back
+        vkCmdEndRenderPass(cmd);
+        vkCmdBeginRenderPass(cmd, &contInfo, VK_SUBPASS_CONTENTS_INLINE);
+        main_pass_started = true;
+        using_continuation_pass = true;
+        restoreDynamicState(cmd, current_render_extent);
+        replayCommandBuffer(cmds);
+        return;
+    }
+
+    // 6. Prepare secondary command buffer inheritance info
+    VkCommandBufferInheritanceInfo inheritanceInfo{};
+    inheritanceInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO;
+    inheritanceInfo.renderPass = continuation_render_pass;
+    inheritanceInfo.subpass = 0;
+    inheritanceInfo.framebuffer = current_active_framebuffer; // optional but improves perf
+
+    // 7. Capture shared immutable state for workers
+    auto frameIdx = current_frame;
+    auto pipelineLayout_cap = pipeline_layout;
+    auto per_obj_mapped = per_object_uniform_mapped[frameIdx];
+    auto per_obj_alignment_cap = per_object_alignment;
+    auto* per_obj_draw_idx = &per_object_draw_index[frameIdx];
+    auto renderExtent = current_render_extent;
+
+    // 8. Launch worker threads
+    std::vector<std::future<void>> futures;
+    futures.reserve(num_workers);
+
+    for (uint32_t w = 0; w < num_workers; w++) {
+        futures.push_back(std::async(std::launch::async,
+            [this, &cmds, &workers, w, frameIdx, inheritanceInfo, renderExtent,
+             pipelineLayout_cap, per_obj_mapped, per_obj_alignment_cap, per_obj_draw_idx]()
+            {
+                auto* workerPool = workers[w].pool;
+                VkCommandBuffer secCmd = workerPool->secondary_buffer;
+
+                // Begin secondary command buffer
+                VkCommandBufferBeginInfo beginInfo{};
+                beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+                beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT
+                                | VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT;
+                beginInfo.pInheritanceInfo = &inheritanceInfo;
+
+                if (vkBeginCommandBuffer(secCmd, &beginInfo) != VK_SUCCESS)
+                    return;
+
+                // Set dynamic state (viewport, scissor)
+                VkViewport viewport{};
+                viewport.x = 0.0f;
+                viewport.y = 0.0f;
+                viewport.width = static_cast<float>(renderExtent.width);
+                viewport.height = static_cast<float>(renderExtent.height);
+                viewport.minDepth = 0.0f;
+                viewport.maxDepth = 1.0f;
+                vkCmdSetViewport(secCmd, 0, 1, &viewport);
+
+                VkRect2D scissor{};
+                scissor.offset = {0, 0};
+                scissor.extent = renderExtent;
+                vkCmdSetScissor(secCmd, 0, 1, &scissor);
+
+                // Per-worker tracking state
+                VkPipeline workerLastPipeline = VK_NULL_HANDLE;
+                VkDescriptorSet workerLastDS = VK_NULL_HANDLE;
+                uint32_t workerLastDynOffset = UINT32_MAX;
+                VkBuffer workerLastVB = VK_NULL_HANDLE;
+
+                // Process this worker's chunk
+                for (size_t i = workers[w].start; i < workers[w].end; i++) {
+                    const auto& drawCmd = cmds[i];
+                    if (!drawCmd.gpu_mesh || !drawCmd.gpu_mesh->isUploaded()) continue;
+
+                    VulkanMesh* vulkanMesh = dynamic_cast<VulkanMesh*>(drawCmd.gpu_mesh);
+                    if (!vulkanMesh || vulkanMesh->getVertexBuffer() == VK_NULL_HANDLE) continue;
+
+                    // Select pipeline (thread-safe: reads immutable pipeline handles)
+                    RenderState rs;
+                    rs.blend_mode = drawCmd.pso_key.blend;
+                    rs.cull_mode = drawCmd.pso_key.cull;
+                    rs.lighting = drawCmd.pso_key.lighting;
+                    VkPipeline selectedPipeline = selectPipeline(rs);
+                    if (selectedPipeline != workerLastPipeline) {
+                        vkCmdBindPipeline(secCmd, VK_PIPELINE_BIND_POINT_GRAPHICS, selectedPipeline);
+                        workerLastPipeline = selectedPipeline;
+                    }
+
+                    // Allocate per-object UBO (atomic bump allocator — thread-safe)
+                    uint32_t drawIdx = per_obj_draw_idx->fetch_add(1, std::memory_order_relaxed);
+                    if (drawIdx >= MAX_PER_OBJECT_DRAWS) continue;
+                    uint32_t perObjectDynOffset = static_cast<uint32_t>(drawIdx * per_obj_alignment_cap);
+
+                    PerObjectUBO objUbo{};
+                    objUbo.model = drawCmd.model_matrix;
+                    objUbo.normalMatrix = glm::transpose(glm::inverse(drawCmd.model_matrix));
+                    objUbo.color = drawCmd.color;
+                    objUbo.useTexture = drawCmd.use_texture ? 1 : 0;
+
+                    void* dst = static_cast<char*>(per_obj_mapped) + perObjectDynOffset;
+                    memcpy(dst, &objUbo, sizeof(objUbo));
+
+                    // Get or allocate descriptor set (worker-local pool — no contention)
+                    TextureHandle texHandle = drawCmd.use_texture ? drawCmd.texture : INVALID_TEXTURE;
+                    VkDescriptorSet ds = workerGetOrAllocateDescriptorSet(*workerPool, frameIdx, texHandle);
+                    if (ds == VK_NULL_HANDLE) continue;
+
+                    // Bind descriptor set with dynamic offset
+                    if (ds != workerLastDS || perObjectDynOffset != workerLastDynOffset) {
+                        vkCmdBindDescriptorSets(secCmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            pipelineLayout_cap, 0, 1, &ds, 1, &perObjectDynOffset);
+                        workerLastDS = ds;
+                        workerLastDynOffset = perObjectDynOffset;
+                    }
+
+                    // Bind vertex buffer
+                    VkBuffer vb = vulkanMesh->getVertexBuffer();
+                    if (vb != workerLastVB) {
+                        VkBuffer vertexBuffers[] = {vb};
+                        VkDeviceSize offsets[] = {0};
+                        vkCmdBindVertexBuffers(secCmd, 0, 1, vertexBuffers, offsets);
+                        workerLastVB = vb;
+                    }
+
+                    // Draw
+                    if (vulkanMesh->isIndexed()) {
+                        vkCmdBindIndexBuffer(secCmd, vulkanMesh->getIndexBuffer(), 0, VK_INDEX_TYPE_UINT32);
+                        uint32_t count = drawCmd.vertex_count > 0
+                            ? static_cast<uint32_t>(drawCmd.vertex_count)
+                            : static_cast<uint32_t>(vulkanMesh->getIndexCount());
+                        uint32_t first = static_cast<uint32_t>(drawCmd.start_vertex);
+                        vkCmdDrawIndexed(secCmd, count, 1, first, 0, 0);
+                    } else {
+                        uint32_t count = drawCmd.vertex_count > 0
+                            ? static_cast<uint32_t>(drawCmd.vertex_count)
+                            : static_cast<uint32_t>(vulkanMesh->getVertexCount());
+                        uint32_t first = static_cast<uint32_t>(drawCmd.start_vertex);
+                        vkCmdDraw(secCmd, count, 1, first, 0);
+                    }
+                }
+
+                vkEndCommandBuffer(secCmd);
+            }));
+    }
+
+    // 9. Wait for all workers
+    for (auto& f : futures)
+        f.get();
+
+    // 10. Execute all secondary command buffers from the primary
+    std::vector<VkCommandBuffer> secondaryBuffers;
+    secondaryBuffers.reserve(num_workers);
+    for (uint32_t w = 0; w < num_workers; w++)
+        secondaryBuffers.push_back(workers[w].pool->secondary_buffer);
+
+    vkCmdExecuteCommands(cmd, static_cast<uint32_t>(secondaryBuffers.size()), secondaryBuffers.data());
+
+    // 11. End secondary render pass
+    vkCmdEndRenderPass(cmd);
+
+    // 12. Re-begin continuation render pass with INLINE for subsequent draws
+    vkCmdBeginRenderPass(cmd, &contInfo, VK_SUBPASS_CONTENTS_INLINE);
+    main_pass_started = true;
+    using_continuation_pass = true;
+
+    // 13. Restore dynamic state for subsequent inline draws
+    restoreDynamicState(cmd, current_render_extent);
 }
 
 void VulkanRenderAPI::renderDebugLines(const vertex* vertices, size_t vertex_count)

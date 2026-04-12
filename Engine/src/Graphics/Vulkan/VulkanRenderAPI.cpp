@@ -185,6 +185,20 @@ bool VulkanRenderAPI::initialize(WindowHandle window, int width, int height, flo
         return false;
     }
 
+    // Create continuation render pass for parallel replay (render pass split)
+    if (!createContinuationRenderPass()) {
+        LOG_ENGINE_WARN("[Vulkan] Failed to create continuation render pass -- parallel replay disabled");
+    }
+
+    // Create per-thread command pools for parallel replay
+    if (continuation_render_pass != VK_NULL_HANDLE) {
+        if (!createThreadCommandPools()) {
+            LOG_ENGINE_WARN("[Vulkan] Failed to create thread command pools -- parallel replay disabled");
+        } else {
+            LOG_ENGINE_INFO("[Vulkan] Parallel replay enabled ({} worker pools)", m_threadCommandPools.size());
+        }
+    }
+
     // Initialize projection matrix
     float ratio = (float)width / (float)height;
     projection_matrix = glm::perspectiveRH_ZO(glm::radians(fov), ratio, 0.1f, 1000.0f);
@@ -371,6 +385,24 @@ void VulkanRenderAPI::shutdown()
     render_finished_semaphores.clear();
     in_flight_fences.clear();
 
+    // Clean up per-thread command pools (parallel replay)
+    for (auto& tp : m_threadCommandPools) {
+        for (int f = 0; f < MAX_FRAMES_IN_FLIGHT; f++) {
+            for (auto pool : tp.descriptor_state[f].pools)
+                vkDestroyDescriptorPool(device, pool, nullptr);
+            tp.descriptor_state[f].pools.clear();
+        }
+        if (tp.pool != VK_NULL_HANDLE)
+            vkDestroyCommandPool(device, tp.pool, nullptr);
+    }
+    m_threadCommandPools.clear();
+
+    // Clean up continuation render pass
+    if (continuation_render_pass != VK_NULL_HANDLE) {
+        vkDestroyRenderPass(device, continuation_render_pass, nullptr);
+        continuation_render_pass = VK_NULL_HANDLE;
+    }
+
     // Clean up command pool
     if (command_pool != VK_NULL_HANDLE) {
         vkDestroyCommandPool(device, command_pool, nullptr);
@@ -437,6 +469,166 @@ void VulkanRenderAPI::shutdown()
     }
 
     printf("Vulkan Render API shutdown complete\n");
+}
+
+// ========================================================================
+// Parallel replay infrastructure
+// ========================================================================
+
+bool VulkanRenderAPI::createContinuationRenderPass()
+{
+    // A render pass identical to the main pass but with loadOp=LOAD on both
+    // color and depth, used for render pass splitting during parallel replay.
+    // Layouts are kept as attachment-optimal since this sits between two passes.
+    VkAttachmentDescription colorAttachment{};
+    colorAttachment.format = swapchain_format;
+    colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    colorAttachment.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    colorAttachment.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+    VkAttachmentDescription depthAttachment{};
+    depthAttachment.format = depth_format;
+    depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depthAttachment.initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+    VkAttachmentReference colorRef{};
+    colorRef.attachment = 0;
+    colorRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+    VkAttachmentReference depthRef{};
+    depthRef.attachment = 1;
+    depthRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+    VkSubpassDescription subpass{};
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 1;
+    subpass.pColorAttachments = &colorRef;
+    subpass.pDepthStencilAttachment = &depthRef;
+
+    VkSubpassDependency dependency{};
+    dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+    dependency.dstSubpass = 0;
+    dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+                            | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+    dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+                            | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+    dependency.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+                             | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+                             | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+
+    std::array<VkAttachmentDescription, 2> attachments = { colorAttachment, depthAttachment };
+
+    VkRenderPassCreateInfo rpInfo{};
+    rpInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    rpInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
+    rpInfo.pAttachments = attachments.data();
+    rpInfo.subpassCount = 1;
+    rpInfo.pSubpasses = &subpass;
+    rpInfo.dependencyCount = 1;
+    rpInfo.pDependencies = &dependency;
+
+    if (vkCreateRenderPass(device, &rpInfo, nullptr, &continuation_render_pass) != VK_SUCCESS) {
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create continuation render pass");
+        return false;
+    }
+    return true;
+}
+
+bool VulkanRenderAPI::createThreadCommandPools()
+{
+    uint32_t poolCount = std::max(1u, std::thread::hardware_concurrency() - 1);
+
+    m_threadCommandPools.resize(poolCount);
+    for (uint32_t i = 0; i < poolCount; i++) {
+        auto& tp = m_threadCommandPools[i];
+
+        // Create per-thread command pool
+        VkCommandPoolCreateInfo poolInfo{};
+        poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+        poolInfo.queueFamilyIndex = graphics_queue_family;
+
+        if (vkCreateCommandPool(device, &poolInfo, nullptr, &tp.pool) != VK_SUCCESS) {
+            LOG_ENGINE_ERROR("[Vulkan] Failed to create thread command pool {}", i);
+            m_threadCommandPools.resize(i);
+            return !m_threadCommandPools.empty();
+        }
+
+        // Allocate secondary command buffer
+        VkCommandBufferAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        allocInfo.commandPool = tp.pool;
+        allocInfo.level = VK_COMMAND_BUFFER_LEVEL_SECONDARY;
+        allocInfo.commandBufferCount = 1;
+
+        if (vkAllocateCommandBuffers(device, &allocInfo, &tp.secondary_buffer) != VK_SUCCESS) {
+            LOG_ENGINE_ERROR("[Vulkan] Failed to allocate secondary command buffer {}", i);
+            vkDestroyCommandPool(device, tp.pool, nullptr);
+            tp.pool = VK_NULL_HANDLE;
+            m_threadCommandPools.resize(i);
+            return !m_threadCommandPools.empty();
+        }
+
+        tp.in_use.store(false, std::memory_order_relaxed);
+
+        // Pre-allocate one descriptor pool per frame-in-flight per worker
+        for (int f = 0; f < MAX_FRAMES_IN_FLIGHT; f++) {
+            VkDescriptorPool descPool = createPerDrawDescriptorPool();
+            if (descPool == VK_NULL_HANDLE) {
+                LOG_ENGINE_ERROR("[Vulkan] Failed to create worker descriptor pool {}/{}", i, f);
+                // Continue without descriptor pool - will be created on demand
+            } else {
+                tp.descriptor_state[f].pools.push_back(descPool);
+            }
+        }
+    }
+
+    return !m_threadCommandPools.empty();
+}
+
+VulkanRenderAPI::PerThreadCommandPool* VulkanRenderAPI::acquireThreadPool()
+{
+    for (auto& pool : m_threadCommandPools) {
+        bool expected = false;
+        if (pool.in_use.compare_exchange_strong(expected, true,
+                std::memory_order_acq_rel, std::memory_order_relaxed)) {
+            return &pool;
+        }
+    }
+    return nullptr; // Pool exhausted
+}
+
+void VulkanRenderAPI::restoreDynamicState(VkCommandBuffer cmd, VkExtent2D extent)
+{
+    VkViewport viewport{};
+    viewport.x = 0.0f;
+    viewport.y = 0.0f;
+    viewport.width = static_cast<float>(extent.width);
+    viewport.height = static_cast<float>(extent.height);
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+
+    VkRect2D scissor{};
+    scissor.offset = {0, 0};
+    scissor.extent = extent;
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+    // Reset bind tracking so subsequent inline draws rebind everything
+    last_bound_pipeline = VK_NULL_HANDLE;
+    last_bound_descriptor_set = VK_NULL_HANDLE;
+    last_bound_vertex_buffer = VK_NULL_HANDLE;
+    last_bound_dynamic_offset = UINT32_MAX;
 }
 
 void VulkanRenderAPI::resize(int width, int height)

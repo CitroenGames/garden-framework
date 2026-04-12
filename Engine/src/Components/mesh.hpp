@@ -124,7 +124,7 @@ public:
         LODLevel& operator=(const LODLevel&) = delete;
     };
     std::vector<LODLevel> lod_levels; // LOD1+, LOD0 is the main gpu_mesh
-    int current_lod = 0;
+    std::atomic<int> current_lod{0};
     int force_lod = -1; // -1 = auto, 0+ = forced LOD level
 
     // Constructor for hardcoded vertex arrays (existing functionality)
@@ -220,7 +220,7 @@ public:
         aabb_max = other.aabb_max;
         bounds_computed = other.bounds_computed;
         lod_levels = std::move(other.lod_levels);
-        current_lod = other.current_lod;
+        current_lod.store(other.current_lod.load(std::memory_order_relaxed), std::memory_order_relaxed);
         force_lod = other.force_lod;
 
         // Invalidate source
@@ -230,7 +230,7 @@ public:
         other.owns_vertices = false;
         other.load_state.store(MeshLoadState::NotLoaded, std::memory_order_relaxed);
         other.bounds_computed = false;
-        other.current_lod = 0;
+        other.current_lod.store(0, std::memory_order_relaxed);
         other.force_lod = -1;
     }
 
@@ -262,7 +262,7 @@ public:
             aabb_max = other.aabb_max;
             bounds_computed = other.bounds_computed;
             lod_levels = std::move(other.lod_levels);
-            current_lod = other.current_lod;
+            current_lod.store(other.current_lod.load(std::memory_order_relaxed), std::memory_order_relaxed);
             force_lod = other.force_lod;
 
             // Invalidate source
@@ -272,7 +272,7 @@ public:
             other.owns_vertices = false;
             other.load_state.store(MeshLoadState::NotLoaded, std::memory_order_relaxed);
             other.bounds_computed = false;
-            other.current_lod = 0;
+            other.current_lod.store(0, std::memory_order_relaxed);
             other.force_lod = -1;
         }
         return *this;
@@ -482,14 +482,15 @@ public:
         if (level < 0) level = 0;
         int max_level = static_cast<int>(lod_levels.size());
         if (level > max_level) level = max_level;
-        current_lod = level;
+        current_lod.store(level, std::memory_order_relaxed);
     }
 
     IGPUMesh* getActiveGPUMesh() const
     {
-        if (current_lod == 0 || lod_levels.empty())
+        int lod = current_lod.load(std::memory_order_relaxed);
+        if (lod == 0 || lod_levels.empty())
             return gpu_mesh;
-        int idx = current_lod - 1;
+        int idx = lod - 1;
         if (idx >= 0 && idx < static_cast<int>(lod_levels.size()) && lod_levels[idx].gpu_mesh)
             return lod_levels[idx].gpu_mesh;
         return gpu_mesh;
@@ -497,9 +498,10 @@ public:
 
     size_t getActiveVertexCount() const
     {
-        if (current_lod == 0 || lod_levels.empty())
+        int lod = current_lod.load(std::memory_order_relaxed);
+        if (lod == 0 || lod_levels.empty())
             return vertices_len;
-        int idx = current_lod - 1;
+        int idx = lod - 1;
         if (idx >= 0 && idx < static_cast<int>(lod_levels.size()))
             return lod_levels[idx].vertex_count;
         return vertices_len;
