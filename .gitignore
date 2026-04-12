@@ -507,3 +507,4 @@ hs_err_pid*
 
 # Config files generated at runtime
 config.cfg
+/cache

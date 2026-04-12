@@ -520,8 +520,11 @@ void D3D12RenderAPI::bindDummyRootParams()
 
     if (m_dummyCBAddr == 0)
     {
-        alignas(16) char dummyData[256] = {};
-        m_dummyCBAddr = m_cbUploadBuffer[m_frameIndex].allocate(256, dummyData);
+        // Must be large enough for the biggest CBuffer any shader may read from
+        // a dummy-bound root param (LightCBuffer is the largest at ~1824 bytes).
+        static constexpr size_t DUMMY_CB_SIZE = 2048;
+        alignas(16) char dummyData[DUMMY_CB_SIZE] = {};
+        m_dummyCBAddr = m_cbUploadBuffer[m_frameIndex].allocate(DUMMY_CB_SIZE, dummyData);
         if (m_dummyCBAddr == 0) return;
     }
     auto dummyAddr = m_dummyCBAddr;
