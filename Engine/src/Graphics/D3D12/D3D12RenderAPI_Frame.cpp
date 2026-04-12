@@ -49,6 +49,11 @@ void D3D12RenderAPI::beginFrame()
 
             D3D12_RECT scissor = { 0, 0, pie.width, pie.height };
             commandList->RSSetScissorRects(1, &scissor);
+
+            m_currentRT.rtvHandle = rtvHandle;
+            m_currentRT.dsvHandle = dsvHandle;
+            m_currentRT.viewport = vp;
+            m_currentRT.scissor = scissor;
             goto setup_done;
         }
     }
@@ -71,6 +76,11 @@ void D3D12RenderAPI::beginFrame()
 
         D3D12_RECT scissor = { 0, 0, viewport_width_rt, viewport_height_rt };
         commandList->RSSetScissorRects(1, &scissor);
+
+        m_currentRT.rtvHandle = rtvHandle;
+        m_currentRT.dsvHandle = dsvHandle;
+        m_currentRT.viewport = vp;
+        m_currentRT.scissor = scissor;
     }
     else if (fxaaEnabled)
     {
@@ -90,6 +100,11 @@ void D3D12RenderAPI::beginFrame()
 
         D3D12_RECT scissor = { 0, 0, static_cast<LONG>(viewport_width), static_cast<LONG>(viewport_height) };
         commandList->RSSetScissorRects(1, &scissor);
+
+        m_currentRT.rtvHandle = rtvHandle;
+        m_currentRT.dsvHandle = dsvHandle;
+        m_currentRT.viewport = vp;
+        m_currentRT.scissor = scissor;
     }
     else
     {
@@ -109,9 +124,17 @@ void D3D12RenderAPI::beginFrame()
 
         D3D12_RECT scissor = { 0, 0, static_cast<LONG>(viewport_width), static_cast<LONG>(viewport_height) };
         commandList->RSSetScissorRects(1, &scissor);
+
+        m_currentRT.rtvHandle = rtvHandle;
+        m_currentRT.dsvHandle = dsvHandle;
+        m_currentRT.viewport = vp;
+        m_currentRT.scissor = scissor;
     }
 
 setup_done:
+    // Cache current render target state for parallel command list setup
+    m_currentRT.valid = true;
+
     // Reset model matrix
     current_model_matrix = glm::mat4(1.0f);
     while (!model_matrix_stack.empty())

@@ -428,6 +428,118 @@ public:
         return merged;
     }
 
+    // Record shadow draws in parallel for a single cascade.
+    RenderCommandBuffer record_shadow_parallel(
+        entt::registry& registry,
+        const std::vector<entt::entity>& entities,
+        int cascade_index)
+    {
+        if (entities.size() < PARALLEL_CHUNK_SIZE)
+        {
+            RenderCommandBuffer cmds;
+            cmds.reserve(entities.size());
+            for (auto entity : entities)
+            {
+                if (!registry.valid(entity)) continue;
+                auto* mc = registry.try_get<MeshComponent>(entity);
+                auto* t = registry.try_get<TransformComponent>(entity);
+                if (mc && t && mc->m_mesh && mc->m_mesh->visible && mc->m_mesh->casts_shadow)
+                    record_shadow_draw(*mc->m_mesh, *t, cmds, cascade_index);
+            }
+            return cmds;
+        }
+
+        size_t num_chunks = (entities.size() + PARALLEL_CHUNK_SIZE - 1) / PARALLEL_CHUNK_SIZE;
+        std::vector<RenderCommandBuffer> buffers(num_chunks);
+        std::vector<std::future<void>> futures;
+        futures.reserve(num_chunks);
+
+        for (size_t c = 0; c < num_chunks; ++c)
+        {
+            size_t start = c * PARALLEL_CHUNK_SIZE;
+            size_t end = std::min(start + PARALLEL_CHUNK_SIZE, entities.size());
+            buffers[c].reserve(end - start);
+
+            futures.push_back(std::async(std::launch::async,
+                [&, c, start, end, cascade_index]() {
+                    for (size_t i = start; i < end; ++i)
+                    {
+                        if (!registry.valid(entities[i])) continue;
+                        auto* mc = registry.try_get<MeshComponent>(entities[i]);
+                        auto* t = registry.try_get<TransformComponent>(entities[i]);
+                        if (mc && t && mc->m_mesh && mc->m_mesh->visible && mc->m_mesh->casts_shadow)
+                            record_shadow_draw(*mc->m_mesh, *t, buffers[c], cascade_index);
+                    }
+                }));
+        }
+
+        for (auto& f : futures)
+            f.get();
+
+        RenderCommandBuffer merged;
+        size_t total = 0;
+        for (const auto& b : buffers) total += b.size();
+        merged.reserve(total);
+        for (auto& b : buffers) merged.append(std::move(b));
+        return merged;
+    }
+
+    // Record depth prepass draws in parallel.
+    RenderCommandBuffer record_depth_parallel(
+        entt::registry& registry,
+        const std::vector<entt::entity>& entities,
+        const std::vector<int>& lod_levels)
+    {
+        if (entities.size() < PARALLEL_CHUNK_SIZE)
+        {
+            RenderCommandBuffer cmds;
+            cmds.reserve(entities.size());
+            for (size_t i = 0; i < entities.size(); ++i)
+            {
+                if (!registry.valid(entities[i])) continue;
+                auto* mc = registry.try_get<MeshComponent>(entities[i]);
+                auto* t = registry.try_get<TransformComponent>(entities[i]);
+                if (!mc || !t || !mc->m_mesh || !mc->m_mesh->visible) continue;
+                record_depth_draw_at_lod(*mc->m_mesh, *t, cmds, lod_levels[i]);
+            }
+            return cmds;
+        }
+
+        size_t num_chunks = (entities.size() + PARALLEL_CHUNK_SIZE - 1) / PARALLEL_CHUNK_SIZE;
+        std::vector<RenderCommandBuffer> buffers(num_chunks);
+        std::vector<std::future<void>> futures;
+        futures.reserve(num_chunks);
+
+        for (size_t c = 0; c < num_chunks; ++c)
+        {
+            size_t start = c * PARALLEL_CHUNK_SIZE;
+            size_t end = std::min(start + PARALLEL_CHUNK_SIZE, entities.size());
+            buffers[c].reserve(end - start);
+
+            futures.push_back(std::async(std::launch::async,
+                [&, c, start, end]() {
+                    for (size_t i = start; i < end; ++i)
+                    {
+                        if (!registry.valid(entities[i])) continue;
+                        auto* mc = registry.try_get<MeshComponent>(entities[i]);
+                        auto* t = registry.try_get<TransformComponent>(entities[i]);
+                        if (!mc || !t || !mc->m_mesh || !mc->m_mesh->visible) continue;
+                        record_depth_draw_at_lod(*mc->m_mesh, *t, buffers[c], lod_levels[i]);
+                    }
+                }));
+        }
+
+        for (auto& f : futures)
+            f.get();
+
+        RenderCommandBuffer merged;
+        size_t total = 0;
+        for (const auto& b : buffers) total += b.size();
+        merged.reserve(total);
+        for (auto& b : buffers) merged.append(std::move(b));
+        return merged;
+    }
+
     // Sort entities by texture handle (primary) and distance (secondary, front-to-back)
     void sort_entities_by_state(entt::registry& registry, std::vector<entt::entity>& entities,
                                 const glm::vec3& cam_pos)
@@ -690,34 +802,22 @@ public:
                 std::vector<entt::entity> shadow_entities;
                 scene_bvh.queryFrustum(shadow_frustum, shadow_entities);
 
-                // Ensure all shadow caster meshes are uploaded
                 ensure_meshes_uploaded(registry, shadow_entities);
-
-                shadow_cmds.reserve(shadow_entities.size());
-                for (auto entity : shadow_entities)
-                {
-                    if (!registry.valid(entity)) continue;
-                    auto* mesh_comp = registry.try_get<MeshComponent>(entity);
-                    auto* t = registry.try_get<TransformComponent>(entity);
-                    if (mesh_comp && t && mesh_comp->m_mesh && mesh_comp->m_mesh->visible
-                        && mesh_comp->m_mesh->casts_shadow)
-                    {
-                        record_shadow_draw(*mesh_comp->m_mesh, *t, shadow_cmds, cascade);
-                    }
-                }
+                shadow_cmds = record_shadow_parallel(registry, shadow_entities, cascade);
             }
             else
             {
+                std::vector<entt::entity> all_shadow;
                 for (auto entity : view)
                 {
                     auto& mesh_comp = view.get<MeshComponent>(entity);
-                    const auto& t = view.get<TransformComponent>(entity);
                     if (mesh_comp.m_mesh && mesh_comp.m_mesh->visible && mesh_comp.m_mesh->casts_shadow)
                     {
                         ensure_mesh_uploaded(*mesh_comp.m_mesh, render_api);
-                        record_shadow_draw(*mesh_comp.m_mesh, t, shadow_cmds, cascade);
+                        all_shadow.push_back(entity);
                     }
                 }
+                shadow_cmds = record_shadow_parallel(registry, all_shadow, cascade);
             }
 
             render_api->replayCommandBuffer(shadow_cmds);
@@ -819,21 +919,11 @@ public:
                 }
             }
 
-            // Depth prepass: record into command buffer, then replay
+            // Depth prepass: parallel record, then replay
             if (depth_prepass_enabled && !opaque_entities.empty())
             {
-                RenderCommandBuffer depth_cmds;
-                depth_cmds.reserve(opaque_entities.size());
-
-                for (size_t i = 0; i < opaque_entities.size(); ++i)
-                {
-                    if (!registry.valid(opaque_entities[i])) continue;
-                    auto* mesh_comp = registry.try_get<MeshComponent>(opaque_entities[i]);
-                    auto* t = registry.try_get<TransformComponent>(opaque_entities[i]);
-                    if (!mesh_comp || !t || !mesh_comp->m_mesh || !mesh_comp->m_mesh->visible) continue;
-
-                    record_depth_draw_at_lod(*mesh_comp->m_mesh, *t, depth_cmds, opaque_lod[i]);
-                }
+                RenderCommandBuffer depth_cmds = record_depth_parallel(
+                    registry, opaque_entities, opaque_lod);
 
                 render_api->beginDepthPrepass();
                 render_api->replayCommandBuffer(depth_cmds);
@@ -845,7 +935,7 @@ public:
                 RenderCommandBuffer opaque_cmds = record_opaque_parallel(
                     registry, opaque_entities, opaque_lod, global_lighting);
                 last_draw_calls += opaque_cmds.size();
-                render_api->replayCommandBuffer(opaque_cmds);
+                render_api->replayCommandBufferParallel(opaque_cmds);
             }
 
             // Main lit pass: transparents (back-to-front, no sort - order matters)
@@ -962,32 +1052,21 @@ public:
                 scene_bvh.queryFrustum(shadow_frustum, shadow_entities);
 
                 ensure_meshes_uploaded(registry, shadow_entities);
-                shadow_cmds.reserve(shadow_entities.size());
-
-                for (auto entity : shadow_entities)
-                {
-                    if (!registry.valid(entity)) continue;
-                    auto* mesh_comp = registry.try_get<MeshComponent>(entity);
-                    auto* t = registry.try_get<TransformComponent>(entity);
-                    if (mesh_comp && t && mesh_comp->m_mesh && mesh_comp->m_mesh->visible
-                        && mesh_comp->m_mesh->casts_shadow)
-                    {
-                        record_shadow_draw(*mesh_comp->m_mesh, *t, shadow_cmds, cascade);
-                    }
-                }
+                shadow_cmds = record_shadow_parallel(registry, shadow_entities, cascade);
             }
             else
             {
+                std::vector<entt::entity> all_shadow;
                 for (auto entity : view)
                 {
                     auto& mesh_comp = view.get<MeshComponent>(entity);
-                    const auto& t = view.get<TransformComponent>(entity);
                     if (mesh_comp.m_mesh && mesh_comp.m_mesh->visible && mesh_comp.m_mesh->casts_shadow)
                     {
                         ensure_mesh_uploaded(*mesh_comp.m_mesh, render_api);
-                        record_shadow_draw(*mesh_comp.m_mesh, t, shadow_cmds, cascade);
+                        all_shadow.push_back(entity);
                     }
                 }
+                shadow_cmds = record_shadow_parallel(registry, all_shadow, cascade);
             }
 
             render_api->replayCommandBuffer(shadow_cmds);
@@ -1085,21 +1164,11 @@ public:
                 }
             }
 
-            // Depth prepass: record + replay
+            // Depth prepass: parallel record, then replay
             if (depth_prepass_enabled && !opaque_entities.empty())
             {
-                RenderCommandBuffer depth_cmds;
-                depth_cmds.reserve(opaque_entities.size());
-
-                for (size_t i = 0; i < opaque_entities.size(); ++i)
-                {
-                    if (!registry.valid(opaque_entities[i])) continue;
-                    auto* mesh_comp = registry.try_get<MeshComponent>(opaque_entities[i]);
-                    auto* t = registry.try_get<TransformComponent>(opaque_entities[i]);
-                    if (!mesh_comp || !t || !mesh_comp->m_mesh || !mesh_comp->m_mesh->visible) continue;
-
-                    record_depth_draw_at_lod(*mesh_comp->m_mesh, *t, depth_cmds, opaque_lod[i]);
-                }
+                RenderCommandBuffer depth_cmds = record_depth_parallel(
+                    registry, opaque_entities, opaque_lod);
 
                 render_api->beginDepthPrepass();
                 render_api->replayCommandBuffer(depth_cmds);
@@ -1111,7 +1180,7 @@ public:
                 RenderCommandBuffer opaque_cmds = record_opaque_parallel(
                     registry, opaque_entities, opaque_lod, global_lighting);
                 last_draw_calls += opaque_cmds.size();
-                render_api->replayCommandBuffer(opaque_cmds);
+                render_api->replayCommandBufferParallel(opaque_cmds);
             }
 
             // Main lit pass: transparents (back-to-front, sequential)

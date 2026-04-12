@@ -11,6 +11,8 @@
 #include <cmath>
 #include <cstring>
 #include <vector>
+#include <future>
+#include <thread>
 
 #include "stb_image.h"
 
@@ -615,6 +617,274 @@ void D3D12RenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t 
 // ============================================================================
 // Command Buffer Replay (Multicore Rendering)
 // ============================================================================
+
+void D3D12RenderAPI::flushAndReopenCommandList()
+{
+    if (!m_commandListOpen || device_lost) return;
+
+    flushBarriers();
+    commandList->Close();
+    m_commandListOpen = false;
+
+    ID3D12CommandList* lists[] = { commandList.Get() };
+    commandQueue->ExecuteCommandLists(1, lists);
+
+    // Reopen immediately for subsequent work (postamble, UI, etc.)
+    // Don't wait for GPU -- we just need the CPU-side cmd list open again.
+    // The command allocator is still valid for this frame.
+    commandList->Reset(m_frameContexts[m_frameIndex].commandAllocator.Get(), nullptr);
+    m_commandListOpen = true;
+
+    // Restore essential state on the reopened command list
+    ID3D12DescriptorHeap* heaps[] = { m_srvHeap.Get() };
+    commandList->SetDescriptorHeaps(1, heaps);
+    commandList->SetGraphicsRootSignature(m_rootSignature.Get());
+
+    if (m_currentRT.valid)
+    {
+        commandList->OMSetRenderTargets(1, &m_currentRT.rtvHandle, FALSE, &m_currentRT.dsvHandle);
+        commandList->RSSetViewports(1, &m_currentRT.viewport);
+        commandList->RSSetScissorRects(1, &m_currentRT.scissor);
+    }
+
+    commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    if (m_shadowSRVIndex != UINT(-1))
+        commandList->SetGraphicsRootDescriptorTable(3, m_srvAllocator.getGPU(m_shadowSRVIndex));
+
+    // Force rebind of PSO and texture
+    last_bound_pso = nullptr;
+    currentBoundTexture = INVALID_TEXTURE;
+    global_cbuffer_dirty = true;
+}
+
+static constexpr size_t D3D12_PARALLEL_REPLAY_THRESHOLD = 512;
+
+void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds)
+{
+    if (cmds.empty() || device_lost) return;
+
+    // Fall back to single-threaded for small buffers or if pool isn't initialized
+    if (cmds.size() < D3D12_PARALLEL_REPLAY_THRESHOLD || m_commandListPool.capacity() == 0)
+    {
+        replayCommandBuffer(cmds);
+        return;
+    }
+
+    if (!m_currentRT.valid)
+    {
+        replayCommandBuffer(cmds);
+        return;
+    }
+
+    // Ensure global CBuffer is uploaded before workers reference it
+    if (global_cbuffer_dirty)
+    {
+        updateGlobalCBuffer();
+        global_cbuffer_dirty = false;
+    }
+
+    // Upload light data once (workers will reference this address)
+    if (m_cachedLightCBAddr == 0)
+    {
+        m_cachedLightCBAddr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(LightCBuffer), &current_lights);
+        if (m_cachedLightCBAddr == 0)
+        {
+            replayCommandBuffer(cmds);
+            return;
+        }
+    }
+
+    // Cache the global CBuffer address for workers
+    D3D12GlobalCBuffer globalCB = {};
+    globalCB.view = view_matrix;
+    globalCB.projection = projection_matrix;
+    for (int i = 0; i < NUM_CASCADES; i++)
+        globalCB.lightSpaceMatrices[i] = lightSpaceMatrices[i];
+    globalCB.cascadeSplits = glm::vec4(cascadeSplitDistances[0], cascadeSplitDistances[1],
+                                        cascadeSplitDistances[2], cascadeSplitDistances[3]);
+    globalCB.cascadeSplit4 = cascadeSplitDistances[NUM_CASCADES];
+    globalCB.lightDir = current_light_direction;
+    globalCB.cascadeCount = NUM_CASCADES;
+    globalCB.lightAmbient = current_light_ambient;
+    globalCB.lightDiffuse = current_light_diffuse;
+    globalCB.debugCascades = debugCascades ? 1 : 0;
+    globalCB.shadowMapTexelSize = glm::vec2(1.0f / static_cast<float>(currentShadowSize));
+
+    // Flush main command list (preamble complete)
+    flushAndReopenCommandList();
+
+    // Determine chunk count based on available command lists
+    uint32_t max_workers = m_commandListPool.capacity();
+    uint32_t num_workers = std::min(max_workers,
+        static_cast<uint32_t>((cmds.size() + D3D12_PARALLEL_REPLAY_THRESHOLD - 1) / D3D12_PARALLEL_REPLAY_THRESHOLD));
+    num_workers = std::max(num_workers, 1u);
+
+    size_t chunk_size = (cmds.size() + num_workers - 1) / num_workers;
+
+    // Acquire worker command lists
+    struct WorkerData
+    {
+        D3D12CommandListPool::Entry* entry = nullptr;
+        size_t start = 0;
+        size_t end = 0;
+    };
+    std::vector<WorkerData> workers(num_workers);
+
+    for (uint32_t w = 0; w < num_workers; w++)
+    {
+        workers[w].entry = m_commandListPool.acquire(nullptr);
+        if (!workers[w].entry)
+        {
+            num_workers = w;
+            break;
+        }
+        workers[w].start = w * chunk_size;
+        workers[w].end = std::min(workers[w].start + chunk_size, cmds.size());
+    }
+
+    if (num_workers == 0)
+    {
+        // Pool exhausted, fall back
+        replayCommandBuffer(cmds);
+        return;
+    }
+
+    // Capture shared state for workers
+    auto rootSig = m_rootSignature.Get();
+    auto srvHeap = m_srvHeap.Get();
+    auto rtState = m_currentRT;
+    auto shadowSRVIdx = m_shadowSRVIndex;
+    auto defaultTex = defaultTexture;
+    auto frameIdx = m_frameIndex;
+    auto lightCBAddr = m_cachedLightCBAddr;
+    auto* uploadBuf = &m_cbUploadBuffer[m_frameIndex];
+    auto* srvAlloc = &m_srvAllocator;
+    auto* textureMap = &textures;
+
+    // Launch parallel replay on worker threads
+    std::vector<std::future<void>> futures;
+    futures.reserve(num_workers);
+
+    for (uint32_t w = 0; w < num_workers; w++)
+    {
+        futures.push_back(std::async(std::launch::async,
+            [&, w, rootSig, srvHeap, rtState, shadowSRVIdx, defaultTex, lightCBAddr, uploadBuf, srvAlloc, textureMap]()
+            {
+                auto* cmdList = workers[w].entry->cmdList.Get();
+
+                // Set up command list state (must be done independently per list)
+                ID3D12DescriptorHeap* heaps[] = { srvHeap };
+                cmdList->SetDescriptorHeaps(1, heaps);
+                cmdList->SetGraphicsRootSignature(rootSig);
+                cmdList->OMSetRenderTargets(1, &rtState.rtvHandle, FALSE, &rtState.dsvHandle);
+                cmdList->RSSetViewports(1, &rtState.viewport);
+                cmdList->RSSetScissorRects(1, &rtState.scissor);
+                cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+                // Upload global CBuffer for this command list
+                auto globalAddr = uploadBuf->allocate(sizeof(D3D12GlobalCBuffer), &globalCB);
+                if (globalAddr != 0)
+                    cmdList->SetGraphicsRootConstantBufferView(0, globalAddr);
+
+                // Bind light CBuffer
+                cmdList->SetGraphicsRootConstantBufferView(4, lightCBAddr);
+
+                // Bind shadow map
+                if (shadowSRVIdx != UINT(-1))
+                    cmdList->SetGraphicsRootDescriptorTable(3, srvAlloc->getGPU(shadowSRVIdx));
+
+                // Replay this worker's chunk of commands
+                ID3D12PipelineState* workerLastPSO = nullptr;
+                TextureHandle workerLastTex = INVALID_TEXTURE;
+
+                for (size_t i = workers[w].start; i < workers[w].end; i++)
+                {
+                    const auto& cmd = cmds[i];
+                    if (!cmd.gpu_mesh || !cmd.gpu_mesh->isUploaded()) continue;
+
+                    D3D12Mesh* gpuMesh = dynamic_cast<D3D12Mesh*>(cmd.gpu_mesh);
+                    if (!gpuMesh || !gpuMesh->isUploaded()) continue;
+
+                    // Per-object CBuffer
+                    D3D12PerObjectCBuffer objCB = {};
+                    objCB.model = cmd.model_matrix;
+                    glm::mat3 normalMat3 = glm::mat3(cmd.model_matrix);
+                    float det = glm::determinant(normalMat3);
+                    if (std::abs(det) > 1e-6f)
+                        objCB.normalMatrix = glm::mat4(glm::transpose(glm::inverse(normalMat3)));
+                    else
+                        objCB.normalMatrix = glm::mat4(1.0f);
+                    objCB.color = cmd.color;
+                    objCB.useTexture = cmd.use_texture ? 1 : 0;
+
+                    auto objAddr = uploadBuf->allocate(sizeof(objCB), &objCB);
+                    if (objAddr == 0) continue;
+                    cmdList->SetGraphicsRootConstantBufferView(1, objAddr);
+
+                    // Select PSO
+                    RenderState rs;
+                    rs.blend_mode = cmd.pso_key.blend;
+                    rs.cull_mode = cmd.pso_key.cull;
+                    rs.lighting = cmd.pso_key.lighting;
+                    bool unlit = !cmd.pso_key.lighting;
+                    ID3D12PipelineState* pso = selectPSO(rs, unlit);
+                    if (pso != workerLastPSO)
+                    {
+                        cmdList->SetPipelineState(pso);
+                        workerLastPSO = pso;
+                    }
+
+                    // Bind texture
+                    TextureHandle texToBind = cmd.use_texture && cmd.texture != INVALID_TEXTURE
+                                              ? cmd.texture : defaultTex;
+                    if (texToBind != workerLastTex && texToBind != INVALID_TEXTURE)
+                    {
+                        auto it = textureMap->find(texToBind);
+                        if (it != textureMap->end())
+                            cmdList->SetGraphicsRootDescriptorTable(2, srvAlloc->getGPU(it->second.srvIndex));
+                        workerLastTex = texToBind;
+                    }
+
+                    // Draw
+                    cmdList->IASetVertexBuffers(0, 1, &gpuMesh->getVertexBufferView());
+                    if (gpuMesh->isIndexed())
+                    {
+                        cmdList->IASetIndexBuffer(&gpuMesh->getIndexBufferView());
+                        if (cmd.vertex_count > 0)
+                            cmdList->DrawIndexedInstanced(static_cast<UINT>(cmd.vertex_count), 1,
+                                                          static_cast<UINT>(cmd.start_vertex), 0, 0);
+                        else
+                            cmdList->DrawIndexedInstanced(static_cast<UINT>(gpuMesh->getIndexCount()), 1, 0, 0, 0);
+                    }
+                    else
+                    {
+                        if (cmd.vertex_count > 0)
+                            cmdList->DrawInstanced(static_cast<UINT>(cmd.vertex_count), 1,
+                                                    static_cast<UINT>(cmd.start_vertex), 0);
+                        else
+                            cmdList->DrawInstanced(static_cast<UINT>(gpuMesh->getVertexCount()), 1, 0, 0);
+                    }
+                }
+
+                // Close this worker's command list
+                cmdList->Close();
+            }));
+    }
+
+    // Wait for all workers to finish recording
+    for (auto& f : futures)
+        f.get();
+
+    // Submit all worker command lists at once
+    auto activeLists = m_commandListPool.getActiveCommandLists();
+    if (!activeLists.empty())
+        commandQueue->ExecuteCommandLists(static_cast<UINT>(activeLists.size()), activeLists.data());
+
+    // NOTE: Do NOT resetAll() here -- the GPU is still executing these command lists.
+    // The pool allocators are reset at the start of the next frame in ensureCommandListOpen()
+    // after the fence signals that the GPU is done with the previous frame.
+}
 
 void D3D12RenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
 {

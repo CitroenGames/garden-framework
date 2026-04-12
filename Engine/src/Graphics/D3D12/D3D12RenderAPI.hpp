@@ -196,6 +196,21 @@ private:
     bool m_commandListOpen = false;
     void ensureCommandListOpen();
 
+    // Current render target state (cached for parallel command list setup)
+    struct FrameRenderTargetState
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = {};
+        D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = {};
+        D3D12_VIEWPORT viewport = {};
+        D3D12_RECT scissor = {};
+        bool valid = false;
+    };
+    FrameRenderTargetState m_currentRT;
+
+    // Flush the main command list (close + submit), then reopen it for further work.
+    // Used to interleave parallel command list submissions.
+    void flushAndReopenCommandList();
+
     // Automatic resource state tracking
     D3D12ResourceStateTracker m_stateTracker;
 
@@ -329,6 +344,10 @@ public:
 
     // Command buffer replay (multicore rendering)
     void replayCommandBuffer(const RenderCommandBuffer& cmds) override;
+
+    // Parallel replay: splits commands across multiple command lists recorded on worker threads.
+    // Falls back to single-threaded replay for small command counts.
+    void replayCommandBufferParallel(const RenderCommandBuffer& cmds) override;
 
     // Debug line rendering
     void renderDebugLines(const vertex* vertices, size_t vertex_count) override;

@@ -13,6 +13,7 @@
 #include "imgui_impl_dx12.h"
 #include <stdio.h>
 #include <algorithm>
+#include <thread>
 #include <cmath>
 #include <limits>
 #include <string>
@@ -255,6 +256,13 @@ bool D3D12RenderAPI::initialize(WindowHandle window, int width, int height, floa
         return false;
     }
 
+    // Initialize command list pool for parallel replay (sized to hardware thread count)
+    {
+        uint32_t poolSize = std::max(1u, std::thread::hardware_concurrency() - 1);
+        if (!m_commandListPool.init(device.Get(), poolSize))
+            LOG_ENGINE_WARN("[D3D12] Failed to create command list pool -- parallel replay disabled");
+    }
+
     if (!createShadowMapResources())
     {
         LOG_ENGINE_ERROR("Failed to create shadow map resources");
@@ -322,6 +330,7 @@ void D3D12RenderAPI::shutdown()
     m_active_scene_target = -1;
 
     m_copyQueue.shutdown();
+    m_commandListPool.shutdown();
 
     if (m_fenceEvent)
     {
@@ -459,6 +468,9 @@ void D3D12RenderAPI::ensureCommandListOpen()
 
     m_cbUploadBuffer[m_frameIndex].reset();
     m_dummyCBAddr = 0;
+
+    // Reset parallel command list pool allocators (safe now: fence confirmed GPU is done)
+    m_commandListPool.resetAll();
 
     // Submit pending async texture uploads and sync with graphics queue
     if (m_copyQueue.hasPendingWork())

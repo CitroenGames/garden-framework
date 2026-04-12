@@ -176,6 +176,11 @@ public:
     // Commands must be recorded with pre-computed model matrices and textures.
     virtual void replayCommandBuffer(const RenderCommandBuffer& cmds) { (void)cmds; }
 
+    // Parallel replay: splits command buffer across multiple GPU command lists
+    // recorded on worker threads. Falls back to single-threaded replay for
+    // small buffers or if the backend doesn't support parallel replay.
+    virtual void replayCommandBufferParallel(const RenderCommandBuffer& cmds) { replayCommandBuffer(cmds); }
+
     // Utility
     virtual const char* getAPIName() const = 0;
 
