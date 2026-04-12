@@ -98,6 +98,8 @@ struct alignas(16) D3D12PerObjectCBuffer
     glm::mat4 normalMatrix;
     glm::vec3 color;
     int useTexture;
+    float alphaCutoff;
+    float _pad[3];
 };
 
 struct alignas(16) D3D12ShadowCBuffer

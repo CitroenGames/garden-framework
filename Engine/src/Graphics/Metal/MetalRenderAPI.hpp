@@ -53,6 +53,21 @@ public:
 
     virtual void renderSkybox() override;
 
+    // Command buffer replay (multicore rendering)
+    virtual void replayCommandBuffer(const RenderCommandBuffer& cmds) override;
+    virtual void replayCommandBufferParallel(const RenderCommandBuffer& cmds) override;
+
+    // Debug rendering
+    virtual void renderDebugLines(const vertex* vertices, size_t vertex_count) override;
+
+    // Depth prepass
+    virtual void beginDepthPrepass() override;
+    virtual void endDepthPrepass() override;
+    virtual void renderMeshDepthOnly(const mesh& m) override;
+
+    // GPU sync
+    virtual void waitForGPU() override;
+
     // Shadow Mapping (CSM)
     virtual void beginShadowPass(const glm::vec3& lightDir) override;
     virtual void beginShadowPass(const glm::vec3& lightDir, const camera& cam) override;

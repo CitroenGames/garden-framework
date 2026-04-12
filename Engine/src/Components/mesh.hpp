@@ -41,6 +41,9 @@ struct MaterialRange
     size_t vertex_count;        // Number of vertices in this range
     TextureHandle texture;      // Texture for this range
     std::string material_name;  // Name of the material (for debugging)
+    uint8_t alpha_mode = 0;     // 0=OPAQUE, 1=MASK, 2=BLEND
+    float alpha_cutoff = 0.5f;  // Alpha test threshold (MASK mode)
+    bool double_sided = false;  // Disable back-face culling
 
     MaterialRange()
         : start_vertex(0), vertex_count(0), texture(INVALID_TEXTURE), material_name("") {}
@@ -49,6 +52,8 @@ struct MaterialRange
         : start_vertex(start), vertex_count(count), texture(tex), material_name(name) {}
 
     bool hasValidTexture() const { return texture != INVALID_TEXTURE; }
+    bool isAlphaMask() const { return alpha_mode == 1; }
+    bool isAlphaBlend() const { return alpha_mode == 2; }
 };
 
 class ENGINE_API mesh

@@ -899,7 +899,18 @@ void D3D12RenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
 
         if (cmd.pso_key.shadow)
         {
-            // Shadow pass draw: update shadow CBuffer with model matrix
+            // Shadow pass draw: select pipeline based on alpha test
+            if (cmd.pso_key.alpha_test && m_psoShadowAlphaTest)
+            {
+                commandList->SetPipelineState(m_psoShadowAlphaTest.Get());
+                // Alpha-test shadow needs per-object CB (for alphaCutoff) and texture
+                glm::mat4 saved_model = current_model_matrix;
+                current_model_matrix = cmd.model_matrix;
+                updatePerObjectCBuffer(glm::vec3(1.0f), true, cmd.alpha_cutoff);
+                current_model_matrix = saved_model;
+                if (cmd.use_texture && cmd.texture != INVALID_TEXTURE)
+                    bindTexture(cmd.texture);
+            }
             updateShadowCBuffer(lightSpaceMatrices[currentCascade], cmd.model_matrix);
 
             commandList->IASetVertexBuffers(0, 1, &gpuMesh->getVertexBufferView());
@@ -920,16 +931,33 @@ void D3D12RenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
                 else
                     commandList->DrawInstanced(static_cast<UINT>(gpuMesh->getVertexCount()), 1, 0, 0);
             }
+            // Restore opaque shadow PSO for next draw
+            if (cmd.pso_key.alpha_test && m_psoShadowAlphaTest)
+                commandList->SetPipelineState(m_psoShadow.Get());
             continue;
         }
 
         if (cmd.pso_key.depth_only)
         {
-            // Depth prepass draw: update per-object CBuffer with identity color
-            // Temporarily set model matrix for the CBuffer upload
+            // Depth prepass draw: select PSO based on alpha test
+            if (cmd.pso_key.alpha_test) {
+                RenderState depth_rs;
+                depth_rs.alpha_test = true;
+                depth_rs.cull_mode = cmd.pso_key.cull;
+                ID3D12PipelineState* pso = selectPSO(depth_rs, false);
+                if (pso != last_bound_pso) {
+                    commandList->SetPipelineState(pso);
+                    last_bound_pso = pso;
+                }
+                // Alpha-test depth prepass needs texture + global CB for view/projection
+                if (global_cbuffer_dirty) { updateGlobalCBuffer(); global_cbuffer_dirty = false; }
+                if (cmd.use_texture && cmd.texture != INVALID_TEXTURE)
+                    bindTexture(cmd.texture);
+            }
+            // Update per-object CBuffer
             glm::mat4 saved_model = current_model_matrix;
             current_model_matrix = cmd.model_matrix;
-            updatePerObjectCBuffer(glm::vec3(1.0f), false);
+            updatePerObjectCBuffer(glm::vec3(1.0f), cmd.pso_key.alpha_test && cmd.use_texture, cmd.alpha_cutoff);
             current_model_matrix = saved_model;
 
             commandList->IASetVertexBuffers(0, 1, &gpuMesh->getVertexBufferView());
@@ -964,7 +992,7 @@ void D3D12RenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
         {
             glm::mat4 saved_model = current_model_matrix;
             current_model_matrix = cmd.model_matrix;
-            updatePerObjectCBuffer(cmd.color, cmd.use_texture);
+            updatePerObjectCBuffer(cmd.color, cmd.use_texture, cmd.alpha_cutoff);
             current_model_matrix = saved_model;
         }
 
@@ -981,6 +1009,7 @@ void D3D12RenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
         rs.blend_mode = cmd.pso_key.blend;
         rs.cull_mode = cmd.pso_key.cull;
         rs.lighting = cmd.pso_key.lighting;
+        rs.alpha_test = cmd.pso_key.alpha_test;
         bool unlit = !cmd.pso_key.lighting;
         ID3D12PipelineState* pso = selectPSO(rs, unlit);
         if (pso != last_bound_pso)

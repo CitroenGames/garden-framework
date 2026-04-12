@@ -126,14 +126,14 @@ void GltfAssetLoader::loadTextures(std::shared_ptr<ModelAssetData> model,
 
         int width, height, channels;
         stbi_set_flip_vertically_on_load(tex_data->flip_vertically);
-        unsigned char* pixels = stbi_load(full_path.c_str(), &width, &height, &channels, 0);
+        unsigned char* pixels = stbi_load(full_path.c_str(), &width, &height, &channels, 4);
 
         if (pixels) {
             tex_data->width = width;
             tex_data->height = height;
-            tex_data->channels = channels;
+            tex_data->channels = 4;  // Force RGBA to preserve alpha channel
 
-            size_t data_size = static_cast<size_t>(width) * height * channels;
+            size_t data_size = static_cast<size_t>(width) * height * 4;
             tex_data->pixels.resize(data_size);
             std::memcpy(tex_data->pixels.data(), pixels, data_size);
 

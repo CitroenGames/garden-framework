@@ -2,7 +2,9 @@
 
 #include "MetalTypes.hpp"
 #include "Graphics/RenderAPI.hpp"
+#include "Graphics/RenderCommandBuffer.hpp"
 #include "Utils/Log.hpp"
+#include <atomic>
 
 // ============================================================================
 // Implementation struct (Pimpl) — shared by all MetalRenderAPI_*.mm files
@@ -38,6 +40,25 @@ struct MetalRenderAPIImpl {
     id<MTLDepthStencilState> depthLessEqualNoWrite = nil;
     id<MTLDepthStencilState> depthNone = nil;
     id<MTLDepthStencilState> shadowDepthState = nil;
+
+    // Unlit pipeline variants (created with function constants)
+    id<MTLRenderPipelineState> unlitPipeline = nil;
+    id<MTLRenderPipelineState> unlitPipelineAlpha = nil;
+    id<MTLRenderPipelineState> unlitPipelineAdditive = nil;
+
+    // Debug line pipeline (unlit, no blend)
+    id<MTLRenderPipelineState> debugLinePipeline = nil;
+
+    // Depth prepass pipeline (no fragment function, no color writes)
+    id<MTLRenderPipelineState> depthPrepassPipeline = nil;
+    bool inDepthPrepass = false;
+
+    // Per-object dynamic ring buffer (triple-buffered for MAX_FRAMES_IN_FLIGHT)
+    static constexpr uint32_t MAX_PER_OBJECT_DRAWS = 4096;
+    static constexpr uint32_t PER_OBJECT_SLOT_SIZE = 256;
+    id<MTLBuffer> perObjectBuffers[MAX_FRAMES_IN_FLIGHT] = {nil, nil, nil};
+    void* perObjectMapped[MAX_FRAMES_IN_FLIGHT] = {nullptr, nullptr, nullptr};
+    std::atomic<uint32_t> perObjectDrawIndex{0};
 
     // Skybox
     id<MTLBuffer> skyboxVertexBuffer = nil;
@@ -165,6 +186,22 @@ struct MetalRenderAPIImpl {
         cachedPerFrameUBO.lightDiffuse = lightDiffuse;
         cachedPerFrameUBO.debugCascades = 0;
         perFrameUBOReady = true;
+    }
+
+    // Select pipeline from PSOKey (used by replayCommandBuffer)
+    id<MTLRenderPipelineState> selectPipeline(const PSOKey& key) const
+    {
+        if (key.depth_only) return depthPrepassPipeline;
+        // Shadow pipeline is bound externally during shadow pass
+        bool lit = key.lighting;
+        switch (key.blend) {
+            case BlendMode::Alpha:
+                return lit ? basicPipelineAlpha : unlitPipelineAlpha;
+            case BlendMode::Additive:
+                return lit ? basicPipelineAdditive : unlitPipelineAdditive;
+            default:
+                return lit ? basicPipeline : unlitPipeline;
+        }
     }
 
     id<MTLTexture> createDepthTextureWithSize(uint32_t w, uint32_t h)

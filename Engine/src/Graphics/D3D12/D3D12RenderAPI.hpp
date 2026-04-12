@@ -109,15 +109,19 @@ private:
     ComPtr<ID3D12PipelineState> m_psoUnlitAlphaCullNone;
     ComPtr<ID3D12PipelineState> m_psoUnlitAdditive;
     ComPtr<ID3D12PipelineState> m_psoShadow;
+    ComPtr<ID3D12PipelineState> m_psoShadowAlphaTest;
     ComPtr<ID3D12PipelineState> m_psoSky;
     ComPtr<ID3D12PipelineState> m_psoFXAA;
     ComPtr<ID3D12PipelineState> m_psoDepthPrepass;
+    ComPtr<ID3D12PipelineState> m_psoDepthPrepassAlphaTest;
+    ComPtr<ID3D12PipelineState> m_psoDepthPrepassAlphaTestCullNone;
     ComPtr<ID3D12PipelineState> m_psoDebugLines;
 
     // Shader bytecode (DXIL)
     std::vector<char> m_basicVS, m_basicPS;
     std::vector<char> m_unlitVS, m_unlitPS;
     std::vector<char> m_shadowVS, m_shadowPS;
+    std::vector<char> m_shadowAlphaTestVS, m_shadowAlphaTestPS;
     std::vector<char> m_skyVS, m_skyPS;
     std::vector<char> m_fxaaVS, m_fxaaPS;
 
@@ -260,7 +264,7 @@ private:
 
     ID3D12PipelineState* selectPSO(const RenderState& state, bool unlit);
     void updateGlobalCBuffer();
-    void updatePerObjectCBuffer(const glm::vec3& color, bool useTexture);
+    void updatePerObjectCBuffer(const glm::vec3& color, bool useTexture, float alphaCutoff = 0.0f);
     void updateShadowCBuffer(const glm::mat4& lightSpace, const glm::mat4& model);
 
     // CSM helper methods

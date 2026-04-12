@@ -701,10 +701,30 @@ void VulkanRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
 
         if (drawCmd.pso_key.shadow)
         {
-            // Shadow pass: push model matrix via push constants
-            vkCmdPushConstants(cmd, shadow_pipeline_layout,
-                               VK_SHADER_STAGE_VERTEX_BIT, sizeof(glm::mat4), sizeof(glm::mat4),
-                               &drawCmd.model_matrix);
+            // Shadow pass: select alpha-test or opaque shadow pipeline
+            if (drawCmd.pso_key.alpha_test && shadow_pipeline_alpha_test != VK_NULL_HANDLE)
+            {
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadow_pipeline_alpha_test);
+                // Alpha-test shadow needs texture binding via main descriptor set
+                TextureHandle texHandle = drawCmd.use_texture ? drawCmd.texture : INVALID_TEXTURE;
+                VkDescriptorSet ds = getOrAllocateDescriptorSet(current_frame, texHandle);
+                if (ds != VK_NULL_HANDLE) {
+                    uint32_t dummyOffset = 0;
+                    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        shadow_alphatest_pipeline_layout, 0, 1, &ds, 1, &dummyOffset);
+                }
+                // Push model matrix
+                vkCmdPushConstants(cmd, shadow_alphatest_pipeline_layout,
+                                   VK_SHADER_STAGE_VERTEX_BIT, sizeof(glm::mat4), sizeof(glm::mat4),
+                                   &drawCmd.model_matrix);
+            }
+            else
+            {
+                // Push model matrix via push constants (opaque shadow)
+                vkCmdPushConstants(cmd, shadow_pipeline_layout,
+                                   VK_SHADER_STAGE_VERTEX_BIT, sizeof(glm::mat4), sizeof(glm::mat4),
+                                   &drawCmd.model_matrix);
+            }
 
             VkBuffer vb = vulkanMesh->getVertexBuffer();
             if (vb != last_bound_vertex_buffer) {
@@ -727,6 +747,9 @@ void VulkanRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
                 else
                     vkCmdDraw(cmd, static_cast<uint32_t>(vulkanMesh->getVertexCount()), 1, 0, 0);
             }
+            // Restore opaque shadow pipeline for next draw
+            if (drawCmd.pso_key.alpha_test && shadow_pipeline_alpha_test != VK_NULL_HANDLE)
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadow_pipeline);
             continue;
         }
 
@@ -756,6 +779,7 @@ void VulkanRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
             objUbo.normalMatrix = glm::transpose(glm::inverse(drawCmd.model_matrix));
             objUbo.color = drawCmd.color;
             objUbo.useTexture = drawCmd.use_texture ? 1 : 0;
+            objUbo.alphaCutoff = drawCmd.alpha_cutoff;
 
             void* dst = static_cast<char*>(per_object_uniform_mapped[current_frame]) + perObjectDynamicOffset;
             memcpy(dst, &objUbo, sizeof(objUbo));

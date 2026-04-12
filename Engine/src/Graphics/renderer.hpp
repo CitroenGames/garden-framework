@@ -136,26 +136,37 @@ public:
         if (!m.visible || !m.gpu_mesh || !m.gpu_mesh->isUploaded()) return;
 
         glm::mat4 model = transform.getTransformMatrix();
-        RenderState state = m.getRenderState();
-        PSOKey key = PSOKey::fromRenderState(state, global_lighting);
+        RenderState base_state = m.getRenderState();
 
         if (m.uses_material_ranges && !m.material_ranges.empty())
         {
             for (const auto& range : m.material_ranges)
             {
+                RenderState range_state = base_state;
+                if (range.isAlphaMask()) {
+                    range_state.alpha_test = true;
+                    range_state.alpha_cutoff = range.alpha_cutoff;
+                    range_state.blend_mode = BlendMode::None;
+                    range_state.depth_write = true;
+                }
+                if (range.double_sided)
+                    range_state.cull_mode = CullMode::None;
+
+                PSOKey key = PSOKey::fromRenderState(range_state, global_lighting);
                 bool has_tex = range.hasValidTexture();
                 cmds.recordDrawRange(m.gpu_mesh, model,
                                      has_tex ? range.texture : INVALID_TEXTURE, has_tex,
                                      key, range.start_vertex, range.vertex_count,
-                                     state.color);
+                                     range_state.color, range_state.alpha_cutoff);
             }
         }
         else
         {
+            PSOKey key = PSOKey::fromRenderState(base_state, global_lighting);
             bool has_tex = (m.texture_set && m.texture != INVALID_TEXTURE);
             cmds.recordDraw(m.gpu_mesh, model,
                             has_tex ? m.texture : INVALID_TEXTURE, has_tex,
-                            key, state.color);
+                            key, base_state.color);
         }
     }
 
@@ -168,8 +179,7 @@ public:
         if (!lod_gpu_mesh || !lod_gpu_mesh->isUploaded()) return;
 
         glm::mat4 model = transform.getTransformMatrix();
-        RenderState state = m.getRenderState();
-        PSOKey key = PSOKey::fromRenderState(state, global_lighting);
+        RenderState base_state = m.getRenderState();
 
         // Check for LOD-specific material ranges using the thread-safe accessor
         const auto* lod_ranges = m.getMaterialRangesForLOD(lod_level);
@@ -178,16 +188,28 @@ public:
         {
             for (const auto& range : *lod_ranges)
             {
+                RenderState range_state = base_state;
+                if (range.isAlphaMask()) {
+                    range_state.alpha_test = true;
+                    range_state.alpha_cutoff = range.alpha_cutoff;
+                    range_state.blend_mode = BlendMode::None;
+                    range_state.depth_write = true;
+                }
+                if (range.double_sided)
+                    range_state.cull_mode = CullMode::None;
+
+                PSOKey key = PSOKey::fromRenderState(range_state, global_lighting);
                 bool has_tex = range.hasValidTexture();
                 cmds.recordDrawRange(lod_gpu_mesh, model,
                                      has_tex ? range.texture : INVALID_TEXTURE, has_tex,
                                      key, range.start_vertex, range.vertex_count,
-                                     state.color);
+                                     range_state.color, range_state.alpha_cutoff);
             }
         }
         else
         {
             // Fall back to first valid texture from original material ranges
+            PSOKey key = PSOKey::fromRenderState(base_state, global_lighting);
             TextureHandle tex = INVALID_TEXTURE;
             bool has_tex = false;
             if (m.uses_material_ranges && !m.material_ranges.empty())
@@ -207,7 +229,7 @@ public:
                 tex = m.texture;
                 has_tex = true;
             }
-            cmds.recordDraw(lod_gpu_mesh, model, tex, has_tex, key, state.color);
+            cmds.recordDraw(lod_gpu_mesh, model, tex, has_tex, key, base_state.color);
         }
     }
 
@@ -278,8 +300,35 @@ public:
     {
         if (!m.visible || !m.gpu_mesh || !m.gpu_mesh->isUploaded()) return;
         glm::mat4 model = transform.getTransformMatrix();
-        PSOKey key = PSOKey::depthPrepass();
-        cmds.recordDraw(m.gpu_mesh, model, INVALID_TEXTURE, false, key);
+
+        // Check if any material range needs alpha testing
+        bool has_alpha_mask = false;
+        if (m.uses_material_ranges) {
+            for (const auto& range : m.material_ranges)
+                if (range.isAlphaMask()) { has_alpha_mask = true; break; }
+        }
+
+        if (has_alpha_mask && m.uses_material_ranges) {
+            for (const auto& range : m.material_ranges) {
+                PSOKey key = PSOKey::depthPrepass();
+                float alpha_cutoff = 0.0f;
+                bool has_tex = false;
+                TextureHandle tex = INVALID_TEXTURE;
+                if (range.isAlphaMask()) {
+                    key.alpha_test = true;
+                    key.cull = range.double_sided ? CullMode::None : CullMode::Back;
+                    alpha_cutoff = range.alpha_cutoff;
+                    has_tex = range.hasValidTexture();
+                    tex = has_tex ? range.texture : INVALID_TEXTURE;
+                }
+                cmds.recordDrawRange(m.gpu_mesh, model, tex, has_tex,
+                                     key, range.start_vertex, range.vertex_count,
+                                     glm::vec3(1.0f), alpha_cutoff);
+            }
+        } else {
+            PSOKey key = PSOKey::depthPrepass();
+            cmds.recordDraw(m.gpu_mesh, model, INVALID_TEXTURE, false, key);
+        }
     }
 
     // Record a depth-prepass draw at a specific LOD.
@@ -312,20 +361,46 @@ public:
         if (!m.visible || !m.casts_shadow) return;
         if (!m.gpu_mesh || !m.gpu_mesh->isUploaded()) return;
 
-        PSOKey key = PSOKey::shadowPass();
         glm::mat4 model = transform.getTransformMatrix();
 
+        // Determine the GPU mesh (LOD selection for shadows)
+        IGPUMesh* gpu_mesh = m.gpu_mesh;
         if (!m.lod_levels.empty())
         {
             int shadow_lod = std::min(cascade_index, static_cast<int>(m.lod_levels.size()));
             IGPUMesh* active = m.getGPUMeshForLOD(shadow_lod);
             if (active && active != m.gpu_mesh && active->isUploaded())
-            {
-                cmds.recordDraw(active, model, INVALID_TEXTURE, false, key);
-                return;
-            }
+                gpu_mesh = active;
         }
-        cmds.recordDraw(m.gpu_mesh, model, INVALID_TEXTURE, false, key);
+        if (!gpu_mesh->isUploaded()) return;
+
+        // Check if any material range needs alpha testing
+        bool has_alpha_mask = false;
+        if (m.uses_material_ranges) {
+            for (const auto& range : m.material_ranges)
+                if (range.isAlphaMask()) { has_alpha_mask = true; break; }
+        }
+
+        if (has_alpha_mask && m.uses_material_ranges) {
+            for (const auto& range : m.material_ranges) {
+                PSOKey key = PSOKey::shadowPass();
+                float alpha_cutoff = 0.0f;
+                bool has_tex = false;
+                TextureHandle tex = INVALID_TEXTURE;
+                if (range.isAlphaMask()) {
+                    key.alpha_test = true;
+                    alpha_cutoff = range.alpha_cutoff;
+                    has_tex = range.hasValidTexture();
+                    tex = has_tex ? range.texture : INVALID_TEXTURE;
+                }
+                cmds.recordDrawRange(gpu_mesh, model, tex, has_tex,
+                                     key, range.start_vertex, range.vertex_count,
+                                     glm::vec3(1.0f), alpha_cutoff);
+            }
+        } else {
+            PSOKey key = PSOKey::shadowPass();
+            cmds.recordDraw(gpu_mesh, model, INVALID_TEXTURE, false, key);
+        }
     }
 
     // Ensure all meshes in an entity list are uploaded to the GPU (main thread pre-pass).

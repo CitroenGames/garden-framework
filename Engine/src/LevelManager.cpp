@@ -1053,6 +1053,13 @@ std::shared_ptr<mesh> LevelManager::loadMesh(const LevelEntity& entity, IRenderA
                     TextureHandle tex = material.getPrimaryTextureHandle();
 
                     MaterialRange range(current_vertex, vertex_count, tex, material.properties.name);
+                    // Propagate alpha properties from glTF material
+                    if (material.properties.alpha_mode == "MASK")
+                        range.alpha_mode = 1;
+                    else if (material.properties.alpha_mode == "BLEND")
+                        range.alpha_mode = 2;
+                    range.alpha_cutoff = material.properties.alpha_cutoff;
+                    range.double_sided = material.properties.double_sided;
                     material_ranges.push_back(range);
 
                     if (tex != INVALID_TEXTURE) {
@@ -1154,12 +1161,23 @@ std::shared_ptr<mesh> LevelManager::loadMesh(const LevelEntity& entity, IRenderA
                             {
                                 TextureHandle tex = INVALID_TEXTURE;
                                 std::string mat_name = "";
+                                uint8_t alpha_mode = 0;
+                                float alpha_cutoff = 0.5f;
+                                bool double_sided = false;
                                 if (sr.submesh_id < m_ptr->material_ranges.size())
                                 {
-                                    tex = m_ptr->material_ranges[sr.submesh_id].texture;
-                                    mat_name = m_ptr->material_ranges[sr.submesh_id].material_name;
+                                    const auto& base_range = m_ptr->material_ranges[sr.submesh_id];
+                                    tex = base_range.texture;
+                                    mat_name = base_range.material_name;
+                                    alpha_mode = base_range.alpha_mode;
+                                    alpha_cutoff = base_range.alpha_cutoff;
+                                    double_sided = base_range.double_sided;
                                 }
-                                level.material_ranges.emplace_back(sr.start_index, sr.index_count, tex, mat_name);
+                                MaterialRange lod_range(sr.start_index, sr.index_count, tex, mat_name);
+                                lod_range.alpha_mode = alpha_mode;
+                                lod_range.alpha_cutoff = alpha_cutoff;
+                                lod_range.double_sided = double_sided;
+                                level.material_ranges.push_back(lod_range);
                             }
                         }
 
@@ -1279,7 +1297,14 @@ std::shared_ptr<mesh> LevelManager::loadCompiledMesh(const std::string& cmesh_pa
                     }
                 }
 
-                material_ranges.emplace_back(sr.start_index, sr.index_count, tex, mat_name);
+                MaterialRange range(sr.start_index, sr.index_count, tex, mat_name);
+                if (sr.submesh_id < cmesh.material_refs.size()) {
+                    const auto& mat_ref = cmesh.material_refs[sr.submesh_id];
+                    range.alpha_mode = mat_ref.alpha_mode;
+                    range.alpha_cutoff = mat_ref.alpha_cutoff;
+                    range.double_sided = mat_ref.double_sided;
+                }
+                material_ranges.push_back(range);
             }
         } else if (!cmesh.submeshes.empty()) {
             // Fallback: use submesh table with LOD0 vertex data
@@ -1299,7 +1324,14 @@ std::shared_ptr<mesh> LevelManager::loadCompiledMesh(const std::string& cmesh_pa
                 }
 
                 // We don't have per-submesh ranges without indexed info
-                material_ranges.emplace_back(current, 0, tex, mat_name);
+                MaterialRange range(current, 0, tex, mat_name);
+                if (sub.material_index < cmesh.material_refs.size()) {
+                    const auto& mat_ref = cmesh.material_refs[sub.material_index];
+                    range.alpha_mode = mat_ref.alpha_mode;
+                    range.alpha_cutoff = mat_ref.alpha_cutoff;
+                    range.double_sided = mat_ref.double_sided;
+                }
+                material_ranges.push_back(range);
             }
         }
 
@@ -1336,11 +1368,22 @@ std::shared_ptr<mesh> LevelManager::loadCompiledMesh(const std::string& cmesh_pa
             for (const auto& sr : lod.submesh_ranges) {
                 TextureHandle tex = INVALID_TEXTURE;
                 std::string mat_name;
+                uint8_t lod_alpha_mode = 0;
+                float lod_alpha_cutoff = 0.5f;
+                bool lod_double_sided = false;
                 if (sr.submesh_id < m_ptr->material_ranges.size()) {
-                    tex = m_ptr->material_ranges[sr.submesh_id].texture;
-                    mat_name = m_ptr->material_ranges[sr.submesh_id].material_name;
+                    const auto& base_range = m_ptr->material_ranges[sr.submesh_id];
+                    tex = base_range.texture;
+                    mat_name = base_range.material_name;
+                    lod_alpha_mode = base_range.alpha_mode;
+                    lod_alpha_cutoff = base_range.alpha_cutoff;
+                    lod_double_sided = base_range.double_sided;
                 }
-                level.material_ranges.emplace_back(sr.start_index, sr.index_count, tex, mat_name);
+                MaterialRange lod_range(sr.start_index, sr.index_count, tex, mat_name);
+                lod_range.alpha_mode = lod_alpha_mode;
+                lod_range.alpha_cutoff = lod_alpha_cutoff;
+                lod_range.double_sided = lod_double_sided;
+                level.material_ranges.push_back(lod_range);
             }
         }
 
@@ -1581,7 +1624,14 @@ std::shared_ptr<mesh> LevelManager::finalizeCompiledMeshGPU(
                     }
                 }
 
-                material_ranges.emplace_back(sr.start_index, sr.index_count, tex, mat_name);
+                MaterialRange range(sr.start_index, sr.index_count, tex, mat_name);
+                if (sr.submesh_id < cmesh.material_refs.size()) {
+                    const auto& mat_ref = cmesh.material_refs[sr.submesh_id];
+                    range.alpha_mode = mat_ref.alpha_mode;
+                    range.alpha_cutoff = mat_ref.alpha_cutoff;
+                    range.double_sided = mat_ref.double_sided;
+                }
+                material_ranges.push_back(range);
             }
         } else if (!cmesh.submeshes.empty()) {
             size_t current = 0;
@@ -1606,7 +1656,14 @@ std::shared_ptr<mesh> LevelManager::finalizeCompiledMeshGPU(
                     }
                 }
 
-                material_ranges.emplace_back(current, 0, tex, mat_name);
+                MaterialRange range(current, 0, tex, mat_name);
+                if (sub.material_index < cmesh.material_refs.size()) {
+                    const auto& mat_ref = cmesh.material_refs[sub.material_index];
+                    range.alpha_mode = mat_ref.alpha_mode;
+                    range.alpha_cutoff = mat_ref.alpha_cutoff;
+                    range.double_sided = mat_ref.double_sided;
+                }
+                material_ranges.push_back(range);
             }
         }
 
@@ -1642,11 +1699,22 @@ std::shared_ptr<mesh> LevelManager::finalizeCompiledMeshGPU(
             for (const auto& sr : lod.submesh_ranges) {
                 TextureHandle tex = INVALID_TEXTURE;
                 std::string mat_name;
+                uint8_t lod_alpha_mode = 0;
+                float lod_alpha_cutoff = 0.5f;
+                bool lod_double_sided = false;
                 if (sr.submesh_id < m_ptr->material_ranges.size()) {
-                    tex = m_ptr->material_ranges[sr.submesh_id].texture;
-                    mat_name = m_ptr->material_ranges[sr.submesh_id].material_name;
+                    const auto& base_range = m_ptr->material_ranges[sr.submesh_id];
+                    tex = base_range.texture;
+                    mat_name = base_range.material_name;
+                    lod_alpha_mode = base_range.alpha_mode;
+                    lod_alpha_cutoff = base_range.alpha_cutoff;
+                    lod_double_sided = base_range.double_sided;
                 }
-                level.material_ranges.emplace_back(sr.start_index, sr.index_count, tex, mat_name);
+                MaterialRange lod_range(sr.start_index, sr.index_count, tex, mat_name);
+                lod_range.alpha_mode = lod_alpha_mode;
+                lod_range.alpha_cutoff = lod_alpha_cutoff;
+                lod_range.double_sided = lod_double_sided;
+                level.material_ranges.push_back(lod_range);
             }
         }
 
@@ -1728,6 +1796,13 @@ std::shared_ptr<mesh> LevelManager::finalizeMeshGPU(
                     const auto& material = gltf.material_data.materials[mat_idx];
                     TextureHandle tex = material.getPrimaryTextureHandle();
                     MaterialRange range(current_vertex, vertex_count, tex, material.properties.name);
+                    // Propagate alpha properties from glTF material
+                    if (material.properties.alpha_mode == "MASK")
+                        range.alpha_mode = 1;
+                    else if (material.properties.alpha_mode == "BLEND")
+                        range.alpha_mode = 2;
+                    range.alpha_cutoff = material.properties.alpha_cutoff;
+                    range.double_sided = material.properties.double_sided;
                     material_ranges.push_back(range);
                     if (tex != INVALID_TEXTURE) texture_applied = true;
                 } else {
@@ -1811,11 +1886,22 @@ std::shared_ptr<mesh> LevelManager::finalizeMeshGPU(
                 for (const auto& sr : lod_data.submesh_ranges) {
                     TextureHandle tex = INVALID_TEXTURE;
                     std::string mat_name = "";
+                    uint8_t lod_alpha_mode = 0;
+                    float lod_alpha_cutoff = 0.5f;
+                    bool lod_double_sided = false;
                     if (sr.submesh_id < m_ptr->material_ranges.size()) {
-                        tex = m_ptr->material_ranges[sr.submesh_id].texture;
-                        mat_name = m_ptr->material_ranges[sr.submesh_id].material_name;
+                        const auto& base_range = m_ptr->material_ranges[sr.submesh_id];
+                        tex = base_range.texture;
+                        mat_name = base_range.material_name;
+                        lod_alpha_mode = base_range.alpha_mode;
+                        lod_alpha_cutoff = base_range.alpha_cutoff;
+                        lod_double_sided = base_range.double_sided;
                     }
-                    level.material_ranges.emplace_back(sr.start_index, sr.index_count, tex, mat_name);
+                    MaterialRange lod_range(sr.start_index, sr.index_count, tex, mat_name);
+                    lod_range.alpha_mode = lod_alpha_mode;
+                    lod_range.alpha_cutoff = lod_alpha_cutoff;
+                    lod_range.double_sided = lod_double_sided;
+                    level.material_ranges.push_back(lod_range);
                 }
             }
 

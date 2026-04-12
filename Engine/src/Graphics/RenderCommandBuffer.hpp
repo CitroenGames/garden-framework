@@ -17,12 +17,13 @@ struct PSOKey
     bool lighting   = true;
     bool depth_only = false;  // depth prepass
     bool shadow     = false;  // shadow pass
+    bool alpha_test = false;  // alpha mask (shader discard)
 
     bool operator==(const PSOKey& o) const
     {
         return blend == o.blend && cull == o.cull &&
                lighting == o.lighting && depth_only == o.depth_only &&
-               shadow == o.shadow;
+               shadow == o.shadow && alpha_test == o.alpha_test;
     }
 
     bool operator!=(const PSOKey& o) const { return !(*this == o); }
@@ -33,6 +34,7 @@ struct PSOKey
         if (shadow != o.shadow) return shadow < o.shadow;
         if (depth_only != o.depth_only) return depth_only < o.depth_only;
         if (lighting != o.lighting) return lighting < o.lighting;
+        if (alpha_test != o.alpha_test) return alpha_test < o.alpha_test;
         if (blend != o.blend) return blend < o.blend;
         return cull < o.cull;
     }
@@ -44,6 +46,7 @@ struct PSOKey
         key.blend = state.blend_mode;
         key.cull = state.cull_mode;
         key.lighting = state.lighting && global_lighting;
+        key.alpha_test = state.alpha_test;
         key.depth_only = false;
         key.shadow = false;
         return key;
@@ -83,6 +86,7 @@ struct DrawCommand
     bool          use_texture  = false;
     PSOKey        pso_key;
     glm::vec3     color        = glm::vec3(1.0f);
+    float         alpha_cutoff = 0.0f;  // >0 triggers alpha test discard in shader
 
     // For range draws (renderMeshRange). If vertex_count == 0, draw entire mesh.
     size_t start_vertex = 0;
@@ -122,7 +126,8 @@ public:
                          TextureHandle texture, bool use_texture,
                          const PSOKey& pso_key,
                          size_t start_vertex, size_t vertex_count,
-                         const glm::vec3& color = glm::vec3(1.0f))
+                         const glm::vec3& color = glm::vec3(1.0f),
+                         float alpha_cutoff = 0.0f)
     {
         DrawCommand cmd;
         cmd.gpu_mesh = gpu_mesh;
@@ -131,6 +136,7 @@ public:
         cmd.use_texture = use_texture;
         cmd.pso_key = pso_key;
         cmd.color = color;
+        cmd.alpha_cutoff = alpha_cutoff;
         cmd.start_vertex = start_vertex;
         cmd.vertex_count = vertex_count;
         m_commands.push_back(cmd);

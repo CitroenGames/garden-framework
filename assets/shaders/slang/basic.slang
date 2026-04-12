@@ -25,6 +25,8 @@ cbuffer PerObjectCB : register(b1)
     float4x4 uNormalMatrix;
     float3 uColor;
     int uUseTexture;
+    float uAlphaCutoff;
+    float3 _objPad;
 };
 
 [[vk::binding(3, 0)]]
@@ -162,6 +164,8 @@ float4 fragmentMain(PSInput input) : SV_TARGET
     if (uUseTexture != 0)
     {
         texColor = diffuseTexture.Sample(linearSampler, input.texcoord);
+        if (uAlphaCutoff > 0.0 && texColor.a < uAlphaCutoff)
+            discard;
     }
     else
     {

@@ -50,6 +50,7 @@ sources = {
     src/Graphics/Metal/MetalRenderAPI_Shadow.mm [macOS]
     src/Graphics/Metal/MetalRenderAPI_Viewport.mm [macOS]
     src/Graphics/Metal/MetalMesh.mm [macOS]
+    src/Graphics/Metal/MetalRenderAPI_Commands.mm [macOS]
     src/Graphics/stb_impl.cpp
     src/ImGui/ImGuiManager.cpp
     src/UI/RmlUiManager.cpp

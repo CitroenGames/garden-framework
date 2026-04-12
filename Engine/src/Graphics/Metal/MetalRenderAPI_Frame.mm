@@ -31,6 +31,9 @@ void MetalRenderAPI::beginFrame()
     // Ensure command buffer exists (may already be created by shadow pass)
     if (!impl->ensureCommandBuffer()) return;
 
+    // Reset per-object ring buffer allocation for this frame
+    impl->perObjectDrawIndex.store(0, std::memory_order_relaxed);
+
     bool editorMode = (impl->viewportTexture != nil);
 
     // In editor mode, defer drawable acquisition to renderUI

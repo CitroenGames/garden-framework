@@ -3,6 +3,10 @@ using namespace metal;
 
 // Shared types and functions are in common.metal
 
+// Function constant for lit/unlit pipeline variants.
+// When false, the compiler dead-strips all lighting and shadow code.
+constant bool enableLighting [[function_constant(0)]];
+
 struct BasicVertexIn {
     float3 position [[attribute(0)]];
     float3 normal   [[attribute(1)]];
@@ -49,19 +53,24 @@ fragment float4 basic_fragment(BasicVertexOut in [[stage_in]],
                                 depth2d_array<float> shadowMap [[texture(1)]],
                                 sampler shadowSampler [[sampler(1)]])
 {
-    float3 norm = normalize(in.normal);
-    float3 lightDir = normalize(-ubo.lightDir);
-    float diff = max(dot(norm, lightDir), 0.0);
+    float3 lighting;
+    if (enableLighting) {
+        float3 norm = normalize(in.normal);
+        float3 lightDir = normalize(-ubo.lightDir);
+        float diff = max(dot(norm, lightDir), 0.0);
 
-    float3 ambient = ubo.lightAmbient;
-    float3 diffuse = ubo.lightDiffuse * diff;
+        float3 ambient = ubo.lightAmbient;
+        float3 diffuse = ubo.lightDiffuse * diff;
 
-    // Calculate shadow using CSM
-    float shadow = 0.0;
-    if (ubo.cascadeCount > 0) {
-        shadow = ShadowCalculationWithBlend(ubo, in.fragPos, norm, in.viewDepth, shadowMap, shadowSampler);
+        // Calculate shadow using CSM
+        float shadow = 0.0;
+        if (ubo.cascadeCount > 0) {
+            shadow = ShadowCalculationWithBlend(ubo, in.fragPos, norm, in.viewDepth, shadowMap, shadowSampler);
+        }
+        lighting = ambient + shadow * diffuse;
+    } else {
+        lighting = float3(1.0);
     }
-    float3 lighting = ambient + shadow * diffuse;
 
     float4 texColor;
     if (ubo.useTexture != 0) {

@@ -93,37 +93,64 @@ bool MetalRenderAPIImpl::createPipelines()
 
     NSError* error = nil;
 
-    // --- Basic pipeline (no blend) ---
+    // Shared vertex function (does not use function constants)
+    id<MTLFunction> basicVertexFn = [shaderLibrary newFunctionWithName:@"basic_vertex"];
+    if (!basicVertexFn) {
+        printf("[Metal] Failed to find basic_vertex shader function\n");
+        return false;
+    }
+
+    // Create lit and unlit fragment function variants via function constants
+    MTLFunctionConstantValues* litConstants = [[MTLFunctionConstantValues alloc] init];
+    BOOL litTrue = YES;
+    [litConstants setConstantValue:&litTrue type:MTLDataTypeBool atIndex:0];
+
+    MTLFunctionConstantValues* unlitConstants = [[MTLFunctionConstantValues alloc] init];
+    BOOL litFalse = NO;
+    [unlitConstants setConstantValue:&litFalse type:MTLDataTypeBool atIndex:0];
+
+    id<MTLFunction> litFragmentFn = [shaderLibrary newFunctionWithName:@"basic_fragment"
+                                                        constantValues:litConstants
+                                                                 error:&error];
+    if (!litFragmentFn) {
+        printf("[Metal] Failed to create lit fragment function: %s\n", [[error localizedDescription] UTF8String]);
+        return false;
+    }
+
+    id<MTLFunction> unlitFragmentFn = [shaderLibrary newFunctionWithName:@"basic_fragment"
+                                                          constantValues:unlitConstants
+                                                                   error:&error];
+    if (!unlitFragmentFn) {
+        printf("[Metal] Failed to create unlit fragment function: %s\n", [[error localizedDescription] UTF8String]);
+        return false;
+    }
+
+    // --- Lit pipeline (no blend) ---
     {
         MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
         desc.rasterSampleCount = 1;
-        desc.vertexFunction = [shaderLibrary newFunctionWithName:@"basic_vertex"];
-        desc.fragmentFunction = [shaderLibrary newFunctionWithName:@"basic_fragment"];
+        desc.vertexFunction = basicVertexFn;
+        desc.fragmentFunction = litFragmentFn;
         desc.vertexDescriptor = vertexDesc;
         desc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
         desc.colorAttachments[0].blendingEnabled = NO;
         desc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
-        desc.label = @"Basic Pipeline (No Blend)";
-
-        if (!desc.vertexFunction || !desc.fragmentFunction) {
-            printf("[Metal] Failed to find basic shader functions\n");
-            return false;
-        }
+        desc.label = @"Lit Pipeline (No Blend)";
 
         basicPipeline = [device newRenderPipelineStateWithDescriptor:desc error:&error];
         if (!basicPipeline) {
             printf("[Metal] Failed to create basic pipeline: %s\n", [[error localizedDescription] UTF8String]);
             return false;
         }
-        printf("[Metal] Pipeline created: Basic (No Blend)\n");
+        printf("[Metal] Pipeline created: Lit (No Blend)\n");
     }
 
-    // --- Basic pipeline (alpha blend) ---
+    // --- Lit pipeline (alpha blend) ---
     {
         MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
         desc.rasterSampleCount = 1;
-        desc.vertexFunction = [shaderLibrary newFunctionWithName:@"basic_vertex"];
-        desc.fragmentFunction = [shaderLibrary newFunctionWithName:@"basic_fragment"];
+        desc.vertexFunction = basicVertexFn;
+        desc.fragmentFunction = litFragmentFn;
         desc.vertexDescriptor = vertexDesc;
         desc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
         desc.colorAttachments[0].blendingEnabled = YES;
@@ -132,22 +159,22 @@ bool MetalRenderAPIImpl::createPipelines()
         desc.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorOne;
         desc.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
         desc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
-        desc.label = @"Basic Pipeline (Alpha)";
+        desc.label = @"Lit Pipeline (Alpha)";
 
         basicPipelineAlpha = [device newRenderPipelineStateWithDescriptor:desc error:&error];
         if (!basicPipelineAlpha) {
             printf("[Metal] Failed to create alpha pipeline: %s\n", [[error localizedDescription] UTF8String]);
             return false;
         }
-        printf("[Metal] Pipeline created: Basic (Alpha Blend)\n");
+        printf("[Metal] Pipeline created: Lit (Alpha Blend)\n");
     }
 
-    // --- Basic pipeline (additive blend) ---
+    // --- Lit pipeline (additive blend) ---
     {
         MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
         desc.rasterSampleCount = 1;
-        desc.vertexFunction = [shaderLibrary newFunctionWithName:@"basic_vertex"];
-        desc.fragmentFunction = [shaderLibrary newFunctionWithName:@"basic_fragment"];
+        desc.vertexFunction = basicVertexFn;
+        desc.fragmentFunction = litFragmentFn;
         desc.vertexDescriptor = vertexDesc;
         desc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
         desc.colorAttachments[0].blendingEnabled = YES;
@@ -156,14 +183,122 @@ bool MetalRenderAPIImpl::createPipelines()
         desc.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorOne;
         desc.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOne;
         desc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
-        desc.label = @"Basic Pipeline (Additive)";
+        desc.label = @"Lit Pipeline (Additive)";
 
         basicPipelineAdditive = [device newRenderPipelineStateWithDescriptor:desc error:&error];
         if (!basicPipelineAdditive) {
             printf("[Metal] Failed to create additive pipeline: %s\n", [[error localizedDescription] UTF8String]);
             return false;
         }
-        printf("[Metal] Pipeline created: Basic (Additive Blend)\n");
+        printf("[Metal] Pipeline created: Lit (Additive Blend)\n");
+    }
+
+    // --- Unlit pipeline (no blend) ---
+    {
+        MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
+        desc.rasterSampleCount = 1;
+        desc.vertexFunction = basicVertexFn;
+        desc.fragmentFunction = unlitFragmentFn;
+        desc.vertexDescriptor = vertexDesc;
+        desc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+        desc.colorAttachments[0].blendingEnabled = NO;
+        desc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+        desc.label = @"Unlit Pipeline (No Blend)";
+
+        unlitPipeline = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+        if (!unlitPipeline) {
+            printf("[Metal] Failed to create unlit pipeline: %s\n", [[error localizedDescription] UTF8String]);
+            return false;
+        }
+        printf("[Metal] Pipeline created: Unlit (No Blend)\n");
+    }
+
+    // --- Unlit pipeline (alpha blend) ---
+    {
+        MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
+        desc.rasterSampleCount = 1;
+        desc.vertexFunction = basicVertexFn;
+        desc.fragmentFunction = unlitFragmentFn;
+        desc.vertexDescriptor = vertexDesc;
+        desc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+        desc.colorAttachments[0].blendingEnabled = YES;
+        desc.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorSourceAlpha;
+        desc.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+        desc.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorOne;
+        desc.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+        desc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+        desc.label = @"Unlit Pipeline (Alpha)";
+
+        unlitPipelineAlpha = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+        if (!unlitPipelineAlpha) {
+            printf("[Metal] Failed to create unlit alpha pipeline: %s\n", [[error localizedDescription] UTF8String]);
+            return false;
+        }
+        printf("[Metal] Pipeline created: Unlit (Alpha Blend)\n");
+    }
+
+    // --- Unlit pipeline (additive blend) ---
+    {
+        MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
+        desc.rasterSampleCount = 1;
+        desc.vertexFunction = basicVertexFn;
+        desc.fragmentFunction = unlitFragmentFn;
+        desc.vertexDescriptor = vertexDesc;
+        desc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+        desc.colorAttachments[0].blendingEnabled = YES;
+        desc.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorSourceAlpha;
+        desc.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOne;
+        desc.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorOne;
+        desc.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOne;
+        desc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+        desc.label = @"Unlit Pipeline (Additive)";
+
+        unlitPipelineAdditive = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+        if (!unlitPipelineAdditive) {
+            printf("[Metal] Failed to create unlit additive pipeline: %s\n", [[error localizedDescription] UTF8String]);
+            return false;
+        }
+        printf("[Metal] Pipeline created: Unlit (Additive Blend)\n");
+    }
+
+    // --- Debug line pipeline (unlit, no blend, line topology) ---
+    {
+        MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
+        desc.rasterSampleCount = 1;
+        desc.vertexFunction = basicVertexFn;
+        desc.fragmentFunction = unlitFragmentFn;
+        desc.vertexDescriptor = vertexDesc;
+        desc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+        desc.colorAttachments[0].blendingEnabled = NO;
+        desc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+        desc.label = @"Debug Line Pipeline";
+
+        debugLinePipeline = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+        if (!debugLinePipeline) {
+            printf("[Metal] Failed to create debug line pipeline: %s\n", [[error localizedDescription] UTF8String]);
+        } else {
+            printf("[Metal] Pipeline created: Debug Lines\n");
+        }
+    }
+
+    // --- Depth prepass pipeline (no fragment function, no color writes) ---
+    {
+        MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
+        desc.rasterSampleCount = 1;
+        desc.vertexFunction = basicVertexFn;
+        desc.fragmentFunction = nil;
+        desc.vertexDescriptor = vertexDesc;
+        desc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+        desc.colorAttachments[0].writeMask = MTLColorWriteMaskNone;
+        desc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+        desc.label = @"Depth Prepass Pipeline";
+
+        depthPrepassPipeline = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+        if (!depthPrepassPipeline) {
+            printf("[Metal] Failed to create depth prepass pipeline: %s\n", [[error localizedDescription] UTF8String]);
+        } else {
+            printf("[Metal] Pipeline created: Depth Prepass\n");
+        }
     }
 
     // --- Shadow pipeline ---
@@ -407,6 +542,15 @@ bool MetalRenderAPI::initialize(WindowHandle window, int width, int height, floa
                                                        length:sizeof(fxaaQuadVertices)
                                                       options:MTLResourceStorageModeShared];
 
+    // Create per-object ring buffers (triple-buffered)
+    for (int i = 0; i < MetalRenderAPIImpl::MAX_FRAMES_IN_FLIGHT; i++) {
+        impl->perObjectBuffers[i] = [impl->device newBufferWithLength:
+            MetalRenderAPIImpl::MAX_PER_OBJECT_DRAWS * MetalRenderAPIImpl::PER_OBJECT_SLOT_SIZE
+            options:MTLResourceStorageModeShared];
+        impl->perObjectBuffers[i].label = [NSString stringWithFormat:@"PerObject Ring Buffer %d", i];
+        impl->perObjectMapped[i] = [impl->perObjectBuffers[i] contents];
+    }
+
     // Create offscreen resources for FXAA
     impl->createOffscreenResources();
 
@@ -454,9 +598,18 @@ void MetalRenderAPI::shutdown()
     impl->basicPipeline = nil;
     impl->basicPipelineAlpha = nil;
     impl->basicPipelineAdditive = nil;
+    impl->unlitPipeline = nil;
+    impl->unlitPipelineAlpha = nil;
+    impl->unlitPipelineAdditive = nil;
+    impl->debugLinePipeline = nil;
+    impl->depthPrepassPipeline = nil;
     impl->shadowPipeline = nil;
     impl->skyboxPipeline = nil;
     impl->fxaaPipeline = nil;
+    for (int i = 0; i < MetalRenderAPIImpl::MAX_FRAMES_IN_FLIGHT; i++) {
+        impl->perObjectBuffers[i] = nil;
+        impl->perObjectMapped[i] = nullptr;
+    }
     impl->depthTexture = nil;
     impl->shadowMapArray = nil;
     impl->offscreenTexture = nil;

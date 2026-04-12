@@ -414,7 +414,7 @@ void D3D12RenderAPI::updateGlobalCBuffer()
     commandList->SetGraphicsRootConstantBufferView(0, addr);
 }
 
-void D3D12RenderAPI::updatePerObjectCBuffer(const glm::vec3& color, bool useTexture)
+void D3D12RenderAPI::updatePerObjectCBuffer(const glm::vec3& color, bool useTexture, float alphaCutoff)
 {
     D3D12PerObjectCBuffer cb = {};
     cb.model = current_model_matrix;
@@ -426,6 +426,7 @@ void D3D12RenderAPI::updatePerObjectCBuffer(const glm::vec3& color, bool useText
         cb.normalMatrix = glm::mat4(1.0f);
     cb.color = color;
     cb.useTexture = useTexture ? 1 : 0;
+    cb.alphaCutoff = alphaCutoff;
 
     auto addr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(cb), &cb);
     if (addr == 0) return;

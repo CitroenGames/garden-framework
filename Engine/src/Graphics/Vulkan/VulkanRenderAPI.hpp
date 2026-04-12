@@ -419,7 +419,9 @@ private:
 
     // Shadow pipeline
     VkPipeline shadow_pipeline = VK_NULL_HANDLE;
+    VkPipeline shadow_pipeline_alpha_test = VK_NULL_HANDLE;
     VkPipelineLayout shadow_pipeline_layout = VK_NULL_HANDLE;
+    VkPipelineLayout shadow_alphatest_pipeline_layout = VK_NULL_HANDLE;
     VkDescriptorSetLayout shadow_descriptor_layout = VK_NULL_HANDLE;
     VkDescriptorPool shadow_descriptor_pool = VK_NULL_HANDLE;
     std::vector<VkDescriptorSet> shadow_descriptor_sets;

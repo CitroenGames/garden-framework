@@ -125,6 +125,8 @@ struct PerObjectUBO {
     glm::mat4 normalMatrix;
     glm::vec3 color;
     int useTexture;
+    float alphaCutoff;
+    float _pad[3];
 };
 
 // Shadow UBO for shadow pass (matches Slang shader ShadowCB)

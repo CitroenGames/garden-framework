@@ -133,6 +133,10 @@ bool D3D12RenderAPI::loadShaders()
     m_shadowPS = readShaderBinary(shaderDir + "shadow_ps.dxil");
     // Shadow PS may be empty (depth-only), which is fine
 
+    m_shadowAlphaTestVS = readShaderBinary(shaderDir + "shadow_alphatest_vs.dxil");
+    m_shadowAlphaTestPS = readShaderBinary(shaderDir + "shadow_alphatest_ps.dxil");
+    // Shadow alpha-test shaders are optional — fall back to opaque shadow if missing
+
     m_skyVS = readShaderBinary(shaderDir + "sky_vs.dxil");
     if (m_skyVS.empty()) return false;
     m_skyPS = readShaderBinary(shaderDir + "sky_ps.dxil");
@@ -440,6 +444,39 @@ bool D3D12RenderAPI::createPipelineStates()
         if (!m_psoDepthPrepass) { LOG_ENGINE_ERROR("Failed to create PSO: DepthPrepass"); return false; }
     }
 
+    // Depth prepass with alpha test (uses basic PS for discard, color writes off)
+    {
+        auto desc = CreateBasePSODesc(m_rootSignature.Get(), m_basicVS, m_basicPS);
+        desc.BlendState.RenderTarget[0].RenderTargetWriteMask = 0;
+        desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+        m_psoDepthPrepassAlphaTest = createPSO(L"DepthPrepassAlphaTest", desc);
+        if (!m_psoDepthPrepassAlphaTest) { LOG_ENGINE_ERROR("Failed to create PSO: DepthPrepassAlphaTest"); return false; }
+    }
+    {
+        auto desc = CreateBasePSODesc(m_rootSignature.Get(), m_basicVS, m_basicPS);
+        desc.BlendState.RenderTarget[0].RenderTargetWriteMask = 0;
+        desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+        desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+        m_psoDepthPrepassAlphaTestCullNone = createPSO(L"DepthPrepassAlphaTestCullNone", desc);
+        if (!m_psoDepthPrepassAlphaTestCullNone) { LOG_ENGINE_ERROR("Failed to create PSO: DepthPrepassAlphaTestCullNone"); return false; }
+    }
+
+    // Shadow with alpha test (uses shadow_alphatest shader for texture sampling + discard)
+    if (!m_shadowAlphaTestVS.empty() && !m_shadowAlphaTestPS.empty())
+    {
+        auto desc = CreateBasePSODesc(m_rootSignature.Get(), m_shadowAlphaTestVS, m_shadowAlphaTestPS);
+        desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+        desc.RasterizerState.DepthBias = 1000;
+        desc.RasterizerState.DepthBiasClamp = 0.0f;
+        desc.RasterizerState.SlopeScaledDepthBias = 1.0f;
+        desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+        desc.NumRenderTargets = 0;
+        desc.RTVFormats[0] = DXGI_FORMAT_UNKNOWN;
+        desc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+        m_psoShadowAlphaTest = createPSO(L"ShadowAlphaTest", desc);
+        if (!m_psoShadowAlphaTest) { LOG_ENGINE_WARN("Failed to create PSO: ShadowAlphaTest — alpha-masked shadows disabled"); }
+    }
+
     LOG_ENGINE_INFO("[D3D12] Pipeline states: {} cached, {} compiled", cached, compiled);
     return true;
 }
@@ -451,7 +488,13 @@ bool D3D12RenderAPI::createPipelineStates()
 ID3D12PipelineState* D3D12RenderAPI::selectPSO(const RenderState& state, bool unlit)
 {
     if (in_depth_prepass)
+    {
+        if (state.alpha_test)
+            return (state.cull_mode == CullMode::None)
+                ? m_psoDepthPrepassAlphaTestCullNone.Get()
+                : m_psoDepthPrepassAlphaTest.Get();
         return m_psoDepthPrepass.Get();
+    }
 
     if (unlit)
     {

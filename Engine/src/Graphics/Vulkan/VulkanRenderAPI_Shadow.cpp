@@ -328,6 +328,66 @@ bool VulkanRenderAPI::createShadowResources()
     vkDestroyShaderModule(device, vertModule, nullptr);
     vkDestroyShaderModule(device, fragModule, nullptr);
 
+    // Create shadow alpha-test pipeline (for alpha-masked geometry like foliage)
+    {
+        auto atVertCode = readShaderFile(EnginePaths::resolveEngineAsset("../assets/shaders/compiled/vulkan/shadow_alphatest.vert.spv"));
+        auto atFragCode = readShaderFile(EnginePaths::resolveEngineAsset("../assets/shaders/compiled/vulkan/shadow_alphatest.frag.spv"));
+
+        if (!atVertCode.empty() && !atFragCode.empty()) {
+            VkShaderModule atVertModule = createShaderModule(atVertCode);
+            VkShaderModule atFragModule = createShaderModule(atFragCode);
+
+            if (atVertModule != VK_NULL_HANDLE && atFragModule != VK_NULL_HANDLE) {
+                // Alpha-test shadow pipeline layout: push constants + main descriptor set (for texture access)
+                VkPushConstantRange atPushRange{};
+                atPushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+                atPushRange.offset = 0;
+                atPushRange.size = 2 * sizeof(glm::mat4);
+
+                VkPipelineLayoutCreateInfo atLayoutInfo{};
+                atLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+                atLayoutInfo.setLayoutCount = 1;
+                atLayoutInfo.pSetLayouts = &descriptor_set_layout;  // Main layout (has texture at binding 1)
+                atLayoutInfo.pushConstantRangeCount = 1;
+                atLayoutInfo.pPushConstantRanges = &atPushRange;
+
+                if (vkCreatePipelineLayout(device, &atLayoutInfo, nullptr, &shadow_alphatest_pipeline_layout) == VK_SUCCESS) {
+                    // Shadow alpha-test shader needs position + texcoord
+                    std::array<VkVertexInputAttributeDescription, 2> atAttrDesc{};
+                    atAttrDesc[0].binding = 0;
+                    atAttrDesc[0].location = 0;
+                    atAttrDesc[0].format = VK_FORMAT_R32G32B32_SFLOAT;
+                    atAttrDesc[0].offset = offsetof(vertex, vx);
+                    atAttrDesc[1].binding = 0;
+                    atAttrDesc[1].location = 2;  // texcoord is at location 2 (after normal at 1)
+                    atAttrDesc[1].format = VK_FORMAT_R32G32_SFLOAT;
+                    atAttrDesc[1].offset = offsetof(vertex, u);
+
+                    VkPipelineBuilder atBuilder(device, vk_pipeline_cache);
+                    atBuilder.setShaders(atVertModule, atFragModule)
+                             .setVertexInput(&bindingDesc, 1, atAttrDesc.data(), static_cast<uint32_t>(atAttrDesc.size()))
+                             .setCullMode(VK_CULL_MODE_NONE)
+                             .setDepthBias(1.25f, 1.75f)
+                             .setNoColorAttachments()
+                             .setRenderPass(shadow_render_pass, 0)
+                             .setLayout(shadow_alphatest_pipeline_layout);
+
+                    VkResult atResult = atBuilder.build(&shadow_pipeline_alpha_test);
+                    if (atResult == VK_SUCCESS) {
+                        LOG_ENGINE_INFO("[Vulkan] Shadow alpha-test pipeline created successfully");
+                    } else {
+                        LOG_ENGINE_WARN("[Vulkan] Failed to create shadow alpha-test pipeline — alpha-masked shadows disabled");
+                    }
+                }
+            }
+
+            if (atVertModule != VK_NULL_HANDLE) vkDestroyShaderModule(device, atVertModule, nullptr);
+            if (atFragModule != VK_NULL_HANDLE) vkDestroyShaderModule(device, atFragModule, nullptr);
+        } else {
+            LOG_ENGINE_WARN("[Vulkan] Shadow alpha-test shaders not found — alpha-masked shadows disabled");
+        }
+    }
+
     // Create shadow descriptor pool
     VkDescriptorPoolSize poolSize{};
     poolSize.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
@@ -432,16 +492,24 @@ void VulkanRenderAPI::cleanupShadowResources()
         shadow_descriptor_pool = VK_NULL_HANDLE;
     }
 
-    // Destroy shadow pipeline
+    // Destroy shadow pipelines
     if (shadow_pipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(device, shadow_pipeline, nullptr);
         shadow_pipeline = VK_NULL_HANDLE;
     }
+    if (shadow_pipeline_alpha_test != VK_NULL_HANDLE) {
+        vkDestroyPipeline(device, shadow_pipeline_alpha_test, nullptr);
+        shadow_pipeline_alpha_test = VK_NULL_HANDLE;
+    }
 
-    // Destroy shadow pipeline layout
+    // Destroy shadow pipeline layouts
     if (shadow_pipeline_layout != VK_NULL_HANDLE) {
         vkDestroyPipelineLayout(device, shadow_pipeline_layout, nullptr);
         shadow_pipeline_layout = VK_NULL_HANDLE;
+    }
+    if (shadow_alphatest_pipeline_layout != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(device, shadow_alphatest_pipeline_layout, nullptr);
+        shadow_alphatest_pipeline_layout = VK_NULL_HANDLE;
     }
 
     // Destroy shadow descriptor set layout

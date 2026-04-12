@@ -63,6 +63,8 @@ struct RenderState
     bool depth_write = true;
     bool lighting = true;
     glm::vec3 color = glm::vec3(1.0f, 1.0f, 1.0f);
+    bool alpha_test = false;
+    float alpha_cutoff = 0.0f;
 };
 
 // GPU light structures for point/spot light constant buffers

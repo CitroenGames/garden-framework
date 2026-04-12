@@ -50,6 +50,17 @@ struct MetalFXAAUniforms {
     glm::vec2 inverseScreenSize;
 };
 
+// Per-object UBO for command buffer replay (matches Vulkan's PerObjectUBO).
+// Padded to 256 bytes for Metal's setVertexBufferOffset alignment requirement.
+struct MetalPerObjectUBO {
+    glm::mat4 model;          // 64 bytes
+    glm::mat4 normalMatrix;   // 64 bytes
+    glm::vec3 color;          // 12 bytes
+    int useTexture;            // 4 bytes
+    float _pad[28];           // 112 bytes padding → 256 total
+};
+static_assert(sizeof(MetalPerObjectUBO) == 256, "Must be 256-byte aligned for Metal");
+
 // ============================================================================
 // Fullscreen quad vertices for FXAA
 // ============================================================================
