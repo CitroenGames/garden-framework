@@ -8,6 +8,7 @@
 #include <limits>
 #include <unordered_map>
 #include <cstring>
+#include <atomic>
 #include "Graphics/RenderAPI.hpp"
 #include "Graphics/IGPUMesh.hpp"
 #include "Utils/ObjLoader.hpp"
@@ -74,8 +75,8 @@ public:
     bool transparent;
     bool casts_shadow;
 
-    // Async loading support
-    MeshLoadState load_state;
+    // Async loading support (atomic for thread-safe read from worker threads)
+    std::atomic<MeshLoadState> load_state{MeshLoadState::NotLoaded};
     Assets::AssetHandle asset_handle;
 
     // AABB for frustum culling
@@ -136,7 +137,7 @@ public:
         texture_set = false;
         texture = INVALID_TEXTURE;
         uses_material_ranges = false;
-        load_state = MeshLoadState::Ready;
+        load_state.store(MeshLoadState::Ready, std::memory_order_release);
         aabb_min = glm::vec3(0.0f);
         aabb_max = glm::vec3(0.0f);
         bounds_computed = false;
@@ -157,14 +158,13 @@ public:
         texture_set = false;
         texture = INVALID_TEXTURE;
         uses_material_ranges = false;
-        load_state = MeshLoadState::NotLoaded;
         aabb_min = glm::vec3(0.0f);
         aabb_max = glm::vec3(0.0f);
         bounds_computed = false;
 
         load_model_file(filename, nullptr, format);
         if (is_valid) {
-            load_state = MeshLoadState::Ready;
+            load_state.store(MeshLoadState::Ready, std::memory_order_release);
         }
     };
 
@@ -184,14 +184,13 @@ public:
         texture_set = false;
         texture = INVALID_TEXTURE;
         uses_material_ranges = false;
-        load_state = MeshLoadState::NotLoaded;
         aabb_min = glm::vec3(0.0f);
         aabb_max = glm::vec3(0.0f);
         bounds_computed = false;
 
         load_model_file(filename, render_api, format);
         if (is_valid) {
-            load_state = MeshLoadState::Ready;
+            load_state.store(MeshLoadState::Ready, std::memory_order_release);
         }
     };
 
@@ -210,7 +209,7 @@ public:
         visible = other.visible;
         culling = other.culling;
         transparent = other.transparent;
-        load_state = other.load_state;
+        load_state.store(other.load_state.load(std::memory_order_relaxed), std::memory_order_relaxed);
         asset_handle = other.asset_handle;
         aabb_min = other.aabb_min;
         aabb_max = other.aabb_max;
@@ -224,7 +223,7 @@ public:
         other.vertices_len = 0;
         other.gpu_mesh = nullptr;
         other.owns_vertices = false;
-        other.load_state = MeshLoadState::NotLoaded;
+        other.load_state.store(MeshLoadState::NotLoaded, std::memory_order_relaxed);
         other.bounds_computed = false;
         other.current_lod = 0;
         other.force_lod = -1;
@@ -252,7 +251,7 @@ public:
             visible = other.visible;
             culling = other.culling;
             transparent = other.transparent;
-            load_state = other.load_state;
+            load_state.store(other.load_state.load(std::memory_order_relaxed), std::memory_order_relaxed);
             asset_handle = other.asset_handle;
             aabb_min = other.aabb_min;
             aabb_max = other.aabb_max;
@@ -266,7 +265,7 @@ public:
             other.vertices_len = 0;
             other.gpu_mesh = nullptr;
             other.owns_vertices = false;
-            other.load_state = MeshLoadState::NotLoaded;
+            other.load_state.store(MeshLoadState::NotLoaded, std::memory_order_relaxed);
             other.bounds_computed = false;
             other.current_lod = 0;
             other.force_lod = -1;
@@ -425,11 +424,11 @@ public:
         return state;
     }
 
-    // Async loading state queries
-    bool isReady() const { return load_state == MeshLoadState::Ready; }
-    bool isLoading() const { return load_state == MeshLoadState::Loading; }
-    bool hasFailed() const { return load_state == MeshLoadState::Failed; }
-    MeshLoadState getLoadState() const { return load_state; }
+    // Async loading state queries (thread-safe via atomic)
+    bool isReady() const { return load_state.load(std::memory_order_acquire) == MeshLoadState::Ready; }
+    bool isLoading() const { return load_state.load(std::memory_order_acquire) == MeshLoadState::Loading; }
+    bool hasFailed() const { return load_state.load(std::memory_order_acquire) == MeshLoadState::Failed; }
+    MeshLoadState getLoadState() const { return load_state.load(std::memory_order_acquire); }
 
     // Compute AABB from vertex data
     void computeBounds()
@@ -504,6 +503,31 @@ public:
     int getLODCount() const
     {
         return static_cast<int>(lod_levels.size()) + 1; // +1 for LOD0
+    }
+
+    // Thread-safe LOD query: returns the GPU mesh for a given LOD level
+    // without writing current_lod. Safe to call from any thread.
+    IGPUMesh* getGPUMeshForLOD(int lod_level) const
+    {
+        if (lod_level <= 0 || lod_levels.empty())
+            return gpu_mesh;
+        int idx = lod_level - 1;
+        if (idx >= 0 && idx < static_cast<int>(lod_levels.size()) && lod_levels[idx].gpu_mesh)
+            return lod_levels[idx].gpu_mesh;
+        return gpu_mesh;
+    }
+
+    // Thread-safe LOD query: returns LOD-specific material ranges,
+    // or nullptr if the base material_ranges should be used.
+    const std::vector<MaterialRange>* getMaterialRangesForLOD(int lod_level) const
+    {
+        if (lod_level <= 0 || lod_levels.empty())
+            return nullptr;
+        int idx = lod_level - 1;
+        if (idx >= 0 && idx < static_cast<int>(lod_levels.size())
+            && !lod_levels[idx].material_ranges.empty())
+            return &lod_levels[idx].material_ranges;
+        return nullptr;
     }
 
     // Static async loading method - returns a handle that can be checked for completion

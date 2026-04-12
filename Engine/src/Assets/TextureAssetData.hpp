@@ -4,6 +4,7 @@
 #include <vector>
 #include <cstdint>
 #include <string>
+#include <atomic>
 
 namespace Assets {
 
@@ -19,8 +20,12 @@ struct TextureAssetData {
     bool is_embedded = false;
     std::string source_uri;
 
+    // Thread safety protocol:
+    // 1. Main thread sets gpu_handle
+    // 2. Main thread calls uploaded.store(true, release)
+    // 3. Worker threads check uploaded.load(acquire) before reading gpu_handle
     TextureHandle gpu_handle = INVALID_TEXTURE;
-    bool uploaded = false;
+    std::atomic<bool> uploaded{false};
 
     TextureAssetData() = default;
 
@@ -34,10 +39,10 @@ struct TextureAssetData {
         , is_embedded(other.is_embedded)
         , source_uri(std::move(other.source_uri))
         , gpu_handle(other.gpu_handle)
-        , uploaded(other.uploaded)
     {
+        uploaded.store(other.uploaded.load(std::memory_order_relaxed), std::memory_order_relaxed);
         other.gpu_handle = INVALID_TEXTURE;
-        other.uploaded = false;
+        other.uploaded.store(false, std::memory_order_relaxed);
         other.width = 0;
         other.height = 0;
         other.channels = 0;
@@ -54,10 +59,10 @@ struct TextureAssetData {
             is_embedded = other.is_embedded;
             source_uri = std::move(other.source_uri);
             gpu_handle = other.gpu_handle;
-            uploaded = other.uploaded;
+            uploaded.store(other.uploaded.load(std::memory_order_relaxed), std::memory_order_relaxed);
 
             other.gpu_handle = INVALID_TEXTURE;
-            other.uploaded = false;
+            other.uploaded.store(false, std::memory_order_relaxed);
             other.width = 0;
             other.height = 0;
             other.channels = 0;

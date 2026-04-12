@@ -11,6 +11,7 @@
 #include <vector>
 #include <string>
 #include <optional>
+#include <atomic>
 
 class IRenderAPI;
 
@@ -20,8 +21,10 @@ struct AssetState {
     AssetId id = INVALID_ASSET_ID;
     std::string path;
     AssetType type = AssetType::Unknown;
-    LoadState state = LoadState::NotLoaded;
-    float progress = 0.0f;
+    // Atomic for thread-safe access: updateProgress() uses shared_lock for
+    // map lookup but writes these atomically; readers also read atomically.
+    std::atomic<LoadState> state{LoadState::NotLoaded};
+    std::atomic<float> progress{0.0f};
 
     AssetData data;
     std::optional<AssetError> error;

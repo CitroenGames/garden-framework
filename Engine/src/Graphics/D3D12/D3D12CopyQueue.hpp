@@ -3,6 +3,7 @@
 #include <d3d12.h>
 #include <wrl/client.h>
 #include <vector>
+#include <mutex>
 
 using Microsoft::WRL::ComPtr;
 
@@ -67,6 +68,7 @@ private:
 
     std::vector<ComPtr<ID3D12Resource>> m_stagingBuffers;
     std::vector<PendingTransition> m_pendingTransitions;
+    std::mutex m_stagingMutex; // Guards m_stagingBuffers and m_pendingTransitions
 
     void ensureOpen();
 };

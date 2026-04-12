@@ -191,7 +191,7 @@ bool GltfAssetLoader::uploadToGPU(AssetData& data, IRenderAPI* render_api) {
 
     auto model = *model_ptr;
 
-    if (model->mesh_data && !model->mesh_data->uploaded) {
+    if (model->mesh_data && !model->mesh_data->uploaded.load(std::memory_order_acquire)) {
         if (!model->mesh_data->vertices.empty()) {
             model->mesh_data->gpu_mesh = render_api->createMesh();
             if (model->mesh_data->gpu_mesh) {
@@ -199,7 +199,7 @@ bool GltfAssetLoader::uploadToGPU(AssetData& data, IRenderAPI* render_api) {
                     model->mesh_data->vertices.data(),
                     model->mesh_data->vertices.size()
                 );
-                model->mesh_data->uploaded = true;
+                model->mesh_data->uploaded.store(true, std::memory_order_release);
 
                 LOG_ENGINE_TRACE("GltfAssetLoader: Uploaded mesh ({} vertices)",
                                model->mesh_data->vertices.size());
@@ -210,7 +210,7 @@ bool GltfAssetLoader::uploadToGPU(AssetData& data, IRenderAPI* render_api) {
     }
 
     for (auto& tex : model->textures) {
-        if (tex && !tex->uploaded && tex->hasData()) {
+        if (tex && !tex->uploaded.load(std::memory_order_acquire) && tex->hasData()) {
             tex->gpu_handle = render_api->loadTextureFromMemory(
                 tex->pixels.data(),
                 tex->width,
@@ -221,7 +221,7 @@ bool GltfAssetLoader::uploadToGPU(AssetData& data, IRenderAPI* render_api) {
             );
 
             if (tex->gpu_handle != INVALID_TEXTURE) {
-                tex->uploaded = true;
+                tex->uploaded.store(true, std::memory_order_release);
                 tex->freePixels();
 
                 LOG_ENGINE_TRACE("GltfAssetLoader: Uploaded texture '{}' (handle: {})",

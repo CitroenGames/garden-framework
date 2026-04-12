@@ -96,11 +96,13 @@ ID3D12GraphicsCommandList* D3D12CopyQueue::getCommandList()
 
 void D3D12CopyQueue::retainStagingBuffer(ComPtr<ID3D12Resource> buffer)
 {
+    std::lock_guard<std::mutex> lock(m_stagingMutex);
     m_stagingBuffers.push_back(std::move(buffer));
 }
 
 void D3D12CopyQueue::addPendingTransition(ID3D12Resource* resource, D3D12_RESOURCE_STATES targetState)
 {
+    std::lock_guard<std::mutex> lock(m_stagingMutex);
     m_pendingTransitions.push_back({ resource, targetState });
 }
 
@@ -129,6 +131,7 @@ void D3D12CopyQueue::waitOnGraphicsQueue(ID3D12CommandQueue* graphicsQueue)
 
 void D3D12CopyQueue::applyPendingTransitions(ID3D12GraphicsCommandList* graphicsCmdList)
 {
+    std::lock_guard<std::mutex> lock(m_stagingMutex);
     if (m_pendingTransitions.empty()) return;
 
     BarrierBatch batch;
@@ -154,12 +157,16 @@ void D3D12CopyQueue::flushSync()
         WaitForSingleObject(m_fenceEvent, INFINITE);
     }
 
-    releaseStagingBuffers();
-    m_pendingTransitions.clear();
+    {
+        std::lock_guard<std::mutex> lock(m_stagingMutex);
+        m_stagingBuffers.clear();
+        m_pendingTransitions.clear();
+    }
 }
 
 void D3D12CopyQueue::releaseStagingBuffers()
 {
+    std::lock_guard<std::mutex> lock(m_stagingMutex);
     // Only release if the GPU is done with them
     if (m_lastSubmittedFence > 0 && m_fence && m_fence->GetCompletedValue() >= m_lastSubmittedFence)
     {

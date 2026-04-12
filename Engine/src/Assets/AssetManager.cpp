@@ -182,7 +182,7 @@ AssetHandle AssetManager::loadAsync(const std::string& path,
         auto it = m_path_to_id.find(path);
         if (it != m_path_to_id.end()) {
             AssetState* state = getAssetState(it->second);
-            if (state && state->state == LoadState::Ready) {
+            if (state && state->state.load(std::memory_order_acquire) == LoadState::Ready) {
                 if (on_complete) {
                     on_complete(it->second, true, state->data);
                 }
@@ -203,7 +203,7 @@ AssetHandle AssetManager::loadAsync(const std::string& path,
     asset_state->id = id;
     asset_state->path = path;
     asset_state->type = loader->getAssetType();
-    asset_state->state = LoadState::Queued;
+    asset_state->state.store(LoadState::Queued, std::memory_order_release);
     asset_state->on_complete = on_complete;
     asset_state->on_progress = on_progress;
 
@@ -324,8 +324,8 @@ void AssetManager::updateProgress(AssetId id, float progress, LoadState state) {
     std::shared_lock<std::shared_mutex> lock(m_assets_mutex);
     auto it = m_assets.find(id);
     if (it != m_assets.end()) {
-        it->second->progress = progress;
-        it->second->state = state;
+        it->second->progress.store(progress, std::memory_order_release);
+        it->second->state.store(state, std::memory_order_release);
 
         if (it->second->on_progress) {
             it->second->on_progress(id, progress, state);
@@ -337,8 +337,8 @@ void AssetManager::completeLoad(AssetId id, bool success, const AssetData& data)
     std::unique_lock<std::shared_mutex> lock(m_assets_mutex);
     auto it = m_assets.find(id);
     if (it != m_assets.end()) {
-        it->second->progress = 1.0f;
-        it->second->state = LoadState::Ready;
+        it->second->progress.store(1.0f, std::memory_order_release);
+        it->second->state.store(LoadState::Ready, std::memory_order_release);
 
         try {
             it->second->promise.set_value(data);
@@ -357,7 +357,7 @@ void AssetManager::failLoad(AssetId id, const std::string& error) {
     std::unique_lock<std::shared_mutex> lock(m_assets_mutex);
     auto it = m_assets.find(id);
     if (it != m_assets.end()) {
-        it->second->state = LoadState::Failed;
+        it->second->state.store(LoadState::Failed, std::memory_order_release);
         it->second->error = AssetError(error, it->second->path);
 
         try {
@@ -380,13 +380,13 @@ AssetState* AssetManager::getAssetState(AssetId id) const {
 }
 
 LoadState AssetManager::getLoadState(AssetId id) const {
-    AssetState* state = getAssetState(id);
-    return state ? state->state : LoadState::Failed;
+    AssetState* s = getAssetState(id);
+    return s ? s->state.load(std::memory_order_acquire) : LoadState::Failed;
 }
 
 float AssetManager::getProgress(AssetId id) const {
-    AssetState* state = getAssetState(id);
-    return state ? state->progress : 0.0f;
+    AssetState* s = getAssetState(id);
+    return s ? s->progress.load(std::memory_order_acquire) : 0.0f;
 }
 
 AssetData AssetManager::getData(AssetId id) const {
@@ -405,7 +405,7 @@ bool AssetManager::isLoaded(const std::string& path) const {
     if (it == m_path_to_id.end()) return false;
 
     AssetState* state = getAssetState(it->second);
-    return state && state->state == LoadState::Ready;
+    return state && state->state.load(std::memory_order_acquire) == LoadState::Ready;
 }
 
 AssetHandle AssetManager::getLoadedAsset(const std::string& path) const {
@@ -457,7 +457,8 @@ size_t AssetManager::getLoadingCount() const {
     std::shared_lock<std::shared_mutex> lock(m_assets_mutex);
     size_t count = 0;
     for (const auto& [id, state] : m_assets) {
-        if (state->state != LoadState::Ready && state->state != LoadState::Failed) {
+        if (state->state.load(std::memory_order_acquire) != LoadState::Ready &&
+            state->state.load(std::memory_order_acquire) != LoadState::Failed) {
             ++count;
         }
     }

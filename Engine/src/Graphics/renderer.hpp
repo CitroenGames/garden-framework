@@ -13,6 +13,7 @@
 #include "Debug/DebugDraw.hpp"
 #include "LODSelector.hpp"
 #include "Console/ConVar.hpp"
+#include "Threading/FrameSync.hpp"
 #include <entt/entt.hpp>
 #include <algorithm>
 #include <future>
@@ -127,8 +128,9 @@ public:
             m.uploadToGPU(api);
     }
 
-    // Record a single mesh draw into a command buffer (replaces render_mesh_with_api)
-    static void record_mesh_draw(mesh& m, const TransformComponent& transform,
+    // Record a single mesh draw into a command buffer.
+    // Thread-safe: reads mesh state without mutation.
+    static void record_mesh_draw(const mesh& m, const TransformComponent& transform,
                                  RenderCommandBuffer& cmds, bool global_lighting)
     {
         if (!m.visible || !m.gpu_mesh || !m.gpu_mesh->isUploaded()) return;
@@ -157,10 +159,11 @@ public:
         }
     }
 
-    // Record a LOD mesh draw into a command buffer (replaces render_lod_mesh)
-    static void record_lod_mesh_draw(mesh& m, const TransformComponent& transform,
+    // Record a LOD mesh draw into a command buffer.
+    // Thread-safe: uses lod_level parameter instead of reading m.current_lod.
+    static void record_lod_mesh_draw(const mesh& m, const TransformComponent& transform,
                                      RenderCommandBuffer& cmds, bool global_lighting,
-                                     IGPUMesh* lod_gpu_mesh)
+                                     IGPUMesh* lod_gpu_mesh, int lod_level)
     {
         if (!lod_gpu_mesh || !lod_gpu_mesh->isUploaded()) return;
 
@@ -168,15 +171,12 @@ public:
         RenderState state = m.getRenderState();
         PSOKey key = PSOKey::fromRenderState(state, global_lighting);
 
-        // Check for LOD-specific material ranges
-        int lod_idx = m.current_lod - 1;
-        bool has_lod_materials = (lod_idx >= 0 && lod_idx < static_cast<int>(m.lod_levels.size())
-                                  && !m.lod_levels[lod_idx].material_ranges.empty());
+        // Check for LOD-specific material ranges using the thread-safe accessor
+        const auto* lod_ranges = m.getMaterialRangesForLOD(lod_level);
 
-        if (has_lod_materials)
+        if (lod_ranges)
         {
-            const auto& ranges = m.lod_levels[lod_idx].material_ranges;
-            for (const auto& range : ranges)
+            for (const auto& range : *lod_ranges)
             {
                 bool has_tex = range.hasValidTexture();
                 cmds.recordDrawRange(lod_gpu_mesh, model,
@@ -211,27 +211,28 @@ public:
         }
     }
 
-    // Record a mesh at a specific LOD level (replaces render_mesh_at_lod)
-    static void record_mesh_at_lod(mesh& m, const TransformComponent& transform,
+    // Record a mesh at a specific LOD level.
+    // Thread-safe: uses getGPUMeshForLOD() instead of selectLOD() + getActiveGPUMesh().
+    static void record_mesh_at_lod(const mesh& m, const TransformComponent& transform,
                                    RenderCommandBuffer& cmds, bool global_lighting, int lod_level)
     {
         if (!m.visible) return;
 
         if (!m.lod_levels.empty() && lod_level > 0)
         {
-            m.selectLOD(lod_level);
-            IGPUMesh* active = m.getActiveGPUMesh();
+            IGPUMesh* active = m.getGPUMeshForLOD(lod_level);
             if (active && active != m.gpu_mesh)
             {
-                record_lod_mesh_draw(m, transform, cmds, global_lighting, active);
+                record_lod_mesh_draw(m, transform, cmds, global_lighting, active, lod_level);
                 return;
             }
         }
         record_mesh_draw(m, transform, cmds, global_lighting);
     }
 
-    // Record a mesh with automatic LOD selection (replaces render_mesh_with_lod)
-    static void record_mesh_with_lod(mesh& m, const TransformComponent& transform,
+    // Record a mesh with automatic LOD selection.
+    // Thread-safe: computes LOD locally, never writes to mesh state.
+    static void record_mesh_with_lod(const mesh& m, const TransformComponent& transform,
                                      RenderCommandBuffer& cmds, bool global_lighting,
                                      const glm::vec3& camera_pos, const glm::mat4& projection)
     {
@@ -258,12 +259,11 @@ public:
                     transform.scale
                 );
             }
-            m.selectLOD(lod);
 
-            IGPUMesh* active = m.getActiveGPUMesh();
+            IGPUMesh* active = m.getGPUMeshForLOD(lod);
             if (active && active != m.gpu_mesh)
             {
-                record_lod_mesh_draw(m, transform, cmds, global_lighting, active);
+                record_lod_mesh_draw(m, transform, cmds, global_lighting, active, lod);
                 return;
             }
         }
@@ -271,8 +271,9 @@ public:
         record_mesh_draw(m, transform, cmds, global_lighting);
     }
 
-    // Record a depth-prepass draw command
-    static void record_depth_draw(mesh& m, const TransformComponent& transform,
+    // Record a depth-prepass draw command.
+    // Thread-safe: reads mesh state without mutation.
+    static void record_depth_draw(const mesh& m, const TransformComponent& transform,
                                   RenderCommandBuffer& cmds)
     {
         if (!m.visible || !m.gpu_mesh || !m.gpu_mesh->isUploaded()) return;
@@ -281,8 +282,9 @@ public:
         cmds.recordDraw(m.gpu_mesh, model, INVALID_TEXTURE, false, key);
     }
 
-    // Record a depth-prepass draw at a specific LOD
-    static void record_depth_draw_at_lod(mesh& m, const TransformComponent& transform,
+    // Record a depth-prepass draw at a specific LOD.
+    // Thread-safe: uses getGPUMeshForLOD() instead of selectLOD().
+    static void record_depth_draw_at_lod(const mesh& m, const TransformComponent& transform,
                                          RenderCommandBuffer& cmds, int lod_level)
     {
         if (!m.visible || !m.gpu_mesh) return;
@@ -291,8 +293,7 @@ public:
 
         if (lod_level > 0 && !m.lod_levels.empty())
         {
-            m.selectLOD(lod_level);
-            IGPUMesh* active = m.getActiveGPUMesh();
+            IGPUMesh* active = m.getGPUMeshForLOD(lod_level);
             if (active && active != m.gpu_mesh && active->isUploaded())
             {
                 cmds.recordDraw(active, model, INVALID_TEXTURE, false, key);
@@ -303,8 +304,9 @@ public:
             cmds.recordDraw(m.gpu_mesh, model, INVALID_TEXTURE, false, key);
     }
 
-    // Record a shadow pass draw command
-    static void record_shadow_draw(mesh& m, const TransformComponent& transform,
+    // Record a shadow pass draw command.
+    // Thread-safe: computes shadow LOD locally, never writes to mesh state.
+    static void record_shadow_draw(const mesh& m, const TransformComponent& transform,
                                    RenderCommandBuffer& cmds, int cascade_index)
     {
         if (!m.visible || !m.casts_shadow) return;
@@ -316,8 +318,7 @@ public:
         if (!m.lod_levels.empty())
         {
             int shadow_lod = std::min(cascade_index, static_cast<int>(m.lod_levels.size()));
-            m.selectLOD(shadow_lod);
-            IGPUMesh* active = m.getActiveGPUMesh();
+            IGPUMesh* active = m.getGPUMeshForLOD(shadow_lod);
             if (active && active != m.gpu_mesh && active->isUploaded())
             {
                 cmds.recordDraw(active, model, INVALID_TEXTURE, false, key);
@@ -389,6 +390,8 @@ public:
         std::vector<std::future<void>> futures;
         futures.reserve(num_chunks);
 
+        FrameSync::get().setPhase(FramePhase::ParallelRecord);
+
         for (size_t c = 0; c < num_chunks; ++c)
         {
             contexts[c].context_index = static_cast<uint32_t>(c);
@@ -413,6 +416,8 @@ public:
         // Wait for all recording tasks to complete
         for (auto& f : futures)
             f.get();
+
+        FrameSync::get().setPhase(FramePhase::Replay);
 
         // Merge all command buffers and sort
         RenderCommandBuffer merged;
@@ -454,6 +459,8 @@ public:
         std::vector<std::future<void>> futures;
         futures.reserve(num_chunks);
 
+        FrameSync::get().setPhase(FramePhase::ParallelRecord);
+
         for (size_t c = 0; c < num_chunks; ++c)
         {
             size_t start = c * PARALLEL_CHUNK_SIZE;
@@ -475,6 +482,8 @@ public:
 
         for (auto& f : futures)
             f.get();
+
+        FrameSync::get().setPhase(FramePhase::Replay);
 
         RenderCommandBuffer merged;
         size_t total = 0;
@@ -510,6 +519,8 @@ public:
         std::vector<std::future<void>> futures;
         futures.reserve(num_chunks);
 
+        FrameSync::get().setPhase(FramePhase::ParallelRecord);
+
         for (size_t c = 0; c < num_chunks; ++c)
         {
             size_t start = c * PARALLEL_CHUNK_SIZE;
@@ -531,6 +542,8 @@ public:
 
         for (auto& f : futures)
             f.get();
+
+        FrameSync::get().setPhase(FramePhase::Replay);
 
         RenderCommandBuffer merged;
         size_t total = 0;
@@ -623,7 +636,9 @@ public:
         api->popMatrix();
     };
 
-    // Render a LOD mesh: temporarily swaps gpu_mesh and uses LOD-specific material ranges
+    // Render a LOD mesh: temporarily swaps gpu_mesh and uses LOD-specific material ranges.
+    // WARNING: NOT thread-safe — mutates and restores mesh state. Main thread only.
+    // For parallel recording, use the thread-safe record_lod_mesh_draw() instead.
     static void render_lod_mesh(mesh& m, const TransformComponent& transform,
                                  IRenderAPI* api, IGPUMesh* lod_gpu_mesh)
     {
@@ -763,6 +778,8 @@ public:
             printf("Error: No render API set for renderer\n");
             return;
         }
+
+        FrameSync::get().setPhase(FramePhase::PreRender);
 
         // Sync renderer state from CVars
         bvh_enabled = CVAR_BOOL(r_frustumculling);

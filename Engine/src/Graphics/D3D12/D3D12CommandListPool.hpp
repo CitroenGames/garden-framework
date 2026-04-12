@@ -4,6 +4,7 @@
 #include <wrl/client.h>
 #include <vector>
 #include <cstdint>
+#include <atomic>
 
 using Microsoft::WRL::ComPtr;
 
@@ -27,7 +28,24 @@ public:
     {
         ComPtr<ID3D12CommandAllocator> allocator;
         ComPtr<ID3D12GraphicsCommandList> cmdList;
-        bool in_use = false;
+        std::atomic<bool> in_use{false};
+
+        Entry() = default;
+        Entry(Entry&& other) noexcept
+            : allocator(std::move(other.allocator))
+            , cmdList(std::move(other.cmdList))
+        {
+            in_use.store(other.in_use.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        }
+        Entry& operator=(Entry&& other) noexcept
+        {
+            allocator = std::move(other.allocator);
+            cmdList = std::move(other.cmdList);
+            in_use.store(other.in_use.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            return *this;
+        }
+        Entry(const Entry&) = delete;
+        Entry& operator=(const Entry&) = delete;
     };
 
     // Initialize the pool with N entries (typically hardware_concurrency).
@@ -48,7 +66,7 @@ public:
 
             // Command lists are created in recording state; close them
             m_entries[i].cmdList->Close();
-            m_entries[i].in_use = false;
+            m_entries[i].in_use.store(false, std::memory_order_relaxed);
         }
         return true;
     }
@@ -61,20 +79,22 @@ public:
         {
             if (entry.allocator)
                 entry.allocator->Reset();
-            entry.in_use = false;
+            entry.in_use.store(false, std::memory_order_release);
         }
     }
 
     // Acquire a command list for recording. Returns nullptr if pool is exhausted.
+    // Thread-safe: uses compare-exchange to prevent two threads acquiring the same entry.
     // The returned command list is already open (Reset + in recording state).
     // The caller must set root signature, descriptor heaps, etc. before recording.
     Entry* acquire(ID3D12PipelineState* initialPSO = nullptr)
     {
         for (auto& entry : m_entries)
         {
-            if (!entry.in_use)
+            bool expected = false;
+            if (entry.in_use.compare_exchange_strong(expected, true,
+                    std::memory_order_acq_rel, std::memory_order_relaxed))
             {
-                entry.in_use = true;
                 entry.cmdList->Reset(entry.allocator.Get(), initialPSO);
                 return &entry;
             }
@@ -88,7 +108,7 @@ public:
         std::vector<ID3D12CommandList*> result;
         for (const auto& entry : m_entries)
         {
-            if (entry.in_use)
+            if (entry.in_use.load(std::memory_order_acquire))
                 result.push_back(entry.cmdList.Get());
         }
         return result;
@@ -99,7 +119,7 @@ public:
     {
         uint32_t count = 0;
         for (const auto& entry : m_entries)
-            if (entry.in_use) count++;
+            if (entry.in_use.load(std::memory_order_acquire)) count++;
         return count;
     }
 

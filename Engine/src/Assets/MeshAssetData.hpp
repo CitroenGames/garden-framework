@@ -7,6 +7,7 @@
 #include <vector>
 #include <memory>
 #include <string>
+#include <atomic>
 
 namespace Assets {
 
@@ -31,8 +32,12 @@ struct MeshAssetData {
     glm::vec3 aabb_min{0.0f};
     glm::vec3 aabb_max{0.0f};
 
+    // Thread safety protocol:
+    // 1. Main thread sets gpu_mesh pointer
+    // 2. Main thread calls uploaded.store(true, release)
+    // 3. Worker threads check uploaded.load(acquire) before reading gpu_mesh
     IGPUMesh* gpu_mesh = nullptr;
-    bool uploaded = false;
+    std::atomic<bool> uploaded{false};
 
     std::string source_path;
 
@@ -41,21 +46,27 @@ struct MeshAssetData {
         std::vector<vertex> vertices;
         std::vector<uint32_t> indices;
         IGPUMesh* gpu_mesh = nullptr;
-        bool uploaded = false;
+        std::atomic<bool> uploaded{false};
         float screen_threshold = 0.0f;
 
         MeshLODLevel() = default;
         ~MeshLODLevel() { if (gpu_mesh) { delete gpu_mesh; gpu_mesh = nullptr; } }
         MeshLODLevel(MeshLODLevel&& o) noexcept
             : vertices(std::move(o.vertices)), indices(std::move(o.indices))
-            , gpu_mesh(o.gpu_mesh), uploaded(o.uploaded), screen_threshold(o.screen_threshold)
-        { o.gpu_mesh = nullptr; o.uploaded = false; }
+            , gpu_mesh(o.gpu_mesh), screen_threshold(o.screen_threshold)
+        {
+            uploaded.store(o.uploaded.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            o.gpu_mesh = nullptr;
+            o.uploaded.store(false, std::memory_order_relaxed);
+        }
         MeshLODLevel& operator=(MeshLODLevel&& o) noexcept {
             if (this != &o) {
                 if (gpu_mesh) delete gpu_mesh;
                 vertices = std::move(o.vertices); indices = std::move(o.indices);
-                gpu_mesh = o.gpu_mesh; uploaded = o.uploaded; screen_threshold = o.screen_threshold;
-                o.gpu_mesh = nullptr; o.uploaded = false;
+                gpu_mesh = o.gpu_mesh; screen_threshold = o.screen_threshold;
+                uploaded.store(o.uploaded.load(std::memory_order_relaxed), std::memory_order_relaxed);
+                o.gpu_mesh = nullptr;
+                o.uploaded.store(false, std::memory_order_relaxed);
             }
             return *this;
         }
@@ -82,13 +93,13 @@ struct MeshAssetData {
         , aabb_min(other.aabb_min)
         , aabb_max(other.aabb_max)
         , gpu_mesh(other.gpu_mesh)
-        , uploaded(other.uploaded)
         , source_path(std::move(other.source_path))
         , lod_levels(std::move(other.lod_levels))
         , has_lods(other.has_lods)
     {
+        uploaded.store(other.uploaded.load(std::memory_order_relaxed), std::memory_order_relaxed);
         other.gpu_mesh = nullptr;
-        other.uploaded = false;
+        other.uploaded.store(false, std::memory_order_relaxed);
         other.has_lods = false;
     }
 
@@ -103,13 +114,13 @@ struct MeshAssetData {
             aabb_min = other.aabb_min;
             aabb_max = other.aabb_max;
             gpu_mesh = other.gpu_mesh;
-            uploaded = other.uploaded;
+            uploaded.store(other.uploaded.load(std::memory_order_relaxed), std::memory_order_relaxed);
             source_path = std::move(other.source_path);
             lod_levels = std::move(other.lod_levels);
             has_lods = other.has_lods;
 
             other.gpu_mesh = nullptr;
-            other.uploaded = false;
+            other.uploaded.store(false, std::memory_order_relaxed);
             other.has_lods = false;
         }
         return *this;
