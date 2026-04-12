@@ -44,8 +44,12 @@ sources = {
     src/Graphics/D3D12/D3D12CopyQueue.cpp [windows]
     src/Graphics/D3D12/D3D12PSOCache.cpp [windows]
     src/Graphics/D3D12/D3D12ResourceStateTracker.cpp [windows]
-    src/Graphics/MetalRenderAPI.mm [macOS]
-    src/Graphics/MetalMesh.mm [macOS]
+    src/Graphics/Metal/MetalRenderAPI.mm [macOS]
+    src/Graphics/Metal/MetalRenderAPI_Frame.mm [macOS]
+    src/Graphics/Metal/MetalRenderAPI_Rendering.mm [macOS]
+    src/Graphics/Metal/MetalRenderAPI_Shadow.mm [macOS]
+    src/Graphics/Metal/MetalRenderAPI_Viewport.mm [macOS]
+    src/Graphics/Metal/MetalMesh.mm [macOS]
     src/Graphics/stb_impl.cpp
     src/ImGui/ImGuiManager.cpp
     src/UI/RmlUiManager.cpp
