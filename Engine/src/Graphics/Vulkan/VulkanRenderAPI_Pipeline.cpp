@@ -309,8 +309,9 @@ bool VulkanRenderAPI::createGraphicsPipeline()
            .setLayout(pipeline_layout);
 
     auto buildVariant = [&](VkCullModeFlags cullMode, VkPipelineColorBlendAttachmentState* blend,
-                            VkPipeline* outPipeline) -> bool {
-        builder.setCullMode(cullMode).setColorBlend(blend);
+                            VkPipeline* outPipeline, bool depthWrite = true) -> bool {
+        builder.setCullMode(cullMode).setColorBlend(blend)
+               .setDepthTest(VK_TRUE, depthWrite ? VK_TRUE : VK_FALSE);
         VkResult r = builder.build(outPipeline);
         if (r != VK_SUCCESS) {
             LOG_ENGINE_ERROR("[Vulkan] Failed to create pipeline variant: {}", vkResultToString(r));
@@ -322,9 +323,9 @@ bool VulkanRenderAPI::createGraphicsPipeline()
     if (!buildVariant(VK_CULL_MODE_BACK_BIT,  &noBlendAttachment,       &pipeline_lit_noblend_cullback))  { vkDestroyShaderModule(device, fragShaderModule, nullptr); vkDestroyShaderModule(device, vertShaderModule, nullptr); return false; }
     if (!buildVariant(VK_CULL_MODE_FRONT_BIT, &noBlendAttachment,       &pipeline_lit_noblend_cullfront)) { vkDestroyShaderModule(device, fragShaderModule, nullptr); vkDestroyShaderModule(device, vertShaderModule, nullptr); return false; }
     if (!buildVariant(VK_CULL_MODE_NONE,      &noBlendAttachment,       &pipeline_lit_noblend_cullnone))  { vkDestroyShaderModule(device, fragShaderModule, nullptr); vkDestroyShaderModule(device, vertShaderModule, nullptr); return false; }
-    if (!buildVariant(VK_CULL_MODE_BACK_BIT,  &alphaBlendAttachment,    &pipeline_lit_alpha_cullback))    { vkDestroyShaderModule(device, fragShaderModule, nullptr); vkDestroyShaderModule(device, vertShaderModule, nullptr); return false; }
-    if (!buildVariant(VK_CULL_MODE_NONE,      &alphaBlendAttachment,    &pipeline_lit_alpha_cullnone))    { vkDestroyShaderModule(device, fragShaderModule, nullptr); vkDestroyShaderModule(device, vertShaderModule, nullptr); return false; }
-    if (!buildVariant(VK_CULL_MODE_BACK_BIT,  &additiveBlendAttachment, &pipeline_lit_additive))          { vkDestroyShaderModule(device, fragShaderModule, nullptr); vkDestroyShaderModule(device, vertShaderModule, nullptr); return false; }
+    if (!buildVariant(VK_CULL_MODE_BACK_BIT,  &alphaBlendAttachment,    &pipeline_lit_alpha_cullback,  false)) { vkDestroyShaderModule(device, fragShaderModule, nullptr); vkDestroyShaderModule(device, vertShaderModule, nullptr); return false; }
+    if (!buildVariant(VK_CULL_MODE_NONE,      &alphaBlendAttachment,    &pipeline_lit_alpha_cullnone,  false)) { vkDestroyShaderModule(device, fragShaderModule, nullptr); vkDestroyShaderModule(device, vertShaderModule, nullptr); return false; }
+    if (!buildVariant(VK_CULL_MODE_BACK_BIT,  &additiveBlendAttachment, &pipeline_lit_additive,        false)) { vkDestroyShaderModule(device, fragShaderModule, nullptr); vkDestroyShaderModule(device, vertShaderModule, nullptr); return false; }
 
     LOG_ENGINE_INFO("[Vulkan] Created 6 lit pipeline variants");
 
@@ -372,9 +373,9 @@ bool VulkanRenderAPI::createGraphicsPipeline()
     // --- Unlit pipelines ---
     if (!buildVariant(VK_CULL_MODE_BACK_BIT, &noBlendAttachment,       &pipeline_unlit_noblend_cullback)) { vkDestroyShaderModule(device, unlitFragModule, nullptr); vkDestroyShaderModule(device, unlitVertModule, nullptr); return false; }
     if (!buildVariant(VK_CULL_MODE_NONE,     &noBlendAttachment,       &pipeline_unlit_noblend_cullnone)) { vkDestroyShaderModule(device, unlitFragModule, nullptr); vkDestroyShaderModule(device, unlitVertModule, nullptr); return false; }
-    if (!buildVariant(VK_CULL_MODE_BACK_BIT, &alphaBlendAttachment,    &pipeline_unlit_alpha_cullback))   { vkDestroyShaderModule(device, unlitFragModule, nullptr); vkDestroyShaderModule(device, unlitVertModule, nullptr); return false; }
-    if (!buildVariant(VK_CULL_MODE_NONE,     &alphaBlendAttachment,    &pipeline_unlit_alpha_cullnone))   { vkDestroyShaderModule(device, unlitFragModule, nullptr); vkDestroyShaderModule(device, unlitVertModule, nullptr); return false; }
-    if (!buildVariant(VK_CULL_MODE_BACK_BIT, &additiveBlendAttachment, &pipeline_unlit_additive))         { vkDestroyShaderModule(device, unlitFragModule, nullptr); vkDestroyShaderModule(device, unlitVertModule, nullptr); return false; }
+    if (!buildVariant(VK_CULL_MODE_BACK_BIT, &alphaBlendAttachment,    &pipeline_unlit_alpha_cullback,  false)) { vkDestroyShaderModule(device, unlitFragModule, nullptr); vkDestroyShaderModule(device, unlitVertModule, nullptr); return false; }
+    if (!buildVariant(VK_CULL_MODE_NONE,     &alphaBlendAttachment,    &pipeline_unlit_alpha_cullnone,  false)) { vkDestroyShaderModule(device, unlitFragModule, nullptr); vkDestroyShaderModule(device, unlitVertModule, nullptr); return false; }
+    if (!buildVariant(VK_CULL_MODE_BACK_BIT, &additiveBlendAttachment, &pipeline_unlit_additive,        false)) { vkDestroyShaderModule(device, unlitFragModule, nullptr); vkDestroyShaderModule(device, unlitVertModule, nullptr); return false; }
 
     LOG_ENGINE_INFO("[Vulkan] Created 5 unlit pipeline variants");
 

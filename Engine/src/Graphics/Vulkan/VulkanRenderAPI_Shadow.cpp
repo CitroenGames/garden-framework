@@ -340,9 +340,9 @@ bool VulkanRenderAPI::createShadowResources()
             if (atVertModule != VK_NULL_HANDLE && atFragModule != VK_NULL_HANDLE) {
                 // Alpha-test shadow pipeline layout: push constants + main descriptor set (for texture access)
                 VkPushConstantRange atPushRange{};
-                atPushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+                atPushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
                 atPushRange.offset = 0;
-                atPushRange.size = 2 * sizeof(glm::mat4);
+                atPushRange.size = 2 * sizeof(glm::mat4) + sizeof(float);
 
                 VkPipelineLayoutCreateInfo atLayoutInfo{};
                 atLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;

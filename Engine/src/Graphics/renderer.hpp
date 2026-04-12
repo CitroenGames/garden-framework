@@ -148,6 +148,11 @@ public:
                     range_state.alpha_cutoff = range.alpha_cutoff;
                     range_state.blend_mode = BlendMode::None;
                     range_state.depth_write = true;
+                } else if (range.isAlphaBlend()) {
+                    range_state.blend_mode = BlendMode::Alpha;
+                    range_state.depth_write = false;
+                    range_state.alpha_test = false;
+                    range_state.alpha_cutoff = 0.0f;
                 }
                 if (range.double_sided)
                     range_state.cull_mode = CullMode::None;
@@ -194,6 +199,11 @@ public:
                     range_state.alpha_cutoff = range.alpha_cutoff;
                     range_state.blend_mode = BlendMode::None;
                     range_state.depth_write = true;
+                } else if (range.isAlphaBlend()) {
+                    range_state.blend_mode = BlendMode::Alpha;
+                    range_state.depth_write = false;
+                    range_state.alpha_test = false;
+                    range_state.alpha_cutoff = 0.0f;
                 }
                 if (range.double_sided)
                     range_state.cull_mode = CullMode::None;
@@ -301,15 +311,19 @@ public:
         if (!m.visible || !m.gpu_mesh || !m.gpu_mesh->isUploaded()) return;
         glm::mat4 model = transform.getTransformMatrix();
 
-        // Check if any material range needs alpha testing
+        // Check if any material range needs special depth handling
         bool has_alpha_mask = false;
+        bool has_alpha_blend = false;
         if (m.uses_material_ranges) {
-            for (const auto& range : m.material_ranges)
-                if (range.isAlphaMask()) { has_alpha_mask = true; break; }
+            for (const auto& range : m.material_ranges) {
+                if (range.isAlphaMask()) has_alpha_mask = true;
+                if (range.isAlphaBlend()) has_alpha_blend = true;
+            }
         }
 
-        if (has_alpha_mask && m.uses_material_ranges) {
+        if (m.uses_material_ranges && (has_alpha_mask || has_alpha_blend)) {
             for (const auto& range : m.material_ranges) {
+                if (range.isAlphaBlend()) continue;  // Skip blend ranges in depth prepass
                 PSOKey key = PSOKey::depthPrepass();
                 float alpha_cutoff = 0.0f;
                 bool has_tex = false;
@@ -337,20 +351,57 @@ public:
                                          RenderCommandBuffer& cmds, int lod_level)
     {
         if (!m.visible || !m.gpu_mesh) return;
-        PSOKey key = PSOKey::depthPrepass();
+        if (m.transparent) return;  // Don't depth-prepass transparent meshes
+
         glm::mat4 model = transform.getTransformMatrix();
 
+        // Determine which GPU mesh to use
+        IGPUMesh* gpu_mesh = m.gpu_mesh;
         if (lod_level > 0 && !m.lod_levels.empty())
         {
             IGPUMesh* active = m.getGPUMeshForLOD(lod_level);
             if (active && active != m.gpu_mesh && active->isUploaded())
-            {
-                cmds.recordDraw(active, model, INVALID_TEXTURE, false, key);
+                gpu_mesh = active;
+        }
+        if (!gpu_mesh->isUploaded()) return;
+
+        // Get material ranges for this LOD level
+        const auto* ranges = (lod_level > 0) ? m.getMaterialRangesForLOD(lod_level) : nullptr;
+        if (!ranges && m.uses_material_ranges && !m.material_ranges.empty())
+            ranges = &m.material_ranges;
+
+        if (ranges)
+        {
+            bool needs_per_range = false;
+            for (const auto& range : *ranges) {
+                if (range.isAlphaMask() || range.isAlphaBlend()) { needs_per_range = true; break; }
+            }
+
+            if (needs_per_range) {
+                for (const auto& range : *ranges) {
+                    if (range.isAlphaBlend()) continue;  // Skip blend ranges in depth prepass
+                    PSOKey key = PSOKey::depthPrepass();
+                    float alpha_cutoff = 0.0f;
+                    bool has_tex = false;
+                    TextureHandle tex = INVALID_TEXTURE;
+                    if (range.isAlphaMask()) {
+                        key.alpha_test = true;
+                        key.cull = range.double_sided ? CullMode::None : CullMode::Back;
+                        alpha_cutoff = range.alpha_cutoff;
+                        has_tex = range.hasValidTexture();
+                        tex = has_tex ? range.texture : INVALID_TEXTURE;
+                    }
+                    cmds.recordDrawRange(gpu_mesh, model, tex, has_tex,
+                                         key, range.start_vertex, range.vertex_count,
+                                         glm::vec3(1.0f), alpha_cutoff);
+                }
                 return;
             }
         }
-        if (m.gpu_mesh->isUploaded())
-            cmds.recordDraw(m.gpu_mesh, model, INVALID_TEXTURE, false, key);
+
+        // Simple path: no special materials
+        PSOKey key = PSOKey::depthPrepass();
+        cmds.recordDraw(gpu_mesh, model, INVALID_TEXTURE, false, key);
     }
 
     // Record a shadow pass draw command.
@@ -374,15 +425,19 @@ public:
         }
         if (!gpu_mesh->isUploaded()) return;
 
-        // Check if any material range needs alpha testing
+        // Check if any material range needs special shadow handling
         bool has_alpha_mask = false;
+        bool has_alpha_blend = false;
         if (m.uses_material_ranges) {
-            for (const auto& range : m.material_ranges)
-                if (range.isAlphaMask()) { has_alpha_mask = true; break; }
+            for (const auto& range : m.material_ranges) {
+                if (range.isAlphaMask()) has_alpha_mask = true;
+                if (range.isAlphaBlend()) has_alpha_blend = true;
+            }
         }
 
-        if (has_alpha_mask && m.uses_material_ranges) {
+        if (m.uses_material_ranges && (has_alpha_mask || has_alpha_blend)) {
             for (const auto& range : m.material_ranges) {
+                if (range.isAlphaBlend()) continue;  // BLEND materials don't cast shadows
                 PSOKey key = PSOKey::shadowPass();
                 float alpha_cutoff = 0.0f;
                 bool has_tex = false;

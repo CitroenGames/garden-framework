@@ -718,6 +718,10 @@ void VulkanRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
                 vkCmdPushConstants(cmd, shadow_alphatest_pipeline_layout,
                                    VK_SHADER_STAGE_VERTEX_BIT, sizeof(glm::mat4), sizeof(glm::mat4),
                                    &drawCmd.model_matrix);
+                // Push alphaCutoff for fragment shader
+                vkCmdPushConstants(cmd, shadow_alphatest_pipeline_layout,
+                                   VK_SHADER_STAGE_FRAGMENT_BIT, 2 * sizeof(glm::mat4), sizeof(float),
+                                   &drawCmd.alpha_cutoff);
             }
             else
             {
@@ -1033,6 +1037,7 @@ void VulkanRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmd
                     objUbo.normalMatrix = glm::transpose(glm::inverse(drawCmd.model_matrix));
                     objUbo.color = drawCmd.color;
                     objUbo.useTexture = drawCmd.use_texture ? 1 : 0;
+                    objUbo.alphaCutoff = drawCmd.alpha_cutoff;
 
                     void* dst = static_cast<char*>(per_obj_mapped) + perObjectDynOffset;
                     memcpy(dst, &objUbo, sizeof(objUbo));

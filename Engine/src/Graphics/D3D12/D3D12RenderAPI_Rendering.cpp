@@ -817,6 +817,7 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
                         objCB.normalMatrix = glm::mat4(1.0f);
                     objCB.color = cmd.color;
                     objCB.useTexture = cmd.use_texture ? 1 : 0;
+                    objCB.alphaCutoff = cmd.alpha_cutoff;
 
                     auto objAddr = uploadBuf->allocate(sizeof(objCB), &objCB);
                     if (objAddr == 0) continue;

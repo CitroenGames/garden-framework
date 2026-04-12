@@ -401,6 +401,19 @@ public:
         material_ranges = ranges;
         uses_material_ranges = !ranges.empty();
         texture_set = false;  // Disable single texture mode
+        updateTransparencyFromMaterials();
+    }
+
+    // Auto-detect transparency from material alpha modes.
+    // Sets transparent=true if any material range uses BLEND mode.
+    void updateTransparencyFromMaterials()
+    {
+        if (!uses_material_ranges) return;
+        for (const auto& range : material_ranges)
+            if (range.isAlphaBlend()) { transparent = true; return; }
+        for (const auto& lod : lod_levels)
+            for (const auto& range : lod.material_ranges)
+                if (range.isAlphaBlend()) { transparent = true; return; }
     }
 
     // Clear material ranges and return to single texture mode
@@ -716,6 +729,7 @@ public:
             }
 
             uses_material_ranges = !material_ranges.empty();
+            updateTransparencyFromMaterials();
             printf("Successfully loaded glTF mesh: %s (%zu vertices, %zu material ranges)\n",
                    filename.c_str(), vertices_len, material_ranges.size());
         }

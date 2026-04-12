@@ -270,6 +270,7 @@ bool D3D12RenderAPI::createPipelineStates()
     // Basic lit alpha blend
     {
         auto desc = CreateBasePSODesc(m_rootSignature.Get(), m_basicVS, m_basicPS);
+        desc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
         auto& rt = desc.BlendState.RenderTarget[0];
         rt.BlendEnable = TRUE;
         rt.SrcBlend = D3D12_BLEND_SRC_ALPHA;
@@ -286,6 +287,7 @@ bool D3D12RenderAPI::createPipelineStates()
     {
         auto desc = CreateBasePSODesc(m_rootSignature.Get(), m_basicVS, m_basicPS);
         desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+        desc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
         auto& rt = desc.BlendState.RenderTarget[0];
         rt.BlendEnable = TRUE;
         rt.SrcBlend = D3D12_BLEND_SRC_ALPHA;
@@ -301,6 +303,7 @@ bool D3D12RenderAPI::createPipelineStates()
     // Basic lit additive
     {
         auto desc = CreateBasePSODesc(m_rootSignature.Get(), m_basicVS, m_basicPS);
+        desc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
         auto& rt = desc.BlendState.RenderTarget[0];
         rt.BlendEnable = TRUE;
         rt.SrcBlend = D3D12_BLEND_SRC_ALPHA;
@@ -331,6 +334,7 @@ bool D3D12RenderAPI::createPipelineStates()
     // Unlit alpha
     {
         auto desc = CreateBasePSODesc(m_rootSignature.Get(), m_unlitVS, m_unlitPS);
+        desc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
         auto& rt = desc.BlendState.RenderTarget[0];
         rt.BlendEnable = TRUE;
         rt.SrcBlend = D3D12_BLEND_SRC_ALPHA;
@@ -347,6 +351,7 @@ bool D3D12RenderAPI::createPipelineStates()
     {
         auto desc = CreateBasePSODesc(m_rootSignature.Get(), m_unlitVS, m_unlitPS);
         desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+        desc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
         auto& rt = desc.BlendState.RenderTarget[0];
         rt.BlendEnable = TRUE;
         rt.SrcBlend = D3D12_BLEND_SRC_ALPHA;
@@ -362,6 +367,7 @@ bool D3D12RenderAPI::createPipelineStates()
     // Unlit additive
     {
         auto desc = CreateBasePSODesc(m_rootSignature.Get(), m_unlitVS, m_unlitPS);
+        desc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
         auto& rt = desc.BlendState.RenderTarget[0];
         rt.BlendEnable = TRUE;
         rt.SrcBlend = D3D12_BLEND_SRC_ALPHA;

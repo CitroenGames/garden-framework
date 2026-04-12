@@ -15,6 +15,7 @@ cbuffer ShadowPush
 {
     float4x4 uLightSpaceMatrix;  // Vulkan: light space via push constant (per-cascade)
     float4x4 uModel;             // Vulkan: model via push constant (per-draw)
+    float uAlphaCutoff;          // Vulkan: alpha cutoff via push constant (per-draw)
 };
 #endif
 
@@ -61,13 +62,6 @@ PSInput vertexMain(VSInput input)
 void fragmentMain(PSInput input)
 {
     float4 texColor = diffuseTexture.Sample(linearSampler, input.texcoord);
-#ifndef TARGET_SPIRV
     if (uAlphaCutoff > 0.0 && texColor.a < uAlphaCutoff)
         discard;
-#else
-    // Vulkan: use a fixed cutoff for now (0.5 is the glTF default for MASK mode)
-    // TODO: pass alphaCutoff via extended push constants when needed
-    if (texColor.a < 0.5)
-        discard;
-#endif
 }

@@ -983,6 +983,7 @@ std::shared_ptr<mesh> LevelManager::loadMesh(const LevelEntity& entity, IRenderA
                 compiled->visible = entity.visible;
                 compiled->casts_shadow = entity.casts_shadow;
                 compiled->force_lod = entity.force_lod;
+                compiled->updateTransparencyFromMaterials();
                 return compiled;
             }
         }
@@ -1120,6 +1121,7 @@ std::shared_ptr<mesh> LevelManager::loadMesh(const LevelEntity& entity, IRenderA
         m_ptr->visible = entity.visible;
         m_ptr->casts_shadow = entity.casts_shadow;
         m_ptr->force_lod = entity.force_lod;
+        m_ptr->updateTransparencyFromMaterials();
 
         // Load LOD data from .meta file if available
         if (render_api && !resolved_path.empty())
@@ -1731,6 +1733,7 @@ std::shared_ptr<mesh> LevelManager::finalizeCompiledMeshGPU(
     m_ptr->visible = entity.visible;
     m_ptr->casts_shadow = entity.casts_shadow;
     m_ptr->force_lod = entity.force_lod;
+    m_ptr->updateTransparencyFromMaterials();
 
     return m_ptr;
 }
@@ -1853,6 +1856,7 @@ std::shared_ptr<mesh> LevelManager::finalizeMeshGPU(
     m_ptr->visible = entity.visible;
     m_ptr->casts_shadow = entity.casts_shadow;
     m_ptr->force_lod = entity.force_lod;
+    m_ptr->updateTransparencyFromMaterials();
 
     // Upload mesh to GPU
     if (render_api && m_ptr->is_valid && !m_ptr->isUploadedToGPU()) {
