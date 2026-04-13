@@ -23,6 +23,11 @@ struct BoneUBO {
     int hasBones;
 };
 
+struct ModelData {
+    float4x4 model;
+    float4x4 normalMatrix;
+};
+
 // Point/spot light structures matching CPU-side LightCBuffer layout
 struct PointLightData {
     packed_float3 position; float range;

@@ -14,10 +14,6 @@ struct ShadowAlphaVertexOut {
     float2 texCoord;
 };
 
-struct ShadowUBO {
-    float4x4 lightSpaceMatrix;
-};
-
 vertex ShadowAlphaVertexOut shadow_alphatest_vertex(
     ShadowAlphaVertexIn in [[stage_in]],
     constant ShadowUBO& ubo [[buffer(1)]],

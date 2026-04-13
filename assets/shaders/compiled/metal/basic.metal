@@ -21,11 +21,6 @@ struct BasicVertexOut {
     float viewDepth;
 };
 
-struct ModelData {
-    float4x4 model;
-    float4x4 normalMatrix;
-};
-
 vertex BasicVertexOut basic_vertex(BasicVertexIn in [[stage_in]],
                                     constant GlobalUBO& ubo [[buffer(1)]],
                                     constant ModelData& modelData [[buffer(2)]])
@@ -51,6 +46,13 @@ vertex BasicVertexOut basic_vertex(BasicVertexIn in [[stage_in]],
 
     return out;
 }
+
+constant float3 cascadeColors[] = {
+    float3(1.0, 0.0, 0.0),
+    float3(0.0, 1.0, 0.0),
+    float3(0.0, 0.0, 1.0),
+    float3(1.0, 1.0, 0.0)
+};
 
 fragment float4 basic_fragment(BasicVertexOut in [[stage_in]],
                                 constant GlobalUBO& ubo [[buffer(0)]],
@@ -99,12 +101,6 @@ fragment float4 basic_fragment(BasicVertexOut in [[stage_in]],
 
     // Debug cascade visualization
     if (enableLighting && ubo.debugCascades != 0) {
-        constant float3 cascadeColors[] = {
-            float3(1.0, 0.0, 0.0),
-            float3(0.0, 1.0, 0.0),
-            float3(0.0, 0.0, 1.0),
-            float3(1.0, 1.0, 0.0)
-        };
         int cascadeIdx = getCascadeIndex(ubo, in.viewDepth);
         texColor.rgb = mix(texColor.rgb, cascadeColors[cascadeIdx], 0.3);
     }

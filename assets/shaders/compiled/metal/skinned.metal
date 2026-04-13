@@ -19,11 +19,6 @@ struct SkinnedVertexOut {
     float viewDepth;
 };
 
-struct ModelData {
-    float4x4 model;
-    float4x4 normalMatrix;
-};
-
 vertex SkinnedVertexOut skinned_vertex(SkinnedVertexIn in [[stage_in]],
                                         constant GlobalUBO& ubo [[buffer(1)]],
                                         constant ModelData& modelData [[buffer(2)]],
