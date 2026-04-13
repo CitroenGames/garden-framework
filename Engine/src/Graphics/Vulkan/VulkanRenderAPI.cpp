@@ -186,6 +186,13 @@ bool VulkanRenderAPI::initialize(WindowHandle window, int width, int height, flo
         return false;
     }
 
+    // Create SSAO resources
+    LOG_ENGINE_INFO("[Vulkan] Creating SSAO resources...");
+    if (!createSSAOResources()) {
+        LOG_ENGINE_WARN("[Vulkan] Failed to create SSAO resources -- SSAO disabled");
+        ssaoEnabled = false;
+    }
+
     // Create continuation render pass for parallel replay (render pass split)
     if (!createContinuationRenderPass()) {
         LOG_ENGINE_WARN("[Vulkan] Failed to create continuation render pass -- parallel replay disabled");
@@ -247,6 +254,9 @@ void VulkanRenderAPI::shutdown()
 
     // Clean up skybox resources
     cleanupSkyboxResources();
+
+    // Clean up SSAO resources
+    cleanupSSAOResources();
 
     // Clean up FXAA resources
     cleanupFxaaResources();

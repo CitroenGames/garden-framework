@@ -128,5 +128,26 @@ struct alignas(16) D3D12FXAACBuffer
 {
     glm::vec2 inverseScreenSize;
     float exposure;
-    float padding;
+    int ssaoEnabled;
+};
+
+struct alignas(16) D3D12SSAOCBuffer
+{
+    glm::mat4 projection;
+    glm::mat4 invProjection;
+    glm::vec4 samples[16];     // hemisphere kernel
+    glm::vec2 screenSize;      // half-res dimensions
+    glm::vec2 noiseScale;      // screenSize / 4.0 (noise texture tiling)
+    float radius;              // AO sampling radius in view space
+    float bias;                // depth comparison bias
+    float power;               // AO intensity exponent
+    float _pad;
+};
+
+struct alignas(16) D3D12SSAOBlurCBuffer
+{
+    glm::vec2 texelSize;       // 1.0 / half-res dimensions
+    glm::vec2 blurDir;         // (1,0) horizontal, (0,1) vertical
+    float depthThreshold;      // edge-detection threshold
+    glm::vec3 _pad;
 };

@@ -96,6 +96,10 @@ public:
     virtual bool isFXAAEnabled() const override;
     virtual void setShadowQuality(int quality) override;
     virtual int getShadowQuality() const override;
+    virtual void setSSAOEnabled(bool enabled) override;
+    virtual bool isSSAOEnabled() const override;
+    virtual void setSSAORadius(float radius) override;
+    virtual void setSSAOIntensity(float intensity) override;
 
     // Vulkan-specific accessors for VulkanMesh
     VkDevice getDevice() const { return device; }
@@ -529,6 +533,63 @@ private:
     VkRenderPass fxaa_render_pass = VK_NULL_HANDLE;
     std::vector<VkFramebuffer> fxaa_framebuffers;  // Swapchain-only, no depth
     bool fxaa_initialized = false;
+
+    // SSAO resources
+    VkImage ssao_raw_image = VK_NULL_HANDLE;
+    VmaAllocation ssao_raw_allocation = nullptr;
+    VkImageView ssao_raw_view = VK_NULL_HANDLE;
+    VkImage ssao_blur_temp_image = VK_NULL_HANDLE;
+    VmaAllocation ssao_blur_temp_allocation = nullptr;
+    VkImageView ssao_blur_temp_view = VK_NULL_HANDLE;
+    VkImage ssao_blurred_image = VK_NULL_HANDLE;
+    VmaAllocation ssao_blurred_allocation = nullptr;
+    VkImageView ssao_blurred_view = VK_NULL_HANDLE;
+    VkImage ssao_noise_image = VK_NULL_HANDLE;
+    VmaAllocation ssao_noise_allocation = nullptr;
+    VkImageView ssao_noise_view = VK_NULL_HANDLE;
+    VkSampler ssao_depth_sampler = VK_NULL_HANDLE;
+    VkImageView ssao_depth_view = VK_NULL_HANDLE;  // depth readable view
+    VkSampler ssao_noise_sampler = VK_NULL_HANDLE;
+    VkSampler ssao_linear_sampler = VK_NULL_HANDLE;
+    VkImage ssao_fallback_image = VK_NULL_HANDLE;
+    VmaAllocation ssao_fallback_allocation = nullptr;
+    VkImageView ssao_fallback_view = VK_NULL_HANDLE;
+    VkRenderPass ssao_render_pass = VK_NULL_HANDLE;
+    VkRenderPass ssao_blur_render_pass = VK_NULL_HANDLE;
+    VkFramebuffer ssao_raw_framebuffer = VK_NULL_HANDLE;
+    VkFramebuffer ssao_blur_temp_framebuffer = VK_NULL_HANDLE;
+    VkFramebuffer ssao_blurred_framebuffer = VK_NULL_HANDLE;
+    VkPipeline ssao_pipeline = VK_NULL_HANDLE;
+    VkPipelineLayout ssao_pipeline_layout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout ssao_descriptor_layout = VK_NULL_HANDLE;
+    VkDescriptorPool ssao_descriptor_pool = VK_NULL_HANDLE;
+    std::vector<VkDescriptorSet> ssao_descriptor_sets;
+    VkPipeline ssao_blur_pipeline = VK_NULL_HANDLE;
+    VkPipelineLayout ssao_blur_pipeline_layout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout ssao_blur_descriptor_layout = VK_NULL_HANDLE;
+    VkDescriptorPool ssao_blur_descriptor_pool = VK_NULL_HANDLE;
+    std::vector<VkDescriptorSet> ssao_blur_h_descriptor_sets;  // horizontal blur
+    std::vector<VkDescriptorSet> ssao_blur_v_descriptor_sets;  // vertical blur
+    std::vector<VkBuffer> ssao_uniform_buffers;
+    std::vector<VmaAllocation> ssao_uniform_allocations;
+    std::vector<void*> ssao_uniform_mapped;
+    std::vector<VkBuffer> ssao_blur_h_uniform_buffers;
+    std::vector<VmaAllocation> ssao_blur_h_uniform_allocations;
+    std::vector<void*> ssao_blur_h_uniform_mapped;
+    std::vector<VkBuffer> ssao_blur_v_uniform_buffers;
+    std::vector<VmaAllocation> ssao_blur_v_uniform_allocations;
+    std::vector<void*> ssao_blur_v_uniform_mapped;
+    bool ssao_initialized = false;
+    bool ssaoEnabled = true;
+    float ssaoRadius = 0.5f;
+    float ssaoIntensity = 1.5f;
+    float ssaoBias = 0.025f;
+    glm::vec4 ssaoKernel[16];
+
+    bool createSSAOResources();
+    void cleanupSSAOResources();
+    void recreateSSAOResources();
+    void generateSSAOKernel();
 
     // Viewport render target for editor
     VkImage viewport_image = VK_NULL_HANDLE;

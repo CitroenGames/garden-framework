@@ -23,6 +23,26 @@ void MetalRenderAPIImpl::createOffscreenResources(int w, int h)
 
     // Offscreen depth texture
     offscreenDepthTexture = createDepthTextureWithSize(w, h);
+
+    // Create 1x1 white SSAO fallback texture (ensures FXAA can always sample texture(1))
+    if (!ssaoFallbackTexture) {
+        MTLTextureDescriptor* fbDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm
+                                                                                         width:1
+                                                                                        height:1
+                                                                                     mipmapped:NO];
+        fbDesc.usage = MTLTextureUsageShaderRead;
+#if TARGET_OS_OSX
+        fbDesc.storageMode = MTLStorageModeManaged;
+#else
+        fbDesc.storageMode = MTLStorageModeShared;
+#endif
+        ssaoFallbackTexture = [device newTextureWithDescriptor:fbDesc];
+        uint8_t white = 255;
+        [ssaoFallbackTexture replaceRegion:MTLRegionMake2D(0, 0, 1, 1)
+                               mipmapLevel:0
+                                 withBytes:&white
+                               bytesPerRow:1];
+    }
 }
 
 void MetalRenderAPIImpl::createOffscreenResources()

@@ -275,6 +275,17 @@ bool D3D12RenderAPI::initialize(WindowHandle window, int width, int height, floa
         return false;
     }
 
+    if (!createSSAORootSignatureAndPSOs())
+    {
+        LOG_ENGINE_WARN("[D3D12] Failed to create SSAO PSOs -- SSAO disabled");
+        ssaoEnabled = false;
+    }
+    else if (!createSSAOResources(width, height))
+    {
+        LOG_ENGINE_WARN("[D3D12] Failed to create SSAO resources -- SSAO disabled");
+        ssaoEnabled = false;
+    }
+
     if (!createSkyboxResources())
     {
         LOG_ENGINE_ERROR("Failed to create skybox resources");
@@ -462,6 +473,10 @@ void D3D12RenderAPI::resize(int width, int height)
         device_lost = true;
         return;
     }
+
+    // Recreate SSAO resources at new size
+    if (m_psoSSAO)
+        createSSAOResources(width, height);
 
     float ratio = static_cast<float>(width) / static_cast<float>(height);
     projection_matrix = glm::perspectiveRH_ZO(glm::radians(field_of_view), ratio, 0.1f, 1000.0f);

@@ -179,6 +179,29 @@ private:
     D3D12_VERTEX_BUFFER_VIEW m_fxaaQuadVBV = {};
     bool fxaaEnabled = true;
 
+    // SSAO
+    ComPtr<ID3D12Resource> m_ssaoRawTexture;
+    ComPtr<ID3D12Resource> m_ssaoBlurTempTexture;
+    ComPtr<ID3D12Resource> m_ssaoBlurredTexture;
+    ComPtr<ID3D12Resource> m_ssaoNoiseTexture;
+    ComPtr<ID3D12Resource> m_ssaoFallbackTexture;   // 1x1 white
+    UINT m_ssaoRawRTVIndex = UINT(-1), m_ssaoRawSRVIndex = UINT(-1);
+    UINT m_ssaoBlurTempRTVIndex = UINT(-1), m_ssaoBlurTempSRVIndex = UINT(-1);
+    UINT m_ssaoBlurredRTVIndex = UINT(-1), m_ssaoBlurredSRVIndex = UINT(-1);
+    UINT m_depthSRVIndex = UINT(-1);
+    UINT m_ssaoNoiseSRVIndex = UINT(-1);
+    UINT m_ssaoFallbackSRVIndex = UINT(-1);
+    ComPtr<ID3D12RootSignature> m_ssaoRootSignature;
+    ComPtr<ID3D12PipelineState> m_psoSSAO;
+    ComPtr<ID3D12PipelineState> m_psoSSAOBlur;
+    std::vector<char> m_ssaoVS, m_ssaoPS;
+    std::vector<char> m_ssaoBlurVS, m_ssaoBlurPS;
+    bool ssaoEnabled = true;
+    float ssaoRadius = 0.5f;
+    float ssaoIntensity = 1.5f;
+    float ssaoBias = 0.025f;
+    glm::vec4 ssaoKernel[16];  // Pre-generated hemisphere samples
+
     // Skybox
     ComPtr<ID3D12Resource> m_skyboxVB;
     D3D12_VERTEX_BUFFER_VIEW m_skyboxVBV = {};
@@ -250,6 +273,10 @@ private:
     bool createConstantBufferUploadHeaps();
     bool createShadowMapResources();
     bool createPostProcessingResources(int width, int height);
+    bool createSSAOResources(int width, int height);
+    bool createSSAORootSignatureAndPSOs();
+    void renderSSAOPass();
+    void generateSSAOKernel();
     bool createSkyboxResources();
     bool createDefaultTexture();
     bool createDefaultPBRTextures();
@@ -370,6 +397,10 @@ public:
     bool isFXAAEnabled() const override;
     void setShadowQuality(int quality) override;
     int getShadowQuality() const override;
+    void setSSAOEnabled(bool enabled) override;
+    bool isSSAOEnabled() const override;
+    void setSSAORadius(float radius) override;
+    void setSSAOIntensity(float intensity) override;
 
     // Viewport rendering (for editor)
     void endSceneRender() override;

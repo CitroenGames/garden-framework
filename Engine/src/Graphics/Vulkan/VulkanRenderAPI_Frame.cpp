@@ -1,4 +1,5 @@
 #include "VulkanRenderAPI.hpp"
+#include "VkDescriptorWriter.hpp"
 #include "Utils/Log.hpp"
 #include <stdio.h>
 #include <cstring>
@@ -259,6 +260,169 @@ void VulkanRenderAPI::endFrame()
         }
     }
 
+    // Run SSAO passes (between scene and FXAA)
+    if (ssaoEnabled && ssao_initialized && fxaa_initialized) {
+        VkCommandBuffer cmd = command_buffers[current_frame];
+        uint32_t halfW = std::max(1u, swapchain_extent.width / 2);
+        uint32_t halfH = std::max(1u, swapchain_extent.height / 2);
+
+        // Transition depth to shader read
+        {
+            VkImageMemoryBarrier depthBarrier{};
+            depthBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            depthBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            depthBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            depthBarrier.image = offscreen_depth_image;
+            depthBarrier.subresourceRange = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 };
+            depthBarrier.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+            depthBarrier.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+            depthBarrier.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+            depthBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            vkCmdPipelineBarrier(cmd,
+                VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                0, 0, nullptr, 0, nullptr, 1, &depthBarrier);
+        }
+
+        // Update SSAO UBO
+        SSAOUbo ssaoUbo{};
+        ssaoUbo.projection = projection_matrix;
+        ssaoUbo.invProjection = glm::inverse(projection_matrix);
+        for (int i = 0; i < 16; i++) ssaoUbo.samples[i] = ssaoKernel[i];
+        ssaoUbo.screenSize = glm::vec2(static_cast<float>(halfW), static_cast<float>(halfH));
+        ssaoUbo.noiseScale = ssaoUbo.screenSize / 4.0f;
+        ssaoUbo.radius = ssaoRadius;
+        ssaoUbo.bias = ssaoBias;
+        ssaoUbo.power = ssaoIntensity;
+        memcpy(ssao_uniform_mapped[current_frame], &ssaoUbo, sizeof(SSAOUbo));
+
+        VkViewport ssaoViewport{};
+        ssaoViewport.width = static_cast<float>(halfW);
+        ssaoViewport.height = static_cast<float>(halfH);
+        ssaoViewport.maxDepth = 1.0f;
+
+        VkRect2D ssaoScissor{};
+        ssaoScissor.extent = { halfW, halfH };
+
+        // --- SSAO computation pass ---
+        {
+            VkRenderPassBeginInfo rpInfo{};
+            rpInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+            rpInfo.renderPass = ssao_render_pass;
+            rpInfo.framebuffer = ssao_raw_framebuffer;
+            rpInfo.renderArea = { {0,0}, {halfW, halfH} };
+            VkClearValue clearVal{};
+            clearVal.color = {{1.0f, 1.0f, 1.0f, 1.0f}};
+            rpInfo.clearValueCount = 1;
+            rpInfo.pClearValues = &clearVal;
+
+            vkCmdBeginRenderPass(cmd, &rpInfo, VK_SUBPASS_CONTENTS_INLINE);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ssao_pipeline);
+            vkCmdSetViewport(cmd, 0, 1, &ssaoViewport);
+            vkCmdSetScissor(cmd, 0, 1, &ssaoScissor);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ssao_pipeline_layout,
+                                    0, 1, &ssao_descriptor_sets[current_frame], 0, nullptr);
+
+            VkBuffer vbs[] = { fxaa_vertex_buffer };
+            VkDeviceSize offs[] = { 0 };
+            vkCmdBindVertexBuffers(cmd, 0, 1, vbs, offs);
+            vkCmdDraw(cmd, 6, 1, 0, 0);
+            vkCmdEndRenderPass(cmd);
+        }
+
+        // --- Horizontal blur pass ---
+        {
+            SSAOBlurUbo blurH{};
+            blurH.texelSize = glm::vec2(1.0f / halfW, 1.0f / halfH);
+            blurH.blurDir = glm::vec2(1.0f, 0.0f);
+            blurH.depthThreshold = 0.001f;
+            memcpy(ssao_blur_h_uniform_mapped[current_frame], &blurH, sizeof(SSAOBlurUbo));
+
+            VkRenderPassBeginInfo rpInfo{};
+            rpInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+            rpInfo.renderPass = ssao_render_pass;
+            rpInfo.framebuffer = ssao_blur_temp_framebuffer;
+            rpInfo.renderArea = { {0,0}, {halfW, halfH} };
+            VkClearValue clearVal{};
+            clearVal.color = {{1.0f, 1.0f, 1.0f, 1.0f}};
+            rpInfo.clearValueCount = 1;
+            rpInfo.pClearValues = &clearVal;
+
+            vkCmdBeginRenderPass(cmd, &rpInfo, VK_SUBPASS_CONTENTS_INLINE);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ssao_blur_pipeline);
+            vkCmdSetViewport(cmd, 0, 1, &ssaoViewport);
+            vkCmdSetScissor(cmd, 0, 1, &ssaoScissor);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ssao_blur_pipeline_layout,
+                                    0, 1, &ssao_blur_h_descriptor_sets[current_frame], 0, nullptr);
+
+            VkBuffer vbs[] = { fxaa_vertex_buffer };
+            VkDeviceSize offs[] = { 0 };
+            vkCmdBindVertexBuffers(cmd, 0, 1, vbs, offs);
+            vkCmdDraw(cmd, 6, 1, 0, 0);
+            vkCmdEndRenderPass(cmd);
+        }
+
+        // --- Vertical blur pass ---
+        {
+            SSAOBlurUbo blurV{};
+            blurV.texelSize = glm::vec2(1.0f / halfW, 1.0f / halfH);
+            blurV.blurDir = glm::vec2(0.0f, 1.0f);
+            blurV.depthThreshold = 0.001f;
+            memcpy(ssao_blur_v_uniform_mapped[current_frame], &blurV, sizeof(SSAOBlurUbo));
+
+            VkRenderPassBeginInfo rpInfo{};
+            rpInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+            rpInfo.renderPass = ssao_render_pass;
+            rpInfo.framebuffer = ssao_blurred_framebuffer;
+            rpInfo.renderArea = { {0,0}, {halfW, halfH} };
+            VkClearValue clearVal{};
+            clearVal.color = {{1.0f, 1.0f, 1.0f, 1.0f}};
+            rpInfo.clearValueCount = 1;
+            rpInfo.pClearValues = &clearVal;
+
+            vkCmdBeginRenderPass(cmd, &rpInfo, VK_SUBPASS_CONTENTS_INLINE);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ssao_blur_pipeline);
+            vkCmdSetViewport(cmd, 0, 1, &ssaoViewport);
+            vkCmdSetScissor(cmd, 0, 1, &ssaoScissor);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ssao_blur_pipeline_layout,
+                                    0, 1, &ssao_blur_v_descriptor_sets[current_frame], 0, nullptr);
+
+            VkBuffer vbs[] = { fxaa_vertex_buffer };
+            VkDeviceSize offs[] = { 0 };
+            vkCmdBindVertexBuffers(cmd, 0, 1, vbs, offs);
+            vkCmdDraw(cmd, 6, 1, 0, 0);
+            vkCmdEndRenderPass(cmd);
+        }
+
+        // Update FXAA descriptor set binding 2 with SSAO blurred texture
+        {
+            VkDescriptorImageInfo ssaoImgInfo{};
+            ssaoImgInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            ssaoImgInfo.imageView = ssao_blurred_view;
+            ssaoImgInfo.sampler = ssao_linear_sampler;
+
+            VkDescriptorWriter(fxaa_descriptor_sets[current_frame])
+                .writeImage(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &ssaoImgInfo)
+                .update(device);
+        }
+    }
+    else if (fxaa_initialized) {
+        // SSAO disabled or not initialized: bind fallback (or offscreen as last resort)
+        VkDescriptorImageInfo fallbackInfo{};
+        fallbackInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        if (ssao_fallback_view != VK_NULL_HANDLE) {
+            fallbackInfo.imageView = ssao_fallback_view;
+            fallbackInfo.sampler = ssao_linear_sampler != VK_NULL_HANDLE ? ssao_linear_sampler : offscreen_sampler;
+        } else {
+            fallbackInfo.imageView = offscreen_view;
+            fallbackInfo.sampler = offscreen_sampler;
+        }
+
+        VkDescriptorWriter(fxaa_descriptor_sets[current_frame])
+            .writeImage(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &fallbackInfo)
+            .update(device);
+    }
+
     // Always apply FXAA/tone-mapping pass (scene renders to HDR offscreen, this resolves to LDR swapchain)
     if (fxaa_initialized) {
         VkCommandBuffer cmd = command_buffers[current_frame];
@@ -296,10 +460,11 @@ void VulkanRenderAPI::endFrame()
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, fxaa_pipeline_layout,
                                 0, 1, &fxaa_descriptor_sets[current_frame], 0, nullptr);
 
-        // Update FXAA UBO with inverse screen size and exposure for ACES tone mapping
+        // Update FXAA UBO with inverse screen size, exposure, and SSAO flag
         FXAAUbo fxaaUbo{};
         fxaaUbo.inverseScreenSize = glm::vec2(1.0f / swapchain_extent.width, 1.0f / swapchain_extent.height);
         fxaaUbo.exposure = 1.0f;
+        fxaaUbo.ssaoEnabled = (ssaoEnabled && ssao_initialized) ? 1 : 0;
         memcpy(fxaa_uniform_mapped[current_frame], &fxaaUbo, sizeof(FXAAUbo));
 
         // Bind fullscreen quad and draw

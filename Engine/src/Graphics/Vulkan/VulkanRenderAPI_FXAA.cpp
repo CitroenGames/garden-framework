@@ -65,10 +65,10 @@ bool VulkanRenderAPI::createFxaaResources()
         return false;
     }
 
-    // Create offscreen depth image
+    // Create offscreen depth image (SAMPLED_BIT for SSAO to read depth)
     if (vkutil::createImage(vma_allocator, swapchain_extent.width, swapchain_extent.height,
                             depth_format,
-                            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
                             offscreen_depth_image, offscreen_depth_allocation) != VK_SUCCESS) {
         printf("Failed to create offscreen depth image\n");
         return false;
@@ -228,7 +228,8 @@ bool VulkanRenderAPI::createFxaaResources()
     // Create FXAA descriptor set layout
     // Binding 0: screen texture (combined image sampler)
     // Binding 1: FXAA UBO (inverse screen size)
-    std::array<VkDescriptorSetLayoutBinding, 2> fxaaBindings{};
+    // Binding 2: SSAO texture (combined image sampler)
+    std::array<VkDescriptorSetLayoutBinding, 3> fxaaBindings{};
     fxaaBindings[0].binding = 0;
     fxaaBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     fxaaBindings[0].descriptorCount = 1;
@@ -238,6 +239,11 @@ bool VulkanRenderAPI::createFxaaResources()
     fxaaBindings[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     fxaaBindings[1].descriptorCount = 1;
     fxaaBindings[1].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+
+    fxaaBindings[2].binding = 2;
+    fxaaBindings[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    fxaaBindings[2].descriptorCount = 1;
+    fxaaBindings[2].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -352,10 +358,10 @@ bool VulkanRenderAPI::createFxaaResources()
         }
     }
 
-    // Create FXAA descriptor pool (needs samplers + UBOs)
+    // Create FXAA descriptor pool (needs samplers + UBOs + SSAO sampler)
     std::array<VkDescriptorPoolSize, 2> fxaaPoolSizes{};
     fxaaPoolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    fxaaPoolSizes[0].descriptorCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
+    fxaaPoolSizes[0].descriptorCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT * 2); // screen + SSAO
     fxaaPoolSizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     fxaaPoolSizes[1].descriptorCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
 
@@ -384,7 +390,7 @@ bool VulkanRenderAPI::createFxaaResources()
         return false;
     }
 
-    // Update FXAA descriptor sets (binding 0: texture, binding 1: UBO)
+    // Update FXAA descriptor sets (binding 0: texture, binding 1: UBO, binding 2: SSAO)
     for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         VkDescriptorImageInfo imageInfo{};
         imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -396,10 +402,72 @@ bool VulkanRenderAPI::createFxaaResources()
         uboInfo.offset = 0;
         uboInfo.range = sizeof(FXAAUbo);
 
+        // SSAO texture at binding 2 (initially use offscreen_view as placeholder, updated per-frame)
+        VkDescriptorImageInfo ssaoInfo{};
+        ssaoInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        ssaoInfo.imageView = offscreen_view;  // placeholder, updated per-frame in endFrame
+        ssaoInfo.sampler = offscreen_sampler;
+
         VkDescriptorWriter(fxaa_descriptor_sets[i])
             .writeImage(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &imageInfo)
             .writeBuffer(1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &uboInfo)
+            .writeImage(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &ssaoInfo)
             .update(device);
+    }
+
+    // Create 1x1 white SSAO fallback texture (ensures FXAA can always sample binding 2)
+    if (ssao_fallback_image == VK_NULL_HANDLE)
+    {
+        if (vkutil::createImage(vma_allocator, 1, 1, VK_FORMAT_R8_UNORM,
+                                VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                                ssao_fallback_image, ssao_fallback_allocation) == VK_SUCCESS)
+        {
+            ssao_fallback_view = vkutil::createImageView(device, ssao_fallback_image, VK_FORMAT_R8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT);
+
+            uint8_t white = 255;
+            ensureStagingBuffer(1);
+            memcpy(staging_mapped, &white, 1);
+
+            transitionImageLayout(ssao_fallback_image, VK_FORMAT_R8_UNORM,
+                                  VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+            VkCommandBuffer cmd = beginSingleTimeCommands();
+            VkBufferImageCopy region{};
+            region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            region.imageSubresource.layerCount = 1;
+            region.imageExtent = {1, 1, 1};
+            vkCmdCopyBufferToImage(cmd, staging_buffer, ssao_fallback_image,
+                                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+            endSingleTimeCommands(cmd);
+            transitionImageLayout(ssao_fallback_image, VK_FORMAT_R8_UNORM,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+            // Create a linear clamp sampler for the fallback
+            if (ssao_linear_sampler == VK_NULL_HANDLE) {
+                SamplerKey key{};
+                key.magFilter = VK_FILTER_LINEAR;
+                key.minFilter = VK_FILTER_LINEAR;
+                key.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+                key.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+                key.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+                key.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+                key.anisotropyEnable = VK_FALSE;
+                key.maxAnisotropy = 1.0f;
+                key.compareEnable = VK_FALSE;
+                key.compareOp = VK_COMPARE_OP_ALWAYS;
+                ssao_linear_sampler = sampler_cache.getOrCreate(key);
+            }
+
+            // Update FXAA descriptor sets to use the real fallback instead of placeholder
+            for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+                VkDescriptorImageInfo fbInfo{};
+                fbInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                fbInfo.imageView = ssao_fallback_view;
+                fbInfo.sampler = ssao_linear_sampler;
+                VkDescriptorWriter(fxaa_descriptor_sets[i])
+                    .writeImage(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &fbInfo)
+                    .update(device);
+            }
+        }
     }
 
     fxaa_initialized = true;
@@ -496,6 +564,18 @@ void VulkanRenderAPI::cleanupFxaaResources()
         fxaa_vertex_buffer = VK_NULL_HANDLE;
         fxaa_vertex_allocation = nullptr;
     }
+
+    // Clean up SSAO fallback (created in createFxaaResources)
+    if (ssao_fallback_view != VK_NULL_HANDLE) {
+        vkDestroyImageView(device, ssao_fallback_view, nullptr);
+        ssao_fallback_view = VK_NULL_HANDLE;
+    }
+    if (ssao_fallback_image != VK_NULL_HANDLE && vma_allocator) {
+        vmaDestroyImage(vma_allocator, ssao_fallback_image, ssao_fallback_allocation);
+        ssao_fallback_image = VK_NULL_HANDLE;
+        ssao_fallback_allocation = nullptr;
+    }
+    ssao_linear_sampler = VK_NULL_HANDLE; // owned by sampler_cache
 }
 
 void VulkanRenderAPI::recreateOffscreenResources()
@@ -546,10 +626,10 @@ void VulkanRenderAPI::recreateOffscreenResources()
 
     offscreen_view = vkutil::createImageView(device, offscreen_image, VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_ASPECT_COLOR_BIT);
 
-    // Create offscreen depth image
+    // Create offscreen depth image (SAMPLED_BIT for SSAO to read depth)
     vkutil::createImage(vma_allocator, swapchain_extent.width, swapchain_extent.height,
                         depth_format,
-                        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
                         offscreen_depth_image, offscreen_depth_allocation);
 
     offscreen_depth_view = vkutil::createImageView(device, offscreen_depth_image, depth_format, VK_IMAGE_ASPECT_DEPTH_BIT);
@@ -580,6 +660,10 @@ void VulkanRenderAPI::recreateOffscreenResources()
                                                          &swapchain_image_views[i], 1,
                                                          swapchain_extent.width, swapchain_extent.height);
     }
+
+    // Recreate SSAO resources at new size
+    if (ssao_initialized)
+        recreateSSAOResources();
 }
 
 void VulkanRenderAPI::setFXAAEnabled(bool enabled)

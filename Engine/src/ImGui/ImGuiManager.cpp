@@ -467,6 +467,15 @@ void ImGuiManager::render()
                         cvar->setInt(fxaa ? 1 : 0);
                 }
 
+                // SSAO toggle
+                bool ssao = m_renderAPI->isSSAOEnabled();
+                if (ImGui::Checkbox("SSAO", &ssao))
+                {
+                    m_renderAPI->setSSAOEnabled(ssao);
+                    if (auto* cvar = CVAR_PTR(r_ssao))
+                        cvar->setInt(ssao ? 1 : 0);
+                }
+
                 // Shadow quality dropdown
                 const char* shadowOptions[] = { "Off", "Low (1024)", "Medium (2048)", "High (4096)" };
                 int shadowQuality = m_renderAPI->getShadowQuality();

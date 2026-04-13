@@ -28,6 +28,7 @@ sources = {
     src/Graphics/Vulkan/VulkanRenderAPI_Shadow.cpp
     src/Graphics/Vulkan/VulkanRenderAPI_Skybox.cpp
     src/Graphics/Vulkan/VulkanRenderAPI_FXAA.cpp
+    src/Graphics/Vulkan/VulkanRenderAPI_SSAO.cpp
     src/Graphics/Vulkan/VulkanRenderAPI_Viewport.cpp
     src/Graphics/Vulkan/VulkanMesh.cpp
     src/Graphics/D3D12/D3D12RenderAPI.cpp [windows]
@@ -39,6 +40,7 @@ sources = {
     src/Graphics/D3D12/D3D12RenderAPI_Shadow.cpp [windows]
     src/Graphics/D3D12/D3D12RenderAPI_Skybox.cpp [windows]
     src/Graphics/D3D12/D3D12RenderAPI_FXAA.cpp [windows]
+    src/Graphics/D3D12/D3D12RenderAPI_SSAO.cpp [windows]
     src/Graphics/D3D12/D3D12RenderAPI_Viewport.cpp [windows]
     src/Graphics/D3D12/D3D12Mesh.cpp [windows]
     src/Graphics/D3D12/D3D12CopyQueue.cpp [windows]
@@ -49,6 +51,7 @@ sources = {
     src/Graphics/Metal/MetalRenderAPI_Rendering.mm [macOS]
     src/Graphics/Metal/MetalRenderAPI_Shadow.mm [macOS]
     src/Graphics/Metal/MetalRenderAPI_Viewport.mm [macOS]
+    src/Graphics/Metal/MetalRenderAPI_SSAO.mm [macOS]
     src/Graphics/Metal/MetalMesh.mm [macOS]
     src/Graphics/Metal/MetalRenderAPI_Commands.mm [macOS]
     src/Graphics/stb_impl.cpp

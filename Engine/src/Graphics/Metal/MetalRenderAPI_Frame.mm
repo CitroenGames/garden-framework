@@ -191,6 +191,122 @@ void MetalRenderAPI::endFrame()
         impl->mainPassActive = false;
     }
 
+    // Run SSAO passes before FXAA
+    if (impl->ssaoEnabled && impl->ssaoInitialized && impl->ssaoPipeline &&
+        impl->offscreenDepthTexture && impl->ssaoRawTexture)
+    {
+        int halfW = std::max(1, impl->viewportWidth / 2);
+        int halfH = std::max(1, impl->viewportHeight / 2);
+
+        // SSAO uniforms
+        struct MetalSSAOUniforms {
+            glm::mat4 projection;
+            glm::mat4 invProjection;
+            glm::vec4 samples[16];
+            glm::vec2 screenSize;
+            glm::vec2 noiseScale;
+            float radius, bias, power, _pad;
+        };
+
+        MetalSSAOUniforms ssaoUniforms;
+        ssaoUniforms.projection = impl->projectionMatrix;
+        ssaoUniforms.invProjection = glm::inverse(impl->projectionMatrix);
+        for (int i = 0; i < 16; i++) ssaoUniforms.samples[i] = impl->ssaoKernel[i];
+        ssaoUniforms.screenSize = glm::vec2((float)halfW, (float)halfH);
+        ssaoUniforms.noiseScale = ssaoUniforms.screenSize / 4.0f;
+        ssaoUniforms.radius = impl->ssaoRadius;
+        ssaoUniforms.bias = impl->ssaoBias;
+        ssaoUniforms.power = impl->ssaoIntensity;
+
+        MTLViewport ssaoViewport = {0, 0, (double)halfW, (double)halfH, 0, 1};
+
+        // --- SSAO computation pass ---
+        {
+            MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+            pass.colorAttachments[0].texture = impl->ssaoRawTexture;
+            pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+            pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+            pass.colorAttachments[0].clearColor = MTLClearColorMake(1, 1, 1, 1);
+
+            id<MTLRenderCommandEncoder> enc = [impl->commandBuffer renderCommandEncoderWithDescriptor:pass];
+            if (enc) {
+                enc.label = @"SSAO Compute";
+                [enc setRenderPipelineState:impl->ssaoPipeline];
+                [enc setViewport:ssaoViewport];
+                [enc setFragmentTexture:impl->offscreenDepthTexture atIndex:0];
+                [enc setFragmentTexture:impl->ssaoNoiseTexture atIndex:1];
+                [enc setFragmentSamplerState:impl->ssaoDepthSampler atIndex:0];
+                [enc setFragmentSamplerState:impl->ssaoNoiseSampler atIndex:1];
+                [enc setFragmentBytes:&ssaoUniforms length:sizeof(ssaoUniforms) atIndex:0];
+                [enc setVertexBuffer:impl->fxaaVertexBuffer offset:0 atIndex:0];
+                [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+                [enc endEncoding];
+            }
+        }
+
+        struct MetalSSAOBlurUniforms {
+            glm::vec2 texelSize;
+            glm::vec2 blurDir;
+            float depthThreshold;
+        };
+
+        // --- Horizontal blur ---
+        {
+            MetalSSAOBlurUniforms blurH;
+            blurH.texelSize = glm::vec2(1.0f / halfW, 1.0f / halfH);
+            blurH.blurDir = glm::vec2(1.0f, 0.0f);
+            blurH.depthThreshold = 0.001f;
+
+            MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+            pass.colorAttachments[0].texture = impl->ssaoBlurTempTexture;
+            pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+            pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+
+            id<MTLRenderCommandEncoder> enc = [impl->commandBuffer renderCommandEncoderWithDescriptor:pass];
+            if (enc) {
+                enc.label = @"SSAO Blur H";
+                [enc setRenderPipelineState:impl->ssaoBlurPipeline];
+                [enc setViewport:ssaoViewport];
+                [enc setFragmentTexture:impl->ssaoRawTexture atIndex:0];
+                [enc setFragmentTexture:impl->offscreenDepthTexture atIndex:1];
+                [enc setFragmentSamplerState:impl->defaultSampler atIndex:0];
+                [enc setFragmentSamplerState:impl->ssaoDepthSampler atIndex:1];
+                [enc setFragmentBytes:&blurH length:sizeof(blurH) atIndex:0];
+                [enc setVertexBuffer:impl->fxaaVertexBuffer offset:0 atIndex:0];
+                [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+                [enc endEncoding];
+            }
+        }
+
+        // --- Vertical blur ---
+        {
+            MetalSSAOBlurUniforms blurV;
+            blurV.texelSize = glm::vec2(1.0f / halfW, 1.0f / halfH);
+            blurV.blurDir = glm::vec2(0.0f, 1.0f);
+            blurV.depthThreshold = 0.001f;
+
+            MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+            pass.colorAttachments[0].texture = impl->ssaoBlurredTexture;
+            pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+            pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+
+            id<MTLRenderCommandEncoder> enc = [impl->commandBuffer renderCommandEncoderWithDescriptor:pass];
+            if (enc) {
+                enc.label = @"SSAO Blur V";
+                [enc setRenderPipelineState:impl->ssaoBlurPipeline];
+                [enc setViewport:ssaoViewport];
+                [enc setFragmentTexture:impl->ssaoBlurTempTexture atIndex:0];
+                [enc setFragmentTexture:impl->offscreenDepthTexture atIndex:1];
+                [enc setFragmentSamplerState:impl->defaultSampler atIndex:0];
+                [enc setFragmentSamplerState:impl->ssaoDepthSampler atIndex:1];
+                [enc setFragmentBytes:&blurV length:sizeof(blurV) atIndex:0];
+                [enc setVertexBuffer:impl->fxaaVertexBuffer offset:0 atIndex:0];
+                [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+                [enc endEncoding];
+            }
+        }
+    }
+
     // Apply FXAA if enabled
     if (impl->fxaaEnabled && impl->fxaaInitialized && impl->fxaaPipeline && impl->offscreenTexture)
     {
@@ -212,11 +328,20 @@ void MetalRenderAPI::endFrame()
 
             // Bind offscreen texture as input
             [fxaaEncoder setFragmentTexture:impl->offscreenTexture atIndex:0];
+            // Bind SSAO blurred texture (or fallback white, or offscreen as last resort) at index 1
+            id<MTLTexture> ssaoTex = (impl->ssaoEnabled && impl->ssaoInitialized && impl->ssaoBlurredTexture)
+                ? impl->ssaoBlurredTexture : impl->ssaoFallbackTexture;
+            if (!ssaoTex) ssaoTex = impl->offscreenTexture; // last resort
+            if (ssaoTex) {
+                [fxaaEncoder setFragmentTexture:ssaoTex atIndex:1];
+            }
             [fxaaEncoder setFragmentSamplerState:impl->defaultSampler atIndex:0];
 
-            // Push inverse screen size
+            // Push FXAA uniforms (inverse screen size + SSAO flag)
             MetalFXAAUniforms fxaaUniforms;
             fxaaUniforms.inverseScreenSize = glm::vec2(1.0f / impl->viewportWidth, 1.0f / impl->viewportHeight);
+            fxaaUniforms.exposure = 1.0f;
+            fxaaUniforms.ssaoEnabled = (impl->ssaoEnabled && impl->ssaoInitialized && impl->ssaoBlurredTexture) ? 1 : 0;
             [fxaaEncoder setFragmentBytes:&fxaaUniforms length:sizeof(fxaaUniforms) atIndex:0];
 
             // Draw fullscreen quad

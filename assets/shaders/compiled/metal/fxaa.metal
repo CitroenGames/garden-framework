@@ -3,6 +3,8 @@ using namespace metal;
 
 struct FXAAUniforms {
     float2 inverseScreenSize;
+    float exposure;
+    int ssaoEnabled;
 };
 
 struct FXAAVertexIn {
@@ -29,6 +31,7 @@ vertex FXAAVertexOut fxaa_vertex(FXAAVertexIn in [[stage_in]])
 
 fragment float4 fxaa_fragment(FXAAVertexOut in [[stage_in]],
                                texture2d<float> screenTexture [[texture(0)]],
+                               texture2d<float> ssaoTexture [[texture(1)]],
                                sampler screenSampler [[sampler(0)]],
                                constant FXAAUniforms& uniforms [[buffer(0)]])
 {
@@ -70,9 +73,18 @@ fragment float4 fxaa_fragment(FXAAVertexOut in [[stage_in]],
 
     float lumaB = dot(rgbB, luma);
 
+    float3 result;
     if (lumaB < lumaMin || lumaB > lumaMax) {
-        return float4(rgbA, 1.0);
+        result = rgbA;
     } else {
-        return float4(rgbB, 1.0);
+        result = rgbB;
     }
+
+    // Apply SSAO (multiplied before output, only when enabled)
+    if (uniforms.ssaoEnabled != 0) {
+        float ao = ssaoTexture.sample(screenSampler, texCoords).r;
+        result *= ao;
+    }
+
+    return float4(result, 1.0);
 }

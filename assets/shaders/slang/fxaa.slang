@@ -5,11 +5,14 @@ cbuffer FXAACB : register(b0)
 {
     float2 uInverseScreenSize;
     float uExposure;
-    float padding;
+    int uSSAOEnabled;
 };
 
 [[vk::binding(0, 0)]]Texture2D screenTexture : register(t0);
 [[vk::binding(0, 0)]]SamplerState linearSampler : register(s0);
+
+// SSAO texture reuses linearSampler (s0) — s1 is a comparison sampler in the main root signature
+[[vk::binding(2, 0)]]Texture2D ssaoTexture : register(t1);
 
 struct VSInput
 {
@@ -107,6 +110,13 @@ float4 fragmentMain(PSInput input) : SV_TARGET
         result = rgbA;
     else
         result = rgbB;
+
+    // Apply SSAO (multiplied before tone mapping, only when enabled)
+    if (uSSAOEnabled != 0)
+    {
+        float ao = ssaoTexture.Sample(linearSampler, texCoord).r;
+        result *= ao;
+    }
 
     // Apply exposure and ACES tone mapping
     result = ACESFilm(result * uExposure);

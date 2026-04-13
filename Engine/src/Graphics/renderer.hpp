@@ -920,6 +920,7 @@ public:
         bool dynamic_lights_enabled = CVAR_BOOL(r_dynamiclights);
         bool global_lighting = CVAR_BOOL(r_lighting);
         render_api->setFXAAEnabled(CVAR_BOOL(r_fxaa));
+        render_api->setSSAOEnabled(CVAR_BOOL(r_ssao));
         render_api->setShadowQuality(CVAR_INT(r_shadowquality));
         render_api->enableLighting(global_lighting);
 
@@ -1169,6 +1170,7 @@ public:
         bool dynamic_lights_enabled = CVAR_BOOL(r_dynamiclights);
         bool global_lighting = CVAR_BOOL(r_lighting);
         render_api->setFXAAEnabled(CVAR_BOOL(r_fxaa));
+        render_api->setSSAOEnabled(CVAR_BOOL(r_ssao));
         render_api->setShadowQuality(CVAR_INT(r_shadowquality));
         render_api->enableLighting(global_lighting);
 

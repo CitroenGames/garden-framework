@@ -27,17 +27,17 @@ public static const float2 poissonDisk[16] = {
 
 public struct PointLightData
 {
-    float3 position; float range;
-    float3 color;    float intensity;
-    float3 attenuation; float _pad;
+    public float3 position; public float range;
+    public float3 color;    public float intensity;
+    public float3 attenuation; public float _pad;
 };
 
 public struct SpotLightData
 {
-    float3 position;  float range;
-    float3 direction; float intensity;
-    float3 color;     float innerCutoff;
-    float3 attenuation; float outerCutoff;
+    public float3 position;  public float range;
+    public float3 direction; public float intensity;
+    public float3 color;     public float innerCutoff;
+    public float3 attenuation; public float outerCutoff;
 };
 
 public float3 CalcPointLight(PointLightData light, float3 normal, float3 fragPos)

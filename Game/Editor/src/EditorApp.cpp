@@ -98,6 +98,7 @@ bool EditorApp::initialize(RenderAPIType api_type)
 
     // Apply graphics CVars from config.cfg
     render_api->setFXAAEnabled(CVAR_BOOL(r_fxaa));
+    render_api->setSSAOEnabled(CVAR_BOOL(r_ssao));
     render_api->setShadowQuality(CVAR_INT(r_shadowquality));
     render_api->enableLighting(CVAR_BOOL(r_lighting));
     m_renderer.setDepthPrepassEnabled(CVAR_BOOL(r_depthprepass));
@@ -1936,6 +1937,17 @@ void EditorApp::renderEditorSettings()
                     }
                 }
 
+                // SSAO toggle
+                {
+                    auto* cvar = CVAR_PTR(r_ssao);
+                    bool ssao = cvar ? cvar->getBool() : true;
+                    if (ImGui::Checkbox("SSAO (Ambient Occlusion)", &ssao))
+                    {
+                        if (cvar) cvar->setInt(ssao ? 1 : 0);
+                        m_app.getRenderAPI()->setSSAOEnabled(ssao);
+                    }
+                }
+
                 // Shadow Quality combo
                 {
                     auto* cvar = CVAR_PTR(r_shadowquality);
@@ -2059,7 +2071,7 @@ void EditorApp::renderEditorSettings()
         // --- Footer ---
         if (ImGui::Button("Reset to Defaults"))
         {
-            const char* cvar_names[] = { "r_fxaa", "r_shadowquality", "r_sky", "r_lighting",
+            const char* cvar_names[] = { "r_fxaa", "r_ssao", "r_shadowquality", "r_sky", "r_lighting",
                                           "r_dynamiclights", "r_depthprepass", "r_frustumculling" };
             for (const char* name : cvar_names)
             {
@@ -2067,6 +2079,7 @@ void EditorApp::renderEditorSettings()
                     cv->reset();
             }
             m_app.getRenderAPI()->setFXAAEnabled(CVAR_BOOL(r_fxaa));
+            m_app.getRenderAPI()->setSSAOEnabled(CVAR_BOOL(r_ssao));
             m_app.getRenderAPI()->setShadowQuality(CVAR_INT(r_shadowquality));
             m_app.getRenderAPI()->enableLighting(CVAR_BOOL(r_lighting));
             m_renderer.setDepthPrepassEnabled(CVAR_BOOL(r_depthprepass));

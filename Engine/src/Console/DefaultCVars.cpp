@@ -22,6 +22,9 @@ CONVAR(sv_cheats, 0, ConVarFlags::SERVER_ONLY | ConVarFlags::REPLICATED | ConVar
 CONVAR(r_fxaa, 1, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
        "Enable FXAA anti-aliasing");
 
+CONVAR(r_ssao, 1, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
+       "Enable Screen Space Ambient Occlusion");
+
 CONVAR_BOUNDED(r_shadowquality, 2, 0, 3, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
                "Shadow quality (0=off, 1=low, 2=medium, 3=high)");
 

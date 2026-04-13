@@ -51,6 +51,8 @@ struct MetalSkyboxUBO {
 
 struct MetalFXAAUniforms {
     glm::vec2 inverseScreenSize;
+    float exposure;
+    int ssaoEnabled;
 };
 
 // Per-object UBO for command buffer replay (matches Vulkan's PerObjectUBO).

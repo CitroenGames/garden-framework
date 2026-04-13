@@ -147,7 +147,7 @@ struct ShadowUBO {
 struct FXAAUbo {
     glm::vec2 inverseScreenSize;
     float exposure;
-    float padding;
+    int ssaoEnabled;
 };
 
 // Skybox UBO (matches Slang SkyboxCB: projection, view, sunDirection, time)
@@ -156,4 +156,25 @@ struct SkyboxUBO {
     glm::mat4 view;
     glm::vec3 sunDirection;
     float time;
+};
+
+// SSAO UBO (matches Slang SSAOCB)
+struct SSAOUbo {
+    glm::mat4 projection;
+    glm::mat4 invProjection;
+    glm::vec4 samples[16];
+    glm::vec2 screenSize;
+    glm::vec2 noiseScale;
+    float radius;
+    float bias;
+    float power;
+    float _pad;
+};
+
+// SSAO blur UBO (matches Slang SSAOBlurCB)
+struct SSAOBlurUbo {
+    glm::vec2 texelSize;
+    glm::vec2 blurDir;
+    float depthThreshold;
+    glm::vec3 _pad;
 };

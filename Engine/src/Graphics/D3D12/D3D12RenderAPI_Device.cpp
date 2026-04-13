@@ -248,7 +248,7 @@ bool D3D12RenderAPI::createDepthStencilBuffer(int width, int height)
     desc.Height = height;
     desc.DepthOrArraySize = 1;
     desc.MipLevels = 1;
-    desc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+    desc.Format = DXGI_FORMAT_R24G8_TYPELESS; // Typeless to allow both DSV and SRV views
     desc.SampleDesc.Count = 1;
     desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
 

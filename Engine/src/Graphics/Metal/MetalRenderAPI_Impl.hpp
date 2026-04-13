@@ -73,6 +73,23 @@ struct MetalRenderAPIImpl {
     bool fxaaEnabled = true;
     bool fxaaInitialized = false;
 
+    // SSAO
+    id<MTLRenderPipelineState> ssaoPipeline = nil;
+    id<MTLRenderPipelineState> ssaoBlurPipeline = nil;
+    id<MTLTexture> ssaoRawTexture = nil;
+    id<MTLTexture> ssaoBlurTempTexture = nil;
+    id<MTLTexture> ssaoBlurredTexture = nil;
+    id<MTLTexture> ssaoNoiseTexture = nil;
+    id<MTLTexture> ssaoFallbackTexture = nil;  // 1x1 white
+    id<MTLSamplerState> ssaoDepthSampler = nil;
+    id<MTLSamplerState> ssaoNoiseSampler = nil;
+    bool ssaoEnabled = true;
+    bool ssaoInitialized = false;
+    float ssaoRadius = 0.5f;
+    float ssaoIntensity = 1.5f;
+    float ssaoBias = 0.025f;
+    glm::vec4 ssaoKernel[16];
+
     // Editor viewport render target
     id<MTLTexture> viewportTexture = nil;
     id<MTLTexture> viewportDepthTexture = nil;

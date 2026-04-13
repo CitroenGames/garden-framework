@@ -145,6 +145,10 @@ void D3D12RenderAPI::endFrame()
 
     if (!m_viewportTexture)
     {
+        // Run SSAO pass before FXAA/tone-mapping (generates blurred SSAO texture)
+        if (ssaoEnabled && m_psoSSAO && m_ssaoRawTexture)
+            renderSSAOPass();
+
         // Standalone: always tone-map HDR offscreen to LDR back buffer (with optional FXAA)
         transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         transitionResource(m_backBuffers[m_backBufferIndex].Get(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -171,6 +175,7 @@ void D3D12RenderAPI::endFrame()
         D3D12FXAACBuffer fxaaCB = {};
         fxaaCB.inverseScreenSize = glm::vec2(1.0f / std::max(viewport_width, 1), 1.0f / std::max(viewport_height, 1));
         fxaaCB.exposure = 1.0f;
+        fxaaCB.ssaoEnabled = (ssaoEnabled && m_ssaoBlurredSRVIndex != UINT(-1)) ? 1 : 0;
         auto cbAddr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(fxaaCB), &fxaaCB);
         if (cbAddr == 0)
         {
@@ -181,13 +186,18 @@ void D3D12RenderAPI::endFrame()
         }
         else
         {
-            // Minimal root param bindings for FXAA (shader only reads b0 and t0)
+            // Minimal root param bindings for FXAA (shader only reads b0 and t0, t1 for SSAO)
             commandList->SetGraphicsRootConstantBufferView(0, cbAddr);
             commandList->SetGraphicsRootConstantBufferView(1, cbAddr); // dummy, reuse FXAA cb
             commandList->SetGraphicsRootDescriptorTable(2, m_srvAllocator.getGPU(m_offscreenSRVIndex));
-            // Bind dummy Texture2DArray SRV for unused t1 slot (must match SRV dimension)
-            if (m_dummyShadowSRVIndex != UINT(-1))
-                commandList->SetGraphicsRootDescriptorTable(3, m_srvAllocator.getGPU(m_dummyShadowSRVIndex));
+            // Bind SSAO blurred texture at t1 slot (root param 3), or fallback white
+            {
+                UINT ssaoSrvIdx = (ssaoEnabled && m_ssaoBlurredSRVIndex != UINT(-1))
+                    ? m_ssaoBlurredSRVIndex : m_ssaoFallbackSRVIndex;
+                if (ssaoSrvIdx != UINT(-1))
+                    commandList->SetGraphicsRootDescriptorTable(3, m_srvAllocator.getGPU(ssaoSrvIdx));
+                // No fallback to dummy shadow Texture2DArray - shader flag guards the sample
+            }
             commandList->SetGraphicsRootConstantBufferView(4, cbAddr); // dummy, reuse FXAA cb
 
             commandList->IASetVertexBuffers(0, 1, &m_fxaaQuadVBV);

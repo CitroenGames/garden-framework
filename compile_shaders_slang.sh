@@ -50,6 +50,10 @@ echo "Compiling skinned_shadow..."
 compile skinned_shadow vertexMain fragmentMain
 echo "Compiling shadow_alphatest..."
 compile shadow_alphatest vertexMain fragmentMain
+echo "Compiling ssao..."
+compile ssao vertexMain fragmentMain
+echo "Compiling ssao_blur..."
+compile ssao_blur vertexMain fragmentMain
 
 # rmlui has 3 entry points
 echo "Compiling rmlui..."
