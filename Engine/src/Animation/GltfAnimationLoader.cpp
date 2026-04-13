@@ -1,5 +1,6 @@
 #include "GltfAnimationLoader.hpp"
 #include "Utils/Log.hpp"
+#include "Utils/TangentGenerator.hpp"
 
 // Must include the full tinygltf header in the .cpp
 #include <tiny_gltf.h>
@@ -292,13 +293,15 @@ bool loadSkinnedVertices(const tinygltf::Model& model, int mesh_index,
         if (!positions) continue;
 
         // Optional attributes
-        size_t normal_count = 0, texcoord_count = 0, joints_count = 0, weights_count = 0;
+        size_t normal_count = 0, texcoord_count = 0, tangent_count = 0, joints_count = 0, weights_count = 0;
         const float* normals = nullptr;
         const float* texcoords = nullptr;
+        const float* tangent_data = nullptr;
         const unsigned char* joints_u8 = nullptr;
         const unsigned short* joints_u16 = nullptr;
         const float* weights = nullptr;
         bool joints_are_u16 = false;
+        bool has_tangents = false;
 
         auto norm_it = primitive.attributes.find("NORMAL");
         if (norm_it != primitive.attributes.end())
@@ -307,6 +310,13 @@ bool loadSkinnedVertices(const tinygltf::Model& model, int mesh_index,
         auto tex_it = primitive.attributes.find("TEXCOORD_0");
         if (tex_it != primitive.attributes.end())
             texcoords = getAccessorData<float>(model, tex_it->second, texcoord_count);
+
+        auto tan_it = primitive.attributes.find("TANGENT");
+        if (tan_it != primitive.attributes.end())
+        {
+            tangent_data = getAccessorData<float>(model, tan_it->second, tangent_count);
+            has_tangents = (tangent_data != nullptr && tangent_count == vertex_count);
+        }
 
         auto joints_it = primitive.attributes.find("JOINTS_0");
         if (joints_it != primitive.attributes.end())
@@ -360,6 +370,18 @@ bool loadSkinnedVertices(const tinygltf::Model& model, int mesh_index,
                 sv.u = sv.v = 0.0f;
             }
 
+            if (has_tangents)
+            {
+                sv.tx = tangent_data[i * 4 + 0];
+                sv.ty = tangent_data[i * 4 + 1];
+                sv.tz = tangent_data[i * 4 + 2];
+                sv.tw = tangent_data[i * 4 + 3];
+            }
+            else
+            {
+                sv.tx = 1.0f; sv.ty = 0.0f; sv.tz = 0.0f; sv.tw = 1.0f;
+            }
+
             // Bone influences
             if (joints_count > 0 && i < joints_count)
             {
@@ -395,6 +417,12 @@ bool loadSkinnedVertices(const tinygltf::Model& model, int mesh_index,
                 sv.bone_weights[0] = 1.0f;
                 sv.bone_weights[1] = sv.bone_weights[2] = sv.bone_weights[3] = 0.0f;
             }
+        }
+
+        // Generate tangents from geometry if not present in glTF data
+        if (!has_tangents && vertex_count >= 3)
+        {
+            TangentGenerator::generateSkinned(&out_vertices[base], vertex_count);
         }
     }
 

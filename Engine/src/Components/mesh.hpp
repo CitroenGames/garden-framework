@@ -39,11 +39,23 @@ struct MaterialRange
 {
     size_t start_vertex;        // Starting vertex index
     size_t vertex_count;        // Number of vertices in this range
-    TextureHandle texture;      // Texture for this range
+    TextureHandle texture;      // Texture for this range (base color / diffuse)
     std::string material_name;  // Name of the material (for debugging)
     uint8_t alpha_mode = 0;     // 0=OPAQUE, 1=MASK, 2=BLEND
     float alpha_cutoff = 0.5f;  // Alpha test threshold (MASK mode)
     bool double_sided = false;  // Disable back-face culling
+
+    // PBR material properties (metallic-roughness workflow)
+    float metallic_factor = 0.0f;
+    float roughness_factor = 0.5f;
+    glm::vec3 emissive_factor = glm::vec3(0.0f);
+    glm::vec4 base_color_factor = glm::vec4(1.0f);
+
+    // PBR texture handles
+    TextureHandle metallic_roughness_texture = INVALID_TEXTURE;
+    TextureHandle normal_texture = INVALID_TEXTURE;
+    TextureHandle occlusion_texture = INVALID_TEXTURE;
+    TextureHandle emissive_texture = INVALID_TEXTURE;
 
     MaterialRange()
         : start_vertex(0), vertex_count(0), texture(INVALID_TEXTURE), material_name("") {}
@@ -724,7 +736,33 @@ public:
                     mat_name = mat.properties.name;
                 }
 
-                material_ranges.emplace_back(current_vertex, vert_count, tex, mat_name);
+                MaterialRange range(current_vertex, vert_count, tex, mat_name);
+
+                // Copy PBR properties from glTF material data
+                if (mat_idx >= 0 && mat_idx < static_cast<int>(result.material_data.materials.size()))
+                {
+                    const auto& mat = result.material_data.materials[mat_idx];
+                    const auto& props = mat.properties;
+                    range.metallic_factor = props.metallic_factor;
+                    range.roughness_factor = props.roughness_factor;
+                    range.emissive_factor = glm::vec3(props.emissive_factor[0], props.emissive_factor[1], props.emissive_factor[2]);
+                    range.base_color_factor = glm::vec4(props.base_color_factor[0], props.base_color_factor[1], props.base_color_factor[2], props.base_color_factor[3]);
+                    range.alpha_mode = (props.alpha_mode == "MASK") ? 1 : (props.alpha_mode == "BLEND") ? 2 : 0;
+                    range.alpha_cutoff = props.alpha_cutoff;
+                    range.double_sided = props.double_sided;
+
+                    // Wire PBR texture handles
+                    const auto* mr_tex = mat.textures.getTexture(TextureType::METALLIC_ROUGHNESS);
+                    if (mr_tex && mr_tex->is_loaded) range.metallic_roughness_texture = mr_tex->handle;
+                    const auto* nm_tex = mat.textures.getTexture(TextureType::NORMAL);
+                    if (nm_tex && nm_tex->is_loaded) range.normal_texture = nm_tex->handle;
+                    const auto* ao_tex = mat.textures.getTexture(TextureType::OCCLUSION);
+                    if (ao_tex && ao_tex->is_loaded) range.occlusion_texture = ao_tex->handle;
+                    const auto* em_tex = mat.textures.getTexture(TextureType::EMISSIVE);
+                    if (em_tex && em_tex->is_loaded) range.emissive_texture = em_tex->handle;
+                }
+
+                material_ranges.push_back(range);
                 current_vertex += vert_count;
             }
 

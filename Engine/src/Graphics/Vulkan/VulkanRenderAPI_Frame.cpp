@@ -154,14 +154,11 @@ void VulkanRenderAPI::beginFrame()
             renderPassInfo.renderPass = offscreen_render_pass;
             renderPassInfo.framebuffer = offscreen_framebuffers[0];
             renderExtent = { (uint32_t)viewport_width_rt, (uint32_t)viewport_height_rt };
-        } else if (fxaaEnabled && fxaa_initialized) {
-            // Render to offscreen framebuffer for FXAA
+        } else {
+            // Always render to offscreen framebuffer (HDR RGBA16F target).
+            // FXAA/tone-mapping pass will resolve to swapchain afterwards.
             renderPassInfo.renderPass = offscreen_render_pass;
             renderPassInfo.framebuffer = offscreen_framebuffers[0];
-        } else {
-            // Render directly to swapchain
-            renderPassInfo.renderPass = render_pass;
-            renderPassInfo.framebuffer = framebuffers[current_image_index];
         }
     }
 
@@ -236,16 +233,6 @@ void VulkanRenderAPI::endFrame()
     }
 
     if (main_pass_started) {
-        // If FXAA is disabled, render ImGui in the main pass before ending it
-        if (!fxaaEnabled || !fxaa_initialized)
-        {
-            ImDrawData* draw_data = ImGui::GetDrawData();
-            if (draw_data && draw_data->TotalVtxCount > 0)
-            {
-                ImGui_ImplVulkan_RenderDrawData(draw_data, command_buffers[current_frame]);
-            }
-        }
-
         vkCmdEndRenderPass(command_buffers[current_frame]);
         main_pass_started = false;
 
@@ -260,31 +247,20 @@ void VulkanRenderAPI::endFrame()
             barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
             barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
 
-            if (fxaaEnabled && fxaa_initialized) {
-                // Offscreen path: FXAA pass needs SHADER_READ_ONLY_OPTIMAL
-                barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-                barrier.image = offscreen_image;
-                barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-                vkCmdPipelineBarrier(command_buffers[current_frame],
-                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                    0, 0, nullptr, 0, nullptr, 1, &barrier);
-            } else {
-                // Direct swapchain: presentation needs PRESENT_SRC_KHR
-                barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-                barrier.image = swapchain_images[current_image_index];
-                barrier.dstAccessMask = 0;
-                vkCmdPipelineBarrier(command_buffers[current_frame],
-                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                    VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                    0, 0, nullptr, 0, nullptr, 1, &barrier);
-            }
+            // Scene always renders to offscreen HDR target; FXAA/tone-mapping pass resolves to swapchain
+            barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            barrier.image = offscreen_image;
+            barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            vkCmdPipelineBarrier(command_buffers[current_frame],
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                0, 0, nullptr, 0, nullptr, 1, &barrier);
             using_continuation_pass = false;
         }
     }
 
-    // Apply FXAA if enabled
-    if (fxaaEnabled && fxaa_initialized) {
+    // Always apply FXAA/tone-mapping pass (scene renders to HDR offscreen, this resolves to LDR swapchain)
+    if (fxaa_initialized) {
         VkCommandBuffer cmd = command_buffers[current_frame];
 
         // Begin FXAA render pass (renders to swapchain)
@@ -320,9 +296,10 @@ void VulkanRenderAPI::endFrame()
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, fxaa_pipeline_layout,
                                 0, 1, &fxaa_descriptor_sets[current_frame], 0, nullptr);
 
-        // Update FXAA UBO with inverse screen size
+        // Update FXAA UBO with inverse screen size and exposure for ACES tone mapping
         FXAAUbo fxaaUbo{};
         fxaaUbo.inverseScreenSize = glm::vec2(1.0f / swapchain_extent.width, 1.0f / swapchain_extent.height);
+        fxaaUbo.exposure = 1.0f;
         memcpy(fxaa_uniform_mapped[current_frame], &fxaaUbo, sizeof(FXAAUbo));
 
         // Bind fullscreen quad and draw

@@ -287,6 +287,12 @@ bool D3D12RenderAPI::initialize(WindowHandle window, int width, int height, floa
         return false;
     }
 
+    if (!createDefaultPBRTextures())
+    {
+        LOG_ENGINE_ERROR("Failed to create default PBR textures");
+        return false;
+    }
+
     if (!createDummyShadowTexture())
     {
         LOG_ENGINE_ERROR("Failed to create dummy shadow texture");
@@ -322,6 +328,20 @@ void D3D12RenderAPI::shutdown()
     // Save PSO cache before releasing PSOs
     if (!m_psoCachePath.empty())
         m_psoCache.saveToDisk(m_psoCachePath);
+
+    // Release default PBR textures
+    if (m_defaultNormalTexture.srvIndex != UINT(-1))
+        m_srvAllocator.free(m_defaultNormalTexture.srvIndex);
+    m_defaultNormalTexture = {};
+    if (m_defaultMetallicRoughnessTexture.srvIndex != UINT(-1))
+        m_srvAllocator.free(m_defaultMetallicRoughnessTexture.srvIndex);
+    m_defaultMetallicRoughnessTexture = {};
+    if (m_defaultOcclusionTexture.srvIndex != UINT(-1))
+        m_srvAllocator.free(m_defaultOcclusionTexture.srvIndex);
+    m_defaultOcclusionTexture = {};
+    if (m_defaultEmissiveTexture.srvIndex != UINT(-1))
+        m_srvAllocator.free(m_defaultEmissiveTexture.srvIndex);
+    m_defaultEmissiveTexture = {};
 
     LOG_ENGINE_TRACE("[D3D12] Releasing {} textures, {} PIE viewports",
                       textures.size(), m_pie_viewports.size());
@@ -556,6 +576,16 @@ void D3D12RenderAPI::bindDummyRootParams()
     {
         commandList->SetGraphicsRootDescriptorTable(3, m_srvAllocator.getGPU(m_dummyShadowSRVIndex));
     }
+
+    // [5]-[8] Default PBR textures
+    if (m_defaultMetallicRoughnessTexture.srvIndex != UINT(-1))
+        commandList->SetGraphicsRootDescriptorTable(5, m_srvAllocator.getGPU(m_defaultMetallicRoughnessTexture.srvIndex));
+    if (m_defaultNormalTexture.srvIndex != UINT(-1))
+        commandList->SetGraphicsRootDescriptorTable(6, m_srvAllocator.getGPU(m_defaultNormalTexture.srvIndex));
+    if (m_defaultOcclusionTexture.srvIndex != UINT(-1))
+        commandList->SetGraphicsRootDescriptorTable(7, m_srvAllocator.getGPU(m_defaultOcclusionTexture.srvIndex));
+    if (m_defaultEmissiveTexture.srvIndex != UINT(-1))
+        commandList->SetGraphicsRootDescriptorTable(8, m_srvAllocator.getGPU(m_defaultEmissiveTexture.srvIndex));
 }
 
 std::vector<char> D3D12RenderAPI::readShaderBinary(const std::string& filepath)

@@ -126,7 +126,15 @@ struct PerObjectUBO {
     glm::vec3 color;
     int useTexture;
     float alphaCutoff;
-    float _pad[3];
+    float metallic;
+    float roughness;
+    float _pbrPad1;
+    glm::vec3 emissive;
+    float _pbrPad2;
+    int hasMetallicRoughnessMap;
+    int hasNormalMap;
+    int hasOcclusionMap;
+    int hasEmissiveMap;
 };
 
 // Shadow UBO for shadow pass (matches Slang shader ShadowCB)
@@ -138,7 +146,8 @@ struct ShadowUBO {
 // FXAA UBO (matches Slang shader FXAACB)
 struct FXAAUbo {
     glm::vec2 inverseScreenSize;
-    glm::vec2 padding;
+    float exposure;
+    float padding;
 };
 
 // Skybox UBO (matches Slang SkyboxCB: projection, view, sunDirection, time)

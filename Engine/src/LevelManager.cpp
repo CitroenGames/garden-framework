@@ -1061,6 +1061,20 @@ std::shared_ptr<mesh> LevelManager::loadMesh(const LevelEntity& entity, IRenderA
                         range.alpha_mode = 2;
                     range.alpha_cutoff = material.properties.alpha_cutoff;
                     range.double_sided = material.properties.double_sided;
+                    range.metallic_factor = material.properties.metallic_factor;
+                    range.roughness_factor = material.properties.roughness_factor;
+                    range.emissive_factor = glm::vec3(material.properties.emissive_factor[0], material.properties.emissive_factor[1], material.properties.emissive_factor[2]);
+                    range.base_color_factor = glm::vec4(material.properties.base_color_factor[0], material.properties.base_color_factor[1], material.properties.base_color_factor[2], material.properties.base_color_factor[3]);
+
+                    // Wire PBR texture handles
+                    const auto* mr_tex = material.textures.getTexture(TextureType::METALLIC_ROUGHNESS);
+                    if (mr_tex && mr_tex->is_loaded) range.metallic_roughness_texture = mr_tex->handle;
+                    const auto* nm_tex = material.textures.getTexture(TextureType::NORMAL);
+                    if (nm_tex && nm_tex->is_loaded) range.normal_texture = nm_tex->handle;
+                    const auto* ao_tex = material.textures.getTexture(TextureType::OCCLUSION);
+                    if (ao_tex && ao_tex->is_loaded) range.occlusion_texture = ao_tex->handle;
+                    const auto* em_tex = material.textures.getTexture(TextureType::EMISSIVE);
+                    if (em_tex && em_tex->is_loaded) range.emissive_texture = em_tex->handle;
                     material_ranges.push_back(range);
 
                     if (tex != INVALID_TEXTURE) {
@@ -1166,6 +1180,14 @@ std::shared_ptr<mesh> LevelManager::loadMesh(const LevelEntity& entity, IRenderA
                                 uint8_t alpha_mode = 0;
                                 float alpha_cutoff = 0.5f;
                                 bool double_sided = false;
+                                float metallic_factor = 0.0f;
+                                float roughness_factor = 0.5f;
+                                glm::vec3 emissive_factor(0.0f);
+                                glm::vec4 base_color_factor(1.0f);
+                                TextureHandle mr_handle = INVALID_TEXTURE;
+                                TextureHandle nm_handle = INVALID_TEXTURE;
+                                TextureHandle ao_handle = INVALID_TEXTURE;
+                                TextureHandle em_handle = INVALID_TEXTURE;
                                 if (sr.submesh_id < m_ptr->material_ranges.size())
                                 {
                                     const auto& base_range = m_ptr->material_ranges[sr.submesh_id];
@@ -1174,11 +1196,27 @@ std::shared_ptr<mesh> LevelManager::loadMesh(const LevelEntity& entity, IRenderA
                                     alpha_mode = base_range.alpha_mode;
                                     alpha_cutoff = base_range.alpha_cutoff;
                                     double_sided = base_range.double_sided;
+                                    metallic_factor = base_range.metallic_factor;
+                                    roughness_factor = base_range.roughness_factor;
+                                    emissive_factor = base_range.emissive_factor;
+                                    base_color_factor = base_range.base_color_factor;
+                                    mr_handle = base_range.metallic_roughness_texture;
+                                    nm_handle = base_range.normal_texture;
+                                    ao_handle = base_range.occlusion_texture;
+                                    em_handle = base_range.emissive_texture;
                                 }
                                 MaterialRange lod_range(sr.start_index, sr.index_count, tex, mat_name);
                                 lod_range.alpha_mode = alpha_mode;
                                 lod_range.alpha_cutoff = alpha_cutoff;
                                 lod_range.double_sided = double_sided;
+                                lod_range.metallic_factor = metallic_factor;
+                                lod_range.roughness_factor = roughness_factor;
+                                lod_range.emissive_factor = emissive_factor;
+                                lod_range.base_color_factor = base_color_factor;
+                                lod_range.metallic_roughness_texture = mr_handle;
+                                lod_range.normal_texture = nm_handle;
+                                lod_range.occlusion_texture = ao_handle;
+                                lod_range.emissive_texture = em_handle;
                                 level.material_ranges.push_back(lod_range);
                             }
                         }
@@ -1305,6 +1343,22 @@ std::shared_ptr<mesh> LevelManager::loadCompiledMesh(const std::string& cmesh_pa
                     range.alpha_mode = mat_ref.alpha_mode;
                     range.alpha_cutoff = mat_ref.alpha_cutoff;
                     range.double_sided = mat_ref.double_sided;
+                    range.metallic_factor = mat_ref.metallic_factor;
+                    range.roughness_factor = mat_ref.roughness_factor;
+                    range.base_color_factor = glm::vec4(mat_ref.base_color_factor[0], mat_ref.base_color_factor[1], mat_ref.base_color_factor[2], mat_ref.base_color_factor[3]);
+
+                    // Wire PBR texture handles from compiled material refs
+                    for (const auto& tr : mat_ref.textures) {
+                        TextureHandle pbr_tex = loadTextureWithFallback(render_api, mesh_dir + tr.path);
+                        if (pbr_tex == INVALID_TEXTURE) continue;
+                        switch (static_cast<TextureType>(tr.type)) {
+                            case TextureType::METALLIC_ROUGHNESS: range.metallic_roughness_texture = pbr_tex; break;
+                            case TextureType::NORMAL:             range.normal_texture = pbr_tex; break;
+                            case TextureType::OCCLUSION:          range.occlusion_texture = pbr_tex; break;
+                            case TextureType::EMISSIVE:           range.emissive_texture = pbr_tex; break;
+                            default: break;
+                        }
+                    }
                 }
                 material_ranges.push_back(range);
             }
@@ -1332,6 +1386,22 @@ std::shared_ptr<mesh> LevelManager::loadCompiledMesh(const std::string& cmesh_pa
                     range.alpha_mode = mat_ref.alpha_mode;
                     range.alpha_cutoff = mat_ref.alpha_cutoff;
                     range.double_sided = mat_ref.double_sided;
+                    range.metallic_factor = mat_ref.metallic_factor;
+                    range.roughness_factor = mat_ref.roughness_factor;
+                    range.base_color_factor = glm::vec4(mat_ref.base_color_factor[0], mat_ref.base_color_factor[1], mat_ref.base_color_factor[2], mat_ref.base_color_factor[3]);
+
+                    // Wire PBR texture handles from compiled material refs
+                    for (const auto& tr : mat_ref.textures) {
+                        TextureHandle pbr_tex = loadTextureWithFallback(render_api, mesh_dir + tr.path);
+                        if (pbr_tex == INVALID_TEXTURE) continue;
+                        switch (static_cast<TextureType>(tr.type)) {
+                            case TextureType::METALLIC_ROUGHNESS: range.metallic_roughness_texture = pbr_tex; break;
+                            case TextureType::NORMAL:             range.normal_texture = pbr_tex; break;
+                            case TextureType::OCCLUSION:          range.occlusion_texture = pbr_tex; break;
+                            case TextureType::EMISSIVE:           range.emissive_texture = pbr_tex; break;
+                            default: break;
+                        }
+                    }
                 }
                 material_ranges.push_back(range);
             }
@@ -1373,6 +1443,14 @@ std::shared_ptr<mesh> LevelManager::loadCompiledMesh(const std::string& cmesh_pa
                 uint8_t lod_alpha_mode = 0;
                 float lod_alpha_cutoff = 0.5f;
                 bool lod_double_sided = false;
+                float lod_metallic_factor = 0.0f;
+                float lod_roughness_factor = 0.5f;
+                glm::vec3 lod_emissive_factor(0.0f);
+                glm::vec4 lod_base_color_factor(1.0f);
+                TextureHandle lod_mr_handle = INVALID_TEXTURE;
+                TextureHandle lod_nm_handle = INVALID_TEXTURE;
+                TextureHandle lod_ao_handle = INVALID_TEXTURE;
+                TextureHandle lod_em_handle = INVALID_TEXTURE;
                 if (sr.submesh_id < m_ptr->material_ranges.size()) {
                     const auto& base_range = m_ptr->material_ranges[sr.submesh_id];
                     tex = base_range.texture;
@@ -1380,11 +1458,27 @@ std::shared_ptr<mesh> LevelManager::loadCompiledMesh(const std::string& cmesh_pa
                     lod_alpha_mode = base_range.alpha_mode;
                     lod_alpha_cutoff = base_range.alpha_cutoff;
                     lod_double_sided = base_range.double_sided;
+                    lod_metallic_factor = base_range.metallic_factor;
+                    lod_roughness_factor = base_range.roughness_factor;
+                    lod_emissive_factor = base_range.emissive_factor;
+                    lod_base_color_factor = base_range.base_color_factor;
+                    lod_mr_handle = base_range.metallic_roughness_texture;
+                    lod_nm_handle = base_range.normal_texture;
+                    lod_ao_handle = base_range.occlusion_texture;
+                    lod_em_handle = base_range.emissive_texture;
                 }
                 MaterialRange lod_range(sr.start_index, sr.index_count, tex, mat_name);
                 lod_range.alpha_mode = lod_alpha_mode;
                 lod_range.alpha_cutoff = lod_alpha_cutoff;
                 lod_range.double_sided = lod_double_sided;
+                lod_range.metallic_factor = lod_metallic_factor;
+                lod_range.roughness_factor = lod_roughness_factor;
+                lod_range.emissive_factor = lod_emissive_factor;
+                lod_range.base_color_factor = lod_base_color_factor;
+                lod_range.metallic_roughness_texture = lod_mr_handle;
+                lod_range.normal_texture = lod_nm_handle;
+                lod_range.occlusion_texture = lod_ao_handle;
+                lod_range.emissive_texture = lod_em_handle;
                 level.material_ranges.push_back(lod_range);
             }
         }
@@ -1632,6 +1726,31 @@ std::shared_ptr<mesh> LevelManager::finalizeCompiledMeshGPU(
                     range.alpha_mode = mat_ref.alpha_mode;
                     range.alpha_cutoff = mat_ref.alpha_cutoff;
                     range.double_sided = mat_ref.double_sided;
+                    range.metallic_factor = mat_ref.metallic_factor;
+                    range.roughness_factor = mat_ref.roughness_factor;
+                    range.base_color_factor = glm::vec4(mat_ref.base_color_factor[0], mat_ref.base_color_factor[1], mat_ref.base_color_factor[2], mat_ref.base_color_factor[3]);
+
+                    // Wire PBR texture handles from compiled material refs
+                    for (const auto& tr : mat_ref.textures) {
+                        std::string pbr_path = mesh_dir + tr.path;
+                        std::filesystem::path pbr_tp(pbr_path);
+                        std::string pbr_ctex = (pbr_tp.parent_path() / pbr_tp.stem()).string() + ".ctex";
+                        TextureHandle pbr_tex = INVALID_TEXTURE;
+                        auto pbr_it = preload.preloaded_textures.find(pbr_ctex);
+                        if (pbr_it != preload.preloaded_textures.end() && pbr_it->second.success) {
+                            pbr_tex = uploadPreloadedCompiledTexture(render_api, pbr_it->second.compiled_tex);
+                        } else {
+                            pbr_tex = loadTextureWithFallback(render_api, pbr_path);
+                        }
+                        if (pbr_tex == INVALID_TEXTURE) continue;
+                        switch (static_cast<TextureType>(tr.type)) {
+                            case TextureType::METALLIC_ROUGHNESS: range.metallic_roughness_texture = pbr_tex; break;
+                            case TextureType::NORMAL:             range.normal_texture = pbr_tex; break;
+                            case TextureType::OCCLUSION:          range.occlusion_texture = pbr_tex; break;
+                            case TextureType::EMISSIVE:           range.emissive_texture = pbr_tex; break;
+                            default: break;
+                        }
+                    }
                 }
                 material_ranges.push_back(range);
             }
@@ -1664,6 +1783,31 @@ std::shared_ptr<mesh> LevelManager::finalizeCompiledMeshGPU(
                     range.alpha_mode = mat_ref.alpha_mode;
                     range.alpha_cutoff = mat_ref.alpha_cutoff;
                     range.double_sided = mat_ref.double_sided;
+                    range.metallic_factor = mat_ref.metallic_factor;
+                    range.roughness_factor = mat_ref.roughness_factor;
+                    range.base_color_factor = glm::vec4(mat_ref.base_color_factor[0], mat_ref.base_color_factor[1], mat_ref.base_color_factor[2], mat_ref.base_color_factor[3]);
+
+                    // Wire PBR texture handles from compiled material refs
+                    for (const auto& tr : mat_ref.textures) {
+                        std::string pbr_path = mesh_dir + tr.path;
+                        std::filesystem::path pbr_tp(pbr_path);
+                        std::string pbr_ctex = (pbr_tp.parent_path() / pbr_tp.stem()).string() + ".ctex";
+                        TextureHandle pbr_tex = INVALID_TEXTURE;
+                        auto pbr_it = preload.preloaded_textures.find(pbr_ctex);
+                        if (pbr_it != preload.preloaded_textures.end() && pbr_it->second.success) {
+                            pbr_tex = uploadPreloadedCompiledTexture(render_api, pbr_it->second.compiled_tex);
+                        } else {
+                            pbr_tex = loadTextureWithFallback(render_api, pbr_path);
+                        }
+                        if (pbr_tex == INVALID_TEXTURE) continue;
+                        switch (static_cast<TextureType>(tr.type)) {
+                            case TextureType::METALLIC_ROUGHNESS: range.metallic_roughness_texture = pbr_tex; break;
+                            case TextureType::NORMAL:             range.normal_texture = pbr_tex; break;
+                            case TextureType::OCCLUSION:          range.occlusion_texture = pbr_tex; break;
+                            case TextureType::EMISSIVE:           range.emissive_texture = pbr_tex; break;
+                            default: break;
+                        }
+                    }
                 }
                 material_ranges.push_back(range);
             }
@@ -1704,6 +1848,14 @@ std::shared_ptr<mesh> LevelManager::finalizeCompiledMeshGPU(
                 uint8_t lod_alpha_mode = 0;
                 float lod_alpha_cutoff = 0.5f;
                 bool lod_double_sided = false;
+                float lod_metallic_factor = 0.0f;
+                float lod_roughness_factor = 0.5f;
+                glm::vec3 lod_emissive_factor(0.0f);
+                glm::vec4 lod_base_color_factor(1.0f);
+                TextureHandle lod_mr_handle = INVALID_TEXTURE;
+                TextureHandle lod_nm_handle = INVALID_TEXTURE;
+                TextureHandle lod_ao_handle = INVALID_TEXTURE;
+                TextureHandle lod_em_handle = INVALID_TEXTURE;
                 if (sr.submesh_id < m_ptr->material_ranges.size()) {
                     const auto& base_range = m_ptr->material_ranges[sr.submesh_id];
                     tex = base_range.texture;
@@ -1711,11 +1863,27 @@ std::shared_ptr<mesh> LevelManager::finalizeCompiledMeshGPU(
                     lod_alpha_mode = base_range.alpha_mode;
                     lod_alpha_cutoff = base_range.alpha_cutoff;
                     lod_double_sided = base_range.double_sided;
+                    lod_metallic_factor = base_range.metallic_factor;
+                    lod_roughness_factor = base_range.roughness_factor;
+                    lod_emissive_factor = base_range.emissive_factor;
+                    lod_base_color_factor = base_range.base_color_factor;
+                    lod_mr_handle = base_range.metallic_roughness_texture;
+                    lod_nm_handle = base_range.normal_texture;
+                    lod_ao_handle = base_range.occlusion_texture;
+                    lod_em_handle = base_range.emissive_texture;
                 }
                 MaterialRange lod_range(sr.start_index, sr.index_count, tex, mat_name);
                 lod_range.alpha_mode = lod_alpha_mode;
                 lod_range.alpha_cutoff = lod_alpha_cutoff;
                 lod_range.double_sided = lod_double_sided;
+                lod_range.metallic_factor = lod_metallic_factor;
+                lod_range.roughness_factor = lod_roughness_factor;
+                lod_range.emissive_factor = lod_emissive_factor;
+                lod_range.base_color_factor = lod_base_color_factor;
+                lod_range.metallic_roughness_texture = lod_mr_handle;
+                lod_range.normal_texture = lod_nm_handle;
+                lod_range.occlusion_texture = lod_ao_handle;
+                lod_range.emissive_texture = lod_em_handle;
                 level.material_ranges.push_back(lod_range);
             }
         }
@@ -1806,6 +1974,20 @@ std::shared_ptr<mesh> LevelManager::finalizeMeshGPU(
                         range.alpha_mode = 2;
                     range.alpha_cutoff = material.properties.alpha_cutoff;
                     range.double_sided = material.properties.double_sided;
+                    range.metallic_factor = material.properties.metallic_factor;
+                    range.roughness_factor = material.properties.roughness_factor;
+                    range.emissive_factor = glm::vec3(material.properties.emissive_factor[0], material.properties.emissive_factor[1], material.properties.emissive_factor[2]);
+                    range.base_color_factor = glm::vec4(material.properties.base_color_factor[0], material.properties.base_color_factor[1], material.properties.base_color_factor[2], material.properties.base_color_factor[3]);
+
+                    // Wire PBR texture handles
+                    const auto* mr_tex = material.textures.getTexture(TextureType::METALLIC_ROUGHNESS);
+                    if (mr_tex && mr_tex->is_loaded) range.metallic_roughness_texture = mr_tex->handle;
+                    const auto* nm_tex = material.textures.getTexture(TextureType::NORMAL);
+                    if (nm_tex && nm_tex->is_loaded) range.normal_texture = nm_tex->handle;
+                    const auto* ao_tex = material.textures.getTexture(TextureType::OCCLUSION);
+                    if (ao_tex && ao_tex->is_loaded) range.occlusion_texture = ao_tex->handle;
+                    const auto* em_tex = material.textures.getTexture(TextureType::EMISSIVE);
+                    if (em_tex && em_tex->is_loaded) range.emissive_texture = em_tex->handle;
                     material_ranges.push_back(range);
                     if (tex != INVALID_TEXTURE) texture_applied = true;
                 } else {
@@ -1893,6 +2075,14 @@ std::shared_ptr<mesh> LevelManager::finalizeMeshGPU(
                     uint8_t lod_alpha_mode = 0;
                     float lod_alpha_cutoff = 0.5f;
                     bool lod_double_sided = false;
+                    float lod_metallic_factor = 0.0f;
+                    float lod_roughness_factor = 0.5f;
+                    glm::vec3 lod_emissive_factor(0.0f);
+                    glm::vec4 lod_base_color_factor(1.0f);
+                    TextureHandle lod_mr_handle = INVALID_TEXTURE;
+                    TextureHandle lod_nm_handle = INVALID_TEXTURE;
+                    TextureHandle lod_ao_handle = INVALID_TEXTURE;
+                    TextureHandle lod_em_handle = INVALID_TEXTURE;
                     if (sr.submesh_id < m_ptr->material_ranges.size()) {
                         const auto& base_range = m_ptr->material_ranges[sr.submesh_id];
                         tex = base_range.texture;
@@ -1900,11 +2090,27 @@ std::shared_ptr<mesh> LevelManager::finalizeMeshGPU(
                         lod_alpha_mode = base_range.alpha_mode;
                         lod_alpha_cutoff = base_range.alpha_cutoff;
                         lod_double_sided = base_range.double_sided;
+                        lod_metallic_factor = base_range.metallic_factor;
+                        lod_roughness_factor = base_range.roughness_factor;
+                        lod_emissive_factor = base_range.emissive_factor;
+                        lod_base_color_factor = base_range.base_color_factor;
+                        lod_mr_handle = base_range.metallic_roughness_texture;
+                        lod_nm_handle = base_range.normal_texture;
+                        lod_ao_handle = base_range.occlusion_texture;
+                        lod_em_handle = base_range.emissive_texture;
                     }
                     MaterialRange lod_range(sr.start_index, sr.index_count, tex, mat_name);
                     lod_range.alpha_mode = lod_alpha_mode;
                     lod_range.alpha_cutoff = lod_alpha_cutoff;
                     lod_range.double_sided = lod_double_sided;
+                    lod_range.metallic_factor = lod_metallic_factor;
+                    lod_range.roughness_factor = lod_roughness_factor;
+                    lod_range.emissive_factor = lod_emissive_factor;
+                    lod_range.base_color_factor = lod_base_color_factor;
+                    lod_range.metallic_roughness_texture = lod_mr_handle;
+                    lod_range.normal_texture = lod_nm_handle;
+                    lod_range.occlusion_texture = lod_ao_handle;
+                    lod_range.emissive_texture = lod_em_handle;
                     level.material_ranges.push_back(lod_range);
                 }
             }

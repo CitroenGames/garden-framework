@@ -1,10 +1,11 @@
-// FXAA post-processing shader
+// FXAA post-processing shader with ACES tone mapping
 
 [[vk::binding(1, 0)]]
 cbuffer FXAACB : register(b0)
 {
     float2 uInverseScreenSize;
-    float2 padding;
+    float uExposure;
+    float padding;
 };
 
 [[vk::binding(0, 0)]]Texture2D screenTexture : register(t0);
@@ -40,19 +41,30 @@ PSInput vertexMain(VSInput input)
 #define FXAA_REDUCE_MUL (1.0 / 8.0)
 #define FXAA_REDUCE_MIN (1.0 / 128.0)
 
+// ACES filmic tone mapping (Narkowicz 2015 approximation)
+float3 ACESFilm(float3 x)
+{
+    float a = 2.51;
+    float b = 0.03;
+    float c = 2.43;
+    float d = 0.59;
+    float e = 0.14;
+    return saturate((x * (a * x + b)) / (x * (c * x + d) + e));
+}
+
 [shader("fragment")]
 float4 fragmentMain(PSInput input) : SV_TARGET
 {
     float2 texCoord = input.texcoord;
 
-    // Sample neighboring pixels
+    // Sample neighboring pixels (HDR values)
     float3 rgbNW = screenTexture.Sample(linearSampler, texCoord + float2(-1.0, -1.0) * uInverseScreenSize).rgb;
     float3 rgbNE = screenTexture.Sample(linearSampler, texCoord + float2(1.0, -1.0) * uInverseScreenSize).rgb;
     float3 rgbSW = screenTexture.Sample(linearSampler, texCoord + float2(-1.0, 1.0) * uInverseScreenSize).rgb;
     float3 rgbSE = screenTexture.Sample(linearSampler, texCoord + float2(1.0, 1.0) * uInverseScreenSize).rgb;
     float3 rgbM = screenTexture.Sample(linearSampler, texCoord).rgb;
 
-    // Luma conversion
+    // Luma conversion (use tone-mapped values for edge detection)
     float3 luma = float3(0.299, 0.587, 0.114);
     float lumaNW = dot(rgbNW, luma);
     float lumaNE = dot(rgbNE, luma);
@@ -78,7 +90,7 @@ float4 fragmentMain(PSInput input) : SV_TARGET
           max(float2(-FXAA_SPAN_MAX, -FXAA_SPAN_MAX),
           dir * rcpDirMin)) * uInverseScreenSize;
 
-    // Sample along edge
+    // Sample along edge (in HDR space)
     float3 rgbA = 0.5 * (
         screenTexture.Sample(linearSampler, texCoord + dir * (1.0 / 3.0 - 0.5)).rgb +
         screenTexture.Sample(linearSampler, texCoord + dir * (2.0 / 3.0 - 0.5)).rgb);
@@ -90,12 +102,17 @@ float4 fragmentMain(PSInput input) : SV_TARGET
     float lumaB = dot(rgbB, luma);
 
     // Choose based on luma comparison
+    float3 result;
     if (lumaB < lumaMin || lumaB > lumaMax)
-    {
-        return float4(rgbA, 1.0);
-    }
+        result = rgbA;
     else
-    {
-        return float4(rgbB, 1.0);
-    }
+        result = rgbB;
+
+    // Apply exposure and ACES tone mapping
+    result = ACESFilm(result * uExposure);
+
+    // Gamma correction (linear -> sRGB)
+    result = pow(result, 1.0 / 2.2);
+
+    return float4(result, 1.0);
 }

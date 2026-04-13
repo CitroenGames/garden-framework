@@ -534,6 +534,16 @@ void D3D12RenderAPI::renderMesh(const mesh& m, const RenderState& state)
     else if (defaultTexture != INVALID_TEXTURE)
         bindTexture(defaultTexture);
 
+    // Bind default PBR textures (root params 5-8)
+    if (m_defaultMetallicRoughnessTexture.srvIndex != UINT(-1))
+        commandList->SetGraphicsRootDescriptorTable(5, m_srvAllocator.getGPU(m_defaultMetallicRoughnessTexture.srvIndex));
+    if (m_defaultNormalTexture.srvIndex != UINT(-1))
+        commandList->SetGraphicsRootDescriptorTable(6, m_srvAllocator.getGPU(m_defaultNormalTexture.srvIndex));
+    if (m_defaultOcclusionTexture.srvIndex != UINT(-1))
+        commandList->SetGraphicsRootDescriptorTable(7, m_srvAllocator.getGPU(m_defaultOcclusionTexture.srvIndex));
+    if (m_defaultEmissiveTexture.srvIndex != UINT(-1))
+        commandList->SetGraphicsRootDescriptorTable(8, m_srvAllocator.getGPU(m_defaultEmissiveTexture.srvIndex));
+
     // Draw
     commandList->IASetVertexBuffers(0, 1, &gpuMesh->getVertexBufferView());
     if (gpuMesh->isIndexed())
@@ -652,6 +662,16 @@ void D3D12RenderAPI::flushAndReopenCommandList()
     if (m_shadowSRVIndex != UINT(-1))
         commandList->SetGraphicsRootDescriptorTable(3, m_srvAllocator.getGPU(m_shadowSRVIndex));
 
+    // Restore PBR texture bindings (root params 5-8)
+    if (m_defaultMetallicRoughnessTexture.srvIndex != UINT(-1))
+        commandList->SetGraphicsRootDescriptorTable(5, m_srvAllocator.getGPU(m_defaultMetallicRoughnessTexture.srvIndex));
+    if (m_defaultNormalTexture.srvIndex != UINT(-1))
+        commandList->SetGraphicsRootDescriptorTable(6, m_srvAllocator.getGPU(m_defaultNormalTexture.srvIndex));
+    if (m_defaultOcclusionTexture.srvIndex != UINT(-1))
+        commandList->SetGraphicsRootDescriptorTable(7, m_srvAllocator.getGPU(m_defaultOcclusionTexture.srvIndex));
+    if (m_defaultEmissiveTexture.srvIndex != UINT(-1))
+        commandList->SetGraphicsRootDescriptorTable(8, m_srvAllocator.getGPU(m_defaultEmissiveTexture.srvIndex));
+
     // Force rebind of PSO and texture
     last_bound_pso = nullptr;
     currentBoundTexture = INVALID_TEXTURE;
@@ -761,6 +781,10 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
     auto* uploadBuf = &m_cbUploadBuffer[m_frameIndex];
     auto* srvAlloc = &m_srvAllocator;
     auto* textureMap = &textures;
+    auto pbrMetallicRoughnessSRV = m_defaultMetallicRoughnessTexture.srvIndex;
+    auto pbrNormalSRV = m_defaultNormalTexture.srvIndex;
+    auto pbrOcclusionSRV = m_defaultOcclusionTexture.srvIndex;
+    auto pbrEmissiveSRV = m_defaultEmissiveTexture.srvIndex;
 
     // Launch parallel replay on worker threads
     std::vector<std::future<void>> futures;
@@ -769,7 +793,8 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
     for (uint32_t w = 0; w < num_workers; w++)
     {
         futures.push_back(std::async(std::launch::async,
-            [&, w, rootSig, srvHeap, rtState, shadowSRVIdx, defaultTex, lightCBAddr, uploadBuf, srvAlloc, textureMap]()
+            [&, w, rootSig, srvHeap, rtState, shadowSRVIdx, defaultTex, lightCBAddr, uploadBuf, srvAlloc, textureMap,
+             pbrMetallicRoughnessSRV, pbrNormalSRV, pbrOcclusionSRV, pbrEmissiveSRV]()
             {
                 auto* cmdList = workers[w].entry->cmdList.Get();
 
@@ -793,6 +818,16 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
                 // Bind shadow map
                 if (shadowSRVIdx != UINT(-1))
                     cmdList->SetGraphicsRootDescriptorTable(3, srvAlloc->getGPU(shadowSRVIdx));
+
+                // Bind default PBR textures (root params 5-8)
+                if (pbrMetallicRoughnessSRV != UINT(-1))
+                    cmdList->SetGraphicsRootDescriptorTable(5, srvAlloc->getGPU(pbrMetallicRoughnessSRV));
+                if (pbrNormalSRV != UINT(-1))
+                    cmdList->SetGraphicsRootDescriptorTable(6, srvAlloc->getGPU(pbrNormalSRV));
+                if (pbrOcclusionSRV != UINT(-1))
+                    cmdList->SetGraphicsRootDescriptorTable(7, srvAlloc->getGPU(pbrOcclusionSRV));
+                if (pbrEmissiveSRV != UINT(-1))
+                    cmdList->SetGraphicsRootDescriptorTable(8, srvAlloc->getGPU(pbrEmissiveSRV));
 
                 // Replay this worker's chunk of commands
                 ID3D12PipelineState* workerLastPSO = nullptr;
@@ -818,6 +853,13 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
                     objCB.color = cmd.color;
                     objCB.useTexture = cmd.use_texture ? 1 : 0;
                     objCB.alphaCutoff = cmd.alpha_cutoff;
+                    objCB.metallic = cmd.metallic;
+                    objCB.roughness = cmd.roughness;
+                    objCB.emissive = cmd.emissive;
+                    objCB.hasMetallicRoughnessMap = 0;
+                    objCB.hasNormalMap = 0;
+                    objCB.hasOcclusionMap = 0;
+                    objCB.hasEmissiveMap = 0;
 
                     auto objAddr = uploadBuf->allocate(sizeof(objCB), &objCB);
                     if (objAddr == 0) continue;
@@ -1024,6 +1066,16 @@ void D3D12RenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
             bindTexture(cmd.texture);
         else if (defaultTexture != INVALID_TEXTURE)
             bindTexture(defaultTexture);
+
+        // Bind default PBR textures (root params 5-8)
+        if (m_defaultMetallicRoughnessTexture.srvIndex != UINT(-1))
+            commandList->SetGraphicsRootDescriptorTable(5, m_srvAllocator.getGPU(m_defaultMetallicRoughnessTexture.srvIndex));
+        if (m_defaultNormalTexture.srvIndex != UINT(-1))
+            commandList->SetGraphicsRootDescriptorTable(6, m_srvAllocator.getGPU(m_defaultNormalTexture.srvIndex));
+        if (m_defaultOcclusionTexture.srvIndex != UINT(-1))
+            commandList->SetGraphicsRootDescriptorTable(7, m_srvAllocator.getGPU(m_defaultOcclusionTexture.srvIndex));
+        if (m_defaultEmissiveTexture.srvIndex != UINT(-1))
+            commandList->SetGraphicsRootDescriptorTable(8, m_srvAllocator.getGPU(m_defaultEmissiveTexture.srvIndex));
 
         // Draw
         commandList->IASetVertexBuffers(0, 1, &gpuMesh->getVertexBufferView());

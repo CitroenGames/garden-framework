@@ -128,6 +128,14 @@ bool VulkanRenderAPI::initialize(WindowHandle window, int width, int height, flo
     // Load pipeline cache from disk (or create empty)
     loadPipelineCache();
 
+    // Create FXAA resources (must come before graphics pipeline so offscreen_render_pass
+    // is available for pipeline creation -- scene pipelines need HDR-compatible render pass)
+    LOG_ENGINE_INFO("[Vulkan] Creating FXAA resources...");
+    if (!createFxaaResources()) {
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create FXAA resources");
+        return false;
+    }
+
     // Create graphics pipeline
     LOG_ENGINE_INFO("[Vulkan] Creating graphics pipeline...");
     if (!createGraphicsPipeline()) {
@@ -175,13 +183,6 @@ bool VulkanRenderAPI::initialize(WindowHandle window, int width, int height, flo
     LOG_ENGINE_INFO("[Vulkan] Creating skybox resources...");
     if (!createSkyboxResources()) {
         LOG_ENGINE_ERROR("[Vulkan] Failed to create skybox resources");
-        return false;
-    }
-
-    // Create FXAA resources
-    LOG_ENGINE_INFO("[Vulkan] Creating FXAA resources...");
-    if (!createFxaaResources()) {
-        LOG_ENGINE_ERROR("[Vulkan] Failed to create FXAA resources");
         return false;
     }
 
@@ -271,6 +272,21 @@ void VulkanRenderAPI::shutdown()
             vmaDestroyImage(vma_allocator, default_texture.image, default_texture.allocation);
         }
         default_texture = VulkanTexture();
+    }
+
+    // Clean up default PBR textures (samplers owned by sampler_cache)
+    VulkanTexture* pbrDefaults[] = {
+        &default_normal_texture, &default_metallic_roughness_texture,
+        &default_occlusion_texture, &default_emissive_texture
+    };
+    for (VulkanTexture* tex : pbrDefaults) {
+        if (tex->isValid()) {
+            if (tex->imageView) vkDestroyImageView(device, tex->imageView, nullptr);
+            if (tex->image && vma_allocator) {
+                vmaDestroyImage(vma_allocator, tex->image, tex->allocation);
+            }
+            *tex = VulkanTexture();
+        }
     }
 
     // Clean up default shadow fallback (sampler owned by sampler_cache)
@@ -480,8 +496,9 @@ bool VulkanRenderAPI::createContinuationRenderPass()
     // A render pass identical to the main pass but with loadOp=LOAD on both
     // color and depth, used for render pass splitting during parallel replay.
     // Layouts are kept as attachment-optimal since this sits between two passes.
+    // Uses HDR format (RGBA16F) to match the offscreen scene render pass.
     VkAttachmentDescription colorAttachment{};
-    colorAttachment.format = swapchain_format;
+    colorAttachment.format = VK_FORMAT_R16G16B16A16_SFLOAT;
     colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
     colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
     colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;

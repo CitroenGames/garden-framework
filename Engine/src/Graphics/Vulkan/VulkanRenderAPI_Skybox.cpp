@@ -160,7 +160,7 @@ bool VulkanRenderAPI::createSkyboxResources()
         .setFrontFace(VK_FRONT_FACE_COUNTER_CLOCKWISE)
         .setDepthTest(VK_TRUE, VK_FALSE, VK_COMPARE_OP_LESS_OR_EQUAL)
         .setColorBlend(&colorBlendAttachment)
-        .setRenderPass(render_pass, 0)
+        .setRenderPass(offscreen_render_pass, 0)
         .setLayout(skybox_pipeline_layout)
         .build(&skybox_pipeline);
 

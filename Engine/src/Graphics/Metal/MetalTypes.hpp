@@ -60,7 +60,13 @@ struct MetalPerObjectUBO {
     glm::mat4 normalMatrix;   // 64 bytes
     glm::vec3 color;          // 12 bytes
     int useTexture;            // 4 bytes
-    float _pad[28];           // 112 bytes padding → 256 total
+    float alphaCutoff;         // 4 bytes
+    float metallic;            // 4 bytes
+    float roughness;           // 4 bytes
+    float _pbrPad1;            // 4 bytes
+    glm::vec3 emissive;        // 12 bytes
+    float _pbrPad2;            // 4 bytes
+    float _pad[20];            // 80 bytes padding → 256 total
 };
 static_assert(sizeof(MetalPerObjectUBO) == 256, "Must be 256-byte aligned for Metal");
 

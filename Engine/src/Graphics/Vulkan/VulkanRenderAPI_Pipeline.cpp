@@ -56,8 +56,41 @@ bool VulkanRenderAPI::createDescriptorSetLayout()
     perObjectUboBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     perObjectUboBinding.pImmutableSamplers = nullptr;
 
-    std::array<VkDescriptorSetLayoutBinding, 5> bindings = {
-        uboLayoutBinding, samplerLayoutBinding, shadowMapBinding, lightUboBinding, perObjectUboBinding
+    // Binding 6: Metallic-roughness texture sampler (PBR)
+    VkDescriptorSetLayoutBinding metallicRoughnessBinding{};
+    metallicRoughnessBinding.binding = 6;
+    metallicRoughnessBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    metallicRoughnessBinding.descriptorCount = 1;
+    metallicRoughnessBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    metallicRoughnessBinding.pImmutableSamplers = nullptr;
+
+    // Binding 7: Normal map texture sampler (PBR)
+    VkDescriptorSetLayoutBinding normalMapBinding{};
+    normalMapBinding.binding = 7;
+    normalMapBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    normalMapBinding.descriptorCount = 1;
+    normalMapBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    normalMapBinding.pImmutableSamplers = nullptr;
+
+    // Binding 8: Occlusion texture sampler (PBR)
+    VkDescriptorSetLayoutBinding occlusionBinding{};
+    occlusionBinding.binding = 8;
+    occlusionBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    occlusionBinding.descriptorCount = 1;
+    occlusionBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    occlusionBinding.pImmutableSamplers = nullptr;
+
+    // Binding 9: Emissive texture sampler (PBR)
+    VkDescriptorSetLayoutBinding emissiveBinding{};
+    emissiveBinding.binding = 9;
+    emissiveBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    emissiveBinding.descriptorCount = 1;
+    emissiveBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    emissiveBinding.pImmutableSamplers = nullptr;
+
+    std::array<VkDescriptorSetLayoutBinding, 9> bindings = {
+        uboLayoutBinding, samplerLayoutBinding, shadowMapBinding, lightUboBinding, perObjectUboBinding,
+        metallicRoughnessBinding, normalMapBinding, occlusionBinding, emissiveBinding
     };
 
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
@@ -233,13 +266,13 @@ bool VulkanRenderAPI::createGraphicsPipeline()
         return false;
     }
 
-    // Vertex input - matches vertex struct: pos(3f), normal(3f), uv(2f)
+    // Vertex input - matches vertex struct: pos(3f), normal(3f), uv(2f), tangent(4f)
     VkVertexInputBindingDescription bindingDescription{};
     bindingDescription.binding = 0;
     bindingDescription.stride = sizeof(vertex);
     bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-    std::array<VkVertexInputAttributeDescription, 3> attributeDescriptions{};
+    std::array<VkVertexInputAttributeDescription, 4> attributeDescriptions{};
     // Position
     attributeDescriptions[0].binding = 0;
     attributeDescriptions[0].location = 0;
@@ -255,6 +288,11 @@ bool VulkanRenderAPI::createGraphicsPipeline()
     attributeDescriptions[2].location = 2;
     attributeDescriptions[2].format = VK_FORMAT_R32G32_SFLOAT;
     attributeDescriptions[2].offset = offsetof(vertex, u);
+    // Tangent
+    attributeDescriptions[3].binding = 0;
+    attributeDescriptions[3].location = 3;
+    attributeDescriptions[3].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    attributeDescriptions[3].offset = offsetof(vertex, tx);
 
     // No push constants - per-object data is now in PerObjectUBO at binding 4
     VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
@@ -305,7 +343,7 @@ bool VulkanRenderAPI::createGraphicsPipeline()
     VkPipelineBuilder builder(device, vk_pipeline_cache);
     builder.setShaders(vertShaderModule, fragShaderModule)
            .setVertexInput(&bindingDescription, 1, attributeDescriptions.data(), static_cast<uint32_t>(attributeDescriptions.size()))
-           .setRenderPass(render_pass, 0)
+           .setRenderPass(offscreen_render_pass, 0)
            .setLayout(pipeline_layout);
 
     auto buildVariant = [&](VkCullModeFlags cullMode, VkPipelineColorBlendAttachmentState* blend,

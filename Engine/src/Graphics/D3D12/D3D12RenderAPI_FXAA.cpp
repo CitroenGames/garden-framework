@@ -20,12 +20,12 @@ bool D3D12RenderAPI::createPostProcessingResources(int width, int height)
     texDesc.Height = height;
     texDesc.DepthOrArraySize = 1;
     texDesc.MipLevels = 1;
-    texDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    texDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
     texDesc.SampleDesc.Count = 1;
     texDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
 
     D3D12_CLEAR_VALUE clearValue = {};
-    clearValue.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    clearValue.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
 
     HRESULT hr = device->CreateCommittedResource(
         &heapProps, D3D12_HEAP_FLAG_NONE, &texDesc,
@@ -45,7 +45,7 @@ bool D3D12RenderAPI::createPostProcessingResources(int width, int height)
     if (m_offscreenSRVIndex == UINT(-1))
         m_offscreenSRVIndex = m_srvAllocator.allocate();
     D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-    srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    srvDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
     srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     srvDesc.Texture2D.MipLevels = 1;

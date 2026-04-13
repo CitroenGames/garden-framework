@@ -31,15 +31,15 @@ void VulkanRenderAPI::createViewportResources(int w, int h)
         }
     }
 
-    // --- Viewport color image ---
-    if (vkutil::createImage(vma_allocator, (uint32_t)w, (uint32_t)h, swapchain_format,
+    // --- Viewport color image (RGBA16F to match HDR pipeline; FXAA tone-maps to LDR values) ---
+    if (vkutil::createImage(vma_allocator, (uint32_t)w, (uint32_t)h, VK_FORMAT_R16G16B16A16_SFLOAT,
                             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
                             viewport_image, viewport_allocation) != VK_SUCCESS) {
         LOG_ENGINE_ERROR("[Vulkan] Failed to create viewport image");
         return;
     }
 
-    viewport_view = vkutil::createImageView(device, viewport_image, swapchain_format, VK_IMAGE_ASPECT_COLOR_BIT);
+    viewport_view = vkutil::createImageView(device, viewport_image, VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_ASPECT_COLOR_BIT);
     if (viewport_view == VK_NULL_HANDLE) {
         LOG_ENGINE_ERROR("[Vulkan] Failed to create viewport image view");
         return;
@@ -81,9 +81,10 @@ void VulkanRenderAPI::createViewportResources(int w, int h)
                                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
     // --- Create viewport_resolve_pass (FXAA -> viewport, finalLayout = SHADER_READ_ONLY) ---
+    // Uses RGBA16F to match viewport image format; FXAA shader outputs tone-mapped LDR values.
     if (viewport_resolve_pass == VK_NULL_HANDLE) {
         VkAttachmentDescription colorAtt{};
-        colorAtt.format = swapchain_format;
+        colorAtt.format = VK_FORMAT_R16G16B16A16_SFLOAT;
         colorAtt.samples = VK_SAMPLE_COUNT_1_BIT;
         colorAtt.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         colorAtt.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -201,12 +202,12 @@ void VulkanRenderAPI::createViewportResources(int w, int h)
         offscreen_allocation = nullptr;
     }
 
-    // Recreate offscreen color image at viewport dimensions
-    VK_CHECK(vkutil::createImage(vma_allocator, (uint32_t)w, (uint32_t)h, swapchain_format,
+    // Recreate offscreen color image at viewport dimensions (HDR: RGBA16F)
+    VK_CHECK(vkutil::createImage(vma_allocator, (uint32_t)w, (uint32_t)h, VK_FORMAT_R16G16B16A16_SFLOAT,
                    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
                    offscreen_image, offscreen_allocation));
 
-    offscreen_view = vkutil::createImageView(device, offscreen_image, swapchain_format, VK_IMAGE_ASPECT_COLOR_BIT);
+    offscreen_view = vkutil::createImageView(device, offscreen_image, VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_ASPECT_COLOR_BIT);
 
     // Recreate offscreen depth image at viewport dimensions
     VK_CHECK(vkutil::createImage(vma_allocator, (uint32_t)w, (uint32_t)h, depth_format,
@@ -409,6 +410,7 @@ void VulkanRenderAPI::endSceneRender()
 
         FXAAUbo fxaaUbo{};
         fxaaUbo.inverseScreenSize = glm::vec2(1.0f / viewport_width_rt, 1.0f / viewport_height_rt);
+        fxaaUbo.exposure = 1.0f;
         memcpy(fxaa_uniform_mapped[current_frame], &fxaaUbo, sizeof(FXAAUbo));
 
         VkBuffer vertexBuffers[] = { fxaa_vertex_buffer };
@@ -540,15 +542,15 @@ void VulkanRenderAPI::createPreviewResources(int w, int h)
     preview_width_rt = w;
     preview_height_rt = h;
 
-    // Color image
-    if (vkutil::createImage(vma_allocator, (uint32_t)w, (uint32_t)h, swapchain_format,
+    // Color image (RGBA16F to match viewport_resolve_pass HDR format)
+    if (vkutil::createImage(vma_allocator, (uint32_t)w, (uint32_t)h, VK_FORMAT_R16G16B16A16_SFLOAT,
                             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
                             preview_image, preview_allocation) != VK_SUCCESS) {
         LOG_ENGINE_ERROR("[Vulkan] Failed to create preview image");
         return;
     }
 
-    preview_view = vkutil::createImageView(device, preview_image, swapchain_format, VK_IMAGE_ASPECT_COLOR_BIT);
+    preview_view = vkutil::createImageView(device, preview_image, VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_ASPECT_COLOR_BIT);
     if (preview_view == VK_NULL_HANDLE) {
         LOG_ENGINE_ERROR("[Vulkan] Failed to create preview image view");
         return;
@@ -761,7 +763,8 @@ void VulkanRenderAPI::createPIEViewportResources(PIEViewportTarget& target, int 
     target.height = h;
 
     // --- Color image (sampled for ImGui, used as color attachment and transfer dst) ---
-    if (vkutil::createImage(vma_allocator, (uint32_t)w, (uint32_t)h, swapchain_format,
+    // HDR format (RGBA16F) to match offscreen_render_pass; tone mapping not yet applied to PIE viewports.
+    if (vkutil::createImage(vma_allocator, (uint32_t)w, (uint32_t)h, VK_FORMAT_R16G16B16A16_SFLOAT,
                             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
                             target.image, target.allocation) != VK_SUCCESS) {
         LOG_ENGINE_ERROR("[Vulkan] Failed to create PIE viewport image");
@@ -769,7 +772,7 @@ void VulkanRenderAPI::createPIEViewportResources(PIEViewportTarget& target, int 
     }
 
     // --- Color image view ---
-    target.view = vkutil::createImageView(device, target.image, swapchain_format, VK_IMAGE_ASPECT_COLOR_BIT);
+    target.view = vkutil::createImageView(device, target.image, VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_ASPECT_COLOR_BIT);
     if (target.view == VK_NULL_HANDLE) {
         LOG_ENGINE_ERROR("[Vulkan] Failed to create PIE viewport image view");
         return;

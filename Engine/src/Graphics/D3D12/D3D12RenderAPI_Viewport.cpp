@@ -16,7 +16,7 @@ void D3D12RenderAPI::createViewportResources(int w, int h)
     D3D12_HEAP_PROPERTIES heapProps = {};
     heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
 
-    // Color texture
+    // Color texture (LDR - FXAA tone maps HDR offscreen to this)
     {
         D3D12_RESOURCE_DESC desc = {};
         desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
@@ -150,23 +150,15 @@ void D3D12RenderAPI::endSceneRender()
 
                 D3D12FXAACBuffer fxaaCB = {};
                 fxaaCB.inverseScreenSize = glm::vec2(1.0f / pie.width, 1.0f / pie.height);
+                fxaaCB.exposure = 1.0f;
                 auto cbAddr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(fxaaCB), &fxaaCB);
                 if (cbAddr == 0)
                 {
-                    // Ring buffer exhausted - fall back to direct copy
+                    // Ring buffer exhausted - cannot run FXAA/tone-map pass.
+                    // HDR offscreen (R16F) is incompatible with LDR output for CopyResource.
+                    LOG_ENGINE_WARN("[D3D12] Ring buffer exhausted - skipping PIE FXAA/tone-map pass");
                     transitionResource(pie.offscreenTexture.Get(),
                                        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-                                       D3D12_RESOURCE_STATE_COPY_SOURCE);
-                    transitionResource(pie.texture.Get(),
-                                       D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-                                       D3D12_RESOURCE_STATE_COPY_DEST);
-                    flushBarriers();
-                    commandList->CopyResource(pie.texture.Get(), pie.offscreenTexture.Get());
-                    transitionResource(pie.texture.Get(),
-                                       D3D12_RESOURCE_STATE_COPY_DEST,
-                                       D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-                    transitionResource(pie.offscreenTexture.Get(),
-                                       D3D12_RESOURCE_STATE_COPY_SOURCE,
                                        D3D12_RESOURCE_STATE_RENDER_TARGET);
                     flushBarriers();
                 }
@@ -195,22 +187,53 @@ void D3D12RenderAPI::endSceneRender()
             }
             else
             {
+                // FXAA disabled - still need tone mapping pass from HDR offscreen to LDR output
                 transitionResource(pie.offscreenTexture.Get(),
                                    D3D12_RESOURCE_STATE_RENDER_TARGET,
-                                   D3D12_RESOURCE_STATE_COPY_SOURCE);
+                                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
                 transitionResource(pie.texture.Get(),
                                    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-                                   D3D12_RESOURCE_STATE_COPY_DEST);
+                                   D3D12_RESOURCE_STATE_RENDER_TARGET);
                 flushBarriers();
 
-                commandList->CopyResource(pie.texture.Get(), pie.offscreenTexture.Get());
+                D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvAllocator.getCPU(pie.rtvIndex);
+                commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
 
-                transitionResource(pie.texture.Get(),
-                                   D3D12_RESOURCE_STATE_COPY_DEST,
-                                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                D3D12_VIEWPORT vp = {};
+                vp.Width = static_cast<float>(pie.width);
+                vp.Height = static_cast<float>(pie.height);
+                vp.MaxDepth = 1.0f;
+                commandList->RSSetViewports(1, &vp);
+
+                D3D12_RECT scissor = { 0, 0, pie.width, pie.height };
+                commandList->RSSetScissorRects(1, &scissor);
+
+                commandList->SetPipelineState(m_psoFXAA.Get());
+                commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+
+                D3D12FXAACBuffer fxaaCB = {};
+                fxaaCB.inverseScreenSize = glm::vec2(1.0f / pie.width, 1.0f / pie.height);
+                fxaaCB.exposure = 1.0f;
+                auto cbAddr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(fxaaCB), &fxaaCB);
+                if (cbAddr != 0)
+                {
+                    commandList->SetGraphicsRootConstantBufferView(0, cbAddr);
+                    commandList->SetGraphicsRootConstantBufferView(1, cbAddr);
+                    commandList->SetGraphicsRootDescriptorTable(2, m_srvAllocator.getGPU(pie.offscreenSRVIndex));
+                    if (m_dummyShadowSRVIndex != UINT(-1))
+                        commandList->SetGraphicsRootDescriptorTable(3, m_srvAllocator.getGPU(m_dummyShadowSRVIndex));
+                    commandList->SetGraphicsRootConstantBufferView(4, cbAddr);
+
+                    commandList->IASetVertexBuffers(0, 1, &m_fxaaQuadVBV);
+                    commandList->DrawInstanced(4, 1, 0, 0);
+                }
+
                 transitionResource(pie.offscreenTexture.Get(),
-                                   D3D12_RESOURCE_STATE_COPY_SOURCE,
+                                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
                                    D3D12_RESOURCE_STATE_RENDER_TARGET);
+                transitionResource(pie.texture.Get(),
+                                   D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
                 flushBarriers();
             }
         }
@@ -245,18 +268,15 @@ void D3D12RenderAPI::endSceneRender()
 
             D3D12FXAACBuffer fxaaCB = {};
             fxaaCB.inverseScreenSize = glm::vec2(1.0f / viewport_width_rt, 1.0f / viewport_height_rt);
+            fxaaCB.exposure = 1.0f;
             auto cbAddr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(fxaaCB), &fxaaCB);
             if (cbAddr == 0)
             {
-                // Ring buffer exhausted - fall back to direct copy (no FXAA)
+                // Ring buffer exhausted - cannot run FXAA/tone-map pass.
+                // HDR offscreen (R16F) is incompatible with LDR viewport for CopyResource.
+                LOG_ENGINE_WARN("[D3D12] Ring buffer exhausted - skipping viewport FXAA/tone-map pass");
                 transitionResource(m_viewportTexture.Get(),
-                                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-                                   D3D12_RESOURCE_STATE_COPY_DEST);
-                transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_COPY_SOURCE);
-                flushBarriers();
-                commandList->CopyResource(m_viewportTexture.Get(), m_offscreenTexture.Get());
-                transitionResource(m_viewportTexture.Get(),
-                                   D3D12_RESOURCE_STATE_COPY_DEST,
+                                   D3D12_RESOURCE_STATE_RENDER_TARGET,
                                    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
                 transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
                 flushBarriers();
@@ -285,16 +305,47 @@ void D3D12RenderAPI::endSceneRender()
         }
         else
         {
+            // FXAA disabled - still need tone mapping pass from HDR offscreen to LDR viewport
+            transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
             transitionResource(m_viewportTexture.Get(),
                                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-                               D3D12_RESOURCE_STATE_COPY_DEST);
-            transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                               D3D12_RESOURCE_STATE_RENDER_TARGET);
             flushBarriers();
 
-            commandList->CopyResource(m_viewportTexture.Get(), m_offscreenTexture.Get());
+            D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvAllocator.getCPU(m_viewportRTVIndex);
+            commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
+
+            D3D12_VIEWPORT vp = {};
+            vp.Width = static_cast<float>(viewport_width_rt);
+            vp.Height = static_cast<float>(viewport_height_rt);
+            vp.MaxDepth = 1.0f;
+            commandList->RSSetViewports(1, &vp);
+
+            D3D12_RECT scissor = { 0, 0, viewport_width_rt, viewport_height_rt };
+            commandList->RSSetScissorRects(1, &scissor);
+
+            commandList->SetPipelineState(m_psoFXAA.Get());
+            commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+
+            D3D12FXAACBuffer fxaaCB = {};
+            fxaaCB.inverseScreenSize = glm::vec2(1.0f / viewport_width_rt, 1.0f / viewport_height_rt);
+            fxaaCB.exposure = 1.0f;
+            auto cbAddr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(fxaaCB), &fxaaCB);
+            if (cbAddr != 0)
+            {
+                commandList->SetGraphicsRootConstantBufferView(0, cbAddr);
+                commandList->SetGraphicsRootConstantBufferView(1, cbAddr);
+                commandList->SetGraphicsRootDescriptorTable(2, m_srvAllocator.getGPU(m_offscreenSRVIndex));
+                if (m_dummyShadowSRVIndex != UINT(-1))
+                    commandList->SetGraphicsRootDescriptorTable(3, m_srvAllocator.getGPU(m_dummyShadowSRVIndex));
+                commandList->SetGraphicsRootConstantBufferView(4, cbAddr);
+
+                commandList->IASetVertexBuffers(0, 1, &m_fxaaQuadVBV);
+                commandList->DrawInstanced(4, 1, 0, 0);
+            }
 
             transitionResource(m_viewportTexture.Get(),
-                               D3D12_RESOURCE_STATE_COPY_DEST,
+                               D3D12_RESOURCE_STATE_RENDER_TARGET,
                                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
             transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
             flushBarriers();
@@ -359,11 +410,11 @@ void D3D12RenderAPI::createPreviewResources(int w, int h)
         desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
         desc.Width = w; desc.Height = h;
         desc.DepthOrArraySize = 1; desc.MipLevels = 1;
-        desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
         desc.SampleDesc.Count = 1;
         desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
 
-        D3D12_CLEAR_VALUE cv = {}; cv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        D3D12_CLEAR_VALUE cv = {}; cv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
         HRESULT hr = device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &desc,
                                          D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &cv,
                                          IID_PPV_ARGS(m_previewTexture.GetAddressOf()));
@@ -406,7 +457,7 @@ void D3D12RenderAPI::createPreviewResources(int w, int h)
     device->CreateRenderTargetView(m_previewTexture.Get(), nullptr, m_rtvAllocator.getCPU(m_previewRTVIndex));
 
     D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-    srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    srvDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
     srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     srvDesc.Texture2D.MipLevels = 1;
@@ -494,7 +545,7 @@ void D3D12RenderAPI::createPIEViewportResources(PIEViewportTarget& target, int w
     D3D12_HEAP_PROPERTIES heapProps = {};
     heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
 
-    // Final output texture
+    // Final output texture (LDR - FXAA tone maps HDR offscreen to this)
     {
         D3D12_RESOURCE_DESC desc = {};
         desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
@@ -515,17 +566,17 @@ void D3D12RenderAPI::createPIEViewportResources(PIEViewportTarget& target, int w
         }
     }
 
-    // Offscreen texture (FXAA intermediate)
+    // Offscreen texture (HDR scene render target, FXAA input)
     {
         D3D12_RESOURCE_DESC desc = {};
         desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
         desc.Width = w; desc.Height = h;
         desc.DepthOrArraySize = 1; desc.MipLevels = 1;
-        desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
         desc.SampleDesc.Count = 1;
         desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
 
-        D3D12_CLEAR_VALUE cv = {}; cv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        D3D12_CLEAR_VALUE cv = {}; cv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
         HRESULT hr = device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &desc,
                                          D3D12_RESOURCE_STATE_RENDER_TARGET, &cv,
                                          IID_PPV_ARGS(target.offscreenTexture.GetAddressOf()));
@@ -580,7 +631,13 @@ void D3D12RenderAPI::createPIEViewportResources(PIEViewportTarget& target, int w
     srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     srvDesc.Texture2D.MipLevels = 1;
     device->CreateShaderResourceView(target.texture.Get(), &srvDesc, m_srvAllocator.getCPU(target.srvIndex));
-    device->CreateShaderResourceView(target.offscreenTexture.Get(), &srvDesc, m_srvAllocator.getCPU(target.offscreenSRVIndex));
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC offscreenSrvDesc = {};
+    offscreenSrvDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    offscreenSrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    offscreenSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    offscreenSrvDesc.Texture2D.MipLevels = 1;
+    device->CreateShaderResourceView(target.offscreenTexture.Get(), &offscreenSrvDesc, m_srvAllocator.getCPU(target.offscreenSRVIndex));
 
     D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc = {};
     dsvDesc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;

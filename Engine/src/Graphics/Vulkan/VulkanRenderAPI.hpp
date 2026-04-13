@@ -427,6 +427,12 @@ private:
     TextureHandle bound_texture = INVALID_TEXTURE;
     VulkanTexture default_texture;
 
+    // Default PBR textures (1x1 each, used when no PBR maps are provided)
+    VulkanTexture default_normal_texture;              // flat normal (128,128,255,255)
+    VulkanTexture default_metallic_roughness_texture;  // metallic=0, roughness=0.5
+    VulkanTexture default_occlusion_texture;           // no occlusion (white)
+    VulkanTexture default_emissive_texture;            // no emission (black)
+
     // Default shadow fallback (1x1 depth texture + comparison sampler)
     VkImage default_shadow_image = VK_NULL_HANDLE;
     VmaAllocation default_shadow_allocation = nullptr;

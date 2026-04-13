@@ -82,37 +82,13 @@ void D3D12RenderAPI::beginFrame()
         m_currentRT.viewport = vp;
         m_currentRT.scissor = scissor;
     }
-    else if (fxaaEnabled)
+    else
     {
-        // Standalone with FXAA: render to offscreen
+        // Standalone: always render to HDR offscreen, then tone-map to back buffer
         transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
 
         flushBarriers();
         rtvHandle = m_rtvAllocator.getCPU(m_offscreenRTVIndex);
-        dsvHandle = m_dsvAllocator.getCPU(m_mainDSVIndex);
-        commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, &dsvHandle);
-
-        D3D12_VIEWPORT vp = {};
-        vp.Width = static_cast<float>(viewport_width);
-        vp.Height = static_cast<float>(viewport_height);
-        vp.MaxDepth = 1.0f;
-        commandList->RSSetViewports(1, &vp);
-
-        D3D12_RECT scissor = { 0, 0, static_cast<LONG>(viewport_width), static_cast<LONG>(viewport_height) };
-        commandList->RSSetScissorRects(1, &scissor);
-
-        m_currentRT.rtvHandle = rtvHandle;
-        m_currentRT.dsvHandle = dsvHandle;
-        m_currentRT.viewport = vp;
-        m_currentRT.scissor = scissor;
-    }
-    else
-    {
-        // Direct to back buffer
-        transitionResource(m_backBuffers[m_backBufferIndex].Get(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
-
-        flushBarriers();
-        rtvHandle = m_rtvAllocator.getCPU(m_backBufferRTVs[m_backBufferIndex]);
         dsvHandle = m_dsvAllocator.getCPU(m_mainDSVIndex);
         commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, &dsvHandle);
 
@@ -167,13 +143,13 @@ void D3D12RenderAPI::endFrame()
     // Re-bind engine root signature (RmlUI may have overridden it)
     commandList->SetGraphicsRootSignature(m_rootSignature.Get());
 
-    if (fxaaEnabled && !m_viewportTexture)
+    if (!m_viewportTexture)
     {
-        // Transition offscreen to SRV for FXAA sampling + back buffer to RT
+        // Standalone: always tone-map HDR offscreen to LDR back buffer (with optional FXAA)
         transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         transitionResource(m_backBuffers[m_backBufferIndex].Get(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
 
-        // Flush batched barriers (offscreen→SRV + backbuffer→RT in one call)
+        // Flush batched barriers (offscreen->SRV + backbuffer->RT in one call)
         flushBarriers();
 
         D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvAllocator.getCPU(m_backBufferRTVs[m_backBufferIndex]);
@@ -188,22 +164,19 @@ void D3D12RenderAPI::endFrame()
         D3D12_RECT scissor = { 0, 0, static_cast<LONG>(viewport_width), static_cast<LONG>(viewport_height) };
         commandList->RSSetScissorRects(1, &scissor);
 
-        // Draw FXAA fullscreen quad
+        // Draw FXAA/tone-mapping fullscreen quad
         commandList->SetPipelineState(m_psoFXAA.Get());
         commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
 
         D3D12FXAACBuffer fxaaCB = {};
         fxaaCB.inverseScreenSize = glm::vec2(1.0f / std::max(viewport_width, 1), 1.0f / std::max(viewport_height, 1));
+        fxaaCB.exposure = 1.0f;
         auto cbAddr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(fxaaCB), &fxaaCB);
         if (cbAddr == 0)
         {
-            // Ring buffer exhausted - skip FXAA, copy offscreen directly to back buffer
-            transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_COPY_SOURCE);
-            transitionResource(m_backBuffers[m_backBufferIndex].Get(), {}, D3D12_RESOURCE_STATE_COPY_DEST);
-            flushBarriers();
-            commandList->CopyResource(m_backBuffers[m_backBufferIndex].Get(), m_offscreenTexture.Get());
+            // Ring buffer exhausted - cannot run FXAA/tone-map pass.
+            LOG_ENGINE_WARN("[D3D12] Ring buffer exhausted - skipping FXAA/tone-map pass");
             transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
-            transitionResource(m_backBuffers[m_backBufferIndex].Get(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
             flushBarriers();
         }
         else
@@ -332,15 +305,10 @@ void D3D12RenderAPI::clear(const glm::vec3& color)
         commandList->ClearDepthStencilView(m_dsvAllocator.getCPU(m_viewportDSVIndex),
                                             D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, nullptr);
     }
-    else if (fxaaEnabled)
-    {
-        commandList->ClearRenderTargetView(m_rtvAllocator.getCPU(m_offscreenRTVIndex), clearColor, 0, nullptr);
-        commandList->ClearDepthStencilView(m_dsvAllocator.getCPU(m_mainDSVIndex),
-                                            D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, nullptr);
-    }
     else
     {
-        commandList->ClearRenderTargetView(m_rtvAllocator.getCPU(m_backBufferRTVs[m_backBufferIndex]), clearColor, 0, nullptr);
+        // Standalone: always render to HDR offscreen
+        commandList->ClearRenderTargetView(m_rtvAllocator.getCPU(m_offscreenRTVIndex), clearColor, 0, nullptr);
         commandList->ClearDepthStencilView(m_dsvAllocator.getCPU(m_mainDSVIndex),
                                             D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, nullptr);
     }
@@ -427,6 +395,13 @@ void D3D12RenderAPI::updatePerObjectCBuffer(const glm::vec3& color, bool useText
     cb.color = color;
     cb.useTexture = useTexture ? 1 : 0;
     cb.alphaCutoff = alphaCutoff;
+    cb.metallic = 0.0f;
+    cb.roughness = 0.5f;
+    cb.emissive = glm::vec3(0.0f);
+    cb.hasMetallicRoughnessMap = 0;
+    cb.hasNormalMap = 0;
+    cb.hasOcclusionMap = 0;
+    cb.hasEmissiveMap = 0;
 
     auto addr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(cb), &cb);
     if (addr == 0) return;

@@ -14,14 +14,14 @@
 bool VulkanRenderAPI::createDescriptorPool()
 {
     // Create a small dedicated pool for per-frame global descriptor sets
-    // Each set needs 3 UBOs (GlobalUBO, LightUBO, PerObjectUBO) and 2 samplers (texture, shadow)
+    // Each set needs 3 UBOs (GlobalUBO, LightUBO, PerObjectUBO) and 6 samplers (diffuse, shadow, + 4 PBR)
     uint32_t globalSets = MAX_FRAMES_IN_FLIGHT;
 
     std::array<VkDescriptorPoolSize, 3> globalPoolSizes{};
     globalPoolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     globalPoolSizes[0].descriptorCount = globalSets * 2; // GlobalUBO + LightUBO
     globalPoolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    globalPoolSizes[1].descriptorCount = globalSets * 2;
+    globalPoolSizes[1].descriptorCount = globalSets * 6; // diffuse + shadow + 4 PBR textures
     globalPoolSizes[2].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
     globalPoolSizes[2].descriptorCount = globalSets * 1; // PerObjectUBO (dynamic)
 
@@ -52,7 +52,7 @@ VkDescriptorPool VulkanRenderAPI::createPerDrawDescriptorPool()
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     poolSizes[0].descriptorCount = SETS_PER_POOL * 2; // GlobalUBO + LightUBO
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSizes[1].descriptorCount = SETS_PER_POOL * 2; // texture + shadow map
+    poolSizes[1].descriptorCount = SETS_PER_POOL * 6; // diffuse + shadow + 4 PBR textures
     poolSizes[2].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
     poolSizes[2].descriptorCount = SETS_PER_POOL * 1; // PerObjectUBO (dynamic)
 
@@ -292,12 +292,40 @@ void VulkanRenderAPI::initializeDescriptorSet(VkDescriptorSet ds, uint32_t frame
     perObjectBufferInfo.offset = 0;
     perObjectBufferInfo.range = per_object_alignment;
 
+    // Binding 6: Metallic-roughness texture (default for now)
+    VkDescriptorImageInfo metallicRoughnessInfo{};
+    metallicRoughnessInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    metallicRoughnessInfo.imageView = default_metallic_roughness_texture.imageView;
+    metallicRoughnessInfo.sampler = default_metallic_roughness_texture.sampler;
+
+    // Binding 7: Normal map texture (default for now)
+    VkDescriptorImageInfo normalMapInfo{};
+    normalMapInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    normalMapInfo.imageView = default_normal_texture.imageView;
+    normalMapInfo.sampler = default_normal_texture.sampler;
+
+    // Binding 8: Occlusion texture (default for now)
+    VkDescriptorImageInfo occlusionInfo{};
+    occlusionInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    occlusionInfo.imageView = default_occlusion_texture.imageView;
+    occlusionInfo.sampler = default_occlusion_texture.sampler;
+
+    // Binding 9: Emissive texture (default for now)
+    VkDescriptorImageInfo emissiveInfo{};
+    emissiveInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    emissiveInfo.imageView = default_emissive_texture.imageView;
+    emissiveInfo.sampler = default_emissive_texture.sampler;
+
     VkDescriptorWriter(ds)
         .writeBuffer(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &globalBufferInfo)
         .writeImage(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &imageInfo)
         .writeImage(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &shadowImageInfo)
         .writeBuffer(3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &lightBufferInfo)
         .writeBuffer(4, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, &perObjectBufferInfo)
+        .writeImage(6, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &metallicRoughnessInfo)
+        .writeImage(7, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &normalMapInfo)
+        .writeImage(8, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &occlusionInfo)
+        .writeImage(9, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &emissiveInfo)
         .update(device);
 }
 
@@ -361,6 +389,66 @@ bool VulkanRenderAPI::createDefaultTexture()
     defaultSamplerKey.maxLod = 0.0f;
     defaultSamplerKey.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
     default_texture.sampler = sampler_cache.getOrCreate(defaultSamplerKey);
+
+    // Helper lambda to create a 1x1 default PBR texture with the given RGBA pixel
+    auto createDefault1x1 = [&](uint8_t r, uint8_t g, uint8_t b, uint8_t a, VulkanTexture& outTex) -> bool {
+        uint8_t pixel[4] = { r, g, b, a };
+        VkDeviceSize imgSize = 4;
+
+        VkResult result = vkutil::createImage(vma_allocator, 1, 1, VK_FORMAT_R8G8B8A8_UNORM,
+            VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+            outTex.image, outTex.allocation);
+        if (result != VK_SUCCESS) return false;
+
+        outTex.width = 1;
+        outTex.height = 1;
+        outTex.mipLevels = 1;
+
+        {
+            std::lock_guard<std::mutex> staging_lock(staging_mutex);
+            ensureStagingBuffer(imgSize);
+            memcpy(staging_mapped, pixel, imgSize);
+
+            transitionImageLayout(outTex.image, VK_FORMAT_R8G8B8A8_UNORM,
+                                 VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1);
+            copyBufferToImage(staging_buffer, outTex.image, 1, 1);
+            transitionImageLayout(outTex.image, VK_FORMAT_R8G8B8A8_UNORM,
+                                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 1);
+        }
+
+        outTex.imageView = vkutil::createImageView(device, outTex.image,
+            VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT);
+        if (outTex.imageView == VK_NULL_HANDLE) {
+            vmaDestroyImage(vma_allocator, outTex.image, outTex.allocation);
+            outTex = VulkanTexture();
+            return false;
+        }
+
+        outTex.sampler = sampler_cache.getOrCreate(defaultSamplerKey);
+        return true;
+    };
+
+    // Create default PBR textures (1x1 each)
+    // Normal map: flat tangent-space normal (0,0,1) encoded as (128,128,255,255)
+    if (!createDefault1x1(128, 128, 255, 255, default_normal_texture)) {
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create default normal texture");
+        return false;
+    }
+    // Metallic-roughness: metallic=0, roughness=0.5 (glTF: G=roughness, B=metallic)
+    if (!createDefault1x1(0, 128, 0, 255, default_metallic_roughness_texture)) {
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create default metallic-roughness texture");
+        return false;
+    }
+    // Occlusion: no occlusion (fully lit)
+    if (!createDefault1x1(255, 255, 255, 255, default_occlusion_texture)) {
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create default occlusion texture");
+        return false;
+    }
+    // Emissive: no emission
+    if (!createDefault1x1(0, 0, 0, 255, default_emissive_texture)) {
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create default emissive texture");
+        return false;
+    }
 
     // Create 1x1 depth texture + comparison sampler for shadow fallback
     // (shader uses SamplerComparisonState, so binding 2 must always have a comparison sampler)

@@ -1,4 +1,5 @@
 #include "GltfLoader.hpp"
+#include "TangentGenerator.hpp"
 #include <iostream>
 #include <cmath>
 #include <algorithm>
@@ -389,7 +390,7 @@ bool GltfLoader::processMesh(const tinygltf::Model& model, const tinygltf::Mesh&
 bool GltfLoader::processPrimitive(const tinygltf::Model& model, const tinygltf::Primitive& primitive,
     std::vector<vertex>& vertices, const GltfLoaderConfig& config)
 {
-    std::vector<float> positions, normals, texcoords;
+    std::vector<float> positions, normals, texcoords, tangents;
     std::vector<unsigned int> indices;
 
     // Extract positions (required)
@@ -424,6 +425,16 @@ bool GltfLoader::processPrimitive(const tinygltf::Model& model, const tinygltf::
         }
     }
 
+    // Extract tangents (optional, float4: xyz = tangent direction, w = bitangent sign)
+    auto tan_it = primitive.attributes.find("TANGENT");
+    bool has_tangents = false;
+    if (tan_it != primitive.attributes.end()) {
+        has_tangents = extractBufferData(model, tan_it->second, tangents);
+        if (!has_tangents && config.verbose_logging) {
+            logMessage(config, "Failed to extract tangents, will generate");
+        }
+    }
+
     // Extract indices (optional)
     bool has_indices = false;
     if (primitive.indices >= 0) {
@@ -442,6 +453,12 @@ bool GltfLoader::processPrimitive(const tinygltf::Model& model, const tinygltf::
         logError(config, "Texture coordinate count doesn't match position count");
         has_texcoords = false;
         texcoords.clear();
+    }
+
+    if (has_tangents && tangents.size() / 4 != vertex_count) {
+        logError(config, "Tangent count doesn't match position count");
+        has_tangents = false;
+        tangents.clear();
     }
 
     // Create vertices
@@ -479,6 +496,16 @@ bool GltfLoader::processPrimitive(const tinygltf::Model& model, const tinygltf::
                     v.u = v.v = 0.0f;
                 }
 
+                if (has_tangents) {
+                    v.tx = tangents[idx * 4];
+                    v.ty = tangents[idx * 4 + 1];
+                    v.tz = tangents[idx * 4 + 2];
+                    v.tw = tangents[idx * 4 + 3];
+                }
+                else {
+                    v.tx = 1.0f; v.ty = 0.0f; v.tz = 0.0f; v.tw = 1.0f;
+                }
+
                 primitive_vertices.push_back(v);
             }
         }
@@ -508,6 +535,16 @@ bool GltfLoader::processPrimitive(const tinygltf::Model& model, const tinygltf::
                 v.u = v.v = 0.0f;
             }
 
+            if (has_tangents) {
+                v.tx = tangents[i * 4];
+                v.ty = tangents[i * 4 + 1];
+                v.tz = tangents[i * 4 + 2];
+                v.tw = tangents[i * 4 + 3];
+            }
+            else {
+                v.tx = 1.0f; v.ty = 0.0f; v.tz = 0.0f; v.tw = 1.0f;
+            }
+
             primitive_vertices.push_back(v);
         }
     }
@@ -519,6 +556,11 @@ bool GltfLoader::processPrimitive(const tinygltf::Model& model, const tinygltf::
 
     if (!has_texcoords && config.generate_texcoords_if_missing) {
         generateTexCoords(primitive_vertices);
+    }
+
+    // Generate tangents from geometry if not present in glTF data
+    if (!has_tangents && !primitive_vertices.empty()) {
+        TangentGenerator::generate(primitive_vertices.data(), primitive_vertices.size());
     }
 
     // Add to main vertex list

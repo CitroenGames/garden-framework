@@ -445,6 +445,132 @@ bool D3D12RenderAPI::createDefaultTexture()
     return defaultTexture != INVALID_TEXTURE;
 }
 
+bool D3D12RenderAPI::createDefaultPBRTextures()
+{
+    LOG_ENGINE_TRACE("[D3D12] Creating default PBR textures...");
+
+    // Helper lambda: create a 1x1 RGBA texture with an SRV
+    auto createPBR1x1 = [&](D3D12Texture& tex, uint8_t r, uint8_t g, uint8_t b, uint8_t a, const wchar_t* name) -> bool
+    {
+        uint8_t pixel[4] = { r, g, b, a };
+
+        D3D12_HEAP_PROPERTIES heapProps = {};
+        heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+        D3D12_RESOURCE_DESC texDesc = {};
+        texDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        texDesc.Width = 1;
+        texDesc.Height = 1;
+        texDesc.DepthOrArraySize = 1;
+        texDesc.MipLevels = 1;
+        texDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        texDesc.SampleDesc.Count = 1;
+
+        HRESULT hr = device->CreateCommittedResource(
+            &heapProps, D3D12_HEAP_FLAG_NONE, &texDesc,
+            D3D12_RESOURCE_STATE_COMMON, nullptr,
+            IID_PPV_ARGS(tex.resource.GetAddressOf()));
+        if (FAILED(hr)) return false;
+
+        SetD3D12DebugName(tex.resource.Get(), name);
+
+        // Upload pixel data via the copy queue
+        D3D12_HEAP_PROPERTIES uploadHeap = {};
+        uploadHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
+
+        UINT64 rowPitch = AlignUp(4, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
+        size_t uploadSize = AlignUp(static_cast<size_t>(rowPitch), D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
+
+        D3D12_RESOURCE_DESC uploadDesc = {};
+        uploadDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        uploadDesc.Width = uploadSize;
+        uploadDesc.Height = 1;
+        uploadDesc.DepthOrArraySize = 1;
+        uploadDesc.MipLevels = 1;
+        uploadDesc.SampleDesc.Count = 1;
+        uploadDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+        ComPtr<ID3D12Resource> uploadBuffer;
+        hr = device->CreateCommittedResource(
+            &uploadHeap, D3D12_HEAP_FLAG_NONE, &uploadDesc,
+            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+            IID_PPV_ARGS(uploadBuffer.GetAddressOf()));
+        if (FAILED(hr)) return false;
+
+        uint8_t* mapped = nullptr;
+        uploadBuffer->Map(0, nullptr, reinterpret_cast<void**>(&mapped));
+        memcpy(mapped, pixel, 4);
+        uploadBuffer->Unmap(0, nullptr);
+
+        auto* copyCmdList = m_copyQueue.getCommandList();
+
+        D3D12_TEXTURE_COPY_LOCATION dst = {};
+        dst.pResource = tex.resource.Get();
+        dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        dst.SubresourceIndex = 0;
+
+        D3D12_TEXTURE_COPY_LOCATION src = {};
+        src.pResource = uploadBuffer.Get();
+        src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        src.PlacedFootprint.Offset = 0;
+        src.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        src.PlacedFootprint.Footprint.Width = 1;
+        src.PlacedFootprint.Footprint.Height = 1;
+        src.PlacedFootprint.Footprint.Depth = 1;
+        src.PlacedFootprint.Footprint.RowPitch = static_cast<UINT>(rowPitch);
+
+        copyCmdList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+
+        m_copyQueue.retainStagingBuffer(std::move(uploadBuffer));
+        m_copyQueue.addPendingTransition(tex.resource.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+
+        // Create SRV
+        tex.srvIndex = m_srvAllocator.allocate();
+        if (tex.srvIndex == UINT(-1)) return false;
+
+        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+        srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srvDesc.Texture2D.MipLevels = 1;
+        device->CreateShaderResourceView(tex.resource.Get(), &srvDesc,
+                                          m_srvAllocator.getCPU(tex.srvIndex));
+
+        tex.width = 1;
+        tex.height = 1;
+        return true;
+    };
+
+    if (!createPBR1x1(m_defaultNormalTexture, 128, 128, 255, 255, L"Default Normal Texture"))
+    {
+        LOG_ENGINE_ERROR("[D3D12] Failed to create default normal texture");
+        return false;
+    }
+
+    if (!createPBR1x1(m_defaultMetallicRoughnessTexture, 0, 128, 0, 255, L"Default MetallicRoughness Texture"))
+    {
+        LOG_ENGINE_ERROR("[D3D12] Failed to create default metallic-roughness texture");
+        return false;
+    }
+
+    if (!createPBR1x1(m_defaultOcclusionTexture, 255, 255, 255, 255, L"Default Occlusion Texture"))
+    {
+        LOG_ENGINE_ERROR("[D3D12] Failed to create default occlusion texture");
+        return false;
+    }
+
+    if (!createPBR1x1(m_defaultEmissiveTexture, 0, 0, 0, 255, L"Default Emissive Texture"))
+    {
+        LOG_ENGINE_ERROR("[D3D12] Failed to create default emissive texture");
+        return false;
+    }
+
+    LOG_ENGINE_TRACE("[D3D12] Created default PBR textures (normal SRV={}, metallicRoughness SRV={}, occlusion SRV={}, emissive SRV={})",
+                      m_defaultNormalTexture.srvIndex, m_defaultMetallicRoughnessTexture.srvIndex,
+                      m_defaultOcclusionTexture.srvIndex, m_defaultEmissiveTexture.srvIndex);
+    return true;
+}
+
 bool D3D12RenderAPI::createDummyShadowTexture()
 {
     // Create a 1x1 Texture2DArray (single slice) as a type-correct placeholder for the

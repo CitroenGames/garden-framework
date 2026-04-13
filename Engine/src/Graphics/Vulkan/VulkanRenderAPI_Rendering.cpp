@@ -446,6 +446,13 @@ void VulkanRenderAPI::renderMesh(const mesh& m, const RenderState& state)
         objUbo.normalMatrix = glm::transpose(glm::inverse(current_model_matrix));
         objUbo.color = state.color;
         objUbo.useTexture = (m.texture_set && m.texture != INVALID_TEXTURE) ? 1 : 0;
+        objUbo.metallic = 0.0f;
+        objUbo.roughness = 0.5f;
+        objUbo.emissive = glm::vec3(0.0f);
+        objUbo.hasMetallicRoughnessMap = 0;
+        objUbo.hasNormalMap = 0;
+        objUbo.hasOcclusionMap = 0;
+        objUbo.hasEmissiveMap = 0;
 
         void* dst = static_cast<char*>(per_object_uniform_mapped[current_frame]) + perObjectDynamicOffset;
         memcpy(dst, &objUbo, sizeof(objUbo));
@@ -597,6 +604,13 @@ void VulkanRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t
         objUbo.normalMatrix = glm::transpose(glm::inverse(current_model_matrix));
         objUbo.color = state.color;
         objUbo.useTexture = (bound_texture != INVALID_TEXTURE) ? 1 : 0;
+        objUbo.metallic = 0.0f;
+        objUbo.roughness = 0.5f;
+        objUbo.emissive = glm::vec3(0.0f);
+        objUbo.hasMetallicRoughnessMap = 0;
+        objUbo.hasNormalMap = 0;
+        objUbo.hasOcclusionMap = 0;
+        objUbo.hasEmissiveMap = 0;
 
         void* dst = static_cast<char*>(per_object_uniform_mapped[current_frame]) + perObjectDynamicOffset;
         memcpy(dst, &objUbo, sizeof(objUbo));
@@ -785,6 +799,13 @@ void VulkanRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
             objUbo.color = drawCmd.color;
             objUbo.useTexture = drawCmd.use_texture ? 1 : 0;
             objUbo.alphaCutoff = drawCmd.alpha_cutoff;
+            objUbo.metallic = drawCmd.metallic;
+            objUbo.roughness = drawCmd.roughness;
+            objUbo.emissive = drawCmd.emissive;
+            objUbo.hasMetallicRoughnessMap = 0;
+            objUbo.hasNormalMap = 0;
+            objUbo.hasOcclusionMap = 0;
+            objUbo.hasEmissiveMap = 0;
 
             void* dst = static_cast<char*>(per_object_uniform_mapped[current_frame]) + perObjectDynamicOffset;
             memcpy(dst, &objUbo, sizeof(objUbo));
@@ -1038,6 +1059,13 @@ void VulkanRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmd
                     objUbo.color = drawCmd.color;
                     objUbo.useTexture = drawCmd.use_texture ? 1 : 0;
                     objUbo.alphaCutoff = drawCmd.alpha_cutoff;
+                    objUbo.metallic = drawCmd.metallic;
+                    objUbo.roughness = drawCmd.roughness;
+                    objUbo.emissive = drawCmd.emissive;
+                    objUbo.hasMetallicRoughnessMap = 0;
+                    objUbo.hasNormalMap = 0;
+                    objUbo.hasOcclusionMap = 0;
+                    objUbo.hasEmissiveMap = 0;
 
                     void* dst = static_cast<char*>(per_obj_mapped) + perObjectDynOffset;
                     memcpy(dst, &objUbo, sizeof(objUbo));
@@ -1216,6 +1244,13 @@ void VulkanRenderAPI::renderDebugLines(const vertex* vertices, size_t vertex_cou
         objUbo.normalMatrix = glm::mat4(1.0f);
         objUbo.color = color;
         objUbo.useTexture = 0;
+        objUbo.metallic = 0.0f;
+        objUbo.roughness = 0.5f;
+        objUbo.emissive = glm::vec3(0.0f);
+        objUbo.hasMetallicRoughnessMap = 0;
+        objUbo.hasNormalMap = 0;
+        objUbo.hasOcclusionMap = 0;
+        objUbo.hasEmissiveMap = 0;
 
         void* dst = static_cast<char*>(per_object_uniform_mapped[current_frame]) + perObjectDynamicOffset;
         memcpy(dst, &objUbo, sizeof(objUbo));

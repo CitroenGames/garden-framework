@@ -159,10 +159,11 @@ public:
 
                 PSOKey key = PSOKey::fromRenderState(range_state, global_lighting);
                 bool has_tex = range.hasValidTexture();
-                cmds.recordDrawRange(m.gpu_mesh, model,
+                cmds.recordDrawRangePBR(m.gpu_mesh, model,
                                      has_tex ? range.texture : INVALID_TEXTURE, has_tex,
                                      key, range.start_vertex, range.vertex_count,
-                                     range_state.color, range_state.alpha_cutoff);
+                                     glm::vec3(range.base_color_factor), range_state.alpha_cutoff,
+                                     range.metallic_factor, range.roughness_factor, range.emissive_factor);
             }
         }
         else
@@ -210,10 +211,11 @@ public:
 
                 PSOKey key = PSOKey::fromRenderState(range_state, global_lighting);
                 bool has_tex = range.hasValidTexture();
-                cmds.recordDrawRange(lod_gpu_mesh, model,
+                cmds.recordDrawRangePBR(lod_gpu_mesh, model,
                                      has_tex ? range.texture : INVALID_TEXTURE, has_tex,
                                      key, range.start_vertex, range.vertex_count,
-                                     range_state.color, range_state.alpha_cutoff);
+                                     glm::vec3(range.base_color_factor), range_state.alpha_cutoff,
+                                     range.metallic_factor, range.roughness_factor, range.emissive_factor);
             }
         }
         else

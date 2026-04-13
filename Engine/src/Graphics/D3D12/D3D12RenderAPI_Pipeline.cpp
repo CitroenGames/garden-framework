@@ -16,8 +16,12 @@ bool D3D12RenderAPI::createRootSignature()
     // [2] Descriptor table: SRV t0 (diffuse texture)
     // [3] Descriptor table: SRV t1 (shadow map)
     // [4] Root CBV b3 - LightCBuffer
+    // [5] Descriptor table: SRV t2 (metallic-roughness texture)
+    // [6] Descriptor table: SRV t3 (normal map texture)
+    // [7] Descriptor table: SRV t4 (occlusion texture)
+    // [8] Descriptor table: SRV t5 (emissive texture)
 
-    D3D12_ROOT_PARAMETER rootParams[5] = {};
+    D3D12_ROOT_PARAMETER rootParams[9] = {};
 
     // [0] Root CBV b0
     rootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
@@ -61,8 +65,56 @@ bool D3D12RenderAPI::createRootSignature()
     rootParams[4].Descriptor.RegisterSpace = 0;
     rootParams[4].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
+    // [5] Descriptor table: SRV t2 (metallic-roughness texture)
+    D3D12_DESCRIPTOR_RANGE srvRange2 = {};
+    srvRange2.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    srvRange2.NumDescriptors = 1;
+    srvRange2.BaseShaderRegister = 2;
+    srvRange2.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    rootParams[5].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    rootParams[5].DescriptorTable.NumDescriptorRanges = 1;
+    rootParams[5].DescriptorTable.pDescriptorRanges = &srvRange2;
+    rootParams[5].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    // [6] Descriptor table: SRV t3 (normal map texture)
+    D3D12_DESCRIPTOR_RANGE srvRange3 = {};
+    srvRange3.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    srvRange3.NumDescriptors = 1;
+    srvRange3.BaseShaderRegister = 3;
+    srvRange3.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    rootParams[6].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    rootParams[6].DescriptorTable.NumDescriptorRanges = 1;
+    rootParams[6].DescriptorTable.pDescriptorRanges = &srvRange3;
+    rootParams[6].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    // [7] Descriptor table: SRV t4 (occlusion texture)
+    D3D12_DESCRIPTOR_RANGE srvRange4 = {};
+    srvRange4.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    srvRange4.NumDescriptors = 1;
+    srvRange4.BaseShaderRegister = 4;
+    srvRange4.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    rootParams[7].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    rootParams[7].DescriptorTable.NumDescriptorRanges = 1;
+    rootParams[7].DescriptorTable.pDescriptorRanges = &srvRange4;
+    rootParams[7].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    // [8] Descriptor table: SRV t5 (emissive texture)
+    D3D12_DESCRIPTOR_RANGE srvRange5 = {};
+    srvRange5.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    srvRange5.NumDescriptors = 1;
+    srvRange5.BaseShaderRegister = 5;
+    srvRange5.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    rootParams[8].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    rootParams[8].DescriptorTable.NumDescriptorRanges = 1;
+    rootParams[8].DescriptorTable.pDescriptorRanges = &srvRange5;
+    rootParams[8].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
     // Static samplers
-    D3D12_STATIC_SAMPLER_DESC staticSamplers[2] = {};
+    D3D12_STATIC_SAMPLER_DESC staticSamplers[6] = {};
 
     // s0: Anisotropic wrap (diffuse textures)
     staticSamplers[0].Filter = D3D12_FILTER_ANISOTROPIC;
@@ -86,10 +138,24 @@ bool D3D12RenderAPI::createRootSignature()
     staticSamplers[1].ShaderRegister = 1;
     staticSamplers[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
+    // s2-s5: Anisotropic wrap samplers for PBR textures (metallic-roughness, normal, occlusion, emissive)
+    for (int i = 2; i <= 5; i++)
+    {
+        staticSamplers[i].Filter = D3D12_FILTER_ANISOTROPIC;
+        staticSamplers[i].AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+        staticSamplers[i].AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+        staticSamplers[i].AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+        staticSamplers[i].MaxAnisotropy = 16;
+        staticSamplers[i].ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+        staticSamplers[i].MaxLOD = D3D12_FLOAT32_MAX;
+        staticSamplers[i].ShaderRegister = i;
+        staticSamplers[i].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    }
+
     D3D12_ROOT_SIGNATURE_DESC rsDesc = {};
-    rsDesc.NumParameters = 5;
+    rsDesc.NumParameters = 9;
     rsDesc.pParameters = rootParams;
-    rsDesc.NumStaticSamplers = 2;
+    rsDesc.NumStaticSamplers = 6;
     rsDesc.pStaticSamplers = staticSamplers;
     rsDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 
@@ -166,7 +232,8 @@ static D3D12_GRAPHICS_PIPELINE_STATE_DESC CreateBasePSODesc(
     static D3D12_INPUT_ELEMENT_DESC basicLayout[] = {
         { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
         { "NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-        { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
+        { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "TANGENT", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 32, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
     };
     static D3D12_INPUT_ELEMENT_DESC posOnlyLayout[] = {
         { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
@@ -174,7 +241,7 @@ static D3D12_GRAPHICS_PIPELINE_STATE_DESC CreateBasePSODesc(
 
     if (hasNormalAndTexcoord)
     {
-        desc.InputLayout = { basicLayout, 3 };
+        desc.InputLayout = { basicLayout, 4 };
     }
     else
     {
@@ -198,7 +265,7 @@ static D3D12_GRAPHICS_PIPELINE_STATE_DESC CreateBasePSODesc(
     desc.SampleMask = UINT_MAX;
     desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     desc.NumRenderTargets = 1;
-    desc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    desc.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
     desc.DSVFormat = DXGI_FORMAT_D24_UNORM_S8_UINT;
     desc.SampleDesc.Count = 1;
 

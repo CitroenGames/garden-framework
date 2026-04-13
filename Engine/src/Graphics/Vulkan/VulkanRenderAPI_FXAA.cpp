@@ -49,9 +49,9 @@ bool VulkanRenderAPI::createFxaaResources()
     memcpy(data, quadVertices, sizeof(quadVertices));
     vmaUnmapMemory(vma_allocator, fxaa_vertex_allocation);
 
-    // Create offscreen color image
+    // Create offscreen color image (HDR: RGBA16F for scene rendering before tone mapping)
     if (vkutil::createImage(vma_allocator, swapchain_extent.width, swapchain_extent.height,
-                            swapchain_format,
+                            VK_FORMAT_R16G16B16A16_SFLOAT,
                             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
                             offscreen_image, offscreen_allocation) != VK_SUCCESS) {
         printf("Failed to create offscreen image\n");
@@ -59,7 +59,7 @@ bool VulkanRenderAPI::createFxaaResources()
     }
 
     // Create offscreen image view
-    offscreen_view = vkutil::createImageView(device, offscreen_image, swapchain_format, VK_IMAGE_ASPECT_COLOR_BIT);
+    offscreen_view = vkutil::createImageView(device, offscreen_image, VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_ASPECT_COLOR_BIT);
     if (offscreen_view == VK_NULL_HANDLE) {
         printf("Failed to create offscreen image view\n");
         return false;
@@ -101,9 +101,9 @@ bool VulkanRenderAPI::createFxaaResources()
         return false;
     }
 
-    // Create offscreen render pass (color + depth)
+    // Create offscreen render pass (color + depth) - HDR format for scene rendering
     VkAttachmentDescription colorAttachment{};
-    colorAttachment.format = swapchain_format;
+    colorAttachment.format = VK_FORMAT_R16G16B16A16_SFLOAT;
     colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
     colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -538,13 +538,13 @@ void VulkanRenderAPI::recreateOffscreenResources()
         offscreen_allocation = nullptr;
     }
 
-    // Recreate with new size
+    // Recreate with new size (HDR: RGBA16F for scene rendering before tone mapping)
     vkutil::createImage(vma_allocator, swapchain_extent.width, swapchain_extent.height,
-                        swapchain_format,
+                        VK_FORMAT_R16G16B16A16_SFLOAT,
                         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
                         offscreen_image, offscreen_allocation);
 
-    offscreen_view = vkutil::createImageView(device, offscreen_image, swapchain_format, VK_IMAGE_ASPECT_COLOR_BIT);
+    offscreen_view = vkutil::createImageView(device, offscreen_image, VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_ASPECT_COLOR_BIT);
 
     // Create offscreen depth image
     vkutil::createImage(vma_allocator, swapchain_extent.width, swapchain_extent.height,

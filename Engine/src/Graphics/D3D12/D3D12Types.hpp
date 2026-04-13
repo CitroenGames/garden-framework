@@ -99,7 +99,15 @@ struct alignas(16) D3D12PerObjectCBuffer
     glm::vec3 color;
     int useTexture;
     float alphaCutoff;
-    float _pad[3];
+    float metallic;
+    float roughness;
+    float _pbrPad1;
+    glm::vec3 emissive;
+    float _pbrPad2;
+    int hasMetallicRoughnessMap;
+    int hasNormalMap;
+    int hasOcclusionMap;
+    int hasEmissiveMap;
 };
 
 struct alignas(16) D3D12ShadowCBuffer
@@ -119,5 +127,6 @@ struct alignas(16) D3D12SkyboxCBuffer
 struct alignas(16) D3D12FXAACBuffer
 {
     glm::vec2 inverseScreenSize;
-    glm::vec2 padding;
+    float exposure;
+    float padding;
 };

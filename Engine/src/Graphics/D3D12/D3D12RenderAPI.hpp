@@ -189,6 +189,12 @@ private:
     TextureHandle currentBoundTexture = INVALID_TEXTURE;
     TextureHandle defaultTexture = INVALID_TEXTURE;
 
+    // Default PBR textures (1x1 placeholders)
+    D3D12Texture m_defaultNormalTexture;             // RGBA(128, 128, 255, 255) = flat normal
+    D3D12Texture m_defaultMetallicRoughnessTexture;  // RGBA(0, 128, 0, 255) = metallic=0, roughness=0.5
+    D3D12Texture m_defaultOcclusionTexture;          // RGBA(255, 255, 255, 255) = no occlusion
+    D3D12Texture m_defaultEmissiveTexture;           // RGBA(0, 0, 0, 255) = no emission
+
     // State tracking
     ID3D12PipelineState* last_bound_pso = nullptr;
     bool global_cbuffer_dirty = true;
@@ -246,6 +252,7 @@ private:
     bool createPostProcessingResources(int width, int height);
     bool createSkyboxResources();
     bool createDefaultTexture();
+    bool createDefaultPBRTextures();
     bool createDummyShadowTexture();
 
     void waitForFence(UINT64 fenceValue);

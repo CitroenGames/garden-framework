@@ -88,6 +88,11 @@ struct DrawCommand
     glm::vec3     color        = glm::vec3(1.0f);
     float         alpha_cutoff = 0.0f;  // >0 triggers alpha test discard in shader
 
+    // PBR material properties
+    float         metallic     = 0.0f;
+    float         roughness    = 0.5f;
+    glm::vec3     emissive     = glm::vec3(0.0f);
+
     // For range draws (renderMeshRange). If vertex_count == 0, draw entire mesh.
     size_t start_vertex = 0;
     size_t vertex_count = 0;
@@ -137,6 +142,31 @@ public:
         cmd.pso_key = pso_key;
         cmd.color = color;
         cmd.alpha_cutoff = alpha_cutoff;
+        cmd.start_vertex = start_vertex;
+        cmd.vertex_count = vertex_count;
+        m_commands.push_back(cmd);
+    }
+
+    // Record a range draw command with PBR material properties
+    void recordDrawRangePBR(IGPUMesh* gpu_mesh, const glm::mat4& model_matrix,
+                            TextureHandle texture, bool use_texture,
+                            const PSOKey& pso_key,
+                            size_t start_vertex, size_t vertex_count,
+                            const glm::vec3& color, float alpha_cutoff,
+                            float metallic, float roughness,
+                            const glm::vec3& emissive = glm::vec3(0.0f))
+    {
+        DrawCommand cmd;
+        cmd.gpu_mesh = gpu_mesh;
+        cmd.model_matrix = model_matrix;
+        cmd.texture = texture;
+        cmd.use_texture = use_texture;
+        cmd.pso_key = pso_key;
+        cmd.color = color;
+        cmd.alpha_cutoff = alpha_cutoff;
+        cmd.metallic = metallic;
+        cmd.roughness = roughness;
+        cmd.emissive = emissive;
         cmd.start_vertex = start_vertex;
         cmd.vertex_count = vertex_count;
         m_commands.push_back(cmd);

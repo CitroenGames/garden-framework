@@ -2,6 +2,9 @@
 REM Compile all Slang shaders to DXIL and SPIR-V
 REM Requires slangc in Tools\slang-2026.5.2\bin\
 REM Metal output can be added when targeting macOS
+REM
+REM Note: pbr.slang and common.slang are modules imported by other shaders.
+REM They are NOT compiled standalone — slangc resolves them automatically.
 
 setlocal enabledelayedexpansion
 
@@ -20,7 +23,7 @@ if not exist "%OUT_VK%" mkdir "%OUT_VK%"
 
 set ERRORS=0
 
-REM Helper: compile a shader to DXBC (VS+PS) and SPIR-V (vert+frag)
+REM Helper: compile a shader to DXIL (VS+PS) and SPIR-V (vert+frag)
 REM Usage: call :compile <name> <vs_entry> <ps_entry>
 
 echo Compiling shadow...
@@ -29,11 +32,11 @@ echo Compiling sky...
 call :compile sky vertexMain fragmentMain
 echo Compiling fxaa...
 call :compile fxaa vertexMain fragmentMain
-echo Compiling basic...
+echo Compiling basic (with PBR)...
 call :compile basic vertexMain fragmentMain
 echo Compiling unlit...
 call :compile unlit vertexMain fragmentMain
-echo Compiling skinned...
+echo Compiling skinned (with PBR)...
 call :compile skinned vertexMain fragmentMain
 echo Compiling skinned_shadow...
 call :compile skinned_shadow vertexMain fragmentMain

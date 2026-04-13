@@ -1,4 +1,5 @@
 #include "ObjLoader.hpp"
+#include "TangentGenerator.hpp"
 #include "tiny_obj_loader.h"
 #include <stdio.h>
 #include <cmath>
@@ -207,14 +208,20 @@ ObjLoadResult ObjLoader::loadObj(const std::string& filename, const ObjLoaderCon
                 v.u = v.v = 0.0f;
             }
             
+            // OBJ format does not carry tangent data; set defaults before generation
+            v.tx = 1.0f; v.ty = 0.0f; v.tz = 0.0f; v.tw = 1.0f;
+
             ++vertex_index;
         }
     }
-    
+
+    // Generate tangent vectors from position/normal/UV
+    TangentGenerator::generate(result.vertices, result.vertex_count);
+
     result.success = true;
-    logMessage("Successfully loaded OBJ: " + filename + " (" + std::to_string(result.vertex_count) + " vertices)", 
+    logMessage("Successfully loaded OBJ: " + filename + " (" + std::to_string(result.vertex_count) + " vertices)",
                config.verbose_logging);
-    
+
     return result;
 }
 
@@ -311,6 +318,10 @@ ObjLoadResult ObjLoader::loadObjSafe(const std::string& filename, const ObjLoade
         result.vertices[i].nz = 0.0f;
         result.vertices[i].u = 0.0f;
         result.vertices[i].v = 0.0f;
+        result.vertices[i].tx = 1.0f;
+        result.vertices[i].ty = 0.0f;
+        result.vertices[i].tz = 0.0f;
+        result.vertices[i].tw = 1.0f;
     }
     
     size_t vertex_index = 0;
@@ -401,11 +412,15 @@ ObjLoadResult ObjLoader::loadObjSafe(const std::string& filename, const ObjLoade
     
     // Update actual vertex count
     result.vertex_count = vertex_index;
+
+    // Generate tangent vectors from position/normal/UV
+    TangentGenerator::generate(result.vertices, result.vertex_count);
+
     result.success = true;
-    
-    logMessage("Successfully loaded OBJ (safe mode): " + filename + " (" + std::to_string(result.vertex_count) + " vertices)", 
+
+    logMessage("Successfully loaded OBJ (safe mode): " + filename + " (" + std::to_string(result.vertex_count) + " vertices)",
                config.verbose_logging);
-    
+
     return result;
 }
 
