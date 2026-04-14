@@ -20,6 +20,8 @@ public:
 
     // Get the copy command list for recording CopyTextureRegion/CopyBufferRegion.
     // Lazily opens the command list on first call after submit/init.
+    // NOTE: Not thread-safe -- all calls to getCommandList() through submit()
+    // must happen on the same thread or be externally synchronized.
     ID3D12GraphicsCommandList* getCommandList();
 
     // Keep a staging buffer alive until the copy completes.

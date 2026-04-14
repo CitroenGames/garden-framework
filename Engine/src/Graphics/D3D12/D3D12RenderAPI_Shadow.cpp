@@ -287,17 +287,9 @@ void D3D12RenderAPI::endShadowPass()
         w = viewport_width;
         h = viewport_height;
 
-        if (fxaaEnabled)
-        {
-            transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
-            rtvHandle = m_rtvAllocator.getCPU(m_offscreenRTVIndex);
-        }
-        else
-        {
-            transitionResource(m_backBuffers[m_backBufferIndex].Get(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
-            rtvHandle = m_rtvAllocator.getCPU(m_backBufferRTVs[m_backBufferIndex]);
-        }
-
+        // Standalone always renders to HDR offscreen (tone-mapped to back buffer in endFrame)
+        transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        rtvHandle = m_rtvAllocator.getCPU(m_offscreenRTVIndex);
         dsvHandle = m_dsvAllocator.getCPU(m_mainDSVIndex);
     }
 

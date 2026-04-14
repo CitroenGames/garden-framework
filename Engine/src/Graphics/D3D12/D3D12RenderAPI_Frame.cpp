@@ -37,6 +37,8 @@ void D3D12RenderAPI::beginFrame()
         if (it != m_pie_viewports.end())
         {
             auto& pie = it->second;
+            transitionResource(pie.offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            flushBarriers();
             rtvHandle = m_rtvAllocator.getCPU(pie.offscreenRTVIndex);
             dsvHandle = m_dsvAllocator.getCPU(pie.dsvIndex);
             commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, &dsvHandle);
@@ -308,6 +310,19 @@ void D3D12RenderAPI::clear(const glm::vec3& color)
     if (device_lost) return;
 
     float clearColor[4] = { color.r, color.g, color.b, 1.0f };
+
+    if (m_active_scene_target >= 0)
+    {
+        auto it = m_pie_viewports.find(m_active_scene_target);
+        if (it != m_pie_viewports.end())
+        {
+            auto& pie = it->second;
+            commandList->ClearRenderTargetView(m_rtvAllocator.getCPU(pie.offscreenRTVIndex), clearColor, 0, nullptr);
+            commandList->ClearDepthStencilView(m_dsvAllocator.getCPU(pie.dsvIndex),
+                                                D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, nullptr);
+            return;
+        }
+    }
 
     if (m_viewportTexture)
     {

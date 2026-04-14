@@ -458,7 +458,11 @@ void D3D12RenderAPI::deleteTexture(TextureHandle texture)
     auto it = textures.find(texture);
     if (it != textures.end())
     {
-        flushGPU(); // Ensure GPU is done with this texture before releasing
+        // Flush GPU once to ensure it's done with this texture, then release.
+        // Callers deleting many textures should batch their own flushGPU() call
+        // and use the internal erase path to avoid repeated stalls.
+        if (!device_lost)
+            flushGPU();
         if (it->second.srvIndex != UINT(-1))
             m_srvAllocator.free(it->second.srvIndex);
         textures.erase(it);

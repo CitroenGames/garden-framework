@@ -10,6 +10,7 @@
 void D3D12RenderAPI::createViewportResources(int w, int h)
 {
     LOG_ENGINE_TRACE("[D3D12] Creating viewport resources ({}x{})", w, h);
+    if (m_viewportTexture) m_stateTracker.untrack(m_viewportTexture.Get());
     m_viewportTexture.Reset();
     m_viewportDepthBuffer.Reset();
 
@@ -39,6 +40,7 @@ void D3D12RenderAPI::createViewportResources(int w, int h)
             LOG_ENGINE_ERROR("[D3D12] Failed to create viewport color texture ({}x{}, HRESULT: 0x{:08X})", w, h, static_cast<unsigned>(hr));
             return;
         }
+        m_stateTracker.track(m_viewportTexture.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     }
 
     // Depth texture
@@ -125,11 +127,9 @@ void D3D12RenderAPI::endSceneRender()
             // FXAA from PIE offscreen to PIE final
             if (fxaaEnabled)
             {
-                transitionResource(pie.offscreenTexture.Get(),
-                                   D3D12_RESOURCE_STATE_RENDER_TARGET,
+                transitionResource(pie.offscreenTexture.Get(), {},
                                    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-                transitionResource(pie.texture.Get(),
-                                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                transitionResource(pie.texture.Get(), {},
                                    D3D12_RESOURCE_STATE_RENDER_TARGET);
                 flushBarriers();
 
@@ -157,8 +157,7 @@ void D3D12RenderAPI::endSceneRender()
                     // Ring buffer exhausted - cannot run FXAA/tone-map pass.
                     // HDR offscreen (R16F) is incompatible with LDR output for CopyResource.
                     LOG_ENGINE_WARN("[D3D12] Ring buffer exhausted - skipping PIE FXAA/tone-map pass");
-                    transitionResource(pie.offscreenTexture.Get(),
-                                       D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                    transitionResource(pie.offscreenTexture.Get(), {},
                                        D3D12_RESOURCE_STATE_RENDER_TARGET);
                     flushBarriers();
                 }
@@ -176,8 +175,7 @@ void D3D12RenderAPI::endSceneRender()
                     commandList->IASetVertexBuffers(0, 1, &m_fxaaQuadVBV);
                     commandList->DrawInstanced(4, 1, 0, 0);
 
-                    transitionResource(pie.offscreenTexture.Get(),
-                                       D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                    transitionResource(pie.offscreenTexture.Get(), {},
                                        D3D12_RESOURCE_STATE_RENDER_TARGET);
                     transitionResource(pie.texture.Get(),
                                        D3D12_RESOURCE_STATE_RENDER_TARGET,
@@ -188,11 +186,9 @@ void D3D12RenderAPI::endSceneRender()
             else
             {
                 // FXAA disabled - still need tone mapping pass from HDR offscreen to LDR output
-                transitionResource(pie.offscreenTexture.Get(),
-                                   D3D12_RESOURCE_STATE_RENDER_TARGET,
+                transitionResource(pie.offscreenTexture.Get(), {},
                                    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-                transitionResource(pie.texture.Get(),
-                                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                transitionResource(pie.texture.Get(), {},
                                    D3D12_RESOURCE_STATE_RENDER_TARGET);
                 flushBarriers();
 
@@ -231,8 +227,7 @@ void D3D12RenderAPI::endSceneRender()
                 transitionResource(pie.offscreenTexture.Get(),
                                    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
                                    D3D12_RESOURCE_STATE_RENDER_TARGET);
-                transitionResource(pie.texture.Get(),
-                                   D3D12_RESOURCE_STATE_RENDER_TARGET,
+                transitionResource(pie.texture.Get(), {},
                                    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
                 flushBarriers();
             }
@@ -245,8 +240,7 @@ void D3D12RenderAPI::endSceneRender()
         if (fxaaEnabled)
         {
                 transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-            transitionResource(m_viewportTexture.Get(),
-                               D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+            transitionResource(m_viewportTexture.Get(), {},
                                D3D12_RESOURCE_STATE_RENDER_TARGET);
             // Flush batched barriers (offscreen→SRV + viewport→RT in one call)
             flushBarriers();
@@ -275,8 +269,7 @@ void D3D12RenderAPI::endSceneRender()
                 // Ring buffer exhausted - cannot run FXAA/tone-map pass.
                 // HDR offscreen (R16F) is incompatible with LDR viewport for CopyResource.
                 LOG_ENGINE_WARN("[D3D12] Ring buffer exhausted - skipping viewport FXAA/tone-map pass");
-                transitionResource(m_viewportTexture.Get(),
-                                   D3D12_RESOURCE_STATE_RENDER_TARGET,
+                transitionResource(m_viewportTexture.Get(), {},
                                    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
                 transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
                 flushBarriers();
@@ -295,8 +288,7 @@ void D3D12RenderAPI::endSceneRender()
                 commandList->IASetVertexBuffers(0, 1, &m_fxaaQuadVBV);
                 commandList->DrawInstanced(4, 1, 0, 0);
 
-                transitionResource(m_viewportTexture.Get(),
-                                   D3D12_RESOURCE_STATE_RENDER_TARGET,
+                transitionResource(m_viewportTexture.Get(), {},
                                    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
                 // Restore offscreen to render target for next frame
                 transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -307,8 +299,7 @@ void D3D12RenderAPI::endSceneRender()
         {
             // FXAA disabled - still need tone mapping pass from HDR offscreen to LDR viewport
             transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-            transitionResource(m_viewportTexture.Get(),
-                               D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+            transitionResource(m_viewportTexture.Get(), {},
                                D3D12_RESOURCE_STATE_RENDER_TARGET);
             flushBarriers();
 
@@ -399,6 +390,7 @@ void D3D12RenderAPI::renderUI()
 
 void D3D12RenderAPI::createPreviewResources(int w, int h)
 {
+    if (m_previewTexture) m_stateTracker.untrack(m_previewTexture.Get());
     m_previewTexture.Reset();
     m_previewDepthBuffer.Reset();
 
@@ -423,6 +415,7 @@ void D3D12RenderAPI::createPreviewResources(int w, int h)
             LOG_ENGINE_ERROR("[D3D12] Failed to create preview color texture (HRESULT: 0x{:08X})", static_cast<unsigned>(hr));
             return;
         }
+        m_stateTracker.track(m_previewTexture.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     }
     {
         D3D12_RESOURCE_DESC desc = {};
@@ -480,8 +473,7 @@ void D3D12RenderAPI::beginPreviewFrame(int width, int height)
         createPreviewResources(width, height);
     }
 
-    transitionResource(m_previewTexture.Get(),
-                       D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+    transitionResource(m_previewTexture.Get(), {},
                        D3D12_RESOURCE_STATE_RENDER_TARGET);
     flushBarriers();
 
@@ -508,8 +500,7 @@ void D3D12RenderAPI::beginPreviewFrame(int width, int height)
 
 void D3D12RenderAPI::endPreviewFrame()
 {
-    transitionResource(m_previewTexture.Get(),
-                       D3D12_RESOURCE_STATE_RENDER_TARGET,
+    transitionResource(m_previewTexture.Get(), {},
                        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     flushBarriers();
 }
@@ -523,6 +514,7 @@ uint64_t D3D12RenderAPI::getPreviewTextureID()
 void D3D12RenderAPI::destroyPreviewTarget()
 {
     flushGPU();
+    if (m_previewTexture) m_stateTracker.untrack(m_previewTexture.Get());
     if (m_previewRTVIndex != UINT(-1)) { m_rtvAllocator.free(m_previewRTVIndex); m_previewRTVIndex = UINT(-1); }
     if (m_previewSRVIndex != UINT(-1)) { m_srvAllocator.free(m_previewSRVIndex); m_previewSRVIndex = UINT(-1); }
     if (m_previewDSVIndex != UINT(-1)) { m_dsvAllocator.free(m_previewDSVIndex); m_previewDSVIndex = UINT(-1); }
@@ -538,6 +530,8 @@ void D3D12RenderAPI::destroyPreviewTarget()
 
 void D3D12RenderAPI::createPIEViewportResources(PIEViewportTarget& target, int w, int h)
 {
+    if (target.texture) m_stateTracker.untrack(target.texture.Get());
+    if (target.offscreenTexture) m_stateTracker.untrack(target.offscreenTexture.Get());
     target.texture.Reset();
     target.depthBuffer.Reset();
     target.offscreenTexture.Reset();
@@ -564,6 +558,7 @@ void D3D12RenderAPI::createPIEViewportResources(PIEViewportTarget& target, int w
             LOG_ENGINE_ERROR("[D3D12] Failed to create PIE output texture ({}x{}, HRESULT: 0x{:08X})", w, h, static_cast<unsigned>(hr));
             return;
         }
+        m_stateTracker.track(target.texture.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     }
 
     // Offscreen texture (HDR scene render target, FXAA input)
@@ -585,6 +580,7 @@ void D3D12RenderAPI::createPIEViewportResources(PIEViewportTarget& target, int w
             LOG_ENGINE_ERROR("[D3D12] Failed to create PIE offscreen texture ({}x{}, HRESULT: 0x{:08X})", w, h, static_cast<unsigned>(hr));
             return;
         }
+        m_stateTracker.track(target.offscreenTexture.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
     }
 
     // Depth buffer
@@ -665,6 +661,8 @@ void D3D12RenderAPI::destroyPIEViewport(int id)
     {
         flushGPU();
         auto& target = it->second;
+        if (target.texture) m_stateTracker.untrack(target.texture.Get());
+        if (target.offscreenTexture) m_stateTracker.untrack(target.offscreenTexture.Get());
         if (target.rtvIndex != UINT(-1)) m_rtvAllocator.free(target.rtvIndex);
         if (target.srvIndex != UINT(-1)) m_srvAllocator.free(target.srvIndex);
         if (target.dsvIndex != UINT(-1)) m_dsvAllocator.free(target.dsvIndex);
@@ -681,6 +679,8 @@ void D3D12RenderAPI::destroyAllPIEViewports()
     flushGPU();
     for (auto& [id, target] : m_pie_viewports)
     {
+        if (target.texture) m_stateTracker.untrack(target.texture.Get());
+        if (target.offscreenTexture) m_stateTracker.untrack(target.offscreenTexture.Get());
         if (target.rtvIndex != UINT(-1)) m_rtvAllocator.free(target.rtvIndex);
         if (target.srvIndex != UINT(-1)) m_srvAllocator.free(target.srvIndex);
         if (target.dsvIndex != UINT(-1)) m_dsvAllocator.free(target.dsvIndex);

@@ -59,10 +59,10 @@ struct UploadRingBuffer
     size_t capacity = 0;
     std::atomic<size_t> offset{0};
     D3D12_GPU_VIRTUAL_ADDRESS gpuAddress = 0;
-    bool overflowLogged = false;
+    std::atomic<bool> overflowLogged{false};
 
     bool init(ID3D12Device* device, size_t size);
-    void reset() { offset.store(0, std::memory_order_relaxed); overflowLogged = false; }
+    void reset() { offset.store(0, std::memory_order_relaxed); overflowLogged.store(false, std::memory_order_relaxed); }
     D3D12_GPU_VIRTUAL_ADDRESS allocate(size_t size, const void* data);
 };
 

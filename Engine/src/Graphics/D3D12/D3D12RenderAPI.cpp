@@ -124,11 +124,10 @@ D3D12_GPU_VIRTUAL_ADDRESS UploadRingBuffer::allocate(size_t size, const void* da
 
     if (alloc_offset + aligned > capacity)
     {
-        if (!overflowLogged)
+        if (!overflowLogged.exchange(true, std::memory_order_relaxed))
         {
             LOG_ENGINE_WARN("[D3D12] Upload ring buffer exhausted (capacity: {} KB, requested: {} bytes)",
                              capacity / 1024, size);
-            overflowLogged = true;
         }
         return 0;
     }
@@ -258,7 +257,8 @@ bool D3D12RenderAPI::initialize(WindowHandle window, int width, int height, floa
 
     // Initialize command list pool for parallel replay (sized to hardware thread count)
     {
-        uint32_t poolSize = std::max(1u, std::thread::hardware_concurrency() - 1);
+        uint32_t hc = std::thread::hardware_concurrency();
+        uint32_t poolSize = (hc > 1) ? (hc - 1) : 1;
         if (!m_commandListPool.init(device.Get(), poolSize))
             LOG_ENGINE_WARN("[D3D12] Failed to create command list pool -- parallel replay disabled");
     }
@@ -356,6 +356,11 @@ void D3D12RenderAPI::shutdown()
 
     LOG_ENGINE_TRACE("[D3D12] Releasing {} textures, {} PIE viewports",
                       textures.size(), m_pie_viewports.size());
+    for (auto& [handle, tex] : textures)
+    {
+        if (tex.srvIndex != UINT(-1))
+            m_srvAllocator.free(tex.srvIndex);
+    }
     textures.clear();
     m_pie_viewports.clear();
     m_active_scene_target = -1;
