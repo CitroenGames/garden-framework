@@ -91,11 +91,6 @@ float4 fragmentMain(PSInput input) : SV_TARGET
     // Add sun disc
     color = lerp(color, SUN_COLOR * 2.0, sunDisc);
 
-    // Simple tone mapping
-    color = color / (color + float3(1.0, 1.0, 1.0));
-
-    // Gamma correction
-    color = pow(color, 1.0 / 2.2);
-
+    // Output linear HDR — FXAA pass handles tone mapping and gamma correction
     return float4(color, 1.0);
 }

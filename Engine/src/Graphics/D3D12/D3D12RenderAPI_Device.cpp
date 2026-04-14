@@ -263,6 +263,8 @@ bool D3D12RenderAPI::createDepthStencilBuffer(int width, int height)
         IID_PPV_ARGS(m_depthStencilBuffer.GetAddressOf()));
     if (FAILED(hr)) return false;
 
+    m_stateTracker.track(m_depthStencilBuffer.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE);
+
     if (m_mainDSVIndex == UINT(-1))
         m_mainDSVIndex = m_dsvAllocator.allocate();
 
@@ -358,9 +360,7 @@ void D3D12RenderAPI::executeUploadCommandList()
         m_uploadFence->SetEventOnCompletion(m_uploadFenceValue, m_uploadFenceEvent);
         WaitForSingleObject(m_uploadFenceEvent, INFINITE);
     }
-
-    m_uploadCmdAllocator->Reset();
-    m_uploadCmdList->Reset(m_uploadCmdAllocator.Get(), nullptr);
+    // Leave command list closed — callers (createBufferFromData) reset and reopen it
 }
 
 // ============================================================================

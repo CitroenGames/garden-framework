@@ -52,8 +52,9 @@ float3 ReconstructViewPos(float2 uv, float depth)
     // NDC: uv [0,1] -> [-1,1]
     float2 ndc = uv * 2.0 - 1.0;
 #ifdef TARGET_HLSL
-    // D3D: Y is already flipped in vertex shader, depth is [0,1]
-    float4 clipPos = float4(ndc, depth, 1.0);
+    // D3D: vertex shader flips UV.y for texture sampling, so ndc.y is inverted
+    // relative to clip space. Negate to restore correct clip-space Y.
+    float4 clipPos = float4(ndc.x, -ndc.y, depth, 1.0);
 #else
     // Vulkan: depth is [0,1], NDC Y flip
     float4 clipPos = float4(ndc.x, -ndc.y, depth, 1.0);
@@ -83,7 +84,13 @@ float3 ReconstructNormal(float2 uv, float2 texelSize, float3 viewPos)
     float3 dy = (abs(posUp.z - viewPos.z) < abs(viewPos.z - posDown.z))
                 ? (posUp - viewPos) : (viewPos - posDown);
 
+#ifdef TARGET_HLSL
+    // D3D: UV.y flip reverses the Y gradient direction, so swap operands
+    // to produce a normal pointing toward the camera (+Z in RH view space)
+    return normalize(cross(dy, dx));
+#else
     return normalize(cross(dx, dy));
+#endif
 }
 
 static const int KERNEL_SIZE = 16;
@@ -128,11 +135,7 @@ float4 fragmentMain(PSInput input) : SV_TARGET
         float4 offset = mul(uProjection, float4(samplePos, 1.0));
         offset.xyz /= offset.w;
         float2 sampleUV = offset.xy * 0.5 + 0.5;
-#ifdef TARGET_HLSL
         sampleUV.y = 1.0 - sampleUV.y;
-#else
-        sampleUV.y = 1.0 - sampleUV.y;
-#endif
 
         // Sample depth at projected position
         float sampleDepth = depthTexture.Sample(depthSampler, sampleUV).r;

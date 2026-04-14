@@ -32,8 +32,8 @@ cbuffer PerObjectCB : register(b1)
 };
 #endif
 
-Texture2D diffuseTexture : register(t0);
-SamplerState linearSampler : register(s0);
+[[vk::binding(1, 0)]]Texture2D diffuseTexture : register(t0);
+[[vk::binding(1, 0)]]SamplerState linearSampler : register(s0);
 
 struct VSInput
 {
