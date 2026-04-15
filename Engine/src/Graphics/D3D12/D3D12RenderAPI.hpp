@@ -275,7 +275,7 @@ private:
     bool createPostProcessingResources(int width, int height);
     bool createSSAOResources(int width, int height);
     bool createSSAORootSignatureAndPSOs();
-    void renderSSAOPass();
+    void renderSSAOPass(ID3D12Resource* depthBuffer, UINT depthSRVIndex, int fullWidth, int fullHeight);
     void generateSSAOKernel();
     bool createSkyboxResources();
     bool createDefaultTexture();
@@ -436,6 +436,7 @@ private:
     UINT m_viewportRTVIndex = UINT(-1);
     UINT m_viewportSRVIndex = UINT(-1);
     UINT m_viewportDSVIndex = UINT(-1);
+    UINT m_viewportDepthSRVIndex = UINT(-1);
     int viewport_width_rt = 0, viewport_height_rt = 0;
     void createViewportResources(int w, int h);
 

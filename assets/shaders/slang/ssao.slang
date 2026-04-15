@@ -1,7 +1,7 @@
 // Screen Space Ambient Occlusion (SSAO)
 // Normal-oriented hemisphere sampling with normals reconstructed from depth
 
-[[vk::binding(0, 0)]]
+[[vk::binding(2, 0)]]
 cbuffer SSAOCB : register(b0)
 {
     float4x4 uProjection;
@@ -15,11 +15,11 @@ cbuffer SSAOCB : register(b0)
     float _pad;
 };
 
-[[vk::binding(1, 0)]]Texture2D depthTexture : register(t0);
-[[vk::binding(1, 0)]]SamplerState depthSampler : register(s0);
+[[vk::binding(0, 0)]]Texture2D depthTexture : register(t0);
+[[vk::binding(0, 0)]]SamplerState depthSampler : register(s0);
 
-[[vk::binding(2, 0)]]Texture2D noiseTexture : register(t1);
-[[vk::binding(2, 0)]]SamplerState noiseSampler : register(s1);
+[[vk::binding(1, 0)]]Texture2D noiseTexture : register(t1);
+[[vk::binding(1, 0)]]SamplerState noiseSampler : register(s1);
 
 struct VSInput
 {
@@ -114,8 +114,8 @@ float4 fragmentMain(PSInput input) : SV_TARGET
     float3 fragPos = ReconstructViewPos(uv, depth);
     float3 normal = ReconstructNormal(uv, depthTexelSize, fragPos);
 
-    // Sample noise texture for random rotation
-    float3 randomVec = noiseTexture.Sample(noiseSampler, uv * uNoiseScale).xyz;
+    // Sample noise texture for random rotation (frac tiles the 4x4 noise across the screen)
+    float3 randomVec = noiseTexture.Sample(noiseSampler, frac(uv * uNoiseScale)).xyz;
 
     // Build TBN matrix using Gram-Schmidt process
     float3 tangent = normalize(randomVec - normal * dot(randomVec, normal));

@@ -86,11 +86,11 @@ bool D3D12RenderAPI::createSSAORootSignatureAndPSOs()
     staticSamplers[0].ShaderRegister = 0;
     staticSamplers[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
-    // s1: point wrap (for noise texture)
+    // s1: point clamp (for depth in blur pass; noise tiling handled via frac() in shader)
     staticSamplers[1].Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
-    staticSamplers[1].AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-    staticSamplers[1].AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-    staticSamplers[1].AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    staticSamplers[1].AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    staticSamplers[1].AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    staticSamplers[1].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
     staticSamplers[1].ShaderRegister = 1;
     staticSamplers[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
@@ -357,17 +357,17 @@ bool D3D12RenderAPI::createSSAOResources(int width, int height)
 // SSAO Render Pass
 // ============================================================================
 
-void D3D12RenderAPI::renderSSAOPass()
+void D3D12RenderAPI::renderSSAOPass(ID3D12Resource* depthBuffer, UINT depthSRVIndex, int fullWidth, int fullHeight)
 {
-    if (!m_psoSSAO || !m_ssaoRawTexture || !m_depthStencilBuffer) return;
+    if (!m_psoSSAO || !m_ssaoRawTexture || !depthBuffer) return;
 
-    int halfW = std::max(1, viewport_width / 2);
-    int halfH = std::max(1, viewport_height / 2);
+    int halfW = std::max(1, fullWidth / 2);
+    int halfH = std::max(1, fullHeight / 2);
 
     // --- Pass 1: SSAO computation ---
 
     // Transition depth to SRV readable
-    transitionResource(m_depthStencilBuffer.Get(), {}, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    transitionResource(depthBuffer, {}, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     transitionResource(m_ssaoRawTexture.Get(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
     flushBarriers();
 
@@ -405,7 +405,7 @@ void D3D12RenderAPI::renderSSAOPass()
     if (cbAddr == 0) goto ssao_cleanup;
 
     commandList->SetGraphicsRootConstantBufferView(0, cbAddr);
-    commandList->SetGraphicsRootDescriptorTable(1, m_srvAllocator.getGPU(m_depthSRVIndex));
+    commandList->SetGraphicsRootDescriptorTable(1, m_srvAllocator.getGPU(depthSRVIndex));
     commandList->SetGraphicsRootDescriptorTable(2, m_srvAllocator.getGPU(m_ssaoNoiseSRVIndex));
 
     commandList->IASetVertexBuffers(0, 1, &m_fxaaQuadVBV);
@@ -433,7 +433,7 @@ void D3D12RenderAPI::renderSSAOPass()
 
         commandList->SetGraphicsRootConstantBufferView(0, cbAddr);
         commandList->SetGraphicsRootDescriptorTable(1, m_srvAllocator.getGPU(m_ssaoRawSRVIndex));
-        commandList->SetGraphicsRootDescriptorTable(2, m_srvAllocator.getGPU(m_depthSRVIndex));
+        commandList->SetGraphicsRootDescriptorTable(2, m_srvAllocator.getGPU(depthSRVIndex));
 
         commandList->DrawInstanced(4, 1, 0, 0);
     }
@@ -458,7 +458,7 @@ void D3D12RenderAPI::renderSSAOPass()
 
         commandList->SetGraphicsRootConstantBufferView(0, cbAddr);
         commandList->SetGraphicsRootDescriptorTable(1, m_srvAllocator.getGPU(m_ssaoBlurTempSRVIndex));
-        commandList->SetGraphicsRootDescriptorTable(2, m_srvAllocator.getGPU(m_depthSRVIndex));
+        commandList->SetGraphicsRootDescriptorTable(2, m_srvAllocator.getGPU(depthSRVIndex));
 
         commandList->DrawInstanced(4, 1, 0, 0);
     }
@@ -466,7 +466,7 @@ void D3D12RenderAPI::renderSSAOPass()
 ssao_cleanup:
     // Always restore state regardless of early exit
     transitionResource(m_ssaoBlurredTexture.Get(), {}, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    transitionResource(m_depthStencilBuffer.Get(), {}, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+    transitionResource(depthBuffer, {}, D3D12_RESOURCE_STATE_DEPTH_WRITE);
     flushBarriers();
 
     // Restore the main root signature for the FXAA pass

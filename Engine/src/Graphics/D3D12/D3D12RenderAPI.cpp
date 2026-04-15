@@ -441,6 +441,8 @@ void D3D12RenderAPI::resize(int width, int height)
     }
 
     // Release depth buffer
+    if (m_depthStencilBuffer)
+        m_stateTracker.untrack(m_depthStencilBuffer.Get());
     m_depthStencilBuffer.Reset();
 
     // Untrack and release offscreen resources

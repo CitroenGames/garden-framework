@@ -43,7 +43,7 @@ void D3D12RenderAPI::createViewportResources(int w, int h)
         m_stateTracker.track(m_viewportTexture.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     }
 
-    // Depth texture
+    // Depth texture (typeless to allow both DSV and SRV views for SSAO)
     {
         D3D12_RESOURCE_DESC desc = {};
         desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
@@ -51,7 +51,7 @@ void D3D12RenderAPI::createViewportResources(int w, int h)
         desc.Height = h;
         desc.DepthOrArraySize = 1;
         desc.MipLevels = 1;
-        desc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+        desc.Format = DXGI_FORMAT_R24G8_TYPELESS;
         desc.SampleDesc.Count = 1;
         desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
 
@@ -94,6 +94,17 @@ void D3D12RenderAPI::createViewportResources(int w, int h)
     dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
     device->CreateDepthStencilView(m_viewportDepthBuffer.Get(), &dsvDesc, m_dsvAllocator.getCPU(m_viewportDSVIndex));
 
+    // Create depth SRV for SSAO (reads depth as R24_UNORM_X8_TYPELESS)
+    if (m_viewportDepthSRVIndex == UINT(-1))
+        m_viewportDepthSRVIndex = m_srvAllocator.allocate();
+    D3D12_SHADER_RESOURCE_VIEW_DESC depthSrvDesc = {};
+    depthSrvDesc.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+    depthSrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    depthSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    depthSrvDesc.Texture2D.MipLevels = 1;
+    device->CreateShaderResourceView(m_viewportDepthBuffer.Get(), &depthSrvDesc,
+                                      m_srvAllocator.getCPU(m_viewportDepthSRVIndex));
+
     viewport_width_rt = w;
     viewport_height_rt = h;
 }
@@ -106,6 +117,8 @@ void D3D12RenderAPI::setViewportSize(int width, int height)
         flushGPU();
         createViewportResources(width, height);
         createPostProcessingResources(width, height);
+        if (m_psoSSAO)
+            createSSAOResources(width, height);
         float ratio = static_cast<float>(width) / static_cast<float>(height);
         projection_matrix = glm::perspectiveRH_ZO(glm::radians(field_of_view), ratio, 0.1f, 1000.0f);
     }
@@ -163,13 +176,12 @@ void D3D12RenderAPI::endSceneRender()
                 }
                 else
                 {
-                    // Minimal root param bindings for FXAA (shader only reads b0 and t0)
                     commandList->SetGraphicsRootConstantBufferView(0, cbAddr);
                     commandList->SetGraphicsRootConstantBufferView(1, cbAddr); // dummy
                     commandList->SetGraphicsRootDescriptorTable(2, m_srvAllocator.getGPU(pie.offscreenSRVIndex));
-                    // Bind dummy Texture2DArray SRV for unused t1 slot (must match SRV dimension)
-                    if (m_dummyShadowSRVIndex != UINT(-1))
-                        commandList->SetGraphicsRootDescriptorTable(3, m_srvAllocator.getGPU(m_dummyShadowSRVIndex));
+                    // Bind SSAO fallback white texture (SSAO not supported in PIE viewports)
+                    if (m_ssaoFallbackSRVIndex != UINT(-1))
+                        commandList->SetGraphicsRootDescriptorTable(3, m_srvAllocator.getGPU(m_ssaoFallbackSRVIndex));
                     commandList->SetGraphicsRootConstantBufferView(4, cbAddr); // dummy
 
                     commandList->IASetVertexBuffers(0, 1, &m_fxaaQuadVBV);
@@ -216,8 +228,9 @@ void D3D12RenderAPI::endSceneRender()
                     commandList->SetGraphicsRootConstantBufferView(0, cbAddr);
                     commandList->SetGraphicsRootConstantBufferView(1, cbAddr);
                     commandList->SetGraphicsRootDescriptorTable(2, m_srvAllocator.getGPU(pie.offscreenSRVIndex));
-                    if (m_dummyShadowSRVIndex != UINT(-1))
-                        commandList->SetGraphicsRootDescriptorTable(3, m_srvAllocator.getGPU(m_dummyShadowSRVIndex));
+                    // Bind SSAO fallback white texture (SSAO not supported in PIE viewports)
+                    if (m_ssaoFallbackSRVIndex != UINT(-1))
+                        commandList->SetGraphicsRootDescriptorTable(3, m_srvAllocator.getGPU(m_ssaoFallbackSRVIndex));
                     commandList->SetGraphicsRootConstantBufferView(4, cbAddr);
 
                     commandList->IASetVertexBuffers(0, 1, &m_fxaaQuadVBV);
@@ -236,13 +249,18 @@ void D3D12RenderAPI::endSceneRender()
     }
     else
     {
+        // Run SSAO pass before FXAA/tone-mapping (generates blurred SSAO texture)
+        if (ssaoEnabled && m_psoSSAO && m_ssaoRawTexture && m_viewportDepthSRVIndex != UINT(-1))
+            renderSSAOPass(m_viewportDepthBuffer.Get(), m_viewportDepthSRVIndex,
+                           viewport_width_rt, viewport_height_rt);
+
         // Editor viewport: FXAA from offscreen to viewport
         if (fxaaEnabled)
         {
-                transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
             transitionResource(m_viewportTexture.Get(), {},
                                D3D12_RESOURCE_STATE_RENDER_TARGET);
-            // Flush batched barriers (offscreen→SRV + viewport→RT in one call)
+            // Flush batched barriers (offscreen->SRV + viewport->RT in one call)
             flushBarriers();
 
             D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvAllocator.getCPU(m_viewportRTVIndex);
@@ -263,6 +281,7 @@ void D3D12RenderAPI::endSceneRender()
             D3D12FXAACBuffer fxaaCB = {};
             fxaaCB.inverseScreenSize = glm::vec2(1.0f / viewport_width_rt, 1.0f / viewport_height_rt);
             fxaaCB.exposure = 1.0f;
+            fxaaCB.ssaoEnabled = (ssaoEnabled && m_ssaoBlurredSRVIndex != UINT(-1)) ? 1 : 0;
             auto cbAddr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(fxaaCB), &fxaaCB);
             if (cbAddr == 0)
             {
@@ -276,13 +295,16 @@ void D3D12RenderAPI::endSceneRender()
             }
             else
             {
-                // Minimal root param bindings for FXAA (shader only reads b0 and t0)
                 commandList->SetGraphicsRootConstantBufferView(0, cbAddr);
                 commandList->SetGraphicsRootConstantBufferView(1, cbAddr); // dummy
                 commandList->SetGraphicsRootDescriptorTable(2, m_srvAllocator.getGPU(m_offscreenSRVIndex));
-                // Bind dummy Texture2DArray SRV for unused t1 slot (must match SRV dimension)
-                if (m_dummyShadowSRVIndex != UINT(-1))
-                    commandList->SetGraphicsRootDescriptorTable(3, m_srvAllocator.getGPU(m_dummyShadowSRVIndex));
+                // Bind SSAO blurred texture at t1 slot (root param 3), or fallback white
+                {
+                    UINT ssaoSrvIdx = (ssaoEnabled && m_ssaoBlurredSRVIndex != UINT(-1))
+                        ? m_ssaoBlurredSRVIndex : m_ssaoFallbackSRVIndex;
+                    if (ssaoSrvIdx != UINT(-1))
+                        commandList->SetGraphicsRootDescriptorTable(3, m_srvAllocator.getGPU(ssaoSrvIdx));
+                }
                 commandList->SetGraphicsRootConstantBufferView(4, cbAddr); // dummy
 
                 commandList->IASetVertexBuffers(0, 1, &m_fxaaQuadVBV);
@@ -321,14 +343,20 @@ void D3D12RenderAPI::endSceneRender()
             D3D12FXAACBuffer fxaaCB = {};
             fxaaCB.inverseScreenSize = glm::vec2(1.0f / viewport_width_rt, 1.0f / viewport_height_rt);
             fxaaCB.exposure = 1.0f;
+            fxaaCB.ssaoEnabled = (ssaoEnabled && m_ssaoBlurredSRVIndex != UINT(-1)) ? 1 : 0;
             auto cbAddr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(fxaaCB), &fxaaCB);
             if (cbAddr != 0)
             {
                 commandList->SetGraphicsRootConstantBufferView(0, cbAddr);
                 commandList->SetGraphicsRootConstantBufferView(1, cbAddr);
                 commandList->SetGraphicsRootDescriptorTable(2, m_srvAllocator.getGPU(m_offscreenSRVIndex));
-                if (m_dummyShadowSRVIndex != UINT(-1))
-                    commandList->SetGraphicsRootDescriptorTable(3, m_srvAllocator.getGPU(m_dummyShadowSRVIndex));
+                // Bind SSAO blurred texture at t1 slot (root param 3), or fallback white
+                {
+                    UINT ssaoSrvIdx = (ssaoEnabled && m_ssaoBlurredSRVIndex != UINT(-1))
+                        ? m_ssaoBlurredSRVIndex : m_ssaoFallbackSRVIndex;
+                    if (ssaoSrvIdx != UINT(-1))
+                        commandList->SetGraphicsRootDescriptorTable(3, m_srvAllocator.getGPU(ssaoSrvIdx));
+                }
                 commandList->SetGraphicsRootConstantBufferView(4, cbAddr);
 
                 commandList->IASetVertexBuffers(0, 1, &m_fxaaQuadVBV);

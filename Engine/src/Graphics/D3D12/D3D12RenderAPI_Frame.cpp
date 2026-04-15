@@ -149,7 +149,7 @@ void D3D12RenderAPI::endFrame()
     {
         // Run SSAO pass before FXAA/tone-mapping (generates blurred SSAO texture)
         if (ssaoEnabled && m_psoSSAO && m_ssaoRawTexture)
-            renderSSAOPass();
+            renderSSAOPass(m_depthStencilBuffer.Get(), m_depthSRVIndex, viewport_width, viewport_height);
 
         // Standalone: always tone-map HDR offscreen to LDR back buffer (with optional FXAA)
         transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);

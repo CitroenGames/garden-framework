@@ -1,7 +1,7 @@
 // SSAO Bilateral Blur - Edge-preserving separable blur
 // Run twice: once horizontal (blurDir = float2(1,0)), once vertical (blurDir = float2(0,1))
 
-[[vk::binding(0, 0)]]
+[[vk::binding(2, 0)]]
 cbuffer SSAOBlurCB : register(b0)
 {
     float2 uTexelSize;    // 1.0 / half-res dimensions
@@ -10,11 +10,11 @@ cbuffer SSAOBlurCB : register(b0)
     float3 _pad;
 };
 
-[[vk::binding(1, 0)]]Texture2D ssaoInput : register(t0);
-[[vk::binding(1, 0)]]SamplerState ssaoSampler : register(s0);
+[[vk::binding(0, 0)]]Texture2D ssaoInput : register(t0);
+[[vk::binding(0, 0)]]SamplerState ssaoSampler : register(s0);
 
-[[vk::binding(2, 0)]]Texture2D depthTexture : register(t1);
-[[vk::binding(2, 0)]]SamplerState depthSampler : register(s1);
+[[vk::binding(1, 0)]]Texture2D depthTexture : register(t1);
+[[vk::binding(1, 0)]]SamplerState depthSampler : register(s1);
 
 struct VSInput
 {
