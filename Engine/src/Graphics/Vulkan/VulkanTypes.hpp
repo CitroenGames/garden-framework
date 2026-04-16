@@ -153,12 +153,11 @@ struct FXAAUbo {
     float _pad[2];
 };
 
-// Skybox UBO (matches Slang SkyboxCB: projection, view, sunDirection, time)
+// Skybox UBO (matches Slang SkyboxCB: invViewProj, sunDirection)
 struct SkyboxUBO {
-    glm::mat4 projection;
-    glm::mat4 view;
+    glm::mat4 invViewProj;
     glm::vec3 sunDirection;
-    float time;
+    float _pad;
 };
 
 // SSAO UBO (matches Slang SSAOCB)

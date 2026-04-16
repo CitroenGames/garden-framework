@@ -471,15 +471,7 @@ bool D3D12RenderAPI::createPipelineStates()
         if (!m_psoShadow) { LOG_ENGINE_ERROR("Failed to create PSO: Shadow"); return false; }
     }
 
-    // Sky (depth read-only, cull back)
-    {
-        auto desc = CreateBasePSODesc(m_rootSignature.Get(), m_skyVS, m_skyPS, false);
-        desc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
-        desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
-        m_psoSky = createPSO(L"Sky", desc);
-        if (!m_psoSky) { LOG_ENGINE_ERROR("Failed to create PSO: Sky"); return false; }
-    }
-
+    // Sky PSO is now created inside D3D12PostProcessPass (m_skyPass)
     // FXAA PSO is now created inside D3D12PostProcessPass (m_fxaaPass)
 
     // Depth prepass (depth-only, no color output)

@@ -111,7 +111,6 @@ private:
     ComPtr<ID3D12PipelineState> m_psoUnlitAdditive;
     ComPtr<ID3D12PipelineState> m_psoShadow;
     ComPtr<ID3D12PipelineState> m_psoShadowAlphaTest;
-    ComPtr<ID3D12PipelineState> m_psoSky;
     ComPtr<ID3D12PipelineState> m_psoDepthPrepass;
     ComPtr<ID3D12PipelineState> m_psoDepthPrepassAlphaTest;
     ComPtr<ID3D12PipelineState> m_psoDepthPrepassAlphaTestCullNone;
@@ -200,9 +199,8 @@ private:
     // Shadow Mask Post-Process
     D3D12PostProcessPass m_shadowMaskPass;
 
-    // Skybox
-    ComPtr<ID3D12Resource> m_skyboxVB;
-    D3D12_VERTEX_BUFFER_VIEW m_skyboxVBV = {};
+    // Skybox (post-process pass)
+    D3D12PostProcessPass m_skyPass;
 
     // Texture management
     std::unordered_map<TextureHandle, D3D12Texture> textures;
@@ -276,7 +274,7 @@ private:
     void generateSSAOKernel();
     bool createShadowMaskResources(int width, int height);
     void renderShadowMaskPass(ID3D12Resource* depthBuffer, UINT depthSRVIndex, int fullWidth, int fullHeight);
-    bool createSkyboxResources();
+    bool createSkyboxPass(int width, int height);
     bool createDefaultTexture();
     bool createDefaultPBRTextures();
     bool createDummyShadowTexture();
@@ -459,6 +457,7 @@ private:
         UINT dsvIndex = UINT(-1);
         UINT offscreenRTVIndex = UINT(-1);
         UINT offscreenSRVIndex = UINT(-1);
+        UINT depthSRVIndex = UINT(-1);
         int width = 0, height = 0;
     };
     std::unordered_map<int, PIEViewportTarget> m_pie_viewports;

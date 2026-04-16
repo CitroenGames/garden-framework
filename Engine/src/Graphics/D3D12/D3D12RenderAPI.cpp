@@ -321,9 +321,9 @@ bool D3D12RenderAPI::initialize(WindowHandle window, int width, int height, floa
         LOG_ENGINE_WARN("[D3D12] Failed to create shadow mask resources -- shadow mask disabled");
     }
 
-    if (!createSkyboxResources())
+    if (!createSkyboxPass(width, height))
     {
-        LOG_ENGINE_ERROR("Failed to create skybox resources");
+        LOG_ENGINE_ERROR("Failed to create skybox pass");
         return false;
     }
 
@@ -377,6 +377,7 @@ void D3D12RenderAPI::shutdown()
     m_ssaoBlurHPass.cleanup();
     m_ssaoBlurVPass.cleanup();
     m_shadowMaskPass.cleanup();
+    m_skyPass.cleanup();
 
     // Save PSO cache before releasing PSOs
     if (!m_psoCachePath.empty())

@@ -273,6 +273,17 @@ bool D3D12RenderAPI::createDepthStencilBuffer(int width, int height)
     dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
     device->CreateDepthStencilView(m_depthStencilBuffer.Get(), &dsvDesc,
                                     m_dsvAllocator.getCPU(m_mainDSVIndex));
+
+    // Create SRV for depth buffer (used by skybox, SSAO, shadow mask passes)
+    if (m_depthSRVIndex == UINT(-1))
+        m_depthSRVIndex = m_srvAllocator.allocate();
+    D3D12_SHADER_RESOURCE_VIEW_DESC depthSrvDesc = {};
+    depthSrvDesc.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+    depthSrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    depthSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    depthSrvDesc.Texture2D.MipLevels = 1;
+    device->CreateShaderResourceView(m_depthStencilBuffer.Get(), &depthSrvDesc,
+                                      m_srvAllocator.getCPU(m_depthSRVIndex));
     return true;
 }
 

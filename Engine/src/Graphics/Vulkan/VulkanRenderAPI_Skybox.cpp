@@ -3,9 +3,6 @@
 #include "VkDescriptorWriter.hpp"
 #include "Utils/Log.hpp"
 #include "Utils/EnginePaths.hpp"
-#include <stdio.h>
-#include <cstring>
-#include <fstream>
 #include <array>
 
 // VMA
@@ -15,97 +12,46 @@
 
 bool VulkanRenderAPI::createSkyboxResources()
 {
-    // Skybox cube vertices (36 vertices, position only)
-    float skyboxVertices[] = {
-        -1.0f,  1.0f, -1.0f,
-        -1.0f, -1.0f, -1.0f,
-         1.0f, -1.0f, -1.0f,
-         1.0f, -1.0f, -1.0f,
-         1.0f,  1.0f, -1.0f,
-        -1.0f,  1.0f, -1.0f,
+    // Create point-clamp sampler for dummy depth binding (same pattern as SSAO)
+    SamplerKey depthSamplerKey{};
+    depthSamplerKey.magFilter = VK_FILTER_NEAREST;
+    depthSamplerKey.minFilter = VK_FILTER_NEAREST;
+    depthSamplerKey.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    depthSamplerKey.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    depthSamplerKey.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    depthSamplerKey.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    depthSamplerKey.anisotropyEnable = VK_FALSE;
+    depthSamplerKey.maxAnisotropy = 1.0f;
+    depthSamplerKey.compareEnable = VK_FALSE;
+    depthSamplerKey.compareOp = VK_COMPARE_OP_ALWAYS;
+    depthSamplerKey.minLod = 0.0f;
+    depthSamplerKey.maxLod = 0.0f;
+    depthSamplerKey.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
+    skybox_depth_sampler = sampler_cache.getOrCreate(depthSamplerKey);
 
-        -1.0f, -1.0f,  1.0f,
-        -1.0f, -1.0f, -1.0f,
-        -1.0f,  1.0f, -1.0f,
-        -1.0f,  1.0f, -1.0f,
-        -1.0f,  1.0f,  1.0f,
-        -1.0f, -1.0f,  1.0f,
+    // Descriptor set layout: binding 0 = combined image sampler (depth), binding 1 = UBO
+    std::array<VkDescriptorSetLayoutBinding, 2> layoutBindings{};
+    layoutBindings[0].binding = 0;
+    layoutBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    layoutBindings[0].descriptorCount = 1;
+    layoutBindings[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
-         1.0f, -1.0f, -1.0f,
-         1.0f, -1.0f,  1.0f,
-         1.0f,  1.0f,  1.0f,
-         1.0f,  1.0f,  1.0f,
-         1.0f,  1.0f, -1.0f,
-         1.0f, -1.0f, -1.0f,
-
-        -1.0f, -1.0f,  1.0f,
-        -1.0f,  1.0f,  1.0f,
-         1.0f,  1.0f,  1.0f,
-         1.0f,  1.0f,  1.0f,
-         1.0f, -1.0f,  1.0f,
-        -1.0f, -1.0f,  1.0f,
-
-        -1.0f,  1.0f, -1.0f,
-         1.0f,  1.0f, -1.0f,
-         1.0f,  1.0f,  1.0f,
-         1.0f,  1.0f,  1.0f,
-        -1.0f,  1.0f,  1.0f,
-        -1.0f,  1.0f, -1.0f,
-
-        -1.0f, -1.0f, -1.0f,
-        -1.0f, -1.0f,  1.0f,
-         1.0f, -1.0f, -1.0f,
-         1.0f, -1.0f, -1.0f,
-        -1.0f, -1.0f,  1.0f,
-         1.0f, -1.0f,  1.0f
-    };
-
-    // Create vertex buffer
-    VkBufferCreateInfo bufferInfo{};
-    bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    bufferInfo.size = sizeof(skyboxVertices);
-    bufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-
-    VmaAllocationCreateInfo allocInfo{};
-    allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
-
-    if (vmaCreateBuffer(vma_allocator, &bufferInfo, &allocInfo,
-                        &skybox_vertex_buffer, &skybox_vertex_allocation, nullptr) != VK_SUCCESS) {
-        printf("Failed to create skybox vertex buffer\n");
-        return false;
-    }
-
-    // Upload via shared staging buffer (lock for thread safety)
-    {
-        std::lock_guard<std::mutex> staging_lock(staging_mutex);
-        ensureStagingBuffer(sizeof(skyboxVertices));
-        memcpy(staging_mapped, skyboxVertices, sizeof(skyboxVertices));
-
-        VkCommandBuffer cmd = beginSingleTimeCommands();
-        VkBufferCopy copyRegion{};
-        copyRegion.size = sizeof(skyboxVertices);
-        vkCmdCopyBuffer(cmd, staging_buffer, skybox_vertex_buffer, 1, &copyRegion);
-        endSingleTimeCommands(cmd);
-    }
-
-    // Create skybox descriptor set layout
-    VkDescriptorSetLayoutBinding uboBinding{};
-    uboBinding.binding = 0;
-    uboBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    uboBinding.descriptorCount = 1;
-    uboBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    layoutBindings[1].binding = 1;
+    layoutBindings[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    layoutBindings[1].descriptorCount = 1;
+    layoutBindings[1].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layoutInfo.bindingCount = 1;
-    layoutInfo.pBindings = &uboBinding;
+    layoutInfo.bindingCount = static_cast<uint32_t>(layoutBindings.size());
+    layoutInfo.pBindings = layoutBindings.data();
 
     if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &skybox_descriptor_layout) != VK_SUCCESS) {
         printf("Failed to create skybox descriptor set layout\n");
         return false;
     }
 
-    // Create skybox pipeline layout
+    // Pipeline layout
     VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
     pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     pipelineLayoutInfo.setLayoutCount = 1;
@@ -135,17 +81,15 @@ bool VulkanRenderAPI::createSkyboxResources()
         return false;
     }
 
-    // Create skybox pipeline using VkPipelineBuilder
+    // Fullscreen quad vertex input: float2 position + float2 texcoord
     VkVertexInputBindingDescription bindingDesc{};
     bindingDesc.binding = 0;
-    bindingDesc.stride = 3 * sizeof(float);
+    bindingDesc.stride = 4 * sizeof(float);
     bindingDesc.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-    VkVertexInputAttributeDescription attrDesc{};
-    attrDesc.binding = 0;
-    attrDesc.location = 0;
-    attrDesc.format = VK_FORMAT_R32G32B32_SFLOAT;
-    attrDesc.offset = 0;
+    std::array<VkVertexInputAttributeDescription, 2> attrDescs{};
+    attrDescs[0] = {0, 0, VK_FORMAT_R32G32_SFLOAT, 0};
+    attrDescs[1] = {1, 0, VK_FORMAT_R32G32_SFLOAT, 2 * sizeof(float)};
 
     VkPipelineColorBlendAttachmentState colorBlendAttachment{};
     colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
@@ -155,7 +99,7 @@ bool VulkanRenderAPI::createSkyboxResources()
     VkPipelineBuilder builder(device, vk_pipeline_cache);
     VkResult pipelineResult = builder
         .setShaders(vertModule, fragModule)
-        .setVertexInput(&bindingDesc, 1, &attrDesc, 1)
+        .setVertexInput(&bindingDesc, 1, attrDescs.data(), static_cast<uint32_t>(attrDescs.size()))
         .setCullMode(VK_CULL_MODE_NONE)
         .setFrontFace(VK_FRONT_FACE_COUNTER_CLOCKWISE)
         .setDepthTest(VK_TRUE, VK_FALSE, VK_COMPARE_OP_LESS_OR_EQUAL)
@@ -174,15 +118,15 @@ bool VulkanRenderAPI::createSkyboxResources()
     vkDestroyShaderModule(device, vertModule, nullptr);
     vkDestroyShaderModule(device, fragModule, nullptr);
 
-    // Create descriptor pool
-    VkDescriptorPoolSize poolSize{};
-    poolSize.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    poolSize.descriptorCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
+    // Descriptor pool
+    std::array<VkDescriptorPoolSize, 2> poolSizes{};
+    poolSizes[0] = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT)};
+    poolSizes[1] = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT)};
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.poolSizeCount = 1;
-    poolInfo.pPoolSizes = &poolSize;
+    poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
+    poolInfo.pPoolSizes = poolSizes.data();
     poolInfo.maxSets = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
 
     if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &skybox_descriptor_pool) != VK_SUCCESS) {
@@ -190,7 +134,7 @@ bool VulkanRenderAPI::createSkyboxResources()
         return false;
     }
 
-    // Create uniform buffers
+    // Uniform buffers
     skybox_uniform_buffers.resize(MAX_FRAMES_IN_FLIGHT);
     skybox_uniform_allocations.resize(MAX_FRAMES_IN_FLIGHT);
     skybox_uniform_mapped.resize(MAX_FRAMES_IN_FLIGHT);
@@ -228,15 +172,23 @@ bool VulkanRenderAPI::createSkyboxResources()
         return false;
     }
 
-    // Update descriptor sets using VkDescriptorWriter
+    // Write descriptor sets
     for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        VkDescriptorBufferInfo descBufferInfo{};
-        descBufferInfo.buffer = skybox_uniform_buffers[i];
-        descBufferInfo.offset = 0;
-        descBufferInfo.range = sizeof(SkyboxUBO);
+        // Binding 0: dummy depth texture (Vulkan path uses hardware depth test, not shader sampling)
+        VkDescriptorImageInfo depthImageInfo{};
+        depthImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        depthImageInfo.imageView = default_shadow_view;
+        depthImageInfo.sampler = skybox_depth_sampler;
+
+        // Binding 1: UBO
+        VkDescriptorBufferInfo uboInfo{};
+        uboInfo.buffer = skybox_uniform_buffers[i];
+        uboInfo.offset = 0;
+        uboInfo.range = sizeof(SkyboxUBO);
 
         VkDescriptorWriter(skybox_descriptor_sets[i])
-            .writeBuffer(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &descBufferInfo)
+            .writeImage(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &depthImageInfo)
+            .writeBuffer(1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &uboInfo)
             .update(device);
     }
 
@@ -280,11 +232,8 @@ void VulkanRenderAPI::cleanupSkyboxResources()
         skybox_descriptor_layout = VK_NULL_HANDLE;
     }
 
-    if (skybox_vertex_buffer != VK_NULL_HANDLE && vma_allocator) {
-        vmaDestroyBuffer(vma_allocator, skybox_vertex_buffer, skybox_vertex_allocation);
-        skybox_vertex_buffer = VK_NULL_HANDLE;
-        skybox_vertex_allocation = nullptr;
-    }
+    // Sampler owned by sampler_cache
+    skybox_depth_sampler = VK_NULL_HANDLE;
 }
 
 void VulkanRenderAPI::renderSkybox()
@@ -295,14 +244,16 @@ void VulkanRenderAPI::renderSkybox()
 
     VkCommandBuffer cmd = command_buffers[current_frame];
 
-    // Update skybox UBO
-    SkyboxUBO skyboxUbo{};
-    skyboxUbo.view = glm::mat4(glm::mat3(view_matrix));
-    skyboxUbo.projection = projection_matrix;
-    skyboxUbo.sunDirection = -light_direction;  // Sun direction is opposite to light direction
-    skyboxUbo.time = 0.0f;  // Could be animated if desired
+    // Compute inverse view-projection (strip translation from view, same as D3D12)
+    glm::mat4 viewNoTranslation = glm::mat4(glm::mat3(view_matrix));
+    glm::mat4 vp = projection_matrix * viewNoTranslation;
 
-    memcpy(skybox_uniform_mapped[current_frame], &skyboxUbo, sizeof(SkyboxUBO));
+    SkyboxUBO ubo{};
+    ubo.invViewProj = glm::inverse(vp);
+    ubo.sunDirection = -light_direction;
+    ubo._pad = 0.0f;
+
+    memcpy(skybox_uniform_mapped[current_frame], &ubo, sizeof(SkyboxUBO));
 
     // Bind skybox pipeline
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, skybox_pipeline);
@@ -311,15 +262,15 @@ void VulkanRenderAPI::renderSkybox()
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, skybox_pipeline_layout,
                             0, 1, &skybox_descriptor_sets[current_frame], 0, nullptr);
 
-    // Bind skybox vertex buffer
-    VkBuffer vertexBuffers[] = { skybox_vertex_buffer };
+    // Bind fullscreen quad vertex buffer (shared with FXAA/SSAO/shadow mask)
+    VkBuffer vertexBuffers[] = { fxaa_vertex_buffer };
     VkDeviceSize offsets[] = { 0 };
     vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
 
-    // Draw skybox cube (36 vertices)
-    vkCmdDraw(cmd, 36, 1, 0, 0);
+    // Draw fullscreen quad (6 vertices)
+    vkCmdDraw(cmd, 6, 1, 0, 0);
 
-    // Invalidate state tracking — skybox used different pipeline/descriptors
+    // Invalidate state tracking -- skybox used different pipeline/descriptors
     last_bound_pipeline = VK_NULL_HANDLE;
     last_bound_descriptor_set = VK_NULL_HANDLE;
     last_bound_vertex_buffer = VK_NULL_HANDLE;

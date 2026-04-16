@@ -428,13 +428,13 @@ void D3D12RenderAPI::createPIEViewportResources(PIEViewportTarget& target, int w
         m_stateTracker.track(target.offscreenTexture.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
     }
 
-    // Depth buffer
+    // Depth buffer (typeless to allow both DSV and SRV views)
     {
         D3D12_RESOURCE_DESC desc = {};
         desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
         desc.Width = w; desc.Height = h;
         desc.DepthOrArraySize = 1; desc.MipLevels = 1;
-        desc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+        desc.Format = DXGI_FORMAT_R24G8_TYPELESS;
         desc.SampleDesc.Count = 1;
         desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
 
@@ -455,9 +455,10 @@ void D3D12RenderAPI::createPIEViewportResources(PIEViewportTarget& target, int w
     if (target.dsvIndex == UINT(-1)) target.dsvIndex = m_dsvAllocator.allocate();
     if (target.offscreenRTVIndex == UINT(-1)) target.offscreenRTVIndex = m_rtvAllocator.allocate();
     if (target.offscreenSRVIndex == UINT(-1)) target.offscreenSRVIndex = m_srvAllocator.allocate();
+    if (target.depthSRVIndex == UINT(-1)) target.depthSRVIndex = m_srvAllocator.allocate();
 
     if (target.rtvIndex == UINT(-1) || target.srvIndex == UINT(-1) || target.dsvIndex == UINT(-1) ||
-        target.offscreenRTVIndex == UINT(-1) || target.offscreenSRVIndex == UINT(-1))
+        target.offscreenRTVIndex == UINT(-1) || target.offscreenSRVIndex == UINT(-1) || target.depthSRVIndex == UINT(-1))
     {
         LOG_ENGINE_ERROR("[D3D12] Failed to allocate descriptors for PIE viewport ({}x{})", w, h);
         return;
@@ -484,6 +485,14 @@ void D3D12RenderAPI::createPIEViewportResources(PIEViewportTarget& target, int w
     dsvDesc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
     dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
     device->CreateDepthStencilView(target.depthBuffer.Get(), &dsvDesc, m_dsvAllocator.getCPU(target.dsvIndex));
+
+    // Depth SRV (for skybox depth sampling)
+    D3D12_SHADER_RESOURCE_VIEW_DESC depthSrvDesc = {};
+    depthSrvDesc.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+    depthSrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    depthSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    depthSrvDesc.Texture2D.MipLevels = 1;
+    device->CreateShaderResourceView(target.depthBuffer.Get(), &depthSrvDesc, m_srvAllocator.getCPU(target.depthSRVIndex));
 
     target.width = w;
     target.height = h;
@@ -513,6 +522,7 @@ void D3D12RenderAPI::destroyPIEViewport(int id)
         if (target.dsvIndex != UINT(-1)) m_dsvAllocator.free(target.dsvIndex);
         if (target.offscreenRTVIndex != UINT(-1)) m_rtvAllocator.free(target.offscreenRTVIndex);
         if (target.offscreenSRVIndex != UINT(-1)) m_srvAllocator.free(target.offscreenSRVIndex);
+        if (target.depthSRVIndex != UINT(-1)) m_srvAllocator.free(target.depthSRVIndex);
         m_pie_viewports.erase(it);
         if (m_active_scene_target == id)
             m_active_scene_target = -1;
@@ -531,6 +541,7 @@ void D3D12RenderAPI::destroyAllPIEViewports()
         if (target.dsvIndex != UINT(-1)) m_dsvAllocator.free(target.dsvIndex);
         if (target.offscreenRTVIndex != UINT(-1)) m_rtvAllocator.free(target.offscreenRTVIndex);
         if (target.offscreenSRVIndex != UINT(-1)) m_srvAllocator.free(target.offscreenSRVIndex);
+        if (target.depthSRVIndex != UINT(-1)) m_srvAllocator.free(target.depthSRVIndex);
     }
     m_pie_viewports.clear();
     m_active_scene_target = -1;

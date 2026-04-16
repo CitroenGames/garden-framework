@@ -498,8 +498,6 @@ private:
     bool shadow_pass_active = false;
 
     // Skybox resources
-    VkBuffer skybox_vertex_buffer = VK_NULL_HANDLE;
-    VmaAllocation skybox_vertex_allocation = nullptr;
     VkPipeline skybox_pipeline = VK_NULL_HANDLE;
     VkPipelineLayout skybox_pipeline_layout = VK_NULL_HANDLE;
     VkDescriptorSetLayout skybox_descriptor_layout = VK_NULL_HANDLE;
@@ -508,6 +506,7 @@ private:
     std::vector<VkBuffer> skybox_uniform_buffers;
     std::vector<VmaAllocation> skybox_uniform_allocations;
     std::vector<void*> skybox_uniform_mapped;
+    VkSampler skybox_depth_sampler = VK_NULL_HANDLE;
     bool skybox_initialized = false;
 
     // FXAA / Post-processing resources
