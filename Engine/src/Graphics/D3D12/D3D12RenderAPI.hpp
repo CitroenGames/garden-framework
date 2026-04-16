@@ -9,6 +9,8 @@
 #include "D3D12PSOCache.hpp"
 #include "D3D12PostProcessPass.hpp"
 #include "D3D12ResourceStateTracker.hpp"
+#include "D3D12RGBackend.hpp"
+#include "Graphics/RenderGraph/RenderGraph.hpp"
 #include <d3d12.h>
 #include <d3d12sdklayers.h>
 #include <dxgi1_4.h>
@@ -277,6 +279,17 @@ private:
     bool createSkyboxPass(int width, int height);
     bool createDefaultTexture();
     bool createDefaultPBRTextures();
+
+    // Render graph
+    RenderGraph m_frameGraph;
+    D3D12RGBackend m_rgBackend;
+    bool m_useRenderGraph = true;
+    bool m_skyboxRequested = false;
+    void buildPostProcessGraph(D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle, UINT inputSRVIndex,
+                               ID3D12Resource* depthBuffer, UINT depthSRVIndex,
+                               int width, int height,
+                               bool enableSSAO, bool enableShadowMask,
+                               bool renderImGui);
     bool createDummyShadowTexture();
 
     void waitForFence(UINT64 fenceValue);

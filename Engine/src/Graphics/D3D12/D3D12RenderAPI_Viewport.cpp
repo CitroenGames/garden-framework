@@ -160,32 +160,62 @@ void D3D12RenderAPI::endSceneRender()
     }
     else
     {
-        // Run SSAO pass before FXAA/tone-mapping (generates blurred SSAO texture)
-        if (ssaoEnabled && m_ssaoPass.isInitialized() && m_viewportDepthSRVIndex != UINT(-1))
-            renderSSAOPass(m_viewportDepthBuffer.Get(), m_viewportDepthSRVIndex,
-                           viewport_width_rt, viewport_height_rt);
-
-        // Run shadow mask pass
+        bool wantSSAO = ssaoEnabled && m_ssaoBlurVPass.isInitialized()
+                        && m_viewportDepthSRVIndex != UINT(-1);
         bool wantShadowMask = (shadowQuality > 0) && m_shadowMaskPass.isInitialized()
                               && m_shadowMapArray && m_viewportDepthSRVIndex != UINT(-1);
-        if (wantShadowMask)
-            renderShadowMaskPass(m_viewportDepthBuffer.Get(), m_viewportDepthSRVIndex,
-                                 viewport_width_rt, viewport_height_rt);
 
-        // Editor viewport: tone-map HDR offscreen to LDR viewport (with optional FXAA)
-        transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-        transitionResource(m_viewportTexture.Get(), {},
-                           D3D12_RESOURCE_STATE_RENDER_TARGET);
-        flushBarriers();
+        if (m_useRenderGraph)
+        {
+            D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvAllocator.getCPU(m_viewportRTVIndex);
+            buildPostProcessGraph(rtvHandle, m_offscreenSRVIndex,
+                                  m_viewportDepthBuffer.Get(), m_viewportDepthSRVIndex,
+                                  viewport_width_rt, viewport_height_rt,
+                                  wantSSAO, wantShadowMask, false);
 
-        D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvAllocator.getCPU(m_viewportRTVIndex);
-        bool enableSSAO = ssaoEnabled && m_ssaoBlurVPass.isInitialized();
-        renderFXAAPass(rtvHandle, m_offscreenSRVIndex, viewport_width_rt, viewport_height_rt, enableSSAO, wantShadowMask);
+            // Bind viewport texture as the output target (index 2)
+            RGResourceHandle outputHandle;
+            outputHandle.index = 2;
+            outputHandle.version = 0;
+            m_rgBackend.bindImportedTexture(outputHandle,
+                m_viewportTexture.Get(), m_viewportSRVIndex, m_viewportRTVIndex);
 
-        transitionResource(m_viewportTexture.Get(), {},
-                           D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-        transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
-        flushBarriers();
+            m_frameGraph.compile();
+            m_frameGraph.execute(m_rgBackend);
+
+            m_skyboxRequested = false;
+
+            // Restore expected states for editor flow
+            transitionResource(m_viewportTexture.Get(), {},
+                               D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            flushBarriers();
+        }
+        else
+        {
+            // Run SSAO pass before FXAA/tone-mapping (generates blurred SSAO texture)
+            if (ssaoEnabled && m_ssaoPass.isInitialized() && m_viewportDepthSRVIndex != UINT(-1))
+                renderSSAOPass(m_viewportDepthBuffer.Get(), m_viewportDepthSRVIndex,
+                               viewport_width_rt, viewport_height_rt);
+
+            if (wantShadowMask)
+                renderShadowMaskPass(m_viewportDepthBuffer.Get(), m_viewportDepthSRVIndex,
+                                     viewport_width_rt, viewport_height_rt);
+
+            // Editor viewport: tone-map HDR offscreen to LDR viewport (with optional FXAA)
+            transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            transitionResource(m_viewportTexture.Get(), {},
+                               D3D12_RESOURCE_STATE_RENDER_TARGET);
+            flushBarriers();
+
+            D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvAllocator.getCPU(m_viewportRTVIndex);
+            renderFXAAPass(rtvHandle, m_offscreenSRVIndex, viewport_width_rt, viewport_height_rt, wantSSAO, wantShadowMask);
+
+            transitionResource(m_viewportTexture.Get(), {},
+                               D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            flushBarriers();
+        }
     }
 
     last_bound_pso = nullptr;

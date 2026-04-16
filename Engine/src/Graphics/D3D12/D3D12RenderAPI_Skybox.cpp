@@ -47,6 +47,13 @@ void D3D12RenderAPI::renderSkybox()
 {
     if (device_lost || !m_skyPass.isInitialized()) return;
 
+    // In render graph mode, defer skybox to the graph built in endFrame/endSceneRender
+    if (m_useRenderGraph)
+    {
+        m_skyboxRequested = true;
+        return;
+    }
+
     // Determine active depth buffer and SRV based on current render mode
     ID3D12Resource* depthBuffer = nullptr;
     UINT depthSRVIndex = UINT(-1);

@@ -48,6 +48,11 @@ sources = {
     src/Graphics/D3D12/D3D12PSOCache.cpp [windows]
     src/Graphics/D3D12/D3D12ResourceStateTracker.cpp [windows]
     src/Graphics/D3D12/D3D12PostProcessPass.cpp [windows]
+    src/Graphics/D3D12/D3D12RGBackend.cpp [windows]
+    src/Graphics/D3D12/D3D12RenderAPI_RenderGraph.cpp [windows]
+    src/Graphics/RenderGraph/RenderGraph.cpp
+    src/Graphics/RenderGraph/RGCompiler.cpp
+    src/Graphics/RenderGraph/RGBuilder.cpp
     src/Graphics/Metal/MetalRenderAPI.mm [macOS]
     src/Graphics/Metal/MetalRenderAPI_Frame.mm [macOS]
     src/Graphics/Metal/MetalRenderAPI_Rendering.mm [macOS]

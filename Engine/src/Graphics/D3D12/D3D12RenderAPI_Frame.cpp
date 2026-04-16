@@ -147,40 +147,65 @@ void D3D12RenderAPI::endFrame()
 
     if (!m_viewportTexture)
     {
-        // Run SSAO pass before FXAA/tone-mapping (generates blurred SSAO texture)
-        if (ssaoEnabled && m_ssaoPass.isInitialized())
-            renderSSAOPass(m_depthStencilBuffer.Get(), m_depthSRVIndex, viewport_width, viewport_height);
-
-        // Run shadow mask pass (generates shadow factor texture from depth + shadow maps)
+        bool wantSSAO = ssaoEnabled && m_ssaoBlurVPass.isInitialized();
         bool wantShadowMask = (shadowQuality > 0) && m_shadowMaskPass.isInitialized() && m_shadowMapArray;
-        if (wantShadowMask)
-            renderShadowMaskPass(m_depthStencilBuffer.Get(), m_depthSRVIndex, viewport_width, viewport_height);
 
-        // Standalone: tone-map HDR offscreen to LDR back buffer (with optional FXAA)
-        transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-        transitionResource(m_backBuffers[m_backBufferIndex].Get(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
-        flushBarriers();
+        if (m_useRenderGraph)
+        {
+            D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvAllocator.getCPU(m_backBufferRTVs[m_backBufferIndex]);
+            buildPostProcessGraph(rtvHandle, m_offscreenSRVIndex,
+                                  m_depthStencilBuffer.Get(), m_depthSRVIndex,
+                                  viewport_width, viewport_height,
+                                  wantSSAO, wantShadowMask, true);
 
-        D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvAllocator.getCPU(m_backBufferRTVs[m_backBufferIndex]);
-        renderFXAAPass(rtvHandle, m_offscreenSRVIndex, viewport_width, viewport_height,
-                       ssaoEnabled && m_ssaoBlurVPass.isInitialized(),
-                       wantShadowMask);
+            // Bind the back buffer resource to the output target handle
+            // OutputTarget is the 3rd imported resource (index 2)
+            RGResourceHandle outputHandle;
+            outputHandle.index = 2;
+            outputHandle.version = 0;
+            m_rgBackend.bindImportedTexture(outputHandle,
+                m_backBuffers[m_backBufferIndex].Get(),
+                UINT(-1), m_backBufferRTVs[m_backBufferIndex]);
 
-        commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            m_frameGraph.compile();
+            m_frameGraph.execute(m_rgBackend);
+
+            m_skyboxRequested = false;
+        }
+        else
+        {
+            // Run SSAO pass before FXAA/tone-mapping (generates blurred SSAO texture)
+            if (ssaoEnabled && m_ssaoPass.isInitialized())
+                renderSSAOPass(m_depthStencilBuffer.Get(), m_depthSRVIndex, viewport_width, viewport_height);
+
+            // Run shadow mask pass (generates shadow factor texture from depth + shadow maps)
+            if (wantShadowMask)
+                renderShadowMaskPass(m_depthStencilBuffer.Get(), m_depthSRVIndex, viewport_width, viewport_height);
+
+            // Standalone: tone-map HDR offscreen to LDR back buffer (with optional FXAA)
+            transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            transitionResource(m_backBuffers[m_backBufferIndex].Get(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            flushBarriers();
+
+            D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvAllocator.getCPU(m_backBufferRTVs[m_backBufferIndex]);
+            renderFXAAPass(rtvHandle, m_offscreenSRVIndex, viewport_width, viewport_height,
+                           wantSSAO, wantShadowMask);
+
+            commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+            // Render ImGui AFTER FXAA so UI text stays crisp (standalone mode only)
+            ImDrawData* draw_data = ImGui::GetDrawData();
+            if (draw_data)
+            {
+                transitionResource(m_backBuffers[m_backBufferIndex].Get(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
+                flushBarriers();
+                ImGui_ImplDX12_RenderDrawData(draw_data, commandList.Get());
+            }
+
+            // Transition back buffer to present
+            transitionResource(m_backBuffers[m_backBufferIndex].Get(), {}, D3D12_RESOURCE_STATE_PRESENT);
+        }
     }
-
-    // Render ImGui AFTER FXAA so UI text stays crisp (standalone mode only)
-    ImDrawData* draw_data = ImGui::GetDrawData();
-    if (draw_data && !m_viewportTexture)
-    {
-        // Ensure back buffer is in render target state for ImGui
-        transitionResource(m_backBuffers[m_backBufferIndex].Get(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
-        flushBarriers();
-        ImGui_ImplDX12_RenderDrawData(draw_data, commandList.Get());
-    }
-
-    // Transition back buffer to present
-    transitionResource(m_backBuffers[m_backBufferIndex].Get(), {}, D3D12_RESOURCE_STATE_PRESENT);
 
     // Close and execute command list
     flushBarriers();
