@@ -15,7 +15,10 @@
 #include "VkDescriptorWriter.hpp"
 #include "VkInitHelpers.hpp"
 
-bool VulkanRenderAPI::createFxaaResources()
+#include "imgui.h"
+#include "imgui_impl_vulkan.h"
+
+bool VulkanRenderAPI::createPostProcessingResources()
 {
     // ── Fullscreen quad vertex buffer (shared by FXAA, SSAO, and future passes) ──
     if (fxaa_vertex_buffer == VK_NULL_HANDLE) {
@@ -296,11 +299,11 @@ bool VulkanRenderAPI::createFxaaResources()
     }
 
     fxaa_initialized = true;
-    LOG_ENGINE_INFO("[Vulkan] FXAA resources created");
+    LOG_ENGINE_INFO("[Vulkan] Post-processing resources created");
     return true;
 }
 
-void VulkanRenderAPI::cleanupFxaaResources()
+void VulkanRenderAPI::cleanupPostProcessingResources()
 {
     if (device == VK_NULL_HANDLE) return;
 
@@ -446,6 +449,16 @@ void VulkanRenderAPI::recreateOffscreenResources()
     }
     fxaaPass_.setExternalFramebuffers(fxaa_framebuffers, swapchain_extent.width, swapchain_extent.height);
 
+    // Recreate skybox RG framebuffer (wraps new offscreen resources)
+    if (skybox_rg_render_pass != VK_NULL_HANDLE) {
+        if (skybox_rg_framebuffer != VK_NULL_HANDLE)
+            vkDestroyFramebuffer(device, skybox_rg_framebuffer, nullptr);
+        std::array<VkImageView, 2> skyAttachments = { offscreen_view, offscreen_depth_view };
+        skybox_rg_framebuffer = vkutil::createFramebuffer(device, skybox_rg_render_pass,
+            skyAttachments.data(), static_cast<uint32_t>(skyAttachments.size()),
+            swapchain_extent.width, swapchain_extent.height);
+    }
+
     // Update FXAA descriptor binding 0 with new offscreen view
     fxaaPass_.writeImageBindingAllFrames(0, offscreen_view, offscreen_sampler);
 
@@ -456,6 +469,63 @@ void VulkanRenderAPI::recreateOffscreenResources()
     // Recreate shadow mask resources at new size
     if (shadow_mask_initialized)
         recreateShadowMaskResources();
+}
+
+void VulkanRenderAPI::renderFXAAPass(
+    VkCommandBuffer cmd,
+    VkRenderPass renderPass, VkFramebuffer framebuffer,
+    VkPipeline pipeline,
+    uint32_t width, uint32_t height,
+    bool enableSSAO, bool enableShadowMask,
+    bool renderImGui)
+{
+    // Update FXAA UBO
+    FXAAUbo fxaaUbo{};
+    fxaaUbo.inverseScreenSize = glm::vec2(1.0f / width, 1.0f / height);
+    fxaaUbo.exposure = 1.0f;
+    fxaaUbo.ssaoEnabled = enableSSAO ? 1 : 0;
+    fxaaUbo.shadowMaskEnabled = enableShadowMask ? 1 : 0;
+    fxaaUbo.shadowMinimum = glm::dot(light_ambient, glm::vec3(0.299f, 0.587f, 0.114f));
+    memcpy(fxaaPass_.getUBOMapped(current_frame), &fxaaUbo, sizeof(FXAAUbo));
+
+    // Begin render pass
+    VkRenderPassBeginInfo rpBegin{};
+    rpBegin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    rpBegin.renderPass = renderPass;
+    rpBegin.framebuffer = framebuffer;
+    rpBegin.renderArea.offset = {0, 0};
+    rpBegin.renderArea.extent = { width, height };
+    rpBegin.clearValueCount = 0;
+    vkCmdBeginRenderPass(cmd, &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+
+    VkViewport viewport{};
+    viewport.width = static_cast<float>(width);
+    viewport.height = static_cast<float>(height);
+    viewport.maxDepth = 1.0f;
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+
+    VkRect2D scissor{};
+    scissor.extent = { width, height };
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+    VkDescriptorSet ds = fxaaPass_.getDescriptorSet(current_frame);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            fxaaPass_.getPipelineLayout(), 0, 1, &ds, 0, nullptr);
+
+    VkBuffer vertexBuffers[] = { fxaa_vertex_buffer };
+    VkDeviceSize offsets[] = { 0 };
+    vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
+    vkCmdDraw(cmd, 6, 1, 0, 0);
+
+    if (renderImGui) {
+        ImDrawData* draw_data = ImGui::GetDrawData();
+        if (draw_data && draw_data->TotalVtxCount > 0)
+            ImGui_ImplVulkan_RenderDrawData(draw_data, cmd);
+    }
+
+    vkCmdEndRenderPass(cmd);
 }
 
 void VulkanRenderAPI::setFXAAEnabled(bool enabled)

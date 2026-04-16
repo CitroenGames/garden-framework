@@ -283,7 +283,9 @@ void VulkanRenderAPI::recreateSSAOResources()
     ssao_depth_view = vkutil::createImageView(device, offscreen_depth_image, depth_format, VK_IMAGE_ASPECT_DEPTH_BIT);
 
     // Resize all passes (recreates output images, resets descriptor pools)
-    VkExtent2D ref = swapchain_extent;
+    VkExtent2D ref = isViewportMode()
+        ? VkExtent2D{(uint32_t)viewport_width_rt, (uint32_t)viewport_height_rt}
+        : swapchain_extent;
     ssaoPass_.resize(ref);
     ssaoBlurHPass_.resize(ref);
     ssaoBlurVPass_.resize(ref);

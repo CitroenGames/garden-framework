@@ -56,7 +56,7 @@ float3 ReconstructWorldPos(float2 uv, float depth)
 #ifdef TARGET_HLSL
     float4 clipPos = float4(ndc.x, -ndc.y, depth, 1.0);
 #else
-    float4 clipPos = float4(ndc.x, -ndc.y, depth, 1.0);
+    float4 clipPos = float4(ndc.x, ndc.y, depth, 1.0);
 #endif
     float4 worldPos = mul(uInvViewProj, clipPos);
     return worldPos.xyz / worldPos.w;

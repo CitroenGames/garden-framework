@@ -6,6 +6,8 @@
 #include "VkDeletionQueue.hpp"
 #include "VkSamplerCache.hpp"
 #include "VulkanPostProcessPass.hpp"
+#include "VulkanRGBackend.hpp"
+#include "Graphics/RenderGraph/RenderGraph.hpp"
 #include <cstdint>
 #include <stack>
 #include <vector>
@@ -158,10 +160,16 @@ private:
     bool createSkyboxResources();
     void cleanupSkyboxResources();
 
-    // FXAA helpers
-    bool createFxaaResources();
-    void cleanupFxaaResources();
+    // Post-processing helpers
+    bool createPostProcessingResources();
+    void cleanupPostProcessingResources();
     void recreateOffscreenResources();
+    void renderFXAAPass(VkCommandBuffer cmd,
+                        VkRenderPass renderPass, VkFramebuffer framebuffer,
+                        VkPipeline pipeline,
+                        uint32_t width, uint32_t height,
+                        bool enableSSAO, bool enableShadowMask,
+                        bool renderImGui);
 
     void cleanupSwapchain();
     void recreateSwapchain();
@@ -509,7 +517,12 @@ private:
     VkSampler skybox_depth_sampler = VK_NULL_HANDLE;
     bool skybox_initialized = false;
 
-    // FXAA / Post-processing resources
+    // Render graph skybox resources (color loadOp=LOAD + depth read-only)
+    VkRenderPass  skybox_rg_render_pass  = VK_NULL_HANDLE;
+    VkFramebuffer skybox_rg_framebuffer  = VK_NULL_HANDLE;
+    bool          m_skyboxRequested      = false;
+
+    // Post-processing resources
     VkImage offscreen_image = VK_NULL_HANDLE;
     VmaAllocation offscreen_allocation = nullptr;
     VkImageView offscreen_view = VK_NULL_HANDLE;
@@ -564,6 +577,12 @@ private:
     bool createShadowMaskResources();
     void cleanupShadowMaskResources();
     void recreateShadowMaskResources();
+
+    // Render graph
+    RenderGraph m_frameGraph;
+    VulkanRGBackend m_rgBackend;
+    bool m_useRenderGraph = true;
+    void buildVulkanPostProcessGraph(bool wantSSAO, bool wantShadowMask, bool renderImGui);
 
     // Viewport render target for editor
     VkImage viewport_image = VK_NULL_HANDLE;

@@ -1,6 +1,7 @@
 #include "VulkanRenderAPI.hpp"
 #include "VkPipelineBuilder.hpp"
 #include "VkDescriptorWriter.hpp"
+#include "VkInitHelpers.hpp"
 #include "Utils/Log.hpp"
 #include "Utils/EnginePaths.hpp"
 #include <array>
@@ -192,6 +193,81 @@ bool VulkanRenderAPI::createSkyboxResources()
             .update(device);
     }
 
+    // --- Render graph render pass (color loadOp=LOAD + depth read-only) ---
+    {
+        std::array<VkAttachmentDescription, 2> attachments{};
+        // Color: offscreen HDR (preserve scene content)
+        attachments[0].format         = VK_FORMAT_R16G16B16A16_SFLOAT;
+        attachments[0].samples        = VK_SAMPLE_COUNT_1_BIT;
+        attachments[0].loadOp         = VK_ATTACHMENT_LOAD_OP_LOAD;
+        attachments[0].storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
+        attachments[0].stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        attachments[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        attachments[0].initialLayout  = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        attachments[0].finalLayout    = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+        // Depth: read-only (hardware depth test, no write)
+        attachments[1].format         = depth_format;
+        attachments[1].samples        = VK_SAMPLE_COUNT_1_BIT;
+        attachments[1].loadOp         = VK_ATTACHMENT_LOAD_OP_LOAD;
+        attachments[1].storeOp        = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        attachments[1].stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        attachments[1].initialLayout  = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+        attachments[1].finalLayout    = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+
+        VkAttachmentReference colorRef{};
+        colorRef.attachment = 0;
+        colorRef.layout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+        VkAttachmentReference depthRef{};
+        depthRef.attachment = 1;
+        depthRef.layout     = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+
+        VkSubpassDescription subpass{};
+        subpass.pipelineBindPoint       = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        subpass.colorAttachmentCount    = 1;
+        subpass.pColorAttachments       = &colorRef;
+        subpass.pDepthStencilAttachment = &depthRef;
+
+        std::array<VkSubpassDependency, 2> deps{};
+        deps[0].srcSubpass      = VK_SUBPASS_EXTERNAL;
+        deps[0].dstSubpass      = 0;
+        deps[0].srcStageMask    = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+        deps[0].dstStageMask    = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+        deps[0].srcAccessMask   = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        deps[0].dstAccessMask   = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
+
+        deps[1].srcSubpass      = 0;
+        deps[1].dstSubpass      = VK_SUBPASS_EXTERNAL;
+        deps[1].srcStageMask    = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        deps[1].dstStageMask    = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        deps[1].srcAccessMask   = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        deps[1].dstAccessMask   = VK_ACCESS_SHADER_READ_BIT;
+
+        VkRenderPassCreateInfo rpInfo{};
+        rpInfo.sType           = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+        rpInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
+        rpInfo.pAttachments    = attachments.data();
+        rpInfo.subpassCount    = 1;
+        rpInfo.pSubpasses      = &subpass;
+        rpInfo.dependencyCount = static_cast<uint32_t>(deps.size());
+        rpInfo.pDependencies   = deps.data();
+
+        if (vkCreateRenderPass(device, &rpInfo, nullptr, &skybox_rg_render_pass) != VK_SUCCESS) {
+            LOG_ENGINE_ERROR("[Vulkan] Failed to create skybox RG render pass");
+            return false;
+        }
+    }
+
+    // Render graph framebuffer (wraps offscreen color + depth)
+    if (offscreen_view != VK_NULL_HANDLE && offscreen_depth_view != VK_NULL_HANDLE) {
+        std::array<VkImageView, 2> fbAttachments = { offscreen_view, offscreen_depth_view };
+        skybox_rg_framebuffer = vkutil::createFramebuffer(device, skybox_rg_render_pass,
+            fbAttachments.data(), static_cast<uint32_t>(fbAttachments.size()),
+            swapchain_extent.width, swapchain_extent.height);
+    }
+
     skybox_initialized = true;
     printf("Skybox resources created\n");
     return true;
@@ -202,6 +278,16 @@ void VulkanRenderAPI::cleanupSkyboxResources()
     if (device == VK_NULL_HANDLE) return;
 
     skybox_initialized = false;
+
+    // Clean up render graph resources
+    if (skybox_rg_framebuffer != VK_NULL_HANDLE) {
+        vkDestroyFramebuffer(device, skybox_rg_framebuffer, nullptr);
+        skybox_rg_framebuffer = VK_NULL_HANDLE;
+    }
+    if (skybox_rg_render_pass != VK_NULL_HANDLE) {
+        vkDestroyRenderPass(device, skybox_rg_render_pass, nullptr);
+        skybox_rg_render_pass = VK_NULL_HANDLE;
+    }
 
     for (size_t i = 0; i < skybox_uniform_buffers.size(); i++) {
         if (skybox_uniform_buffers[i] && vma_allocator) {

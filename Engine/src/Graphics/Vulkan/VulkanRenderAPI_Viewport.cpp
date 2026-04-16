@@ -26,10 +26,10 @@ void VulkanRenderAPI::createViewportResources(int w, int h)
     viewport_width_rt = w;
     viewport_height_rt = h;
 
-    // Ensure FXAA infrastructure exists (we need offscreen_render_pass, fxaaPass_, etc.)
+    // Ensure post-processing infrastructure exists (we need offscreen_render_pass, fxaaPass_, etc.)
     if (!fxaa_initialized) {
-        if (!createFxaaResources()) {
-            LOG_ENGINE_ERROR("[Vulkan] Failed to create FXAA resources for viewport mode");
+        if (!createPostProcessingResources()) {
+            LOG_ENGINE_ERROR("[Vulkan] Failed to create post-processing resources for viewport mode");
             return;
         }
     }
@@ -256,7 +256,7 @@ void VulkanRenderAPI::createViewportResources(int w, int h)
 
     // Recreate offscreen depth image at viewport dimensions
     VK_CHECK(vkutil::createImage(vma_allocator, (uint32_t)w, (uint32_t)h, depth_format,
-                   VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                   VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
                    offscreen_depth_image, offscreen_depth_allocation));
 
     offscreen_depth_view = vkutil::createImageView(device, offscreen_depth_image, depth_format, VK_IMAGE_ASPECT_DEPTH_BIT);
@@ -334,6 +334,12 @@ void VulkanRenderAPI::setViewportSize(int width, int height)
     if (width <= 0 || height <= 0) return;
     if (width == viewport_width_rt && height == viewport_height_rt) return;
     createViewportResources(width, height);
+
+    // Recreate SSAO and shadow mask resources at new viewport size (matches D3D12)
+    if (ssao_initialized)
+        recreateSSAOResources();
+    if (shadow_mask_initialized)
+        recreateShadowMaskResources();
 }
 
 void VulkanRenderAPI::endSceneRender()
@@ -418,51 +424,131 @@ void VulkanRenderAPI::endSceneRender()
         }
     }
 
+    // Run SSAO + shadow mask passes before FXAA resolve (matches D3D12 viewport mode)
+    bool wantSSAO = ssaoEnabled && ssao_initialized;
+    bool wantShadowMask = shadowQuality > 0 && shadow_mask_initialized && shadow_map_image != VK_NULL_HANDLE;
+
+    if (fxaaPass_.isInitialized()) {
+        bool needDepthRead = wantSSAO || wantShadowMask;
+
+        if (needDepthRead) {
+            // Transition depth to shader read
+            {
+                VkImageMemoryBarrier depthBarrier{};
+                depthBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                depthBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                depthBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                depthBarrier.image = offscreen_depth_image;
+                depthBarrier.subresourceRange = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 };
+                depthBarrier.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+                depthBarrier.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+                depthBarrier.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+                depthBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                vkCmdPipelineBarrier(cmd,
+                    VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                    0, 0, nullptr, 0, nullptr, 1, &depthBarrier);
+            }
+
+            // SSAO passes
+            if (wantSSAO) {
+                SSAOUbo ssaoUbo{};
+                ssaoUbo.projection = projection_matrix;
+                ssaoUbo.invProjection = glm::inverse(projection_matrix);
+                for (int i = 0; i < 16; i++) ssaoUbo.samples[i] = ssaoKernel[i];
+                ssaoUbo.screenSize = glm::vec2(static_cast<float>(ssaoPass_.getWidth()), static_cast<float>(ssaoPass_.getHeight()));
+                ssaoUbo.noiseScale = ssaoUbo.screenSize / 4.0f;
+                ssaoUbo.radius = ssaoRadius;
+                ssaoUbo.bias = ssaoBias;
+                ssaoUbo.power = ssaoIntensity;
+                memcpy(ssaoPass_.getUBOMapped(current_frame), &ssaoUbo, sizeof(SSAOUbo));
+                ssaoPass_.record(cmd, current_frame, fxaa_vertex_buffer);
+
+                SSAOBlurUbo blurH{};
+                blurH.texelSize = glm::vec2(1.0f / ssaoPass_.getWidth(), 1.0f / ssaoPass_.getHeight());
+                blurH.blurDir = glm::vec2(1.0f, 0.0f);
+                blurH.depthThreshold = 0.005f;
+                memcpy(ssaoBlurHPass_.getUBOMapped(current_frame), &blurH, sizeof(SSAOBlurUbo));
+                ssaoBlurHPass_.record(cmd, current_frame, fxaa_vertex_buffer);
+
+                SSAOBlurUbo blurV{};
+                blurV.texelSize = glm::vec2(1.0f / ssaoBlurHPass_.getWidth(), 1.0f / ssaoBlurHPass_.getHeight());
+                blurV.blurDir = glm::vec2(0.0f, 1.0f);
+                blurV.depthThreshold = 0.005f;
+                memcpy(ssaoBlurVPass_.getUBOMapped(current_frame), &blurV, sizeof(SSAOBlurUbo));
+                ssaoBlurVPass_.record(cmd, current_frame, fxaa_vertex_buffer);
+
+                fxaaPass_.writeImageBinding(current_frame, 2, ssaoBlurVPass_.getOutputView(), ssaoBlurVPass_.getOutputSampler());
+            }
+
+            // Shadow mask pass
+            if (wantShadowMask) {
+                ShadowMaskUbo shadowMaskUbo{};
+                shadowMaskUbo.invViewProj = glm::inverse(projection_matrix * view_matrix);
+                shadowMaskUbo.view = view_matrix;
+                for (int i = 0; i < NUM_CASCADES; i++)
+                    shadowMaskUbo.lightSpaceMatrices[i] = lightSpaceMatrices[i];
+                shadowMaskUbo.cascadeSplits = glm::vec4(
+                    cascadeSplitDistances[0], cascadeSplitDistances[1],
+                    cascadeSplitDistances[2], cascadeSplitDistances[3]);
+                shadowMaskUbo.cascadeSplit4 = cascadeSplitDistances[4];
+                shadowMaskUbo.cascadeCount = NUM_CASCADES;
+                shadowMaskUbo.shadowMapTexelSize = glm::vec2(1.0f / static_cast<float>(currentShadowSize));
+                shadowMaskUbo.screenSize = glm::vec2(
+                    static_cast<float>(shadowMaskPass_.getWidth()),
+                    static_cast<float>(shadowMaskPass_.getHeight()));
+                shadowMaskUbo.lightDir = light_direction;
+                memcpy(shadowMaskPass_.getUBOMapped(current_frame), &shadowMaskUbo, sizeof(ShadowMaskUbo));
+                shadowMaskPass_.record(cmd, current_frame, fxaa_vertex_buffer);
+
+                fxaaPass_.writeImageBinding(current_frame, 3, shadowMaskPass_.getOutputView(), shadowMaskPass_.getOutputSampler());
+            }
+
+            // Restore depth layout to ATTACHMENT_OPTIMAL for the next frame's scene pass
+            {
+                VkImageMemoryBarrier depthRestore{};
+                depthRestore.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                depthRestore.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                depthRestore.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                depthRestore.image = offscreen_depth_image;
+                depthRestore.subresourceRange = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 };
+                depthRestore.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+                depthRestore.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+                depthRestore.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                depthRestore.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+                vkCmdPipelineBarrier(cmd,
+                    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                    VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+                    0, 0, nullptr, 0, nullptr, 1, &depthRestore);
+            }
+        }
+
+        // Bind fallbacks for disabled post-process effects
+        if (!wantSSAO) {
+            if (ssao_fallback_view != VK_NULL_HANDLE) {
+                VkSampler sampler = ssao_linear_sampler != VK_NULL_HANDLE ? ssao_linear_sampler : offscreen_sampler;
+                fxaaPass_.writeImageBinding(current_frame, 2, ssao_fallback_view, sampler);
+            } else {
+                fxaaPass_.writeImageBinding(current_frame, 2, offscreen_view, offscreen_sampler);
+            }
+        }
+        if (!wantShadowMask) {
+            if (ssao_fallback_view != VK_NULL_HANDLE) {
+                VkSampler sampler = ssao_linear_sampler != VK_NULL_HANDLE ? ssao_linear_sampler : offscreen_sampler;
+                fxaaPass_.writeImageBinding(current_frame, 3, ssao_fallback_view, sampler);
+            } else {
+                fxaaPass_.writeImageBinding(current_frame, 3, offscreen_view, offscreen_sampler);
+            }
+        }
+    }
+
     // Resolve offscreen -> viewport image
     if (fxaaEnabled && fxaaPass_.isInitialized() && viewport_fxaa_pipeline != VK_NULL_HANDLE) {
-        // FXAA pass: sample offscreen, write to viewport via fullscreen quad
-        VkRenderPassBeginInfo rpBegin{};
-        rpBegin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-        rpBegin.renderPass = viewport_resolve_pass;
-        rpBegin.framebuffer = viewport_framebuffer;
-        rpBegin.renderArea.offset = {0, 0};
-        rpBegin.renderArea.extent = { (uint32_t)viewport_width_rt, (uint32_t)viewport_height_rt };
-        rpBegin.clearValueCount = 0;
-
-        vkCmdBeginRenderPass(cmd, &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
-
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, viewport_fxaa_pipeline);
-
-        VkViewport vp{};
-        vp.x = 0.0f;
-        vp.y = 0.0f;
-        vp.width = static_cast<float>(viewport_width_rt);
-        vp.height = static_cast<float>(viewport_height_rt);
-        vp.minDepth = 0.0f;
-        vp.maxDepth = 1.0f;
-        vkCmdSetViewport(cmd, 0, 1, &vp);
-
-        VkRect2D scissor{};
-        scissor.offset = {0, 0};
-        scissor.extent = { (uint32_t)viewport_width_rt, (uint32_t)viewport_height_rt };
-        vkCmdSetScissor(cmd, 0, 1, &scissor);
-
-        VkDescriptorSet ds = fxaaPass_.getDescriptorSet(current_frame);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, fxaaPass_.getPipelineLayout(),
-                                0, 1, &ds, 0, nullptr);
-
-        FXAAUbo fxaaUbo{};
-        fxaaUbo.inverseScreenSize = glm::vec2(1.0f / viewport_width_rt, 1.0f / viewport_height_rt);
-        fxaaUbo.exposure = 1.0f;
-        memcpy(fxaaPass_.getUBOMapped(current_frame), &fxaaUbo, sizeof(FXAAUbo));
-
-        VkBuffer vertexBuffers[] = { fxaa_vertex_buffer };
-        VkDeviceSize offsets[] = { 0 };
-        vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
-
-        vkCmdDraw(cmd, 6, 1, 0, 0);
-
-        vkCmdEndRenderPass(cmd);
+        renderFXAAPass(cmd, viewport_resolve_pass, viewport_framebuffer,
+                       viewport_fxaa_pipeline,
+                       static_cast<uint32_t>(viewport_width_rt),
+                       static_cast<uint32_t>(viewport_height_rt),
+                       wantSSAO, wantShadowMask, false);
     } else {
         // No FXAA: copy offscreen -> viewport via image copy
         // Transition offscreen: SHADER_READ_ONLY -> TRANSFER_SRC
@@ -932,10 +1018,10 @@ int VulkanRenderAPI::createPIEViewport(int width, int height)
 {
     if (width <= 0 || height <= 0) return -1;
 
-    // Ensure FXAA infrastructure exists (we need offscreen_render_pass, viewport_resolve_pass, etc.)
+    // Ensure post-processing infrastructure exists (we need offscreen_render_pass, viewport_resolve_pass, etc.)
     if (!fxaa_initialized) {
-        if (!createFxaaResources()) {
-            LOG_ENGINE_ERROR("[Vulkan] Failed to create FXAA resources for PIE viewport");
+        if (!createPostProcessingResources()) {
+            LOG_ENGINE_ERROR("[Vulkan] Failed to create post-processing resources for PIE viewport");
             return -1;
         }
     }

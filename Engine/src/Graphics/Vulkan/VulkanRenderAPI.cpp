@@ -128,11 +128,11 @@ bool VulkanRenderAPI::initialize(WindowHandle window, int width, int height, flo
     // Load pipeline cache from disk (or create empty)
     loadPipelineCache();
 
-    // Create FXAA resources (must come before graphics pipeline so offscreen_render_pass
+    // Create post-processing resources (must come before graphics pipeline so offscreen_render_pass
     // is available for pipeline creation -- scene pipelines need HDR-compatible render pass)
-    LOG_ENGINE_INFO("[Vulkan] Creating FXAA resources...");
-    if (!createFxaaResources()) {
-        LOG_ENGINE_ERROR("[Vulkan] Failed to create FXAA resources");
+    LOG_ENGINE_INFO("[Vulkan] Creating post-processing resources...");
+    if (!createPostProcessingResources()) {
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create post-processing resources");
         return false;
     }
 
@@ -267,8 +267,8 @@ void VulkanRenderAPI::shutdown()
     // Clean up SSAO resources
     cleanupSSAOResources();
 
-    // Clean up FXAA resources
-    cleanupFxaaResources();
+    // Clean up post-processing resources
+    cleanupPostProcessingResources();
 
     // Clean up PIE viewport resources
     destroyAllPIEViewports();
