@@ -10,6 +10,9 @@
 #include "vk_mem_alloc.h"
 #include "VkInitHelpers.hpp"
 #include "VkDescriptorWriter.hpp"
+#include "VkPipelineBuilder.hpp"
+#include "Utils/EnginePaths.hpp"
+#include "ImGui/ImGuiManager.hpp"
 
 // ImGui for Vulkan rendering
 #include "imgui.h"
@@ -122,6 +125,48 @@ void VulkanRenderAPI::createViewportResources(int w, int h)
         if (vkCreateRenderPass(device, &rpInfo, nullptr, &viewport_resolve_pass) != VK_SUCCESS) {
             LOG_ENGINE_ERROR("[Vulkan] Failed to create viewport resolve render pass");
             return;
+        }
+    }
+
+    // --- Create viewport FXAA pipeline (uses viewport_resolve_pass instead of fxaa_render_pass) ---
+    if (viewport_fxaa_pipeline == VK_NULL_HANDLE && fxaa_pipeline_layout != VK_NULL_HANDLE) {
+        auto vertCode = readShaderFile(EnginePaths::resolveEngineAsset("../assets/shaders/compiled/vulkan/fxaa.vert.spv"));
+        auto fragCode = readShaderFile(EnginePaths::resolveEngineAsset("../assets/shaders/compiled/vulkan/fxaa.frag.spv"));
+        VkShaderModule vertModule = vertCode.empty() ? VK_NULL_HANDLE : createShaderModule(vertCode);
+        VkShaderModule fragModule = fragCode.empty() ? VK_NULL_HANDLE : createShaderModule(fragCode);
+
+        if (vertModule != VK_NULL_HANDLE && fragModule != VK_NULL_HANDLE) {
+            VkVertexInputBindingDescription bindingDesc{};
+            bindingDesc.binding = 0;
+            bindingDesc.stride = 4 * sizeof(float);
+            bindingDesc.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+            std::array<VkVertexInputAttributeDescription, 2> attrDescs{};
+            attrDescs[0] = {0, 0, VK_FORMAT_R32G32_SFLOAT, 0};
+            attrDescs[1] = {1, 0, VK_FORMAT_R32G32_SFLOAT, 2 * sizeof(float)};
+
+            VkPipelineColorBlendAttachmentState blendAtt{};
+            blendAtt.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                      VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+            blendAtt.blendEnable = VK_FALSE;
+
+            VkPipelineBuilder builder(device, vk_pipeline_cache);
+            builder.setShaders(vertModule, fragModule)
+                   .setVertexInput(&bindingDesc, 1, attrDescs.data(), static_cast<uint32_t>(attrDescs.size()))
+                   .setCullMode(VK_CULL_MODE_NONE)
+                   .setFrontFace(VK_FRONT_FACE_COUNTER_CLOCKWISE)
+                   .setDepthTest(VK_FALSE, VK_FALSE)
+                   .setColorBlend(&blendAtt)
+                   .setRenderPass(viewport_resolve_pass, 0)
+                   .setLayout(fxaa_pipeline_layout)
+                   .build(&viewport_fxaa_pipeline);
+        }
+
+        if (vertModule != VK_NULL_HANDLE) vkDestroyShaderModule(device, vertModule, nullptr);
+        if (fragModule != VK_NULL_HANDLE) vkDestroyShaderModule(device, fragModule, nullptr);
+
+        if (viewport_fxaa_pipeline == VK_NULL_HANDLE) {
+            LOG_ENGINE_ERROR("[Vulkan] Failed to create viewport FXAA pipeline");
         }
     }
 
@@ -253,8 +298,14 @@ void VulkanRenderAPI::destroyViewportResources()
     vkDeviceWaitIdle(device);
 
     if (viewport_imgui_ds != VK_NULL_HANDLE) {
-        ImGui_ImplVulkan_RemoveTexture(viewport_imgui_ds);
+        if (ImGuiManager::get().isInitialized())
+            ImGui_ImplVulkan_RemoveTexture(viewport_imgui_ds);
         viewport_imgui_ds = VK_NULL_HANDLE;
+    }
+
+    if (viewport_fxaa_pipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(device, viewport_fxaa_pipeline, nullptr);
+        viewport_fxaa_pipeline = VK_NULL_HANDLE;
     }
 
     if (viewport_framebuffer != VK_NULL_HANDLE) {
@@ -377,7 +428,7 @@ void VulkanRenderAPI::endSceneRender()
     }
 
     // Resolve offscreen -> viewport image
-    if (fxaaEnabled && fxaa_initialized) {
+    if (fxaaEnabled && fxaa_initialized && viewport_fxaa_pipeline != VK_NULL_HANDLE) {
         // FXAA pass: sample offscreen, write to viewport via fullscreen quad
         VkRenderPassBeginInfo rpBegin{};
         rpBegin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -389,7 +440,7 @@ void VulkanRenderAPI::endSceneRender()
 
         vkCmdBeginRenderPass(cmd, &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
 
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, fxaa_pipeline);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, viewport_fxaa_pipeline);
 
         VkViewport vp{};
         vp.x = 0.0f;
@@ -610,7 +661,8 @@ void VulkanRenderAPI::destroyPreviewResources()
     vkDeviceWaitIdle(device);
 
     if (preview_imgui_ds != VK_NULL_HANDLE) {
-        ImGui_ImplVulkan_RemoveTexture(preview_imgui_ds);
+        if (ImGuiManager::get().isInitialized())
+            ImGui_ImplVulkan_RemoveTexture(preview_imgui_ds);
         preview_imgui_ds = VK_NULL_HANDLE;
     }
 
@@ -844,7 +896,8 @@ void VulkanRenderAPI::createPIEViewportResources(PIEViewportTarget& target, int 
 void VulkanRenderAPI::destroyPIEViewportResources(PIEViewportTarget& target)
 {
     if (target.imgui_ds != VK_NULL_HANDLE) {
-        ImGui_ImplVulkan_RemoveTexture(target.imgui_ds);
+        if (ImGuiManager::get().isInitialized())
+            ImGui_ImplVulkan_RemoveTexture(target.imgui_ds);
         target.imgui_ds = VK_NULL_HANDLE;
     }
 

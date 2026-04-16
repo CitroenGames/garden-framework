@@ -330,12 +330,30 @@ void VulkanRenderAPI::endFrame()
             vkCmdEndRenderPass(cmd);
         }
 
+        // Barrier: ssao_raw_image color writes -> shader reads for blur H
+        {
+            VkImageMemoryBarrier barrier{};
+            barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.image = ssao_raw_image;
+            barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+            barrier.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            vkCmdPipelineBarrier(cmd,
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                0, 0, nullptr, 0, nullptr, 1, &barrier);
+        }
+
         // --- Horizontal blur pass ---
         {
             SSAOBlurUbo blurH{};
             blurH.texelSize = glm::vec2(1.0f / halfW, 1.0f / halfH);
             blurH.blurDir = glm::vec2(1.0f, 0.0f);
-            blurH.depthThreshold = 0.001f;
+            blurH.depthThreshold = 0.005f;
             memcpy(ssao_blur_h_uniform_mapped[current_frame], &blurH, sizeof(SSAOBlurUbo));
 
             VkRenderPassBeginInfo rpInfo{};
@@ -362,12 +380,30 @@ void VulkanRenderAPI::endFrame()
             vkCmdEndRenderPass(cmd);
         }
 
+        // Barrier: ssao_blur_temp_image color writes -> shader reads for blur V
+        {
+            VkImageMemoryBarrier barrier{};
+            barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.image = ssao_blur_temp_image;
+            barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+            barrier.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            vkCmdPipelineBarrier(cmd,
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                0, 0, nullptr, 0, nullptr, 1, &barrier);
+        }
+
         // --- Vertical blur pass ---
         {
             SSAOBlurUbo blurV{};
             blurV.texelSize = glm::vec2(1.0f / halfW, 1.0f / halfH);
             blurV.blurDir = glm::vec2(0.0f, 1.0f);
-            blurV.depthThreshold = 0.001f;
+            blurV.depthThreshold = 0.005f;
             memcpy(ssao_blur_v_uniform_mapped[current_frame], &blurV, sizeof(SSAOBlurUbo));
 
             VkRenderPassBeginInfo rpInfo{};
@@ -392,6 +428,24 @@ void VulkanRenderAPI::endFrame()
             vkCmdBindVertexBuffers(cmd, 0, 1, vbs, offs);
             vkCmdDraw(cmd, 6, 1, 0, 0);
             vkCmdEndRenderPass(cmd);
+        }
+
+        // Restore depth layout to ATTACHMENT_OPTIMAL for the next frame's scene pass
+        {
+            VkImageMemoryBarrier depthRestore{};
+            depthRestore.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            depthRestore.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            depthRestore.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            depthRestore.image = offscreen_depth_image;
+            depthRestore.subresourceRange = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 };
+            depthRestore.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+            depthRestore.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+            depthRestore.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            depthRestore.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+            vkCmdPipelineBarrier(cmd,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+                0, 0, nullptr, 0, nullptr, 1, &depthRestore);
         }
 
         // Update FXAA descriptor set binding 2 with SSAO blurred texture

@@ -728,13 +728,13 @@ void VulkanRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
                     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                         shadow_alphatest_pipeline_layout, 0, 1, &ds, 1, &dummyOffset);
                 }
-                // Push model matrix
+                // Push model matrix + alphaCutoff (must use all stages from the overlapping range)
+                VkShaderStageFlags atStages = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
                 vkCmdPushConstants(cmd, shadow_alphatest_pipeline_layout,
-                                   VK_SHADER_STAGE_VERTEX_BIT, sizeof(glm::mat4), sizeof(glm::mat4),
+                                   atStages, sizeof(glm::mat4), sizeof(glm::mat4),
                                    &drawCmd.model_matrix);
-                // Push alphaCutoff for fragment shader
                 vkCmdPushConstants(cmd, shadow_alphatest_pipeline_layout,
-                                   VK_SHADER_STAGE_FRAGMENT_BIT, 2 * sizeof(glm::mat4), sizeof(float),
+                                   atStages, 2 * sizeof(glm::mat4), sizeof(float),
                                    &drawCmd.alpha_cutoff);
             }
             else
@@ -922,6 +922,25 @@ void VulkanRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmd
     if (main_pass_started) {
         vkCmdEndRenderPass(cmd);
         main_pass_started = false;
+    }
+
+    // 2b. Transition color attachment from SHADER_READ_ONLY (offscreen pass finalLayout)
+    //     back to COLOR_ATTACHMENT_OPTIMAL (continuation pass initialLayout)
+    {
+        VkImageMemoryBarrier colorBarrier{};
+        colorBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        colorBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        colorBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        colorBarrier.image = offscreen_image;
+        colorBarrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        colorBarrier.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        colorBarrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        colorBarrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        colorBarrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT;
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &colorBarrier);
     }
 
     // 3. Begin continuation render pass with SECONDARY_COMMAND_BUFFERS

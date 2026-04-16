@@ -523,6 +523,7 @@ private:
     VkBuffer fxaa_vertex_buffer = VK_NULL_HANDLE;
     VmaAllocation fxaa_vertex_allocation = nullptr;
     VkPipeline fxaa_pipeline = VK_NULL_HANDLE;
+    VkPipeline viewport_fxaa_pipeline = VK_NULL_HANDLE;
     VkPipelineLayout fxaa_pipeline_layout = VK_NULL_HANDLE;
     VkDescriptorSetLayout fxaa_descriptor_layout = VK_NULL_HANDLE;
     VkDescriptorPool fxaa_descriptor_pool = VK_NULL_HANDLE;

@@ -134,14 +134,25 @@ bool VulkanRenderAPI::createSSAOResources()
 
         ssao_noise_view = vkutil::createImageView(device, ssao_noise_image, VK_FORMAT_R32G32B32A32_SFLOAT, VK_IMAGE_ASPECT_COLOR_BIT);
 
-        // Upload noise data
+        // Upload noise data (all transitions + copy in a single command buffer)
         VkDeviceSize imageSize = 4 * 4 * 16; // 4x4 * RGBA32F
         ensureStagingBuffer(imageSize);
         memcpy(staging_mapped, noiseData, imageSize);
 
         auto cmd = beginSingleTimeCommands();
-        transitionImageLayout(ssao_noise_image, VK_FORMAT_R32G32B32A32_SFLOAT,
-                              VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+
+        VkImageMemoryBarrier noisePreBarrier{};
+        noisePreBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        noisePreBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        noisePreBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        noisePreBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        noisePreBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        noisePreBarrier.image = ssao_noise_image;
+        noisePreBarrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        noisePreBarrier.srcAccessMask = 0;
+        noisePreBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &noisePreBarrier);
 
         VkBufferImageCopy region{};
         region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
@@ -150,40 +161,18 @@ bool VulkanRenderAPI::createSSAOResources()
         vkCmdCopyBufferToImage(cmd, staging_buffer, ssao_noise_image,
                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
-        endSingleTimeCommands(cmd);
-        transitionImageLayout(ssao_noise_image, VK_FORMAT_R32G32B32A32_SFLOAT,
-                              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    }
-
-    // --- Create 1x1 white fallback ---
-    if (ssao_fallback_image == VK_NULL_HANDLE)
-    {
-        if (vkutil::createImage(vma_allocator, 1, 1, VK_FORMAT_R8_UNORM,
-                                VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-                                ssao_fallback_image, ssao_fallback_allocation) != VK_SUCCESS)
-            return false;
-
-        ssao_fallback_view = vkutil::createImageView(device, ssao_fallback_image, VK_FORMAT_R8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT);
-
-        uint8_t white = 255;
-        ensureStagingBuffer(1);
-        memcpy(staging_mapped, &white, 1);
-
-        auto cmd = beginSingleTimeCommands();
-        transitionImageLayout(ssao_fallback_image, VK_FORMAT_R8_UNORM,
-                              VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-
-        VkBufferImageCopy region{};
-        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        region.imageSubresource.layerCount = 1;
-        region.imageExtent = {1, 1, 1};
-        vkCmdCopyBufferToImage(cmd, staging_buffer, ssao_fallback_image,
-                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+        VkImageMemoryBarrier noisePostBarrier = noisePreBarrier;
+        noisePostBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        noisePostBarrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        noisePostBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        noisePostBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &noisePostBarrier);
 
         endSingleTimeCommands(cmd);
-        transitionImageLayout(ssao_fallback_image, VK_FORMAT_R8_UNORM,
-                              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     }
+
+    // Note: 1x1 white SSAO fallback texture is owned by createFxaaResources() / cleanupFxaaResources()
 
     // --- SSAO render pass (R8 color only) ---
     if (ssao_render_pass == VK_NULL_HANDLE)
@@ -207,13 +196,23 @@ bool VulkanRenderAPI::createSSAOResources()
         subpass.colorAttachmentCount = 1;
         subpass.pColorAttachments = &colorRef;
 
-        VkSubpassDependency dep{};
-        dep.srcSubpass = VK_SUBPASS_EXTERNAL;
-        dep.dstSubpass = 0;
-        dep.srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-        dep.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        dep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-        dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        std::array<VkSubpassDependency, 2> deps{};
+
+        // Entry: wait for prior color writes before this pass begins
+        deps[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+        deps[0].dstSubpass = 0;
+        deps[0].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        deps[0].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        deps[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        deps[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+
+        // Exit: ensure color writes + finalLayout transition are visible to next pass's reads
+        deps[1].srcSubpass = 0;
+        deps[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+        deps[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        deps[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        deps[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        deps[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
 
         VkRenderPassCreateInfo rpInfo{};
         rpInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
@@ -221,8 +220,8 @@ bool VulkanRenderAPI::createSSAOResources()
         rpInfo.pAttachments = &colorAttach;
         rpInfo.subpassCount = 1;
         rpInfo.pSubpasses = &subpass;
-        rpInfo.dependencyCount = 1;
-        rpInfo.pDependencies = &dep;
+        rpInfo.dependencyCount = static_cast<uint32_t>(deps.size());
+        rpInfo.pDependencies = deps.data();
 
         VK_CHECK_BOOL(vkCreateRenderPass(device, &rpInfo, nullptr, &ssao_render_pass));
 
@@ -528,7 +527,7 @@ void VulkanRenderAPI::cleanupSSAOResources()
     destroyImg(ssao_blur_temp_image, ssao_blur_temp_allocation, ssao_blur_temp_view);
     destroyImg(ssao_blurred_image, ssao_blurred_allocation, ssao_blurred_view);
     destroyImg(ssao_noise_image, ssao_noise_allocation, ssao_noise_view);
-    destroyImg(ssao_fallback_image, ssao_fallback_allocation, ssao_fallback_view);
+    // Note: ssao_fallback is owned by FXAA resources, not destroyed here
 
     if (ssao_depth_view != VK_NULL_HANDLE) { vkDestroyImageView(device, ssao_depth_view, nullptr); ssao_depth_view = VK_NULL_HANDLE; }
 

@@ -116,7 +116,7 @@ bool VulkanRenderAPI::createFxaaResources()
     depthAttachment.format = depth_format;
     depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
     depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -194,10 +194,10 @@ bool VulkanRenderAPI::createFxaaResources()
     VkSubpassDependency fxaaDependency{};
     fxaaDependency.srcSubpass = VK_SUBPASS_EXTERNAL;
     fxaaDependency.dstSubpass = 0;
-    fxaaDependency.srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-    fxaaDependency.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    fxaaDependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    fxaaDependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    fxaaDependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    fxaaDependency.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    fxaaDependency.dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    fxaaDependency.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
 
     VkRenderPassCreateInfo fxaaRenderPassInfo{};
     fxaaRenderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
@@ -428,18 +428,38 @@ bool VulkanRenderAPI::createFxaaResources()
             ensureStagingBuffer(1);
             memcpy(staging_mapped, &white, 1);
 
-            transitionImageLayout(ssao_fallback_image, VK_FORMAT_R8_UNORM,
-                                  VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+            // All transitions + copy in a single command buffer
             VkCommandBuffer cmd = beginSingleTimeCommands();
+
+            VkImageMemoryBarrier fbPreBarrier{};
+            fbPreBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            fbPreBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            fbPreBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            fbPreBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            fbPreBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            fbPreBarrier.image = ssao_fallback_image;
+            fbPreBarrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+            fbPreBarrier.srcAccessMask = 0;
+            fbPreBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 0, 0, nullptr, 0, nullptr, 1, &fbPreBarrier);
+
             VkBufferImageCopy region{};
             region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
             region.imageSubresource.layerCount = 1;
             region.imageExtent = {1, 1, 1};
             vkCmdCopyBufferToImage(cmd, staging_buffer, ssao_fallback_image,
                                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+            VkImageMemoryBarrier fbPostBarrier = fbPreBarrier;
+            fbPostBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            fbPostBarrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            fbPostBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            fbPostBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                                 0, 0, nullptr, 0, nullptr, 1, &fbPostBarrier);
+
             endSingleTimeCommands(cmd);
-            transitionImageLayout(ssao_fallback_image, VK_FORMAT_R8_UNORM,
-                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
             // Create a linear clamp sampler for the fallback
             if (ssao_linear_sampler == VK_NULL_HANDLE) {
@@ -493,6 +513,11 @@ void VulkanRenderAPI::cleanupFxaaResources()
     if (fxaa_descriptor_pool != VK_NULL_HANDLE) {
         vkDestroyDescriptorPool(device, fxaa_descriptor_pool, nullptr);
         fxaa_descriptor_pool = VK_NULL_HANDLE;
+    }
+
+    if (viewport_fxaa_pipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(device, viewport_fxaa_pipeline, nullptr);
+        viewport_fxaa_pipeline = VK_NULL_HANDLE;
     }
 
     if (fxaa_pipeline != VK_NULL_HANDLE) {

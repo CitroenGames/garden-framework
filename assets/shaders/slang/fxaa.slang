@@ -11,8 +11,9 @@ cbuffer FXAACB : register(b0)
 [[vk::binding(0, 0)]]Texture2D screenTexture : register(t0);
 [[vk::binding(0, 0)]]SamplerState linearSampler : register(s0);
 
-// SSAO texture reuses linearSampler (s0) — s1 is a comparison sampler in the main root signature
+// SSAO texture with its own sampler for Vulkan COMBINED_IMAGE_SAMPLER compatibility
 [[vk::binding(2, 0)]]Texture2D ssaoTexture : register(t1);
+[[vk::binding(2, 0)]]SamplerState ssaoSampler : register(s1);
 
 struct VSInput
 {
@@ -114,7 +115,7 @@ float4 fragmentMain(PSInput input) : SV_TARGET
     // Apply SSAO (multiplied before tone mapping, only when enabled)
     if (uSSAOEnabled != 0)
     {
-        float ao = ssaoTexture.Sample(linearSampler, texCoord).r;
+        float ao = ssaoTexture.Sample(ssaoSampler, texCoord).r;
         result *= ao;
     }
 
