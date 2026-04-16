@@ -449,13 +449,18 @@ void VulkanRenderAPI::endSceneRender()
 
     if (m_useRenderGraph && fxaa_initialized && viewport_fxaa_pipeline != VK_NULL_HANDLE) {
         // Render graph path: skybox + SSAO + shadow mask + FXAA as ordered passes (matches D3D12)
-        buildVulkanPostProcessGraph(wantSSAO, wantShadowMask, false,
-            static_cast<uint32_t>(viewport_width_rt), static_cast<uint32_t>(viewport_height_rt),
+        m_ppGraphBuilder.setFrameInputs(
             viewport_image, VK_IMAGE_LAYOUT_UNDEFINED,
             RGFormat::RGBA16_FLOAT,
             viewport_framebuffer, viewport_resolve_pass, viewport_fxaa_pipeline);
-        m_frameGraph.compile();
-        m_frameGraph.execute(m_rgBackend);
+
+        PostProcessGraphBuilder::Config cfg;
+        cfg.width          = static_cast<uint32_t>(viewport_width_rt);
+        cfg.height         = static_cast<uint32_t>(viewport_height_rt);
+        cfg.wantSSAO       = wantSSAO;
+        cfg.wantShadowMask = wantShadowMask;
+        cfg.renderImGui    = false;
+        m_ppGraphBuilder.build(m_frameGraph, m_rgBackend, cfg);
         m_skyboxRequested = false;
     } else {
         // Manual fallback path: SSAO + shadow mask + FXAA without render graph

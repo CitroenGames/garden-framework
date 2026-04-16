@@ -7,6 +7,7 @@
 #include "VkSamplerCache.hpp"
 #include "VulkanPostProcessPass.hpp"
 #include "VulkanRGBackend.hpp"
+#include "VulkanPostProcessGraphBuilder.hpp"
 #include "Graphics/RenderGraph/RenderGraph.hpp"
 #include <cstdint>
 #include <stack>
@@ -26,6 +27,8 @@ class VulkanMesh;
 
 class VulkanRenderAPI : public IRenderAPI
 {
+    friend class VulkanPostProcessGraphBuilder;
+
 public:
     VulkanRenderAPI();
     virtual ~VulkanRenderAPI();
@@ -584,12 +587,8 @@ private:
     // Render graph
     RenderGraph m_frameGraph;
     VulkanRGBackend m_rgBackend;
+    VulkanPostProcessGraphBuilder m_ppGraphBuilder;
     bool m_useRenderGraph = true;
-    void buildVulkanPostProcessGraph(bool wantSSAO, bool wantShadowMask, bool renderImGui,
-                                      uint32_t width, uint32_t height,
-                                      VkImage outputImage, VkImageLayout outputInitialLayout,
-                                      RGFormat outputFormat,
-                                      VkFramebuffer fxaaFB, VkRenderPass fxaaRP, VkPipeline fxaaPipeline);
 
     // Viewport render target for editor
     VkImage viewport_image = VK_NULL_HANDLE;

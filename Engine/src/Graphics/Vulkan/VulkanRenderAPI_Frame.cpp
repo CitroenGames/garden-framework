@@ -239,14 +239,19 @@ void VulkanRenderAPI::endFrame()
 
         if (m_useRenderGraph && fxaa_initialized)
         {
-            buildVulkanPostProcessGraph(wantSSAO, wantShadowMask, true,
-                swapchain_extent.width, swapchain_extent.height,
+            m_ppGraphBuilder.setFrameInputs(
                 swapchain_images[current_image_index], VK_IMAGE_LAYOUT_UNDEFINED,
                 RGFormat::RGBA8_UNORM,
                 fxaa_framebuffers[current_image_index],
                 fxaaPass_.getRenderPass(), fxaaPass_.getPipeline());
-            m_frameGraph.compile();
-            m_frameGraph.execute(m_rgBackend);
+
+            PostProcessGraphBuilder::Config cfg;
+            cfg.width          = swapchain_extent.width;
+            cfg.height         = swapchain_extent.height;
+            cfg.wantSSAO       = wantSSAO;
+            cfg.wantShadowMask = wantShadowMask;
+            cfg.renderImGui    = true;
+            m_ppGraphBuilder.build(m_frameGraph, m_rgBackend, cfg);
             m_skyboxRequested = false;
         }
         else

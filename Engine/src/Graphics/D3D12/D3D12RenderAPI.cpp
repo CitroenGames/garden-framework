@@ -148,6 +148,7 @@ D3D12RenderAPI::D3D12RenderAPI()
         lightSpaceMatrices[i] = glm::mat4(1.0f);
     for (int i = 0; i <= NUM_CASCADES; i++)
         cascadeSplitDistances[i] = 0.0f;
+    m_ppGraphBuilder.setAPI(this);
 }
 
 D3D12RenderAPI::~D3D12RenderAPI()

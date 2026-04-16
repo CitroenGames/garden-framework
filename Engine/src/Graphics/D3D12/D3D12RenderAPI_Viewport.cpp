@@ -168,20 +168,17 @@ void D3D12RenderAPI::endSceneRender()
         if (m_useRenderGraph)
         {
             D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvAllocator.getCPU(m_viewportRTVIndex);
-            buildPostProcessGraph(rtvHandle, m_offscreenSRVIndex,
-                                  m_viewportDepthBuffer.Get(), m_viewportDepthSRVIndex,
-                                  viewport_width_rt, viewport_height_rt,
-                                  wantSSAO, wantShadowMask, false);
+            m_ppGraphBuilder.setFrameInputs(rtvHandle, m_offscreenSRVIndex,
+                                            m_viewportDepthBuffer.Get(), m_viewportDepthSRVIndex,
+                                            m_viewportTexture.Get(), m_viewportRTVIndex);
 
-            // Bind viewport texture as the output target (index 2)
-            RGResourceHandle outputHandle;
-            outputHandle.index = 2;
-            outputHandle.version = 0;
-            m_rgBackend.bindImportedTexture(outputHandle,
-                m_viewportTexture.Get(), m_viewportSRVIndex, m_viewportRTVIndex);
-
-            m_frameGraph.compile();
-            m_frameGraph.execute(m_rgBackend);
+            PostProcessGraphBuilder::Config cfg;
+            cfg.width          = static_cast<uint32_t>(viewport_width_rt);
+            cfg.height         = static_cast<uint32_t>(viewport_height_rt);
+            cfg.wantSSAO       = wantSSAO;
+            cfg.wantShadowMask = wantShadowMask;
+            cfg.renderImGui    = false;
+            m_ppGraphBuilder.build(m_frameGraph, m_rgBackend, cfg);
 
             m_skyboxRequested = false;
 

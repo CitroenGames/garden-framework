@@ -153,22 +153,18 @@ void D3D12RenderAPI::endFrame()
         if (m_useRenderGraph)
         {
             D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvAllocator.getCPU(m_backBufferRTVs[m_backBufferIndex]);
-            buildPostProcessGraph(rtvHandle, m_offscreenSRVIndex,
-                                  m_depthStencilBuffer.Get(), m_depthSRVIndex,
-                                  viewport_width, viewport_height,
-                                  wantSSAO, wantShadowMask, true);
+            m_ppGraphBuilder.setFrameInputs(rtvHandle, m_offscreenSRVIndex,
+                                            m_depthStencilBuffer.Get(), m_depthSRVIndex,
+                                            m_backBuffers[m_backBufferIndex].Get(),
+                                            m_backBufferRTVs[m_backBufferIndex]);
 
-            // Bind the back buffer resource to the output target handle
-            // OutputTarget is the 3rd imported resource (index 2)
-            RGResourceHandle outputHandle;
-            outputHandle.index = 2;
-            outputHandle.version = 0;
-            m_rgBackend.bindImportedTexture(outputHandle,
-                m_backBuffers[m_backBufferIndex].Get(),
-                UINT(-1), m_backBufferRTVs[m_backBufferIndex]);
-
-            m_frameGraph.compile();
-            m_frameGraph.execute(m_rgBackend);
+            PostProcessGraphBuilder::Config cfg;
+            cfg.width          = static_cast<uint32_t>(viewport_width);
+            cfg.height         = static_cast<uint32_t>(viewport_height);
+            cfg.wantSSAO       = wantSSAO;
+            cfg.wantShadowMask = wantShadowMask;
+            cfg.renderImGui    = true;
+            m_ppGraphBuilder.build(m_frameGraph, m_rgBackend, cfg);
 
             m_skyboxRequested = false;
         }

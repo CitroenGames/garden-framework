@@ -19,6 +19,7 @@
 
 VulkanRenderAPI::VulkanRenderAPI()
 {
+    m_ppGraphBuilder.setAPI(this);
 }
 
 VulkanRenderAPI::~VulkanRenderAPI()
