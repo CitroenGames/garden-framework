@@ -118,10 +118,9 @@ struct alignas(16) D3D12ShadowCBuffer
 
 struct alignas(16) D3D12SkyboxCBuffer
 {
-    glm::mat4 projection;
-    glm::mat4 view;
+    glm::mat4 invViewProj;
     glm::vec3 sunDirection;
-    float time;
+    float _pad;
 };
 
 struct alignas(16) D3D12FXAACBuffer
@@ -130,7 +129,8 @@ struct alignas(16) D3D12FXAACBuffer
     float exposure;
     int ssaoEnabled;
     int shadowMaskEnabled;
-    glm::vec3 _pad;
+    float shadowMinimum;
+    glm::vec2 _pad;
 };
 
 struct alignas(16) D3D12SSAOCBuffer

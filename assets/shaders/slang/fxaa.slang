@@ -7,7 +7,8 @@ cbuffer FXAACB : register(b0)
     float uExposure;
     int uSSAOEnabled;
     int uShadowMaskEnabled;
-    float3 _pad;
+    float uShadowMinimum;
+    float2 _pad;
 };
 
 [[vk::binding(0, 0)]]Texture2D screenTexture : register(t0);
@@ -129,7 +130,7 @@ float4 fragmentMain(PSInput input) : SV_TARGET
     if (uShadowMaskEnabled != 0)
     {
         float shadow = shadowMaskTexture.Sample(shadowMaskSampler, texCoord).r;
-        result *= shadow;
+        result *= max(shadow, uShadowMinimum);
     }
 
     // Apply exposure and ACES tone mapping

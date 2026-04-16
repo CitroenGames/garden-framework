@@ -389,6 +389,7 @@ void VulkanRenderAPI::endFrame()
         fxaaUbo.exposure = 1.0f;
         fxaaUbo.ssaoEnabled = wantSSAO ? 1 : 0;
         fxaaUbo.shadowMaskEnabled = wantShadowMask ? 1 : 0;
+        fxaaUbo.shadowMinimum = glm::dot(light_ambient, glm::vec3(0.299f, 0.587f, 0.114f));
         memcpy(fxaaPass_.getUBOMapped(current_frame), &fxaaUbo, sizeof(FXAAUbo));
 
         // Begin FXAA render pass (renders to swapchain)

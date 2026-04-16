@@ -168,6 +168,7 @@ void D3D12RenderAPI::renderFXAAPass(
     fxaaCB.exposure = 1.0f;
     fxaaCB.ssaoEnabled = enableSSAO ? 1 : 0;
     fxaaCB.shadowMaskEnabled = enableShadowMask ? 1 : 0;
+    fxaaCB.shadowMinimum = glm::dot(current_light_ambient, glm::vec3(0.299f, 0.587f, 0.114f));
     auto cbAddr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(fxaaCB), &fxaaCB);
     if (cbAddr == 0) {
         LOG_ENGINE_WARN("[D3D12] Ring buffer exhausted - skipping FXAA/tone-map pass");

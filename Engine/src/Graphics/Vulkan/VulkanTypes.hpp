@@ -149,7 +149,8 @@ struct FXAAUbo {
     float exposure;
     int ssaoEnabled;
     int shadowMaskEnabled;
-    float _pad[3];
+    float shadowMinimum;
+    float _pad[2];
 };
 
 // Skybox UBO (matches Slang SkyboxCB: projection, view, sunDirection, time)
