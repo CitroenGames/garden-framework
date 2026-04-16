@@ -5,6 +5,7 @@
 #include "VulkanTypes.hpp"
 #include "VkDeletionQueue.hpp"
 #include "VkSamplerCache.hpp"
+#include "VulkanPostProcessPass.hpp"
 #include <cstdint>
 #include <stack>
 #include <vector>
@@ -112,7 +113,7 @@ public:
     VkPhysicalDevice getPhysicalDevice() const { return physical_device; }
     uint32_t getGraphicsQueueFamily() const { return graphics_queue_family; }
     VkRenderPass getRenderPass() const { return render_pass; }
-    VkRenderPass getFxaaRenderPass() const { return fxaa_render_pass; }
+    VkRenderPass getFxaaRenderPass() const { return fxaaPass_.getRenderPass(); }
     uint32_t getSwapchainImageCount() const { return static_cast<uint32_t>(swapchain_images.size()); }
     VkCommandBuffer getCurrentCommandBuffer() const { return command_buffers[current_frame]; }
     VkFormat getSwapchainFormat() const { return swapchain_format; }
@@ -522,17 +523,9 @@ private:
 
     VkBuffer fxaa_vertex_buffer = VK_NULL_HANDLE;
     VmaAllocation fxaa_vertex_allocation = nullptr;
-    VkPipeline fxaa_pipeline = VK_NULL_HANDLE;
+    VulkanPostProcessPass fxaaPass_;                   // FXAA pipeline, render pass, descriptors, UBOs
+    std::vector<VkFramebuffer> fxaa_framebuffers;      // Swapchain framebuffers (shared with renderUI)
     VkPipeline viewport_fxaa_pipeline = VK_NULL_HANDLE;
-    VkPipelineLayout fxaa_pipeline_layout = VK_NULL_HANDLE;
-    VkDescriptorSetLayout fxaa_descriptor_layout = VK_NULL_HANDLE;
-    VkDescriptorPool fxaa_descriptor_pool = VK_NULL_HANDLE;
-    std::vector<VkDescriptorSet> fxaa_descriptor_sets;
-    std::vector<VkBuffer> fxaa_uniform_buffers;
-    std::vector<VmaAllocation> fxaa_uniform_allocations;
-    std::vector<void*> fxaa_uniform_mapped;
-    VkRenderPass fxaa_render_pass = VK_NULL_HANDLE;
-    std::vector<VkFramebuffer> fxaa_framebuffers;  // Swapchain-only, no depth
     bool fxaa_initialized = false;
 
     // SSAO resources

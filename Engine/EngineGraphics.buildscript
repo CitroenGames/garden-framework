@@ -30,6 +30,7 @@ sources = {
     src/Graphics/Vulkan/VulkanRenderAPI_FXAA.cpp
     src/Graphics/Vulkan/VulkanRenderAPI_SSAO.cpp
     src/Graphics/Vulkan/VulkanRenderAPI_Viewport.cpp
+    src/Graphics/Vulkan/VulkanPostProcessPass.cpp
     src/Graphics/Vulkan/VulkanMesh.cpp
     src/Graphics/D3D12/D3D12RenderAPI.cpp [windows]
     src/Graphics/D3D12/D3D12RenderAPI_Device.cpp [windows]

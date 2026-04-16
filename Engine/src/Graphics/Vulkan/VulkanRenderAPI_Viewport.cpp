@@ -26,7 +26,7 @@ void VulkanRenderAPI::createViewportResources(int w, int h)
     viewport_width_rt = w;
     viewport_height_rt = h;
 
-    // Ensure FXAA infrastructure exists (we need offscreen_render_pass, FXAA pipeline, etc.)
+    // Ensure FXAA infrastructure exists (we need offscreen_render_pass, fxaaPass_, etc.)
     if (!fxaa_initialized) {
         if (!createFxaaResources()) {
             LOG_ENGINE_ERROR("[Vulkan] Failed to create FXAA resources for viewport mode");
@@ -128,8 +128,8 @@ void VulkanRenderAPI::createViewportResources(int w, int h)
         }
     }
 
-    // --- Create viewport FXAA pipeline (uses viewport_resolve_pass instead of fxaa_render_pass) ---
-    if (viewport_fxaa_pipeline == VK_NULL_HANDLE && fxaa_pipeline_layout != VK_NULL_HANDLE) {
+    // --- Create viewport FXAA pipeline (uses viewport_resolve_pass instead of fxaaPass_ render pass) ---
+    if (viewport_fxaa_pipeline == VK_NULL_HANDLE && fxaaPass_.getPipelineLayout() != VK_NULL_HANDLE) {
         auto vertCode = readShaderFile(EnginePaths::resolveEngineAsset("../assets/shaders/compiled/vulkan/fxaa.vert.spv"));
         auto fragCode = readShaderFile(EnginePaths::resolveEngineAsset("../assets/shaders/compiled/vulkan/fxaa.frag.spv"));
         VkShaderModule vertModule = vertCode.empty() ? VK_NULL_HANDLE : createShaderModule(vertCode);
@@ -158,7 +158,7 @@ void VulkanRenderAPI::createViewportResources(int w, int h)
                    .setDepthTest(VK_FALSE, VK_FALSE)
                    .setColorBlend(&blendAtt)
                    .setRenderPass(viewport_resolve_pass, 0)
-                   .setLayout(fxaa_pipeline_layout)
+                   .setLayout(fxaaPass_.getPipelineLayout())
                    .build(&viewport_fxaa_pipeline);
         }
 
@@ -268,16 +268,7 @@ void VulkanRenderAPI::createViewportResources(int w, int h)
                                                           static_cast<uint32_t>(offFbAttachments.size()), (uint32_t)w, (uint32_t)h);
 
     // Update FXAA descriptor sets to point to new offscreen image
-    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        VkDescriptorImageInfo fxaaImageInfo{};
-        fxaaImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        fxaaImageInfo.imageView = offscreen_view;
-        fxaaImageInfo.sampler = offscreen_sampler;
-
-        VkDescriptorWriter(fxaa_descriptor_sets[i])
-            .writeImage(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &fxaaImageInfo)
-            .update(device);
-    }
+    fxaaPass_.writeImageBindingAllFrames(0, offscreen_view, offscreen_sampler);
 
     // Update projection matrix for viewport aspect ratio
     float ratio = static_cast<float>(w) / static_cast<float>(h);
@@ -428,7 +419,7 @@ void VulkanRenderAPI::endSceneRender()
     }
 
     // Resolve offscreen -> viewport image
-    if (fxaaEnabled && fxaa_initialized && viewport_fxaa_pipeline != VK_NULL_HANDLE) {
+    if (fxaaEnabled && fxaaPass_.isInitialized() && viewport_fxaa_pipeline != VK_NULL_HANDLE) {
         // FXAA pass: sample offscreen, write to viewport via fullscreen quad
         VkRenderPassBeginInfo rpBegin{};
         rpBegin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -456,13 +447,14 @@ void VulkanRenderAPI::endSceneRender()
         scissor.extent = { (uint32_t)viewport_width_rt, (uint32_t)viewport_height_rt };
         vkCmdSetScissor(cmd, 0, 1, &scissor);
 
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, fxaa_pipeline_layout,
-                                0, 1, &fxaa_descriptor_sets[current_frame], 0, nullptr);
+        VkDescriptorSet ds = fxaaPass_.getDescriptorSet(current_frame);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, fxaaPass_.getPipelineLayout(),
+                                0, 1, &ds, 0, nullptr);
 
         FXAAUbo fxaaUbo{};
         fxaaUbo.inverseScreenSize = glm::vec2(1.0f / viewport_width_rt, 1.0f / viewport_height_rt);
         fxaaUbo.exposure = 1.0f;
-        memcpy(fxaa_uniform_mapped[current_frame], &fxaaUbo, sizeof(FXAAUbo));
+        memcpy(fxaaPass_.getUBOMapped(current_frame), &fxaaUbo, sizeof(FXAAUbo));
 
         VkBuffer vertexBuffers[] = { fxaa_vertex_buffer };
         VkDeviceSize offsets[] = { 0 };

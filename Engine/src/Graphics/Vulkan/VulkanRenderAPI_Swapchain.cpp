@@ -308,10 +308,11 @@ void VulkanRenderAPI::recreateSwapchain()
 
             fxaa_framebuffers.resize(swapchain_image_views.size());
             for (size_t i = 0; i < swapchain_image_views.size(); i++) {
-                fxaa_framebuffers[i] = vkutil::createFramebuffer(device, fxaa_render_pass,
+                fxaa_framebuffers[i] = vkutil::createFramebuffer(device, fxaaPass_.getRenderPass(),
                                                                   &swapchain_image_views[i], 1,
                                                                   swapchain_extent.width, swapchain_extent.height);
             }
+            fxaaPass_.setExternalFramebuffers(fxaa_framebuffers, swapchain_extent.width, swapchain_extent.height);
         } else {
             recreateOffscreenResources();
         }

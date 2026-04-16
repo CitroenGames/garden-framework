@@ -449,42 +449,33 @@ void VulkanRenderAPI::endFrame()
         }
 
         // Update FXAA descriptor set binding 2 with SSAO blurred texture
-        {
-            VkDescriptorImageInfo ssaoImgInfo{};
-            ssaoImgInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            ssaoImgInfo.imageView = ssao_blurred_view;
-            ssaoImgInfo.sampler = ssao_linear_sampler;
-
-            VkDescriptorWriter(fxaa_descriptor_sets[current_frame])
-                .writeImage(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &ssaoImgInfo)
-                .update(device);
-        }
+        fxaaPass_.writeImageBinding(current_frame, 2, ssao_blurred_view, ssao_linear_sampler);
     }
-    else if (fxaa_initialized) {
+    else if (fxaaPass_.isInitialized()) {
         // SSAO disabled or not initialized: bind fallback (or offscreen as last resort)
-        VkDescriptorImageInfo fallbackInfo{};
-        fallbackInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         if (ssao_fallback_view != VK_NULL_HANDLE) {
-            fallbackInfo.imageView = ssao_fallback_view;
-            fallbackInfo.sampler = ssao_linear_sampler != VK_NULL_HANDLE ? ssao_linear_sampler : offscreen_sampler;
+            VkSampler sampler = ssao_linear_sampler != VK_NULL_HANDLE ? ssao_linear_sampler : offscreen_sampler;
+            fxaaPass_.writeImageBinding(current_frame, 2, ssao_fallback_view, sampler);
         } else {
-            fallbackInfo.imageView = offscreen_view;
-            fallbackInfo.sampler = offscreen_sampler;
+            fxaaPass_.writeImageBinding(current_frame, 2, offscreen_view, offscreen_sampler);
         }
-
-        VkDescriptorWriter(fxaa_descriptor_sets[current_frame])
-            .writeImage(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &fallbackInfo)
-            .update(device);
     }
 
     // Always apply FXAA/tone-mapping pass (scene renders to HDR offscreen, this resolves to LDR swapchain)
-    if (fxaa_initialized) {
+    if (fxaaPass_.isInitialized()) {
         VkCommandBuffer cmd = command_buffers[current_frame];
+
+        // Update FXAA UBO
+        FXAAUbo fxaaUbo{};
+        fxaaUbo.inverseScreenSize = glm::vec2(1.0f / swapchain_extent.width, 1.0f / swapchain_extent.height);
+        fxaaUbo.exposure = 1.0f;
+        fxaaUbo.ssaoEnabled = (ssaoEnabled && ssao_initialized) ? 1 : 0;
+        memcpy(fxaaPass_.getUBOMapped(current_frame), &fxaaUbo, sizeof(FXAAUbo));
 
         // Begin FXAA render pass (renders to swapchain)
         VkRenderPassBeginInfo fxaaPassInfo{};
         fxaaPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-        fxaaPassInfo.renderPass = fxaa_render_pass;
+        fxaaPassInfo.renderPass = fxaaPass_.getRenderPass();
         fxaaPassInfo.framebuffer = fxaa_framebuffers[current_image_index];
         fxaaPassInfo.renderArea.offset = {0, 0};
         fxaaPassInfo.renderArea.extent = swapchain_extent;
@@ -492,10 +483,8 @@ void VulkanRenderAPI::endFrame()
 
         vkCmdBeginRenderPass(cmd, &fxaaPassInfo, VK_SUBPASS_CONTENTS_INLINE);
 
-        // Bind FXAA pipeline
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, fxaa_pipeline);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, fxaaPass_.getPipeline());
 
-        // Set viewport and scissor
         VkViewport viewport{};
         viewport.x = 0.0f;
         viewport.y = 0.0f;
@@ -510,18 +499,10 @@ void VulkanRenderAPI::endFrame()
         scissor.extent = swapchain_extent;
         vkCmdSetScissor(cmd, 0, 1, &scissor);
 
-        // Bind FXAA descriptor set
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, fxaa_pipeline_layout,
-                                0, 1, &fxaa_descriptor_sets[current_frame], 0, nullptr);
+        VkDescriptorSet ds = fxaaPass_.getDescriptorSet(current_frame);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, fxaaPass_.getPipelineLayout(),
+                                0, 1, &ds, 0, nullptr);
 
-        // Update FXAA UBO with inverse screen size, exposure, and SSAO flag
-        FXAAUbo fxaaUbo{};
-        fxaaUbo.inverseScreenSize = glm::vec2(1.0f / swapchain_extent.width, 1.0f / swapchain_extent.height);
-        fxaaUbo.exposure = 1.0f;
-        fxaaUbo.ssaoEnabled = (ssaoEnabled && ssao_initialized) ? 1 : 0;
-        memcpy(fxaa_uniform_mapped[current_frame], &fxaaUbo, sizeof(FXAAUbo));
-
-        // Bind fullscreen quad and draw
         VkBuffer vertexBuffers[] = { fxaa_vertex_buffer };
         VkDeviceSize offsets[] = { 0 };
         vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
