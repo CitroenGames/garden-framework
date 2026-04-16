@@ -129,6 +129,8 @@ struct alignas(16) D3D12FXAACBuffer
     glm::vec2 inverseScreenSize;
     float exposure;
     int ssaoEnabled;
+    int shadowMaskEnabled;
+    glm::vec3 _pad;
 };
 
 struct alignas(16) D3D12SSAOCBuffer
@@ -150,4 +152,18 @@ struct alignas(16) D3D12SSAOBlurCBuffer
     glm::vec2 blurDir;         // (1,0) horizontal, (0,1) vertical
     float depthThreshold;      // edge-detection threshold
     glm::vec3 _pad;
+};
+
+struct alignas(16) D3D12ShadowMaskCBuffer
+{
+    glm::mat4 invViewProj;
+    glm::mat4 view;
+    glm::mat4 lightSpaceMatrices[4];
+    glm::vec4 cascadeSplits;
+    float cascadeSplit4;
+    int cascadeCount;
+    glm::vec2 shadowMapTexelSize;
+    glm::vec2 screenSize;
+    glm::vec3 lightDir;
+    float _pad;
 };

@@ -117,8 +117,10 @@ void D3D12RenderAPI::setViewportSize(int width, int height)
         flushGPU();
         createViewportResources(width, height);
         createPostProcessingResources(width, height);
-        if (m_psoSSAO)
+        if (m_ssaoPass.isInitialized())
             createSSAOResources(width, height);
+        if (m_shadowMaskPass.isInitialized())
+            createShadowMaskResources(width, height);
         float ratio = static_cast<float>(width) / static_cast<float>(height);
         projection_matrix = glm::perspectiveRH_ZO(glm::radians(field_of_view), ratio, 0.1f, 1000.0f);
     }
@@ -137,238 +139,53 @@ void D3D12RenderAPI::endSceneRender()
         if (it != m_pie_viewports.end())
         {
             auto& pie = it->second;
-            // FXAA from PIE offscreen to PIE final
-            if (fxaaEnabled)
-            {
-                transitionResource(pie.offscreenTexture.Get(), {},
-                                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-                transitionResource(pie.texture.Get(), {},
-                                   D3D12_RESOURCE_STATE_RENDER_TARGET);
-                flushBarriers();
 
-                D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvAllocator.getCPU(pie.rtvIndex);
-                commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
+            // PIE viewport: tone-map HDR offscreen to LDR output (with optional FXAA)
+            transitionResource(pie.offscreenTexture.Get(), {},
+                               D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            transitionResource(pie.texture.Get(), {},
+                               D3D12_RESOURCE_STATE_RENDER_TARGET);
+            flushBarriers();
 
-                D3D12_VIEWPORT vp = {};
-                vp.Width = static_cast<float>(pie.width);
-                vp.Height = static_cast<float>(pie.height);
-                vp.MaxDepth = 1.0f;
-                commandList->RSSetViewports(1, &vp);
+            D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvAllocator.getCPU(pie.rtvIndex);
+            renderFXAAPass(rtvHandle, pie.offscreenSRVIndex, pie.width, pie.height, false, false);
 
-                D3D12_RECT scissor = { 0, 0, pie.width, pie.height };
-                commandList->RSSetScissorRects(1, &scissor);
-
-                commandList->SetPipelineState(m_psoFXAA.Get());
-                commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
-
-                D3D12FXAACBuffer fxaaCB = {};
-                fxaaCB.inverseScreenSize = glm::vec2(1.0f / pie.width, 1.0f / pie.height);
-                fxaaCB.exposure = 1.0f;
-                auto cbAddr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(fxaaCB), &fxaaCB);
-                if (cbAddr == 0)
-                {
-                    // Ring buffer exhausted - cannot run FXAA/tone-map pass.
-                    // HDR offscreen (R16F) is incompatible with LDR output for CopyResource.
-                    LOG_ENGINE_WARN("[D3D12] Ring buffer exhausted - skipping PIE FXAA/tone-map pass");
-                    transitionResource(pie.offscreenTexture.Get(), {},
-                                       D3D12_RESOURCE_STATE_RENDER_TARGET);
-                    flushBarriers();
-                }
-                else
-                {
-                    commandList->SetGraphicsRootConstantBufferView(0, cbAddr);
-                    commandList->SetGraphicsRootConstantBufferView(1, cbAddr); // dummy
-                    commandList->SetGraphicsRootDescriptorTable(2, m_srvAllocator.getGPU(pie.offscreenSRVIndex));
-                    // Bind SSAO fallback white texture (SSAO not supported in PIE viewports)
-                    if (m_ssaoFallbackSRVIndex != UINT(-1))
-                        commandList->SetGraphicsRootDescriptorTable(3, m_srvAllocator.getGPU(m_ssaoFallbackSRVIndex));
-                    commandList->SetGraphicsRootConstantBufferView(4, cbAddr); // dummy
-
-                    commandList->IASetVertexBuffers(0, 1, &m_fxaaQuadVBV);
-                    commandList->DrawInstanced(4, 1, 0, 0);
-
-                    transitionResource(pie.offscreenTexture.Get(), {},
-                                       D3D12_RESOURCE_STATE_RENDER_TARGET);
-                    transitionResource(pie.texture.Get(),
-                                       D3D12_RESOURCE_STATE_RENDER_TARGET,
-                                       D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-                    flushBarriers();
-                }
-            }
-            else
-            {
-                // FXAA disabled - still need tone mapping pass from HDR offscreen to LDR output
-                transitionResource(pie.offscreenTexture.Get(), {},
-                                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-                transitionResource(pie.texture.Get(), {},
-                                   D3D12_RESOURCE_STATE_RENDER_TARGET);
-                flushBarriers();
-
-                D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvAllocator.getCPU(pie.rtvIndex);
-                commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
-
-                D3D12_VIEWPORT vp = {};
-                vp.Width = static_cast<float>(pie.width);
-                vp.Height = static_cast<float>(pie.height);
-                vp.MaxDepth = 1.0f;
-                commandList->RSSetViewports(1, &vp);
-
-                D3D12_RECT scissor = { 0, 0, pie.width, pie.height };
-                commandList->RSSetScissorRects(1, &scissor);
-
-                commandList->SetPipelineState(m_psoFXAA.Get());
-                commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
-
-                D3D12FXAACBuffer fxaaCB = {};
-                fxaaCB.inverseScreenSize = glm::vec2(1.0f / pie.width, 1.0f / pie.height);
-                fxaaCB.exposure = 1.0f;
-                auto cbAddr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(fxaaCB), &fxaaCB);
-                if (cbAddr != 0)
-                {
-                    commandList->SetGraphicsRootConstantBufferView(0, cbAddr);
-                    commandList->SetGraphicsRootConstantBufferView(1, cbAddr);
-                    commandList->SetGraphicsRootDescriptorTable(2, m_srvAllocator.getGPU(pie.offscreenSRVIndex));
-                    // Bind SSAO fallback white texture (SSAO not supported in PIE viewports)
-                    if (m_ssaoFallbackSRVIndex != UINT(-1))
-                        commandList->SetGraphicsRootDescriptorTable(3, m_srvAllocator.getGPU(m_ssaoFallbackSRVIndex));
-                    commandList->SetGraphicsRootConstantBufferView(4, cbAddr);
-
-                    commandList->IASetVertexBuffers(0, 1, &m_fxaaQuadVBV);
-                    commandList->DrawInstanced(4, 1, 0, 0);
-                }
-
-                transitionResource(pie.offscreenTexture.Get(),
-                                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-                                   D3D12_RESOURCE_STATE_RENDER_TARGET);
-                transitionResource(pie.texture.Get(), {},
-                                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-                flushBarriers();
-            }
+            transitionResource(pie.offscreenTexture.Get(), {},
+                               D3D12_RESOURCE_STATE_RENDER_TARGET);
+            transitionResource(pie.texture.Get(), {},
+                               D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            flushBarriers();
         }
         m_active_scene_target = -1;
     }
     else
     {
         // Run SSAO pass before FXAA/tone-mapping (generates blurred SSAO texture)
-        if (ssaoEnabled && m_psoSSAO && m_ssaoRawTexture && m_viewportDepthSRVIndex != UINT(-1))
+        if (ssaoEnabled && m_ssaoPass.isInitialized() && m_viewportDepthSRVIndex != UINT(-1))
             renderSSAOPass(m_viewportDepthBuffer.Get(), m_viewportDepthSRVIndex,
                            viewport_width_rt, viewport_height_rt);
 
-        // Editor viewport: FXAA from offscreen to viewport
-        if (fxaaEnabled)
-        {
-            transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-            transitionResource(m_viewportTexture.Get(), {},
-                               D3D12_RESOURCE_STATE_RENDER_TARGET);
-            // Flush batched barriers (offscreen->SRV + viewport->RT in one call)
-            flushBarriers();
+        // Run shadow mask pass
+        bool wantShadowMask = (shadowQuality > 0) && m_shadowMaskPass.isInitialized()
+                              && m_shadowMapArray && m_viewportDepthSRVIndex != UINT(-1);
+        if (wantShadowMask)
+            renderShadowMaskPass(m_viewportDepthBuffer.Get(), m_viewportDepthSRVIndex,
+                                 viewport_width_rt, viewport_height_rt);
 
-            D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvAllocator.getCPU(m_viewportRTVIndex);
-            commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
+        // Editor viewport: tone-map HDR offscreen to LDR viewport (with optional FXAA)
+        transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        transitionResource(m_viewportTexture.Get(), {},
+                           D3D12_RESOURCE_STATE_RENDER_TARGET);
+        flushBarriers();
 
-            D3D12_VIEWPORT vp = {};
-            vp.Width = static_cast<float>(viewport_width_rt);
-            vp.Height = static_cast<float>(viewport_height_rt);
-            vp.MaxDepth = 1.0f;
-            commandList->RSSetViewports(1, &vp);
+        D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvAllocator.getCPU(m_viewportRTVIndex);
+        bool enableSSAO = ssaoEnabled && m_ssaoBlurVPass.isInitialized();
+        renderFXAAPass(rtvHandle, m_offscreenSRVIndex, viewport_width_rt, viewport_height_rt, enableSSAO, wantShadowMask);
 
-            D3D12_RECT scissor = { 0, 0, viewport_width_rt, viewport_height_rt };
-            commandList->RSSetScissorRects(1, &scissor);
-
-            commandList->SetPipelineState(m_psoFXAA.Get());
-            commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
-
-            D3D12FXAACBuffer fxaaCB = {};
-            fxaaCB.inverseScreenSize = glm::vec2(1.0f / viewport_width_rt, 1.0f / viewport_height_rt);
-            fxaaCB.exposure = 1.0f;
-            fxaaCB.ssaoEnabled = (ssaoEnabled && m_ssaoBlurredSRVIndex != UINT(-1)) ? 1 : 0;
-            auto cbAddr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(fxaaCB), &fxaaCB);
-            if (cbAddr == 0)
-            {
-                // Ring buffer exhausted - cannot run FXAA/tone-map pass.
-                // HDR offscreen (R16F) is incompatible with LDR viewport for CopyResource.
-                LOG_ENGINE_WARN("[D3D12] Ring buffer exhausted - skipping viewport FXAA/tone-map pass");
-                transitionResource(m_viewportTexture.Get(), {},
-                                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-                transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
-                flushBarriers();
-            }
-            else
-            {
-                commandList->SetGraphicsRootConstantBufferView(0, cbAddr);
-                commandList->SetGraphicsRootConstantBufferView(1, cbAddr); // dummy
-                commandList->SetGraphicsRootDescriptorTable(2, m_srvAllocator.getGPU(m_offscreenSRVIndex));
-                // Bind SSAO blurred texture at t1 slot (root param 3), or fallback white
-                {
-                    UINT ssaoSrvIdx = (ssaoEnabled && m_ssaoBlurredSRVIndex != UINT(-1))
-                        ? m_ssaoBlurredSRVIndex : m_ssaoFallbackSRVIndex;
-                    if (ssaoSrvIdx != UINT(-1))
-                        commandList->SetGraphicsRootDescriptorTable(3, m_srvAllocator.getGPU(ssaoSrvIdx));
-                }
-                commandList->SetGraphicsRootConstantBufferView(4, cbAddr); // dummy
-
-                commandList->IASetVertexBuffers(0, 1, &m_fxaaQuadVBV);
-                commandList->DrawInstanced(4, 1, 0, 0);
-
-                transitionResource(m_viewportTexture.Get(), {},
-                                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-                // Restore offscreen to render target for next frame
-                transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
-                flushBarriers();
-            }
-        }
-        else
-        {
-            // FXAA disabled - still need tone mapping pass from HDR offscreen to LDR viewport
-            transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-            transitionResource(m_viewportTexture.Get(), {},
-                               D3D12_RESOURCE_STATE_RENDER_TARGET);
-            flushBarriers();
-
-            D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvAllocator.getCPU(m_viewportRTVIndex);
-            commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
-
-            D3D12_VIEWPORT vp = {};
-            vp.Width = static_cast<float>(viewport_width_rt);
-            vp.Height = static_cast<float>(viewport_height_rt);
-            vp.MaxDepth = 1.0f;
-            commandList->RSSetViewports(1, &vp);
-
-            D3D12_RECT scissor = { 0, 0, viewport_width_rt, viewport_height_rt };
-            commandList->RSSetScissorRects(1, &scissor);
-
-            commandList->SetPipelineState(m_psoFXAA.Get());
-            commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
-
-            D3D12FXAACBuffer fxaaCB = {};
-            fxaaCB.inverseScreenSize = glm::vec2(1.0f / viewport_width_rt, 1.0f / viewport_height_rt);
-            fxaaCB.exposure = 1.0f;
-            fxaaCB.ssaoEnabled = (ssaoEnabled && m_ssaoBlurredSRVIndex != UINT(-1)) ? 1 : 0;
-            auto cbAddr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(fxaaCB), &fxaaCB);
-            if (cbAddr != 0)
-            {
-                commandList->SetGraphicsRootConstantBufferView(0, cbAddr);
-                commandList->SetGraphicsRootConstantBufferView(1, cbAddr);
-                commandList->SetGraphicsRootDescriptorTable(2, m_srvAllocator.getGPU(m_offscreenSRVIndex));
-                // Bind SSAO blurred texture at t1 slot (root param 3), or fallback white
-                {
-                    UINT ssaoSrvIdx = (ssaoEnabled && m_ssaoBlurredSRVIndex != UINT(-1))
-                        ? m_ssaoBlurredSRVIndex : m_ssaoFallbackSRVIndex;
-                    if (ssaoSrvIdx != UINT(-1))
-                        commandList->SetGraphicsRootDescriptorTable(3, m_srvAllocator.getGPU(ssaoSrvIdx));
-                }
-                commandList->SetGraphicsRootConstantBufferView(4, cbAddr);
-
-                commandList->IASetVertexBuffers(0, 1, &m_fxaaQuadVBV);
-                commandList->DrawInstanced(4, 1, 0, 0);
-            }
-
-            transitionResource(m_viewportTexture.Get(),
-                               D3D12_RESOURCE_STATE_RENDER_TARGET,
-                               D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-            transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
-            flushBarriers();
-        }
+        transitionResource(m_viewportTexture.Get(), {},
+                           D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        flushBarriers();
     }
 
     last_bound_pso = nullptr;

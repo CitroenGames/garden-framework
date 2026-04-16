@@ -1,6 +1,9 @@
 #include "D3D12RenderAPI.hpp"
 #include "Utils/Log.hpp"
 
+#undef min
+#undef max
+
 // ============================================================================
 // Post-Processing Resources (FXAA)
 // ============================================================================
@@ -146,6 +149,48 @@ bool D3D12RenderAPI::createPostProcessingResources(int width, int height)
     }
 
     return true;
+}
+
+// ============================================================================
+// Unified FXAA / tone-mapping pass
+// ============================================================================
+
+void D3D12RenderAPI::renderFXAAPass(
+    D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle, UINT inputSRVIndex,
+    int width, int height, bool enableSSAO, bool enableShadowMask)
+{
+    m_fxaaPass.begin(commandList.Get(), rtvHandle,
+                     static_cast<uint32_t>(width), static_cast<uint32_t>(height));
+
+    // Root param 0: FXAA constant buffer
+    D3D12FXAACBuffer fxaaCB = {};
+    fxaaCB.inverseScreenSize = glm::vec2(1.0f / std::max(width, 1), 1.0f / std::max(height, 1));
+    fxaaCB.exposure = 1.0f;
+    fxaaCB.ssaoEnabled = enableSSAO ? 1 : 0;
+    fxaaCB.shadowMaskEnabled = enableShadowMask ? 1 : 0;
+    auto cbAddr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(fxaaCB), &fxaaCB);
+    if (cbAddr == 0) {
+        LOG_ENGINE_WARN("[D3D12] Ring buffer exhausted - skipping FXAA/tone-map pass");
+        return;
+    }
+    commandList->SetGraphicsRootConstantBufferView(0, cbAddr);
+
+    // Root param 1: Screen texture (HDR offscreen)
+    commandList->SetGraphicsRootDescriptorTable(1, m_srvAllocator.getGPU(inputSRVIndex));
+
+    // Root param 2: SSAO texture (or fallback white)
+    UINT ssaoSrvIdx = (enableSSAO && m_ssaoBlurVPass.isInitialized())
+        ? m_ssaoBlurVPass.getOutputSRVIndex() : m_ssaoFallbackSRVIndex;
+    if (ssaoSrvIdx != UINT(-1))
+        commandList->SetGraphicsRootDescriptorTable(2, m_srvAllocator.getGPU(ssaoSrvIdx));
+
+    // Root param 3: Shadow mask texture
+    UINT shadowMaskSrvIdx = (enableShadowMask && m_shadowMaskPass.isInitialized())
+        ? m_shadowMaskPass.getOutputSRVIndex() : m_ssaoFallbackSRVIndex;
+    if (shadowMaskSrvIdx != UINT(-1))
+        commandList->SetGraphicsRootDescriptorTable(3, m_srvAllocator.getGPU(shadowMaskSrvIdx));
+
+    m_fxaaPass.draw(commandList.Get(), m_fxaaQuadVBV);
 }
 
 // ============================================================================

@@ -480,33 +480,7 @@ bool D3D12RenderAPI::createPipelineStates()
         if (!m_psoSky) { LOG_ENGINE_ERROR("Failed to create PSO: Sky"); return false; }
     }
 
-    // FXAA (no depth, fullscreen quad)
-    {
-        static D3D12_INPUT_ELEMENT_DESC fxaaLayout[] = {
-            { "POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-            { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 8, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
-        };
-
-        D3D12_GRAPHICS_PIPELINE_STATE_DESC desc = {};
-        desc.pRootSignature = m_rootSignature.Get();
-        desc.VS = { m_fxaaVS.data(), m_fxaaVS.size() };
-        desc.PS = { m_fxaaPS.data(), m_fxaaPS.size() };
-        desc.InputLayout = { fxaaLayout, 2 };
-        desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-        desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-        desc.RasterizerState.DepthClipEnable = FALSE;
-        desc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-        desc.DepthStencilState.DepthEnable = FALSE;
-        desc.SampleMask = UINT_MAX;
-        desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-        desc.NumRenderTargets = 1;
-        desc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
-        desc.DSVFormat = DXGI_FORMAT_UNKNOWN;
-        desc.SampleDesc.Count = 1;
-
-        m_psoFXAA = createPSO(L"FXAA", desc);
-        if (!m_psoFXAA) { LOG_ENGINE_ERROR("Failed to create PSO: FXAA"); return false; }
-    }
+    // FXAA PSO is now created inside D3D12PostProcessPass (m_fxaaPass)
 
     // Depth prepass (depth-only, no color output)
     {

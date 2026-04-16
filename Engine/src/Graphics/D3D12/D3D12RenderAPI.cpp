@@ -275,15 +275,50 @@ bool D3D12RenderAPI::initialize(WindowHandle window, int width, int height, floa
         return false;
     }
 
-    if (!createSSAORootSignatureAndPSOs())
+    // Initialize FXAA post-process pass with dedicated root signature
     {
-        LOG_ENGINE_WARN("[D3D12] Failed to create SSAO PSOs -- SSAO disabled");
-        ssaoEnabled = false;
+        D3D12PostProcessPassConfig fxaaCfg;
+        fxaaCfg.debugName = L"FXAA";
+        fxaaCfg.outputFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+        fxaaCfg.useExternalRTV = true;
+
+        fxaaCfg.bindings = {
+            { D3D12PPBinding::CBV,       0, D3D12_SHADER_VISIBILITY_ALL   },  // b0: FXAACBuffer
+            { D3D12PPBinding::SRV_TABLE, 0, D3D12_SHADER_VISIBILITY_PIXEL },  // t0: screen texture
+            { D3D12PPBinding::SRV_TABLE, 1, D3D12_SHADER_VISIBILITY_PIXEL },  // t1: SSAO texture
+            { D3D12PPBinding::SRV_TABLE, 2, D3D12_SHADER_VISIBILITY_PIXEL },  // t2: shadow mask texture
+        };
+
+        for (int i = 0; i < 3; i++) {
+            D3D12_STATIC_SAMPLER_DESC samp = {};
+            samp.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+            samp.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+            samp.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+            samp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+            samp.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+            samp.MaxLOD = D3D12_FLOAT32_MAX;
+            samp.ShaderRegister = i;
+            samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            fxaaCfg.staticSamplers.push_back(samp);
+        }
+
+        if (!m_fxaaPass.init(device.Get(), m_rtvAllocator, m_srvAllocator,
+                             m_stateTracker, m_psoCache, fxaaCfg,
+                             width, height, m_fxaaVS, m_fxaaPS)) {
+            LOG_ENGINE_ERROR("Failed to create FXAA post-process pass");
+            return false;
+        }
     }
-    else if (!createSSAOResources(width, height))
+
+    if (!createSSAOResources(width, height))
     {
         LOG_ENGINE_WARN("[D3D12] Failed to create SSAO resources -- SSAO disabled");
         ssaoEnabled = false;
+    }
+
+    if (!createShadowMaskResources(width, height))
+    {
+        LOG_ENGINE_WARN("[D3D12] Failed to create shadow mask resources -- shadow mask disabled");
     }
 
     if (!createSkyboxResources())
@@ -335,6 +370,13 @@ void D3D12RenderAPI::shutdown()
     LOG_ENGINE_INFO("[D3D12] Shutting down...");
     m_copyQueue.flushSync();
     flushGPU();
+
+    // Clean up post-process passes before device release
+    m_fxaaPass.cleanup();
+    m_ssaoPass.cleanup();
+    m_ssaoBlurHPass.cleanup();
+    m_ssaoBlurVPass.cleanup();
+    m_shadowMaskPass.cleanup();
 
     // Save PSO cache before releasing PSOs
     if (!m_psoCachePath.empty())
@@ -482,8 +524,40 @@ void D3D12RenderAPI::resize(int width, int height)
     }
 
     // Recreate SSAO resources at new size
-    if (m_psoSSAO)
-        createSSAOResources(width, height);
+    if (m_ssaoPass.isInitialized())
+    {
+        m_ssaoPass.resize(width, height);
+        m_ssaoBlurHPass.resize(width, height);
+        m_ssaoBlurVPass.resize(width, height);
+
+        // Recreate depth SRV for new depth buffer
+        if (m_depthSRVIndex == UINT(-1))
+            m_depthSRVIndex = m_srvAllocator.allocate();
+        D3D12_SHADER_RESOURCE_VIEW_DESC depthSrvDesc = {};
+        depthSrvDesc.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+        depthSrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        depthSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        depthSrvDesc.Texture2D.MipLevels = 1;
+        device->CreateShaderResourceView(m_depthStencilBuffer.Get(), &depthSrvDesc,
+                                          m_srvAllocator.getCPU(m_depthSRVIndex));
+    }
+
+    // Recreate shadow mask pass at new size
+    if (m_shadowMaskPass.isInitialized())
+    {
+        m_shadowMaskPass.resize(width, height);
+
+        // Ensure depth SRV exists for new depth buffer (may not exist if SSAO is disabled)
+        if (m_depthSRVIndex == UINT(-1))
+            m_depthSRVIndex = m_srvAllocator.allocate();
+        D3D12_SHADER_RESOURCE_VIEW_DESC depthSrvDesc = {};
+        depthSrvDesc.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+        depthSrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        depthSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        depthSrvDesc.Texture2D.MipLevels = 1;
+        device->CreateShaderResourceView(m_depthStencilBuffer.Get(), &depthSrvDesc,
+                                          m_srvAllocator.getCPU(m_depthSRVIndex));
+    }
 
     float ratio = static_cast<float>(width) / static_cast<float>(height);
     projection_matrix = glm::perspectiveRH_ZO(glm::radians(field_of_view), ratio, 0.1f, 1000.0f);

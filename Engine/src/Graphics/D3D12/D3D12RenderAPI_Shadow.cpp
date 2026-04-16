@@ -5,6 +5,7 @@
 #include "D3D12RenderAPI.hpp"
 #include "Components/camera.hpp"
 #include "Utils/Log.hpp"
+#include "Utils/EnginePaths.hpp"
 #include <cmath>
 #include <limits>
 #include <algorithm>
@@ -400,4 +401,143 @@ void D3D12RenderAPI::recreateShadowMapResources(unsigned int size)
                                               m_srvAllocator.getCPU(m_shadowSRVIndex));
         }
     }
+}
+
+// ============================================================================
+// Shadow Mask Post-Process Pass
+// ============================================================================
+
+bool D3D12RenderAPI::createShadowMaskResources(int width, int height)
+{
+    if (!m_shadowMaskPass.isInitialized())
+    {
+        auto shaderBasePath = EnginePaths::resolveEngineAsset("../assets/shaders/compiled/d3d12/");
+        auto shadowMaskVS = readShaderBinary(shaderBasePath + "shadow_mask_vs.dxil");
+        auto shadowMaskPS = readShaderBinary(shaderBasePath + "shadow_mask_ps.dxil");
+
+        if (shadowMaskVS.empty() || shadowMaskPS.empty())
+        {
+            LOG_ENGINE_ERROR("[D3D12] Failed to load shadow mask shaders");
+            return false;
+        }
+
+        D3D12PostProcessPassConfig cfg;
+        cfg.debugName = L"Shadow Mask";
+        cfg.outputFormat = DXGI_FORMAT_R8_UNORM;
+        cfg.scaleFactor = 1.0f;
+        cfg.useExternalRTV = false;
+        cfg.clearColor[0] = 1.0f; cfg.clearColor[1] = 1.0f;
+        cfg.clearColor[2] = 1.0f; cfg.clearColor[3] = 1.0f;
+
+        cfg.bindings = {
+            { D3D12PPBinding::CBV,       0, D3D12_SHADER_VISIBILITY_ALL   },  // b0: ShadowMaskCB
+            { D3D12PPBinding::SRV_TABLE, 0, D3D12_SHADER_VISIBILITY_PIXEL },  // t0: depth texture
+            { D3D12PPBinding::SRV_TABLE, 1, D3D12_SHADER_VISIBILITY_PIXEL },  // t1: shadow map array
+        };
+
+        // s0: point clamp sampler for depth texture
+        {
+            D3D12_STATIC_SAMPLER_DESC samp = {};
+            samp.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+            samp.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+            samp.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+            samp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+            samp.ShaderRegister = 0;
+            samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            cfg.staticSamplers.push_back(samp);
+        }
+
+        // s1: comparison sampler for shadow map PCF
+        {
+            D3D12_STATIC_SAMPLER_DESC samp = {};
+            samp.Filter = D3D12_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT;
+            samp.AddressU = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+            samp.AddressV = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+            samp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+            samp.ComparisonFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+            samp.BorderColor = D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE;
+            samp.ShaderRegister = 1;
+            samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            cfg.staticSamplers.push_back(samp);
+        }
+
+        if (!m_shadowMaskPass.init(device.Get(), m_rtvAllocator, m_srvAllocator,
+                                   m_stateTracker, m_psoCache, cfg,
+                                   width, height, shadowMaskVS, shadowMaskPS))
+        {
+            LOG_ENGINE_ERROR("[D3D12] Failed to create shadow mask pass");
+            return false;
+        }
+    }
+    else
+    {
+        m_shadowMaskPass.resize(width, height);
+    }
+
+    // Ensure depth SRV exists (may already be created by SSAO)
+    if (m_depthSRVIndex == UINT(-1))
+        m_depthSRVIndex = m_srvAllocator.allocate();
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC depthSrvDesc = {};
+    depthSrvDesc.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+    depthSrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    depthSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    depthSrvDesc.Texture2D.MipLevels = 1;
+    device->CreateShaderResourceView(m_depthStencilBuffer.Get(), &depthSrvDesc,
+                                      m_srvAllocator.getCPU(m_depthSRVIndex));
+
+    LOG_ENGINE_INFO("[D3D12] Shadow mask resources created ({}x{})",
+                    m_shadowMaskPass.getWidth(), m_shadowMaskPass.getHeight());
+    return true;
+}
+
+void D3D12RenderAPI::renderShadowMaskPass(ID3D12Resource* depthBuffer, UINT depthSRVIndex,
+                                           int fullWidth, int fullHeight)
+{
+    if (!m_shadowMaskPass.isInitialized() || !depthBuffer || !m_shadowMapArray) return;
+    if (m_shadowSRVIndex == UINT(-1) || depthSRVIndex == UINT(-1)) return;
+
+    transitionResource(depthBuffer, {}, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    transitionResource(m_shadowMapArray.Get(), {}, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    flushBarriers();
+
+    m_shadowMaskPass.begin(commandList.Get());
+
+    float clearColor[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+    commandList->ClearRenderTargetView(m_rtvAllocator.getCPU(m_shadowMaskPass.getOutputRTVIndex()),
+                                       clearColor, 0, nullptr);
+
+    D3D12ShadowMaskCBuffer cb = {};
+    cb.invViewProj = glm::inverse(projection_matrix * view_matrix);
+    cb.view = view_matrix;
+    for (int i = 0; i < NUM_CASCADES; i++)
+        cb.lightSpaceMatrices[i] = lightSpaceMatrices[i];
+    cb.cascadeSplits = glm::vec4(cascadeSplitDistances[0], cascadeSplitDistances[1],
+                                  cascadeSplitDistances[2], cascadeSplitDistances[3]);
+    cb.cascadeSplit4 = cascadeSplitDistances[NUM_CASCADES];
+    cb.cascadeCount = NUM_CASCADES;
+    cb.shadowMapTexelSize = glm::vec2(1.0f / static_cast<float>(currentShadowSize));
+    cb.screenSize = glm::vec2(static_cast<float>(m_shadowMaskPass.getWidth()),
+                               static_cast<float>(m_shadowMaskPass.getHeight()));
+    cb.lightDir = current_light_direction;
+
+    auto cbAddr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(cb), &cb);
+    if (cbAddr == 0)
+    {
+        LOG_ENGINE_WARN("[D3D12] Ring buffer exhausted - skipping shadow mask pass");
+        goto shadow_mask_cleanup;
+    }
+
+    commandList->SetGraphicsRootConstantBufferView(0, cbAddr);
+    commandList->SetGraphicsRootDescriptorTable(1, m_srvAllocator.getGPU(depthSRVIndex));
+    commandList->SetGraphicsRootDescriptorTable(2, m_srvAllocator.getGPU(m_shadowSRVIndex));
+
+    m_shadowMaskPass.draw(commandList.Get(), m_fxaaQuadVBV);
+
+shadow_mask_cleanup:
+    transitionResource(m_shadowMaskPass.getOutputTexture(), {}, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    transitionResource(depthBuffer, {}, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+    flushBarriers();
+
+    commandList->SetGraphicsRootSignature(m_rootSignature.Get());
 }

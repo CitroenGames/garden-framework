@@ -6,3 +6,4 @@ headers = *.h
 includes = .
 public_includes = .
 multiprocessor = true
+simd = AdvancedVectorExtensions2

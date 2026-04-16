@@ -48,7 +48,7 @@ target_link_libraries(
     PUBLIC bc7enc
 )
 multiprocessor = true
-simd = StreamingSIMDExtensions2
+simd = AdvancedVectorExtensions2
 std = 20
 utf8 = true
 exception_handling = false

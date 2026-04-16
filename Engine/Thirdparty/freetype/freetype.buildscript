@@ -38,3 +38,4 @@ includes = include
 public_includes = include
 defines = FT2_BUILD_LIBRARY
 multiprocessor = true
+simd = AdvancedVectorExtensions2

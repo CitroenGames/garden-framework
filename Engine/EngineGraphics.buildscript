@@ -47,6 +47,7 @@ sources = {
     src/Graphics/D3D12/D3D12CopyQueue.cpp [windows]
     src/Graphics/D3D12/D3D12PSOCache.cpp [windows]
     src/Graphics/D3D12/D3D12ResourceStateTracker.cpp [windows]
+    src/Graphics/D3D12/D3D12PostProcessPass.cpp [windows]
     src/Graphics/Metal/MetalRenderAPI.mm [macOS]
     src/Graphics/Metal/MetalRenderAPI_Frame.mm [macOS]
     src/Graphics/Metal/MetalRenderAPI_Rendering.mm [macOS]
@@ -99,7 +100,7 @@ target_link_libraries(
     PUBLIC RmlUi
 )
 multiprocessor = true
-simd = StreamingSIMDExtensions2
+simd = AdvancedVectorExtensions2
 std = 20
 utf8 = true
 exception_handling = false

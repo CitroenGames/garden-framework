@@ -6,6 +6,8 @@ cbuffer FXAACB : register(b0)
     float2 uInverseScreenSize;
     float uExposure;
     int uSSAOEnabled;
+    int uShadowMaskEnabled;
+    float3 _pad;
 };
 
 [[vk::binding(0, 0)]]Texture2D screenTexture : register(t0);
@@ -14,6 +16,10 @@ cbuffer FXAACB : register(b0)
 // SSAO texture with its own sampler for Vulkan COMBINED_IMAGE_SAMPLER compatibility
 [[vk::binding(2, 0)]]Texture2D ssaoTexture : register(t1);
 [[vk::binding(2, 0)]]SamplerState ssaoSampler : register(s1);
+
+// Shadow mask texture
+[[vk::binding(3, 0)]]Texture2D shadowMaskTexture : register(t2);
+[[vk::binding(3, 0)]]SamplerState shadowMaskSampler : register(s2);
 
 struct VSInput
 {
@@ -117,6 +123,13 @@ float4 fragmentMain(PSInput input) : SV_TARGET
     {
         float ao = ssaoTexture.Sample(ssaoSampler, texCoord).r;
         result *= ao;
+    }
+
+    // Apply shadow mask (multiplied before tone mapping, only when enabled)
+    if (uShadowMaskEnabled != 0)
+    {
+        float shadow = shadowMaskTexture.Sample(shadowMaskSampler, texCoord).r;
+        result *= shadow;
     }
 
     // Apply exposure and ACES tone mapping

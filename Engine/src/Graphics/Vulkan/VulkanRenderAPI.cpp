@@ -193,6 +193,12 @@ bool VulkanRenderAPI::initialize(WindowHandle window, int width, int height, flo
         ssaoEnabled = false;
     }
 
+    // Create shadow mask post-process pass
+    LOG_ENGINE_INFO("[Vulkan] Creating shadow mask resources...");
+    if (!createShadowMaskResources()) {
+        LOG_ENGINE_WARN("[Vulkan] Failed to create shadow mask resources");
+    }
+
     // Create continuation render pass for parallel replay (render pass split)
     if (!createContinuationRenderPass()) {
         LOG_ENGINE_WARN("[Vulkan] Failed to create continuation render pass -- parallel replay disabled");
@@ -254,6 +260,9 @@ void VulkanRenderAPI::shutdown()
 
     // Clean up skybox resources
     cleanupSkyboxResources();
+
+    // Clean up shadow mask post-process pass
+    cleanupShadowMaskResources();
 
     // Clean up SSAO resources
     cleanupSSAOResources();

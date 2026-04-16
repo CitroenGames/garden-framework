@@ -6,3 +6,4 @@ headers = src/meshoptimizer.h
 includes = src
 public_includes = src
 multiprocessor = true
+simd = AdvancedVectorExtensions2

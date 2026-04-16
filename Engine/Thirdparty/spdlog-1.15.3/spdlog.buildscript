@@ -8,3 +8,4 @@ includes = include
 public_includes = include
 defines = SPDLOG_COMPILED_LIB
 multiprocessor = true
+simd = AdvancedVectorExtensions2

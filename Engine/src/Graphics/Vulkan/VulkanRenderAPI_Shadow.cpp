@@ -793,4 +793,110 @@ void VulkanRenderAPI::recreateShadowResources(uint32_t size)
     {
         LOG_ENGINE_INFO("Shadow map resized to {}x{}", size, size);
     }
+
+    // Rebind shadow map to shadow mask post-process pass
+    if (shadow_mask_initialized && shadow_map_view != VK_NULL_HANDLE) {
+        shadowMaskPass_.writeImageBindingAllFrames(1, shadow_map_view, shadow_sampler,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    }
+}
+
+// ============================================================================
+// Shadow Mask Post-Process Pass
+// ============================================================================
+
+bool VulkanRenderAPI::createShadowMaskResources()
+{
+    // Need shadow map and offscreen depth to exist
+    if (shadow_map_view == VK_NULL_HANDLE || offscreen_depth_image == VK_NULL_HANDLE)
+        return false;
+
+    // --- Create depth readable view and sampler ---
+    shadow_mask_depth_view = vkutil::createImageView(device, offscreen_depth_image, depth_format, VK_IMAGE_ASPECT_DEPTH_BIT);
+    if (shadow_mask_depth_view == VK_NULL_HANDLE) return false;
+
+    SamplerKey depthSamplerKey{};
+    depthSamplerKey.magFilter = VK_FILTER_NEAREST;
+    depthSamplerKey.minFilter = VK_FILTER_NEAREST;
+    depthSamplerKey.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    depthSamplerKey.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    depthSamplerKey.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    depthSamplerKey.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    depthSamplerKey.anisotropyEnable = VK_FALSE;
+    depthSamplerKey.maxAnisotropy = 1.0f;
+    depthSamplerKey.compareEnable = VK_FALSE;
+    depthSamplerKey.compareOp = VK_COMPARE_OP_ALWAYS;
+    shadow_mask_depth_sampler = sampler_cache.getOrCreate(depthSamplerKey);
+
+    // --- Shader loading callbacks ---
+    auto readShaderFn = [this](const std::string& path) { return readShaderFile(path); };
+    auto createModuleFn = [this](const std::vector<char>& code) { return createShaderModule(code); };
+
+    // --- Initialize shadow mask pass ---
+    PostProcessPassConfig cfg;
+    cfg.debugName = "Shadow Mask";
+    cfg.outputFormat = VK_FORMAT_R8_UNORM;
+    cfg.scaleFactor = 1.0f;
+    cfg.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    cfg.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    cfg.clearColor = {{1.0f, 1.0f, 1.0f, 1.0f}};
+    cfg.bindings = {
+        {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT},
+        {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT},
+        {2, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT},
+    };
+    cfg.vertShaderPath = EnginePaths::resolveEngineAsset("../assets/shaders/compiled/vulkan/shadow_mask.vert.spv");
+    cfg.fragShaderPath = EnginePaths::resolveEngineAsset("../assets/shaders/compiled/vulkan/shadow_mask.frag.spv");
+    cfg.uboSize = sizeof(ShadowMaskUbo);
+    cfg.uboBinding = 2;
+
+    if (!shadowMaskPass_.init(device, vma_allocator, vk_pipeline_cache, sampler_cache,
+                              cfg, swapchain_extent, readShaderFn, createModuleFn))
+        return false;
+
+    // --- Write image bindings ---
+    shadowMaskPass_.writeImageBindingAllFrames(0, shadow_mask_depth_view, shadow_mask_depth_sampler,
+        VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+    shadowMaskPass_.writeImageBindingAllFrames(1, shadow_map_view, shadow_sampler,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+    shadow_mask_initialized = true;
+    LOG_ENGINE_INFO("[Vulkan] Shadow mask resources created ({}x{})", shadowMaskPass_.getWidth(), shadowMaskPass_.getHeight());
+    return true;
+}
+
+void VulkanRenderAPI::cleanupShadowMaskResources()
+{
+    if (device == VK_NULL_HANDLE) return;
+    shadow_mask_initialized = false;
+
+    shadowMaskPass_.cleanup();
+
+    if (shadow_mask_depth_view != VK_NULL_HANDLE) {
+        vkDestroyImageView(device, shadow_mask_depth_view, nullptr);
+        shadow_mask_depth_view = VK_NULL_HANDLE;
+    }
+
+    shadow_mask_depth_sampler = VK_NULL_HANDLE;
+}
+
+void VulkanRenderAPI::recreateShadowMaskResources()
+{
+    // Recreate depth view for new offscreen depth image
+    if (shadow_mask_depth_view != VK_NULL_HANDLE) {
+        vkDestroyImageView(device, shadow_mask_depth_view, nullptr);
+        shadow_mask_depth_view = VK_NULL_HANDLE;
+    }
+    shadow_mask_depth_view = vkutil::createImageView(device, offscreen_depth_image, depth_format, VK_IMAGE_ASPECT_DEPTH_BIT);
+
+    // Resize pass (recreates output image)
+    shadowMaskPass_.resize(swapchain_extent);
+
+    // Re-write image bindings
+    shadowMaskPass_.writeImageBindingAllFrames(0, shadow_mask_depth_view, shadow_mask_depth_sampler,
+        VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+    if (shadow_map_view != VK_NULL_HANDLE) {
+        shadowMaskPass_.writeImageBindingAllFrames(1, shadow_map_view, shadow_sampler,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    }
 }

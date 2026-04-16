@@ -34,6 +34,7 @@ if(Windows)
 public_includes = ., backends
 defines = ENGINEGRAPHICS_BUILDING_DLL
 multiprocessor = true
+simd = AdvancedVectorExtensions2
 target_link_libraries(SDL3)
 if(macOS)
 {

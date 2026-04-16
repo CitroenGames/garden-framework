@@ -261,9 +261,9 @@ float4 fragmentMain(PSInput input) : SV_TARGET
     float3 directLight = CalcPBRDirectional(N, V, lightDir, uLightDiffuse,
                                             albedo, metallic, roughness);
 
-    // CSM shadow with cascade blending (only affects direct lighting)
-    int cascadeIndex = getCascadeIndex(input.viewDepth);
-    float shadow = ShadowCalculation(cascadeIndex, input.fragPos, input.normal, input.viewDepth, input.position.xy);
+    // Shadow applied as screen-space post-process pass (shadow_mask.slang)
+    float shadow = 1.0;
+    int cascadeIndex = 0;
 
     float3 lighting = ambient + shadow * directLight;
 

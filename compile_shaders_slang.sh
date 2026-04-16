@@ -54,6 +54,8 @@ echo "Compiling ssao..."
 compile ssao vertexMain fragmentMain
 echo "Compiling ssao_blur..."
 compile ssao_blur vertexMain fragmentMain
+echo "Compiling shadow_mask..."
+compile shadow_mask vertexMain fragmentMain
 
 # rmlui has 3 entry points
 echo "Compiling rmlui..."

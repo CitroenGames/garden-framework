@@ -192,6 +192,7 @@ bool VulkanRenderAPI::createFxaaResources()
             { 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT },
             { 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT },
             { 2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT },
+            { 3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT },  // shadow mask
         };
 
         if (!fxaaPass_.init(device, vma_allocator, vk_pipeline_cache, sampler_cache, fxaaCfg,
@@ -220,6 +221,9 @@ bool VulkanRenderAPI::createFxaaResources()
 
         // Write placeholder for SSAO binding 2 (updated per-frame in endFrame)
         fxaaPass_.writeImageBindingAllFrames(2, offscreen_view, offscreen_sampler);
+
+        // Write placeholder for shadow mask binding 3 (updated per-frame in endFrame)
+        fxaaPass_.writeImageBindingAllFrames(3, offscreen_view, offscreen_sampler);
     }
 
     // ── 1x1 white SSAO fallback texture ──
@@ -285,6 +289,9 @@ bool VulkanRenderAPI::createFxaaResources()
 
             // Update FXAA binding 2 with real fallback
             fxaaPass_.writeImageBindingAllFrames(2, ssao_fallback_view, ssao_linear_sampler);
+
+            // Update FXAA binding 3 with shadow mask fallback (reuse 1x1 white texture)
+            fxaaPass_.writeImageBindingAllFrames(3, ssao_fallback_view, ssao_linear_sampler);
         }
     }
 
@@ -445,6 +452,10 @@ void VulkanRenderAPI::recreateOffscreenResources()
     // Recreate SSAO resources at new size
     if (ssao_initialized)
         recreateSSAOResources();
+
+    // Recreate shadow mask resources at new size
+    if (shadow_mask_initialized)
+        recreateShadowMaskResources();
 }
 
 void VulkanRenderAPI::setFXAAEnabled(bool enabled)

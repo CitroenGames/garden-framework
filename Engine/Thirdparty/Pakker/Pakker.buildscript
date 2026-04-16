@@ -6,3 +6,4 @@ sources = src/**/*.cpp
 public_includes = src
 includes = src
 multiprocessor = true
+simd = AdvancedVectorExtensions2

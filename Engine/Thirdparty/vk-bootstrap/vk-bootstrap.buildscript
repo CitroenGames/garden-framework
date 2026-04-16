@@ -10,3 +10,4 @@ libs = ${Vulkan_LIBRARIES}
 libdirs = ${Vulkan_LIBRARY_DIRS}
 std = 17
 multiprocessor = true
+simd = AdvancedVectorExtensions2

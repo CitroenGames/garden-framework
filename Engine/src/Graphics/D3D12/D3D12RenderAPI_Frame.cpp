@@ -148,63 +148,23 @@ void D3D12RenderAPI::endFrame()
     if (!m_viewportTexture)
     {
         // Run SSAO pass before FXAA/tone-mapping (generates blurred SSAO texture)
-        if (ssaoEnabled && m_psoSSAO && m_ssaoRawTexture)
+        if (ssaoEnabled && m_ssaoPass.isInitialized())
             renderSSAOPass(m_depthStencilBuffer.Get(), m_depthSRVIndex, viewport_width, viewport_height);
 
-        // Standalone: always tone-map HDR offscreen to LDR back buffer (with optional FXAA)
+        // Run shadow mask pass (generates shadow factor texture from depth + shadow maps)
+        bool wantShadowMask = (shadowQuality > 0) && m_shadowMaskPass.isInitialized() && m_shadowMapArray;
+        if (wantShadowMask)
+            renderShadowMaskPass(m_depthStencilBuffer.Get(), m_depthSRVIndex, viewport_width, viewport_height);
+
+        // Standalone: tone-map HDR offscreen to LDR back buffer (with optional FXAA)
         transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         transitionResource(m_backBuffers[m_backBufferIndex].Get(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
-
-        // Flush batched barriers (offscreen->SRV + backbuffer->RT in one call)
         flushBarriers();
 
         D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvAllocator.getCPU(m_backBufferRTVs[m_backBufferIndex]);
-        commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
-
-        D3D12_VIEWPORT vp = {};
-        vp.Width = static_cast<float>(viewport_width);
-        vp.Height = static_cast<float>(viewport_height);
-        vp.MaxDepth = 1.0f;
-        commandList->RSSetViewports(1, &vp);
-
-        D3D12_RECT scissor = { 0, 0, static_cast<LONG>(viewport_width), static_cast<LONG>(viewport_height) };
-        commandList->RSSetScissorRects(1, &scissor);
-
-        // Draw FXAA/tone-mapping fullscreen quad
-        commandList->SetPipelineState(m_psoFXAA.Get());
-        commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
-
-        D3D12FXAACBuffer fxaaCB = {};
-        fxaaCB.inverseScreenSize = glm::vec2(1.0f / std::max(viewport_width, 1), 1.0f / std::max(viewport_height, 1));
-        fxaaCB.exposure = 1.0f;
-        fxaaCB.ssaoEnabled = (ssaoEnabled && m_ssaoBlurredSRVIndex != UINT(-1)) ? 1 : 0;
-        auto cbAddr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(fxaaCB), &fxaaCB);
-        if (cbAddr == 0)
-        {
-            // Ring buffer exhausted - cannot run FXAA/tone-map pass.
-            LOG_ENGINE_WARN("[D3D12] Ring buffer exhausted - skipping FXAA/tone-map pass");
-            transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
-            flushBarriers();
-        }
-        else
-        {
-            // Minimal root param bindings for FXAA (shader only reads b0 and t0, t1 for SSAO)
-            commandList->SetGraphicsRootConstantBufferView(0, cbAddr);
-            commandList->SetGraphicsRootConstantBufferView(1, cbAddr); // dummy, reuse FXAA cb
-            commandList->SetGraphicsRootDescriptorTable(2, m_srvAllocator.getGPU(m_offscreenSRVIndex));
-            // Bind SSAO blurred texture at t1 slot (root param 3), or fallback white
-            {
-                UINT ssaoSrvIdx = (ssaoEnabled && m_ssaoBlurredSRVIndex != UINT(-1))
-                    ? m_ssaoBlurredSRVIndex : m_ssaoFallbackSRVIndex;
-                if (ssaoSrvIdx != UINT(-1))
-                    commandList->SetGraphicsRootDescriptorTable(3, m_srvAllocator.getGPU(ssaoSrvIdx));
-                // No fallback to dummy shadow Texture2DArray - shader flag guards the sample
-            }
-            commandList->SetGraphicsRootConstantBufferView(4, cbAddr); // dummy, reuse FXAA cb
-
-            commandList->IASetVertexBuffers(0, 1, &m_fxaaQuadVBV);
-            commandList->DrawInstanced(4, 1, 0, 0);
-        }
+        renderFXAAPass(rtvHandle, m_offscreenSRVIndex, viewport_width, viewport_height,
+                       ssaoEnabled && m_ssaoBlurVPass.isInitialized(),
+                       wantShadowMask);
 
         commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     }

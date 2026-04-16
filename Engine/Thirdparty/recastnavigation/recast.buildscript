@@ -12,3 +12,4 @@ includes = Recast/Include, Detour/Include
 public_includes = Recast/Include, Detour/Include
 std = 17
 multiprocessor = true
+simd = AdvancedVectorExtensions2

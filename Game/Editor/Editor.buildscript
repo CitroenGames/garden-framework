@@ -45,6 +45,7 @@ target_link_libraries(
     PRIVATE EngineGraphics
 )
 multiprocessor = true
+simd = AdvancedVectorExtensions2
 std = 20
 utf8 = true
 exception_handling = false

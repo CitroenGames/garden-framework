@@ -9,3 +9,4 @@ public_includes = include, ${Vulkan_INCLUDE_DIRS}
 libs = ${Vulkan_LIBRARIES}
 std = 17
 multiprocessor = true
+simd = AdvancedVectorExtensions2

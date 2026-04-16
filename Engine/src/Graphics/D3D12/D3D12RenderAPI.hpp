@@ -7,6 +7,7 @@
 #include "D3D12CommandListPool.hpp"
 #include "D3D12CopyQueue.hpp"
 #include "D3D12PSOCache.hpp"
+#include "D3D12PostProcessPass.hpp"
 #include "D3D12ResourceStateTracker.hpp"
 #include <d3d12.h>
 #include <d3d12sdklayers.h>
@@ -111,7 +112,6 @@ private:
     ComPtr<ID3D12PipelineState> m_psoShadow;
     ComPtr<ID3D12PipelineState> m_psoShadowAlphaTest;
     ComPtr<ID3D12PipelineState> m_psoSky;
-    ComPtr<ID3D12PipelineState> m_psoFXAA;
     ComPtr<ID3D12PipelineState> m_psoDepthPrepass;
     ComPtr<ID3D12PipelineState> m_psoDepthPrepassAlphaTest;
     ComPtr<ID3D12PipelineState> m_psoDepthPrepassAlphaTestCullNone;
@@ -172,35 +172,33 @@ private:
     bool debugCascades = false;
 
     // Post-processing (FXAA)
+    D3D12PostProcessPass m_fxaaPass;
     ComPtr<ID3D12Resource> m_offscreenTexture;
     UINT m_offscreenRTVIndex = UINT(-1);
     UINT m_offscreenSRVIndex = UINT(-1);
     ComPtr<ID3D12Resource> m_fxaaQuadVB;
     D3D12_VERTEX_BUFFER_VIEW m_fxaaQuadVBV = {};
     bool fxaaEnabled = true;
+    void renderFXAAPass(D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle, UINT inputSRVIndex,
+                        int width, int height, bool enableSSAO, bool enableShadowMask);
 
     // SSAO
-    ComPtr<ID3D12Resource> m_ssaoRawTexture;
-    ComPtr<ID3D12Resource> m_ssaoBlurTempTexture;
-    ComPtr<ID3D12Resource> m_ssaoBlurredTexture;
+    D3D12PostProcessPass m_ssaoPass;
+    D3D12PostProcessPass m_ssaoBlurHPass;
+    D3D12PostProcessPass m_ssaoBlurVPass;
     ComPtr<ID3D12Resource> m_ssaoNoiseTexture;
     ComPtr<ID3D12Resource> m_ssaoFallbackTexture;   // 1x1 white
-    UINT m_ssaoRawRTVIndex = UINT(-1), m_ssaoRawSRVIndex = UINT(-1);
-    UINT m_ssaoBlurTempRTVIndex = UINT(-1), m_ssaoBlurTempSRVIndex = UINT(-1);
-    UINT m_ssaoBlurredRTVIndex = UINT(-1), m_ssaoBlurredSRVIndex = UINT(-1);
     UINT m_depthSRVIndex = UINT(-1);
     UINT m_ssaoNoiseSRVIndex = UINT(-1);
     UINT m_ssaoFallbackSRVIndex = UINT(-1);
-    ComPtr<ID3D12RootSignature> m_ssaoRootSignature;
-    ComPtr<ID3D12PipelineState> m_psoSSAO;
-    ComPtr<ID3D12PipelineState> m_psoSSAOBlur;
-    std::vector<char> m_ssaoVS, m_ssaoPS;
-    std::vector<char> m_ssaoBlurVS, m_ssaoBlurPS;
     bool ssaoEnabled = true;
     float ssaoRadius = 0.5f;
     float ssaoIntensity = 1.5f;
     float ssaoBias = 0.025f;
     glm::vec4 ssaoKernel[16];  // Pre-generated hemisphere samples
+
+    // Shadow Mask Post-Process
+    D3D12PostProcessPass m_shadowMaskPass;
 
     // Skybox
     ComPtr<ID3D12Resource> m_skyboxVB;
@@ -274,9 +272,10 @@ private:
     bool createShadowMapResources();
     bool createPostProcessingResources(int width, int height);
     bool createSSAOResources(int width, int height);
-    bool createSSAORootSignatureAndPSOs();
     void renderSSAOPass(ID3D12Resource* depthBuffer, UINT depthSRVIndex, int fullWidth, int fullHeight);
     void generateSSAOKernel();
+    bool createShadowMaskResources(int width, int height);
+    void renderShadowMaskPass(ID3D12Resource* depthBuffer, UINT depthSRVIndex, int fullWidth, int fullHeight);
     bool createSkyboxResources();
     bool createDefaultTexture();
     bool createDefaultPBRTextures();
