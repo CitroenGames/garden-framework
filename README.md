@@ -43,28 +43,3 @@ Game logic can be loaded at runtime via `GameModuleLoader`, which dynamically lo
 ## Building
 
 See [build.md](Documentation/build.md) for prerequisites, build instructions, and running the engine.
-
-## Project Structure
-
-| Directory | Description |
-| :--- | :--- |
-| **Engine/src/Graphics/** | Multi-API rendering, shaders, post-processing, BVH, debug draw |
-| **Engine/src/Components/** | ECS components (transform, mesh, physics, audio, animation) |
-| **Engine/src/Audio/** | miniaudio-based spatial audio system |
-| **Engine/src/Animation/** | Skeletal animation, blending, glTF loader |
-| **Engine/src/Events/** | Event bus and predefined engine events |
-| **Engine/src/Timer/** | Gameplay timer/scheduler system |
-| **Engine/src/GameState/** | Stack-based game state manager |
-| **Engine/src/Scene/** | Scene lifecycle and level transitions |
-| **Engine/src/Console/** | ConVar system and developer console |
-| **Engine/src/Threading/** | Job system and thread pool |
-| **Engine/src/Assets/** | Async asset manager and loaders |
-| **Engine/src/Debug/** | Debug drawing system |
-| **Engine/Thirdparty/** | Third-party dependencies |
-| **Game/Client/** | Client executable and player controller |
-| **Game/Editor/** | Unreal-style level editor with dockable panels |
-| **Game/Server/** | Dedicated headless server |
-| **Game/shared/** | Network protocol and shared components |
-| **assets/shaders/** | GLSL, HLSL, Metal, and SPIR-V shaders |
-| **assets/levels/** | JSON level definitions |
-| **assets/models/** | 3D models (glTF, OBJ) |
