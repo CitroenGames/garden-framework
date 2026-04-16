@@ -102,7 +102,7 @@ GAME_API bool gardenGameInit(EngineServices* services)
     g_network.setOnShootResult([](const ShootResultMessage& msg) {
         // Draw tracer line for visual feedback
         glm::vec3 color = (msg.hit_entity_id != 0) ? glm::vec3(1.0f, 0.3f, 0.0f) : glm::vec3(1.0f, 1.0f, 0.5f);
-        DebugDraw::get().addLine(msg.ray_origin, msg.hit_position, color, 0.15f);
+        DebugDraw::get().drawLine(msg.ray_origin, msg.hit_position, color, 0.15f);
     });
 
     g_network.setOnDamageEvent([](const DamageEventMessage& msg) {
