@@ -426,9 +426,9 @@ void VulkanRenderAPI::shutdown()
             for (auto pool : tp.descriptor_state[f].pools)
                 vkDestroyDescriptorPool(device, pool, nullptr);
             tp.descriptor_state[f].pools.clear();
+            if (tp.pool[f] != VK_NULL_HANDLE)
+                vkDestroyCommandPool(device, tp.pool[f], nullptr);
         }
-        if (tp.pool != VK_NULL_HANDLE)
-            vkDestroyCommandPool(device, tp.pool, nullptr);
     }
     m_threadCommandPools.clear();
 
@@ -588,31 +588,40 @@ bool VulkanRenderAPI::createThreadCommandPools()
     for (uint32_t i = 0; i < poolCount; i++) {
         auto& tp = m_threadCommandPools[i];
 
-        // Create per-thread command pool
-        VkCommandPoolCreateInfo poolInfo{};
-        poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-        poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-        poolInfo.queueFamilyIndex = graphics_queue_family;
+        // Create per-frame command pools and secondary buffers.
+        // Each frame-in-flight needs its own pool so that resetting one frame's pool
+        // doesn't invalidate secondary buffers still pending from the other frame.
+        for (int f = 0; f < MAX_FRAMES_IN_FLIGHT; f++) {
+            VkCommandPoolCreateInfo poolInfo{};
+            poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+            poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+            poolInfo.queueFamilyIndex = graphics_queue_family;
 
-        if (vkCreateCommandPool(device, &poolInfo, nullptr, &tp.pool) != VK_SUCCESS) {
-            LOG_ENGINE_ERROR("[Vulkan] Failed to create thread command pool {}", i);
-            m_threadCommandPools.resize(i);
-            return !m_threadCommandPools.empty();
-        }
+            if (vkCreateCommandPool(device, &poolInfo, nullptr, &tp.pool[f]) != VK_SUCCESS) {
+                LOG_ENGINE_ERROR("[Vulkan] Failed to create thread command pool {}/{}", i, f);
+                for (int g = 0; g < f; g++) {
+                    vkDestroyCommandPool(device, tp.pool[g], nullptr);
+                    tp.pool[g] = VK_NULL_HANDLE;
+                }
+                m_threadCommandPools.resize(i);
+                return !m_threadCommandPools.empty();
+            }
 
-        // Allocate secondary command buffer
-        VkCommandBufferAllocateInfo allocInfo{};
-        allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-        allocInfo.commandPool = tp.pool;
-        allocInfo.level = VK_COMMAND_BUFFER_LEVEL_SECONDARY;
-        allocInfo.commandBufferCount = 1;
+            VkCommandBufferAllocateInfo allocInfo{};
+            allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+            allocInfo.commandPool = tp.pool[f];
+            allocInfo.level = VK_COMMAND_BUFFER_LEVEL_SECONDARY;
+            allocInfo.commandBufferCount = 1;
 
-        if (vkAllocateCommandBuffers(device, &allocInfo, &tp.secondary_buffer) != VK_SUCCESS) {
-            LOG_ENGINE_ERROR("[Vulkan] Failed to allocate secondary command buffer {}", i);
-            vkDestroyCommandPool(device, tp.pool, nullptr);
-            tp.pool = VK_NULL_HANDLE;
-            m_threadCommandPools.resize(i);
-            return !m_threadCommandPools.empty();
+            if (vkAllocateCommandBuffers(device, &allocInfo, &tp.secondary_buffer[f]) != VK_SUCCESS) {
+                LOG_ENGINE_ERROR("[Vulkan] Failed to allocate secondary command buffer {}/{}", i, f);
+                for (int g = 0; g <= f; g++) {
+                    vkDestroyCommandPool(device, tp.pool[g], nullptr);
+                    tp.pool[g] = VK_NULL_HANDLE;
+                }
+                m_threadCommandPools.resize(i);
+                return !m_threadCommandPools.empty();
+            }
         }
 
         tp.in_use.store(false, std::memory_order_relaxed);

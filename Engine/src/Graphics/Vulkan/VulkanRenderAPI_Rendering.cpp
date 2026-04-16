@@ -1015,7 +1015,7 @@ void VulkanRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmd
              pipelineLayout_cap, per_obj_mapped, per_obj_alignment_cap, per_obj_draw_idx]()
             {
                 auto* workerPool = workers[w].pool;
-                VkCommandBuffer secCmd = workerPool->secondary_buffer;
+                VkCommandBuffer secCmd = workerPool->secondary_buffer[frameIdx];
 
                 // Begin secondary command buffer
                 VkCommandBufferBeginInfo beginInfo{};
@@ -1140,7 +1140,7 @@ void VulkanRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmd
     std::vector<VkCommandBuffer> secondaryBuffers;
     secondaryBuffers.reserve(num_workers);
     for (uint32_t w = 0; w < num_workers; w++)
-        secondaryBuffers.push_back(workers[w].pool->secondary_buffer);
+        secondaryBuffers.push_back(workers[w].pool->secondary_buffer[frameIdx]);
 
     vkCmdExecuteCommands(cmd, static_cast<uint32_t>(secondaryBuffers.size()), secondaryBuffers.data());
 

@@ -890,7 +890,10 @@ void VulkanRenderAPI::recreateShadowMaskResources()
     shadow_mask_depth_view = vkutil::createImageView(device, offscreen_depth_image, depth_format, VK_IMAGE_ASPECT_DEPTH_BIT);
 
     // Resize pass (recreates output image)
-    shadowMaskPass_.resize(swapchain_extent);
+    VkExtent2D ref = isViewportMode()
+        ? VkExtent2D{(uint32_t)viewport_width_rt, (uint32_t)viewport_height_rt}
+        : swapchain_extent;
+    shadowMaskPass_.resize(ref);
 
     // Re-write image bindings
     shadowMaskPass_.writeImageBindingAllFrames(0, shadow_mask_depth_view, shadow_mask_depth_sampler,

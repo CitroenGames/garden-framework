@@ -302,9 +302,10 @@ void RmlRenderer_D3D12::RenderGeometry(Rml::CompiledGeometryHandle handle, Rml::
     bufDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
 
     ComPtr<ID3D12Resource> cbResource;
-    m_renderAPI->getDevice()->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &bufDesc,
-                                                       D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
-                                                       IID_PPV_ARGS(cbResource.GetAddressOf()));
+    if (FAILED(m_renderAPI->getDevice()->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &bufDesc,
+                                                                  D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                                  IID_PPV_ARGS(cbResource.GetAddressOf()))))
+        return;
     void* mapped = nullptr;
     cbResource->Map(0, nullptr, &mapped);
     memcpy(mapped, &cb, sizeof(cb));

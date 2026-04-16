@@ -242,6 +242,10 @@ private:
     VkCommandPool command_pool = VK_NULL_HANDLE;
     std::vector<VkCommandBuffer> command_buffers;
 
+    // Synchronization constants (needed before PerThreadCommandPool)
+    static const int MAX_FRAMES_IN_FLIGHT = 2;
+    static constexpr uint64_t FENCE_TIMEOUT_NS = 5'000'000'000ULL; // 5 seconds
+
     // Per-draw descriptor pool state (needed before PerThreadCommandPool)
     static constexpr uint32_t SETS_PER_POOL = 512;
     struct PerFrameDescriptorState {
@@ -255,32 +259,33 @@ private:
     // Secondary command buffers are recorded with RENDER_PASS_CONTINUE_BIT and
     // executed from the primary command buffer via vkCmdExecuteCommands().
     struct PerThreadCommandPool {
-        VkCommandPool pool = VK_NULL_HANDLE;
-        VkCommandBuffer secondary_buffer = VK_NULL_HANDLE;
+        VkCommandPool pool[MAX_FRAMES_IN_FLIGHT] = {};
+        VkCommandBuffer secondary_buffer[MAX_FRAMES_IN_FLIGHT] = {};
         std::atomic<bool> in_use{false};
 
         // Per-worker descriptor allocation (avoids contention on shared pools)
-        PerFrameDescriptorState descriptor_state[2]; // one per frame-in-flight
+        PerFrameDescriptorState descriptor_state[MAX_FRAMES_IN_FLIGHT] = {};
         std::unordered_map<TextureHandle, VkDescriptorSet> texture_cache;
 
         PerThreadCommandPool() = default;
         PerThreadCommandPool(PerThreadCommandPool&& o) noexcept
-            : pool(o.pool), secondary_buffer(o.secondary_buffer)
         {
+            for (int f = 0; f < MAX_FRAMES_IN_FLIGHT; f++) {
+                pool[f] = o.pool[f]; o.pool[f] = VK_NULL_HANDLE;
+                secondary_buffer[f] = o.secondary_buffer[f]; o.secondary_buffer[f] = VK_NULL_HANDLE;
+                descriptor_state[f] = std::move(o.descriptor_state[f]);
+            }
             in_use.store(o.in_use.load(std::memory_order_relaxed), std::memory_order_relaxed);
-            for (int i = 0; i < 2; i++)
-                descriptor_state[i] = std::move(o.descriptor_state[i]);
             texture_cache = std::move(o.texture_cache);
-            o.pool = VK_NULL_HANDLE;
-            o.secondary_buffer = VK_NULL_HANDLE;
         }
         PerThreadCommandPool& operator=(PerThreadCommandPool&& o) noexcept {
-            pool = o.pool; secondary_buffer = o.secondary_buffer;
+            for (int f = 0; f < MAX_FRAMES_IN_FLIGHT; f++) {
+                pool[f] = o.pool[f]; o.pool[f] = VK_NULL_HANDLE;
+                secondary_buffer[f] = o.secondary_buffer[f]; o.secondary_buffer[f] = VK_NULL_HANDLE;
+                descriptor_state[f] = std::move(o.descriptor_state[f]);
+            }
             in_use.store(o.in_use.load(std::memory_order_relaxed), std::memory_order_relaxed);
-            for (int i = 0; i < 2; i++)
-                descriptor_state[i] = std::move(o.descriptor_state[i]);
             texture_cache = std::move(o.texture_cache);
-            o.pool = VK_NULL_HANDLE; o.secondary_buffer = VK_NULL_HANDLE;
             return *this;
         }
         PerThreadCommandPool(const PerThreadCommandPool&) = delete;
@@ -303,8 +308,6 @@ private:
     bool using_continuation_pass = false;
 
     // Synchronization
-    static const int MAX_FRAMES_IN_FLIGHT = 2;
-    static constexpr uint64_t FENCE_TIMEOUT_NS = 5'000'000'000ULL; // 5 seconds
     std::vector<VkSemaphore> image_available_semaphores;
     std::vector<VkSemaphore> render_finished_semaphores;
     std::vector<VkFence> in_flight_fences;
@@ -582,7 +585,11 @@ private:
     RenderGraph m_frameGraph;
     VulkanRGBackend m_rgBackend;
     bool m_useRenderGraph = true;
-    void buildVulkanPostProcessGraph(bool wantSSAO, bool wantShadowMask, bool renderImGui);
+    void buildVulkanPostProcessGraph(bool wantSSAO, bool wantShadowMask, bool renderImGui,
+                                      uint32_t width, uint32_t height,
+                                      VkImage outputImage, VkImageLayout outputInitialLayout,
+                                      RGFormat outputFormat,
+                                      VkFramebuffer fxaaFB, VkRenderPass fxaaRP, VkPipeline fxaaPipeline);
 
     // Viewport render target for editor
     VkImage viewport_image = VK_NULL_HANDLE;

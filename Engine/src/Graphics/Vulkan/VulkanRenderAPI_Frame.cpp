@@ -84,9 +84,10 @@ void VulkanRenderAPI::prepareFrame()
     per_object_draw_index[current_frame] = 0;
 
     // Reset per-thread command pools and descriptor pools for parallel replay
+    // Only reset the current frame's pool — the other frame's secondary buffers may still be pending.
     for (auto& tp : m_threadCommandPools) {
-        if (tp.pool != VK_NULL_HANDLE)
-            vkResetCommandPool(device, tp.pool, 0);
+        if (tp.pool[current_frame] != VK_NULL_HANDLE)
+            vkResetCommandPool(device, tp.pool[current_frame], 0);
         tp.in_use.store(false, std::memory_order_release);
         auto& ds = tp.descriptor_state[current_frame];
         for (auto pool : ds.pools)
@@ -238,7 +239,12 @@ void VulkanRenderAPI::endFrame()
 
         if (m_useRenderGraph && fxaa_initialized)
         {
-            buildVulkanPostProcessGraph(wantSSAO, wantShadowMask, true);
+            buildVulkanPostProcessGraph(wantSSAO, wantShadowMask, true,
+                swapchain_extent.width, swapchain_extent.height,
+                swapchain_images[current_image_index], VK_IMAGE_LAYOUT_UNDEFINED,
+                RGFormat::RGBA8_UNORM,
+                fxaa_framebuffers[current_image_index],
+                fxaaPass_.getRenderPass(), fxaaPass_.getPipeline());
             m_frameGraph.compile();
             m_frameGraph.execute(m_rgBackend);
             m_skyboxRequested = false;

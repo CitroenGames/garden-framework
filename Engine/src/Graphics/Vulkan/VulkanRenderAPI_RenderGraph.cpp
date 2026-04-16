@@ -5,10 +5,14 @@
 // ============================================================================
 
 void VulkanRenderAPI::buildVulkanPostProcessGraph(
-    bool wantSSAO, bool wantShadowMask, bool renderImGui)
+    bool wantSSAO, bool wantShadowMask, bool renderImGui,
+    uint32_t width, uint32_t height,
+    VkImage outputImage, VkImageLayout outputInitialLayout,
+    RGFormat outputFormat,
+    VkFramebuffer fxaaFB, VkRenderPass fxaaRP, VkPipeline fxaaPipeline)
 {
     m_frameGraph.reset();
-    m_frameGraph.setReferenceResolution(swapchain_extent.width, swapchain_extent.height);
+    m_frameGraph.setReferenceResolution(width, height);
 
     VkCommandBuffer cmd = command_buffers[current_frame];
     m_rgBackend.init(device, cmd);
@@ -17,8 +21,8 @@ void VulkanRenderAPI::buildVulkanPostProcessGraph(
 
     // Offscreen HDR (already in SHADER_READ_ONLY after main render pass finalLayout)
     RGTextureDesc offscreenDesc;
-    offscreenDesc.width = swapchain_extent.width;
-    offscreenDesc.height = swapchain_extent.height;
+    offscreenDesc.width = width;
+    offscreenDesc.height = height;
     offscreenDesc.format = RGFormat::RGBA16_FLOAT;
     offscreenDesc.debugName = "OffscreenHDR";
     auto offscreenHDR = m_frameGraph.importTexture("OffscreenHDR", offscreenDesc,
@@ -28,8 +32,8 @@ void VulkanRenderAPI::buildVulkanPostProcessGraph(
 
     // Depth buffer (in DEPTH_STENCIL_ATTACHMENT_OPTIMAL after main render pass)
     RGTextureDesc depthDesc;
-    depthDesc.width = swapchain_extent.width;
-    depthDesc.height = swapchain_extent.height;
+    depthDesc.width = width;
+    depthDesc.height = height;
     depthDesc.format = RGFormat::D32_FLOAT;
     depthDesc.debugName = "DepthBuffer";
     auto depthHandle = m_frameGraph.importTexture("DepthBuffer", depthDesc,
@@ -38,16 +42,16 @@ void VulkanRenderAPI::buildVulkanPostProcessGraph(
                                   VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
                                   VK_IMAGE_ASPECT_DEPTH_BIT);
 
-    // Swapchain image (output)
+    // Output image (swapchain in standalone, viewport texture in editor)
     RGTextureDesc outputDesc;
-    outputDesc.width = swapchain_extent.width;
-    outputDesc.height = swapchain_extent.height;
-    outputDesc.format = RGFormat::RGBA8_UNORM;
-    outputDesc.debugName = "Swapchain";
-    auto outputTarget = m_frameGraph.importTexture("Swapchain", outputDesc,
-                                                    RGResourceUsage::Present);
-    m_rgBackend.bindImportedImage(outputTarget.handle, swapchain_images[current_image_index],
-                                  VK_IMAGE_LAYOUT_UNDEFINED);
+    outputDesc.width = width;
+    outputDesc.height = height;
+    outputDesc.format = outputFormat;
+    outputDesc.debugName = "OutputTarget";
+    auto outputTarget = m_frameGraph.importTexture("OutputTarget", outputDesc,
+                                                    RGResourceUsage::RenderTarget);
+    m_rgBackend.bindImportedImage(outputTarget.handle, outputImage,
+                                  outputInitialLayout);
 
     // Shadow map (if shadow mask enabled)
     RGTextureHandle shadowMapHandle = RGTextureHandle::invalid();
@@ -119,7 +123,7 @@ void VulkanRenderAPI::buildVulkanPostProcessGraph(
                 builder.read(depthHandle, RGResourceUsage::DepthStencilReadOnly);
                 builder.write(offscreenHDR, RGResourceUsage::RenderTarget);
             },
-            [this](RGContext&) {
+            [this, width, height](RGContext&) {
                 VkCommandBuffer cmd = command_buffers[current_frame];
 
                 // Update UBO
@@ -131,24 +135,26 @@ void VulkanRenderAPI::buildVulkanPostProcessGraph(
                 ubo._pad = 0.0f;
                 memcpy(skybox_uniform_mapped[current_frame], &ubo, sizeof(SkyboxUBO));
 
+                VkExtent2D extent = { width, height };
+
                 // Begin render pass (loadOp=LOAD preserves scene, depth read-only)
                 VkRenderPassBeginInfo rpInfo{};
                 rpInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
                 rpInfo.renderPass = skybox_rg_render_pass;
                 rpInfo.framebuffer = skybox_rg_framebuffer;
-                rpInfo.renderArea = { {0, 0}, swapchain_extent };
+                rpInfo.renderArea = { {0, 0}, extent };
                 rpInfo.clearValueCount = 0;
                 vkCmdBeginRenderPass(cmd, &rpInfo, VK_SUBPASS_CONTENTS_INLINE);
 
                 vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, skybox_pipeline);
 
                 VkViewport viewport{};
-                viewport.width = static_cast<float>(swapchain_extent.width);
-                viewport.height = static_cast<float>(swapchain_extent.height);
+                viewport.width = static_cast<float>(width);
+                viewport.height = static_cast<float>(height);
                 viewport.maxDepth = 1.0f;
                 vkCmdSetViewport(cmd, 0, 1, &viewport);
 
-                VkRect2D scissor{ {0, 0}, swapchain_extent };
+                VkRect2D scissor{ {0, 0}, extent };
                 vkCmdSetScissor(cmd, 0, 1, &scissor);
 
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -172,7 +178,7 @@ void VulkanRenderAPI::buildVulkanPostProcessGraph(
                 builder.read(depthHandle, RGResourceUsage::DepthStencilReadOnly);
                 builder.write(ssaoOutHandle, RGResourceUsage::RenderTarget);
             },
-            [this](RGContext&) {
+            [this, ssaoOutHandle](RGContext&) {
                 VkCommandBuffer cmd = command_buffers[current_frame];
                 SSAOUbo ssaoUbo{};
                 ssaoUbo.projection = projection_matrix;
@@ -187,6 +193,8 @@ void VulkanRenderAPI::buildVulkanPostProcessGraph(
                 ssaoUbo.power = ssaoIntensity;
                 memcpy(ssaoPass_.getUBOMapped(current_frame), &ssaoUbo, sizeof(SSAOUbo));
                 ssaoPass_.record(cmd, current_frame, fxaa_vertex_buffer);
+                m_rgBackend.setCurrentLayout(ssaoOutHandle.handle,
+                                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
             });
 
         // Pass 2: Horizontal blur
@@ -196,7 +204,7 @@ void VulkanRenderAPI::buildVulkanPostProcessGraph(
                 builder.read(depthHandle, RGResourceUsage::DepthStencilReadOnly);
                 builder.write(ssaoBlurHHandle, RGResourceUsage::RenderTarget);
             },
-            [this](RGContext&) {
+            [this, ssaoBlurHHandle](RGContext&) {
                 VkCommandBuffer cmd = command_buffers[current_frame];
                 SSAOBlurUbo blurH{};
                 blurH.texelSize = glm::vec2(1.0f / ssaoPass_.getWidth(),
@@ -205,6 +213,8 @@ void VulkanRenderAPI::buildVulkanPostProcessGraph(
                 blurH.depthThreshold = 0.005f;
                 memcpy(ssaoBlurHPass_.getUBOMapped(current_frame), &blurH, sizeof(SSAOBlurUbo));
                 ssaoBlurHPass_.record(cmd, current_frame, fxaa_vertex_buffer);
+                m_rgBackend.setCurrentLayout(ssaoBlurHHandle.handle,
+                                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
             });
 
         // Pass 3: Vertical blur
@@ -214,7 +224,7 @@ void VulkanRenderAPI::buildVulkanPostProcessGraph(
                 builder.read(depthHandle, RGResourceUsage::DepthStencilReadOnly);
                 builder.write(ssaoBlurVHandle, RGResourceUsage::RenderTarget);
             },
-            [this](RGContext&) {
+            [this, ssaoBlurVHandle](RGContext&) {
                 VkCommandBuffer cmd = command_buffers[current_frame];
                 SSAOBlurUbo blurV{};
                 blurV.texelSize = glm::vec2(1.0f / ssaoBlurHPass_.getWidth(),
@@ -223,6 +233,8 @@ void VulkanRenderAPI::buildVulkanPostProcessGraph(
                 blurV.depthThreshold = 0.005f;
                 memcpy(ssaoBlurVPass_.getUBOMapped(current_frame), &blurV, sizeof(SSAOBlurUbo));
                 ssaoBlurVPass_.record(cmd, current_frame, fxaa_vertex_buffer);
+                m_rgBackend.setCurrentLayout(ssaoBlurVHandle.handle,
+                                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
             });
     }
 
@@ -235,7 +247,7 @@ void VulkanRenderAPI::buildVulkanPostProcessGraph(
                 builder.read(shadowMapHandle, RGResourceUsage::ShaderResource);
                 builder.write(shadowMaskHandle, RGResourceUsage::RenderTarget);
             },
-            [this](RGContext&) {
+            [this, shadowMaskHandle](RGContext&) {
                 VkCommandBuffer cmd = command_buffers[current_frame];
                 ShadowMaskUbo shadowMaskUbo{};
                 shadowMaskUbo.invViewProj = glm::inverse(projection_matrix * view_matrix);
@@ -254,6 +266,8 @@ void VulkanRenderAPI::buildVulkanPostProcessGraph(
                 shadowMaskUbo.lightDir = light_direction;
                 memcpy(shadowMaskPass_.getUBOMapped(current_frame), &shadowMaskUbo, sizeof(ShadowMaskUbo));
                 shadowMaskPass_.record(cmd, current_frame, fxaa_vertex_buffer);
+                m_rgBackend.setCurrentLayout(shadowMaskHandle.handle,
+                                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
             });
     }
 
@@ -306,12 +320,12 @@ void VulkanRenderAPI::buildVulkanPostProcessGraph(
                 builder.write(outputTarget, RGResourceUsage::RenderTarget);
                 builder.setSideEffect();
             },
-            [this, wantSSAO, wantShadowMask, renderImGui](RGContext&) {
+            [this, wantSSAO, wantShadowMask, renderImGui, width, height, fxaaFB, fxaaRP, fxaaPipeline](RGContext&) {
                 renderFXAAPass(command_buffers[current_frame],
-                               fxaaPass_.getRenderPass(),
-                               fxaa_framebuffers[current_image_index],
-                               fxaaPass_.getPipeline(),
-                               swapchain_extent.width, swapchain_extent.height,
+                               fxaaRP,
+                               fxaaFB,
+                               fxaaPipeline,
+                               width, height,
                                wantSSAO, wantShadowMask, renderImGui);
             });
     }
