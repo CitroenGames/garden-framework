@@ -140,67 +140,67 @@ void D3D12RenderAPI::endSceneRender()
         auto it = m_pie_viewports.find(m_active_scene_target);
         if (it != m_pie_viewports.end())
         {
-            auto& pie = it->second;
+            auto& pie = *it->second;
 
             // Route PIE through the same render graph as the editor viewport so
             // it gets skybox + deferred + SSAO + shadow-mask 1:1 with standalone.
             bool wantSSAO = ssaoEnabled && m_ssaoBlurVPass.isInitialized()
-                            && pie.depthSRVIndex != UINT(-1);
+                            && pie.getDepthSRV() != UINT(-1);
             bool wantShadowMask = (shadowQuality > 0) && m_shadowMaskPass.isInitialized()
-                                  && m_shadowMapArray && pie.depthSRVIndex != UINT(-1);
+                                  && m_shadowMapArray && pie.getDepthSRV() != UINT(-1);
 
             if (m_useRenderGraph)
             {
-                D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvAllocator.getCPU(pie.rtvIndex);
+                D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvAllocator.getCPU(pie.getOutputRTV());
 
                 PostProcessGraphBuilder::Config cfg;
-                cfg.width          = static_cast<uint32_t>(pie.width);
-                cfg.height         = static_cast<uint32_t>(pie.height);
+                cfg.width          = static_cast<uint32_t>(pie.width());
+                cfg.height         = static_cast<uint32_t>(pie.height());
                 cfg.wantSSAO       = wantSSAO;
                 cfg.wantShadowMask = wantShadowMask;
                 cfg.renderImGui    = false;
 
                 if (m_useDeferred && m_gbufferPass.isInitialized()) {
-                    m_deferredGraphBuilder.setFrameInputs(rtvHandle, pie.offscreenSRVIndex,
-                                                         pie.depthBuffer.Get(), pie.depthSRVIndex,
-                                                         pie.dsvIndex,
-                                                         pie.texture.Get(), pie.rtvIndex);
+                    m_deferredGraphBuilder.setFrameInputs(rtvHandle, pie.getHDRSRV(),
+                                                         pie.getDepth(), pie.getDepthSRV(),
+                                                         pie.getDepthDSV(),
+                                                         pie.getOutput(), pie.getOutputRTV());
                     // Shadows applied in lighting pass; SSAO still via tonemap.
                     PostProcessGraphBuilder::Config deferredCfg = cfg;
                     deferredCfg.wantShadowMask = false;
                     m_deferredGraphBuilder.build(m_frameGraph, m_rgBackend, deferredCfg);
                 } else {
-                    m_ppGraphBuilder.setFrameInputs(rtvHandle, pie.offscreenSRVIndex,
-                                                    pie.depthBuffer.Get(), pie.depthSRVIndex,
-                                                    pie.dsvIndex,
-                                                    pie.texture.Get(), pie.rtvIndex);
+                    m_ppGraphBuilder.setFrameInputs(rtvHandle, pie.getHDRSRV(),
+                                                    pie.getDepth(), pie.getDepthSRV(),
+                                                    pie.getDepthDSV(),
+                                                    pie.getOutput(), pie.getOutputRTV());
                     m_ppGraphBuilder.build(m_frameGraph, m_rgBackend, cfg);
                 }
 
                 m_skyboxRequested = false;
 
-                // Restore expected states for editor flow (ImGui samples pie.texture).
-                transitionResource(pie.texture.Get(), {},
+                // Restore expected states for editor flow (ImGui samples pie output).
+                transitionResource(pie.getOutput(), {},
                                    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-                transitionResource(pie.offscreenTexture.Get(), {},
+                transitionResource(pie.getHDR(), {},
                                    D3D12_RESOURCE_STATE_RENDER_TARGET);
                 flushBarriers();
             }
             else
             {
                 // Legacy fallback (no render graph): tone-map HDR → LDR directly.
-                transitionResource(pie.offscreenTexture.Get(), {},
+                transitionResource(pie.getHDR(), {},
                                    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-                transitionResource(pie.texture.Get(), {},
+                transitionResource(pie.getOutput(), {},
                                    D3D12_RESOURCE_STATE_RENDER_TARGET);
                 flushBarriers();
 
-                D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvAllocator.getCPU(pie.rtvIndex);
-                renderFXAAPass(rtvHandle, pie.offscreenSRVIndex, pie.width, pie.height, false, false);
+                D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvAllocator.getCPU(pie.getOutputRTV());
+                renderFXAAPass(rtvHandle, pie.getHDRSRV(), pie.width(), pie.height(), false, false);
 
-                transitionResource(pie.offscreenTexture.Get(), {},
+                transitionResource(pie.getHDR(), {},
                                    D3D12_RESOURCE_STATE_RENDER_TARGET);
-                transitionResource(pie.texture.Get(), {},
+                transitionResource(pie.getOutput(), {},
                                    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
                 flushBarriers();
             }
@@ -462,139 +462,10 @@ void D3D12RenderAPI::destroyPreviewTarget()
 // PIE Viewports
 // ============================================================================
 
-void D3D12RenderAPI::createPIEViewportResources(PIEViewportTarget& target, int w, int h)
-{
-    if (target.texture) m_stateTracker.untrack(target.texture.Get());
-    if (target.offscreenTexture) m_stateTracker.untrack(target.offscreenTexture.Get());
-    if (target.depthBuffer) m_stateTracker.untrack(target.depthBuffer.Get());
-    target.texture.Reset();
-    target.depthBuffer.Reset();
-    target.offscreenTexture.Reset();
-
-    D3D12_HEAP_PROPERTIES heapProps = {};
-    heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
-
-    // Final output texture (LDR - FXAA tone maps HDR offscreen to this)
-    {
-        D3D12_RESOURCE_DESC desc = {};
-        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-        desc.Width = w; desc.Height = h;
-        desc.DepthOrArraySize = 1; desc.MipLevels = 1;
-        desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-        desc.SampleDesc.Count = 1;
-        desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
-
-        D3D12_CLEAR_VALUE cv = {}; cv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-        HRESULT hr = device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &desc,
-                                         D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &cv,
-                                         IID_PPV_ARGS(target.texture.GetAddressOf()));
-        if (FAILED(hr))
-        {
-            LOG_ENGINE_ERROR("[D3D12] Failed to create PIE output texture ({}x{}, HRESULT: 0x{:08X})", w, h, static_cast<unsigned>(hr));
-            return;
-        }
-        m_stateTracker.track(target.texture.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    }
-
-    // Offscreen texture (HDR scene render target, FXAA input)
-    {
-        D3D12_RESOURCE_DESC desc = {};
-        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-        desc.Width = w; desc.Height = h;
-        desc.DepthOrArraySize = 1; desc.MipLevels = 1;
-        desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-        desc.SampleDesc.Count = 1;
-        desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
-
-        D3D12_CLEAR_VALUE cv = {}; cv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-        HRESULT hr = device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &desc,
-                                         D3D12_RESOURCE_STATE_RENDER_TARGET, &cv,
-                                         IID_PPV_ARGS(target.offscreenTexture.GetAddressOf()));
-        if (FAILED(hr))
-        {
-            LOG_ENGINE_ERROR("[D3D12] Failed to create PIE offscreen texture ({}x{}, HRESULT: 0x{:08X})", w, h, static_cast<unsigned>(hr));
-            return;
-        }
-        m_stateTracker.track(target.offscreenTexture.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
-    }
-
-    // Depth buffer (typeless to allow both DSV and SRV views)
-    {
-        D3D12_RESOURCE_DESC desc = {};
-        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-        desc.Width = w; desc.Height = h;
-        desc.DepthOrArraySize = 1; desc.MipLevels = 1;
-        desc.Format = DXGI_FORMAT_R24G8_TYPELESS;
-        desc.SampleDesc.Count = 1;
-        desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
-
-        D3D12_CLEAR_VALUE cv = {}; cv.Format = DXGI_FORMAT_D24_UNORM_S8_UINT; cv.DepthStencil.Depth = 1.0f;
-        HRESULT hr = device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &desc,
-                                         D3D12_RESOURCE_STATE_DEPTH_WRITE, &cv,
-                                         IID_PPV_ARGS(target.depthBuffer.GetAddressOf()));
-        if (FAILED(hr))
-        {
-            LOG_ENGINE_ERROR("[D3D12] Failed to create PIE depth buffer ({}x{}, HRESULT: 0x{:08X})", w, h, static_cast<unsigned>(hr));
-            return;
-        }
-        m_stateTracker.track(target.depthBuffer.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE);
-    }
-
-    // Descriptors
-    if (target.rtvIndex == UINT(-1)) target.rtvIndex = m_rtvAllocator.allocate();
-    if (target.srvIndex == UINT(-1)) target.srvIndex = m_srvAllocator.allocate();
-    if (target.dsvIndex == UINT(-1)) target.dsvIndex = m_dsvAllocator.allocate();
-    if (target.offscreenRTVIndex == UINT(-1)) target.offscreenRTVIndex = m_rtvAllocator.allocate();
-    if (target.offscreenSRVIndex == UINT(-1)) target.offscreenSRVIndex = m_srvAllocator.allocate();
-    if (target.depthSRVIndex == UINT(-1)) target.depthSRVIndex = m_srvAllocator.allocate();
-
-    if (target.rtvIndex == UINT(-1) || target.srvIndex == UINT(-1) || target.dsvIndex == UINT(-1) ||
-        target.offscreenRTVIndex == UINT(-1) || target.offscreenSRVIndex == UINT(-1) || target.depthSRVIndex == UINT(-1))
-    {
-        LOG_ENGINE_ERROR("[D3D12] Failed to allocate descriptors for PIE viewport ({}x{})", w, h);
-        return;
-    }
-
-    device->CreateRenderTargetView(target.texture.Get(), nullptr, m_rtvAllocator.getCPU(target.rtvIndex));
-    device->CreateRenderTargetView(target.offscreenTexture.Get(), nullptr, m_rtvAllocator.getCPU(target.offscreenRTVIndex));
-
-    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-    srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    srvDesc.Texture2D.MipLevels = 1;
-    device->CreateShaderResourceView(target.texture.Get(), &srvDesc, m_srvAllocator.getCPU(target.srvIndex));
-
-    D3D12_SHADER_RESOURCE_VIEW_DESC offscreenSrvDesc = {};
-    offscreenSrvDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-    offscreenSrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-    offscreenSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    offscreenSrvDesc.Texture2D.MipLevels = 1;
-    device->CreateShaderResourceView(target.offscreenTexture.Get(), &offscreenSrvDesc, m_srvAllocator.getCPU(target.offscreenSRVIndex));
-
-    D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc = {};
-    dsvDesc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
-    dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
-    device->CreateDepthStencilView(target.depthBuffer.Get(), &dsvDesc, m_dsvAllocator.getCPU(target.dsvIndex));
-
-    // Depth SRV (for skybox depth sampling)
-    D3D12_SHADER_RESOURCE_VIEW_DESC depthSrvDesc = {};
-    depthSrvDesc.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
-    depthSrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-    depthSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    depthSrvDesc.Texture2D.MipLevels = 1;
-    device->CreateShaderResourceView(target.depthBuffer.Get(), &depthSrvDesc, m_srvAllocator.getCPU(target.depthSRVIndex));
-
-    target.width = w;
-    target.height = h;
-}
-
 int D3D12RenderAPI::createPIEViewport(int width, int height)
 {
     int id = m_next_pie_id++;
-    PIEViewportTarget target;
-    createPIEViewportResources(target, width, height);
-    m_pie_viewports[id] = std::move(target);
+    m_pie_viewports[id] = std::make_unique<D3D12SceneViewport>(this, width, height, false);
     LOG_ENGINE_TRACE("[D3D12] Created PIE viewport #{} ({}x{})", id, width, height);
     return id;
 }
@@ -602,40 +473,14 @@ int D3D12RenderAPI::createPIEViewport(int width, int height)
 void D3D12RenderAPI::destroyPIEViewport(int id)
 {
     auto it = m_pie_viewports.find(id);
-    if (it != m_pie_viewports.end())
-    {
-        flushGPU();
-        auto& target = it->second;
-        if (target.texture) m_stateTracker.untrack(target.texture.Get());
-        if (target.offscreenTexture) m_stateTracker.untrack(target.offscreenTexture.Get());
-        if (target.depthBuffer) m_stateTracker.untrack(target.depthBuffer.Get());
-        if (target.rtvIndex != UINT(-1)) m_rtvAllocator.free(target.rtvIndex);
-        if (target.srvIndex != UINT(-1)) m_srvAllocator.free(target.srvIndex);
-        if (target.dsvIndex != UINT(-1)) m_dsvAllocator.free(target.dsvIndex);
-        if (target.offscreenRTVIndex != UINT(-1)) m_rtvAllocator.free(target.offscreenRTVIndex);
-        if (target.offscreenSRVIndex != UINT(-1)) m_srvAllocator.free(target.offscreenSRVIndex);
-        if (target.depthSRVIndex != UINT(-1)) m_srvAllocator.free(target.depthSRVIndex);
-        m_pie_viewports.erase(it);
-        if (m_active_scene_target == id)
-            m_active_scene_target = -1;
-    }
+    if (it == m_pie_viewports.end()) return;
+    m_pie_viewports.erase(it);  // SceneViewport dtor routes resources through the deferred-release ring
+    if (m_active_scene_target == id)
+        m_active_scene_target = -1;
 }
 
 void D3D12RenderAPI::destroyAllPIEViewports()
 {
-    flushGPU();
-    for (auto& [id, target] : m_pie_viewports)
-    {
-        if (target.texture) m_stateTracker.untrack(target.texture.Get());
-        if (target.offscreenTexture) m_stateTracker.untrack(target.offscreenTexture.Get());
-        if (target.depthBuffer) m_stateTracker.untrack(target.depthBuffer.Get());
-        if (target.rtvIndex != UINT(-1)) m_rtvAllocator.free(target.rtvIndex);
-        if (target.srvIndex != UINT(-1)) m_srvAllocator.free(target.srvIndex);
-        if (target.dsvIndex != UINT(-1)) m_dsvAllocator.free(target.dsvIndex);
-        if (target.offscreenRTVIndex != UINT(-1)) m_rtvAllocator.free(target.offscreenRTVIndex);
-        if (target.offscreenSRVIndex != UINT(-1)) m_srvAllocator.free(target.offscreenSRVIndex);
-        if (target.depthSRVIndex != UINT(-1)) m_srvAllocator.free(target.depthSRVIndex);
-    }
     m_pie_viewports.clear();
     m_active_scene_target = -1;
 }
@@ -643,11 +488,8 @@ void D3D12RenderAPI::destroyAllPIEViewports()
 void D3D12RenderAPI::setPIEViewportSize(int id, int width, int height)
 {
     auto it = m_pie_viewports.find(id);
-    if (it != m_pie_viewports.end() && (it->second.width != width || it->second.height != height))
-    {
-        flushGPU();
-        createPIEViewportResources(it->second, width, height);
-    }
+    if (it != m_pie_viewports.end())
+        it->second->resize(width, height);
 }
 
 void D3D12RenderAPI::setActiveSceneTarget(int pie_viewport_id)
@@ -658,7 +500,6 @@ void D3D12RenderAPI::setActiveSceneTarget(int pie_viewport_id)
 uint64_t D3D12RenderAPI::getPIEViewportTextureID(int id)
 {
     auto it = m_pie_viewports.find(id);
-    if (it != m_pie_viewports.end() && it->second.srvIndex != UINT(-1))
-        return m_srvAllocator.getGPU(it->second.srvIndex).ptr;
-    return 0;
+    if (it == m_pie_viewports.end()) return 0;
+    return it->second->getOutputTextureID();
 }

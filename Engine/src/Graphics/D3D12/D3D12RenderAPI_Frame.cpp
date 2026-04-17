@@ -36,20 +36,20 @@ void D3D12RenderAPI::beginFrame()
         auto it = m_pie_viewports.find(m_active_scene_target);
         if (it != m_pie_viewports.end())
         {
-            auto& pie = it->second;
-            transitionResource(pie.offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            auto& pie = *it->second;
+            transitionResource(pie.getHDR(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
             flushBarriers();
-            rtvHandle = m_rtvAllocator.getCPU(pie.offscreenRTVIndex);
-            dsvHandle = m_dsvAllocator.getCPU(pie.dsvIndex);
+            rtvHandle = m_rtvAllocator.getCPU(pie.getHDRRTV());
+            dsvHandle = m_dsvAllocator.getCPU(pie.getDepthDSV());
             commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, &dsvHandle);
 
             D3D12_VIEWPORT vp = {};
-            vp.Width = static_cast<float>(pie.width);
-            vp.Height = static_cast<float>(pie.height);
+            vp.Width = static_cast<float>(pie.width());
+            vp.Height = static_cast<float>(pie.height());
             vp.MaxDepth = 1.0f;
             commandList->RSSetViewports(1, &vp);
 
-            D3D12_RECT scissor = { 0, 0, pie.width, pie.height };
+            D3D12_RECT scissor = { 0, 0, pie.width(), pie.height() };
             commandList->RSSetScissorRects(1, &scissor);
 
             m_currentRT.rtvHandle = rtvHandle;
@@ -314,9 +314,9 @@ void D3D12RenderAPI::clear(const glm::vec3& color)
         auto it = m_pie_viewports.find(m_active_scene_target);
         if (it != m_pie_viewports.end())
         {
-            auto& pie = it->second;
-            commandList->ClearRenderTargetView(m_rtvAllocator.getCPU(pie.offscreenRTVIndex), clearColor, 0, nullptr);
-            commandList->ClearDepthStencilView(m_dsvAllocator.getCPU(pie.dsvIndex),
+            auto& pie = *it->second;
+            commandList->ClearRenderTargetView(m_rtvAllocator.getCPU(pie.getHDRRTV()), clearColor, 0, nullptr);
+            commandList->ClearDepthStencilView(m_dsvAllocator.getCPU(pie.getDepthDSV()),
                                                 D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, nullptr);
             return;
         }

@@ -78,7 +78,7 @@ public:
         for (auto& entry : m_entries)
         {
             if (entry.allocator)
-a                 entry.allocator->Reset();
+                 entry.allocator->Reset();
             entry.in_use.store(false, std::memory_order_release);
         }
     }

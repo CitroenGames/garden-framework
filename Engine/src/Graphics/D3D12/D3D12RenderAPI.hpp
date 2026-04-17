@@ -14,6 +14,7 @@
 #include "D3D12PostProcessGraphBuilder.hpp"
 #include "D3D12DeferredSceneGraphBuilder.hpp"
 #include "Graphics/RenderGraph/RenderGraph.hpp"
+#include "D3D12SceneViewport.hpp"
 #include <d3d12.h>
 #include <d3d12sdklayers.h>
 #include <dxgi1_4.h>
@@ -30,6 +31,7 @@
 #include <string>
 #include <vector>
 #include <mutex>
+#include <memory>
 
 
 using Microsoft::WRL::ComPtr;
@@ -46,6 +48,7 @@ public:
 private:
     friend class D3D12PostProcessGraphBuilder;
     friend class D3D12DeferredSceneGraphBuilder;
+    friend class D3D12SceneViewport;
 
     WindowHandle window_handle = nullptr;
     HWND hwnd = nullptr;
@@ -538,22 +541,10 @@ private:
     int preview_width_rt = 0, preview_height_rt = 0;
     void createPreviewResources(int w, int h);
 
-    // PIE viewport render targets
-    struct PIEViewportTarget
-    {
-        ComPtr<ID3D12Resource> texture;
-        ComPtr<ID3D12Resource> depthBuffer;
-        ComPtr<ID3D12Resource> offscreenTexture;
-        UINT rtvIndex = UINT(-1);
-        UINT srvIndex = UINT(-1);
-        UINT dsvIndex = UINT(-1);
-        UINT offscreenRTVIndex = UINT(-1);
-        UINT offscreenSRVIndex = UINT(-1);
-        UINT depthSRVIndex = UINT(-1);
-        int width = 0, height = 0;
-    };
-    std::unordered_map<int, PIEViewportTarget> m_pie_viewports;
+    // PIE viewport render targets. Each PIE client owns one SceneViewport;
+    // the viewport's destructor routes resources through the deferred-release
+    // ring and cleans up descriptors.
+    std::unordered_map<int, std::unique_ptr<D3D12SceneViewport>> m_pie_viewports;
     int m_next_pie_id = 0;
     int m_active_scene_target = -1;
-    void createPIEViewportResources(PIEViewportTarget& target, int w, int h);
 };

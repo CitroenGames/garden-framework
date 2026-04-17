@@ -65,11 +65,11 @@ void D3D12RenderAPI::renderSkybox()
         auto it = m_pie_viewports.find(m_active_scene_target);
         if (it != m_pie_viewports.end())
         {
-            auto& pie = it->second;
-            depthBuffer = pie.depthBuffer.Get();
-            depthSRVIndex = pie.depthSRVIndex;
-            currentWidth = pie.width;
-            currentHeight = pie.height;
+            auto& pie = *it->second;
+            depthBuffer = pie.getDepth();
+            depthSRVIndex = pie.getDepthSRV();
+            currentWidth = pie.width();
+            currentHeight = pie.height();
         }
     }
     else if (m_viewportTexture)
