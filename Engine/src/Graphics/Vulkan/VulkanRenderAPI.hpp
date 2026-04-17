@@ -109,6 +109,9 @@ public:
     virtual void setSSAORadius(float radius) override;
     virtual void setSSAOIntensity(float intensity) override;
 
+    void setDeferredEnabled(bool enabled) override { m_useDeferred = enabled; }
+    bool isDeferredEnabled() const override { return m_useDeferred; }
+
     // Vulkan-specific accessors for VulkanMesh
     VkDevice getDevice() const { return device; }
     VmaAllocator getAllocator() const { return vma_allocator; }

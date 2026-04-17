@@ -11,6 +11,7 @@ void D3D12RenderAPI::createViewportResources(int w, int h)
 {
     LOG_ENGINE_TRACE("[D3D12] Creating viewport resources ({}x{})", w, h);
     if (m_viewportTexture) m_stateTracker.untrack(m_viewportTexture.Get());
+    if (m_viewportDepthBuffer) m_stateTracker.untrack(m_viewportDepthBuffer.Get());
     m_viewportTexture.Reset();
     m_viewportDepthBuffer.Reset();
 
@@ -67,6 +68,7 @@ void D3D12RenderAPI::createViewportResources(int w, int h)
             LOG_ENGINE_ERROR("[D3D12] Failed to create viewport depth texture ({}x{}, HRESULT: 0x{:08X})", w, h, static_cast<unsigned>(hr));
             return;
         }
+        m_stateTracker.track(m_viewportDepthBuffer.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE);
     }
 
     // Allocate descriptors
@@ -140,21 +142,68 @@ void D3D12RenderAPI::endSceneRender()
         {
             auto& pie = it->second;
 
-            // PIE viewport: tone-map HDR offscreen to LDR output (with optional FXAA)
-            transitionResource(pie.offscreenTexture.Get(), {},
-                               D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-            transitionResource(pie.texture.Get(), {},
-                               D3D12_RESOURCE_STATE_RENDER_TARGET);
-            flushBarriers();
+            // Route PIE through the same render graph as the editor viewport so
+            // it gets skybox + deferred + SSAO + shadow-mask 1:1 with standalone.
+            bool wantSSAO = ssaoEnabled && m_ssaoBlurVPass.isInitialized()
+                            && pie.depthSRVIndex != UINT(-1);
+            bool wantShadowMask = (shadowQuality > 0) && m_shadowMaskPass.isInitialized()
+                                  && m_shadowMapArray && pie.depthSRVIndex != UINT(-1);
 
-            D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvAllocator.getCPU(pie.rtvIndex);
-            renderFXAAPass(rtvHandle, pie.offscreenSRVIndex, pie.width, pie.height, false, false);
+            if (m_useRenderGraph)
+            {
+                D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvAllocator.getCPU(pie.rtvIndex);
 
-            transitionResource(pie.offscreenTexture.Get(), {},
-                               D3D12_RESOURCE_STATE_RENDER_TARGET);
-            transitionResource(pie.texture.Get(), {},
-                               D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-            flushBarriers();
+                PostProcessGraphBuilder::Config cfg;
+                cfg.width          = static_cast<uint32_t>(pie.width);
+                cfg.height         = static_cast<uint32_t>(pie.height);
+                cfg.wantSSAO       = wantSSAO;
+                cfg.wantShadowMask = wantShadowMask;
+                cfg.renderImGui    = false;
+
+                if (m_useDeferred && m_gbufferPass.isInitialized()) {
+                    m_deferredGraphBuilder.setFrameInputs(rtvHandle, pie.offscreenSRVIndex,
+                                                         pie.depthBuffer.Get(), pie.depthSRVIndex,
+                                                         pie.dsvIndex,
+                                                         pie.texture.Get(), pie.rtvIndex);
+                    // Shadows applied in lighting pass; SSAO still via tonemap.
+                    PostProcessGraphBuilder::Config deferredCfg = cfg;
+                    deferredCfg.wantShadowMask = false;
+                    m_deferredGraphBuilder.build(m_frameGraph, m_rgBackend, deferredCfg);
+                } else {
+                    m_ppGraphBuilder.setFrameInputs(rtvHandle, pie.offscreenSRVIndex,
+                                                    pie.depthBuffer.Get(), pie.depthSRVIndex,
+                                                    pie.dsvIndex,
+                                                    pie.texture.Get(), pie.rtvIndex);
+                    m_ppGraphBuilder.build(m_frameGraph, m_rgBackend, cfg);
+                }
+
+                m_skyboxRequested = false;
+
+                // Restore expected states for editor flow (ImGui samples pie.texture).
+                transitionResource(pie.texture.Get(), {},
+                                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                transitionResource(pie.offscreenTexture.Get(), {},
+                                   D3D12_RESOURCE_STATE_RENDER_TARGET);
+                flushBarriers();
+            }
+            else
+            {
+                // Legacy fallback (no render graph): tone-map HDR → LDR directly.
+                transitionResource(pie.offscreenTexture.Get(), {},
+                                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                transitionResource(pie.texture.Get(), {},
+                                   D3D12_RESOURCE_STATE_RENDER_TARGET);
+                flushBarriers();
+
+                D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvAllocator.getCPU(pie.rtvIndex);
+                renderFXAAPass(rtvHandle, pie.offscreenSRVIndex, pie.width, pie.height, false, false);
+
+                transitionResource(pie.offscreenTexture.Get(), {},
+                                   D3D12_RESOURCE_STATE_RENDER_TARGET);
+                transitionResource(pie.texture.Get(), {},
+                                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                flushBarriers();
+            }
         }
         m_active_scene_target = -1;
     }
@@ -168,9 +217,6 @@ void D3D12RenderAPI::endSceneRender()
         if (m_useRenderGraph)
         {
             D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvAllocator.getCPU(m_viewportRTVIndex);
-            m_ppGraphBuilder.setFrameInputs(rtvHandle, m_offscreenSRVIndex,
-                                            m_viewportDepthBuffer.Get(), m_viewportDepthSRVIndex,
-                                            m_viewportTexture.Get(), m_viewportRTVIndex);
 
             PostProcessGraphBuilder::Config cfg;
             cfg.width          = static_cast<uint32_t>(viewport_width_rt);
@@ -178,7 +224,23 @@ void D3D12RenderAPI::endSceneRender()
             cfg.wantSSAO       = wantSSAO;
             cfg.wantShadowMask = wantShadowMask;
             cfg.renderImGui    = false;
-            m_ppGraphBuilder.build(m_frameGraph, m_rgBackend, cfg);
+
+            if (m_useDeferred && m_gbufferPass.isInitialized()) {
+                m_deferredGraphBuilder.setFrameInputs(rtvHandle, m_offscreenSRVIndex,
+                                                     m_viewportDepthBuffer.Get(), m_viewportDepthSRVIndex,
+                                                     m_viewportDSVIndex,
+                                                     m_viewportTexture.Get(), m_viewportRTVIndex);
+                // Shadows applied in lighting pass; SSAO still via tonemap.
+                PostProcessGraphBuilder::Config deferredCfg = cfg;
+                deferredCfg.wantShadowMask = false;
+                m_deferredGraphBuilder.build(m_frameGraph, m_rgBackend, deferredCfg);
+            } else {
+                m_ppGraphBuilder.setFrameInputs(rtvHandle, m_offscreenSRVIndex,
+                                                m_viewportDepthBuffer.Get(), m_viewportDepthSRVIndex,
+                                                m_viewportDSVIndex,
+                                                m_viewportTexture.Get(), m_viewportRTVIndex);
+                m_ppGraphBuilder.build(m_frameGraph, m_rgBackend, cfg);
+            }
 
             m_skyboxRequested = false;
 
@@ -404,6 +466,7 @@ void D3D12RenderAPI::createPIEViewportResources(PIEViewportTarget& target, int w
 {
     if (target.texture) m_stateTracker.untrack(target.texture.Get());
     if (target.offscreenTexture) m_stateTracker.untrack(target.offscreenTexture.Get());
+    if (target.depthBuffer) m_stateTracker.untrack(target.depthBuffer.Get());
     target.texture.Reset();
     target.depthBuffer.Reset();
     target.offscreenTexture.Reset();
@@ -474,6 +537,7 @@ void D3D12RenderAPI::createPIEViewportResources(PIEViewportTarget& target, int w
             LOG_ENGINE_ERROR("[D3D12] Failed to create PIE depth buffer ({}x{}, HRESULT: 0x{:08X})", w, h, static_cast<unsigned>(hr));
             return;
         }
+        m_stateTracker.track(target.depthBuffer.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE);
     }
 
     // Descriptors
@@ -544,6 +608,7 @@ void D3D12RenderAPI::destroyPIEViewport(int id)
         auto& target = it->second;
         if (target.texture) m_stateTracker.untrack(target.texture.Get());
         if (target.offscreenTexture) m_stateTracker.untrack(target.offscreenTexture.Get());
+        if (target.depthBuffer) m_stateTracker.untrack(target.depthBuffer.Get());
         if (target.rtvIndex != UINT(-1)) m_rtvAllocator.free(target.rtvIndex);
         if (target.srvIndex != UINT(-1)) m_srvAllocator.free(target.srvIndex);
         if (target.dsvIndex != UINT(-1)) m_dsvAllocator.free(target.dsvIndex);
@@ -563,6 +628,7 @@ void D3D12RenderAPI::destroyAllPIEViewports()
     {
         if (target.texture) m_stateTracker.untrack(target.texture.Get());
         if (target.offscreenTexture) m_stateTracker.untrack(target.offscreenTexture.Get());
+        if (target.depthBuffer) m_stateTracker.untrack(target.depthBuffer.Get());
         if (target.rtvIndex != UINT(-1)) m_rtvAllocator.free(target.rtvIndex);
         if (target.srvIndex != UINT(-1)) m_srvAllocator.free(target.srvIndex);
         if (target.dsvIndex != UINT(-1)) m_dsvAllocator.free(target.dsvIndex);

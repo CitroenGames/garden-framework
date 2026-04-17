@@ -73,6 +73,19 @@ private:
 
     std::unordered_map<uint16_t, TextureEntry> m_textures;
 
+    // Resources whose descriptor changed (e.g. viewport resize) are parked
+    // here rather than Reset()'d immediately — the previous frame's command
+    // list may still reference them on the GPU. Flushed at beginFrame() when
+    // we know any frame older than the fence wait is finished. Kept per-slot
+    // so we hold through a full NUM_FRAMES_IN_FLIGHT cycle.
+    static constexpr int kKeepAliveSlots = 3;
+    std::vector<ComPtr<ID3D12Resource>> m_pendingRelease[kKeepAliveSlots];
+    int m_keepAliveSlot = 0;
+
+    // Latched on first DEVICE_REMOVED from CreateCommittedResource so subsequent
+    // transient allocations become silent no-ops instead of flooding the log.
+    bool m_deviceRemoved = false;
+
     static D3D12_RESOURCE_STATES toD3D12State(RGResourceUsage usage);
     static bool isDepthFormat(RGFormat format);
     static DXGI_FORMAT toDXGIFormat(RGFormat format);

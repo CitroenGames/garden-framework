@@ -100,6 +100,7 @@ bool EditorApp::initialize(RenderAPIType api_type)
     render_api->setFXAAEnabled(CVAR_BOOL(r_fxaa));
     render_api->setSSAOEnabled(CVAR_BOOL(r_ssao));
     render_api->setShadowQuality(CVAR_INT(r_shadowquality));
+    render_api->setDeferredEnabled(CVAR_BOOL(r_deferred));
     render_api->enableLighting(CVAR_BOOL(r_lighting));
     m_renderer.setDepthPrepassEnabled(CVAR_BOOL(r_depthprepass));
     m_renderer.setBVHEnabled(CVAR_BOOL(r_frustumculling));
@@ -1988,6 +1989,19 @@ void EditorApp::renderEditorSettings()
                         if (cvar) cvar->setInt(dyn ? 1 : 0);
                     }
                 }
+
+                // Deferred Rendering toggle
+                {
+                    auto* cvar = CVAR_PTR(r_deferred);
+                    bool deferred = cvar ? cvar->getBool() : false;
+                    if (ImGui::Checkbox("Deferred Rendering", &deferred))
+                    {
+                        if (cvar) cvar->setInt(deferred ? 1 : 0);
+                        m_app.getRenderAPI()->setDeferredEnabled(deferred);
+                    }
+                    if (m_app.getAPIType() != RenderAPIType::D3D12)
+                        ImGui::TextDisabled("  D3D12 only -- no-op on Vulkan.");
+                }
                 break;
             }
 
@@ -2067,7 +2081,8 @@ void EditorApp::renderEditorSettings()
         if (ImGui::Button("Reset to Defaults"))
         {
             const char* cvar_names[] = { "r_fxaa", "r_ssao", "r_shadowquality", "r_sky", "r_lighting",
-                                          "r_dynamiclights", "r_depthprepass", "r_frustumculling" };
+                                          "r_dynamiclights", "r_depthprepass", "r_frustumculling",
+                                          "r_deferred" };
             for (const char* name : cvar_names)
             {
                 if (auto* cv = ConVarRegistry::get().find(name))
@@ -2076,6 +2091,7 @@ void EditorApp::renderEditorSettings()
             m_app.getRenderAPI()->setFXAAEnabled(CVAR_BOOL(r_fxaa));
             m_app.getRenderAPI()->setSSAOEnabled(CVAR_BOOL(r_ssao));
             m_app.getRenderAPI()->setShadowQuality(CVAR_INT(r_shadowquality));
+            m_app.getRenderAPI()->setDeferredEnabled(CVAR_BOOL(r_deferred));
             m_app.getRenderAPI()->enableLighting(CVAR_BOOL(r_lighting));
             m_renderer.setDepthPrepassEnabled(CVAR_BOOL(r_depthprepass));
             m_renderer.setBVHEnabled(CVAR_BOOL(r_frustumculling));

@@ -164,18 +164,20 @@ void D3D12RenderAPI::endFrame()
             if (m_useDeferred && m_gbufferPass.isInitialized()) {
                 m_deferredGraphBuilder.setFrameInputs(rtvHandle, m_offscreenSRVIndex,
                                                      m_depthStencilBuffer.Get(), m_depthSRVIndex,
+                                                     m_mainDSVIndex,
                                                      m_backBuffers[m_backBufferIndex].Get(),
                                                      m_backBufferRTVs[m_backBufferIndex]);
-                // Deferred lighting applies shadows in-pass and doesn't consume
-                // the screen-space shadow-mask or SSAO textures. Disabling them
-                // avoids double-darkening at tonemap time.
+                // Shadows are applied inside the deferred lighting pass, so the
+                // screen-space ShadowMask is redundant (and would double-darken).
+                // SSAO is left on — tonemap multiplies it into the lit HDR, same
+                // as the forward path.
                 PostProcessGraphBuilder::Config deferredCfg = cfg;
                 deferredCfg.wantShadowMask = false;
-                deferredCfg.wantSSAO       = false;
                 m_deferredGraphBuilder.build(m_frameGraph, m_rgBackend, deferredCfg);
             } else {
                 m_ppGraphBuilder.setFrameInputs(rtvHandle, m_offscreenSRVIndex,
                                                 m_depthStencilBuffer.Get(), m_depthSRVIndex,
+                                                m_mainDSVIndex,
                                                 m_backBuffers[m_backBufferIndex].Get(),
                                                 m_backBufferRTVs[m_backBufferIndex]);
                 m_ppGraphBuilder.build(m_frameGraph, m_rgBackend, cfg);

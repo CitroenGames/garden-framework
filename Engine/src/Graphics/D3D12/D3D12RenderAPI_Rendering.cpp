@@ -1115,6 +1115,11 @@ void D3D12RenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
     }
 }
 
+void D3D12RenderAPI::setDeferredEnabled(bool enabled)
+{
+    m_useDeferred = enabled;
+}
+
 bool D3D12RenderAPI::isDeferredActive() const
 {
     return m_useDeferred && m_gbufferPass.isInitialized();
@@ -1210,6 +1215,24 @@ void D3D12RenderAPI::renderDebugLines(const vertex* vertices, size_t vertex_coun
 {
     if (!vertices || vertex_count < 2 || device_lost) return;
     if (in_shadow_pass) return;
+    if (!m_psoDebugLines) return;
+
+    // Deferred path: buffer the vertices and let the RG TransparentForward pass
+    // draw them after the lighting pass. If we drew now, the lighting pass's
+    // full-screen write would wipe them (albedo/emissive are 0 at non-geometry
+    // pixels) and shipped colors would be black.
+    if (isDeferredActive()) {
+        m_deferredDebugLineVertices.insert(m_deferredDebugLineVertices.end(),
+                                           vertices, vertices + vertex_count);
+        return;
+    }
+
+    renderDebugLinesDirect(vertices, vertex_count);
+}
+
+void D3D12RenderAPI::renderDebugLinesDirect(const vertex* vertices, size_t vertex_count)
+{
+    if (!vertices || vertex_count < 2 || device_lost) return;
     if (!m_psoDebugLines) return;
 
     if (global_cbuffer_dirty)
@@ -1321,6 +1344,7 @@ IGPUMesh* D3D12RenderAPI::createMesh()
     mesh->setD3D12Handles(device.Get(), commandQueue.Get(),
                           m_uploadCmdAllocator.Get(), m_uploadCmdList.Get(),
                           m_uploadFence.Get(), m_uploadFenceEvent,
-                          &m_uploadFenceValue);
+                          &m_uploadFenceValue,
+                          this);
     return mesh;
 }

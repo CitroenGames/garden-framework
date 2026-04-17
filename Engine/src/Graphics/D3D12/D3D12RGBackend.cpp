@@ -31,10 +31,51 @@ void D3D12RGBackend::bindImportedTexture(RGResourceHandle handle,
 
 void D3D12RGBackend::createTransientTexture(RGResourceHandle handle, const RGTextureDesc& desc)
 {
-    // Check if already created (e.g., from a previous frame reuse)
+    if (m_deviceRemoved) return;
+
+    // Reuse across frames when the descriptor still matches. A command list
+    // that was submitted last frame may still be in flight on the GPU when we
+    // get here, so we can't safely Release + recreate per-frame — keeping the
+    // resource alive across frames avoids "object deleted while still in use"
+    // validation errors. Recreate only on descriptor change (size/format/etc.).
     auto it = m_textures.find(handle.index);
     if (it != m_textures.end() && it->second.rawPtr != nullptr)
-        return;
+    {
+        auto& existing = it->second;
+        if (!existing.imported)
+        {
+            const auto prevDesc = existing.resource->GetDesc();
+            const bool depthNow = isDepthFormat(desc.format);
+            const DXGI_FORMAT wantFormat = depthNow ? DXGI_FORMAT_R32_TYPELESS
+                                                    : toDXGIFormat(desc.format);
+            if (prevDesc.Width == desc.width && prevDesc.Height == desc.height
+                && prevDesc.Format == wantFormat
+                && prevDesc.DepthOrArraySize == desc.arraySize
+                && prevDesc.MipLevels == desc.mipLevels)
+            {
+                return; // match — reuse
+            }
+            // Descriptor drifted (resize, format change) — park the old resource
+            // in the per-slot keep-alive list so a still-in-flight previous
+            // frame's command list doesn't reference a freed resource. The slot
+            // is cleared at a future beginFrame once the GPU has cycled past it.
+            if (existing.rawPtr)
+                m_stateTracker->untrack(existing.rawPtr);
+            if (existing.ownsDescriptors)
+            {
+                if (existing.rtvIndex != UINT(-1)) m_rtvAllocator->free(existing.rtvIndex);
+                if (existing.srvIndex != UINT(-1)) m_srvAllocator->free(existing.srvIndex);
+                if (existing.dsvIndex != UINT(-1)) m_dsvAllocator->free(existing.dsvIndex);
+            }
+            if (existing.resource)
+                m_pendingRelease[m_keepAliveSlot].push_back(std::move(existing.resource));
+            existing = TextureEntry{};
+        }
+        else
+        {
+            return; // imports are rebound each frame via bindImportedTexture
+        }
+    }
 
     D3D12_HEAP_PROPERTIES heapProps = {};
     heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -89,6 +130,14 @@ void D3D12RGBackend::createTransientTexture(RGResourceHandle handle, const RGTex
         LOG_ENGINE_ERROR("[RenderGraph] Failed to create transient texture '{}' ({}x{}, HRESULT: 0x{:08X})",
                          desc.debugName ? desc.debugName : "unnamed", desc.width, desc.height,
                          static_cast<unsigned>(hr));
+        // HRESULT 0x887A0005 == DXGI_ERROR_DEVICE_REMOVED. Latch so we don't
+        // flood the log every frame — the GPU isn't coming back in this session.
+        if (hr == 0x887A0005L)
+        {
+            m_deviceRemoved = true;
+            LOG_ENGINE_ERROR("[RenderGraph] GPU device removed; suppressing further transient-texture logs. "
+                             "Set r_d3d12_dred=1 and restart to capture DRED breadcrumbs.");
+        }
         return;
     }
 
@@ -145,22 +194,15 @@ void D3D12RGBackend::createTransientTexture(RGResourceHandle handle, const RGTex
 
 void D3D12RGBackend::destroyTransientTexture(RGResourceHandle handle)
 {
+    // Deliberate no-op. Transient resources are kept alive across frames so the
+    // submitted command list that references them doesn't close with a deleted
+    // resource. createTransientTexture reuses (or rebuilds on desc change).
+    // Resources are finally released when the backend itself is destroyed or
+    // when the descriptor changes (size/format/etc).
     auto it = m_textures.find(handle.index);
     if (it == m_textures.end()) return;
-
-    auto& entry = it->second;
-    if (entry.imported) return; // don't destroy imported resources
-
-    if (entry.rawPtr)
-        m_stateTracker->untrack(entry.rawPtr);
-    if (entry.ownsDescriptors)
-    {
-        if (entry.rtvIndex != UINT(-1)) m_rtvAllocator->free(entry.rtvIndex);
-        if (entry.srvIndex != UINT(-1)) m_srvAllocator->free(entry.srvIndex);
-        if (entry.dsvIndex != UINT(-1)) m_dsvAllocator->free(entry.dsvIndex);
-    }
-
-    m_textures.erase(it);
+    if (it->second.imported)
+        m_textures.erase(it); // imports are rebound each frame via bindImportedTexture
 }
 
 void D3D12RGBackend::insertBarrier(RGResourceHandle handle,
@@ -186,7 +228,11 @@ RGContext& D3D12RGBackend::getContext()
 
 void D3D12RGBackend::beginFrame()
 {
-    // Nothing needed — transient textures are created on demand
+    // Advance the keep-alive ring and release the slot we're about to reuse.
+    // By this point the D3D12RenderAPI has already fence-waited the previous
+    // cycle, so anything parked here is safe to Release.
+    m_keepAliveSlot = (m_keepAliveSlot + 1) % kKeepAliveSlots;
+    m_pendingRelease[m_keepAliveSlot].clear();
 }
 
 void D3D12RGBackend::endFrame()

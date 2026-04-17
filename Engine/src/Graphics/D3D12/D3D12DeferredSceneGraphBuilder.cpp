@@ -83,8 +83,13 @@ void D3D12DeferredSceneGraphBuilder::build(RenderGraph& graph, RGBackend& backen
                 m_api->m_rtvAllocator.getCPU(rtv1),
                 m_api->m_rtvAllocator.getCPU(rtv2),
             };
+            // Use the active scene depth DSV (matches viewport-vs-standalone dims).
+            // Binding the wrong-sized DSV with these RTVs is what was TDR'ing.
+            const UINT dsvIdx = (m_depthDSVIndex != UINT(-1))
+                                    ? m_depthDSVIndex
+                                    : m_api->m_mainDSVIndex;
             const D3D12_CPU_DESCRIPTOR_HANDLE dsv =
-                m_api->m_dsvAllocator.getCPU(m_api->m_mainDSVIndex);
+                m_api->m_dsvAllocator.getCPU(dsvIdx);
 
             d3dCtx->commandList->OMSetRenderTargets(3, rtvs, FALSE, &dsv);
 
@@ -94,13 +99,17 @@ void D3D12DeferredSceneGraphBuilder::build(RenderGraph& graph, RGBackend& backen
             d3dCtx->commandList->ClearRenderTargetView(rtvs[2], clear0, 0, nullptr);
 
             // Replay the buffered opaque draws with the GBuffer PSO bound.
-            // The forward root signature is reused, so the per-draw binding code
-            // in replayCommandBuffer works unchanged — only the PSO differs.
+            // NOTE: must use the single-threaded replay here. Parallel workers
+            // rebuild their command lists from m_currentRT (which still points
+            // at the single-HDR forward RT), so they'd draw with a 3-RT GBuffer
+            // PSO into a 1-RT bind -> GPU-BV "render target format mismatch".
+            // Single-threaded uses the main command list whose OMSetRenderTargets
+            // above already bound gb0/gb1/gb2 + the correct DSV.
             if (!m_api->m_deferredOpaqueCmds.empty()) {
                 ID3D12PipelineState* gbufferPSO = m_api->m_gbufferPass.getPSO();
                 if (gbufferPSO) {
                     m_api->m_replayPSOOverride = gbufferPSO;
-                    m_api->replayCommandBufferParallel(m_api->m_deferredOpaqueCmds);
+                    m_api->replayCommandBuffer(m_api->m_deferredOpaqueCmds);
                     m_api->m_replayPSOOverride = nullptr;
                 }
                 m_api->m_deferredOpaqueCmds.clear();
@@ -191,7 +200,11 @@ void D3D12DeferredSceneGraphBuilder::addPreTonemapPasses(RenderGraph& graph,
                                                          const Handles& h,
                                                          const Config& cfg)
 {
-    if (m_api->m_deferredTransparentCmds.empty()) return;
+    // Run the pass when we have ANY forward content that needs to land after
+    // the lighting pass — transparents or debug lines.
+    const bool haveTransparent = !m_api->m_deferredTransparentCmds.empty();
+    const bool haveDebugLines  = !m_api->m_deferredDebugLineVertices.empty();
+    if (!haveTransparent && !haveDebugLines) return;
 
     graph.addPass("TransparentForward",
         [&](RGBuilder& b) {
@@ -210,8 +223,11 @@ void D3D12DeferredSceneGraphBuilder::addPreTonemapPasses(RenderGraph& graph,
             if (hdrRTV == UINT(-1)) return;
 
             D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_api->m_rtvAllocator.getCPU(hdrRTV);
+            const UINT dsvIdx = (m_depthDSVIndex != UINT(-1))
+                                    ? m_depthDSVIndex
+                                    : m_api->m_mainDSVIndex;
             D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle =
-                m_api->m_dsvAllocator.getCPU(m_api->m_mainDSVIndex);
+                m_api->m_dsvAllocator.getCPU(dsvIdx);
 
             // Restore forward rendering state: the lighting + skybox passes left
             // the command list with their own root signatures and render targets.
@@ -252,7 +268,18 @@ void D3D12DeferredSceneGraphBuilder::addPreTonemapPasses(RenderGraph& graph,
             m_api->global_cbuffer_dirty = true;
             m_api->m_cachedLightCBAddr  = 0;
 
-            m_api->replayCommandBuffer(m_api->m_deferredTransparentCmds);
-            m_api->m_deferredTransparentCmds.clear();
+            if (!m_api->m_deferredTransparentCmds.empty()) {
+                m_api->replayCommandBuffer(m_api->m_deferredTransparentCmds);
+                m_api->m_deferredTransparentCmds.clear();
+            }
+
+            // Debug lines land here so they survive the lighting pass. The
+            // debug-line PSO has depth test + write, single RGBA16F RT -
+            // matches the HDR target we just bound.
+            if (!m_api->m_deferredDebugLineVertices.empty()) {
+                m_api->renderDebugLinesDirect(m_api->m_deferredDebugLineVertices.data(),
+                                              m_api->m_deferredDebugLineVertices.size());
+                m_api->m_deferredDebugLineVertices.clear();
+            }
         });
 }

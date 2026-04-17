@@ -14,6 +14,7 @@ void D3D12PostProcessGraphBuilder::setFrameInputs(D3D12_CPU_DESCRIPTOR_HANDLE rt
                                                     UINT inputSRVIndex,
                                                     ID3D12Resource* depthBuffer,
                                                     UINT depthSRVIndex,
+                                                    UINT depthDSVIndex,
                                                     ID3D12Resource* backBuffer,
                                                     UINT backBufferRTVIndex)
 {
@@ -21,6 +22,7 @@ void D3D12PostProcessGraphBuilder::setFrameInputs(D3D12_CPU_DESCRIPTOR_HANDLE rt
     m_inputSRVIndex      = inputSRVIndex;
     m_depthBuffer        = depthBuffer;
     m_depthSRVIndex      = depthSRVIndex;
+    m_depthDSVIndex      = depthDSVIndex;
     m_backBuffer         = backBuffer;
     m_backBufferRTVIndex = backBufferRTVIndex;
 }

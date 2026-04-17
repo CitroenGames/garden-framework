@@ -470,6 +470,14 @@ void D3D12RenderAPI::shutdown()
     m_pie_viewports.clear();
     m_active_scene_target = -1;
 
+    // Drain any resources parked in the deferred-release ring. flushGPU above
+    // guaranteed the GPU is idle, so everything here is safe to Release now.
+    {
+        std::lock_guard<std::mutex> lock(m_deferredReleaseMutex);
+        for (auto& slot : m_deferredRelease)
+            slot.clear();
+    }
+
     m_copyQueue.shutdown();
     m_commandListPool.shutdown();
 
@@ -525,6 +533,20 @@ void D3D12RenderAPI::waitForFence(UINT64 fenceValue)
         m_fence->SetEventOnCompletion(fenceValue, m_fenceEvent);
         WaitForSingleObject(m_fenceEvent, INFINITE);
     }
+}
+
+void D3D12RenderAPI::enqueueDeferredRelease(ComPtr<IUnknown> resource)
+{
+    if (!resource) return;
+    std::lock_guard<std::mutex> lock(m_deferredReleaseMutex);
+    m_deferredRelease[m_deferredReleaseSlot].push_back(std::move(resource));
+}
+
+void D3D12RenderAPI::flushDeferredReleases()
+{
+    std::lock_guard<std::mutex> lock(m_deferredReleaseMutex);
+    m_deferredReleaseSlot = (m_deferredReleaseSlot + 1) % kDeferredReleaseSlots;
+    m_deferredRelease[m_deferredReleaseSlot].clear();
 }
 
 void D3D12RenderAPI::resize(int width, int height)
@@ -636,6 +658,11 @@ void D3D12RenderAPI::ensureCommandListOpen()
 
     FrameContext& fc = m_frameContexts[m_frameIndex];
     waitForFence(fc.fenceValue);
+
+    // Now that the fence has retired the frame we're about to reuse, advance
+    // the deferred-release ring. After kDeferredReleaseSlots advances, any
+    // resource parked back then is guaranteed past the GPU.
+    flushDeferredReleases();
 
     // Apply deferred resource recreation BEFORE opening the command list
     // (must happen while no commands reference these resources)

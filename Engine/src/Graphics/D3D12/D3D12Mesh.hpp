@@ -6,6 +6,8 @@
 
 using Microsoft::WRL::ComPtr;
 
+class D3D12RenderAPI;
+
 class D3D12Mesh : public IGPUMesh
 {
 private:
@@ -28,15 +30,21 @@ private:
     HANDLE uploadFenceEvent = nullptr;
     UINT64* uploadFenceValue = nullptr;
 
+    // Owner API — routes vertex/index buffer release through the deferred
+    // queue so destruction during an open frame is safe. nullptr means
+    // "release immediately" (e.g. during API shutdown after flushGPU).
+    D3D12RenderAPI* ownerAPI = nullptr;
+
     ComPtr<ID3D12Resource> uploadToDefaultHeap(const void* data, size_t dataSize);
 
 public:
     D3D12Mesh() = default;
-    ~D3D12Mesh() override = default;
+    ~D3D12Mesh() override;
 
     void setD3D12Handles(ID3D12Device* dev, ID3D12CommandQueue* queue,
                          ID3D12CommandAllocator* cmdAlloc, ID3D12GraphicsCommandList* cmdList,
-                         ID3D12Fence* fence, HANDLE fenceEvent, UINT64* fenceVal);
+                         ID3D12Fence* fence, HANDLE fenceEvent, UINT64* fenceVal,
+                         D3D12RenderAPI* owner);
 
     // IGPUMesh implementation
     void uploadMeshData(const vertex* vertices, size_t count) override;

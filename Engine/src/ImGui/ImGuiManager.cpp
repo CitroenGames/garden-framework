@@ -485,6 +485,15 @@ void ImGuiManager::render()
                     if (auto* cvar = CVAR_PTR(r_shadowquality))
                         cvar->setInt(shadowQuality);
                 }
+
+                // Deferred rendering toggle
+                bool deferred = m_renderAPI->isDeferredEnabled();
+                if (ImGui::Checkbox("Deferred Rendering", &deferred))
+                {
+                    m_renderAPI->setDeferredEnabled(deferred);
+                    if (auto* cvar = CVAR_PTR(r_deferred))
+                        cvar->setInt(deferred ? 1 : 0);
+                }
             }
         }
         ImGui::End();

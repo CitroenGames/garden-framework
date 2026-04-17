@@ -29,6 +29,7 @@
 #include <unordered_map>
 #include <string>
 #include <vector>
+#include <mutex>
 
 
 using Microsoft::WRL::ComPtr;
@@ -258,6 +259,19 @@ private:
     // Automatic resource state tracking
     D3D12ResourceStateTracker m_stateTracker;
 
+    // Deferred-release ring. External owners (meshes, textures, viewport
+    // targets, etc.) hand their ComPtrs here when they'd otherwise Release
+    // immediately. A slot is only cleared after NUM_FRAMES_IN_FLIGHT + 1
+    // advances, by which point the GPU has cycled past every command list
+    // that could have referenced the parked resource. Mutex-guarded because
+    // meshes can be destroyed from worker threads (asset streaming).
+    static constexpr int kDeferredReleaseSlots = NUM_FRAMES_IN_FLIGHT + 1;
+    std::vector<ComPtr<IUnknown>> m_deferredRelease[kDeferredReleaseSlots];
+    int m_deferredReleaseSlot = 0;
+    std::mutex m_deferredReleaseMutex;
+    void enqueueDeferredRelease(ComPtr<IUnknown> resource);
+    void flushDeferredReleases();   // advance the ring; called in ensureCommandListOpen after the fence-wait
+
     // Device lost flag
     bool device_lost = false;
 
@@ -305,6 +319,11 @@ private:
     // Buffered opaque/transparent commands for the deferred path.
     RenderCommandBuffer m_deferredOpaqueCmds;
     RenderCommandBuffer m_deferredTransparentCmds;
+    // Buffered debug-line vertices for deferred replay. Forward draws them
+    // straight to HDR during the scene phase; in deferred we defer them into
+    // the TransparentForward RG pass so the lighting pass doesn't overwrite
+    // them with (albedo=0, emissive=0) pixels.
+    std::vector<vertex> m_deferredDebugLineVertices;
     // Optional PSO override used by replayCommandBuffer main-pass loop. Set while
     // replaying opaques into the GBuffer pass so the GBuffer PSO is bound instead
     // of the forward-lit PSO.
@@ -429,6 +448,8 @@ public:
     // Falls back to single-threaded replay for small command counts.
     void replayCommandBufferParallel(const RenderCommandBuffer& cmds) override;
 
+    void setDeferredEnabled(bool enabled) override;
+    bool isDeferredEnabled() const override { return m_useDeferred; }
     bool isDeferredActive() const override;
     void submitDeferredOpaqueCommands(const RenderCommandBuffer& cmds) override;
     void submitDeferredTransparentCommands(const RenderCommandBuffer& cmds) override;
@@ -437,6 +458,11 @@ public:
 
     // Debug line rendering
     void renderDebugLines(const vertex* vertices, size_t vertex_count) override;
+    // Unbuffered variant: draw debug lines directly onto whatever RT is currently
+    // bound. Used by the deferred RG pass to replay buffered vertices after
+    // lighting/skybox/transparent. Normal callers should use renderDebugLines,
+    // which routes through the deferred buffer when deferred is active.
+    void renderDebugLinesDirect(const vertex* vertices, size_t vertex_count);
 
     const char* getAPIName() const override { return "D3D12"; }
 
@@ -476,6 +502,21 @@ public:
     ID3D12GraphicsCommandList* getCommandList() const { return commandList.Get(); }
     ID3D12DescriptorHeap* getSrvDescriptorHeap() const { return m_srvHeap.Get(); }
     DescriptorHeapAllocator& getSrvAllocator() { return m_srvAllocator; }
+
+    // Hand a D3D12 resource to the deferred-release ring. The caller's ComPtr
+    // is Reset to null; the underlying object is kept alive for
+    // NUM_FRAMES_IN_FLIGHT + 1 frames before its refcount drops. Use this
+    // instead of letting a ComPtr Release during a frame — any resource still
+    // referenced by the currently-open command list would otherwise trigger
+    // OBJECT_DELETED_WHILE_STILL_IN_USE at Close().
+    template <typename T>
+    void deferredRelease(ComPtr<T>& resource)
+    {
+        if (!resource) return;
+        ComPtr<IUnknown> u = resource;  // AddRef via T* -> IUnknown* conversion
+        enqueueDeferredRelease(std::move(u));
+        resource.Reset();
+    }
 
 private:
     // Viewport render target for editor

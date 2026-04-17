@@ -17,6 +17,7 @@ public:
                         UINT inputSRVIndex,
                         ID3D12Resource* depthBuffer,
                         UINT depthSRVIndex,
+                        UINT depthDSVIndex,
                         ID3D12Resource* backBuffer,
                         UINT backBufferRTVIndex);
 
@@ -41,6 +42,7 @@ protected:
     UINT            m_inputSRVIndex   = UINT(-1);
     ID3D12Resource* m_depthBuffer     = nullptr;
     UINT            m_depthSRVIndex   = UINT(-1);
+    UINT            m_depthDSVIndex   = UINT(-1);
     ID3D12Resource* m_backBuffer      = nullptr;
     UINT            m_backBufferRTVIndex = UINT(-1);
 };

@@ -3,6 +3,7 @@
 #endif
 
 #include "D3D12RenderAPI.hpp"
+#include "Console/ConVar.hpp"
 #include "Utils/Log.hpp"
 #include <cstring>
 
@@ -12,43 +13,50 @@
 
 bool D3D12RenderAPI::createDevice()
 {
+    // Debug layer / DRED: always on in _DEBUG; in Release only when r_d3d12_dred=1.
+    const bool forceDred = CVAR_BOOL(r_d3d12_dred);
+    bool debugEnabled = false;
 #ifdef _DEBUG
-    // Enable debug layer
-    ComPtr<ID3D12Debug> debugController;
-    if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(debugController.GetAddressOf()))))
-    {
-        debugController->EnableDebugLayer();
-        LOG_ENGINE_INFO("[D3D12] Debug layer enabled");
+    const bool wantDebugLayer = true;
+#else
+    const bool wantDebugLayer = forceDred;
+#endif
 
-        // Enable GPU-based validation (catches more errors but slower)
-        ComPtr<ID3D12Debug1> debugController1;
-        if (SUCCEEDED(debugController.As(&debugController1)))
+    if (wantDebugLayer)
+    {
+        ComPtr<ID3D12Debug> debugController;
+        if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(debugController.GetAddressOf()))))
         {
-            debugController1->SetEnableGPUBasedValidation(TRUE);
-            debugController1->SetEnableSynchronizedCommandQueueValidation(TRUE);
-            LOG_ENGINE_INFO("[D3D12] GPU-based validation enabled");
+            debugController->EnableDebugLayer();
+            debugEnabled = true;
+            LOG_ENGINE_INFO("[D3D12] Debug layer enabled");
+
+            ComPtr<ID3D12Debug1> debugController1;
+            if (SUCCEEDED(debugController.As(&debugController1)))
+            {
+                debugController1->SetEnableGPUBasedValidation(TRUE);
+                debugController1->SetEnableSynchronizedCommandQueueValidation(TRUE);
+                LOG_ENGINE_INFO("[D3D12] GPU-based validation enabled");
+            }
+        }
+        else
+        {
+            LOG_ENGINE_WARN("[D3D12] Failed to enable debug layer - install Graphics Tools optional feature");
+        }
+
+        ComPtr<ID3D12DeviceRemovedExtendedDataSettings> dredSettings;
+        if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(dredSettings.GetAddressOf()))))
+        {
+            dredSettings->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+            dredSettings->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+            LOG_ENGINE_INFO("[D3D12] DRED enabled ({})",
+                            forceDred ? "r_d3d12_dred=1" : "debug build");
         }
     }
-    else
-    {
-        LOG_ENGINE_WARN("[D3D12] Failed to enable debug layer - install Graphics Tools optional feature");
-    }
-
-    // Enable DRED (Device Removed Extended Data) for post-mortem debugging
-    ComPtr<ID3D12DeviceRemovedExtendedDataSettings> dredSettings;
-    if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(dredSettings.GetAddressOf()))))
-    {
-        dredSettings->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
-        dredSettings->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
-        LOG_ENGINE_INFO("[D3D12] DRED (Device Removed Extended Data) enabled");
-    }
-#endif
 
     // Create DXGI Factory
     UINT dxgiFlags = 0;
-#ifdef _DEBUG
-    dxgiFlags = DXGI_CREATE_FACTORY_DEBUG;
-#endif
+    if (debugEnabled) dxgiFlags = DXGI_CREATE_FACTORY_DEBUG;
     HRESULT hr = CreateDXGIFactory2(dxgiFlags, IID_PPV_ARGS(dxgiFactory.GetAddressOf()));
     if (FAILED(hr))
     {

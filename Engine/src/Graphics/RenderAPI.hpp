@@ -189,9 +189,12 @@ public:
     // small buffers or if the backend doesn't support parallel replay.
     virtual void replayCommandBufferParallel(const RenderCommandBuffer& cmds) { replayCommandBuffer(cmds); }
 
-    // Deferred rendering: when active, opaque commands are recorded here instead
-    // of being replayed inline. The backend replays them later inside its GBuffer
-    // render graph pass with the GBuffer PSO bound.
+    // Deferred rendering controls. `isDeferredEnabled` reflects the desired
+    // toggle (matches the r_deferred CVar). `isDeferredActive` reports whether
+    // it is currently in effect (desired AND backend resources initialized).
+    // UI should bind to Enabled; the render path reads Active.
+    virtual void setDeferredEnabled(bool enabled) { (void)enabled; }
+    virtual bool isDeferredEnabled() const { return false; }
     virtual bool isDeferredActive() const { return false; }
     virtual void submitDeferredOpaqueCommands(const RenderCommandBuffer& cmds) { (void)cmds; }
     virtual void submitDeferredTransparentCommands(const RenderCommandBuffer& cmds) { (void)cmds; }

@@ -929,6 +929,7 @@ public:
         render_api->setFXAAEnabled(CVAR_BOOL(r_fxaa));
         render_api->setSSAOEnabled(CVAR_BOOL(r_ssao));
         render_api->setShadowQuality(CVAR_INT(r_shadowquality));
+        render_api->setDeferredEnabled(CVAR_BOOL(r_deferred));
         render_api->enableLighting(global_lighting);
 
         last_draw_calls = 0;
@@ -1185,6 +1186,7 @@ public:
         render_api->setFXAAEnabled(CVAR_BOOL(r_fxaa));
         render_api->setSSAOEnabled(CVAR_BOOL(r_ssao));
         render_api->setShadowQuality(CVAR_INT(r_shadowquality));
+        render_api->setDeferredEnabled(CVAR_BOOL(r_deferred));
         render_api->enableLighting(global_lighting);
 
         last_draw_calls = 0;

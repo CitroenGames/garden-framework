@@ -1,10 +1,25 @@
 #include "D3D12Mesh.hpp"
+#include "D3D12RenderAPI.hpp"
 #include "Utils/Vertex.hpp"
 #include <cstring>
 
+D3D12Mesh::~D3D12Mesh()
+{
+    // If we have an owner API, hand buffers to its deferred-release ring so
+    // any command list still in flight that references them stays valid until
+    // the GPU is past it. Without an owner (e.g. API already shut down), the
+    // ComPtrs Release immediately — safe because flushGPU already ran.
+    if (ownerAPI)
+    {
+        if (vertexBuffer) ownerAPI->deferredRelease(vertexBuffer);
+        if (indexBuffer)  ownerAPI->deferredRelease(indexBuffer);
+    }
+}
+
 void D3D12Mesh::setD3D12Handles(ID3D12Device* dev, ID3D12CommandQueue* queue,
                                 ID3D12CommandAllocator* cmdAlloc, ID3D12GraphicsCommandList* cmdList,
-                                ID3D12Fence* fence, HANDLE fenceEvent, UINT64* fenceVal)
+                                ID3D12Fence* fence, HANDLE fenceEvent, UINT64* fenceVal,
+                                D3D12RenderAPI* owner)
 {
     device = dev;
     commandQueue = queue;
@@ -13,6 +28,7 @@ void D3D12Mesh::setD3D12Handles(ID3D12Device* dev, ID3D12CommandQueue* queue,
     uploadFence = fence;
     uploadFenceEvent = fenceEvent;
     uploadFenceValue = fenceVal;
+    ownerAPI = owner;
 }
 
 ComPtr<ID3D12Resource> D3D12Mesh::uploadToDefaultHeap(const void* data, size_t dataSize)
@@ -131,8 +147,16 @@ void D3D12Mesh::uploadMeshData(const vertex* vertices, size_t count)
 {
     if (!device || !vertices || count == 0) return;
 
-    vertexBuffer.Reset();
-    indexBuffer.Reset();
+    if (ownerAPI)
+    {
+        if (vertexBuffer) ownerAPI->deferredRelease(vertexBuffer);
+        if (indexBuffer)  ownerAPI->deferredRelease(indexBuffer);
+    }
+    else
+    {
+        vertexBuffer.Reset();
+        indexBuffer.Reset();
+    }
     indexed_ = false;
     index_count_ = 0;
 
@@ -153,8 +177,16 @@ void D3D12Mesh::uploadIndexedMeshData(const vertex* vertices, size_t vert_count,
 {
     if (!device || !vertices || vert_count == 0 || !indices || idx_count == 0) return;
 
-    vertexBuffer.Reset();
-    indexBuffer.Reset();
+    if (ownerAPI)
+    {
+        if (vertexBuffer) ownerAPI->deferredRelease(vertexBuffer);
+        if (indexBuffer)  ownerAPI->deferredRelease(indexBuffer);
+    }
+    else
+    {
+        vertexBuffer.Reset();
+        indexBuffer.Reset();
+    }
 
     size_t vbSize = sizeof(vertex) * vert_count;
     vertexBuffer = uploadToDefaultHeap(vertices, vbSize);
@@ -188,6 +220,8 @@ void D3D12Mesh::updateMeshData(const vertex* vertices, size_t count, size_t offs
 
     // For simplicity, re-upload the entire buffer
     // A more optimal approach would use a staging buffer and CopyBufferRegion
+    if (ownerAPI)
+        ownerAPI->deferredRelease(vertexBuffer);
     size_t dataSize = sizeof(vertex) * count;
     vertexBuffer = uploadToDefaultHeap(vertices, dataSize);
     if (vertexBuffer)
