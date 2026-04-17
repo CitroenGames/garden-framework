@@ -6,6 +6,14 @@ void PostProcessGraphBuilder::build(RenderGraph& graph, RGBackend& backend, cons
     graph.setReferenceResolution(cfg.width, cfg.height);
 
     const Handles h = importResources(graph, backend, cfg);
+    addPostProcessPasses(graph, h, cfg);
+
+    graph.compile();
+    graph.execute(backend);
+}
+
+void PostProcessGraphBuilder::addPostProcessPasses(RenderGraph& graph, const Handles& h, const Config& cfg)
+{
     const RGResourceUsage depthRead = depthReadUsage();
 
     if (h.skyboxEnabled) {
@@ -52,6 +60,8 @@ void PostProcessGraphBuilder::build(RenderGraph& graph, RGBackend& backend, cons
             [this, h, cfg](RGContext& ctx) { this->recordShadowMask(ctx, h, cfg); });
     }
 
+    addPreTonemapPasses(graph, h, cfg);
+
     graph.addPass("Tonemapping",
         [&](RGBuilder& b) {
             b.read(h.offscreenHDR, RGResourceUsage::ShaderResource);
@@ -66,6 +76,15 @@ void PostProcessGraphBuilder::build(RenderGraph& graph, RGBackend& backend, cons
 
     addExtraPasses(graph, h, cfg);
 
-    graph.compile();
-    graph.execute(backend);
+    // Restore depth to DepthStencilWrite so next frame's forward pass can use
+    // it as a DSV without a stale-layout validation error. Passes above leave
+    // it in ShaderResource (Skybox/SSAO/ShadowMask read paths).
+    if (h.depth.isValid()) {
+        graph.addPass("DepthRestore",
+            [&](RGBuilder& b) {
+                b.write(h.depth, RGResourceUsage::DepthStencilWrite);
+                b.setSideEffect();
+            },
+            [](RGContext&) {});
+    }
 }

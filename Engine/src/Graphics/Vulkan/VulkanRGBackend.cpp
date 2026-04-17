@@ -1,8 +1,16 @@
 #include "VulkanRGBackend.hpp"
+#include "vk_mem_alloc.h"
+#include "VkInitHelpers.hpp"
+#include "Utils/Log.hpp"
 
-void VulkanRGBackend::init(VkDevice device, VkCommandBuffer commandBuffer)
+void VulkanRGBackend::init(VkDevice device, VmaAllocator allocator)
 {
     m_device = device;
+    m_allocator = allocator;
+}
+
+void VulkanRGBackend::setCommandBuffer(VkCommandBuffer commandBuffer)
+{
     m_context.commandBuffer = commandBuffer;
 }
 
@@ -24,15 +32,98 @@ void VulkanRGBackend::setCurrentLayout(RGResourceHandle handle, VkImageLayout la
         it->second.currentLayout = layout;
 }
 
-void VulkanRGBackend::createTransientTexture(RGResourceHandle, const RGTextureDesc&)
+void VulkanRGBackend::createTransientTexture(RGResourceHandle handle, const RGTextureDesc& desc)
 {
-    // Not used — all Vulkan textures are managed by VulkanPostProcessPass instances
-    // and imported as external resources. Transient allocation is a future extension.
+    if (!m_device || !m_allocator) return;
+    auto it = m_images.find(handle.index);
+    if (it != m_images.end() && it->second.image != VK_NULL_HANDLE) return;
+
+    const bool depth = isDepthFormat(desc.format);
+    const VkFormat format = toVkFormat(desc.format);
+    const VkImageAspectFlags aspect = depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+
+    VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+    if (depth) usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    else       usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+
+    VkImage image = VK_NULL_HANDLE;
+    VmaAllocation allocation = nullptr;
+    VkResult r = vkutil::createImage(m_allocator, desc.width, desc.height,
+                                     format, usage, image, allocation,
+                                     desc.mipLevels, desc.arraySize, 0);
+    if (r != VK_SUCCESS) {
+        LOG_ENGINE_ERROR("[RenderGraph] Failed to allocate transient image '{}' ({}x{})",
+                         desc.debugName ? desc.debugName : "unnamed", desc.width, desc.height);
+        return;
+    }
+
+    VkImageView view = vkutil::createImageView(m_device, image, format, aspect, desc.mipLevels);
+    if (view == VK_NULL_HANDLE) {
+        vmaDestroyImage(m_allocator, image, allocation);
+        LOG_ENGINE_ERROR("[RenderGraph] Failed to create image view for transient '{}'",
+                         desc.debugName ? desc.debugName : "unnamed");
+        return;
+    }
+
+    auto& entry = m_images[handle.index];
+    entry.image         = image;
+    entry.view          = view;
+    entry.allocation    = allocation;
+    entry.currentLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    entry.aspectMask    = aspect;
+    entry.imported      = false;
 }
 
-void VulkanRGBackend::destroyTransientTexture(RGResourceHandle)
+void VulkanRGBackend::destroyTransientTexture(RGResourceHandle handle)
 {
-    // Not used — see above.
+    auto it = m_images.find(handle.index);
+    if (it == m_images.end()) return;
+    auto& entry = it->second;
+    if (entry.imported) return;
+
+    if (entry.view != VK_NULL_HANDLE)
+        vkDestroyImageView(m_device, entry.view, nullptr);
+    if (entry.image != VK_NULL_HANDLE && entry.allocation != nullptr)
+        vmaDestroyImage(m_allocator, entry.image, entry.allocation);
+
+    m_images.erase(it);
+}
+
+VkImage VulkanRGBackend::getImage(RGResourceHandle handle) const
+{
+    auto it = m_images.find(handle.index);
+    return (it == m_images.end()) ? VK_NULL_HANDLE : it->second.image;
+}
+
+VkImageView VulkanRGBackend::getImageView(RGResourceHandle handle) const
+{
+    auto it = m_images.find(handle.index);
+    return (it == m_images.end()) ? VK_NULL_HANDLE : it->second.view;
+}
+
+bool VulkanRGBackend::isDepthFormat(RGFormat format)
+{
+    return format == RGFormat::D24_UNORM_S8_UINT
+        || format == RGFormat::D32_FLOAT
+        || format == RGFormat::D32_FLOAT_S8_UINT;
+}
+
+VkFormat VulkanRGBackend::toVkFormat(RGFormat format)
+{
+    switch (format) {
+    case RGFormat::R8_UNORM:          return VK_FORMAT_R8_UNORM;
+    case RGFormat::R16_FLOAT:         return VK_FORMAT_R16_SFLOAT;
+    case RGFormat::R32_FLOAT:         return VK_FORMAT_R32_SFLOAT;
+    case RGFormat::RG16_FLOAT:        return VK_FORMAT_R16G16_SFLOAT;
+    case RGFormat::RGBA8_UNORM:       return VK_FORMAT_R8G8B8A8_UNORM;
+    case RGFormat::RGBA8_SRGB:        return VK_FORMAT_R8G8B8A8_SRGB;
+    case RGFormat::RGBA16_FLOAT:      return VK_FORMAT_R16G16B16A16_SFLOAT;
+    case RGFormat::RGBA32_FLOAT:      return VK_FORMAT_R32G32B32A32_SFLOAT;
+    case RGFormat::D24_UNORM_S8_UINT: return VK_FORMAT_D24_UNORM_S8_UINT;
+    case RGFormat::D32_FLOAT:         return VK_FORMAT_D32_SFLOAT;
+    case RGFormat::D32_FLOAT_S8_UINT: return VK_FORMAT_D32_SFLOAT_S8_UINT;
+    default:                          return VK_FORMAT_R8G8B8A8_UNORM;
+    }
 }
 
 void VulkanRGBackend::insertBarrier(RGResourceHandle handle,

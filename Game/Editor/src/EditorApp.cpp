@@ -548,9 +548,6 @@ void EditorApp::run()
             // LOD settings panel (opens when double-clicking a mesh in content browser)
             m_lod_settings_panel.draw();
 
-            // Viewport overlay (not docked, transparent)
-            m_viewport_overlay.draw(m_state);
-
             // Status bar (fixed at bottom)
             if (m_show_status_bar)
             {
@@ -1773,8 +1770,6 @@ void EditorApp::renderMenuBar()
             ImGui::MenuItem("Status Bar",      nullptr, &m_show_status_bar);
             ImGui::MenuItem("NavMesh",         nullptr, &m_show_navmesh_panel);
             ImGui::MenuItem("Physics Debug",   nullptr, &m_show_physics_debug);
-            ImGui::Separator();
-            ImGui::MenuItem("Viewport Stats",  nullptr, &m_state.show_viewport_stats);
             ImGui::MenuItem("Grid",            nullptr, &m_state.show_grid);
             ImGui::Separator();
             ImGui::MenuItem("All Panels (F1)", nullptr, &m_show_ui);

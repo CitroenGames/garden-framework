@@ -41,14 +41,15 @@ cbuffer PerObjectCB : register(b1)
 [[vk::binding(3, 0)]]
 cbuffer LightCB : register(b3)
 {
-    PointLightData pointLights[MAX_LIGHTS];
-    SpotLightData  spotLights[MAX_LIGHTS];
     int numPointLights;
     int numSpotLights;
     float2 _lightPad;
     float3 uCameraPos;
     float _lightPad2;
 };
+
+[[vk::binding(10, 0)]]StructuredBuffer<PointLightData> pointLights : register(t6);
+[[vk::binding(11, 0)]]StructuredBuffer<SpotLightData>  spotLights  : register(t7);
 
 // Base color / diffuse texture
 [[vk::binding(1, 0)]]Texture2D diffuseTexture : register(t0);

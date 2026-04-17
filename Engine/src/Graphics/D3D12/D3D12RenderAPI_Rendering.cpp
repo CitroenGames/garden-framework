@@ -665,6 +665,10 @@ void D3D12RenderAPI::flushAndReopenCommandList()
 
     if (m_shadowSRVIndex != UINT(-1))
         commandList->SetGraphicsRootDescriptorTable(3, m_srvAllocator.getGPU(m_shadowSRVIndex));
+    if (m_pointLightsSRVIndex[m_frameIndex] != UINT(-1))
+        commandList->SetGraphicsRootDescriptorTable(9, m_srvAllocator.getGPU(m_pointLightsSRVIndex[m_frameIndex]));
+    if (m_spotLightsSRVIndex[m_frameIndex] != UINT(-1))
+        commandList->SetGraphicsRootDescriptorTable(10, m_srvAllocator.getGPU(m_spotLightsSRVIndex[m_frameIndex]));
 
     // Restore PBR texture bindings (root params 5-8)
     if (m_defaultMetallicRoughnessTexture.srvIndex != UINT(-1))
@@ -869,13 +873,17 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
                     if (objAddr == 0) continue;
                     cmdList->SetGraphicsRootConstantBufferView(1, objAddr);
 
-                    // Select PSO
-                    RenderState rs;
-                    rs.blend_mode = cmd.pso_key.blend;
-                    rs.cull_mode = cmd.pso_key.cull;
-                    rs.lighting = cmd.pso_key.lighting;
-                    bool unlit = !cmd.pso_key.lighting;
-                    ID3D12PipelineState* pso = selectPSO(rs, unlit);
+                    // Select PSO (or honor caller-set GBuffer override).
+                    ID3D12PipelineState* pso = m_replayPSOOverride;
+                    if (!pso)
+                    {
+                        RenderState rs;
+                        rs.blend_mode = cmd.pso_key.blend;
+                        rs.cull_mode = cmd.pso_key.cull;
+                        rs.lighting = cmd.pso_key.lighting;
+                        bool unlit = !cmd.pso_key.lighting;
+                        pso = selectPSO(rs, unlit);
+                    }
                     if (pso != workerLastPSO)
                     {
                         cmdList->SetPipelineState(pso);
@@ -1051,14 +1059,18 @@ void D3D12RenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
         }
         commandList->SetGraphicsRootConstantBufferView(4, m_cachedLightCBAddr);
 
-        // Select PSO from PSOKey
-        RenderState rs;
-        rs.blend_mode = cmd.pso_key.blend;
-        rs.cull_mode = cmd.pso_key.cull;
-        rs.lighting = cmd.pso_key.lighting;
-        rs.alpha_test = cmd.pso_key.alpha_test;
-        bool unlit = !cmd.pso_key.lighting;
-        ID3D12PipelineState* pso = selectPSO(rs, unlit);
+        // Select PSO from PSOKey (or honor caller-set GBuffer override).
+        ID3D12PipelineState* pso = m_replayPSOOverride;
+        if (!pso)
+        {
+            RenderState rs;
+            rs.blend_mode = cmd.pso_key.blend;
+            rs.cull_mode = cmd.pso_key.cull;
+            rs.lighting = cmd.pso_key.lighting;
+            rs.alpha_test = cmd.pso_key.alpha_test;
+            bool unlit = !cmd.pso_key.lighting;
+            pso = selectPSO(rs, unlit);
+        }
         if (pso != last_bound_pso)
         {
             commandList->SetPipelineState(pso);
@@ -1101,6 +1113,97 @@ void D3D12RenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
                 commandList->DrawInstanced(static_cast<UINT>(gpuMesh->getVertexCount()), 1, 0, 0);
         }
     }
+}
+
+bool D3D12RenderAPI::isDeferredActive() const
+{
+    return m_useDeferred && m_gbufferPass.isInitialized();
+}
+
+void D3D12RenderAPI::submitDeferredOpaqueCommands(const RenderCommandBuffer& cmds)
+{
+    m_deferredOpaqueCmds = cmds;
+}
+
+void D3D12RenderAPI::submitDeferredTransparentCommands(const RenderCommandBuffer& cmds)
+{
+    m_deferredTransparentCmds = cmds;
+}
+
+bool D3D12RenderAPI::createDeferredLightBuffers()
+{
+    D3D12_HEAP_PROPERTIES heap = {};
+    heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+
+    auto createStructuredBuffer = [&](SIZE_T stride, ComPtr<ID3D12Resource>& outRes,
+                                      void*& outMapped, UINT& outSrvIndex,
+                                      const wchar_t* debugName) -> bool
+    {
+        D3D12_RESOURCE_DESC desc = {};
+        desc.Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER;
+        desc.Width            = stride * MAX_LIGHTS_DEFERRED;
+        desc.Height           = 1;
+        desc.DepthOrArraySize = 1;
+        desc.MipLevels        = 1;
+        desc.Format           = DXGI_FORMAT_UNKNOWN;
+        desc.SampleDesc.Count = 1;
+        desc.Layout           = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+        HRESULT hr = device->CreateCommittedResource(
+            &heap, D3D12_HEAP_FLAG_NONE, &desc,
+            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+            IID_PPV_ARGS(outRes.GetAddressOf()));
+        if (FAILED(hr)) return false;
+        outRes->SetName(debugName);
+
+        if (FAILED(outRes->Map(0, nullptr, &outMapped))) return false;
+        memset(outMapped, 0, desc.Width);
+
+        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+        srvDesc.ViewDimension           = D3D12_SRV_DIMENSION_BUFFER;
+        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srvDesc.Format                  = DXGI_FORMAT_UNKNOWN;
+        srvDesc.Buffer.FirstElement        = 0;
+        srvDesc.Buffer.NumElements         = MAX_LIGHTS_DEFERRED;
+        srvDesc.Buffer.StructureByteStride = static_cast<UINT>(stride);
+        srvDesc.Buffer.Flags               = D3D12_BUFFER_SRV_FLAG_NONE;
+
+        outSrvIndex = m_srvAllocator.allocate();
+        if (outSrvIndex == UINT(-1)) return false;
+        device->CreateShaderResourceView(outRes.Get(), &srvDesc,
+                                         m_srvAllocator.getCPU(outSrvIndex));
+        return true;
+    };
+
+    for (int i = 0; i < NUM_FRAMES_IN_FLIGHT; ++i)
+    {
+        if (!createStructuredBuffer(sizeof(GPUPointLight), m_pointLightsSB[i],
+                                    m_pointLightsSBMapped[i], m_pointLightsSRVIndex[i],
+                                    L"DeferredPointLightsSB"))
+            return false;
+        if (!createStructuredBuffer(sizeof(GPUSpotLight), m_spotLightsSB[i],
+                                    m_spotLightsSBMapped[i], m_spotLightsSRVIndex[i],
+                                    L"DeferredSpotLightsSB"))
+            return false;
+    }
+    return true;
+}
+
+void D3D12RenderAPI::uploadLightBuffers(const GPUPointLight* pts, int ptCount,
+                                        const GPUSpotLight* spts, int spCount)
+{
+    if (ptCount > MAX_LIGHTS_DEFERRED) ptCount = MAX_LIGHTS_DEFERRED;
+    if (spCount > MAX_LIGHTS_DEFERRED) spCount = MAX_LIGHTS_DEFERRED;
+    if (ptCount < 0) ptCount = 0;
+    if (spCount < 0) spCount = 0;
+
+    if (m_pointLightsSBMapped[m_frameIndex] && pts && ptCount > 0)
+        memcpy(m_pointLightsSBMapped[m_frameIndex], pts, sizeof(GPUPointLight) * ptCount);
+    if (m_spotLightsSBMapped[m_frameIndex] && spts && spCount > 0)
+        memcpy(m_spotLightsSBMapped[m_frameIndex], spts, sizeof(GPUSpotLight) * spCount);
+
+    m_numPointLights = ptCount;
+    m_numSpotLights  = spCount;
 }
 
 void D3D12RenderAPI::renderDebugLines(const vertex* vertices, size_t vertex_count)

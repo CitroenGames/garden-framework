@@ -33,7 +33,7 @@ protected:
 
     void addExtraPasses(RenderGraph& graph, const Handles& h, const Config& cfg) override;
 
-private:
+protected:
     D3D12RenderAPI* m_api = nullptr;
 
     // Per-frame inputs (set via setFrameInputs before each build)

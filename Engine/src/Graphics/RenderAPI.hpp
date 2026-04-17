@@ -67,7 +67,9 @@ struct RenderState
     float alpha_cutoff = 0.0f;
 };
 
-// GPU light structures for point/spot light constant buffers
+// GPU light structures for point/spot light constant buffers.
+// MAX_LIGHTS is the forward-path CB cap. The deferred path uses a larger
+// StructuredBuffer (see MAX_LIGHTS_DEFERRED on backends like D3D12RenderAPI).
 static const int MAX_LIGHTS = 16;
 
 struct alignas(16) GPUPointLight {
@@ -83,6 +85,10 @@ struct alignas(16) GPUSpotLight {
     glm::vec3 attenuation; float outerCutoff;
 };
 
+// Shared backend light-cbuffer struct. On D3D12 forward (post-Phase-7) the
+// shader only reads counts + cameraPos; per-light data comes from the
+// StructuredBuffers populated via uploadLightBuffers. The arrays stay for
+// Vulkan's forward path which still uses inline arrays.
 struct alignas(16) LightCBuffer {
     GPUPointLight pointLights[MAX_LIGHTS];
     GPUSpotLight  spotLights[MAX_LIGHTS];
@@ -182,6 +188,21 @@ public:
     // recorded on worker threads. Falls back to single-threaded replay for
     // small buffers or if the backend doesn't support parallel replay.
     virtual void replayCommandBufferParallel(const RenderCommandBuffer& cmds) { replayCommandBuffer(cmds); }
+
+    // Deferred rendering: when active, opaque commands are recorded here instead
+    // of being replayed inline. The backend replays them later inside its GBuffer
+    // render graph pass with the GBuffer PSO bound.
+    virtual bool isDeferredActive() const { return false; }
+    virtual void submitDeferredOpaqueCommands(const RenderCommandBuffer& cmds) { (void)cmds; }
+    virtual void submitDeferredTransparentCommands(const RenderCommandBuffer& cmds) { (void)cmds; }
+
+    // Populate the deferred path's light StructuredBuffers. Supports up to a
+    // backend-specific cap (256 per kind on D3D12). The forward CB path is
+    // independent and still populated via setPointAndSpotLights.
+    virtual void uploadLightBuffers(const GPUPointLight* pts, int ptCount,
+                                    const GPUSpotLight* spts, int spCount) {
+        (void)pts; (void)ptCount; (void)spts; (void)spCount;
+    }
 
     // Utility
     virtual const char* getAPIName() const = 0;

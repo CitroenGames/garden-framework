@@ -31,7 +31,11 @@ private:
     // Direct key state tracking (no keyboard repeat issues)
     std::unordered_map<SDL_Scancode, bool> current_key_states;
     std::unordered_map<SDL_Scancode, bool> previous_key_states;
-    
+
+    // Mouse button state tracking (SDL3 button ids: 1=L, 2=M, 3=R, 4=X1, 5=X2)
+    std::unordered_map<uint8_t, bool> current_mouse_button_states;
+    std::unordered_map<uint8_t, bool> previous_mouse_button_states;
+
     // Mouse data
     float mouse_delta_x = 0.0f;
     float mouse_delta_y = 0.0f;
@@ -62,6 +66,11 @@ public:
     bool is_key_pressed(SDL_Scancode key) const;
     bool is_key_released(SDL_Scancode key) const;
     bool is_key_held(SDL_Scancode key) const;
+
+    // Direct mouse button queries (button: 1=L, 2=M, 3=R, 4=X1, 5=X2 — SDL3 BUTTON_* ids)
+    bool is_mouse_button_pressed(uint8_t button) const;
+    bool is_mouse_button_released(uint8_t button) const;
+    bool is_mouse_button_held(uint8_t button) const;
     
     // Mouse input - raw deltas
     float get_mouse_delta_x() const { return mouse_delta_x; }

@@ -25,7 +25,7 @@ VulkanPostProcessGraphBuilder::importResources(RenderGraph& graph, RGBackend& ba
     auto& vkBackend = static_cast<VulkanRGBackend&>(backend);
 
     VkCommandBuffer cmd = api->command_buffers[api->current_frame];
-    vkBackend.init(api->device, cmd);
+    vkBackend.setCommandBuffer(cmd);
 
     Handles h;
 

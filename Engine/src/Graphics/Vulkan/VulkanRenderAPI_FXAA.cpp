@@ -324,6 +324,9 @@ void VulkanRenderAPI::cleanupPostProcessingResources()
     // Clean up the FXAA post-process pass
     fxaaPass_.cleanup();
 
+    // Clean up deferred GBuffer pass
+    cleanupGBufferResources();
+
     // Clean up offscreen framebuffers
     for (auto fb : offscreen_framebuffers) {
         if (fb != VK_NULL_HANDLE)

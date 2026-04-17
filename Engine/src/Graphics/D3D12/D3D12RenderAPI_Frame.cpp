@@ -153,10 +153,6 @@ void D3D12RenderAPI::endFrame()
         if (m_useRenderGraph)
         {
             D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvAllocator.getCPU(m_backBufferRTVs[m_backBufferIndex]);
-            m_ppGraphBuilder.setFrameInputs(rtvHandle, m_offscreenSRVIndex,
-                                            m_depthStencilBuffer.Get(), m_depthSRVIndex,
-                                            m_backBuffers[m_backBufferIndex].Get(),
-                                            m_backBufferRTVs[m_backBufferIndex]);
 
             PostProcessGraphBuilder::Config cfg;
             cfg.width          = static_cast<uint32_t>(viewport_width);
@@ -164,7 +160,26 @@ void D3D12RenderAPI::endFrame()
             cfg.wantSSAO       = wantSSAO;
             cfg.wantShadowMask = wantShadowMask;
             cfg.renderImGui    = true;
-            m_ppGraphBuilder.build(m_frameGraph, m_rgBackend, cfg);
+
+            if (m_useDeferred && m_gbufferPass.isInitialized()) {
+                m_deferredGraphBuilder.setFrameInputs(rtvHandle, m_offscreenSRVIndex,
+                                                     m_depthStencilBuffer.Get(), m_depthSRVIndex,
+                                                     m_backBuffers[m_backBufferIndex].Get(),
+                                                     m_backBufferRTVs[m_backBufferIndex]);
+                // Deferred lighting applies shadows in-pass and doesn't consume
+                // the screen-space shadow-mask or SSAO textures. Disabling them
+                // avoids double-darkening at tonemap time.
+                PostProcessGraphBuilder::Config deferredCfg = cfg;
+                deferredCfg.wantShadowMask = false;
+                deferredCfg.wantSSAO       = false;
+                m_deferredGraphBuilder.build(m_frameGraph, m_rgBackend, deferredCfg);
+            } else {
+                m_ppGraphBuilder.setFrameInputs(rtvHandle, m_offscreenSRVIndex,
+                                                m_depthStencilBuffer.Get(), m_depthSRVIndex,
+                                                m_backBuffers[m_backBufferIndex].Get(),
+                                                m_backBufferRTVs[m_backBufferIndex]);
+                m_ppGraphBuilder.build(m_frameGraph, m_rgBackend, cfg);
+            }
 
             m_skyboxRequested = false;
         }

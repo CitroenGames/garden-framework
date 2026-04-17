@@ -39,6 +39,11 @@ public:
     void build(RenderGraph& graph, RGBackend& backend, const Config& cfg);
 
 protected:
+    // Adds the Skybox/SSAO/ShadowMask/Tonemapping/extra passes to an already-reset graph.
+    // Exposed so composing builders (e.g. deferred) can reuse the post-process chain
+    // after inserting their own upstream passes.
+    void addPostProcessPasses(RenderGraph& graph, const Handles& h, const Config& cfg);
+
     virtual Handles importResources(RenderGraph& graph, RGBackend& backend, const Config& cfg) = 0;
 
     virtual RGResourceUsage depthReadUsage() const = 0;
@@ -51,4 +56,9 @@ protected:
     virtual void recordTonemapping(RGContext& ctx, const Handles& h, const Config& cfg) = 0;
 
     virtual void addExtraPasses(RenderGraph& graph, const Handles& h, const Config& cfg) { (void)graph; (void)h; (void)cfg; }
+
+    // Hook invoked after Skybox/SSAO/ShadowMask but before Tonemapping. Subclasses
+    // can insert passes here that still write into the HDR target (e.g. the
+    // deferred path's transparent forward pass).
+    virtual void addPreTonemapPasses(RenderGraph& graph, const Handles& h, const Config& cfg) { (void)graph; (void)h; (void)cfg; }
 };

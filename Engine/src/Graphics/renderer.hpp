@@ -56,53 +56,60 @@ public:
 
     void gatherAndSetLights(entt::registry& registry, camera& cam)
     {
-        LightCBuffer light_buffer{};
-        int point_count = 0;
-        int spot_count = 0;
+        std::vector<GPUPointLight> points;
+        std::vector<GPUSpotLight>  spots;
+        points.reserve(64);
+        spots.reserve(64);
 
         auto point_view = registry.view<PointLightComponent, TransformComponent>();
         for (auto entity : point_view)
         {
-            if (point_count >= MAX_LIGHTS) break;
             const auto& pl = point_view.get<PointLightComponent>(entity);
-            const auto& t = point_view.get<TransformComponent>(entity);
-            auto& gpu = light_buffer.pointLights[point_count];
-            gpu.position = t.position;
-            gpu.range = pl.range;
-            gpu.color = pl.color;
-            gpu.intensity = pl.intensity;
+            const auto& t  = point_view.get<TransformComponent>(entity);
+            GPUPointLight gpu{};
+            gpu.position    = t.position;
+            gpu.range       = pl.range;
+            gpu.color       = pl.color;
+            gpu.intensity   = pl.intensity;
             gpu.attenuation = glm::vec3(pl.constant_attenuation, pl.linear_attenuation, pl.quadratic_attenuation);
-            gpu._pad0 = 0.0f;
-            point_count++;
+            gpu._pad0       = 0.0f;
+            points.push_back(gpu);
         }
 
         auto spot_view = registry.view<SpotLightComponent, TransformComponent>();
         for (auto entity : spot_view)
         {
-            if (spot_count >= MAX_LIGHTS) break;
             const auto& sl = spot_view.get<SpotLightComponent>(entity);
-            const auto& t = spot_view.get<TransformComponent>(entity);
-            auto& gpu = light_buffer.spotLights[spot_count];
-            gpu.position = t.position;
-            gpu.range = sl.range;
-            // Derive forward direction from rotation euler angles
-            glm::mat4 rot = glm::eulerAngleYXZ(
+            const auto& t  = spot_view.get<TransformComponent>(entity);
+            GPUSpotLight gpu{};
+            gpu.position    = t.position;
+            gpu.range       = sl.range;
+            glm::mat4 rot   = glm::eulerAngleYXZ(
                 glm::radians(t.rotation.y), glm::radians(t.rotation.x), glm::radians(t.rotation.z));
-            gpu.direction = glm::normalize(glm::vec3(rot * glm::vec4(0.0f, 0.0f, -1.0f, 0.0f)));
-            gpu.intensity = sl.intensity;
-            gpu.color = sl.color;
+            gpu.direction   = glm::normalize(glm::vec3(rot * glm::vec4(0.0f, 0.0f, -1.0f, 0.0f)));
+            gpu.intensity   = sl.intensity;
+            gpu.color       = sl.color;
             gpu.innerCutoff = glm::cos(glm::radians(sl.inner_cone_angle));
             gpu.attenuation = glm::vec3(sl.constant_attenuation, sl.linear_attenuation, sl.quadratic_attenuation);
             gpu.outerCutoff = glm::cos(glm::radians(sl.outer_cone_angle));
-            spot_count++;
+            spots.push_back(gpu);
         }
 
-        light_buffer.numPointLights = point_count;
-        light_buffer.numSpotLights = spot_count;
-        light_buffer.cameraPos = cam.getPosition();
-        light_buffer._pad2 = 0.0f;
-
+        // Forward path (transparents) still uses the 16+16 cbuffer — fill it with
+        // the first MAX_LIGHTS of each. Full list goes to the deferred SBs below.
+        LightCBuffer light_buffer{};
+        int fwd_points = std::min(static_cast<int>(points.size()), MAX_LIGHTS);
+        int fwd_spots  = std::min(static_cast<int>(spots.size()),  MAX_LIGHTS);
+        for (int i = 0; i < fwd_points; ++i) light_buffer.pointLights[i] = points[i];
+        for (int i = 0; i < fwd_spots;  ++i) light_buffer.spotLights[i]  = spots[i];
+        light_buffer.numPointLights = fwd_points;
+        light_buffer.numSpotLights  = fwd_spots;
+        light_buffer.cameraPos      = cam.getPosition();
+        light_buffer._pad2          = 0.0f;
         render_api->setPointAndSpotLights(light_buffer);
+
+        render_api->uploadLightBuffers(points.data(), static_cast<int>(points.size()),
+                                        spots.data(),  static_cast<int>(spots.size()));
     }
 
     // Depth prepass helper: render mesh depth-only with transform (immediate mode, legacy)
@@ -1085,7 +1092,10 @@ public:
                 RenderCommandBuffer opaque_cmds = record_opaque_parallel(
                     registry, opaque_entities, opaque_lod, global_lighting);
                 last_draw_calls += opaque_cmds.size();
-                render_api->replayCommandBufferParallel(opaque_cmds);
+                if (render_api->isDeferredActive())
+                    render_api->submitDeferredOpaqueCommands(opaque_cmds);
+                else
+                    render_api->replayCommandBufferParallel(opaque_cmds);
             }
 
             // Main lit pass: transparents (back-to-front, no sort - order matters)
@@ -1107,7 +1117,10 @@ public:
                 }
 
                 last_draw_calls += transparent_cmds.size();
-                render_api->replayCommandBuffer(transparent_cmds);
+                if (render_api->isDeferredActive())
+                    render_api->submitDeferredTransparentCommands(transparent_cmds);
+                else
+                    render_api->replayCommandBuffer(transparent_cmds);
             }
         }
         else
@@ -1331,7 +1344,10 @@ public:
                 RenderCommandBuffer opaque_cmds = record_opaque_parallel(
                     registry, opaque_entities, opaque_lod, global_lighting);
                 last_draw_calls += opaque_cmds.size();
-                render_api->replayCommandBufferParallel(opaque_cmds);
+                if (render_api->isDeferredActive())
+                    render_api->submitDeferredOpaqueCommands(opaque_cmds);
+                else
+                    render_api->replayCommandBufferParallel(opaque_cmds);
             }
 
             // Main lit pass: transparents (back-to-front, sequential)
@@ -1352,7 +1368,10 @@ public:
                 }
 
                 last_draw_calls += transparent_cmds.size();
-                render_api->replayCommandBuffer(transparent_cmds);
+                if (render_api->isDeferredActive())
+                    render_api->submitDeferredTransparentCommands(transparent_cmds);
+                else
+                    render_api->replayCommandBuffer(transparent_cmds);
             }
         }
         else

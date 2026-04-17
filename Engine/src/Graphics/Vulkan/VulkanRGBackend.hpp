@@ -6,6 +6,12 @@
 #include <unordered_map>
 #include <vector>
 
+// VMA forward declarations
+struct VmaAllocator_T;
+typedef VmaAllocator_T* VmaAllocator;
+struct VmaAllocation_T;
+typedef VmaAllocation_T* VmaAllocation;
+
 // Vulkan-specific execution context for render graph pass callbacks.
 class VulkanRGContext : public RGContext {
 public:
@@ -17,7 +23,10 @@ class VulkanRGBackend : public RGBackend {
 public:
     VulkanRGBackend() = default;
 
-    void init(VkDevice device, VkCommandBuffer commandBuffer);
+    void init(VkDevice device, VmaAllocator allocator);
+
+    // Set the command buffer the backend will record barriers into for the next execute().
+    void setCommandBuffer(VkCommandBuffer commandBuffer);
 
     // RGBackend overrides
     void createTransientTexture(RGResourceHandle handle, const RGTextureDesc& desc) override;
@@ -38,12 +47,20 @@ public:
     // Update the tracked layout for a handle (call after render pass that changes finalLayout).
     void setCurrentLayout(RGResourceHandle handle, VkImageLayout layout);
 
+    VkImage     getImage(RGResourceHandle handle) const;
+    VkImageView getImageView(RGResourceHandle handle) const;
+
+    static VkFormat toVkFormat(RGFormat format);
+
 private:
     VkDevice m_device = VK_NULL_HANDLE;
+    VmaAllocator m_allocator = nullptr;
     VulkanRGContext m_context;
 
     struct ImageEntry {
         VkImage image = VK_NULL_HANDLE;
+        VkImageView view = VK_NULL_HANDLE;
+        VmaAllocation allocation = nullptr;
         VkImageLayout currentLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         VkImageAspectFlags aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         bool imported = false;
@@ -57,4 +74,5 @@ private:
     static VkImageLayout toVkLayout(RGResourceUsage usage);
     static VkAccessFlags toVkAccessMask(RGResourceUsage usage);
     static VkPipelineStageFlags toVkStageMask(RGResourceUsage usage);
+    static bool isDepthFormat(RGFormat format);
 };

@@ -79,15 +79,18 @@ bool RGCompiler::topologicalSort(const std::vector<RGPassNode>& passes,
         }
     }
 
-    // Second pass: build edges. Re-scan to handle producer/consumer correctly.
-    // For each pass, if it reads a resource, it depends on the most recent writer
-    // that appears before it in declaration order (or any writer if only one exists).
-    // We need to rebuild writer tracking in declaration order.
+    // Second pass: build edges in declaration order. Tracks three dependency kinds:
+    //   RAW — reader depends on most recent writer of the same resource.
+    //   WAW — writer depends on most recent writer of the same resource.
+    //   WAR — writer depends on every reader recorded since the last write.
+    // Without WAR, a pass that writes a resource can be scheduled before passes
+    // that read the same resource, leaving the resource in a read-state at graph end.
     lastWriter.clear();
+    std::unordered_map<uint16_t, std::vector<uint32_t>> readersSinceWrite;
 
     for (uint32_t pi = 0; pi < passCount; ++pi)
     {
-        // Check reads: depend on previous writer
+        // Reads: RAW dependency on previous writer; record reader for future WAR.
         for (const auto& access : passes[pi].accesses)
         {
             if (!access.isWrite)
@@ -98,30 +101,38 @@ bool RGCompiler::topologicalSort(const std::vector<RGPassNode>& passes,
                     adjacency[it->second].push_back(pi);
                     inDegree[pi]++;
                 }
+                readersSinceWrite[access.handle.index].push_back(pi);
             }
         }
 
-        // Check writes: depend on previous writer of same resource (WAW dependency)
+        // Writes: WAW dep on previous writer, WAR deps on every intermediate reader.
         for (const auto& access : passes[pi].accesses)
         {
             if (access.isWrite)
             {
-                auto it = lastWriter.find(access.handle.index);
-                if (it != lastWriter.end() && it->second != pi)
+                auto itw = lastWriter.find(access.handle.index);
+                if (itw != lastWriter.end() && itw->second != pi)
                 {
-                    adjacency[it->second].push_back(pi);
+                    adjacency[itw->second].push_back(pi);
                     inDegree[pi]++;
+                }
+                auto itr = readersSinceWrite.find(access.handle.index);
+                if (itr != readersSinceWrite.end())
+                {
+                    for (uint32_t readerPi : itr->second)
+                    {
+                        if (readerPi != pi)
+                        {
+                            adjacency[readerPi].push_back(pi);
+                            inDegree[pi]++;
+                        }
+                    }
+                    itr->second.clear();
                 }
                 lastWriter[access.handle.index] = pi;
             }
         }
     }
-
-    // Also add RAW dependencies: if pass A reads a resource and pass B writes it later,
-    // B depends on A (WAR). We handle this by tracking readers.
-    // Re-scan with full tracking.
-    // Actually, the above handles the common case (producer before consumer).
-    // WAR (write-after-read) is handled by the second writer check above.
 
     // Kahn's algorithm
     std::queue<uint32_t> q;

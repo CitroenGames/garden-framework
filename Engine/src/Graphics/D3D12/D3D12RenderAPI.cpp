@@ -149,6 +149,7 @@ D3D12RenderAPI::D3D12RenderAPI()
     for (int i = 0; i <= NUM_CASCADES; i++)
         cascadeSplitDistances[i] = 0.0f;
     m_ppGraphBuilder.setAPI(this);
+    m_deferredGraphBuilder.setAPI(this);
 }
 
 D3D12RenderAPI::~D3D12RenderAPI()
@@ -311,6 +312,64 @@ bool D3D12RenderAPI::initialize(WindowHandle window, int width, int height, floa
         }
     }
 
+    if (!m_gbufferPass.init(device.Get(), m_psoCache, m_rootSignature.Get(),
+                            m_gbufferVS, m_gbufferPS)) {
+        LOG_ENGINE_WARN("[D3D12] Failed to create GBuffer pass -- deferred path disabled");
+    }
+
+    if (!createDeferredLightBuffers()) {
+        LOG_ENGINE_WARN("[D3D12] Failed to create deferred light buffers -- deferred path will have no dynamic lights");
+    }
+
+    // Deferred lighting pass: fullscreen, reads GBuffer + depth + CSM, writes HDR.
+    {
+        D3D12PostProcessPassConfig cfg;
+        cfg.debugName     = L"DeferredLighting";
+        cfg.outputFormat  = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        cfg.useExternalRTV = true;
+        cfg.bindings = {
+            { D3D12PPBinding::CBV,       0, D3D12_SHADER_VISIBILITY_ALL   },  // b0: DeferredLightingCB
+            { D3D12PPBinding::SRV_TABLE, 0, D3D12_SHADER_VISIBILITY_PIXEL },  // t0: gb0
+            { D3D12PPBinding::SRV_TABLE, 1, D3D12_SHADER_VISIBILITY_PIXEL },  // t1: gb1
+            { D3D12PPBinding::SRV_TABLE, 2, D3D12_SHADER_VISIBILITY_PIXEL },  // t2: gb2
+            { D3D12PPBinding::SRV_TABLE, 3, D3D12_SHADER_VISIBILITY_PIXEL },  // t3: sceneDepth
+            { D3D12PPBinding::SRV_TABLE, 4, D3D12_SHADER_VISIBILITY_PIXEL },  // t4: shadowMapArray
+            { D3D12PPBinding::SRV_TABLE, 5, D3D12_SHADER_VISIBILITY_PIXEL },  // t5: pointLights SB
+            { D3D12PPBinding::SRV_TABLE, 6, D3D12_SHADER_VISIBILITY_PIXEL },  // t6: spotLights SB
+        };
+
+        D3D12_STATIC_SAMPLER_DESC linSamp = {};
+        linSamp.Filter           = D3D12_FILTER_MIN_MAG_MIP_POINT;
+        linSamp.AddressU         = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        linSamp.AddressV         = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        linSamp.AddressW         = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        linSamp.ComparisonFunc   = D3D12_COMPARISON_FUNC_NEVER;
+        linSamp.MaxLOD           = D3D12_FLOAT32_MAX;
+        linSamp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        for (UINT reg = 0; reg < 4; ++reg) {
+            linSamp.ShaderRegister = reg;
+            cfg.staticSamplers.push_back(linSamp);
+        }
+
+        D3D12_STATIC_SAMPLER_DESC shadowSamp = {};
+        shadowSamp.Filter           = D3D12_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT;
+        shadowSamp.AddressU         = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+        shadowSamp.AddressV         = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+        shadowSamp.AddressW         = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+        shadowSamp.ComparisonFunc   = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+        shadowSamp.BorderColor      = D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE;
+        shadowSamp.MaxLOD           = D3D12_FLOAT32_MAX;
+        shadowSamp.ShaderRegister   = 4;
+        shadowSamp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        cfg.staticSamplers.push_back(shadowSamp);
+
+        if (!m_deferredLightingPass.init(device.Get(), m_rtvAllocator, m_srvAllocator,
+                                         m_stateTracker, m_psoCache, cfg,
+                                         width, height, m_deferredLightingVS, m_deferredLightingPS)) {
+            LOG_ENGINE_WARN("[D3D12] Failed to create Deferred Lighting pass -- deferred path disabled");
+        }
+    }
+
     if (!createSSAOResources(width, height))
     {
         LOG_ENGINE_WARN("[D3D12] Failed to create SSAO resources -- SSAO disabled");
@@ -373,6 +432,8 @@ void D3D12RenderAPI::shutdown()
     flushGPU();
 
     // Clean up post-process passes before device release
+    m_gbufferPass.cleanup();
+    m_deferredLightingPass.cleanup();
     m_fxaaPass.cleanup();
     m_ssaoPass.cleanup();
     m_ssaoBlurHPass.cleanup();
@@ -639,7 +700,8 @@ void D3D12RenderAPI::bindDummyRootParams()
     if (m_dummyCBAddr == 0)
     {
         // Must be large enough for the biggest CBuffer any shader may read from
-        // a dummy-bound root param (LightCBuffer is the largest at ~1824 bytes).
+        // a dummy-bound root param. GlobalCB (view/proj/cascade matrices) is the
+        // widest forward CBV at well under 2 KB.
         static constexpr size_t DUMMY_CB_SIZE = 2048;
         alignas(16) char dummyData[DUMMY_CB_SIZE] = {};
         m_dummyCBAddr = m_cbUploadBuffer[m_frameIndex].allocate(DUMMY_CB_SIZE, dummyData);
@@ -684,6 +746,12 @@ void D3D12RenderAPI::bindDummyRootParams()
         commandList->SetGraphicsRootDescriptorTable(7, m_srvAllocator.getGPU(m_defaultOcclusionTexture.srvIndex));
     if (m_defaultEmissiveTexture.srvIndex != UINT(-1))
         commandList->SetGraphicsRootDescriptorTable(8, m_srvAllocator.getGPU(m_defaultEmissiveTexture.srvIndex));
+
+    // [9]-[10] Light StructuredBuffers (per-frame ring). Shared with deferred path.
+    if (m_pointLightsSRVIndex[m_frameIndex] != UINT(-1))
+        commandList->SetGraphicsRootDescriptorTable(9, m_srvAllocator.getGPU(m_pointLightsSRVIndex[m_frameIndex]));
+    if (m_spotLightsSRVIndex[m_frameIndex] != UINT(-1))
+        commandList->SetGraphicsRootDescriptorTable(10, m_srvAllocator.getGPU(m_spotLightsSRVIndex[m_frameIndex]));
 }
 
 std::vector<char> D3D12RenderAPI::readShaderBinary(const std::string& filepath)

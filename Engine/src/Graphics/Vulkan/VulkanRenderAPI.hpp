@@ -6,8 +6,10 @@
 #include "VkDeletionQueue.hpp"
 #include "VkSamplerCache.hpp"
 #include "VulkanPostProcessPass.hpp"
+#include "VulkanGBufferPass.hpp"
 #include "VulkanRGBackend.hpp"
 #include "VulkanPostProcessGraphBuilder.hpp"
+#include "VulkanDeferredSceneGraphBuilder.hpp"
 #include "Graphics/RenderGraph/RenderGraph.hpp"
 #include <cstdint>
 #include <stack>
@@ -546,6 +548,12 @@ private:
     VkPipeline viewport_fxaa_pipeline = VK_NULL_HANDLE;
     bool fxaa_initialized = false;
 
+    // Deferred GBuffer geometry pass (PSO + 3-RT render pass owner)
+    VulkanGBufferPass gbufferPass_;
+    bool gbuffer_initialized = false;
+    bool createGBufferResources();
+    void cleanupGBufferResources();
+
     // SSAO post-process passes
     VulkanPostProcessPass ssaoPass_;        // computation
     VulkanPostProcessPass ssaoBlurHPass_;   // horizontal blur
@@ -588,7 +596,9 @@ private:
     RenderGraph m_frameGraph;
     VulkanRGBackend m_rgBackend;
     VulkanPostProcessGraphBuilder m_ppGraphBuilder;
+    VulkanDeferredSceneGraphBuilder m_deferredGraphBuilder;
     bool m_useRenderGraph = true;
+    bool m_useDeferred = false;
 
     // Viewport render target for editor
     VkImage viewport_image = VK_NULL_HANDLE;

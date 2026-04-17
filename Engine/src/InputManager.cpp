@@ -9,7 +9,8 @@ void InputManager::update()
 {
     // Update previous key states
     previous_key_states = current_key_states;
-    
+    previous_mouse_button_states = current_mouse_button_states;
+
     // Reset mouse deltas
     mouse_delta_x = 0.0f;
     mouse_delta_y = 0.0f;
@@ -66,6 +67,14 @@ void InputManager::process_event(const SDL_Event& event)
         mouse_delta_x = event.motion.xrel;
         mouse_delta_y = event.motion.yrel;
         break;
+
+    case SDL_EVENT_MOUSE_BUTTON_DOWN:
+        current_mouse_button_states[event.button.button] = true;
+        break;
+
+    case SDL_EVENT_MOUSE_BUTTON_UP:
+        current_mouse_button_states[event.button.button] = false;
+        break;
     }
 }
 
@@ -108,6 +117,34 @@ bool InputManager::is_key_held(SDL_Scancode key) const
 {
     auto it = current_key_states.find(key);
     return (it != current_key_states.end()) ? it->second : false;
+}
+
+bool InputManager::is_mouse_button_pressed(uint8_t button) const
+{
+    auto current_it = current_mouse_button_states.find(button);
+    auto previous_it = previous_mouse_button_states.find(button);
+
+    bool current_pressed = (current_it != current_mouse_button_states.end()) ? current_it->second : false;
+    bool previous_pressed = (previous_it != previous_mouse_button_states.end()) ? previous_it->second : false;
+
+    return current_pressed && !previous_pressed;
+}
+
+bool InputManager::is_mouse_button_released(uint8_t button) const
+{
+    auto current_it = current_mouse_button_states.find(button);
+    auto previous_it = previous_mouse_button_states.find(button);
+
+    bool current_pressed = (current_it != current_mouse_button_states.end()) ? current_it->second : false;
+    bool previous_pressed = (previous_it != previous_mouse_button_states.end()) ? previous_it->second : false;
+
+    return !current_pressed && previous_pressed;
+}
+
+bool InputManager::is_mouse_button_held(uint8_t button) const
+{
+    auto it = current_mouse_button_states.find(button);
+    return (it != current_mouse_button_states.end()) ? it->second : false;
 }
 
 void InputManager::clear_all_mappings()

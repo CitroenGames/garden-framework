@@ -46,9 +46,6 @@ struct EditorState
             || play_mode == PlayMode::Ejected;
     }
 
-    // Viewport overlay
-    bool show_viewport_stats = true;
-
     // Render stats (updated per frame by EditorApp)
     float fps = 0.0f;
     float delta_time = 0.0f;

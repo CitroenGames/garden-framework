@@ -15,7 +15,6 @@
 #include "panels/ToolbarPanel.hpp"
 #include "panels/ConsolePanel.hpp"
 #include "panels/ContentBrowserPanel.hpp"
-#include "panels/ViewportOverlayPanel.hpp"
 #include "panels/StatusBarPanel.hpp"
 #include "panels/ViewportPanel.hpp"
 #include "panels/NavMeshPanel.hpp"
@@ -111,7 +110,6 @@ private:
     ConsolePanel         m_console;
     ContentBrowserPanel  m_content_browser;
     ViewportPanel        m_viewport;
-    ViewportOverlayPanel m_viewport_overlay;
     StatusBarPanel       m_status_bar;
     NavMeshPanel         m_navmesh_panel;
     PhysicsDebugPanel    m_physics_debug_panel;

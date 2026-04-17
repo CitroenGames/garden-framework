@@ -20,6 +20,7 @@
 VulkanRenderAPI::VulkanRenderAPI()
 {
     m_ppGraphBuilder.setAPI(this);
+    m_deferredGraphBuilder.setAPI(this);
 }
 
 VulkanRenderAPI::~VulkanRenderAPI()
@@ -143,6 +144,9 @@ bool VulkanRenderAPI::initialize(WindowHandle window, int width, int height, flo
         LOG_ENGINE_ERROR("[Vulkan] Failed to create graphics pipeline");
         return false;
     }
+
+    // Create deferred GBuffer pass (failure is non-fatal, just disables deferred path)
+    createGBufferResources();
 
     // Create descriptor pool
     LOG_ENGINE_INFO("[Vulkan] Creating descriptor pool...");

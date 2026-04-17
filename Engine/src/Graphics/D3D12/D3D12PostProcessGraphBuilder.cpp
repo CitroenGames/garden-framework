@@ -69,7 +69,10 @@ D3D12PostProcessGraphBuilder::importResources(RenderGraph& graph, RGBackend& bac
 
     h.skyboxEnabled = m_api->m_skyboxRequested && m_api->m_skyPass.isInitialized();
 
-    if (cfg.wantShadowMask && m_api->m_shadowMapArray) {
+    // Import the CSM shadow atlas whenever one exists. Consumers (shadow-mask
+    // pass, deferred lighting) still gate themselves on their own configuration;
+    // importing unconditionally keeps the handle available for both paths.
+    if (m_api->m_shadowMapArray) {
         RGTextureDesc smDesc;
         smDesc.width     = m_api->currentShadowSize;
         smDesc.height    = m_api->currentShadowSize;

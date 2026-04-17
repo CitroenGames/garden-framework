@@ -2,10 +2,12 @@
 
 ### Rendering
 *   **Multi-API Renderer**: Vulkan, Direct3D 12, Metal, and a headless backend for dedicated servers.
+*   **Deferred Rendering Pipeline**: Two-phase GBuffer architecture. Phase 1 fills three MRTs per frame: RT0 (BaseColor RGB + Metallic A, RGBA8), RT1 (World-space Normal RGB + Roughness A, RGBA16F), RT2 (Emissive RGB + AO A, RGBA16F) plus a depth buffer. Phase 2 runs a deferred lighting pass reading all four buffers to produce an HDR result, followed by skybox, transparent-forward, and the full post-process chain.
+*   **Render Graph**: Backend-agnostic, compile-time-validated render graph (`RGTextureHandle` typed handles, resource lifetime tracking) with Vulkan and D3D12 backends. Orchestrates all passes from GBuffer fill through post-processing and ImGui composite into a single DAG-scheduled frame.
 *   **Slang Shader System**: Unified shader source compiled to SPIR-V (Vulkan), DXIL (D3D12), and MSL (Metal) via Slang 2026.5.2.
 *   **Cascaded Shadow Maps (CSM)**: 4-cascade directional shadows at 4096x4096 with PCF filtering and cascade blending.
 *   **Frustum Culling**: BVH-accelerated spatial culling for efficient rendering.
-*   **Post-Processing**: FXAA anti-aliasing via offscreen framebuffer pipeline.
+*   **Post-Processing**: Composable post-process chain executed via the render graph — SSAO (raw + separable bilateral blur), directional shadow mask, HDR tonemapping, and FXAA anti-aliasing. Each stage is optional and toggled per `PostProcessGraphBuilder::Config`.
 *   **Skybox**: Procedural atmosphere rendering.
 *   **Multi-Material Meshes**: Per-submesh textures and material ranges from glTF.
 *   **Debug Drawing**: Wireframe lines, boxes, spheres, capsules, and rays for visualizing physics and spatial data.
