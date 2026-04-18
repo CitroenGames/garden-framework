@@ -96,6 +96,14 @@ bool EditorApp::initialize(RenderAPIType api_type)
 
     m_renderer = renderer(render_api);
 
+    // Create the editor's main scene viewport via the factory. Starts at 1x1;
+    // the first frame's setViewportSize() will grow it to match the panel.
+    // Backends without the factory (Vulkan, until Phase 7) return nullptr, and
+    // the editor falls back to the render API's legacy setViewportSize path.
+    m_main_viewport = render_api->createSceneViewport(1, 1);
+    if (m_main_viewport)
+        render_api->setEditorViewport(m_main_viewport.get());
+
     // Apply graphics CVars from config.cfg
     render_api->setFXAAEnabled(CVAR_BOOL(r_fxaa));
     render_api->setSSAOEnabled(CVAR_BOOL(r_ssao));
@@ -388,32 +396,34 @@ void EditorApp::run()
 
         // --- Phase 1: Render 3D scene to viewport texture ---
         IRenderAPI* render_api = m_app.getRenderAPI();
+        render_api->setEditorViewport(m_main_viewport.get());
         render_api->setViewportSize(m_viewport.width, m_viewport.height);
         m_renderer.render_scene_to_texture(m_world.registry, render_camera);
 
         // --- Phase 1b: Render additional PIE client viewports ---
         for (auto& inst : m_pie_clients)
         {
-            if (!inst || !inst->initialized || inst->viewport_id < 0)
+            if (!inst || !inst->initialized || !inst->viewport)
                 continue;
 
-            // Resize PIE viewport if needed
-            render_api->setPIEViewportSize(inst->viewport_id, inst->viewport_width, inst->viewport_height);
-
-            // Redirect the next render to this PIE viewport's render target
-            render_api->setActiveSceneTarget(inst->viewport_id);
+            // Bind the PIE viewport as the active scene render target. resize()
+            // is a no-op if the size hasn't changed.
+            inst->viewport->resize(inst->viewport_width, inst->viewport_height);
+            render_api->setEditorViewport(inst->viewport.get());
             render_api->setViewportSize(inst->viewport_width, inst->viewport_height);
 
             // Render the client's world using its camera
             m_renderer.render_scene_to_texture(inst->client_world.registry,
                                                 inst->client_world.world_camera);
-
-            // setActiveSceneTarget(-1) is called inside endSceneRender() automatically
         }
 
-        // Restore main viewport size
+        // Restore main viewport binding + size for any post-PIE work that
+        // assumes the main editor viewport is current.
         if (!m_pie_clients.empty())
+        {
+            render_api->setEditorViewport(m_main_viewport.get());
             render_api->setViewportSize(m_viewport.width, m_viewport.height);
+        }
 
         // --- Phase 1c: Render prefab editor 3D previews ---
         m_prefab_editor.renderAllPreviews();
@@ -475,7 +485,7 @@ void EditorApp::run()
             // --- PIE client viewports (additional players, rendered as dockable windows) ---
             for (auto& inst : m_pie_clients)
             {
-                if (!inst || !inst->initialized || inst->viewport_id < 0)
+                if (!inst || !inst->initialized || !inst->viewport)
                     continue;
 
                 ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
@@ -494,7 +504,7 @@ void EditorApp::run()
                 }
 
                 // Display the PIE viewport texture
-                ImTextureID pie_tex = (ImTextureID)render_api->getPIEViewportTextureID(inst->viewport_id);
+                ImTextureID pie_tex = (ImTextureID)inst->viewport->getOutputTextureID();
                 if (pie_tex)
                     ImGui::Image(pie_tex, avail);
 
@@ -574,12 +584,7 @@ void EditorApp::run()
         render_api->renderUI();
 
         // Multi-viewport: update and render platform windows (second monitor support)
-        ImGuiIO& io = ImGui::GetIO();
-        if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
-        {
-            ImGui::UpdatePlatformWindows();
-            ImGui::RenderPlatformWindowsDefault();
-        }
+        ImGuiManager::get().updatePlatformWindows();
 
         m_app.swapBuffers();
 
@@ -707,7 +712,13 @@ void EditorApp::shutdown()
     m_prefab_editor.shutdown();
 
     if (auto* api = m_app.getRenderAPI())
+    {
         api->waitForGPU();
+        // Unregister the viewport pointer before its destructor runs so the
+        // render API never sees a dangling pointer during shutdown.
+        api->setEditorViewport(nullptr);
+    }
+    m_main_viewport.reset();
     m_world.registry.clear();
     Threading::JobSystem::get().shutdown();
     Console::get().shutdown();
@@ -876,8 +887,8 @@ void EditorApp::beginPlay()
                                 }
 
                                 // Create render target
-                                inst->viewport_id = m_app.getRenderAPI()->createPIEViewport(640, 480);
-                                if (inst->viewport_id < 0)
+                                inst->viewport = m_app.getRenderAPI()->createSceneViewport(640, 480);
+                                if (!inst->viewport)
                                 {
                                     LOG_ENGINE_WARN("Failed to create PIE viewport for Player {}", i);
                                     inst->game_module.unload();
@@ -902,7 +913,7 @@ void EditorApp::beginPlay()
                                 if (!inst->game_module.init(&inst->services))
                                 {
                                     LOG_ENGINE_WARN("Client init failed for Player {}", i);
-                                    m_app.getRenderAPI()->destroyPIEViewport(inst->viewport_id);
+                                    inst->viewport.reset();
                                     inst->game_module.unload();
                                     inst->client_world.resetWorld();
                                     continue;
@@ -1009,8 +1020,8 @@ void EditorApp::beginPlay()
                                 continue;
                             }
 
-                            inst->viewport_id = m_app.getRenderAPI()->createPIEViewport(640, 480);
-                            if (inst->viewport_id < 0)
+                            inst->viewport = m_app.getRenderAPI()->createSceneViewport(640, 480);
+                            if (!inst->viewport)
                             {
                                 LOG_ENGINE_WARN("Failed to create PIE viewport for Player {}", i);
                                 inst->game_module.unload();
@@ -1034,7 +1045,7 @@ void EditorApp::beginPlay()
                             if (!inst->game_module.init(&inst->services))
                             {
                                 LOG_ENGINE_WARN("Client init failed for Player {}", i);
-                                m_app.getRenderAPI()->destroyPIEViewport(inst->viewport_id);
+                                inst->viewport.reset();
                                 inst->game_module.unload();
                                 inst->client_world.resetWorld();
                                 continue;
@@ -1091,15 +1102,21 @@ void EditorApp::stopPlay()
         // Kill spawned processes first (clients disconnect before server shuts down)
         m_pie_processes.killAll();
 
-        // Tear down additional in-editor PIE client instances
+        // Tear down additional in-editor PIE client instances. Make sure no
+        // dangling pointer remains in the API: if a PIE viewport is currently
+        // bound, clear it before destroying any of them.
+        if (auto* api = m_app.getRenderAPI())
+        {
+            api->waitForGPU();
+            api->setEditorViewport(m_main_viewport.get());
+        }
         for (auto& inst : m_pie_clients)
         {
             if (inst && inst->initialized)
             {
                 inst->game_module.shutdown();
                 inst->game_module.unload();
-                if (inst->viewport_id >= 0)
-                    m_app.getRenderAPI()->destroyPIEViewport(inst->viewport_id);
+                inst->viewport.reset();
                 inst->client_world.resetWorld();
                 inst->initialized = false;
             }

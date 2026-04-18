@@ -4,6 +4,7 @@
 #include "world.hpp"
 #include "LevelManager.hpp"
 #include "Graphics/renderer.hpp"
+#include "Graphics/SceneViewport.hpp"
 #include "EditorCamera.hpp"
 #include "EditorState.hpp"
 #include "GameSimulation.hpp"
@@ -53,6 +54,12 @@ private:
     LevelManager m_level_manager;
     LevelData    m_level_data;   // kept alive for round-trip serialization fidelity
     renderer     m_renderer;
+
+    // The editor's main-viewport scene target. Caller-owned; the render API
+    // holds a non-owning pointer to it via setEditorViewport(). Null when the
+    // backend (currently Vulkan) doesn't yet support the factory, in which
+    // case the render API's legacy setViewportSize path is used.
+    std::unique_ptr<SceneViewport> m_main_viewport;
     EditorCamera m_editor_cam;
     bool         m_running = false;
 

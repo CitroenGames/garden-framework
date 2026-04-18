@@ -245,56 +245,6 @@ bool D3D12RenderAPI::createBackBufferRTVs()
     return true;
 }
 
-bool D3D12RenderAPI::createDepthStencilBuffer(int width, int height)
-{
-    D3D12_HEAP_PROPERTIES heapProps = {};
-    heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
-
-    D3D12_RESOURCE_DESC desc = {};
-    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-    desc.Width = width;
-    desc.Height = height;
-    desc.DepthOrArraySize = 1;
-    desc.MipLevels = 1;
-    desc.Format = DXGI_FORMAT_R24G8_TYPELESS; // Typeless to allow both DSV and SRV views
-    desc.SampleDesc.Count = 1;
-    desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
-
-    D3D12_CLEAR_VALUE clearValue = {};
-    clearValue.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
-    clearValue.DepthStencil.Depth = 1.0f;
-    clearValue.DepthStencil.Stencil = 0;
-
-    HRESULT hr = device->CreateCommittedResource(
-        &heapProps, D3D12_HEAP_FLAG_NONE, &desc,
-        D3D12_RESOURCE_STATE_DEPTH_WRITE, &clearValue,
-        IID_PPV_ARGS(m_depthStencilBuffer.GetAddressOf()));
-    if (FAILED(hr)) return false;
-
-    m_stateTracker.track(m_depthStencilBuffer.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE);
-
-    if (m_mainDSVIndex == UINT(-1))
-        m_mainDSVIndex = m_dsvAllocator.allocate();
-
-    D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc = {};
-    dsvDesc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
-    dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
-    device->CreateDepthStencilView(m_depthStencilBuffer.Get(), &dsvDesc,
-                                    m_dsvAllocator.getCPU(m_mainDSVIndex));
-
-    // Create SRV for depth buffer (used by skybox, SSAO, shadow mask passes)
-    if (m_depthSRVIndex == UINT(-1))
-        m_depthSRVIndex = m_srvAllocator.allocate();
-    D3D12_SHADER_RESOURCE_VIEW_DESC depthSrvDesc = {};
-    depthSrvDesc.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
-    depthSrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-    depthSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    depthSrvDesc.Texture2D.MipLevels = 1;
-    device->CreateShaderResourceView(m_depthStencilBuffer.Get(), &depthSrvDesc,
-                                      m_srvAllocator.getCPU(m_depthSRVIndex));
-    return true;
-}
-
 // ============================================================================
 // Frame Resources / Fences / Upload Infrastructure
 // ============================================================================

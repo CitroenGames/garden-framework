@@ -1157,8 +1157,10 @@ public:
         // Render debug lines (after scene, before UI)
         DebugDraw::get().render(render_api, c);
 
-        // Render RmlUi (game UI)
-        RmlUiManager::get().render();
+        // Render RmlUi (game UI). D3D12 routes this through the post-process graph
+        // (after tonemap, into the LDR backbuffer) so PSO/RTV formats agree.
+        if (std::string(render_api->getAPIName()) != "D3D12")
+            RmlUiManager::get().render();
 
         // Render ImGui UI (dev tools)
         ImGuiManager::get().render();

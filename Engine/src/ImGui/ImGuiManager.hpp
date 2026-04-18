@@ -23,6 +23,10 @@ public:
     void newFrame();
     void render();
 
+    // Call once per frame after ImGui::Render() and the main swapchain present,
+    // when ImGuiConfigFlags_ViewportsEnable is set.
+    void updatePlatformWindows();
+
     // Event handling - returns true if ImGui consumed the event
     bool processEvent(const SDL_Event* event);
 

@@ -7,24 +7,29 @@
 #include "D3D12RGBackend.hpp"
 #include "imgui.h"
 #include "imgui_impl_dx12.h"
+#include "UI/RmlUiManager.h"
 #include <algorithm>
 #include <cmath>
 
-void D3D12PostProcessGraphBuilder::setFrameInputs(D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle,
-                                                    UINT inputSRVIndex,
+void D3D12PostProcessGraphBuilder::setFrameInputs(D3D12_CPU_DESCRIPTOR_HANDLE outputRTVHandle,
+                                                    ID3D12Resource* hdrResource,
+                                                    UINT hdrSRVIndex,
+                                                    UINT hdrRTVIndex,
                                                     ID3D12Resource* depthBuffer,
                                                     UINT depthSRVIndex,
                                                     UINT depthDSVIndex,
-                                                    ID3D12Resource* backBuffer,
-                                                    UINT backBufferRTVIndex)
+                                                    ID3D12Resource* outputResource,
+                                                    UINT outputRTVIndex)
 {
-    m_rtvHandle          = rtvHandle;
-    m_inputSRVIndex      = inputSRVIndex;
-    m_depthBuffer        = depthBuffer;
-    m_depthSRVIndex      = depthSRVIndex;
-    m_depthDSVIndex      = depthDSVIndex;
-    m_backBuffer         = backBuffer;
-    m_backBufferRTVIndex = backBufferRTVIndex;
+    m_outputRTVHandle = outputRTVHandle;
+    m_hdrResource     = hdrResource;
+    m_hdrSRVIndex     = hdrSRVIndex;
+    m_hdrRTVIndex     = hdrRTVIndex;
+    m_depthBuffer     = depthBuffer;
+    m_depthSRVIndex   = depthSRVIndex;
+    m_depthDSVIndex   = depthDSVIndex;
+    m_outputResource  = outputResource;
+    m_outputRTVIndex  = outputRTVIndex;
 }
 
 PostProcessGraphBuilder::Handles
@@ -63,11 +68,11 @@ D3D12PostProcessGraphBuilder::importResources(RenderGraph& graph, RGBackend& bac
                                    RGResourceUsage::Present);
 
     d3dBackend.bindImportedTexture(h.offscreenHDR.handle,
-        m_api->m_offscreenTexture.Get(), m_api->m_offscreenSRVIndex, m_api->m_offscreenRTVIndex);
+        m_hdrResource, m_hdrSRVIndex, m_hdrRTVIndex);
     d3dBackend.bindImportedTexture(h.depth.handle,
         m_depthBuffer, m_depthSRVIndex);
     d3dBackend.bindImportedTexture(h.output.handle,
-        m_backBuffer, UINT(-1), m_backBufferRTVIndex);
+        m_outputResource, UINT(-1), m_outputRTVIndex);
 
     h.skyboxEnabled = m_api->m_skyboxRequested && m_api->m_skyPass.isInitialized();
 
@@ -273,13 +278,24 @@ void D3D12PostProcessGraphBuilder::recordShadowMask(RGContext&, const Handles&, 
 
 void D3D12PostProcessGraphBuilder::recordTonemapping(RGContext&, const Handles&, const Config& cfg)
 {
-    m_api->renderFXAAPass(m_rtvHandle, m_inputSRVIndex,
+    m_api->renderFXAAPass(m_outputRTVHandle, m_hdrSRVIndex,
                           static_cast<int>(cfg.width), static_cast<int>(cfg.height),
                           cfg.wantSSAO, cfg.wantShadowMask);
 }
 
 void D3D12PostProcessGraphBuilder::addExtraPasses(RenderGraph& graph, const Handles& h, const Config& cfg)
 {
+    if (cfg.renderRml) {
+        graph.addPass("RmlUi",
+            [&](RGBuilder& b) {
+                b.write(h.output, RGResourceUsage::RenderTarget);
+                b.setSideEffect();
+            },
+            [](RGContext&) {
+                RmlUiManager::get().render();
+            });
+    }
+
     if (cfg.renderImGui) {
         ImDrawData* drawData = ImGui::GetDrawData();
         if (drawData) {

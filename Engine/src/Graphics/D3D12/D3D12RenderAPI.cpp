@@ -203,11 +203,9 @@ bool D3D12RenderAPI::initialize(WindowHandle window, int width, int height, floa
         return false;
     }
 
-    if (!createDepthStencilBuffer(width, height))
-    {
-        LOG_ENGINE_ERROR("Failed to create depth stencil buffer");
-        return false;
-    }
+    // Client-mode scene viewport — owns HDR + depth, imports the back buffer
+    // as its LDR output. Rebound each frame to whichever back buffer is current.
+    m_clientViewport = std::make_unique<D3D12SceneViewport>(this, width, height, true);
 
     if (!createFrameResources())
     {
@@ -271,9 +269,9 @@ bool D3D12RenderAPI::initialize(WindowHandle window, int width, int height, floa
         return false;
     }
 
-    if (!createPostProcessingResources(width, height))
+    if (!createPostProcessSharedResources())
     {
-        LOG_ENGINE_ERROR("Failed to create post-processing resources");
+        LOG_ENGINE_ERROR("Failed to create post-process shared resources");
         return false;
     }
 
@@ -468,6 +466,8 @@ void D3D12RenderAPI::shutdown()
     }
     textures.clear();
     m_pie_viewports.clear();
+    m_editorViewport = nullptr;  // non-owning pointer; caller owns the viewport
+    m_clientViewport.reset();
     m_active_scene_target = -1;
 
     // Drain any resources parked in the deferred-release ring. flushGPU above
@@ -552,12 +552,18 @@ void D3D12RenderAPI::flushDeferredReleases()
 void D3D12RenderAPI::resize(int width, int height)
 {
     if (width <= 0 || height <= 0) return;
+    if (device_lost) return;
 
     LOG_ENGINE_TRACE("[D3D12] Resize: {}x{} -> {}x{}", viewport_width, viewport_height, width, height);
     flushGPU();
 
     viewport_width = width;
     viewport_height = height;
+
+    // Drop the client viewport's reference to the current back buffer —
+    // ResizeBuffers requires zero outstanding refs to any swap-chain buffer.
+    if (m_clientViewport)
+        m_clientViewport->rebindBackBuffer(nullptr, UINT(-1));
 
     // Untrack and release back buffer references
     for (int i = 0; i < NUM_BACK_BUFFERS; i++)
@@ -566,16 +572,6 @@ void D3D12RenderAPI::resize(int width, int height)
             m_stateTracker.untrack(m_backBuffers[i].Get());
         m_backBuffers[i].Reset();
     }
-
-    // Release depth buffer
-    if (m_depthStencilBuffer)
-        m_stateTracker.untrack(m_depthStencilBuffer.Get());
-    m_depthStencilBuffer.Reset();
-
-    // Untrack and release offscreen resources
-    if (m_offscreenTexture)
-        m_stateTracker.untrack(m_offscreenTexture.Get());
-    m_offscreenTexture.Reset();
 
     // Resize swap chain
     HRESULT hr = swapChain->ResizeBuffers(NUM_BACK_BUFFERS, width, height,
@@ -595,54 +591,21 @@ void D3D12RenderAPI::resize(int width, int height)
         device_lost = true;
         return;
     }
-    if (!createDepthStencilBuffer(width, height))
-    {
-        LOG_ENGINE_ERROR("Failed to recreate depth stencil buffer after resize");
-        device_lost = true;
-        return;
-    }
-    if (!createPostProcessingResources(width, height))
-    {
-        LOG_ENGINE_ERROR("Failed to recreate post-processing resources after resize");
-        device_lost = true;
-        return;
-    }
 
-    // Recreate SSAO resources at new size
+    // Resize client viewport's HDR + depth to match the new window size.
+    if (m_clientViewport)
+        m_clientViewport->resize(width, height);
+
+    // Recreate SSAO / shadow-mask passes at new size — their own resources
+    // are tied to the output dimensions.
     if (m_ssaoPass.isInitialized())
     {
         m_ssaoPass.resize(width, height);
         m_ssaoBlurHPass.resize(width, height);
         m_ssaoBlurVPass.resize(width, height);
-
-        // Recreate depth SRV for new depth buffer
-        if (m_depthSRVIndex == UINT(-1))
-            m_depthSRVIndex = m_srvAllocator.allocate();
-        D3D12_SHADER_RESOURCE_VIEW_DESC depthSrvDesc = {};
-        depthSrvDesc.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
-        depthSrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-        depthSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        depthSrvDesc.Texture2D.MipLevels = 1;
-        device->CreateShaderResourceView(m_depthStencilBuffer.Get(), &depthSrvDesc,
-                                          m_srvAllocator.getCPU(m_depthSRVIndex));
     }
-
-    // Recreate shadow mask pass at new size
     if (m_shadowMaskPass.isInitialized())
-    {
         m_shadowMaskPass.resize(width, height);
-
-        // Ensure depth SRV exists for new depth buffer (may not exist if SSAO is disabled)
-        if (m_depthSRVIndex == UINT(-1))
-            m_depthSRVIndex = m_srvAllocator.allocate();
-        D3D12_SHADER_RESOURCE_VIEW_DESC depthSrvDesc = {};
-        depthSrvDesc.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
-        depthSrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-        depthSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        depthSrvDesc.Texture2D.MipLevels = 1;
-        device->CreateShaderResourceView(m_depthStencilBuffer.Get(), &depthSrvDesc,
-                                          m_srvAllocator.getCPU(m_depthSRVIndex));
-    }
 
     float ratio = static_cast<float>(width) / static_cast<float>(height);
     projection_matrix = glm::perspectiveRH_ZO(glm::radians(field_of_view), ratio, 0.1f, 1000.0f);
@@ -672,10 +635,25 @@ void D3D12RenderAPI::ensureCommandListOpen()
         shadow_resources_dirty = false;
     }
 
+    // Apply pending SSAO / shadow-mask resize. Safe here because the previous
+    // frame's command list referencing the old textures is already retired.
+    if (pp_resize_dirty)
+    {
+        if (m_ssaoPass.isInitialized())
+            createSSAOResources(pp_resize_width, pp_resize_height);
+        if (m_shadowMaskPass.isInitialized())
+            createShadowMaskResources(pp_resize_width, pp_resize_height);
+        pp_resize_dirty = false;
+    }
+
     m_cbUploadBuffer[m_frameIndex].reset();
     m_dummyCBAddr = 0;
 
-    // Reset parallel command list pool allocators (safe now: fence confirmed GPU is done)
+    // Reset parallel command list pool allocators. Wait specifically for the
+    // pool's last-submission fence — the per-frame-slot fence above only
+    // covers up through frame N-2 with NUM_FRAMES_IN_FLIGHT=2, but the pool
+    // may have submitted work in frame N-1 that isn't covered.
+    waitForFence(m_commandListPool.getLastSubmissionFence());
     m_commandListPool.resetAll();
 
     // Submit pending async texture uploads and sync with graphics queue
@@ -689,6 +667,12 @@ void D3D12RenderAPI::ensureCommandListOpen()
     commandList->Reset(fc.commandAllocator.Get(), nullptr);
 
     m_backBufferIndex = swapChain->GetCurrentBackBufferIndex();
+
+    // Rebind the client viewport's LDR output to the back buffer that the
+    // swap chain just handed us for this frame.
+    if (m_clientViewport)
+        m_clientViewport->rebindBackBuffer(m_backBuffers[m_backBufferIndex].Get(),
+                                           m_backBufferRTVs[m_backBufferIndex]);
 
     ID3D12DescriptorHeap* heaps[] = { m_srvHeap.Get() };
     commandList->SetDescriptorHeaps(1, heaps);
@@ -723,6 +707,13 @@ void D3D12RenderAPI::bindDummyRootParams()
     // D3D12 requires all root params to be valid before Draw.
     // Bind safe placeholders so every slot has a valid descriptor/address.
     // Allocate the dummy CB once per frame and reuse across all calls.
+
+    // The placeholders below target the engine root signature's layout
+    // (params 0/1/4 are CBVs; 2/3 are descriptor tables). A previous post-
+    // process or ImGui pass may have swapped the bound root signature to
+    // something else with incompatible param types; force it back before
+    // we write any root-CBV.
+    commandList->SetGraphicsRootSignature(m_rootSignature.Get());
 
     if (m_dummyCBAddr == 0)
     {

@@ -381,6 +381,8 @@ int main(int argc, char* argv[])
             // Render using the world camera (updated by the game DLL)
             _renderer.render_scene(_world.registry, _world.world_camera);
 
+            ImGuiManager::get().updatePlatformWindows();
+
             app.swapBuffers();
 
             Uint64 frame_end = SDL_GetTicks();

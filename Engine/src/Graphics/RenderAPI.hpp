@@ -13,6 +13,9 @@
 #include <utility>
 #include <functional>
 #include <algorithm>
+#include <memory>
+
+#include "SceneViewport.hpp"
 
 // Forward declaration for command buffer
 class RenderCommandBuffer;
@@ -233,6 +236,21 @@ public:
     virtual void setViewportSize(int width, int height) { (void)width; (void)height; }
     // Render ImGui draw data to the screen backbuffer
     virtual void renderUI() {}
+
+    // Caller-owned scene viewports. Backends that haven't migrated yet return
+    // nullptr from createSceneViewport — callers must fall back to the legacy
+    // setViewportSize / setActiveSceneTarget API when that happens.
+    //
+    //   auto vp = api->createSceneViewport(w, h);
+    //   api->setEditorViewport(vp.get());
+    //   ...render...
+    //   api->setEditorViewport(nullptr);  // before vp destruction or before API shutdown
+    virtual std::unique_ptr<SceneViewport> createSceneViewport(int width, int height)
+    {
+        (void)width; (void)height;
+        return nullptr;
+    }
+    virtual void setEditorViewport(SceneViewport* viewport) { (void)viewport; }
 
     // Preview render target (for asset preview panel)
     virtual void beginPreviewFrame(int width, int height) { (void)width; (void)height; }

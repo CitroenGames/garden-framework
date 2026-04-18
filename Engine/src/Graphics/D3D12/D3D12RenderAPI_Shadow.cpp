@@ -190,8 +190,8 @@ void D3D12RenderAPI::beginShadowPass(const glm::vec3& lightDir)
     D3D12_RECT scissor = { 0, 0, static_cast<LONG>(currentShadowSize), static_cast<LONG>(currentShadowSize) };
     commandList->RSSetScissorRects(1, &scissor);
 
-    // Bind shadow PSO and ensure all root params are valid
-    // (ensureCommandListOpen resets root signature, leaving params undefined)
+    // Bind shadow PSO. bindDummyRootParams() restores the engine root signature
+    // (a previous post-process pass may have swapped it).
     bindDummyRootParams();
     commandList->SetPipelineState(m_psoShadow.Get());
     last_bound_pso = m_psoShadow.Get();
@@ -211,7 +211,7 @@ void D3D12RenderAPI::beginShadowPass(const glm::vec3& lightDir, const camera& ca
     calculateCascadeSplits(0.1f, 1000.0f);
 
     // Use viewport render target dimensions in editor mode
-    float aspect = m_viewportTexture
+    float aspect = m_editorViewport
         ? static_cast<float>(viewport_width_rt) / static_cast<float>(std::max(viewport_height_rt, 1))
         : static_cast<float>(viewport_width) / static_cast<float>(std::max(viewport_height, 1));
     for (int i = 0; i < NUM_CASCADES; i++)
@@ -237,8 +237,10 @@ void D3D12RenderAPI::beginShadowPass(const glm::vec3& lightDir, const camera& ca
     static bool logged_shadow_init = false;
     if (!logged_shadow_init)
     {
+        UINT mainDSV = m_clientViewport ? m_clientViewport->getDepthDSV()
+                      : (m_editorViewport ? m_editorViewport->getDepthDSV() : UINT(-1));
         LOG_ENGINE_INFO("[D3D12 Shadow] beginShadowPass: shadowSize={}, cascades={}, mainDSV={}, shadowDSV=[{},{},{},{}], shadowSRV={}",
-                         currentShadowSize, NUM_CASCADES, m_mainDSVIndex,
+                         currentShadowSize, NUM_CASCADES, mainDSV,
                          m_shadowDSVIndices[0], m_shadowDSVIndices[1], m_shadowDSVIndices[2], m_shadowDSVIndices[3],
                          m_shadowSRVIndex);
         LOG_ENGINE_INFO("[D3D12 Shadow] lightDir=({:.2f},{:.2f},{:.2f}), aspect={:.3f}, viewportRT={}x{}, viewport={}x{}",
@@ -275,23 +277,25 @@ void D3D12RenderAPI::endShadowPass()
     D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle;
     D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle;
 
-    if (m_viewportTexture)
+    if (m_editorViewport)
     {
+        auto& ev = *m_editorViewport;
         w = viewport_width_rt;
         h = viewport_height_rt;
-        transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
-        rtvHandle = m_rtvAllocator.getCPU(m_offscreenRTVIndex);
-        dsvHandle = m_dsvAllocator.getCPU(m_viewportDSVIndex);
+        transitionResource(ev.getHDR(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        rtvHandle = m_rtvAllocator.getCPU(ev.getHDRRTV());
+        dsvHandle = m_dsvAllocator.getCPU(ev.getDepthDSV());
     }
-    else
+    else if (m_clientViewport)
     {
+        auto& cv = *m_clientViewport;
         w = viewport_width;
         h = viewport_height;
 
         // Standalone always renders to HDR offscreen (tone-mapped to back buffer in endFrame)
-        transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
-        rtvHandle = m_rtvAllocator.getCPU(m_offscreenRTVIndex);
-        dsvHandle = m_dsvAllocator.getCPU(m_mainDSVIndex);
+        transitionResource(cv.getHDR(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        rtvHandle = m_rtvAllocator.getCPU(cv.getHDRRTV());
+        dsvHandle = m_dsvAllocator.getCPU(cv.getDepthDSV());
     }
 
     // Flush batched barriers (shadow→SRV + render target transitions in one call)
@@ -474,18 +478,8 @@ bool D3D12RenderAPI::createShadowMaskResources(int width, int height)
         m_shadowMaskPass.resize(width, height);
     }
 
-    // Ensure depth SRV exists (may already be created by SSAO)
-    if (m_depthSRVIndex == UINT(-1))
-        m_depthSRVIndex = m_srvAllocator.allocate();
-
-    D3D12_SHADER_RESOURCE_VIEW_DESC depthSrvDesc = {};
-    depthSrvDesc.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
-    depthSrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-    depthSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    depthSrvDesc.Texture2D.MipLevels = 1;
-    device->CreateShaderResourceView(m_depthStencilBuffer.Get(), &depthSrvDesc,
-                                      m_srvAllocator.getCPU(m_depthSRVIndex));
-
+    // The scene depth SRV is now owned by the active scene viewport
+    // (client / editor / PIE). Nothing to create here — callers pass it in.
     LOG_ENGINE_INFO("[D3D12] Shadow mask resources created ({}x{})",
                     m_shadowMaskPass.getWidth(), m_shadowMaskPass.getHeight());
     return true;

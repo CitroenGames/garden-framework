@@ -105,4 +105,36 @@ inline fs::path findClientPath(const fs::path& engine_root)
     return {}; // Not found
 }
 
+// Returns the platform-specific server executable name
+inline std::string getServerExeName()
+{
+#ifdef _WIN32
+    return "Server.exe";
+#else
+    return "Server";
+#endif
+}
+
+// Search for the server executable relative to an engine root.
+// Checks common build output locations.
+inline fs::path findServerPath(const fs::path& engine_root)
+{
+    fs::path candidates[] = {
+        engine_root / "bin" / getServerExeName(),
+        engine_root / getServerExeName(),
+        engine_root / "x64" / "Release" / getServerExeName(),
+        engine_root / "x64" / "Debug" / getServerExeName(),
+        engine_root / "build" / "Release" / getServerExeName(),
+        engine_root / "build" / "Debug" / getServerExeName(),
+    };
+
+    for (auto& candidate : candidates)
+    {
+        if (fs::exists(candidate))
+            return fs::canonical(candidate);
+    }
+
+    return {}; // Not found
+}
+
 } // namespace PathUtils

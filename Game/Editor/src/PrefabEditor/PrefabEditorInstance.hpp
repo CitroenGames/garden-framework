@@ -1,8 +1,10 @@
 #pragma once
 
 #include <string>
+#include <memory>
 #include <entt/entt.hpp>
 #include "panels/PreviewOrbitCamera.hpp"
+#include "Graphics/SceneViewport.hpp"
 
 struct PrefabEditorInstance
 {
@@ -15,8 +17,8 @@ struct PrefabEditorInstance
     entt::registry registry;
     entt::entity entity = entt::null;
 
-    // 3D Preview
-    int viewport_id = -1;           // from IRenderAPI::createPIEViewport()
+    // 3D Preview — owns its scene viewport (created via IRenderAPI::createSceneViewport)
+    std::unique_ptr<SceneViewport> viewport;
     int viewport_width = 400;
     int viewport_height = 300;
     PreviewOrbitCamera orbit;

@@ -84,8 +84,10 @@ private:
     // Back buffer resources
     ComPtr<ID3D12Resource> m_backBuffers[NUM_BACK_BUFFERS];
 
-    // Depth stencil
-    ComPtr<ID3D12Resource> m_depthStencilBuffer;
+    // Client-mode scene viewport. Owns the HDR + depth that the standalone
+    // render path draws into, and each frame rebinds the current swap-chain
+    // back buffer as its LDR output. Null in editor mode.
+    std::unique_ptr<D3D12SceneViewport> m_clientViewport;
 
     // Descriptor heaps
     ComPtr<ID3D12DescriptorHeap> m_rtvHeap;
@@ -98,9 +100,6 @@ private:
 
     // RTV indices for back buffers
     UINT m_backBufferRTVs[NUM_BACK_BUFFERS] = { UINT(-1), UINT(-1) };
-
-    // DSV index for main depth buffer
-    UINT m_mainDSVIndex = UINT(-1);
 
     // Root signature
     ComPtr<ID3D12RootSignature> m_rootSignature;
@@ -191,9 +190,6 @@ private:
 
     // Post-processing (FXAA)
     D3D12PostProcessPass m_fxaaPass;
-    ComPtr<ID3D12Resource> m_offscreenTexture;
-    UINT m_offscreenRTVIndex = UINT(-1);
-    UINT m_offscreenSRVIndex = UINT(-1);
     ComPtr<ID3D12Resource> m_fxaaQuadVB;
     D3D12_VERTEX_BUFFER_VIEW m_fxaaQuadVBV = {};
     bool fxaaEnabled = true;
@@ -206,7 +202,6 @@ private:
     D3D12PostProcessPass m_ssaoBlurVPass;
     ComPtr<ID3D12Resource> m_ssaoNoiseTexture;
     ComPtr<ID3D12Resource> m_ssaoFallbackTexture;   // 1x1 white
-    UINT m_depthSRVIndex = UINT(-1);
     UINT m_ssaoNoiseSRVIndex = UINT(-1);
     UINT m_ssaoFallbackSRVIndex = UINT(-1);
     bool ssaoEnabled = true;
@@ -282,6 +277,16 @@ private:
     bool shadow_resources_dirty = false;
     unsigned int pending_shadow_size = 0;
 
+    // Deferred SSAO / shadow-mask viewport-size change. setViewportSize can be
+    // called mid-frame (editor: main -> PIE -> main); destroying these textures
+    // immediately would invalidate references already recorded in the open
+    // command list. We stash the requested size and apply it inside
+    // ensureCommandListOpen on the NEXT frame, after the fence has retired
+    // any work that referenced the old textures.
+    bool pp_resize_dirty = false;
+    int  pp_resize_width = 0;
+    int  pp_resize_height = 0;
+
     // VSync / present interval
     int presentInterval = 1;
 
@@ -291,7 +296,6 @@ private:
     bool createSwapChain();
     bool createDescriptorHeaps();
     bool createBackBufferRTVs();
-    bool createDepthStencilBuffer(int width, int height);
     bool createFrameResources();
     bool createFence();
     bool createUploadInfrastructure();
@@ -300,7 +304,7 @@ private:
     bool createPipelineStates();
     bool createConstantBufferUploadHeaps();
     bool createShadowMapResources();
-    bool createPostProcessingResources(int width, int height);
+    bool createPostProcessSharedResources();   // FXAA quad VB + SSAO fallback texture
     bool createSSAOResources(int width, int height);
     void renderSSAOPass(ID3D12Resource* depthBuffer, UINT depthSRVIndex, int fullWidth, int fullHeight);
     void generateSSAOKernel();
@@ -485,6 +489,10 @@ public:
     void setViewportSize(int width, int height) override;
     void renderUI() override;
 
+    // New SceneViewport-based editor path. Caller owns the viewport.
+    std::unique_ptr<SceneViewport> createSceneViewport(int width, int height) override;
+    void setEditorViewport(SceneViewport* viewport) override;
+
     // Preview render target (for asset preview panel)
     void beginPreviewFrame(int width, int height) override;
     void endPreviewFrame() override;
@@ -522,15 +530,15 @@ public:
     }
 
 private:
-    // Viewport render target for editor
-    ComPtr<ID3D12Resource> m_viewportTexture;
-    ComPtr<ID3D12Resource> m_viewportDepthBuffer;
-    UINT m_viewportRTVIndex = UINT(-1);
-    UINT m_viewportSRVIndex = UINT(-1);
-    UINT m_viewportDSVIndex = UINT(-1);
-    UINT m_viewportDepthSRVIndex = UINT(-1);
+    // Editor main-viewport render target. null in standalone-client mode OR
+    // when the editor hasn't yet registered its viewport.
+    // Ownership lives in the caller (EditorApp). The API just stores a
+    // non-owning pointer that's set via setEditorViewport().
+    D3D12SceneViewport* m_editorViewport = nullptr;
+    // Cached size of the current scene-render target (editor viewport when
+    // editor mode, PIE viewport during PIE render, window size otherwise).
+    // Used to size the API-wide SSAO / shadow-mask buffers.
     int viewport_width_rt = 0, viewport_height_rt = 0;
-    void createViewportResources(int w, int h);
 
     // Preview render target for asset preview panel
     ComPtr<ID3D12Resource> m_previewTexture;

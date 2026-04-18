@@ -22,6 +22,11 @@ public:
 
     void SetViewport(int width, int height);
 
+    // Advance the per-frame ring of transient resources (CBs created per draw).
+    // Must be called once per frame before Rml::Context::Render(), so we can
+    // safely release CBs that the GPU has finished with.
+    void BeginFrame();
+
     // -- Rml::RenderInterface --
     Rml::CompiledGeometryHandle CompileGeometry(Rml::Span<const Rml::Vertex> vertices, Rml::Span<const int> indices) override;
     void RenderGeometry(Rml::CompiledGeometryHandle handle, Rml::Vector2f translation, Rml::TextureHandle texture) override;
@@ -70,6 +75,12 @@ private:
     };
     uintptr_t m_nextTextureHandle = 1;
     std::unordered_map<uintptr_t, TextureData> m_textures;
+
+    // Transient per-draw constant buffers, retained until the GPU is done.
+    // Ring of size 3 (>= max frames in flight) cleared as we cycle slots.
+    static constexpr int kCBFrameSlots = 3;
+    std::vector<ComPtr<ID3D12Resource>> m_perFrameCBs[kCBFrameSlots];
+    int m_cbFrameSlot = 0;
 
     // State
     int m_viewportWidth = 0;

@@ -122,17 +122,7 @@ bool D3D12RenderAPI::createSSAOResources(int width, int height)
         m_ssaoBlurVPass.resize(width, height);
     }
 
-    // Create depth buffer SRV (depth buffer is D24_UNORM_S8_UINT, we need SRV with R24_UNORM_X8_TYPELESS)
-    if (m_depthSRVIndex == UINT(-1))
-        m_depthSRVIndex = m_srvAllocator.allocate();
-
-    D3D12_SHADER_RESOURCE_VIEW_DESC depthSrvDesc = {};
-    depthSrvDesc.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
-    depthSrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-    depthSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    depthSrvDesc.Texture2D.MipLevels = 1;
-    device->CreateShaderResourceView(m_depthStencilBuffer.Get(), &depthSrvDesc,
-                                      m_srvAllocator.getCPU(m_depthSRVIndex));
+    // Scene depth SRV is owned by the active scene viewport; nothing to create here.
 
     // Create noise texture (4x4 RGBA32F with random rotation vectors)
     if (!m_ssaoNoiseTexture)
@@ -234,7 +224,7 @@ bool D3D12RenderAPI::createSSAOResources(int width, int height)
                                           m_srvAllocator.getCPU(m_ssaoNoiseSRVIndex));
     }
 
-    // Fallback texture is created in createPostProcessingResources() (FXAA file)
+    // Fallback texture is created in createPostProcessSharedResources() (FXAA file)
 
     // Generate kernel samples
     generateSSAOKernel();

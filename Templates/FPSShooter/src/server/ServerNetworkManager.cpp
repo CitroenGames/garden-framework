@@ -8,8 +8,13 @@
 #include "Console/Console.hpp"
 #include <entt/entt.hpp>
 #include <cstring>
+#include <cerrno>
 #include <cmath>
 #include <glm/glm.hpp>
+
+#ifdef _WIN32
+  #include <winsock2.h>
+#endif
 
 namespace Game {
 
@@ -48,7 +53,18 @@ bool ServerNetworkManager::startServer(uint16_t port, uint32_t max_clients)
     server_host = enet_host_create(&address, max_clients, 2, 0, 0);
 
     if (server_host == nullptr) {
-        LOG_ENGINE_ERROR("Failed to create ENet server host");
+#ifdef _WIN32
+        int err = WSAGetLastError();
+        const char* hint = "";
+        if (err == WSAEADDRINUSE)      hint = " (port already in use - another server running?)";
+        else if (err == WSAEACCES)     hint = " (permission denied - port in Windows reserved range?)";
+        LOG_ENGINE_ERROR("Failed to create ENet server host on UDP port {} (WSA error {}){}",
+                         port, err, hint);
+#else
+        int err = errno;
+        LOG_ENGINE_ERROR("Failed to create ENet server host on UDP port {} (errno {}: {})",
+                         port, err, std::strerror(err));
+#endif
         return false;
     }
 

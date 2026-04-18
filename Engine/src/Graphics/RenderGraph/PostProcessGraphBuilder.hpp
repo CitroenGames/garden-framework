@@ -17,6 +17,7 @@ public:
         bool     wantSSAO       = false;
         bool     wantShadowMask = false;
         bool     renderImGui    = false;
+        bool     renderRml      = false;
     };
 
     struct Handles {

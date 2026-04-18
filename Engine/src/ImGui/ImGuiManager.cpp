@@ -504,6 +504,18 @@ void ImGuiManager::render()
     ImGui::Render();
 }
 
+void ImGuiManager::updatePlatformWindows()
+{
+    if (!m_initialized) return;
+
+    ImGuiIO& io = ImGui::GetIO();
+    if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
+    {
+        ImGui::UpdatePlatformWindows();
+        ImGui::RenderPlatformWindowsDefault();
+    }
+}
+
 bool ImGuiManager::processEvent(const SDL_Event* event)
 {
     if (!m_initialized) return false;

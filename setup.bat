@@ -128,6 +128,8 @@ reg add "HKCU\Software\Classes\GardenProject" /ve /d "Garden Project File" /f >n
 reg add "HKCU\Software\Classes\GardenProject\shell\open\command" /ve /d "\"%INSTALL_DIR%\garden.exe\" \"%%1\"" /f >nul
 reg add "HKCU\Software\Classes\GardenProject\shell\run" /ve /d "Run Game" /f >nul
 reg add "HKCU\Software\Classes\GardenProject\shell\run\command" /ve /d "\"%INSTALL_DIR%\garden.exe\" run \"%%1\"" /f >nul
+reg add "HKCU\Software\Classes\GardenProject\shell\run-server" /ve /d "Run Server" /f >nul
+reg add "HKCU\Software\Classes\GardenProject\shell\run-server\command" /ve /d "\"%INSTALL_DIR%\garden.exe\" run-server \"%%1\"" /f >nul
 reg add "HKCU\Software\Classes\GardenProject\shell\generate" /ve /d "Generate Project Files" /f >nul
 reg add "HKCU\Software\Classes\GardenProject\shell\generate\command" /ve /d "\"%INSTALL_DIR%\garden.exe\" generate \"%%1\"" /f >nul
 reg add "HKCU\Software\Classes\GardenProject\shell\change-engine" /ve /d "Change Engine" /f >nul

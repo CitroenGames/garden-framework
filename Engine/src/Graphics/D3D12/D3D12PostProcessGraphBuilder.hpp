@@ -13,13 +13,20 @@ public:
     void setAPI(D3D12RenderAPI* api) { m_api = api; }
 
     // DX12-specific per-frame inputs. Must be called before build().
-    void setFrameInputs(D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle,
-                        UINT inputSRVIndex,
+    //
+    // hdrResource / hdrSRVIndex / hdrRTVIndex describe the HDR scene target
+    // the graph reads from and tone-maps. outputResource / outputRTVIndex
+    // describe the LDR surface the graph writes to (editor viewport texture,
+    // PIE viewport texture, or the swap-chain back buffer).
+    void setFrameInputs(D3D12_CPU_DESCRIPTOR_HANDLE outputRTVHandle,
+                        ID3D12Resource* hdrResource,
+                        UINT hdrSRVIndex,
+                        UINT hdrRTVIndex,
                         ID3D12Resource* depthBuffer,
                         UINT depthSRVIndex,
                         UINT depthDSVIndex,
-                        ID3D12Resource* backBuffer,
-                        UINT backBufferRTVIndex);
+                        ID3D12Resource* outputResource,
+                        UINT outputRTVIndex);
 
 protected:
     Handles importResources(RenderGraph& graph, RGBackend& backend, const Config& cfg) override;
@@ -38,11 +45,13 @@ protected:
     D3D12RenderAPI* m_api = nullptr;
 
     // Per-frame inputs (set via setFrameInputs before each build)
-    D3D12_CPU_DESCRIPTOR_HANDLE m_rtvHandle = {};
-    UINT            m_inputSRVIndex   = UINT(-1);
-    ID3D12Resource* m_depthBuffer     = nullptr;
-    UINT            m_depthSRVIndex   = UINT(-1);
-    UINT            m_depthDSVIndex   = UINT(-1);
-    ID3D12Resource* m_backBuffer      = nullptr;
-    UINT            m_backBufferRTVIndex = UINT(-1);
+    D3D12_CPU_DESCRIPTOR_HANDLE m_outputRTVHandle = {};
+    ID3D12Resource* m_hdrResource    = nullptr;
+    UINT            m_hdrSRVIndex    = UINT(-1);
+    UINT            m_hdrRTVIndex    = UINT(-1);
+    ID3D12Resource* m_depthBuffer    = nullptr;
+    UINT            m_depthSRVIndex  = UINT(-1);
+    UINT            m_depthDSVIndex  = UINT(-1);
+    ID3D12Resource* m_outputResource = nullptr;
+    UINT            m_outputRTVIndex = UINT(-1);
 };

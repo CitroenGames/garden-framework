@@ -72,7 +72,8 @@ public:
     }
 
     // Reset all allocators and mark all entries as available.
-    // Call at frame start after the GPU fence signals for this frame.
+    // Call at frame start AFTER the caller has waited for getLastSubmissionFence()
+    // to ensure the GPU is past every command list this pool has produced.
     void resetAll()
     {
         for (auto& entry : m_entries)
@@ -82,6 +83,15 @@ public:
             entry.in_use.store(false, std::memory_order_release);
         }
     }
+
+    // The pool stores the fence value associated with its most recent
+    // ExecuteCommandLists submission. The owner (D3D12RenderAPI) is
+    // responsible for waiting on this fence before resetAll(). Without this
+    // tracking, pool allocators get reset while frame N-1 may still be
+    // executing them (NUM_FRAMES_IN_FLIGHT=2 means the per-slot fence only
+    // covers up through frame N-2).
+    void     setLastSubmissionFence(uint64_t v) { m_lastSubmissionFence = v; }
+    uint64_t getLastSubmissionFence() const     { return m_lastSubmissionFence; }
 
     // Acquire a command list for recording. Returns nullptr if pool is exhausted.
     // Thread-safe: uses compare-exchange to prevent two threads acquiring the same entry.
@@ -130,4 +140,5 @@ public:
 
 private:
     std::vector<Entry> m_entries;
+    uint64_t m_lastSubmissionFence = 0;
 };

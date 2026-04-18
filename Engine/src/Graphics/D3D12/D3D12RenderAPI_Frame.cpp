@@ -22,9 +22,9 @@ void D3D12RenderAPI::beginFrame()
     // Note: deferred resource recreation happens inside ensureCommandListOpen()
     ensureCommandListOpen();
 
-    // Initialize all root params to valid state. When shadows ran, params are stale
-    // from the shadow pass. When shadows are disabled, ensureCommandListOpen() reset the
-    // root signature which invalidates all params. Either way, this makes them valid.
+    // bindDummyRootParams() now restores the engine root signature internally,
+    // so no matter what previous pass left behind, we end up with a known layout
+    // before any root-CBV write.
     bindDummyRootParams();
 
     // Determine render target
@@ -60,14 +60,15 @@ void D3D12RenderAPI::beginFrame()
         }
     }
 
-    if (m_viewportTexture)
+    if (m_editorViewport)
     {
-        // Editor mode: render to offscreen at viewport dimensions
-        transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        // Editor mode: render into the editor viewport's HDR + depth.
+        auto& ev = *m_editorViewport;
+        transitionResource(ev.getHDR(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
 
         flushBarriers();
-        rtvHandle = m_rtvAllocator.getCPU(m_offscreenRTVIndex);
-        dsvHandle = m_dsvAllocator.getCPU(m_viewportDSVIndex);
+        rtvHandle = m_rtvAllocator.getCPU(ev.getHDRRTV());
+        dsvHandle = m_dsvAllocator.getCPU(ev.getDepthDSV());
         commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, &dsvHandle);
 
         D3D12_VIEWPORT vp = {};
@@ -86,12 +87,13 @@ void D3D12RenderAPI::beginFrame()
     }
     else
     {
-        // Standalone: always render to HDR offscreen, then tone-map to back buffer
-        transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        // Standalone: render into the client viewport's HDR, tone-map to back buffer.
+        auto& cv = *m_clientViewport;
+        transitionResource(cv.getHDR(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
 
         flushBarriers();
-        rtvHandle = m_rtvAllocator.getCPU(m_offscreenRTVIndex);
-        dsvHandle = m_dsvAllocator.getCPU(m_mainDSVIndex);
+        rtvHandle = m_rtvAllocator.getCPU(cv.getHDRRTV());
+        dsvHandle = m_dsvAllocator.getCPU(cv.getDepthDSV());
         commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, &dsvHandle);
 
         D3D12_VIEWPORT vp = {};
@@ -145,8 +147,10 @@ void D3D12RenderAPI::endFrame()
     // Re-bind engine root signature (RmlUI may have overridden it)
     commandList->SetGraphicsRootSignature(m_rootSignature.Get());
 
-    if (!m_viewportTexture)
+    if (!m_editorViewport)
     {
+        auto& cv = *m_clientViewport;
+
         bool wantSSAO = ssaoEnabled && m_ssaoBlurVPass.isInitialized();
         bool wantShadowMask = (shadowQuality > 0) && m_shadowMaskPass.isInitialized() && m_shadowMapArray;
 
@@ -160,11 +164,12 @@ void D3D12RenderAPI::endFrame()
             cfg.wantSSAO       = wantSSAO;
             cfg.wantShadowMask = wantShadowMask;
             cfg.renderImGui    = true;
+            cfg.renderRml      = true;
 
             if (m_useDeferred && m_gbufferPass.isInitialized()) {
-                m_deferredGraphBuilder.setFrameInputs(rtvHandle, m_offscreenSRVIndex,
-                                                     m_depthStencilBuffer.Get(), m_depthSRVIndex,
-                                                     m_mainDSVIndex,
+                m_deferredGraphBuilder.setFrameInputs(rtvHandle,
+                                                     cv.getHDR(),   cv.getHDRSRV(),   cv.getHDRRTV(),
+                                                     cv.getDepth(), cv.getDepthSRV(), cv.getDepthDSV(),
                                                      m_backBuffers[m_backBufferIndex].Get(),
                                                      m_backBufferRTVs[m_backBufferIndex]);
                 // Shadows are applied inside the deferred lighting pass, so the
@@ -175,9 +180,9 @@ void D3D12RenderAPI::endFrame()
                 deferredCfg.wantShadowMask = false;
                 m_deferredGraphBuilder.build(m_frameGraph, m_rgBackend, deferredCfg);
             } else {
-                m_ppGraphBuilder.setFrameInputs(rtvHandle, m_offscreenSRVIndex,
-                                                m_depthStencilBuffer.Get(), m_depthSRVIndex,
-                                                m_mainDSVIndex,
+                m_ppGraphBuilder.setFrameInputs(rtvHandle,
+                                                cv.getHDR(),   cv.getHDRSRV(),   cv.getHDRRTV(),
+                                                cv.getDepth(), cv.getDepthSRV(), cv.getDepthDSV(),
                                                 m_backBuffers[m_backBufferIndex].Get(),
                                                 m_backBufferRTVs[m_backBufferIndex]);
                 m_ppGraphBuilder.build(m_frameGraph, m_rgBackend, cfg);
@@ -189,19 +194,19 @@ void D3D12RenderAPI::endFrame()
         {
             // Run SSAO pass before FXAA/tone-mapping (generates blurred SSAO texture)
             if (ssaoEnabled && m_ssaoPass.isInitialized())
-                renderSSAOPass(m_depthStencilBuffer.Get(), m_depthSRVIndex, viewport_width, viewport_height);
+                renderSSAOPass(cv.getDepth(), cv.getDepthSRV(), viewport_width, viewport_height);
 
             // Run shadow mask pass (generates shadow factor texture from depth + shadow maps)
             if (wantShadowMask)
-                renderShadowMaskPass(m_depthStencilBuffer.Get(), m_depthSRVIndex, viewport_width, viewport_height);
+                renderShadowMaskPass(cv.getDepth(), cv.getDepthSRV(), viewport_width, viewport_height);
 
             // Standalone: tone-map HDR offscreen to LDR back buffer (with optional FXAA)
-            transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            transitionResource(cv.getHDR(), {}, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
             transitionResource(m_backBuffers[m_backBufferIndex].Get(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
             flushBarriers();
 
             D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvAllocator.getCPU(m_backBufferRTVs[m_backBufferIndex]);
-            renderFXAAPass(rtvHandle, m_offscreenSRVIndex, viewport_width, viewport_height,
+            renderFXAAPass(rtvHandle, cv.getHDRSRV(), viewport_width, viewport_height,
                            wantSSAO, wantShadowMask);
 
             commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -322,17 +327,19 @@ void D3D12RenderAPI::clear(const glm::vec3& color)
         }
     }
 
-    if (m_viewportTexture)
+    if (m_editorViewport)
     {
-        commandList->ClearRenderTargetView(m_rtvAllocator.getCPU(m_offscreenRTVIndex), clearColor, 0, nullptr);
-        commandList->ClearDepthStencilView(m_dsvAllocator.getCPU(m_viewportDSVIndex),
+        auto& ev = *m_editorViewport;
+        commandList->ClearRenderTargetView(m_rtvAllocator.getCPU(ev.getHDRRTV()), clearColor, 0, nullptr);
+        commandList->ClearDepthStencilView(m_dsvAllocator.getCPU(ev.getDepthDSV()),
                                             D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, nullptr);
     }
-    else
+    else if (m_clientViewport)
     {
-        // Standalone: always render to HDR offscreen
-        commandList->ClearRenderTargetView(m_rtvAllocator.getCPU(m_offscreenRTVIndex), clearColor, 0, nullptr);
-        commandList->ClearDepthStencilView(m_dsvAllocator.getCPU(m_mainDSVIndex),
+        // Standalone: clear the client viewport's HDR + depth
+        auto& cv = *m_clientViewport;
+        commandList->ClearRenderTargetView(m_rtvAllocator.getCPU(cv.getHDRRTV()), clearColor, 0, nullptr);
+        commandList->ClearDepthStencilView(m_dsvAllocator.getCPU(cv.getDepthDSV()),
                                             D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, nullptr);
     }
 }

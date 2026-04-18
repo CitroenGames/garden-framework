@@ -85,9 +85,7 @@ void D3D12DeferredSceneGraphBuilder::build(RenderGraph& graph, RGBackend& backen
             };
             // Use the active scene depth DSV (matches viewport-vs-standalone dims).
             // Binding the wrong-sized DSV with these RTVs is what was TDR'ing.
-            const UINT dsvIdx = (m_depthDSVIndex != UINT(-1))
-                                    ? m_depthDSVIndex
-                                    : m_api->m_mainDSVIndex;
+            const UINT dsvIdx = m_depthDSVIndex;
             const D3D12_CPU_DESCRIPTOR_HANDLE dsv =
                 m_api->m_dsvAllocator.getCPU(dsvIdx);
 
@@ -223,9 +221,7 @@ void D3D12DeferredSceneGraphBuilder::addPreTonemapPasses(RenderGraph& graph,
             if (hdrRTV == UINT(-1)) return;
 
             D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_api->m_rtvAllocator.getCPU(hdrRTV);
-            const UINT dsvIdx = (m_depthDSVIndex != UINT(-1))
-                                    ? m_depthDSVIndex
-                                    : m_api->m_mainDSVIndex;
+            const UINT dsvIdx = m_depthDSVIndex;
             D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle =
                 m_api->m_dsvAllocator.getCPU(dsvIdx);
 

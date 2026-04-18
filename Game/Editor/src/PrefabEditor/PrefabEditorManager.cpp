@@ -40,17 +40,12 @@ void PrefabEditorManager::openPrefab(const std::string& prefab_path)
         }
     }
 
-    // Remove any stale (closed) instances for this path
+    // Remove any stale (closed) instances for this path. The viewport's
+    // destructor routes resources through the render API's deferred-release ring.
     m_instances.erase(
         std::remove_if(m_instances.begin(), m_instances.end(),
             [&](const std::unique_ptr<PrefabEditorInstance>& inst) {
-                if (inst->prefab_path == normalized && !inst->is_open)
-                {
-                    if (inst->viewport_id >= 0 && m_render_api)
-                        m_render_api->destroyPIEViewport(inst->viewport_id);
-                    return true;
-                }
-                return false;
+                return inst->prefab_path == normalized && !inst->is_open;
             }),
         m_instances.end());
 
@@ -60,7 +55,7 @@ void PrefabEditorManager::openPrefab(const std::string& prefab_path)
     inst->id = m_next_id++;
 
     if (m_render_api)
-        inst->viewport_id = m_render_api->createPIEViewport(inst->viewport_width, inst->viewport_height);
+        inst->viewport = m_render_api->createSceneViewport(inst->viewport_width, inst->viewport_height);
 
     loadPrefabIntoInstance(*inst);
 
@@ -132,13 +127,13 @@ void PrefabEditorManager::renderAllPreviews()
         if (!mc || !mc->m_mesh || !mc->m_mesh->gpu_mesh)
             continue;
 
-        if (!m_render_api)
+        if (!m_render_api || !inst->viewport)
             continue;
 
         if (inst->viewport_width > 0 && inst->viewport_height > 0)
-            m_render_api->setPIEViewportSize(inst->viewport_id, inst->viewport_width, inst->viewport_height);
+            inst->viewport->resize(inst->viewport_width, inst->viewport_height);
 
-        m_render_api->setActiveSceneTarget(inst->viewport_id);
+        m_render_api->setEditorViewport(inst->viewport.get());
         m_render_api->beginFrame();
         m_render_api->clear(glm::vec3(0.12f, 0.12f, 0.14f));
 
@@ -173,17 +168,12 @@ void PrefabEditorManager::drawAll()
             drawEditorWindow(*inst);
     }
 
-    // Remove closed instances — no save_prompt gate, since the modal is inside the window
+    // Remove closed instances — no save_prompt gate, since the modal is inside the window.
+    // Each instance owns its viewport; the dtor handles resource release.
     m_instances.erase(
         std::remove_if(m_instances.begin(), m_instances.end(),
-            [this](const std::unique_ptr<PrefabEditorInstance>& inst) {
-                if (!inst->is_open)
-                {
-                    if (inst->viewport_id >= 0 && m_render_api)
-                        m_render_api->destroyPIEViewport(inst->viewport_id);
-                    return true;
-                }
-                return false;
+            [](const std::unique_ptr<PrefabEditorInstance>& inst) {
+                return !inst->is_open;
             }),
         m_instances.end());
 }
@@ -611,9 +601,9 @@ void PrefabEditorManager::drawViewport(PrefabEditorInstance& inst)
         inst.viewport_height = new_h;
     }
 
-    if (inst.viewport_id >= 0 && m_render_api)
+    if (inst.viewport)
     {
-        ImTextureID tex = (ImTextureID)m_render_api->getPIEViewportTextureID(inst.viewport_id);
+        ImTextureID tex = (ImTextureID)inst.viewport->getOutputTextureID();
         if (tex)
         {
             ImGui::Image(tex, avail);
@@ -733,13 +723,6 @@ void PrefabEditorManager::drawSavePrompt(PrefabEditorInstance& inst)
 
 void PrefabEditorManager::shutdown()
 {
-    if (m_render_api)
-    {
-        for (auto& inst : m_instances)
-        {
-            if (inst->viewport_id >= 0)
-                m_render_api->destroyPIEViewport(inst->viewport_id);
-        }
-    }
+    // Each instance's destructor releases its viewport via the deferred-release ring.
     m_instances.clear();
 }

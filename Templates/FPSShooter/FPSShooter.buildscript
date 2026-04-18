@@ -15,6 +15,7 @@ target_link_libraries(
 )
 defines = RMLUI_SDL_VERSION_MAJOR=3
 outdir = bin
+multiprocessor = true
 simd = AdvancedVectorExtensions2
 std = 20
 utf8 = true

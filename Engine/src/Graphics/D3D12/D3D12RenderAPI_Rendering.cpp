@@ -934,11 +934,18 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
     // Submit all worker command lists at once
     auto activeLists = m_commandListPool.getActiveCommandLists();
     if (!activeLists.empty())
+    {
         commandQueue->ExecuteCommandLists(static_cast<UINT>(activeLists.size()), activeLists.data());
 
-    // NOTE: Do NOT resetAll() here -- the GPU is still executing these command lists.
-    // The pool allocators are reset at the start of the next frame in ensureCommandListOpen()
-    // after the fence signals that the GPU is done with the previous frame.
+        // Capture the fence value that covers this pool submission. The pool
+        // can't be reset until the GPU is past this. The per-frame-slot fence
+        // alone isn't enough — with NUM_FRAMES_IN_FLIGHT=2 it lags this one
+        // by a full frame, leaving pool work from frame N-1 in flight when
+        // frame N+1's ensureCommandListOpen calls resetAll().
+        m_fenceValue++;
+        commandQueue->Signal(m_fence.Get(), m_fenceValue);
+        m_commandListPool.setLastSubmissionFence(m_fenceValue);
+    }
 }
 
 void D3D12RenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)

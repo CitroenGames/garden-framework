@@ -160,6 +160,12 @@ void RmlRenderer_D3D12::SetViewport(int width, int height)
     m_viewportHeight = height;
 }
 
+void RmlRenderer_D3D12::BeginFrame()
+{
+    m_cbFrameSlot = (m_cbFrameSlot + 1) % kCBFrameSlots;
+    m_perFrameCBs[m_cbFrameSlot].clear();
+}
+
 Rml::CompiledGeometryHandle RmlRenderer_D3D12::CompileGeometry(Rml::Span<const Rml::Vertex> vertices, Rml::Span<const int> indices)
 {
     ID3D12Device* device = m_renderAPI->getDevice();
@@ -312,6 +318,9 @@ void RmlRenderer_D3D12::RenderGeometry(Rml::CompiledGeometryHandle handle, Rml::
     cbResource->Unmap(0, nullptr);
 
     cmdList->SetGraphicsRootConstantBufferView(0, cbResource->GetGPUVirtualAddress());
+
+    // Retain the CB until the GPU is done with the current frame's command list.
+    m_perFrameCBs[m_cbFrameSlot].push_back(cbResource);
 
     cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     cmdList->IASetVertexBuffers(0, 1, &geo.vbView);

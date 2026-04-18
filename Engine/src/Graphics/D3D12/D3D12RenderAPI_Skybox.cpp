@@ -72,17 +72,17 @@ void D3D12RenderAPI::renderSkybox()
             currentHeight = pie.height();
         }
     }
-    else if (m_viewportTexture)
+    else if (m_editorViewport)
     {
-        depthBuffer = m_viewportDepthBuffer.Get();
-        depthSRVIndex = m_viewportDepthSRVIndex;
+        depthBuffer = m_editorViewport->getDepth();
+        depthSRVIndex = m_editorViewport->getDepthSRV();
         currentWidth = viewport_width_rt;
         currentHeight = viewport_height_rt;
     }
-    else
+    else if (m_clientViewport)
     {
-        depthBuffer = m_depthStencilBuffer.Get();
-        depthSRVIndex = m_depthSRVIndex;
+        depthBuffer = m_clientViewport->getDepth();
+        depthSRVIndex = m_clientViewport->getDepthSRV();
         currentWidth = viewport_width;
         currentHeight = viewport_height;
     }

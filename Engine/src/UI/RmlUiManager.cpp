@@ -241,7 +241,9 @@ void RmlUiManager::beginFrame()
 #ifdef _WIN32
     else if (m_apiType == RenderAPIType::D3D12)
     {
-        static_cast<RmlRenderer_D3D12*>(m_renderInterface)->SetViewport(w, h);
+        auto* d3dRenderer = static_cast<RmlRenderer_D3D12*>(m_renderInterface);
+        d3dRenderer->SetViewport(w, h);
+        d3dRenderer->BeginFrame();
     }
 #endif
 #ifdef __APPLE__

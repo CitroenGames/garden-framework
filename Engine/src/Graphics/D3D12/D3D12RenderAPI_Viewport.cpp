@@ -7,130 +7,54 @@
 // Editor Viewport Rendering
 // ============================================================================
 
-void D3D12RenderAPI::createViewportResources(int w, int h)
-{
-    LOG_ENGINE_TRACE("[D3D12] Creating viewport resources ({}x{})", w, h);
-    if (m_viewportTexture) m_stateTracker.untrack(m_viewportTexture.Get());
-    if (m_viewportDepthBuffer) m_stateTracker.untrack(m_viewportDepthBuffer.Get());
-    m_viewportTexture.Reset();
-    m_viewportDepthBuffer.Reset();
-
-    D3D12_HEAP_PROPERTIES heapProps = {};
-    heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
-
-    // Color texture (LDR - FXAA tone maps HDR offscreen to this)
-    {
-        D3D12_RESOURCE_DESC desc = {};
-        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-        desc.Width = w;
-        desc.Height = h;
-        desc.DepthOrArraySize = 1;
-        desc.MipLevels = 1;
-        desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-        desc.SampleDesc.Count = 1;
-        desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
-
-        D3D12_CLEAR_VALUE cv = {};
-        cv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-
-        HRESULT hr = device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &desc,
-                                         D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &cv,
-                                         IID_PPV_ARGS(m_viewportTexture.GetAddressOf()));
-        if (FAILED(hr))
-        {
-            LOG_ENGINE_ERROR("[D3D12] Failed to create viewport color texture ({}x{}, HRESULT: 0x{:08X})", w, h, static_cast<unsigned>(hr));
-            return;
-        }
-        m_stateTracker.track(m_viewportTexture.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    }
-
-    // Depth texture (typeless to allow both DSV and SRV views for SSAO)
-    {
-        D3D12_RESOURCE_DESC desc = {};
-        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-        desc.Width = w;
-        desc.Height = h;
-        desc.DepthOrArraySize = 1;
-        desc.MipLevels = 1;
-        desc.Format = DXGI_FORMAT_R24G8_TYPELESS;
-        desc.SampleDesc.Count = 1;
-        desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
-
-        D3D12_CLEAR_VALUE cv = {};
-        cv.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
-        cv.DepthStencil.Depth = 1.0f;
-
-        HRESULT hr = device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &desc,
-                                         D3D12_RESOURCE_STATE_DEPTH_WRITE, &cv,
-                                         IID_PPV_ARGS(m_viewportDepthBuffer.GetAddressOf()));
-        if (FAILED(hr))
-        {
-            LOG_ENGINE_ERROR("[D3D12] Failed to create viewport depth texture ({}x{}, HRESULT: 0x{:08X})", w, h, static_cast<unsigned>(hr));
-            return;
-        }
-        m_stateTracker.track(m_viewportDepthBuffer.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE);
-    }
-
-    // Allocate descriptors
-    if (m_viewportRTVIndex == UINT(-1)) m_viewportRTVIndex = m_rtvAllocator.allocate();
-    if (m_viewportSRVIndex == UINT(-1)) m_viewportSRVIndex = m_srvAllocator.allocate();
-    if (m_viewportDSVIndex == UINT(-1)) m_viewportDSVIndex = m_dsvAllocator.allocate();
-
-    if (m_viewportRTVIndex == UINT(-1) || m_viewportSRVIndex == UINT(-1) || m_viewportDSVIndex == UINT(-1))
-    {
-        LOG_ENGINE_ERROR("[D3D12] Failed to allocate descriptors for viewport resources");
-        return;
-    }
-
-    device->CreateRenderTargetView(m_viewportTexture.Get(), nullptr, m_rtvAllocator.getCPU(m_viewportRTVIndex));
-
-    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-    srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    srvDesc.Texture2D.MipLevels = 1;
-    device->CreateShaderResourceView(m_viewportTexture.Get(), &srvDesc, m_srvAllocator.getCPU(m_viewportSRVIndex));
-
-    D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc = {};
-    dsvDesc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
-    dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
-    device->CreateDepthStencilView(m_viewportDepthBuffer.Get(), &dsvDesc, m_dsvAllocator.getCPU(m_viewportDSVIndex));
-
-    // Create depth SRV for SSAO (reads depth as R24_UNORM_X8_TYPELESS)
-    if (m_viewportDepthSRVIndex == UINT(-1))
-        m_viewportDepthSRVIndex = m_srvAllocator.allocate();
-    D3D12_SHADER_RESOURCE_VIEW_DESC depthSrvDesc = {};
-    depthSrvDesc.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
-    depthSrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-    depthSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    depthSrvDesc.Texture2D.MipLevels = 1;
-    device->CreateShaderResourceView(m_viewportDepthBuffer.Get(), &depthSrvDesc,
-                                      m_srvAllocator.getCPU(m_viewportDepthSRVIndex));
-
-    viewport_width_rt = w;
-    viewport_height_rt = h;
-}
-
 void D3D12RenderAPI::setViewportSize(int width, int height)
 {
     if (width <= 0 || height <= 0) return;
-    if (width != viewport_width_rt || height != viewport_height_rt)
+    if (width == viewport_width_rt && height == viewport_height_rt) return;
+
+    // Resize the caller-owned editor viewport through our non-owning pointer.
+    // Before the editor has registered one, this is a no-op — setViewportSize
+    // only makes sense after setEditorViewport() has been called.
+    // SceneViewport's resize routes resources through the deferred-release
+    // ring, so it is safe to call mid-frame.
+    if (m_editorViewport)
+        m_editorViewport->resize(width, height);
+
+    // SSAO / shadow-mask textures don't go through the deferred-release ring
+    // yet — releasing them inline mid-frame would leave dangling references in
+    // the open command list and produce ghosting on submission. Stash the new
+    // size and apply it at the start of the next frame in ensureCommandListOpen.
+    if (m_ssaoPass.isInitialized() || m_shadowMaskPass.isInitialized())
     {
-        flushGPU();
-        createViewportResources(width, height);
-        createPostProcessingResources(width, height);
-        if (m_ssaoPass.isInitialized())
-            createSSAOResources(width, height);
-        if (m_shadowMaskPass.isInitialized())
-            createShadowMaskResources(width, height);
-        float ratio = static_cast<float>(width) / static_cast<float>(height);
-        projection_matrix = glm::perspectiveRH_ZO(glm::radians(field_of_view), ratio, 0.1f, 1000.0f);
+        pp_resize_width  = width;
+        pp_resize_height = height;
+        pp_resize_dirty  = true;
     }
+
+    viewport_width_rt  = width;
+    viewport_height_rt = height;
+
+    float ratio = static_cast<float>(width) / static_cast<float>(height);
+    projection_matrix = glm::perspectiveRH_ZO(glm::radians(field_of_view), ratio, 0.1f, 1000.0f);
+}
+
+std::unique_ptr<SceneViewport> D3D12RenderAPI::createSceneViewport(int width, int height)
+{
+    if (width <= 0 || height <= 0) return nullptr;
+    return std::make_unique<D3D12SceneViewport>(this, width, height, /*outputsToBackBuffer=*/false);
+}
+
+void D3D12RenderAPI::setEditorViewport(SceneViewport* viewport)
+{
+    // Caller owns the viewport. We store a non-owning pointer and cast down;
+    // the factory only ever hands out D3D12SceneViewport instances, so the
+    // cast is safe.
+    m_editorViewport = static_cast<D3D12SceneViewport*>(viewport);
 }
 
 void D3D12RenderAPI::endSceneRender()
 {
-    if (!m_viewportTexture && m_active_scene_target < 0) return;
+    if (!m_editorViewport && m_active_scene_target < 0) return;
 
     // Re-bind engine root signature (RmlUI may have overridden it)
     commandList->SetGraphicsRootSignature(m_rootSignature.Get());
@@ -161,18 +85,18 @@ void D3D12RenderAPI::endSceneRender()
                 cfg.renderImGui    = false;
 
                 if (m_useDeferred && m_gbufferPass.isInitialized()) {
-                    m_deferredGraphBuilder.setFrameInputs(rtvHandle, pie.getHDRSRV(),
-                                                         pie.getDepth(), pie.getDepthSRV(),
-                                                         pie.getDepthDSV(),
+                    m_deferredGraphBuilder.setFrameInputs(rtvHandle,
+                                                         pie.getHDR(),   pie.getHDRSRV(),   pie.getHDRRTV(),
+                                                         pie.getDepth(), pie.getDepthSRV(), pie.getDepthDSV(),
                                                          pie.getOutput(), pie.getOutputRTV());
                     // Shadows applied in lighting pass; SSAO still via tonemap.
                     PostProcessGraphBuilder::Config deferredCfg = cfg;
                     deferredCfg.wantShadowMask = false;
                     m_deferredGraphBuilder.build(m_frameGraph, m_rgBackend, deferredCfg);
                 } else {
-                    m_ppGraphBuilder.setFrameInputs(rtvHandle, pie.getHDRSRV(),
-                                                    pie.getDepth(), pie.getDepthSRV(),
-                                                    pie.getDepthDSV(),
+                    m_ppGraphBuilder.setFrameInputs(rtvHandle,
+                                                    pie.getHDR(),   pie.getHDRSRV(),   pie.getHDRRTV(),
+                                                    pie.getDepth(), pie.getDepthSRV(), pie.getDepthDSV(),
                                                     pie.getOutput(), pie.getOutputRTV());
                     m_ppGraphBuilder.build(m_frameGraph, m_rgBackend, cfg);
                 }
@@ -209,14 +133,16 @@ void D3D12RenderAPI::endSceneRender()
     }
     else
     {
+        auto& vp = *m_editorViewport;
+
         bool wantSSAO = ssaoEnabled && m_ssaoBlurVPass.isInitialized()
-                        && m_viewportDepthSRVIndex != UINT(-1);
+                        && vp.getDepthSRV() != UINT(-1);
         bool wantShadowMask = (shadowQuality > 0) && m_shadowMaskPass.isInitialized()
-                              && m_shadowMapArray && m_viewportDepthSRVIndex != UINT(-1);
+                              && m_shadowMapArray && vp.getDepthSRV() != UINT(-1);
 
         if (m_useRenderGraph)
         {
-            D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvAllocator.getCPU(m_viewportRTVIndex);
+            D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvAllocator.getCPU(vp.getOutputRTV());
 
             PostProcessGraphBuilder::Config cfg;
             cfg.width          = static_cast<uint32_t>(viewport_width_rt);
@@ -226,53 +152,50 @@ void D3D12RenderAPI::endSceneRender()
             cfg.renderImGui    = false;
 
             if (m_useDeferred && m_gbufferPass.isInitialized()) {
-                m_deferredGraphBuilder.setFrameInputs(rtvHandle, m_offscreenSRVIndex,
-                                                     m_viewportDepthBuffer.Get(), m_viewportDepthSRVIndex,
-                                                     m_viewportDSVIndex,
-                                                     m_viewportTexture.Get(), m_viewportRTVIndex);
+                m_deferredGraphBuilder.setFrameInputs(rtvHandle,
+                                                     vp.getHDR(),   vp.getHDRSRV(),   vp.getHDRRTV(),
+                                                     vp.getDepth(), vp.getDepthSRV(), vp.getDepthDSV(),
+                                                     vp.getOutput(), vp.getOutputRTV());
                 // Shadows applied in lighting pass; SSAO still via tonemap.
                 PostProcessGraphBuilder::Config deferredCfg = cfg;
                 deferredCfg.wantShadowMask = false;
                 m_deferredGraphBuilder.build(m_frameGraph, m_rgBackend, deferredCfg);
             } else {
-                m_ppGraphBuilder.setFrameInputs(rtvHandle, m_offscreenSRVIndex,
-                                                m_viewportDepthBuffer.Get(), m_viewportDepthSRVIndex,
-                                                m_viewportDSVIndex,
-                                                m_viewportTexture.Get(), m_viewportRTVIndex);
+                m_ppGraphBuilder.setFrameInputs(rtvHandle,
+                                                vp.getHDR(),   vp.getHDRSRV(),   vp.getHDRRTV(),
+                                                vp.getDepth(), vp.getDepthSRV(), vp.getDepthDSV(),
+                                                vp.getOutput(), vp.getOutputRTV());
                 m_ppGraphBuilder.build(m_frameGraph, m_rgBackend, cfg);
             }
 
             m_skyboxRequested = false;
 
-            // Restore expected states for editor flow
-            transitionResource(m_viewportTexture.Get(), {},
-                               D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-            transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            // Restore expected states for editor flow (ImGui samples the LDR output).
+            transitionResource(vp.getOutput(), {}, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            transitionResource(vp.getHDR(),    {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
             flushBarriers();
         }
         else
         {
             // Run SSAO pass before FXAA/tone-mapping (generates blurred SSAO texture)
-            if (ssaoEnabled && m_ssaoPass.isInitialized() && m_viewportDepthSRVIndex != UINT(-1))
-                renderSSAOPass(m_viewportDepthBuffer.Get(), m_viewportDepthSRVIndex,
+            if (ssaoEnabled && m_ssaoPass.isInitialized() && vp.getDepthSRV() != UINT(-1))
+                renderSSAOPass(vp.getDepth(), vp.getDepthSRV(),
                                viewport_width_rt, viewport_height_rt);
 
             if (wantShadowMask)
-                renderShadowMaskPass(m_viewportDepthBuffer.Get(), m_viewportDepthSRVIndex,
+                renderShadowMaskPass(vp.getDepth(), vp.getDepthSRV(),
                                      viewport_width_rt, viewport_height_rt);
 
             // Editor viewport: tone-map HDR offscreen to LDR viewport (with optional FXAA)
-            transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-            transitionResource(m_viewportTexture.Get(), {},
-                               D3D12_RESOURCE_STATE_RENDER_TARGET);
+            transitionResource(vp.getHDR(),    {}, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            transitionResource(vp.getOutput(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
             flushBarriers();
 
-            D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvAllocator.getCPU(m_viewportRTVIndex);
-            renderFXAAPass(rtvHandle, m_offscreenSRVIndex, viewport_width_rt, viewport_height_rt, wantSSAO, wantShadowMask);
+            D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvAllocator.getCPU(vp.getOutputRTV());
+            renderFXAAPass(rtvHandle, vp.getHDRSRV(), viewport_width_rt, viewport_height_rt, wantSSAO, wantShadowMask);
 
-            transitionResource(m_viewportTexture.Get(), {},
-                               D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-            transitionResource(m_offscreenTexture.Get(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            transitionResource(vp.getOutput(), {}, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            transitionResource(vp.getHDR(),    {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
             flushBarriers();
         }
     }
@@ -282,8 +205,7 @@ void D3D12RenderAPI::endSceneRender()
 
 uint64_t D3D12RenderAPI::getViewportTextureID()
 {
-    if (m_viewportSRVIndex == UINT(-1)) return 0;
-    return m_srvAllocator.getGPU(m_viewportSRVIndex).ptr;
+    return m_editorViewport ? m_editorViewport->getOutputTextureID() : 0;
 }
 
 void D3D12RenderAPI::renderUI()

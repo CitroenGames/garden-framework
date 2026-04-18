@@ -3,6 +3,7 @@
 #include "world.hpp"
 #include "Plugin/GameModuleLoader.hpp"
 #include "InputManager.hpp"
+#include "Graphics/SceneViewport.hpp"
 #include <memory>
 #include <string>
 
@@ -18,7 +19,9 @@ struct PIEClientInstance
     std::shared_ptr<InputManager> input_manager;      // per-client input
     EngineServices services{};                        // passed to game DLL init
 
-    int viewport_id = -1;                             // render target ID from RenderAPI
+    // Caller-owned scene viewport. Created via render_api->createSceneViewport.
+    // Destruction routes resources through the API's deferred-release ring.
+    std::unique_ptr<SceneViewport> viewport;
     int viewport_width = 640;
     int viewport_height = 480;
     bool initialized = false;
