@@ -10,7 +10,7 @@ sources = src/**/*.cpp
 headers = src/**/*.hpp
 includes = src
 target_link_libraries(
-    PRIVATE EngineGraphics
+    PRIVATE EngineSDK
 )
 outdir = bin
 multiprocessor = true

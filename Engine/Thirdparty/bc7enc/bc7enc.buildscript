@@ -1,5 +1,6 @@
 [project:bc7enc]
 type = lib
+outdir = ../../../bin/
 std = 11
 sources = *.cpp
 headers = *.h

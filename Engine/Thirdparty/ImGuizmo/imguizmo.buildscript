@@ -1,5 +1,6 @@
 [project:imguizmo]
 type = lib
+outdir = ../../../bin/
 sources = ImGuizmo.cpp
 headers = ImGuizmo.h
 includes = ../imgui-docking

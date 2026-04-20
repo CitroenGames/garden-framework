@@ -1,5 +1,6 @@
 [project:freetype]
 type = lib
+outdir = ../../../bin/
 c_standard = 11
 sources = {
     src/base/ftsystem.c

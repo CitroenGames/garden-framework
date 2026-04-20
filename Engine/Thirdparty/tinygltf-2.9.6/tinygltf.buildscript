@@ -1,5 +1,6 @@
 [project:tinygltf]
 type = lib
+outdir = ../../../bin/
 std = 11
 sources = tiny_gltf.cc
 headers = *.h

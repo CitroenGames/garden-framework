@@ -10,8 +10,7 @@ sources = src/**/*.cpp
 headers = src/**/*.hpp
 includes = src, src/shared
 target_link_libraries(
-    PRIVATE EngineCore
-    PRIVATE EngineGraphics
+    PRIVATE EngineSDK
 )
 defines = RMLUI_SDL_VERSION_MAJOR=3
 outdir = bin

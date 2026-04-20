@@ -2,6 +2,7 @@ find_package(Vulkan REQUIRED)
 
 [project:vk-bootstrap]
 type = lib
+outdir = ../../../bin/
 sources = src/VkBootstrap.cpp
 headers = src/VkBootstrap.h src/VkBootstrapDispatch.h
 includes = src, ${Vulkan_INCLUDE_DIRS}

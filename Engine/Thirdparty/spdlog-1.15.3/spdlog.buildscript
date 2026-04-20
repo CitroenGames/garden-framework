@@ -1,5 +1,6 @@
 [project:spdlog]
 type = lib
+outdir = ../../../bin/
 std = 11
 utf8 = true
 sources = src/**/*.cpp

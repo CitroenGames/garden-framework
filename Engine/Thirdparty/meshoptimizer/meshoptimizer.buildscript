@@ -1,5 +1,6 @@
 [project:meshoptimizer]
 type = lib
+outdir = ../../../bin/
 std = 11
 sources = src/*.cpp
 headers = src/meshoptimizer.h

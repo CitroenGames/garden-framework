@@ -1,0 +1,25 @@
+[project:EngineSDK]
+type = interface
+public_includes = public
+public_libs = {
+    ../bin/EngineCore.lib
+    ../bin/EngineGraphics.lib
+    ../bin/freetype.lib
+    ../bin/RmlUi.lib
+    ../bin/Pakker.lib
+    ../bin/tinygltf.lib
+    ../bin/tinyobjloader.lib
+    ../bin/spdlog.lib
+    ../bin/imgui-docking.lib
+    ../bin/imguizmo.lib
+    ../bin/vk-bootstrap.lib
+    ../bin/VMA.lib
+    ../bin/JoltPhysics.lib
+    ../bin/meshoptimizer.lib
+    ../bin/RecastNavigation.lib
+    ../bin/bc7enc.lib
+}
+target_link_libraries(
+    PUBLIC EngineCore
+    PUBLIC EngineGraphics
+)

@@ -1,5 +1,6 @@
 [project:tinyobjloader]
 type = lib
+outdir = ../../../bin/
 std = 11
 sources = tiny_obj_loader.cc
 headers = *.h

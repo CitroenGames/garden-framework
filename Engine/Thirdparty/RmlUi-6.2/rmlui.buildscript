@@ -1,5 +1,6 @@
 [project:RmlUi]
 type = lib
+outdir = ../../../bin/
 std = 17
 sources = {
     Source/Core/*.cpp

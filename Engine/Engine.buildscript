@@ -4,4 +4,5 @@ folder("Engine") {
     }
     include = EngineCore.buildscript
     include = EngineGraphics.buildscript
+    include = EngineSDK.buildscript
 }
