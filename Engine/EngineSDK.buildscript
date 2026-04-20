@@ -1,6 +1,7 @@
 [project:EngineSDK]
 type = interface
-public_includes = public
+public_includes = public, src
+include = Thirdparty
 public_libs = {
     ../bin/EngineCore.lib
     ../bin/EngineGraphics.lib
@@ -18,8 +19,5 @@ public_libs = {
     ../bin/meshoptimizer.lib
     ../bin/RecastNavigation.lib
     ../bin/bc7enc.lib
+    Thirdparty/SDL3-3.4.4/lib/x64/SDL3.lib
 }
-target_link_libraries(
-    PUBLIC EngineCore
-    PUBLIC EngineGraphics
-)
