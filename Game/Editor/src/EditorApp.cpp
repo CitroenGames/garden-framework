@@ -304,12 +304,208 @@ bool EditorApp::initialize(RenderAPIType api_type)
     m_asset_scanner.scanDirectory("assets");
     m_asset_scanner.processAllPending();
 
+    // Editor plugins — load AFTER project/assets so plugins see a populated context.
+    initializePlugins();
+
+    // Bind plugin manager panel to the host.
+    m_plugin_manager_panel.bind(&m_plugin_host);
+
     SDL_SetWindowRelativeMouseMode(m_app.getWindow(), false);
 
     m_running = true;
 
     LOG_ENGINE_INFO("Editor initialized successfully");
     return true;
+}
+
+// ---- Editor plugin lifecycle ----
+
+namespace {
+    // Global log routers for the plugin-host EditorServices struct. They
+    // prepend "[plugin]" so messages are distinguishable in the console.
+    void plugin_log_info (const char* m) { LOG_ENGINE_INFO ("[plugin] {}", m ? m : ""); }
+    void plugin_log_warn (const char* m) { LOG_ENGINE_WARN ("[plugin] {}", m ? m : ""); }
+    void plugin_log_error(const char* m) { LOG_ENGINE_ERROR("[plugin] {}", m ? m : ""); }
+
+    // Background-job adapter: forward to the engine's JobSystem. Plugin-
+    // provided functions are plain C, so we wrap them in a lambda that the
+    // JobSystem scheduler can call.
+    void plugin_run_background(void* user, EditorBackgroundJobFn fn, const char* /*task_name*/)
+    {
+        if (!fn) return;
+        // Detached std::thread instead of the engine's JobSystem because
+        // JobBuilder isn't ENGINE_API'd and we don't want to leak its symbols
+        // just for plugin support. Plugin jobs are coarse-grained imports —
+        // a thread per job is fine.
+        std::thread([user, fn]() { fn(user); }).detach();
+    }
+}
+
+void EditorApp::initializePlugins()
+{
+    if (!m_editor_config || !m_editor_config->plugins_enabled)
+    {
+        LOG_ENGINE_INFO("[EditorPluginHost] Plugins disabled in editor config — skipping discovery");
+        return;
+    }
+
+    EditorServices services{};
+    services.api_version    = GARDEN_EDITOR_PLUGIN_API_VERSION;
+    services.asset_manager  = &Assets::AssetManager::get();
+    services.render_api     = m_app.getRenderAPI();
+    services.application    = &m_app;
+    services.panel_registry = &m_panel_registry;
+    services.menu_registry  = &m_menu_registry;
+    services.log_info       = &plugin_log_info;
+    services.log_warn       = &plugin_log_warn;
+    services.log_error      = &plugin_log_error;
+    services.run_background = &plugin_run_background;
+
+    std::string project_root, assets_root, plugin_data;
+    if (m_project_manager.isLoaded())
+    {
+        project_root = m_project_manager.getProjectRoot();
+        const auto& asset_dir = m_project_manager.getDescriptor().asset_directories.empty()
+            ? std::string("assets")
+            : m_project_manager.getDescriptor().asset_directories[0];
+        assets_root  = m_project_manager.resolveProjectPath(asset_dir);
+        plugin_data  = (std::filesystem::path(project_root) / ".garden" / "plugin_data").string();
+        std::error_code ec;
+        std::filesystem::create_directories(plugin_data, ec);
+    }
+
+    m_plugin_host.setServicesTemplate(services);
+    m_plugin_host.setProjectContext(project_root, assets_root, plugin_data);
+
+    // Resolve relative plugin dirs. The editor has already chdir'd into the
+    // project root, so a bare "plugins" means "<project>/plugins". For each
+    // relative entry we ALSO scan the engine-wide install location, which is
+    // <engine_root>/<dir> (engine_root being the parent of bin/).
+    auto raw_dirs = m_editor_config->getPluginDirectories();
+    std::vector<std::string> dirs;
+    dirs.reserve(raw_dirs.size() * 2);
+    auto engine_root = EnginePaths::getExecutableDir().parent_path();
+    for (const auto& d : raw_dirs)
+    {
+        std::filesystem::path p(d);
+        if (p.is_absolute())
+        {
+            dirs.push_back(p.string());
+        }
+        else
+        {
+            // Engine-wide plugins (sibling to bin/) AND project-local plugins.
+            dirs.push_back((engine_root / p).string());
+            dirs.push_back(p.string());
+        }
+    }
+    m_plugin_host.discoverAll(dirs);
+    m_plugin_host.loadAllEnabled();
+}
+
+// Render plugin-contributed main-menu items. We group by '/'-separated path
+// so a plugin registering "File/Import/Quake PAK..." shows up inside the
+// built-in File menu (ImGui merges multiple BeginMenu("File") calls within
+// the same menu bar).
+void EditorApp::renderPluginMenus()
+{
+    const auto& items = m_menu_registry.items();
+    if (items.empty()) return;
+
+    // First pass: collect unique top-level menu names (preserve insertion order).
+    std::vector<std::string> top_names;
+    for (const auto& it : items)
+    {
+        size_t slash = it.path.find('/');
+        std::string top = (slash == std::string::npos) ? it.path : it.path.substr(0, slash);
+        if (std::find(top_names.begin(), top_names.end(), top) == top_names.end())
+            top_names.push_back(top);
+    }
+
+    // Second pass: for each top-level menu, render its descendants.
+    for (const auto& top : top_names)
+    {
+        if (!ImGui::BeginMenu(top.c_str())) continue;
+
+        // For this top-level, walk items whose path starts with "top/"
+        // and render as nested submenus. We use a simple depth-first
+        // approach: collect this menu's items grouped by the next path
+        // segment. For MVP, support two levels of nesting (top/sub/leaf),
+        // which covers "File/Import/Foo" and "Tools/Foo".
+        std::vector<std::string> sub_names; // unique second-level names
+        for (const auto& it : items)
+        {
+            if (it.path.rfind(top + "/", 0) != 0) continue;
+            std::string rest = it.path.substr(top.size() + 1);
+            size_t slash = rest.find('/');
+            if (slash == std::string::npos) continue; // direct child, rendered later
+            std::string sub = rest.substr(0, slash);
+            if (std::find(sub_names.begin(), sub_names.end(), sub) == sub_names.end())
+                sub_names.push_back(sub);
+        }
+
+        // Render nested submenus first.
+        for (const auto& sub : sub_names)
+        {
+            if (!ImGui::BeginMenu(sub.c_str())) continue;
+            for (const auto& it : items)
+            {
+                std::string prefix = top + "/" + sub + "/";
+                if (it.path.rfind(prefix, 0) != 0) continue;
+                std::string leaf = it.path.substr(prefix.size());
+                if (leaf.empty() || leaf.find('/') != std::string::npos) continue;
+                const char* sc = it.shortcut.empty() ? nullptr : it.shortcut.c_str();
+                if (ImGui::MenuItem(leaf.c_str(), sc))
+                    if (it.on_click) it.on_click(it.user);
+            }
+            ImGui::EndMenu();
+        }
+
+        // Render direct children (top/leaf with no intermediate).
+        bool any_direct = false;
+        for (const auto& it : items)
+        {
+            std::string prefix = top + "/";
+            if (it.path.rfind(prefix, 0) != 0) continue;
+            std::string rest = it.path.substr(prefix.size());
+            if (rest.empty() || rest.find('/') != std::string::npos) continue;
+            if (!any_direct && !sub_names.empty()) { ImGui::Separator(); any_direct = true; }
+            const char* sc = it.shortcut.empty() ? nullptr : it.shortcut.c_str();
+            if (ImGui::MenuItem(rest.c_str(), sc))
+                if (it.on_click) it.on_click(it.user);
+        }
+
+        ImGui::EndMenu();
+    }
+}
+
+// Per-frame draw of plugin-contributed panels. Each panel controls its own
+// visibility via the registry's `visible` flag, toggled from the View menu.
+void EditorApp::renderPluginPanels()
+{
+    auto& entries = m_panel_registry.entries();
+    for (auto& entry : entries)
+    {
+        if (!entry.panel || !entry.visible) continue;
+        // Catch plugin-raised exceptions at the ABI boundary — a misbehaving
+        // plugin must not take down the frame.
+        try
+        {
+            entry.panel->draw(&entry.visible);
+        }
+        catch (const std::exception& e)
+        {
+            LOG_ENGINE_ERROR("[plugin] '{}' panel '{}' threw: {}",
+                entry.plugin_name, entry.panel->getId(), e.what());
+            entry.visible = false;
+        }
+        catch (...)
+        {
+            LOG_ENGINE_ERROR("[plugin] '{}' panel '{}' threw unknown exception",
+                entry.plugin_name, entry.panel->getId());
+            entry.visible = false;
+        }
+    }
 }
 
 void EditorApp::run()
@@ -575,9 +771,22 @@ void EditorApp::run()
             // Prefab editor windows (each is its own dockable window)
             m_prefab_editor.drawAll();
 
+            // Plugin-contributed dynamic panels (rendered AFTER first-party panels
+            // so they dock on top of existing layout and users perceive plugin UI
+            // as an add-on rather than core editor chrome).
+            renderPluginPanels();
+
+            // First-party plugin manager panel (not a plugin itself).
+            if (m_show_plugin_manager)
+                m_plugin_manager_panel.draw(&m_show_plugin_manager);
+
             if (bvh_dirty)
                 m_renderer.markBVHDirty();
         }
+
+        // Forward the frame delta to every loaded plugin (after UI so plugin
+        // state changes are reflected next frame, same as first-party panels).
+        m_plugin_host.tick(m_delta_time);
 
         // --- Phase 3: Render ImGui to screen ---
         ImGui::Render();
@@ -707,6 +916,12 @@ void EditorApp::shutdown()
 
     if (m_editor_config)
         m_editor_config->save();
+
+    // Unload plugins BEFORE tearing down engine systems so plugin shutdown
+    // callbacks can still touch asset manager / render api etc.
+    m_plugin_host.unloadAll();
+    m_panel_registry.clear();
+    m_menu_registry.clear();
 
     // Cleanup prefab editors (destroy PIE viewport resources)
     m_prefab_editor.shutdown();
@@ -1789,7 +2004,23 @@ void EditorApp::renderMenuBar()
             ImGui::MenuItem("NavMesh",         nullptr, &m_show_navmesh_panel);
             ImGui::MenuItem("Physics Debug",   nullptr, &m_show_physics_debug);
             ImGui::MenuItem("Grid",            nullptr, &m_state.show_grid);
+
+            // Plugin-contributed panels (grouped under a sub-header when present).
+            const auto& plugin_panels = m_panel_registry.entries();
+            if (!plugin_panels.empty())
+            {
+                ImGui::Separator();
+                ImGui::TextDisabled("Plugins");
+                for (size_t i = 0; i < plugin_panels.size(); ++i)
+                {
+                    auto& entry = m_panel_registry.entries()[i];
+                    if (!entry.panel) continue;
+                    ImGui::MenuItem(entry.panel->getDisplayName(), nullptr, &entry.visible);
+                }
+            }
+
             ImGui::Separator();
+            ImGui::MenuItem("Plugin Manager",  nullptr, &m_show_plugin_manager);
             ImGui::MenuItem("All Panels (F1)", nullptr, &m_show_ui);
             ImGui::EndMenu();
         }
@@ -1800,6 +2031,9 @@ void EditorApp::renderMenuBar()
                 m_show_editor_settings = true;
             ImGui::EndMenu();
         }
+
+        // Plugin-contributed main-menu items (File/Import/..., Tools/..., etc.)
+        renderPluginMenus();
 
         // Display current file in the menu bar (with dirty indicator)
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 20.0f);

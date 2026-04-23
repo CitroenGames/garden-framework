@@ -52,6 +52,12 @@ public:
     virtual bool uploadToGPU(AssetData& data, IRenderAPI* render_api) = 0;
 
     virtual float estimateLoadTime(const std::string& path) const { return 1.0f; }
+
+    // Origin of this loader. "engine" for first-party loaders (default),
+    // the plugin name (e.g. "QuakeImporter") for loaders registered by
+    // editor plugins. Used by AssetManager::unregisterLoadersFromSource()
+    // to evict plugin-owned loaders cleanly on DLL unload.
+    virtual const char* getSourceId() const { return "engine"; }
 };
 
 } // namespace Assets

@@ -162,8 +162,11 @@ std::string ProjectSelector::run()
                 "Open Garden Project",
                 "Garden Project (*.garden)\0*.garden\0All Files (*.*)\0*.*\0");
             if (!file.empty())
+            {
                 std::strncpy(open_project_path, file.c_str(),
                              sizeof(open_project_path) - 1);
+                open_project_path[sizeof(open_project_path) - 1] = '\0';
+            }
         }
         ImGui::SameLine();
         if (ImGui::Button("Open", ImVec2(open_w, 0)))

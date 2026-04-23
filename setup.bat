@@ -61,6 +61,7 @@ if %ERRORLEVEL%==0 (
        "%CLI_SRC%\src\main.cpp" ^
        "%CLI_SRC%\src\EngineRegistry.cpp" ^
        "%CLI_SRC%\src\ProjectFile.cpp" ^
+       "%CLI_SRC%\src\PluginFile.cpp" ^
        "%CLI_SRC%\src\EnginePicker.cpp" ^
        "%IMGUI_DIR%\imgui.cpp" ^
        "%IMGUI_DIR%\imgui_draw.cpp" ^
@@ -135,6 +136,16 @@ reg add "HKCU\Software\Classes\GardenProject\shell\generate\command" /ve /d "\"%
 reg add "HKCU\Software\Classes\GardenProject\shell\change-engine" /ve /d "Change Engine" /f >nul
 reg add "HKCU\Software\Classes\GardenProject\shell\change-engine\command" /ve /d "\"%INSTALL_DIR%\garden.exe\" change-engine \"%%1\"" /f >nul
 echo   Associated .garden files with garden.exe
+
+:: ---- .gardenplugin association — mirrors GardenProject above ----
+:: Default action ("open") routes to `garden generate-plugin` so a double-click
+:: in Explorer builds the plugin AND deploys its manifest into <engine>/plugins/.
+reg add "HKCU\Software\Classes\.gardenplugin" /ve /d "GardenPlugin" /f >nul
+reg add "HKCU\Software\Classes\GardenPlugin" /ve /d "Garden Editor Plugin" /f >nul
+reg add "HKCU\Software\Classes\GardenPlugin\shell\open\command" /ve /d "\"%INSTALL_DIR%\garden.exe\" generate-plugin \"%%1\"" /f >nul
+reg add "HKCU\Software\Classes\GardenPlugin\shell\generate-plugin" /ve /d "Build Plugin" /f >nul
+reg add "HKCU\Software\Classes\GardenPlugin\shell\generate-plugin\command" /ve /d "\"%INSTALL_DIR%\garden.exe\" generate-plugin \"%%1\"" /f >nul
+echo   Associated .gardenplugin files with garden.exe
 
 :: ---- Step 5: Register this engine ----
 echo.

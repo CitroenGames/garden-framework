@@ -54,6 +54,7 @@ if [ -z "$BUILT_CLI" ]; then
                 "$CLI_SRC/src/main.cpp" \
                 "$CLI_SRC/src/EngineRegistry.cpp" \
                 "$CLI_SRC/src/ProjectFile.cpp" \
+                "$CLI_SRC/src/PluginFile.cpp" \
                 -o "$GARDEN_ROOT/build/cli_tmp/garden"
             BUILT_CLI="$GARDEN_ROOT/build/cli_tmp/garden"
         else
@@ -134,13 +135,30 @@ DESKTOP_EOF
     <comment>Garden Project File</comment>
     <glob pattern="*.garden"/>
   </mime-type>
+  <mime-type type="application/x-garden-plugin">
+    <comment>Garden Editor Plugin</comment>
+    <glob pattern="*.gardenplugin"/>
+  </mime-type>
 </mime-info>
 MIME_EOF
 
+        # Separate desktop entry for plugins so the default action is
+        # `garden generate-plugin` (build + deploy) rather than `open`.
+        cat > "$DESKTOP_DIR/garden-plugin.desktop" << DESKTOP_EOF
+[Desktop Entry]
+Type=Application
+Name=Garden Plugin
+Comment=Build and deploy a Garden editor plugin
+Exec=$INSTALL_DIR/garden generate-plugin %f
+MimeType=application/x-garden-plugin;
+NoDisplay=true
+DESKTOP_EOF
+
         update-mime-database "$HOME/.local/share/mime" 2>/dev/null || true
         xdg-mime default garden-engine.desktop application/x-garden-project 2>/dev/null || true
+        xdg-mime default garden-plugin.desktop application/x-garden-plugin 2>/dev/null || true
         update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
-        echo "  Registered .garden MIME type and desktop entry."
+        echo "  Registered .garden + .gardenplugin MIME types and desktop entries."
         ;;
     Darwin)
         APP_NAME="Garden Opener"
@@ -170,12 +188,18 @@ MIME_EOF
 on open theFiles
     repeat with aFile in theFiles
         set filePath to POSIX path of aFile
-        do shell script "${GARDEN_CLI} open " & quoted form of filePath & " > /dev/null 2>&1 &"
+        -- Dispatch on extension so .garden opens the editor and
+        -- .gardenplugin builds + deploys the plugin.
+        if filePath ends with ".gardenplugin" then
+            do shell script "${GARDEN_CLI} generate-plugin " & quoted form of filePath & " > /dev/null 2>&1 &"
+        else
+            do shell script "${GARDEN_CLI} open " & quoted form of filePath & " > /dev/null 2>&1 &"
+        end if
     end repeat
 end open
 
 on run
-    display dialog "Garden Opener" & return & return & "Double-click a .garden file in Finder to open it in the editor." buttons {"OK"} default button "OK" with title "Garden Engine"
+    display dialog "Garden Opener" & return & return & "Double-click a .garden file to open it in the editor, or a .gardenplugin file to build it." buttons {"OK"} default button "OK" with title "Garden Engine"
 end run
 APPLESCRIPT_EOF
 
@@ -206,6 +230,17 @@ APPLESCRIPT_EOF
             $PLIST_BUDDY -c "Add :UTExportedTypeDeclarations:0:UTTypeTagSpecification:public.filename-extension array" "$PLIST"
             $PLIST_BUDDY -c "Add :UTExportedTypeDeclarations:0:UTTypeTagSpecification:public.filename-extension:0 string garden" "$PLIST"
 
+            # Define the .gardenplugin UTI as a second exported type
+            $PLIST_BUDDY -c "Add :UTExportedTypeDeclarations:1 dict" "$PLIST"
+            $PLIST_BUDDY -c "Add :UTExportedTypeDeclarations:1:UTTypeIdentifier string com.garden-engine.plugin" "$PLIST"
+            $PLIST_BUDDY -c "Add :UTExportedTypeDeclarations:1:UTTypeDescription string Garden Editor Plugin" "$PLIST"
+            $PLIST_BUDDY -c "Add :UTExportedTypeDeclarations:1:UTTypeConformsTo array" "$PLIST"
+            $PLIST_BUDDY -c "Add :UTExportedTypeDeclarations:1:UTTypeConformsTo:0 string public.json" "$PLIST"
+            $PLIST_BUDDY -c "Add :UTExportedTypeDeclarations:1:UTTypeConformsTo:1 string public.data" "$PLIST"
+            $PLIST_BUDDY -c "Add :UTExportedTypeDeclarations:1:UTTypeTagSpecification dict" "$PLIST"
+            $PLIST_BUDDY -c "Add :UTExportedTypeDeclarations:1:UTTypeTagSpecification:public.filename-extension array" "$PLIST"
+            $PLIST_BUDDY -c "Add :UTExportedTypeDeclarations:1:UTTypeTagSpecification:public.filename-extension:0 string gardenplugin" "$PLIST"
+
             # Declare that this app opens .garden files
             $PLIST_BUDDY -c "Add :CFBundleDocumentTypes array" "$PLIST"
             $PLIST_BUDDY -c "Add :CFBundleDocumentTypes:0 dict" "$PLIST"
@@ -216,6 +251,16 @@ APPLESCRIPT_EOF
             $PLIST_BUDDY -c "Add :CFBundleDocumentTypes:0:LSItemContentTypes:0 string com.garden-engine.project" "$PLIST"
             $PLIST_BUDDY -c "Add :CFBundleDocumentTypes:0:CFBundleTypeExtensions array" "$PLIST"
             $PLIST_BUDDY -c "Add :CFBundleDocumentTypes:0:CFBundleTypeExtensions:0 string garden" "$PLIST"
+
+            # And that it opens .gardenplugin files (handled by the same AppleScript)
+            $PLIST_BUDDY -c "Add :CFBundleDocumentTypes:1 dict" "$PLIST"
+            $PLIST_BUDDY -c "Add :CFBundleDocumentTypes:1:CFBundleTypeName string Garden Editor Plugin" "$PLIST"
+            $PLIST_BUDDY -c "Add :CFBundleDocumentTypes:1:CFBundleTypeRole string Editor" "$PLIST"
+            $PLIST_BUDDY -c "Add :CFBundleDocumentTypes:1:LSHandlerRank string Owner" "$PLIST"
+            $PLIST_BUDDY -c "Add :CFBundleDocumentTypes:1:LSItemContentTypes array" "$PLIST"
+            $PLIST_BUDDY -c "Add :CFBundleDocumentTypes:1:LSItemContentTypes:0 string com.garden-engine.plugin" "$PLIST"
+            $PLIST_BUDDY -c "Add :CFBundleDocumentTypes:1:CFBundleTypeExtensions array" "$PLIST"
+            $PLIST_BUDDY -c "Add :CFBundleDocumentTypes:1:CFBundleTypeExtensions:0 string gardenplugin" "$PLIST"
 
             # Ad-hoc code sign (required on macOS Sequoia 15.1+)
             codesign --force --deep --sign - "$APP_DIR" 2>/dev/null && \
@@ -252,21 +297,27 @@ sema.wait()
 exit(exitCode)
 SWIFT_EOF
             if swiftc -o /tmp/garden_setdefault "$SWIFT_HELPER" -framework AppKit 2>/dev/null; then
-                if /tmp/garden_setdefault "$APP_DIR" "garden" 2>/dev/null; then
-                    echo "  Set as default handler for .garden files."
+                ok_garden=1
+                ok_plugin=1
+                /tmp/garden_setdefault "$APP_DIR" "garden"       2>/dev/null || ok_garden=0
+                /tmp/garden_setdefault "$APP_DIR" "gardenplugin" 2>/dev/null || ok_plugin=0
+                if [ $ok_garden -eq 1 ] && [ $ok_plugin -eq 1 ]; then
+                    echo "  Set as default handler for .garden and .gardenplugin files."
                 else
                     echo "  WARNING: Could not set default handler automatically."
-                    echo "  TIP: Right-click a .garden file in Finder, choose 'Get Info',"
-                    echo "       change 'Open with' to '${APP_NAME}', then click 'Change All...'."
+                    echo "  TIP: Right-click a .garden / .gardenplugin file in Finder,"
+                    echo "       choose 'Get Info', change 'Open with' to '${APP_NAME}',"
+                    echo "       then click 'Change All...'."
                 fi
                 rm -f /tmp/garden_setdefault
             elif command -v duti &>/dev/null; then
-                duti -s "$BUNDLE_ID" .garden all 2>/dev/null
-                echo "  Set as default handler for .garden files."
+                duti -s "$BUNDLE_ID" .garden       all 2>/dev/null
+                duti -s "$BUNDLE_ID" .gardenplugin all 2>/dev/null
+                echo "  Set as default handler for .garden and .gardenplugin files."
             else
-                echo "  TIP: To set as default handler, right-click a .garden file in Finder,"
-                echo "       choose 'Get Info', change 'Open with' to '${APP_NAME}', then"
-                echo "       click 'Change All...'."
+                echo "  TIP: To set as default handler, right-click a .garden or"
+                echo "       .gardenplugin file in Finder, choose 'Get Info', change"
+                echo "       'Open with' to '${APP_NAME}', then click 'Change All...'."
             fi
             rm -f "$SWIFT_HELPER"
 

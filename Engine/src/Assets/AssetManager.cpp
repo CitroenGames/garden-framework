@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <fstream>
 #include <algorithm>
+#include <cstring>
 #include <set>
 
 namespace fs = std::filesystem;
@@ -153,10 +154,27 @@ std::vector<std::string> AssetManager::collectLevelAssets(const std::string& lev
 void AssetManager::registerLoader(std::unique_ptr<IAssetLoader> loader) {
     if (!loader) return;
 
-    LOG_ENGINE_INFO("AssetManager: Registered loader for {} assets",
-                   assetTypeToString(loader->getAssetType()));
+    LOG_ENGINE_INFO("AssetManager: Registered loader for {} assets (source: {})",
+                   assetTypeToString(loader->getAssetType()),
+                   loader->getSourceId());
 
     m_loaders.push_back(std::move(loader));
+}
+
+void AssetManager::unregisterLoadersFromSource(const char* source_id) {
+    if (!source_id) return;
+
+    size_t before = m_loaders.size();
+    m_loaders.erase(
+        std::remove_if(m_loaders.begin(), m_loaders.end(),
+            [source_id](const std::unique_ptr<IAssetLoader>& l) {
+                return l && std::strcmp(l->getSourceId(), source_id) == 0;
+            }),
+        m_loaders.end());
+
+    size_t removed = before - m_loaders.size();
+    if (removed > 0)
+        LOG_ENGINE_INFO("AssetManager: Removed {} loader(s) from source '{}'", removed, source_id);
 }
 
 IAssetLoader* AssetManager::findLoaderForPath(const std::string& path) const {

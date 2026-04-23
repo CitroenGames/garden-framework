@@ -19,6 +19,13 @@ public:
     // UI scale factor (1.0 = 100%, 1.25 = 125%, etc.)
     float ui_scale = 1.0f;
 
+    // Editor plugin settings.
+    // plugin_directories is a comma-separated list of paths (relative to exe,
+    // or absolute) where the plugin host scans for .dll/.so/.dylib files.
+    std::string plugin_directories = "plugins";
+    bool        plugins_enabled    = true;
+    bool        plugin_hot_reload  = true;
+
     // Returns the path to editorconfig.cfg next to the executable
     static std::filesystem::path getConfigPath()
     {
@@ -63,6 +70,12 @@ public:
                 render_backend = parseBackend(value);
             else if (key == "ui_scale")
                 ui_scale = std::clamp(std::stof(value), 0.5f, 3.0f);
+            else if (key == "plugin_directories")
+                plugin_directories = value;
+            else if (key == "plugins_enabled")
+                plugins_enabled = (value == "1" || value == "true" || value == "yes");
+            else if (key == "plugin_hot_reload")
+                plugin_hot_reload = (value == "1" || value == "true" || value == "yes");
         }
     }
 
@@ -78,6 +91,38 @@ public:
         file << "// Changes to render_backend take effect on next launch.\n\n";
         file << "render_backend = " << backendToString(render_backend) << "\n";
         file << "ui_scale = " << ui_scale << "\n";
+        file << "\n";
+        file << "// Editor plugin loader — comma-separated list of scan directories.\n";
+        file << "plugin_directories = " << plugin_directories << "\n";
+        file << "plugins_enabled = " << (plugins_enabled ? "true" : "false") << "\n";
+        file << "plugin_hot_reload = " << (plugin_hot_reload ? "true" : "false") << "\n";
+    }
+
+    // Helper: split plugin_directories into individual paths.
+    std::vector<std::string> getPluginDirectories() const
+    {
+        std::vector<std::string> out;
+        std::string cur;
+        for (char c : plugin_directories)
+        {
+            if (c == ',' || c == ';')
+            {
+                if (!cur.empty()) { out.push_back(cur); cur.clear(); }
+            }
+            else
+            {
+                cur.push_back(c);
+            }
+        }
+        if (!cur.empty()) out.push_back(cur);
+        // Trim whitespace around each entry.
+        for (auto& s : out)
+        {
+            size_t a = s.find_first_not_of(" \t");
+            size_t b = s.find_last_not_of(" \t");
+            s = (a == std::string::npos) ? "" : s.substr(a, b - a + 1);
+        }
+        return out;
     }
 
     // Platform-available backends (for UI display)

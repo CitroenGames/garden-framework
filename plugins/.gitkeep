@@ -1,0 +1,5 @@
+# Editor plugins go here.
+#
+# Build a plugin (EditorPlugins/QuakeImporter or Templates/EditorPlugin) and
+# the .dll/.so/.dylib lands here next to its plugin.json sidecar. The editor
+# scans this directory at startup via EditorPluginHost::discoverAll().

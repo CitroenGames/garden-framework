@@ -1,0 +1,14 @@
+{
+    "name":             "EditorPlugin",
+    "version":          "0.1.0",
+    "engine_id":        "",
+    "engine_version":   "1.0",
+    "min_editor_api":   1,
+    "author":           "",
+    "description":      "Minimal editor plugin skeleton. Replace this with your extension.",
+    "buildscript":      "EditorPlugin.buildscript",
+    "source_directory": "src/",
+    "output_dll":       "EditorPlugin",
+    "tags":             [],
+    "enabled":          true
+}

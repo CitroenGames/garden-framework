@@ -29,6 +29,10 @@
 #include <optional>
 #include "EditorConfig.hpp"
 #include "Plugin/GameModuleLoader.hpp"
+#include "Plugin/EditorPluginHost.hpp"
+#include "Plugin/EditorPanelRegistry.hpp"
+#include "Plugin/MenuRegistry.hpp"
+#include "panels/PluginManagerPanel.hpp"
 #include "Reflection/ReflectionRegistry.hpp"
 #include "PIEProcessManager.hpp"
 #include "PIEClientInstance.hpp"
@@ -79,6 +83,7 @@ private:
     bool m_show_navmesh_panel  = false;
     bool m_show_physics_debug  = false;
     bool m_show_model_preview  = true;
+    bool m_show_plugin_manager = false;
 
     // Mouse state (editor camera)
     bool  m_right_mouse = false;
@@ -126,6 +131,15 @@ private:
     LODSettingsPanel     m_lod_settings_panel;
     ModelPreviewPanel    m_model_preview;
     PrefabEditorManager  m_prefab_editor;
+
+    // --- Editor plugins ---
+    EditorPluginHost    m_plugin_host;
+    EditorPanelRegistry m_panel_registry;
+    MenuRegistry        m_menu_registry;
+    PluginManagerPanel  m_plugin_manager_panel;
+    void initializePlugins();
+    void renderPluginMenus();     // draws plugin-contributed main-menu items
+    void renderPluginPanels();    // per-frame draw loop for dynamic panels
 
     // Undo/Redo
     UndoSystem m_undo;

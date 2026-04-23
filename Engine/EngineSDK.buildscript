@@ -1,7 +1,7 @@
 [project:EngineSDK]
 type = interface
 public_includes = public, src
-include = Thirdparty
+includes = Thirdparty/glm/, Thirdparty/RmlUi-6.2/Include/
 public_libs = {
     ../bin/EngineCore.lib
     ../bin/EngineGraphics.lib

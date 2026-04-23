@@ -68,7 +68,8 @@ ComPtr<ID3D12Resource> D3D12Mesh::uploadToDefaultHeap(const void* data, size_t d
 
     // Map and copy
     void* mapped = nullptr;
-    uploadBuffer->Map(0, nullptr, &mapped);
+    hr = uploadBuffer->Map(0, nullptr, &mapped);
+    if (FAILED(hr) || mapped == nullptr) return nullptr;
     memcpy(mapped, data, dataSize);
     uploadBuffer->Unmap(0, nullptr);
 

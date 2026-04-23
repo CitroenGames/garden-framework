@@ -1,0 +1,21 @@
+[solution]
+name = EditorPlugin
+platforms = x64, Linux
+
+include = ${ENGINE_PATH}/Engine/Engine.buildscript
+
+[project:EditorPlugin]
+type = dll
+sources = src/**/*.cpp
+headers = src/**/*.hpp
+includes = src
+target_link_libraries(
+    PRIVATE EditorSDK
+)
+# Drop the DLL into the editor's plugins/ folder so the host picks it up on
+# next launch. Adjust as needed when targeting a specific editor install.
+outdir = ${ENGINE_PATH}/plugins
+multiprocessor = true
+simd = AdvancedVectorExtensions2
+std = 20
+utf8 = true

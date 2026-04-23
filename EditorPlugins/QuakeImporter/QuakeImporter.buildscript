@@ -1,0 +1,19 @@
+[solution]
+name = QuakeImporter
+platforms = x64, Linux
+
+include = ${ENGINE_PATH}/Engine/Engine.buildscript
+
+[project:QuakeImporter]
+type = dll
+sources = src/**/*.cpp
+headers = src/**/*.hpp
+includes = src
+target_link_libraries(
+    PRIVATE EditorSDK
+)
+outdir = ${ENGINE_PATH}/plugins
+multiprocessor = true
+simd = AdvancedVectorExtensions2
+std = 20
+utf8 = true

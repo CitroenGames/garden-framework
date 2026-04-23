@@ -1,0 +1,40 @@
+[project:EditorSDK]
+type = interface
+# Mirrors EngineSDK structurally — same public_libs list of pre-built .libs
+# linked by file path — but adds the third-party include paths that editor
+# plugins commonly touch (imgui, spdlog, ImGuizmo) on top of what EngineSDK
+# already exposes for game code (glm, RmlUi).
+#
+# The Plugin ABI headers (EditorPluginAPI.h, IEditorPanel.h, etc.) live
+# under src/Plugin and are reachable via the `src` entry below.
+public_includes = {
+    public
+    src
+    Thirdparty/glm
+    Thirdparty/RmlUi-6.2/Include
+    Thirdparty/imgui-docking
+    Thirdparty/imgui-docking/backends
+    Thirdparty/ImGuizmo
+    Thirdparty/spdlog-1.15.3/include
+    Thirdparty/tinygltf-2.9.6
+    Thirdparty/SDL3-3.4.4/include
+}
+public_libs = {
+    ../bin/EngineCore.lib
+    ../bin/EngineGraphics.lib
+    ../bin/freetype.lib
+    ../bin/RmlUi.lib
+    ../bin/Pakker.lib
+    ../bin/tinygltf.lib
+    ../bin/tinyobjloader.lib
+    ../bin/spdlog.lib
+    ../bin/imgui-docking.lib
+    ../bin/imguizmo.lib
+    ../bin/vk-bootstrap.lib
+    ../bin/VMA.lib
+    ../bin/JoltPhysics.lib
+    ../bin/meshoptimizer.lib
+    ../bin/RecastNavigation.lib
+    ../bin/bc7enc.lib
+    Thirdparty/SDL3-3.4.4/lib/x64/SDL3.lib
+}

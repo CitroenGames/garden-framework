@@ -1,0 +1,14 @@
+{
+    "name":             "QuakeImporter",
+    "version":          "0.1.0",
+    "engine_id":        "",
+    "engine_version":   "1.0",
+    "min_editor_api":   1,
+    "author":           "Garden Framework",
+    "description":      "Imports assets from Quake 1 PAK archives. Adds an import panel under File -> Import -> Quake PAK... and an IAssetLoader stub for .mdl files under the 'QuakeImporter' source id.",
+    "buildscript":      "QuakeImporter.buildscript",
+    "source_directory": "src/",
+    "output_dll":       "QuakeImporter",
+    "tags":             ["importer", "asset"],
+    "enabled":          true
+}

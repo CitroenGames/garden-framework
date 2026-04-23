@@ -49,6 +49,31 @@ bool ServerNetworkManager::startServer(uint16_t port, uint32_t max_clients)
     address.host = ENET_HOST_ANY;
     address.port = port;
 
+#ifdef _WIN32
+    // Pre-flight UDP bind probe: captures the real OS error before ENet's
+    // internal cleanup can clobber WSAGetLastError.
+    {
+        SOCKET probe = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if (probe == INVALID_SOCKET) {
+            LOG_ENGINE_ERROR("UDP probe socket() failed: WSA {}", WSAGetLastError());
+        } else {
+            BOOL reuse = TRUE;
+            ::setsockopt(probe, SOL_SOCKET, SO_REUSEADDR, (const char*)&reuse, sizeof(reuse));
+            sockaddr_in sa{};
+            sa.sin_family = AF_INET;
+            sa.sin_port = htons(port);
+            sa.sin_addr.s_addr = INADDR_ANY;
+            if (::bind(probe, (sockaddr*)&sa, sizeof(sa)) == SOCKET_ERROR) {
+                int perr = WSAGetLastError();
+                LOG_ENGINE_ERROR("UDP probe bind to port {} failed: WSA {}", port, perr);
+            } else {
+                LOG_ENGINE_INFO("UDP probe bind to port {} succeeded (OS-level port is free)", port);
+            }
+            ::closesocket(probe);
+        }
+    }
+#endif
+
     // Create server with 2 channels: reliable and unreliable
     server_host = enet_host_create(&address, max_clients, 2, 0, 0);
 
@@ -242,7 +267,8 @@ void ServerNetworkManager::handleConnectRequest(ENetPeer* peer, BitReader& reade
 
         BitWriter writer;
         ConnectRejectMessage reject;
-        std::strncpy(reject.reason, "Protocol version mismatch", 64);
+        std::strncpy(reject.reason, "Protocol version mismatch", 63);
+        reject.reason[63] = '\0';
         NetworkSerializer::serialize(writer, reject);
         sendReliableMessage(peer, writer);
 
@@ -711,7 +737,9 @@ void ServerNetworkManager::broadcastCVar(const std::string& name, const std::str
 
     CVarSyncMessage msg;
     std::strncpy(msg.cvar_name, name.c_str(), 63);
+    msg.cvar_name[63] = '\0';
     std::strncpy(msg.cvar_value, value.c_str(), 127);
+    msg.cvar_value[127] = '\0';
 
     BitWriter writer;
     NetworkSerializer::serialize(writer, msg);

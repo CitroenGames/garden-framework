@@ -74,6 +74,12 @@ public:
 
     void registerLoader(std::unique_ptr<IAssetLoader> loader);
 
+    // Remove every loader whose getSourceId() matches `source_id`. Used by
+    // the editor's plugin host on DLL unload so loaders living in the
+    // unloaded DLL's code don't become dangling vtable pointers. Safe to
+    // call from the main thread only.
+    void unregisterLoadersFromSource(const char* source_id);
+
     AssetHandle loadAsync(const std::string& path,
                          LoadPriority priority = LoadPriority::Normal,
                          LoadCallback on_complete = nullptr,
