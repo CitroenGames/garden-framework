@@ -14,6 +14,7 @@
 
 #ifdef _WIN32
   #include <winsock2.h>
+  #include <ws2tcpip.h>
 #endif
 
 namespace Game {
@@ -45,31 +46,51 @@ bool ServerNetworkManager::startServer(uint16_t port, uint32_t max_clients)
         return false;
     }
 
-    ENetAddress address;
+    ENetAddress address = {};
     address.host = ENET_HOST_ANY;
     address.port = port;
+    address.sin6_scope_id = 0;
 
 #ifdef _WIN32
-    // Pre-flight UDP bind probe: captures the real OS error before ENet's
-    // internal cleanup can clobber WSAGetLastError.
+    // Pre-flight UDP bind probes. ENet6 creates an AF_INET6 dual-stack socket,
+    // so we test both families to locate the failure.
     {
-        SOCKET probe = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-        if (probe == INVALID_SOCKET) {
-            LOG_ENGINE_ERROR("UDP probe socket() failed: WSA {}", WSAGetLastError());
+        // IPv4 probe
+        SOCKET probe4 = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if (probe4 == INVALID_SOCKET) {
+            LOG_ENGINE_ERROR("IPv4 probe socket() failed: WSA {}", WSAGetLastError());
         } else {
-            BOOL reuse = TRUE;
-            ::setsockopt(probe, SOL_SOCKET, SO_REUSEADDR, (const char*)&reuse, sizeof(reuse));
             sockaddr_in sa{};
             sa.sin_family = AF_INET;
             sa.sin_port = htons(port);
             sa.sin_addr.s_addr = INADDR_ANY;
-            if (::bind(probe, (sockaddr*)&sa, sizeof(sa)) == SOCKET_ERROR) {
-                int perr = WSAGetLastError();
-                LOG_ENGINE_ERROR("UDP probe bind to port {} failed: WSA {}", port, perr);
+            if (::bind(probe4, (sockaddr*)&sa, sizeof(sa)) == SOCKET_ERROR) {
+                LOG_ENGINE_ERROR("IPv4 probe bind port {} failed: WSA {}", port, WSAGetLastError());
             } else {
-                LOG_ENGINE_INFO("UDP probe bind to port {} succeeded (OS-level port is free)", port);
+                LOG_ENGINE_INFO("IPv4 probe bind port {} OK", port);
             }
-            ::closesocket(probe);
+            ::closesocket(probe4);
+        }
+
+        // IPv6 probe (what ENet actually does)
+        SOCKET probe6 = ::socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
+        if (probe6 == INVALID_SOCKET) {
+            LOG_ENGINE_ERROR("IPv6 probe socket() failed: WSA {} (IPv6 stack disabled?)", WSAGetLastError());
+        } else {
+            DWORD v6only = 0;
+            if (::setsockopt(probe6, IPPROTO_IPV6, IPV6_V6ONLY, (const char*)&v6only, sizeof(v6only)) == SOCKET_ERROR) {
+                LOG_ENGINE_ERROR("IPv6 probe IPV6_V6ONLY=0 failed: WSA {}", WSAGetLastError());
+            }
+            sockaddr_in6 sa6{};
+            sa6.sin6_family = AF_INET6;
+            sa6.sin6_port = htons(port);
+            sa6.sin6_addr = in6addr_any;
+            if (::bind(probe6, (sockaddr*)&sa6, sizeof(sa6)) == SOCKET_ERROR) {
+                LOG_ENGINE_ERROR("IPv6 probe bind port {} failed: WSA {}", port, WSAGetLastError());
+            } else {
+                LOG_ENGINE_INFO("IPv6 probe bind port {} OK", port);
+            }
+            ::closesocket(probe6);
         }
     }
 #endif

@@ -1,7 +1,23 @@
 [project:EngineSDK]
 type = interface
-public_includes = public, src
-includes = Thirdparty/glm/, Thirdparty/RmlUi-6.2/Include/
+# Exposes engine public headers plus the third-party include paths game
+# code commonly touches (glm, RmlUi, enet, entt, SDL3). All entries are
+# `public_includes` so they propagate to consumers like FPSShooter.
+public_includes = {
+    public
+    src
+    Thirdparty/glm
+    Thirdparty/RmlUi-6.2/Include
+    Thirdparty/enet/src
+    Thirdparty/entt/src
+    Thirdparty/SDL3-3.4.4/include
+    Thirdparty/spdlog-1.15.3/include
+    Thirdparty/JoltPhysics-5.5.0
+    Thirdparty/imgui-docking
+    Thirdparty/imgui-docking/backends
+    Thirdparty/ImGuizmo
+    Thirdparty/tinygltf-2.9.6
+}
 public_libs = {
     ../bin/EngineCore.lib
     ../bin/EngineGraphics.lib
