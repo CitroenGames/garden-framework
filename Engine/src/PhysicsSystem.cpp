@@ -546,9 +546,6 @@ void PhysicsSystem::syncTransformsFromJolt(entt::registry& registry)
             rb.velocity = toGlm(vel);
         }
 
-        LOG_ENGINE_TRACE("[FromJolt] pos=({},{},{}) vel=({},{},{})",
-            transform.position.x, transform.position.y, transform.position.z,
-            rb.velocity.x, rb.velocity.y, rb.velocity.z);
     }
 }
 
@@ -574,9 +571,6 @@ void PhysicsSystem::syncTransformsToJolt(entt::registry& registry)
         if (motion_type != JPH::EMotionType::Dynamic) continue;
 
         auto& rb = registry.get<RigidBodyComponent>(entity);
-
-        LOG_ENGINE_TRACE("[ToJolt] pushing vel=({},{},{})",
-            rb.velocity.x, rb.velocity.y, rb.velocity.z);
 
         // Validate and clamp velocity before pushing to Jolt
         if (!isValidVec3(rb.velocity))
