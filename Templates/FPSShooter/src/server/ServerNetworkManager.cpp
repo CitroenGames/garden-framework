@@ -10,7 +10,13 @@
 #include <cstring>
 #include <cerrno>
 #include <cmath>
+#include <chrono>
 #include <glm/glm.hpp>
+
+namespace {
+    constexpr int kMaxEventsPerTick = 2048;
+    constexpr int kShutdownDrainBudgetMs = 3000;
+}
 
 #ifdef _WIN32
   #include <winsock2.h>
@@ -128,11 +134,23 @@ void ServerNetworkManager::shutdown()
             }
         }
 
-        // Give time for disconnect messages to send
+        // Give time for disconnect messages to send (bounded drain)
         ENetEvent event;
+        const auto drain_start = std::chrono::steady_clock::now();
+        int drained = 0;
         while (enet_host_service(server_host, &event, 100) > 0) {
             if (event.type == ENET_EVENT_TYPE_RECEIVE) {
                 enet_packet_destroy(event.packet);
+            }
+            if (++drained >= kMaxEventsPerTick) {
+                LOG_ENGINE_WARN("Server shutdown drain hit event cap ({0}); breaking", kMaxEventsPerTick);
+                break;
+            }
+            auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - drain_start).count();
+            if (elapsed_ms >= kShutdownDrainBudgetMs) {
+                LOG_ENGINE_WARN("Server shutdown drain hit time budget ({0}ms); breaking", kShutdownDrainBudgetMs);
+                break;
             }
         }
 
@@ -162,9 +180,17 @@ void ServerNetworkManager::update(float delta_time)
         tick_accumulator -= game_world->fixed_delta;
     }
 
-    // Process network events
+    // Process network events (bounded to prevent flood-induced stalls)
     ENetEvent event;
+    int events_this_tick = 0;
     while (enet_host_service(server_host, &event, 0) > 0) {
+        if (++events_this_tick > kMaxEventsPerTick) {
+            LOG_ENGINE_WARN("Server event loop hit cap ({0}) - possible flood", kMaxEventsPerTick);
+            if (event.type == ENET_EVENT_TYPE_RECEIVE) {
+                enet_packet_destroy(event.packet);
+            }
+            break;
+        }
         switch (event.type) {
             case ENET_EVENT_TYPE_CONNECT:
                 handleClientConnect(event);
@@ -297,8 +323,28 @@ void ServerNetworkManager::handleConnectRequest(ENetPeer* peer, BitReader& reade
         return;
     }
 
-    // Assign client ID
-    uint16_t client_id = next_client_id++;
+    // Assign client ID (skip any that collide after uint16_t wrap)
+    uint16_t client_id = 0;
+    bool id_assigned = false;
+    for (size_t attempts = 0; attempts < 65536; ++attempts) {
+        client_id = next_client_id++;
+        if (clients.find(client_id) == clients.end()) {
+            id_assigned = true;
+            break;
+        }
+    }
+    if (!id_assigned) {
+        LOG_ENGINE_ERROR("Server full: no free client_id slots; rejecting connection");
+        ConnectRejectMessage reject;
+        reject.type = MessageType::CONNECT_REJECT;
+        std::strncpy(reject.reason, "Server full", 63);
+        reject.reason[63] = '\0';
+        BitWriter writer;
+        NetworkSerializer::serialize(writer, reject);
+        sendReliableMessage(peer, writer);
+        enet_peer_disconnect_later(peer, 0);
+        return;
+    }
     peer_to_client_id[peer] = client_id;
 
     // Create client info
@@ -633,7 +679,22 @@ void ServerNetworkManager::sendWorldStateToClient(uint16_t client_id, const Worl
 
 uint32_t ServerNetworkManager::registerEntity(entt::entity entity)
 {
-    uint32_t net_id = next_network_id++;
+    // Skip 0 (the protocol's null/unset sentinel) and skip live IDs after uint32_t wrap.
+    uint32_t net_id = 0;
+    bool id_assigned = false;
+    for (uint64_t attempts = 0; attempts < (1ULL << 32); ++attempts) {
+        uint32_t candidate = next_network_id++;
+        if (candidate == 0) continue;  // reserved sentinel
+        if (net_id_to_entity.find(candidate) == net_id_to_entity.end()) {
+            net_id = candidate;
+            id_assigned = true;
+            break;
+        }
+    }
+    if (!id_assigned) {
+        LOG_ENGINE_ERROR("registerEntity: no free network IDs available (every uint32_t is in use)");
+        return 0;
+    }
     entity_to_net_id[entity] = net_id;
     net_id_to_entity[net_id] = entity;
     return net_id;
@@ -683,7 +744,10 @@ void ServerNetworkManager::sendReliableMessage(ENetPeer* peer, const BitWriter& 
         writer.getByteSize(),
         ENET_PACKET_FLAG_RELIABLE
     );
-    enet_peer_send(peer, static_cast<uint8_t>(NetworkChannel::RELIABLE_ORDERED), packet);
+    if (enet_peer_send(peer, static_cast<uint8_t>(NetworkChannel::RELIABLE_ORDERED), packet) < 0) {
+        LOG_ENGINE_WARN("enet_peer_send failed for reliable message; destroying unqueued packet");
+        enet_packet_destroy(packet);
+    }
 }
 
 void ServerNetworkManager::sendUnreliableMessage(ENetPeer* peer, const BitWriter& writer)
@@ -693,7 +757,10 @@ void ServerNetworkManager::sendUnreliableMessage(ENetPeer* peer, const BitWriter
         writer.getByteSize(),
         ENET_PACKET_FLAG_UNSEQUENCED
     );
-    enet_peer_send(peer, static_cast<uint8_t>(NetworkChannel::UNRELIABLE_UNORDERED), packet);
+    if (enet_peer_send(peer, static_cast<uint8_t>(NetworkChannel::UNRELIABLE_UNORDERED), packet) < 0) {
+        LOG_ENGINE_WARN("enet_peer_send failed for unreliable message; destroying unqueued packet");
+        enet_packet_destroy(packet);
+    }
 }
 
 void ServerNetworkManager::disconnectClient(uint16_t client_id, const char* reason)

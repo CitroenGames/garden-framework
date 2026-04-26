@@ -187,9 +187,20 @@ namespace NetworkSerializer
     }
 
     inline bool deserialize(BitReader& reader, EntityUpdateData& entity) {
+        // Zero-init so a partial read isn't observable as garbage if caller forgets to check.
+        entity = EntityUpdateData{};
+
         if (!reader.canRead(40)) return false;  // entity_id(32) + flags(8)
         entity.entity_id = reader.readUInt32();
         entity.flags = reader.readByte();
+
+        // Pre-validate the conditional body fits in the remaining buffer.
+        size_t body_bits = 0;
+        if (entity.flags & ComponentFlags::TRANSFORM) body_bits += 96;            // 3 x float
+        if (entity.flags & ComponentFlags::VELOCITY)  body_bits += 96;            // 3 x float
+        if (entity.flags & ComponentFlags::GROUNDED)  body_bits += 8 + 96;        // byte + 3 x float
+        if (entity.flags & ComponentFlags::ROTATION)  body_bits += 32;            // 1 x float
+        if (body_bits > 0 && !reader.canRead(body_bits)) return false;
 
         // Read conditional data based on flags
         if (entity.flags & ComponentFlags::TRANSFORM) {
@@ -454,6 +465,11 @@ namespace NetworkSerializer
             char value[128] = {0};
             reader.readString(name, 64);
             reader.readString(value, 128);
+            // Bail before pushing partial/garbage data on truncated wire input.
+            if (reader.hasError()) {
+                cvars.clear();
+                return false;
+            }
             cvars.emplace_back(name, value);
         }
         return !reader.hasError();

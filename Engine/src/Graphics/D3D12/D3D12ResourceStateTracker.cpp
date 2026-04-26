@@ -79,7 +79,10 @@ void D3D12ResourceStateTracker::endSplit(ID3D12Resource* resource, ID3D12Graphic
 
 void D3D12ResourceStateTracker::flush(ID3D12GraphicsCommandList* cmdList)
 {
-    // No lock needed: flush only touches m_batch which is main-thread-only
+    // transition() pushes into m_batch under the exclusive lock, so flush must
+    // take the same lock to avoid a data race if any worker thread is still
+    // recording transitions when the main thread flushes.
+    std::unique_lock lock(m_mutex);
     m_batch.flush(cmdList);
 }
 

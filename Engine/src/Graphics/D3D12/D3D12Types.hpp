@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstring>
 #include <atomic>
+#include <mutex>
 
 using Microsoft::WRL::ComPtr;
 
@@ -42,6 +43,9 @@ struct DescriptorHeapAllocator
     D3D12_CPU_DESCRIPTOR_HANDLE cpuStart = {};
     D3D12_GPU_DESCRIPTOR_HANDLE gpuStart = {};
     std::vector<UINT> freeList;
+    // Guards nextFreeIndex and freeList. allocate()/free() are called from
+    // both the main thread and async texture upload paths.
+    std::mutex mutex;
 
     void init(ID3D12Device* device, ID3D12DescriptorHeap* heap, UINT capacity);
     UINT allocate();

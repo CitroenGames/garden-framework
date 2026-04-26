@@ -3,6 +3,7 @@
 #endif
 
 #include "D3D12PostProcessPass.hpp"
+#include "D3D12RenderAPI.hpp"
 #include "Utils/Log.hpp"
 #include <algorithm>
 #include <cstring>
@@ -27,6 +28,7 @@ D3D12PostProcessPass& D3D12PostProcessPass::operator=(D3D12PostProcessPass&& o) 
     cleanup();
 
     device_       = o.device_;
+    api_          = o.api_;
     rtvAllocator_ = o.rtvAllocator_;
     srvAllocator_ = o.srvAllocator_;
     stateTracker_ = o.stateTracker_;
@@ -45,6 +47,7 @@ D3D12PostProcessPass& D3D12PostProcessPass::operator=(D3D12PostProcessPass&& o) 
 
     // Null out moved-from object
     o.device_       = nullptr;
+    o.api_          = nullptr;
     o.rtvAllocator_ = nullptr;
     o.srvAllocator_ = nullptr;
     o.stateTracker_ = nullptr;
@@ -63,6 +66,7 @@ D3D12PostProcessPass& D3D12PostProcessPass::operator=(D3D12PostProcessPass&& o) 
 
 bool D3D12PostProcessPass::init(
     ID3D12Device* device,
+    D3D12RenderAPI* api,
     DescriptorHeapAllocator& rtvAllocator,
     DescriptorHeapAllocator& srvAllocator,
     D3D12ResourceStateTracker& stateTracker,
@@ -73,6 +77,7 @@ bool D3D12PostProcessPass::init(
     const std::vector<char>& ps)
 {
     device_       = device;
+    api_          = api;
     rtvAllocator_ = &rtvAllocator;
     srvAllocator_ = &srvAllocator;
     stateTracker_ = &stateTracker;
@@ -363,16 +368,40 @@ bool D3D12PostProcessPass::createOutputTexture()
 
 void D3D12PostProcessPass::destroyOutputTexture()
 {
+    // Keep the texture alive until the GPU is past any frame that could still
+    // reference it. Without this, resize() mid-play drops a live resource and
+    // hands its RTV/SRV slot to the next allocation, causing TDR / descriptor
+    // aliasing. Indices are parked in a parallel ring and freed after the
+    // same fence boundary.
     if (outputTexture_) {
         stateTracker_->untrack(outputTexture_.Get());
-        outputTexture_.Reset();
+        if (api_) {
+            ComPtr<IUnknown> u;
+            outputTexture_.As(&u);
+            api_->enqueueDeferredRelease(std::move(u));
+            outputTexture_.Reset();
+        } else {
+            outputTexture_.Reset();
+        }
     }
     if (outputRTVIndex_ != UINT(-1) && rtvAllocator_) {
-        rtvAllocator_->free(outputRTVIndex_);
+        if (api_) {
+            DescriptorHeapAllocator* alloc = rtvAllocator_;
+            UINT idx = outputRTVIndex_;
+            api_->enqueueDeferredFree([alloc, idx]() { alloc->free(idx); });
+        } else {
+            rtvAllocator_->free(outputRTVIndex_);
+        }
         outputRTVIndex_ = UINT(-1);
     }
     if (outputSRVIndex_ != UINT(-1) && srvAllocator_) {
-        srvAllocator_->free(outputSRVIndex_);
+        if (api_) {
+            DescriptorHeapAllocator* alloc = srvAllocator_;
+            UINT idx = outputSRVIndex_;
+            api_->enqueueDeferredFree([alloc, idx]() { alloc->free(idx); });
+        } else {
+            srvAllocator_->free(outputSRVIndex_);
+        }
         outputSRVIndex_ = UINT(-1);
     }
 }

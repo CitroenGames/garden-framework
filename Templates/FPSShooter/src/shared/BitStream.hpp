@@ -79,10 +79,14 @@ public:
 
     // Write a compressed glm::vec3 (quantized to range with specified precision)
     void writeVector3f_compressed(const glm::vec3& v, float min_val, float max_val, size_t bits_per_component) {
+        // bits in [1, 32]: shift width matches uint32_t and avoids div-by-zero on the read side.
+        if (bits_per_component < 1 || bits_per_component > 32) {
+            return;
+        }
         auto quantize = [](float value, float min_v, float max_v, size_t bits) -> uint32_t {
             float normalized = (value - min_v) / (max_v - min_v);
             normalized = (std::max)(0.0f, (std::min)(1.0f, normalized));
-            uint32_t max_value = (1u << bits) - 1;
+            uint32_t max_value = static_cast<uint32_t>((static_cast<uint64_t>(1) << bits) - 1);
             return static_cast<uint32_t>(normalized * max_value);
         };
 
@@ -98,12 +102,16 @@ public:
 
     // Write a null-terminated string
     void writeString(const char* str, size_t max_length) {
+        if (str == nullptr) {
+            writeByte(0);  // empty string
+            return;
+        }
         size_t length = 0;
-        while (str[length] != '\0' && length < max_length) {
+        while (length < max_length && str[length] != '\0') {
             writeByte(str[length]);
             length++;
         }
-        writeByte(0);  // Null terminator
+        writeByte(0);  // Null terminator (always written, even on truncation)
     }
 
     // Get the data buffer
@@ -214,8 +222,12 @@ public:
 
     // Read a compressed glm::vec3
     glm::vec3 readVector3f_compressed(float min_val, float max_val, size_t bits_per_component) {
+        if (bits_per_component < 1 || bits_per_component > 32) {
+            error_state = true;
+            return glm::vec3(0.0f);
+        }
         auto dequantize = [](uint32_t value, float min_v, float max_v, size_t bits) -> float {
-            uint32_t max_value = (1u << bits) - 1;
+            uint32_t max_value = static_cast<uint32_t>((static_cast<uint64_t>(1) << bits) - 1);
             float normalized = static_cast<float>(value) / static_cast<float>(max_value);
             return min_v + normalized * (max_v - min_v);
         };
@@ -236,12 +248,17 @@ public:
     void readString(char* output, size_t max_length) {
         if (max_length == 0) return;
         size_t i = 0;
+        bool found_terminator = false;
         while (i < max_length - 1 && !hasError()) {
             uint8_t ch = readByte();
-            if (ch == 0) break;
+            if (ch == 0) { found_terminator = true; break; }
             output[i++] = ch;
         }
         output[i] = '\0';
+        // If we filled the buffer without seeing the wire null terminator, the input is malformed.
+        if (!found_terminator && !hasError()) {
+            error_state = true;
+        }
     }
 
     // Get current bit position
@@ -256,6 +273,12 @@ public:
 
     // Skip bits
     void skipBits(size_t num_bits) {
+        const size_t total_bits = buffer_size * 8;
+        if (num_bits > total_bits || bit_position > total_bits - num_bits) {
+            error_state = true;
+            bit_position = total_bits;
+            return;
+        }
         bit_position += num_bits;
     }
 

@@ -86,7 +86,7 @@ bool D3D12RenderAPI::createSSAOResources(int width, int height)
 
         // SSAO computation pass
         cfg.debugName = L"SSAO";
-        if (!m_ssaoPass.init(device.Get(), m_rtvAllocator, m_srvAllocator,
+        if (!m_ssaoPass.init(device.Get(), this, m_rtvAllocator, m_srvAllocator,
                              m_stateTracker, m_psoCache, cfg,
                              width, height, ssaoVS, ssaoPS))
         {
@@ -96,7 +96,7 @@ bool D3D12RenderAPI::createSSAOResources(int width, int height)
 
         // Horizontal blur pass
         cfg.debugName = L"SSAO Blur H";
-        if (!m_ssaoBlurHPass.init(device.Get(), m_rtvAllocator, m_srvAllocator,
+        if (!m_ssaoBlurHPass.init(device.Get(), this, m_rtvAllocator, m_srvAllocator,
                                   m_stateTracker, m_psoCache, cfg,
                                   width, height, ssaoBlurVS, ssaoBlurPS))
         {
@@ -106,7 +106,7 @@ bool D3D12RenderAPI::createSSAOResources(int width, int height)
 
         // Vertical blur pass
         cfg.debugName = L"SSAO Blur V";
-        if (!m_ssaoBlurVPass.init(device.Get(), m_rtvAllocator, m_srvAllocator,
+        if (!m_ssaoBlurVPass.init(device.Get(), this, m_rtvAllocator, m_srvAllocator,
                                   m_stateTracker, m_psoCache, cfg,
                                   width, height, ssaoBlurVS, ssaoBlurPS))
         {

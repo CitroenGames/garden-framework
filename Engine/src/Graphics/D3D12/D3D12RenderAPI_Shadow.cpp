@@ -465,7 +465,7 @@ bool D3D12RenderAPI::createShadowMaskResources(int width, int height)
             cfg.staticSamplers.push_back(samp);
         }
 
-        if (!m_shadowMaskPass.init(device.Get(), m_rtvAllocator, m_srvAllocator,
+        if (!m_shadowMaskPass.init(device.Get(), this, m_rtvAllocator, m_srvAllocator,
                                    m_stateTracker, m_psoCache, cfg,
                                    width, height, shadowMaskVS, shadowMaskPS))
         {

@@ -99,10 +99,10 @@ struct ClientInfo
 // Network statistics
 struct NetworkStats
 {
-    uint32_t packets_sent = 0;
-    uint32_t packets_received = 0;
-    uint32_t bytes_sent = 0;
-    uint32_t bytes_received = 0;
+    uint64_t packets_sent = 0;
+    uint64_t packets_received = 0;
+    uint64_t bytes_sent = 0;
+    uint64_t bytes_received = 0;
     float ping_ms = 0.0f;
     float packet_loss_percent = 0.0f;
     uint32_t messages_sent_per_second = 0;

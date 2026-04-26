@@ -11,6 +11,8 @@
 
 using Microsoft::WRL::ComPtr;
 
+class D3D12RenderAPI;
+
 // Describes one root parameter binding in a D3D12 post-process pass.
 struct D3D12PPBinding {
     enum Type { CBV, SRV_TABLE };
@@ -56,7 +58,12 @@ public:
     D3D12PostProcessPass& operator=(D3D12PostProcessPass&& o) noexcept;
 
     // --- Initialization ---
+    // 'api' is used to route output-texture / descriptor frees through the
+    // render API's deferred-release ring so resize() is safe while the GPU
+    // still references the prior output. May be nullptr for test harnesses;
+    // in that case destroyOutputTexture() falls back to immediate release.
     bool init(ID3D12Device* device,
+              D3D12RenderAPI* api,
               DescriptorHeapAllocator& rtvAllocator,
               DescriptorHeapAllocator& srvAllocator,
               D3D12ResourceStateTracker& stateTracker,
@@ -100,6 +107,7 @@ public:
 
 private:
     ID3D12Device*             device_       = nullptr;
+    D3D12RenderAPI*           api_          = nullptr;
     DescriptorHeapAllocator*  rtvAllocator_ = nullptr;
     DescriptorHeapAllocator*  srvAllocator_ = nullptr;
     D3D12ResourceStateTracker* stateTracker_ = nullptr;

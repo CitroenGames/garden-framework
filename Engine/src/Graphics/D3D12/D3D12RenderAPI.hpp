@@ -8,6 +8,7 @@
 #include "D3D12CopyQueue.hpp"
 #include "D3D12PSOCache.hpp"
 #include "D3D12PostProcessPass.hpp"
+#include <functional>
 #include "D3D12GBufferPass.hpp"
 #include "D3D12ResourceStateTracker.hpp"
 #include "D3D12RGBackend.hpp"
@@ -49,6 +50,7 @@ private:
     friend class D3D12PostProcessGraphBuilder;
     friend class D3D12DeferredSceneGraphBuilder;
     friend class D3D12SceneViewport;
+    friend class D3D12PostProcessPass;
 
     WindowHandle window_handle = nullptr;
     HWND hwnd = nullptr;
@@ -265,9 +267,13 @@ private:
     // meshes can be destroyed from worker threads (asset streaming).
     static constexpr int kDeferredReleaseSlots = NUM_FRAMES_IN_FLIGHT + 1;
     std::vector<ComPtr<IUnknown>> m_deferredRelease[kDeferredReleaseSlots];
+    // Parallel ring for non-IUnknown cleanups (e.g. descriptor-heap slot frees).
+    // Runs after kDeferredReleaseSlots frames so the GPU is past any reference.
+    std::vector<std::function<void()>> m_deferredDescriptorFrees[kDeferredReleaseSlots];
     int m_deferredReleaseSlot = 0;
     std::mutex m_deferredReleaseMutex;
     void enqueueDeferredRelease(ComPtr<IUnknown> resource);
+    void enqueueDeferredFree(std::function<void()> cleanup);
     void flushDeferredReleases();   // advance the ring; called in ensureCommandListOpen after the fence-wait
 
     // Device lost flag

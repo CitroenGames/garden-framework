@@ -46,6 +46,7 @@ void DescriptorHeapAllocator::init(ID3D12Device* device, ID3D12DescriptorHeap* h
 
 UINT DescriptorHeapAllocator::allocate()
 {
+    std::lock_guard<std::mutex> lock(mutex);
     if (!freeList.empty())
     {
         UINT index = freeList.back();
@@ -62,6 +63,7 @@ UINT DescriptorHeapAllocator::allocate()
 
 void DescriptorHeapAllocator::free(UINT index)
 {
+    std::lock_guard<std::mutex> lock(mutex);
     if (index < capacity)
         freeList.push_back(index);
 }
@@ -302,7 +304,7 @@ bool D3D12RenderAPI::initialize(WindowHandle window, int width, int height, floa
             fxaaCfg.staticSamplers.push_back(samp);
         }
 
-        if (!m_fxaaPass.init(device.Get(), m_rtvAllocator, m_srvAllocator,
+        if (!m_fxaaPass.init(device.Get(), this, m_rtvAllocator, m_srvAllocator,
                              m_stateTracker, m_psoCache, fxaaCfg,
                              width, height, m_fxaaVS, m_fxaaPS)) {
             LOG_ENGINE_ERROR("Failed to create FXAA post-process pass");
@@ -361,7 +363,7 @@ bool D3D12RenderAPI::initialize(WindowHandle window, int width, int height, floa
         shadowSamp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
         cfg.staticSamplers.push_back(shadowSamp);
 
-        if (!m_deferredLightingPass.init(device.Get(), m_rtvAllocator, m_srvAllocator,
+        if (!m_deferredLightingPass.init(device.Get(), this, m_rtvAllocator, m_srvAllocator,
                                          m_stateTracker, m_psoCache, cfg,
                                          width, height, m_deferredLightingVS, m_deferredLightingPS)) {
             LOG_ENGINE_WARN("[D3D12] Failed to create Deferred Lighting pass -- deferred path disabled");
@@ -474,6 +476,12 @@ void D3D12RenderAPI::shutdown()
     // guaranteed the GPU is idle, so everything here is safe to Release now.
     {
         std::lock_guard<std::mutex> lock(m_deferredReleaseMutex);
+        for (auto& slot : m_deferredDescriptorFrees)
+        {
+            for (auto& cleanup : slot)
+                if (cleanup) cleanup();
+            slot.clear();
+        }
         for (auto& slot : m_deferredRelease)
             slot.clear();
     }
@@ -542,10 +550,22 @@ void D3D12RenderAPI::enqueueDeferredRelease(ComPtr<IUnknown> resource)
     m_deferredRelease[m_deferredReleaseSlot].push_back(std::move(resource));
 }
 
+void D3D12RenderAPI::enqueueDeferredFree(std::function<void()> cleanup)
+{
+    if (!cleanup) return;
+    std::lock_guard<std::mutex> lock(m_deferredReleaseMutex);
+    m_deferredDescriptorFrees[m_deferredReleaseSlot].push_back(std::move(cleanup));
+}
+
 void D3D12RenderAPI::flushDeferredReleases()
 {
     std::lock_guard<std::mutex> lock(m_deferredReleaseMutex);
     m_deferredReleaseSlot = (m_deferredReleaseSlot + 1) % kDeferredReleaseSlots;
+    // Run any cleanups (e.g. descriptor-heap slot frees) parked kDeferredReleaseSlots
+    // frames ago, then clear both rings for the new slot.
+    for (auto& cleanup : m_deferredDescriptorFrees[m_deferredReleaseSlot])
+        if (cleanup) cleanup();
+    m_deferredDescriptorFrees[m_deferredReleaseSlot].clear();
     m_deferredRelease[m_deferredReleaseSlot].clear();
 }
 
@@ -688,12 +708,28 @@ void D3D12RenderAPI::transitionResource(ID3D12Resource* resource,
                                          D3D12_RESOURCE_STATES before,
                                          D3D12_RESOURCE_STATES after)
 {
+    if (!resource) return;
+
     // If the resource is tracked, use the tracker (ignores 'before' — it knows the current state).
-    // Otherwise fall back to the raw barrier batch for untracked resources.
     if (m_stateTracker.isTracked(resource))
+    {
         m_stateTracker.transition(resource, after);
-    else
-        m_barrierBatch.add(resource, before, after);
+        return;
+    }
+
+    // Fallback for untracked resources: emit a raw barrier using the caller's
+    // explicit 'before' state. Callers pass {} (=COMMON) everywhere they expect
+    // the tracker to resolve the real state, so a COMMON->X fallback here is
+    // almost always a bug: either the resource was never track()'d or it was
+    // untrack()'d prematurely. Fail loudly instead of emitting a wrong barrier.
+    if (before == D3D12_RESOURCE_STATE_COMMON)
+    {
+        LOG_ENGINE_ERROR("[D3D12] transitionResource: resource {} not tracked and before=COMMON. "
+                         "Barrier skipped to avoid a wrong transition — call m_stateTracker.track() first.",
+                         static_cast<const void*>(resource));
+        return;
+    }
+    m_barrierBatch.add(resource, before, after);
 }
 
 void D3D12RenderAPI::flushBarriers()

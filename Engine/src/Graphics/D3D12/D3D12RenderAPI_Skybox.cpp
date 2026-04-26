@@ -29,7 +29,7 @@ bool D3D12RenderAPI::createSkyboxPass(int width, int height)
     depthSamp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     skyCfg.staticSamplers.push_back(depthSamp);
 
-    if (!m_skyPass.init(device.Get(), m_rtvAllocator, m_srvAllocator,
+    if (!m_skyPass.init(device.Get(), this, m_rtvAllocator, m_srvAllocator,
                         m_stateTracker, m_psoCache, skyCfg,
                         width, height, m_skyVS, m_skyPS)) {
         LOG_ENGINE_ERROR("Failed to create Sky post-process pass");
