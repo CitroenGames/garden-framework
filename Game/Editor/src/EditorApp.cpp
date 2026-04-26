@@ -38,7 +38,9 @@ static constexpr const char* PIE_SERVER_EXE_NAME  = "Server";
 bool EditorApp::initialize(RenderAPIType api_type)
 {
     std::strncpy(m_open_path_buf, "assets/levels/", sizeof(m_open_path_buf) - 1);
+    m_open_path_buf[sizeof(m_open_path_buf) - 1] = '\0';
     std::strncpy(m_save_path_buf, "assets/levels/", sizeof(m_save_path_buf) - 1);
+    m_save_path_buf[sizeof(m_save_path_buf) - 1] = '\0';
 
     EE::CLog::Init();
     Console::get().initialize();
@@ -1916,7 +1918,10 @@ void EditorApp::renderMenuBar()
                 {
                     std::string last_dir = CVAR_STRING(editor_package_output_dir);
                     if (!last_dir.empty())
+                    {
                         std::strncpy(m_package_output_dir, last_dir.c_str(), sizeof(m_package_output_dir) - 1);
+                        m_package_output_dir[sizeof(m_package_output_dir) - 1] = '\0';
+                    }
                 }
 
                 m_package_phase = PackagePhase::Configure;
@@ -2409,6 +2414,7 @@ void EditorApp::renderPackageDialog()
                 if (!folder.empty())
                 {
                     std::strncpy(m_package_output_dir, folder.c_str(), sizeof(m_package_output_dir) - 1);
+                    m_package_output_dir[sizeof(m_package_output_dir) - 1] = '\0';
                     // Re-run pre-validation after directory change
                     m_package_pre_warnings = ProjectPackager::validateBeforePackage(
                         m_project_manager, PackageConfig{m_package_output_dir, m_package_name,
@@ -2698,6 +2704,7 @@ void EditorApp::openLevel(const std::string& path)
 
     m_current_save_path = path;
     std::strncpy(m_save_path_buf, path.c_str(), sizeof(m_save_path_buf) - 1);
+    m_save_path_buf[sizeof(m_save_path_buf) - 1] = '\0';
     m_state.unsaved_changes = false;
     m_undo.clear();
     m_undo.pushState(m_level_data, "initial state");
@@ -2730,6 +2737,7 @@ void EditorApp::saveLevelAs(const std::string& path)
 {
     m_current_save_path = path;
     std::strncpy(m_save_path_buf, path.c_str(), sizeof(m_save_path_buf) - 1);
+    m_save_path_buf[sizeof(m_save_path_buf) - 1] = '\0';
     saveLevel();
 }
 

@@ -16,6 +16,8 @@ struct ComponentDescriptor;
 class InspectorPanel
 {
 public:
+    ~InspectorPanel();
+
     // entity -> original mesh file path (ECS holds GPU ptr, not a string)
     std::unordered_map<entt::entity, std::string> mesh_path_cache;
 
@@ -47,6 +49,12 @@ private:
     uint32_t m_clipboard_type_id = 0;
     std::vector<uint8_t> m_clipboard_data;
     bool m_has_clipboard = false;
+    // Descriptor used to construct the live instance in m_clipboard_data; its destruct
+    // function pointer must run before the buffer is reused or freed, otherwise any
+    // non-trivial members (e.g. std::string) leak.
+    const ComponentDescriptor* m_clipboard_desc = nullptr;
+
+    void clearClipboard();
 
     // Mesh asset picker state
     bool m_mesh_picker_open = false;
