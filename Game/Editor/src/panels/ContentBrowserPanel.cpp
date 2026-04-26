@@ -3,9 +3,11 @@
 #include "Assets/AssetScanner.hpp"
 #include "EditorIcons.hpp"
 #include "ImGui/ImGuiManager.hpp"
+#include "Utils/Log.hpp"
 #include "json.hpp"
 #include <algorithm>
 #include <fstream>
+#include <system_error>
 
 namespace fs = std::filesystem;
 
@@ -1148,7 +1150,16 @@ void ContentBrowserPanel::draw(bool* p_open)
 
         if (ImGui::Button("Delete", ImVec2(120, 0)))
         {
-            fs::remove_all(m_pending_delete);
+            // Use the std::error_code overload so a permission/in-use failure surfaces
+            // as a log message instead of unwinding an exception out of the open ImGui
+            // popup (which would corrupt the frame and crash next frame).
+            std::error_code ec;
+            fs::remove_all(m_pending_delete, ec);
+            if (ec)
+            {
+                LOG_ENGINE_ERROR("Failed to delete '{}': {}",
+                    m_pending_delete.string(), ec.message());
+            }
             m_pending_delete.clear();
             ImGui::CloseCurrentPopup();
         }

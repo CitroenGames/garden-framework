@@ -373,9 +373,29 @@ bool InspectorPanel::draw(entt::registry& registry, entt::entity selected,
     return transform_dirty;
 }
 
+InspectorPanel::~InspectorPanel()
+{
+    clearClipboard();
+}
+
+void InspectorPanel::clearClipboard()
+{
+    // The buffer holds a placement-constructed instance whose destructor must run
+    // before the bytes are freed or reused, otherwise std::string members leak.
+    if (m_has_clipboard && m_clipboard_desc && m_clipboard_desc->destruct)
+        m_clipboard_desc->destruct(m_clipboard_data.data());
+    m_has_clipboard = false;
+    m_clipboard_desc = nullptr;
+    m_clipboard_type_id = 0;
+    m_clipboard_data.clear();
+}
+
 void InspectorPanel::copyComponentToClipboard(const ComponentDescriptor& desc, void* src)
 {
+    clearClipboard();
+
     m_clipboard_type_id = desc.type_id;
+    m_clipboard_desc = &desc;
     m_clipboard_data.resize(desc.size);
 
     // Construct a default in the buffer so any std::string members are valid

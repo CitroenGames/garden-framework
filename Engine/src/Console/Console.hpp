@@ -66,8 +66,15 @@ public:
     void warning(const std::string& msg);
     void error(const std::string& msg);
 
-    // History
-    const std::deque<ConsoleLogEntry>& getLogEntries() const { return m_logEntries; }
+    // History — returns a copy taken under the mutex. Callers need a stable view of the
+    // log buffer for the duration of a frame, but addLogEntry() runs from any thread that
+    // logs (spdlog sinks frequently push from worker threads); a const-ref into the live
+    // deque would race with concurrent push_back / pop_front.
+    std::deque<ConsoleLogEntry> getLogEntries() const
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_logEntries;
+    }
     void clear();
 
     // Command history

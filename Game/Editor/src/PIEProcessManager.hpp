@@ -60,6 +60,9 @@ private:
 
     std::vector<ProcessEntry> m_processes;
 
-    bool launchProcess(const std::string& exe_path, const std::string& args,
+    // argv[0] should be the executable name (or path); the platform implementation will
+    // either exec it directly (POSIX) or build a quoted command line from it (Windows).
+    bool launchProcess(const std::string& exe_path,
+                       const std::vector<std::string>& argv,
                        const std::string& working_dir, ProcessEntry& entry);
 };
