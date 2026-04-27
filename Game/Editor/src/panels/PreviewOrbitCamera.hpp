@@ -61,7 +61,11 @@ struct PreviewOrbitCamera
         target = (aabb_min + aabb_max) * 0.5f;
         float radius = glm::length(aabb_max - aabb_min) * 0.5f;
         if (radius < 0.001f) radius = 1.0f;
-        distance = radius / sinf(fov_radians * 0.5f);
+        // Guard against caller passing a degenerate FOV that would produce
+        // sin(0) = 0 and an infinite distance.
+        float half_fov = fov_radians * 0.5f;
+        if (half_fov < glm::radians(1.0f)) half_fov = glm::radians(30.0f);
+        distance = radius / sinf(half_fov);
         distance *= 1.3f;
         min_distance = radius * 0.1f;
         max_distance = distance * 10.0f;

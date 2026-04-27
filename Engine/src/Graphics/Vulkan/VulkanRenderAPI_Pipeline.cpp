@@ -88,9 +88,30 @@ bool VulkanRenderAPI::createDescriptorSetLayout()
     emissiveBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     emissiveBinding.pImmutableSamplers = nullptr;
 
-    std::array<VkDescriptorSetLayoutBinding, 9> bindings = {
+    // Binding 10: Point lights StructuredBuffer (matches the unified shader's
+    // PointLights[t6] declaration after the D3D12 deferred light-buffer
+    // upgrade). Even when the Vulkan forward path doesn't populate these yet,
+    // the descriptor must be declared so vkCreateGraphicsPipelines passes
+    // shader/layout interface validation.
+    VkDescriptorSetLayoutBinding pointLightsBinding{};
+    pointLightsBinding.binding = 10;
+    pointLightsBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    pointLightsBinding.descriptorCount = 1;
+    pointLightsBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    pointLightsBinding.pImmutableSamplers = nullptr;
+
+    // Binding 11: Spot lights StructuredBuffer (mirror of binding 10).
+    VkDescriptorSetLayoutBinding spotLightsBinding{};
+    spotLightsBinding.binding = 11;
+    spotLightsBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    spotLightsBinding.descriptorCount = 1;
+    spotLightsBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    spotLightsBinding.pImmutableSamplers = nullptr;
+
+    std::array<VkDescriptorSetLayoutBinding, 11> bindings = {
         uboLayoutBinding, samplerLayoutBinding, shadowMapBinding, lightUboBinding, perObjectUboBinding,
-        metallicRoughnessBinding, normalMapBinding, occlusionBinding, emissiveBinding
+        metallicRoughnessBinding, normalMapBinding, occlusionBinding, emissiveBinding,
+        pointLightsBinding, spotLightsBinding
     };
 
     VkDescriptorSetLayoutCreateInfo layoutInfo{};

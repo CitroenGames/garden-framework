@@ -136,6 +136,12 @@ void VulkanRenderAPI::beginFrame()
     // Determine render extent for viewport/scissor
     VkExtent2D renderExtent = swapchain_extent;
 
+    // Track which color image is bound as attachment 0. Layout-transition
+    // barriers around parallel-replay continuation passes need the actual
+    // image, not a hard-coded one (offscreen_image was wrong for PIE-routed
+    // editor renders since Phase 7).
+    VkImage activeColorImage = VK_NULL_HANDLE;
+
     // Check for active PIE viewport target
     bool pie_target_active = false;
     if (m_active_scene_target >= 0) {
@@ -145,6 +151,7 @@ void VulkanRenderAPI::beginFrame()
             renderPassInfo.renderPass = offscreen_render_pass;
             renderPassInfo.framebuffer = it->second.framebuffer;
             renderExtent = { (uint32_t)it->second.width, (uint32_t)it->second.height };
+            activeColorImage = it->second.image;
             pie_target_active = true;
         }
     }
@@ -155,11 +162,13 @@ void VulkanRenderAPI::beginFrame()
             renderPassInfo.renderPass = offscreen_render_pass;
             renderPassInfo.framebuffer = offscreen_framebuffers[0];
             renderExtent = { (uint32_t)viewport_width_rt, (uint32_t)viewport_height_rt };
+            activeColorImage = offscreen_image;
         } else {
             // Always render to offscreen framebuffer (HDR RGBA16F target).
             // FXAA/tone-mapping pass will resolve to swapchain afterwards.
             renderPassInfo.renderPass = offscreen_render_pass;
             renderPassInfo.framebuffer = offscreen_framebuffers[0];
+            activeColorImage = offscreen_image;
         }
     }
 
@@ -176,6 +185,7 @@ void VulkanRenderAPI::beginFrame()
     // Cache framebuffer info for parallel replay's render pass split
     current_active_framebuffer = renderPassInfo.framebuffer;
     current_render_extent = renderExtent;
+    current_active_color_image = activeColorImage;
 
     vkCmdBeginRenderPass(command_buffers[current_frame], &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
     main_pass_started = true;
@@ -211,8 +221,10 @@ void VulkanRenderAPI::endFrame()
         main_pass_started = false;
 
         // When using continuation pass, the finalLayout is COLOR_ATTACHMENT_OPTIMAL
-        // instead of the original pass's finalLayout. Insert a barrier to fix the layout.
-        if (using_continuation_pass) {
+        // instead of the original pass's finalLayout. Insert a barrier to fix the
+        // layout — on the actual bound image, which can be a PIE viewport image,
+        // the legacy viewport_image, or offscreen_image depending on mode.
+        if (using_continuation_pass && current_active_color_image != VK_NULL_HANDLE) {
             VkImageMemoryBarrier barrier{};
             barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
             barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -220,7 +232,7 @@ void VulkanRenderAPI::endFrame()
             barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
             barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
             barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            barrier.image = offscreen_image;
+            barrier.image = current_active_color_image;
             barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
             barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
             vkCmdPipelineBarrier(command_buffers[current_frame],

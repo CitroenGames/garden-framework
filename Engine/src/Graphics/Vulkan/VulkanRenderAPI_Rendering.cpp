@@ -772,12 +772,14 @@ void VulkanRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
             continue;
         }
 
-        // Main pass / depth prepass: select pipeline from PSOKey
+        // Main pass / depth prepass: select pipeline from PSOKey, unless an
+        // override is active (deferred GBuffer pass binds gbufferPass_'s pipeline).
         RenderState rs;
         rs.blend_mode = drawCmd.pso_key.blend;
         rs.cull_mode = drawCmd.pso_key.cull;
         rs.lighting = drawCmd.pso_key.lighting;
-        VkPipeline selectedPipeline = selectPipeline(rs);
+        VkPipeline selectedPipeline = m_replayPipelineOverride
+            ? m_replayPipelineOverride : selectPipeline(rs);
         if (selectedPipeline != last_bound_pipeline) {
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, selectedPipeline);
             last_bound_pipeline = selectedPipeline;
@@ -924,14 +926,17 @@ void VulkanRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmd
         main_pass_started = false;
     }
 
-    // 2b. Transition color attachment from SHADER_READ_ONLY (offscreen pass finalLayout)
-    //     back to COLOR_ATTACHMENT_OPTIMAL (continuation pass initialLayout)
-    {
+    // 2b. Transition the *active* color attachment from SHADER_READ_ONLY
+    //     (offscreen pass finalLayout) back to COLOR_ATTACHMENT_OPTIMAL
+    //     (continuation pass initialLayout). The active image is whichever
+    //     framebuffer we're using — could be offscreen_image, the legacy
+    //     viewport_image, or a PIE viewport's image.
+    if (current_active_color_image != VK_NULL_HANDLE) {
         VkImageMemoryBarrier colorBarrier{};
         colorBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         colorBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         colorBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        colorBarrier.image = offscreen_image;
+        colorBarrier.image = current_active_color_image;
         colorBarrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
         colorBarrier.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         colorBarrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -1056,12 +1061,14 @@ void VulkanRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmd
                     VulkanMesh* vulkanMesh = dynamic_cast<VulkanMesh*>(drawCmd.gpu_mesh);
                     if (!vulkanMesh || vulkanMesh->getVertexBuffer() == VK_NULL_HANDLE) continue;
 
-                    // Select pipeline (thread-safe: reads immutable pipeline handles)
+                    // Select pipeline (thread-safe: reads immutable pipeline handles).
+                    // Honor the replay pipeline override (set by GBuffer pass).
                     RenderState rs;
                     rs.blend_mode = drawCmd.pso_key.blend;
                     rs.cull_mode = drawCmd.pso_key.cull;
                     rs.lighting = drawCmd.pso_key.lighting;
-                    VkPipeline selectedPipeline = selectPipeline(rs);
+                    VkPipeline selectedPipeline = m_replayPipelineOverride
+                        ? m_replayPipelineOverride : selectPipeline(rs);
                     if (selectedPipeline != workerLastPipeline) {
                         vkCmdBindPipeline(secCmd, VK_PIPELINE_BIND_POINT_GRAPHICS, selectedPipeline);
                         workerLastPipeline = selectedPipeline;
@@ -1318,4 +1325,32 @@ IGPUMesh* VulkanRenderAPI::createMesh()
     VulkanMesh* mesh = new VulkanMesh();
     mesh->setVulkanHandles(device, vma_allocator, command_pool, graphics_queue);
     return mesh;
+}
+
+// ============================================================================
+// Deferred command routing (Phase A)
+// ============================================================================
+
+bool VulkanRenderAPI::isDeferredActive() const
+{
+    return m_useDeferred && gbuffer_initialized;
+}
+
+void VulkanRenderAPI::submitDeferredOpaqueCommands(const RenderCommandBuffer& cmds)
+{
+    m_deferredOpaqueCmds = cmds;
+}
+
+void VulkanRenderAPI::submitDeferredTransparentCommands(const RenderCommandBuffer& cmds)
+{
+    m_deferredTransparentCmds = cmds;
+}
+
+void VulkanRenderAPI::uploadLightBuffers(const GPUPointLight* pts, int ptCount,
+                                         const GPUSpotLight*  spts, int spCount)
+{
+    // TODO (Phase E): copy light arrays into per-frame point/spot SSBOs.
+    // For now, the deferred lighting shader reads num*Lights from the CB and
+    // short-circuits when count==0, so we ignore the upload.
+    (void)pts; (void)ptCount; (void)spts; (void)spCount;
 }

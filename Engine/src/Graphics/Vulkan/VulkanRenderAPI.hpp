@@ -7,11 +7,14 @@
 #include "VkSamplerCache.hpp"
 #include "VulkanPostProcessPass.hpp"
 #include "VulkanGBufferPass.hpp"
+#include "VulkanDeferredLightingPass.hpp"
 #include "VulkanRGBackend.hpp"
 #include "VulkanPostProcessGraphBuilder.hpp"
 #include "VulkanDeferredSceneGraphBuilder.hpp"
 #include "Graphics/RenderGraph/RenderGraph.hpp"
+#include "VulkanSceneViewport.hpp"
 #include <cstdint>
+#include <memory>
 #include <stack>
 #include <vector>
 #include <unordered_map>
@@ -30,6 +33,8 @@ class VulkanMesh;
 class VulkanRenderAPI : public IRenderAPI
 {
     friend class VulkanPostProcessGraphBuilder;
+    friend class VulkanDeferredSceneGraphBuilder;
+    friend class VulkanSceneViewport;
 
 public:
     VulkanRenderAPI();
@@ -111,6 +116,11 @@ public:
 
     void setDeferredEnabled(bool enabled) override { m_useDeferred = enabled; }
     bool isDeferredEnabled() const override { return m_useDeferred; }
+    bool isDeferredActive() const override;
+    void submitDeferredOpaqueCommands(const RenderCommandBuffer& cmds) override;
+    void submitDeferredTransparentCommands(const RenderCommandBuffer& cmds) override;
+    void uploadLightBuffers(const GPUPointLight* pts, int ptCount,
+                            const GPUSpotLight* spts, int spCount) override;
 
     // Vulkan-specific accessors for VulkanMesh
     VkDevice getDevice() const { return device; }
@@ -313,6 +323,13 @@ private:
     // Cached framebuffer state from beginFrame() for use in replayCommandBufferParallel()
     VkFramebuffer current_active_framebuffer = VK_NULL_HANDLE;
     VkExtent2D current_render_extent = {0, 0};
+    // Color image backing current_active_framebuffer's first attachment.
+    // Used by parallel-replay's render-pass-split barrier and endFrame's
+    // post-continuation barrier — these need to transition the layout of
+    // the actual bound attachment, which can be the legacy offscreen_image,
+    // the legacy viewport_image, or a PIE viewport's image (the latter when
+    // the editor's main viewport routes through a SceneViewport wrapper).
+    VkImage current_active_color_image = VK_NULL_HANDLE;
     bool using_continuation_pass = false;
 
     // Synchronization
@@ -423,6 +440,20 @@ private:
     std::vector<VkBuffer> light_uniform_buffers;
     std::vector<VmaAllocation> light_uniform_allocations;
     std::vector<void*> light_uniform_mapped;
+
+    // Dummy zero-filled SSBO bound to bindings 10/11 (pointLights / spotLights).
+    // Vulkan's forward path doesn't have a real per-light StructuredBuffer
+    // upload yet; the shader treats num*Lights=0 from LightUBO as "no lights",
+    // so this buffer is never actually read.
+    VkBuffer m_dummy_lights_buffer = VK_NULL_HANDLE;
+    VmaAllocation m_dummy_lights_allocation = VK_NULL_HANDLE;
+
+    // Per-frame uniform buffer for the DeferredLightingCB. Sized for one CB
+    // (~640 bytes); NUM_FRAMES_IN_FLIGHT=2 instances so consecutive frames
+    // can write without racing the GPU.
+    std::vector<VkBuffer> m_deferred_lighting_cb_buffers;
+    std::vector<VmaAllocation> m_deferred_lighting_cb_allocations;
+    std::vector<void*> m_deferred_lighting_cb_mapped;
 
     // Per-object dynamic UBO ring buffer (per-frame) - PerObjectUBO at binding 4
     static constexpr uint32_t MAX_PER_OBJECT_DRAWS = 4096;
@@ -554,8 +585,12 @@ private:
     // Deferred GBuffer geometry pass (PSO + 3-RT render pass owner)
     VulkanGBufferPass gbufferPass_;
     bool gbuffer_initialized = false;
+    VulkanDeferredLightingPass deferredLightingPass_;
+    bool deferred_lighting_initialized = false;
     bool createGBufferResources();
     void cleanupGBufferResources();
+    bool createDeferredLightingResources();
+    void cleanupDeferredLightingResources();
 
     // SSAO post-process passes
     VulkanPostProcessPass ssaoPass_;        // computation
@@ -603,6 +638,19 @@ private:
     bool m_useRenderGraph = true;
     bool m_useDeferred = false;
 
+    // Deferred-path command buffering (mirrors D3D12 layout). The renderer
+    // routes opaque/transparent draws here when isDeferredActive() returns
+    // true; the GBuffer / TransparentForward graph passes replay them.
+    RenderCommandBuffer m_deferredOpaqueCmds;
+    RenderCommandBuffer m_deferredTransparentCmds;
+    std::vector<vertex> m_deferredDebugLineVertices;
+
+    // Optional pipeline override for replay paths. When non-null, the buffered
+    // command replay loops bind this pipeline instead of the per-cmd selection.
+    // Set by the GBuffer pass (to bind gbufferPass_.getPipeline()) and cleared
+    // afterwards. Mirrors D3D12RenderAPI::m_replayPSOOverride.
+    VkPipeline m_replayPipelineOverride = VK_NULL_HANDLE;
+
     // Viewport render target for editor
     VkImage viewport_image = VK_NULL_HANDLE;
     VmaAllocation viewport_allocation = VK_NULL_HANDLE;
@@ -619,7 +667,13 @@ private:
     int viewport_height_rt = 0;
     void createViewportResources(int w, int h);
     void destroyViewportResources();
-    bool isViewportMode() const { return viewport_image != VK_NULL_HANDLE; }
+    // True when the API is rendering for an editor (legacy viewport_image set
+    // up, OR the new SceneViewport wrapper bound via setEditorViewport). Used
+    // throughout the Vulkan path to gate "I'm an editor render" branches.
+    bool isViewportMode() const
+    {
+        return viewport_image != VK_NULL_HANDLE || m_editor_scene_viewport != nullptr;
+    }
 
     VkDebugUtilsMessengerEXT debug_messenger = VK_NULL_HANDLE;
 
@@ -629,6 +683,20 @@ public:
     virtual uint64_t getViewportTextureID() override;
     virtual void setViewportSize(int width, int height) override;
     virtual void renderUI() override;
+
+    // SceneViewport-based editor path. Each call to createSceneViewport
+    // allocates a fresh PIE viewport under the hood (the wrapper owns it
+    // and frees on destruction). setEditorViewport routes the active scene
+    // target to whichever wrapper is bound.
+    std::unique_ptr<SceneViewport> createSceneViewport(int width, int height) override;
+    void setEditorViewport(SceneViewport* viewport) override;
+
+private:
+    // Non-owning pointer to the editor's currently-bound scene viewport. Set
+    // by setEditorViewport. Used by setViewportSize / getViewportTextureID
+    // to forward to the active wrapper instead of the legacy viewport_image.
+    VulkanSceneViewport* m_editor_scene_viewport = nullptr;
+public:
 
     // Preview render target (for asset preview panel)
     virtual void beginPreviewFrame(int width, int height) override;

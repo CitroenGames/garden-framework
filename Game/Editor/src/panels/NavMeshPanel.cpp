@@ -130,11 +130,23 @@ void NavMeshPanel::draw(bool* p_open)
 
     ImGui::InputText("File Path", m_filepath_buf, sizeof(m_filepath_buf));
 
-    if (ImGui::Button("Save") && navmesh.valid)
+    ImGui::BeginDisabled(!navmesh.valid);
+    if (ImGui::Button("Save"))
     {
         if (Navigation::NavMeshSerializer::save(navmesh, m_filepath_buf))
-            ImGui::SetTooltip("Saved!");
+        {
+            m_io_status = std::string("Saved to ") + m_filepath_buf;
+            m_io_ok = true;
+        }
+        else
+        {
+            m_io_status = std::string("Save failed: ") + m_filepath_buf;
+            m_io_ok = false;
+        }
     }
+    ImGui::EndDisabled();
+    if (!navmesh.valid && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("Generate a NavMesh first.");
     ImGui::SameLine();
     if (ImGui::Button("Load"))
     {
@@ -149,7 +161,22 @@ void NavMeshPanel::draw(bool* p_open)
             // Re-extract debug polys after load
             // (They aren't serialized - regenerate from Detour data)
             Navigation::NavMeshGenerator::extractDebugPolys(navmesh);
+
+            m_io_status = std::string("Loaded ") + m_filepath_buf;
+            m_io_ok = true;
         }
+        else
+        {
+            m_io_status = std::string("Load failed: ") + m_filepath_buf;
+            m_io_ok = false;
+        }
+    }
+
+    if (!m_io_status.empty())
+    {
+        ImVec4 col = m_io_ok ? ImVec4(0.4f, 0.85f, 0.4f, 1.0f)
+                             : ImVec4(0.95f, 0.45f, 0.35f, 1.0f);
+        ImGui::TextColored(col, "%s", m_io_status.c_str());
     }
 
     // ── Path Testing ─────────────────────────────────────────────────────

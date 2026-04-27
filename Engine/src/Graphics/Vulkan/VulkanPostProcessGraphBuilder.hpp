@@ -33,8 +33,10 @@ protected:
 
     void addExtraPasses(RenderGraph& graph, const Handles& h, const Config& cfg) override;
 
-private:
+protected:
     VulkanRenderAPI* m_api = nullptr;
+
+private:
 
     VkImage       m_outputImage          = VK_NULL_HANDLE;
     VkImageLayout m_outputInitialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;

@@ -258,6 +258,9 @@ bool EditorApp::initialize(RenderAPIType api_type)
     };
 
     m_hierarchy.reflection = &m_reflection;
+    m_hierarchy.on_entity_destroyed = [this](entt::entity entity) {
+        m_inspector.mesh_path_cache.erase(entity);
+    };
     m_navmesh_panel.registry = &m_world.registry;
     m_physics_debug_panel.registry = &m_world.registry;
 
@@ -1669,6 +1672,7 @@ void EditorApp::processEvents()
                                 m_world.registry.valid(m_hierarchy.selected_entity))
                             {
                                 m_undo.pushState(buildLevelDataFromECS(), "delete entity");
+                                m_inspector.mesh_path_cache.erase(m_hierarchy.selected_entity);
                                 m_world.registry.destroy(m_hierarchy.selected_entity);
                                 m_hierarchy.selected_entity = entt::null;
                                 m_renderer.markBVHDirty();
@@ -1986,6 +1990,7 @@ void EditorApp::renderMenuBar()
                 can_edit && m_hierarchy.selected_entity != entt::null))
             {
                 m_undo.pushState(buildLevelDataFromECS(), "delete entity");
+                m_inspector.mesh_path_cache.erase(m_hierarchy.selected_entity);
                 m_world.registry.destroy(m_hierarchy.selected_entity);
                 m_hierarchy.selected_entity = entt::null;
                 m_renderer.markBVHDirty();

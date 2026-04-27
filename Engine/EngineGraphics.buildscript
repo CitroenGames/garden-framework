@@ -37,6 +37,8 @@ sources = {
     src/Graphics/Vulkan/VulkanRenderAPI_GBuffer.cpp
     src/Graphics/Vulkan/VulkanDeferredSceneGraphBuilder.cpp
     src/Graphics/Vulkan/VulkanMesh.cpp
+    src/Graphics/Vulkan/VulkanSceneViewport.cpp
+    src/Graphics/Vulkan/VulkanDeferredLightingPass.cpp
     src/Graphics/D3D12/D3D12RenderAPI.cpp [windows]
     src/Graphics/D3D12/D3D12RenderAPI_Device.cpp [windows]
     src/Graphics/D3D12/D3D12RenderAPI_Swapchain.cpp [windows]

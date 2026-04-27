@@ -15,6 +15,10 @@ public:
     // Callback: editor wires this to open save dialog and write .prefab file
     std::function<void(entt::entity)> on_save_as_prefab;
 
+    // Callback: invoked just before an entity is destroyed so panel-side
+    // caches keyed by entt::entity can drop their entries.
+    std::function<void(entt::entity)> on_entity_destroyed;
+
     // Reflection registry for Add Component submenu in context menu
     ReflectionRegistry* reflection = nullptr;
 

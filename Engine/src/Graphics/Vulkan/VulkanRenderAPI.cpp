@@ -145,8 +145,9 @@ bool VulkanRenderAPI::initialize(WindowHandle window, int width, int height, flo
         return false;
     }
 
-    // Create deferred GBuffer pass (failure is non-fatal, just disables deferred path)
+    // Create deferred GBuffer + lighting passes (non-fatal — disables deferred if either fails)
     createGBufferResources();
+    createDeferredLightingResources();
 
     // Create descriptor pool
     LOG_ENGINE_INFO("[Vulkan] Creating descriptor pool...");
@@ -357,6 +358,25 @@ void VulkanRenderAPI::shutdown()
     light_uniform_buffers.clear();
     light_uniform_allocations.clear();
     light_uniform_mapped.clear();
+
+    // Clean up dummy lights SSBO (bindings 10/11)
+    if (m_dummy_lights_buffer && vma_allocator) {
+        vmaDestroyBuffer(vma_allocator, m_dummy_lights_buffer, m_dummy_lights_allocation);
+        m_dummy_lights_buffer = VK_NULL_HANDLE;
+        m_dummy_lights_allocation = VK_NULL_HANDLE;
+    }
+
+    // Clean up deferred lighting CB buffers
+    for (size_t i = 0; i < m_deferred_lighting_cb_buffers.size(); ++i) {
+        if (m_deferred_lighting_cb_buffers[i] && vma_allocator) {
+            vmaDestroyBuffer(vma_allocator,
+                             m_deferred_lighting_cb_buffers[i],
+                             m_deferred_lighting_cb_allocations[i]);
+        }
+    }
+    m_deferred_lighting_cb_buffers.clear();
+    m_deferred_lighting_cb_allocations.clear();
+    m_deferred_lighting_cb_mapped.clear();
 
     // Clean up per-object uniform buffers
     for (size_t i = 0; i < per_object_uniform_buffers.size(); i++) {

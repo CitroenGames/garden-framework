@@ -351,10 +351,30 @@ void VulkanRenderAPI::destroyViewportResources()
 void VulkanRenderAPI::setViewportSize(int width, int height)
 {
     if (width <= 0 || height <= 0) return;
+
+    // New path: caller owns the viewport via SceneViewport. Forward the resize
+    // to the wrapper (which calls setPIEViewportSize underneath) and update
+    // the SSAO / shadow-mask passes that track viewport_width_rt.
+    if (m_editor_scene_viewport)
+    {
+        m_editor_scene_viewport->resize(width, height);
+        if (width != viewport_width_rt || height != viewport_height_rt)
+        {
+            viewport_width_rt  = width;
+            viewport_height_rt = height;
+            if (ssao_initialized)
+                recreateSSAOResources();
+            if (shadow_mask_initialized)
+                recreateShadowMaskResources();
+        }
+        return;
+    }
+
+    // Legacy path: API owns the editor viewport image (used by Vulkan
+    // standalone-style renders that don't hand us a SceneViewport).
     if (width == viewport_width_rt && height == viewport_height_rt) return;
     createViewportResources(width, height);
 
-    // Recreate SSAO and shadow mask resources at new viewport size (matches D3D12)
     if (ssao_initialized)
         recreateSSAOResources();
     if (shadow_mask_initialized)
@@ -423,8 +443,10 @@ void VulkanRenderAPI::endSceneRender()
         vkCmdEndRenderPass(cmd);
         main_pass_started = false;
 
-        // Continuation pass leaves image in COLOR_ATTACHMENT_OPTIMAL; transition to SHADER_READ_ONLY
-        if (using_continuation_pass) {
+        // Continuation pass leaves image in COLOR_ATTACHMENT_OPTIMAL; transition
+        // the actual bound image to SHADER_READ_ONLY (could be offscreen_image,
+        // viewport_image, or a PIE viewport image — track via current_active_color_image).
+        if (using_continuation_pass && current_active_color_image != VK_NULL_HANDLE) {
             VkImageMemoryBarrier barrier{};
             barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
             barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -432,7 +454,7 @@ void VulkanRenderAPI::endSceneRender()
             barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
             barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
             barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            barrier.image = offscreen_image;
+            barrier.image = current_active_color_image;
             barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
             barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
             vkCmdPipelineBarrier(cmd,
@@ -649,6 +671,8 @@ void VulkanRenderAPI::endSceneRender()
 
 uint64_t VulkanRenderAPI::getViewportTextureID()
 {
+    if (m_editor_scene_viewport)
+        return m_editor_scene_viewport->getOutputTextureID();
     return (uint64_t)viewport_imgui_ds;
 }
 
@@ -1139,4 +1163,25 @@ uint64_t VulkanRenderAPI::getPIEViewportTextureID(int id)
     auto it = m_pie_viewports.find(id);
     if (it == m_pie_viewports.end()) return 0;
     return reinterpret_cast<uint64_t>(it->second.imgui_ds);
+}
+
+// ============================================================================
+// SceneViewport-based editor path (Phase 7 — bridges to PIE infrastructure)
+// ============================================================================
+
+std::unique_ptr<SceneViewport> VulkanRenderAPI::createSceneViewport(int width, int height)
+{
+    if (width <= 0 || height <= 0) return nullptr;
+    return std::make_unique<VulkanSceneViewport>(this, width, height);
+}
+
+void VulkanRenderAPI::setEditorViewport(SceneViewport* viewport)
+{
+    // Caller owns the viewport. We hold a non-owning pointer so setViewportSize
+    // / getViewportTextureID can forward to the active wrapper, and we route
+    // the legacy m_active_scene_target through whichever PIE id the wrapper
+    // is hiding.
+    auto* vk_vp = static_cast<VulkanSceneViewport*>(viewport);
+    m_editor_scene_viewport = vk_vp;
+    m_active_scene_target = vk_vp ? vk_vp->pieId() : -1;
 }

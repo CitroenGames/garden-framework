@@ -17,13 +17,15 @@ bool VulkanRenderAPI::createDescriptorPool()
     // Each set needs 3 UBOs (GlobalUBO, LightUBO, PerObjectUBO) and 6 samplers (diffuse, shadow, + 4 PBR)
     uint32_t globalSets = MAX_FRAMES_IN_FLIGHT;
 
-    std::array<VkDescriptorPoolSize, 3> globalPoolSizes{};
+    std::array<VkDescriptorPoolSize, 4> globalPoolSizes{};
     globalPoolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     globalPoolSizes[0].descriptorCount = globalSets * 2; // GlobalUBO + LightUBO
     globalPoolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     globalPoolSizes[1].descriptorCount = globalSets * 6; // diffuse + shadow + 4 PBR textures
     globalPoolSizes[2].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
     globalPoolSizes[2].descriptorCount = globalSets * 1; // PerObjectUBO (dynamic)
+    globalPoolSizes[3].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    globalPoolSizes[3].descriptorCount = globalSets * 2; // pointLights + spotLights SSBOs
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -48,13 +50,15 @@ bool VulkanRenderAPI::createDescriptorPool()
 
 VkDescriptorPool VulkanRenderAPI::createPerDrawDescriptorPool()
 {
-    std::array<VkDescriptorPoolSize, 3> poolSizes{};
+    std::array<VkDescriptorPoolSize, 4> poolSizes{};
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     poolSizes[0].descriptorCount = SETS_PER_POOL * 2; // GlobalUBO + LightUBO
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     poolSizes[1].descriptorCount = SETS_PER_POOL * 6; // diffuse + shadow + 4 PBR textures
     poolSizes[2].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
     poolSizes[2].descriptorCount = SETS_PER_POOL * 1; // PerObjectUBO (dynamic)
+    poolSizes[3].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    poolSizes[3].descriptorCount = SETS_PER_POOL * 2; // pointLights + spotLights SSBOs
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -123,6 +127,62 @@ bool VulkanRenderAPI::createUniformBuffers()
                 return false;
             }
             light_uniform_mapped[i] = allocInfoOut.pMappedData;
+        }
+    }
+
+    // Dummy storage buffer (bindings 10/11). The unified shader expects
+    // pointLights/spotLights SSBOs at these slots — Vulkan's forward path
+    // doesn't populate them yet, so a single small zero-filled buffer is
+    // bound to both. Lighting still flows through the LightUBO at binding 3
+    // (numPointLights / numSpotLights = 0 means the shader skips the loops).
+    {
+        VkDeviceSize bufferSize = 4096; // generous; covers any small light-array struct
+        VkBufferCreateInfo bufferInfo{};
+        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bufferInfo.size = bufferSize;
+        bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+
+        VmaAllocationCreateInfo allocInfo{};
+        allocInfo.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
+        allocInfo.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
+
+        VmaAllocationInfo allocInfoOut;
+        if (vmaCreateBuffer(vma_allocator, &bufferInfo, &allocInfo,
+                           &m_dummy_lights_buffer, &m_dummy_lights_allocation, &allocInfoOut) != VK_SUCCESS) {
+            printf("Failed to create dummy lights SSBO\n");
+            return false;
+        }
+        if (allocInfoOut.pMappedData)
+            std::memset(allocInfoOut.pMappedData, 0, bufferSize);
+    }
+
+    // DeferredLightingCB uniform buffer (per-frame). Matches deferred_lighting.slang's
+    // DeferredLightingCB layout — ~640 bytes; round up to 1024 for safety.
+    {
+        constexpr VkDeviceSize bufferSize = 1024;
+        m_deferred_lighting_cb_buffers.resize(MAX_FRAMES_IN_FLIGHT);
+        m_deferred_lighting_cb_allocations.resize(MAX_FRAMES_IN_FLIGHT);
+        m_deferred_lighting_cb_mapped.resize(MAX_FRAMES_IN_FLIGHT);
+        for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i)
+        {
+            VkBufferCreateInfo bi{};
+            bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+            bi.size  = bufferSize;
+            bi.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+
+            VmaAllocationCreateInfo ai{};
+            ai.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
+            ai.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
+
+            VmaAllocationInfo ao;
+            if (vmaCreateBuffer(vma_allocator, &bi, &ai,
+                                &m_deferred_lighting_cb_buffers[i],
+                                &m_deferred_lighting_cb_allocations[i], &ao) != VK_SUCCESS) {
+                printf("Failed to create deferred lighting CB %d\n", i);
+                return false;
+            }
+            m_deferred_lighting_cb_mapped[i] = ao.pMappedData;
+            if (ao.pMappedData) std::memset(ao.pMappedData, 0, bufferSize);
         }
     }
 
@@ -197,10 +257,17 @@ bool VulkanRenderAPI::createDescriptorSets()
         perObjectBufferInfo.offset = 0;
         perObjectBufferInfo.range = per_object_alignment;
 
+        VkDescriptorBufferInfo dummyLightsInfo{};
+        dummyLightsInfo.buffer = m_dummy_lights_buffer;
+        dummyLightsInfo.offset = 0;
+        dummyLightsInfo.range = VK_WHOLE_SIZE;
+
         VkDescriptorWriter(descriptor_sets[i])
             .writeBuffer(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &globalBufferInfo)
             .writeBuffer(3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &lightBufferInfo)
             .writeBuffer(4, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, &perObjectBufferInfo)
+            .writeBuffer(10, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &dummyLightsInfo)
+            .writeBuffer(11, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &dummyLightsInfo)
             .update(device);
     }
 
@@ -316,6 +383,13 @@ void VulkanRenderAPI::initializeDescriptorSet(VkDescriptorSet ds, uint32_t frame
     emissiveInfo.imageView = default_emissive_texture.imageView;
     emissiveInfo.sampler = default_emissive_texture.sampler;
 
+    // Bindings 10/11: dummy point/spot light SSBOs. Shader sees num*Lights=0
+    // from LightUBO and short-circuits without sampling these.
+    VkDescriptorBufferInfo dummyLightsInfo{};
+    dummyLightsInfo.buffer = m_dummy_lights_buffer;
+    dummyLightsInfo.offset = 0;
+    dummyLightsInfo.range = VK_WHOLE_SIZE;
+
     VkDescriptorWriter(ds)
         .writeBuffer(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &globalBufferInfo)
         .writeImage(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &imageInfo)
@@ -326,6 +400,8 @@ void VulkanRenderAPI::initializeDescriptorSet(VkDescriptorSet ds, uint32_t frame
         .writeImage(7, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &normalMapInfo)
         .writeImage(8, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &occlusionInfo)
         .writeImage(9, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &emissiveInfo)
+        .writeBuffer(10, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &dummyLightsInfo)
+        .writeBuffer(11, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &dummyLightsInfo)
         .update(device);
 }
 

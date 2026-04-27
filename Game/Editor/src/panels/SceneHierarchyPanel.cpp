@@ -342,6 +342,8 @@ void SceneHierarchyPanel::draw(entt::registry& registry, bool* out_dirty, bool* 
         if (selected_entity == to_delete)
             selected_entity = entt::null;
         m_hidden_entities.erase(to_delete);
+        if (on_entity_destroyed)
+            on_entity_destroyed(to_delete);
         registry.destroy(to_delete);
         if (out_dirty) *out_dirty = true;
         if (out_unsaved) *out_unsaved = true;

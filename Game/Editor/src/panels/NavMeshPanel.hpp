@@ -30,6 +30,8 @@ private:
 
     // Serialization
     char m_filepath_buf[512] = "assets/levels/main.navmesh";
+    std::string m_io_status;
+    bool m_io_ok = true;
 
     // Stats
     int m_total_source_tris  = 0;
