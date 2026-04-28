@@ -37,6 +37,7 @@ VulkanPostProcessGraphBuilder::importResources(RenderGraph& graph, RGBackend& ba
     h.offscreenHDR = graph.importTexture("OffscreenHDR", offscreenDesc,
                                           RGResourceUsage::ShaderResource);
     vkBackend.bindImportedImage(h.offscreenHDR.handle, api->offscreen_image,
+                                api->offscreen_view,
                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
     RGTextureDesc depthDesc;
@@ -47,6 +48,7 @@ VulkanPostProcessGraphBuilder::importResources(RenderGraph& graph, RGBackend& ba
     h.depth = graph.importTexture("DepthBuffer", depthDesc,
                                   RGResourceUsage::DepthStencilWrite);
     vkBackend.bindImportedImage(h.depth.handle, api->offscreen_depth_image,
+                                api->offscreen_depth_view,
                                 VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
                                 VK_IMAGE_ASPECT_DEPTH_BIT);
 
@@ -57,7 +59,10 @@ VulkanPostProcessGraphBuilder::importResources(RenderGraph& graph, RGBackend& ba
     outputDesc.debugName = "OutputTarget";
     h.output = graph.importTexture("OutputTarget", outputDesc,
                                    RGResourceUsage::RenderTarget);
-    vkBackend.bindImportedImage(h.output.handle, m_outputImage, m_outputInitialLayout);
+    // Output uses its own externally-managed framebuffer (FXAA path), so we
+    // don't need a view inside the graph — pass VK_NULL_HANDLE.
+    vkBackend.bindImportedImage(h.output.handle, m_outputImage, VK_NULL_HANDLE,
+                                m_outputInitialLayout);
 
     h.skyboxEnabled = api->m_skyboxRequested && api->skybox_initialized;
 
@@ -71,6 +76,7 @@ VulkanPostProcessGraphBuilder::importResources(RenderGraph& graph, RGBackend& ba
         h.shadowMap = graph.importTexture("ShadowMap", smDesc,
                                           RGResourceUsage::ShaderResource);
         vkBackend.bindImportedImage(h.shadowMap.handle, api->shadow_map_image,
+                                    api->shadow_map_view,
                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                                     VK_IMAGE_ASPECT_DEPTH_BIT);
     }
@@ -86,16 +92,19 @@ VulkanPostProcessGraphBuilder::importResources(RenderGraph& graph, RGBackend& ba
         ssaoDesc.debugName = "SSAORaw";
         h.ssaoRaw = graph.importTexture("SSAORaw", ssaoDesc, RGResourceUsage::RenderTarget);
         vkBackend.bindImportedImage(h.ssaoRaw.handle, api->ssaoPass_.getOutputImage(),
+                                    api->ssaoPass_.getOutputView(),
                                     VK_IMAGE_LAYOUT_UNDEFINED);
 
         ssaoDesc.debugName = "SSAOBlurH";
         h.ssaoBlurH = graph.importTexture("SSAOBlurH", ssaoDesc, RGResourceUsage::RenderTarget);
         vkBackend.bindImportedImage(h.ssaoBlurH.handle, api->ssaoBlurHPass_.getOutputImage(),
+                                    api->ssaoBlurHPass_.getOutputView(),
                                     VK_IMAGE_LAYOUT_UNDEFINED);
 
         ssaoDesc.debugName = "SSAOBlurV";
         h.ssaoBlurV = graph.importTexture("SSAOBlurV", ssaoDesc, RGResourceUsage::RenderTarget);
         vkBackend.bindImportedImage(h.ssaoBlurV.handle, api->ssaoBlurVPass_.getOutputImage(),
+                                    api->ssaoBlurVPass_.getOutputView(),
                                     VK_IMAGE_LAYOUT_UNDEFINED);
     }
 
@@ -110,6 +119,7 @@ VulkanPostProcessGraphBuilder::importResources(RenderGraph& graph, RGBackend& ba
         h.shadowMask = graph.importTexture("ShadowMask", smOutDesc,
                                            RGResourceUsage::RenderTarget);
         vkBackend.bindImportedImage(h.shadowMask.handle, api->shadowMaskPass_.getOutputImage(),
+                                    api->shadowMaskPass_.getOutputView(),
                                     VK_IMAGE_LAYOUT_UNDEFINED);
     }
 

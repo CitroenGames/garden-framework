@@ -150,6 +150,14 @@ void VulkanDeferredSceneGraphBuilder::build(RenderGraph& graph, RGBackend& backe
             }
 
             vkCmdEndRenderPass(cmd);
+
+            // GBuffer render pass finalLayouts: gb0/gb1/gb2 → SHADER_READ_ONLY_OPTIMAL,
+            // depth → DEPTH_STENCIL_ATTACHMENT_OPTIMAL. Mirror those into the RG tracker
+            // so the next pass's barrier emission computes from the correct source layout.
+            backend.setCurrentLayout(dh->gb0.handle,  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            backend.setCurrentLayout(dh->gb1.handle,  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            backend.setCurrentLayout(dh->gb2.handle,  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            backend.setCurrentLayout(h.depth.handle,  VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
         });
 
     graph.addPass("DeferredLighting",

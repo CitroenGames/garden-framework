@@ -174,5 +174,6 @@ bool VulkanRenderAPI::createVmaAllocator()
     printf("VMA allocator created\n");
 
     m_rgBackend.init(device, vma_allocator);
+    m_rgBackend.setDeletionQueue(&deletion_queue);
     return true;
 }

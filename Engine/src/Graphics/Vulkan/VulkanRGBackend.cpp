@@ -1,6 +1,7 @@
 #include "VulkanRGBackend.hpp"
 #include "vk_mem_alloc.h"
 #include "VkInitHelpers.hpp"
+#include "VkDeletionQueue.hpp"
 #include "Utils/Log.hpp"
 
 void VulkanRGBackend::init(VkDevice device, VmaAllocator allocator)
@@ -15,11 +16,13 @@ void VulkanRGBackend::setCommandBuffer(VkCommandBuffer commandBuffer)
 }
 
 void VulkanRGBackend::bindImportedImage(RGResourceHandle handle, VkImage image,
+                                        VkImageView view,
                                         VkImageLayout currentLayout,
                                         VkImageAspectFlags aspectMask)
 {
     auto& entry = m_images[handle.index];
     entry.image = image;
+    entry.view = view;
     entry.currentLayout = currentLayout;
     entry.aspectMask = aspectMask;
     entry.imported = true;
@@ -81,10 +84,31 @@ void VulkanRGBackend::destroyTransientTexture(RGResourceHandle handle)
     auto& entry = it->second;
     if (entry.imported) return;
 
-    if (entry.view != VK_NULL_HANDLE)
-        vkDestroyImageView(m_device, entry.view, nullptr);
-    if (entry.image != VK_NULL_HANDLE && entry.allocation != nullptr)
-        vmaDestroyImage(m_allocator, entry.image, entry.allocation);
+    // The transient was just used in the command buffer that hasn't been
+    // submitted yet. Defer destruction past GPU completion via the deletion
+    // queue (default 3-frame delay). Falling back to immediate destruction
+    // would violate the Vulkan validity rules for VkImage/VkImageView.
+    VkDevice     device     = m_device;
+    VmaAllocator allocator  = m_allocator;
+    VkImageView  view       = entry.view;
+    VkImage      image      = entry.image;
+    VmaAllocation allocation = entry.allocation;
+
+    if (m_deletionQueue) {
+        m_deletionQueue->push([device, allocator, view, image, allocation]() {
+            if (view != VK_NULL_HANDLE)
+                vkDestroyImageView(device, view, nullptr);
+            if (image != VK_NULL_HANDLE && allocation != nullptr)
+                vmaDestroyImage(allocator, image, allocation);
+        });
+    } else {
+        // No deletion queue wired up — fall back to inline destruction.
+        // Hit during shutdown after deletion_queue.flushAll() runs.
+        if (view != VK_NULL_HANDLE)
+            vkDestroyImageView(device, view, nullptr);
+        if (image != VK_NULL_HANDLE && allocation != nullptr)
+            vmaDestroyImage(allocator, image, allocation);
+    }
 
     m_images.erase(it);
 }

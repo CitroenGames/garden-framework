@@ -12,6 +12,8 @@ typedef VmaAllocator_T* VmaAllocator;
 struct VmaAllocation_T;
 typedef VmaAllocation_T* VmaAllocation;
 
+class VkDeletionQueue;
+
 // Vulkan-specific execution context for render graph pass callbacks.
 class VulkanRGContext : public RGContext {
 public:
@@ -24,6 +26,10 @@ public:
     VulkanRGBackend() = default;
 
     void init(VkDevice device, VmaAllocator allocator);
+
+    // Hand the backend a deletion queue so transient image teardown can be
+    // deferred past GPU completion. Must be set before the first execute().
+    void setDeletionQueue(VkDeletionQueue* queue) { m_deletionQueue = queue; }
 
     // Set the command buffer the backend will record barriers into for the next execute().
     void setCommandBuffer(VkCommandBuffer commandBuffer);
@@ -39,8 +45,12 @@ public:
     void beginFrame() override;
     void endFrame() override;
 
-    // Bind an imported (externally-owned) image to a graph handle.
-    void bindImportedImage(RGResourceHandle handle, VkImage image,
+    // Bind an imported (externally-owned) image to a graph handle. The view
+    // is optional but required for any pass that calls getImageView() on this
+    // handle (e.g. attachments built from imported images, sampler bindings
+    // sourced from the graph). Pass VK_NULL_HANDLE if the resource is only
+    // used for layout/barrier tracking.
+    void bindImportedImage(RGResourceHandle handle, VkImage image, VkImageView view,
                            VkImageLayout currentLayout,
                            VkImageAspectFlags aspectMask = VK_IMAGE_ASPECT_COLOR_BIT);
 
@@ -55,6 +65,7 @@ public:
 private:
     VkDevice m_device = VK_NULL_HANDLE;
     VmaAllocator m_allocator = nullptr;
+    VkDeletionQueue* m_deletionQueue = nullptr;
     VulkanRGContext m_context;
 
     struct ImageEntry {
