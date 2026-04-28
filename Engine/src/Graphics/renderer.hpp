@@ -364,20 +364,23 @@ public:
 
         glm::mat4 model = transform.getTransformMatrix();
 
-        // Determine which GPU mesh to use
+        // Determine which GPU mesh to use, and pick matching ranges. If a LOD
+        // gpu_mesh has no per-LOD ranges, fall back to LOD0 so that
+        // m.material_ranges still matches the bound index buffer.
         IGPUMesh* gpu_mesh = m.gpu_mesh;
+        const std::vector<MaterialRange>* ranges = nullptr;
         if (lod_level > 0 && !m.lod_levels.empty())
         {
             IGPUMesh* active = m.getGPUMeshForLOD(lod_level);
-            if (active && active != m.gpu_mesh && active->isUploaded())
+            const auto* lod_ranges = m.getMaterialRangesForLOD(lod_level);
+            if (active && active != m.gpu_mesh && active->isUploaded() && lod_ranges) {
                 gpu_mesh = active;
+                ranges = lod_ranges;
+            }
         }
-        if (!gpu_mesh->isUploaded()) return;
-
-        // Get material ranges for this LOD level
-        const auto* ranges = (lod_level > 0) ? m.getMaterialRangesForLOD(lod_level) : nullptr;
         if (!ranges && m.uses_material_ranges && !m.material_ranges.empty())
             ranges = &m.material_ranges;
+        if (!gpu_mesh->isUploaded()) return;
 
         if (ranges)
         {
@@ -423,14 +426,22 @@ public:
 
         glm::mat4 model = transform.getTransformMatrix();
 
-        // Determine the GPU mesh (LOD selection for shadows)
+        // Determine the GPU mesh (LOD selection for shadows). When a LOD is
+        // selected, also pick its per-LOD material_ranges (which use offsets
+        // into the LOD's own index buffer). If the chosen LOD lacks per-LOD
+        // ranges, fall back to LOD0's gpu_mesh so the full-mesh material_ranges
+        // still match the bound index buffer.
         IGPUMesh* gpu_mesh = m.gpu_mesh;
+        const std::vector<MaterialRange>* shadow_ranges = &m.material_ranges;
         if (!m.lod_levels.empty())
         {
             int shadow_lod = std::min(cascade_index, static_cast<int>(m.lod_levels.size()));
             IGPUMesh* active = m.getGPUMeshForLOD(shadow_lod);
-            if (active && active != m.gpu_mesh && active->isUploaded())
+            const auto* lod_ranges = m.getMaterialRangesForLOD(shadow_lod);
+            if (active && active != m.gpu_mesh && active->isUploaded() && lod_ranges) {
                 gpu_mesh = active;
+                shadow_ranges = lod_ranges;
+            }
         }
         if (!gpu_mesh->isUploaded()) return;
 
@@ -438,14 +449,14 @@ public:
         bool has_alpha_mask = false;
         bool has_alpha_blend = false;
         if (m.uses_material_ranges) {
-            for (const auto& range : m.material_ranges) {
+            for (const auto& range : *shadow_ranges) {
                 if (range.isAlphaMask()) has_alpha_mask = true;
                 if (range.isAlphaBlend()) has_alpha_blend = true;
             }
         }
 
         if (m.uses_material_ranges && (has_alpha_mask || has_alpha_blend)) {
-            for (const auto& range : m.material_ranges) {
+            for (const auto& range : *shadow_ranges) {
                 if (range.isAlphaBlend()) continue;  // BLEND materials don't cast shadows
                 PSOKey key = PSOKey::shadowPass();
                 float alpha_cutoff = 0.0f;

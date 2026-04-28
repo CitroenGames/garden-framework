@@ -186,6 +186,52 @@ bool VulkanRenderAPI::createUniformBuffers()
         }
     }
 
+    // Per-frame point / spot light SSBOs for the deferred lighting pass.
+    // MAX_LIGHTS_DEFERRED entries per kind; populated by uploadLightBuffers.
+    {
+        const VkDeviceSize ptSize = sizeof(GPUPointLight) * MAX_LIGHTS_DEFERRED;
+        const VkDeviceSize spSize = sizeof(GPUSpotLight)  * MAX_LIGHTS_DEFERRED;
+        m_point_lights_buffers.resize(MAX_FRAMES_IN_FLIGHT);
+        m_point_lights_allocations.resize(MAX_FRAMES_IN_FLIGHT);
+        m_point_lights_mapped.resize(MAX_FRAMES_IN_FLIGHT);
+        m_spot_lights_buffers.resize(MAX_FRAMES_IN_FLIGHT);
+        m_spot_lights_allocations.resize(MAX_FRAMES_IN_FLIGHT);
+        m_spot_lights_mapped.resize(MAX_FRAMES_IN_FLIGHT);
+
+        auto makeSSBO = [this](VkDeviceSize size, VkBuffer& buf, VmaAllocation& alloc, void*& mapped) {
+            VkBufferCreateInfo bi{};
+            bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+            bi.size  = size;
+            bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+
+            VmaAllocationCreateInfo ai{};
+            ai.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
+            ai.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
+
+            VmaAllocationInfo ao;
+            if (vmaCreateBuffer(vma_allocator, &bi, &ai, &buf, &alloc, &ao) != VK_SUCCESS)
+                return false;
+            mapped = ao.pMappedData;
+            if (ao.pMappedData) std::memset(ao.pMappedData, 0, size);
+            return true;
+        };
+
+        for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+            if (!makeSSBO(ptSize, m_point_lights_buffers[i],
+                          m_point_lights_allocations[i],
+                          m_point_lights_mapped[i])) {
+                printf("Failed to create deferred point-lights SSBO %d\n", i);
+                return false;
+            }
+            if (!makeSSBO(spSize, m_spot_lights_buffers[i],
+                          m_spot_lights_allocations[i],
+                          m_spot_lights_mapped[i])) {
+                printf("Failed to create deferred spot-lights SSBO %d\n", i);
+                return false;
+            }
+        }
+    }
+
     // PerObjectUBO dynamic ring buffers (binding 4) - one large buffer per frame
     {
         // Query minUniformBufferOffsetAlignment for dynamic UBO offsets

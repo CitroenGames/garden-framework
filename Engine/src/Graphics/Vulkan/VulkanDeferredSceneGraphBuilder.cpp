@@ -204,8 +204,8 @@ void VulkanDeferredSceneGraphBuilder::build(RenderGraph& graph, RGBackend& backe
             ubo.uLightDir     = m_api->light_direction;
             ubo.uLightAmbient = m_api->light_ambient;
             ubo.uLightDiffuse = m_api->light_diffuse;
-            ubo.uNumPointLights = 0;  // Phase E: real per-light SSBOs
-            ubo.uNumSpotLights  = 0;
+            ubo.uNumPointLights = m_api->m_num_point_lights_deferred;
+            ubo.uNumSpotLights  = m_api->m_num_spot_lights_deferred;
 
             const uint32_t f = m_api->current_frame;
             std::memcpy(m_api->m_deferred_lighting_cb_mapped[f], &ubo, sizeof(ubo));
@@ -232,10 +232,16 @@ void VulkanDeferredSceneGraphBuilder::build(RenderGraph& graph, RGBackend& backe
             VkDescriptorImageInfo dpI { linear, depthV,  VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL };
             VkDescriptorImageInfo shI { shadow, shadowV, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
 
-            VkDescriptorBufferInfo lightsBI{};
-            lightsBI.buffer = m_api->m_dummy_lights_buffer;
-            lightsBI.offset = 0;
-            lightsBI.range  = VK_WHOLE_SIZE;
+            // Real per-frame point/spot SSBOs populated by uploadLightBuffers.
+            VkDescriptorBufferInfo pointBI{};
+            pointBI.buffer = m_api->m_point_lights_buffers[f];
+            pointBI.offset = 0;
+            pointBI.range  = VK_WHOLE_SIZE;
+
+            VkDescriptorBufferInfo spotBI{};
+            spotBI.buffer = m_api->m_spot_lights_buffers[f];
+            spotBI.offset = 0;
+            spotBI.range  = VK_WHOLE_SIZE;
 
             std::array<VkWriteDescriptorSet, 8> writes{};
             for (auto& w : writes) w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -259,15 +265,15 @@ void VulkanDeferredSceneGraphBuilder::build(RenderGraph& graph, RGBackend& backe
             fillImage(4, VulkanDeferredLightingPass::BINDING_DEPTH,  &dpI);
             fillImage(5, VulkanDeferredLightingPass::BINDING_SHADOW, &shI);
 
-            auto fillSSBO = [&](size_t i, uint32_t binding) {
+            auto fillSSBO = [&](size_t i, uint32_t binding, const VkDescriptorBufferInfo* info) {
                 writes[i].dstSet          = ds;
                 writes[i].dstBinding      = binding;
                 writes[i].descriptorCount = 1;
                 writes[i].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-                writes[i].pBufferInfo     = &lightsBI;
+                writes[i].pBufferInfo     = info;
             };
-            fillSSBO(6, VulkanDeferredLightingPass::BINDING_POINT_LIGHTS);
-            fillSSBO(7, VulkanDeferredLightingPass::BINDING_SPOT_LIGHTS);
+            fillSSBO(6, VulkanDeferredLightingPass::BINDING_POINT_LIGHTS, &pointBI);
+            fillSSBO(7, VulkanDeferredLightingPass::BINDING_SPOT_LIGHTS, &spotBI);
 
             vkUpdateDescriptorSets(m_api->device,
                                    static_cast<uint32_t>(writes.size()),

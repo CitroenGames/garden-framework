@@ -455,6 +455,18 @@ private:
     std::vector<VmaAllocation> m_deferred_lighting_cb_allocations;
     std::vector<void*> m_deferred_lighting_cb_mapped;
 
+    // Per-frame point / spot light SSBOs for the deferred lighting pass.
+    // Sized for MAX_LIGHTS_DEFERRED entries; populated by uploadLightBuffers.
+    static constexpr int MAX_LIGHTS_DEFERRED = 256;
+    std::vector<VkBuffer> m_point_lights_buffers;
+    std::vector<VmaAllocation> m_point_lights_allocations;
+    std::vector<void*> m_point_lights_mapped;
+    std::vector<VkBuffer> m_spot_lights_buffers;
+    std::vector<VmaAllocation> m_spot_lights_allocations;
+    std::vector<void*> m_spot_lights_mapped;
+    int m_num_point_lights_deferred = 0;
+    int m_num_spot_lights_deferred  = 0;
+
     // Per-object dynamic UBO ring buffer (per-frame) - PerObjectUBO at binding 4
     static constexpr uint32_t MAX_PER_OBJECT_DRAWS = 4096;
     VkDeviceSize per_object_alignment = 0; // minUniformBufferOffsetAlignment-aligned size

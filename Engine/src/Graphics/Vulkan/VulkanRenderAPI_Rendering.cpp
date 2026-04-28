@@ -20,6 +20,29 @@
 
 #include "VkInitHelpers.hpp"
 
+namespace {
+bool checkIndexedDrawBounds(const char* tag,
+                            VulkanMesh* vulkanMesh,
+                            size_t firstIndex,
+                            size_t indexCount,
+                            const char* extra = "")
+{
+    if (!vulkanMesh) return false;
+    const size_t indices_size = vulkanMesh->getIndexCount();
+    const size_t vertex_size  = vulkanMesh->getVertexCount();
+    if (firstIndex + indexCount > indices_size) {
+        LOG_ENGINE_ERROR("[OVERFLOW {}] gpu_mesh={} firstIndex={} indexCount={} indices_size={} gpu_vertex_count={} overrun_by={} {}",
+                         tag,
+                         static_cast<const void*>(vulkanMesh),
+                         firstIndex, indexCount, indices_size, vertex_size,
+                         (firstIndex + indexCount) - indices_size,
+                         extra);
+        return false;
+    }
+    return true;
+}
+} // namespace
+
 // Camera and transforms
 void VulkanRenderAPI::setCamera(const camera& cam)
 {
@@ -523,6 +546,16 @@ void VulkanRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t
         }
         if (vulkanMesh->isIndexed()) {
             vkCmdBindIndexBuffer(command_buffers[current_frame], vulkanMesh->getIndexBuffer(), 0, VK_INDEX_TYPE_UINT32);
+            char extra[256];
+            snprintf(extra, sizeof(extra),
+                     "mesh.vertices_len=%zu uses_mat_ranges=%d ranges=%zu lod=%d lod_levels=%zu",
+                     m.vertices_len,
+                     m.uses_material_ranges ? 1 : 0,
+                     m.material_ranges.size(),
+                     m.current_lod.load(std::memory_order_relaxed),
+                     m.lod_levels.size());
+            if (!checkIndexedDrawBounds("shadow", vulkanMesh, start_vertex, vertex_count, extra))
+                return;
             vkCmdDrawIndexed(command_buffers[current_frame], static_cast<uint32_t>(vertex_count), 1,
                              static_cast<uint32_t>(start_vertex), 0, 0);
         } else {
@@ -640,6 +673,16 @@ void VulkanRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t
 
     if (vulkanMesh->isIndexed()) {
         vkCmdBindIndexBuffer(command_buffers[current_frame], vulkanMesh->getIndexBuffer(), 0, VK_INDEX_TYPE_UINT32);
+        char extra[256];
+        snprintf(extra, sizeof(extra),
+                 "mesh.vertices_len=%zu uses_mat_ranges=%d ranges=%zu lod=%d lod_levels=%zu",
+                 m.vertices_len,
+                 m.uses_material_ranges ? 1 : 0,
+                 m.material_ranges.size(),
+                 m.current_lod.load(std::memory_order_relaxed),
+                 m.lod_levels.size());
+        if (!checkIndexedDrawBounds("renderMeshRange", vulkanMesh, start_vertex, vertex_count, extra))
+            return;
         vkCmdDrawIndexed(command_buffers[current_frame], static_cast<uint32_t>(vertex_count), 1,
                          static_cast<uint32_t>(start_vertex), 0, 0);
     } else {
@@ -754,11 +797,15 @@ void VulkanRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
             }
             if (vulkanMesh->isIndexed()) {
                 vkCmdBindIndexBuffer(cmd, vulkanMesh->getIndexBuffer(), 0, VK_INDEX_TYPE_UINT32);
-                if (drawCmd.vertex_count > 0)
-                    vkCmdDrawIndexed(cmd, static_cast<uint32_t>(drawCmd.vertex_count), 1,
-                                     static_cast<uint32_t>(drawCmd.start_vertex), 0, 0);
-                else
+                if (drawCmd.vertex_count > 0) {
+                    if (checkIndexedDrawBounds("replay-shadow", vulkanMesh,
+                                               drawCmd.start_vertex, drawCmd.vertex_count,
+                                               "shadow_replay"))
+                        vkCmdDrawIndexed(cmd, static_cast<uint32_t>(drawCmd.vertex_count), 1,
+                                         static_cast<uint32_t>(drawCmd.start_vertex), 0, 0);
+                } else {
                     vkCmdDrawIndexed(cmd, static_cast<uint32_t>(vulkanMesh->getIndexCount()), 1, 0, 0, 0);
+                }
             } else {
                 if (drawCmd.vertex_count > 0)
                     vkCmdDraw(cmd, static_cast<uint32_t>(drawCmd.vertex_count), 1,
@@ -836,11 +883,15 @@ void VulkanRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
 
         if (vulkanMesh->isIndexed()) {
             vkCmdBindIndexBuffer(cmd, vulkanMesh->getIndexBuffer(), 0, VK_INDEX_TYPE_UINT32);
-            if (drawCmd.vertex_count > 0)
-                vkCmdDrawIndexed(cmd, static_cast<uint32_t>(drawCmd.vertex_count), 1,
-                                 static_cast<uint32_t>(drawCmd.start_vertex), 0, 0);
-            else
+            if (drawCmd.vertex_count > 0) {
+                if (checkIndexedDrawBounds("replay-main", vulkanMesh,
+                                           drawCmd.start_vertex, drawCmd.vertex_count,
+                                           "main_replay"))
+                    vkCmdDrawIndexed(cmd, static_cast<uint32_t>(drawCmd.vertex_count), 1,
+                                     static_cast<uint32_t>(drawCmd.start_vertex), 0, 0);
+            } else {
                 vkCmdDrawIndexed(cmd, static_cast<uint32_t>(vulkanMesh->getIndexCount()), 1, 0, 0, 0);
+            }
         } else {
             if (drawCmd.vertex_count > 0)
                 vkCmdDraw(cmd, static_cast<uint32_t>(drawCmd.vertex_count), 1,
@@ -1125,6 +1176,9 @@ void VulkanRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmd
                             ? static_cast<uint32_t>(drawCmd.vertex_count)
                             : static_cast<uint32_t>(vulkanMesh->getIndexCount());
                         uint32_t first = static_cast<uint32_t>(drawCmd.start_vertex);
+                        if (drawCmd.vertex_count > 0 && !checkIndexedDrawBounds(
+                                "replay-parallel", vulkanMesh, first, count, "parallel_replay"))
+                            continue;
                         vkCmdDrawIndexed(secCmd, count, 1, first, 0, 0);
                     } else {
                         uint32_t count = drawCmd.vertex_count > 0
@@ -1349,8 +1403,17 @@ void VulkanRenderAPI::submitDeferredTransparentCommands(const RenderCommandBuffe
 void VulkanRenderAPI::uploadLightBuffers(const GPUPointLight* pts, int ptCount,
                                          const GPUSpotLight*  spts, int spCount)
 {
-    // TODO (Phase E): copy light arrays into per-frame point/spot SSBOs.
-    // For now, the deferred lighting shader reads num*Lights from the CB and
-    // short-circuits when count==0, so we ignore the upload.
-    (void)pts; (void)ptCount; (void)spts; (void)spCount;
+    if (ptCount > MAX_LIGHTS_DEFERRED) ptCount = MAX_LIGHTS_DEFERRED;
+    if (spCount > MAX_LIGHTS_DEFERRED) spCount = MAX_LIGHTS_DEFERRED;
+    if (ptCount < 0) ptCount = 0;
+    if (spCount < 0) spCount = 0;
+
+    const uint32_t f = current_frame;
+    if (f < m_point_lights_mapped.size() && m_point_lights_mapped[f] && pts && ptCount > 0)
+        std::memcpy(m_point_lights_mapped[f], pts, sizeof(GPUPointLight) * ptCount);
+    if (f < m_spot_lights_mapped.size() && m_spot_lights_mapped[f] && spts && spCount > 0)
+        std::memcpy(m_spot_lights_mapped[f], spts, sizeof(GPUSpotLight)  * spCount);
+
+    m_num_point_lights_deferred = ptCount;
+    m_num_spot_lights_deferred  = spCount;
 }

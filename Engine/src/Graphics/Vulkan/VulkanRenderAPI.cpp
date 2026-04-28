@@ -378,6 +378,27 @@ void VulkanRenderAPI::shutdown()
     m_deferred_lighting_cb_allocations.clear();
     m_deferred_lighting_cb_mapped.clear();
 
+    // Clean up deferred light SSBOs
+    for (size_t i = 0; i < m_point_lights_buffers.size(); ++i) {
+        if (m_point_lights_buffers[i] && vma_allocator)
+            vmaDestroyBuffer(vma_allocator,
+                             m_point_lights_buffers[i],
+                             m_point_lights_allocations[i]);
+    }
+    m_point_lights_buffers.clear();
+    m_point_lights_allocations.clear();
+    m_point_lights_mapped.clear();
+
+    for (size_t i = 0; i < m_spot_lights_buffers.size(); ++i) {
+        if (m_spot_lights_buffers[i] && vma_allocator)
+            vmaDestroyBuffer(vma_allocator,
+                             m_spot_lights_buffers[i],
+                             m_spot_lights_allocations[i]);
+    }
+    m_spot_lights_buffers.clear();
+    m_spot_lights_allocations.clear();
+    m_spot_lights_mapped.clear();
+
     // Clean up per-object uniform buffers
     for (size_t i = 0; i < per_object_uniform_buffers.size(); i++) {
         if (per_object_uniform_buffers[i] && vma_allocator) {
