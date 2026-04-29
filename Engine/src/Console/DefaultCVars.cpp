@@ -43,6 +43,15 @@ CONVAR(r_depthprepass, 1, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
 CONVAR(r_frustumculling, 1, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
        "Enable BVH frustum culling");
 
+CONVAR(r_staticmesh_chunking, 1, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
+       "Enable spatial chunking for large static meshes");
+
+CONVAR_BOUNDED(r_staticmesh_chunk_tris, 8192, 128, 65536, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
+               "Target triangles per static mesh chunk");
+
+CONVAR_BOUNDED(r_staticmesh_max_chunks, 3072, 0, 65536, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
+               "Maximum chunks per static mesh, 0 means unlimited");
+
 CONVAR(r_deferred, 0, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
        "Enable deferred rendering (opaque GBuffer + deferred lighting; transparents still forward). "
        "Supported on D3D12 and Vulkan.");

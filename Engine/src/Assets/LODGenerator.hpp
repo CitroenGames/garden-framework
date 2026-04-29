@@ -2,6 +2,7 @@
 
 #include "AssetMetadata.hpp"
 #include "Utils/Vertex.hpp"
+#include <glm/glm.hpp>
 #include <vector>
 #include <string>
 #include <cstdint>
@@ -12,6 +13,9 @@ struct LODSubmeshRange {
     size_t start_index = 0;   // Start in the index buffer
     size_t index_count = 0;   // Number of indices in this submesh
     size_t submesh_id = 0;    // Maps back to original submesh index
+    bool has_bounds = false;
+    glm::vec3 aabb_min{0.0f};
+    glm::vec3 aabb_max{0.0f};
 };
 
 struct LODMeshData {

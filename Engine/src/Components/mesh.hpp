@@ -57,6 +57,11 @@ struct MaterialRange
     TextureHandle occlusion_texture = INVALID_TEXTURE;
     TextureHandle emissive_texture = INVALID_TEXTURE;
 
+    bool has_bounds = false;
+    glm::vec3 aabb_min{0.0f};
+    glm::vec3 aabb_max{0.0f};
+    size_t source_range = std::numeric_limits<size_t>::max();
+
     MaterialRange()
         : start_vertex(0), vertex_count(0), texture(INVALID_TEXTURE), material_name("") {}
 
@@ -737,6 +742,7 @@ public:
                 }
 
                 MaterialRange range(current_vertex, vert_count, tex, mat_name);
+                range.source_range = i;
 
                 // Copy PBR properties from glTF material data
                 if (mat_idx >= 0 && mat_idx < static_cast<int>(result.material_data.materials.size()))

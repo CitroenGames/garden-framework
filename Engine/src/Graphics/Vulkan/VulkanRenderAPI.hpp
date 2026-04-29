@@ -469,7 +469,7 @@ private:
     int m_num_spot_lights_deferred  = 0;
 
     // Per-object dynamic UBO ring buffer (per-frame) - PerObjectUBO at binding 4
-    static constexpr uint32_t MAX_PER_OBJECT_DRAWS = 4096;
+    static constexpr uint32_t MAX_PER_OBJECT_DRAWS = 16384;
     VkDeviceSize per_object_alignment = 0; // minUniformBufferOffsetAlignment-aligned size
     std::vector<VkBuffer> per_object_uniform_buffers;
     std::vector<VmaAllocation> per_object_uniform_allocations;

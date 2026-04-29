@@ -135,10 +135,103 @@ public:
             m.uploadToGPU(api);
     }
 
+    static bool material_range_is_visible(const MaterialRange& range, const glm::mat4& model,
+                                          const Frustum* frustum)
+    {
+        if (!frustum || !range.has_bounds)
+            return true;
+        if (range.isAlphaBlend())
+            return true;
+
+        glm::vec3 extent = range.aabb_max - range.aabb_min;
+        float min_extent = std::min(extent.x, std::min(extent.y, extent.z));
+        if (range.vertex_count <= 12 && min_extent < 0.05f)
+            return true;
+
+        glm::vec3 padding = glm::max(extent * 0.05f, glm::vec3(1.0f));
+        AABB world_bounds = AABB::fromTransformedAABB(
+            range.aabb_min - padding,
+            range.aabb_max + padding,
+            model);
+        return frustum->intersectsAABB(world_bounds);
+    }
+
+    static bool has_bounded_ranges(const std::vector<MaterialRange>* ranges)
+    {
+        if (!ranges)
+            return false;
+        for (const auto& range : *ranges)
+            if (range.has_bounds)
+                return true;
+        return false;
+    }
+
+    static bool material_ranges_draw_compatible(const MaterialRange& a, const MaterialRange& b)
+    {
+        return a.start_vertex + a.vertex_count == b.start_vertex
+            && a.texture == b.texture
+            && a.alpha_mode == b.alpha_mode
+            && a.alpha_cutoff == b.alpha_cutoff
+            && a.double_sided == b.double_sided
+            && a.metallic_factor == b.metallic_factor
+            && a.roughness_factor == b.roughness_factor
+            && a.emissive_factor.x == b.emissive_factor.x
+            && a.emissive_factor.y == b.emissive_factor.y
+            && a.emissive_factor.z == b.emissive_factor.z
+            && a.base_color_factor.x == b.base_color_factor.x
+            && a.base_color_factor.y == b.base_color_factor.y
+            && a.base_color_factor.z == b.base_color_factor.z
+            && a.base_color_factor.w == b.base_color_factor.w
+            && a.metallic_roughness_texture == b.metallic_roughness_texture
+            && a.normal_texture == b.normal_texture
+            && a.occlusion_texture == b.occlusion_texture
+            && a.emissive_texture == b.emissive_texture;
+    }
+
+    template <typename Emit>
+    static void emit_visible_merged_ranges(const std::vector<MaterialRange>& ranges,
+                                           const glm::mat4& model,
+                                           const Frustum* frustum,
+                                           Emit emit)
+    {
+        MaterialRange merged;
+        bool has_merged = false;
+
+        auto flush = [&]() {
+            if (has_merged) {
+                emit(merged);
+                has_merged = false;
+            }
+        };
+
+        for (const auto& range : ranges)
+        {
+            if (range.vertex_count == 0)
+                continue;
+
+            if (!material_range_is_visible(range, model, frustum)) {
+                flush();
+                continue;
+            }
+
+            if (has_merged && material_ranges_draw_compatible(merged, range)) {
+                merged.vertex_count += range.vertex_count;
+                continue;
+            }
+
+            flush();
+            merged = range;
+            has_merged = true;
+        }
+
+        flush();
+    }
+
     // Record a single mesh draw into a command buffer.
     // Thread-safe: reads mesh state without mutation.
     static void record_mesh_draw(const mesh& m, const TransformComponent& transform,
-                                 RenderCommandBuffer& cmds, bool global_lighting)
+                                 RenderCommandBuffer& cmds, bool global_lighting,
+                                 const Frustum* frustum = nullptr)
     {
         if (!m.visible || !m.gpu_mesh || !m.gpu_mesh->isUploaded()) return;
 
@@ -147,8 +240,8 @@ public:
 
         if (m.uses_material_ranges && !m.material_ranges.empty())
         {
-            for (const auto& range : m.material_ranges)
-            {
+            emit_visible_merged_ranges(m.material_ranges, model, frustum,
+                [&](const MaterialRange& range) {
                 RenderState range_state = base_state;
                 if (range.isAlphaMask()) {
                     range_state.alpha_test = true;
@@ -171,7 +264,7 @@ public:
                                      key, range.start_vertex, range.vertex_count,
                                      glm::vec3(range.base_color_factor), range_state.alpha_cutoff,
                                      range.metallic_factor, range.roughness_factor, range.emissive_factor);
-            }
+                });
         }
         else
         {
@@ -187,7 +280,8 @@ public:
     // Thread-safe: uses lod_level parameter instead of reading m.current_lod.
     static void record_lod_mesh_draw(const mesh& m, const TransformComponent& transform,
                                      RenderCommandBuffer& cmds, bool global_lighting,
-                                     IGPUMesh* lod_gpu_mesh, int lod_level)
+                                     IGPUMesh* lod_gpu_mesh, int lod_level,
+                                     const Frustum* frustum = nullptr)
     {
         if (!lod_gpu_mesh || !lod_gpu_mesh->isUploaded()) return;
 
@@ -199,8 +293,8 @@ public:
 
         if (lod_ranges)
         {
-            for (const auto& range : *lod_ranges)
-            {
+            emit_visible_merged_ranges(*lod_ranges, model, frustum,
+                [&](const MaterialRange& range) {
                 RenderState range_state = base_state;
                 if (range.isAlphaMask()) {
                     range_state.alpha_test = true;
@@ -223,7 +317,7 @@ public:
                                      key, range.start_vertex, range.vertex_count,
                                      glm::vec3(range.base_color_factor), range_state.alpha_cutoff,
                                      range.metallic_factor, range.roughness_factor, range.emissive_factor);
-            }
+                });
         }
         else
         {
@@ -255,7 +349,8 @@ public:
     // Record a mesh at a specific LOD level.
     // Thread-safe: uses getGPUMeshForLOD() instead of selectLOD() + getActiveGPUMesh().
     static void record_mesh_at_lod(const mesh& m, const TransformComponent& transform,
-                                   RenderCommandBuffer& cmds, bool global_lighting, int lod_level)
+                                   RenderCommandBuffer& cmds, bool global_lighting, int lod_level,
+                                   const Frustum* frustum = nullptr)
     {
         if (!m.visible) return;
 
@@ -264,18 +359,19 @@ public:
             IGPUMesh* active = m.getGPUMeshForLOD(lod_level);
             if (active && active != m.gpu_mesh)
             {
-                record_lod_mesh_draw(m, transform, cmds, global_lighting, active, lod_level);
+                record_lod_mesh_draw(m, transform, cmds, global_lighting, active, lod_level, frustum);
                 return;
             }
         }
-        record_mesh_draw(m, transform, cmds, global_lighting);
+        record_mesh_draw(m, transform, cmds, global_lighting, frustum);
     }
 
     // Record a mesh with automatic LOD selection.
     // Thread-safe: computes LOD locally, never writes to mesh state.
     static void record_mesh_with_lod(const mesh& m, const TransformComponent& transform,
                                      RenderCommandBuffer& cmds, bool global_lighting,
-                                     const glm::vec3& camera_pos, const glm::mat4& projection)
+                                     const glm::vec3& camera_pos, const glm::mat4& projection,
+                                     const Frustum* frustum = nullptr)
     {
         if (!m.visible) return;
 
@@ -304,18 +400,18 @@ public:
             IGPUMesh* active = m.getGPUMeshForLOD(lod);
             if (active && active != m.gpu_mesh)
             {
-                record_lod_mesh_draw(m, transform, cmds, global_lighting, active, lod);
+                record_lod_mesh_draw(m, transform, cmds, global_lighting, active, lod, frustum);
                 return;
             }
         }
 
-        record_mesh_draw(m, transform, cmds, global_lighting);
+        record_mesh_draw(m, transform, cmds, global_lighting, frustum);
     }
 
     // Record a depth-prepass draw command.
     // Thread-safe: reads mesh state without mutation.
     static void record_depth_draw(const mesh& m, const TransformComponent& transform,
-                                  RenderCommandBuffer& cmds)
+                                  RenderCommandBuffer& cmds, const Frustum* frustum = nullptr)
     {
         if (!m.visible || !m.gpu_mesh || !m.gpu_mesh->isUploaded()) return;
         glm::mat4 model = transform.getTransformMatrix();
@@ -323,16 +419,19 @@ public:
         // Check if any material range needs special depth handling
         bool has_alpha_mask = false;
         bool has_alpha_blend = false;
+        bool has_bounded = false;
         if (m.uses_material_ranges) {
             for (const auto& range : m.material_ranges) {
                 if (range.isAlphaMask()) has_alpha_mask = true;
                 if (range.isAlphaBlend()) has_alpha_blend = true;
+                if (range.has_bounds) has_bounded = true;
             }
         }
 
-        if (m.uses_material_ranges && (has_alpha_mask || has_alpha_blend)) {
-            for (const auto& range : m.material_ranges) {
-                if (range.isAlphaBlend()) continue;  // Skip blend ranges in depth prepass
+        if (m.uses_material_ranges && (has_alpha_mask || has_alpha_blend || has_bounded)) {
+            emit_visible_merged_ranges(m.material_ranges, model, frustum,
+                [&](const MaterialRange& range) {
+                if (range.isAlphaBlend()) return;  // Skip blend ranges in depth prepass
                 PSOKey key = PSOKey::depthPrepass();
                 float alpha_cutoff = 0.0f;
                 bool has_tex = false;
@@ -347,7 +446,7 @@ public:
                 cmds.recordDrawRange(m.gpu_mesh, model, tex, has_tex,
                                      key, range.start_vertex, range.vertex_count,
                                      glm::vec3(1.0f), alpha_cutoff);
-            }
+                });
         } else {
             PSOKey key = PSOKey::depthPrepass();
             cmds.recordDraw(m.gpu_mesh, model, INVALID_TEXTURE, false, key);
@@ -357,7 +456,8 @@ public:
     // Record a depth-prepass draw at a specific LOD.
     // Thread-safe: uses getGPUMeshForLOD() instead of selectLOD().
     static void record_depth_draw_at_lod(const mesh& m, const TransformComponent& transform,
-                                         RenderCommandBuffer& cmds, int lod_level)
+                                         RenderCommandBuffer& cmds, int lod_level,
+                                         const Frustum* frustum = nullptr)
     {
         if (!m.visible || !m.gpu_mesh) return;
         if (m.transparent) return;  // Don't depth-prepass transparent meshes
@@ -386,12 +486,13 @@ public:
         {
             bool needs_per_range = false;
             for (const auto& range : *ranges) {
-                if (range.isAlphaMask() || range.isAlphaBlend()) { needs_per_range = true; break; }
+                if (range.isAlphaMask() || range.isAlphaBlend() || range.has_bounds) { needs_per_range = true; break; }
             }
 
             if (needs_per_range) {
-                for (const auto& range : *ranges) {
-                    if (range.isAlphaBlend()) continue;  // Skip blend ranges in depth prepass
+                emit_visible_merged_ranges(*ranges, model, frustum,
+                    [&](const MaterialRange& range) {
+                    if (range.isAlphaBlend()) return;  // Skip blend ranges in depth prepass
                     PSOKey key = PSOKey::depthPrepass();
                     float alpha_cutoff = 0.0f;
                     bool has_tex = false;
@@ -406,7 +507,7 @@ public:
                     cmds.recordDrawRange(gpu_mesh, model, tex, has_tex,
                                          key, range.start_vertex, range.vertex_count,
                                          glm::vec3(1.0f), alpha_cutoff);
-                }
+                    });
                 return;
             }
         }
@@ -419,7 +520,8 @@ public:
     // Record a shadow pass draw command.
     // Thread-safe: computes shadow LOD locally, never writes to mesh state.
     static void record_shadow_draw(const mesh& m, const TransformComponent& transform,
-                                   RenderCommandBuffer& cmds, int cascade_index)
+                                   RenderCommandBuffer& cmds, int cascade_index,
+                                   const Frustum* frustum = nullptr)
     {
         if (!m.visible || !m.casts_shadow) return;
         if (!m.gpu_mesh || !m.gpu_mesh->isUploaded()) return;
@@ -448,16 +550,19 @@ public:
         // Check if any material range needs special shadow handling
         bool has_alpha_mask = false;
         bool has_alpha_blend = false;
+        bool has_bounded = false;
         if (m.uses_material_ranges) {
             for (const auto& range : *shadow_ranges) {
                 if (range.isAlphaMask()) has_alpha_mask = true;
                 if (range.isAlphaBlend()) has_alpha_blend = true;
+                if (range.has_bounds) has_bounded = true;
             }
         }
 
-        if (m.uses_material_ranges && (has_alpha_mask || has_alpha_blend)) {
-            for (const auto& range : *shadow_ranges) {
-                if (range.isAlphaBlend()) continue;  // BLEND materials don't cast shadows
+        if (m.uses_material_ranges && (has_alpha_mask || has_alpha_blend || has_bounded)) {
+            emit_visible_merged_ranges(*shadow_ranges, model, frustum,
+                [&](const MaterialRange& range) {
+                if (range.isAlphaBlend()) return;  // BLEND materials don't cast shadows
                 PSOKey key = PSOKey::shadowPass();
                 float alpha_cutoff = 0.0f;
                 bool has_tex = false;
@@ -471,7 +576,7 @@ public:
                 cmds.recordDrawRange(gpu_mesh, model, tex, has_tex,
                                      key, range.start_vertex, range.vertex_count,
                                      glm::vec3(1.0f), alpha_cutoff);
-            }
+                });
         } else {
             PSOKey key = PSOKey::shadowPass();
             cmds.recordDraw(gpu_mesh, model, INVALID_TEXTURE, false, key);
@@ -515,7 +620,8 @@ public:
         entt::registry& registry,
         const std::vector<entt::entity>& entities,
         const std::vector<int>& lod_levels,
-        bool global_lighting)
+        bool global_lighting,
+        const Frustum* frustum = nullptr)
     {
         // For small entity counts, single-threaded recording is faster
         if (entities.size() < PARALLEL_CHUNK_SIZE)
@@ -528,7 +634,7 @@ public:
                 auto* mc = registry.try_get<MeshComponent>(entities[i]);
                 auto* t = registry.try_get<TransformComponent>(entities[i]);
                 if (!mc || !t || !mc->m_mesh || !mc->m_mesh->visible) continue;
-                record_mesh_at_lod(*mc->m_mesh, *t, cmds, global_lighting, lod_levels[i]);
+                record_mesh_at_lod(*mc->m_mesh, *t, cmds, global_lighting, lod_levels[i], frustum);
             }
             cmds.sort();
             return cmds;
@@ -558,7 +664,7 @@ public:
                         auto* t = registry.try_get<TransformComponent>(entities[i]);
                         if (!mc || !t || !mc->m_mesh || !mc->m_mesh->visible) continue;
                         record_mesh_at_lod(*mc->m_mesh, *t,
-                                           contexts[c].command_buffer, global_lighting, lod_levels[i]);
+                                           contexts[c].command_buffer, global_lighting, lod_levels[i], frustum);
                     }
                 }));
         }
@@ -587,7 +693,8 @@ public:
     RenderCommandBuffer record_shadow_parallel(
         entt::registry& registry,
         const std::vector<entt::entity>& entities,
-        int cascade_index)
+        int cascade_index,
+        const Frustum* frustum = nullptr)
     {
         if (entities.size() < PARALLEL_CHUNK_SIZE)
         {
@@ -599,7 +706,7 @@ public:
                 auto* mc = registry.try_get<MeshComponent>(entity);
                 auto* t = registry.try_get<TransformComponent>(entity);
                 if (mc && t && mc->m_mesh && mc->m_mesh->visible && mc->m_mesh->casts_shadow)
-                    record_shadow_draw(*mc->m_mesh, *t, cmds, cascade_index);
+                    record_shadow_draw(*mc->m_mesh, *t, cmds, cascade_index, frustum);
             }
             return cmds;
         }
@@ -625,7 +732,7 @@ public:
                         auto* mc = registry.try_get<MeshComponent>(entities[i]);
                         auto* t = registry.try_get<TransformComponent>(entities[i]);
                         if (mc && t && mc->m_mesh && mc->m_mesh->visible && mc->m_mesh->casts_shadow)
-                            record_shadow_draw(*mc->m_mesh, *t, buffers[c], cascade_index);
+                            record_shadow_draw(*mc->m_mesh, *t, buffers[c], cascade_index, frustum);
                     }
                 }));
         }
@@ -647,7 +754,8 @@ public:
     RenderCommandBuffer record_depth_parallel(
         entt::registry& registry,
         const std::vector<entt::entity>& entities,
-        const std::vector<int>& lod_levels)
+        const std::vector<int>& lod_levels,
+        const Frustum* frustum = nullptr)
     {
         if (entities.size() < PARALLEL_CHUNK_SIZE)
         {
@@ -659,7 +767,7 @@ public:
                 auto* mc = registry.try_get<MeshComponent>(entities[i]);
                 auto* t = registry.try_get<TransformComponent>(entities[i]);
                 if (!mc || !t || !mc->m_mesh || !mc->m_mesh->visible) continue;
-                record_depth_draw_at_lod(*mc->m_mesh, *t, cmds, lod_levels[i]);
+                record_depth_draw_at_lod(*mc->m_mesh, *t, cmds, lod_levels[i], frustum);
             }
             return cmds;
         }
@@ -685,7 +793,7 @@ public:
                         auto* mc = registry.try_get<MeshComponent>(entities[i]);
                         auto* t = registry.try_get<TransformComponent>(entities[i]);
                         if (!mc || !t || !mc->m_mesh || !mc->m_mesh->visible) continue;
-                        record_depth_draw_at_lod(*mc->m_mesh, *t, buffers[c], lod_levels[i]);
+                        record_depth_draw_at_lod(*mc->m_mesh, *t, buffers[c], lod_levels[i], frustum);
                     }
                 }));
         }
@@ -962,17 +1070,21 @@ public:
             render_api->beginCascade(cascade);
 
             RenderCommandBuffer shadow_cmds;
-
-            if (bvh_enabled && cascade_matrices)
+            Frustum shadow_frustum;
+            const Frustum* shadow_frustum_ptr = nullptr;
+            if (cascade_matrices)
             {
-                Frustum shadow_frustum;
                 shadow_frustum.extractFromViewProjection(cascade_matrices[cascade]);
+                shadow_frustum_ptr = &shadow_frustum;
+            }
 
+            if (bvh_enabled && shadow_frustum_ptr)
+            {
                 std::vector<entt::entity> shadow_entities;
                 scene_bvh.queryFrustum(shadow_frustum, shadow_entities);
 
                 ensure_meshes_uploaded(registry, shadow_entities);
-                shadow_cmds = record_shadow_parallel(registry, shadow_entities, cascade);
+                shadow_cmds = record_shadow_parallel(registry, shadow_entities, cascade, shadow_frustum_ptr);
             }
             else
             {
@@ -986,7 +1098,7 @@ public:
                         all_shadow.push_back(entity);
                     }
                 }
-                shadow_cmds = record_shadow_parallel(registry, all_shadow, cascade);
+                shadow_cmds = record_shadow_parallel(registry, all_shadow, cascade, shadow_frustum_ptr);
             }
 
             render_api->replayCommandBuffer(shadow_cmds);
@@ -1012,16 +1124,15 @@ public:
 
         glm::mat4 proj = render_api->getProjectionMatrix();
         glm::vec3 cam_pos = c.getPosition();
+        Frustum camera_frustum;
+        glm::mat4 camera_view_proj = proj * render_api->getViewMatrix();
+        camera_frustum.extractFromViewProjection(camera_view_proj);
 
         if (bvh_enabled)
         {
             // Extract camera frustum and query visible entities
-            Frustum frustum;
-            glm::mat4 viewProj = proj * render_api->getViewMatrix();
-            frustum.extractFromViewProjection(viewProj);
-
             std::vector<entt::entity> visible_entities;
-            scene_bvh.queryFrustum(frustum, visible_entities);
+            scene_bvh.queryFrustum(camera_frustum, visible_entities);
 
             last_total_entities = scene_bvh.getTotalEntities();
             last_visible_entities = visible_entities.size();
@@ -1092,7 +1203,7 @@ public:
             if (depth_prepass_enabled && !opaque_entities.empty())
             {
                 RenderCommandBuffer depth_cmds = record_depth_parallel(
-                    registry, opaque_entities, opaque_lod);
+                    registry, opaque_entities, opaque_lod, &camera_frustum);
 
                 render_api->beginDepthPrepass();
                 render_api->replayCommandBuffer(depth_cmds);
@@ -1102,7 +1213,7 @@ public:
             // Main lit pass: opaques - parallel recording, merge, sort, replay
             {
                 RenderCommandBuffer opaque_cmds = record_opaque_parallel(
-                    registry, opaque_entities, opaque_lod, global_lighting);
+                    registry, opaque_entities, opaque_lod, global_lighting, &camera_frustum);
                 last_draw_calls += opaque_cmds.size();
                 if (render_api->isDeferredActive())
                     render_api->submitDeferredOpaqueCommands(opaque_cmds);
@@ -1124,7 +1235,7 @@ public:
                     if (mesh_comp && t && mesh_comp->m_mesh && mesh_comp->m_mesh->visible)
                     {
                         record_mesh_with_lod(*mesh_comp->m_mesh, *t, transparent_cmds,
-                                             global_lighting, cam_pos, proj);
+                                             global_lighting, cam_pos, proj, &camera_frustum);
                     }
                 }
 
@@ -1152,7 +1263,7 @@ public:
                 {
                     ensure_mesh_uploaded(*mesh_comp.m_mesh, render_api);
                     record_mesh_with_lod(*mesh_comp.m_mesh, t, all_cmds,
-                                         global_lighting, cam_pos, proj);
+                                         global_lighting, cam_pos, proj, &camera_frustum);
                     last_total_entities++;
                 }
             }
@@ -1221,17 +1332,21 @@ public:
             render_api->beginCascade(cascade);
 
             RenderCommandBuffer shadow_cmds;
-
-            if (bvh_enabled && cascade_matrices)
+            Frustum shadow_frustum;
+            const Frustum* shadow_frustum_ptr = nullptr;
+            if (cascade_matrices)
             {
-                Frustum shadow_frustum;
                 shadow_frustum.extractFromViewProjection(cascade_matrices[cascade]);
+                shadow_frustum_ptr = &shadow_frustum;
+            }
 
+            if (bvh_enabled && shadow_frustum_ptr)
+            {
                 std::vector<entt::entity> shadow_entities;
                 scene_bvh.queryFrustum(shadow_frustum, shadow_entities);
 
                 ensure_meshes_uploaded(registry, shadow_entities);
-                shadow_cmds = record_shadow_parallel(registry, shadow_entities, cascade);
+                shadow_cmds = record_shadow_parallel(registry, shadow_entities, cascade, shadow_frustum_ptr);
             }
             else
             {
@@ -1245,7 +1360,7 @@ public:
                         all_shadow.push_back(entity);
                     }
                 }
-                shadow_cmds = record_shadow_parallel(registry, all_shadow, cascade);
+                shadow_cmds = record_shadow_parallel(registry, all_shadow, cascade, shadow_frustum_ptr);
             }
 
             render_api->replayCommandBuffer(shadow_cmds);
@@ -1271,15 +1386,14 @@ public:
 
         glm::mat4 proj = render_api->getProjectionMatrix();
         glm::vec3 cam_pos = c.getPosition();
+        Frustum camera_frustum;
+        glm::mat4 camera_view_proj = proj * render_api->getViewMatrix();
+        camera_frustum.extractFromViewProjection(camera_view_proj);
 
         if (bvh_enabled)
         {
-            Frustum frustum;
-            glm::mat4 viewProj = proj * render_api->getViewMatrix();
-            frustum.extractFromViewProjection(viewProj);
-
             std::vector<entt::entity> visible_entities;
-            scene_bvh.queryFrustum(frustum, visible_entities);
+            scene_bvh.queryFrustum(camera_frustum, visible_entities);
             last_total_entities = scene_bvh.getTotalEntities();
             last_visible_entities = visible_entities.size();
 
@@ -1347,7 +1461,7 @@ public:
             if (depth_prepass_enabled && !opaque_entities.empty())
             {
                 RenderCommandBuffer depth_cmds = record_depth_parallel(
-                    registry, opaque_entities, opaque_lod);
+                    registry, opaque_entities, opaque_lod, &camera_frustum);
 
                 render_api->beginDepthPrepass();
                 render_api->replayCommandBuffer(depth_cmds);
@@ -1357,7 +1471,7 @@ public:
             // Main lit pass: opaques - parallel recording
             {
                 RenderCommandBuffer opaque_cmds = record_opaque_parallel(
-                    registry, opaque_entities, opaque_lod, global_lighting);
+                    registry, opaque_entities, opaque_lod, global_lighting, &camera_frustum);
                 last_draw_calls += opaque_cmds.size();
                 if (render_api->isDeferredActive())
                     render_api->submitDeferredOpaqueCommands(opaque_cmds);
@@ -1378,7 +1492,7 @@ public:
                     if (mesh_comp && t && mesh_comp->m_mesh && mesh_comp->m_mesh->visible)
                     {
                         record_mesh_with_lod(*mesh_comp->m_mesh, *t, transparent_cmds,
-                                             global_lighting, cam_pos, proj);
+                                             global_lighting, cam_pos, proj, &camera_frustum);
                     }
                 }
 
@@ -1404,7 +1518,7 @@ public:
                 {
                     ensure_mesh_uploaded(*mesh_comp.m_mesh, render_api);
                     record_mesh_with_lod(*mesh_comp.m_mesh, t, all_cmds,
-                                         global_lighting, cam_pos, proj);
+                                         global_lighting, cam_pos, proj, &camera_frustum);
                     last_total_entities++;
                 }
             }

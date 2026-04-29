@@ -194,8 +194,8 @@ struct Frustum
         glm::vec4 top = row3 - row1;
         planes[PLANE_TOP].setFromCoefficients(top.x, top.y, top.z, top.w);
 
-        // Near plane: row3 + row2
-        glm::vec4 near_p = row3 + row2;
+        // Near plane for RH_ZO projection matrices: z >= 0.
+        glm::vec4 near_p = row2;
         planes[PLANE_NEAR].setFromCoefficients(near_p.x, near_p.y, near_p.z, near_p.w);
 
         // Far plane: row3 - row2

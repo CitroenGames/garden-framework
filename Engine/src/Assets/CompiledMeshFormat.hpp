@@ -5,7 +5,7 @@
 namespace Assets {
 
 static constexpr uint32_t CMESH_MAGIC   = 0x434D5348; // "CMSH"
-static constexpr uint32_t CMESH_VERSION = 2; // bumped: vertex now includes tangent (tx,ty,tz,tw)
+static constexpr uint32_t CMESH_VERSION = 3; // v3 stores per-range bounds for chunk culling
 
 enum CmeshFlags : uint32_t {
     CMESH_FLAG_HAS_INDICES   = 1 << 0,

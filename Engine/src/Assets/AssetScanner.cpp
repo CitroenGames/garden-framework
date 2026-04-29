@@ -2,6 +2,7 @@
 #include "AssetMetadataSerializer.hpp"
 #include "LODGenerator.hpp"
 #include "LODMeshSerializer.hpp"
+#include "MeshChunker.hpp"
 #include "Utils/FileHash.hpp"
 #include "Utils/GltfLoader.hpp"
 #include "Utils/ObjLoader.hpp"
@@ -14,6 +15,13 @@
 namespace fs = std::filesystem;
 
 namespace Assets {
+
+static void chunkLODResult(LODGenerationResult& lod_result)
+{
+    MeshChunkConfig chunk_cfg;
+    for (auto& lod : lod_result.lod_meshes)
+        lod = MeshChunker::chunkLODMesh(lod, chunk_cfg);
+}
 
 void AssetScanner::scanDirectory(const std::string& root_dir)
 {
@@ -258,6 +266,7 @@ bool AssetScanner::processAsset(const std::string& asset_path)
                asset_path.c_str(), lod_result.error_message.c_str());
         return false;
     }
+    chunkLODResult(lod_result);
 
     return buildAndSaveMetadata(asset_path, lod_result, m_default_lod_config, {}, submesh_count, generateTimestamp());
 }
@@ -297,6 +306,7 @@ bool AssetScanner::processAssetWithConfig(const std::string& asset_path,
                asset_path.c_str(), lod_result.error_message.c_str());
         return false;
     }
+    chunkLODResult(lod_result);
 
     return buildAndSaveMetadata(asset_path, lod_result, config, screen_thresholds, submesh_count, generateTimestamp());
 }

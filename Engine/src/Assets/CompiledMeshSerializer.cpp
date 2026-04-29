@@ -2,6 +2,8 @@
 #include <fstream>
 #include <cstdio>
 #include <cstring>
+#include <algorithm>
+#include <limits>
 
 namespace Assets {
 
@@ -24,12 +26,58 @@ static uint32_t readU32(std::ifstream& f) { uint32_t v = 0; f.read(reinterpret_c
 static uint64_t readU64(std::ifstream& f) { uint64_t v = 0; f.read(reinterpret_cast<char*>(&v), 8); return v; }
 static float    readF32(std::ifstream& f) { float    v = 0; f.read(reinterpret_cast<char*>(&v), 4); return v; }
 
+static void writeVec3(std::ofstream& f, const glm::vec3& v) {
+    writeF32(f, v.x);
+    writeF32(f, v.y);
+    writeF32(f, v.z);
+}
+
+static glm::vec3 readVec3(std::ifstream& f) {
+    return glm::vec3(readF32(f), readF32(f), readF32(f));
+}
+
 static std::string readStr(std::ifstream& f) {
     uint16_t len = readU16(f);
     if (len == 0) return {};
     std::string s(len, '\0');
     f.read(s.data(), len);
     return s;
+}
+
+static void populateMissingRangeBounds(CompiledMeshData::LODLevel& lod) {
+    if (lod.vertices.empty() || lod.indices.empty())
+        return;
+
+    for (auto& range : lod.submesh_ranges) {
+        if (range.has_bounds)
+            continue;
+
+        size_t start = std::min(range.start_index, lod.indices.size());
+        size_t count = std::min(range.index_count, lod.indices.size() - start);
+        if (count == 0)
+            continue;
+
+        glm::vec3 bmin(std::numeric_limits<float>::max());
+        glm::vec3 bmax(std::numeric_limits<float>::lowest());
+        bool valid = false;
+
+        for (size_t i = 0; i < count; ++i) {
+            uint32_t index = lod.indices[start + i];
+            if (index >= lod.vertices.size())
+                continue;
+            const auto& v = lod.vertices[index];
+            glm::vec3 p(v.vx, v.vy, v.vz);
+            bmin = glm::min(bmin, p);
+            bmax = glm::max(bmax, p);
+            valid = true;
+        }
+
+        if (valid) {
+            range.has_bounds = true;
+            range.aabb_min = bmin;
+            range.aabb_max = bmax;
+        }
+    }
 }
 
 // ================================================================
@@ -81,9 +129,9 @@ bool CompiledMeshSerializer::save(const CompiledMeshData& data, const std::strin
     for (const auto& lod : data.lod_levels) {
         // vertex_count(4) + index_count(4) + vertex_offset(8) + index_offset(8)
         // + screen_threshold(4) + achieved_error(4) + achieved_ratio(4)
-        // + submesh_range_count(4) + per_range(4+4+4)*N
+        // + submesh_range_count(4) + per_range(start/count/id + bounds)*N
         lod_table_size += 4 + 4 + 8 + 8 + 4 + 4 + 4 + 4;
-        lod_table_size += lod.submesh_ranges.size() * (4 + 4 + 4);
+        lod_table_size += lod.submesh_ranges.size() * (4 + 4 + 4 + 1 + 4 * 6);
     }
 
     uint64_t bulk_data_start = static_cast<uint64_t>(lod_table_start) + lod_table_size;
@@ -112,6 +160,9 @@ bool CompiledMeshSerializer::save(const CompiledMeshData& data, const std::strin
             writeU32(file, static_cast<uint32_t>(r.start_index));
             writeU32(file, static_cast<uint32_t>(r.index_count));
             writeU32(file, static_cast<uint32_t>(r.submesh_id));
+            writeU8(file, r.has_bounds ? 1 : 0);
+            writeVec3(file, r.aabb_min);
+            writeVec3(file, r.aabb_max);
         }
 
         current_offset = index_offset + index_size;
@@ -148,10 +199,11 @@ bool CompiledMeshSerializer::load(CompiledMeshData& data, const std::string& fil
         printf("CompiledMeshSerializer: Invalid magic in %s\n", filepath.c_str());
         return false;
     }
-    if (data.header.version != CMESH_VERSION) {
+    if (data.header.version < 2 || data.header.version > CMESH_VERSION) {
         printf("CompiledMeshSerializer: Unsupported version %u in %s\n", data.header.version, filepath.c_str());
         return false;
     }
+    const bool has_range_bounds = data.header.version >= 3;
 
     // --- Submesh table ---
     data.submeshes.resize(data.header.submesh_count);
@@ -204,6 +256,11 @@ bool CompiledMeshSerializer::load(CompiledMeshData& data, const std::string& fil
             e.submesh_ranges[r].start_index = readU32(file);
             e.submesh_ranges[r].index_count = readU32(file);
             e.submesh_ranges[r].submesh_id  = readU32(file);
+            if (has_range_bounds) {
+                e.submesh_ranges[r].has_bounds = readU8(file) != 0;
+                e.submesh_ranges[r].aabb_min = readVec3(file);
+                e.submesh_ranges[r].aabb_max = readVec3(file);
+            }
         }
     }
 
@@ -230,6 +287,8 @@ bool CompiledMeshSerializer::load(CompiledMeshData& data, const std::string& fil
             file.read(reinterpret_cast<char*>(lod.indices.data()),
                       e.index_count * sizeof(uint32_t));
         }
+
+        populateMissingRangeBounds(lod);
     }
 
     if (!file) {

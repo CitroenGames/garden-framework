@@ -11,11 +11,15 @@
 #include "Assets/LODMeshSerializer.hpp"
 #include "Assets/CompiledMeshSerializer.hpp"
 #include "Assets/CompiledTextureSerializer.hpp"
+#include "Assets/MeshChunker.hpp"
 #include "Assets/AssetManager.hpp"
+#include "Console/ConVar.hpp"
 #include "Threading/JobSystem.hpp"
 #include <iostream>
+#include <algorithm>
 #include <cstring>
 #include <filesystem>
+#include <limits>
 
 using json = nlohmann::json;
 
@@ -37,6 +41,131 @@ static std::string getTextureTypeName(TextureType type) {
         case TextureType::SPECULAR: return "Specular";
         default: return "Unknown";
     }
+}
+
+static Assets::MeshChunkConfig getStaticMeshChunkConfig()
+{
+    Assets::MeshChunkConfig cfg;
+
+    if (auto* cvar = CVAR_PTR(r_staticmesh_chunking))
+        cfg.enabled = cvar->getBool();
+
+    if (auto* cvar = CVAR_PTR(r_staticmesh_chunk_tris))
+        cfg.target_triangles = static_cast<size_t>(std::max(cvar->getInt(), 1));
+
+    if (auto* cvar = CVAR_PTR(r_staticmesh_max_chunks)) {
+        int max_chunks = cvar->getInt();
+        cfg.max_chunks = max_chunks > 0 ? static_cast<size_t>(max_chunks) : 0;
+    }
+
+    return cfg;
+}
+
+static void copyMaterialPayload(MaterialRange& dst, const MaterialRange& src)
+{
+    dst.texture = src.texture;
+    dst.material_name = src.material_name;
+    dst.alpha_mode = src.alpha_mode;
+    dst.alpha_cutoff = src.alpha_cutoff;
+    dst.double_sided = src.double_sided;
+    dst.metallic_factor = src.metallic_factor;
+    dst.roughness_factor = src.roughness_factor;
+    dst.emissive_factor = src.emissive_factor;
+    dst.base_color_factor = src.base_color_factor;
+    dst.metallic_roughness_texture = src.metallic_roughness_texture;
+    dst.normal_texture = src.normal_texture;
+    dst.occlusion_texture = src.occlusion_texture;
+    dst.emissive_texture = src.emissive_texture;
+}
+
+static const MaterialRange* findMaterialTemplate(const std::vector<MaterialRange>& ranges, size_t source_range)
+{
+    for (const auto& range : ranges)
+        if (range.source_range == source_range)
+            return &range;
+
+    if (source_range < ranges.size())
+        return &ranges[source_range];
+
+    return nullptr;
+}
+
+static std::vector<bool> buildSplitMaskFromRanges(const std::vector<MaterialRange>& ranges)
+{
+    std::vector<bool> split_mask;
+    for (size_t i = 0; i < ranges.size(); ++i) {
+        const auto& range = ranges[i];
+        size_t source_id = range.source_range == std::numeric_limits<size_t>::max()
+            ? i
+            : range.source_range;
+        if (source_id >= split_mask.size())
+            split_mask.resize(source_id + 1, true);
+        if (range.isAlphaBlend())
+            split_mask[source_id] = false;
+    }
+    return split_mask;
+}
+
+static Assets::LODMeshData maybeChunkLODForRuntime(
+    const Assets::LODMeshData& lod_data,
+    const std::vector<MaterialRange>& material_templates)
+{
+    Assets::MeshChunkConfig cfg = getStaticMeshChunkConfig();
+    if (!cfg.enabled || lod_data.vertices.empty() || lod_data.indices.empty())
+        return lod_data;
+
+    std::vector<bool> split_mask = buildSplitMaskFromRanges(material_templates);
+    const std::vector<bool>* split_ptr = split_mask.empty() ? nullptr : &split_mask;
+    return Assets::MeshChunker::chunkLODMesh(lod_data, cfg, split_ptr);
+}
+
+static bool uploadChunkedMaterialMesh(const std::shared_ptr<mesh>& m_ptr, IRenderAPI* render_api)
+{
+    if (!m_ptr || !render_api || !m_ptr->is_valid || !m_ptr->vertices || m_ptr->vertices_len < 3)
+        return false;
+
+    Assets::MeshChunkConfig cfg = getStaticMeshChunkConfig();
+    if (!cfg.enabled)
+        return false;
+
+    std::vector<MaterialRange> source_ranges = m_ptr->material_ranges;
+    if (source_ranges.empty()) {
+        MaterialRange full(0, m_ptr->vertices_len,
+                           m_ptr->texture_set ? m_ptr->texture : INVALID_TEXTURE, "");
+        full.source_range = 0;
+        source_ranges.push_back(full);
+    }
+
+    for (size_t i = 0; i < source_ranges.size(); ++i)
+        if (source_ranges[i].source_range == std::numeric_limits<size_t>::max())
+            source_ranges[i].source_range = i;
+
+    Assets::ChunkedTriangleMesh chunked = Assets::MeshChunker::buildChunkedIndexedMesh(
+        m_ptr->vertices, m_ptr->vertices_len, source_ranges, cfg);
+    if (chunked.vertices.empty() || chunked.indices.empty() || chunked.material_ranges.empty())
+        return false;
+
+    IGPUMesh* chunked_gpu = render_api->createMesh();
+    if (!chunked_gpu)
+        return false;
+
+    chunked_gpu->uploadIndexedMeshData(
+        chunked.vertices.data(), chunked.vertices.size(),
+        chunked.indices.data(), chunked.indices.size());
+
+    if (!chunked_gpu->isUploaded()) {
+        delete chunked_gpu;
+        return false;
+    }
+
+    if (m_ptr->gpu_mesh)
+        delete m_ptr->gpu_mesh;
+    m_ptr->gpu_mesh = chunked_gpu;
+    m_ptr->setMaterialRanges(chunked.material_ranges);
+
+    LOG_ENGINE_TRACE("Chunked mesh into {} ranges ({} verts, {} indices)",
+                     chunked.material_ranges.size(), chunked.vertices.size(), chunked.indices.size());
+    return true;
 }
 
 LevelManager::LevelManager()
@@ -1054,6 +1183,7 @@ std::shared_ptr<mesh> LevelManager::loadMesh(const LevelEntity& entity, IRenderA
                     TextureHandle tex = material.getPrimaryTextureHandle();
 
                     MaterialRange range(current_vertex, vertex_count, tex, material.properties.name);
+                    range.source_range = i;
                     // Propagate alpha properties from glTF material
                     if (material.properties.alpha_mode == "MASK")
                         range.alpha_mode = 1;
@@ -1083,6 +1213,7 @@ std::shared_ptr<mesh> LevelManager::loadMesh(const LevelEntity& entity, IRenderA
                 }
                 else {
                     MaterialRange range(current_vertex, vertex_count, INVALID_TEXTURE, "unknown");
+                    range.source_range = i;
                     material_ranges.push_back(range);
                 }
 
@@ -1157,66 +1288,33 @@ std::shared_ptr<mesh> LevelManager::loadMesh(const LevelEntity& entity, IRenderA
                     Assets::LODMeshData lod_data;
                     if (Assets::LODMeshSerializer::load(lod_data, lod_path))
                     {
+                        Assets::LODMeshData lod_upload = maybeChunkLODForRuntime(lod_data, m_ptr->material_ranges);
+
                         mesh::LODLevel level;
                         level.screen_threshold = lod_info.screen_threshold;
-                        level.vertex_count = lod_data.vertices.size();
-                        level.index_count = lod_data.indices.size();
+                        level.vertex_count = lod_upload.vertices.size();
+                        level.index_count = lod_upload.indices.size();
                         level.gpu_mesh = render_api->createMesh();
                         if (level.gpu_mesh)
                         {
                             level.gpu_mesh->uploadIndexedMeshData(
-                                lod_data.vertices.data(), lod_data.vertices.size(),
-                                lod_data.indices.data(), lod_data.indices.size()
+                                lod_upload.vertices.data(), lod_upload.vertices.size(),
+                                lod_upload.indices.data(), lod_upload.indices.size()
                             );
                         }
 
                         // Map LOD submesh ranges to original mesh's material textures
-                        if (!lod_data.submesh_ranges.empty() && m_ptr->uses_material_ranges)
+                        if (!lod_upload.submesh_ranges.empty() && m_ptr->uses_material_ranges)
                         {
-                            for (const auto& sr : lod_data.submesh_ranges)
+                            for (const auto& sr : lod_upload.submesh_ranges)
                             {
-                                TextureHandle tex = INVALID_TEXTURE;
-                                std::string mat_name = "";
-                                uint8_t alpha_mode = 0;
-                                float alpha_cutoff = 0.5f;
-                                bool double_sided = false;
-                                float metallic_factor = 0.0f;
-                                float roughness_factor = 0.5f;
-                                glm::vec3 emissive_factor(0.0f);
-                                glm::vec4 base_color_factor(1.0f);
-                                TextureHandle mr_handle = INVALID_TEXTURE;
-                                TextureHandle nm_handle = INVALID_TEXTURE;
-                                TextureHandle ao_handle = INVALID_TEXTURE;
-                                TextureHandle em_handle = INVALID_TEXTURE;
-                                if (sr.submesh_id < m_ptr->material_ranges.size())
-                                {
-                                    const auto& base_range = m_ptr->material_ranges[sr.submesh_id];
-                                    tex = base_range.texture;
-                                    mat_name = base_range.material_name;
-                                    alpha_mode = base_range.alpha_mode;
-                                    alpha_cutoff = base_range.alpha_cutoff;
-                                    double_sided = base_range.double_sided;
-                                    metallic_factor = base_range.metallic_factor;
-                                    roughness_factor = base_range.roughness_factor;
-                                    emissive_factor = base_range.emissive_factor;
-                                    base_color_factor = base_range.base_color_factor;
-                                    mr_handle = base_range.metallic_roughness_texture;
-                                    nm_handle = base_range.normal_texture;
-                                    ao_handle = base_range.occlusion_texture;
-                                    em_handle = base_range.emissive_texture;
-                                }
-                                MaterialRange lod_range(sr.start_index, sr.index_count, tex, mat_name);
-                                lod_range.alpha_mode = alpha_mode;
-                                lod_range.alpha_cutoff = alpha_cutoff;
-                                lod_range.double_sided = double_sided;
-                                lod_range.metallic_factor = metallic_factor;
-                                lod_range.roughness_factor = roughness_factor;
-                                lod_range.emissive_factor = emissive_factor;
-                                lod_range.base_color_factor = base_color_factor;
-                                lod_range.metallic_roughness_texture = mr_handle;
-                                lod_range.normal_texture = nm_handle;
-                                lod_range.occlusion_texture = ao_handle;
-                                lod_range.emissive_texture = em_handle;
+                                MaterialRange lod_range(sr.start_index, sr.index_count, INVALID_TEXTURE, "");
+                                if (const auto* base_range = findMaterialTemplate(m_ptr->material_ranges, sr.submesh_id))
+                                    copyMaterialPayload(lod_range, *base_range);
+                                lod_range.source_range = sr.submesh_id;
+                                lod_range.has_bounds = sr.has_bounds;
+                                lod_range.aabb_min = sr.aabb_min;
+                                lod_range.aabb_max = sr.aabb_max;
                                 level.material_ranges.push_back(lod_range);
                             }
                         }
@@ -1232,6 +1330,9 @@ std::shared_ptr<mesh> LevelManager::loadMesh(const LevelEntity& entity, IRenderA
                 }
             }
         }
+
+        if (render_api && m_ptr->is_valid && !m_ptr->isUploadedToGPU())
+            uploadChunkedMaterialMesh(m_ptr, render_api);
     }
 
     return m_ptr;
@@ -1311,6 +1412,7 @@ std::shared_ptr<mesh> LevelManager::loadCompiledMesh(const std::string& cmesh_pa
     m_ptr->aabb_min = glm::vec3(cmesh.header.aabb_min[0], cmesh.header.aabb_min[1], cmesh.header.aabb_min[2]);
     m_ptr->aabb_max = glm::vec3(cmesh.header.aabb_max[0], cmesh.header.aabb_max[1], cmesh.header.aabb_max[2]);
     m_ptr->bounds_computed = true;
+    m_ptr->is_valid = true;
 
     // Resolve material textures
     std::string mesh_dir = std::filesystem::path(cmesh_path).parent_path().string();
@@ -1338,6 +1440,10 @@ std::shared_ptr<mesh> LevelManager::loadCompiledMesh(const std::string& cmesh_pa
                 }
 
                 MaterialRange range(sr.start_index, sr.index_count, tex, mat_name);
+                range.source_range = sr.submesh_id;
+                range.has_bounds = sr.has_bounds;
+                range.aabb_min = sr.aabb_min;
+                range.aabb_max = sr.aabb_max;
                 if (sr.submesh_id < cmesh.material_refs.size()) {
                     const auto& mat_ref = cmesh.material_refs[sr.submesh_id];
                     range.alpha_mode = mat_ref.alpha_mode;
@@ -1365,7 +1471,8 @@ std::shared_ptr<mesh> LevelManager::loadCompiledMesh(const std::string& cmesh_pa
         } else if (!cmesh.submeshes.empty()) {
             // Fallback: use submesh table with LOD0 vertex data
             size_t current = 0;
-            for (const auto& sub : cmesh.submeshes) {
+            for (size_t submesh_id = 0; submesh_id < cmesh.submeshes.size(); ++submesh_id) {
+                const auto& sub = cmesh.submeshes[submesh_id];
                 TextureHandle tex = INVALID_TEXTURE;
                 std::string mat_name = sub.name;
 
@@ -1381,6 +1488,7 @@ std::shared_ptr<mesh> LevelManager::loadCompiledMesh(const std::string& cmesh_pa
 
                 // We don't have per-submesh ranges without indexed info
                 MaterialRange range(current, 0, tex, mat_name);
+                range.source_range = submesh_id;
                 if (sub.material_index < cmesh.material_refs.size()) {
                     const auto& mat_ref = cmesh.material_refs[sub.material_index];
                     range.alpha_mode = mat_ref.alpha_mode;
@@ -1438,47 +1546,13 @@ std::shared_ptr<mesh> LevelManager::loadCompiledMesh(const std::string& cmesh_pa
         // Map submesh ranges to material textures
         if (!lod.submesh_ranges.empty() && m_ptr->uses_material_ranges) {
             for (const auto& sr : lod.submesh_ranges) {
-                TextureHandle tex = INVALID_TEXTURE;
-                std::string mat_name;
-                uint8_t lod_alpha_mode = 0;
-                float lod_alpha_cutoff = 0.5f;
-                bool lod_double_sided = false;
-                float lod_metallic_factor = 0.0f;
-                float lod_roughness_factor = 0.5f;
-                glm::vec3 lod_emissive_factor(0.0f);
-                glm::vec4 lod_base_color_factor(1.0f);
-                TextureHandle lod_mr_handle = INVALID_TEXTURE;
-                TextureHandle lod_nm_handle = INVALID_TEXTURE;
-                TextureHandle lod_ao_handle = INVALID_TEXTURE;
-                TextureHandle lod_em_handle = INVALID_TEXTURE;
-                if (sr.submesh_id < m_ptr->material_ranges.size()) {
-                    const auto& base_range = m_ptr->material_ranges[sr.submesh_id];
-                    tex = base_range.texture;
-                    mat_name = base_range.material_name;
-                    lod_alpha_mode = base_range.alpha_mode;
-                    lod_alpha_cutoff = base_range.alpha_cutoff;
-                    lod_double_sided = base_range.double_sided;
-                    lod_metallic_factor = base_range.metallic_factor;
-                    lod_roughness_factor = base_range.roughness_factor;
-                    lod_emissive_factor = base_range.emissive_factor;
-                    lod_base_color_factor = base_range.base_color_factor;
-                    lod_mr_handle = base_range.metallic_roughness_texture;
-                    lod_nm_handle = base_range.normal_texture;
-                    lod_ao_handle = base_range.occlusion_texture;
-                    lod_em_handle = base_range.emissive_texture;
-                }
-                MaterialRange lod_range(sr.start_index, sr.index_count, tex, mat_name);
-                lod_range.alpha_mode = lod_alpha_mode;
-                lod_range.alpha_cutoff = lod_alpha_cutoff;
-                lod_range.double_sided = lod_double_sided;
-                lod_range.metallic_factor = lod_metallic_factor;
-                lod_range.roughness_factor = lod_roughness_factor;
-                lod_range.emissive_factor = lod_emissive_factor;
-                lod_range.base_color_factor = lod_base_color_factor;
-                lod_range.metallic_roughness_texture = lod_mr_handle;
-                lod_range.normal_texture = lod_nm_handle;
-                lod_range.occlusion_texture = lod_ao_handle;
-                lod_range.emissive_texture = lod_em_handle;
+                MaterialRange lod_range(sr.start_index, sr.index_count, INVALID_TEXTURE, "");
+                if (const auto* base_range = findMaterialTemplate(m_ptr->material_ranges, sr.submesh_id))
+                    copyMaterialPayload(lod_range, *base_range);
+                lod_range.source_range = sr.submesh_id;
+                lod_range.has_bounds = sr.has_bounds;
+                lod_range.aabb_min = sr.aabb_min;
+                lod_range.aabb_max = sr.aabb_max;
                 level.material_ranges.push_back(lod_range);
             }
         }
@@ -1687,6 +1761,7 @@ std::shared_ptr<mesh> LevelManager::finalizeCompiledMeshGPU(
     m_ptr->aabb_min = glm::vec3(cmesh.header.aabb_min[0], cmesh.header.aabb_min[1], cmesh.header.aabb_min[2]);
     m_ptr->aabb_max = glm::vec3(cmesh.header.aabb_max[0], cmesh.header.aabb_max[1], cmesh.header.aabb_max[2]);
     m_ptr->bounds_computed = true;
+    m_ptr->is_valid = true;
 
     // Resolve material textures using preloaded texture data
     std::string mesh_dir = std::filesystem::path(preload.resolved_path).parent_path().string();
@@ -1721,6 +1796,10 @@ std::shared_ptr<mesh> LevelManager::finalizeCompiledMeshGPU(
                 }
 
                 MaterialRange range(sr.start_index, sr.index_count, tex, mat_name);
+                range.source_range = sr.submesh_id;
+                range.has_bounds = sr.has_bounds;
+                range.aabb_min = sr.aabb_min;
+                range.aabb_max = sr.aabb_max;
                 if (sr.submesh_id < cmesh.material_refs.size()) {
                     const auto& mat_ref = cmesh.material_refs[sr.submesh_id];
                     range.alpha_mode = mat_ref.alpha_mode;
@@ -1756,7 +1835,8 @@ std::shared_ptr<mesh> LevelManager::finalizeCompiledMeshGPU(
             }
         } else if (!cmesh.submeshes.empty()) {
             size_t current = 0;
-            for (const auto& sub : cmesh.submeshes) {
+            for (size_t submesh_id = 0; submesh_id < cmesh.submeshes.size(); ++submesh_id) {
+                const auto& sub = cmesh.submeshes[submesh_id];
                 TextureHandle tex = INVALID_TEXTURE;
                 std::string mat_name = sub.name;
 
@@ -1778,6 +1858,7 @@ std::shared_ptr<mesh> LevelManager::finalizeCompiledMeshGPU(
                 }
 
                 MaterialRange range(current, 0, tex, mat_name);
+                range.source_range = submesh_id;
                 if (sub.material_index < cmesh.material_refs.size()) {
                     const auto& mat_ref = cmesh.material_refs[sub.material_index];
                     range.alpha_mode = mat_ref.alpha_mode;
@@ -1843,47 +1924,13 @@ std::shared_ptr<mesh> LevelManager::finalizeCompiledMeshGPU(
 
         if (!lod.submesh_ranges.empty() && m_ptr->uses_material_ranges) {
             for (const auto& sr : lod.submesh_ranges) {
-                TextureHandle tex = INVALID_TEXTURE;
-                std::string mat_name;
-                uint8_t lod_alpha_mode = 0;
-                float lod_alpha_cutoff = 0.5f;
-                bool lod_double_sided = false;
-                float lod_metallic_factor = 0.0f;
-                float lod_roughness_factor = 0.5f;
-                glm::vec3 lod_emissive_factor(0.0f);
-                glm::vec4 lod_base_color_factor(1.0f);
-                TextureHandle lod_mr_handle = INVALID_TEXTURE;
-                TextureHandle lod_nm_handle = INVALID_TEXTURE;
-                TextureHandle lod_ao_handle = INVALID_TEXTURE;
-                TextureHandle lod_em_handle = INVALID_TEXTURE;
-                if (sr.submesh_id < m_ptr->material_ranges.size()) {
-                    const auto& base_range = m_ptr->material_ranges[sr.submesh_id];
-                    tex = base_range.texture;
-                    mat_name = base_range.material_name;
-                    lod_alpha_mode = base_range.alpha_mode;
-                    lod_alpha_cutoff = base_range.alpha_cutoff;
-                    lod_double_sided = base_range.double_sided;
-                    lod_metallic_factor = base_range.metallic_factor;
-                    lod_roughness_factor = base_range.roughness_factor;
-                    lod_emissive_factor = base_range.emissive_factor;
-                    lod_base_color_factor = base_range.base_color_factor;
-                    lod_mr_handle = base_range.metallic_roughness_texture;
-                    lod_nm_handle = base_range.normal_texture;
-                    lod_ao_handle = base_range.occlusion_texture;
-                    lod_em_handle = base_range.emissive_texture;
-                }
-                MaterialRange lod_range(sr.start_index, sr.index_count, tex, mat_name);
-                lod_range.alpha_mode = lod_alpha_mode;
-                lod_range.alpha_cutoff = lod_alpha_cutoff;
-                lod_range.double_sided = lod_double_sided;
-                lod_range.metallic_factor = lod_metallic_factor;
-                lod_range.roughness_factor = lod_roughness_factor;
-                lod_range.emissive_factor = lod_emissive_factor;
-                lod_range.base_color_factor = lod_base_color_factor;
-                lod_range.metallic_roughness_texture = lod_mr_handle;
-                lod_range.normal_texture = lod_nm_handle;
-                lod_range.occlusion_texture = lod_ao_handle;
-                lod_range.emissive_texture = lod_em_handle;
+                MaterialRange lod_range(sr.start_index, sr.index_count, INVALID_TEXTURE, "");
+                if (const auto* base_range = findMaterialTemplate(m_ptr->material_ranges, sr.submesh_id))
+                    copyMaterialPayload(lod_range, *base_range);
+                lod_range.source_range = sr.submesh_id;
+                lod_range.has_bounds = sr.has_bounds;
+                lod_range.aabb_min = sr.aabb_min;
+                lod_range.aabb_max = sr.aabb_max;
                 level.material_ranges.push_back(lod_range);
             }
         }
@@ -1967,6 +2014,7 @@ std::shared_ptr<mesh> LevelManager::finalizeMeshGPU(
                     const auto& material = gltf.material_data.materials[mat_idx];
                     TextureHandle tex = material.getPrimaryTextureHandle();
                     MaterialRange range(current_vertex, vertex_count, tex, material.properties.name);
+                    range.source_range = i;
                     // Propagate alpha properties from glTF material
                     if (material.properties.alpha_mode == "MASK")
                         range.alpha_mode = 1;
@@ -1992,6 +2040,7 @@ std::shared_ptr<mesh> LevelManager::finalizeMeshGPU(
                     if (tex != INVALID_TEXTURE) texture_applied = true;
                 } else {
                     MaterialRange range(current_vertex, vertex_count, INVALID_TEXTURE, "unknown");
+                    range.source_range = i;
                     material_ranges.push_back(range);
                 }
                 current_vertex += vertex_count;
@@ -2040,8 +2089,10 @@ std::shared_ptr<mesh> LevelManager::finalizeMeshGPU(
     m_ptr->force_lod = entity.force_lod;
     m_ptr->updateTransparencyFromMaterials();
 
+    const bool defer_base_upload_for_chunking = getStaticMeshChunkConfig().enabled;
+
     // Upload mesh to GPU
-    if (render_api && m_ptr->is_valid && !m_ptr->isUploadedToGPU()) {
+    if (render_api && m_ptr->is_valid && !m_ptr->isUploadedToGPU() && !defer_base_upload_for_chunking) {
         m_ptr->uploadToGPU(render_api);
     }
 
@@ -2055,62 +2106,29 @@ std::shared_ptr<mesh> LevelManager::finalizeMeshGPU(
             if (lod_info.file_path.empty()) continue;
 
             auto& lod_data = preload.lod_mesh_data[lod_data_idx++];
+            Assets::LODMeshData lod_upload = maybeChunkLODForRuntime(lod_data, m_ptr->material_ranges);
 
             mesh::LODLevel level;
             level.screen_threshold = lod_info.screen_threshold;
-            level.vertex_count = lod_data.vertices.size();
-            level.index_count = lod_data.indices.size();
+            level.vertex_count = lod_upload.vertices.size();
+            level.index_count = lod_upload.indices.size();
             level.gpu_mesh = render_api->createMesh();
             if (level.gpu_mesh) {
                 level.gpu_mesh->uploadIndexedMeshData(
-                    lod_data.vertices.data(), lod_data.vertices.size(),
-                    lod_data.indices.data(), lod_data.indices.size());
+                    lod_upload.vertices.data(), lod_upload.vertices.size(),
+                    lod_upload.indices.data(), lod_upload.indices.size());
             }
 
             // Map LOD submesh ranges to original mesh's material textures
-            if (!lod_data.submesh_ranges.empty() && m_ptr->uses_material_ranges) {
-                for (const auto& sr : lod_data.submesh_ranges) {
-                    TextureHandle tex = INVALID_TEXTURE;
-                    std::string mat_name = "";
-                    uint8_t lod_alpha_mode = 0;
-                    float lod_alpha_cutoff = 0.5f;
-                    bool lod_double_sided = false;
-                    float lod_metallic_factor = 0.0f;
-                    float lod_roughness_factor = 0.5f;
-                    glm::vec3 lod_emissive_factor(0.0f);
-                    glm::vec4 lod_base_color_factor(1.0f);
-                    TextureHandle lod_mr_handle = INVALID_TEXTURE;
-                    TextureHandle lod_nm_handle = INVALID_TEXTURE;
-                    TextureHandle lod_ao_handle = INVALID_TEXTURE;
-                    TextureHandle lod_em_handle = INVALID_TEXTURE;
-                    if (sr.submesh_id < m_ptr->material_ranges.size()) {
-                        const auto& base_range = m_ptr->material_ranges[sr.submesh_id];
-                        tex = base_range.texture;
-                        mat_name = base_range.material_name;
-                        lod_alpha_mode = base_range.alpha_mode;
-                        lod_alpha_cutoff = base_range.alpha_cutoff;
-                        lod_double_sided = base_range.double_sided;
-                        lod_metallic_factor = base_range.metallic_factor;
-                        lod_roughness_factor = base_range.roughness_factor;
-                        lod_emissive_factor = base_range.emissive_factor;
-                        lod_base_color_factor = base_range.base_color_factor;
-                        lod_mr_handle = base_range.metallic_roughness_texture;
-                        lod_nm_handle = base_range.normal_texture;
-                        lod_ao_handle = base_range.occlusion_texture;
-                        lod_em_handle = base_range.emissive_texture;
-                    }
-                    MaterialRange lod_range(sr.start_index, sr.index_count, tex, mat_name);
-                    lod_range.alpha_mode = lod_alpha_mode;
-                    lod_range.alpha_cutoff = lod_alpha_cutoff;
-                    lod_range.double_sided = lod_double_sided;
-                    lod_range.metallic_factor = lod_metallic_factor;
-                    lod_range.roughness_factor = lod_roughness_factor;
-                    lod_range.emissive_factor = lod_emissive_factor;
-                    lod_range.base_color_factor = lod_base_color_factor;
-                    lod_range.metallic_roughness_texture = lod_mr_handle;
-                    lod_range.normal_texture = lod_nm_handle;
-                    lod_range.occlusion_texture = lod_ao_handle;
-                    lod_range.emissive_texture = lod_em_handle;
+            if (!lod_upload.submesh_ranges.empty() && m_ptr->uses_material_ranges) {
+                for (const auto& sr : lod_upload.submesh_ranges) {
+                    MaterialRange lod_range(sr.start_index, sr.index_count, INVALID_TEXTURE, "");
+                    if (const auto* base_range = findMaterialTemplate(m_ptr->material_ranges, sr.submesh_id))
+                        copyMaterialPayload(lod_range, *base_range);
+                    lod_range.source_range = sr.submesh_id;
+                    lod_range.has_bounds = sr.has_bounds;
+                    lod_range.aabb_min = sr.aabb_min;
+                    lod_range.aabb_max = sr.aabb_max;
                     level.material_ranges.push_back(lod_range);
                 }
             }
@@ -2122,6 +2140,11 @@ std::shared_ptr<mesh> LevelManager::finalizeMeshGPU(
             m_ptr->computeBounds();
             LOG_ENGINE_TRACE("Loaded {} LOD levels for {}", m_ptr->lod_levels.size(), preload.resolved_path);
         }
+    }
+
+    if (render_api && m_ptr->is_valid && !m_ptr->isUploadedToGPU()) {
+        if (!uploadChunkedMaterialMesh(m_ptr, render_api))
+            m_ptr->uploadToGPU(render_api);
     }
 
     return m_ptr;

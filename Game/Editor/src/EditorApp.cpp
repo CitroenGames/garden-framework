@@ -2343,7 +2343,8 @@ void EditorApp::renderEditorSettings()
         {
             const char* cvar_names[] = { "r_fxaa", "r_ssao", "r_shadowquality", "r_sky", "r_lighting",
                                           "r_dynamiclights", "r_depthprepass", "r_frustumculling",
-                                          "r_deferred" };
+                                          "r_staticmesh_chunking", "r_staticmesh_chunk_tris",
+                                          "r_staticmesh_max_chunks", "r_deferred" };
             for (const char* name : cvar_names)
             {
                 if (auto* cv = ConVarRegistry::get().find(name))

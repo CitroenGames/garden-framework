@@ -3,6 +3,7 @@
 #include "CompiledTextureSerializer.hpp"
 #include "LODGenerator.hpp"
 #include "LODMeshSerializer.hpp"
+#include "MeshChunker.hpp"
 #include "AssetMetadata.hpp"
 #include "AssetMetadataSerializer.hpp"
 #include "Utils/FileHash.hpp"
@@ -560,6 +561,19 @@ bool AssetCompiler::compileModel(
         }
 
         lod_meshes = std::move(final_lods);
+    }
+
+    {
+        MeshChunkConfig chunk_cfg;
+        std::vector<bool> split_submesh(primitive_vertex_counts.size(), true);
+        for (size_t i = 0; i < primitive_vertex_counts.size(); ++i) {
+            int mat_idx = (i < material_indices.size()) ? material_indices[i] : -1;
+            if (mat_idx >= 0 && mat_idx < static_cast<int>(mat_refs.size()))
+                split_submesh[i] = mat_refs[mat_idx].alpha_mode != 2;
+        }
+
+        for (auto& lod_mesh : lod_meshes)
+            lod_mesh = MeshChunker::chunkLODMesh(lod_mesh, chunk_cfg, &split_submesh);
     }
 
     delete[] raw_verts;
