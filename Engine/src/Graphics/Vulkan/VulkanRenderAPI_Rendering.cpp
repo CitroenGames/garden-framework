@@ -451,7 +451,7 @@ void VulkanRenderAPI::renderMesh(const mesh& m, const RenderState& state)
         ubo.cascadeSplit4 = cascadeSplitDistances[4];
         ubo.lightDir = light_direction;
         ubo.lightAmbient = light_ambient;
-        ubo.cascadeCount = NUM_CASCADES;
+        ubo.cascadeCount = getCascadeCount();
         ubo.lightDiffuse = light_diffuse;
         ubo.debugCascades = 0;
         ubo.shadowMapTexelSize = (currentShadowSize > 0)
@@ -594,7 +594,7 @@ void VulkanRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t
         ubo.cascadeSplit4 = cascadeSplitDistances[4];
         ubo.lightDir = light_direction;
         ubo.lightAmbient = light_ambient;
-        ubo.cascadeCount = NUM_CASCADES;
+        ubo.cascadeCount = getCascadeCount();
         ubo.lightDiffuse = light_diffuse;
         ubo.debugCascades = 0;
         ubo.shadowMapTexelSize = (currentShadowSize > 0)
@@ -697,7 +697,7 @@ void VulkanRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
         ubo.cascadeSplit4 = cascadeSplitDistances[4];
         ubo.lightDir = light_direction;
         ubo.lightAmbient = light_ambient;
-        ubo.cascadeCount = NUM_CASCADES;
+        ubo.cascadeCount = getCascadeCount();
         ubo.lightDiffuse = light_diffuse;
         ubo.debugCascades = 0;
         ubo.shadowMapTexelSize = (currentShadowSize > 0)
@@ -893,7 +893,7 @@ void VulkanRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmd
         ubo.cascadeSplit4 = cascadeSplitDistances[4];
         ubo.lightDir = light_direction;
         ubo.lightAmbient = light_ambient;
-        ubo.cascadeCount = NUM_CASCADES;
+        ubo.cascadeCount = getCascadeCount();
         ubo.lightDiffuse = light_diffuse;
         ubo.debugCascades = 0;
         ubo.shadowMapTexelSize = (currentShadowSize > 0)
@@ -1236,7 +1236,7 @@ void VulkanRenderAPI::renderDebugLinesDirect(const vertex* vertices, size_t vert
         ubo.cascadeSplit4 = cascadeSplitDistances[4];
         ubo.lightDir = light_direction;
         ubo.lightAmbient = light_ambient;
-        ubo.cascadeCount = NUM_CASCADES;
+        ubo.cascadeCount = getCascadeCount();
         ubo.lightDiffuse = light_diffuse;
         ubo.shadowMapTexelSize = (currentShadowSize > 0)
             ? glm::vec2(1.0f / static_cast<float>(currentShadowSize))

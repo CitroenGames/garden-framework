@@ -20,6 +20,7 @@ extern "C" void ImGuiMetal_NewFrame(void* renderPassDescriptor);
 #include "Console/ConCommand.hpp"
 #include "Utils/EnginePaths.hpp"
 #include <SDL3/SDL.h>
+#include <algorithm>
 #include <cstring>
 
 ImGuiManager& ImGuiManager::get()
@@ -484,6 +485,16 @@ void ImGuiManager::render()
                     m_renderAPI->setShadowQuality(shadowQuality);
                     if (auto* cvar = CVAR_PTR(r_shadowquality))
                         cvar->setInt(shadowQuality);
+                }
+
+                const char* cascadeOptions[] = { "1", "2", "3", "4" };
+                int shadowCascades = std::clamp(m_renderAPI->getCascadeCount(), 1, 4) - 1;
+                if (ImGui::Combo("Shadow Cascades", &shadowCascades, cascadeOptions, 4))
+                {
+                    const int cascadeCount = shadowCascades + 1;
+                    m_renderAPI->setShadowCascadeCount(cascadeCount);
+                    if (auto* cvar = CVAR_PTR(r_shadowcascades))
+                        cvar->setInt(cascadeCount);
                 }
 
                 // Deferred rendering toggle

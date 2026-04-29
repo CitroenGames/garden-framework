@@ -215,6 +215,7 @@ public:
     virtual bool isFXAAEnabled() const = 0;
     virtual void setShadowQuality(int quality) = 0;  // 0=Off, 1=Low(1024), 2=Medium(2048), 3=High(4096)
     virtual int getShadowQuality() const = 0;
+    virtual void setShadowCascadeCount(int count) { (void)count; }
     virtual void setSSAOEnabled(bool enabled) { (void)enabled; }
     virtual bool isSSAOEnabled() const { return false; }
     virtual void setSSAORadius(float radius) { (void)radius; }

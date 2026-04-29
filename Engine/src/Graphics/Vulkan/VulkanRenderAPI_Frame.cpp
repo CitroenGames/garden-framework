@@ -349,7 +349,7 @@ void VulkanRenderAPI::endFrame()
                         cascadeSplitDistances[0], cascadeSplitDistances[1],
                         cascadeSplitDistances[2], cascadeSplitDistances[3]);
                     shadowMaskUbo.cascadeSplit4 = cascadeSplitDistances[4];
-                    shadowMaskUbo.cascadeCount = NUM_CASCADES;
+                    shadowMaskUbo.cascadeCount = getCascadeCount();
                     shadowMaskUbo.shadowMapTexelSize = glm::vec2(1.0f / static_cast<float>(currentShadowSize));
                     shadowMaskUbo.screenSize = glm::vec2(
                         static_cast<float>(shadowMaskPass_.getWidth()),
@@ -442,7 +442,12 @@ void VulkanRenderAPI::present()
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &command_buffers[current_frame];
 
-    VkSemaphore signalSemaphores[] = {render_finished_semaphores[current_frame]};
+    if (current_image_index >= render_finished_semaphores.size()) {
+        LOG_ENGINE_ERROR("[Vulkan] Missing render-finished semaphore for swapchain image {}", current_image_index);
+        return;
+    }
+
+    VkSemaphore signalSemaphores[] = {render_finished_semaphores[current_image_index]};
     submitInfo.signalSemaphoreCount = 1;
     submitInfo.pSignalSemaphores = signalSemaphores;
 

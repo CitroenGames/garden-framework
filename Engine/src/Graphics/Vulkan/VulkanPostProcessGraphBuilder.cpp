@@ -340,7 +340,7 @@ void VulkanPostProcessGraphBuilder::recordShadowMask(RGContext&, const Handles& 
         api->cascadeSplitDistances[0], api->cascadeSplitDistances[1],
         api->cascadeSplitDistances[2], api->cascadeSplitDistances[3]);
     shadowMaskUbo.cascadeSplit4      = api->cascadeSplitDistances[4];
-    shadowMaskUbo.cascadeCount       = VulkanRenderAPI::NUM_CASCADES;
+    shadowMaskUbo.cascadeCount       = api->getCascadeCount();
     shadowMaskUbo.shadowMapTexelSize = glm::vec2(1.0f / static_cast<float>(api->currentShadowSize));
     shadowMaskUbo.screenSize         = glm::vec2(
         static_cast<float>(api->shadowMaskPass_.getWidth()),

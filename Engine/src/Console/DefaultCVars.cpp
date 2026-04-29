@@ -28,6 +28,9 @@ CONVAR(r_ssao, 1, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
 CONVAR_BOUNDED(r_shadowquality, 2, 0, 3, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
                "Shadow quality (0=off, 1=low, 2=medium, 3=high)");
 
+CONVAR_BOUNDED(r_shadowcascades, 2, 1, 4, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
+               "Vulkan shadow cascade count");
+
 CONVAR(r_sky, 1, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
        "Enable skybox rendering");
 

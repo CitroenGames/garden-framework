@@ -10,6 +10,7 @@
 #define VMA_DYNAMIC_VULKAN_FUNCTIONS 1
 #include "vk_mem_alloc.h"
 #include "VkInitHelpers.hpp"
+#include <algorithm>
 
 // ImGui for Vulkan rendering
 #include "imgui.h"
@@ -189,7 +190,6 @@ bool VulkanRenderAPI::createCommandBuffers()
 bool VulkanRenderAPI::createSyncObjects()
 {
     image_available_semaphores.resize(MAX_FRAMES_IN_FLIGHT);
-    render_finished_semaphores.resize(MAX_FRAMES_IN_FLIGHT);
     in_flight_fences.resize(MAX_FRAMES_IN_FLIGHT);
 
     VkSemaphoreCreateInfo semaphoreInfo{};
@@ -201,11 +201,33 @@ bool VulkanRenderAPI::createSyncObjects()
 
     for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         if (vkCreateSemaphore(device, &semaphoreInfo, nullptr, &image_available_semaphores[i]) != VK_SUCCESS ||
-            vkCreateSemaphore(device, &semaphoreInfo, nullptr, &render_finished_semaphores[i]) != VK_SUCCESS ||
             vkCreateFence(device, &fenceInfo, nullptr, &in_flight_fences[i]) != VK_SUCCESS) {
             printf("Failed to create sync objects for frame %d\n", i);
             return false;
         }
+    }
+
+    if (!ensureRenderFinishedSemaphores())
+        return false;
+
+    return true;
+}
+
+bool VulkanRenderAPI::ensureRenderFinishedSemaphores()
+{
+    VkSemaphoreCreateInfo semaphoreInfo{};
+    semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+
+    const size_t requiredCount = std::max<size_t>(swapchain_images.size(), 1);
+    while (render_finished_semaphores.size() < requiredCount)
+    {
+        VkSemaphore semaphore = VK_NULL_HANDLE;
+        if (vkCreateSemaphore(device, &semaphoreInfo, nullptr, &semaphore) != VK_SUCCESS)
+        {
+            printf("Failed to create render-finished semaphore %zu\n", render_finished_semaphores.size());
+            return false;
+        }
+        render_finished_semaphores.push_back(semaphore);
     }
 
     return true;
@@ -265,6 +287,11 @@ void VulkanRenderAPI::recreateSwapchain()
     cleanupSwapchain();
 
     if (!createSwapchain()) {
+        return;
+    }
+
+    if (!ensureRenderFinishedSemaphores()) {
+        swapchain_extent = {0, 0};
         return;
     }
 

@@ -110,6 +110,7 @@ bool EditorApp::initialize(RenderAPIType api_type)
     render_api->setFXAAEnabled(CVAR_BOOL(r_fxaa));
     render_api->setSSAOEnabled(CVAR_BOOL(r_ssao));
     render_api->setShadowQuality(CVAR_INT(r_shadowquality));
+    render_api->setShadowCascadeCount(CVAR_INT(r_shadowcascades));
     render_api->setDeferredEnabled(CVAR_BOOL(r_deferred));
     render_api->enableLighting(CVAR_BOOL(r_lighting));
     m_renderer.setDepthPrepassEnabled(CVAR_BOOL(r_depthprepass));
@@ -2218,6 +2219,21 @@ void EditorApp::renderEditorSettings()
                     }
                 }
 
+                // Shadow cascade count
+                {
+                    auto* cvar = CVAR_PTR(r_shadowcascades);
+                    int shadow_cascades = cvar ? cvar->getInt() : 2;
+                    const char* cascade_opts[] = { "1", "2", "3", "4" };
+                    int cascade_index = std::clamp(shadow_cascades, 1, 4) - 1;
+                    ImGui::SetNextItemWidth(-1.0f);
+                    if (ImGui::Combo("Shadow Cascades", &cascade_index, cascade_opts, 4))
+                    {
+                        shadow_cascades = cascade_index + 1;
+                        if (cvar) cvar->setInt(shadow_cascades);
+                        m_app.getRenderAPI()->setShadowCascadeCount(shadow_cascades);
+                    }
+                }
+
                 // Skybox toggle
                 {
                     auto* cvar = CVAR_PTR(r_sky);
@@ -2341,7 +2357,7 @@ void EditorApp::renderEditorSettings()
         // --- Footer ---
         if (ImGui::Button("Reset to Defaults"))
         {
-            const char* cvar_names[] = { "r_fxaa", "r_ssao", "r_shadowquality", "r_sky", "r_lighting",
+            const char* cvar_names[] = { "r_fxaa", "r_ssao", "r_shadowquality", "r_shadowcascades", "r_sky", "r_lighting",
                                           "r_dynamiclights", "r_depthprepass", "r_frustumculling",
                                           "r_staticmesh_chunking", "r_staticmesh_chunk_tris",
                                           "r_staticmesh_max_chunks", "r_deferred" };
@@ -2353,6 +2369,7 @@ void EditorApp::renderEditorSettings()
             m_app.getRenderAPI()->setFXAAEnabled(CVAR_BOOL(r_fxaa));
             m_app.getRenderAPI()->setSSAOEnabled(CVAR_BOOL(r_ssao));
             m_app.getRenderAPI()->setShadowQuality(CVAR_INT(r_shadowquality));
+            m_app.getRenderAPI()->setShadowCascadeCount(CVAR_INT(r_shadowcascades));
             m_app.getRenderAPI()->setDeferredEnabled(CVAR_BOOL(r_deferred));
             m_app.getRenderAPI()->enableLighting(CVAR_BOOL(r_lighting));
             m_renderer.setDepthPrepassEnabled(CVAR_BOOL(r_depthprepass));

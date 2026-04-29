@@ -20,13 +20,16 @@
 // CSM Helper: Calculate cascade split distances using practical split scheme
 void VulkanRenderAPI::calculateCascadeSplits(float nearPlane, float farPlane)
 {
+    const int cascadeCount = std::clamp(activeCascadeCount, 1, NUM_CASCADES);
     cascadeSplitDistances[0] = nearPlane;
-    for (int i = 1; i <= NUM_CASCADES; i++) {
-        float p = static_cast<float>(i) / static_cast<float>(NUM_CASCADES);
+    for (int i = 1; i <= cascadeCount; i++) {
+        float p = static_cast<float>(i) / static_cast<float>(cascadeCount);
         float log = nearPlane * std::pow(farPlane / nearPlane, p);
         float linear = nearPlane + (farPlane - nearPlane) * p;
         cascadeSplitDistances[i] = cascadeSplitLambda * log + (1.0f - cascadeSplitLambda) * linear;
     }
+    for (int i = cascadeCount + 1; i <= NUM_CASCADES; i++)
+        cascadeSplitDistances[i] = farPlane;
 }
 
 // CSM Helper: Get frustum corners in world space
@@ -122,6 +125,37 @@ bool VulkanRenderAPI::createShadowResources()
                             1, NUM_CASCADES) != VK_SUCCESS) {
         printf("Failed to create shadow map image\n");
         return false;
+    }
+
+    // The sampled descriptor view spans all cascade layers. If fewer cascades
+    // are rendered, untouched layers still need a valid sampled layout.
+    {
+        VkCommandBuffer cmd = beginSingleTimeCommands();
+
+        VkImageMemoryBarrier barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image = shadow_map_image;
+        barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+        barrier.subresourceRange.baseMipLevel = 0;
+        barrier.subresourceRange.levelCount = 1;
+        barrier.subresourceRange.baseArrayLayer = 0;
+        barrier.subresourceRange.layerCount = NUM_CASCADES;
+        barrier.srcAccessMask = 0;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            0,
+            0, nullptr,
+            0, nullptr,
+            1, &barrier);
+
+        endSingleTimeCommands(cmd);
     }
 
     // Create per-cascade image views (for framebuffer attachment)
@@ -578,8 +612,12 @@ void VulkanRenderAPI::beginShadowPass(const glm::vec3& lightDir)
 
     // Calculate light space matrices
     float aspect = static_cast<float>(viewport_width) / static_cast<float>(std::max(viewport_height, 1));
-    for (int i = 0; i < NUM_CASCADES; i++) {
+    const int cascadeCount = getCascadeCount();
+    for (int i = 0; i < cascadeCount; i++) {
         lightSpaceMatrices[i] = getLightSpaceMatrixForCascade(i, lightDir, view_matrix, field_of_view, aspect);
+    }
+    for (int i = cascadeCount; i < NUM_CASCADES; i++) {
+        lightSpaceMatrices[i] = lightSpaceMatrices[cascadeCount - 1];
     }
 
     currentCascade = 0;
@@ -614,8 +652,12 @@ void VulkanRenderAPI::beginShadowPass(const glm::vec3& lightDir, const camera& c
     float aspect = isViewportMode()
         ? static_cast<float>(viewport_width_rt) / static_cast<float>(std::max(viewport_height_rt, 1))
         : static_cast<float>(viewport_width) / static_cast<float>(std::max(viewport_height, 1));
-    for (int i = 0; i < NUM_CASCADES; i++) {
+    const int cascadeCount = getCascadeCount();
+    for (int i = 0; i < cascadeCount; i++) {
         lightSpaceMatrices[i] = getLightSpaceMatrixForCascade(i, lightDir, view_matrix, field_of_view, aspect);
+    }
+    for (int i = cascadeCount; i < NUM_CASCADES; i++) {
+        lightSpaceMatrices[i] = lightSpaceMatrices[cascadeCount - 1];
     }
 
     currentCascade = 0;
@@ -718,7 +760,7 @@ glm::mat4 VulkanRenderAPI::getLightSpaceMatrix()
 
 int VulkanRenderAPI::getCascadeCount() const
 {
-    return NUM_CASCADES;
+    return std::clamp(activeCascadeCount, 1, NUM_CASCADES);
 }
 
 const float* VulkanRenderAPI::getCascadeSplitDistances() const
@@ -760,6 +802,11 @@ void VulkanRenderAPI::setShadowQuality(int quality)
 int VulkanRenderAPI::getShadowQuality() const
 {
     return (pendingShadowQuality >= 0) ? pendingShadowQuality : shadowQuality;
+}
+
+void VulkanRenderAPI::setShadowCascadeCount(int count)
+{
+    activeCascadeCount = std::clamp(count, 1, NUM_CASCADES);
 }
 
 void VulkanRenderAPI::recreateShadowResources(uint32_t size)

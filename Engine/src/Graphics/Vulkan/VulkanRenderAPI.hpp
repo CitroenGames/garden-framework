@@ -109,6 +109,7 @@ public:
     virtual bool isFXAAEnabled() const override;
     virtual void setShadowQuality(int quality) override;
     virtual int getShadowQuality() const override;
+    virtual void setShadowCascadeCount(int count) override;
     virtual void setSSAOEnabled(bool enabled) override;
     virtual bool isSSAOEnabled() const override;
     virtual void setSSAORadius(float radius) override;
@@ -155,6 +156,7 @@ private:
     bool createCommandPool();
     bool createCommandBuffers();
     bool createSyncObjects();
+    bool ensureRenderFinishedSemaphores();
     bool createDescriptorSetLayout();
     bool createGraphicsPipeline();
     bool createDescriptorPool();
@@ -527,6 +529,7 @@ private:
     uint32_t currentShadowSize = 4096;  // Runtime configurable shadow resolution
     int shadowQuality = 3;  // 0=Off, 1=Low(1024), 2=Medium(2048), 3=High(4096)
     int pendingShadowQuality = -1;  // Deferred quality change (-1 = none pending)
+    int activeCascadeCount = 2;
     bool fxaaEnabled = true;
     bool debugCascades = false;
     float cascadeSplitDistances[5] = { 0.1f, 10.0f, 35.0f, 90.0f, 200.0f };

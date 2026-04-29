@@ -143,16 +143,19 @@ public:
         if (range.isAlphaBlend())
             return true;
 
-        glm::vec3 extent = range.aabb_max - range.aabb_min;
+        AABB world_bounds = AABB::fromTransformedAABB(range.aabb_min, range.aabb_max, model);
+        glm::vec3 extent = world_bounds.max - world_bounds.min;
         float min_extent = std::min(extent.x, std::min(extent.y, extent.z));
+        float max_extent = std::max(extent.x, std::max(extent.y, extent.z));
         if (range.vertex_count <= 12 && min_extent < 0.05f)
             return true;
 
         glm::vec3 padding = glm::max(extent * 0.05f, glm::vec3(1.0f));
-        AABB world_bounds = AABB::fromTransformedAABB(
-            range.aabb_min - padding,
-            range.aabb_max + padding,
-            model);
+        if (max_extent > 0.0f && min_extent < max_extent * 0.01f)
+            padding = glm::max(padding, glm::vec3(std::min(max_extent * 0.10f, 4.0f)));
+
+        world_bounds.min -= padding;
+        world_bounds.max += padding;
         return frustum->intersectsAABB(world_bounds);
     }
 
@@ -188,11 +191,33 @@ public:
             && a.emissive_texture == b.emissive_texture;
     }
 
-    template <typename Emit>
-    static void emit_visible_merged_ranges(const std::vector<MaterialRange>& ranges,
-                                           const glm::mat4& model,
-                                           const Frustum* frustum,
-                                           Emit emit)
+    static bool depth_ranges_draw_compatible(const MaterialRange& a, const MaterialRange& b)
+    {
+        if (a.start_vertex + a.vertex_count != b.start_vertex)
+            return false;
+        if (a.isAlphaBlend() || b.isAlphaBlend())
+            return false;
+        if (a.isAlphaMask() != b.isAlphaMask())
+            return false;
+        if (!a.isAlphaMask())
+            return true;
+
+        return a.texture == b.texture
+            && a.alpha_cutoff == b.alpha_cutoff
+            && a.double_sided == b.double_sided;
+    }
+
+    static bool shadow_ranges_draw_compatible(const MaterialRange& a, const MaterialRange& b)
+    {
+        return depth_ranges_draw_compatible(a, b);
+    }
+
+    template <typename Compatible, typename Emit>
+    static void emit_visible_merged_ranges_if(const std::vector<MaterialRange>& ranges,
+                                              const glm::mat4& model,
+                                              const Frustum* frustum,
+                                              Compatible compatible,
+                                              Emit emit)
     {
         MaterialRange merged;
         bool has_merged = false;
@@ -214,7 +239,7 @@ public:
                 continue;
             }
 
-            if (has_merged && material_ranges_draw_compatible(merged, range)) {
+            if (has_merged && compatible(merged, range)) {
                 merged.vertex_count += range.vertex_count;
                 continue;
             }
@@ -225,6 +250,36 @@ public:
         }
 
         flush();
+    }
+
+    template <typename Emit>
+    static void emit_visible_merged_ranges(const std::vector<MaterialRange>& ranges,
+                                           const glm::mat4& model,
+                                           const Frustum* frustum,
+                                           Emit emit)
+    {
+        emit_visible_merged_ranges_if(ranges, model, frustum,
+                                      material_ranges_draw_compatible, emit);
+    }
+
+    template <typename Emit>
+    static void emit_visible_merged_depth_ranges(const std::vector<MaterialRange>& ranges,
+                                                 const glm::mat4& model,
+                                                 const Frustum* frustum,
+                                                 Emit emit)
+    {
+        emit_visible_merged_ranges_if(ranges, model, frustum,
+                                      depth_ranges_draw_compatible, emit);
+    }
+
+    template <typename Emit>
+    static void emit_visible_merged_shadow_ranges(const std::vector<MaterialRange>& ranges,
+                                                  const glm::mat4& model,
+                                                  const Frustum* frustum,
+                                                  Emit emit)
+    {
+        emit_visible_merged_ranges_if(ranges, model, frustum,
+                                      shadow_ranges_draw_compatible, emit);
     }
 
     // Record a single mesh draw into a command buffer.
@@ -429,7 +484,7 @@ public:
         }
 
         if (m.uses_material_ranges && (has_alpha_mask || has_alpha_blend || has_bounded)) {
-            emit_visible_merged_ranges(m.material_ranges, model, frustum,
+            emit_visible_merged_depth_ranges(m.material_ranges, model, frustum,
                 [&](const MaterialRange& range) {
                 if (range.isAlphaBlend()) return;  // Skip blend ranges in depth prepass
                 PSOKey key = PSOKey::depthPrepass();
@@ -490,7 +545,7 @@ public:
             }
 
             if (needs_per_range) {
-                emit_visible_merged_ranges(*ranges, model, frustum,
+                emit_visible_merged_depth_ranges(*ranges, model, frustum,
                     [&](const MaterialRange& range) {
                     if (range.isAlphaBlend()) return;  // Skip blend ranges in depth prepass
                     PSOKey key = PSOKey::depthPrepass();
@@ -560,7 +615,7 @@ public:
         }
 
         if (m.uses_material_ranges && (has_alpha_mask || has_alpha_blend || has_bounded)) {
-            emit_visible_merged_ranges(*shadow_ranges, model, frustum,
+            emit_visible_merged_shadow_ranges(*shadow_ranges, model, frustum,
                 [&](const MaterialRange& range) {
                 if (range.isAlphaBlend()) return;  // BLEND materials don't cast shadows
                 PSOKey key = PSOKey::shadowPass();
@@ -1048,6 +1103,7 @@ public:
         render_api->setFXAAEnabled(CVAR_BOOL(r_fxaa));
         render_api->setSSAOEnabled(CVAR_BOOL(r_ssao));
         render_api->setShadowQuality(CVAR_INT(r_shadowquality));
+        render_api->setShadowCascadeCount(CVAR_INT(r_shadowcascades));
         render_api->setDeferredEnabled(CVAR_BOOL(r_deferred));
         render_api->enableLighting(global_lighting);
 
@@ -1310,6 +1366,7 @@ public:
         render_api->setFXAAEnabled(CVAR_BOOL(r_fxaa));
         render_api->setSSAOEnabled(CVAR_BOOL(r_ssao));
         render_api->setShadowQuality(CVAR_INT(r_shadowquality));
+        render_api->setShadowCascadeCount(CVAR_INT(r_shadowcascades));
         render_api->setDeferredEnabled(CVAR_BOOL(r_deferred));
         render_api->enableLighting(global_lighting);
 

@@ -595,7 +595,7 @@ void VulkanRenderAPI::endSceneRender()
                         cascadeSplitDistances[0], cascadeSplitDistances[1],
                         cascadeSplitDistances[2], cascadeSplitDistances[3]);
                     shadowMaskUbo.cascadeSplit4 = cascadeSplitDistances[4];
-                    shadowMaskUbo.cascadeCount = NUM_CASCADES;
+                    shadowMaskUbo.cascadeCount = getCascadeCount();
                     shadowMaskUbo.shadowMapTexelSize = glm::vec2(1.0f / static_cast<float>(currentShadowSize));
                     shadowMaskUbo.screenSize = glm::vec2(
                         static_cast<float>(shadowMaskPass_.getWidth()),

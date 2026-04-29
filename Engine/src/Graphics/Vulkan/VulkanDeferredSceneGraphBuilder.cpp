@@ -210,7 +210,7 @@ void VulkanDeferredSceneGraphBuilder::build(RenderGraph& graph, RGBackend& backe
                 m_api->cascadeSplitDistances[0], m_api->cascadeSplitDistances[1],
                 m_api->cascadeSplitDistances[2], m_api->cascadeSplitDistances[3]);
             ubo.uCascadeSplit4      = m_api->cascadeSplitDistances[4];
-            ubo.uCascadeCount       = VulkanRenderAPI::NUM_CASCADES;
+            ubo.uCascadeCount       = m_api->getCascadeCount();
             ubo.uShadowMapTexelSize = glm::vec2(1.0f / static_cast<float>(m_api->currentShadowSize));
             const glm::mat4 invView = glm::affineInverse(m_api->view_matrix);
             ubo.uCameraPos    = glm::vec3(invView[3]);
