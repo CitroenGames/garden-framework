@@ -80,7 +80,11 @@ VulkanPostProcessGraphBuilder::importResources(RenderGraph& graph, RGBackend& ba
 
     h.skyboxEnabled = api->m_skyboxRequested && api->skybox_initialized;
 
-    if (cfg.wantShadowMask && api->shadow_map_image != VK_NULL_HANDLE) {
+    // Import the CSM shadow atlas whenever one exists. Consumers (shadow-mask
+    // pass, deferred lighting, transparent forward) gate themselves separately;
+    // deferred lighting disables the screen-space shadow mask but still needs
+    // the real cascades here.
+    if (api->shadow_map_image != VK_NULL_HANDLE) {
         RGTextureDesc smDesc;
         smDesc.width     = api->currentShadowSize;
         smDesc.height    = api->currentShadowSize;
