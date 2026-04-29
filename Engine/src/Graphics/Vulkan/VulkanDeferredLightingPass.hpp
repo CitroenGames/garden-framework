@@ -34,7 +34,8 @@ public:
     bool init(VkDevice device,
               VkPipelineCache pipelineCache,
               const std::vector<char>& vertSPV,
-              const std::vector<char>& fragSPV);
+              const std::vector<char>& fragSPV,
+              uint32_t framesInFlight = 2);
 
     void cleanup();
 
@@ -46,13 +47,13 @@ public:
     VkSampler           getShadowSampler()    const { return shadowSampler_; }
     bool                isInitialized()       const { return initialized_; }
 
-    // Allocate a descriptor set from this pass's pool. Caller writes bindings
-    // each frame. Pool grows on demand if exhausted.
-    VkDescriptorSet allocateDescriptorSet();
+    // Allocate a descriptor set from the current frame's pool. Caller writes
+    // bindings each frame.
+    VkDescriptorSet allocateDescriptorSet(uint32_t frameIndex);
 
-    // Reset the pool — call once per frame after the GPU is past previous
-    // descriptor uses. Frees all sets allocated since last reset.
-    void resetDescriptors();
+    // Reset the current frame's pool after its fence has signaled. This keeps
+    // descriptor sets used by other in-flight frames valid.
+    void resetDescriptors(uint32_t frameIndex);
 
 private:
     bool createRenderPass();
@@ -62,7 +63,7 @@ private:
                         const std::vector<char>& vs,
                         const std::vector<char>& fs);
     bool createSamplers();
-    bool createDescriptorPool();
+    bool createDescriptorPools();
     VkShaderModule makeShaderModule(const std::vector<char>& code);
 
     VkDevice              device_         = VK_NULL_HANDLE;
@@ -70,7 +71,8 @@ private:
     VkDescriptorSetLayout dsLayout_       = VK_NULL_HANDLE;
     VkPipelineLayout      pipelineLayout_ = VK_NULL_HANDLE;
     VkPipeline            pipeline_       = VK_NULL_HANDLE;
-    VkDescriptorPool      descriptorPool_ = VK_NULL_HANDLE;
+    std::vector<VkDescriptorPool> descriptorPools_;
+    uint32_t              framesInFlight_ = 0;
     VkSampler             linearSampler_  = VK_NULL_HANDLE;
     VkSampler             shadowSampler_  = VK_NULL_HANDLE;
     bool                  initialized_    = false;

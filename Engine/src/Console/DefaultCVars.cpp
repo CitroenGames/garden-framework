@@ -45,7 +45,7 @@ CONVAR(r_frustumculling, 1, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
 
 CONVAR(r_deferred, 0, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
        "Enable deferred rendering (opaque GBuffer + deferred lighting; transparents still forward). "
-       "D3D12 only today -- Vulkan path is a no-op.");
+       "Supported on D3D12 and Vulkan.");
 
 CONVAR(r_d3d12_dred, 0, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
        "Force-enable D3D12 DRED (Device Removed Extended Data) and GPU-Based Validation in Release builds. "

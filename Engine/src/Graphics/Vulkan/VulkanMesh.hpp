@@ -9,6 +9,8 @@ typedef VmaAllocator_T* VmaAllocator;
 struct VmaAllocation_T;
 typedef VmaAllocation_T* VmaAllocation;
 
+class VkDeletionQueue;
+
 class VulkanMesh : public IGPUMesh
 {
 private:
@@ -27,13 +29,15 @@ private:
     VkCommandPool command_pool = VK_NULL_HANDLE;
     VkQueue graphics_queue = VK_NULL_HANDLE;
     VkFence transfer_fence = VK_NULL_HANDLE;
+    VkDeletionQueue* deletion_queue = nullptr;
 
 public:
     VulkanMesh();
     ~VulkanMesh() override;
 
     // Set Vulkan handles (called by VulkanRenderAPI::createMesh)
-    void setVulkanHandles(VkDevice dev, VmaAllocator alloc, VkCommandPool cmdPool, VkQueue queue);
+    void setVulkanHandles(VkDevice dev, VmaAllocator alloc, VkCommandPool cmdPool, VkQueue queue,
+                          VkDeletionQueue* deletionQueue = nullptr);
 
     // IGPUMesh implementation
     void uploadMeshData(const vertex* vertices, size_t count) override;
@@ -52,4 +56,7 @@ public:
 
 private:
     void copyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size);
+    void cleanupBuffers();
+    void destroyBuffer(VkBuffer& buffer, VmaAllocation& allocation);
+    void destroyTransferFence();
 };

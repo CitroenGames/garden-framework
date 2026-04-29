@@ -1,4 +1,5 @@
 #include "VulkanMesh.hpp"
+#include "VkDeletionQueue.hpp"
 #include "VulkanRenderAPI.hpp"
 #include "Utils/Vertex.hpp"
 #include <cstring>
@@ -18,12 +19,14 @@ VulkanMesh::~VulkanMesh()
     cleanup();
 }
 
-void VulkanMesh::setVulkanHandles(VkDevice dev, VmaAllocator alloc, VkCommandPool cmdPool, VkQueue queue)
+void VulkanMesh::setVulkanHandles(VkDevice dev, VmaAllocator alloc, VkCommandPool cmdPool, VkQueue queue,
+                                  VkDeletionQueue* deletionQueue)
 {
     device = dev;
     allocator = alloc;
     command_pool = cmdPool;
     graphics_queue = queue;
+    deletion_queue = deletionQueue;
 
     // Create fence for transfer synchronization (avoids blocking entire queue)
     VkFenceCreateInfo fenceInfo{};
@@ -46,7 +49,7 @@ void VulkanMesh::uploadMeshData(const vertex* vertices, size_t count)
     // Clean up existing buffers
     if (vertex_buffer != VK_NULL_HANDLE || index_buffer != VK_NULL_HANDLE)
     {
-        cleanup();
+        cleanupBuffers();
     }
 
     if (count == 0 || vertices == nullptr)
@@ -123,7 +126,7 @@ void VulkanMesh::uploadIndexedMeshData(const vertex* vertices, size_t vert_count
     // Clean up existing buffers
     if (vertex_buffer != VK_NULL_HANDLE || index_buffer != VK_NULL_HANDLE)
     {
-        cleanup();
+        cleanupBuffers();
     }
 
     if (vert_count == 0 || !vertices || idx_count == 0 || !indices)
@@ -363,25 +366,53 @@ void VulkanMesh::copyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize
 
 void VulkanMesh::cleanup()
 {
-    if (vertex_buffer != VK_NULL_HANDLE && allocator != nullptr)
+    cleanupBuffers();
+    destroyTransferFence();
+}
+
+void VulkanMesh::cleanupBuffers()
+{
+    destroyBuffer(vertex_buffer, vertex_allocation);
+    destroyBuffer(index_buffer, index_allocation);
+
+    vertex_count = 0;
+    index_count_ = 0;
+    indexed_ = false;
+    uploaded = false;
+}
+
+void VulkanMesh::destroyBuffer(VkBuffer& buffer, VmaAllocation& allocation)
+{
+    if (buffer == VK_NULL_HANDLE || allocator == nullptr)
     {
-        vmaDestroyBuffer(allocator, vertex_buffer, vertex_allocation);
-        vertex_buffer = VK_NULL_HANDLE;
-        vertex_allocation = nullptr;
+        buffer = VK_NULL_HANDLE;
+        allocation = nullptr;
+        return;
     }
-    if (index_buffer != VK_NULL_HANDLE && allocator != nullptr)
+
+    VkBuffer oldBuffer = buffer;
+    VmaAllocation oldAllocation = allocation;
+    VmaAllocator oldAllocator = allocator;
+    buffer = VK_NULL_HANDLE;
+    allocation = nullptr;
+
+    if (deletion_queue)
     {
-        vmaDestroyBuffer(allocator, index_buffer, index_allocation);
-        index_buffer = VK_NULL_HANDLE;
-        index_allocation = nullptr;
+        deletion_queue->push([oldAllocator, oldBuffer, oldAllocation]() {
+            vmaDestroyBuffer(oldAllocator, oldBuffer, oldAllocation);
+        });
     }
+    else
+    {
+        vmaDestroyBuffer(oldAllocator, oldBuffer, oldAllocation);
+    }
+}
+
+void VulkanMesh::destroyTransferFence()
+{
     if (transfer_fence != VK_NULL_HANDLE && device != VK_NULL_HANDLE)
     {
         vkDestroyFence(device, transfer_fence, nullptr);
         transfer_fence = VK_NULL_HANDLE;
     }
-    vertex_count = 0;
-    index_count_ = 0;
-    indexed_ = false;
-    uploaded = false;
 }

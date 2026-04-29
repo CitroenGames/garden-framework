@@ -373,20 +373,7 @@ void VulkanPostProcessGraphBuilder::recordTonemapping(RGContext&, const Handles&
 
 void VulkanPostProcessGraphBuilder::addExtraPasses(RenderGraph& graph, const Handles& h, const Config& cfg)
 {
-    // Vulkan needs an explicit barrier back to DEPTH_STENCIL_ATTACHMENT_OPTIMAL
-    // for the next frame's main render pass, any time depth was read this frame.
-    const bool depthWasRead =
-        (cfg.wantSSAO && h.ssaoEnabled) ||
-        (cfg.wantShadowMask && h.shadowMaskEnabled) ||
-        h.skyboxEnabled;
-
-    if (depthWasRead) {
-        graph.addPass("DepthRestore",
-            [&](RGBuilder& b) {
-                b.write(h.depth, RGResourceUsage::DepthStencilWrite);
-                b.setSideEffect();
-            },
-            [](RGContext&) {
-            });
-    }
+    (void)graph;
+    (void)h;
+    (void)cfg;
 }

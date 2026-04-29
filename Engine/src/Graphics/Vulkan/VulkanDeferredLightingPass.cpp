@@ -11,18 +11,21 @@ VulkanDeferredLightingPass::~VulkanDeferredLightingPass()
 bool VulkanDeferredLightingPass::init(VkDevice device,
                                       VkPipelineCache pipelineCache,
                                       const std::vector<char>& vertSPV,
-                                      const std::vector<char>& fragSPV)
+                                      const std::vector<char>& fragSPV,
+                                      uint32_t framesInFlight)
 {
     if (device == VK_NULL_HANDLE) return false;
     if (vertSPV.empty() || fragSPV.empty()) return false;
+    if (framesInFlight == 0) return false;
     device_ = device;
+    framesInFlight_ = framesInFlight;
 
     if (!createRenderPass())     { cleanup(); return false; }
     if (!createSamplers())       { cleanup(); return false; }
     if (!createDescriptorLayout()) { cleanup(); return false; }
     if (!createPipelineLayout()) { cleanup(); return false; }
     if (!createPipeline(pipelineCache, vertSPV, fragSPV)) { cleanup(); return false; }
-    if (!createDescriptorPool()) { cleanup(); return false; }
+    if (!createDescriptorPools()) { cleanup(); return false; }
 
     initialized_ = true;
     return true;
@@ -34,7 +37,12 @@ void VulkanDeferredLightingPass::cleanup()
     if (pipeline_ != VK_NULL_HANDLE)        { vkDestroyPipeline(device_, pipeline_, nullptr); pipeline_ = VK_NULL_HANDLE; }
     if (pipelineLayout_ != VK_NULL_HANDLE)  { vkDestroyPipelineLayout(device_, pipelineLayout_, nullptr); pipelineLayout_ = VK_NULL_HANDLE; }
     if (dsLayout_ != VK_NULL_HANDLE)        { vkDestroyDescriptorSetLayout(device_, dsLayout_, nullptr); dsLayout_ = VK_NULL_HANDLE; }
-    if (descriptorPool_ != VK_NULL_HANDLE)  { vkDestroyDescriptorPool(device_, descriptorPool_, nullptr); descriptorPool_ = VK_NULL_HANDLE; }
+    for (VkDescriptorPool pool : descriptorPools_) {
+        if (pool != VK_NULL_HANDLE)
+            vkDestroyDescriptorPool(device_, pool, nullptr);
+    }
+    descriptorPools_.clear();
+    framesInFlight_ = 0;
     if (linearSampler_ != VK_NULL_HANDLE)   { vkDestroySampler(device_, linearSampler_, nullptr); linearSampler_ = VK_NULL_HANDLE; }
     if (shadowSampler_ != VK_NULL_HANDLE)   { vkDestroySampler(device_, shadowSampler_, nullptr); shadowSampler_ = VK_NULL_HANDLE; }
     if (renderPass_ != VK_NULL_HANDLE)      { vkDestroyRenderPass(device_, renderPass_, nullptr); renderPass_ = VK_NULL_HANDLE; }
@@ -231,10 +239,10 @@ bool VulkanDeferredLightingPass::createPipeline(VkPipelineCache cache,
     return r == VK_SUCCESS;
 }
 
-bool VulkanDeferredLightingPass::createDescriptorPool()
+bool VulkanDeferredLightingPass::createDescriptorPools()
 {
-    // Modest cap — 1 set per frame is plenty (1 fullscreen lighting draw).
-    constexpr uint32_t kMaxSets = 8;
+    // Modest cap: one set per frame is plenty for the fullscreen lighting draw.
+    constexpr uint32_t kMaxSets = 4;
     std::array<VkDescriptorPoolSize, 3> sizes{};
     sizes[0] = { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         kMaxSets * 1 };
     sizes[1] = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kMaxSets * 5 };
@@ -245,30 +253,38 @@ bool VulkanDeferredLightingPass::createDescriptorPool()
     info.maxSets       = kMaxSets;
     info.poolSizeCount = static_cast<uint32_t>(sizes.size());
     info.pPoolSizes    = sizes.data();
-    return vkCreateDescriptorPool(device_, &info, nullptr, &descriptorPool_) == VK_SUCCESS;
+    descriptorPools_.assign(framesInFlight_, VK_NULL_HANDLE);
+    for (uint32_t i = 0; i < framesInFlight_; ++i) {
+        if (vkCreateDescriptorPool(device_, &info, nullptr, &descriptorPools_[i]) != VK_SUCCESS) {
+            for (VkDescriptorPool pool : descriptorPools_) {
+                if (pool != VK_NULL_HANDLE)
+                    vkDestroyDescriptorPool(device_, pool, nullptr);
+            }
+            descriptorPools_.clear();
+            return false;
+        }
+    }
+    return true;
 }
 
-VkDescriptorSet VulkanDeferredLightingPass::allocateDescriptorSet()
+VkDescriptorSet VulkanDeferredLightingPass::allocateDescriptorSet(uint32_t frameIndex)
 {
     if (!initialized_) return VK_NULL_HANDLE;
+    if (frameIndex >= descriptorPools_.size()) return VK_NULL_HANDLE;
     VkDescriptorSetAllocateInfo info{};
     info.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    info.descriptorPool     = descriptorPool_;
+    info.descriptorPool     = descriptorPools_[frameIndex];
     info.descriptorSetCount = 1;
     info.pSetLayouts        = &dsLayout_;
     VkDescriptorSet ds = VK_NULL_HANDLE;
-    if (vkAllocateDescriptorSets(device_, &info, &ds) != VK_SUCCESS) {
-        // Pool exhausted — reset and retry. The graph builder is expected to
-        // call resetDescriptors() once per frame before any allocation.
-        vkResetDescriptorPool(device_, descriptorPool_, 0);
-        if (vkAllocateDescriptorSets(device_, &info, &ds) != VK_SUCCESS)
-            return VK_NULL_HANDLE;
-    }
+    if (vkAllocateDescriptorSets(device_, &info, &ds) != VK_SUCCESS)
+        return VK_NULL_HANDLE;
     return ds;
 }
 
-void VulkanDeferredLightingPass::resetDescriptors()
+void VulkanDeferredLightingPass::resetDescriptors(uint32_t frameIndex)
 {
-    if (descriptorPool_ != VK_NULL_HANDLE)
-        vkResetDescriptorPool(device_, descriptorPool_, 0);
+    if (frameIndex < descriptorPools_.size()
+        && descriptorPools_[frameIndex] != VK_NULL_HANDLE)
+        vkResetDescriptorPool(device_, descriptorPools_[frameIndex], 0);
 }

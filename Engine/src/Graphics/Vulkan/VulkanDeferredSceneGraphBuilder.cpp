@@ -78,12 +78,16 @@ void VulkanDeferredSceneGraphBuilder::build(RenderGraph& graph, RGBackend& backe
             VkImageView depthView = backend.getImageView(h.depth.handle);
             if (!gb0View || !gb1View || !gb2View || !depthView) {
                 LOG_ENGINE_ERROR("[Vulkan] GBuffer pass: missing image views");
+                m_api->m_deferredOpaqueCmds.clear();
                 return;
             }
 
             VkRenderPass rp       = m_api->gbufferPass_.getRenderPass();
             VkPipeline   pipeline = m_api->gbufferPass_.getPipeline();
-            if (rp == VK_NULL_HANDLE || pipeline == VK_NULL_HANDLE) return;
+            if (rp == VK_NULL_HANDLE || pipeline == VK_NULL_HANDLE) {
+                m_api->m_deferredOpaqueCmds.clear();
+                return;
+            }
 
             // Build a framebuffer for this frame's image views. Pushed to the
             // deletion queue with the default 3-frame delay so the GPU is past
@@ -101,6 +105,7 @@ void VulkanDeferredSceneGraphBuilder::build(RenderGraph& graph, RGBackend& backe
             VkFramebuffer framebuffer = VK_NULL_HANDLE;
             if (vkCreateFramebuffer(m_api->device, &fbInfo, nullptr, &framebuffer) != VK_SUCCESS) {
                 LOG_ENGINE_ERROR("[Vulkan] GBuffer pass: failed to create framebuffer");
+                m_api->m_deferredOpaqueCmds.clear();
                 return;
             }
             VkDevice dev = m_api->device;
@@ -216,11 +221,22 @@ void VulkanDeferredSceneGraphBuilder::build(RenderGraph& graph, RGBackend& backe
             ubo.uNumSpotLights  = m_api->m_num_spot_lights_deferred;
 
             const uint32_t f = m_api->current_frame;
+            if (f >= m_api->m_deferred_lighting_cb_mapped.size()
+                || f >= m_api->m_deferred_lighting_cb_buffers.size()
+                || f >= m_api->m_point_lights_buffers.size()
+                || f >= m_api->m_spot_lights_buffers.size()
+                || !m_api->m_deferred_lighting_cb_mapped[f]
+                || m_api->m_deferred_lighting_cb_buffers[f] == VK_NULL_HANDLE
+                || m_api->m_point_lights_buffers[f] == VK_NULL_HANDLE
+                || m_api->m_spot_lights_buffers[f] == VK_NULL_HANDLE) {
+                LOG_ENGINE_ERROR("[Vulkan] DeferredLighting: per-frame buffers unavailable");
+                return;
+            }
             std::memcpy(m_api->m_deferred_lighting_cb_mapped[f], &ubo, sizeof(ubo));
 
             // Allocate and write the descriptor set for this frame's draw.
-            deferredPass.resetDescriptors();
-            VkDescriptorSet ds = deferredPass.allocateDescriptorSet();
+            deferredPass.resetDescriptors(f);
+            VkDescriptorSet ds = deferredPass.allocateDescriptorSet(f);
             if (ds == VK_NULL_HANDLE) {
                 LOG_ENGINE_ERROR("[Vulkan] DeferredLighting: descriptor alloc failed");
                 return;
@@ -390,6 +406,8 @@ void VulkanDeferredSceneGraphBuilder::addPreTonemapPasses(RenderGraph& graph,
             VkImageView depthView = backend.getImageView(h.depth.handle);
             if (rp == VK_NULL_HANDLE || !hdrView || !depthView) {
                 LOG_ENGINE_ERROR("[Vulkan] TransparentForward: missing render pass or image views");
+                m_api->m_deferredTransparentCmds.clear();
+                m_api->m_deferredDebugLineVertices.clear();
                 return;
             }
 
@@ -406,6 +424,8 @@ void VulkanDeferredSceneGraphBuilder::addPreTonemapPasses(RenderGraph& graph,
             VkFramebuffer framebuffer = VK_NULL_HANDLE;
             if (vkCreateFramebuffer(m_api->device, &fbInfo, nullptr, &framebuffer) != VK_SUCCESS) {
                 LOG_ENGINE_ERROR("[Vulkan] TransparentForward: failed to create framebuffer");
+                m_api->m_deferredTransparentCmds.clear();
+                m_api->m_deferredDebugLineVertices.clear();
                 return;
             }
             VkDevice dev = m_api->device;

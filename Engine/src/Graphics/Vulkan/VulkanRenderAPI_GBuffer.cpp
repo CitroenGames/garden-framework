@@ -49,7 +49,8 @@ bool VulkanRenderAPI::createDeferredLightingResources()
         return false;
     }
 
-    if (!deferredLightingPass_.init(device, vk_pipeline_cache, vs, fs)) {
+    if (!deferredLightingPass_.init(device, vk_pipeline_cache, vs, fs,
+                                    MAX_FRAMES_IN_FLIGHT)) {
         LOG_ENGINE_WARN("[Vulkan] Failed to create Deferred Lighting pass -- deferred lighting disabled");
         return false;
     }

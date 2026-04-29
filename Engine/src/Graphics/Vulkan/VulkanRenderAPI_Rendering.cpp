@@ -1180,10 +1180,17 @@ void VulkanRenderAPI::renderDebugLinesDirect(const vertex* vertices, size_t vert
         // Free old buffer
         if (debug_line_buffer)
         {
-            vmaDestroyBuffer(vma_allocator, debug_line_buffer, debug_line_allocation);
+            VkBuffer oldBuffer = debug_line_buffer;
+            VmaAllocation oldAllocation = debug_line_allocation;
+            VmaAllocator oldAllocator = vma_allocator;
+            deletion_queue.push([oldAllocator, oldBuffer, oldAllocation]() {
+                vmaDestroyBuffer(oldAllocator, oldBuffer, oldAllocation);
+            });
             debug_line_buffer = VK_NULL_HANDLE;
             debug_line_allocation = nullptr;
             debug_line_mapped = nullptr;
+            if (last_bound_vertex_buffer == oldBuffer)
+                last_bound_vertex_buffer = VK_NULL_HANDLE;
         }
 
         debug_line_buffer_capacity = std::max(vertex_count, size_t(1024));
@@ -1326,7 +1333,7 @@ void VulkanRenderAPI::setPointAndSpotLights(const LightCBuffer& lights)
 IGPUMesh* VulkanRenderAPI::createMesh()
 {
     VulkanMesh* mesh = new VulkanMesh();
-    mesh->setVulkanHandles(device, vma_allocator, command_pool, graphics_queue);
+    mesh->setVulkanHandles(device, vma_allocator, command_pool, graphics_queue, &deletion_queue);
     return mesh;
 }
 
@@ -1336,7 +1343,12 @@ IGPUMesh* VulkanRenderAPI::createMesh()
 
 bool VulkanRenderAPI::isDeferredActive() const
 {
-    return m_useDeferred && gbuffer_initialized && lighting_enabled;
+    return m_useDeferred
+        && lighting_enabled
+        && gbuffer_initialized
+        && deferred_lighting_initialized
+        && gbufferPass_.isInitialized()
+        && deferredLightingPass_.isInitialized();
 }
 
 void VulkanRenderAPI::submitDeferredOpaqueCommands(const RenderCommandBuffer& cmds)

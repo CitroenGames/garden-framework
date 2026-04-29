@@ -2260,8 +2260,8 @@ void EditorApp::renderEditorSettings()
                         if (cvar) cvar->setInt(deferred ? 1 : 0);
                         m_app.getRenderAPI()->setDeferredEnabled(deferred);
                     }
-                    if (m_app.getAPIType() != RenderAPIType::D3D12)
-                        ImGui::TextDisabled("  D3D12 only -- no-op on Vulkan.");
+                    if (deferred && !m_app.getRenderAPI()->isDeferredActive())
+                        ImGui::TextDisabled("  Deferred requested; active backend resources are unavailable or lighting is disabled.");
                 }
                 break;
             }
