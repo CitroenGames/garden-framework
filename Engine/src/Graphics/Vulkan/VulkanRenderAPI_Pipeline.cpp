@@ -40,7 +40,7 @@ bool VulkanRenderAPI::createDescriptorSetLayout()
     shadowMapBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     shadowMapBinding.pImmutableSamplers = nullptr;
 
-    // Binding 3: VulkanLightUBO (point/spot lights, camera position)
+    // Binding 3: VulkanLightUBO (point/spot light counts, camera position)
     VkDescriptorSetLayoutBinding lightUboBinding{};
     lightUboBinding.binding = 3;
     lightUboBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
@@ -88,11 +88,7 @@ bool VulkanRenderAPI::createDescriptorSetLayout()
     emissiveBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     emissiveBinding.pImmutableSamplers = nullptr;
 
-    // Binding 10: Point lights StructuredBuffer (matches the unified shader's
-    // PointLights[t6] declaration after the D3D12 deferred light-buffer
-    // upgrade). Even when the Vulkan forward path doesn't populate these yet,
-    // the descriptor must be declared so vkCreateGraphicsPipelines passes
-    // shader/layout interface validation.
+    // Binding 10: Point lights StructuredBuffer.
     VkDescriptorSetLayoutBinding pointLightsBinding{};
     pointLightsBinding.binding = 10;
     pointLightsBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -100,7 +96,7 @@ bool VulkanRenderAPI::createDescriptorSetLayout()
     pointLightsBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     pointLightsBinding.pImmutableSamplers = nullptr;
 
-    // Binding 11: Spot lights StructuredBuffer (mirror of binding 10).
+    // Binding 11: Spot lights StructuredBuffer.
     VkDescriptorSetLayoutBinding spotLightsBinding{};
     spotLightsBinding.binding = 11;
     spotLightsBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -441,7 +437,8 @@ bool VulkanRenderAPI::createGraphicsPipeline()
     // --- Debug line pipeline (unlit shader, LINE_LIST topology, no cull) ---
     builder.setTopology(VK_PRIMITIVE_TOPOLOGY_LINE_LIST)
            .setCullMode(VK_CULL_MODE_NONE)
-           .setColorBlend(&noBlendAttachment);
+           .setColorBlend(&noBlendAttachment)
+           .setDepthTest(VK_TRUE, VK_TRUE);
     {
         VkResult r = builder.build(&pipeline_debug_lines);
         if (r != VK_SUCCESS) {

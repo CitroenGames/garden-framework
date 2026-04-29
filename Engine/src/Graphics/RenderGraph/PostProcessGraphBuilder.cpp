@@ -19,6 +19,7 @@ void PostProcessGraphBuilder::addPostProcessPasses(RenderGraph& graph, const Han
     if (h.skyboxEnabled) {
         graph.addPass("Skybox",
             [&](RGBuilder& b) {
+                b.read(h.offscreenHDR, RGResourceUsage::ShaderResource);
                 b.read(h.depth, depthRead);
                 b.write(h.offscreenHDR, RGResourceUsage::RenderTarget);
             },

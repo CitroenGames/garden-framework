@@ -188,6 +188,9 @@ private:
                         uint32_t width, uint32_t height,
                         bool enableSSAO, bool enableShadowMask,
                         bool renderImGui);
+    void uploadLightUniformBuffer(uint32_t frameIndex);
+    void uploadCurrentForwardLightBuffers(uint32_t frameIndex);
+    void renderDebugLinesDirect(const vertex* vertices, size_t vertex_count);
 
     void cleanupSwapchain();
     void recreateSwapchain();
@@ -441,10 +444,8 @@ private:
     std::vector<VmaAllocation> light_uniform_allocations;
     std::vector<void*> light_uniform_mapped;
 
-    // Dummy zero-filled SSBO bound to bindings 10/11 (pointLights / spotLights).
-    // Vulkan's forward path doesn't have a real per-light StructuredBuffer
-    // upload yet; the shader treats num*Lights=0 from LightUBO as "no lights",
-    // so this buffer is never actually read.
+    // Dummy zero-filled SSBO fallback for bindings 10/11 when real light
+    // buffers are not available yet.
     VkBuffer m_dummy_lights_buffer = VK_NULL_HANDLE;
     VmaAllocation m_dummy_lights_allocation = VK_NULL_HANDLE;
 
@@ -582,6 +583,7 @@ private:
     VkImageView offscreen_view = VK_NULL_HANDLE;
     VkSampler offscreen_sampler = VK_NULL_HANDLE;
     VkRenderPass offscreen_render_pass = VK_NULL_HANDLE;
+    VkRenderPass transparent_forward_render_pass = VK_NULL_HANDLE;
     std::vector<VkFramebuffer> offscreen_framebuffers;
     VkImage offscreen_depth_image = VK_NULL_HANDLE;
     VmaAllocation offscreen_depth_allocation = nullptr;
@@ -747,6 +749,9 @@ private:
         VkImageView view = VK_NULL_HANDLE;
         VkSampler sampler = VK_NULL_HANDLE;
         VkDescriptorSet imgui_ds = VK_NULL_HANDLE;
+        VkImage hdr_image = VK_NULL_HANDLE;
+        VmaAllocation hdr_allocation = nullptr;
+        VkImageView hdr_view = VK_NULL_HANDLE;
         VkImage depth_image = VK_NULL_HANDLE;
         VmaAllocation depth_allocation = nullptr;
         VkImageView depth_view = VK_NULL_HANDLE;

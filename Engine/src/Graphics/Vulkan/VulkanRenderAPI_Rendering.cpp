@@ -43,6 +43,40 @@ bool checkIndexedDrawBounds(const char* tag,
 }
 } // namespace
 
+void VulkanRenderAPI::uploadLightUniformBuffer(uint32_t frameIndex)
+{
+    if (frameIndex >= light_uniform_mapped.size() || !light_uniform_mapped[frameIndex])
+        return;
+
+    VulkanLightUBO lightUbo{};
+    lightUbo.numPointLights = std::clamp(m_num_point_lights_deferred, 0, MAX_LIGHTS_DEFERRED);
+    lightUbo.numSpotLights  = std::clamp(m_num_spot_lights_deferred, 0, MAX_LIGHTS_DEFERRED);
+    lightUbo._lightPad      = glm::vec2(0.0f);
+    lightUbo.cameraPos      = current_lights.cameraPos;
+    lightUbo._lightPad2     = 0.0f;
+    std::memcpy(light_uniform_mapped[frameIndex], &lightUbo, sizeof(lightUbo));
+}
+
+void VulkanRenderAPI::uploadCurrentForwardLightBuffers(uint32_t frameIndex)
+{
+    const int pointCount = std::clamp(current_lights.numPointLights, 0, MAX_LIGHTS);
+    const int spotCount  = std::clamp(current_lights.numSpotLights, 0, MAX_LIGHTS);
+
+    if (frameIndex < m_point_lights_mapped.size() && m_point_lights_mapped[frameIndex] && pointCount > 0) {
+        std::memcpy(m_point_lights_mapped[frameIndex],
+                    current_lights.pointLights,
+                    sizeof(GPUPointLight) * pointCount);
+    }
+    if (frameIndex < m_spot_lights_mapped.size() && m_spot_lights_mapped[frameIndex] && spotCount > 0) {
+        std::memcpy(m_spot_lights_mapped[frameIndex],
+                    current_lights.spotLights,
+                    sizeof(GPUSpotLight) * spotCount);
+    }
+
+    m_num_point_lights_deferred = pointCount;
+    m_num_spot_lights_deferred  = spotCount;
+}
+
 // Camera and transforms
 void VulkanRenderAPI::setCamera(const camera& cam)
 {
@@ -427,32 +461,7 @@ void VulkanRenderAPI::renderMesh(const mesh& m, const RenderState& state)
         memcpy(uniform_buffer_mapped[current_frame], &ubo, sizeof(ubo));
     }
 
-    // Upload VulkanLightUBO (binding 3) - point/spot lights + camera
-    {
-        VulkanLightUBO lightUbo{};
-        for (int i = 0; i < current_lights.numPointLights && i < 16; i++) {
-            lightUbo.pointLights[i].position = current_lights.pointLights[i].position;
-            lightUbo.pointLights[i].range = current_lights.pointLights[i].range;
-            lightUbo.pointLights[i].color = current_lights.pointLights[i].color;
-            lightUbo.pointLights[i].intensity = current_lights.pointLights[i].intensity;
-            lightUbo.pointLights[i].attenuation = current_lights.pointLights[i].attenuation;
-            lightUbo.pointLights[i]._pad0 = 0.0f;
-        }
-        for (int i = 0; i < current_lights.numSpotLights && i < 16; i++) {
-            lightUbo.spotLights[i].position = current_lights.spotLights[i].position;
-            lightUbo.spotLights[i].range = current_lights.spotLights[i].range;
-            lightUbo.spotLights[i].direction = current_lights.spotLights[i].direction;
-            lightUbo.spotLights[i].intensity = current_lights.spotLights[i].intensity;
-            lightUbo.spotLights[i].color = current_lights.spotLights[i].color;
-            lightUbo.spotLights[i].innerCutoff = current_lights.spotLights[i].innerCutoff;
-            lightUbo.spotLights[i].attenuation = current_lights.spotLights[i].attenuation;
-            lightUbo.spotLights[i].outerCutoff = current_lights.spotLights[i].outerCutoff;
-        }
-        lightUbo.numPointLights = current_lights.numPointLights;
-        lightUbo.numSpotLights = current_lights.numSpotLights;
-        lightUbo.cameraPos = current_lights.cameraPos;
-        memcpy(light_uniform_mapped[current_frame], &lightUbo, sizeof(lightUbo));
-    }
+    uploadLightUniformBuffer(current_frame);
 
     // Upload PerObjectUBO to next slot in dynamic ring buffer (binding 4)
     uint32_t perObjectDynamicOffset;
@@ -595,32 +604,7 @@ void VulkanRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t
         memcpy(uniform_buffer_mapped[current_frame], &ubo, sizeof(ubo));
     }
 
-    // Upload VulkanLightUBO (binding 3) - point/spot lights + camera
-    {
-        VulkanLightUBO lightUbo{};
-        for (int i = 0; i < current_lights.numPointLights && i < 16; i++) {
-            lightUbo.pointLights[i].position = current_lights.pointLights[i].position;
-            lightUbo.pointLights[i].range = current_lights.pointLights[i].range;
-            lightUbo.pointLights[i].color = current_lights.pointLights[i].color;
-            lightUbo.pointLights[i].intensity = current_lights.pointLights[i].intensity;
-            lightUbo.pointLights[i].attenuation = current_lights.pointLights[i].attenuation;
-            lightUbo.pointLights[i]._pad0 = 0.0f;
-        }
-        for (int i = 0; i < current_lights.numSpotLights && i < 16; i++) {
-            lightUbo.spotLights[i].position = current_lights.spotLights[i].position;
-            lightUbo.spotLights[i].range = current_lights.spotLights[i].range;
-            lightUbo.spotLights[i].direction = current_lights.spotLights[i].direction;
-            lightUbo.spotLights[i].intensity = current_lights.spotLights[i].intensity;
-            lightUbo.spotLights[i].color = current_lights.spotLights[i].color;
-            lightUbo.spotLights[i].innerCutoff = current_lights.spotLights[i].innerCutoff;
-            lightUbo.spotLights[i].attenuation = current_lights.spotLights[i].attenuation;
-            lightUbo.spotLights[i].outerCutoff = current_lights.spotLights[i].outerCutoff;
-        }
-        lightUbo.numPointLights = current_lights.numPointLights;
-        lightUbo.numSpotLights = current_lights.numSpotLights;
-        lightUbo.cameraPos = current_lights.cameraPos;
-        memcpy(light_uniform_mapped[current_frame], &lightUbo, sizeof(lightUbo));
-    }
+    uploadLightUniformBuffer(current_frame);
 
     // Upload PerObjectUBO to next slot in dynamic ring buffer (binding 4)
     uint32_t perObjectDynamicOffset;
@@ -723,32 +707,7 @@ void VulkanRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
         memcpy(uniform_buffer_mapped[current_frame], &ubo, sizeof(ubo));
     }
 
-    // Upload VulkanLightUBO once (binding 3)
-    {
-        VulkanLightUBO lightUbo{};
-        for (int i = 0; i < current_lights.numPointLights && i < 16; i++) {
-            lightUbo.pointLights[i].position = current_lights.pointLights[i].position;
-            lightUbo.pointLights[i].range = current_lights.pointLights[i].range;
-            lightUbo.pointLights[i].color = current_lights.pointLights[i].color;
-            lightUbo.pointLights[i].intensity = current_lights.pointLights[i].intensity;
-            lightUbo.pointLights[i].attenuation = current_lights.pointLights[i].attenuation;
-            lightUbo.pointLights[i]._pad0 = 0.0f;
-        }
-        for (int i = 0; i < current_lights.numSpotLights && i < 16; i++) {
-            lightUbo.spotLights[i].position = current_lights.spotLights[i].position;
-            lightUbo.spotLights[i].range = current_lights.spotLights[i].range;
-            lightUbo.spotLights[i].direction = current_lights.spotLights[i].direction;
-            lightUbo.spotLights[i].intensity = current_lights.spotLights[i].intensity;
-            lightUbo.spotLights[i].color = current_lights.spotLights[i].color;
-            lightUbo.spotLights[i].innerCutoff = current_lights.spotLights[i].innerCutoff;
-            lightUbo.spotLights[i].attenuation = current_lights.spotLights[i].attenuation;
-            lightUbo.spotLights[i].outerCutoff = current_lights.spotLights[i].outerCutoff;
-        }
-        lightUbo.numPointLights = current_lights.numPointLights;
-        lightUbo.numSpotLights = current_lights.numSpotLights;
-        lightUbo.cameraPos = current_lights.cameraPos;
-        memcpy(light_uniform_mapped[current_frame], &lightUbo, sizeof(lightUbo));
-    }
+    uploadLightUniformBuffer(current_frame);
 
     for (const auto& drawCmd : cmds)
     {
@@ -944,32 +903,7 @@ void VulkanRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmd
         memcpy(uniform_buffer_mapped[current_frame], &ubo, sizeof(ubo));
     }
 
-    // Upload VulkanLightUBO (binding 3)
-    {
-        VulkanLightUBO lightUbo{};
-        for (int i = 0; i < current_lights.numPointLights && i < 16; i++) {
-            lightUbo.pointLights[i].position = current_lights.pointLights[i].position;
-            lightUbo.pointLights[i].range = current_lights.pointLights[i].range;
-            lightUbo.pointLights[i].color = current_lights.pointLights[i].color;
-            lightUbo.pointLights[i].intensity = current_lights.pointLights[i].intensity;
-            lightUbo.pointLights[i].attenuation = current_lights.pointLights[i].attenuation;
-            lightUbo.pointLights[i]._pad0 = 0.0f;
-        }
-        for (int i = 0; i < current_lights.numSpotLights && i < 16; i++) {
-            lightUbo.spotLights[i].position = current_lights.spotLights[i].position;
-            lightUbo.spotLights[i].range = current_lights.spotLights[i].range;
-            lightUbo.spotLights[i].direction = current_lights.spotLights[i].direction;
-            lightUbo.spotLights[i].intensity = current_lights.spotLights[i].intensity;
-            lightUbo.spotLights[i].color = current_lights.spotLights[i].color;
-            lightUbo.spotLights[i].innerCutoff = current_lights.spotLights[i].innerCutoff;
-            lightUbo.spotLights[i].attenuation = current_lights.spotLights[i].attenuation;
-            lightUbo.spotLights[i].outerCutoff = current_lights.spotLights[i].outerCutoff;
-        }
-        lightUbo.numPointLights = current_lights.numPointLights;
-        lightUbo.numSpotLights = current_lights.numSpotLights;
-        lightUbo.cameraPos = current_lights.cameraPos;
-        memcpy(light_uniform_mapped[current_frame], &lightUbo, sizeof(lightUbo));
-    }
+    uploadLightUniformBuffer(current_frame);
 
     // 2. End current INLINE render pass
     if (main_pass_started) {
@@ -1221,6 +1155,20 @@ void VulkanRenderAPI::renderDebugLines(const vertex* vertices, size_t vertex_cou
 {
     if (!vertices || vertex_count < 2 || !frame_started || device_lost) return;
     if (in_shadow_pass) return;
+
+    if (isDeferredActive()) {
+        m_deferredDebugLineVertices.insert(m_deferredDebugLineVertices.end(),
+                                           vertices, vertices + vertex_count);
+        return;
+    }
+
+    renderDebugLinesDirect(vertices, vertex_count);
+}
+
+void VulkanRenderAPI::renderDebugLinesDirect(const vertex* vertices, size_t vertex_count)
+{
+    if (!vertices || vertex_count < 2 || !frame_started || device_lost) return;
+    if (in_shadow_pass) return;
     if (pipeline_debug_lines == VK_NULL_HANDLE) return;
 
     VkCommandBuffer cmd = command_buffers[current_frame];
@@ -1372,6 +1320,7 @@ void VulkanRenderAPI::setLighting(const glm::vec3& ambient, const glm::vec3& dif
 void VulkanRenderAPI::setPointAndSpotLights(const LightCBuffer& lights)
 {
     current_lights = lights;
+    uploadCurrentForwardLightBuffers(current_frame);
 }
 
 IGPUMesh* VulkanRenderAPI::createMesh()
@@ -1387,7 +1336,7 @@ IGPUMesh* VulkanRenderAPI::createMesh()
 
 bool VulkanRenderAPI::isDeferredActive() const
 {
-    return m_useDeferred && gbuffer_initialized;
+    return m_useDeferred && gbuffer_initialized && lighting_enabled;
 }
 
 void VulkanRenderAPI::submitDeferredOpaqueCommands(const RenderCommandBuffer& cmds)
@@ -1407,11 +1356,13 @@ void VulkanRenderAPI::uploadLightBuffers(const GPUPointLight* pts, int ptCount,
     if (spCount > MAX_LIGHTS_DEFERRED) spCount = MAX_LIGHTS_DEFERRED;
     if (ptCount < 0) ptCount = 0;
     if (spCount < 0) spCount = 0;
+    if (!pts) ptCount = 0;
+    if (!spts) spCount = 0;
 
     const uint32_t f = current_frame;
-    if (f < m_point_lights_mapped.size() && m_point_lights_mapped[f] && pts && ptCount > 0)
+    if (f < m_point_lights_mapped.size() && m_point_lights_mapped[f] && ptCount > 0)
         std::memcpy(m_point_lights_mapped[f], pts, sizeof(GPUPointLight) * ptCount);
-    if (f < m_spot_lights_mapped.size() && m_spot_lights_mapped[f] && spts && spCount > 0)
+    if (f < m_spot_lights_mapped.size() && m_spot_lights_mapped[f] && spCount > 0)
         std::memcpy(m_spot_lights_mapped[f], spts, sizeof(GPUSpotLight)  * spCount);
 
     m_num_point_lights_deferred = ptCount;

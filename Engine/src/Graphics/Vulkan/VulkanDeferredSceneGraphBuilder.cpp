@@ -362,3 +362,104 @@ void VulkanDeferredSceneGraphBuilder::build(RenderGraph& graph, RGBackend& backe
     graph.compile();
     graph.execute(backend);
 }
+
+void VulkanDeferredSceneGraphBuilder::addPreTonemapPasses(RenderGraph& graph,
+                                                          const Handles& h,
+                                                          const Config& cfg)
+{
+    const bool haveTransparent = !m_api->m_deferredTransparentCmds.empty();
+    const bool haveDebugLines  = !m_api->m_deferredDebugLineVertices.empty();
+    if (!haveTransparent && !haveDebugLines) return;
+
+    graph.addPass("TransparentForward",
+        [&, h](RGBuilder& b) {
+            // The render pass LOADs the HDR target, so model that as a read
+            // before the write to get a layout transition after DeferredLighting.
+            b.read(h.offscreenHDR, RGResourceUsage::ShaderResource);
+            b.write(h.offscreenHDR, RGResourceUsage::RenderTarget);
+            b.write(h.depth, RGResourceUsage::DepthStencilWrite);
+            if (h.shadowMap.isValid())
+                b.read(h.shadowMap, RGResourceUsage::ShaderResource);
+        },
+        [this, h, cfg](RGContext& ctx) {
+            auto* vkCtx = static_cast<VulkanRGContext*>(&ctx);
+            auto& backend = m_api->m_rgBackend;
+
+            VkRenderPass rp = m_api->transparent_forward_render_pass;
+            VkImageView hdrView = backend.getImageView(h.offscreenHDR.handle);
+            VkImageView depthView = backend.getImageView(h.depth.handle);
+            if (rp == VK_NULL_HANDLE || !hdrView || !depthView) {
+                LOG_ENGINE_ERROR("[Vulkan] TransparentForward: missing render pass or image views");
+                return;
+            }
+
+            std::array<VkImageView, 2> attachments = { hdrView, depthView };
+            VkFramebufferCreateInfo fbInfo{};
+            fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+            fbInfo.renderPass = rp;
+            fbInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
+            fbInfo.pAttachments = attachments.data();
+            fbInfo.width = cfg.width;
+            fbInfo.height = cfg.height;
+            fbInfo.layers = 1;
+
+            VkFramebuffer framebuffer = VK_NULL_HANDLE;
+            if (vkCreateFramebuffer(m_api->device, &fbInfo, nullptr, &framebuffer) != VK_SUCCESS) {
+                LOG_ENGINE_ERROR("[Vulkan] TransparentForward: failed to create framebuffer");
+                return;
+            }
+            VkDevice dev = m_api->device;
+            m_api->deletion_queue.push([dev, framebuffer]() {
+                vkDestroyFramebuffer(dev, framebuffer, nullptr);
+            });
+
+            VkRenderPassBeginInfo rpBegin{};
+            rpBegin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+            rpBegin.renderPass = rp;
+            rpBegin.framebuffer = framebuffer;
+            rpBegin.renderArea.offset = { 0, 0 };
+            rpBegin.renderArea.extent = { cfg.width, cfg.height };
+            rpBegin.clearValueCount = 0;
+
+            VkCommandBuffer cmd = vkCtx->commandBuffer;
+            vkCmdBeginRenderPass(cmd, &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
+
+            VkViewport vp{};
+            vp.x = 0.0f;
+            vp.y = 0.0f;
+            vp.width = static_cast<float>(cfg.width);
+            vp.height = static_cast<float>(cfg.height);
+            vp.minDepth = 0.0f;
+            vp.maxDepth = 1.0f;
+            vkCmdSetViewport(cmd, 0, 1, &vp);
+
+            VkRect2D scissor{};
+            scissor.offset = { 0, 0 };
+            scissor.extent = { cfg.width, cfg.height };
+            vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+            m_api->m_replayPipelineOverride = VK_NULL_HANDLE;
+            m_api->last_bound_pipeline = VK_NULL_HANDLE;
+            m_api->last_bound_descriptor_set = VK_NULL_HANDLE;
+            m_api->last_bound_vertex_buffer = VK_NULL_HANDLE;
+            m_api->last_bound_dynamic_offset = UINT32_MAX;
+
+            if (!m_api->m_deferredTransparentCmds.empty()) {
+                m_api->replayCommandBuffer(m_api->m_deferredTransparentCmds);
+                m_api->m_deferredTransparentCmds.clear();
+            }
+
+            if (!m_api->m_deferredDebugLineVertices.empty()) {
+                m_api->renderDebugLinesDirect(m_api->m_deferredDebugLineVertices.data(),
+                                              m_api->m_deferredDebugLineVertices.size());
+                m_api->m_deferredDebugLineVertices.clear();
+            }
+
+            vkCmdEndRenderPass(cmd);
+
+            backend.setCurrentLayout(h.offscreenHDR.handle,
+                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            backend.setCurrentLayout(h.depth.handle,
+                                     VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+        });
+}

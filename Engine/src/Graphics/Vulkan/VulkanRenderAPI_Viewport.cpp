@@ -66,8 +66,9 @@ void VulkanRenderAPI::createViewportResources(int w, int h)
     viewport_sampler = sampler_cache.getOrCreate(samplerKey);
 
     // --- Viewport depth image ---
+    // SSAO and shadow-mask passes sample the scene depth in the render graph.
     if (vkutil::createImage(vma_allocator, (uint32_t)w, (uint32_t)h, depth_format,
-                            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
                             viewport_depth_image, viewport_depth_allocation) != VK_SUCCESS) {
         LOG_ENGINE_ERROR("[Vulkan] Failed to create viewport depth image");
         return;
@@ -383,19 +384,24 @@ void VulkanRenderAPI::setViewportSize(int width, int height)
 
 void VulkanRenderAPI::endSceneRender()
 {
-    // Handle PIE viewport resolve
-    if (m_active_scene_target >= 0) {
-        auto it = m_pie_viewports.find(m_active_scene_target);
-        m_active_scene_target = -1;  // Reset early so subsequent calls go to normal path
+    // Handle PIE/editor SceneViewport resolve. Explicit PIE targets are
+    // one-shot; the editor SceneViewport remains bound until setEditorViewport.
+    int scene_target_id = m_active_scene_target;
+    const bool explicit_scene_target = scene_target_id >= 0;
+    if (scene_target_id < 0 && m_editor_scene_viewport)
+        scene_target_id = m_editor_scene_viewport->pieId();
+    if (scene_target_id >= 0) {
+        auto it = m_pie_viewports.find(scene_target_id);
+        if (explicit_scene_target)
+            m_active_scene_target = -1;
 
         if (it == m_pie_viewports.end() || !frame_started) return;
 
         PIEViewportTarget& target = it->second;
         VkCommandBuffer cmd = command_buffers[current_frame];
 
-        // End the main render pass (scene was rendered to PIE's offscreen framebuffer).
-        // The offscreen_render_pass transitions the color attachment to SHADER_READ_ONLY_OPTIMAL
-        // automatically via its finalLayout, so the PIE viewport image is ready for ImGui sampling.
+        // End the main render pass. The scene was rendered to the PIE HDR
+        // image; the graph below resolves it into the ImGui-sampled output.
         if (main_pass_started) {
             vkCmdEndRenderPass(cmd);
             main_pass_started = false;
@@ -409,7 +415,7 @@ void VulkanRenderAPI::endSceneRender()
                 barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
                 barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
                 barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-                barrier.image = target.image;
+                barrier.image = target.hdr_image;
                 barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
                 barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
                 vkCmdPipelineBarrier(cmd,
@@ -420,10 +426,39 @@ void VulkanRenderAPI::endSceneRender()
             }
         }
 
-        // Note: The scene was rendered directly to target.image via the PIE viewport's
-        // offscreen framebuffer. The offscreen_render_pass finalLayout already transitions
-        // the image to SHADER_READ_ONLY_OPTIMAL, which is what ImGui needs.
-        // FXAA is not applied to PIE viewports (would require a separate intermediate buffer).
+        bool wantSSAO = ssaoEnabled && ssao_initialized;
+        bool wantShadowMask = shadowQuality > 0 && shadow_mask_initialized && shadow_map_image != VK_NULL_HANDLE;
+
+        if (m_useRenderGraph && fxaa_initialized && viewport_fxaa_pipeline != VK_NULL_HANDLE) {
+            PostProcessGraphBuilder::Config cfg;
+            cfg.width          = static_cast<uint32_t>(target.width);
+            cfg.height         = static_cast<uint32_t>(target.height);
+            cfg.wantSSAO       = wantSSAO;
+            cfg.wantShadowMask = wantShadowMask;
+            cfg.renderImGui    = false;
+
+            if (isDeferredActive()) {
+                m_deferredGraphBuilder.setFrameInputs(
+                    target.image, VK_IMAGE_LAYOUT_UNDEFINED,
+                    RGFormat::RGBA16_FLOAT,
+                    target.resolve_framebuffer, viewport_resolve_pass, viewport_fxaa_pipeline,
+                    target.hdr_image, target.hdr_view,
+                    target.depth_image, target.depth_view);
+                PostProcessGraphBuilder::Config deferredCfg = cfg;
+                deferredCfg.wantShadowMask = false;
+                m_deferredGraphBuilder.build(m_frameGraph, m_rgBackend, deferredCfg);
+            } else {
+                m_ppGraphBuilder.setFrameInputs(
+                    target.image, VK_IMAGE_LAYOUT_UNDEFINED,
+                    RGFormat::RGBA16_FLOAT,
+                    target.resolve_framebuffer, viewport_resolve_pass, viewport_fxaa_pipeline,
+                    target.hdr_image, target.hdr_view,
+                    target.depth_image, target.depth_view);
+                m_ppGraphBuilder.build(m_frameGraph, m_rgBackend, cfg);
+            }
+
+            m_skyboxRequested = false;
+        }
 
         // Command buffer stays open for renderUI()
         return;
@@ -471,18 +506,28 @@ void VulkanRenderAPI::endSceneRender()
 
     if (m_useRenderGraph && fxaa_initialized && viewport_fxaa_pipeline != VK_NULL_HANDLE) {
         // Render graph path: skybox + SSAO + shadow mask + FXAA as ordered passes (matches D3D12)
-        m_ppGraphBuilder.setFrameInputs(
-            viewport_image, VK_IMAGE_LAYOUT_UNDEFINED,
-            RGFormat::RGBA16_FLOAT,
-            viewport_framebuffer, viewport_resolve_pass, viewport_fxaa_pipeline);
-
         PostProcessGraphBuilder::Config cfg;
         cfg.width          = static_cast<uint32_t>(viewport_width_rt);
         cfg.height         = static_cast<uint32_t>(viewport_height_rt);
         cfg.wantSSAO       = wantSSAO;
         cfg.wantShadowMask = wantShadowMask;
         cfg.renderImGui    = false;
-        m_ppGraphBuilder.build(m_frameGraph, m_rgBackend, cfg);
+
+        if (isDeferredActive()) {
+            m_deferredGraphBuilder.setFrameInputs(
+                viewport_image, VK_IMAGE_LAYOUT_UNDEFINED,
+                RGFormat::RGBA16_FLOAT,
+                viewport_framebuffer, viewport_resolve_pass, viewport_fxaa_pipeline);
+            PostProcessGraphBuilder::Config deferredCfg = cfg;
+            deferredCfg.wantShadowMask = false;
+            m_deferredGraphBuilder.build(m_frameGraph, m_rgBackend, deferredCfg);
+        } else {
+            m_ppGraphBuilder.setFrameInputs(
+                viewport_image, VK_IMAGE_LAYOUT_UNDEFINED,
+                RGFormat::RGBA16_FLOAT,
+                viewport_framebuffer, viewport_resolve_pass, viewport_fxaa_pipeline);
+            m_ppGraphBuilder.build(m_frameGraph, m_rgBackend, cfg);
+        }
         m_skyboxRequested = false;
     } else {
         // Manual fallback path: SSAO + shadow mask + FXAA without render graph
@@ -761,9 +806,10 @@ void VulkanRenderAPI::createPreviewResources(int w, int h)
     samplerKey.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
     preview_sampler = sampler_cache.getOrCreate(samplerKey);
 
-    // Depth image
+    // Depth image. Keep it sampleable so preview post-process paths can share
+    // the same descriptor/update code as scene viewports if needed.
     if (vkutil::createImage(vma_allocator, (uint32_t)w, (uint32_t)h, depth_format,
-                            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
                             preview_depth_image, preview_depth_allocation) != VK_SUCCESS) {
         LOG_ENGINE_ERROR("[Vulkan] Failed to create preview depth image");
         return;
@@ -953,8 +999,7 @@ void VulkanRenderAPI::createPIEViewportResources(PIEViewportTarget& target, int 
     target.width = w;
     target.height = h;
 
-    // --- Color image (sampled for ImGui, used as color attachment and transfer dst) ---
-    // HDR format (RGBA16F) to match offscreen_render_pass; tone mapping not yet applied to PIE viewports.
+    // --- Output image (sampled by ImGui, written by tonemapping/FXAA) ---
     if (vkutil::createImage(vma_allocator, (uint32_t)w, (uint32_t)h, VK_FORMAT_R16G16B16A16_SFLOAT,
                             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
                             target.image, target.allocation) != VK_SUCCESS) {
@@ -987,8 +1032,9 @@ void VulkanRenderAPI::createPIEViewportResources(PIEViewportTarget& target, int 
     target.sampler = sampler_cache.getOrCreate(samplerKey);
 
     // --- Depth image ---
+    // SceneViewport post effects sample depth through combined image samplers.
     if (vkutil::createImage(vma_allocator, (uint32_t)w, (uint32_t)h, depth_format,
-                            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
                             target.depth_image, target.depth_allocation) != VK_SUCCESS) {
         LOG_ENGINE_ERROR("[Vulkan] Failed to create PIE viewport depth image");
         return;
@@ -1005,13 +1051,27 @@ void VulkanRenderAPI::createPIEViewportResources(PIEViewportTarget& target, int 
     target.imgui_ds = ImGui_ImplVulkan_AddTexture(target.sampler, target.view,
                                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
+    // --- HDR scene image (rendered by the scene/deferred graph, sampled by tonemapping) ---
+    if (vkutil::createImage(vma_allocator, (uint32_t)w, (uint32_t)h, VK_FORMAT_R16G16B16A16_SFLOAT,
+                            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                            target.hdr_image, target.hdr_allocation) != VK_SUCCESS) {
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create PIE viewport HDR image");
+        return;
+    }
+
+    target.hdr_view = vkutil::createImageView(device, target.hdr_image, VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_ASPECT_COLOR_BIT);
+    if (target.hdr_view == VK_NULL_HANDLE) {
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create PIE viewport HDR image view");
+        return;
+    }
+
     // --- Offscreen framebuffer (color + depth, for main scene render) ---
     if (offscreen_render_pass == VK_NULL_HANDLE) {
         LOG_ENGINE_ERROR("[Vulkan] offscreen_render_pass not available for PIE viewport");
         return;
     }
 
-    std::array<VkImageView, 2> offscreenAttachments = { target.view, target.depth_view };
+    std::array<VkImageView, 2> offscreenAttachments = { target.hdr_view, target.depth_view };
     target.framebuffer = vkutil::createFramebuffer(device, offscreen_render_pass, offscreenAttachments.data(),
                                                    static_cast<uint32_t>(offscreenAttachments.size()), (uint32_t)w, (uint32_t)h);
     if (target.framebuffer == VK_NULL_HANDLE) {
@@ -1048,6 +1108,16 @@ void VulkanRenderAPI::destroyPIEViewportResources(PIEViewportTarget& target)
     if (target.framebuffer != VK_NULL_HANDLE) {
         vkDestroyFramebuffer(device, target.framebuffer, nullptr);
         target.framebuffer = VK_NULL_HANDLE;
+    }
+
+    if (target.hdr_view != VK_NULL_HANDLE) {
+        vkDestroyImageView(device, target.hdr_view, nullptr);
+        target.hdr_view = VK_NULL_HANDLE;
+    }
+    if (target.hdr_image != VK_NULL_HANDLE && vma_allocator) {
+        vmaDestroyImage(vma_allocator, target.hdr_image, target.hdr_allocation);
+        target.hdr_image = VK_NULL_HANDLE;
+        target.hdr_allocation = nullptr;
     }
 
     if (target.depth_view != VK_NULL_HANDLE) {
@@ -1101,7 +1171,9 @@ int VulkanRenderAPI::createPIEViewport(int width, int height)
     PIEViewportTarget target{};
     createPIEViewportResources(target, width, height);
 
-    if (target.framebuffer == VK_NULL_HANDLE || target.resolve_framebuffer == VK_NULL_HANDLE) {
+    if (target.hdr_view == VK_NULL_HANDLE ||
+        target.framebuffer == VK_NULL_HANDLE ||
+        target.resolve_framebuffer == VK_NULL_HANDLE) {
         destroyPIEViewportResources(target);
         return -1;
     }

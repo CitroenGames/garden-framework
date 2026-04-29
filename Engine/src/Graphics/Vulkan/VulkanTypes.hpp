@@ -78,20 +78,6 @@ struct VulkanTexture {
     bool isValid() const { return image != VK_NULL_HANDLE; }
 };
 
-// GPU light structs for Vulkan UBO (matches GLSL std140 layout)
-struct VkGPUPointLight {
-    glm::vec3 position;    float range;
-    glm::vec3 color;       float intensity;
-    glm::vec3 attenuation; float _pad0;
-};
-
-struct VkGPUSpotLight {
-    glm::vec3 position;    float range;
-    glm::vec3 direction;   float intensity;
-    glm::vec3 color;       float innerCutoff;
-    glm::vec3 attenuation; float outerCutoff;
-};
-
 // Global UBO structure (matches Slang shader GlobalCB at binding 0)
 struct GlobalUBO {
     glm::mat4 view;
@@ -110,14 +96,13 @@ struct GlobalUBO {
 
 // Light UBO structure (matches Slang shader LightCB at binding 3)
 struct VulkanLightUBO {
-    VkGPUPointLight pointLights[16];
-    VkGPUSpotLight  spotLights[16];
     int numPointLights;
     int numSpotLights;
-    float _lightPad[2];
+    glm::vec2 _lightPad;
     glm::vec3 cameraPos;
     float _lightPad2;
 };
+static_assert(sizeof(VulkanLightUBO) == 32, "VulkanLightUBO must match basic.slang LightCB");
 
 // Per-object UBO structure (matches Slang shader PerObjectCB at binding 4)
 struct PerObjectUBO {

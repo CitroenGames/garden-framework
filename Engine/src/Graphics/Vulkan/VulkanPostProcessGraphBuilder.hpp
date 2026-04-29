@@ -18,7 +18,11 @@ public:
                         RGFormat        outputFormat,
                         VkFramebuffer   fxaaFB,
                         VkRenderPass    fxaaRP,
-                        VkPipeline      fxaaPipeline);
+                        VkPipeline      fxaaPipeline,
+                        VkImage         hdrImage = VK_NULL_HANDLE,
+                        VkImageView     hdrView = VK_NULL_HANDLE,
+                        VkImage         depthImage = VK_NULL_HANDLE,
+                        VkImageView     depthView = VK_NULL_HANDLE);
 
 protected:
     Handles importResources(RenderGraph& graph, RGBackend& backend, const Config& cfg) override;
@@ -44,4 +48,8 @@ private:
     VkFramebuffer m_fxaaFB               = VK_NULL_HANDLE;
     VkRenderPass  m_fxaaRP               = VK_NULL_HANDLE;
     VkPipeline    m_fxaaPipeline         = VK_NULL_HANDLE;
+    VkImage       m_hdrImage             = VK_NULL_HANDLE;
+    VkImageView   m_hdrView              = VK_NULL_HANDLE;
+    VkImage       m_depthImage           = VK_NULL_HANDLE;
+    VkImageView   m_depthView            = VK_NULL_HANDLE;
 };

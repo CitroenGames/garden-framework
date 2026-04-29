@@ -10,4 +10,7 @@ public:
     VulkanDeferredSceneGraphBuilder() = default;
 
     void build(RenderGraph& graph, RGBackend& backend, const Config& cfg);
+
+protected:
+    void addPreTonemapPasses(RenderGraph& graph, const Handles& h, const Config& cfg) override;
 };

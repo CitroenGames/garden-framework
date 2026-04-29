@@ -142,16 +142,21 @@ void VulkanRenderAPI::beginFrame()
     // editor renders since Phase 7).
     VkImage activeColorImage = VK_NULL_HANDLE;
 
-    // Check for active PIE viewport target
+    // Check for active PIE/editor SceneViewport target. The editor viewport is
+    // backed by the same PIE target infrastructure but persists across frames;
+    // m_active_scene_target is only the explicit per-frame override.
     bool pie_target_active = false;
-    if (m_active_scene_target >= 0) {
-        auto it = m_pie_viewports.find(m_active_scene_target);
+    int scene_target_id = m_active_scene_target;
+    if (scene_target_id < 0 && m_editor_scene_viewport)
+        scene_target_id = m_editor_scene_viewport->pieId();
+    if (scene_target_id >= 0) {
+        auto it = m_pie_viewports.find(scene_target_id);
         if (it != m_pie_viewports.end() && it->second.framebuffer != VK_NULL_HANDLE) {
             // PIE viewport mode: render to PIE viewport's offscreen framebuffer
             renderPassInfo.renderPass = offscreen_render_pass;
             renderPassInfo.framebuffer = it->second.framebuffer;
             renderExtent = { (uint32_t)it->second.width, (uint32_t)it->second.height };
-            activeColorImage = it->second.image;
+            activeColorImage = it->second.hdr_image;
             pie_target_active = true;
         }
     }
@@ -258,13 +263,15 @@ void VulkanRenderAPI::endFrame()
             cfg.wantShadowMask = wantShadowMask;
             cfg.renderImGui    = true;
 
-            if (m_useDeferred && gbuffer_initialized) {
+            if (isDeferredActive()) {
                 m_deferredGraphBuilder.setFrameInputs(
                     swapchain_images[current_image_index], VK_IMAGE_LAYOUT_UNDEFINED,
                     RGFormat::RGBA8_UNORM,
                     fxaa_framebuffers[current_image_index],
                     fxaaPass_.getRenderPass(), fxaaPass_.getPipeline());
-                m_deferredGraphBuilder.build(m_frameGraph, m_rgBackend, cfg);
+                PostProcessGraphBuilder::Config deferredCfg = cfg;
+                deferredCfg.wantShadowMask = false;
+                m_deferredGraphBuilder.build(m_frameGraph, m_rgBackend, deferredCfg);
             } else {
                 m_ppGraphBuilder.setFrameInputs(
                     swapchain_images[current_image_index], VK_IMAGE_LAYOUT_UNDEFINED,

@@ -130,11 +130,8 @@ bool VulkanRenderAPI::createUniformBuffers()
         }
     }
 
-    // Dummy storage buffer (bindings 10/11). The unified shader expects
-    // pointLights/spotLights SSBOs at these slots — Vulkan's forward path
-    // doesn't populate them yet, so a single small zero-filled buffer is
-    // bound to both. Lighting still flows through the LightUBO at binding 3
-    // (numPointLights / numSpotLights = 0 means the shader skips the loops).
+    // Dummy storage buffer fallback for bindings 10/11 until the real
+    // per-frame point/spot light SSBOs are created.
     {
         VkDeviceSize bufferSize = 4096; // generous; covers any small light-array struct
         VkBufferCreateInfo bufferInfo{};
@@ -303,17 +300,26 @@ bool VulkanRenderAPI::createDescriptorSets()
         perObjectBufferInfo.offset = 0;
         perObjectBufferInfo.range = per_object_alignment;
 
-        VkDescriptorBufferInfo dummyLightsInfo{};
-        dummyLightsInfo.buffer = m_dummy_lights_buffer;
-        dummyLightsInfo.offset = 0;
-        dummyLightsInfo.range = VK_WHOLE_SIZE;
+        VkDescriptorBufferInfo pointLightsInfo{};
+        pointLightsInfo.buffer = (i < static_cast<int>(m_point_lights_buffers.size()) &&
+                                  m_point_lights_buffers[i] != VK_NULL_HANDLE)
+            ? m_point_lights_buffers[i] : m_dummy_lights_buffer;
+        pointLightsInfo.offset = 0;
+        pointLightsInfo.range = VK_WHOLE_SIZE;
+
+        VkDescriptorBufferInfo spotLightsInfo{};
+        spotLightsInfo.buffer = (i < static_cast<int>(m_spot_lights_buffers.size()) &&
+                                 m_spot_lights_buffers[i] != VK_NULL_HANDLE)
+            ? m_spot_lights_buffers[i] : m_dummy_lights_buffer;
+        spotLightsInfo.offset = 0;
+        spotLightsInfo.range = VK_WHOLE_SIZE;
 
         VkDescriptorWriter(descriptor_sets[i])
             .writeBuffer(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &globalBufferInfo)
             .writeBuffer(3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &lightBufferInfo)
             .writeBuffer(4, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, &perObjectBufferInfo)
-            .writeBuffer(10, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &dummyLightsInfo)
-            .writeBuffer(11, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &dummyLightsInfo)
+            .writeBuffer(10, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &pointLightsInfo)
+            .writeBuffer(11, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &spotLightsInfo)
             .update(device);
     }
 
@@ -429,12 +435,21 @@ void VulkanRenderAPI::initializeDescriptorSet(VkDescriptorSet ds, uint32_t frame
     emissiveInfo.imageView = default_emissive_texture.imageView;
     emissiveInfo.sampler = default_emissive_texture.sampler;
 
-    // Bindings 10/11: dummy point/spot light SSBOs. Shader sees num*Lights=0
-    // from LightUBO and short-circuits without sampling these.
-    VkDescriptorBufferInfo dummyLightsInfo{};
-    dummyLightsInfo.buffer = m_dummy_lights_buffer;
-    dummyLightsInfo.offset = 0;
-    dummyLightsInfo.range = VK_WHOLE_SIZE;
+    // Bindings 10/11: real per-frame point/spot light SSBOs used by the
+    // forward shader; fall back to the dummy buffer during partial init.
+    VkDescriptorBufferInfo pointLightsInfo{};
+    pointLightsInfo.buffer = (frameIndex < m_point_lights_buffers.size() &&
+                              m_point_lights_buffers[frameIndex] != VK_NULL_HANDLE)
+        ? m_point_lights_buffers[frameIndex] : m_dummy_lights_buffer;
+    pointLightsInfo.offset = 0;
+    pointLightsInfo.range = VK_WHOLE_SIZE;
+
+    VkDescriptorBufferInfo spotLightsInfo{};
+    spotLightsInfo.buffer = (frameIndex < m_spot_lights_buffers.size() &&
+                             m_spot_lights_buffers[frameIndex] != VK_NULL_HANDLE)
+        ? m_spot_lights_buffers[frameIndex] : m_dummy_lights_buffer;
+    spotLightsInfo.offset = 0;
+    spotLightsInfo.range = VK_WHOLE_SIZE;
 
     VkDescriptorWriter(ds)
         .writeBuffer(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &globalBufferInfo)
@@ -446,8 +461,8 @@ void VulkanRenderAPI::initializeDescriptorSet(VkDescriptorSet ds, uint32_t frame
         .writeImage(7, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &normalMapInfo)
         .writeImage(8, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &occlusionInfo)
         .writeImage(9, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &emissiveInfo)
-        .writeBuffer(10, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &dummyLightsInfo)
-        .writeBuffer(11, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &dummyLightsInfo)
+        .writeBuffer(10, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &pointLightsInfo)
+        .writeBuffer(11, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &spotLightsInfo)
         .update(device);
 }
 

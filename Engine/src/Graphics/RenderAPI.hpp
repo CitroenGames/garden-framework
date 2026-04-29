@@ -88,10 +88,8 @@ struct alignas(16) GPUSpotLight {
     glm::vec3 attenuation; float outerCutoff;
 };
 
-// Shared backend light-cbuffer struct. On D3D12 forward (post-Phase-7) the
-// shader only reads counts + cameraPos; per-light data comes from the
-// StructuredBuffers populated via uploadLightBuffers. The arrays stay for
-// Vulkan's forward path which still uses inline arrays.
+// Shared backend light-cbuffer struct. Forward shaders read counts +
+// cameraPos from the CB; per-light data comes from backend StructuredBuffers.
 struct alignas(16) LightCBuffer {
     GPUPointLight pointLights[MAX_LIGHTS];
     GPUSpotLight  spotLights[MAX_LIGHTS];
@@ -202,9 +200,8 @@ public:
     virtual void submitDeferredOpaqueCommands(const RenderCommandBuffer& cmds) { (void)cmds; }
     virtual void submitDeferredTransparentCommands(const RenderCommandBuffer& cmds) { (void)cmds; }
 
-    // Populate the deferred path's light StructuredBuffers. Supports up to a
-    // backend-specific cap (256 per kind on D3D12). The forward CB path is
-    // independent and still populated via setPointAndSpotLights.
+    // Populate the backend light StructuredBuffers. Supports up to a
+    // backend-specific cap (256 per kind on D3D12/Vulkan).
     virtual void uploadLightBuffers(const GPUPointLight* pts, int ptCount,
                                     const GPUSpotLight* spts, int spCount) {
         (void)pts; (void)ptCount; (void)spts; (void)spCount;

@@ -1,6 +1,8 @@
 #include "VulkanPostProcessGraphBuilder.hpp"
 #include "VulkanRenderAPI.hpp"
 #include "VulkanRGBackend.hpp"
+#include "Utils/Log.hpp"
+#include <array>
 #include <cstring>
 
 void VulkanPostProcessGraphBuilder::setFrameInputs(VkImage       outputImage,
@@ -8,7 +10,11 @@ void VulkanPostProcessGraphBuilder::setFrameInputs(VkImage       outputImage,
                                                     RGFormat      outputFormat,
                                                     VkFramebuffer fxaaFB,
                                                     VkRenderPass  fxaaRP,
-                                                    VkPipeline    fxaaPipeline)
+                                                    VkPipeline    fxaaPipeline,
+                                                    VkImage       hdrImage,
+                                                    VkImageView   hdrView,
+                                                    VkImage       depthImage,
+                                                    VkImageView   depthView)
 {
     m_outputImage         = outputImage;
     m_outputInitialLayout = outputInitialLayout;
@@ -16,6 +22,10 @@ void VulkanPostProcessGraphBuilder::setFrameInputs(VkImage       outputImage,
     m_fxaaFB              = fxaaFB;
     m_fxaaRP              = fxaaRP;
     m_fxaaPipeline        = fxaaPipeline;
+    m_hdrImage            = hdrImage;
+    m_hdrView             = hdrView;
+    m_depthImage          = depthImage;
+    m_depthView           = depthView;
 }
 
 PostProcessGraphBuilder::Handles
@@ -36,8 +46,10 @@ VulkanPostProcessGraphBuilder::importResources(RenderGraph& graph, RGBackend& ba
     offscreenDesc.debugName = "OffscreenHDR";
     h.offscreenHDR = graph.importTexture("OffscreenHDR", offscreenDesc,
                                           RGResourceUsage::ShaderResource);
-    vkBackend.bindImportedImage(h.offscreenHDR.handle, api->offscreen_image,
-                                api->offscreen_view,
+    VkImage hdrImage = (m_hdrImage != VK_NULL_HANDLE) ? m_hdrImage : api->offscreen_image;
+    VkImageView hdrView = (m_hdrView != VK_NULL_HANDLE) ? m_hdrView : api->offscreen_view;
+    vkBackend.bindImportedImage(h.offscreenHDR.handle, hdrImage,
+                                hdrView,
                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
     RGTextureDesc depthDesc;
@@ -47,8 +59,10 @@ VulkanPostProcessGraphBuilder::importResources(RenderGraph& graph, RGBackend& ba
     depthDesc.debugName = "DepthBuffer";
     h.depth = graph.importTexture("DepthBuffer", depthDesc,
                                   RGResourceUsage::DepthStencilWrite);
-    vkBackend.bindImportedImage(h.depth.handle, api->offscreen_depth_image,
-                                api->offscreen_depth_view,
+    VkImage depthImage = (m_depthImage != VK_NULL_HANDLE) ? m_depthImage : api->offscreen_depth_image;
+    VkImageView depthView = (m_depthView != VK_NULL_HANDLE) ? m_depthView : api->offscreen_depth_view;
+    vkBackend.bindImportedImage(h.depth.handle, depthImage,
+                                depthView,
                                 VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
                                 VK_IMAGE_ASPECT_DEPTH_BIT);
 
@@ -149,7 +163,7 @@ VulkanPostProcessGraphBuilder::importResources(RenderGraph& graph, RGBackend& ba
     return h;
 }
 
-void VulkanPostProcessGraphBuilder::recordSkybox(RGContext&, const Handles&, const Config& cfg)
+void VulkanPostProcessGraphBuilder::recordSkybox(RGContext&, const Handles& h, const Config& cfg)
 {
     auto* api = m_api;
     VkCommandBuffer cmd = api->command_buffers[api->current_frame];
@@ -162,12 +176,39 @@ void VulkanPostProcessGraphBuilder::recordSkybox(RGContext&, const Handles&, con
     ubo._pad         = 0.0f;
     std::memcpy(api->skybox_uniform_mapped[api->current_frame], &ubo, sizeof(SkyboxUBO));
 
+    auto& backend = static_cast<VulkanRGBackend&>(api->m_rgBackend);
+    VkImageView hdrView = backend.getImageView(h.offscreenHDR.handle);
+    VkImageView depthView = backend.getImageView(h.depth.handle);
+    if (api->skybox_rg_render_pass == VK_NULL_HANDLE || !hdrView || !depthView) {
+        LOG_ENGINE_ERROR("[Vulkan] Skybox pass: missing render pass or image views");
+        return;
+    }
+
     VkExtent2D extent = { cfg.width, cfg.height };
+    std::array<VkImageView, 2> attachments = { hdrView, depthView };
+    VkFramebufferCreateInfo fbInfo{};
+    fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+    fbInfo.renderPass = api->skybox_rg_render_pass;
+    fbInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
+    fbInfo.pAttachments = attachments.data();
+    fbInfo.width = cfg.width;
+    fbInfo.height = cfg.height;
+    fbInfo.layers = 1;
+
+    VkFramebuffer framebuffer = VK_NULL_HANDLE;
+    if (vkCreateFramebuffer(api->device, &fbInfo, nullptr, &framebuffer) != VK_SUCCESS) {
+        LOG_ENGINE_ERROR("[Vulkan] Skybox pass: failed to create framebuffer");
+        return;
+    }
+    VkDevice dev = api->device;
+    api->deletion_queue.push([dev, framebuffer]() {
+        vkDestroyFramebuffer(dev, framebuffer, nullptr);
+    });
 
     VkRenderPassBeginInfo rpInfo{};
     rpInfo.sType           = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
     rpInfo.renderPass      = api->skybox_rg_render_pass;
-    rpInfo.framebuffer     = api->skybox_rg_framebuffer;
+    rpInfo.framebuffer     = framebuffer;
     rpInfo.renderArea      = { {0, 0}, extent };
     rpInfo.clearValueCount = 0;
     vkCmdBeginRenderPass(cmd, &rpInfo, VK_SUBPASS_CONTENTS_INLINE);
@@ -199,6 +240,14 @@ void VulkanPostProcessGraphBuilder::recordSSAO(RGContext&, const Handles& h, con
 {
     auto* api = m_api;
     VkCommandBuffer cmd = api->command_buffers[api->current_frame];
+    auto& vkBackend = static_cast<VulkanRGBackend&>(m_api->m_rgBackend);
+
+    VkImageView depthView = vkBackend.getImageView(h.depth.handle);
+    if (depthView != VK_NULL_HANDLE) {
+        api->ssaoPass_.writeImageBinding(api->current_frame, 0,
+            depthView, api->ssao_depth_sampler,
+            VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+    }
 
     SSAOUbo ssaoUbo{};
     ssaoUbo.projection    = api->projection_matrix;
@@ -214,7 +263,6 @@ void VulkanPostProcessGraphBuilder::recordSSAO(RGContext&, const Handles& h, con
     std::memcpy(api->ssaoPass_.getUBOMapped(api->current_frame), &ssaoUbo, sizeof(SSAOUbo));
     api->ssaoPass_.record(cmd, api->current_frame, api->fxaa_vertex_buffer);
 
-    auto& vkBackend = static_cast<VulkanRGBackend&>(m_api->m_rgBackend);
     vkBackend.setCurrentLayout(h.ssaoRaw.handle, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 }
 
@@ -222,6 +270,14 @@ void VulkanPostProcessGraphBuilder::recordSSAOBlurH(RGContext&, const Handles& h
 {
     auto* api = m_api;
     VkCommandBuffer cmd = api->command_buffers[api->current_frame];
+    auto& vkBackend = static_cast<VulkanRGBackend&>(m_api->m_rgBackend);
+
+    VkImageView depthView = vkBackend.getImageView(h.depth.handle);
+    if (depthView != VK_NULL_HANDLE) {
+        api->ssaoBlurHPass_.writeImageBinding(api->current_frame, 1,
+            depthView, api->ssao_depth_sampler,
+            VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+    }
 
     SSAOBlurUbo blurH{};
     blurH.texelSize = glm::vec2(1.0f / api->ssaoPass_.getWidth(),
@@ -231,7 +287,6 @@ void VulkanPostProcessGraphBuilder::recordSSAOBlurH(RGContext&, const Handles& h
     std::memcpy(api->ssaoBlurHPass_.getUBOMapped(api->current_frame), &blurH, sizeof(SSAOBlurUbo));
     api->ssaoBlurHPass_.record(cmd, api->current_frame, api->fxaa_vertex_buffer);
 
-    auto& vkBackend = static_cast<VulkanRGBackend&>(m_api->m_rgBackend);
     vkBackend.setCurrentLayout(h.ssaoBlurH.handle, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 }
 
@@ -239,6 +294,14 @@ void VulkanPostProcessGraphBuilder::recordSSAOBlurV(RGContext&, const Handles& h
 {
     auto* api = m_api;
     VkCommandBuffer cmd = api->command_buffers[api->current_frame];
+    auto& vkBackend = static_cast<VulkanRGBackend&>(m_api->m_rgBackend);
+
+    VkImageView depthView = vkBackend.getImageView(h.depth.handle);
+    if (depthView != VK_NULL_HANDLE) {
+        api->ssaoBlurVPass_.writeImageBinding(api->current_frame, 1,
+            depthView, api->ssao_depth_sampler,
+            VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+    }
 
     SSAOBlurUbo blurV{};
     blurV.texelSize = glm::vec2(1.0f / api->ssaoBlurHPass_.getWidth(),
@@ -248,7 +311,6 @@ void VulkanPostProcessGraphBuilder::recordSSAOBlurV(RGContext&, const Handles& h
     std::memcpy(api->ssaoBlurVPass_.getUBOMapped(api->current_frame), &blurV, sizeof(SSAOBlurUbo));
     api->ssaoBlurVPass_.record(cmd, api->current_frame, api->fxaa_vertex_buffer);
 
-    auto& vkBackend = static_cast<VulkanRGBackend&>(m_api->m_rgBackend);
     vkBackend.setCurrentLayout(h.ssaoBlurV.handle, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 }
 
@@ -256,6 +318,14 @@ void VulkanPostProcessGraphBuilder::recordShadowMask(RGContext&, const Handles& 
 {
     auto* api = m_api;
     VkCommandBuffer cmd = api->command_buffers[api->current_frame];
+    auto& vkBackend = static_cast<VulkanRGBackend&>(m_api->m_rgBackend);
+
+    VkImageView depthView = vkBackend.getImageView(h.depth.handle);
+    if (depthView != VK_NULL_HANDLE) {
+        api->shadowMaskPass_.writeImageBinding(api->current_frame, 0,
+            depthView, api->shadow_mask_depth_sampler,
+            VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+    }
 
     ShadowMaskUbo shadowMaskUbo{};
     shadowMaskUbo.invViewProj = glm::inverse(api->projection_matrix * api->view_matrix);
@@ -276,13 +346,21 @@ void VulkanPostProcessGraphBuilder::recordShadowMask(RGContext&, const Handles& 
                 &shadowMaskUbo, sizeof(ShadowMaskUbo));
     api->shadowMaskPass_.record(cmd, api->current_frame, api->fxaa_vertex_buffer);
 
-    auto& vkBackend = static_cast<VulkanRGBackend&>(m_api->m_rgBackend);
     vkBackend.setCurrentLayout(h.shadowMask.handle, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 }
 
-void VulkanPostProcessGraphBuilder::recordTonemapping(RGContext&, const Handles&, const Config& cfg)
+void VulkanPostProcessGraphBuilder::recordTonemapping(RGContext&, const Handles& h, const Config& cfg)
 {
     auto* api = m_api;
+    auto& vkBackend = static_cast<VulkanRGBackend&>(m_api->m_rgBackend);
+
+    VkImageView hdrView = vkBackend.getImageView(h.offscreenHDR.handle);
+    if (hdrView != VK_NULL_HANDLE) {
+        api->fxaaPass_.writeImageBinding(api->current_frame, 0,
+            hdrView, api->offscreen_sampler,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    }
+
     api->renderFXAAPass(api->command_buffers[api->current_frame],
                         m_fxaaRP, m_fxaaFB, m_fxaaPipeline,
                         cfg.width, cfg.height,
