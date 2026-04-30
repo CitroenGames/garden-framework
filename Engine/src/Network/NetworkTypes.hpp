@@ -3,10 +3,24 @@
 #define NOMINMAX  // Prevent Windows.h min/max macros from interfering
 
 #include <cstdint>
+#include <cmath>
 #include <string>
 #include <unordered_map>
 #include <glm/glm.hpp>
 #include "enet.h"
+
+namespace Net {
+
+struct NetworkedEntity
+{
+    uint32_t network_id = 0;
+    uint16_t owner_client_id = 0;
+    bool is_player = false;
+
+    NetworkedEntity() = default;
+    NetworkedEntity(uint32_t net_id, uint16_t owner = 0, bool player = false)
+        : network_id(net_id), owner_client_id(owner), is_player(player) {}
+};
 
 // Component snapshot - represents the state of an entity at a specific tick
 struct ComponentSnapshot
@@ -128,3 +142,5 @@ inline uint32_t entityToNetworkId(uint32_t entity_value) {
 inline uint32_t networkIdToEntity(uint32_t network_id) {
     return network_id;
 }
+
+} // namespace Net

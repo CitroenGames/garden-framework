@@ -1,26 +1,29 @@
 // Server-side DLL exports for the FPSShooter template.
 // These are resolved by the engine's Server.exe launcher via GameModuleLoader.
-// They are optional — if absent, the DLL only supports client mode.
+// They are optional - if absent, the DLL only supports client mode.
 
 #include "Plugin/GameModuleAPI.h"
 #include "world.hpp"
 #include "LevelManager.hpp"
 #include "Components/Components.hpp"
+#include "Network/NetworkProtocol.hpp"
+#include "Network/NetworkSerializer.hpp"
+#include "Network/NetworkTypes.hpp"
+#include "Network/ServerNetworkManager.hpp"
 #include "shared/SharedComponents.hpp"
-#include "shared/SharedMovement.hpp"
-#include "shared/NetworkProtocol.hpp"
-#include "shared/NetworkSerializer.hpp"
+#include "shared/CombatProtocol.hpp"
 #include "shared/WeaponTypes.hpp"
 #include "shared/WeaponSystem.hpp"
-#include "server/ServerNetworkManager.hpp"
 #include "server/GameRules.hpp"
 #include "Utils/Log.hpp"
 
 #include <cmath>
 
 static EngineServices* g_server_services = nullptr;
-static Game::ServerNetworkManager g_server_network;
+static Net::ServerNetworkManager g_server_network;
 static Game::GameRules g_game_rules;
+
+using namespace Net;
 
 // ---- Hit validation helpers ----
 
@@ -141,7 +144,7 @@ static void processShootCommand(uint16_t shooter_client_id, const ShootCommandMe
         dmg_msg.hit_position = best_hit_point;
 
         BitWriter dmg_writer;
-        NetworkSerializer::serialize(dmg_writer, dmg_msg);
+        CombatSerializer::serialize(dmg_writer, dmg_msg);
         g_server_network.sendReliableToClient(best_hit_client_id, dmg_writer);
 
         // Also send to attacker so they see hit confirmation
@@ -166,7 +169,7 @@ static void processShootCommand(uint16_t shooter_client_id, const ShootCommandMe
             death_msg.death_position = victim_trans.position;
 
             BitWriter death_writer;
-            NetworkSerializer::serialize(death_writer, death_msg);
+            CombatSerializer::serialize(death_writer, death_msg);
 
             for (uint16_t i = 1; i < g_server_network.getNextClientId(); i++) {
                 const ClientInfo* client = g_server_network.getClientInfo(i);
@@ -190,7 +193,7 @@ static void processShootCommand(uint16_t shooter_client_id, const ShootCommandMe
     result_msg.weapon_type = shoot_msg.weapon_type;
 
     BitWriter result_writer;
-    NetworkSerializer::serialize(result_writer, result_msg);
+    CombatSerializer::serialize(result_writer, result_msg);
 
     for (uint16_t i = 1; i < g_server_network.getNextClientId(); i++) {
         const ClientInfo* client = g_server_network.getClientInfo(i);
@@ -232,7 +235,7 @@ static void respawnPlayer(uint16_t client_id, const glm::vec3& spawn_pos)
             respawn_msg.health = health.health;
 
             BitWriter writer;
-            NetworkSerializer::serialize(writer, respawn_msg);
+            CombatSerializer::serialize(writer, respawn_msg);
 
             for (uint16_t i = 1; i < g_server_network.getNextClientId(); i++) {
                 const ClientInfo* other = g_server_network.getClientInfo(i);
@@ -369,6 +372,17 @@ GAME_API bool gardenServerInit(EngineServices* services)
 
     g_server_network.setWorld(services->game_world);
 
+    g_server_network.setInputFilter([](uint16_t, entt::entity player_entity) {
+        world* w = g_server_services ? g_server_services->game_world : nullptr;
+        if (!w || !w->registry.valid(player_entity)) {
+            return false;
+        }
+        if (!w->registry.all_of<HealthComponent>(player_entity)) {
+            return true;
+        }
+        return w->registry.get<HealthComponent>(player_entity).alive;
+    });
+
     g_server_network.setOnClientConnected([](uint16_t client_id) {
         spawnPlayerForClient(client_id);
     });
@@ -378,7 +392,17 @@ GAME_API bool gardenServerInit(EngineServices* services)
     });
 
     // Set up shoot command handler
-    g_server_network.setOnShootCommand([](uint16_t client_id, const ShootCommandMessage& msg) {
+    g_server_network.setCustomMessageHandler([](uint16_t client_id, uint8_t message_type, BitReader& reader) {
+        if (message_type != static_cast<uint8_t>(CombatMessageType::SHOOT_COMMAND)) {
+            LOG_ENGINE_WARN("Unhandled client custom message {}", static_cast<int>(message_type));
+            return;
+        }
+
+        ShootCommandMessage msg;
+        if (!CombatSerializer::deserialize(reader, msg)) {
+            LOG_ENGINE_WARN("Failed to deserialize SHOOT_COMMAND from client {}", client_id);
+            return;
+        }
         processShootCommand(client_id, msg);
     });
 
@@ -434,7 +458,7 @@ GAME_API void gardenServerUpdate(float delta_time)
             death_msg.death_position = trans.position;
 
             BitWriter death_writer;
-            NetworkSerializer::serialize(death_writer, death_msg);
+            CombatSerializer::serialize(death_writer, death_msg);
 
             for (uint16_t i = 1; i < g_server_network.getNextClientId(); i++) {
                 const ClientInfo* client = g_server_network.getClientInfo(i);

@@ -3,12 +3,15 @@
 #include <glm/glm.hpp>
 #include "world.hpp"
 #include "Components/Components.hpp"
+#include "Network/NetworkTypes.hpp"
 #include "shared/SharedComponents.hpp"
 #include "shared/WeaponTypes.hpp"
 #include <vector>
 #include <functional>
 
 namespace Game {
+
+using Net::NetworkedEntity;
 
 // Pending respawn entry
 struct PendingRespawn

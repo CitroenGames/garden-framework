@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <cstddef>
 
+namespace Net {
+
 // Tracks visual smoothing offset for reconciliation.
 // When the server corrects our position, instead of snapping we blend the visual
 // offset to zero over ~100ms for a smooth correction.
@@ -65,7 +67,7 @@ public:
     // Discard all entries with tick <= given tick (they've been acknowledged by server)
     void discardUpTo(uint32_t tick)
     {
-        // We don't physically remove — just mark invalid.
+        // We don't physically remove - just mark invalid.
         // Iteration skips invalid entries and entries with tick <= given.
         for (size_t i = 0; i < count; i++)
         {
@@ -129,3 +131,5 @@ private:
     size_t head = 0;
     size_t count = 0;
 };
+
+} // namespace Net

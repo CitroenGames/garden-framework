@@ -1,0 +1,20 @@
+[project:NetworkTests]
+type = exe
+outdir = ../../bin/
+if(Windows)
+{
+    subsystem = Console
+}
+sources = src/main.cpp
+headers = src/**/*.hpp
+includes = src
+target_link_libraries(
+    PRIVATE EngineCore
+)
+multiprocessor = true
+simd = AdvancedVectorExtensions2
+std = 20
+utf8 = true
+exception_handling = false
+buffer_security_check = false
+

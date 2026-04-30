@@ -13,6 +13,7 @@ sources = {
     src/Graphics/HeadlessRenderAPI.cpp
     src/Graphics/HeadlessMesh.cpp
     src/Navigation/**/*.cpp
+    src/Network/**/*.cpp
     src/Plugin/**/*.cpp
     src/Prefab/**/*.cpp
     src/Project/**/*.cpp

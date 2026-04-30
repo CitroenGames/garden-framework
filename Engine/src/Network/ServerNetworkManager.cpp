@@ -1,8 +1,8 @@
 #include "ServerNetworkManager.hpp"
+#include "NetworkRuntime.hpp"
 #include "world.hpp"
 #include "Components/Components.hpp"
-#include "shared/SharedComponents.hpp"
-#include "shared/SharedMovement.hpp"
+#include "SharedMovement.hpp"
 #include "Utils/Log.hpp"
 #include "Console/ConVar.hpp"
 #include "Console/Console.hpp"
@@ -23,7 +23,7 @@ namespace {
   #include <ws2tcpip.h>
 #endif
 
-namespace Game {
+namespace Net {
 
 ServerNetworkManager::ServerNetworkManager()
 {
@@ -36,10 +36,15 @@ ServerNetworkManager::~ServerNetworkManager()
 
 bool ServerNetworkManager::initialize()
 {
-    if (enet_initialize() != 0) {
+    if (runtime_acquired) {
+        return true;
+    }
+
+    if (!NetworkRuntime::acquire()) {
         LOG_ENGINE_ERROR("Failed to initialize ENet");
         return false;
     }
+    runtime_acquired = true;
 
     LOG_ENGINE_INFO("ENet initialized successfully");
     return true;
@@ -163,7 +168,10 @@ void ServerNetworkManager::shutdown()
     entity_to_net_id.clear();
     net_id_to_entity.clear();
 
-    enet_deinitialize();
+    if (runtime_acquired) {
+        NetworkRuntime::release();
+        runtime_acquired = false;
+    }
     LOG_ENGINE_INFO("Server shutdown complete");
 }
 
@@ -257,9 +265,9 @@ void ServerNetworkManager::handleClientDisconnect(ENetEvent& event)
 void ServerNetworkManager::handleClientMessage(ENetEvent& event)
 {
     BitReader reader(event.packet->data, event.packet->dataLength);
-    MessageType msg_type = NetworkSerializer::getMessageType(event.packet->data, event.packet->dataLength);
+    uint8_t msg_type = NetworkSerializer::getMessageType(event.packet->data, event.packet->dataLength);
 
-    switch (msg_type) {
+    switch (static_cast<MessageType>(msg_type)) {
         case MessageType::CONNECT_REQUEST:
             handleConnectRequest(event.peer, reader);
             break;
@@ -280,21 +288,19 @@ void ServerNetworkManager::handleClientMessage(ENetEvent& event)
             break;
         }
 
-        case MessageType::SHOOT_COMMAND: {
-            auto it = peer_to_client_id.find(event.peer);
-            if (it != peer_to_client_id.end()) {
-                handleShootCommand(it->second, reader);
-            }
-            break;
-        }
-
         case MessageType::PING:
             handlePing(event.peer, reader);
             break;
 
-        default:
-            LOG_ENGINE_WARN("Received unknown message type: {0}", static_cast<int>(msg_type));
+        default: {
+            auto it = peer_to_client_id.find(event.peer);
+            if (msg_type >= CUSTOM_MESSAGE_START && it != peer_to_client_id.end() && on_custom_message) {
+                on_custom_message(it->second, msg_type, reader);
+            } else {
+                LOG_ENGINE_WARN("Received unknown message type: {0}", static_cast<int>(msg_type));
+            }
             break;
+        }
     }
 }
 
@@ -405,10 +411,8 @@ void ServerNetworkManager::handleInputCommand(uint16_t client_id, BitReader& rea
         return;
     }
 
-    // Don't process movement for dead players
-    if (game_world->registry.all_of<HealthComponent>(player_entity)) {
-        auto& health = game_world->registry.get<HealthComponent>(player_entity);
-        if (!health.alive) return;
+    if (input_filter && !input_filter(client_id, player_entity)) {
+        return;
     }
 
     auto& player = game_world->registry.get<PlayerComponent>(player_entity);
@@ -472,19 +476,6 @@ void ServerNetworkManager::handleInputCommand(uint16_t client_id, BitReader& rea
         player.grounded = result.grounded;
 
         it->second.info.last_input_tick = msg.client_tick;
-    }
-}
-
-void ServerNetworkManager::handleShootCommand(uint16_t client_id, BitReader& reader)
-{
-    ShootCommandMessage msg;
-    if (!NetworkSerializer::deserialize(reader, msg)) {
-        LOG_ENGINE_WARN("Failed to deserialize shoot command from client {0}", client_id);
-        return;
-    }
-
-    if (on_shoot_command) {
-        on_shoot_command(client_id, msg);
     }
 }
 
@@ -817,6 +808,40 @@ void ServerNetworkManager::sendReliableToClient(uint16_t client_id, const BitWri
     }
 }
 
+void ServerNetworkManager::sendUnreliableToClient(uint16_t client_id, const BitWriter& writer)
+{
+    auto it = clients.find(client_id);
+    if (it != clients.end() && it->second.info.peer != nullptr) {
+        sendUnreliableMessage(it->second.info.peer, writer);
+        stats.packets_sent++;
+        stats.bytes_sent += writer.getByteSize();
+    } else {
+        LOG_ENGINE_WARN("Cannot send to client {0}: not found or no peer", client_id);
+    }
+}
+
+void ServerNetworkManager::broadcastReliable(const BitWriter& writer)
+{
+    for (auto& [client_id, connection] : clients) {
+        if (connection.info.peer) {
+            sendReliableMessage(connection.info.peer, writer);
+            stats.packets_sent++;
+            stats.bytes_sent += writer.getByteSize();
+        }
+    }
+}
+
+void ServerNetworkManager::broadcastUnreliable(const BitWriter& writer)
+{
+    for (auto& [client_id, connection] : clients) {
+        if (connection.info.peer) {
+            sendUnreliableMessage(connection.info.peer, writer);
+            stats.packets_sent++;
+            stats.bytes_sent += writer.getByteSize();
+        }
+    }
+}
+
 void ServerNetworkManager::broadcastCVar(const std::string& name, const std::string& value)
 {
     if (clients.empty()) {
@@ -905,4 +930,4 @@ void ServerNetworkManager::setupCVarCallbacks()
     LOG_ENGINE_INFO("Set up cvar callbacks for {} replicated cvars", replicated.size());
 }
 
-} // namespace Game
+} // namespace Net

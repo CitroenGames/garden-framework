@@ -1,4 +1,4 @@
-#include "Plugin/GameModuleAPI.h"
+﻿#include "Plugin/GameModuleAPI.h"
 #include "Reflection/Reflect.hpp"
 #include "Reflection/ReflectionRegistry.hpp"
 
@@ -9,11 +9,12 @@
 #include "InputHandler.hpp"
 #include "Components/Components.hpp"
 #include "Components/camera.hpp"
+#include "Network/ClientNetworkManager.hpp"
+#include "Network/SharedMovement.hpp"
 #include "shared/SharedComponents.hpp"
-#include "shared/SharedMovement.hpp"
+#include "shared/CombatProtocol.hpp"
 #include "shared/WeaponTypes.hpp"
 #include "shared/WeaponSystem.hpp"
-#include "ClientNetworkManager.hpp"
 #include "GameHUD.hpp"
 #include "PlayerRepSystem.hpp"
 
@@ -33,11 +34,19 @@
 #include <SDL3/SDL.h>
 #include <memory>
 
+using Net::InputState;
+using Net::MovementConfig;
+using Net::MovementInput;
+using Net::MovementState;
+using Net::PredictionEntry;
+namespace InputFlags = Net::InputFlags;
+namespace SharedMovement = Net::SharedMovement;
+
 // ---- Module state ----
 
 static EngineServices* g_services = nullptr;
 static std::unique_ptr<PlayerController> g_player_controller;
-static Game::ClientNetworkManager g_network;
+static Net::ClientNetworkManager g_network;
 static GameHUD g_hud;
 
 static entt::entity g_player_entity = entt::null;
@@ -45,7 +54,7 @@ static entt::entity g_freecam_entity = entt::null;
 static entt::entity g_player_rep_entity = entt::null;
 
 // Combat state
-static ReconciliationSmoothing g_recon_smoothing;
+static Net::ReconciliationSmoothing g_recon_smoothing;
 static int32_t g_local_health = 100;
 static int32_t g_local_max_health = 100;
 static bool g_local_alive = true;
@@ -98,59 +107,108 @@ GAME_API bool gardenGameInit(EngineServices* services)
 
     g_network.setWorld(services->game_world);
 
-    // Set up combat callbacks
-    g_network.setOnShootResult([](const ShootResultMessage& msg) {
-        // Draw tracer line for visual feedback
-        glm::vec3 color = (msg.hit_entity_id != 0) ? glm::vec3(1.0f, 0.3f, 0.0f) : glm::vec3(1.0f, 1.0f, 0.5f);
-        DebugDraw::get().drawLine(msg.ray_origin, msg.hit_position, color, 0.15f);
-    });
-
-    g_network.setOnDamageEvent([](const DamageEventMessage& msg) {
-        if (msg.victim_client_id == g_network.getClientId()) {
-            g_local_health = msg.health_remaining;
-            LOG_ENGINE_INFO("Took {} damage! Health: {}", msg.damage, g_local_health);
+    g_network.setCustomMessageHandler([](uint8_t message_type, Net::BitReader& reader) {
+        switch (static_cast<CombatMessageType>(message_type)) {
+        case CombatMessageType::SHOOT_RESULT: {
+            ShootResultMessage msg;
+            if (!CombatSerializer::deserialize(reader, msg)) {
+                LOG_ENGINE_WARN("Failed to deserialize SHOOT_RESULT");
+                return;
+            }
+            glm::vec3 color = (msg.hit_entity_id != 0)
+                ? glm::vec3(1.0f, 0.3f, 0.0f)
+                : glm::vec3(1.0f, 1.0f, 0.5f);
+            DebugDraw::get().drawLine(msg.ray_origin, msg.hit_position, color, 0.15f);
+            break;
         }
-    });
-
-    g_network.setOnPlayerDied([](const PlayerDiedMessage& msg) {
-        // Add kill feed entry
-        KillFeedEntry entry;
-        entry.killer_name = "Player " + std::to_string(msg.killer_client_id);
-        entry.victim_name = "Player " + std::to_string(msg.victim_client_id);
-        entry.timer = 5.0f;
-        g_kill_feed.push_back(entry);
-
-        if (msg.victim_client_id == g_network.getClientId()) {
-            g_local_alive = false;
-            g_local_health = 0;
-            g_local_deaths++;
-            g_death_timer = RESPAWN_DELAY;
-            LOG_ENGINE_INFO("You died! Killed by Player {}", msg.killer_client_id);
+        case CombatMessageType::DAMAGE_EVENT: {
+            DamageEventMessage msg;
+            if (!CombatSerializer::deserialize(reader, msg)) {
+                LOG_ENGINE_WARN("Failed to deserialize DAMAGE_EVENT");
+                return;
+            }
+            if (msg.victim_client_id == g_network.getClientId()) {
+                g_local_health = msg.health_remaining;
+                LOG_ENGINE_INFO("Took {} damage! Health: {}", msg.damage, g_local_health);
+            }
+            break;
         }
-        if (msg.killer_client_id == g_network.getClientId() &&
-            msg.killer_client_id != msg.victim_client_id) {
-            g_local_kills++;
+        case CombatMessageType::PLAYER_DIED: {
+            PlayerDiedMessage msg;
+            if (!CombatSerializer::deserialize(reader, msg)) {
+                LOG_ENGINE_WARN("Failed to deserialize PLAYER_DIED");
+                return;
+            }
+            KillFeedEntry entry;
+            entry.killer_name = "Player " + std::to_string(msg.killer_client_id);
+            entry.victim_name = "Player " + std::to_string(msg.victim_client_id);
+            entry.timer = 5.0f;
+            g_kill_feed.push_back(entry);
+
+            if (msg.victim_client_id == g_network.getClientId()) {
+                g_local_alive = false;
+                g_local_health = 0;
+                g_local_deaths++;
+                g_death_timer = RESPAWN_DELAY;
+                LOG_ENGINE_INFO("You died! Killed by Player {}", msg.killer_client_id);
+            }
+            if (msg.killer_client_id == g_network.getClientId() &&
+                msg.killer_client_id != msg.victim_client_id) {
+                g_local_kills++;
+            }
+            break;
         }
-    });
+        case CombatMessageType::PLAYER_RESPAWN: {
+            PlayerRespawnMessage msg;
+            if (!CombatSerializer::deserialize(reader, msg)) {
+                LOG_ENGINE_WARN("Failed to deserialize PLAYER_RESPAWN");
+                return;
+            }
 
-    g_network.setOnPlayerRespawn([](const PlayerRespawnMessage& msg) {
-        if (msg.client_id == g_network.getClientId()) {
-            g_local_alive = true;
-            g_local_health = msg.health;
-            g_local_max_health = msg.health;
-            g_death_timer = 0.0f;
-            g_local_fire_cooldown = 0.0f;
-            g_local_reloading = false;
+            if (g_services && g_services->game_world) {
+                entt::entity entity = g_network.getEntityByNetworkId(msg.entity_id);
+                if (g_services->game_world->registry.valid(entity)) {
+                    auto& registry = g_services->game_world->registry;
+                    if (registry.all_of<TransformComponent>(entity)) {
+                        registry.get<TransformComponent>(entity).position = msg.spawn_position;
+                    }
+                    if (registry.all_of<RigidBodyComponent>(entity)) {
+                        registry.get<RigidBodyComponent>(entity).velocity = glm::vec3(0);
+                    }
+                }
+            }
 
-            // Reset weapon
-            const auto& def = getWeaponDef(WeaponType::RIFLE);
-            g_local_ammo = def.max_ammo;
-            g_local_max_ammo = def.max_ammo;
+            if (msg.client_id == g_network.getClientId()) {
+                g_local_alive = true;
+                g_local_health = msg.health;
+                g_local_max_health = msg.health;
+                g_death_timer = 0.0f;
+                g_local_fire_cooldown = 0.0f;
+                g_local_reloading = false;
 
-            // Reset reconciliation smoothing
-            g_recon_smoothing.visual_offset = glm::vec3(0.0f);
+                const auto& def = getWeaponDef(WeaponType::RIFLE);
+                g_local_ammo = def.max_ammo;
+                g_local_max_ammo = def.max_ammo;
+                g_recon_smoothing.visual_offset = glm::vec3(0.0f);
 
-            LOG_ENGINE_INFO("Respawned with {} health", msg.health);
+                LOG_ENGINE_INFO("Respawned with {} health", msg.health);
+            }
+            break;
+        }
+        case CombatMessageType::WEAPON_STATE: {
+            WeaponStateMessage msg;
+            if (!CombatSerializer::deserialize(reader, msg)) {
+                LOG_ENGINE_WARN("Failed to deserialize WEAPON_STATE");
+                return;
+            }
+            g_local_ammo = msg.ammo;
+            g_local_max_ammo = msg.max_ammo;
+            g_local_reloading = msg.reloading != 0;
+            break;
+        }
+        default:
+            LOG_ENGINE_WARN("Unhandled combat message type {}", static_cast<int>(message_type));
+            break;
         }
     });
 
@@ -228,10 +286,10 @@ GAME_API void gardenGameUpdate(float delta_time)
     // Send player input to server and run client-side prediction
     if (g_network.isConnected() && input_manager)
     {
-        // Disable PlayerController's built-in movement — SharedMovement handles it
+        // Disable PlayerController's built-in movement - SharedMovement handles it
         g_player_controller->setMovementEnabled(false);
 
-        Game::InputState input_state;
+        InputState input_state;
         input_state.buttons = 0;
 
         if (g_local_alive) {
@@ -267,10 +325,16 @@ GAME_API void gardenGameUpdate(float delta_time)
                 g_local_reloading = true;
             }
 
-            // Send shoot command to server
             glm::vec3 cam_pos = game_world->world_camera.getPosition();
             glm::vec3 cam_fwd = game_world->world_camera.camera_forward();
-            g_network.sendShootCommand(cam_pos, cam_fwd, static_cast<uint8_t>(WeaponType::RIFLE));
+            Net::BitWriter writer;
+            ShootCommandMessage shoot_msg;
+            shoot_msg.client_tick = g_network.getClientTick();
+            shoot_msg.ray_origin = cam_pos;
+            shoot_msg.ray_direction = cam_fwd;
+            shoot_msg.weapon_type = static_cast<uint8_t>(WeaponType::RIFLE);
+            CombatSerializer::serialize(writer, shoot_msg);
+            g_network.sendCustomUnreliable(writer);
         }
 
         // Handle reload (R key)

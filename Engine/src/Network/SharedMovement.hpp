@@ -6,6 +6,8 @@
 #include <cmath>
 #include "NetworkProtocol.hpp" // For InputFlags
 
+namespace Net {
+
 // Input command for one simulation tick
 struct MovementInput
 {
@@ -113,3 +115,5 @@ namespace SharedMovement
         return result;
     }
 } // namespace SharedMovement
+
+} // namespace Net

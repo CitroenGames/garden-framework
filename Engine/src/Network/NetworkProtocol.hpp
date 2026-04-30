@@ -5,36 +5,30 @@
 #include <cstdint>
 #include <glm/glm.hpp>
 
+namespace Net {
+
 // Protocol version for compatibility checking
 constexpr uint32_t NETWORK_PROTOCOL_VERSION = 1;
 constexpr uint16_t MAX_NETWORKED_ENTITIES = 2048;
 constexpr uint16_t MAX_SYNCED_CVARS = 1024;
+constexpr uint8_t CUSTOM_MESSAGE_START = 64;
 
 // Message type enumeration
 enum class MessageType : uint8_t
 {
     // Connection Management (Reliable)
-    CONNECT_REQUEST = 0,      // Client → Server
-    CONNECT_ACCEPT = 1,       // Server → Client
-    CONNECT_REJECT = 2,       // Server → Client
+    CONNECT_REQUEST = 0,      // Client -> Server
+    CONNECT_ACCEPT = 1,       // Server -> Client
+    CONNECT_REJECT = 2,       // Server -> Client
     DISCONNECT = 3,           // Bidirectional
 
     // Player Management (Reliable)
-    SPAWN_PLAYER = 4,         // Server → Client
-    DESPAWN_PLAYER = 5,       // Server → Client
+    SPAWN_PLAYER = 4,         // Server -> Client
+    DESPAWN_PLAYER = 5,       // Server -> Client
 
     // Input & Simulation (Unreliable)
-    INPUT_COMMAND = 10,       // Client → Server
-    WORLD_STATE_UPDATE = 11,  // Server → Clients
-
-    // Combat (Reliable unless noted)
-    SHOOT_COMMAND = 12,       // Client → Server (Unreliable): player fired weapon
-    SHOOT_RESULT = 13,        // Server → Clients (Unreliable): hit/miss result for effects
-    DAMAGE_EVENT = 14,        // Server → Client (Reliable): damage dealt notification
-    PLAYER_DIED = 15,         // Server → Clients (Reliable): player killed
-    PLAYER_RESPAWN = 16,      // Server → Clients (Reliable): player respawned
-    WEAPON_STATE = 17,        // Server → Client (Unreliable): ammo/reload sync
-
+    INPUT_COMMAND = 10,       // Client -> Server
+    WORLD_STATE_UPDATE = 11,  // Server -> Clients
     // Debugging
     PING = 20,
     PONG = 21,
@@ -188,67 +182,6 @@ struct PongMessage
     uint32_t timestamp = 0;  // Echo back the ping timestamp
 };
 
-// Shoot command: client tells server it fired
-struct ShootCommandMessage
-{
-    MessageType type = MessageType::SHOOT_COMMAND;
-    uint32_t client_tick = 0;         // Tick when client fired (for lag compensation)
-    glm::vec3 ray_origin = glm::vec3(0);   // Camera position
-    glm::vec3 ray_direction = glm::vec3(0, 0, -1); // Camera forward
-    uint8_t weapon_type = 0;          // WeaponType enum value
-};
-
-// Shoot result: server broadcasts hit/miss for visual effects
-struct ShootResultMessage
-{
-    MessageType type = MessageType::SHOOT_RESULT;
-    uint16_t shooter_client_id = 0;
-    glm::vec3 ray_origin = glm::vec3(0);
-    glm::vec3 hit_position = glm::vec3(0);  // End point of tracer (hit point or max range)
-    uint32_t hit_entity_id = 0;       // 0 = miss
-    uint8_t weapon_type = 0;
-};
-
-// Damage event: server tells specific client they took damage
-struct DamageEventMessage
-{
-    MessageType type = MessageType::DAMAGE_EVENT;
-    uint16_t attacker_client_id = 0;
-    uint16_t victim_client_id = 0;
-    int32_t damage = 0;
-    int32_t health_remaining = 0;
-    glm::vec3 hit_position = glm::vec3(0);
-};
-
-// Player died: broadcast to all clients
-struct PlayerDiedMessage
-{
-    MessageType type = MessageType::PLAYER_DIED;
-    uint16_t victim_client_id = 0;
-    uint16_t killer_client_id = 0;
-    glm::vec3 death_position = glm::vec3(0);
-};
-
-// Player respawned: broadcast to all clients
-struct PlayerRespawnMessage
-{
-    MessageType type = MessageType::PLAYER_RESPAWN;
-    uint16_t client_id = 0;
-    uint32_t entity_id = 0;
-    glm::vec3 spawn_position = glm::vec3(0);
-    int32_t health = 100;
-};
-
-// Weapon state sync: server periodically syncs weapon state
-struct WeaponStateMessage
-{
-    MessageType type = MessageType::WEAPON_STATE;
-    int32_t ammo = 0;
-    int32_t max_ammo = 0;
-    uint8_t weapon_type = 0;
-    uint8_t reloading = 0;
-};
-
 // ConVar sync message - single cvar update
 struct CVarSyncMessage
 {
@@ -266,3 +199,5 @@ struct CVarInitialSyncMessage
 };
 
 #pragma pack(pop)
+
+} // namespace Net

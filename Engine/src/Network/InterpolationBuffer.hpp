@@ -6,6 +6,8 @@
 #include <cstddef>
 #include <cmath>
 
+namespace Net {
+
 // A single snapshot of a remote entity's state at a specific server tick
 struct InterpolationSnapshot
 {
@@ -110,7 +112,7 @@ public:
         }
 
         if (snap_a) {
-            // Past the latest snapshot — extrapolate using velocity (capped)
+            // Past the latest snapshot - extrapolate using velocity (capped)
             float extrap_ticks = render_tick - static_cast<float>(snap_a->tick);
             if (extrap_ticks > MAX_EXTRAP_TICKS) extrap_ticks = MAX_EXTRAP_TICKS;
 
@@ -121,7 +123,7 @@ public:
         }
 
         if (snap_b) {
-            // Before earliest snapshot — snap to earliest
+            // Before earliest snapshot - snap to earliest
             out_position = snap_b->position;
             out_rotation = snap_b->rotation_y;
             return true;
@@ -154,3 +156,5 @@ private:
         return a + diff * t;
     }
 };
+
+} // namespace Net

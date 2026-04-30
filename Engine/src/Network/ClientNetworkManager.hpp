@@ -4,21 +4,24 @@
 #include <string>
 #include <unordered_map>
 #include <functional>
+#include <utility>
+#include "EngineExport.h"
 #include "enet.h"
-#include "shared/NetworkProtocol.hpp"
-#include "shared/NetworkTypes.hpp"
-#include "shared/BitStream.hpp"
-#include "shared/NetworkSerializer.hpp"
-#include "shared/SharedMovement.hpp"
-#include "shared/SharedComponents.hpp"
-#include "shared/PredictionTypes.hpp"
-#include "shared/InterpolationBuffer.hpp"
+#include "NetworkProtocol.hpp"
+#include "NetworkTypes.hpp"
+#include "BitStream.hpp"
+#include "NetworkSerializer.hpp"
+#include "SharedMovement.hpp"
+#include "PredictionTypes.hpp"
+#include "InterpolationBuffer.hpp"
 #include <entt/entt.hpp>
 
 // Forward declarations
 class world;
 
-namespace Game {
+namespace Net {
+
+using ClientCustomMessageHandler = std::function<void(uint8_t message_type, BitReader& reader)>;
 
 // Connection state
 enum class ConnectionState : uint8_t
@@ -39,10 +42,11 @@ struct InputState
 };
 
 // Client Network Manager - handles all client-side networking
-class ClientNetworkManager
+class ENGINE_API ClientNetworkManager
 {
 private:
     bool m_shutdown = false;
+    bool runtime_acquired = false;
     ENetHost* client_host = nullptr;
     ENetPeer* server_peer = nullptr;
     world* game_world = nullptr;
@@ -76,11 +80,7 @@ private:
 
     // Callbacks
     std::function<void()> on_disconnected;
-    std::function<void(const ShootResultMessage&)> on_shoot_result;
-    std::function<void(const DamageEventMessage&)> on_damage_event;
-    std::function<void(const PlayerDiedMessage&)> on_player_died;
-    std::function<void(const PlayerRespawnMessage&)> on_player_respawn;
-    std::function<void(const WeaponStateMessage&)> on_weapon_state;
+    ClientCustomMessageHandler on_custom_message;
 
     // Input redundancy: store last few inputs to resend
     static constexpr int INPUT_REDUNDANCY_COUNT = 2; // Send current + 2 older
@@ -134,33 +134,21 @@ public:
     bool popAuthoritativeUpdate(MovementState& out_state, uint32_t& out_tick);
     const InputRingBuffer<128>& getInputHistory() const { return input_history; }
 
-    // Entity interpolation — call before rendering to smoothly position remote entities
+    // Entity interpolation - call before rendering to smoothly position remote entities
     void interpolateRemoteEntities();
 
     // Stats
     const NetworkStats& getStats() const { return stats; }
 
-    // Send shoot command to server
-    void sendShootCommand(const glm::vec3& ray_origin, const glm::vec3& ray_direction, uint8_t weapon_type);
+    void sendCustomReliable(const BitWriter& writer);
+    void sendCustomUnreliable(const BitWriter& writer);
 
     // Callbacks
     void setOnDisconnected(std::function<void()> callback) {
         on_disconnected = callback;
     }
-    void setOnShootResult(std::function<void(const ShootResultMessage&)> callback) {
-        on_shoot_result = callback;
-    }
-    void setOnDamageEvent(std::function<void(const DamageEventMessage&)> callback) {
-        on_damage_event = callback;
-    }
-    void setOnPlayerDied(std::function<void(const PlayerDiedMessage&)> callback) {
-        on_player_died = callback;
-    }
-    void setOnPlayerRespawn(std::function<void(const PlayerRespawnMessage&)> callback) {
-        on_player_respawn = callback;
-    }
-    void setOnWeaponState(std::function<void(const WeaponStateMessage&)> callback) {
-        on_weapon_state = callback;
+    void setCustomMessageHandler(ClientCustomMessageHandler callback) {
+        on_custom_message = std::move(callback);
     }
 
 private:
@@ -179,12 +167,6 @@ private:
     void handlePong(BitReader& reader);
     void handleCVarSync(BitReader& reader);
     void handleCVarInitialSync(BitReader& reader);
-    void handleShootResult(BitReader& reader);
-    void handleDamageEvent(BitReader& reader);
-    void handlePlayerDied(BitReader& reader);
-    void handlePlayerRespawn(BitReader& reader);
-    void handleWeaponState(BitReader& reader);
-
     // Ping/RTT
     void sendPing();
 
@@ -198,4 +180,4 @@ private:
     void setConnectionState(ConnectionState new_state);
 };
 
-} // namespace Game
+} // namespace Net

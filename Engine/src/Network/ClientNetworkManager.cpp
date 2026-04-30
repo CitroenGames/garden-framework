@@ -1,7 +1,7 @@
 #include "ClientNetworkManager.hpp"
+#include "NetworkRuntime.hpp"
 #include "world.hpp"
 #include "Components/Components.hpp"
-#include "shared/SharedComponents.hpp"
 #include "Utils/Log.hpp"
 #include "Console/ConVar.hpp"
 #include "Console/Console.hpp"
@@ -15,7 +15,7 @@ namespace {
     constexpr int kShutdownDrainBudgetMs = 3000;
 }
 
-namespace Game {
+namespace Net {
 
 ClientNetworkManager::ClientNetworkManager()
 {
@@ -28,10 +28,17 @@ ClientNetworkManager::~ClientNetworkManager()
 
 bool ClientNetworkManager::initialize()
 {
-    if (enet_initialize() != 0) {
+    if (runtime_acquired) {
+        m_shutdown = false;
+        return true;
+    }
+
+    if (!NetworkRuntime::acquire()) {
         LOG_ENGINE_ERROR("Failed to initialize ENet");
         return false;
     }
+    runtime_acquired = true;
+    m_shutdown = false;
 
     LOG_ENGINE_INFO("ENet initialized successfully (Client)");
     return true;
@@ -141,7 +148,10 @@ void ClientNetworkManager::shutdown()
     local_player_entity = entt::null;
     local_player_network_id = 0;
 
-    enet_deinitialize();
+    if (runtime_acquired) {
+        NetworkRuntime::release();
+        runtime_acquired = false;
+    }
     LOG_ENGINE_INFO("Client network shutdown complete");
 }
 
@@ -318,9 +328,9 @@ void ClientNetworkManager::handleServerDisconnect(ENetEvent& event)
 void ClientNetworkManager::handleServerMessage(ENetEvent& event)
 {
     BitReader reader(event.packet->data, event.packet->dataLength);
-    MessageType msg_type = NetworkSerializer::getMessageType(event.packet->data, event.packet->dataLength);
+    uint8_t msg_type = NetworkSerializer::getMessageType(event.packet->data, event.packet->dataLength);
 
-    switch (msg_type) {
+    switch (static_cast<MessageType>(msg_type)) {
         case MessageType::CONNECT_ACCEPT:
             handleConnectAccept(reader);
             break;
@@ -357,28 +367,12 @@ void ClientNetworkManager::handleServerMessage(ENetEvent& event)
             handleCVarInitialSync(reader);
             break;
 
-        case MessageType::SHOOT_RESULT:
-            handleShootResult(reader);
-            break;
-
-        case MessageType::DAMAGE_EVENT:
-            handleDamageEvent(reader);
-            break;
-
-        case MessageType::PLAYER_DIED:
-            handlePlayerDied(reader);
-            break;
-
-        case MessageType::PLAYER_RESPAWN:
-            handlePlayerRespawn(reader);
-            break;
-
-        case MessageType::WEAPON_STATE:
-            handleWeaponState(reader);
-            break;
-
         default:
-            LOG_ENGINE_WARN("Received unknown message type: {0}", static_cast<int>(msg_type));
+            if (msg_type >= CUSTOM_MESSAGE_START && on_custom_message) {
+                on_custom_message(msg_type, reader);
+            } else {
+                LOG_ENGINE_WARN("Received unknown message type: {0}", static_cast<int>(msg_type));
+            }
             break;
     }
 }
@@ -779,7 +773,7 @@ void ClientNetworkManager::interpolateRemoteEntities()
         render_tick = 0.0f;
 
     for (auto& [net_id, buffer] : interp_buffers) {
-        // Skip local player — handled by prediction
+        // Skip local player - handled by prediction
         if (net_id == local_player_network_id)
             continue;
 
@@ -825,86 +819,14 @@ bool ClientNetworkManager::popAuthoritativeUpdate(MovementState& out_state, uint
     return true;
 }
 
-void ClientNetworkManager::sendShootCommand(const glm::vec3& ray_origin, const glm::vec3& ray_direction, uint8_t weapon_type)
+void ClientNetworkManager::sendCustomReliable(const BitWriter& writer)
 {
-    if (!isConnected() || server_peer == nullptr) return;
+    sendReliableMessage(writer);
+}
 
-    BitWriter writer;
-    ShootCommandMessage msg;
-    msg.client_tick = client_tick;
-    msg.ray_origin = ray_origin;
-    msg.ray_direction = ray_direction;
-    msg.weapon_type = weapon_type;
-    NetworkSerializer::serialize(writer, msg);
+void ClientNetworkManager::sendCustomUnreliable(const BitWriter& writer)
+{
     sendUnreliableMessage(writer);
 }
 
-void ClientNetworkManager::handleShootResult(BitReader& reader)
-{
-    ShootResultMessage msg;
-    if (!NetworkSerializer::deserialize(reader, msg)) {
-        LOG_ENGINE_WARN("Failed to deserialize SHOOT_RESULT");
-        return;
-    }
-    if (on_shoot_result) on_shoot_result(msg);
-}
-
-void ClientNetworkManager::handleDamageEvent(BitReader& reader)
-{
-    DamageEventMessage msg;
-    if (!NetworkSerializer::deserialize(reader, msg)) {
-        LOG_ENGINE_WARN("Failed to deserialize DAMAGE_EVENT");
-        return;
-    }
-    if (on_damage_event) on_damage_event(msg);
-}
-
-void ClientNetworkManager::handlePlayerDied(BitReader& reader)
-{
-    PlayerDiedMessage msg;
-    if (!NetworkSerializer::deserialize(reader, msg)) {
-        LOG_ENGINE_WARN("Failed to deserialize PLAYER_DIED");
-        return;
-    }
-    LOG_ENGINE_INFO("Player {} killed by player {}", msg.victim_client_id, msg.killer_client_id);
-    if (on_player_died) on_player_died(msg);
-}
-
-void ClientNetworkManager::handlePlayerRespawn(BitReader& reader)
-{
-    PlayerRespawnMessage msg;
-    if (!NetworkSerializer::deserialize(reader, msg)) {
-        LOG_ENGINE_WARN("Failed to deserialize PLAYER_RESPAWN");
-        return;
-    }
-
-    // Update entity position
-    auto it = network_id_to_entity.find(msg.entity_id);
-    if (it != network_id_to_entity.end() && game_world != nullptr) {
-        entt::entity entity = it->second;
-        if (game_world->registry.valid(entity)) {
-            if (game_world->registry.all_of<TransformComponent>(entity)) {
-                game_world->registry.get<TransformComponent>(entity).position = msg.spawn_position;
-            }
-            if (game_world->registry.all_of<RigidBodyComponent>(entity)) {
-                game_world->registry.get<RigidBodyComponent>(entity).velocity = glm::vec3(0);
-            }
-        }
-    }
-
-    LOG_ENGINE_INFO("Player {} respawned at ({},{},{})", msg.client_id,
-        msg.spawn_position.x, msg.spawn_position.y, msg.spawn_position.z);
-    if (on_player_respawn) on_player_respawn(msg);
-}
-
-void ClientNetworkManager::handleWeaponState(BitReader& reader)
-{
-    WeaponStateMessage msg;
-    if (!NetworkSerializer::deserialize(reader, msg)) {
-        LOG_ENGINE_WARN("Failed to deserialize WEAPON_STATE");
-        return;
-    }
-    if (on_weapon_state) on_weapon_state(msg);
-}
-
-} // namespace Game
+} // namespace Net

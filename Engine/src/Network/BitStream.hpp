@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <glm/glm.hpp>
 
+namespace Net {
+
 // Bit-level writer for efficient network serialization
 class BitWriter
 {
@@ -287,3 +289,5 @@ public:
         bit_position = 0;
     }
 };
+
+} // namespace Net

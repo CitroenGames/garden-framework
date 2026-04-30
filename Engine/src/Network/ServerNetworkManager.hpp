@@ -5,17 +5,22 @@
 #include <deque>
 #include <unordered_map>
 #include <functional>
+#include <utility>
+#include "EngineExport.h"
 #include "enet.h"
-#include "shared/NetworkProtocol.hpp"
-#include "shared/NetworkTypes.hpp"
-#include "shared/BitStream.hpp"
-#include "shared/NetworkSerializer.hpp"
+#include "NetworkProtocol.hpp"
+#include "NetworkTypes.hpp"
+#include "BitStream.hpp"
+#include "NetworkSerializer.hpp"
 #include <entt/entt.hpp>
 
 // Forward declarations
 class world;
 
-namespace Game {
+namespace Net {
+
+using ServerCustomMessageHandler = std::function<void(uint16_t client_id, uint8_t message_type, BitReader& reader)>;
+using ServerInputFilter = std::function<bool(uint16_t client_id, entt::entity player_entity)>;
 
 // Client connection tracking (server-side)
 struct ClientConnection
@@ -60,15 +65,16 @@ struct ClientConnection
 };
 
 // Server Network Manager - handles all server-side networking
-class ServerNetworkManager
+class ENGINE_API ServerNetworkManager
 {
 private:
+    bool runtime_acquired = false;
     ENetHost* server_host = nullptr;
     world* game_world = nullptr;
 
     // Client management
-    std::unordered_map<uint16_t, ClientConnection> clients;  // client_id → connection
-    std::unordered_map<ENetPeer*, uint16_t> peer_to_client_id;  // peer → client_id
+    std::unordered_map<uint16_t, ClientConnection> clients;  // client_id -> connection
+    std::unordered_map<ENetPeer*, uint16_t> peer_to_client_id;  // peer -> client_id
     uint16_t next_client_id = 1;
 
     // Entity management
@@ -84,7 +90,8 @@ private:
     // Callbacks
     std::function<void(uint16_t)> on_client_connected;
     std::function<void(uint16_t)> on_client_disconnected;
-    std::function<void(uint16_t, const ShootCommandMessage&)> on_shoot_command;
+    ServerCustomMessageHandler on_custom_message;
+    ServerInputFilter input_filter;
 
     // Network stats
     NetworkStats stats;
@@ -122,15 +129,17 @@ public:
         on_client_disconnected = callback;
     }
 
-    void setOnShootCommand(std::function<void(uint16_t, const ShootCommandMessage&)> callback) {
-        on_shoot_command = callback;
-    }
+    void setCustomMessageHandler(ServerCustomMessageHandler callback) { on_custom_message = std::move(callback); }
+    void setInputFilter(ServerInputFilter callback) { input_filter = std::move(callback); }
 
     // Client management
     const ClientInfo* getClientInfo(uint16_t client_id) const;
     size_t getClientCount() const { return clients.size(); }
     void setClientPlayerEntity(uint16_t client_id, uint32_t network_id);
     void sendReliableToClient(uint16_t client_id, const BitWriter& writer);
+    void sendUnreliableToClient(uint16_t client_id, const BitWriter& writer);
+    void broadcastReliable(const BitWriter& writer);
+    void broadcastUnreliable(const BitWriter& writer);
     uint16_t getNextClientId() const { return next_client_id; }
 
     // Stats
@@ -152,7 +161,6 @@ private:
     void handleInputCommand(uint16_t client_id, BitReader& reader);
     void handleDisconnect(uint16_t client_id, BitReader& reader);
     void handlePing(ENetPeer* peer, BitReader& reader);
-    void handleShootCommand(uint16_t client_id, BitReader& reader);
 
     // State synchronization
     WorldSnapshot generateWorldSnapshot();
@@ -165,4 +173,4 @@ private:
     void disconnectClient(uint16_t client_id, const char* reason);
 };
 
-} // namespace Game
+} // namespace Net
