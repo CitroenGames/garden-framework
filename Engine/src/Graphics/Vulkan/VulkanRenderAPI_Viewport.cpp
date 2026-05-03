@@ -437,25 +437,16 @@ void VulkanRenderAPI::endSceneRender()
             cfg.wantShadowMask = wantShadowMask;
             cfg.renderImGui    = false;
 
-            if (isDeferredActive()) {
-                m_deferredGraphBuilder.setFrameInputs(
-                    target.image, VK_IMAGE_LAYOUT_UNDEFINED,
-                    RGFormat::RGBA16_FLOAT,
-                    target.resolve_framebuffer, viewport_resolve_pass, viewport_fxaa_pipeline,
-                    target.hdr_image, target.hdr_view,
-                    target.depth_image, target.depth_view);
-                PostProcessGraphBuilder::Config deferredCfg = cfg;
-                deferredCfg.wantShadowMask = false;
-                m_deferredGraphBuilder.build(m_frameGraph, m_rgBackend, deferredCfg);
-            } else {
-                m_ppGraphBuilder.setFrameInputs(
-                    target.image, VK_IMAGE_LAYOUT_UNDEFINED,
-                    RGFormat::RGBA16_FLOAT,
-                    target.resolve_framebuffer, viewport_resolve_pass, viewport_fxaa_pipeline,
-                    target.hdr_image, target.hdr_view,
-                    target.depth_image, target.depth_view);
-                m_ppGraphBuilder.build(m_frameGraph, m_rgBackend, cfg);
-            }
+            if (isDeferredActive())
+                cfg.wantShadowMask = false;
+
+            m_ppGraphBuilder.setFrameInputs(
+                target.image, VK_IMAGE_LAYOUT_UNDEFINED,
+                RGFormat::RGBA16_FLOAT,
+                target.resolve_framebuffer, viewport_resolve_pass, viewport_fxaa_pipeline,
+                target.hdr_image, target.hdr_view,
+                target.depth_image, target.depth_view);
+            m_ppGraphBuilder.build(m_frameGraph, m_rgBackend, cfg);
 
             m_skyboxRequested = false;
         }
@@ -513,21 +504,14 @@ void VulkanRenderAPI::endSceneRender()
         cfg.wantShadowMask = wantShadowMask;
         cfg.renderImGui    = false;
 
-        if (isDeferredActive()) {
-            m_deferredGraphBuilder.setFrameInputs(
-                viewport_image, VK_IMAGE_LAYOUT_UNDEFINED,
-                RGFormat::RGBA16_FLOAT,
-                viewport_framebuffer, viewport_resolve_pass, viewport_fxaa_pipeline);
-            PostProcessGraphBuilder::Config deferredCfg = cfg;
-            deferredCfg.wantShadowMask = false;
-            m_deferredGraphBuilder.build(m_frameGraph, m_rgBackend, deferredCfg);
-        } else {
-            m_ppGraphBuilder.setFrameInputs(
-                viewport_image, VK_IMAGE_LAYOUT_UNDEFINED,
-                RGFormat::RGBA16_FLOAT,
-                viewport_framebuffer, viewport_resolve_pass, viewport_fxaa_pipeline);
-            m_ppGraphBuilder.build(m_frameGraph, m_rgBackend, cfg);
-        }
+        if (isDeferredActive())
+            cfg.wantShadowMask = false;
+
+        m_ppGraphBuilder.setFrameInputs(
+            viewport_image, VK_IMAGE_LAYOUT_UNDEFINED,
+            RGFormat::RGBA16_FLOAT,
+            viewport_framebuffer, viewport_resolve_pass, viewport_fxaa_pipeline);
+        m_ppGraphBuilder.build(m_frameGraph, m_rgBackend, cfg);
         m_skyboxRequested = false;
     } else {
         // Manual fallback path: SSAO + shadow mask + FXAA without render graph

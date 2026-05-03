@@ -13,7 +13,6 @@
 #include "D3D12ResourceStateTracker.hpp"
 #include "D3D12RGBackend.hpp"
 #include "D3D12PostProcessGraphBuilder.hpp"
-#include "D3D12DeferredSceneGraphBuilder.hpp"
 #include "Graphics/RenderGraph/RenderGraph.hpp"
 #include "D3D12SceneViewport.hpp"
 #include <d3d12.h>
@@ -48,7 +47,6 @@ public:
 
 private:
     friend class D3D12PostProcessGraphBuilder;
-    friend class D3D12DeferredSceneGraphBuilder;
     friend class D3D12SceneViewport;
     friend class D3D12PostProcessPass;
 
@@ -324,7 +322,6 @@ private:
     RenderGraph m_frameGraph;
     D3D12RGBackend m_rgBackend;
     D3D12PostProcessGraphBuilder m_ppGraphBuilder;
-    D3D12DeferredSceneGraphBuilder m_deferredGraphBuilder;
     bool m_useRenderGraph = true;
     bool m_useDeferred = false;
     bool m_skyboxRequested = false;

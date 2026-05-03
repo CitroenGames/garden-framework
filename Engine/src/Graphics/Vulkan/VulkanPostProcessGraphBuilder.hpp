@@ -35,6 +35,8 @@ protected:
     void recordShadowMask (RGContext& ctx, const Handles& h, const Config& cfg) override;
     void recordTonemapping(RGContext& ctx, const Handles& h, const Config& cfg) override;
 
+    void addScenePasses(RenderGraph& graph, const Handles& h, const Config& cfg) override;
+    void addPreTonemapPasses(RenderGraph& graph, const Handles& h, const Config& cfg) override;
     void addExtraPasses(RenderGraph& graph, const Handles& h, const Config& cfg) override;
 
 protected:

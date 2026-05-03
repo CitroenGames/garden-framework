@@ -40,6 +40,11 @@ public:
     void build(RenderGraph& graph, RGBackend& backend, const Config& cfg);
 
 protected:
+    // Optional scene passes inserted before shared post-processing. Forward
+    // rendering has already written HDR before build(); deferred backends use
+    // this hook for GBuffer + lighting.
+    virtual void addScenePasses(RenderGraph& graph, const Handles& h, const Config& cfg) { (void)graph; (void)h; (void)cfg; }
+
     // Adds the Skybox/SSAO/ShadowMask/Tonemapping/extra passes to an already-reset graph.
     // Exposed so composing builders (e.g. deferred) can reuse the post-process chain
     // after inserting their own upstream passes.

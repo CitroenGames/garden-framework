@@ -1129,7 +1129,10 @@ void D3D12RenderAPI::setDeferredEnabled(bool enabled)
 
 bool D3D12RenderAPI::isDeferredActive() const
 {
-    return m_useDeferred && m_gbufferPass.isInitialized();
+    return m_useDeferred
+        && lighting_enabled
+        && m_gbufferPass.isInitialized()
+        && m_deferredLightingPass.isInitialized();
 }
 
 void D3D12RenderAPI::submitDeferredOpaqueCommands(const RenderCommandBuffer& cmds)

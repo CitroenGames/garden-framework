@@ -263,23 +263,15 @@ void VulkanRenderAPI::endFrame()
             cfg.wantShadowMask = wantShadowMask;
             cfg.renderImGui    = true;
 
-            if (isDeferredActive()) {
-                m_deferredGraphBuilder.setFrameInputs(
-                    swapchain_images[current_image_index], VK_IMAGE_LAYOUT_UNDEFINED,
-                    RGFormat::RGBA8_UNORM,
-                    fxaa_framebuffers[current_image_index],
-                    fxaaPass_.getRenderPass(), fxaaPass_.getPipeline());
-                PostProcessGraphBuilder::Config deferredCfg = cfg;
-                deferredCfg.wantShadowMask = false;
-                m_deferredGraphBuilder.build(m_frameGraph, m_rgBackend, deferredCfg);
-            } else {
-                m_ppGraphBuilder.setFrameInputs(
-                    swapchain_images[current_image_index], VK_IMAGE_LAYOUT_UNDEFINED,
-                    RGFormat::RGBA8_UNORM,
-                    fxaa_framebuffers[current_image_index],
-                    fxaaPass_.getRenderPass(), fxaaPass_.getPipeline());
-                m_ppGraphBuilder.build(m_frameGraph, m_rgBackend, cfg);
-            }
+            if (isDeferredActive())
+                cfg.wantShadowMask = false;
+
+            m_ppGraphBuilder.setFrameInputs(
+                swapchain_images[current_image_index], VK_IMAGE_LAYOUT_UNDEFINED,
+                RGFormat::RGBA8_UNORM,
+                fxaa_framebuffers[current_image_index],
+                fxaaPass_.getRenderPass(), fxaaPass_.getPipeline());
+            m_ppGraphBuilder.build(m_frameGraph, m_rgBackend, cfg);
             m_skyboxRequested = false;
         }
         else

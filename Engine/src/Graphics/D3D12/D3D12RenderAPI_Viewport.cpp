@@ -84,22 +84,14 @@ void D3D12RenderAPI::endSceneRender()
                 cfg.wantShadowMask = wantShadowMask;
                 cfg.renderImGui    = false;
 
-                if (m_useDeferred && m_gbufferPass.isInitialized()) {
-                    m_deferredGraphBuilder.setFrameInputs(rtvHandle,
-                                                         pie.getHDR(),   pie.getHDRSRV(),   pie.getHDRRTV(),
-                                                         pie.getDepth(), pie.getDepthSRV(), pie.getDepthDSV(),
-                                                         pie.getOutput(), pie.getOutputRTV());
-                    // Shadows applied in lighting pass; SSAO still via tonemap.
-                    PostProcessGraphBuilder::Config deferredCfg = cfg;
-                    deferredCfg.wantShadowMask = false;
-                    m_deferredGraphBuilder.build(m_frameGraph, m_rgBackend, deferredCfg);
-                } else {
-                    m_ppGraphBuilder.setFrameInputs(rtvHandle,
-                                                    pie.getHDR(),   pie.getHDRSRV(),   pie.getHDRRTV(),
-                                                    pie.getDepth(), pie.getDepthSRV(), pie.getDepthDSV(),
-                                                    pie.getOutput(), pie.getOutputRTV());
-                    m_ppGraphBuilder.build(m_frameGraph, m_rgBackend, cfg);
-                }
+                if (isDeferredActive())
+                    cfg.wantShadowMask = false;
+
+                m_ppGraphBuilder.setFrameInputs(rtvHandle,
+                                                pie.getHDR(),   pie.getHDRSRV(),   pie.getHDRRTV(),
+                                                pie.getDepth(), pie.getDepthSRV(), pie.getDepthDSV(),
+                                                pie.getOutput(), pie.getOutputRTV());
+                m_ppGraphBuilder.build(m_frameGraph, m_rgBackend, cfg);
 
                 m_skyboxRequested = false;
 
@@ -151,22 +143,14 @@ void D3D12RenderAPI::endSceneRender()
             cfg.wantShadowMask = wantShadowMask;
             cfg.renderImGui    = false;
 
-            if (m_useDeferred && m_gbufferPass.isInitialized()) {
-                m_deferredGraphBuilder.setFrameInputs(rtvHandle,
-                                                     vp.getHDR(),   vp.getHDRSRV(),   vp.getHDRRTV(),
-                                                     vp.getDepth(), vp.getDepthSRV(), vp.getDepthDSV(),
-                                                     vp.getOutput(), vp.getOutputRTV());
-                // Shadows applied in lighting pass; SSAO still via tonemap.
-                PostProcessGraphBuilder::Config deferredCfg = cfg;
-                deferredCfg.wantShadowMask = false;
-                m_deferredGraphBuilder.build(m_frameGraph, m_rgBackend, deferredCfg);
-            } else {
-                m_ppGraphBuilder.setFrameInputs(rtvHandle,
-                                                vp.getHDR(),   vp.getHDRSRV(),   vp.getHDRRTV(),
-                                                vp.getDepth(), vp.getDepthSRV(), vp.getDepthDSV(),
-                                                vp.getOutput(), vp.getOutputRTV());
-                m_ppGraphBuilder.build(m_frameGraph, m_rgBackend, cfg);
-            }
+            if (isDeferredActive())
+                cfg.wantShadowMask = false;
+
+            m_ppGraphBuilder.setFrameInputs(rtvHandle,
+                                            vp.getHDR(),   vp.getHDRSRV(),   vp.getHDRRTV(),
+                                            vp.getDepth(), vp.getDepthSRV(), vp.getDepthDSV(),
+                                            vp.getOutput(), vp.getOutputRTV());
+            m_ppGraphBuilder.build(m_frameGraph, m_rgBackend, cfg);
 
             m_skyboxRequested = false;
 

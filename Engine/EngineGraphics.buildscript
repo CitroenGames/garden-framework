@@ -35,7 +35,6 @@ sources = {
     src/Graphics/Vulkan/VulkanPostProcessGraphBuilder.cpp
     src/Graphics/Vulkan/VulkanGBufferPass.cpp
     src/Graphics/Vulkan/VulkanRenderAPI_GBuffer.cpp
-    src/Graphics/Vulkan/VulkanDeferredSceneGraphBuilder.cpp
     src/Graphics/Vulkan/VulkanMesh.cpp
     src/Graphics/Vulkan/VulkanSceneViewport.cpp
     src/Graphics/Vulkan/VulkanDeferredLightingPass.cpp
@@ -58,7 +57,6 @@ sources = {
     src/Graphics/D3D12/D3D12RGBackend.cpp [windows]
     src/Graphics/D3D12/D3D12PostProcessGraphBuilder.cpp [windows]
     src/Graphics/D3D12/D3D12GBufferPass.cpp [windows]
-    src/Graphics/D3D12/D3D12DeferredSceneGraphBuilder.cpp [windows]
     src/Graphics/D3D12/D3D12SceneViewport.cpp [windows]
     src/Graphics/RenderGraph/RenderGraph.cpp
     src/Graphics/RenderGraph/RGCompiler.cpp

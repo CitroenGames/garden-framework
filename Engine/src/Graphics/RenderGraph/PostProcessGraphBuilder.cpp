@@ -6,6 +6,7 @@ void PostProcessGraphBuilder::build(RenderGraph& graph, RGBackend& backend, cons
     graph.setReferenceResolution(cfg.width, cfg.height);
 
     const Handles h = importResources(graph, backend, cfg);
+    addScenePasses(graph, h, cfg);
     addPostProcessPasses(graph, h, cfg);
 
     graph.compile();

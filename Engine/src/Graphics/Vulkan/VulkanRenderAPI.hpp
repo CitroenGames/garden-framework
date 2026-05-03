@@ -10,7 +10,6 @@
 #include "VulkanDeferredLightingPass.hpp"
 #include "VulkanRGBackend.hpp"
 #include "VulkanPostProcessGraphBuilder.hpp"
-#include "VulkanDeferredSceneGraphBuilder.hpp"
 #include "Graphics/RenderGraph/RenderGraph.hpp"
 #include "VulkanSceneViewport.hpp"
 #include <cstdint>
@@ -33,7 +32,6 @@ class VulkanMesh;
 class VulkanRenderAPI : public IRenderAPI
 {
     friend class VulkanPostProcessGraphBuilder;
-    friend class VulkanDeferredSceneGraphBuilder;
     friend class VulkanSceneViewport;
 
 public:
@@ -651,7 +649,6 @@ private:
     RenderGraph m_frameGraph;
     VulkanRGBackend m_rgBackend;
     VulkanPostProcessGraphBuilder m_ppGraphBuilder;
-    VulkanDeferredSceneGraphBuilder m_deferredGraphBuilder;
     bool m_useRenderGraph = true;
     bool m_useDeferred = false;
 

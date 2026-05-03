@@ -169,7 +169,6 @@ D3D12RenderAPI::D3D12RenderAPI()
     for (int i = 0; i <= NUM_CASCADES; i++)
         cascadeSplitDistances[i] = 0.0f;
     m_ppGraphBuilder.setAPI(this);
-    m_deferredGraphBuilder.setAPI(this);
 }
 
 D3D12RenderAPI::~D3D12RenderAPI()
