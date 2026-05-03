@@ -38,6 +38,8 @@ void DescriptorHeapAllocator::init(ID3D12Device* device, ID3D12DescriptorHeap* h
     type = h->GetDesc().Type;
     descriptorSize = device->GetDescriptorHandleIncrementSize(type);
     cpuStart = h->GetCPUDescriptorHandleForHeapStart();
+    freeList.clear();
+    allocated.assign(capacity, 0);
     if (h->GetDesc().Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE)
         gpuStart = h->GetGPUDescriptorHandleForHeapStart();
     else
@@ -51,6 +53,7 @@ UINT DescriptorHeapAllocator::allocate()
     {
         UINT index = freeList.back();
         freeList.pop_back();
+        allocated[index] = 1;
         return index;
     }
     if (nextFreeIndex >= capacity)
@@ -58,14 +61,29 @@ UINT DescriptorHeapAllocator::allocate()
         LOG_ENGINE_ERROR("[D3D12] Descriptor heap full! Type={}, capacity={}", static_cast<int>(type), capacity);
         return UINT(-1);
     }
-    return nextFreeIndex++;
+    UINT index = nextFreeIndex++;
+    allocated[index] = 1;
+    return index;
 }
 
 void DescriptorHeapAllocator::free(UINT index)
 {
+    if (index == UINT(-1)) return;
     std::lock_guard<std::mutex> lock(mutex);
-    if (index < capacity)
-        freeList.push_back(index);
+    if (index >= capacity)
+    {
+        LOG_ENGINE_ERROR("[D3D12] Descriptor free ignored: index {} is outside heap type {} capacity {}",
+                         index, static_cast<int>(type), capacity);
+        return;
+    }
+    if (index >= allocated.size() || allocated[index] == 0)
+    {
+        LOG_ENGINE_ERROR("[D3D12] Descriptor free ignored: index {} in heap type {} was already free",
+                         index, static_cast<int>(type));
+        return;
+    }
+    allocated[index] = 0;
+    freeList.push_back(index);
 }
 
 D3D12_CPU_DESCRIPTOR_HANDLE DescriptorHeapAllocator::getCPU(UINT index) const
@@ -555,6 +573,27 @@ void D3D12RenderAPI::enqueueDeferredFree(std::function<void()> cleanup)
     if (!cleanup) return;
     std::lock_guard<std::mutex> lock(m_deferredReleaseMutex);
     m_deferredDescriptorFrees[m_deferredReleaseSlot].push_back(std::move(cleanup));
+}
+
+void D3D12RenderAPI::deferRTVFree(UINT index)
+{
+    if (index == UINT(-1)) return;
+    DescriptorHeapAllocator* allocator = &m_rtvAllocator;
+    enqueueDeferredFree([allocator, index]() { allocator->free(index); });
+}
+
+void D3D12RenderAPI::deferDSVFree(UINT index)
+{
+    if (index == UINT(-1)) return;
+    DescriptorHeapAllocator* allocator = &m_dsvAllocator;
+    enqueueDeferredFree([allocator, index]() { allocator->free(index); });
+}
+
+void D3D12RenderAPI::deferSRVFree(UINT index)
+{
+    if (index == UINT(-1)) return;
+    DescriptorHeapAllocator* allocator = &m_srvAllocator;
+    enqueueDeferredFree([allocator, index]() { allocator->free(index); });
 }
 
 void D3D12RenderAPI::flushDeferredReleases()

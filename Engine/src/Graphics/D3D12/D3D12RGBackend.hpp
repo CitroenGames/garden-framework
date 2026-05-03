@@ -79,7 +79,13 @@ private:
     // we know any frame older than the fence wait is finished. Kept per-slot
     // so we hold through a full NUM_FRAMES_IN_FLIGHT cycle.
     static constexpr int kKeepAliveSlots = 3;
-    std::vector<ComPtr<ID3D12Resource>> m_pendingRelease[kKeepAliveSlots];
+    struct PendingRelease {
+        ComPtr<ID3D12Resource> resource;
+        UINT rtvIndex = UINT(-1);
+        UINT srvIndex = UINT(-1);
+        UINT dsvIndex = UINT(-1);
+    };
+    std::vector<PendingRelease> m_pendingRelease[kKeepAliveSlots];
     int m_keepAliveSlot = 0;
 
     // Latched on first DEVICE_REMOVED from CreateCommittedResource so subsequent
@@ -89,4 +95,5 @@ private:
     static D3D12_RESOURCE_STATES toD3D12State(RGResourceUsage usage);
     static bool isDepthFormat(RGFormat format);
     static DXGI_FORMAT toDXGIFormat(RGFormat format);
+    void retirePendingSlot(int slot);
 };

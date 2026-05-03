@@ -39,8 +39,8 @@ void RmlRenderer_D3D12::Shutdown()
     m_geometries.clear();
     for (auto& [k, tex] : m_textures)
     {
-        if (tex.srvIndex != UINT(-1))
-            m_renderAPI->getSrvAllocator().free(tex.srvIndex);
+        if (m_renderAPI && tex.srvIndex != UINT(-1))
+            m_renderAPI->deferSRVFree(tex.srvIndex);
     }
     m_textures.clear();
     m_rootSignature.Reset();
@@ -477,8 +477,8 @@ void RmlRenderer_D3D12::ReleaseTexture(Rml::TextureHandle texture)
     auto it = m_textures.find((uintptr_t)texture);
     if (it != m_textures.end())
     {
-        if (it->second.srvIndex != UINT(-1))
-            m_renderAPI->getSrvAllocator().free(it->second.srvIndex);
+        if (m_renderAPI && it->second.srvIndex != UINT(-1))
+            m_renderAPI->deferSRVFree(it->second.srvIndex);
         m_textures.erase(it);
     }
 }

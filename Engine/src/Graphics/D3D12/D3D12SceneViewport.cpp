@@ -218,17 +218,16 @@ void D3D12SceneViewport::releaseOwned()
     else
         m_output.Reset();  // imported back buffer — we never owned it
 
-    // Free descriptor slots (same-frame reuse risk is handled elsewhere: the
-    // ring keeps the underlying texture alive, and a fresh allocation just
-    // rewrites the same slot with a new view before the next shader read).
-    if (m_hdrRTV    != UINT(-1)) { m_api->m_rtvAllocator.free(m_hdrRTV);    m_hdrRTV    = UINT(-1); }
-    if (m_hdrSRV    != UINT(-1)) { m_api->m_srvAllocator.free(m_hdrSRV);    m_hdrSRV    = UINT(-1); }
-    if (m_depthDSV  != UINT(-1)) { m_api->m_dsvAllocator.free(m_depthDSV);  m_depthDSV  = UINT(-1); }
-    if (m_depthSRV  != UINT(-1)) { m_api->m_srvAllocator.free(m_depthSRV);  m_depthSRV  = UINT(-1); }
+    // Descriptor heap entries are GPU-visible too. Delay slot reuse until the
+    // command lists that may reference the old views have retired.
+    if (m_hdrRTV    != UINT(-1)) { m_api->deferRTVFree(m_hdrRTV);    m_hdrRTV    = UINT(-1); }
+    if (m_hdrSRV    != UINT(-1)) { m_api->deferSRVFree(m_hdrSRV);    m_hdrSRV    = UINT(-1); }
+    if (m_depthDSV  != UINT(-1)) { m_api->deferDSVFree(m_depthDSV);  m_depthDSV  = UINT(-1); }
+    if (m_depthSRV  != UINT(-1)) { m_api->deferSRVFree(m_depthSRV);  m_depthSRV  = UINT(-1); }
     if (!m_outputsToBackBuffer)
     {
-        if (m_outputRTV != UINT(-1)) { m_api->m_rtvAllocator.free(m_outputRTV); m_outputRTV = UINT(-1); }
-        if (m_outputSRV != UINT(-1)) { m_api->m_srvAllocator.free(m_outputSRV); m_outputSRV = UINT(-1); }
+        if (m_outputRTV != UINT(-1)) { m_api->deferRTVFree(m_outputRTV); m_outputRTV = UINT(-1); }
+        if (m_outputSRV != UINT(-1)) { m_api->deferSRVFree(m_outputSRV); m_outputSRV = UINT(-1); }
     }
     else
     {

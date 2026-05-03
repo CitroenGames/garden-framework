@@ -61,14 +61,22 @@ void D3D12RGBackend::createTransientTexture(RGResourceHandle handle, const RGTex
             // is cleared at a future beginFrame once the GPU has cycled past it.
             if (existing.rawPtr)
                 m_stateTracker->untrack(existing.rawPtr);
+            PendingRelease pending;
             if (existing.ownsDescriptors)
             {
-                if (existing.rtvIndex != UINT(-1)) m_rtvAllocator->free(existing.rtvIndex);
-                if (existing.srvIndex != UINT(-1)) m_srvAllocator->free(existing.srvIndex);
-                if (existing.dsvIndex != UINT(-1)) m_dsvAllocator->free(existing.dsvIndex);
+                pending.rtvIndex = existing.rtvIndex;
+                pending.srvIndex = existing.srvIndex;
+                pending.dsvIndex = existing.dsvIndex;
             }
             if (existing.resource)
-                m_pendingRelease[m_keepAliveSlot].push_back(std::move(existing.resource));
+                pending.resource = std::move(existing.resource);
+            if (pending.resource
+                || pending.rtvIndex != UINT(-1)
+                || pending.srvIndex != UINT(-1)
+                || pending.dsvIndex != UINT(-1))
+            {
+                m_pendingRelease[m_keepAliveSlot].push_back(std::move(pending));
+            }
             existing = TextureEntry{};
         }
         else
@@ -232,7 +240,7 @@ void D3D12RGBackend::beginFrame()
     // By this point the D3D12RenderAPI has already fence-waited the previous
     // cycle, so anything parked here is safe to Release.
     m_keepAliveSlot = (m_keepAliveSlot + 1) % kKeepAliveSlots;
-    m_pendingRelease[m_keepAliveSlot].clear();
+    retirePendingSlot(m_keepAliveSlot);
 }
 
 void D3D12RGBackend::endFrame()
@@ -316,4 +324,15 @@ DXGI_FORMAT D3D12RGBackend::toDXGIFormat(RGFormat format)
     case RGFormat::D32_FLOAT_S8_UINT:return DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
     default:                         return DXGI_FORMAT_R8G8B8A8_UNORM;
     }
+}
+
+void D3D12RGBackend::retirePendingSlot(int slot)
+{
+    for (auto& pending : m_pendingRelease[slot])
+    {
+        if (pending.rtvIndex != UINT(-1)) m_rtvAllocator->free(pending.rtvIndex);
+        if (pending.srvIndex != UINT(-1)) m_srvAllocator->free(pending.srvIndex);
+        if (pending.dsvIndex != UINT(-1)) m_dsvAllocator->free(pending.dsvIndex);
+    }
+    m_pendingRelease[slot].clear();
 }

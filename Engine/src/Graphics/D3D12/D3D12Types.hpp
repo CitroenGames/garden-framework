@@ -43,6 +43,7 @@ struct DescriptorHeapAllocator
     D3D12_CPU_DESCRIPTOR_HANDLE cpuStart = {};
     D3D12_GPU_DESCRIPTOR_HANDLE gpuStart = {};
     std::vector<UINT> freeList;
+    std::vector<uint8_t> allocated;
     // Guards nextFreeIndex and freeList. allocate()/free() are called from
     // both the main thread and async texture upload paths.
     std::mutex mutex;

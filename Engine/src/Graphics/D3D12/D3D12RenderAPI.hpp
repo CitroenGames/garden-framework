@@ -519,6 +519,9 @@ public:
     ID3D12GraphicsCommandList* getCommandList() const { return commandList.Get(); }
     ID3D12DescriptorHeap* getSrvDescriptorHeap() const { return m_srvHeap.Get(); }
     DescriptorHeapAllocator& getSrvAllocator() { return m_srvAllocator; }
+    void deferRTVFree(UINT index);
+    void deferDSVFree(UINT index);
+    void deferSRVFree(UINT index);
 
     // Hand a D3D12 resource to the deferred-release ring. The caller's ComPtr
     // is Reset to null; the underlying object is kept alive for

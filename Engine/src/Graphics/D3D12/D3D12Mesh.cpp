@@ -31,7 +31,8 @@ void D3D12Mesh::setD3D12Handles(ID3D12Device* dev, ID3D12CommandQueue* queue,
     ownerAPI = owner;
 }
 
-ComPtr<ID3D12Resource> D3D12Mesh::uploadToDefaultHeap(const void* data, size_t dataSize)
+ComPtr<ID3D12Resource> D3D12Mesh::uploadToDefaultHeap(const void* data, size_t dataSize,
+                                                      D3D12_RESOURCE_STATES finalState)
 {
     if (!device || !commandQueue || !data || dataSize == 0) return nullptr;
 
@@ -85,7 +86,7 @@ ComPtr<ID3D12Resource> D3D12Mesh::uploadToDefaultHeap(const void* data, size_t d
         barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
         barrier.Transition.pResource = resource.Get();
         barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
+        barrier.Transition.StateAfter = finalState;
         barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         uploadCmdList->ResourceBarrier(1, &barrier);
 
@@ -123,7 +124,7 @@ ComPtr<ID3D12Resource> D3D12Mesh::uploadToDefaultHeap(const void* data, size_t d
         barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
         barrier.Transition.pResource = resource.Get();
         barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
+        barrier.Transition.StateAfter = finalState;
         barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         cmdList->ResourceBarrier(1, &barrier);
 
@@ -162,7 +163,7 @@ void D3D12Mesh::uploadMeshData(const vertex* vertices, size_t count)
     index_count_ = 0;
 
     size_t dataSize = sizeof(vertex) * count;
-    vertexBuffer = uploadToDefaultHeap(vertices, dataSize);
+    vertexBuffer = uploadToDefaultHeap(vertices, dataSize, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
     if (!vertexBuffer) return;
 
     vbView.BufferLocation = vertexBuffer->GetGPUVirtualAddress();
@@ -190,7 +191,7 @@ void D3D12Mesh::uploadIndexedMeshData(const vertex* vertices, size_t vert_count,
     }
 
     size_t vbSize = sizeof(vertex) * vert_count;
-    vertexBuffer = uploadToDefaultHeap(vertices, vbSize);
+    vertexBuffer = uploadToDefaultHeap(vertices, vbSize, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
     if (!vertexBuffer) return;
 
     vbView.BufferLocation = vertexBuffer->GetGPUVirtualAddress();
@@ -198,7 +199,7 @@ void D3D12Mesh::uploadIndexedMeshData(const vertex* vertices, size_t vert_count,
     vbView.StrideInBytes = sizeof(vertex);
 
     size_t ibSize = sizeof(uint32_t) * idx_count;
-    indexBuffer = uploadToDefaultHeap(indices, ibSize);
+    indexBuffer = uploadToDefaultHeap(indices, ibSize, D3D12_RESOURCE_STATE_INDEX_BUFFER);
     if (!indexBuffer)
     {
         vertexBuffer.Reset();
@@ -224,7 +225,7 @@ void D3D12Mesh::updateMeshData(const vertex* vertices, size_t count, size_t offs
     if (ownerAPI)
         ownerAPI->deferredRelease(vertexBuffer);
     size_t dataSize = sizeof(vertex) * count;
-    vertexBuffer = uploadToDefaultHeap(vertices, dataSize);
+    vertexBuffer = uploadToDefaultHeap(vertices, dataSize, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
     if (vertexBuffer)
     {
         vbView.BufferLocation = vertexBuffer->GetGPUVirtualAddress();

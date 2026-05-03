@@ -137,20 +137,24 @@ ChunkedTriangleMesh MeshChunker::buildChunkedIndexedMesh(
         if (range_vertex_count == 0)
             continue;
 
-        std::vector<uint32_t> local_indices(range_vertex_count);
-        for (uint32_t i = 0; i < static_cast<uint32_t>(range_vertex_count); ++i)
-            local_indices[i] = i;
-
         std::vector<uint32_t> sorted_indices(range_vertex_count);
-        meshopt_spatialSortTriangles(
-            sorted_indices.data(),
-            local_indices.data(),
-            range_vertex_count,
-            &source_vertices[source_range.start_vertex].vx,
-            range_vertex_count,
-            sizeof(vertex));
-
         const bool split = !source_range.isAlphaBlend();
+        if (split) {
+            std::vector<uint32_t> local_indices(range_vertex_count);
+            for (uint32_t i = 0; i < static_cast<uint32_t>(range_vertex_count); ++i)
+                local_indices[i] = i;
+
+            meshopt_spatialSortTriangles(
+                sorted_indices.data(),
+                local_indices.data(),
+                range_vertex_count,
+                &source_vertices[source_range.start_vertex].vx,
+                range_vertex_count,
+                sizeof(vertex));
+        } else {
+            for (uint32_t i = 0; i < static_cast<uint32_t>(range_vertex_count); ++i)
+                sorted_indices[i] = i;
+        }
         const size_t chunk_indices = split ? target_indices : range_vertex_count;
 
         for (size_t start = 0; start < sorted_indices.size(); start += chunk_indices) {
@@ -230,16 +234,21 @@ LODMeshData MeshChunker::chunkLODMesh(
         if (range_index_count == 0)
             continue;
 
-        std::vector<uint32_t> sorted_indices(range_index_count);
-        meshopt_spatialSortTriangles(
-            sorted_indices.data(),
-            lod.indices.data() + source_range.start_index,
-            range_index_count,
-            &lod.vertices[0].vx,
-            lod.vertices.size(),
-            sizeof(vertex));
-
         const bool split = shouldSplitSubmesh(source_range.submesh_id, split_submesh);
+        std::vector<uint32_t> sorted_indices(range_index_count);
+        if (split) {
+            meshopt_spatialSortTriangles(
+                sorted_indices.data(),
+                lod.indices.data() + source_range.start_index,
+                range_index_count,
+                &lod.vertices[0].vx,
+                lod.vertices.size(),
+                sizeof(vertex));
+        } else {
+            std::copy_n(lod.indices.data() + source_range.start_index,
+                        range_index_count,
+                        sorted_indices.data());
+        }
         const size_t chunk_indices = split ? target_indices : range_index_count;
 
         for (size_t start = 0; start < sorted_indices.size(); start += chunk_indices) {

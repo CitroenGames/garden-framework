@@ -106,15 +106,31 @@ static std::vector<bool> buildSplitMaskFromRanges(const std::vector<MaterialRang
     return split_mask;
 }
 
+static bool hasAlphaBlendRange(const std::vector<MaterialRange>& ranges)
+{
+    return std::any_of(ranges.begin(), ranges.end(),
+                       [](const MaterialRange& range) { return range.isAlphaBlend(); });
+}
+
 static Assets::LODMeshData maybeChunkLODForRuntime(
     const Assets::LODMeshData& lod_data,
-    const std::vector<MaterialRange>& material_templates)
+    const std::vector<MaterialRange>& material_templates,
+    bool mesh_transparent)
 {
     Assets::MeshChunkConfig cfg = getStaticMeshChunkConfig();
     if (!cfg.enabled || lod_data.vertices.empty() || lod_data.indices.empty())
         return lod_data;
 
     std::vector<bool> split_mask = buildSplitMaskFromRanges(material_templates);
+    if (mesh_transparent && !hasAlphaBlendRange(material_templates)) {
+        size_t required_entries = split_mask.size();
+        for (const auto& range : lod_data.submesh_ranges)
+            required_entries = std::max(required_entries, range.submesh_id + 1);
+        if (required_entries == 0)
+            required_entries = 1;
+        split_mask.assign(required_entries, false);
+    }
+
     const std::vector<bool>* split_ptr = split_mask.empty() ? nullptr : &split_mask;
     return Assets::MeshChunker::chunkLODMesh(lod_data, cfg, split_ptr);
 }
@@ -139,6 +155,11 @@ static bool uploadChunkedMaterialMesh(const std::shared_ptr<mesh>& m_ptr, IRende
     for (size_t i = 0; i < source_ranges.size(); ++i)
         if (source_ranges[i].source_range == std::numeric_limits<size_t>::max())
             source_ranges[i].source_range = i;
+
+    if (m_ptr->transparent && !hasAlphaBlendRange(source_ranges)) {
+        for (auto& range : source_ranges)
+            range.alpha_mode = 2;
+    }
 
     Assets::ChunkedTriangleMesh chunked = Assets::MeshChunker::buildChunkedIndexedMesh(
         m_ptr->vertices, m_ptr->vertices_len, source_ranges, cfg);
@@ -1288,7 +1309,8 @@ std::shared_ptr<mesh> LevelManager::loadMesh(const LevelEntity& entity, IRenderA
                     Assets::LODMeshData lod_data;
                     if (Assets::LODMeshSerializer::load(lod_data, lod_path))
                     {
-                        Assets::LODMeshData lod_upload = maybeChunkLODForRuntime(lod_data, m_ptr->material_ranges);
+                        Assets::LODMeshData lod_upload = maybeChunkLODForRuntime(
+                            lod_data, m_ptr->material_ranges, m_ptr->transparent);
 
                         mesh::LODLevel level;
                         level.screen_threshold = lod_info.screen_threshold;
@@ -2106,7 +2128,8 @@ std::shared_ptr<mesh> LevelManager::finalizeMeshGPU(
             if (lod_info.file_path.empty()) continue;
 
             auto& lod_data = preload.lod_mesh_data[lod_data_idx++];
-            Assets::LODMeshData lod_upload = maybeChunkLODForRuntime(lod_data, m_ptr->material_ranges);
+            Assets::LODMeshData lod_upload = maybeChunkLODForRuntime(
+                lod_data, m_ptr->material_ranges, m_ptr->transparent);
 
             mesh::LODLevel level;
             level.screen_threshold = lod_info.screen_threshold;

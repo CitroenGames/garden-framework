@@ -35,7 +35,8 @@ private:
     // "release immediately" (e.g. during API shutdown after flushGPU).
     D3D12RenderAPI* ownerAPI = nullptr;
 
-    ComPtr<ID3D12Resource> uploadToDefaultHeap(const void* data, size_t dataSize);
+    ComPtr<ID3D12Resource> uploadToDefaultHeap(const void* data, size_t dataSize,
+                                               D3D12_RESOURCE_STATES finalState);
 
 public:
     D3D12Mesh() = default;
