@@ -24,7 +24,7 @@ headers = src/**/*.hpp
 if(Windows)
 {
     includes = src, ${DirectX12_INCLUDE_DIRS}
-    libs = ${Vulkan_LIBRARIES}, ${DirectX12_LIBRARIES}
+    libs = ${Vulkan_LIBRARIES}, ${DirectX12_LIBRARIES}, user32.lib
     libdirs = ${Vulkan_LIBRARY_DIRS}, ${DirectX12_LIBRARY_DIRS}
 }
 if(Linux)

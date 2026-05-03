@@ -232,6 +232,7 @@ private:
     ID3D12PipelineState* last_bound_pso = nullptr;
     bool global_cbuffer_dirty = true;
     bool in_depth_prepass = false;
+    D3D12_GPU_VIRTUAL_ADDRESS m_cachedGlobalCBAddr = 0; // Uploaded once per frame slot, rebound as needed
     D3D12_GPU_VIRTUAL_ADDRESS m_cachedLightCBAddr = 0; // Uploaded once per frame, reused per mesh
     D3D12_GPU_VIRTUAL_ADDRESS m_dummyCBAddr = 0;       // Dummy CB for bindDummyRootParams, allocated once per frame
 
@@ -368,6 +369,15 @@ private:
     void bindDummyRootParams();
 
     ID3D12PipelineState* selectPSO(const RenderState& state, bool unlit);
+    D3D12_GPU_VIRTUAL_ADDRESS getGlobalCBufferAddress();
+    D3D12_GPU_VIRTUAL_ADDRESS uploadPerObjectCBuffer(const glm::mat4& model,
+                                                     const glm::mat4& normalMatrix,
+                                                     const glm::vec3& color,
+                                                     bool useTexture,
+                                                     float alphaCutoff = 0.0f,
+                                                     float metallic = 0.0f,
+                                                     float roughness = 0.5f,
+                                                     const glm::vec3& emissive = glm::vec3(0.0f));
     void updateGlobalCBuffer();
     void updatePerObjectCBuffer(const glm::vec3& color, bool useTexture, float alphaCutoff = 0.0f);
     void updateShadowCBuffer(const glm::mat4& lightSpace, const glm::mat4& model);

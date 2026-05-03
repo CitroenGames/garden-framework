@@ -7,6 +7,7 @@
 #include <vector>
 #include <algorithm>
 #include <cstdint>
+#include <cmath>
 
 // Compact key encoding the pipeline state variant needed for a draw call.
 // Used by backends to select the correct PSO (D3D12) or Pipeline (Vulkan).
@@ -82,6 +83,7 @@ struct DrawCommand
 {
     IGPUMesh*     gpu_mesh     = nullptr;
     glm::mat4     model_matrix = glm::mat4(1.0f);
+    glm::mat4     normal_matrix = glm::mat4(1.0f);
     TextureHandle texture      = INVALID_TEXTURE;
     bool          use_texture  = false;
     PSOKey        pso_key;
@@ -117,6 +119,7 @@ public:
         DrawCommand cmd;
         cmd.gpu_mesh = gpu_mesh;
         cmd.model_matrix = model_matrix;
+        cmd.normal_matrix = computeNormalMatrix(model_matrix);
         cmd.texture = texture;
         cmd.use_texture = use_texture;
         cmd.pso_key = pso_key;
@@ -137,6 +140,7 @@ public:
         DrawCommand cmd;
         cmd.gpu_mesh = gpu_mesh;
         cmd.model_matrix = model_matrix;
+        cmd.normal_matrix = computeNormalMatrix(model_matrix);
         cmd.texture = texture;
         cmd.use_texture = use_texture;
         cmd.pso_key = pso_key;
@@ -159,6 +163,7 @@ public:
         DrawCommand cmd;
         cmd.gpu_mesh = gpu_mesh;
         cmd.model_matrix = model_matrix;
+        cmd.normal_matrix = computeNormalMatrix(model_matrix);
         cmd.texture = texture;
         cmd.use_texture = use_texture;
         cmd.pso_key = pso_key;
@@ -219,5 +224,14 @@ public:
     auto end() const { return m_commands.end(); }
 
 private:
+    static glm::mat4 computeNormalMatrix(const glm::mat4& model_matrix)
+    {
+        glm::mat3 normalMat3 = glm::mat3(model_matrix);
+        const float det = glm::determinant(normalMat3);
+        if (std::abs(det) > 1e-6f)
+            return glm::mat4(glm::transpose(glm::inverse(normalMat3)));
+        return glm::mat4(1.0f);
+    }
+
     std::vector<DrawCommand> m_commands;
 };

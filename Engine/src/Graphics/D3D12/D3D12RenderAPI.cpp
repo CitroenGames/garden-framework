@@ -705,6 +705,7 @@ void D3D12RenderAPI::ensureCommandListOpen()
     }
 
     m_cbUploadBuffer[m_frameIndex].reset();
+    m_cachedGlobalCBAddr = 0;
     m_dummyCBAddr = 0;
 
     // Reset parallel command list pool allocators. Wait specifically for the
@@ -749,11 +750,8 @@ void D3D12RenderAPI::transitionResource(ID3D12Resource* resource,
     if (!resource) return;
 
     // If the resource is tracked, use the tracker (ignores 'before' — it knows the current state).
-    if (m_stateTracker.isTracked(resource))
-    {
-        m_stateTracker.transition(resource, after);
+    if (m_stateTracker.transitionIfTracked(resource, after))
         return;
-    }
 
     // Fallback for untracked resources: emit a raw barrier using the caller's
     // explicit 'before' state. Callers pass {} (=COMMON) everywhere they expect

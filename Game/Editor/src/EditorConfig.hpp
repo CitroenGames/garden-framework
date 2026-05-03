@@ -26,6 +26,10 @@ public:
     bool        plugins_enabled    = true;
     bool        plugin_hot_reload  = true;
 
+    // One-time migration marker: old generated config.cfg files saved fps_max=60
+    // even when the user never explicitly chose an editor cap.
+    bool fps_max_refresh_default_migrated = false;
+
     // Returns the path to editorconfig.cfg next to the executable
     static std::filesystem::path getConfigPath()
     {
@@ -76,6 +80,8 @@ public:
                 plugins_enabled = (value == "1" || value == "true" || value == "yes");
             else if (key == "plugin_hot_reload")
                 plugin_hot_reload = (value == "1" || value == "true" || value == "yes");
+            else if (key == "fps_max_refresh_default_migrated")
+                fps_max_refresh_default_migrated = (value == "1" || value == "true" || value == "yes");
         }
     }
 
@@ -96,6 +102,8 @@ public:
         file << "plugin_directories = " << plugin_directories << "\n";
         file << "plugins_enabled = " << (plugins_enabled ? "true" : "false") << "\n";
         file << "plugin_hot_reload = " << (plugin_hot_reload ? "true" : "false") << "\n";
+        file << "fps_max_refresh_default_migrated = "
+             << (fps_max_refresh_default_migrated ? "true" : "false") << "\n";
     }
 
     // Helper: split plugin_directories into individual paths.

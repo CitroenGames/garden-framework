@@ -27,6 +27,22 @@ void D3D12ResourceStateTracker::transition(ID3D12Resource* resource, D3D12_RESOU
     state.current = newState;
 }
 
+bool D3D12ResourceStateTracker::transitionIfTracked(ID3D12Resource* resource, D3D12_RESOURCE_STATES newState)
+{
+    if (!resource) return false;
+    std::unique_lock lock(m_mutex);
+    auto it = m_states.find(resource);
+    if (it == m_states.end()) return false;
+
+    auto& state = it->second;
+    if (state.current != newState)
+    {
+        m_batch.add(resource, state.current, newState);
+        state.current = newState;
+    }
+    return true;
+}
+
 void D3D12ResourceStateTracker::beginSplit(ID3D12Resource* resource, D3D12_RESOURCE_STATES newState,
                                             ID3D12GraphicsCommandList* cmdList)
 {

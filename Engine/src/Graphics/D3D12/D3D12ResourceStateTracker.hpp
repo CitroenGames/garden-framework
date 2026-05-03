@@ -31,6 +31,10 @@ public:
     // Thread-safe: acquires exclusive lock.
     void transition(ID3D12Resource* resource, D3D12_RESOURCE_STATES newState);
 
+    // Request a transition if the resource is tracked. Returns false when the
+    // resource is unknown so the caller can use its explicit fallback path.
+    bool transitionIfTracked(ID3D12Resource* resource, D3D12_RESOURCE_STATES newState);
+
     // Begin a split barrier (BEGIN_ONLY). The GPU can overlap the transition
     // with subsequent work that doesn't touch this resource.
     // Emitted immediately (not batched) since timing matters.

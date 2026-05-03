@@ -383,8 +383,11 @@ glm::mat4 D3D12RenderAPI::getViewMatrix() const { return view_matrix; }
 // Constant Buffer Updates
 // ============================================================================
 
-void D3D12RenderAPI::updateGlobalCBuffer()
+D3D12_GPU_VIRTUAL_ADDRESS D3D12RenderAPI::getGlobalCBufferAddress()
 {
+    if (m_cachedGlobalCBAddr != 0 && !global_cbuffer_dirty)
+        return m_cachedGlobalCBAddr;
+
     D3D12GlobalCBuffer cb = {};
     cb.view = view_matrix;
     cb.projection = projection_matrix;
@@ -400,33 +403,52 @@ void D3D12RenderAPI::updateGlobalCBuffer()
     cb.debugCascades = debugCascades ? 1 : 0;
     cb.shadowMapTexelSize = glm::vec2(1.0f / static_cast<float>(currentShadowSize));
 
-    auto addr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(cb), &cb);
+    m_cachedGlobalCBAddr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(cb), &cb);
+    return m_cachedGlobalCBAddr;
+}
+
+void D3D12RenderAPI::updateGlobalCBuffer()
+{
+    auto addr = getGlobalCBufferAddress();
     if (addr == 0) return;
     commandList->SetGraphicsRootConstantBufferView(0, addr);
 }
 
-void D3D12RenderAPI::updatePerObjectCBuffer(const glm::vec3& color, bool useTexture, float alphaCutoff)
+D3D12_GPU_VIRTUAL_ADDRESS D3D12RenderAPI::uploadPerObjectCBuffer(const glm::mat4& model,
+                                                                  const glm::mat4& normalMatrix,
+                                                                  const glm::vec3& color,
+                                                                  bool useTexture,
+                                                                  float alphaCutoff,
+                                                                  float metallic,
+                                                                  float roughness,
+                                                                  const glm::vec3& emissive)
 {
     D3D12PerObjectCBuffer cb = {};
-    cb.model = current_model_matrix;
-    glm::mat3 normalMat3 = glm::mat3(current_model_matrix);
-    float det = glm::determinant(normalMat3);
-    if (std::abs(det) > 1e-6f)
-        cb.normalMatrix = glm::mat4(glm::transpose(glm::inverse(normalMat3)));
-    else
-        cb.normalMatrix = glm::mat4(1.0f);
+    cb.model = model;
+    cb.normalMatrix = normalMatrix;
     cb.color = color;
     cb.useTexture = useTexture ? 1 : 0;
     cb.alphaCutoff = alphaCutoff;
-    cb.metallic = 0.0f;
-    cb.roughness = 0.5f;
-    cb.emissive = glm::vec3(0.0f);
+    cb.metallic = metallic;
+    cb.roughness = roughness;
+    cb.emissive = emissive;
     cb.hasMetallicRoughnessMap = 0;
     cb.hasNormalMap = 0;
     cb.hasOcclusionMap = 0;
     cb.hasEmissiveMap = 0;
 
-    auto addr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(cb), &cb);
+    return m_cbUploadBuffer[m_frameIndex].allocate(sizeof(cb), &cb);
+}
+
+void D3D12RenderAPI::updatePerObjectCBuffer(const glm::vec3& color, bool useTexture, float alphaCutoff)
+{
+    glm::mat3 normalMat3 = glm::mat3(current_model_matrix);
+    float det = glm::determinant(normalMat3);
+    glm::mat4 normalMatrix = (std::abs(det) > 1e-6f)
+        ? glm::mat4(glm::transpose(glm::inverse(normalMat3)))
+        : glm::mat4(1.0f);
+
+    auto addr = uploadPerObjectCBuffer(current_model_matrix, normalMatrix, color, useTexture, alphaCutoff);
     if (addr == 0) return;
     commandList->SetGraphicsRootConstantBufferView(1, addr);
 }

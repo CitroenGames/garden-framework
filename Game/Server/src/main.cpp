@@ -198,14 +198,15 @@ int main(int argc, char* argv[])
 
     while (running)
     {
+        Uint64 frame_start_ns = SDL_GetTicksNS();
         Uint64 frame_start = SDL_GetTicks();
         float delta_time = (frame_start - delta_last) / 1000.0f;
         delta_last = frame_start;
 
         game_module.serverUpdate(delta_time);
 
-        Uint64 frame_end = SDL_GetTicks();
-        app.lockFramerate(frame_start, frame_end);
+        Uint64 frame_end_ns = SDL_GetTicksNS();
+        app.lockFramerate(frame_start_ns, frame_end_ns);
 
         SDL_Event event;
         while (SDL_PollEvent(&event)) {

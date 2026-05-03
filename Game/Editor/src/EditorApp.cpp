@@ -21,11 +21,25 @@
 #include <SDL3/SDL.h>
 #include "Threading/JobSystem.hpp"
 #include <algorithm>
-#include <cstring>
 #include <chrono>
+#include <cmath>
+#include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <mutex>
+#include <optional>
+#include <string>
 #include <thread>
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 #ifdef _WIN32
 static constexpr const char* PIE_GAME_EXE_NAME   = "Game.exe";
@@ -34,6 +48,188 @@ static constexpr const char* PIE_SERVER_EXE_NAME  = "Server.exe";
 static constexpr const char* PIE_GAME_EXE_NAME   = "Game";
 static constexpr const char* PIE_SERVER_EXE_NAME  = "Server";
 #endif
+
+namespace
+{
+    static constexpr const char* EDITOR_CONFIG_FILENAME = "config.cfg";
+    static constexpr int EDITOR_FPS_FALLBACK = 60;
+    static constexpr int EDITOR_FPS_LEGACY_DEFAULT = 60;
+    static constexpr int EDITOR_FPS_UNLIMITED_TARGET = 10000;
+
+    std::filesystem::path getEditorCVarConfigPath()
+    {
+        return EnginePaths::getExecutableDir() / EDITOR_CONFIG_FILENAME;
+    }
+
+    std::filesystem::path selectEditorCVarConfigLoadPath()
+    {
+        std::filesystem::path stable_path = getEditorCVarConfigPath();
+        if (std::filesystem::exists(stable_path))
+            return stable_path;
+
+        // Older editor builds used the process working directory for config.cfg.
+        // Load it once if present, then save back to the stable executable path.
+        std::filesystem::path legacy_path = std::filesystem::current_path() / EDITOR_CONFIG_FILENAME;
+        if (std::filesystem::exists(legacy_path))
+            return legacy_path;
+
+        return stable_path;
+    }
+
+    std::optional<std::string> readConfigCVarValue(const std::filesystem::path& filepath, const char* cvar_name)
+    {
+        std::ifstream file(filepath);
+        if (!file.is_open())
+            return std::nullopt;
+
+        std::string line;
+        while (std::getline(file, line))
+        {
+            const size_t start = line.find_first_not_of(" \t");
+            if (start == std::string::npos)
+                continue;
+            if (line[start] == '/' && line.size() > start + 1 && line[start + 1] == '/')
+                continue;
+
+            const std::string trimmed = line.substr(start);
+            const size_t space_pos = trimmed.find_first_of(" \t");
+            if (space_pos == std::string::npos)
+                continue;
+
+            if (trimmed.substr(0, space_pos) == cvar_name)
+            {
+                std::string value = trimmed.substr(space_pos + 1);
+                const size_t value_start = value.find_first_not_of(" \t");
+                if (value_start != std::string::npos)
+                    value = value.substr(value_start);
+                if (value.size() >= 2 && value.front() == '"' && value.back() == '"')
+                    value = value.substr(1, value.size() - 2);
+                return value;
+            }
+        }
+
+        return std::nullopt;
+    }
+
+    std::optional<int> readConfigIntCVar(const std::filesystem::path& filepath, const char* cvar_name)
+    {
+        std::optional<std::string> value = readConfigCVarValue(filepath, cvar_name);
+        if (!value)
+            return std::nullopt;
+
+        try
+        {
+            return std::stoi(*value);
+        }
+        catch (...)
+        {
+            return std::nullopt;
+        }
+    }
+
+    int refreshRateFromDisplayMode(const SDL_DisplayMode* mode)
+    {
+        if (!mode)
+            return 0;
+
+        double refresh_rate = 0.0;
+        if (mode->refresh_rate_numerator > 0 && mode->refresh_rate_denominator > 0)
+        {
+            refresh_rate = static_cast<double>(mode->refresh_rate_numerator) /
+                           static_cast<double>(mode->refresh_rate_denominator);
+        }
+        else if (mode->refresh_rate > 0.0f)
+        {
+            refresh_rate = static_cast<double>(mode->refresh_rate);
+        }
+
+        if (refresh_rate <= 0.0)
+            return 0;
+
+        return std::clamp(static_cast<int>(std::lround(refresh_rate)), 1, 1000);
+    }
+
+    int detectNativeWindowRefreshRate(SDL_Window* window)
+    {
+#ifdef _WIN32
+        if (!window)
+            return 0;
+
+        SDL_PropertiesID props = SDL_GetWindowProperties(window);
+        HWND hwnd = static_cast<HWND>(
+            SDL_GetPointerProperty(props, SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr));
+        if (!hwnd)
+            return 0;
+
+        HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        if (!monitor)
+            return 0;
+
+        MONITORINFOEXA monitor_info{};
+        monitor_info.cbSize = sizeof(monitor_info);
+        if (!GetMonitorInfoA(monitor, &monitor_info))
+            return 0;
+
+        DEVMODEA dev_mode{};
+        dev_mode.dmSize = sizeof(dev_mode);
+        if (!EnumDisplaySettingsA(monitor_info.szDevice, ENUM_CURRENT_SETTINGS, &dev_mode))
+            return 0;
+
+        if (dev_mode.dmDisplayFrequency <= 1)
+            return 0;
+
+        return std::clamp(static_cast<int>(dev_mode.dmDisplayFrequency), 1, 1000);
+#else
+        (void)window;
+        return 0;
+#endif
+    }
+
+    int detectWindowRefreshRate(SDL_Window* window)
+    {
+        const int native_refresh_rate = detectNativeWindowRefreshRate(window);
+        if (native_refresh_rate > 0)
+            return native_refresh_rate;
+
+        SDL_DisplayID display_id = window ? SDL_GetDisplayForWindow(window) : 0;
+        if (display_id == 0)
+            display_id = SDL_GetPrimaryDisplay();
+        if (display_id == 0)
+            return EDITOR_FPS_FALLBACK;
+
+        int refresh_rate = refreshRateFromDisplayMode(SDL_GetCurrentDisplayMode(display_id));
+        if (refresh_rate > 0)
+            return refresh_rate;
+
+        refresh_rate = refreshRateFromDisplayMode(SDL_GetDesktopDisplayMode(display_id));
+        if (refresh_rate > 0)
+            return refresh_rate;
+
+        return EDITOR_FPS_FALLBACK;
+    }
+
+    void applyEditorFpsCap(Application& app)
+    {
+        const ConVarBase* fps_max = CVAR_PTR(fps_max);
+        if (!fps_max)
+        {
+            app.setTargetFPS(EDITOR_FPS_FALLBACK);
+            return;
+        }
+
+        const int fps_max_val = fps_max->getInt();
+        app.setTargetFPS(fps_max_val > 0 ? fps_max_val : EDITOR_FPS_UNLIMITED_TARGET);
+    }
+
+    void markFpsRefreshDefaultMigrationApplied(EditorConfig* editor_config)
+    {
+        if (!editor_config || editor_config->fps_max_refresh_default_migrated)
+            return;
+
+        editor_config->fps_max_refresh_default_migrated = true;
+        editor_config->save();
+    }
+}
 
 bool EditorApp::initialize(RenderAPIType api_type)
 {
@@ -45,7 +241,10 @@ bool EditorApp::initialize(RenderAPIType api_type)
     EE::CLog::Init();
     Console::get().initialize();
     InitializeDefaultCVars();
-    ConVarRegistry::get().loadConfig("config.cfg");
+    const std::filesystem::path editor_cvar_config_path = getEditorCVarConfigPath();
+    const std::filesystem::path editor_cvar_load_path = selectEditorCVarConfigLoadPath();
+    const std::optional<int> configured_fps_max = readConfigIntCVar(editor_cvar_load_path, "fps_max");
+    ConVarRegistry::get().loadConfig(editor_cvar_load_path.string());
 
     if (!Threading::JobSystem::get().initialize()) {
         LOG_ENGINE_FATAL("Failed to initialize Job System");
@@ -63,6 +262,24 @@ bool EditorApp::initialize(RenderAPIType api_type)
         LOG_ENGINE_FATAL("Failed to initialize Application");
         return false;
     }
+
+    const int refresh_rate = detectWindowRefreshRate(m_app.getWindow());
+    const bool migrate_legacy_fps_default =
+        configured_fps_max.has_value() &&
+        configured_fps_max.value() == EDITOR_FPS_LEGACY_DEFAULT &&
+        (!m_editor_config || !m_editor_config->fps_max_refresh_default_migrated);
+    if (!configured_fps_max.has_value() || migrate_legacy_fps_default)
+    {
+        if (auto* fps_max = CVAR_PTR(fps_max))
+        {
+            fps_max->setInt(refresh_rate);
+            LOG_ENGINE_INFO("Editor fps_max defaulted to monitor refresh rate: {}", fps_max->getInt());
+        }
+    }
+    markFpsRefreshDefaultMigrationApplied(m_editor_config);
+    if (editor_cvar_load_path != editor_cvar_config_path)
+        LOG_ENGINE_INFO("Editor cvar config will be saved to {}", editor_cvar_config_path.string());
+    applyEditorFpsCap(m_app);
 
     // Restore maximized state from config
     if (CVAR_BOOL(window_maximized))
@@ -523,6 +740,7 @@ void EditorApp::run()
         // Drain Metal autorelease pool each frame to prevent ObjC temporary object leaks.
         // On non-Metal backends this is a no-op passthrough.
         m_app.getRenderAPI()->executeWithAutoreleasePool([&]() {
+        Uint64 frame_start_ns = SDL_GetTicksNS();
         Uint64 now = SDL_GetTicks();
         m_delta_time = (now - last_ticks) / 1000.0f;
         last_ticks = now;
@@ -803,8 +1021,9 @@ void EditorApp::run()
 
         m_app.swapBuffers();
 
-        Uint64 frame_end = SDL_GetTicks();
-        m_app.lockFramerate(now, frame_end);
+        Uint64 frame_end_ns = SDL_GetTicksNS();
+        applyEditorFpsCap(m_app);
+        m_app.lockFramerate(frame_start_ns, frame_end_ns);
         }); // executeWithAutoreleasePool
     }
 }
@@ -917,7 +1136,7 @@ void EditorApp::shutdown()
                 cvar->setInt(m_app.getHeight());
         }
 
-        ConVarRegistry::get().saveArchiveCvars("config.cfg");
+        ConVarRegistry::get().saveArchiveCvars(getEditorCVarConfigPath().string());
     }
 
     if (m_editor_config)

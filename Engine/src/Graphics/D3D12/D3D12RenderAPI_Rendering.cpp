@@ -16,6 +16,65 @@
 
 #include "stb_image.h"
 
+namespace
+{
+    D3D12Mesh* asD3D12Mesh(IGPUMesh* mesh)
+    {
+#ifdef _DEBUG
+        auto* d3dMesh = dynamic_cast<D3D12Mesh*>(mesh);
+        if (!d3dMesh && mesh)
+            LOG_ENGINE_ERROR("[D3D12] Command buffer contained a non-D3D12 GPU mesh");
+        return d3dMesh;
+#else
+        return static_cast<D3D12Mesh*>(mesh);
+#endif
+    }
+
+    bool sameVertexBufferView(const D3D12_VERTEX_BUFFER_VIEW& a, const D3D12_VERTEX_BUFFER_VIEW& b)
+    {
+        return a.BufferLocation == b.BufferLocation
+            && a.SizeInBytes == b.SizeInBytes
+            && a.StrideInBytes == b.StrideInBytes;
+    }
+
+    bool sameIndexBufferView(const D3D12_INDEX_BUFFER_VIEW& a, const D3D12_INDEX_BUFFER_VIEW& b)
+    {
+        return a.BufferLocation == b.BufferLocation
+            && a.SizeInBytes == b.SizeInBytes
+            && a.Format == b.Format;
+    }
+
+    struct ReplayBindingCache
+    {
+        D3D12_VERTEX_BUFFER_VIEW lastVBV = {};
+        D3D12_INDEX_BUFFER_VIEW lastIBV = {};
+        bool hasVB = false;
+        bool hasIB = false;
+
+        void bindMesh(ID3D12GraphicsCommandList* cmdList, D3D12Mesh* mesh)
+        {
+            const auto& vbv = mesh->getVertexBufferView();
+            if (!hasVB || !sameVertexBufferView(lastVBV, vbv))
+            {
+                cmdList->IASetVertexBuffers(0, 1, &vbv);
+                lastVBV = vbv;
+                hasVB = true;
+            }
+
+            if (mesh->isIndexed())
+            {
+                const auto& ibv = mesh->getIndexBufferView();
+                if (!hasIB || !sameIndexBufferView(lastIBV, ibv))
+                {
+                    cmdList->IASetIndexBuffer(&ibv);
+                    lastIBV = ibv;
+                    hasIB = true;
+                }
+            }
+        }
+    };
+}
+
 // ============================================================================
 // Texture Management
 // ============================================================================
@@ -484,7 +543,7 @@ void D3D12RenderAPI::renderMesh(const mesh& m, const RenderState& state)
         const_cast<mesh&>(m).uploadToGPU(this);
     }
 
-    D3D12Mesh* gpuMesh = dynamic_cast<D3D12Mesh*>(m.gpu_mesh);
+    D3D12Mesh* gpuMesh = asD3D12Mesh(m.gpu_mesh);
     if (!gpuMesh || !gpuMesh->isUploaded()) return;
 
     if (in_shadow_pass)
@@ -569,7 +628,7 @@ void D3D12RenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t 
     if (!m.gpu_mesh || !m.gpu_mesh->isUploaded())
         const_cast<mesh&>(m).uploadToGPU(this);
 
-    D3D12Mesh* gpuMesh = dynamic_cast<D3D12Mesh*>(m.gpu_mesh);
+    D3D12Mesh* gpuMesh = asD3D12Mesh(m.gpu_mesh);
     if (!gpuMesh || !gpuMesh->isUploaded()) return;
 
     if (in_shadow_pass)
@@ -683,7 +742,10 @@ void D3D12RenderAPI::flushAndReopenCommandList()
     // Force rebind of PSO and texture
     last_bound_pso = nullptr;
     currentBoundTexture = INVALID_TEXTURE;
-    global_cbuffer_dirty = true;
+    if (m_cachedGlobalCBAddr != 0)
+        commandList->SetGraphicsRootConstantBufferView(0, m_cachedGlobalCBAddr);
+    else
+        global_cbuffer_dirty = true;
 }
 
 static constexpr size_t D3D12_PARALLEL_REPLAY_THRESHOLD = 512;
@@ -723,21 +785,13 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
         }
     }
 
-    // Cache the global CBuffer address for workers
-    D3D12GlobalCBuffer globalCB = {};
-    globalCB.view = view_matrix;
-    globalCB.projection = projection_matrix;
-    for (int i = 0; i < NUM_CASCADES; i++)
-        globalCB.lightSpaceMatrices[i] = lightSpaceMatrices[i];
-    globalCB.cascadeSplits = glm::vec4(cascadeSplitDistances[0], cascadeSplitDistances[1],
-                                        cascadeSplitDistances[2], cascadeSplitDistances[3]);
-    globalCB.cascadeSplit4 = cascadeSplitDistances[NUM_CASCADES];
-    globalCB.lightDir = current_light_direction;
-    globalCB.cascadeCount = NUM_CASCADES;
-    globalCB.lightAmbient = current_light_ambient;
-    globalCB.lightDiffuse = current_light_diffuse;
-    globalCB.debugCascades = debugCascades ? 1 : 0;
-    globalCB.shadowMapTexelSize = glm::vec2(1.0f / static_cast<float>(currentShadowSize));
+    // Cache the global CBuffer address for workers.
+    const auto globalCBAddr = getGlobalCBufferAddress();
+    if (globalCBAddr == 0)
+    {
+        replayCommandBuffer(cmds);
+        return;
+    }
 
     // Flush main command list (preamble complete)
     flushAndReopenCommandList();
@@ -784,7 +838,6 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
     auto rtState = m_currentRT;
     auto shadowSRVIdx = m_shadowSRVIndex;
     auto defaultTex = defaultTexture;
-    auto frameIdx = m_frameIndex;
     auto lightCBAddr = m_cachedLightCBAddr;
     auto* uploadBuf = &m_cbUploadBuffer[m_frameIndex];
     auto* srvAlloc = &m_srvAllocator;
@@ -801,7 +854,7 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
     for (uint32_t w = 0; w < num_workers; w++)
     {
         futures.push_back(std::async(std::launch::async,
-            [&, w, rootSig, srvHeap, rtState, shadowSRVIdx, defaultTex, lightCBAddr, uploadBuf, srvAlloc, textureMap,
+            [&, w, rootSig, srvHeap, rtState, shadowSRVIdx, defaultTex, globalCBAddr, lightCBAddr, uploadBuf, srvAlloc, textureMap,
              pbrMetallicRoughnessSRV, pbrNormalSRV, pbrOcclusionSRV, pbrEmissiveSRV]()
             {
                 auto* cmdList = workers[w].entry->cmdList.Get();
@@ -815,10 +868,7 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
                 cmdList->RSSetScissorRects(1, &rtState.scissor);
                 cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
-                // Upload global CBuffer for this command list
-                auto globalAddr = uploadBuf->allocate(sizeof(D3D12GlobalCBuffer), &globalCB);
-                if (globalAddr != 0)
-                    cmdList->SetGraphicsRootConstantBufferView(0, globalAddr);
+                cmdList->SetGraphicsRootConstantBufferView(0, globalCBAddr);
 
                 // Bind light CBuffer
                 cmdList->SetGraphicsRootConstantBufferView(4, lightCBAddr);
@@ -840,24 +890,19 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
                 // Replay this worker's chunk of commands
                 ID3D12PipelineState* workerLastPSO = nullptr;
                 TextureHandle workerLastTex = INVALID_TEXTURE;
+                ReplayBindingCache bindingCache;
 
                 for (size_t i = workers[w].start; i < workers[w].end; i++)
                 {
                     const auto& cmd = cmds[i];
                     if (!cmd.gpu_mesh || !cmd.gpu_mesh->isUploaded()) continue;
 
-                    D3D12Mesh* gpuMesh = dynamic_cast<D3D12Mesh*>(cmd.gpu_mesh);
+                    D3D12Mesh* gpuMesh = asD3D12Mesh(cmd.gpu_mesh);
                     if (!gpuMesh || !gpuMesh->isUploaded()) continue;
 
-                    // Per-object CBuffer
                     D3D12PerObjectCBuffer objCB = {};
                     objCB.model = cmd.model_matrix;
-                    glm::mat3 normalMat3 = glm::mat3(cmd.model_matrix);
-                    float det = glm::determinant(normalMat3);
-                    if (std::abs(det) > 1e-6f)
-                        objCB.normalMatrix = glm::mat4(glm::transpose(glm::inverse(normalMat3)));
-                    else
-                        objCB.normalMatrix = glm::mat4(1.0f);
+                    objCB.normalMatrix = cmd.normal_matrix;
                     objCB.color = cmd.color;
                     objCB.useTexture = cmd.use_texture ? 1 : 0;
                     objCB.alphaCutoff = cmd.alpha_cutoff;
@@ -881,6 +926,7 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
                         rs.blend_mode = cmd.pso_key.blend;
                         rs.cull_mode = cmd.pso_key.cull;
                         rs.lighting = cmd.pso_key.lighting;
+                        rs.alpha_test = cmd.pso_key.alpha_test;
                         bool unlit = !cmd.pso_key.lighting;
                         pso = selectPSO(rs, unlit);
                     }
@@ -901,11 +947,9 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
                         workerLastTex = texToBind;
                     }
 
-                    // Draw
-                    cmdList->IASetVertexBuffers(0, 1, &gpuMesh->getVertexBufferView());
+                    bindingCache.bindMesh(cmdList, gpuMesh);
                     if (gpuMesh->isIndexed())
                     {
-                        cmdList->IASetIndexBuffer(&gpuMesh->getIndexBufferView());
                         if (cmd.vertex_count > 0)
                             cmdList->DrawIndexedInstanced(static_cast<UINT>(cmd.vertex_count), 1,
                                                           static_cast<UINT>(cmd.start_vertex), 0, 0);
@@ -952,11 +996,26 @@ void D3D12RenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
 {
     if (cmds.empty() || device_lost) return;
 
+    ReplayBindingCache bindingCache;
+    D3D12_GPU_VIRTUAL_ADDRESS lastLightCBAddr = 0;
+
+    if (!in_shadow_pass)
+    {
+        if (m_defaultMetallicRoughnessTexture.srvIndex != UINT(-1))
+            commandList->SetGraphicsRootDescriptorTable(5, m_srvAllocator.getGPU(m_defaultMetallicRoughnessTexture.srvIndex));
+        if (m_defaultNormalTexture.srvIndex != UINT(-1))
+            commandList->SetGraphicsRootDescriptorTable(6, m_srvAllocator.getGPU(m_defaultNormalTexture.srvIndex));
+        if (m_defaultOcclusionTexture.srvIndex != UINT(-1))
+            commandList->SetGraphicsRootDescriptorTable(7, m_srvAllocator.getGPU(m_defaultOcclusionTexture.srvIndex));
+        if (m_defaultEmissiveTexture.srvIndex != UINT(-1))
+            commandList->SetGraphicsRootDescriptorTable(8, m_srvAllocator.getGPU(m_defaultEmissiveTexture.srvIndex));
+    }
+
     for (const auto& cmd : cmds)
     {
         if (!cmd.gpu_mesh || !cmd.gpu_mesh->isUploaded()) continue;
 
-        D3D12Mesh* gpuMesh = dynamic_cast<D3D12Mesh*>(cmd.gpu_mesh);
+        D3D12Mesh* gpuMesh = asD3D12Mesh(cmd.gpu_mesh);
         if (!gpuMesh || !gpuMesh->isUploaded()) continue;
 
         if (cmd.pso_key.shadow)
@@ -966,19 +1025,18 @@ void D3D12RenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
             {
                 commandList->SetPipelineState(m_psoShadowAlphaTest.Get());
                 // Alpha-test shadow needs per-object CB (for alphaCutoff) and texture
-                glm::mat4 saved_model = current_model_matrix;
-                current_model_matrix = cmd.model_matrix;
-                updatePerObjectCBuffer(glm::vec3(1.0f), true, cmd.alpha_cutoff);
-                current_model_matrix = saved_model;
+                auto objAddr = uploadPerObjectCBuffer(cmd.model_matrix, cmd.normal_matrix,
+                                                       glm::vec3(1.0f), true, cmd.alpha_cutoff);
+                if (objAddr == 0) continue;
+                commandList->SetGraphicsRootConstantBufferView(1, objAddr);
                 if (cmd.use_texture && cmd.texture != INVALID_TEXTURE)
                     bindTexture(cmd.texture);
             }
             updateShadowCBuffer(lightSpaceMatrices[currentCascade], cmd.model_matrix);
 
-            commandList->IASetVertexBuffers(0, 1, &gpuMesh->getVertexBufferView());
+            bindingCache.bindMesh(commandList.Get(), gpuMesh);
             if (gpuMesh->isIndexed())
             {
-                commandList->IASetIndexBuffer(&gpuMesh->getIndexBufferView());
                 if (cmd.vertex_count > 0)
                     commandList->DrawIndexedInstanced(static_cast<UINT>(cmd.vertex_count), 1,
                                                       static_cast<UINT>(cmd.start_vertex), 0, 0);
@@ -1017,15 +1075,16 @@ void D3D12RenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
                     bindTexture(cmd.texture);
             }
             // Update per-object CBuffer
-            glm::mat4 saved_model = current_model_matrix;
-            current_model_matrix = cmd.model_matrix;
-            updatePerObjectCBuffer(glm::vec3(1.0f), cmd.pso_key.alpha_test && cmd.use_texture, cmd.alpha_cutoff);
-            current_model_matrix = saved_model;
+            auto objAddr = uploadPerObjectCBuffer(cmd.model_matrix, cmd.normal_matrix,
+                                                   glm::vec3(1.0f),
+                                                   cmd.pso_key.alpha_test && cmd.use_texture,
+                                                   cmd.alpha_cutoff);
+            if (objAddr == 0) continue;
+            commandList->SetGraphicsRootConstantBufferView(1, objAddr);
 
-            commandList->IASetVertexBuffers(0, 1, &gpuMesh->getVertexBufferView());
+            bindingCache.bindMesh(commandList.Get(), gpuMesh);
             if (gpuMesh->isIndexed())
             {
-                commandList->IASetIndexBuffer(&gpuMesh->getIndexBufferView());
                 if (cmd.vertex_count > 0)
                     commandList->DrawIndexedInstanced(static_cast<UINT>(cmd.vertex_count), 1,
                                                       static_cast<UINT>(cmd.start_vertex), 0, 0);
@@ -1050,13 +1109,11 @@ void D3D12RenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
             global_cbuffer_dirty = false;
         }
 
-        // Upload per-object CBuffer with the command's model matrix
-        {
-            glm::mat4 saved_model = current_model_matrix;
-            current_model_matrix = cmd.model_matrix;
-            updatePerObjectCBuffer(cmd.color, cmd.use_texture, cmd.alpha_cutoff);
-            current_model_matrix = saved_model;
-        }
+        auto objAddr = uploadPerObjectCBuffer(cmd.model_matrix, cmd.normal_matrix,
+                                               cmd.color, cmd.use_texture, cmd.alpha_cutoff,
+                                               cmd.metallic, cmd.roughness, cmd.emissive);
+        if (objAddr == 0) continue;
+        commandList->SetGraphicsRootConstantBufferView(1, objAddr);
 
         // Upload light data once per frame
         if (m_cachedLightCBAddr == 0)
@@ -1064,7 +1121,11 @@ void D3D12RenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
             m_cachedLightCBAddr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(LightCBuffer), &current_lights);
             if (m_cachedLightCBAddr == 0) continue;
         }
-        commandList->SetGraphicsRootConstantBufferView(4, m_cachedLightCBAddr);
+        if (m_cachedLightCBAddr != lastLightCBAddr)
+        {
+            commandList->SetGraphicsRootConstantBufferView(4, m_cachedLightCBAddr);
+            lastLightCBAddr = m_cachedLightCBAddr;
+        }
 
         // Select PSO from PSOKey (or honor caller-set GBuffer override).
         ID3D12PipelineState* pso = m_replayPSOOverride;
@@ -1090,21 +1151,9 @@ void D3D12RenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
         else if (defaultTexture != INVALID_TEXTURE)
             bindTexture(defaultTexture);
 
-        // Bind default PBR textures (root params 5-8)
-        if (m_defaultMetallicRoughnessTexture.srvIndex != UINT(-1))
-            commandList->SetGraphicsRootDescriptorTable(5, m_srvAllocator.getGPU(m_defaultMetallicRoughnessTexture.srvIndex));
-        if (m_defaultNormalTexture.srvIndex != UINT(-1))
-            commandList->SetGraphicsRootDescriptorTable(6, m_srvAllocator.getGPU(m_defaultNormalTexture.srvIndex));
-        if (m_defaultOcclusionTexture.srvIndex != UINT(-1))
-            commandList->SetGraphicsRootDescriptorTable(7, m_srvAllocator.getGPU(m_defaultOcclusionTexture.srvIndex));
-        if (m_defaultEmissiveTexture.srvIndex != UINT(-1))
-            commandList->SetGraphicsRootDescriptorTable(8, m_srvAllocator.getGPU(m_defaultEmissiveTexture.srvIndex));
-
-        // Draw
-        commandList->IASetVertexBuffers(0, 1, &gpuMesh->getVertexBufferView());
+        bindingCache.bindMesh(commandList.Get(), gpuMesh);
         if (gpuMesh->isIndexed())
         {
-            commandList->IASetIndexBuffer(&gpuMesh->getIndexBufferView());
             if (cmd.vertex_count > 0)
                 commandList->DrawIndexedInstanced(static_cast<UINT>(cmd.vertex_count), 1,
                                                   static_cast<UINT>(cmd.start_vertex), 0, 0);
@@ -1331,7 +1380,7 @@ void D3D12RenderAPI::renderMeshDepthOnly(const mesh& m)
     if (!m.gpu_mesh || !m.gpu_mesh->isUploaded())
         const_cast<mesh&>(m).uploadToGPU(this);
 
-    D3D12Mesh* gpuMesh = dynamic_cast<D3D12Mesh*>(m.gpu_mesh);
+    D3D12Mesh* gpuMesh = asD3D12Mesh(m.gpu_mesh);
     if (!gpuMesh || !gpuMesh->isUploaded()) return;
 
     updatePerObjectCBuffer(glm::vec3(1.0f), false);

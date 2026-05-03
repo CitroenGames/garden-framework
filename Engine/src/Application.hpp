@@ -139,13 +139,16 @@ public:
         }
     }
 
-    void lockFramerate(Uint64 start_time, Uint64 end_time)
+    void lockFramerate(Uint64 start_time_ns, Uint64 end_time_ns)
     {
-        Uint64 frame_delay = 1000 / target_fps;
-        Uint64 delta = end_time - start_time;
+        if (target_fps <= 0)
+            return;
 
-        if (delta < frame_delay)
-            SDL_Delay(static_cast<Uint32>(frame_delay - delta));
+        Uint64 frame_delay_ns = 1000000000ull / static_cast<Uint64>(target_fps);
+        Uint64 delta_ns = end_time_ns - start_time_ns;
+
+        if (delta_ns < frame_delay_ns)
+            SDL_DelayPrecise(frame_delay_ns - delta_ns);
     }
 
     // Getters

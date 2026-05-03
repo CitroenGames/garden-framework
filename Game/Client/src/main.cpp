@@ -354,6 +354,7 @@ int main(int argc, char* argv[])
     while (true)
     {
         render_api->executeWithAutoreleasePool([&]() {
+            Uint64 frame_start_ns = SDL_GetTicksNS();
             Uint64 frame_start = SDL_GetTicks();
 
             ImGuiManager::get().newFrame();
@@ -385,13 +386,13 @@ int main(int argc, char* argv[])
 
             app.swapBuffers();
 
-            Uint64 frame_end = SDL_GetTicks();
+            Uint64 frame_end_ns = SDL_GetTicksNS();
             int fps_max_val = CVAR_INT(fps_max);
             if (fps_max_val > 0)
                 app.setTargetFPS(fps_max_val);
             else
                 app.setTargetFPS(10000);
-            app.lockFramerate(frame_start, frame_end);
+            app.lockFramerate(frame_start_ns, frame_end_ns);
         });
     }
 
