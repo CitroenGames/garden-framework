@@ -60,6 +60,16 @@ struct MetalFXAAUniforms {
     int ssaoEnabled;
 };
 
+// Fragment-stage light metadata. Point/spot payloads live in separate
+// per-frame buffers so Metal can use the same 256-light cap as Vulkan/D3D12.
+struct alignas(16) MetalLightCBuffer {
+    int numPointLights = 0;
+    int numSpotLights = 0;
+    glm::vec2 _pad = glm::vec2(0.0f);
+    glm::vec3 cameraPos = glm::vec3(0.0f);
+    float _pad2 = 0.0f;
+};
+
 // Per-object UBO for command buffer replay (matches Vulkan's PerObjectUBO).
 // Padded to 256 bytes for Metal's setVertexBufferOffset alignment requirement.
 struct MetalPerObjectUBO {

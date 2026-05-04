@@ -328,7 +328,7 @@ void MetalRenderAPI::renderMesh(const mesh& m, const RenderState& state)
 
     [impl->encoder setVertexBytes:&ubo length:sizeof(ubo) atIndex:1];
     [impl->encoder setFragmentBytes:&ubo length:sizeof(ubo) atIndex:0];
-    [impl->encoder setFragmentBytes:&impl->currentLights length:sizeof(LightCBuffer) atIndex:3];
+    impl->bindLightBuffers(impl->encoder);
 
     // Set model + normal matrix
     struct { glm::mat4 model; glm::mat4 normalMatrix; } modelData;
@@ -494,7 +494,7 @@ void MetalRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t 
 
     [impl->encoder setVertexBytes:&ubo length:sizeof(ubo) atIndex:1];
     [impl->encoder setFragmentBytes:&ubo length:sizeof(ubo) atIndex:0];
-    [impl->encoder setFragmentBytes:&impl->currentLights length:sizeof(LightCBuffer) atIndex:3];
+    impl->bindLightBuffers(impl->encoder);
 
     // Model + normal matrix per draw
     struct { glm::mat4 model; glm::mat4 normalMatrix; } modelData;
@@ -576,6 +576,52 @@ void MetalRenderAPI::setLighting(const glm::vec3& ambient, const glm::vec3& diff
 void MetalRenderAPI::setPointAndSpotLights(const LightCBuffer& lights)
 {
     impl->currentLights = lights;
+    impl->updateLightInfoFromCurrentLights();
+    uploadLightBuffers(lights.pointLights, lights.numPointLights,
+                       lights.spotLights, lights.numSpotLights);
+}
+
+bool MetalRenderAPI::isDeferredActive() const
+{
+    // Metal has the same public toggle as Vulkan/D3D12, but not the GBuffer /
+    // deferred-lighting pass yet. Keep Active false so the renderer uses the
+    // forward path while still letting UI persist the desired setting.
+    return false;
+}
+
+void MetalRenderAPI::submitDeferredOpaqueCommands(const RenderCommandBuffer& cmds)
+{
+    (void)cmds;
+}
+
+void MetalRenderAPI::submitDeferredTransparentCommands(const RenderCommandBuffer& cmds)
+{
+    (void)cmds;
+}
+
+void MetalRenderAPI::uploadLightBuffers(const GPUPointLight* pts, int ptCount,
+                                        const GPUSpotLight* spts, int spCount)
+{
+    ptCount = std::clamp(ptCount, 0, MetalRenderAPIImpl::MAX_LIGHTS_DEFERRED);
+    spCount = std::clamp(spCount, 0, MetalRenderAPIImpl::MAX_LIGHTS_DEFERRED);
+    if (!pts) ptCount = 0;
+    if (!spts) spCount = 0;
+
+    const uint32_t frame = impl->currentFrame;
+    if (frame < MetalRenderAPIImpl::MAX_FRAMES_IN_FLIGHT) {
+        if (impl->pointLightMapped[frame] && ptCount > 0)
+            std::memcpy(impl->pointLightMapped[frame], pts, sizeof(GPUPointLight) * ptCount);
+        if (impl->spotLightMapped[frame] && spCount > 0)
+            std::memcpy(impl->spotLightMapped[frame], spts, sizeof(GPUSpotLight) * spCount);
+    }
+
+    impl->numPointLightsUploaded = ptCount;
+    impl->numSpotLightsUploaded = spCount;
+    impl->currentLightInfo.numPointLights = ptCount;
+    impl->currentLightInfo.numSpotLights = spCount;
+    impl->currentLightInfo.cameraPos = impl->currentLights.cameraPos;
+    impl->currentLightInfo._pad = glm::vec2(0.0f);
+    impl->currentLightInfo._pad2 = 0.0f;
 }
 
 // ============================================================================

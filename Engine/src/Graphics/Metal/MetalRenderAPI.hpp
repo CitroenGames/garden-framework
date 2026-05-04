@@ -50,6 +50,8 @@ public:
     virtual void enableLighting(bool enable) override;
     virtual void setLighting(const glm::vec3& ambient, const glm::vec3& diffuse, const glm::vec3& direction) override;
     virtual void setPointAndSpotLights(const LightCBuffer& lights) override;
+    virtual void uploadLightBuffers(const GPUPointLight* pts, int ptCount,
+                                    const GPUSpotLight* spts, int spCount) override;
 
     virtual void renderSkybox() override;
 
@@ -97,6 +99,12 @@ public:
     virtual void setSSAOIntensity(float intensity) override;
     virtual RenderFrameStats getLastFrameStats() const override;
 
+    virtual void setDeferredEnabled(bool enabled) override { m_useDeferred = enabled; }
+    virtual bool isDeferredEnabled() const override { return m_useDeferred; }
+    virtual bool isDeferredActive() const override;
+    virtual void submitDeferredOpaqueCommands(const RenderCommandBuffer& cmds) override;
+    virtual void submitDeferredTransparentCommands(const RenderCommandBuffer& cmds) override;
+
     // Autorelease pool support (drains ObjC temporaries each frame)
     virtual void executeWithAutoreleasePool(std::function<void()> fn) override;
 
@@ -130,4 +138,5 @@ public:
 
 private:
     std::unique_ptr<MetalRenderAPIImpl> impl;
+    bool m_useDeferred = false;
 };

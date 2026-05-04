@@ -71,7 +71,9 @@ fragment float4 skinned_fragment(SkinnedVertexOut in [[stage_in]],
                                   sampler texSampler [[sampler(0)]],
                                   depth2d_array<float> shadowMap [[texture(1)]],
                                   sampler shadowSampler [[sampler(1)]],
-                                  constant LightCBuffer& lights [[buffer(3)]])
+                                  constant LightCBuffer& lights [[buffer(3)]],
+                                  const device PointLightData* pointLights [[buffer(4)]],
+                                  const device SpotLightData* spotLights [[buffer(5)]])
 {
     float3 norm = normalize(in.normal);
     float3 lightDir = normalize(-ubo.lightDir);
@@ -89,11 +91,11 @@ fragment float4 skinned_fragment(SkinnedVertexOut in [[stage_in]],
 
     // Point lights
     for (int i = 0; i < lights.numPointLights; i++)
-        lighting += CalcPointLight(lights.pointLights[i], norm, in.fragPos);
+        lighting += CalcPointLight(pointLights[i], norm, in.fragPos);
 
     // Spot lights
     for (int j = 0; j < lights.numSpotLights; j++)
-        lighting += CalcSpotLight(lights.spotLights[j], norm, in.fragPos);
+        lighting += CalcSpotLight(spotLights[j], norm, in.fragPos);
 
     float4 texColor;
     if (ubo.useTexture != 0) {

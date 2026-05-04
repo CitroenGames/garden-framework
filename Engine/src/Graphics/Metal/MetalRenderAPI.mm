@@ -26,12 +26,14 @@ bool MetalRenderAPIImpl::loadShaderLibrary()
             const bool hasSSAO = [shaderLibrary newFunctionWithName:@"ssao_vertex"] != nil
                 && [shaderLibrary newFunctionWithName:@"ssao_fragment"] != nil
                 && [shaderLibrary newFunctionWithName:@"ssao_blur_fragment"] != nil;
-            if (hasSSAO) {
+            const bool hasStructuredLightBuffers =
+                [shaderLibrary newFunctionWithName:@"metal_structured_lights_v1"] != nil;
+            if (hasSSAO && hasStructuredLightBuffers) {
                 LOG_ENGINE_INFO("[Metal] Loaded precompiled shader library");
                 return true;
             }
 
-            LOG_ENGINE_WARN("[Metal] Precompiled shader library is missing SSAO functions; compiling from source");
+            LOG_ENGINE_WARN("[Metal] Precompiled shader library is stale or incomplete; compiling from source");
             shaderLibrary = nil;
         }
         else {
@@ -651,6 +653,22 @@ bool MetalRenderAPI::initialize(WindowHandle window, int width, int height, floa
         impl->perObjectMapped[i] = [impl->perObjectBuffers[i] contents];
     }
 
+    // Create structured light buffers (triple-buffered)
+    const NSUInteger pointLightBytes = sizeof(GPUPointLight) * MetalRenderAPIImpl::MAX_LIGHTS_DEFERRED;
+    const NSUInteger spotLightBytes = sizeof(GPUSpotLight) * MetalRenderAPIImpl::MAX_LIGHTS_DEFERRED;
+    for (int i = 0; i < MetalRenderAPIImpl::MAX_FRAMES_IN_FLIGHT; i++) {
+        impl->pointLightBuffers[i] = [impl->device newBufferWithLength:pointLightBytes
+                                                                options:MTLResourceStorageModeShared];
+        impl->spotLightBuffers[i] = [impl->device newBufferWithLength:spotLightBytes
+                                                               options:MTLResourceStorageModeShared];
+        impl->pointLightBuffers[i].label = [NSString stringWithFormat:@"Point Light Buffer %d", i];
+        impl->spotLightBuffers[i].label = [NSString stringWithFormat:@"Spot Light Buffer %d", i];
+        impl->pointLightMapped[i] = [impl->pointLightBuffers[i] contents];
+        impl->spotLightMapped[i] = [impl->spotLightBuffers[i] contents];
+        if (impl->pointLightMapped[i]) std::memset(impl->pointLightMapped[i], 0, pointLightBytes);
+        if (impl->spotLightMapped[i]) std::memset(impl->spotLightMapped[i], 0, spotLightBytes);
+    }
+
     // Create offscreen resources for FXAA
     impl->createOffscreenResources();
 
@@ -716,6 +734,10 @@ void MetalRenderAPI::shutdown()
     for (int i = 0; i < MetalRenderAPIImpl::MAX_FRAMES_IN_FLIGHT; i++) {
         impl->perObjectBuffers[i] = nil;
         impl->perObjectMapped[i] = nullptr;
+        impl->pointLightBuffers[i] = nil;
+        impl->spotLightBuffers[i] = nil;
+        impl->pointLightMapped[i] = nullptr;
+        impl->spotLightMapped[i] = nullptr;
     }
     impl->depthTexture = nil;
     impl->shadowMapArray = nil;

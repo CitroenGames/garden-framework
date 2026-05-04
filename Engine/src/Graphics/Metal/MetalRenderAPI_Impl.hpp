@@ -65,6 +65,17 @@ struct MetalRenderAPIImpl {
     void* perObjectMapped[MAX_FRAMES_IN_FLIGHT] = {nullptr, nullptr, nullptr};
     std::atomic<uint32_t> perObjectDrawIndex{0};
 
+    // Per-frame structured light buffers. Vulkan/D3D12 expose 256 dynamic
+    // point and spot lights; keep the same cap for Metal's forward path.
+    static constexpr int MAX_LIGHTS_DEFERRED = 256;
+    id<MTLBuffer> pointLightBuffers[MAX_FRAMES_IN_FLIGHT] = {nil, nil, nil};
+    id<MTLBuffer> spotLightBuffers[MAX_FRAMES_IN_FLIGHT] = {nil, nil, nil};
+    void* pointLightMapped[MAX_FRAMES_IN_FLIGHT] = {nullptr, nullptr, nullptr};
+    void* spotLightMapped[MAX_FRAMES_IN_FLIGHT] = {nullptr, nullptr, nullptr};
+    MetalLightCBuffer currentLightInfo{};
+    int numPointLightsUploaded = 0;
+    int numSpotLightsUploaded = 0;
+
     // Skybox
     id<MTLBuffer> skyboxVertexBuffer = nil;
 
@@ -202,6 +213,30 @@ struct MetalRenderAPIImpl {
     // ========================================================================
     // Inline helper methods (small, called from multiple files)
     // ========================================================================
+
+    void updateLightInfoFromCurrentLights()
+    {
+        currentLightInfo.numPointLights = std::clamp(currentLights.numPointLights, 0, MAX_LIGHTS_DEFERRED);
+        currentLightInfo.numSpotLights = std::clamp(currentLights.numSpotLights, 0, MAX_LIGHTS_DEFERRED);
+        currentLightInfo.cameraPos = currentLights.cameraPos;
+        currentLightInfo._pad = glm::vec2(0.0f);
+        currentLightInfo._pad2 = 0.0f;
+    }
+
+    void bindLightBuffers(id<MTLRenderCommandEncoder> enc)
+    {
+        MetalLightCBuffer lightInfo = currentLightInfo;
+        if (!pointLightBuffers[currentFrame])
+            lightInfo.numPointLights = 0;
+        if (!spotLightBuffers[currentFrame])
+            lightInfo.numSpotLights = 0;
+
+        [enc setFragmentBytes:&lightInfo length:sizeof(lightInfo) atIndex:3];
+        if (pointLightBuffers[currentFrame])
+            [enc setFragmentBuffer:pointLightBuffers[currentFrame] offset:0 atIndex:4];
+        if (spotLightBuffers[currentFrame])
+            [enc setFragmentBuffer:spotLightBuffers[currentFrame] offset:0 atIndex:5];
+    }
 
     void updatePerFrameUBO()
     {

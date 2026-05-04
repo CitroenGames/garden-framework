@@ -28,8 +28,8 @@ void MetalRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
     impl->updatePerFrameUBO();
     MetalGlobalUBO globalUBO = impl->cachedPerFrameUBO;
 
-    // Upload LightCBuffer once
-    [enc setFragmentBytes:&impl->currentLights length:sizeof(LightCBuffer) atIndex:3];
+    // Upload light metadata and bind structured point/spot buffers once.
+    impl->bindLightBuffers(enc);
 
     // Bind shadow map once
     if (impl->shadowMapArray) {
@@ -238,7 +238,7 @@ static uint64_t replayCommandRange(MetalRenderAPIImpl* impl,
     }
 
     // Bind lights once
-    [enc setFragmentBytes:&impl->currentLights length:sizeof(LightCBuffer) atIndex:3];
+    impl->bindLightBuffers(enc);
 
     // Local bind tracking
     id<MTLRenderPipelineState> lastPipeline = nil;

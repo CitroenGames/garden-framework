@@ -1,5 +1,7 @@
 // Shared types and utility functions for Metal shaders
 
+kernel void metal_structured_lights_v1() {}
+
 struct GlobalUBO {
     float4x4 view;
     float4x4 projection;
@@ -33,7 +35,7 @@ struct ModelData {
     float4x4 normalMatrix;
 };
 
-// Point/spot light structures matching CPU-side LightCBuffer layout
+// Point/spot light structures matching CPU-side GPUPointLight/GPUSpotLight layout
 struct PointLightData {
     packed_float3 position; float range;
     packed_float3 color;    float intensity;
@@ -48,8 +50,6 @@ struct SpotLightData {
 };
 
 struct LightCBuffer {
-    PointLightData pointLights[16];
-    SpotLightData  spotLights[16];
     int numPointLights;
     int numSpotLights;
     float _pad[2];

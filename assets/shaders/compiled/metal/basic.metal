@@ -60,7 +60,9 @@ fragment float4 basic_fragment(BasicVertexOut in [[stage_in]],
                                 sampler texSampler [[sampler(0)]],
                                 depth2d_array<float> shadowMap [[texture(1)]],
                                 sampler shadowSampler [[sampler(1)]],
-                                constant LightCBuffer& lights [[buffer(3)]])
+                                constant LightCBuffer& lights [[buffer(3)]],
+                                const device PointLightData* pointLights [[buffer(4)]],
+                                const device SpotLightData* spotLights [[buffer(5)]])
 {
     float4 texColor;
     if (ubo.useTexture != 0) {
@@ -96,12 +98,12 @@ fragment float4 basic_fragment(BasicVertexOut in [[stage_in]],
 
         // Point lights
         for (int i = 0; i < lights.numPointLights; i++)
-            lighting += CalcPBRPointLight(lights.pointLights[i], norm, viewDir, in.fragPos,
+            lighting += CalcPBRPointLight(pointLights[i], norm, viewDir, in.fragPos,
                                           albedo, metallic, roughness);
 
         // Spot lights
         for (int j = 0; j < lights.numSpotLights; j++)
-            lighting += CalcPBRSpotLight(lights.spotLights[j], norm, viewDir, in.fragPos,
+            lighting += CalcPBRSpotLight(spotLights[j], norm, viewDir, in.fragPos,
                                          albedo, metallic, roughness);
     } else {
         lighting = albedo;
