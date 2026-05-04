@@ -1,6 +1,7 @@
 #include "MetalRenderAPI.hpp"
 #include "MetalRenderAPI_Impl.hpp"
 #include "MetalMesh.hpp"
+#include "Console/ConVar.hpp"
 #include "Utils/EnginePaths.hpp"
 #include "Utils/Vertex.hpp"
 
@@ -22,10 +23,20 @@ bool MetalRenderAPIImpl::loadShaderLibrary()
     if ([[NSFileManager defaultManager] fileExistsAtPath:libPath]) {
         shaderLibrary = [device newLibraryWithURL:libURL error:&error];
         if (shaderLibrary) {
-            LOG_ENGINE_INFO("[Metal] Loaded precompiled shader library");
-            return true;
+            const bool hasSSAO = [shaderLibrary newFunctionWithName:@"ssao_vertex"] != nil
+                && [shaderLibrary newFunctionWithName:@"ssao_fragment"] != nil
+                && [shaderLibrary newFunctionWithName:@"ssao_blur_fragment"] != nil;
+            if (hasSSAO) {
+                LOG_ENGINE_INFO("[Metal] Loaded precompiled shader library");
+                return true;
+            }
+
+            LOG_ENGINE_WARN("[Metal] Precompiled shader library is missing SSAO functions; compiling from source");
+            shaderLibrary = nil;
         }
-        LOG_ENGINE_WARN("[Metal] Failed to load metallib: {}", [[error localizedDescription] UTF8String]);
+        else {
+            LOG_ENGINE_WARN("[Metal] Failed to load metallib: {}", [[error localizedDescription] UTF8String]);
+        }
     }
 
     // Fallback: compile from source
@@ -36,6 +47,7 @@ bool MetalRenderAPIImpl::loadShaderLibrary()
         [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/shadow.metal").c_str()],
         [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/sky.metal").c_str()],
         [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/fxaa.metal").c_str()],
+        [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/ssao.metal").c_str()],
         [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/skinned.metal").c_str()],
         [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/skinned_shadow.metal").c_str()],
         [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/shadow_alphatest.metal").c_str()]];
@@ -408,6 +420,59 @@ bool MetalRenderAPIImpl::createPipelines()
         }
     }
 
+    // --- SSAO pipelines ---
+    {
+        MTLVertexDescriptor* ssaoDesc = [[MTLVertexDescriptor alloc] init];
+        ssaoDesc.attributes[0].format = MTLVertexFormatFloat2;
+        ssaoDesc.attributes[0].offset = offsetof(FXAAVertex, x);
+        ssaoDesc.attributes[0].bufferIndex = 0;
+        ssaoDesc.attributes[1].format = MTLVertexFormatFloat2;
+        ssaoDesc.attributes[1].offset = offsetof(FXAAVertex, u);
+        ssaoDesc.attributes[1].bufferIndex = 0;
+        ssaoDesc.layouts[0].stride = sizeof(FXAAVertex);
+        ssaoDesc.layouts[0].stepFunction = MTLVertexStepFunctionPerVertex;
+
+        id<MTLFunction> ssaoVertexFn = [shaderLibrary newFunctionWithName:@"ssao_vertex"];
+        id<MTLFunction> ssaoFragmentFn = [shaderLibrary newFunctionWithName:@"ssao_fragment"];
+        id<MTLFunction> ssaoBlurFragmentFn = [shaderLibrary newFunctionWithName:@"ssao_blur_fragment"];
+
+        if (ssaoVertexFn && ssaoFragmentFn) {
+            MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
+            desc.rasterSampleCount = 1;
+            desc.vertexFunction = ssaoVertexFn;
+            desc.fragmentFunction = ssaoFragmentFn;
+            desc.vertexDescriptor = ssaoDesc;
+            desc.colorAttachments[0].pixelFormat = MTLPixelFormatR8Unorm;
+            desc.label = @"SSAO Pipeline";
+
+            ssaoPipeline = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+            if (!ssaoPipeline) {
+                printf("[Metal] Failed to create SSAO pipeline: %s\n", [[error localizedDescription] UTF8String]);
+            } else {
+                printf("[Metal] Pipeline created: SSAO\n");
+            }
+        } else {
+            printf("[Metal] Warning: ssao functions not found, SSAO disabled\n");
+        }
+
+        if (ssaoVertexFn && ssaoBlurFragmentFn) {
+            MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
+            desc.rasterSampleCount = 1;
+            desc.vertexFunction = ssaoVertexFn;
+            desc.fragmentFunction = ssaoBlurFragmentFn;
+            desc.vertexDescriptor = ssaoDesc;
+            desc.colorAttachments[0].pixelFormat = MTLPixelFormatR8Unorm;
+            desc.label = @"SSAO Blur Pipeline";
+
+            ssaoBlurPipeline = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+            if (!ssaoBlurPipeline) {
+                printf("[Metal] Failed to create SSAO blur pipeline: %s\n", [[error localizedDescription] UTF8String]);
+            } else {
+                printf("[Metal] Pipeline created: SSAO Blur\n");
+            }
+        }
+    }
+
     return true;
 }
 
@@ -487,6 +552,8 @@ bool MetalRenderAPI::initialize(WindowHandle window, int width, int height, floa
     impl->viewportWidth = width;
     impl->viewportHeight = height;
     impl->fieldOfView = fov;
+    if (auto* cvar = CVAR_PTR(r_vsync))
+        impl->vsyncEnabled = cvar->getBool();
 
     // Create Metal device
     impl->device = MTLCreateSystemDefaultDevice();
@@ -530,6 +597,11 @@ bool MetalRenderAPI::initialize(WindowHandle window, int width, int height, floa
     impl->metalLayer.pixelFormat = MTLPixelFormatBGRA8Unorm;
     impl->metalLayer.framebufferOnly = YES; // Drawable is only written to (FXAA uses offscreenTexture)
     impl->metalLayer.drawableSize = CGSizeMake(width, height);
+#if TARGET_OS_OSX
+    if (@available(macOS 10.13, *)) {
+        impl->metalLayer.displaySyncEnabled = impl->vsyncEnabled ? YES : NO;
+    }
+#endif
     [contentView setLayer:impl->metalLayer];
 
     // Create depth texture
@@ -639,6 +711,8 @@ void MetalRenderAPI::shutdown()
     impl->shadowAlphaTestPipeline = nil;
     impl->skyboxPipeline = nil;
     impl->fxaaPipeline = nil;
+    impl->ssaoPipeline = nil;
+    impl->ssaoBlurPipeline = nil;
     for (int i = 0; i < MetalRenderAPIImpl::MAX_FRAMES_IN_FLIGHT; i++) {
         impl->perObjectBuffers[i] = nil;
         impl->perObjectMapped[i] = nullptr;
@@ -647,6 +721,14 @@ void MetalRenderAPI::shutdown()
     impl->shadowMapArray = nil;
     impl->offscreenTexture = nil;
     impl->offscreenDepthTexture = nil;
+    impl->ssaoRawTexture = nil;
+    impl->ssaoBlurTempTexture = nil;
+    impl->ssaoBlurredTexture = nil;
+    impl->ssaoNoiseTexture = nil;
+    impl->ssaoFallbackTexture = nil;
+    impl->ssaoDepthSampler = nil;
+    impl->ssaoNoiseSampler = nil;
+    impl->ssaoInitialized = false;
     impl->viewportTexture = nil;
     impl->viewportDepthTexture = nil;
     impl->skyboxVertexBuffer = nil;

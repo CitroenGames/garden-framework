@@ -82,6 +82,8 @@ public:
     virtual IGPUMesh* createMesh() override;
 
     virtual const char* getAPIName() const override { return "Metal"; }
+    virtual void setVSyncEnabled(bool enabled) override;
+    virtual bool isVSyncEnabled() const override;
 
     // Graphics settings
     virtual void setFXAAEnabled(bool enabled) override;

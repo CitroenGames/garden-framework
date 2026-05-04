@@ -43,6 +43,8 @@ void MetalRenderAPIImpl::createOffscreenResources(int w, int h)
                                  withBytes:&white
                                bytesPerRow:1];
     }
+
+    createSSAOResources(w, h);
 }
 
 void MetalRenderAPIImpl::createOffscreenResources()
@@ -134,6 +136,11 @@ void MetalRenderAPI::endSceneRender()
                 impl->mainPassActive = false;
             }
 
+            id<MTLTexture> ssaoTexture = nil;
+            if (impl->fxaaEnabled && impl->fxaaInitialized && pie.offscreenDepthTexture) {
+                ssaoTexture = impl->runSSAOPasses(pie.offscreenDepthTexture, pie.width, pie.height);
+            }
+
             // Apply FXAA from PIE offscreen -> PIE color texture
             if (impl->fxaaEnabled && impl->fxaaInitialized && impl->fxaaPipeline && pie.offscreenTexture)
             {
@@ -153,11 +160,17 @@ void MetalRenderAPI::endSceneRender()
                     [fxaaEncoder setViewport:viewport];
 
                     [fxaaEncoder setFragmentTexture:pie.offscreenTexture atIndex:0];
+                    id<MTLTexture> aoTexture = ssaoTexture ? ssaoTexture : impl->ssaoFallbackTexture;
+                    if (aoTexture) {
+                        [fxaaEncoder setFragmentTexture:aoTexture atIndex:1];
+                    }
                     [fxaaEncoder setFragmentSamplerState:impl->defaultSampler atIndex:0];
 
                     MetalFXAAUniforms fxaaUniforms;
                     fxaaUniforms.inverseScreenSize = glm::vec2(
                         1.0f / std::max(pie.width, 1), 1.0f / std::max(pie.height, 1));
+                    fxaaUniforms.exposure = 1.0f;
+                    fxaaUniforms.ssaoEnabled = ssaoTexture ? 1 : 0;
                     [fxaaEncoder setFragmentBytes:&fxaaUniforms length:sizeof(fxaaUniforms) atIndex:0];
 
                     [fxaaEncoder setVertexBuffer:impl->fxaaVertexBuffer offset:0 atIndex:0];
@@ -190,6 +203,12 @@ void MetalRenderAPI::endSceneRender()
         impl->mainPassActive = false;
     }
 
+    id<MTLTexture> ssaoTexture = nil;
+    if (impl->fxaaEnabled && impl->fxaaInitialized && impl->offscreenDepthTexture) {
+        ssaoTexture = impl->runSSAOPasses(impl->offscreenDepthTexture,
+                                          impl->viewportWidthRT, impl->viewportHeightRT);
+    }
+
     // Apply FXAA from offscreen -> viewportTexture
     if (impl->fxaaEnabled && impl->fxaaInitialized && impl->fxaaPipeline && impl->offscreenTexture)
     {
@@ -210,11 +229,17 @@ void MetalRenderAPI::endSceneRender()
             [fxaaEncoder setViewport:viewport];
 
             [fxaaEncoder setFragmentTexture:impl->offscreenTexture atIndex:0];
+            id<MTLTexture> aoTexture = ssaoTexture ? ssaoTexture : impl->ssaoFallbackTexture;
+            if (aoTexture) {
+                [fxaaEncoder setFragmentTexture:aoTexture atIndex:1];
+            }
             [fxaaEncoder setFragmentSamplerState:impl->defaultSampler atIndex:0];
 
             MetalFXAAUniforms fxaaUniforms;
             fxaaUniforms.inverseScreenSize = glm::vec2(
                 1.0f / impl->viewportWidthRT, 1.0f / impl->viewportHeightRT);
+            fxaaUniforms.exposure = 1.0f;
+            fxaaUniforms.ssaoEnabled = ssaoTexture ? 1 : 0;
             [fxaaEncoder setFragmentBytes:&fxaaUniforms length:sizeof(fxaaUniforms) atIndex:0];
 
             [fxaaEncoder setVertexBuffer:impl->fxaaVertexBuffer offset:0 atIndex:0];

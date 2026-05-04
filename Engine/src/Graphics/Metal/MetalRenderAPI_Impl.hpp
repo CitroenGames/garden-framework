@@ -70,6 +70,7 @@ struct MetalRenderAPIImpl {
     id<MTLBuffer> fxaaVertexBuffer = nil;
     id<MTLTexture> offscreenTexture = nil;
     id<MTLTexture> offscreenDepthTexture = nil;
+    bool vsyncEnabled = true;
     bool fxaaEnabled = true;
     bool fxaaInitialized = false;
 
@@ -85,6 +86,8 @@ struct MetalRenderAPIImpl {
     id<MTLSamplerState> ssaoNoiseSampler = nil;
     bool ssaoEnabled = true;
     bool ssaoInitialized = false;
+    int ssaoWidth = 0;
+    int ssaoHeight = 0;
     float ssaoRadius = 0.5f;
     float ssaoIntensity = 1.5f;
     float ssaoBias = 0.025f;
@@ -238,7 +241,7 @@ struct MetalRenderAPIImpl {
                                                                                        width:w
                                                                                       height:h
                                                                                    mipmapped:NO];
-        desc.usage = MTLTextureUsageRenderTarget;
+        desc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
         desc.storageMode = MTLStorageModePrivate;
         return [device newTextureWithDescriptor:desc];
     }
@@ -300,4 +303,8 @@ struct MetalRenderAPIImpl {
     void createOffscreenResources();
     void createViewportResources(int w, int h);
     void createPIEViewportTextures(PIEViewportTarget& target, int w, int h);
+
+    // Defined in MetalRenderAPI_SSAO.mm
+    void createSSAOResources(int w, int h);
+    id<MTLTexture> runSSAOPasses(id<MTLTexture> depthTexture, int w, int h);
 };
