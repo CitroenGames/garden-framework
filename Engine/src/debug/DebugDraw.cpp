@@ -91,6 +91,12 @@ void DebugDraw::drawSphere(const glm::vec3& center, float radius,
 void DebugDraw::drawCapsule(const glm::vec3& base, const glm::vec3& tip, float radius,
                              const glm::vec3& color, int segments, float duration)
 {
+    if (radius <= 0.0f)
+    {
+        drawLine(base, tip, color, duration);
+        return;
+    }
+
     glm::vec3 axis = tip - base;
     float height = glm::length(axis);
     if (height < 0.0001f)
@@ -113,10 +119,12 @@ void DebugDraw::drawCapsule(const glm::vec3& base, const glm::vec3& tip, float r
     }
     perp2 = glm::cross(up, perp1);
 
-    float step = 2.0f * static_cast<float>(M_PI) / static_cast<float>(segments);
+    int ring_segments = std::max(4, segments);
+    int arc_segments = std::max(2, ring_segments / 2);
+    float step = 2.0f * static_cast<float>(M_PI) / static_cast<float>(ring_segments);
 
     // Draw circles at base and tip
-    for (int i = 0; i < segments; i++)
+    for (int i = 0; i < ring_segments; i++)
     {
         float a0 = step * i;
         float a1 = step * (i + 1);
@@ -128,7 +136,7 @@ void DebugDraw::drawCapsule(const glm::vec3& base, const glm::vec3& tip, float r
     }
 
     // Draw connecting lines
-    int num_lines = std::min(segments, 4);
+    int num_lines = std::min(ring_segments, 4);
     float line_step = 2.0f * static_cast<float>(M_PI) / static_cast<float>(num_lines);
     for (int i = 0; i < num_lines; i++)
     {
@@ -137,32 +145,25 @@ void DebugDraw::drawCapsule(const glm::vec3& base, const glm::vec3& tip, float r
         addLine(base + d, tip + d, color, duration);
     }
 
-    // Draw hemisphere arcs at base and tip
-    int half_seg = segments / 2;
-    float half_step = static_cast<float>(M_PI) / static_cast<float>(half_seg);
-    for (int i = 0; i < half_seg; i++)
-    {
-        float a0 = half_step * i;
-        float a1 = half_step * (i + 1);
+    auto drawCapArc = [&](const glm::vec3& center, const glm::vec3& cap_direction, const glm::vec3& radial) {
+        float arc_step = static_cast<float>(M_PI) / static_cast<float>(arc_segments);
+        for (int i = 0; i < arc_segments; i++)
+        {
+            float a0 = arc_step * i;
+            float a1 = arc_step * (i + 1);
 
-        // Bottom hemisphere (going down from base)
-        glm::vec3 b0 = base + (-up * std::cos(a0) + perp1 * std::sin(a0)) * radius;
-        glm::vec3 b1 = base + (-up * std::cos(a1) + perp1 * std::sin(a1)) * radius;
-        addLine(b0, b1, color, duration);
+            glm::vec3 p0 = center + (radial * std::cos(a0) + cap_direction * std::sin(a0)) * radius;
+            glm::vec3 p1 = center + (radial * std::cos(a1) + cap_direction * std::sin(a1)) * radius;
+            addLine(p0, p1, color, duration);
+        }
+    };
 
-        b0 = base + (-up * std::cos(a0) + perp2 * std::sin(a0)) * radius;
-        b1 = base + (-up * std::cos(a1) + perp2 * std::sin(a1)) * radius;
-        addLine(b0, b1, color, duration);
-
-        // Top hemisphere (going up from tip)
-        glm::vec3 t0 = tip + (up * std::cos(a0) + perp1 * std::sin(a0)) * radius;
-        glm::vec3 t1 = tip + (up * std::cos(a1) + perp1 * std::sin(a1)) * radius;
-        addLine(t0, t1, color, duration);
-
-        t0 = tip + (up * std::cos(a0) + perp2 * std::sin(a0)) * radius;
-        t1 = tip + (up * std::cos(a1) + perp2 * std::sin(a1)) * radius;
-        addLine(t0, t1, color, duration);
-    }
+    // Draw hemisphere meridians. Each arc starts and ends on the equator ring and passes through
+    // the outer cap pole; it should not cross into the cylindrical span.
+    drawCapArc(base, -up, perp1);
+    drawCapArc(base, -up, perp2);
+    drawCapArc(tip, up, perp1);
+    drawCapArc(tip, up, perp2);
 }
 
 void DebugDraw::drawRay(const glm::vec3& origin, const glm::vec3& direction, float length,
