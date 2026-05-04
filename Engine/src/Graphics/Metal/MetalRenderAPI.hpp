@@ -90,10 +90,12 @@ public:
     virtual bool isFXAAEnabled() const override;
     virtual void setShadowQuality(int quality) override;
     virtual int getShadowQuality() const override;
+    virtual void setShadowCascadeCount(int count) override;
     virtual void setSSAOEnabled(bool enabled) override;
     virtual bool isSSAOEnabled() const override;
     virtual void setSSAORadius(float radius) override;
     virtual void setSSAOIntensity(float intensity) override;
+    virtual RenderFrameStats getLastFrameStats() const override;
 
     // Autorelease pool support (drains ObjC temporaries each frame)
     virtual void executeWithAutoreleasePool(std::function<void()> fn) override;

@@ -36,6 +36,11 @@ struct MetalGlobalUBO {
     float alphaCutoff;
     float _globalPad1;
     glm::vec2 shadowMapTexelSize;
+    float metallic;
+    float roughness;
+    glm::vec2 _pbrPad;
+    glm::vec3 emissive;
+    float _pbrPad2;
 };
 
 struct MetalShadowUBO {

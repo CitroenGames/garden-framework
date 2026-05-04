@@ -21,6 +21,8 @@ void MetalRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
     id<MTLRenderCommandEncoder> enc = impl->encoder;
     if (!enc) return;
 
+    impl->lastFrameStats.submitted_draw_commands += cmds.size();
+
     // Build per-frame UBO once
     impl->updatePerFrameUBO();
     MetalGlobalUBO globalUBO = impl->cachedPerFrameUBO;
@@ -105,6 +107,7 @@ void MetalRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
             }
 
             impl->drawCallCount++;
+            impl->lastFrameStats.backend_draw_calls++;
             continue;
         }
 
@@ -144,6 +147,9 @@ void MetalRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
         ubo.color = drawCmd.color;
         ubo.useTexture = drawCmd.use_texture ? 1 : 0;
         ubo.alphaCutoff = drawCmd.alpha_cutoff;
+        ubo.metallic = drawCmd.metallic;
+        ubo.roughness = drawCmd.roughness;
+        ubo.emissive = drawCmd.emissive;
 
         [enc setVertexBytes:&ubo length:sizeof(ubo) atIndex:1];
         [enc setFragmentBytes:&ubo length:sizeof(ubo) atIndex:0];
@@ -200,6 +206,7 @@ void MetalRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
                         vertexCount:metalMesh->getVertexCount()];
         }
         impl->drawCallCount++;
+        impl->lastFrameStats.backend_draw_calls++;
     }
 }
 
@@ -207,13 +214,15 @@ void MetalRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
 // Helper: replay a range of commands on a given encoder
 // ============================================================================
 
-static void replayCommandRange(MetalRenderAPIImpl* impl,
-                                id<MTLRenderCommandEncoder> enc,
-                                const RenderCommandBuffer& cmds,
-                                size_t start, size_t end,
-                                const MetalGlobalUBO& globalUBO,
-                                int rtWidth, int rtHeight)
+static uint64_t replayCommandRange(MetalRenderAPIImpl* impl,
+                                   id<MTLRenderCommandEncoder> enc,
+                                   const RenderCommandBuffer& cmds,
+                                   size_t start, size_t end,
+                                   const MetalGlobalUBO& globalUBO,
+                                   int rtWidth, int rtHeight)
 {
+    uint64_t drawCount = 0;
+
     // Set up per-encoder state
     MTLViewport viewport = {0, 0, (double)rtWidth, (double)rtHeight, 0, 1};
     [enc setViewport:viewport];
@@ -276,6 +285,9 @@ static void replayCommandRange(MetalRenderAPIImpl* impl,
         ubo.color = drawCmd.color;
         ubo.useTexture = drawCmd.use_texture ? 1 : 0;
         ubo.alphaCutoff = drawCmd.alpha_cutoff;
+        ubo.metallic = drawCmd.metallic;
+        ubo.roughness = drawCmd.roughness;
+        ubo.emissive = drawCmd.emissive;
         [enc setVertexBytes:&ubo length:sizeof(ubo) atIndex:1];
         [enc setFragmentBytes:&ubo length:sizeof(ubo) atIndex:0];
 
@@ -330,9 +342,11 @@ static void replayCommandRange(MetalRenderAPIImpl* impl,
                         vertexStart:0
                         vertexCount:metalMesh->getVertexCount()];
         }
+        drawCount++;
     }
 
     [enc endEncoding];
+    return drawCount;
 }
 
 // ============================================================================
@@ -453,6 +467,7 @@ void MetalRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
         return;
     }
     parallelEncoder.label = @"Parallel Replay Encoder";
+    impl->lastFrameStats.submitted_draw_commands += cmds.size();
 
     // Determine worker count
     uint32_t numWorkers = std::min(4u, static_cast<uint32_t>(
@@ -472,7 +487,7 @@ void MetalRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
     }
 
     // Launch workers
-    std::vector<std::future<void>> futures;
+    std::vector<std::future<uint64_t>> futures;
     futures.reserve(numWorkers);
 
     for (uint32_t w = 0; w < numWorkers; w++) {
@@ -483,13 +498,16 @@ void MetalRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
             [implPtr = impl.get(), enc = subordinates[w], &cmds, start, end, globalUBO, rtWidth, rtHeight]()
             {
                 @autoreleasepool {
-                    replayCommandRange(implPtr, enc, cmds, start, end, globalUBO, rtWidth, rtHeight);
+                    return replayCommandRange(implPtr, enc, cmds, start, end, globalUBO, rtWidth, rtHeight);
                 }
             }));
     }
 
     // Wait for all workers
-    for (auto& f : futures) f.get();
+    uint64_t parallelDraws = 0;
+    for (auto& f : futures) parallelDraws += f.get();
+    impl->lastFrameStats.backend_draw_calls += parallelDraws;
+    impl->drawCallCount += static_cast<uint32_t>(parallelDraws);
 
     // End parallel encoder
     [parallelEncoder endEncoding];

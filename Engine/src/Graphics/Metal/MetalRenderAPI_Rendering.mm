@@ -287,10 +287,11 @@ void MetalRenderAPI::renderMesh(const mesh& m, const RenderState& state)
 
     // Main pass rendering
     // Select pipeline based on blend mode
-    id<MTLRenderPipelineState> pipeline = impl->basicPipeline;
+    const bool lit = state.lighting && impl->lightingEnabled;
+    id<MTLRenderPipelineState> pipeline = lit ? impl->basicPipeline : impl->unlitPipeline;
     switch (state.blend_mode) {
-        case BlendMode::Alpha:    pipeline = impl->basicPipelineAlpha; break;
-        case BlendMode::Additive: pipeline = impl->basicPipelineAdditive; break;
+        case BlendMode::Alpha:    pipeline = lit ? impl->basicPipelineAlpha : impl->unlitPipelineAlpha; break;
+        case BlendMode::Additive: pipeline = lit ? impl->basicPipelineAdditive : impl->unlitPipelineAdditive; break;
         default: break;
     }
     [impl->encoder setRenderPipelineState:pipeline];
@@ -320,6 +321,10 @@ void MetalRenderAPI::renderMesh(const mesh& m, const RenderState& state)
     MetalGlobalUBO ubo = impl->cachedPerFrameUBO;
     ubo.color = state.color;
     ubo.useTexture = (m.texture_set && m.texture != INVALID_TEXTURE) ? 1 : 0;
+    ubo.alphaCutoff = state.alpha_cutoff;
+    ubo.metallic = 0.0f;
+    ubo.roughness = 0.5f;
+    ubo.emissive = glm::vec3(0.0f);
 
     [impl->encoder setVertexBytes:&ubo length:sizeof(ubo) atIndex:1];
     [impl->encoder setFragmentBytes:&ubo length:sizeof(ubo) atIndex:0];
@@ -383,6 +388,7 @@ void MetalRenderAPI::renderMesh(const mesh& m, const RenderState& state)
     }
 #endif
     impl->drawCallCount++;
+    impl->lastFrameStats.backend_draw_calls++;
 }
 
 void MetalRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t vertex_count, const RenderState& state)
@@ -438,10 +444,11 @@ void MetalRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t 
     }
 
     // Main pass - optimized with redundant bind tracking
-    id<MTLRenderPipelineState> pipeline = impl->basicPipeline;
+    const bool lit = state.lighting && impl->lightingEnabled;
+    id<MTLRenderPipelineState> pipeline = lit ? impl->basicPipeline : impl->unlitPipeline;
     switch (state.blend_mode) {
-        case BlendMode::Alpha:    pipeline = impl->basicPipelineAlpha; break;
-        case BlendMode::Additive: pipeline = impl->basicPipelineAdditive; break;
+        case BlendMode::Alpha:    pipeline = lit ? impl->basicPipelineAlpha : impl->unlitPipelineAlpha; break;
+        case BlendMode::Additive: pipeline = lit ? impl->basicPipelineAdditive : impl->unlitPipelineAdditive; break;
         default: break;
     }
     if (pipeline != impl->lastBoundPipeline) {
@@ -480,6 +487,10 @@ void MetalRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t 
     MetalGlobalUBO ubo = impl->cachedPerFrameUBO;
     ubo.color = state.color;
     ubo.useTexture = (impl->boundTexture != INVALID_TEXTURE) ? 1 : 0;
+    ubo.alphaCutoff = state.alpha_cutoff;
+    ubo.metallic = 0.0f;
+    ubo.roughness = 0.5f;
+    ubo.emissive = glm::vec3(0.0f);
 
     [impl->encoder setVertexBytes:&ubo length:sizeof(ubo) atIndex:1];
     [impl->encoder setFragmentBytes:&ubo length:sizeof(ubo) atIndex:0];
@@ -538,6 +549,7 @@ void MetalRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t 
         [impl->encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:start_vertex vertexCount:vertex_count];
     }
     impl->drawCallCount++;
+    impl->lastFrameStats.backend_draw_calls++;
 }
 
 // ============================================================================

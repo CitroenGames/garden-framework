@@ -125,6 +125,7 @@ struct MetalRenderAPIImpl {
     id<MTLSamplerState> shadowSampler = nil;
     uint32_t shadowMapSize = 4096;
     int shadowQuality = 3;
+    int activeCascadeCount = 2;
     bool inShadowPass = false;
     int currentCascade = 0;
     float cascadeSplitDistances[5] = { 0.1f, 10.0f, 35.0f, 90.0f, 200.0f };
@@ -189,6 +190,7 @@ struct MetalRenderAPIImpl {
     // Draw call counter for diagnostics
     uint32_t drawCallCount = 0;
     uint32_t frameNumber = 0;
+    RenderFrameStats lastFrameStats{};
 
     // GPU error tracking for auto-recovery
     uint32_t gpuErrorCount = 0;
@@ -211,10 +213,13 @@ struct MetalRenderAPIImpl {
         cachedPerFrameUBO.cascadeSplit4 = cascadeSplitDistances[4];
         cachedPerFrameUBO.lightDir = lightDirection;
         cachedPerFrameUBO.lightAmbient = lightAmbient;
-        cachedPerFrameUBO.cascadeCount = (shadowQuality > 0) ? NUM_CASCADES : 0;
+        cachedPerFrameUBO.cascadeCount = (shadowQuality > 0) ? std::clamp(activeCascadeCount, 1, NUM_CASCADES) : 0;
         cachedPerFrameUBO.lightDiffuse = lightDiffuse;
         cachedPerFrameUBO.debugCascades = 0;
         cachedPerFrameUBO.alphaCutoff = 0.0f;
+        cachedPerFrameUBO.metallic = 0.0f;
+        cachedPerFrameUBO.roughness = 0.5f;
+        cachedPerFrameUBO.emissive = glm::vec3(0.0f);
         cachedPerFrameUBO.shadowMapTexelSize = glm::vec2(1.0f / static_cast<float>(shadowMapSize));
         perFrameUBOReady = true;
     }

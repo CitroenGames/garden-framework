@@ -8,6 +8,13 @@
 // Frame lifecycle
 // ============================================================================
 
+RenderFrameStats MetalRenderAPI::getLastFrameStats() const
+{
+    RenderFrameStats stats = impl->lastFrameStats;
+    stats.backend_name = getAPIName();
+    return stats;
+}
+
 void MetalRenderAPI::resize(int width, int height)
 {
     if (width <= 0 || height <= 0) return;
@@ -164,6 +171,12 @@ void MetalRenderAPI::beginFrame()
     impl->shadowMapBound = false;
     impl->perFrameUBOReady = false;
     impl->drawCallCount = 0;
+    impl->lastFrameStats.backend_name = getAPIName();
+    impl->lastFrameStats.gpu_frame_ms_valid = false;
+    impl->lastFrameStats.submitted_draw_commands = 0;
+    impl->lastFrameStats.backend_draw_calls = 0;
+    impl->lastFrameStats.instanced_batches = 0;
+    impl->lastFrameStats.instanced_instances = 0;
 
     impl->frameStarted = true;
 }

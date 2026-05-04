@@ -50,12 +50,16 @@ void MetalRenderAPIImpl::createShadowResources()
 
 void MetalRenderAPIImpl::calculateCascadeSplits(float nearPlane, float farPlane)
 {
+    const int cascadeCount = std::clamp(activeCascadeCount, 1, NUM_CASCADES);
     cascadeSplitDistances[0] = nearPlane;
-    for (int i = 1; i <= NUM_CASCADES; i++) {
-        float p = static_cast<float>(i) / static_cast<float>(NUM_CASCADES);
+    for (int i = 1; i <= cascadeCount; i++) {
+        float p = static_cast<float>(i) / static_cast<float>(cascadeCount);
         float log_split = nearPlane * std::pow(farPlane / nearPlane, p);
         float linear = nearPlane + (farPlane - nearPlane) * p;
         cascadeSplitDistances[i] = cascadeSplitLambda * log_split + (1.0f - cascadeSplitLambda) * linear;
+    }
+    for (int i = cascadeCount + 1; i <= NUM_CASCADES; i++) {
+        cascadeSplitDistances[i] = farPlane;
     }
 }
 
@@ -142,7 +146,8 @@ void MetalRenderAPI::beginShadowPass(const glm::vec3& lightDir)
     int rtWidth = impl->viewportTexture ? impl->viewportWidthRT : impl->viewportWidth;
     int rtHeight = impl->viewportTexture ? impl->viewportHeightRT : impl->viewportHeight;
     float aspect = static_cast<float>(rtWidth) / static_cast<float>(rtHeight);
-    for (int i = 0; i < MetalRenderAPIImpl::NUM_CASCADES; i++) {
+    const int cascadeCount = getCascadeCount();
+    for (int i = 0; i < cascadeCount; i++) {
         impl->lightSpaceMatrices[i] = impl->getLightSpaceMatrixForCascade(i, lightDir, impl->viewMatrix, impl->fieldOfView, aspect);
     }
     impl->currentCascade = 0;
@@ -172,7 +177,8 @@ void MetalRenderAPI::beginShadowPass(const glm::vec3& lightDir, const camera& ca
     int rtWidth = impl->viewportTexture ? impl->viewportWidthRT : impl->viewportWidth;
     int rtHeight = impl->viewportTexture ? impl->viewportHeightRT : impl->viewportHeight;
     float aspect = static_cast<float>(rtWidth) / static_cast<float>(rtHeight);
-    for (int i = 0; i < MetalRenderAPIImpl::NUM_CASCADES; i++) {
+    const int cascadeCount = getCascadeCount();
+    for (int i = 0; i < cascadeCount; i++) {
         impl->lightSpaceMatrices[i] = impl->getLightSpaceMatrixForCascade(i, lightDir, impl->viewMatrix, impl->fieldOfView, aspect);
     }
     impl->currentCascade = 0;
@@ -181,6 +187,7 @@ void MetalRenderAPI::beginShadowPass(const glm::vec3& lightDir, const camera& ca
 void MetalRenderAPI::beginCascade(int cascadeIndex)
 {
     if (!impl->inShadowPass) return;
+    if (cascadeIndex < 0 || cascadeIndex >= getCascadeCount()) return;
     impl->currentCascade = cascadeIndex;
 
     // End current encoder if active
@@ -301,6 +308,12 @@ void MetalRenderAPI::endShadowPass()
     impl->shadowMapBound = false;
     impl->perFrameUBOReady = false;
     impl->drawCallCount = 0;
+    impl->lastFrameStats.backend_name = getAPIName();
+    impl->lastFrameStats.gpu_frame_ms_valid = false;
+    impl->lastFrameStats.submitted_draw_commands = 0;
+    impl->lastFrameStats.backend_draw_calls = 0;
+    impl->lastFrameStats.instanced_batches = 0;
+    impl->lastFrameStats.instanced_instances = 0;
     [impl->encoder setCullMode:MTLCullModeBack];
     [impl->encoder setFrontFacingWinding:MTLWindingCounterClockwise];
 }
@@ -317,7 +330,8 @@ glm::mat4 MetalRenderAPI::getLightSpaceMatrix()
 
 int MetalRenderAPI::getCascadeCount() const
 {
-    return (impl->shadowQuality > 0 && impl->shadowPipeline) ? MetalRenderAPIImpl::NUM_CASCADES : 0;
+    if (impl->shadowQuality <= 0 || !impl->shadowPipeline) return 0;
+    return std::clamp(impl->activeCascadeCount, 1, MetalRenderAPIImpl::NUM_CASCADES);
 }
 
 const float* MetalRenderAPI::getCascadeSplitDistances() const
@@ -353,4 +367,10 @@ void MetalRenderAPI::setShadowQuality(int quality)
 int MetalRenderAPI::getShadowQuality() const
 {
     return impl->shadowQuality;
+}
+
+void MetalRenderAPI::setShadowCascadeCount(int count)
+{
+    impl->activeCascadeCount = std::clamp(count, 1, MetalRenderAPIImpl::NUM_CASCADES);
+    impl->perFrameUBOReady = false;
 }

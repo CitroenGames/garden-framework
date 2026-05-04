@@ -62,33 +62,6 @@ fragment float4 basic_fragment(BasicVertexOut in [[stage_in]],
                                 sampler shadowSampler [[sampler(1)]],
                                 constant LightCBuffer& lights [[buffer(3)]])
 {
-    float3 lighting;
-    if (enableLighting) {
-        float3 norm = normalize(in.normal);
-        float3 lightDir = normalize(-ubo.lightDir);
-        float diff = max(dot(norm, lightDir), 0.0);
-
-        float3 ambient = ubo.lightAmbient;
-        float3 diffuse = ubo.lightDiffuse * diff;
-
-        // Calculate shadow using CSM
-        float shadow = 0.0;
-        if (ubo.cascadeCount > 0) {
-            shadow = ShadowCalculationWithBlend(ubo, in.fragPos, norm, in.viewDepth, shadowMap, shadowSampler);
-        }
-        lighting = ambient + shadow * diffuse;
-
-        // Point lights
-        for (int i = 0; i < lights.numPointLights; i++)
-            lighting += CalcPointLight(lights.pointLights[i], norm, in.fragPos);
-
-        // Spot lights
-        for (int j = 0; j < lights.numSpotLights; j++)
-            lighting += CalcSpotLight(lights.spotLights[j], norm, in.fragPos);
-    } else {
-        lighting = float3(1.0);
-    }
-
     float4 texColor;
     if (ubo.useTexture != 0) {
         texColor = tex.sample(texSampler, in.texCoord);
@@ -99,11 +72,46 @@ fragment float4 basic_fragment(BasicVertexOut in [[stage_in]],
         texColor = float4(ubo.color, 1.0);
     }
 
+    float3 albedo = texColor.rgb;
+    float metallic = saturate(ubo.metallic);
+    float roughness = max(ubo.roughness, 0.04);
+    float3 emissive = float3(ubo.emissive);
+
+    float3 lighting;
+    if (enableLighting) {
+        float3 norm = normalize(in.normal);
+        float3 lightDir = normalize(-float3(ubo.lightDir));
+        float3 viewDir = normalize(float3(lights.cameraPos) - in.fragPos);
+
+        // Calculate shadow using CSM
+        float shadow = 1.0;
+        if (ubo.cascadeCount > 0) {
+            shadow = ShadowCalculationWithBlend(ubo, in.fragPos, norm, in.viewDepth, shadowMap, shadowSampler);
+        }
+
+        float3 ambient = float3(ubo.lightAmbient) * albedo;
+        float3 direct = shadow * CalcPBRDirectional(norm, viewDir, lightDir, float3(ubo.lightDiffuse),
+                                                    albedo, metallic, roughness);
+        lighting = ambient + direct + emissive;
+
+        // Point lights
+        for (int i = 0; i < lights.numPointLights; i++)
+            lighting += CalcPBRPointLight(lights.pointLights[i], norm, viewDir, in.fragPos,
+                                          albedo, metallic, roughness);
+
+        // Spot lights
+        for (int j = 0; j < lights.numSpotLights; j++)
+            lighting += CalcPBRSpotLight(lights.spotLights[j], norm, viewDir, in.fragPos,
+                                         albedo, metallic, roughness);
+    } else {
+        lighting = albedo;
+    }
+
     // Debug cascade visualization
     if (enableLighting && ubo.debugCascades != 0) {
         int cascadeIdx = getCascadeIndex(ubo, in.viewDepth);
-        texColor.rgb = mix(texColor.rgb, cascadeColors[cascadeIdx], 0.3);
+        lighting = mix(lighting, cascadeColors[cascadeIdx], 0.3);
     }
 
-    return float4(lighting * texColor.rgb, texColor.a);
+    return float4(lighting, texColor.a);
 }
