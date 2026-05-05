@@ -30,6 +30,18 @@ namespace {
         ConVarBase* cvar = ConVarRegistry::get().find(name);
         return cvar ? cvar->getFloat() : fallback;
     }
+
+    CharacterMoveInput toCharacterMoveInput(const Net::MovementInput& input)
+    {
+        CharacterMoveInput out;
+        out.move_forward = input.move_forward;
+        out.move_right = input.move_right;
+        out.camera_yaw = input.camera_yaw;
+        out.camera_pitch = input.camera_pitch;
+        if ((input.buttons & Net::InputFlags::JUMP) != 0)
+            out.buttons |= CharacterMoveFlags::Jump;
+        return out;
+    }
 }
 
 #ifdef _WIN32
@@ -538,10 +550,21 @@ void ServerNetworkManager::handleInputCommand(uint16_t client_id, BitReader& rea
         move_state.grounded = player.grounded;
         move_state.ground_normal = player.ground_normal;
 
-        MovementState result = SharedMovement::simulate(move_input, move_state, movement_config);
+        MovementState result;
+        if (game_world->registry.all_of<CharacterControllerComponent>(player_entity)) {
+            CharacterControllerState controller_state = game_world->simulate_character_controller(
+                player_entity, toCharacterMoveInput(move_input), movement_config.fixed_delta);
+            result.position = controller_state.position;
+            result.velocity = controller_state.velocity;
+            result.grounded = controller_state.grounded;
+            result.ground_normal = controller_state.ground_normal;
+        } else {
+            result = SharedMovement::simulate(move_input, move_state, movement_config);
+        }
         transform.position = result.position;
         rigidbody.velocity = result.velocity;
         player.grounded = result.grounded;
+        player.ground_normal = result.ground_normal;
 
         it->second.info.last_input_tick = sample.tick;
 
@@ -618,8 +641,12 @@ WorldSnapshot ServerNetworkManager::generateWorldSnapshot()
             comp_snapshot.velocity = rb.velocity;
         }
 
-        // Add grounded state if entity is a player
-        if (game_world->registry.all_of<PlayerComponent>(entity)) {
+        // Add grounded state if entity uses engine character movement
+        if (game_world->registry.all_of<CharacterControllerComponent>(entity)) {
+            auto& controller = game_world->registry.get<CharacterControllerComponent>(entity);
+            comp_snapshot.grounded = controller.grounded;
+            comp_snapshot.ground_normal = controller.ground_normal;
+        } else if (game_world->registry.all_of<PlayerComponent>(entity)) {
             auto& player = game_world->registry.get<PlayerComponent>(entity);
             comp_snapshot.grounded = player.grounded;
             comp_snapshot.ground_normal = player.ground_normal;

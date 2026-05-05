@@ -2528,11 +2528,18 @@ bool LevelManager::instantiateLevelParallel(
             pc.jump_force = entity_data.jump_force;
             pc.mouse_sensitivity = entity_data.mouse_sensitivity;
 
+            auto& cc = game_world.registry.get_or_emplace<CharacterControllerComponent>(e);
+            cc.move_speed = entity_data.speed;
+            cc.jump_velocity = entity_data.jump_force;
+            cc.input_enabled = pc.input_enabled;
+            cc.capsule_half_height = pc.capsule_half_height;
+            cc.capsule_radius = pc.capsule_radius;
+
             if (!game_world.registry.all_of<RigidBodyComponent>(e)) {
                 game_world.registry.emplace<RigidBodyComponent>(e);
                 auto& rb = game_world.registry.get<RigidBodyComponent>(e);
                 rb.mass = 80.0f;
-                rb.apply_gravity = true;
+                rb.apply_gravity = false;
             }
 
             {
@@ -2734,13 +2741,20 @@ bool LevelManager::instantiateLevel(
             pc.jump_force = entity_data.jump_force;
             pc.mouse_sensitivity = entity_data.mouse_sensitivity;
 
+            auto& cc = game_world.registry.get_or_emplace<CharacterControllerComponent>(e);
+            cc.move_speed = entity_data.speed;
+            cc.jump_velocity = entity_data.jump_force;
+            cc.input_enabled = pc.input_enabled;
+            cc.capsule_half_height = pc.capsule_half_height;
+            cc.capsule_radius = pc.capsule_radius;
+
             // Ensure player has a RigidBodyComponent
             if (!game_world.registry.all_of<RigidBodyComponent>(e))
             {
                 game_world.registry.emplace<RigidBodyComponent>(e);
                 auto& rb = game_world.registry.get<RigidBodyComponent>(e);
                 rb.mass = 80.0f;
-                rb.apply_gravity = true;
+                rb.apply_gravity = false;
             }
 
             // Create Jolt capsule body for player collision

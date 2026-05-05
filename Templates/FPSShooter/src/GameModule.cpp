@@ -43,6 +43,38 @@ using Net::PredictionEntry;
 namespace InputFlags = Net::InputFlags;
 namespace SharedMovement = Net::SharedMovement;
 
+static CharacterMoveInput toCharacterMoveInput(const MovementInput& input)
+{
+    CharacterMoveInput out;
+    out.move_forward = input.move_forward;
+    out.move_right = input.move_right;
+    out.camera_yaw = input.camera_yaw;
+    out.camera_pitch = input.camera_pitch;
+    if ((input.buttons & InputFlags::JUMP) != 0)
+        out.buttons |= CharacterMoveFlags::Jump;
+    return out;
+}
+
+static MovementState toMovementState(const CharacterControllerState& state)
+{
+    MovementState out;
+    out.position = state.position;
+    out.velocity = state.velocity;
+    out.grounded = state.grounded;
+    out.ground_normal = state.ground_normal;
+    return out;
+}
+
+static CharacterControllerState toCharacterControllerState(const MovementState& state)
+{
+    CharacterControllerState out;
+    out.position = state.position;
+    out.velocity = state.velocity;
+    out.grounded = state.grounded;
+    out.ground_normal = state.ground_normal;
+    return out;
+}
+
 // ---- Module state ----
 
 static EngineServices* g_services = nullptr;
@@ -170,6 +202,9 @@ GAME_API bool gardenGameInit(EngineServices* services)
                 entt::entity entity = g_network.getEntityByNetworkId(msg.entity_id);
                 if (g_services->game_world->registry.valid(entity)) {
                     auto& registry = g_services->game_world->registry;
+                    if (registry.all_of<CharacterControllerComponent>(entity)) {
+                        g_services->game_world->teleport_character_controller(entity, msg.spawn_position);
+                    }
                     if (registry.all_of<TransformComponent>(entity)) {
                         registry.get<TransformComponent>(entity).position = msg.spawn_position;
                     }
@@ -266,6 +301,17 @@ GAME_API void gardenGameUpdate(float delta_time)
 
     // Network update
     g_network.update(delta_time);
+
+    if (g_network.isConnected())
+    {
+        entt::entity local_player = g_network.getLocalPlayerEntity();
+        if (game_world->registry.valid(local_player) && local_player != g_player_entity)
+        {
+            g_player_entity = local_player;
+            if (g_player_controller)
+                g_player_controller->setPossessedPlayer(g_player_entity);
+        }
+    }
 
     // Update kill feed timers
     for (auto it = g_kill_feed.begin(); it != g_kill_feed.end(); ) {
@@ -369,13 +415,24 @@ GAME_API void gardenGameUpdate(float delta_time)
             move_config.jump_force = pc.jump_force;
             move_config.fixed_delta = game_world->fixed_delta;
 
-            MovementState result = SharedMovement::simulate(move_input, move_state, move_config);
+            auto apply_movement = [&](const MovementInput& input, const MovementState& start_state) {
+                if (game_world->registry.all_of<CharacterControllerComponent>(g_player_entity))
+                {
+                    game_world->set_character_controller_state(g_player_entity, toCharacterControllerState(start_state));
+                    return toMovementState(game_world->simulate_character_controller(
+                        g_player_entity, toCharacterMoveInput(input), move_config.fixed_delta));
+                }
+                return SharedMovement::simulate(input, start_state, move_config);
+            };
+
+            MovementState result = apply_movement(move_input, move_state);
 
             g_network.storeInput(command_tick, move_input, result);
 
             trans.position = result.position;
             rb.velocity = result.velocity;
             pc.grounded = result.grounded;
+            pc.ground_normal = result.ground_normal;
 
             // Server reconciliation with smooth visual correction
             MovementState server_state;
@@ -392,7 +449,7 @@ GAME_API void gardenGameUpdate(float delta_time)
                     g_network.getInputHistory().forEachFrom(server_tick, [&](const PredictionEntry& entry) {
                         replay_state.grounded = entry.predicted_state.grounded;
                         replay_state.ground_normal = entry.predicted_state.ground_normal;
-                        replay_state = SharedMovement::simulate(entry.input, replay_state, move_config);
+                        replay_state = apply_movement(entry.input, replay_state);
                     });
 
                     trans.position = replay_state.position;
@@ -450,7 +507,10 @@ GAME_API void gardenGameUpdate(float delta_time)
         auto& t = game_world->registry.get<TransformComponent>(g_player_entity);
         if (t.position.y < -50)
         {
-            t.position = glm::vec3(0, 5, 0);
+            const glm::vec3 respawn_pos(0, 5, 0);
+            if (game_world->registry.all_of<CharacterControllerComponent>(g_player_entity))
+                game_world->teleport_character_controller(g_player_entity, respawn_pos);
+            t.position = respawn_pos;
             if (game_world->registry.all_of<RigidBodyComponent>(g_player_entity))
                 game_world->registry.get<RigidBodyComponent>(g_player_entity).velocity = glm::vec3(0);
         }

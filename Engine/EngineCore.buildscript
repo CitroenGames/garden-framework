@@ -5,6 +5,7 @@ sources = {
     src/Animation/**/*.cpp
     src/Assets/**/*.cpp
     src/Audio/**/*.cpp
+    src/Character/**/*.cpp
     src/Components/**/*.cpp
     src/Console/**/*.cpp
     src/Debug/**/*.cpp

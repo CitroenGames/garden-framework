@@ -564,6 +564,26 @@ void ClientNetworkManager::handleSpawnPlayer(BitReader& reader)
     transform.position = msg.position;
     game_world->registry.emplace<TransformComponent>(entity, transform);
 
+    RigidBodyComponent rigidbody;
+    rigidbody.mass = 80.0f;
+    rigidbody.apply_gravity = false;
+    game_world->registry.emplace<RigidBodyComponent>(entity, rigidbody);
+
+    PlayerComponent player;
+    player.speed = 10.0f;
+    player.jump_force = 5.0f;
+    player.input_enabled = true;
+    game_world->registry.emplace<PlayerComponent>(entity, player);
+
+    CharacterControllerComponent controller;
+    controller.move_speed = player.speed;
+    controller.jump_velocity = player.jump_force;
+    controller.capsule_half_height = player.capsule_half_height;
+    controller.capsule_radius = player.capsule_radius;
+    controller.mass = rigidbody.mass;
+    controller.input_enabled = player.input_enabled;
+    game_world->registry.emplace<CharacterControllerComponent>(entity, controller);
+
     // Store in mapping
     network_id_to_entity[msg.entity_id] = entity;
 
@@ -571,6 +591,7 @@ void ClientNetworkManager::handleSpawnPlayer(BitReader& reader)
     if (msg.client_id == client_id) {
         local_player_entity = entity;
         local_player_network_id = msg.entity_id;
+        game_world->create_character_controller(entity);
         LOG_ENGINE_INFO("Local player entity created");
     }
 }
@@ -701,6 +722,11 @@ void ClientNetworkManager::createOrUpdateEntity(const EntityUpdateData& update)
             player.grounded = (update.grounded != 0);
             player.ground_normal = update.ground_normal;
         }
+        if (game_world->registry.all_of<CharacterControllerComponent>(entity)) {
+            auto& controller = game_world->registry.get<CharacterControllerComponent>(entity);
+            controller.grounded = (update.grounded != 0);
+            controller.ground_normal = update.ground_normal;
+        }
     }
 }
 
@@ -714,6 +740,7 @@ void ClientNetworkManager::deleteEntity(uint32_t network_id)
     if (it != network_id_to_entity.end()) {
         entt::entity entity = it->second;
         if (game_world->registry.valid(entity)) {
+            game_world->getPhysicsSystem().removeBody(entity);
             game_world->registry.destroy(entity);
         }
         network_id_to_entity.erase(it);

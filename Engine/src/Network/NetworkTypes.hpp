@@ -37,6 +37,7 @@ struct ComponentSnapshot
         return glm::distance(position, other.position) < epsilon &&
                glm::distance(velocity, other.velocity) < epsilon &&
                grounded == other.grounded &&
+               glm::distance(ground_normal, other.ground_normal) < epsilon &&
                std::abs(rotation_y - other.rotation_y) < epsilon;
     }
 

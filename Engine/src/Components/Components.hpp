@@ -7,6 +7,7 @@
 #include <string>
 #include <memory>
 #include <entt/entt.hpp>
+#include "Character/CharacterController.hpp"
 #include "mesh.hpp"
 #include "Reflection/Reflector.hpp"
 
@@ -189,6 +190,74 @@ struct ColliderComponent {
             .tooltip("Surface friction").drag(0.01f).range(0.0f, 10.0f).category("Material");
         r.property("restitution", &ColliderComponent::restitution)
             .tooltip("Bounciness").drag(0.01f).range(0.0f, 1.0f).category("Material");
+    }
+};
+
+struct CharacterControllerComponent {
+    float move_speed = 10.0f;
+    float jump_velocity = 5.0f;
+    float gravity_scale = 1.0f;
+    float ground_control = 0.8f;
+    float air_control = 0.3f;
+    float capsule_half_height = 0.9f;
+    float capsule_radius = 0.3f;
+    float mass = 80.0f;
+    float max_strength = 100.0f;
+    float max_slope_angle = 50.0f;
+    float character_padding = 0.02f;
+    float collision_tolerance = 0.05f;
+    float step_up_height = 0.4f;
+    float stick_to_floor_distance = 0.5f;
+    bool enhanced_internal_edge_removal = true;
+    bool use_inner_body = true;
+    bool input_enabled = true;
+
+    bool grounded = false;
+    glm::vec3 ground_normal = glm::vec3(0, 1, 0);
+    glm::vec3 ground_velocity = glm::vec3(0);
+
+    static void reflect(Reflector<CharacterControllerComponent>& r) {
+        r.display("Character Controller").category("Physics");
+        r.property("move_speed", &CharacterControllerComponent::move_speed)
+            .tooltip("Maximum movement speed").drag(0.1f).range(0.0f, 100.0f).category("Movement");
+        r.property("jump_velocity", &CharacterControllerComponent::jump_velocity)
+            .tooltip("Upward jump velocity").drag(0.1f).range(0.0f, 100.0f).category("Movement");
+        r.property("gravity_scale", &CharacterControllerComponent::gravity_scale)
+            .tooltip("Gravity multiplier").drag(0.05f).range(0.0f, 10.0f).category("Movement");
+        r.property("ground_control", &CharacterControllerComponent::ground_control)
+            .tooltip("Ground acceleration authority").drag(0.01f).range(0.0f, 1.0f).category("Movement");
+        r.property("air_control", &CharacterControllerComponent::air_control)
+            .tooltip("Air acceleration authority").drag(0.01f).range(0.0f, 1.0f).category("Movement");
+        r.property("capsule_half_height", &CharacterControllerComponent::capsule_half_height)
+            .tooltip("Capsule cylinder half height").drag(0.01f).range(0.01f, 10.0f).category("Shape");
+        r.property("capsule_radius", &CharacterControllerComponent::capsule_radius)
+            .tooltip("Capsule radius").drag(0.01f).range(0.01f, 5.0f).category("Shape");
+        r.property("mass", &CharacterControllerComponent::mass)
+            .tooltip("Character mass").drag(0.1f).range(0.001f, 100000.0f).category("Physics");
+        r.property("max_strength", &CharacterControllerComponent::max_strength)
+            .tooltip("Maximum push force").drag(1.0f).range(0.0f, 100000.0f).category("Physics");
+        r.property("max_slope_angle", &CharacterControllerComponent::max_slope_angle)
+            .tooltip("Maximum walkable slope angle in degrees").drag(0.5f).range(0.0f, 89.0f).category("Physics");
+        r.property("character_padding", &CharacterControllerComponent::character_padding)
+            .tooltip("Distance kept from collision geometry").drag(0.001f).range(0.0f, 0.2f).category("Physics");
+        r.property("collision_tolerance", &CharacterControllerComponent::collision_tolerance)
+            .tooltip("Collision separation tolerance").drag(0.001f).range(0.0f, 0.5f).category("Physics");
+        r.property("step_up_height", &CharacterControllerComponent::step_up_height)
+            .tooltip("Maximum stair step height").drag(0.01f).range(0.0f, 2.0f).category("Physics");
+        r.property("stick_to_floor_distance", &CharacterControllerComponent::stick_to_floor_distance)
+            .tooltip("Distance used to stay snapped to ground").drag(0.01f).range(0.0f, 2.0f).category("Physics");
+        r.property("enhanced_internal_edge_removal", &CharacterControllerComponent::enhanced_internal_edge_removal)
+            .category("Physics");
+        r.property("use_inner_body", &CharacterControllerComponent::use_inner_body)
+            .tooltip("Expose a kinematic proxy body to raycasts and contacts").category("Physics");
+        r.property("input_enabled", &CharacterControllerComponent::input_enabled)
+            .category("Input");
+        r.property("grounded", &CharacterControllerComponent::grounded)
+            .visible().category("State");
+        r.property("ground_normal", &CharacterControllerComponent::ground_normal)
+            .visible().category("State");
+        r.property("ground_velocity", &CharacterControllerComponent::ground_velocity)
+            .visible().category("State");
     }
 };
 

@@ -77,6 +77,32 @@ public:
         return physics_system->boxCast(origin, halfExtents, rotation, direction, maxDistance);
     }
 
+    JPH::BodyID create_character_controller(entt::entity entity)
+    {
+        return physics_system->createCharacterController(registry, entity);
+    }
+
+    CharacterControllerState simulate_character_controller(entt::entity entity,
+        const CharacterMoveInput& input, float delta_time)
+    {
+        return physics_system->simulateCharacterController(registry, entity, input, delta_time);
+    }
+
+    CharacterControllerState get_character_controller_state(entt::entity entity)
+    {
+        return physics_system->getCharacterControllerState(registry, entity);
+    }
+
+    bool set_character_controller_state(entt::entity entity, const CharacterControllerState& state)
+    {
+        return physics_system->setCharacterControllerState(registry, entity, state);
+    }
+
+    bool teleport_character_controller(entt::entity entity, const glm::vec3& position)
+    {
+        return physics_system->teleportCharacterController(registry, entity, position);
+    }
+
     // Configuration methods
     void setGravity(const glm::vec3& gravity)
     {

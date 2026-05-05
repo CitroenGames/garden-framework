@@ -144,13 +144,39 @@ private:
 
         auto& trans = game_world->registry.get<TransformComponent>(player_entity);
 
-        // When movement is disabled (networked mode), SharedMovement::simulate()
+        // When movement is disabled (networked mode), prediction/authority code
         // handles velocity/position. We only do camera follow here.
         if (!movement_enabled)
         {
             float camera_speed = 10.0f;
             float t = 1.0f - std::exp(-camera_speed * delta);
             game_world->world_camera.position = glm::mix(game_world->world_camera.position, trans.position, t);
+            return;
+        }
+
+        if (game_world->registry.all_of<CharacterControllerComponent>(player_entity))
+        {
+            auto& controller = game_world->registry.get<CharacterControllerComponent>(player_entity);
+            bool input_enabled = controller.input_enabled;
+            if (game_world->registry.all_of<PlayerComponent>(player_entity))
+                input_enabled = input_enabled && game_world->registry.get<PlayerComponent>(player_entity).input_enabled;
+            if (!input_enabled || !input_manager)
+                return;
+
+            CharacterMoveInput input;
+            if (input_manager->is_key_held(SDL_SCANCODE_W)) input.move_forward += 1.0f;
+            if (input_manager->is_key_held(SDL_SCANCODE_S)) input.move_forward -= 1.0f;
+            if (input_manager->is_key_held(SDL_SCANCODE_D)) input.move_right -= 1.0f;
+            if (input_manager->is_key_held(SDL_SCANCODE_A)) input.move_right += 1.0f;
+            if (input_manager->is_key_held(SDL_SCANCODE_SPACE)) input.buttons |= CharacterMoveFlags::Jump;
+            input.camera_yaw = game_world->world_camera.rotation.y;
+            input.camera_pitch = game_world->world_camera.rotation.x;
+
+            CharacterControllerState state = game_world->simulate_character_controller(player_entity, input, game_world->fixed_delta);
+
+            float camera_speed = 10.0f;
+            float t = 1.0f - std::exp(-camera_speed * delta);
+            game_world->world_camera.position = glm::mix(game_world->world_camera.position, state.position, t);
             return;
         }
 
@@ -269,7 +295,7 @@ public:
     
     bool isFreecamMode() const { return freecam_mode_enabled; }
 
-    // In networked mode, movement is handled by SharedMovement::simulate() externally.
+    // In networked mode, movement is handled externally by prediction/authority code.
     // When disabled, updatePlayer() only does camera follow.
     void setMovementEnabled(bool enabled) { movement_enabled = enabled; }
     bool isMovementEnabled() const { return movement_enabled; }

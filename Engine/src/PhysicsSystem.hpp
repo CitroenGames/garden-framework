@@ -6,6 +6,7 @@
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/gtx/euler_angles.hpp>
 #include <glm/gtc/quaternion.hpp>
+#include "Character/CharacterControllerSystem.hpp"
 #include "Components/Components.hpp"
 #include <entt/entt.hpp>
 #include <vector>
@@ -42,7 +43,6 @@
 #include <Jolt/Physics/Collision/BroadPhase/BroadPhaseLayerInterfaceMask.h>
 #include <Jolt/Physics/Collision/BroadPhase/ObjectVsBroadPhaseLayerFilterMask.h>
 #include <Jolt/Physics/Collision/ObjectLayerPairFilterMask.h>
-#include <Jolt/Physics/Character/CharacterVirtual.h>
 #include <Jolt/Physics/Body/BodyFilter.h>
 #include <Jolt/Physics/Collision/ContactListener.h>
 #include <Jolt/Physics/Collision/ShapeCast.h>
@@ -221,6 +221,8 @@ private:
     // Constraint management
     std::unordered_map<entt::entity, JPH::Ref<JPH::Constraint>> entity_to_constraint;
 
+    CharacterControllerSystem character_controllers;
+
     bool initialized = false;
 
     // Helper: convert glm <-> Jolt types
@@ -295,6 +297,17 @@ public:
     JPH::BodyID createPlayerBody(entt::registry& registry, entt::entity entity);
     void removeBody(entt::entity entity);
     bool hasBody(entt::entity entity) const { return entity_to_body.find(entity) != entity_to_body.end(); }
+
+    // Character controller management
+    JPH::BodyID createCharacterController(entt::registry& registry, entt::entity entity);
+    void removeCharacterController(entt::entity entity);
+    bool hasCharacterController(entt::entity entity) const { return character_controllers.has(entity); }
+    CharacterControllerState simulateCharacterController(entt::registry& registry, entt::entity entity,
+        const CharacterMoveInput& input, float delta_time);
+    CharacterControllerState getCharacterControllerState(entt::registry& registry, entt::entity entity) const;
+    bool setCharacterControllerState(entt::registry& registry, entt::entity entity,
+        const CharacterControllerState& state);
+    bool teleportCharacterController(entt::registry& registry, entt::entity entity, const glm::vec3& position);
 
     // Main physics update
     void stepPhysics(entt::registry& registry);

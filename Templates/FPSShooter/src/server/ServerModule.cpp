@@ -393,6 +393,15 @@ static void spawnPlayerForClient(uint16_t client_id)
     player.input_enabled = true;
     w->registry.emplace<PlayerComponent>(player_entity, player);
 
+    CharacterControllerComponent controller;
+    controller.move_speed = player.speed;
+    controller.jump_velocity = player.jump_force;
+    controller.capsule_half_height = player.capsule_half_height;
+    controller.capsule_radius = player.capsule_radius;
+    controller.mass = rigidbody.mass;
+    controller.input_enabled = player.input_enabled;
+    w->registry.emplace<CharacterControllerComponent>(player_entity, controller);
+
     // Add combat components
     w->registry.emplace<HealthComponent>(player_entity, 100);
 

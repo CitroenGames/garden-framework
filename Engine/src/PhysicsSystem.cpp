@@ -113,6 +113,8 @@ void PhysicsSystem::shutdown()
     }
     entity_to_constraint.clear();
 
+    character_controllers.shutdown(body_to_entity);
+
     // Remove all bodies
     if (jolt_system)
     {
@@ -381,28 +383,62 @@ JPH::BodyID PhysicsSystem::createPlayerBody(entt::registry& registry, entt::enti
     if (!registry.all_of<TransformComponent, RigidBodyComponent, PlayerComponent>(entity))
         return JPH::BodyID();
 
-    const auto& transform = registry.get<TransformComponent>(entity);
-    const auto& rb = registry.get<RigidBodyComponent>(entity);
-    const auto& player = registry.get<PlayerComponent>(entity);
+    character_controllers.copyPlayerSettings(registry, entity);
+    return createCharacterController(registry, entity);
+}
 
-    ColliderComponent collider;
-    collider.shape_type = ColliderShapeType::Capsule;
-    collider.capsule_half_height = player.capsule_half_height;
-    collider.capsule_radius = player.capsule_radius;
-
-    JPH::ShapeRefC shape = createShapeFromCollider(collider, glm::vec3(1.0f));
-    if (!shape)
-    {
-        LOG_ENGINE_ERROR("Failed to create player capsule shape");
+JPH::BodyID PhysicsSystem::createCharacterController(entt::registry& registry, entt::entity entity)
+{
+    if (!registry.valid(entity))
         return JPH::BodyID();
-    }
+    if (!registry.all_of<TransformComponent, CharacterControllerComponent>(entity))
+        return JPH::BodyID();
 
-    PhysicsBodyDesc desc;
-    desc.mass = rb.mass;
-    desc.apply_gravity = false; // Player movement code owns gravity for prediction parity.
-    desc.lock_rotation = true;
+    if (!initialized)
+        initialize();
 
-    return createDynamicBody(transform.position, transform.rotation, shape, entity, desc);
+    return character_controllers.create(
+        registry, entity, *jolt_system, *temp_allocator, body_to_entity, Layers::MOVING);
+}
+
+void PhysicsSystem::removeCharacterController(entt::entity entity)
+{
+    character_controllers.remove(entity, body_to_entity);
+}
+
+CharacterControllerState PhysicsSystem::getCharacterControllerState(entt::registry& registry, entt::entity entity) const
+{
+    return character_controllers.getState(registry, entity);
+}
+
+bool PhysicsSystem::setCharacterControllerState(entt::registry& registry, entt::entity entity,
+    const CharacterControllerState& state)
+{
+    if (!initialized)
+        initialize();
+
+    return character_controllers.setState(
+        registry, entity, state, *jolt_system, *temp_allocator, Layers::MOVING);
+}
+
+bool PhysicsSystem::teleportCharacterController(entt::registry& registry, entt::entity entity, const glm::vec3& position)
+{
+    if (!initialized)
+        initialize();
+
+    return character_controllers.teleport(
+        registry, entity, position, *jolt_system, *temp_allocator, Layers::MOVING);
+}
+
+CharacterControllerState PhysicsSystem::simulateCharacterController(entt::registry& registry, entt::entity entity,
+    const CharacterMoveInput& input, float delta_time)
+{
+    if (!initialized)
+        initialize();
+
+    return character_controllers.simulate(
+        registry, entity, input, delta_time, gravity, fixed_delta,
+        *jolt_system, *temp_allocator, body_to_entity, Layers::MOVING);
 }
 
 PhysicsSystem::ShapeCastResult PhysicsSystem::shapeCast(const JPH::ShapeRefC& shape, const glm::vec3& position,
@@ -547,6 +583,8 @@ void PhysicsSystem::removeConstraint(entt::entity entity)
 
 void PhysicsSystem::removeBody(entt::entity entity)
 {
+    removeCharacterController(entity);
+
     // Remove any constraint associated with this entity first
     removeConstraint(entity);
 
@@ -586,6 +624,8 @@ void PhysicsSystem::stepPhysics(entt::registry& registry)
     {
         if (entity_to_body.find(entity) != entity_to_body.end())
             continue; // Managed by Jolt, already synced
+        if (character_controllers.has(entity))
+            continue; // Character controllers are advanced explicitly by game/network code
 
         auto& rb = view.get<RigidBodyComponent>(entity);
         auto& transform = view.get<TransformComponent>(entity);
@@ -681,6 +721,11 @@ void PhysicsSystem::syncTransformsToJolt(entt::registry& registry)
 void PhysicsSystem::handlePlayerCollisions(entt::registry& registry, entt::entity playerEntity)
 {
     if (!initialized || !registry.valid(playerEntity)) return;
+    if (registry.all_of<CharacterControllerComponent>(playerEntity) && hasCharacterController(playerEntity))
+    {
+        character_controllers.refresh(registry, playerEntity, *jolt_system, *temp_allocator, Layers::MOVING);
+        return;
+    }
     if (!registry.all_of<TransformComponent, RigidBodyComponent, PlayerComponent>(playerEntity)) return;
 
     auto& player = registry.get<PlayerComponent>(playerEntity);

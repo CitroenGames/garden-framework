@@ -174,6 +174,8 @@ static bool testNetworkSpawnedPlayerGroundsOnMesh(const fs::path& repo_root)
 
     for (int i = 0; i < 90; ++i)
     {
+        CharacterMoveInput input;
+        w.simulate_character_controller(player, input, w.fixed_delta);
         w.getPhysicsSystem().stepPhysics(w.registry);
         w.player_collisions(player);
     }
@@ -186,6 +188,51 @@ static bool testNetworkSpawnedPlayerGroundsOnMesh(const fs::path& repo_root)
         return fail(name, "player was not grounded on mesh collider");
     if (final_pc.ground_normal.y < 0.8f)
         return fail(name, "player ground normal is not upward");
+
+    return pass(name);
+}
+
+static bool testLevelPlayerCreatesCharacterController()
+{
+    const std::string name = "level player creates character controller";
+
+    LevelData data;
+    data.metadata.level_name = "CharacterControllerTest";
+    data.entities.clear();
+
+    LevelEntity player_data;
+    player_data.name = "player";
+    player_data.type = EntityType::Player;
+    player_data.position = glm::vec3(0.0f, 2.0f, 0.0f);
+    player_data.speed = 7.0f;
+    player_data.jump_force = 4.0f;
+    data.entities.push_back(player_data);
+
+    world w;
+    w.initializePhysics();
+
+    LevelManager level_manager;
+    if (!level_manager.instantiateLevel(data, w, nullptr))
+        return fail(name, "instantiateLevel returned false");
+
+    entt::entity player = entt::null;
+    auto view = w.registry.view<PlayerComponent>();
+    for (auto entity : view)
+    {
+        player = entity;
+        break;
+    }
+
+    if (player == entt::null)
+        return fail(name, "player entity was not created");
+    if (!w.registry.all_of<CharacterControllerComponent>(player))
+        return fail(name, "player has no CharacterControllerComponent");
+    if (!w.getPhysicsSystem().hasCharacterController(player))
+        return fail(name, "player has no runtime character controller");
+
+    const auto& controller = w.registry.get<CharacterControllerComponent>(player);
+    if (!approx(controller.move_speed, 7.0f) || !approx(controller.jump_velocity, 4.0f))
+        return fail(name, "player movement settings were not copied to controller");
 
     return pass(name);
 }
@@ -311,6 +358,8 @@ int main()
     ok = testPlayerBodyDoesNotUseJoltGravity() && ok;
     run("network-spawned player grounds on mesh");
     ok = testNetworkSpawnedPlayerGroundsOnMesh(repo_root) && ok;
+    run("level player creates character controller");
+    ok = testLevelPlayerCreatesCharacterController() && ok;
     run("use_mesh_collision creates body");
     ok = testUseMeshCollisionCreatesBody(repo_root) && ok;
     run("FPSShooter level references");

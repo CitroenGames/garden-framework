@@ -10,6 +10,7 @@ void registerEngineReflection(ReflectionRegistry& registry)
     registry.reflect<RigidBodyComponent>("RigidBodyComponent");
     registry.reflect<ColliderComponent>("ColliderComponent");
     registry.reflect<ConstraintComponent>("ConstraintComponent");
+    registry.reflect<CharacterControllerComponent>("CharacterControllerComponent");
     registry.reflect<PlayerComponent>("PlayerComponent");
     registry.reflect<FreecamComponent>("FreecamComponent");
     registry.reflect<PlayerRepresentationComponent>("PlayerRepresentationComponent");
