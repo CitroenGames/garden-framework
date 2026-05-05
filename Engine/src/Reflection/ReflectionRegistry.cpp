@@ -41,7 +41,7 @@ void ReflectionRegistry::unregisterBySource(const char* source_id)
     m_components.erase(
         std::remove_if(m_components.begin(), m_components.end(),
             [source_id](const ComponentDescriptor& d) {
-                return d.source_id && std::strcmp(d.source_id, source_id) == 0;
+                return d.source_id == source_id;
             }),
         m_components.end());
 }
@@ -49,7 +49,7 @@ void ReflectionRegistry::unregisterBySource(const char* source_id)
 const ComponentDescriptor* ReflectionRegistry::findByName(const char* name) const
 {
     for (auto& d : m_components)
-        if (std::strcmp(d.name, name) == 0)
+        if (d.name == name)
             return &d;
     return nullptr;
 }

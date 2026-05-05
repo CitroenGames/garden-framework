@@ -29,11 +29,11 @@ struct TransformComponent {
 
     static void reflect(Reflector<TransformComponent>& r) {
         r.display("Transform").category("Core").removable(false);
-        r.property("position", &TransformComponent::position)
+        r.field<&TransformComponent::position>("position")
             .tooltip("World position").drag(0.01f).category("Transform");
-        r.property("rotation", &TransformComponent::rotation)
+        r.field<&TransformComponent::rotation>("rotation")
             .tooltip("Euler rotation (degrees)").drag(0.5f).category("Transform");
-        r.property("scale", &TransformComponent::scale)
+        r.field<&TransformComponent::scale>("scale")
             .tooltip("Scale").drag(0.01f).range(0.001f, 1000.0f).category("Transform");
     }
 };
@@ -43,7 +43,7 @@ struct TagComponent {
 
     static void reflect(Reflector<TagComponent>& r) {
         r.display("Tag").category("Core").removable(false);
-        r.property("name", &TagComponent::name).category("Tag");
+        r.field<&TagComponent::name>("name").category("Tag");
     }
 };
 
@@ -88,17 +88,17 @@ struct RigidBodyComponent {
 
     static void reflect(Reflector<RigidBodyComponent>& r) {
         r.display("Rigid Body").category("Physics");
-        r.property("motion_type", &RigidBodyComponent::motion_type)
+        r.field<&RigidBodyComponent::motion_type>("motion_type")
             .tooltip("Body motion type")
             .enumValues(body_motion_type_names, (int)BodyMotionType::COUNT)
             .category("Physics");
-        r.property("velocity", &RigidBodyComponent::velocity)
+        r.field<&RigidBodyComponent::velocity>("velocity")
             .visible().category("Physics");
-        r.property("force", &RigidBodyComponent::force)
+        r.field<&RigidBodyComponent::force>("force")
             .visible().category("Physics");
-        r.property("mass", &RigidBodyComponent::mass)
+        r.field<&RigidBodyComponent::mass>("mass")
             .tooltip("Body mass").drag(0.1f).range(0.001f, 100000.0f).category("Physics");
-        r.property("apply_gravity", &RigidBodyComponent::apply_gravity)
+        r.field<&RigidBodyComponent::apply_gravity>("apply_gravity")
             .category("Physics");
     }
 };
@@ -170,25 +170,25 @@ struct ColliderComponent {
 
     static void reflect(Reflector<ColliderComponent>& r) {
         r.display("Collider").category("Physics");
-        r.property("shape_type", &ColliderComponent::shape_type)
+        r.field<&ColliderComponent::shape_type>("shape_type")
             .tooltip("Collision shape type")
             .enumValues(collider_shape_type_names, (int)ColliderShapeType::COUNT)
             .category("Shape");
-        r.property("box_half_extents", &ColliderComponent::box_half_extents)
+        r.field<&ColliderComponent::box_half_extents>("box_half_extents")
             .tooltip("Box half extents").drag(0.01f).category("Shape");
-        r.property("sphere_radius", &ColliderComponent::sphere_radius)
+        r.field<&ColliderComponent::sphere_radius>("sphere_radius")
             .tooltip("Sphere radius").drag(0.01f).range(0.001f, 1000.0f).category("Shape");
-        r.property("capsule_half_height", &ColliderComponent::capsule_half_height)
+        r.field<&ColliderComponent::capsule_half_height>("capsule_half_height")
             .tooltip("Capsule half height").drag(0.01f).range(0.001f, 100.0f).category("Shape");
-        r.property("capsule_radius", &ColliderComponent::capsule_radius)
+        r.field<&ColliderComponent::capsule_radius>("capsule_radius")
             .tooltip("Capsule radius").drag(0.01f).range(0.001f, 100.0f).category("Shape");
-        r.property("cylinder_half_height", &ColliderComponent::cylinder_half_height)
+        r.field<&ColliderComponent::cylinder_half_height>("cylinder_half_height")
             .tooltip("Cylinder half height").drag(0.01f).range(0.001f, 100.0f).category("Shape");
-        r.property("cylinder_radius", &ColliderComponent::cylinder_radius)
+        r.field<&ColliderComponent::cylinder_radius>("cylinder_radius")
             .tooltip("Cylinder radius").drag(0.01f).range(0.001f, 100.0f).category("Shape");
-        r.property("friction", &ColliderComponent::friction)
+        r.field<&ColliderComponent::friction>("friction")
             .tooltip("Surface friction").drag(0.01f).range(0.0f, 10.0f).category("Material");
-        r.property("restitution", &ColliderComponent::restitution)
+        r.field<&ColliderComponent::restitution>("restitution")
             .tooltip("Bounciness").drag(0.01f).range(0.0f, 1.0f).category("Material");
     }
 };
@@ -218,45 +218,45 @@ struct CharacterControllerComponent {
 
     static void reflect(Reflector<CharacterControllerComponent>& r) {
         r.display("Character Controller").category("Physics");
-        r.property("move_speed", &CharacterControllerComponent::move_speed)
+        r.field<&CharacterControllerComponent::move_speed>("move_speed")
             .tooltip("Maximum movement speed").drag(0.1f).range(0.0f, 100.0f).category("Movement");
-        r.property("jump_velocity", &CharacterControllerComponent::jump_velocity)
+        r.field<&CharacterControllerComponent::jump_velocity>("jump_velocity")
             .tooltip("Upward jump velocity").drag(0.1f).range(0.0f, 100.0f).category("Movement");
-        r.property("gravity_scale", &CharacterControllerComponent::gravity_scale)
+        r.field<&CharacterControllerComponent::gravity_scale>("gravity_scale")
             .tooltip("Gravity multiplier").drag(0.05f).range(0.0f, 10.0f).category("Movement");
-        r.property("ground_control", &CharacterControllerComponent::ground_control)
+        r.field<&CharacterControllerComponent::ground_control>("ground_control")
             .tooltip("Ground acceleration authority").drag(0.01f).range(0.0f, 1.0f).category("Movement");
-        r.property("air_control", &CharacterControllerComponent::air_control)
+        r.field<&CharacterControllerComponent::air_control>("air_control")
             .tooltip("Air acceleration authority").drag(0.01f).range(0.0f, 1.0f).category("Movement");
-        r.property("capsule_half_height", &CharacterControllerComponent::capsule_half_height)
+        r.field<&CharacterControllerComponent::capsule_half_height>("capsule_half_height")
             .tooltip("Capsule cylinder half height").drag(0.01f).range(0.01f, 10.0f).category("Shape");
-        r.property("capsule_radius", &CharacterControllerComponent::capsule_radius)
+        r.field<&CharacterControllerComponent::capsule_radius>("capsule_radius")
             .tooltip("Capsule radius").drag(0.01f).range(0.01f, 5.0f).category("Shape");
-        r.property("mass", &CharacterControllerComponent::mass)
+        r.field<&CharacterControllerComponent::mass>("mass")
             .tooltip("Character mass").drag(0.1f).range(0.001f, 100000.0f).category("Physics");
-        r.property("max_strength", &CharacterControllerComponent::max_strength)
+        r.field<&CharacterControllerComponent::max_strength>("max_strength")
             .tooltip("Maximum push force").drag(1.0f).range(0.0f, 100000.0f).category("Physics");
-        r.property("max_slope_angle", &CharacterControllerComponent::max_slope_angle)
+        r.field<&CharacterControllerComponent::max_slope_angle>("max_slope_angle")
             .tooltip("Maximum walkable slope angle in degrees").drag(0.5f).range(0.0f, 89.0f).category("Physics");
-        r.property("character_padding", &CharacterControllerComponent::character_padding)
+        r.field<&CharacterControllerComponent::character_padding>("character_padding")
             .tooltip("Distance kept from collision geometry").drag(0.001f).range(0.0f, 0.2f).category("Physics");
-        r.property("collision_tolerance", &CharacterControllerComponent::collision_tolerance)
+        r.field<&CharacterControllerComponent::collision_tolerance>("collision_tolerance")
             .tooltip("Collision separation tolerance").drag(0.001f).range(0.0f, 0.5f).category("Physics");
-        r.property("step_up_height", &CharacterControllerComponent::step_up_height)
+        r.field<&CharacterControllerComponent::step_up_height>("step_up_height")
             .tooltip("Maximum stair step height").drag(0.01f).range(0.0f, 2.0f).category("Physics");
-        r.property("stick_to_floor_distance", &CharacterControllerComponent::stick_to_floor_distance)
+        r.field<&CharacterControllerComponent::stick_to_floor_distance>("stick_to_floor_distance")
             .tooltip("Distance used to stay snapped to ground").drag(0.01f).range(0.0f, 2.0f).category("Physics");
-        r.property("enhanced_internal_edge_removal", &CharacterControllerComponent::enhanced_internal_edge_removal)
+        r.field<&CharacterControllerComponent::enhanced_internal_edge_removal>("enhanced_internal_edge_removal")
             .category("Physics");
-        r.property("use_inner_body", &CharacterControllerComponent::use_inner_body)
+        r.field<&CharacterControllerComponent::use_inner_body>("use_inner_body")
             .tooltip("Expose a kinematic proxy body to raycasts and contacts").category("Physics");
-        r.property("input_enabled", &CharacterControllerComponent::input_enabled)
+        r.field<&CharacterControllerComponent::input_enabled>("input_enabled")
             .category("Input");
-        r.property("grounded", &CharacterControllerComponent::grounded)
+        r.field<&CharacterControllerComponent::grounded>("grounded")
             .visible().category("State");
-        r.property("ground_normal", &CharacterControllerComponent::ground_normal)
+        r.field<&CharacterControllerComponent::ground_normal>("ground_normal")
             .visible().category("State");
-        r.property("ground_velocity", &CharacterControllerComponent::ground_velocity)
+        r.field<&CharacterControllerComponent::ground_velocity>("ground_velocity")
             .visible().category("State");
     }
 };
@@ -273,19 +273,19 @@ struct PlayerComponent {
 
     static void reflect(Reflector<PlayerComponent>& r) {
         r.display("Player").category("Gameplay");
-        r.property("speed", &PlayerComponent::speed)
+        r.field<&PlayerComponent::speed>("speed")
             .tooltip("Movement speed").drag(0.1f).range(0.0f, 100.0f).category("Movement");
-        r.property("jump_force", &PlayerComponent::jump_force)
+        r.field<&PlayerComponent::jump_force>("jump_force")
             .tooltip("Jump force").drag(0.1f).range(0.0f, 100.0f).category("Movement");
-        r.property("mouse_sensitivity", &PlayerComponent::mouse_sensitivity)
+        r.field<&PlayerComponent::mouse_sensitivity>("mouse_sensitivity")
             .tooltip("Mouse sensitivity").drag(0.01f).range(0.01f, 10.0f).category("Input");
-        r.property("grounded", &PlayerComponent::grounded)
+        r.field<&PlayerComponent::grounded>("grounded")
             .visible().category("State");
-        r.property("input_enabled", &PlayerComponent::input_enabled)
+        r.field<&PlayerComponent::input_enabled>("input_enabled")
             .category("Input");
-        r.property("capsule_half_height", &PlayerComponent::capsule_half_height)
+        r.field<&PlayerComponent::capsule_half_height>("capsule_half_height")
             .tooltip("Capsule half height").drag(0.01f).range(0.01f, 10.0f).category("Collision");
-        r.property("capsule_radius", &PlayerComponent::capsule_radius)
+        r.field<&PlayerComponent::capsule_radius>("capsule_radius")
             .tooltip("Capsule radius").drag(0.01f).range(0.01f, 5.0f).category("Collision");
     }
 };
@@ -298,13 +298,13 @@ struct FreecamComponent {
 
     static void reflect(Reflector<FreecamComponent>& r) {
         r.display("Freecam").category("Gameplay");
-        r.property("movement_speed", &FreecamComponent::movement_speed)
+        r.field<&FreecamComponent::movement_speed>("movement_speed")
             .tooltip("Normal speed").drag(0.1f).range(0.0f, 100.0f).category("Movement");
-        r.property("fast_movement_speed", &FreecamComponent::fast_movement_speed)
+        r.field<&FreecamComponent::fast_movement_speed>("fast_movement_speed")
             .tooltip("Fast speed (shift)").drag(0.1f).range(0.0f, 200.0f).category("Movement");
-        r.property("mouse_sensitivity", &FreecamComponent::mouse_sensitivity)
+        r.field<&FreecamComponent::mouse_sensitivity>("mouse_sensitivity")
             .tooltip("Mouse sensitivity").drag(0.01f).range(0.01f, 10.0f).category("Input");
-        r.property("input_enabled", &FreecamComponent::input_enabled)
+        r.field<&FreecamComponent::input_enabled>("input_enabled")
             .category("Input");
     }
 };
@@ -316,11 +316,11 @@ struct PlayerRepresentationComponent {
 
     static void reflect(Reflector<PlayerRepresentationComponent>& r) {
         r.display("Player Representation").category("Gameplay");
-        r.property("tracked_player", &PlayerRepresentationComponent::tracked_player)
+        r.field<&PlayerRepresentationComponent::tracked_player>("tracked_player")
             .tooltip("Entity to track").category("Tracking");
-        r.property("position_offset", &PlayerRepresentationComponent::position_offset)
+        r.field<&PlayerRepresentationComponent::position_offset>("position_offset")
             .tooltip("Offset from tracked entity").drag(0.01f).category("Tracking");
-        r.property("visible_only_freecam", &PlayerRepresentationComponent::visible_only_freecam)
+        r.field<&PlayerRepresentationComponent::visible_only_freecam>("visible_only_freecam")
             .tooltip("Only visible in freecam mode").category("Tracking");
     }
 };
@@ -335,17 +335,17 @@ struct PointLightComponent {
 
     static void reflect(Reflector<PointLightComponent>& r) {
         r.display("Point Light").category("Lighting");
-        r.property("color", &PointLightComponent::color)
+        r.field<&PointLightComponent::color>("color")
             .tooltip("Light color").widget(EPropertyWidget::ColorEdit3).category("Light");
-        r.property("intensity", &PointLightComponent::intensity)
+        r.field<&PointLightComponent::intensity>("intensity")
             .tooltip("Light intensity").drag(0.1f).range(0.0f, 100.0f).category("Light");
-        r.property("range", &PointLightComponent::range)
+        r.field<&PointLightComponent::range>("range")
             .tooltip("Light range").drag(0.1f).range(0.1f, 1000.0f).category("Light");
-        r.property("constant_attenuation", &PointLightComponent::constant_attenuation)
+        r.field<&PointLightComponent::constant_attenuation>("constant_attenuation")
             .tooltip("Constant").drag(0.01f).range(0.0f, 10.0f).category("Attenuation");
-        r.property("linear_attenuation", &PointLightComponent::linear_attenuation)
+        r.field<&PointLightComponent::linear_attenuation>("linear_attenuation")
             .tooltip("Linear").drag(0.001f).range(0.0f, 2.0f).category("Attenuation");
-        r.property("quadratic_attenuation", &PointLightComponent::quadratic_attenuation)
+        r.field<&PointLightComponent::quadratic_attenuation>("quadratic_attenuation")
             .tooltip("Quadratic").drag(0.001f).range(0.0f, 2.0f).category("Attenuation");
     }
 };
@@ -362,21 +362,21 @@ struct SpotLightComponent {
 
     static void reflect(Reflector<SpotLightComponent>& r) {
         r.display("Spot Light").category("Lighting");
-        r.property("color", &SpotLightComponent::color)
+        r.field<&SpotLightComponent::color>("color")
             .tooltip("Light color").widget(EPropertyWidget::ColorEdit3).category("Light");
-        r.property("intensity", &SpotLightComponent::intensity)
+        r.field<&SpotLightComponent::intensity>("intensity")
             .tooltip("Light intensity").drag(0.1f).range(0.0f, 100.0f).category("Light");
-        r.property("range", &SpotLightComponent::range)
+        r.field<&SpotLightComponent::range>("range")
             .tooltip("Light range").drag(0.1f).range(0.1f, 1000.0f).category("Light");
-        r.property("inner_cone_angle", &SpotLightComponent::inner_cone_angle)
+        r.field<&SpotLightComponent::inner_cone_angle>("inner_cone_angle")
             .tooltip("Inner cone angle (degrees)").drag(0.5f).range(0.0f, 90.0f).category("Light");
-        r.property("outer_cone_angle", &SpotLightComponent::outer_cone_angle)
+        r.field<&SpotLightComponent::outer_cone_angle>("outer_cone_angle")
             .tooltip("Outer cone angle (degrees)").drag(0.5f).range(0.0f, 90.0f).category("Light");
-        r.property("constant_attenuation", &SpotLightComponent::constant_attenuation)
+        r.field<&SpotLightComponent::constant_attenuation>("constant_attenuation")
             .tooltip("Constant").drag(0.01f).range(0.0f, 10.0f).category("Attenuation");
-        r.property("linear_attenuation", &SpotLightComponent::linear_attenuation)
+        r.field<&SpotLightComponent::linear_attenuation>("linear_attenuation")
             .tooltip("Linear").drag(0.001f).range(0.0f, 2.0f).category("Attenuation");
-        r.property("quadratic_attenuation", &SpotLightComponent::quadratic_attenuation)
+        r.field<&SpotLightComponent::quadratic_attenuation>("quadratic_attenuation")
             .tooltip("Quadratic").drag(0.001f).range(0.0f, 2.0f).category("Attenuation");
     }
 };
@@ -433,25 +433,25 @@ struct ConstraintComponent {
 
     static void reflect(Reflector<ConstraintComponent>& r) {
         r.display("Constraint").category("Physics");
-        r.property("type", &ConstraintComponent::type)
+        r.field<&ConstraintComponent::type>("type")
             .tooltip("Constraint type")
             .enumValues(constraint_type_names, (int)ConstraintType::COUNT)
             .category("Constraint");
-        r.property("target_entity_name", &ConstraintComponent::target_entity_name)
+        r.field<&ConstraintComponent::target_entity_name>("target_entity_name")
             .tooltip("Name of target entity").category("Constraint");
-        r.property("anchor_1", &ConstraintComponent::anchor_1)
+        r.field<&ConstraintComponent::anchor_1>("anchor_1")
             .tooltip("Local anchor on this body").drag(0.01f).category("Constraint");
-        r.property("anchor_2", &ConstraintComponent::anchor_2)
+        r.field<&ConstraintComponent::anchor_2>("anchor_2")
             .tooltip("Local anchor on target body").drag(0.01f).category("Constraint");
-        r.property("hinge_axis", &ConstraintComponent::hinge_axis)
+        r.field<&ConstraintComponent::hinge_axis>("hinge_axis")
             .tooltip("Hinge rotation axis").drag(0.01f).category("Hinge");
-        r.property("hinge_min_limit", &ConstraintComponent::hinge_min_limit)
+        r.field<&ConstraintComponent::hinge_min_limit>("hinge_min_limit")
             .tooltip("Min angle (degrees)").drag(1.0f).range(-180.0f, 0.0f).category("Hinge");
-        r.property("hinge_max_limit", &ConstraintComponent::hinge_max_limit)
+        r.field<&ConstraintComponent::hinge_max_limit>("hinge_max_limit")
             .tooltip("Max angle (degrees)").drag(1.0f).range(0.0f, 180.0f).category("Hinge");
-        r.property("min_distance", &ConstraintComponent::min_distance)
+        r.field<&ConstraintComponent::min_distance>("min_distance")
             .tooltip("Min distance (-1 = auto)").drag(0.01f).category("Distance");
-        r.property("max_distance", &ConstraintComponent::max_distance)
+        r.field<&ConstraintComponent::max_distance>("max_distance")
             .tooltip("Max distance (-1 = auto)").drag(0.01f).category("Distance");
     }
 };

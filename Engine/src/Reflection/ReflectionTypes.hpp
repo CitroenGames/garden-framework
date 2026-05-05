@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <string>
 #include <vector>
 #include <entt/entt.hpp>
 
@@ -60,39 +61,39 @@ struct PropertyMeta
 {
     EPropertySpecifier specifier = EPropertySpecifier::EditAnywhere;
     EPropertyWidget widget = EPropertyWidget::Auto;
-    const char* category = "";
-    const char* display_name = nullptr; // null = use field name
-    const char* tooltip = "";
+    std::string category;
+    std::string display_name; // empty = use field name
+    std::string tooltip;
     float clamp_min = 0.0f;
     float clamp_max = 0.0f;
     bool has_clamp = false;
     float drag_speed = 0.1f;
-    // For enum properties
-    const char** enum_names = nullptr;
-    int enum_count = 0;
+    std::vector<std::string> enum_names;
 };
 
 // ---- Property descriptor ----
 
 struct PropertyDescriptor
 {
-    const char* name;           // Field name (e.g. "speed")
-    EPropertyType type;         // Data type
-    size_t offset;              // offsetof() from component start
-    uint32_t size;              // sizeof the field
-    PropertyMeta meta;          // Editor metadata
+    std::string name;          // Stable serialized field name (e.g. "speed")
+    EPropertyType type;        // Data type
+    uint32_t size = 0;         // sizeof the field
+    PropertyMeta meta;         // Editor metadata
+
+    void* (*mutable_data)(void* component) = nullptr;
+    const void* (*const_data)(const void* component) = nullptr;
 };
 
 // ---- Component descriptor ----
 
 struct ComponentDescriptor
 {
-    const char* name;           // Type name (e.g. "PlayerComponent")
-    const char* display_name;   // Editor display (e.g. "Player")
-    const char* category;       // Grouping (e.g. "Gameplay")
-    const char* source_id;      // "engine" or DLL name (for unload tracking)
-    uint32_t type_id;           // entt::type_hash<T>::value()
-    size_t size;                // sizeof(T)
+    std::string name;          // Stable serialized type name (e.g. "PlayerComponent")
+    std::string display_name;  // Editor display (e.g. "Player")
+    std::string category;      // Grouping (e.g. "Gameplay")
+    std::string source_id;     // "engine" or DLL name (for unload tracking)
+    uint32_t type_id = 0;      // entt::type_hash<T>::value()
+    size_t size = 0;           // sizeof(T)
     bool removable = true;      // Can be removed in editor inspector
 
     std::vector<PropertyDescriptor> properties;

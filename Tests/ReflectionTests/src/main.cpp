@@ -1,9 +1,12 @@
 #include "Reflection/ReflectionPropertyOps.hpp"
 #include "Reflection/ReflectionRegistry.hpp"
 #include "Reflection/ReflectionSerializer.hpp"
+#include "LevelManager.hpp"
 
 #include <cmath>
 #include <entt/entt.hpp>
+#include <filesystem>
+#include <fstream>
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <iostream>
@@ -36,15 +39,15 @@ namespace
         static void reflect(Reflector<TestComponent>& r)
         {
             r.display("Test Component").category("Tests");
-            r.property("speed", &TestComponent::speed).range(0.0f, 10.0f);
-            r.property("health", &TestComponent::health);
-            r.property("enabled", &TestComponent::enabled);
-            r.property("name", &TestComponent::name);
-            r.property("position", &TestComponent::position);
-            r.property("rotation", &TestComponent::rotation);
-            r.property("matrix", &TestComponent::matrix);
-            r.property("mode", &TestComponent::mode).enumValues(test_mode_names, 2);
-            r.property("target", &TestComponent::target).visible();
+            r.field<&TestComponent::speed>("speed").range(0.0f, 10.0f);
+            r.field<&TestComponent::health>("health");
+            r.field<&TestComponent::enabled>("enabled");
+            r.field<&TestComponent::name>("name");
+            r.field<&TestComponent::position>("position");
+            r.field<&TestComponent::rotation>("rotation");
+            r.field<&TestComponent::matrix>("matrix");
+            r.field<&TestComponent::mode>("mode").enumValues(test_mode_names, 2);
+            r.field<&TestComponent::target>("target").visible();
         }
     };
 
@@ -171,9 +174,12 @@ namespace
         nlohmann::json entity_json = ReflectionSerializer::serializeEntity(registry, entity, reflection);
         if (!entity_json["components"].contains("TestComponent"))
             return fail(name, "serialized entity is missing reflected component");
+        if (entity_json["components"]["TestComponent"]["mode"] != "Active")
+            return fail(name, "enum property was not serialized by stable name");
 
         entt::registry loaded_registry;
         entt::entity loaded = loaded_registry.create();
+        entity_json["components"]["TestComponent"]["mode"] = 1; // legacy import path
         ReflectionSerializer::deserializeEntity(loaded_registry, loaded, entity_json, reflection);
 
         if (!loaded_registry.all_of<TestComponent>(loaded))
@@ -230,6 +236,73 @@ namespace
 
         return pass(name);
     }
+
+    bool testReflectedLevelJsonMigration()
+    {
+        const std::string name = "reflected level json migration";
+
+        LevelData data;
+        data.metadata.level_name = "Reflection Test";
+
+        LevelEntity entity;
+        entity.name = "Old Name";
+        entity.type = EntityType::Static;
+        entity.reflected_components = nlohmann::json::object();
+        entity.reflected_components["TagComponent"]["name"] = "Reflected Entity";
+        entity.reflected_components["TransformComponent"]["position"] = {1.0f, 2.0f, 3.0f};
+        entity.reflected_components["TransformComponent"]["rotation"] = {4.0f, 5.0f, 6.0f};
+        entity.reflected_components["TransformComponent"]["scale"] = {1.0f, 2.0f, 3.0f};
+        entity.reflected_components["RigidBodyComponent"]["mass"] = 25.0f;
+        entity.reflected_components["RigidBodyComponent"]["apply_gravity"] = false;
+        entity.reflected_components["RigidBodyComponent"]["motion_type"] = "Kinematic";
+        entity.reflected_components["PlayerComponent"]["speed"] = 9.0f;
+        entity.reflected_components["PlayerComponent"]["jump_force"] = 12.0f;
+        entity.reflected_components["PlayerComponent"]["mouse_sensitivity"] = 2.5f;
+        data.entities.push_back(entity);
+
+        const std::filesystem::path path =
+            std::filesystem::current_path() / "build" / "reflection_level_roundtrip.json";
+
+        LevelManager manager;
+        if (!manager.saveLevelToJSON(path.string(), data))
+            return fail(name, "failed to save reflected level json");
+
+        std::ifstream saved(path);
+        nlohmann::json raw;
+        saved >> raw;
+        saved.close();
+
+        if (!raw["entities"][0].contains("components"))
+            return fail(name, "saved level did not use reflected components block");
+        if (raw["entities"][0].contains("transform"))
+            return fail(name, "saved reflected level also wrote legacy transform block");
+
+        LevelData loaded;
+        if (!manager.loadLevelFromJSON(path.string(), loaded))
+            return fail(name, "failed to load reflected level json");
+
+        std::filesystem::remove(path);
+
+        if (loaded.entities.size() != 1)
+            return fail(name, "loaded level entity count mismatch");
+
+        const auto& out = loaded.entities[0];
+        bool ok = out.name == "Reflected Entity"
+            && out.type == EntityType::Player
+            && approx(out.position.y, 2.0f)
+            && approx(out.scale.z, 3.0f)
+            && out.has_rigidbody
+            && approx(out.mass, 25.0f)
+            && !out.apply_gravity
+            && out.body_motion_type == "Kinematic"
+            && approx(out.speed, 9.0f)
+            && out.reflected_components.contains("PlayerComponent");
+
+        if (!ok)
+            return fail(name, "loaded reflected level did not rebuild legacy fallback fields");
+
+        return pass(name);
+    }
 }
 
 int main()
@@ -239,5 +312,6 @@ int main()
     ok = testComponentCopy() && ok;
     ok = testEntitySerializationRoundTrip() && ok;
     ok = testInvalidJsonDoesNotMutate() && ok;
+    ok = testReflectedLevelJsonMigration() && ok;
     return ok ? 0 : 1;
 }

@@ -9,7 +9,10 @@ bool drawReflectedProperty(const PropertyDescriptor& prop, void* component,
                            bool* out_edit_started)
 {
     void* field_ptr = ReflectionPropertyOps::propertyData(prop, component);
-    const char* label = prop.meta.display_name ? prop.meta.display_name : prop.name;
+    if (!field_ptr)
+        return false;
+
+    const char* label = prop.meta.display_name.empty() ? prop.name.c_str() : prop.meta.display_name.c_str();
     EPropertyWidget widget = ReflectionPropertyOps::resolveWidget(prop);
 
     // Read-only wrapper
@@ -111,16 +114,16 @@ bool drawReflectedProperty(const PropertyDescriptor& prop, void* component,
     case EPropertyWidget::Enum:
     {
         auto* val = static_cast<int*>(field_ptr);
-        if (prop.meta.enum_names && prop.meta.enum_count > 0)
+        if (!prop.meta.enum_names.empty())
         {
-            const char* preview = (*val >= 0 && *val < prop.meta.enum_count)
-                ? prop.meta.enum_names[*val] : "Unknown";
+            const char* preview = (*val >= 0 && *val < static_cast<int>(prop.meta.enum_names.size()))
+                ? prop.meta.enum_names[static_cast<size_t>(*val)].c_str() : "Unknown";
             if (ImGui::BeginCombo(label, preview))
             {
-                for (int i = 0; i < prop.meta.enum_count; i++)
+                for (int i = 0; i < static_cast<int>(prop.meta.enum_names.size()); i++)
                 {
                     bool selected = (*val == i);
-                    if (ImGui::Selectable(prop.meta.enum_names[i], selected))
+                    if (ImGui::Selectable(prop.meta.enum_names[static_cast<size_t>(i)].c_str(), selected))
                     {
                         *val = i;
                         changed = true;
@@ -146,8 +149,8 @@ bool drawReflectedProperty(const PropertyDescriptor& prop, void* component,
         ImGui::EndDisabled();
 
     // Tooltip
-    if (prop.meta.tooltip && prop.meta.tooltip[0] != '\0' && ImGui::IsItemHovered())
-        ImGui::SetTooltip("%s", prop.meta.tooltip);
+    if (!prop.meta.tooltip.empty() && ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", prop.meta.tooltip.c_str());
 
     return changed;
 }
@@ -156,18 +159,18 @@ bool drawReflectedComponent(const ComponentDescriptor& desc, void* component,
                             bool* out_edit_started)
 {
     bool any_changed = false;
-    const char* current_category = nullptr;
+    std::string current_category;
 
     for (const auto& prop : desc.properties)
     {
         // Category separator
-        if (prop.meta.category && prop.meta.category[0] != '\0')
+        if (!prop.meta.category.empty())
         {
-            if (!current_category || std::strcmp(current_category, prop.meta.category) != 0)
+            if (current_category != prop.meta.category)
             {
                 current_category = prop.meta.category;
                 ImGui::Spacing();
-                ImGui::TextDisabled("%s", current_category);
+                ImGui::TextDisabled("%s", current_category.c_str());
                 ImGui::Separator();
             }
         }

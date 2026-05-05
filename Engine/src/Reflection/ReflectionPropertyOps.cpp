@@ -52,12 +52,12 @@ namespace ReflectionPropertyOps
 {
     void* propertyData(const PropertyDescriptor& prop, void* component)
     {
-        return static_cast<char*>(component) + prop.offset;
+        return prop.mutable_data ? prop.mutable_data(component) : nullptr;
     }
 
     const void* propertyData(const PropertyDescriptor& prop, const void* component)
     {
-        return static_cast<const char*>(component) + prop.offset;
+        return prop.const_data ? prop.const_data(component) : nullptr;
     }
 
     EPropertyWidget defaultWidgetForType(EPropertyType type)
@@ -97,6 +97,8 @@ namespace ReflectionPropertyOps
     {
         const void* src_field = propertyData(prop, src_component);
         void* dst_field = propertyData(prop, dst_component);
+        if (!src_field || !dst_field)
+            return;
 
         if (isStringLike(prop.type))
         {
@@ -116,6 +118,8 @@ namespace ReflectionPropertyOps
     json serializeProperty(const PropertyDescriptor& prop, const void* component)
     {
         const void* ptr = propertyData(prop, component);
+        if (!ptr)
+            return nullptr;
 
         switch (prop.type)
         {
@@ -162,7 +166,12 @@ namespace ReflectionPropertyOps
             return values;
         }
         case EPropertyType::Enum:
-            return readIntStorage(ptr, prop.size);
+        {
+            const int value = readIntStorage(ptr, prop.size);
+            if (value >= 0 && value < static_cast<int>(prop.meta.enum_names.size()))
+                return prop.meta.enum_names[static_cast<size_t>(value)];
+            return value;
+        }
 
         case EPropertyType::Entity:
             return static_cast<uint32_t>(*static_cast<const entt::entity*>(ptr));
@@ -175,6 +184,8 @@ namespace ReflectionPropertyOps
     bool deserializeProperty(const PropertyDescriptor& prop, void* component, const json& value)
     {
         void* ptr = propertyData(prop, component);
+        if (!ptr)
+            return false;
 
         switch (prop.type)
         {
@@ -248,6 +259,15 @@ namespace ReflectionPropertyOps
         }
 
         case EPropertyType::Enum:
+            if (value.is_string())
+            {
+                const std::string enum_name = value.get<std::string>();
+                auto it = std::find(prop.meta.enum_names.begin(), prop.meta.enum_names.end(), enum_name);
+                if (it == prop.meta.enum_names.end())
+                    return false;
+                writeIntStorage(ptr, prop.size, static_cast<int>(std::distance(prop.meta.enum_names.begin(), it)));
+                return true;
+            }
             if (!value.is_number_integer())
                 return false;
             writeIntStorage(ptr, prop.size, value.get<int>());

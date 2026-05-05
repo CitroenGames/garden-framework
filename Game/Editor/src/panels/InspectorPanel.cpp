@@ -1,6 +1,7 @@
 #include "InspectorPanel.hpp"
 #include "PanelUtils.hpp"
 #include "ColliderWidgets.hpp"
+#include "ComponentAddMenu.hpp"
 #include "Components/Components.hpp"
 #include "Graphics/LODSelector.hpp"
 #include "ImGui/ImGuiManager.hpp"
@@ -111,7 +112,7 @@ bool InspectorPanel::draw(entt::registry& registry, entt::entity selected,
             {
                 // Case-insensitive check against display name
                 bool match = false;
-                const char* haystack = desc.display_name;
+                const char* haystack = desc.display_name.c_str();
                 const char* needle = m_filter_buf;
                 // Simple case-insensitive substring
                 for (const char* h = haystack; *h; ++h)
@@ -125,7 +126,7 @@ bool InspectorPanel::draw(entt::registry& registry, entt::entity selected,
             }
 
             bool removed = false;
-            if (drawComponentHeader(desc.display_name, desc.removable, &removed))
+            if (drawComponentHeader(desc.display_name.c_str(), desc.removable, &removed))
             {
                 ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.65f);
 
@@ -336,36 +337,7 @@ bool InspectorPanel::draw(entt::registry& registry, entt::entity selected,
 
     if (ImGui::BeginPopup("AddComponentPopup"))
     {
-        // Custom non-reflected components
-        if (!registry.all_of<MeshComponent>(selected))
-            if (ImGui::MenuItem("Mesh"))
-            { registry.emplace<MeshComponent>(selected); markUnsaved(); }
-
-        if (!registry.all_of<ColliderComponent>(selected))
-            if (ImGui::MenuItem("Collider"))
-            { registry.emplace<ColliderComponent>(selected); markUnsaved(); }
-
-        // Reflected components from registry
-        if (reflection)
-        {
-            bool need_separator = true;
-            for (const auto& desc : reflection->getAll())
-            {
-                if (desc.type_id == mesh_type_id || desc.type_id == collider_type_id)
-                    continue;
-
-                if (desc.has(registry, selected))
-                    continue;
-
-                if (need_separator) { ImGui::Separator(); need_separator = false; }
-
-                if (ImGui::MenuItem(desc.display_name))
-                {
-                    desc.add(registry, selected);
-                    markUnsaved();
-                }
-            }
-        }
+        EditorComponentAddMenu::draw(registry, selected, reflection, markUnsaved);
 
         ImGui::EndPopup();
     }

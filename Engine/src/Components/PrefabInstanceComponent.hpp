@@ -8,7 +8,7 @@ struct PrefabInstanceComponent {
 
     static void reflect(Reflector<PrefabInstanceComponent>& r) {
         r.display("Prefab Instance").category("Core").removable(false);
-        r.property("prefab_path", &PrefabInstanceComponent::prefab_path)
+        r.field<&PrefabInstanceComponent::prefab_path>("prefab_path")
             .visible().tooltip("Source prefab asset path").category("Prefab");
     }
 };

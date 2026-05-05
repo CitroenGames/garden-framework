@@ -13,6 +13,8 @@
 #include "Assets/CompiledTextureSerializer.hpp"
 #include "Assets/MeshChunker.hpp"
 #include "Assets/AssetManager.hpp"
+#include "Reflection/ReflectionRegistry.hpp"
+#include "Reflection/ReflectionSerializer.hpp"
 #include "Console/ConVar.hpp"
 #include "Threading/JobSystem.hpp"
 #include <iostream>
@@ -25,7 +27,8 @@
 using json = nlohmann::json;
 
 static constexpr uint32_t LEVEL_BINARY_MAGIC   = 0x47444E4C; // "GDNL"
-static constexpr uint32_t LEVEL_BINARY_VERSION  = 4;
+static constexpr uint32_t LEVEL_BINARY_VERSION  = 5;
+static constexpr uint32_t LEVEL_BINARY_VERSION_V4 = 4;
 static constexpr uint32_t LEVEL_BINARY_VERSION_V3 = 3; // Previous version for backward compat
 
 // stringToColliderShapeType and colliderShapeTypeToString are inline in Components.hpp
@@ -100,6 +103,176 @@ static void copyColliderSettings(ColliderComponent& col, const LevelEntity& enti
     col.cylinder_radius = entity_data.collider_cylinder_radius;
     col.friction = entity_data.collider_friction;
     col.restitution = entity_data.collider_restitution;
+}
+
+static bool readVec3Json(const json& value, glm::vec3& out)
+{
+    if (value.is_array() && value.size() >= 3 &&
+        value[0].is_number() && value[1].is_number() && value[2].is_number())
+    {
+        out = glm::vec3(value[0].get<float>(), value[1].get<float>(), value[2].get<float>());
+        return true;
+    }
+
+    if (value.is_object())
+    {
+        out = glm::vec3(
+            value.value("x", value.value("r", out.x)),
+            value.value("y", value.value("g", out.y)),
+            value.value("z", value.value("b", out.z)));
+        return true;
+    }
+
+    return false;
+}
+
+static std::string readEnumName(const json& object, const char* key, const std::string& fallback)
+{
+    if (!object.contains(key))
+        return fallback;
+    const auto& value = object[key];
+    if (value.is_string())
+        return value.get<std::string>();
+    return fallback;
+}
+
+static bool hasComponentJson(const json& components, const char* name)
+{
+    return components.is_object() && components.contains(name) && components[name].is_object();
+}
+
+static void applyReflectedComponentsToLevelEntity(const json& components, LevelEntity& entity)
+{
+    if (!components.is_object())
+        return;
+
+    if (hasComponentJson(components, "TagComponent"))
+    {
+        const auto& c = components["TagComponent"];
+        if (c.contains("name") && c["name"].is_string())
+            entity.name = c["name"].get<std::string>();
+    }
+
+    if (hasComponentJson(components, "TransformComponent"))
+    {
+        const auto& c = components["TransformComponent"];
+        if (c.contains("position")) readVec3Json(c["position"], entity.position);
+        if (c.contains("rotation")) readVec3Json(c["rotation"], entity.rotation);
+        if (c.contains("scale"))    readVec3Json(c["scale"], entity.scale);
+    }
+
+    if (hasComponentJson(components, "RigidBodyComponent"))
+    {
+        const auto& c = components["RigidBodyComponent"];
+        entity.has_rigidbody = true;
+        entity.mass = c.value("mass", entity.mass);
+        entity.apply_gravity = c.value("apply_gravity", entity.apply_gravity);
+        entity.body_motion_type = readEnumName(c, "motion_type", entity.body_motion_type);
+    }
+
+    if (hasComponentJson(components, "ColliderComponent"))
+    {
+        const auto& c = components["ColliderComponent"];
+        entity.has_collider = true;
+        entity.collider_shape_type = readEnumName(c, "shape_type", entity.collider_shape_type);
+        if (c.contains("box_half_extents")) readVec3Json(c["box_half_extents"], entity.collider_box_half_extents);
+        entity.collider_sphere_radius = c.value("sphere_radius", entity.collider_sphere_radius);
+        entity.collider_capsule_half_height = c.value("capsule_half_height", entity.collider_capsule_half_height);
+        entity.collider_capsule_radius = c.value("capsule_radius", entity.collider_capsule_radius);
+        entity.collider_cylinder_half_height = c.value("cylinder_half_height", entity.collider_cylinder_half_height);
+        entity.collider_cylinder_radius = c.value("cylinder_radius", entity.collider_cylinder_radius);
+        entity.collider_friction = c.value("friction", entity.collider_friction);
+        entity.collider_restitution = c.value("restitution", entity.collider_restitution);
+    }
+
+    if (hasComponentJson(components, "ConstraintComponent"))
+    {
+        const auto& c = components["ConstraintComponent"];
+        entity.has_constraint = true;
+        entity.constraint_type = readEnumName(c, "type", entity.constraint_type);
+        if (c.contains("target_entity_name") && c["target_entity_name"].is_string())
+            entity.constraint_target_name = c["target_entity_name"].get<std::string>();
+        if (c.contains("anchor_1")) readVec3Json(c["anchor_1"], entity.constraint_anchor_1);
+        if (c.contains("anchor_2")) readVec3Json(c["anchor_2"], entity.constraint_anchor_2);
+        if (c.contains("hinge_axis")) readVec3Json(c["hinge_axis"], entity.constraint_hinge_axis);
+        entity.constraint_hinge_min = c.value("hinge_min_limit", entity.constraint_hinge_min);
+        entity.constraint_hinge_max = c.value("hinge_max_limit", entity.constraint_hinge_max);
+        entity.constraint_min_distance = c.value("min_distance", entity.constraint_min_distance);
+        entity.constraint_max_distance = c.value("max_distance", entity.constraint_max_distance);
+    }
+
+    if (hasComponentJson(components, "PlayerComponent"))
+    {
+        const auto& c = components["PlayerComponent"];
+        entity.type = EntityType::Player;
+        entity.speed = c.value("speed", entity.speed);
+        entity.jump_force = c.value("jump_force", entity.jump_force);
+        entity.mouse_sensitivity = c.value("mouse_sensitivity", entity.mouse_sensitivity);
+        entity.has_rigidbody = true;
+    }
+    else if (hasComponentJson(components, "FreecamComponent"))
+    {
+        const auto& c = components["FreecamComponent"];
+        entity.type = EntityType::Freecam;
+        entity.movement_speed = c.value("movement_speed", entity.movement_speed);
+        entity.fast_movement_speed = c.value("fast_movement_speed", entity.fast_movement_speed);
+        entity.mouse_sensitivity = c.value("mouse_sensitivity", entity.mouse_sensitivity);
+    }
+    else if (hasComponentJson(components, "PlayerRepresentationComponent"))
+    {
+        const auto& c = components["PlayerRepresentationComponent"];
+        entity.type = EntityType::PlayerRep;
+        if (c.contains("position_offset")) readVec3Json(c["position_offset"], entity.position_offset);
+    }
+    else if (hasComponentJson(components, "PointLightComponent"))
+    {
+        const auto& c = components["PointLightComponent"];
+        entity.type = EntityType::PointLight;
+        if (c.contains("color")) readVec3Json(c["color"], entity.light_color);
+        entity.light_intensity = c.value("intensity", entity.light_intensity);
+        entity.light_range = c.value("range", entity.light_range);
+        entity.light_constant_attenuation = c.value("constant_attenuation", entity.light_constant_attenuation);
+        entity.light_linear_attenuation = c.value("linear_attenuation", entity.light_linear_attenuation);
+        entity.light_quadratic_attenuation = c.value("quadratic_attenuation", entity.light_quadratic_attenuation);
+    }
+    else if (hasComponentJson(components, "SpotLightComponent"))
+    {
+        const auto& c = components["SpotLightComponent"];
+        entity.type = EntityType::SpotLight;
+        if (c.contains("color")) readVec3Json(c["color"], entity.light_color);
+        entity.light_intensity = c.value("intensity", entity.light_intensity);
+        entity.light_range = c.value("range", entity.light_range);
+        entity.light_inner_cone_angle = c.value("inner_cone_angle", entity.light_inner_cone_angle);
+        entity.light_outer_cone_angle = c.value("outer_cone_angle", entity.light_outer_cone_angle);
+        entity.light_constant_attenuation = c.value("constant_attenuation", entity.light_constant_attenuation);
+        entity.light_linear_attenuation = c.value("linear_attenuation", entity.light_linear_attenuation);
+        entity.light_quadratic_attenuation = c.value("quadratic_attenuation", entity.light_quadratic_attenuation);
+    }
+    else if (entity.has_rigidbody && entity.has_collider)
+    {
+        entity.type = EntityType::Physical;
+    }
+    else if (entity.has_collider && entity.mesh_path.empty())
+    {
+        entity.type = EntityType::Collidable;
+    }
+    else if (!entity.mesh_path.empty())
+    {
+        entity.type = EntityType::Renderable;
+    }
+}
+
+static void deserializeReflectedComponents(ReflectionRegistry* reflection,
+                                           entt::registry& registry,
+                                           entt::entity entity,
+                                           const json& components)
+{
+    if (!reflection || !components.is_object() || components.empty())
+        return;
+
+    json entity_json = json::object();
+    entity_json["components"] = components;
+    ReflectionSerializer::deserializeEntity(registry, entity, entity_json, *reflection);
 }
 
 static std::shared_ptr<mesh> getVisualMesh(entt::registry& registry, entt::entity e)
@@ -757,6 +930,12 @@ bool LevelManager::parseEntityFromJSON(const void* json_ptr, LevelEntity& entity
         entity.light_quadratic_attenuation = sl.value("quadratic_attenuation", 0.032f);
     }
 
+    if (j.contains("components") && j["components"].is_object())
+    {
+        entity.reflected_components = j["components"];
+        applyReflectedComponentsToLevelEntity(entity.reflected_components, entity);
+    }
+
     return true;
 }
 
@@ -807,6 +986,30 @@ bool LevelManager::saveLevelToJSON(const std::string& json_path, const LevelData
         json e;
         e["name"] = le.name;
         e["type"] = entityTypeToString(le.type);
+
+        if (le.reflected_components.is_object() && !le.reflected_components.empty())
+        {
+            e["components"] = le.reflected_components;
+
+            if (!le.mesh_path.empty())
+            {
+                e["mesh"]["path"]              = le.mesh_path;
+                e["mesh"]["textures"]          = le.texture_paths;
+                e["mesh"]["culling"]           = le.culling;
+                e["mesh"]["transparent"]       = le.transparent;
+                e["mesh"]["visible"]           = le.visible;
+                e["mesh"]["casts_shadow"]      = le.casts_shadow;
+                e["mesh"]["force_lod"]         = le.force_lod;
+                e["mesh"]["use_mesh_collision"]= le.use_mesh_collision;
+            }
+
+            if (!le.collider_mesh_path.empty())
+                e["collider"]["mesh_path"] = le.collider_mesh_path;
+
+            entities_array.push_back(e);
+            continue;
+        }
+
         e["transform"]["position"] = {{"x", le.position.x}, {"y", le.position.y}, {"z", le.position.z}};
         e["transform"]["rotation"] = {{"x", le.rotation.x}, {"y", le.rotation.y}, {"z", le.rotation.z}};
         e["transform"]["scale"]    = {{"x", le.scale.x},    {"y", le.scale.y},    {"z", le.scale.z}};
@@ -1144,6 +1347,8 @@ void LevelManager::writeBinaryEntity(std::ofstream& file, const LevelEntity& ent
     file.write(reinterpret_cast<const char*>(&entity.constraint_hinge_max), sizeof(float));
     file.write(reinterpret_cast<const char*>(&entity.constraint_min_distance), sizeof(float));
     file.write(reinterpret_cast<const char*>(&entity.constraint_max_distance), sizeof(float));
+
+    writeString(file, entity.reflected_components.is_object() ? entity.reflected_components.dump() : "{}");
 }
 
 bool LevelManager::readBinaryHeader(std::ifstream& file, LevelMetadata& metadata)
@@ -1158,9 +1363,13 @@ bool LevelManager::readBinaryHeader(std::ifstream& file, LevelMetadata& metadata
 
     uint32_t version;
     file.read(reinterpret_cast<char*>(&version), sizeof(uint32_t));
-    if (file.fail() || (version != LEVEL_BINARY_VERSION && version != LEVEL_BINARY_VERSION_V3))
+    if (file.fail() ||
+        (version != LEVEL_BINARY_VERSION &&
+         version != LEVEL_BINARY_VERSION_V4 &&
+         version != LEVEL_BINARY_VERSION_V3))
     {
-        printf("ERROR: Unsupported binary level version (expected %u or %u, got %u)\n", LEVEL_BINARY_VERSION, LEVEL_BINARY_VERSION_V3, version);
+        printf("ERROR: Unsupported binary level version (expected %u, %u, or %u, got %u)\n",
+               LEVEL_BINARY_VERSION, LEVEL_BINARY_VERSION_V4, LEVEL_BINARY_VERSION_V3, version);
         return false;
     }
     binary_read_version = version;
@@ -1287,6 +1496,24 @@ bool LevelManager::readBinaryEntity(std::ifstream& file, LevelEntity& entity)
         file.read(reinterpret_cast<char*>(&entity.constraint_hinge_max), sizeof(float));
         file.read(reinterpret_cast<char*>(&entity.constraint_min_distance), sizeof(float));
         file.read(reinterpret_cast<char*>(&entity.constraint_max_distance), sizeof(float));
+
+        if (binary_read_version >= LEVEL_BINARY_VERSION)
+        {
+            std::string reflected_json;
+            if (!readString(file, reflected_json)) return false;
+            if (!reflected_json.empty())
+            {
+                try
+                {
+                    entity.reflected_components = json::parse(reflected_json);
+                    applyReflectedComponentsToLevelEntity(entity.reflected_components, entity);
+                }
+                catch (const json::exception&)
+                {
+                    entity.reflected_components = json::object();
+                }
+            }
+        }
     }
 
     return !file.fail();
@@ -2517,13 +2744,13 @@ bool LevelManager::instantiateLevelParallel(
         }
 
         setupLevelColliderComponent(game_world.registry, e, entity_data, getOrFinalizeMesh);
+        deserializeReflectedComponents(m_reflection, game_world.registry, e, entity_data.reflected_components);
         createLevelPhysicsBody(game_world, e, entity_data);
 
         // Player
         if (entity_data.type == EntityType::Player)
         {
-            game_world.registry.emplace<PlayerComponent>(e);
-            auto& pc = game_world.registry.get<PlayerComponent>(e);
+            auto& pc = game_world.registry.get_or_emplace<PlayerComponent>(e);
             pc.speed = entity_data.speed;
             pc.jump_force = entity_data.jump_force;
             pc.mouse_sensitivity = entity_data.mouse_sensitivity;
@@ -2552,8 +2779,7 @@ bool LevelManager::instantiateLevelParallel(
         // Freecam
         if (entity_data.type == EntityType::Freecam)
         {
-            game_world.registry.emplace<FreecamComponent>(e);
-            auto& fc = game_world.registry.get<FreecamComponent>(e);
+            auto& fc = game_world.registry.get_or_emplace<FreecamComponent>(e);
             fc.movement_speed = entity_data.movement_speed;
             fc.fast_movement_speed = entity_data.fast_movement_speed;
             fc.mouse_sensitivity = entity_data.mouse_sensitivity;
@@ -2564,8 +2790,7 @@ bool LevelManager::instantiateLevelParallel(
         // Player Rep
         if (entity_data.type == EntityType::PlayerRep)
         {
-            game_world.registry.emplace<PlayerRepresentationComponent>(e);
-            auto& pr = game_world.registry.get<PlayerRepresentationComponent>(e);
+            auto& pr = game_world.registry.get_or_emplace<PlayerRepresentationComponent>(e);
             pr.position_offset = entity_data.position_offset;
 
             if (out_player_rep_entity) *out_player_rep_entity = e;
@@ -2573,7 +2798,7 @@ bool LevelManager::instantiateLevelParallel(
 
         if (entity_data.type == EntityType::PointLight)
         {
-            auto& pl = game_world.registry.emplace<PointLightComponent>(e);
+            auto& pl = game_world.registry.get_or_emplace<PointLightComponent>(e);
             pl.color = entity_data.light_color;
             pl.intensity = entity_data.light_intensity;
             pl.range = entity_data.light_range;
@@ -2584,7 +2809,7 @@ bool LevelManager::instantiateLevelParallel(
 
         if (entity_data.type == EntityType::SpotLight)
         {
-            auto& sl = game_world.registry.emplace<SpotLightComponent>(e);
+            auto& sl = game_world.registry.get_or_emplace<SpotLightComponent>(e);
             sl.color = entity_data.light_color;
             sl.intensity = entity_data.light_intensity;
             sl.range = entity_data.light_range;
@@ -2598,7 +2823,7 @@ bool LevelManager::instantiateLevelParallel(
         // Constraint (data only - resolved in third pass)
         if (entity_data.has_constraint)
         {
-            auto& cc = game_world.registry.emplace<ConstraintComponent>(e);
+            auto& cc = game_world.registry.get_or_emplace<ConstraintComponent>(e);
             cc.type = stringToConstraintType(entity_data.constraint_type);
             cc.target_entity_name = entity_data.constraint_target_name;
             cc.anchor_1 = entity_data.constraint_anchor_1;
@@ -2730,13 +2955,13 @@ bool LevelManager::instantiateLevel(
         }
         
         setupLevelColliderComponent(game_world.registry, e, entity_data, loadMeshForLevel);
+        deserializeReflectedComponents(m_reflection, game_world.registry, e, entity_data.reflected_components);
         createLevelPhysicsBody(game_world, e, entity_data);
 
         // Player
         if (entity_data.type == EntityType::Player)
         {
-            game_world.registry.emplace<PlayerComponent>(e);
-            auto& pc = game_world.registry.get<PlayerComponent>(e);
+            auto& pc = game_world.registry.get_or_emplace<PlayerComponent>(e);
             pc.speed = entity_data.speed;
             pc.jump_force = entity_data.jump_force;
             pc.mouse_sensitivity = entity_data.mouse_sensitivity;
@@ -2769,8 +2994,7 @@ bool LevelManager::instantiateLevel(
         // Freecam
         if (entity_data.type == EntityType::Freecam)
         {
-            game_world.registry.emplace<FreecamComponent>(e);
-            auto& fc = game_world.registry.get<FreecamComponent>(e);
+            auto& fc = game_world.registry.get_or_emplace<FreecamComponent>(e);
             fc.movement_speed = entity_data.movement_speed;
             fc.fast_movement_speed = entity_data.fast_movement_speed;
             fc.mouse_sensitivity = entity_data.mouse_sensitivity;
@@ -2782,8 +3006,7 @@ bool LevelManager::instantiateLevel(
         // Player Rep
         if (entity_data.type == EntityType::PlayerRep)
         {
-             game_world.registry.emplace<PlayerRepresentationComponent>(e);
-             auto& pr = game_world.registry.get<PlayerRepresentationComponent>(e);
+             auto& pr = game_world.registry.get_or_emplace<PlayerRepresentationComponent>(e);
              pr.position_offset = entity_data.position_offset;
              // tracked_player resolved in second pass
 
@@ -2792,7 +3015,7 @@ bool LevelManager::instantiateLevel(
 
         if (entity_data.type == EntityType::PointLight)
         {
-            auto& pl = game_world.registry.emplace<PointLightComponent>(e);
+            auto& pl = game_world.registry.get_or_emplace<PointLightComponent>(e);
             pl.color = entity_data.light_color;
             pl.intensity = entity_data.light_intensity;
             pl.range = entity_data.light_range;
@@ -2803,7 +3026,7 @@ bool LevelManager::instantiateLevel(
 
         if (entity_data.type == EntityType::SpotLight)
         {
-            auto& sl = game_world.registry.emplace<SpotLightComponent>(e);
+            auto& sl = game_world.registry.get_or_emplace<SpotLightComponent>(e);
             sl.color = entity_data.light_color;
             sl.intensity = entity_data.light_intensity;
             sl.range = entity_data.light_range;
@@ -2816,7 +3039,7 @@ bool LevelManager::instantiateLevel(
         // Constraint (data only — resolved in third pass)
         if (entity_data.has_constraint)
         {
-            auto& cc = game_world.registry.emplace<ConstraintComponent>(e);
+            auto& cc = game_world.registry.get_or_emplace<ConstraintComponent>(e);
             cc.type = stringToConstraintType(entity_data.constraint_type);
             cc.target_entity_name = entity_data.constraint_target_name;
             cc.anchor_1 = entity_data.constraint_anchor_1;

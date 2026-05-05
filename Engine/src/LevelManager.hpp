@@ -8,6 +8,7 @@
 #include <unordered_map>
 #include <glm/glm.hpp>
 #include "Components/Components.hpp"
+#include "json.hpp"
 #include <entt/entt.hpp>
 
 // Includes for parallel loading data structures
@@ -19,6 +20,7 @@
 // Forward declarations
 class world;
 class IRenderAPI;
+class ReflectionRegistry;
 
 // Entity types for serialization
 enum class EntityType
@@ -109,6 +111,10 @@ struct LevelEntity
     float light_quadratic_attenuation = 0.032f;
     float light_inner_cone_angle = 12.5f;  // Spot light only
     float light_outer_cone_angle = 17.5f;  // Spot light only
+
+    // New reflected persistence payload. New JSON and binary levels store
+    // component data here; legacy fields remain as import/fallback data.
+    nlohmann::json reflected_components = nlohmann::json::object();
 
     LevelEntity()
         : type(EntityType::Static)
@@ -245,6 +251,8 @@ public:
                                   entt::entity* out_freecam_entity = nullptr,
                                   entt::entity* out_player_rep_entity = nullptr);
 
+    void setReflectionRegistry(ReflectionRegistry* reflection) { m_reflection = reflection; }
+
     // Cleanup - called before loading new level
     void cleanup();
 
@@ -278,6 +286,8 @@ private:
 
     // Store level data to keep entity references valid
     std::vector<LevelEntity> stored_entities;
+
+    ReflectionRegistry* m_reflection = nullptr;
 
     // Binary format version (set during readBinaryHeader for readBinaryEntity)
     uint32_t binary_read_version = 0;

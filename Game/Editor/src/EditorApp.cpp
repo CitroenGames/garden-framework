@@ -12,6 +12,7 @@
 #include "Components/PrefabInstanceComponent.hpp"
 #include "Prefab/PrefabManager.hpp"
 #include "Reflection/EngineReflection.hpp"
+#include "Reflection/ReflectionSerializer.hpp"
 #include "Assets/LODMeshSerializer.hpp"
 #include "Assets/AssetManager.hpp"
 #include "Project/ProjectManager.hpp"
@@ -392,6 +393,7 @@ bool EditorApp::initialize(RenderAPIType api_type)
 
     // Register engine reflection and wire up inspector
     registerEngineReflection(m_reflection);
+    m_level_manager.setReflectionRegistry(&m_reflection);
     m_inspector.reflection = &m_reflection;
 
     // Inspector: browse button loads mesh for existing entity
@@ -3126,6 +3128,12 @@ LevelEntity EditorApp::buildLevelEntityFromECS(entt::entity entity) const
     le.rotation = t.rotation;
     le.scale    = t.scale;
 
+    le.reflected_components =
+        ReflectionSerializer::serializeEntity(
+            const_cast<entt::registry&>(m_world.registry),
+            entity,
+            m_reflection).value("components", nlohmann::json::object());
+
     // Determine entity type from component presence
     bool has_player  = m_world.registry.all_of<PlayerComponent>(entity);
     bool has_freecam = m_world.registry.all_of<FreecamComponent>(entity);
@@ -3419,6 +3427,16 @@ void EditorApp::pasteEntity()
         sl.constant_attenuation = le.light_constant_attenuation;
         sl.linear_attenuation = le.light_linear_attenuation;
         sl.quadratic_attenuation = le.light_quadratic_attenuation;
+    }
+
+    if (le.reflected_components.is_object() && !le.reflected_components.empty())
+    {
+        nlohmann::json entity_json = nlohmann::json::object();
+        entity_json["components"] = le.reflected_components;
+        ReflectionSerializer::deserializeEntity(m_world.registry, entity, entity_json, m_reflection);
+
+        if (auto* tag = m_world.registry.try_get<TagComponent>(entity))
+            tag->name = le.name + " (Pasted)";
     }
 
     m_hierarchy.selected_entity = entity;

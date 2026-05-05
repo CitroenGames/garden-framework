@@ -15,6 +15,7 @@
 #include "Plugin/GameModuleLoader.hpp"
 #include "Project/ProjectManager.hpp"
 #include "Reflection/ReflectionRegistry.hpp"
+#include "Reflection/EngineReflection.hpp"
 #include "Prefab/PrefabManager.hpp"
 #include "Assets/AssetManager.hpp"
 
@@ -132,6 +133,25 @@ int main(int argc, char* argv[])
     _world = world();
     _world.initializePhysics();
 
+    registerEngineReflection(reflection);
+    level_manager.setReflectionRegistry(&reflection);
+
+    // Load game DLL before the level so reflected game components can be imported.
+    std::string dll_path = project_manager.getAbsoluteModulePath();
+    if (!game_module.load(dll_path))
+    {
+        LOG_ENGINE_FATAL("Failed to load game module: {}", dll_path);
+        shutdown_server(1);
+    }
+
+    if (!game_module.hasServerSupport())
+    {
+        LOG_ENGINE_FATAL("Game module '{}' does not export server hooks", game_module.getGameName());
+        shutdown_server(1);
+    }
+
+    game_module.registerComponents(&reflection);
+
     // Load level
     LevelData level_data;
     std::string level_path = project_manager.getDescriptor().default_level;
@@ -151,20 +171,6 @@ int main(int argc, char* argv[])
         }
     }
 
-    // Load game DLL
-    std::string dll_path = project_manager.getAbsoluteModulePath();
-    if (!game_module.load(dll_path))
-    {
-        LOG_ENGINE_FATAL("Failed to load game module: {}", dll_path);
-        shutdown_server(1);
-    }
-
-    if (!game_module.hasServerSupport())
-    {
-        LOG_ENGINE_FATAL("Game module '{}' does not export server hooks", game_module.getGameName());
-        shutdown_server(1);
-    }
-
     // Initialize server via DLL
     uint16_t listen_port = parsePort(argc, argv);
 
@@ -177,8 +183,6 @@ int main(int argc, char* argv[])
     services.level_manager = &level_manager;
     services.api_version = GARDEN_MODULE_API_VERSION;
     services.listen_port = listen_port;
-
-    game_module.registerComponents(&reflection);
 
     PrefabManager::get().initialize(&reflection, render_api);
 

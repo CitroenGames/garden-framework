@@ -30,6 +30,7 @@
 #include "Assets/GltfAssetLoader.hpp"
 #include "Audio/AudioSystem.hpp"
 #include "Reflection/ReflectionRegistry.hpp"
+#include "Reflection/EngineReflection.hpp"
 #include "Prefab/PrefabManager.hpp"
 
 namespace fs = std::filesystem;
@@ -270,6 +271,17 @@ int main(int argc, char* argv[])
     if (!AudioSystem::get().initialize())
         LOG_ENGINE_WARN("Failed to initialize Audio System - continuing without audio");
 
+    registerEngineReflection(reflection);
+    level_manager.setReflectionRegistry(&reflection);
+
+    std::string dll_path = project_manager.getAbsoluteModulePath();
+    if (!game_module.load(dll_path))
+    {
+        LOG_ENGINE_FATAL("Failed to load game module: {}", dll_path);
+        quit_game(1);
+    }
+    game_module.registerComponents(&reflection);
+
     // Set up input
     input_handler.set_window(app.getWindow());
     input_handler.set_quit_callback([]() { quit_game(0); });
@@ -313,14 +325,6 @@ int main(int argc, char* argv[])
         level_data.metadata.diffuse_light,
         level_data.metadata.light_direction);
 
-    // Load game DLL
-    std::string dll_path = project_manager.getAbsoluteModulePath();
-    if (!game_module.load(dll_path))
-    {
-        LOG_ENGINE_FATAL("Failed to load game module: {}", dll_path);
-        quit_game(1);
-    }
-
     // Parse network CLI args
     std::string connect_addr = parseConnectAddress(argc, argv);
     uint16_t connect_port = parsePort(argc, argv);
@@ -336,8 +340,6 @@ int main(int argc, char* argv[])
     services.api_version = GARDEN_MODULE_API_VERSION;
     services.connect_address = connect_addr.empty() ? nullptr : connect_addr.c_str();
     services.connect_port = connect_port;
-
-    game_module.registerComponents(&reflection);
 
     PrefabManager::get().initialize(&reflection, render_api);
 

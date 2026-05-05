@@ -355,7 +355,7 @@ void PrefabEditorManager::drawComponentsPanel(PrefabEditorInstance& inst)
                 if (inst.has_selection && inst.selected_component_type == desc.type_id)
                     node_flags |= ImGuiTreeNodeFlags_Selected;
 
-                ImGui::TreeNodeEx(desc.display_name, node_flags, ICON_FA_CUBE " %s", desc.display_name);
+                ImGui::TreeNodeEx(desc.display_name.c_str(), node_flags, ICON_FA_CUBE " %s", desc.display_name.c_str());
 
                 if (ImGui::IsItemClicked())
                 {
@@ -446,7 +446,7 @@ void PrefabEditorManager::drawComponentsPanel(PrefabEditorInstance& inst)
 
                 if (need_separator) { ImGui::Separator(); need_separator = false; }
 
-                if (ImGui::MenuItem(desc.display_name))
+                if (ImGui::MenuItem(desc.display_name.c_str()))
                 {
                     desc.add(inst.registry, inst.entity);
                     markPrefabPreviewDirty(inst);
@@ -598,7 +598,7 @@ void PrefabEditorManager::drawDetailsPanel(PrefabEditorInstance& inst)
             if (comp)
             {
                 if (bold) ImGui::PushFont(bold);
-                ImGui::Text("%s", desc->display_name);
+                ImGui::Text("%s", desc->display_name.c_str());
                 if (bold) ImGui::PopFont();
                 ImGui::Separator();
                 ImGui::Spacing();

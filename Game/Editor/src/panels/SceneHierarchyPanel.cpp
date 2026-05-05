@@ -1,8 +1,10 @@
 #include "SceneHierarchyPanel.hpp"
 #include "PanelUtils.hpp"
+#include "ComponentAddMenu.hpp"
 #include "Components/Components.hpp"
 #include "Components/PrefabInstanceComponent.hpp"
 #include "Reflection/ReflectionRegistry.hpp"
+#include "Reflection/ReflectionPropertyOps.hpp"
 #include "EditorIcons.hpp"
 #include "imgui.h"
 #include <algorithm>
@@ -274,34 +276,9 @@ void SceneHierarchyPanel::draw(entt::registry& registry, bool* out_dirty, bool* 
             }
             if (ImGui::BeginMenu(ICON_FA_PLUS "  Add Component"))
             {
-                static const uint32_t mesh_type_id     = entt::type_hash<MeshComponent>::value();
-                static const uint32_t collider_type_id = entt::type_hash<ColliderComponent>::value();
-
-                if (!registry.all_of<MeshComponent>(entity))
-                    if (ImGui::MenuItem("Mesh"))
-                    { registry.emplace<MeshComponent>(entity); if (out_unsaved) *out_unsaved = true; }
-
-                if (!registry.all_of<ColliderComponent>(entity))
-                    if (ImGui::MenuItem("Collider"))
-                    { registry.emplace<ColliderComponent>(entity); if (out_unsaved) *out_unsaved = true; }
-
-                if (reflection)
-                {
-                    bool need_separator = true;
-                    for (const auto& desc : reflection->getAll())
-                    {
-                        if (desc.type_id == mesh_type_id || desc.type_id == collider_type_id)
-                            continue;
-                        if (desc.has(registry, entity))
-                            continue;
-                        if (need_separator) { ImGui::Separator(); need_separator = false; }
-                        if (ImGui::MenuItem(desc.display_name))
-                        {
-                            desc.add(registry, entity);
-                            if (out_unsaved) *out_unsaved = true;
-                        }
-                    }
-                }
+                EditorComponentAddMenu::draw(registry, entity, reflection, [&]() {
+                    if (out_unsaved) *out_unsaved = true;
+                });
                 ImGui::EndMenu();
             }
             if (ImGui::MenuItem(ICON_FA_PENCIL "  Rename"))
@@ -359,35 +336,58 @@ entt::entity SceneHierarchyPanel::duplicateEntity(entt::registry& registry, entt
 
     auto new_entity = registry.create();
 
-    if (auto* tag = registry.try_get<TagComponent>(source))
-        registry.emplace<TagComponent>(new_entity, tag->name + " (Copy)");
+    if (reflection)
+    {
+        for (const auto& desc : reflection->getAll())
+        {
+            if (!desc.has(registry, source))
+                continue;
 
-    if (auto* t = registry.try_get<TransformComponent>(source))
-        registry.emplace<TransformComponent>(new_entity, *t);
+            desc.add(registry, new_entity);
+            void* src = desc.get(registry, source);
+            void* dst = desc.get(registry, new_entity);
+            if (src && dst)
+                ReflectionPropertyOps::copyComponentProperties(desc, src, dst);
+        }
+    }
+    else
+    {
+        if (auto* tag = registry.try_get<TagComponent>(source))
+            registry.emplace<TagComponent>(new_entity, tag->name);
+
+        if (auto* t = registry.try_get<TransformComponent>(source))
+            registry.emplace<TransformComponent>(new_entity, *t);
+
+        if (auto* rb = registry.try_get<RigidBodyComponent>(source))
+            registry.emplace<RigidBodyComponent>(new_entity, *rb);
+
+        if (auto* pc = registry.try_get<PlayerComponent>(source))
+            registry.emplace<PlayerComponent>(new_entity, *pc);
+
+        if (auto* fc = registry.try_get<FreecamComponent>(source))
+            registry.emplace<FreecamComponent>(new_entity, *fc);
+
+        if (auto* pr = registry.try_get<PlayerRepresentationComponent>(source))
+            registry.emplace<PlayerRepresentationComponent>(new_entity, *pr);
+
+        if (auto* pl = registry.try_get<PointLightComponent>(source))
+            registry.emplace<PointLightComponent>(new_entity, *pl);
+
+        if (auto* sl = registry.try_get<SpotLightComponent>(source))
+            registry.emplace<SpotLightComponent>(new_entity, *sl);
+    }
 
     if (auto* mc = registry.try_get<MeshComponent>(source))
         registry.emplace<MeshComponent>(new_entity, *mc);
 
-    if (auto* rb = registry.try_get<RigidBodyComponent>(source))
-        registry.emplace<RigidBodyComponent>(new_entity, *rb);
-
     if (auto* col = registry.try_get<ColliderComponent>(source))
-        registry.emplace<ColliderComponent>(new_entity, *col);
+    {
+        auto& dst = registry.get_or_emplace<ColliderComponent>(new_entity);
+        dst.m_mesh = col->m_mesh;
+    }
 
-    if (auto* pc = registry.try_get<PlayerComponent>(source))
-        registry.emplace<PlayerComponent>(new_entity, *pc);
-
-    if (auto* fc = registry.try_get<FreecamComponent>(source))
-        registry.emplace<FreecamComponent>(new_entity, *fc);
-
-    if (auto* pr = registry.try_get<PlayerRepresentationComponent>(source))
-        registry.emplace<PlayerRepresentationComponent>(new_entity, *pr);
-
-    if (auto* pl = registry.try_get<PointLightComponent>(source))
-        registry.emplace<PointLightComponent>(new_entity, *pl);
-
-    if (auto* sl = registry.try_get<SpotLightComponent>(source))
-        registry.emplace<SpotLightComponent>(new_entity, *sl);
+    if (auto* tag = registry.try_get<TagComponent>(new_entity))
+        tag->name += " (Copy)";
 
     selected_entity = new_entity;
     return new_entity;

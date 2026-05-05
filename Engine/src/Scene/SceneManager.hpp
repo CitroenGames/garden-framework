@@ -7,6 +7,7 @@
 
 class world;
 class IRenderAPI;
+class ReflectionRegistry;
 
 class SceneManager
 {
@@ -19,6 +20,7 @@ public:
 
     // Initialize with references to world and render API
     void initialize(world* game_world, IRenderAPI* render_api);
+    void setReflectionRegistry(ReflectionRegistry* reflection) { level_manager.setReflectionRegistry(reflection); }
 
     // Load a scene from a level file (synchronous for now)
     SceneId loadScene(const std::string& level_path);
