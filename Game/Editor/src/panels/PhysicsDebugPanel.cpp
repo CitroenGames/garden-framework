@@ -3,6 +3,7 @@
 #include "Components/Components.hpp"
 #include "Debug/DebugDraw.hpp"
 #include "imgui.h"
+#include <algorithm>
 #include <limits>
 
 static void drawSectionHeader(const char* label, ImVec4 accent_color = ImVec4(0.30f, 0.55f, 0.85f, 1.0f))
@@ -135,16 +136,60 @@ void PhysicsDebugPanel::drawDebugVisualization()
             auto& collider  = view.get<ColliderComponent>(entity);
             auto& transform = view.get<TransformComponent>(entity);
 
-            if (!collider.is_mesh_valid())
-                continue;
+            switch (collider.shape_type)
+            {
+            case ColliderShapeType::Box:
+            {
+                glm::vec3 world_min, world_max;
+                transformAABB(-collider.box_half_extents, collider.box_half_extents,
+                              transform.getTransformMatrix(), world_min, world_max);
+                dd.drawAABB(world_min, world_max, m_config.collider_color);
+                break;
+            }
+            case ColliderShapeType::Sphere:
+            {
+                float max_scale = std::max({std::abs(transform.scale.x), std::abs(transform.scale.y), std::abs(transform.scale.z)});
+                dd.drawSphere(transform.position, collider.sphere_radius * max_scale, m_config.collider_color);
+                break;
+            }
+            case ColliderShapeType::Capsule:
+            {
+                float radius_scale = std::max(std::abs(transform.scale.x), std::abs(transform.scale.z));
+                float half_height = collider.capsule_half_height * std::abs(transform.scale.y);
+                float radius = collider.capsule_radius * radius_scale;
+                dd.drawCapsule(transform.position - glm::vec3(0.0f, half_height, 0.0f),
+                               transform.position + glm::vec3(0.0f, half_height, 0.0f),
+                               radius, m_config.collider_color);
+                break;
+            }
+            case ColliderShapeType::Cylinder:
+            {
+                glm::vec3 half_extents(collider.cylinder_radius,
+                                       collider.cylinder_half_height,
+                                       collider.cylinder_radius);
+                glm::vec3 world_min, world_max;
+                transformAABB(-half_extents, half_extents,
+                              transform.getTransformMatrix(), world_min, world_max);
+                dd.drawAABB(world_min, world_max, m_config.collider_color);
+                break;
+            }
+            case ColliderShapeType::Mesh:
+            case ColliderShapeType::ConvexHull:
+            default:
+            {
+                if (!collider.is_mesh_valid())
+                    continue;
 
-            glm::vec3 mesh_min, mesh_max;
-            collider.get_mesh()->getAABB(mesh_min, mesh_max);
+                glm::vec3 mesh_min, mesh_max;
+                collider.get_mesh()->getAABB(mesh_min, mesh_max);
 
-            glm::vec3 world_min, world_max;
-            transformAABB(mesh_min, mesh_max, transform.getTransformMatrix(), world_min, world_max);
+                glm::vec3 world_min, world_max;
+                transformAABB(mesh_min, mesh_max, transform.getTransformMatrix(), world_min, world_max);
 
-            dd.drawAABB(world_min, world_max, m_config.collider_color);
+                dd.drawAABB(world_min, world_max, m_config.collider_color);
+                break;
+            }
+            }
         }
     }
 

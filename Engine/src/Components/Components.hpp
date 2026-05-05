@@ -79,8 +79,8 @@ inline std::string bodyMotionTypeToString(BodyMotionType t)
 }
 
 struct RigidBodyComponent {
-    glm::vec3 velocity;
-    glm::vec3 force;
+    glm::vec3 velocity = glm::vec3(0.0f);
+    glm::vec3 force = glm::vec3(0.0f);
     float mass = 1.0f;
     bool apply_gravity = true;
     BodyMotionType motion_type = BodyMotionType::Dynamic;

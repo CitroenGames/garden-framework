@@ -8,3 +8,7 @@ include = Game/Server/Server.buildscript
 include = Game/Editor/Editor.buildscript
 include = Tools/GardenCLI/GardenCLI.buildscript
 include = Tools/NetworkTests/NetworkTests.buildscript
+folder("Tests")
+{
+    include = Tests/Tests.buildscript
+}

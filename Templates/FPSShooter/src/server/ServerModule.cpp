@@ -17,7 +17,9 @@
 #include "server/GameRules.hpp"
 #include "Utils/Log.hpp"
 
+#include <algorithm>
 #include <cmath>
+#include <glm/gtc/quaternion.hpp>
 
 static EngineServices* g_server_services = nullptr;
 static Net::ServerNetworkManager g_server_network;
@@ -25,86 +27,148 @@ static Game::GameRules g_game_rules;
 
 using namespace Net;
 
+static bool ensurePlayerPhysicsBody(world& w, entt::entity player_entity)
+{
+    if (!w.registry.valid(player_entity))
+        return false;
+    if (!w.registry.all_of<TransformComponent, RigidBodyComponent, PlayerComponent>(player_entity))
+        return false;
+
+    JPH::BodyID body_id = w.getPhysicsSystem().createPlayerBody(w.registry, player_entity);
+    if (body_id.IsInvalid())
+    {
+        LOG_ENGINE_ERROR("Failed to create server player physics body");
+        return false;
+    }
+    return true;
+}
+
+static void updateServerPlayerCollisions(world& w)
+{
+    auto view = w.registry.view<NetworkedEntity, PlayerComponent, RigidBodyComponent, TransformComponent>();
+    for (auto entity : view)
+    {
+        const auto& net = view.get<NetworkedEntity>(entity);
+        if (!net.is_player)
+            continue;
+        w.player_collisions(entity);
+    }
+}
+
 // ---- Hit validation helpers ----
 
-// Simple capsule-ray intersection for lag-compensated hit detection.
-// Tests ray against a vertical capsule centered at player position.
+// Tests a ray against a vertical capsule centered at player position.
 static bool rayCapsuleIntersect(const glm::vec3& ray_origin, const glm::vec3& ray_dir,
                                 const glm::vec3& capsule_center, float capsule_radius,
                                 float capsule_height, glm::vec3& hit_point)
 {
-    // Approximate as a sphere for simplicity (player bounding sphere)
-    // Use a tall sphere centered at capsule_center + half height offset
-    glm::vec3 center = capsule_center + glm::vec3(0, capsule_height * 0.5f, 0);
-    float radius = capsule_radius;
+    const glm::vec3 axis(0.0f, 1.0f, 0.0f);
+    const glm::vec3 seg_a = capsule_center - axis * (capsule_height * 0.5f);
+    const glm::vec3 seg_b = capsule_center + axis * (capsule_height * 0.5f);
+    const glm::vec3 seg = seg_b - seg_a;
+    const glm::vec3 w0 = ray_origin - seg_a;
 
-    glm::vec3 oc = ray_origin - center;
-    float a = glm::dot(ray_dir, ray_dir);
-    float b = 2.0f * glm::dot(oc, ray_dir);
-    float c = glm::dot(oc, oc) - radius * radius;
-    float discriminant = b * b - 4.0f * a * c;
+    const float a = glm::dot(ray_dir, ray_dir);
+    const float b = glm::dot(ray_dir, seg);
+    const float c = glm::dot(seg, seg);
+    const float d = glm::dot(ray_dir, w0);
+    const float e = glm::dot(seg, w0);
+    const float denom = a * c - b * b;
 
-    if (discriminant < 0.0f) return false;
-
-    float t = (-b - std::sqrt(discriminant)) / (2.0f * a);
-    if (t < 0.0f) {
-        t = (-b + std::sqrt(discriminant)) / (2.0f * a);
-        if (t < 0.0f) return false;
+    float ray_t = 0.0f;
+    float seg_t = 0.0f;
+    if (denom > 0.000001f) {
+        ray_t = (b * e - c * d) / denom;
+        seg_t = (a * e - b * d) / denom;
+    } else if (c > 0.000001f) {
+        seg_t = e / c;
     }
 
-    hit_point = ray_origin + ray_dir * t;
+    seg_t = std::clamp(seg_t, 0.0f, 1.0f);
+    ray_t = (b * seg_t - d) / a;
+    if (ray_t < 0.0f) {
+        ray_t = 0.0f;
+        seg_t = c > 0.000001f ? std::clamp(e / c, 0.0f, 1.0f) : 0.0f;
+    }
+
+    const glm::vec3 closest_ray = ray_origin + ray_dir * ray_t;
+    const glm::vec3 closest_capsule = seg_a + seg * seg_t;
+    if (glm::distance(closest_ray, closest_capsule) > capsule_radius) {
+        return false;
+    }
+
+    hit_point = closest_ray;
     return true;
 }
 
-// Process a shoot command from a client with lag compensation
-static void processShootCommand(uint16_t shooter_client_id, const ShootCommandMessage& shoot_msg)
+static glm::vec3 makeAimDirection(float pitch, float yaw)
+{
+    const glm::vec3 clamped_rotation(std::clamp(pitch, -1.0f, 1.0f), yaw, 0.0f);
+    return glm::normalize(glm::quat(clamped_rotation) * glm::vec3(0.0f, 0.0f, 1.0f));
+}
+
+static glm::vec3 getShootOrigin(const TransformComponent& transform)
+{
+    return transform.position;
+}
+
+static WeaponStateMessage makeWeaponStateMessage(const WeaponComponent& weapon)
+{
+    WeaponStateMessage msg;
+    msg.ammo = weapon.ammo;
+    msg.max_ammo = weapon.max_ammo;
+    msg.weapon_type = static_cast<uint8_t>(weapon.weapon_type);
+    msg.reloading = weapon.reloading ? 1 : 0;
+    msg.fire_cooldown = weapon.fire_cooldown;
+    msg.reload_timer = weapon.reload_timer;
+    return msg;
+}
+
+static void sendWeaponState(uint16_t client_id, const WeaponComponent& weapon)
+{
+    BitWriter writer;
+    CombatSerializer::serialize(writer, makeWeaponStateMessage(weapon));
+    g_server_network.sendReliableToClient(client_id, writer);
+}
+
+static uint32_t getLagCompensatedAimTick(uint32_t acknowledged_server_tick)
+{
+    if (acknowledged_server_tick <= DEFAULT_INTERP_DELAY_TICKS) {
+        return acknowledged_server_tick;
+    }
+    return acknowledged_server_tick - DEFAULT_INTERP_DELAY_TICKS;
+}
+
+// Process an authoritative attack input sample with lag compensation.
+static void fireServerShot(
+    uint16_t shooter_client_id,
+    entt::entity shooter_entity,
+    const InputSample& input,
+    uint32_t acknowledged_server_tick,
+    const WeaponComponent& weapon)
 {
     world* w = g_server_services->game_world;
 
-    // Find shooter entity
-    entt::entity shooter_entity = entt::null;
-    auto player_view = w->registry.view<NetworkedEntity, TransformComponent, HealthComponent>();
-    for (auto entity : player_view) {
-        auto& net = player_view.get<NetworkedEntity>(entity);
-        if (net.owner_client_id == shooter_client_id && net.is_player) {
-            shooter_entity = entity;
-            break;
-        }
-    }
+    const auto& shooter_transform = w->registry.get<TransformComponent>(shooter_entity);
+    const auto& weapon_def = getWeaponDef(weapon.weapon_type);
+    const glm::vec3 ray_origin = getShootOrigin(shooter_transform);
+    const glm::vec3 ray_dir = makeAimDirection(input.camera_pitch, input.camera_yaw);
 
-    if (shooter_entity == entt::null) return;
-
-    auto& shooter_health = w->registry.get<HealthComponent>(shooter_entity);
-    if (!shooter_health.alive) return;
-
-    // Check weapon cooldown (server-authoritative)
-    if (!w->registry.all_of<WeaponComponent>(shooter_entity)) return;
-    auto& weapon = w->registry.get<WeaponComponent>(shooter_entity);
-    if (!WeaponSystem::tryFire(weapon)) return;
-
-    WeaponType wtype = static_cast<WeaponType>(shoot_msg.weapon_type);
-    const auto& weapon_def = getWeaponDef(wtype);
-    glm::vec3 ray_dir = glm::normalize(shoot_msg.ray_direction);
-
-    // Lag compensation: use the client's reported tick to look up historical positions.
-    // The server's snapshot history (in ServerNetworkManager) stores world state at each tick.
-    // We check ray against each other player's position at the client's perceived tick.
-    uint32_t rewind_tick = shoot_msg.client_tick;
+    const uint32_t rewind_tick = getLagCompensatedAimTick(acknowledged_server_tick);
 
     // Find best hit across all pellets
     uint32_t best_hit_entity_id = 0;
     uint16_t best_hit_client_id = 0;
-    glm::vec3 best_hit_point = shoot_msg.ray_origin + ray_dir * weapon_def.range;
+    glm::vec3 best_hit_point = ray_origin + ray_dir * weapon_def.range;
     float best_hit_dist = weapon_def.range;
     entt::entity best_hit_ent = entt::null;
+    auto player_view = w->registry.view<NetworkedEntity, TransformComponent, HealthComponent>();
 
     // For each pellet
     for (int pellet = 0; pellet < weapon_def.pellets; pellet++) {
         glm::vec3 pellet_dir = WeaponSystem::applySpread(ray_dir, weapon_def.spread,
-            shoot_msg.client_tick * 31 + pellet * 7919 + shooter_client_id);
+            input.tick * 31 + pellet * 7919 + shooter_client_id);
 
-        // Check against each other player using current positions
-        // (Simplified: use current positions. Full lag comp would rewind to rewind_tick.)
         for (auto entity : player_view) {
             if (entity == shooter_entity) continue;
 
@@ -114,10 +178,16 @@ static void processShootCommand(uint16_t shooter_client_id, const ShootCommandMe
 
             if (!health.alive) continue;
 
+            glm::vec3 target_position = trans.position;
+            ComponentSnapshot rewind_snapshot;
+            if (g_server_network.sampleLagCompensatedEntity(net.network_id, rewind_tick, rewind_snapshot)) {
+                target_position = rewind_snapshot.position;
+            }
+
             // Player bounding capsule: radius=0.4m, height=1.8m
             glm::vec3 hit_point;
-            if (rayCapsuleIntersect(shoot_msg.ray_origin, pellet_dir, trans.position, 0.4f, 1.8f, hit_point)) {
-                float dist = glm::distance(shoot_msg.ray_origin, hit_point);
+            if (rayCapsuleIntersect(ray_origin, pellet_dir, target_position, 0.4f, 1.8f, hit_point)) {
+                float dist = glm::distance(ray_origin, hit_point);
                 if (dist < best_hit_dist && dist <= weapon_def.range) {
                     best_hit_dist = dist;
                     best_hit_point = hit_point;
@@ -187,10 +257,10 @@ static void processShootCommand(uint16_t shooter_client_id, const ShootCommandMe
     // Broadcast shoot result to all clients for visual effects (tracers)
     ShootResultMessage result_msg;
     result_msg.shooter_client_id = shooter_client_id;
-    result_msg.ray_origin = shoot_msg.ray_origin;
+    result_msg.ray_origin = ray_origin;
     result_msg.hit_position = best_hit_point;
     result_msg.hit_entity_id = best_hit_entity_id;
-    result_msg.weapon_type = shoot_msg.weapon_type;
+    result_msg.weapon_type = static_cast<uint8_t>(weapon.weapon_type);
 
     BitWriter result_writer;
     CombatSerializer::serialize(result_writer, result_msg);
@@ -200,6 +270,43 @@ static void processShootCommand(uint16_t shooter_client_id, const ShootCommandMe
         if (client && client->peer)
             g_server_network.sendReliableToClient(i, result_writer);
     }
+}
+
+static void processWeaponInput(
+    uint16_t client_id,
+    entt::entity player_entity,
+    const InputSample& input,
+    uint32_t acknowledged_server_tick)
+{
+    world* w = g_server_services ? g_server_services->game_world : nullptr;
+    if (!w || !w->registry.valid(player_entity)) {
+        return;
+    }
+
+    if (!w->registry.all_of<TransformComponent, HealthComponent, WeaponComponent>(player_entity)) {
+        return;
+    }
+
+    auto& health = w->registry.get<HealthComponent>(player_entity);
+    if (!health.alive) {
+        return;
+    }
+
+    auto& weapon = w->registry.get<WeaponComponent>(player_entity);
+    const bool wants_attack = (input.buttons & InputFlags::ATTACK) != 0;
+    const bool wants_reload = (input.buttons & InputFlags::RELOAD) != 0;
+    if (!wants_attack && !wants_reload) {
+        return;
+    }
+
+    if (wants_attack) {
+        if (WeaponSystem::tryFire(weapon)) {
+            fireServerShot(client_id, player_entity, input, acknowledged_server_tick, weapon);
+        }
+    } else if (wants_reload) {
+        (void)WeaponSystem::tryReload(weapon);
+    }
+    sendWeaponState(client_id, weapon);
 }
 
 // ---- Respawn handler ----
@@ -220,11 +327,17 @@ static void respawnPlayer(uint16_t client_id, const glm::vec3& spawn_pos)
             trans.position = spawn_pos;
 
             if (w->registry.all_of<RigidBodyComponent>(entity)) {
-                w->registry.get<RigidBodyComponent>(entity).velocity = glm::vec3(0);
+                auto& rb = w->registry.get<RigidBodyComponent>(entity);
+                rb.velocity = glm::vec3(0.0f);
+                rb.force = glm::vec3(0.0f);
             }
 
+            ensurePlayerPhysicsBody(*w, entity);
+
             if (w->registry.all_of<WeaponComponent>(entity)) {
-                initWeapon(w->registry.get<WeaponComponent>(entity), WeaponType::RIFLE);
+                auto& weapon = w->registry.get<WeaponComponent>(entity);
+                initWeapon(weapon, WeaponType::RIFLE);
+                sendWeaponState(client_id, weapon);
             }
 
             // Broadcast respawn to all clients
@@ -266,7 +379,9 @@ static void spawnPlayerForClient(uint16_t client_id)
     w->registry.emplace<TransformComponent>(player_entity, transform);
 
     RigidBodyComponent rigidbody;
-    rigidbody.mass = 1.0f;
+    rigidbody.velocity = glm::vec3(0.0f);
+    rigidbody.force = glm::vec3(0.0f);
+    rigidbody.mass = 80.0f;
     rigidbody.apply_gravity = false;
     w->registry.emplace<RigidBodyComponent>(player_entity, rigidbody);
 
@@ -283,11 +398,14 @@ static void spawnPlayerForClient(uint16_t client_id)
 
     WeaponComponent weapon;
     initWeapon(weapon, WeaponType::RIFLE);
-    w->registry.emplace<WeaponComponent>(player_entity, weapon);
+    auto& weapon_component = w->registry.emplace<WeaponComponent>(player_entity, weapon);
 
     w->registry.emplace<ScoreComponent>(player_entity);
 
+    ensurePlayerPhysicsBody(*w, player_entity);
+
     g_server_network.setClientPlayerEntity(client_id, network_id);
+    sendWeaponState(client_id, weapon_component);
 
     // Broadcast spawn to all clients
     SpawnPlayerMessage spawn_msg;
@@ -335,6 +453,8 @@ static void despawnPlayerForClient(uint16_t client_id)
     for (auto entity : view) {
         auto& networked = view.get<NetworkedEntity>(entity);
         if (networked.owner_client_id == client_id && networked.is_player) {
+            w->getPhysicsSystem().removeBody(entity);
+
             DespawnPlayerMessage despawn_msg;
             despawn_msg.client_id = client_id;
             despawn_msg.entity_id = networked.network_id;
@@ -383,6 +503,14 @@ GAME_API bool gardenServerInit(EngineServices* services)
         return w->registry.get<HealthComponent>(player_entity).alive;
     });
 
+    g_server_network.setInputSampleHandler([](
+        uint16_t client_id,
+        entt::entity player_entity,
+        const InputSample& input,
+        uint32_t acknowledged_server_tick) {
+        processWeaponInput(client_id, player_entity, input, acknowledged_server_tick);
+    });
+
     g_server_network.setOnClientConnected([](uint16_t client_id) {
         spawnPlayerForClient(client_id);
     });
@@ -391,19 +519,10 @@ GAME_API bool gardenServerInit(EngineServices* services)
         despawnPlayerForClient(client_id);
     });
 
-    // Set up shoot command handler
     g_server_network.setCustomMessageHandler([](uint16_t client_id, uint8_t message_type, BitReader& reader) {
-        if (message_type != static_cast<uint8_t>(CombatMessageType::SHOOT_COMMAND)) {
-            LOG_ENGINE_WARN("Unhandled client custom message {}", static_cast<int>(message_type));
-            return;
-        }
-
-        ShootCommandMessage msg;
-        if (!CombatSerializer::deserialize(reader, msg)) {
-            LOG_ENGINE_WARN("Failed to deserialize SHOOT_COMMAND from client {}", client_id);
-            return;
-        }
-        processShootCommand(client_id, msg);
+        (void)reader;
+        LOG_ENGINE_WARN("Ignoring unauthoritative client custom message {} from client {}",
+            static_cast<int>(message_type), client_id);
     });
 
     // Set up respawn handler
@@ -427,15 +546,22 @@ GAME_API void gardenServerUpdate(float delta_time)
 
     world* w = g_server_services->game_world;
 
-    g_server_network.update(delta_time);
+    g_server_network.pumpNetworkEvents(delta_time);
     w->step_physics(delta_time);
+    updateServerPlayerCollisions(*w);
     g_game_rules.Update(*w, delta_time);
 
     // Update weapon cooldowns for all players
-    auto weapon_view = w->registry.view<WeaponComponent>();
+    auto weapon_view = w->registry.view<WeaponComponent, NetworkedEntity>();
     for (auto entity : weapon_view) {
         auto& weapon = weapon_view.get<WeaponComponent>(entity);
+        auto& net = weapon_view.get<NetworkedEntity>(entity);
+        const int32_t old_ammo = weapon.ammo;
+        const bool old_reloading = weapon.reloading;
         WeaponSystem::tick(weapon, w->fixed_delta);
+        if ((old_ammo != weapon.ammo || old_reloading != weapon.reloading) && net.owner_client_id != 0) {
+            sendWeaponState(net.owner_client_id, weapon);
+        }
     }
 
     // Fall detection for server-side entities
@@ -469,6 +595,8 @@ GAME_API void gardenServerUpdate(float delta_time)
             g_game_rules.queueRespawn(net.owner_client_id);
         }
     }
+
+    g_server_network.publishWorldState();
 }
 
 GAME_API void gardenServerOnLevelLoaded()

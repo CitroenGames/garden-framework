@@ -256,6 +256,15 @@ private:
     }
 
 public:
+    struct PhysicsBodyDesc
+    {
+        float mass = 1.0f;
+        float friction = 0.2f;
+        float restitution = 0.0f;
+        bool apply_gravity = true;
+        bool lock_rotation = true;
+    };
+
     PhysicsSystem(const glm::vec3& gravityVector = glm::vec3(0, -1, 0), float deltaTime = 1.0f / 60.0f);
     ~PhysicsSystem();
 
@@ -273,12 +282,19 @@ public:
     static JPH::ShapeRefC createShapeFromCollider(const ColliderComponent& collider, const glm::vec3& scale);
 
     // Body management
-    JPH::BodyID createStaticBody(const glm::vec3& position, const glm::vec3& rotation, const JPH::ShapeRefC& shape, entt::entity entity);
+    JPH::BodyID createStaticBody(const glm::vec3& position, const glm::vec3& rotation, const JPH::ShapeRefC& shape, entt::entity entity,
+        const PhysicsBodyDesc& desc = {});
+    JPH::BodyID createDynamicBody(const glm::vec3& position, const glm::vec3& rotation, const JPH::ShapeRefC& shape, entt::entity entity,
+        const PhysicsBodyDesc& desc = {});
     JPH::BodyID createDynamicBody(const glm::vec3& position, const glm::vec3& rotation, const JPH::ShapeRefC& shape, float mass, entt::entity entity,
         float friction = 0.0f, float restitution = 0.0f, bool lock_rotation = true);
-    JPH::BodyID createKinematicBody(const glm::vec3& position, const glm::vec3& rotation, const JPH::ShapeRefC& shape, entt::entity entity);
-    JPH::BodyID createStaticMeshBody(const glm::vec3& position, const glm::vec3& rotation, const glm::vec3& scale, const mesh& colliderMesh, entt::entity entity);
+    JPH::BodyID createKinematicBody(const glm::vec3& position, const glm::vec3& rotation, const JPH::ShapeRefC& shape, entt::entity entity,
+        const PhysicsBodyDesc& desc = {});
+    JPH::BodyID createStaticMeshBody(const glm::vec3& position, const glm::vec3& rotation, const glm::vec3& scale, const mesh& colliderMesh, entt::entity entity,
+        const PhysicsBodyDesc& desc = {});
+    JPH::BodyID createPlayerBody(entt::registry& registry, entt::entity entity);
     void removeBody(entt::entity entity);
+    bool hasBody(entt::entity entity) const { return entity_to_body.find(entity) != entity_to_body.end(); }
 
     // Main physics update
     void stepPhysics(entt::registry& registry);

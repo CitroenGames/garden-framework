@@ -65,6 +65,13 @@ std::string ProjectSelector::run()
     char new_project_dir[512]  = ".";
     char open_project_path[512] = "";
 
+    enum class BrowserTab
+    {
+        ProjectBrowser,
+        OpenExistingProject
+    };
+    BrowserTab active_tab = BrowserTab::ProjectBrowser;
+
     ProjectManager project_manager;
     std::string result_path;
     bool running = true;
@@ -122,14 +129,34 @@ std::string ProjectSelector::run()
             ImVec2 text_pos(p0.x + 20.0f, p0.y + (title_h - text_size.y) * 0.5f);
             draw->AddText(text_pos, IM_COL32(200, 200, 200, 255), title);
 
-            const char* subtitle = "Project Browser";
-            ImVec2 sub_size = ImGui::CalcTextSize(subtitle);
-            ImVec2 sub_pos(p0.x + 20.0f + text_size.x + 16.0f,
-                           p0.y + (title_h - sub_size.y) * 0.5f);
-            draw->AddText(sub_pos, IM_COL32(120, 120, 130, 255), subtitle);
+            auto draw_header_tab = [&](const char* label, BrowserTab tab) {
+                bool selected = (active_tab == tab);
+                ImVec2 label_size = ImGui::CalcTextSize(label);
+                ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 0.0f);
+                ImGui::PushStyleColor(ImGuiCol_Button,
+                    selected ? ImVec4(0.12f, 0.12f, 0.14f, 1.0f)
+                             : ImVec4(0.09f, 0.09f, 0.11f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.16f, 0.16f, 0.18f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.10f, 0.46f, 0.82f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_Text,
+                    selected ? ImVec4(0.88f, 0.88f, 0.92f, 1.0f)
+                             : ImVec4(0.58f, 0.58f, 0.64f, 1.0f));
+                if (ImGui::Button(label, ImVec2(label_size.x + 24.0f, 30.0f)))
+                    active_tab = tab;
+                ImGui::PopStyleColor(4);
+                ImGui::PopStyleVar();
+            };
+
+            float tab_x = p0.x + 20.0f + text_size.x + 24.0f;
+            float tab_y = p0.y + (title_h - 30.0f) * 0.5f;
+            ImGui::SetCursorScreenPos(ImVec2(tab_x, tab_y));
+            draw_header_tab("Project Browser", BrowserTab::ProjectBrowser);
+            ImGui::SameLine(0.0f, 4.0f);
+            draw_header_tab("Open Existing Project", BrowserTab::OpenExistingProject);
             ImGui::PopFont();
 
             draw->AddLine(ImVec2(p0.x, p1.y), p1, IM_COL32(50, 50, 60, 255));
+            ImGui::SetCursorScreenPos(p0);
             ImGui::Dummy(ImVec2(0, title_h + 1));
         }
 
@@ -142,150 +169,140 @@ std::string ProjectSelector::run()
         ImGui::SetCursorPos(ImVec2(pad_x, pad_y_top));
         ImGui::BeginChild("##ProjectContent", ImVec2(panel_w, panel_h), false);
 
-        // ---- Open Project section ----
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.85f, 0.88f, 1.0f));
-        ImGui::TextUnformatted("Open Existing Project");
-        ImGui::PopStyleColor();
-        ImGui::Spacing();
-
         float browse_w = 80.0f;
         float label_col = 80.0f;
         float open_w = 72.0f;
-        float btns_total = browse_w + 4 + open_w + 8;
-        ImGui::SetNextItemWidth(panel_w - btns_total);
-        ImGui::InputTextWithHint("##open_path", "Path to .garden file...",
-                                 open_project_path, sizeof(open_project_path));
-        ImGui::SameLine();
-        if (ImGui::Button("Browse##open", ImVec2(browse_w, 0)))
+        if (active_tab == BrowserTab::ProjectBrowser)
         {
-            std::string file = FileDialog::openFile(
-                "Open Garden Project",
-                "Garden Project (*.garden)\0*.garden\0All Files (*.*)\0*.*\0");
-            if (!file.empty())
-            {
-                std::strncpy(open_project_path, file.c_str(),
-                             sizeof(open_project_path) - 1);
-                open_project_path[sizeof(open_project_path) - 1] = '\0';
-            }
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Open", ImVec2(open_w, 0)))
-        {
-            std::string path(open_project_path);
-            if (!path.empty())
-            {
-                result_path = std::filesystem::absolute(path).string();
-                running = false;
-            }
-        }
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.85f, 0.88f, 1.0f));
+            ImGui::TextUnformatted("Create New Project");
+            ImGui::PopStyleColor();
+            ImGui::Spacing();
 
-        ImGui::Spacing();
-        ImGui::Spacing();
-
-        // Divider
-        {
-            ImVec2 cp = ImGui::GetCursorScreenPos();
-            ImDrawList* dl = ImGui::GetWindowDrawList();
-            dl->AddLine(ImVec2(cp.x, cp.y), ImVec2(cp.x + panel_w, cp.y),
-                        IM_COL32(50, 50, 60, 255));
-            ImGui::Dummy(ImVec2(0, 1));
-        }
-
-        ImGui::Spacing();
-        ImGui::Spacing();
-
-        // ---- New Project section ----
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.85f, 0.88f, 1.0f));
-        ImGui::TextUnformatted("Create New Project");
-        ImGui::PopStyleColor();
-        ImGui::Spacing();
-
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted("Name");
-        ImGui::SameLine(label_col);
-        ImGui::SetNextItemWidth(panel_w - label_col);
-        ImGui::InputTextWithHint("##new_name", "Project name...",
-                                 new_project_name, sizeof(new_project_name));
-
-        // Template selection
-        if (!available_templates.empty())
-        {
             ImGui::AlignTextToFramePadding();
-            ImGui::TextUnformatted("Template");
+            ImGui::TextUnformatted("Name");
             ImGui::SameLine(label_col);
-            const char* preview = (selected_template >= 0 &&
-                                   selected_template < (int)available_templates.size())
-                ? available_templates[selected_template].name.c_str()
-                : "Select Template...";
             ImGui::SetNextItemWidth(panel_w - label_col);
-            if (ImGui::BeginCombo("##new_template", preview))
+            ImGui::InputTextWithHint("##new_name", "Project name...",
+                                     new_project_name, sizeof(new_project_name));
+
+            // Template selection
+            if (!available_templates.empty())
             {
-                for (int i = 0; i < (int)available_templates.size(); i++)
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextUnformatted("Template");
+                ImGui::SameLine(label_col);
+                const char* preview = (selected_template >= 0 &&
+                                       selected_template < (int)available_templates.size())
+                    ? available_templates[selected_template].name.c_str()
+                    : "Select Template...";
+                ImGui::SetNextItemWidth(panel_w - label_col);
+                if (ImGui::BeginCombo("##new_template", preview))
                 {
-                    bool is_selected = (selected_template == i);
-                    if (ImGui::Selectable(available_templates[i].name.c_str(), is_selected))
-                        selected_template = i;
-                    if (is_selected)
-                        ImGui::SetItemDefaultFocus();
+                    for (int i = 0; i < (int)available_templates.size(); i++)
+                    {
+                        bool is_selected = (selected_template == i);
+                        if (ImGui::Selectable(available_templates[i].name.c_str(), is_selected))
+                            selected_template = i;
+                        if (is_selected)
+                            ImGui::SetItemDefaultFocus();
+                    }
+                    ImGui::EndCombo();
                 }
-                ImGui::EndCombo();
             }
-        }
-        else
-        {
-            ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.2f, 1.0f),
-                "No project templates found. Check your Templates/ directory.");
-        }
-
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted("Directory");
-        ImGui::SameLine(label_col);
-        ImGui::SetNextItemWidth(panel_w - label_col - browse_w - 8);
-        ImGui::InputTextWithHint("##new_dir", "Parent directory...",
-                                 new_project_dir, sizeof(new_project_dir));
-        ImGui::SameLine();
-        if (ImGui::Button("Browse##dir", ImVec2(browse_w, 0)))
-        {
-            std::string folder = FileDialog::openFolder("Select Project Directory");
-            if (!folder.empty())
-                std::strncpy(new_project_dir, folder.c_str(),
-                             sizeof(new_project_dir) - 1);
-        }
-
-        ImGui::Spacing();
-        ImGui::Spacing();
-
-        // Create button
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.45f, 0.80f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.25f, 0.50f, 0.90f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.15f, 0.40f, 0.75f, 1.0f));
-        bool can_create = !available_templates.empty() &&
-                          selected_template >= 0 &&
-                          selected_template < (int)available_templates.size();
-        if (!can_create) ImGui::BeginDisabled();
-        if (ImGui::Button("Create Project", ImVec2(160, 36)))
-        {
-            std::string name(new_project_name);
-            std::string dir(new_project_dir);
-            if (!name.empty() && !dir.empty())
+            else
             {
-                bool success = project_manager.createProjectFromTemplate(
-                    available_templates[selected_template].path, dir, name);
+                ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.2f, 1.0f),
+                    "No project templates found. Check your Templates/ directory.");
+            }
 
-                if (success)
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted("Directory");
+            ImGui::SameLine(label_col);
+            ImGui::SetNextItemWidth(panel_w - label_col - browse_w - 8);
+            ImGui::InputTextWithHint("##new_dir", "Parent directory...",
+                                     new_project_dir, sizeof(new_project_dir));
+            ImGui::SameLine();
+            if (ImGui::Button("Browse##dir", ImVec2(browse_w, 0)))
+            {
+                std::string folder = FileDialog::openFolder("Select Project Directory");
+                if (!folder.empty())
                 {
-                    result_path = project_manager.getProjectFilePath();
+                    std::strncpy(new_project_dir, folder.c_str(),
+                                 sizeof(new_project_dir) - 1);
+                    new_project_dir[sizeof(new_project_dir) - 1] = '\0';
+                }
+            }
+
+            ImGui::Spacing();
+            ImGui::Spacing();
+
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.45f, 0.80f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.25f, 0.50f, 0.90f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.15f, 0.40f, 0.75f, 1.0f));
+            bool can_create = !available_templates.empty() &&
+                              selected_template >= 0 &&
+                              selected_template < (int)available_templates.size();
+            if (!can_create) ImGui::BeginDisabled();
+            if (ImGui::Button("Create Project", ImVec2(160, 36)))
+            {
+                std::string name(new_project_name);
+                std::string dir(new_project_dir);
+                if (!name.empty() && !dir.empty())
+                {
+                    bool success = project_manager.createProjectFromTemplate(
+                        available_templates[selected_template].path, dir, name);
+
+                    if (success)
+                    {
+                        result_path = project_manager.getProjectFilePath();
+                        running = false;
+                    }
+                    else
+                    {
+                        fprintf(stderr, "[ProjectSelector] Failed to create project '%s' in '%s'\n",
+                                name.c_str(), dir.c_str());
+                    }
+                }
+            }
+            ImGui::PopStyleColor(3);
+            if (!can_create) ImGui::EndDisabled();
+        }
+        else if (active_tab == BrowserTab::OpenExistingProject)
+        {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.85f, 0.88f, 1.0f));
+            ImGui::TextUnformatted("Open Existing Project");
+            ImGui::PopStyleColor();
+            ImGui::Spacing();
+
+            float btns_total = browse_w + 4 + open_w + 8;
+            ImGui::SetNextItemWidth(panel_w - btns_total);
+            ImGui::InputTextWithHint("##open_path", "Path to .garden file...",
+                                     open_project_path, sizeof(open_project_path));
+            ImGui::SameLine();
+            if (ImGui::Button("Browse##open", ImVec2(browse_w, 0)))
+            {
+                std::string file = FileDialog::openFile(
+                    "Open Garden Project",
+                    "Garden Project (*.garden)\0*.garden\0All Files (*.*)\0*.*\0");
+                if (!file.empty())
+                {
+                    std::strncpy(open_project_path, file.c_str(),
+                                 sizeof(open_project_path) - 1);
+                    open_project_path[sizeof(open_project_path) - 1] = '\0';
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Open", ImVec2(open_w, 0)))
+            {
+                std::string path(open_project_path);
+                if (!path.empty())
+                {
+                    result_path = std::filesystem::absolute(path).string();
                     running = false;
                 }
-                else
-                {
-                    fprintf(stderr, "[ProjectSelector] Failed to create project '%s' in '%s'\n",
-                            name.c_str(), dir.c_str());
-                }
             }
         }
-        ImGui::PopStyleColor(3);
-        if (!can_create) ImGui::EndDisabled();
 
         ImGui::EndChild(); // ##ProjectContent
 

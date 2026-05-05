@@ -8,10 +8,12 @@
 namespace Net {
 
 // Protocol version for compatibility checking
-constexpr uint32_t NETWORK_PROTOCOL_VERSION = 1;
+constexpr uint32_t NETWORK_PROTOCOL_VERSION = 2;
 constexpr uint16_t MAX_NETWORKED_ENTITIES = 2048;
 constexpr uint16_t MAX_SYNCED_CVARS = 1024;
 constexpr uint8_t CUSTOM_MESSAGE_START = 64;
+constexpr uint8_t MAX_INPUT_SAMPLES_PER_PACKET = 3;
+constexpr uint8_t DEFAULT_INTERP_DELAY_TICKS = 2;
 
 // Message type enumeration
 enum class MessageType : uint8_t
@@ -56,6 +58,7 @@ namespace InputFlags
     constexpr uint8_t USE           = 1 << 2;  // E
     constexpr uint8_t ATTACK        = 1 << 1;  // Mouse1
     constexpr uint8_t ATTACK2       = 1 << 0;  // Mouse2
+    constexpr uint8_t RELOAD        = ATTACK2; // Sample-level alias used by FPSShooter.
 }
 
 // Component update flags (for delta compression)
@@ -66,6 +69,14 @@ namespace ComponentFlags
     constexpr uint8_t GROUNDED      = 1 << 5;  // Grounded state changed
     constexpr uint8_t DELETED        = 1 << 4;  // Entity should be deleted
     constexpr uint8_t ROTATION      = 1 << 3;  // Rotation changed
+}
+
+// Snapshot flags
+namespace SnapshotFlags
+{
+    constexpr uint8_t NONE          = 0;
+    constexpr uint8_t FULL          = 1 << 0;  // Snapshot is authoritative for all currently networked entities.
+    constexpr uint8_t BASELINE_MISS = 1 << 1;  // Server could not find the client's acknowledged delta baseline.
 }
 
 // Message structures
@@ -165,9 +176,13 @@ struct WorldStateUpdateMessage
 {
     MessageType type = MessageType::WORLD_STATE_UPDATE;
     uint32_t server_tick = 0;
+    uint32_t delta_from_tick = 0; // 0 when this is a full snapshot or no delta baseline was used.
+    uint8_t snapshot_flags = SnapshotFlags::NONE;
     uint16_t num_entities = 0;
     uint32_t last_processed_input_tick = 0; // Per-client: last input tick the server applied
     // EntityUpdateData entities[] follows in memory
+
+    bool isFullSnapshot() const { return (snapshot_flags & SnapshotFlags::FULL) != 0; }
 };
 
 struct PingMessage

@@ -1,4 +1,5 @@
 #include "ClientNetworkManager.hpp"
+#include "NetworkInput.hpp"
 #include "NetworkRuntime.hpp"
 #include "world.hpp"
 #include "Components/Components.hpp"
@@ -8,6 +9,8 @@
 #include <entt/entt.hpp>
 #include <cstring>
 #include <chrono>
+#include <unordered_set>
+#include <vector>
 #include <SDL3/SDL.h>
 
 namespace {
@@ -145,6 +148,9 @@ void ClientNetworkManager::shutdown()
     client_id = 0;
     client_tick = 0;
     last_received_server_tick = 0;
+    pending_input_tick = 0;
+    has_pending_input = false;
+    recent_input_count = 0;
     local_player_entity = entt::null;
     local_player_network_id = 0;
 
@@ -160,9 +166,6 @@ void ClientNetworkManager::update(float delta_time)
     if (client_host == nullptr) {
         return;
     }
-
-    // Increment client tick
-    client_tick++;
 
     // Check connection timeout
     if (connection_state == ConnectionState::CONNECTING) {
@@ -219,7 +222,7 @@ void ClientNetworkManager::update(float delta_time)
             // Shift recent inputs history
             recent_inputs[2] = recent_inputs[1];
             recent_inputs[1] = recent_inputs[0];
-            recent_inputs[0].tick = client_tick;
+            recent_inputs[0].tick = pending_input_tick;
             recent_inputs[0].buttons = last_sent_input.buttons;
             recent_inputs[0].camera_yaw = last_sent_input.camera_yaw;
             recent_inputs[0].camera_pitch = last_sent_input.camera_pitch;
@@ -230,7 +233,7 @@ void ClientNetworkManager::update(float delta_time)
             // Create and send input command with redundant older inputs
             BitWriter writer;
             InputCommandMessage msg;
-            msg.client_tick = client_tick;
+            msg.client_tick = pending_input_tick;
             msg.last_received_tick = last_received_server_tick;
             msg.buttons = last_sent_input.buttons;
             msg.camera_yaw = last_sent_input.camera_yaw;
@@ -238,10 +241,14 @@ void ClientNetworkManager::update(float delta_time)
             msg.move_forward = last_sent_input.move_forward;
             msg.move_right = last_sent_input.move_right;
 
-            // Include up to 2 older inputs for redundancy
+            // Include up to 2 older inputs for redundancy, oldest first.
             uint8_t redundant_count = (recent_input_count > 1) ? static_cast<uint8_t>(recent_input_count - 1) : 0;
             if (redundant_count > INPUT_REDUNDANCY_COUNT) redundant_count = INPUT_REDUNDANCY_COUNT;
-            NetworkSerializer::serialize(writer, msg, &recent_inputs[1], redundant_count);
+            InputSample redundant_inputs[INPUT_REDUNDANCY_COUNT] = {};
+            for (uint8_t i = 0; i < redundant_count; ++i) {
+                redundant_inputs[i] = recent_inputs[redundant_count - i];
+            }
+            NetworkSerializer::serialize(writer, msg, redundant_inputs, redundant_count);
             sendUnreliableMessage(writer);
         }
     }
@@ -257,17 +264,45 @@ void ClientNetworkManager::update(float delta_time)
 
     // Flush all queued packets at end of update
     enet_host_flush(client_host);
+    refreshStats(delta_time);
 }
 
 void ClientNetworkManager::sendInputCommand(const InputState& input)
+{
+    sendInputCommand(beginInputCommandTick(), input);
+}
+
+void ClientNetworkManager::sendInputCommand(uint32_t command_tick, const InputState& input)
 {
     if (!isConnected() || server_peer == nullptr) {
         return;
     }
 
-    // Store input for rate-limited sending
+    if (command_tick == 0) {
+        command_tick = beginInputCommandTick();
+    }
+    if (static_cast<int32_t>(command_tick - client_tick) > 0) {
+        client_tick = command_tick;
+    }
+
+    const uint8_t latched_actions = has_pending_input
+        ? static_cast<uint8_t>(last_sent_input.buttons & INPUT_ACTION_LATCH_MASK)
+        : 0;
+
+    // Store input for rate-limited sending. One-shot action buttons are latched
+    // so a high render frame rate cannot overwrite them before the next packet.
+    pending_input_tick = command_tick;
     last_sent_input = input;
+    last_sent_input.buttons |= latched_actions;
     has_pending_input = true;
+}
+
+uint32_t ClientNetworkManager::beginInputCommandTick()
+{
+    if (!isConnected()) {
+        return client_tick;
+    }
+    return ++client_tick;
 }
 
 entt::entity ClientNetworkManager::getEntityByNetworkId(uint32_t net_id) const
@@ -386,7 +421,7 @@ void ClientNetworkManager::handleConnectAccept(BitReader& reader)
     }
 
     client_id = msg.client_id;
-    client_tick = msg.server_tick;
+    client_tick = 0;
     last_received_server_tick = msg.server_tick;
 
     setConnectionState(ConnectionState::CONNECTED);
@@ -432,11 +467,20 @@ void ClientNetworkManager::handleWorldStateUpdate(BitReader& reader)
     // Update last received server tick
     last_received_server_tick = msg.server_tick;
 
+    std::unordered_set<uint32_t> full_snapshot_entities;
+    if (msg.isFullSnapshot()) {
+        full_snapshot_entities.reserve(entities.size());
+    }
+
     // Process all entity updates
     for (const auto& update : entities) {
         if (update.shouldDelete()) {
             deleteEntity(update.entity_id);
             continue;
+        }
+
+        if (msg.isFullSnapshot()) {
+            full_snapshot_entities.insert(update.entity_id);
         }
 
         // For the local player: store authoritative state for reconciliation
@@ -474,6 +518,18 @@ void ClientNetworkManager::handleWorldStateUpdate(BitReader& reader)
                     update.hasRotation() ? update.rotation_y : 0.0f
                 );
             }
+        }
+    }
+
+    if (msg.isFullSnapshot()) {
+        std::vector<uint32_t> stale_entities;
+        for (const auto& [net_id, entity] : network_id_to_entity) {
+            if (full_snapshot_entities.find(net_id) == full_snapshot_entities.end()) {
+                stale_entities.push_back(net_id);
+            }
+        }
+        for (uint32_t net_id : stale_entities) {
+            deleteEntity(net_id);
         }
     }
 }
@@ -663,6 +719,11 @@ void ClientNetworkManager::deleteEntity(uint32_t network_id)
         network_id_to_entity.erase(it);
     }
 
+    if (network_id == local_player_network_id) {
+        local_player_entity = entt::null;
+        local_player_network_id = 0;
+    }
+
     // Clean up interpolation buffer
     interp_buffers.erase(network_id);
 }
@@ -719,6 +780,12 @@ void ClientNetworkManager::setConnectionState(ConnectionState new_state)
         const char* state_names[] = { "DISCONNECTED", "CONNECTING", "CONNECTED" };
         LOG_ENGINE_INFO("Connection state changed: {0}", state_names[static_cast<int>(new_state)]);
     }
+}
+
+void ClientNetworkManager::refreshStats(float delta_time)
+{
+    updateStatsFromPeer(stats, server_peer, client_host);
+    stats_sampler.update(stats, delta_time);
 }
 
 void ClientNetworkManager::handleCVarSync(BitReader& reader)

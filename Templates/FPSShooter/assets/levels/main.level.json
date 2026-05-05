@@ -55,10 +55,8 @@
         "textures": [],
         "culling": true,
         "transparent": false,
-        "visible": true
-      },
-      "collider": {
-        "mesh_path": "assets/models/map_collider.obj"
+        "visible": true,
+        "use_mesh_collision": true
       }
     },
     {

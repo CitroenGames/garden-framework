@@ -32,6 +32,7 @@
 #include "Assets/AssetManager.hpp"
 
 #include <SDL3/SDL.h>
+#include <algorithm>
 #include <memory>
 
 using Net::InputState;
@@ -204,6 +205,7 @@ GAME_API bool gardenGameInit(EngineServices* services)
             g_local_ammo = msg.ammo;
             g_local_max_ammo = msg.max_ammo;
             g_local_reloading = msg.reloading != 0;
+            g_local_fire_cooldown = std::max(g_local_fire_cooldown, msg.fire_cooldown);
             break;
         }
         default:
@@ -286,6 +288,8 @@ GAME_API void gardenGameUpdate(float delta_time)
     // Send player input to server and run client-side prediction
     if (g_network.isConnected() && input_manager)
     {
+        const uint32_t command_tick = g_network.beginInputCommandTick();
+
         // Disable PlayerController's built-in movement - SharedMovement handles it
         g_player_controller->setMovementEnabled(false);
 
@@ -311,10 +315,12 @@ GAME_API void gardenGameUpdate(float delta_time)
         if (input_state.buttons & InputFlags::MOVE_RIGHT) input_state.move_right += 1.0f;
         if (input_state.buttons & InputFlags::MOVE_LEFT) input_state.move_right -= 1.0f;
 
-        // Handle shooting (Mouse1 / ATTACK)
+        // Predict local weapon controls; the server consumes the same input flags authoritatively.
         if (g_local_alive && input_manager->is_mouse_button_held(1) && g_local_fire_cooldown <= 0.0f && !g_local_reloading && g_local_ammo > 0)
         {
             const auto& weapon_def = getWeaponDef(WeaponType::RIFLE);
+
+            input_state.buttons |= InputFlags::ATTACK;
 
             // Consume ammo locally (client prediction)
             g_local_ammo--;
@@ -324,23 +330,13 @@ GAME_API void gardenGameUpdate(float delta_time)
             if (g_local_ammo <= 0) {
                 g_local_reloading = true;
             }
-
-            glm::vec3 cam_pos = game_world->world_camera.getPosition();
-            glm::vec3 cam_fwd = game_world->world_camera.camera_forward();
-            Net::BitWriter writer;
-            ShootCommandMessage shoot_msg;
-            shoot_msg.client_tick = g_network.getClientTick();
-            shoot_msg.ray_origin = cam_pos;
-            shoot_msg.ray_direction = cam_fwd;
-            shoot_msg.weapon_type = static_cast<uint8_t>(WeaponType::RIFLE);
-            CombatSerializer::serialize(writer, shoot_msg);
-            g_network.sendCustomUnreliable(writer);
         }
 
         // Handle reload (R key)
         if (g_local_alive && input_manager->is_key_pressed(SDL_SCANCODE_R) && !g_local_reloading) {
             const auto& weapon_def = getWeaponDef(WeaponType::RIFLE);
             if (g_local_ammo < weapon_def.max_ammo) {
+                input_state.buttons |= InputFlags::RELOAD;
                 g_local_reloading = true;
                 // Reload timer handled by server, client just shows the state
             }
@@ -375,8 +371,7 @@ GAME_API void gardenGameUpdate(float delta_time)
 
             MovementState result = SharedMovement::simulate(move_input, move_state, move_config);
 
-            uint32_t prediction_tick = g_network.getClientTick();
-            g_network.storeInput(prediction_tick, move_input, result);
+            g_network.storeInput(command_tick, move_input, result);
 
             trans.position = result.position;
             rb.velocity = result.velocity;
@@ -414,7 +409,7 @@ GAME_API void gardenGameUpdate(float delta_time)
             g_recon_smoothing.update();
         }
 
-        g_network.sendInputCommand(input_state);
+        g_network.sendInputCommand(command_tick, input_state);
     }
     else
     {

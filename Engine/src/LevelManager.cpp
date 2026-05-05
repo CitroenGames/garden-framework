@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cstring>
 #include <filesystem>
+#include <functional>
 #include <limits>
 
 using json = nlohmann::json;
@@ -76,6 +77,188 @@ static void copyMaterialPayload(MaterialRange& dst, const MaterialRange& src)
     dst.normal_texture = src.normal_texture;
     dst.occlusion_texture = src.occlusion_texture;
     dst.emissive_texture = src.emissive_texture;
+}
+
+using LevelMeshResolver = std::function<std::shared_ptr<mesh>(const std::string&, const LevelEntity&)>;
+
+static bool entityTypeCanHaveLevelCollider(EntityType type)
+{
+    return type == EntityType::Renderable ||
+           type == EntityType::Physical ||
+           type == EntityType::Collidable ||
+           type == EntityType::Player;
+}
+
+static void copyColliderSettings(ColliderComponent& col, const LevelEntity& entity_data)
+{
+    col.shape_type = stringToColliderShapeType(entity_data.collider_shape_type);
+    col.box_half_extents = entity_data.collider_box_half_extents;
+    col.sphere_radius = entity_data.collider_sphere_radius;
+    col.capsule_half_height = entity_data.collider_capsule_half_height;
+    col.capsule_radius = entity_data.collider_capsule_radius;
+    col.cylinder_half_height = entity_data.collider_cylinder_half_height;
+    col.cylinder_radius = entity_data.collider_cylinder_radius;
+    col.friction = entity_data.collider_friction;
+    col.restitution = entity_data.collider_restitution;
+}
+
+static std::shared_ptr<mesh> getVisualMesh(entt::registry& registry, entt::entity e)
+{
+    if (!registry.all_of<MeshComponent>(e))
+        return nullptr;
+    return registry.get<MeshComponent>(e).m_mesh;
+}
+
+static void assignColliderMesh(ColliderComponent& col,
+                               const LevelEntity& entity_data,
+                               entt::registry& registry,
+                               entt::entity e,
+                               const LevelMeshResolver& resolve_mesh)
+{
+    if (!entity_data.collider_mesh_path.empty())
+    {
+        LevelEntity col_ent = entity_data;
+        col_ent.mesh_path = entity_data.collider_mesh_path;
+        col_ent.texture_paths.clear();
+        col.m_mesh = resolve_mesh(entity_data.collider_mesh_path, col_ent);
+
+        if (!col.m_mesh && entity_data.use_mesh_collision)
+        {
+            col.m_mesh = getVisualMesh(registry, e);
+            if (col.m_mesh)
+            {
+                LOG_ENGINE_WARN("Entity '{}': collider mesh '{}' failed to load, using visual mesh because use_mesh_collision=true",
+                                entity_data.name, entity_data.collider_mesh_path);
+            }
+        }
+
+        if (!col.m_mesh)
+        {
+            LOG_ENGINE_ERROR("Entity '{}': collider mesh '{}' failed to load",
+                             entity_data.name, entity_data.collider_mesh_path);
+        }
+        return;
+    }
+
+    col.m_mesh = getVisualMesh(registry, e);
+}
+
+static void setupLevelColliderComponent(entt::registry& registry,
+                                        entt::entity e,
+                                        const LevelEntity& entity_data,
+                                        const LevelMeshResolver& resolve_mesh)
+{
+    if (entity_data.has_collider && entityTypeCanHaveLevelCollider(entity_data.type))
+    {
+        auto& col = registry.get_or_emplace<ColliderComponent>(e);
+        copyColliderSettings(col, entity_data);
+        assignColliderMesh(col, entity_data, registry, e, resolve_mesh);
+    }
+
+    if (entity_data.use_mesh_collision && registry.all_of<MeshComponent>(e))
+    {
+        auto& col = registry.get_or_emplace<ColliderComponent>(e);
+        if (!entity_data.has_collider)
+        {
+            col.shape_type = ColliderShapeType::Mesh;
+        }
+        if (!col.m_mesh)
+        {
+            col.m_mesh = getVisualMesh(registry, e);
+            LOG_ENGINE_INFO("Entity '{}': using visual mesh as collision (use_mesh_collision=true)", entity_data.name);
+        }
+    }
+}
+
+static PhysicsSystem::PhysicsBodyDesc makeBodyDesc(const LevelEntity& entity_data, const ColliderComponent& col, bool player_body = false)
+{
+    PhysicsSystem::PhysicsBodyDesc desc;
+    desc.mass = entity_data.mass;
+    desc.friction = col.friction;
+    desc.restitution = col.restitution;
+    desc.apply_gravity = player_body ? false : entity_data.apply_gravity;
+    desc.lock_rotation = true;
+    return desc;
+}
+
+static bool createLevelPhysicsBody(world& game_world, entt::entity e, const LevelEntity& entity_data)
+{
+    if (!game_world.registry.all_of<ColliderComponent, TransformComponent>(e))
+        return false;
+    if (entity_data.type == EntityType::Player)
+        return false;
+
+    auto& col = game_world.registry.get<ColliderComponent>(e);
+    auto& t = game_world.registry.get<TransformComponent>(e);
+    PhysicsSystem::PhysicsBodyDesc desc = makeBodyDesc(entity_data, col);
+
+    if (entity_data.type == EntityType::Physical)
+    {
+        BodyMotionType motion = BodyMotionType::Dynamic;
+        if (game_world.registry.all_of<RigidBodyComponent>(e))
+            motion = game_world.registry.get<RigidBodyComponent>(e).motion_type;
+
+        if (motion == BodyMotionType::Kinematic)
+        {
+            if (col.shape_type == ColliderShapeType::Mesh)
+            {
+                if (!col.is_mesh_valid())
+                {
+                    LOG_ENGINE_ERROR("Entity '{}': kinematic mesh collider has no valid mesh", entity_data.name);
+                    return false;
+                }
+                return game_world.getPhysicsSystem().createStaticMeshBody(t.position, t.rotation, t.scale, *col.get_mesh(), e, desc).IsInvalid() == false;
+            }
+
+            JPH::ShapeRefC shape = PhysicsSystem::createShapeFromCollider(col, t.scale);
+            if (!shape)
+            {
+                LOG_ENGINE_ERROR("Entity '{}': failed to create kinematic collider shape '{}'",
+                                 entity_data.name, colliderShapeTypeToString(col.shape_type));
+                return false;
+            }
+            return game_world.getPhysicsSystem().createKinematicBody(t.position, t.rotation, shape, e, desc).IsInvalid() == false;
+        }
+
+        if (col.shape_type == ColliderShapeType::Mesh)
+        {
+            if (!col.is_mesh_valid())
+            {
+                LOG_ENGINE_ERROR("Entity '{}': dynamic mesh collider has no valid mesh", entity_data.name);
+                return false;
+            }
+            col.shape_type = ColliderShapeType::ConvexHull;
+            LOG_ENGINE_WARN("Entity '{}': Mesh collider on dynamic body not supported, using ConvexHull", entity_data.name);
+        }
+
+        JPH::ShapeRefC shape = PhysicsSystem::createShapeFromCollider(col, t.scale);
+        if (!shape)
+        {
+            LOG_ENGINE_ERROR("Entity '{}': failed to create dynamic collider shape '{}'",
+                             entity_data.name, colliderShapeTypeToString(col.shape_type));
+            return false;
+        }
+        return game_world.getPhysicsSystem().createDynamicBody(t.position, t.rotation, shape, e, desc).IsInvalid() == false;
+    }
+
+    if (col.shape_type == ColliderShapeType::Mesh)
+    {
+        if (!col.is_mesh_valid())
+        {
+            LOG_ENGINE_ERROR("Entity '{}': static mesh collider has no valid mesh", entity_data.name);
+            return false;
+        }
+        return game_world.getPhysicsSystem().createStaticMeshBody(t.position, t.rotation, t.scale, *col.get_mesh(), e, desc).IsInvalid() == false;
+    }
+
+    JPH::ShapeRefC shape = PhysicsSystem::createShapeFromCollider(col, t.scale);
+    if (!shape)
+    {
+        LOG_ENGINE_ERROR("Entity '{}': failed to create static collider shape '{}'",
+                         entity_data.name, colliderShapeTypeToString(col.shape_type));
+        return false;
+    }
+    return game_world.getPhysicsSystem().createStaticBody(t.position, t.rotation, shape, e, desc).IsInvalid() == false;
 }
 
 static const MaterialRange* findMaterialTemplate(const std::vector<MaterialRange>& ranges, size_t source_range)
@@ -2320,156 +2503,21 @@ bool LevelManager::instantiateLevelParallel(
             }
         }
 
-        // Renderable with explicit collider
-        if (entity_data.type == EntityType::Renderable && entity_data.has_collider)
-        {
-            game_world.registry.emplace<ColliderComponent>(e);
-            auto& col = game_world.registry.get<ColliderComponent>(e);
-
-            col.shape_type = stringToColliderShapeType(entity_data.collider_shape_type);
-            col.box_half_extents = entity_data.collider_box_half_extents;
-            col.sphere_radius = entity_data.collider_sphere_radius;
-            col.capsule_half_height = entity_data.collider_capsule_half_height;
-            col.capsule_radius = entity_data.collider_capsule_radius;
-            col.cylinder_half_height = entity_data.collider_cylinder_half_height;
-            col.cylinder_radius = entity_data.collider_cylinder_radius;
-            col.friction = entity_data.collider_friction;
-            col.restitution = entity_data.collider_restitution;
-
-            if (!entity_data.collider_mesh_path.empty()) {
-                LevelEntity col_ent = entity_data;
-                col_ent.mesh_path = entity_data.collider_mesh_path;
-                col_ent.texture_paths.clear();
-                col.m_mesh = getOrFinalizeMesh(entity_data.collider_mesh_path, col_ent);
-            } else if (game_world.registry.all_of<MeshComponent>(e)) {
-                col.m_mesh = game_world.registry.get<MeshComponent>(e).m_mesh;
-            }
-        }
-
         // Add Physics components
         if (entity_data.type == EntityType::Physical ||
             entity_data.type == EntityType::Player)
         {
-            if (entity_data.has_rigidbody) {
+            if (entity_data.has_rigidbody || entity_data.type == EntityType::Physical) {
                 game_world.registry.emplace<RigidBodyComponent>(e);
                 auto& rb = game_world.registry.get<RigidBodyComponent>(e);
                 rb.mass = entity_data.mass;
                 rb.apply_gravity = entity_data.apply_gravity;
                 rb.motion_type = stringToBodyMotionType(entity_data.body_motion_type);
             }
-
-            if (entity_data.has_collider) {
-                game_world.registry.emplace<ColliderComponent>(e);
-                auto& col = game_world.registry.get<ColliderComponent>(e);
-
-                col.shape_type = stringToColliderShapeType(entity_data.collider_shape_type);
-                col.box_half_extents = entity_data.collider_box_half_extents;
-                col.sphere_radius = entity_data.collider_sphere_radius;
-                col.capsule_half_height = entity_data.collider_capsule_half_height;
-                col.capsule_radius = entity_data.collider_capsule_radius;
-                col.cylinder_half_height = entity_data.collider_cylinder_half_height;
-                col.cylinder_radius = entity_data.collider_cylinder_radius;
-                col.friction = entity_data.collider_friction;
-                col.restitution = entity_data.collider_restitution;
-
-                if (!entity_data.collider_mesh_path.empty()) {
-                    LevelEntity col_ent = entity_data;
-                    col_ent.mesh_path = entity_data.collider_mesh_path;
-                    col_ent.texture_paths.clear();
-                    col.m_mesh = getOrFinalizeMesh(entity_data.collider_mesh_path, col_ent);
-                } else if (game_world.registry.all_of<MeshComponent>(e)) {
-                    col.m_mesh = game_world.registry.get<MeshComponent>(e).m_mesh;
-                }
-            }
         }
 
-        // Collidable only (static collider)
-        if (entity_data.type == EntityType::Collidable) {
-            if (entity_data.has_collider) {
-                game_world.registry.emplace<ColliderComponent>(e);
-                auto& col = game_world.registry.get<ColliderComponent>(e);
-
-                col.shape_type = stringToColliderShapeType(entity_data.collider_shape_type);
-                col.box_half_extents = entity_data.collider_box_half_extents;
-                col.sphere_radius = entity_data.collider_sphere_radius;
-                col.capsule_half_height = entity_data.collider_capsule_half_height;
-                col.capsule_radius = entity_data.collider_capsule_radius;
-                col.cylinder_half_height = entity_data.collider_cylinder_half_height;
-                col.cylinder_radius = entity_data.collider_cylinder_radius;
-                col.friction = entity_data.collider_friction;
-                col.restitution = entity_data.collider_restitution;
-
-                if (!entity_data.collider_mesh_path.empty()) {
-                    LevelEntity col_ent = entity_data;
-                    col_ent.mesh_path = entity_data.collider_mesh_path;
-                    col.m_mesh = getOrFinalizeMesh(entity_data.collider_mesh_path, col_ent);
-                } else if (game_world.registry.all_of<MeshComponent>(e)) {
-                    col.m_mesh = game_world.registry.get<MeshComponent>(e).m_mesh;
-                }
-            }
-        }
-
-        // Auto-generate collision from visual mesh if use_mesh_collision is set
-        if (entity_data.use_mesh_collision && !game_world.registry.all_of<ColliderComponent>(e)
-            && game_world.registry.all_of<MeshComponent>(e))
-        {
-            game_world.registry.emplace<ColliderComponent>(e);
-            auto& col = game_world.registry.get<ColliderComponent>(e);
-            col.m_mesh = game_world.registry.get<MeshComponent>(e).m_mesh;
-        }
-
-        // Register collider shapes with Jolt physics
-        if (game_world.registry.all_of<ColliderComponent>(e))
-        {
-            auto& col = game_world.registry.get<ColliderComponent>(e);
-            auto& t = game_world.registry.get<TransformComponent>(e);
-
-            if (entity_data.type == EntityType::Physical)
-            {
-                BodyMotionType motion = BodyMotionType::Dynamic;
-                if (game_world.registry.all_of<RigidBodyComponent>(e))
-                    motion = game_world.registry.get<RigidBodyComponent>(e).motion_type;
-
-                if (motion == BodyMotionType::Kinematic)
-                {
-                    JPH::ShapeRefC shape = PhysicsSystem::createShapeFromCollider(col, t.scale);
-                    if (!shape && col.shape_type == ColliderShapeType::Mesh && col.is_mesh_valid()) {
-                        game_world.getPhysicsSystem().createStaticMeshBody(
-                            t.position, t.rotation, t.scale, *col.get_mesh(), e);
-                    } else if (shape) {
-                        game_world.getPhysicsSystem().createKinematicBody(
-                            t.position, t.rotation, shape, e);
-                    }
-                }
-                else
-                {
-                    if (col.shape_type == ColliderShapeType::Mesh) {
-                        if (col.is_mesh_valid()) {
-                            col.shape_type = ColliderShapeType::ConvexHull;
-                        }
-                    }
-                    JPH::ShapeRefC shape = PhysicsSystem::createShapeFromCollider(col, t.scale);
-                    if (shape) {
-                        game_world.getPhysicsSystem().createDynamicBody(
-                            t.position, t.rotation, shape, entity_data.mass, e,
-                            col.friction, col.restitution);
-                    }
-                }
-            }
-            else
-            {
-                if (col.shape_type == ColliderShapeType::Mesh && col.is_mesh_valid()) {
-                    game_world.getPhysicsSystem().createStaticMeshBody(
-                        t.position, t.rotation, t.scale, *col.get_mesh(), e);
-                } else {
-                    JPH::ShapeRefC shape = PhysicsSystem::createShapeFromCollider(col, t.scale);
-                    if (shape) {
-                        game_world.getPhysicsSystem().createStaticBody(
-                            t.position, t.rotation, shape, e);
-                    }
-                }
-            }
-        }
+        setupLevelColliderComponent(game_world.registry, e, entity_data, getOrFinalizeMesh);
+        createLevelPhysicsBody(game_world, e, entity_data);
 
         // Player
         if (entity_data.type == EntityType::Player)
@@ -2488,14 +2536,7 @@ bool LevelManager::instantiateLevelParallel(
             }
 
             {
-                auto& t = game_world.registry.get<TransformComponent>(e);
-                auto& pc2 = game_world.registry.get<PlayerComponent>(e);
-                JPH::CapsuleShapeSettings capsule(pc2.capsule_half_height, pc2.capsule_radius);
-                auto shape_result = capsule.Create();
-                if (shape_result.IsValid()) {
-                    game_world.getPhysicsSystem().createDynamicBody(
-                        t.position, t.rotation, shape_result.Get(), 80.0f, e);
-                }
+                game_world.getPhysicsSystem().createPlayerBody(game_world.registry, e);
             }
 
             if (out_player_entity) *out_player_entity = e;
@@ -2631,6 +2672,10 @@ bool LevelManager::instantiateLevel(
     std::vector<entt::entity> created_entities;
     created_entities.reserve(level_data.entities.size());
 
+    LevelMeshResolver loadMeshForLevel = [&](const std::string&, const LevelEntity& ent) -> std::shared_ptr<mesh> {
+        return loadMesh(ent, render_api);
+    };
+
     // Create all entities
     for (const auto& entity_data : level_data.entities)
     {
@@ -2664,184 +2709,21 @@ bool LevelManager::instantiateLevel(
             }
         }
 
-        // Renderable with explicit collider (e.g. map with separate collision mesh)
-        if (entity_data.type == EntityType::Renderable && entity_data.has_collider)
-        {
-            game_world.registry.emplace<ColliderComponent>(e);
-            auto& col = game_world.registry.get<ColliderComponent>(e);
-
-            // Copy shape parameters
-            col.shape_type = stringToColliderShapeType(entity_data.collider_shape_type);
-            col.box_half_extents = entity_data.collider_box_half_extents;
-            col.sphere_radius = entity_data.collider_sphere_radius;
-            col.capsule_half_height = entity_data.collider_capsule_half_height;
-            col.capsule_radius = entity_data.collider_capsule_radius;
-            col.cylinder_half_height = entity_data.collider_cylinder_half_height;
-            col.cylinder_radius = entity_data.collider_cylinder_radius;
-            col.friction = entity_data.collider_friction;
-            col.restitution = entity_data.collider_restitution;
-
-            if (!entity_data.collider_mesh_path.empty()) {
-                LevelEntity col_ent = entity_data;
-                col_ent.mesh_path = entity_data.collider_mesh_path;
-                col_ent.texture_paths.clear();
-                col.m_mesh = loadMesh(col_ent, render_api);
-            } else if (game_world.registry.all_of<MeshComponent>(e)) {
-                col.m_mesh = game_world.registry.get<MeshComponent>(e).m_mesh;
-            }
-        }
-
         // Add Physics components
         if (entity_data.type == EntityType::Physical ||
             entity_data.type == EntityType::Player)
         {
-            // Rigidbody
-            if (entity_data.has_rigidbody) {
+            if (entity_data.has_rigidbody || entity_data.type == EntityType::Physical) {
                 game_world.registry.emplace<RigidBodyComponent>(e);
                 auto& rb = game_world.registry.get<RigidBodyComponent>(e);
                 rb.mass = entity_data.mass;
                 rb.apply_gravity = entity_data.apply_gravity;
                 rb.motion_type = stringToBodyMotionType(entity_data.body_motion_type);
             }
-
-            // Collider
-            if (entity_data.has_collider) {
-                game_world.registry.emplace<ColliderComponent>(e);
-                auto& col = game_world.registry.get<ColliderComponent>(e);
-
-                // Copy shape parameters from level data
-                col.shape_type = stringToColliderShapeType(entity_data.collider_shape_type);
-                col.box_half_extents = entity_data.collider_box_half_extents;
-                col.sphere_radius = entity_data.collider_sphere_radius;
-                col.capsule_half_height = entity_data.collider_capsule_half_height;
-                col.capsule_radius = entity_data.collider_capsule_radius;
-                col.cylinder_half_height = entity_data.collider_cylinder_half_height;
-                col.cylinder_radius = entity_data.collider_cylinder_radius;
-                col.friction = entity_data.collider_friction;
-                col.restitution = entity_data.collider_restitution;
-
-                // If it has a separate collider mesh
-                if (!entity_data.collider_mesh_path.empty()) {
-                    LevelEntity col_ent = entity_data;
-                    col_ent.mesh_path = entity_data.collider_mesh_path;
-                    col_ent.texture_paths.clear(); // No texture for collider
-                    col.m_mesh = loadMesh(col_ent, render_api);
-                } else if (game_world.registry.all_of<MeshComponent>(e)) {
-                    // Share visual mesh
-                    col.m_mesh = game_world.registry.get<MeshComponent>(e).m_mesh;
-                }
-            }
         }
         
-        // Collidable only (static collider)
-        if (entity_data.type == EntityType::Collidable) {
-             if (entity_data.has_collider) {
-                game_world.registry.emplace<ColliderComponent>(e);
-                auto& col = game_world.registry.get<ColliderComponent>(e);
-
-                // Copy shape parameters
-                col.shape_type = stringToColliderShapeType(entity_data.collider_shape_type);
-                col.box_half_extents = entity_data.collider_box_half_extents;
-                col.sphere_radius = entity_data.collider_sphere_radius;
-                col.capsule_half_height = entity_data.collider_capsule_half_height;
-                col.capsule_radius = entity_data.collider_capsule_radius;
-                col.cylinder_half_height = entity_data.collider_cylinder_half_height;
-                col.cylinder_radius = entity_data.collider_cylinder_radius;
-                col.friction = entity_data.collider_friction;
-                col.restitution = entity_data.collider_restitution;
-
-                if (!entity_data.collider_mesh_path.empty()) {
-                    LevelEntity col_ent = entity_data;
-                    col_ent.mesh_path = entity_data.collider_mesh_path;
-                    col.m_mesh = loadMesh(col_ent, render_api);
-                } else if (game_world.registry.all_of<MeshComponent>(e)) {
-                    col.m_mesh = game_world.registry.get<MeshComponent>(e).m_mesh;
-                }
-            }
-        }
-
-        // Auto-generate collision from visual mesh if use_mesh_collision is set
-        if (entity_data.use_mesh_collision && !game_world.registry.all_of<ColliderComponent>(e)
-            && game_world.registry.all_of<MeshComponent>(e))
-        {
-            game_world.registry.emplace<ColliderComponent>(e);
-            auto& col = game_world.registry.get<ColliderComponent>(e);
-            col.m_mesh = game_world.registry.get<MeshComponent>(e).m_mesh;
-            LOG_ENGINE_INFO("Entity '{}': using visual mesh as collision (use_mesh_collision=true)", entity_data.name);
-        }
-
-        // Register collider shapes with Jolt physics
-        if (game_world.registry.all_of<ColliderComponent>(e))
-        {
-            auto& col = game_world.registry.get<ColliderComponent>(e);
-            auto& t = game_world.registry.get<TransformComponent>(e);
-            LOG_ENGINE_INFO("Jolt: entity '{}' has ColliderComponent, shape_type={}, mesh_valid={}",
-                entity_data.name, colliderShapeTypeToString(col.shape_type), col.is_mesh_valid());
-
-            if (entity_data.type == EntityType::Physical)
-            {
-                // Determine motion type from RigidBodyComponent
-                BodyMotionType motion = BodyMotionType::Dynamic;
-                if (game_world.registry.all_of<RigidBodyComponent>(e))
-                    motion = game_world.registry.get<RigidBodyComponent>(e).motion_type;
-
-                if (motion == BodyMotionType::Kinematic)
-                {
-                    // Kinematic body
-                    JPH::ShapeRefC shape = PhysicsSystem::createShapeFromCollider(col, t.scale);
-                    if (!shape && col.shape_type == ColliderShapeType::Mesh && col.is_mesh_valid())
-                    {
-                        // Use mesh as static for kinematic (rare case)
-                        game_world.getPhysicsSystem().createStaticMeshBody(
-                            t.position, t.rotation, t.scale, *col.get_mesh(), e);
-                    }
-                    else if (shape)
-                    {
-                        game_world.getPhysicsSystem().createKinematicBody(
-                            t.position, t.rotation, shape, e);
-                    }
-                }
-                else
-                {
-                    // Dynamic body: use shape from ColliderComponent
-                    if (col.shape_type == ColliderShapeType::Mesh)
-                    {
-                        // Mesh shapes cannot be dynamic in Jolt; fall back to ConvexHull
-                        if (col.is_mesh_valid()) {
-                            col.shape_type = ColliderShapeType::ConvexHull;
-                            LOG_ENGINE_WARN("Entity '{}': Mesh collider on dynamic body not supported, using ConvexHull", entity_data.name);
-                        }
-                    }
-
-                    JPH::ShapeRefC shape = PhysicsSystem::createShapeFromCollider(col, t.scale);
-                    if (shape)
-                    {
-                        game_world.getPhysicsSystem().createDynamicBody(
-                            t.position, t.rotation, shape, entity_data.mass, e,
-                            col.friction, col.restitution);
-                    }
-                }
-            }
-            else
-            {
-                // Static body
-                if (col.shape_type == ColliderShapeType::Mesh && col.is_mesh_valid())
-                {
-                    // Static mesh collider (apply entity scale)
-                    game_world.getPhysicsSystem().createStaticMeshBody(
-                        t.position, t.rotation, t.scale, *col.get_mesh(), e);
-                }
-                else
-                {
-                    JPH::ShapeRefC shape = PhysicsSystem::createShapeFromCollider(col, t.scale);
-                    if (shape)
-                    {
-                        game_world.getPhysicsSystem().createStaticBody(
-                            t.position, t.rotation, shape, e);
-                    }
-                }
-            }
-        }
+        setupLevelColliderComponent(game_world.registry, e, entity_data, loadMeshForLevel);
+        createLevelPhysicsBody(game_world, e, entity_data);
 
         // Player
         if (entity_data.type == EntityType::Player)
@@ -2863,15 +2745,7 @@ bool LevelManager::instantiateLevel(
 
             // Create Jolt capsule body for player collision
             {
-                auto& t = game_world.registry.get<TransformComponent>(e);
-                auto& pc = game_world.registry.get<PlayerComponent>(e);
-                JPH::CapsuleShapeSettings capsule(pc.capsule_half_height, pc.capsule_radius);
-                auto shape_result = capsule.Create();
-                if (shape_result.IsValid())
-                {
-                    game_world.getPhysicsSystem().createDynamicBody(
-                        t.position, t.rotation, shape_result.Get(), 80.0f, e);
-                }
+                game_world.getPhysicsSystem().createPlayerBody(game_world.registry, e);
             }
             
             if (out_player_entity) *out_player_entity = e;

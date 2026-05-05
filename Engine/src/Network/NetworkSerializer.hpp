@@ -4,6 +4,7 @@
 #include "NetworkProtocol.hpp"
 #include "NetworkTypes.hpp"
 #include <vector>
+#include <algorithm>
 #include <cstring>
 #include <utility>
 
@@ -118,7 +119,10 @@ namespace NetworkSerializer
         writer.writeByte(static_cast<uint8_t>(msg.type));
         writer.writeUInt32(msg.client_tick);
         writer.writeUInt32(msg.last_received_tick);
-        uint8_t total_count = 1 + redundant_count; // Primary + redundant
+        if (redundant_inputs == nullptr) {
+            redundant_count = 0;
+        }
+        uint8_t total_count = static_cast<uint8_t>(1 + (std::min<uint8_t>)(redundant_count, MAX_INPUT_SAMPLES_PER_PACKET - 1)); // Primary + redundant
         writer.writeByte(total_count);
         // Primary input
         writer.writeByte(msg.buttons);
@@ -127,7 +131,7 @@ namespace NetworkSerializer
         writer.writeFloat(msg.move_forward);
         writer.writeFloat(msg.move_right);
         // Redundant older inputs
-        for (uint8_t i = 0; i < redundant_count; i++) {
+        for (uint8_t i = 0; i < total_count - 1; i++) {
             writer.writeUInt32(redundant_inputs[i].tick);
             writer.writeByte(redundant_inputs[i].buttons);
             writer.writeFloat(redundant_inputs[i].camera_yaw);
@@ -145,7 +149,7 @@ namespace NetworkSerializer
         msg.client_tick = reader.readUInt32();
         msg.last_received_tick = reader.readUInt32();
         msg.input_count = reader.readByte();
-        if (msg.input_count == 0 || msg.input_count > 4) return false;
+        if (msg.input_count == 0 || msg.input_count > MAX_INPUT_SAMPLES_PER_PACKET) return false;
         // Primary input
         msg.buttons = reader.readByte();
         msg.camera_yaw = reader.readFloat();
@@ -226,6 +230,8 @@ namespace NetworkSerializer
     inline void serialize(BitWriter& writer, const WorldStateUpdateMessage& msg, const std::vector<EntityUpdateData>& entities) {
         writer.writeByte(static_cast<uint8_t>(msg.type));
         writer.writeUInt32(msg.server_tick);
+        writer.writeUInt32(msg.delta_from_tick);
+        writer.writeByte(msg.snapshot_flags);
         writer.writeUInt16(static_cast<uint16_t>(entities.size()));
         writer.writeUInt32(msg.last_processed_input_tick);
 
@@ -240,8 +246,11 @@ namespace NetworkSerializer
         msg.type = static_cast<MessageType>(reader.readByte());
         if (msg.type != MessageType::WORLD_STATE_UPDATE) return false;
         msg.server_tick = reader.readUInt32();
+        msg.delta_from_tick = reader.readUInt32();
+        msg.snapshot_flags = reader.readByte();
         uint16_t num_entities = reader.readUInt16();
         if (num_entities > MAX_NETWORKED_ENTITIES) return false;
+        msg.num_entities = num_entities;
         msg.last_processed_input_tick = reader.readUInt32();
 
         entities.clear();

@@ -107,6 +107,15 @@ CONVAR_BOUNDED(cl_updaterate, 60, 20, 128, ConVarFlags::ARCHIVE | ConVarFlags::C
 CONVAR_BOUNDED(cl_cmdrate, 60, 20, 128, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
                "Client command rate");
 
+CONVAR_BOUNDED(sv_maxunlag, 1.0f, 0.0f, 2.0f, ConVarFlags::SERVER_ONLY | ConVarFlags::REPLICATED,
+               "Maximum server lag compensation history in seconds");
+
+CONVAR(net_fullsnapshot_on_baseline_miss, 1, ConVarFlags::SERVER_ONLY,
+       "Send a full network snapshot when a client's delta baseline is unavailable");
+
+CONVAR(net_show_connection_trouble, 0, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
+       "Show network loss and timeout diagnostics");
+
 // Developer/debug cvars
 CONVAR(developer, 0, ConVarFlags::ARCHIVE,
        "Developer mode - shows additional debug info");

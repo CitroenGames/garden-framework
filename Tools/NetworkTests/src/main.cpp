@@ -1,6 +1,8 @@
 #include "Network/BitStream.hpp"
 #include "Network/NetworkProtocol.hpp"
 #include "Network/NetworkSerializer.hpp"
+#include "Network/NetworkInput.hpp"
+#include "Network/LagHistory.hpp"
 #include "Network/PredictionTypes.hpp"
 #include "Network/InterpolationBuffer.hpp"
 
@@ -74,11 +76,53 @@ int testInputSerialization()
     return 0;
 }
 
+int testInputPolicy()
+{
+    const char* name = "InputPolicy";
+    Net::InputCommandMessage msg;
+    msg.client_tick = 43;
+    msg.buttons = Net::InputFlags::MOVE_FORWARD;
+
+    std::vector<Net::InputSample> redundant;
+    Net::InputSample newer;
+    newer.tick = 42;
+    Net::InputSample older;
+    older.tick = 41;
+    redundant.push_back(newer);
+    redundant.push_back(older);
+
+    auto samples = Net::collectInputSamplesChronological(msg, redundant);
+    if (samples.size() != 3) return fail(name, "sample count mismatch");
+    if (samples[0].tick != 41 || samples[1].tick != 42 || samples[2].tick != 43) {
+        return fail(name, "samples not chronological");
+    }
+    if (!Net::shouldAcceptInputTick(41, 40)) return fail(name, "new tick rejected");
+    if (Net::shouldAcceptInputTick(40, 40)) return fail(name, "duplicate tick accepted");
+    if (Net::shouldAcceptInputTick(39, 40)) return fail(name, "old tick accepted");
+    if (Net::shouldAcceptInputTick(170, 40)) return fail(name, "out-of-window tick accepted");
+    if (Net::InputFlags::RELOAD != Net::InputFlags::ATTACK2) return fail(name, "reload alias mismatch");
+
+    uint32_t last_budget_tick = 10;
+    uint32_t budget = 0;
+    Net::accrueInputTickBudget(12, last_budget_tick, budget);
+    if (budget != 2 || last_budget_tick != 12) return fail(name, "budget accrual mismatch");
+    if (!Net::consumeInputTickBudget(budget) || budget != 1) return fail(name, "budget consume failed");
+    if (!Net::consumeInputTickBudget(budget) || budget != 0) return fail(name, "second budget consume failed");
+    if (Net::consumeInputTickBudget(budget)) return fail(name, "empty budget consumed");
+
+    budget = Net::MAX_INPUT_BURST_TICKS - 1;
+    Net::accrueInputTickBudget(40, last_budget_tick, budget);
+    if (budget != Net::MAX_INPUT_BURST_TICKS) return fail(name, "budget did not cap at burst limit");
+    return 0;
+}
+
 int testWorldStateSerialization()
 {
     const char* name = "WorldStateSerialization";
     Net::WorldStateUpdateMessage msg;
     msg.server_tick = 99;
+    msg.delta_from_tick = 77;
+    msg.snapshot_flags = Net::SnapshotFlags::FULL | Net::SnapshotFlags::BASELINE_MISS;
     msg.last_processed_input_tick = 88;
 
     std::vector<Net::EntityUpdateData> updates;
@@ -103,10 +147,72 @@ int testWorldStateSerialization()
     if (!Net::NetworkSerializer::deserialize(reader, out, out_updates)) {
         return fail(name, "deserialize failed");
     }
-    if (out.server_tick != 99 || out.last_processed_input_tick != 88) return fail(name, "header mismatch");
+    if (out.server_tick != 99 || out.delta_from_tick != 77 || out.last_processed_input_tick != 88) return fail(name, "header mismatch");
+    if (!out.isFullSnapshot() || (out.snapshot_flags & Net::SnapshotFlags::BASELINE_MISS) == 0) return fail(name, "snapshot flags mismatch");
+    if (out.num_entities != 2) return fail(name, "serialized entity count mismatch");
     if (out_updates.size() != 2) return fail(name, "update count mismatch");
     if (!out_updates[0].hasTransform() || !approxEqual(out_updates[0].position.y, 2.0f)) return fail(name, "transform mismatch");
     if (!out_updates[1].shouldDelete()) return fail(name, "delete flag mismatch");
+    return 0;
+}
+
+int testNetworkStats()
+{
+    const char* name = "NetworkStats";
+    Net::NetworkStats stats;
+    stats.packets_sent = 10;
+    stats.packets_received = 20;
+    stats.bytes_sent = 1000;
+    stats.bytes_received = 2000;
+
+    Net::NetworkStatsRateSampler sampler;
+    sampler.reset(stats);
+
+    stats.packets_sent += 2;
+    stats.packets_received += 3;
+    stats.bytes_sent += 200;
+    stats.bytes_received += 450;
+    sampler.update(stats, 1.0f);
+
+    if (!approxEqual(stats.packets_sent_per_second, 2.0f)) return fail(name, "sent packet rate mismatch");
+    if (!approxEqual(stats.packets_received_per_second, 3.0f)) return fail(name, "received packet rate mismatch");
+    if (!approxEqual(stats.bytes_sent_per_second, 200.0f)) return fail(name, "sent byte rate mismatch");
+    if (!approxEqual(stats.bytes_received_per_second, 450.0f)) return fail(name, "received byte rate mismatch");
+    return 0;
+}
+
+int testLagHistory()
+{
+    const char* name = "LagHistory";
+    Net::LagHistory history;
+    history.setMaxRecords(2);
+
+    Net::WorldSnapshot a(10);
+    Net::ComponentSnapshot comp_a;
+    comp_a.position = glm::vec3(0, 0, 0);
+    a.setEntity(7, comp_a);
+    history.recordSnapshot(a);
+
+    Net::WorldSnapshot b(12);
+    Net::ComponentSnapshot comp_b;
+    comp_b.position = glm::vec3(2, 0, 0);
+    comp_b.velocity = glm::vec3(10, 0, 0);
+    b.setEntity(7, comp_b);
+    history.recordSnapshot(b);
+
+    Net::ComponentSnapshot out;
+    if (!history.sample(7, 11, out)) return fail(name, "interpolated sample missing");
+    if (!approxEqual(out.position.x, 1.0f)) return fail(name, "interpolated sample mismatch");
+
+    Net::WorldSnapshot c(14);
+    Net::ComponentSnapshot comp_c;
+    comp_c.position = glm::vec3(4, 0, 0);
+    c.setEntity(7, comp_c);
+    history.recordSnapshot(c);
+
+    if (history.getRecordCount(7) != 2) return fail(name, "history did not prune");
+    if (history.sample(7, 10, out)) return fail(name, "sample before pruned history succeeded");
+    if (!history.sample(7, 12, out)) return fail(name, "oldest retained sample missing");
     return 0;
 }
 
@@ -166,8 +272,11 @@ int main()
     int failures = 0;
     failures += testBitStream();
     failures += testInputSerialization();
+    failures += testInputPolicy();
     failures += testWorldStateSerialization();
     failures += testCVarSerialization();
+    failures += testNetworkStats();
+    failures += testLagHistory();
     failures += testPredictionAndInterpolation();
 
     if (failures == 0) {

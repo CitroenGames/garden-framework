@@ -8,21 +8,11 @@
 
 enum class CombatMessageType : uint8_t
 {
-    SHOOT_COMMAND = Net::CUSTOM_MESSAGE_START,
-    SHOOT_RESULT = Net::CUSTOM_MESSAGE_START + 1,
-    DAMAGE_EVENT = Net::CUSTOM_MESSAGE_START + 2,
-    PLAYER_DIED = Net::CUSTOM_MESSAGE_START + 3,
-    PLAYER_RESPAWN = Net::CUSTOM_MESSAGE_START + 4,
-    WEAPON_STATE = Net::CUSTOM_MESSAGE_START + 5
-};
-
-struct ShootCommandMessage
-{
-    uint8_t type = static_cast<uint8_t>(CombatMessageType::SHOOT_COMMAND);
-    uint32_t client_tick = 0;
-    glm::vec3 ray_origin = glm::vec3(0);
-    glm::vec3 ray_direction = glm::vec3(0, 0, -1);
-    uint8_t weapon_type = 0;
+    SHOOT_RESULT = Net::CUSTOM_MESSAGE_START,
+    DAMAGE_EVENT = Net::CUSTOM_MESSAGE_START + 1,
+    PLAYER_DIED = Net::CUSTOM_MESSAGE_START + 2,
+    PLAYER_RESPAWN = Net::CUSTOM_MESSAGE_START + 3,
+    WEAPON_STATE = Net::CUSTOM_MESSAGE_START + 4
 };
 
 struct ShootResultMessage
@@ -69,28 +59,12 @@ struct WeaponStateMessage
     int32_t max_ammo = 0;
     uint8_t weapon_type = 0;
     uint8_t reloading = 0;
+    float fire_cooldown = 0.0f;
+    float reload_timer = 0.0f;
 };
 
 namespace CombatSerializer
 {
-    inline void serialize(Net::BitWriter& writer, const ShootCommandMessage& msg) {
-        writer.writeByte(msg.type);
-        writer.writeUInt32(msg.client_tick);
-        writer.writeVector3f(msg.ray_origin);
-        writer.writeVector3f(msg.ray_direction);
-        writer.writeByte(msg.weapon_type);
-    }
-
-    inline bool deserialize(Net::BitReader& reader, ShootCommandMessage& msg) {
-        msg.type = reader.readByte();
-        if (msg.type != static_cast<uint8_t>(CombatMessageType::SHOOT_COMMAND)) return false;
-        msg.client_tick = reader.readUInt32();
-        msg.ray_origin = reader.readVector3f();
-        msg.ray_direction = reader.readVector3f();
-        msg.weapon_type = reader.readByte();
-        return !reader.hasError();
-    }
-
     inline void serialize(Net::BitWriter& writer, const ShootResultMessage& msg) {
         writer.writeByte(msg.type);
         writer.writeUInt16(msg.shooter_client_id);
@@ -171,6 +145,8 @@ namespace CombatSerializer
         writer.writeUInt32(static_cast<uint32_t>(msg.max_ammo));
         writer.writeByte(msg.weapon_type);
         writer.writeByte(msg.reloading);
+        writer.writeFloat(msg.fire_cooldown);
+        writer.writeFloat(msg.reload_timer);
     }
 
     inline bool deserialize(Net::BitReader& reader, WeaponStateMessage& msg) {
@@ -180,6 +156,8 @@ namespace CombatSerializer
         msg.max_ammo = static_cast<int32_t>(reader.readUInt32());
         msg.weapon_type = reader.readByte();
         msg.reloading = reader.readByte();
+        msg.fire_cooldown = reader.readFloat();
+        msg.reload_timer = reader.readFloat();
         return !reader.hasError();
     }
 }

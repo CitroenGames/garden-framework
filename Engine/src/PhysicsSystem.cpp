@@ -1,5 +1,6 @@
 #include "PhysicsSystem.hpp"
 #include "Utils/Log.hpp"
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdarg>
@@ -16,6 +17,23 @@ static void JoltTrace(const char* inFMT, ...)
 }
 
 static std::atomic<bool> s_jolt_registered{false};
+
+static bool isFiniteVertexPosition(const vertex& v)
+{
+    return std::isfinite(v.vx) && std::isfinite(v.vy) && std::isfinite(v.vz);
+}
+
+static bool isUsableTriangle(const vertex& v0, const vertex& v1, const vertex& v2)
+{
+    if (!isFiniteVertexPosition(v0) || !isFiniteVertexPosition(v1) || !isFiniteVertexPosition(v2))
+        return false;
+
+    const glm::vec3 p0(v0.vx, v0.vy, v0.vz);
+    const glm::vec3 p1(v1.vx, v1.vy, v1.vz);
+    const glm::vec3 p2(v2.vx, v2.vy, v2.vz);
+    const glm::vec3 area_vec = glm::cross(p1 - p0, p2 - p0);
+    return glm::dot(area_vec, area_vec) > 1.0e-12f;
+}
 
 PhysicsSystem::PhysicsSystem(const glm::vec3& gravityVector, float deltaTime)
     : gravity(gravityVector), fixed_delta(deltaTime)
@@ -140,11 +158,17 @@ void PhysicsSystem::optimizeBroadPhase()
         jolt_system->OptimizeBroadPhase();
 }
 
-JPH::BodyID PhysicsSystem::createStaticBody(const glm::vec3& position, const glm::vec3& rotation, const JPH::ShapeRefC& shape, entt::entity entity)
+JPH::BodyID PhysicsSystem::createStaticBody(const glm::vec3& position, const glm::vec3& rotation, const JPH::ShapeRefC& shape, entt::entity entity,
+    const PhysicsBodyDesc& desc)
 {
     if (!initialized) initialize();
+    if (!shape) return JPH::BodyID();
+    if (entity_to_body.find(entity) != entity_to_body.end())
+        removeBody(entity);
 
     JPH::BodyCreationSettings settings(shape, toJoltR(position), toJoltQuat(rotation), JPH::EMotionType::Static, Layers::NON_MOVING);
+    settings.mFriction = desc.friction;
+    settings.mRestitution = desc.restitution;
 
     JPH::BodyInterface& body_interface = jolt_system->GetBodyInterface();
     JPH::Body* body = body_interface.CreateBody(settings);
@@ -220,20 +244,24 @@ JPH::ShapeRefC PhysicsSystem::createShapeFromCollider(const ColliderComponent& c
     return shape;
 }
 
-JPH::BodyID PhysicsSystem::createDynamicBody(const glm::vec3& position, const glm::vec3& rotation, const JPH::ShapeRefC& shape, float mass, entt::entity entity,
-    float friction, float restitution, bool lock_rotation)
+JPH::BodyID PhysicsSystem::createDynamicBody(const glm::vec3& position, const glm::vec3& rotation, const JPH::ShapeRefC& shape, entt::entity entity,
+    const PhysicsBodyDesc& desc)
 {
     if (!initialized) initialize();
+    if (!shape) return JPH::BodyID();
+    if (entity_to_body.find(entity) != entity_to_body.end())
+        removeBody(entity);
 
     JPH::BodyCreationSettings settings(shape, toJoltR(position), toJoltQuat(rotation), JPH::EMotionType::Dynamic, Layers::MOVING);
     settings.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
-    settings.mMassPropertiesOverride.mMass = mass;
-    if (lock_rotation)
+    settings.mMassPropertiesOverride.mMass = std::max(desc.mass, 0.001f);
+    if (desc.lock_rotation)
         settings.mAllowedDOFs = JPH::EAllowedDOFs::TranslationX | JPH::EAllowedDOFs::TranslationY | JPH::EAllowedDOFs::TranslationZ;
     settings.mMotionQuality = JPH::EMotionQuality::LinearCast; // CCD to prevent tunneling
-    settings.mFriction = friction;
-    settings.mRestitution = restitution;
-    settings.mLinearDamping = 0.0f; // Disable Jolt damping — game code handles velocity damping
+    settings.mFriction = desc.friction;
+    settings.mRestitution = desc.restitution;
+    settings.mGravityFactor = desc.apply_gravity ? 1.0f : 0.0f;
+    settings.mLinearDamping = 0.0f; // Disable Jolt damping; game code handles velocity damping
 
     JPH::BodyInterface& body_interface = jolt_system->GetBodyInterface();
     JPH::Body* body = body_interface.CreateBody(settings);
@@ -245,16 +273,34 @@ JPH::BodyID PhysicsSystem::createDynamicBody(const glm::vec3& position, const gl
     entity_to_body[entity] = body_id;
     body_to_entity[body_id] = entity;
 
-    LOG_ENGINE_INFO("Created Jolt dynamic body at ({}, {}, {}), mass={}", position.x, position.y, position.z, mass);
+    LOG_ENGINE_INFO("Created Jolt dynamic body at ({}, {}, {}), mass={}", position.x, position.y, position.z, desc.mass);
     return body_id;
 }
 
-JPH::BodyID PhysicsSystem::createKinematicBody(const glm::vec3& position, const glm::vec3& rotation, const JPH::ShapeRefC& shape, entt::entity entity)
+JPH::BodyID PhysicsSystem::createDynamicBody(const glm::vec3& position, const glm::vec3& rotation, const JPH::ShapeRefC& shape, float mass, entt::entity entity,
+    float friction, float restitution, bool lock_rotation)
+{
+    PhysicsBodyDesc desc;
+    desc.mass = mass;
+    desc.friction = friction;
+    desc.restitution = restitution;
+    desc.lock_rotation = lock_rotation;
+    return createDynamicBody(position, rotation, shape, entity, desc);
+}
+
+JPH::BodyID PhysicsSystem::createKinematicBody(const glm::vec3& position, const glm::vec3& rotation, const JPH::ShapeRefC& shape, entt::entity entity,
+    const PhysicsBodyDesc& desc)
 {
     if (!initialized) initialize();
+    if (!shape) return JPH::BodyID();
+    if (entity_to_body.find(entity) != entity_to_body.end())
+        removeBody(entity);
 
     JPH::BodyCreationSettings settings(shape, toJoltR(position), toJoltQuat(rotation), JPH::EMotionType::Kinematic, Layers::MOVING);
     settings.mMotionQuality = JPH::EMotionQuality::LinearCast;
+    settings.mFriction = desc.friction;
+    settings.mRestitution = desc.restitution;
+    settings.mGravityFactor = 0.0f;
 
     JPH::BodyInterface& body_interface = jolt_system->GetBodyInterface();
     JPH::Body* body = body_interface.CreateBody(settings);
@@ -270,7 +316,8 @@ JPH::BodyID PhysicsSystem::createKinematicBody(const glm::vec3& position, const 
     return body_id;
 }
 
-JPH::BodyID PhysicsSystem::createStaticMeshBody(const glm::vec3& position, const glm::vec3& rotation, const glm::vec3& scale, const mesh& colliderMesh, entt::entity entity)
+JPH::BodyID PhysicsSystem::createStaticMeshBody(const glm::vec3& position, const glm::vec3& rotation, const glm::vec3& scale, const mesh& colliderMesh, entt::entity entity,
+    const PhysicsBodyDesc& desc)
 {
     if (!initialized) initialize();
     if (!colliderMesh.vertices || colliderMesh.vertices_len < 3) return JPH::BodyID();
@@ -284,12 +331,19 @@ JPH::BodyID PhysicsSystem::createStaticMeshBody(const glm::vec3& position, const
         const vertex& v0 = colliderMesh.vertices[i];
         const vertex& v1 = colliderMesh.vertices[i + 1];
         const vertex& v2 = colliderMesh.vertices[i + 2];
+        if (!isUsableTriangle(v0, v1, v2))
+            continue;
 
         triangles.push_back(JPH::Triangle(
             JPH::Float3(v0.vx, v0.vy, v0.vz),
             JPH::Float3(v1.vx, v1.vy, v1.vz),
             JPH::Float3(v2.vx, v2.vy, v2.vz)
         ));
+    }
+    if (triangles.empty())
+    {
+        LOG_ENGINE_ERROR("Failed to create Jolt mesh shape: no usable triangles");
+        return JPH::BodyID();
     }
 
     LOG_ENGINE_INFO("Creating Jolt mesh body: {} triangles at ({}, {}, {}), scale=({}, {}, {})",
@@ -317,7 +371,38 @@ JPH::BodyID PhysicsSystem::createStaticMeshBody(const glm::vec3& position, const
         final_shape = scaled_result.Get();
     }
 
-    return createStaticBody(position, rotation, final_shape, entity);
+    return createStaticBody(position, rotation, final_shape, entity, desc);
+}
+
+JPH::BodyID PhysicsSystem::createPlayerBody(entt::registry& registry, entt::entity entity)
+{
+    if (!registry.valid(entity))
+        return JPH::BodyID();
+    if (!registry.all_of<TransformComponent, RigidBodyComponent, PlayerComponent>(entity))
+        return JPH::BodyID();
+
+    const auto& transform = registry.get<TransformComponent>(entity);
+    const auto& rb = registry.get<RigidBodyComponent>(entity);
+    const auto& player = registry.get<PlayerComponent>(entity);
+
+    ColliderComponent collider;
+    collider.shape_type = ColliderShapeType::Capsule;
+    collider.capsule_half_height = player.capsule_half_height;
+    collider.capsule_radius = player.capsule_radius;
+
+    JPH::ShapeRefC shape = createShapeFromCollider(collider, glm::vec3(1.0f));
+    if (!shape)
+    {
+        LOG_ENGINE_ERROR("Failed to create player capsule shape");
+        return JPH::BodyID();
+    }
+
+    PhysicsBodyDesc desc;
+    desc.mass = rb.mass;
+    desc.apply_gravity = false; // Player movement code owns gravity for prediction parity.
+    desc.lock_rotation = true;
+
+    return createDynamicBody(transform.position, transform.rotation, shape, entity, desc);
 }
 
 PhysicsSystem::ShapeCastResult PhysicsSystem::shapeCast(const JPH::ShapeRefC& shape, const glm::vec3& position,
@@ -615,8 +700,8 @@ void PhysicsSystem::handlePlayerCollisions(entt::registry& registry, entt::entit
 
         player.grounded = jolt_system->GetNarrowPhaseQuery().CastRay(
             ray, hit,
-            JPH::SpecifiedBroadPhaseLayerFilter(BroadPhaseLayers::NON_MOVING),
-            JPH::SpecifiedObjectLayerFilter(Layers::NON_MOVING),
+            JPH::BroadPhaseLayerFilter(),
+            JPH::ObjectLayerFilter(),
             body_filter);
         if (player.grounded)
         {
@@ -657,6 +742,7 @@ bool PhysicsSystem::raycast(const glm::vec3& origin, const glm::vec3& direction,
     entt::registry& registry, glm::vec3& hitPoint, glm::vec3& hitNormal)
 {
     if (!initialized) return false;
+    if (maxDistance <= 0.0f || glm::length(direction) <= 0.0001f) return false;
 
     JPH::Vec3 dir = toJolt(glm::normalize(direction)) * maxDistance;
     JPH::RRayCast ray(toJoltR(origin), dir);

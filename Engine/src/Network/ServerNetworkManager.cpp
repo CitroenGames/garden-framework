@@ -1,5 +1,6 @@
 #include "ServerNetworkManager.hpp"
 #include "NetworkRuntime.hpp"
+#include "NetworkInput.hpp"
 #include "world.hpp"
 #include "Components/Components.hpp"
 #include "SharedMovement.hpp"
@@ -11,11 +12,24 @@
 #include <cerrno>
 #include <cmath>
 #include <chrono>
+#include <algorithm>
 #include <glm/glm.hpp>
 
 namespace {
     constexpr int kMaxEventsPerTick = 2048;
     constexpr int kShutdownDrainBudgetMs = 3000;
+
+    bool getBoolCVarOrDefault(const char* name, bool fallback)
+    {
+        ConVarBase* cvar = ConVarRegistry::get().find(name);
+        return cvar ? cvar->getBool() : fallback;
+    }
+
+    float getFloatCVarOrDefault(const char* name, float fallback)
+    {
+        ConVarBase* cvar = ConVarRegistry::get().find(name);
+        return cvar ? cvar->getFloat() : fallback;
+    }
 }
 
 #ifdef _WIN32
@@ -167,6 +181,8 @@ void ServerNetworkManager::shutdown()
     peer_to_client_id.clear();
     entity_to_net_id.clear();
     net_id_to_entity.clear();
+    lag_history.clear();
+    last_lag_history_tick = 0;
 
     if (runtime_acquired) {
         NetworkRuntime::release();
@@ -176,6 +192,12 @@ void ServerNetworkManager::shutdown()
 }
 
 void ServerNetworkManager::update(float delta_time)
+{
+    pumpNetworkEvents(delta_time);
+    publishWorldState();
+}
+
+void ServerNetworkManager::pumpNetworkEvents(float delta_time)
 {
     if (server_host == nullptr || game_world == nullptr) {
         return;
@@ -210,6 +232,14 @@ void ServerNetworkManager::update(float delta_time)
                 enet_packet_destroy(event.packet);
                 stats.packets_received++;
                 stats.bytes_received += packet_size;
+                auto peer_it = peer_to_client_id.find(event.peer);
+                if (peer_it != peer_to_client_id.end()) {
+                    auto client_it = clients.find(peer_it->second);
+                    if (client_it != clients.end()) {
+                        client_it->second.info.stats.packets_received++;
+                        client_it->second.info.stats.bytes_received += packet_size;
+                    }
+                }
                 break;
             }
 
@@ -223,6 +253,25 @@ void ServerNetworkManager::update(float delta_time)
         }
     }
 
+    refreshStats(delta_time);
+}
+
+void ServerNetworkManager::publishWorldState()
+{
+    if (server_host == nullptr || game_world == nullptr) {
+        return;
+    }
+
+    const float max_unlag_seconds = getFloatCVarOrDefault("sv_maxunlag", 1.0f);
+    const float fixed_delta = game_world->fixed_delta > 0.0f ? game_world->fixed_delta : (1.0f / 60.0f);
+    const size_t max_lag_records = static_cast<size_t>((std::max)(2.0f, std::ceil(max_unlag_seconds / fixed_delta) + 2.0f));
+    lag_history.setMaxRecords(max_lag_records);
+
+    if (current_tick != last_lag_history_tick) {
+        lag_history.recordSnapshot(generateWorldSnapshot());
+        last_lag_history_tick = current_tick;
+    }
+
     // Broadcast world state every 3 ticks (~20Hz at 62.5Hz server tick)
     state_update_counter++;
     if (state_update_counter >= 3) {
@@ -232,6 +281,32 @@ void ServerNetworkManager::update(float delta_time)
 
     // Flush all queued packets at end of update
     enet_host_flush(server_host);
+}
+
+void ServerNetworkManager::refreshStats(float delta_time)
+{
+    float ping_sum = 0.0f;
+    float loss_sum = 0.0f;
+    size_t peer_count = 0;
+
+    for (auto& [_, connection] : clients) {
+        updateStatsFromPeer(connection.info.stats, connection.info.peer, server_host);
+        connection.stats_sampler.update(connection.info.stats, delta_time);
+        connection.info.ping_ms = connection.info.stats.ping_ms;
+
+        if (connection.info.peer != nullptr) {
+            ping_sum += connection.info.stats.ping_ms;
+            loss_sum += connection.info.stats.packet_loss_percent;
+            peer_count++;
+        }
+    }
+
+    if (peer_count > 0) {
+        stats.ping_ms = ping_sum / static_cast<float>(peer_count);
+        stats.rtt_ms = stats.ping_ms;
+        stats.packet_loss_percent = loss_sum / static_cast<float>(peer_count);
+    }
+    stats_sampler.update(stats, delta_time);
 }
 
 void ServerNetworkManager::handleClientConnect(ENetEvent& event)
@@ -371,6 +446,8 @@ void ServerNetworkManager::handleConnectRequest(ENetPeer* peer, BitReader& reade
 
     stats.packets_sent++;
     stats.bytes_sent += writer.getByteSize();
+    clients[client_id].info.stats.packets_sent++;
+    clients[client_id].info.stats.bytes_sent += writer.getByteSize();
 
     // Notify callback
     if (on_client_connected) {
@@ -392,8 +469,13 @@ void ServerNetworkManager::handleInputCommand(uint16_t client_id, BitReader& rea
         return;
     }
 
-    // Update acknowledged tick
-    it->second.acknowledgeSnapshot(msg.last_received_tick);
+    // Update acknowledged tick. Clients may acknowledge 0 before their first world snapshot.
+    if (msg.last_received_tick == 0 ||
+        (!isTickNewer(msg.last_received_tick, current_tick) &&
+         (msg.last_received_tick == it->second.info.last_acknowledged_tick ||
+          isTickNewer(msg.last_received_tick, it->second.info.last_acknowledged_tick)))) {
+        it->second.acknowledgeSnapshot(msg.last_received_tick);
+    }
 
     // Get player entity for this client
     uint32_t player_net_id = it->second.info.player_entity_network_id;
@@ -424,58 +506,48 @@ void ServerNetworkManager::handleInputCommand(uint16_t client_id, BitReader& rea
     movement_config.jump_force = player.jump_force;
     movement_config.fixed_delta = game_world->fixed_delta;
 
-    // Process redundant (older) inputs first if they haven't been processed yet
-    for (const auto& sample : redundant_inputs) {
-        if (sample.tick > it->second.info.last_input_tick) {
-            transform.rotation.y = sample.camera_yaw;
-            transform.rotation.x = sample.camera_pitch;
+    const auto samples = collectInputSamplesChronological(msg, redundant_inputs);
+    accrueInputTickBudget(
+        current_tick,
+        it->second.info.last_input_budget_server_tick,
+        it->second.info.input_tick_budget);
 
-            MovementInput move_input;
-            move_input.move_forward = sample.move_forward;
-            move_input.move_right = sample.move_right;
-            move_input.camera_yaw = sample.camera_yaw;
-            move_input.camera_pitch = sample.camera_pitch;
-            move_input.buttons = sample.buttons;
-
-            MovementState move_state;
-            move_state.position = transform.position;
-            move_state.velocity = rigidbody.velocity;
-            move_state.grounded = player.grounded;
-            move_state.ground_normal = player.ground_normal;
-
-            MovementState result = SharedMovement::simulate(move_input, move_state, movement_config);
-            transform.position = result.position;
-            rigidbody.velocity = result.velocity;
-            player.grounded = result.grounded;
-
-            it->second.info.last_input_tick = sample.tick;
+    for (const auto& sample : samples) {
+        if (!shouldAcceptInputTick(sample.tick, it->second.info.last_input_tick)) {
+            continue;
         }
-    }
 
-    // Process the primary (latest) input
-    if (msg.client_tick > it->second.info.last_input_tick) {
-        transform.rotation.y = msg.camera_yaw;
-        transform.rotation.x = msg.camera_pitch;
+        if (!consumeInputTickBudget(it->second.info.input_tick_budget)) {
+            LOG_ENGINE_WARN("Client {0} exceeded input tick budget at server tick {1}", client_id, current_tick);
+            break;
+        }
 
-        MovementInput movement_input;
-        movement_input.move_forward = msg.move_forward;
-        movement_input.move_right = msg.move_right;
-        movement_input.camera_yaw = msg.camera_yaw;
-        movement_input.camera_pitch = msg.camera_pitch;
-        movement_input.buttons = msg.buttons;
+        transform.rotation.y = sample.camera_yaw;
+        transform.rotation.x = sample.camera_pitch;
 
-        MovementState movement_state;
-        movement_state.position = transform.position;
-        movement_state.velocity = rigidbody.velocity;
-        movement_state.grounded = player.grounded;
-        movement_state.ground_normal = player.ground_normal;
+        MovementInput move_input;
+        move_input.move_forward = sample.move_forward;
+        move_input.move_right = sample.move_right;
+        move_input.camera_yaw = sample.camera_yaw;
+        move_input.camera_pitch = sample.camera_pitch;
+        move_input.buttons = sample.buttons;
 
-        MovementState result = SharedMovement::simulate(movement_input, movement_state, movement_config);
+        MovementState move_state;
+        move_state.position = transform.position;
+        move_state.velocity = rigidbody.velocity;
+        move_state.grounded = player.grounded;
+        move_state.ground_normal = player.ground_normal;
+
+        MovementState result = SharedMovement::simulate(move_input, move_state, movement_config);
         transform.position = result.position;
         rigidbody.velocity = result.velocity;
         player.grounded = result.grounded;
 
-        it->second.info.last_input_tick = msg.client_tick;
+        it->second.info.last_input_tick = sample.tick;
+
+        if (input_sample_handler) {
+            input_sample_handler(client_id, player_entity, sample, msg.last_received_tick);
+        }
     }
 }
 
@@ -560,7 +632,7 @@ WorldSnapshot ServerNetworkManager::generateWorldSnapshot()
 }
 
 std::vector<EntityUpdateData> ServerNetworkManager::generateDeltaUpdate(
-    uint16_t client_id, const WorldSnapshot& current)
+    uint16_t client_id, const WorldSnapshot& current, bool full_snapshot, uint32_t delta_from_tick)
 {
     std::vector<EntityUpdateData> updates;
 
@@ -570,7 +642,7 @@ std::vector<EntityUpdateData> ServerNetworkManager::generateDeltaUpdate(
     }
 
     // Get baseline snapshot (last acknowledged)
-    const WorldSnapshot* baseline = it->second.getSnapshot(it->second.info.last_acknowledged_tick);
+    const WorldSnapshot* baseline = full_snapshot ? nullptr : it->second.getSnapshot(delta_from_tick);
 
     // For each entity in current snapshot
     for (const auto& [entity_id, entity_snapshot] : current.entities) {
@@ -584,7 +656,7 @@ std::vector<EntityUpdateData> ServerNetworkManager::generateDeltaUpdate(
         if (!entity_snapshot.exists) {
             // Entity deleted - only send DELETED flag, no component data needed
             update.flags = ComponentFlags::DELETED;
-        } else if (!baseline_entity) {
+        } else if (full_snapshot || !baseline_entity) {
             // New entity - send all data
             update.flags |= ComponentFlags::TRANSFORM | ComponentFlags::VELOCITY | ComponentFlags::GROUNDED | ComponentFlags::ROTATION;
             update.position = entity_snapshot.components.position;
@@ -625,8 +697,7 @@ std::vector<EntityUpdateData> ServerNetworkManager::generateDeltaUpdate(
         }
     }
 
-    // TODO: Check for deleted entities in baseline that aren't in current
-    if (baseline) {
+    if (!full_snapshot && baseline) {
         for (const auto& [entity_id, entity_snapshot] : baseline->entities) {
             if (!current.hasEntity(entity_id)) {
                 EntityUpdateData update;
@@ -647,10 +718,17 @@ void ServerNetworkManager::sendWorldStateToClient(uint16_t client_id, const Worl
         return;
     }
 
-    // Generate delta update
-    std::vector<EntityUpdateData> updates = generateDeltaUpdate(client_id, snapshot);
+    const uint32_t acknowledged_tick = it->second.info.last_acknowledged_tick;
+    const bool has_baseline = acknowledged_tick != 0 && it->second.hasSnapshot(acknowledged_tick);
+    const bool baseline_miss = acknowledged_tick != 0 && !has_baseline;
+    const bool force_full_on_miss = getBoolCVarOrDefault("net_fullsnapshot_on_baseline_miss", true);
+    const bool full_snapshot = acknowledged_tick == 0 || (baseline_miss && force_full_on_miss);
+    const uint32_t delta_from_tick = full_snapshot ? 0 : acknowledged_tick;
 
-    if (updates.empty()) {
+    // Generate delta update
+    std::vector<EntityUpdateData> updates = generateDeltaUpdate(client_id, snapshot, full_snapshot, delta_from_tick);
+
+    if (updates.empty() && !full_snapshot) {
         return;  // Nothing changed
     }
 
@@ -658,6 +736,11 @@ void ServerNetworkManager::sendWorldStateToClient(uint16_t client_id, const Worl
     BitWriter writer;
     WorldStateUpdateMessage msg;
     msg.server_tick = snapshot.tick;
+    msg.delta_from_tick = delta_from_tick;
+    msg.snapshot_flags = full_snapshot ? SnapshotFlags::FULL : SnapshotFlags::NONE;
+    if (baseline_miss) {
+        msg.snapshot_flags |= SnapshotFlags::BASELINE_MISS;
+    }
     msg.last_processed_input_tick = it->second.info.last_input_tick;
     NetworkSerializer::serialize(writer, msg, updates);
 
@@ -666,6 +749,8 @@ void ServerNetworkManager::sendWorldStateToClient(uint16_t client_id, const Worl
 
     stats.packets_sent++;
     stats.bytes_sent += writer.getByteSize();
+    it->second.info.stats.packets_sent++;
+    it->second.info.stats.bytes_sent += writer.getByteSize();
 }
 
 uint32_t ServerNetworkManager::registerEntity(entt::entity entity)
@@ -717,6 +802,11 @@ uint32_t ServerNetworkManager::getNetworkIdByEntity(entt::entity entity)
         return it->second;
     }
     return 0;
+}
+
+bool ServerNetworkManager::sampleLagCompensatedEntity(uint32_t network_id, uint32_t target_tick, ComponentSnapshot& out) const
+{
+    return lag_history.sample(network_id, target_tick, out);
 }
 
 const ClientInfo* ServerNetworkManager::getClientInfo(uint16_t client_id) const
@@ -803,6 +893,8 @@ void ServerNetworkManager::sendReliableToClient(uint16_t client_id, const BitWri
         sendReliableMessage(it->second.info.peer, writer);
         stats.packets_sent++;
         stats.bytes_sent += writer.getByteSize();
+        it->second.info.stats.packets_sent++;
+        it->second.info.stats.bytes_sent += writer.getByteSize();
     } else {
         LOG_ENGINE_WARN("Cannot send to client {0}: not found or no peer", client_id);
     }
@@ -815,6 +907,8 @@ void ServerNetworkManager::sendUnreliableToClient(uint16_t client_id, const BitW
         sendUnreliableMessage(it->second.info.peer, writer);
         stats.packets_sent++;
         stats.bytes_sent += writer.getByteSize();
+        it->second.info.stats.packets_sent++;
+        it->second.info.stats.bytes_sent += writer.getByteSize();
     } else {
         LOG_ENGINE_WARN("Cannot send to client {0}: not found or no peer", client_id);
     }
@@ -827,6 +921,8 @@ void ServerNetworkManager::broadcastReliable(const BitWriter& writer)
             sendReliableMessage(connection.info.peer, writer);
             stats.packets_sent++;
             stats.bytes_sent += writer.getByteSize();
+            connection.info.stats.packets_sent++;
+            connection.info.stats.bytes_sent += writer.getByteSize();
         }
     }
 }
@@ -838,6 +934,8 @@ void ServerNetworkManager::broadcastUnreliable(const BitWriter& writer)
             sendUnreliableMessage(connection.info.peer, writer);
             stats.packets_sent++;
             stats.bytes_sent += writer.getByteSize();
+            connection.info.stats.packets_sent++;
+            connection.info.stats.bytes_sent += writer.getByteSize();
         }
     }
 }
@@ -863,6 +961,8 @@ void ServerNetworkManager::broadcastCVar(const std::string& name, const std::str
             sendReliableMessage(connection.info.peer, writer);
             stats.packets_sent++;
             stats.bytes_sent += writer.getByteSize();
+            connection.info.stats.packets_sent++;
+            connection.info.stats.bytes_sent += writer.getByteSize();
         }
     }
 
@@ -894,6 +994,8 @@ void ServerNetworkManager::sendInitialCVarsToClient(uint16_t client_id)
     sendReliableMessage(it->second.info.peer, writer);
     stats.packets_sent++;
     stats.bytes_sent += writer.getByteSize();
+    it->second.info.stats.packets_sent++;
+    it->second.info.stats.bytes_sent += writer.getByteSize();
 
     LOG_ENGINE_INFO("Sent {} replicated cvars to client {}", replicated.size(), client_id);
 }

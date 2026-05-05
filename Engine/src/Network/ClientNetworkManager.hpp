@@ -71,6 +71,7 @@ private:
     float input_send_timer = 0.0f;
     static constexpr float INPUT_SEND_INTERVAL = 1.0f / 60.0f;  // 60Hz max
     InputState last_sent_input;
+    uint32_t pending_input_tick = 0;
     bool has_pending_input = false;
 
     // Ping/RTT measurement
@@ -95,10 +96,11 @@ private:
 
     // Entity interpolation for remote players
     std::unordered_map<uint32_t, EntityInterpolationBuffer> interp_buffers;
-    static constexpr float INTERP_DELAY_TICKS = 2.0f; // Render remote entities 2 ticks behind
+    static constexpr float INTERP_DELAY_TICKS = static_cast<float>(DEFAULT_INTERP_DELAY_TICKS);
 
     // Network stats
     NetworkStats stats;
+    NetworkStatsRateSampler stats_sampler;
 
 public:
     ClientNetworkManager();
@@ -118,11 +120,14 @@ public:
 
     // Send input to server
     void sendInputCommand(const InputState& input);
+    void sendInputCommand(uint32_t command_tick, const InputState& input);
+    uint32_t beginInputCommandTick();
 
     // State queries
     ConnectionState getConnectionState() const { return connection_state; }
     uint16_t getClientId() const { return client_id; }
     uint32_t getClientTick() const { return client_tick; }
+    uint32_t getLastReceivedServerTick() const { return last_received_server_tick; }
     bool isConnected() const { return connection_state == ConnectionState::CONNECTED; }
 
     // Entity queries
@@ -178,6 +183,7 @@ private:
     void sendReliableMessage(const BitWriter& writer);
     void sendUnreliableMessage(const BitWriter& writer);
     void setConnectionState(ConnectionState new_state);
+    void refreshStats(float delta_time);
 };
 
 } // namespace Net

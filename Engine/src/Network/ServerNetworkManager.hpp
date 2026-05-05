@@ -12,6 +12,7 @@
 #include "NetworkTypes.hpp"
 #include "BitStream.hpp"
 #include "NetworkSerializer.hpp"
+#include "LagHistory.hpp"
 #include <entt/entt.hpp>
 
 // Forward declarations
@@ -21,12 +22,18 @@ namespace Net {
 
 using ServerCustomMessageHandler = std::function<void(uint16_t client_id, uint8_t message_type, BitReader& reader)>;
 using ServerInputFilter = std::function<bool(uint16_t client_id, entt::entity player_entity)>;
+using ServerInputSampleHandler = std::function<void(
+    uint16_t client_id,
+    entt::entity player_entity,
+    const InputSample& input,
+    uint32_t acknowledged_server_tick)>;
 
 // Client connection tracking (server-side)
 struct ClientConnection
 {
     ClientInfo info;
     std::deque<WorldSnapshot> snapshot_history;  // Keep last 64 snapshots
+    NetworkStatsRateSampler stats_sampler;
     uint32_t last_sent_tick = 0;
 
     ClientConnection() = default;
@@ -50,6 +57,10 @@ struct ClientConnection
             }
         }
         return nullptr;
+    }
+
+    bool hasSnapshot(uint32_t tick) const {
+        return getSnapshot(tick) != nullptr;
     }
 
     // Update acknowledged tick and prune old snapshots
@@ -86,15 +97,19 @@ private:
     uint32_t current_tick = 0;
     float tick_accumulator = 0.0f;
     uint32_t state_update_counter = 0;  // Counter for 20Hz updates (every 3 ticks)
+    uint32_t last_lag_history_tick = 0;
+    LagHistory lag_history;
 
     // Callbacks
     std::function<void(uint16_t)> on_client_connected;
     std::function<void(uint16_t)> on_client_disconnected;
     ServerCustomMessageHandler on_custom_message;
     ServerInputFilter input_filter;
+    ServerInputSampleHandler input_sample_handler;
 
     // Network stats
     NetworkStats stats;
+    NetworkStatsRateSampler stats_sampler;
 
 public:
     ServerNetworkManager();
@@ -110,6 +125,8 @@ public:
 
     // Main update loop
     void update(float delta_time);
+    void pumpNetworkEvents(float delta_time);
+    void publishWorldState();
 
     // Broadcast world state to all clients
     void broadcastWorldState();
@@ -119,6 +136,8 @@ public:
     void unregisterEntity(entt::entity entity);
     entt::entity getEntityByNetworkId(uint32_t net_id);
     uint32_t getNetworkIdByEntity(entt::entity entity);
+    bool sampleLagCompensatedEntity(uint32_t network_id, uint32_t target_tick, ComponentSnapshot& out) const;
+    const LagHistory& getLagHistory() const { return lag_history; }
 
     // Callbacks
     void setOnClientConnected(std::function<void(uint16_t)> callback) {
@@ -131,6 +150,7 @@ public:
 
     void setCustomMessageHandler(ServerCustomMessageHandler callback) { on_custom_message = std::move(callback); }
     void setInputFilter(ServerInputFilter callback) { input_filter = std::move(callback); }
+    void setInputSampleHandler(ServerInputSampleHandler callback) { input_sample_handler = std::move(callback); }
 
     // Client management
     const ClientInfo* getClientInfo(uint16_t client_id) const;
@@ -164,8 +184,10 @@ private:
 
     // State synchronization
     WorldSnapshot generateWorldSnapshot();
-    std::vector<EntityUpdateData> generateDeltaUpdate(uint16_t client_id, const WorldSnapshot& current);
+    std::vector<EntityUpdateData> generateDeltaUpdate(uint16_t client_id, const WorldSnapshot& current,
+                                                      bool full_snapshot, uint32_t delta_from_tick);
     void sendWorldStateToClient(uint16_t client_id, const WorldSnapshot& snapshot);
+    void refreshStats(float delta_time);
 
     // Helper functions
     void sendReliableMessage(ENetPeer* peer, const BitWriter& writer);
