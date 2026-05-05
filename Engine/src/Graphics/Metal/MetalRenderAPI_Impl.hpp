@@ -6,7 +6,9 @@
 #include "Graphics/RenderAPI.hpp"
 #include "Graphics/RenderCommandBuffer.hpp"
 #include "Utils/Log.hpp"
+#include "Utils/Vertex.hpp"
 #include <atomic>
+#include <vector>
 
 class MetalSceneViewport;
 
@@ -53,6 +55,16 @@ struct MetalRenderAPIImpl {
 
     // Debug line pipeline (unlit, no blend)
     id<MTLRenderPipelineState> debugLinePipeline = nil;
+    id<MTLRenderPipelineState> basicHDRPipeline = nil;
+    id<MTLRenderPipelineState> basicHDRPipelineAlpha = nil;
+    id<MTLRenderPipelineState> basicHDRPipelineAdditive = nil;
+    id<MTLRenderPipelineState> unlitHDRPipeline = nil;
+    id<MTLRenderPipelineState> unlitHDRPipelineAlpha = nil;
+    id<MTLRenderPipelineState> unlitHDRPipelineAdditive = nil;
+    id<MTLRenderPipelineState> debugLineHDRPipeline = nil;
+    id<MTLRenderPipelineState> skyboxHDRPipeline = nil;
+    id<MTLRenderPipelineState> gbufferPipeline = nil;
+    id<MTLRenderPipelineState> deferredLightingPipeline = nil;
 
     // Depth prepass pipeline (no fragment function, no color writes)
     id<MTLRenderPipelineState> depthPrepassPipeline = nil;
@@ -83,6 +95,10 @@ struct MetalRenderAPIImpl {
     id<MTLBuffer> fxaaVertexBuffer = nil;
     id<MTLTexture> offscreenTexture = nil;
     id<MTLTexture> offscreenDepthTexture = nil;
+    id<MTLTexture> deferredHDRTexture = nil;
+    id<MTLTexture> gbuffer0Texture = nil;
+    id<MTLTexture> gbuffer1Texture = nil;
+    id<MTLTexture> gbuffer2Texture = nil;
     bool vsyncEnabled = true;
     bool fxaaEnabled = true;
     bool fxaaInitialized = false;
@@ -125,6 +141,10 @@ struct MetalRenderAPIImpl {
         // Offscreen texture for FXAA intermediate rendering
         id<MTLTexture> offscreenTexture = nil;
         id<MTLTexture> offscreenDepthTexture = nil;
+        id<MTLTexture> hdrTexture = nil;
+        id<MTLTexture> gbuffer0Texture = nil;
+        id<MTLTexture> gbuffer1Texture = nil;
+        id<MTLTexture> gbuffer2Texture = nil;
         int width = 0;
         int height = 0;
     };
@@ -185,6 +205,10 @@ struct MetalRenderAPIImpl {
 
     // Main pass state
     bool mainPassActive = false;
+    bool skyboxRequested = false;
+    RenderCommandBuffer deferredOpaqueCmds;
+    RenderCommandBuffer deferredTransparentCmds;
+    std::vector<vertex> deferredDebugLineVertices;
 
     // ImGui render pass descriptor (stored for ImGui rendering)
     MTLRenderPassDescriptor* imguiRenderPassDesc = nil;
@@ -278,6 +302,19 @@ struct MetalRenderAPIImpl {
         }
     }
 
+    id<MTLRenderPipelineState> selectHDRPipeline(const PSOKey& key) const
+    {
+        bool lit = key.lighting;
+        switch (key.blend) {
+            case BlendMode::Alpha:
+                return lit ? basicHDRPipelineAlpha : unlitHDRPipelineAlpha;
+            case BlendMode::Additive:
+                return lit ? basicHDRPipelineAdditive : unlitHDRPipelineAdditive;
+            default:
+                return lit ? basicHDRPipeline : unlitHDRPipeline;
+        }
+    }
+
     id<MTLTexture> createDepthTextureWithSize(uint32_t w, uint32_t h)
     {
         MTLTextureDescriptor* desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float
@@ -346,6 +383,7 @@ struct MetalRenderAPIImpl {
     void createOffscreenResources();
     void createViewportResources(int w, int h);
     void createPIEViewportTextures(PIEViewportTarget& target, int w, int h);
+    void renderDeferredSceneToCurrentTarget(bool presentToDrawable, bool renderImGui);
 
     // Defined in MetalRenderAPI_SSAO.mm
     void createSSAOResources(int w, int h);

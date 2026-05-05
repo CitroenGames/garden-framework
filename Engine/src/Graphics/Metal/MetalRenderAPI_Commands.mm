@@ -556,6 +556,12 @@ void MetalRenderAPI::renderDebugLines(const vertex* vertices, size_t vertex_coun
     if (!vertices || vertex_count < 2 || !impl->frameStarted) return;
     if (impl->inShadowPass) return;
 
+    if (isDeferredActive()) {
+        impl->deferredDebugLineVertices.insert(impl->deferredDebugLineVertices.end(),
+                                               vertices, vertices + vertex_count);
+        return;
+    }
+
     id<MTLRenderCommandEncoder> enc = impl->encoder;
     if (!enc) return;
     if (!impl->debugLinePipeline) return;

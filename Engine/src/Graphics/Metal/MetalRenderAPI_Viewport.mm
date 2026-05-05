@@ -1,6 +1,7 @@
 #include "MetalRenderAPI.hpp"
 #include "MetalRenderAPI_Impl.hpp"
 #include "MetalSceneViewport.hpp"
+#include "MetalMesh.hpp"
 
 #include "imgui.h"
 #include "imgui_impl_metal.h"
@@ -24,6 +25,35 @@ void MetalRenderAPIImpl::createOffscreenResources(int w, int h)
 
     // Offscreen depth texture
     offscreenDepthTexture = createDepthTextureWithSize(w, h);
+
+    MTLTextureDescriptor* hdrDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
+                                                                                       width:w
+                                                                                      height:h
+                                                                                   mipmapped:NO];
+    hdrDesc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    hdrDesc.storageMode = MTLStorageModePrivate;
+    deferredHDRTexture = [device newTextureWithDescriptor:hdrDesc];
+    deferredHDRTexture.label = @"Metal Deferred HDR";
+
+    MTLTextureDescriptor* gb0Desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                                       width:w
+                                                                                      height:h
+                                                                                   mipmapped:NO];
+    gb0Desc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    gb0Desc.storageMode = MTLStorageModePrivate;
+    gbuffer0Texture = [device newTextureWithDescriptor:gb0Desc];
+    gbuffer0Texture.label = @"Metal GBuffer0";
+
+    MTLTextureDescriptor* gbDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
+                                                                                     width:w
+                                                                                    height:h
+                                                                                 mipmapped:NO];
+    gbDesc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    gbDesc.storageMode = MTLStorageModePrivate;
+    gbuffer1Texture = [device newTextureWithDescriptor:gbDesc];
+    gbuffer1Texture.label = @"Metal GBuffer1";
+    gbuffer2Texture = [device newTextureWithDescriptor:gbDesc];
+    gbuffer2Texture.label = @"Metal GBuffer2";
 
     // Create 1x1 white SSAO fallback texture (ensures FXAA can always sample texture(1))
     if (!ssaoFallbackTexture) {
@@ -79,6 +109,10 @@ void MetalRenderAPIImpl::createPIEViewportTextures(PIEViewportTarget& target, in
     target.depthTexture = nil;
     target.offscreenTexture = nil;
     target.offscreenDepthTexture = nil;
+    target.hdrTexture = nil;
+    target.gbuffer0Texture = nil;
+    target.gbuffer1Texture = nil;
+    target.gbuffer2Texture = nil;
     target.width = w;
     target.height = h;
 
@@ -97,6 +131,31 @@ void MetalRenderAPIImpl::createPIEViewportTextures(PIEViewportTarget& target, in
     // Offscreen texture for FXAA intermediate rendering
     target.offscreenTexture = [device newTextureWithDescriptor:desc];
     target.offscreenDepthTexture = createDepthTextureWithSize(w, h);
+
+    MTLTextureDescriptor* hdrDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
+                                                                                       width:w
+                                                                                      height:h
+                                                                                   mipmapped:NO];
+    hdrDesc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    hdrDesc.storageMode = MTLStorageModePrivate;
+    target.hdrTexture = [device newTextureWithDescriptor:hdrDesc];
+
+    MTLTextureDescriptor* gb0Desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                                       width:w
+                                                                                      height:h
+                                                                                   mipmapped:NO];
+    gb0Desc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    gb0Desc.storageMode = MTLStorageModePrivate;
+    target.gbuffer0Texture = [device newTextureWithDescriptor:gb0Desc];
+
+    MTLTextureDescriptor* gbDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
+                                                                                     width:w
+                                                                                    height:h
+                                                                                 mipmapped:NO];
+    gbDesc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    gbDesc.storageMode = MTLStorageModePrivate;
+    target.gbuffer1Texture = [device newTextureWithDescriptor:gbDesc];
+    target.gbuffer2Texture = [device newTextureWithDescriptor:gbDesc];
 }
 
 // ============================================================================
@@ -134,6 +193,16 @@ void MetalRenderAPI::setViewportSize(int width, int height)
 
 void MetalRenderAPI::endSceneRender()
 {
+    if (isDeferredActive())
+    {
+        const bool explicitSceneTarget = impl->activeSceneTarget >= 0;
+        impl->renderDeferredSceneToCurrentTarget(/*presentToDrawable=*/false,
+                                                 /*renderImGui=*/false);
+        if (explicitSceneTarget)
+            impl->activeSceneTarget = -1;
+        return;
+    }
+
     int sceneTarget = impl->activeSceneTarget;
     if (sceneTarget < 0 && impl->editorSceneViewport)
         sceneTarget = impl->editorSceneViewport->pieId();
@@ -188,6 +257,7 @@ void MetalRenderAPI::endSceneRender()
                         1.0f / std::max(pie.width, 1), 1.0f / std::max(pie.height, 1));
                     fxaaUniforms.exposure = 1.0f;
                     fxaaUniforms.ssaoEnabled = ssaoTexture ? 1 : 0;
+                    fxaaUniforms.fxaaEnabled = impl->fxaaEnabled ? 1 : 0;
                     [fxaaEncoder setFragmentBytes:&fxaaUniforms length:sizeof(fxaaUniforms) atIndex:0];
 
                     [fxaaEncoder setVertexBuffer:impl->fxaaVertexBuffer offset:0 atIndex:0];
@@ -257,6 +327,7 @@ void MetalRenderAPI::endSceneRender()
                 1.0f / impl->viewportWidthRT, 1.0f / impl->viewportHeightRT);
             fxaaUniforms.exposure = 1.0f;
             fxaaUniforms.ssaoEnabled = ssaoTexture ? 1 : 0;
+            fxaaUniforms.fxaaEnabled = impl->fxaaEnabled ? 1 : 0;
             [fxaaEncoder setFragmentBytes:&fxaaUniforms length:sizeof(fxaaUniforms) atIndex:0];
 
             [fxaaEncoder setVertexBuffer:impl->fxaaVertexBuffer offset:0 atIndex:0];
@@ -396,6 +467,10 @@ void MetalRenderAPI::destroyPIEViewport(int id)
     it->second.depthTexture = nil;
     it->second.offscreenTexture = nil;
     it->second.offscreenDepthTexture = nil;
+    it->second.hdrTexture = nil;
+    it->second.gbuffer0Texture = nil;
+    it->second.gbuffer1Texture = nil;
+    it->second.gbuffer2Texture = nil;
 
     impl->pieViewports.erase(it);
 
@@ -452,6 +527,501 @@ void MetalRenderAPI::setEditorViewport(SceneViewport* viewport)
     auto* metalViewport = static_cast<MetalSceneViewport*>(viewport);
     impl->editorSceneViewport = metalViewport;
     impl->activeSceneTarget = metalViewport ? metalViewport->pieId() : -1;
+}
+
+// ============================================================================
+// Deferred rendering path
+// ============================================================================
+
+namespace {
+
+struct MetalDeferredTarget {
+    id<MTLTexture> output = nil;
+    id<MTLTexture> hdr = nil;
+    id<MTLTexture> depth = nil;
+    id<MTLTexture> gb0 = nil;
+    id<MTLTexture> gb1 = nil;
+    id<MTLTexture> gb2 = nil;
+    int width = 0;
+    int height = 0;
+};
+
+static MetalDeferredTarget getDeferredTarget(MetalRenderAPIImpl* impl, bool presentToDrawable)
+{
+    MetalDeferredTarget target;
+
+    int sceneTarget = impl->activeSceneTarget;
+    if (sceneTarget < 0 && impl->editorSceneViewport)
+        sceneTarget = impl->editorSceneViewport->pieId();
+
+    if (sceneTarget >= 0) {
+        auto it = impl->pieViewports.find(sceneTarget);
+        if (it != impl->pieViewports.end()) {
+            auto& pie = it->second;
+            target.output = pie.colorTexture;
+            target.hdr = pie.hdrTexture;
+            target.depth = pie.offscreenDepthTexture ? pie.offscreenDepthTexture : pie.depthTexture;
+            target.gb0 = pie.gbuffer0Texture;
+            target.gb1 = pie.gbuffer1Texture;
+            target.gb2 = pie.gbuffer2Texture;
+            target.width = pie.width;
+            target.height = pie.height;
+            return target;
+        }
+    }
+
+    target.output = presentToDrawable && impl->currentDrawable ? impl->currentDrawable.texture : impl->viewportTexture;
+    target.hdr = impl->deferredHDRTexture;
+    target.depth = impl->offscreenDepthTexture;
+    target.gb0 = impl->gbuffer0Texture;
+    target.gb1 = impl->gbuffer1Texture;
+    target.gb2 = impl->gbuffer2Texture;
+    target.width = impl->viewportWidthRT > 0 ? impl->viewportWidthRT : impl->viewportWidth;
+    target.height = impl->viewportHeightRT > 0 ? impl->viewportHeightRT : impl->viewportHeight;
+    return target;
+}
+
+static bool targetReady(const MetalDeferredTarget& target)
+{
+    return target.output && target.hdr && target.depth && target.gb0 && target.gb1 && target.gb2
+        && target.width > 0 && target.height > 0;
+}
+
+static void bindDrawTexture(MetalRenderAPIImpl* impl,
+                            id<MTLRenderCommandEncoder> enc,
+                            const DrawCommand& drawCmd)
+{
+    TextureHandle texHandle = drawCmd.use_texture ? drawCmd.texture : INVALID_TEXTURE;
+    if (texHandle != INVALID_TEXTURE && impl->textures.count(texHandle)) {
+        auto& tex = impl->textures[texHandle];
+        [enc setFragmentTexture:tex.texture atIndex:0];
+        [enc setFragmentSamplerState:tex.sampler atIndex:0];
+    } else {
+        [enc setFragmentTexture:impl->defaultTexture atIndex:0];
+        [enc setFragmentSamplerState:impl->defaultSampler atIndex:0];
+    }
+}
+
+static void drawCommandMesh(MetalRenderAPIImpl* impl,
+                            id<MTLRenderCommandEncoder> enc,
+                            const DrawCommand& drawCmd)
+{
+    MetalMesh* metalMesh = dynamic_cast<MetalMesh*>(drawCmd.gpu_mesh);
+    if (!metalMesh) return;
+
+    id<MTLBuffer> vertexBuffer = (__bridge id<MTLBuffer>)metalMesh->getVertexBuffer();
+    if (!vertexBuffer) return;
+
+    [enc setVertexBuffer:vertexBuffer offset:0 atIndex:0];
+
+    if (metalMesh->isIndexed()) {
+        id<MTLBuffer> indexBuffer = (__bridge id<MTLBuffer>)metalMesh->getIndexBuffer();
+        if (!indexBuffer) return;
+        if (drawCmd.vertex_count > 0) {
+            [enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+                            indexCount:drawCmd.vertex_count
+                             indexType:MTLIndexTypeUInt32
+                           indexBuffer:indexBuffer
+                     indexBufferOffset:drawCmd.start_vertex * sizeof(uint32_t)];
+        } else {
+            [enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+                            indexCount:metalMesh->getIndexCount()
+                             indexType:MTLIndexTypeUInt32
+                           indexBuffer:indexBuffer
+                     indexBufferOffset:0];
+        }
+    } else {
+        if (drawCmd.vertex_count > 0) {
+            [enc drawPrimitives:MTLPrimitiveTypeTriangle
+                    vertexStart:drawCmd.start_vertex
+                    vertexCount:drawCmd.vertex_count];
+        } else {
+            [enc drawPrimitives:MTLPrimitiveTypeTriangle
+                    vertexStart:0
+                    vertexCount:metalMesh->getVertexCount()];
+        }
+    }
+
+    impl->drawCallCount++;
+    impl->lastFrameStats.backend_draw_calls++;
+}
+
+static void encodeCommands(MetalRenderAPIImpl* impl,
+                           id<MTLRenderCommandEncoder> enc,
+                           const RenderCommandBuffer& cmds,
+                           id<MTLRenderPipelineState> forcedPipeline,
+                           bool hdrForward)
+{
+    if (cmds.empty()) return;
+
+    impl->lastFrameStats.submitted_draw_commands += cmds.size();
+    impl->updatePerFrameUBO();
+    MetalGlobalUBO frameUBO = impl->cachedPerFrameUBO;
+
+    if (!forcedPipeline) {
+        impl->bindLightBuffers(enc);
+        if (impl->shadowMapArray) {
+            [enc setFragmentTexture:impl->shadowMapArray atIndex:1];
+            [enc setFragmentSamplerState:impl->shadowSampler atIndex:1];
+        }
+    }
+
+    for (const auto& drawCmd : cmds) {
+        if (!drawCmd.gpu_mesh || !drawCmd.gpu_mesh->isUploaded()) continue;
+
+        id<MTLRenderPipelineState> pipeline = forcedPipeline;
+        if (!pipeline)
+            pipeline = hdrForward ? impl->selectHDRPipeline(drawCmd.pso_key)
+                                  : impl->selectPipeline(drawCmd.pso_key);
+        if (!pipeline) continue;
+
+        [enc setRenderPipelineState:pipeline];
+
+        MTLCullMode cullMode = MTLCullModeBack;
+        switch (drawCmd.pso_key.cull) {
+            case CullMode::Back:  cullMode = MTLCullModeBack; break;
+            case CullMode::Front: cullMode = MTLCullModeFront; break;
+            case CullMode::None:  cullMode = MTLCullModeNone; break;
+        }
+        [enc setCullMode:cullMode];
+
+        if (forcedPipeline || drawCmd.pso_key.blend == BlendMode::None)
+            [enc setDepthStencilState:impl->depthLessEqual];
+        else
+            [enc setDepthStencilState:impl->depthLessEqualNoWrite];
+
+        MetalGlobalUBO ubo = frameUBO;
+        ubo.color = drawCmd.color;
+        ubo.useTexture = drawCmd.use_texture ? 1 : 0;
+        ubo.alphaCutoff = drawCmd.alpha_cutoff;
+        ubo.metallic = drawCmd.metallic;
+        ubo.roughness = drawCmd.roughness;
+        ubo.emissive = drawCmd.emissive;
+        [enc setVertexBytes:&ubo length:sizeof(ubo) atIndex:1];
+        [enc setFragmentBytes:&ubo length:sizeof(ubo) atIndex:0];
+
+        struct { glm::mat4 model; glm::mat4 normalMatrix; } modelData;
+        modelData.model = drawCmd.model_matrix;
+        modelData.normalMatrix = drawCmd.normal_matrix;
+        [enc setVertexBytes:&modelData length:sizeof(modelData) atIndex:2];
+
+        bindDrawTexture(impl, enc, drawCmd);
+        drawCommandMesh(impl, enc, drawCmd);
+    }
+}
+
+static void encodeDebugLinesToHDR(MetalRenderAPIImpl* impl,
+                                  id<MTLTexture> hdr,
+                                  id<MTLTexture> depth,
+                                  int width,
+                                  int height)
+{
+    if (impl->deferredDebugLineVertices.size() < 2 || !impl->debugLineHDRPipeline)
+        return;
+
+    MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture = hdr;
+    pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    pass.depthAttachment.texture = depth;
+    pass.depthAttachment.loadAction = MTLLoadActionLoad;
+    pass.depthAttachment.storeAction = MTLStoreActionStore;
+
+    id<MTLRenderCommandEncoder> enc = [impl->commandBuffer renderCommandEncoderWithDescriptor:pass];
+    if (!enc) return;
+    enc.label = @"Deferred Debug Lines";
+    [enc setRenderPipelineState:impl->debugLineHDRPipeline];
+    [enc setDepthStencilState:impl->depthLessEqual];
+    [enc setCullMode:MTLCullModeNone];
+    [enc setFrontFacingWinding:MTLWindingCounterClockwise];
+    MTLViewport vp = {0, 0, (double)width, (double)height, 0, 1};
+    [enc setViewport:vp];
+
+    impl->updatePerFrameUBO();
+    MetalGlobalUBO ubo = impl->cachedPerFrameUBO;
+    glm::mat4 identity(1.0f);
+    [enc setVertexBytes:&identity length:sizeof(glm::mat4) atIndex:2];
+    [enc setFragmentTexture:impl->defaultTexture atIndex:0];
+    [enc setFragmentSamplerState:impl->defaultSampler atIndex:0];
+
+    size_t i = 0;
+    const auto& vertices = impl->deferredDebugLineVertices;
+    while (i < vertices.size()) {
+        glm::vec3 color(vertices[i].nx, vertices[i].ny, vertices[i].nz);
+        size_t batchStart = i;
+        while (i < vertices.size()
+            && vertices[i].nx == color.r
+            && vertices[i].ny == color.g
+            && vertices[i].nz == color.b) {
+            ++i;
+        }
+
+        ubo.color = color;
+        ubo.useTexture = 0;
+        [enc setVertexBytes:&ubo length:sizeof(ubo) atIndex:1];
+        [enc setFragmentBytes:&ubo length:sizeof(ubo) atIndex:0];
+        [enc setVertexBytes:vertices.data() + batchStart
+                     length:(i - batchStart) * sizeof(vertex)
+                    atIndex:0];
+        [enc drawPrimitives:MTLPrimitiveTypeLine vertexStart:0 vertexCount:i - batchStart];
+    }
+
+    [enc endEncoding];
+}
+
+static void commitDeferredFrame(MetalRenderAPIImpl* impl, bool presentToDrawable)
+{
+    if (presentToDrawable && impl->currentDrawable)
+        [impl->commandBuffer presentDrawable:impl->currentDrawable];
+
+    __block dispatch_semaphore_t sem = impl->frameSemaphore;
+    __block uint32_t frameNum = impl->frameNumber;
+    __block uint32_t* errorCountPtr = &impl->gpuErrorCount;
+    __block id<MTLDevice> dev = impl->device;
+    __block id<MTLCommandQueue> __strong* queuePtr = &impl->commandQueue;
+    [impl->commandBuffer addCompletedHandler:^(id<MTLCommandBuffer> buf) {
+        if (buf.status == MTLCommandBufferStatusError) {
+            (*errorCountPtr)++;
+            printf("[Metal] GPU Error (deferred frame %u, total errors: %u): %s\n",
+                   frameNum, *errorCountPtr, [[buf.error localizedDescription] UTF8String]);
+            if (@available(macOS 11.0, *)) {
+                NSArray<id<MTLCommandBufferEncoderInfo>>* encoderInfos =
+                    buf.error.userInfo[MTLCommandBufferEncoderInfoErrorKey];
+                for (id<MTLCommandBufferEncoderInfo> info in encoderInfos) {
+                    NSString* statusStr = @"unknown";
+                    switch (info.errorState) {
+                        case MTLCommandEncoderErrorStateCompleted: statusStr = @"completed"; break;
+                        case MTLCommandEncoderErrorStateAffected: statusStr = @"affected"; break;
+                        case MTLCommandEncoderErrorStateFaulted: statusStr = @"FAULTED"; break;
+                        case MTLCommandEncoderErrorStatePending: statusStr = @"pending"; break;
+                        default: break;
+                    }
+                    printf("[Metal]   Encoder '%s': %s\n",
+                           [info.label UTF8String], [statusStr UTF8String]);
+                }
+            }
+            fflush(stdout);
+            if (*errorCountPtr >= MetalRenderAPIImpl::MAX_GPU_ERRORS_BEFORE_RECOVERY) {
+                printf("[Metal] Too many consecutive GPU errors, recreating command queue\n");
+                *queuePtr = [dev newCommandQueue];
+                *errorCountPtr = 0;
+            }
+        } else {
+            *errorCountPtr = 0;
+        }
+        dispatch_semaphore_signal(sem);
+    }];
+
+    [impl->commandBuffer commit];
+    impl->commandBuffer = nil;
+    impl->currentDrawable = nil;
+    impl->frameStarted = false;
+    impl->frameNumber++;
+    impl->currentFrame = (impl->currentFrame + 1) % MetalRenderAPIImpl::MAX_FRAMES_IN_FLIGHT;
+}
+
+} // namespace
+
+void MetalRenderAPIImpl::renderDeferredSceneToCurrentTarget(bool presentToDrawable, bool renderImGui)
+{
+    if (!frameStarted || !commandBuffer)
+        return;
+
+    if (presentToDrawable && !ensureDrawable())
+        return;
+
+    MetalDeferredTarget target = getDeferredTarget(this, presentToDrawable);
+    if (presentToDrawable && currentDrawable)
+        target.output = currentDrawable.texture;
+    if (!targetReady(target))
+        return;
+
+    {
+        MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        pass.colorAttachments[0].texture = target.gb0;
+        pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
+        pass.colorAttachments[1].texture = target.gb1;
+        pass.colorAttachments[1].loadAction = MTLLoadActionClear;
+        pass.colorAttachments[1].storeAction = MTLStoreActionStore;
+        pass.colorAttachments[1].clearColor = MTLClearColorMake(0, 0, 0, 0);
+        pass.colorAttachments[2].texture = target.gb2;
+        pass.colorAttachments[2].loadAction = MTLLoadActionClear;
+        pass.colorAttachments[2].storeAction = MTLStoreActionStore;
+        pass.colorAttachments[2].clearColor = MTLClearColorMake(0, 0, 0, 0);
+        pass.depthAttachment.texture = target.depth;
+        pass.depthAttachment.loadAction = MTLLoadActionClear;
+        pass.depthAttachment.storeAction = MTLStoreActionStore;
+        pass.depthAttachment.clearDepth = 1.0;
+
+        id<MTLRenderCommandEncoder> enc = [commandBuffer renderCommandEncoderWithDescriptor:pass];
+        if (enc) {
+            enc.label = @"GBuffer Encoder";
+            MTLViewport vp = {0, 0, (double)target.width, (double)target.height, 0, 1};
+            [enc setViewport:vp];
+            [enc setFrontFacingWinding:MTLWindingCounterClockwise];
+            encodeCommands(this, enc, deferredOpaqueCmds, gbufferPipeline, false);
+            [enc endEncoding];
+        }
+    }
+
+    {
+        MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        pass.colorAttachments[0].texture = target.hdr;
+        pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
+
+        id<MTLRenderCommandEncoder> enc = [commandBuffer renderCommandEncoderWithDescriptor:pass];
+        if (enc) {
+            enc.label = @"Deferred Lighting Encoder";
+            [enc setRenderPipelineState:deferredLightingPipeline];
+            MTLViewport vp = {0, 0, (double)target.width, (double)target.height, 0, 1};
+            [enc setViewport:vp];
+
+            MetalDeferredLightingUniforms ubo{};
+            ubo.invViewProj = glm::inverse(projectionMatrix * viewMatrix);
+            ubo.view = viewMatrix;
+            for (int i = 0; i < NUM_CASCADES; ++i)
+                ubo.lightSpaceMatrices[i] = lightSpaceMatrices[i];
+            ubo.cascadeSplits = glm::vec4(cascadeSplitDistances[0], cascadeSplitDistances[1],
+                                          cascadeSplitDistances[2], cascadeSplitDistances[3]);
+            ubo.cascadeSplit4 = cascadeSplitDistances[4];
+            ubo.cascadeCount = shadowMapArray ? std::clamp(activeCascadeCount, 1, NUM_CASCADES) : 0;
+            ubo.shadowMapTexelSize = glm::vec2(1.0f / static_cast<float>(shadowMapSize));
+            const glm::mat4 invView = glm::inverse(viewMatrix);
+            ubo.cameraPos = glm::vec3(invView[3]);
+            ubo.lightDir = lightDirection;
+            ubo.lightAmbient = lightAmbient;
+            ubo.lightDiffuse = lightDiffuse;
+            ubo.numPointLights = std::clamp(numPointLightsUploaded, 0, MAX_LIGHTS_DEFERRED);
+            ubo.numSpotLights = std::clamp(numSpotLightsUploaded, 0, MAX_LIGHTS_DEFERRED);
+
+            [enc setFragmentBytes:&ubo length:sizeof(ubo) atIndex:0];
+            if (pointLightBuffers[currentFrame])
+                [enc setFragmentBuffer:pointLightBuffers[currentFrame] offset:0 atIndex:1];
+            if (spotLightBuffers[currentFrame])
+                [enc setFragmentBuffer:spotLightBuffers[currentFrame] offset:0 atIndex:2];
+            [enc setFragmentTexture:target.gb0 atIndex:0];
+            [enc setFragmentTexture:target.gb1 atIndex:1];
+            [enc setFragmentTexture:target.gb2 atIndex:2];
+            [enc setFragmentTexture:target.depth atIndex:3];
+            if (shadowMapArray)
+                [enc setFragmentTexture:shadowMapArray atIndex:4];
+            [enc setFragmentSamplerState:defaultSampler atIndex:0];
+            id<MTLSamplerState> depthSampler = ssaoDepthSampler ? ssaoDepthSampler : defaultSampler;
+            [enc setFragmentSamplerState:depthSampler atIndex:1];
+            if (shadowSampler)
+                [enc setFragmentSamplerState:shadowSampler atIndex:2];
+            [enc setVertexBuffer:fxaaVertexBuffer offset:0 atIndex:0];
+            [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+            [enc endEncoding];
+        }
+    }
+
+    if (skyboxRequested && skyboxHDRPipeline && skyboxVertexBuffer) {
+        MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        pass.colorAttachments[0].texture = target.hdr;
+        pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+        pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        pass.depthAttachment.texture = target.depth;
+        pass.depthAttachment.loadAction = MTLLoadActionLoad;
+        pass.depthAttachment.storeAction = MTLStoreActionStore;
+
+        id<MTLRenderCommandEncoder> enc = [commandBuffer renderCommandEncoderWithDescriptor:pass];
+        if (enc) {
+            enc.label = @"Deferred Skybox Encoder";
+            [enc setRenderPipelineState:skyboxHDRPipeline];
+            [enc setDepthStencilState:depthLessEqualNoWrite];
+            [enc setCullMode:MTLCullModeNone];
+            MTLViewport vp = {0, 0, (double)target.width, (double)target.height, 0, 1};
+            [enc setViewport:vp];
+
+            MetalSkyboxUBO skyUBO;
+            skyUBO.view = viewMatrix;
+            skyUBO.projection = projectionMatrix;
+            skyUBO.sunDirection = -lightDirection;
+            skyUBO.time = 0.0f;
+            [enc setVertexBytes:&skyUBO length:sizeof(skyUBO) atIndex:1];
+            [enc setFragmentBytes:&skyUBO length:sizeof(skyUBO) atIndex:0];
+            [enc setVertexBuffer:skyboxVertexBuffer offset:0 atIndex:0];
+            [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:36];
+            [enc endEncoding];
+        }
+    }
+
+    if (!deferredTransparentCmds.empty()) {
+        MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        pass.colorAttachments[0].texture = target.hdr;
+        pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+        pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        pass.depthAttachment.texture = target.depth;
+        pass.depthAttachment.loadAction = MTLLoadActionLoad;
+        pass.depthAttachment.storeAction = MTLStoreActionStore;
+
+        id<MTLRenderCommandEncoder> enc = [commandBuffer renderCommandEncoderWithDescriptor:pass];
+        if (enc) {
+            enc.label = @"Deferred Transparent Forward";
+            MTLViewport vp = {0, 0, (double)target.width, (double)target.height, 0, 1};
+            [enc setViewport:vp];
+            [enc setFrontFacingWinding:MTLWindingCounterClockwise];
+            encodeCommands(this, enc, deferredTransparentCmds, nil, true);
+            [enc endEncoding];
+        }
+    }
+
+    encodeDebugLinesToHDR(this, target.hdr, target.depth, target.width, target.height);
+
+    id<MTLTexture> ssaoTexture = nil;
+    if (ssaoEnabled && target.depth)
+        ssaoTexture = runSSAOPasses(target.depth, target.width, target.height);
+
+    {
+        MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        pass.colorAttachments[0].texture = target.output;
+        pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+        pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+
+        if (renderImGui)
+            ImGui_ImplMetal_NewFrame(pass);
+
+        id<MTLRenderCommandEncoder> enc = [commandBuffer renderCommandEncoderWithDescriptor:pass];
+        if (enc) {
+            enc.label = @"Deferred Resolve Encoder";
+            [enc setRenderPipelineState:fxaaPipeline];
+            MTLViewport vp = {0, 0, (double)target.width, (double)target.height, 0, 1};
+            [enc setViewport:vp];
+            [enc setFragmentTexture:target.hdr atIndex:0];
+            id<MTLTexture> aoTexture = ssaoTexture ? ssaoTexture : ssaoFallbackTexture;
+            if (aoTexture)
+                [enc setFragmentTexture:aoTexture atIndex:1];
+            [enc setFragmentSamplerState:defaultSampler atIndex:0];
+            MetalFXAAUniforms fxaaUniforms{};
+            fxaaUniforms.inverseScreenSize = glm::vec2(1.0f / target.width, 1.0f / target.height);
+            fxaaUniforms.exposure = 1.0f;
+            fxaaUniforms.ssaoEnabled = ssaoTexture ? 1 : 0;
+            fxaaUniforms.fxaaEnabled = fxaaEnabled ? 1 : 0;
+            [enc setFragmentBytes:&fxaaUniforms length:sizeof(fxaaUniforms) atIndex:0];
+            [enc setVertexBuffer:fxaaVertexBuffer offset:0 atIndex:0];
+            [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+
+            if (renderImGui) {
+                ImDrawData* drawData = ImGui::GetDrawData();
+                if (drawData && drawData->TotalVtxCount > 0)
+                    ImGui_ImplMetal_RenderDrawData(drawData, commandBuffer, enc);
+            }
+            [enc endEncoding];
+        }
+    }
+
+    deferredOpaqueCmds.clear();
+    deferredTransparentCmds.clear();
+    deferredDebugLineVertices.clear();
+    skyboxRequested = false;
+
+    if (presentToDrawable)
+        commitDeferredFrame(this, true);
 }
 
 // ============================================================================

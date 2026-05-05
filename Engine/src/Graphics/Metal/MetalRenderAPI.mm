@@ -15,6 +15,7 @@
 bool MetalRenderAPIImpl::loadShaderLibrary()
 {
     NSError* error = nil;
+    id<MTLLibrary> fallbackLibrary = nil;
 
     // Try loading precompiled metallib
     NSString* libPath = [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/shaders.metallib").c_str()];
@@ -28,12 +29,17 @@ bool MetalRenderAPIImpl::loadShaderLibrary()
                 && [shaderLibrary newFunctionWithName:@"ssao_blur_fragment"] != nil;
             const bool hasStructuredLightBuffers =
                 [shaderLibrary newFunctionWithName:@"metal_structured_lights_v1"] != nil;
-            if (hasSSAO && hasStructuredLightBuffers) {
+            const bool hasDeferred = [shaderLibrary newFunctionWithName:@"gbuffer_vertex"] != nil
+                && [shaderLibrary newFunctionWithName:@"gbuffer_fragment"] != nil
+                && [shaderLibrary newFunctionWithName:@"deferred_lighting_vertex"] != nil
+                && [shaderLibrary newFunctionWithName:@"deferred_lighting_fragment"] != nil;
+            if (hasSSAO && hasStructuredLightBuffers && hasDeferred) {
                 LOG_ENGINE_INFO("[Metal] Loaded precompiled shader library");
                 return true;
             }
 
             LOG_ENGINE_WARN("[Metal] Precompiled shader library is stale or incomplete; compiling from source");
+            fallbackLibrary = shaderLibrary;
             shaderLibrary = nil;
         }
         else {
@@ -50,6 +56,8 @@ bool MetalRenderAPIImpl::loadShaderLibrary()
         [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/sky.metal").c_str()],
         [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/fxaa.metal").c_str()],
         [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/ssao.metal").c_str()],
+        [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/gbuffer.metal").c_str()],
+        [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/deferred_lighting.metal").c_str()],
         [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/skinned.metal").c_str()],
         [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/skinned_shadow.metal").c_str()],
         [NSString stringWithUTF8String:EnginePaths::resolveEngineAsset("../assets/shaders/compiled/metal/shadow_alphatest.metal").c_str()]];
@@ -78,6 +86,12 @@ bool MetalRenderAPIImpl::loadShaderLibrary()
     MTLCompileOptions* opts = [[MTLCompileOptions alloc] init];
     shaderLibrary = [device newLibraryWithSource:allSource options:opts error:&error];
     if (!shaderLibrary) {
+        if (fallbackLibrary) {
+            LOG_ENGINE_WARN("[Metal] Shader source compilation failed ({}); using stale metallib with unavailable features disabled",
+                            [[error localizedDescription] UTF8String]);
+            shaderLibrary = fallbackLibrary;
+            return true;
+        }
         LOG_ENGINE_FATAL("[Metal] Shader compilation failed: {}", [[error localizedDescription] UTF8String]);
         return false;
     }
@@ -102,6 +116,10 @@ bool MetalRenderAPIImpl::createPipelines()
     vertexDesc.attributes[2].format = MTLVertexFormatFloat2;
     vertexDesc.attributes[2].offset = offsetof(vertex, u);
     vertexDesc.attributes[2].bufferIndex = 0;
+    // Tangent: float4 at offset 32 (used by GBuffer; ignored by basic shaders)
+    vertexDesc.attributes[3].format = MTLVertexFormatFloat4;
+    vertexDesc.attributes[3].offset = offsetof(vertex, tx);
+    vertexDesc.attributes[3].bufferIndex = 0;
     // Layout
     vertexDesc.layouts[0].stride = sizeof(vertex);
     vertexDesc.layouts[0].stepFunction = MTLVertexStepFunctionPerVertex;
@@ -296,6 +314,54 @@ bool MetalRenderAPIImpl::createPipelines()
         }
     }
 
+    auto makeForwardPipeline = [&](NSString* label,
+                                   id<MTLFunction> fragmentFn,
+                                   BlendMode blend,
+                                   MTLPixelFormat colorFormat) -> id<MTLRenderPipelineState>
+    {
+        MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
+        desc.rasterSampleCount = 1;
+        desc.vertexFunction = basicVertexFn;
+        desc.fragmentFunction = fragmentFn;
+        desc.vertexDescriptor = vertexDesc;
+        desc.colorAttachments[0].pixelFormat = colorFormat;
+        desc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+        desc.label = label;
+
+        if (blend == BlendMode::Alpha) {
+            desc.colorAttachments[0].blendingEnabled = YES;
+            desc.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorSourceAlpha;
+            desc.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+            desc.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorOne;
+            desc.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+        } else if (blend == BlendMode::Additive) {
+            desc.colorAttachments[0].blendingEnabled = YES;
+            desc.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorSourceAlpha;
+            desc.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOne;
+            desc.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorOne;
+            desc.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOne;
+        } else {
+            desc.colorAttachments[0].blendingEnabled = NO;
+        }
+
+        id<MTLRenderPipelineState> pipeline = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+        if (!pipeline) {
+            printf("[Metal] Failed to create %s: %s\n", [label UTF8String], [[error localizedDescription] UTF8String]);
+        }
+        return pipeline;
+    };
+
+    // --- HDR forward pipeline variants (deferred transparent/debug pass) ---
+    {
+        basicHDRPipeline = makeForwardPipeline(@"HDR Lit Pipeline (No Blend)", litFragmentFn, BlendMode::None, MTLPixelFormatRGBA16Float);
+        basicHDRPipelineAlpha = makeForwardPipeline(@"HDR Lit Pipeline (Alpha)", litFragmentFn, BlendMode::Alpha, MTLPixelFormatRGBA16Float);
+        basicHDRPipelineAdditive = makeForwardPipeline(@"HDR Lit Pipeline (Additive)", litFragmentFn, BlendMode::Additive, MTLPixelFormatRGBA16Float);
+        unlitHDRPipeline = makeForwardPipeline(@"HDR Unlit Pipeline (No Blend)", unlitFragmentFn, BlendMode::None, MTLPixelFormatRGBA16Float);
+        unlitHDRPipelineAlpha = makeForwardPipeline(@"HDR Unlit Pipeline (Alpha)", unlitFragmentFn, BlendMode::Alpha, MTLPixelFormatRGBA16Float);
+        unlitHDRPipelineAdditive = makeForwardPipeline(@"HDR Unlit Pipeline (Additive)", unlitFragmentFn, BlendMode::Additive, MTLPixelFormatRGBA16Float);
+        debugLineHDRPipeline = makeForwardPipeline(@"HDR Debug Line Pipeline", unlitFragmentFn, BlendMode::None, MTLPixelFormatRGBA16Float);
+    }
+
     // --- Depth prepass pipeline (no fragment function, no color writes) ---
     {
         MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
@@ -388,6 +454,15 @@ bool MetalRenderAPIImpl::createPipelines()
             } else {
                 printf("[Metal] Pipeline created: Skybox\n");
             }
+
+            desc.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
+            desc.label = @"HDR Skybox Pipeline";
+            skyboxHDRPipeline = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+            if (!skyboxHDRPipeline) {
+                printf("[Metal] Failed to create HDR skybox pipeline: %s\n", [[error localizedDescription] UTF8String]);
+            } else {
+                printf("[Metal] Pipeline created: HDR Skybox\n");
+            }
         }
     }
 
@@ -419,6 +494,64 @@ bool MetalRenderAPIImpl::createPipelines()
                 printf("[Metal] Pipeline created: FXAA\n");
             }
             fxaaInitialized = (fxaaPipeline != nil);
+        }
+    }
+
+    // --- Deferred GBuffer pipeline ---
+    {
+        MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
+        desc.rasterSampleCount = 1;
+        desc.vertexFunction = [shaderLibrary newFunctionWithName:@"gbuffer_vertex"];
+        desc.fragmentFunction = [shaderLibrary newFunctionWithName:@"gbuffer_fragment"];
+        desc.vertexDescriptor = vertexDesc;
+        desc.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+        desc.colorAttachments[1].pixelFormat = MTLPixelFormatRGBA16Float;
+        desc.colorAttachments[2].pixelFormat = MTLPixelFormatRGBA16Float;
+        desc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+        desc.label = @"GBuffer Pipeline";
+
+        if (desc.vertexFunction && desc.fragmentFunction) {
+            gbufferPipeline = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+            if (!gbufferPipeline) {
+                printf("[Metal] Failed to create GBuffer pipeline: %s\n", [[error localizedDescription] UTF8String]);
+            } else {
+                printf("[Metal] Pipeline created: GBuffer\n");
+            }
+        } else {
+            printf("[Metal] Warning: GBuffer shader functions not found, deferred disabled\n");
+        }
+    }
+
+    // --- Deferred lighting pipeline ---
+    {
+        MTLVertexDescriptor* deferredDesc = [[MTLVertexDescriptor alloc] init];
+        deferredDesc.attributes[0].format = MTLVertexFormatFloat2;
+        deferredDesc.attributes[0].offset = offsetof(FXAAVertex, x);
+        deferredDesc.attributes[0].bufferIndex = 0;
+        deferredDesc.attributes[1].format = MTLVertexFormatFloat2;
+        deferredDesc.attributes[1].offset = offsetof(FXAAVertex, u);
+        deferredDesc.attributes[1].bufferIndex = 0;
+        deferredDesc.layouts[0].stride = sizeof(FXAAVertex);
+        deferredDesc.layouts[0].stepFunction = MTLVertexStepFunctionPerVertex;
+
+        MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
+        desc.rasterSampleCount = 1;
+        desc.vertexFunction = [shaderLibrary newFunctionWithName:@"deferred_lighting_vertex"];
+        desc.fragmentFunction = [shaderLibrary newFunctionWithName:@"deferred_lighting_fragment"];
+        desc.vertexDescriptor = deferredDesc;
+        desc.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
+        desc.depthAttachmentPixelFormat = MTLPixelFormatInvalid;
+        desc.label = @"Deferred Lighting Pipeline";
+
+        if (desc.vertexFunction && desc.fragmentFunction) {
+            deferredLightingPipeline = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+            if (!deferredLightingPipeline) {
+                printf("[Metal] Failed to create deferred lighting pipeline: %s\n", [[error localizedDescription] UTF8String]);
+            } else {
+                printf("[Metal] Pipeline created: Deferred Lighting\n");
+            }
+        } else {
+            printf("[Metal] Warning: deferred lighting shader functions not found, deferred disabled\n");
         }
     }
 
@@ -724,6 +857,16 @@ void MetalRenderAPI::shutdown()
     impl->unlitPipelineAlpha = nil;
     impl->unlitPipelineAdditive = nil;
     impl->debugLinePipeline = nil;
+    impl->basicHDRPipeline = nil;
+    impl->basicHDRPipelineAlpha = nil;
+    impl->basicHDRPipelineAdditive = nil;
+    impl->unlitHDRPipeline = nil;
+    impl->unlitHDRPipelineAlpha = nil;
+    impl->unlitHDRPipelineAdditive = nil;
+    impl->debugLineHDRPipeline = nil;
+    impl->skyboxHDRPipeline = nil;
+    impl->gbufferPipeline = nil;
+    impl->deferredLightingPipeline = nil;
     impl->depthPrepassPipeline = nil;
     impl->shadowPipeline = nil;
     impl->shadowAlphaTestPipeline = nil;
@@ -743,6 +886,10 @@ void MetalRenderAPI::shutdown()
     impl->shadowMapArray = nil;
     impl->offscreenTexture = nil;
     impl->offscreenDepthTexture = nil;
+    impl->deferredHDRTexture = nil;
+    impl->gbuffer0Texture = nil;
+    impl->gbuffer1Texture = nil;
+    impl->gbuffer2Texture = nil;
     impl->ssaoRawTexture = nil;
     impl->ssaoBlurTempTexture = nil;
     impl->ssaoBlurredTexture = nil;
@@ -753,6 +900,9 @@ void MetalRenderAPI::shutdown()
     impl->ssaoInitialized = false;
     impl->viewportTexture = nil;
     impl->viewportDepthTexture = nil;
+    impl->deferredOpaqueCmds.clear();
+    impl->deferredTransparentCmds.clear();
+    impl->deferredDebugLineVertices.clear();
     impl->skyboxVertexBuffer = nil;
     impl->fxaaVertexBuffer = nil;
     impl->defaultTexture = nil;

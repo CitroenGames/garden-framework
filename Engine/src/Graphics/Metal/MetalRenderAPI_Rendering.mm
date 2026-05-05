@@ -583,20 +583,23 @@ void MetalRenderAPI::setPointAndSpotLights(const LightCBuffer& lights)
 
 bool MetalRenderAPI::isDeferredActive() const
 {
-    // Metal has the same public toggle as Vulkan/D3D12, but not the GBuffer /
-    // deferred-lighting pass yet. Keep Active false so the renderer uses the
-    // forward path while still letting UI persist the desired setting.
-    return false;
+    return m_useDeferred
+        && impl->lightingEnabled
+        && impl->gbufferPipeline
+        && impl->deferredLightingPipeline
+        && impl->fxaaPipeline
+        && impl->basicHDRPipeline
+        && impl->skyboxHDRPipeline;
 }
 
 void MetalRenderAPI::submitDeferredOpaqueCommands(const RenderCommandBuffer& cmds)
 {
-    (void)cmds;
+    impl->deferredOpaqueCmds = cmds;
 }
 
 void MetalRenderAPI::submitDeferredTransparentCommands(const RenderCommandBuffer& cmds)
 {
-    (void)cmds;
+    impl->deferredTransparentCmds = cmds;
 }
 
 void MetalRenderAPI::uploadLightBuffers(const GPUPointLight* pts, int ptCount,
@@ -631,6 +634,12 @@ void MetalRenderAPI::uploadLightBuffers(const GPUPointLight* pts, int ptCount,
 void MetalRenderAPI::renderSkybox()
 {
     if (!impl->frameStarted || !impl->skyboxPipeline || impl->inShadowPass) return;
+
+    if (isDeferredActive()) {
+        impl->skyboxRequested = true;
+        return;
+    }
+
     if (!impl->mainPassActive || !impl->encoder) return;
 
     [impl->encoder setRenderPipelineState:impl->skyboxPipeline];

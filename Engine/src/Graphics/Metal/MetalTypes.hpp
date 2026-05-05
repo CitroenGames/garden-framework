@@ -58,6 +58,29 @@ struct MetalFXAAUniforms {
     glm::vec2 inverseScreenSize;
     float exposure;
     int ssaoEnabled;
+    int fxaaEnabled;
+    glm::vec3 _pad = glm::vec3(0.0f);
+};
+
+struct alignas(16) MetalDeferredLightingUniforms {
+    glm::mat4 invViewProj;
+    glm::mat4 view;
+    glm::mat4 lightSpaceMatrices[4];
+    glm::vec4 cascadeSplits;
+    float cascadeSplit4;
+    int cascadeCount;
+    glm::vec2 shadowMapTexelSize;
+    glm::vec3 cameraPos;
+    float _pad0;
+    glm::vec3 lightDir;
+    float _pad1;
+    glm::vec3 lightAmbient;
+    float _pad2;
+    glm::vec3 lightDiffuse;
+    float _pad3;
+    int numPointLights;
+    int numSpotLights;
+    glm::vec2 _pad4;
 };
 
 // Fragment-stage light metadata. Point/spot payloads live in separate

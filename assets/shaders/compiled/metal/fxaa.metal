@@ -5,6 +5,8 @@ struct FXAAUniforms {
     float2 inverseScreenSize;
     float exposure;
     int ssaoEnabled;
+    int fxaaEnabled;
+    float3 _pad;
 };
 
 struct FXAAVertexIn {
@@ -73,11 +75,13 @@ fragment float4 fxaa_fragment(FXAAVertexOut in [[stage_in]],
 
     float lumaB = dot(rgbB, luma);
 
-    float3 result;
-    if (lumaB < lumaMin || lumaB > lumaMax) {
-        result = rgbA;
-    } else {
-        result = rgbB;
+    float3 result = rgbM;
+    if (uniforms.fxaaEnabled != 0) {
+        if (lumaB < lumaMin || lumaB > lumaMax) {
+            result = rgbA;
+        } else {
+            result = rgbB;
+        }
     }
 
     // Apply SSAO (multiplied before output, only when enabled)
