@@ -39,12 +39,10 @@ struct DeducePropertyType<M, std::enable_if_t<std::is_enum_v<M>>>
 // ============================================================================
 
 template<typename T, typename M>
-uint32_t memberOffset(M T::* member)
+size_t memberOffset(M T::* member)
 {
-    return static_cast<uint32_t>(
-        reinterpret_cast<std::uintptr_t>(
-            &(static_cast<T*>(nullptr)->*member)
-        )
+    return static_cast<size_t>(
+        reinterpret_cast<std::uintptr_t>(&(static_cast<T*>(nullptr)->*member))
     );
 }
 

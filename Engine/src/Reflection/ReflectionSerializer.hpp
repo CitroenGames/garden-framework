@@ -1,5 +1,6 @@
 #pragma once
 
+#include "EngineExport.h"
 #include "ReflectionRegistry.hpp"
 #include <entt/entt.hpp>
 #include "json.hpp"
@@ -7,7 +8,7 @@
 // Serialize/deserialize entities using reflected component metadata.
 // Produces a component-based JSON format that can handle any registered component,
 // including game DLL-defined ones.
-class ReflectionSerializer
+class ENGINE_API ReflectionSerializer
 {
 public:
     // Serialize a single entity's reflected components to JSON

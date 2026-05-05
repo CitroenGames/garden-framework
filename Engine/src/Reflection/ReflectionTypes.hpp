@@ -78,7 +78,7 @@ struct PropertyDescriptor
 {
     const char* name;           // Field name (e.g. "speed")
     EPropertyType type;         // Data type
-    uint32_t offset;            // offsetof() from component start
+    size_t offset;              // offsetof() from component start
     uint32_t size;              // sizeof the field
     PropertyMeta meta;          // Editor metadata
 };

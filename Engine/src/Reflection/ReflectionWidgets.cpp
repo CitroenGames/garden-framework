@@ -1,58 +1,23 @@
 #include "ReflectionWidgets.hpp"
+#include "ReflectionPropertyOps.hpp"
 #include <imgui.h>
 #include <glm/glm.hpp>
 #include <string>
 #include <cstring>
 
-static EPropertyWidget resolveWidget(const PropertyDescriptor& prop)
-{
-    if (prop.meta.widget != EPropertyWidget::Auto)
-        return prop.meta.widget;
-
-    // If specifier is VisibleAnywhere, force read-only
-    if (prop.meta.specifier == EPropertySpecifier::VisibleAnywhere)
-        return EPropertyWidget::ReadOnly;
-
-    // Infer from type
-    switch (prop.type)
-    {
-    case EPropertyType::Float:  return EPropertyWidget::DragFloat;
-    case EPropertyType::Int:    return EPropertyWidget::DragInt;
-    case EPropertyType::Bool:   return EPropertyWidget::Checkbox;
-    case EPropertyType::String: return EPropertyWidget::InputText;
-    case EPropertyType::Vec2:   return EPropertyWidget::DragFloat2;
-    case EPropertyType::Vec3:   return EPropertyWidget::DragFloat3;
-    case EPropertyType::Vec4:   return EPropertyWidget::DragFloat4;
-    case EPropertyType::Enum:   return EPropertyWidget::Enum;
-    default:                    return EPropertyWidget::ReadOnly;
-    }
-}
-
 bool drawReflectedProperty(const PropertyDescriptor& prop, void* component,
                            bool* out_edit_started)
 {
-    void* field_ptr = static_cast<char*>(component) + prop.offset;
+    void* field_ptr = ReflectionPropertyOps::propertyData(prop, component);
     const char* label = prop.meta.display_name ? prop.meta.display_name : prop.name;
-    EPropertyWidget widget = resolveWidget(prop);
+    EPropertyWidget widget = ReflectionPropertyOps::resolveWidget(prop);
 
     // Read-only wrapper
     bool read_only = (widget == EPropertyWidget::ReadOnly);
     if (read_only)
     {
         ImGui::BeginDisabled();
-        // Resolve the actual widget to draw
-        widget = EPropertyWidget::Auto;
-        switch (prop.type)
-        {
-        case EPropertyType::Float:  widget = EPropertyWidget::DragFloat;  break;
-        case EPropertyType::Int:    widget = EPropertyWidget::DragInt;    break;
-        case EPropertyType::Bool:   widget = EPropertyWidget::Checkbox;   break;
-        case EPropertyType::String: widget = EPropertyWidget::InputText;  break;
-        case EPropertyType::Vec2:   widget = EPropertyWidget::DragFloat2; break;
-        case EPropertyType::Vec3:   widget = EPropertyWidget::DragFloat3; break;
-        case EPropertyType::Vec4:   widget = EPropertyWidget::DragFloat4; break;
-        default: break;
-        }
+        widget = ReflectionPropertyOps::defaultWidgetForType(prop.type);
     }
 
     bool changed = false;

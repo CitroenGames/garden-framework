@@ -5,6 +5,7 @@
 #include "Graphics/LODSelector.hpp"
 #include "ImGui/ImGuiManager.hpp"
 #include "Reflection/ReflectionRegistry.hpp"
+#include "Reflection/ReflectionPropertyOps.hpp"
 #include "Reflection/ReflectionTypes.hpp"
 #include "Reflection/ReflectionWidgets.hpp"
 #include "EditorIcons.hpp"
@@ -401,16 +402,7 @@ void InspectorPanel::copyComponentToClipboard(const ComponentDescriptor& desc, v
     // Construct a default in the buffer so any std::string members are valid
     desc.construct_default(m_clipboard_data.data());
 
-    // Copy each property field-by-field
-    for (const auto& prop : desc.properties)
-    {
-        void* src_field = static_cast<char*>(src) + prop.offset;
-        void* dst_field = m_clipboard_data.data() + prop.offset;
-        if (prop.type == EPropertyType::String)
-            *static_cast<std::string*>(dst_field) = *static_cast<std::string*>(src_field);
-        else
-            std::memcpy(dst_field, src_field, prop.size);
-    }
+    ReflectionPropertyOps::copyComponentProperties(desc, src, m_clipboard_data.data());
     m_has_clipboard = true;
 }
 
@@ -418,15 +410,7 @@ void InspectorPanel::pasteComponentFromClipboard(const ComponentDescriptor& desc
 {
     if (!m_has_clipboard || m_clipboard_type_id != desc.type_id) return;
 
-    for (const auto& prop : desc.properties)
-    {
-        void* src_field = m_clipboard_data.data() + prop.offset;
-        void* dst_field = static_cast<char*>(dest) + prop.offset;
-        if (prop.type == EPropertyType::String)
-            *static_cast<std::string*>(dst_field) = *static_cast<std::string*>(src_field);
-        else
-            std::memcpy(dst_field, src_field, prop.size);
-    }
+    ReflectionPropertyOps::copyComponentProperties(desc, m_clipboard_data.data(), dest);
 }
 
 void InspectorPanel::resetComponentToDefaults(const ComponentDescriptor& desc, void* dest)
@@ -435,15 +419,7 @@ void InspectorPanel::resetComponentToDefaults(const ComponentDescriptor& desc, v
     std::vector<uint8_t> temp(desc.size);
     desc.construct_default(temp.data());
 
-    for (const auto& prop : desc.properties)
-    {
-        void* src_field = temp.data() + prop.offset;
-        void* dst_field = static_cast<char*>(dest) + prop.offset;
-        if (prop.type == EPropertyType::String)
-            *static_cast<std::string*>(dst_field) = *static_cast<std::string*>(src_field);
-        else
-            std::memcpy(dst_field, src_field, prop.size);
-    }
+    ReflectionPropertyOps::copyComponentProperties(desc, temp.data(), dest);
 
     desc.destruct(temp.data());
 }
