@@ -1,23 +1,22 @@
 #!/bin/bash
+set -e
+
 cd "$(dirname "$0")"
 
-# Pick the platform-appropriate sighmake binary once.
-if [ "$(uname)" = "Darwin" ]; then
+# Pick the platform-appropriate sighmake binary once. Prefer repo-local
+# binaries, but allow a PATH install for checkouts that do not carry them.
+if [ -n "${SIGHMAKE:-}" ]; then
+    :
+elif [ "$(uname)" = "Darwin" ] && [ -x ./sighmake_macos ]; then
     SIGHMAKE=./sighmake_macos
-else
+elif [ -x ./sighmake ]; then
     SIGHMAKE=./sighmake
+elif command -v sighmake >/dev/null 2>&1; then
+    SIGHMAKE="$(command -v sighmake)"
+else
+    echo "sighmake not found. Install sighmake or place sighmake_macos/sighmake in the repo root." >&2
+    exit 1
 fi
 
 # Main engine + tooling solution.
 "$SIGHMAKE" project.buildscript -g makefile
-
-# Bundled editor plugins. Each is a standalone sighmake solution that links
-# against EngineSDK, so they're generated separately. Engine must be built
-# before plugins because they pull in ../bin/EngineCore.lib etc.
-mkdir -p plugins
-for PLUGIN in EditorPlugins/QuakeImporter/QuakeImporter.buildscript; do
-    if [ -f "$PLUGIN" ]; then
-        echo "Generating bundled plugin: $PLUGIN"
-        "$SIGHMAKE" "$PLUGIN" -D ENGINE_PATH=. -g makefile
-    fi
-done

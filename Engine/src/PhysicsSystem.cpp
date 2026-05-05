@@ -265,6 +265,11 @@ JPH::BodyID PhysicsSystem::createStaticBody(const glm::vec3& position, const glm
     return body_id;
 }
 
+JPH::BodyID PhysicsSystem::createStaticBody(const glm::vec3& position, const glm::vec3& rotation, const JPH::ShapeRefC& shape, entt::entity entity)
+{
+    return createStaticBody(position, rotation, shape, entity, PhysicsBodyDesc{});
+}
+
 JPH::ShapeRefC PhysicsSystem::createShapeFromCollider(const ColliderComponent& collider, const glm::vec3& scale)
 {
     JPH::ShapeRefC shape;
@@ -359,6 +364,11 @@ JPH::BodyID PhysicsSystem::createDynamicBody(const glm::vec3& position, const gl
     return body_id;
 }
 
+JPH::BodyID PhysicsSystem::createDynamicBody(const glm::vec3& position, const glm::vec3& rotation, const JPH::ShapeRefC& shape, entt::entity entity)
+{
+    return createDynamicBody(position, rotation, shape, entity, PhysicsBodyDesc{});
+}
+
 JPH::BodyID PhysicsSystem::createDynamicBody(const glm::vec3& position, const glm::vec3& rotation, const JPH::ShapeRefC& shape, float mass, entt::entity entity,
     float friction, float restitution, bool lock_rotation)
 {
@@ -396,6 +406,11 @@ JPH::BodyID PhysicsSystem::createKinematicBody(const glm::vec3& position, const 
 
     LOG_ENGINE_INFO("Created Jolt kinematic body at ({}, {}, {})", position.x, position.y, position.z);
     return body_id;
+}
+
+JPH::BodyID PhysicsSystem::createKinematicBody(const glm::vec3& position, const glm::vec3& rotation, const JPH::ShapeRefC& shape, entt::entity entity)
+{
+    return createKinematicBody(position, rotation, shape, entity, PhysicsBodyDesc{});
 }
 
 JPH::BodyID PhysicsSystem::createStaticMeshBody(const glm::vec3& position, const glm::vec3& rotation, const glm::vec3& scale, const mesh& colliderMesh, entt::entity entity,
@@ -454,6 +469,11 @@ JPH::BodyID PhysicsSystem::createStaticMeshBody(const glm::vec3& position, const
     }
 
     return createStaticBody(position, rotation, final_shape, entity, desc);
+}
+
+JPH::BodyID PhysicsSystem::createStaticMeshBody(const glm::vec3& position, const glm::vec3& rotation, const glm::vec3& scale, const mesh& colliderMesh, entt::entity entity)
+{
+    return createStaticMeshBody(position, rotation, scale, colliderMesh, entity, PhysicsBodyDesc{});
 }
 
 JPH::BodyID PhysicsSystem::createPlayerBody(entt::registry& registry, entt::entity entity)
