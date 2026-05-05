@@ -3,6 +3,7 @@
 #include "EngineGraphicsExport.h"
 #include "Graphics/RenderAPI.hpp"
 #include <SDL3/SDL.h>
+#include <vector>
 
 // Forward declarations
 namespace Rml { class Context; class RenderInterface; }
@@ -25,14 +26,27 @@ public:
     bool processEvent(SDL_Event& event);
 
     // State queries
-    bool isInitialized() const { return m_initialized; }
+    bool isInitialized() const;
 
     // Context access
-    Rml::Context* getContext() const { return m_context; }
+    Rml::Context* getContext() const;
 
     // Document management
     void* loadDocument(const char* path);
+    void closeDocument(void* document);
     void toggleDebugger();
+
+    // C-safe data model API for hot-loaded game modules. The model values are
+    // owned by EngineGraphics so RmlUi never reads STL objects from game DLLs.
+    void* createDataModel(const char* name);
+    void removeDataModel(void* model);
+    bool dataModelBindInt(void* model, const char* name, int value);
+    bool dataModelBindBool(void* model, const char* name, bool value);
+    bool dataModelBindString(void* model, const char* name, const char* value);
+    bool dataModelSetInt(void* model, const char* name, int value);
+    bool dataModelSetBool(void* model, const char* name, bool value);
+    bool dataModelSetString(void* model, const char* name, const char* value);
+    void dataModelDirtyAll(void* model);
 
 private:
     RmlUiManager() = default;
@@ -53,4 +67,6 @@ private:
     Rml::RenderInterface* m_renderInterface = nullptr;
     SystemInterface_SDL* m_systemInterface = nullptr;
     bool m_debuggerVisible = false;
+    std::vector<void*> m_dataModels;
+    std::vector<void*> m_documents;
 };

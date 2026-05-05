@@ -15,6 +15,29 @@ namespace EE
 	std::shared_ptr<spdlog::logger> CLog::S_ClientLogger;
 	std::shared_ptr<spdlog::logger> CLog::S_LuaLogger;
 
+	namespace
+	{
+		bool shouldLog(const std::shared_ptr<spdlog::logger>& logger, spdlog::level::level_enum level)
+		{
+			return logger && logger->should_log(level);
+		}
+
+		void logRaw(const std::shared_ptr<spdlog::logger>& logger,
+			spdlog::level::level_enum level, const char* message, size_t length)
+		{
+			if (!logger)
+				return;
+
+			if (!message)
+			{
+				message = "";
+				length = 0;
+			}
+
+			logger->log(level, spdlog::string_view_t(message, length));
+		}
+	}
+
 	void CLog::Init()
 	{
 		spdlog::set_pattern( "[%H:%M:%S %z] [%n] [%^---%L---%$] [thread %t] %v" );
@@ -50,9 +73,39 @@ namespace EE
 			}
 		);
 		S_EngineLogger->sinks().push_back(console_callback);
-		S_ClientLogger->sinks().push_back(console_callback);
+        S_ClientLogger->sinks().push_back(console_callback);
 		S_LuaLogger->sinks().push_back(console_callback);
     }
+
+	bool CLog::ShouldLogEngine(spdlog::level::level_enum level)
+	{
+		return shouldLog(S_EngineLogger, level);
+	}
+
+	bool CLog::ShouldLogClient(spdlog::level::level_enum level)
+	{
+		return shouldLog(S_ClientLogger, level);
+	}
+
+	bool CLog::ShouldLogLua(spdlog::level::level_enum level)
+	{
+		return shouldLog(S_LuaLogger, level);
+	}
+
+	void CLog::LogEngineRaw(spdlog::level::level_enum level, const char* message, size_t length)
+	{
+		logRaw(S_EngineLogger, level, message, length);
+	}
+
+	void CLog::LogClientRaw(spdlog::level::level_enum level, const char* message, size_t length)
+	{
+		logRaw(S_ClientLogger, level, message, length);
+	}
+
+	void CLog::LogLuaRaw(spdlog::level::level_enum level, const char* message, size_t length)
+	{
+		logRaw(S_LuaLogger, level, message, length);
+	}
 
 	void CLog::Shutdown()
 	{

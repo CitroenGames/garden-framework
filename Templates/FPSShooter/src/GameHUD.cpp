@@ -1,75 +1,76 @@
 #include "GameHUD.hpp"
+#include "UI/RmlUiManager.h"
 #include "Utils/Log.hpp"
 #include <cstdio>
 
-static Rml::String FloatStr(float v, int decimals = 1)
+static void FormatFloat(char* buffer, size_t buffer_size, float v, int decimals = 1)
 {
-    char buf[32];
-    snprintf(buf, sizeof(buf), "%.*f", decimals, v);
-    return buf;
+    snprintf(buffer, buffer_size, "%.*f", decimals, v);
 }
 
-bool GameHUD::initialize(Rml::Context* context, const std::string& rmlPath)
+bool GameHUD::initialize(const char* rmlPath)
 {
-    m_context = context;
-    if (!m_context)
+    RmlUiManager& rml = RmlUiManager::get();
+    if (!rml.isInitialized())
         return false;
 
-    // Create data model
-    Rml::DataModelConstructor constructor = m_context->CreateDataModel("hud");
-    if (!constructor)
+    m_model = rml.createDataModel("hud");
+    if (!m_model)
         return false;
 
-    // Debug info bindings
-    constructor.Bind("fps", &m_fps);
-    constructor.Bind("pos_x", &m_posX);
-    constructor.Bind("pos_y", &m_posY);
-    constructor.Bind("pos_z", &m_posZ);
-    constructor.Bind("speed", &m_speed);
-    constructor.Bind("grounded", &m_grounded);
-    constructor.Bind("connected", &m_connected);
-    constructor.Bind("ping", &m_ping);
-
-    // Combat bindings
-    constructor.Bind("health", &m_health);
-    constructor.Bind("max_health", &m_maxHealth);
-    constructor.Bind("ammo_text", &m_ammoText);
-    constructor.Bind("alive", &m_alive);
-    constructor.Bind("death_timer", &m_deathTimer);
-    constructor.Bind("kills", &m_killsText);
-    constructor.Bind("deaths", &m_deathsText);
-    constructor.Bind("kill_feed", &m_killFeed);
-    constructor.Bind("reloading", &m_reloading);
-
-    m_modelHandle = constructor.GetModelHandle();
-
-    // Load document
-    LOG_ENGINE_INFO("[HUD] Loading document: {}", rmlPath);
-    m_document = m_context->LoadDocument(rmlPath);
-    if (!m_document)
+    bool bound = true;
+    bound &= rml.dataModelBindInt(m_model, "fps", 0);
+    bound &= rml.dataModelBindString(m_model, "pos_x", "0.0");
+    bound &= rml.dataModelBindString(m_model, "pos_y", "0.0");
+    bound &= rml.dataModelBindString(m_model, "pos_z", "0.0");
+    bound &= rml.dataModelBindString(m_model, "speed", "0.0");
+    bound &= rml.dataModelBindBool(m_model, "grounded", false);
+    bound &= rml.dataModelBindBool(m_model, "connected", false);
+    bound &= rml.dataModelBindString(m_model, "ping", "0");
+    bound &= rml.dataModelBindInt(m_model, "health", 100);
+    bound &= rml.dataModelBindInt(m_model, "max_health", 100);
+    bound &= rml.dataModelBindString(m_model, "ammo_text", "30 / 30");
+    bound &= rml.dataModelBindBool(m_model, "alive", true);
+    bound &= rml.dataModelBindString(m_model, "death_timer", "");
+    bound &= rml.dataModelBindString(m_model, "kills", "0");
+    bound &= rml.dataModelBindString(m_model, "deaths", "0");
+    bound &= rml.dataModelBindString(m_model, "kill_feed", "");
+    bound &= rml.dataModelBindBool(m_model, "reloading", false);
+    if (!bound)
     {
-        LOG_ENGINE_ERROR("[HUD] Failed to load document: {}", rmlPath);
+        rml.removeDataModel(m_model);
+        m_model = nullptr;
         return false;
     }
 
-    m_document->Show();
+    // Load document
+    LOG_ENGINE_INFO("[HUD] Loading document: {}", rmlPath ? rmlPath : "");
+    m_document = rml.loadDocument(rmlPath);
+    if (!m_document)
+    {
+        LOG_ENGINE_ERROR("[HUD] Failed to load document: {}", rmlPath ? rmlPath : "");
+        rml.removeDataModel(m_model);
+        m_model = nullptr;
+        return false;
+    }
+
     LOG_ENGINE_INFO("[HUD] Document loaded and shown");
     return true;
 }
 
 void GameHUD::shutdown()
 {
+    RmlUiManager& rml = RmlUiManager::get();
     if (m_document)
     {
-        m_document->Close();
+        rml.closeDocument(m_document);
         m_document = nullptr;
     }
-    if (m_context && m_modelHandle)
+    if (m_model)
     {
-        m_context->RemoveDataModel("hud");
-        m_modelHandle = {};
+        rml.removeDataModel(m_model);
+        m_model = nullptr;
     }
-    m_context = nullptr;
 }
 
 void GameHUD::update(float fps, const glm::vec3& position, float speed, bool grounded,
@@ -78,22 +79,35 @@ void GameHUD::update(float fps, const glm::vec3& position, float speed, bool gro
                      bool alive, float death_timer, int32_t kills, int32_t deaths,
                      const std::string& kill_feed, bool reloading)
 {
-    if (!m_modelHandle)
+    if (!m_model)
         return;
 
+    RmlUiManager& rml = RmlUiManager::get();
+    char pos_x[32];
+    char pos_y[32];
+    char pos_z[32];
+    char speed_text[32];
+    char ping_text[32];
+
+    FormatFloat(pos_x, sizeof(pos_x), position.x);
+    FormatFloat(pos_y, sizeof(pos_y), position.y);
+    FormatFloat(pos_z, sizeof(pos_z), position.z);
+    FormatFloat(speed_text, sizeof(speed_text), speed, 2);
+    FormatFloat(ping_text, sizeof(ping_text), ping, 0);
+
     // Debug info
-    m_fps = (int)fps;
-    m_posX = FloatStr(position.x);
-    m_posY = FloatStr(position.y);
-    m_posZ = FloatStr(position.z);
-    m_speed = FloatStr(speed, 2);
-    m_grounded = grounded;
-    m_connected = connected;
-    m_ping = FloatStr(ping, 0);
+    rml.dataModelSetInt(m_model, "fps", (int)fps);
+    rml.dataModelSetString(m_model, "pos_x", pos_x);
+    rml.dataModelSetString(m_model, "pos_y", pos_y);
+    rml.dataModelSetString(m_model, "pos_z", pos_z);
+    rml.dataModelSetString(m_model, "speed", speed_text);
+    rml.dataModelSetBool(m_model, "grounded", grounded);
+    rml.dataModelSetBool(m_model, "connected", connected);
+    rml.dataModelSetString(m_model, "ping", ping_text);
 
     // Combat info
-    m_health = health;
-    m_maxHealth = max_health;
+    rml.dataModelSetInt(m_model, "health", health);
+    rml.dataModelSetInt(m_model, "max_health", max_health);
 
     char ammo_buf[32];
     if (reloading) {
@@ -101,28 +115,27 @@ void GameHUD::update(float fps, const glm::vec3& position, float speed, bool gro
     } else {
         snprintf(ammo_buf, sizeof(ammo_buf), "%d / %d", ammo, max_ammo);
     }
-    m_ammoText = ammo_buf;
-
-    m_alive = alive;
-    m_reloading = reloading;
+    rml.dataModelSetString(m_model, "ammo_text", ammo_buf);
+    rml.dataModelSetBool(m_model, "alive", alive);
+    rml.dataModelSetBool(m_model, "reloading", reloading);
 
     if (!alive && death_timer > 0.0f) {
         char timer_buf[32];
         snprintf(timer_buf, sizeof(timer_buf), "Respawning in %.1f...", death_timer);
-        m_deathTimer = timer_buf;
+        rml.dataModelSetString(m_model, "death_timer", timer_buf);
     } else {
-        m_deathTimer = "";
+        rml.dataModelSetString(m_model, "death_timer", "");
     }
 
     char kills_buf[16];
     snprintf(kills_buf, sizeof(kills_buf), "%d", kills);
-    m_killsText = kills_buf;
+    rml.dataModelSetString(m_model, "kills", kills_buf);
 
     char deaths_buf[16];
     snprintf(deaths_buf, sizeof(deaths_buf), "%d", deaths);
-    m_deathsText = deaths_buf;
+    rml.dataModelSetString(m_model, "deaths", deaths_buf);
 
-    m_killFeed = kill_feed;
+    rml.dataModelSetString(m_model, "kill_feed", kill_feed.c_str());
 
-    m_modelHandle.DirtyAllVariables();
+    rml.dataModelDirtyAll(m_model);
 }

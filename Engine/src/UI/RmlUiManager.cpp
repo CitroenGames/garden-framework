@@ -22,6 +22,44 @@ static volatile auto s_force_rml_family = &Rml::Family<int>::Id;
 #endif
 #include "Graphics/VulkanRenderAPI.hpp"
 
+#include <algorithm>
+#include <string>
+#include <unordered_map>
+
+namespace
+{
+    struct RmlUiDataModel
+    {
+        std::string name;
+        Rml::DataModelConstructor constructor;
+        Rml::DataModelHandle handle;
+        std::unordered_map<std::string, int> ints;
+        std::unordered_map<std::string, bool> bools;
+        std::unordered_map<std::string, Rml::String> strings;
+    };
+
+    RmlUiDataModel* asDataModel(void* model)
+    {
+        return static_cast<RmlUiDataModel*>(model);
+    }
+
+    bool isValidName(const char* name)
+    {
+        return name && name[0] != '\0';
+    }
+
+    void deleteDataModel(Rml::Context* context, RmlUiDataModel* model)
+    {
+        if (!model)
+            return;
+
+        if (context && !model->name.empty())
+            context->RemoveDataModel(model->name);
+
+        delete model;
+    }
+}
+
 RmlUiManager& RmlUiManager::get()
 {
     static RmlUiManager instance;
@@ -112,6 +150,16 @@ bool RmlUiManager::initialize(SDL_Window* window, IRenderAPI* renderAPI, RenderA
     return true;
 }
 
+bool RmlUiManager::isInitialized() const
+{
+    return m_initialized;
+}
+
+Rml::Context* RmlUiManager::getContext() const
+{
+    return m_context;
+}
+
 #ifdef _WIN32
 bool RmlUiManager::initD3D12(SDL_Window* window, IRenderAPI* api)
 {
@@ -186,6 +234,17 @@ void RmlUiManager::shutdown()
 {
     if (!m_initialized)
         return;
+
+    for (void* document : m_documents)
+    {
+        if (document)
+            static_cast<Rml::ElementDocument*>(document)->Close();
+    }
+    m_documents.clear();
+
+    for (void* model : m_dataModels)
+        deleteDataModel(m_context, asDataModel(model));
+    m_dataModels.clear();
 
     Rml::Debugger::Shutdown();
 
@@ -278,10 +337,25 @@ void* RmlUiManager::loadDocument(const char* path)
     if (!m_initialized || !m_context)
         return nullptr;
 
-    Rml::ElementDocument* doc = m_context->LoadDocument(path);
+    Rml::ElementDocument* doc = m_context->LoadDocument(path ? path : "");
     if (doc)
+    {
         doc->Show();
+        m_documents.push_back(doc);
+    }
     return doc;
+}
+
+void RmlUiManager::closeDocument(void* document)
+{
+    if (!document)
+        return;
+
+    auto it = std::remove(m_documents.begin(), m_documents.end(), document);
+    m_documents.erase(it, m_documents.end());
+
+    if (m_context)
+        static_cast<Rml::ElementDocument*>(document)->Close();
 }
 
 void RmlUiManager::toggleDebugger()
@@ -291,4 +365,146 @@ void RmlUiManager::toggleDebugger()
 
     m_debuggerVisible = !m_debuggerVisible;
     Rml::Debugger::SetVisible(m_debuggerVisible);
+}
+
+void* RmlUiManager::createDataModel(const char* name)
+{
+    if (!m_initialized || !m_context || !isValidName(name))
+        return nullptr;
+
+    Rml::DataModelConstructor constructor = m_context->CreateDataModel(name);
+    if (!constructor)
+        return nullptr;
+
+    auto* model = new RmlUiDataModel();
+    model->name = name;
+    model->constructor = constructor;
+    model->handle = constructor.GetModelHandle();
+    m_dataModels.push_back(model);
+    return model;
+}
+
+void RmlUiManager::removeDataModel(void* model)
+{
+    if (!model)
+        return;
+
+    auto it = std::remove(m_dataModels.begin(), m_dataModels.end(), model);
+    m_dataModels.erase(it, m_dataModels.end());
+
+    deleteDataModel(m_context, asDataModel(model));
+}
+
+bool RmlUiManager::dataModelBindInt(void* model_handle, const char* name, int value)
+{
+    RmlUiDataModel* model = asDataModel(model_handle);
+    if (!model || !isValidName(name))
+        return false;
+
+    auto [it, inserted] = model->ints.emplace(name, value);
+    if (!inserted)
+    {
+        it->second = value;
+        return true;
+    }
+
+    if (!model->constructor.Bind(it->first, &it->second))
+    {
+        model->ints.erase(it);
+        return false;
+    }
+    return true;
+}
+
+bool RmlUiManager::dataModelBindBool(void* model_handle, const char* name, bool value)
+{
+    RmlUiDataModel* model = asDataModel(model_handle);
+    if (!model || !isValidName(name))
+        return false;
+
+    auto [it, inserted] = model->bools.emplace(name, value);
+    if (!inserted)
+    {
+        it->second = value;
+        return true;
+    }
+
+    if (!model->constructor.Bind(it->first, &it->second))
+    {
+        model->bools.erase(it);
+        return false;
+    }
+    return true;
+}
+
+bool RmlUiManager::dataModelBindString(void* model_handle, const char* name, const char* value)
+{
+    RmlUiDataModel* model = asDataModel(model_handle);
+    if (!model || !isValidName(name))
+        return false;
+
+    auto [it, inserted] = model->strings.emplace(name, value ? value : "");
+    if (!inserted)
+    {
+        it->second = value ? value : "";
+        return true;
+    }
+
+    if (!model->constructor.Bind(it->first, &it->second))
+    {
+        model->strings.erase(it);
+        return false;
+    }
+    return true;
+}
+
+bool RmlUiManager::dataModelSetInt(void* model_handle, const char* name, int value)
+{
+    RmlUiDataModel* model = asDataModel(model_handle);
+    if (!model || !isValidName(name))
+        return false;
+
+    auto it = model->ints.find(name);
+    if (it == model->ints.end())
+        return false;
+
+    it->second = value;
+    return true;
+}
+
+bool RmlUiManager::dataModelSetBool(void* model_handle, const char* name, bool value)
+{
+    RmlUiDataModel* model = asDataModel(model_handle);
+    if (!model || !isValidName(name))
+        return false;
+
+    auto it = model->bools.find(name);
+    if (it == model->bools.end())
+        return false;
+
+    it->second = value;
+    return true;
+}
+
+bool RmlUiManager::dataModelSetString(void* model_handle, const char* name, const char* value)
+{
+    RmlUiDataModel* model = asDataModel(model_handle);
+    if (!model || !isValidName(name))
+        return false;
+
+    auto it = model->strings.find(name);
+    if (it == model->strings.end())
+        return false;
+
+    it->second = value ? value : "";
+    return true;
+}
+
+void RmlUiManager::dataModelDirtyAll(void* model_handle)
+{
+    RmlUiDataModel* model = asDataModel(model_handle);
+    if (!model || !model->handle)
+        return;
+
+    model->handle.DirtyAllVariables();
 }
