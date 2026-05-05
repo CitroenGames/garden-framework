@@ -6,8 +6,13 @@
 #include "InputManager.hpp"
 #include "Utils/Log.hpp"
 #include "world.hpp"
-#include <entt/entt.hpp>
+
+#include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <entt/entt.hpp>
+#include <memory>
 
 enum class PossessedEntityType
 {
@@ -27,26 +32,28 @@ private:
     world* game_world;
 
 public:
-    PlayerController(std::shared_ptr<InputManager> input_mgr, world* w) 
-        : input_manager(input_mgr), game_world(w),
-          player_entity(entt::null), freecam_entity(entt::null), 
-          currently_possessed(PossessedEntityType::Player), 
-          freecam_mode_enabled(false) 
+    PlayerController(std::shared_ptr<InputManager> input_mgr, world* w)
+        : player_entity(entt::null),
+          freecam_entity(entt::null),
+          input_manager(input_mgr),
+          currently_possessed(PossessedEntityType::Player),
+          freecam_mode_enabled(false),
+          game_world(w)
     {
         setup_input_bindings();
     }
 
     void setup_input_bindings()
     {
-        if (!input_manager) return; 
-        
+        if (!input_manager) return;
+
         input_manager->bind_action("ToggleFreecam", [this](InputActionState state) {
             if (state == InputActionState::Pressed)
             {
                 toggleFreecamMode();
             }
         });
-        
+
         input_manager->bind_action("Quit", [this](InputActionState state) {
             if (state == InputActionState::Pressed)
             {
@@ -75,16 +82,11 @@ public:
         if (freecam_mode_enabled)
         {
             currently_possessed = PossessedEntityType::Freecam;
-            
-            // Sync freecam to player position
+
             auto& p_trans = game_world->registry.get<TransformComponent>(player_entity);
             auto& f_trans = game_world->registry.get<TransformComponent>(freecam_entity);
-            
             f_trans.position = p_trans.position;
-            // Also sync camera rotation (stored in world camera, but we want freecam to start looking same way)
-            // But freecam entity doesn't store camera rotation usually, it uses the camera directly.
-            // We'll just rely on the world camera state being preserved.
-            
+
             printf("Switched to freecam mode\n");
         }
         else
@@ -96,20 +98,20 @@ public:
 
     void handleMouseMotion(float yrel, float xrel)
     {
-        if (!game_world) return; 
-        
+        if (!game_world) return;
+
         camera& active_cam = game_world->world_camera;
         float sensitivity = 1.0f;
 
         if (currently_possessed == PossessedEntityType::Player && game_world->registry.valid(player_entity))
         {
-             auto& pc = game_world->registry.get<PlayerComponent>(player_entity);
-             sensitivity = pc.mouse_sensitivity;
+            auto& pc = game_world->registry.get<PlayerComponent>(player_entity);
+            sensitivity = pc.mouse_sensitivity;
         }
         else if (currently_possessed == PossessedEntityType::Freecam && game_world->registry.valid(freecam_entity))
         {
-             auto& fc = game_world->registry.get<FreecamComponent>(freecam_entity);
-             sensitivity = fc.mouse_sensitivity;
+            auto& fc = game_world->registry.get<FreecamComponent>(freecam_entity);
+            sensitivity = fc.mouse_sensitivity;
         }
 
         float effective_sensitivity_x = input_manager ? input_manager->Sensitivity_X * sensitivity : sensitivity;
@@ -118,14 +120,13 @@ public:
         active_cam.rotation.x += yrel / 1000.0f * effective_sensitivity_y;
         active_cam.rotation.y += -xrel / 1000.0f * effective_sensitivity_x;
 
-        // Clamp pitch
         if (active_cam.rotation.x > 1.5f) active_cam.rotation.x = 1.5f;
         if (active_cam.rotation.x < -1.5f) active_cam.rotation.x = -1.5f;
     }
 
     void update(float delta)
     {
-        if (!game_world) return; 
+        if (!game_world) return;
 
         if (currently_possessed == PossessedEntityType::Player)
         {
@@ -138,19 +139,38 @@ public:
     }
 
 private:
+    void followCamera(const glm::vec3& position, float delta)
+    {
+        float camera_speed = 10.0f;
+        float t = 1.0f - std::exp(-camera_speed * delta);
+        game_world->world_camera.position = glm::mix(game_world->world_camera.position, position, t);
+    }
+
+    CharacterMoveInput collectPlayerMoveInput() const
+    {
+        CharacterMoveInput input;
+        if (!input_manager)
+            return input;
+
+        if (input_manager->is_key_held(SDL_SCANCODE_W)) input.move_forward += 1.0f;
+        if (input_manager->is_key_held(SDL_SCANCODE_S)) input.move_forward -= 1.0f;
+        if (input_manager->is_key_held(SDL_SCANCODE_D)) input.move_right -= 1.0f;
+        if (input_manager->is_key_held(SDL_SCANCODE_A)) input.move_right += 1.0f;
+        if (input_manager->is_key_pressed(SDL_SCANCODE_SPACE)) input.buttons |= CharacterMoveFlags::Jump;
+        input.camera_yaw = game_world->world_camera.rotation.y;
+        input.camera_pitch = game_world->world_camera.rotation.x;
+        return input;
+    }
+
     void updatePlayer(float delta)
     {
         if (!game_world->registry.valid(player_entity)) return;
 
         auto& trans = game_world->registry.get<TransformComponent>(player_entity);
 
-        // When movement is disabled (networked mode), prediction/authority code
-        // handles velocity/position. We only do camera follow here.
         if (!movement_enabled)
         {
-            float camera_speed = 10.0f;
-            float t = 1.0f - std::exp(-camera_speed * delta);
-            game_world->world_camera.position = glm::mix(game_world->world_camera.position, trans.position, t);
+            followCamera(trans.position, delta);
             return;
         }
 
@@ -163,105 +183,57 @@ private:
             if (!input_enabled || !input_manager)
                 return;
 
-            CharacterMoveInput input;
-            if (input_manager->is_key_held(SDL_SCANCODE_W)) input.move_forward += 1.0f;
-            if (input_manager->is_key_held(SDL_SCANCODE_S)) input.move_forward -= 1.0f;
-            if (input_manager->is_key_held(SDL_SCANCODE_D)) input.move_right -= 1.0f;
-            if (input_manager->is_key_held(SDL_SCANCODE_A)) input.move_right += 1.0f;
-            if (input_manager->is_key_held(SDL_SCANCODE_SPACE)) input.buttons |= CharacterMoveFlags::Jump;
-            input.camera_yaw = game_world->world_camera.rotation.y;
-            input.camera_pitch = game_world->world_camera.rotation.x;
+            CharacterMoveInput input = collectPlayerMoveInput();
+            CharacterControllerState state =
+                game_world->simulate_character_controller(player_entity, input, game_world->fixed_delta);
 
-            CharacterControllerState state = game_world->simulate_character_controller(player_entity, input, game_world->fixed_delta);
-
-            float camera_speed = 10.0f;
-            float t = 1.0f - std::exp(-camera_speed * delta);
-            game_world->world_camera.position = glm::mix(game_world->world_camera.position, state.position, t);
+            followCamera(state.position, delta);
             return;
         }
 
         auto& pc = game_world->registry.get<PlayerComponent>(player_entity);
         auto& rb = game_world->registry.get<RigidBodyComponent>(player_entity);
+        if (!pc.input_enabled || !input_manager)
+            return;
 
-        if (!pc.input_enabled || !input_manager) return;
+        CharacterMoveInput input = collectPlayerMoveInput();
 
-        float move_forward = 0.0f;
-        float move_right = 0.0f;
+        CharacterControllerState current;
+        current.position = trans.position;
+        current.velocity = rb.velocity;
+        current.grounded = pc.grounded;
+        current.ground_normal = pc.ground_normal;
 
-        if (input_manager->is_key_held(SDL_SCANCODE_W)) move_forward += 1.0f;
-        if (input_manager->is_key_held(SDL_SCANCODE_S)) move_forward -= 1.0f;
-        if (input_manager->is_key_held(SDL_SCANCODE_D)) move_right -= 1.0f;
-        if (input_manager->is_key_held(SDL_SCANCODE_A)) move_right += 1.0f;
+        CharacterController::MovementTuning tuning;
+        tuning.max_speed = pc.speed;
+        tuning.jump_velocity = pc.jump_force;
+        tuning.gravity = game_world->getGravity() * 9.81f;
+        tuning.fixed_delta = delta;
+        tuning.stop_speed = std::max(pc.speed, 0.0f) * 0.25f;
+        tuning.air_wish_speed_cap = std::max(pc.speed, 0.0f) * (30.0f / 320.0f);
 
-        glm::vec3 wish_dir = glm::vec3(move_right, 0, move_forward);
+        const CharacterControllerState simulated =
+            CharacterController::simulateSourceMovement(input, current, tuning);
+        rb.velocity = simulated.velocity;
+        pc.grounded = simulated.grounded;
+        pc.ground_normal = simulated.ground_normal;
 
-        // Rotate wish_dir by camera
-        wish_dir = game_world->world_camera.camera_rot_quaternion() * wish_dir;
-
-        if (pc.grounded)
-        {
-            // Project on plane: v - dot(v, n) * n
-            wish_dir = wish_dir - glm::dot(wish_dir, pc.ground_normal) * pc.ground_normal;
-        }
-        else
-        {
-            wish_dir.y = 0;
-        }
-
-        if (glm::length(wish_dir) > 0.001f)
-            wish_dir = glm::normalize(wish_dir);
-        else
-            wish_dir = glm::vec3(0);
-
-        bool wishJump = input_manager->is_key_held(SDL_SCANCODE_SPACE);
-        bool jump = wishJump && pc.grounded;
-
-        // Set horizontal velocity directly (not additive — prevents acceleration stacking)
-        float move_speed = pc.speed;
-        glm::vec3 target_horizontal = wish_dir * move_speed;
-
-        if (pc.grounded)
-        {
-            // Snap horizontal velocity to input direction with friction blend
-            rb.velocity.x = target_horizontal.x * 0.8f + rb.velocity.x * 0.2f;
-            rb.velocity.z = target_horizontal.z * 0.8f + rb.velocity.z * 0.2f;
-
-            if (jump)
-                rb.velocity.y = pc.jump_force;
-            else
-                rb.velocity.y = 0; // Stick to surfaces
-        }
-        else
-        {
-            // Air control — less authority
-            rb.velocity.x = target_horizontal.x * 0.3f + rb.velocity.x * 0.7f;
-            rb.velocity.z = target_horizontal.z * 0.3f + rb.velocity.z * 0.7f;
-
-            // Apply gravity manually — game code is velocity authority for player,
-            // so Jolt's gravity integration on velocity is not read back
-            glm::vec3 grav = game_world->getGravity();
-            float gravity_magnitude = glm::length(grav) * 9.81f;
-            rb.velocity.y -= gravity_magnitude * delta;
-        }
-
+        const glm::vec3 wish_dir = CharacterController::buildWishMove(input, tuning.max_speed).direction;
         LOG_ENGINE_TRACE("[PlayerCtrl] wish=({},{},{}) vel=({},{},{}) grounded={}",
             wish_dir.x, wish_dir.y, wish_dir.z,
             rb.velocity.x, rb.velocity.y, rb.velocity.z, pc.grounded);
 
-        // Camera follow — framerate-independent exponential smoothing
-        float camera_speed = 10.0f;
-        float t = 1.0f - std::exp(-camera_speed * delta);
-        game_world->world_camera.position = glm::mix(game_world->world_camera.position, trans.position, t);
+        followCamera(trans.position, delta);
     }
 
     void updateFreecam(float delta)
     {
-        if (!game_world->registry.valid(freecam_entity)) return; 
+        if (!game_world->registry.valid(freecam_entity)) return;
 
         auto& fc = game_world->registry.get<FreecamComponent>(freecam_entity);
         auto& trans = game_world->registry.get<TransformComponent>(freecam_entity);
 
-        if (!fc.input_enabled || !input_manager) return; 
+        if (!fc.input_enabled || !input_manager) return;
 
         glm::vec3 local_movement = glm::vec3(0, 0, 0);
 
@@ -275,28 +247,23 @@ private:
         if (glm::length(local_movement) > 0)
             local_movement = glm::normalize(local_movement);
 
-        float current_speed = input_manager->is_key_held(SDL_SCANCODE_LSHIFT) ? fc.fast_movement_speed : fc.movement_speed;
+        float current_speed = input_manager->is_key_held(SDL_SCANCODE_LSHIFT)
+            ? fc.fast_movement_speed
+            : fc.movement_speed;
 
         glm::vec3 world_movement = game_world->world_camera.camera_rot_quaternion() * local_movement;
-
-        // Move camera directly (freecam mode moves the camera)
         game_world->world_camera.position += world_movement * current_speed * delta;
-        
-        // Sync entity transform to camera
         trans.position = game_world->world_camera.position;
     }
 
 public:
-    // Get active camera (always world camera now, as we update it)
     camera& getActiveCamera()
     {
         return game_world->world_camera;
     }
-    
+
     bool isFreecamMode() const { return freecam_mode_enabled; }
 
-    // In networked mode, movement is handled externally by prediction/authority code.
-    // When disabled, updatePlayer() only does camera follow.
     void setMovementEnabled(bool enabled) { movement_enabled = enabled; }
     bool isMovementEnabled() const { return movement_enabled; }
 };

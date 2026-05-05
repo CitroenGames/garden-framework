@@ -52,6 +52,15 @@ CONVAR(r_frustumculling, 1, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
 CONVAR(r_staticmesh_chunking, 1, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
        "Enable spatial chunking for large static meshes");
 
+CONVAR(r_occlusionculling, 0, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
+       "Enable conservative screen-space occlusion culling for opaque meshes");
+
+CONVAR(r_light_zbinning, 1, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
+       "Enable tiled z-binned deferred point/spot light culling");
+
+CONVAR(r_culling_debug, 0, ConVarFlags::CLIENT_ONLY,
+       "Print culling diagnostics for renderer development");
+
 CONVAR_BOUNDED(r_staticmesh_chunk_tris, 8192, 128, 65536, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
                "Target triangles per static mesh chunk");
 

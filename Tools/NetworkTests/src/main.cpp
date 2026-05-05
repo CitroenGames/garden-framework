@@ -2,6 +2,7 @@
 #include "Network/NetworkProtocol.hpp"
 #include "Network/NetworkSerializer.hpp"
 #include "Network/NetworkInput.hpp"
+#include "Network/SharedMovement.hpp"
 #include "Network/LagHistory.hpp"
 #include "Network/PredictionTypes.hpp"
 #include "Network/InterpolationBuffer.hpp"
@@ -113,6 +114,64 @@ int testInputPolicy()
     budget = Net::MAX_INPUT_BURST_TICKS - 1;
     Net::accrueInputTickBudget(40, last_budget_tick, budget);
     if (budget != Net::MAX_INPUT_BURST_TICKS) return fail(name, "budget did not cap at burst limit");
+    return 0;
+}
+
+int testInputActionLatchPolicy()
+{
+    const char* name = "InputActionLatchPolicy";
+    const uint8_t mask = Net::INPUT_ACTION_LATCH_MASK;
+
+    if ((mask & Net::InputFlags::JUMP) == 0) return fail(name, "jump is not latched");
+    if ((mask & Net::InputFlags::ATTACK) == 0) return fail(name, "attack is not latched");
+    if ((mask & Net::InputFlags::ATTACK2) == 0) return fail(name, "attack2 is not latched");
+
+    const uint8_t movement_mask =
+        Net::InputFlags::MOVE_FORWARD |
+        Net::InputFlags::MOVE_BACK |
+        Net::InputFlags::MOVE_LEFT |
+        Net::InputFlags::MOVE_RIGHT |
+        Net::InputFlags::USE;
+    if ((mask & movement_mask) != 0) return fail(name, "held movement/use inputs are latched");
+    return 0;
+}
+
+int testSharedMovementSourceRules()
+{
+    const char* name = "SharedMovementSourceRules";
+
+    Net::MovementConfig config;
+    config.speed = 10.0f;
+    config.jump_force = 5.0f;
+    config.fixed_delta = 1.0f / 60.0f;
+    config.gravity_magnitude = 9.81f;
+    config.air_wish_speed_cap_ratio = 30.0f / 320.0f;
+
+    Net::MovementState grounded;
+    grounded.grounded = true;
+    grounded.velocity = glm::vec3(3.0f, 0.0f, 0.0f);
+
+    Net::MovementInput jump;
+    jump.buttons = Net::InputFlags::JUMP;
+    const Net::MovementState jumped = Net::SharedMovement::simulate(jump, grounded, config);
+    if (jumped.grounded) return fail(name, "jump did not clear grounded state");
+    if (!approxEqual(jumped.velocity.x, 3.0f, 0.02f)) return fail(name, "jump changed horizontal velocity");
+    if (jumped.velocity.y < 4.7f) return fail(name, "jump impulse was not applied");
+
+    Net::MovementState airborne;
+    airborne.grounded = false;
+
+    Net::MovementInput air_input;
+    air_input.move_forward = 1.0f;
+    const Net::MovementState air_result = Net::SharedMovement::simulate(air_input, airborne, config);
+    const float horizontal_speed = std::sqrt(
+        air_result.velocity.x * air_result.velocity.x +
+        air_result.velocity.z * air_result.velocity.z);
+    if (horizontal_speed <= 0.0f) return fail(name, "air input did not accelerate");
+    if (horizontal_speed > config.speed * config.air_wish_speed_cap_ratio + 0.02f) {
+        return fail(name, "air acceleration exceeded Source-style wish-speed cap");
+    }
+
     return 0;
 }
 
@@ -273,6 +332,8 @@ int main()
     failures += testBitStream();
     failures += testInputSerialization();
     failures += testInputPolicy();
+    failures += testInputActionLatchPolicy();
+    failures += testSharedMovementSourceRules();
     failures += testWorldStateSerialization();
     failures += testCVarSerialization();
     failures += testNetworkStats();

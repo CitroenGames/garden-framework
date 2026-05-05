@@ -10,7 +10,7 @@ namespace Net {
 
 constexpr uint32_t MAX_INPUT_TICK_WINDOW = 128;
 constexpr uint32_t MAX_INPUT_BURST_TICKS = 8;
-constexpr uint8_t INPUT_ACTION_LATCH_MASK = InputFlags::ATTACK | InputFlags::ATTACK2;
+constexpr uint8_t INPUT_ACTION_LATCH_MASK = InputFlags::JUMP | InputFlags::ATTACK | InputFlags::ATTACK2;
 
 inline bool isTickNewer(uint32_t tick, uint32_t last_tick)
 {

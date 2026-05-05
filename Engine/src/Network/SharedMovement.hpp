@@ -4,6 +4,7 @@
 #include <glm/gtc/quaternion.hpp>
 #include <algorithm>
 #include <cmath>
+#include "Character/CharacterController.hpp"
 #include "NetworkProtocol.hpp" // For InputFlags
 
 namespace Net {
@@ -36,6 +37,13 @@ struct MovementConfig
     float gravity_magnitude = 9.81f;
     float ground_friction_authority = 0.8f;
     float air_control_authority = 0.3f;
+    float ground_acceleration = 5.5f;
+    float air_acceleration = 12.0f;
+    float friction = 5.2f;
+    float stop_speed_ratio = 0.25f;
+    float air_wish_speed_cap_ratio = 30.0f / 320.0f;
+    float surface_friction = 1.0f;
+    float max_velocity = 100.0f;
 };
 
 namespace SharedMovement
@@ -47,71 +55,41 @@ namespace SharedMovement
                                   const MovementState& current,
                                   const MovementConfig& config)
     {
-        MovementState result = current;
+        CharacterMoveInput character_input;
+        character_input.move_forward = input.move_forward;
+        character_input.move_right = input.move_right;
+        character_input.camera_yaw = input.camera_yaw;
+        character_input.camera_pitch = input.camera_pitch;
+        if ((input.buttons & InputFlags::JUMP) != 0)
+            character_input.buttons |= CharacterMoveFlags::Jump;
 
-        // 1. Build wish direction from input axes
-        glm::vec3 wish_dir(input.move_right, 0.0f, input.move_forward);
+        CharacterControllerState character_state;
+        character_state.position = current.position;
+        character_state.velocity = current.velocity;
+        character_state.grounded = current.grounded;
+        character_state.ground_normal = current.ground_normal;
 
-        // 2. Rotate by camera orientation (matches camera.hpp camera_rot_quaternion())
-        //    Camera stores rotation as radians: x=pitch, y=yaw, z=roll(0)
-        //    Pitch clamped to [-1, 1] radians (~57 degrees)
-        float clamped_pitch = glm::clamp(input.camera_pitch, -1.0f, 1.0f);
-        glm::quat cam_rot = glm::quat(glm::vec3(clamped_pitch, input.camera_yaw, 0.0f));
-        wish_dir = cam_rot * wish_dir;
+        CharacterController::MovementTuning tuning;
+        tuning.max_speed = config.speed;
+        tuning.jump_velocity = config.jump_force;
+        tuning.gravity = glm::vec3(0.0f, -std::max(config.gravity_magnitude, 0.0f), 0.0f);
+        tuning.fixed_delta = config.fixed_delta;
+        tuning.ground_acceleration = config.ground_acceleration;
+        tuning.air_acceleration = config.air_acceleration;
+        tuning.friction = config.friction;
+        tuning.stop_speed = std::max(config.speed, 0.0f) * std::max(config.stop_speed_ratio, 0.0f);
+        tuning.air_wish_speed_cap = std::max(config.speed, 0.0f) * std::max(config.air_wish_speed_cap_ratio, 0.0f);
+        tuning.surface_friction = config.surface_friction;
+        tuning.max_velocity = config.max_velocity;
 
-        // 3. Project onto ground plane or flatten for air
-        if (current.grounded)
-        {
-            // Project wish_dir onto ground plane: v - dot(v, n) * n
-            wish_dir = wish_dir - glm::dot(wish_dir, current.ground_normal) * current.ground_normal;
-        }
-        else
-        {
-            wish_dir.y = 0.0f;
-        }
+        const CharacterControllerState simulated =
+            CharacterController::simulateSourceMovement(character_input, character_state, tuning);
 
-        // 4. Normalize (or zero if negligible)
-        if (glm::length(wish_dir) > 0.001f)
-            wish_dir = glm::normalize(wish_dir);
-        else
-            wish_dir = glm::vec3(0.0f);
-
-        // 5. Target horizontal velocity
-        glm::vec3 target_horizontal = wish_dir * config.speed;
-
-        bool wish_jump = (input.buttons & InputFlags::JUMP) != 0;
-
-        if (current.grounded)
-        {
-            // 6a. Grounded: friction blend for responsive but smooth movement
-            float ga = config.ground_friction_authority;
-            result.velocity.x = target_horizontal.x * ga + current.velocity.x * (1.0f - ga);
-            result.velocity.z = target_horizontal.z * ga + current.velocity.z * (1.0f - ga);
-
-            if (wish_jump)
-            {
-                result.velocity.y = config.jump_force;
-                result.grounded = false;
-            }
-            else
-            {
-                result.velocity.y = 0.0f; // Stick to surface
-            }
-        }
-        else
-        {
-            // 6b. Airborne: reduced authority for air control
-            float aa = config.air_control_authority;
-            result.velocity.x = target_horizontal.x * aa + current.velocity.x * (1.0f - aa);
-            result.velocity.z = target_horizontal.z * aa + current.velocity.z * (1.0f - aa);
-
-            // Apply gravity
-            result.velocity.y -= config.gravity_magnitude * config.fixed_delta;
-        }
-
-        // 7. Integrate position
-        result.position += result.velocity * config.fixed_delta;
-
+        MovementState result;
+        result.position = simulated.position;
+        result.velocity = simulated.velocity;
+        result.grounded = simulated.grounded;
+        result.ground_normal = simulated.ground_normal;
         return result;
     }
 } // namespace SharedMovement

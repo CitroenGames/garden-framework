@@ -199,6 +199,12 @@ struct CharacterControllerComponent {
     float gravity_scale = 1.0f;
     float ground_control = 0.8f;
     float air_control = 0.3f;
+    float ground_acceleration = 5.5f;
+    float air_acceleration = 12.0f;
+    float friction = 5.2f;
+    float stop_speed_ratio = 0.25f;
+    float air_wish_speed_cap_ratio = 30.0f / 320.0f;
+    float surface_friction = 1.0f;
     float capsule_half_height = 0.9f;
     float capsule_radius = 0.3f;
     float mass = 80.0f;
@@ -225,9 +231,21 @@ struct CharacterControllerComponent {
         r.field<&CharacterControllerComponent::gravity_scale>("gravity_scale")
             .tooltip("Gravity multiplier").drag(0.05f).range(0.0f, 10.0f).category("Movement");
         r.field<&CharacterControllerComponent::ground_control>("ground_control")
-            .tooltip("Ground acceleration authority").drag(0.01f).range(0.0f, 1.0f).category("Movement");
+            .tooltip("Legacy blend movement authority").drag(0.01f).range(0.0f, 1.0f).category("Movement");
         r.field<&CharacterControllerComponent::air_control>("air_control")
-            .tooltip("Air acceleration authority").drag(0.01f).range(0.0f, 1.0f).category("Movement");
+            .tooltip("Legacy blend air-control authority").drag(0.01f).range(0.0f, 1.0f).category("Movement");
+        r.field<&CharacterControllerComponent::ground_acceleration>("ground_acceleration")
+            .tooltip("Source-style ground acceleration").drag(0.1f).range(0.0f, 100.0f).category("Movement");
+        r.field<&CharacterControllerComponent::air_acceleration>("air_acceleration")
+            .tooltip("Source-style air acceleration").drag(0.1f).range(0.0f, 100.0f).category("Movement");
+        r.field<&CharacterControllerComponent::friction>("friction")
+            .tooltip("Source-style ground friction").drag(0.1f).range(0.0f, 100.0f).category("Movement");
+        r.field<&CharacterControllerComponent::stop_speed_ratio>("stop_speed_ratio")
+            .tooltip("Ground stop speed as a fraction of move_speed").drag(0.01f).range(0.0f, 10.0f).category("Movement");
+        r.field<&CharacterControllerComponent::air_wish_speed_cap_ratio>("air_wish_speed_cap_ratio")
+            .tooltip("Air wish-speed cap as a fraction of move_speed").drag(0.01f).range(0.0f, 10.0f).category("Movement");
+        r.field<&CharacterControllerComponent::surface_friction>("surface_friction")
+            .tooltip("Movement friction multiplier for the current surface").drag(0.01f).range(0.0f, 10.0f).category("Movement");
         r.field<&CharacterControllerComponent::capsule_half_height>("capsule_half_height")
             .tooltip("Capsule cylinder half height").drag(0.01f).range(0.01f, 10.0f).category("Shape");
         r.field<&CharacterControllerComponent::capsule_radius>("capsule_radius")

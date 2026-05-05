@@ -54,6 +54,26 @@ namespace
         return v;
     }
 
+    CharacterController::MovementTuning makeMovementTuning(const CharacterControllerComponent& controller,
+                                                           const PhysicsSystemSettings& settings,
+                                                           float delta_time)
+    {
+        CharacterController::MovementTuning tuning;
+        tuning.max_speed = std::max(controller.move_speed, 0.0f);
+        tuning.jump_velocity = std::max(controller.jump_velocity, 0.0f);
+        tuning.gravity = settings.gravity_direction * settings.gravity_acceleration;
+        tuning.gravity_scale = std::max(controller.gravity_scale, 0.0f);
+        tuning.fixed_delta = delta_time;
+        tuning.ground_acceleration = std::max(controller.ground_acceleration, 0.0f);
+        tuning.air_acceleration = std::max(controller.air_acceleration, 0.0f);
+        tuning.friction = std::max(controller.friction, 0.0f);
+        tuning.stop_speed = tuning.max_speed * std::max(controller.stop_speed_ratio, 0.0f);
+        tuning.air_wish_speed_cap = tuning.max_speed * std::max(controller.air_wish_speed_cap_ratio, 0.0f);
+        tuning.surface_friction = std::max(controller.surface_friction, 0.0f);
+        tuning.max_velocity = std::max(settings.max_character_velocity, 0.0f);
+        return tuning;
+    }
+
     bool isCharacterGrounded(JPH::CharacterBase::EGroundState state)
     {
         return state == JPH::CharacterBase::EGroundState::OnGround;
@@ -380,38 +400,10 @@ CharacterControllerState CharacterControllerSystem::simulate(entt::registry& reg
         effective_input.buttons = 0;
     }
 
-    const glm::vec3 wish_dir = CharacterController::buildWishDirection(
-        effective_input, current.grounded, current.ground_normal);
-    const glm::vec3 target_horizontal = wish_dir * std::max(controller.move_speed, 0.0f);
-    const bool jump = CharacterController::wantsJump(effective_input) && current.grounded;
-
-    glm::vec3 new_velocity = current.velocity;
-    if (current.grounded)
-    {
-        glm::vec3 relative_velocity = current.velocity - current.ground_velocity;
-        relative_velocity.y = 0.0f;
-        const float authority = glm::clamp(controller.ground_control, 0.0f, 1.0f);
-        const glm::vec3 relative_horizontal = glm::mix(relative_velocity, target_horizontal, authority);
-
-        new_velocity = current.ground_velocity;
-        new_velocity.x += relative_horizontal.x;
-        new_velocity.z += relative_horizontal.z;
-
-        if (jump)
-            new_velocity.y += std::max(controller.jump_velocity, 0.0f);
-    }
-    else
-    {
-        glm::vec3 current_horizontal(current.velocity.x, 0.0f, current.velocity.z);
-        const float authority = glm::clamp(controller.air_control, 0.0f, 1.0f);
-        const glm::vec3 blended_horizontal = glm::mix(current_horizontal, target_horizontal, authority);
-
-        new_velocity.x = blended_horizontal.x;
-        new_velocity.z = blended_horizontal.z;
-    }
-
-    new_velocity += settings.gravity_direction * settings.gravity_acceleration * controller.gravity_scale * delta_time;
-
+    const CharacterController::MovementTuning tuning = makeMovementTuning(controller, settings, delta_time);
+    const CharacterControllerState predicted = CharacterController::simulateSourceMovement(
+        effective_input, current, tuning);
+    glm::vec3 new_velocity = predicted.velocity;
     if (!isValidVec3(new_velocity))
         new_velocity = glm::vec3(0.0f);
     new_velocity = clampVelocity(new_velocity, settings.max_character_velocity);

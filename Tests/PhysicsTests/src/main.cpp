@@ -45,6 +45,146 @@ static bool pass(const std::string& name)
     return true;
 }
 
+static float horizontalSpeed(const glm::vec3& v)
+{
+    return std::sqrt(v.x * v.x + v.z * v.z);
+}
+
+static CharacterController::MovementTuning makeSourceMovementTestTuning()
+{
+    CharacterController::MovementTuning tuning;
+    tuning.max_speed = 10.0f;
+    tuning.jump_velocity = 5.0f;
+    tuning.gravity = glm::vec3(0.0f, -9.81f, 0.0f);
+    tuning.fixed_delta = 1.0f / 60.0f;
+    tuning.ground_acceleration = 5.5f;
+    tuning.air_acceleration = 12.0f;
+    tuning.friction = 5.2f;
+    tuning.stop_speed = tuning.max_speed * 0.25f;
+    tuning.air_wish_speed_cap = tuning.max_speed * (30.0f / 320.0f);
+    tuning.surface_friction = 1.0f;
+    tuning.max_velocity = 100.0f;
+    return tuning;
+}
+
+static bool testSourceGroundAcceleration()
+{
+    const std::string name = "source movement ground acceleration";
+    const auto tuning = makeSourceMovementTestTuning();
+    CharacterControllerState state;
+    state.grounded = true;
+
+    CharacterMoveInput input;
+    input.move_forward = 1.0f;
+
+    const CharacterControllerState result =
+        CharacterController::simulateSourceMovement(input, state, tuning);
+
+    if (result.velocity.z <= 0.0f)
+        return fail(name, "forward input did not accelerate");
+    if (result.velocity.z >= tuning.max_speed)
+        return fail(name, "ground movement snapped directly to max speed");
+
+    const float expected = tuning.ground_acceleration * tuning.max_speed * tuning.fixed_delta;
+    if (!approx(result.velocity.z, expected, 0.03f))
+        return fail(name, "ground acceleration did not match Source-style formula");
+
+    return pass(name);
+}
+
+static bool testSourceGroundFriction()
+{
+    const std::string name = "source movement ground friction";
+    const auto tuning = makeSourceMovementTestTuning();
+    CharacterControllerState state;
+    state.grounded = true;
+    state.velocity = glm::vec3(5.0f, 0.0f, 0.0f);
+
+    const CharacterControllerState result =
+        CharacterController::simulateSourceMovement(CharacterMoveInput{}, state, tuning);
+
+    if (horizontalSpeed(result.velocity) >= horizontalSpeed(state.velocity))
+        return fail(name, "ground friction did not slow horizontal velocity");
+
+    const float expected = 5.0f - 5.0f * tuning.friction * tuning.fixed_delta;
+    if (!approx(horizontalSpeed(result.velocity), expected, 0.03f))
+        return fail(name, "ground friction did not match Source-style formula");
+
+    return pass(name);
+}
+
+static bool testSourceJumpPreservesHorizontalVelocity()
+{
+    const std::string name = "source movement jump preserves horizontal velocity";
+    const auto tuning = makeSourceMovementTestTuning();
+    CharacterControllerState state;
+    state.grounded = true;
+    state.velocity = glm::vec3(3.0f, 0.0f, 0.0f);
+
+    CharacterMoveInput input;
+    input.buttons = CharacterMoveFlags::Jump;
+
+    const CharacterControllerState result =
+        CharacterController::simulateSourceMovement(input, state, tuning);
+
+    if (!approx(result.velocity.x, 3.0f, 0.02f))
+        return fail(name, "jump changed horizontal velocity");
+    if (result.velocity.y < 4.7f)
+        return fail(name, "jump impulse was not applied");
+    if (result.grounded)
+        return fail(name, "jump did not leave grounded state");
+
+    return pass(name);
+}
+
+static bool testSourceAirAccelerationCap()
+{
+    const std::string name = "source movement air acceleration cap";
+    const auto tuning = makeSourceMovementTestTuning();
+    CharacterControllerState state;
+    state.grounded = false;
+
+    CharacterMoveInput input;
+    input.move_forward = 1.0f;
+
+    const CharacterControllerState result =
+        CharacterController::simulateSourceMovement(input, state, tuning);
+
+    if (result.velocity.z <= 0.0f)
+        return fail(name, "air input did not accelerate");
+    if (result.velocity.z > tuning.air_wish_speed_cap + 0.02f)
+        return fail(name, "air acceleration exceeded wish-speed cap");
+    if (result.velocity.z >= tuning.max_speed)
+        return fail(name, "air movement snapped directly to max speed");
+
+    return pass(name);
+}
+
+static bool testSourceDiagonalInputClampsSpeed()
+{
+    const std::string name = "source movement diagonal input clamps speed";
+    const auto tuning = makeSourceMovementTestTuning();
+    CharacterControllerState state;
+    state.grounded = true;
+
+    CharacterMoveInput input;
+    input.move_forward = 1.0f;
+    input.move_right = 1.0f;
+
+    for (int i = 0; i < 120; ++i)
+    {
+        state = CharacterController::simulateSourceMovement(input, state, tuning);
+        state.grounded = true;
+    }
+
+    if (horizontalSpeed(state.velocity) > tuning.max_speed + 0.02f)
+        return fail(name, "diagonal input exceeded max movement speed");
+    if (horizontalSpeed(state.velocity) < tuning.max_speed * 0.8f)
+        return fail(name, "diagonal input never accelerated close to max speed");
+
+    return pass(name);
+}
+
 static void run(const std::string& name)
 {
     std::cout << "[RUN] " << name << std::endl;
@@ -393,6 +533,16 @@ int main()
     EE::CLog::Init();
     fs::path repo_root = findRepoRoot();
     bool ok = true;
+    run("source movement ground acceleration");
+    ok = testSourceGroundAcceleration() && ok;
+    run("source movement ground friction");
+    ok = testSourceGroundFriction() && ok;
+    run("source movement jump preserves horizontal velocity");
+    ok = testSourceJumpPreservesHorizontalVelocity() && ok;
+    run("source movement air acceleration cap");
+    ok = testSourceAirAccelerationCap() && ok;
+    run("source movement diagonal input clamps speed");
+    ok = testSourceDiagonalInputClampsSpeed() && ok;
     run("dynamic gravity flag");
     ok = testDynamicGravityFlag() && ok;
     run("physics settings configure gravity");
