@@ -71,7 +71,10 @@ std::array<glm::vec3, 8> MetalRenderAPIImpl::getFrustumCornersWorldSpace(const g
     for (int x = 0; x < 2; ++x) {
         for (int y = 0; y < 2; ++y) {
             for (int z = 0; z < 2; ++z) {
-                glm::vec4 pt = inv * glm::vec4(2.0f * x - 1.0f, 2.0f * y - 1.0f, 2.0f * z - 1.0f, 1.0f);
+                glm::vec4 pt = inv * glm::vec4(2.0f * x - 1.0f,
+                                                2.0f * y - 1.0f,
+                                                static_cast<float>(z),
+                                                1.0f);
                 corners[idx++] = glm::vec3(pt) / pt.w;
             }
         }
@@ -145,10 +148,13 @@ void MetalRenderAPI::beginShadowPass(const glm::vec3& lightDir)
 
     int rtWidth = impl->viewportTexture ? impl->viewportWidthRT : impl->viewportWidth;
     int rtHeight = impl->viewportTexture ? impl->viewportHeightRT : impl->viewportHeight;
-    float aspect = static_cast<float>(rtWidth) / static_cast<float>(rtHeight);
+    float aspect = static_cast<float>(rtWidth) / static_cast<float>(std::max(rtHeight, 1));
     const int cascadeCount = getCascadeCount();
     for (int i = 0; i < cascadeCount; i++) {
         impl->lightSpaceMatrices[i] = impl->getLightSpaceMatrixForCascade(i, lightDir, impl->viewMatrix, impl->fieldOfView, aspect);
+    }
+    for (int i = cascadeCount; i < MetalRenderAPIImpl::NUM_CASCADES; i++) {
+        impl->lightSpaceMatrices[i] = impl->lightSpaceMatrices[cascadeCount - 1];
     }
     impl->currentCascade = 0;
 }
@@ -176,10 +182,13 @@ void MetalRenderAPI::beginShadowPass(const glm::vec3& lightDir, const camera& ca
 
     int rtWidth = impl->viewportTexture ? impl->viewportWidthRT : impl->viewportWidth;
     int rtHeight = impl->viewportTexture ? impl->viewportHeightRT : impl->viewportHeight;
-    float aspect = static_cast<float>(rtWidth) / static_cast<float>(rtHeight);
+    float aspect = static_cast<float>(rtWidth) / static_cast<float>(std::max(rtHeight, 1));
     const int cascadeCount = getCascadeCount();
     for (int i = 0; i < cascadeCount; i++) {
         impl->lightSpaceMatrices[i] = impl->getLightSpaceMatrixForCascade(i, lightDir, impl->viewMatrix, impl->fieldOfView, aspect);
+    }
+    for (int i = cascadeCount; i < MetalRenderAPIImpl::NUM_CASCADES; i++) {
+        impl->lightSpaceMatrices[i] = impl->lightSpaceMatrices[cascadeCount - 1];
     }
     impl->currentCascade = 0;
 }
@@ -243,63 +252,9 @@ void MetalRenderAPI::endShadowPass()
 
     impl->inShadowPass = false;
 
-    bool editorMode = (impl->viewportTexture != nil);
-
-    // In editor mode, defer drawable acquisition to renderUI
-    if (!editorMode) {
-        if (!impl->ensureDrawable()) {
-            printf("[Metal] endShadowPass: Failed to acquire drawable\n");
-            return;
-        }
-    }
-
-    // Determine render target dimensions
-    int rtWidth = editorMode ? impl->viewportWidthRT : impl->viewportWidth;
-    int rtHeight = editorMode ? impl->viewportHeightRT : impl->viewportHeight;
-
-    // Restart main render pass
-    MTLRenderPassDescriptor* passDesc = [MTLRenderPassDescriptor renderPassDescriptor];
-
-    if (impl->fxaaEnabled && impl->fxaaInitialized && impl->offscreenTexture) {
-        passDesc.colorAttachments[0].texture = impl->offscreenTexture;
-    } else if (editorMode) {
-        passDesc.colorAttachments[0].texture = impl->viewportTexture;
-    } else {
-        passDesc.colorAttachments[0].texture = impl->currentDrawable.texture;
-    }
-    passDesc.colorAttachments[0].loadAction = MTLLoadActionClear;
-    passDesc.colorAttachments[0].storeAction = MTLStoreActionStore;
-    passDesc.colorAttachments[0].clearColor = MTLClearColorMake(impl->clearColor.r, impl->clearColor.g, impl->clearColor.b, 1.0);
-
-    // Depth texture: editor mode uses viewport depth or offscreen depth
-    id<MTLTexture> depthTex;
-    if (impl->fxaaEnabled && impl->fxaaInitialized && impl->offscreenDepthTexture) {
-        depthTex = impl->offscreenDepthTexture;
-    } else if (editorMode) {
-        depthTex = impl->viewportDepthTexture;
-    } else {
-        depthTex = impl->depthTexture;
-    }
-    passDesc.depthAttachment.texture = depthTex;
-    passDesc.depthAttachment.loadAction = MTLLoadActionClear;
-    passDesc.depthAttachment.storeAction = MTLStoreActionStore;
-    passDesc.depthAttachment.clearDepth = 1.0;
-
-    impl->encoder = [impl->commandBuffer renderCommandEncoderWithDescriptor:passDesc];
-    if (!impl->encoder) {
-        printf("[Metal] endShadowPass: Failed to create main encoder\n");
-        impl->mainPassActive = false;
-        return;
-    }
-    impl->encoder.label = @"Main Render Encoder (Post-Shadow)";
-    impl->mainPassActive = true;
-
-    // Restore viewport
-    MTLViewport viewport = {0, 0, (double)rtWidth, (double)rtHeight, 0, 1};
-    [impl->encoder setViewport:viewport];
-
-    // Restore default state and reset bind tracking for fresh encoder
-    [impl->encoder setDepthStencilState:impl->depthLessEqual];
+    // Match Vulkan: endShadowPass only closes the shadow pass. beginFrame() owns
+    // the main scene encoder, and the deferred path may skip a main encoder entirely.
+    impl->mainPassActive = false;
     impl->lastBoundPipeline = nil;
     impl->lastBoundDepthStencil = nil;
     impl->lastBoundVertexBuffer = nil;
@@ -307,15 +262,6 @@ void MetalRenderAPI::endShadowPass()
     impl->lastCullMode = MTLCullModeBack;
     impl->shadowMapBound = false;
     impl->perFrameUBOReady = false;
-    impl->drawCallCount = 0;
-    impl->lastFrameStats.backend_name = getAPIName();
-    impl->lastFrameStats.gpu_frame_ms_valid = false;
-    impl->lastFrameStats.submitted_draw_commands = 0;
-    impl->lastFrameStats.backend_draw_calls = 0;
-    impl->lastFrameStats.instanced_batches = 0;
-    impl->lastFrameStats.instanced_instances = 0;
-    [impl->encoder setCullMode:MTLCullModeBack];
-    [impl->encoder setFrontFacingWinding:MTLWindingCounterClockwise];
 }
 
 void MetalRenderAPI::bindShadowMap(int textureUnit)

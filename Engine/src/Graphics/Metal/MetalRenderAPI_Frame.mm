@@ -75,7 +75,7 @@ void MetalRenderAPI::beginFrame()
         if (!impl->ensureDrawable()) return;
     }
 
-    // If shadow pass already created the main render encoder (via endShadowPass), skip
+    // If an earlier pass already opened the main render encoder, skip reopening it.
     if (impl->mainPassActive && impl->encoder) {
         // In game mode, update ImGui with the current render pass info
         if (!editorMode) {
