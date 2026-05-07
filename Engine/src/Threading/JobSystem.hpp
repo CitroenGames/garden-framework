@@ -7,6 +7,9 @@
 #include <unordered_map>
 #include <shared_mutex>
 #include <memory>
+#include <functional>
+#include <string>
+#include <thread>
 
 namespace Threading {
 
@@ -27,6 +30,11 @@ public:
 
     void waitForJob(JobHandle handle);
     void waitForJobs(const std::vector<JobHandle>& handles);
+    void parallelFor(const std::string& name,
+                     size_t item_count,
+                     size_t min_batch_size,
+                     const std::function<void(size_t begin, size_t end)>& work,
+                     JobPriority priority = JobPriority::Normal);
 
     void processMainThreadJobs();
     void processMainThreadJobs(size_t max_jobs);
@@ -59,6 +67,7 @@ private:
 
     std::atomic<JobHandle> m_next_handle{1};
     std::atomic<bool> m_initialized{false};
+    std::thread::id m_main_thread_id;
 };
 
 } // namespace Threading

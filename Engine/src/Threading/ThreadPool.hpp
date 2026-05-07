@@ -26,14 +26,17 @@ public:
 
     void shutdown();
     void waitForIdle();
+    bool tryRunOneJob();
 
     size_t getWorkerCount() const { return m_workers.size(); }
     size_t getPendingJobCount() const;
 
 private:
     void workerThread(size_t worker_id);
+    void executeJob(JobData* job);
     JobData* trySteal(size_t thief_id);
     JobData* getNextJob(size_t worker_id);
+    JobData* getNextExternalJob();
 
     std::vector<std::thread> m_workers;
 

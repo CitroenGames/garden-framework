@@ -6,6 +6,7 @@
 #include "Utils/FileHash.hpp"
 #include "Utils/GltfLoader.hpp"
 #include "Utils/ObjLoader.hpp"
+#include "Threading/JobSystem.hpp"
 #include <filesystem>
 #include <algorithm>
 #include <cstdio>
@@ -318,26 +319,89 @@ const std::vector<ScannedAsset>& AssetScanner::getScannedAssets() const
 
 void AssetScanner::processAllPending()
 {
-    // Process synchronously for now; can be made async via JobSystem later
-    std::lock_guard<std::mutex> lock(m_mutex);
+    std::vector<std::string> pending_paths;
 
-    for (auto& asset : m_scanned_assets)
     {
-        if (asset.status == AssetScanStatus::NeedsScan ||
-            asset.status == AssetScanStatus::NeedsUpdate)
+        std::lock_guard<std::mutex> lock(m_mutex);
+        for (auto& asset : m_scanned_assets)
         {
-            asset.status = AssetScanStatus::Processing;
-            if (processAsset(asset.source_path))
+            if (asset.status == AssetScanStatus::NeedsScan ||
+                asset.status == AssetScanStatus::NeedsUpdate)
             {
+                asset.status = AssetScanStatus::Processing;
+                pending_paths.push_back(asset.source_path);
+            }
+        }
+    }
+
+    for (const auto& path : pending_paths)
+    {
+        const bool success = processAsset(path);
+        std::lock_guard<std::mutex> lock(m_mutex);
+        for (auto& asset : m_scanned_assets)
+        {
+            if (asset.source_path != path)
+                continue;
+
+            if (success) {
                 asset.status = AssetScanStatus::UpToDate;
                 AssetMetadataSerializer::load(asset.metadata, AssetMetadataSerializer::getMetaPath(asset.source_path));
-            }
-            else
-            {
+            } else {
                 asset.status = AssetScanStatus::Error;
                 asset.error_message = "Failed to process asset";
             }
+            break;
         }
+    }
+}
+
+void AssetScanner::processPendingAsync()
+{
+    if (!Threading::JobSystem::get().isInitialized())
+    {
+        processAllPending();
+        return;
+    }
+
+    std::vector<std::string> pending_paths;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        for (auto& asset : m_scanned_assets)
+        {
+            if (asset.status == AssetScanStatus::NeedsScan ||
+                asset.status == AssetScanStatus::NeedsUpdate)
+            {
+                asset.status = AssetScanStatus::Processing;
+                pending_paths.push_back(asset.source_path);
+            }
+        }
+    }
+
+    for (const auto& path : pending_paths)
+    {
+        Threading::JobSystem::get().createJob()
+            .setName("AssetScannerProcess")
+            .setWork([this, path]() {
+                const bool success = processAsset(path);
+                std::lock_guard<std::mutex> lock(m_mutex);
+                for (auto& asset : m_scanned_assets)
+                {
+                    if (asset.source_path != path)
+                        continue;
+
+                    if (success) {
+                        asset.status = AssetScanStatus::UpToDate;
+                        AssetMetadataSerializer::load(asset.metadata, AssetMetadataSerializer::getMetaPath(asset.source_path));
+                    } else {
+                        asset.status = AssetScanStatus::Error;
+                        asset.error_message = "Failed to process asset";
+                    }
+                    break;
+                }
+            })
+            .setPriority(Threading::JobPriority::Low)
+            .setContext(Threading::JobContext::Worker)
+            .submit();
     }
 }
 

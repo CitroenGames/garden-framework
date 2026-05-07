@@ -16,6 +16,7 @@
 #include "Assets/CompiledTextureSerializer.hpp"
 #include "Assets/AssetMetadata.hpp"
 #include "Assets/LODGenerator.hpp"
+#include "Assets/MeshChunker.hpp"
 
 // Forward declarations
 class world;
@@ -196,6 +197,10 @@ struct MeshPreloadData {
     bool has_lod_metadata = false;
     std::unique_ptr<Assets::AssetMetadata> lod_metadata;
     std::vector<Assets::LODMeshData> lod_mesh_data;
+
+    // CPU-prepared chunk/index buffers for LOD0. This is built on workers so
+    // the main thread only uploads already prepared data.
+    std::unique_ptr<Assets::ChunkedTriangleMesh> prepared_chunked_mesh;
 
     // Pre-loaded compiled texture data (.ctex files, for compiled meshes)
     // Key: absolute texture file path

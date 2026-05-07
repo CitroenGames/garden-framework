@@ -83,6 +83,7 @@ public:
 
     // GPU-side mesh data (VAO/VBO)
     IGPUMesh* gpu_mesh;
+    bool owns_gpu_mesh;
 
     // Single texture mode (for backward compatibility)
     TextureHandle texture;
@@ -100,6 +101,7 @@ public:
     // Async loading support (atomic for thread-safe read from worker threads)
     std::atomic<MeshLoadState> load_state{MeshLoadState::NotLoaded};
     Assets::AssetHandle asset_handle;
+    std::shared_ptr<mesh> resource_owner;
 
     // AABB for frustum culling
     glm::vec3 aabb_min{0.0f};
@@ -109,6 +111,7 @@ public:
     // LOD support
     struct LODLevel {
         IGPUMesh* gpu_mesh = nullptr;
+        bool owns_gpu_mesh = true;
         size_t vertex_count = 0;
         size_t index_count = 0;
         float screen_threshold = 0.0f;
@@ -116,27 +119,31 @@ public:
 
         LODLevel() = default;
         LODLevel(LODLevel&& other) noexcept
-            : gpu_mesh(other.gpu_mesh), vertex_count(other.vertex_count)
+            : gpu_mesh(other.gpu_mesh), owns_gpu_mesh(other.owns_gpu_mesh)
+            , vertex_count(other.vertex_count)
             , index_count(other.index_count), screen_threshold(other.screen_threshold)
             , material_ranges(std::move(other.material_ranges))
         {
             other.gpu_mesh = nullptr;
+            other.owns_gpu_mesh = true;
         }
         LODLevel& operator=(LODLevel&& other) noexcept
         {
             if (this != &other)
             {
-                if (gpu_mesh) delete gpu_mesh;
+                if (owns_gpu_mesh && gpu_mesh) delete gpu_mesh;
                 gpu_mesh = other.gpu_mesh;
+                owns_gpu_mesh = other.owns_gpu_mesh;
                 vertex_count = other.vertex_count;
                 index_count = other.index_count;
                 screen_threshold = other.screen_threshold;
                 material_ranges = std::move(other.material_ranges);
                 other.gpu_mesh = nullptr;
+                other.owns_gpu_mesh = true;
             }
             return *this;
         }
-        ~LODLevel() { if (gpu_mesh) { delete gpu_mesh; gpu_mesh = nullptr; } }
+        ~LODLevel() { if (owns_gpu_mesh && gpu_mesh) { delete gpu_mesh; gpu_mesh = nullptr; } }
         LODLevel(const LODLevel&) = delete;
         LODLevel& operator=(const LODLevel&) = delete;
     };
@@ -152,6 +159,7 @@ public:
         this->owns_vertices = false;
         this->is_valid = (vertices != nullptr && vertices_len > 0);
         this->gpu_mesh = nullptr;
+        this->owns_gpu_mesh = true;
         visible = true;
         culling = true;
         transparent = false;
@@ -173,6 +181,7 @@ public:
         owns_vertices = true;
         is_valid = false;
         gpu_mesh = nullptr;
+        owns_gpu_mesh = true;
         visible = true;
         culling = true;
         transparent = false;
@@ -199,6 +208,7 @@ public:
         owns_vertices = true;
         is_valid = false;
         gpu_mesh = nullptr;
+        owns_gpu_mesh = true;
         visible = true;
         culling = true;
         transparent = false;
@@ -224,6 +234,7 @@ public:
         owns_vertices = other.owns_vertices;
         is_valid = other.is_valid;
         gpu_mesh = other.gpu_mesh;
+        owns_gpu_mesh = other.owns_gpu_mesh;
         texture = other.texture;
         texture_set = other.texture_set;
         material_ranges = std::move(other.material_ranges);
@@ -233,6 +244,7 @@ public:
         transparent = other.transparent;
         load_state.store(other.load_state.load(std::memory_order_relaxed), std::memory_order_relaxed);
         asset_handle = other.asset_handle;
+        resource_owner = std::move(other.resource_owner);
         aabb_min = other.aabb_min;
         aabb_max = other.aabb_max;
         bounds_computed = other.bounds_computed;
@@ -244,6 +256,7 @@ public:
         other.vertices = nullptr;
         other.vertices_len = 0;
         other.gpu_mesh = nullptr;
+        other.owns_gpu_mesh = true;
         other.owns_vertices = false;
         other.load_state.store(MeshLoadState::NotLoaded, std::memory_order_relaxed);
         other.bounds_computed = false;
@@ -258,7 +271,7 @@ public:
         {
             // Clean up current
             if (owns_vertices && vertices) delete[] vertices;
-            if (gpu_mesh) delete gpu_mesh;
+            if (owns_gpu_mesh && gpu_mesh) delete gpu_mesh;
 
             // Move from other
             vertices = other.vertices;
@@ -266,6 +279,7 @@ public:
             owns_vertices = other.owns_vertices;
             is_valid = other.is_valid;
             gpu_mesh = other.gpu_mesh;
+            owns_gpu_mesh = other.owns_gpu_mesh;
             texture = other.texture;
             texture_set = other.texture_set;
             material_ranges = std::move(other.material_ranges);
@@ -275,6 +289,7 @@ public:
             transparent = other.transparent;
             load_state.store(other.load_state.load(std::memory_order_relaxed), std::memory_order_relaxed);
             asset_handle = other.asset_handle;
+            resource_owner = std::move(other.resource_owner);
             aabb_min = other.aabb_min;
             aabb_max = other.aabb_max;
             bounds_computed = other.bounds_computed;
@@ -286,6 +301,7 @@ public:
             other.vertices = nullptr;
             other.vertices_len = 0;
             other.gpu_mesh = nullptr;
+            other.owns_gpu_mesh = true;
             other.owns_vertices = false;
             other.load_state.store(MeshLoadState::NotLoaded, std::memory_order_relaxed);
             other.bounds_computed = false;
@@ -308,7 +324,7 @@ public:
             vertices = nullptr;
         }
 
-        if (gpu_mesh)
+        if (owns_gpu_mesh && gpu_mesh)
         {
             delete gpu_mesh;
             gpu_mesh = nullptr;
@@ -341,6 +357,7 @@ public:
         if (!gpu_mesh)
         {
             gpu_mesh = api->createMesh();
+            owns_gpu_mesh = true;
         }
 
         // Deduplicate vertices and create index buffer

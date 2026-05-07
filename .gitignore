@@ -438,7 +438,9 @@ FodyWeavers.xsd
 *.vcxproj
 *.vcxproj.filters
 
-/build/
+/build/*
+!/build/Directory.Solution.targets
+!/build/Garden.SerialBuild.proj
 .DS_Store
 pipeline_cache.bin
 imgui.ini

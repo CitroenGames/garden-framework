@@ -1,8 +1,11 @@
 #include "GltfLoader.hpp"
 #include "TangentGenerator.hpp"
+#include "Threading/JobSystem.hpp"
 #include <iostream>
 #include <cmath>
 #include <algorithm>
+#include <atomic>
+#include <functional>
 #include <map>
 #include <set>
 
@@ -54,46 +57,124 @@ GltfLoadResult GltfLoader::loadGltfGeometry(const std::string& filename, const G
         return result;
     }
 
-    std::vector<vertex> vertices;
-    std::vector<int> material_indices;
-    std::vector<size_t> primitive_vertex_counts;
+    struct PrimitiveWork {
+        const tinygltf::Primitive* primitive = nullptr;
+        int material_index = -1;
+    };
 
-    // Process all scenes and nodes
+    std::vector<PrimitiveWork> primitive_work;
+    std::function<bool(int)> collect_node = [&](int node_index) -> bool {
+        if (node_index < 0 || node_index >= static_cast<int>(model.nodes.size()))
+            return true;
+
+        const auto& node = model.nodes[node_index];
+        if (node.mesh >= 0 && node.mesh < static_cast<int>(model.meshes.size())) {
+            const auto& mesh = model.meshes[node.mesh];
+            for (const auto& primitive : mesh.primitives) {
+                primitive_work.push_back({ &primitive, primitive.material });
+            }
+        }
+
+        for (int child_index : node.children) {
+            if (!collect_node(child_index))
+                return false;
+        }
+
+        return true;
+    };
+
     for (const auto& scene : model.scenes) {
         for (int node_index : scene.nodes) {
-            if (node_index >= 0 && node_index < model.nodes.size()) {
-                if (!processNodeWithMaterials(model, model.nodes[node_index], vertices, material_indices, primitive_vertex_counts, config)) {
-                    result.error_message = "Failed to process node " + std::to_string(node_index);
-                    logError(config, result.error_message);
-                    return result;
-                }
+            if (!collect_node(node_index)) {
+                result.error_message = "Failed to collect glTF node " + std::to_string(node_index);
+                logError(config, result.error_message);
+                return result;
             }
         }
     }
 
-    if (vertices.empty()) {
+    if (primitive_work.empty()) {
         result.error_message = "No geometry found in glTF file";
         logError(config, result.error_message);
         return result;
     }
 
-    // Convert to array format
-    result.vertex_count = vertices.size();
-    result.vertices = new vertex[result.vertex_count];
+    std::vector<std::vector<vertex>> primitive_vertices(primitive_work.size());
+    std::vector<std::string> primitive_errors(primitive_work.size());
+    std::atomic<bool> failed{false};
 
-    for (size_t i = 0; i < result.vertex_count; ++i) {
-        result.vertices[i] = vertices[i];
+    auto process_range = [&](size_t begin, size_t end) {
+        for (size_t i = begin; i < end; ++i) {
+            if (failed.load(std::memory_order_acquire))
+                return;
 
-        if (config.validate_normals || config.validate_texcoords) {
-            if (!validateVertex(result.vertices[i], config)) {
-                logError(config, "Invalid vertex data at index " + std::to_string(i));
+            std::vector<vertex> local_vertices;
+            if (!primitive_work[i].primitive ||
+                !processPrimitive(model, *primitive_work[i].primitive, local_vertices, config)) {
+                primitive_errors[i] = "Failed to process primitive " + std::to_string(i);
+                failed.store(true, std::memory_order_release);
+                return;
             }
+
+            primitive_vertices[i] = std::move(local_vertices);
         }
+    };
+
+    const bool use_parallel_primitives =
+        primitive_work.size() >= 8 &&
+        Threading::JobSystem::get().isInitialized() &&
+        Threading::JobSystem::get().getWorkerCount() > 1;
+
+    if (use_parallel_primitives) {
+        Threading::JobSystem::get().parallelFor(
+            "GltfPrimitiveLoad",
+            primitive_work.size(),
+            1,
+            process_range,
+            Threading::JobPriority::High);
+    } else {
+        process_range(0, primitive_work.size());
     }
 
-    // Store material indices and vertex counts
-    result.material_indices = std::move(material_indices);
-    result.primitive_vertex_counts = std::move(primitive_vertex_counts);
+    if (failed.load(std::memory_order_acquire)) {
+        auto it = std::find_if(primitive_errors.begin(), primitive_errors.end(),
+                               [](const std::string& error) { return !error.empty(); });
+        result.error_message = (it != primitive_errors.end()) ? *it : "Failed to process glTF primitive";
+        logError(config, result.error_message);
+        return result;
+    }
+
+    result.vertex_count = 0;
+    result.material_indices.reserve(primitive_work.size());
+    result.primitive_vertex_counts.reserve(primitive_work.size());
+    for (size_t i = 0; i < primitive_work.size(); ++i) {
+        result.material_indices.push_back(primitive_work[i].material_index);
+        result.primitive_vertex_counts.push_back(primitive_vertices[i].size());
+        result.vertex_count += primitive_vertices[i].size();
+    }
+
+    if (result.vertex_count == 0) {
+        result.error_message = "No vertices found in glTF file";
+        logError(config, result.error_message);
+        return result;
+    }
+
+    result.vertices = new vertex[result.vertex_count];
+
+    size_t write_offset = 0;
+    for (const auto& primitive_vertex_list : primitive_vertices) {
+        for (const auto& v : primitive_vertex_list) {
+            result.vertices[write_offset] = v;
+
+            if (config.validate_normals || config.validate_texcoords) {
+                if (!validateVertex(result.vertices[write_offset], config)) {
+                    logError(config, "Invalid vertex data at index " + std::to_string(write_offset));
+                }
+            }
+
+            ++write_offset;
+        }
+    }
 
     // Extract basic material names for compatibility
     result.material_names.clear();

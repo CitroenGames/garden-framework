@@ -1,5 +1,7 @@
 #include "JobSystem.hpp"
 #include "Utils/Log.hpp"
+#include <algorithm>
+#include <chrono>
 
 namespace Threading {
 
@@ -20,6 +22,7 @@ bool JobSystem::initialize(size_t num_worker_threads) {
 
     LOG_ENGINE_INFO("JobSystem: Initializing...");
 
+    m_main_thread_id = std::this_thread::get_id();
     m_thread_pool = std::make_unique<ThreadPool>(num_worker_threads);
 
     LOG_ENGINE_INFO("JobSystem: Initialized with {} worker threads", m_thread_pool->getWorkerCount());
@@ -62,6 +65,9 @@ JobHandle JobSystem::submitJob(std::unique_ptr<JobData> job) {
 
     JobHandle handle = m_next_handle.fetch_add(1, std::memory_order_relaxed);
     job->handle = handle;
+    job->completion_notify = [this](JobHandle completed) {
+        notifyJobComplete(completed);
+    };
 
     int32_t pending_deps = 0;
     for (JobHandle dep : job->dependencies) {
@@ -157,12 +163,73 @@ void JobSystem::waitForJob(JobHandle handle) {
     JobData* job = getJobData(handle);
     if (!job) return;
 
+    using namespace std::chrono_literals;
+    while (job->completion_future.wait_for(0ms) != std::future_status::ready) {
+        bool made_progress = false;
+
+        if (std::this_thread::get_id() == m_main_thread_id && m_main_thread_queue.hasPending()) {
+            made_progress = m_main_thread_queue.processN(1) > 0;
+        }
+
+        if (!made_progress && m_thread_pool) {
+            made_progress = m_thread_pool->tryRunOneJob();
+        }
+
+        if (!made_progress) {
+            job->completion_future.wait_for(1ms);
+        }
+    }
+
     job->completion_future.wait();
 }
 
 void JobSystem::waitForJobs(const std::vector<JobHandle>& handles) {
     for (JobHandle handle : handles) {
         waitForJob(handle);
+    }
+}
+
+void JobSystem::parallelFor(const std::string& name,
+                            size_t item_count,
+                            size_t min_batch_size,
+                            const std::function<void(size_t begin, size_t end)>& work,
+                            JobPriority priority) {
+    if (item_count == 0 || !work)
+        return;
+
+    const size_t worker_count = getWorkerCount();
+    if (!isInitialized() || worker_count <= 1 || item_count <= min_batch_size) {
+        work(0, item_count);
+        return;
+    }
+
+    min_batch_size = std::max<size_t>(1, min_batch_size);
+    const size_t desired_jobs = (item_count + min_batch_size - 1) / min_batch_size;
+    const size_t max_jobs = std::max<size_t>(1, worker_count * 4);
+    const size_t job_count = std::min(desired_jobs, max_jobs);
+    const size_t batch_size = (item_count + job_count - 1) / job_count;
+
+    std::vector<JobHandle> jobs;
+    jobs.reserve(job_count);
+
+    for (size_t begin = 0; begin < item_count; begin += batch_size) {
+        const size_t end = std::min(item_count, begin + batch_size);
+        auto handle = createJob()
+            .setName(name)
+            .setWork([work, begin, end]() { work(begin, end); })
+            .setPriority(priority)
+            .setContext(JobContext::Worker)
+            .submit();
+        jobs.push_back(handle);
+    }
+
+    waitForJobs(jobs);
+
+    for (JobHandle handle : jobs) {
+        if (getJobStatus(handle) == JobStatus::Failed) {
+            LOG_ENGINE_ERROR("JobSystem::parallelFor '{}' had a failed batch", name);
+            break;
+        }
     }
 }
 

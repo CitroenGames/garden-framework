@@ -130,6 +130,75 @@ JobData* ThreadPool::getNextJob(size_t worker_id) {
     return trySteal(worker_id);
 }
 
+JobData* ThreadPool::getNextExternalJob() {
+    std::lock_guard<std::mutex> lock(m_global_mutex);
+    if (m_global_queue.empty())
+        return nullptr;
+
+    JobData* job = m_global_queue.front();
+    m_global_queue.pop_front();
+    return job;
+}
+
+bool ThreadPool::tryRunOneJob() {
+    if (m_shutdown)
+        return false;
+
+    JobData* job = getNextExternalJob();
+    if (!job)
+        return false;
+
+    executeJob(job);
+    return true;
+}
+
+void ThreadPool::executeJob(JobData* job) {
+    if (!job)
+        return;
+
+    m_active_workers.fetch_add(1, std::memory_order_relaxed);
+
+    job->status.store(JobStatus::Running, std::memory_order_release);
+
+    bool success = true;
+    try {
+        if (job->work) {
+            job->work();
+        }
+    } catch (const std::exception& e) {
+        LOG_ENGINE_ERROR("ThreadPool: Job '{}' threw exception: {}", job->name, e.what());
+        success = false;
+    } catch (...) {
+        LOG_ENGINE_ERROR("ThreadPool: Job '{}' threw unknown exception", job->name);
+        success = false;
+    }
+
+    job->status.store(success ? JobStatus::Completed : JobStatus::Failed,
+                     std::memory_order_release);
+
+    try {
+        job->completion_promise.set_value(success);
+    } catch (...) {
+    }
+
+    if (job->on_complete) {
+        try {
+            job->on_complete(job->handle, success);
+        } catch (...) {
+        }
+    }
+
+    if (job->completion_notify) {
+        try {
+            job->completion_notify(job->handle);
+        } catch (...) {
+        }
+    }
+
+    m_pending_jobs.fetch_sub(1, std::memory_order_relaxed);
+    m_active_workers.fetch_sub(1, std::memory_order_relaxed);
+}
+
 void ThreadPool::workerThread(size_t worker_id) {
     LOG_ENGINE_TRACE("ThreadPool: Worker {} started", worker_id);
 
@@ -157,42 +226,8 @@ void ThreadPool::workerThread(size_t worker_id) {
             }
         }
 
-        if (job) {
-            m_active_workers.fetch_add(1, std::memory_order_relaxed);
-
-            job->status.store(JobStatus::Running, std::memory_order_release);
-
-            bool success = true;
-            try {
-                if (job->work) {
-                    job->work();
-                }
-            } catch (const std::exception& e) {
-                LOG_ENGINE_ERROR("ThreadPool: Job '{}' threw exception: {}", job->name, e.what());
-                success = false;
-            } catch (...) {
-                LOG_ENGINE_ERROR("ThreadPool: Job '{}' threw unknown exception", job->name);
-                success = false;
-            }
-
-            job->status.store(success ? JobStatus::Completed : JobStatus::Failed,
-                             std::memory_order_release);
-
-            try {
-                job->completion_promise.set_value(success);
-            } catch (...) {
-            }
-
-            if (job->on_complete) {
-                try {
-                    job->on_complete(job->handle, success);
-                } catch (...) {
-                }
-            }
-
-            m_pending_jobs.fetch_sub(1, std::memory_order_relaxed);
-            m_active_workers.fetch_sub(1, std::memory_order_relaxed);
-        }
+        if (job)
+            executeJob(job);
     }
 
     LOG_ENGINE_TRACE("ThreadPool: Worker {} exiting", worker_id);

@@ -22,13 +22,6 @@ MaterialLoadResult GltfMaterialLoader::loadMaterials(const std::string& filename
 {
     MaterialLoadResult result;
     
-    if (!render_api)
-    {
-        result.error_message = "Render API is null";
-        logError(config, result.error_message);
-        return result;
-    }
-    
     logMessage(config, "Loading materials from: " + filename);
     
     tinygltf::Model model;
@@ -416,14 +409,16 @@ TextureInfo GltfMaterialLoader::processTexture(int texture_index,
         // External texture file
         tex_info.uri = image.uri;
         tex_info.is_embedded = false;
-        tex_info.handle = loadTextureFromUri(image.uri, config, render_api, texture_cache);
+        if (render_api)
+            tex_info.handle = loadTextureFromUri(image.uri, config, render_api, texture_cache);
     }
     else if (config.load_embedded_textures && !image.image.empty())
     {
         // Embedded texture
         tex_info.uri = "embedded_texture_" + std::to_string(gltf_texture.source);
         tex_info.is_embedded = true;
-        tex_info.handle = loadEmbeddedTexture(image, render_api, config);
+        if (render_api)
+            tex_info.handle = loadEmbeddedTexture(image, render_api, config);
         
         // Cache embedded textures too
         if (tex_info.handle != INVALID_TEXTURE)
@@ -442,6 +437,10 @@ TextureHandle GltfMaterialLoader::loadTextureFromUri(const std::string& uri,
                                                     IRenderAPI* render_api,
                                                     std::map<std::string, TextureHandle>& texture_cache)
 {
+    // Check cache first
+    if (!render_api)
+        return INVALID_TEXTURE;
+
     // Check cache first
     if (config.cache_textures)
     {
@@ -487,6 +486,9 @@ TextureHandle GltfMaterialLoader::loadEmbeddedTexture(const tinygltf::Image& ima
         logError(config, "Invalid embedded texture data");
         return INVALID_TEXTURE;
     }
+
+    if (!render_api)
+        return INVALID_TEXTURE;
 
     logMessage(config, "Loading embedded texture: " +
                std::to_string(image.width) + "x" + std::to_string(image.height) +

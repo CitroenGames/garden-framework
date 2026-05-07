@@ -19,6 +19,7 @@
 #include "Threading/JobSystem.hpp"
 #include <iostream>
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <functional>
@@ -30,6 +31,26 @@ static constexpr uint32_t LEVEL_BINARY_MAGIC   = 0x47444E4C; // "GDNL"
 static constexpr uint32_t LEVEL_BINARY_VERSION  = 5;
 static constexpr uint32_t LEVEL_BINARY_VERSION_V4 = 4;
 static constexpr uint32_t LEVEL_BINARY_VERSION_V3 = 3; // Previous version for backward compat
+
+class ScopedLoadTimer {
+public:
+    explicit ScopedLoadTimer(const char* label)
+        : m_label(label)
+        , m_start(std::chrono::steady_clock::now())
+    {
+    }
+
+    ~ScopedLoadTimer()
+    {
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - m_start);
+        LOG_ENGINE_INFO("{} took {} ms", m_label, elapsed.count());
+    }
+
+private:
+    const char* m_label;
+    std::chrono::steady_clock::time_point m_start;
+};
 
 // stringToColliderShapeType and colliderShapeTypeToString are inline in Components.hpp
 
@@ -535,14 +556,163 @@ static bool uploadChunkedMaterialMesh(const std::shared_ptr<mesh>& m_ptr, IRende
         return false;
     }
 
-    if (m_ptr->gpu_mesh)
+    if (m_ptr->owns_gpu_mesh && m_ptr->gpu_mesh)
         delete m_ptr->gpu_mesh;
     m_ptr->gpu_mesh = chunked_gpu;
+    m_ptr->owns_gpu_mesh = true;
     m_ptr->setMaterialRanges(chunked.material_ranges);
 
     LOG_ENGINE_TRACE("Chunked mesh into {} ranges ({} verts, {} indices)",
                      chunked.material_ranges.size(), chunked.vertices.size(), chunked.indices.size());
     return true;
+}
+
+static std::vector<MaterialRange> buildGltfSourceRangesForChunking(const GltfLoadResult& gltf)
+{
+    std::vector<MaterialRange> ranges;
+    ranges.reserve(gltf.primitive_vertex_counts.size());
+
+    size_t current_vertex = 0;
+    for (size_t i = 0; i < gltf.primitive_vertex_counts.size(); ++i) {
+        MaterialRange range(current_vertex, gltf.primitive_vertex_counts[i], INVALID_TEXTURE, "");
+        range.source_range = i;
+        ranges.push_back(range);
+        current_vertex += gltf.primitive_vertex_counts[i];
+    }
+
+    return ranges;
+}
+
+static std::vector<MaterialRange> buildFullSourceRangeForChunking(size_t vertex_count)
+{
+    MaterialRange range(0, vertex_count, INVALID_TEXTURE, "");
+    range.source_range = 0;
+    return { range };
+}
+
+static void prepareChunkedLOD0(MeshPreloadData& data)
+{
+    Assets::MeshChunkConfig cfg = getStaticMeshChunkConfig();
+    if (!cfg.enabled)
+        return;
+
+    const vertex* vertices = nullptr;
+    size_t vertex_count = 0;
+    std::vector<MaterialRange> source_ranges;
+
+    if (data.type == MeshPreloadData::Type::GLTF && data.gltf_geometry) {
+        vertices = data.gltf_geometry->vertices;
+        vertex_count = data.gltf_geometry->vertex_count;
+        source_ranges = buildGltfSourceRangesForChunking(*data.gltf_geometry);
+    } else if (data.type == MeshPreloadData::Type::OBJ && data.obj_result) {
+        vertices = data.obj_result->vertices;
+        vertex_count = data.obj_result->vertex_count;
+        source_ranges = buildFullSourceRangeForChunking(vertex_count);
+    } else {
+        return;
+    }
+
+    if (!vertices || vertex_count < 3)
+        return;
+
+    auto chunked = std::make_unique<Assets::ChunkedTriangleMesh>(
+        Assets::MeshChunker::buildChunkedIndexedMesh(vertices, vertex_count, source_ranges, cfg));
+
+    if (!chunked->vertices.empty() && !chunked->indices.empty() && !chunked->material_ranges.empty())
+        data.prepared_chunked_mesh = std::move(chunked);
+}
+
+static bool uploadPreparedChunkedMaterialMesh(const std::shared_ptr<mesh>& m_ptr,
+                                             const Assets::ChunkedTriangleMesh& chunked,
+                                             IRenderAPI* render_api)
+{
+    if (!m_ptr || !render_api || chunked.vertices.empty() ||
+        chunked.indices.empty() || chunked.material_ranges.empty())
+        return false;
+
+    std::vector<MaterialRange> material_ranges = chunked.material_ranges;
+    if (m_ptr->uses_material_ranges) {
+        for (auto& range : material_ranges) {
+            if (const auto* base_range = findMaterialTemplate(m_ptr->material_ranges, range.source_range))
+                copyMaterialPayload(range, *base_range);
+        }
+    }
+
+    IGPUMesh* chunked_gpu = render_api->createMesh();
+    if (!chunked_gpu)
+        return false;
+
+    chunked_gpu->uploadIndexedMeshData(
+        chunked.vertices.data(), chunked.vertices.size(),
+        chunked.indices.data(), chunked.indices.size());
+
+    if (!chunked_gpu->isUploaded()) {
+        delete chunked_gpu;
+        return false;
+    }
+
+    if (m_ptr->owns_gpu_mesh && m_ptr->gpu_mesh)
+        delete m_ptr->gpu_mesh;
+    m_ptr->gpu_mesh = chunked_gpu;
+    m_ptr->owns_gpu_mesh = true;
+    m_ptr->setMaterialRanges(material_ranges);
+
+    LOG_ENGINE_TRACE("Uploaded prepared chunked mesh with {} ranges ({} verts, {} indices)",
+                     material_ranges.size(), chunked.vertices.size(), chunked.indices.size());
+    return true;
+}
+
+static void applyLevelMeshProperties(const std::shared_ptr<mesh>& m_ptr, const LevelEntity& entity)
+{
+    if (!m_ptr)
+        return;
+
+    m_ptr->culling = entity.culling;
+    m_ptr->transparent = entity.transparent;
+    m_ptr->visible = entity.visible;
+    m_ptr->casts_shadow = entity.casts_shadow;
+    m_ptr->force_lod = entity.force_lod;
+    m_ptr->updateTransparencyFromMaterials();
+}
+
+static std::shared_ptr<mesh> makeMeshInstanceView(const std::shared_ptr<mesh>& resource, const LevelEntity& entity)
+{
+    if (!resource)
+        return nullptr;
+
+    auto instance = std::make_shared<mesh>(resource->vertices, resource->vertices_len);
+    instance->owns_vertices = false;
+    instance->is_valid = resource->is_valid;
+    instance->gpu_mesh = resource->gpu_mesh;
+    instance->owns_gpu_mesh = false;
+    instance->texture = resource->texture;
+    instance->texture_set = resource->texture_set;
+    instance->material_ranges = resource->material_ranges;
+    instance->uses_material_ranges = resource->uses_material_ranges;
+    instance->load_state.store(resource->load_state.load(std::memory_order_acquire),
+                               std::memory_order_release);
+    instance->asset_handle = resource->asset_handle;
+    instance->aabb_min = resource->aabb_min;
+    instance->aabb_max = resource->aabb_max;
+    instance->bounds_computed = resource->bounds_computed;
+    instance->current_lod.store(resource->current_lod.load(std::memory_order_relaxed),
+                                std::memory_order_relaxed);
+
+    instance->lod_levels.reserve(resource->lod_levels.size());
+    for (const auto& resource_lod : resource->lod_levels) {
+        mesh::LODLevel lod_view;
+        lod_view.gpu_mesh = resource_lod.gpu_mesh;
+        lod_view.owns_gpu_mesh = false;
+        lod_view.vertex_count = resource_lod.vertex_count;
+        lod_view.index_count = resource_lod.index_count;
+        lod_view.screen_threshold = resource_lod.screen_threshold;
+        lod_view.material_ranges = resource_lod.material_ranges;
+        instance->lod_levels.push_back(std::move(lod_view));
+    }
+
+    instance->resource_owner = resource;
+    applyLevelMeshProperties(instance, entity);
+    return instance;
 }
 
 LevelManager::LevelManager()
@@ -1597,6 +1767,7 @@ std::shared_ptr<mesh> LevelManager::loadMesh(const LevelEntity& entity, IRenderA
         
         // Create mesh from glTF data
         m_ptr = std::make_shared<mesh>(map_result.vertices, map_result.vertex_count);
+        m_ptr->owns_vertices = true;
 
         // Apply textures
         bool texture_applied = false;
@@ -2008,6 +2179,7 @@ std::shared_ptr<mesh> LevelManager::loadCompiledMesh(const std::string& cmesh_pa
 void LevelManager::preloadMeshCPU(MeshPreloadData& data)
 {
     // This runs on a worker thread - NO GPU calls, NO render_api, NO ECS access
+    ScopedLoadTimer timer("Mesh CPU preload");
 
     const std::string& resolved_path = data.resolved_path;
     if (resolved_path.empty()) {
@@ -2087,6 +2259,8 @@ void LevelManager::preloadMeshCPU(MeshPreloadData& data)
             data.error_message = "Failed to load glTF geometry: " + data.gltf_geometry->error_message;
             return;
         }
+
+        prepareChunkedLOD0(data);
     }
     else
     {
@@ -2106,6 +2280,8 @@ void LevelManager::preloadMeshCPU(MeshPreloadData& data)
             data.error_message = "Failed to load OBJ: " + data.obj_result->error_message;
             return;
         }
+
+        prepareChunkedLOD0(data);
     }
 
     // Load LOD metadata (applies to non-compiled GLTF/OBJ meshes)
@@ -2391,6 +2567,7 @@ std::shared_ptr<mesh> LevelManager::finalizeMeshGPU(
     IRenderAPI* render_api)
 {
     // Main thread only - takes pre-loaded CPU data and does GPU uploads
+    ScopedLoadTimer timer("Mesh GPU finalize");
     if (!preload.success) return nullptr;
 
     // Compiled mesh path
@@ -2406,6 +2583,7 @@ std::shared_ptr<mesh> LevelManager::finalizeMeshGPU(
 
         // Create mesh from preloaded geometry
         m_ptr = std::make_shared<mesh>(gltf.vertices, gltf.vertex_count);
+        m_ptr->owns_vertices = true;
         // Transfer ownership
         gltf.vertices = nullptr;
         gltf.vertex_count = 0;
@@ -2496,6 +2674,7 @@ std::shared_ptr<mesh> LevelManager::finalizeMeshGPU(
 
         // Create mesh from preloaded OBJ data
         m_ptr = std::make_shared<mesh>(obj.vertices, obj.vertex_count);
+        m_ptr->owns_vertices = true;
         // Transfer ownership
         obj.vertices = nullptr;
         obj.vertex_count = 0;
@@ -2576,8 +2755,17 @@ std::shared_ptr<mesh> LevelManager::finalizeMeshGPU(
     }
 
     if (render_api && m_ptr->is_valid && !m_ptr->isUploadedToGPU()) {
-        if (!uploadChunkedMaterialMesh(m_ptr, render_api))
+        const bool can_use_prepared_chunking =
+            preload.prepared_chunked_mesh &&
+            !m_ptr->transparent &&
+            !hasAlphaBlendRange(m_ptr->material_ranges);
+
+        if (can_use_prepared_chunking) {
+            if (!uploadPreparedChunkedMaterialMesh(m_ptr, *preload.prepared_chunked_mesh, render_api))
+                m_ptr->uploadToGPU(render_api);
+        } else if (!uploadChunkedMaterialMesh(m_ptr, render_api)) {
             m_ptr->uploadToGPU(render_api);
+        }
     }
 
     return m_ptr;
@@ -2592,6 +2780,7 @@ bool LevelManager::instantiateLevelParallel(
     entt::entity* out_player_rep_entity)
 {
     LOG_ENGINE_INFO("Instantiating level (parallel): {}", level_data.metadata.level_name);
+    ScopedLoadTimer timer("Level instantiation");
 
     // ========================================================================
     // PHASE 1: SCAN - Collect unique mesh paths (main thread, fast)
@@ -2668,7 +2857,9 @@ bool LevelManager::instantiateLevelParallel(
     std::vector<entt::entity> created_entities;
     created_entities.reserve(level_data.entities.size());
 
-    // Cache finalized meshes to avoid duplicate GPU uploads for same path
+    // Cache finalized resources to avoid duplicate GPU uploads for same path.
+    // Entity components receive lightweight instance views so per-entity render
+    // state does not leak between users of the same mesh asset.
     std::unordered_map<std::string, std::shared_ptr<mesh>> finalized_meshes;
 
     // Helper to get or finalize a mesh from the preload cache
@@ -2679,7 +2870,7 @@ bool LevelManager::instantiateLevelParallel(
         // Check if already finalized (GPU-level dedup)
         auto fin_it = finalized_meshes.find(resolved);
         if (fin_it != finalized_meshes.end()) {
-            return fin_it->second;
+            return makeMeshInstanceView(fin_it->second, ent);
         }
 
         // Look up preloaded data
@@ -2694,8 +2885,9 @@ bool LevelManager::instantiateLevelParallel(
         auto mesh_ptr = finalizeMeshGPU(*pre_it->second, ent, render_api);
         if (mesh_ptr) {
             finalized_meshes[resolved] = mesh_ptr;
+            return makeMeshInstanceView(mesh_ptr, ent);
         }
-        return mesh_ptr;
+        return nullptr;
     };
 
     // Create all entities (same logic as instantiateLevel, using preloaded data)
@@ -2886,210 +3078,11 @@ bool LevelManager::instantiateLevel(
     entt::entity* out_freecam_entity,
     entt::entity* out_player_rep_entity)
 {
-    printf("Instantiating level: %s\n", level_data.metadata.level_name.c_str());
-
-    // Apply world settings
-    game_world.setGravity(level_data.metadata.gravity);
-    game_world.setFixedDelta(level_data.metadata.fixed_delta);
-
-    // Initialize output pointers
-    if (out_player_entity) *out_player_entity = entt::null;
-    if (out_freecam_entity) *out_freecam_entity = entt::null;
-    if (out_player_rep_entity) *out_player_rep_entity = entt::null;
-
-    // Map to store entities by name for reference resolution
-    std::map<std::string, entt::entity> entity_map;
-    
-    // Store created entities corresponding to level_data.entities indices
-    std::vector<entt::entity> created_entities;
-    created_entities.reserve(level_data.entities.size());
-
-    LevelMeshResolver loadMeshForLevel = [&](const std::string&, const LevelEntity& ent) -> std::shared_ptr<mesh> {
-        return loadMesh(ent, render_api);
-    };
-
-    // Create all entities
-    for (const auto& entity_data : level_data.entities)
-    {
-        // Create entity in registry
-        auto e = game_world.registry.create();
-        created_entities.push_back(e);
-        
-        if (!entity_data.name.empty()) {
-            entity_map[entity_data.name] = e;
-        }
-
-        // Add Transform
-        game_world.registry.emplace<TransformComponent>(e, entity_data.position.x, entity_data.position.y, entity_data.position.z);
-        auto& transform = game_world.registry.get<TransformComponent>(e);
-        transform.rotation = entity_data.rotation;
-        transform.scale = entity_data.scale;
-
-        // Add Tag
-        game_world.registry.emplace<TagComponent>(e, entity_data.name);
-
-        // Load and add Mesh
-        if (entity_data.type == EntityType::Renderable ||
-            entity_data.type == EntityType::Physical ||
-            entity_data.type == EntityType::PlayerRep)
-        {
-            if (!entity_data.mesh_path.empty()) { 
-                auto mesh_ptr = loadMesh(entity_data, render_api);
-                if (mesh_ptr) {
-                    game_world.registry.emplace<MeshComponent>(e, mesh_ptr);
-                }
-            }
-        }
-
-        // Add Physics components
-        if (entity_data.type == EntityType::Physical ||
-            entity_data.type == EntityType::Player)
-        {
-            if (entity_data.has_rigidbody || entity_data.type == EntityType::Physical) {
-                game_world.registry.emplace<RigidBodyComponent>(e);
-                auto& rb = game_world.registry.get<RigidBodyComponent>(e);
-                rb.mass = entity_data.mass;
-                rb.apply_gravity = entity_data.apply_gravity;
-                rb.motion_type = stringToBodyMotionType(entity_data.body_motion_type);
-            }
-        }
-        
-        setupLevelColliderComponent(game_world.registry, e, entity_data, loadMeshForLevel);
-        deserializeReflectedComponents(m_reflection, game_world.registry, e, entity_data.reflected_components);
-        createLevelPhysicsBody(game_world, e, entity_data);
-
-        // Player
-        if (entity_data.type == EntityType::Player)
-        {
-            auto& pc = game_world.registry.get_or_emplace<PlayerComponent>(e);
-            pc.speed = entity_data.speed;
-            pc.jump_force = entity_data.jump_force;
-            pc.mouse_sensitivity = entity_data.mouse_sensitivity;
-
-            auto& cc = game_world.registry.get_or_emplace<CharacterControllerComponent>(e);
-            cc.move_speed = entity_data.speed;
-            cc.jump_velocity = entity_data.jump_force;
-            cc.input_enabled = pc.input_enabled;
-            cc.capsule_half_height = pc.capsule_half_height;
-            cc.capsule_radius = pc.capsule_radius;
-
-            // Ensure player has a RigidBodyComponent
-            if (!game_world.registry.all_of<RigidBodyComponent>(e))
-            {
-                game_world.registry.emplace<RigidBodyComponent>(e);
-                auto& rb = game_world.registry.get<RigidBodyComponent>(e);
-                rb.mass = 80.0f;
-                rb.apply_gravity = false;
-            }
-
-            // Create Jolt capsule body for player collision
-            {
-                game_world.getPhysicsSystem().createPlayerBody(game_world.registry, e);
-            }
-            
-            if (out_player_entity) *out_player_entity = e;
-            printf("NOTE: Player entity '%s' created\n", entity_data.name.c_str());
-        }
-
-        // Freecam
-        if (entity_data.type == EntityType::Freecam)
-        {
-            auto& fc = game_world.registry.get_or_emplace<FreecamComponent>(e);
-            fc.movement_speed = entity_data.movement_speed;
-            fc.fast_movement_speed = entity_data.fast_movement_speed;
-            fc.mouse_sensitivity = entity_data.mouse_sensitivity;
-            
-            if (out_freecam_entity) *out_freecam_entity = e;
-            printf("NOTE: Freecam entity '%s' created\n", entity_data.name.c_str());
-        }
-
-        // Player Rep
-        if (entity_data.type == EntityType::PlayerRep)
-        {
-             auto& pr = game_world.registry.get_or_emplace<PlayerRepresentationComponent>(e);
-             pr.position_offset = entity_data.position_offset;
-             // tracked_player resolved in second pass
-
-             if (out_player_rep_entity) *out_player_rep_entity = e;
-        }
-
-        if (entity_data.type == EntityType::PointLight)
-        {
-            auto& pl = game_world.registry.get_or_emplace<PointLightComponent>(e);
-            pl.color = entity_data.light_color;
-            pl.intensity = entity_data.light_intensity;
-            pl.range = entity_data.light_range;
-            pl.constant_attenuation = entity_data.light_constant_attenuation;
-            pl.linear_attenuation = entity_data.light_linear_attenuation;
-            pl.quadratic_attenuation = entity_data.light_quadratic_attenuation;
-        }
-
-        if (entity_data.type == EntityType::SpotLight)
-        {
-            auto& sl = game_world.registry.get_or_emplace<SpotLightComponent>(e);
-            sl.color = entity_data.light_color;
-            sl.intensity = entity_data.light_intensity;
-            sl.range = entity_data.light_range;
-            sl.inner_cone_angle = entity_data.light_inner_cone_angle;
-            sl.outer_cone_angle = entity_data.light_outer_cone_angle;
-            sl.constant_attenuation = entity_data.light_constant_attenuation;
-            sl.linear_attenuation = entity_data.light_linear_attenuation;
-            sl.quadratic_attenuation = entity_data.light_quadratic_attenuation;
-        }
-        // Constraint (data only — resolved in third pass)
-        if (entity_data.has_constraint)
-        {
-            auto& cc = game_world.registry.get_or_emplace<ConstraintComponent>(e);
-            cc.type = stringToConstraintType(entity_data.constraint_type);
-            cc.target_entity_name = entity_data.constraint_target_name;
-            cc.anchor_1 = entity_data.constraint_anchor_1;
-            cc.anchor_2 = entity_data.constraint_anchor_2;
-            cc.hinge_axis = entity_data.constraint_hinge_axis;
-            cc.hinge_min_limit = entity_data.constraint_hinge_min;
-            cc.hinge_max_limit = entity_data.constraint_hinge_max;
-            cc.min_distance = entity_data.constraint_min_distance;
-            cc.max_distance = entity_data.constraint_max_distance;
-        }
-    }
-
-    // Second pass: Resolve references (PlayerRepresentation)
-    for (size_t i = 0; i < level_data.entities.size(); ++i) {
-        const auto& entity_data = level_data.entities[i];
-        if (entity_data.type == EntityType::PlayerRep) {
-            entt::entity e = created_entities[i];
-            auto& pr = game_world.registry.get<PlayerRepresentationComponent>(e);
-            
-            if (!entity_data.tracked_player_name.empty()) {
-                auto it = entity_map.find(entity_data.tracked_player_name);
-                if (it != entity_map.end()) {
-                    pr.tracked_player = it->second;
-                } else {
-                    printf("WARNING: PlayerRepresentation '%s' cannot find tracked player '%s'\n", 
-                           entity_data.name.c_str(), entity_data.tracked_player_name.c_str());
-                }
-            }
-        }
-    }
-
-    // Third pass: Create constraints (requires both bodies to exist)
-    for (size_t i = 0; i < level_data.entities.size(); ++i) {
-        const auto& entity_data = level_data.entities[i];
-        if (entity_data.has_constraint) {
-            entt::entity e = created_entities[i];
-            if (game_world.registry.all_of<ConstraintComponent>(e)) {
-                auto& cc = game_world.registry.get<ConstraintComponent>(e);
-                auto target_it = entity_map.find(entity_data.constraint_target_name);
-                if (target_it != entity_map.end()) {
-                    cc.target_entity = target_it->second;
-                    game_world.getPhysicsSystem().createConstraint(e, cc.target_entity, cc);
-                } else {
-                    printf("WARNING: Constraint on '%s' cannot find target '%s'\n",
-                           entity_data.name.c_str(), entity_data.constraint_target_name.c_str());
-                }
-            }
-        }
-    }
-
-    printf("Level instantiation complete: %d entities\n", (int)level_data.entities.size());
-    return true;
+    return instantiateLevelParallel(
+        level_data,
+        game_world,
+        render_api,
+        out_player_entity,
+        out_freecam_entity,
+        out_player_rep_entity);
 }

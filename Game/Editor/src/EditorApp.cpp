@@ -528,7 +528,7 @@ bool EditorApp::initialize(RenderAPIType api_type)
     }
 
     m_asset_scanner.scanDirectory("assets");
-    m_asset_scanner.processAllPending();
+    m_asset_scanner.processPendingAsync();
 
     // Editor plugins — load AFTER project/assets so plugins see a populated context.
     initializePlugins();
@@ -1282,7 +1282,7 @@ void EditorApp::beginPlay()
             m_server_world.initializePhysics();
 
             // Instantiate level into server world
-            m_level_manager.instantiateLevel(m_play_snapshot, m_server_world,
+            m_level_manager.instantiateLevelParallel(m_play_snapshot, m_server_world,
                 m_app.getRenderAPI(), nullptr, nullptr, nullptr);
 
             // Set up server EngineServices
@@ -1352,7 +1352,7 @@ void EditorApp::beginPlay()
                                 // Create isolated world
                                 inst->client_world = world();
                                 inst->client_world.initializePhysics();
-                                m_level_manager.instantiateLevel(m_play_snapshot, inst->client_world,
+                                m_level_manager.instantiateLevelParallel(m_play_snapshot, inst->client_world,
                                     m_app.getRenderAPI(), nullptr, nullptr, nullptr);
 
                                 // Load a separate DLL copy (hot-reload mechanism gives us isolation)
@@ -1487,7 +1487,7 @@ void EditorApp::beginPlay()
                             inst->window_title = "Player " + std::to_string(i);
                             inst->client_world = world();
                             inst->client_world.initializePhysics();
-                            m_level_manager.instantiateLevel(m_play_snapshot, inst->client_world,
+                            m_level_manager.instantiateLevelParallel(m_play_snapshot, inst->client_world,
                                 m_app.getRenderAPI(), nullptr, nullptr, nullptr);
 
                             if (!inst->game_module.load(dll_path))
@@ -1633,7 +1633,7 @@ void EditorApp::stopPlay()
     m_level_data = m_play_snapshot;
     m_level_settings.metadata = &m_level_data.metadata;
 
-    m_level_manager.instantiateLevel(
+    m_level_manager.instantiateLevelParallel(
         m_play_snapshot, m_world, m_app.getRenderAPI(),
         nullptr, nullptr, nullptr);
 
@@ -2993,7 +2993,7 @@ void EditorApp::openLevel(const std::string& path)
     m_level_data = std::move(new_data);
     m_level_settings.metadata = &m_level_data.metadata;
 
-    m_level_manager.instantiateLevel(
+    m_level_manager.instantiateLevelParallel(
         m_level_data, m_world, m_app.getRenderAPI(),
         nullptr, nullptr, nullptr);
 
@@ -3060,7 +3060,7 @@ void EditorApp::restoreFromSnapshot(const LevelData& snapshot)
     m_level_data = snapshot;
     m_level_settings.metadata = &m_level_data.metadata;
 
-    m_level_manager.instantiateLevel(
+    m_level_manager.instantiateLevelParallel(
         m_level_data, m_world, m_app.getRenderAPI(),
         nullptr, nullptr, nullptr);
 

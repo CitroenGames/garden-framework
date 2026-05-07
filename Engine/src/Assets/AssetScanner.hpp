@@ -33,6 +33,7 @@ public:
     AssetScanStatus checkAsset(const std::string& asset_path);
     const std::vector<ScannedAsset>& getScannedAssets() const;
     void processAllPending();
+    void processPendingAsync();
     bool regenerateAsset(const std::string& asset_path);
 
     void setLODConfig(const AssetMetadata::LODConfig& config) { m_default_lod_config = config; }

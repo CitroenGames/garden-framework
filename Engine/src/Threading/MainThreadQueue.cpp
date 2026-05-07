@@ -94,6 +94,13 @@ void MainThreadQueue::processJob(JobData* job) {
         } catch (...) {
         }
     }
+
+    if (job->completion_notify) {
+        try {
+            job->completion_notify(job->handle);
+        } catch (...) {
+        }
+    }
 }
 
 } // namespace Threading

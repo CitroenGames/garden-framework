@@ -40,14 +40,7 @@ LoadResult GltfAssetLoader::loadFromFile(const std::string& path,
     mat_config.load_embedded_textures = true;
     mat_config.texture_base_path = context.base_path;
 
-    GltfLoadResult gltf_result;
-
-    if (m_config.load_materials && context.render_api) {
-        gltf_result = GltfLoader::loadGltfWithMaterials(path, context.render_api,
-                                                        gltf_config, mat_config);
-    } else {
-        gltf_result = GltfLoader::loadGltf(path, gltf_config);
-    }
+    GltfLoadResult gltf_result = GltfLoader::loadGltf(path, gltf_config);
 
     if (!gltf_result.success) {
         result.success = false;
@@ -87,9 +80,19 @@ LoadResult GltfAssetLoader::loadFromFile(const std::string& path,
         );
     }
 
-    if (gltf_result.materials_loaded) {
-        for (size_t i = 0; i < gltf_result.material_data.materials.size(); ++i) {
-            model->materials.push_back(gltf_result.material_data.materials[i]);
+    if (m_config.load_materials) {
+        gltf_result.material_data = GltfMaterialLoader::loadMaterials(path, nullptr, mat_config);
+        gltf_result.materials_loaded = gltf_result.material_data.success;
+
+        if (gltf_result.materials_loaded) {
+            gltf_result.texture_paths.clear();
+            for (const auto& material : gltf_result.material_data.materials) {
+                model->materials.push_back(material);
+                for (const auto& tex : material.textures.textures) {
+                    if (!tex.uri.empty())
+                        gltf_result.texture_paths.push_back(tex.uri);
+                }
+            }
         }
     }
 

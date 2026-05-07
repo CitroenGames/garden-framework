@@ -45,6 +45,7 @@ struct JobData {
 
     std::vector<JobHandle> dependencies;
     JobCallback on_complete;
+    std::function<void(JobHandle)> completion_notify;
 
     std::atomic<JobStatus> status{JobStatus::Pending};
     std::atomic<int32_t> unfinished_dependencies{0};
@@ -66,6 +67,7 @@ struct JobData {
         , context(other.context)
         , dependencies(std::move(other.dependencies))
         , on_complete(std::move(other.on_complete))
+        , completion_notify(std::move(other.completion_notify))
         , status(other.status.load())
         , unfinished_dependencies(other.unfinished_dependencies.load())
         , ref_count(other.ref_count.load())
