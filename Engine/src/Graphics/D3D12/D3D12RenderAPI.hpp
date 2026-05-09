@@ -403,7 +403,8 @@ private:
                                                      bool useHeightmapDisplacement = false,
                                                      float heightmapHeightScale = 1.0f,
                                                      float heightmapHeightOffset = 0.0f,
-                                                     const glm::vec2& heightmapTexelSize = glm::vec2(0.0f));
+                                                     const glm::vec2& heightmapTexelSize = glm::vec2(0.0f),
+                                                     uint32_t materialFlags = 0);
     void updateGlobalCBuffer();
     void updatePerObjectCBuffer(const glm::vec3& color, bool useTexture, float alphaCutoff = 0.0f);
     void updateShadowCBuffer(const glm::mat4& lightSpace, const glm::mat4& model,

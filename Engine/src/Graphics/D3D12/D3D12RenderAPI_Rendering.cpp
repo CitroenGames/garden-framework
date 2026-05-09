@@ -980,6 +980,7 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
         item.object_cb.heightmapHeightScale = cmd.heightmap_height_scale;
         item.object_cb.heightmapHeightOffset = cmd.heightmap_height_offset;
         item.object_cb.heightmapTexelSize = cmd.heightmap_texel_size;
+        item.object_cb.materialFlags = static_cast<int>(cmd.material_flags);
 
         item.pso = m_replayPSOOverride;
         if (!item.pso)
@@ -1320,7 +1321,8 @@ void D3D12RenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
                                                cmd.use_heightmap_displacement,
                                                cmd.heightmap_height_scale,
                                                cmd.heightmap_height_offset,
-                                               cmd.heightmap_texel_size);
+                                               cmd.heightmap_texel_size,
+                                               cmd.material_flags);
         if (objAddr == 0) continue;
         commandList->SetGraphicsRootConstantBufferView(1, objAddr);
 

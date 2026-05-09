@@ -273,6 +273,48 @@ static bool testSourceDiagonalInputClampsSpeed()
     return pass(name);
 }
 
+static bool testSourceWaterMovement()
+{
+    const std::string name = "source movement water swimming";
+    auto tuning = makeSourceMovementTestTuning();
+    tuning.water_level = CharacterWaterLevel::Waist;
+    tuning.water_speed_scale = 0.8f;
+    tuning.water_acceleration = 5.5f;
+    tuning.water_friction = 5.2f;
+    tuning.water_sink_speed = 1.75f;
+
+    CharacterControllerState state;
+    state.grounded = true;
+    state.water_level = CharacterWaterLevel::Waist;
+    state.velocity = glm::vec3(4.0f, 0.0f, 0.0f);
+
+    const CharacterControllerState idle =
+        CharacterController::simulateSourceMovement(CharacterMoveInput{}, state, tuning);
+
+    if (idle.grounded)
+        return fail(name, "water movement stayed grounded");
+    if (idle.water_level != CharacterWaterLevel::Waist)
+        return fail(name, "water level was not preserved");
+    if (glm::length(idle.velocity) >= glm::length(state.velocity))
+        return fail(name, "water friction did not slow existing velocity");
+    if (idle.velocity.y >= 0.0f)
+        return fail(name, "idle water movement did not sink");
+
+    CharacterMoveInput jump_input;
+    jump_input.buttons = CharacterMoveFlags::Jump;
+    CharacterControllerState still_water = state;
+    still_water.velocity = glm::vec3(0.0f);
+    const CharacterControllerState swim_up =
+        CharacterController::simulateSourceMovement(jump_input, still_water, tuning);
+
+    if (swim_up.velocity.y <= 0.0f)
+        return fail(name, "jump did not swim upward in water");
+    if (swim_up.velocity.y >= tuning.jump_velocity)
+        return fail(name, "water jump used full ground jump impulse");
+
+    return pass(name);
+}
+
 static void run(const std::string& name)
 {
     std::cout << "[RUN] " << name << std::endl;
@@ -397,6 +439,51 @@ static bool testPlayerBodyDoesNotUseJoltGravity()
     float y = w.registry.get<TransformComponent>(player).position.y;
     if (!approx(y, 5.0f))
         return fail(name, "Jolt gravity moved the player body");
+
+    return pass(name);
+}
+
+static bool testWaterComponentProvidesSwimmingVolume()
+{
+    const std::string name = "water component provides swimming volume";
+
+    world w;
+    w.initializePhysics();
+
+    auto water_entity = w.registry.create();
+    w.registry.emplace<TransformComponent>(water_entity, 0.0f, 0.0f, 0.0f);
+    auto& water = w.registry.emplace<WaterComponent>(water_entity);
+    water.half_extents = glm::vec3(8.0f, 4.0f, 8.0f);
+    water.surface_offset = 0.25f;
+    water.swim_speed_scale = 0.55f;
+
+    auto player = w.registry.create();
+    w.registry.emplace<TransformComponent>(player, 0.0f, 0.0f, 0.0f);
+    auto& pc = w.registry.emplace<PlayerComponent>(player);
+    pc.speed = 10.0f;
+    pc.jump_force = 5.0f;
+    auto& rb = w.registry.emplace<RigidBodyComponent>(player);
+    rb.mass = 80.0f;
+    rb.apply_gravity = false;
+
+    if (w.getPhysicsSystem().createPlayerBody(w.registry, player).IsInvalid())
+        return fail(name, "failed to create player body");
+
+    CharacterMoveInput input;
+    const CharacterControllerState result =
+        w.simulate_character_controller(player, input, w.fixed_delta);
+
+    if (result.water_level < CharacterWaterLevel::Waist)
+        return fail(name, "character state did not enter swimming water level");
+    const auto& controller = w.registry.get<CharacterControllerComponent>(player);
+    if (!controller.swimming)
+        return fail(name, "CharacterControllerComponent swimming state was not synced");
+
+    water.affects_swimming = false;
+    const CharacterControllerState disabled_result =
+        w.simulate_character_controller(player, input, w.fixed_delta);
+    if (disabled_result.water_level != CharacterWaterLevel::None)
+        return fail(name, "disabled WaterComponent still affected swimming");
 
     return pass(name);
 }
@@ -818,12 +905,16 @@ int main()
     ok = testSourceAirAccelerationCap() && ok;
     run("source movement diagonal input clamps speed");
     ok = testSourceDiagonalInputClampsSpeed() && ok;
+    run("source movement water swimming");
+    ok = testSourceWaterMovement() && ok;
     run("dynamic gravity flag");
     ok = testDynamicGravityFlag() && ok;
     run("physics settings configure gravity");
     ok = testPhysicsSettingsConfigureGravity() && ok;
     run("player body gravity ownership");
     ok = testPlayerBodyDoesNotUseJoltGravity() && ok;
+    run("water component provides swimming volume");
+    ok = testWaterComponentProvidesSwimmingVolume() && ok;
     run("network-spawned player grounds on mesh");
     ok = testNetworkSpawnedPlayerGroundsOnMesh(repo_root) && ok;
     run("level player creates character controller");

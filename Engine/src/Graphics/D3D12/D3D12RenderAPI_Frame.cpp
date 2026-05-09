@@ -443,7 +443,8 @@ D3D12_GPU_VIRTUAL_ADDRESS D3D12RenderAPI::uploadPerObjectCBuffer(const glm::mat4
                                                                   bool useHeightmapDisplacement,
                                                                   float heightmapHeightScale,
                                                                   float heightmapHeightOffset,
-                                                                  const glm::vec2& heightmapTexelSize)
+                                                                  const glm::vec2& heightmapTexelSize,
+                                                                  uint32_t materialFlags)
 {
     D3D12PerObjectCBuffer cb = {};
     cb.model = model;
@@ -462,6 +463,7 @@ D3D12_GPU_VIRTUAL_ADDRESS D3D12RenderAPI::uploadPerObjectCBuffer(const glm::mat4
     cb.heightmapHeightScale = heightmapHeightScale;
     cb.heightmapHeightOffset = heightmapHeightOffset;
     cb.heightmapTexelSize = heightmapTexelSize;
+    cb.materialFlags = static_cast<int>(materialFlags);
 
     return m_cbUploadBuffer[m_frameIndex].allocate(sizeof(cb), &cb);
 }

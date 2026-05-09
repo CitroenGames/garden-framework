@@ -100,6 +100,7 @@ struct DrawCommand
     float         metallic     = 0.0f;
     float         roughness    = 0.5f;
     glm::vec3     emissive     = glm::vec3(0.0f);
+    uint32_t      material_flags = 0;
 
     // For range draws (renderMeshRange). If vertex_count == 0, draw entire mesh.
     size_t start_vertex = 0;
@@ -189,7 +190,8 @@ public:
                             bool use_heightmap_displacement = false,
                             float heightmap_height_scale = 1.0f,
                             float heightmap_height_offset = 0.0f,
-                            glm::vec2 heightmap_texel_size = glm::vec2(0.0f))
+                            glm::vec2 heightmap_texel_size = glm::vec2(0.0f),
+                            uint32_t material_flags = 0)
     {
         DrawCommand cmd;
         cmd.gpu_mesh = gpu_mesh;
@@ -208,6 +210,7 @@ public:
         cmd.metallic = metallic;
         cmd.roughness = roughness;
         cmd.emissive = emissive;
+        cmd.material_flags = material_flags;
         cmd.start_vertex = start_vertex;
         cmd.vertex_count = vertex_count;
         m_commands.push_back(cmd);
@@ -243,6 +246,7 @@ public:
                 if (a.heightmap_texel_size.y != b.heightmap_texel_size.y) return a.heightmap_texel_size.y < b.heightmap_texel_size.y;
                 if (a.metallic != b.metallic) return a.metallic < b.metallic;
                 if (a.roughness != b.roughness) return a.roughness < b.roughness;
+                if (a.material_flags != b.material_flags) return a.material_flags < b.material_flags;
                 if (vecLess(a.color, b.color)) return true;
                 if (vecLess(b.color, a.color)) return false;
                 return vecLess(a.emissive, b.emissive);

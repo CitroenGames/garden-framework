@@ -119,6 +119,8 @@ struct alignas(16) D3D12PerObjectCBuffer
     float _heightmapPad0;
     glm::vec2 heightmapTexelSize;
     glm::vec2 _heightmapPad1;
+    int materialFlags;
+    glm::vec3 _materialPad0;
 };
 
 struct alignas(16) D3D12ShadowCBuffer

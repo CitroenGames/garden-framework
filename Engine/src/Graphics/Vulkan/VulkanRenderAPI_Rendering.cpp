@@ -74,6 +74,7 @@ bool staticInstanceCompatible(const DrawCommand& a, const DrawCommand& b)
         && a.alpha_cutoff == b.alpha_cutoff
         && a.metallic == b.metallic
         && a.roughness == b.roughness
+        && a.material_flags == b.material_flags
         && vec3Equal(a.color, b.color)
         && vec3Equal(a.emissive, b.emissive);
 }
@@ -1091,6 +1092,7 @@ void VulkanRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
             objUbo.metallic = drawCmd.metallic;
             objUbo.roughness = drawCmd.roughness;
             objUbo.emissive = drawCmd.emissive;
+            objUbo.materialFlags = static_cast<int>(drawCmd.material_flags);
             objUbo.hasMetallicRoughnessMap = 0;
             objUbo.hasNormalMap = 0;
             objUbo.hasOcclusionMap = 0;
@@ -1252,6 +1254,7 @@ void VulkanRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmd
         item.objectUBO.metallic = drawCmd.metallic;
         item.objectUBO.roughness = drawCmd.roughness;
         item.objectUBO.emissive = drawCmd.emissive;
+        item.objectUBO.materialFlags = static_cast<int>(drawCmd.material_flags);
         item.objectUBO.hasMetallicRoughnessMap = 0;
         item.objectUBO.hasNormalMap = 0;
         item.objectUBO.hasOcclusionMap = 0;

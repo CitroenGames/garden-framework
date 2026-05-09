@@ -53,6 +53,7 @@ void copyRangePayload(MaterialRange& dst, const MaterialRange& src) {
     dst.alpha_mode = src.alpha_mode;
     dst.alpha_cutoff = src.alpha_cutoff;
     dst.double_sided = src.double_sided;
+    dst.material_flags = src.material_flags;
     dst.metallic_factor = src.metallic_factor;
     dst.roughness_factor = src.roughness_factor;
     dst.emissive_factor = src.emissive_factor;

@@ -94,6 +94,7 @@ static void copyMaterialPayload(MaterialRange& dst, const MaterialRange& src)
     dst.alpha_mode = src.alpha_mode;
     dst.alpha_cutoff = src.alpha_cutoff;
     dst.double_sided = src.double_sided;
+    dst.material_flags = src.material_flags;
     dst.metallic_factor = src.metallic_factor;
     dst.roughness_factor = src.roughness_factor;
     dst.emissive_factor = src.emissive_factor;
@@ -295,6 +296,14 @@ static void deserializeReflectedComponents(ReflectionRegistry* reflection,
     json entity_json = json::object();
     entity_json["components"] = components;
     ReflectionSerializer::deserializeEntity(registry, entity, entity_json, *reflection);
+}
+
+static void applyWaterComponentToEntityMesh(entt::registry& registry, entt::entity entity)
+{
+    auto* water = registry.try_get<WaterComponent>(entity);
+    auto* mesh_component = registry.try_get<MeshComponent>(entity);
+    if (water && mesh_component && mesh_component->m_mesh)
+        applyWaterComponentToMesh(*water, *mesh_component->m_mesh);
 }
 
 static std::shared_ptr<mesh> getVisualMesh(entt::registry& registry, entt::entity e)
@@ -1901,6 +1910,7 @@ std::shared_ptr<mesh> LevelManager::loadMesh(const LevelEntity& entity, IRenderA
                     range.roughness_factor = material.properties.roughness_factor;
                     range.emissive_factor = glm::vec3(material.properties.emissive_factor[0], material.properties.emissive_factor[1], material.properties.emissive_factor[2]);
                     range.base_color_factor = glm::vec4(material.properties.base_color_factor[0], material.properties.base_color_factor[1], material.properties.base_color_factor[2], material.properties.base_color_factor[3]);
+                    applyWaterMaterialDefaults(range);
 
                     // Wire PBR texture handles
                     const auto* mr_tex = material.textures.getTexture(TextureType::METALLIC_ROUGHNESS);
@@ -2160,6 +2170,7 @@ std::shared_ptr<mesh> LevelManager::loadCompiledMesh(const std::string& cmesh_pa
                     range.metallic_factor = mat_ref.metallic_factor;
                     range.roughness_factor = mat_ref.roughness_factor;
                     range.base_color_factor = glm::vec4(mat_ref.base_color_factor[0], mat_ref.base_color_factor[1], mat_ref.base_color_factor[2], mat_ref.base_color_factor[3]);
+                    applyWaterMaterialDefaults(range);
 
                     // Wire PBR texture handles from compiled material refs
                     for (const auto& tr : mat_ref.textures) {
@@ -2205,6 +2216,7 @@ std::shared_ptr<mesh> LevelManager::loadCompiledMesh(const std::string& cmesh_pa
                     range.metallic_factor = mat_ref.metallic_factor;
                     range.roughness_factor = mat_ref.roughness_factor;
                     range.base_color_factor = glm::vec4(mat_ref.base_color_factor[0], mat_ref.base_color_factor[1], mat_ref.base_color_factor[2], mat_ref.base_color_factor[3]);
+                    applyWaterMaterialDefaults(range);
 
                     // Wire PBR texture handles from compiled material refs
                     for (const auto& tr : mat_ref.textures) {
@@ -2522,6 +2534,7 @@ std::shared_ptr<mesh> LevelManager::finalizeCompiledMeshGPU(
                     range.metallic_factor = mat_ref.metallic_factor;
                     range.roughness_factor = mat_ref.roughness_factor;
                     range.base_color_factor = glm::vec4(mat_ref.base_color_factor[0], mat_ref.base_color_factor[1], mat_ref.base_color_factor[2], mat_ref.base_color_factor[3]);
+                    applyWaterMaterialDefaults(range);
 
                     // Wire PBR texture handles from compiled material refs
                     for (const auto& tr : mat_ref.textures) {
@@ -2581,6 +2594,7 @@ std::shared_ptr<mesh> LevelManager::finalizeCompiledMeshGPU(
                     range.metallic_factor = mat_ref.metallic_factor;
                     range.roughness_factor = mat_ref.roughness_factor;
                     range.base_color_factor = glm::vec4(mat_ref.base_color_factor[0], mat_ref.base_color_factor[1], mat_ref.base_color_factor[2], mat_ref.base_color_factor[3]);
+                    applyWaterMaterialDefaults(range);
 
                     // Wire PBR texture handles from compiled material refs
                     for (const auto& tr : mat_ref.textures) {
@@ -2742,6 +2756,7 @@ std::shared_ptr<mesh> LevelManager::finalizeMeshGPU(
                     range.roughness_factor = material.properties.roughness_factor;
                     range.emissive_factor = glm::vec3(material.properties.emissive_factor[0], material.properties.emissive_factor[1], material.properties.emissive_factor[2]);
                     range.base_color_factor = glm::vec4(material.properties.base_color_factor[0], material.properties.base_color_factor[1], material.properties.base_color_factor[2], material.properties.base_color_factor[3]);
+                    applyWaterMaterialDefaults(range);
 
                     // Wire PBR texture handles
                     const auto* mr_tex = material.textures.getTexture(TextureType::METALLIC_ROUGHNESS);
@@ -3046,6 +3061,7 @@ bool LevelManager::instantiateLevelParallel(
         setupLevelColliderComponent(game_world.registry, e, entity_data, getOrFinalizeMesh);
         deserializeReflectedComponents(m_reflection, game_world.registry, e, entity_data.reflected_components);
         setupLevelTerrainComponent(game_world.registry, e, entity_data, render_api);
+        applyWaterComponentToEntityMesh(game_world.registry, e);
         createLevelPhysicsBody(game_world, e, entity_data);
 
         // Player

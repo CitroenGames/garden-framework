@@ -126,6 +126,8 @@ struct PerObjectUBO {
     float _heightmapPad0;
     glm::vec2 heightmapTexelSize;
     glm::vec2 _heightmapPad1;
+    int materialFlags;
+    glm::vec3 _materialPad0;
     int useInstanceData;
     uint32_t instanceBase;
     glm::vec2 _instancePad;

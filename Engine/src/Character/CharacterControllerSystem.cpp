@@ -54,6 +54,126 @@ namespace
         return v;
     }
 
+    struct WaterSample
+    {
+        int level = CharacterWaterLevel::None;
+        float swim_speed_scale = 0.8f;
+        float water_acceleration = 5.5f;
+        float water_friction = 5.2f;
+        float water_sink_speed = 1.75f;
+
+        bool swimming() const
+        {
+            return level >= CharacterWaterLevel::Waist;
+        }
+    };
+
+    bool sampleInsideWaterBounds(const TransformComponent& transform,
+                                 const glm::vec3& half_extents,
+                                 float surface_offset,
+                                 const glm::vec3& point)
+    {
+        const glm::vec3 scaled_half_extents = glm::max(glm::abs(transform.scale) * half_extents,
+                                                       glm::vec3(0.0f));
+        const glm::vec3 min = transform.position - scaled_half_extents;
+        const glm::vec3 max = transform.position + scaled_half_extents;
+        const float surface_y = max.y + surface_offset;
+
+        return point.x >= min.x && point.x <= max.x &&
+               point.z >= min.z && point.z <= max.z &&
+               point.y >= min.y && point.y <= surface_y;
+    }
+
+    bool sampleInsideWaterVolume(const TransformComponent& transform,
+                                 const WaterVolumeComponent& water,
+                                 const glm::vec3& point)
+    {
+        return water.enabled &&
+            sampleInsideWaterBounds(transform, water.half_extents, water.surface_offset, point);
+    }
+
+    bool sampleInsideWaterComponent(const TransformComponent& transform,
+                                    const WaterComponent& water,
+                                    const glm::vec3& point)
+    {
+        return water.enabled && water.affects_swimming &&
+            sampleInsideWaterBounds(transform, water.half_extents, water.surface_offset, point);
+    }
+
+    void applyWaterVolumeSettings(WaterSample& sample, const WaterVolumeComponent& water)
+    {
+        sample.swim_speed_scale = std::max(water.swim_speed_scale, 0.0f);
+        sample.water_acceleration = std::max(water.water_acceleration, 0.0f);
+        sample.water_friction = std::max(water.water_friction, 0.0f);
+        sample.water_sink_speed = std::max(water.water_sink_speed, 0.0f);
+    }
+
+    void applyWaterComponentSettings(WaterSample& sample, const WaterComponent& water)
+    {
+        sample.swim_speed_scale = std::max(water.swim_speed_scale, 0.0f);
+        sample.water_acceleration = std::max(water.water_acceleration, 0.0f);
+        sample.water_friction = std::max(water.water_friction, 0.0f);
+        sample.water_sink_speed = std::max(water.water_sink_speed, 0.0f);
+    }
+
+    WaterSample sampleWaterVolumes(entt::registry& registry,
+                                   const CharacterControllerState& state,
+                                   const CharacterControllerComponent& controller)
+    {
+        WaterSample best;
+        const float capsule_half = std::max(controller.capsule_half_height, 0.0f) +
+            std::max(controller.capsule_radius, 0.0f);
+        const glm::vec3 feet = state.position + glm::vec3(0.0f, -capsule_half + 0.05f, 0.0f);
+        const glm::vec3 waist = state.position;
+        const glm::vec3 eyes = state.position + glm::vec3(0.0f, capsule_half * 0.8f, 0.0f);
+
+        auto view = registry.view<WaterVolumeComponent, TransformComponent>();
+        for (auto entity : view)
+        {
+            (void)entity;
+            const auto& water = view.get<WaterVolumeComponent>(entity);
+            const auto& transform = view.get<TransformComponent>(entity);
+
+            int level = CharacterWaterLevel::None;
+            if (sampleInsideWaterVolume(transform, water, feet))
+                level = CharacterWaterLevel::Feet;
+            if (sampleInsideWaterVolume(transform, water, waist))
+                level = CharacterWaterLevel::Waist;
+            if (sampleInsideWaterVolume(transform, water, eyes))
+                level = CharacterWaterLevel::Eyes;
+
+            if (level > best.level)
+            {
+                best.level = level;
+                applyWaterVolumeSettings(best, water);
+            }
+        }
+
+        auto component_view = registry.view<WaterComponent, TransformComponent>();
+        for (auto entity : component_view)
+        {
+            (void)entity;
+            const auto& water = component_view.get<WaterComponent>(entity);
+            const auto& transform = component_view.get<TransformComponent>(entity);
+
+            int level = CharacterWaterLevel::None;
+            if (sampleInsideWaterComponent(transform, water, feet))
+                level = CharacterWaterLevel::Feet;
+            if (sampleInsideWaterComponent(transform, water, waist))
+                level = CharacterWaterLevel::Waist;
+            if (sampleInsideWaterComponent(transform, water, eyes))
+                level = CharacterWaterLevel::Eyes;
+
+            if (level > best.level)
+            {
+                best.level = level;
+                applyWaterComponentSettings(best, water);
+            }
+        }
+
+        return best;
+    }
+
     CharacterController::MovementTuning makeMovementTuning(const CharacterControllerComponent& controller,
                                                            const PhysicsSystemSettings& settings,
                                                            float delta_time)
@@ -98,6 +218,8 @@ namespace
             cc.grounded = state.grounded;
             cc.ground_normal = state.ground_normal;
             cc.ground_velocity = state.ground_velocity;
+            cc.water_level = state.water_level;
+            cc.swimming = state.water_level >= CharacterWaterLevel::Waist;
         }
 
         if (registry.all_of<PlayerComponent>(entity))
@@ -262,6 +384,7 @@ CharacterControllerState CharacterControllerSystem::getState(entt::registry& reg
         state.grounded = controller.grounded;
         state.ground_normal = controller.ground_normal;
         state.ground_velocity = controller.ground_velocity;
+        state.water_level = controller.water_level;
     }
     else if (registry.all_of<PlayerComponent>(entity))
     {
@@ -391,6 +514,8 @@ CharacterControllerState CharacterControllerSystem::simulate(entt::registry& reg
 
     refresh(registry, entity, physics_system, temp_allocator, settings.layers);
     CharacterControllerState current = getState(registry, entity);
+    const WaterSample water = sampleWaterVolumes(registry, current, controller);
+    current.water_level = water.level;
 
     CharacterMoveInput effective_input = input;
     if (!controller.input_enabled)
@@ -400,7 +525,12 @@ CharacterControllerState CharacterControllerSystem::simulate(entt::registry& reg
         effective_input.buttons = 0;
     }
 
-    const CharacterController::MovementTuning tuning = makeMovementTuning(controller, settings, delta_time);
+    CharacterController::MovementTuning tuning = makeMovementTuning(controller, settings, delta_time);
+    tuning.water_level = water.level;
+    tuning.water_speed_scale = water.swim_speed_scale;
+    tuning.water_acceleration = water.water_acceleration;
+    tuning.water_friction = water.water_friction;
+    tuning.water_sink_speed = water.water_sink_speed;
     const CharacterControllerState predicted = CharacterController::simulateSourceMovement(
         effective_input, current, tuning);
     glm::vec3 new_velocity = predicted.velocity;
@@ -412,14 +542,20 @@ CharacterControllerState CharacterControllerSystem::simulate(entt::registry& reg
     character.SetLinearVelocity(toJolt(new_velocity));
 
     JPH::CharacterVirtual::ExtendedUpdateSettings update_settings;
-    update_settings.mStickToFloorStepDown = JPH::Vec3(0.0f, -std::max(controller.stick_to_floor_distance, 0.0f), 0.0f);
-    update_settings.mWalkStairsStepUp = JPH::Vec3(0.0f, std::max(controller.step_up_height, 0.0f), 0.0f);
+    update_settings.mStickToFloorStepDown = water.swimming()
+        ? JPH::Vec3::sZero()
+        : JPH::Vec3(0.0f, -std::max(controller.stick_to_floor_distance, 0.0f), 0.0f);
+    update_settings.mWalkStairsStepUp = water.swimming()
+        ? JPH::Vec3::sZero()
+        : JPH::Vec3(0.0f, std::max(controller.step_up_height, 0.0f), 0.0f);
 
     JPH::BodyFilter body_filter;
     JPH::ShapeFilter shape_filter;
     character.ExtendedUpdate(
         delta_time,
-        toJolt(settings.gravity_direction * settings.gravity_acceleration * controller.gravity_scale),
+        water.swimming()
+            ? JPH::Vec3::sZero()
+            : toJolt(settings.gravity_direction * settings.gravity_acceleration * controller.gravity_scale),
         update_settings,
         physics_system.GetDefaultBroadPhaseLayerFilter(settings.layers.dynamic_body),
         physics_system.GetDefaultLayerFilter(settings.layers.dynamic_body),
@@ -433,6 +569,13 @@ CharacterControllerState CharacterControllerSystem::simulate(entt::registry& reg
 
     CharacterControllerState result = getState(registry, entity);
     result.velocity = effective_velocity;
+    const WaterSample final_water = sampleWaterVolumes(registry, result, controller);
+    result.water_level = final_water.level;
+    if (final_water.swimming())
+    {
+        result.grounded = false;
+        result.ground_velocity = glm::vec3(0.0f);
+    }
     syncCharacterStateToComponents(registry, entity, result);
     return result;
 }

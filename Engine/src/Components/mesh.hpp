@@ -10,6 +10,7 @@
 #include <cstring>
 #include <atomic>
 #include <cstdint>
+#include <cctype>
 #include "Graphics/RenderAPI.hpp"
 #include "Graphics/IGPUMesh.hpp"
 #include "Utils/ObjLoader.hpp"
@@ -35,6 +36,19 @@ enum class MeshLoadState
     Failed
 };
 
+namespace MaterialFlags
+{
+    constexpr uint32_t None = 0;
+    constexpr uint32_t Water = 1u << 0;
+}
+
+inline bool materialNameLooksLikeWater(std::string name)
+{
+    std::transform(name.begin(), name.end(), name.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return name.find("water") != std::string::npos || name.find("ocean") != std::string::npos;
+}
+
 // Material range structure for multi-material support
 struct MaterialRange
 {
@@ -45,6 +59,7 @@ struct MaterialRange
     uint8_t alpha_mode = 0;     // 0=OPAQUE, 1=MASK, 2=BLEND
     float alpha_cutoff = 0.5f;  // Alpha test threshold (MASK mode)
     bool double_sided = false;  // Disable back-face culling
+    uint32_t material_flags = MaterialFlags::None;
 
     // PBR material properties (metallic-roughness workflow)
     float metallic_factor = 0.0f;
@@ -72,7 +87,26 @@ struct MaterialRange
     bool hasValidTexture() const { return texture != INVALID_TEXTURE; }
     bool isAlphaMask() const { return alpha_mode == 1; }
     bool isAlphaBlend() const { return alpha_mode == 2; }
+    bool isWater() const { return (material_flags & MaterialFlags::Water) != 0; }
 };
+
+inline void applyWaterMaterialDefaults(MaterialRange& range)
+{
+    if (!materialNameLooksLikeWater(range.material_name))
+        return;
+
+    range.material_flags |= MaterialFlags::Water;
+    if (range.isAlphaMask() && range.base_color_factor.a <= 0.01f)
+        range.alpha_mode = 0;
+    range.double_sided = true;
+    range.metallic_factor = 0.0f;
+    range.roughness_factor = std::min(range.roughness_factor, 0.08f);
+    if (range.base_color_factor.a <= 0.01f)
+        range.base_color_factor = glm::vec4(0.05f, 0.32f, 0.55f, 1.0f);
+    else
+        range.base_color_factor.a = std::max(range.base_color_factor.a, 1.0f);
+    range.emissive_factor = glm::max(range.emissive_factor, glm::vec3(0.0f, 0.025f, 0.04f));
+}
 
 class ENGINE_API mesh
 {
@@ -831,6 +865,7 @@ public:
                     range.alpha_mode = (props.alpha_mode == "MASK") ? 1 : (props.alpha_mode == "BLEND") ? 2 : 0;
                     range.alpha_cutoff = props.alpha_cutoff;
                     range.double_sided = props.double_sided;
+                    applyWaterMaterialDefaults(range);
 
                     // Wire PBR texture handles
                     const auto* mr_tex = mat.textures.getTexture(TextureType::METALLIC_ROUGHNESS);

@@ -49,6 +49,8 @@ cbuffer PerObjectCB : register(b1)
     float _heightmapPad0;
     float2 uHeightmapTexelSize;
     float2 _heightmapPad1;
+    int uMaterialFlags;
+    float3 _materialPad0;
 #ifdef TARGET_SPIRV
     int uUseInstanceData;
     uint uInstanceBase;

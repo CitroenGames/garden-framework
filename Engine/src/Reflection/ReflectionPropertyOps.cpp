@@ -20,14 +20,39 @@ namespace
 
     bool readVec(const json& value, float* out, size_t count)
     {
-        if (!value.is_array() || value.size() < count)
-            return false;
-
         float values[16]{};
-        for (size_t i = 0; i < count; ++i)
+
+        if (value.is_array())
         {
-            if (!readFloat(value[i], values[i]))
+            if (value.size() < count)
                 return false;
+
+            for (size_t i = 0; i < count; ++i)
+            {
+                if (!readFloat(value[i], values[i]))
+                    return false;
+            }
+        }
+        else if (value.is_object())
+        {
+            static constexpr const char* axis_names[] = {"x", "y", "z", "w"};
+            static constexpr const char* color_names[] = {"r", "g", "b", "a"};
+
+            for (size_t i = 0; i < count; ++i)
+            {
+                const json* component = nullptr;
+                if (auto it = value.find(axis_names[i]); it != value.end())
+                    component = &*it;
+                else if (auto it = value.find(color_names[i]); it != value.end())
+                    component = &*it;
+
+                if (!component || !readFloat(*component, values[i]))
+                    return false;
+            }
+        }
+        else
+        {
+            return false;
         }
 
         std::memcpy(out, values, sizeof(float) * count);

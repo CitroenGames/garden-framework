@@ -61,6 +61,7 @@ static MovementState toMovementState(const CharacterControllerState& state)
     out.velocity = state.velocity;
     out.grounded = state.grounded;
     out.ground_normal = state.ground_normal;
+    out.water_level = state.water_level;
     return out;
 }
 
@@ -71,6 +72,7 @@ static CharacterControllerState toCharacterControllerState(const MovementState& 
     out.velocity = state.velocity;
     out.grounded = state.grounded;
     out.ground_normal = state.ground_normal;
+    out.water_level = state.water_level;
     return out;
 }
 

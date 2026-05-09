@@ -4,11 +4,20 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 
 namespace CharacterMoveFlags
 {
     constexpr uint8_t Jump = 1 << 0;
+}
+
+namespace CharacterWaterLevel
+{
+    constexpr int None = 0;
+    constexpr int Feet = 1;
+    constexpr int Waist = 2;
+    constexpr int Eyes = 3;
 }
 
 struct CharacterMoveInput
@@ -27,6 +36,7 @@ struct CharacterControllerState
     bool grounded = false;
     glm::vec3 ground_normal = glm::vec3(0.0f, 1.0f, 0.0f);
     glm::vec3 ground_velocity = glm::vec3(0.0f);
+    int water_level = CharacterWaterLevel::None;
 };
 
 namespace CharacterController
@@ -45,6 +55,11 @@ namespace CharacterController
         float air_wish_speed_cap = 0.9375f;
         float surface_friction = 1.0f;
         float max_velocity = 100.0f;
+        int water_level = CharacterWaterLevel::None;
+        float water_speed_scale = 0.8f;
+        float water_acceleration = 5.5f;
+        float water_friction = 5.2f;
+        float water_sink_speed = 1.75f;
     };
 
     struct WishMove
@@ -100,6 +115,47 @@ namespace CharacterController
         return wish;
     }
 
+    inline WishMove buildWaterWishMove(const CharacterMoveInput& input,
+                                       const MovementTuning& tuning)
+    {
+        WishMove wish;
+        const float clamped_forward = std::clamp(input.move_forward, -1.0f, 1.0f);
+        const float clamped_right = std::clamp(input.move_right, -1.0f, 1.0f);
+        const float clamped_speed = std::max(tuning.max_speed, 0.0f);
+
+        const glm::vec3 view_rotation(
+            std::clamp(input.camera_pitch, -1.5f, 1.5f),
+            input.camera_yaw,
+            0.0f);
+        const glm::quat look_rotation = glm::quat(view_rotation);
+        const glm::quat yaw_rotation = glm::quat(glm::vec3(0.0f, input.camera_yaw, 0.0f));
+
+        const glm::vec3 forward = look_rotation * glm::vec3(0.0f, 0.0f, 1.0f);
+        const glm::vec3 right = yaw_rotation * glm::vec3(1.0f, 0.0f, 0.0f);
+
+        glm::vec3 wish_velocity =
+            forward * (clamped_forward * clamped_speed) +
+            right * (clamped_right * clamped_speed);
+
+        if (wantsJump(input))
+            wish_velocity.y += clamped_speed;
+        else if (std::abs(clamped_forward) < 0.001f && std::abs(clamped_right) < 0.001f)
+            wish_velocity.y -= std::max(tuning.water_sink_speed, 0.0f);
+
+        wish.speed = glm::length(wish_velocity);
+        if (wish.speed > clamped_speed && wish.speed > 0.0f)
+        {
+            wish_velocity *= clamped_speed / wish.speed;
+            wish.speed = clamped_speed;
+        }
+
+        wish.speed *= std::clamp(tuning.water_speed_scale, 0.0f, 1.0f);
+        if (wish.speed > 0.001f)
+            wish.direction = wish_velocity / glm::length(wish_velocity);
+
+        return wish;
+    }
+
     inline glm::vec3 applyFriction(glm::vec3 velocity, const MovementTuning& tuning)
     {
         velocity.y = 0.0f;
@@ -109,6 +165,21 @@ namespace CharacterController
 
         const float control = speed < tuning.stop_speed ? tuning.stop_speed : speed;
         const float drop = control * std::max(tuning.friction, 0.0f) *
+            std::max(tuning.surface_friction, 0.0f) * tuning.fixed_delta;
+        const float new_speed = std::max(speed - drop, 0.0f);
+        if (new_speed == speed)
+            return velocity;
+
+        return velocity * (new_speed / speed);
+    }
+
+    inline glm::vec3 applyWaterFriction(glm::vec3 velocity, const MovementTuning& tuning)
+    {
+        const float speed = glm::length(velocity);
+        if (speed < 0.1f)
+            return velocity;
+
+        const float drop = speed * std::max(tuning.water_friction, 0.0f) *
             std::max(tuning.surface_friction, 0.0f) * tuning.fixed_delta;
         const float new_speed = std::max(speed - drop, 0.0f);
         if (new_speed == speed)
@@ -161,6 +232,25 @@ namespace CharacterController
         return velocity + wish_dir * accel_speed;
     }
 
+    inline CharacterControllerState simulateWaterMovement(const CharacterMoveInput& input,
+                                                          const CharacterControllerState& current,
+                                                          const MovementTuning& tuning)
+    {
+        CharacterControllerState result = current;
+        result.grounded = false;
+        result.ground_velocity = glm::vec3(0.0f);
+        result.water_level = tuning.water_level;
+
+        const WishMove wish = buildWaterWishMove(input, tuning);
+        glm::vec3 new_velocity = applyWaterFriction(current.velocity, tuning);
+        new_velocity = accelerate(new_velocity, wish.direction, wish.speed, tuning.water_acceleration, tuning);
+        new_velocity = clampVectorLength(new_velocity, tuning.max_velocity);
+
+        result.velocity = new_velocity;
+        result.position += result.velocity * tuning.fixed_delta;
+        return result;
+    }
+
     inline CharacterControllerState simulateSourceMovement(const CharacterMoveInput& input,
                                                            const CharacterControllerState& current,
                                                            MovementTuning tuning)
@@ -170,6 +260,10 @@ namespace CharacterController
         tuning.fixed_delta = std::max(tuning.fixed_delta, 0.0f);
         tuning.stop_speed = std::max(tuning.stop_speed, 0.0f);
         tuning.air_wish_speed_cap = std::max(tuning.air_wish_speed_cap, 0.0f);
+        tuning.water_level = std::clamp(tuning.water_level, CharacterWaterLevel::None, CharacterWaterLevel::Eyes);
+
+        if (tuning.water_level >= CharacterWaterLevel::Waist)
+            return simulateWaterMovement(input, current, tuning);
 
         CharacterControllerState result = current;
         const WishMove wish = buildWishMove(input, tuning.max_speed);

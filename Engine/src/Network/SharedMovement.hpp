@@ -26,6 +26,7 @@ struct MovementState
     glm::vec3 velocity = glm::vec3(0.0f);
     bool grounded = false;
     glm::vec3 ground_normal = glm::vec3(0.0f, 1.0f, 0.0f);
+    int water_level = CharacterWaterLevel::None;
 };
 
 // Tuning parameters for movement simulation
@@ -44,6 +45,11 @@ struct MovementConfig
     float air_wish_speed_cap_ratio = 30.0f / 320.0f;
     float surface_friction = 1.0f;
     float max_velocity = 100.0f;
+    int water_level = CharacterWaterLevel::None;
+    float water_speed_scale = 0.8f;
+    float water_acceleration = 5.5f;
+    float water_friction = 5.2f;
+    float water_sink_speed = 1.75f;
 };
 
 namespace SharedMovement
@@ -68,6 +74,7 @@ namespace SharedMovement
         character_state.velocity = current.velocity;
         character_state.grounded = current.grounded;
         character_state.ground_normal = current.ground_normal;
+        character_state.water_level = current.water_level;
 
         CharacterController::MovementTuning tuning;
         tuning.max_speed = config.speed;
@@ -81,6 +88,11 @@ namespace SharedMovement
         tuning.air_wish_speed_cap = std::max(config.speed, 0.0f) * std::max(config.air_wish_speed_cap_ratio, 0.0f);
         tuning.surface_friction = config.surface_friction;
         tuning.max_velocity = config.max_velocity;
+        tuning.water_level = config.water_level;
+        tuning.water_speed_scale = config.water_speed_scale;
+        tuning.water_acceleration = config.water_acceleration;
+        tuning.water_friction = config.water_friction;
+        tuning.water_sink_speed = config.water_sink_speed;
 
         const CharacterControllerState simulated =
             CharacterController::simulateSourceMovement(character_input, character_state, tuning);
@@ -90,6 +102,7 @@ namespace SharedMovement
         result.velocity = simulated.velocity;
         result.grounded = simulated.grounded;
         result.ground_normal = simulated.ground_normal;
+        result.water_level = simulated.water_level;
         return result;
     }
 } // namespace SharedMovement

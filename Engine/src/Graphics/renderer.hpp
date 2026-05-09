@@ -135,6 +135,13 @@ public:
             m.uploadToGPU(api);
     }
 
+    static void prepare_water_mesh(entt::registry& registry, entt::entity entity, MeshComponent& mc)
+    {
+        auto* water = registry.try_get<WaterComponent>(entity);
+        if (water && mc.m_mesh)
+            applyWaterComponentToMesh(*water, *mc.m_mesh);
+    }
+
     static bool material_range_is_visible(const MaterialRange& range, const glm::mat4& model,
                                           const Frustum* frustum)
     {
@@ -176,6 +183,7 @@ public:
             && a.alpha_mode == b.alpha_mode
             && a.alpha_cutoff == b.alpha_cutoff
             && a.double_sided == b.double_sided
+            && a.material_flags == b.material_flags
             && a.metallic_factor == b.metallic_factor
             && a.roughness_factor == b.roughness_factor
             && a.emissive_factor.x == b.emissive_factor.x
@@ -321,7 +329,7 @@ public:
                                      range.metallic_factor, range.roughness_factor, range.emissive_factor,
                                      m.heightmap_texture, m.heightmap_displacement,
                                      m.heightmap_height_scale, m.heightmap_height_offset,
-                                     m.heightmap_texel_size);
+                                     m.heightmap_texel_size, range.material_flags);
                 });
         }
         else
@@ -380,7 +388,7 @@ public:
                                      range.metallic_factor, range.roughness_factor, range.emissive_factor,
                                      m.heightmap_texture, m.heightmap_displacement,
                                      m.heightmap_height_scale, m.heightmap_height_offset,
-                                     m.heightmap_texel_size);
+                                     m.heightmap_texel_size, range.material_flags);
                 });
         }
         else
@@ -680,6 +688,7 @@ public:
             if (!registry.valid(entity)) continue;
             auto* mc = registry.try_get<MeshComponent>(entity);
             if (!mc || !mc->m_mesh) continue;
+            prepare_water_mesh(registry, entity, *mc);
             ensure_mesh_uploaded(*mc->m_mesh, render_api);
 
             // Also ensure LOD meshes are uploaded
@@ -1184,6 +1193,7 @@ public:
                     auto& mesh_comp = view.get<MeshComponent>(entity);
                     if (mesh_comp.m_mesh && mesh_comp.m_mesh->visible && mesh_comp.m_mesh->casts_shadow)
                     {
+                        prepare_water_mesh(registry, entity, mesh_comp);
                         ensure_mesh_uploaded(*mesh_comp.m_mesh, render_api);
                         all_shadow.push_back(entity);
                     }
@@ -1351,6 +1361,7 @@ public:
 
                 if (mesh_comp.m_mesh && mesh_comp.m_mesh->visible)
                 {
+                    prepare_water_mesh(registry, entity, mesh_comp);
                     ensure_mesh_uploaded(*mesh_comp.m_mesh, render_api);
                     record_mesh_with_lod(*mesh_comp.m_mesh, t, all_cmds,
                                          global_lighting, cam_pos, proj, &camera_frustum);
@@ -1449,6 +1460,7 @@ public:
                     auto& mesh_comp = view.get<MeshComponent>(entity);
                     if (mesh_comp.m_mesh && mesh_comp.m_mesh->visible && mesh_comp.m_mesh->casts_shadow)
                     {
+                        prepare_water_mesh(registry, entity, mesh_comp);
                         ensure_mesh_uploaded(*mesh_comp.m_mesh, render_api);
                         all_shadow.push_back(entity);
                     }
@@ -1609,6 +1621,7 @@ public:
                 const auto& t = view.get<TransformComponent>(entity);
                 if (mesh_comp.m_mesh && mesh_comp.m_mesh->visible)
                 {
+                    prepare_water_mesh(registry, entity, mesh_comp);
                     ensure_mesh_uploaded(*mesh_comp.m_mesh, render_api);
                     record_mesh_with_lod(*mesh_comp.m_mesh, t, all_cmds,
                                          global_lighting, cam_pos, proj, &camera_frustum);

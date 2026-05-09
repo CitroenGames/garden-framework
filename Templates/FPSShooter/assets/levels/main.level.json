@@ -60,6 +60,42 @@
       }
     },
     {
+      "name": "ocean_water_volume",
+      "type": "Static",
+      "transform": {
+        "position": {
+          "x": -25.8862,
+          "y": -4.9901,
+          "z": -34.1862
+        },
+        "rotation": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "scale": {
+          "x": 1.0,
+          "y": 1.0,
+          "z": 1.0
+        }
+      },
+      "components": {
+        "WaterVolumeComponent": {
+          "half_extents": {
+            "x": 327.85,
+            "y": 4.0,
+            "z": 327.85
+          },
+          "surface_offset": 0.0,
+          "swim_speed_scale": 0.8,
+          "water_acceleration": 5.5,
+          "water_friction": 5.2,
+          "water_sink_speed": 1.75,
+          "enabled": true
+        }
+      }
+    },
+    {
       "name": "test_cube",
       "type": "Physical",
       "transform": {

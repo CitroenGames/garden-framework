@@ -1,3 +1,5 @@
+#include "Components/Components.hpp"
+#include "Reflection/EngineReflection.hpp"
 #include "Reflection/ReflectionPropertyOps.hpp"
 #include "Reflection/ReflectionRegistry.hpp"
 #include "Reflection/ReflectionSerializer.hpp"
@@ -237,6 +239,62 @@ namespace
         return pass(name);
     }
 
+    bool testWaterComponentReflectionAndObjectVectorJson()
+    {
+        const std::string name = "water component reflection and object vector json";
+
+        ReflectionRegistry reflection;
+        registerEngineReflection(reflection);
+
+        if (!reflection.findByName("WaterComponent"))
+            return fail(name, "WaterComponent was not registered");
+        if (!reflection.findByName("WaterVolumeComponent"))
+            return fail(name, "WaterVolumeComponent was not registered");
+
+        entt::registry registry;
+        entt::entity entity = registry.create();
+
+        nlohmann::json entity_json = nlohmann::json::object();
+        entity_json["components"]["WaterComponent"] = {
+            {"enabled", true},
+            {"affects_rendering", false},
+            {"affects_swimming", true},
+            {"half_extents", {{"x", 12.0f}, {"y", 3.0f}, {"z", 8.0f}}},
+            {"surface_offset", 1.5f},
+            {"swim_speed_scale", 0.6f}
+        };
+        entity_json["components"]["WaterVolumeComponent"] = {
+            {"enabled", true},
+            {"half_extents", {{"x", 6.0f}, {"y", 2.0f}, {"z", 4.0f}}}
+        };
+
+        ReflectionSerializer::deserializeEntity(registry, entity, entity_json, reflection);
+
+        auto* water = registry.try_get<WaterComponent>(entity);
+        auto* volume = registry.try_get<WaterVolumeComponent>(entity);
+        if (!water || !volume)
+            return fail(name, "water components were not deserialized");
+        if (!approx(water->half_extents.x, 12.0f) || !approx(water->half_extents.y, 3.0f) ||
+            !approx(water->half_extents.z, 8.0f))
+            return fail(name, "WaterComponent object vector JSON was not parsed");
+        if (!approx(volume->half_extents.x, 6.0f) || !approx(volume->half_extents.y, 2.0f) ||
+            !approx(volume->half_extents.z, 4.0f))
+            return fail(name, "WaterVolumeComponent object vector JSON was not parsed");
+        if (water->affects_rendering || !water->affects_swimming || !approx(water->surface_offset, 1.5f))
+            return fail(name, "WaterComponent scalar fields were not deserialized");
+
+        vertex vertices[3]{};
+        mesh water_mesh(vertices, 3);
+        WaterComponent render_water;
+        applyWaterComponentToMesh(render_water, water_mesh);
+        if (!water_mesh.uses_material_ranges || water_mesh.material_ranges.empty())
+            return fail(name, "WaterComponent did not create a material range");
+        if (!water_mesh.material_ranges.front().isWater())
+            return fail(name, "WaterComponent material range was not flagged as water");
+
+        return pass(name);
+    }
+
     bool testReflectedLevelJsonMigration()
     {
         const std::string name = "reflected level json migration";
@@ -312,6 +370,7 @@ int main()
     ok = testComponentCopy() && ok;
     ok = testEntitySerializationRoundTrip() && ok;
     ok = testInvalidJsonDoesNotMutate() && ok;
+    ok = testWaterComponentReflectionAndObjectVectorJson() && ok;
     ok = testReflectedLevelJsonMigration() && ok;
     return ok ? 0 : 1;
 }

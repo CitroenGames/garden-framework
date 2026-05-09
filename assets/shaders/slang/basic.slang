@@ -42,12 +42,16 @@ cbuffer PerObjectCB : register(b1)
     float _heightmapPad0;
     float2 uHeightmapTexelSize;
     float2 _heightmapPad1;
+    int uMaterialFlags;
+    float3 _materialPad0;
 #ifdef TARGET_SPIRV
     int uUseInstanceData;
     uint uInstanceBase;
     float2 _instancePad;
 #endif
 };
+
+static const int MATERIAL_FLAG_WATER = 1;
 
 [[vk::binding(3, 0)]]
 cbuffer LightCB : register(b3)
@@ -294,6 +298,7 @@ float4 fragmentMain(PSInput input) : SV_TARGET
     float3 albedo = texColor.rgb;
     float metallic = uMetallic;
     float roughness = uRoughness;
+    const bool isWater = (uMaterialFlags & MATERIAL_FLAG_WATER) != 0;
 
     // Sample metallic-roughness map if present (glTF: G=roughness, B=metallic)
     if (uHasMetallicRoughnessMap != 0)
@@ -305,6 +310,23 @@ float4 fragmentMain(PSInput input) : SV_TARGET
 
     // Clamp roughness to avoid division issues
     roughness = max(roughness, 0.04);
+
+    if (isWater)
+    {
+        float wave0 = sin(input.fragPos.x * 0.23 + input.fragPos.z * 0.31);
+        float wave1 = sin(input.fragPos.x * -0.41 + input.fragPos.z * 0.17);
+        N = normalize(N + float3(wave0 * 0.055, 0.0, wave1 * 0.055));
+
+        float fresnel = pow(1.0 - saturate(dot(N, V)), 3.0);
+        float depth_tint = saturate(input.viewDepth * 0.018);
+        float3 shallow = float3(0.05, 0.32, 0.48);
+        float3 deep = float3(0.0, 0.10, 0.22);
+        albedo = lerp(shallow, deep, depth_tint);
+        albedo = lerp(albedo, float3(0.52, 0.86, 0.95), fresnel * 0.45);
+        metallic = 0.0;
+        roughness = 0.055;
+        texColor.a = max(texColor.a, 0.58 + fresnel * 0.18);
+    }
 
     // Ambient lighting with optional AO
     float ao = 1.0;

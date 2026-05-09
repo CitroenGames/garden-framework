@@ -26,6 +26,33 @@ static bool isFiniteVertexPosition(const vertex& v)
     return std::isfinite(v.vx) && std::isfinite(v.vy) && std::isfinite(v.vz);
 }
 
+static bool meshHasWaterMaterialRanges(const mesh& colliderMesh)
+{
+    if (!colliderMesh.uses_material_ranges)
+        return false;
+
+    return std::any_of(colliderMesh.material_ranges.begin(), colliderMesh.material_ranges.end(),
+                       [](const MaterialRange& range) { return range.isWater(); });
+}
+
+static bool triangleUsesWaterMaterial(const mesh& colliderMesh, size_t triangle_start)
+{
+    if (!colliderMesh.uses_material_ranges)
+        return false;
+
+    for (const MaterialRange& range : colliderMesh.material_ranges)
+    {
+        if (!range.isWater())
+            continue;
+
+        const size_t range_end = range.start_vertex + range.vertex_count;
+        if (triangle_start >= range.start_vertex && triangle_start + 2 < range_end)
+            return true;
+    }
+
+    return false;
+}
+
 static uint32_t resolveWorkerThreadCount(uint32_t requested)
 {
     if (requested > 0)
@@ -455,7 +482,8 @@ JPH::BodyID PhysicsSystem::createStaticMeshBody(const glm::vec3& position, const
     if (!initialized) initialize();
 
     JPH::ShapeRefC final_shape;
-    if (!colliderMesh.collision_cache_path.empty())
+    const bool exclude_water_collision = meshHasWaterMaterialRanges(colliderMesh);
+    if (!exclude_water_collision && !colliderMesh.collision_cache_path.empty())
     {
         std::string error;
         if (Assets::CookedCollisionSerializer::loadShape(
@@ -473,6 +501,11 @@ JPH::BodyID PhysicsSystem::createStaticMeshBody(const glm::vec3& position, const
                             colliderMesh.collision_cache_path, error);
         }
     }
+    else if (exclude_water_collision && !colliderMesh.collision_cache_path.empty())
+    {
+        LOG_ENGINE_TRACE("Ignoring cooked collision mesh '{}' because water material ranges are non-solid",
+                         colliderMesh.collision_cache_path);
+    }
 
     if (!final_shape)
     {
@@ -484,6 +517,9 @@ JPH::BodyID PhysicsSystem::createStaticMeshBody(const glm::vec3& position, const
 
         for (size_t i = 0; i + 2 < colliderMesh.vertices_len; i += 3)
         {
+            if (triangleUsesWaterMaterial(colliderMesh, i))
+                continue;
+
             const vertex& v0 = colliderMesh.vertices[i];
             const vertex& v1 = colliderMesh.vertices[i + 1];
             const vertex& v2 = colliderMesh.vertices[i + 2];

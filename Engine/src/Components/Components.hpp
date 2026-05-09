@@ -10,6 +10,7 @@
 #include "Character/CharacterController.hpp"
 #include "mesh.hpp"
 #include "Reflection/Reflector.hpp"
+#include <algorithm>
 
 struct TransformComponent {
     glm::vec3 position;
@@ -261,6 +262,8 @@ struct CharacterControllerComponent {
     bool grounded = false;
     glm::vec3 ground_normal = glm::vec3(0, 1, 0);
     glm::vec3 ground_velocity = glm::vec3(0);
+    bool swimming = false;
+    int water_level = 0;
 
     static void reflect(Reflector<CharacterControllerComponent>& r) {
         r.display("Character Controller").category("Physics");
@@ -316,8 +319,117 @@ struct CharacterControllerComponent {
             .visible().category("State");
         r.field<&CharacterControllerComponent::ground_velocity>("ground_velocity")
             .visible().category("State");
+        r.field<&CharacterControllerComponent::swimming>("swimming")
+            .visible().category("State");
+        r.field<&CharacterControllerComponent::water_level>("water_level")
+            .visible().category("State");
     }
 };
+
+struct WaterVolumeComponent {
+    glm::vec3 half_extents = glm::vec3(5.0f, 2.0f, 5.0f);
+    float surface_offset = 0.0f;
+    float swim_speed_scale = 0.8f;
+    float water_acceleration = 5.5f;
+    float water_friction = 5.2f;
+    float water_sink_speed = 1.75f;
+    bool enabled = true;
+
+    static void reflect(Reflector<WaterVolumeComponent>& r) {
+        r.display("Water Volume").category("Physics");
+        r.field<&WaterVolumeComponent::half_extents>("half_extents")
+            .tooltip("Water volume half extents in local units").drag(0.1f).category("Volume");
+        r.field<&WaterVolumeComponent::surface_offset>("surface_offset")
+            .tooltip("Extra water surface height above the volume top").drag(0.01f).range(-10.0f, 10.0f).category("Volume");
+        r.field<&WaterVolumeComponent::swim_speed_scale>("swim_speed_scale")
+            .tooltip("Fraction of move_speed used while swimming").drag(0.01f).range(0.0f, 2.0f).category("Movement");
+        r.field<&WaterVolumeComponent::water_acceleration>("water_acceleration")
+            .tooltip("Source-style acceleration while swimming").drag(0.1f).range(0.0f, 100.0f).category("Movement");
+        r.field<&WaterVolumeComponent::water_friction>("water_friction")
+            .tooltip("Velocity damping while swimming").drag(0.1f).range(0.0f, 100.0f).category("Movement");
+        r.field<&WaterVolumeComponent::water_sink_speed>("water_sink_speed")
+            .tooltip("Downward idle drift while not swimming or jumping").drag(0.1f).range(0.0f, 100.0f).category("Movement");
+        r.field<&WaterVolumeComponent::enabled>("enabled")
+            .category("Volume");
+    }
+};
+
+struct WaterComponent {
+    bool enabled = true;
+    bool affects_rendering = true;
+    bool affects_swimming = true;
+    glm::vec3 half_extents = glm::vec3(5.0f, 2.0f, 5.0f);
+    float surface_offset = 0.0f;
+    float swim_speed_scale = 0.8f;
+    float water_acceleration = 5.5f;
+    float water_friction = 5.2f;
+    float water_sink_speed = 1.75f;
+
+    static void reflect(Reflector<WaterComponent>& r) {
+        r.display("Water").category("Rendering");
+        r.field<&WaterComponent::enabled>("enabled")
+            .category("Water");
+        r.field<&WaterComponent::affects_rendering>("affects_rendering")
+            .tooltip("Force attached mesh material ranges through the built-in water shader path").category("Rendering");
+        r.field<&WaterComponent::affects_swimming>("affects_swimming")
+            .tooltip("Use this component as a swimming volume").category("Physics");
+        r.field<&WaterComponent::half_extents>("half_extents")
+            .tooltip("Water volume half extents in local units").drag(0.1f).category("Volume");
+        r.field<&WaterComponent::surface_offset>("surface_offset")
+            .tooltip("Extra water surface height above the volume top").drag(0.01f).range(-10.0f, 10.0f).category("Volume");
+        r.field<&WaterComponent::swim_speed_scale>("swim_speed_scale")
+            .tooltip("Fraction of move_speed used while swimming").drag(0.01f).range(0.0f, 2.0f).category("Movement");
+        r.field<&WaterComponent::water_acceleration>("water_acceleration")
+            .tooltip("Source-style acceleration while swimming").drag(0.1f).range(0.0f, 100.0f).category("Movement");
+        r.field<&WaterComponent::water_friction>("water_friction")
+            .tooltip("Velocity damping while swimming").drag(0.1f).range(0.0f, 100.0f).category("Movement");
+        r.field<&WaterComponent::water_sink_speed>("water_sink_speed")
+            .tooltip("Downward idle drift while not swimming or jumping").drag(0.1f).range(0.0f, 100.0f).category("Movement");
+    }
+};
+
+inline void applyWaterComponentToMesh(const WaterComponent& water, mesh& m)
+{
+    if (!water.enabled || !water.affects_rendering)
+        return;
+
+    if (m.uses_material_ranges && !m.material_ranges.empty())
+    {
+        for (auto& range : m.material_ranges)
+        {
+            range.material_flags |= MaterialFlags::Water;
+            range.double_sided = true;
+            range.metallic_factor = 0.0f;
+            range.roughness_factor = std::min(range.roughness_factor, 0.08f);
+            range.emissive_factor = glm::max(range.emissive_factor, glm::vec3(0.0f, 0.025f, 0.04f));
+        }
+
+        for (auto& lod : m.lod_levels)
+        {
+            for (auto& range : lod.material_ranges)
+            {
+                range.material_flags |= MaterialFlags::Water;
+                range.double_sided = true;
+                range.metallic_factor = 0.0f;
+                range.roughness_factor = std::min(range.roughness_factor, 0.08f);
+                range.emissive_factor = glm::max(range.emissive_factor, glm::vec3(0.0f, 0.025f, 0.04f));
+            }
+        }
+        return;
+    }
+
+    if (!m.is_valid || m.vertices_len == 0)
+        return;
+
+    MaterialRange range(0, m.vertices_len, m.texture_set ? m.texture : INVALID_TEXTURE, "WaterComponent");
+    range.material_flags = MaterialFlags::Water;
+    range.double_sided = true;
+    range.metallic_factor = 0.0f;
+    range.roughness_factor = 0.055f;
+    range.base_color_factor = glm::vec4(0.05f, 0.32f, 0.55f, 1.0f);
+    range.emissive_factor = glm::vec3(0.0f, 0.025f, 0.04f);
+    m.setMaterialRanges({range});
+}
 
 struct PlayerComponent {
     float speed = 1.5f;
