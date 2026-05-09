@@ -304,6 +304,38 @@ static std::shared_ptr<mesh> getVisualMesh(entt::registry& registry, entt::entit
     return registry.get<MeshComponent>(e).m_mesh;
 }
 
+static void applyMeshCollisionMetadata(const std::shared_ptr<mesh>& m_ptr,
+                                       const std::string& resolved_source_path)
+{
+    if (!m_ptr || resolved_source_path.empty())
+        return;
+
+    m_ptr->source_path = resolved_source_path;
+    m_ptr->collision_cache_path.clear();
+    m_ptr->collision_source_hash = 0;
+    m_ptr->collision_source_file_size = 0;
+
+    Assets::AssetMetadata metadata;
+    const std::string meta_path = Assets::AssetMetadataSerializer::getMetaPath(resolved_source_path);
+    if (!Assets::AssetMetadataSerializer::load(metadata, meta_path))
+        return;
+
+    if (!metadata.collision.enabled || metadata.collision.file_path.empty())
+        return;
+
+    std::filesystem::path collision_path(metadata.collision.file_path);
+    if (collision_path.is_relative())
+        collision_path = std::filesystem::path(resolved_source_path).parent_path() / collision_path;
+
+    m_ptr->collision_cache_path = collision_path.string();
+    m_ptr->collision_source_hash = metadata.collision.source_hash != 0
+        ? metadata.collision.source_hash
+        : metadata.source_hash;
+    m_ptr->collision_source_file_size = metadata.collision.source_file_size != 0
+        ? metadata.collision.source_file_size
+        : metadata.source_file_size;
+}
+
 static void assignColliderMesh(ColliderComponent& col,
                                const LevelEntity& entity_data,
                                entt::registry& registry,
@@ -759,6 +791,10 @@ static std::shared_ptr<mesh> makeMeshInstanceView(const std::shared_ptr<mesh>& r
     instance->load_state.store(resource->load_state.load(std::memory_order_acquire),
                                std::memory_order_release);
     instance->asset_handle = resource->asset_handle;
+    instance->source_path = resource->source_path;
+    instance->collision_cache_path = resource->collision_cache_path;
+    instance->collision_source_hash = resource->collision_source_hash;
+    instance->collision_source_file_size = resource->collision_source_file_size;
     instance->aabb_min = resource->aabb_min;
     instance->aabb_max = resource->aabb_max;
     instance->bounds_computed = resource->bounds_computed;
@@ -1775,6 +1811,7 @@ std::shared_ptr<mesh> LevelManager::loadMesh(const LevelEntity& entity, IRenderA
             auto compiled = loadCompiledMesh(cmesh_path, render_api);
             if (compiled)
             {
+                applyMeshCollisionMetadata(compiled, resolved_path);
                 compiled->culling = entity.culling;
                 compiled->transparent = entity.transparent;
                 compiled->visible = entity.visible;
@@ -1930,6 +1967,7 @@ std::shared_ptr<mesh> LevelManager::loadMesh(const LevelEntity& entity, IRenderA
 
     if (m_ptr)
     {
+        applyMeshCollisionMetadata(m_ptr, resolved_path);
         m_ptr->culling = entity.culling;
         m_ptr->transparent = entity.transparent;
         m_ptr->visible = entity.visible;
@@ -2417,6 +2455,7 @@ std::shared_ptr<mesh> LevelManager::finalizeCompiledMeshGPU(
 
     const auto& lod0 = cmesh.lod_levels[0];
     auto m_ptr = std::make_shared<mesh>(preload.resolved_path);
+    applyMeshCollisionMetadata(m_ptr, preload.resolved_path);
 
     // Upload LOD0 to GPU
     if (render_api && !lod0.vertices.empty()) {
@@ -2758,6 +2797,8 @@ std::shared_ptr<mesh> LevelManager::finalizeMeshGPU(
     }
 
     if (!m_ptr) return nullptr;
+
+    applyMeshCollisionMetadata(m_ptr, preload.resolved_path);
 
     // Apply entity properties
     m_ptr->culling = entity.culling;

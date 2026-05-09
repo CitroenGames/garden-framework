@@ -1,5 +1,6 @@
 #include "AssetScanner.hpp"
 #include "AssetMetadataSerializer.hpp"
+#include "CookedCollisionSerializer.hpp"
 #include "LODGenerator.hpp"
 #include "LODMeshSerializer.hpp"
 #include "MeshChunker.hpp"
@@ -70,6 +71,15 @@ AssetScanStatus AssetScanner::checkAsset(const std::string& asset_path)
     // Check if source file changed
     uint64_t current_hash = Utils::hashFile(asset_path);
     if (current_hash != existing.source_hash)
+        return AssetScanStatus::NeedsUpdate;
+
+    if (!existing.collision.enabled || existing.collision.file_path.empty())
+        return AssetScanStatus::NeedsUpdate;
+
+    fs::path collision_path(existing.collision.file_path);
+    if (collision_path.is_relative())
+        collision_path = fs::path(asset_path).parent_path() / collision_path;
+    if (!fs::exists(collision_path))
         return AssetScanStatus::NeedsUpdate;
 
     return AssetScanStatus::UpToDate;
@@ -149,7 +159,7 @@ static bool buildAndSaveMetadata(const std::string& asset_path,
                                   const std::string& timestamp)
 {
     AssetMetadata metadata;
-    metadata.version = 1;
+    metadata.version = 2;
     metadata.source_path = fs::path(asset_path).filename().string();
     metadata.source_hash = Utils::hashFile(asset_path);
     metadata.source_file_size = Utils::getFileSize(asset_path);
@@ -221,6 +231,24 @@ static bool buildAndSaveMetadata(const std::string& asset_path,
         }
 
         metadata.lod_levels.push_back(info);
+    }
+
+    if (!lod_result.lod_meshes.empty())
+    {
+        const std::string collision_path = CookedCollisionSerializer::defaultPathForAsset(asset_path);
+        std::string error;
+        if (!CookedCollisionSerializer::cookMeshToFile(
+                lod_result.lod_meshes[0],
+                collision_path,
+                metadata.source_hash,
+                metadata.source_file_size,
+                &metadata.collision,
+                &error))
+        {
+            metadata.collision = {};
+            printf("AssetScanner: Failed to generate collision for %s: %s\n",
+                   asset_path.c_str(), error.c_str());
+        }
     }
 
     std::string meta_path = AssetMetadataSerializer::getMetaPath(asset_path);

@@ -47,6 +47,16 @@ bool AssetMetadataSerializer::save(const AssetMetadata& metadata, const std::str
     }
     j["lod"]["levels"] = lod_array;
 
+    j["collision"]["enabled"] = metadata.collision.enabled;
+    j["collision"]["file"] = metadata.collision.file_path;
+    j["collision"]["backend"] = metadata.collision.backend;
+    j["collision"]["cook_version"] = metadata.collision.cook_version;
+    j["collision"]["source_hash"] = metadata.collision.source_hash;
+    j["collision"]["source_file_size"] = metadata.collision.source_file_size;
+    j["collision"]["jolt_version"] = metadata.collision.jolt_version;
+    j["collision"]["vertices"] = metadata.collision.vertex_count;
+    j["collision"]["triangles"] = metadata.collision.triangle_count;
+
     // LOD config
     j["lod"]["config"]["max_levels"] = metadata.lod_config.max_lod_levels;
     j["lod"]["config"]["target_ratios"] = metadata.lod_config.target_ratios;
@@ -164,6 +174,20 @@ bool AssetMetadataSerializer::load(AssetMetadata& metadata, const std::string& m
             metadata.lod_config.allow_attribute_collapse = cfg.value("allow_attribute_collapse", false);
             metadata.lod_config.prune_disconnected = cfg.value("prune_disconnected", false);
         }
+    }
+
+    if (j.contains("collision"))
+    {
+        const auto& collision = j["collision"];
+        metadata.collision.enabled = collision.value("enabled", false);
+        metadata.collision.file_path = collision.value("file", "");
+        metadata.collision.backend = collision.value("backend", "Jolt");
+        metadata.collision.cook_version = collision.value("cook_version", (uint32_t)1);
+        metadata.collision.source_hash = collision.value("source_hash", (uint64_t)0);
+        metadata.collision.source_file_size = collision.value("source_file_size", (uint64_t)0);
+        metadata.collision.jolt_version = collision.value("jolt_version", (uint64_t)0);
+        metadata.collision.vertex_count = collision.value("vertices", (size_t)0);
+        metadata.collision.triangle_count = collision.value("triangles", (size_t)0);
     }
 
     metadata.generated_at = j.value("generated_at", "");

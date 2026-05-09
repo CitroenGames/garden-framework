@@ -1,4 +1,5 @@
 #include "PhysicsSystem.hpp"
+#include "Assets/CookedCollisionSerializer.hpp"
 #include "Utils/Log.hpp"
 #include <algorithm>
 #include <atomic>
@@ -18,6 +19,7 @@ static void JoltTrace(const char* inFMT, ...)
 }
 
 static std::atomic<bool> s_jolt_registered{false};
+static std::once_flag s_jolt_register_once;
 
 static bool isFiniteVertexPosition(const vertex& v)
 {
@@ -163,28 +165,7 @@ void PhysicsSystem::initialize()
 {
     if (initialized) return;
 
-    // Register Jolt allocators and types (once globally)
-    if (!s_jolt_registered)
-    {
-        // Set trace and assert handlers FIRST (before any Jolt code runs)
-        JPH::Trace = JoltTrace;
-#ifdef JPH_ENABLE_ASSERTS
-        JPH::AssertFailed = [](const char* inExpression, const char* inMessage, const char* inFile, JPH::uint inLine) -> bool {
-            printf("JOLT ASSERT FAILED: %s:%u: %s", inFile, inLine, inExpression);
-            if (inMessage) printf(" (%s)", inMessage);
-            printf("\n");
-            fflush(stdout);
-            return false; // don't trigger breakpoint
-        };
-#endif
-
-        // Use Jolt's built-in default allocator (handles posix_memalign etc.)
-        JPH::RegisterDefaultAllocator();
-
-        JPH::Factory::sInstance = new JPH::Factory();
-        JPH::RegisterTypes();
-        s_jolt_registered = true;
-    }
+    ensureJoltRegistered();
 
     // Create allocator and job system
     temp_allocator = std::make_unique<JPH::TempAllocatorImpl>(settings.temp_allocator_size_bytes);
@@ -206,6 +187,33 @@ void PhysicsSystem::initialize()
 
     initialized = true;
     LOG_ENGINE_INFO("Jolt Physics initialized ({} worker threads, {} bodies)", settings.worker_thread_count, settings.max_bodies);
+}
+
+void PhysicsSystem::ensureJoltRegistered()
+{
+    // Register Jolt allocators and types (once globally). Asset import uses this
+    // too when cooking .gardenphys files before any world has initialized.
+    std::call_once(s_jolt_register_once, []() {
+        // Set trace and assert handlers FIRST (before any Jolt code runs)
+        JPH::Trace = JoltTrace;
+#ifdef JPH_ENABLE_ASSERTS
+        JPH::AssertFailed = [](const char* inExpression, const char* inMessage, const char* inFile, JPH::uint inLine) -> bool {
+            printf("JOLT ASSERT FAILED: %s:%u: %s", inFile, inLine, inExpression);
+            if (inMessage) printf(" (%s)", inMessage);
+            printf("\n");
+            fflush(stdout);
+            return false; // don't trigger breakpoint
+        };
+#endif
+
+        // Use Jolt's built-in default allocator (handles posix_memalign etc.)
+        JPH::RegisterDefaultAllocator();
+
+        if (!JPH::Factory::sInstance)
+            JPH::Factory::sInstance = new JPH::Factory();
+        JPH::RegisterTypes();
+        s_jolt_registered = true;
+    });
 }
 
 void PhysicsSystem::shutdown()
@@ -445,45 +453,69 @@ JPH::BodyID PhysicsSystem::createStaticMeshBody(const glm::vec3& position, const
     const PhysicsBodyDesc& desc)
 {
     if (!initialized) initialize();
-    if (!colliderMesh.vertices || colliderMesh.vertices_len < 3) return JPH::BodyID();
 
-    // Build Jolt triangle list from mesh vertices (in local space)
-    JPH::TriangleList triangles;
-    triangles.reserve(colliderMesh.vertices_len / 3);
-
-    for (size_t i = 0; i + 2 < colliderMesh.vertices_len; i += 3)
+    JPH::ShapeRefC final_shape;
+    if (!colliderMesh.collision_cache_path.empty())
     {
-        const vertex& v0 = colliderMesh.vertices[i];
-        const vertex& v1 = colliderMesh.vertices[i + 1];
-        const vertex& v2 = colliderMesh.vertices[i + 2];
-        if (!isUsableTriangle(v0, v1, v2, settings.mesh_degenerate_triangle_epsilon))
-            continue;
-
-        triangles.push_back(JPH::Triangle(
-            JPH::Float3(v0.vx, v0.vy, v0.vz),
-            JPH::Float3(v1.vx, v1.vy, v1.vz),
-            JPH::Float3(v2.vx, v2.vy, v2.vz)
-        ));
-    }
-    if (triangles.empty())
-    {
-        LOG_ENGINE_ERROR("Failed to create Jolt mesh shape: no usable triangles");
-        return JPH::BodyID();
+        std::string error;
+        if (Assets::CookedCollisionSerializer::loadShape(
+                colliderMesh.collision_cache_path,
+                colliderMesh.collision_source_hash,
+                colliderMesh.collision_source_file_size,
+                final_shape,
+                &error))
+        {
+            LOG_ENGINE_TRACE("Loaded cooked collision mesh: {}", colliderMesh.collision_cache_path);
+        }
+        else
+        {
+            LOG_ENGINE_WARN("Failed to load cooked collision '{}': {}",
+                            colliderMesh.collision_cache_path, error);
+        }
     }
 
-    LOG_ENGINE_INFO("Creating Jolt mesh body: {} triangles at ({}, {}, {}), scale=({}, {}, {})",
-        triangles.size(), position.x, position.y, position.z, scale.x, scale.y, scale.z);
-
-    JPH::MeshShapeSettings mesh_settings(triangles);
-    JPH::ShapeSettings::ShapeResult result = mesh_settings.Create();
-    if (!result.IsValid())
+    if (!final_shape)
     {
-        LOG_ENGINE_ERROR("Failed to create Jolt mesh shape: {}", result.GetError().c_str());
-        return JPH::BodyID();
+        if (!colliderMesh.vertices || colliderMesh.vertices_len < 3) return JPH::BodyID();
+
+        // Build Jolt triangle list from mesh vertices (in local space)
+        JPH::TriangleList triangles;
+        triangles.reserve(colliderMesh.vertices_len / 3);
+
+        for (size_t i = 0; i + 2 < colliderMesh.vertices_len; i += 3)
+        {
+            const vertex& v0 = colliderMesh.vertices[i];
+            const vertex& v1 = colliderMesh.vertices[i + 1];
+            const vertex& v2 = colliderMesh.vertices[i + 2];
+            if (!isUsableTriangle(v0, v1, v2, settings.mesh_degenerate_triangle_epsilon))
+                continue;
+
+            triangles.push_back(JPH::Triangle(
+                JPH::Float3(v0.vx, v0.vy, v0.vz),
+                JPH::Float3(v1.vx, v1.vy, v1.vz),
+                JPH::Float3(v2.vx, v2.vy, v2.vz)
+            ));
+        }
+        if (triangles.empty())
+        {
+            LOG_ENGINE_ERROR("Failed to create Jolt mesh shape: no usable triangles");
+            return JPH::BodyID();
+        }
+
+        LOG_ENGINE_INFO("Creating Jolt mesh body: {} triangles at ({}, {}, {}), scale=({}, {}, {})",
+            triangles.size(), position.x, position.y, position.z, scale.x, scale.y, scale.z);
+
+        JPH::MeshShapeSettings mesh_settings(triangles);
+        JPH::ShapeSettings::ShapeResult result = mesh_settings.Create();
+        if (!result.IsValid())
+        {
+            LOG_ENGINE_ERROR("Failed to create Jolt mesh shape: {}", result.GetError().c_str());
+            return JPH::BodyID();
+        }
+        final_shape = result.Get();
     }
 
     // Apply scale via ScaledShape if not identity
-    JPH::ShapeRefC final_shape = result.Get();
     if (scale.x != 1.0f || scale.y != 1.0f || scale.z != 1.0f)
     {
         JPH::ScaledShapeSettings scaled_settings(final_shape, toJolt(scale));

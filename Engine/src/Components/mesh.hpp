@@ -9,6 +9,7 @@
 #include <unordered_map>
 #include <cstring>
 #include <atomic>
+#include <cstdint>
 #include "Graphics/RenderAPI.hpp"
 #include "Graphics/IGPUMesh.hpp"
 #include "Utils/ObjLoader.hpp"
@@ -108,6 +109,10 @@ public:
     std::atomic<MeshLoadState> load_state{MeshLoadState::NotLoaded};
     Assets::AssetHandle asset_handle;
     std::shared_ptr<mesh> resource_owner;
+    std::string source_path;
+    std::string collision_cache_path;
+    uint64_t collision_source_hash = 0;
+    uint64_t collision_source_file_size = 0;
 
     // AABB for frustum culling
     glm::vec3 aabb_min{0.0f};
@@ -187,6 +192,7 @@ public:
     // Constructor for loading model files - now supports both OBJ and glTF
     mesh(const std::string& filename, MeshFormat format = MeshFormat::Auto)
     {
+        source_path = filename;
         vertices = nullptr;
         vertices_len = 0;
         owns_vertices = true;
@@ -219,6 +225,7 @@ public:
     // Pass a valid render_api to load materials and textures for multi-material meshes
     mesh(const std::string& filename, IRenderAPI* render_api, MeshFormat format = MeshFormat::Auto)
     {
+        source_path = filename;
         vertices = nullptr;
         vertices_len = 0;
         owns_vertices = true;
@@ -272,6 +279,10 @@ public:
         load_state.store(other.load_state.load(std::memory_order_relaxed), std::memory_order_relaxed);
         asset_handle = other.asset_handle;
         resource_owner = std::move(other.resource_owner);
+        source_path = std::move(other.source_path);
+        collision_cache_path = std::move(other.collision_cache_path);
+        collision_source_hash = other.collision_source_hash;
+        collision_source_file_size = other.collision_source_file_size;
         aabb_min = other.aabb_min;
         aabb_max = other.aabb_max;
         bounds_computed = other.bounds_computed;
@@ -286,6 +297,8 @@ public:
         other.owns_gpu_mesh = true;
         other.owns_vertices = false;
         other.load_state.store(MeshLoadState::NotLoaded, std::memory_order_relaxed);
+        other.collision_source_hash = 0;
+        other.collision_source_file_size = 0;
         other.bounds_computed = false;
         other.current_lod.store(0, std::memory_order_relaxed);
         other.force_lod = -1;
@@ -326,6 +339,10 @@ public:
             load_state.store(other.load_state.load(std::memory_order_relaxed), std::memory_order_relaxed);
             asset_handle = other.asset_handle;
             resource_owner = std::move(other.resource_owner);
+            source_path = std::move(other.source_path);
+            collision_cache_path = std::move(other.collision_cache_path);
+            collision_source_hash = other.collision_source_hash;
+            collision_source_file_size = other.collision_source_file_size;
             aabb_min = other.aabb_min;
             aabb_max = other.aabb_max;
             bounds_computed = other.bounds_computed;
@@ -340,6 +357,8 @@ public:
             other.owns_gpu_mesh = true;
             other.owns_vertices = false;
             other.load_state.store(MeshLoadState::NotLoaded, std::memory_order_relaxed);
+            other.collision_source_hash = 0;
+            other.collision_source_file_size = 0;
             other.bounds_computed = false;
             other.current_lod.store(0, std::memory_order_relaxed);
             other.force_lod = -1;

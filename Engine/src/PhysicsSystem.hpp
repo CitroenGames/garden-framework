@@ -274,6 +274,7 @@ public:
     float getFixedDelta() const { return fixed_delta; }
 
     // Shape creation
+    static void ensureJoltRegistered();
     static JPH::ShapeRefC createShapeFromCollider(const ColliderComponent& collider, const glm::vec3& scale);
 
     // Body management

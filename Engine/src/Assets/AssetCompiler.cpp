@@ -1,6 +1,7 @@
 #include "AssetCompiler.hpp"
 #include "CompiledMeshSerializer.hpp"
 #include "CompiledTextureSerializer.hpp"
+#include "CookedCollisionSerializer.hpp"
 #include "LODGenerator.hpp"
 #include "LODMeshSerializer.hpp"
 #include "MeshChunker.hpp"
@@ -54,6 +55,49 @@ static std::string replaceExtension(const std::string& path, const std::string& 
     fs::path p(path);
     p.replace_extension(new_ext);
     return p.string();
+}
+
+static void updateCollisionMetadataForModel(const std::string& source_path,
+                                            const LODMeshData& collision_mesh,
+                                            uint64_t source_hash,
+                                            uint64_t source_file_size)
+{
+    AssetMetadata metadata;
+    const std::string meta_path = AssetMetadataSerializer::getMetaPath(source_path);
+    const bool had_metadata = AssetMetadataSerializer::load(metadata, meta_path);
+
+    metadata.version = std::max(metadata.version, 2);
+    metadata.source_path = fs::path(source_path).filename().string();
+    metadata.source_hash = source_hash;
+    metadata.source_file_size = source_file_size;
+
+    if (!had_metadata)
+    {
+        metadata.vertex_count = collision_mesh.vertices.size();
+        metadata.index_count = collision_mesh.indices.size();
+        metadata.triangle_count = collision_mesh.indices.empty()
+            ? collision_mesh.vertices.size() / 3
+            : collision_mesh.indices.size() / 3;
+        metadata.lod_enabled = false;
+    }
+
+    std::string error;
+    const std::string collision_path = CookedCollisionSerializer::defaultPathForAsset(source_path);
+    if (!CookedCollisionSerializer::cookMeshToFile(
+            collision_mesh,
+            collision_path,
+            source_hash,
+            source_file_size,
+            &metadata.collision,
+            &error))
+    {
+        metadata.collision = {};
+        LOG_ENGINE_WARN("[AssetCompiler] Failed to generate collision for {}: {}",
+                        source_path, error);
+    }
+
+    if (!AssetMetadataSerializer::save(metadata, meta_path))
+        LOG_ENGINE_WARN("[AssetCompiler] Failed to update metadata collision block: {}", meta_path);
 }
 
 // Check if texture has meaningful alpha (any pixel with alpha < 255)
@@ -220,7 +264,23 @@ bool AssetCompiler::isUpToDate(const std::string& source_path, const std::string
     if (ext == ".cmesh") {
         CmeshHeader header{};
         if (CompiledMeshSerializer::loadHeader(header, compiled_path))
-            return header.source_hash == source_hash;
+        {
+            if (header.source_hash != source_hash)
+                return false;
+
+            AssetMetadata metadata;
+            if (!AssetMetadataSerializer::load(metadata, AssetMetadataSerializer::getMetaPath(source_path)))
+                return false;
+            if (!metadata.collision.enabled || metadata.collision.file_path.empty())
+                return false;
+            if (metadata.collision.source_hash != 0 && metadata.collision.source_hash != source_hash)
+                return false;
+
+            fs::path collision_path(metadata.collision.file_path);
+            if (collision_path.is_relative())
+                collision_path = fs::path(source_path).parent_path() / collision_path;
+            return fs::exists(collision_path);
+        }
     } else if (ext == ".ctex") {
         CtexHeader header{};
         if (CompiledTextureSerializer::loadHeader(header, compiled_path))
@@ -635,6 +695,19 @@ bool AssetCompiler::compileModel(
         }
         cmesh.header.aabb_min[0] = bmin.x; cmesh.header.aabb_min[1] = bmin.y; cmesh.header.aabb_min[2] = bmin.z;
         cmesh.header.aabb_max[0] = bmax.x; cmesh.header.aabb_max[1] = bmax.y; cmesh.header.aabb_max[2] = bmax.z;
+    }
+
+    if (!cmesh.lod_levels.empty())
+    {
+        LODMeshData collision_mesh;
+        collision_mesh.vertices = cmesh.lod_levels[0].vertices;
+        collision_mesh.indices = cmesh.lod_levels[0].indices;
+        collision_mesh.submesh_ranges = cmesh.lod_levels[0].submesh_ranges;
+        updateCollisionMetadataForModel(
+            source_path,
+            collision_mesh,
+            cmesh.header.source_hash,
+            Utils::getFileSize(source_path));
     }
 
     // Write .cmesh

@@ -19,7 +19,7 @@ struct LODLevelInfo {
 };
 
 struct AssetMetadata {
-    int version = 1;
+    int version = 2;
 
     // Source file info
     std::string source_path;
@@ -39,6 +39,19 @@ struct AssetMetadata {
     // LOD chain
     bool lod_enabled = true;
     std::vector<LODLevelInfo> lod_levels;
+
+    struct CollisionInfo {
+        bool enabled = false;
+        std::string file_path; // relative path to .gardenphys
+        std::string backend = "Jolt";
+        uint32_t cook_version = 1;
+        uint64_t source_hash = 0;
+        uint64_t source_file_size = 0;
+        uint64_t jolt_version = 0;
+        size_t vertex_count = 0;
+        size_t triangle_count = 0;
+    };
+    CollisionInfo collision;
 
     // LOD generation config (stored so we can detect config changes)
     struct LODConfig {
