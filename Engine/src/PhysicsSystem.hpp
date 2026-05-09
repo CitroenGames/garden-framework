@@ -234,6 +234,15 @@ private:
     void applySettings(const PhysicsSystemSettings& new_settings);
 
 public:
+    struct RaycastResult {
+        bool hit = false;
+        entt::entity entity = entt::null;
+        glm::vec3 hit_point{0.0f};
+        glm::vec3 hit_normal{0.0f, 1.0f, 0.0f};
+        float fraction = 1.0f;
+        float distance = 0.0f;
+    };
+
     struct PhysicsBodyDesc
     {
         float mass = 1.0f;
@@ -306,6 +315,8 @@ public:
     // General collision queries
     bool raycast(const glm::vec3& origin, const glm::vec3& direction, float maxDistance,
         entt::registry& registry, glm::vec3& hitPoint, glm::vec3& hitNormal);
+    RaycastResult raycastClosest(const glm::vec3& origin, const glm::vec3& direction, float maxDistance,
+        entt::entity ignoredEntity = entt::null);
 
     // Shape casting result
     struct ShapeCastResult {

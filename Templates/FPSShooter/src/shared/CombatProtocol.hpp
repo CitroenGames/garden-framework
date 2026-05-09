@@ -57,10 +57,15 @@ struct WeaponStateMessage
     uint8_t type = static_cast<uint8_t>(CombatMessageType::WEAPON_STATE);
     int32_t ammo = 0;
     int32_t max_ammo = 0;
+    int32_t reserve_ammo = 0;
+    int32_t max_reserve_ammo = 0;
     uint8_t weapon_type = 0;
     uint8_t reloading = 0;
     float fire_cooldown = 0.0f;
     float reload_timer = 0.0f;
+    float spread = 0.0f;
+    float accuracy_penalty = 0.0f;
+    float recoil_index = 0.0f;
 };
 
 namespace CombatSerializer
@@ -143,10 +148,15 @@ namespace CombatSerializer
         writer.writeByte(msg.type);
         writer.writeUInt32(static_cast<uint32_t>(msg.ammo));
         writer.writeUInt32(static_cast<uint32_t>(msg.max_ammo));
+        writer.writeUInt32(static_cast<uint32_t>(msg.reserve_ammo));
+        writer.writeUInt32(static_cast<uint32_t>(msg.max_reserve_ammo));
         writer.writeByte(msg.weapon_type);
         writer.writeByte(msg.reloading);
         writer.writeFloat(msg.fire_cooldown);
         writer.writeFloat(msg.reload_timer);
+        writer.writeFloat(msg.spread);
+        writer.writeFloat(msg.accuracy_penalty);
+        writer.writeFloat(msg.recoil_index);
     }
 
     inline bool deserialize(Net::BitReader& reader, WeaponStateMessage& msg) {
@@ -154,10 +164,15 @@ namespace CombatSerializer
         if (msg.type != static_cast<uint8_t>(CombatMessageType::WEAPON_STATE)) return false;
         msg.ammo = static_cast<int32_t>(reader.readUInt32());
         msg.max_ammo = static_cast<int32_t>(reader.readUInt32());
+        msg.reserve_ammo = static_cast<int32_t>(reader.readUInt32());
+        msg.max_reserve_ammo = static_cast<int32_t>(reader.readUInt32());
         msg.weapon_type = reader.readByte();
         msg.reloading = reader.readByte();
         msg.fire_cooldown = reader.readFloat();
         msg.reload_timer = reader.readFloat();
+        msg.spread = reader.readFloat();
+        msg.accuracy_penalty = reader.readFloat();
+        msg.recoil_index = reader.readFloat();
         return !reader.hasError();
     }
 }

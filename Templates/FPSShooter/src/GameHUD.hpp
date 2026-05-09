@@ -13,8 +13,9 @@ public:
     void update(float fps, const glm::vec3& position, float speed, bool grounded,
                 bool connected, float ping,
                 int32_t health, int32_t max_health, int32_t ammo, int32_t max_ammo,
+                int32_t reserve_ammo, int32_t max_reserve_ammo,
                 bool alive, float death_timer, int32_t kills, int32_t deaths,
-                const std::string& kill_feed, bool reloading);
+                const std::string& kill_feed, bool reloading, float weapon_spread);
 
 private:
     void* m_document = nullptr;

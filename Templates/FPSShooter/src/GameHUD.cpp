@@ -1,6 +1,7 @@
 #include "GameHUD.hpp"
 #include "UI/RmlUiManager.h"
 #include "Utils/Log.hpp"
+#include <algorithm>
 #include <cstdio>
 
 static void FormatFloat(char* buffer, size_t buffer_size, float v, int decimals = 1)
@@ -30,6 +31,8 @@ bool GameHUD::initialize(const char* rmlPath)
     bound &= rml.dataModelBindInt(m_model, "health", 100);
     bound &= rml.dataModelBindInt(m_model, "max_health", 100);
     bound &= rml.dataModelBindString(m_model, "ammo_text", "30 / 30");
+    bound &= rml.dataModelBindString(m_model, "reserve_text", "90");
+    bound &= rml.dataModelBindString(m_model, "crosshair_gap", "12.0");
     bound &= rml.dataModelBindBool(m_model, "alive", true);
     bound &= rml.dataModelBindString(m_model, "death_timer", "");
     bound &= rml.dataModelBindString(m_model, "kills", "0");
@@ -76,8 +79,9 @@ void GameHUD::shutdown()
 void GameHUD::update(float fps, const glm::vec3& position, float speed, bool grounded,
                      bool connected, float ping,
                      int32_t health, int32_t max_health, int32_t ammo, int32_t max_ammo,
+                     int32_t reserve_ammo, int32_t max_reserve_ammo,
                      bool alive, float death_timer, int32_t kills, int32_t deaths,
-                     const std::string& kill_feed, bool reloading)
+                     const std::string& kill_feed, bool reloading, float weapon_spread)
 {
     if (!m_model)
         return;
@@ -116,6 +120,16 @@ void GameHUD::update(float fps, const glm::vec3& position, float speed, bool gro
         snprintf(ammo_buf, sizeof(ammo_buf), "%d / %d", ammo, max_ammo);
     }
     rml.dataModelSetString(m_model, "ammo_text", ammo_buf);
+
+    char reserve_buf[32];
+    snprintf(reserve_buf, sizeof(reserve_buf), "%d / %d", reserve_ammo, max_reserve_ammo);
+    rml.dataModelSetString(m_model, "reserve_text", reserve_buf);
+
+    char crosshair_gap_buf[32];
+    const float crosshair_gap = std::clamp(8.0f + weapon_spread * 900.0f, 8.0f, 58.0f);
+    FormatFloat(crosshair_gap_buf, sizeof(crosshair_gap_buf), crosshair_gap, 1);
+    rml.dataModelSetString(m_model, "crosshair_gap", crosshair_gap_buf);
+
     rml.dataModelSetBool(m_model, "alive", alive);
     rml.dataModelSetBool(m_model, "reloading", reloading);
 

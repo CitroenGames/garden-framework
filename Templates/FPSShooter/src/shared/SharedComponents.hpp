@@ -48,14 +48,20 @@ struct WeaponComponent
     WeaponType weapon_type = WeaponType::RIFLE;
     int32_t ammo = 30;
     int32_t max_ammo = 30;
+    int32_t reserve_ammo = 90;
+    int32_t max_reserve_ammo = 90;
     float fire_cooldown = 0.0f;     // Time until can fire again (seconds)
     float reload_timer = 0.0f;      // Time remaining in reload (seconds)
+    float accuracy_penalty = 0.0f;  // Additional spread accumulated by recent shots
+    float recoil_index = 0.0f;      // Burst length used by HUD/recoil-aware effects
+    float time_since_last_shot = 1000.0f;
     bool reloading = false;
 
     WeaponComponent() = default;
     WeaponComponent(WeaponType type) : weapon_type(type) {}
 
     bool canFire() const { return ammo > 0 && fire_cooldown <= 0.0f && !reloading; }
+    bool canReload() const { return !reloading && ammo < max_ammo && reserve_ammo > 0; }
 };
 
 // Score tracking per player

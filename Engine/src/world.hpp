@@ -65,6 +65,12 @@ public:
         return physics_system->raycast(origin, direction, max_distance, registry, hit_point, hit_normal);
     }
 
+    PhysicsSystem::RaycastResult raycastClosest(const glm::vec3& origin, const glm::vec3& direction,
+        float max_distance, entt::entity ignored_entity = entt::null)
+    {
+        return physics_system->raycastClosest(origin, direction, max_distance, ignored_entity);
+    }
+
     // Shape casting convenience wrappers
     PhysicsSystem::ShapeCastResult sphereCast(const glm::vec3& origin, float radius,
         const glm::vec3& direction, float maxDistance)

@@ -82,6 +82,34 @@ static bool isUsableTriangle(const vertex& v0, const vertex& v1, const vertex& v
     return glm::dot(area_vec, area_vec) > epsilon;
 }
 
+class IgnoreEntityBodyFilter final : public JPH::BodyFilter
+{
+public:
+    IgnoreEntityBodyFilter(const std::unordered_map<JPH::BodyID, entt::entity>& body_to_entity,
+                           entt::entity ignored_entity)
+        : m_body_to_entity(body_to_entity), m_ignored_entity(ignored_entity)
+    {
+    }
+
+    bool ShouldCollide(const JPH::BodyID& body_id) const override
+    {
+        if (m_ignored_entity == entt::null)
+            return true;
+
+        auto it = m_body_to_entity.find(body_id);
+        return it == m_body_to_entity.end() || it->second != m_ignored_entity;
+    }
+
+    bool ShouldCollideLocked(const JPH::Body& body) const override
+    {
+        return ShouldCollide(body.GetID());
+    }
+
+private:
+    const std::unordered_map<JPH::BodyID, entt::entity>& m_body_to_entity;
+    entt::entity m_ignored_entity = entt::null;
+};
+
 PhysicsSystem::PhysicsSystem(const PhysicsSystemSettings& system_settings)
 {
     applySettings(system_settings);
@@ -891,31 +919,56 @@ void PhysicsSystem::handlePlayerCollisions(entt::registry& registry, entt::entit
 bool PhysicsSystem::raycast(const glm::vec3& origin, const glm::vec3& direction, float maxDistance,
     entt::registry& registry, glm::vec3& hitPoint, glm::vec3& hitNormal)
 {
-    if (!initialized) return false;
-    if (maxDistance <= 0.0f || glm::length(direction) <= settings.raycast_direction_epsilon) return false;
+    (void)registry;
+    RaycastResult result = raycastClosest(origin, direction, maxDistance);
+    if (!result.hit)
+        return false;
+
+    hitPoint = result.hit_point;
+    hitNormal = result.hit_normal;
+    return true;
+}
+
+PhysicsSystem::RaycastResult PhysicsSystem::raycastClosest(const glm::vec3& origin, const glm::vec3& direction,
+    float maxDistance, entt::entity ignoredEntity)
+{
+    RaycastResult result;
+    if (!initialized) return result;
+    if (maxDistance <= 0.0f || glm::length(direction) <= settings.raycast_direction_epsilon) return result;
 
     JPH::Vec3 dir = toJolt(glm::normalize(direction)) * maxDistance;
     JPH::RRayCast ray(toJoltR(origin), dir);
     JPH::RayCastResult hit;
+    IgnoreEntityBodyFilter body_filter(body_to_entity, ignoredEntity);
 
-    if (jolt_system->GetNarrowPhaseQuery().CastRay(ray, hit))
+    if (jolt_system->GetNarrowPhaseQuery().CastRay(
+        ray, hit,
+        JPH::BroadPhaseLayerFilter(),
+        JPH::ObjectLayerFilter(),
+        body_filter))
     {
         JPH::RVec3 hitPos = ray.GetPointOnRay(hit.mFraction);
-        hitPoint = glm::vec3(float(hitPos.GetX()), float(hitPos.GetY()), float(hitPos.GetZ()));
+        result.hit = true;
+        result.hit_point = glm::vec3(float(hitPos.GetX()), float(hitPos.GetY()), float(hitPos.GetZ()));
+        result.fraction = hit.mFraction;
+        result.distance = hit.mFraction * maxDistance;
 
         // Get the hit normal from the body
         JPH::BodyLockRead lock(jolt_system->GetBodyLockInterface(), hit.mBodyID);
         if (lock.Succeeded())
         {
             JPH::Vec3 normal = lock.GetBody().GetWorldSpaceSurfaceNormal(hit.mSubShapeID2, hitPos);
-            hitNormal = toGlm(normal);
+            result.hit_normal = toGlm(normal);
         }
         else
         {
-            hitNormal = glm::vec3(0, 1, 0);
+            result.hit_normal = glm::vec3(0, 1, 0);
         }
-        return true;
+
+        auto it = body_to_entity.find(hit.mBodyID);
+        if (it != body_to_entity.end())
+            result.entity = it->second;
     }
 
-    return false;
+    return result;
 }

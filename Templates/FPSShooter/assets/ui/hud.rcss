@@ -52,13 +52,44 @@ body {
     position: absolute;
     top: 50%;
     left: 50%;
-    margin-top: -8dp;
-    margin-left: -8dp;
-    width: 16dp;
-    height: 16dp;
-    text-align: center;
-    font-size: 16dp;
-    color: #ffffffcc;
+    transform: translate(-50%, -50%);
+}
+
+.hair {
+    position: absolute;
+    background-color: #ffffffdd;
+}
+
+.hair-top,
+.hair-bottom {
+    left: 50%;
+    width: 2dp;
+    height: 8dp;
+    margin-left: -1dp;
+}
+
+.hair-left,
+.hair-right {
+    top: 50%;
+    width: 8dp;
+    height: 2dp;
+    margin-top: -1dp;
+}
+
+.hair-top {
+    top: 0;
+}
+
+.hair-bottom {
+    bottom: 0;
+}
+
+.hair-left {
+    left: 0;
+}
+
+.hair-right {
+    right: 0;
 }
 
 #health-panel {
@@ -121,6 +152,12 @@ body {
     font-size: 22dp;
     font-weight: bold;
     color: #ffffff;
+    margin-bottom: 4dp;
+}
+
+.reserve-text {
+    font-size: 12dp;
+    color: #bbbbbb;
     margin-bottom: 4dp;
 }
 

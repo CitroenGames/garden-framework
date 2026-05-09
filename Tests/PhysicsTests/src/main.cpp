@@ -471,6 +471,43 @@ static bool testUseMeshCollisionCreatesBody(const fs::path& repo_root)
     return pass(name);
 }
 
+static bool testRaycastClosestCanIgnoreShooterBody()
+{
+    const std::string name = "raycast closest ignores shooter body";
+    world w;
+    w.initializePhysics();
+
+    auto player = w.registry.create();
+    w.registry.emplace<TransformComponent>(player, 0.0f, 0.6f, 0.0f);
+    w.registry.emplace<PlayerComponent>(player);
+    auto& rb = w.registry.emplace<RigidBodyComponent>(player);
+    rb.mass = 80.0f;
+    rb.apply_gravity = false;
+
+    if (w.getPhysicsSystem().createPlayerBody(w.registry, player).IsInvalid())
+        return fail(name, "failed to create player body");
+
+    auto wall = w.registry.create();
+    w.registry.emplace<TransformComponent>(wall, 0.0f, 0.6f, 5.0f);
+    auto wall_shape = makeBoxShape();
+    if (!wall_shape)
+        return fail(name, "failed to create wall shape");
+    if (w.getPhysicsSystem().createStaticBody(glm::vec3(0.0f, 0.6f, 5.0f), glm::vec3(0.0f), wall_shape, wall).IsInvalid())
+        return fail(name, "failed to create wall body");
+
+    PhysicsSystem::RaycastResult hit = w.raycastClosest(
+        glm::vec3(0.0f, 0.6f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f), 10.0f, player);
+
+    if (!hit.hit)
+        return fail(name, "raycast did not hit the wall");
+    if (hit.entity != wall)
+        return fail(name, "raycast hit the ignored player instead of the wall");
+    if (!approx(hit.distance, 4.5f, 0.08f))
+        return fail(name, "raycast hit distance was not the wall front face");
+
+    return pass(name);
+}
+
 static bool testFpsShooterLevelReferences(const fs::path& repo_root)
 {
     const std::string name = "FPSShooter level references";
@@ -555,6 +592,8 @@ int main()
     ok = testLevelPlayerCreatesCharacterController() && ok;
     run("use_mesh_collision creates body");
     ok = testUseMeshCollisionCreatesBody(repo_root) && ok;
+    run("raycast closest ignores shooter body");
+    ok = testRaycastClosestCanIgnoreShooterBody() && ok;
     run("FPSShooter level references");
     ok = testFpsShooterLevelReferences(repo_root) && ok;
 

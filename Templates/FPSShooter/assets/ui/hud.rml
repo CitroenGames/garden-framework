@@ -16,7 +16,12 @@
         <div class="kill-feed-text">{{ kill_feed }}</div>
     </div>
 
-    <div id="crosshair" data-if="alive">+</div>
+    <div id="crosshair" data-if="alive" style="width: {{ crosshair_gap }}dp; height: {{ crosshair_gap }}dp;">
+        <div class="hair hair-top"></div>
+        <div class="hair hair-right"></div>
+        <div class="hair hair-bottom"></div>
+        <div class="hair hair-left"></div>
+    </div>
 
     <div id="health-panel">
         <div class="health-bar-bg">
@@ -33,6 +38,7 @@
 
     <div id="ammo-panel">
         <div class="ammo-text">{{ ammo_text }}</div>
+        <div class="reserve-text">RESERVE {{ reserve_text }}</div>
         <div class="score-text">K: {{ kills }} / D: {{ deaths }}</div>
         <div class="label" data-if="connected">PING</div>
         <div class="value" data-if="connected">{{ ping }} ms</div>

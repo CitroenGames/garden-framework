@@ -31,6 +31,7 @@
 
 #include <SDL3/SDL.h>
 #include <algorithm>
+#include <cmath>
 #include <memory>
 
 using Net::InputState;
@@ -89,10 +90,17 @@ static Net::ReconciliationSmoothing g_recon_smoothing;
 static int32_t g_local_health = 100;
 static int32_t g_local_max_health = 100;
 static bool g_local_alive = true;
+static WeaponType g_local_weapon_type = WeaponType::RIFLE;
 static int32_t g_local_ammo = 30;
 static int32_t g_local_max_ammo = 30;
+static int32_t g_local_reserve_ammo = 90;
+static int32_t g_local_max_reserve_ammo = 90;
 static bool g_local_reloading = false;
 static float g_local_fire_cooldown = 0.0f;
+static float g_local_accuracy_penalty = 0.0f;
+static float g_local_recoil_index = 0.0f;
+static float g_local_time_since_last_shot = 1000.0f;
+static float g_local_weapon_spread = 0.0f;
 static int32_t g_local_kills = 0;
 static int32_t g_local_deaths = 0;
 static float g_death_timer = 0.0f; // Countdown shown on death screen
@@ -105,6 +113,22 @@ struct KillFeedEntry {
     float timer = 5.0f;
 };
 static std::vector<KillFeedEntry> g_kill_feed;
+
+static WeaponComponent makeLocalWeaponSnapshot()
+{
+    WeaponComponent weapon;
+    weapon.weapon_type = g_local_weapon_type;
+    weapon.ammo = g_local_ammo;
+    weapon.max_ammo = g_local_max_ammo;
+    weapon.reserve_ammo = g_local_reserve_ammo;
+    weapon.max_reserve_ammo = g_local_max_reserve_ammo;
+    weapon.fire_cooldown = g_local_fire_cooldown;
+    weapon.accuracy_penalty = g_local_accuracy_penalty;
+    weapon.recoil_index = g_local_recoil_index;
+    weapon.time_since_last_shot = g_local_time_since_last_shot;
+    weapon.reloading = g_local_reloading;
+    return weapon;
+}
 
 // ---- DLL exports ----
 
@@ -221,8 +245,15 @@ GAME_API bool gardenGameInit(EngineServices* services)
                 g_local_reloading = false;
 
                 const auto& def = getWeaponDef(WeaponType::RIFLE);
+                g_local_weapon_type = WeaponType::RIFLE;
                 g_local_ammo = def.max_ammo;
                 g_local_max_ammo = def.max_ammo;
+                g_local_reserve_ammo = def.max_reserve_ammo;
+                g_local_max_reserve_ammo = def.max_reserve_ammo;
+                g_local_accuracy_penalty = 0.0f;
+                g_local_recoil_index = 0.0f;
+                g_local_time_since_last_shot = 1000.0f;
+                g_local_weapon_spread = def.spread;
                 g_recon_smoothing.visual_offset = glm::vec3(0.0f);
 
                 LOG_ENGINE_INFO("Respawned with {} health", msg.health);
@@ -235,10 +266,17 @@ GAME_API bool gardenGameInit(EngineServices* services)
                 LOG_ENGINE_WARN("Failed to deserialize WEAPON_STATE");
                 return;
             }
+            const uint8_t weapon_idx = std::min<uint8_t>(msg.weapon_type, static_cast<uint8_t>(WeaponType::COUNT) - 1);
+            g_local_weapon_type = static_cast<WeaponType>(weapon_idx);
             g_local_ammo = msg.ammo;
             g_local_max_ammo = msg.max_ammo;
+            g_local_reserve_ammo = msg.reserve_ammo;
+            g_local_max_reserve_ammo = msg.max_reserve_ammo;
             g_local_reloading = msg.reloading != 0;
             g_local_fire_cooldown = std::max(g_local_fire_cooldown, msg.fire_cooldown);
+            g_local_weapon_spread = msg.spread;
+            g_local_accuracy_penalty = msg.accuracy_penalty;
+            g_local_recoil_index = msg.recoil_index;
             break;
         }
         default:
@@ -325,8 +363,16 @@ GAME_API void gardenGameUpdate(float delta_time)
         g_death_timer -= delta_time;
     }
 
-    // Update local weapon cooldowns
-    if (g_local_fire_cooldown > 0.0f) g_local_fire_cooldown -= delta_time;
+    // Update locally predicted weapon cooldown and accuracy recovery.
+    if (g_local_fire_cooldown > 0.0f)
+        g_local_fire_cooldown = std::max(g_local_fire_cooldown - delta_time, 0.0f);
+    g_local_time_since_last_shot += std::max(delta_time, 0.0f);
+    const auto& local_weapon_def = getWeaponDef(g_local_weapon_type);
+    g_local_accuracy_penalty = WeaponSystem::decayTowardZero(
+        g_local_accuracy_penalty, delta_time, local_weapon_def.recovery_time);
+    if (g_local_time_since_last_shot > local_weapon_def.fire_rate * local_weapon_def.recoil_decay_delay)
+        g_local_recoil_index = WeaponSystem::decayTowardZero(
+            g_local_recoil_index, delta_time, 1.0f / std::max(local_weapon_def.recoil_decay_rate, 0.001f));
 
     // Send player input to server and run client-side prediction
     if (g_network.isConnected() && input_manager)
@@ -361,24 +407,28 @@ GAME_API void gardenGameUpdate(float delta_time)
         // Predict local weapon controls; the server consumes the same input flags authoritatively.
         if (g_local_alive && input_manager->is_mouse_button_held(1) && g_local_fire_cooldown <= 0.0f && !g_local_reloading && g_local_ammo > 0)
         {
-            const auto& weapon_def = getWeaponDef(WeaponType::RIFLE);
+            const auto& weapon_def = getWeaponDef(g_local_weapon_type);
 
             input_state.buttons |= InputFlags::ATTACK;
 
             // Consume ammo locally (client prediction)
             g_local_ammo--;
             g_local_fire_cooldown = weapon_def.fire_rate;
+            g_local_accuracy_penalty = std::min(
+                g_local_accuracy_penalty + weapon_def.shot_spread_penalty, weapon_def.max_spread);
+            g_local_recoil_index += 1.0f;
+            g_local_time_since_last_shot = 0.0f;
 
             // Auto-reload
-            if (g_local_ammo <= 0) {
+            if (g_local_ammo <= 0 && g_local_reserve_ammo > 0) {
                 g_local_reloading = true;
             }
         }
 
         // Handle reload (R key)
         if (g_local_alive && input_manager->is_key_pressed(SDL_SCANCODE_R) && !g_local_reloading) {
-            const auto& weapon_def = getWeaponDef(WeaponType::RIFLE);
-            if (g_local_ammo < weapon_def.max_ammo) {
+            const auto& weapon_def = getWeaponDef(g_local_weapon_type);
+            if (g_local_ammo < weapon_def.max_ammo && g_local_reserve_ammo > 0) {
                 input_state.buttons |= InputFlags::RELOAD;
                 g_local_reloading = true;
                 // Reload timer handled by server, client just shows the state
@@ -536,16 +586,33 @@ GAME_API void gardenGameUpdate(float delta_time)
         float fps = (delta_time > 0.0f) ? 1.0f / delta_time : 0.0f;
         glm::vec3 pos(0.0f);
         float speed = 0.0f;
+        float max_speed = 10.0f;
         bool grounded = false;
         if (game_world->registry.valid(g_player_entity))
         {
             auto& t = game_world->registry.get<TransformComponent>(g_player_entity);
             pos = t.position;
-            if (game_world->registry.all_of<RigidBodyComponent>(g_player_entity))
-                speed = glm::length(game_world->registry.get<RigidBodyComponent>(g_player_entity).velocity);
-            if (game_world->registry.all_of<PlayerComponent>(g_player_entity))
-                grounded = game_world->registry.get<PlayerComponent>(g_player_entity).grounded;
+            if (game_world->registry.all_of<RigidBodyComponent>(g_player_entity)) {
+                const glm::vec3 velocity = game_world->registry.get<RigidBodyComponent>(g_player_entity).velocity;
+                speed = std::sqrt(velocity.x * velocity.x + velocity.z * velocity.z);
+            }
+            if (game_world->registry.all_of<PlayerComponent>(g_player_entity)) {
+                const auto& player = game_world->registry.get<PlayerComponent>(g_player_entity);
+                grounded = player.grounded;
+                max_speed = player.speed;
+            }
+            if (game_world->registry.all_of<CharacterControllerComponent>(g_player_entity)) {
+                const auto& controller = game_world->registry.get<CharacterControllerComponent>(g_player_entity);
+                grounded = controller.grounded;
+                max_speed = controller.move_speed;
+            }
         }
+
+        WeaponSystem::AccuracyContext accuracy_context;
+        accuracy_context.horizontal_speed = speed;
+        accuracy_context.max_speed = max_speed;
+        accuracy_context.grounded = grounded;
+        g_local_weapon_spread = WeaponSystem::computeSpread(makeLocalWeaponSnapshot(), accuracy_context);
 
         // Build kill feed text (last 5 entries)
         std::string kill_feed_text;
@@ -558,8 +625,9 @@ GAME_API void gardenGameUpdate(float delta_time)
         g_hud.update(fps, pos, speed, grounded, g_network.isConnected(),
                      g_network.isConnected() ? g_network.getStats().ping_ms : 0.0f,
                      g_local_health, g_local_max_health, g_local_ammo, g_local_max_ammo,
+                     g_local_reserve_ammo, g_local_max_reserve_ammo,
                      g_local_alive, g_death_timer, g_local_kills, g_local_deaths,
-                     kill_feed_text, g_local_reloading);
+                     kill_feed_text, g_local_reloading, g_local_weapon_spread);
     }
 }
 
@@ -615,10 +683,17 @@ GAME_API void gardenOnLevelLoaded()
     g_kill_feed.clear();
 
     const auto& def = getWeaponDef(WeaponType::RIFLE);
+    g_local_weapon_type = WeaponType::RIFLE;
     g_local_ammo = def.max_ammo;
     g_local_max_ammo = def.max_ammo;
+    g_local_reserve_ammo = def.max_reserve_ammo;
+    g_local_max_reserve_ammo = def.max_reserve_ammo;
     g_local_reloading = false;
     g_local_fire_cooldown = 0.0f;
+    g_local_accuracy_penalty = 0.0f;
+    g_local_recoil_index = 0.0f;
+    g_local_time_since_last_shot = 1000.0f;
+    g_local_weapon_spread = def.spread;
 }
 
 GAME_API void gardenOnPlayStart()
