@@ -43,7 +43,7 @@ void QuakeImportPanel::draw(bool* p_open)
     if (!ImGui::Begin("Quake Importer", p_open)) { ImGui::End(); return; }
 
     // ---- Archive picker ----
-    ImGui::Text("PAK file:");
+    ImGui::Text("PAK/ZIP file:");
     ImGui::SameLine();
     char buf[512];
     std::snprintf(buf, sizeof(buf), "%s", m_path_input.c_str());

@@ -7,8 +7,8 @@ include = ${ENGINE_PATH}/Engine/Engine.buildscript
 [project:QuakeImporter]
 type = dll
 sources = src/**/*.cpp
-headers = src/**/*.hpp
-includes = src
+headers = src/**/*.hpp, src/**/*.h
+includes = src, ../../Engine/src
 target_link_libraries(
     PRIVATE EditorSDK
 )

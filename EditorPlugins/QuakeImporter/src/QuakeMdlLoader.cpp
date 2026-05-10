@@ -10,7 +10,7 @@ Assets::AssetType QuakeMdlLoader::getAssetType() const
 
 std::vector<std::string> QuakeMdlLoader::getSupportedExtensions() const
 {
-    return { ".mdl" };
+    return { ".mdl", ".md5mesh", ".md5anim" };
 }
 
 Assets::LoadResult QuakeMdlLoader::loadFromFile(const std::string& path,
