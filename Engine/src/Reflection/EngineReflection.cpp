@@ -15,6 +15,7 @@ void registerEngineReflection(ReflectionRegistry& registry)
     registry.reflect<WaterVolumeComponent>("WaterVolumeComponent");
     registry.reflect<WaterComponent>("WaterComponent");
     registry.reflect<PlayerComponent>("PlayerComponent");
+    registry.reflect<CameraSpringComponent>("CameraSpringComponent");
     registry.reflect<FreecamComponent>("FreecamComponent");
     registry.reflect<PlayerRepresentationComponent>("PlayerRepresentationComponent");
     registry.reflect<PointLightComponent>("PointLightComponent");

@@ -30,11 +30,12 @@ These docs target developers **building a game** in Garden Framework. For engine
 - Code examples assume you are inside `gardenGameInit`/`gardenGameUpdate` and have an `EngineServices* g_services` cached.
 - "Host" means whichever executable loads your game DLL: `Editor.exe` (PIE), `Game.exe` (client), or `Server.exe` (dedicated).
 
-## Two starter templates
+## Starter templates
 
 | Template | When to start here |
 | :--- | :--- |
 | `Templates/EmptyProject` | You want a clean canvas. Single-player, minimal hooks, no networking. |
+| `Templates/ThirdPerson` | You want a small single-player character controller with a spring-arm third-person camera. |
 | `Templates/FPSShooter` | You want a working multiplayer FPS to copy from: client/server, weapons, HUD, prediction. |
 
-Either template can be generated through `garden new-project` (see [Getting Started](getting-started.md)) or copied by hand.
+These templates can be generated through `garden new-project` (see [Getting Started](getting-started.md)) or copied by hand.

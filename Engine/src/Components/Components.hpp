@@ -460,6 +460,40 @@ struct PlayerComponent {
     }
 };
 
+struct CameraSpringComponent {
+    bool enabled = true;
+    glm::vec3 pivot_offset = glm::vec3(0.0f, 1.35f, 0.0f);
+    glm::vec3 local_offset = glm::vec3(0.45f, 0.1f, -4.0f);
+    bool position_lag_enabled = true;
+    float spring_frequency = 12.0f;
+    float snap_distance = 12.0f;
+    bool collision_enabled = true;
+    float collision_padding = 0.2f;
+    bool rotate_target_yaw = true;
+
+    static void reflect(Reflector<CameraSpringComponent>& r) {
+        r.display("Camera Spring").category("Gameplay");
+        r.field<&CameraSpringComponent::enabled>("enabled")
+            .category("Spring");
+        r.field<&CameraSpringComponent::pivot_offset>("pivot_offset")
+            .tooltip("World-space offset from the target position to the camera pivot").drag(0.01f).category("Offsets");
+        r.field<&CameraSpringComponent::local_offset>("local_offset")
+            .tooltip("Camera offset in view space; negative Z places the camera behind the target").drag(0.01f).category("Offsets");
+        r.field<&CameraSpringComponent::position_lag_enabled>("position_lag_enabled")
+            .tooltip("Use spring smoothing instead of snapping to the arm target").category("Spring");
+        r.field<&CameraSpringComponent::spring_frequency>("spring_frequency")
+            .tooltip("Higher values make the camera catch up faster").drag(0.1f).range(0.1f, 60.0f).category("Spring");
+        r.field<&CameraSpringComponent::snap_distance>("snap_distance")
+            .tooltip("Snap instead of lagging when the camera is this far from the target; 0 disables snapping").drag(0.1f).range(0.0f, 1000.0f).category("Spring");
+        r.field<&CameraSpringComponent::collision_enabled>("collision_enabled")
+            .tooltip("Shorten the camera arm when world geometry blocks the view").category("Collision");
+        r.field<&CameraSpringComponent::collision_padding>("collision_padding")
+            .tooltip("Distance kept between the camera and a blocking surface").drag(0.01f).range(0.0f, 5.0f).category("Collision");
+        r.field<&CameraSpringComponent::rotate_target_yaw>("rotate_target_yaw")
+            .tooltip("Rotate the target transform to match the camera yaw").category("Target");
+    }
+};
+
 struct FreecamComponent {
     float movement_speed = 5.0f;
     float fast_movement_speed = 15.0f;

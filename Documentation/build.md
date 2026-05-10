@@ -230,7 +230,14 @@ garden list-plugins
 
 Garden project files are JSON `.garden` files. They reference a buildscript, default level, game module path, asset directories, and an engine registration.
 
-Templates live under `Templates/`. To generate the FPS shooter template manually:
+Templates live under `Templates/`. To generate the third-person template manually:
+
+```bat
+cd Templates\ThirdPerson
+sighmake ThirdPerson.buildscript -D ENGINE_PATH=../..
+```
+
+To generate the FPS shooter template manually:
 
 ```bat
 cd Templates\FPSShooter

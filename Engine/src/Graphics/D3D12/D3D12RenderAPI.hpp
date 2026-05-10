@@ -296,6 +296,8 @@ private:
     bool pp_resize_dirty = false;
     int  pp_resize_width = 0;
     int  pp_resize_height = 0;
+    int  pp_resources_width = 0;
+    int  pp_resources_height = 0;
 
     // VSync / present interval
     bool m_vsyncEnabled = true;

@@ -38,6 +38,11 @@ void D3D12RenderAPI::beginFrame()
         if (it != m_pie_viewports.end())
         {
             auto& pie = *it->second;
+            viewport_width_rt = pie.width();
+            viewport_height_rt = pie.height();
+            float ratio = static_cast<float>(viewport_width_rt) / static_cast<float>(viewport_height_rt);
+            projection_matrix = glm::perspectiveRH_ZO(glm::radians(field_of_view), ratio, 0.1f, 1000.0f);
+
             transitionResource(pie.getHDR(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
             flushBarriers();
             rtvHandle = m_rtvAllocator.getCPU(pie.getHDRRTV());
@@ -65,6 +70,11 @@ void D3D12RenderAPI::beginFrame()
     {
         // Editor mode: render into the editor viewport's HDR + depth.
         auto& ev = *m_editorViewport;
+        viewport_width_rt = ev.width();
+        viewport_height_rt = ev.height();
+        float ratio = static_cast<float>(viewport_width_rt) / static_cast<float>(viewport_height_rt);
+        projection_matrix = glm::perspectiveRH_ZO(glm::radians(field_of_view), ratio, 0.1f, 1000.0f);
+
         transitionResource(ev.getHDR(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
 
         flushBarriers();

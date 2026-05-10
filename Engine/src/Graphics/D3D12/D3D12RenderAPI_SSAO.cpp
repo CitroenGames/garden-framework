@@ -231,6 +231,8 @@ bool D3D12RenderAPI::createSSAOResources(int width, int height)
 
     LOG_ENGINE_INFO("[D3D12] SSAO resources created ({}x{} half-res)",
                     m_ssaoPass.getWidth(), m_ssaoPass.getHeight());
+    pp_resources_width = width;
+    pp_resources_height = height;
     return true;
 }
 

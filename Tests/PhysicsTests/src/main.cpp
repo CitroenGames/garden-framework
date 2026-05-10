@@ -4,6 +4,7 @@
 #include "Graphics/HeadlessRenderAPI.hpp"
 #include "LevelManager.hpp"
 #include "PhysicsSystem.hpp"
+#include "PlayerController.hpp"
 #include "Reflection/EngineReflection.hpp"
 #include "Reflection/ReflectionRegistry.hpp"
 #include "Utils/Log.hpp"
@@ -488,6 +489,41 @@ static bool testWaterComponentProvidesSwimmingVolume()
     return pass(name);
 }
 
+static bool testCameraSpringComponentOffsetsCamera()
+{
+    const std::string name = "camera spring offsets camera";
+    world w;
+
+    entt::entity player = w.registry.create();
+    auto& transform = w.registry.emplace<TransformComponent>(player, 0.0f, 1.0f, 0.0f);
+    w.registry.emplace<PlayerComponent>(player);
+    auto& spring = w.registry.emplace<CameraSpringComponent>(player);
+    spring.pivot_offset = glm::vec3(0.0f, 1.0f, 0.0f);
+    spring.local_offset = glm::vec3(0.5f, 0.0f, -4.0f);
+    spring.position_lag_enabled = false;
+    spring.collision_enabled = false;
+    spring.rotate_target_yaw = true;
+
+    w.world_camera.position = glm::vec3(10.0f, 10.0f, 10.0f);
+    w.world_camera.rotation = glm::vec3(0.0f);
+
+    PlayerController controller(nullptr, &w);
+    controller.setPossessedPlayer(player);
+    controller.setMovementEnabled(false);
+    controller.update(1.0f / 60.0f);
+
+    const glm::vec3 expected_position(0.5f, 2.0f, -4.0f);
+    if (glm::distance(w.world_camera.position, expected_position) > 0.01f)
+        return fail(name, "camera did not snap to the configured third-person arm");
+
+    w.world_camera.rotation.y = 1.0f;
+    controller.update(1.0f / 60.0f);
+    if (!approx(transform.rotation.y, glm::degrees(1.0f), 0.01f))
+        return fail(name, "target yaw did not follow camera yaw");
+
+    return pass(name);
+}
+
 static bool testNetworkSpawnedPlayerGroundsOnMesh(const fs::path& repo_root)
 {
     const std::string name = "network-spawned player grounds on mesh";
@@ -890,6 +926,60 @@ static bool testFpsShooterLevelReferences(const fs::path& repo_root)
     return pass(name);
 }
 
+static bool testThirdPersonTemplateReferences(const fs::path& repo_root)
+{
+    const std::string name = "ThirdPerson template references";
+    Assets::AssetManager::get().setAssetRoot((repo_root / "Templates" / "ThirdPerson" / "assets").string());
+    Assets::AssetManager::get().setAssetPrefix("assets");
+
+    LevelManager level_manager;
+    LevelData level;
+    fs::path level_path = repo_root / "Templates" / "ThirdPerson" / "assets" / "levels" / "main.level.json";
+    if (!level_manager.loadLevel(level_path.string(), level))
+        return fail(name, "failed to parse main.level.json");
+
+    bool saw_camera_spring = false;
+    bool saw_visible_player_rep = false;
+
+    for (const LevelEntity& entity : level.entities)
+    {
+        if (!entity.mesh_path.empty())
+        {
+            const std::string resolved = Assets::AssetManager::get().resolveAssetPath(entity.mesh_path);
+            if (!fs::exists(resolved))
+                return fail(name, "missing mesh asset: " + entity.mesh_path);
+        }
+
+        const auto& components = entity.reflected_components;
+        if (!components.is_object())
+            continue;
+
+        if (components.contains("CameraSpringComponent"))
+        {
+            saw_camera_spring = true;
+            const auto& spring = components["CameraSpringComponent"];
+            if (!spring.value("enabled", false))
+                return fail(name, "CameraSpringComponent is not enabled");
+            if (!spring.contains("local_offset") || spring["local_offset"].value("z", 0.0f) >= 0.0f)
+                return fail(name, "CameraSpringComponent does not place the camera behind the player");
+        }
+
+        if (components.contains("PlayerRepresentationComponent"))
+        {
+            const auto& rep = components["PlayerRepresentationComponent"];
+            if (!rep.value("visible_only_freecam", true))
+                saw_visible_player_rep = true;
+        }
+    }
+
+    if (!saw_camera_spring)
+        return fail(name, "template player has no CameraSpringComponent");
+    if (!saw_visible_player_rep)
+        return fail(name, "template has no visible third-person player representation");
+
+    return pass(name);
+}
+
 int main()
 {
     EE::CLog::Init();
@@ -915,6 +1005,8 @@ int main()
     ok = testPlayerBodyDoesNotUseJoltGravity() && ok;
     run("water component provides swimming volume");
     ok = testWaterComponentProvidesSwimmingVolume() && ok;
+    run("camera spring offsets camera");
+    ok = testCameraSpringComponentOffsetsCamera() && ok;
     run("network-spawned player grounds on mesh");
     ok = testNetworkSpawnedPlayerGroundsOnMesh(repo_root) && ok;
     run("level player creates character controller");
@@ -929,6 +1021,8 @@ int main()
     ok = testRaycastClosestCanIgnoreShooterBody() && ok;
     run("FPSShooter level references");
     ok = testFpsShooterLevelReferences(repo_root) && ok;
+    run("ThirdPerson template references");
+    ok = testThirdPersonTemplateReferences(repo_root) && ok;
 
     Assets::AssetManager::get().shutdown();
     EE::CLog::Shutdown();

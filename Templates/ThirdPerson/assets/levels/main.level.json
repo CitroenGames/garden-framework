@@ -1,0 +1,225 @@
+{
+  "metadata": {
+    "level_name": "Third Person Template",
+    "author": "Garden",
+    "version": "1.0",
+    "world": {
+      "gravity": {
+        "x": 0.0,
+        "y": -1.0,
+        "z": 0.0
+      },
+      "fixed_delta": 0.016
+    },
+    "lighting": {
+      "ambient": {
+        "r": 0.22,
+        "g": 0.24,
+        "b": 0.28
+      },
+      "diffuse": {
+        "r": 0.9,
+        "g": 0.85,
+        "b": 0.76
+      },
+      "direction": {
+        "x": -0.35,
+        "y": -1.0,
+        "z": 0.2
+      }
+    }
+  },
+  "entities": [
+    {
+      "name": "ground",
+      "type": "Renderable",
+      "transform": {
+        "position": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "rotation": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "scale": {
+          "x": 1.0,
+          "y": 1.0,
+          "z": 1.0
+        }
+      },
+      "mesh": {
+        "path": "assets/models/ground_plane.obj",
+        "textures": [],
+        "culling": true,
+        "transparent": false,
+        "visible": true
+      },
+      "collider": {
+        "shape_type": "Box",
+        "box_half_extents": {
+          "x": 20.0,
+          "y": 0.1,
+          "z": 20.0
+        },
+        "friction": 0.75,
+        "restitution": 0.0
+      }
+    },
+    {
+      "name": "player",
+      "type": "Player",
+      "transform": {
+        "position": {
+          "x": 0.0,
+          "y": 2.0,
+          "z": 0.0
+        },
+        "rotation": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "scale": {
+          "x": 1.0,
+          "y": 1.0,
+          "z": 1.0
+        }
+      },
+      "player_properties": {
+        "speed": 6.0,
+        "jump_force": 5.2,
+        "mouse_sensitivity": 1.0,
+        "apply_gravity": true
+      },
+      "components": {
+        "CameraSpringComponent": {
+          "enabled": true,
+          "pivot_offset": {
+            "x": 0.0,
+            "y": 1.15,
+            "z": 0.0
+          },
+          "local_offset": {
+            "x": 0.45,
+            "y": 0.15,
+            "z": -4.25
+          },
+          "position_lag_enabled": true,
+          "spring_frequency": 11.0,
+          "snap_distance": 16.0,
+          "collision_enabled": true,
+          "collision_padding": 0.25,
+          "rotate_target_yaw": true
+        }
+      }
+    },
+    {
+      "name": "player_visual",
+      "type": "PlayerRep",
+      "transform": {
+        "position": {
+          "x": 0.0,
+          "y": 2.0,
+          "z": 0.0
+        },
+        "rotation": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "scale": {
+          "x": 1.0,
+          "y": 1.0,
+          "z": 1.0
+        }
+      },
+      "mesh": {
+        "path": "assets/models/third_person_character.obj",
+        "textures": [],
+        "culling": true,
+        "transparent": false,
+        "visible": true
+      },
+      "player_rep_properties": {
+        "tracked_player": "player",
+        "position_offset": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        }
+      },
+      "components": {
+        "PlayerRepresentationComponent": {
+          "position_offset": {
+            "x": 0.0,
+            "y": 0.0,
+            "z": 0.0
+          },
+          "visible_only_freecam": false
+        }
+      }
+    },
+    {
+      "name": "freecam",
+      "type": "Freecam",
+      "transform": {
+        "position": {
+          "x": -2.0,
+          "y": 4.0,
+          "z": -6.0
+        },
+        "rotation": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "scale": {
+          "x": 1.0,
+          "y": 1.0,
+          "z": 1.0
+        }
+      },
+      "freecam_properties": {
+        "movement_speed": 6.0,
+        "fast_movement_speed": 18.0,
+        "mouse_sensitivity": 1.0
+      }
+    },
+    {
+      "name": "key_light",
+      "type": "PointLight",
+      "transform": {
+        "position": {
+          "x": -3.0,
+          "y": 6.0,
+          "z": -4.0
+        },
+        "rotation": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "scale": {
+          "x": 1.0,
+          "y": 1.0,
+          "z": 1.0
+        }
+      },
+      "point_light": {
+        "color": {
+          "x": 1.0,
+          "y": 0.86,
+          "z": 0.68
+        },
+        "intensity": 4.0,
+        "range": 18.0,
+        "constant_attenuation": 1.0,
+        "linear_attenuation": 0.08,
+        "quadratic_attenuation": 0.018
+      }
+    }
+  ]
+}

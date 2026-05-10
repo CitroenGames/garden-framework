@@ -756,6 +756,9 @@ void D3D12RenderAPI::resize(int width, int height)
     }
     if (m_shadowMaskPass.isInitialized())
         m_shadowMaskPass.resize(width, height);
+    pp_resources_width = width;
+    pp_resources_height = height;
+    pp_resize_dirty = false;
 
     float ratio = static_cast<float>(width) / static_cast<float>(height);
     projection_matrix = glm::perspectiveRH_ZO(glm::radians(field_of_view), ratio, 0.1f, 1000.0f);
@@ -794,6 +797,8 @@ void D3D12RenderAPI::ensureCommandListOpen()
             createSSAOResources(pp_resize_width, pp_resize_height);
         if (m_shadowMaskPass.isInitialized())
             createShadowMaskResources(pp_resize_width, pp_resize_height);
+        pp_resources_width = pp_resize_width;
+        pp_resources_height = pp_resize_height;
         pp_resize_dirty = false;
     }
 

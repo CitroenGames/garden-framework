@@ -26,7 +26,7 @@
 *   **Play In Editor (PIE)**: Enter play mode with world snapshot/restore, pause, eject to free-cam, and re-enter. Network PIE support with multi-process client instances.
 *   **Prefab Editor**: Create, edit, and spawn prefabs with nested prefab support and hot-reload.
 *   **Undo/Redo**: Action-based undo system for editor operations.
-*   **Project Browser**: Create new projects from templates (EmptyProject, FPSShooter) or open existing `.garden` project files.
+*   **Project Browser**: Create new projects from templates (EmptyProject, ThirdPerson, FPSShooter) or open existing `.garden` project files.
 *   **Level Serialization**: New, open, save, and save-as for JSON level files with native file dialogs.
 *   **Console Panel**: Integrated developer console with command input, tab completion, and log filtering.
 *   **Toolbar & Status Bar**: Quick-access editor actions and status information.
@@ -63,6 +63,7 @@
 
 ### Templates
 *   **EmptyProject**: Minimal starter with directory structure, game module entry point, and a default level.
+*   **ThirdPerson**: Single-player starter with a visible character, spring-arm camera, and collision-aware follow behavior.
 *   **FPSShooter**: Complete networked FPS template with client-server architecture, weapon system, character animation, HUD, movement prediction, and delta-compressed replication.
 
 ### Platforms

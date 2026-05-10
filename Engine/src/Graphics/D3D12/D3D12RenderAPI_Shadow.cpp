@@ -482,6 +482,8 @@ bool D3D12RenderAPI::createShadowMaskResources(int width, int height)
     // (client / editor / PIE). Nothing to create here — callers pass it in.
     LOG_ENGINE_INFO("[D3D12] Shadow mask resources created ({}x{})",
                     m_shadowMaskPass.getWidth(), m_shadowMaskPass.getHeight());
+    pp_resources_width = width;
+    pp_resources_height = height;
     return true;
 }
 

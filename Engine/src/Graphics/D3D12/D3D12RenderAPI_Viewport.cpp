@@ -11,14 +11,14 @@
 void D3D12RenderAPI::setViewportSize(int width, int height)
 {
     if (width <= 0 || height <= 0) return;
-    if (width == viewport_width_rt && height == viewport_height_rt) return;
+    const bool size_changed = width != viewport_width_rt || height != viewport_height_rt;
 
     // Resize the caller-owned editor viewport through our non-owning pointer.
     // Before the editor has registered one, this is a no-op — setViewportSize
     // only makes sense after setEditorViewport() has been called.
     // SceneViewport's resize routes resources through the deferred-release
     // ring, so it is safe to call mid-frame.
-    if (m_editorViewport)
+    if (m_editorViewport && size_changed)
         m_editorViewport->resize(width, height);
 
     // SSAO / shadow-mask textures don't go through the deferred-release ring
@@ -27,9 +27,16 @@ void D3D12RenderAPI::setViewportSize(int width, int height)
     // size and apply it at the start of the next frame in ensureCommandListOpen.
     if (m_ssaoPass.isInitialized() || m_shadowMaskPass.isInitialized())
     {
-        pp_resize_width  = width;
-        pp_resize_height = height;
-        pp_resize_dirty  = true;
+        if (width == pp_resources_width && height == pp_resources_height)
+        {
+            pp_resize_dirty = false;
+        }
+        else
+        {
+            pp_resize_width  = width;
+            pp_resize_height = height;
+            pp_resize_dirty  = true;
+        }
     }
 
     viewport_width_rt  = width;
@@ -51,6 +58,23 @@ void D3D12RenderAPI::setEditorViewport(SceneViewport* viewport)
     // the factory only ever hands out D3D12SceneViewport instances, so the
     // cast is safe.
     m_editorViewport = static_cast<D3D12SceneViewport*>(viewport);
+    // D3D12 SceneViewport instances are direct render targets, not wrappers
+    // around m_pie_viewports. Binding one should discard any stale explicit
+    // PIE target from a previous legacy path before beginFrame() selects a RT.
+    m_active_scene_target = -1;
+
+    if (m_editorViewport)
+    {
+        const int width = m_editorViewport->width();
+        const int height = m_editorViewport->height();
+        if (width > 0 && height > 0)
+        {
+            viewport_width_rt = width;
+            viewport_height_rt = height;
+            const float ratio = static_cast<float>(width) / static_cast<float>(height);
+            projection_matrix = glm::perspectiveRH_ZO(glm::radians(field_of_view), ratio, 0.1f, 1000.0f);
+        }
+    }
 }
 
 void D3D12RenderAPI::endSceneRender()
@@ -69,9 +93,11 @@ void D3D12RenderAPI::endSceneRender()
 
             // Route PIE through the same render graph as the editor viewport so
             // it gets skybox + deferred + SSAO + shadow-mask 1:1 with standalone.
-            bool wantSSAO = ssaoEnabled && m_ssaoBlurVPass.isInitialized()
+            const bool postProcessSizeMatches =
+                pie.width() == pp_resources_width && pie.height() == pp_resources_height && !pp_resize_dirty;
+            bool wantSSAO = postProcessSizeMatches && ssaoEnabled && m_ssaoBlurVPass.isInitialized()
                             && pie.getDepthSRV() != UINT(-1);
-            bool wantShadowMask = (shadowQuality > 0) && m_shadowMaskPass.isInitialized()
+            bool wantShadowMask = postProcessSizeMatches && (shadowQuality > 0) && m_shadowMaskPass.isInitialized()
                                   && m_shadowMapArray && pie.getDepthSRV() != UINT(-1);
 
             if (m_useRenderGraph)
@@ -133,10 +159,14 @@ void D3D12RenderAPI::endSceneRender()
     else
     {
         auto& vp = *m_editorViewport;
+        const int target_width = vp.width();
+        const int target_height = vp.height();
+        const bool postProcessSizeMatches =
+            target_width == pp_resources_width && target_height == pp_resources_height && !pp_resize_dirty;
 
-        bool wantSSAO = ssaoEnabled && m_ssaoBlurVPass.isInitialized()
+        bool wantSSAO = postProcessSizeMatches && ssaoEnabled && m_ssaoBlurVPass.isInitialized()
                         && vp.getDepthSRV() != UINT(-1);
-        bool wantShadowMask = (shadowQuality > 0) && m_shadowMaskPass.isInitialized()
+        bool wantShadowMask = postProcessSizeMatches && (shadowQuality > 0) && m_shadowMaskPass.isInitialized()
                               && m_shadowMapArray && vp.getDepthSRV() != UINT(-1);
 
         if (m_useRenderGraph)
@@ -144,8 +174,8 @@ void D3D12RenderAPI::endSceneRender()
             D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvAllocator.getCPU(vp.getOutputRTV());
 
             PostProcessGraphBuilder::Config cfg;
-            cfg.width          = static_cast<uint32_t>(viewport_width_rt);
-            cfg.height         = static_cast<uint32_t>(viewport_height_rt);
+            cfg.width          = static_cast<uint32_t>(target_width);
+            cfg.height         = static_cast<uint32_t>(target_height);
             cfg.wantSSAO       = wantSSAO;
             cfg.wantShadowMask = wantShadowMask;
             cfg.renderImGui    = false;
@@ -170,13 +200,13 @@ void D3D12RenderAPI::endSceneRender()
         else
         {
             // Run SSAO pass before FXAA/tone-mapping (generates blurred SSAO texture)
-            if (ssaoEnabled && m_ssaoPass.isInitialized() && vp.getDepthSRV() != UINT(-1))
+            if (wantSSAO)
                 renderSSAOPass(vp.getDepth(), vp.getDepthSRV(),
-                               viewport_width_rt, viewport_height_rt);
+                               target_width, target_height);
 
             if (wantShadowMask)
                 renderShadowMaskPass(vp.getDepth(), vp.getDepthSRV(),
-                                     viewport_width_rt, viewport_height_rt);
+                                     target_width, target_height);
 
             // Editor viewport: tone-map HDR offscreen to LDR viewport (with optional FXAA)
             transitionResource(vp.getHDR(),    {}, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -184,10 +214,10 @@ void D3D12RenderAPI::endSceneRender()
             flushBarriers();
 
             D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvAllocator.getCPU(vp.getOutputRTV());
-            renderFXAAPass(rtvHandle, vp.getHDRSRV(), viewport_width_rt, viewport_height_rt, wantSSAO, wantShadowMask);
+            renderFXAAPass(rtvHandle, vp.getHDRSRV(), target_width, target_height, wantSSAO, wantShadowMask);
             if (m_sceneRmlEnabled)
             {
-                RmlUiManager::get().beginFrame(viewport_width_rt, viewport_height_rt);
+                RmlUiManager::get().beginFrame(target_width, target_height);
                 RmlUiManager::get().render();
             }
 
@@ -415,6 +445,12 @@ void D3D12RenderAPI::setPIEViewportSize(int id, int width, int height)
 
 void D3D12RenderAPI::setActiveSceneTarget(int pie_viewport_id)
 {
+    if (pie_viewport_id >= 0 && m_pie_viewports.find(pie_viewport_id) == m_pie_viewports.end())
+    {
+        LOG_ENGINE_WARN("[D3D12] Ignoring unknown PIE scene target #{}", pie_viewport_id);
+        m_active_scene_target = -1;
+        return;
+    }
     m_active_scene_target = pie_viewport_id;
 }
 

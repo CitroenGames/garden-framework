@@ -30,6 +30,9 @@ private:
     bool freecam_mode_enabled;
     bool movement_enabled = true; // When false, updatePlayer() only does camera follow (networked mode)
     world* game_world;
+    glm::vec3 camera_spring_velocity = glm::vec3(0.0f);
+    entt::entity camera_spring_entity = entt::null;
+    bool camera_spring_initialized = false;
 
 public:
     PlayerController(std::shared_ptr<InputManager> input_mgr, world* w)
@@ -65,6 +68,7 @@ public:
     void setPossessedPlayer(entt::entity player)
     {
         player_entity = player;
+        resetCameraSpring();
     }
 
     void setPossessedFreecam(entt::entity freecam)
@@ -78,6 +82,7 @@ public:
             return;
 
         freecam_mode_enabled = !freecam_mode_enabled;
+        resetCameraSpring();
 
         if (freecam_mode_enabled)
         {
@@ -139,11 +144,114 @@ public:
     }
 
 private:
-    void followCamera(const glm::vec3& position, float delta)
+    void resetCameraSpring()
     {
-        float camera_speed = 10.0f;
-        float t = 1.0f - std::exp(-camera_speed * delta);
-        game_world->world_camera.position = glm::mix(game_world->world_camera.position, position, t);
+        camera_spring_velocity = glm::vec3(0.0f);
+        camera_spring_entity = entt::null;
+        camera_spring_initialized = false;
+    }
+
+    glm::vec3 resolveCameraSpringCollision(const glm::vec3& pivot,
+                                           const glm::vec3& desired_position,
+                                           const CameraSpringComponent& spring,
+                                           entt::entity target_entity)
+    {
+        if (!spring.collision_enabled)
+            return desired_position;
+
+        const glm::vec3 arm = desired_position - pivot;
+        const float arm_length = glm::length(arm);
+        if (arm_length <= 0.001f)
+            return desired_position;
+
+        PhysicsSystem::RaycastResult hit = game_world->raycastClosest(
+            pivot, arm / arm_length, arm_length, target_entity);
+        if (!hit.hit)
+            return desired_position;
+
+        const float adjusted_distance = std::max(hit.distance - std::max(spring.collision_padding, 0.0f), 0.0f);
+        return pivot + (arm / arm_length) * adjusted_distance;
+    }
+
+    glm::vec3 stepCameraSpring(const glm::vec3& current_position,
+                               const glm::vec3& target_position,
+                               float delta,
+                               const CameraSpringComponent& spring)
+    {
+        if (!spring.position_lag_enabled || delta <= 0.0f)
+        {
+            camera_spring_velocity = glm::vec3(0.0f);
+            return target_position;
+        }
+
+        const float omega = std::max(spring.spring_frequency, 0.001f);
+        const float frame_delta = std::min(delta, 0.1f);
+        const float decay = std::exp(-omega * frame_delta);
+        const glm::vec3 offset = current_position - target_position;
+
+        const glm::vec3 new_offset =
+            (offset * (1.0f + omega * frame_delta) + camera_spring_velocity * frame_delta) * decay;
+        camera_spring_velocity =
+            (camera_spring_velocity * (1.0f - omega * frame_delta) -
+             offset * (omega * omega * frame_delta)) * decay;
+
+        return target_position + new_offset;
+    }
+
+    void followCamera(const glm::vec3& position, float delta, entt::entity target_entity)
+    {
+        CameraSpringComponent* spring = nullptr;
+        if (game_world->registry.valid(target_entity))
+            spring = game_world->registry.try_get<CameraSpringComponent>(target_entity);
+
+        if (!spring || !spring->enabled)
+        {
+            resetCameraSpring();
+            float camera_speed = 10.0f;
+            float t = 1.0f - std::exp(-camera_speed * delta);
+            game_world->world_camera.position = glm::mix(game_world->world_camera.position, position, t);
+            return;
+        }
+
+        if (spring->rotate_target_yaw && game_world->registry.all_of<TransformComponent>(target_entity))
+        {
+            auto& target_transform = game_world->registry.get<TransformComponent>(target_entity);
+            target_transform.rotation.y = glm::degrees(game_world->world_camera.rotation.y);
+        }
+
+        glm::vec3 camera_rotation = game_world->world_camera.rotation;
+        camera_rotation.x = std::clamp(camera_rotation.x, -1.5f, 1.5f);
+        const glm::quat view_rotation = glm::quat(camera_rotation);
+        const glm::vec3 forward = view_rotation * glm::vec3(0.0f, 0.0f, 1.0f);
+        const glm::vec3 right = view_rotation * glm::vec3(1.0f, 0.0f, 0.0f);
+        const glm::vec3 up = glm::vec3(0.0f, 1.0f, 0.0f);
+
+        const glm::vec3 pivot = position + spring->pivot_offset;
+        glm::vec3 desired_position =
+            pivot +
+            right * spring->local_offset.x +
+            up * spring->local_offset.y +
+            forward * spring->local_offset.z;
+        desired_position = resolveCameraSpringCollision(pivot, desired_position, *spring, target_entity);
+
+        const bool changed_target = camera_spring_entity != target_entity;
+        const bool should_snap =
+            !camera_spring_initialized ||
+            changed_target ||
+            (spring->snap_distance > 0.0f &&
+             glm::distance(game_world->world_camera.position, desired_position) > spring->snap_distance);
+
+        camera_spring_entity = target_entity;
+        if (should_snap)
+        {
+            game_world->world_camera.position = desired_position;
+            camera_spring_velocity = glm::vec3(0.0f);
+            camera_spring_initialized = true;
+            return;
+        }
+
+        game_world->world_camera.position = stepCameraSpring(
+            game_world->world_camera.position, desired_position, delta, *spring);
     }
 
     CharacterMoveInput collectPlayerMoveInput() const
@@ -170,7 +278,7 @@ private:
 
         if (!movement_enabled)
         {
-            followCamera(trans.position, delta);
+            followCamera(trans.position, delta, player_entity);
             return;
         }
 
@@ -187,7 +295,7 @@ private:
             CharacterControllerState state =
                 game_world->simulate_character_controller(player_entity, input, game_world->fixed_delta);
 
-            followCamera(state.position, delta);
+            followCamera(state.position, delta, player_entity);
             return;
         }
 
@@ -223,12 +331,13 @@ private:
             wish_dir.x, wish_dir.y, wish_dir.z,
             rb.velocity.x, rb.velocity.y, rb.velocity.z, pc.grounded);
 
-        followCamera(trans.position, delta);
+        followCamera(trans.position, delta, player_entity);
     }
 
     void updateFreecam(float delta)
     {
         if (!game_world->registry.valid(freecam_entity)) return;
+        resetCameraSpring();
 
         auto& fc = game_world->registry.get<FreecamComponent>(freecam_entity);
         auto& trans = game_world->registry.get<TransformComponent>(freecam_entity);
