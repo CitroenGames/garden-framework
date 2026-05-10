@@ -23,6 +23,20 @@ namespace fs = std::filesystem;
 
 // ---- Process launching ----
 
+#ifdef _WIN32
+static std::string quoteCommandArg(const std::string& value)
+{
+    std::string quoted = "\"";
+    for (char c : value)
+    {
+        if (c == '"') quoted += "\\\"";
+        else quoted += c;
+    }
+    quoted += "\"";
+    return quoted;
+}
+#endif
+
 static bool launchEditor(const std::string& editor_path, const std::string& project_path)
 {
     if (!fs::exists(editor_path))
@@ -216,7 +230,9 @@ static int runSighmake(const std::string& abs_buildscript,
                        const std::string& cwd)
 {
 #ifdef _WIN32
-    std::string cmdline = "sighmake \"" + abs_buildscript + "\" -D ENGINE_PATH=" + engine_path;
+    std::string d_arg = "ENGINE_PATH=" + engine_path;
+    std::string cmdline = "sighmake " + quoteCommandArg(abs_buildscript) +
+                          " -D " + quoteCommandArg(d_arg);
     printf("  Running: %s\n\n", cmdline.c_str());
 
     STARTUPINFOA si = {};
@@ -290,10 +306,13 @@ static int runSighmake(const std::string& abs_buildscript,
 // Compile the generated build tree using Sighmake's own build driver so plugin
 // builds stay on the same toolchain discovery path as normal engine builds.
 static int runSighmakeBuild(const std::string& cwd,
-                            const std::string& configuration)
+                            const std::string& configuration,
+                            const std::string& project)
 {
 #ifdef _WIN32
-    std::string cmdline = "sighmake --build . --config " + configuration + " --parallel 8";
+    std::string cmdline = "sighmake --build . --config " + quoteCommandArg(configuration) +
+                          " --project " + quoteCommandArg(project) +
+                          " --no-project-references --parallel 1";
     printf("  Running: %s\n\n", cmdline.c_str());
 
     STARTUPINFOA si = {};
@@ -342,8 +361,11 @@ static int runSighmakeBuild(const std::string& cwd,
             ".",
             "--config",
             configuration.c_str(),
+            "--project",
+            project.c_str(),
+            "--no-project-references",
             "--parallel",
-            "8",
+            "1",
             nullptr
         };
         execvp(args[0], const_cast<char* const*>(args));
@@ -896,13 +918,15 @@ static int cmdGeneratePlugin(const std::string& plugin_path)
     printf("  Engine: %s\n", engine_path.c_str());
     printf("  Buildscript: %s\n", abs_buildscript.c_str());
 
+    std::string output_stem = plugin.output_dll.empty() ? plugin.name : plugin.output_dll;
+
     if (runSighmake(abs_buildscript, engine_path, plugin_dir) != 0)
         return 1;
 
-    // Sighmake generation only emits project files; build from the plugin
-    // directory so Sighmake uses the generated plugin build tree.
+    // Sighmake generation only emits project files. Build the plugin project
+    // directly so we do not rebuild the whole engine graph for every plugin.
     printf("\nBuilding plugin (Debug) via sighmake...\n");
-    if (runSighmakeBuild(plugin_dir, "Debug") != 0)
+    if (runSighmakeBuild(plugin_dir, "Debug", output_stem) != 0)
     {
         fprintf(stderr, "  Build failed while running sighmake --build from '%s'.\n",
                 plugin_dir.c_str());
@@ -913,8 +937,6 @@ static int cmdGeneratePlugin(const std::string& plugin_path)
     fs::path engine_plugins_dir = fs::path(engine->path) / "plugins";
     std::error_code ec;
     fs::create_directories(engine_plugins_dir, ec);
-
-    std::string output_stem = plugin.output_dll.empty() ? plugin.name : plugin.output_dll;
 
     // Verify the binary is where we expect before deploying the manifest. A
     // manifest without a matching library makes the editor report a plugin

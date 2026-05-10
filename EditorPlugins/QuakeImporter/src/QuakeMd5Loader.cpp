@@ -1,553 +1,518 @@
-// MD5 loader
-// Paul R. All Rights Reserved,
-// this is licensed under the license that garden uses, MIT.
-// instead of attributing me, please attribute garden because this is a part of garden.
-
 #include "QuakeMd5Loader.h"
+
+#include <algorithm>
+#include <cstdio>
 #include <fstream>
 #include <sstream>
-#include <algorithm>
-#include <cmath>
 
 namespace garden::assets {
 
-    // ============================================================================
-    // Utility Functions
-    // ============================================================================
+namespace detail {
 
-    namespace detail {
+static std::string trim(const std::string& str)
+{
+    size_t first = str.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return "";
 
-        /**
-         * @brief Split a string by whitespace
-         */
-        static std::vector<std::string> splitString(const std::string& str) {
-            std::vector<std::string> tokens;
-            std::istringstream iss(str);
-            std::string token;
+    size_t last = str.find_last_not_of(" \t\r\n");
+    return str.substr(first, last - first + 1);
+}
 
-            while (iss >> token) {
-                tokens.push_back(token);
+static std::string removeComments(const std::string& line)
+{
+    size_t pos = line.find("//");
+    if (pos != std::string::npos) {
+        return line.substr(0, pos);
+    }
+    return line;
+}
+
+static std::string extractQuotedString(const std::string& line)
+{
+    size_t first = line.find('"');
+    if (first == std::string::npos) return "";
+
+    size_t last = line.find('"', first + 1);
+    if (last == std::string::npos) return "";
+
+    return line.substr(first + 1, last - first - 1);
+}
+
+static std::vector<std::string> readFile(const std::string& filename)
+{
+    std::vector<std::string> lines;
+    std::ifstream file(filename);
+    if (!file.is_open()) {
+        return lines;
+    }
+
+    std::string line;
+    while (std::getline(file, line)) {
+        line = trim(removeComments(line));
+        if (!line.empty()) {
+            lines.push_back(line);
+        }
+    }
+
+    return lines;
+}
+
+static bool validParentIndex(int parent, size_t jointIndex)
+{
+    return parent == -1 || (parent >= 0 && static_cast<size_t>(parent) < jointIndex);
+}
+
+} // namespace detail
+
+bool MD5Model::load(const std::string& filename)
+{
+    unload();
+
+    auto lines = detail::readFile(filename);
+    if (lines.empty()) {
+        return false;
+    }
+
+    bool sawVersion = false;
+    bool sawJoints = false;
+    bool sawMeshes = false;
+    int version = 0;
+    int numJoints = 0;
+    int numMeshes = 0;
+
+    for (size_t i = 0; i < lines.size(); ++i) {
+        const auto& line = lines[i];
+
+        if (std::sscanf(line.c_str(), "MD5Version %d", &version) == 1) {
+            sawVersion = true;
+            if (version != MD5_VERSION) {
+                return false;
             }
-
-            return tokens;
-        }
-
-        /**
-         * @brief Remove leading/trailing whitespace
-         */
-        static std::string trim(const std::string& str) {
-            size_t first = str.find_first_not_of(" \t\r\n");
-            if (first == std::string::npos) return "";
-
-            size_t last = str.find_last_not_of(" \t\r\n");
-            return str.substr(first, last - first + 1);
-        }
-
-        /**
-         * @brief Remove comments from line (everything after //)
-         */
-        static std::string removeComments(const std::string& line) {
-            size_t pos = line.find("//");
-            if (pos != std::string::npos) {
-                return line.substr(0, pos);
+        } else if (std::sscanf(line.c_str(), "numJoints %d", &numJoints) == 1) {
+            if (numJoints <= 0 || numJoints > MD5_MAX_JOINTS) {
+                return false;
             }
-            return line;
-        }
-
-        /**
-         * @brief Extract string between quotes
-         */
-        static std::string extractQuotedString(const std::string& line) {
-            size_t first = line.find('\"');
-            if (first == std::string::npos) return "";
-
-            size_t last = line.find('\"', first + 1);
-            if (last == std::string::npos) return "";
-
-            return line.substr(first + 1, last - first - 1);
-        }
-
-        /**
-         * @brief Read and preprocess file
-         */
-        static std::vector<std::string> readFile(const std::string& filename) {
-            std::vector<std::string> lines;
-            std::ifstream file(filename);
-
-            if (!file.is_open()) {
-                return lines;
+            baseSkeleton.resize(static_cast<size_t>(numJoints));
+        } else if (std::sscanf(line.c_str(), "numMeshes %d", &numMeshes) == 1) {
+            if (numMeshes <= 0) {
+                return false;
             }
-
-            std::string line;
-            while (std::getline(file, line)) {
-                line = removeComments(line);
-                line = trim(line);
-
-                if (!line.empty()) {
-                    lines.push_back(line);
-                }
+            meshes.resize(static_cast<size_t>(numMeshes));
+        } else if (line == "joints {") {
+            if (baseSkeleton.empty() || !parseJoints(line, i, lines)) {
+                return false;
             }
-
-            file.close();
-            return lines;
+            sawJoints = true;
+        } else if (line == "mesh {") {
+            if (meshes.empty() || !parseMesh(line, i, lines)) {
+                return false;
+            }
+            sawMeshes = true;
         }
+    }
 
-    } // namespace detail
+    return sawVersion && sawJoints && sawMeshes && meshParseIndex == meshes.size();
+}
 
-    // ============================================================================
-    // MD5Model Implementation
-    // ============================================================================
+bool MD5Model::parseJoints(const std::string& line, size_t& lineNum,
+    const std::vector<std::string>& lines)
+{
+    (void)line;
+    ++lineNum;
 
-    bool MD5Model::load(const std::string& filename) {
-        auto lines = detail::readFile(filename);
-        if (lines.empty()) {
+    for (size_t i = 0; i < baseSkeleton.size(); ++i, ++lineNum) {
+        if (lineNum >= lines.size() || lines[lineNum] == "}") {
             return false;
         }
 
-        int version = 0;
-        int numJoints = 0;
-        int numMeshes = 0;
+        char name[64] = {};
+        float x = 0.0f, y = 0.0f, z = 0.0f, qx = 0.0f, qy = 0.0f, qz = 0.0f;
+        int parent = -1;
 
-        // Parse header
-        for (size_t i = 0; i < lines.size(); ++i) {
-            const auto& line = lines[i];
-
-            if (sscanf(line.c_str(), "MD5Version %d", &version) == 1) {
-                if (version != MD5_VERSION) {
-                    return false;
-                }
-            }
-            else if (sscanf(line.c_str(), "numJoints %d", &numJoints) == 1) {
-                baseSkeleton.resize(numJoints);
-            }
-            else if (sscanf(line.c_str(), "numMeshes %d", &numMeshes) == 1) {
-                meshes.resize(numMeshes);
-            }
-            else if (line.find("joints {") != std::string::npos) {
-                if (!parseJoints(line, i, lines)) {
-                    return false;
-                }
-            }
-            else if (line.find("mesh {") != std::string::npos) {
-                if (!parseMesh(line, i, lines)) {
-                    return false;
-                }
-            }
-        }
-
-        return !baseSkeleton.empty();
-    }
-
-    bool MD5Model::parseJoints(const std::string& line, size_t& lineNum,
-        const std::vector<std::string>& lines) {
-        lineNum++; // Move past "joints {"
-
-        for (size_t i = 0; i < baseSkeleton.size() && lineNum < lines.size(); ++i, ++lineNum) {
-            const auto& jointLine = lines[lineNum];
-
-            auto& joint = baseSkeleton[i];
-
-            // Parse: "name" parent ( x y z ) ( qx qy qz )
-            char name[64];
-            float x, y, z, qx, qy, qz;
-            int parent;
-
-            if (sscanf(jointLine.c_str(), "\"%63[^\"]\" %d ( %f %f %f ) ( %f %f %f )",
-                name, &parent, &x, &y, &z, &qx, &qy, &qz) == 8) {
-
-                joint.name = name;
-                joint.parent = parent;
-                joint.pos = glm::vec3(x, y, z);
-				joint.orient = quatFromMD5(qx, qy, qz);
-            }
-        }
-
-        return true;
-    }
-
-    bool MD5Model::parseMesh(const std::string& line, size_t& lineNum,
-        const std::vector<std::string>& lines) {
-        static int currentMesh = 0;
-        if (currentMesh >= static_cast<int>(meshes.size())) {
+        if (std::sscanf(lines[lineNum].c_str(), "\"%63[^\"]\" %d ( %f %f %f ) ( %f %f %f )",
+            name, &parent, &x, &y, &z, &qx, &qy, &qz) != 8) {
             return false;
         }
 
-        auto& mesh = meshes[currentMesh++];
-        lineNum++; // Move past "mesh {"
-
-        int numVerts = 0, numTris = 0, numWeights = 0;
-
-        while (lineNum < lines.size()) {
-            const auto& meshLine = lines[lineNum++];
-
-            if (meshLine == "}") {
-                break;
-            }
-
-            if (meshLine.find("shader ") != std::string::npos) {
-                mesh.shader = detail::extractQuotedString(meshLine);
-            }
-            else if (sscanf(meshLine.c_str(), "numverts %d", &numVerts) == 1) {
-                mesh.vertices.resize(numVerts);
-            }
-            else if (sscanf(meshLine.c_str(), "numtris %d", &numTris) == 1) {
-                mesh.triangles.resize(numTris);
-            }
-            else if (sscanf(meshLine.c_str(), "numweights %d", &numWeights) == 1) {
-                mesh.weights.resize(numWeights);
-            }
-            else {
-                // Parse vertex data
-                unsigned int vertIndex;
-                float s, t;
-                unsigned int start, count;
-
-                if (sscanf(meshLine.c_str(), "vert %u ( %f %f ) %u %u",
-                    &vertIndex, &s, &t, &start, &count) == 5) {
-
-                    if (vertIndex < mesh.vertices.size()) {
-                        mesh.vertices[vertIndex].texCoord = glm::vec2(s, t);
-                        mesh.vertices[vertIndex].weightStart = start;
-                        mesh.vertices[vertIndex].weightCount = count;
-                    }
-                }
-
-                // Parse triangle data
-                unsigned int triIndex, idx0, idx1, idx2;
-                if (sscanf(meshLine.c_str(), "tri %u %u %u %u",
-                    &triIndex, &idx0, &idx1, &idx2) == 4) {
-
-                    if (triIndex < mesh.triangles.size()) {
-                        mesh.triangles[triIndex].indices[0] = idx0;
-                        mesh.triangles[triIndex].indices[1] = idx1;
-                        mesh.triangles[triIndex].indices[2] = idx2;
-                    }
-                }
-
-                // Parse weight data
-                unsigned int weightIndex, joint;
-                float bias, wx, wy, wz;
-
-                if (sscanf(meshLine.c_str(), "weight %u %u %f ( %f %f %f )",
-                    &weightIndex, &joint, &bias, &wx, &wy, &wz) == 7) {
-
-                    if (weightIndex < mesh.weights.size()) {
-                        mesh.weights[weightIndex].joint = joint;
-                        mesh.weights[weightIndex].bias = bias;
-                        mesh.weights[weightIndex].pos = glm::vec3(wx, wy, wz);
-                    }
-                }
-            }
-        }
-
-        lineNum--; // Back up one line since the outer loop will increment
-        return true;
-    }
-
-    void MD5Model::unload() {
-        baseSkeleton.clear();
-        meshes.clear();
-    }
-
-    // ============================================================================
-    // MD5Animation Implementation
-    // ============================================================================
-
-    bool MD5Animation::load(const std::string& filename) {
-        auto lines = detail::readFile(filename);
-        if (lines.empty()) {
+        if (!detail::validParentIndex(parent, i)) {
             return false;
         }
 
-        int version = 0;
+        auto& joint = baseSkeleton[i];
+        joint.name = name;
+        joint.parent = parent;
+        joint.pos = glm::vec3(x, y, z);
+        joint.orient = quatFromMD5(qx, qy, qz);
+    }
 
-        // Parse header
-        for (size_t i = 0; i < lines.size(); ++i) {
-            const auto& line = lines[i];
+    return lineNum < lines.size() && lines[lineNum] == "}";
+}
 
-            if (sscanf(line.c_str(), "MD5Version %d", &version) == 1) {
-                if (version != MD5_VERSION) {
+bool MD5Model::parseMesh(const std::string& line, size_t& lineNum,
+    const std::vector<std::string>& lines)
+{
+    (void)line;
+    if (meshParseIndex >= meshes.size()) {
+        return false;
+    }
+
+    auto& mesh = meshes[meshParseIndex++];
+    ++lineNum;
+
+    while (lineNum < lines.size()) {
+        const auto& meshLine = lines[lineNum];
+        if (meshLine == "}") {
+            break;
+        }
+
+        if (meshLine.rfind("shader ", 0) == 0) {
+            mesh.shader = detail::extractQuotedString(meshLine);
+        } else {
+            int count = 0;
+            if (std::sscanf(meshLine.c_str(), "numverts %d", &count) == 1) {
+                if (count < 0) return false;
+                mesh.vertices.resize(static_cast<size_t>(count));
+            } else if (std::sscanf(meshLine.c_str(), "numtris %d", &count) == 1) {
+                if (count < 0) return false;
+                mesh.triangles.resize(static_cast<size_t>(count));
+            } else if (std::sscanf(meshLine.c_str(), "numweights %d", &count) == 1) {
+                if (count < 0) return false;
+                mesh.weights.resize(static_cast<size_t>(count));
+            } else if (meshLine.rfind("vert ", 0) == 0) {
+                unsigned int vertIndex = 0, start = 0, weightCount = 0;
+                float s = 0.0f, t = 0.0f;
+
+                if (std::sscanf(meshLine.c_str(), "vert %u ( %f %f ) %u %u",
+                    &vertIndex, &s, &t, &start, &weightCount) != 5 ||
+                    vertIndex >= mesh.vertices.size()) {
                     return false;
                 }
-            }
-            else if (sscanf(line.c_str(), "numFrames %u", &frameCount) == 1) {
-                skeletonFrames.resize(frameCount);
-                boundingBoxes.resize(frameCount);
-            }
-            else if (sscanf(line.c_str(), "numJoints %u", &jointCount) == 1) {
-                for (auto& frame : skeletonFrames) {
-                    frame.resize(jointCount);
-                }
-            }
-            else if (sscanf(line.c_str(), "frameRate %u", &frameRate) == 1) {
-                // Frame rate parsed
-            }
-            else if (line.find("hierarchy {") != std::string::npos) {
-                if (!parseHierarchy(line, i, lines)) {
+
+                mesh.vertices[vertIndex].texCoord = glm::vec2(s, t);
+                mesh.vertices[vertIndex].weightStart = start;
+                mesh.vertices[vertIndex].weightCount = weightCount;
+            } else if (meshLine.rfind("tri ", 0) == 0) {
+                unsigned int triIndex = 0, idx0 = 0, idx1 = 0, idx2 = 0;
+
+                if (std::sscanf(meshLine.c_str(), "tri %u %u %u %u",
+                    &triIndex, &idx0, &idx1, &idx2) != 4 ||
+                    triIndex >= mesh.triangles.size()) {
                     return false;
                 }
-            }
-            else if (line.find("bounds {") != std::string::npos) {
-                if (!parseBounds(line, i, lines)) {
+
+                mesh.triangles[triIndex].indices[0] = idx0;
+                mesh.triangles[triIndex].indices[1] = idx1;
+                mesh.triangles[triIndex].indices[2] = idx2;
+            } else if (meshLine.rfind("weight ", 0) == 0) {
+                unsigned int weightIndex = 0, joint = 0;
+                float bias = 0.0f, wx = 0.0f, wy = 0.0f, wz = 0.0f;
+
+                if (std::sscanf(meshLine.c_str(), "weight %u %u %f ( %f %f %f )",
+                    &weightIndex, &joint, &bias, &wx, &wy, &wz) != 7 ||
+                    weightIndex >= mesh.weights.size() ||
+                    joint >= baseSkeleton.size()) {
                     return false;
                 }
-            }
-            else if (line.find("baseframe {") != std::string::npos) {
-                if (!parseBaseFrame(line, i, lines)) {
-                    return false;
-                }
-            }
-            else if (sscanf(line.c_str(), "frame %u", &i) == 1) {
-                // Will be handled in parseFrame
-                if (!parseFrame(line, i, lines)) {
-                    return false;
-                }
+
+                mesh.weights[weightIndex].joint = joint;
+                mesh.weights[weightIndex].bias = bias;
+                mesh.weights[weightIndex].pos = glm::vec3(wx, wy, wz);
             }
         }
 
-        return frameCount > 0 && jointCount > 0;
+        ++lineNum;
     }
 
-    bool MD5Animation::parseHierarchy(const std::string& line, size_t& lineNum,
-        const std::vector<std::string>& lines) {
-        lineNum++; // Move past "hierarchy {"
-        jointInfos.resize(jointCount);
+    if (lineNum >= lines.size() || lines[lineNum] != "}") {
+        return false;
+    }
 
-        for (size_t i = 0; i < jointCount && lineNum < lines.size(); ++i, ++lineNum) {
-            const auto& hierLine = lines[lineNum];
-
-            if (hierLine == "}") {
-                return true;
-            }
-
-            // Parse: "name" parent flags startIndex
-            char name[64];
-            int parent, flags, startIndex;
-
-            if (sscanf(hierLine.c_str(), "\"%63[^\"]\" %d %d %d",
-                name, &parent, &flags, &startIndex) == 4) {
-
-                jointInfos[i].name = name;
-                jointInfos[i].parent = parent;
-                jointInfos[i].flags = static_cast<uint32_t>(flags);
-                jointInfos[i].startIndex = static_cast<uint32_t>(startIndex);
-            }
+    for (const auto& vertex : mesh.vertices) {
+        if (vertex.weightCount == 0 ||
+            vertex.weightStart > mesh.weights.size() ||
+            vertex.weightCount > mesh.weights.size() - vertex.weightStart) {
+            return false;
         }
-
-        return true;
     }
 
-    bool MD5Animation::parseBounds(const std::string& line, size_t& lineNum,
-        const std::vector<std::string>& lines) {
-        lineNum++; // Move past "bounds {"
-
-        for (size_t i = 0; i < frameCount && lineNum < lines.size(); ++i, ++lineNum) {
-            const auto& boundLine = lines[lineNum];
-
-            if (boundLine == "}") {
-                return true;
-            }
-
-            // Parse: ( min.x min.y min.z ) ( max.x max.y max.z )
-            float minX, minY, minZ, maxX, maxY, maxZ;
-
-            if (sscanf(boundLine.c_str(), "( %f %f %f ) ( %f %f %f )",
-                &minX, &minY, &minZ, &maxX, &maxY, &maxZ) == 6) {
-
-                boundingBoxes[i].min = glm::vec3(minX, minY, minZ);
-                boundingBoxes[i].max = glm::vec3(maxX, maxY, maxZ);
-            }
+    for (const auto& tri : mesh.triangles) {
+        if (tri.indices[0] >= mesh.vertices.size() ||
+            tri.indices[1] >= mesh.vertices.size() ||
+            tri.indices[2] >= mesh.vertices.size()) {
+            return false;
         }
-
-        return true;
     }
 
-    bool MD5Animation::parseBaseFrame(const std::string& line, size_t& lineNum,
-        const std::vector<std::string>& lines) {
-        lineNum++; // Move past "baseframe {"
-        baseFrame.resize(jointCount);
+    return true;
+}
 
-        for (size_t i = 0; i < jointCount && lineNum < lines.size(); ++i, ++lineNum) {
-            const auto& baseLine = lines[lineNum];
+void MD5Model::unload()
+{
+    baseSkeleton.clear();
+    meshes.clear();
+    meshParseIndex = 0;
+}
 
-            if (baseLine == "}") {
-                return true;
+bool MD5Animation::load(const std::string& filename)
+{
+    unload();
+
+    auto lines = detail::readFile(filename);
+    if (lines.empty()) {
+        return false;
+    }
+
+    bool sawVersion = false;
+    bool sawHierarchy = false;
+    bool sawBounds = false;
+    bool sawBaseFrame = false;
+    int version = 0;
+
+    for (size_t i = 0; i < lines.size(); ++i) {
+        const auto& line = lines[i];
+
+        if (std::sscanf(line.c_str(), "MD5Version %d", &version) == 1) {
+            sawVersion = true;
+            if (version != MD5_VERSION) {
+                return false;
             }
-
-            // Parse: ( pos.x pos.y pos.z ) ( qx qy qz )
-            float x, y, z, qx, qy, qz;
-
-            if (sscanf(baseLine.c_str(), "( %f %f %f ) ( %f %f %f )",
-                &x, &y, &z, &qx, &qy, &qz) == 6) {
-
-                baseFrame[i].pos = glm::vec3(x, y, z);
-				baseFrame[i].orient = quatFromMD5(qx, qy, qz);
+        } else if (std::sscanf(line.c_str(), "numFrames %u", &frameCount) == 1) {
+            if (frameCount == 0) return false;
+            skeletonFrames.resize(frameCount);
+            boundingBoxes.resize(frameCount);
+            if (jointCount > 0) {
+                for (auto& frame : skeletonFrames) frame.resize(jointCount);
             }
+        } else if (std::sscanf(line.c_str(), "numJoints %u", &jointCount) == 1) {
+            if (jointCount == 0 || jointCount > MD5_MAX_JOINTS) return false;
+            for (auto& frame : skeletonFrames) frame.resize(jointCount);
+        } else if (std::sscanf(line.c_str(), "frameRate %u", &frameRate) == 1) {
+            if (frameRate == 0) return false;
+        } else if (line == "hierarchy {") {
+            if (jointCount == 0 || !parseHierarchy(line, i, lines)) return false;
+            sawHierarchy = true;
+        } else if (line == "bounds {") {
+            if (frameCount == 0 || !parseBounds(line, i, lines)) return false;
+            sawBounds = true;
+        } else if (line == "baseframe {") {
+            if (jointCount == 0 || !parseBaseFrame(line, i, lines)) return false;
+            sawBaseFrame = true;
+        } else if (line.rfind("frame ", 0) == 0) {
+            if (!parseFrame(line, i, lines)) return false;
         }
-
-        return true;
     }
 
-    bool MD5Animation::parseFrame(const std::string& line, size_t& lineNum,
-        const std::vector<std::string>& lines) {
-        unsigned int frameIndex;
+    return sawVersion && sawHierarchy && sawBounds && sawBaseFrame &&
+        frameCount > 0 && jointCount > 0 && skeletonFrames.size() == frameCount;
+}
 
-        if (sscanf(line.c_str(), "frame %u", &frameIndex) != 1) {
+bool MD5Animation::parseHierarchy(const std::string& line, size_t& lineNum,
+    const std::vector<std::string>& lines)
+{
+    (void)line;
+    ++lineNum;
+    jointInfos.resize(jointCount);
+
+    for (size_t i = 0; i < jointCount; ++i, ++lineNum) {
+        if (lineNum >= lines.size() || lines[lineNum] == "}") {
             return false;
         }
 
-        if (frameIndex >= frameCount) {
+        char name[64] = {};
+        int parent = -1, flags = 0, startIndex = 0;
+
+        if (std::sscanf(lines[lineNum].c_str(), "\"%63[^\"]\" %d %d %d",
+            name, &parent, &flags, &startIndex) != 4 ||
+            flags < 0 || (flags & ~63) != 0 || startIndex < 0 ||
+            !detail::validParentIndex(parent, i)) {
             return false;
         }
 
-        lineNum++; // Move past "frame X {"
-
-        std::vector<float> frameData;
-
-        // Read frame data until we hit '}'
-        while (lineNum < lines.size()) {
-            const auto& dataLine = lines[lineNum++];
-
-            if (dataLine == "}") {
-                break;
-            }
-
-            // Parse whitespace-separated floats
-            std::istringstream iss(dataLine);
-            float value;
-            while (iss >> value) {
-                frameData.push_back(value);
-            }
-        }
-
-        // Build skeleton from frame data
-        buildFrameSkeleton(frameIndex, frameData);
-
-        return true;
+        jointInfos[i].name = name;
+        jointInfos[i].parent = parent;
+        jointInfos[i].flags = static_cast<uint32_t>(flags);
+        jointInfos[i].startIndex = static_cast<uint32_t>(startIndex);
     }
 
-    void MD5Animation::buildFrameSkeleton(uint32_t frameIndex,
-        const std::vector<float>& frameData) {
-        auto& frame = skeletonFrames[frameIndex];
+    return lineNum < lines.size() && lines[lineNum] == "}";
+}
 
-        for (size_t i = 0; i < jointCount; ++i) {
-            const auto& baseJoint = baseFrame[i];
-            const auto& info = jointInfos[i];
+bool MD5Animation::parseBounds(const std::string& line, size_t& lineNum,
+    const std::vector<std::string>& lines)
+{
+    (void)line;
+    ++lineNum;
 
-            // Start with base frame
-            glm::vec3 animatedPos = baseJoint.pos;
-            glm::quat animatedOrient = baseJoint.orient;
-
-            uint32_t j = 0;
-
-            // Replace components based on flags
-            if (info.flags & 1) { // Tx
-                if (info.startIndex + j < frameData.size()) {
-                    animatedPos.x = frameData[info.startIndex + j];
-                }
-                ++j;
-            }
-
-            if (info.flags & 2) { // Ty
-                if (info.startIndex + j < frameData.size()) {
-                    animatedPos.y = frameData[info.startIndex + j];
-                }
-                ++j;
-            }
-
-            if (info.flags & 4) { // Tz
-                if (info.startIndex + j < frameData.size()) {
-                    animatedPos.z = frameData[info.startIndex + j];
-                }
-                ++j;
-            }
-
-            if (info.flags & 8) { // Qx
-                if (info.startIndex + j < frameData.size()) {
-                    animatedOrient.x = frameData[info.startIndex + j];
-                }
-                ++j;
-            }
-
-            if (info.flags & 16) { // Qy
-                if (info.startIndex + j < frameData.size()) {
-                    animatedOrient.y = frameData[info.startIndex + j];
-                }
-                ++j;
-            }
-
-            if (info.flags & 32) { // Qz
-                if (info.startIndex + j < frameData.size()) {
-                    animatedOrient.z = frameData[info.startIndex + j];
-                }
-                ++j;
-            }
-
-            // Ensure quaternion is normalized
-			animatedOrient = quatFromMD5(animatedOrient.x, animatedOrient.y, animatedOrient.z);
-
-            // Build final joint in object space
-            auto& joint = frame[i];
-            joint.name = info.name;
-            joint.parent = info.parent;
-
-            if (info.parent < 0) {
-                // Root joint
-                joint.pos = animatedPos;
-                joint.orient = animatedOrient;
-            }
-            else {
-                // Has parent - transform to object space
-                const auto& parentJoint = frame[info.parent];
-
-                // Rotate position by parent orientation
-                glm::vec3 rotatedPos = parentJoint.orient * animatedPos;
-
-                // Add to parent position
-                joint.pos = parentJoint.pos + rotatedPos;
-
-                // Concatenate rotations and normalize
-                joint.orient = parentJoint.orient * animatedOrient;
-                joint.orient = glm::normalize(joint.orient);
-            }
+    for (size_t i = 0; i < frameCount; ++i, ++lineNum) {
+        if (lineNum >= lines.size() || lines[lineNum] == "}") {
+            return false;
         }
+
+        float minX = 0.0f, minY = 0.0f, minZ = 0.0f;
+        float maxX = 0.0f, maxY = 0.0f, maxZ = 0.0f;
+
+        if (std::sscanf(lines[lineNum].c_str(), "( %f %f %f ) ( %f %f %f )",
+            &minX, &minY, &minZ, &maxX, &maxY, &maxZ) != 6) {
+            return false;
+        }
+
+        boundingBoxes[i].min = glm::vec3(minX, minY, minZ);
+        boundingBoxes[i].max = glm::vec3(maxX, maxY, maxZ);
     }
 
-    bool MD5Animation::isCompatibleWith(const MD5Model& model) const {
-        if (model.getJointCount() != jointCount) {
+    return lineNum < lines.size() && lines[lineNum] == "}";
+}
+
+bool MD5Animation::parseBaseFrame(const std::string& line, size_t& lineNum,
+    const std::vector<std::string>& lines)
+{
+    (void)line;
+    ++lineNum;
+    baseFrame.resize(jointCount);
+
+    for (size_t i = 0; i < jointCount; ++i, ++lineNum) {
+        if (lineNum >= lines.size() || lines[lineNum] == "}") {
             return false;
         }
 
-        // Check against first frame
-        if (skeletonFrames.empty()) {
+        float x = 0.0f, y = 0.0f, z = 0.0f, qx = 0.0f, qy = 0.0f, qz = 0.0f;
+
+        if (std::sscanf(lines[lineNum].c_str(), "( %f %f %f ) ( %f %f %f )",
+            &x, &y, &z, &qx, &qy, &qz) != 6) {
             return false;
         }
 
-        const auto& modelSkel = model.getBaseSkeleton();
-        const auto& animSkel = skeletonFrames[0];
+        baseFrame[i].pos = glm::vec3(x, y, z);
+        baseFrame[i].orient = quatFromMD5(qx, qy, qz);
+    }
 
-        for (size_t i = 0; i < jointCount; ++i) {
-            // Check parent indices match
-            if (modelSkel[i].parent != animSkel[i].parent) {
+    return lineNum < lines.size() && lines[lineNum] == "}";
+}
+
+bool MD5Animation::parseFrame(const std::string& line, size_t& lineNum,
+    const std::vector<std::string>& lines)
+{
+    unsigned int frameIndex = 0;
+    if (std::sscanf(line.c_str(), "frame %u", &frameIndex) != 1 ||
+        frameIndex >= frameCount ||
+        jointInfos.size() != jointCount ||
+        baseFrame.size() != jointCount ||
+        skeletonFrames.size() != frameCount) {
+        return false;
+    }
+
+    ++lineNum;
+
+    std::vector<float> frameData;
+    while (lineNum < lines.size()) {
+        const auto& dataLine = lines[lineNum];
+        if (dataLine == "}") {
+            break;
+        }
+
+        std::istringstream iss(dataLine);
+        float value = 0.0f;
+        while (iss >> value) {
+            frameData.push_back(value);
+        }
+
+        ++lineNum;
+    }
+
+    if (lineNum >= lines.size() || lines[lineNum] != "}") {
+        return false;
+    }
+
+    return buildFrameSkeleton(frameIndex, frameData);
+}
+
+bool MD5Animation::buildFrameSkeleton(uint32_t frameIndex,
+    const std::vector<float>& frameData)
+{
+    if (frameIndex >= skeletonFrames.size() ||
+        jointInfos.size() != jointCount ||
+        baseFrame.size() != jointCount) {
+        return false;
+    }
+
+    auto& frame = skeletonFrames[frameIndex];
+
+    for (size_t i = 0; i < jointCount; ++i) {
+        const auto& baseJoint = baseFrame[i];
+        const auto& info = jointInfos[i];
+
+        glm::vec3 animatedPos = baseJoint.pos;
+        glm::quat animatedOrient = baseJoint.orient;
+        uint32_t j = 0;
+
+        auto readComponent = [&](float& out) {
+            const size_t index = static_cast<size_t>(info.startIndex + j);
+            if (index >= frameData.size()) {
+                return false;
+            }
+            out = frameData[index];
+            ++j;
+            return true;
+        };
+
+        if ((info.flags & 1) && !readComponent(animatedPos.x)) return false;
+        if ((info.flags & 2) && !readComponent(animatedPos.y)) return false;
+        if ((info.flags & 4) && !readComponent(animatedPos.z)) return false;
+        if ((info.flags & 8) && !readComponent(animatedOrient.x)) return false;
+        if ((info.flags & 16) && !readComponent(animatedOrient.y)) return false;
+        if ((info.flags & 32) && !readComponent(animatedOrient.z)) return false;
+
+        animatedOrient = quatFromMD5(animatedOrient.x, animatedOrient.y, animatedOrient.z);
+
+        auto& joint = frame[i];
+        joint.name = info.name;
+        joint.parent = info.parent;
+
+        if (info.parent < 0) {
+            joint.pos = animatedPos;
+            joint.orient = animatedOrient;
+        } else {
+            if (static_cast<size_t>(info.parent) >= i) {
                 return false;
             }
 
-            // Check names match
-            if (modelSkel[i].name != animSkel[i].name) {
-                return false;
-            }
+            const auto& parentJoint = frame[static_cast<size_t>(info.parent)];
+            joint.pos = parentJoint.pos + parentJoint.orient * animatedPos;
+            joint.orient = glm::normalize(parentJoint.orient * animatedOrient);
         }
-
-        return true;
     }
 
-    void MD5Animation::unload() {
-        frameCount = 0;
-        jointCount = 0;
-        skeletonFrames.clear();
-        boundingBoxes.clear();
-        jointInfos.clear();
-        baseFrame.clear();
+    return true;
+}
+
+bool MD5Animation::isCompatibleWith(const MD5Model& model) const
+{
+    if (model.getJointCount() != jointCount || skeletonFrames.empty()) {
+        return false;
     }
+
+    const auto& modelSkel = model.getBaseSkeleton();
+    const auto& animSkel = skeletonFrames[0];
+
+    for (size_t i = 0; i < jointCount; ++i) {
+        if (modelSkel[i].parent != animSkel[i].parent ||
+            modelSkel[i].name != animSkel[i].name) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+void MD5Animation::unload()
+{
+    frameCount = 0;
+    jointCount = 0;
+    frameRate = 24;
+    skeletonFrames.clear();
+    boundingBoxes.clear();
+    jointInfos.clear();
+    baseFrame.clear();
+}
 
 } // namespace garden::assets

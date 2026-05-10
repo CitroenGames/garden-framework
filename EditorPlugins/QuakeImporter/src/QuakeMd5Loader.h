@@ -1,23 +1,14 @@
 #pragma once
-/*
-Implementation of a Doom3/Quake4 (i.e. id Tech 4) MD5 model and animation loader.
-I was very careful as not to basically just, (fucking) copy paste GPL code because
-we dont want that in an MIT project, as that would essentially destroy the whole purpose
-of having a more liberal license if it gets overriden during distribution.
-
-Specifically adapted for Garden.
-*/
-
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtx/quaternion.hpp>
-#include <vector>
-#include <string>
-#include <memory>
 #include <array>
+#include <cstddef>
+#include <cstdint>
 #include <cmath>
-
+#include <string>
+#include <vector>
 
 namespace garden::assets {
 
@@ -124,6 +115,7 @@ namespace garden::assets {
     private:
         std::vector<Joint> baseSkeleton;
         std::vector<Mesh> meshes;
+        size_t meshParseIndex = 0;
 
         bool parseJoints(const std::string& line, size_t& lineNum,
             const std::vector<std::string>& lines);
@@ -202,7 +194,7 @@ namespace garden::assets {
         bool parseFrame(const std::string& line, size_t& lineNum,
             const std::vector<std::string>& lines);
 
-        void buildFrameSkeleton(uint32_t frameIndex,
+        bool buildFrameSkeleton(uint32_t frameIndex,
             const std::vector<float>& frameData);
     };
 
@@ -248,10 +240,18 @@ namespace garden::assets {
         positions.reserve(vertices.size());
 
         for (const auto& vertex : vertices) {
+            if (vertex.weightStart > weights.size() ||
+                vertex.weightCount > weights.size() - vertex.weightStart) {
+                return {};
+            }
+
             glm::vec3 finalPos(0.0f);
 
             for (uint32_t i = 0; i < vertex.weightCount; ++i) {
                 const auto& weight = weights[vertex.weightStart + i];
+                if (weight.joint >= skeleton.size()) {
+                    return {};
+                }
                 const auto& joint = skeleton[weight.joint];
 
                 glm::vec3 rotated = joint.orient * weight.pos;
@@ -271,7 +271,7 @@ namespace garden::assets {
 
     inline void AnimationState::update(double deltaTime,
         const MD5Animation& animation) {
-        if (!animation.getFrameRate()) return;
+        if (!animation.getFrameRate() || !animation.getFrameCount()) return;
 
         maxFrameTime = 1.0 / animation.getFrameRate();
         elapsedTime += deltaTime;
@@ -298,6 +298,10 @@ namespace garden::assets {
         const std::vector<Joint>& skelB,
         float t) {
 
+        if (skelA.size() != skelB.size()) {
+            return {};
+        }
+
         std::vector<Joint> result;
         result.reserve(skelA.size());
 
@@ -307,7 +311,7 @@ namespace garden::assets {
             j.parent = skelA[i].parent;
 
             j.pos = glm::mix(skelA[i].pos, skelB[i].pos, t);
-            glm::slerp(skelA[i].orient, skelB[i].orient, t);
+            j.orient = glm::normalize(glm::slerp(skelA[i].orient, skelB[i].orient, t));
 
             result.push_back(j);
         }
