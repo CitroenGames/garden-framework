@@ -6,5 +6,6 @@ sources = tiny_gltf.cc
 headers = *.h
 includes = .
 public_includes = .
+defines = TINYGLTF_NO_EXTERNAL_IMAGE
 multiprocessor = true
 simd = AdvancedVectorExtensions2

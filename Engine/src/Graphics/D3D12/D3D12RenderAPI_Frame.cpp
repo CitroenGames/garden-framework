@@ -130,6 +130,8 @@ setup_done:
     m_lastFrameStats.backend_draw_calls = 0;
     m_lastFrameStats.instanced_batches = 0;
     m_lastFrameStats.instanced_instances = 0;
+    m_lastFrameStats.parallel_replay_batches = 0;
+    m_lastFrameStats.parallel_replay_workers = 0;
 
     commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 

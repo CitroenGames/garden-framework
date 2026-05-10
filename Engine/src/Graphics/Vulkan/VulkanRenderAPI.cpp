@@ -18,6 +18,23 @@
 #include "imgui.h"
 #include "imgui_impl_vulkan.h"
 
+#include <algorithm>
+
+namespace
+{
+    uint32_t configuredParallelReplayWorkerCount(uint32_t automaticCount)
+    {
+        automaticCount = std::max(1u, automaticCount);
+        if (auto* cvar = CVAR_PTR(r_multicore_replay_workers))
+        {
+            const int requestedWorkers = cvar->getInt();
+            if (requestedWorkers > 0)
+                automaticCount = std::min(automaticCount, static_cast<uint32_t>(requestedWorkers));
+        }
+        return automaticCount;
+    }
+}
+
 VulkanRenderAPI::VulkanRenderAPI()
 {
     m_ppGraphBuilder.setAPI(this);
@@ -649,7 +666,9 @@ bool VulkanRenderAPI::createContinuationRenderPass()
 
 bool VulkanRenderAPI::createThreadCommandPools()
 {
-    uint32_t poolCount = std::max(1u, std::thread::hardware_concurrency() - 1);
+    const uint32_t hwThreads = std::thread::hardware_concurrency();
+    const uint32_t automaticPoolCount = (hwThreads > 1) ? (hwThreads - 1) : 1;
+    uint32_t poolCount = configuredParallelReplayWorkerCount(automaticPoolCount);
 
     m_threadCommandPools.resize(poolCount);
     for (uint32_t i = 0; i < poolCount; i++) {

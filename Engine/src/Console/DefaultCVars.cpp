@@ -85,6 +85,17 @@ CONVAR(r_deferred, 0, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
        "Enable deferred rendering (opaque GBuffer + deferred lighting; transparents still forward). "
        "Supported on D3D12 and Vulkan.");
 
+CONVAR(r_multicore_rendering, 1, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
+       "Enable backend parallel command replay on supported render APIs");
+
+CONVAR_BOUNDED(r_multicore_replay_min_draws, 512, 1, 65536,
+               ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
+               "Minimum buffered draws before D3D12/Vulkan use parallel replay");
+
+CONVAR_BOUNDED(r_multicore_replay_workers, 0, 0, 64,
+               ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
+               "Maximum backend replay workers, 0 means auto");
+
 CONVAR(r_d3d12_dred, 0, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
        "Force-enable D3D12 DRED (Device Removed Extended Data) and GPU-Based Validation in Release builds. "
        "Captures breadcrumbs and page-fault data after TDRs; costs perf. Takes effect on next launch.");

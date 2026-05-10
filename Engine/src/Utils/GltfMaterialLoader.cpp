@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <fstream>
 #include <cstring>
+#include <limits>
+#include "stb_image.h"
 
 // Configure tinygltf to use external STB_IMAGE
 #define TINYGLTF_NO_STB_IMAGE_WRITE
@@ -127,10 +129,77 @@ void GltfMaterialLoader::cleanupMaterialTextures(MaterialLoadResult& result, IRe
     }
 }
 
+bool GltfMaterialLoader::uploadTextures(MaterialLoadResult& result,
+                                       IRenderAPI* render_api,
+                                       const MaterialLoaderConfig& config)
+{
+    if (!render_api || !result.success)
+        return false;
+
+    bool uploaded_any = false;
+
+    for (auto& material : result.materials)
+    {
+        for (auto& texture : material.textures.textures)
+        {
+            if (texture.handle != INVALID_TEXTURE)
+            {
+                texture.is_loaded = true;
+                continue;
+            }
+
+            if (texture.uri.empty())
+                continue;
+
+            TextureHandle handle = INVALID_TEXTURE;
+            if (config.cache_textures)
+            {
+                auto cache_it = result.texture_cache.find(texture.uri);
+                if (cache_it != result.texture_cache.end())
+                    handle = cache_it->second;
+            }
+
+            if (handle == INVALID_TEXTURE)
+            {
+                if (texture.is_embedded)
+                {
+                    handle = loadEmbeddedTextureData(
+                        texture.embedded_data.data(),
+                        texture.embedded_data.size(),
+                        texture.embedded_width,
+                        texture.embedded_height,
+                        texture.embedded_channels,
+                        texture.embedded_as_is,
+                        render_api,
+                        config);
+
+                    if (handle != INVALID_TEXTURE && config.cache_textures)
+                        result.texture_cache[texture.uri] = handle;
+                }
+                else
+                {
+                    handle = loadTextureFromUri(texture.uri, config, render_api, result.texture_cache);
+                }
+            }
+
+            texture.handle = handle;
+            texture.is_loaded = (handle != INVALID_TEXTURE);
+            uploaded_any = uploaded_any || texture.is_loaded;
+        }
+    }
+
+    refreshStatistics(result);
+    return uploaded_any;
+}
+
 bool GltfMaterialLoader::loadModel(const std::string& filename, tinygltf::Model& model, std::string& error)
 {
     tinygltf::TinyGLTF loader;
     std::string warn;
+
+    // Material processing only needs texture references here. Keep embedded
+    // payloads compressed so stb does not decode images during glTF parsing.
+    loader.SetImagesAsIs(true);
     
     // Determine if file is binary (.glb) or text (.gltf)
     bool is_binary = filename.substr(filename.find_last_of(".") + 1) == "glb";
@@ -203,27 +272,8 @@ MaterialLoadResult GltfMaterialLoader::processMaterials(const tinygltf::Model& m
         result.materials.push_back(std::move(material));
     }
     
-    // Update statistics
-    result.total_materials = static_cast<int>(result.materials.size());
-    result.total_textures_loaded = 0;
-    result.total_textures_failed = 0;
-    
-    for (const auto& material : result.materials)
-    {
-        for (const auto& texture : material.textures.textures)
-        {
-            if (texture.is_loaded && texture.handle != INVALID_TEXTURE)
-            {
-                result.total_textures_loaded++;
-            }
-            else if (!texture.uri.empty())
-            {
-                result.total_textures_failed++;
-            }
-        }
-    }
-    
     result.success = true;
+    refreshStatistics(result);
     return result;
 }
 
@@ -417,6 +467,11 @@ TextureInfo GltfMaterialLoader::processTexture(int texture_index,
         // Embedded texture
         tex_info.uri = "embedded_texture_" + std::to_string(gltf_texture.source);
         tex_info.is_embedded = true;
+        tex_info.embedded_width = image.width;
+        tex_info.embedded_height = image.height;
+        tex_info.embedded_channels = image.component;
+        tex_info.embedded_as_is = image.as_is;
+        tex_info.embedded_data = image.image;
         if (render_api)
             tex_info.handle = loadEmbeddedTexture(image, render_api, config);
         
@@ -481,7 +536,7 @@ TextureHandle GltfMaterialLoader::loadEmbeddedTexture(const tinygltf::Image& ima
                                                      IRenderAPI* render_api,
                                                      const MaterialLoaderConfig& config)
 {
-    if (image.image.empty() || image.width <= 0 || image.height <= 0)
+    if (image.image.empty())
     {
         logError(config, "Invalid embedded texture data");
         return INVALID_TEXTURE;
@@ -494,16 +549,15 @@ TextureHandle GltfMaterialLoader::loadEmbeddedTexture(const tinygltf::Image& ima
                std::to_string(image.width) + "x" + std::to_string(image.height) +
                " (" + std::to_string(image.component) + " channels)");
 
-    // tinygltf stores image data as unsigned char vector
-    // Use loadTextureFromMemory which all render backends support
-    TextureHandle handle = render_api->loadTextureFromMemory(
+    TextureHandle handle = loadEmbeddedTextureData(
         image.image.data(),
+        image.image.size(),
         image.width,
         image.height,
         image.component,
-        config.flip_textures_vertically,
-        config.generate_mipmaps
-    );
+        image.as_is,
+        render_api,
+        config);
 
     if (handle != INVALID_TEXTURE)
     {
@@ -515,6 +569,72 @@ TextureHandle GltfMaterialLoader::loadEmbeddedTexture(const tinygltf::Image& ima
     }
 
     return handle;
+}
+
+TextureHandle GltfMaterialLoader::loadEmbeddedTextureData(const unsigned char* data,
+                                                         size_t data_size,
+                                                         int width,
+                                                         int height,
+                                                         int channels,
+                                                         bool encoded,
+                                                         IRenderAPI* render_api,
+                                                         const MaterialLoaderConfig& config)
+{
+    if (!render_api || !data || data_size == 0)
+        return INVALID_TEXTURE;
+
+    if (encoded)
+    {
+        if (data_size > static_cast<size_t>(std::numeric_limits<int>::max()))
+        {
+            logError(config, "Embedded texture is too large to decode");
+            return INVALID_TEXTURE;
+        }
+
+        int decoded_width = 0;
+        int decoded_height = 0;
+        int decoded_channels = 0;
+        unsigned char* decoded = stbi_load_from_memory(
+            data,
+            static_cast<int>(data_size),
+            &decoded_width,
+            &decoded_height,
+            &decoded_channels,
+            STBI_rgb_alpha);
+
+        if (!decoded)
+        {
+            const char* reason = stbi_failure_reason();
+            logError(config, std::string("Failed to decode embedded texture") +
+                     (reason ? (": " + std::string(reason)) : ""));
+            return INVALID_TEXTURE;
+        }
+
+        TextureHandle handle = render_api->loadTextureFromMemory(
+            decoded,
+            decoded_width,
+            decoded_height,
+            4,
+            config.flip_textures_vertically,
+            config.generate_mipmaps);
+
+        stbi_image_free(decoded);
+        return handle;
+    }
+
+    if (width <= 0 || height <= 0 || channels <= 0)
+    {
+        logError(config, "Invalid embedded texture dimensions");
+        return INVALID_TEXTURE;
+    }
+
+    return render_api->loadTextureFromMemory(
+        data,
+        width,
+        height,
+        channels,
+        config.flip_textures_vertically,
+        config.generate_mipmaps);
 }
 
 TextureType GltfMaterialLoader::getTextureTypeFromMaterialProperty(const std::string& property_name)
@@ -557,6 +677,34 @@ bool GltfMaterialLoader::isTextureTypeWanted(TextureType type, const MaterialLoa
     }
     
     return true;
+}
+
+void GltfMaterialLoader::refreshStatistics(MaterialLoadResult& result)
+{
+    result.total_materials = static_cast<int>(result.materials.size());
+    result.materials_with_textures = 0;
+    result.total_textures_loaded = 0;
+    result.total_textures_failed = 0;
+
+    for (const auto& material : result.materials)
+    {
+        bool material_has_texture = false;
+        for (const auto& texture : material.textures.textures)
+        {
+            if (texture.is_loaded && texture.handle != INVALID_TEXTURE)
+            {
+                material_has_texture = true;
+                result.total_textures_loaded++;
+            }
+            else if (!texture.uri.empty())
+            {
+                result.total_textures_failed++;
+            }
+        }
+
+        if (material_has_texture)
+            result.materials_with_textures++;
+    }
 }
 
 void GltfMaterialLoader::logMessage(const MaterialLoaderConfig& config, const std::string& message)

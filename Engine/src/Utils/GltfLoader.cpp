@@ -193,12 +193,9 @@ bool GltfLoader::loadMaterialsIntoResult(GltfLoadResult& result,
                                        IRenderAPI* render_api,
                                        const MaterialLoaderConfig& material_config)
 {
-    if (!render_api) {
-        logError(GltfLoaderConfig(), "Render API is null");
-        return false;
-    }
-
-    // Load materials using the dedicated material loader
+    // Load materials using the dedicated material loader. render_api may be
+    // null during worker-thread preload; in that case only material metadata
+    // and texture references are populated.
     result.material_data = GltfMaterialLoader::loadMaterials(filename, render_api, material_config);
     
     if (result.material_data.success) {
@@ -374,6 +371,10 @@ bool GltfLoader::loadModel(const std::string& filename, tinygltf::Model& model, 
     tinygltf::TinyGLTF loader;
     std::string warn;
 
+    // Geometry loading does not need decoded image pixels. This avoids PNG/JPG
+    // decode work when TinyGLTF parses the asset for vertex buffers.
+    loader.SetImagesAsIs(true);
+
     // Determine if file is binary (.glb) or text (.gltf)
     bool is_binary = filename.substr(filename.find_last_of(".") + 1) == "glb";
 
@@ -542,12 +543,49 @@ bool GltfLoader::processPrimitive(const tinygltf::Model& model, const tinygltf::
         tangents.clear();
     }
 
-    // Create vertices
-    std::vector<vertex> primitive_vertices;
+    const size_t output_vertex_count = has_indices
+        ? (indices.size() - (indices.size() % 3))
+        : vertex_count;
+    const size_t start_vertex = vertices.size();
+    vertices.resize(start_vertex + output_vertex_count);
+    size_t write_vertex = start_vertex;
+
+    auto writeSourceVertex = [&](size_t source_index) {
+        vertex& v = vertices[write_vertex++];
+        v.vx = positions[source_index * 3] * config.scale;
+        v.vy = positions[source_index * 3 + 1] * config.scale;
+        v.vz = positions[source_index * 3 + 2] * config.scale;
+
+        if (has_normals) {
+            v.nx = normals[source_index * 3];
+            v.ny = normals[source_index * 3 + 1];
+            v.nz = normals[source_index * 3 + 2];
+        }
+        else {
+            v.nx = v.ny = v.nz = 0.0f;
+        }
+
+        if (has_texcoords) {
+            v.u = texcoords[source_index * 2];
+            v.v = texcoords[source_index * 2 + 1];
+        }
+        else {
+            v.u = v.v = 0.0f;
+        }
+
+        if (has_tangents) {
+            v.tx = tangents[source_index * 4];
+            v.ty = tangents[source_index * 4 + 1];
+            v.tz = tangents[source_index * 4 + 2];
+            v.tw = tangents[source_index * 4 + 3];
+        }
+        else {
+            v.tx = 1.0f; v.ty = 0.0f; v.tz = 0.0f; v.tw = 1.0f;
+        }
+    };
 
     if (has_indices) {
-        // Use indices to build triangulated mesh
-        for (size_t i = 0; i < indices.size(); i += 3) {
+        for (size_t i = 0; i + 2 < indices.size(); i += 3) {
             for (int j = 0; j < 3; ++j) {
                 unsigned int idx = indices[i + j];
                 if (idx >= vertex_count) {
@@ -555,97 +593,67 @@ bool GltfLoader::processPrimitive(const tinygltf::Model& model, const tinygltf::
                     continue;
                 }
 
-                vertex v;
-                v.vx = positions[idx * 3] * config.scale;
-                v.vy = positions[idx * 3 + 1] * config.scale;
-                v.vz = positions[idx * 3 + 2] * config.scale;
-
-                if (has_normals) {
-                    v.nx = normals[idx * 3];
-                    v.ny = normals[idx * 3 + 1];
-                    v.nz = normals[idx * 3 + 2];
-                }
-                else {
-                    v.nx = v.ny = v.nz = 0.0f;
-                }
-
-                if (has_texcoords) {
-                    v.u = texcoords[idx * 2];
-                    v.v = texcoords[idx * 2 + 1];
-                }
-                else {
-                    v.u = v.v = 0.0f;
-                }
-
-                if (has_tangents) {
-                    v.tx = tangents[idx * 4];
-                    v.ty = tangents[idx * 4 + 1];
-                    v.tz = tangents[idx * 4 + 2];
-                    v.tw = tangents[idx * 4 + 3];
-                }
-                else {
-                    v.tx = 1.0f; v.ty = 0.0f; v.tz = 0.0f; v.tw = 1.0f;
-                }
-
-                primitive_vertices.push_back(v);
+                writeSourceVertex(idx);
             }
         }
     }
     else {
-        // No indices, use vertices directly (assuming triangulated)
-        for (size_t i = 0; i < vertex_count; ++i) {
-            vertex v;
-            v.vx = positions[i * 3] * config.scale;
-            v.vy = positions[i * 3 + 1] * config.scale;
-            v.vz = positions[i * 3 + 2] * config.scale;
-
-            if (has_normals) {
-                v.nx = normals[i * 3];
-                v.ny = normals[i * 3 + 1];
-                v.nz = normals[i * 3 + 2];
-            }
-            else {
-                v.nx = v.ny = v.nz = 0.0f;
-            }
-
-            if (has_texcoords) {
-                v.u = texcoords[i * 2];
-                v.v = texcoords[i * 2 + 1];
-            }
-            else {
-                v.u = v.v = 0.0f;
-            }
-
-            if (has_tangents) {
-                v.tx = tangents[i * 4];
-                v.ty = tangents[i * 4 + 1];
-                v.tz = tangents[i * 4 + 2];
-                v.tw = tangents[i * 4 + 3];
-            }
-            else {
-                v.tx = 1.0f; v.ty = 0.0f; v.tz = 0.0f; v.tw = 1.0f;
-            }
-
-            primitive_vertices.push_back(v);
-        }
+        for (size_t i = 0; i < vertex_count; ++i)
+            writeSourceVertex(i);
     }
+
+    if (write_vertex != vertices.size())
+        vertices.resize(write_vertex);
+
+    const size_t written_count = write_vertex - start_vertex;
+    if (written_count == 0)
+        return true;
+
+    vertex* written_vertices = vertices.data() + start_vertex;
 
     // Generate missing data if requested
     if (!has_normals && config.generate_normals_if_missing) {
-        generateNormals(primitive_vertices);
+        for (size_t i = 0; i + 2 < written_count; i += 3) {
+            vertex& v0 = written_vertices[i];
+            vertex& v1 = written_vertices[i + 1];
+            vertex& v2 = written_vertices[i + 2];
+
+            float v1x = v1.vx - v0.vx;
+            float v1y = v1.vy - v0.vy;
+            float v1z = v1.vz - v0.vz;
+
+            float v2x = v2.vx - v0.vx;
+            float v2y = v2.vy - v0.vy;
+            float v2z = v2.vz - v0.vz;
+
+            float nx = v1y * v2z - v1z * v2y;
+            float ny = v1z * v2x - v1x * v2z;
+            float nz = v1x * v2y - v1y * v2x;
+
+            float length = std::sqrt(nx * nx + ny * ny + nz * nz);
+            if (length > 0.0f) {
+                nx /= length;
+                ny /= length;
+                nz /= length;
+            }
+
+            v0.nx = v1.nx = v2.nx = nx;
+            v0.ny = v1.ny = v2.ny = ny;
+            v0.nz = v1.nz = v2.nz = nz;
+        }
     }
 
     if (!has_texcoords && config.generate_texcoords_if_missing) {
-        generateTexCoords(primitive_vertices);
+        for (size_t i = 0; i < written_count; ++i) {
+            written_vertices[i].u = (written_vertices[i].vx + 1.0f) * 0.5f;
+            written_vertices[i].v = (written_vertices[i].vy + 1.0f) * 0.5f;
+        }
     }
 
     // Generate tangents from geometry if not present in glTF data
-    if (!has_tangents && !primitive_vertices.empty()) {
-        TangentGenerator::generate(primitive_vertices.data(), primitive_vertices.size());
+    if (!has_tangents) {
+        TangentGenerator::generate(written_vertices, written_count);
     }
-
-    // Add to main vertex list
-    vertices.insert(vertices.end(), primitive_vertices.begin(), primitive_vertices.end());
 
     return true;
 }

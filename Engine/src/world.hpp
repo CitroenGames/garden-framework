@@ -13,6 +13,18 @@ private:
     std::unique_ptr<PhysicsSystem> physics_system;
     float physics_accumulator = 0.0f;
 
+    void clearRegistryStorage()
+    {
+        registry.clear();
+
+        std::vector<entt::id_type> storage_ids;
+        for (auto&& [id, storage] : registry.storage())
+            storage_ids.push_back(id);
+
+        for (entt::id_type id : storage_ids)
+            registry.reset(id);
+    }
+
 public:
     entt::registry registry;
     camera world_camera;
@@ -24,6 +36,16 @@ public:
         fixed_delta = physics_settings.fixed_delta;
         physics_system = std::make_unique<PhysicsSystem>(physics_settings);
         fixed_delta = physics_system->getFixedDelta();
+    }
+
+    world(world&&) noexcept = default;
+    world& operator=(world&&) noexcept = default;
+    world(const world&) = delete;
+    world& operator=(const world&) = delete;
+
+    ~world()
+    {
+        shutdown();
     }
 
     // Initialize Jolt physics (call after world construction)
@@ -136,13 +158,20 @@ public:
         return true;
     }
 
+    void shutdown()
+    {
+        if (physics_system)
+            physics_system->shutdown();
+        clearRegistryStorage();
+        physics_accumulator = 0.0f;
+    }
+
     // Full reset: tear down physics, clear ECS, reinitialize.
     // Used by the editor to restore pre-play state.
     void resetWorld()
     {
-        physics_system->shutdown();
-        registry.clear();
-        physics_system->initialize();
-        physics_accumulator = 0.0f;
+        shutdown();
+        if (physics_system)
+            physics_system->initialize();
     }
 };

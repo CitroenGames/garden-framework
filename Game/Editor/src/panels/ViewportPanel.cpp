@@ -18,6 +18,7 @@ GizmoResult ViewportPanel::draw(ImTextureID scene_texture, EditorState& state,
     GizmoResult result;
     is_hovered = false;
     is_visible = false;
+    const PlayMode entry_play_mode = state.play_mode;
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
     bool window_visible = ImGui::Begin("Viewport", p_open);
@@ -49,6 +50,7 @@ GizmoResult ViewportPanel::draw(ImTextureID scene_texture, EditorState& state,
         dl->AddLine(ImVec2(p.x, p.y), ImVec2(p.x + w, p.y),
                     IM_COL32(50, 46, 40, 180), 1.0f);
     }
+    const bool play_mode_changed_by_toolbar = (state.play_mode != entry_play_mode);
 
     // --- Scene image (fills remaining space) ---
     ImVec2 avail = ImGui::GetContentRegionAvail();
@@ -116,10 +118,13 @@ GizmoResult ViewportPanel::draw(ImTextureID scene_texture, EditorState& state,
         }
 
         // --- Draw gizmo over the viewport ---
-        drawGizmo(state, registry, selected, cam, render_api, result);
+        if (!play_mode_changed_by_toolbar)
+            drawGizmo(state, registry, selected, cam, render_api, result);
+        else
+            state.gizmo_using = false;
 
         // Handle viewport click-to-select (after gizmo so IsOver() is current)
-        if (!state.isSimulationActive())
+        if (!play_mode_changed_by_toolbar && !state.isSimulationActive())
             handlePicking(image_clicked, registry, selected, render_api, bvh);
     }
     else

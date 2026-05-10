@@ -2,30 +2,10 @@
 
 #include "meshoptimizer.h"
 #include <algorithm>
-#include <cstring>
 #include <limits>
-#include <unordered_map>
 
 namespace Assets {
 namespace {
-
-struct VertexHash {
-    size_t operator()(const vertex& v) const {
-        const uint8_t* data = reinterpret_cast<const uint8_t*>(&v);
-        size_t hash = 14695981039346656037ULL;
-        for (size_t i = 0; i < sizeof(vertex); ++i) {
-            hash ^= data[i];
-            hash *= 1099511628211ULL;
-        }
-        return hash;
-    }
-};
-
-struct VertexEqual {
-    bool operator()(const vertex& a, const vertex& b) const {
-        return std::memcmp(&a, &b, sizeof(vertex)) == 0;
-    }
-};
 
 struct BoundsBuilder {
     glm::vec3 min{std::numeric_limits<float>::max()};
@@ -65,16 +45,9 @@ void copyRangePayload(MaterialRange& dst, const MaterialRange& src) {
     dst.source_range = src.source_range;
 }
 
-uint32_t appendVertex(const vertex& v,
-                      std::vector<vertex>& vertices,
-                      std::unordered_map<vertex, uint32_t, VertexHash, VertexEqual>& remap) {
-    auto it = remap.find(v);
-    if (it != remap.end())
-        return it->second;
-
+uint32_t appendVertex(const vertex& v, std::vector<vertex>& vertices) {
     uint32_t index = static_cast<uint32_t>(vertices.size());
     vertices.push_back(v);
-    remap.emplace(vertices.back(), index);
     return index;
 }
 
@@ -124,9 +97,7 @@ ChunkedTriangleMesh MeshChunker::buildChunkedIndexedMesh(
     const size_t target_triangles = resolveChunkTriangleTarget(total_triangles, config);
     const size_t target_indices = target_triangles * 3;
 
-    std::unordered_map<vertex, uint32_t, VertexHash, VertexEqual> remap;
-    remap.reserve(source_vertex_count);
-    result.vertices.reserve(source_vertex_count);
+    result.vertices.reserve(total_triangles * 3);
     result.indices.reserve(total_triangles * 3);
 
     for (const auto& source_range : ranges) {
@@ -166,7 +137,7 @@ ChunkedTriangleMesh MeshChunker::buildChunkedIndexedMesh(
             MaterialRange out_range;
             copyRangePayload(out_range, source_range);
             out_range.start_vertex = result.indices.size();
-            out_range.vertex_count = count;
+            out_range.vertex_count = 0;
 
             BoundsBuilder bounds;
             for (size_t i = 0; i < count; ++i) {
@@ -175,7 +146,9 @@ ChunkedTriangleMesh MeshChunker::buildChunkedIndexedMesh(
                     continue;
                 const vertex& v = source_vertices[source_range.start_vertex + local_index];
                 bounds.include(v);
-                result.indices.push_back(appendVertex(v, result.vertices, remap));
+                if (result.vertices.size() >= static_cast<size_t>(std::numeric_limits<uint32_t>::max()))
+                    break;
+                result.indices.push_back(appendVertex(v, result.vertices));
             }
 
             if (bounds.valid) {
@@ -183,7 +156,9 @@ ChunkedTriangleMesh MeshChunker::buildChunkedIndexedMesh(
                 out_range.aabb_min = bounds.min;
                 out_range.aabb_max = bounds.max;
             }
-            result.material_ranges.push_back(out_range);
+            out_range.vertex_count = result.indices.size() - out_range.start_vertex;
+            if (out_range.vertex_count > 0)
+                result.material_ranges.push_back(out_range);
         }
     }
 

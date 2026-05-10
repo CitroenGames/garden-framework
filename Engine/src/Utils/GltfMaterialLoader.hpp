@@ -47,6 +47,14 @@ struct TextureInfo
     float scale = 1.0f;                 // For normal/occlusion textures
     bool is_embedded = false;
     bool is_loaded = false;
+
+    // Deferred embedded texture payload. External textures keep only uri and
+    // are loaded through IRenderAPI::loadTexture.
+    std::vector<unsigned char> embedded_data;
+    int embedded_width = 0;
+    int embedded_height = 0;
+    int embedded_channels = 0;
+    bool embedded_as_is = false;
     
     // Additional texture properties
     int wrap_s = 10497;                 // GL_REPEAT
@@ -201,6 +209,11 @@ public:
                                            IRenderAPI* render_api,
                                            const std::vector<int>& material_indices,
                                            const MaterialLoaderConfig& config = MaterialLoaderConfig());
+
+    // Upload textures for material metadata loaded earlier without a render API.
+    static bool uploadTextures(MaterialLoadResult& result,
+                               IRenderAPI* render_api,
+                               const MaterialLoaderConfig& config = MaterialLoaderConfig());
     
     // Utility functions
     static std::vector<std::string> getMaterialNames(const std::string& filename);
@@ -248,6 +261,17 @@ private:
     static TextureHandle loadEmbeddedTexture(const tinygltf::Image& image,
                                            IRenderAPI* render_api,
                                            const MaterialLoaderConfig& config);
+
+    static TextureHandle loadEmbeddedTextureData(const unsigned char* data,
+                                               size_t data_size,
+                                               int width,
+                                               int height,
+                                               int channels,
+                                               bool encoded,
+                                               IRenderAPI* render_api,
+                                               const MaterialLoaderConfig& config);
+
+    static void refreshStatistics(MaterialLoadResult& result);
     
     // Utility methods
     static TextureType getTextureTypeFromMaterialProperty(const std::string& property_name);

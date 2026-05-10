@@ -370,7 +370,6 @@ private:
 
     // Continuation render pass for parallel replay (loadOp=LOAD to preserve prior content)
     VkRenderPass continuation_render_pass = VK_NULL_HANDLE;
-    static constexpr size_t VK_PARALLEL_REPLAY_THRESHOLD = 512;
 
     // Cached framebuffer state from beginFrame() for use in replayCommandBufferParallel()
     VkFramebuffer current_active_framebuffer = VK_NULL_HANDLE;

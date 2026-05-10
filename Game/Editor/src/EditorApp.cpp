@@ -3337,8 +3337,157 @@ void EditorApp::saveLevelAs(const std::string& path)
     saveLevel();
 }
 
+namespace
+{
+    bool vec3ExactEqual(const glm::vec3& a, const glm::vec3& b)
+    {
+        return a.x == b.x && a.y == b.y && a.z == b.z;
+    }
+
+    nlohmann::json reflectedComponentsWithoutTransform(const nlohmann::json& components)
+    {
+        if (!components.is_object())
+            return nlohmann::json::object();
+
+        nlohmann::json copy = components;
+        copy.erase("TransformComponent");
+        return copy;
+    }
+
+    bool metadataExactEqual(const LevelMetadata& a, const LevelMetadata& b)
+    {
+        return a.level_name == b.level_name &&
+               a.author == b.author &&
+               a.version == b.version &&
+               a.entity_count == b.entity_count &&
+               vec3ExactEqual(a.gravity, b.gravity) &&
+               a.fixed_delta == b.fixed_delta &&
+               vec3ExactEqual(a.ambient_light, b.ambient_light) &&
+               vec3ExactEqual(a.diffuse_light, b.diffuse_light) &&
+               vec3ExactEqual(a.light_direction, b.light_direction);
+    }
+
+    bool levelEntityExactEqualExceptTransform(const LevelEntity& a, const LevelEntity& b)
+    {
+        return a.name == b.name &&
+               a.type == b.type &&
+               a.mesh_path == b.mesh_path &&
+               a.texture_paths == b.texture_paths &&
+               a.has_rigidbody == b.has_rigidbody &&
+               a.mass == b.mass &&
+               a.apply_gravity == b.apply_gravity &&
+               a.body_motion_type == b.body_motion_type &&
+               a.has_collider == b.has_collider &&
+               a.collider_mesh_path == b.collider_mesh_path &&
+               a.use_mesh_collision == b.use_mesh_collision &&
+               a.collider_shape_type == b.collider_shape_type &&
+               vec3ExactEqual(a.collider_box_half_extents, b.collider_box_half_extents) &&
+               a.collider_sphere_radius == b.collider_sphere_radius &&
+               a.collider_capsule_half_height == b.collider_capsule_half_height &&
+               a.collider_capsule_radius == b.collider_capsule_radius &&
+               a.collider_cylinder_half_height == b.collider_cylinder_half_height &&
+               a.collider_cylinder_radius == b.collider_cylinder_radius &&
+               a.collider_friction == b.collider_friction &&
+               a.collider_restitution == b.collider_restitution &&
+               a.has_constraint == b.has_constraint &&
+               a.constraint_type == b.constraint_type &&
+               a.constraint_target_name == b.constraint_target_name &&
+               vec3ExactEqual(a.constraint_anchor_1, b.constraint_anchor_1) &&
+               vec3ExactEqual(a.constraint_anchor_2, b.constraint_anchor_2) &&
+               vec3ExactEqual(a.constraint_hinge_axis, b.constraint_hinge_axis) &&
+               a.constraint_hinge_min == b.constraint_hinge_min &&
+               a.constraint_hinge_max == b.constraint_hinge_max &&
+               a.constraint_min_distance == b.constraint_min_distance &&
+               a.constraint_max_distance == b.constraint_max_distance &&
+               a.culling == b.culling &&
+               a.transparent == b.transparent &&
+               a.visible == b.visible &&
+               a.casts_shadow == b.casts_shadow &&
+               a.force_lod == b.force_lod &&
+               a.speed == b.speed &&
+               a.jump_force == b.jump_force &&
+               a.mouse_sensitivity == b.mouse_sensitivity &&
+               a.movement_speed == b.movement_speed &&
+               a.fast_movement_speed == b.fast_movement_speed &&
+               a.tracked_player_name == b.tracked_player_name &&
+               vec3ExactEqual(a.position_offset, b.position_offset) &&
+               vec3ExactEqual(a.light_color, b.light_color) &&
+               a.light_intensity == b.light_intensity &&
+               a.light_range == b.light_range &&
+               a.light_constant_attenuation == b.light_constant_attenuation &&
+               a.light_linear_attenuation == b.light_linear_attenuation &&
+               a.light_quadratic_attenuation == b.light_quadratic_attenuation &&
+               a.light_inner_cone_angle == b.light_inner_cone_angle &&
+               a.light_outer_cone_angle == b.light_outer_cone_angle &&
+               reflectedComponentsWithoutTransform(a.reflected_components) ==
+                   reflectedComponentsWithoutTransform(b.reflected_components);
+    }
+}
+
+bool EditorApp::tryRestoreTransformOnlySnapshot(const LevelData& snapshot)
+{
+    LevelData current = buildLevelDataFromECS();
+    if (!metadataExactEqual(current.metadata, snapshot.metadata) ||
+        current.entities.size() != snapshot.entities.size())
+    {
+        return false;
+    }
+
+    std::unordered_map<std::string, const LevelEntity*> current_by_name;
+    current_by_name.reserve(current.entities.size());
+    for (const auto& entity : current.entities)
+    {
+        if (!current_by_name.emplace(entity.name, &entity).second)
+            return false;
+    }
+
+    std::unordered_map<std::string, entt::entity> live_by_name;
+    live_by_name.reserve(snapshot.entities.size());
+    auto view = m_world.registry.view<TagComponent, TransformComponent>();
+    for (auto entity : view)
+    {
+        const auto& tag = view.get<TagComponent>(entity);
+        if (!live_by_name.emplace(tag.name, entity).second)
+            return false;
+    }
+
+    if (live_by_name.size() != snapshot.entities.size())
+        return false;
+
+    for (const auto& target : snapshot.entities)
+    {
+        auto current_it = current_by_name.find(target.name);
+        if (current_it == current_by_name.end())
+            return false;
+
+        if (!levelEntityExactEqualExceptTransform(*current_it->second, target))
+            return false;
+    }
+
+    for (const auto& target : snapshot.entities)
+    {
+        auto live_it = live_by_name.find(target.name);
+        if (live_it == live_by_name.end())
+            return false;
+
+        auto& transform = m_world.registry.get<TransformComponent>(live_it->second);
+        transform.position = target.position;
+        transform.rotation = target.rotation;
+        transform.scale = target.scale;
+    }
+
+    m_level_data = snapshot;
+    m_level_settings.metadata = &m_level_data.metadata;
+    m_renderer.markBVHDirty();
+    m_state.unsaved_changes = true;
+    return true;
+}
+
 void EditorApp::restoreFromSnapshot(const LevelData& snapshot)
 {
+    if (tryRestoreTransformOnlySnapshot(snapshot))
+        return;
+
     // Save selected entity name for best-effort re-selection
     std::string prev_selected_name;
     if (m_hierarchy.selected_entity != entt::null &&

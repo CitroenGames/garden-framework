@@ -197,6 +197,7 @@ struct MeshPreloadData {
     bool has_lod_metadata = false;
     std::unique_ptr<Assets::AssetMetadata> lod_metadata;
     std::vector<Assets::LODMeshData> lod_mesh_data;
+    std::vector<Assets::LODMeshData> prepared_lod_mesh_data;
 
     // CPU-prepared chunk/index buffers for LOD0. This is built on workers so
     // the main thread only uploads already prepared data.

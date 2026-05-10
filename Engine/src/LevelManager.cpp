@@ -69,6 +69,28 @@ static std::string getTextureTypeName(TextureType type) {
     }
 }
 
+static MaterialLoaderConfig makeLevelMaterialLoaderConfig(const std::string& mesh_path, bool verbose_logging)
+{
+    MaterialLoaderConfig material_config;
+    material_config.verbose_logging = verbose_logging;
+    material_config.load_all_textures = false;
+    material_config.priority_texture_types = {
+        TextureType::BASE_COLOR,
+        TextureType::DIFFUSE,
+        TextureType::NORMAL
+    };
+    material_config.generate_mipmaps = true;
+    material_config.flip_textures_vertically = true;
+    material_config.cache_textures = true;
+
+    size_t last_sep = mesh_path.find_last_of("/\\");
+    material_config.texture_base_path = (last_sep != std::string::npos)
+        ? mesh_path.substr(0, last_sep + 1)
+        : "";
+
+    return material_config;
+}
+
 static Assets::MeshChunkConfig getStaticMeshChunkConfig()
 {
     Assets::MeshChunkConfig cfg;
@@ -669,12 +691,7 @@ static Assets::LODMeshData maybeChunkLODForRuntime(
 
     std::vector<bool> split_mask = buildSplitMaskFromRanges(material_templates);
     if (mesh_transparent && !hasAlphaBlendRange(material_templates)) {
-        size_t required_entries = split_mask.size();
-        for (const auto& range : lod_data.submesh_ranges)
-            required_entries = std::max(required_entries, range.submesh_id + 1);
-        if (required_entries == 0)
-            required_entries = 1;
-        split_mask.assign(required_entries, false);
+        return lod_data;
     }
 
     const std::vector<bool>* split_ptr = split_mask.empty() ? nullptr : &split_mask;
@@ -745,6 +762,19 @@ static std::vector<MaterialRange> buildGltfSourceRangesForChunking(const GltfLoa
     for (size_t i = 0; i < gltf.primitive_vertex_counts.size(); ++i) {
         MaterialRange range(current_vertex, gltf.primitive_vertex_counts[i], INVALID_TEXTURE, "");
         range.source_range = i;
+        if (gltf.materials_loaded && i < gltf.material_indices.size()) {
+            int mat_idx = gltf.material_indices[i];
+            const GltfMaterial* material = gltf.material_data.getMaterial(mat_idx);
+            if (material) {
+                range.material_name = material->properties.name;
+                if (material->properties.alpha_mode == "MASK")
+                    range.alpha_mode = 1;
+                else if (material->properties.alpha_mode == "BLEND")
+                    range.alpha_mode = 2;
+                range.alpha_cutoff = material->properties.alpha_cutoff;
+                range.double_sided = material->properties.double_sided;
+            }
+        }
         ranges.push_back(range);
         current_vertex += gltf.primitive_vertex_counts[i];
     }
@@ -789,6 +819,32 @@ static void prepareChunkedLOD0(MeshPreloadData& data)
 
     if (!chunked->vertices.empty() && !chunked->indices.empty() && !chunked->material_ranges.empty())
         data.prepared_chunked_mesh = std::move(chunked);
+}
+
+static void prepareChunkedLODs(MeshPreloadData& data)
+{
+    Assets::MeshChunkConfig cfg = getStaticMeshChunkConfig();
+    if (!cfg.enabled || data.lod_mesh_data.empty())
+        return;
+
+    std::vector<MaterialRange> material_templates;
+    if (data.type == MeshPreloadData::Type::GLTF && data.gltf_geometry)
+        material_templates = buildGltfSourceRangesForChunking(*data.gltf_geometry);
+
+    std::vector<bool> split_mask = buildSplitMaskFromRanges(material_templates);
+    const std::vector<bool>* split_ptr = split_mask.empty() ? nullptr : &split_mask;
+
+    data.prepared_lod_mesh_data.clear();
+    data.prepared_lod_mesh_data.reserve(data.lod_mesh_data.size());
+    for (const auto& lod_data : data.lod_mesh_data) {
+        if (lod_data.vertices.empty() || lod_data.indices.empty()) {
+            data.prepared_lod_mesh_data.push_back(lod_data);
+            continue;
+        }
+
+        data.prepared_lod_mesh_data.push_back(
+            Assets::MeshChunker::chunkLODMesh(lod_data, cfg, split_ptr));
+    }
 }
 
 static bool uploadPreparedChunkedMaterialMesh(const std::shared_ptr<mesh>& m_ptr,
@@ -1914,25 +1970,7 @@ std::shared_ptr<mesh> LevelManager::loadMesh(const LevelEntity& entity, IRenderA
         gltf_config.generate_normals_if_missing = true;
         gltf_config.scale = 1.0f;
 
-        // Configure material loading
-        MaterialLoaderConfig material_config;
-        material_config.verbose_logging = true;
-        material_config.load_all_textures = false;
-        material_config.priority_texture_types = {
-            TextureType::BASE_COLOR,
-            TextureType::DIFFUSE,
-            TextureType::NORMAL
-        };
-        material_config.generate_mipmaps = true;
-        material_config.flip_textures_vertically = true;
-        material_config.cache_textures = true;
-        // Derive texture base path from the mesh file's directory
-        {
-            size_t last_sep = resolved_path.find_last_of("/\\");
-            material_config.texture_base_path = (last_sep != std::string::npos)
-                ? resolved_path.substr(0, last_sep + 1)
-                : "";
-        }
+        MaterialLoaderConfig material_config = makeLevelMaterialLoaderConfig(resolved_path, true);
 
         // Load geometry and materials
         GltfLoadResult map_result = GltfLoader::loadGltfWithMaterials(resolved_path, render_api, gltf_config, material_config);
@@ -2453,6 +2491,12 @@ void LevelManager::preloadMeshCPU(MeshPreloadData& data)
             return;
         }
 
+        MaterialLoaderConfig material_config = makeLevelMaterialLoaderConfig(resolved_path, false);
+        if (!GltfLoader::loadMaterialsIntoResult(*data.gltf_geometry, resolved_path, nullptr, material_config))
+        {
+            LOG_ENGINE_WARN("Failed to preload glTF material metadata for {}", resolved_path);
+        }
+
         prepareChunkedLOD0(data);
     }
     else
@@ -2501,6 +2545,8 @@ void LevelManager::preloadMeshCPU(MeshPreloadData& data)
                 data.lod_mesh_data.push_back(std::move(lod_data));
             }
         }
+
+        prepareChunkedLODs(data);
     }
 
     data.success = true;
@@ -2769,27 +2815,17 @@ std::shared_ptr<mesh> LevelManager::finalizeMeshGPU(
         gltf.vertices = nullptr;
         gltf.vertex_count = 0;
 
-        // Now load materials on main thread (requires render_api for texture uploads)
-        MaterialLoaderConfig material_config;
-        material_config.verbose_logging = false;
-        material_config.load_all_textures = false;
-        material_config.priority_texture_types = {
-            TextureType::BASE_COLOR,
-            TextureType::DIFFUSE,
-            TextureType::NORMAL
-        };
-        material_config.generate_mipmaps = true;
-        material_config.flip_textures_vertically = true;
-        material_config.cache_textures = true;
-        {
-            size_t last_sep = preload.resolved_path.find_last_of("/\\");
-            material_config.texture_base_path = (last_sep != std::string::npos)
-                ? preload.resolved_path.substr(0, last_sep + 1)
-                : "";
-        }
+        MaterialLoaderConfig material_config = makeLevelMaterialLoaderConfig(preload.resolved_path, false);
 
-        // Load materials into the existing geometry result (main thread GPU calls)
-        GltfLoader::loadMaterialsIntoResult(gltf, preload.resolved_path, render_api, material_config);
+        if (gltf.materials_loaded && gltf.material_data.success)
+        {
+            GltfMaterialLoader::uploadTextures(gltf.material_data, render_api, material_config);
+        }
+        else
+        {
+            // Fallback for callers that did not use preloadMeshCPU.
+            GltfLoader::loadMaterialsIntoResult(gltf, preload.resolved_path, render_api, material_config);
+        }
 
         // Apply textures from materials
         bool texture_applied = false;
@@ -2900,9 +2936,16 @@ std::shared_ptr<mesh> LevelManager::finalizeMeshGPU(
             const auto& lod_info = preload.lod_metadata->lod_levels[i];
             if (lod_info.file_path.empty()) continue;
 
-            auto& lod_data = preload.lod_mesh_data[lod_data_idx++];
-            Assets::LODMeshData lod_upload = maybeChunkLODForRuntime(
-                lod_data, m_ptr->material_ranges, m_ptr->transparent);
+            const size_t current_lod_data_idx = lod_data_idx++;
+            auto& lod_data = preload.lod_mesh_data[current_lod_data_idx];
+            const bool can_use_prepared_lod =
+                !m_ptr->transparent &&
+                current_lod_data_idx < preload.prepared_lod_mesh_data.size() &&
+                !preload.prepared_lod_mesh_data[current_lod_data_idx].indices.empty();
+
+            Assets::LODMeshData lod_upload = can_use_prepared_lod
+                ? preload.prepared_lod_mesh_data[current_lod_data_idx]
+                : maybeChunkLODForRuntime(lod_data, m_ptr->material_ranges, m_ptr->transparent);
 
             mesh::LODLevel level;
             level.screen_threshold = lod_info.screen_threshold;

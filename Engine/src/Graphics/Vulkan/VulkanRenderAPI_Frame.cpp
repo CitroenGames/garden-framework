@@ -156,6 +156,8 @@ void VulkanRenderAPI::prepareFrame()
     m_lastFrameStats.backend_draw_calls = 0;
     m_lastFrameStats.instanced_batches = 0;
     m_lastFrameStats.instanced_instances = 0;
+    m_lastFrameStats.parallel_replay_batches = 0;
+    m_lastFrameStats.parallel_replay_workers = 0;
 
     // Reset per-thread command pools and descriptor pools for parallel replay
     // Only reset the current frame's pool — the other frame's secondary buffers may still be pending.

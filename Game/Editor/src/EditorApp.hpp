@@ -233,6 +233,7 @@ private:
 
     // Undo/redo restore
     void restoreFromSnapshot(const LevelData& snapshot);
+    bool tryRestoreTransformOnlySnapshot(const LevelData& snapshot);
 
     // Serialization helpers
     LevelData          buildLevelDataFromECS() const;

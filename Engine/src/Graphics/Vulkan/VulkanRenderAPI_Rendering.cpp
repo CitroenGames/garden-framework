@@ -22,6 +22,37 @@
 #include "VkInitHelpers.hpp"
 
 namespace {
+static constexpr size_t DEFAULT_PARALLEL_REPLAY_THRESHOLD = 512;
+
+bool multicoreReplayEnabled()
+{
+    if (auto* cvar = CVAR_PTR(r_multicore_rendering))
+        return cvar->getBool();
+    return true;
+}
+
+size_t parallelReplayThreshold()
+{
+    if (auto* cvar = CVAR_PTR(r_multicore_replay_min_draws))
+        return std::max<size_t>(1, static_cast<size_t>(cvar->getInt()));
+    return DEFAULT_PARALLEL_REPLAY_THRESHOLD;
+}
+
+uint32_t parallelReplayWorkerLimit(uint32_t availableWorkers)
+{
+    if (!multicoreReplayEnabled() || availableWorkers == 0)
+        return 0;
+
+    if (auto* cvar = CVAR_PTR(r_multicore_replay_workers))
+    {
+        const int requestedWorkers = cvar->getInt();
+        if (requestedWorkers > 0)
+            availableWorkers = std::min(availableWorkers, static_cast<uint32_t>(requestedWorkers));
+    }
+
+    return availableWorkers;
+}
+
 bool checkIndexedDrawBounds(const char* tag,
                             VulkanMesh* vulkanMesh,
                             size_t firstIndex,
@@ -1203,6 +1234,12 @@ void VulkanRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmd
 {
     if (cmds.empty() || !frame_started || device_lost) return;
 
+    if (!multicoreReplayEnabled())
+    {
+        replayCommandBuffer(cmds);
+        return;
+    }
+
     const bool commandClassSupported = std::all_of(cmds.begin(), cmds.end(),
         [](const DrawCommand& cmd) {
             return !cmd.pso_key.shadow && !cmd.pso_key.depth_only;
@@ -1214,17 +1251,19 @@ void VulkanRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmd
     }
 
     // Fall back to single-threaded for small buffers or if parallel infra not initialized
-    if (cmds.size() < VK_PARALLEL_REPLAY_THRESHOLD ||
-        m_threadCommandPools.empty() ||
+    const size_t replayThreshold = parallelReplayThreshold();
+    const uint32_t workerCapacity = parallelReplayWorkerLimit(static_cast<uint32_t>(m_threadCommandPools.size()));
+    if (cmds.size() < replayThreshold ||
+        workerCapacity == 0 ||
         continuation_render_pass == VK_NULL_HANDLE)
     {
         replayCommandBuffer(cmds);
         return;
     }
 
-    constexpr size_t STATIC_INSTANCING_PARALLEL_SAVINGS_THRESHOLD = VK_PARALLEL_REPLAY_THRESHOLD / 16;
+    const size_t staticInstancingParallelSavingsThreshold = std::max<size_t>(1, replayThreshold / 16);
     if (CVAR_BOOL(r_vulkan_static_instancing) &&
-        estimateStaticInstanceSavings(cmds) >= STATIC_INSTANCING_PARALLEL_SAVINGS_THRESHOLD)
+        estimateStaticInstanceSavings(cmds) >= staticInstancingParallelSavingsThreshold)
     {
         replayCommandBuffer(cmds);
         return;
@@ -1358,9 +1397,9 @@ void VulkanRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmd
     vkCmdBeginRenderPass(cmd, &contInfo, VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
 
     // 4. Calculate worker distribution (same chunking as D3D12)
-    uint32_t max_workers = static_cast<uint32_t>(m_threadCommandPools.size());
+    uint32_t max_workers = workerCapacity;
     uint32_t num_workers = std::min(max_workers,
-        static_cast<uint32_t>((replayItems.size() + VK_PARALLEL_REPLAY_THRESHOLD - 1) / VK_PARALLEL_REPLAY_THRESHOLD));
+        static_cast<uint32_t>((replayItems.size() + replayThreshold - 1) / replayThreshold));
     num_workers = std::max(num_workers, 1u);
     size_t chunk_size = (replayItems.size() + num_workers - 1) / num_workers;
 
@@ -1369,6 +1408,7 @@ void VulkanRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmd
         PerThreadCommandPool* pool = nullptr;
         size_t start = 0;
         size_t end = 0;
+        bool recorded = false;
     };
     std::vector<WorkerData> workers(num_workers);
 
@@ -1389,11 +1429,13 @@ void VulkanRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmd
         main_pass_started = true;
         using_continuation_pass = true;
         restoreDynamicState(cmd, current_render_extent);
+        last_bound_pipeline = VK_NULL_HANDLE;
+        last_bound_descriptor_set = VK_NULL_HANDLE;
+        last_bound_vertex_buffer = VK_NULL_HANDLE;
+        last_bound_dynamic_offset = UINT32_MAX;
         replayCommandBuffer(cmds);
         return;
     }
-
-    m_lastFrameStats.submitted_draw_commands += cmds.size();
 
     // 6. Prepare secondary command buffer inheritance info
     VkCommandBufferInheritanceInfo inheritanceInfo{};
@@ -1430,7 +1472,10 @@ void VulkanRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmd
                 beginInfo.pInheritanceInfo = &inheritanceInfo;
 
                 if (vkBeginCommandBuffer(secCmd, &beginInfo) != VK_SUCCESS)
+                {
+                    LOG_ENGINE_ERROR("[Vulkan] Failed to begin parallel secondary command buffer for worker {}", w);
                     return;
+                }
 
                 // Set dynamic state (viewport, scissor)
                 VkViewport viewport{};
@@ -1500,7 +1545,14 @@ void VulkanRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmd
                     }
                 }
 
-                vkEndCommandBuffer(secCmd);
+                if (vkEndCommandBuffer(secCmd) == VK_SUCCESS)
+                {
+                    workers[w].recorded = true;
+                }
+                else
+                {
+                    LOG_ENGINE_ERROR("[Vulkan] Failed to end parallel secondary command buffer for worker {}", w);
+                }
             }));
     }
 
@@ -1511,11 +1563,34 @@ void VulkanRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmd
     // 10. Execute all secondary command buffers from the primary
     std::vector<VkCommandBuffer> secondaryBuffers;
     secondaryBuffers.reserve(num_workers);
-    for (uint32_t w = 0; w < num_workers; w++)
-        secondaryBuffers.push_back(workers[w].pool->secondary_buffer[frameIdx]);
+    bool allWorkersRecorded = true;
+    for (uint32_t w = 0; w < num_workers; w++) {
+        if (workers[w].recorded)
+            secondaryBuffers.push_back(workers[w].pool->secondary_buffer[frameIdx]);
+        else
+            allWorkersRecorded = false;
+    }
+
+    if (!allWorkersRecorded || secondaryBuffers.empty()) {
+        LOG_ENGINE_WARN("[Vulkan] Parallel replay worker recording failed; replaying {} draws inline", cmds.size());
+        vkCmdEndRenderPass(cmd);
+        vkCmdBeginRenderPass(cmd, &contInfo, VK_SUBPASS_CONTENTS_INLINE);
+        main_pass_started = true;
+        using_continuation_pass = true;
+        restoreDynamicState(cmd, current_render_extent);
+        last_bound_pipeline = VK_NULL_HANDLE;
+        last_bound_descriptor_set = VK_NULL_HANDLE;
+        last_bound_vertex_buffer = VK_NULL_HANDLE;
+        last_bound_dynamic_offset = UINT32_MAX;
+        replayCommandBuffer(cmds);
+        return;
+    }
 
     vkCmdExecuteCommands(cmd, static_cast<uint32_t>(secondaryBuffers.size()), secondaryBuffers.data());
+    m_lastFrameStats.submitted_draw_commands += cmds.size();
     m_lastFrameStats.backend_draw_calls += replayItems.size();
+    m_lastFrameStats.parallel_replay_batches++;
+    m_lastFrameStats.parallel_replay_workers += secondaryBuffers.size();
 
     // 11. End secondary render pass
     vkCmdEndRenderPass(cmd);
@@ -1527,6 +1602,10 @@ void VulkanRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmd
 
     // 13. Restore dynamic state for subsequent inline draws
     restoreDynamicState(cmd, current_render_extent);
+    last_bound_pipeline = VK_NULL_HANDLE;
+    last_bound_descriptor_set = VK_NULL_HANDLE;
+    last_bound_vertex_buffer = VK_NULL_HANDLE;
+    last_bound_dynamic_offset = UINT32_MAX;
 }
 
 void VulkanRenderAPI::renderDebugLines(const vertex* vertices, size_t vertex_count)

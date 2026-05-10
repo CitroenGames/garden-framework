@@ -5,6 +5,7 @@
 #include "D3D12RenderAPI.hpp"
 #include "D3D12Mesh.hpp"
 #include "Components/mesh.hpp"
+#include "Console/ConVar.hpp"
 #include "Graphics/RenderCommandBuffer.hpp"
 #include "Utils/Log.hpp"
 #include <algorithm>
@@ -18,6 +19,37 @@
 
 namespace
 {
+    static constexpr size_t DEFAULT_PARALLEL_REPLAY_THRESHOLD = 512;
+
+    bool multicoreReplayEnabled()
+    {
+        if (auto* cvar = CVAR_PTR(r_multicore_rendering))
+            return cvar->getBool();
+        return true;
+    }
+
+    size_t parallelReplayThreshold()
+    {
+        if (auto* cvar = CVAR_PTR(r_multicore_replay_min_draws))
+            return std::max<size_t>(1, static_cast<size_t>(cvar->getInt()));
+        return DEFAULT_PARALLEL_REPLAY_THRESHOLD;
+    }
+
+    uint32_t parallelReplayWorkerLimit(uint32_t availableWorkers)
+    {
+        if (!multicoreReplayEnabled() || availableWorkers == 0)
+            return 0;
+
+        if (auto* cvar = CVAR_PTR(r_multicore_replay_workers))
+        {
+            const int requestedWorkers = cvar->getInt();
+            if (requestedWorkers > 0)
+                availableWorkers = std::min(availableWorkers, static_cast<uint32_t>(requestedWorkers));
+        }
+
+        return availableWorkers;
+    }
+
     D3D12Mesh* asD3D12Mesh(IGPUMesh* mesh)
     {
 #ifdef _DEBUG
@@ -894,11 +926,15 @@ void D3D12RenderAPI::flushAndReopenCommandList()
         global_cbuffer_dirty = true;
 }
 
-static constexpr size_t D3D12_PARALLEL_REPLAY_THRESHOLD = 512;
-
 void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds)
 {
     if (cmds.empty() || device_lost) return;
+
+    if (!multicoreReplayEnabled())
+    {
+        replayCommandBuffer(cmds);
+        return;
+    }
 
     const bool commandClassSupported = std::all_of(cmds.begin(), cmds.end(),
         [](const DrawCommand& cmd) {
@@ -911,7 +947,9 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
     }
 
     // Fall back to single-threaded for small buffers or if pool isn't initialized
-    if (cmds.size() < D3D12_PARALLEL_REPLAY_THRESHOLD || m_commandListPool.capacity() == 0)
+    const size_t replayThreshold = parallelReplayThreshold();
+    const uint32_t workerCapacity = parallelReplayWorkerLimit(m_commandListPool.capacity());
+    if (cmds.size() < replayThreshold || workerCapacity == 0)
     {
         replayCommandBuffer(cmds);
         return;
@@ -949,90 +987,92 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
         return;
     }
 
-    std::unique_lock<std::mutex> textureLock(m_textureMutex);
-    const TextureHandle defaultTex = defaultTexture;
-
     std::vector<D3D12ParallelReplayItem> replayItems;
     replayItems.reserve(cmds.size());
-    auto resolveTextureSRV = [&](TextureHandle requested) -> D3D12_GPU_DESCRIPTOR_HANDLE
+
     {
-        auto it = textures.find(requested);
-        if (it != textures.end() && it->second.srvIndex != UINT(-1))
-            return m_srvAllocator.getGPU(it->second.srvIndex);
-
-        if (defaultTex != INVALID_TEXTURE && requested != defaultTex)
+        std::unique_lock<std::mutex> textureLock(m_textureMutex);
+        const TextureHandle defaultTex = defaultTexture;
+        auto resolveTextureSRV = [&](TextureHandle requested) -> D3D12_GPU_DESCRIPTOR_HANDLE
         {
-            auto defaultIt = textures.find(defaultTex);
-            if (defaultIt != textures.end() && defaultIt->second.srvIndex != UINT(-1))
-                return m_srvAllocator.getGPU(defaultIt->second.srvIndex);
-        }
-        return {};
-    };
+            auto it = textures.find(requested);
+            if (it != textures.end() && it->second.srvIndex != UINT(-1))
+                return m_srvAllocator.getGPU(it->second.srvIndex);
 
-    for (const DrawCommand& cmd : cmds)
-    {
-        if (!cmd.gpu_mesh || !cmd.gpu_mesh->isUploaded()) continue;
+            if (defaultTex != INVALID_TEXTURE && requested != defaultTex)
+            {
+                auto defaultIt = textures.find(defaultTex);
+                if (defaultIt != textures.end() && defaultIt->second.srvIndex != UINT(-1))
+                    return m_srvAllocator.getGPU(defaultIt->second.srvIndex);
+            }
+            return {};
+        };
 
-        D3D12Mesh* gpuMesh = asD3D12Mesh(cmd.gpu_mesh);
-        if (!gpuMesh || !gpuMesh->isUploaded()) continue;
-
-        D3D12ParallelReplayItem item;
-        item.vbv = gpuMesh->getVertexBufferView();
-        item.indexed = gpuMesh->isIndexed();
-        item.draw_count = static_cast<UINT>(cmd.vertex_count > 0
-            ? cmd.vertex_count
-            : (item.indexed ? gpuMesh->getIndexCount() : gpuMesh->getVertexCount()));
-        item.first_vertex = static_cast<UINT>(cmd.vertex_count > 0 ? cmd.start_vertex : 0);
-        if (item.draw_count == 0) continue;
-        if (item.indexed)
-            item.ibv = gpuMesh->getIndexBufferView();
-
-        item.object_cb.model = cmd.model_matrix;
-        item.object_cb.normalMatrix = cmd.normal_matrix;
-        item.object_cb.color = cmd.color;
-        item.object_cb.useTexture = cmd.use_texture ? 1 : 0;
-        item.object_cb.alphaCutoff = cmd.alpha_cutoff;
-        item.object_cb.metallic = cmd.metallic;
-        item.object_cb.roughness = cmd.roughness;
-        item.object_cb.emissive = cmd.emissive;
-        item.object_cb.hasMetallicRoughnessMap = 0;
-        item.object_cb.hasNormalMap = 0;
-        item.object_cb.hasOcclusionMap = 0;
-        item.object_cb.hasEmissiveMap = 0;
-        item.object_cb.useHeightmapDisplacement = cmd.use_heightmap_displacement ? 1 : 0;
-        item.object_cb.heightmapHeightScale = cmd.heightmap_height_scale;
-        item.object_cb.heightmapHeightOffset = cmd.heightmap_height_offset;
-        item.object_cb.heightmapTexelSize = cmd.heightmap_texel_size;
-        item.object_cb.materialFlags = static_cast<int>(cmd.material_flags);
-
-        item.pso = m_replayPSOOverride;
-        if (!item.pso)
+        for (const DrawCommand& cmd : cmds)
         {
-            RenderState rs;
-            rs.blend_mode = cmd.pso_key.blend;
-            rs.cull_mode = cmd.pso_key.cull;
-            rs.lighting = cmd.pso_key.lighting;
-            rs.alpha_test = cmd.pso_key.alpha_test;
-            item.pso = selectPSO(rs, !cmd.pso_key.lighting);
-        }
-        if (!item.pso) continue;
+            if (!cmd.gpu_mesh || !cmd.gpu_mesh->isUploaded()) continue;
 
-        TextureHandle texToBind = cmd.use_texture && cmd.texture != INVALID_TEXTURE
-            ? cmd.texture : defaultTex;
-        if (texToBind != INVALID_TEXTURE)
-        {
-            item.diffuse_srv = resolveTextureSRV(texToBind);
-            item.has_diffuse_srv = item.diffuse_srv.ptr != 0;
-        }
-        TextureHandle heightTexToBind = cmd.use_heightmap_displacement
-            ? cmd.heightmap_texture : defaultTex;
-        if (heightTexToBind != INVALID_TEXTURE)
-        {
-            item.heightmap_srv = resolveTextureSRV(heightTexToBind);
-            item.has_heightmap_srv = item.heightmap_srv.ptr != 0;
-        }
+            D3D12Mesh* gpuMesh = asD3D12Mesh(cmd.gpu_mesh);
+            if (!gpuMesh || !gpuMesh->isUploaded()) continue;
 
-        replayItems.push_back(item);
+            D3D12ParallelReplayItem item;
+            item.vbv = gpuMesh->getVertexBufferView();
+            item.indexed = gpuMesh->isIndexed();
+            item.draw_count = static_cast<UINT>(cmd.vertex_count > 0
+                ? cmd.vertex_count
+                : (item.indexed ? gpuMesh->getIndexCount() : gpuMesh->getVertexCount()));
+            item.first_vertex = static_cast<UINT>(cmd.vertex_count > 0 ? cmd.start_vertex : 0);
+            if (item.draw_count == 0) continue;
+            if (item.indexed)
+                item.ibv = gpuMesh->getIndexBufferView();
+
+            item.object_cb.model = cmd.model_matrix;
+            item.object_cb.normalMatrix = cmd.normal_matrix;
+            item.object_cb.color = cmd.color;
+            item.object_cb.useTexture = cmd.use_texture ? 1 : 0;
+            item.object_cb.alphaCutoff = cmd.alpha_cutoff;
+            item.object_cb.metallic = cmd.metallic;
+            item.object_cb.roughness = cmd.roughness;
+            item.object_cb.emissive = cmd.emissive;
+            item.object_cb.hasMetallicRoughnessMap = 0;
+            item.object_cb.hasNormalMap = 0;
+            item.object_cb.hasOcclusionMap = 0;
+            item.object_cb.hasEmissiveMap = 0;
+            item.object_cb.useHeightmapDisplacement = cmd.use_heightmap_displacement ? 1 : 0;
+            item.object_cb.heightmapHeightScale = cmd.heightmap_height_scale;
+            item.object_cb.heightmapHeightOffset = cmd.heightmap_height_offset;
+            item.object_cb.heightmapTexelSize = cmd.heightmap_texel_size;
+            item.object_cb.materialFlags = static_cast<int>(cmd.material_flags);
+
+            item.pso = m_replayPSOOverride;
+            if (!item.pso)
+            {
+                RenderState rs;
+                rs.blend_mode = cmd.pso_key.blend;
+                rs.cull_mode = cmd.pso_key.cull;
+                rs.lighting = cmd.pso_key.lighting;
+                rs.alpha_test = cmd.pso_key.alpha_test;
+                item.pso = selectPSO(rs, !cmd.pso_key.lighting);
+            }
+            if (!item.pso) continue;
+
+            TextureHandle texToBind = cmd.use_texture && cmd.texture != INVALID_TEXTURE
+                ? cmd.texture : defaultTex;
+            if (texToBind != INVALID_TEXTURE)
+            {
+                item.diffuse_srv = resolveTextureSRV(texToBind);
+                item.has_diffuse_srv = item.diffuse_srv.ptr != 0;
+            }
+            TextureHandle heightTexToBind = cmd.use_heightmap_displacement
+                ? cmd.heightmap_texture : defaultTex;
+            if (heightTexToBind != INVALID_TEXTURE)
+            {
+                item.heightmap_srv = resolveTextureSRV(heightTexToBind);
+                item.has_heightmap_srv = item.heightmap_srv.ptr != 0;
+            }
+
+            replayItems.push_back(item);
+        }
     }
 
     if (replayItems.empty())
@@ -1040,11 +1080,13 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
 
     // Flush main command list (preamble complete)
     flushAndReopenCommandList();
+    if (device_lost || !m_commandListOpen)
+        return;
 
     // Determine chunk count based on available command lists
-    uint32_t max_workers = m_commandListPool.capacity();
+    uint32_t max_workers = workerCapacity;
     uint32_t num_workers = std::min(max_workers,
-        static_cast<uint32_t>((replayItems.size() + D3D12_PARALLEL_REPLAY_THRESHOLD - 1) / D3D12_PARALLEL_REPLAY_THRESHOLD));
+        static_cast<uint32_t>((replayItems.size() + replayThreshold - 1) / replayThreshold));
     num_workers = std::max(num_workers, 1u);
 
     size_t chunk_size = (replayItems.size() + num_workers - 1) / num_workers;
@@ -1055,6 +1097,7 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
         D3D12CommandListPool::Entry* entry = nullptr;
         size_t start = 0;
         size_t end = 0;
+        bool recorded = false;
     };
     std::vector<WorkerData> workers(num_workers);
 
@@ -1072,7 +1115,6 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
 
     if (num_workers == 0)
     {
-        textureLock.unlock();
         replayCommandBuffer(cmds);
         return;
     }
@@ -1171,8 +1213,16 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
                     }
                 }
 
-                // Close this worker's command list
-                cmdList->Close();
+                HRESULT closeHr = cmdList->Close();
+                if (SUCCEEDED(closeHr))
+                {
+                    workers[w].recorded = true;
+                }
+                else
+                {
+                    LOG_ENGINE_ERROR("[D3D12] Parallel replay worker {} failed to close command list (HRESULT: 0x{:08X})",
+                                     w, static_cast<unsigned>(closeHr));
+                }
             }));
     }
 
@@ -1180,8 +1230,26 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
     for (auto& f : futures)
         f.get();
 
+    std::vector<ID3D12CommandList*> activeLists;
+    activeLists.reserve(num_workers);
+    bool allWorkersRecorded = true;
+    for (uint32_t w = 0; w < num_workers; ++w)
+    {
+        if (workers[w].recorded)
+            activeLists.push_back(workers[w].entry->cmdList.Get());
+        else
+            allWorkersRecorded = false;
+    }
+
+    if (!allWorkersRecorded || activeLists.empty())
+    {
+        LOG_ENGINE_WARN("[D3D12] Parallel replay worker recording failed; replaying {} draws on the primary command list",
+                        cmds.size());
+        replayCommandBuffer(cmds);
+        return;
+    }
+
     // Submit all worker command lists at once
-    auto activeLists = m_commandListPool.getActiveCommandLists();
     if (!activeLists.empty())
     {
         commandQueue->ExecuteCommandLists(static_cast<UINT>(activeLists.size()), activeLists.data());
@@ -1195,10 +1263,11 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
         commandQueue->Signal(m_fence.Get(), m_fenceValue);
         m_commandListPool.setLastSubmissionFence(m_fenceValue);
     }
-    textureLock.unlock();
 
     m_lastFrameStats.submitted_draw_commands += cmds.size();
     m_lastFrameStats.backend_draw_calls += replayItems.size();
+    m_lastFrameStats.parallel_replay_batches++;
+    m_lastFrameStats.parallel_replay_workers += activeLists.size();
 }
 
 void D3D12RenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)

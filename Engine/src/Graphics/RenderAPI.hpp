@@ -80,6 +80,8 @@ struct RenderFrameStats
     uint64_t backend_draw_calls = 0;
     uint64_t instanced_batches = 0;
     uint64_t instanced_instances = 0;
+    uint64_t parallel_replay_batches = 0;
+    uint64_t parallel_replay_workers = 0;
 };
 
 // GPU light structures for point/spot light constant buffers.
