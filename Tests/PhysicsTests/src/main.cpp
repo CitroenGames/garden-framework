@@ -7,6 +7,7 @@
 #include "PlayerController.hpp"
 #include "Reflection/EngineReflection.hpp"
 #include "Reflection/ReflectionRegistry.hpp"
+#include "Tick/TickSystem.hpp"
 #include "Utils/Log.hpp"
 #include "world.hpp"
 
@@ -51,6 +52,36 @@ static bool pass(const std::string& name)
 {
     std::cout << "[PASS] " << name << std::endl;
     return true;
+}
+
+static bool testFixedTickAccumulatorCarriesPartialTime()
+{
+    const std::string name = "fixed tick accumulator carries partial time";
+    Tick::FixedTickAccumulator ticks(0.1f, 8);
+
+    if (ticks.consume(0.05f) != 0)
+        return fail(name, "partial delta consumed a tick");
+    if (!approx(ticks.getAlpha(), 0.5f, 0.001f))
+        return fail(name, "partial delta did not produce expected interpolation alpha");
+    if (ticks.consume(0.05f) != 1)
+        return fail(name, "second partial delta did not complete one tick");
+    if (!approx(ticks.getAccumulatedTime(), 0.0f, 0.001f))
+        return fail(name, "completed tick left unexpected accumulated time");
+
+    return pass(name);
+}
+
+static bool testFixedTickAccumulatorCapsCatchUp()
+{
+    const std::string name = "fixed tick accumulator caps catch-up";
+    Tick::FixedTickAccumulator ticks(0.1f, 3);
+
+    if (ticks.consume(1.0f) != 3)
+        return fail(name, "large delta was not capped to max tick steps");
+    if (!approx(ticks.getAccumulatedTime(), 0.0f, 0.001f))
+        return fail(name, "capped catch-up retained dropped time");
+
+    return pass(name);
 }
 
 static void appendLe16(std::vector<std::uint8_t>& out, std::uint16_t value)
@@ -985,6 +1016,10 @@ int main()
     EE::CLog::Init();
     fs::path repo_root = findRepoRoot();
     bool ok = true;
+    run("fixed tick accumulator carries partial time");
+    ok = testFixedTickAccumulatorCarriesPartialTime() && ok;
+    run("fixed tick accumulator caps catch-up");
+    ok = testFixedTickAccumulatorCapsCatchUp() && ok;
     run("source movement ground acceleration");
     ok = testSourceGroundAcceleration() && ok;
     run("source movement ground friction");

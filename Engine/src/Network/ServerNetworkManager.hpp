@@ -13,6 +13,7 @@
 #include "BitStream.hpp"
 #include "NetworkSerializer.hpp"
 #include "LagHistory.hpp"
+#include "Tick/TickSystem.hpp"
 #include <entt/entt.hpp>
 
 // Forward declarations
@@ -95,8 +96,9 @@ private:
 
     // Server state
     uint32_t current_tick = 0;
-    float tick_accumulator = 0.0f;
+    Tick::FixedTickAccumulator server_ticks;
     uint32_t state_update_counter = 0;  // Counter for 20Hz updates (every 3 ticks)
+    uint32_t last_state_update_tick = 0;
     uint32_t last_lag_history_tick = 0;
     LagHistory lag_history;
 

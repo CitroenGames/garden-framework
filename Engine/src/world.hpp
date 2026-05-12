@@ -3,6 +3,8 @@
 #include "Components/Components.hpp"
 #include "Components/camera.hpp"
 #include "PhysicsSystem.hpp"
+#include "Tick/TickSystem.hpp"
+#include <cstdint>
 #include <vector>
 #include <memory>
 #include <entt/entt.hpp>
@@ -11,7 +13,7 @@ class world
 {
 private:
     std::unique_ptr<PhysicsSystem> physics_system;
-    float physics_accumulator = 0.0f;
+    Tick::FixedTickAccumulator physics_ticks;
 
     void clearRegistryStorage()
     {
@@ -31,11 +33,13 @@ public:
     float fixed_delta;
 
     explicit world(const PhysicsSystemSettings& physics_settings = PhysicsSystemSettings())
+        : physics_ticks(physics_settings.fixed_delta)
     {
         world_camera = camera(0, 0, -5);
         fixed_delta = physics_settings.fixed_delta;
         physics_system = std::make_unique<PhysicsSystem>(physics_settings);
         fixed_delta = physics_system->getFixedDelta();
+        physics_ticks.setFixedDelta(fixed_delta);
     }
 
     world(world&&) noexcept = default;
@@ -59,21 +63,20 @@ public:
     const PhysicsSystem& getPhysicsSystem() const { return *physics_system; }
 
     // Simplified interface that delegates to physics system
-    void step_physics(float dt)
+    uint32_t step_physics(float dt)
     {
-        physics_accumulator += dt;
+        physics_ticks.setFixedDelta(fixed_delta);
+        const uint32_t steps = physics_ticks.consume(dt);
 
-        // Cap accumulator to prevent spiral of death (max 8 steps per frame)
-        const float max_accumulation = fixed_delta * 8.0f;
-        if (physics_accumulator > max_accumulation)
-            physics_accumulator = max_accumulation;
-
-        while (physics_accumulator >= fixed_delta)
+        for (uint32_t i = 0; i < steps; ++i)
         {
             physics_system->stepPhysics(registry);
-            physics_accumulator -= fixed_delta;
         }
+
+        return steps;
     }
+
+    float getPhysicsInterpolationAlpha() const { return physics_ticks.getAlpha(); }
 
     void player_collisions(entt::entity playerEntity)
     {
@@ -147,6 +150,7 @@ public:
     {
         physics_system->setFixedDelta(delta);
         fixed_delta = physics_system->getFixedDelta();
+        physics_ticks.setFixedDelta(fixed_delta);
     }
 
     bool configurePhysics(const PhysicsSystemSettings& physics_settings)
@@ -154,7 +158,8 @@ public:
         if (!physics_system->configure(physics_settings))
             return false;
         fixed_delta = physics_system->getFixedDelta();
-        physics_accumulator = 0.0f;
+        physics_ticks.setFixedDelta(fixed_delta);
+        physics_ticks.reset();
         return true;
     }
 
@@ -163,7 +168,7 @@ public:
         if (physics_system)
             physics_system->shutdown();
         clearRegistryStorage();
-        physics_accumulator = 0.0f;
+        physics_ticks.reset();
     }
 
     // Full reset: tear down physics, clear ECS, reinitialize.

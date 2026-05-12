@@ -193,6 +193,10 @@ void ServerNetworkManager::shutdown()
     peer_to_client_id.clear();
     entity_to_net_id.clear();
     net_id_to_entity.clear();
+    current_tick = 0;
+    server_ticks.reset();
+    state_update_counter = 0;
+    last_state_update_tick = 0;
     lag_history.clear();
     last_lag_history_tick = 0;
 
@@ -215,12 +219,9 @@ void ServerNetworkManager::pumpNetworkEvents(float delta_time)
         return;
     }
 
-    // Update tick counter
-    tick_accumulator += delta_time;
-    while (tick_accumulator >= game_world->fixed_delta) {
-        current_tick++;
-        tick_accumulator -= game_world->fixed_delta;
-    }
+    const float fixed_delta = game_world->fixed_delta > 0.0f ? game_world->fixed_delta : (1.0f / 60.0f);
+    server_ticks.setFixedDelta(fixed_delta);
+    current_tick += server_ticks.consume(delta_time);
 
     // Process network events (bounded to prevent flood-induced stalls)
     ENetEvent event;
@@ -284,10 +285,14 @@ void ServerNetworkManager::publishWorldState()
         last_lag_history_tick = current_tick;
     }
 
-    // Broadcast world state every 3 ticks (~20Hz at 62.5Hz server tick)
-    state_update_counter++;
+    // Broadcast world state every 3 simulation ticks (~20Hz at 60Hz).
+    const uint32_t elapsed_ticks = current_tick - last_state_update_tick;
+    if (elapsed_ticks > 0) {
+        state_update_counter += elapsed_ticks;
+        last_state_update_tick = current_tick;
+    }
     if (state_update_counter >= 3) {
-        state_update_counter = 0;
+        state_update_counter %= 3;
         broadcastWorldState();
     }
 
