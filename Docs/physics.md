@@ -91,7 +91,7 @@ auto sweep = w.sphereCast(origin, 0.3f, direction, 10.0f);
 
 ## Fixed timestep
 
-`world::step_physics(dt)` uses the shared `Tick::FixedTickAccumulator` to accumulate real time and run as many fixed steps as needed (capped at 8 to avoid spiral of death). It returns the number of fixed steps consumed during the call. Default `fixed_delta` is set by `PhysicsSystemSettings`, and `world::getPhysicsInterpolationAlpha()` exposes the remaining partial-step alpha for interpolation.
+`world::step_physics(dt)` uses `Tick::FixedTickAccumulator` to accumulate real time and run as many fixed steps as needed (capped at 8 to avoid spiral of death). It returns the number of fixed steps consumed during the call. `world::getSimulationTick()` advances once per consumed fixed step, so systems such as server networking can follow the authoritative physics tick. Default `fixed_delta` is set by `PhysicsSystemSettings`, and `world::getPhysicsInterpolationAlpha()` exposes the remaining partial-step alpha for interpolation.
 
 The engine drives this for you — you don't call `step_physics` from gameplay. But it means:
 

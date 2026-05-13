@@ -13,7 +13,8 @@ class world
 {
 private:
     std::unique_ptr<PhysicsSystem> physics_system;
-    Tick::FixedTickAccumulator physics_ticks;
+    Tick::FixedTickAccumulator simulation_ticks;
+    uint32_t simulation_tick = 0;
 
     void clearRegistryStorage()
     {
@@ -33,13 +34,13 @@ public:
     float fixed_delta;
 
     explicit world(const PhysicsSystemSettings& physics_settings = PhysicsSystemSettings())
-        : physics_ticks(physics_settings.fixed_delta)
+        : simulation_ticks(physics_settings.fixed_delta)
     {
         world_camera = camera(0, 0, -5);
         fixed_delta = physics_settings.fixed_delta;
         physics_system = std::make_unique<PhysicsSystem>(physics_settings);
         fixed_delta = physics_system->getFixedDelta();
-        physics_ticks.setFixedDelta(fixed_delta);
+        simulation_ticks.setFixedDelta(fixed_delta);
     }
 
     world(world&&) noexcept = default;
@@ -65,18 +66,21 @@ public:
     // Simplified interface that delegates to physics system
     uint32_t step_physics(float dt)
     {
-        physics_ticks.setFixedDelta(fixed_delta);
-        const uint32_t steps = physics_ticks.consume(dt);
+        simulation_ticks.setFixedDelta(fixed_delta);
+        const uint32_t steps = simulation_ticks.consume(dt);
 
         for (uint32_t i = 0; i < steps; ++i)
         {
             physics_system->stepPhysics(registry);
+            ++simulation_tick;
         }
 
         return steps;
     }
 
-    float getPhysicsInterpolationAlpha() const { return physics_ticks.getAlpha(); }
+    uint32_t getSimulationTick() const { return simulation_tick; }
+
+    float getPhysicsInterpolationAlpha() const { return simulation_ticks.getAlpha(); }
 
     void player_collisions(entt::entity playerEntity)
     {
@@ -150,7 +154,7 @@ public:
     {
         physics_system->setFixedDelta(delta);
         fixed_delta = physics_system->getFixedDelta();
-        physics_ticks.setFixedDelta(fixed_delta);
+        simulation_ticks.setFixedDelta(fixed_delta);
     }
 
     bool configurePhysics(const PhysicsSystemSettings& physics_settings)
@@ -158,8 +162,9 @@ public:
         if (!physics_system->configure(physics_settings))
             return false;
         fixed_delta = physics_system->getFixedDelta();
-        physics_ticks.setFixedDelta(fixed_delta);
-        physics_ticks.reset();
+        simulation_ticks.setFixedDelta(fixed_delta);
+        simulation_ticks.reset();
+        simulation_tick = 0;
         return true;
     }
 
@@ -168,7 +173,8 @@ public:
         if (physics_system)
             physics_system->shutdown();
         clearRegistryStorage();
-        physics_ticks.reset();
+        simulation_ticks.reset();
+        simulation_tick = 0;
     }
 
     // Full reset: tear down physics, clear ECS, reinitialize.

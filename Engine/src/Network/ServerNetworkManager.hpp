@@ -13,7 +13,6 @@
 #include "BitStream.hpp"
 #include "NetworkSerializer.hpp"
 #include "LagHistory.hpp"
-#include "Tick/TickSystem.hpp"
 #include <entt/entt.hpp>
 
 // Forward declarations
@@ -96,7 +95,6 @@ private:
 
     // Server state
     uint32_t current_tick = 0;
-    Tick::FixedTickAccumulator server_ticks;
     uint32_t state_update_counter = 0;  // Counter for 20Hz updates (every 3 ticks)
     uint32_t last_state_update_tick = 0;
     uint32_t last_lag_history_tick = 0;
@@ -128,6 +126,7 @@ public:
     // Main update loop
     void update(float delta_time);
     void pumpNetworkEvents(float delta_time);
+    void advanceSimulationTicks(uint32_t tick_count);
     void publishWorldState();
 
     // Broadcast world state to all clients
@@ -166,6 +165,7 @@ public:
 
     // Stats
     const NetworkStats& getStats() const { return stats; }
+    uint32_t getCurrentTick() const { return current_tick; }
 
     // ConVar replication
     void broadcastCVar(const std::string& name, const std::string& value);

@@ -84,6 +84,36 @@ static bool testFixedTickAccumulatorCapsCatchUp()
     return pass(name);
 }
 
+static bool testWorldSimulationTickTracksPhysicsSteps()
+{
+    const std::string name = "world simulation tick tracks physics steps";
+    PhysicsSystemSettings settings;
+    settings.fixed_delta = 0.1f;
+    world w(settings);
+
+    if (w.getSimulationTick() != 0)
+        return fail(name, "new world did not start at tick zero");
+    if (w.step_physics(0.05f) != 0)
+        return fail(name, "partial delta consumed a physics step");
+    if (w.getSimulationTick() != 0)
+        return fail(name, "partial delta advanced simulation tick");
+    if (!approx(w.getPhysicsInterpolationAlpha(), 0.5f, 0.001f))
+        return fail(name, "partial delta did not expose expected interpolation alpha");
+
+    if (w.step_physics(0.25f) != 3)
+        return fail(name, "completed delta did not consume expected physics steps");
+    if (w.getSimulationTick() != 3)
+        return fail(name, "simulation tick did not match consumed physics steps");
+
+    settings.fixed_delta = 0.2f;
+    if (!w.configurePhysics(settings))
+        return fail(name, "pre-initialize physics reconfigure failed");
+    if (w.getSimulationTick() != 0)
+        return fail(name, "physics reconfigure did not reset simulation tick");
+
+    return pass(name);
+}
+
 static void appendLe16(std::vector<std::uint8_t>& out, std::uint16_t value)
 {
     out.push_back(static_cast<std::uint8_t>(value & 0xff));
@@ -1020,6 +1050,8 @@ int main()
     ok = testFixedTickAccumulatorCarriesPartialTime() && ok;
     run("fixed tick accumulator caps catch-up");
     ok = testFixedTickAccumulatorCapsCatchUp() && ok;
+    run("world simulation tick tracks physics steps");
+    ok = testWorldSimulationTickTracksPhysicsSteps() && ok;
     run("source movement ground acceleration");
     ok = testSourceGroundAcceleration() && ok;
     run("source movement ground friction");

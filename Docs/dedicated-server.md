@@ -72,13 +72,14 @@ GAME_API bool gardenServerInit(EngineServices* services)
 GAME_API void gardenServerUpdate(float dt)
 {
     g_server.pumpNetworkEvents(dt);                          // pull queued inputs from clients
-    g_services->game_world->step_physics(dt);                // authoritative fixed steps
+    uint32_t steps = g_services->game_world->step_physics(dt); // authoritative fixed steps
+    g_server.advanceSimulationTicks(steps);                  // network tick follows physics
     runServerGameRules(*g_services->game_world, dt);         // damage, scoring, win conditions
     g_server.publishWorldState();                            // send snapshots on tick cadence
 }
 ```
 
-Network and physics tick accumulation both use the shared fixed-tick accumulator, so catch-up is capped consistently and snapshot publishing is based on elapsed simulation ticks instead of render/frame calls. Method names in the FPS template are slightly different - read `Templates/FPSShooter/src/server/ServerModule.cpp` for the canonical version.
+The world owns fixed-step accumulation. Networking advances from the number of physics steps actually consumed, so catch-up caps, snapshot cadence, and lag-history ticks follow the authoritative simulation instead of render/frame calls. Method names in the FPS template are slightly different - read `Templates/FPSShooter/src/server/ServerModule.cpp` for the canonical version.
 
 ## Connection lifecycle
 

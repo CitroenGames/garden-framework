@@ -194,7 +194,6 @@ void ServerNetworkManager::shutdown()
     entity_to_net_id.clear();
     net_id_to_entity.clear();
     current_tick = 0;
-    server_ticks.reset();
     state_update_counter = 0;
     last_state_update_tick = 0;
     lag_history.clear();
@@ -210,6 +209,9 @@ void ServerNetworkManager::shutdown()
 void ServerNetworkManager::update(float delta_time)
 {
     pumpNetworkEvents(delta_time);
+    if (game_world != nullptr) {
+        advanceSimulationTicks(game_world->step_physics(delta_time));
+    }
     publishWorldState();
 }
 
@@ -218,10 +220,6 @@ void ServerNetworkManager::pumpNetworkEvents(float delta_time)
     if (server_host == nullptr || game_world == nullptr) {
         return;
     }
-
-    const float fixed_delta = game_world->fixed_delta > 0.0f ? game_world->fixed_delta : (1.0f / 60.0f);
-    server_ticks.setFixedDelta(fixed_delta);
-    current_tick += server_ticks.consume(delta_time);
 
     // Process network events (bounded to prevent flood-induced stalls)
     ENetEvent event;
@@ -267,6 +265,15 @@ void ServerNetworkManager::pumpNetworkEvents(float delta_time)
     }
 
     refreshStats(delta_time);
+}
+
+void ServerNetworkManager::advanceSimulationTicks(uint32_t tick_count)
+{
+    if (tick_count == 0) {
+        return;
+    }
+
+    current_tick += tick_count;
 }
 
 void ServerNetworkManager::publishWorldState()

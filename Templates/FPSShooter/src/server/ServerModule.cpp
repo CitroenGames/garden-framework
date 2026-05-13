@@ -617,7 +617,8 @@ GAME_API void gardenServerUpdate(float delta_time)
     world* w = g_server_services->game_world;
 
     g_server_network.pumpNetworkEvents(delta_time);
-    w->step_physics(delta_time);
+    const uint32_t physics_steps = w->step_physics(delta_time);
+    g_server_network.advanceSimulationTicks(physics_steps);
     updateServerPlayerCollisions(*w);
     g_game_rules.Update(*w, delta_time);
 
