@@ -21,6 +21,7 @@ if(Windows)
 }
 sources = src/**/*.cpp
 headers = src/**/*.hpp
+defines = RMLUI_SDL_VERSION_MAJOR=3, RMLUI_STATIC_LIB
 if(Windows)
 {
     includes = src, ${DirectX12_INCLUDE_DIRS}
@@ -43,6 +44,8 @@ if(macOS)
 target_link_libraries(
     PRIVATE EngineCore
     PRIVATE EngineGraphics
+    PRIVATE RmlUi
+    PRIVATE freetype
 )
 multiprocessor = true
 simd = AdvancedVectorExtensions2

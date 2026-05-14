@@ -1,0 +1,460 @@
+<rml>
+<head>
+<title>Garden - Project Browser</title>
+<style>
+body {
+    display: block;
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    background-color: #171a1d;
+    color: #e3e7ec;
+    font-family: LatoLatin;
+    font-size: 14dp;
+}
+#root {
+    display: block;
+    position: absolute;
+    left: 0;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    background-color: #171a1d;
+}
+#header {
+    position: absolute;
+    left: 0;
+    top: 0;
+    right: 0;
+    height: 52dp;
+    background-color: #20252b;
+    border-bottom: 1dp #343c44;
+}
+#brand {
+    position: absolute;
+    left: 20dp;
+    top: 15dp;
+    color: #d8dde4;
+    font-size: 16dp;
+    font-weight: bold;
+}
+#tabs {
+    position: absolute;
+    left: 164dp;
+    top: 10dp;
+    height: 32dp;
+}
+.tab {
+    display: inline-block;
+    height: 32dp;
+    margin-right: 4dp;
+    padding: 0 14dp;
+    color: #89929d;
+    background-color: transparent;
+    border: 1dp transparent;
+    border-radius: 4dp;
+    line-height: 32dp;
+    cursor: pointer;
+    box-sizing: border-box;
+}
+.tab:hover {
+    color: #d8e1ea;
+    background-color: #29313a;
+}
+.tab.active {
+    color: #eff4f8;
+    background-color: #11161b;
+    border-color: #36424d;
+}
+#content {
+    position: absolute;
+    left: 44dp;
+    right: 44dp;
+    top: 82dp;
+    bottom: 34dp;
+    background-color: #11161b;
+    border: 1dp #34404a;
+    border-radius: 6dp;
+}
+.panel {
+    display: none;
+    position: absolute;
+    left: 22dp;
+    top: 22dp;
+    right: 22dp;
+    bottom: 22dp;
+}
+.panel.active {
+    display: block;
+}
+.form-column {
+    position: absolute;
+    left: 0;
+    top: 0;
+    right: 304dp;
+    bottom: 0;
+}
+.side-panel {
+    position: absolute;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    width: 260dp;
+    background-color: #0d1217;
+    border: 1dp #2a3540;
+    border-radius: 4dp;
+    padding: 16dp;
+    box-sizing: border-box;
+}
+#create-title,
+#open-title {
+    position: absolute;
+    left: 0;
+    top: 0;
+    right: 0;
+    display: block;
+    color: #f1f5f8;
+    font-size: 23dp;
+    font-weight: bold;
+}
+#create-copy,
+#open-copy {
+    position: absolute;
+    left: 0;
+    top: 38dp;
+    right: 0;
+    display: block;
+    color: #9da8b5;
+    line-height: 20dp;
+}
+.field-label {
+    display: block;
+    color: #97a4b2;
+    font-size: 13dp;
+}
+#name-label,
+#open-path-label {
+    position: absolute;
+    left: 0;
+    top: 132dp;
+}
+#dir-label {
+    position: absolute;
+    left: 0;
+    top: 236dp;
+}
+input {
+    width: 100%;
+    height: 40dp;
+    padding: 9dp 10dp;
+    color: #edf2f6;
+    background-color: #1b232b;
+    border: 1dp #3a4651;
+    border-radius: 4dp;
+    box-sizing: border-box;
+    cursor: text;
+}
+input:hover {
+    border-color: #4d5c68;
+    background-color: #202a33;
+}
+input:focus {
+    border-color: #5bb6c7;
+    background-color: #202b34;
+}
+#new-project-name {
+    position: absolute;
+    left: 0;
+    top: 158dp;
+    right: 0;
+    width: auto;
+}
+#new-project-dir {
+    position: absolute;
+    left: 0;
+    top: 262dp;
+    right: 120dp;
+    width: auto;
+}
+#open-project-path {
+    position: absolute;
+    left: 0;
+    top: 158dp;
+    right: 120dp;
+    width: auto;
+}
+button {
+    height: 40dp;
+    padding: 0;
+    color: #eef4f7;
+    background-color: #26313b;
+    border: 1dp #46535e;
+    border-radius: 4dp;
+    font-family: LatoLatin;
+    font-size: 14dp;
+    line-height: 40dp;
+    text-align: center;
+    cursor: pointer;
+    box-sizing: border-box;
+}
+button:hover {
+    background-color: #31404c;
+    border-color: #5b6974;
+}
+#browse-dir-button {
+    position: absolute;
+    right: 0;
+    top: 262dp;
+    width: 108dp;
+}
+#browse-open-button {
+    position: absolute;
+    right: 0;
+    top: 158dp;
+    width: 108dp;
+}
+button.primary {
+    width: 184dp;
+    background-color: #2c7888;
+    border-color: #59b6c8;
+}
+button.primary:hover {
+    background-color: #358b9c;
+    border-color: #75c9d8;
+}
+button.disabled {
+    color: #737e88;
+    background-color: #252b31;
+    border-color: #333c44;
+    cursor: arrow;
+}
+#create-project-button {
+    position: absolute;
+    left: 0;
+    top: 328dp;
+}
+#open-project-button {
+    position: absolute;
+    left: 0;
+    top: 224dp;
+}
+#create-hint {
+    position: absolute;
+    left: 202dp;
+    top: 337dp;
+    right: 0;
+    color: #77838e;
+    line-height: 18dp;
+}
+#open-hint {
+    position: absolute;
+    left: 202dp;
+    top: 233dp;
+    right: 0;
+    color: #77838e;
+    line-height: 18dp;
+}
+#status {
+    position: absolute;
+    left: 22dp;
+    right: 326dp;
+    bottom: 22dp;
+    display: none;
+    color: #80d4b1;
+}
+#status.visible {
+    display: block;
+}
+#status.error {
+    color: #f29ba1;
+}
+.side-title {
+    display: block;
+    color: #cbd4dd;
+    font-size: 13dp;
+    text-transform: uppercase;
+}
+.side-rule {
+    display: block;
+    height: 1dp;
+    margin: 10dp 0 10dp 0;
+    background-color: #29333c;
+}
+#template-list {
+    position: absolute;
+    left: 16dp;
+    right: 16dp;
+    top: 44dp;
+    bottom: 130dp;
+    padding-right: 12dp;
+    overflow-y: scroll;
+    scrollbar-margin: 0dp;
+    background-color: #0a0f13;
+    border-top: 1dp #26313a;
+    border-bottom: 1dp #26313a;
+}
+#template-list scrollbarvertical {
+    width: 8dp;
+}
+#template-list scrollbarvertical sliderarrowdec,
+#template-list scrollbarvertical sliderarrowinc {
+    width: 0;
+    height: 0;
+}
+#template-list scrollbarvertical slidertrack {
+    width: 8dp;
+    margin-left: 0;
+    background-color: #101820;
+}
+#template-list scrollbarvertical sliderbar {
+    width: 8dp;
+    min-height: 32dp;
+    background-color: #3b4a55;
+    border-radius: 4dp;
+}
+#template-list scrollbarvertical sliderbar:hover {
+    background-color: #58707d;
+}
+#template-spacer {
+    display: block;
+    width: 1dp;
+}
+.template-row {
+    display: block;
+    position: absolute;
+    left: 0;
+    right: 10dp;
+    height: 52dp;
+    padding: 17dp 10dp 0 10dp;
+    color: #aeb8c3;
+    background-color: transparent;
+    border-left: 3dp #0d1217;
+    cursor: pointer;
+    box-sizing: border-box;
+}
+.template-row:hover {
+    background-color: #182129;
+    color: #e5edf4;
+    border-left-color: #4e5c67;
+}
+.template-row.selected {
+    background-color: #1d3a43;
+    color: #f2f7f9;
+    border-left-color: #65c4d4;
+}
+.empty-text {
+    color: #87919c;
+    line-height: 20dp;
+}
+#template-scroll-hint {
+    position: absolute;
+    left: 16dp;
+    right: 16dp;
+    bottom: 106dp;
+    height: 18dp;
+    color: #70808e;
+    font-size: 12dp;
+    line-height: 18dp;
+    text-align: right;
+}
+#selected-template {
+    position: absolute;
+    left: 16dp;
+    right: 16dp;
+    bottom: 16dp;
+}
+.meta-label {
+    display: block;
+    margin-bottom: 4dp;
+    color: #7e8995;
+    font-size: 12dp;
+}
+.meta-value {
+    display: block;
+    color: #b7c1cc;
+    line-height: 18dp;
+    word-break: break-word;
+    overflow: hidden;
+}
+#selected-template-path {
+    max-height: 40dp;
+}
+#open-current-path {
+    display: block;
+    margin-top: 12dp;
+    color: #b7c1cc;
+    line-height: 18dp;
+    word-break: break-word;
+    overflow: hidden;
+}
+</style>
+</head>
+<body>
+<div id="root">
+    <div id="header">
+        <div id="brand">Garden Engine</div>
+        <div id="tabs">
+            <div id="project-browser-tab" class="tab active">Project Browser</div>
+            <div id="open-existing-tab" class="tab">Open Existing Project</div>
+        </div>
+    </div>
+
+    <div id="content">
+        <div id="create-panel" class="panel active">
+            <div class="form-column">
+                <div id="create-title">Create Project</div>
+                <div id="create-copy">Choose a template and project location. The editor opens the new .garden project after creation.</div>
+
+                <div id="name-label" class="field-label">Project name</div>
+                <input id="new-project-name" type="text" value="MyGame" />
+
+                <div id="dir-label" class="field-label">Project directory</div>
+                <input id="new-project-dir" type="text" value="." />
+                <button id="browse-dir-button">Browse</button>
+
+                <button id="create-project-button" class="primary disabled">Create Project</button>
+                <div id="create-hint">Name, directory, and template are required.</div>
+            </div>
+
+            <div class="side-panel">
+                <div class="side-title">Templates</div>
+                <div class="side-rule"></div>
+                <div id="template-list"></div>
+                <div id="template-scroll-hint">Scroll for more</div>
+                <div id="selected-template">
+                    <div class="meta-label">Selected template</div>
+                    <div id="selected-template-name" class="meta-value">None</div>
+                    <div class="meta-label">Path</div>
+                    <div id="selected-template-path" class="meta-value">No template selected.</div>
+                </div>
+            </div>
+        </div>
+
+        <div id="open-panel" class="panel">
+            <div class="form-column">
+                <div id="open-title">Open Project</div>
+                <div id="open-copy">Select an existing .garden project file. The editor will load it directly.</div>
+
+                <div id="open-path-label" class="field-label">Project file</div>
+                <input id="open-project-path" type="text" value="" />
+                <button id="browse-open-button">Browse</button>
+
+                <button id="open-project-button" class="primary disabled">Open Project</button>
+                <div id="open-hint">Choose a .garden file first.</div>
+            </div>
+
+            <div class="side-panel">
+                <div class="side-title">Project File</div>
+                <div class="side-rule"></div>
+                <div class="empty-text">Garden project files use the .garden extension and describe the editor project root.</div>
+                <div class="side-rule"></div>
+                <div class="meta-label">Current path</div>
+                <div id="open-current-path">No project selected.</div>
+            </div>
+        </div>
+        <div id="status"></div>
+    </div>
+</div>
+</body>
+</rml>
