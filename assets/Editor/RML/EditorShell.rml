@@ -25,76 +25,77 @@ body {
     display: none;
 }
 
-#topbar {
+.hidden {
+    display: none;
+}
+
+#header {
     position: absolute;
     top: 0dp;
     left: 0dp;
     right: 0dp;
-    height: 28dp;
-    box-sizing: border-box;
-    padding: 0dp 8dp;
-    display: flex;
-    flex-direction: row;
-    align-items: center;
-    column-gap: 10dp;
-    background-color: #171c22;
-    border-bottom: 1dp #2b343d;
+    height: 76dp;
+    background-color: #191919;
+    border-bottom: 1dp #2b2f33;
     pointer-events: auto;
 }
 
-#brand-block {
-    width: 220dp;
-    height: 28dp;
+#logo-rail {
+    position: absolute;
+    top: 0dp;
+    left: 0dp;
+    width: 76dp;
+    height: 76dp;
+    background-color: #101214;
+    border-right: 1dp #2a2f34;
+}
+
+#engine-logo {
+    position: absolute;
+    left: 10dp;
+    top: 10dp;
+    width: 56dp;
+    height: 56dp;
+}
+
+#top-row {
+    position: absolute;
+    left: 76dp;
+    right: 0dp;
+    top: 0dp;
+    height: 36dp;
     display: flex;
     flex-direction: row;
     align-items: center;
-    column-gap: 10dp;
-    flex: none;
-}
-
-#brand {
-    width: 118dp;
-    height: 28dp;
-    line-height: 28dp;
-    font-size: 13dp;
-    font-weight: bold;
-    color: #edf3f7;
-    white-space: nowrap;
-}
-
-#project-label {
-    width: 92dp;
-    height: 28dp;
-    line-height: 28dp;
-    color: #75cfe0;
-    font-size: 12dp;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    background-color: #141414;
 }
 
 #menubar {
-    height: 28dp;
+    height: 36dp;
     display: flex;
     flex-direction: row;
     align-items: center;
-    column-gap: 1dp;
+    column-gap: 0dp;
     flex: none;
 }
 
 .menu-title {
-    height: 28dp;
-    line-height: 28dp;
-    padding: 0dp 10dp;
-    color: #d7dee8;
-    font-size: 12dp;
+    height: 36dp;
+    line-height: 36dp;
+    padding: 0dp 11dp;
+    color: #cfd3d8;
+    font-size: 13dp;
     background-color: transparent;
 }
 
 .menu-title:hover,
 .menu-title.active {
     color: #ffffff;
-    background-color: #24313c;
+    background-color: #262626;
+}
+
+.menu-title.inert {
+    color: #a5abb2;
 }
 
 #top-spacer {
@@ -102,17 +103,166 @@ body {
     flex: 1;
 }
 
-#top-path {
-    width: 520dp;
-    height: 28dp;
-    line-height: 28dp;
-    text-align: right;
-    color: #8d98a5;
-    font-size: 11dp;
+#project-pill {
+    width: 240dp;
+    height: 36dp;
+    line-height: 36dp;
+    text-align: center;
+    color: #c9ced4;
+    font-size: 13dp;
+    background-color: #101010;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
     flex: none;
+}
+
+#toolbar-row {
+    position: absolute;
+    left: 76dp;
+    right: 0dp;
+    top: 36dp;
+    height: 40dp;
+    box-sizing: border-box;
+    padding: 5dp 12dp;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    column-gap: 0dp;
+    background-color: #242424;
+    border-top: 1dp #202020;
+}
+
+.tool-group {
+    height: 30dp;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    column-gap: 6dp;
+    flex: none;
+}
+
+#toolbar-left,
+#toolbar-right {
+    flex: 1;
+}
+
+#toolbar-right {
+    justify-content: flex-end;
+}
+
+#play-group {
+    flex: none;
+}
+
+.toolbar-button {
+    height: 30dp;
+    line-height: 30dp;
+    min-width: 0dp;
+    padding: 0dp 12dp;
+    color: #d7dce2;
+    font-size: 12dp;
+    text-align: center;
+    background-color: #1b1b1b;
+    border: 1dp #353a3f;
+}
+
+.toolbar-button:hover {
+    background-color: #2b2f34;
+    border-color: #4b535b;
+    color: #ffffff;
+}
+
+.toolbar-button.disabled {
+    color: #727980;
+    background-color: #1d1f22;
+    border-color: #2c3035;
+}
+
+.toolbar-button.play {
+    background-color: #2c6f2f;
+    border-color: #409846;
+    color: #ffffff;
+    min-width: 66dp;
+}
+
+.toolbar-button.play:hover {
+    background-color: #36863a;
+}
+
+.toolbar-button.play-arrow {
+    width: 28dp;
+    min-width: 28dp;
+    padding: 0dp;
+    margin-left: -6dp;
+    background-color: #255d28;
+    border-color: #3d8842;
+}
+
+.toolbar-button.play-arrow.active,
+.toolbar-button.play-arrow:hover {
+    background-color: #347839;
+    color: #ffffff;
+}
+
+.toolbar-button.pause {
+    width: 58dp;
+    background-color: #5e5520;
+    border-color: #8b7b31;
+    color: #f1e6a2;
+}
+
+.toolbar-button.pause:hover {
+    background-color: #746726;
+}
+
+.toolbar-button.stop {
+    width: 50dp;
+    background-color: #5d2525;
+    border-color: #8d3838;
+    color: #ffd7d7;
+}
+
+.toolbar-button.stop:hover {
+    background-color: #783030;
+}
+
+.toolbar-button.eject,
+.toolbar-button.return {
+    width: 74dp;
+    background-color: #25456f;
+    border-color: #3d6fa4;
+    color: #d7ebff;
+}
+
+.toolbar-button.eject:hover,
+.toolbar-button.return:hover {
+    background-color: #2f5689;
+}
+
+.toolbar-label {
+    height: 30dp;
+    line-height: 30dp;
+    padding: 0dp 10dp;
+    color: #b8c1cc;
+    font-size: 12dp;
+    white-space: nowrap;
+}
+
+#play-mode-label {
+    color: #8e98a4;
+    width: 138dp;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.toolbar-button.mode {
+    width: 156dp;
+    text-align: left;
+}
+
+.toolbar-button.settings {
+    width: 96dp;
 }
 
 #dropdown-layer {
@@ -128,12 +278,12 @@ body {
 .menu-panel {
     display: none;
     position: absolute;
-    top: 28dp;
+    top: 36dp;
     width: 232dp;
     box-sizing: border-box;
     padding: 4dp;
-    background-color: #171d23;
-    border: 1dp #37434e;
+    background-color: #191c20;
+    border: 1dp #3a4048;
     pointer-events: auto;
 }
 
@@ -141,26 +291,15 @@ body {
     display: block;
 }
 
-#file-menu {
-    left: 238dp;
-}
-
-#edit-menu {
-    left: 278dp;
-}
-
-#view-menu {
-    left: 320dp;
-    width: 250dp;
-}
-
-#debug-menu {
-    left: 366dp;
-    width: 238dp;
-}
-
-#settings-menu {
-    left: 422dp;
+#file-menu { left: 82dp; }
+#edit-menu { left: 122dp; }
+#view-menu { left: 162dp; width: 250dp; }
+#debug-menu { left: 228dp; width: 238dp; }
+#play-menu {
+    top: 76dp;
+    left: 50%;
+    margin-left: -169dp;
+    width: 338dp;
 }
 
 .menu-item {
@@ -197,6 +336,12 @@ body {
     background-color: #263642;
 }
 
+.menu-item.disabled.active,
+.menu-item.disabled.active:hover {
+    color: #697480;
+    background-color: transparent;
+}
+
 .menu-check {
     width: 18dp;
     height: 24dp;
@@ -222,6 +367,79 @@ body {
     text-align: right;
     color: #8d98a5;
     flex: none;
+}
+
+.menu-section {
+    height: 24dp;
+    line-height: 24dp;
+    padding: 0dp 8dp;
+    color: #8e98a4;
+    font-size: 11dp;
+}
+
+.menu-info {
+    min-height: 20dp;
+    line-height: 20dp;
+    padding: 0dp 8dp;
+    color: #8e98a4;
+    font-size: 11dp;
+}
+
+.menu-info.warn {
+    color: #f0be65;
+}
+
+.stepper-row {
+    height: 28dp;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    padding: 0dp 8dp;
+    color: #d7dee8;
+    font-size: 12dp;
+}
+
+.stepper-row.disabled {
+    color: #697480;
+}
+
+.stepper-label {
+    height: 28dp;
+    line-height: 28dp;
+    flex: 1;
+}
+
+.stepper-value {
+    width: 64dp;
+    height: 24dp;
+    line-height: 24dp;
+    text-align: center;
+    color: #cfd7df;
+    background-color: #11161b;
+    border: 1dp #303a43;
+}
+
+.stepper-button {
+    width: 26dp;
+    height: 24dp;
+    line-height: 24dp;
+    margin-left: 4dp;
+    text-align: center;
+    color: #d7dee8;
+    background-color: #222830;
+    border: 1dp #3a4651;
+}
+
+.stepper-button:hover {
+    color: #ffffff;
+    background-color: #2c4659;
+}
+
+.stepper-button.disabled,
+.stepper-button.disabled:hover {
+    color: #697480;
+    background-color: #171c20;
+    border-color: #2a323a;
 }
 
 .separator {
@@ -280,37 +498,50 @@ body {
     white-space: nowrap;
 }
 
-#dirty-state {
-    color: #85d5e7;
-}
-
-#dirty-state.modified {
-    color: #f2c66d;
-}
-
-#mode-state.playing {
-    color: #8ad783;
-}
+#dirty-state { color: #85d5e7; }
+#dirty-state.modified { color: #f2c66d; }
+#mode-state.playing { color: #8ad783; }
 </style>
 </head>
 <body>
     <div id="editor-shell">
-        <div id="topbar">
-            <div id="brand-block">
-                <div id="brand">Garden Engine</div>
-                <div id="project-label">Project</div>
+        <div id="header">
+            <div id="logo-rail">
+                <img id="engine-logo" src="" />
             </div>
 
-            <div id="menubar">
-                <div id="menu-file" class="menu-title">File</div>
-                <div id="menu-edit" class="menu-title">Edit</div>
-                <div id="menu-view" class="menu-title">View</div>
-                <div id="menu-debug" class="menu-title">Debug</div>
-                <div id="menu-settings" class="menu-title">Settings</div>
+            <div id="top-row">
+                <div id="menubar">
+                    <div id="menu-file" class="menu-title">File</div>
+                    <div id="menu-edit" class="menu-title">Edit</div>
+                    <div id="menu-view" class="menu-title">Window</div>
+                    <div id="menu-debug" class="menu-title">Tools</div>
+                </div>
+                <div id="top-spacer"></div>
+                <div id="project-pill">Project</div>
             </div>
 
-            <div id="top-spacer"></div>
-            <div id="top-path">Untitled level</div>
+            <div id="toolbar-row">
+                <div id="toolbar-left" class="tool-group">
+                    <div id="toolbar-save" class="toolbar-button">Save</div>
+                </div>
+
+                <div id="play-group" class="tool-group">
+                    <div id="toolbar-play" class="toolbar-button play">Play</div>
+                    <div id="toolbar-play-menu" class="toolbar-button play-arrow">v</div>
+                    <div id="play-mode-label" class="toolbar-label">Selected Viewport</div>
+                    <div id="toolbar-external" class="toolbar-label hidden">External</div>
+                    <div id="toolbar-pause" class="toolbar-button pause hidden">Pause</div>
+                    <div id="toolbar-resume" class="toolbar-button play hidden">Resume</div>
+                    <div id="toolbar-stop" class="toolbar-button stop hidden">Stop</div>
+                    <div id="toolbar-eject" class="toolbar-button eject hidden">Eject F8</div>
+                    <div id="toolbar-return" class="toolbar-button return hidden">Return F8</div>
+                </div>
+
+                <div id="toolbar-right" class="tool-group">
+                    <div id="toolbar-settings" class="toolbar-button settings">Settings</div>
+                </div>
+            </div>
         </div>
 
         <div id="dropdown-layer">
@@ -357,8 +588,44 @@ body {
                 <div id="toggle-performance" class="menu-item"><span class="menu-check">*</span><span class="menu-label">Performance Monitor</span></div>
             </div>
 
-            <div id="settings-menu" class="menu-panel">
-                <div id="settings" class="menu-item"><span class="menu-check"></span><span class="menu-label">Editor Settings...</span></div>
+            <div id="play-menu" class="menu-panel">
+                <div class="menu-section">Modes</div>
+                <div id="launch-selected-viewport" class="menu-item active"><span class="menu-check">*</span><span class="menu-label">Selected Viewport</span></div>
+                <div id="launch-new-window" class="menu-item"><span class="menu-check">*</span><span class="menu-label">New Editor Window</span></div>
+                <div id="launch-vr-preview" class="menu-item"><span class="menu-check">*</span><span class="menu-label">VR Preview</span></div>
+                <div id="launch-standalone" class="menu-item"><span class="menu-check">*</span><span class="menu-label">Standalone Game</span></div>
+                <div id="launch-simulate" class="menu-item"><span class="menu-check">*</span><span class="menu-label">Simulate</span></div>
+                <div class="separator"></div>
+                <div class="menu-section">Quick Launch</div>
+                <div id="quick-launch-vr" class="menu-item"><span class="menu-check"></span><span id="xr-launch-label" class="menu-label">Meta Quest Link</span></div>
+                <div id="refresh-openxr" class="menu-item"><span class="menu-check"></span><span class="menu-label">Refresh OpenXR Runtime</span></div>
+                <div id="xr-runtime" class="menu-info">Runtime: not initialized</div>
+                <div id="xr-hmd" class="menu-info">HMD: unavailable</div>
+                <div id="xr-error" class="menu-info warn hidden"></div>
+                <div class="separator"></div>
+                <div class="menu-section">Spawn Player At</div>
+                <div id="spawn-current-camera" class="menu-item"><span class="menu-check">*</span><span class="menu-label">Current Camera Location</span></div>
+                <div id="spawn-default-start" class="menu-item active"><span class="menu-check">*</span><span class="menu-label">Default Player Start</span></div>
+                <div class="separator"></div>
+                <div class="menu-section">Multiplayer Options</div>
+                <div id="net-standalone" class="menu-item active"><span class="menu-check">*</span><span class="menu-label">Standalone</span></div>
+                <div id="net-listen" class="menu-item"><span class="menu-check">*</span><span class="menu-label">Listen Server</span></div>
+                <div id="net-dedicated" class="menu-item"><span class="menu-check">*</span><span class="menu-label">Dedicated Server</span></div>
+                <div id="run-in-editor" class="menu-item active"><span class="menu-check">*</span><span class="menu-label">Run In Editor</span></div>
+                <div id="run-separate" class="menu-item"><span class="menu-check">*</span><span class="menu-label">Separate Windows</span></div>
+                <div id="players-row" class="stepper-row">
+                    <span class="stepper-label">Players</span>
+                    <span id="players-value" class="stepper-value">1</span>
+                    <span id="players-minus" class="stepper-button">-</span>
+                    <span id="players-plus" class="stepper-button">+</span>
+                </div>
+                <div id="port-row" class="stepper-row">
+                    <span class="stepper-label">Port</span>
+                    <span id="port-value" class="stepper-value">7777</span>
+                    <span id="port-minus" class="stepper-button">-</span>
+                    <span id="port-plus" class="stepper-button">+</span>
+                </div>
+                <div id="network-warning" class="menu-info warn hidden">No game module loaded. Network modes require a game DLL.</div>
             </div>
         </div>
 

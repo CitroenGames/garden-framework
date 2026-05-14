@@ -72,6 +72,51 @@ namespace
         return "";
     }
 
+    const char* rmlLaunchModeLabel(PIELaunchMode mode)
+    {
+        switch (mode)
+        {
+        case PIELaunchMode::SelectedViewport: return "Selected Viewport";
+        case PIELaunchMode::NewEditorWindow: return "New Editor Window";
+        case PIELaunchMode::VRPreview: return "VR Preview";
+        case PIELaunchMode::StandaloneGame: return "Standalone Game";
+        case PIELaunchMode::Simulate: return "Simulate";
+        }
+        return "Selected Viewport";
+    }
+
+    std::string buildRmlPlayLabel(const EditorState& state)
+    {
+        switch (state.pie_launch_mode)
+        {
+        case PIELaunchMode::SelectedViewport:
+            if (state.network_pie.net_mode != PIENetMode::Standalone && state.network_pie.num_players > 1)
+            {
+                const char* mode_short = (state.network_pie.net_mode == PIENetMode::ListenServer)
+                    ? "Listen"
+                    : "Dedicated";
+                return "Play " + std::to_string(state.network_pie.num_players) + "P " + mode_short;
+            }
+            if (state.network_pie.net_mode != PIENetMode::Standalone)
+            {
+                const char* mode_short = (state.network_pie.net_mode == PIENetMode::ListenServer)
+                    ? "Listen"
+                    : "Dedicated";
+                return std::string("Play ") + mode_short;
+            }
+            return "Play";
+        case PIELaunchMode::NewEditorWindow:
+            return "Window";
+        case PIELaunchMode::VRPreview:
+            return "VR";
+        case PIELaunchMode::StandaloneGame:
+            return "Standalone";
+        case PIELaunchMode::Simulate:
+            return "Simulate";
+        }
+        return "Play";
+    }
+
     std::filesystem::path getEditorCVarConfigPath()
     {
         return EnginePaths::getExecutableDir() / EDITOR_CONFIG_FILENAME;
@@ -876,9 +921,86 @@ bool EditorApp::initialize(RenderAPIType api_type)
             if (!m_state.isSimulationActive())
                 beginPlay();
         };
+        callbacks.on_pause = [this]() { pausePlay(); };
+        callbacks.on_resume = [this]() { resumePlay(); };
         callbacks.on_stop = [this]() {
             if (m_state.isSimulationActive())
                 stopPlay();
+        };
+        callbacks.on_eject = [this]() {
+            if (!m_external_pie_active)
+                ejectFromPlay();
+        };
+        callbacks.on_return = [this]() {
+            if (!m_external_pie_active)
+                returnToPlay();
+        };
+        callbacks.on_quick_launch_vr = [this]() {
+            if (m_state.isSimulationActive())
+                return;
+            m_state.pie_launch_mode = PIELaunchMode::VRPreview;
+            beginPlay();
+        };
+        callbacks.on_refresh_openxr = []() {
+            XR::OpenXRSystem::get().shutdown();
+            XR::OpenXRSystem::get().initialize();
+        };
+        callbacks.on_set_launch_mode = [this](const std::string& mode) {
+            if (m_state.isSimulationActive())
+                return;
+            if (mode == "selected_viewport")
+                m_state.pie_launch_mode = PIELaunchMode::SelectedViewport;
+            else if (mode == "new_editor_window")
+                m_state.pie_launch_mode = PIELaunchMode::NewEditorWindow;
+            else if (mode == "vr_preview")
+                m_state.pie_launch_mode = PIELaunchMode::VRPreview;
+            else if (mode == "standalone_game")
+                m_state.pie_launch_mode = PIELaunchMode::StandaloneGame;
+            else if (mode == "simulate")
+                m_state.pie_launch_mode = PIELaunchMode::Simulate;
+        };
+        callbacks.on_set_spawn_location = [this](const std::string& location) {
+            if (m_state.isSimulationActive())
+                return;
+            if (location == "current_camera")
+                m_state.pie_spawn_location = PIESpawnLocation::CurrentCameraLocation;
+            else if (location == "default_player_start")
+                m_state.pie_spawn_location = PIESpawnLocation::DefaultPlayerStart;
+        };
+        callbacks.on_set_net_mode = [this](const std::string& mode) {
+            if (m_state.isSimulationActive())
+                return;
+            if (mode == "standalone")
+                m_state.network_pie.net_mode = PIENetMode::Standalone;
+            else if (mode == "listen_server")
+                m_state.network_pie.net_mode = PIENetMode::ListenServer;
+            else if (mode == "dedicated_server")
+                m_state.network_pie.net_mode = PIENetMode::DedicatedServer;
+        };
+        callbacks.on_set_run_mode = [this](const std::string& mode) {
+            if (m_state.isSimulationActive())
+                return;
+            if (m_state.network_pie.net_mode == PIENetMode::Standalone)
+                return;
+            if (mode == "in_editor")
+                m_state.network_pie.run_mode = PIERunMode::InEditor;
+            else if (mode == "separate_windows")
+                m_state.network_pie.run_mode = PIERunMode::SeparateWindows;
+        };
+        callbacks.on_adjust_players = [this](int delta) {
+            if (m_state.isSimulationActive())
+                return;
+            if (m_state.network_pie.net_mode == PIENetMode::Standalone)
+                return;
+            m_state.network_pie.num_players = std::clamp(m_state.network_pie.num_players + delta, 1, 4);
+        };
+        callbacks.on_adjust_port = [this](int delta) {
+            if (m_state.isSimulationActive())
+                return;
+            if (m_state.network_pie.net_mode == PIENetMode::Standalone)
+                return;
+            const int port = std::clamp(static_cast<int>(m_state.network_pie.server_port) + delta, 1024, 65535);
+            m_state.network_pie.server_port = static_cast<uint16_t>(port);
         };
         callbacks.on_translate = [this]() { m_state.transform_mode = EditorState::TransformMode::Translate; };
         callbacks.on_rotate = [this]() { m_state.transform_mode = EditorState::TransformMode::Rotate; };
@@ -1298,9 +1420,11 @@ void EditorApp::run()
             rml_state.can_delete = rml_state.can_copy;
             rml_state.simulation_active = m_state.isSimulationActive();
             rml_state.paused = m_state.play_mode == PlayMode::Paused;
+            rml_state.ejected = m_state.play_mode == PlayMode::Ejected;
             rml_state.unsaved_changes = m_state.unsaved_changes;
             rml_state.external_pie_active = m_external_pie_active;
             rml_state.network_pie_active = m_network_pie_active;
+            rml_state.has_game_module = m_toolbar.has_game_module;
             rml_state.show_viewport = m_show_viewport;
             rml_state.show_toolbar = m_show_toolbar;
             rml_state.show_hierarchy = m_show_hierarchy;
@@ -1330,6 +1454,33 @@ void EditorApp::run()
             rml_state.backend_name = render_stats.backend_name ? render_stats.backend_name : render_api->getAPIName();
             rml_state.project_name = m_project_manager.isLoaded() ? m_project_manager.getDescriptor().name : std::string();
             rml_state.current_save_path = m_current_save_path;
+            rml_state.play_label = buildRmlPlayLabel(m_state);
+            rml_state.launch_mode_label = rmlLaunchModeLabel(m_state.pie_launch_mode);
+            rml_state.launch_selected_viewport = m_state.pie_launch_mode == PIELaunchMode::SelectedViewport;
+            rml_state.launch_new_editor_window = m_state.pie_launch_mode == PIELaunchMode::NewEditorWindow;
+            rml_state.launch_vr_preview = m_state.pie_launch_mode == PIELaunchMode::VRPreview;
+            rml_state.launch_standalone_game = m_state.pie_launch_mode == PIELaunchMode::StandaloneGame;
+            rml_state.launch_simulate = m_state.pie_launch_mode == PIELaunchMode::Simulate;
+            rml_state.spawn_current_camera = m_state.pie_spawn_location == PIESpawnLocation::CurrentCameraLocation;
+            rml_state.spawn_default_player_start = m_state.pie_spawn_location == PIESpawnLocation::DefaultPlayerStart;
+            rml_state.net_standalone = m_state.network_pie.net_mode == PIENetMode::Standalone;
+            rml_state.net_listen_server = m_state.network_pie.net_mode == PIENetMode::ListenServer;
+            rml_state.net_dedicated_server = m_state.network_pie.net_mode == PIENetMode::DedicatedServer;
+            rml_state.run_in_editor = m_state.network_pie.run_mode == PIERunMode::InEditor;
+            rml_state.run_separate_windows = m_state.network_pie.run_mode == PIERunMode::SeparateWindows;
+            rml_state.network_players = m_state.network_pie.num_players;
+            rml_state.network_port = static_cast<int>(m_state.network_pie.server_port);
+            const XR::OpenXRStatus& xr_status = XR::OpenXRSystem::get().getStatus();
+            rml_state.xr_launch_label = (xr_status.hmd_available && !xr_status.system_name.empty())
+                ? "Meta Quest Link (Ready)"
+                : "Meta Quest Link";
+            rml_state.xr_runtime_label = xr_status.runtime_name.empty()
+                ? "Runtime: not initialized"
+                : ("Runtime: " + xr_status.runtime_name);
+            rml_state.xr_hmd_label = xr_status.system_name.empty()
+                ? "HMD: unavailable"
+                : ("HMD: " + xr_status.system_name);
+            rml_state.xr_error = xr_status.last_error;
             m_rml_gui.update(rml_state);
         }
 
@@ -2649,7 +2800,7 @@ void EditorApp::renderDockspace()
         dockspace_flags |= ImGuiWindowFlags_MenuBar;
 
     // Account for status bar at bottom
-    const float rml_topbar_height = use_rml_chrome ? 28.0f : 0.0f;
+    const float rml_topbar_height = use_rml_chrome ? 76.0f : 0.0f;
     const float status_bar_height = (use_rml_chrome && m_show_status_bar)
         ? 24.0f
         : (m_show_status_bar ? (ImGui::GetFrameHeight() + ImGui::GetStyle().WindowPadding.y * 2.0f) : 0.0f);

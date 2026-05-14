@@ -34,7 +34,19 @@ public:
         std::function<void()> on_settings;
         std::function<void()> on_quit;
         std::function<void()> on_play;
+        std::function<void()> on_pause;
+        std::function<void()> on_resume;
         std::function<void()> on_stop;
+        std::function<void()> on_eject;
+        std::function<void()> on_return;
+        std::function<void()> on_quick_launch_vr;
+        std::function<void()> on_refresh_openxr;
+        std::function<void(const std::string&)> on_set_launch_mode;
+        std::function<void(const std::string&)> on_set_spawn_location;
+        std::function<void(const std::string&)> on_set_net_mode;
+        std::function<void(const std::string&)> on_set_run_mode;
+        std::function<void(int)> on_adjust_players;
+        std::function<void(int)> on_adjust_port;
         std::function<void()> on_translate;
         std::function<void()> on_rotate;
         std::function<void()> on_scale;
@@ -68,9 +80,11 @@ public:
         bool can_delete = false;
         bool simulation_active = false;
         bool paused = false;
+        bool ejected = false;
         bool unsaved_changes = false;
         bool external_pie_active = false;
         bool network_pie_active = false;
+        bool has_game_module = false;
         bool show_viewport = true;
         bool show_toolbar = true;
         bool show_hierarchy = true;
@@ -100,6 +114,26 @@ public:
         std::string backend_name;
         std::string project_name;
         std::string current_save_path;
+        std::string play_label;
+        std::string launch_mode_label;
+        bool launch_selected_viewport = true;
+        bool launch_new_editor_window = false;
+        bool launch_vr_preview = false;
+        bool launch_standalone_game = false;
+        bool launch_simulate = false;
+        bool spawn_current_camera = false;
+        bool spawn_default_player_start = true;
+        bool net_standalone = true;
+        bool net_listen_server = false;
+        bool net_dedicated_server = false;
+        bool run_in_editor = true;
+        bool run_separate_windows = false;
+        int network_players = 1;
+        int network_port = 7777;
+        std::string xr_launch_label;
+        std::string xr_runtime_label;
+        std::string xr_hmd_label;
+        std::string xr_error;
     };
 
     bool initialize(Callbacks callbacks);
@@ -110,10 +144,12 @@ public:
 
 private:
     class ActionListener;
+    class MenuHoverListener;
 
     void attachListeners();
     void detachListeners();
     void handleAction(const std::string& id);
+    void handleMenuHover(const std::string& id);
     void setActiveMenu(const std::string& menu);
     void closeMenus();
     void syncMenuState();
@@ -123,5 +159,6 @@ private:
     Rml::ElementDocument* m_document = nullptr;
     Callbacks m_callbacks;
     std::unique_ptr<ActionListener> m_listener;
+    std::unique_ptr<MenuHoverListener> m_menuHoverListener;
     std::string m_activeMenu;
 };
