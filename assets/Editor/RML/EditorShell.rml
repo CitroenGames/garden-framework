@@ -1,0 +1,380 @@
+<rml>
+<head>
+<title>Garden Editor Shell</title>
+<style>
+html,
+body {
+    width: 100%;
+    height: 100%;
+    margin: 0dp;
+    font-family: LatoLatin;
+    color: #d7dee8;
+    background-color: transparent;
+}
+
+#editor-shell {
+    position: absolute;
+    top: 0dp;
+    left: 0dp;
+    right: 0dp;
+    bottom: 0dp;
+    pointer-events: none;
+}
+
+#editor-shell.hidden {
+    display: none;
+}
+
+#topbar {
+    position: absolute;
+    top: 0dp;
+    left: 0dp;
+    right: 0dp;
+    height: 28dp;
+    box-sizing: border-box;
+    padding: 0dp 8dp;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    column-gap: 10dp;
+    background-color: #171c22;
+    border-bottom: 1dp #2b343d;
+    pointer-events: auto;
+}
+
+#brand-block {
+    width: 220dp;
+    height: 28dp;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    column-gap: 10dp;
+    flex: none;
+}
+
+#brand {
+    width: 118dp;
+    height: 28dp;
+    line-height: 28dp;
+    font-size: 13dp;
+    font-weight: bold;
+    color: #edf3f7;
+    white-space: nowrap;
+}
+
+#project-label {
+    width: 92dp;
+    height: 28dp;
+    line-height: 28dp;
+    color: #75cfe0;
+    font-size: 12dp;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#menubar {
+    height: 28dp;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    column-gap: 1dp;
+    flex: none;
+}
+
+.menu-title {
+    height: 28dp;
+    line-height: 28dp;
+    padding: 0dp 10dp;
+    color: #d7dee8;
+    font-size: 12dp;
+    background-color: transparent;
+}
+
+.menu-title:hover,
+.menu-title.active {
+    color: #ffffff;
+    background-color: #24313c;
+}
+
+#top-spacer {
+    height: 1dp;
+    flex: 1;
+}
+
+#top-path {
+    width: 520dp;
+    height: 28dp;
+    line-height: 28dp;
+    text-align: right;
+    color: #8d98a5;
+    font-size: 11dp;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: none;
+}
+
+#dropdown-layer {
+    position: absolute;
+    top: 0dp;
+    left: 0dp;
+    right: 0dp;
+    bottom: 0dp;
+    pointer-events: none;
+    z-index: 10;
+}
+
+.menu-panel {
+    display: none;
+    position: absolute;
+    top: 28dp;
+    width: 232dp;
+    box-sizing: border-box;
+    padding: 4dp;
+    background-color: #171d23;
+    border: 1dp #37434e;
+    pointer-events: auto;
+}
+
+.menu-panel.open {
+    display: block;
+}
+
+#file-menu {
+    left: 238dp;
+}
+
+#edit-menu {
+    left: 278dp;
+}
+
+#view-menu {
+    left: 320dp;
+    width: 250dp;
+}
+
+#debug-menu {
+    left: 366dp;
+    width: 238dp;
+}
+
+#settings-menu {
+    left: 422dp;
+}
+
+.menu-item {
+    height: 24dp;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    padding: 0dp 8dp;
+    color: #d7dee8;
+    font-size: 12dp;
+}
+
+.menu-item:hover {
+    background-color: #263642;
+    color: #ffffff;
+}
+
+.menu-item.disabled {
+    color: #697480;
+}
+
+.menu-item.disabled:hover {
+    background-color: transparent;
+    color: #697480;
+}
+
+.menu-item.active {
+    color: #d7dee8;
+    background-color: transparent;
+}
+
+.menu-item.active:hover {
+    color: #ffffff;
+    background-color: #263642;
+}
+
+.menu-check {
+    width: 18dp;
+    height: 24dp;
+    line-height: 24dp;
+    color: transparent;
+    flex: none;
+}
+
+.menu-item.active .menu-check {
+    color: #69c6d8;
+}
+
+.menu-label {
+    height: 24dp;
+    line-height: 24dp;
+    flex: 1;
+}
+
+.menu-shortcut {
+    width: 74dp;
+    height: 24dp;
+    line-height: 24dp;
+    text-align: right;
+    color: #8d98a5;
+    flex: none;
+}
+
+.separator {
+    height: 1dp;
+    margin: 4dp 3dp;
+    background-color: #303a43;
+}
+
+#statusbar {
+    position: absolute;
+    left: 0dp;
+    right: 0dp;
+    bottom: 0dp;
+    height: 24dp;
+    box-sizing: border-box;
+    padding: 0dp 10dp;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    background-color: #11161b;
+    border-top: 1dp #26313a;
+    font-size: 11dp;
+    pointer-events: auto;
+}
+
+#statusbar.hidden {
+    display: none;
+}
+
+#level-path {
+    height: 24dp;
+    line-height: 24dp;
+    flex: 1;
+    color: #aeb8c4;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#right-status {
+    height: 24dp;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    column-gap: 0dp;
+    flex: none;
+}
+
+.status-item {
+    display: block;
+    height: 24dp;
+    line-height: 24dp;
+    padding: 0dp 10dp;
+    color: #aeb8c4;
+    border-left: 1dp #26313a;
+    white-space: nowrap;
+}
+
+#dirty-state {
+    color: #85d5e7;
+}
+
+#dirty-state.modified {
+    color: #f2c66d;
+}
+
+#mode-state.playing {
+    color: #8ad783;
+}
+</style>
+</head>
+<body>
+    <div id="editor-shell">
+        <div id="topbar">
+            <div id="brand-block">
+                <div id="brand">Garden Engine</div>
+                <div id="project-label">Project</div>
+            </div>
+
+            <div id="menubar">
+                <div id="menu-file" class="menu-title">File</div>
+                <div id="menu-edit" class="menu-title">Edit</div>
+                <div id="menu-view" class="menu-title">View</div>
+                <div id="menu-debug" class="menu-title">Debug</div>
+                <div id="menu-settings" class="menu-title">Settings</div>
+            </div>
+
+            <div id="top-spacer"></div>
+            <div id="top-path">Untitled level</div>
+        </div>
+
+        <div id="dropdown-layer">
+            <div id="file-menu" class="menu-panel">
+                <div id="new-level" class="menu-item"><span class="menu-check"></span><span class="menu-label">New</span></div>
+                <div id="open-level" class="menu-item"><span class="menu-check"></span><span class="menu-label">Open Level...</span></div>
+                <div id="save-level" class="menu-item"><span class="menu-check"></span><span class="menu-label">Save</span><span class="menu-shortcut">Ctrl+S</span></div>
+                <div id="save-as-level" class="menu-item"><span class="menu-check"></span><span class="menu-label">Save As...</span></div>
+                <div class="separator"></div>
+                <div id="package-project" class="menu-item"><span class="menu-check"></span><span class="menu-label">Package Project...</span></div>
+                <div class="separator"></div>
+                <div id="quit" class="menu-item"><span class="menu-check"></span><span class="menu-label">Quit</span></div>
+            </div>
+
+            <div id="edit-menu" class="menu-panel">
+                <div id="undo" class="menu-item disabled"><span class="menu-check"></span><span class="menu-label">Undo</span><span class="menu-shortcut">Ctrl+Z</span></div>
+                <div id="redo" class="menu-item disabled"><span class="menu-check"></span><span class="menu-label">Redo</span><span class="menu-shortcut">Ctrl+Y</span></div>
+                <div class="separator"></div>
+                <div id="copy" class="menu-item disabled"><span class="menu-check"></span><span class="menu-label">Copy</span><span class="menu-shortcut">Ctrl+C</span></div>
+                <div id="paste" class="menu-item disabled"><span class="menu-check"></span><span class="menu-label">Paste</span><span class="menu-shortcut">Ctrl+V</span></div>
+                <div id="duplicate" class="menu-item disabled"><span class="menu-check"></span><span class="menu-label">Duplicate</span><span class="menu-shortcut">Ctrl+D</span></div>
+                <div id="delete" class="menu-item disabled"><span class="menu-check"></span><span class="menu-label">Delete</span><span class="menu-shortcut">Del</span></div>
+            </div>
+
+            <div id="view-menu" class="menu-panel">
+                <div id="toggle-viewport" class="menu-item active"><span class="menu-check">*</span><span class="menu-label">Viewport</span></div>
+                <div id="toggle-toolbar" class="menu-item active"><span class="menu-check">*</span><span class="menu-label">Toolbar</span></div>
+                <div id="toggle-hierarchy" class="menu-item active"><span class="menu-check">*</span><span class="menu-label">Hierarchy</span></div>
+                <div id="toggle-inspector" class="menu-item active"><span class="menu-check">*</span><span class="menu-label">Inspector</span></div>
+                <div id="toggle-level-settings" class="menu-item active"><span class="menu-check">*</span><span class="menu-label">Level Settings</span></div>
+                <div id="toggle-console" class="menu-item active"><span class="menu-check">*</span><span class="menu-label">Console</span></div>
+                <div id="toggle-content" class="menu-item active"><span class="menu-check">*</span><span class="menu-label">Content Browser</span></div>
+                <div id="toggle-model-preview" class="menu-item active"><span class="menu-check">*</span><span class="menu-label">Asset Preview</span></div>
+                <div id="toggle-status-bar" class="menu-item active"><span class="menu-check">*</span><span class="menu-label">Status Bar</span></div>
+                <div id="toggle-navmesh" class="menu-item"><span class="menu-check">*</span><span class="menu-label">NavMesh</span></div>
+                <div id="grid" class="menu-item active"><span class="menu-check">*</span><span class="menu-label">Grid</span></div>
+                <div class="separator"></div>
+                <div id="toggle-plugin-manager" class="menu-item"><span class="menu-check">*</span><span class="menu-label">Plugin Manager</span></div>
+                <div id="toggle-all-ui" class="menu-item active"><span class="menu-check">*</span><span class="menu-label">All Panels</span><span class="menu-shortcut">F1</span></div>
+            </div>
+
+            <div id="debug-menu" class="menu-panel">
+                <div id="toggle-physics-debug" class="menu-item"><span class="menu-check">*</span><span class="menu-label">Physics Debug</span></div>
+                <div id="toggle-performance" class="menu-item"><span class="menu-check">*</span><span class="menu-label">Performance Monitor</span></div>
+            </div>
+
+            <div id="settings-menu" class="menu-panel">
+                <div id="settings" class="menu-item"><span class="menu-check"></span><span class="menu-label">Editor Settings...</span></div>
+            </div>
+        </div>
+
+        <div id="statusbar">
+            <div id="level-path">Untitled level</div>
+            <div id="right-status">
+                <span id="dirty-state" class="status-item">Saved</span>
+                <span id="mode-state" class="status-item">Editing</span>
+                <span id="backend-state" class="status-item">Renderer</span>
+                <span id="fps-state" class="status-item">0 FPS</span>
+                <span id="gpu-state" class="status-item">GPU --</span>
+                <span id="entity-state" class="status-item">0/0 visible</span>
+                <span id="draw-state" class="status-item">0 draws</span>
+                <span id="process-state" class="status-item">Local PIE</span>
+            </div>
+        </div>
+    </div>
+</body>
+</rml>

@@ -267,6 +267,12 @@ void D3D12RenderAPI::renderUI()
     {
         ImGui_ImplDX12_RenderDrawData(draw_data, commandList.Get());
     }
+
+    if (RmlUiManager::get().isInitialized())
+    {
+        RmlUiManager::get().beginEditorFrame(viewport_width, viewport_height);
+        RmlUiManager::get().renderEditor();
+    }
 }
 
 // ============================================================================

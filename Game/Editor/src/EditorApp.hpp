@@ -40,6 +40,7 @@
 #include "PIEClientInstance.hpp"
 #include "PrefabEditor/PrefabEditorManager.hpp"
 #include "EditorPerformanceMonitor.hpp"
+#include "EditorRmlGui.hpp"
 
 class EditorApp
 {
@@ -127,6 +128,7 @@ private:
     ContentBrowserPanel  m_content_browser;
     ViewportPanel        m_viewport;
     StatusBarPanel       m_status_bar;
+    EditorRmlGui         m_rml_gui;
     NavMeshPanel         m_navmesh_panel;
     PhysicsDebugPanel    m_physics_debug_panel;
     PerformanceMonitorPanel m_performance_monitor_panel;
@@ -199,6 +201,9 @@ private:
     void processEvents();
     void renderDockspace();
     void renderMenuBar();
+    void requestOpenLevelDialog();
+    void requestSaveLevelAsDialog();
+    void requestPackageProjectDialog();
     void renderOpenDialog();
     void renderSaveAsDialog();
     void renderEditorSettings();

@@ -248,6 +248,15 @@ void RmlRenderer_D3D12::RenderGeometry(Rml::CompiledGeometryHandle handle, Rml::
     // Set our root signature and PSO
     cmdList->SetGraphicsRootSignature(m_rootSignature.Get());
 
+    D3D12_VIEWPORT viewport = {};
+    viewport.Width = static_cast<float>(m_viewportWidth);
+    viewport.Height = static_cast<float>(m_viewportHeight);
+    viewport.MaxDepth = 1.0f;
+    cmdList->RSSetViewports(1, &viewport);
+
+    D3D12_RECT scissor = { 0, 0, static_cast<LONG>(m_viewportWidth), static_cast<LONG>(m_viewportHeight) };
+    cmdList->RSSetScissorRects(1, &scissor);
+
     if (texture)
     {
         cmdList->SetPipelineState(m_psoTextured.Get());

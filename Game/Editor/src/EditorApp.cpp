@@ -33,6 +33,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -517,6 +518,8 @@ bool EditorApp::initialize(RenderAPIType api_type)
     int win_h = CVAR_INT(window_height);
     if (win_w <= 0) win_w = 1600;
     if (win_h <= 0) win_h = 900;
+    win_w = std::max(win_w, 1280);
+    win_h = std::max(win_h, 720);
 
     m_app = Application(win_w, win_h, 60, 75.0f, api_type);
     if (!m_app.initialize("Garden Level Editor", false))
@@ -524,6 +527,7 @@ bool EditorApp::initialize(RenderAPIType api_type)
         LOG_ENGINE_FATAL("Failed to initialize Application");
         return false;
     }
+    SDL_SetWindowMinimumSize(m_app.getWindow(), 1280, 720);
 
     const int refresh_rate = detectWindowRefreshRate(m_app.getWindow());
     const bool migrate_legacy_fps_default =
@@ -796,6 +800,107 @@ bool EditorApp::initialize(RenderAPIType api_type)
 
     // Bind plugin manager panel to the host.
     m_plugin_manager_panel.bind(&m_plugin_host);
+
+    if (RmlUiManager::get().isInitialized())
+    {
+        EditorRmlGui::Callbacks callbacks;
+        callbacks.on_new_level = [this]() {
+            if (!m_state.isSimulationActive())
+                newLevel();
+        };
+        callbacks.on_open_level = [this]() {
+            if (!m_state.isSimulationActive())
+                requestOpenLevelDialog();
+        };
+        callbacks.on_save_level = [this]() {
+            if (!m_state.isSimulationActive())
+                saveLevel();
+        };
+        callbacks.on_save_level_as = [this]() {
+            if (!m_state.isSimulationActive())
+                requestSaveLevelAsDialog();
+        };
+        callbacks.on_package_project = [this]() {
+            if (!m_state.isSimulationActive())
+                requestPackageProjectDialog();
+        };
+        callbacks.on_undo = [this]() {
+            if (!m_state.isSimulationActive() && m_undo.canUndo())
+            {
+                const LevelData& snapshot = m_undo.undo();
+                restoreFromSnapshot(snapshot);
+            }
+        };
+        callbacks.on_redo = [this]() {
+            if (!m_state.isSimulationActive() && m_undo.canRedo())
+            {
+                const LevelData& snapshot = m_undo.redo();
+                restoreFromSnapshot(snapshot);
+            }
+        };
+        callbacks.on_copy = [this]() {
+            if (!m_state.isSimulationActive() && m_hierarchy.selected_entity != entt::null)
+                copySelectedEntity();
+        };
+        callbacks.on_paste = [this]() {
+            if (!m_state.isSimulationActive() && m_entity_clipboard.has_value())
+                pasteEntity();
+        };
+        callbacks.on_duplicate = [this]() {
+            if (!m_state.isSimulationActive() && m_hierarchy.selected_entity != entt::null)
+            {
+                m_undo.pushState(buildLevelDataFromECS(), "duplicate entity");
+                m_hierarchy.duplicateEntity(m_world.registry, m_hierarchy.selected_entity);
+                m_renderer.markBVHDirty();
+                m_state.unsaved_changes = true;
+            }
+        };
+        callbacks.on_delete = [this]() {
+            if (!m_state.isSimulationActive() && m_hierarchy.selected_entity != entt::null)
+            {
+                m_undo.pushState(buildLevelDataFromECS(), "delete entity");
+                m_inspector.mesh_path_cache.erase(m_hierarchy.selected_entity);
+                m_world.registry.destroy(m_hierarchy.selected_entity);
+                m_hierarchy.selected_entity = entt::null;
+                m_renderer.markBVHDirty();
+                m_state.unsaved_changes = true;
+            }
+        };
+        callbacks.on_settings = [this]() { m_show_editor_settings = true; };
+        callbacks.on_quit = [this]() {
+            if (m_state.isSimulationActive())
+                stopPlay();
+            m_running = false;
+        };
+        callbacks.on_play = [this]() {
+            if (!m_state.isSimulationActive())
+                beginPlay();
+        };
+        callbacks.on_stop = [this]() {
+            if (m_state.isSimulationActive())
+                stopPlay();
+        };
+        callbacks.on_translate = [this]() { m_state.transform_mode = EditorState::TransformMode::Translate; };
+        callbacks.on_rotate = [this]() { m_state.transform_mode = EditorState::TransformMode::Rotate; };
+        callbacks.on_scale = [this]() { m_state.transform_mode = EditorState::TransformMode::Scale; };
+        callbacks.on_toggle_snap = [this]() { m_state.snap_enabled = !m_state.snap_enabled; };
+        callbacks.on_toggle_grid = [this]() { m_state.show_grid = !m_state.show_grid; };
+        callbacks.on_toggle_viewport = [this]() { m_show_viewport = !m_show_viewport; };
+        callbacks.on_toggle_toolbar = [this]() { m_show_toolbar = !m_show_toolbar; };
+        callbacks.on_toggle_hierarchy = [this]() { m_show_hierarchy = !m_show_hierarchy; };
+        callbacks.on_toggle_inspector = [this]() { m_show_inspector = !m_show_inspector; };
+        callbacks.on_toggle_level_settings = [this]() { m_show_level_settings = !m_show_level_settings; };
+        callbacks.on_toggle_content_browser = [this]() { m_show_content_browser = !m_show_content_browser; };
+        callbacks.on_toggle_console = [this]() { m_show_console = !m_show_console; };
+        callbacks.on_toggle_model_preview = [this]() { m_show_model_preview = !m_show_model_preview; };
+        callbacks.on_toggle_status_bar = [this]() { m_show_status_bar = !m_show_status_bar; };
+        callbacks.on_toggle_navmesh = [this]() { m_show_navmesh_panel = !m_show_navmesh_panel; };
+        callbacks.on_toggle_plugin_manager = [this]() { m_show_plugin_manager = !m_show_plugin_manager; };
+        callbacks.on_toggle_all_ui = [this]() { m_show_ui = !m_show_ui; };
+        callbacks.on_toggle_physics_debug = [this]() { m_show_physics_debug = !m_show_physics_debug; };
+        callbacks.on_toggle_performance = [this]() { m_show_performance_monitor = !m_show_performance_monitor; };
+        m_rml_gui.initialize(std::move(callbacks));
+    }
 
     SDL_SetWindowRelativeMouseMode(m_app.getWindow(), false);
 
@@ -1179,6 +1284,55 @@ void EditorApp::run()
             }
         }
 
+        if (m_rml_gui.isReady())
+        {
+            const RenderFrameStats render_stats = render_api->getLastFrameStats();
+            EditorRmlGui::FrameState rml_state;
+            rml_state.visible = m_show_ui;
+            rml_state.can_edit = !m_state.isSimulationActive();
+            rml_state.can_undo = !m_state.isSimulationActive() && m_undo.canUndo();
+            rml_state.can_redo = !m_state.isSimulationActive() && m_undo.canRedo();
+            rml_state.can_copy = !m_state.isSimulationActive() && m_hierarchy.selected_entity != entt::null;
+            rml_state.can_paste = !m_state.isSimulationActive() && m_entity_clipboard.has_value();
+            rml_state.can_duplicate = rml_state.can_copy;
+            rml_state.can_delete = rml_state.can_copy;
+            rml_state.simulation_active = m_state.isSimulationActive();
+            rml_state.paused = m_state.play_mode == PlayMode::Paused;
+            rml_state.unsaved_changes = m_state.unsaved_changes;
+            rml_state.external_pie_active = m_external_pie_active;
+            rml_state.network_pie_active = m_network_pie_active;
+            rml_state.show_viewport = m_show_viewport;
+            rml_state.show_toolbar = m_show_toolbar;
+            rml_state.show_hierarchy = m_show_hierarchy;
+            rml_state.show_inspector = m_show_inspector;
+            rml_state.show_level_settings = m_show_level_settings;
+            rml_state.show_content_browser = m_show_content_browser;
+            rml_state.show_console = m_show_console;
+            rml_state.show_model_preview = m_show_model_preview;
+            rml_state.show_status_bar = m_show_status_bar;
+            rml_state.show_navmesh = m_show_navmesh_panel;
+            rml_state.show_plugin_manager = m_show_plugin_manager;
+            rml_state.show_ui = m_show_ui;
+            rml_state.show_physics_debug = m_show_physics_debug;
+            rml_state.show_performance_monitor = m_show_performance_monitor;
+            rml_state.transform_translate = m_state.transform_mode == EditorState::TransformMode::Translate;
+            rml_state.transform_rotate = m_state.transform_mode == EditorState::TransformMode::Rotate;
+            rml_state.transform_scale = m_state.transform_mode == EditorState::TransformMode::Scale;
+            rml_state.snap_enabled = m_state.snap_enabled;
+            rml_state.grid_enabled = m_state.show_grid;
+            rml_state.spawned_processes = m_pie_processes.countRunning();
+            rml_state.fps = m_state.fps;
+            rml_state.gpu_ms_valid = render_stats.gpu_frame_ms_valid;
+            rml_state.gpu_ms = render_stats.gpu_frame_ms;
+            rml_state.total_entities = m_state.total_entities;
+            rml_state.visible_entities = m_state.visible_entities;
+            rml_state.draw_calls = m_state.draw_calls;
+            rml_state.backend_name = render_stats.backend_name ? render_stats.backend_name : render_api->getAPIName();
+            rml_state.project_name = m_project_manager.isLoaded() ? m_project_manager.getDescriptor().name : std::string();
+            rml_state.current_save_path = m_current_save_path;
+            m_rml_gui.update(rml_state);
+        }
+
         // --- Phase 2: Build ImGui UI ---
         {
             EditorPerformanceMonitor::ScopedTimer timer(m_perf_monitor, EditorPerfSeries::CpuUIBuild);
@@ -1204,6 +1358,7 @@ void EditorApp::run()
                     m_world.registry, m_hierarchy.selected_entity,
                     chooseRenderCamera(), render_api, m_renderer.getSceneBVH(),
                     &m_show_viewport);
+
                 if (gizmo.drag_started)
                     m_undo.snapshotIfNeeded([this]() { return buildLevelDataFromECS(); });
                 if (gizmo.transform_changed)
@@ -1294,7 +1449,7 @@ void EditorApp::run()
             m_lod_settings_panel.draw();
 
             // Status bar (fixed at bottom)
-            if (m_show_status_bar)
+            if (m_show_status_bar && !m_rml_gui.isReady())
             {
                 m_status_bar.network_pie_active = m_network_pie_active;
                 m_status_bar.spawned_processes = m_pie_processes.countRunning();
@@ -1486,6 +1641,7 @@ void EditorApp::shutdown()
     m_world.registry.clear();
     Threading::JobSystem::get().shutdown();
     Console::get().shutdown();
+    m_rml_gui.shutdown();
     RmlUiManager::get().shutdown();
     ImGuiManager::get().shutdown();
     XR::OpenXRSystem::get().shutdown();
@@ -2176,6 +2332,8 @@ void EditorApp::processEvents()
     while (SDL_PollEvent(&event))
     {
         ImGuiManager::get().processEvent(&event);
+        if (m_rml_gui.isReady())
+            RmlUiManager::get().processEditorEvent(event);
 
         switch (event.type)
         {
@@ -2477,7 +2635,6 @@ void EditorApp::processEvents()
 void EditorApp::renderDockspace()
 {
     ImGuiWindowFlags dockspace_flags =
-        ImGuiWindowFlags_MenuBar        |
         ImGuiWindowFlags_NoDocking      |
         ImGuiWindowFlags_NoTitleBar     |
         ImGuiWindowFlags_NoCollapse     |
@@ -2487,12 +2644,18 @@ void EditorApp::renderDockspace()
         ImGuiWindowFlags_NoNavFocus;
 
     ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const bool use_rml_chrome = m_rml_gui.isReady() && m_show_ui;
+    if (!use_rml_chrome)
+        dockspace_flags |= ImGuiWindowFlags_MenuBar;
 
     // Account for status bar at bottom
-    float status_bar_height = m_show_status_bar ? (ImGui::GetFrameHeight() + ImGui::GetStyle().WindowPadding.y * 2.0f) : 0.0f;
+    const float rml_topbar_height = use_rml_chrome ? 28.0f : 0.0f;
+    const float status_bar_height = (use_rml_chrome && m_show_status_bar)
+        ? 24.0f
+        : (m_show_status_bar ? (ImGui::GetFrameHeight() + ImGui::GetStyle().WindowPadding.y * 2.0f) : 0.0f);
 
-    ImGui::SetNextWindowPos(viewport->Pos);
-    ImGui::SetNextWindowSize(ImVec2(viewport->Size.x, viewport->Size.y - status_bar_height));
+    ImGui::SetNextWindowPos(ImVec2(viewport->Pos.x, viewport->Pos.y + rml_topbar_height));
+    ImGui::SetNextWindowSize(ImVec2(viewport->Size.x, std::max(0.0f, viewport->Size.y - rml_topbar_height - status_bar_height)));
     ImGui::SetNextWindowViewport(viewport->ID);
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
@@ -2510,7 +2673,8 @@ void EditorApp::renderDockspace()
     if (ImGui::DockBuilderGetNode(dockspace_id) == nullptr)
     {
         ImGui::DockBuilderAddNode(dockspace_id, ImGuiDockNodeFlags_DockSpace);
-        ImGui::DockBuilderSetNodeSize(dockspace_id, ImVec2(viewport->Size.x, viewport->Size.y - status_bar_height));
+        ImGui::DockBuilderSetNodeSize(dockspace_id,
+            ImVec2(viewport->Size.x, std::max(0.0f, viewport->Size.y - rml_topbar_height - status_bar_height)));
 
         ImGuiID dock_main = dockspace_id;
 
@@ -2539,9 +2703,55 @@ void EditorApp::renderDockspace()
 
     ImGui::DockSpace(dockspace_id, ImVec2(0.0f, 0.0f));
 
-    renderMenuBar();
+    if (!use_rml_chrome)
+        renderMenuBar();
 
     ImGui::End();
+}
+
+void EditorApp::requestOpenLevelDialog()
+{
+    std::string path = FileDialog::openFile("Open Level",
+        "Level Files (*.level.json)\0*.level.json\0All Files (*.*)\0*.*\0");
+    if (!path.empty())
+        openLevel(path);
+}
+
+void EditorApp::requestSaveLevelAsDialog()
+{
+    std::string path = FileDialog::saveFile("Save Level As",
+        "Level Files (*.level.json)\0*.level.json\0All Files (*.*)\0*.*\0");
+    if (!path.empty())
+        saveLevelAs(path);
+}
+
+void EditorApp::requestPackageProjectDialog()
+{
+    if (!m_project_manager.isLoaded())
+        return;
+
+    std::strncpy(m_package_name,
+        m_project_manager.getDescriptor().name.c_str(),
+        sizeof(m_package_name) - 1);
+    m_package_name[sizeof(m_package_name) - 1] = '\0';
+
+    // Load last output directory from ConVar if empty
+    if (m_package_output_dir[0] == '\0')
+    {
+        std::string last_dir = CVAR_STRING(editor_package_output_dir);
+        if (!last_dir.empty())
+        {
+            std::strncpy(m_package_output_dir, last_dir.c_str(), sizeof(m_package_output_dir) - 1);
+            m_package_output_dir[sizeof(m_package_output_dir) - 1] = '\0';
+        }
+    }
+
+    m_package_phase = PackagePhase::Configure;
+    m_package_result = {};
+    m_package_pre_warnings = ProjectPackager::validateBeforePackage(
+        m_project_manager, PackageConfig{m_package_output_dir, m_package_name,
+            m_package_compile_levels, m_app.getAPIType()});
+    m_show_package_dialog = true;
 }
 
 void EditorApp::renderMenuBar()
@@ -2557,10 +2767,7 @@ void EditorApp::renderMenuBar()
 
             if (ImGui::MenuItem("Open Level...", nullptr, false, can_edit))
             {
-                std::string path = FileDialog::openFile("Open Level",
-                    "Level Files (*.level.json)\0*.level.json\0All Files (*.*)\0*.*\0");
-                if (!path.empty())
-                    openLevel(path);
+                requestOpenLevelDialog();
             }
 
             if (ImGui::MenuItem("Save", "Ctrl+S", false, can_edit))
@@ -2568,10 +2775,7 @@ void EditorApp::renderMenuBar()
 
             if (ImGui::MenuItem("Save As...", nullptr, false, can_edit))
             {
-                std::string path = FileDialog::saveFile("Save Level As",
-                    "Level Files (*.level.json)\0*.level.json\0All Files (*.*)\0*.*\0");
-                if (!path.empty())
-                    saveLevelAs(path);
+                requestSaveLevelAsDialog();
             }
 
             ImGui::Separator();
@@ -2579,28 +2783,7 @@ void EditorApp::renderMenuBar()
             if (ImGui::MenuItem("Package Project...", nullptr, false,
                 can_edit && m_project_manager.isLoaded()))
             {
-                std::strncpy(m_package_name,
-                    m_project_manager.getDescriptor().name.c_str(),
-                    sizeof(m_package_name) - 1);
-                m_package_name[sizeof(m_package_name) - 1] = '\0';
-
-                // Load last output directory from ConVar if empty
-                if (m_package_output_dir[0] == '\0')
-                {
-                    std::string last_dir = CVAR_STRING(editor_package_output_dir);
-                    if (!last_dir.empty())
-                    {
-                        std::strncpy(m_package_output_dir, last_dir.c_str(), sizeof(m_package_output_dir) - 1);
-                        m_package_output_dir[sizeof(m_package_output_dir) - 1] = '\0';
-                    }
-                }
-
-                m_package_phase = PackagePhase::Configure;
-                m_package_result = {};
-                m_package_pre_warnings = ProjectPackager::validateBeforePackage(
-                    m_project_manager, PackageConfig{m_package_output_dir, m_package_name,
-                        m_package_compile_levels, m_app.getAPIType()});
-                m_show_package_dialog = true;
+                requestPackageProjectDialog();
             }
 
             ImGui::Separator();

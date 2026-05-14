@@ -77,8 +77,9 @@ private:
     std::unordered_map<uintptr_t, TextureData> m_textures;
 
     // Transient per-draw constant buffers, retained until the GPU is done.
-    // Ring of size 3 (>= max frames in flight) cleared as we cycle slots.
-    static constexpr int kCBFrameSlots = 3;
+    // The editor can render game and editor Rml contexts in the same frame, so
+    // keep more slots than the backend frame count before recycling uploads.
+    static constexpr int kCBFrameSlots = 8;
     std::vector<ComPtr<ID3D12Resource>> m_perFrameCBs[kCBFrameSlots];
     int m_cbFrameSlot = 0;
 

@@ -124,11 +124,28 @@ bool RmlUiManager::initialize(SDL_Window* window, IRenderAPI* renderAPI, RenderA
     int w, h;
     SDL_GetWindowSize(window, &w, &h);
 
-    // Create main context
+    // Create main/game context
     m_context = Rml::CreateContext("main", Rml::Vector2i(w, h));
     if (!m_context)
     {
         LOG_ENGINE_ERROR("[RmlUi] Failed to create context");
+        Rml::Shutdown();
+        delete m_renderInterface;
+        m_renderInterface = nullptr;
+        delete m_systemInterface;
+        m_systemInterface = nullptr;
+        return false;
+    }
+
+    // Editor chrome gets a separate context so documents rendered into the
+    // editor swapchain do not duplicate game/PIE documents rendered into scene
+    // viewports.
+    m_editorContext = Rml::CreateContext("editor", Rml::Vector2i(w, h));
+    if (!m_editorContext)
+    {
+        LOG_ENGINE_ERROR("[RmlUi] Failed to create editor context");
+        Rml::RemoveContext(m_context->GetName());
+        m_context = nullptr;
         Rml::Shutdown();
         delete m_renderInterface;
         m_renderInterface = nullptr;
@@ -158,6 +175,11 @@ bool RmlUiManager::isInitialized() const
 Rml::Context* RmlUiManager::getContext() const
 {
     return m_context;
+}
+
+Rml::Context* RmlUiManager::getEditorContext() const
+{
+    return m_editorContext;
 }
 
 #ifdef _WIN32
@@ -242,6 +264,13 @@ void RmlUiManager::shutdown()
     }
     m_documents.clear();
 
+    for (void* document : m_editorDocuments)
+    {
+        if (document)
+            static_cast<Rml::ElementDocument*>(document)->Close();
+    }
+    m_editorDocuments.clear();
+
     for (void* model : m_dataModels)
         deleteDataModel(m_context, asDataModel(model));
     m_dataModels.clear();
@@ -252,6 +281,12 @@ void RmlUiManager::shutdown()
     {
         Rml::RemoveContext(m_context->GetName());
         m_context = nullptr;
+    }
+
+    if (m_editorContext)
+    {
+        Rml::RemoveContext(m_editorContext->GetName());
+        m_editorContext = nullptr;
     }
 
     Rml::Shutdown();
@@ -331,12 +366,60 @@ void RmlUiManager::render()
     m_context->Render();
 }
 
+void RmlUiManager::beginEditorFrame(int width, int height)
+{
+    if (!m_initialized || !m_editorContext || width <= 0 || height <= 0)
+        return;
+
+    m_editorContext->SetDimensions(Rml::Vector2i(width, height));
+
+    if (m_apiType == RenderAPIType::Vulkan)
+    {
+        auto* vkRenderer = static_cast<RmlRenderer_VK*>(m_renderInterface);
+        vkRenderer->SetViewport(width, height);
+        vkRenderer->BeginFrame();
+    }
+#ifdef _WIN32
+    else if (m_apiType == RenderAPIType::D3D12)
+    {
+        auto* d3dRenderer = static_cast<RmlRenderer_D3D12*>(m_renderInterface);
+        d3dRenderer->SetViewport(width, height);
+        d3dRenderer->BeginFrame();
+    }
+#endif
+#ifdef __APPLE__
+    else if (m_apiType == RenderAPIType::Metal)
+    {
+        auto* metalRenderer = static_cast<RmlRenderer_Metal*>(m_renderInterface);
+        metalRenderer->SetViewport(width, height);
+        metalRenderer->BeginFrame();
+    }
+#endif
+}
+
+void RmlUiManager::renderEditor()
+{
+    if (!m_initialized || !m_editorContext)
+        return;
+
+    m_editorContext->Update();
+    m_editorContext->Render();
+}
+
 bool RmlUiManager::processEvent(SDL_Event& event)
 {
     if (!m_initialized || !m_context)
         return false;
 
     return !RmlSDL::InputEventHandler(m_context, m_window, event);
+}
+
+bool RmlUiManager::processEditorEvent(SDL_Event& event)
+{
+    if (!m_initialized || !m_editorContext)
+        return false;
+
+    return !RmlSDL::InputEventHandler(m_editorContext, m_window, event);
 }
 
 void* RmlUiManager::loadDocument(const char* path)
@@ -353,6 +436,20 @@ void* RmlUiManager::loadDocument(const char* path)
     return doc;
 }
 
+void* RmlUiManager::loadEditorDocument(const char* path)
+{
+    if (!m_initialized || !m_editorContext)
+        return nullptr;
+
+    Rml::ElementDocument* doc = m_editorContext->LoadDocument(path ? path : "");
+    if (doc)
+    {
+        doc->Show();
+        m_editorDocuments.push_back(doc);
+    }
+    return doc;
+}
+
 void RmlUiManager::closeDocument(void* document)
 {
     if (!document)
@@ -362,6 +459,18 @@ void RmlUiManager::closeDocument(void* document)
     m_documents.erase(it, m_documents.end());
 
     if (m_context)
+        static_cast<Rml::ElementDocument*>(document)->Close();
+}
+
+void RmlUiManager::closeEditorDocument(void* document)
+{
+    if (!document)
+        return;
+
+    auto it = std::remove(m_editorDocuments.begin(), m_editorDocuments.end(), document);
+    m_editorDocuments.erase(it, m_editorDocuments.end());
+
+    if (m_editorContext)
         static_cast<Rml::ElementDocument*>(document)->Close();
 }
 

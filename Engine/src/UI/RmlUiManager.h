@@ -22,19 +22,25 @@ public:
     void beginFrame();
     void beginFrame(int width, int height);
     void render();
+    void beginEditorFrame(int width, int height);
+    void renderEditor();
 
     // Event handling - returns true if RmlUi consumed the event
     bool processEvent(SDL_Event& event);
+    bool processEditorEvent(SDL_Event& event);
 
     // State queries
     bool isInitialized() const;
 
     // Context access
     Rml::Context* getContext() const;
+    Rml::Context* getEditorContext() const;
 
     // Document management
     void* loadDocument(const char* path);
+    void* loadEditorDocument(const char* path);
     void closeDocument(void* document);
+    void closeEditorDocument(void* document);
     void toggleDebugger();
 
     // C-safe data model API for hot-loaded game modules. The model values are
@@ -65,9 +71,11 @@ private:
     IRenderAPI* m_renderAPI = nullptr;
 
     Rml::Context* m_context = nullptr;
+    Rml::Context* m_editorContext = nullptr;
     Rml::RenderInterface* m_renderInterface = nullptr;
     SystemInterface_SDL* m_systemInterface = nullptr;
     bool m_debuggerVisible = false;
     std::vector<void*> m_dataModels;
     std::vector<void*> m_documents;
+    std::vector<void*> m_editorDocuments;
 };

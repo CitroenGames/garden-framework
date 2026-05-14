@@ -13,6 +13,7 @@
 #include "VkPipelineBuilder.hpp"
 #include "Utils/EnginePaths.hpp"
 #include "ImGui/ImGuiManager.hpp"
+#include "UI/RmlUiManager.h"
 
 // ImGui for Vulkan rendering
 #include "imgui.h"
@@ -751,6 +752,15 @@ void VulkanRenderAPI::renderUI()
     ImDrawData* draw_data = ImGui::GetDrawData();
     if (draw_data && draw_data->TotalVtxCount > 0) {
         ImGui_ImplVulkan_RenderDrawData(draw_data, cmd);
+    }
+
+    if (RmlUiManager::get().isInitialized()) {
+        m_currentRmlRenderPass = ui_render_pass;
+        RmlUiManager::get().beginEditorFrame(
+            static_cast<int>(swapchain_extent.width),
+            static_cast<int>(swapchain_extent.height));
+        RmlUiManager::get().renderEditor();
+        m_currentRmlRenderPass = VK_NULL_HANDLE;
     }
 
     vkCmdEndRenderPass(cmd);
