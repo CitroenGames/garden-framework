@@ -58,6 +58,34 @@ bool PIEProcessManager::spawnClient(int player_index,
     return true;
 }
 
+bool PIEProcessManager::spawnStandalone(const std::string& label,
+                                         const std::string& game_exe_path,
+                                         const std::string& project_path,
+                                         const std::string& render_api_arg)
+{
+    std::vector<std::string> argv = {
+        game_exe_path,
+        "--project", project_path,
+    };
+    if (!render_api_arg.empty())
+        argv.push_back(render_api_arg);
+
+    ProcessEntry entry{};
+    entry.player_index = 1;
+    entry.label = label.empty() ? "Standalone Game" : label;
+
+    if (!launchProcess(game_exe_path, argv, deriveWorkingDir(project_path), entry))
+    {
+        LOG_ENGINE_ERROR("Failed to spawn {}", entry.label);
+        return false;
+    }
+
+    LOG_ENGINE_INFO("Spawned {} (PID {})", entry.label, entry.getPID());
+
+    m_processes.push_back(std::move(entry));
+    return true;
+}
+
 bool PIEProcessManager::spawnServer(const std::string& server_exe_path,
                                      const std::string& project_path,
                                      uint16_t port)

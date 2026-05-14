@@ -1,0 +1,54 @@
+[project:OpenXR]
+type = lib
+outdir = ../../../bin/
+sources = {
+    src/loader/api_layer_interface.cpp
+    src/loader/loader_core.cpp
+    src/loader/loader_init_data.cpp
+    src/loader/loader_instance.cpp
+    src/loader/loader_logger.cpp
+    src/loader/loader_logger_recorders.cpp
+    src/loader/loader_properties.cpp
+    src/loader/manifest_file.cpp
+    src/loader/runtime_interface.cpp
+    src/loader/xr_generated_loader.cpp
+    src/common/filesystem_utils.cpp
+    src/common/object_info.cpp
+    src/xr_generated_dispatch_table_core.c
+    src/external/jsoncpp/src/lib_json/json_reader.cpp
+    src/external/jsoncpp/src/lib_json/json_value.cpp
+    src/external/jsoncpp/src/lib_json/json_writer.cpp
+}
+headers = {
+    include/**/*.h
+    src/loader/**/*.h
+    src/loader/**/*.hpp
+    src/common/**/*.h
+    src/common/**/*.hpp
+    src/external/jsoncpp/include/**/*.h
+}
+includes = include, src, src/common, src/loader, src/external/jsoncpp/include
+public_includes = include
+defines = JSON_USE_EXCEPTION=0, XRLOADER_DISABLE_EXCEPTION_HANDLING
+if(Windows)
+{
+    defines = JSON_USE_EXCEPTION=0, XRLOADER_DISABLE_EXCEPTION_HANDLING, XR_OS_WINDOWS, XR_USE_PLATFORM_WIN32, WIN32_LEAN_AND_MEAN, NOMINMAX
+    public_libs = advapi32.lib
+}
+if(Linux)
+{
+    defines = JSON_USE_EXCEPTION=0, XRLOADER_DISABLE_EXCEPTION_HANDLING, XR_OS_LINUX
+    public_libs = dl
+    cxxflags = -pthread
+    ldflags = -pthread
+}
+if(macOS)
+{
+    defines = JSON_USE_EXCEPTION=0, XRLOADER_DISABLE_EXCEPTION_HANDLING, XR_OS_APPLE
+}
+std = 17
+utf8 = true
+exception_handling = false
+buffer_security_check = false
+simd = AdvancedVectorExtensions2
+multiprocessor = true

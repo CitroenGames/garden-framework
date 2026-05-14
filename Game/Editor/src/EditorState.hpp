@@ -12,6 +12,21 @@ enum class PlayMode
     Ejected   // Simulation running, editor camera active, mouse released
 };
 
+enum class PIELaunchMode
+{
+    SelectedViewport,
+    NewEditorWindow,
+    VRPreview,
+    StandaloneGame,
+    Simulate
+};
+
+enum class PIESpawnLocation
+{
+    CurrentCameraLocation,
+    DefaultPlayerStart
+};
+
 struct EditorState
 {
     enum class TransformMode { Translate, Rotate, Scale };
@@ -32,6 +47,9 @@ struct EditorState
 
     // Play mode
     PlayMode play_mode = PlayMode::Editing;
+    PIELaunchMode pie_launch_mode = PIELaunchMode::SelectedViewport;
+    PIESpawnLocation pie_spawn_location = PIESpawnLocation::DefaultPlayerStart;
+    bool external_pie_active = false;
 
     bool isSimulationActive() const
     {

@@ -47,7 +47,7 @@ Two paths — pick one.
 
 1. Run `bin\Editor.exe`.
 2. In the project browser, click **New Project**.
-3. Choose `EmptyProject`, `ThirdPerson`, or `FPSShooter`, pick a folder, name it.
+3. Choose `EmptyProject`, `ThirdPerson`, `VR`, or `FPSShooter`, pick a folder, name it.
 4. The editor generates the project, opens it, and creates a default level.
 
 ### B. From the command line

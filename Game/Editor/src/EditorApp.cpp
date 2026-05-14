@@ -59,6 +59,18 @@ namespace
     static constexpr int EDITOR_FPS_LEGACY_DEFAULT = 60;
     static constexpr int EDITOR_FPS_UNLIMITED_TARGET = 10000;
 
+    const char* renderApiCliArg(RenderAPIType api_type)
+    {
+        switch (api_type)
+        {
+        case RenderAPIType::Vulkan: return "--vulkan";
+        case RenderAPIType::D3D12: return "--d3d12";
+        case RenderAPIType::Metal: return "--metal";
+        case RenderAPIType::Headless: return "";
+        }
+        return "";
+    }
+
     std::filesystem::path getEditorCVarConfigPath()
     {
         return EnginePaths::getExecutableDir() / EDITOR_CONFIG_FILENAME;
@@ -1005,6 +1017,18 @@ void EditorApp::run()
         m_undo.beginFrame();
 
         processEvents();
+        if (XR::OpenXRSystem::get().isPIEActive())
+            XR::OpenXRSystem::get().pollEvents();
+        if (m_external_pie_active && m_pie_processes.countRunning() == 0)
+        {
+            LOG_ENGINE_INFO("--- PIE: External play session ended ---");
+            m_pie_processes.killAll();
+            m_external_pie_active = false;
+            m_state.external_pie_active = false;
+            m_state.play_mode = PlayMode::Editing;
+            m_mouse_captured_for_game = false;
+            SDL_SetWindowRelativeMouseMode(m_app.getWindow(), false);
+        }
 
         // --- Simulation tick (when active and running) ---
         {
@@ -1050,7 +1074,7 @@ void EditorApp::run()
         }
 
         // --- Editor camera update (editing or ejected) ---
-        if (!m_state.isSimulationActive() || m_state.play_mode == PlayMode::Ejected)
+        if (m_external_pie_active || !m_state.isSimulationActive() || m_state.play_mode == PlayMode::Ejected)
         {
             const bool* keys = SDL_GetKeyboardState(nullptr);
             m_editor_cam.update(m_delta_time, m_right_mouse, m_mouse_dx, m_mouse_dy, keys);
@@ -1062,7 +1086,7 @@ void EditorApp::run()
         DebugDraw::get().update(m_delta_time);
 
         // Draw grid over the editor scene, including ejected Scene View.
-        if (m_state.show_grid && (!m_state.isSimulationActive() || m_state.play_mode == PlayMode::Ejected))
+        if (m_state.show_grid && (m_external_pie_active || !m_state.isSimulationActive() || m_state.play_mode == PlayMode::Ejected))
             renderGrid();
 
         // NavMesh debug visualization (submit lines before scene render)
@@ -1081,8 +1105,9 @@ void EditorApp::run()
         render_api->setViewportSize(m_viewport.width, m_viewport.height);
         const bool render_main_viewport =
             m_show_viewport && m_viewport.is_visible && m_viewport.width > 0 && m_viewport.height > 0;
-        render_api->setSceneRmlEnabled(m_state.play_mode == PlayMode::Playing ||
-                                       m_state.play_mode == PlayMode::Paused);
+        render_api->setSceneRmlEnabled(!m_external_pie_active &&
+                                       (m_state.play_mode == PlayMode::Playing ||
+                                        m_state.play_mode == PlayMode::Paused));
         {
             EditorPerformanceMonitor::ScopedTimer timer(m_perf_monitor, EditorPerfSeries::CpuViewport);
             if (render_main_viewport)
@@ -1463,6 +1488,7 @@ void EditorApp::shutdown()
     Console::get().shutdown();
     RmlUiManager::get().shutdown();
     ImGuiManager::get().shutdown();
+    XR::OpenXRSystem::get().shutdown();
     m_app.shutdown();
     EE::CLog::Shutdown();
 }
@@ -1475,6 +1501,13 @@ void EditorApp::beginPlay()
 {
     if (m_state.isSimulationActive())
         return; // already playing
+
+    if (m_state.pie_launch_mode == PIELaunchMode::NewEditorWindow ||
+        m_state.pie_launch_mode == PIELaunchMode::StandaloneGame)
+    {
+        beginExternalPlay();
+        return;
+    }
 
     // Guard: nothing to play
     auto view = m_world.registry.view<TagComponent, TransformComponent>();
@@ -1509,9 +1542,11 @@ void EditorApp::beginPlay()
         LOG_ENGINE_ERROR("PIE: Failed to create isolated play world");
         return;
     }
+    applyPIESpawnLocation();
 
     // Determine if we should use the game DLL for network PIE
-    bool use_network_pie = (m_state.network_pie.net_mode != PIENetMode::Standalone);
+    const bool simulate_mode = (m_state.pie_launch_mode == PIELaunchMode::Simulate);
+    bool use_network_pie = !simulate_mode && (m_state.network_pie.net_mode != PIENetMode::Standalone);
     std::string dll_path = m_project_manager.getAbsoluteModulePath();
 
     if (use_network_pie && (dll_path.empty() || !std::filesystem::exists(dll_path)))
@@ -1859,12 +1894,79 @@ void EditorApp::beginPlay()
     }
 
     // Enter playing state (mouse stays free until user clicks viewport)
-    m_state.play_mode = PlayMode::Playing;
+    m_state.play_mode = simulate_mode ? PlayMode::Ejected : PlayMode::Playing;
     m_mouse_captured_for_game = false;
+    XR::OpenXRSystem::get().beginPIE(m_app.getRenderAPI(), m_state.pie_launch_mode == PIELaunchMode::VRPreview);
 
     m_renderer.markBVHDirty();
 
-    LOG_ENGINE_INFO("--- PIE: Play mode started (click viewport to capture mouse) ---");
+    if (simulate_mode)
+        LOG_ENGINE_INFO("--- PIE: Simulate mode started (editor camera, simulation running) ---");
+    else
+        LOG_ENGINE_INFO("--- PIE: Play mode started (click viewport to capture mouse) ---");
+}
+
+bool EditorApp::beginExternalPlay()
+{
+    if (m_state.isSimulationActive())
+        return false;
+
+    if (!m_project_manager.isLoaded() || m_project_manager.getProjectFilePath().empty())
+    {
+        LOG_ENGINE_ERROR("Cannot launch external play mode: no project is loaded");
+        return false;
+    }
+
+    std::filesystem::path exe_dir = EnginePaths::getExecutableDir();
+    std::string game_exe = (exe_dir / PIE_GAME_EXE_NAME).string();
+    if (!std::filesystem::exists(game_exe))
+    {
+        LOG_ENGINE_ERROR("Cannot launch external play mode: '{}' was not found", game_exe);
+        return false;
+    }
+
+    const bool standalone = (m_state.pie_launch_mode == PIELaunchMode::StandaloneGame);
+    const std::string label = standalone ? "Standalone Game" : "New Editor Window (PIE)";
+    const std::string render_api_arg = renderApiCliArg(m_app.getAPIType());
+
+    if (!m_pie_processes.spawnStandalone(label, game_exe,
+            m_project_manager.getProjectFilePath(), render_api_arg))
+    {
+        return false;
+    }
+
+    m_pre_play_editor_cam = m_editor_cam.cam;
+    m_external_pie_active = true;
+    m_state.external_pie_active = true;
+    m_state.play_mode = PlayMode::Playing;
+    m_mouse_captured_for_game = false;
+
+    LOG_ENGINE_INFO("--- PIE: {} launched using {} ---", label, render_api_arg.empty() ? "default render API" : render_api_arg);
+    return true;
+}
+
+void EditorApp::applyPIESpawnLocation()
+{
+    if (m_state.pie_spawn_location != PIESpawnLocation::CurrentCameraLocation || !m_play_world)
+        return;
+
+    auto view = m_play_world->registry.view<PlayerComponent, TransformComponent>();
+    for (auto entity : view)
+    {
+        auto& transform = m_play_world->registry.get<TransformComponent>(entity);
+        transform.position = m_pre_play_editor_cam.position;
+        transform.rotation = m_pre_play_editor_cam.rotation;
+        m_play_world->world_camera.position = m_pre_play_editor_cam.position;
+        m_play_world->world_camera.rotation = m_pre_play_editor_cam.rotation;
+
+        if (m_play_world->getPhysicsSystem().hasCharacterController(entity))
+            m_play_world->teleport_character_controller(entity, transform.position);
+
+        LOG_ENGINE_INFO("PIE: Player start moved to current editor camera location");
+        return;
+    }
+
+    LOG_ENGINE_WARN("PIE: Current Camera Location was selected, but no Player entity exists in the play world");
 }
 
 void EditorApp::stopPlay()
@@ -1873,6 +1975,14 @@ void EditorApp::stopPlay()
         return; // not playing
 
     LOG_ENGINE_INFO("--- PIE: Stopping play mode ---");
+    XR::OpenXRSystem::get().endPIE();
+
+    if (m_external_pie_active)
+    {
+        m_pie_processes.killAll();
+        m_external_pie_active = false;
+        m_state.external_pie_active = false;
+    }
 
     // 1. Tear down project DLL PIE or standalone simulation
     if (m_game_module_active)
@@ -1937,6 +2047,7 @@ void EditorApp::stopPlay()
 
     // 4. Restore state
     m_state.play_mode = PlayMode::Editing;
+    m_state.external_pie_active = false;
     m_mouse_captured_for_game = false;
     SDL_SetWindowRelativeMouseMode(m_app.getWindow(), false);
 
@@ -2116,7 +2227,7 @@ void EditorApp::processEvents()
                 }
 
                 // F8: eject/return toggle during play
-                if (event.key.scancode == SDL_SCANCODE_F8)
+                if (event.key.scancode == SDL_SCANCODE_F8 && !m_external_pie_active)
                 {
                     if (m_state.play_mode == PlayMode::Playing)
                     {
@@ -2298,7 +2409,7 @@ void EditorApp::processEvents()
 
         case SDL_EVENT_MOUSE_BUTTON_DOWN:
             // During Playing mode: left-click in viewport captures mouse for game
-            if (m_state.play_mode == PlayMode::Playing && !m_mouse_captured_for_game)
+            if (m_state.play_mode == PlayMode::Playing && m_game_input_manager && !m_mouse_captured_for_game)
             {
                 if (event.button.button == SDL_BUTTON_LEFT &&
                     m_viewport.is_hovered)
@@ -2313,7 +2424,7 @@ void EditorApp::processEvents()
             {
                 m_game_input_manager->process_event(event);
             }
-            else if (!m_state.isSimulationActive() || m_state.play_mode == PlayMode::Ejected)
+            else if (m_external_pie_active || !m_state.isSimulationActive() || m_state.play_mode == PlayMode::Ejected)
             {
                 // Editor camera: right-click to fly (blocked during gizmo drag)
                 if (event.button.button == SDL_BUTTON_RIGHT && !m_state.gizmo_using && m_viewport.is_hovered)
@@ -2329,7 +2440,7 @@ void EditorApp::processEvents()
             {
                 m_game_input_manager->process_event(event);
             }
-            else if (!m_state.isSimulationActive() || m_state.play_mode == PlayMode::Ejected)
+            else if (m_external_pie_active || !m_state.isSimulationActive() || m_state.play_mode == PlayMode::Ejected)
             {
                 if (event.button.button == SDL_BUTTON_RIGHT)
                 {
@@ -2686,6 +2797,7 @@ void EditorApp::renderEditorSettings()
                 { ICON_FA_DISPLAY    "  Graphics",    SettingsCategory::Graphics },
                 { ICON_FA_EYE        "  Rendering",   SettingsCategory::Rendering },
                 { ICON_FA_GAUGE_HIGH "  Performance",  SettingsCategory::Performance },
+                { ICON_FA_VR_CARDBOARD "  XR",         SettingsCategory::XR },
                 { ICON_FA_PALETTE    "  Appearance",   SettingsCategory::Appearance },
             };
             for (auto& c : categories)
@@ -2879,6 +2991,53 @@ void EditorApp::renderEditorSettings()
                         m_renderer.setBVHEnabled(culling);
                     }
                 }
+                break;
+            }
+
+            case SettingsCategory::XR:
+            {
+                ImGui::SeparatorText("OpenXR");
+
+                auto* enable_cvar = CVAR_PTR(xr_enable);
+                bool xr_enabled = enable_cvar ? enable_cvar->getBool() : false;
+                if (ImGui::Checkbox("Enable OpenXR", &xr_enabled))
+                {
+                    if (enable_cvar) enable_cvar->setInt(xr_enabled ? 1 : 0);
+                    if (!xr_enabled)
+                        XR::OpenXRSystem::get().shutdown();
+                }
+
+                auto* pie_cvar = CVAR_PTR(xr_pie);
+                bool xr_pie = pie_cvar ? pie_cvar->getBool() : true;
+                if (ImGui::Checkbox("Use OpenXR in PIE", &xr_pie))
+                    if (pie_cvar) pie_cvar->setInt(xr_pie ? 1 : 0);
+
+                ImGui::Spacing();
+                if (ImGui::Button("Refresh Runtime"))
+                {
+                    XR::OpenXRSystem::get().shutdown();
+                    if (xr_enabled)
+                        XR::OpenXRSystem::get().initialize();
+                }
+
+                const XR::OpenXRStatus& xr = XR::OpenXRSystem::get().getStatus();
+                ImGui::Spacing();
+                ImGui::Text("Runtime: %s", xr.runtime_name.empty() ? "Not initialized" : xr.runtime_name.c_str());
+                ImGui::Text("HMD: %s", xr.system_name.empty() ? "Unavailable" : xr.system_name.c_str());
+                ImGui::Text("Backend: %s", xr.backend_name.empty() ? m_app.getRenderAPI()->getAPIName() : xr.backend_name.c_str());
+                ImGui::Text("PIE Bridge: %s", xr.pie_active ? "Active" : "Inactive");
+
+                const auto& views = XR::OpenXRSystem::get().getViewConfiguration();
+                if (!views.empty())
+                {
+                    ImGui::Text("Stereo Views: %u", xr.view_count);
+                    ImGui::Text("Recommended Eye Size: %ux%u",
+                                views[0].recommended_width, views[0].recommended_height);
+                }
+
+                if (!xr.last_error.empty())
+                    ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.25f, 1.0f), "%s", xr.last_error.c_str());
+
                 break;
             }
 

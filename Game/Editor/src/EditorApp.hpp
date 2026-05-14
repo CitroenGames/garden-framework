@@ -5,6 +5,7 @@
 #include "LevelManager.hpp"
 #include "Graphics/renderer.hpp"
 #include "Graphics/SceneViewport.hpp"
+#include "XR/OpenXRSystem.hpp"
 #include "EditorCamera.hpp"
 #include "EditorState.hpp"
 #include "GameSimulation.hpp"
@@ -102,7 +103,7 @@ private:
     bool m_show_editor_settings = false;
 
     // Settings window category navigation
-    enum class SettingsCategory { Graphics, Rendering, Performance, Appearance };
+    enum class SettingsCategory { Graphics, Rendering, Performance, XR, Appearance };
     SettingsCategory m_settings_category = SettingsCategory::Graphics;
 
     // Save path
@@ -172,6 +173,7 @@ private:
     EngineServices     m_client_services{};
     bool               m_game_module_active = false; // true when Player 1 is running project DLL code
     bool               m_network_pie_active = false; // true when using game DLL for network PIE
+    bool               m_external_pie_active = false; // true when a play mode owns an external Game.exe process
     PIEProcessManager  m_pie_processes;
 
     // Multi-viewport PIE: additional client instances (Player 2-4) for InEditor mode
@@ -185,6 +187,8 @@ private:
     void resumePlay();
     void ejectFromPlay();
     void returnToPlay();
+    bool beginExternalPlay();
+    void applyPIESpawnLocation();
     world& chooseRenderWorld();
     camera& chooseRenderCamera();
 

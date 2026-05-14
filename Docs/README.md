@@ -36,6 +36,7 @@ These docs target developers **building a game** in Garden Framework. For engine
 | :--- | :--- |
 | `Templates/EmptyProject` | You want a clean canvas. Single-player, minimal hooks, no networking. |
 | `Templates/ThirdPerson` | You want a small single-player character controller with a spring-arm third-person camera. |
+| `Templates/VR` | You want an OpenXR-ready walkaround pawn with keyboard/mouse fallback for development. |
 | `Templates/FPSShooter` | You want a working multiplayer FPS to copy from: client/server, weapons, HUD, prediction. |
 
 These templates can be generated through `garden new-project` (see [Getting Started](getting-started.md)) or copied by hand.

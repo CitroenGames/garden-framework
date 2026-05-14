@@ -17,6 +17,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -1041,6 +1042,70 @@ static bool testThirdPersonTemplateReferences(const fs::path& repo_root)
     return pass(name);
 }
 
+static bool testVRTemplateReferences(const fs::path& repo_root)
+{
+    const std::string name = "VR template references";
+    const fs::path template_root = repo_root / "Templates" / "VR";
+    Assets::AssetManager::get().setAssetRoot((template_root / "assets").string());
+    Assets::AssetManager::get().setAssetPrefix("assets");
+
+    if (!fs::exists(template_root / "VR.garden"))
+        return fail(name, "missing VR.garden");
+    if (!fs::exists(template_root / "VR.buildscript"))
+        return fail(name, "missing VR.buildscript");
+
+    LevelManager level_manager;
+    LevelData level;
+    fs::path level_path = template_root / "assets" / "levels" / "main.level.json";
+    if (!level_manager.loadLevel(level_path.string(), level))
+        return fail(name, "failed to parse main.level.json");
+
+    bool saw_player = false;
+    bool saw_floor_collider = false;
+    bool saw_walkaround_block = false;
+
+    for (const LevelEntity& entity : level.entities)
+    {
+        if (!entity.mesh_path.empty())
+        {
+            const std::string resolved = Assets::AssetManager::get().resolveAssetPath(entity.mesh_path);
+            if (!fs::exists(resolved))
+                return fail(name, "missing mesh asset: " + entity.mesh_path);
+        }
+
+        if (entity.type == EntityType::Player)
+        {
+            saw_player = true;
+            if (entity.speed < 2.0f)
+                return fail(name, "player walk speed is too low for the walkaround template");
+        }
+
+        if (entity.name == "floor" && entity.has_collider && entity.collider_shape_type == "Box")
+            saw_floor_collider = true;
+        if (entity.name.find("walkaround_block") == 0 && entity.has_collider)
+            saw_walkaround_block = true;
+    }
+
+    if (!saw_player)
+        return fail(name, "template has no Player entity");
+    if (!saw_floor_collider)
+        return fail(name, "template floor has no box collider");
+    if (!saw_walkaround_block)
+        return fail(name, "template has no collidable walkaround block");
+
+    std::ifstream module(template_root / "src" / "GameModule.cpp");
+    if (!module)
+        return fail(name, "missing GameModule.cpp");
+    const std::string source((std::istreambuf_iterator<char>(module)),
+                             std::istreambuf_iterator<char>());
+    if (source.find("XR/OpenXRSystem.hpp") == std::string::npos)
+        return fail(name, "game module does not touch the OpenXR runtime bridge");
+    if (source.find("simulate_character_controller") == std::string::npos)
+        return fail(name, "game module does not drive character-controller locomotion");
+
+    return pass(name);
+}
+
 int main()
 {
     EE::CLog::Init();
@@ -1090,6 +1155,8 @@ int main()
     ok = testFpsShooterLevelReferences(repo_root) && ok;
     run("ThirdPerson template references");
     ok = testThirdPersonTemplateReferences(repo_root) && ok;
+    run("VR template references");
+    ok = testVRTemplateReferences(repo_root) && ok;
 
     Assets::AssetManager::get().shutdown();
     EE::CLog::Shutdown();

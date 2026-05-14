@@ -22,9 +22,11 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <cctype>
 #include <filesystem>
 #include <functional>
 #include <limits>
+#include <unordered_map>
 
 using json = nlohmann::json;
 
@@ -2198,15 +2200,193 @@ static TextureHandle loadCompiledTexture(IRenderAPI* render_api, const std::stri
 // Helper: load texture with .ctex fallback
 static TextureHandle loadTextureWithFallback(IRenderAPI* render_api, const std::string& path)
 {
+    if (!render_api || path.empty())
+        return INVALID_TEXTURE;
+
     // Try .ctex first
     std::filesystem::path p(path);
-    std::string ctex_path = (p.parent_path() / p.stem()).string() + ".ctex";
+    p = p.lexically_normal();
+    std::filesystem::path ctex_path = p;
+    ctex_path.replace_extension(".ctex");
     if (std::filesystem::exists(ctex_path)) {
-        TextureHandle h = loadCompiledTexture(render_api, ctex_path);
+        TextureHandle h = loadCompiledTexture(render_api, ctex_path.string());
         if (h != INVALID_TEXTURE) return h;
     }
+
     // Fallback to original format
     return render_api->loadTexture(path, true, true);
+}
+
+using TextureHandleCache = std::unordered_map<std::string, TextureHandle>;
+
+static std::string normalizeTextureCacheKey(const std::string& path)
+{
+    std::string key = std::filesystem::path(path).lexically_normal().string();
+    std::replace(key.begin(), key.end(), '\\', '/');
+#ifdef _WIN32
+    std::transform(key.begin(), key.end(), key.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+#endif
+    return key;
+}
+
+static std::string resolveCompiledTexturePath(const std::filesystem::path& mesh_dir,
+                                              const std::string& texture_path)
+{
+    if (texture_path.empty())
+        return {};
+
+    std::filesystem::path path(texture_path);
+    if (path.is_absolute())
+        return path.lexically_normal().string();
+
+    return (mesh_dir / path).lexically_normal().string();
+}
+
+static std::string compiledTexturePathFor(const std::string& texture_path)
+{
+    std::filesystem::path path(texture_path);
+    path.replace_extension(".ctex");
+    return path.lexically_normal().string();
+}
+
+static TextureHandle loadTextureWithFallbackCached(IRenderAPI* render_api,
+                                                   const std::string& path,
+                                                   TextureHandleCache& cache)
+{
+    const std::string key = normalizeTextureCacheKey(path);
+    auto it = cache.find(key);
+    if (it != cache.end())
+        return it->second;
+
+    TextureHandle handle = loadTextureWithFallback(render_api, path);
+    if (handle != INVALID_TEXTURE)
+        cache.emplace(key, handle);
+    return handle;
+}
+
+static const Assets::CompiledMeshData::MaterialRef* getCompiledMaterialRefForSubmesh(
+    const Assets::CompiledMeshData& cmesh,
+    size_t submesh_id)
+{
+    if (submesh_id < cmesh.submeshes.size())
+    {
+        const auto& submesh = cmesh.submeshes[submesh_id];
+        if (submesh.material_index < cmesh.material_refs.size())
+            return &cmesh.material_refs[submesh.material_index];
+    }
+
+    // Backward compatibility for older compiled meshes that wrote material refs
+    // in primitive order instead of using the submesh material index.
+    if (cmesh.submeshes.empty() && submesh_id < cmesh.material_refs.size())
+        return &cmesh.material_refs[submesh_id];
+
+    return nullptr;
+}
+
+template <typename LoadTextureFn>
+static void applyCompiledMaterialRef(MaterialRange& range,
+                                     const Assets::CompiledMeshData::MaterialRef& mat_ref,
+                                     LoadTextureFn&& load_texture)
+{
+    range.alpha_mode = mat_ref.alpha_mode;
+    range.alpha_cutoff = mat_ref.alpha_cutoff;
+    range.double_sided = mat_ref.double_sided;
+    range.metallic_factor = mat_ref.metallic_factor;
+    range.roughness_factor = mat_ref.roughness_factor;
+    range.base_color_factor = glm::vec4(mat_ref.base_color_factor[0],
+                                        mat_ref.base_color_factor[1],
+                                        mat_ref.base_color_factor[2],
+                                        mat_ref.base_color_factor[3]);
+
+    TextureHandle first_valid_texture = INVALID_TEXTURE;
+    for (const auto& texture_ref : mat_ref.textures)
+    {
+        TextureHandle texture = load_texture(texture_ref);
+        if (texture == INVALID_TEXTURE)
+            continue;
+
+        if (first_valid_texture == INVALID_TEXTURE)
+            first_valid_texture = texture;
+
+        switch (static_cast<TextureType>(texture_ref.type))
+        {
+            case TextureType::BASE_COLOR:
+            case TextureType::DIFFUSE:
+                range.texture = texture;
+                break;
+            case TextureType::METALLIC_ROUGHNESS:
+                range.metallic_roughness_texture = texture;
+                break;
+            case TextureType::NORMAL:
+                range.normal_texture = texture;
+                break;
+            case TextureType::OCCLUSION:
+                range.occlusion_texture = texture;
+                break;
+            case TextureType::EMISSIVE:
+                range.emissive_texture = texture;
+                break;
+            default:
+                break;
+        }
+    }
+
+    if (range.texture == INVALID_TEXTURE)
+        range.texture = first_valid_texture;
+
+    applyWaterMaterialDefaults(range);
+}
+
+template <typename LoadTextureFn>
+static std::vector<MaterialRange> buildCompiledMaterialRanges(
+    const Assets::CompiledMeshData& cmesh,
+    const Assets::CompiledMeshData::LODLevel& lod,
+    LoadTextureFn&& load_texture)
+{
+    std::vector<MaterialRange> material_ranges;
+
+    if (!lod.submesh_ranges.empty())
+    {
+        material_ranges.reserve(lod.submesh_ranges.size());
+        for (const auto& sr : lod.submesh_ranges)
+        {
+            const auto* mat_ref = getCompiledMaterialRefForSubmesh(cmesh, sr.submesh_id);
+            const std::string mat_name = mat_ref ? mat_ref->name : "";
+
+            MaterialRange range(sr.start_index, sr.index_count, INVALID_TEXTURE, mat_name);
+            range.source_range = sr.submesh_id;
+            range.has_bounds = sr.has_bounds;
+            range.aabb_min = sr.aabb_min;
+            range.aabb_max = sr.aabb_max;
+
+            if (mat_ref)
+                applyCompiledMaterialRef(range, *mat_ref, load_texture);
+
+            material_ranges.push_back(range);
+        }
+        return material_ranges;
+    }
+
+    material_ranges.reserve(cmesh.submeshes.size());
+    for (size_t submesh_id = 0; submesh_id < cmesh.submeshes.size(); ++submesh_id)
+    {
+        const auto& submesh = cmesh.submeshes[submesh_id];
+        const auto* mat_ref = submesh.material_index < cmesh.material_refs.size()
+            ? &cmesh.material_refs[submesh.material_index]
+            : nullptr;
+        const std::string mat_name = mat_ref ? mat_ref->name : submesh.name;
+
+        MaterialRange range(0, 0, INVALID_TEXTURE, mat_name);
+        range.source_range = submesh_id;
+
+        if (mat_ref)
+            applyCompiledMaterialRef(range, *mat_ref, load_texture);
+
+        material_ranges.push_back(range);
+    }
+
+    return material_ranges;
 }
 
 std::shared_ptr<mesh> LevelManager::loadCompiledMesh(const std::string& cmesh_path, IRenderAPI* render_api)
@@ -2247,111 +2427,18 @@ std::shared_ptr<mesh> LevelManager::loadCompiledMesh(const std::string& cmesh_pa
     m_ptr->is_valid = true;
 
     // Resolve material textures
-    std::string mesh_dir = std::filesystem::path(cmesh_path).parent_path().string();
-    if (!mesh_dir.empty() && mesh_dir.back() != '/' && mesh_dir.back() != '\\')
-        mesh_dir += "/";
-
+    const std::filesystem::path mesh_dir = std::filesystem::path(cmesh_path).parent_path();
     if (!cmesh.material_refs.empty() && render_api) {
-        // Build material ranges from submeshes and LOD0 submesh_ranges
-        std::vector<MaterialRange> material_ranges;
+        TextureHandleCache texture_cache;
+        auto load_texture_ref = [&](const Assets::CompiledMeshData::MaterialRef::TextureRef& texture_ref) {
+            const std::string texture_path = resolveCompiledTexturePath(mesh_dir, texture_ref.path);
+            return loadTextureWithFallbackCached(render_api, texture_path, texture_cache);
+        };
 
-        if (!lod0.submesh_ranges.empty()) {
-            for (const auto& sr : lod0.submesh_ranges) {
-                TextureHandle tex = INVALID_TEXTURE;
-                std::string mat_name;
-
-                if (sr.submesh_id < cmesh.material_refs.size()) {
-                    const auto& mat = cmesh.material_refs[sr.submesh_id];
-                    mat_name = mat.name;
-                    // Load first texture reference
-                    for (const auto& tr : mat.textures) {
-                        std::string tex_path = mesh_dir + tr.path;
-                        tex = loadTextureWithFallback(render_api, tex_path);
-                        if (tex != INVALID_TEXTURE) break;
-                    }
-                }
-
-                MaterialRange range(sr.start_index, sr.index_count, tex, mat_name);
-                range.source_range = sr.submesh_id;
-                range.has_bounds = sr.has_bounds;
-                range.aabb_min = sr.aabb_min;
-                range.aabb_max = sr.aabb_max;
-                if (sr.submesh_id < cmesh.material_refs.size()) {
-                    const auto& mat_ref = cmesh.material_refs[sr.submesh_id];
-                    range.alpha_mode = mat_ref.alpha_mode;
-                    range.alpha_cutoff = mat_ref.alpha_cutoff;
-                    range.double_sided = mat_ref.double_sided;
-                    range.metallic_factor = mat_ref.metallic_factor;
-                    range.roughness_factor = mat_ref.roughness_factor;
-                    range.base_color_factor = glm::vec4(mat_ref.base_color_factor[0], mat_ref.base_color_factor[1], mat_ref.base_color_factor[2], mat_ref.base_color_factor[3]);
-                    applyWaterMaterialDefaults(range);
-
-                    // Wire PBR texture handles from compiled material refs
-                    for (const auto& tr : mat_ref.textures) {
-                        TextureHandle pbr_tex = loadTextureWithFallback(render_api, mesh_dir + tr.path);
-                        if (pbr_tex == INVALID_TEXTURE) continue;
-                        switch (static_cast<TextureType>(tr.type)) {
-                            case TextureType::METALLIC_ROUGHNESS: range.metallic_roughness_texture = pbr_tex; break;
-                            case TextureType::NORMAL:             range.normal_texture = pbr_tex; break;
-                            case TextureType::OCCLUSION:          range.occlusion_texture = pbr_tex; break;
-                            case TextureType::EMISSIVE:           range.emissive_texture = pbr_tex; break;
-                            default: break;
-                        }
-                    }
-                }
-                material_ranges.push_back(range);
-            }
-        } else if (!cmesh.submeshes.empty()) {
-            // Fallback: use submesh table with LOD0 vertex data
-            size_t current = 0;
-            for (size_t submesh_id = 0; submesh_id < cmesh.submeshes.size(); ++submesh_id) {
-                const auto& sub = cmesh.submeshes[submesh_id];
-                TextureHandle tex = INVALID_TEXTURE;
-                std::string mat_name = sub.name;
-
-                if (sub.material_index < cmesh.material_refs.size()) {
-                    const auto& mat = cmesh.material_refs[sub.material_index];
-                    mat_name = mat.name;
-                    for (const auto& tr : mat.textures) {
-                        std::string tex_path = mesh_dir + tr.path;
-                        tex = loadTextureWithFallback(render_api, tex_path);
-                        if (tex != INVALID_TEXTURE) break;
-                    }
-                }
-
-                // We don't have per-submesh ranges without indexed info
-                MaterialRange range(current, 0, tex, mat_name);
-                range.source_range = submesh_id;
-                if (sub.material_index < cmesh.material_refs.size()) {
-                    const auto& mat_ref = cmesh.material_refs[sub.material_index];
-                    range.alpha_mode = mat_ref.alpha_mode;
-                    range.alpha_cutoff = mat_ref.alpha_cutoff;
-                    range.double_sided = mat_ref.double_sided;
-                    range.metallic_factor = mat_ref.metallic_factor;
-                    range.roughness_factor = mat_ref.roughness_factor;
-                    range.base_color_factor = glm::vec4(mat_ref.base_color_factor[0], mat_ref.base_color_factor[1], mat_ref.base_color_factor[2], mat_ref.base_color_factor[3]);
-                    applyWaterMaterialDefaults(range);
-
-                    // Wire PBR texture handles from compiled material refs
-                    for (const auto& tr : mat_ref.textures) {
-                        TextureHandle pbr_tex = loadTextureWithFallback(render_api, mesh_dir + tr.path);
-                        if (pbr_tex == INVALID_TEXTURE) continue;
-                        switch (static_cast<TextureType>(tr.type)) {
-                            case TextureType::METALLIC_ROUGHNESS: range.metallic_roughness_texture = pbr_tex; break;
-                            case TextureType::NORMAL:             range.normal_texture = pbr_tex; break;
-                            case TextureType::OCCLUSION:          range.occlusion_texture = pbr_tex; break;
-                            case TextureType::EMISSIVE:           range.emissive_texture = pbr_tex; break;
-                            default: break;
-                        }
-                    }
-                }
-                material_ranges.push_back(range);
-            }
-        }
-
-        if (!material_ranges.empty()) {
+        std::vector<MaterialRange> material_ranges =
+            buildCompiledMaterialRanges(cmesh, lod0, load_texture_ref);
+        if (!material_ranges.empty())
             m_ptr->setMaterialRanges(material_ranges);
-        }
     }
 
     // Load LOD1+ levels
@@ -2435,26 +2522,23 @@ void LevelManager::preloadMeshCPU(MeshPreloadData& data)
             }
 
             // Pre-load compiled textures (.ctex) for materials
-            std::string mesh_dir = std::filesystem::path(cmesh_path).parent_path().string();
-            if (!mesh_dir.empty() && mesh_dir.back() != '/' && mesh_dir.back() != '\\')
-                mesh_dir += "/";
+            const std::filesystem::path mesh_dir = std::filesystem::path(cmesh_path).parent_path();
 
             for (const auto& mat_ref : data.compiled_data->material_refs)
             {
                 for (const auto& tex_ref : mat_ref.textures)
                 {
-                    std::string tex_path = mesh_dir + tex_ref.path;
-                    // Try .ctex variant
-                    std::filesystem::path tp(tex_path);
-                    std::string ctex_path = (tp.parent_path() / tp.stem()).string() + ".ctex";
+                    std::string tex_path = resolveCompiledTexturePath(mesh_dir, tex_ref.path);
+                    std::string ctex_path = compiledTexturePathFor(tex_path);
                     if (std::filesystem::exists(ctex_path))
                     {
-                        if (data.preloaded_textures.find(ctex_path) == data.preloaded_textures.end())
+                        const std::string ctex_key = normalizeTextureCacheKey(ctex_path);
+                        if (data.preloaded_textures.find(ctex_key) == data.preloaded_textures.end())
                         {
                             MeshPreloadData::PreloadedTexture pt;
                             pt.is_compiled = true;
                             pt.success = loadCompiledTextureDataForStreaming(pt.compiled_tex, ctex_path);
-                            data.preloaded_textures[ctex_path] = std::move(pt);
+                            data.preloaded_textures[ctex_key] = std::move(pt);
                         }
                     }
                 }
@@ -2559,6 +2643,30 @@ static TextureHandle uploadPreloadedCompiledTexture(IRenderAPI* render_api,
     return uploadCompiledTextureData(render_api, tex_data);
 }
 
+static TextureHandle loadPreloadedTextureWithFallbackCached(IRenderAPI* render_api,
+                                                            MeshPreloadData& preload,
+                                                            const std::string& path,
+                                                            TextureHandleCache& cache)
+{
+    const std::string key = normalizeTextureCacheKey(path);
+    auto it = cache.find(key);
+    if (it != cache.end())
+        return it->second;
+
+    TextureHandle handle = INVALID_TEXTURE;
+    const std::string ctex_key = normalizeTextureCacheKey(compiledTexturePathFor(path));
+    auto preloaded_it = preload.preloaded_textures.find(ctex_key);
+    if (preloaded_it != preload.preloaded_textures.end() && preloaded_it->second.success)
+        handle = uploadPreloadedCompiledTexture(render_api, preloaded_it->second.compiled_tex);
+
+    if (handle == INVALID_TEXTURE)
+        handle = loadTextureWithFallback(render_api, path);
+
+    if (handle != INVALID_TEXTURE)
+        cache.emplace(key, handle);
+    return handle;
+}
+
 std::shared_ptr<mesh> LevelManager::finalizeCompiledMeshGPU(
     MeshPreloadData& preload,
     const LevelEntity& entity,
@@ -2597,141 +2705,18 @@ std::shared_ptr<mesh> LevelManager::finalizeCompiledMeshGPU(
     m_ptr->is_valid = true;
 
     // Resolve material textures using preloaded texture data
-    std::string mesh_dir = std::filesystem::path(preload.resolved_path).parent_path().string();
-    if (!mesh_dir.empty() && mesh_dir.back() != '/' && mesh_dir.back() != '\\')
-        mesh_dir += "/";
-
+    const std::filesystem::path mesh_dir = std::filesystem::path(preload.resolved_path).parent_path();
     if (!cmesh.material_refs.empty() && render_api) {
-        std::vector<MaterialRange> material_ranges;
+        TextureHandleCache texture_cache;
+        auto load_texture_ref = [&](const Assets::CompiledMeshData::MaterialRef::TextureRef& texture_ref) {
+            const std::string texture_path = resolveCompiledTexturePath(mesh_dir, texture_ref.path);
+            return loadPreloadedTextureWithFallbackCached(render_api, preload, texture_path, texture_cache);
+        };
 
-        if (!lod0.submesh_ranges.empty()) {
-            for (const auto& sr : lod0.submesh_ranges) {
-                TextureHandle tex = INVALID_TEXTURE;
-                std::string mat_name;
-
-                if (sr.submesh_id < cmesh.material_refs.size()) {
-                    const auto& mat = cmesh.material_refs[sr.submesh_id];
-                    mat_name = mat.name;
-                    for (const auto& tr : mat.textures) {
-                        std::string tex_path = mesh_dir + tr.path;
-                        // Try preloaded .ctex first
-                        std::filesystem::path tp(tex_path);
-                        std::string ctex_path = (tp.parent_path() / tp.stem()).string() + ".ctex";
-                        auto it = preload.preloaded_textures.find(ctex_path);
-                        if (it != preload.preloaded_textures.end() && it->second.success) {
-                            tex = uploadPreloadedCompiledTexture(render_api, it->second.compiled_tex);
-                        } else {
-                            // Fallback to loading from disk (main thread)
-                            tex = loadTextureWithFallback(render_api, tex_path);
-                        }
-                        if (tex != INVALID_TEXTURE) break;
-                    }
-                }
-
-                MaterialRange range(sr.start_index, sr.index_count, tex, mat_name);
-                range.source_range = sr.submesh_id;
-                range.has_bounds = sr.has_bounds;
-                range.aabb_min = sr.aabb_min;
-                range.aabb_max = sr.aabb_max;
-                if (sr.submesh_id < cmesh.material_refs.size()) {
-                    const auto& mat_ref = cmesh.material_refs[sr.submesh_id];
-                    range.alpha_mode = mat_ref.alpha_mode;
-                    range.alpha_cutoff = mat_ref.alpha_cutoff;
-                    range.double_sided = mat_ref.double_sided;
-                    range.metallic_factor = mat_ref.metallic_factor;
-                    range.roughness_factor = mat_ref.roughness_factor;
-                    range.base_color_factor = glm::vec4(mat_ref.base_color_factor[0], mat_ref.base_color_factor[1], mat_ref.base_color_factor[2], mat_ref.base_color_factor[3]);
-                    applyWaterMaterialDefaults(range);
-
-                    // Wire PBR texture handles from compiled material refs
-                    for (const auto& tr : mat_ref.textures) {
-                        std::string pbr_path = mesh_dir + tr.path;
-                        std::filesystem::path pbr_tp(pbr_path);
-                        std::string pbr_ctex = (pbr_tp.parent_path() / pbr_tp.stem()).string() + ".ctex";
-                        TextureHandle pbr_tex = INVALID_TEXTURE;
-                        auto pbr_it = preload.preloaded_textures.find(pbr_ctex);
-                        if (pbr_it != preload.preloaded_textures.end() && pbr_it->second.success) {
-                            pbr_tex = uploadPreloadedCompiledTexture(render_api, pbr_it->second.compiled_tex);
-                        } else {
-                            pbr_tex = loadTextureWithFallback(render_api, pbr_path);
-                        }
-                        if (pbr_tex == INVALID_TEXTURE) continue;
-                        switch (static_cast<TextureType>(tr.type)) {
-                            case TextureType::METALLIC_ROUGHNESS: range.metallic_roughness_texture = pbr_tex; break;
-                            case TextureType::NORMAL:             range.normal_texture = pbr_tex; break;
-                            case TextureType::OCCLUSION:          range.occlusion_texture = pbr_tex; break;
-                            case TextureType::EMISSIVE:           range.emissive_texture = pbr_tex; break;
-                            default: break;
-                        }
-                    }
-                }
-                material_ranges.push_back(range);
-            }
-        } else if (!cmesh.submeshes.empty()) {
-            size_t current = 0;
-            for (size_t submesh_id = 0; submesh_id < cmesh.submeshes.size(); ++submesh_id) {
-                const auto& sub = cmesh.submeshes[submesh_id];
-                TextureHandle tex = INVALID_TEXTURE;
-                std::string mat_name = sub.name;
-
-                if (sub.material_index < cmesh.material_refs.size()) {
-                    const auto& mat = cmesh.material_refs[sub.material_index];
-                    mat_name = mat.name;
-                    for (const auto& tr : mat.textures) {
-                        std::string tex_path = mesh_dir + tr.path;
-                        std::filesystem::path tp(tex_path);
-                        std::string ctex_path = (tp.parent_path() / tp.stem()).string() + ".ctex";
-                        auto it = preload.preloaded_textures.find(ctex_path);
-                        if (it != preload.preloaded_textures.end() && it->second.success) {
-                            tex = uploadPreloadedCompiledTexture(render_api, it->second.compiled_tex);
-                        } else {
-                            tex = loadTextureWithFallback(render_api, tex_path);
-                        }
-                        if (tex != INVALID_TEXTURE) break;
-                    }
-                }
-
-                MaterialRange range(current, 0, tex, mat_name);
-                range.source_range = submesh_id;
-                if (sub.material_index < cmesh.material_refs.size()) {
-                    const auto& mat_ref = cmesh.material_refs[sub.material_index];
-                    range.alpha_mode = mat_ref.alpha_mode;
-                    range.alpha_cutoff = mat_ref.alpha_cutoff;
-                    range.double_sided = mat_ref.double_sided;
-                    range.metallic_factor = mat_ref.metallic_factor;
-                    range.roughness_factor = mat_ref.roughness_factor;
-                    range.base_color_factor = glm::vec4(mat_ref.base_color_factor[0], mat_ref.base_color_factor[1], mat_ref.base_color_factor[2], mat_ref.base_color_factor[3]);
-                    applyWaterMaterialDefaults(range);
-
-                    // Wire PBR texture handles from compiled material refs
-                    for (const auto& tr : mat_ref.textures) {
-                        std::string pbr_path = mesh_dir + tr.path;
-                        std::filesystem::path pbr_tp(pbr_path);
-                        std::string pbr_ctex = (pbr_tp.parent_path() / pbr_tp.stem()).string() + ".ctex";
-                        TextureHandle pbr_tex = INVALID_TEXTURE;
-                        auto pbr_it = preload.preloaded_textures.find(pbr_ctex);
-                        if (pbr_it != preload.preloaded_textures.end() && pbr_it->second.success) {
-                            pbr_tex = uploadPreloadedCompiledTexture(render_api, pbr_it->second.compiled_tex);
-                        } else {
-                            pbr_tex = loadTextureWithFallback(render_api, pbr_path);
-                        }
-                        if (pbr_tex == INVALID_TEXTURE) continue;
-                        switch (static_cast<TextureType>(tr.type)) {
-                            case TextureType::METALLIC_ROUGHNESS: range.metallic_roughness_texture = pbr_tex; break;
-                            case TextureType::NORMAL:             range.normal_texture = pbr_tex; break;
-                            case TextureType::OCCLUSION:          range.occlusion_texture = pbr_tex; break;
-                            case TextureType::EMISSIVE:           range.emissive_texture = pbr_tex; break;
-                            default: break;
-                        }
-                    }
-                }
-                material_ranges.push_back(range);
-            }
-        }
-
-        if (!material_ranges.empty()) {
+        std::vector<MaterialRange> material_ranges =
+            buildCompiledMaterialRanges(cmesh, lod0, load_texture_ref);
+        if (!material_ranges.empty())
             m_ptr->setMaterialRanges(material_ranges);
-        }
     }
 
     // Load LOD1+ levels to GPU

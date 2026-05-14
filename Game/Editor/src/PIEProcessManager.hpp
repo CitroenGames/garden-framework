@@ -25,6 +25,12 @@ public:
                      const std::string& server_address,
                      uint16_t server_port);
 
+    // Spawn a standalone game preview process.
+    bool spawnStandalone(const std::string& label,
+                         const std::string& game_exe_path,
+                         const std::string& project_path,
+                         const std::string& render_api_arg);
+
     // Spawn a dedicated server process.
     bool spawnServer(const std::string& server_exe_path,
                      const std::string& project_path,

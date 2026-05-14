@@ -1,0 +1,12 @@
+{
+    "name": "VR",
+    "engine_id": "",
+    "engine_version": "1.0",
+    "game_module": "bin/VR",
+    "default_level": "assets/levels/main.level.json",
+    "asset_directories": [
+        "assets/"
+    ],
+    "source_directory": "src/",
+    "buildscript": "VR.buildscript"
+}

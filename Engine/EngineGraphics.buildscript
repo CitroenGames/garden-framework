@@ -62,6 +62,7 @@ sources = {
     src/Graphics/RenderGraph/RGCompiler.cpp
     src/Graphics/RenderGraph/RGBuilder.cpp
     src/Graphics/RenderGraph/PostProcessGraphBuilder.cpp
+    src/XR/OpenXRSystem.cpp
     src/Graphics/Metal/MetalRenderAPI.mm [macOS]
     src/Graphics/Metal/MetalRenderAPI_Frame.mm [macOS]
     src/Graphics/Metal/MetalRenderAPI_Rendering.mm [macOS]
@@ -83,6 +84,7 @@ sources = {
 headers = {
     src/Graphics/**/*.hpp
     src/Graphics/**/*.h
+    src/XR/**/*.hpp
     src/ImGui/**/*.hpp
     src/UI/**/*.h
 }
@@ -114,6 +116,7 @@ target_link_libraries(
     PUBLIC WHOLE_ARCHIVE imgui-docking
     PUBLIC imguizmo
     PUBLIC RmlUi
+    PUBLIC OpenXR
 )
 multiprocessor = true
 simd = AdvancedVectorExtensions2

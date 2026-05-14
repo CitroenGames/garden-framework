@@ -31,7 +31,7 @@ struct CompiledMeshData {
 
         struct TextureRef {
             uint8_t     type = 0; // TextureType cast to uint8
-            std::string path;     // relative, uses .ctex when compiled
+            std::string path;     // source-relative texture URI; runtime prefers sibling .ctex
         };
         std::vector<TextureRef> textures;
     };

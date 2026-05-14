@@ -57,6 +57,92 @@ static std::string replaceExtension(const std::string& path, const std::string& 
     return p.string();
 }
 
+static uint8_t encodeGltfAlphaMode(const std::string& alpha_mode)
+{
+    if (alpha_mode == "MASK")
+        return 1;
+    if (alpha_mode == "BLEND")
+        return 2;
+    return 0;
+}
+
+static std::vector<CompiledMeshData::MaterialRef> buildCompiledMaterialRefs(const std::string& source_path)
+{
+    std::vector<CompiledMeshData::MaterialRef> refs;
+
+    MaterialLoaderConfig mat_cfg;
+    mat_cfg.verbose_logging = false;
+    mat_cfg.load_all_textures = true;
+    mat_cfg.load_embedded_textures = false;
+    mat_cfg.texture_base_path = fs::path(source_path).parent_path().string();
+
+    MaterialLoadResult material_data = GltfMaterialLoader::loadMaterials(source_path, nullptr, mat_cfg);
+    if (!material_data.success)
+        return refs;
+
+    refs.reserve(material_data.materials.size());
+    for (const auto& material : material_data.materials)
+    {
+        const auto& props = material.properties;
+
+        CompiledMeshData::MaterialRef ref;
+        ref.name = props.name;
+        ref.base_color_factor[0] = props.base_color_factor[0];
+        ref.base_color_factor[1] = props.base_color_factor[1];
+        ref.base_color_factor[2] = props.base_color_factor[2];
+        ref.base_color_factor[3] = props.base_color_factor[3];
+        ref.metallic_factor = props.metallic_factor;
+        ref.roughness_factor = props.roughness_factor;
+        ref.alpha_mode = encodeGltfAlphaMode(props.alpha_mode);
+        ref.alpha_cutoff = props.alpha_cutoff;
+        ref.double_sided = props.double_sided;
+
+        for (const auto& texture : material.textures.textures)
+        {
+            if (texture.uri.empty() || texture.is_embedded)
+                continue;
+
+            CompiledMeshData::MaterialRef::TextureRef tex_ref;
+            tex_ref.type = static_cast<uint8_t>(texture.type);
+            tex_ref.path = texture.uri;
+            ref.textures.push_back(std::move(tex_ref));
+        }
+
+        refs.push_back(std::move(ref));
+    }
+
+    return refs;
+}
+
+static std::vector<CompiledMeshData::MaterialRef> buildFallbackMaterialRefs(
+    const std::string& source_path,
+    const std::vector<std::string>& texture_paths)
+{
+    std::vector<CompiledMeshData::MaterialRef> refs;
+    auto material_names = GltfMaterialLoader::getMaterialNames(source_path);
+    refs.reserve(material_names.size());
+
+    for (const auto& name : material_names)
+    {
+        CompiledMeshData::MaterialRef ref;
+        ref.name = name;
+        refs.push_back(std::move(ref));
+    }
+
+    for (size_t i = 0; i < texture_paths.size() && i < refs.size(); ++i)
+    {
+        if (texture_paths[i].empty())
+            continue;
+
+        CompiledMeshData::MaterialRef::TextureRef tex_ref;
+        tex_ref.type = static_cast<uint8_t>(TextureType::BASE_COLOR);
+        tex_ref.path = texture_paths[i];
+        refs[i].textures.push_back(std::move(tex_ref));
+    }
+
+    return refs;
+}
+
 static void updateCollisionMetadataForModel(const std::string& source_path,
                                             const LODMeshData& collision_mesh,
                                             uint64_t source_hash,
@@ -465,37 +551,9 @@ bool AssetCompiler::compileModel(
         material_names = result.material_names;
         texture_paths = result.texture_paths;
 
-        // Extract material properties from the glTF file directly
-        // (load materials without a render API just for metadata)
-        {
-            MaterialLoaderConfig mat_cfg;
-            mat_cfg.verbose_logging = false;
-            mat_cfg.load_all_textures = false; // don't load pixels, just metadata
-
-            auto mat_names_list = GltfMaterialLoader::getMaterialNames(source_path);
-            auto tex_uris = GltfMaterialLoader::getTextureUris(source_path);
-
-            // We can't load full material data without a render API,
-            // but we can store names and texture paths from the gltf result
-            for (size_t i = 0; i < mat_names_list.size(); ++i) {
-                CompiledMeshData::MaterialRef ref;
-                ref.name = mat_names_list[i];
-                // Store texture paths from the gltf result
-                // Map them to .ctex extensions
-                mat_refs.push_back(std::move(ref));
-            }
-
-            // Associate texture paths with materials using the gltf texture_paths
-            for (size_t i = 0; i < texture_paths.size() && i < mat_refs.size(); ++i) {
-                if (!texture_paths[i].empty()) {
-                    CompiledMeshData::MaterialRef::TextureRef tex_ref;
-                    tex_ref.type = static_cast<uint8_t>(TextureType::BASE_COLOR);
-                    // Replace texture extension with .ctex
-                    tex_ref.path = replaceExtension(texture_paths[i], ".ctex");
-                    mat_refs[i].textures.push_back(std::move(tex_ref));
-                }
-            }
-        }
+        mat_refs = buildCompiledMaterialRefs(source_path);
+        if (mat_refs.empty())
+            mat_refs = buildFallbackMaterialRefs(source_path, texture_paths);
     }
     else if (ext == ".obj") {
         ObjLoaderConfig obj_cfg;

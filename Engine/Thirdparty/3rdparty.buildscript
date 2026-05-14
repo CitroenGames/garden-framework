@@ -22,3 +22,4 @@ include = miniaudio/miniaudio.buildscript
 include = meshoptimizer/meshoptimizer.buildscript
 include = recastnavigation/recast.buildscript
 include = bc7enc/bc7enc.buildscript
+include = OpenXR-SDK-1.1.59/openxr.buildscript

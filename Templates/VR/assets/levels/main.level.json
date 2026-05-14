@@ -1,0 +1,242 @@
+{
+  "metadata": {
+    "level_name": "VR Walkaround Template",
+    "author": "Garden",
+    "version": "1.0",
+    "world": {
+      "gravity": {
+        "x": 0.0,
+        "y": -1.0,
+        "z": 0.0
+      },
+      "fixed_delta": 0.016
+    },
+    "lighting": {
+      "ambient": {
+        "r": 0.18,
+        "g": 0.2,
+        "b": 0.24
+      },
+      "diffuse": {
+        "r": 0.86,
+        "g": 0.9,
+        "b": 1.0
+      },
+      "direction": {
+        "x": -0.4,
+        "y": -1.0,
+        "z": 0.25
+      }
+    }
+  },
+  "entities": [
+    {
+      "name": "floor",
+      "type": "Renderable",
+      "transform": {
+        "position": { "x": 0.0, "y": 0.0, "z": 0.0 },
+        "rotation": { "x": 0.0, "y": 0.0, "z": 0.0 },
+        "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }
+      },
+      "mesh": {
+        "path": "assets/models/ground_plane.obj",
+        "textures": [],
+        "culling": true,
+        "transparent": false,
+        "visible": true
+      },
+      "collider": {
+        "shape_type": "Box",
+        "box_half_extents": { "x": 12.0, "y": 0.08, "z": 12.0 },
+        "friction": 0.85,
+        "restitution": 0.0
+      }
+    },
+    {
+      "name": "wall_north",
+      "type": "Renderable",
+      "transform": {
+        "position": { "x": 0.0, "y": 1.0, "z": 12.0 },
+        "rotation": { "x": 0.0, "y": 0.0, "z": 0.0 },
+        "scale": { "x": 24.0, "y": 2.0, "z": 0.35 }
+      },
+      "mesh": {
+        "path": "assets/models/unit_cube.obj",
+        "textures": [],
+        "culling": true,
+        "transparent": false,
+        "visible": true
+      },
+      "collider": {
+        "shape_type": "Box",
+        "box_half_extents": { "x": 0.5, "y": 0.5, "z": 0.5 },
+        "friction": 0.8,
+        "restitution": 0.0
+      }
+    },
+    {
+      "name": "wall_south",
+      "type": "Renderable",
+      "transform": {
+        "position": { "x": 0.0, "y": 1.0, "z": -12.0 },
+        "rotation": { "x": 0.0, "y": 0.0, "z": 0.0 },
+        "scale": { "x": 24.0, "y": 2.0, "z": 0.35 }
+      },
+      "mesh": {
+        "path": "assets/models/unit_cube.obj",
+        "textures": [],
+        "culling": true,
+        "transparent": false,
+        "visible": true
+      },
+      "collider": {
+        "shape_type": "Box",
+        "box_half_extents": { "x": 0.5, "y": 0.5, "z": 0.5 },
+        "friction": 0.8,
+        "restitution": 0.0
+      }
+    },
+    {
+      "name": "wall_east",
+      "type": "Renderable",
+      "transform": {
+        "position": { "x": 12.0, "y": 1.0, "z": 0.0 },
+        "rotation": { "x": 0.0, "y": 0.0, "z": 0.0 },
+        "scale": { "x": 0.35, "y": 2.0, "z": 24.0 }
+      },
+      "mesh": {
+        "path": "assets/models/unit_cube.obj",
+        "textures": [],
+        "culling": true,
+        "transparent": false,
+        "visible": true
+      },
+      "collider": {
+        "shape_type": "Box",
+        "box_half_extents": { "x": 0.5, "y": 0.5, "z": 0.5 },
+        "friction": 0.8,
+        "restitution": 0.0
+      }
+    },
+    {
+      "name": "wall_west",
+      "type": "Renderable",
+      "transform": {
+        "position": { "x": -12.0, "y": 1.0, "z": 0.0 },
+        "rotation": { "x": 0.0, "y": 0.0, "z": 0.0 },
+        "scale": { "x": 0.35, "y": 2.0, "z": 24.0 }
+      },
+      "mesh": {
+        "path": "assets/models/unit_cube.obj",
+        "textures": [],
+        "culling": true,
+        "transparent": false,
+        "visible": true
+      },
+      "collider": {
+        "shape_type": "Box",
+        "box_half_extents": { "x": 0.5, "y": 0.5, "z": 0.5 },
+        "friction": 0.8,
+        "restitution": 0.0
+      }
+    },
+    {
+      "name": "walkaround_block_a",
+      "type": "Renderable",
+      "transform": {
+        "position": { "x": -3.5, "y": 0.45, "z": 2.0 },
+        "rotation": { "x": 0.0, "y": 18.0, "z": 0.0 },
+        "scale": { "x": 2.5, "y": 0.9, "z": 1.2 }
+      },
+      "mesh": {
+        "path": "assets/models/unit_cube.obj",
+        "textures": [],
+        "culling": true,
+        "transparent": false,
+        "visible": true
+      },
+      "collider": {
+        "shape_type": "Box",
+        "box_half_extents": { "x": 0.5, "y": 0.5, "z": 0.5 },
+        "friction": 0.8,
+        "restitution": 0.0
+      }
+    },
+    {
+      "name": "walkaround_block_b",
+      "type": "Renderable",
+      "transform": {
+        "position": { "x": 3.5, "y": 0.75, "z": -2.5 },
+        "rotation": { "x": 0.0, "y": -24.0, "z": 0.0 },
+        "scale": { "x": 1.6, "y": 1.5, "z": 1.6 }
+      },
+      "mesh": {
+        "path": "assets/models/unit_cube.obj",
+        "textures": [],
+        "culling": true,
+        "transparent": false,
+        "visible": true
+      },
+      "collider": {
+        "shape_type": "Box",
+        "box_half_extents": { "x": 0.5, "y": 0.5, "z": 0.5 },
+        "friction": 0.8,
+        "restitution": 0.0
+      }
+    },
+    {
+      "name": "player",
+      "type": "Player",
+      "transform": {
+        "position": { "x": 0.0, "y": 1.2, "z": -5.5 },
+        "rotation": { "x": 0.0, "y": 0.0, "z": 0.0 },
+        "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }
+      },
+      "player_properties": {
+        "speed": 3.0,
+        "jump_force": 3.8,
+        "mouse_sensitivity": 0.65,
+        "apply_gravity": true
+      },
+      "components": {
+        "PlayerComponent": {
+          "speed": 3.0,
+          "jump_force": 3.8,
+          "mouse_sensitivity": 0.65,
+          "capsule_half_height": 0.85,
+          "capsule_radius": 0.28,
+          "input_enabled": true
+        },
+        "CharacterControllerComponent": {
+          "move_speed": 3.0,
+          "jump_velocity": 3.8,
+          "ground_acceleration": 7.0,
+          "air_acceleration": 3.0,
+          "friction": 6.0,
+          "capsule_half_height": 0.85,
+          "capsule_radius": 0.28,
+          "step_up_height": 0.25,
+          "stick_to_floor_distance": 0.35,
+          "input_enabled": true
+        }
+      }
+    },
+    {
+      "name": "key_light",
+      "type": "PointLight",
+      "transform": {
+        "position": { "x": -4.5, "y": 5.5, "z": -4.0 },
+        "rotation": { "x": 0.0, "y": 0.0, "z": 0.0 },
+        "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }
+      },
+      "point_light": {
+        "color": { "r": 0.95, "g": 0.9, "b": 0.78 },
+        "intensity": 5.0,
+        "range": 18.0,
+        "constant_attenuation": 1.0,
+        "linear_attenuation": 0.08,
+        "quadratic_attenuation": 0.018
+      }
+    }
+  ]
+}

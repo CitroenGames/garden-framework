@@ -17,6 +17,7 @@ public_includes = {
     Thirdparty/imgui-docking/backends
     Thirdparty/ImGuizmo
     Thirdparty/tinygltf-2.9.6
+    Thirdparty/OpenXR-SDK-1.1.59/include
 }
 public_libs = {
     ../bin/EngineCore.lib
