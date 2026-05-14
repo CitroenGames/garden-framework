@@ -7,18 +7,12 @@ if(Windows)
 }
 sources = {
     src/**/*.cpp
-    ../../Engine/Thirdparty/imgui-docking/imgui.cpp
-    ../../Engine/Thirdparty/imgui-docking/imgui_draw.cpp
-    ../../Engine/Thirdparty/imgui-docking/imgui_widgets.cpp
-    ../../Engine/Thirdparty/imgui-docking/imgui_tables.cpp
-    ../../Engine/Thirdparty/imgui-docking/backends/imgui_impl_sdl3.cpp
-    ../../Engine/Thirdparty/imgui-docking/backends/imgui_impl_sdlrenderer3.cpp
 }
 headers = src/**/*.hpp
-includes = src, ../../Engine/Thirdparty/tinygltf-2.9.6, ../../Engine/Thirdparty/imgui-docking, ../../Engine/Thirdparty/imgui-docking/backends
-defines = ENGINEGRAPHICS_BUILDING_DLL
+includes = src, ../../Engine/Thirdparty/tinygltf-2.9.6, ../../Engine/Thirdparty/RmlUi-6.2/Include, ../../Engine/Thirdparty/RmlUi-6.2/Backends
+defines = ENGINEGRAPHICS_BUILDING_DLL, RMLUI_SDL_VERSION_MAJOR=3, RMLUI_STATIC_LIB
 std = 20
 utf8 = true
 multiprocessor = true
 simd = AdvancedVectorExtensions2
-target_link_libraries(SDL3)
+target_link_libraries(RmlUi, freetype, SDL3)
