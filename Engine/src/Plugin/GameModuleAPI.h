@@ -2,7 +2,40 @@
 
 #include <cstdint>
 
-#define GARDEN_MODULE_API_VERSION 3
+// Game modules pass STL-heavy engine objects across the DLL boundary
+// (world, entt::registry, shared component storage). The compatibility token
+// therefore includes both the source API revision and the C++ runtime/STL ABI
+// shape that changes between Debug/Release builds on MSVC.
+#define GARDEN_MODULE_API_REVISION 4
+
+#if defined(_MSC_VER)
+#   define GARDEN_MODULE_COMPILER_FAMILY 1
+#   define GARDEN_MODULE_COMPILER_VERSION (_MSC_VER)
+#else
+#   define GARDEN_MODULE_COMPILER_FAMILY 0
+#   define GARDEN_MODULE_COMPILER_VERSION 0
+#endif
+
+#if defined(_ITERATOR_DEBUG_LEVEL)
+#   define GARDEN_MODULE_STL_DEBUG_LEVEL (_ITERATOR_DEBUG_LEVEL)
+#elif defined(_GLIBCXX_DEBUG) || (defined(_LIBCPP_DEBUG) && _LIBCPP_DEBUG)
+#   define GARDEN_MODULE_STL_DEBUG_LEVEL 1
+#else
+#   define GARDEN_MODULE_STL_DEBUG_LEVEL 0
+#endif
+
+#if defined(_DEBUG)
+#   define GARDEN_MODULE_DEBUG_RUNTIME 1
+#else
+#   define GARDEN_MODULE_DEBUG_RUNTIME 0
+#endif
+
+#define GARDEN_MODULE_API_VERSION (static_cast<int32_t>( \
+    ((GARDEN_MODULE_API_REVISION & 0xff) << 24) | \
+    ((GARDEN_MODULE_COMPILER_FAMILY & 0x0f) << 20) | \
+    ((GARDEN_MODULE_COMPILER_VERSION & 0x0fff) << 8) | \
+    ((GARDEN_MODULE_STL_DEBUG_LEVEL & 0x0f) << 4) | \
+    (GARDEN_MODULE_DEBUG_RUNTIME & 0x0f)))
 
 // Forward declarations
 class world;

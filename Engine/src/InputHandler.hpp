@@ -2,6 +2,7 @@
 
 #include "InputManager.hpp"
 #include "ImGui/ImGuiManager.hpp"
+#include "UI/RmlUiManager.h"
 #include <SDL3/SDL.h>
 #include <memory>
 #include <functional>
@@ -189,6 +190,9 @@ public:
                 consumed = true;
                 break;
             }
+
+            if (!consumed && RmlUiManager::get().isInitialized())
+                consumed = RmlUiManager::get().processEvent(event);
 
             if (!consumed && should_route_to_game_input(event))
                 input_manager->process_event(event);

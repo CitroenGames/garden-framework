@@ -2,6 +2,10 @@
 #include "Utils/Log.hpp"
 
 #include <RmlUi/Core.h>
+#include <RmlUi/Core/Element.h>
+#include <RmlUi/Core/ElementDocument.h>
+#include <RmlUi/Core/Event.h>
+#include <RmlUi/Core/EventListener.h>
 #include <RmlUi/Core/Traits.h>
 #include <RmlUi/Debugger.h>
 
@@ -23,8 +27,10 @@ static volatile auto s_force_rml_family = &Rml::Family<int>::Id;
 #include "Graphics/VulkanRenderAPI.hpp"
 
 #include <algorithm>
+#include <filesystem>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace
 {
@@ -58,6 +64,226 @@ namespace
 
         delete model;
     }
+
+    Rml::Element* findElementById(void* document, const char* id)
+    {
+        if (!document || !isValidName(id))
+            return nullptr;
+
+        return static_cast<Rml::ElementDocument*>(document)->GetElementById(id);
+    }
+
+    Rml::PropertyId toRmlPropertyId(RmlUiManager::EditorStyleProperty property)
+    {
+        switch (property)
+        {
+        case RmlUiManager::EditorStyleProperty::Width: return Rml::PropertyId::Width;
+        case RmlUiManager::EditorStyleProperty::Height: return Rml::PropertyId::Height;
+        case RmlUiManager::EditorStyleProperty::Left: return Rml::PropertyId::Left;
+        case RmlUiManager::EditorStyleProperty::Right: return Rml::PropertyId::Right;
+        case RmlUiManager::EditorStyleProperty::Top: return Rml::PropertyId::Top;
+        case RmlUiManager::EditorStyleProperty::Bottom: return Rml::PropertyId::Bottom;
+        }
+
+        return Rml::PropertyId::Invalid;
+    }
+
+    Rml::EventId toRmlEventId(RmlUiManager::EditorEventType type)
+    {
+        switch (type)
+        {
+        case RmlUiManager::EditorEventType::Click: return Rml::EventId::Click;
+        case RmlUiManager::EditorEventType::Mouseover: return Rml::EventId::Mouseover;
+        case RmlUiManager::EditorEventType::Mousedown: return Rml::EventId::Mousedown;
+        case RmlUiManager::EditorEventType::Change: return Rml::EventId::Change;
+        }
+
+        return Rml::EventId::Invalid;
+    }
+
+    bool elementHasMenuData(Rml::Element* element)
+    {
+        return element &&
+            (!element->GetId().empty() ||
+             element->HasAttribute("data-command") ||
+             element->HasAttribute("data-tab") ||
+             element->HasAttribute("data-map") ||
+             element->HasAttribute("data-setting"));
+    }
+
+    void loadFontFaceIfExists(const std::filesystem::path& path, bool fallback = false)
+    {
+        std::error_code ec;
+        if (std::filesystem::exists(path, ec))
+            Rml::LoadFontFace(path.string(), fallback);
+    }
+
+    void loadOptionalOpenStrikeFonts()
+    {
+        const std::filesystem::path relative_font_dir = std::filesystem::path("assets") / "resource" / "ui" / "fonts";
+        const std::filesystem::path executable_dir = EnginePaths::getExecutableDir();
+        std::error_code ec;
+        const std::filesystem::path roots[] = {
+            std::filesystem::current_path(ec),
+            executable_dir,
+            executable_dir.parent_path(),
+        };
+
+        for (const std::filesystem::path& root : roots)
+        {
+            const std::filesystem::path font_dir = root / relative_font_dir;
+            loadFontFaceIfExists(font_dir / "Stratum2-Regular.ttf");
+            loadFontFaceIfExists(font_dir / "Stratum2-Medium.ttf");
+            loadFontFaceIfExists(font_dir / "Stratum2-Bold.ttf");
+            loadFontFaceIfExists(font_dir / "LatoLatin-Regular.ttf", true);
+            loadFontFaceIfExists(font_dir / "LatoLatin-Bold.ttf", true);
+        }
+    }
+}
+
+class RmlUiManager::EditorEventRegistration final : public Rml::EventListener
+{
+public:
+    EditorEventRegistration(
+        Rml::ElementDocument* document,
+        Rml::Element* element,
+        Rml::EventId event_id,
+        EditorEventType event_type,
+        EditorElementEventFn callback,
+        void* user_data)
+        : m_document(document)
+        , m_elements{element}
+        , m_event_id(event_id)
+        , m_event_type(event_type)
+        , m_callback(callback)
+        , m_user_data(user_data)
+    {
+    }
+
+    EditorEventRegistration(
+        Rml::ElementDocument* document,
+        std::vector<Rml::Element*> elements,
+        Rml::EventId event_id,
+        EditorEventType event_type,
+        EditorElementEventFn callback,
+        void* user_data)
+        : m_document(document)
+        , m_elements(std::move(elements))
+        , m_event_id(event_id)
+        , m_event_type(event_type)
+        , m_callback(callback)
+        , m_user_data(user_data)
+    {
+    }
+
+    ~EditorEventRegistration() override
+    {
+        detach();
+    }
+
+    void attach()
+    {
+        if (m_elements.empty() || m_event_id == Rml::EventId::Invalid || m_attached)
+            return;
+
+        for (Rml::Element* element : m_elements)
+        {
+            if (element)
+                element->AddEventListener(m_event_id, this);
+        }
+        m_attached = true;
+    }
+
+    void detach()
+    {
+        if (!m_attached || m_event_id == Rml::EventId::Invalid)
+            return;
+
+        m_attached = false;
+        for (Rml::Element*& element : m_elements)
+        {
+            if (element)
+            {
+                Rml::Element* current = element;
+                element = nullptr;
+                current->RemoveEventListener(m_event_id, this);
+            }
+        }
+    }
+
+    void OnDetach(Rml::Element* element) override
+    {
+        for (Rml::Element*& registered : m_elements)
+        {
+            if (element == registered)
+            {
+                registered = nullptr;
+                break;
+            }
+        }
+    }
+
+    void ProcessEvent(Rml::Event& event) override
+    {
+        if (!m_callback)
+            return;
+
+        Rml::Element* element = event.GetCurrentElement();
+        if (!elementHasMenuData(element))
+        {
+            element = event.GetTargetElement();
+            while (element && !elementHasMenuData(element))
+                element = element->GetParentNode();
+        }
+        if (!element)
+            return;
+
+        m_event_id_text = element->GetId();
+        m_event_command = element->GetAttribute<Rml::String>("data-command", "");
+        m_event_tab = element->GetAttribute<Rml::String>("data-tab", "");
+        m_event_map = element->GetAttribute<Rml::String>("data-map", "");
+        m_event_setting = element->GetAttribute<Rml::String>("data-setting", "");
+        m_event_value = event.GetParameter<Rml::String>("value", "");
+
+        EditorElementEvent editor_event;
+        editor_event.element_id = m_event_id_text.c_str();
+        editor_event.data_command = m_event_command.c_str();
+        editor_event.data_tab = m_event_tab.c_str();
+        editor_event.data_map = m_event_map.c_str();
+        editor_event.data_setting = m_event_setting.c_str();
+        editor_event.value = m_event_value.c_str();
+        editor_event.mouse_x = event.GetParameter("mouse_x", 0.0f);
+        editor_event.mouse_y = event.GetParameter("mouse_y", 0.0f);
+        m_callback(&editor_event, m_user_data);
+
+        if (m_event_type == EditorEventType::Click || m_event_type == EditorEventType::Mousedown)
+            event.StopPropagation();
+    }
+
+    bool matchesDocument(void* document) const
+    {
+        return !document || m_document == document;
+    }
+
+private:
+    Rml::ElementDocument* m_document = nullptr;
+    std::vector<Rml::Element*> m_elements;
+    Rml::EventId m_event_id = Rml::EventId::Invalid;
+    EditorEventType m_event_type = EditorEventType::Click;
+    EditorElementEventFn m_callback = nullptr;
+    void* m_user_data = nullptr;
+    bool m_attached = false;
+    Rml::String m_event_id_text;
+    Rml::String m_event_command;
+    Rml::String m_event_tab;
+    Rml::String m_event_map;
+    Rml::String m_event_setting;
+    Rml::String m_event_value;
+};
+
+RmlUiManager::~RmlUiManager()
+{
+    clearEditorEventRegistrationsForDocument(nullptr);
 }
 
 RmlUiManager& RmlUiManager::get()
@@ -158,6 +384,7 @@ bool RmlUiManager::initialize(SDL_Window* window, IRenderAPI* renderAPI, RenderA
     std::string fontDir = EnginePaths::resolveEngineAsset("../assets/fonts/");
     Rml::LoadFontFace(fontDir + "LatoLatin-Regular.ttf", true);
     Rml::LoadFontFace(fontDir + "LatoLatin-Bold.ttf", true);
+    loadOptionalOpenStrikeFonts();
 
     // Initialize debugger
     Rml::Debugger::Initialise(m_context);
@@ -256,6 +483,8 @@ void RmlUiManager::shutdown()
 {
     if (!m_initialized)
         return;
+
+    clearEditorEventRegistrationsForDocument(nullptr);
 
     for (void* document : m_documents)
     {
@@ -455,6 +684,8 @@ void RmlUiManager::closeDocument(void* document)
     if (!document)
         return;
 
+    clearEditorEventRegistrationsForDocument(document);
+
     auto it = std::remove(m_documents.begin(), m_documents.end(), document);
     m_documents.erase(it, m_documents.end());
 
@@ -466,6 +697,8 @@ void RmlUiManager::closeEditorDocument(void* document)
 {
     if (!document)
         return;
+
+    clearEditorEventRegistrationsForDocument(document);
 
     auto it = std::remove(m_editorDocuments.begin(), m_editorDocuments.end(), document);
     m_editorDocuments.erase(it, m_editorDocuments.end());
@@ -481,6 +714,174 @@ void RmlUiManager::toggleDebugger()
 
     m_debuggerVisible = !m_debuggerVisible;
     Rml::Debugger::SetVisible(m_debuggerVisible);
+}
+
+void RmlUiManager::setEditorElementText(void* document, const char* id, const char* text)
+{
+    if (!m_initialized)
+        return;
+
+    if (Rml::Element* element = findElementById(document, id))
+        element->SetInnerRML(text ? text : "");
+}
+
+void RmlUiManager::setEditorElementClass(void* document, const char* id, const char* class_name, bool enabled)
+{
+    if (!m_initialized || !isValidName(class_name))
+        return;
+
+    if (Rml::Element* element = findElementById(document, id))
+        element->SetClass(class_name, enabled);
+}
+
+void RmlUiManager::setEditorElementAttribute(void* document, const char* id, const char* attribute, const char* value)
+{
+    if (!m_initialized || !isValidName(attribute))
+        return;
+
+    if (Rml::Element* element = findElementById(document, id))
+        element->SetAttribute(attribute, Rml::String(value ? value : ""));
+}
+
+void RmlUiManager::setEditorElementProperty(void* document, const char* id, const char* property, const char* value)
+{
+    if (!m_initialized || !isValidName(property))
+        return;
+
+    if (Rml::Element* element = findElementById(document, id))
+        element->SetProperty(property, value ? value : "");
+}
+
+void RmlUiManager::setEditorElementStyleDp(void* document, const char* id, EditorStyleProperty property, int value)
+{
+    if (!m_initialized)
+        return;
+
+    const Rml::PropertyId property_id = toRmlPropertyId(property);
+    if (property_id == Rml::PropertyId::Invalid)
+        return;
+
+    if (Rml::Element* element = findElementById(document, id))
+        element->SetProperty(property_id, Rml::Property(static_cast<float>(value), Rml::Unit::DP));
+}
+
+void RmlUiManager::setDocumentVisible(void* document, bool visible)
+{
+    if (!m_initialized || !document)
+        return;
+
+    Rml::ElementDocument* element_document = static_cast<Rml::ElementDocument*>(document);
+    if (visible)
+        element_document->Show();
+    else
+        element_document->Hide();
+}
+
+RmlUiManager::EditorEventHandle RmlUiManager::registerEditorElementEvent(
+    void* document,
+    const char* id,
+    EditorEventType type,
+    EditorElementEventFn callback,
+    void* user_data)
+{
+    if (!m_initialized || !document || !callback)
+        return 0;
+
+    Rml::Element* element = findElementById(document, id);
+    if (!element)
+        return 0;
+
+    const Rml::EventId event_id = toRmlEventId(type);
+    if (event_id == Rml::EventId::Invalid)
+        return 0;
+
+    EditorEventHandle handle = 0;
+    do
+    {
+        handle = m_nextEditorEventHandle++;
+        if (m_nextEditorEventHandle == 0)
+            m_nextEditorEventHandle = 1;
+    } while (handle == 0 || m_editorEventRegistrations.find(handle) != m_editorEventRegistrations.end());
+
+    auto* registration = new EditorEventRegistration(
+        static_cast<Rml::ElementDocument*>(document),
+        element,
+        event_id,
+        type,
+        callback,
+        user_data);
+    registration->attach();
+    m_editorEventRegistrations.emplace(handle, registration);
+    return handle;
+}
+
+RmlUiManager::EditorEventHandle RmlUiManager::registerEditorClassEvent(
+    void* document,
+    const char* class_name,
+    EditorEventType type,
+    EditorElementEventFn callback,
+    void* user_data)
+{
+    if (!m_initialized || !document || !isValidName(class_name) || !callback)
+        return 0;
+
+    const Rml::EventId event_id = toRmlEventId(type);
+    if (event_id == Rml::EventId::Invalid)
+        return 0;
+
+    Rml::ElementList elements;
+    static_cast<Rml::ElementDocument*>(document)->GetElementsByClassName(elements, class_name);
+    if (elements.empty())
+        return 0;
+
+    EditorEventHandle handle = 0;
+    do
+    {
+        handle = m_nextEditorEventHandle++;
+        if (m_nextEditorEventHandle == 0)
+            m_nextEditorEventHandle = 1;
+    } while (handle == 0 || m_editorEventRegistrations.find(handle) != m_editorEventRegistrations.end());
+
+    std::vector<Rml::Element*> element_vector(elements.begin(), elements.end());
+    auto* registration = new EditorEventRegistration(
+        static_cast<Rml::ElementDocument*>(document),
+        std::move(element_vector),
+        event_id,
+        type,
+        callback,
+        user_data);
+    registration->attach();
+    m_editorEventRegistrations.emplace(handle, registration);
+    return handle;
+}
+
+void RmlUiManager::unregisterEditorElementEvent(EditorEventHandle handle)
+{
+    if (handle == 0)
+        return;
+
+    auto it = m_editorEventRegistrations.find(handle);
+    if (it == m_editorEventRegistrations.end())
+        return;
+
+    delete it->second;
+    m_editorEventRegistrations.erase(it);
+}
+
+void RmlUiManager::clearEditorEventRegistrationsForDocument(void* document)
+{
+    for (auto it = m_editorEventRegistrations.begin(); it != m_editorEventRegistrations.end();)
+    {
+        if (it->second && it->second->matchesDocument(document))
+        {
+            delete it->second;
+            it = m_editorEventRegistrations.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
 }
 
 void* RmlUiManager::createDataModel(const char* name)

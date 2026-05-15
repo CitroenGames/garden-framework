@@ -11,6 +11,46 @@
 
 namespace fs = std::filesystem;
 
+namespace
+{
+    int moduleApiRevision(int32_t version)
+    {
+        return (version >> 24) & 0xff;
+    }
+
+    int moduleCompilerFamily(int32_t version)
+    {
+        return (version >> 20) & 0x0f;
+    }
+
+    int moduleCompilerVersion(int32_t version)
+    {
+        return (version >> 8) & 0x0fff;
+    }
+
+    int moduleStlDebugLevel(int32_t version)
+    {
+        return (version >> 4) & 0x0f;
+    }
+
+    int moduleDebugRuntime(int32_t version)
+    {
+        return version & 0x0f;
+    }
+
+    void printModuleVersionFields(const char* label, int32_t version)
+    {
+        fprintf(stderr, "%s=%d (api=%d compiler=%d:%d stl_debug=%d debug_runtime=%d)",
+                label,
+                version,
+                moduleApiRevision(version),
+                moduleCompilerFamily(version),
+                moduleCompilerVersion(version),
+                moduleStlDebugLevel(version),
+                moduleDebugRuntime(version));
+    }
+}
+
 // ---- Platform helpers ----
 
 static void* platformLoad(const std::string& path)
@@ -118,8 +158,20 @@ bool GameModuleLoader::load(const std::string& dll_path)
     int32_t version = getAPIVersion();
     if (version != GARDEN_MODULE_API_VERSION)
     {
-        fprintf(stderr, "[GameModule] API version mismatch: DLL=%d, Engine=%d\n",
-                version, GARDEN_MODULE_API_VERSION);
+        if (moduleApiRevision(version) == 0)
+        {
+            fprintf(stderr, "[GameModule] API/ABI mismatch: DLL=%d (legacy API token), ",
+                    version);
+        }
+        else
+        {
+            fprintf(stderr, "[GameModule] API/ABI mismatch: ");
+            printModuleVersionFields("DLL", version);
+            fprintf(stderr, ", ");
+        }
+
+        printModuleVersionFields("Engine", GARDEN_MODULE_API_VERSION);
+        fprintf(stderr, "\n");
         unload();
         return false;
     }
