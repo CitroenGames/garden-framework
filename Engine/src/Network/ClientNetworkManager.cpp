@@ -1,6 +1,7 @@
 #include "ClientNetworkManager.hpp"
 #include "NetworkInput.hpp"
 #include "NetworkRuntime.hpp"
+#include "NetworkTransport.hpp"
 #include "world.hpp"
 #include "Components/Components.hpp"
 #include "Utils/Log.hpp"
@@ -8,15 +9,9 @@
 #include "Console/Console.hpp"
 #include <entt/entt.hpp>
 #include <cstring>
-#include <chrono>
 #include <unordered_set>
 #include <vector>
 #include <SDL3/SDL.h>
-
-namespace {
-    constexpr int kMaxEventsPerTick = 2048;
-    constexpr int kShutdownDrainBudgetMs = 3000;
-}
 
 namespace Net {
 
@@ -120,24 +115,7 @@ void ClientNetworkManager::shutdown()
 
     if (client_host != nullptr) {
         // Give time for disconnect message to send (bounded drain)
-        ENetEvent event;
-        const auto drain_start = std::chrono::steady_clock::now();
-        int drained = 0;
-        while (enet_host_service(client_host, &event, 100) > 0) {
-            if (event.type == ENET_EVENT_TYPE_RECEIVE) {
-                enet_packet_destroy(event.packet);
-            }
-            if (++drained >= kMaxEventsPerTick) {
-                LOG_ENGINE_WARN("Client shutdown drain hit event cap ({0}); breaking", kMaxEventsPerTick);
-                break;
-            }
-            auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - drain_start).count();
-            if (elapsed_ms >= kShutdownDrainBudgetMs) {
-                LOG_ENGINE_WARN("Client shutdown drain hit time budget ({0}ms); breaking", kShutdownDrainBudgetMs);
-                break;
-            }
-        }
+        drainHostForShutdown(client_host, "Client");
 
         enet_host_destroy(client_host);
         client_host = nullptr;
@@ -179,13 +157,9 @@ void ClientNetworkManager::update(float delta_time)
 
     // Process network events (bounded to prevent flood-induced stalls)
     ENetEvent event;
-    int events_this_tick = 0;
+    NetworkEventBudget event_budget("Client");
     while (enet_host_service(client_host, &event, 0) > 0) {
-        if (++events_this_tick > kMaxEventsPerTick) {
-            LOG_ENGINE_WARN("Client event loop hit cap ({0}) - possible flood", kMaxEventsPerTick);
-            if (event.type == ENET_EVENT_TYPE_RECEIVE) {
-                enet_packet_destroy(event.packet);
-            }
+        if (!event_budget.shouldProcess(event)) {
             break;
         }
         switch (event.type) {
@@ -331,9 +305,6 @@ void ClientNetworkManager::handleServerConnect(ENetEvent& event)
 
     // Flush immediately to ensure packet is transmitted
     enet_host_flush(client_host);
-
-    stats.packets_sent++;
-    stats.bytes_sent += writer.getByteSize();
 }
 
 void ClientNetworkManager::handleServerDisconnect(ENetEvent& event)
@@ -755,48 +726,32 @@ void ClientNetworkManager::deleteEntity(uint32_t network_id)
     interp_buffers.erase(network_id);
 }
 
-void ClientNetworkManager::sendReliableMessage(const BitWriter& writer)
+bool ClientNetworkManager::sendReliableMessage(const BitWriter& writer)
 {
     if (server_peer == nullptr) {
-        return;
+        return false;
     }
 
-    ENetPacket* packet = enet_packet_create(
-        writer.getData(),
-        writer.getByteSize(),
-        ENET_PACKET_FLAG_RELIABLE
-    );
-
-    if (enet_peer_send(server_peer, static_cast<uint8_t>(NetworkChannel::RELIABLE_ORDERED), packet) < 0) {
-        LOG_ENGINE_WARN("enet_peer_send failed for reliable message; destroying unqueued packet");
-        enet_packet_destroy(packet);
-        return;
+    if (!sendPacketToPeer(server_peer, writer, PacketReliability::Reliable)) {
+        return false;
     }
 
-    stats.packets_sent++;
-    stats.bytes_sent += writer.getByteSize();
+    recordSentPacket(stats, writer.getByteSize());
+    return true;
 }
 
-void ClientNetworkManager::sendUnreliableMessage(const BitWriter& writer)
+bool ClientNetworkManager::sendUnreliableMessage(const BitWriter& writer)
 {
     if (server_peer == nullptr) {
-        return;
+        return false;
     }
 
-    ENetPacket* packet = enet_packet_create(
-        writer.getData(),
-        writer.getByteSize(),
-        ENET_PACKET_FLAG_UNSEQUENCED  // unsequenced unreliable: lets input redundancy actually work and matches server
-    );
-
-    if (enet_peer_send(server_peer, static_cast<uint8_t>(NetworkChannel::UNRELIABLE_UNORDERED), packet) < 0) {
-        LOG_ENGINE_WARN("enet_peer_send failed for unreliable message; destroying unqueued packet");
-        enet_packet_destroy(packet);
-        return;
+    if (!sendPacketToPeer(server_peer, writer, PacketReliability::UnreliableUnordered)) {
+        return false;
     }
 
-    stats.packets_sent++;
-    stats.bytes_sent += writer.getByteSize();
+    recordSentPacket(stats, writer.getByteSize());
+    return true;
 }
 
 void ClientNetworkManager::setConnectionState(ConnectionState new_state)

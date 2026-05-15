@@ -1,6 +1,6 @@
 # Input
 
-Garden uses SDL3 for input. The host pumps SDL each frame and exposes per-frame state through `InputManager`. You read it from `g_services->input_manager`.
+Garden uses SDL3 for input. The host pumps SDL events each frame and exposes state through `InputManager`. Game modules read it from `g_services->input_manager`.
 
 ## Per-frame state
 
@@ -10,53 +10,60 @@ Garden uses SDL3 for input. The host pumps SDL each frame and exposes per-frame 
 
 void gardenGameUpdate(float dt)
 {
-    auto* in = g_services->input_manager;
+    auto* input = g_services->input_manager;
+    if (!input)
+        return;
 
-    // Edge-triggered: true only on the frame the key went down
-    if (in->wasKeyPressed(SDL_SCANCODE_SPACE)) jump();
+    // Edge-triggered: true only on the frame the key went down.
+    if (input->is_key_pressed(SDL_SCANCODE_SPACE))
+        jump();
 
-    // Level-triggered: true while held
-    if (in->isKeyDown(SDL_SCANCODE_W)) moveForward(dt);
+    // Level-triggered: true while held.
+    if (input->is_key_held(SDL_SCANCODE_W))
+        moveForward(dt);
 
-    // Edge-triggered release
-    if (in->wasKeyReleased(SDL_SCANCODE_E)) endInteract();
+    // Edge-triggered release.
+    if (input->is_key_released(SDL_SCANCODE_E))
+        endInteract();
 
-    // Mouse delta (raw, in pixels — apply your own sensitivity)
-    glm::vec2 dm = in->getMouseDelta();
-    yaw   -= dm.x * mouse_sens;
-    pitch -= dm.y * mouse_sens;
+    // Mouse delta is raw pixels accumulated for this frame.
+    const float mouse_dx = input->get_mouse_delta_x();
+    const float mouse_dy = input->get_mouse_delta_y();
+    yaw   -= mouse_dx * mouse_sens;
+    pitch -= mouse_dy * mouse_sens;
 
-    // Mouse buttons
-    if (in->wasMouseButtonPressed(SDL_BUTTON_LEFT)) shoot();
+    if (input->is_mouse_button_pressed(SDL_BUTTON_LEFT))
+        shoot();
 }
 ```
 
-Use scancodes (`SDL_SCANCODE_*`), not keycodes — scancodes are layout-independent. `Engine/src/InputManager.hpp` is the source of truth for the available methods.
+Use scancodes (`SDL_SCANCODE_*`), not keycodes. Scancodes are layout-independent, which keeps gameplay bindings stable across keyboard layouts.
 
-## Action mappings
+## Action Mappings
 
-For anything beyond a prototype, map physical inputs to *actions* and read actions in your gameplay code. This survives keybind changes without you rewriting the gameplay.
+Use action mappings for commands that should be rebound or shared by systems. Register mappings at startup, bind callbacks, and keep direct key polling for local movement axes where that is simpler.
 
-The pattern in the FPSShooter template (`src/InputHandler.hpp` in the engine):
+```cpp
+input->add_action_mapping("Interact", SDL_SCANCODE_E);
+input->bind_action("Interact", [](InputActionState state) {
+    if (state == InputActionState::Pressed)
+        beginInteract();
+});
+```
 
-1. Define an enum of actions: `MoveForward`, `Jump`, `Fire`, `Reload`, ...
-2. Map each action to a scancode or button at startup.
-3. Gameplay reads `actions.isPressed(Action::Jump)` instead of `SDL_SCANCODE_SPACE`.
+`InputActionState::Pressed` and `Released` are dispatched from SDL transitions. Key repeat events are ignored.
 
-If you want a configurable rebind UI, persist the mapping with the [ConVar system](console-and-convars.md) or your own JSON next to the `.garden` file.
+## Mouse Capture
 
-## Mouse capture
+For FPS-style mouse look, lock the cursor with SDL relative mouse mode while gameplay owns input and disable it when opening menus or pausing. The standalone game host does this through `InputHandler`; the editor routes input separately during Play-In-Editor.
 
-For an FPS-style mouselook you usually want the OS cursor hidden and locked to the window. The `Application` exposes the SDL window through `g_services->application` — set relative-mouse mode via SDL when entering gameplay and clear it when opening menus / pausing.
+## Per-entity Input Components
 
-## Per-entity input components
+`InputComponent` (in `Engine/src/Components/InputComponent.hpp`) is the base for attaching input-driven behavior to entities. For tightly coupled local-player code, reading `InputManager` directly in `gardenGameUpdate` is usually simpler.
 
-`InputComponent` (in `Engine/src/Components/InputComponent.hpp`) lets you attach input-driven behaviour to entities through reflection (so it shows up in the inspector). Useful when you want designers to wire keys to entities in the editor instead of in code.
+## What Does Not Go Through InputManager
 
-For tightly coupled gameplay (e.g., the local player), reading `InputManager` directly in `gardenGameUpdate` is simpler and what the templates do.
+- Editor UI input is handled by ImGui. If UI has keyboard or mouse capture, gameplay input should be ignored for that event.
+- HUD input is handled by RmlUi when it owns focus. Either gate gameplay input on UI focus or design HUD screens as read-only during play.
+- Network input is serialized through `MovementInput` / `InputState` structs. Servers do not read SDL.
 
-## What does *not* go through InputManager
-
-- **Editor UI input** — handled by ImGui. If a menu is hovered/focused, your gameplay should ignore input that frame. Check `ImGui::GetIO().WantCaptureKeyboard` / `WantCaptureMouse`.
-- **HUD input** — RmlUi handles its own focus. Either gate gameplay input on `RmlUiManager` having focus, or design your HUD to be read-only during play.
-- **Network input** — the FPSShooter template wraps local input in `MovementInput` / `InputState` structs and ships them to the server. The server doesn't read SDL.

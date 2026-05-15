@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 #include <deque>
@@ -192,8 +193,9 @@ private:
     void refreshStats(float delta_time);
 
     // Helper functions
-    void sendReliableMessage(ENetPeer* peer, const BitWriter& writer);
-    void sendUnreliableMessage(ENetPeer* peer, const BitWriter& writer);
+    bool sendReliableMessage(ENetPeer* peer, const BitWriter& writer);
+    bool sendUnreliableMessage(ENetPeer* peer, const BitWriter& writer);
+    void recordSentToPeer(ENetPeer* peer, std::size_t byte_count);
     void disconnectClient(uint16_t client_id, const char* reason);
 };
 

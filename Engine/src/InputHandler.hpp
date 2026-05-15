@@ -18,6 +18,85 @@ private:
     bool ui_mode = false;  // When true, mouse is visible and game input is paused
     bool is_minimized_state = false;
 
+    void set_relative_mouse_mode(bool enabled)
+    {
+        if (window)
+            SDL_SetWindowRelativeMouseMode(window, enabled);
+    }
+
+    void set_ui_mode(bool enabled)
+    {
+        if (ui_mode == enabled)
+            return;
+
+        ui_mode = enabled;
+        if (ui_mode)
+            input_manager->reset_state();
+        set_relative_mouse_mode(!ui_mode);
+    }
+
+    bool should_route_to_game_input(const SDL_Event& event) const
+    {
+        if (ui_mode)
+            return false;
+
+        switch (event.type)
+        {
+        case SDL_EVENT_KEY_DOWN:
+        case SDL_EVENT_KEY_UP:
+            return !ImGuiManager::get().wantCaptureKeyboard();
+
+        case SDL_EVENT_MOUSE_MOTION:
+        case SDL_EVENT_MOUSE_BUTTON_DOWN:
+        case SDL_EVENT_MOUSE_BUTTON_UP:
+        case SDL_EVENT_MOUSE_WHEEL:
+            return !ImGuiManager::get().wantCaptureMouse();
+
+        default:
+            return false;
+        }
+    }
+
+    void request_quit()
+    {
+        should_quit = true;
+        if (quit_callback)
+            quit_callback();
+    }
+
+    bool handle_key_down(const SDL_KeyboardEvent& key)
+    {
+        if (key.repeat)
+            return false;
+
+        // Backtick (`) toggles console.
+        if (key.scancode == SDL_SCANCODE_GRAVE)
+        {
+            ImGuiManager::get().toggleConsole();
+            set_ui_mode(ImGuiManager::get().getShowConsole() || ImGuiManager::get().getShowSettings());
+            return true;
+        }
+
+        // Escape closes console if open.
+        if (key.scancode == SDL_SCANCODE_ESCAPE && ImGuiManager::get().getShowConsole())
+        {
+            ImGuiManager::get().setShowConsole(false);
+            set_ui_mode(ImGuiManager::get().getShowSettings());
+            return true;
+        }
+
+        // F3 toggles UI mode (mouse visible, game input paused).
+        if (key.scancode == SDL_SCANCODE_F3)
+        {
+            const bool next_ui_mode = !ui_mode;
+            ImGuiManager::get().setShowSettings(next_ui_mode);
+            set_ui_mode(next_ui_mode);
+            return true;
+        }
+
+        return false;
+    }
+
 public:
     InputHandler()
     {
@@ -80,78 +159,39 @@ public:
             // Let ImGui process events first
             ImGuiManager::get().processEvent(&event);
 
+            bool consumed = false;
+
             switch (event.type)
             {
             case SDL_EVENT_QUIT:
-                should_quit = true;
-                if (quit_callback)
-                {
-                    quit_callback();
-                }
+                request_quit();
+                consumed = true;
                 break;
 
             case SDL_EVENT_KEY_DOWN:
-                // Backtick (`) toggles console
-                if (event.key.scancode == SDL_SCANCODE_GRAVE && !event.key.repeat)
-                {
-                    ImGuiManager::get().toggleConsole();
-                    // If console is now open, enable UI mode
-                    if (ImGuiManager::get().getShowConsole() && !ui_mode)
-                    {
-                        ui_mode = true;
-                        SDL_SetWindowRelativeMouseMode(window, false);
-                    }
-                    break;  // Don't pass backtick to game input
-                }
-                // Escape closes console if open
-                if (event.key.scancode == SDL_SCANCODE_ESCAPE && !event.key.repeat)
-                {
-                    if (ImGuiManager::get().getShowConsole())
-                    {
-                        ImGuiManager::get().setShowConsole(false);
-                        // Return to game mode if settings panel not shown
-                        if (!ImGuiManager::get().getShowSettings())
-                        {
-                            ui_mode = false;
-                            SDL_SetWindowRelativeMouseMode(window, true);
-                        }
-                        break;  // Don't pass Escape to game input
-                    }
-                }
-                // F3 toggles UI mode (mouse visible, game input paused)
-                if (event.key.scancode == SDL_SCANCODE_F3 && !event.key.repeat)
-                {
-                    ui_mode = !ui_mode;
-                    SDL_SetWindowRelativeMouseMode(window, !ui_mode);
-                    ImGuiManager::get().setShowSettings(ui_mode);
-                    break;  // Don't pass F3 to game input
-                }
+                consumed = handle_key_down(event.key);
                 break;
 
             case SDL_EVENT_WINDOW_MINIMIZED:
                 is_minimized_state = true;
+                consumed = true;
                 break;
 
             case SDL_EVENT_WINDOW_RESTORED:
                 is_minimized_state = false;
+                consumed = true;
                 break;
 
             case SDL_EVENT_WINDOW_RESIZED:
             case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
                 if (resize_callback && window && event.window.windowID == SDL_GetWindowID(window))
                     resize_callback(event.window.data1, event.window.data2);
-                break;
-
-            default:
-                // Only pass to game input if not in UI mode and ImGui doesn't want input
-                if (!ui_mode &&
-                    !ImGuiManager::get().wantCaptureMouse() &&
-                    !ImGuiManager::get().wantCaptureKeyboard())
-                {
-                    input_manager->process_event(event);
-                }
+                consumed = true;
                 break;
             }
+
+            if (!consumed && should_route_to_game_input(event))
+                input_manager->process_event(event);
         }
     }
 

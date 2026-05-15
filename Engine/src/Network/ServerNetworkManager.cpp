@@ -1,5 +1,6 @@
 #include "ServerNetworkManager.hpp"
 #include "NetworkRuntime.hpp"
+#include "NetworkTransport.hpp"
 #include "NetworkInput.hpp"
 #include "world.hpp"
 #include "Components/Components.hpp"
@@ -11,14 +12,10 @@
 #include <cstring>
 #include <cerrno>
 #include <cmath>
-#include <chrono>
 #include <algorithm>
 #include <glm/glm.hpp>
 
 namespace {
-    constexpr int kMaxEventsPerTick = 2048;
-    constexpr int kShutdownDrainBudgetMs = 3000;
-
     bool getBoolCVarOrDefault(const char* name, bool fallback)
     {
         ConVarBase* cvar = ConVarRegistry::get().find(name);
@@ -166,24 +163,7 @@ void ServerNetworkManager::shutdown()
         }
 
         // Give time for disconnect messages to send (bounded drain)
-        ENetEvent event;
-        const auto drain_start = std::chrono::steady_clock::now();
-        int drained = 0;
-        while (enet_host_service(server_host, &event, 100) > 0) {
-            if (event.type == ENET_EVENT_TYPE_RECEIVE) {
-                enet_packet_destroy(event.packet);
-            }
-            if (++drained >= kMaxEventsPerTick) {
-                LOG_ENGINE_WARN("Server shutdown drain hit event cap ({0}); breaking", kMaxEventsPerTick);
-                break;
-            }
-            auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - drain_start).count();
-            if (elapsed_ms >= kShutdownDrainBudgetMs) {
-                LOG_ENGINE_WARN("Server shutdown drain hit time budget ({0}ms); breaking", kShutdownDrainBudgetMs);
-                break;
-            }
-        }
+        drainHostForShutdown(server_host, "Server");
 
         enet_host_destroy(server_host);
         server_host = nullptr;
@@ -223,13 +203,9 @@ void ServerNetworkManager::pumpNetworkEvents(float delta_time)
 
     // Process network events (bounded to prevent flood-induced stalls)
     ENetEvent event;
-    int events_this_tick = 0;
+    NetworkEventBudget event_budget("Server");
     while (enet_host_service(server_host, &event, 0) > 0) {
-        if (++events_this_tick > kMaxEventsPerTick) {
-            LOG_ENGINE_WARN("Server event loop hit cap ({0}) - possible flood", kMaxEventsPerTick);
-            if (event.type == ENET_EVENT_TYPE_RECEIVE) {
-                enet_packet_destroy(event.packet);
-            }
+        if (!event_budget.shouldProcess(event)) {
             break;
         }
         switch (event.type) {
@@ -467,11 +443,6 @@ void ServerNetworkManager::handleConnectRequest(ENetPeer* peer, BitReader& reade
     accept.level_hash = 0;  // TODO: Calculate level hash
     NetworkSerializer::serialize(writer, accept);
     sendReliableMessage(peer, writer);
-
-    stats.packets_sent++;
-    stats.bytes_sent += writer.getByteSize();
-    clients[client_id].info.stats.packets_sent++;
-    clients[client_id].info.stats.bytes_sent += writer.getByteSize();
 
     // Notify callback
     if (on_client_connected) {
@@ -785,11 +756,6 @@ void ServerNetworkManager::sendWorldStateToClient(uint16_t client_id, const Worl
 
     // Send unreliable
     sendUnreliableMessage(it->second.info.peer, writer);
-
-    stats.packets_sent++;
-    stats.bytes_sent += writer.getByteSize();
-    it->second.info.stats.packets_sent++;
-    it->second.info.stats.bytes_sent += writer.getByteSize();
 }
 
 uint32_t ServerNetworkManager::registerEntity(entt::entity entity)
@@ -857,29 +823,38 @@ const ClientInfo* ServerNetworkManager::getClientInfo(uint16_t client_id) const
     return nullptr;
 }
 
-void ServerNetworkManager::sendReliableMessage(ENetPeer* peer, const BitWriter& writer)
+bool ServerNetworkManager::sendReliableMessage(ENetPeer* peer, const BitWriter& writer)
 {
-    ENetPacket* packet = enet_packet_create(
-        writer.getData(),
-        writer.getByteSize(),
-        ENET_PACKET_FLAG_RELIABLE
-    );
-    if (enet_peer_send(peer, static_cast<uint8_t>(NetworkChannel::RELIABLE_ORDERED), packet) < 0) {
-        LOG_ENGINE_WARN("enet_peer_send failed for reliable message; destroying unqueued packet");
-        enet_packet_destroy(packet);
+    if (!sendPacketToPeer(peer, writer, PacketReliability::Reliable)) {
+        return false;
     }
+
+    recordSentToPeer(peer, writer.getByteSize());
+    return true;
 }
 
-void ServerNetworkManager::sendUnreliableMessage(ENetPeer* peer, const BitWriter& writer)
+bool ServerNetworkManager::sendUnreliableMessage(ENetPeer* peer, const BitWriter& writer)
 {
-    ENetPacket* packet = enet_packet_create(
-        writer.getData(),
-        writer.getByteSize(),
-        ENET_PACKET_FLAG_UNSEQUENCED
-    );
-    if (enet_peer_send(peer, static_cast<uint8_t>(NetworkChannel::UNRELIABLE_UNORDERED), packet) < 0) {
-        LOG_ENGINE_WARN("enet_peer_send failed for unreliable message; destroying unqueued packet");
-        enet_packet_destroy(packet);
+    if (!sendPacketToPeer(peer, writer, PacketReliability::UnreliableUnordered)) {
+        return false;
+    }
+
+    recordSentToPeer(peer, writer.getByteSize());
+    return true;
+}
+
+void ServerNetworkManager::recordSentToPeer(ENetPeer* peer, std::size_t byte_count)
+{
+    recordSentPacket(stats, byte_count);
+
+    auto peer_it = peer_to_client_id.find(peer);
+    if (peer_it == peer_to_client_id.end()) {
+        return;
+    }
+
+    auto client_it = clients.find(peer_it->second);
+    if (client_it != clients.end()) {
+        recordSentPacket(client_it->second.info.stats, byte_count);
     }
 }
 
@@ -930,10 +905,6 @@ void ServerNetworkManager::sendReliableToClient(uint16_t client_id, const BitWri
     auto it = clients.find(client_id);
     if (it != clients.end() && it->second.info.peer != nullptr) {
         sendReliableMessage(it->second.info.peer, writer);
-        stats.packets_sent++;
-        stats.bytes_sent += writer.getByteSize();
-        it->second.info.stats.packets_sent++;
-        it->second.info.stats.bytes_sent += writer.getByteSize();
     } else {
         LOG_ENGINE_WARN("Cannot send to client {0}: not found or no peer", client_id);
     }
@@ -944,10 +915,6 @@ void ServerNetworkManager::sendUnreliableToClient(uint16_t client_id, const BitW
     auto it = clients.find(client_id);
     if (it != clients.end() && it->second.info.peer != nullptr) {
         sendUnreliableMessage(it->second.info.peer, writer);
-        stats.packets_sent++;
-        stats.bytes_sent += writer.getByteSize();
-        it->second.info.stats.packets_sent++;
-        it->second.info.stats.bytes_sent += writer.getByteSize();
     } else {
         LOG_ENGINE_WARN("Cannot send to client {0}: not found or no peer", client_id);
     }
@@ -958,10 +925,6 @@ void ServerNetworkManager::broadcastReliable(const BitWriter& writer)
     for (auto& [client_id, connection] : clients) {
         if (connection.info.peer) {
             sendReliableMessage(connection.info.peer, writer);
-            stats.packets_sent++;
-            stats.bytes_sent += writer.getByteSize();
-            connection.info.stats.packets_sent++;
-            connection.info.stats.bytes_sent += writer.getByteSize();
         }
     }
 }
@@ -971,10 +934,6 @@ void ServerNetworkManager::broadcastUnreliable(const BitWriter& writer)
     for (auto& [client_id, connection] : clients) {
         if (connection.info.peer) {
             sendUnreliableMessage(connection.info.peer, writer);
-            stats.packets_sent++;
-            stats.bytes_sent += writer.getByteSize();
-            connection.info.stats.packets_sent++;
-            connection.info.stats.bytes_sent += writer.getByteSize();
         }
     }
 }
@@ -998,10 +957,6 @@ void ServerNetworkManager::broadcastCVar(const std::string& name, const std::str
     for (auto& [client_id, connection] : clients) {
         if (connection.info.peer) {
             sendReliableMessage(connection.info.peer, writer);
-            stats.packets_sent++;
-            stats.bytes_sent += writer.getByteSize();
-            connection.info.stats.packets_sent++;
-            connection.info.stats.bytes_sent += writer.getByteSize();
         }
     }
 
@@ -1031,10 +986,6 @@ void ServerNetworkManager::sendInitialCVarsToClient(uint16_t client_id)
     NetworkSerializer::serialize(writer, msg, cvarData);
 
     sendReliableMessage(it->second.info.peer, writer);
-    stats.packets_sent++;
-    stats.bytes_sent += writer.getByteSize();
-    it->second.info.stats.packets_sent++;
-    it->second.info.stats.bytes_sent += writer.getByteSize();
 
     LOG_ENGINE_INFO("Sent {} replicated cvars to client {}", replicated.size(), client_id);
 }

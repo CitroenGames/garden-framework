@@ -180,8 +180,8 @@ private:
     void deleteEntity(uint32_t network_id);
 
     // Helper functions
-    void sendReliableMessage(const BitWriter& writer);
-    void sendUnreliableMessage(const BitWriter& writer);
+    bool sendReliableMessage(const BitWriter& writer);
+    bool sendUnreliableMessage(const BitWriter& writer);
     void setConnectionState(ConnectionState new_state);
     void refreshStats(float delta_time);
 };

@@ -2,10 +2,13 @@
 
 #include "EngineExport.h"
 #include <SDL3/SDL.h>
-#include <unordered_map>
-#include <vector>
+#include <array>
+#include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 // Simple input action states
 enum class InputActionState
@@ -22,19 +25,22 @@ using ActionDelegate = std::function<void(InputActionState state)>;
 struct ActionMapping
 {
     std::string action_name;
-    SDL_Scancode key;
+    SDL_Scancode key = SDL_SCANCODE_UNKNOWN;
 };
 
 class ENGINE_API InputManager
 {
 private:
-    // Direct key state tracking (no keyboard repeat issues)
-    std::unordered_map<SDL_Scancode, bool> current_key_states;
-    std::unordered_map<SDL_Scancode, bool> previous_key_states;
+    static constexpr std::size_t KeyCount = SDL_SCANCODE_COUNT;
+    static constexpr std::size_t MouseButtonCount = 256;
 
-    // Mouse button state tracking (SDL3 button ids: 1=L, 2=M, 3=R, 4=X1, 5=X2)
-    std::unordered_map<uint8_t, bool> current_mouse_button_states;
-    std::unordered_map<uint8_t, bool> previous_mouse_button_states;
+    // Direct key state tracking (no keyboard repeat issues).
+    std::array<bool, KeyCount> current_key_states{};
+    std::array<bool, KeyCount> previous_key_states{};
+
+    // Mouse button state tracking (SDL3 button ids: 1=L, 2=M, 3=R, 4=X1, 5=X2).
+    std::array<bool, MouseButtonCount> current_mouse_button_states{};
+    std::array<bool, MouseButtonCount> previous_mouse_button_states{};
 
     // Mouse data
     float mouse_delta_x = 0.0f;
@@ -45,6 +51,11 @@ private:
     
     // Delegates
     std::unordered_map<std::string, std::vector<ActionDelegate>> action_delegates;
+
+    static bool is_valid_key(SDL_Scancode key);
+    void dispatch_action(SDL_Scancode key, InputActionState state) const;
+    void set_key_state(SDL_Scancode key, bool is_down);
+    void set_mouse_button_state(uint8_t button, bool is_down);
 
 public:
     // Mouse sensitivity settings - now public and properly used
@@ -107,6 +118,7 @@ public:
     float get_mouse_sensitivity_y() const { return Sensitivity_Y; }
     
     // Utility
+    void reset_state();
     void clear_all_mappings();
     void setup_default_mappings();
 };
