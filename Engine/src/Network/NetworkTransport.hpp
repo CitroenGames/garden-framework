@@ -13,30 +13,68 @@ namespace Net {
 
 constexpr int NETWORK_MAX_EVENTS_PER_TICK = 2048;
 constexpr int NETWORK_SHUTDOWN_DRAIN_BUDGET_MS = 3000;
+constexpr std::size_t NETWORK_MAX_PACKET_BYTES = 128u * 1024u;
+constexpr uint32_t NETWORK_MAX_UNRELIABLE_QUEUE_BYTES = 128u * 1024u;
+constexpr uint32_t NETWORK_MAX_RELIABLE_QUEUE_BYTES = NETWORK_DEFAULT_SATURATED_QUEUE_BYTES;
 
 enum class PacketReliability : uint8_t
 {
     Reliable,
+    UnreliableSequenced,
     UnreliableUnordered
+};
+
+enum class PacketSendResult : uint8_t
+{
+    Sent,
+    InvalidPeer,
+    EmptyPayload,
+    OversizedPayload,
+    Saturated,
+    CreateFailed,
+    SendFailed
 };
 
 inline ENetPacketFlag getPacketFlags(PacketReliability reliability)
 {
-    return reliability == PacketReliability::Reliable
-        ? ENET_PACKET_FLAG_RELIABLE
-        : ENET_PACKET_FLAG_UNSEQUENCED;
+    switch (reliability) {
+        case PacketReliability::Reliable:
+            return ENET_PACKET_FLAG_RELIABLE;
+        case PacketReliability::UnreliableSequenced:
+            return static_cast<ENetPacketFlag>(0);
+        case PacketReliability::UnreliableUnordered:
+            return ENET_PACKET_FLAG_UNSEQUENCED;
+    }
+
+    return static_cast<ENetPacketFlag>(0);
 }
 
 inline NetworkChannel getPacketChannel(PacketReliability reliability)
 {
-    return reliability == PacketReliability::Reliable
-        ? NetworkChannel::RELIABLE_ORDERED
-        : NetworkChannel::UNRELIABLE_UNORDERED;
+    switch (reliability) {
+        case PacketReliability::Reliable:
+            return NetworkChannel::RELIABLE_ORDERED;
+        case PacketReliability::UnreliableSequenced:
+            return NetworkChannel::UNRELIABLE_SEQUENCED;
+        case PacketReliability::UnreliableUnordered:
+            return NetworkChannel::UNRELIABLE_UNORDERED;
+    }
+
+    return NetworkChannel::UNRELIABLE_SEQUENCED;
 }
 
 inline const char* getPacketReliabilityName(PacketReliability reliability)
 {
-    return reliability == PacketReliability::Reliable ? "reliable" : "unreliable";
+    switch (reliability) {
+        case PacketReliability::Reliable:
+            return "reliable";
+        case PacketReliability::UnreliableSequenced:
+            return "unreliable sequenced";
+        case PacketReliability::UnreliableUnordered:
+            return "unreliable unordered";
+    }
+
+    return "unknown";
 }
 
 inline void recordSentPacket(NetworkStats& stats, std::size_t byte_count)
@@ -45,21 +83,73 @@ inline void recordSentPacket(NetworkStats& stats, std::size_t byte_count)
     stats.bytes_sent += byte_count;
 }
 
-inline bool sendPacketToPeer(ENetPeer* peer, const BitWriter& writer, PacketReliability reliability)
+inline void recordDroppedIncomingPacket(NetworkStats& stats, std::size_t byte_count)
 {
-    if (peer == nullptr) {
-        return false;
+    stats.packets_dropped_incoming++;
+    stats.bytes_dropped_incoming += byte_count;
+}
+
+inline void recordDroppedOutgoingPacket(NetworkStats& stats, std::size_t byte_count)
+{
+    stats.packets_dropped_outgoing++;
+    stats.bytes_dropped_outgoing += byte_count;
+}
+
+inline bool isPeerConnectedForApplicationSend(const ENetPeer* peer)
+{
+    return peer != nullptr &&
+        (peer->state == ENET_PEER_STATE_CONNECTED ||
+         peer->state == ENET_PEER_STATE_DISCONNECT_LATER ||
+         peer->state == ENET_PEER_STATE_DISCONNECTING);
+}
+
+inline uint32_t getQueueLimitForReliability(PacketReliability reliability)
+{
+    return reliability == PacketReliability::Reliable
+        ? NETWORK_MAX_RELIABLE_QUEUE_BYTES
+        : NETWORK_MAX_UNRELIABLE_QUEUE_BYTES;
+}
+
+inline bool shouldDropForSaturation(const ENetPeer* peer, PacketReliability reliability)
+{
+    return isPeerSendQueueSaturated(peer, getQueueLimitForReliability(reliability));
+}
+
+inline PacketSendResult sendPacketToPeer(ENetPeer* peer, const BitWriter& writer, PacketReliability reliability)
+{
+    if (!isPeerConnectedForApplicationSend(peer)) {
+        return PacketSendResult::InvalidPeer;
+    }
+
+    const std::size_t byte_size = writer.getByteSize();
+    if (byte_size == 0) {
+        return PacketSendResult::EmptyPayload;
+    }
+
+    if (byte_size > NETWORK_MAX_PACKET_BYTES) {
+        LOG_ENGINE_WARN("Dropping oversized {0} message ({1} bytes > {2} bytes)",
+                        getPacketReliabilityName(reliability),
+                        byte_size,
+                        NETWORK_MAX_PACKET_BYTES);
+        return PacketSendResult::OversizedPayload;
+    }
+
+    if (shouldDropForSaturation(peer, reliability)) {
+        LOG_ENGINE_WARN("Dropping {0} message because peer send queue is saturated ({1} bytes queued)",
+                        getPacketReliabilityName(reliability),
+                        peer->outgoingDataTotal);
+        return PacketSendResult::Saturated;
     }
 
     ENetPacket* packet = enet_packet_create(
         writer.getData(),
-        writer.getByteSize(),
+        byte_size,
         getPacketFlags(reliability)
     );
 
     if (packet == nullptr) {
         LOG_ENGINE_WARN("enet_packet_create failed for {0} message", getPacketReliabilityName(reliability));
-        return false;
+        return PacketSendResult::CreateFailed;
     }
 
     const uint8_t channel = static_cast<uint8_t>(getPacketChannel(reliability));
@@ -67,10 +157,15 @@ inline bool sendPacketToPeer(ENetPeer* peer, const BitWriter& writer, PacketReli
         LOG_ENGINE_WARN("enet_peer_send failed for {0} message; destroying unqueued packet",
                         getPacketReliabilityName(reliability));
         enet_packet_destroy(packet);
-        return false;
+        return PacketSendResult::SendFailed;
     }
 
-    return true;
+    return PacketSendResult::Sent;
+}
+
+inline bool packetSendSucceeded(PacketSendResult result)
+{
+    return result == PacketSendResult::Sent;
 }
 
 inline void destroyReceivedPacket(ENetEvent& event)

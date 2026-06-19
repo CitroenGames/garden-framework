@@ -99,7 +99,8 @@ enum class NetworkConnectionTrouble : uint8_t
 {
     None = 0,
     Loss = 1,
-    Timeout = 2
+    Timeout = 2,
+    Saturated = 3
 };
 
 // Network statistics. Packet and byte counters are total application-level
@@ -108,14 +109,19 @@ struct NetworkStats
 {
     uint64_t packets_sent = 0;
     uint64_t packets_received = 0;
+    uint64_t packets_dropped_incoming = 0;
+    uint64_t packets_dropped_outgoing = 0;
     uint64_t bytes_sent = 0;
     uint64_t bytes_received = 0;
+    uint64_t bytes_dropped_incoming = 0;
+    uint64_t bytes_dropped_outgoing = 0;
     float ping_ms = 0.0f;
     float rtt_ms = 0.0f;
     float jitter_ms = 0.0f;
     float packet_loss_percent = 0.0f;
     float packet_loss_variance_percent = 0.0f;
     float time_since_last_receive_seconds = 0.0f;
+    uint32_t outgoing_queue_bytes = 0;
     float bytes_sent_per_second = 0.0f;
     float bytes_received_per_second = 0.0f;
     float packets_sent_per_second = 0.0f;
@@ -127,14 +133,19 @@ struct NetworkStats
     void reset() {
         packets_sent = 0;
         packets_received = 0;
+        packets_dropped_incoming = 0;
+        packets_dropped_outgoing = 0;
         bytes_sent = 0;
         bytes_received = 0;
+        bytes_dropped_incoming = 0;
+        bytes_dropped_outgoing = 0;
         ping_ms = 0.0f;
         rtt_ms = 0.0f;
         jitter_ms = 0.0f;
         packet_loss_percent = 0.0f;
         packet_loss_variance_percent = 0.0f;
         time_since_last_receive_seconds = 0.0f;
+        outgoing_queue_bytes = 0;
         bytes_sent_per_second = 0.0f;
         bytes_received_per_second = 0.0f;
         packets_sent_per_second = 0.0f;
@@ -189,11 +200,21 @@ inline float enetPacketLossToPercent(uint32_t packet_loss)
     return static_cast<float>(packet_loss) * 100.0f / static_cast<float>(ENET_PEER_PACKET_LOSS_SCALE);
 }
 
+constexpr uint32_t NETWORK_DEFAULT_SATURATED_QUEUE_BYTES = 512u * 1024u;
+
+inline bool isPeerSendQueueSaturated(
+    const ENetPeer* peer,
+    uint32_t queued_byte_limit = NETWORK_DEFAULT_SATURATED_QUEUE_BYTES)
+{
+    return peer != nullptr && peer->outgoingDataTotal >= queued_byte_limit;
+}
+
 inline void updateStatsFromPeer(NetworkStats& stats, const ENetPeer* peer, const ENetHost* host)
 {
     if (peer == nullptr) {
         stats.trouble = NetworkConnectionTrouble::None;
         stats.time_since_last_receive_seconds = 0.0f;
+        stats.outgoing_queue_bytes = 0;
         return;
     }
 
@@ -202,6 +223,7 @@ inline void updateStatsFromPeer(NetworkStats& stats, const ENetPeer* peer, const
     stats.jitter_ms = static_cast<float>(peer->roundTripTimeVariance);
     stats.packet_loss_percent = enetPacketLossToPercent(peer->packetLoss);
     stats.packet_loss_variance_percent = enetPacketLossToPercent(peer->packetLossVariance);
+    stats.outgoing_queue_bytes = peer->outgoingDataTotal;
 
     if (host != nullptr && peer->lastReceiveTime > 0) {
         stats.time_since_last_receive_seconds =
@@ -210,7 +232,9 @@ inline void updateStatsFromPeer(NetworkStats& stats, const ENetPeer* peer, const
 
     stats.trouble = NetworkConnectionTrouble::None;
     const float timeout_seconds = static_cast<float>(peer->timeoutMaximum) / 1000.0f;
-    if (timeout_seconds > 0.0f && stats.time_since_last_receive_seconds > timeout_seconds * 0.5f) {
+    if (isPeerSendQueueSaturated(peer)) {
+        stats.trouble = NetworkConnectionTrouble::Saturated;
+    } else if (timeout_seconds > 0.0f && stats.time_since_last_receive_seconds > timeout_seconds * 0.5f) {
         stats.trouble = NetworkConnectionTrouble::Timeout;
     } else if (stats.packet_loss_percent > 0.0f) {
         stats.trouble = NetworkConnectionTrouble::Loss;

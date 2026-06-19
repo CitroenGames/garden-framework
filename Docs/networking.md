@@ -96,6 +96,16 @@ g_network.setCustomMessageHandler([](uint8_t type, Net::BitReader& reader) {
 
 Define your message types and serializers in `src/shared/` so client and server compile from the same code.
 
+## Packet policy
+
+Garden uses three ENet channels:
+
+- `RELIABLE_ORDERED` for connection control, spawns, despawns, cvars, and reliable game events.
+- `UNRELIABLE_SEQUENCED` for input commands and world snapshots. Newer state supersedes older state; stale snapshots are dropped on the client.
+- `UNRELIABLE_UNORDERED` for fire-and-forget custom messages where ordering does not matter.
+
+The transport layer caps application payloads, drops traffic when a peer's outgoing queue is saturated, and records incoming/outgoing drop counters in `NetworkStats`. If a client misses the acknowledged delta baseline, the server falls back to a full snapshot by default (`net_fullsnapshot_on_baseline_miss 1`).
+
 ## ConVars and replication
 
 Some ConVars are flagged `REPLICATED` — the server publishes them to clients. Use this for anything gameplay-sensitive that the server needs to control (gravity overrides, gametime, mod settings). See [Console & ConVars](console-and-convars.md).

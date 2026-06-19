@@ -52,8 +52,8 @@ bool ClientNetworkManager::connectToServer(const char* address, uint16_t port, c
     // Store player name
     player_name = name;
 
-    // Create client host with 2 channels
-    client_host = enet_host_create(nullptr, 1, 2, 0, 0);
+    // Create client host with reliable, sequenced unreliable, and unordered unreliable channels.
+    client_host = enet_host_create(nullptr, 1, NETWORK_CHANNEL_COUNT, 0, 0);
     if (client_host == nullptr) {
         LOG_ENGINE_ERROR("Failed to create ENet client host");
         return false;
@@ -71,7 +71,7 @@ bool ClientNetworkManager::connectToServer(const char* address, uint16_t port, c
     server_address.sin6_scope_id = 0;
 
     // Connect to server
-    server_peer = enet_host_connect(client_host, &server_address, 2, 0);
+    server_peer = enet_host_connect(client_host, &server_address, NETWORK_CHANNEL_COUNT, 0);
     if (server_peer == nullptr) {
         LOG_ENGINE_ERROR("Failed to create connection to server");
         enet_host_destroy(client_host);
@@ -333,8 +333,32 @@ void ClientNetworkManager::handleServerDisconnect(ENetEvent& event)
 
 void ClientNetworkManager::handleServerMessage(ENetEvent& event)
 {
+    if (event.packet == nullptr ||
+        event.packet->data == nullptr ||
+        event.packet->dataLength == 0 ||
+        event.packet->dataLength > NETWORK_MAX_PACKET_BYTES) {
+        const size_t packet_size = event.packet ? event.packet->dataLength : 0;
+        LOG_ENGINE_WARN("Dropping invalid server packet ({} bytes)", packet_size);
+        recordDroppedIncomingPacket(stats, packet_size);
+        return;
+    }
+
+    uint8_t msg_type = 0;
+    if (!NetworkSerializer::tryGetMessageType(event.packet->data, event.packet->dataLength, msg_type)) {
+        LOG_ENGINE_WARN("Dropping server packet without message type");
+        recordDroppedIncomingPacket(stats, event.packet->dataLength);
+        return;
+    }
+
+    if (!shouldAcceptServerMessage(msg_type)) {
+        LOG_ENGINE_WARN("Dropping server message type {} while client is in state {}",
+                        static_cast<int>(msg_type),
+                        static_cast<int>(connection_state));
+        recordDroppedIncomingPacket(stats, event.packet->dataLength);
+        return;
+    }
+
     BitReader reader(event.packet->data, event.packet->dataLength);
-    uint8_t msg_type = NetworkSerializer::getMessageType(event.packet->data, event.packet->dataLength);
 
     switch (static_cast<MessageType>(msg_type)) {
         case MessageType::CONNECT_ACCEPT:
@@ -432,6 +456,15 @@ void ClientNetworkManager::handleWorldStateUpdate(BitReader& reader)
     std::vector<EntityUpdateData> entities;
     if (!NetworkSerializer::deserialize(reader, msg, entities)) {
         LOG_ENGINE_WARN("Failed to deserialize WORLD_STATE_UPDATE message; dropping {0} partial entities", entities.size());
+        recordDroppedIncomingPacket(stats, 0);
+        return;
+    }
+
+    if (last_received_server_tick != 0 && !isTickNewer(msg.server_tick, last_received_server_tick)) {
+        LOG_ENGINE_WARN("Dropping stale WORLD_STATE_UPDATE tick {} (last accepted {})",
+                        msg.server_tick,
+                        last_received_server_tick);
+        recordDroppedIncomingPacket(stats, 0);
         return;
     }
 
@@ -478,16 +511,8 @@ void ClientNetworkManager::handleWorldStateUpdate(BitReader& reader)
             // Remote entities: ensure entity exists, then push to interpolation buffer
             createOrUpdateEntity(update);
 
-            // Push snapshot into interpolation buffer for smooth rendering
             if (update.hasTransform() || update.hasRotation()) {
-                auto& buf = interp_buffers[update.entity_id];
-                buf.addSnapshot(
-                    msg.server_tick,
-                    update.hasTransform() ? update.position : glm::vec3(0.0f),
-                    update.hasVelocity() ? update.velocity : glm::vec3(0.0f),
-                    update.hasGrounded() ? (update.grounded != 0) : false,
-                    update.hasRotation() ? update.rotation_y : 0.0f
-                );
+                pushInterpolationSnapshot(update.entity_id, msg.server_tick);
             }
         }
     }
@@ -701,6 +726,39 @@ void ClientNetworkManager::createOrUpdateEntity(const EntityUpdateData& update)
     }
 }
 
+void ClientNetworkManager::pushInterpolationSnapshot(uint32_t network_id, uint32_t server_tick)
+{
+    if (game_world == nullptr) {
+        return;
+    }
+
+    entt::entity entity = getEntityByNetworkId(network_id);
+    if (entity == entt::null || !game_world->registry.valid(entity)) {
+        return;
+    }
+
+    if (!game_world->registry.all_of<TransformComponent>(entity)) {
+        return;
+    }
+
+    const auto& transform = game_world->registry.get<TransformComponent>(entity);
+    glm::vec3 velocity(0.0f);
+    bool grounded = false;
+
+    if (game_world->registry.all_of<RigidBodyComponent>(entity)) {
+        velocity = game_world->registry.get<RigidBodyComponent>(entity).velocity;
+    }
+
+    if (game_world->registry.all_of<CharacterControllerComponent>(entity)) {
+        grounded = game_world->registry.get<CharacterControllerComponent>(entity).grounded;
+    } else if (game_world->registry.all_of<PlayerComponent>(entity)) {
+        grounded = game_world->registry.get<PlayerComponent>(entity).grounded;
+    }
+
+    auto& buffer = interp_buffers[network_id];
+    buffer.addSnapshot(server_tick, transform.position, velocity, grounded, transform.rotation.y);
+}
+
 void ClientNetworkManager::deleteEntity(uint32_t network_id)
 {
     if (game_world == nullptr) {
@@ -728,11 +786,9 @@ void ClientNetworkManager::deleteEntity(uint32_t network_id)
 
 bool ClientNetworkManager::sendReliableMessage(const BitWriter& writer)
 {
-    if (server_peer == nullptr) {
-        return false;
-    }
-
-    if (!sendPacketToPeer(server_peer, writer, PacketReliability::Reliable)) {
+    PacketSendResult result = sendPacketToPeer(server_peer, writer, PacketReliability::Reliable);
+    if (!packetSendSucceeded(result)) {
+        recordDroppedOutgoingPacket(stats, writer.getByteSize());
         return false;
     }
 
@@ -740,18 +796,50 @@ bool ClientNetworkManager::sendReliableMessage(const BitWriter& writer)
     return true;
 }
 
-bool ClientNetworkManager::sendUnreliableMessage(const BitWriter& writer)
+bool ClientNetworkManager::sendUnreliableMessage(const BitWriter& writer, PacketReliability reliability)
 {
-    if (server_peer == nullptr) {
-        return false;
-    }
-
-    if (!sendPacketToPeer(server_peer, writer, PacketReliability::UnreliableUnordered)) {
+    PacketSendResult result = sendPacketToPeer(server_peer, writer, reliability);
+    if (!packetSendSucceeded(result)) {
+        recordDroppedOutgoingPacket(stats, writer.getByteSize());
         return false;
     }
 
     recordSentPacket(stats, writer.getByteSize());
     return true;
+}
+
+bool ClientNetworkManager::shouldAcceptServerMessage(uint8_t message_type) const
+{
+    const MessageType type = static_cast<MessageType>(message_type);
+
+    if (connection_state == ConnectionState::CONNECTING) {
+        return type == MessageType::CONNECT_ACCEPT ||
+               type == MessageType::CONNECT_REJECT ||
+               type == MessageType::DISCONNECT;
+    }
+
+    if (connection_state != ConnectionState::CONNECTED) {
+        return false;
+    }
+
+    switch (type) {
+        case MessageType::CONNECT_ACCEPT:
+        case MessageType::CONNECT_REJECT:
+        case MessageType::CONNECT_REQUEST:
+        case MessageType::INPUT_COMMAND:
+        case MessageType::PING:
+            return false;
+        case MessageType::DISCONNECT:
+        case MessageType::SPAWN_PLAYER:
+        case MessageType::DESPAWN_PLAYER:
+        case MessageType::WORLD_STATE_UPDATE:
+        case MessageType::PONG:
+        case MessageType::CVAR_SYNC:
+        case MessageType::CVAR_INITIAL_SYNC:
+            return true;
+    }
+
+    return message_type >= CUSTOM_MESSAGE_START;
 }
 
 void ClientNetworkManager::setConnectionState(ConnectionState new_state)
@@ -875,7 +963,7 @@ void ClientNetworkManager::sendCustomReliable(const BitWriter& writer)
 
 void ClientNetworkManager::sendCustomUnreliable(const BitWriter& writer)
 {
-    sendUnreliableMessage(writer);
+    sendUnreliableMessage(writer, PacketReliability::UnreliableUnordered);
 }
 
 } // namespace Net

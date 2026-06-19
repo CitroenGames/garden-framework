@@ -3,6 +3,7 @@
 #include "NetworkProtocol.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <vector>
 
@@ -10,6 +11,8 @@ namespace Net {
 
 constexpr uint32_t MAX_INPUT_TICK_WINDOW = 128;
 constexpr uint32_t MAX_INPUT_BURST_TICKS = 8;
+constexpr float MAX_INPUT_AXIS_ABS = 1.25f;
+constexpr float MAX_INPUT_VIEW_ANGLE_ABS = 100000.0f;
 constexpr uint8_t INPUT_ACTION_LATCH_MASK = InputFlags::JUMP | InputFlags::ATTACK | InputFlags::ATTACK2;
 
 inline bool isTickNewer(uint32_t tick, uint32_t last_tick)
@@ -88,6 +91,32 @@ inline bool consumeInputTickBudget(uint32_t& available_ticks)
     }
 
     --available_ticks;
+    return true;
+}
+
+inline bool isValidInputSample(const InputSample& sample)
+{
+    if (sample.tick == 0) {
+        return false;
+    }
+
+    if (!std::isfinite(sample.camera_yaw) ||
+        !std::isfinite(sample.camera_pitch) ||
+        !std::isfinite(sample.move_forward) ||
+        !std::isfinite(sample.move_right)) {
+        return false;
+    }
+
+    if (std::abs(sample.move_forward) > MAX_INPUT_AXIS_ABS ||
+        std::abs(sample.move_right) > MAX_INPUT_AXIS_ABS) {
+        return false;
+    }
+
+    if (std::abs(sample.camera_yaw) > MAX_INPUT_VIEW_ANGLE_ABS ||
+        std::abs(sample.camera_pitch) > MAX_INPUT_VIEW_ANGLE_ABS) {
+        return false;
+    }
+
     return true;
 }
 

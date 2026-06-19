@@ -104,16 +104,22 @@ public:
 
     // Write a null-terminated string
     void writeString(const char* str, size_t max_length) {
-        if (str == nullptr) {
-            writeByte(0);  // empty string
+        if (max_length == 0) {
             return;
         }
+
+        if (str == nullptr) {
+            writeByte(0);
+            return;
+        }
+
+        const size_t max_chars = max_length - 1;
         size_t length = 0;
-        while (length < max_length && str[length] != '\0') {
+        while (length < max_chars && str[length] != '\0') {
             writeByte(str[length]);
             length++;
         }
-        writeByte(0);  // Null terminator (always written, even on truncation)
+        writeByte(0);
     }
 
     // Get the data buffer
@@ -249,14 +255,21 @@ public:
     // Read a null-terminated string
     void readString(char* output, size_t max_length) {
         if (max_length == 0) return;
-        size_t i = 0;
+        size_t stored = 0;
         bool found_terminator = false;
-        while (i < max_length - 1 && !hasError()) {
+
+        for (size_t wire_index = 0; wire_index < max_length && !hasError(); ++wire_index) {
             uint8_t ch = readByte();
-            if (ch == 0) { found_terminator = true; break; }
-            output[i++] = ch;
+            if (ch == 0) {
+                found_terminator = true;
+                break;
+            }
+            if (stored < max_length - 1) {
+                output[stored++] = static_cast<char>(ch);
+            }
         }
-        output[i] = '\0';
+
+        output[stored] = '\0';
         // If we filled the buffer without seeing the wire null terminator, the input is malformed.
         if (!found_terminator && !hasError()) {
             error_state = true;

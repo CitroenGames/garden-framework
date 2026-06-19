@@ -2,6 +2,7 @@
 #include "Network/NetworkProtocol.hpp"
 #include "Network/NetworkSerializer.hpp"
 #include "Network/NetworkInput.hpp"
+#include "Network/NetworkTransport.hpp"
 #include "Network/SharedMovement.hpp"
 #include "Network/LagHistory.hpp"
 #include "Network/PredictionTypes.hpp"
@@ -9,6 +10,7 @@
 
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -41,6 +43,18 @@ int testBitStream()
     Net::BitReader truncated(writer.getData(), 1);
     (void)truncated.readUInt32();
     if (!truncated.hasError()) return fail(name, "truncated read did not set error");
+
+    char exact[32] = {};
+    for (int i = 0; i < 31; ++i) {
+        exact[i] = static_cast<char>('a' + (i % 26));
+    }
+    Net::BitWriter string_writer;
+    string_writer.writeString(exact, sizeof(exact));
+    Net::BitReader string_reader(string_writer.getData(), string_writer.getByteSize());
+    char exact_out[32] = {};
+    string_reader.readString(exact_out, sizeof(exact_out));
+    if (string_reader.hasError()) return fail(name, "exact-capacity string was rejected");
+    if (std::string(exact_out) != std::string(exact)) return fail(name, "exact-capacity string mismatch");
     return 0;
 }
 
@@ -102,6 +116,20 @@ int testInputPolicy()
     if (Net::shouldAcceptInputTick(39, 40)) return fail(name, "old tick accepted");
     if (Net::shouldAcceptInputTick(170, 40)) return fail(name, "out-of-window tick accepted");
     if (Net::InputFlags::RELOAD != Net::InputFlags::ATTACK2) return fail(name, "reload alias mismatch");
+
+    Net::InputSample valid_sample;
+    valid_sample.tick = 1;
+    valid_sample.move_forward = 1.0f;
+    valid_sample.move_right = -1.0f;
+    if (!Net::isValidInputSample(valid_sample)) return fail(name, "valid input sample rejected");
+
+    Net::InputSample nan_sample = valid_sample;
+    nan_sample.camera_yaw = std::numeric_limits<float>::quiet_NaN();
+    if (Net::isValidInputSample(nan_sample)) return fail(name, "nan input sample accepted");
+
+    Net::InputSample axis_sample = valid_sample;
+    axis_sample.move_forward = Net::MAX_INPUT_AXIS_ABS + 0.5f;
+    if (Net::isValidInputSample(axis_sample)) return fail(name, "out-of-range input axis accepted");
 
     uint32_t last_budget_tick = 10;
     uint32_t budget = 0;
@@ -180,7 +208,7 @@ int testWorldStateSerialization()
     const char* name = "WorldStateSerialization";
     Net::WorldStateUpdateMessage msg;
     msg.server_tick = 99;
-    msg.delta_from_tick = 77;
+    msg.delta_from_tick = 0;
     msg.snapshot_flags = Net::SnapshotFlags::FULL | Net::SnapshotFlags::BASELINE_MISS;
     msg.last_processed_input_tick = 88;
 
@@ -206,12 +234,76 @@ int testWorldStateSerialization()
     if (!Net::NetworkSerializer::deserialize(reader, out, out_updates)) {
         return fail(name, "deserialize failed");
     }
-    if (out.server_tick != 99 || out.delta_from_tick != 77 || out.last_processed_input_tick != 88) return fail(name, "header mismatch");
+    if (out.server_tick != 99 || out.delta_from_tick != 0 || out.last_processed_input_tick != 88) return fail(name, "header mismatch");
     if (!out.isFullSnapshot() || (out.snapshot_flags & Net::SnapshotFlags::BASELINE_MISS) == 0) return fail(name, "snapshot flags mismatch");
     if (out.num_entities != 2) return fail(name, "serialized entity count mismatch");
     if (out_updates.size() != 2) return fail(name, "update count mismatch");
     if (!out_updates[0].hasTransform() || !approxEqual(out_updates[0].position.y, 2.0f)) return fail(name, "transform mismatch");
     if (!out_updates[1].shouldDelete()) return fail(name, "delete flag mismatch");
+
+    Net::EntityUpdateData invalid_id = moved;
+    invalid_id.entity_id = 0;
+    Net::BitWriter invalid_id_writer;
+    Net::NetworkSerializer::serialize(invalid_id_writer, invalid_id);
+    Net::BitReader invalid_id_reader(invalid_id_writer.getData(), invalid_id_writer.getByteSize());
+    Net::EntityUpdateData invalid_id_out;
+    if (Net::NetworkSerializer::deserialize(invalid_id_reader, invalid_id_out)) {
+        return fail(name, "null entity id accepted");
+    }
+
+    Net::EntityUpdateData invalid_flags = moved;
+    invalid_flags.flags = static_cast<uint8_t>(Net::ComponentFlags::DELETED | Net::ComponentFlags::TRANSFORM);
+    Net::BitWriter invalid_flags_writer;
+    Net::NetworkSerializer::serialize(invalid_flags_writer, invalid_flags);
+    Net::BitReader invalid_flags_reader(invalid_flags_writer.getData(), invalid_flags_writer.getByteSize());
+    Net::EntityUpdateData invalid_flags_out;
+    if (Net::NetworkSerializer::deserialize(invalid_flags_reader, invalid_flags_out)) {
+        return fail(name, "delete-with-payload flags accepted");
+    }
+
+    Net::WorldStateUpdateMessage invalid_snapshot = msg;
+    invalid_snapshot.delta_from_tick = 77;
+    Net::BitWriter invalid_snapshot_writer;
+    Net::NetworkSerializer::serialize(invalid_snapshot_writer, invalid_snapshot, updates);
+    Net::BitReader invalid_snapshot_reader(invalid_snapshot_writer.getData(), invalid_snapshot_writer.getByteSize());
+    Net::WorldStateUpdateMessage invalid_snapshot_out;
+    std::vector<Net::EntityUpdateData> invalid_snapshot_updates;
+    if (Net::NetworkSerializer::deserialize(invalid_snapshot_reader, invalid_snapshot_out, invalid_snapshot_updates)) {
+        return fail(name, "full snapshot with non-zero baseline accepted");
+    }
+    return 0;
+}
+
+int testNetworkTransportPolicy()
+{
+    const char* name = "NetworkTransportPolicy";
+
+    if (Net::NETWORK_CHANNEL_COUNT != 3) return fail(name, "channel count mismatch");
+    if (Net::getPacketChannel(Net::PacketReliability::Reliable) != Net::NetworkChannel::RELIABLE_ORDERED) {
+        return fail(name, "reliable channel mismatch");
+    }
+    if (Net::getPacketChannel(Net::PacketReliability::UnreliableSequenced) != Net::NetworkChannel::UNRELIABLE_SEQUENCED) {
+        return fail(name, "sequenced unreliable channel mismatch");
+    }
+    if (Net::getPacketChannel(Net::PacketReliability::UnreliableUnordered) != Net::NetworkChannel::UNRELIABLE_UNORDERED) {
+        return fail(name, "unordered unreliable channel mismatch");
+    }
+    if (Net::getPacketFlags(Net::PacketReliability::UnreliableSequenced) != 0) {
+        return fail(name, "sequenced unreliable should not use unsequenced flag");
+    }
+    if ((Net::getPacketFlags(Net::PacketReliability::UnreliableUnordered) & ENET_PACKET_FLAG_UNSEQUENCED) == 0) {
+        return fail(name, "unordered unreliable missing ENet unsequenced flag");
+    }
+
+    Net::NetworkStats stats;
+    Net::recordDroppedIncomingPacket(stats, 12);
+    Net::recordDroppedOutgoingPacket(stats, 34);
+    if (stats.packets_dropped_incoming != 1 || stats.bytes_dropped_incoming != 12) {
+        return fail(name, "incoming drop stats mismatch");
+    }
+    if (stats.packets_dropped_outgoing != 1 || stats.bytes_dropped_outgoing != 34) {
+        return fail(name, "outgoing drop stats mismatch");
+    }
     return 0;
 }
 
@@ -335,6 +427,7 @@ int main()
     failures += testInputActionLatchPolicy();
     failures += testSharedMovementSourceRules();
     failures += testWorldStateSerialization();
+    failures += testNetworkTransportPolicy();
     failures += testCVarSerialization();
     failures += testNetworkStats();
     failures += testLagHistory();

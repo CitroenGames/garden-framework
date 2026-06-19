@@ -14,6 +14,7 @@ constexpr uint16_t MAX_SYNCED_CVARS = 1024;
 constexpr uint8_t CUSTOM_MESSAGE_START = 64;
 constexpr uint8_t MAX_INPUT_SAMPLES_PER_PACKET = 3;
 constexpr uint8_t DEFAULT_INTERP_DELAY_TICKS = 2;
+constexpr uint8_t NETWORK_CHANNEL_COUNT = 3;
 
 // Message type enumeration
 enum class MessageType : uint8_t
@@ -44,7 +45,8 @@ enum class MessageType : uint8_t
 enum class NetworkChannel : uint8_t
 {
     RELIABLE_ORDERED = 0,      // Connection, spawns (reliable)
-    UNRELIABLE_UNORDERED = 1   // Input, state (unreliable)
+    UNRELIABLE_SEQUENCED = 1,  // Input, state (unreliable, stale packets discarded by ENet)
+    UNRELIABLE_UNORDERED = 2   // Fire-and-forget custom messages
 };
 
 // Input button flags
@@ -69,6 +71,7 @@ namespace ComponentFlags
     constexpr uint8_t GROUNDED      = 1 << 5;  // Grounded state changed
     constexpr uint8_t DELETED        = 1 << 4;  // Entity should be deleted
     constexpr uint8_t ROTATION      = 1 << 3;  // Rotation changed
+    constexpr uint8_t ALL_KNOWN      = TRANSFORM | VELOCITY | GROUNDED | DELETED | ROTATION;
 }
 
 // Snapshot flags
@@ -77,6 +80,7 @@ namespace SnapshotFlags
     constexpr uint8_t NONE          = 0;
     constexpr uint8_t FULL          = 1 << 0;  // Snapshot is authoritative for all currently networked entities.
     constexpr uint8_t BASELINE_MISS = 1 << 1;  // Server could not find the client's acknowledged delta baseline.
+    constexpr uint8_t ALL_KNOWN     = FULL | BASELINE_MISS;
 }
 
 // Message structures

@@ -5,6 +5,7 @@
 #include "NetworkTypes.hpp"
 #include <vector>
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <utility>
 
@@ -13,6 +14,35 @@ namespace Net {
 // Namespace for all serialization functions
 namespace NetworkSerializer
 {
+    inline bool isFinite(float value)
+    {
+        return std::isfinite(value);
+    }
+
+    inline bool isFinite(const glm::vec3& value)
+    {
+        return isFinite(value.x) && isFinite(value.y) && isFinite(value.z);
+    }
+
+    inline bool hasOnlyKnownComponentFlags(uint8_t flags)
+    {
+        return (flags & ~ComponentFlags::ALL_KNOWN) == 0;
+    }
+
+    inline bool hasOnlyKnownSnapshotFlags(uint8_t flags)
+    {
+        return (flags & ~SnapshotFlags::ALL_KNOWN) == 0;
+    }
+
+    inline bool tryGetMessageType(const uint8_t* data, size_t size, uint8_t& out_type)
+    {
+        if (data == nullptr || size < 1) {
+            return false;
+        }
+        out_type = data[0];
+        return true;
+    }
+
     // Serialize ConnectRequestMessage
     inline void serialize(BitWriter& writer, const ConnectRequestMessage& msg) {
         writer.writeByte(static_cast<uint8_t>(msg.type));
@@ -156,6 +186,12 @@ namespace NetworkSerializer
         msg.camera_pitch = reader.readFloat();
         msg.move_forward = reader.readFloat();
         msg.move_right = reader.readFloat();
+        if (!isFinite(msg.camera_yaw) ||
+            !isFinite(msg.camera_pitch) ||
+            !isFinite(msg.move_forward) ||
+            !isFinite(msg.move_right)) {
+            return false;
+        }
         // Redundant older inputs
         redundant_inputs.clear();
         for (uint8_t i = 1; i < msg.input_count; i++) {
@@ -166,6 +202,13 @@ namespace NetworkSerializer
             sample.camera_pitch = reader.readFloat();
             sample.move_forward = reader.readFloat();
             sample.move_right = reader.readFloat();
+            if (!isFinite(sample.camera_yaw) ||
+                !isFinite(sample.camera_pitch) ||
+                !isFinite(sample.move_forward) ||
+                !isFinite(sample.move_right)) {
+                redundant_inputs.clear();
+                return false;
+            }
             redundant_inputs.push_back(sample);
         }
         return !reader.hasError();
@@ -199,6 +242,9 @@ namespace NetworkSerializer
         if (!reader.canRead(40)) return false;  // entity_id(32) + flags(8)
         entity.entity_id = reader.readUInt32();
         entity.flags = reader.readByte();
+        if (entity.entity_id == 0) return false;
+        if (!hasOnlyKnownComponentFlags(entity.flags)) return false;
+        if ((entity.flags & ComponentFlags::DELETED) != 0 && entity.flags != ComponentFlags::DELETED) return false;
 
         // Pre-validate the conditional body fits in the remaining buffer.
         size_t body_bits = 0;
@@ -211,16 +257,21 @@ namespace NetworkSerializer
         // Read conditional data based on flags
         if (entity.flags & ComponentFlags::TRANSFORM) {
             entity.position = reader.readVector3f();
+            if (!isFinite(entity.position)) return false;
         }
         if (entity.flags & ComponentFlags::VELOCITY) {
             entity.velocity = reader.readVector3f();
+            if (!isFinite(entity.velocity)) return false;
         }
         if (entity.flags & ComponentFlags::GROUNDED) {
             entity.grounded = reader.readByte();
+            if (entity.grounded > 1) return false;
             entity.ground_normal = reader.readVector3f();
+            if (!isFinite(entity.ground_normal)) return false;
         }
         if (entity.flags & ComponentFlags::ROTATION) {
             entity.rotation_y = reader.readFloat();
+            if (!isFinite(entity.rotation_y)) return false;
         }
 
         return !reader.hasError();
@@ -248,6 +299,8 @@ namespace NetworkSerializer
         msg.server_tick = reader.readUInt32();
         msg.delta_from_tick = reader.readUInt32();
         msg.snapshot_flags = reader.readByte();
+        if (!hasOnlyKnownSnapshotFlags(msg.snapshot_flags)) return false;
+        if (msg.isFullSnapshot() && msg.delta_from_tick != 0) return false;
         uint16_t num_entities = reader.readUInt16();
         if (num_entities > MAX_NETWORKED_ENTITIES) return false;
         msg.num_entities = num_entities;
@@ -298,8 +351,9 @@ namespace NetworkSerializer
 
     // Helper: Get message type from raw data (peek first byte)
     inline uint8_t getMessageType(const uint8_t* data, size_t size) {
-        if (size < 1) return static_cast<uint8_t>(MessageType::DISCONNECT);
-        return data[0];
+        uint8_t type = static_cast<uint8_t>(MessageType::DISCONNECT);
+        tryGetMessageType(data, size, type);
+        return type;
     }
 
     // Helper: Create an ENet packet from serialized data

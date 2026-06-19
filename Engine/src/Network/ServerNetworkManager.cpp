@@ -129,8 +129,8 @@ bool ServerNetworkManager::startServer(uint16_t port, uint32_t max_clients)
     }
 #endif
 
-    // Create server with 2 channels: reliable and unreliable
-    server_host = enet_host_create(&address, max_clients, 2, 0, 0);
+    // Create server with reliable, sequenced unreliable, and unordered unreliable channels.
+    server_host = enet_host_create(&address, max_clients, NETWORK_CHANNEL_COUNT, 0, 0);
 
     if (server_host == nullptr) {
 #ifdef _WIN32
@@ -178,6 +178,7 @@ void ServerNetworkManager::shutdown()
     last_state_update_tick = 0;
     lag_history.clear();
     last_lag_history_tick = 0;
+    snapshot_history.clear();
 
     if (runtime_acquired) {
         NetworkRuntime::release();
@@ -339,8 +340,31 @@ void ServerNetworkManager::handleClientDisconnect(ENetEvent& event)
 
 void ServerNetworkManager::handleClientMessage(ENetEvent& event)
 {
+    if (event.packet == nullptr ||
+        event.packet->data == nullptr ||
+        event.packet->dataLength == 0 ||
+        event.packet->dataLength > NETWORK_MAX_PACKET_BYTES) {
+        const size_t packet_size = event.packet ? event.packet->dataLength : 0;
+        LOG_ENGINE_WARN("Dropping invalid client packet ({} bytes)", packet_size);
+        recordDroppedFromPeer(event.peer, packet_size);
+        return;
+    }
+
+    uint8_t msg_type = 0;
+    if (!NetworkSerializer::tryGetMessageType(event.packet->data, event.packet->dataLength, msg_type)) {
+        LOG_ENGINE_WARN("Dropping client packet without message type");
+        recordDroppedFromPeer(event.peer, event.packet->dataLength);
+        return;
+    }
+
+    if (!shouldAcceptClientMessage(event.peer, msg_type)) {
+        LOG_ENGINE_WARN("Dropping client message type {} before/after invalid connection state",
+                        static_cast<int>(msg_type));
+        recordDroppedFromPeer(event.peer, event.packet->dataLength);
+        return;
+    }
+
     BitReader reader(event.packet->data, event.packet->dataLength);
-    uint8_t msg_type = NetworkSerializer::getMessageType(event.packet->data, event.packet->dataLength);
 
     switch (static_cast<MessageType>(msg_type)) {
         case MessageType::CONNECT_REQUEST:
@@ -381,6 +405,11 @@ void ServerNetworkManager::handleClientMessage(ENetEvent& event)
 
 void ServerNetworkManager::handleConnectRequest(ENetPeer* peer, BitReader& reader)
 {
+    if (peer_to_client_id.find(peer) != peer_to_client_id.end()) {
+        LOG_ENGINE_WARN("Ignoring duplicate CONNECT_REQUEST from authenticated peer");
+        return;
+    }
+
     ConnectRequestMessage msg;
     if (!NetworkSerializer::deserialize(reader, msg)) {
         LOG_ENGINE_WARN("Failed to deserialize CONNECT_REQUEST from peer");
@@ -508,6 +537,12 @@ void ServerNetworkManager::handleInputCommand(uint16_t client_id, BitReader& rea
         it->second.info.input_tick_budget);
 
     for (const auto& sample : samples) {
+        if (!isValidInputSample(sample)) {
+            LOG_ENGINE_WARN("Client {0} sent invalid input sample at tick {1}", client_id, sample.tick);
+            recordDroppedFromPeer(it->second.info.peer, 0);
+            continue;
+        }
+
         if (!shouldAcceptInputTick(sample.tick, it->second.info.last_input_tick)) {
             continue;
         }
@@ -591,10 +626,10 @@ void ServerNetworkManager::broadcastWorldState()
     // Generate current world snapshot
     WorldSnapshot snapshot = generateWorldSnapshot();
     snapshot.tick = current_tick;
+    addSnapshotToHistory(snapshot);
 
     // Send to each client (with delta compression)
     for (auto& [client_id, connection] : clients) {
-        connection.addSnapshot(snapshot);
         sendWorldStateToClient(client_id, snapshot);
     }
 }
@@ -641,18 +676,29 @@ WorldSnapshot ServerNetworkManager::generateWorldSnapshot()
     return snapshot;
 }
 
+void ServerNetworkManager::addSnapshotToHistory(const WorldSnapshot& snapshot)
+{
+    snapshot_history.push_back(snapshot);
+
+    while (snapshot_history.size() > 64) {
+        snapshot_history.pop_front();
+    }
+}
+
+const WorldSnapshot* ServerNetworkManager::getSnapshotFromHistory(uint32_t tick) const
+{
+    for (const auto& snapshot : snapshot_history) {
+        if (snapshot.tick == tick) {
+            return &snapshot;
+        }
+    }
+    return nullptr;
+}
+
 std::vector<EntityUpdateData> ServerNetworkManager::generateDeltaUpdate(
-    uint16_t client_id, const WorldSnapshot& current, bool full_snapshot, uint32_t delta_from_tick)
+    const WorldSnapshot& current, const WorldSnapshot* baseline, bool full_snapshot)
 {
     std::vector<EntityUpdateData> updates;
-
-    auto it = clients.find(client_id);
-    if (it == clients.end()) {
-        return updates;
-    }
-
-    // Get baseline snapshot (last acknowledged)
-    const WorldSnapshot* baseline = full_snapshot ? nullptr : it->second.getSnapshot(delta_from_tick);
 
     // For each entity in current snapshot
     for (const auto& [entity_id, entity_snapshot] : current.entities) {
@@ -729,14 +775,18 @@ void ServerNetworkManager::sendWorldStateToClient(uint16_t client_id, const Worl
     }
 
     const uint32_t acknowledged_tick = it->second.info.last_acknowledged_tick;
-    const bool has_baseline = acknowledged_tick != 0 && it->second.hasSnapshot(acknowledged_tick);
+    const WorldSnapshot* baseline = acknowledged_tick != 0 ? getSnapshotFromHistory(acknowledged_tick) : nullptr;
+    const bool has_baseline = baseline != nullptr;
     const bool baseline_miss = acknowledged_tick != 0 && !has_baseline;
     const bool force_full_on_miss = getBoolCVarOrDefault("net_fullsnapshot_on_baseline_miss", true);
     const bool full_snapshot = acknowledged_tick == 0 || (baseline_miss && force_full_on_miss);
     const uint32_t delta_from_tick = full_snapshot ? 0 : acknowledged_tick;
+    if (full_snapshot) {
+        baseline = nullptr;
+    }
 
     // Generate delta update
-    std::vector<EntityUpdateData> updates = generateDeltaUpdate(client_id, snapshot, full_snapshot, delta_from_tick);
+    std::vector<EntityUpdateData> updates = generateDeltaUpdate(snapshot, baseline, full_snapshot);
 
     if (updates.empty() && !full_snapshot) {
         return;  // Nothing changed
@@ -825,7 +875,9 @@ const ClientInfo* ServerNetworkManager::getClientInfo(uint16_t client_id) const
 
 bool ServerNetworkManager::sendReliableMessage(ENetPeer* peer, const BitWriter& writer)
 {
-    if (!sendPacketToPeer(peer, writer, PacketReliability::Reliable)) {
+    PacketSendResult result = sendPacketToPeer(peer, writer, PacketReliability::Reliable);
+    if (!packetSendSucceeded(result)) {
+        recordDroppedToPeer(peer, writer.getByteSize());
         return false;
     }
 
@@ -833,9 +885,11 @@ bool ServerNetworkManager::sendReliableMessage(ENetPeer* peer, const BitWriter& 
     return true;
 }
 
-bool ServerNetworkManager::sendUnreliableMessage(ENetPeer* peer, const BitWriter& writer)
+bool ServerNetworkManager::sendUnreliableMessage(ENetPeer* peer, const BitWriter& writer, PacketReliability reliability)
 {
-    if (!sendPacketToPeer(peer, writer, PacketReliability::UnreliableUnordered)) {
+    PacketSendResult result = sendPacketToPeer(peer, writer, reliability);
+    if (!packetSendSucceeded(result)) {
+        recordDroppedToPeer(peer, writer.getByteSize());
         return false;
     }
 
@@ -856,6 +910,65 @@ void ServerNetworkManager::recordSentToPeer(ENetPeer* peer, std::size_t byte_cou
     if (client_it != clients.end()) {
         recordSentPacket(client_it->second.info.stats, byte_count);
     }
+}
+
+void ServerNetworkManager::recordDroppedFromPeer(ENetPeer* peer, std::size_t byte_count)
+{
+    recordDroppedIncomingPacket(stats, byte_count);
+
+    auto peer_it = peer_to_client_id.find(peer);
+    if (peer_it == peer_to_client_id.end()) {
+        return;
+    }
+
+    auto client_it = clients.find(peer_it->second);
+    if (client_it != clients.end()) {
+        recordDroppedIncomingPacket(client_it->second.info.stats, byte_count);
+    }
+}
+
+void ServerNetworkManager::recordDroppedToPeer(ENetPeer* peer, std::size_t byte_count)
+{
+    recordDroppedOutgoingPacket(stats, byte_count);
+
+    auto peer_it = peer_to_client_id.find(peer);
+    if (peer_it == peer_to_client_id.end()) {
+        return;
+    }
+
+    auto client_it = clients.find(peer_it->second);
+    if (client_it != clients.end()) {
+        recordDroppedOutgoingPacket(client_it->second.info.stats, byte_count);
+    }
+}
+
+bool ServerNetworkManager::shouldAcceptClientMessage(ENetPeer* peer, uint8_t message_type) const
+{
+    const bool is_authenticated = peer_to_client_id.find(peer) != peer_to_client_id.end();
+    const MessageType type = static_cast<MessageType>(message_type);
+
+    if (!is_authenticated) {
+        return type == MessageType::CONNECT_REQUEST;
+    }
+
+    switch (type) {
+        case MessageType::CONNECT_REQUEST:
+        case MessageType::CONNECT_ACCEPT:
+        case MessageType::CONNECT_REJECT:
+        case MessageType::SPAWN_PLAYER:
+        case MessageType::DESPAWN_PLAYER:
+        case MessageType::WORLD_STATE_UPDATE:
+        case MessageType::PONG:
+        case MessageType::CVAR_SYNC:
+        case MessageType::CVAR_INITIAL_SYNC:
+            return false;
+        case MessageType::DISCONNECT:
+        case MessageType::INPUT_COMMAND:
+        case MessageType::PING:
+            return true;
+    }
+
+    return message_type >= CUSTOM_MESSAGE_START;
 }
 
 void ServerNetworkManager::disconnectClient(uint16_t client_id, const char* reason)
@@ -914,7 +1027,7 @@ void ServerNetworkManager::sendUnreliableToClient(uint16_t client_id, const BitW
 {
     auto it = clients.find(client_id);
     if (it != clients.end() && it->second.info.peer != nullptr) {
-        sendUnreliableMessage(it->second.info.peer, writer);
+        sendUnreliableMessage(it->second.info.peer, writer, PacketReliability::UnreliableUnordered);
     } else {
         LOG_ENGINE_WARN("Cannot send to client {0}: not found or no peer", client_id);
     }
@@ -933,7 +1046,7 @@ void ServerNetworkManager::broadcastUnreliable(const BitWriter& writer)
 {
     for (auto& [client_id, connection] : clients) {
         if (connection.info.peer) {
-            sendUnreliableMessage(connection.info.peer, writer);
+            sendUnreliableMessage(connection.info.peer, writer, PacketReliability::UnreliableUnordered);
         }
     }
 }

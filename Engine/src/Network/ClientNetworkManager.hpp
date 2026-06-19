@@ -11,6 +11,7 @@
 #include "NetworkTypes.hpp"
 #include "BitStream.hpp"
 #include "NetworkSerializer.hpp"
+#include "NetworkTransport.hpp"
 #include "SharedMovement.hpp"
 #include "PredictionTypes.hpp"
 #include "InterpolationBuffer.hpp"
@@ -177,11 +178,14 @@ private:
 
     // Entity management
     void createOrUpdateEntity(const EntityUpdateData& update);
+    void pushInterpolationSnapshot(uint32_t network_id, uint32_t server_tick);
     void deleteEntity(uint32_t network_id);
 
     // Helper functions
     bool sendReliableMessage(const BitWriter& writer);
-    bool sendUnreliableMessage(const BitWriter& writer);
+    bool sendUnreliableMessage(const BitWriter& writer,
+                               PacketReliability reliability = PacketReliability::UnreliableSequenced);
+    bool shouldAcceptServerMessage(uint8_t message_type) const;
     void setConnectionState(ConnectionState new_state);
     void refreshStats(float delta_time);
 };

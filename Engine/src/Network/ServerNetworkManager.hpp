@@ -13,6 +13,7 @@
 #include "NetworkTypes.hpp"
 #include "BitStream.hpp"
 #include "NetworkSerializer.hpp"
+#include "NetworkTransport.hpp"
 #include "LagHistory.hpp"
 #include <entt/entt.hpp>
 
@@ -33,46 +34,15 @@ using ServerInputSampleHandler = std::function<void(
 struct ClientConnection
 {
     ClientInfo info;
-    std::deque<WorldSnapshot> snapshot_history;  // Keep last 64 snapshots
     NetworkStatsRateSampler stats_sampler;
     uint32_t last_sent_tick = 0;
 
     ClientConnection() = default;
     ClientConnection(const ClientInfo& client_info) : info(client_info) {}
 
-    // Add a snapshot to history
-    void addSnapshot(const WorldSnapshot& snapshot) {
-        snapshot_history.push_back(snapshot);
-
-        // Keep only last 64 snapshots
-        while (snapshot_history.size() > 64) {
-            snapshot_history.pop_front();
-        }
-    }
-
-    // Get snapshot at specific tick (returns nullptr if not found)
-    const WorldSnapshot* getSnapshot(uint32_t tick) const {
-        for (const auto& snapshot : snapshot_history) {
-            if (snapshot.tick == tick) {
-                return &snapshot;
-            }
-        }
-        return nullptr;
-    }
-
-    bool hasSnapshot(uint32_t tick) const {
-        return getSnapshot(tick) != nullptr;
-    }
-
-    // Update acknowledged tick and prune old snapshots
+    // Update acknowledged tick.
     void acknowledgeSnapshot(uint32_t tick) {
         info.last_acknowledged_tick = tick;
-
-        // Prune snapshots older than acknowledged - 32 ticks
-        uint32_t min_tick = (tick > 32) ? (tick - 32) : 0;
-        while (!snapshot_history.empty() && snapshot_history.front().tick < min_tick) {
-            snapshot_history.pop_front();
-        }
     }
 };
 
@@ -99,6 +69,7 @@ private:
     uint32_t state_update_counter = 0;  // Counter for 20Hz updates (every 3 ticks)
     uint32_t last_state_update_tick = 0;
     uint32_t last_lag_history_tick = 0;
+    std::deque<WorldSnapshot> snapshot_history;
     LagHistory lag_history;
 
     // Callbacks
@@ -187,15 +158,23 @@ private:
 
     // State synchronization
     WorldSnapshot generateWorldSnapshot();
-    std::vector<EntityUpdateData> generateDeltaUpdate(uint16_t client_id, const WorldSnapshot& current,
-                                                      bool full_snapshot, uint32_t delta_from_tick);
+    void addSnapshotToHistory(const WorldSnapshot& snapshot);
+    const WorldSnapshot* getSnapshotFromHistory(uint32_t tick) const;
+    std::vector<EntityUpdateData> generateDeltaUpdate(const WorldSnapshot& current,
+                                                      const WorldSnapshot* baseline,
+                                                      bool full_snapshot);
     void sendWorldStateToClient(uint16_t client_id, const WorldSnapshot& snapshot);
     void refreshStats(float delta_time);
 
     // Helper functions
     bool sendReliableMessage(ENetPeer* peer, const BitWriter& writer);
-    bool sendUnreliableMessage(ENetPeer* peer, const BitWriter& writer);
+    bool sendUnreliableMessage(ENetPeer* peer,
+                               const BitWriter& writer,
+                               PacketReliability reliability = PacketReliability::UnreliableSequenced);
     void recordSentToPeer(ENetPeer* peer, std::size_t byte_count);
+    void recordDroppedFromPeer(ENetPeer* peer, std::size_t byte_count);
+    void recordDroppedToPeer(ENetPeer* peer, std::size_t byte_count);
+    bool shouldAcceptClientMessage(ENetPeer* peer, uint8_t message_type) const;
     void disconnectClient(uint16_t client_id, const char* reason);
 };
 
