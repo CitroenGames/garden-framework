@@ -2,6 +2,7 @@
 
 #include "Events/EngineEvents.hpp"
 #include "Events/EventBus.hpp"
+#include "GameFramework/GameFrameworkComponents.hpp"
 #include "GameFramework/GameModeRegistry.hpp"
 #include "GameFramework/GameStateBase.hpp"
 #include "PlayerController.hpp"
@@ -23,6 +24,12 @@ GameModeBase::GameModeBase() = default;
 
 GameModeBase::~GameModeBase() = default;
 
+void GameModeBase::bindWorld(world& game_world)
+{
+    m_world = &game_world;
+    syncGameModeComponent();
+}
+
 void GameModeBase::initGame(world& game_world,
                             const std::string& map_name,
                             const std::string& options,
@@ -33,6 +40,7 @@ void GameModeBase::initGame(world& game_world,
     m_map_name = map_name;
     m_options_string = options;
     initGameState();
+    syncGameModeComponent();
 
     LOG_ENGINE_INFO("GameMode initialized: {} map='{}'", getClassName(), m_map_name);
     EventBus::get().queue(GameModeInitializedEvent{getClassName(), m_map_name});
@@ -70,6 +78,8 @@ void GameModeBase::tick(float delta_time)
 {
     if (m_game_state)
         m_game_state->tick(delta_time);
+
+    syncGameModeComponent();
 }
 
 void GameModeBase::reset()
@@ -99,6 +109,7 @@ bool GameModeBase::setPause(uint16_t player_id)
         return false;
 
     m_paused = true;
+    syncGameModeComponent();
     return true;
 }
 
@@ -106,6 +117,7 @@ bool GameModeBase::clearPause()
 {
     const bool was_paused = m_paused;
     m_paused = false;
+    syncGameModeComponent();
     return was_paused;
 }
 
@@ -148,6 +160,7 @@ PlayerControllerEntry* GameModeBase::login(const PlayerLoginOptions& options, st
     entry.player_state->start_time = m_game_state
         ? static_cast<float>(m_game_state->getServerWorldTimeSeconds())
         : 0.0f;
+    syncPlayerEntryToEcs(entry);
 
     m_players.push_back(std::move(entry));
     error_message.clear();
@@ -180,7 +193,9 @@ void GameModeBase::logout(uint16_t player_id)
         it->player_state ? it->player_state->player_name : std::string{}
     });
     detachPlayerStateFromGameState(it->player_id);
+    destroyPlayerEntryEcs(*it);
     m_players.erase(it);
+    syncGameModeComponent();
 }
 
 void GameModeBase::handleStartingNewPlayer(PlayerControllerEntry& new_player)
@@ -194,6 +209,7 @@ void GameModeBase::handleStartingNewPlayer(PlayerControllerEntry& new_player)
         new_player.freecam = findOrCreateFreecamFor(new_player);
         if (new_player.controller && m_world && m_world->registry.valid(new_player.freecam))
             new_player.controller->setPossessedFreecam(new_player.freecam);
+        syncPlayerEntryToEcs(new_player);
         return;
     }
 
@@ -444,6 +460,8 @@ void GameModeBase::finishRestartPlayer(PlayerControllerEntry& player)
     if (player.player_state)
         player.player_state->pawn = player.pawn;
 
+    syncPlayerEntryToEcs(player);
+
     if (m_world->registry.all_of<TransformComponent>(player.pawn))
     {
         const auto& transform = m_world->registry.get<TransformComponent>(player.pawn);
@@ -586,5 +604,71 @@ void GameModeBase::detachPlayerStateFromGameState(uint16_t player_id)
 {
     if (m_game_state)
         m_game_state->removePlayerState(player_id);
+}
+
+void GameModeBase::syncGameModeComponent()
+{
+    if (!m_world)
+        return;
+
+    const entt::entity entity = getOrCreateGameModeEntity(m_world->registry);
+    auto& component = m_world->registry.get_or_emplace<GameModeComponent>(entity);
+    component.class_name = getClassName();
+    component.map_name = m_map_name;
+    component.options = m_options_string;
+    component.authority = true;
+    component.pauseable = m_pauseable;
+    component.paused = m_paused;
+    component.start_players_as_spectators = m_start_players_as_spectators;
+    component.num_players = getNumPlayers();
+    component.num_spectators = getNumSpectators();
+}
+
+void GameModeBase::syncPlayerEntryToEcs(PlayerControllerEntry& player)
+{
+    if (!m_world || !player.player_state)
+        return;
+
+    if (!m_world->registry.valid(player.player_state_entity) ||
+        !m_world->registry.all_of<PlayerStateComponent>(player.player_state_entity))
+    {
+        player.player_state_entity = findPlayerStateEntity(m_world->registry, player.player_id);
+        if (player.player_state_entity == entt::null)
+            player.player_state_entity = m_world->registry.create();
+    }
+
+    auto& player_state_component =
+        m_world->registry.get_or_emplace<PlayerStateComponent>(player.player_state_entity);
+    copyPlayerStateToComponent(player_state_component, *player.player_state);
+    player_state_component.freecam = player.freecam;
+
+    if (!m_world->registry.valid(player.controller_entity) ||
+        !m_world->registry.all_of<PlayerControllerComponent>(player.controller_entity))
+    {
+        player.controller_entity = m_world->registry.create();
+    }
+
+    auto& controller_component =
+        m_world->registry.get_or_emplace<PlayerControllerComponent>(player.controller_entity);
+    controller_component.player_id = player.player_id;
+    controller_component.player_state = player.player_state_entity;
+    controller_component.pawn = player.pawn;
+    controller_component.freecam = player.freecam;
+    controller_component.spectator = player.spectator;
+    controller_component.local = true;
+}
+
+void GameModeBase::destroyPlayerEntryEcs(PlayerControllerEntry& player)
+{
+    if (!m_world)
+        return;
+
+    if (m_world->registry.valid(player.controller_entity))
+        m_world->registry.destroy(player.controller_entity);
+    if (m_world->registry.valid(player.player_state_entity))
+        m_world->registry.destroy(player.player_state_entity);
+
+    player.controller_entity = entt::null;
+    player.player_state_entity = entt::null;
 }
 }

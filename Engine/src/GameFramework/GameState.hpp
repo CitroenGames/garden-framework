@@ -31,6 +31,7 @@ public:
     virtual void defaultTimer();
 
 protected:
+    void syncGameStateComponent() override;
     virtual void onMatchStateSet();
     virtual void handleMatchIsWaitingToStart();
     virtual void handleMatchHasStarted();

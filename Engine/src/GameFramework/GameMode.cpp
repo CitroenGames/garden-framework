@@ -2,8 +2,10 @@
 
 #include "Events/EngineEvents.hpp"
 #include "Events/EventBus.hpp"
+#include "GameFramework/GameFrameworkComponents.hpp"
 #include "GameFramework/GameState.hpp"
 #include "Utils/Log.hpp"
+#include "world.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -25,13 +27,11 @@ void GameMode::initGame(world& game_world,
                         std::string& error_message)
 {
     GameModeBase::initGame(game_world, map_name, options, error_message);
-    setMatchState(MatchState::WaitingToStart);
+    setMatchState(MatchState::EnteringMap);
 }
 
 void GameMode::startPlay()
 {
-    GameModeBase::startPlay();
-
     if (m_match_state == MatchState::EnteringMap)
         setMatchState(MatchState::WaitingToStart);
 
@@ -51,12 +51,14 @@ void GameMode::tick(float delta_time)
 
 bool GameMode::hasMatchStarted() const
 {
-    return MatchState::order(m_match_state) >= MatchState::order(MatchState::InProgress);
+    return m_match_state != MatchState::EnteringMap &&
+        m_match_state != MatchState::WaitingToStart;
 }
 
 bool GameMode::hasMatchEnded() const
 {
-    return MatchState::order(m_match_state) >= MatchState::order(MatchState::WaitingPostMatch);
+    return m_match_state == MatchState::WaitingPostMatch ||
+        m_match_state == MatchState::LeavingMap;
 }
 
 void GameMode::postLogin(PlayerControllerEntry& new_player)
@@ -75,9 +77,29 @@ void GameMode::logout(uint16_t player_id)
         endMatch();
 }
 
+void GameMode::handleStartingNewPlayer(PlayerControllerEntry& new_player)
+{
+    if (mustSpectate(new_player))
+    {
+        GameModeBase::handleStartingNewPlayer(new_player);
+        return;
+    }
+
+    if (isMatchInProgress() && playerCanRestart(new_player))
+    {
+        restartPlayer(new_player);
+        return;
+    }
+
+    if (m_match_state == MatchState::WaitingToStart && readyToStartMatch())
+        startMatch();
+    else
+        syncPlayerEntryToEcs(new_player);
+}
+
 bool GameMode::playerCanRestart(const PlayerControllerEntry& player) const
 {
-    return GameModeBase::playerCanRestart(player) && !hasMatchEnded();
+    return isMatchInProgress() && GameModeBase::playerCanRestart(player);
 }
 
 float GameMode::getPlayerRespawnDelay(uint16_t player_id) const
@@ -93,7 +115,7 @@ bool GameMode::isMatchInProgress() const
 
 void GameMode::startMatch()
 {
-    if (m_match_state == MatchState::InProgress || hasMatchEnded())
+    if (hasMatchStarted())
         return;
 
     setMatchState(MatchState::InProgress);
@@ -101,7 +123,7 @@ void GameMode::startMatch()
 
 void GameMode::endMatch()
 {
-    if (hasMatchEnded())
+    if (!isMatchInProgress())
         return;
 
     setMatchState(MatchState::WaitingPostMatch);
@@ -109,12 +131,10 @@ void GameMode::endMatch()
 
 void GameMode::restartGame()
 {
+    if (m_match_state == MatchState::LeavingMap)
+        return;
+
     setMatchState(MatchState::WaitingToStart);
-    for (PlayerControllerEntry& player : m_players)
-    {
-        if (!player.spectator)
-            restartPlayer(player);
-    }
 
     if (readyToStartMatch())
         startMatch();
@@ -133,6 +153,25 @@ void GameMode::startToLeaveMap()
 void GameMode::setMinRespawnDelay(float delay)
 {
     m_min_respawn_delay = std::isfinite(delay) ? std::max(delay, 0.0f) : 0.0f;
+    syncGameModeComponent();
+}
+
+void GameMode::syncGameModeComponent()
+{
+    GameModeBase::syncGameModeComponent();
+
+    if (!m_world)
+        return;
+
+    const entt::entity entity = getOrCreateGameModeEntity(m_world->registry);
+    auto& component = m_world->registry.get_or_emplace<GameModeComponent>(entity);
+    component.delayed_start = m_delayed_start;
+    component.match_state = m_match_state;
+    component.min_respawn_delay = m_min_respawn_delay;
+    component.num_players = getNumPlayers();
+    component.num_spectators = getNumSpectators();
+    component.num_bots = m_num_bots;
+    component.num_travelling_players = m_num_travelling_players;
 }
 
 void GameMode::setMatchState(const std::string& new_state)
@@ -149,6 +188,7 @@ void GameMode::setMatchState(const std::string& new_state)
     if (auto* state = dynamic_cast<GameState*>(m_game_state))
         state->setMatchState(m_match_state);
 
+    syncGameModeComponent();
     EventBus::get().queue(MatchStateChangedEvent{old_state, m_match_state});
 }
 
@@ -177,6 +217,12 @@ bool GameMode::readyToStartMatch() const
 
 void GameMode::handleMatchHasStarted()
 {
+    for (PlayerControllerEntry& player : m_players)
+    {
+        if (m_world && !m_world->registry.valid(player.pawn) && playerCanRestart(player))
+            restartPlayer(player);
+    }
+
     if (m_game_state && !m_game_state->hasBegunPlay())
         m_game_state->handleBeginPlay();
 }

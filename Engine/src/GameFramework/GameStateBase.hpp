@@ -62,6 +62,8 @@ public:
     float getServerWorldTimeSecondsUpdateFrequency() const { return m_server_time_update_frequency; }
 
 protected:
+    virtual void syncGameStateComponent();
+
     world* m_world = nullptr;
     GameModeBase* m_authority_game_mode = nullptr;
     std::string m_game_mode_class_name;

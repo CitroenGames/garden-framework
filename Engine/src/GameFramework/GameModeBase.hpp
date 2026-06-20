@@ -38,6 +38,8 @@ struct ENGINE_API PlayerControllerEntry
     PlayerControllerEntry& operator=(const PlayerControllerEntry&) = delete;
 
     uint16_t player_id = 0;
+    entt::entity controller_entity = entt::null;
+    entt::entity player_state_entity = entt::null;
     std::unique_ptr<PlayerController> controller;
     PlayerStatePtr player_state;
     entt::entity pawn = entt::null;
@@ -68,6 +70,7 @@ public:
     virtual void reset();
 
     world* getWorld() const { return m_world; }
+    void bindWorld(world& game_world);
     GameStateBase* getGameState() const { return m_game_state; }
 
     void setInputManager(std::shared_ptr<InputManager> input_manager);
@@ -83,10 +86,10 @@ public:
     virtual bool clearPause();
     virtual bool allowPausing(uint16_t player_id = 0) const;
     bool isPaused() const { return m_paused; }
-    void setPauseable(bool pauseable) { m_pauseable = pauseable; }
+    void setPauseable(bool pauseable) { m_pauseable = pauseable; syncGameModeComponent(); }
     bool isPauseable() const { return m_pauseable; }
 
-    void setStartPlayersAsSpectators(bool enabled) { m_start_players_as_spectators = enabled; }
+    void setStartPlayersAsSpectators(bool enabled) { m_start_players_as_spectators = enabled; syncGameModeComponent(); }
     bool shouldStartPlayersAsSpectators() const { return m_start_players_as_spectators; }
 
     virtual bool preLogin(const PlayerLoginOptions& options, std::string& error_message);
@@ -130,6 +133,9 @@ protected:
     uint16_t allocatePlayerId(uint16_t requested_id);
     void attachPlayerStateToGameState(const PlayerStatePtr& player_state);
     void detachPlayerStateFromGameState(uint16_t player_id);
+    virtual void syncGameModeComponent();
+    void syncPlayerEntryToEcs(PlayerControllerEntry& player);
+    void destroyPlayerEntryEcs(PlayerControllerEntry& player);
 
     world* m_world = nullptr;
     GameStateBase* m_game_state = nullptr;

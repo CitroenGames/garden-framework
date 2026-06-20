@@ -25,6 +25,8 @@ world::~world()
 void world::setAuthorityGameMode(std::unique_ptr<GameFramework::GameModeBase> game_mode)
 {
     authority_game_mode = std::move(game_mode);
+    if (authority_game_mode)
+        authority_game_mode->bindWorld(*this);
 }
 
 void world::setGameState(std::unique_ptr<GameFramework::GameStateBase> state)

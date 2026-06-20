@@ -28,6 +28,7 @@ public:
     bool hasMatchEnded() const override;
     void postLogin(PlayerControllerEntry& new_player) override;
     void logout(uint16_t player_id) override;
+    void handleStartingNewPlayer(PlayerControllerEntry& new_player) override;
     bool playerCanRestart(const PlayerControllerEntry& player) const override;
     float getPlayerRespawnDelay(uint16_t player_id) const override;
 
@@ -40,7 +41,7 @@ public:
     virtual void abortMatch();
     virtual void startToLeaveMap();
 
-    void setDelayedStart(bool delayed_start) { m_delayed_start = delayed_start; }
+    void setDelayedStart(bool delayed_start) { m_delayed_start = delayed_start; syncGameModeComponent(); }
     bool isDelayedStart() const { return m_delayed_start; }
 
     void setMinRespawnDelay(float delay);
@@ -50,6 +51,7 @@ public:
     int32_t getNumTravellingPlayers() const { return m_num_travelling_players; }
 
 protected:
+    void syncGameModeComponent() override;
     virtual void setMatchState(const std::string& new_state);
     virtual void onMatchStateSet();
     virtual void handleMatchIsWaitingToStart();
