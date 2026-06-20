@@ -1,8 +1,10 @@
 #include "LevelSettingsPanel.hpp"
 #include "PanelUtils.hpp"
+#include "GameFramework/GameModeRegistry.hpp"
 #include "imgui.h"
 #include <glm/glm.hpp>
 #include <cstring>
+#include <vector>
 
 static void drawSectionHeader(const char* label, ImVec4 accent_color = ImVec4(0.30f, 0.55f, 0.85f, 1.0f))
 {
@@ -75,6 +77,32 @@ void LevelSettingsPanel::draw(bool* p_open)
 
     ImGui::DragFloat3("Gravity", &metadata->gravity.x, 0.01f);
     ImGui::DragFloat("Fixed Delta", &metadata->fixed_delta, 0.0001f, 0.001f, 1.0f, "%.4f");
+
+    drawSectionHeader("Gameplay", ImVec4(0.65f, 0.45f, 0.95f, 1.0f));
+
+    auto drawClassCombo = [](const char* label, std::string& value, const std::vector<std::string>& options) {
+        const char* preview = value.empty() ? "<default>" : value.c_str();
+        if (ImGui::BeginCombo(label, preview))
+        {
+            for (const std::string& option : options)
+            {
+                const bool selected = value == option;
+                if (ImGui::Selectable(option.c_str(), selected))
+                    value = option;
+                if (selected)
+                    ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+    };
+
+    auto& gameplay_registry = GameFramework::GameModeRegistry::get();
+    drawClassCombo("Game Mode", metadata->game_mode_class, gameplay_registry.getGameModeNames());
+    drawClassCombo("Game State", metadata->game_state_class, gameplay_registry.getGameStateNames());
+    ImGui::Checkbox("Delayed Start", &metadata->delayed_start);
+    ImGui::Checkbox("Start Players As Spectators", &metadata->start_players_as_spectators);
+    ImGui::Checkbox("Pauseable", &metadata->pauseable);
+    ImGui::DragFloat("Min Respawn Delay", &metadata->min_respawn_delay, 0.05f, 0.0f, 300.0f, "%.2f");
 
     ImGui::End();
 }

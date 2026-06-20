@@ -3855,6 +3855,12 @@ namespace
                a.entity_count == b.entity_count &&
                vec3ExactEqual(a.gravity, b.gravity) &&
                a.fixed_delta == b.fixed_delta &&
+               a.game_mode_class == b.game_mode_class &&
+               a.game_state_class == b.game_state_class &&
+               a.delayed_start == b.delayed_start &&
+               a.start_players_as_spectators == b.start_players_as_spectators &&
+               a.pauseable == b.pauseable &&
+               a.min_respawn_delay == b.min_respawn_delay &&
                vec3ExactEqual(a.ambient_light, b.ambient_light) &&
                vec3ExactEqual(a.diffuse_light, b.diffuse_light) &&
                vec3ExactEqual(a.light_direction, b.light_direction);

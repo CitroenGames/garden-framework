@@ -513,6 +513,22 @@ struct FreecamComponent {
     }
 };
 
+struct PlayerStartComponent {
+    std::string tag;
+    bool enabled = true;
+    bool prefer_for_spectators = false;
+
+    static void reflect(Reflector<PlayerStartComponent>& r) {
+        r.display("Player Start").category("Gameplay");
+        r.field<&PlayerStartComponent::tag>("tag")
+            .tooltip("Optional spawn tag used by GameMode::FindPlayerStart").category("Spawn");
+        r.field<&PlayerStartComponent::enabled>("enabled")
+            .category("Spawn");
+        r.field<&PlayerStartComponent::prefer_for_spectators>("prefer_for_spectators")
+            .tooltip("Prefer this start when spawning spectators").category("Spawn");
+    }
+};
+
 struct PlayerRepresentationComponent {
     entt::entity tracked_player = entt::null;
     glm::vec3 position_offset;

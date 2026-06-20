@@ -2,6 +2,7 @@
 
 #include "Components/Components.hpp"
 #include "Components/camera.hpp"
+#include "EngineExport.h"
 #include "PhysicsSystem.hpp"
 #include "Tick/TickSystem.hpp"
 #include <cstdint>
@@ -9,10 +10,18 @@
 #include <memory>
 #include <entt/entt.hpp>
 
-class world
+namespace GameFramework
+{
+    class GameModeBase;
+    class GameStateBase;
+}
+
+class ENGINE_API world
 {
 private:
     std::unique_ptr<PhysicsSystem> physics_system;
+    std::unique_ptr<GameFramework::GameModeBase> authority_game_mode;
+    std::unique_ptr<GameFramework::GameStateBase> game_state;
     Tick::FixedTickAccumulator simulation_ticks;
     uint32_t simulation_tick = 0;
 
@@ -33,25 +42,48 @@ public:
     camera world_camera;
     float fixed_delta;
 
-    explicit world(const PhysicsSystemSettings& physics_settings = PhysicsSystemSettings())
-        : simulation_ticks(physics_settings.fixed_delta)
-    {
-        world_camera = camera(0, 0, -5);
-        fixed_delta = physics_settings.fixed_delta;
-        physics_system = std::make_unique<PhysicsSystem>(physics_settings);
-        fixed_delta = physics_system->getFixedDelta();
-        simulation_ticks.setFixedDelta(fixed_delta);
-    }
+    explicit world(const PhysicsSystemSettings& physics_settings = PhysicsSystemSettings());
 
-    world(world&&) noexcept = default;
-    world& operator=(world&&) noexcept = default;
+    world(world&&) noexcept;
+    world& operator=(world&&) noexcept;
     world(const world&) = delete;
     world& operator=(const world&) = delete;
 
-    ~world()
+    ~world();
+
+    void setAuthorityGameMode(std::unique_ptr<GameFramework::GameModeBase> game_mode);
+    GameFramework::GameModeBase* getAuthorityGameMode() { return authority_game_mode.get(); }
+    const GameFramework::GameModeBase* getAuthorityGameMode() const { return authority_game_mode.get(); }
+
+    template<typename T>
+    T* getAuthorityGameModeAs()
     {
-        shutdown();
+        return dynamic_cast<T*>(authority_game_mode.get());
     }
+
+    template<typename T>
+    const T* getAuthorityGameModeAs() const
+    {
+        return dynamic_cast<const T*>(authority_game_mode.get());
+    }
+
+    void setGameState(std::unique_ptr<GameFramework::GameStateBase> state);
+    GameFramework::GameStateBase* getGameState() { return game_state.get(); }
+    const GameFramework::GameStateBase* getGameState() const { return game_state.get(); }
+
+    template<typename T>
+    T* getGameStateAs()
+    {
+        return dynamic_cast<T*>(game_state.get());
+    }
+
+    template<typename T>
+    const T* getGameStateAs() const
+    {
+        return dynamic_cast<const T*>(game_state.get());
+    }
+
+    void clearGameplayFramework();
 
     // Initialize Jolt physics (call after world construction)
     void initializePhysics()
@@ -168,21 +200,9 @@ public:
         return true;
     }
 
-    void shutdown()
-    {
-        if (physics_system)
-            physics_system->shutdown();
-        clearRegistryStorage();
-        simulation_ticks.reset();
-        simulation_tick = 0;
-    }
+    void shutdown();
 
     // Full reset: tear down physics, clear ECS, reinitialize.
     // Used by the editor to restore pre-play state.
-    void resetWorld()
-    {
-        shutdown();
-        if (physics_system)
-            physics_system->initialize();
-    }
+    void resetWorld();
 };

@@ -17,6 +17,9 @@
 #include "Reflection/ReflectionRegistry.hpp"
 #include "Reflection/ReflectionSerializer.hpp"
 #include "Console/ConVar.hpp"
+#include "GameFramework/GameMode.hpp"
+#include "GameFramework/GameModeRegistry.hpp"
+#include "GameFramework/GameStateBase.hpp"
 #include "Threading/JobSystem.hpp"
 #include <iostream>
 #include <algorithm>
@@ -31,9 +34,37 @@
 using json = nlohmann::json;
 
 static constexpr uint32_t LEVEL_BINARY_MAGIC   = 0x47444E4C; // "GDNL"
-static constexpr uint32_t LEVEL_BINARY_VERSION  = 5;
+static constexpr uint32_t LEVEL_BINARY_VERSION  = 6;
+static constexpr uint32_t LEVEL_BINARY_VERSION_V5 = 5;
 static constexpr uint32_t LEVEL_BINARY_VERSION_V4 = 4;
 static constexpr uint32_t LEVEL_BINARY_VERSION_V3 = 3; // Previous version for backward compat
+
+static void applyGameplayFrameworkSettings(const LevelMetadata& metadata, world& game_world)
+{
+    using namespace GameFramework;
+
+    if (!game_world.getAuthorityGameMode())
+        game_world.setAuthorityGameMode(GameModeRegistry::get().createGameMode(metadata.game_mode_class));
+
+    if (!game_world.getGameState() && !metadata.game_state_class.empty())
+        game_world.setGameState(GameModeRegistry::get().createGameState(metadata.game_state_class));
+
+    GameModeBase* game_mode = game_world.getAuthorityGameMode();
+    if (!game_mode)
+    {
+        LOG_ENGINE_WARN("Failed to create GameMode '{}'", metadata.game_mode_class);
+        return;
+    }
+
+    game_mode->setStartPlayersAsSpectators(metadata.start_players_as_spectators);
+    game_mode->setPauseable(metadata.pauseable);
+
+    if (auto* match_mode = dynamic_cast<GameMode*>(game_mode))
+    {
+        match_mode->setDelayedStart(metadata.delayed_start);
+        match_mode->setMinRespawnDelay(metadata.min_respawn_delay);
+    }
+}
 
 class ScopedLoadTimer {
 public:
@@ -1070,6 +1101,19 @@ bool LevelManager::parseMetadataFromJSON(const void* json_ptr, LevelMetadata& me
         }
     }
 
+    // Parse gameplay framework settings
+    if (meta.contains("gameplay"))
+    {
+        const auto& gameplay = meta["gameplay"];
+        metadata.game_mode_class = gameplay.value("game_mode_class", metadata.game_mode_class);
+        metadata.game_state_class = gameplay.value("game_state_class", metadata.game_state_class);
+        metadata.delayed_start = gameplay.value("delayed_start", metadata.delayed_start);
+        metadata.start_players_as_spectators =
+            gameplay.value("start_players_as_spectators", metadata.start_players_as_spectators);
+        metadata.pauseable = gameplay.value("pauseable", metadata.pauseable);
+        metadata.min_respawn_delay = gameplay.value("min_respawn_delay", metadata.min_respawn_delay);
+    }
+
     // Parse lighting
     if (meta.contains("lighting"))
     {
@@ -1375,6 +1419,12 @@ bool LevelManager::saveLevelToJSON(const std::string& json_path, const LevelData
         {"x", meta.gravity.x}, {"y", meta.gravity.y}, {"z", meta.gravity.z}
     };
     j["metadata"]["world"]["fixed_delta"] = meta.fixed_delta;
+    j["metadata"]["gameplay"]["game_mode_class"] = meta.game_mode_class;
+    j["metadata"]["gameplay"]["game_state_class"] = meta.game_state_class;
+    j["metadata"]["gameplay"]["delayed_start"] = meta.delayed_start;
+    j["metadata"]["gameplay"]["start_players_as_spectators"] = meta.start_players_as_spectators;
+    j["metadata"]["gameplay"]["pauseable"] = meta.pauseable;
+    j["metadata"]["gameplay"]["min_respawn_delay"] = meta.min_respawn_delay;
     j["metadata"]["lighting"]["ambient"] = {
         {"r", meta.ambient_light.x}, {"g", meta.ambient_light.y}, {"b", meta.ambient_light.z}
     };
@@ -1660,6 +1710,15 @@ void LevelManager::writeBinaryHeader(std::ofstream& file, const LevelMetadata& m
 
     file.write(reinterpret_cast<const char*>(&metadata.gravity), sizeof(glm::vec3));
     file.write(reinterpret_cast<const char*>(&metadata.fixed_delta), sizeof(float));
+    writeString(file, metadata.game_mode_class);
+    writeString(file, metadata.game_state_class);
+    uint8_t delayed_start = metadata.delayed_start ? 1 : 0;
+    uint8_t start_spectators = metadata.start_players_as_spectators ? 1 : 0;
+    uint8_t pauseable = metadata.pauseable ? 1 : 0;
+    file.write(reinterpret_cast<const char*>(&delayed_start), sizeof(uint8_t));
+    file.write(reinterpret_cast<const char*>(&start_spectators), sizeof(uint8_t));
+    file.write(reinterpret_cast<const char*>(&pauseable), sizeof(uint8_t));
+    file.write(reinterpret_cast<const char*>(&metadata.min_respawn_delay), sizeof(float));
     file.write(reinterpret_cast<const char*>(&metadata.ambient_light), sizeof(glm::vec3));
     file.write(reinterpret_cast<const char*>(&metadata.diffuse_light), sizeof(glm::vec3));
     file.write(reinterpret_cast<const char*>(&metadata.light_direction), sizeof(glm::vec3));
@@ -1771,11 +1830,12 @@ bool LevelManager::readBinaryHeader(std::ifstream& file, LevelMetadata& metadata
     file.read(reinterpret_cast<char*>(&version), sizeof(uint32_t));
     if (file.fail() ||
         (version != LEVEL_BINARY_VERSION &&
+         version != LEVEL_BINARY_VERSION_V5 &&
          version != LEVEL_BINARY_VERSION_V4 &&
          version != LEVEL_BINARY_VERSION_V3))
     {
-        printf("ERROR: Unsupported binary level version (expected %u, %u, or %u, got %u)\n",
-               LEVEL_BINARY_VERSION, LEVEL_BINARY_VERSION_V4, LEVEL_BINARY_VERSION_V3, version);
+        printf("ERROR: Unsupported binary level version (expected %u, %u, %u, or %u, got %u)\n",
+               LEVEL_BINARY_VERSION, LEVEL_BINARY_VERSION_V5, LEVEL_BINARY_VERSION_V4, LEVEL_BINARY_VERSION_V3, version);
         return false;
     }
     binary_read_version = version;
@@ -1791,6 +1851,21 @@ bool LevelManager::readBinaryHeader(std::ifstream& file, LevelMetadata& metadata
 
     file.read(reinterpret_cast<char*>(&metadata.gravity), sizeof(glm::vec3));
     file.read(reinterpret_cast<char*>(&metadata.fixed_delta), sizeof(float));
+    if (version >= 6)
+    {
+        if (!readString(file, metadata.game_mode_class)) return false;
+        if (!readString(file, metadata.game_state_class)) return false;
+        uint8_t delayed_start = 0;
+        uint8_t start_spectators = 0;
+        uint8_t pauseable = 1;
+        file.read(reinterpret_cast<char*>(&delayed_start), sizeof(uint8_t));
+        file.read(reinterpret_cast<char*>(&start_spectators), sizeof(uint8_t));
+        file.read(reinterpret_cast<char*>(&pauseable), sizeof(uint8_t));
+        file.read(reinterpret_cast<char*>(&metadata.min_respawn_delay), sizeof(float));
+        metadata.delayed_start = delayed_start != 0;
+        metadata.start_players_as_spectators = start_spectators != 0;
+        metadata.pauseable = pauseable != 0;
+    }
     file.read(reinterpret_cast<char*>(&metadata.ambient_light), sizeof(glm::vec3));
     file.read(reinterpret_cast<char*>(&metadata.diffuse_light), sizeof(glm::vec3));
     file.read(reinterpret_cast<char*>(&metadata.light_direction), sizeof(glm::vec3));
@@ -3058,6 +3133,7 @@ bool LevelManager::instantiateLevelParallel(
     // Apply world settings
     game_world.setGravity(level_data.metadata.gravity);
     game_world.setFixedDelta(level_data.metadata.fixed_delta);
+    applyGameplayFrameworkSettings(level_data.metadata, game_world);
 
     // Initialize output pointers
     if (out_player_entity) *out_player_entity = entt::null;

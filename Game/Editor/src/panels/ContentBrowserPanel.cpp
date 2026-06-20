@@ -557,6 +557,12 @@ void ContentBrowserPanel::createEmptyLevel(const fs::path& dir)
     j["metadata"]["version"] = "1.0";
     j["metadata"]["world"]["gravity"] = {{"x", 0.0}, {"y", -1.0}, {"z", 0.0}};
     j["metadata"]["world"]["fixed_delta"] = 0.016;
+    j["metadata"]["gameplay"]["game_mode_class"] = "GameMode";
+    j["metadata"]["gameplay"]["game_state_class"] = "GameState";
+    j["metadata"]["gameplay"]["delayed_start"] = false;
+    j["metadata"]["gameplay"]["start_players_as_spectators"] = false;
+    j["metadata"]["gameplay"]["pauseable"] = true;
+    j["metadata"]["gameplay"]["min_respawn_delay"] = 0.0;
     j["metadata"]["lighting"]["ambient"] = {{"r", 0.2}, {"g", 0.2}, {"b", 0.2}};
     j["metadata"]["lighting"]["diffuse"] = {{"r", 0.8}, {"g", 0.8}, {"b", 0.8}};
     j["metadata"]["lighting"]["direction"] = {{"x", -0.2}, {"y", -1.0}, {"z", -0.3}};

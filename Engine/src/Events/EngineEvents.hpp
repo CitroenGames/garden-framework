@@ -2,6 +2,7 @@
 
 #include <glm/glm.hpp>
 #include <entt/entt.hpp>
+#include <cstdint>
 #include <string>
 
 // --- Physics Events ---
@@ -88,6 +89,32 @@ struct StatePushedEvent
 struct StatePoppedEvent
 {
     std::string state_name;
+};
+
+// --- Gameplay Framework Events ---
+
+struct GameModeInitializedEvent
+{
+    std::string game_mode;
+    std::string map_name;
+};
+
+struct PlayerLoginEvent
+{
+    uint16_t player_id = 0;
+    std::string player_name;
+};
+
+struct PlayerLogoutEvent
+{
+    uint16_t player_id = 0;
+    std::string player_name;
+};
+
+struct MatchStateChangedEvent
+{
+    std::string old_state;
+    std::string new_state;
 };
 
 // --- Timer Events ---

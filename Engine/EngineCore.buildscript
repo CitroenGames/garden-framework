@@ -10,6 +10,7 @@ sources = {
     src/Console/**/*.cpp
     src/Debug/**/*.cpp
     src/Events/**/*.cpp
+    src/GameFramework/**/*.cpp
     src/GameState/**/*.cpp
     src/Graphics/HeadlessRenderAPI.cpp
     src/Graphics/HeadlessMesh.cpp
@@ -27,6 +28,7 @@ sources = {
     src/Timer/**/*.cpp
     src/Utils/**/*.cpp
     src/InputManager.cpp
+    src/world.cpp
     src/GameSimulation.cpp
     src/PhysicsSystem.cpp
     src/LevelManager.cpp

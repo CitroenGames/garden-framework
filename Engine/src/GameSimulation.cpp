@@ -5,6 +5,7 @@
 #include "Debug/DebugDraw.hpp"
 #include "Audio/AudioSystem.hpp"
 #include "Animation/AnimationSystem.hpp"
+#include "GameFramework/GameMode.hpp"
 #include "Utils/Log.hpp"
 
 GameSimulation::GameSimulation(world* game_world, std::shared_ptr<InputManager> input_mgr)
@@ -15,7 +16,7 @@ GameSimulation::GameSimulation(world* game_world, std::shared_ptr<InputManager> 
 
 GameSimulation::~GameSimulation()
 {
-    m_player_controller.reset();
+    m_game_mode = nullptr;
 }
 
 void GameSimulation::initialize()
@@ -26,24 +27,33 @@ void GameSimulation::initialize()
         return;
     }
 
-    // Find player entity
+    if (!m_world->getAuthorityGameMode())
+        m_world->setAuthorityGameMode(std::make_unique<GameFramework::GameMode>());
+
+    m_game_mode = m_world->getAuthorityGameMode();
+    m_game_mode->setInputManager(m_input_manager);
+
+    std::string error_message;
+    m_game_mode->initGame(*m_world, "", "", error_message);
+    if (!error_message.empty())
+        LOG_ENGINE_WARN("GameMode init reported: {}", error_message);
+
+    if (!m_game_mode->getPrimaryPlayer())
     {
-        auto view = m_world->registry.view<PlayerComponent>();
-        for (auto entity : view)
-        {
-            m_player_entity = entity;
-            break; // use first player found
-        }
+        GameFramework::PlayerLoginOptions login_options;
+        login_options.player_id = 1;
+        login_options.player_name = "Player";
+        m_game_mode->createLocalPlayer(login_options, error_message);
+        if (!error_message.empty())
+            LOG_ENGINE_WARN("Local player login failed: {}", error_message);
     }
 
-    // Find freecam entity
+    m_game_mode->startPlay();
+
+    if (const GameFramework::PlayerControllerEntry* primary_player = m_game_mode->getPrimaryPlayer())
     {
-        auto view = m_world->registry.view<FreecamComponent>();
-        for (auto entity : view)
-        {
-            m_freecam_entity = entity;
-            break;
-        }
+        m_player_entity = primary_player->pawn;
+        m_freecam_entity = primary_player->freecam;
     }
 
     // Find player representation entity
@@ -54,24 +64,6 @@ void GameSimulation::initialize()
             m_player_rep_entity = entity;
             break;
         }
-    }
-
-    // Create PlayerController
-    m_player_controller = std::make_unique<PlayerController>(m_input_manager, m_world);
-
-    if (m_world->registry.valid(m_player_entity))
-    {
-        m_player_controller->setPossessedPlayer(m_player_entity);
-
-        // Sync world camera to player position
-        auto& t = m_world->registry.get<TransformComponent>(m_player_entity);
-        m_world->world_camera.position = t.position;
-        m_world->world_camera.rotation = t.rotation;
-    }
-
-    if (m_world->registry.valid(m_freecam_entity))
-    {
-        m_player_controller->setPossessedFreecam(m_freecam_entity);
     }
 
     // Optimize broad phase after all bodies are set up
@@ -95,8 +87,13 @@ void GameSimulation::update(float delta_time)
     // Update timers
     TimerSystem::get().update(delta_time);
 
+    if (m_game_mode)
+        m_game_mode->tick(delta_time);
+
+    PlayerController* player_controller = getPlayerController();
+
     // Physics and player collisions (only when controlling player, not freecam)
-    if (m_player_controller && !m_player_controller->isFreecamMode())
+    if (player_controller && !player_controller->isFreecamMode())
     {
         m_world->step_physics(delta_time);
 
@@ -105,11 +102,11 @@ void GameSimulation::update(float delta_time)
     }
 
     // Update player controller (movement from input)
-    if (m_player_controller)
-        m_player_controller->update(delta_time);
+    if (player_controller)
+        player_controller->update(delta_time);
 
     // Update player representations
-    bool is_freecam = m_player_controller ? m_player_controller->isFreecamMode() : false;
+    bool is_freecam = player_controller ? player_controller->isFreecamMode() : false;
     update_player_representations(m_world->registry, is_freecam);
 
     // Update animations
@@ -126,13 +123,21 @@ void GameSimulation::update(float delta_time)
 
 void GameSimulation::handleMouseMotion(float mouse_dy, float mouse_dx)
 {
-    if (m_player_controller && m_initialized && !m_paused)
-        m_player_controller->handleMouseMotion(mouse_dy, mouse_dx);
+    PlayerController* player_controller = getPlayerController();
+    if (player_controller && m_initialized && !m_paused)
+        player_controller->handleMouseMotion(mouse_dy, mouse_dx);
 }
 
 void GameSimulation::setPaused(bool paused)
 {
     m_paused = paused;
+    if (m_game_mode)
+    {
+        if (paused)
+            m_game_mode->setPause();
+        else
+            m_game_mode->clearPause();
+    }
 }
 
 bool GameSimulation::isPaused() const
@@ -142,12 +147,13 @@ bool GameSimulation::isPaused() const
 
 camera& GameSimulation::getActiveCamera()
 {
-    if (m_player_controller)
-        return m_player_controller->getActiveCamera();
+    PlayerController* player_controller = getPlayerController();
+    if (player_controller)
+        return player_controller->getActiveCamera();
     return m_world->world_camera;
 }
 
 PlayerController* GameSimulation::getPlayerController()
 {
-    return m_player_controller.get();
+    return m_game_mode ? m_game_mode->getPrimaryPlayerController() : nullptr;
 }

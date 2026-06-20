@@ -153,6 +153,14 @@ struct LevelMetadata
     glm::vec3 gravity;
     float fixed_delta;
 
+    // Gameplay framework settings
+    std::string game_mode_class;
+    std::string game_state_class;
+    bool delayed_start;
+    bool start_players_as_spectators;
+    bool pauseable;
+    float min_respawn_delay;
+
     // Lighting
     glm::vec3 ambient_light;
     glm::vec3 diffuse_light;
@@ -165,6 +173,12 @@ struct LevelMetadata
         , entity_count(0)
         , gravity(0, -1, 0)
         , fixed_delta(1.0f / 60.0f)
+        , game_mode_class("GameMode")
+        , game_state_class("GameState")
+        , delayed_start(false)
+        , start_players_as_spectators(false)
+        , pauseable(true)
+        , min_respawn_delay(0.0f)
         , ambient_light(0.2f, 0.2f, 0.2f)
         , diffuse_light(0.8f, 0.8f, 0.8f)
         , light_direction(0.0f, -1.0f, 0.0f)
