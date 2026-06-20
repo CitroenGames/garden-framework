@@ -41,6 +41,8 @@ bool ProjectManager::loadProject(const std::string& project_file_path)
     m_descriptor.engine_version = j.value("engine_version", "1.0");
     m_descriptor.game_module = j.value("game_module", "");
     m_descriptor.default_level = j.value("default_level", "");
+    m_descriptor.default_game_mode = j.value("default_game_mode", "GameMode");
+    m_descriptor.default_game_state = j.value("default_game_state", "GameState");
     m_descriptor.source_directory = j.value("source_directory", "src/");
     m_descriptor.buildscript = j.value("buildscript", "");
 
@@ -210,6 +212,8 @@ bool ProjectManager::saveProject()
     j["engine_version"] = m_descriptor.engine_version;
     j["game_module"] = m_descriptor.game_module;
     j["default_level"] = m_descriptor.default_level;
+    j["default_game_mode"] = m_descriptor.default_game_mode;
+    j["default_game_state"] = m_descriptor.default_game_state;
     j["asset_directories"] = m_descriptor.asset_directories;
     j["source_directory"] = m_descriptor.source_directory;
     j["buildscript"] = m_descriptor.buildscript;

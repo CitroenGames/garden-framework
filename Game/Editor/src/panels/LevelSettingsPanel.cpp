@@ -81,9 +81,15 @@ void LevelSettingsPanel::draw(bool* p_open)
     drawSectionHeader("Gameplay", ImVec4(0.65f, 0.45f, 0.95f, 1.0f));
 
     auto drawClassCombo = [](const char* label, std::string& value, const std::vector<std::string>& options) {
-        const char* preview = value.empty() ? "<default>" : value.c_str();
+        const char* preview = value.empty() ? "<Project Default>" : value.c_str();
         if (ImGui::BeginCombo(label, preview))
         {
+            const bool default_selected = value.empty();
+            if (ImGui::Selectable("<Project Default>", default_selected))
+                value.clear();
+            if (default_selected)
+                ImGui::SetItemDefaultFocus();
+
             for (const std::string& option : options)
             {
                 const bool selected = value == option;

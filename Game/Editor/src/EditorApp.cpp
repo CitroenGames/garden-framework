@@ -447,11 +447,13 @@ namespace
 
     std::unique_ptr<world> cloneEditorWorldForPIE(world& editor_world,
                                                   const LevelMetadata& metadata,
-                                                  const ReflectionRegistry& reflection)
+                                                  const ReflectionRegistry& reflection,
+                                                  const LevelManager& level_manager)
     {
         auto play_world = std::make_unique<world>();
         play_world->setGravity(metadata.gravity);
         play_world->setFixedDelta(metadata.fixed_delta);
+        level_manager.applyGameplayFrameworkSettings(metadata, *play_world);
         play_world->initializePhysics();
         play_world->world_camera = editor_world.world_camera;
 
@@ -828,6 +830,8 @@ bool EditorApp::initialize(RenderAPIType api_type)
         LOG_ENGINE_INFO("Project '{}' loaded from '{}'",
                        m_project_manager.getDescriptor().name,
                        m_project_manager.getProjectRoot());
+        m_level_manager.setGameplayDefaults(m_project_manager.getDescriptor().default_game_mode,
+                                            m_project_manager.getDescriptor().default_game_state);
 
         if (!m_project_manager.getDescriptor().default_level.empty())
             openLevel(m_project_manager.getDescriptor().default_level);
@@ -1266,8 +1270,13 @@ void EditorApp::run()
                 {
                     // Project DLL PIE: tick server when networked, then Player 1.
                     if (m_network_pie_active && m_state.network_pie.net_mode == PIENetMode::ListenServer)
+                    {
+                        m_server_world.tickGameplayFramework(m_delta_time);
                         m_game_module.serverUpdate(m_delta_time);
+                    }
 
+                    if (m_play_world)
+                        m_play_world->tickGameplayFramework(m_delta_time);
                     m_game_module.update(m_delta_time);
                     if (m_state.play_mode != PlayMode::Ejected)
                         m_renderer.markBVHDirty();
@@ -1278,7 +1287,10 @@ void EditorApp::run()
                         for (auto& inst : m_pie_clients)
                         {
                             if (inst && inst->initialized)
+                            {
+                                inst->client_world.tickGameplayFramework(m_delta_time);
                                 inst->game_module.update(m_delta_time);
+                            }
                         }
                     }
                 }
@@ -1293,6 +1305,8 @@ void EditorApp::run()
                             m_game_sim->handleMouseMotion(my, mx);
                     }
 
+                    if (m_play_world)
+                        m_play_world->tickGameplayFramework(m_delta_time);
                     m_game_sim->update(m_delta_time);
                     if (m_state.play_mode != PlayMode::Ejected)
                         m_renderer.markBVHDirty();
@@ -1843,7 +1857,11 @@ void EditorApp::beginPlay()
         m_pre_play_selected_name = m_world.registry.get<TagComponent>(m_hierarchy.selected_entity).name;
     }
 
-    m_play_world = cloneEditorWorldForPIE(m_world, m_play_snapshot.metadata, m_reflection);
+    m_play_world = cloneEditorWorldForPIE(
+        m_world,
+        m_play_snapshot.metadata,
+        m_reflection,
+        m_level_manager);
     if (!m_play_world)
     {
         LOG_ENGINE_ERROR("PIE: Failed to create isolated play world");
@@ -1872,6 +1890,10 @@ void EditorApp::beginPlay()
             LOG_ENGINE_ERROR("Failed to load game module '{}' — falling back to Standalone", dll_path);
             use_network_pie = false;
         }
+        else
+        {
+            m_game_module.registerComponents(&m_reflection);
+        }
     }
 
     if (use_network_pie && m_state.network_pie.net_mode == PIENetMode::ListenServer)
@@ -1895,6 +1917,7 @@ void EditorApp::beginPlay()
             // Instantiate level into server world
             m_level_manager.instantiateLevelParallel(m_play_snapshot, m_server_world,
                 m_app.getRenderAPI(), nullptr, nullptr, nullptr);
+            m_server_world.initializeGameplayFramework(m_play_snapshot.metadata.level_name, "");
 
             // Set up server EngineServices
             m_server_services = {};
@@ -1907,8 +1930,6 @@ void EditorApp::beginPlay()
             m_server_services.api_version   = GARDEN_MODULE_API_VERSION;
             m_server_services.listen_port   = port;
 
-            m_game_module.registerComponents(&m_reflection);
-
             if (!m_game_module.serverInit(&m_server_services))
             {
                 LOG_ENGINE_ERROR("Server initialization failed — falling back to Standalone");
@@ -1919,9 +1940,16 @@ void EditorApp::beginPlay()
             else
             {
                 m_game_module.serverOnLevelLoaded();
+                m_server_world.startGameplayFramework();
 
                 // Create input manager for client
                 m_game_input_manager = std::make_shared<InputManager>();
+                m_level_manager.applyGameplayFrameworkSettings(
+                    m_play_snapshot.metadata,
+                    *m_play_world,
+                    "",
+                    false);
+                m_play_world->initializeGameplayFramework(m_play_snapshot.metadata.level_name, "");
 
                 // Set up client EngineServices
                 m_client_services = {};
@@ -1946,6 +1974,7 @@ void EditorApp::beginPlay()
                 else
                 {
                     m_game_module.onLevelLoaded();
+                    m_play_world->startGameplayFramework();
                     m_game_module_active = true;
                     m_network_pie_active = true;
 
@@ -1965,7 +1994,10 @@ void EditorApp::beginPlay()
                                 inst->client_world = world();
                                 inst->client_world.initializePhysics();
                                 m_level_manager.instantiateLevelParallel(m_play_snapshot, inst->client_world,
-                                    m_app.getRenderAPI(), nullptr, nullptr, nullptr);
+                                    m_app.getRenderAPI(), nullptr, nullptr, nullptr, false);
+                                inst->client_world.initializeGameplayFramework(
+                                    m_play_snapshot.metadata.level_name,
+                                    "");
 
                                 // Load a separate DLL copy (hot-reload mechanism gives us isolation)
                                 if (!inst->game_module.load(dll_path))
@@ -1999,6 +2031,14 @@ void EditorApp::beginPlay()
                                 inst->services.connect_port     = port;
 
                                 inst->game_module.registerComponents(&m_reflection);
+                                m_level_manager.applyGameplayFrameworkSettings(
+                                    m_play_snapshot.metadata,
+                                    inst->client_world,
+                                    "",
+                                    false);
+                                inst->client_world.initializeGameplayFramework(
+                                    m_play_snapshot.metadata.level_name,
+                                    "");
                                 if (!inst->game_module.init(&inst->services))
                                 {
                                     LOG_ENGINE_WARN("Client init failed for Player {}", i);
@@ -2009,6 +2049,7 @@ void EditorApp::beginPlay()
                                 }
 
                                 inst->game_module.onLevelLoaded();
+                                inst->client_world.startGameplayFramework();
                                 inst->initialized = true;
                                 LOG_ENGINE_INFO("PIE: Player {} initialized in-editor", i);
 
@@ -2059,9 +2100,12 @@ void EditorApp::beginPlay()
 
             // Create input manager for client
             m_game_input_manager = std::make_shared<InputManager>();
-
-            // Register components
-            m_game_module.registerComponents(&m_reflection);
+            m_level_manager.applyGameplayFrameworkSettings(
+                m_play_snapshot.metadata,
+                *m_play_world,
+                "",
+                false);
+            m_play_world->initializeGameplayFramework(m_play_snapshot.metadata.level_name, "");
 
             // Set up client EngineServices
             m_client_services = {};
@@ -2085,6 +2129,7 @@ void EditorApp::beginPlay()
             else
             {
                 m_game_module.onLevelLoaded();
+                m_play_world->startGameplayFramework();
                 m_game_module_active = true;
                 m_network_pie_active = true;
 
@@ -2101,7 +2146,10 @@ void EditorApp::beginPlay()
                             inst->client_world = world();
                             inst->client_world.initializePhysics();
                             m_level_manager.instantiateLevelParallel(m_play_snapshot, inst->client_world,
-                                m_app.getRenderAPI(), nullptr, nullptr, nullptr);
+                                m_app.getRenderAPI(), nullptr, nullptr, nullptr, false);
+                            inst->client_world.initializeGameplayFramework(
+                                m_play_snapshot.metadata.level_name,
+                                "");
 
                             if (!inst->game_module.load(dll_path))
                             {
@@ -2132,6 +2180,14 @@ void EditorApp::beginPlay()
                             inst->services.connect_port     = port;
 
                             inst->game_module.registerComponents(&m_reflection);
+                            m_level_manager.applyGameplayFrameworkSettings(
+                                m_play_snapshot.metadata,
+                                inst->client_world,
+                                "",
+                                false);
+                            inst->client_world.initializeGameplayFramework(
+                                m_play_snapshot.metadata.level_name,
+                                "");
                             if (!inst->game_module.init(&inst->services))
                             {
                                 LOG_ENGINE_WARN("Client init failed for Player {}", i);
@@ -2142,6 +2198,7 @@ void EditorApp::beginPlay()
                             }
 
                             inst->game_module.onLevelLoaded();
+                            inst->client_world.startGameplayFramework();
                             inst->initialized = true;
                             LOG_ENGINE_INFO("PIE: Player {} initialized in-editor", i);
                             m_pie_clients.push_back(std::move(inst));
@@ -2179,9 +2236,12 @@ void EditorApp::beginPlay()
             m_client_services.api_version      = GARDEN_MODULE_API_VERSION;
 
             m_game_module.registerComponents(&m_reflection);
+            m_level_manager.applyGameplayFrameworkSettings(m_play_snapshot.metadata, *m_play_world);
+            m_play_world->initializeGameplayFramework(m_play_snapshot.metadata.level_name, "");
             if (m_game_module.init(&m_client_services))
             {
                 m_game_module.onLevelLoaded();
+                m_play_world->startGameplayFramework();
                 m_game_module_active = true;
                 LOG_ENGINE_INFO("--- PIE: Standalone game module initialized ---");
             }
@@ -2198,6 +2258,7 @@ void EditorApp::beginPlay()
             m_game_sim = std::make_unique<GameSimulation>(m_play_world.get(), m_game_input_manager);
             m_game_sim->initialize();
         }
+        m_play_world->startGameplayFramework();
     }
 
     // Enter playing state (mouse stays free until user clicks viewport)

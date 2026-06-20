@@ -5,7 +5,10 @@ Your game ships as a DLL the host (Editor / Game / Server) loads at runtime. The
 ## API version
 
 ```cpp
-#define GARDEN_MODULE_API_VERSION 3
+GAME_API int32_t gardenGetAPIVersion()
+{
+    return GARDEN_MODULE_API_VERSION;
+}
 ```
 
 Every export uses C linkage and `GAME_API` (handles `dllexport` / `visibility("default")`):
@@ -106,6 +109,30 @@ host shuts down
 - **`gardenOnPlayStart` / `gardenOnPlayStop`** — only fire in the **editor's** PIE flow. In a standalone `Game.exe`, treat `gardenGameInit` + `gardenOnLevelLoaded` as your "play started". In server flows, mirror the logic in `gardenServerInit`.
 - **`gardenGameUpdate`** — your top-level frame tick. Keep it small; dispatch to systems.
 - **`gardenGameShutdown`** — symmetric to init. Disconnect networks, flush logs, close files.
+
+## GameMode and GameState
+
+Garden mirrors Unreal's split in ENTT terms: `GameModeBase` exists only on authority worlds, while `GameStateBase` publishes shared state into singleton ECS components such as `GameStateComponent` and `PlayerStateComponent`.
+
+Selection order is URL option (`?game=MyMode`), level override in Level Settings, then `.garden` project defaults (`default_game_mode`, `default_game_state`). Register custom classes in `gardenRegisterComponents` before levels load:
+
+```cpp
+#include "GameFramework/GameModeRegistry.hpp"
+
+GAME_API const char* gardenGetGameName() { return "MyGame"; }
+
+GAME_API void gardenRegisterComponents(ReflectionRegistry* registry)
+{
+    (void)registry;
+
+    GameFramework::GameModeRegistry::get().registerGameMode(
+        "ArenaGameMode",
+        []() { return std::make_unique<ArenaGameMode>(); },
+        gardenGetGameName());
+}
+```
+
+Use the same `source_id` (`gardenGetGameName()` is conventional) for custom `registerGameState` calls. The host unregisters module-owned factories when the DLL unloads.
 
 ## Optional server exports
 

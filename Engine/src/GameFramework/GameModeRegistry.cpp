@@ -24,42 +24,64 @@ GameModeRegistry::GameModeRegistry()
     registerGameState("GameState", []() { return std::make_unique<GameState>(); });
 }
 
-bool GameModeRegistry::registerGameMode(std::string name, GameModeFactory factory)
+bool GameModeRegistry::registerGameMode(std::string name, GameModeFactory factory, std::string source_id)
 {
     if (name.empty() || !factory)
         return false;
 
-    m_game_mode_factories[std::move(name)] = std::move(factory);
+    m_game_mode_factories[std::move(name)] = GameModeEntry{std::move(factory), std::move(source_id)};
     return true;
 }
 
-bool GameModeRegistry::registerGameState(std::string name, GameStateFactory factory)
+bool GameModeRegistry::registerGameState(std::string name, GameStateFactory factory, std::string source_id)
 {
     if (name.empty() || !factory)
         return false;
 
-    m_game_state_factories[std::move(name)] = std::move(factory);
+    m_game_state_factories[std::move(name)] = GameStateEntry{std::move(factory), std::move(source_id)};
     return true;
+}
+
+void GameModeRegistry::unregisterBySource(const std::string& source_id)
+{
+    if (source_id.empty() || source_id == "engine")
+        return;
+
+    for (auto it = m_game_mode_factories.begin(); it != m_game_mode_factories.end();)
+    {
+        if (it->second.source_id == source_id)
+            it = m_game_mode_factories.erase(it);
+        else
+            ++it;
+    }
+
+    for (auto it = m_game_state_factories.begin(); it != m_game_state_factories.end();)
+    {
+        if (it->second.source_id == source_id)
+            it = m_game_state_factories.erase(it);
+        else
+            ++it;
+    }
 }
 
 std::unique_ptr<GameModeBase> GameModeRegistry::createGameMode(const std::string& name) const
 {
     auto it = m_game_mode_factories.find(name);
     if (it != m_game_mode_factories.end())
-        return it->second();
+        return it->second.factory();
 
     auto fallback = m_game_mode_factories.find("GameMode");
-    return fallback != m_game_mode_factories.end() ? fallback->second() : nullptr;
+    return fallback != m_game_mode_factories.end() ? fallback->second.factory() : nullptr;
 }
 
 std::unique_ptr<GameStateBase> GameModeRegistry::createGameState(const std::string& name) const
 {
     auto it = m_game_state_factories.find(name);
     if (it != m_game_state_factories.end())
-        return it->second();
+        return it->second.factory();
 
     auto fallback = m_game_state_factories.find("GameState");
-    return fallback != m_game_state_factories.end() ? fallback->second() : nullptr;
+    return fallback != m_game_state_factories.end() ? fallback->second.factory() : nullptr;
 }
 
 bool GameModeRegistry::hasGameMode(const std::string& name) const

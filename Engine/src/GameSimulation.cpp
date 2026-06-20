@@ -34,9 +34,8 @@ void GameSimulation::initialize()
     m_game_mode->setInputManager(m_input_manager);
 
     std::string error_message;
-    m_game_mode->initGame(*m_world, "", "", error_message);
-    if (!error_message.empty())
-        LOG_ENGINE_WARN("GameMode init reported: {}", error_message);
+    if (!m_world->initializeGameplayFramework("", ""))
+        LOG_ENGINE_WARN("Gameplay framework did not initialize");
 
     if (!m_game_mode->getPrimaryPlayer())
     {
@@ -48,7 +47,7 @@ void GameSimulation::initialize()
             LOG_ENGINE_WARN("Local player login failed: {}", error_message);
     }
 
-    m_game_mode->startPlay();
+    m_world->startGameplayFramework();
 
     if (const GameFramework::PlayerControllerEntry* primary_player = m_game_mode->getPrimaryPlayer())
     {
@@ -86,9 +85,6 @@ void GameSimulation::update(float delta_time)
 
     // Update timers
     TimerSystem::get().update(delta_time);
-
-    if (m_game_mode)
-        m_game_mode->tick(delta_time);
 
     PlayerController* player_controller = getPlayerController();
 

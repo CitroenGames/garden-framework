@@ -18,6 +18,7 @@
 #include "Reflection/ReflectionSerializer.hpp"
 #include "Console/ConVar.hpp"
 #include "GameFramework/GameMode.hpp"
+#include "GameFramework/GameModeBase.hpp"
 #include "GameFramework/GameModeRegistry.hpp"
 #include "GameFramework/GameStateBase.hpp"
 #include "Threading/JobSystem.hpp"
@@ -28,8 +29,10 @@
 #include <cctype>
 #include <filesystem>
 #include <functional>
+#include <initializer_list>
 #include <limits>
 #include <unordered_map>
+#include <utility>
 
 using json = nlohmann::json;
 
@@ -39,27 +42,101 @@ static constexpr uint32_t LEVEL_BINARY_VERSION_V5 = 5;
 static constexpr uint32_t LEVEL_BINARY_VERSION_V4 = 4;
 static constexpr uint32_t LEVEL_BINARY_VERSION_V3 = 3; // Previous version for backward compat
 
-static void applyGameplayFrameworkSettings(const LevelMetadata& metadata, world& game_world)
+static std::string readOptionValue(const std::string& options, std::initializer_list<const char*> keys)
+{
+    size_t pos = 0;
+    while (pos < options.size())
+    {
+        while (pos < options.size() &&
+               (options[pos] == '?' || options[pos] == '&' || options[pos] == ' '))
+        {
+            ++pos;
+        }
+
+        const size_t end = options.find_first_of("& ", pos);
+        const std::string token = options.substr(pos, end == std::string::npos ? end : end - pos);
+        const size_t equals = token.find('=');
+        if (equals != std::string::npos)
+        {
+            const std::string key = token.substr(0, equals);
+            for (const char* candidate : keys)
+            {
+                if (key == candidate)
+                    return token.substr(equals + 1);
+            }
+        }
+
+        if (end == std::string::npos)
+            break;
+        pos = end + 1;
+    }
+
+    return {};
+}
+
+static std::string resolveClassName(const std::string& option_override,
+                                    const std::string& level_override,
+                                    const std::string& project_default,
+                                    const char* engine_fallback)
+{
+    if (!option_override.empty())
+        return option_override;
+    if (!level_override.empty())
+        return level_override;
+    if (!project_default.empty())
+        return project_default;
+    return engine_fallback;
+}
+
+static std::unique_ptr<GameFramework::GameModeBase> createGameModeOrFallback(const std::string& class_name)
 {
     using namespace GameFramework;
 
-    if (!game_world.getAuthorityGameMode())
-        game_world.setAuthorityGameMode(GameModeRegistry::get().createGameMode(metadata.game_mode_class));
+    auto game_mode = GameModeRegistry::get().createGameMode(class_name);
+    if (!game_mode && class_name != "GameMode")
+        game_mode = GameModeRegistry::get().createGameMode("GameMode");
+    return game_mode;
+}
 
-    if (!game_world.getGameState() && !metadata.game_state_class.empty())
-        game_world.setGameState(GameModeRegistry::get().createGameState(metadata.game_state_class));
+static std::unique_ptr<GameFramework::GameStateBase> createGameStateOrFallback(const std::string& class_name)
+{
+    using namespace GameFramework;
 
-    GameModeBase* game_mode = game_world.getAuthorityGameMode();
-    if (!game_mode)
-    {
-        LOG_ENGINE_WARN("Failed to create GameMode '{}'", metadata.game_mode_class);
-        return;
-    }
+    auto game_state = GameModeRegistry::get().createGameState(class_name);
+    if (!game_state && class_name != "GameState")
+        game_state = GameModeRegistry::get().createGameState("GameState");
+    return game_state;
+}
 
-    game_mode->setStartPlayersAsSpectators(metadata.start_players_as_spectators);
-    game_mode->setPauseable(metadata.pauseable);
+static std::string resolvedGameModeClass(const LevelMetadata& metadata,
+                                         const std::string& project_default,
+                                         const std::string& options)
+{
+    return resolveClassName(
+        readOptionValue(options, {"game", "game_mode", "game_mode_class"}),
+        metadata.game_mode_class,
+        project_default,
+        "GameMode");
+}
 
-    if (auto* match_mode = dynamic_cast<GameMode*>(game_mode))
+static std::string resolvedGameStateClass(const LevelMetadata& metadata,
+                                          const std::string& project_default,
+                                          const std::string& options)
+{
+    return resolveClassName(
+        readOptionValue(options, {"game_state", "game_state_class"}),
+        metadata.game_state_class,
+        project_default,
+        "GameState");
+}
+
+static void applyGameModeRuntimeSettings(GameFramework::GameModeBase& game_mode,
+                                         const LevelMetadata& metadata)
+{
+    game_mode.setStartPlayersAsSpectators(metadata.start_players_as_spectators);
+    game_mode.setPauseable(metadata.pauseable);
+
+    if (auto* match_mode = dynamic_cast<GameFramework::GameMode*>(&game_mode))
     {
         match_mode->setDelayedStart(metadata.delayed_start);
         match_mode->setMinRespawnDelay(metadata.min_respawn_delay);
@@ -994,6 +1071,81 @@ LevelManager::~LevelManager()
 void LevelManager::cleanup()
 {
     stored_entities.clear();
+}
+
+void LevelManager::setGameplayDefaults(std::string game_mode_class, std::string game_state_class)
+{
+    m_default_game_mode_class = game_mode_class.empty() ? "GameMode" : std::move(game_mode_class);
+    m_default_game_state_class = game_state_class.empty() ? "GameState" : std::move(game_state_class);
+}
+
+void LevelManager::applyGameplayFrameworkSettings(const LevelMetadata& metadata,
+                                                  world& game_world,
+                                                  const std::string& options,
+                                                  bool create_authority_game_mode) const
+{
+    using namespace GameFramework;
+
+    const std::string game_mode_class =
+        resolvedGameModeClass(metadata, m_default_game_mode_class, options);
+    const std::string game_state_class =
+        resolvedGameStateClass(metadata, m_default_game_state_class, options);
+
+    game_world.shutdownGameplayFramework();
+
+    if (create_authority_game_mode)
+    {
+        auto game_mode = createGameModeOrFallback(game_mode_class);
+        if (!game_mode)
+        {
+            LOG_ENGINE_WARN("Failed to create GameMode '{}'", game_mode_class);
+            game_world.clearGameplayFramework();
+            return;
+        }
+
+        if (game_mode_class != game_mode->getClassName())
+        {
+            LOG_ENGINE_WARN("GameMode '{}' is not registered, falling back to '{}'",
+                            game_mode_class, game_mode->getClassName());
+        }
+
+        auto game_state = createGameStateOrFallback(game_state_class);
+        if (!game_state)
+        {
+            LOG_ENGINE_WARN("Failed to create GameState '{}'", game_state_class);
+        }
+        else if (game_state_class != game_state->getClassName())
+        {
+            LOG_ENGINE_WARN("GameState '{}' is not registered, falling back to '{}'",
+                            game_state_class, game_state->getClassName());
+        }
+
+        game_world.setAuthorityGameMode(std::move(game_mode));
+        game_world.setGameState(std::move(game_state));
+
+        if (GameModeBase* game_mode = game_world.getAuthorityGameMode())
+            applyGameModeRuntimeSettings(*game_mode, metadata);
+        return;
+    }
+
+    if (game_world.getAuthorityGameMode())
+        game_world.setAuthorityGameMode(nullptr);
+
+    auto game_state = createGameStateOrFallback(game_state_class);
+    if (!game_state)
+    {
+        LOG_ENGINE_WARN("Failed to create client GameState '{}'", game_state_class);
+        game_world.setGameState(nullptr);
+        return;
+    }
+
+    game_world.setGameState(std::move(game_state));
+
+    if (GameStateBase* game_state = game_world.getGameState())
+    {
+        game_state->setAuthorityGameMode(nullptr);
+        game_state->setGameModeClassName(game_mode_class);
+    }
 }
 
 bool LevelManager::loadLevel(const std::string& path, LevelData& out_level_data)
@@ -3064,7 +3216,8 @@ bool LevelManager::instantiateLevelParallel(
     IRenderAPI* render_api,
     entt::entity* out_player_entity,
     entt::entity* out_freecam_entity,
-    entt::entity* out_player_rep_entity)
+    entt::entity* out_player_rep_entity,
+    bool create_authority_game_mode)
 {
     LOG_ENGINE_INFO("Instantiating level (parallel): {}", level_data.metadata.level_name);
     ScopedLoadTimer timer("Level instantiation");
@@ -3133,7 +3286,7 @@ bool LevelManager::instantiateLevelParallel(
     // Apply world settings
     game_world.setGravity(level_data.metadata.gravity);
     game_world.setFixedDelta(level_data.metadata.fixed_delta);
-    applyGameplayFrameworkSettings(level_data.metadata, game_world);
+    applyGameplayFrameworkSettings(level_data.metadata, game_world, "", create_authority_game_mode);
 
     // Initialize output pointers
     if (out_player_entity) *out_player_entity = entt::null;
@@ -3366,7 +3519,8 @@ bool LevelManager::instantiateLevel(
     IRenderAPI* render_api,
     entt::entity* out_player_entity,
     entt::entity* out_freecam_entity,
-    entt::entity* out_player_rep_entity)
+    entt::entity* out_player_rep_entity,
+    bool create_authority_game_mode)
 {
     return instantiateLevelParallel(
         level_data,
@@ -3374,5 +3528,6 @@ bool LevelManager::instantiateLevel(
         render_api,
         out_player_entity,
         out_freecam_entity,
-        out_player_rep_entity);
+        out_player_rep_entity,
+        create_authority_game_mode);
 }

@@ -13,6 +13,8 @@ A small JSON file the engine and CLI read to know what your project is.
     "engine_version": "1.0",
     "game_module": "bin/MyGame",
     "default_level": "assets/levels/main.level.json",
+    "default_game_mode": "GameMode",
+    "default_game_state": "GameState",
     "asset_directories": ["assets/"],
     "source_directory": "src/",
     "buildscript": "MyGame.buildscript"
@@ -25,6 +27,8 @@ A small JSON file the engine and CLI read to know what your project is.
 | `engine_id` | Set by `garden set-engine` — pins this project to a registered engine. Empty means "any engine". |
 | `game_module` | Path (no extension) to the game DLL the host should load. The engine appends `.dll` / `.so` / `.dylib`. |
 | `default_level` | Level the editor opens when the project loads, and the level Game.exe starts in. |
+| `default_game_mode` | Project default GameMode class. Levels can override this in Level Settings. |
+| `default_game_state` | Project default GameState class mirrored into the ECS. |
 | `asset_directories` | Roots scanned by the asset compiler and content browser. |
 | `source_directory` | Hint to the editor for "open source folder" actions. |
 | `buildscript` | Sighmake buildscript that produces the game DLL. |
@@ -104,11 +108,10 @@ At runtime the engine prefers compiled forms. Source files are kept around so yo
 When the editor or Game.exe launches a project:
 
 1. Loads `<project>.garden`.
-2. Resolves `game_module` relative to the project folder, appends platform suffix, copies it to a temp path, and loads it (so you can rebuild while running).
-3. Calls `gardenGetAPIVersion` — must return `GARDEN_MODULE_API_VERSION` (currently 3).
-4. Calls `gardenRegisterComponents` so your reflected components show up in the inspector.
-5. Calls `gardenGameInit(EngineServices*)`.
-6. Loads `default_level`.
-7. Starts ticking `gardenGameUpdate(dt)`.
+2. Resolves `game_module` relative to the project folder, appends the platform suffix, copies it to a temp path, and loads it.
+3. Calls `gardenGetAPIVersion` and `gardenRegisterComponents`.
+4. Loads `default_level`, resolving GameMode from URL options, level override, then project defaults.
+5. Calls `gardenGameInit(EngineServices*)` and `gardenOnLevelLoaded()`.
+6. Starts ticking the world GameMode/GameState, then `gardenGameUpdate(dt)`.
 
 See [Game Module](game-module.md) for the full lifecycle.

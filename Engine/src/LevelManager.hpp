@@ -173,8 +173,8 @@ struct LevelMetadata
         , entity_count(0)
         , gravity(0, -1, 0)
         , fixed_delta(1.0f / 60.0f)
-        , game_mode_class("GameMode")
-        , game_state_class("GameState")
+        , game_mode_class("")
+        , game_state_class("")
         , delayed_start(false)
         , start_players_as_spectators(false)
         , pauseable(true)
@@ -260,7 +260,8 @@ public:
                          IRenderAPI* render_api,
                          entt::entity* out_player_entity = nullptr,
                          entt::entity* out_freecam_entity = nullptr,
-                         entt::entity* out_player_rep_entity = nullptr);
+                         entt::entity* out_player_rep_entity = nullptr,
+                         bool create_authority_game_mode = true);
 
     // Parallel instantiation - reads all meshes from disk in parallel, then
     // finalizes GPU uploads and entity creation on the main thread.
@@ -269,9 +270,15 @@ public:
                                   IRenderAPI* render_api,
                                   entt::entity* out_player_entity = nullptr,
                                   entt::entity* out_freecam_entity = nullptr,
-                                  entt::entity* out_player_rep_entity = nullptr);
+                                  entt::entity* out_player_rep_entity = nullptr,
+                                  bool create_authority_game_mode = true);
 
     void setReflectionRegistry(ReflectionRegistry* reflection) { m_reflection = reflection; }
+    void setGameplayDefaults(std::string game_mode_class, std::string game_state_class);
+    void applyGameplayFrameworkSettings(const LevelMetadata& metadata,
+                                        world& game_world,
+                                        const std::string& options = "",
+                                        bool create_authority_game_mode = true) const;
 
     // Cleanup - called before loading new level
     void cleanup();
@@ -308,6 +315,8 @@ private:
     std::vector<LevelEntity> stored_entities;
 
     ReflectionRegistry* m_reflection = nullptr;
+    std::string m_default_game_mode_class = "GameMode";
+    std::string m_default_game_state_class = "GameState";
 
     // Binary format version (set during readBinaryHeader for readBinaryEntity)
     uint32_t binary_read_version = 0;

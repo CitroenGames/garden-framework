@@ -221,6 +221,8 @@ int main(int argc, char* argv[])
     LOG_ENGINE_INFO("Project '{}' loaded from '{}'",
                     project_manager.getDescriptor().name,
                     project_manager.getProjectRoot());
+    level_manager.setGameplayDefaults(project_manager.getDescriptor().default_game_mode,
+                                      project_manager.getDescriptor().default_game_state);
 
     // Initialize application
     app = Application(1920, 1080, 60, 75.0f, api_type);
@@ -293,6 +295,12 @@ int main(int argc, char* argv[])
     _world = world();
     _world.initializePhysics();
 
+    // Parse network CLI args before level instantiation so connecting clients
+    // create only GameState, not an authority GameMode.
+    std::string connect_addr = parseConnectAddress(argc, argv);
+    uint16_t connect_port = parsePort(argc, argv);
+    const bool create_authority_game_mode = connect_addr.empty();
+
     // Load default level
     LevelData level_data;
     std::string level_path = project_manager.getDescriptor().default_level;
@@ -310,11 +318,14 @@ int main(int argc, char* argv[])
         entt::entity player_rep_entity = entt::null;
 
         if (!level_manager.instantiateLevelParallel(level_data, _world, render_api,
-                &player_entity, &freecam_entity, &player_rep_entity))
+                &player_entity, &freecam_entity, &player_rep_entity,
+                create_authority_game_mode))
         {
             LOG_ENGINE_FATAL("Failed to instantiate level");
             quit_game(1);
         }
+
+        _world.initializeGameplayFramework(level_data.metadata.level_name, "");
     }
 
     // Initialize renderer
@@ -325,10 +336,6 @@ int main(int argc, char* argv[])
         level_data.metadata.ambient_light,
         level_data.metadata.diffuse_light,
         level_data.metadata.light_direction);
-
-    // Parse network CLI args
-    std::string connect_addr = parseConnectAddress(argc, argv);
-    uint16_t connect_port = parsePort(argc, argv);
 
     // Initialize game module
     EngineServices services{};
@@ -351,6 +358,7 @@ int main(int argc, char* argv[])
     }
 
     game_module.onLevelLoaded();
+    _world.startGameplayFramework();
 
     // Main game loop
     Uint64 delta_last = SDL_GetTicks();
@@ -383,6 +391,7 @@ int main(int argc, char* argv[])
             delta_last = frame_start;
 
             // Let the game DLL handle all game logic
+            _world.tickGameplayFramework(delta_time);
             game_module.update(delta_time);
 
             // Render using the world camera (updated by the game DLL)

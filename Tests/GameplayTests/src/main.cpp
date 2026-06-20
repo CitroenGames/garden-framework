@@ -38,6 +38,18 @@ bool pass(const std::string& name)
     return true;
 }
 
+class TestDefaultGameMode : public GameFramework::GameMode
+{
+public:
+    const char* getClassName() const override { return "TestDefaultGameMode"; }
+};
+
+class TestDefaultGameState : public GameFramework::GameState
+{
+public:
+    const char* getClassName() const override { return "TestDefaultGameState"; }
+};
+
 bool testPlayerStartReflectionRegistered()
 {
     const std::string name = "player start component is reflected";
@@ -255,6 +267,88 @@ bool testLevelMetadataAppliesGameplaySettings()
     return pass(name);
 }
 
+bool testProjectDefaultsResolveGameplayClasses()
+{
+    const std::string name = "project defaults resolve gameplay classes";
+    const std::string source_id = "gameplay_tests";
+
+    auto& registry = GameFramework::GameModeRegistry::get();
+    registry.unregisterBySource(source_id);
+    registry.registerGameMode(
+        "TestDefaultGameMode",
+        []() { return std::make_unique<TestDefaultGameMode>(); },
+        source_id);
+    registry.registerGameState(
+        "TestDefaultGameState",
+        []() { return std::make_unique<TestDefaultGameState>(); },
+        source_id);
+
+    LevelData data;
+    data.metadata.game_mode_class.clear();
+    data.metadata.game_state_class.clear();
+
+    world game_world;
+    LevelManager level_manager;
+    level_manager.setGameplayDefaults("TestDefaultGameMode", "TestDefaultGameState");
+
+    const bool instantiated = level_manager.instantiateLevelParallel(data, game_world, nullptr);
+    registry.unregisterBySource(source_id);
+
+    if (!instantiated)
+        return fail(name, "empty level instantiation failed");
+
+    auto* mode = game_world.getAuthorityGameMode();
+    if (!mode || std::string(mode->getClassName()) != "TestDefaultGameMode")
+        return fail(name, "project default GameMode was not created");
+
+    auto* state = game_world.getGameState();
+    if (!state || std::string(state->getClassName()) != "TestDefaultGameState")
+        return fail(name, "project default GameState was not created");
+
+    return pass(name);
+}
+
+bool testClientWorldCreatesOnlyGameState()
+{
+    const std::string name = "client world creates only game state";
+
+    LevelData data;
+    data.metadata.game_mode_class = "GameMode";
+    data.metadata.game_state_class = "GameState";
+
+    world game_world;
+    LevelManager level_manager;
+    if (!level_manager.instantiateLevelParallel(
+            data, game_world, nullptr, nullptr, nullptr, nullptr, false))
+    {
+        return fail(name, "empty client level instantiation failed");
+    }
+
+    if (game_world.getAuthorityGameMode())
+        return fail(name, "client world created an authority GameMode");
+
+    auto* game_state = game_world.getGameStateAs<GameFramework::GameState>();
+    if (!game_state)
+        return fail(name, "client world did not create GameState");
+    if (game_state->getAuthorityGameMode())
+        return fail(name, "client GameState has authority GameMode");
+    if (game_state->getGameModeClassName() != "GameMode")
+        return fail(name, "client GameState did not mirror GameMode class");
+
+    if (!game_world.initializeGameplayFramework("ClientMap", ""))
+        return fail(name, "client GameState did not initialize");
+
+    game_world.startGameplayFramework();
+    if (!game_state->hasBegunPlay())
+        return fail(name, "client GameState did not begin play");
+
+    game_world.tickGameplayFramework(0.25f);
+    if (game_state->getServerWorldTimeSeconds() <= 0.0)
+        return fail(name, "client GameState did not tick");
+
+    return pass(name);
+}
+
 bool testGameModeRegistryCreatesBuiltins()
 {
     const std::string name = "game mode registry creates builtins";
@@ -279,5 +373,7 @@ int main()
     ok = testGameModeSpawnsAtPlayerStart() && ok;
     ok = testDelayedStartWaitsForManualMatchStart() && ok;
     ok = testLevelMetadataAppliesGameplaySettings() && ok;
+    ok = testProjectDefaultsResolveGameplayClasses() && ok;
+    ok = testClientWorldCreatesOnlyGameState() && ok;
     return ok ? 0 : 1;
 }

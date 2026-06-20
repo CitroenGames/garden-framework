@@ -21,8 +21,9 @@ public:
 
     static GameModeRegistry& get();
 
-    bool registerGameMode(std::string name, GameModeFactory factory);
-    bool registerGameState(std::string name, GameStateFactory factory);
+    bool registerGameMode(std::string name, GameModeFactory factory, std::string source_id = "engine");
+    bool registerGameState(std::string name, GameStateFactory factory, std::string source_id = "engine");
+    void unregisterBySource(const std::string& source_id);
 
     std::unique_ptr<GameModeBase> createGameMode(const std::string& name) const;
     std::unique_ptr<GameStateBase> createGameState(const std::string& name) const;
@@ -36,7 +37,19 @@ public:
 private:
     GameModeRegistry();
 
-    std::unordered_map<std::string, GameModeFactory> m_game_mode_factories;
-    std::unordered_map<std::string, GameStateFactory> m_game_state_factories;
+    struct GameModeEntry
+    {
+        GameModeFactory factory;
+        std::string source_id;
+    };
+
+    struct GameStateEntry
+    {
+        GameStateFactory factory;
+        std::string source_id;
+    };
+
+    std::unordered_map<std::string, GameModeEntry> m_game_mode_factories;
+    std::unordered_map<std::string, GameStateEntry> m_game_state_factories;
 };
 }

@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <vector>
 #include <memory>
+#include <string>
 #include <entt/entt.hpp>
 
 namespace GameFramework
@@ -24,6 +25,8 @@ private:
     std::unique_ptr<GameFramework::GameStateBase> game_state;
     Tick::FixedTickAccumulator simulation_ticks;
     uint32_t simulation_tick = 0;
+    bool gameplay_framework_initialized = false;
+    bool gameplay_framework_started = false;
 
     void clearRegistryStorage()
     {
@@ -84,6 +87,12 @@ public:
     }
 
     void clearGameplayFramework();
+    bool initializeGameplayFramework(const std::string& map_name = "", const std::string& options = "");
+    void startGameplayFramework();
+    void tickGameplayFramework(float delta_time);
+    void shutdownGameplayFramework();
+    bool isGameplayFrameworkInitialized() const { return gameplay_framework_initialized; }
+    bool hasGameplayFrameworkStarted() const { return gameplay_framework_started; }
 
     // Initialize Jolt physics (call after world construction)
     void initializePhysics()

@@ -4,6 +4,8 @@
 #include <unordered_map>
 #include <memory>
 #include <functional>
+#include <string>
+#include <utility>
 
 class world;
 class IRenderAPI;
@@ -21,6 +23,10 @@ public:
     // Initialize with references to world and render API
     void initialize(world* game_world, IRenderAPI* render_api);
     void setReflectionRegistry(ReflectionRegistry* reflection) { level_manager.setReflectionRegistry(reflection); }
+    void setGameplayDefaults(std::string game_mode_class, std::string game_state_class)
+    {
+        level_manager.setGameplayDefaults(std::move(game_mode_class), std::move(game_state_class));
+    }
 
     // Load a scene from a level file (synchronous for now)
     SceneId loadScene(const std::string& level_path);

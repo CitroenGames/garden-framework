@@ -1,4 +1,5 @@
 #include "GameModuleLoader.hpp"
+#include "GameFramework/GameModeRegistry.hpp"
 #include <cstdio>
 #include <filesystem>
 
@@ -186,6 +187,7 @@ void GameModuleLoader::unload()
 {
     if (!m_handle) return;
 
+    GameFramework::GameModeRegistry::get().unregisterBySource(getGameName());
     clearFunctionPointers();
     platformUnload(m_handle);
     m_handle = nullptr;

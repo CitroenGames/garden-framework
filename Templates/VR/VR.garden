@@ -4,6 +4,8 @@
     "engine_version": "1.0",
     "game_module": "bin/VR",
     "default_level": "assets/levels/main.level.json",
+    "default_game_mode": "GameMode",
+    "default_game_state": "GameState",
     "asset_directories": [
         "assets/"
     ],

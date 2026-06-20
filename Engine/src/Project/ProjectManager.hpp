@@ -11,6 +11,8 @@ struct ENGINE_API ProjectDescriptor
     std::string engine_version;
     std::string game_module;       // e.g. "bin/MyGame" (no extension; resolved per-platform)
     std::string default_level;     // e.g. "assets/levels/main.level.json"
+    std::string default_game_mode;  // Project default, used when a level has no override
+    std::string default_game_state; // Project default GameState mirror
     std::vector<std::string> asset_directories;
     std::string source_directory;  // e.g. "src/"
     std::string buildscript;       // e.g. "MyGame.buildscript"

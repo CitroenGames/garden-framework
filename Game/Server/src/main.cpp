@@ -110,6 +110,8 @@ int main(int argc, char* argv[])
 
     fs::current_path(project_manager.getProjectRoot());
     LOG_ENGINE_INFO("Project '{}' loaded", project_manager.getDescriptor().name);
+    level_manager.setGameplayDefaults(project_manager.getDescriptor().default_game_mode,
+                                      project_manager.getDescriptor().default_game_state);
 
     // Initialize headless application (no window, no GPU)
     app = Application(1, 1, 60, 75.0f, RenderAPIType::Headless);
@@ -169,6 +171,8 @@ int main(int argc, char* argv[])
             LOG_ENGINE_FATAL("Failed to instantiate level");
             shutdown_server(1);
         }
+
+        _world.initializeGameplayFramework(level_data.metadata.level_name, "");
     }
 
     // Initialize server via DLL
@@ -193,6 +197,7 @@ int main(int argc, char* argv[])
     }
 
     game_module.serverOnLevelLoaded();
+    _world.startGameplayFramework();
 
     LOG_ENGINE_INFO("Server started successfully");
 
@@ -207,6 +212,7 @@ int main(int argc, char* argv[])
         float delta_time = (frame_start - delta_last) / 1000.0f;
         delta_last = frame_start;
 
+        _world.tickGameplayFramework(delta_time);
         game_module.serverUpdate(delta_time);
 
         Uint64 frame_end_ns = SDL_GetTicksNS();
