@@ -16,6 +16,7 @@ struct ENGINE_API GameModeComponent
     std::string class_name = "GameMode";
     std::string map_name;
     std::string options;
+    std::string default_player_name = "Player";
     bool authority = true;
     bool pauseable = true;
     bool paused = false;
@@ -41,7 +42,7 @@ struct ENGINE_API GameStateComponent
     bool match_started = false;
     bool match_ended = false;
     double server_world_time_seconds = 0.0;
-    float server_time_update_frequency = 0.5f;
+    float server_time_update_frequency = 0.1f;
     int32_t elapsed_time = 0;
     int32_t num_players = 0;
     int32_t num_spectators = 0;
@@ -66,6 +67,8 @@ struct ENGINE_API PlayerControllerComponent
     entt::entity player_state = entt::null;
     entt::entity pawn = entt::null;
     entt::entity freecam = entt::null;
+    entt::entity start_spot = entt::null;
+    std::string portal;
     bool spectator = false;
     bool local = false;
 };

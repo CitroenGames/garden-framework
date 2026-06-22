@@ -21,7 +21,7 @@ class GameStateBase;
 struct ENGINE_API PlayerLoginOptions
 {
     uint16_t player_id = 0;
-    std::string player_name = "Player";
+    std::string player_name;
     std::string options;
     std::string address;
     std::string portal;
@@ -44,6 +44,8 @@ struct ENGINE_API PlayerControllerEntry
     PlayerStatePtr player_state;
     entt::entity pawn = entt::null;
     entt::entity freecam = entt::null;
+    entt::entity start_spot = entt::null;
+    std::string portal;
     bool spectator = false;
 };
 
@@ -101,6 +103,9 @@ public:
     virtual bool canSpectate(const PlayerControllerEntry& viewer, const PlayerState& view_target) const;
 
     PlayerControllerEntry* createLocalPlayer(const PlayerLoginOptions& options, std::string& error_message);
+    virtual void changeName(PlayerControllerEntry& player, const std::string& new_name, bool name_change);
+    void setDefaultPlayerName(std::string default_player_name);
+    const std::string& getDefaultPlayerName() const { return m_default_player_name; }
     PlayerControllerEntry* getPrimaryPlayer();
     const PlayerControllerEntry* getPrimaryPlayer() const;
     PlayerController* getPrimaryPlayerController();
@@ -111,6 +116,10 @@ public:
 
     virtual entt::entity choosePlayerStart(const PlayerControllerEntry& player);
     virtual entt::entity findPlayerStart(const PlayerControllerEntry& player, const std::string& incoming_name = "");
+    virtual bool shouldSpawnAtStartSpot(const PlayerControllerEntry& player) const;
+    virtual bool updatePlayerStartSpot(PlayerControllerEntry& player,
+                                       const std::string& portal,
+                                       std::string& out_error_message);
     virtual bool playerCanRestart(const PlayerControllerEntry& player) const;
     virtual void restartPlayer(PlayerControllerEntry& player);
     virtual void restartPlayerAtPlayerStart(PlayerControllerEntry& player, entt::entity start_spot);
@@ -128,6 +137,9 @@ public:
     int32_t getNumSpectators() const;
 
 protected:
+    virtual void onPostLogin(PlayerControllerEntry& new_player);
+    virtual void onChangeName(PlayerControllerEntry& player, const std::string& new_name, bool name_change);
+    virtual void onRestartPlayer(PlayerControllerEntry& player);
     entt::entity findExistingPawnFor(const PlayerControllerEntry& player) const;
     entt::entity findOrCreateFreecamFor(const PlayerControllerEntry& player);
     uint16_t allocatePlayerId(uint16_t requested_id);
@@ -142,6 +154,7 @@ protected:
     std::shared_ptr<InputManager> m_input_manager;
     std::string m_map_name;
     std::string m_options_string;
+    std::string m_default_player_name = "Player";
     std::vector<PlayerControllerEntry> m_players;
     bool m_pauseable = true;
     bool m_paused = false;

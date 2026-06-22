@@ -29,6 +29,8 @@ public:
     virtual void setMatchState(const std::string& new_state);
     int32_t getElapsedTime() const { return m_elapsed_time; }
     virtual void defaultTimer();
+    virtual void onRepMatchState();
+    virtual void onRepElapsedTime();
 
 protected:
     void syncGameStateComponent() override;

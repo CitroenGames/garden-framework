@@ -150,16 +150,27 @@ PlayerControllerEntry* GameModeBase::login(const PlayerLoginOptions& options, st
     PlayerControllerEntry entry;
     entry.player_id = allocatePlayerId(options.player_id);
     entry.spectator = options.spectator || m_start_players_as_spectators;
+    entry.portal = options.portal;
     entry.controller = std::make_unique<PlayerController>(m_input_manager, m_world);
     entry.player_state = std::make_shared<PlayerState>();
     entry.player_state->player_id = entry.player_id;
-    entry.player_state->player_name = options.player_name.empty()
-        ? ("Player " + std::to_string(entry.player_id))
-        : options.player_name;
     entry.player_state->is_spectator = entry.spectator;
     entry.player_state->start_time = m_game_state
         ? static_cast<float>(m_game_state->getServerWorldTimeSeconds())
         : 0.0f;
+    changeName(entry,
+        options.player_name.empty()
+            ? (m_default_player_name + " " + std::to_string(entry.player_id))
+            : options.player_name,
+        false);
+
+    std::string start_error_message;
+    if (!updatePlayerStartSpot(entry, entry.portal, start_error_message) &&
+        !start_error_message.empty())
+    {
+        LOG_ENGINE_WARN("InitNewPlayer: {}", start_error_message);
+    }
+
     syncPlayerEntryToEcs(entry);
 
     m_players.push_back(std::move(entry));
@@ -175,6 +186,7 @@ void GameModeBase::postLogin(PlayerControllerEntry& new_player)
         new_player.player_state ? new_player.player_state->player_name : std::string{}
     });
 
+    onPostLogin(new_player);
     handleStartingNewPlayer(new_player);
 }
 
@@ -241,6 +253,26 @@ PlayerControllerEntry* GameModeBase::createLocalPlayer(const PlayerLoginOptions&
     return new_player;
 }
 
+void GameModeBase::changeName(PlayerControllerEntry& player, const std::string& new_name, bool name_change)
+{
+    if (new_name.empty() || !player.player_state)
+        return;
+
+    player.player_state->player_name = new_name;
+    onChangeName(player, new_name, name_change);
+    syncPlayerEntryToEcs(player);
+    if (m_game_state)
+        m_game_state->addPlayerState(player.player_state);
+}
+
+void GameModeBase::setDefaultPlayerName(std::string default_player_name)
+{
+    m_default_player_name = default_player_name.empty()
+        ? std::string("Player")
+        : std::move(default_player_name);
+    syncGameModeComponent();
+}
+
 PlayerControllerEntry* GameModeBase::getPrimaryPlayer()
 {
     return m_players.empty() ? nullptr : &m_players.front();
@@ -293,6 +325,32 @@ entt::entity GameModeBase::findPlayerStart(const PlayerControllerEntry& player, 
     if (!m_world)
         return entt::null;
 
+    if (!incoming_name.empty())
+    {
+        auto named_view = m_world->registry.view<PlayerStartComponent, TransformComponent>();
+        for (entt::entity entity : named_view)
+        {
+            const auto& start = named_view.get<PlayerStartComponent>(entity);
+            if (!start.enabled)
+                continue;
+
+            const auto* tag = m_world->registry.try_get<TagComponent>(entity);
+            if ((tag && tag->name == incoming_name) || start.tag == incoming_name)
+                return entity;
+        }
+    }
+
+    if (shouldSpawnAtStartSpot(player))
+    {
+        if (m_world->registry.valid(player.start_spot) &&
+            m_world->registry.all_of<PlayerStartComponent, TransformComponent>(player.start_spot))
+        {
+            return player.start_spot;
+        }
+
+        LOG_ENGINE_ERROR("FindPlayerStart: shouldSpawnAtStartSpot returned true but the start spot was invalid");
+    }
+
     entt::entity first_enabled = entt::null;
     entt::entity preferred = entt::null;
     auto view = m_world->registry.view<PlayerStartComponent, TransformComponent>();
@@ -302,12 +360,6 @@ entt::entity GameModeBase::findPlayerStart(const PlayerControllerEntry& player, 
         const auto& start = view.get<PlayerStartComponent>(entity);
         if (!start.enabled)
             continue;
-
-        const auto* tag = m_world->registry.try_get<TagComponent>(entity);
-        const bool name_matches = !incoming_name.empty() &&
-            ((tag && tag->name == incoming_name) || start.tag == incoming_name);
-        if (name_matches)
-            return entity;
 
         if (first_enabled == entt::null)
             first_enabled = entity;
@@ -319,6 +371,30 @@ entt::entity GameModeBase::findPlayerStart(const PlayerControllerEntry& player, 
     }
 
     return preferred != entt::null ? preferred : first_enabled;
+}
+
+bool GameModeBase::shouldSpawnAtStartSpot(const PlayerControllerEntry& player) const
+{
+    return m_world && m_world->registry.valid(player.start_spot);
+}
+
+bool GameModeBase::updatePlayerStartSpot(PlayerControllerEntry& player,
+                                         const std::string& portal,
+                                         std::string& out_error_message)
+{
+    out_error_message.clear();
+
+    const entt::entity start_spot = findPlayerStart(player, portal);
+    if (m_world && m_world->registry.valid(start_spot) &&
+        m_world->registry.all_of<PlayerStartComponent, TransformComponent>(start_spot))
+    {
+        player.start_spot = start_spot;
+        syncPlayerEntryToEcs(player);
+        return true;
+    }
+
+    out_error_message = "Could not find a starting spot";
+    return false;
 }
 
 bool GameModeBase::playerCanRestart(const PlayerControllerEntry& player) const
@@ -342,6 +418,14 @@ void GameModeBase::restartPlayer(PlayerControllerEntry& player)
         return;
     }
 
+    if (m_world && m_world->registry.valid(player.start_spot) &&
+        m_world->registry.all_of<TransformComponent>(player.start_spot))
+    {
+        LOG_ENGINE_WARN("RestartPlayer: Player start not found, using last start spot");
+        restartPlayerAtPlayerStart(player, player.start_spot);
+        return;
+    }
+
     TransformComponent fallback_spawn;
     restartPlayerAtTransform(player, fallback_spawn);
 }
@@ -356,9 +440,17 @@ void GameModeBase::restartPlayerAtPlayerStart(PlayerControllerEntry& player, ent
         return;
     }
 
-    initStartSpot(start_spot, player);
-    const TransformComponent& start_transform = m_world->registry.get<TransformComponent>(start_spot);
-    restartPlayerAtTransform(player, start_transform);
+    player.start_spot = start_spot;
+    player.pawn = spawnDefaultPawnFor(player, start_spot);
+    if (m_world && m_world->registry.valid(player.pawn))
+    {
+        initStartSpot(start_spot, player);
+        setPlayerDefaults(player.pawn);
+        finishRestartPlayer(player);
+        return;
+    }
+
+    failedToRestartPlayer(player);
 }
 
 void GameModeBase::restartPlayerAtTransform(PlayerControllerEntry& player, const TransformComponent& spawn_transform)
@@ -468,6 +560,8 @@ void GameModeBase::finishRestartPlayer(PlayerControllerEntry& player)
         m_world->world_camera.position = transform.position;
         m_world->world_camera.rotation = transform.rotation;
     }
+
+    onRestartPlayer(player);
 }
 
 void GameModeBase::failedToRestartPlayer(PlayerControllerEntry& player)
@@ -489,7 +583,7 @@ void GameModeBase::setPlayerDefaults(entt::entity player_pawn)
 float GameModeBase::getPlayerRespawnDelay(uint16_t player_id) const
 {
     (void)player_id;
-    return 0.0f;
+    return 1.0f;
 }
 
 int32_t GameModeBase::getNumPlayers() const
@@ -616,6 +710,7 @@ void GameModeBase::syncGameModeComponent()
     component.class_name = getClassName();
     component.map_name = m_map_name;
     component.options = m_options_string;
+    component.default_player_name = m_default_player_name;
     component.authority = true;
     component.pauseable = m_pauseable;
     component.paused = m_paused;
@@ -654,8 +749,27 @@ void GameModeBase::syncPlayerEntryToEcs(PlayerControllerEntry& player)
     controller_component.player_state = player.player_state_entity;
     controller_component.pawn = player.pawn;
     controller_component.freecam = player.freecam;
+    controller_component.start_spot = player.start_spot;
+    controller_component.portal = player.portal;
     controller_component.spectator = player.spectator;
     controller_component.local = true;
+}
+
+void GameModeBase::onPostLogin(PlayerControllerEntry& new_player)
+{
+    (void)new_player;
+}
+
+void GameModeBase::onChangeName(PlayerControllerEntry& player, const std::string& new_name, bool name_change)
+{
+    (void)player;
+    (void)new_name;
+    (void)name_change;
+}
+
+void GameModeBase::onRestartPlayer(PlayerControllerEntry& player)
+{
+    (void)player;
 }
 
 void GameModeBase::destroyPlayerEntryEcs(PlayerControllerEntry& player)

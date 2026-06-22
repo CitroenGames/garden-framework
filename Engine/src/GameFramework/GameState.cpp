@@ -68,7 +68,7 @@ void GameState::setMatchState(const std::string& new_state)
 
     m_previous_match_state = m_match_state;
     m_match_state = new_state;
-    onMatchStateSet();
+    onRepMatchState();
     syncGameStateComponent();
 }
 
@@ -77,8 +77,18 @@ void GameState::defaultTimer()
     if (isMatchInProgress())
     {
         ++m_elapsed_time;
+        onRepElapsedTime();
         syncGameStateComponent();
     }
+}
+
+void GameState::onRepMatchState()
+{
+    onMatchStateSet();
+}
+
+void GameState::onRepElapsedTime()
+{
 }
 
 void GameState::onMatchStateSet()

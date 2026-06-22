@@ -71,7 +71,7 @@ protected:
     std::vector<PlayerStatePtr> m_player_array;
     bool m_has_begun_play = false;
     double m_server_world_time_seconds = 0.0;
-    float m_server_time_update_frequency = 0.5f;
+    float m_server_time_update_frequency = 0.1f;
     float m_server_time_update_accumulator = 0.0f;
 };
 }

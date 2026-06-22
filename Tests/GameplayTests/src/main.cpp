@@ -50,6 +50,49 @@ public:
     const char* getClassName() const override { return "TestDefaultGameState"; }
 };
 
+class HookedGameMode : public GameFramework::GameMode
+{
+public:
+    const char* getClassName() const override { return "HookedGameMode"; }
+
+    entt::entity spawnDefaultPawnFor(GameFramework::PlayerControllerEntry& player,
+                                     entt::entity start_spot) override
+    {
+        ++spawn_default_pawn_for_count;
+        return GameFramework::GameMode::spawnDefaultPawnFor(player, start_spot);
+    }
+
+    int post_login_count = 0;
+    int change_name_count = 0;
+    int restart_player_count = 0;
+    int spawn_default_pawn_for_count = 0;
+    bool restarted_after_post_login = false;
+
+protected:
+    void onPostLogin(GameFramework::PlayerControllerEntry& new_player) override
+    {
+        (void)new_player;
+        ++post_login_count;
+    }
+
+    void onChangeName(GameFramework::PlayerControllerEntry& player,
+                      const std::string& new_name,
+                      bool name_change) override
+    {
+        (void)player;
+        (void)new_name;
+        (void)name_change;
+        ++change_name_count;
+    }
+
+    void onRestartPlayer(GameFramework::PlayerControllerEntry& player) override
+    {
+        (void)player;
+        restarted_after_post_login = post_login_count > 0;
+        ++restart_player_count;
+    }
+};
+
 bool testPlayerStartReflectionRegistered()
 {
     const std::string name = "player start component is reflected";
@@ -62,6 +105,115 @@ bool testPlayerStartReflectionRegistered()
         return fail(name, "PlayerStartComponent was not registered");
     if (desc->display_name != "Player Start")
         return fail(name, "unexpected display name");
+
+    return pass(name);
+}
+
+bool testGameModeUsesPortalPlayerStart()
+{
+    const std::string name = "game mode uses portal player start";
+
+    world game_world;
+
+    entt::entity start_a = game_world.registry.create();
+    game_world.registry.emplace<TagComponent>(start_a, "StartA");
+    game_world.registry.emplace<TransformComponent>(start_a, -5.0f, 0.0f, 0.0f);
+    game_world.registry.emplace<PlayerStartComponent>(start_a).tag = "A";
+
+    entt::entity start_b = game_world.registry.create();
+    game_world.registry.emplace<TagComponent>(start_b, "StartB");
+    game_world.registry.emplace<TransformComponent>(start_b, 42.0f, 3.0f, 7.0f);
+    game_world.registry.emplace<PlayerStartComponent>(start_b).tag = "B";
+
+    auto mode = std::make_unique<GameFramework::GameMode>();
+    GameFramework::GameMode* mode_ptr = mode.get();
+    game_world.setAuthorityGameMode(std::move(mode));
+
+    std::string error;
+    mode_ptr->initGame(game_world, "PortalMap", "", error);
+    if (!error.empty())
+        return fail(name, "initGame returned error: " + error);
+
+    GameFramework::PlayerLoginOptions login;
+    login.player_id = 9;
+    login.player_name = "PortalUser";
+    login.portal = "B";
+    GameFramework::PlayerControllerEntry* player = mode_ptr->createLocalPlayer(login, error);
+    if (!player || !error.empty())
+        return fail(name, "local player login failed: " + error);
+    if (player->start_spot != start_b)
+        return fail(name, "portal did not assign the matching PlayerStart");
+
+    mode_ptr->startPlay();
+
+    if (!game_world.registry.valid(player->pawn))
+        return fail(name, "portal player did not spawn");
+
+    const auto& transform = game_world.registry.get<TransformComponent>(player->pawn);
+    if (!approxVec3(transform.position, glm::vec3(42.0f, 3.0f, 7.0f)))
+        return fail(name, "portal player did not spawn at tagged PlayerStart");
+
+    const auto* controller_component =
+        game_world.registry.try_get<GameFramework::PlayerControllerComponent>(player->controller_entity);
+    if (!controller_component ||
+        controller_component->start_spot != start_b ||
+        controller_component->portal != "B")
+    {
+        return fail(name, "portal start spot was not mirrored to the PlayerController component");
+    }
+
+    return pass(name);
+}
+
+bool testGameModeUnrealStyleHooks()
+{
+    const std::string name = "game mode unreal style hooks";
+
+    world game_world;
+
+    entt::entity start = game_world.registry.create();
+    game_world.registry.emplace<TagComponent>(start, "HookStart");
+    game_world.registry.emplace<TransformComponent>(start, 1.0f, 2.0f, 3.0f);
+    game_world.registry.emplace<PlayerStartComponent>(start);
+
+    auto mode = std::make_unique<HookedGameMode>();
+    HookedGameMode* mode_ptr = mode.get();
+    game_world.setAuthorityGameMode(std::move(mode));
+
+    std::string error;
+    mode_ptr->initGame(game_world, "HookMap", "", error);
+    if (!error.empty())
+        return fail(name, "initGame returned error: " + error);
+
+    mode_ptr->setDefaultPlayerName("Hero");
+
+    GameFramework::PlayerLoginOptions login;
+    login.player_id = 5;
+    GameFramework::PlayerControllerEntry* player = mode_ptr->createLocalPlayer(login, error);
+    if (!player || !error.empty())
+        return fail(name, "local player login failed: " + error);
+
+    if (!player->player_state || player->player_state->player_name != "Hero 5")
+        return fail(name, "default player name was not applied through ChangeName");
+    if (mode_ptr->change_name_count != 1)
+        return fail(name, "onChangeName was not called");
+    if (mode_ptr->post_login_count != 1)
+        return fail(name, "onPostLogin was not called");
+    if (mode_ptr->restart_player_count != 0)
+        return fail(name, "player restarted before match start");
+
+    mode_ptr->startPlay();
+
+    if (mode_ptr->spawn_default_pawn_for_count != 1)
+        return fail(name, "RestartPlayerAtPlayerStart did not use spawnDefaultPawnFor");
+    if (mode_ptr->restart_player_count != 1 || !mode_ptr->restarted_after_post_login)
+        return fail(name, "onRestartPlayer was not called after onPostLogin");
+
+    entt::entity mode_entity = GameFramework::getGameModeEntity(game_world.registry);
+    const auto& mode_component =
+        game_world.registry.get<GameFramework::GameModeComponent>(mode_entity);
+    if (mode_component.default_player_name != "Hero")
+        return fail(name, "default player name was not mirrored to GameMode component");
 
     return pass(name);
 }
@@ -370,6 +522,8 @@ int main()
     bool ok = true;
     ok = testPlayerStartReflectionRegistered() && ok;
     ok = testGameModeRegistryCreatesBuiltins() && ok;
+    ok = testGameModeUsesPortalPlayerStart() && ok;
+    ok = testGameModeUnrealStyleHooks() && ok;
     ok = testGameModeSpawnsAtPlayerStart() && ok;
     ok = testDelayedStartWaitsForManualMatchStart() && ok;
     ok = testLevelMetadataAppliesGameplaySettings() && ok;

@@ -66,6 +66,6 @@ protected:
     bool m_delayed_start = false;
     int32_t m_num_bots = 0;
     int32_t m_num_travelling_players = 0;
-    float m_min_respawn_delay = 0.0f;
+    float m_min_respawn_delay = 1.0f;
 };
 }

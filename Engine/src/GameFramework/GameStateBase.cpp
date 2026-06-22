@@ -138,7 +138,7 @@ float GameStateBase::getPlayerStartTime(uint16_t player_id) const
 
 float GameStateBase::getPlayerRespawnDelay(uint16_t player_id) const
 {
-    return m_authority_game_mode ? m_authority_game_mode->getPlayerRespawnDelay(player_id) : 0.0f;
+    return m_authority_game_mode ? m_authority_game_mode->getPlayerRespawnDelay(player_id) : 1.0f;
 }
 
 void GameStateBase::setServerWorldTimeSecondsUpdateFrequency(float frequency)
