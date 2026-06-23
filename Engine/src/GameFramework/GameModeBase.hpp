@@ -138,6 +138,7 @@ public:
 
 protected:
     virtual void onPostLogin(PlayerControllerEntry& new_player);
+    virtual void onLogout(PlayerControllerEntry& exiting_player);
     virtual void onChangeName(PlayerControllerEntry& player, const std::string& new_name, bool name_change);
     virtual void onRestartPlayer(PlayerControllerEntry& player);
     entt::entity findExistingPawnFor(const PlayerControllerEntry& player) const;

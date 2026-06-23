@@ -85,6 +85,7 @@ void GameState::defaultTimer()
 void GameState::onRepMatchState()
 {
     onMatchStateSet();
+    m_previous_match_state = m_match_state;
 }
 
 void GameState::onRepElapsedTime()

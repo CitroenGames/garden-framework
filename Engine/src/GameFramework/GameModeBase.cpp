@@ -204,6 +204,7 @@ void GameModeBase::logout(uint16_t player_id)
         it->player_id,
         it->player_state ? it->player_state->player_name : std::string{}
     });
+    onLogout(*it);
     detachPlayerStateFromGameState(it->player_id);
     destroyPlayerEntryEcs(*it);
     m_players.erase(it);
@@ -758,6 +759,11 @@ void GameModeBase::syncPlayerEntryToEcs(PlayerControllerEntry& player)
 void GameModeBase::onPostLogin(PlayerControllerEntry& new_player)
 {
     (void)new_player;
+}
+
+void GameModeBase::onLogout(PlayerControllerEntry& exiting_player)
+{
+    (void)exiting_player;
 }
 
 void GameModeBase::onChangeName(PlayerControllerEntry& player, const std::string& new_name, bool name_change)

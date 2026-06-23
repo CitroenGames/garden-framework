@@ -12,6 +12,7 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <vector>
 #include <glm/glm.hpp>
 
 namespace
@@ -63,16 +64,25 @@ public:
     }
 
     int post_login_count = 0;
+    int logout_count = 0;
     int change_name_count = 0;
     int restart_player_count = 0;
     int spawn_default_pawn_for_count = 0;
+    uint16_t logout_player_id = 0;
     bool restarted_after_post_login = false;
+    std::vector<std::string> set_match_state_events;
 
 protected:
     void onPostLogin(GameFramework::PlayerControllerEntry& new_player) override
     {
         (void)new_player;
         ++post_login_count;
+    }
+
+    void onLogout(GameFramework::PlayerControllerEntry& exiting_player) override
+    {
+        logout_player_id = exiting_player.player_id;
+        ++logout_count;
     }
 
     void onChangeName(GameFramework::PlayerControllerEntry& player,
@@ -90,6 +100,33 @@ protected:
         (void)player;
         restarted_after_post_login = post_login_count > 0;
         ++restart_player_count;
+    }
+
+    void onSetMatchState(const std::string& new_state) override
+    {
+        set_match_state_events.push_back(new_state);
+    }
+};
+
+class RecordingGameState : public GameFramework::GameState
+{
+public:
+    const char* getClassName() const override { return "RecordingGameState"; }
+
+    std::string previous_seen_while_waiting;
+    std::string previous_seen_while_starting;
+
+protected:
+    void handleMatchIsWaitingToStart() override
+    {
+        previous_seen_while_waiting = getPreviousMatchState();
+        GameFramework::GameState::handleMatchIsWaitingToStart();
+    }
+
+    void handleMatchHasStarted() override
+    {
+        previous_seen_while_starting = getPreviousMatchState();
+        GameFramework::GameState::handleMatchHasStarted();
     }
 };
 
@@ -208,12 +245,25 @@ bool testGameModeUnrealStyleHooks()
         return fail(name, "RestartPlayerAtPlayerStart did not use spawnDefaultPawnFor");
     if (mode_ptr->restart_player_count != 1 || !mode_ptr->restarted_after_post_login)
         return fail(name, "onRestartPlayer was not called after onPostLogin");
+    if (mode_ptr->set_match_state_events.size() != 2 ||
+        mode_ptr->set_match_state_events[0] != GameFramework::MatchState::WaitingToStart ||
+        mode_ptr->set_match_state_events[1] != GameFramework::MatchState::InProgress)
+    {
+        return fail(name, "onSetMatchState did not run after match state transitions");
+    }
 
     entt::entity mode_entity = GameFramework::getGameModeEntity(game_world.registry);
     const auto& mode_component =
         game_world.registry.get<GameFramework::GameModeComponent>(mode_entity);
     if (mode_component.default_player_name != "Hero")
         return fail(name, "default player name was not mirrored to GameMode component");
+
+    const uint16_t player_id = player->player_id;
+    mode_ptr->logout(player_id);
+    if (mode_ptr->logout_count != 1 || mode_ptr->logout_player_id != player_id)
+        return fail(name, "onLogout was not called before player cleanup");
+    if (!mode_ptr->getPlayers().empty())
+        return fail(name, "player was not removed after logout");
 
     return pass(name);
 }
@@ -359,16 +409,43 @@ bool testDelayedStartWaitsForManualMatchStart()
     auto* game_state = game_world.getGameStateAs<GameFramework::GameState>();
     if (!game_state)
         return fail(name, "GameState was not created");
-    if (game_state->hasBegunPlay())
-        return fail(name, "GameState began play before manual match start");
+    if (!game_state->hasBegunPlay())
+        return fail(name, "GameState did not begin play while waiting to start");
+    if (game_state->hasMatchStarted())
+        return fail(name, "GameState reported match started before manual match start");
 
     mode_ptr->startMatch();
     if (!mode_ptr->isMatchInProgress())
         return fail(name, "manual start did not put match in progress");
     if (!game_world.registry.valid(player->pawn))
         return fail(name, "manual start did not spawn a player pawn");
-    if (!game_state->hasBegunPlay())
-        return fail(name, "GameState did not begin play after manual match start");
+    if (!game_state->hasMatchStarted())
+        return fail(name, "GameState did not report match started after manual match start");
+
+    return pass(name);
+}
+
+bool testGameStateMatchStatePreviousBookkeeping()
+{
+    const std::string name = "game state match state previous bookkeeping";
+
+    world game_world;
+    auto state = std::make_unique<RecordingGameState>();
+    RecordingGameState* state_ptr = state.get();
+    game_world.setGameState(std::move(state));
+    state_ptr->initialize(&game_world);
+
+    state_ptr->setMatchState(GameFramework::MatchState::WaitingToStart);
+    if (state_ptr->previous_seen_while_waiting != GameFramework::MatchState::EnteringMap)
+        return fail(name, "WaitingToStart callback did not see EnteringMap as previous state");
+    if (state_ptr->getPreviousMatchState() != GameFramework::MatchState::WaitingToStart)
+        return fail(name, "PreviousMatchState was not advanced after WaitingToStart notification");
+
+    state_ptr->setMatchState(GameFramework::MatchState::InProgress);
+    if (state_ptr->previous_seen_while_starting != GameFramework::MatchState::WaitingToStart)
+        return fail(name, "InProgress callback did not see WaitingToStart as previous state");
+    if (state_ptr->getPreviousMatchState() != GameFramework::MatchState::InProgress)
+        return fail(name, "PreviousMatchState was not advanced after InProgress notification");
 
     return pass(name);
 }
@@ -526,6 +603,7 @@ int main()
     ok = testGameModeUnrealStyleHooks() && ok;
     ok = testGameModeSpawnsAtPlayerStart() && ok;
     ok = testDelayedStartWaitsForManualMatchStart() && ok;
+    ok = testGameStateMatchStatePreviousBookkeeping() && ok;
     ok = testLevelMetadataAppliesGameplaySettings() && ok;
     ok = testProjectDefaultsResolveGameplayClasses() && ok;
     ok = testClientWorldCreatesOnlyGameState() && ok;

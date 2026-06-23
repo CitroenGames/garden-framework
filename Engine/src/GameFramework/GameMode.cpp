@@ -188,6 +188,7 @@ void GameMode::setMatchState(const std::string& new_state)
     if (auto* state = dynamic_cast<GameState*>(m_game_state))
         state->setMatchState(m_match_state);
 
+    onSetMatchState(m_match_state);
     syncGameModeComponent();
     EventBus::get().queue(MatchStateChangedEvent{old_state, m_match_state});
 }
@@ -208,6 +209,8 @@ void GameMode::onMatchStateSet()
 
 void GameMode::handleMatchIsWaitingToStart()
 {
+    if (!readyToStartMatch() && m_game_state && !m_game_state->hasBegunPlay())
+        m_game_state->handleBeginPlay();
 }
 
 bool GameMode::readyToStartMatch() const
@@ -242,5 +245,10 @@ void GameMode::handleLeavingMap()
 
 void GameMode::handleMatchAborted()
 {
+}
+
+void GameMode::onSetMatchState(const std::string& new_state)
+{
+    (void)new_state;
 }
 }

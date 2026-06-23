@@ -24,7 +24,7 @@
 
 ## Overview
 
-Garden Framework is a game engine foundation with a multi-backend renderer, an Unreal-style editor, runtime game module loading, dedicated server support, and a full asset pipeline. It is focused on shipping practical game systems rather than being a renderer demo: ECS, physics, audio, animation, networking, navigation, editor tooling, templates, and build scripts live in one repo.
+Garden Framework is a game engine foundation with a multi-backend renderer, a full scene editor, runtime game module loading, dedicated server support, and a full asset pipeline. It is focused on shipping practical game systems rather than being a renderer demo: ECS, physics, audio, animation, networking, navigation, editor tooling, templates, and build scripts live in one repo.
 
 | Editor | Runtime |
 | :---: | :---: |
@@ -95,7 +95,7 @@ EngineCore.dll          EngineGraphics.dll
 
 **EngineGraphics** (`EngineGraphics.dll`) contains all rendering and UI code: the multi-backend render API (Vulkan, D3D12, Metal, headless factory), ImGui integration, RmlUi integration, and ImGuizmo gizmos. It exports symbols via `ENGINE_GRAPHICS_API` and links EngineCore, vk-bootstrap, VMA, Dear ImGui, ImGuizmo, and RmlUi.
 
-**Game** is the standalone client with a game loop, player controller, and game module loader. **Editor** is the Unreal-style level editor built on ImGui with dockable panels, Play-In-Editor, and gizmo manipulation. **Server** is a headless dedicated server that uses EngineCore without graphics dependencies for authoritative game simulation.
+**Game** is the standalone client with a game loop, player controller, and game module loader. **Editor** is the dockable level editor built on ImGui with Play-In-Editor and gizmo manipulation. **Server** is a headless dedicated server that uses EngineCore without graphics dependencies for authoritative game simulation.
 
 Game logic can be loaded at runtime via `GameModuleLoader`, which dynamically loads a shared library implementing the game's custom components, systems, and update loop.
 

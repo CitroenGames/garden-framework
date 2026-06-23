@@ -54,6 +54,7 @@ protected:
     void syncGameModeComponent() override;
     virtual void setMatchState(const std::string& new_state);
     virtual void onMatchStateSet();
+    virtual void onSetMatchState(const std::string& new_state);
     virtual void handleMatchIsWaitingToStart();
     virtual bool readyToStartMatch() const;
     virtual void handleMatchHasStarted();

@@ -36,7 +36,7 @@
 
 ### Engine Systems
 *   **Entity Component System (ECS)**: `entt`-based with transform, mesh, rigidbody, collider, audio source, animation, IK, input, camera, and prefab instance components.
-*   **Reflection System**: Macro-free C++ reflection with property registration, Unreal-style specifiers (EditAnywhere, VisibleAnywhere), automatic editor widget generation, and JSON serialization. Game modules register custom components at runtime.
+*   **Reflection System**: Macro-free C++ reflection with property registration, editor-facing specifiers (`EditAnywhere`, `VisibleAnywhere`), automatic editor widget generation, and JSON serialization. Game modules register custom components at runtime.
 *   **Physics**: Jolt Physics 5.5.0 with rigid bodies, capsule character controllers, raycasting, collision layers, and fixed-timestep simulation.
 *   **Audio**: miniaudio-based spatial audio system with 3D positional sound, audio groups (SFX, Music, Voice, UI), and per-group volume control.
 *   **Animation**: Skeletal animation with bone hierarchies, keyframe interpolation (SLERP), animation blending/crossfade, bone masks, animation layers, and glTF skin/animation loading. Skinned vertex shaders for all backends.

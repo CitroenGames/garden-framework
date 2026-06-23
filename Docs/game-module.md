@@ -112,7 +112,9 @@ host shuts down
 
 ## GameMode and GameState
 
-Garden mirrors Unreal's split in ENTT terms: `GameModeBase` exists only on authority worlds, while `GameStateBase` publishes shared state into singleton ECS components such as `GameStateComponent` and `PlayerStateComponent`.
+Garden uses an authority/shared-state split in ENTT terms: `GameModeBase` exists only on authority worlds, while `GameStateBase` publishes shared state into singleton ECS components such as `GameStateComponent` and `PlayerStateComponent`.
+
+`GameMode` adds match states (`EnteringMap`, `WaitingToStart`, `InProgress`, `WaitingPostMatch`, `LeavingMap`, `Aborted`). With delayed start enabled, a match can enter BeginPlay while still in `WaitingToStart`; gameplay start is tracked separately through `hasMatchStarted()`. Override hooks such as `onPostLogin`, `onLogout`, `onRestartPlayer`, and `onSetMatchState` for game-specific behavior.
 
 Selection order is URL option (`?game=MyMode`), level override in Level Settings, then `.garden` project defaults (`default_game_mode`, `default_game_state`). Register custom classes in `gardenRegisterComponents` before levels load:
 
