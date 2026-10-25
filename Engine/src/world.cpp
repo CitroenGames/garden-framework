@@ -116,6 +116,7 @@ void world::shutdown()
     clearRegistryStorage();
     simulation_ticks.reset();
     simulation_tick = 0;
+    simulation_time = 0.0;
 }
 
 void world::resetWorld()

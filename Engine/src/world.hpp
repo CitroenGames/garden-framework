@@ -25,6 +25,7 @@ private:
     std::unique_ptr<GameFramework::GameStateBase> game_state;
     Tick::FixedTickAccumulator simulation_ticks;
     uint32_t simulation_tick = 0;
+    double simulation_time = 0.0;
     bool gameplay_framework_initialized = false;
     bool gameplay_framework_started = false;
 
@@ -114,12 +115,25 @@ public:
         {
             physics_system->stepPhysics(registry);
             ++simulation_tick;
+            simulation_time += fixed_delta;
         }
 
         return steps;
     }
 
     uint32_t getSimulationTick() const { return simulation_tick; }
+    double getWorldTime() const { return simulation_time; }
+    float getFixedDelta() const { return fixed_delta; }
+    Tick::SimulationTickContext getTickContext(uint32_t substep_index, uint32_t substep_count) const
+    {
+        Tick::SimulationTickContext context;
+        context.tick_index = simulation_tick + substep_index;
+        context.substep_index = substep_index;
+        context.substep_count = substep_count;
+        context.fixed_delta = fixed_delta;
+        context.world_time = simulation_time + static_cast<double>(substep_index) * fixed_delta;
+        return context;
+    }
 
     float getPhysicsInterpolationAlpha() const { return simulation_ticks.getAlpha(); }
 
@@ -206,6 +220,7 @@ public:
         simulation_ticks.setFixedDelta(fixed_delta);
         simulation_ticks.reset();
         simulation_tick = 0;
+        simulation_time = 0.0;
         return true;
     }
 

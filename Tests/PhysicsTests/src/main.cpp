@@ -115,6 +115,87 @@ static bool testWorldSimulationTickTracksPhysicsSteps()
     return pass(name);
 }
 
+static bool testWorldTimeTracksPhysicsSteps()
+{
+    const std::string name = "world time tracks physics steps";
+    PhysicsSystemSettings settings;
+    settings.fixed_delta = 0.1f;
+    world w(settings);
+
+    if (!approx(static_cast<float>(w.getWorldTime()), 0.0f, 0.0001f))
+        return fail(name, "new world did not start at time zero");
+
+    w.step_physics(0.05f);
+    if (!approx(static_cast<float>(w.getWorldTime()), 0.0f, 0.0001f))
+        return fail(name, "partial delta advanced world time");
+
+    w.step_physics(0.25f);
+    if (w.getSimulationTick() != 3)
+        return fail(name, "simulation tick did not match consumed physics steps");
+    if (!approx(static_cast<float>(w.getWorldTime()), 0.3f, 0.001f))
+        return fail(name, "world time did not match consumed physics steps");
+
+    if (!w.configurePhysics(settings))
+        return fail(name, "pre-initialize physics reconfigure failed");
+    if (!approx(static_cast<float>(w.getWorldTime()), 0.0f, 0.0001f))
+        return fail(name, "physics reconfigure did not reset world time");
+
+    return pass(name);
+}
+
+static bool testFrameSplitKeepsDeterministicTickAndTime()
+{
+    const std::string name = "frame split keeps deterministic tick and time";
+    PhysicsSystemSettings settings;
+    settings.fixed_delta = 0.1f;
+
+    world single_call(settings);
+    world split_calls(settings);
+
+    single_call.step_physics(0.3f);
+    split_calls.step_physics(0.1f);
+    split_calls.step_physics(0.1f);
+    split_calls.step_physics(0.1f);
+
+    if (single_call.getSimulationTick() != split_calls.getSimulationTick())
+        return fail(name, "same total frame time produced different tick counts");
+    if (!approx(static_cast<float>(single_call.getWorldTime()),
+                static_cast<float>(split_calls.getWorldTime()), 0.0001f))
+        return fail(name, "same total frame time produced different world times");
+    if (single_call.getSimulationTick() != 3)
+        return fail(name, "expected three fixed steps for 0.3s at 10Hz");
+
+    return pass(name);
+}
+
+static bool testTickContextNamesSubsteps()
+{
+    const std::string name = "tick context names substeps";
+    PhysicsSystemSettings settings;
+    settings.fixed_delta = 0.1f;
+    world w(settings);
+
+    Tick::SimulationTickContext first = w.getTickContext(0, 3);
+    Tick::SimulationTickContext second = w.getTickContext(1, 3);
+    Tick::SimulationTickContext third = w.getTickContext(2, 3);
+
+    if (first.tick_index + 1 != second.tick_index || second.tick_index + 1 != third.tick_index)
+        return fail(name, "substep tick indices are not contiguous");
+    if (!approx(first.fixed_delta, 0.1f, 0.0001f))
+        return fail(name, "tick context did not carry the fixed delta");
+    if (!approx(static_cast<float>(third.world_time - first.world_time), 0.2f, 0.0001f))
+        return fail(name, "substep world times are not spaced by the fixed delta");
+
+    w.step_physics(0.3f);
+    Tick::SimulationTickContext next = w.getTickContext(0, 1);
+    if (next.tick_index != w.getSimulationTick())
+        return fail(name, "tick context does not continue from the simulation tick");
+    if (!approx(static_cast<float>(next.world_time), static_cast<float>(w.getWorldTime()), 0.0001f))
+        return fail(name, "tick context world time does not match the simulation clock");
+
+    return pass(name);
+}
+
 static void appendLe16(std::vector<std::uint8_t>& out, std::uint16_t value)
 {
     out.push_back(static_cast<std::uint8_t>(value & 0xff));
@@ -1117,6 +1198,12 @@ int main()
     ok = testFixedTickAccumulatorCapsCatchUp() && ok;
     run("world simulation tick tracks physics steps");
     ok = testWorldSimulationTickTracksPhysicsSteps() && ok;
+    run("world time tracks physics steps");
+    ok = testWorldTimeTracksPhysicsSteps() && ok;
+    run("frame split keeps deterministic tick and time");
+    ok = testFrameSplitKeepsDeterministicTickAndTime() && ok;
+    run("tick context names substeps");
+    ok = testTickContextNamesSubsteps() && ok;
     run("source movement ground acceleration");
     ok = testSourceGroundAcceleration() && ok;
     run("source movement ground friction");

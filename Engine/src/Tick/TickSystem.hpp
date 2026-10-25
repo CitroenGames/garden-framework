@@ -6,6 +6,22 @@
 
 namespace Tick
 {
+    // Deterministic per-substep description, modelled on Ferrite's
+    // SimulationTickContext notes (see OpenStrike docs/simulation_tick_context.md):
+    // every fixed step names the world tick it advances, its position inside
+    // the current frame, the fixed delta, and the simulation time at the
+    // start of the step. Gameplay code should read this instead of the
+    // variable frame delta so the same frame-time split always replays the
+    // same substep sequence.
+    struct SimulationTickContext
+    {
+        uint32_t tick_index = 0;      // world simulation tick before this step
+        uint32_t substep_index = 0;   // position of this step inside the frame
+        uint32_t substep_count = 0;   // total fixed steps consumed this frame
+        float fixed_delta = 1.0f / 60.0f;
+        double world_time = 0.0;      // simulation time at the start of the step
+    };
+
     class FixedTickAccumulator
     {
     public:

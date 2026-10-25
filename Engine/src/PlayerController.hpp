@@ -316,7 +316,7 @@ private:
         tuning.max_speed = pc.speed;
         tuning.jump_velocity = pc.jump_force;
         tuning.gravity = game_world->getGravity() * 9.81f;
-        tuning.fixed_delta = delta;
+        tuning.fixed_delta = game_world->fixed_delta;
         tuning.stop_speed = std::max(pc.speed, 0.0f) * 0.25f;
         tuning.air_wish_speed_cap = std::max(pc.speed, 0.0f) * (30.0f / 320.0f);
 
