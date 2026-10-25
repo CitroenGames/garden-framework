@@ -1,83 +1,8 @@
 #include "ToolbarPanel.hpp"
 #include "EditorState.hpp"
-#include "NetworkPIESettings.hpp"
 #include "EditorIcons.hpp"
-#include "XR/OpenXRSystem.hpp"
 #include "imgui.h"
 #include "imgui_internal.h"
-
-#include <cstdio>
-
-namespace
-{
-    const char* launchModeLabel(PIELaunchMode mode)
-    {
-        switch (mode)
-        {
-        case PIELaunchMode::SelectedViewport: return "Selected Viewport";
-        case PIELaunchMode::NewEditorWindow:  return "New Editor Window (PIE)";
-        case PIELaunchMode::VRPreview:        return "VR Preview";
-        case PIELaunchMode::StandaloneGame:   return "Standalone Game";
-        case PIELaunchMode::Simulate:         return "Simulate";
-        }
-        return "Selected Viewport";
-    }
-
-    const char* launchModeIcon(PIELaunchMode mode)
-    {
-        switch (mode)
-        {
-        case PIELaunchMode::SelectedViewport: return ICON_FA_DISPLAY;
-        case PIELaunchMode::NewEditorWindow:  return ICON_FA_DISPLAY;
-        case PIELaunchMode::VRPreview:        return ICON_FA_VR_CARDBOARD;
-        case PIELaunchMode::StandaloneGame:   return ICON_FA_PLAY;
-        case PIELaunchMode::Simulate:         return ICON_FA_FORWARD;
-        }
-        return ICON_FA_PLAY;
-    }
-
-    void buildPlayLabel(const EditorState& state, char* buffer, size_t buffer_size)
-    {
-        if (buffer_size == 0)
-            return;
-
-        switch (state.pie_launch_mode)
-        {
-        case PIELaunchMode::SelectedViewport:
-            if (state.network_pie.net_mode != PIENetMode::Standalone && state.network_pie.num_players > 1)
-            {
-                const char* mode_short = (state.network_pie.net_mode == PIENetMode::ListenServer)
-                    ? "Listen"
-                    : "Dedicated";
-                std::snprintf(buffer, buffer_size, ICON_FA_PLAY " %dP %s", state.network_pie.num_players, mode_short);
-            }
-            else if (state.network_pie.net_mode != PIENetMode::Standalone)
-            {
-                const char* mode_short = (state.network_pie.net_mode == PIENetMode::ListenServer)
-                    ? "Listen"
-                    : "Dedicated";
-                std::snprintf(buffer, buffer_size, ICON_FA_PLAY " %s", mode_short);
-            }
-            else
-            {
-                std::snprintf(buffer, buffer_size, "%s", ICON_FA_PLAY);
-            }
-            break;
-        case PIELaunchMode::NewEditorWindow:
-            std::snprintf(buffer, buffer_size, ICON_FA_DISPLAY " Window");
-            break;
-        case PIELaunchMode::VRPreview:
-            std::snprintf(buffer, buffer_size, ICON_FA_VR_CARDBOARD " VR");
-            break;
-        case PIELaunchMode::StandaloneGame:
-            std::snprintf(buffer, buffer_size, ICON_FA_PLAY " Standalone");
-            break;
-        case PIELaunchMode::Simulate:
-            std::snprintf(buffer, buffer_size, ICON_FA_FORWARD " Simulate");
-            break;
-        }
-    }
-}
 
 void ToolbarPanel::draw(EditorState& state)
 {
@@ -89,6 +14,14 @@ void ToolbarPanel::draw(EditorState& state)
 
 void ToolbarPanel::drawContent(EditorState& state)
 {
+    // NOTE: Play/Pause/Stop/Eject live solely in the RML shell header
+    // (assets/Editor/RML/EditorShell.rml #play-group). This strip holds only
+    // viewport transform tools so there is exactly one Play button.
+    // Play callbacks on ToolbarCallbacks are retained for API compatibility
+    // but are no longer driven from here.
+    (void)callbacks;
+    (void)has_game_module;
+
     // --- Transform mode buttons (disabled during play) ---
     bool editing = !state.isSimulationActive();
     ImDrawList* draw_list = ImGui::GetWindowDrawList();
@@ -98,9 +31,9 @@ void ToolbarPanel::drawContent(EditorState& state)
         bool active = (state.transform_mode == mode);
         if (active)
         {
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.40f, 0.70f, 1.0f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.26f, 0.48f, 0.80f, 1.0f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.15f, 0.35f, 0.65f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.10f, 0.48f, 0.45f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.14f, 0.58f, 0.54f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.08f, 0.38f, 0.36f, 1.0f));
         }
 
         if (!editing)
@@ -113,7 +46,7 @@ void ToolbarPanel::drawContent(EditorState& state)
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
             ImGui::SetTooltip("%s", tooltip);
 
-        // Active underline indicator
+        // Active underline indicator (logo teal)
         if (active)
         {
             ImVec2 btn_min = ImGui::GetItemRectMin();
@@ -121,7 +54,7 @@ void ToolbarPanel::drawContent(EditorState& state)
             draw_list->AddRectFilled(
                 ImVec2(btn_min.x, btn_max.y - 2.0f),
                 ImVec2(btn_max.x, btn_max.y),
-                IM_COL32(77, 140, 255, 255));
+                IM_COL32(42, 161, 152, 255));
         }
 
         if (!editing)
@@ -205,295 +138,6 @@ void ToolbarPanel::drawContent(EditorState& state)
 
     if (!editing)
         ImGui::EndDisabled();
-
-    // Custom vertical separator
-    ImGui::SameLine();
-    {
-        ImVec2 p = ImGui::GetCursorScreenPos();
-        float h = ImGui::GetFrameHeight();
-        draw_list->AddLine(ImVec2(p.x + 4, p.y + 2), ImVec2(p.x + 4, p.y + h - 2),
-                           IM_COL32(42, 42, 42, 200), 1.0f);
-        ImGui::Dummy(ImVec2(10, h));
-    }
-    ImGui::SameLine();
-
-    // --- Centered Play / Pause / Stop / Eject ---
-    {
-        ImGuiStyle& s = ImGui::GetStyle();
-        float play_group_width = 0.0f;
-        float btn_h = 32.0f;
-        switch (state.play_mode)
-        {
-        case PlayMode::Editing:
-        {
-            float arrow_w = ImGui::GetFrameHeight();
-            char buf[96];
-            buildPlayLabel(state, buf, sizeof(buf));
-            play_group_width = ImGui::CalcTextSize(buf).x + s.FramePadding.x * 2.0f + arrow_w;
-            break;
-        }
-        case PlayMode::Playing:
-            if (state.external_pie_active)
-            {
-                play_group_width = ImGui::CalcTextSize(ICON_FA_DISPLAY " External").x
-                                 + ImGui::CalcTextSize(ICON_FA_STOP).x
-                                 + s.FramePadding.x * 4.0f + s.ItemSpacing.x;
-            }
-            else
-            {
-                play_group_width = ImGui::CalcTextSize(ICON_FA_PAUSE).x + ImGui::CalcTextSize(ICON_FA_STOP).x
-                                 + ImGui::CalcTextSize(ICON_FA_EJECT " F8").x
-                                 + s.FramePadding.x * 6.0f + s.ItemSpacing.x * 2.0f;
-            }
-            break;
-        case PlayMode::Paused:
-            play_group_width = ImGui::CalcTextSize(ICON_FA_PLAY).x + ImGui::CalcTextSize(ICON_FA_STOP).x
-                             + s.FramePadding.x * 4.0f + s.ItemSpacing.x;
-            break;
-        case PlayMode::Ejected:
-            play_group_width = ImGui::CalcTextSize(ICON_FA_ARROW_ROTATE_LEFT " F8").x + ImGui::CalcTextSize(ICON_FA_STOP).x
-                             + s.FramePadding.x * 4.0f + s.ItemSpacing.x;
-            break;
-        }
-        float window_width = ImGui::GetWindowWidth();
-        float center_x = (window_width - play_group_width) * 0.5f;
-        float current_x = ImGui::GetCursorPosX();
-        if (center_x > current_x)
-            ImGui::SetCursorPosX(center_x);
-    }
-
-    switch (state.play_mode)
-    {
-    case PlayMode::Editing:
-    {
-        char play_buf[96];
-        buildPlayLabel(state, play_buf, sizeof(play_buf));
-
-        // Green Play button
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.1f, 0.6f, 0.1f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.2f, 0.7f, 0.2f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.0f, 0.5f, 0.0f, 1.0f));
-        if (ImGui::Button(play_buf))
-            if (callbacks.on_play) callbacks.on_play();
-        ImGui::PopStyleColor(3);
-
-        // Small dropdown arrow for UE-style play settings
-        ImGui::SameLine(0, 0);
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.08f, 0.50f, 0.08f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.15f, 0.60f, 0.15f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.0f, 0.45f, 0.0f, 1.0f));
-        if (ImGui::ArrowButton("##pie_settings", ImGuiDir_Down))
-            ImGui::OpenPopup("PIEPlaySettings");
-        ImGui::PopStyleColor(3);
-
-        if (ImGui::BeginPopup("PIEPlaySettings"))
-        {
-            ImGui::TextDisabled("Modes");
-            ImGui::Separator();
-
-            auto modeItem = [&](PIELaunchMode mode)
-            {
-                char label[96];
-                std::snprintf(label, sizeof(label), "%s  %s", launchModeIcon(mode), launchModeLabel(mode));
-                if (ImGui::MenuItem(label, nullptr, state.pie_launch_mode == mode))
-                    state.pie_launch_mode = mode;
-            };
-
-            modeItem(PIELaunchMode::SelectedViewport);
-            modeItem(PIELaunchMode::NewEditorWindow);
-            modeItem(PIELaunchMode::VRPreview);
-            modeItem(PIELaunchMode::StandaloneGame);
-            modeItem(PIELaunchMode::Simulate);
-
-            ImGui::Spacing();
-            ImGui::TextDisabled("Quick Launch");
-            ImGui::Separator();
-
-            const XR::OpenXRStatus& xr = XR::OpenXRSystem::get().getStatus();
-            char quest_label[160];
-            std::snprintf(quest_label, sizeof(quest_label), ICON_FA_VR_CARDBOARD "  Meta Quest Link%s",
-                xr.hmd_available && !xr.system_name.empty() ? " (Ready)" : "");
-            if (ImGui::MenuItem(quest_label, nullptr, false))
-            {
-                state.pie_launch_mode = PIELaunchMode::VRPreview;
-                if (callbacks.on_play)
-                    callbacks.on_play();
-            }
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
-                ImGui::SetTooltip("Launch VR Preview through the active PC OpenXR runtime.");
-
-            if (ImGui::MenuItem(ICON_FA_ARROW_ROTATE_LEFT "  Refresh OpenXR Runtime"))
-            {
-                XR::OpenXRSystem::get().shutdown();
-                XR::OpenXRSystem::get().initialize();
-            }
-
-            if (!xr.runtime_name.empty())
-            {
-                ImGui::TextDisabled("Runtime: %s", xr.runtime_name.c_str());
-                ImGui::TextDisabled("HMD: %s", xr.system_name.empty() ? "Unavailable" : xr.system_name.c_str());
-            }
-            else
-            {
-                ImGui::TextDisabled("Runtime: not initialized");
-            }
-            if (!xr.last_error.empty())
-                ImGui::TextWrapped("%s", xr.last_error.c_str());
-
-            ImGui::Spacing();
-            ImGui::TextDisabled("Spawn Player At");
-            ImGui::Separator();
-
-            bool current_camera = state.pie_spawn_location == PIESpawnLocation::CurrentCameraLocation;
-            if (ImGui::MenuItem(ICON_FA_CAMERA "  Current Camera Location", nullptr, current_camera))
-                state.pie_spawn_location = PIESpawnLocation::CurrentCameraLocation;
-
-            bool default_start = state.pie_spawn_location == PIESpawnLocation::DefaultPlayerStart;
-            if (ImGui::MenuItem(ICON_FA_USER "  Default Player Start", nullptr, default_start))
-                state.pie_spawn_location = PIESpawnLocation::DefaultPlayerStart;
-
-            ImGui::Spacing();
-            ImGui::TextDisabled("Multiplayer Options");
-            ImGui::Separator();
-
-            const char* mode_names[] = { "Standalone", "Listen Server", "Dedicated Server" };
-            int mode_idx = static_cast<int>(state.network_pie.net_mode);
-            ImGui::SetNextItemWidth(160.0f);
-            if (ImGui::Combo("Net Mode", &mode_idx, mode_names, 3))
-                state.network_pie.net_mode = static_cast<PIENetMode>(mode_idx);
-
-            bool is_network = (state.network_pie.net_mode != PIENetMode::Standalone);
-
-            if (!is_network) ImGui::BeginDisabled();
-
-            const char* run_names[] = { "In Editor", "Separate Windows" };
-            int run_idx = static_cast<int>(state.network_pie.run_mode);
-            ImGui::SetNextItemWidth(160.0f);
-            if (ImGui::Combo("Run Mode", &run_idx, run_names, 2))
-                state.network_pie.run_mode = static_cast<PIERunMode>(run_idx);
-
-            ImGui::SetNextItemWidth(160.0f);
-            ImGui::SliderInt("Players", &state.network_pie.num_players, 1, 4);
-
-            int port_val = static_cast<int>(state.network_pie.server_port);
-            ImGui::SetNextItemWidth(160.0f);
-            if (ImGui::InputInt("Port", &port_val, 1, 100))
-            {
-                if (port_val < 1024) port_val = 1024;
-                if (port_val > 65535) port_val = 65535;
-                state.network_pie.server_port = static_cast<uint16_t>(port_val);
-            }
-
-            if (!is_network) ImGui::EndDisabled();
-
-            if (!has_game_module && is_network)
-            {
-                ImGui::Spacing();
-                ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.2f, 1.0f),
-                    ICON_FA_TRIANGLE_EXCLAMATION " No game module loaded.\nNetwork modes require a game DLL.");
-            }
-
-            ImGui::EndPopup();
-        }
-
-        break;
-    }
-    case PlayMode::Playing:
-    {
-        if (state.external_pie_active)
-        {
-            ImGui::TextUnformatted(ICON_FA_DISPLAY " External");
-            ImGui::SameLine();
-
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.1f, 0.1f, 1.0f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.8f, 0.2f, 0.2f, 1.0f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.6f, 0.0f, 0.0f, 1.0f));
-            if (ImGui::Button(ICON_FA_STOP))
-                if (callbacks.on_stop) callbacks.on_stop();
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("Stop external play session");
-            ImGui::PopStyleColor(3);
-            break;
-        }
-
-        // Yellow Pause button
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.7f, 0.0f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.9f, 0.8f, 0.1f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.7f, 0.6f, 0.0f, 1.0f));
-        if (ImGui::Button(ICON_FA_PAUSE))
-            if (callbacks.on_pause) callbacks.on_pause();
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("Pause");
-        ImGui::PopStyleColor(3);
-
-        ImGui::SameLine();
-
-        // Red Stop button
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.1f, 0.1f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.8f, 0.2f, 0.2f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.6f, 0.0f, 0.0f, 1.0f));
-        if (ImGui::Button(ICON_FA_STOP))
-            if (callbacks.on_stop) callbacks.on_stop();
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("Stop");
-        ImGui::PopStyleColor(3);
-
-        ImGui::SameLine();
-
-        // Blue Eject button
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.5f, 0.9f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.6f, 1.0f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.1f, 0.4f, 0.8f, 1.0f));
-        if (ImGui::Button(ICON_FA_EJECT " F8"))
-            if (callbacks.on_eject) callbacks.on_eject();
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("Eject from player (F8)");
-        ImGui::PopStyleColor(3);
-        break;
-    }
-    case PlayMode::Paused:
-    {
-        // Green Resume button
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.1f, 0.6f, 0.1f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.2f, 0.7f, 0.2f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.0f, 0.5f, 0.0f, 1.0f));
-        if (ImGui::Button(ICON_FA_PLAY))
-            if (callbacks.on_resume) callbacks.on_resume();
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("Resume");
-        ImGui::PopStyleColor(3);
-
-        ImGui::SameLine();
-
-        // Red Stop button
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.1f, 0.1f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.8f, 0.2f, 0.2f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.6f, 0.0f, 0.0f, 1.0f));
-        if (ImGui::Button(ICON_FA_STOP "##stop_paused"))
-            if (callbacks.on_stop) callbacks.on_stop();
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("Stop");
-        ImGui::PopStyleColor(3);
-        break;
-    }
-    case PlayMode::Ejected:
-    {
-        // Blue Return button
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.5f, 0.9f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.6f, 1.0f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.1f, 0.4f, 0.8f, 1.0f));
-        if (ImGui::Button(ICON_FA_ARROW_ROTATE_LEFT " F8"))
-            if (callbacks.on_return) callbacks.on_return();
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("Return to player (F8)");
-        ImGui::PopStyleColor(3);
-
-        ImGui::SameLine();
-
-        // Red Stop button
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.1f, 0.1f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.8f, 0.2f, 0.2f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.6f, 0.0f, 0.0f, 1.0f));
-        if (ImGui::Button(ICON_FA_STOP "##stop_ejected"))
-            if (callbacks.on_stop) callbacks.on_stop();
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("Stop");
-        ImGui::PopStyleColor(3);
-        break;
-    }
-    }
 
     // Custom vertical separator
     ImGui::SameLine();

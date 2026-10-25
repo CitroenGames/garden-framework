@@ -5,6 +5,8 @@
 struct EditorState;
 struct NetworkPIESettings;
 
+// Retained for API compatibility. Play/Pause/Stop/Eject are owned solely
+// by the RML shell header (#play-group); this ImGui strip no longer drives them.
 struct ToolbarCallbacks
 {
     std::function<void()> on_play;     // Play pressed while Editing

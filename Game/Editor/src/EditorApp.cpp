@@ -3065,7 +3065,7 @@ void EditorApp::renderMenuBar()
         if (ImGui::BeginMenu("View"))
         {
             ImGui::MenuItem("Viewport",        nullptr, &m_show_viewport);
-            ImGui::MenuItem("Toolbar",         nullptr, &m_show_toolbar);
+            ImGui::MenuItem("Viewport Toolbar", nullptr, &m_show_toolbar);
             ImGui::MenuItem("Hierarchy",       nullptr, &m_show_hierarchy);
             ImGui::MenuItem("Inspector",       nullptr, &m_show_inspector);
             ImGui::MenuItem("Level Settings",  nullptr, &m_show_level_settings);

@@ -101,13 +101,13 @@ GizmoResult ViewportPanel::draw(ImTextureID scene_texture, EditorState& state,
             switch (play_mode)
             {
             case PlayMode::Playing:
-                border_color = IM_COL32(50, 200, 50, 200);   // green
+                border_color = IM_COL32(122, 182, 72, 200); // leaf green (logo)
                 break;
             case PlayMode::Paused:
                 border_color = IM_COL32(255, 200, 0, 200);   // yellow
                 break;
             case PlayMode::Ejected:
-                border_color = IM_COL32(80, 140, 255, 200);  // blue
+                border_color = IM_COL32(42, 161, 152, 200); // teal (logo)
                 break;
             default:
                 border_color = IM_COL32(255, 255, 255, 100);

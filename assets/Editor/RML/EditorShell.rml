@@ -180,14 +180,14 @@ body {
 }
 
 .toolbar-button.play {
-    background-color: #2c6f2f;
-    border-color: #409846;
+    background-color: #4e8a34;
+    border-color: #7ab648;
     color: #ffffff;
     min-width: 66dp;
 }
 
 .toolbar-button.play:hover {
-    background-color: #36863a;
+    background-color: #5d9c40;
 }
 
 .toolbar-button.play-arrow {
@@ -195,13 +195,13 @@ body {
     min-width: 28dp;
     padding: 0dp;
     margin-left: -6dp;
-    background-color: #255d28;
-    border-color: #3d8842;
+    background-color: #3f7329;
+    border-color: #6aa84f;
 }
 
 .toolbar-button.play-arrow.active,
 .toolbar-button.play-arrow:hover {
-    background-color: #347839;
+    background-color: #4e8a34;
     color: #ffffff;
 }
 
@@ -230,14 +230,14 @@ body {
 .toolbar-button.eject,
 .toolbar-button.return {
     width: 74dp;
-    background-color: #25456f;
-    border-color: #3d6fa4;
+    background-color: #155e63;
+    border-color: #2aa198;
     color: #d7ebff;
 }
 
 .toolbar-button.eject:hover,
 .toolbar-button.return:hover {
-    background-color: #2f5689;
+    background-color: #1b767c;
 }
 
 .toolbar-label {
@@ -313,7 +313,7 @@ body {
 }
 
 .menu-item:hover {
-    background-color: #263642;
+    background-color: #143a3e;
     color: #ffffff;
 }
 
@@ -333,7 +333,7 @@ body {
 
 .menu-item.active:hover {
     color: #ffffff;
-    background-color: #263642;
+    background-color: #143a3e;
 }
 
 .menu-item.disabled.active,
@@ -351,7 +351,7 @@ body {
 }
 
 .menu-item.active .menu-check {
-    color: #69c6d8;
+    color: #4cc9a8;
 }
 
 .menu-label {
@@ -432,7 +432,7 @@ body {
 
 .stepper-button:hover {
     color: #ffffff;
-    background-color: #2c4659;
+    background-color: #1e4a4f;
 }
 
 .stepper-button.disabled,
@@ -498,7 +498,7 @@ body {
     white-space: nowrap;
 }
 
-#dirty-state { color: #85d5e7; }
+#dirty-state { color: #6fc7ad; }
 #dirty-state.modified { color: #f2c66d; }
 #mode-state.playing { color: #8ad783; }
 </style>
@@ -568,7 +568,7 @@ body {
 
             <div id="view-menu" class="menu-panel">
                 <div id="toggle-viewport" class="menu-item active"><span class="menu-check">*</span><span class="menu-label">Viewport</span></div>
-                <div id="toggle-toolbar" class="menu-item active"><span class="menu-check">*</span><span class="menu-label">Toolbar</span></div>
+                <div id="toggle-toolbar" class="menu-item active"><span class="menu-check">*</span><span class="menu-label">Viewport Toolbar</span></div>
                 <div id="toggle-hierarchy" class="menu-item active"><span class="menu-check">*</span><span class="menu-label">Hierarchy</span></div>
                 <div id="toggle-inspector" class="menu-item active"><span class="menu-check">*</span><span class="menu-label">Inspector</span></div>
                 <div id="toggle-level-settings" class="menu-item active"><span class="menu-check">*</span><span class="menu-label">Level Settings</span></div>

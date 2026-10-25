@@ -63,7 +63,7 @@ static void ApplyEditorTheme()
     style.TabBarOverlineSize    = 1.5f;
     style.DockingSeparatorSize  = 1.0f;
 
-    // Colors — UE5 neutral-grey palette with blue accents
+    // Colors — Garden neutral-grey palette with logo-teal accents
     ImVec4* c = style.Colors;
 
     // Text
@@ -98,42 +98,42 @@ static void ApplyEditorTheme()
     c[ImGuiCol_ScrollbarGrabHovered]  = ImVec4(0.36f, 0.36f, 0.36f, 1.00f);
     c[ImGuiCol_ScrollbarGrabActive]   = ImVec4(0.44f, 0.44f, 0.44f, 1.00f);
 
-    // Checkmark, slider grab — bright UE5 blue accent
-    c[ImGuiCol_CheckMark]             = ImVec4(0.26f, 0.59f, 0.98f, 1.00f);
-    c[ImGuiCol_SliderGrab]            = ImVec4(0.26f, 0.59f, 0.98f, 1.00f);
-    c[ImGuiCol_SliderGrabActive]      = ImVec4(0.40f, 0.68f, 1.00f, 1.00f);
+    // Checkmark, slider grab — garden teal accent (from logo hexagon)
+    c[ImGuiCol_CheckMark]             = ImVec4(0.16f, 0.63f, 0.60f, 1.00f);
+    c[ImGuiCol_SliderGrab]            = ImVec4(0.16f, 0.63f, 0.60f, 1.00f);
+    c[ImGuiCol_SliderGrabActive]      = ImVec4(0.23f, 0.71f, 0.65f, 1.00f);
 
     // Buttons — neutral grey
     c[ImGuiCol_Button]                = ImVec4(0.19f, 0.19f, 0.19f, 1.00f);
     c[ImGuiCol_ButtonHovered]         = ImVec4(0.26f, 0.26f, 0.26f, 1.00f);
-    c[ImGuiCol_ButtonActive]          = ImVec4(0.22f, 0.42f, 0.70f, 1.00f);
+    c[ImGuiCol_ButtonActive]          = ImVec4(0.11f, 0.48f, 0.45f, 1.00f);
 
-    // Headers — neutral grey, blue on active
+    // Headers — neutral grey, teal on active
     c[ImGuiCol_Header]                = ImVec4(0.19f, 0.19f, 0.19f, 1.00f);
     c[ImGuiCol_HeaderHovered]         = ImVec4(0.26f, 0.26f, 0.26f, 1.00f);
-    c[ImGuiCol_HeaderActive]          = ImVec4(0.22f, 0.42f, 0.70f, 1.00f);
+    c[ImGuiCol_HeaderActive]          = ImVec4(0.11f, 0.48f, 0.45f, 1.00f);
 
     // Separator — neutral
     c[ImGuiCol_Separator]             = ImVec4(0.19f, 0.19f, 0.19f, 1.00f);
-    c[ImGuiCol_SeparatorHovered]      = ImVec4(0.26f, 0.59f, 0.98f, 0.78f);
-    c[ImGuiCol_SeparatorActive]       = ImVec4(0.26f, 0.59f, 0.98f, 1.00f);
+    c[ImGuiCol_SeparatorHovered]      = ImVec4(0.16f, 0.63f, 0.60f, 0.78f);
+    c[ImGuiCol_SeparatorActive]       = ImVec4(0.16f, 0.63f, 0.60f, 1.00f);
 
     // Resize grip
-    c[ImGuiCol_ResizeGrip]            = ImVec4(0.26f, 0.59f, 0.98f, 0.25f);
-    c[ImGuiCol_ResizeGripHovered]     = ImVec4(0.26f, 0.59f, 0.98f, 0.67f);
-    c[ImGuiCol_ResizeGripActive]      = ImVec4(0.26f, 0.59f, 0.98f, 0.95f);
+    c[ImGuiCol_ResizeGrip]            = ImVec4(0.16f, 0.63f, 0.60f, 0.25f);
+    c[ImGuiCol_ResizeGripHovered]     = ImVec4(0.16f, 0.63f, 0.60f, 0.67f);
+    c[ImGuiCol_ResizeGripActive]      = ImVec4(0.16f, 0.63f, 0.60f, 0.95f);
 
     // Tabs — selected merges seamlessly with panel body (match WindowBg)
     c[ImGuiCol_Tab]                   = ImVec4(0.08f, 0.08f, 0.08f, 1.00f);
     c[ImGuiCol_TabHovered]            = ImVec4(0.17f, 0.17f, 0.17f, 1.00f);
     c[ImGuiCol_TabSelected]           = ImVec4(0.12f, 0.12f, 0.12f, 1.00f);
-    c[ImGuiCol_TabSelectedOverline]   = ImVec4(0.10f, 0.46f, 0.82f, 1.00f);
+    c[ImGuiCol_TabSelectedOverline]   = ImVec4(0.16f, 0.63f, 0.60f, 1.00f);
     c[ImGuiCol_TabDimmed]             = ImVec4(0.07f, 0.07f, 0.07f, 1.00f);
     c[ImGuiCol_TabDimmedSelected]     = ImVec4(0.11f, 0.11f, 0.11f, 1.00f);
-    c[ImGuiCol_TabDimmedSelectedOverline] = ImVec4(0.10f, 0.36f, 0.65f, 1.00f);
+    c[ImGuiCol_TabDimmedSelectedOverline] = ImVec4(0.11f, 0.48f, 0.45f, 1.00f);
 
     // Docking
-    c[ImGuiCol_DockingPreview]        = ImVec4(0.26f, 0.59f, 0.98f, 0.70f);
+    c[ImGuiCol_DockingPreview]        = ImVec4(0.16f, 0.63f, 0.60f, 0.70f);
     c[ImGuiCol_DockingEmptyBg]        = ImVec4(0.06f, 0.06f, 0.06f, 1.00f);
 
     // Tables
@@ -144,8 +144,8 @@ static void ApplyEditorTheme()
     c[ImGuiCol_TableRowBgAlt]         = ImVec4(1.00f, 1.00f, 1.00f, 0.03f);
 
     // Misc
-    c[ImGuiCol_DragDropTarget]        = ImVec4(0.26f, 0.59f, 0.98f, 0.90f);
-    c[ImGuiCol_NavCursor]             = ImVec4(0.26f, 0.59f, 0.98f, 1.00f);
+    c[ImGuiCol_DragDropTarget]        = ImVec4(0.16f, 0.63f, 0.60f, 0.90f);
+    c[ImGuiCol_NavCursor]             = ImVec4(0.16f, 0.63f, 0.60f, 1.00f);
     c[ImGuiCol_NavWindowingHighlight] = ImVec4(1.00f, 1.00f, 1.00f, 0.70f);
     c[ImGuiCol_NavWindowingDimBg]     = ImVec4(0.80f, 0.80f, 0.80f, 0.20f);
     c[ImGuiCol_ModalWindowDimBg]      = ImVec4(0.00f, 0.00f, 0.00f, 0.55f);
