@@ -687,9 +687,18 @@ void D3D12RenderAPI::resize(int width, int height)
 {
     if (width <= 0 || height <= 0) return;
     if (device_lost) return;
+    // SDL fires both RESIZED and PIXEL_SIZE_CHANGED; skip the redundant one.
+    // setFOV also lands here, so still refresh the projection.
+    if (width == viewport_width && height == viewport_height)
+    {
+        projection_matrix = glm::perspectiveRH_ZO(glm::radians(field_of_view),
+                                                  static_cast<float>(width) / static_cast<float>(height),
+                                                  0.1f, 1000.0f);
+        return;
+    }
 
     LOG_ENGINE_TRACE("[D3D12] Resize: {}x{} -> {}x{}", viewport_width, viewport_height, width, height);
-    flushGPU();
+    waitForGPU();
 
     const int old_width = viewport_width;
     const int old_height = viewport_height;
@@ -780,6 +789,7 @@ void D3D12RenderAPI::ensureCommandListOpen()
     // the deferred-release ring. After kDeferredReleaseSlots advances, any
     // resource parked back then is guaranteed past the GPU.
     flushDeferredReleases();
+    m_rgBackend.advanceFrame();
 
     // Apply deferred resource recreation BEFORE opening the command list
     // (must happen while no commands reference these resources)

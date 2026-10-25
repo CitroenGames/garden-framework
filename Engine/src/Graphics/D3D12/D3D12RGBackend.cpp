@@ -236,9 +236,16 @@ RGContext& D3D12RGBackend::getContext()
 
 void D3D12RGBackend::beginFrame()
 {
+    // Intentionally empty: RenderGraph::execute runs once per scene target
+    // (editor, each PIE client, prefab previews), so the keep-alive ring must
+    // not advance here. See advanceFrame().
+}
+
+void D3D12RGBackend::advanceFrame()
+{
     // Advance the keep-alive ring and release the slot we're about to reuse.
-    // By this point the D3D12RenderAPI has already fence-waited the previous
-    // cycle, so anything parked here is safe to Release.
+    // Called once per real frame, after D3D12RenderAPI has fence-waited the
+    // frame it is about to reuse, so anything parked here is safe to Release.
     m_keepAliveSlot = (m_keepAliveSlot + 1) % kKeepAliveSlots;
     retirePendingSlot(m_keepAliveSlot);
 }

@@ -990,6 +990,7 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
     std::vector<D3D12ParallelReplayItem> replayItems;
     replayItems.reserve(cmds.size());
 
+    D3D12_GPU_DESCRIPTOR_HANDLE defaultSrvGPU = {};
     {
         std::unique_lock<std::mutex> textureLock(m_textureMutex);
         const TextureHandle defaultTex = defaultTexture;
@@ -1007,6 +1008,7 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
             }
             return {};
         };
+        defaultSrvGPU = resolveTextureSRV(defaultTex);
 
         for (const DrawCommand& cmd : cmds)
         {
@@ -1131,6 +1133,9 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
     auto pbrNormalSRV = m_defaultNormalTexture.srvIndex;
     auto pbrOcclusionSRV = m_defaultOcclusionTexture.srvIndex;
     auto pbrEmissiveSRV = m_defaultEmissiveTexture.srvIndex;
+    auto dummyShadowSRVIdx = m_dummyShadowSRVIndex;
+    auto pointLightsSRVIdx = m_pointLightsSRVIndex[m_frameIndex];
+    auto spotLightsSRVIdx = m_spotLightsSRVIndex[m_frameIndex];
 
     // Launch parallel replay on worker threads
     std::vector<std::future<void>> futures;
@@ -1140,7 +1145,8 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
     {
         futures.push_back(std::async(std::launch::async,
             [&, w, rootSig, srvHeap, rtState, shadowSRVIdx, globalCBAddr, lightCBAddr, uploadBuf, srvAlloc,
-             pbrMetallicRoughnessSRV, pbrNormalSRV, pbrOcclusionSRV, pbrEmissiveSRV]()
+             pbrMetallicRoughnessSRV, pbrNormalSRV, pbrOcclusionSRV, pbrEmissiveSRV,
+             dummyShadowSRVIdx, pointLightsSRVIdx, spotLightsSRVIdx]()
             {
                 auto* cmdList = workers[w].entry->cmdList.Get();
 
@@ -1161,6 +1167,19 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
                 // Bind shadow map
                 if (shadowSRVIdx != UINT(-1))
                     cmdList->SetGraphicsRootDescriptorTable(3, srvAlloc->getGPU(shadowSRVIdx));
+                else if (dummyShadowSRVIdx != UINT(-1))
+                    cmdList->SetGraphicsRootDescriptorTable(3, srvAlloc->getGPU(dummyShadowSRVIdx));
+
+                // Fresh command lists carry no state: bind every table the pixel shader reads
+                if (defaultSrvGPU.ptr != 0)
+                {
+                    cmdList->SetGraphicsRootDescriptorTable(2, defaultSrvGPU);
+                    cmdList->SetGraphicsRootDescriptorTable(11, defaultSrvGPU);
+                }
+                if (pointLightsSRVIdx != UINT(-1))
+                    cmdList->SetGraphicsRootDescriptorTable(9, srvAlloc->getGPU(pointLightsSRVIdx));
+                if (spotLightsSRVIdx != UINT(-1))
+                    cmdList->SetGraphicsRootDescriptorTable(10, srvAlloc->getGPU(spotLightsSRVIdx));
 
                 // Bind default PBR textures (root params 5-8)
                 if (pbrMetallicRoughnessSRV != UINT(-1))

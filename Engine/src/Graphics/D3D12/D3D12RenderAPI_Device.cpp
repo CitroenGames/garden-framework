@@ -14,18 +14,21 @@
 bool D3D12RenderAPI::createDevice()
 {
     // Debug layer / DRED: always on in _DEBUG; in Release only when r_d3d12_dred=1.
-    const bool forceDred = CVAR_BOOL(r_d3d12_dred);
+    // r_d3d12_dred: 1 = debug layer + GPU-based validation + DRED, 2 = DRED only
+    // (no validation overhead, so timing-dependent hangs still reproduce).
+    const int dredMode = CVAR_INT(r_d3d12_dred);
+    const bool forceDred = dredMode != 0;
     bool debugEnabled = false;
 #ifdef _DEBUG
     const bool wantDebugLayer = true;
 #else
-    const bool wantDebugLayer = forceDred;
+    const bool wantDebugLayer = dredMode == 1;
 #endif
 
-    if (wantDebugLayer)
+    if (wantDebugLayer || forceDred)
     {
         ComPtr<ID3D12Debug> debugController;
-        if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(debugController.GetAddressOf()))))
+        if (wantDebugLayer && SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(debugController.GetAddressOf()))))
         {
             debugController->EnableDebugLayer();
             debugEnabled = true;
@@ -39,7 +42,7 @@ bool D3D12RenderAPI::createDevice()
                 LOG_ENGINE_INFO("[D3D12] GPU-based validation enabled");
             }
         }
-        else
+        else if (wantDebugLayer)
         {
             LOG_ENGINE_WARN("[D3D12] Failed to enable debug layer - install Graphics Tools optional feature");
         }
@@ -154,6 +157,28 @@ bool D3D12RenderAPI::createDevice()
         LOG_ENGINE_TRACE("[D3D12] Suppressed {} noisy validation messages", _countof(suppressIds));
     }
 #endif
+
+    // Route debug-layer messages into Log.log so validation errors are visible
+    // without an attached debugger (Release + r_d3d12_dred=1).
+    if (debugEnabled)
+    {
+        ComPtr<ID3D12InfoQueue1> infoQueue1;
+        if (SUCCEEDED(device.As(&infoQueue1)))
+        {
+            auto onMessage = [](D3D12_MESSAGE_CATEGORY, D3D12_MESSAGE_SEVERITY severity,
+                                D3D12_MESSAGE_ID id, LPCSTR description, void*)
+            {
+                if (severity <= D3D12_MESSAGE_SEVERITY_ERROR)
+                    LOG_ENGINE_ERROR("[D3D12 Debug] ({}) {}", static_cast<int>(id), description);
+                else if (severity == D3D12_MESSAGE_SEVERITY_WARNING)
+                    LOG_ENGINE_WARN("[D3D12 Debug] ({}) {}", static_cast<int>(id), description);
+            };
+            DWORD cookie = 0;
+            if (SUCCEEDED(infoQueue1->RegisterMessageCallback(onMessage, D3D12_MESSAGE_CALLBACK_FLAG_NONE,
+                                                              nullptr, &cookie)))
+                LOG_ENGINE_INFO("[D3D12] Debug layer messages routed to log");
+        }
+    }
 
     // Log feature support
     D3D12_FEATURE_DATA_D3D12_OPTIONS options = {};

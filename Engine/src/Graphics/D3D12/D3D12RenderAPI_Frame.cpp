@@ -302,6 +302,14 @@ void D3D12RenderAPI::present()
                         LOG_ENGINE_ERROR("[D3D12] DRED breadcrumb - (unnamed), completed: {}/{}",
                                           *node->pLastBreadcrumbValue, node->BreadcrumbCount);
                     }
+                    // Incomplete list: the op at the completed index is the one the GPU stalled in
+                    if (node->pCommandHistory && *node->pLastBreadcrumbValue < node->BreadcrumbCount)
+                    {
+                        const UINT last = *node->pLastBreadcrumbValue;
+                        LOG_ENGINE_ERROR("[D3D12] DRED   stalled at op #{} = D3D12_AUTO_BREADCRUMB_OP {} (previous op {})",
+                                          last, static_cast<int>(node->pCommandHistory[last]),
+                                          last > 0 ? static_cast<int>(node->pCommandHistory[last - 1]) : -1);
+                    }
                     node = node->pNext;
                 }
             }
@@ -311,6 +319,14 @@ void D3D12RenderAPI::present()
             {
                 LOG_ENGINE_ERROR("[D3D12] DRED page fault at VA: 0x{:016X}",
                                   pageFault.PageFaultVA);
+                for (auto* n = pageFault.pHeadExistingAllocationNode; n; n = n->pNext)
+                    LOG_ENGINE_ERROR("[D3D12] DRED   live allocation near fault: type {} name '{}'",
+                                      static_cast<int>(n->AllocationType),
+                                      n->ObjectNameA ? n->ObjectNameA : "?");
+                for (auto* n = pageFault.pHeadRecentFreedAllocationNode; n; n = n->pNext)
+                    LOG_ENGINE_ERROR("[D3D12] DRED   RECENTLY FREED allocation at fault: type {} name '{}'",
+                                      static_cast<int>(n->AllocationType),
+                                      n->ObjectNameA ? n->ObjectNameA : "?");
             }
         }
 

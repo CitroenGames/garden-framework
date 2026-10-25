@@ -340,7 +340,16 @@ void RmlRenderer_D3D12::RenderGeometry(Rml::CompiledGeometryHandle handle, Rml::
 
 void RmlRenderer_D3D12::ReleaseGeometry(Rml::CompiledGeometryHandle handle)
 {
-    m_geometries.erase((uintptr_t)handle);
+    // RmlUi releases geometry on relayout (e.g. window resize) while earlier frames
+    // may still be executing on the GPU, so park the buffers instead of freeing them.
+    auto it = m_geometries.find((uintptr_t)handle);
+    if (it == m_geometries.end()) return;
+    if (m_renderAPI)
+    {
+        m_renderAPI->deferredRelease(it->second.vertexBuffer);
+        m_renderAPI->deferredRelease(it->second.indexBuffer);
+    }
+    m_geometries.erase(it);
 }
 
 Rml::TextureHandle RmlRenderer_D3D12::LoadTexture(Rml::Vector2i& texture_dimensions, const Rml::String& source)
@@ -488,6 +497,8 @@ void RmlRenderer_D3D12::ReleaseTexture(Rml::TextureHandle texture)
     {
         if (m_renderAPI && it->second.srvIndex != UINT(-1))
             m_renderAPI->deferSRVFree(it->second.srvIndex);
+        if (m_renderAPI)
+            m_renderAPI->deferredRelease(it->second.texture);
         m_textures.erase(it);
     }
 }

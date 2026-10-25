@@ -198,6 +198,10 @@ void D3D12SceneViewport::createOwned(int w, int h)
         device->CreateShaderResourceView(m_output.Get(), &ldrSrvDesc,
                                          m_api->m_srvAllocator.getCPU(m_outputSRV));
     }
+
+    if (m_hdr)   m_hdr->SetName(L"SceneViewport HDR");
+    if (m_depth) m_depth->SetName(L"SceneViewport depth");
+    if (m_output && !m_outputsToBackBuffer) m_output->SetName(L"SceneViewport LDR output");
 }
 
 void D3D12SceneViewport::releaseOwned()

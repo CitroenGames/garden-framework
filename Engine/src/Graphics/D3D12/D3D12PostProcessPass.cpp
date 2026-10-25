@@ -345,6 +345,7 @@ bool D3D12PostProcessPass::createOutputTexture()
     }
 
     stateTracker_->track(outputTexture_.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    outputTexture_->SetName((std::wstring(L"PostProcess output: ") + config_.debugName).c_str());
 
     // RTV
     if (outputRTVIndex_ == UINT(-1))

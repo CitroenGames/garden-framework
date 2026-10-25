@@ -39,6 +39,9 @@ public:
     void beginFrame() override;
     void endFrame() override;
 
+    // Advance the keep-alive ring. Call exactly once per real frame.
+    void advanceFrame();
+
     // Bind an imported (externally-owned) resource to a graph handle.
     void bindImportedTexture(RGResourceHandle handle,
                              ID3D12Resource* resource,
