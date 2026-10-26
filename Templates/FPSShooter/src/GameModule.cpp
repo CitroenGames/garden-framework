@@ -1,4 +1,4 @@
-﻿#include "Plugin/GameModuleAPI.h"
+#include "Plugin/GameModuleAPI.h"
 #include "Reflection/Reflect.hpp"
 #include "Reflection/ReflectionRegistry.hpp"
 
@@ -10,6 +10,7 @@
 #include "Components/Components.hpp"
 #include "Components/camera.hpp"
 #include "Network/ClientNetworkManager.hpp"
+#include "Network/LevelHash.hpp"
 #include "Network/SharedMovement.hpp"
 #include "shared/SharedComponents.hpp"
 #include "shared/CombatProtocol.hpp"
@@ -51,7 +52,36 @@ static CharacterMoveInput toCharacterMoveInput(const MovementInput& input)
     out.camera_pitch = input.camera_pitch;
     if ((input.buttons & InputFlags::JUMP) != 0)
         out.buttons |= CharacterMoveFlags::Jump;
+    if ((input.buttons & InputFlags::CROUCH) != 0)
+        out.buttons |= CharacterMoveFlags::Crouch;
+    if ((input.buttons & InputFlags::SPRINT) != 0)
+        out.buttons |= CharacterMoveFlags::Sprint;
     return out;
+}
+
+// Compute the v3 level hash for the template's default level and hand it
+// to the client network manager (D2 step 6). Missing file leaves hash 0
+// (no-level sentinel; both sides at 0 accept with a server warning).
+static void applyTemplateLevelHash(Net::ClientNetworkManager& net)
+{
+    static const char* kCandidates[] = {
+        "assets/levels/main.level.json",
+        "Templates/FPSShooter/assets/levels/main.level.json",
+        "../Templates/FPSShooter/assets/levels/main.level.json",
+    };
+    for (const char* path : kCandidates) {
+        FILE* file = std::fopen(path, "rb");
+        if (!file) continue;
+        std::vector<uint8_t> bytes;
+        uint8_t chunk[8192];
+        size_t read = 0;
+        while ((read = std::fread(chunk, 1, sizeof(chunk), file)) > 0) {
+            bytes.insert(bytes.end(), chunk, chunk + read);
+        }
+        std::fclose(file);
+        net.setLevelHash(Net::computeLevelHashFromBytes(bytes));
+        return;
+    }
 }
 
 static MovementState toMovementState(const CharacterControllerState& state)
@@ -158,6 +188,7 @@ GAME_API bool gardenGameInit(EngineServices* services)
                           ? services->connect_address : "127.0.0.1";
     uint16_t port = services->connect_port ? services->connect_port : 7777;
 
+    applyTemplateLevelHash(g_network);
     if (!g_network.connectToServer(address, port, "Player")) {
         LOG_ENGINE_WARN("Failed to connect to server at {}:{} - running in offline mode", address, port);
     }
@@ -402,6 +433,17 @@ GAME_API void gardenGameUpdate(float delta_time)
             if (input_manager->is_key_held(SDL_SCANCODE_D)) input_state.buttons |= InputFlags::MOVE_RIGHT;
             if (input_manager->is_key_pressed(SDL_SCANCODE_SPACE)) input_state.buttons |= InputFlags::JUMP;
             if (input_manager->is_key_held(SDL_SCANCODE_E)) input_state.buttons |= InputFlags::USE;
+            // D3 held posture / modifier bits (mirrors PlayerController mapping)
+            if (input_manager->is_key_held(SDL_SCANCODE_LSHIFT)) input_state.buttons |= InputFlags::SPRINT;
+            if (input_manager->is_key_held(SDL_SCANCODE_LCTRL) || input_manager->is_key_held(SDL_SCANCODE_C)) input_state.buttons |= InputFlags::CROUCH;
+            if (input_manager->is_key_held(SDL_SCANCODE_LALT)) input_state.buttons |= InputFlags::WALK;
+            // D3 edge actions: drop (G) and weapon select (digits 1-5, absolute slot)
+            if (input_manager->is_key_pressed(SDL_SCANCODE_G)) input_state.buttons |= InputFlags::DROP;
+            if (input_manager->is_key_pressed(SDL_SCANCODE_1)) input_state.buttons = Net::withWeaponSelect(input_state.buttons, 1);
+            if (input_manager->is_key_pressed(SDL_SCANCODE_2)) input_state.buttons = Net::withWeaponSelect(input_state.buttons, 2);
+            if (input_manager->is_key_pressed(SDL_SCANCODE_3)) input_state.buttons = Net::withWeaponSelect(input_state.buttons, 3);
+            if (input_manager->is_key_pressed(SDL_SCANCODE_4)) input_state.buttons = Net::withWeaponSelect(input_state.buttons, 4);
+            if (input_manager->is_key_pressed(SDL_SCANCODE_5)) input_state.buttons = Net::withWeaponSelect(input_state.buttons, 5);
         }
 
         input_state.camera_yaw = game_world->world_camera.rotation.y;
@@ -644,6 +686,7 @@ GAME_API void gardenGameUpdate(float delta_time)
 GAME_API void gardenOnLevelLoaded()
 {
     if (!g_services) return;
+    applyTemplateLevelHash(g_network);
 
     world* game_world = g_services->game_world;
 

@@ -37,6 +37,10 @@ namespace {
         out.camera_pitch = input.camera_pitch;
         if ((input.buttons & Net::InputFlags::JUMP) != 0)
             out.buttons |= CharacterMoveFlags::Jump;
+        if ((input.buttons & Net::InputFlags::CROUCH) != 0)
+            out.buttons |= CharacterMoveFlags::Crouch;
+        if ((input.buttons & Net::InputFlags::SPRINT) != 0)
+            out.buttons |= CharacterMoveFlags::Sprint;
         return out;
     }
 }
@@ -410,27 +414,45 @@ void ServerNetworkManager::handleConnectRequest(ENetPeer* peer, BitReader& reade
         return;
     }
 
+    // Reject-before-allocate (D2): peek type + protocol_version only.
+    // A v2 client's packet is shorter, so full deserialise would fail
+    // generically before the version gate could fire.
+    uint32_t peeked_version = 0;
+    if (!NetworkSerializer::tryPeekProtocolVersion(reader.getBuffer(), reader.getBufferSize(), peeked_version)) {
+        LOG_ENGINE_WARN("Failed to peek CONNECT_REQUEST version from peer");
+        enet_peer_disconnect_later(peer, 0);
+        return;
+    }
+    if (peeked_version != NETWORK_PROTOCOL_VERSION) {
+        LOG_ENGINE_WARN("Client protocol version mismatch: {0} (expected {1})",
+            peeked_version, NETWORK_PROTOCOL_VERSION);
+        sendConnectReject(peer, RejectCode::VersionMismatch, "Protocol version mismatch");
+        enet_peer_disconnect_later(peer, 0);
+        return;
+    }
+
     ConnectRequestMessage msg;
+    reader.seekBits(0);
     if (!NetworkSerializer::deserialize(reader, msg)) {
         LOG_ENGINE_WARN("Failed to deserialize CONNECT_REQUEST from peer");
         enet_peer_disconnect_later(peer, 0);
         return;
     }
 
-    // Check protocol version
-    if (msg.protocol_version != NETWORK_PROTOCOL_VERSION) {
-        LOG_ENGINE_WARN("Client protocol version mismatch: {0} (expected {1})",
-            msg.protocol_version, NETWORK_PROTOCOL_VERSION);
-
-        BitWriter writer;
-        ConnectRejectMessage reject;
-        std::strncpy(reject.reason, "Protocol version mismatch", 63);
-        reject.reason[63] = '\0';
-        NetworkSerializer::serialize(writer, reject);
-        sendReliableMessage(peer, writer);
-
+    // Level check BEFORE client-id allocation (D2). 0 = no level loaded:
+    // exactly one side at 0 is a mismatch; both 0 accepts with a warning.
+    const bool level_mismatch =
+        ((msg.level_hash == 0) != (server_level_hash == 0)) ||
+        (msg.level_hash != server_level_hash);
+    if (level_mismatch) {
+        LOG_ENGINE_WARN("Client level hash mismatch: {0} (expected {1})",
+            msg.level_hash, server_level_hash);
+        sendConnectReject(peer, RejectCode::LevelMismatch, "Level mismatch");
         enet_peer_disconnect_later(peer, 0);
         return;
+    }
+    if (server_level_hash == 0) {
+        LOG_ENGINE_WARN("Accepting client with no level hash on either side (lobby/menu flow)");
     }
 
     // Assign client ID (skip any that collide after uint16_t wrap)
@@ -445,13 +467,7 @@ void ServerNetworkManager::handleConnectRequest(ENetPeer* peer, BitReader& reade
     }
     if (!id_assigned) {
         LOG_ENGINE_ERROR("Server full: no free client_id slots; rejecting connection");
-        ConnectRejectMessage reject;
-        reject.type = MessageType::CONNECT_REJECT;
-        std::strncpy(reject.reason, "Server full", 63);
-        reject.reason[63] = '\0';
-        BitWriter writer;
-        NetworkSerializer::serialize(writer, reject);
-        sendReliableMessage(peer, writer);
+        sendConnectReject(peer, RejectCode::ServerFull, "Server full");
         enet_peer_disconnect_later(peer, 0);
         return;
     }
@@ -459,6 +475,7 @@ void ServerNetworkManager::handleConnectRequest(ENetPeer* peer, BitReader& reade
 
     // Create client info
     ClientInfo info(client_id, msg.player_name, peer);
+    info.capability_flags = msg.capability_flags & server_capability_flags;
     ClientConnection connection(info);
     clients[client_id] = connection;
 
@@ -469,7 +486,8 @@ void ServerNetworkManager::handleConnectRequest(ENetPeer* peer, BitReader& reade
     ConnectAcceptMessage accept;
     accept.client_id = client_id;
     accept.server_tick = current_tick;
-    accept.level_hash = 0;  // TODO: Calculate level hash
+    accept.level_hash = server_level_hash;
+    accept.capability_flags = msg.capability_flags & server_capability_flags;
     NetworkSerializer::serialize(writer, accept);
     sendReliableMessage(peer, writer);
 
@@ -481,15 +499,16 @@ void ServerNetworkManager::handleConnectRequest(ENetPeer* peer, BitReader& reade
 
 void ServerNetworkManager::handleInputCommand(uint16_t client_id, BitReader& reader)
 {
-    InputCommandMessage msg;
-    std::vector<InputSample> redundant_inputs;
-    if (!NetworkSerializer::deserialize(reader, msg, redundant_inputs)) {
-        LOG_ENGINE_WARN("Failed to deserialize input from client {0}", client_id);
-        return;
-    }
-
     auto it = clients.find(client_id);
     if (it == clients.end()) {
+        return;
+    }
+    const bool include_view_tick = (it->second.info.capability_flags & CAP_VIEW_TICK) != 0;
+
+    InputCommandMessage msg;
+    std::vector<InputSample> redundant_inputs;
+    if (!NetworkSerializer::deserialize(reader, msg, redundant_inputs, include_view_tick)) {
+        LOG_ENGINE_WARN("Failed to deserialize input from client {0}", client_id);
         return;
     }
 
@@ -552,8 +571,9 @@ void ServerNetworkManager::handleInputCommand(uint16_t client_id, BitReader& rea
             break;
         }
 
-        transform.rotation.y = sample.camera_yaw;
-        transform.rotation.x = sample.camera_pitch;
+        // D4 point 2: input yaw/pitch are radians; ECS rotation is degrees.
+        transform.rotation.y = glm::degrees(sample.camera_yaw);
+        transform.rotation.x = glm::degrees(sample.camera_pitch);
 
         MovementInput move_input;
         move_input.move_forward = sample.move_forward;
@@ -561,6 +581,7 @@ void ServerNetworkManager::handleInputCommand(uint16_t client_id, BitReader& rea
         move_input.camera_yaw = sample.camera_yaw;
         move_input.camera_pitch = sample.camera_pitch;
         move_input.buttons = sample.buttons;
+        move_input.view_server_tick = sample.view_server_tick;
 
         MovementState move_state;
         move_state.position = transform.position;
@@ -586,8 +607,20 @@ void ServerNetworkManager::handleInputCommand(uint16_t client_id, BitReader& rea
 
         it->second.info.last_input_tick = sample.tick;
 
+        const uint32_t acknowledged_tick = include_view_tick
+            ? sample.view_server_tick : msg.last_received_tick;
         if (input_sample_handler) {
-            input_sample_handler(client_id, player_entity, sample, msg.last_received_tick);
+            input_sample_handler(client_id, player_entity, sample, acknowledged_tick);
+        }
+
+        // WEAPON_SELECT edge: fire only when the value changes vs the last
+        // applied sample for this client (chronological order guaranteed).
+        const uint8_t weapon_select = getWeaponSelect(sample.buttons);
+        if (weapon_select != it->second.info.last_weapon_select) {
+            if (weapon_select != 0 && weapon_select_handler) {
+                weapon_select_handler(client_id, player_entity, weapon_select, sample);
+            }
+            it->second.info.last_weapon_select = weapon_select;
         }
     }
 }
@@ -651,7 +684,8 @@ WorldSnapshot ServerNetworkManager::generateWorldSnapshot()
 
         ComponentSnapshot comp_snapshot;
         comp_snapshot.position = transform.position;
-        comp_snapshot.rotation_y = transform.rotation.y;
+        // D4 point 1: ECS degrees -> network radians.
+        comp_snapshot.rotation_y = glm::radians(transform.rotation.y);
 
         // Add velocity if entity has rigidbody
         if (game_world->registry.all_of<RigidBodyComponent>(entity)) {
@@ -741,7 +775,9 @@ std::vector<EntityUpdateData> ServerNetworkManager::generateDeltaUpdate(
                 update.ground_normal = entity_snapshot.components.ground_normal;
             }
 
-            if (std::abs(entity_snapshot.components.rotation_y - baseline_entity->components.rotation_y) > epsilon) {
+            const float rotation_epsilon = 0.001f; // radians (~0.057 deg)
+            if (std::abs(wrappedAngleDelta(entity_snapshot.components.rotation_y,
+                                           baseline_entity->components.rotation_y)) > rotation_epsilon) {
                 update.flags |= ComponentFlags::ROTATION;
                 update.rotation_y = entity_snapshot.components.rotation_y;
             }
@@ -802,6 +838,17 @@ void ServerNetworkManager::sendWorldStateToClient(uint16_t client_id, const Worl
         msg.snapshot_flags |= SnapshotFlags::BASELINE_MISS;
     }
     msg.last_processed_input_tick = it->second.info.last_input_tick;
+    // HAS_EXT only when at least one entity carries an entry (D2); the
+    // per-client OwnerOnly filter applies at ext encode time in game code.
+    const bool negotiated_ext = (it->second.info.capability_flags & CAP_HAS_EXT) != 0;
+    if (negotiated_ext) {
+        for (const auto& update : updates) {
+            if (!update.ext_entries.empty()) {
+                msg.snapshot_flags |= SnapshotFlags::HAS_EXT;
+                break;
+            }
+        }
+    }
     NetworkSerializer::serialize(writer, msg, updates);
 
     // Send unreliable
@@ -810,6 +857,11 @@ void ServerNetworkManager::sendWorldStateToClient(uint16_t client_id, const Worl
 
 uint32_t ServerNetworkManager::registerEntity(entt::entity entity)
 {
+    // D1: re-registering a live entity returns its existing NetId; the
+    // wire identity is the server-assigned NetId only (GUID never sent).
+    if (auto existing = entity_to_net_id.find(entity); existing != entity_to_net_id.end()) {
+        return existing->second;
+    }
     // Skip 0 (the protocol's null/unset sentinel) and skip live IDs after uint32_t wrap.
     uint32_t net_id = 0;
     bool id_assigned = false;
@@ -957,6 +1009,7 @@ bool ServerNetworkManager::shouldAcceptClientMessage(ENetPeer* peer, uint8_t mes
         case MessageType::CONNECT_REJECT:
         case MessageType::SPAWN_PLAYER:
         case MessageType::DESPAWN_PLAYER:
+        case MessageType::SPAWN_ENTITY:
         case MessageType::WORLD_STATE_UPDATE:
         case MessageType::PONG:
         case MessageType::CVAR_SYNC:
@@ -1049,6 +1102,37 @@ void ServerNetworkManager::broadcastUnreliable(const BitWriter& writer)
             sendUnreliableMessage(connection.info.peer, writer, PacketReliability::UnreliableUnordered);
         }
     }
+}
+
+void ServerNetworkManager::sendConnectReject(ENetPeer* peer, RejectCode code, const char* reason)
+{
+    ConnectRejectMessage reject;
+    reject.reject_code = static_cast<uint8_t>(code);
+    std::strncpy(reject.reason, reason, 63);
+    reject.reason[63] = '\0';
+    BitWriter writer;
+    NetworkSerializer::serialize(writer, reject);
+    sendReliableMessage(peer, writer);
+}
+
+uint32_t ServerNetworkManager::getClientCapabilityFlags(uint16_t client_id) const
+{
+    auto it = clients.find(client_id);
+    return it == clients.end() ? 0u : it->second.info.capability_flags;
+}
+
+void ServerNetworkManager::sendSpawnEntityToClient(uint16_t client_id, const SpawnEntityMessage& msg)
+{
+    BitWriter writer;
+    NetworkSerializer::serialize(writer, msg);
+    sendReliableToClient(client_id, writer);
+}
+
+void ServerNetworkManager::broadcastSpawnEntity(const SpawnEntityMessage& msg)
+{
+    BitWriter writer;
+    NetworkSerializer::serialize(writer, msg);
+    broadcastReliable(writer);
 }
 
 void ServerNetworkManager::broadcastCVar(const std::string& name, const std::string& value)

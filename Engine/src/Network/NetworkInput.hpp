@@ -13,7 +13,7 @@ constexpr uint32_t MAX_INPUT_TICK_WINDOW = 128;
 constexpr uint32_t MAX_INPUT_BURST_TICKS = 8;
 constexpr float MAX_INPUT_AXIS_ABS = 1.25f;
 constexpr float MAX_INPUT_VIEW_ANGLE_ABS = 100000.0f;
-constexpr uint8_t INPUT_ACTION_LATCH_MASK = InputFlags::JUMP | InputFlags::ATTACK | InputFlags::ATTACK2;
+constexpr uint16_t INPUT_ACTION_LATCH_MASK = InputFlags::JUMP | InputFlags::ATTACK | InputFlags::RELOAD | InputFlags::DROP;
 
 inline bool isTickNewer(uint32_t tick, uint32_t last_tick)
 {
@@ -29,7 +29,18 @@ inline InputSample makePrimaryInputSample(const InputCommandMessage& msg)
     sample.camera_pitch = msg.camera_pitch;
     sample.move_forward = msg.move_forward;
     sample.move_right = msg.move_right;
+    sample.view_server_tick = msg.view_server_tick;
     return sample;
+}
+
+// Reserved WEAPON_SELECT value (7) decodes as "none"; counted, never fatal.
+inline uint16_t sanitizeWeaponSelect(uint16_t buttons, uint32_t* reject_counter)
+{
+    if (getWeaponSelect(buttons) == InputFlags::WEAPON_SELECT_RESERVED) {
+        if (reject_counter != nullptr) ++(*reject_counter);
+        return withWeaponSelect(buttons, 0);
+    }
+    return buttons;
 }
 
 inline std::vector<InputSample> collectInputSamplesChronological(

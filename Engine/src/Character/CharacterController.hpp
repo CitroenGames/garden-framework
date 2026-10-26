@@ -9,9 +9,9 @@
 
 namespace CharacterMoveFlags
 {
-    constexpr uint8_t Jump = 1 << 0;
-    constexpr uint8_t Sprint = 1 << 1;
-    constexpr uint8_t Crouch = 1 << 2;
+    constexpr uint16_t Jump = 1 << 0;
+    constexpr uint16_t Sprint = 1 << 1;
+    constexpr uint16_t Crouch = 1 << 2;
 }
 
 namespace CharacterWaterLevel
@@ -28,7 +28,7 @@ struct CharacterMoveInput
     float move_right = 0.0f;
     float camera_yaw = 0.0f;
     float camera_pitch = 0.0f;
-    uint8_t buttons = 0;
+    uint16_t buttons = 0;
 };
 
 struct CharacterControllerState

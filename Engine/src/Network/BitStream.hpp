@@ -281,6 +281,16 @@ public:
         return bit_position;
     }
 
+    // Raw buffer access for protocol peeking (e.g. handshake version peek).
+    const uint8_t* getBuffer() const { return buffer; }
+    size_t getBufferSize() const { return buffer_size; }
+
+    void seekBits(size_t bits) {
+        const size_t total_bits = buffer_size * 8;
+        if (bits > total_bits) { error_state = true; bit_position = total_bits; return; }
+        bit_position = bits;
+    }
+
     // Check if we can read more data
     bool canRead(size_t num_bits) const {
         return (bit_position + num_bits) <= (buffer_size * 8);

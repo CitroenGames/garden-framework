@@ -1,7 +1,11 @@
+#define ENET_IMPLEMENTATION
+#include "enet.h"
 #include "Components/Components.hpp"
 #include "Network/BitStream.hpp"
 #include "Network/ClientNetworkManager.hpp"
+#include "Network/LevelHash.hpp"
 #include "Network/NetworkProtocol.hpp"
+#include "Network/NetworkSerializer.hpp"
 #include "Network/NetworkTypes.hpp"
 #include "Network/ServerNetworkManager.hpp"
 #include "Utils/Log.hpp"
@@ -217,6 +221,154 @@ static entt::entity spawnServerPlayer(world& server_world, Net::ServerNetworkMan
 
     server.setClientPlayerEntity(client_id, network_id);
     return player_entity;
+}
+
+// Sends one handcrafted CONNECT_REQUEST from a raw ENet peer and returns
+// the CONNECT_REJECT code the server replies with (or -1 on timeout).
+static int rawConnectAttempt(Net::ServerNetworkManager& server, uint16_t port,
+                             uint32_t protocol_version, uint32_t level_hash, uint32_t caps)
+{
+    ENetHost* raw = enet_host_create(nullptr, 1, Net::NETWORK_CHANNEL_COUNT, 0, 0);
+    if (!raw) return -1;
+    ENetAddress address{};
+    enet_address_set_host(&address, "127.0.0.1");
+    address.port = port;
+    ENetPeer* peer = enet_host_connect(raw, &address, Net::NETWORK_CHANNEL_COUNT, 0);
+    if (!peer) { enet_host_destroy(raw); return -1; }
+
+    bool sent = false;
+    int reject_code = -1;
+    for (int frame = 0; frame < 600 && reject_code < 0; ++frame) {
+        server.pumpNetworkEvents(kFixedDelta);
+        ENetEvent event{};
+        while (enet_host_service(raw, &event, 0) > 0) {
+            if (event.type == ENET_EVENT_TYPE_CONNECT && !sent) {
+                sent = true;
+                Net::BitWriter writer;
+                writer.writeByte(static_cast<uint8_t>(Net::MessageType::CONNECT_REQUEST));
+                writer.writeUInt32(protocol_version);
+                writer.writeString("rawclient", 32);
+                if (protocol_version == 2) {
+                    writer.writeUInt32(0); // v2 checksum field
+                } else {
+                    writer.writeUInt32(level_hash);
+                    writer.writeUInt32(caps);
+                }
+                ENetPacket* packet = enet_packet_create(writer.getData(), writer.getByteSize(), ENET_PACKET_FLAG_RELIABLE);
+                enet_peer_send(peer, 0, packet);
+                enet_host_flush(raw);
+            } else if (event.type == ENET_EVENT_TYPE_RECEIVE) {
+                if (event.packet->dataLength >= 2 &&
+                    event.packet->data[0] == static_cast<uint8_t>(Net::MessageType::CONNECT_REJECT)) {
+                    reject_code = event.packet->data[1];
+                }
+                enet_packet_destroy(event.packet);
+            }
+        }
+        SDL_Delay(1);
+    }
+    enet_peer_disconnect(peer, 0);
+    enet_host_flush(raw);
+    enet_host_destroy(raw);
+    return reject_code;
+}
+
+static bool runWireV3HandshakeTests()
+{
+    TestState state;
+    world server_world;
+    server_world.setFixedDelta(kFixedDelta);
+    Net::ServerNetworkManager server;
+    if (!server.initialize()) {
+        std::cerr << "[FAIL] handshake test: server init failed\n";
+        return false;
+    }
+    server.setWorld(&server_world);
+    server.setLevelHash(0x1234ABCDu);
+
+    // D1: NetId allocation is server-only, idempotent per entity.
+    {
+        entt::entity e = server_world.registry.create();
+        const uint32_t first = server.registerEntity(e);
+        const uint32_t second = server.registerEntity(e);
+        if (first == 0 || first != second) state.addError("double registerEntity minted a second NetId");
+        if (server.getEntityByNetworkId(first) != e) state.addError("NetId -> entity lookup failed");
+        if (server.getNetworkIdByEntity(e) != first) state.addError("entity -> NetId lookup failed");
+        server.unregisterEntity(e);
+        for (int cycle = 0; cycle < 100; ++cycle) {
+            entt::entity tmp = server_world.registry.create();
+            const uint32_t id = server.registerEntity(tmp);
+            if (id == 0 || server.getEntityByNetworkId(id) != tmp) {
+                state.addError("register/unregister cycle broke NetId mapping");
+                break;
+            }
+            server.unregisterEntity(tmp);
+            server_world.registry.destroy(tmp);
+        }
+        server_world.registry.destroy(e);
+    }
+
+    uint16_t port = 0;
+    {
+        StressConfig cfg;
+        cfg.requested_port = 0;
+        cfg.client_count = 4;
+        if (!startServer(server, cfg, port)) {
+            std::cerr << "[FAIL] handshake test: server start failed\n";
+            server.shutdown();
+            return false;
+        }
+    }
+
+    // v2 client -> VersionMismatch (1), no client id allocated.
+    if (rawConnectAttempt(server, port, 2, 0, 0) != 1) {
+        state.addError("v2 client was not rejected with VersionMismatch (1)");
+    }
+    if (server.getClientCount() != 0) state.addError("v2 reject allocated a client id");
+
+    // v3 client with wrong level hash -> LevelMismatch (2), no id allocated.
+    if (rawConnectAttempt(server, port, 3, 0x99999999u, Net::CAP_ALL_KNOWN) != 2) {
+        state.addError("wrong level hash was not rejected with LevelMismatch (2)");
+    }
+    if (server.getClientCount() != 0) state.addError("level reject allocated a client id");
+
+    // Valid v3 client (real manager, matching hash) connects; caps echo.
+    {
+        world client_world;
+        Net::ClientNetworkManager client;
+        client.setWorld(&client_world);
+        if (!client.initialize()) state.addError("valid client init failed");
+        client.setLevelHash(0x1234ABCDu);
+        if (!client.connectToServer("127.0.0.1", port, "valid")) state.addError("valid client connect failed");
+        for (int frame = 0; frame < 600 && !client.isConnected(); ++frame) {
+            client.update(kFixedDelta);
+            server.pumpNetworkEvents(kFixedDelta);
+            SDL_Delay(1);
+        }
+        // One extra pump pair so the server processes the request.
+        for (int frame = 0; frame < 60 && server.getClientCount() == 0; ++frame) {
+            client.update(kFixedDelta);
+            server.pumpNetworkEvents(kFixedDelta);
+            SDL_Delay(1);
+        }
+        if (!client.isConnected()) state.addError("valid v3 client did not connect");
+        if (server.getClientCount() != 1) state.addError("valid v3 client was not allocated exactly one id");
+        if (client.getNegotiatedCapabilityFlags() != Net::CAP_ALL_KNOWN) {
+            state.addError("accept did not echo negotiated capability flags");
+        }
+        client.disconnect("handshake test done");
+        client.shutdown();
+    }
+
+    server.shutdown();
+    if (state.error_count != 0) {
+        for (const std::string& error : state.errors) {
+            std::cerr << "[FAIL] " << error << "\n";
+        }
+        return false;
+    }
+    std::cout << "[PASS] WireV3HandshakeTests\n";
+    return true;
 }
 
 static bool runNetworkStress(const StressConfig& config)
@@ -487,7 +639,8 @@ int main(int argc, char** argv)
         EE::CLog::GetClientLogger()->set_level(spdlog::level::warn);
         EE::CLog::GetLuaLogger()->set_level(spdlog::level::warn);
     }
+    const bool handshake_ok = runWireV3HandshakeTests();
     const bool ok = runNetworkStress(config);
     EE::CLog::Shutdown();
-    return ok ? 0 : 1;
+    return (handshake_ok && ok) ? 0 : 1;
 }

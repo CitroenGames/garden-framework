@@ -6,6 +6,7 @@
 #include "world.hpp"
 #include "LevelManager.hpp"
 #include "Components/Components.hpp"
+#include "Network/LevelHash.hpp"
 #include "Network/NetworkProtocol.hpp"
 #include "Network/NetworkSerializer.hpp"
 #include "Network/NetworkTypes.hpp"
@@ -355,6 +356,12 @@ static void processWeaponInput(
     auto& weapon = w->registry.get<WeaponComponent>(player_entity);
     const bool wants_attack = (input.buttons & InputFlags::ATTACK) != 0;
     const bool wants_reload = (input.buttons & InputFlags::RELOAD) != 0;
+    const bool wants_drop = (input.buttons & InputFlags::DROP) != 0;
+    if (wants_drop) {
+        // D3: drop rides the input stream; inventory drop lands with the
+        // inventory system. Parsed and validated here, never discarded.
+        LOG_ENGINE_INFO("Player {} requested weapon drop (tick {})", client_id, input.tick);
+    }
     if (!wants_attack && !wants_reload) {
         return;
     }
@@ -478,12 +485,12 @@ static void spawnPlayerForClient(uint16_t client_id)
     g_server_network.setClientPlayerEntity(client_id, network_id);
     sendWeaponState(client_id, player_entity, weapon_component);
 
-    // Broadcast spawn to all clients
+    // Broadcast spawn to all clients (camera_yaw is radians on the wire, D4)
     SpawnPlayerMessage spawn_msg;
     spawn_msg.client_id = client_id;
     spawn_msg.entity_id = network_id;
     spawn_msg.position = spawn_pos;
-    spawn_msg.camera_yaw = 0.0f;
+    spawn_msg.camera_yaw = glm::radians(transform.rotation.y);
 
     BitWriter writer;
     NetworkSerializer::serialize(writer, spawn_msg);
@@ -505,7 +512,7 @@ static void spawnPlayerForClient(uint16_t client_id)
         existing_msg.client_id = networked.owner_client_id;
         existing_msg.entity_id = networked.network_id;
         existing_msg.position = trans.position;
-        existing_msg.camera_yaw = 0.0f;
+        existing_msg.camera_yaw = glm::radians(trans.rotation.y);
 
         BitWriter existing_writer;
         NetworkSerializer::serialize(existing_writer, existing_msg);
@@ -580,6 +587,14 @@ GAME_API bool gardenServerInit(EngineServices* services)
         const InputSample& input,
         uint32_t acknowledged_server_tick) {
         processWeaponInput(client_id, player_entity, input, acknowledged_server_tick);
+    });
+
+    // D3: weapon-select fires once per value change (engine edge detection).
+    // Slot semantics are template data; switching lands with inventory.
+    g_server_network.setWeaponSelectHandler([](
+        uint16_t client_id, entt::entity, uint8_t weapon_select, const InputSample& input) {
+        LOG_ENGINE_INFO("Player {} requested weapon select {} (tick {})",
+            client_id, static_cast<int>(weapon_select), input.tick);
     });
 
     g_server_network.setOnClientConnected([](uint16_t client_id) {
@@ -684,6 +699,25 @@ GAME_API void gardenServerOnLevelLoaded()
 {
     if (!g_server_services) return;
     g_server_services->game_world->getPhysicsSystem().optimizeBroadPhase();
+    // D2 step 6: compute the v3 level hash for the loaded default level.
+    static const char* kCandidates[] = {
+        "assets/levels/main.level.json",
+        "Templates/FPSShooter/assets/levels/main.level.json",
+        "../Templates/FPSShooter/assets/levels/main.level.json",
+    };
+    for (const char* path : kCandidates) {
+        FILE* file = std::fopen(path, "rb");
+        if (!file) continue;
+        std::vector<uint8_t> bytes;
+        uint8_t chunk[8192];
+        size_t read = 0;
+        while ((read = std::fread(chunk, 1, sizeof(chunk), file)) > 0) {
+            bytes.insert(bytes.end(), chunk, chunk + read);
+        }
+        std::fclose(file);
+        g_server_network.setLevelHash(Net::computeLevelHashFromBytes(bytes));
+        break;
+    }
     LOG_ENGINE_INFO("Server level loaded");
 }
 

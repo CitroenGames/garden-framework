@@ -29,6 +29,11 @@ using ServerInputSampleHandler = std::function<void(
     entt::entity player_entity,
     const InputSample& input,
     uint32_t acknowledged_server_tick)>;
+using ServerWeaponSelectHandler = std::function<void(
+    uint16_t client_id,
+    entt::entity player_entity,
+    uint8_t weapon_select,
+    const InputSample& input)>;
 
 // Client connection tracking (server-side)
 struct ClientConnection
@@ -78,6 +83,11 @@ private:
     ServerCustomMessageHandler on_custom_message;
     ServerInputFilter input_filter;
     ServerInputSampleHandler input_sample_handler;
+    ServerWeaponSelectHandler weapon_select_handler;
+
+    // Handshake state (wire v3)
+    uint32_t server_level_hash = 0;
+    uint32_t server_capability_flags = CAP_ALL_KNOWN;
 
     // Network stats
     NetworkStats stats;
@@ -124,6 +134,18 @@ public:
     void setCustomMessageHandler(ServerCustomMessageHandler callback) { on_custom_message = std::move(callback); }
     void setInputFilter(ServerInputFilter callback) { input_filter = std::move(callback); }
     void setInputSampleHandler(ServerInputSampleHandler callback) { input_sample_handler = std::move(callback); }
+    void setWeaponSelectHandler(ServerWeaponSelectHandler callback) { weapon_select_handler = std::move(callback); }
+
+    // Level hash handshake (D2). 0 = no level loaded (sentinel).
+    void setLevelHash(uint32_t hash) { server_level_hash = hash; }
+    uint32_t getLevelHash() const { return server_level_hash; }
+    void setServerCapabilityFlags(uint32_t flags) { server_capability_flags = flags; }
+    uint32_t getServerCapabilityFlags() const { return server_capability_flags; }
+    uint32_t getClientCapabilityFlags(uint16_t client_id) const;
+
+    // Generic replicated spawn (SPAWN_ENTITY, reliable)
+    void sendSpawnEntityToClient(uint16_t client_id, const SpawnEntityMessage& msg);
+    void broadcastSpawnEntity(const SpawnEntityMessage& msg);
 
     // Client management
     const ClientInfo* getClientInfo(uint16_t client_id) const;
@@ -176,6 +198,7 @@ private:
     void recordDroppedToPeer(ENetPeer* peer, std::size_t byte_count);
     bool shouldAcceptClientMessage(ENetPeer* peer, uint8_t message_type) const;
     void disconnectClient(uint16_t client_id, const char* reason);
+    void sendConnectReject(ENetPeer* peer, RejectCode code, const char* reason);
 };
 
 } // namespace Net

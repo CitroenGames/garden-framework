@@ -5,6 +5,8 @@
 #include "Network/NetworkTransport.hpp"
 #include "Network/SharedMovement.hpp"
 #include "Network/LagHistory.hpp"
+#include "Network/LevelHash.hpp"
+#include "Network/ReplicationRegistry.hpp"
 #include "Network/PredictionTypes.hpp"
 #include "Network/InterpolationBuffer.hpp"
 
@@ -115,7 +117,13 @@ int testInputPolicy()
     if (Net::shouldAcceptInputTick(40, 40)) return fail(name, "duplicate tick accepted");
     if (Net::shouldAcceptInputTick(39, 40)) return fail(name, "old tick accepted");
     if (Net::shouldAcceptInputTick(170, 40)) return fail(name, "out-of-window tick accepted");
-    if (Net::InputFlags::RELOAD != Net::InputFlags::ATTACK2) return fail(name, "reload alias mismatch");
+    if (Net::InputFlags::RELOAD == Net::InputFlags::ATTACK2) return fail(name, "reload still aliases attack2");
+    if (Net::InputFlags::RELOAD != static_cast<uint16_t>(1 << 11)) return fail(name, "reload bit mismatch");
+    if (Net::InputFlags::CROUCH != static_cast<uint16_t>(1 << 8)) return fail(name, "crouch bit mismatch");
+    if (Net::InputFlags::SPRINT != static_cast<uint16_t>(1 << 9)) return fail(name, "sprint bit mismatch");
+    if (Net::InputFlags::WALK != static_cast<uint16_t>(1 << 10)) return fail(name, "walk bit mismatch");
+    if (Net::InputFlags::DROP != static_cast<uint16_t>(1 << 12)) return fail(name, "drop bit mismatch");
+    if (Net::getWeaponSelect(Net::withWeaponSelect(0, 4)) != 4) return fail(name, "weapon select field mismatch");
 
     Net::InputSample valid_sample;
     valid_sample.tick = 1;
@@ -148,18 +156,20 @@ int testInputPolicy()
 int testInputActionLatchPolicy()
 {
     const char* name = "InputActionLatchPolicy";
-    const uint8_t mask = Net::INPUT_ACTION_LATCH_MASK;
+    const uint16_t mask = Net::INPUT_ACTION_LATCH_MASK;
 
     if ((mask & Net::InputFlags::JUMP) == 0) return fail(name, "jump is not latched");
     if ((mask & Net::InputFlags::ATTACK) == 0) return fail(name, "attack is not latched");
-    if ((mask & Net::InputFlags::ATTACK2) == 0) return fail(name, "attack2 is not latched");
+    if ((mask & Net::InputFlags::RELOAD) == 0) return fail(name, "reload is not latched");
+    if ((mask & Net::InputFlags::DROP) == 0) return fail(name, "drop is not latched");
 
-    const uint8_t movement_mask =
+    const uint16_t movement_mask =
         Net::InputFlags::MOVE_FORWARD |
         Net::InputFlags::MOVE_BACK |
         Net::InputFlags::MOVE_LEFT |
         Net::InputFlags::MOVE_RIGHT |
-        Net::InputFlags::USE;
+        Net::InputFlags::USE |
+        Net::InputFlags::ATTACK2;
     if ((mask & movement_mask) != 0) return fail(name, "held movement/use inputs are latched");
     return 0;
 }
@@ -405,14 +415,259 @@ int testPredictionAndInterpolation()
     if (history.get(4) == nullptr) return fail(name, "latest prediction missing");
 
     Net::EntityInterpolationBuffer buffer;
+    constexpr float kDeg = 3.14159265358979323846f / 180.0f;
     buffer.addSnapshot(10, glm::vec3(0), glm::vec3(10, 0, 0), false, 0.0f);
-    buffer.addSnapshot(12, glm::vec3(2, 0, 0), glm::vec3(10, 0, 0), false, 90.0f);
+    buffer.addSnapshot(12, glm::vec3(2, 0, 0), glm::vec3(10, 0, 0), false, 90.0f * kDeg);
 
     glm::vec3 pos;
     float rot = 0.0f;
     if (!buffer.interpolate(11.0f, pos, rot)) return fail(name, "interpolation failed");
     if (!approxEqual(pos.x, 1.0f, 0.05f)) return fail(name, "interpolated position mismatch");
-    if (!approxEqual(rot, 45.0f, 0.05f)) return fail(name, "interpolated rotation mismatch");
+    if (!approxEqual(rot, 45.0f * kDeg, 0.05f)) return fail(name, "interpolated rotation mismatch");
+
+    // Wrap lerp: 170deg -> -170deg (radians) must go through +-180, never 0.
+    Net::EntityInterpolationBuffer wrap_buffer;
+    wrap_buffer.addSnapshot(10, glm::vec3(0), glm::vec3(0), false, 170.0f * kDeg);
+    wrap_buffer.addSnapshot(12, glm::vec3(0), glm::vec3(0), false, -170.0f * kDeg);
+    glm::vec3 wrap_pos;
+    float wrap_rot = 0.0f;
+    if (!wrap_buffer.interpolate(11.0f, wrap_pos, wrap_rot)) return fail(name, "wrap interpolation failed");
+    if (std::abs(wrap_rot) < 170.0f * kDeg) return fail(name, "wrap lerp went through zero");
+    return 0;
+}
+
+int testWireV3Handshake()
+{
+    const char* name = "WireV3Handshake";
+    if (Net::NETWORK_PROTOCOL_VERSION != 3) return fail(name, "protocol version is not 3");
+    if (Net::NETWORK_PROTOCOL_MIN_SUPPORTED != 3) return fail(name, "min supported is not 3");
+
+    Net::ConnectRequestMessage req;
+    std::strncpy(req.player_name, "v3player", 31);
+    req.level_hash = 0xDEADBEEFu;
+    req.capability_flags = Net::CAP_HAS_EXT | Net::CAP_VIEW_TICK;
+    Net::BitWriter writer;
+    Net::NetworkSerializer::serialize(writer, req);
+    uint32_t peeked = 0;
+    if (!Net::NetworkSerializer::tryPeekProtocolVersion(writer.getData(), writer.getByteSize(), peeked)) {
+        return fail(name, "version peek failed");
+    }
+    if (peeked != 3) return fail(name, "peeked version mismatch");
+    Net::BitReader reader(writer.getData(), writer.getByteSize());
+    Net::ConnectRequestMessage out;
+    if (!Net::NetworkSerializer::deserialize(reader, out)) return fail(name, "connect request round-trip failed");
+    if (out.level_hash != 0xDEADBEEFu || out.capability_flags != req.capability_flags) {
+        return fail(name, "connect request fields mismatch");
+    }
+    if (std::string(out.player_name) != "v3player") return fail(name, "player name mismatch");
+
+    Net::ConnectAcceptMessage accept;
+    accept.client_id = 7;
+    accept.server_tick = 123;
+    accept.level_hash = 0xDEADBEEFu;
+    accept.capability_flags = Net::CAP_HAS_EXT;
+    Net::BitWriter aw;
+    Net::NetworkSerializer::serialize(aw, accept);
+    Net::BitReader ar(aw.getData(), aw.getByteSize());
+    Net::ConnectAcceptMessage aout;
+    if (!Net::NetworkSerializer::deserialize(ar, aout)) return fail(name, "connect accept round-trip failed");
+    if (aout.client_id != 7 || aout.capability_flags != Net::CAP_HAS_EXT) return fail(name, "accept fields mismatch");
+
+    for (uint8_t code = 0; code <= 4; ++code) {
+        Net::ConnectRejectMessage reject;
+        reject.reject_code = code;
+        std::strncpy(reject.reason, "nope", 63);
+        Net::BitWriter rw;
+        Net::NetworkSerializer::serialize(rw, reject);
+        Net::BitReader rr(rw.getData(), rw.getByteSize());
+        Net::ConnectRejectMessage rout;
+        if (!Net::NetworkSerializer::deserialize(rr, rout)) return fail(name, "reject round-trip failed");
+        if (rout.reject_code != code) return fail(name, "reject code mismatch");
+    }
+
+    // FNV-1a level hash determinism
+    const uint8_t level_a[] = {'l','e','v','e','l','-'};
+    const uint8_t level_b[] = {'l','e','v','e','l','+'};
+    auto h1 = Net::computeLevelHash(level_a, sizeof(level_a), {{"sv_gravity","800"},{"sv_cheats","0"}});
+    auto h2 = Net::computeLevelHash(level_a, sizeof(level_a), {{"sv_cheats","0"},{"sv_gravity","800"}});
+    if (h1 != h2) return fail(name, "hash not deterministic under cvar order");
+    auto h3 = Net::computeLevelHash(level_b, sizeof(level_b), {{"sv_cheats","0"},{"sv_gravity","800"}});
+    if (h1 == h3) return fail(name, "one-byte level change kept hash");
+    if (Net::finalizeLevelHash(0) != 1) return fail(name, "zero hash not remapped to 1");
+    return 0;
+}
+
+int testExtRoundTrip()
+{
+    const char* name = "ExtRoundTrip";
+    Net::ReplicationRegistry::get().clear();
+    Net::ReplicationRegistry::get().registerComponent(42, {{"a",0,nullptr,nullptr},{"b",1,nullptr,nullptr},{"c",2,nullptr,nullptr}});
+
+    Net::WorldStateUpdateMessage msg;
+    msg.server_tick = 50;
+    msg.snapshot_flags = Net::SnapshotFlags::FULL | Net::SnapshotFlags::HAS_EXT;
+    std::vector<Net::EntityUpdateData> updates;
+    Net::EntityUpdateData with_ext;
+    with_ext.entity_id = 7;
+    with_ext.flags = Net::ComponentFlags::TRANSFORM;
+    with_ext.position = glm::vec3(1,2,3);
+    Net::ReplicatedExtEntry entry;
+    entry.component_id = 42;
+    entry.field_mask = 0x7;
+    entry.payload = {1,2,3,4,5,6};
+    with_ext.ext_entries.push_back(entry);
+    updates.push_back(with_ext);
+    Net::EntityUpdateData plain;
+    plain.entity_id = 8;
+    plain.flags = Net::ComponentFlags::TRANSFORM;
+    plain.position = glm::vec3(4,5,6);
+    updates.push_back(plain);
+
+    Net::BitWriter writer;
+    Net::NetworkSerializer::serialize(writer, msg, updates);
+    Net::BitReader reader(writer.getData(), writer.getByteSize());
+    Net::WorldStateUpdateMessage out;
+    std::vector<Net::EntityUpdateData> out_updates;
+    if (!Net::NetworkSerializer::deserialize(reader, out, out_updates)) return fail(name, "ext deserialize failed");
+    if (out_updates.size() != 2) return fail(name, "ext entity count mismatch");
+    if (out_updates[0].ext_entries.size() != 1 || out_updates[0].ext_entries[0].payload != entry.payload) {
+        return fail(name, "ext payload mismatch");
+    }
+    if (!approxEqual(out_updates[1].position.x, 4.0f)) return fail(name, "following entity mismatch");
+
+    // Unknown component: skipped, following entity still parses.
+    Net::ReplicationRegistry::get().clear();
+    Net::BitReader reader2(writer.getData(), writer.getByteSize());
+    Net::WorldStateUpdateMessage out2;
+    std::vector<Net::EntityUpdateData> out2_updates;
+    if (!Net::NetworkSerializer::deserialize(reader2, out2, out2_updates)) return fail(name, "unknown-component deserialize failed");
+    if (!out2_updates[0].ext_entries.empty()) return fail(name, "unknown component was not skipped");
+    if (!approxEqual(out2_updates[1].position.x, 4.0f)) return fail(name, "following entity after skip mismatch");
+
+    // Truncated ext_len: whole message rejected, zero entities applied.
+    Net::BitReader trunc_reader(writer.getData(), writer.getByteSize() - 1);
+    Net::WorldStateUpdateMessage out3;
+    std::vector<Net::EntityUpdateData> out3_updates;
+    if (Net::NetworkSerializer::deserialize(trunc_reader, out3, out3_updates)) return fail(name, "truncated ext accepted");
+    if (!out3_updates.empty()) return fail(name, "truncated ext applied partial entities");
+
+    // flags=0 entity is exactly 5 bytes (D1: no GUID widening, no ext).
+    Net::EntityUpdateData empty;
+    empty.entity_id = 9;
+    empty.flags = 0;
+    Net::BitWriter ew;
+    Net::NetworkSerializer::serialize(ew, empty);
+    if (ew.getByteSize() != 5) return fail(name, "flags=0 entity size is not 5 bytes");
+    Net::ReplicationRegistry::get().clear();
+    return 0;
+}
+
+int testButtonsAndViewTick()
+{
+    const char* name = "ButtonsAndViewTick";
+    Net::InputCommandMessage msg;
+    msg.client_tick = 100;
+    msg.last_received_tick = 90;
+    msg.buttons = Net::withWeaponSelect(
+        static_cast<uint16_t>(Net::InputFlags::CROUCH | Net::InputFlags::RELOAD), 2);
+    msg.view_server_tick = 88;
+    msg.camera_yaw = 1.0f;
+    Net::InputSample redundant[1] = {};
+    redundant[0].tick = 99;
+    redundant[0].buttons = Net::InputFlags::ATTACK2;
+    redundant[0].view_server_tick = 87;
+
+    Net::BitWriter writer;
+    Net::NetworkSerializer::serialize(writer, msg, redundant, 1, true);
+    if (writer.getByteSize() != 58) return fail(name, "v3 input packet size mismatch (view tick)");
+    Net::BitReader reader(writer.getData(), writer.getByteSize());
+    Net::InputCommandMessage out;
+    std::vector<Net::InputSample> out_red;
+    if (!Net::NetworkSerializer::deserialize(reader, out, out_red, true)) return fail(name, "input deserialize failed");
+    if (out.buttons != msg.buttons) return fail(name, "uint16 buttons round-trip failed");
+    if ((out.buttons & Net::InputFlags::RELOAD) == 0) return fail(name, "reload bit lost");
+    if ((out.buttons & Net::InputFlags::ATTACK2) != 0) return fail(name, "reload aliased to attack2");
+    if (out.view_server_tick != 88 || out_red.size() != 1 || out_red[0].view_server_tick != 87) {
+        return fail(name, "view tick round-trip failed");
+    }
+    if (out_red[0].buttons != Net::InputFlags::ATTACK2) return fail(name, "attack2 distinctness failed");
+
+    // Without CAP_VIEW_TICK the field is omitted and defaults to ack tick.
+    Net::BitWriter nw;
+    Net::NetworkSerializer::serialize(nw, msg, redundant, 1, false);
+    if (nw.getByteSize() != 50) return fail(name, "no-view-tick packet size mismatch");
+    Net::BitReader nr(nw.getData(), nw.getByteSize());
+    Net::InputCommandMessage nout;
+    std::vector<Net::InputSample> nred;
+    if (!Net::NetworkSerializer::deserialize(nr, nout, nred, false)) return fail(name, "no-view-tick deserialize failed");
+    if (nout.view_server_tick != nout.last_received_tick) return fail(name, "view tick default is not ack tick");
+
+    // Reserved select 7 masks to 0 and counts, sample still valid.
+    Net::InputCommandMessage bad = msg;
+    bad.buttons = Net::withWeaponSelect(Net::InputFlags::JUMP, 7);
+    const uint32_t before = Net::ReplicationRegistry::get().weapon_select_reserved_count;
+    Net::BitWriter bw;
+    Net::NetworkSerializer::serialize(bw, bad, nullptr, 0, true);
+    Net::BitReader br(bw.getData(), bw.getByteSize());
+    Net::InputCommandMessage bout;
+    std::vector<Net::InputSample> bred;
+    if (!Net::NetworkSerializer::deserialize(br, bout, bred)) return fail(name, "reserved-select packet rejected");
+    if (Net::getWeaponSelect(bout.buttons) != 0) return fail(name, "reserved select not masked");
+    if (Net::ReplicationRegistry::get().weapon_select_reserved_count != before + 1) return fail(name, "reserved select not counted");
+    return 0;
+}
+
+int testSpawnRadians()
+{
+    const char* name = "SpawnRadians";
+    constexpr float kPi = 3.14159265358979323846f;
+    Net::SpawnPlayerMessage spawn;
+    spawn.client_id = 3;
+    spawn.entity_id = 11;
+    spawn.position = glm::vec3(1,2,3);
+    spawn.camera_yaw = kPi * 0.5f;
+    Net::BitWriter writer;
+    Net::NetworkSerializer::serialize(writer, spawn);
+    Net::BitReader reader(writer.getData(), writer.getByteSize());
+    Net::SpawnPlayerMessage out;
+    if (!Net::NetworkSerializer::deserialize(reader, out)) return fail(name, "spawn player round-trip failed");
+    if (!approxEqual(out.camera_yaw, kPi * 0.5f, 1e-6f)) return fail(name, "spawn yaw not preserved (radians)");
+
+    Net::SpawnEntityMessage entity;
+    entity.network_id = 21;
+    entity.archetype_id = 5;
+    entity.owner_client_id = 3;
+    entity.position = glm::vec3(4,5,6);
+    entity.rotation_y = -kPi * 0.5f;
+    entity.init_ext = {9,8,7};
+    Net::BitWriter ew;
+    Net::NetworkSerializer::serialize(ew, entity);
+    Net::BitReader er(ew.getData(), ew.getByteSize());
+    Net::SpawnEntityMessage eout;
+    if (!Net::NetworkSerializer::deserialize(er, eout)) return fail(name, "spawn entity round-trip failed");
+    if (eout.network_id != 21 || eout.archetype_id != 5) return fail(name, "spawn entity ids mismatch");
+    if (!approxEqual(eout.rotation_y, -kPi * 0.5f, 1e-6f)) return fail(name, "spawn entity yaw mismatch");
+    if (eout.init_ext != entity.init_ext) return fail(name, "spawn entity init_ext mismatch");
+    if (static_cast<uint8_t>(Net::MessageType::SPAWN_ENTITY) != 6) return fail(name, "SPAWN_ENTITY id is not 6");
+    return 0;
+}
+
+int testTruncatedFuzz()
+{
+    const char* name = "TruncatedFuzz";
+    Net::ConnectRequestMessage req;
+    req.level_hash = 42;
+    req.capability_flags = 3;
+    Net::BitWriter writer;
+    Net::NetworkSerializer::serialize(writer, req);
+    for (size_t cut = 0; cut < writer.getByteSize(); ++cut) {
+        Net::BitReader reader(writer.getData(), cut);
+        Net::ConnectRequestMessage out;
+        if (Net::NetworkSerializer::deserialize(reader, out) && cut >= 6) {
+            // Short reads before the trailing fields must fail; full reads pass above.
+            if (cut < writer.getByteSize()) return fail(name, "truncated connect request accepted");
+        }
+    }
     return 0;
 }
 
@@ -432,6 +687,11 @@ int main()
     failures += testNetworkStats();
     failures += testLagHistory();
     failures += testPredictionAndInterpolation();
+    failures += testWireV3Handshake();
+    failures += testExtRoundTrip();
+    failures += testButtonsAndViewTick();
+    failures += testSpawnRadians();
+    failures += testTruncatedFuzz();
 
     if (failures == 0) {
         std::cout << "[PASS] NetworkTests\n";

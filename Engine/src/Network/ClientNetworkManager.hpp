@@ -35,7 +35,7 @@ enum class ConnectionState : uint8_t
 // Input state structure for sending to server
 struct InputState
 {
-    uint8_t buttons = 0;              // Button flags
+    uint16_t buttons = 0;             // Button flags (uint16, wire v3)
     float camera_yaw = 0.0f;
     float camera_pitch = 0.0f;
     float move_forward = 0.0f;        // -1.0 to 1.0
@@ -63,6 +63,14 @@ private:
     std::unordered_map<uint32_t, entt::entity> network_id_to_entity;
     entt::entity local_player_entity = entt::null;
     uint32_t local_player_network_id = 0;
+
+    // Handshake state (wire v3)
+    uint32_t client_level_hash = 0;
+    uint32_t client_capability_flags = CAP_ALL_KNOWN;
+    uint32_t negotiated_capability_flags = 0;
+    uint8_t last_reject_code = static_cast<uint8_t>(RejectCode::Unknown);
+    std::string last_reject_reason;
+    uint8_t pending_weapon_select = 0; // preserved until its packet is sent
 
     // Connection timeout tracking
     float connection_timeout = 0.0f;
@@ -149,6 +157,14 @@ public:
     void sendCustomReliable(const BitWriter& writer);
     void sendCustomUnreliable(const BitWriter& writer);
 
+    // Level hash handshake (D2). 0 = no level loaded (sentinel).
+    void setLevelHash(uint32_t hash) { client_level_hash = hash; }
+    uint32_t getLevelHash() const { return client_level_hash; }
+    void setClientCapabilityFlags(uint32_t flags) { client_capability_flags = flags; }
+    uint32_t getNegotiatedCapabilityFlags() const { return negotiated_capability_flags; }
+    RejectCode getLastRejectCode() const { return static_cast<RejectCode>(last_reject_code); }
+    const std::string& getLastRejectReason() const { return last_reject_reason; }
+
     // Callbacks
     void setOnDisconnected(std::function<void()> callback) {
         on_disconnected = callback;
@@ -168,6 +184,7 @@ private:
     void handleConnectReject(BitReader& reader);
     void handleWorldStateUpdate(BitReader& reader);
     void handleSpawnPlayer(BitReader& reader);
+    void handleSpawnEntity(BitReader& reader);
     void handleDespawnPlayer(BitReader& reader);
     void handleDisconnect(BitReader& reader);
     void handlePong(BitReader& reader);

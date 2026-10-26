@@ -16,7 +16,8 @@ struct MovementInput
     float move_right = 0.0f;    // -1.0 to 1.0
     float camera_yaw = 0.0f;    // radians
     float camera_pitch = 0.0f;  // radians
-    uint8_t buttons = 0;        // InputFlags bitfield
+    uint16_t buttons = 0;       // InputFlags bitfield (uint16, wire v3)
+    uint32_t view_server_tick = 0; // server tick the client was viewing
 };
 
 // Player movement state at a point in time
@@ -69,6 +70,10 @@ namespace SharedMovement
         character_input.camera_pitch = input.camera_pitch;
         if ((input.buttons & InputFlags::JUMP) != 0)
             character_input.buttons |= CharacterMoveFlags::Jump;
+        if ((input.buttons & InputFlags::CROUCH) != 0)
+            character_input.buttons |= CharacterMoveFlags::Crouch;
+        if ((input.buttons & InputFlags::SPRINT) != 0)
+            character_input.buttons |= CharacterMoveFlags::Sprint;
 
         CharacterControllerState character_state;
         character_state.position = current.position;

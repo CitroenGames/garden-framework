@@ -111,9 +111,11 @@ private:
 
     static float lerpAngle(float a, float b, float t)
     {
+        constexpr float kPi = 3.14159265358979323846f;
+        constexpr float kTwoPi = 2.0f * kPi;
         float diff = b - a;
-        while (diff > 180.0f) diff -= 360.0f;
-        while (diff < -180.0f) diff += 360.0f;
+        while (diff > kPi) diff -= kTwoPi;
+        while (diff < -kPi) diff += kTwoPi;
         return a + diff * t;
     }
 

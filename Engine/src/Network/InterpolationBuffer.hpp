@@ -145,14 +145,15 @@ private:
     size_t head = 0;
     size_t count = 0;
 
-    // Lerp between two angles (in degrees or radians) via shortest path
+    // Lerp between two angles in radians via shortest path ([-pi, pi)).
+    // Buffer stores radians (D4); callers convert to degrees at the ECS boundary.
     static float lerpAngle(float a, float b, float t)
     {
+        constexpr float kPi = 3.14159265358979323846f;
+        constexpr float kTwoPi = 2.0f * kPi;
         float diff = b - a;
-        // Wrap to [-180, 180] for degrees (works for radians too with [-PI, PI])
-        // Using a generous range since rotation_y is stored in degrees in TransformComponent
-        while (diff > 180.0f) diff -= 360.0f;
-        while (diff < -180.0f) diff += 360.0f;
+        while (diff > kPi) diff -= kTwoPi;
+        while (diff < -kPi) diff += kTwoPi;
         return a + diff * t;
     }
 };

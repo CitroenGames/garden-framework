@@ -129,6 +129,8 @@ void ClientNetworkManager::shutdown()
     pending_input_tick = 0;
     has_pending_input = false;
     recent_input_count = 0;
+    negotiated_capability_flags = 0;
+    pending_weapon_select = 0;
     local_player_entity = entt::null;
     local_player_network_id = 0;
 
@@ -202,6 +204,7 @@ void ClientNetworkManager::update(float delta_time)
             recent_inputs[0].camera_pitch = last_sent_input.camera_pitch;
             recent_inputs[0].move_forward = last_sent_input.move_forward;
             recent_inputs[0].move_right = last_sent_input.move_right;
+            recent_inputs[0].view_server_tick = last_received_server_tick;
             if (recent_input_count < 3) recent_input_count++;
 
             // Create and send input command with redundant older inputs
@@ -214,6 +217,7 @@ void ClientNetworkManager::update(float delta_time)
             msg.camera_pitch = last_sent_input.camera_pitch;
             msg.move_forward = last_sent_input.move_forward;
             msg.move_right = last_sent_input.move_right;
+            msg.view_server_tick = last_received_server_tick;
 
             // Include up to 2 older inputs for redundancy, oldest first.
             uint8_t redundant_count = (recent_input_count > 1) ? static_cast<uint8_t>(recent_input_count - 1) : 0;
@@ -222,8 +226,12 @@ void ClientNetworkManager::update(float delta_time)
             for (uint8_t i = 0; i < redundant_count; ++i) {
                 redundant_inputs[i] = recent_inputs[redundant_count - i];
             }
-            NetworkSerializer::serialize(writer, msg, redundant_inputs, redundant_count);
+            const bool include_view_tick = (negotiated_capability_flags & CAP_VIEW_TICK) != 0;
+            NetworkSerializer::serialize(writer, msg, redundant_inputs, redundant_count, include_view_tick);
             sendUnreliableMessage(writer);
+            // The packet carrying the pending select has been handed to the
+            // rate limiter; the press is preserved up to this point (D3).
+            pending_weapon_select = 0;
         }
     }
 
@@ -259,15 +267,24 @@ void ClientNetworkManager::sendInputCommand(uint32_t command_tick, const InputSt
         client_tick = command_tick;
     }
 
-    const uint8_t latched_actions = has_pending_input
-        ? static_cast<uint8_t>(last_sent_input.buttons & INPUT_ACTION_LATCH_MASK)
+    const uint16_t latched_actions = has_pending_input
+        ? static_cast<uint16_t>(last_sent_input.buttons & INPUT_ACTION_LATCH_MASK)
         : 0;
 
     // Store input for rate-limited sending. One-shot action buttons are latched
     // so a high render frame rate cannot overwrite them before the next packet.
+    // WEAPON_SELECT is a value field: kept in pending_weapon_select until the
+    // packet carrying it has been handed to the rate limiter (D3).
+    const uint8_t requested_select = getWeaponSelect(input.buttons);
+    if (requested_select != 0) {
+        pending_weapon_select = requested_select;
+    }
     pending_input_tick = command_tick;
     last_sent_input = input;
     last_sent_input.buttons |= latched_actions;
+    if (pending_weapon_select != 0) {
+        last_sent_input.buttons = withWeaponSelect(last_sent_input.buttons, pending_weapon_select);
+    }
     has_pending_input = true;
 }
 
@@ -298,7 +315,8 @@ void ClientNetworkManager::handleServerConnect(ENetEvent& event)
     msg.protocol_version = NETWORK_PROTOCOL_VERSION;
     std::strncpy(msg.player_name, player_name.c_str(), 32);
     msg.player_name[31] = '\0';
-    msg.checksum = 0;  // TODO: Calculate checksum
+    msg.level_hash = client_level_hash;
+    msg.capability_flags = client_capability_flags;
 
     NetworkSerializer::serialize(writer, msg);
     sendReliableMessage(writer);
@@ -377,6 +395,10 @@ void ClientNetworkManager::handleServerMessage(ENetEvent& event)
             handleSpawnPlayer(reader);
             break;
 
+        case MessageType::SPAWN_ENTITY:
+            handleSpawnEntity(reader);
+            break;
+
         case MessageType::DESPAWN_PLAYER:
             handleDespawnPlayer(reader);
             break;
@@ -415,9 +437,25 @@ void ClientNetworkManager::handleConnectAccept(BitReader& reader)
         return;
     }
 
+    // Defence in depth (D2): the server check is authoritative, but a
+    // mismatched accept level_hash (both non-zero) still disconnects.
+    if (client_level_hash != 0 && msg.level_hash != 0 && msg.level_hash != client_level_hash) {
+        LOG_ENGINE_ERROR("Connection accepted with mismatched level hash: {0} (expected {1})",
+            msg.level_hash, client_level_hash);
+        last_reject_code = static_cast<uint8_t>(RejectCode::LevelMismatch);
+        last_reject_reason = "Level mismatch";
+        setConnectionState(ConnectionState::DISCONNECTED);
+        if (server_peer != nullptr) {
+            enet_peer_disconnect(server_peer, 0);
+            server_peer = nullptr;
+        }
+        return;
+    }
+
     client_id = msg.client_id;
     client_tick = 0;
     last_received_server_tick = msg.server_tick;
+    negotiated_capability_flags = msg.capability_flags;
 
     setConnectionState(ConnectionState::CONNECTED);
     LOG_ENGINE_INFO("Connection accepted! Client ID: {0}, Server Tick: {1}", client_id, msg.server_tick);
@@ -426,7 +464,16 @@ void ClientNetworkManager::handleConnectAccept(BitReader& reader)
 void ClientNetworkManager::handleConnectReject(BitReader& reader)
 {
     ConnectRejectMessage msg;
-    if (!NetworkSerializer::deserialize(reader, msg)) {
+    // v2 servers sent reason as the first payload byte (e.g. 'P' = 80 > 4):
+    // reinterpret the whole post-type payload as a v2 reason, code Unknown.
+    const uint8_t* raw = reader.getBuffer();
+    const size_t raw_size = reader.getBufferSize();
+    if (raw != nullptr && raw_size >= 2 && raw[1] > static_cast<uint8_t>(RejectCode::Banned)) {
+        msg.reject_code = static_cast<uint8_t>(RejectCode::Unknown);
+        const size_t copy_len = (std::min)(raw_size - 1, sizeof(msg.reason) - 1);
+        std::memcpy(msg.reason, raw + 1, copy_len);
+        msg.reason[copy_len] = '\0';
+    } else if (!NetworkSerializer::deserialize(reader, msg)) {
         LOG_ENGINE_WARN("Failed to deserialize CONNECT_REJECT message");
         setConnectionState(ConnectionState::DISCONNECTED);
         if (server_peer != nullptr) {
@@ -436,7 +483,10 @@ void ClientNetworkManager::handleConnectReject(BitReader& reader)
         return;
     }
 
-    LOG_ENGINE_ERROR("Connection rejected: {0}", msg.reason);
+    last_reject_code = msg.reject_code;
+    last_reject_reason = msg.reason;
+    LOG_ENGINE_ERROR("Connection rejected (code {0}): {1}",
+        static_cast<int>(msg.reject_code), msg.reason);
     setConnectionState(ConnectionState::DISCONNECTED);
 
     // Disconnect
@@ -558,6 +608,8 @@ void ClientNetworkManager::handleSpawnPlayer(BitReader& reader)
     // Add TransformComponent
     TransformComponent transform;
     transform.position = msg.position;
+    // D4 point 5: wire yaw is radians; ECS rotation is degrees.
+    transform.rotation.y = glm::degrees(msg.camera_yaw);
     game_world->registry.emplace<TransformComponent>(entity, transform);
 
     RigidBodyComponent rigidbody;
@@ -589,6 +641,42 @@ void ClientNetworkManager::handleSpawnPlayer(BitReader& reader)
         local_player_network_id = msg.entity_id;
         game_world->create_character_controller(entity);
         LOG_ENGINE_INFO("Local player entity created");
+    }
+}
+
+void ClientNetworkManager::handleSpawnEntity(BitReader& reader)
+{
+    if (game_world == nullptr) {
+        return;
+    }
+
+    SpawnEntityMessage msg;
+    if (!NetworkSerializer::deserialize(reader, msg)) {
+        LOG_ENGINE_WARN("Failed to deserialize SPAWN_ENTITY message");
+        return;
+    }
+
+    // Spawn for an id the client already has is a full update, not a dup.
+    entt::entity entity = getEntityByNetworkId(msg.network_id);
+    if (entity == entt::null) {
+        entity = game_world->registry.create();
+        NetworkedEntity networked;
+        networked.network_id = msg.network_id;
+        networked.owner_client_id = msg.owner_client_id;
+        networked.is_player = false;
+        game_world->registry.emplace<NetworkedEntity>(entity, networked);
+        network_id_to_entity[msg.network_id] = entity;
+    }
+
+    if (game_world->registry.all_of<TransformComponent>(entity)) {
+        auto& transform = game_world->registry.get<TransformComponent>(entity);
+        transform.position = msg.position;
+        transform.rotation.y = glm::degrees(msg.rotation_y);
+    } else {
+        TransformComponent transform;
+        transform.position = msg.position;
+        transform.rotation.y = glm::degrees(msg.rotation_y);
+        game_world->registry.emplace<TransformComponent>(entity, transform);
     }
 }
 
@@ -695,7 +783,8 @@ void ClientNetworkManager::createOrUpdateEntity(const EntityUpdateData& update)
     if (update.hasRotation()) {
         if (game_world->registry.all_of<TransformComponent>(entity)) {
             auto& transform = game_world->registry.get<TransformComponent>(entity);
-            transform.rotation.y = update.rotation_y;
+            // D4 point 3: wire radians -> ECS degrees.
+            transform.rotation.y = glm::degrees(update.rotation_y);
         }
     }
 
@@ -756,7 +845,8 @@ void ClientNetworkManager::pushInterpolationSnapshot(uint32_t network_id, uint32
     }
 
     auto& buffer = interp_buffers[network_id];
-    buffer.addSnapshot(server_tick, transform.position, velocity, grounded, transform.rotation.y);
+    // D4 point 4 (in): buffer stores radians; ECS holds degrees.
+    buffer.addSnapshot(server_tick, transform.position, velocity, grounded, glm::radians(transform.rotation.y));
 }
 
 void ClientNetworkManager::deleteEntity(uint32_t network_id)
@@ -832,6 +922,7 @@ bool ClientNetworkManager::shouldAcceptServerMessage(uint8_t message_type) const
         case MessageType::DISCONNECT:
         case MessageType::SPAWN_PLAYER:
         case MessageType::DESPAWN_PLAYER:
+        case MessageType::SPAWN_ENTITY:
         case MessageType::WORLD_STATE_UPDATE:
         case MessageType::PONG:
         case MessageType::CVAR_SYNC:
@@ -930,7 +1021,8 @@ void ClientNetworkManager::interpolateRemoteEntities()
         if (buffer.interpolate(render_tick, interpolated_pos, interpolated_rot)) {
             auto& transform = game_world->registry.get<TransformComponent>(entity);
             transform.position = interpolated_pos;
-            transform.rotation.y = interpolated_rot;
+            // D4 point 4 (out): buffer radians -> ECS degrees.
+            transform.rotation.y = glm::degrees(interpolated_rot);
         }
     }
 }

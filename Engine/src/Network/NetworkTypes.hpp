@@ -22,23 +22,41 @@ struct NetworkedEntity
         : network_id(net_id), owner_client_id(owner), is_player(player) {}
 };
 
-// Component snapshot - represents the state of an entity at a specific tick
+// Wrap an angle in radians to [-pi, pi).
+inline float wrapAnglePi(float angle)
+{
+    constexpr float kPi = 3.14159265358979323846f;
+    constexpr float kTwoPi = 2.0f * kPi;
+    float wrapped = std::fmod(angle + kPi, kTwoPi);
+    if (wrapped < 0.0f) wrapped += kTwoPi;
+    return wrapped - kPi;
+}
+
+inline float wrappedAngleDelta(float a, float b)
+{
+    return wrapAnglePi(a - b);
+}
+
+// Component snapshot - network-internal state; rotation_y is radians (D4).
+// ECS TransformComponent.rotation stays degrees; managers convert at the
+// five named boundary points only.
 struct ComponentSnapshot
 {
     glm::vec3 position = glm::vec3(0, 0, 0);
     glm::vec3 velocity = glm::vec3(0, 0, 0);
     bool grounded = false;
     glm::vec3 ground_normal = glm::vec3(0, 1, 0);
-    float rotation_y = 0.0f;  // Yaw rotation in degrees
+    float rotation_y = 0.0f;  // Yaw rotation in radians (wire / network-internal)
 
     // Comparison for delta compression
     bool operator==(const ComponentSnapshot& other) const {
         const float epsilon = 0.001f;
+        const float rotation_epsilon = 0.001f; // radians
         return glm::distance(position, other.position) < epsilon &&
                glm::distance(velocity, other.velocity) < epsilon &&
                grounded == other.grounded &&
                glm::distance(ground_normal, other.ground_normal) < epsilon &&
-               std::abs(rotation_y - other.rotation_y) < epsilon;
+               std::abs(wrappedAngleDelta(rotation_y, other.rotation_y)) < rotation_epsilon;
     }
 
     bool operator!=(const ComponentSnapshot& other) const {
@@ -252,6 +270,8 @@ struct ClientInfo
     uint32_t last_input_tick = 0;         // Last tick we received input from client
     uint32_t last_input_budget_server_tick = 0;
     uint32_t input_tick_budget = 3;
+    uint32_t capability_flags = 0; // negotiated CAP_* bits for this client
+    uint16_t last_weapon_select = 0; // last applied WEAPON_SELECT value (0 = none)
     float ping_ms = 0.0f;
     NetworkStats stats;
 
@@ -259,16 +279,5 @@ struct ClientInfo
     ClientInfo(uint16_t id, const std::string& name, ENetPeer* p)
         : client_id(id), player_name(name), peer(p) {}
 };
-
-// Convert entt::entity to network ID (32-bit integer)
-// Note: entt::entity is platform-specific, so we use explicit uint32_t for network
-inline uint32_t entityToNetworkId(uint32_t entity_value) {
-    return entity_value;
-}
-
-// Convert network ID back to entt::entity value
-inline uint32_t networkIdToEntity(uint32_t network_id) {
-    return network_id;
-}
 
 } // namespace Net
