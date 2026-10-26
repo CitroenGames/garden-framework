@@ -16,6 +16,7 @@
 #include "shared/WeaponTypes.hpp"
 #include "shared/WeaponSystem.hpp"
 #include "shared/FpsGameLogic.hpp"
+#include "shared/CompetitiveLogic.hpp"
 #include "Gameplay/GameplayComponents.hpp"
 #include <cstdlib>
 #include <cstring>
@@ -31,6 +32,15 @@
 static EngineServices* g_server_services = nullptr;
 static Net::ServerNetworkManager g_server_network;
 static Game::GameRules g_game_rules;
+// Competitive mode (FPS_GAME_MODE=competitive); DM/TDM paths unchanged when off.
+static bool g_competitive = false;
+static Competitive::RoundSystem g_round_system;
+static Competitive::BuySystem g_buy_system;
+static Competitive::EconomySystem g_economy;
+static Competitive::NullBombHooks g_bomb_hooks; // bomb plant/defuse: next stage
+static entt::entity g_match_entity = entt::null;
+static entt::entity findPlayerEntity(world& w, uint16_t client_id); // defined with competitive helpers below
+static void sendEconomyState(uint16_t client_id, entt::entity e);
 
 using namespace Net;
 
@@ -216,14 +226,14 @@ static void fireServerShot(
     entt::entity best_hit_ent = entt::null;
     std::unordered_map<entt::entity, int> pellet_hits;
     std::unordered_map<entt::entity, glm::vec3> pellet_hit_points;
-    auto player_view = w->registry.view<NetworkedEntity, TransformComponent, HealthComponent>();
+    auto player_view = w->registry.view<NetworkedEntity, TransformComponent, FpsHealthComponent>();
     for (int pellet = 0; pellet < weapon_def.pellets; pellet++) {
         glm::vec3 pellet_dir = WeaponSystem::applySpread(ray_dir, shot_spread,
             input.tick * 31 + pellet * 7919 + shooter_client_id);
         const PhysicsSystem::RaycastResult trace_hit =
             w->raycastClosest(ray_origin, pellet_dir, weapon_def.range, shooter_entity);
         const bool trace_hit_player = trace_hit.hit && w->registry.valid(trace_hit.entity) &&
-            w->registry.all_of<HealthComponent>(trace_hit.entity);
+            w->registry.all_of<FpsHealthComponent>(trace_hit.entity);
         if (trace_hit.hit && !trace_hit_player && trace_hit.distance < best_hit_dist) {
             best_hit_dist = trace_hit.distance; best_hit_point = trace_hit.hit_point;
             best_hit_entity_id = 0; best_hit_client_id = 0; best_hit_ent = entt::null;
@@ -231,7 +241,7 @@ static void fireServerShot(
         for (auto entity : player_view) {
             if (entity == shooter_entity) continue;
             auto& net = player_view.get<NetworkedEntity>(entity);
-            auto& health = player_view.get<HealthComponent>(entity);
+            auto& health = player_view.get<FpsHealthComponent>(entity);
             auto& trans = player_view.get<TransformComponent>(entity);
             if (!health.alive) continue;
             glm::vec3 target_position = trans.position;
@@ -256,7 +266,7 @@ static void fireServerShot(
     for (auto& kv : pellet_hits) {
         entt::entity victim_ent = kv.first;
         if (!w->registry.valid(victim_ent)) continue;
-        auto& victim_health = w->registry.get<HealthComponent>(victim_ent);
+        auto& victim_health = w->registry.get<FpsHealthComponent>(victim_ent);
         if (!victim_health.alive) continue;
         uint16_t victim_client = w->registry.get<NetworkedEntity>(victim_ent).owner_client_id;
         glm::vec3 hp = pellet_hit_points[victim_ent];
@@ -285,6 +295,16 @@ static void fireServerShot(
                 vlo.active_slot = prev;
             }
             g_game_rules.onPlayerKilled(*w, shooter_client_id, victim_client);
+            if (g_competitive && shooter_client_id != victim_client) {
+                entt::entity killer_ent = findPlayerEntity(*w, shooter_client_id);
+                if (killer_ent != entt::null && w->registry.all_of<Competitive::MoneyComponent>(killer_ent)) {
+                    const WeaponCatalogDef* def = findCatalogByWeaponType(weapon.weapon_type);
+                    // Legacy weapons have no catalog entry: default kill award data.
+                    if (def) g_economy.awardKill(w->registry.get<Competitive::MoneyComponent>(killer_ent), def);
+                    else w->registry.get<Competitive::MoneyComponent>(killer_ent).wallet.add(300);
+                    sendEconomyState(shooter_client_id, killer_ent);
+                }
+            }
             PlayerDiedMessage death_msg;
             death_msg.victim_client_id = victim_client; death_msg.killer_client_id = shooter_client_id; death_msg.death_position = victim_trans.position;
             BitWriter death_writer; CombatSerializer::serialize(death_writer, death_msg);
@@ -293,7 +313,10 @@ static void fireServerShot(
                 if (client && client->peer) g_server_network.sendReliableToClient(i, death_writer);
             }
             LOG_ENGINE_INFO("Player {} killed by player {}", victim_client, shooter_client_id);
-            g_game_rules.queueRespawn(victim_client);
+            // Competitive Live: no respawn (spectates until next Freeze).
+            // Warmup keeps DM-style respawn.
+            if (!g_competitive || g_round_system.state.phase == Competitive::RoundPhase::Warmup)
+                g_game_rules.queueRespawn(victim_client);
         }
     }
 
@@ -371,11 +394,11 @@ static void processWeaponInput(
         return;
     }
 
-    if (!w->registry.all_of<TransformComponent, HealthComponent, WeaponComponent>(player_entity)) {
+    if (!w->registry.all_of<TransformComponent, FpsHealthComponent, WeaponComponent>(player_entity)) {
         return;
     }
 
-    auto& health = w->registry.get<HealthComponent>(player_entity);
+    auto& health = w->registry.get<FpsHealthComponent>(player_entity);
     if (!health.alive) {
         return;
     }
@@ -410,12 +433,12 @@ static void respawnPlayer(uint16_t client_id, const glm::vec3& spawn_pos)
 {
     world* w = g_server_services->game_world;
 
-    auto view = w->registry.view<NetworkedEntity, TransformComponent, HealthComponent>();
+    auto view = w->registry.view<NetworkedEntity, TransformComponent, FpsHealthComponent>();
     for (auto entity : view) {
         auto& net = view.get<NetworkedEntity>(entity);
         if (net.owner_client_id == client_id && net.is_player) {
             auto& trans = view.get<TransformComponent>(entity);
-            auto& health = view.get<HealthComponent>(entity);
+            auto& health = view.get<FpsHealthComponent>(entity);
 
             // Reset state
             health.reset();
@@ -460,6 +483,225 @@ static void respawnPlayer(uint16_t client_id, const glm::vec3& spawn_pos)
     }
 }
 
+
+// ---- Competitive mode helpers ----
+static entt::entity findPlayerEntity(world& w, uint16_t client_id)
+{
+    auto view = w.registry.view<NetworkedEntity>();
+    for (auto e : view) {
+        auto& net = view.get<NetworkedEntity>(e);
+        if (net.is_player && net.owner_client_id == client_id) return e;
+    }
+    return entt::null;
+}
+static void sendEconomyState(uint16_t client_id, entt::entity e)
+{
+    world* w = g_server_services ? g_server_services->game_world : nullptr;
+    if (!w || !w->registry.valid(e) || !w->registry.all_of<Competitive::MoneyComponent>(e)) return;
+    auto& money = w->registry.get<Competitive::MoneyComponent>(e);
+    EconomyStateMessage msg; msg.balance = money.money(); msg.loss_streak = money.loss_streak;
+    BitWriter writer; CompetitiveSerializer::serialize(writer, msg);
+    g_server_network.sendReliableToClient(client_id, writer);
+}
+static void broadcastRoundState()
+{
+    world* w = g_server_services ? g_server_services->game_world : nullptr;
+    if (w && w->registry.valid(g_match_entity)) {
+        w->registry.get_or_emplace<Competitive::MatchStateComponent>(g_match_entity) = g_round_system.state;
+        w->registry.get_or_emplace<CountdownTimerComponent>(g_match_entity) = g_round_system.timer;
+    }
+    RoundStateMessage msg;
+    msg.phase = static_cast<uint8_t>(g_round_system.state.phase);
+    msg.phase_time_remaining = g_round_system.state.phase_time_remaining;
+    msg.phase_deadline_tick = g_round_system.state.phase_deadline_tick;
+    msg.server_tick = g_round_system.state.server_tick;
+    msg.round_number = g_round_system.state.round_number;
+    msg.wins_attackers = g_round_system.state.wins_attackers;
+    msg.wins_defenders = g_round_system.state.wins_defenders;
+    msg.bomb_planted = g_round_system.state.bomb_planted ? 1 : 0;
+    msg.last_reason = static_cast<uint8_t>(g_round_system.state.last_reason);
+    msg.last_winner = static_cast<uint8_t>(g_round_system.state.last_winner);
+    BitWriter writer; CompetitiveSerializer::serialize(writer, msg);
+    for (uint16_t i = 1; i < g_server_network.getNextClientId(); i++) {
+        const ClientInfo* c = g_server_network.getClientInfo(i);
+        if (c && c->peer) g_server_network.sendReliableToClient(i, writer);
+    }
+}
+static void competitiveFreezeRespawnAll()
+{
+    world* w = g_server_services ? g_server_services->game_world : nullptr;
+    if (!w) return;
+    std::vector<uint16_t> clients;
+    auto view = w->registry.view<NetworkedEntity, TeamComponent>();
+    for (auto e : view) {
+        auto& net = view.get<NetworkedEntity>(e);
+        if (net.is_player) clients.push_back(net.owner_client_id);
+    }
+    for (uint16_t cid : clients) {
+        entt::entity e = findPlayerEntity(*w, cid);
+        if (e == entt::null || !w->registry.all_of<TeamComponent>(e)) continue;
+        uint8_t team = w->registry.get<TeamComponent>(e).team_id;
+        if (team != FpsLogic::kTeamAttackers && team != FpsLogic::kTeamDefenders) continue;
+        bool was_dead = w->registry.all_of<FpsHealthComponent>(e) && !w->registry.get<FpsHealthComponent>(e).alive;
+        glm::vec3 pos = g_game_rules.getSpawnForPlayer(*w, cid, team);
+        respawnPlayer(cid, pos); // resets health/position; loadout re-granted inside
+        (void)was_dead;
+        sendEconomyState(cid, e);
+    }
+}
+static void competitivePeriodReset(bool overtime)
+{
+    world* w = g_server_services ? g_server_services->game_world : nullptr;
+    if (!w) return;
+    auto view = w->registry.view<NetworkedEntity, TeamComponent>();
+    for (auto e : view) {
+        auto& net = view.get<NetworkedEntity>(e);
+        if (!net.is_player) continue;
+        auto& team = view.get<TeamComponent>(e);
+        // Halftime/OT-half: swap Attackers <-> Defenders (engine TeamComponent).
+        if (team.team_id == FpsLogic::kTeamAttackers) team.team_id = FpsLogic::kTeamDefenders;
+        else if (team.team_id == FpsLogic::kTeamDefenders) team.team_id = FpsLogic::kTeamAttackers;
+        if (w->registry.all_of<Competitive::MoneyComponent>(e))
+            w->registry.get<Competitive::MoneyComponent>(e).reset(
+                g_round_system.config.currentStartMoney(overtime), g_round_system.config.money_cap);
+        if (w->registry.all_of<ArmorComponent>(e)) w->registry.get<ArmorComponent>(e) = ArmorComponent{};
+        // Strip weapons: pistol (team default) + knife only.
+        if (w->registry.all_of<InventoryComponent, PlayerLoadoutComponent, WeaponComponent>(e)) {
+            auto& inv = w->registry.get<InventoryComponent>(e);
+            auto& lo = w->registry.get<PlayerLoadoutComponent>(e);
+            auto& wpn = w->registry.get<WeaponComponent>(e);
+            for (auto& s : lo.slots) s = WeaponSlotState{};
+            WeaponType pistol = team.team_id == FpsLogic::kTeamAttackers ? WeaponType::GLOCK : WeaponType::P2000;
+            const auto& pd = getWeaponDef(pistol);
+            lo.slots[(size_t)WeaponSlot::Secondary] = WeaponSlotState{pistol, pd.max_ammo, pd.max_reserve_ammo, true};
+            const auto& kd = getWeaponDef(WeaponType::KNIFE);
+            lo.slots[(size_t)WeaponSlot::Melee] = WeaponSlotState{WeaponType::KNIFE, kd.max_ammo, kd.max_reserve_ammo, true};
+            lo.active_slot = (int)WeaponSlot::Secondary;
+            FpsLogic::loadSlotIntoWeapon(lo, wpn, lo.active_slot);
+            FpsLogic::syncInventory(inv, lo);
+            sendWeaponState(net.owner_client_id, e, wpn);
+        }
+        sendEconomyState(net.owner_client_id, e);
+    }
+    LOG_ENGINE_INFO("Competitive period reset (overtime={}): teams swapped, money reset", overtime);
+}
+static void competitiveRoundEndAwards(Competitive::RoundWinner winner, Competitive::RoundEndReason reason)
+{
+    world* w = g_server_services ? g_server_services->game_world : nullptr;
+    if (!w) return;
+    auto view = w->registry.view<NetworkedEntity, TeamComponent, Competitive::MoneyComponent>();
+    for (auto e : view) {
+        auto& net = view.get<NetworkedEntity>(e);
+        if (!net.is_player) continue;
+        auto& money = view.get<Competitive::MoneyComponent>(e);
+        g_economy.awardRoundEnd(money, Competitive::teamFromId(view.get<TeamComponent>(e).team_id), winner, reason);
+        sendEconomyState(net.owner_client_id, e);
+    }
+}
+static const char* competitivePhaseName(Competitive::RoundPhase ph)
+{
+    using P = Competitive::RoundPhase;
+    switch (ph) {
+    case P::WaitingForPlayers: return "WaitingForPlayers";
+    case P::Warmup: return "Warmup";
+    case P::Freeze: return "Freeze";
+    case P::Live: return "Live";
+    case P::RoundEnd: return "RoundEnd";
+    case P::Halftime: return "Halftime";
+    case P::MatchEnded: return "MatchEnded";
+    }
+    return "?";
+}
+static void handleCompetitiveBuy(uint16_t client_id, BitReader& reader)
+{
+    // Type byte already consumed by the network dispatcher.
+    uint32_t seq = reader.readUInt32();
+    uint16_t item_id = reader.readUInt16();
+    world* w = g_server_services ? g_server_services->game_world : nullptr;
+    if (!w) return;
+    entt::entity e = findPlayerEntity(*w, client_id);
+    BuyResultMessage reply; reply.request_seq = seq; reply.item_id = item_id;
+    if (e == entt::null || !w->registry.all_of<TeamComponent, Competitive::MoneyComponent, InventoryComponent, PlayerLoadoutComponent, WeaponComponent, FpsHealthComponent, TransformComponent>(e)) {
+        reply.result = static_cast<uint8_t>(Competitive::BuyResult::Dead);
+        BitWriter bw; CompetitiveSerializer::serialize(bw, reply);
+        g_server_network.sendReliableToClient(client_id, bw);
+        return;
+    }
+    uint8_t team = w->registry.get<TeamComponent>(e).team_id;
+    // Buy zone: distance-to-team-spawn fallback (see CompetitiveLogic note).
+    std::vector<glm::vec3> spawns;
+    for (auto& sp : g_game_rules.getTeamSpawnPoints()) if (sp.team_id == team) spawns.push_back(sp.position);
+    glm::vec3 pos = w->registry.get<TransformComponent>(e).position;
+    Competitive::BuyContext ctx;
+    ctx.client_id = client_id; ctx.request_seq = seq;
+    ctx.phase = g_round_system.state.phase;
+    ctx.seconds_into_live = g_round_system.state.phase == Competitive::RoundPhase::Live ? g_round_system.phaseElapsed() : 0.0f;
+    ctx.alive = w->registry.get<FpsHealthComponent>(e).alive;
+    ctx.in_buy_zone = Competitive::isInBuyZone(pos, spawns, g_round_system.config.buy_zone_radius);
+    ctx.team_id = team;
+    ctx.money = &w->registry.get<Competitive::MoneyComponent>(e);
+    ctx.inventory = &w->registry.get<InventoryComponent>(e);
+    ctx.loadout = &w->registry.get<PlayerLoadoutComponent>(e);
+    ctx.weapon = &w->registry.get<WeaponComponent>(e);
+    ctx.armor = w->registry.all_of<ArmorComponent>(e) ? &w->registry.get<ArmorComponent>(e) : nullptr;
+    FpsLogic::DroppedItem dropped;
+    // Replaced weapon (if any) is returned in `dropped`; COUNT = none.
+    // Detect a replaced weapon so it can be dropped into the world.
+    const WeaponCatalogDef* def = findCatalogById(item_id);
+    Competitive::BuyResult result = g_buy_system.buy(ctx, item_id, &dropped);
+    if (result == Competitive::BuyResult::Ok) {
+        if (dropped.type != WeaponType::COUNT)
+            spawnDroppedWeapon(*w, pos + glm::vec3(0.0f, 0.3f, 0.0f), dropped, client_id);
+        if (def && def->kind != BuyItemKind::Equipment)
+            sendWeaponState(client_id, e, *ctx.weapon);
+
+
+
+
+
+
+    }
+    reply.result = static_cast<uint8_t>(result);
+    reply.balance = ctx.money->money();
+    BitWriter bw; CompetitiveSerializer::serialize(bw, reply);
+    g_server_network.sendReliableToClient(client_id, bw);
+    sendEconomyState(client_id, e);
+    LOG_ENGINE_INFO("Competitive buy client={} item={} result={} balance={}", client_id, item_id, (int)result, reply.balance);
+}
+static void handleCompetitiveTeamSelect(uint16_t client_id, BitReader& reader)
+{
+    uint8_t desired = reader.readByte();
+    uint8_t auto_assign = reader.readByte();
+    world* w = g_server_services ? g_server_services->game_world : nullptr;
+    if (!w) return;
+    entt::entity e = findPlayerEntity(*w, client_id);
+    int32_t na = 0, nd = 0;
+    auto tv = w->registry.view<NetworkedEntity, TeamComponent>();
+    for (auto ent : tv) {
+        if (!tv.get<NetworkedEntity>(ent).is_player) continue;
+        uint8_t tid = tv.get<TeamComponent>(ent).team_id;
+        if (tid == FpsLogic::kTeamAttackers) na++; else if (tid == FpsLogic::kTeamDefenders) nd++;
+    }
+    Competitive::FpsTeam out = Competitive::FpsTeam::None;
+    Competitive::TeamSelectResult res = Competitive::validateTeamSelect(
+        Competitive::teamFromId(desired), auto_assign != 0, na, nd,
+        g_round_system.state.phase, g_round_system.config, out);
+    if (res == Competitive::TeamSelectResult::Ok && e != entt::null && w->registry.all_of<TeamComponent>(e)) {
+        uint8_t old = w->registry.get<TeamComponent>(e).team_id;
+        w->registry.get<TeamComponent>(e).team_id = Competitive::teamId(out);
+        LOG_ENGINE_INFO("Competitive team select client={} team {}->{}", client_id, (int)old, (int)out);
+        if (Competitive::canSpawnNow(g_round_system.state.phase) &&
+            w->registry.all_of<FpsHealthComponent>(e) && !w->registry.get<FpsHealthComponent>(e).alive) {
+            respawnPlayer(client_id, g_game_rules.getSpawnForPlayer(*w, client_id, Competitive::teamId(out)));
+        }
+    }
+    TeamResultMessage reply;
+    reply.result = static_cast<uint8_t>(res);
+    reply.team = static_cast<uint8_t>(out);
+    BitWriter bw; CompetitiveSerializer::serialize(bw, reply);
+    g_server_network.sendReliableToClient(client_id, bw);
+}
+
 // ---- Player spawning (called by network callbacks) ----
 
 static void spawnPlayerForClient(uint16_t client_id)
@@ -467,6 +709,20 @@ static void spawnPlayerForClient(uint16_t client_id)
     world* w = g_server_services->game_world;
 
     uint8_t team_id = g_game_rules.assignTeam(*w);
+    if (g_competitive) {
+        int32_t na = 0, nd = 0;
+        auto tv = w->registry.view<NetworkedEntity, TeamComponent>();
+        for (auto ent : tv) {
+            if (!tv.get<NetworkedEntity>(ent).is_player) continue;
+            uint8_t tid = tv.get<TeamComponent>(ent).team_id;
+            if (tid == FpsLogic::kTeamAttackers) na++; else if (tid == FpsLogic::kTeamDefenders) nd++;
+        }
+        Competitive::FpsTeam assigned = Competitive::autoAssignTeam(na, nd);
+        int32_t cnt = assigned == Competitive::FpsTeam::Attackers ? na : nd;
+        team_id = cnt >= g_round_system.config.team_size
+            ? Competitive::teamId(Competitive::FpsTeam::Spectator)
+            : Competitive::teamId(assigned);
+    }
     glm::vec3 spawn_pos = g_game_rules.getSpawnForPlayer(*w, client_id, team_id);
     entt::entity player_entity = w->registry.create();
     uint32_t network_id = g_server_network.registerEntity(player_entity);
@@ -502,7 +758,7 @@ static void spawnPlayerForClient(uint16_t client_id)
     w->registry.emplace<CharacterControllerComponent>(player_entity, controller);
 
     // Add combat components
-    w->registry.emplace<HealthComponent>(player_entity, 100);
+    w->registry.emplace<FpsHealthComponent>(player_entity, 100);
     w->registry.emplace<TeamComponent>(player_entity, TeamComponent{team_id});
     auto& inv_comp = w->registry.emplace<InventoryComponent>(player_entity);
     auto& loadout_comp = w->registry.emplace<PlayerLoadoutComponent>(player_entity);
@@ -510,6 +766,16 @@ static void spawnPlayerForClient(uint16_t client_id)
     FpsLogic::grantLoadout(inv_comp, loadout_comp, weapon, primaryForClient(client_id, team_id));
     auto& weapon_component = w->registry.emplace<WeaponComponent>(player_entity, weapon);
     w->registry.emplace<ScoreComponent>(player_entity);
+    if (g_competitive) {
+        auto& money = w->registry.emplace<Competitive::MoneyComponent>(player_entity);
+        money.reset(g_round_system.config.start_money, g_round_system.config.money_cap);
+        w->registry.emplace<ArmorComponent>(player_entity);
+        // Late joiner (Live/RoundEnd) joins as dead observer, spawns next Freeze.
+        if (!Competitive::canSpawnNow(g_round_system.state.phase)) {
+            auto& h = w->registry.get<FpsHealthComponent>(player_entity);
+            h.alive = false; h.health = 0;
+        }
+    }
 
     ensurePlayerPhysicsBody(*w, player_entity);
 
@@ -550,6 +816,7 @@ static void spawnPlayerForClient(uint16_t client_id)
         g_server_network.sendReliableToClient(client_id, existing_writer);
     }
 
+    if (g_competitive) { broadcastRoundState(); sendEconomyState(client_id, player_entity); }
     LOG_ENGINE_INFO("Spawned player (net_id={}) for client {} at ({},{},{})",
         network_id, client_id, spawn_pos.x, spawn_pos.y, spawn_pos.z);
 }
@@ -593,12 +860,43 @@ GAME_API bool gardenServerInit(EngineServices* services)
     g_server_services = services;
     {
         const char* mode_env = std::getenv("FPS_GAME_MODE");
+        g_competitive = mode_env && std::strcmp(mode_env, "competitive") == 0;
         FpsLogic::ModeConfig cfg = (mode_env && std::strcmp(mode_env, "tdm") == 0)
             ? FpsLogic::teamDeathmatchConfig() : FpsLogic::deathmatchConfig();
         if (const char* lim = std::getenv("FPS_SCORE_LIMIT")) { int v = std::atoi(lim); if (v > 0) cfg.score_limit = v; }
         if (const char* tl = std::getenv("FPS_TIME_LIMIT")) { float v = (float)std::atof(tl); if (v > 0) cfg.time_limit_seconds = v; }
         g_game_rules.configureMode(cfg);
-        LOG_ENGINE_INFO("FPSShooter mode: {} score_limit={} time_limit={}", cfg.mode == FpsLogic::FpsGameMode::TeamDeathmatch ? "team_deathmatch" : "deathmatch", cfg.score_limit, cfg.time_limit_seconds);
+        if (g_competitive) {
+            Competitive::ModeConfig ccfg; // all [P]/[V] values are data here
+            if (const char* v = std::getenv("FPS_ROUND_SECONDS")) { float f = (float)std::atof(v); if (f > 0) ccfg.round_seconds = f; }
+            if (const char* v = std::getenv("FPS_WARMUP_SECONDS")) { float f = (float)std::atof(v); if (f >= 0) ccfg.warmup_seconds = f; }
+            g_round_system.configure(ccfg);
+            g_round_system.bomb_hooks = &g_bomb_hooks;
+            g_economy.config = Competitive::EconomyConfig{};
+            g_buy_system.config = ccfg;
+            g_round_system.on_phase_enter = [](Competitive::RoundPhase ph) {
+                LOG_ENGINE_INFO("Competitive phase: {} round={} score A{}-D{} deadline_tick={}",
+                    competitivePhaseName(ph), g_round_system.state.round_number,
+                    (int)g_round_system.state.wins_attackers, (int)g_round_system.state.wins_defenders,
+                    g_round_system.state.phase_deadline_tick);
+                if (ph == Competitive::RoundPhase::Freeze) competitiveFreezeRespawnAll();
+                broadcastRoundState();
+            };
+            g_round_system.on_period_reset = [](bool overtime) { competitivePeriodReset(overtime); };
+            g_round_system.on_round_end = [](Competitive::RoundWinner winner, Competitive::RoundEndReason reason) {
+                LOG_ENGINE_INFO("Competitive round end: winner={} reason={}", (int)winner, (int)reason);
+                competitiveRoundEndAwards(winner, reason);
+            };
+            // Singleton MatchStateComponent entity.
+            world* mw = services->game_world;
+            g_match_entity = mw->registry.create();
+            mw->registry.emplace<Competitive::MatchStateComponent>(g_match_entity, g_round_system.state);
+            mw->registry.emplace<CountdownTimerComponent>(g_match_entity, g_round_system.timer);
+            LOG_ENGINE_INFO("FPSShooter mode: competitive max_rounds={} clinch={} round={}s freeze={}s warmup={}s",
+                ccfg.max_rounds, ccfg.winsToClinch(), ccfg.round_seconds, ccfg.freeze_seconds, ccfg.warmup_seconds);
+        } else {
+            LOG_ENGINE_INFO("FPSShooter mode: {} score_limit={} time_limit={}", cfg.mode == FpsLogic::FpsGameMode::TeamDeathmatch ? "team_deathmatch" : "deathmatch", cfg.score_limit, cfg.time_limit_seconds);
+        }
     }
 
     uint16_t port = services->listen_port ? services->listen_port : 7777;
@@ -615,10 +913,11 @@ GAME_API bool gardenServerInit(EngineServices* services)
         if (!w || !w->registry.valid(player_entity)) {
             return false;
         }
-        if (!w->registry.all_of<HealthComponent>(player_entity)) {
+        if (!w->registry.all_of<FpsHealthComponent>(player_entity)) {
             return true;
         }
-        return w->registry.get<HealthComponent>(player_entity).alive;
+        if (g_competitive && g_round_system.isMovementLocked()) return false; // Freeze: movement locked
+        return w->registry.get<FpsHealthComponent>(player_entity).alive;
     });
 
     g_server_network.setInputSampleHandler([](
@@ -646,7 +945,12 @@ GAME_API bool gardenServerInit(EngineServices* services)
     });
 
     g_server_network.setCustomMessageHandler([](uint16_t client_id, uint8_t message_type, BitReader& reader) {
-        (void)reader;
+        if (g_competitive && message_type == static_cast<uint8_t>(CompetitiveMessageType::BUY_REQUEST)) {
+            handleCompetitiveBuy(client_id, reader); return;
+        }
+        if (g_competitive && message_type == static_cast<uint8_t>(CompetitiveMessageType::TEAM_SELECT)) {
+            handleCompetitiveTeamSelect(client_id, reader); return;
+        }
         LOG_ENGINE_WARN("Ignoring unauthoritative client custom message {} from client {}",
             static_cast<int>(message_type), client_id);
     });
@@ -681,6 +985,24 @@ GAME_API void gardenServerUpdate(float delta_time)
     const uint32_t physics_steps = w->step_physics(delta_time);
     g_server_network.advanceSimulationTicks(physics_steps);
     updateServerPlayerCollisions(*w);
+    if (g_competitive) {
+        Competitive::RoundTickInput rin;
+        auto pv = w->registry.view<NetworkedEntity, TeamComponent, FpsHealthComponent>();
+        for (auto e : pv) {
+            if (!pv.get<NetworkedEntity>(e).is_player) continue;
+            uint8_t tid = pv.get<TeamComponent>(e).team_id;
+            bool alive = pv.get<FpsHealthComponent>(e).alive;
+            if (tid == FpsLogic::kTeamAttackers) { rin.attackers_connected++; if (alive) rin.attackers_alive++; }
+            else if (tid == FpsLogic::kTeamDefenders) { rin.defenders_connected++; if (alive) rin.defenders_alive++; }
+        }
+        auto prev_phase = g_round_system.state.phase;
+        g_round_system.tick(w->fixed_delta > 0.0f ? w->fixed_delta : delta_time, rin);
+        (void)prev_phase;
+        // ROUND_STATE heartbeat 1 Hz (spec S7); phase changes broadcast on enter.
+        static float s_round_heartbeat = 0.0f;
+        s_round_heartbeat += delta_time;
+        if (s_round_heartbeat >= 1.0f) { s_round_heartbeat = 0.0f; broadcastRoundState(); }
+    }
     g_game_rules.Update(*w, delta_time);
 
     // Update weapon cooldowns for all players
@@ -699,10 +1021,10 @@ GAME_API void gardenServerUpdate(float delta_time)
     }
 
     // Fall detection for server-side entities
-    auto fall_view = w->registry.view<NetworkedEntity, TransformComponent, HealthComponent>();
+    auto fall_view = w->registry.view<NetworkedEntity, TransformComponent, FpsHealthComponent>();
     for (auto entity : fall_view) {
         auto& trans = fall_view.get<TransformComponent>(entity);
-        auto& health = fall_view.get<HealthComponent>(entity);
+        auto& health = fall_view.get<FpsHealthComponent>(entity);
         auto& net = fall_view.get<NetworkedEntity>(entity);
 
         if (health.alive && trans.position.y < -50.0f) {
@@ -726,7 +1048,8 @@ GAME_API void gardenServerUpdate(float delta_time)
                     g_server_network.sendReliableToClient(i, death_writer);
             }
 
-            g_game_rules.queueRespawn(net.owner_client_id);
+            if (!g_competitive || g_round_system.state.phase == Competitive::RoundPhase::Warmup)
+                g_game_rules.queueRespawn(net.owner_client_id);
         }
     }
 
@@ -734,12 +1057,12 @@ GAME_API void gardenServerUpdate(float delta_time)
     {
         std::vector<entt::entity> consumed;
         auto dv = w->registry.view<DroppedWeaponComponent, TransformComponent>();
-        auto pv2 = w->registry.view<NetworkedEntity, TransformComponent, HealthComponent, InventoryComponent, PlayerLoadoutComponent, WeaponComponent>();
+        auto pv2 = w->registry.view<NetworkedEntity, TransformComponent, FpsHealthComponent, InventoryComponent, PlayerLoadoutComponent, WeaponComponent>();
         for (auto de : dv) {
             auto& dw = dv.get<DroppedWeaponComponent>(de);
             glm::vec3 dpos = dv.get<TransformComponent>(de).position;
             for (auto pe : pv2) {
-                if (!pv2.get<HealthComponent>(pe).alive) continue;
+                if (!pv2.get<FpsHealthComponent>(pe).alive) continue;
                 if (glm::distance(pv2.get<TransformComponent>(pe).position, dpos) > 1.2f) continue;
                 auto& inv3 = pv2.get<InventoryComponent>(pe);
                 auto& lo3 = pv2.get<PlayerLoadoutComponent>(pe);

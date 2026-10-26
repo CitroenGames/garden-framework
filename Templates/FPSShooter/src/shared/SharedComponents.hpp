@@ -3,8 +3,9 @@
 #include <cstdint>
 #include <string>
 
-// Health component for damageable entities
-struct HealthComponent
+// Template health (distinct from engine ::HealthComponent in GameplayComponents.hpp;
+// both headers may be included together, no macro aliasing).
+struct FpsHealthComponent
 {
     int32_t health = 100;
     int32_t max_health = 100;
@@ -12,8 +13,8 @@ struct HealthComponent
     float respawn_timer = 0.0f;     // Server-side countdown to respawn (seconds)
     float invulnerable_timer = 0.0f; // Brief invulnerability after respawn
 
-    HealthComponent() = default;
-    HealthComponent(int32_t hp) : health(hp), max_health(hp) {}
+    FpsHealthComponent() = default;
+    FpsHealthComponent(int32_t hp) : health(hp), max_health(hp) {}
 
     void takeDamage(int32_t damage)
     {
@@ -43,6 +44,15 @@ enum class WeaponType : uint8_t
     PISTOL = 2,
     KNIFE = 3,
     GRENADE = 4,
+    // Catalog weapons (spec S4.2). Legacy ids above keep their behaviour.
+    GLOCK = 5, P2000 = 6, USP_S = 7, P250 = 8, TEC9 = 9, FIVESEVEN = 10,
+    CZ75 = 11, ELITE = 12, DEAGLE = 13, REVOLVER = 14,
+    NOVA = 15, XM1014 = 16, SAWEDOFF = 17, MAG7 = 18, M249 = 19, NEGEV = 20,
+    MAC10 = 21, MP9 = 22, MP7 = 23, MP5SD = 24, UMP45 = 25, P90 = 26, BIZON = 27,
+    FAMAS = 28, GALILAR = 29, AK47 = 30, M4A4 = 31, M4A1S = 32, SG556 = 33,
+    AUG = 34, SSG08 = 35, AWP = 36, G3SG1 = 37, SCAR20 = 38, TASER = 39,
+    HEGRENADE = 40, FLASHBANG = 41, SMOKEGRENADE = 42, MOLOTOV = 43,
+    INCENDIARY = 44, DECOY = 45,
     COUNT
 };
 
@@ -102,6 +112,14 @@ struct WeaponComponent
 
     bool canFire() const { return ammo > 0 && fire_cooldown <= 0.0f && !reloading; }
     bool canReload() const { return !reloading && ammo < max_ammo && reserve_ammo > 0; }
+};
+
+// Game-side armor/equipment state (buy system; spec S7 armor is game data).
+struct ArmorComponent
+{
+    int32_t armor = 0;          // 0..100
+    bool has_helmet = false;
+    bool has_defuse_kit = false; // kit flag (defuse timing hook, next stage)
 };
 
 // Score tracking per player

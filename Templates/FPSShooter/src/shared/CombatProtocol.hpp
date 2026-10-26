@@ -15,6 +15,69 @@ enum class CombatMessageType : uint8_t
     WEAPON_STATE = Net::CUSTOM_MESSAGE_START + 4
 };
 
+// Competitive mode messages (wire v3 custom messages >= CUSTOM_MESSAGE_START+5 = 69).
+enum class CompetitiveMessageType : uint8_t
+{
+    ROUND_STATE = Net::CUSTOM_MESSAGE_START + 5,    // 69 S->C reliable
+    ECONOMY_STATE = Net::CUSTOM_MESSAGE_START + 6,  // 70 S->C owner-only reliable
+    BUY_REQUEST = Net::CUSTOM_MESSAGE_START + 7,    // 71 C->S reliable
+    BUY_RESULT = Net::CUSTOM_MESSAGE_START + 8,     // 72 S->C reliable
+    TEAM_SELECT = Net::CUSTOM_MESSAGE_START + 9,    // 73 C->S reliable
+    TEAM_RESULT = Net::CUSTOM_MESSAGE_START + 10    // 74 S->C reliable
+};
+
+struct RoundStateMessage
+{
+    uint8_t type = static_cast<uint8_t>(CompetitiveMessageType::ROUND_STATE);
+    uint8_t phase = 0;
+    float phase_time_remaining = 0.0f;
+    uint32_t phase_deadline_tick = 0; // server tick at which phase ends
+    uint32_t server_tick = 0;
+    uint16_t round_number = 0;
+    uint8_t wins_attackers = 0;
+    uint8_t wins_defenders = 0;
+    uint8_t bomb_planted = 0;
+    uint8_t last_reason = 0;
+    uint8_t last_winner = 0;
+};
+
+struct EconomyStateMessage
+{
+    uint8_t type = static_cast<uint8_t>(CompetitiveMessageType::ECONOMY_STATE);
+    int32_t balance = 0;
+    uint8_t loss_streak = 0;
+};
+
+struct BuyRequestMessage
+{
+    uint8_t type = static_cast<uint8_t>(CompetitiveMessageType::BUY_REQUEST);
+    uint32_t request_seq = 0; // per-client, monotonically increasing (dedup)
+    uint16_t item_id = 0;     // WeaponCatalogDef id
+};
+
+struct BuyResultMessage
+{
+    uint8_t type = static_cast<uint8_t>(CompetitiveMessageType::BUY_RESULT);
+    uint32_t request_seq = 0;
+    uint16_t item_id = 0;
+    uint8_t result = 0; // Competitive::BuyResult
+    int32_t balance = 0;
+};
+
+struct TeamSelectMessage
+{
+    uint8_t type = static_cast<uint8_t>(CompetitiveMessageType::TEAM_SELECT);
+    uint8_t desired_team = 0; // Competitive::FpsTeam
+    uint8_t auto_assign = 0;
+};
+
+struct TeamResultMessage
+{
+    uint8_t type = static_cast<uint8_t>(CompetitiveMessageType::TEAM_RESULT);
+    uint8_t result = 0; // Competitive::TeamSelectResult
+    uint8_t team = 0;   // Competitive::FpsTeam
+};
+
 struct ShootResultMessage
 {
     uint8_t type = static_cast<uint8_t>(CombatMessageType::SHOOT_RESULT);
@@ -173,6 +236,75 @@ namespace CombatSerializer
         msg.spread = reader.readFloat();
         msg.accuracy_penalty = reader.readFloat();
         msg.recoil_index = reader.readFloat();
+        return !reader.hasError();
+    }
+
+} // namespace CombatSerializer
+namespace CompetitiveSerializer
+{
+    inline void serialize(Net::BitWriter& writer, const RoundStateMessage& msg) {
+        writer.writeByte(msg.type); writer.writeByte(msg.phase);
+        writer.writeFloat(msg.phase_time_remaining);
+        writer.writeUInt32(msg.phase_deadline_tick); writer.writeUInt32(msg.server_tick);
+        writer.writeUInt16(msg.round_number);
+        writer.writeByte(msg.wins_attackers); writer.writeByte(msg.wins_defenders);
+        writer.writeByte(msg.bomb_planted); writer.writeByte(msg.last_reason); writer.writeByte(msg.last_winner);
+    }
+    inline bool deserialize(Net::BitReader& reader, RoundStateMessage& msg) {
+        msg.type = reader.readByte();
+        if (msg.type != static_cast<uint8_t>(CompetitiveMessageType::ROUND_STATE)) return false;
+        msg.phase = reader.readByte(); msg.phase_time_remaining = reader.readFloat();
+        msg.phase_deadline_tick = reader.readUInt32(); msg.server_tick = reader.readUInt32();
+        msg.round_number = reader.readUInt16();
+        msg.wins_attackers = reader.readByte(); msg.wins_defenders = reader.readByte();
+        msg.bomb_planted = reader.readByte(); msg.last_reason = reader.readByte(); msg.last_winner = reader.readByte();
+        return !reader.hasError();
+    }
+    inline void serialize(Net::BitWriter& writer, const EconomyStateMessage& msg) {
+        writer.writeByte(msg.type); writer.writeUInt32(static_cast<uint32_t>(msg.balance)); writer.writeByte(msg.loss_streak);
+    }
+    inline bool deserialize(Net::BitReader& reader, EconomyStateMessage& msg) {
+        msg.type = reader.readByte();
+        if (msg.type != static_cast<uint8_t>(CompetitiveMessageType::ECONOMY_STATE)) return false;
+        msg.balance = static_cast<int32_t>(reader.readUInt32()); msg.loss_streak = reader.readByte();
+        return !reader.hasError();
+    }
+    inline void serialize(Net::BitWriter& writer, const BuyRequestMessage& msg) {
+        writer.writeByte(msg.type); writer.writeUInt32(msg.request_seq); writer.writeUInt16(msg.item_id);
+    }
+    inline bool deserialize(Net::BitReader& reader, BuyRequestMessage& msg) {
+        msg.type = reader.readByte();
+        if (msg.type != static_cast<uint8_t>(CompetitiveMessageType::BUY_REQUEST)) return false;
+        msg.request_seq = reader.readUInt32(); msg.item_id = reader.readUInt16();
+        return !reader.hasError();
+    }
+    inline void serialize(Net::BitWriter& writer, const BuyResultMessage& msg) {
+        writer.writeByte(msg.type); writer.writeUInt32(msg.request_seq); writer.writeUInt16(msg.item_id);
+        writer.writeByte(msg.result); writer.writeUInt32(static_cast<uint32_t>(msg.balance));
+    }
+    inline bool deserialize(Net::BitReader& reader, BuyResultMessage& msg) {
+        msg.type = reader.readByte();
+        if (msg.type != static_cast<uint8_t>(CompetitiveMessageType::BUY_RESULT)) return false;
+        msg.request_seq = reader.readUInt32(); msg.item_id = reader.readUInt16();
+        msg.result = reader.readByte(); msg.balance = static_cast<int32_t>(reader.readUInt32());
+        return !reader.hasError();
+    }
+    inline void serialize(Net::BitWriter& writer, const TeamSelectMessage& msg) {
+        writer.writeByte(msg.type); writer.writeByte(msg.desired_team); writer.writeByte(msg.auto_assign);
+    }
+    inline bool deserialize(Net::BitReader& reader, TeamSelectMessage& msg) {
+        msg.type = reader.readByte();
+        if (msg.type != static_cast<uint8_t>(CompetitiveMessageType::TEAM_SELECT)) return false;
+        msg.desired_team = reader.readByte(); msg.auto_assign = reader.readByte();
+        return !reader.hasError();
+    }
+    inline void serialize(Net::BitWriter& writer, const TeamResultMessage& msg) {
+        writer.writeByte(msg.type); writer.writeByte(msg.result); writer.writeByte(msg.team);
+    }
+    inline bool deserialize(Net::BitReader& reader, TeamResultMessage& msg) {
+        msg.type = reader.readByte();
+        if (msg.type != static_cast<uint8_t>(CompetitiveMessageType::TEAM_RESULT)) return false;
+        msg.result = reader.readByte(); msg.team = reader.readByte();
         return !reader.hasError();
     }
 }

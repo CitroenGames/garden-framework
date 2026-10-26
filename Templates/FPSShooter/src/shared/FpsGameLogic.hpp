@@ -4,13 +4,9 @@
 // Pure helpers so Tests/GameplayTests can exercise them without a server.
 #include "SharedComponents.hpp"
 #include "WeaponTypes.hpp"
-// Engine bug (reported, not fixed here): EngineCore GameplayComponents.hpp
-// defines a global ::HealthComponent that collides with the template's
-// ::HealthComponent in SharedComponents.hpp. Alias the engine one away in
-// template TUs; only Team/Inventory (name-unique) are used from it.
-#define HealthComponent FpsEngineHealthComponentAlias
+// Engine gameplay primitives (Team/Inventory/Wallet/Timer/Channel). The
+// template health type is FpsHealthComponent, so no name collision remains.
 #include "Gameplay/GameplayComponents.hpp"
-#undef HealthComponent
 #include <glm/glm.hpp>
 #include <algorithm>
 #include <array>
@@ -33,11 +29,18 @@ inline bool weaponTypeFromItemDef(uint32_t id, WeaponType& out) {
 }
 inline WeaponSlot slotForWeaponType(WeaponType t) {
     switch (t) {
-    case WeaponType::RIFLE: case WeaponType::SHOTGUN: return WeaponSlot::Primary;
-    case WeaponType::PISTOL: return WeaponSlot::Secondary;
+    case WeaponType::PISTOL: case WeaponType::GLOCK: case WeaponType::P2000:
+    case WeaponType::USP_S: case WeaponType::P250: case WeaponType::TEC9:
+    case WeaponType::FIVESEVEN: case WeaponType::CZ75: case WeaponType::ELITE:
+    case WeaponType::DEAGLE: case WeaponType::REVOLVER:
+        return WeaponSlot::Secondary;
     case WeaponType::KNIFE: return WeaponSlot::Melee;
-    case WeaponType::GRENADE: return WeaponSlot::Grenade;
-    default: return WeaponSlot::Utility;
+    case WeaponType::GRENADE: case WeaponType::HEGRENADE: case WeaponType::FLASHBANG:
+    case WeaponType::SMOKEGRENADE: case WeaponType::MOLOTOV: case WeaponType::INCENDIARY:
+    case WeaponType::DECOY:
+        return WeaponSlot::Grenade;
+    case WeaponType::TASER: return WeaponSlot::Utility;
+    default: return WeaponSlot::Primary; // RIFLE/SHOTGUN + all catalog primaries
     }
 }
 

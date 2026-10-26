@@ -68,11 +68,11 @@ public:
     glm::vec3 getSpawnForPlayer(world& w, uint16_t client_id, uint8_t team_id) {
         // Gather enemy positions (alive players on another team; in DM everyone else).
         std::vector<glm::vec3> enemies;
-        auto view = w.registry.view<NetworkedEntity, TransformComponent, HealthComponent>();
+        auto view = w.registry.view<NetworkedEntity, TransformComponent, FpsHealthComponent>();
         for (auto e : view) {
             auto& net = view.get<NetworkedEntity>(e);
             if (!net.is_player || net.owner_client_id == client_id) continue;
-            if (!view.get<HealthComponent>(e).alive) continue;
+            if (!view.get<FpsHealthComponent>(e).alive) continue;
             uint8_t other_team = w.registry.all_of<TeamComponent>(e) ? w.registry.get<TeamComponent>(e).team_id : FpsLogic::kTeamNone;
             bool is_enemy = (match.config.mode == FpsLogic::FpsGameMode::Deathmatch) || other_team != team_id;
             if (is_enemy) enemies.push_back(view.get<TransformComponent>(e).position);
@@ -126,9 +126,9 @@ public:
                 it = pending_respawns.erase(it);
             } else ++it;
         }
-        auto view = game_world.registry.view<HealthComponent>();
+        auto view = game_world.registry.view<FpsHealthComponent>();
         for (auto entity : view) {
-            auto& h = view.get<HealthComponent>(entity);
+            auto& h = view.get<FpsHealthComponent>(entity);
             if (h.invulnerable_timer > 0.0f) h.invulnerable_timer -= delta_time;
         }
         // Dropped weapon despawn.
