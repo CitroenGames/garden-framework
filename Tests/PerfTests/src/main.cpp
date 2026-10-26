@@ -1,4 +1,4 @@
-// Phase 1 renderer-perf tests: packed sort-key order, depth-bucketed opaque
+// Renderer-perf tests: packed sort-key order, depth-bucketed opaque
 // sort, and Headless counting replay (redundant-bind skip verification).
 // Run: PerfTests.exe -> exit code 0 means all tests passed.
 

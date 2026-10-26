@@ -41,6 +41,8 @@ void MetalRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
     id<MTLRenderPipelineState> lastPipeline = nil;
     id<MTLBuffer> lastVB = nil;
     TextureHandle lastTex = INVALID_TEXTURE + 1; // force first bind
+    glm::mat4 lastModel(0.0f); // constant-upload dedup tracker
+    bool haveLastModel = false; // constant-upload dedup tracker
     MTLCullMode lastCull = (MTLCullMode)0xFF;     // sentinel
     id<MTLDepthStencilState> lastDS = nil;
     id<MTLRenderPipelineState> lastShadowPipeline = nil;
@@ -176,7 +178,14 @@ void MetalRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
         struct { glm::mat4 model; glm::mat4 normalMatrix; } modelData;
         modelData.model = drawCmd.model_matrix;
         modelData.normalMatrix = glm::transpose(glm::inverse(drawCmd.model_matrix));
-        [enc setVertexBytes:&modelData length:sizeof(modelData) atIndex:2];
+        // Skip the model-matrix re-upload for an unchanged object.
+        if (haveLastModel && drawCmd.model_matrix == lastModel) {
+            impl->lastFrameStats.state_binds_skipped++;
+        } else {
+            [enc setVertexBytes:&modelData length:sizeof(modelData) atIndex:2];
+            lastModel = drawCmd.model_matrix;
+            haveLastModel = true;
+        }
 
         // Bind texture (only if changed)
         TextureHandle texHandle = drawCmd.use_texture ? drawCmd.texture : INVALID_TEXTURE;

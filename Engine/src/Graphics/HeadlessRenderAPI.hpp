@@ -2,6 +2,7 @@
 
 #include "RenderAPI.hpp"
 #include <cstdint>
+#include <unordered_set>
 
 class ENGINE_API HeadlessRenderAPI : public IRenderAPI
 {
@@ -58,14 +59,17 @@ public:
 
     virtual IGPUMesh* createMesh() override;
 
-    // Phase 1: counting replay -- simulates backend bind caching (PSO /
+    // Counting replay -- simulates backend bind caching (PSO /
     // texture / mesh) so sort-key grouping and redundant-bind skip behaviour
     // can be verified without a GPU.
+    // m_descriptorCache persists across frames (never cleared by
+    // beginFrame), mirroring a cross-frame descriptor cache.
     virtual void replayCommandBuffer(const RenderCommandBuffer& cmds) override;
     virtual RenderFrameStats getLastFrameStats() const override;
 
 private:
     RenderFrameStats m_lastFrameStats{};
+    std::unordered_set<uint64_t> m_descriptorCache{};
 
     virtual const char* getAPIName() const override { return "Headless"; }
 

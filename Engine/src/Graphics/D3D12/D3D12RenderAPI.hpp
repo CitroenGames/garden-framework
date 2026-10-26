@@ -236,8 +236,12 @@ private:
     // State tracking
     ID3D12PipelineState* last_bound_pso = nullptr;
     ID3D12PipelineState* last_bound_shadow_pso = nullptr;
+    // Default PBR descriptor tables (root params 5-8) are immutable
+    // for the frame; replay binds them once per command list and skips the
+    // rebind on later replay calls sharing that list.
+    bool m_pbrDefaultTablesBound = false;
 
-    // Phase 1: bind a shadow-path PSO only when it differs from the last
+    // Bind a shadow-path PSO only when it differs from the last
     // bound shadow PSO; count the skip otherwise.
     void bindShadowPSO(ID3D12PipelineState* pso)
     {

@@ -779,6 +779,8 @@ void D3D12RenderAPI::ensureCommandListOpen()
         fc.continuationCommandAllocator->Reset();
     fc.continuationAllocatorUsed = false;
     commandList->Reset(fc.commandAllocator.Get(), nullptr);
+    // Fresh command list carries no root tables.
+    m_pbrDefaultTablesBound = false;
 
     m_backBufferIndex = swapChain->GetCurrentBackBufferIndex();
 

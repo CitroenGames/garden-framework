@@ -488,7 +488,10 @@ private:
     PerFrameDescriptorState frame_descriptor_state[2]; // MAX_FRAMES_IN_FLIGHT
     bool descriptor_limit_warned = false;
 
-    // Cache: texture handle -> VkDescriptorSet (for reuse within a frame)
+    // Cache: texture handle -> VkDescriptorSet (for reuse within a frame).
+    // Kept within-frame on purpose -- per-frame pools are reset in
+    // prepareFrame, which invalidates every set, so cross-frame reuse needs a
+    // persistent-pool layout split (deferred); hits/allocs are counted.
     std::unordered_map<VulkanDrawDescriptorKey, VkDescriptorSet, VulkanDrawDescriptorKeyHash> texture_descriptor_cache;
 
     // Uniform buffers (per-frame) - GlobalUBO at binding 0

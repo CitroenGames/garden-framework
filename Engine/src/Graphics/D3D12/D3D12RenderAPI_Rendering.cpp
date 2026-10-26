@@ -753,15 +753,42 @@ void D3D12RenderAPI::renderMesh(const mesh& m, const RenderState& state)
         bindTexture(defaultTexture);
     bindHeightmapTexture(m.heightmap_texture);
 
-    // Bind default PBR textures (root params 5-8)
-    if (m_defaultMetallicRoughnessTexture.srvIndex != UINT(-1))
-        commandList->SetGraphicsRootDescriptorTable(5, m_srvAllocator.getGPU(m_defaultMetallicRoughnessTexture.srvIndex));
-    if (m_defaultNormalTexture.srvIndex != UINT(-1))
-        commandList->SetGraphicsRootDescriptorTable(6, m_srvAllocator.getGPU(m_defaultNormalTexture.srvIndex));
-    if (m_defaultOcclusionTexture.srvIndex != UINT(-1))
-        commandList->SetGraphicsRootDescriptorTable(7, m_srvAllocator.getGPU(m_defaultOcclusionTexture.srvIndex));
-    if (m_defaultEmissiveTexture.srvIndex != UINT(-1))
-        commandList->SetGraphicsRootDescriptorTable(8, m_srvAllocator.getGPU(m_defaultEmissiveTexture.srvIndex));
+    // Bind default PBR textures (root params 5-8), change-only.
+    if (!m_pbrDefaultTablesBound)
+    {
+        if (m_defaultMetallicRoughnessTexture.srvIndex != UINT(-1))
+            commandList->SetGraphicsRootDescriptorTable(5, m_srvAllocator.getGPU(m_defaultMetallicRoughnessTexture.srvIndex));
+        if (m_defaultNormalTexture.srvIndex != UINT(-1))
+            commandList->SetGraphicsRootDescriptorTable(6, m_srvAllocator.getGPU(m_defaultNormalTexture.srvIndex));
+        if (m_defaultOcclusionTexture.srvIndex != UINT(-1))
+            commandList->SetGraphicsRootDescriptorTable(7, m_srvAllocator.getGPU(m_defaultOcclusionTexture.srvIndex));
+        if (m_defaultEmissiveTexture.srvIndex != UINT(-1))
+            commandList->SetGraphicsRootDescriptorTable(8, m_srvAllocator.getGPU(m_defaultEmissiveTexture.srvIndex));
+        m_pbrDefaultTablesBound = true;
+    }
+    else
+    {
+        if (m_defaultMetallicRoughnessTexture.srvIndex != UINT(-1))
+        {
+            m_lastFrameStats.state_binds_skipped++;
+            m_lastFrameStats.descriptor_cache_hits++;
+        }
+        if (m_defaultNormalTexture.srvIndex != UINT(-1))
+        {
+            m_lastFrameStats.state_binds_skipped++;
+            m_lastFrameStats.descriptor_cache_hits++;
+        }
+        if (m_defaultOcclusionTexture.srvIndex != UINT(-1))
+        {
+            m_lastFrameStats.state_binds_skipped++;
+            m_lastFrameStats.descriptor_cache_hits++;
+        }
+        if (m_defaultEmissiveTexture.srvIndex != UINT(-1))
+        {
+            m_lastFrameStats.state_binds_skipped++;
+            m_lastFrameStats.descriptor_cache_hits++;
+        }
+    }
 
     // Draw
     commandList->IASetVertexBuffers(0, 1, &gpuMesh->getVertexBufferView());
@@ -939,6 +966,8 @@ void D3D12RenderAPI::flushAndReopenCommandList()
         commandList->SetGraphicsRootDescriptorTable(7, m_srvAllocator.getGPU(m_defaultOcclusionTexture.srvIndex));
     if (m_defaultEmissiveTexture.srvIndex != UINT(-1))
         commandList->SetGraphicsRootDescriptorTable(8, m_srvAllocator.getGPU(m_defaultEmissiveTexture.srvIndex));
+    // Fresh command list now carries the default PBR tables.
+    m_pbrDefaultTablesBound = true;
     bindHeightmapTexture(INVALID_TEXTURE);
 
     // Force rebind of PSO and texture
@@ -1356,14 +1385,44 @@ void D3D12RenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
 
     if (!in_shadow_pass)
     {
-        if (m_defaultMetallicRoughnessTexture.srvIndex != UINT(-1))
-            commandList->SetGraphicsRootDescriptorTable(5, m_srvAllocator.getGPU(m_defaultMetallicRoughnessTexture.srvIndex));
-        if (m_defaultNormalTexture.srvIndex != UINT(-1))
-            commandList->SetGraphicsRootDescriptorTable(6, m_srvAllocator.getGPU(m_defaultNormalTexture.srvIndex));
-        if (m_defaultOcclusionTexture.srvIndex != UINT(-1))
-            commandList->SetGraphicsRootDescriptorTable(7, m_srvAllocator.getGPU(m_defaultOcclusionTexture.srvIndex));
-        if (m_defaultEmissiveTexture.srvIndex != UINT(-1))
-            commandList->SetGraphicsRootDescriptorTable(8, m_srvAllocator.getGPU(m_defaultEmissiveTexture.srvIndex));
+        // Default PBR tables are immutable for the frame. Bind once
+        // per command list; later replay calls sharing the list skip the
+        // rebind and count a descriptor-cache hit per table instead.
+        if (m_pbrDefaultTablesBound)
+        {
+            if (m_defaultMetallicRoughnessTexture.srvIndex != UINT(-1))
+            {
+                m_lastFrameStats.state_binds_skipped++;
+                m_lastFrameStats.descriptor_cache_hits++;
+            }
+            if (m_defaultNormalTexture.srvIndex != UINT(-1))
+            {
+                m_lastFrameStats.state_binds_skipped++;
+                m_lastFrameStats.descriptor_cache_hits++;
+            }
+            if (m_defaultOcclusionTexture.srvIndex != UINT(-1))
+            {
+                m_lastFrameStats.state_binds_skipped++;
+                m_lastFrameStats.descriptor_cache_hits++;
+            }
+            if (m_defaultEmissiveTexture.srvIndex != UINT(-1))
+            {
+                m_lastFrameStats.state_binds_skipped++;
+                m_lastFrameStats.descriptor_cache_hits++;
+            }
+        }
+        else
+        {
+            if (m_defaultMetallicRoughnessTexture.srvIndex != UINT(-1))
+                commandList->SetGraphicsRootDescriptorTable(5, m_srvAllocator.getGPU(m_defaultMetallicRoughnessTexture.srvIndex));
+            if (m_defaultNormalTexture.srvIndex != UINT(-1))
+                commandList->SetGraphicsRootDescriptorTable(6, m_srvAllocator.getGPU(m_defaultNormalTexture.srvIndex));
+            if (m_defaultOcclusionTexture.srvIndex != UINT(-1))
+                commandList->SetGraphicsRootDescriptorTable(7, m_srvAllocator.getGPU(m_defaultOcclusionTexture.srvIndex));
+            if (m_defaultEmissiveTexture.srvIndex != UINT(-1))
+                commandList->SetGraphicsRootDescriptorTable(8, m_srvAllocator.getGPU(m_defaultEmissiveTexture.srvIndex));
+            m_pbrDefaultTablesBound = true;
+        }
         // Light + Forward+ tables: this list may have been reset since
         // bindDummyRootParams ran (root args do not survive a reset), and the
         // lit shader reads the Forward+ tile header whenever Forward+ is on.

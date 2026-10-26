@@ -706,6 +706,7 @@ VkDescriptorSet VulkanRenderAPI::getOrAllocateDescriptorSet(uint32_t frameIndex,
     // Check cache first - reuse descriptor set for same texture within a frame
     auto cacheIt = texture_descriptor_cache.find(key);
     if (cacheIt != texture_descriptor_cache.end()) {
+        m_lastFrameStats.descriptor_cache_hits++;
         return cacheIt->second;
     }
 
@@ -719,8 +720,9 @@ VkDescriptorSet VulkanRenderAPI::getOrAllocateDescriptorSet(uint32_t frameIndex,
     // Write UBO, texture, and shadow map bindings
     initializeDescriptorSet(ds, frameIndex, texture, heightmap);
 
-    // Cache for reuse within this frame
+    // Cache for reuse within this frame; pools reset per frame.
     texture_descriptor_cache[key] = ds;
+    m_lastFrameStats.descriptor_allocs++;
     return ds;
 }
 
@@ -770,6 +772,7 @@ VkDescriptorSet VulkanRenderAPI::workerGetOrAllocateDescriptorSet(
     // Check worker-local cache first
     auto it = worker.texture_cache.find(key);
     if (it != worker.texture_cache.end())
+        { std::lock_guard<std::mutex> statsLock(m_descriptorPoolMutex); m_lastFrameStats.descriptor_cache_hits++; }
         return it->second;
 
     // Allocate from worker's own descriptor pool
@@ -781,5 +784,6 @@ VkDescriptorSet VulkanRenderAPI::workerGetOrAllocateDescriptorSet(
     initializeDescriptorSet(ds, frameIndex, texture, heightmap);
 
     worker.texture_cache[key] = ds;
+    { std::lock_guard<std::mutex> statsLock(m_descriptorPoolMutex); m_lastFrameStats.descriptor_allocs++; }
     return ds;
 }

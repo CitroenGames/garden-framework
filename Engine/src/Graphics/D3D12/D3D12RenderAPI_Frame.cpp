@@ -138,6 +138,7 @@ setup_done:
     currentBoundHeightmapTexture = INVALID_TEXTURE;
     in_depth_prepass = false;
     m_cachedLightCBAddr = 0;
+    m_pbrDefaultTablesBound = false;
     m_lastFrameStats.submitted_draw_commands = 0;
     m_lastFrameStats.backend_draw_calls = 0;
     m_lastFrameStats.instanced_batches = 0;
@@ -145,6 +146,8 @@ setup_done:
     m_lastFrameStats.parallel_replay_batches = 0;
     m_lastFrameStats.parallel_replay_workers = 0;
     m_lastFrameStats.state_binds_skipped = 0;
+    m_lastFrameStats.descriptor_allocs = 0;
+    m_lastFrameStats.descriptor_cache_hits = 0;
 
     commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 

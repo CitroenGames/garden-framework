@@ -221,6 +221,17 @@ void HeadlessRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
             m_lastFrameStats.state_binds_skipped++;
         }
 
+        // Cross-frame descriptor cache -- allocate on first sight, hit after.
+        uint64_t descKey = cmd.use_texture ? static_cast<uint64_t>(tex) : 0u;
+        if (m_descriptorCache.find(descKey) != m_descriptorCache.end())
+        {
+            m_lastFrameStats.descriptor_cache_hits++;
+        }
+        else
+        {
+            m_descriptorCache.insert(descKey);
+            m_lastFrameStats.descriptor_allocs++;
+        }
         m_lastFrameStats.backend_draw_calls++;
     }
 }
