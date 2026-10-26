@@ -210,6 +210,18 @@ int main(int argc, char* argv[])
     SystemScheduler server_scheduler(true, _world.getFixedDelta());
     server_scheduler.setLifecycle(&server_lifecycle);
     {
+        // D6: server-authoritative trigger polling, headless (Physics phase).
+        // step_physics (inside the DLL update) also polls post-step; the diff
+        // makes this registration exactly-once.
+        SystemDescriptor d;
+        d.name = "engine.triggers";
+        d.phase = Phase::Physics;
+        d.update = [](entt::registry& reg, const Tick::SimulationTickContext&) {
+            _world.getPhysicsSystem().updateTriggers(reg);
+        };
+        server_scheduler.addSystem(std::move(d));
+    }
+    {
         SystemDescriptor d;
         d.name = "game.gameplay_framework";
         d.phase = Phase::Gameplay;

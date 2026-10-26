@@ -33,6 +33,16 @@ void GameSimulation::registerSystems()
     }
     {
         SystemDescriptor d;
+        d.name = "engine.triggers";
+        d.phase = Phase::Physics;
+        d.run_after = {"engine.physics"};
+        d.update = [this](entt::registry& reg, const Tick::SimulationTickContext&) {
+            m_world->getPhysicsSystem().updateTriggers(reg);
+        };
+        m_scheduler->addSystem(std::move(d));
+    }
+    {
+        SystemDescriptor d;
         d.name = "engine.player_collisions";
         d.phase = Phase::Physics;
         d.run_after = {"engine.physics"};

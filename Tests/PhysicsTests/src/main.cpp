@@ -4,6 +4,9 @@
 #include "Graphics/HeadlessRenderAPI.hpp"
 #include "LevelManager.hpp"
 #include "PhysicsSystem.hpp"
+#include "Events/EventBus.hpp"
+#include "Events/EngineEvents.hpp"
+#include "Physics/PhysicsSettings.hpp"
 #include "PlayerController.hpp"
 #include "Character/FpsCharacter.hpp"
 #include "Reflection/EngineReflection.hpp"
@@ -1198,6 +1201,251 @@ static bool testRaycastClosestCanIgnoreShooterBody()
     return pass(name);
 }
 
+
+// ---- D6 Stage-2 tests ----
+static int g_trigger_entered = 0;
+static int g_trigger_exited = 0;
+static uint32_t g_last_trigger_id = 0;
+static void onTriggerEntered(const TriggerEnteredEvent& e) { ++g_trigger_entered; g_last_trigger_id = e.trigger_id; }
+static void onTriggerExited(const TriggerExitedEvent& e) { ++g_trigger_exited; g_last_trigger_id = e.trigger_id; }
+
+static entt::entity makeDynamicBox(world& w, const glm::vec3& pos, bool gravity = false)
+{
+    auto e = w.registry.create();
+    w.registry.emplace<TransformComponent>(e, pos.x, pos.y, pos.z);
+    auto& rb = w.registry.emplace<RigidBodyComponent>(e);
+    rb.mass = 1.0f; rb.apply_gravity = gravity;
+    PhysicsSystem::PhysicsBodyDesc desc; desc.mass = 1.0f; desc.apply_gravity = gravity;
+    w.getPhysicsSystem().createDynamicBody(pos, glm::vec3(0.0f), makeBoxShape(), e, desc);
+    return e;
+}
+static entt::entity makeStaticBox(world& w, const glm::vec3& pos)
+{
+    auto e = w.registry.create();
+    w.registry.emplace<TransformComponent>(e, pos.x, pos.y, pos.z);
+    w.registry.emplace<RigidBodyComponent>(e);
+    w.getPhysicsSystem().createStaticBody(pos, glm::vec3(0.0f), makeBoxShape(), e);
+    return e;
+}
+static entt::entity makeTriggerBox(world& w, const glm::vec3& pos, float half, uint32_t id)
+{
+    auto e = w.registry.create();
+    w.registry.emplace<TransformComponent>(e, pos.x, pos.y, pos.z);
+    auto& col = w.registry.emplace<ColliderComponent>(e);
+    col.shape_type = ColliderShapeType::Box; col.box_half_extents = glm::vec3(half);
+    auto& trig = w.registry.emplace<TriggerComponent>(e);
+    trig.trigger_id = id; trig.enabled = true;
+    w.getPhysicsSystem().createTriggerBody(w.registry, e);
+    return e;
+}
+
+static bool testD6LayerMatrix()
+{
+    const std::string name = "D6 layer matrix";
+    if (PhysicsObjectLayers::StaticWorld != 0 || PhysicsObjectLayers::DynamicProp != 1 ||
+        PhysicsObjectLayers::Character != 2 || PhysicsObjectLayers::Trigger != 3 ||
+        PhysicsObjectLayers::ProjectileQueryOnly != 4 || PhysicsObjectLayers::Count != 5)
+        return fail(name, "layer numbering is not 0..4 as decided");
+    PhysicsLayerSettings s;
+    auto C = [&](JPH::ObjectLayer a, JPH::ObjectLayer b) { return s.shouldObjectsCollide(a, b); };
+    using namespace PhysicsObjectLayers;
+    if (!C(StaticWorld, DynamicProp) || !C(DynamicProp, StaticWorld)) return fail(name, "static-dynamic must collide");
+    if (!C(StaticWorld, Character) || !C(Character, StaticWorld)) return fail(name, "static-character must collide");
+    if (!C(DynamicProp, Character) || !C(Character, DynamicProp)) return fail(name, "dynamic-character must collide");
+    if (!C(DynamicProp, DynamicProp) || !C(Character, Character)) return fail(name, "dynamic/character self must collide");
+    if (C(StaticWorld, StaticWorld)) return fail(name, "static-static must not collide");
+    const JPH::ObjectLayer all[] = {StaticWorld, DynamicProp, Character, Trigger, ProjectileQueryOnly};
+    for (auto a : all) for (auto b : all)
+    {
+        if (a == Trigger || b == Trigger) { if (C(a, b)) return fail(name, "trigger must collide with nothing"); }
+        if (a == ProjectileQueryOnly || b == ProjectileQueryOnly) { if (C(a, b)) return fail(name, "projectile-query-only must collide with nothing"); }
+        if (C(a, b) != C(b, a)) return fail(name, "pair matrix must be symmetric");
+    }
+    // Physical: value 0/1 behaviour preserved - dynamic rests on static, trigger does not support it.
+    world w; w.initializePhysics(); w.setGravity(glm::vec3(0.0f, -1.0f, 0.0f));
+    makeStaticBox(w, glm::vec3(0.0f, 0.0f, 0.0f));
+    auto crate = makeDynamicBox(w, glm::vec3(0.0f, 2.0f, 0.0f), true);
+    auto floater = makeDynamicBox(w, glm::vec3(10.0f, 2.0f, 0.0f), true);
+    makeTriggerBox(w, glm::vec3(10.0f, 0.5f, 0.0f), 2.0f, 1);
+    for (int i = 0; i < 120; ++i) w.getPhysicsSystem().stepPhysics(w.registry);
+    float crate_y = w.registry.get<TransformComponent>(crate).position.y;
+    float floater_y = w.registry.get<TransformComponent>(floater).position.y;
+    if (!approx(crate_y, 1.0f, 0.15f)) return fail(name, "dynamic did not rest on static (0/1 behaviour changed)");
+    if (floater_y > 0.0f) return fail(name, "trigger volume supported a dynamic body (sensor collided)");
+    return pass(name);
+}
+
+static bool testD6OverlapSphere()
+{
+    const std::string name = "D6 overlapSphere hits and misses";
+    world w; w.initializePhysics();
+    auto inside = makeDynamicBox(w, glm::vec3(0.0f, 0.0f, 0.0f));
+    auto outside = makeDynamicBox(w, glm::vec3(10.0f, 0.0f, 0.0f));
+    (void)outside;
+    PhysicsSystem::QueryFilter f;
+    PhysicsSystem::OverlapResult out[8];
+    uint32_t n = w.getPhysicsSystem().overlapSphere(glm::vec3(0.0f), 2.0f, f, out, 8);
+    if (n != 1 || out[0].entity != inside) return fail(name, "sphere overlap did not hit exactly the inside body");
+    n = w.getPhysicsSystem().overlapSphere(glm::vec3(20.0f, 0.0f, 0.0f), 2.0f, f, out, 8);
+    if (n != 0) return fail(name, "sphere overlap hit in empty space");
+    PhysicsSystem::QueryFilter ignore_f; ignore_f.ignore = inside;
+    n = w.getPhysicsSystem().overlapSphere(glm::vec3(0.0f), 2.0f, ignore_f, out, 8);
+    if (n != 0) return fail(name, "overlap ignored entity was still reported");
+    PhysicsSystem::QueryFilter static_only;
+    static_only.layer_mask = PhysicsObjectLayers::layerBit(PhysicsObjectLayers::StaticWorld);
+    n = w.getPhysicsSystem().overlapSphere(glm::vec3(0.0f), 2.0f, static_only, out, 8);
+    if (n != 0) return fail(name, "overlap layer_mask did not exclude dynamic bodies");
+    // overlapBox / overlapCapsule smoke (same filter path)
+    n = w.getPhysicsSystem().overlapBox(glm::vec3(0.0f), glm::vec3(1.0f), glm::vec3(0.0f), f, out, 8);
+    if (n != 1) return fail(name, "box overlap missed inside body");
+    n = w.getPhysicsSystem().overlapCapsule(glm::vec3(0.0f), 0.5f, 0.5f, f, out, 8);
+    if (n != 1) return fail(name, "capsule overlap missed inside body");
+    return pass(name);
+}
+
+static bool testD6QueryFilterTriggers()
+{
+    const std::string name = "D6 query filter excludes triggers by default";
+    world w; w.initializePhysics();
+    auto trig = makeTriggerBox(w, glm::vec3(0.0f, 0.0f, 3.0f), 0.5f, 42);
+    auto wall = makeStaticBox(w, glm::vec3(0.0f, 0.0f, 6.0f));
+    auto def = w.getPhysicsSystem().raycastClosest(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f), 20.0f);
+    if (!def.hit || def.entity != wall) return fail(name, "default raycast did not skip trigger and hit wall");
+    PhysicsSystem::QueryFilter with_trig; with_trig.hit_triggers = true;
+    auto th = w.getPhysicsSystem().raycastClosest(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f), 20.0f, with_trig);
+    if (!th.hit || th.entity != trig) return fail(name, "hit_triggers=true raycast did not hit trigger first");
+    PhysicsSystem::RaycastResult all[8];
+    uint32_t n = w.getPhysicsSystem().raycastAll(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f), 20.0f, with_trig, all, 8);
+    if (n != 2 || all[0].entity != trig || all[1].entity != wall || all[0].distance > all[1].distance)
+        return fail(name, "raycastAll did not return trigger+wall distance-sorted");
+    n = w.getPhysicsSystem().raycastAll(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f), 20.0f, PhysicsSystem::QueryFilter{}, all, 8);
+    if (n != 1 || all[0].entity != wall) return fail(name, "raycastAll default did not exclude trigger");
+    // Shape casts honour the filter too.
+    auto sc_def = w.getPhysicsSystem().sphereCast(glm::vec3(0.0f, 0.0f, 0.0f), 0.2f, glm::vec3(0.0f, 0.0f, 1.0f), 20.0f, PhysicsSystem::QueryFilter{});
+    if (!sc_def.hit || sc_def.entity != wall) return fail(name, "filtered sphereCast did not skip trigger");
+    auto sc_trig = w.getPhysicsSystem().sphereCast(glm::vec3(0.0f, 0.0f, 0.0f), 0.2f, glm::vec3(0.0f, 0.0f, 1.0f), 20.0f, with_trig);
+    if (!sc_trig.hit || sc_trig.entity != trig) return fail(name, "sphereCast with hit_triggers did not hit trigger");
+    return pass(name);
+}
+
+static bool testD6TriggerLifecycle()
+{
+    const std::string name = "D6 trigger enter exit exactly once";
+    EventBus::get().clear();
+    g_trigger_entered = 0; g_trigger_exited = 0; g_last_trigger_id = 0;
+    EventBus::get().sink<TriggerEnteredEvent>().connect<&onTriggerEntered>();
+    EventBus::get().sink<TriggerExitedEvent>().connect<&onTriggerExited>();
+    bool okk = true;
+    auto check = [&](const char* what, int entered, int exited) {
+        EventBus::get().flush();
+        if (g_trigger_entered != entered || g_trigger_exited != exited)
+        { okk = false; std::cerr << "  lifecycle " << what << ": entered=" << g_trigger_entered << "/" << entered
+                                 << " exited=" << g_trigger_exited << "/" << exited << std::endl; }
+    };
+    {
+        world w; w.initializePhysics();
+        auto trig = makeTriggerBox(w, glm::vec3(0.0f), 2.0f, 7);
+        if (w.getPhysicsSystem().hasBody(trig) == false) { EventBus::get().sink<TriggerEnteredEvent>().disconnect<&onTriggerEntered>(); EventBus::get().sink<TriggerExitedEvent>().disconnect<&onTriggerExited>(); return fail(name, "trigger body was not created"); }
+        auto occupant = w.registry.create();
+        w.registry.emplace<TransformComponent>(occupant, 10.0f, 0.0f, 0.0f);
+        auto& rb = w.registry.emplace<RigidBodyComponent>(occupant);
+        rb.motion_type = BodyMotionType::Kinematic; rb.apply_gravity = false;
+        w.getPhysicsSystem().createKinematicBody(glm::vec3(10.0f, 0.0f, 0.0f), glm::vec3(0.0f), makeBoxShape(), occupant);
+        auto step = [&]() { w.getPhysicsSystem().stepPhysics(w.registry); };
+        step(); check("outside", 0, 0);
+        w.registry.get<TransformComponent>(occupant).position = glm::vec3(0.0f); // teleport in
+        step(); check("teleport in", 1, 0);
+        for (int i = 0; i < 10; ++i) step();
+        check("idle inside (no duplicates)", 1, 0);
+        if (g_last_trigger_id != 7) { EventBus::get().sink<TriggerEnteredEvent>().disconnect<&onTriggerEntered>(); EventBus::get().sink<TriggerExitedEvent>().disconnect<&onTriggerExited>(); return fail(name, "trigger_id was not propagated"); }
+        w.registry.get<TransformComponent>(occupant).position = glm::vec3(10.0f, 0.0f, 0.0f); // teleport out
+        step(); check("teleport out", 1, 1);
+        w.registry.get<TransformComponent>(occupant).position = glm::vec3(0.0f);
+        step(); check("re-enter", 2, 1);
+        // Destroy inside: remove Jolt body then destroy entity -> one exit, pruned.
+        w.getPhysicsSystem().removeBody(occupant);
+        w.registry.destroy(occupant);
+        step(); check("destroy inside", 2, 2);
+        step(); check("destroy pruned (no extra exit)", 2, 2);
+        // Occupant set in state must be empty now.
+        if (!w.registry.get<TriggerOverlapState>(trig).occupants.empty())
+            okk = false;
+    }
+    EventBus::get().sink<TriggerEnteredEvent>().disconnect<&onTriggerEntered>();
+    EventBus::get().sink<TriggerExitedEvent>().disconnect<&onTriggerExited>();
+    EventBus::get().clear();
+    if (!okk) return fail(name, "enter/exit counts were not exactly-once (see above)");
+    return pass(name);
+}
+
+static bool testD6TriggerCapAndMeshRejection()
+{
+    const std::string name = "D6 trigger cap and mesh rejection";
+    if (PhysicsSystem::kMaxTriggerCount != 256) return fail(name, "soft cap is not 256");
+    PhysicsSystemSettings settings; settings.max_trigger_count = 2;
+    world w(settings); w.initializePhysics();
+    auto t1 = makeTriggerBox(w, glm::vec3(0.0f), 1.0f, 1);
+    auto t2 = makeTriggerBox(w, glm::vec3(10.0f, 0.0f, 0.0f), 1.0f, 2);
+    if (!w.getPhysicsSystem().hasBody(t1) || !w.getPhysicsSystem().hasBody(t2)) return fail(name, "first triggers failed");
+    auto t3 = makeTriggerBox(w, glm::vec3(20.0f, 0.0f, 0.0f), 1.0f, 3);
+    if (w.getPhysicsSystem().hasBody(t3)) return fail(name, "trigger beyond cap created a body");
+    auto mesh_trig = w.registry.create();
+    w.registry.emplace<TransformComponent>(mesh_trig, 0.0f, 5.0f, 0.0f);
+    auto& col = w.registry.emplace<ColliderComponent>(mesh_trig);
+    col.shape_type = ColliderShapeType::Mesh;
+    w.registry.emplace<TriggerComponent>(mesh_trig);
+    if (!w.getPhysicsSystem().createTriggerBody(w.registry, mesh_trig).IsInvalid())
+        return fail(name, "mesh trigger was not rejected");
+    if (w.getPhysicsSystem().hasBody(mesh_trig)) return fail(name, "mesh trigger created a body");
+    // World keeps stepping.
+    w.getPhysicsSystem().stepPhysics(w.registry);
+    return pass(name);
+}
+
+static bool testD6LevelRoundTrip()
+{
+    const std::string name = "D6-U1 level round-trip (no persisted layer indices)";
+    // D6-U1 experiment result: grep of LevelManager/scene serialisation and
+    // FPSShooter *.level.json found no persisted object-layer values; bodies
+    // are recreated from EntityType/motion_type, layers assigned at creation.
+    // This round-trip proves save->load preserves that behaviour under 0/1.
+    LevelData data; data.metadata.level_name = "D6RoundTrip";
+    LevelEntity ground; ground.name = "ground"; ground.type = EntityType::Collidable;
+    ground.position = glm::vec3(0.0f, 0.0f, 0.0f);
+    ground.has_collider = true; ground.collider_shape_type = "Box";
+    ground.collider_box_half_extents = glm::vec3(5.0f, 0.5f, 5.0f);
+    data.entities.push_back(ground);
+    LevelEntity crate; crate.name = "crate"; crate.type = EntityType::Physical;
+    crate.position = glm::vec3(0.0f, 2.0f, 0.0f);
+    crate.has_rigidbody = true; crate.mass = 1.0f; crate.apply_gravity = true;
+    crate.body_motion_type = "Dynamic";
+    crate.has_collider = true; crate.collider_shape_type = "Box";
+    crate.collider_box_half_extents = glm::vec3(0.5f);
+    data.entities.push_back(crate);
+
+    fs::path tmp = fs::temp_directory_path() / "garden_d6_roundtrip.level.json";
+    LevelManager lm;
+    if (!lm.saveLevelToJSON(tmp.string(), data)) return fail(name, "saveLevelToJSON failed");
+    std::ifstream in(tmp); std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    if (text.find("layer") != std::string::npos && text.find("player") == std::string::npos)
+        return fail(name, "saved level unexpectedly persists a physics layer value");
+    LevelData loaded;
+    if (!lm.loadLevelFromJSON(tmp.string(), loaded)) return fail(name, "loadLevelFromJSON failed");
+    if (loaded.entities.size() != 2) return fail(name, "round-trip entity count changed");
+    world w; w.initializePhysics(); w.setGravity(glm::vec3(0.0f, -1.0f, 0.0f));
+    LevelManager lm2;
+    if (!lm2.instantiateLevel(loaded, w, nullptr)) return fail(name, "instantiate of round-tripped level failed");
+    for (int i = 0; i < 120; ++i) w.getPhysicsSystem().stepPhysics(w.registry);
+    bool rested = false;
+    auto view = w.registry.view<TagComponent, TransformComponent>();
+    for (auto e : view)
+        if (view.get<TagComponent>(e).name == "crate")
+            rested = approx(view.get<TransformComponent>(e).position.y, 1.0f, 0.2f);
+    if (!rested) return fail(name, "dynamic crate did not rest on static ground after round-trip");
+    return pass(name);
+}
+
+
 static bool testFpsShooterLevelReferences(const fs::path& repo_root)
 {
     const std::string name = "FPSShooter level references";
@@ -1470,6 +1718,18 @@ int main()
     ok = testLevelTerrainCreatesMeshAndCollision(repo_root) && ok;
     run("raycast closest ignores shooter body");
     ok = testRaycastClosestCanIgnoreShooterBody() && ok;
+    run("D6 layer matrix");
+    ok = testD6LayerMatrix() && ok;
+    run("D6 overlapSphere hits and misses");
+    ok = testD6OverlapSphere() && ok;
+    run("D6 query filter excludes triggers by default");
+    ok = testD6QueryFilterTriggers() && ok;
+    run("D6 trigger enter exit exactly once");
+    ok = testD6TriggerLifecycle() && ok;
+    run("D6 trigger cap and mesh rejection");
+    ok = testD6TriggerCapAndMeshRejection() && ok;
+    run("D6-U1 level round-trip");
+    ok = testD6LevelRoundTrip() && ok;
     run("FPSShooter level references");
     ok = testFpsShooterLevelReferences(repo_root) && ok;
     run("ThirdPerson template references");

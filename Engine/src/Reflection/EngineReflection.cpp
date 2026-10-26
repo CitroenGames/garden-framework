@@ -16,6 +16,7 @@ void registerEngineReflection(ReflectionRegistry& registry)
     registry.reflect<TerrainComponent>("TerrainComponent");
     registry.reflect<RigidBodyComponent>("RigidBodyComponent");
     registry.reflect<ColliderComponent>("ColliderComponent");
+    registry.reflect<TriggerComponent>("TriggerComponent");
     registry.reflect<ConstraintComponent>("ConstraintComponent");
     registry.reflect<CharacterControllerComponent>("CharacterControllerComponent");
     registry.reflect<WaterVolumeComponent>("WaterVolumeComponent");

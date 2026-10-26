@@ -151,6 +151,25 @@ public:
         physics_system->handlePlayerCollisions(registry, playerEntity);
     }
 
+    // D6 trigger polling (also invoked automatically at end of step_physics;
+    // calling again is a no-change diff, so scheduler systems stay exactly-once).
+    void update_triggers()
+    {
+        physics_system->updateTriggers(registry);
+    }
+
+    PhysicsSystem::RaycastResult raycastClosest(const glm::vec3& origin, const glm::vec3& direction,
+        float max_distance, const PhysicsSystem::QueryFilter& filter)
+    {
+        return physics_system->raycastClosest(origin, direction, max_distance, filter);
+    }
+
+    uint32_t overlapSphere(const glm::vec3& center, float radius,
+        const PhysicsSystem::QueryFilter& filter, PhysicsSystem::OverlapResult* out, uint32_t cap)
+    {
+        return physics_system->overlapSphere(center, radius, filter, out, cap);
+    }
+
     // Utility methods for common physics queries
     bool raycast(const glm::vec3& origin, const glm::vec3& direction, float max_distance,
         glm::vec3& hit_point, glm::vec3& hit_normal)

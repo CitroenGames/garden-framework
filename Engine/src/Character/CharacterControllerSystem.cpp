@@ -8,6 +8,7 @@
 #include <Jolt/Physics/Character/CharacterVirtual.h>
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
 #include <Jolt/Physics/Collision/ShapeFilter.h>
+#include <Jolt/Physics/Collision/ObjectLayer.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 
 #include <algorithm>
@@ -53,6 +54,20 @@ namespace
             return v * (max_velocity / len);
         return v;
     }
+
+    // Character queries: pair matrix for character_body, with Trigger layer
+    // explicitly masked out so a trigger can never perturb movement (D6).
+    struct CharacterObjectLayerFilter final : public JPH::ObjectLayerFilter
+    {
+        explicit CharacterObjectLayerFilter(const PhysicsLayerSettings& ls) : layers(ls) {}
+        PhysicsLayerSettings layers;
+        bool ShouldCollide(JPH::ObjectLayer inLayer) const override
+        {
+            if (inLayer == layers.trigger_body || inLayer == layers.projectile_query_body)
+                return false;
+            return layers.shouldObjectsCollide(layers.character_body, inLayer);
+        }
+    };
 
     struct WaterSample
     {
@@ -338,7 +353,7 @@ JPH::BodyID CharacterControllerSystem::create(entt::registry& registry,
     settings->mCharacterPadding = controller.character_padding;
     settings->mCollisionTolerance = controller.collision_tolerance;
     settings->mEnhancedInternalEdgeRemoval = controller.enhanced_internal_edge_removal;
-    settings->mInnerBodyLayer = layer_settings.dynamic_body;
+    settings->mInnerBodyLayer = layer_settings.character_body;
     if (controller.use_inner_body)
         settings->mInnerBodyShape = shape;
 
@@ -500,9 +515,10 @@ bool CharacterControllerSystem::refresh(entt::registry& registry,
 
     JPH::BodyFilter body_filter;
     JPH::ShapeFilter shape_filter;
+    CharacterObjectLayerFilter char_layer_filter{layer_settings};
     character.RefreshContacts(
-        physics_system.GetDefaultBroadPhaseLayerFilter(layer_settings.dynamic_body),
-        physics_system.GetDefaultLayerFilter(layer_settings.dynamic_body),
+        physics_system.GetDefaultBroadPhaseLayerFilter(layer_settings.character_body),
+        char_layer_filter,
         body_filter,
         shape_filter,
         temp_allocator);
@@ -602,8 +618,8 @@ CharacterControllerState CharacterControllerSystem::simulate(entt::registry& reg
             ? JPH::Vec3::sZero()
             : toJolt(settings.gravity_direction * settings.gravity_acceleration * controller.gravity_scale),
         update_settings,
-        physics_system.GetDefaultBroadPhaseLayerFilter(settings.layers.dynamic_body),
-        physics_system.GetDefaultLayerFilter(settings.layers.dynamic_body),
+        physics_system.GetDefaultBroadPhaseLayerFilter(settings.layers.character_body),
+        CharacterObjectLayerFilter{settings.layers},
         body_filter,
         shape_filter,
         temp_allocator);

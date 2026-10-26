@@ -14,6 +14,7 @@
 #include <unordered_map>
 #include <memory>
 #include <cmath>
+#include <cassert>
 
 // Jolt includes
 #include <Jolt/Jolt.h>
@@ -206,6 +207,8 @@ private:
     CharacterControllerSystem character_controllers;
 
     bool initialized = false;
+    bool stepping = false;
+    std::vector<entt::entity> trigger_entities;
 
     // Helper: convert glm <-> Jolt types
     static JPH::Vec3 toJolt(const glm::vec3& v) { return JPH::Vec3(v.x, v.y, v.z); }
@@ -307,8 +310,28 @@ public:
         const CharacterControllerState& state);
     bool teleportCharacterController(entt::registry& registry, entt::entity entity, const glm::vec3& position);
 
+    static constexpr uint32_t kMaxTriggerCount = 256;
+
+    struct QueryFilter {
+        entt::entity ignore = entt::null;
+        const entt::entity* ignore_list = nullptr;
+        uint32_t ignore_count = 0;
+        uint32_t layer_mask = ~0u; // bit per PhysicsObjectLayers value
+        bool hit_triggers = false; // triggers excluded unless asked
+    };
+
+    struct OverlapResult {
+        entt::entity entity = entt::null;
+        glm::vec3 point{0.0f};
+    };
+
     // Main physics update
     void stepPhysics(entt::registry& registry);
+    JPH::BodyID createTriggerBody(entt::registry& registry, entt::entity entity);
+    void updateTriggers(entt::registry& registry);
+    uint32_t triggerCount() const { return static_cast<uint32_t>(trigger_entities.size()); }
+    bool isStepping() const { return stepping; }
+    const PhysicsLayerSettings& layerSettings() const { return settings.layers; }
 
     // Collision detection and response
     void handlePlayerCollisions(entt::registry& registry, entt::entity playerEntity);
@@ -318,6 +341,22 @@ public:
         entt::registry& registry, glm::vec3& hitPoint, glm::vec3& hitNormal);
     RaycastResult raycastClosest(const glm::vec3& origin, const glm::vec3& direction, float maxDistance,
         entt::entity ignoredEntity = entt::null);
+    RaycastResult raycastClosest(const glm::vec3& origin, const glm::vec3& direction, float maxDistance,
+        const QueryFilter& filter);
+    uint32_t raycastAll(const glm::vec3& origin, const glm::vec3& direction, float maxDistance,
+        const QueryFilter& filter, RaycastResult* out, uint32_t cap);
+    uint32_t overlapSphere(const glm::vec3& center, float radius,
+        const QueryFilter& filter, OverlapResult* out, uint32_t cap);
+    uint32_t overlapBox(const glm::vec3& center, const glm::vec3& halfExtents, const glm::vec3& rotation,
+        const QueryFilter& filter, OverlapResult* out, uint32_t cap);
+    uint32_t overlapCapsule(const glm::vec3& center, float halfHeight, float radius,
+        const QueryFilter& filter, OverlapResult* out, uint32_t cap);
+
+private:
+    uint32_t overlapShape(const JPH::ShapeRefC& shape, const glm::vec3& center, const glm::vec3& rotation,
+        const QueryFilter& filter, OverlapResult* out, uint32_t cap);
+
+public:
 
     // Shape casting result
     struct ShapeCastResult {
@@ -333,8 +372,14 @@ public:
         const glm::vec3& rotation, const glm::vec3& direction);
     ShapeCastResult sphereCast(const glm::vec3& origin, float radius,
         const glm::vec3& direction, float maxDistance);
+    ShapeCastResult sphereCast(const glm::vec3& origin, float radius,
+        const glm::vec3& direction, float maxDistance, const QueryFilter& filter);
     ShapeCastResult boxCast(const glm::vec3& origin, const glm::vec3& halfExtents,
         const glm::vec3& rotation, const glm::vec3& direction, float maxDistance);
+    ShapeCastResult boxCast(const glm::vec3& origin, const glm::vec3& halfExtents,
+        const glm::vec3& rotation, const glm::vec3& direction, float maxDistance, const QueryFilter& filter);
+    ShapeCastResult shapeCast(const JPH::ShapeRefC& shape, const glm::vec3& position,
+        const glm::vec3& rotation, const glm::vec3& direction, const QueryFilter& filter);
 
     // Constraint management
     JPH::Constraint* createConstraint(entt::entity entityA, entt::entity entityB, const ConstraintComponent& constraint);

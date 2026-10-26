@@ -12,6 +12,7 @@
 #include "Components/IdentityComponent.hpp"
 #include "Reflection/Reflector.hpp"
 #include <algorithm>
+#include <vector>
 
 struct TransformComponent {
     glm::vec3 position;
@@ -51,7 +52,7 @@ struct TagComponent {
 
 struct MeshComponent {
     std::shared_ptr<mesh> m_mesh;
-    // No reflect() — contains non-reflectable shared_ptr data, handled with custom UI
+    // No reflect() â€” contains non-reflectable shared_ptr data, handled with custom UI
 };
 
 struct TerrainComponent {
@@ -233,6 +234,25 @@ struct ColliderComponent {
         r.field<&ColliderComponent::restitution>("restitution")
             .tooltip("Bounciness").drag(0.01f).range(0.0f, 1.0f).category("Material");
     }
+};
+
+struct TriggerComponent {
+    bool enabled = true;
+    uint32_t trigger_id = 0;   // game-assigned semantic id; engine never interprets it
+    bool server_only = true;   // authoritative effects read server state
+
+    static void reflect(Reflector<TriggerComponent>& r) {
+        r.display("Trigger").category("Physics");
+        r.field<&TriggerComponent::enabled>("enabled").category("Physics");
+        r.field<&TriggerComponent::trigger_id>("trigger_id")
+            .tooltip("Game-assigned semantic id").category("Physics");
+        r.field<&TriggerComponent::server_only>("server_only").category("Physics");
+    }
+};
+
+// Engine-maintained, not authored, not reflected. Occupants sorted ascending.
+struct TriggerOverlapState {
+    std::vector<entt::entity> occupants;
 };
 
 struct CharacterControllerComponent {

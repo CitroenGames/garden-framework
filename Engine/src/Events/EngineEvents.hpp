@@ -22,6 +22,21 @@ struct PhysicsStepEvent
     float delta_time = 0.0f;
 };
 
+struct TriggerEnteredEvent
+{
+    entt::entity trigger = entt::null;
+    entt::entity other = entt::null;
+    uint32_t trigger_id = 0;
+};
+
+struct TriggerExitedEvent
+{
+    entt::entity trigger = entt::null;
+    entt::entity other = entt::null;
+    uint32_t trigger_id = 0;
+};
+
+
 // --- Entity Lifecycle Events ---
 
 struct EntityCreatedEvent
