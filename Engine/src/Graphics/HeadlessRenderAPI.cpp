@@ -187,9 +187,25 @@ void HeadlessRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
     TextureHandle lastTexture = INVALID_TEXTURE;
     const IGPUMesh* lastMesh = nullptr;
 
-    for (const auto& cmd : cmds)
+    const std::vector<DrawCommand>& list = cmds.commands();
+    for (size_t i = 0; i < list.size();)
     {
-        if (!cmd.gpu_mesh || !cmd.gpu_mesh->isUploaded()) continue;
+        const DrawCommand& first = list[i];
+        if (!first.gpu_mesh || !first.gpu_mesh->isUploaded()) { ++i; continue; }
+
+        // Consecutive compatible draws issue as one merged draw. Bind and
+        // descriptor accounting below still visits every member, so the
+        // counters stay comparable with an unmerged replay.
+        const size_t runLength = instancedRunLength(list, i);
+        if (runLength > 1)
+        {
+            m_lastFrameStats.instanced_batches++;
+            m_lastFrameStats.instanced_instances += runLength;
+        }
+        m_lastFrameStats.backend_draw_calls++;
+        for (size_t member = 0; member < runLength; ++member)
+        {
+        const DrawCommand& cmd = list[i + member];
 
         if (!havePSO || cmd.pso_key != lastPSO)
         {
@@ -232,7 +248,8 @@ void HeadlessRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
             m_descriptorCache.insert(descKey);
             m_lastFrameStats.descriptor_allocs++;
         }
-        m_lastFrameStats.backend_draw_calls++;
+        }
+        i += runLength;
     }
 }
 

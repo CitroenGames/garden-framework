@@ -142,6 +142,58 @@ struct DrawCommand
     size_t vertex_count = 0;
 };
 
+// A draw may join a merged instanced draw only when every per-draw value
+// the shader reads from its per-object data is shared by the whole run, so
+// the sole remaining difference between members is their transform. Shadow,
+// depth-only and blended draws keep individual draws, matching the order
+// guarantees those draws rely on.
+inline bool drawSupportsInstancing(const DrawCommand& cmd)
+{
+    return !cmd.pso_key.shadow
+        && !cmd.pso_key.depth_only
+        && cmd.pso_key.blend == BlendMode::None;
+}
+
+inline bool drawInstanceCompatible(const DrawCommand& a, const DrawCommand& b)
+{
+    auto vec3Equal = [](const glm::vec3& x, const glm::vec3& y)
+    {
+        return x.x == y.x && x.y == y.y && x.z == y.z;
+    };
+    return drawSupportsInstancing(a)
+        && drawSupportsInstancing(b)
+        && a.gpu_mesh == b.gpu_mesh
+        && a.pso_key == b.pso_key
+        && a.use_texture == b.use_texture
+        && a.texture == b.texture
+        && a.use_heightmap_displacement == b.use_heightmap_displacement
+        && a.heightmap_texture == b.heightmap_texture
+        && a.heightmap_height_scale == b.heightmap_height_scale
+        && a.heightmap_height_offset == b.heightmap_height_offset
+        && a.heightmap_texel_size.x == b.heightmap_texel_size.x
+        && a.heightmap_texel_size.y == b.heightmap_texel_size.y
+        && a.start_vertex == b.start_vertex
+        && a.vertex_count == b.vertex_count
+        && a.alpha_cutoff == b.alpha_cutoff
+        && a.metallic == b.metallic
+        && a.roughness == b.roughness
+        && a.material_flags == b.material_flags
+        && vec3Equal(a.color, b.color)
+        && vec3Equal(a.emissive, b.emissive);
+}
+
+// Length of the merged run beginning at first, always at least one.
+inline size_t instancedRunLength(const std::vector<DrawCommand>& cmds, size_t first)
+{
+    size_t length = 1;
+    if (first >= cmds.size() || !drawSupportsInstancing(cmds[first]))
+        return length;
+    while (first + length < cmds.size() &&
+           drawInstanceCompatible(cmds[first], cmds[first + length]))
+        ++length;
+    return length;
+}
+
 // CPU-side command buffer that stores a flat list of self-contained draw commands.
 // Multiple threads can each own their own RenderCommandBuffer and record independently.
 // No GPU calls happen during recording -- all GPU work is deferred to replay.

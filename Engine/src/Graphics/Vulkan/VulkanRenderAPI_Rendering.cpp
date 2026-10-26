@@ -75,40 +75,14 @@ bool checkIndexedDrawBounds(const char* tag,
     return true;
 }
 
-bool vec3Equal(const glm::vec3& a, const glm::vec3& b)
-{
-    return a.x == b.x && a.y == b.y && a.z == b.z;
-}
-
 bool isStaticInstancingEligible(const DrawCommand& cmd)
 {
-    return !cmd.pso_key.shadow
-        && !cmd.pso_key.depth_only
-        && cmd.pso_key.blend == BlendMode::None;
+    return drawSupportsInstancing(cmd);
 }
 
 bool staticInstanceCompatible(const DrawCommand& a, const DrawCommand& b)
 {
-    return isStaticInstancingEligible(a)
-        && isStaticInstancingEligible(b)
-        && a.gpu_mesh == b.gpu_mesh
-        && a.use_texture == b.use_texture
-        && a.texture == b.texture
-        && a.use_heightmap_displacement == b.use_heightmap_displacement
-        && a.heightmap_texture == b.heightmap_texture
-        && a.heightmap_height_scale == b.heightmap_height_scale
-        && a.heightmap_height_offset == b.heightmap_height_offset
-        && a.heightmap_texel_size.x == b.heightmap_texel_size.x
-        && a.heightmap_texel_size.y == b.heightmap_texel_size.y
-        && a.pso_key == b.pso_key
-        && a.start_vertex == b.start_vertex
-        && a.vertex_count == b.vertex_count
-        && a.alpha_cutoff == b.alpha_cutoff
-        && a.metallic == b.metallic
-        && a.roughness == b.roughness
-        && a.material_flags == b.material_flags
-        && vec3Equal(a.color, b.color)
-        && vec3Equal(a.emissive, b.emissive);
+    return drawInstanceCompatible(a, b);
 }
 
 size_t estimateStaticInstanceSavings(const RenderCommandBuffer& cmds)
@@ -1136,11 +1110,7 @@ void VulkanRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
 
         size_t batchCount = 1;
         if (allowStaticInstancing && isStaticInstancingEligible(drawCmd)) {
-            while (cmdIndex + batchCount < cmds.size() &&
-                   staticInstanceCompatible(drawCmd, cmds[cmdIndex + batchCount]))
-            {
-                ++batchCount;
-            }
+            batchCount = instancedRunLength(cmds.commands(), cmdIndex);
         }
 
         bool useInstanceData = false;

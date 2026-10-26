@@ -179,8 +179,10 @@ static bool testHeadlessReplaySkipsRedundantBinds()
     api.replayCommandBuffer(buf);
     RenderFrameStats stats = api.getLastFrameStats();
 
-    if (stats.backend_draw_calls != 8)
-        return fail(name, "expected 8 backend draws, got " + std::to_string(stats.backend_draw_calls));
+    if (stats.backend_draw_calls != 1)
+        return fail(name, "expected 1 backend draw, got " + std::to_string(stats.backend_draw_calls));
+    if (stats.instanced_batches != 1 || stats.instanced_instances != 8)
+        return fail(name, "expected one merged batch covering 8 draws");
     // 7 PSO skips + 7 texture skips + 7 mesh skips.
     if (stats.state_binds_skipped != 21)
         return fail(name, "expected 21 skipped binds, got " + std::to_string(stats.state_binds_skipped));
@@ -204,6 +206,8 @@ static bool testHeadlessReplayAlternatingTexture()
 
     if (stats.backend_draw_calls != 8)
         return fail(name, "expected 8 backend draws, got " + std::to_string(stats.backend_draw_calls));
+    if (stats.instanced_batches != 0 || stats.instanced_instances != 0)
+        return fail(name, "draws with changing textures must stay unmerged");
     // Texture changes every draw (0 skips); PSO + mesh skip 7 each.
     if (stats.state_binds_skipped != 14)
         return fail(name, "expected 14 skipped binds, got " + std::to_string(stats.state_binds_skipped));
@@ -313,6 +317,121 @@ static bool benchBinForwardPlusLights(size_t count)
     return pass(name + " (" + std::to_string(count) + ")");
 }
 
+static bool testHeadlessCoalescesIdenticalRun()
+{
+    const std::string name = "counting replay merges a long identical run";
+    HeadlessRenderAPI api;
+    api.beginFrame();
+    IGPUMesh* mesh = makeUploadedMesh(api);
+    PSOKey main;
+    RenderCommandBuffer buf;
+    for (int i = 0; i < 100; i++)
+        buf.recordDraw(mesh, glm::translate(glm::mat4(1.0f), glm::vec3((float)i, 0.0f, -10.0f)), 7, true, main);
+    buf.sort();
+    api.replayCommandBuffer(buf);
+    RenderFrameStats stats = api.getLastFrameStats();
+    delete mesh;
+    if (stats.submitted_draw_commands != 100)
+        return fail(name, "expected 100 submitted draws");
+    if (stats.backend_draw_calls != 1)
+        return fail(name, "expected 1 backend draw, got " + std::to_string(stats.backend_draw_calls));
+    if (stats.instanced_batches != 1 || stats.instanced_instances != 100)
+        return fail(name, "expected one batch covering every draw");
+    return pass(name);
+}
+
+static bool testHeadlessRejectsDifferingRuns()
+{
+    const std::string name = "counting replay keeps unlike draws unmerged";
+    HeadlessRenderAPI api;
+    IGPUMesh* mesh = makeUploadedMesh(api);
+    IGPUMesh* otherMesh = makeUploadedMesh(api);
+    PSOKey lit;
+    PSOKey unlit;
+    unlit.lighting = false;
+    PSOKey shadow = PSOKey::shadowPass();
+    PSOKey depth = PSOKey::depthPrepass();
+    PSOKey blended;
+    blended.blend = BlendMode::Alpha;
+
+    auto run = [&](const PSOKey& key, IGPUMesh* m, TextureHandle tex, const glm::vec3& color) {
+        RenderCommandBuffer buf;
+        for (int i = 0; i < 10; i++)
+            buf.recordDrawRangePBR(m, glm::translate(glm::mat4(1.0f), glm::vec3((float)i, 0.0f, -10.0f)),
+                                   tex, true, key, 0, 0, color, 0.0f, 0.0f, 0.5f);
+        api.beginFrame();
+        api.replayCommandBuffer(buf);
+        return api.getLastFrameStats();
+    };
+
+    RenderFrameStats s = run(unlit, mesh, 7, glm::vec3(1.0f));
+    if (s.backend_draw_calls != 1 || s.instanced_instances != 10)
+        return fail(name, "unlit run did not merge on its own");
+    s = run(shadow, mesh, 7, glm::vec3(1.0f));
+    if (s.backend_draw_calls != 10 || s.instanced_batches != 0)
+        return fail(name, "shadow draws must stay unmerged");
+    s = run(depth, mesh, 7, glm::vec3(1.0f));
+    if (s.backend_draw_calls != 10 || s.instanced_batches != 0)
+        return fail(name, "depth-only draws must stay unmerged");
+    s = run(blended, mesh, 7, glm::vec3(1.0f));
+    if (s.backend_draw_calls != 10 || s.instanced_batches != 0)
+        return fail(name, "blended draws must stay unmerged");
+    s = run(lit, otherMesh, 7, glm::vec3(1.0f));
+    if (s.backend_draw_calls != 1 || s.instanced_instances != 10)
+        return fail(name, "second mesh run did not merge on its own");
+    s = run(lit, mesh, 9, glm::vec3(1.0f));
+    if (s.backend_draw_calls != 1 || s.instanced_instances != 10)
+        return fail(name, "second texture run did not merge on its own");
+    s = run(lit, mesh, 7, glm::vec3(0.5f, 1.0f, 1.0f));
+    if (s.backend_draw_calls != 1 || s.instanced_instances != 10)
+        return fail(name, "recolored run did not merge on its own");
+
+    // Unlike neighbours break a run: lit, unlit, lit never merge across.
+    {
+        RenderCommandBuffer buf;
+        for (int i = 0; i < 5; i++)
+            buf.recordDraw(mesh, glm::mat4(1.0f), 7, true, lit);
+        for (int i = 0; i < 5; i++)
+            buf.recordDraw(mesh, glm::mat4(1.0f), 7, true, unlit);
+        for (int i = 0; i < 5; i++)
+            buf.recordDraw(mesh, glm::mat4(1.0f), 7, true, lit);
+        api.beginFrame();
+        api.replayCommandBuffer(buf);
+        s = api.getLastFrameStats();
+        if (s.backend_draw_calls != 3 || s.instanced_batches != 3 || s.instanced_instances != 15)
+            return fail(name, "neighbouring unlike runs merged or split wrongly, draws=" +
+                            std::to_string(s.backend_draw_calls));
+    }
+    delete mesh;
+    delete otherMesh;
+    return pass(name);
+}
+
+static bool testHeadlessParallelCoalescesLikeSequential()
+{
+    const std::string name = "counting parallel replay merges like sequential replay";
+    HeadlessRenderAPI api;
+    IGPUMesh* mesh = makeUploadedMesh(api);
+    PSOKey main;
+    RenderCommandBuffer buf;
+    for (int i = 0; i < 100; i++)
+        buf.recordDraw(mesh, glm::translate(glm::mat4(1.0f), glm::vec3((float)i, 0.0f, -10.0f)), 7, true, main);
+    api.beginFrame();
+    api.replayCommandBuffer(buf);
+    RenderFrameStats seq = api.getLastFrameStats();
+    api.beginFrame();
+    api.replayCommandBufferParallel(buf);
+    RenderFrameStats par = api.getLastFrameStats();
+    delete mesh;
+    if (par.backend_draw_calls != seq.backend_draw_calls ||
+        par.instanced_batches != seq.instanced_batches ||
+        par.instanced_instances != seq.instanced_instances)
+        return fail(name, "parallel merged counts differ from sequential counts");
+    if (par.backend_draw_calls != 1 || par.instanced_instances != 100)
+        return fail(name, "parallel replay did not merge the run");
+    return pass(name);
+}
+
 static bool testHeadlessFrameStatsPopulate()
 {
     const std::string name = "counting replay reports descriptor, parallel and instanced counters";
@@ -326,8 +445,10 @@ static bool testHeadlessFrameStatsPopulate()
     api.beginFrame();
     api.replayCommandBuffer(buf);
     RenderFrameStats first = api.getLastFrameStats();
-    if (first.backend_draw_calls != 8 || first.submitted_draw_commands != 8)
+    if (first.backend_draw_calls != 1 || first.submitted_draw_commands != 8)
         return fail(name, "draw counters did not populate on first replay");
+    if (first.instanced_batches != 1 || first.instanced_instances != 8)
+        return fail(name, "merged counters did not populate on first replay");
     if (first.descriptor_allocs != 1 || first.descriptor_cache_hits != 7)
         return fail(name, "expected 1 descriptor alloc and 7 hits, got allocs=" +
                             std::to_string(first.descriptor_allocs) + " hits=" +
@@ -340,8 +461,8 @@ static bool testHeadlessFrameStatsPopulate()
         return fail(name, "expected warm replay with 0 allocs and 8 hits, got allocs=" +
                             std::to_string(second.descriptor_allocs) + " hits=" +
                             std::to_string(second.descriptor_cache_hits));
-    if (second.instanced_batches != 0 || second.instanced_instances != 0)
-        return fail(name, "plain draws must not be reported as instanced draws");
+    if (second.instanced_batches != 1 || second.instanced_instances != 8)
+        return fail(name, "warm replay lost its merged batch");
 
     api.beginFrame();
     api.replayCommandBufferParallel(buf);
@@ -362,6 +483,9 @@ int main()
     ok &= testSortWithViewDepthFrontToBack();
     ok &= testHeadlessReplaySkipsRedundantBinds();
     ok &= testHeadlessReplayAlternatingTexture();
+    ok &= testHeadlessCoalescesIdenticalRun();
+    ok &= testHeadlessRejectsDifferingRuns();
+    ok &= testHeadlessParallelCoalescesLikeSequential();
     ok &= testHeadlessFrameStatsPopulate();
     ok &= benchSort(1000);
     ok &= benchSort(10000);
