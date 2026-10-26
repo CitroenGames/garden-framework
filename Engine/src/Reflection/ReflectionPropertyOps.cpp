@@ -1,4 +1,5 @@
 #include "ReflectionPropertyOps.hpp"
+#include "Components/IdentityComponent.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -125,6 +126,11 @@ namespace ReflectionPropertyOps
         if (!src_field || !dst_field)
             return;
 
+        if (isStringLike(prop.type) && prop.size == sizeof(EntityGuid))
+        {
+            std::memcpy(dst_field, src_field, prop.size);
+            return;
+        }
         if (isStringLike(prop.type))
         {
             *static_cast<std::string*>(dst_field) = *static_cast<const std::string*>(src_field);
@@ -159,6 +165,8 @@ namespace ReflectionPropertyOps
 
         case EPropertyType::String:
         case EPropertyType::AssetPath:
+            if (prop.size == sizeof(EntityGuid))
+                return guidToString(*static_cast<const EntityGuid*>(ptr));
             return *static_cast<const std::string*>(ptr);
 
         case EPropertyType::Vec2:
@@ -236,6 +244,8 @@ namespace ReflectionPropertyOps
         case EPropertyType::AssetPath:
             if (!value.is_string())
                 return false;
+            if (prop.size == sizeof(EntityGuid))
+                return guidFromString(value.get<std::string>(), *static_cast<EntityGuid*>(ptr));
             *static_cast<std::string*>(ptr) = value.get<std::string>();
             return true;
 

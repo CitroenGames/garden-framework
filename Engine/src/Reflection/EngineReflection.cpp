@@ -2,6 +2,7 @@
 #include "ReflectionRegistry.hpp"
 #include "Components/Components.hpp"
 #include "Components/PrefabInstanceComponent.hpp"
+#include "Components/IdentityComponent.hpp"
 
 void registerEngineReflection(ReflectionRegistry& registry)
 {
@@ -22,4 +23,5 @@ void registerEngineReflection(ReflectionRegistry& registry)
     registry.reflect<PointLightComponent>("PointLightComponent");
     registry.reflect<SpotLightComponent>("SpotLightComponent");
     registry.reflect<PrefabInstanceComponent>("PrefabInstanceComponent");
+    registry.reflect<IdentityComponent>("IdentityComponent");
 }
