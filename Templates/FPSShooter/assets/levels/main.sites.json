@@ -1,0 +1,10 @@
+{
+  "format": "fpsshooter_bomb_sites",
+  "version": 1,
+  "level": "main",
+  "note": "Authored bomb sites for the shipped city map (main.level.json). Centres are on navmesh-walkable ground, distinct from team spawns. Validated live: server logs 'Bomb: authored sites=' and bots path to them after the FPS_BAKE_NAV=1 bake.",
+  "sites": [
+    { "name": "A", "centre": [30.0, 5.0, 15.0], "radius": 10.0 },
+    { "name": "B", "centre": [22.0, 2.0, -16.0], "radius": 10.0 }
+  ]
+}

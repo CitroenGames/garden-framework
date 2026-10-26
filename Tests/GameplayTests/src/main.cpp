@@ -987,6 +987,7 @@ bool testWeaponRosterIntegrity()
 #include "BotTests.hpp"
 #include "UiLogicTests.hpp"
 #include "AudioTests.hpp"
+#include "NavMeshTests.hpp"
 int main()
 {
     bool ok = true;
@@ -1021,11 +1022,15 @@ int main()
     ok = testBotFsmPlantDefendDefuse() && ok;
     ok = testBotSteeringArrivalStuck() && ok;
     ok = testBotInputSynthesisShape() && ok;
+    ok = testBotEngageStrafes() && ok;
     ok = testBotBuyPlanByMoney() && ok;
     ok = testBotDebugRingWraps() && ok;
     ok = testBotDebugTransitionRecorded() && ok;
     ok = testBotDebugDumpFormatter() && ok;
     ok = testBotDebugPausedNeutral() && ok;
+    ok = testBombAuthoredSitesParse() && ok;
+    ok = testNavMeshGenerateAndSerializerRoundTrip() && ok;
+    ok = testNavMeshFindPathTwoPoly() && ok;
     ok = testUiScreenTransitions() && ok;
     ok = testUiMenusRequireCompetitiveState() && ok;
     ok = testUiClockFormatting() && ok;

@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <functional>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -139,6 +140,50 @@ struct BombConfig {
         return false;
     }
 };
+
+// Authored bomb sites for a shipped level (assets/levels/main.sites.json).
+// Format: {"sites":[{"name":"A","centre":[x,y,z],"radius":r}, ...]}
+// Returns false (out cleared) on any malformed/insufficient data so the
+// caller can fall back to the Defender-spawn fallback above.
+inline bool parseAuthoredBombSites(const std::string& text, std::vector<BombSite>& out, std::string* err = nullptr)
+{
+    out.clear();
+    auto failWith = [&](const char* m) { if (err) *err = m; out.clear(); return false; };
+    size_t pos = text.find("\"sites\"");
+    if (pos == std::string::npos) return failWith("no sites key");
+    pos = text.find('[', pos);
+    if (pos == std::string::npos) return failWith("sites not an array");
+    while (true) {
+        size_t obj = text.find('{', pos);
+        if (obj == std::string::npos) break;
+        size_t end = text.find('}', obj);
+        if (end == std::string::npos) return failWith("unterminated site object");
+        std::string chunk = text.substr(obj, end - obj);
+        size_t cpos = chunk.find("\"centre\"");
+        if (cpos == std::string::npos) return failWith("site missing centre");
+        cpos = chunk.find('[', cpos);
+        size_t cend = chunk.find(']', cpos);
+        if (cpos == std::string::npos || cend == std::string::npos) return failWith("centre not an array");
+        std::string nums = chunk.substr(cpos + 1, cend - cpos - 1);
+        float v[3] = {0, 0, 0}; int n = 0; size_t s = 0;
+        while (n < 3) { size_t comma = nums.find(',', s); std::string tok = nums.substr(s, comma == std::string::npos ? std::string::npos : comma - s); try { v[n] = std::stof(tok); } catch (...) { return failWith("centre not numeric"); } ++n; if (comma == std::string::npos) break; s = comma + 1; }
+        if (n != 3) return failWith("centre needs 3 numbers");
+        size_t rpos = chunk.find("\"radius\"");
+        if (rpos == std::string::npos) return failWith("site missing radius");
+        rpos = chunk.find(':', rpos);
+        float radius = 0.0f;
+        try { radius = std::stof(chunk.substr(rpos + 1)); } catch (...) { return failWith("radius not numeric"); }
+        if (radius < 3.0f || radius > 30.0f) return failWith("radius out of [3,30]");
+        BombSite site; site.centre = glm::vec3(v[0], v[1], v[2]); site.radius = radius; site.site_index = (uint8_t)out.size();
+        out.push_back(site);
+        pos = end + 1;
+        if (text.find('{', pos) == std::string::npos || (out.size() >= 1 && text.find(']', pos) < text.find('{', pos))) break;
+    }
+    if (out.size() < 2) return failWith("need at least 2 authored sites");
+    for (size_t i = 0; i < out.size(); ++i) for (size_t j = i + 1; j < out.size(); ++j)
+        if (glm::distance(out[i].centre, out[j].centre) < 5.0f) return failWith("authored sites too close (<5m)");
+    return true;
+}
 
 // Singleton bomb state (mirrors BombStateComponent in the spec).
 struct BombStateComponent {

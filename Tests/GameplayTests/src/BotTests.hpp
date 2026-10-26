@@ -119,6 +119,37 @@ bool testBotInputSynthesisShape()
     return pass(name);
 }
 
+bool testBotEngageStrafes()
+{
+    const std::string name = "Bot_EngageStrafes";
+    using namespace Bots;
+    // Normal (strafe_interval 0.9): Engage with a visible enemy must produce
+    // lateral movement while aiming, and the direction must flip over time.
+    BotComponent b; b.difficulty = 1; b.state = BotState::Engage; b.rng_state = 99;
+    NavAgentComponent nav; nav.desired_velocity = glm::vec3(0);
+    BotIntentComponent intent; intent.want_attack = true; intent.aim_yaw = 0.0f;
+    bool saw_left = false, saw_right = false, saw_move = false;
+    for (int i = 0; i < 300; ++i) {
+        Net::InputSample s = synthesizeInput(b, nav, intent, (uint32_t)i, 0.1f);
+        if (s.move_right > 0.1f) saw_right = true;
+        if (s.move_right < -0.1f) saw_left = true;
+        if (s.move_right != 0.0f) saw_move = true;
+        if (!(s.buttons & Net::InputFlags::ATTACK)) return fail(name, "Engage strafe lost ATTACK");
+    }
+    if (!saw_move) return fail(name, "Engage bot stationary while aiming (no strafe)");
+    if (!saw_left || !saw_right) return fail(name, "strafe direction never flipped");
+    // Easy (strafe_interval 0): standing still while aiming is by design.
+    BotComponent easy; easy.difficulty = 0; easy.state = BotState::Engage; easy.rng_state = 5;
+    Net::InputSample es = synthesizeInput(easy, nav, intent, 1, 0.1f);
+    if (es.move_right != 0.0f) return fail(name, "Easy bot strafed despite strafe_interval=0");
+    // No visible enemy (want_attack false): no strafe.
+    BotComponent blind; blind.difficulty = 1; blind.state = BotState::Engage; blind.rng_state = 5;
+    BotIntentComponent no_atk; no_atk.aim_yaw = 0.0f;
+    Net::InputSample bs = synthesizeInput(blind, nav, no_atk, 1, 0.1f);
+    if (bs.move_right != 0.0f) return fail(name, "strafed without a visible enemy");
+    return pass(name);
+}
+
 bool testBotBuyPlanByMoney()
 {
     const std::string name = "Bot_BuyPlanByMoney";
@@ -187,5 +218,23 @@ bool testBotDebugPausedNeutral()
     if (s.tick != 9 || s.buttons != 0 || s.move_forward != 0.0f || s.move_right != 0.0f) return fail(name, "paused sample not neutral");
     if (!botApprox(s.camera_yaw, 0.5f) || !botApprox(s.camera_pitch, -0.2f)) return fail(name, "paused camera not preserved");
     StuckLogLatch latch; if (!latch.check(true) || latch.check(true) || latch.check(false) || !latch.check(true)) return fail(name, "stuck latch not one-shot per episode");
+    return pass(name);
+}
+bool testBombAuthoredSitesParse()
+{
+    const std::string name = "Bomb_AuthoredSitesParse";
+    using namespace Competitive;
+    std::vector<BombSite> sites; std::string err;
+    const std::string good = "{\"sites\":[{\"name\":\"A\",\"centre\":[30.0,5.0,15.0],\"radius\":10.0},{\"name\":\"B\",\"centre\":[-30.0,5.0,-15.0],\"radius\":10.0}]}";
+    if (!parseAuthoredBombSites(good, sites, &err)) return fail(name, "valid authored sites rejected: " + err);
+    if (sites.size() != 2 || sites[0].site_index != 0 || sites[1].site_index != 1) return fail(name, "site indices wrong");
+    if (glm::distance(sites[0].centre, glm::vec3(30,5,15)) > 0.01f) return fail(name, "site A centre wrong");
+    BombConfig cfg; cfg.sites = sites; uint8_t idx = 99;
+    if (!cfg.inSite(glm::vec3(30,5,15), idx) || idx != 0) return fail(name, "inSite A failed");
+    if (cfg.inSite(glm::vec3(0,5,0), idx)) return fail(name, "origin unexpectedly in a site");
+    if (parseAuthoredBombSites("{\"sites\":[{\"centre\":[0,0,0],\"radius\":10}]}", sites, &err)) return fail(name, "single site accepted");
+    if (parseAuthoredBombSites("{\"sites\":[{\"centre\":[0,0,0],\"radius\":1},{\"centre\":[50,0,0],\"radius\":10}]}", sites, &err)) return fail(name, "tiny radius accepted");
+    if (parseAuthoredBombSites("not json", sites, &err)) return fail(name, "garbage accepted");
+    if (parseAuthoredBombSites("{\"sites\":[{\"centre\":[0,0,0],\"radius\":10},{\"centre\":[1,0,0],\"radius\":10}]}", sites, &err)) return fail(name, "overlapping sites accepted");
     return pass(name);
 }

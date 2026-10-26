@@ -46,6 +46,7 @@ struct SteeringComponent { glm::vec3 velocity{0}; float stuck_time = 0; glm::vec
 struct BotComponent {
     uint8_t difficulty = 1; BotState state = BotState::Idle; BotState resume_state = BotState::Advance; bool has_resume = false;
     float state_time = 0, next_decision_time = 0, engage_lost_time = 0, aim_yaw = 0, aim_pitch = 0;
+    float strafe_timer = 0; int8_t strafe_dir = 1; // Engage strafe pattern (bots.md: flips every strafe_interval)
     uint32_t rng_state = 1; entt::entity pawn = entt::null; int32_t bot_index = 0;
     bool buy_done = false;
 };
@@ -178,7 +179,7 @@ struct BotDecisionInput {
     glm::vec3 site_pos{0}; bool has_site = false; glm::vec3 bomb_pos{0}; bool has_bomb_pos = false;
     int32_t health = 100; float dt = 0.1f; glm::vec3 bot_pos{0};
 };
-inline void setState(BotComponent& b, BotState s) { if (b.state != s) { b.state = s; b.state_time = 0; b.engage_lost_time = 0; } }
+inline void setState(BotComponent& b, BotState s) { if (b.state != s) { b.state = s; b.state_time = 0; b.engage_lost_time = 0; if (s == BotState::Engage) b.strafe_timer = 0; } }
 
 inline void decide(BotComponent& b, const BotPerceptComponent& p, BotIntentComponent& intent, const BotDecisionInput& in,
                    TransitionRingBuffer* transitions = nullptr, uint32_t tick = 0) {
@@ -284,6 +285,14 @@ inline Net::InputSample synthesizeInput(BotComponent& b, const NavAgentComponent
     glm::vec3 dir = speed > 0.001f ? wish / speed : glm::vec3(0);
     s.move_forward = std::clamp(glm::dot(dir, fwd) * scale, -1.0f, 1.0f);
     s.move_right = std::clamp(glm::dot(dir, right) * scale, -1.0f, 1.0f);
+    // Engage strafe (bots.md state table): lateral movement while aiming at the
+    // visible enemy, direction flipped by rng every strafe_interval seconds.
+    // strafe_interval == 0 (Easy) means stand. Direct input only, no teleport.
+    if (engaging && intent.want_attack && diff.strafe_interval > 0.0f) {
+        b.strafe_timer += std::max(dt, 0.0f);
+        if (b.strafe_timer >= diff.strafe_interval) { b.strafe_timer = 0.0f; b.strafe_dir = rngSigned(b.rng_state) >= 0.0f ? (int8_t)1 : (int8_t)-1; }
+        s.move_right = 0.8f * (float)b.strafe_dir;
+    }
     if (s.move_forward > 0.01f) s.buttons |= Net::InputFlags::MOVE_FORWARD; else if (s.move_forward < -0.01f) s.buttons |= Net::InputFlags::MOVE_BACK;
     if (s.move_right > 0.01f) s.buttons |= Net::InputFlags::MOVE_RIGHT; else if (s.move_right < -0.01f) s.buttons |= Net::InputFlags::MOVE_LEFT;
     if (intent.want_use) s.buttons |= Net::InputFlags::USE;

@@ -21,6 +21,8 @@
 #include "Navigation/NavMesh.hpp"
 #include "Navigation/NavMeshPathfinder.hpp"
 #include "Navigation/NavMeshSerializer.hpp"
+#include "Navigation/NavMeshGenerator.hpp"
+#include <filesystem>
 #include "Network/SharedMovement.hpp"
 #include "Gameplay/GameplayComponents.hpp"
 #include <cstdlib>
@@ -586,8 +588,52 @@ static bool loadBotNavMesh()
         }
     }
     g_bots_enabled = false; // F-AI-01: never straight-line wall walking
-    if (!g_bots_error_logged) { g_bots_error_logged = true; LOG_ENGINE_ERROR("Bots disabled: navmesh missing/invalid (F-AI-01); match continues human-only"); }
+    if (!g_bots_error_logged) { g_bots_error_logged = true; LOG_ENGINE_ERROR("Bots disabled: navmesh missing/invalid (F-AI-01); match continues human-only. Fix: run server once with FPS_BAKE_NAV=1 FPS_GAME_MODE=competitive to bake assets/levels/main.nav, then relaunch with FPS_BOTS=N (see Templates/FPSShooter/BOTS.txt)"); }
     return false;
+}
+
+// Explicit opt-in bake (FPS_BAKE_NAV=1): generate from the loaded level registry,
+// save to the first loadBotNavMesh candidate whose directory exists, verify by
+// round-trip load. Never writes on generation failure. Runtime (no env) unchanged.
+static bool bakeBotNavMeshIfRequested()
+{
+    const char* env = std::getenv("FPS_BAKE_NAV");
+    if (!env || std::atoi(env) == 0) return false;
+    static bool s_done = false;
+    if (s_done) return g_bot_nav.loaded;
+    s_done = true;
+    world* w = g_server_services ? g_server_services->game_world : nullptr;
+    if (!w) { LOG_ENGINE_ERROR("BakeNav: no game world; cannot bake"); return false; }
+    static const char* kNavCandidates[] = {"assets/levels/main.nav", "Templates/FPSShooter/assets/levels/main.nav", "../Templates/FPSShooter/assets/levels/main.nav"};
+    std::string out_path = kNavCandidates[0];
+    for (const char* cand : kNavCandidates) {
+        std::filesystem::path p(cand);
+        if (p.has_parent_path() && std::filesystem::is_directory(p.parent_path())) { out_path = cand; break; }
+    }
+    Navigation::NavMeshConfig cfg;
+    cfg.agent_height = 1.8f; cfg.agent_radius = 0.35f; cfg.cell_size = 0.25f;
+    cfg.cell_height = 0.2f; cfg.max_climb = 0.5f; cfg.max_slope_angle = 45.0f;
+    LOG_ENGINE_INFO("BakeNav: generating navmesh (agent h={} r={} cell={} climb={}) -> {}", cfg.agent_height, cfg.agent_radius, cfg.cell_size, cfg.max_climb, out_path);
+    Navigation::NavMeshGenerator::GenerationStats stats;
+    Navigation::NavMesh baked = Navigation::NavMeshGenerator::generate(w->registry, cfg, &stats);
+    if (!baked.valid || baked.total_polys <= 0) {
+        LOG_ENGINE_ERROR("BakeNav: generation produced 0 polys (source_tris={}); NOT writing {}", stats.source_triangles, out_path);
+        return false;
+    }
+    if (!Navigation::NavMeshSerializer::save(baked, out_path)) {
+        LOG_ENGINE_ERROR("BakeNav: serializer save failed to {}", out_path);
+        return false;
+    }
+    Navigation::NavMesh check;
+    if (!Navigation::NavMeshSerializer::load(check, out_path) || !check.valid || check.total_polys <= 0) {
+        LOG_ENGINE_ERROR("BakeNav: round-trip load failed for {}", out_path);
+        return false;
+    }
+    std::error_code ec;
+    const auto bytes = std::filesystem::file_size(out_path, ec);
+    LOG_ENGINE_INFO("BakeNav: wrote {} polys={} bake_ms={:.1f} source_tris={} roundtrip_polys={} bytes={}",
+        out_path, baked.total_polys, stats.time_ms, stats.source_triangles, check.total_polys, ec ? 0 : (long long)bytes);
+    return true;
 }
 
 static void spawnBotsIfNeeded()
@@ -701,10 +747,11 @@ static void tickBots(float dt)
                 if (path.valid) Bots::setPath(nav, path.waypoints, goal); else { nav.path_valid = false; nav.has_goal = false; ++nav.path_failures; }
             }
         } else if (intent.has_move_goal) { nav.path_valid = false; nav.has_goal = false; }
-        if (!intent.has_move_goal && bot.state != Bots::BotState::Engage) { nav.has_goal = false; nav.desired_velocity = glm::vec3(0); }
+        // No move goal (incl. Engage): drop any stale path so steering does not
+        // walk the bot toward its pre-Engage goal while it aims/strafes.
+        if (!intent.has_move_goal) { nav.has_goal = false; nav.desired_velocity = glm::vec3(0); }
         // S4 steering + S5 synthesis into the same consumption path as humans
         Bots::updateSteering(nav, steer, pos, dt);
-        if (bot.state == Bots::BotState::Engage && percept.visible_fraction > 0.0f) { /* aim via intent, no positional steering */ }
         Net::InputSample sample = aiPauseBots() ? Bots::synthesizeNeutralInput(++g_bot_input_tick, bot.aim_yaw, bot.aim_pitch)
                                                 : Bots::synthesizeInput(bot, nav, intent, ++g_bot_input_tick, dt);
         consumeBotInputSample(client_id, e, sample, dt);
@@ -782,6 +829,36 @@ static void competitiveFreezeRespawnAll()
 }
 // Bomb sites: no bomb-site volumes are exposed by the level, so use the
 // documented BombConfig fallback - Defender spawn centres + fallback radius.
+static bool loadAuthoredBombSites(std::vector<Competitive::BombSite>& out)
+{
+    static bool s_tried = false; static std::vector<Competitive::BombSite> s_sites; static bool s_ok = false;
+    if (s_tried) { out = s_sites; return s_ok; }
+    s_tried = true;
+    static const char* kCandidates[] = {"assets/levels/main.sites.json", "Templates/FPSShooter/assets/levels/main.sites.json", "../Templates/FPSShooter/assets/levels/main.sites.json"};
+    for (const char* path : kCandidates) {
+        FILE* f = std::fopen(path, "rb"); if (!f) continue;
+        std::string text; char buf[4096]; size_t n = 0; while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) text.append(buf, n);
+        std::fclose(f);
+        std::string err;
+        if (!Competitive::parseAuthoredBombSites(text, s_sites, &err)) { LOG_ENGINE_ERROR("Bomb: authored sites {} rejected ({}); using fallback", path, err); s_sites.clear(); return false; }
+        if (g_bot_nav.loaded) {
+            for (const auto& s : s_sites) { glm::vec3 near_pt(0); if (!Navigation::NavMeshPathfinder::findNearestPoly(g_bot_nav.mesh, s.centre, near_pt)) { LOG_ENGINE_ERROR("Bomb: authored site {} off navmesh; using fallback", (int)s.site_index); s_sites.clear(); return false; } }
+        }
+        s_ok = true; out = s_sites;
+        LOG_ENGINE_INFO("Bomb: authored sites loaded from {} count={}", path, (int)s_sites.size());
+        return true;
+    }
+    LOG_ENGINE_INFO("Bomb: no authored sites file found; using fallback");
+    return false;
+}
+static void configureBombSitesFallback();
+static bool configureBombSites()
+{
+    std::vector<Competitive::BombSite> authored;
+    if (loadAuthoredBombSites(authored) && authored.size() >= 2) { g_bomb_system.config.sites = authored; return true; }
+    configureBombSitesFallback();
+    return false;
+}
 static void configureBombSitesFallback()
 {
     g_bomb_system.config.sites.clear();
@@ -797,7 +874,7 @@ static void competitiveFreezeBombSetup()
 {
     world* w = g_server_services ? g_server_services->game_world : nullptr;
     if (!w) return;
-    configureBombSitesFallback();
+    (void)configureBombSites();
     g_bomb_system.resetForRound();
     std::vector<entt::entity> attackers;
     auto view = w->registry.view<NetworkedEntity, TeamComponent, FpsHealthComponent>();
@@ -1493,6 +1570,7 @@ GAME_API void gardenServerOnLevelLoaded()
         g_server_network.setLevelHash(Net::computeLevelHashFromBytes(bytes));
         break;
     }
+    (void)bakeBotNavMeshIfRequested();
     if (g_competitive && botCountFromEnv() > 0) { g_bot_target_count = botCountFromEnv(); (void)loadBotNavMesh(); }
     LOG_ENGINE_INFO("Server level loaded");
 }
