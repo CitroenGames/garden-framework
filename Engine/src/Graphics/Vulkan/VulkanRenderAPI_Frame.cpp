@@ -148,6 +148,7 @@ void VulkanRenderAPI::prepareFrame()
     last_bound_descriptor_set = VK_NULL_HANDLE;
     last_bound_vertex_buffer = VK_NULL_HANDLE;
     last_bound_dynamic_offset = UINT32_MAX;
+    last_bound_index_buffer = VK_NULL_HANDLE;
 
     // Reset per-object dynamic UBO draw counter
     per_object_draw_index[current_frame] = 0;
@@ -158,6 +159,7 @@ void VulkanRenderAPI::prepareFrame()
     m_lastFrameStats.instanced_instances = 0;
     m_lastFrameStats.parallel_replay_batches = 0;
     m_lastFrameStats.parallel_replay_workers = 0;
+    m_lastFrameStats.state_binds_skipped = 0;
 
     // Reset per-thread command pools and descriptor pools for parallel replay
     // Only reset the current frame's pool — the other frame's secondary buffers may still be pending.

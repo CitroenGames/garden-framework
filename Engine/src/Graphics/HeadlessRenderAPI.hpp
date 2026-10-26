@@ -58,6 +58,15 @@ public:
 
     virtual IGPUMesh* createMesh() override;
 
+    // Phase 1: counting replay -- simulates backend bind caching (PSO /
+    // texture / mesh) so sort-key grouping and redundant-bind skip behaviour
+    // can be verified without a GPU.
+    virtual void replayCommandBuffer(const RenderCommandBuffer& cmds) override;
+    virtual RenderFrameStats getLastFrameStats() const override;
+
+private:
+    RenderFrameStats m_lastFrameStats{};
+
     virtual const char* getAPIName() const override { return "Headless"; }
 
     // Graphics settings (no-op for headless)

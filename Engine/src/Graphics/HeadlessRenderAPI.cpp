@@ -1,9 +1,11 @@
 #include "HeadlessRenderAPI.hpp"
 #include "HeadlessMesh.hpp"
+#include "Graphics/RenderCommandBuffer.hpp"
 #include "Components/camera.hpp"
 
 HeadlessRenderAPI::HeadlessRenderAPI()
 {
+    m_lastFrameStats.backend_name = getAPIName();
 }
 
 HeadlessRenderAPI::~HeadlessRenderAPI()
@@ -25,6 +27,9 @@ void HeadlessRenderAPI::resize(int width, int height)
 
 void HeadlessRenderAPI::beginFrame()
 {
+    const char* name = m_lastFrameStats.backend_name;
+    m_lastFrameStats = RenderFrameStats{};
+    m_lastFrameStats.backend_name = (name && name[0] != '\0') ? name : getAPIName();
 }
 
 void HeadlessRenderAPI::endFrame()
@@ -165,4 +170,62 @@ const glm::mat4* HeadlessRenderAPI::getLightSpaceMatrices() const
 IGPUMesh* HeadlessRenderAPI::createMesh()
 {
     return new HeadlessMesh();
+}
+
+void HeadlessRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
+{
+    if (cmds.empty()) return;
+
+    m_lastFrameStats.submitted_draw_commands += cmds.size();
+    m_lastFrameStats.backend_name = getAPIName();
+
+    // Fresh-list semantics: every replay starts unbound, mirroring the real
+    // backends after a command-list reset.
+    bool havePSO = false;
+    PSOKey lastPSO;
+    bool haveTexture = false;
+    TextureHandle lastTexture = INVALID_TEXTURE;
+    const IGPUMesh* lastMesh = nullptr;
+
+    for (const auto& cmd : cmds)
+    {
+        if (!cmd.gpu_mesh || !cmd.gpu_mesh->isUploaded()) continue;
+
+        if (!havePSO || cmd.pso_key != lastPSO)
+        {
+            lastPSO = cmd.pso_key;
+            havePSO = true;
+        }
+        else
+        {
+            m_lastFrameStats.state_binds_skipped++;
+        }
+
+        TextureHandle tex = cmd.use_texture ? cmd.texture : INVALID_TEXTURE;
+        if (!haveTexture || tex != lastTexture)
+        {
+            lastTexture = tex;
+            haveTexture = true;
+        }
+        else
+        {
+            m_lastFrameStats.state_binds_skipped++;
+        }
+
+        if (cmd.gpu_mesh != lastMesh)
+        {
+            lastMesh = cmd.gpu_mesh;
+        }
+        else
+        {
+            m_lastFrameStats.state_binds_skipped++;
+        }
+
+        m_lastFrameStats.backend_draw_calls++;
+    }
+}
+
+RenderFrameStats HeadlessRenderAPI::getLastFrameStats() const
+{
+    return m_lastFrameStats;
 }

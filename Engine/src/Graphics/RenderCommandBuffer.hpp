@@ -42,6 +42,21 @@ struct PSOKey
     }
 
     // Build from a RenderState + global lighting flag
+    // Packed pipeline variant bits (top 16 of the 64-bit sort key).
+    // Bit15 shadow, bit14 depth_only, bit13 lighting, bit12 alpha_test,
+    // bits11-10 blend, bits9-8 cull. Numeric order matches operator< priority.
+    uint16_t pipelineBits() const
+    {
+        uint16_t b = 0;
+        if (shadow) b |= (1u << 15);
+        if (depth_only) b |= (1u << 14);
+        if (lighting) b |= (1u << 13);
+        if (alpha_test) b |= (1u << 12);
+        b |= (uint16_t)((uint16_t)blend & 0x3u) << 10;
+        b |= (uint16_t)((uint16_t)cull & 0x3u) << 8;
+        return b;
+    }
+
     static PSOKey fromRenderState(const RenderState& state, bool global_lighting)
     {
         PSOKey key;
@@ -101,6 +116,26 @@ struct DrawCommand
     float         roughness    = 0.5f;
     glm::vec3     emissive     = glm::vec3(0.0f);
     uint32_t      material_flags = 0;
+
+    // Packed 64-bit sort key: pipeline(16) | material(16) | lighting(12) |
+    // geometry(8) | depth(12). Numeric order matches field priority, so a
+    // plain integer sort groups draws to minimize state changes; the depth
+    // bucket (front-to-back, near = 0) only orders within the same group.
+    uint64_t packedSortKey(uint16_t depthBucket = 0) const
+    {
+        uint64_t pipeline = (uint64_t)pso_key.pipelineBits();
+        uint64_t material = (uint64_t)(material_flags & 0xFFFFu);
+        uint64_t lighting = (uint64_t)((pso_key.lighting ? 0x800u : 0u) |
+            (((uint64_t)pso_key.blend & 0x3u) << 8) |
+            ((use_texture ? 1u : 0u) << 7) |
+            ((pso_key.shadow ? 1u : 0u) << 6));
+        uint64_t geometry = (uint64_t)((((uint64_t)pso_key.cull & 0x3u) << 6) |
+            ((pso_key.alpha_test ? 1u : 0u) << 5) |
+            ((use_heightmap_displacement ? 1u : 0u) << 4) |
+            ((vertex_count > 0 ? 1u : 0u) << 3));
+        return (pipeline << 48) | (material << 32) | (lighting << 20) |
+            (geometry << 12) | (uint64_t)(depthBucket & 0xFFFu);
+    }
 
     // For range draws (renderMeshRange). If vertex_count == 0, draw entire mesh.
     size_t start_vertex = 0;
@@ -230,7 +265,9 @@ public:
         std::sort(m_commands.begin(), m_commands.end(),
             [&](const DrawCommand& a, const DrawCommand& b)
             {
-                if (a.pso_key != b.pso_key) return a.pso_key < b.pso_key;
+                uint64_t ka = a.packedSortKey();
+                uint64_t kb = b.packedSortKey();
+                if (ka != kb) return ka < kb;
                 if (a.use_texture != b.use_texture) return a.use_texture < b.use_texture;
                 if (a.texture != b.texture) return a.texture < b.texture;
                 if (a.gpu_mesh != b.gpu_mesh) return std::less<IGPUMesh*>{}(a.gpu_mesh, b.gpu_mesh);
@@ -251,6 +288,45 @@ public:
                 if (vecLess(b.color, a.color)) return false;
                 return vecLess(a.emissive, b.emissive);
             });
+    }
+
+    // Depth-bucketed sort for opaque draws: groups by packed pipeline /
+    // material state, then orders front-to-back within each group using a
+    // 12-bit view-space depth bucket (near = 0). Transparent draws must NOT
+    // use this -- they require back-to-front submission order.
+    void sortWithViewDepth(const glm::mat4& viewMatrix)
+    {
+        if (m_commands.empty()) return;
+        std::vector<float> depths(m_commands.size());
+        float minD = 0.0f, maxD = 0.0f;
+        for (size_t i = 0; i < m_commands.size(); i++)
+        {
+            glm::vec3 pos = glm::vec3(m_commands[i].model_matrix[3]);
+            float d = -(glm::vec3(viewMatrix * glm::vec4(pos, 1.0f)).z);
+            depths[i] = d;
+            if (i == 0) { minD = d; maxD = d; }
+            else { if (d < minD) minD = d; if (d > maxD) maxD = d; }
+        }
+        std::vector<uint16_t> buckets(m_commands.size(), 0);
+        if (maxD > minD)
+        {
+            for (size_t i = 0; i < depths.size(); i++)
+            {
+                float t = (depths[i] - minD) / (maxD - minD);
+                buckets[i] = (uint16_t)(t * 4095.0f + 0.5f);
+            }
+        }
+        std::vector<uint64_t> keys(m_commands.size());
+        for (size_t i = 0; i < m_commands.size(); i++)
+            keys[i] = m_commands[i].packedSortKey(buckets[i]);
+        std::vector<size_t> order(m_commands.size());
+        for (size_t i = 0; i < order.size(); i++) order[i] = i;
+        std::stable_sort(order.begin(), order.end(),
+            [&](size_t a, size_t b) { return keys[a] < keys[b]; });
+        std::vector<DrawCommand> sorted;
+        sorted.reserve(m_commands.size());
+        for (size_t i : order) sorted.push_back(m_commands[i]);
+        m_commands = std::move(sorted);
     }
 
     // Append all commands from another buffer (for merging parallel results)

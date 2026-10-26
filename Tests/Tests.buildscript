@@ -5,3 +5,4 @@ include = InputTests/InputTests.buildscript
 include = GameplayTests/GameplayTests.buildscript
 include = ShadowTests/ShadowTests.buildscript
 include = ForwardPlusTests/ForwardPlusTests.buildscript
+include = PerfTests/PerfTests.buildscript

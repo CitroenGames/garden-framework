@@ -224,6 +224,7 @@ private:
     std::unordered_map<TextureHandle, D3D12Texture> textures;
     TextureHandle nextTextureHandle = 1;
     TextureHandle currentBoundTexture = INVALID_TEXTURE;
+    TextureHandle currentBoundHeightmapTexture = INVALID_TEXTURE;
     TextureHandle defaultTexture = INVALID_TEXTURE;
 
     // Default PBR textures (1x1 placeholders)
@@ -234,6 +235,23 @@ private:
 
     // State tracking
     ID3D12PipelineState* last_bound_pso = nullptr;
+    ID3D12PipelineState* last_bound_shadow_pso = nullptr;
+
+    // Phase 1: bind a shadow-path PSO only when it differs from the last
+    // bound shadow PSO; count the skip otherwise.
+    void bindShadowPSO(ID3D12PipelineState* pso)
+    {
+        if (pso == nullptr) return;
+        if (pso != last_bound_shadow_pso)
+        {
+            commandList->SetPipelineState(pso);
+            last_bound_shadow_pso = pso;
+        }
+        else
+        {
+            m_lastFrameStats.state_binds_skipped++;
+        }
+    }
     bool global_cbuffer_dirty = true;
     bool in_depth_prepass = false;
     D3D12_GPU_VIRTUAL_ADDRESS m_cachedGlobalCBAddr = 0; // Uploaded once per frame slot, rebound as needed

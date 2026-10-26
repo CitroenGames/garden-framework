@@ -133,7 +133,9 @@ setup_done:
 
     // Reset state tracking
     last_bound_pso = nullptr;
+    last_bound_shadow_pso = nullptr;
     currentBoundTexture = INVALID_TEXTURE;
+    currentBoundHeightmapTexture = INVALID_TEXTURE;
     in_depth_prepass = false;
     m_cachedLightCBAddr = 0;
     m_lastFrameStats.submitted_draw_commands = 0;
@@ -142,6 +144,7 @@ setup_done:
     m_lastFrameStats.instanced_instances = 0;
     m_lastFrameStats.parallel_replay_batches = 0;
     m_lastFrameStats.parallel_replay_workers = 0;
+    m_lastFrameStats.state_binds_skipped = 0;
 
     commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 

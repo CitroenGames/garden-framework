@@ -411,6 +411,7 @@ private:
     VkPipeline last_bound_pipeline = VK_NULL_HANDLE;
     VkDescriptorSet last_bound_descriptor_set = VK_NULL_HANDLE;
     VkBuffer last_bound_vertex_buffer = VK_NULL_HANDLE;
+    VkBuffer last_bound_index_buffer = VK_NULL_HANDLE;
     uint32_t last_bound_dynamic_offset = UINT32_MAX;
 
     // Shared staging buffer (guarded by staging_mutex for thread safety)

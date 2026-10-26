@@ -83,7 +83,7 @@ namespace
         bool hasVB = false;
         bool hasIB = false;
 
-        void bindMesh(ID3D12GraphicsCommandList* cmdList, D3D12Mesh* mesh)
+        void bindMesh(ID3D12GraphicsCommandList* cmdList, D3D12Mesh* mesh, uint64_t& skipped)
         {
             const auto& vbv = mesh->getVertexBufferView();
             if (!hasVB || !sameVertexBufferView(lastVBV, vbv))
@@ -91,6 +91,10 @@ namespace
                 cmdList->IASetVertexBuffers(0, 1, &vbv);
                 lastVBV = vbv;
                 hasVB = true;
+            }
+            else
+            {
+                skipped++;
             }
 
             if (mesh->isIndexed())
@@ -101,6 +105,10 @@ namespace
                     cmdList->IASetIndexBuffer(&ibv);
                     lastIBV = ibv;
                     hasIB = true;
+                }
+                else
+                {
+                    skipped++;
                 }
             }
         }
@@ -573,7 +581,11 @@ TextureHandle D3D12RenderAPI::loadCompressedTextureMipRange(int width, int heigh
 
 void D3D12RenderAPI::bindTexture(TextureHandle texture)
 {
-    if (texture == currentBoundTexture) return;
+    if (texture == currentBoundTexture)
+    {
+        m_lastFrameStats.state_binds_skipped++;
+        return;
+    }
 
     UINT srvIndex = UINT(-1);
     {
@@ -599,6 +611,11 @@ void D3D12RenderAPI::bindHeightmapTexture(TextureHandle texture)
     TextureHandle textureToBind = texture != INVALID_TEXTURE ? texture : defaultTexture;
     if (textureToBind == INVALID_TEXTURE)
         return;
+    if (textureToBind == currentBoundHeightmapTexture)
+    {
+        m_lastFrameStats.state_binds_skipped++;
+        return;
+    }
 
     UINT srvIndex = UINT(-1);
     {
@@ -609,7 +626,10 @@ void D3D12RenderAPI::bindHeightmapTexture(TextureHandle texture)
     }
 
     if (srvIndex != UINT(-1))
+    {
         commandList->SetGraphicsRootDescriptorTable(11, m_srvAllocator.getGPU(srvIndex));
+        currentBoundHeightmapTexture = textureToBind;
+    }
 }
 
 void D3D12RenderAPI::unbindTexture()
@@ -923,7 +943,9 @@ void D3D12RenderAPI::flushAndReopenCommandList()
 
     // Force rebind of PSO and texture
     last_bound_pso = nullptr;
+    last_bound_shadow_pso = nullptr;
     currentBoundTexture = INVALID_TEXTURE;
+    currentBoundHeightmapTexture = INVALID_TEXTURE;
     if (m_cachedGlobalCBAddr != 0)
         commandList->SetGraphicsRootConstantBufferView(0, m_cachedGlobalCBAddr);
     else
@@ -1104,6 +1126,7 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
         bool recorded = false;
     };
     std::vector<WorkerData> workers(num_workers);
+    std::vector<uint64_t> workerSkips(num_workers, 0);
 
     for (uint32_t w = 0; w < num_workers; w++)
     {
@@ -1203,6 +1226,10 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
                 ID3D12PipelineState* workerLastPSO = nullptr;
                 D3D12_GPU_DESCRIPTOR_HANDLE workerLastSrv = {};
                 D3D12_GPU_DESCRIPTOR_HANDLE workerLastHeightSrv = {};
+                D3D12_VERTEX_BUFFER_VIEW workerLastVBV = {};
+                D3D12_INDEX_BUFFER_VIEW workerLastIBV = {};
+                bool workerHasVB = false;
+                bool workerHasIB = false;
 
                 for (size_t i = workers[w].start; i < workers[w].end; i++)
                 {
@@ -1216,22 +1243,43 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
                         cmdList->SetPipelineState(item.pso);
                         workerLastPSO = item.pso;
                     }
+                    else workerSkips[w]++;
 
-                    if (item.has_diffuse_srv && item.diffuse_srv.ptr != workerLastSrv.ptr)
+                    if (item.has_diffuse_srv)
                     {
-                        cmdList->SetGraphicsRootDescriptorTable(2, item.diffuse_srv);
-                        workerLastSrv = item.diffuse_srv;
+                        if (item.diffuse_srv.ptr != workerLastSrv.ptr)
+                        {
+                            cmdList->SetGraphicsRootDescriptorTable(2, item.diffuse_srv);
+                            workerLastSrv = item.diffuse_srv;
+                        }
+                        else workerSkips[w]++;
                     }
-                    if (item.has_heightmap_srv && item.heightmap_srv.ptr != workerLastHeightSrv.ptr)
+                    if (item.has_heightmap_srv)
                     {
-                        cmdList->SetGraphicsRootDescriptorTable(11, item.heightmap_srv);
-                        workerLastHeightSrv = item.heightmap_srv;
+                        if (item.heightmap_srv.ptr != workerLastHeightSrv.ptr)
+                        {
+                            cmdList->SetGraphicsRootDescriptorTable(11, item.heightmap_srv);
+                            workerLastHeightSrv = item.heightmap_srv;
+                        }
+                        else workerSkips[w]++;
                     }
 
-                    cmdList->IASetVertexBuffers(0, 1, &item.vbv);
+                    if (!workerHasVB || !sameVertexBufferView(workerLastVBV, item.vbv))
+                    {
+                        cmdList->IASetVertexBuffers(0, 1, &item.vbv);
+                        workerLastVBV = item.vbv;
+                        workerHasVB = true;
+                    }
+                    else workerSkips[w]++;
                     if (item.indexed)
                     {
-                        cmdList->IASetIndexBuffer(&item.ibv);
+                        if (!workerHasIB || !sameIndexBufferView(workerLastIBV, item.ibv))
+                        {
+                            cmdList->IASetIndexBuffer(&item.ibv);
+                            workerLastIBV = item.ibv;
+                            workerHasIB = true;
+                        }
+                        else workerSkips[w]++;
                         cmdList->DrawIndexedInstanced(item.draw_count, 1, item.first_vertex, 0, 0);
                     }
                     else
@@ -1293,6 +1341,7 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
 
     m_lastFrameStats.submitted_draw_commands += cmds.size();
     m_lastFrameStats.backend_draw_calls += replayItems.size();
+    for (uint64_t s : workerSkips) m_lastFrameStats.state_binds_skipped += s;
     m_lastFrameStats.parallel_replay_batches++;
     m_lastFrameStats.parallel_replay_workers += activeLists.size();
 }
@@ -1342,7 +1391,7 @@ void D3D12RenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
             // Shadow pass draw: select pipeline based on alpha test
             if (cmd.pso_key.alpha_test && m_psoShadowAlphaTest)
             {
-                commandList->SetPipelineState(m_psoShadowAlphaTest.Get());
+                bindShadowPSO(m_psoShadowAlphaTest.Get());
                 // Alpha-test shadow needs per-object CB (for alphaCutoff) and texture
                 auto objAddr = uploadPerObjectCBuffer(cmd.model_matrix, cmd.normal_matrix,
                                                        glm::vec3(1.0f), true, cmd.alpha_cutoff,
@@ -1363,7 +1412,7 @@ void D3D12RenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
                                 cmd.heightmap_height_offset,
                                 cmd.heightmap_texel_size);
 
-            bindingCache.bindMesh(commandList.Get(), gpuMesh);
+            bindingCache.bindMesh(commandList.Get(), gpuMesh, m_lastFrameStats.state_binds_skipped);
             if (gpuMesh->isIndexed())
             {
                 if (cmd.vertex_count > 0)
@@ -1382,7 +1431,7 @@ void D3D12RenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
             }
             // Restore opaque shadow PSO for next draw
             if (cmd.pso_key.alpha_test && m_psoShadowAlphaTest)
-                commandList->SetPipelineState(m_psoShadow.Get());
+                bindShadowPSO(m_psoShadow.Get());
             m_lastFrameStats.backend_draw_calls++;
             continue;
         }
@@ -1398,6 +1447,8 @@ void D3D12RenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
                 if (pso != last_bound_pso) {
                     commandList->SetPipelineState(pso);
                     last_bound_pso = pso;
+                } else {
+                    m_lastFrameStats.state_binds_skipped++;
                 }
                 // Alpha-test depth prepass needs texture + global CB for view/projection
                 if (global_cbuffer_dirty) { updateGlobalCBuffer(); global_cbuffer_dirty = false; }
@@ -1418,7 +1469,7 @@ void D3D12RenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
             commandList->SetGraphicsRootConstantBufferView(1, objAddr);
             bindHeightmapTexture(cmd.use_heightmap_displacement ? cmd.heightmap_texture : INVALID_TEXTURE);
 
-            bindingCache.bindMesh(commandList.Get(), gpuMesh);
+            bindingCache.bindMesh(commandList.Get(), gpuMesh, m_lastFrameStats.state_binds_skipped);
             if (gpuMesh->isIndexed())
             {
                 if (cmd.vertex_count > 0)
@@ -1468,6 +1519,10 @@ void D3D12RenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
             commandList->SetGraphicsRootConstantBufferView(4, m_cachedLightCBAddr);
             lastLightCBAddr = m_cachedLightCBAddr;
         }
+        else
+        {
+            m_lastFrameStats.state_binds_skipped++;
+        }
 
         // Select PSO from PSOKey.
         ID3D12PipelineState* pso = nullptr;
@@ -1485,6 +1540,10 @@ void D3D12RenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
             commandList->SetPipelineState(pso);
             last_bound_pso = pso;
         }
+        else
+        {
+            m_lastFrameStats.state_binds_skipped++;
+        }
 
         // Bind texture
         if (cmd.use_texture && cmd.texture != INVALID_TEXTURE)
@@ -1493,7 +1552,7 @@ void D3D12RenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
             bindTexture(defaultTexture);
         bindHeightmapTexture(cmd.use_heightmap_displacement ? cmd.heightmap_texture : INVALID_TEXTURE);
 
-        bindingCache.bindMesh(commandList.Get(), gpuMesh);
+        bindingCache.bindMesh(commandList.Get(), gpuMesh, m_lastFrameStats.state_binds_skipped);
         if (gpuMesh->isIndexed())
         {
             if (cmd.vertex_count > 0)

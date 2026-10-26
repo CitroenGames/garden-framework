@@ -42,6 +42,8 @@ void MetalRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
     id<MTLBuffer> lastVB = nil;
     TextureHandle lastTex = INVALID_TEXTURE + 1; // force first bind
     MTLCullMode lastCull = (MTLCullMode)0xFF;     // sentinel
+    id<MTLDepthStencilState> lastDS = nil;
+    id<MTLRenderPipelineState> lastShadowPipeline = nil;
 
     for (const auto& drawCmd : cmds)
     {
@@ -57,7 +59,12 @@ void MetalRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
         {
             // Select alpha-test or opaque shadow pipeline
             if (drawCmd.pso_key.alpha_test && impl->shadowAlphaTestPipeline) {
-                [enc setRenderPipelineState:impl->shadowAlphaTestPipeline];
+                if (impl->shadowAlphaTestPipeline != lastShadowPipeline) {
+                    [enc setRenderPipelineState:impl->shadowAlphaTestPipeline];
+                    lastShadowPipeline = impl->shadowAlphaTestPipeline;
+                } else {
+                    impl->lastFrameStats.state_binds_skipped++;
+                }
                 // Bind texture for alpha sampling
                 TextureHandle texHandle = drawCmd.use_texture ? drawCmd.texture : INVALID_TEXTURE;
                 if (texHandle != INVALID_TEXTURE && impl->textures.count(texHandle)) {
@@ -75,6 +82,8 @@ void MetalRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
             if (vertexBuffer != lastVB) {
                 [enc setVertexBuffer:vertexBuffer offset:0 atIndex:0];
                 lastVB = vertexBuffer;
+            } else {
+                impl->lastFrameStats.state_binds_skipped++;
             }
 
             if (metalMesh->isIndexed()) {
@@ -103,8 +112,10 @@ void MetalRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
             }
 
             // Restore opaque shadow pipeline if we switched to alpha-test
-            if (drawCmd.pso_key.alpha_test && impl->shadowAlphaTestPipeline) {
+            if (drawCmd.pso_key.alpha_test && impl->shadowAlphaTestPipeline &&
+                impl->shadowPipeline != lastShadowPipeline) {
                 [enc setRenderPipelineState:impl->shadowPipeline];
+                lastShadowPipeline = impl->shadowPipeline;
             }
 
             impl->drawCallCount++;
@@ -119,6 +130,8 @@ void MetalRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
         if (pipeline != lastPipeline) {
             [enc setRenderPipelineState:pipeline];
             lastPipeline = pipeline;
+        } else {
+            impl->lastFrameStats.state_binds_skipped++;
         }
 
         // Set cull mode
@@ -131,16 +144,20 @@ void MetalRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
         if (cullMode != lastCull) {
             [enc setCullMode:cullMode];
             lastCull = cullMode;
+        } else {
+            impl->lastFrameStats.state_binds_skipped++;
         }
 
-        // Set depth stencil state
-        if (drawCmd.pso_key.depth_only) {
-            [enc setDepthStencilState:impl->depthLessEqual];
-        } else if (drawCmd.pso_key.blend == BlendMode::None) {
-            [enc setDepthStencilState:impl->depthLessEqual];
+        // Set depth stencil state (change-only; transparent keeps no-write variant)
+        id<MTLDepthStencilState> dsState = impl->depthLessEqual;
+        if (!drawCmd.pso_key.depth_only && drawCmd.pso_key.blend != BlendMode::None) {
+            dsState = impl->depthLessEqualNoWrite;
+        }
+        if (dsState != lastDS) {
+            [enc setDepthStencilState:dsState];
+            lastDS = dsState;
         } else {
-            // Transparent objects: depth test but no depth write
-            [enc setDepthStencilState:impl->depthLessEqualNoWrite];
+            impl->lastFrameStats.state_binds_skipped++;
         }
 
         // Build per-draw UBO (copy per-frame, override per-draw fields)
@@ -173,12 +190,16 @@ void MetalRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
                 [enc setFragmentSamplerState:impl->defaultSampler atIndex:0];
             }
             lastTex = texHandle;
+        } else {
+            impl->lastFrameStats.state_binds_skipped++;
         }
 
         // Bind vertex buffer (only if changed)
         if (vertexBuffer != lastVB) {
             [enc setVertexBuffer:vertexBuffer offset:0 atIndex:0];
             lastVB = vertexBuffer;
+        } else {
+            impl->lastFrameStats.state_binds_skipped++;
         }
 
         // Issue draw call
@@ -245,6 +266,7 @@ static uint64_t replayCommandRange(MetalRenderAPIImpl* impl,
     id<MTLBuffer> lastVB = nil;
     TextureHandle lastTex = INVALID_TEXTURE + 1;
     MTLCullMode lastCull = (MTLCullMode)0xFF;
+    id<MTLDepthStencilState> lastDS = nil;
 
     for (size_t i = start; i < end; i++)
     {
@@ -261,6 +283,8 @@ static uint64_t replayCommandRange(MetalRenderAPIImpl* impl,
         if (pipeline != lastPipeline) {
             [enc setRenderPipelineState:pipeline];
             lastPipeline = pipeline;
+        } else {
+            impl->lastFrameStats.state_binds_skipped++;
         }
 
         // Set cull mode
@@ -273,13 +297,19 @@ static uint64_t replayCommandRange(MetalRenderAPIImpl* impl,
         if (cullMode != lastCull) {
             [enc setCullMode:cullMode];
             lastCull = cullMode;
+        } else {
+            impl->lastFrameStats.state_binds_skipped++;
         }
 
-        // Depth state
-        if (drawCmd.pso_key.blend == BlendMode::None)
-            [enc setDepthStencilState:impl->depthLessEqual];
-        else
-            [enc setDepthStencilState:impl->depthLessEqualNoWrite];
+        // Depth state (change-only)
+        id<MTLDepthStencilState> dsState = (drawCmd.pso_key.blend == BlendMode::None)
+            ? impl->depthLessEqual : impl->depthLessEqualNoWrite;
+        if (dsState != lastDS) {
+            [enc setDepthStencilState:dsState];
+            lastDS = dsState;
+        } else {
+            impl->lastFrameStats.state_binds_skipped++;
+        }
 
         // Per-draw UBO
         MetalGlobalUBO ubo = globalUBO;
@@ -310,12 +340,16 @@ static uint64_t replayCommandRange(MetalRenderAPIImpl* impl,
                 [enc setFragmentSamplerState:impl->defaultSampler atIndex:0];
             }
             lastTex = texHandle;
+        } else {
+            impl->lastFrameStats.state_binds_skipped++;
         }
 
         // Vertex buffer
         if (vertexBuffer != lastVB) {
             [enc setVertexBuffer:vertexBuffer offset:0 atIndex:0];
             lastVB = vertexBuffer;
+        } else {
+            impl->lastFrameStats.state_binds_skipped++;
         }
 
         // Draw

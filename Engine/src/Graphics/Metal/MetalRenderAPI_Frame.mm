@@ -181,6 +181,7 @@ void MetalRenderAPI::beginFrame()
     impl->lastFrameStats.backend_draw_calls = 0;
     impl->lastFrameStats.instanced_batches = 0;
     impl->lastFrameStats.instanced_instances = 0;
+    impl->lastFrameStats.state_binds_skipped = 0;
 
     impl->frameStarted = true;
 }

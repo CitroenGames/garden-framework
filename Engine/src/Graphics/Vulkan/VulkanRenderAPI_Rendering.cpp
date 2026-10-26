@@ -918,6 +918,8 @@ bool VulkanRenderAPI::replayStaticInstancedBatch(VkCommandBuffer cmd, const Rend
     if (selectedPipeline != last_bound_pipeline) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, selectedPipeline);
         last_bound_pipeline = selectedPipeline;
+    } else {
+        m_lastFrameStats.state_binds_skipped++;
     }
 
     if (ds != last_bound_descriptor_set || perObjectDynamicOffset != last_bound_dynamic_offset) {
@@ -925,6 +927,8 @@ bool VulkanRenderAPI::replayStaticInstancedBatch(VkCommandBuffer cmd, const Rend
             pipeline_layout, 0, 1, &ds, 1, &perObjectDynamicOffset);
         last_bound_descriptor_set = ds;
         last_bound_dynamic_offset = perObjectDynamicOffset;
+    } else {
+        m_lastFrameStats.state_binds_skipped++;
     }
 
     VkBuffer vb = vulkanMesh->getVertexBuffer();
@@ -933,11 +937,19 @@ bool VulkanRenderAPI::replayStaticInstancedBatch(VkCommandBuffer cmd, const Rend
         VkDeviceSize offsets[] = {0};
         vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
         last_bound_vertex_buffer = vb;
+    } else {
+        m_lastFrameStats.state_binds_skipped++;
     }
 
     const uint32_t instanceCount = static_cast<uint32_t>(count);
     if (vulkanMesh->isIndexed()) {
-        vkCmdBindIndexBuffer(cmd, vulkanMesh->getIndexBuffer(), 0, VK_INDEX_TYPE_UINT32);
+        VkBuffer ib = vulkanMesh->getIndexBuffer();
+        if (ib != last_bound_index_buffer) {
+            vkCmdBindIndexBuffer(cmd, ib, 0, VK_INDEX_TYPE_UINT32);
+            last_bound_index_buffer = ib;
+        } else {
+            m_lastFrameStats.state_binds_skipped++;
+        }
         uint32_t indexCount = drawCmd.vertex_count > 0
             ? static_cast<uint32_t>(drawCmd.vertex_count)
             : static_cast<uint32_t>(vulkanMesh->getIndexCount());
@@ -1014,7 +1026,12 @@ void VulkanRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
             // Shadow pass: select alpha-test or opaque shadow pipeline
             if (drawCmd.pso_key.alpha_test && shadow_pipeline_alpha_test != VK_NULL_HANDLE)
             {
-                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadow_pipeline_alpha_test);
+                if (shadow_pipeline_alpha_test != last_bound_pipeline) {
+                    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadow_pipeline_alpha_test);
+                    last_bound_pipeline = shadow_pipeline_alpha_test;
+                } else {
+                    m_lastFrameStats.state_binds_skipped++;
+                }
                 // Alpha-test shadow needs texture binding via main descriptor set
                 TextureHandle texHandle = drawCmd.use_texture ? drawCmd.texture : INVALID_TEXTURE;
                 VkDescriptorSet ds = getOrAllocateDescriptorSet(current_frame, texHandle, heightmapHandle);
@@ -1035,6 +1052,12 @@ void VulkanRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
             }
             else
             {
+                if (shadow_pipeline != last_bound_pipeline) {
+                    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadow_pipeline);
+                    last_bound_pipeline = shadow_pipeline;
+                } else {
+                    m_lastFrameStats.state_binds_skipped++;
+                }
                 VkDescriptorSet ds = getOrAllocateDescriptorSet(current_frame, INVALID_TEXTURE, heightmapHandle);
                 if (ds != VK_NULL_HANDLE) {
                     uint32_t dummyOffset = 0;
@@ -1055,9 +1078,17 @@ void VulkanRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
                 VkDeviceSize offsets[] = {0};
                 vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
                 last_bound_vertex_buffer = vb;
+            } else {
+                m_lastFrameStats.state_binds_skipped++;
             }
             if (vulkanMesh->isIndexed()) {
-                vkCmdBindIndexBuffer(cmd, vulkanMesh->getIndexBuffer(), 0, VK_INDEX_TYPE_UINT32);
+                VkBuffer ib = vulkanMesh->getIndexBuffer();
+                if (ib != last_bound_index_buffer) {
+                    vkCmdBindIndexBuffer(cmd, ib, 0, VK_INDEX_TYPE_UINT32);
+                    last_bound_index_buffer = ib;
+                } else {
+                    m_lastFrameStats.state_binds_skipped++;
+                }
                 if (drawCmd.vertex_count > 0) {
                     if (checkIndexedDrawBounds("replay-shadow", vulkanMesh,
                                                drawCmd.start_vertex, drawCmd.vertex_count,
@@ -1081,8 +1112,12 @@ void VulkanRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
                 }
             }
             // Restore opaque shadow pipeline for next draw
-            if (drawCmd.pso_key.alpha_test && shadow_pipeline_alpha_test != VK_NULL_HANDLE)
+            if (drawCmd.pso_key.alpha_test && shadow_pipeline_alpha_test != VK_NULL_HANDLE &&
+                shadow_pipeline != last_bound_pipeline)
+            {
                 vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadow_pipeline);
+                last_bound_pipeline = shadow_pipeline;
+            }
             continue;
         }
 
@@ -1095,6 +1130,8 @@ void VulkanRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
         if (selectedPipeline != last_bound_pipeline) {
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, selectedPipeline);
             last_bound_pipeline = selectedPipeline;
+        } else {
+            m_lastFrameStats.state_binds_skipped++;
         }
 
         size_t batchCount = 1;
@@ -1177,6 +1214,8 @@ void VulkanRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
                 pipeline_layout, 0, 1, &ds, 1, &perObjectDynamicOffset);
             last_bound_descriptor_set = ds;
             last_bound_dynamic_offset = perObjectDynamicOffset;
+        } else {
+            m_lastFrameStats.state_binds_skipped++;
         }
 
         if (useInstanceData) {
@@ -1198,10 +1237,18 @@ void VulkanRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
             VkDeviceSize offsets[] = {0};
             vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
             last_bound_vertex_buffer = vb;
+        } else {
+            m_lastFrameStats.state_binds_skipped++;
         }
 
         if (vulkanMesh->isIndexed()) {
-            vkCmdBindIndexBuffer(cmd, vulkanMesh->getIndexBuffer(), 0, VK_INDEX_TYPE_UINT32);
+            VkBuffer ib = vulkanMesh->getIndexBuffer();
+            if (ib != last_bound_index_buffer) {
+                vkCmdBindIndexBuffer(cmd, ib, 0, VK_INDEX_TYPE_UINT32);
+                last_bound_index_buffer = ib;
+            } else {
+                m_lastFrameStats.state_binds_skipped++;
+            }
             if (drawCmd.vertex_count > 0) {
                 if (checkIndexedDrawBounds("replay-main", vulkanMesh,
                                            drawCmd.start_vertex, drawCmd.vertex_count,
@@ -1413,6 +1460,7 @@ void VulkanRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmd
         bool recorded = false;
     };
     std::vector<WorkerData> workers(num_workers);
+    std::vector<uint64_t> workerSkips(num_workers, 0);
 
     for (uint32_t w = 0; w < num_workers; w++) {
         workers[w].pool = acquireThreadPool();
@@ -1460,7 +1508,7 @@ void VulkanRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmd
 
     for (uint32_t w = 0; w < num_workers; w++) {
         futures.push_back(std::async(std::launch::async,
-            [this, &replayItems, &workers, w, frameIdx, inheritanceInfo, renderExtent,
+            [this, &replayItems, &workers, &workerSkips, w, frameIdx, inheritanceInfo, renderExtent,
              pipelineLayout_cap, per_obj_mapped, per_obj_alignment_cap, per_obj_draw_idx]()
             {
                 auto* workerPool = workers[w].pool;
@@ -1499,6 +1547,7 @@ void VulkanRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmd
                 VkDescriptorSet workerLastDS = VK_NULL_HANDLE;
                 uint32_t workerLastDynOffset = UINT32_MAX;
                 VkBuffer workerLastVB = VK_NULL_HANDLE;
+                VkBuffer workerLastIB = VK_NULL_HANDLE;
 
                 // Process this worker's chunk
                 for (size_t i = workers[w].start; i < workers[w].end; i++) {
@@ -1507,6 +1556,7 @@ void VulkanRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmd
                         vkCmdBindPipeline(secCmd, VK_PIPELINE_BIND_POINT_GRAPHICS, item.pipeline);
                         workerLastPipeline = item.pipeline;
                     }
+                    else workerSkips[w]++;
 
                     // Allocate per-object UBO (atomic bump allocator — thread-safe)
                     uint32_t drawIdx = per_obj_draw_idx->fetch_add(1, std::memory_order_relaxed);
@@ -1529,6 +1579,7 @@ void VulkanRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmd
                         workerLastDS = ds;
                         workerLastDynOffset = perObjectDynOffset;
                     }
+                    else workerSkips[w]++;
 
                     // Bind vertex buffer
                     if (item.vertexBuffer != workerLastVB) {
@@ -1537,10 +1588,15 @@ void VulkanRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmd
                         vkCmdBindVertexBuffers(secCmd, 0, 1, vertexBuffers, offsets);
                         workerLastVB = item.vertexBuffer;
                     }
+                    else workerSkips[w]++;
 
                     // Draw
                     if (item.indexed) {
-                        vkCmdBindIndexBuffer(secCmd, item.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+                        if (item.indexBuffer != workerLastIB) {
+                            vkCmdBindIndexBuffer(secCmd, item.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+                            workerLastIB = item.indexBuffer;
+                        }
+                        else workerSkips[w]++;
                         vkCmdDrawIndexed(secCmd, item.count, 1, item.first, 0, 0);
                     } else {
                         vkCmdDraw(secCmd, item.count, 1, item.first, 0);
@@ -1593,6 +1649,7 @@ void VulkanRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmd
     m_lastFrameStats.backend_draw_calls += replayItems.size();
     m_lastFrameStats.parallel_replay_batches++;
     m_lastFrameStats.parallel_replay_workers += secondaryBuffers.size();
+    for (uint64_t s : workerSkips) m_lastFrameStats.state_binds_skipped += s;
 
     // 11. End secondary render pass
     vkCmdEndRenderPass(cmd);

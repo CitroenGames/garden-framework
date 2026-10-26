@@ -82,6 +82,13 @@ struct RenderFrameStats
     uint64_t instanced_instances = 0;
     uint64_t parallel_replay_batches = 0;
     uint64_t parallel_replay_workers = 0;
+    // Redundant state binds skipped during replay (unchanged PSO/table/VB/texture).
+    // Phase 2: descriptor_allocs counts per-draw descriptor allocations;
+    // descriptor_cache_hits counts draws reusing a cached descriptor.
+    // Steady state for an unchanged scene: allocs == 0, hits > 0.
+    uint64_t state_binds_skipped = 0;
+    uint64_t descriptor_allocs = 0;
+    uint64_t descriptor_cache_hits = 0;
 };
 
 // GPU light structures for point/spot light constant buffers.
