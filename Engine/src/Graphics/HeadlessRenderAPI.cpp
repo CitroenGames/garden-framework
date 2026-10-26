@@ -236,6 +236,15 @@ void HeadlessRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
     }
 }
 
+void HeadlessRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds)
+{
+    if (cmds.empty()) return;
+    // Counting backend records on a single list, so one batch on one worker.
+    m_lastFrameStats.parallel_replay_batches++;
+    m_lastFrameStats.parallel_replay_workers++;
+    replayCommandBuffer(cmds);
+}
+
 RenderFrameStats HeadlessRenderAPI::getLastFrameStats() const
 {
     return m_lastFrameStats;

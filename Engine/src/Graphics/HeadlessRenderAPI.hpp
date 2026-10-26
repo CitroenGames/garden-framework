@@ -65,6 +65,7 @@ public:
     // m_descriptorCache persists across frames (never cleared by
     // beginFrame), mirroring a cross-frame descriptor cache.
     virtual void replayCommandBuffer(const RenderCommandBuffer& cmds) override;
+    virtual void replayCommandBufferParallel(const RenderCommandBuffer& cmds) override;
     virtual RenderFrameStats getLastFrameStats() const override;
 
 private:

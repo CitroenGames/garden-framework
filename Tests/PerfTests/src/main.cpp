@@ -5,9 +5,12 @@
 #include "Graphics/RenderCommandBuffer.hpp"
 #include "Graphics/HeadlessRenderAPI.hpp"
 #include "Graphics/IGPUMesh.hpp"
+#include "Graphics/ForwardPlusLightBinning.hpp"
 #include "Utils/Vertex.hpp"
 
+#include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -207,6 +210,150 @@ static bool testHeadlessReplayAlternatingTexture()
     return pass(name);
 }
 
+static void printTiming(const char* label, size_t ops, std::chrono::steady_clock::duration elapsed)
+{
+    const double totalNs = (double)std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count();
+    const double nsPerOp = ops ? totalNs / (double)ops : 0.0;
+    std::cout << "[BENCH] " << label << " ops=" << ops << " ns/op=" << nsPerOp << std::endl;
+}
+
+static RenderCommandBuffer makeUnsortedBuffer(IGPUMesh* mesh, size_t count)
+{
+    RenderCommandBuffer buf;
+    buf.reserve(count);
+    PSOKey main;
+    for (size_t i = 0; i < count; i++)
+    {
+        const uint32_t scrambled = (uint32_t)((i * 2654435761u) >> 8);
+        const glm::mat4 model = glm::translate(glm::mat4(1.0f),
+            glm::vec3(0.0f, 0.0f, -1.0f - (float)(scrambled % 97u)));
+        const PSOKey key = (scrambled & 0x100u) ? PSOKey::shadowPass() : main;
+        buf.recordDrawRangePBR(mesh, model, (TextureHandle)(7u + (scrambled & 7u)), true,
+                               key, 0, 0, glm::vec3(1.0f), 0.0f, 0.0f, 0.5f,
+                               glm::vec3(0.0f), INVALID_TEXTURE, false, 1.0f, 0.0f,
+                               glm::vec2(0.0f), scrambled & 3u);
+    }
+    return buf;
+}
+
+static bool benchSort(size_t count)
+{
+    const std::string name = "timed sort() stays ordered";
+    HeadlessRenderAPI api;
+    IGPUMesh* mesh = makeUploadedMesh(api);
+    RenderCommandBuffer buf = makeUnsortedBuffer(mesh, count);
+    const auto start = std::chrono::steady_clock::now();
+    buf.sort();
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    printTiming("sort", count, elapsed);
+    for (size_t i = 1; i < buf.size(); i++)
+        if (buf[i - 1].packedSortKey() > buf[i].packedSortKey())
+            return fail(name, "buffer not ordered after timed sort()");
+    delete mesh;
+    return pass(name + " (" + std::to_string(count) + ")");
+}
+
+static bool benchSortWithViewDepth(size_t count)
+{
+    const std::string name = "timed depth-bucketed sort stays ordered";
+    HeadlessRenderAPI api;
+    IGPUMesh* mesh = makeUploadedMesh(api);
+    RenderCommandBuffer buf = makeUnsortedBuffer(mesh, count);
+    const glm::mat4 view(1.0f);
+    const auto start = std::chrono::steady_clock::now();
+    buf.sortWithViewDepth(view);
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    printTiming("sortWithViewDepth", count, elapsed);
+    if (buf.size() != count)
+        return fail(name, "command count changed during timed sort");
+    delete mesh;
+    return pass(name + " (" + std::to_string(count) + ")");
+}
+
+static bool benchRecordDraw(size_t count)
+{
+    const std::string name = "timed recordDraw records every draw";
+    HeadlessRenderAPI api;
+    IGPUMesh* mesh = makeUploadedMesh(api);
+    RenderCommandBuffer buf;
+    buf.reserve(count);
+    PSOKey main;
+    const auto start = std::chrono::steady_clock::now();
+    for (size_t i = 0; i < count; i++)
+        buf.recordDraw(mesh, glm::translate(glm::mat4(1.0f), glm::vec3((float)i, 0.0f, -10.0f)),
+                       7, true, main);
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    printTiming("recordDraw", count, elapsed);
+    if (buf.size() != count)
+        return fail(name, "recorded count does not match requested count");
+    delete mesh;
+    return pass(name + " (" + std::to_string(count) + ")");
+}
+
+static bool benchBinForwardPlusLights(size_t count)
+{
+    const std::string name = "timed light binning bins every visible light";
+    std::vector<GPUPointLight> lights(count);
+    for (size_t i = 0; i < count; i++)
+    {
+        lights[i].position = glm::vec3((float)((int)(i % 16) - 8) * 0.4f,
+                                       (float)((int)((i / 16) % 16) - 8) * 0.4f,
+                                       -5.0f - (float)(i % 8));
+        lights[i].range = 0.5f;
+    }
+    const glm::mat4 view(1.0f);
+    const glm::mat4 proj = glm::perspective(glm::radians(90.0f), 1.0f, 0.1f, 1000.0f);
+    const auto start = std::chrono::steady_clock::now();
+    ForwardPlusBinningResult result = binForwardPlusLights(
+        lights.data(), (uint32_t)count, nullptr, 0, view, proj, 160, 160, 0.1f, 1000.0f, true, true);
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    printTiming("binForwardPlusLights", count, elapsed);
+    if (result.lightIndices.empty())
+        return fail(name, "no lights were binned");
+    return pass(name + " (" + std::to_string(count) + ")");
+}
+
+static bool testHeadlessFrameStatsPopulate()
+{
+    const std::string name = "counting replay reports descriptor, parallel and instanced counters";
+    HeadlessRenderAPI api;
+    IGPUMesh* mesh = makeUploadedMesh(api);
+    PSOKey main;
+    RenderCommandBuffer buf;
+    for (int i = 0; i < 8; i++)
+        buf.recordDraw(mesh, glm::mat4(1.0f), 7, true, main);
+
+    api.beginFrame();
+    api.replayCommandBuffer(buf);
+    RenderFrameStats first = api.getLastFrameStats();
+    if (first.backend_draw_calls != 8 || first.submitted_draw_commands != 8)
+        return fail(name, "draw counters did not populate on first replay");
+    if (first.descriptor_allocs != 1 || first.descriptor_cache_hits != 7)
+        return fail(name, "expected 1 descriptor alloc and 7 hits, got allocs=" +
+                            std::to_string(first.descriptor_allocs) + " hits=" +
+                            std::to_string(first.descriptor_cache_hits));
+
+    api.beginFrame();
+    api.replayCommandBuffer(buf);
+    RenderFrameStats second = api.getLastFrameStats();
+    if (second.descriptor_allocs != 0 || second.descriptor_cache_hits != 8)
+        return fail(name, "expected warm replay with 0 allocs and 8 hits, got allocs=" +
+                            std::to_string(second.descriptor_allocs) + " hits=" +
+                            std::to_string(second.descriptor_cache_hits));
+    if (second.instanced_batches != 0 || second.instanced_instances != 0)
+        return fail(name, "plain draws must not be reported as instanced draws");
+
+    api.beginFrame();
+    api.replayCommandBufferParallel(buf);
+    RenderFrameStats parallel = api.getLastFrameStats();
+    if (parallel.parallel_replay_batches < 1 || parallel.parallel_replay_workers < 1)
+        return fail(name, "parallel replay counters did not populate");
+    if (parallel.backend_draw_calls != first.backend_draw_calls ||
+        parallel.state_binds_skipped != first.state_binds_skipped)
+        return fail(name, "parallel replay counts differ from sequential replay");
+    delete mesh;
+    return pass(name);
+}
 int main()
 {
     bool ok = true;
@@ -215,6 +362,15 @@ int main()
     ok &= testSortWithViewDepthFrontToBack();
     ok &= testHeadlessReplaySkipsRedundantBinds();
     ok &= testHeadlessReplayAlternatingTexture();
+    ok &= testHeadlessFrameStatsPopulate();
+    ok &= benchSort(1000);
+    ok &= benchSort(10000);
+    ok &= benchSortWithViewDepth(1000);
+    ok &= benchSortWithViewDepth(10000);
+    ok &= benchRecordDraw(1000);
+    ok &= benchRecordDraw(10000);
+    ok &= benchBinForwardPlusLights(1000);
+    ok &= benchBinForwardPlusLights(10000);
     std::cout << (ok ? "all perf tests passed" : "perf tests FAILED") << std::endl;
     return ok ? 0 : 1;
 }
