@@ -95,6 +95,32 @@ static bool copySingleFile(const fs::path& src, const fs::path& dst, const char*
     return true;
 }
 
+std::vector<std::string> ProjectPackager::requiredEngineBinaries(bool include_dedicated_server)
+{
+#ifdef _WIN32
+    std::vector<std::string> files = { "Game.exe", "EngineCore.dll", "EngineGraphics.dll", "SDL3.dll" };
+    if (include_dedicated_server) files.push_back("Server.exe");
+#elif defined(__APPLE__)
+    std::vector<std::string> files = { "Game", "libEngineCore.dylib", "libEngineGraphics.dylib" };
+    if (include_dedicated_server) files.push_back("Server");
+#else
+    std::vector<std::string> files = { "Game", "libEngineCore.so", "libEngineGraphics.so" };
+    if (include_dedicated_server) files.push_back("Server");
+#endif
+    return files;
+}
+
+std::vector<std::string> ProjectPackager::missingEngineBinaries(const std::string& engine_bin_dir, bool include_dedicated_server)
+{
+    std::vector<std::string> missing;
+    for (const auto& file : requiredEngineBinaries(include_dedicated_server))
+    {
+        if (!fs::exists(fs::path(engine_bin_dir) / file))
+            missing.push_back(file);
+    }
+    return missing;
+}
+
 PackageResult ProjectPackager::packageProject(
     const ProjectManager& project_manager,
     LevelManager& level_manager,
@@ -193,24 +219,23 @@ PackageResult ProjectPackager::packageProjectInternal(
 
     fs::path engine_bin = EnginePaths::getExecutableDir();
 
-#ifdef _WIN32
-    const char* engine_files[] = { "Game.exe", "EngineCore.dll", "EngineGraphics.dll", "SDL2.dll" };
-#elif defined(__APPLE__)
-    const char* engine_files[] = { "Game", "libEngineCore.dylib", "libEngineGraphics.dylib" };
-#else
-    const char* engine_files[] = { "Game", "libEngineCore.so", "libEngineGraphics.so" };
-#endif
+    const std::vector<std::string> engine_files = requiredEngineBinaries(config.include_dedicated_server);
 
-    for (const char* file : engine_files)
+    std::vector<std::string> missing_binaries;
+    for (const auto& file : engine_files)
     {
-        if (copySingleFile(engine_bin / file, output_root / "bin" / file, file, &result.warnings))
+        if (copySingleFile(engine_bin / file, output_root / "bin" / file, file.c_str(), &result.warnings))
             result.files_copied++;
         else
-        {
-            std::string msg = std::string("Missing engine binary: ") + file;
-            LOG_ENGINE_WARN("[Packager] {}", msg);
-            result.warnings.push_back(msg);
-        }
+            missing_binaries.push_back(file);
+    }
+    if (!missing_binaries.empty())
+    {
+        result.error_message = "Missing required engine binaries (build the engine first):";
+        for (const auto& f : missing_binaries) result.error_message += " " + f;
+        LOG_ENGINE_ERROR("[Packager] {}", result.error_message);
+        setPhase(PackageProgress::Phase::Failed);
+        return result;
     }
 
     // --- Copy game module DLL ---
@@ -402,6 +427,10 @@ PackageResult ProjectPackager::packageProjectInternal(
     j["game_module"] = desc.game_module;
     j["default_level"] = default_level;
     j["asset_directories"] = desc.asset_directories;
+    j["default_game_mode"] = desc.default_game_mode;
+    j["default_game_state"] = desc.default_game_state;
+    j["source_directory"] = desc.source_directory;
+    j["buildscript"] = desc.buildscript;
 
     fs::path garden_path = output_root / (desc.name + ".garden");
     std::ofstream garden_file(garden_path);

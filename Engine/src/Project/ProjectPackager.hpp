@@ -22,6 +22,9 @@ struct ENGINE_API PackageConfig
     // Asset compilation
     bool compile_assets = false;
     Assets::CompileConfig compile_config;
+
+    // Ship the dedicated server binary (Server.exe / Server) in the package.
+    bool include_dedicated_server = true;
 };
 
 struct ENGINE_API PackageResult
@@ -78,6 +81,11 @@ public:
         LevelManager& level_manager,
         const PackageConfig& config,
         std::shared_ptr<PackageProgress> progress);
+
+    // Engine binaries a package cannot run without. Used by packaging and tests.
+    static std::vector<std::string> requiredEngineBinaries(bool include_dedicated_server = true);
+    static std::vector<std::string> missingEngineBinaries(const std::string& engine_bin_dir,
+                                                          bool include_dedicated_server = true);
 
     static std::vector<std::string> validateBeforePackage(
         const ProjectManager& project_manager,
