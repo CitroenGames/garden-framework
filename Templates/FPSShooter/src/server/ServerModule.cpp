@@ -15,6 +15,11 @@
 #include "shared/CombatProtocol.hpp"
 #include "shared/WeaponTypes.hpp"
 #include "shared/WeaponSystem.hpp"
+#include "shared/FpsGameLogic.hpp"
+#include "Gameplay/GameplayComponents.hpp"
+#include <cstdlib>
+#include <cstring>
+#include <unordered_map>
 #include "server/GameRules.hpp"
 #include "Utils/Log.hpp"
 #include "Events/EventBus.hpp"
@@ -202,116 +207,93 @@ static void fireServerShot(
 
     const uint32_t rewind_tick = getLagCompensatedAimTick(acknowledged_server_tick);
 
-    // Find best hit across all pellets
+    // Per-pellet hits: every pellet that hits a player applies damage
+    // independently (fixes best-pellet-only shotgun bug).
     uint32_t best_hit_entity_id = 0;
     uint16_t best_hit_client_id = 0;
     glm::vec3 best_hit_point = ray_origin + ray_dir * weapon_def.range;
     float best_hit_dist = weapon_def.range;
     entt::entity best_hit_ent = entt::null;
+    std::unordered_map<entt::entity, int> pellet_hits;
+    std::unordered_map<entt::entity, glm::vec3> pellet_hit_points;
     auto player_view = w->registry.view<NetworkedEntity, TransformComponent, HealthComponent>();
-
-    // For each pellet
     for (int pellet = 0; pellet < weapon_def.pellets; pellet++) {
         glm::vec3 pellet_dir = WeaponSystem::applySpread(ray_dir, shot_spread,
             input.tick * 31 + pellet * 7919 + shooter_client_id);
         const PhysicsSystem::RaycastResult trace_hit =
             w->raycastClosest(ray_origin, pellet_dir, weapon_def.range, shooter_entity);
-        const bool trace_hit_player = trace_hit.hit &&
-            w->registry.valid(trace_hit.entity) &&
+        const bool trace_hit_player = trace_hit.hit && w->registry.valid(trace_hit.entity) &&
             w->registry.all_of<HealthComponent>(trace_hit.entity);
         if (trace_hit.hit && !trace_hit_player && trace_hit.distance < best_hit_dist) {
-            best_hit_dist = trace_hit.distance;
-            best_hit_point = trace_hit.hit_point;
-            best_hit_entity_id = 0;
-            best_hit_client_id = 0;
-            best_hit_ent = entt::null;
+            best_hit_dist = trace_hit.distance; best_hit_point = trace_hit.hit_point;
+            best_hit_entity_id = 0; best_hit_client_id = 0; best_hit_ent = entt::null;
         }
-
         for (auto entity : player_view) {
             if (entity == shooter_entity) continue;
-
             auto& net = player_view.get<NetworkedEntity>(entity);
             auto& health = player_view.get<HealthComponent>(entity);
             auto& trans = player_view.get<TransformComponent>(entity);
-
             if (!health.alive) continue;
-
             glm::vec3 target_position = trans.position;
             ComponentSnapshot rewind_snapshot;
-            if (g_server_network.sampleLagCompensatedEntity(net.network_id, rewind_tick, rewind_snapshot)) {
+            if (g_server_network.sampleLagCompensatedEntity(net.network_id, rewind_tick, rewind_snapshot))
                 target_position = rewind_snapshot.position;
-            }
-
-            // Player bounding capsule: radius=0.4m, height=1.8m
             glm::vec3 hit_point;
             if (rayCapsuleIntersect(ray_origin, pellet_dir, target_position, 0.4f, 1.8f, hit_point)) {
                 float dist = glm::distance(ray_origin, hit_point);
-                if (trace_hit.hit && trace_hit.entity != entity && trace_hit.distance + 0.02f < dist) {
-                    continue;
-                }
-                if (dist < best_hit_dist && dist <= weapon_def.range) {
-                    best_hit_dist = dist;
-                    best_hit_point = hit_point;
-                    best_hit_entity_id = net.network_id;
-                    best_hit_client_id = net.owner_client_id;
-                    best_hit_ent = entity;
+                if (trace_hit.hit && trace_hit.entity != entity && trace_hit.distance + 0.02f < dist) continue;
+                if (dist <= weapon_def.range) {
+                    pellet_hits[entity]++;
+                    pellet_hit_points[entity] = hit_point;
+                    if (dist < best_hit_dist) {
+                        best_hit_dist = dist; best_hit_point = hit_point;
+                        best_hit_entity_id = net.network_id; best_hit_client_id = net.owner_client_id; best_hit_ent = entity;
+                    }
                 }
             }
         }
     }
-
-    // Apply damage if we hit someone
-    if (best_hit_ent != entt::null && w->registry.valid(best_hit_ent)) {
-        auto& victim_health = w->registry.get<HealthComponent>(best_hit_ent);
-        int32_t total_damage = weapon_def.damage; // Per pellet that hits (simplified: best hit only)
+    for (auto& kv : pellet_hits) {
+        entt::entity victim_ent = kv.first;
+        if (!w->registry.valid(victim_ent)) continue;
+        auto& victim_health = w->registry.get<HealthComponent>(victim_ent);
+        if (!victim_health.alive) continue;
+        uint16_t victim_client = w->registry.get<NetworkedEntity>(victim_ent).owner_client_id;
+        glm::vec3 hp = pellet_hit_points[victim_ent];
+        int32_t total_damage = weapon_def.damage * kv.second;
         victim_health.takeDamage(total_damage);
-
-        // Send damage event to victim
         DamageEventMessage dmg_msg;
-        dmg_msg.attacker_client_id = shooter_client_id;
-        dmg_msg.victim_client_id = best_hit_client_id;
-        dmg_msg.damage = total_damage;
-        dmg_msg.health_remaining = victim_health.health;
-        dmg_msg.hit_position = best_hit_point;
-
-        BitWriter dmg_writer;
-        CombatSerializer::serialize(dmg_writer, dmg_msg);
-        g_server_network.sendReliableToClient(best_hit_client_id, dmg_writer);
-
-        // Also send to attacker so they see hit confirmation
-        if (shooter_client_id != best_hit_client_id) {
-            g_server_network.sendReliableToClient(shooter_client_id, dmg_writer);
-        }
-
-        LOG_ENGINE_TRACE("Player {} hit player {} for {} damage (hp: {})",
-            shooter_client_id, best_hit_client_id, total_damage, victim_health.health);
-
-        // Check for kill
+        dmg_msg.attacker_client_id = shooter_client_id; dmg_msg.victim_client_id = victim_client;
+        dmg_msg.damage = total_damage; dmg_msg.health_remaining = victim_health.health; dmg_msg.hit_position = hp;
+        BitWriter dmg_writer; CombatSerializer::serialize(dmg_writer, dmg_msg);
+        g_server_network.sendReliableToClient(victim_client, dmg_writer);
+        if (shooter_client_id != victim_client) g_server_network.sendReliableToClient(shooter_client_id, dmg_writer);
+        LOG_ENGINE_TRACE("Player {} hit player {} for {} damage ({} pellets, hp: {})", shooter_client_id, victim_client, total_damage, kv.second, victim_health.health);
         if (!victim_health.alive) {
-            auto& victim_trans = w->registry.get<TransformComponent>(best_hit_ent);
-
-            // Update scores
-            g_game_rules.onPlayerKilled(*w, shooter_client_id, best_hit_client_id);
-
-            // Broadcast death to all clients
+            auto& victim_trans = w->registry.get<TransformComponent>(victim_ent);
+            // Death drop: primary weapon becomes a pickup.
+            if (w->registry.all_of<InventoryComponent, PlayerLoadoutComponent, WeaponComponent>(victim_ent)) {
+                auto& vinv = w->registry.get<InventoryComponent>(victim_ent);
+                auto& vlo = w->registry.get<PlayerLoadoutComponent>(victim_ent);
+                auto& vw = w->registry.get<WeaponComponent>(victim_ent);
+                int prev = vlo.active_slot; vlo.active_slot = (int)WeaponSlot::Primary;
+                if (auto dropped = FpsLogic::dropActive(vinv, vlo, vw)) {
+                    entt::entity de = w->registry.create();
+                    TransformComponent dt; dt.position = victim_trans.position; w->registry.emplace<TransformComponent>(de, dt);
+                    w->registry.emplace<DroppedWeaponComponent>(de, DroppedWeaponComponent{dropped->type, dropped->ammo, dropped->reserve, victim_client, 30.0f});
+                }
+                vlo.active_slot = prev;
+            }
+            g_game_rules.onPlayerKilled(*w, shooter_client_id, victim_client);
             PlayerDiedMessage death_msg;
-            death_msg.victim_client_id = best_hit_client_id;
-            death_msg.killer_client_id = shooter_client_id;
-            death_msg.death_position = victim_trans.position;
-
-            BitWriter death_writer;
-            CombatSerializer::serialize(death_writer, death_msg);
-
+            death_msg.victim_client_id = victim_client; death_msg.killer_client_id = shooter_client_id; death_msg.death_position = victim_trans.position;
+            BitWriter death_writer; CombatSerializer::serialize(death_writer, death_msg);
             for (uint16_t i = 1; i < g_server_network.getNextClientId(); i++) {
                 const ClientInfo* client = g_server_network.getClientInfo(i);
-                if (client && client->peer)
-                    g_server_network.sendReliableToClient(i, death_writer);
+                if (client && client->peer) g_server_network.sendReliableToClient(i, death_writer);
             }
-
-            LOG_ENGINE_INFO("Player {} killed by player {}", best_hit_client_id, shooter_client_id);
-
-            // Queue respawn
-            g_game_rules.queueRespawn(best_hit_client_id);
+            LOG_ENGINE_INFO("Player {} killed by player {}", victim_client, shooter_client_id);
+            g_game_rules.queueRespawn(victim_client);
         }
     }
 
@@ -331,6 +313,51 @@ static void fireServerShot(
         if (client && client->peer)
             g_server_network.sendReliableToClient(i, result_writer);
     }
+}
+
+
+static WeaponType primaryForClient(uint16_t client_id, uint8_t team_id)
+{
+    // Defenders (and even DM clients) get the shotgun primary so it is reachable.
+    if (team_id == FpsLogic::kTeamDefenders) return WeaponType::SHOTGUN;
+    if (g_game_rules.match.config.mode == FpsLogic::FpsGameMode::Deathmatch && (client_id % 2 == 0)) return WeaponType::SHOTGUN;
+    return WeaponType::RIFLE;
+}
+static void spawnDroppedWeapon(world& w, const glm::vec3& pos, const FpsLogic::DroppedItem& item, uint16_t by)
+{
+    entt::entity de = w.registry.create();
+    TransformComponent dt; dt.position = pos;
+    w.registry.emplace<TransformComponent>(de, dt);
+    w.registry.emplace<DroppedWeaponComponent>(de, DroppedWeaponComponent{item.type, item.ammo, item.reserve, by, 30.0f});
+}
+static bool doDropWeapon(uint16_t client_id, entt::entity player_entity)
+{
+    world* w = g_server_services ? g_server_services->game_world : nullptr;
+    if (!w || !w->registry.valid(player_entity)) return false;
+    if (!w->registry.all_of<InventoryComponent, PlayerLoadoutComponent, WeaponComponent, TransformComponent>(player_entity)) return false;
+    auto& inv = w->registry.get<InventoryComponent>(player_entity);
+    auto& lo = w->registry.get<PlayerLoadoutComponent>(player_entity);
+    auto& weapon = w->registry.get<WeaponComponent>(player_entity);
+    auto dropped = FpsLogic::dropActive(inv, lo, weapon);
+    if (!dropped) return false;
+    glm::vec3 pos = w->registry.get<TransformComponent>(player_entity).position + glm::vec3(0.0f, 0.3f, 0.0f);
+    spawnDroppedWeapon(*w, pos, *dropped, client_id);
+    sendWeaponState(client_id, player_entity, weapon);
+    LOG_ENGINE_INFO("Player {} dropped weapon {}", client_id, (int)dropped->type);
+    return true;
+}
+static bool doWeaponSelect(uint16_t client_id, entt::entity player_entity, uint8_t sel)
+{
+    world* w = g_server_services ? g_server_services->game_world : nullptr;
+    if (!w || !w->registry.valid(player_entity)) return false;
+    if (!w->registry.all_of<InventoryComponent, PlayerLoadoutComponent, WeaponComponent>(player_entity)) return false;
+    auto& inv = w->registry.get<InventoryComponent>(player_entity);
+    auto& lo = w->registry.get<PlayerLoadoutComponent>(player_entity);
+    auto& weapon = w->registry.get<WeaponComponent>(player_entity);
+    if (!FpsLogic::switchByWeaponSelect(inv, lo, weapon, sel)) return false;
+    sendWeaponState(client_id, player_entity, weapon);
+    LOG_ENGINE_INFO("Player {} switched to weapon {} (slot {})", client_id, (int)weapon.weapon_type, lo.active_slot);
+    return true;
 }
 
 static void processWeaponInput(
@@ -358,9 +385,8 @@ static void processWeaponInput(
     const bool wants_reload = (input.buttons & InputFlags::RELOAD) != 0;
     const bool wants_drop = (input.buttons & InputFlags::DROP) != 0;
     if (wants_drop) {
-        // D3: drop rides the input stream; inventory drop lands with the
-        // inventory system. Parsed and validated here, never discarded.
-        LOG_ENGINE_INFO("Player {} requested weapon drop (tick {})", client_id, input.tick);
+        doDropWeapon(client_id, player_entity);
+        return;
     }
     if (!wants_attack && !wants_reload) {
         return;
@@ -403,9 +429,12 @@ static void respawnPlayer(uint16_t client_id, const glm::vec3& spawn_pos)
 
             ensurePlayerPhysicsBody(*w, entity);
 
-            if (w->registry.all_of<WeaponComponent>(entity)) {
+            if (w->registry.all_of<WeaponComponent, InventoryComponent, PlayerLoadoutComponent>(entity)) {
                 auto& weapon = w->registry.get<WeaponComponent>(entity);
-                initWeapon(weapon, WeaponType::RIFLE);
+                auto& inv2 = w->registry.get<InventoryComponent>(entity);
+                auto& lo2 = w->registry.get<PlayerLoadoutComponent>(entity);
+                uint8_t team2 = w->registry.all_of<TeamComponent>(entity) ? w->registry.get<TeamComponent>(entity).team_id : FpsLogic::kTeamNone;
+                FpsLogic::grantLoadout(inv2, lo2, weapon, primaryForClient(client_id, team2));
                 sendWeaponState(client_id, entity, weapon);
             }
 
@@ -437,7 +466,8 @@ static void spawnPlayerForClient(uint16_t client_id)
 {
     world* w = g_server_services->game_world;
 
-    glm::vec3 spawn_pos = g_game_rules.getNextSpawnPoint();
+    uint8_t team_id = g_game_rules.assignTeam(*w);
+    glm::vec3 spawn_pos = g_game_rules.getSpawnForPlayer(*w, client_id, team_id);
     entt::entity player_entity = w->registry.create();
     uint32_t network_id = g_server_network.registerEntity(player_entity);
 
@@ -473,11 +503,12 @@ static void spawnPlayerForClient(uint16_t client_id)
 
     // Add combat components
     w->registry.emplace<HealthComponent>(player_entity, 100);
-
+    w->registry.emplace<TeamComponent>(player_entity, TeamComponent{team_id});
+    auto& inv_comp = w->registry.emplace<InventoryComponent>(player_entity);
+    auto& loadout_comp = w->registry.emplace<PlayerLoadoutComponent>(player_entity);
     WeaponComponent weapon;
-    initWeapon(weapon, WeaponType::RIFLE);
+    FpsLogic::grantLoadout(inv_comp, loadout_comp, weapon, primaryForClient(client_id, team_id));
     auto& weapon_component = w->registry.emplace<WeaponComponent>(player_entity, weapon);
-
     w->registry.emplace<ScoreComponent>(player_entity);
 
     ensurePlayerPhysicsBody(*w, player_entity);
@@ -560,6 +591,15 @@ static void despawnPlayerForClient(uint16_t client_id)
 GAME_API bool gardenServerInit(EngineServices* services)
 {
     g_server_services = services;
+    {
+        const char* mode_env = std::getenv("FPS_GAME_MODE");
+        FpsLogic::ModeConfig cfg = (mode_env && std::strcmp(mode_env, "tdm") == 0)
+            ? FpsLogic::teamDeathmatchConfig() : FpsLogic::deathmatchConfig();
+        if (const char* lim = std::getenv("FPS_SCORE_LIMIT")) { int v = std::atoi(lim); if (v > 0) cfg.score_limit = v; }
+        if (const char* tl = std::getenv("FPS_TIME_LIMIT")) { float v = (float)std::atof(tl); if (v > 0) cfg.time_limit_seconds = v; }
+        g_game_rules.configureMode(cfg);
+        LOG_ENGINE_INFO("FPSShooter mode: {} score_limit={} time_limit={}", cfg.mode == FpsLogic::FpsGameMode::TeamDeathmatch ? "team_deathmatch" : "deathmatch", cfg.score_limit, cfg.time_limit_seconds);
+    }
 
     uint16_t port = services->listen_port ? services->listen_port : 7777;
 
@@ -592,9 +632,9 @@ GAME_API bool gardenServerInit(EngineServices* services)
     // D3: weapon-select fires once per value change (engine edge detection).
     // Slot semantics are template data; switching lands with inventory.
     g_server_network.setWeaponSelectHandler([](
-        uint16_t client_id, entt::entity, uint8_t weapon_select, const InputSample& input) {
-        LOG_ENGINE_INFO("Player {} requested weapon select {} (tick {})",
-            client_id, static_cast<int>(weapon_select), input.tick);
+        uint16_t client_id, entt::entity player_entity, uint8_t weapon_select, const InputSample& input) {
+        (void)input;
+        doWeaponSelect(client_id, player_entity, weapon_select);
     });
 
     g_server_network.setOnClientConnected([](uint16_t client_id) {
@@ -688,6 +728,33 @@ GAME_API void gardenServerUpdate(float delta_time)
 
             g_game_rules.queueRespawn(net.owner_client_id);
         }
+    }
+
+    // Walk-over pickup: dropped weapon -> player if its slot is free (1.2 m).
+    {
+        std::vector<entt::entity> consumed;
+        auto dv = w->registry.view<DroppedWeaponComponent, TransformComponent>();
+        auto pv2 = w->registry.view<NetworkedEntity, TransformComponent, HealthComponent, InventoryComponent, PlayerLoadoutComponent, WeaponComponent>();
+        for (auto de : dv) {
+            auto& dw = dv.get<DroppedWeaponComponent>(de);
+            glm::vec3 dpos = dv.get<TransformComponent>(de).position;
+            for (auto pe : pv2) {
+                if (!pv2.get<HealthComponent>(pe).alive) continue;
+                if (glm::distance(pv2.get<TransformComponent>(pe).position, dpos) > 1.2f) continue;
+                auto& inv3 = pv2.get<InventoryComponent>(pe);
+                auto& lo3 = pv2.get<PlayerLoadoutComponent>(pe);
+                auto& w3 = pv2.get<WeaponComponent>(pe);
+                FpsLogic::DroppedItem item{dw.weapon_type, dw.ammo, dw.reserve};
+                if (FpsLogic::tryPickup(inv3, lo3, w3, item)) {
+                    uint16_t cid = pv2.get<NetworkedEntity>(pe).owner_client_id;
+                    sendWeaponState(cid, pe, w3);
+                    LOG_ENGINE_INFO("Player {} picked up weapon {}", cid, (int)dw.weapon_type);
+                    consumed.push_back(de);
+                    break;
+                }
+            }
+        }
+        for (auto de : consumed) if (w->registry.valid(de)) w->registry.destroy(de);
     }
 
     g_server_network.publishWorldState();

@@ -34,6 +34,9 @@ inline const WeaponDef& getWeaponDef(WeaponType type)
         { "Rifle",   15, 0.10f, 200.0f, 30, 90, 1.55f, 1, 0.006f, 0.030f, 0.055f, 0.025f, 0.0065f, 0.080f, 0.35f, 1.10f, 6.0f },
         // SHOTGUN: close-range burst damage with broad pellet spread.
         { "Shotgun", 10, 0.80f,  40.0f,  8, 32, 2.00f, 8, 0.055f, 0.025f, 0.040f, 0.030f, 0.0150f, 0.120f, 0.50f, 1.10f, 5.0f },
+        { "Pistol",  12, 0.25f, 100.0f, 12, 48, 1.20f, 1, 0.012f, 0.030f, 0.050f, 0.025f, 0.0080f, 0.080f, 0.35f, 1.10f, 6.0f },
+        { "Knife",   50, 0.40f,   2.0f, 999, 0, 0.10f, 1, 0.001f, 0.001f, 0.001f, 0.001f, 0.0010f, 0.010f, 0.10f, 1.10f, 6.0f },
+        { "Grenade",  0, 0.80f,  20.0f,  1,  0, 0.50f, 1, 0.010f, 0.010f, 0.010f, 0.010f, 0.0050f, 0.050f, 0.30f, 1.10f, 6.0f },
     };
 
     static_assert(sizeof(defs) / sizeof(defs[0]) == static_cast<size_t>(WeaponType::COUNT),

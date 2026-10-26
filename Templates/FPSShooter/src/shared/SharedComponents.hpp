@@ -34,12 +34,52 @@ struct HealthComponent
     }
 };
 
-// Weapon type enumeration
+// Weapon type enumeration. Values double as inventory item_def ids (+1,
+// since InventoryComponent reserves item_def_id 0 for empty).
 enum class WeaponType : uint8_t
 {
     RIFLE = 0,
     SHOTGUN = 1,
+    PISTOL = 2,
+    KNIFE = 3,
+    GRENADE = 4,
     COUNT
+};
+
+// Game slot semantics over engine InventoryComponent slots (indices 0..4).
+enum class WeaponSlot : uint8_t
+{
+    Primary = 0,
+    Secondary = 1,
+    Melee = 2,
+    Grenade = 3,
+    Utility = 4,
+    COUNT
+};
+
+struct WeaponSlotState
+{
+    WeaponType type = WeaponType::RIFLE;
+    int32_t ammo = 0;
+    int32_t reserve = 0;
+    bool occupied = false;
+};
+
+// Per-player loadout: ammo per slot. Presence mirrors InventoryComponent.
+struct PlayerLoadoutComponent
+{
+    WeaponSlotState slots[static_cast<size_t>(WeaponSlot::COUNT)];
+    int32_t active_slot = static_cast<int32_t>(WeaponSlot::Primary);
+};
+
+// World pickup created by DROP / death. Position lives in TransformComponent.
+struct DroppedWeaponComponent
+{
+    WeaponType weapon_type = WeaponType::RIFLE;
+    int32_t ammo = 0;
+    int32_t reserve = 0;
+    uint16_t dropped_by = 0;
+    float despawn_timer = 30.0f;
 };
 
 // Weapon component attached to player entities

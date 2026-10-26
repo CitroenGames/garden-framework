@@ -277,16 +277,12 @@ GAME_API bool gardenGameInit(EngineServices* services)
                 g_local_fire_cooldown = 0.0f;
                 g_local_reloading = false;
 
-                const auto& def = getWeaponDef(WeaponType::RIFLE);
-                g_local_weapon_type = WeaponType::RIFLE;
-                g_local_ammo = def.max_ammo;
-                g_local_max_ammo = def.max_ammo;
-                g_local_reserve_ammo = def.max_reserve_ammo;
-                g_local_max_reserve_ammo = def.max_reserve_ammo;
+                // Active weapon is restored by the server WEAPON_STATE that
+                // follows respawn (loadout primary, not always Rifle).
                 g_local_accuracy_penalty = 0.0f;
                 g_local_recoil_index = 0.0f;
                 g_local_time_since_last_shot = 1000.0f;
-                g_local_weapon_spread = def.spread;
+                g_local_weapon_spread = 0.0f;
                 g_recon_smoothing.visual_offset = glm::vec3(0.0f);
 
                 LOG_ENGINE_INFO("Respawned with {} health", msg.health);

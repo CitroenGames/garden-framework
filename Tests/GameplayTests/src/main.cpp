@@ -7,6 +7,8 @@
 #include "Reflection/EngineReflection.hpp"
 #include "Reflection/ReflectionRegistry.hpp"
 #include "world.hpp"
+#include "shared/FpsGameLogic.hpp"
+#include "server/GameRules.hpp"
 
 #include <cmath>
 #include <iostream>
@@ -594,6 +596,97 @@ bool testGameModeRegistryCreatesBuiltins()
 }
 }
 
+bool testFpsSpawnSelectionPerTeamFarthest()
+{
+    const std::string name = "FpsSpawnSelectionPerTeamFarthest";
+    Game::GameRules rules;
+    // Enemies near the first attackers spawn -> farthest attackers spawn chosen.
+    glm::vec3 enemy(-15.0f, 5.0f, -15.0f);
+    glm::vec3 picked = rules.getSpawnPointForTeam(FpsLogic::kTeamAttackers, {enemy});
+    if (!approxVec3(picked, glm::vec3(-15.0f, 5.0f, 15.0f))) return fail(name, "did not pick farthest attackers spawn");
+    glm::vec3 picked_def = rules.getSpawnPointForTeam(FpsLogic::kTeamDefenders, {glm::vec3(15.0f, 5.0f, 15.0f)});
+    if (!approxVec3(picked_def, glm::vec3(15.0f, 5.0f, -15.0f))) return fail(name, "did not pick farthest defenders spawn");
+    // No enemies -> round-robin still returns a team spawn.
+    glm::vec3 rr = rules.getSpawnPointForTeam(FpsLogic::kTeamAttackers, {});
+    bool in_team = approxVec3(rr, glm::vec3(-15.0f,5.0f,-15.0f)) || approxVec3(rr, glm::vec3(-15.0f,5.0f,15.0f));
+    if (!in_team) return fail(name, "round-robin fallback left team spawns");
+    return pass(name);
+}
+bool testFpsSwitchChangesActiveDef()
+{
+    const std::string name = "FpsSwitchChangesActiveDef";
+    InventoryComponent inv; PlayerLoadoutComponent lo; WeaponComponent w;
+    FpsLogic::grantLoadout(inv, lo, w);
+    if (w.weapon_type != WeaponType::RIFLE) return fail(name, "loadout primary is not Rifle");
+    if (inv.slots[0].item_def_id != FpsLogic::itemDefId(WeaponType::RIFLE)) return fail(name, "inventory primary mismatch");
+    if (!FpsLogic::switchByWeaponSelect(inv, lo, w, 2)) return fail(name, "switch to Secondary failed");
+    if (w.weapon_type != WeaponType::PISTOL || FpsLogic::activeWeaponType(lo, w) != WeaponType::PISTOL) return fail(name, "active def did not change to Pistol");
+    if (inv.active_slot != 1) return fail(name, "inventory active_slot not updated");
+    if (!FpsLogic::switchByWeaponSelect(inv, lo, w, 3) || w.weapon_type != WeaponType::KNIFE) return fail(name, "switch to Melee failed");
+    // Shotgun reachable: drop rifle, pick up shotgun into Primary.
+    if (!FpsLogic::switchByWeaponSelect(inv, lo, w, 1)) return fail(name, "switch back to Primary failed");
+    auto dropped = FpsLogic::dropActive(inv, lo, w);
+    if (!dropped || dropped->type != WeaponType::RIFLE) return fail(name, "drop did not return Rifle");
+    FpsLogic::DroppedItem sg{WeaponType::SHOTGUN, 5, 20};
+    if (!FpsLogic::tryPickup(inv, lo, w, sg)) return fail(name, "shotgun pickup into free Primary failed");
+    if (!FpsLogic::switchByWeaponSelect(inv, lo, w, 1) || w.weapon_type != WeaponType::SHOTGUN) return fail(name, "shotgun not active after pickup+select");
+    if (w.ammo != 5 || w.reserve_ammo != 20) return fail(name, "shotgun ammo not preserved");
+    return pass(name);
+}
+bool testFpsDropAndPickup()
+{
+    const std::string name = "FpsDropAndPickup";
+    InventoryComponent inv; PlayerLoadoutComponent lo; WeaponComponent w;
+    FpsLogic::grantLoadout(inv, lo, w);
+    w.ammo = 17; w.reserve_ammo = 43;
+    auto dropped = FpsLogic::dropActive(inv, lo, w);
+    if (!dropped) return fail(name, "drop returned nothing");
+    if (dropped->ammo != 17 || dropped->reserve != 43) return fail(name, "dropped ammo not preserved");
+    if (lo.slots[0].occupied) return fail(name, "primary slot not cleared on drop");
+    if (w.weapon_type != WeaponType::PISTOL) return fail(name, "fallback after drop is not Secondary");
+    // Melee never droppable.
+    FpsLogic::switchByWeaponSelect(inv, lo, w, 3);
+    if (FpsLogic::dropActive(inv, lo, w)) return fail(name, "melee should not be droppable");
+    // Pickup blocked when slot occupied, allowed when free.
+    InventoryComponent inv2; PlayerLoadoutComponent lo2; WeaponComponent w2;
+    FpsLogic::grantLoadout(inv2, lo2, w2);
+    FpsLogic::DroppedItem sg{WeaponType::SHOTGUN, 8, 32};
+    if (FpsLogic::tryPickup(inv2, lo2, w2, sg)) return fail(name, "pickup should fail while Primary occupied");
+    auto d2 = FpsLogic::dropActive(inv2, lo2, w2);
+    if (!d2 || !FpsLogic::tryPickup(inv2, lo2, w2, sg)) return fail(name, "pickup after freeing slot failed");
+    if (!FpsLogic::switchByWeaponSelect(inv2, lo2, w2, 1) || w2.weapon_type != WeaponType::SHOTGUN || w2.ammo != 8) return fail(name, "picked-up shotgun state wrong");
+    return pass(name);
+}
+bool testFpsDeathmatchScoreLimit()
+{
+    const std::string name = "FpsDeathmatchScoreLimit";
+    FpsLogic::MatchLogic m; FpsLogic::ModeConfig cfg = FpsLogic::deathmatchConfig(); cfg.score_limit = 3; cfg.time_limit_seconds = 600.0f;
+    m.configure(cfg);
+    m.recordKill(7, 8, FpsLogic::kTeamNone); m.recordKill(7, 9, FpsLogic::kTeamNone);
+    if (m.ended) return fail(name, "DM ended before score limit");
+    m.recordKill(7, 8, FpsLogic::kTeamNone);
+    if (!m.ended || m.winner_client != 7) return fail(name, "DM did not end at score limit with winner");
+    if (!m.tick(10.0f)) return fail(name, "DM match-end timer did not expire for restart");
+    m.restart();
+    if (m.ended || m.scoreOf(7) != 0) return fail(name, "DM restart did not clear scores");
+    return pass(name);
+}
+bool testFpsTeamDeathmatchTeamScoreWin()
+{
+    const std::string name = "FpsTeamDeathmatchTeamScoreWin";
+    FpsLogic::MatchLogic m; FpsLogic::ModeConfig cfg = FpsLogic::teamDeathmatchConfig(); cfg.score_limit = 2;
+    m.configure(cfg);
+    m.recordKill(1, 3, FpsLogic::kTeamAttackers);
+    m.recordKill(2, 4, FpsLogic::kTeamAttackers); // second attacker frag -> team total 2
+    if (!m.ended || m.winner_team != FpsLogic::kTeamAttackers) return fail(name, "TDM did not end on team score");
+    if (m.team_scores[FpsLogic::kTeamAttackers] != 2) return fail(name, "TDM team score wrong");
+    // Suicide gives no team score.
+    FpsLogic::MatchLogic m2; m2.configure(cfg);
+    m2.recordKill(5, 5, FpsLogic::kTeamDefenders);
+    if (m2.team_scores[FpsLogic::kTeamDefenders] != 0 || m2.ended) return fail(name, "suicide scored in TDM");
+    return pass(name);
+}
+
 int main()
 {
     bool ok = true;
@@ -607,5 +700,10 @@ int main()
     ok = testLevelMetadataAppliesGameplaySettings() && ok;
     ok = testProjectDefaultsResolveGameplayClasses() && ok;
     ok = testClientWorldCreatesOnlyGameState() && ok;
+    ok = testFpsSpawnSelectionPerTeamFarthest() && ok;
+    ok = testFpsSwitchChangesActiveDef() && ok;
+    ok = testFpsDropAndPickup() && ok;
+    ok = testFpsDeathmatchScoreLimit() && ok;
+    ok = testFpsTeamDeathmatchTeamScoreWin() && ok;
     return ok ? 0 : 1;
 }
