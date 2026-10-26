@@ -28,6 +28,9 @@
 #include "Timer/TimerSystem.hpp"
 #include "Debug/DebugDraw.hpp"
 #include "Audio/AudioSystem.hpp"
+#include "Audio/SoundEvent.hpp"
+#include "Audio/AudioSourceSystem.hpp"
+#include "shared/FpsAudioEvents.hpp"
 #include "Animation/AnimationSystem.hpp"
 #include "Threading/JobSystem.hpp"
 
@@ -211,6 +214,9 @@ GAME_API bool gardenGameInit(EngineServices* services)
         LOG_ENGINE_WARN("Failed to connect to server at {}:{} - running in offline mode", address, port);
     }
 
+    if (!AudioSystem::get().isInitialized()) AudioSystem::get().initialize();
+    registerFpsAudioEvents();
+
     g_network.setWorld(services->game_world);
 
     g_network.setCustomMessageHandler([](uint8_t message_type, Net::BitReader& reader) {
@@ -239,6 +245,7 @@ GAME_API bool gardenGameInit(EngineServices* services)
                 if (msg.item_id == 43) { g_comp.armor = 100; g_comp.has_helmet = true; }
                 if (msg.item_id == 44) g_comp.has_kit = true;
             }
+            if (result == Competitive::BuyResult::Ok) AudioEventSystem::get().play2D("ui.click");
             UiLogic::applyBuyResult(g_ui, result); return;
         }
         if (message_type == static_cast<uint8_t>(CompetitiveMessageType::TEAM_RESULT)) {
@@ -256,6 +263,7 @@ GAME_API bool gardenGameInit(EngineServices* services)
                 ? glm::vec3(1.0f, 0.3f, 0.0f)
                 : glm::vec3(1.0f, 1.0f, 0.5f);
             DebugDraw::get().drawLine(msg.ray_origin, msg.hit_position, color, 0.15f);
+            AudioEventSystem::get().playAt("weapon.fire", msg.ray_origin);
             break;
         }
         case CombatMessageType::DAMAGE_EVENT: {
@@ -266,6 +274,7 @@ GAME_API bool gardenGameInit(EngineServices* services)
             }
             if (msg.victim_client_id == g_network.getClientId()) {
                 g_local_health = msg.health_remaining;
+                AudioEventSystem::get().play2D("player.hurt");
                 LOG_ENGINE_INFO("Took {} damage! Health: {}", msg.damage, g_local_health);
             }
             break;
@@ -283,6 +292,7 @@ GAME_API bool gardenGameInit(EngineServices* services)
             g_kill_feed.push_back(entry);
 
             if (msg.victim_client_id == g_network.getClientId()) {
+                AudioEventSystem::get().play2D("player.death");
                 g_local_alive = false;
                 g_local_health = 0;
                 g_local_deaths++;
@@ -704,6 +714,7 @@ GAME_API void gardenGameUpdate(float delta_time)
     AnimationSystem::update(game_world->registry, delta_time);
 
     // Update audio listener
+    AudioSourceSystem::update(game_world->registry, delta_time);
     if (g_player_controller)
     {
         camera& active_camera = g_player_controller->getActiveCamera();
@@ -711,7 +722,9 @@ GAME_API void gardenGameUpdate(float delta_time)
             active_camera.getPosition(),
             active_camera.camera_forward(),
             active_camera.getUpVector());
+        AudioEventSystem::get().setListenerPosition(active_camera.getPosition());
     }
+    AudioEventSystem::get().reapFinished([](SoundHandle h) { return AudioSystem::get().isSoundPlaying(h); });
     AudioSystem::get().update();
 
     // Interpolate remote entities

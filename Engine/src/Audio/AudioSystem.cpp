@@ -5,6 +5,7 @@
 #include "Utils/Log.hpp"
 #include <unordered_map>
 #include <algorithm>
+#include <cmath>
 
 struct AudioSystem::AudioClip
 {
@@ -22,6 +23,10 @@ struct AudioSystem::ActiveSound
     AudioGroup group = AudioGroup::SFX;
     bool spatial = false;
     bool active = false;
+    float base_volume = 1.0f;
+    float pitch = 1.0f;
+    glm::vec3 position{0.0f};
+    bool paused = false;
 };
 
 struct AudioSystem::Impl
@@ -149,6 +154,7 @@ bool AudioSystem::isClipLoaded(AudioClipId id) const
 SoundHandle AudioSystem::playSound(AudioClipId clip_id, const PlayParams& params)
 {
     if (!initialized) return INVALID_SOUND;
+    if (!std::isfinite(params.volume) || !std::isfinite(params.pitch)) return INVALID_SOUND;
 
     auto it = impl->clips.find(clip_id);
     if (it == impl->clips.end()) return INVALID_SOUND;
@@ -160,6 +166,8 @@ SoundHandle AudioSystem::playSound(AudioClipId clip_id, const PlayParams& params
     active.clip_id = clip_id;
     active.group = params.group;
     active.spatial = false;
+    active.base_volume = params.volume;
+    active.pitch = params.pitch;
 
     ma_result result = ma_sound_init_from_file(
         &impl->engine,
@@ -194,6 +202,7 @@ SoundHandle AudioSystem::playSound(AudioClipId clip_id, const PlayParams& params
 SoundHandle AudioSystem::playSound3D(AudioClipId clip_id, const glm::vec3& position, const Play3DParams& params)
 {
     if (!initialized) return INVALID_SOUND;
+    if (!std::isfinite(params.volume) || !std::isfinite(params.pitch) || !std::isfinite(position.x) || !std::isfinite(position.y) || !std::isfinite(position.z)) return INVALID_SOUND;
 
     auto it = impl->clips.find(clip_id);
     if (it == impl->clips.end()) return INVALID_SOUND;
@@ -205,6 +214,9 @@ SoundHandle AudioSystem::playSound3D(AudioClipId clip_id, const glm::vec3& posit
     active.clip_id = clip_id;
     active.group = params.group;
     active.spatial = true;
+    active.base_volume = params.volume;
+    active.pitch = params.pitch;
+    active.position = position;
 
     ma_result result = ma_sound_init_from_file(
         &impl->engine,
@@ -282,6 +294,7 @@ bool AudioSystem::isSoundPlaying(SoundHandle handle) const
 
 void AudioSystem::setListenerPosition(const glm::vec3& position, const glm::vec3& forward, const glm::vec3& up)
 {
+    if (std::isfinite(position.x) && std::isfinite(position.y) && std::isfinite(position.z)) { listener_position = position; has_listener = true; }
     if (!initialized) return;
 
     ma_engine_listener_set_position(&impl->engine, 0, position.x, position.y, position.z);
@@ -300,13 +313,47 @@ void AudioSystem::setMasterVolume(float volume)
 
 void AudioSystem::setGroupVolume(AudioGroup group, float volume)
 {
+    if (!std::isfinite(volume)) return;
     group_volumes[static_cast<int>(group)] = volume;
+    if (!initialized) return;
+    for (auto& s : impl->sounds) { if (!s.active) continue; float eff = s.base_volume * group_volumes[static_cast<int>(s.group)] * group_volumes[static_cast<int>(AudioGroup::Master)]; ma_sound_set_volume(&s.sound, eff); }
 }
 
 float AudioSystem::getGroupVolume(AudioGroup group) const
 {
     return group_volumes[static_cast<int>(group)];
 }
+
+bool AudioSystem::setSoundPosition(SoundHandle handle, const glm::vec3& position)
+{
+    if (!std::isfinite(position.x) || !std::isfinite(position.y) || !std::isfinite(position.z)) return false;
+    if (!initialized) return false;
+    for (auto& s : impl->sounds) if (s.handle == handle && s.active) { ma_sound_set_position(&s.sound, position.x, position.y, position.z); s.position = position; return true; }
+    return false;
+}
+bool AudioSystem::setSoundVolume(SoundHandle handle, float volume)
+{
+    if (!std::isfinite(volume)) return false;
+    if (!initialized) return false;
+    for (auto& s : impl->sounds) if (s.handle == handle && s.active) { s.base_volume = volume; float eff = volume * group_volumes[static_cast<int>(s.group)] * group_volumes[static_cast<int>(AudioGroup::Master)]; ma_sound_set_volume(&s.sound, eff); return true; }
+    return false;
+}
+bool AudioSystem::setSoundPitch(SoundHandle handle, float pitch)
+{
+    if (!std::isfinite(pitch) || pitch <= 0.0f) return false;
+    if (!initialized) return false;
+    for (auto& s : impl->sounds) if (s.handle == handle && s.active) { s.pitch = pitch; ma_sound_set_pitch(&s.sound, pitch); return true; }
+    return false;
+}
+bool AudioSystem::setSoundPaused(SoundHandle handle, bool paused)
+{
+    if (!initialized) return false;
+    for (auto& s : impl->sounds) if (s.handle == handle && s.active) { s.paused = paused; if (paused) ma_sound_stop(&s.sound); else ma_sound_start(&s.sound); return true; }
+    return false;
+}
+size_t AudioSystem::activeVoiceCount() const { size_t n = 0; for (auto& s : impl->sounds) if (s.active) ++n; return n; }
+glm::vec3 AudioSystem::getSoundPosition(SoundHandle handle) const { for (auto& s : impl->sounds) if (s.handle == handle && s.active) return s.position; return glm::vec3(0.0f); }
+float AudioSystem::getSoundVolume(SoundHandle handle) const { for (auto& s : impl->sounds) if (s.handle == handle && s.active) return s.base_volume; return 0.0f; }
 
 void AudioSystem::update()
 {

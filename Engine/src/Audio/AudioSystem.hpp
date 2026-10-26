@@ -68,6 +68,13 @@ public:
 
     // Sound control
     void stopSound(SoundHandle handle);
+    bool setSoundPosition(SoundHandle handle, const glm::vec3& position);
+    bool setSoundVolume(SoundHandle handle, float volume);
+    bool setSoundPitch(SoundHandle handle, float pitch);
+    bool setSoundPaused(SoundHandle handle, bool paused);
+    size_t activeVoiceCount() const;
+    glm::vec3 getSoundPosition(SoundHandle handle) const;
+    float getSoundVolume(SoundHandle handle) const;
     void stopAllSounds();
     bool isSoundPlaying(SoundHandle handle) const;
 
@@ -84,6 +91,8 @@ public:
     void update();
 
     bool isInitialized() const { return initialized; }
+    glm::vec3 getListenerPosition() const { return listener_position; }
+    bool hasListener() const { return has_listener; }
 
 private:
     AudioSystem();
@@ -102,4 +111,6 @@ private:
     uint32_t next_sound_id = 1;
 
     float group_volumes[static_cast<int>(AudioGroup::COUNT)] = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
+    glm::vec3 listener_position{0.0f};
+    bool has_listener = false;
 };

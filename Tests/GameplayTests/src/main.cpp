@@ -986,6 +986,7 @@ bool testWeaponRosterIntegrity()
 #include "C4Tests.hpp"
 #include "BotTests.hpp"
 #include "UiLogicTests.hpp"
+#include "AudioTests.hpp"
 int main()
 {
     bool ok = true;
@@ -1027,5 +1028,11 @@ int main()
     ok = testUiBuyItemStateMatrix() && ok;
     ok = testUiScoreboardMoneyVisibility() && ok;
     ok = testUiRadarProjection() && ok;
+    ok = testAudioUnknownEventNoVoices() && ok;
+    ok = testAudioVoiceStealingSelection() && ok;
+    ok = testAudioPerEventCap() && ok;
+    ok = testAudioClipPickNoRepeat() && ok;
+    ok = testAudioDistanceCullingAndLookup() && ok;
+    ok = testAudioServerExclusionHeadless() && ok;
     return ok ? 0 : 1;
 }

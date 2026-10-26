@@ -3,6 +3,7 @@
 #include "ECS/EntityLifecycle.hpp"
 #include "Timer/TimerSystem.hpp"
 #include "Audio/AudioSystem.hpp"
+#include "Audio/AudioSourceSystem.hpp"
 #include "Animation/AnimationSystem.hpp"
 #include "GameFramework/GameMode.hpp"
 #include "Gameplay/GameplaySystems.hpp"
@@ -89,9 +90,21 @@ void GameSimulation::registerSystems()
     }
     {
         SystemDescriptor d;
+        d.name = "engine.audio_sources";
+        d.phase = Phase::Presentation;
+        d.run_on_server = false; // dedicated server never touches audio
+        d.run_after = {"engine.animation"};
+        d.update = [this](entt::registry& reg, const Tick::SimulationTickContext&) {
+            AudioSourceSystem::update(reg, m_current_frame_dt);
+        };
+        m_scheduler->addSystem(std::move(d));
+    }
+    {
+        SystemDescriptor d;
         d.name = "engine.audio";
         d.phase = Phase::Presentation;
-        d.run_after = {"engine.animation"};
+        d.run_after = {"engine.audio_sources"};
+        d.run_on_server = false;
         d.update = [this](entt::registry&, const Tick::SimulationTickContext&) {
             camera& cam = getActiveCamera();
             AudioSystem::get().setListenerPosition(
