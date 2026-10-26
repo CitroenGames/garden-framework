@@ -985,6 +985,7 @@ bool testWeaponRosterIntegrity()
 
 #include "C4Tests.hpp"
 #include "BotTests.hpp"
+#include "UiLogicTests.hpp"
 int main()
 {
     bool ok = true;
@@ -1020,5 +1021,11 @@ int main()
     ok = testBotSteeringArrivalStuck() && ok;
     ok = testBotInputSynthesisShape() && ok;
     ok = testBotBuyPlanByMoney() && ok;
+    ok = testUiScreenTransitions() && ok;
+    ok = testUiMenusRequireCompetitiveState() && ok;
+    ok = testUiClockFormatting() && ok;
+    ok = testUiBuyItemStateMatrix() && ok;
+    ok = testUiScoreboardMoneyVisibility() && ok;
+    ok = testUiRadarProjection() && ok;
     return ok ? 0 : 1;
 }

@@ -17,6 +17,7 @@
 #include "shared/WeaponTypes.hpp"
 #include "shared/WeaponSystem.hpp"
 #include "GameHUD.hpp"
+#include "ui/UiLogic.hpp"
 #include "PlayerRepSystem.hpp"
 
 #include "Utils/Log.hpp"
@@ -145,6 +146,23 @@ struct KillFeedEntry {
     float timer = 5.0f;
 };
 static std::vector<KillFeedEntry> g_kill_feed;
+// Competitive client state (server-authoritative; client renders only).
+static UiLogic::UiState g_ui;
+static UiLogic::ClientCompetitiveState g_comp;
+static std::vector<uint16_t> g_owned_items;
+static std::array<UiLogic::RadarBlip, UiLogic::kRadarSlots> g_radar{}; // D10: zero slots until teammate replication exists
+static bool uiIsOwned(uint16_t id) { return std::find(g_owned_items.begin(), g_owned_items.end(), id) != g_owned_items.end(); }
+static bool uiIsEquipped(const WeaponCatalogDef& def) { return def.weapon_type != WeaponType::COUNT && def.weapon_type == g_local_weapon_type; }
+static void sendBuyRequest(uint16_t item_id) {
+    BuyRequestMessage msg; msg.request_seq = g_comp.next_buy_seq++; msg.item_id = item_id;
+    Net::BitWriter writer; CompetitiveSerializer::serialize(writer, msg);
+    g_network.sendCustomReliable(writer);
+}
+static void sendTeamSelect(Competitive::FpsTeam desired, bool auto_assign) {
+    TeamSelectMessage msg; msg.desired_team = static_cast<uint8_t>(desired); msg.auto_assign = auto_assign ? 1 : 0;
+    Net::BitWriter writer; CompetitiveSerializer::serialize(writer, msg);
+    g_network.sendCustomReliable(writer);
+}
 
 static WeaponComponent makeLocalWeaponSnapshot()
 {
@@ -196,7 +214,38 @@ GAME_API bool gardenGameInit(EngineServices* services)
     g_network.setWorld(services->game_world);
 
     g_network.setCustomMessageHandler([](uint8_t message_type, Net::BitReader& reader) {
-        switch (static_cast<CombatMessageType>(message_type)) {
+        // Competitive messages (69-74): server-authoritative, client renders.
+        if (message_type == static_cast<uint8_t>(CompetitiveMessageType::ROUND_STATE)) {
+            RoundStateMessage msg; if (!CompetitiveSerializer::deserialize(reader, msg)) return;
+            auto prev = g_comp.phase;
+            UiLogic::applyRoundState(g_comp, msg.phase, msg.phase_time_remaining, msg.round_number, msg.wins_attackers, msg.wins_defenders, msg.bomb_planted != 0);
+            if (g_comp.phase == Competitive::RoundPhase::MatchEnded) g_ui.screen = UiLogic::UiScreen::MatchEnd;
+            else if (prev != g_comp.phase && g_ui.screen == UiLogic::UiScreen::Buy && !UiLogic::buyWindowOpen(g_comp)) {
+                UiLogic::closeToHud(g_ui); UiLogic::showNotice(g_ui, "Buy window closed");
+            }
+            return;
+        }
+        if (message_type == static_cast<uint8_t>(CompetitiveMessageType::ECONOMY_STATE)) {
+            EconomyStateMessage msg; if (!CompetitiveSerializer::deserialize(reader, msg)) return;
+            UiLogic::applyEconomyState(g_comp, msg.balance, msg.loss_streak); return;
+        }
+        if (message_type == static_cast<uint8_t>(CompetitiveMessageType::BUY_RESULT)) {
+            BuyResultMessage msg; if (!CompetitiveSerializer::deserialize(reader, msg)) return;
+            g_comp.money = msg.balance;
+            auto result = static_cast<Competitive::BuyResult>(msg.result);
+            if (result == Competitive::BuyResult::Ok) {
+                if (!uiIsOwned(msg.item_id)) g_owned_items.push_back(msg.item_id);
+                if (msg.item_id == 42) g_comp.armor = 100;
+                if (msg.item_id == 43) { g_comp.armor = 100; g_comp.has_helmet = true; }
+                if (msg.item_id == 44) g_comp.has_kit = true;
+            }
+            UiLogic::applyBuyResult(g_ui, result); return;
+        }
+        if (message_type == static_cast<uint8_t>(CompetitiveMessageType::TEAM_RESULT)) {
+            TeamResultMessage msg; if (!CompetitiveSerializer::deserialize(reader, msg)) return;
+            UiLogic::applyTeamResult(g_ui, static_cast<Competitive::TeamSelectResult>(msg.result),
+                                     Competitive::teamFromId(msg.team), g_comp.local_team); return;
+        }        switch (static_cast<CombatMessageType>(message_type)) {
         case CombatMessageType::SHOOT_RESULT: {
             ShootResultMessage msg;
             if (!CombatSerializer::deserialize(reader, msg)) {
@@ -284,6 +333,7 @@ GAME_API bool gardenGameInit(EngineServices* services)
                 g_local_time_since_last_shot = 1000.0f;
                 g_local_weapon_spread = 0.0f;
                 g_recon_smoothing.visual_offset = glm::vec3(0.0f);
+    g_comp = UiLogic::ClientCompetitiveState{}; g_ui = UiLogic::UiState{}; g_owned_items.clear();
 
                 LOG_ENGINE_INFO("Respawned with {} health", msg.health);
             }
@@ -381,10 +431,48 @@ GAME_API void gardenGameUpdate(float delta_time)
     {
         const float mouse_dx = input_manager->get_mouse_delta_x();
         const float mouse_dy = input_manager->get_mouse_delta_y();
-        if (mouse_dx != 0.0f || mouse_dy != 0.0f)
+        if ((mouse_dx != 0.0f || mouse_dy != 0.0f) && !UiLogic::cursorWanted(g_ui))
             g_player_controller->handleMouseMotion(mouse_dy, mouse_dx);
     }
 
+    // UI timers + keyboard-first menus (hud_menus S1/S3/S4/S5). Modal input is gated below.
+    UiLogic::tickUi(g_ui, delta_time);
+    UiLogic::tickCompetitive(g_comp, delta_time);
+    if (g_ui.screen == UiLogic::UiScreen::Buy && g_comp.has_round_state && !UiLogic::buyWindowOpen(g_comp)) {
+        UiLogic::closeToHud(g_ui); UiLogic::showNotice(g_ui, "Buy window closed");
+    }
+    if (input_manager) {
+        UiLogic::setScoreboardHeld(g_ui, input_manager->is_key_held(SDL_SCANCODE_TAB));
+        if (input_manager->is_key_pressed(SDL_SCANCODE_B)) {
+            if (g_ui.screen == UiLogic::UiScreen::Buy) UiLogic::closeToHud(g_ui);
+            else if (g_ui.screen == UiLogic::UiScreen::None) {
+                if (UiLogic::canOpenBuy(g_comp)) UiLogic::tryOpen(g_ui, UiLogic::UiScreen::Buy);
+                else UiLogic::showNotice(g_ui, g_comp.has_round_state ? "Buy window closed" : "Buy unavailable in this mode");
+            }
+        }
+        if (input_manager->is_key_pressed(SDL_SCANCODE_M)) {
+            if (g_ui.screen == UiLogic::UiScreen::TeamSelect) UiLogic::closeToHud(g_ui);
+            else if (g_ui.screen == UiLogic::UiScreen::None) {
+                if (UiLogic::canOpenTeamSelect(g_comp)) UiLogic::tryOpen(g_ui, UiLogic::UiScreen::TeamSelect);
+                else UiLogic::showNotice(g_ui, "Team select unavailable in this mode");
+            }
+        }
+        if (input_manager->is_key_pressed(SDL_SCANCODE_ESCAPE)) {
+            if (g_ui.screen == UiLogic::UiScreen::Settings) UiLogic::backFromSettings(g_ui);
+            else if (g_ui.screen != UiLogic::UiScreen::None) UiLogic::closeToHud(g_ui);
+            else UiLogic::tryOpen(g_ui, UiLogic::UiScreen::Pause);
+        }
+        if (g_ui.screen == UiLogic::UiScreen::Buy) {
+            static const SDL_Scancode digits[10] = {SDL_SCANCODE_1,SDL_SCANCODE_2,SDL_SCANCODE_3,SDL_SCANCODE_4,SDL_SCANCODE_5,SDL_SCANCODE_6,SDL_SCANCODE_7,SDL_SCANCODE_8,SDL_SCANCODE_9,SDL_SCANCODE_0};
+            for (int i = 0; i < 10; ++i) if (input_manager->is_key_pressed(digits[i])) sendBuyRequest(UiLogic::featuredBuyIds()[(size_t)i]);
+        }
+        if (g_ui.screen == UiLogic::UiScreen::TeamSelect) {
+            if (input_manager->is_key_pressed(SDL_SCANCODE_1)) sendTeamSelect(Competitive::FpsTeam::Attackers, false);
+            if (input_manager->is_key_pressed(SDL_SCANCODE_2)) sendTeamSelect(Competitive::FpsTeam::Defenders, false);
+            if (input_manager->is_key_pressed(SDL_SCANCODE_3)) sendTeamSelect(Competitive::FpsTeam::Attackers, true);
+            if (input_manager->is_key_pressed(SDL_SCANCODE_4)) sendTeamSelect(Competitive::FpsTeam::Spectator, false);
+        }
+    }
     // Update kill feed timers
     for (auto it = g_kill_feed.begin(); it != g_kill_feed.end(); ) {
         it->timer -= delta_time;
@@ -422,7 +510,8 @@ GAME_API void gardenGameUpdate(float delta_time)
         InputState input_state;
         input_state.buttons = 0;
 
-        if (g_local_alive) {
+        const bool ui_modal = UiLogic::cursorWanted(g_ui);
+        if (g_local_alive && !ui_modal) {
             if (input_manager->is_key_held(SDL_SCANCODE_W)) input_state.buttons |= InputFlags::MOVE_FORWARD;
             if (input_manager->is_key_held(SDL_SCANCODE_S)) input_state.buttons |= InputFlags::MOVE_BACK;
             if (input_manager->is_key_held(SDL_SCANCODE_A)) input_state.buttons |= InputFlags::MOVE_LEFT;
@@ -453,7 +542,7 @@ GAME_API void gardenGameUpdate(float delta_time)
         if (input_state.buttons & InputFlags::MOVE_LEFT) input_state.move_right -= 1.0f;
 
         // Predict local weapon controls; the server consumes the same input flags authoritatively.
-        if (g_local_alive && input_manager->is_mouse_button_held(1) && g_local_fire_cooldown <= 0.0f && !g_local_reloading && g_local_ammo > 0)
+        if (g_local_alive && !ui_modal && input_manager->is_mouse_button_held(1) && g_local_fire_cooldown <= 0.0f && !g_local_reloading && g_local_ammo > 0)
         {
             const auto& weapon_def = getWeaponDef(g_local_weapon_type);
 
@@ -474,7 +563,7 @@ GAME_API void gardenGameUpdate(float delta_time)
         }
 
         // Handle reload (R key)
-        if (g_local_alive && input_manager->is_key_pressed(SDL_SCANCODE_R) && !g_local_reloading) {
+        if (g_local_alive && !ui_modal && input_manager->is_key_pressed(SDL_SCANCODE_R) && !g_local_reloading) {
             const auto& weapon_def = getWeaponDef(g_local_weapon_type);
             if (g_local_ammo < weapon_def.max_ammo && g_local_reserve_ammo > 0) {
                 input_state.buttons |= InputFlags::RELOAD;
@@ -676,6 +765,31 @@ GAME_API void gardenGameUpdate(float delta_time)
                      g_local_reserve_ammo, g_local_max_reserve_ammo,
                      g_local_alive, g_death_timer, g_local_kills, g_local_deaths,
                      kill_feed_text, g_local_reloading, g_local_weapon_spread);
+        // Competitive HUD text (featured buy list + local scoreboard row only;
+        // full roster/money snapshots are not replicated yet - no fabricated rows).
+        std::string buy_text;
+        if (g_ui.screen == UiLogic::UiScreen::Buy) {
+            char line[160];
+            for (size_t i = 0; i < UiLogic::featuredBuyIds().size(); ++i) {
+                const WeaponCatalogDef* def = findCatalogById(UiLogic::featuredBuyIds()[i]);
+                if (!def) continue;
+                auto st = UiLogic::deriveBuyItemState(*def, g_comp.money, g_comp.local_team, g_comp.phase, g_comp.phase_elapsed, uiIsOwned(def->id), uiIsEquipped(*def));
+                snprintf(line, sizeof(line), "%d %s $%d [%s]\n", (int)((i + 1) % 10), def->name, def->price, UiLogic::buyItemStateText(st));
+                buy_text += line;
+            }
+        }
+        std::string scoreboard_text;
+        if (UiLogic::scoreboardVisible(g_ui)) {
+            UiLogic::ScoreboardRowInput local_row;
+            local_row.name = "Player " + std::to_string(g_network.getClientId());
+            local_row.kills = g_local_kills; local_row.deaths = g_local_deaths;
+            local_row.money = g_comp.money; local_row.side = g_comp.local_team; local_row.is_local = true; local_row.alive = g_local_alive;
+            auto row = UiLogic::buildScoreboardRow(local_row, g_comp.local_team);
+            char line[200];
+            snprintf(line, sizeof(line), "%s K%d D%d money %d\n(full roster pending replication)", row.display_name.c_str(), row.kills, row.deaths, row.money_display);
+            scoreboard_text = line;
+        }
+        g_hud.updateCompetitive(g_comp, g_ui, buy_text, scoreboard_text, g_radar);
     }
 }
 
@@ -729,6 +843,7 @@ GAME_API void gardenOnLevelLoaded()
     g_local_deaths = 0;
     g_death_timer = 0.0f;
     g_recon_smoothing.visual_offset = glm::vec3(0.0f);
+    g_comp = UiLogic::ClientCompetitiveState{}; g_ui = UiLogic::UiState{}; g_owned_items.clear();
     g_kill_feed.clear();
 
     const auto& def = getWeaponDef(WeaponType::RIFLE);

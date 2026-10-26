@@ -199,3 +199,16 @@ body {
     color: #ffffffcc;
     margin-top: 16dp;
 }
+
+#match-panel { position: absolute; top: 12dp; left: 50%; margin-left: -110dp; width: 220dp; padding: 8dp; background-color: #00000066; border-radius: 6dp; text-align: center; }
+.phase-text { font-size: 12dp; color: #aaaaaa; }
+.clock-text { font-size: 22dp; font-weight: bold; color: #ffffff; }
+.round-text { font-size: 13dp; color: #88ccff; }
+.bomb-text { font-size: 13dp; color: #ff4444; }
+#notice { position: absolute; top: 22%; left: 50%; margin-left: -160dp; width: 320dp; padding: 8dp; background-color: #00000088; text-align: center; }
+.notice-text { color: #ffcc66; font-size: 15dp; }
+#buy-panel, #team-panel, #scoreboard-panel, #pause-panel { position: absolute; top: 18%; left: 50%; margin-left: -220dp; width: 440dp; padding: 12dp; background-color: #000000cc; border-radius: 6dp; }
+.panel-title { font-size: 16dp; font-weight: bold; color: #ffffff; margin-bottom: 6dp; }
+.buy-text { font-size: 13dp; color: #dddddd; white-space: pre-wrap; }
+#radar { position: absolute; top: 110dp; left: 12dp; width: 180dp; height: 180dp; background-color: #00000088; border-radius: 6dp; }
+.blip { position: absolute; width: 8dp; height: 8dp; margin-left: -4dp; margin-top: -4dp; background-color: #66ff66; border-radius: 4dp; }

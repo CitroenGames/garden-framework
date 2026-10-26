@@ -28,6 +28,7 @@
             <div class="health-bar-fill" style="width: {{ health }}%;"></div>
         </div>
         <div class="health-text">{{ health }} / {{ max_health }}</div>
+        <div class="status-text">ARMOR {{ armor }}</div>
         <div class="status-text" data-if="grounded">
             <span class="grounded">GROUNDED</span>
         </div>
@@ -40,11 +41,46 @@
         <div class="ammo-text">{{ ammo_text }}</div>
         <div class="reserve-text">RESERVE {{ reserve_text }}</div>
         <div class="score-text">K: {{ kills }} / D: {{ deaths }}</div>
+        <div class="score-text">MONEY {{ money }}</div>
         <div class="label" data-if="connected">PING</div>
         <div class="value" data-if="connected">{{ ping }} ms</div>
     </div>
 
-    <div id="death-overlay" data-if="!alive">
+    <div id="match-panel">
+        <div class="phase-text">{{ phase_text }}</div>
+        <div class="clock-text">{{ clock_text }}</div>
+        <div class="round-text">{{ round_text }} ATK {{ score_t }} - {{ score_ct }} DEF</div>
+        <div class="bomb-text" data-if="bomb_planted">BOMB PLANTED</div>
+    </div>
+    <div id="radar" data-if="radar_visible">
+        <div class="blip" data-if="r0_visible" style="left: {{ r0_x }}; top: {{ r0_y }};"></div>
+        <div class="blip" data-if="r1_visible" style="left: {{ r1_x }}; top: {{ r1_y }};"></div>
+        <div class="blip" data-if="r2_visible" style="left: {{ r2_x }}; top: {{ r2_y }};"></div>
+        <div class="blip" data-if="r3_visible" style="left: {{ r3_x }}; top: {{ r3_y }};"></div>
+        <div class="blip" data-if="r4_visible" style="left: {{ r4_x }}; top: {{ r4_y }};"></div>
+        <div class="blip" data-if="r5_visible" style="left: {{ r5_x }}; top: {{ r5_y }};"></div>
+        <div class="blip" data-if="r6_visible" style="left: {{ r6_x }}; top: {{ r6_y }};"></div>
+        <div class="blip" data-if="r7_visible" style="left: {{ r7_x }}; top: {{ r7_y }};"></div>
+        <div class="blip" data-if="r8_visible" style="left: {{ r8_x }}; top: {{ r8_y }};"></div>
+        <div class="blip" data-if="r9_visible" style="left: {{ r9_x }}; top: {{ r9_y }};"></div>
+    </div>
+    <div id="notice" data-if="notice_text != ''"><div class="notice-text">{{ notice_text }}</div></div>
+    <div id="buy-panel" data-if="buy_visible">
+        <div class="panel-title">BUY (B/Esc close, 1-0 buy)</div>
+        <div class="buy-text">{{ buy_text }}</div>
+    </div>
+    <div id="team-panel" data-if="team_visible">
+        <div class="panel-title">TEAM SELECT</div>
+        <div class="buy-text">1 Attackers  2 Defenders  3 Auto  4 Spectate  (Esc close)</div>
+    </div>
+    <div id="scoreboard-panel" data-if="scoreboard_visible">
+        <div class="panel-title">SCOREBOARD</div>
+        <div class="buy-text">{{ scoreboard_text }}</div>
+    </div>
+    <div id="pause-panel" data-if="pause_visible">
+        <div class="panel-title">PAUSED</div>
+        <div class="buy-text">Esc Resume</div>
+    </div>    <div id="death-overlay" data-if="!alive">
         <div class="death-text">YOU DIED</div>
         <div class="respawn-text" data-if="death_timer != ''">{{ death_timer }}</div>
     </div>

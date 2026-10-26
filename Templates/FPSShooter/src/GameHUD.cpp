@@ -39,6 +39,32 @@ bool GameHUD::initialize(const char* rmlPath)
     bound &= rml.dataModelBindString(m_model, "deaths", "0");
     bound &= rml.dataModelBindString(m_model, "kill_feed", "");
     bound &= rml.dataModelBindBool(m_model, "reloading", false);
+    bound &= rml.dataModelBindString(m_model, "phase_text", "WAITING");
+    bound &= rml.dataModelBindString(m_model, "clock_text", "WAITING");
+    bound &= rml.dataModelBindString(m_model, "round_text", "");
+    bound &= rml.dataModelBindInt(m_model, "score_t", 0);
+    bound &= rml.dataModelBindInt(m_model, "score_ct", 0);
+    bound &= rml.dataModelBindInt(m_model, "money", 800);
+    bound &= rml.dataModelBindInt(m_model, "armor", 0);
+    bound &= rml.dataModelBindBool(m_model, "has_helmet", false);
+    bound &= rml.dataModelBindBool(m_model, "has_kit", false);
+    bound &= rml.dataModelBindBool(m_model, "bomb_planted", false);
+    bound &= rml.dataModelBindBool(m_model, "buy_open", false);
+    bound &= rml.dataModelBindBool(m_model, "buy_visible", false);
+    bound &= rml.dataModelBindBool(m_model, "team_visible", false);
+    bound &= rml.dataModelBindBool(m_model, "scoreboard_visible", false);
+    bound &= rml.dataModelBindBool(m_model, "pause_visible", false);
+    bound &= rml.dataModelBindString(m_model, "notice_text", "");
+    bound &= rml.dataModelBindString(m_model, "buy_text", "");
+    bound &= rml.dataModelBindString(m_model, "scoreboard_text", "");
+    bound &= rml.dataModelBindInt(m_model, "buy_money", 800);
+    bound &= rml.dataModelBindBool(m_model, "radar_visible", false);
+    for (int i = 0; i < 10; ++i) {
+        char n[24];
+        snprintf(n, sizeof(n), "r%d_visible", i); bound &= rml.dataModelBindBool(m_model, n, false);
+        snprintf(n, sizeof(n), "r%d_x", i); bound &= rml.dataModelBindString(m_model, n, "50.0%");
+        snprintf(n, sizeof(n), "r%d_y", i); bound &= rml.dataModelBindString(m_model, n, "50.0%");
+    }
     if (!bound)
     {
         rml.removeDataModel(m_model);
@@ -151,5 +177,43 @@ void GameHUD::update(float fps, const glm::vec3& position, float speed, bool gro
 
     rml.dataModelSetString(m_model, "kill_feed", kill_feed.c_str());
 
+    rml.dataModelDirtyAll(m_model);
+}
+void GameHUD::updateCompetitive(const UiLogic::ClientCompetitiveState& comp,
+                                const UiLogic::UiState& ui,
+                                const std::string& buy_text,
+                                const std::string& scoreboard_text,
+                                const std::array<UiLogic::RadarBlip, UiLogic::kRadarSlots>& radar)
+{
+    if (!m_model) return;
+    RmlUiManager& rml = RmlUiManager::get();
+    rml.dataModelSetString(m_model, "phase_text", UiLogic::formatPhaseText(comp.phase, comp.bomb_planted).c_str());
+    rml.dataModelSetString(m_model, "clock_text", UiLogic::formatClock(comp.phase, comp.phase_time_remaining, comp.bomb_planted).c_str());
+    char round_buf[32]; snprintf(round_buf, sizeof(round_buf), "Round %d", (int)comp.round_number);
+    rml.dataModelSetString(m_model, "round_text", comp.has_round_state ? round_buf : "");
+    rml.dataModelSetInt(m_model, "score_t", comp.score_attackers);
+    rml.dataModelSetInt(m_model, "score_ct", comp.score_defenders);
+    rml.dataModelSetInt(m_model, "money", comp.money);
+    rml.dataModelSetInt(m_model, "buy_money", comp.money);
+    rml.dataModelSetInt(m_model, "armor", comp.armor);
+    rml.dataModelSetBool(m_model, "has_helmet", comp.has_helmet);
+    rml.dataModelSetBool(m_model, "has_kit", comp.has_kit);
+    rml.dataModelSetBool(m_model, "bomb_planted", comp.bomb_planted);
+    rml.dataModelSetBool(m_model, "buy_open", UiLogic::buyWindowOpen(comp));
+    rml.dataModelSetBool(m_model, "buy_visible", ui.screen == UiLogic::UiScreen::Buy);
+    rml.dataModelSetBool(m_model, "team_visible", ui.screen == UiLogic::UiScreen::TeamSelect);
+    rml.dataModelSetBool(m_model, "scoreboard_visible", UiLogic::scoreboardVisible(ui));
+    rml.dataModelSetBool(m_model, "pause_visible", ui.screen == UiLogic::UiScreen::Pause);
+    rml.dataModelSetString(m_model, "notice_text", ui.notice_text.c_str());
+    rml.dataModelSetString(m_model, "buy_text", buy_text.c_str());
+    rml.dataModelSetString(m_model, "scoreboard_text", scoreboard_text.c_str());
+    bool any_radar = false; for (const auto& b : radar) any_radar = any_radar || b.visible;
+    rml.dataModelSetBool(m_model, "radar_visible", any_radar);
+    for (int i = 0; i < UiLogic::kRadarSlots; ++i) {
+        char n[24];
+        snprintf(n, sizeof(n), "r%d_visible", i); rml.dataModelSetBool(m_model, n, radar[i].visible);
+        snprintf(n, sizeof(n), "r%d_x", i); rml.dataModelSetString(m_model, n, radar[i].x.c_str());
+        snprintf(n, sizeof(n), "r%d_y", i); rml.dataModelSetString(m_model, n, radar[i].y.c_str());
+    }
     rml.dataModelDirtyAll(m_model);
 }
