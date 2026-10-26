@@ -111,6 +111,206 @@ struct IBombHooks {
 };
 struct NullBombHooks : IBombHooks {};
 
+// --- C4 bomb (Stage 3.4, damage_objectives.md section 3) ----------------------
+// Pure state machine; the server supplies site geometry, positions and the
+// per-tick channel inputs derived from real input/health/weapon state.
+enum class BombState : uint8_t { Idle = 0, Carried = 1, Dropped = 2, Planting = 3, Planted = 4, Defusing = 5, Exploded = 6, Defused = 7 };
+
+struct BombSite {
+    glm::vec3 centre{0.0f};
+    float radius = 0.0f;
+    uint8_t site_index = 0;
+};
+
+struct BombConfig {
+    float plant_seconds = 3.0f;          // [V]
+    float defuse_with_kit_seconds = 5.0f;    // [V]
+    float defuse_without_kit_seconds = 10.0f; // [V]
+    float bomb_timer_seconds = 40.0f;    // [V]
+    float pickup_radius = 1.5f;
+    float defuse_range = 3.0f;
+    float move_speed_threshold = 0.5f; // server-side movement cancel input
+    // Documented fallback when the level exposes no bomb-site volumes:
+    // sites are derived from Defender spawn positions (centre + this radius).
+    float fallback_site_radius = 12.0f;
+    std::vector<BombSite> sites;
+    bool inSite(const glm::vec3& pos, uint8_t& out_site) const {
+        for (const auto& s : sites) if (glm::distance(pos, s.centre) <= s.radius) { out_site = s.site_index; return true; }
+        return false;
+    }
+};
+
+// Singleton bomb state (mirrors BombStateComponent in the spec).
+struct BombStateComponent {
+    BombState state = BombState::Idle;
+    entt::entity carrier = entt::null;
+    entt::entity planter = entt::null;
+    entt::entity defuser = entt::null;
+    uint8_t site = 0;
+    float plant_channel = 0.0f;
+    float defuse_channel = 0.0f;
+    float timer = 0.0f;
+    glm::vec3 dropped_position{0.0f};
+    glm::vec3 planted_position{0.0f};
+};
+
+struct BombTickInput {
+    // Carrier/plant channel inputs.
+    bool plant_use = false;
+    bool plant_in_site = false;
+    uint8_t plant_site = 0;
+    bool plant_moved = false;
+    bool plant_damaged = false;
+    bool plant_weapon_switched = false;
+    bool plant_dead = false;
+    glm::vec3 carrier_position{0.0f};
+    // Defuse channel inputs (defuse_actor identifies the would-be defuser).
+    entt::entity defuse_actor = entt::null;
+    bool defuse_use = false;
+    bool defuse_in_range = false;
+    bool defuse_has_kit = false;
+    bool defuse_moved = false;
+    bool defuse_damaged = false;
+    bool defuse_dead = false;
+    bool paused = false;
+};
+
+class BombSystem {
+public:
+    BombConfig config;
+    BombStateComponent bomb;
+    std::function<void(BombState from, BombState to)> on_transition;
+
+    bool isPlanted() const { return bomb.state == BombState::Planted || bomb.state == BombState::Defusing; }
+    bool consumeDetonated() { bool v = detonated_pending_; detonated_pending_ = false; return v; }
+    bool consumeDefused() { bool v = defused_pending_; defused_pending_ = false; return v; }
+    bool consumePlantCompleted(entt::entity& out_planter) {
+        if (!plant_pending_) return false; plant_pending_ = false; out_planter = bomb.planter; return true;
+    }
+    bool consumeDefuseCompleted(entt::entity& out_defuser) {
+        if (!defuse_reward_pending_) return false; defuse_reward_pending_ = false; out_defuser = last_defuser_; return true;
+    }
+    float activeDefuseDuration() const { return active_defuse_duration_; }
+
+    void resetForRound() {
+        BombState old = bomb.state;
+        bomb = BombStateComponent{};
+        detonated_pending_ = defused_pending_ = plant_pending_ = defuse_reward_pending_ = false;
+        active_defuse_duration_ = config.defuse_without_kit_seconds;
+        if (old != bomb.state && on_transition) on_transition(old, bomb.state);
+    }
+    bool assignCarrier(entt::entity carrier) {
+        if (bomb.state != BombState::Idle || carrier == entt::null) return false;
+        bomb.carrier = carrier;
+        setState(BombState::Carried);
+        return true;
+    }
+    // Carrier death/disconnect: bomb drops at the last carrier position.
+    bool dropBomb(const glm::vec3& pos) {
+        if (bomb.state != BombState::Carried && bomb.state != BombState::Planting) return false;
+        bomb.carrier = entt::null; bomb.plant_channel = 0.0f; bomb.dropped_position = pos;
+        setState(BombState::Dropped);
+        return true;
+    }
+    bool onCarrierDeath(const glm::vec3& pos) { return dropBomb(pos); }
+    bool onCarrierDisconnect(const glm::vec3& pos) { return dropBomb(pos); }
+    // Attackers-only pickup of a dropped bomb.
+    bool tryPickup(entt::entity actor, FpsTeam team, const glm::vec3& actor_pos) {
+        if (bomb.state != BombState::Dropped || actor == entt::null) return false;
+        if (team != FpsTeam::Attackers) return false;
+        if (glm::distance(actor_pos, bomb.dropped_position) > config.pickup_radius) return false;
+        bomb.carrier = actor;
+        setState(BombState::Carried);
+        return true;
+    }
+
+    void tick(float dt, const BombTickInput& in) {
+        if (dt <= 0.0f || in.paused) return; // paused match: channels + timer frozen
+        // Carrier death drops the bomb before any channel progress.
+        if ((bomb.state == BombState::Carried || bomb.state == BombState::Planting) && in.plant_dead) {
+            dropBomb(in.carrier_position);
+            return;
+        }
+        if (bomb.state == BombState::Carried) {
+            if (in.plant_use && in.plant_in_site && !in.plant_moved && !in.plant_damaged && !in.plant_weapon_switched) {
+                bomb.site = in.plant_site; bomb.plant_channel = 0.0f;
+                setState(BombState::Planting);
+            } else return;
+        }
+        if (bomb.state == BombState::Planting) {
+            if (!in.plant_use || !in.plant_in_site || in.plant_moved || in.plant_damaged || in.plant_weapon_switched) {
+                bomb.plant_channel = 0.0f; // channel cancels, bomb stays carried
+                setState(BombState::Carried);
+                return;
+            }
+            bomb.site = in.plant_site;
+            bomb.plant_channel += dt;
+            if (bomb.plant_channel >= config.plant_seconds - 0.0001f) {
+                bomb.planter = bomb.carrier; bomb.planted_position = in.carrier_position;
+                bomb.timer = config.bomb_timer_seconds; bomb.plant_channel = 0.0f;
+                plant_pending_ = true;
+                setState(BombState::Planted);
+            }
+            return;
+        }
+        if (bomb.state == BombState::Planted || bomb.state == BombState::Defusing) {
+            // Timer first: explosion wins a same-tick defuse tie, and a defuser
+            // who dies on the completion tick is cancelled below before progress.
+            bomb.timer -= dt;
+            if (bomb.timer <= dt * 0.5f) { // half-tick tolerance: same-tick defuse tie explodes
+                bomb.timer = 0.0f; bomb.defuser = entt::null; bomb.defuse_channel = 0.0f;
+                detonated_pending_ = true;
+                setState(BombState::Exploded);
+                return;
+            }
+            if (bomb.state == BombState::Planted) {
+                if (in.defuse_use && in.defuse_in_range && in.defuse_actor != entt::null && !in.defuse_dead) {
+                    bomb.defuser = in.defuse_actor; bomb.defuse_channel = 0.0f;
+                    active_defuse_duration_ = in.defuse_has_kit ? config.defuse_with_kit_seconds
+                                                                : config.defuse_without_kit_seconds;
+                    setState(BombState::Defusing);
+                } else return;
+            }
+            if (bomb.state == BombState::Defusing) {
+                if (in.defuse_actor != bomb.defuser) return; // single defuser: second USE ignored
+                if (!in.defuse_use || !in.defuse_in_range || in.defuse_moved || in.defuse_damaged || in.defuse_dead) {
+                    bomb.defuser = entt::null; bomb.defuse_channel = 0.0f;
+                    setState(BombState::Planted);
+                    return;
+                }
+                bomb.defuse_channel += dt;
+                if (bomb.defuse_channel >= active_defuse_duration_ - 0.0001f) {
+                    last_defuser_ = bomb.defuser; bomb.defuser = entt::null; bomb.defuse_channel = 0.0f;
+                    defused_pending_ = true; defuse_reward_pending_ = true;
+                    setState(BombState::Defused);
+                }
+            }
+        }
+    }
+
+private:
+    bool detonated_pending_ = false;
+    bool defused_pending_ = false;
+    bool plant_pending_ = false;
+    bool defuse_reward_pending_ = false;
+    entt::entity last_defuser_ = entt::null;
+    float active_defuse_duration_ = 10.0f;
+    void setState(BombState s) {
+        if (bomb.state == s) return;
+        BombState old = bomb.state; bomb.state = s;
+        if (on_transition) on_transition(old, s);
+    }
+};
+
+// Real IBombHooks adapter over a BombSystem (replaces NullBombHooks server-side).
+struct BombHooksAdapter : IBombHooks {
+    BombSystem* system = nullptr;
+    explicit BombHooksAdapter(BombSystem* s = nullptr) : system(s) {}
+    bool isPlanted() const override { return system && system->isPlanted(); }
+    bool consumeDetonated() override { return system && system->consumeDetonated(); }
+    bool consumeDefused() override { return system && system->consumeDefused(); }
+};
+
 struct RoundTickInput {
     int32_t attackers_alive = 0;
     int32_t defenders_alive = 0;

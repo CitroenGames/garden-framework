@@ -37,7 +37,25 @@ static bool g_competitive = false;
 static Competitive::RoundSystem g_round_system;
 static Competitive::BuySystem g_buy_system;
 static Competitive::EconomySystem g_economy;
-static Competitive::NullBombHooks g_bomb_hooks; // bomb plant/defuse: next stage
+static Competitive::BombSystem g_bomb_system;
+static Competitive::BombHooksAdapter g_bomb_hooks{&g_bomb_system};
+// USE (E, InputFlags::USE) is the plant/defuse channel input: there is no
+// separate USE/interact message, and no C4 weapon item, so the assigned
+// carrier holding USE in a site plants and a Defender holding USE in range defuses.
+static std::unordered_map<uint16_t, bool> g_bomb_use_held;
+static std::unordered_map<uint16_t, uint16_t> g_bomb_last_buttons;
+static std::unordered_map<uint32_t, int32_t> g_bomb_prev_health;
+static std::unordered_map<uint32_t, uint8_t> g_bomb_prev_weapon;
+static const char* bombStateName(Competitive::BombState st)
+{
+    using B = Competitive::BombState;
+    switch (st) {
+    case B::Idle: return "Idle"; case B::Carried: return "Carried"; case B::Dropped: return "Dropped";
+    case B::Planting: return "Planting"; case B::Planted: return "Planted"; case B::Defusing: return "Defusing";
+    case B::Exploded: return "Exploded"; case B::Defused: return "Defused";
+    }
+    return "?";
+}
 static entt::entity g_match_entity = entt::null;
 static entt::entity findPlayerEntity(world& w, uint16_t client_id); // defined with competitive helpers below
 static void sendEconomyState(uint16_t client_id, entt::entity e);
@@ -549,6 +567,146 @@ static void competitiveFreezeRespawnAll()
         sendEconomyState(cid, e);
     }
 }
+// Bomb sites: no bomb-site volumes are exposed by the level, so use the
+// documented BombConfig fallback - Defender spawn centres + fallback radius.
+static void configureBombSitesFallback()
+{
+    g_bomb_system.config.sites.clear();
+    uint8_t idx = 0;
+    for (auto& sp : g_game_rules.getTeamSpawnPoints()) {
+        if (sp.team_id != FpsLogic::kTeamDefenders || idx >= 2) continue;
+        g_bomb_system.config.sites.push_back(Competitive::BombSite{sp.position, g_bomb_system.config.fallback_site_radius, idx++});
+    }
+    if (g_bomb_system.config.sites.empty())
+        g_bomb_system.config.sites.push_back(Competitive::BombSite{glm::vec3(0, 5, 0), g_bomb_system.config.fallback_site_radius, 0});
+}
+static void competitiveFreezeBombSetup()
+{
+    world* w = g_server_services ? g_server_services->game_world : nullptr;
+    if (!w) return;
+    configureBombSitesFallback();
+    g_bomb_system.resetForRound();
+    std::vector<entt::entity> attackers;
+    auto view = w->registry.view<NetworkedEntity, TeamComponent, FpsHealthComponent>();
+    for (auto e : view) {
+        if (!view.get<NetworkedEntity>(e).is_player) continue;
+        if (view.get<TeamComponent>(e).team_id == FpsLogic::kTeamAttackers && view.get<FpsHealthComponent>(e).alive)
+            attackers.push_back(e);
+    }
+    if (attackers.empty()) { LOG_ENGINE_INFO("Bomb: no alive Attacker to carry C4"); return; }
+    // Pseudo-random carrier per round (round-seeded, deterministic per match).
+    size_t pick = (static_cast<size_t>(g_round_system.state.round_number) * 2654435761u >> 8) % attackers.size();
+    entt::entity carrier = attackers[pick];
+    g_bomb_system.assignCarrier(carrier);
+    uint16_t cid = w->registry.get<NetworkedEntity>(carrier).owner_client_id;
+    LOG_ENGINE_INFO("Bomb: carrier=client {} sites={}", cid, (int)g_bomb_system.config.sites.size());
+}
+static bool bombActorMoved(world& w, entt::entity e, uint16_t client_id)
+{
+    auto it = g_bomb_last_buttons.find(client_id);
+    if (it != g_bomb_last_buttons.end() && (it->second & (InputFlags::MOVE_FORWARD | InputFlags::MOVE_BACK | InputFlags::MOVE_LEFT | InputFlags::MOVE_RIGHT)) != 0) return true;
+    if (w.registry.all_of<RigidBodyComponent>(e)) {
+        glm::vec3 v = w.registry.get<RigidBodyComponent>(e).velocity;
+        if (std::sqrt(v.x * v.x + v.z * v.z) > g_bomb_system.config.move_speed_threshold) return true;
+    }
+    return false;
+}
+static bool bombActorDamaged(world& w, entt::entity e)
+{
+    if (!w.registry.all_of<FpsHealthComponent>(e)) return false;
+    auto it = g_bomb_prev_health.find(static_cast<uint32_t>(e));
+    return it != g_bomb_prev_health.end() && w.registry.get<FpsHealthComponent>(e).health < it->second;
+}
+static bool bombActorSwitched(world& w, entt::entity e)
+{
+    if (!w.registry.all_of<WeaponComponent>(e)) return false;
+    auto it = g_bomb_prev_weapon.find(static_cast<uint32_t>(e));
+    return it != g_bomb_prev_weapon.end() && static_cast<uint8_t>(w.registry.get<WeaponComponent>(e).weapon_type) != it->second;
+}
+static void tickBombServer(float dt)
+{
+    world* w = g_server_services ? g_server_services->game_world : nullptr;
+    if (!w || g_round_system.state.phase != Competitive::RoundPhase::Live) return;
+    using B = Competitive::BombState;
+    // Dropped bomb: Attackers-only walk-over pickup.
+    if (g_bomb_system.bomb.state == B::Dropped) {
+        auto pv = w->registry.view<NetworkedEntity, TeamComponent, TransformComponent, FpsHealthComponent>();
+        for (auto e : pv) {
+            if (!pv.get<NetworkedEntity>(e).is_player || !pv.get<FpsHealthComponent>(e).alive) continue;
+            if (g_bomb_system.tryPickup(e, Competitive::teamFromId(pv.get<TeamComponent>(e).team_id), pv.get<TransformComponent>(e).position)) break;
+        }
+    }
+    Competitive::BombTickInput in;
+    in.paused = g_round_system.state.paused;
+    entt::entity carrier = g_bomb_system.bomb.carrier;
+    if (carrier != entt::null && w->registry.valid(carrier) && w->registry.all_of<TransformComponent, FpsHealthComponent, NetworkedEntity>(carrier)) {
+        glm::vec3 pos = w->registry.get<TransformComponent>(carrier).position;
+        uint16_t cid = w->registry.get<NetworkedEntity>(carrier).owner_client_id;
+        in.carrier_position = pos;
+        in.plant_dead = !w->registry.get<FpsHealthComponent>(carrier).alive;
+        auto uit = g_bomb_use_held.find(cid);
+        in.plant_use = uit != g_bomb_use_held.end() && uit->second;
+        in.plant_in_site = g_bomb_system.config.inSite(pos, in.plant_site);
+        in.plant_moved = bombActorMoved(*w, carrier, cid);
+        in.plant_damaged = bombActorDamaged(*w, carrier);
+        in.plant_weapon_switched = bombActorSwitched(*w, carrier);
+    } else if (carrier != entt::null && !w->registry.valid(carrier)) {
+        in.plant_dead = true; // carrier entity gone (disconnect handled explicitly too)
+    }
+    if (g_bomb_system.bomb.state == B::Planted || g_bomb_system.bomb.state == B::Defusing) {
+        // Prefer the locked defuser; otherwise nearest USE-holding Defender in range.
+        entt::entity best = g_bomb_system.bomb.defuser; float best_dist = 1e30f;
+        auto pv = w->registry.view<NetworkedEntity, TeamComponent, TransformComponent, FpsHealthComponent>();
+        for (auto e : pv) {
+            if (!pv.get<NetworkedEntity>(e).is_player || !pv.get<FpsHealthComponent>(e).alive) continue;
+            if (pv.get<TeamComponent>(e).team_id != FpsLogic::kTeamDefenders) continue;
+            float d = glm::distance(pv.get<TransformComponent>(e).position, g_bomb_system.bomb.planted_position);
+            uint16_t cid = pv.get<NetworkedEntity>(e).owner_client_id;
+            auto uit = g_bomb_use_held.find(cid);
+            bool use = uit != g_bomb_use_held.end() && uit->second;
+            if (e == g_bomb_system.bomb.defuser) { best = e; best_dist = d; break; }
+            if (use && d <= g_bomb_system.config.defuse_range && d < best_dist) { best = e; best_dist = d; }
+        }
+        if (best != entt::null && w->registry.valid(best) && w->registry.all_of<TransformComponent, FpsHealthComponent, NetworkedEntity>(best)) {
+            uint16_t cid = w->registry.get<NetworkedEntity>(best).owner_client_id;
+            auto uit = g_bomb_use_held.find(cid);
+            in.defuse_actor = best;
+            in.defuse_use = uit != g_bomb_use_held.end() && uit->second;
+            in.defuse_in_range = glm::distance(w->registry.get<TransformComponent>(best).position, g_bomb_system.bomb.planted_position) <= g_bomb_system.config.defuse_range;
+            in.defuse_has_kit = w->registry.all_of<ArmorComponent>(best) && w->registry.get<ArmorComponent>(best).has_defuse_kit;
+            in.defuse_moved = bombActorMoved(*w, best, cid);
+            in.defuse_damaged = bombActorDamaged(*w, best);
+            in.defuse_dead = !w->registry.get<FpsHealthComponent>(best).alive;
+        }
+    }
+    g_bomb_system.tick(dt, in);
+    // Refresh damage/weapon baselines for the next tick.
+    auto all = w->registry.view<NetworkedEntity, FpsHealthComponent>();
+    for (auto e : all) {
+        g_bomb_prev_health[static_cast<uint32_t>(e)] = all.get<FpsHealthComponent>(e).health;
+        if (w->registry.all_of<WeaponComponent>(e)) g_bomb_prev_weapon[static_cast<uint32_t>(e)] = static_cast<uint8_t>(w->registry.get<WeaponComponent>(e).weapon_type);
+    }
+    // Plant economy: planter +300, every Attacker +800 (planter included as team member).
+    entt::entity planter = entt::null;
+    if (g_bomb_system.consumePlantCompleted(planter) && planter != entt::null && w->registry.valid(planter)) {
+        auto pv = w->registry.view<NetworkedEntity, TeamComponent, Competitive::MoneyComponent>();
+        for (auto e : pv) {
+            if (!pv.get<NetworkedEntity>(e).is_player) continue;
+            if (e == planter) g_economy.awardPlantPlanter(pv.get<Competitive::MoneyComponent>(e));
+            if (pv.get<TeamComponent>(e).team_id == FpsLogic::kTeamAttackers) g_economy.awardPlantTeam(pv.get<Competitive::MoneyComponent>(e));
+            sendEconomyState(pv.get<NetworkedEntity>(e).owner_client_id, e);
+        }
+        broadcastRoundState();
+    }
+    entt::entity defuser = entt::null;
+    if (g_bomb_system.consumeDefuseCompleted(defuser) && defuser != entt::null && w->registry.valid(defuser)
+        && w->registry.all_of<Competitive::MoneyComponent, NetworkedEntity>(defuser)) {
+        g_economy.awardDefuse(w->registry.get<Competitive::MoneyComponent>(defuser));
+        sendEconomyState(w->registry.get<NetworkedEntity>(defuser).owner_client_id, defuser);
+    }
+    // Detonation choice: no radial explosion damage; detonation ends the round
+    // via IBombHooks -> RoundSystem TargetBombed (sufficient for Stage 3.4).
+}
 static void competitivePeriodReset(bool overtime)
 {
     world* w = g_server_services ? g_server_services->game_world : nullptr;
@@ -829,6 +987,9 @@ static void despawnPlayerForClient(uint16_t client_id)
     for (auto entity : view) {
         auto& networked = view.get<NetworkedEntity>(entity);
         if (networked.owner_client_id == client_id && networked.is_player) {
+            if (g_competitive && g_bomb_system.bomb.carrier == entity && w->registry.all_of<TransformComponent>(entity))
+                g_bomb_system.onCarrierDisconnect(w->registry.get<TransformComponent>(entity).position);
+            g_bomb_use_held.erase(client_id); g_bomb_last_buttons.erase(client_id);
             w->getPhysicsSystem().removeBody(entity);
 
             DespawnPlayerMessage despawn_msg;
@@ -872,6 +1033,10 @@ GAME_API bool gardenServerInit(EngineServices* services)
             if (const char* v = std::getenv("FPS_WARMUP_SECONDS")) { float f = (float)std::atof(v); if (f >= 0) ccfg.warmup_seconds = f; }
             g_round_system.configure(ccfg);
             g_round_system.bomb_hooks = &g_bomb_hooks;
+            g_bomb_system.on_transition = [](Competitive::BombState from, Competitive::BombState to) {
+                LOG_ENGINE_INFO("Bomb state {} -> {} carrier_valid={} timer={:.1f}", bombStateName(from), bombStateName(to),
+                    g_bomb_system.bomb.carrier != entt::null, g_bomb_system.bomb.timer);
+            };
             g_economy.config = Competitive::EconomyConfig{};
             g_buy_system.config = ccfg;
             g_round_system.on_phase_enter = [](Competitive::RoundPhase ph) {
@@ -879,7 +1044,7 @@ GAME_API bool gardenServerInit(EngineServices* services)
                     competitivePhaseName(ph), g_round_system.state.round_number,
                     (int)g_round_system.state.wins_attackers, (int)g_round_system.state.wins_defenders,
                     g_round_system.state.phase_deadline_tick);
-                if (ph == Competitive::RoundPhase::Freeze) competitiveFreezeRespawnAll();
+                if (ph == Competitive::RoundPhase::Freeze) { competitiveFreezeRespawnAll(); competitiveFreezeBombSetup(); }
                 broadcastRoundState();
             };
             g_round_system.on_period_reset = [](bool overtime) { competitivePeriodReset(overtime); };
@@ -925,6 +1090,10 @@ GAME_API bool gardenServerInit(EngineServices* services)
         entt::entity player_entity,
         const InputSample& input,
         uint32_t acknowledged_server_tick) {
+        if (g_competitive) {
+            g_bomb_use_held[client_id] = (input.buttons & InputFlags::USE) != 0;
+            g_bomb_last_buttons[client_id] = input.buttons;
+        }
         processWeaponInput(client_id, player_entity, input, acknowledged_server_tick);
     });
 
@@ -996,6 +1165,7 @@ GAME_API void gardenServerUpdate(float delta_time)
             else if (tid == FpsLogic::kTeamDefenders) { rin.defenders_connected++; if (alive) rin.defenders_alive++; }
         }
         auto prev_phase = g_round_system.state.phase;
+        tickBombServer(w->fixed_delta > 0.0f ? w->fixed_delta : delta_time);
         g_round_system.tick(w->fixed_delta > 0.0f ? w->fixed_delta : delta_time, rin);
         (void)prev_phase;
         // ROUND_STATE heartbeat 1 Hz (spec S7); phase changes broadcast on enter.

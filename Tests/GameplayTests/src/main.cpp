@@ -983,6 +983,7 @@ bool testWeaponRosterIntegrity()
     return pass(name);
 }
 
+#include "C4Tests.hpp"
 int main()
 {
     bool ok = true;
@@ -1008,5 +1009,9 @@ int main()
     ok = testCompetitiveBuyMatrix() && ok;
     ok = testCompetitiveTeamAutoAssign() && ok;
     ok = testWeaponRosterIntegrity() && ok;
+    ok = testC4PlantInterrupt() && ok;
+    ok = testC4DefuseKit() && ok;
+    ok = testC4Timer40() && ok;
+    ok = testC4CarrierDropPickup() && ok;
     return ok ? 0 : 1;
 }
