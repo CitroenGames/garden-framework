@@ -432,6 +432,42 @@ static bool testHeadlessParallelCoalescesLikeSequential()
     return pass(name);
 }
 
+static bool testBinningReuseKeepsCapacity()
+{
+    const std::string name = "reused light binning keeps retained capacity";
+    std::vector<GPUPointLight> lights(100);
+    for (size_t i = 0; i < lights.size(); i++)
+    {
+        lights[i].position = glm::vec3((float)((int)(i % 16) - 8) * 0.4f,
+                                       (float)((int)((i / 16) % 16) - 8) * 0.4f,
+                                       -5.0f - (float)(i % 8));
+        lights[i].range = 0.5f;
+    }
+    const glm::mat4 view(1.0f);
+    const glm::mat4 proj = glm::perspective(glm::radians(90.0f), 1.0f, 0.1f, 1000.0f);
+    ForwardPlusBinningResult fresh = binForwardPlusLights(
+        lights.data(), (uint32_t)lights.size(), nullptr, 0, view, proj, 160, 160, 0.1f, 1000.0f, true, true);
+    ForwardPlusBinningResult reused;
+    ForwardPlusBinningScratch scratch;
+    binForwardPlusLightsInto(reused, scratch, lights.data(), (uint32_t)lights.size(),
+                             nullptr, 0, view, proj, 160, 160, 0.1f, 1000.0f, true, true);
+    if (reused.tiles.size() != fresh.tiles.size() || reused.lightIndices != fresh.lightIndices)
+        return fail(name, "reused binning output differs from fresh binning");
+    const size_t tilesCap = reused.tiles.capacity();
+    const size_t indicesCap = reused.lightIndices.capacity();
+    const size_t scratchCap = scratch.binned.capacity() + scratch.cellCounts.capacity() +
+                              scratch.writeOffsets.capacity();
+    binForwardPlusLightsInto(reused, scratch, lights.data(), (uint32_t)lights.size(),
+                             nullptr, 0, view, proj, 160, 160, 0.1f, 1000.0f, true, true);
+    if (reused.tiles.capacity() != tilesCap || reused.lightIndices.capacity() != indicesCap ||
+        scratch.binned.capacity() + scratch.cellCounts.capacity() +
+                scratch.writeOffsets.capacity() != scratchCap)
+        return fail(name, "reused binning grew retained storage on an identical call");
+    if (reused.lightIndices != fresh.lightIndices)
+        return fail(name, "second reused binning output differs from fresh binning");
+    return pass(name);
+}
+
 static bool testHeadlessFrameStatsPopulate()
 {
     const std::string name = "counting replay reports descriptor, parallel and instanced counters";
@@ -486,6 +522,7 @@ int main()
     ok &= testHeadlessCoalescesIdenticalRun();
     ok &= testHeadlessRejectsDifferingRuns();
     ok &= testHeadlessParallelCoalescesLikeSequential();
+    ok &= testBinningReuseKeepsCapacity();
     ok &= testHeadlessFrameStatsPopulate();
     ok &= benchSort(1000);
     ok &= benchSort(10000);

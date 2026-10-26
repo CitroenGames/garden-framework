@@ -4,6 +4,7 @@
 #include "MetalDeletionQueue.hpp"
 #include "MetalSamplerCache.hpp"
 #include "Graphics/RenderAPI.hpp"
+#include "Graphics/ForwardPlusLightBinning.hpp"
 #include "Graphics/RenderCommandBuffer.hpp"
 #include "Utils/Log.hpp"
 #include "Utils/Vertex.hpp"
@@ -97,6 +98,9 @@ struct MetalRenderAPIImpl {
     uint32_t forwardPlusTilesCapacity[MAX_FRAMES_IN_FLIGHT] = {0, 0, 0};
     uint32_t forwardPlusIndicesCapacity[MAX_FRAMES_IN_FLIGHT] = {0, 0, 0};
     glm::vec4 forwardPlusParams = glm::vec4(16.0f, 1.0f, 1.0f, 0.0f);
+    // Retained binning output and working storage, reused every frame.
+    ForwardPlusBinningResult forwardPlusBinned;
+    ForwardPlusBinningScratch forwardPlusScratch;
 
     // Skybox
     id<MTLBuffer> skyboxVertexBuffer = nil;

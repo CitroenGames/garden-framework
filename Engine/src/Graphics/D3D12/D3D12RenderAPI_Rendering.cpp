@@ -1822,7 +1822,8 @@ void D3D12RenderAPI::uploadLightBuffers(const GPUPointLight* pts, int ptCount,
     const bool haveCamera = haveViewport && view_matrix != glm::mat4(0.0f)
         && projection_matrix != glm::mat4(0.0f) && projection_matrix != glm::mat4(1.0f);
     const bool fpEnabled = haveCamera && lighting_enabled && CVAR_BOOL(r_light_zbinning);
-    ForwardPlusBinningResult binned = binForwardPlusLights(
+    ForwardPlusBinningResult& binned = m_forwardPlusBinned;
+    binForwardPlusLightsInto(binned, m_forwardPlusScratch,
         pts, static_cast<uint32_t>(ptCount), spts, static_cast<uint32_t>(spCount),
         view_matrix, projection_matrix,
         static_cast<uint32_t>(std::max(binWidth, 1)), static_cast<uint32_t>(std::max(binHeight, 1)),

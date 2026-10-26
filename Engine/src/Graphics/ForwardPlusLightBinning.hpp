@@ -229,6 +229,34 @@ struct ForwardPlusBinningResult
     uint32_t sliceCount = 1;
 };
 
+// One visible light prepared for binning, retained between calls so a
+// caller that bins every frame reuses the same storage.
+struct ForwardPlusBinnedLight
+{
+    uint32_t index = 0;
+    ForwardPlusTileBounds bounds{};
+    float viewDepth = 0.0f;
+    float radius = 0.0f;
+    ForwardPlusSliceRange slices{};
+};
+
+// Working storage for binForwardPlusLightsInto. Clearing it between calls
+// keeps the allocated capacity, so repeated binning of a similar light set
+// does not allocate again.
+struct ForwardPlusBinningScratch
+{
+    std::vector<ForwardPlusBinnedLight> binned;
+    std::vector<uint32_t> cellCounts;
+    std::vector<uint32_t> writeOffsets;
+
+    void clear()
+    {
+        binned.clear();
+        cellCounts.clear();
+        writeOffsets.clear();
+    }
+};
+
 // Bins point + spot lights into the Forward+ tile/z-slice grid.
 // Unified light index space: point lights are indices [0, pointCount), spot
 // lights are [pointCount, pointCount + spotCount); each light's cull sphere
@@ -238,13 +266,14 @@ struct ForwardPlusBinningResult
 // lights, a valid minimal result is still returned (header with sliceCount=1
 // and a zeroed tile grid whose first cell is offset 0 / count 0, tilesX/tilesY
 // computed, empty lightIndices) so backends can always bind something.
-inline ForwardPlusBinningResult binForwardPlusLights(const GPUPointLight* points, uint32_t pointCount,
-                                                     const GPUSpotLight* spots, uint32_t spotCount,
-                                                     const glm::mat4& viewMatrix, const glm::mat4& projMatrix,
-                                                     uint32_t width, uint32_t height, float nearPlane,
-                                                     float farPlane, bool flipY, bool enabled)
+inline void binForwardPlusLightsInto(ForwardPlusBinningResult& result, ForwardPlusBinningScratch& scratch,
+                                     const GPUPointLight* points, uint32_t pointCount,
+                                     const GPUSpotLight* spots, uint32_t spotCount,
+                                     const glm::mat4& viewMatrix, const glm::mat4& projMatrix,
+                                     uint32_t width, uint32_t height, float nearPlane,
+                                     float farPlane, bool flipY, bool enabled)
 {
-    ForwardPlusBinningResult result;
+    scratch.clear();
     result.tilesX = (std::max)(1u, (width + kForwardPlusTileSize - 1u) / kForwardPlusTileSize);
     result.tilesY = (std::max)(1u, (height + kForwardPlusTileSize - 1u) / kForwardPlusTileSize);
     const uint32_t tileCount = result.tilesX * result.tilesY;
@@ -258,26 +287,20 @@ inline ForwardPlusBinningResult binForwardPlusLights(const GPUPointLight* points
         result.tiles[0].padding0 = std::bit_cast<uint32_t>(grid.offset);
         result.tiles[0].padding1 = std::bit_cast<uint32_t>(grid.distribution);
         result.lightIndices.clear();
-        return result;
     };
 
     const uint32_t totalLights = pointCount + spotCount;
     if (!enabled || totalLights == 0)
-        return finishMinimal();
+    {
+        finishMinimal();
+        return;
+    }
 
     const glm::mat4 viewProj = projMatrix * viewMatrix;
     // glm perspective projections put -1 in column 2, row 3; orthographic puts 0.
     const bool perspective = projMatrix[2][3] != 0.0f;
 
-    struct BinnedLight
-    {
-        uint32_t index = 0;
-        ForwardPlusTileBounds bounds{};
-        float viewDepth = 0.0f;
-        float radius = 0.0f;
-        ForwardPlusSliceRange slices{};
-    };
-    std::vector<BinnedLight> binned;
+    std::vector<ForwardPlusBinnedLight>& binned = scratch.binned;
     binned.reserve(totalLights);
     float furthestDepth = 0.0f;
 
@@ -287,7 +310,7 @@ inline ForwardPlusBinningResult binForwardPlusLights(const GPUPointLight* points
                             result.tilesY, kForwardPlusTileSize, flipY);
         if (!bounds) return;
         const glm::vec4 viewPos = viewMatrix * glm::vec4(position, 1.0f);
-        BinnedLight light;
+        ForwardPlusBinnedLight light;
         light.index = index;
         light.bounds = *bounds;
         light.viewDepth = -viewPos.z;
@@ -302,7 +325,10 @@ inline ForwardPlusBinningResult binForwardPlusLights(const GPUPointLight* points
             consider(pointCount + i, spots[i].position, spots[i].range);
 
     if (binned.empty())
-        return finishMinimal();
+    {
+        finishMinimal();
+        return;
+    }
 
     // Z slicing only when it can pay: a perspective camera, enough binned
     // lights, and a light set whose spheres span a small share of the view
@@ -319,7 +345,7 @@ inline ForwardPlusBinningResult binForwardPlusLights(const GPUPointLight* points
         {
             double weightedSpan = 0.0;
             double weightedArea = 0.0;
-            for (const BinnedLight& light : binned)
+            for (const ForwardPlusBinnedLight& light : binned)
             {
                 const ForwardPlusSliceRange range =
                     forwardPlusLightSliceRange(candidate, light.viewDepth, light.radius);
@@ -336,7 +362,7 @@ inline ForwardPlusBinningResult binForwardPlusLights(const GPUPointLight* points
                 grid = candidate;
         }
     }
-    for (BinnedLight& light : binned)
+    for (ForwardPlusBinnedLight& light : binned)
         light.slices = forwardPlusLightSliceRange(grid, light.viewDepth, light.radius);
 
     result.sliceCount = grid.sliceCount;
@@ -344,8 +370,9 @@ inline ForwardPlusBinningResult binForwardPlusLights(const GPUPointLight* points
 
     // Count lights per cell, capped at kForwardPlusMaxLightsPerTile (the cap
     // keeps the lowest slots, as the scatter below does).
-    std::vector<uint32_t> cellCounts(cellCount, 0);
-    for (const BinnedLight& light : binned)
+    std::vector<uint32_t>& cellCounts = scratch.cellCounts;
+    cellCounts.assign(cellCount, 0u);
+    for (const ForwardPlusBinnedLight& light : binned)
         for (uint32_t slice = light.slices.first; slice <= light.slices.last; ++slice)
             for (uint32_t ty = light.bounds.minY; ty <= light.bounds.maxY; ++ty)
                 for (uint32_t tx = light.bounds.minX; tx <= light.bounds.maxX; ++tx)
@@ -360,7 +387,8 @@ inline ForwardPlusBinningResult binForwardPlusLights(const GPUPointLight* points
     result.tiles[0].padding0 = std::bit_cast<uint32_t>(grid.offset);
     result.tiles[0].padding1 = std::bit_cast<uint32_t>(grid.distribution);
     uint32_t runningOffset = 0;
-    std::vector<uint32_t> writeOffsets(cellCount, 0);
+    std::vector<uint32_t>& writeOffsets = scratch.writeOffsets;
+    writeOffsets.assign(cellCount, 0u);
     for (uint32_t cell = 0; cell < cellCount; ++cell)
     {
         ForwardPlusTile& tile = result.tiles[1u + cell];
@@ -372,7 +400,7 @@ inline ForwardPlusBinningResult binForwardPlusLights(const GPUPointLight* points
 
     // Scatter light indices, capped per cell.
     result.lightIndices.assign(runningOffset, 0u);
-    for (const BinnedLight& light : binned)
+    for (const ForwardPlusBinnedLight& light : binned)
     {
         for (uint32_t slice = light.slices.first; slice <= light.slices.last; ++slice)
         {
@@ -389,5 +417,21 @@ inline ForwardPlusBinningResult binForwardPlusLights(const GPUPointLight* points
             }
         }
     }
+}
+
+// Binning entry point for one-off calls. Callers that bin every frame keep
+// a result and scratch and call binForwardPlusLightsInto instead, so the
+// working storage is reused instead of allocated per call.
+inline ForwardPlusBinningResult binForwardPlusLights(const GPUPointLight* points, uint32_t pointCount,
+                                                     const GPUSpotLight* spots, uint32_t spotCount,
+                                                     const glm::mat4& viewMatrix, const glm::mat4& projMatrix,
+                                                     uint32_t width, uint32_t height, float nearPlane,
+                                                     float farPlane, bool flipY, bool enabled)
+{
+    ForwardPlusBinningResult result;
+    ForwardPlusBinningScratch scratch;
+    binForwardPlusLightsInto(result, scratch, points, pointCount, spots, spotCount,
+                             viewMatrix, projMatrix, width, height, nearPlane, farPlane,
+                             flipY, enabled);
     return result;
 }

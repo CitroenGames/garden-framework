@@ -534,6 +534,8 @@ private:
     std::vector<void*> m_forward_plus_indices_mapped;
     std::vector<uint32_t> m_forward_plus_indices_capacity;
     glm::vec4 m_forwardPlusParams = glm::vec4(16.0f, 1.0f, 1.0f, 0.0f);
+    ForwardPlusBinningResult m_forwardPlusBinned;
+    ForwardPlusBinningScratch m_forwardPlusScratch;
     bool ensureForwardPlusBuffer(uint32_t frameIndex, bool tiles, uint32_t neededElements);
     void writeForwardPlusDescriptors(uint32_t frameIndex, VkDescriptorSet ds);
 

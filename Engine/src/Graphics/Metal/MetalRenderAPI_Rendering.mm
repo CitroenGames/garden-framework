@@ -664,7 +664,8 @@ void MetalRenderAPI::uploadLightBuffers(const GPUPointLight* pts, int ptCount,
     const bool haveCamera = haveViewport && impl->viewMatrix != glm::mat4(0.0f)
         && impl->projectionMatrix != glm::mat4(0.0f) && impl->projectionMatrix != glm::mat4(1.0f);
     const bool fpEnabled = haveCamera && impl->lightingEnabled && CVAR_BOOL(r_light_zbinning);
-    ForwardPlusBinningResult binned = binForwardPlusLights(
+    ForwardPlusBinningResult& binned = impl->forwardPlusBinned;
+    binForwardPlusLightsInto(binned, impl->forwardPlusScratch,
         pts, static_cast<uint32_t>(ptCount), spts, static_cast<uint32_t>(spCount),
         impl->viewMatrix, impl->projectionMatrix,
         static_cast<uint32_t>(std::max(binWidth, 1)), static_cast<uint32_t>(std::max(binHeight, 1)),

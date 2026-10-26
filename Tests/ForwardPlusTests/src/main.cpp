@@ -232,9 +232,65 @@ static bool testGridHeaderRoundTrip()
     return pass(name);
 }
 
+static bool sameBinning(const ForwardPlusBinningResult& a, const ForwardPlusBinningResult& b)
+{
+    if (a.tilesX != b.tilesX || a.tilesY != b.tilesY || a.sliceCount != b.sliceCount)
+        return false;
+    if (a.tiles.size() != b.tiles.size() || a.lightIndices != b.lightIndices)
+        return false;
+    for (size_t i = 0; i < a.tiles.size(); ++i)
+        if (a.tiles[i].lightOffset != b.tiles[i].lightOffset ||
+            a.tiles[i].lightCount != b.tiles[i].lightCount ||
+            a.tiles[i].padding0 != b.tiles[i].padding0 ||
+            a.tiles[i].padding1 != b.tiles[i].padding1)
+            return false;
+    return true;
+}
+
+static bool testReusedScratchMatchesFreshAndKeepsCapacity()
+{
+    const std::string name = "reused binning scratch matches fresh output and keeps capacity";
+    TestCamera cam;
+    std::vector<GPUPointLight> lights;
+    for (int i = 0; i < 16; ++i)
+        lights.push_back(makePoint((float)(i % 4) - 1.5f, (float)((i / 4) % 4) - 1.5f,
+                                   -2.0f - (float)(i * 3), 1.5f));
+    ForwardPlusBinningResult fresh = binForwardPlusLights(
+        lights.data(), (uint32_t)lights.size(), nullptr, 0, cam.view, cam.proj,
+        cam.width, cam.height, 0.1f, 1000.0f, true, true);
+
+    ForwardPlusBinningResult reused;
+    ForwardPlusBinningScratch scratch;
+    binForwardPlusLightsInto(reused, scratch, lights.data(), (uint32_t)lights.size(),
+                             nullptr, 0, cam.view, cam.proj, cam.width, cam.height,
+                             0.1f, 1000.0f, true, true);
+    if (!sameBinning(reused, fresh))
+        return fail(name, "first reused-scratch result differs from fresh result");
+
+    const size_t tilesCap = reused.tiles.capacity();
+    const size_t indicesCap = reused.lightIndices.capacity();
+    const size_t binnedCap = scratch.binned.capacity();
+    const size_t countsCap = scratch.cellCounts.capacity();
+    const size_t offsetsCap = scratch.writeOffsets.capacity();
+    if (tilesCap == 0 || binnedCap == 0 || countsCap == 0 || offsetsCap == 0)
+        return fail(name, "scratch or result storage was not retained");
+
+    binForwardPlusLightsInto(reused, scratch, lights.data(), (uint32_t)lights.size(),
+                             nullptr, 0, cam.view, cam.proj, cam.width, cam.height,
+                             0.1f, 1000.0f, true, true);
+    if (!sameBinning(reused, fresh))
+        return fail(name, "second reused-scratch result differs from fresh result");
+    if (reused.tiles.capacity() != tilesCap || reused.lightIndices.capacity() != indicesCap ||
+        scratch.binned.capacity() != binnedCap || scratch.cellCounts.capacity() != countsCap ||
+        scratch.writeOffsets.capacity() != offsetsCap)
+        return fail(name, "reused binning grew retained storage on an identical call");
+    return pass(name);
+}
+
 int main()
 {
     bool ok = true;
+    ok &= testReusedScratchMatchesFreshAndKeepsCapacity();
     ok &= testLightLandsInCentreTile();
     ok &= testBehindAndOffScreenExcluded();
     ok &= testSpotIndexOffsetByPointCount();

@@ -193,6 +193,8 @@ private:
     
 
     // Post-processing (FXAA)
+    ForwardPlusBinningResult m_forwardPlusBinned;
+    ForwardPlusBinningScratch m_forwardPlusScratch;
     D3D12PostProcessPass m_fxaaPass;
     ComPtr<ID3D12Resource> m_fxaaQuadVB;
     D3D12_VERTEX_BUFFER_VIEW m_fxaaQuadVBV = {};
