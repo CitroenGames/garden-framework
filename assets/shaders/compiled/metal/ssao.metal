@@ -43,18 +43,35 @@ float3 reconstructViewPos(float2 uv, float depth, float4x4 invProj)
     return viewPos.xyz / viewPos.w;
 }
 
-float3 reconstructNormal(float2 uv, float2 texelSize, float3 viewPos,
-                          depth2d<float> depthTex, sampler depthSamp, float4x4 invProj)
+// Depth is sampled with a point filter, so a coordinate that lands on a
+// texel boundary can resolve to either neighbouring texel. The SSAO target
+// runs at half resolution against a full-resolution depth buffer, which
+// places every centre and tap exactly on such a boundary; snapping to the
+// full-resolution texel centres makes the sampled texel and the position
+// reconstructed from it agree.
+float2 snapDepthUV(float2 uv, float2 screenSize)
 {
-    float depthRight = depthTex.sample(depthSamp, uv + float2(texelSize.x, 0));
-    float depthLeft  = depthTex.sample(depthSamp, uv - float2(texelSize.x, 0));
-    float depthUp    = depthTex.sample(depthSamp, uv + float2(0, texelSize.y));
-    float depthDown  = depthTex.sample(depthSamp, uv - float2(0, texelSize.y));
+    float2 depthSize = screenSize * 2.0;
+    return (floor(uv * depthSize) + 0.5) / depthSize;
+}
 
-    float3 posRight = reconstructViewPos(uv + float2(texelSize.x, 0), depthRight, invProj);
-    float3 posLeft  = reconstructViewPos(uv - float2(texelSize.x, 0), depthLeft, invProj);
-    float3 posUp    = reconstructViewPos(uv + float2(0, texelSize.y), depthUp, invProj);
-    float3 posDown  = reconstructViewPos(uv - float2(0, texelSize.y), depthDown, invProj);
+float3 reconstructNormal(float2 uv, float2 texelSize, float3 viewPos,
+                          depth2d<float> depthTex, sampler depthSamp, float4x4 invProj, float2 screenSize)
+{
+    float2 uvRight = snapDepthUV(uv + float2(texelSize.x, 0), screenSize);
+    float2 uvLeft  = snapDepthUV(uv - float2(texelSize.x, 0), screenSize);
+    float2 uvUp    = snapDepthUV(uv + float2(0, texelSize.y), screenSize);
+    float2 uvDown  = snapDepthUV(uv - float2(0, texelSize.y), screenSize);
+
+    float depthRight = depthTex.sample(depthSamp, uvRight);
+    float depthLeft  = depthTex.sample(depthSamp, uvLeft);
+    float depthUp    = depthTex.sample(depthSamp, uvUp);
+    float depthDown  = depthTex.sample(depthSamp, uvDown);
+
+    float3 posRight = reconstructViewPos(uvRight, depthRight, invProj);
+    float3 posLeft  = reconstructViewPos(uvLeft, depthLeft, invProj);
+    float3 posUp    = reconstructViewPos(uvUp, depthUp, invProj);
+    float3 posDown  = reconstructViewPos(uvDown, depthDown, invProj);
 
     float3 dx = (abs(posRight.z - viewPos.z) < abs(viewPos.z - posLeft.z))
                 ? (posRight - viewPos) : (viewPos - posLeft);
@@ -72,14 +89,15 @@ fragment float4 ssao_fragment(SSAOVertexOut in [[stage_in]],
                                constant SSAOUniforms& uniforms [[buffer(0)]])
 {
     float2 uv = in.texCoord;
-    float depth = depthTexture.sample(depthSampler, uv);
+    float2 depthUv = snapDepthUV(uv, uniforms.screenSize);
+    float depth = depthTexture.sample(depthSampler, depthUv);
 
     if (depth >= 0.9999)
         return float4(1.0, 1.0, 1.0, 1.0);
 
     float2 depthTexelSize = 1.0 / (uniforms.screenSize * 2.0);
-    float3 fragPos = reconstructViewPos(uv, depth, uniforms.invProjection);
-    float3 normal = reconstructNormal(uv, depthTexelSize, fragPos, depthTexture, depthSampler, uniforms.invProjection);
+    float3 fragPos = reconstructViewPos(depthUv, depth, uniforms.invProjection);
+    float3 normal = reconstructNormal(depthUv, depthTexelSize, fragPos, depthTexture, depthSampler, uniforms.invProjection, uniforms.screenSize);
 
     float3 randomVec = noiseTexture.sample(noiseSampler, uv * uniforms.noiseScale).xyz;
 

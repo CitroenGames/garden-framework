@@ -12,3 +12,7 @@ include = RenderGraphTests/RenderGraphTests.buildscript
 include = SortTests/SortTests.buildscript
 include = ReplayTests/ReplayTests.buildscript
 include = BinningEdgeTests/BinningEdgeTests.buildscript
+include = SSAONormalTests/SSAONormalTests.buildscript
+include = SSAOBlurTests/SSAOBlurTests.buildscript
+include = SSAONoiseTests/SSAONoiseTests.buildscript
+include = SSAOInputTests/SSAOInputTests.buildscript

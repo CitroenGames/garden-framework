@@ -1,0 +1,24 @@
+[project:SSAOInputTests]
+type = exe
+outdir = ../../bin/
+if(Windows)
+{
+    subsystem = Console
+}
+sources = {
+    src/main.cpp
+    ../../Engine/src/Graphics/RenderGraph/RenderGraph.cpp
+    ../../Engine/src/Graphics/RenderGraph/RGCompiler.cpp
+    ../../Engine/src/Graphics/RenderGraph/RGBuilder.cpp
+}
+headers = src/**/*.hpp
+includes = src, ../../Engine/src
+target_link_libraries(
+    PRIVATE EngineCore
+)
+multiprocessor = true
+simd = AdvancedVectorExtensions2
+std = 20
+utf8 = true
+exception_handling = false
+buffer_security_check = false

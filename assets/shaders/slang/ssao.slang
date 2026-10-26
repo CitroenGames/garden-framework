@@ -63,20 +63,37 @@ float3 ReconstructViewPos(float2 uv, float depth)
     return viewPos.xyz / viewPos.w;
 }
 
+// Depth is sampled with a point filter, so a coordinate that lands on a
+// texel boundary can resolve to either neighbouring texel. The SSAO target
+// runs at half resolution against a full-resolution depth buffer, which
+// places every centre and tap exactly on such a boundary; snapping to the
+// full-resolution texel centres makes the sampled texel and the position
+// reconstructed from it agree.
+float2 SnapDepthUV(float2 uv)
+{
+    float2 depthSize = uScreenSize * 2.0;
+    return (floor(uv * depthSize) + 0.5) / depthSize;
+}
+
 // Reconstruct view-space normal from depth buffer using improved method
 // Uses best of forward/backward differences to handle edges
 float3 ReconstructNormal(float2 uv, float2 texelSize, float3 viewPos)
 {
-    // Sample 4 neighboring depth values
-    float depthRight = depthTexture.Sample(depthSampler, uv + float2(texelSize.x, 0)).r;
-    float depthLeft  = depthTexture.Sample(depthSampler, uv - float2(texelSize.x, 0)).r;
-    float depthUp    = depthTexture.Sample(depthSampler, uv + float2(0, texelSize.y)).r;
-    float depthDown  = depthTexture.Sample(depthSampler, uv - float2(0, texelSize.y)).r;
+    float2 uvRight = SnapDepthUV(uv + float2(texelSize.x, 0));
+    float2 uvLeft  = SnapDepthUV(uv - float2(texelSize.x, 0));
+    float2 uvUp    = SnapDepthUV(uv + float2(0, texelSize.y));
+    float2 uvDown  = SnapDepthUV(uv - float2(0, texelSize.y));
 
-    float3 posRight = ReconstructViewPos(uv + float2(texelSize.x, 0), depthRight);
-    float3 posLeft  = ReconstructViewPos(uv - float2(texelSize.x, 0), depthLeft);
-    float3 posUp    = ReconstructViewPos(uv + float2(0, texelSize.y), depthUp);
-    float3 posDown  = ReconstructViewPos(uv - float2(0, texelSize.y), depthDown);
+    // Sample 4 neighboring depth values
+    float depthRight = depthTexture.Sample(depthSampler, uvRight).r;
+    float depthLeft  = depthTexture.Sample(depthSampler, uvLeft).r;
+    float depthUp    = depthTexture.Sample(depthSampler, uvUp).r;
+    float depthDown  = depthTexture.Sample(depthSampler, uvDown).r;
+
+    float3 posRight = ReconstructViewPos(uvRight, depthRight);
+    float3 posLeft  = ReconstructViewPos(uvLeft, depthLeft);
+    float3 posUp    = ReconstructViewPos(uvUp, depthUp);
+    float3 posDown  = ReconstructViewPos(uvDown, depthDown);
 
     // Choose the pair with the smaller depth difference (handles edges better)
     float3 dx = (abs(posRight.z - viewPos.z) < abs(viewPos.z - posLeft.z))
@@ -101,7 +118,8 @@ float4 fragmentMain(PSInput input) : SV_TARGET
     float2 uv = input.texcoord;
 
     // Sample depth at full resolution UV (depth texture is full-res)
-    float depth = depthTexture.Sample(depthSampler, uv).r;
+    float2 depthUv = SnapDepthUV(uv);
+    float depth = depthTexture.Sample(depthSampler, depthUv).r;
 
     // Skip sky pixels (depth == 1.0 or very close)
     if (depth >= 0.9999)
@@ -111,8 +129,8 @@ float4 fragmentMain(PSInput input) : SV_TARGET
     float2 depthTexelSize = float2(1.0, 1.0) / (uScreenSize * 2.0);
 
     // Reconstruct view-space position and normal
-    float3 fragPos = ReconstructViewPos(uv, depth);
-    float3 normal = ReconstructNormal(uv, depthTexelSize, fragPos);
+    float3 fragPos = ReconstructViewPos(depthUv, depth);
+    float3 normal = ReconstructNormal(depthUv, depthTexelSize, fragPos);
 
     // Sample noise texture for random rotation (frac tiles the 4x4 noise across the screen)
     float3 randomVec = noiseTexture.Sample(noiseSampler, frac(uv * uNoiseScale)).xyz;
