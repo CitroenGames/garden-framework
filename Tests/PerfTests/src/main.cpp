@@ -511,8 +511,140 @@ static bool testHeadlessFrameStatsPopulate()
     delete mesh;
     return pass(name);
 }
-int main()
+static void printHeadToHead(const char* label, size_t ops, double nsPerOpValue,
+                            const char* counterName, uint64_t counterValue)
 {
+    std::cout << "[BENCH] " << label << " ops=" << ops << " ns/op=" << nsPerOpValue
+              << " " << counterName << "=" << counterValue << std::endl;
+}
+
+static double elapsedNsPerOp(std::chrono::steady_clock::duration elapsed, size_t ops)
+{
+    const double totalNs = (double)std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count();
+    return ops ? totalNs / (double)ops : 0.0;
+}
+
+// Identical draws replayed as one sorted buffer and as single-draw buffers.
+// Both sides submit the same draws; the sorted side issues one backend draw
+// for the whole run while the single-draw side issues one per draw.
+static bool benchReplayMergedAgainstPerDraw(size_t count, size_t reps)
+{
+    const std::string name = "merged and per-draw replay submit identical draws";
+    HeadlessRenderAPI mergedApi;
+    IGPUMesh* mesh = makeUploadedMesh(mergedApi);
+    PSOKey main;
+    RenderCommandBuffer merged;
+    merged.reserve(count);
+    std::vector<RenderCommandBuffer> singles;
+    singles.reserve(count);
+    for (size_t i = 0; i < count; i++)
+    {
+        const glm::mat4 model = glm::translate(glm::mat4(1.0f), glm::vec3((float)i, 0.0f, -10.0f));
+        merged.recordDraw(mesh, model, 7, true, main);
+        RenderCommandBuffer single;
+        single.recordDraw(mesh, model, 7, true, main);
+        singles.push_back(single);
+    }
+    merged.sort();
+
+    mergedApi.beginFrame();
+    mergedApi.replayCommandBuffer(merged);
+    const RenderFrameStats mergedStats = mergedApi.getLastFrameStats();
+
+    HeadlessRenderAPI perDrawApi;
+    perDrawApi.beginFrame();
+    for (const RenderCommandBuffer& single : singles)
+        perDrawApi.replayCommandBuffer(single);
+    const RenderFrameStats perDrawStats = perDrawApi.getLastFrameStats();
+
+    if (mergedStats.submitted_draw_commands != count ||
+        perDrawStats.submitted_draw_commands != count)
+        return fail(name, "submitted draw counts differ between the two sides");
+    if (mergedStats.backend_draw_calls != 1)
+        return fail(name, "merged replay issued " +
+                    std::to_string(mergedStats.backend_draw_calls) + " backend draws");
+    if (perDrawStats.backend_draw_calls != count)
+        return fail(name, "per-draw replay issued " +
+                    std::to_string(perDrawStats.backend_draw_calls) + " backend draws");
+    if (mergedStats.instanced_instances != count)
+        return fail(name, "merged replay did not cover every submitted draw");
+
+    const size_t ops = count * reps;
+    auto start = std::chrono::steady_clock::now();
+    for (size_t rep = 0; rep < reps; rep++)
+        mergedApi.replayCommandBuffer(merged);
+    const double mergedNs = elapsedNsPerOp(std::chrono::steady_clock::now() - start, ops);
+
+    start = std::chrono::steady_clock::now();
+    for (size_t rep = 0; rep < reps; rep++)
+        for (const RenderCommandBuffer& single : singles)
+            perDrawApi.replayCommandBuffer(single);
+    const double perDrawNs = elapsedNsPerOp(std::chrono::steady_clock::now() - start, ops);
+
+    printHeadToHead("replay merged", ops, mergedNs, "backend_draws",
+                    mergedStats.backend_draw_calls);
+    printHeadToHead("replay per-draw", ops, perDrawNs, "backend_draws",
+                    perDrawStats.backend_draw_calls);
+    const double deltaPct = perDrawNs > 0.0 ? (perDrawNs - mergedNs) / perDrawNs * 100.0 : 0.0;
+    std::cout << "[BENCH] replay merged vs per-draw ns/op delta_pct=" << deltaPct << std::endl;
+    delete mesh;
+    return pass(name);
+}
+
+// Identical lights binned with retained scratch storage and with a fresh
+// result on every call. Both sides must produce the same tiles and indices;
+// only the allocation behaviour and cost differ.
+static bool benchBinningRetainedAgainstOneOff(size_t count, size_t reps)
+{
+    const std::string name = "retained-scratch and one-off binning produce identical output";
+    std::vector<GPUPointLight> lights(count);
+    for (size_t i = 0; i < count; i++)
+    {
+        lights[i].position = glm::vec3((float)((int)(i % 16) - 8) * 0.4f,
+                                       (float)((int)((i / 16) % 16) - 8) * 0.4f,
+                                       -5.0f - (float)(i % 8));
+        lights[i].range = 0.5f;
+    }
+    const glm::mat4 view(1.0f);
+    const glm::mat4 proj = glm::perspective(glm::radians(90.0f), 1.0f, 0.1f, 1000.0f);
+
+    ForwardPlusBinningResult oneOff = binForwardPlusLights(
+        lights.data(), (uint32_t)count, nullptr, 0, view, proj, 160, 160, 0.1f, 1000.0f, true, true);
+    ForwardPlusBinningResult retained;
+    ForwardPlusBinningScratch scratch;
+    binForwardPlusLightsInto(retained, scratch, lights.data(), (uint32_t)count,
+                             nullptr, 0, view, proj, 160, 160, 0.1f, 1000.0f, true, true);
+    if (retained.tiles.size() != oneOff.tiles.size() ||
+        retained.lightIndices != oneOff.lightIndices)
+        return fail(name, "retained-scratch output differs from one-off output");
+
+    const size_t ops = count * reps;
+    auto start = std::chrono::steady_clock::now();
+    for (size_t rep = 0; rep < reps; rep++)
+        oneOff = binForwardPlusLights(lights.data(), (uint32_t)count, nullptr, 0,
+                                      view, proj, 160, 160, 0.1f, 1000.0f, true, true);
+    const double oneOffNs = elapsedNsPerOp(std::chrono::steady_clock::now() - start, ops);
+
+    start = std::chrono::steady_clock::now();
+    for (size_t rep = 0; rep < reps; rep++)
+        binForwardPlusLightsInto(retained, scratch, lights.data(), (uint32_t)count,
+                                 nullptr, 0, view, proj, 160, 160, 0.1f, 1000.0f, true, true);
+    const double retainedNs = elapsedNsPerOp(std::chrono::steady_clock::now() - start, ops);
+
+    if (retained.tiles.size() != oneOff.tiles.size() ||
+        retained.lightIndices != oneOff.lightIndices)
+        return fail(name, "timed retained-scratch output differs from one-off output");
+
+    printHeadToHead("binning one-off", ops, oneOffNs, "binned_indices",
+                    (uint64_t)oneOff.lightIndices.size());
+    printHeadToHead("binning retained-scratch", ops, retainedNs, "binned_indices",
+                    (uint64_t)retained.lightIndices.size());
+    const double deltaPct = oneOffNs > 0.0 ? (oneOffNs - retainedNs) / oneOffNs * 100.0 : 0.0;
+    std::cout << "[BENCH] binning retained-scratch vs one-off ns/op delta_pct=" << deltaPct << std::endl;
+    return pass(name);
+}
+
+int main(){
     bool ok = true;
     ok &= testPackedKeyFieldPriority();
     ok &= testSortGroupsByPipeline();
@@ -532,6 +664,8 @@ int main()
     ok &= benchRecordDraw(10000);
     ok &= benchBinForwardPlusLights(1000);
     ok &= benchBinForwardPlusLights(10000);
+    ok &= benchReplayMergedAgainstPerDraw(1024, 200);
+    ok &= benchBinningRetainedAgainstOneOff(4096, 100);
     std::cout << (ok ? "all perf tests passed" : "perf tests FAILED") << std::endl;
     return ok ? 0 : 1;
 }
