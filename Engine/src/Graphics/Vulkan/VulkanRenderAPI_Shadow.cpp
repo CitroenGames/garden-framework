@@ -786,6 +786,10 @@ void VulkanRenderAPI::recreateShadowResources(uint32_t size)
     // Wait for device to be idle before recreating resources
     vkDeviceWaitIdle(device);
 
+    // Retained sets name the shadow map view destroyed below, and the
+    // device is idle, so every retained set can be dropped safely.
+    invalidateDrawDescriptorCache();
+
     // Cleanup existing shadow resources
     cleanupShadowResources();
 

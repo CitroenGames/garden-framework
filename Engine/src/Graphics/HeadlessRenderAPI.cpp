@@ -237,8 +237,12 @@ void HeadlessRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
             m_lastFrameStats.state_binds_skipped++;
         }
 
-        // Cross-frame descriptor cache -- allocate on first sight, hit after.
-        uint64_t descKey = cmd.use_texture ? static_cast<uint64_t>(tex) : 0u;
+        // Descriptor sets are retained across frames, keyed by diffuse texture
+        // plus heightmap. Allocate on first sight of a pair, hit afterwards.
+        const uint64_t texPart = cmd.use_texture
+            ? static_cast<uint64_t>(tex) : static_cast<uint64_t>(INVALID_TEXTURE);
+        const uint64_t descKey = (texPart << 32) |
+            static_cast<uint64_t>(static_cast<uint32_t>(cmd.heightmap_texture));
         if (m_descriptorCache.find(descKey) != m_descriptorCache.end())
         {
             m_lastFrameStats.descriptor_cache_hits++;

@@ -40,11 +40,16 @@ bool VulkanRenderAPI::createDescriptorPool()
         return false;
     }
 
-    // Create initial per-draw pool for each frame
+    // Presize the retained per-draw pools for each frame slot. Sets are
+    // allocated from these pools only on a cache miss and are never
+    // returned per frame, so this capacity is the steady-state budget
+    // for distinct texture plus heightmap pairs.
     for (int f = 0; f < MAX_FRAMES_IN_FLIGHT; f++) {
-        VkDescriptorPool pool = createPerDrawDescriptorPool();
-        if (pool == VK_NULL_HANDLE) return false;
-        frame_descriptor_state[f].pools.push_back(pool);
+        for (uint32_t p = 0; p < POOLS_PRESIZED_PER_SLOT; p++) {
+            VkDescriptorPool pool = createPerDrawDescriptorPool();
+            if (pool == VK_NULL_HANDLE) return false;
+            frame_descriptor_state[f].pools.push_back(pool);
+        }
     }
 
     return true;
@@ -703,9 +708,10 @@ VkDescriptorSet VulkanRenderAPI::getOrAllocateDescriptorSet(uint32_t frameIndex,
 {
     VulkanDrawDescriptorKey key{texture, heightmap};
 
-    // Check cache first - reuse descriptor set for same texture within a frame
-    auto cacheIt = texture_descriptor_cache.find(key);
-    if (cacheIt != texture_descriptor_cache.end()) {
+    // Retained sets: reuse the set written for this slot on an earlier frame
+    auto& slotCache = texture_descriptor_cache[frameIndex];
+    auto cacheIt = slotCache.find(key);
+    if (cacheIt != slotCache.end()) {
         m_lastFrameStats.descriptor_cache_hits++;
         return cacheIt->second;
     }
@@ -720,10 +726,69 @@ VkDescriptorSet VulkanRenderAPI::getOrAllocateDescriptorSet(uint32_t frameIndex,
     // Write UBO, texture, and shadow map bindings
     initializeDescriptorSet(ds, frameIndex, texture, heightmap);
 
-    // Cache for reuse within this frame; pools reset per frame.
-    texture_descriptor_cache[key] = ds;
+    // Retain for reuse on this slot in later frames.
+    slotCache[key] = ds;
     m_lastFrameStats.descriptor_allocs++;
     return ds;
+}
+
+// Drops every retained set. Pools are reset so their sets are allocated
+// again on the next miss. Call only while no retained set can still be
+// bound by in-flight work (device idle or before the first frame).
+void VulkanRenderAPI::invalidateDrawDescriptorCache()
+{
+    for (int f = 0; f < MAX_FRAMES_IN_FLIGHT; f++) {
+        auto& state = frame_descriptor_state[f];
+        for (auto pool : state.pools)
+            vkResetDescriptorPool(device, pool, 0);
+        state.current_pool = 0;
+        state.sets_allocated_in_pool = 0;
+        texture_descriptor_cache[f].clear();
+        for (auto& worker : m_threadCommandPools) {
+            auto& workerState = worker.descriptor_state[f];
+            for (auto pool : workerState.pools)
+                vkResetDescriptorPool(device, pool, 0);
+            workerState.current_pool = 0;
+            workerState.sets_allocated_in_pool = 0;
+            worker.texture_cache[f].clear();
+        }
+    }
+    descriptor_limit_warned = false;
+    last_bound_descriptor_set = VK_NULL_HANDLE;
+    last_bound_dynamic_offset = UINT32_MAX;
+}
+
+// Drops retained sets that reference a texture whose image view is about
+// to be destroyed. The set slot stays allocated in its pool and is reused
+// only after a later pool reset, so erasing cannot hand a live set to a
+// different texture.
+void VulkanRenderAPI::invalidateDrawDescriptorsForTexture(TextureHandle texture)
+{
+    auto eraseTexture = [texture](auto& cache) {
+        for (auto it = cache.begin(); it != cache.end();) {
+            if (it->first.texture == texture || it->first.heightmap == texture)
+                it = cache.erase(it);
+            else
+                ++it;
+        }
+    };
+    for (int f = 0; f < MAX_FRAMES_IN_FLIGHT; f++) {
+        eraseTexture(texture_descriptor_cache[f]);
+        for (auto& worker : m_threadCommandPools)
+            eraseTexture(worker.texture_cache[f]);
+    }
+}
+
+// Rewrites the Forward+ grid bindings of every retained set of a slot
+// after one of its grid buffers moved to a new allocation.
+void VulkanRenderAPI::refreshForwardPlusDescriptors(uint32_t frameIndex)
+{
+    if (frameIndex >= static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT)) return;
+    for (auto& entry : texture_descriptor_cache[frameIndex])
+        writeForwardPlusDescriptors(frameIndex, entry.second);
+    for (auto& worker : m_threadCommandPools)
+        for (auto& entry : worker.texture_cache[frameIndex])
+            writeForwardPlusDescriptors(frameIndex, entry.second);
 }
 
 // ========================================================================
@@ -770,8 +835,9 @@ VkDescriptorSet VulkanRenderAPI::workerGetOrAllocateDescriptorSet(
     VulkanDrawDescriptorKey key{texture, heightmap};
 
     // Check worker-local cache first
-    auto it = worker.texture_cache.find(key);
-    if (it != worker.texture_cache.end())
+    auto& slotCache = worker.texture_cache[frameIndex];
+    auto it = slotCache.find(key);
+    if (it != slotCache.end())
         { std::lock_guard<std::mutex> statsLock(m_descriptorPoolMutex); m_lastFrameStats.descriptor_cache_hits++; }
         return it->second;
 
@@ -783,7 +849,7 @@ VkDescriptorSet VulkanRenderAPI::workerGetOrAllocateDescriptorSet(
     // reads only immutable state (UBO handles, texture map, shadow map)
     initializeDescriptorSet(ds, frameIndex, texture, heightmap);
 
-    worker.texture_cache[key] = ds;
+    slotCache[key] = ds;
     { std::lock_guard<std::mutex> statsLock(m_descriptorPoolMutex); m_lastFrameStats.descriptor_allocs++; }
     return ds;
 }

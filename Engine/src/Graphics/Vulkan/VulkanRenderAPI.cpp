@@ -714,14 +714,16 @@ bool VulkanRenderAPI::createThreadCommandPools()
 
         tp.in_use.store(false, std::memory_order_relaxed);
 
-        // Pre-allocate one descriptor pool per frame-in-flight per worker
+        // Presize the retained descriptor pools of every worker slot.
         for (int f = 0; f < MAX_FRAMES_IN_FLIGHT; f++) {
-            VkDescriptorPool descPool = createPerDrawDescriptorPool();
-            if (descPool == VK_NULL_HANDLE) {
-                LOG_ENGINE_ERROR("[Vulkan] Failed to create worker descriptor pool {}/{}", i, f);
-                // Continue without descriptor pool - will be created on demand
-            } else {
-                tp.descriptor_state[f].pools.push_back(descPool);
+            for (uint32_t p = 0; p < POOLS_PRESIZED_PER_SLOT; p++) {
+                VkDescriptorPool descPool = createPerDrawDescriptorPool();
+                if (descPool == VK_NULL_HANDLE) {
+                    LOG_ENGINE_ERROR("[Vulkan] Failed to create worker descriptor pool {}/{}", i, f);
+                    // Continue without that pool - more are created on demand
+                } else {
+                    tp.descriptor_state[f].pools.push_back(descPool);
+                }
             }
         }
     }

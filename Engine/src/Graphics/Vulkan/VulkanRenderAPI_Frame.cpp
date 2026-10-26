@@ -133,15 +133,10 @@ void VulkanRenderAPI::prepareFrame()
 
     vkResetFences(device, 1, &in_flight_fences[current_frame]);
 
-    // Reset per-draw descriptor pools for this frame (O(1) per pool)
-    auto& descState = frame_descriptor_state[current_frame];
-    for (auto pool : descState.pools) {
-        vkResetDescriptorPool(device, pool, 0);
-    }
-    descState.current_pool = 0;
-    descState.sets_allocated_in_pool = 0;
-    texture_descriptor_cache.clear();
-    descriptor_limit_warned = false;
+    // Retained descriptor pools and caches keep their sets across frames.
+    // This slot was fenced above, so its sets are safe to bind again and a
+    // warm frame allocates nothing. Bind tracking below still resets,
+    // because the new command list starts with nothing bound.
 
     // Reset redundant bind tracking
     last_bound_pipeline = VK_NULL_HANDLE;
@@ -163,18 +158,13 @@ void VulkanRenderAPI::prepareFrame()
     m_lastFrameStats.descriptor_allocs = 0;
     m_lastFrameStats.descriptor_cache_hits = 0;
 
-    // Reset per-thread command pools and descriptor pools for parallel replay
+    // Reset per-thread command pools for parallel replay
     // Only reset the current frame's pool — the other frame's secondary buffers may still be pending.
     for (auto& tp : m_threadCommandPools) {
         if (tp.pool[current_frame] != VK_NULL_HANDLE)
             vkResetCommandPool(device, tp.pool[current_frame], 0);
         tp.in_use.store(false, std::memory_order_release);
-        auto& ds = tp.descriptor_state[current_frame];
-        for (auto pool : ds.pools)
-            vkResetDescriptorPool(device, pool, 0);
-        ds.current_pool = 0;
-        ds.sets_allocated_in_pool = 0;
-        tp.texture_cache.clear();
+        // Worker descriptor pools and caches are retained like the primary ones.
     }
     using_continuation_pass = false;
 

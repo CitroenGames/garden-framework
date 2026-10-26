@@ -528,6 +528,9 @@ void VulkanRenderAPI::deleteTexture(TextureHandle texture)
     }
 
     if (found) {
+        // Retained sets referencing this texture must not be bound again;
+        // their image view is destroyed by the deferred deletion below.
+        invalidateDrawDescriptorsForTexture(texture);
 
         // Defer destruction until GPU is done with the resource
         // Sampler is owned by sampler_cache, don't destroy it here
@@ -1860,6 +1863,8 @@ bool VulkanRenderAPI::ensureForwardPlusBuffer(uint32_t frameIndex, bool tiles, u
     allocations[frameIndex] = newAllocation;
     mapped[frameIndex]      = ao.pMappedData;
     capacity[frameIndex]    = neededElements;
+    // Retained sets of this slot still name the previous grid buffer.
+    refreshForwardPlusDescriptors(frameIndex);
     return true;
 }
 

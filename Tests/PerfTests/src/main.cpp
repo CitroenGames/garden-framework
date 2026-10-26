@@ -511,6 +511,53 @@ static bool testHeadlessFrameStatsPopulate()
     delete mesh;
     return pass(name);
 }
+// Descriptor sets are keyed by diffuse texture plus heightmap and are
+// retained across frames: a repeated pair allocates once, a new pair
+// allocates on first sight, and later frames allocate nothing.
+static bool testHeadlessDescriptorCacheAcrossFrames()
+{
+    const std::string name = "counting replay retains descriptor sets across frames";
+    HeadlessRenderAPI api;
+    IGPUMesh* mesh = makeUploadedMesh(api);
+    PSOKey main;
+    RenderCommandBuffer buf;
+    buf.recordDraw(mesh, glm::mat4(1.0f), 7, true, main, glm::vec3(1.0f),
+                   INVALID_TEXTURE, false);
+    buf.recordDraw(mesh, glm::mat4(1.0f), 7, true, main, glm::vec3(1.0f),
+                   (TextureHandle)42, true);
+    buf.recordDraw(mesh, glm::mat4(1.0f), 8, true, main, glm::vec3(1.0f),
+                   (TextureHandle)42, true);
+
+    api.beginFrame();
+    api.replayCommandBuffer(buf);
+    RenderFrameStats first = api.getLastFrameStats();
+    if (first.descriptor_allocs != 3 || first.descriptor_cache_hits != 0)
+        return fail(name, "expected 3 descriptor allocs and 0 hits, got allocs=" +
+                            std::to_string(first.descriptor_allocs) + " hits=" +
+                            std::to_string(first.descriptor_cache_hits));
+
+    api.beginFrame();
+    api.replayCommandBuffer(buf);
+    RenderFrameStats second = api.getLastFrameStats();
+    if (second.descriptor_allocs != 0 || second.descriptor_cache_hits != 3)
+        return fail(name, "expected warm frame with 0 allocs and 3 hits, got allocs=" +
+                            std::to_string(second.descriptor_allocs) + " hits=" +
+                            std::to_string(second.descriptor_cache_hits));
+
+    RenderCommandBuffer grown;
+    grown.recordDraw(mesh, glm::mat4(1.0f), 9, true, main, glm::vec3(1.0f),
+                     (TextureHandle)42, true);
+    api.beginFrame();
+    api.replayCommandBuffer(grown);
+    RenderFrameStats third = api.getLastFrameStats();
+    if (third.descriptor_allocs != 1 || third.descriptor_cache_hits != 0)
+        return fail(name, "expected one alloc for a new texture, got allocs=" +
+                            std::to_string(third.descriptor_allocs) + " hits=" +
+                            std::to_string(third.descriptor_cache_hits));
+    delete mesh;
+    return pass(name);
+}
+
 static void printHeadToHead(const char* label, size_t ops, double nsPerOpValue,
                             const char* counterName, uint64_t counterValue)
 {
@@ -644,6 +691,74 @@ static bool benchBinningRetainedAgainstOneOff(size_t count, size_t reps)
     return pass(name);
 }
 
+// The same draws replayed on a fresh counting backend every frame and on
+// one retained backend. Both sides submit identical draws; the fresh side
+// allocates a descriptor set per distinct texture on every frame while the
+// retained side allocates only on the first frame.
+static bool benchDescriptorCacheColdAgainstWarm(size_t distinct, size_t reps)
+{
+    const std::string name = "cold and warm descriptor replay submit identical draws";
+    HeadlessRenderAPI probe;
+    IGPUMesh* mesh = makeUploadedMesh(probe);
+    PSOKey main;
+    RenderCommandBuffer buf;
+    buf.reserve(distinct);
+    for (size_t i = 0; i < distinct; i++)
+        buf.recordDraw(mesh, glm::mat4(1.0f), (TextureHandle)(7u + (uint32_t)i), true, main);
+
+    uint64_t coldAllocs = 0;
+    uint64_t coldSubmitted = 0;
+    const auto coldStart = std::chrono::steady_clock::now();
+    for (size_t rep = 0; rep < reps; rep++)
+    {
+        HeadlessRenderAPI coldApi;
+        coldApi.beginFrame();
+        coldApi.replayCommandBuffer(buf);
+        RenderFrameStats stats = coldApi.getLastFrameStats();
+        coldAllocs += stats.descriptor_allocs;
+        coldSubmitted += stats.submitted_draw_commands;
+    }
+    const double coldNs = elapsedNsPerOp(std::chrono::steady_clock::now() - coldStart,
+                                         distinct * reps);
+
+    HeadlessRenderAPI warmApi;
+    warmApi.beginFrame();
+    warmApi.replayCommandBuffer(buf);
+    uint64_t warmAllocs = warmApi.getLastFrameStats().descriptor_allocs;
+    uint64_t warmHits = 0;
+    uint64_t warmSubmitted = warmApi.getLastFrameStats().submitted_draw_commands;
+    const auto warmStart = std::chrono::steady_clock::now();
+    for (size_t rep = 1; rep < reps; rep++)
+    {
+        warmApi.beginFrame();
+        warmApi.replayCommandBuffer(buf);
+        RenderFrameStats stats = warmApi.getLastFrameStats();
+        warmAllocs += stats.descriptor_allocs;
+        warmHits += stats.descriptor_cache_hits;
+        warmSubmitted += stats.submitted_draw_commands;
+    }
+    const double warmNs = elapsedNsPerOp(std::chrono::steady_clock::now() - warmStart,
+                                         distinct * (reps - 1));
+
+    if (coldSubmitted != distinct * reps || warmSubmitted != distinct * reps)
+        return fail(name, "submitted draw counts differ between the two sides");
+    if (coldAllocs != distinct * reps)
+        return fail(name, "fresh replay allocated " + std::to_string(coldAllocs) +
+                            " descriptor sets over " + std::to_string(reps) + " frames");
+    if (warmAllocs != distinct || warmHits != distinct * (reps - 1))
+        return fail(name, "retained replay allocated " + std::to_string(warmAllocs) +
+                            " descriptor sets with " + std::to_string(warmHits) + " hits");
+
+    printHeadToHead("descriptor replay cold", distinct * reps, coldNs,
+                    "descriptor_allocs", coldAllocs);
+    printHeadToHead("descriptor replay warm", distinct * (reps - 1), warmNs,
+                    "descriptor_allocs", warmAllocs);
+    const double deltaPct = coldNs > 0.0 ? (coldNs - warmNs) / coldNs * 100.0 : 0.0;
+    std::cout << "[BENCH] descriptor replay warm vs cold ns/op delta_pct=" << deltaPct << std::endl;
+    delete mesh;
+    return pass(name);
+}
+
 int main(){
     bool ok = true;
     ok &= testPackedKeyFieldPriority();
@@ -664,8 +779,10 @@ int main(){
     ok &= benchRecordDraw(10000);
     ok &= benchBinForwardPlusLights(1000);
     ok &= benchBinForwardPlusLights(10000);
+    ok &= testHeadlessDescriptorCacheAcrossFrames();
     ok &= benchReplayMergedAgainstPerDraw(1024, 200);
     ok &= benchBinningRetainedAgainstOneOff(4096, 100);
+    ok &= benchDescriptorCacheColdAgainstWarm(64, 200);
     std::cout << (ok ? "all perf tests passed" : "perf tests FAILED") << std::endl;
     return ok ? 0 : 1;
 }

@@ -251,6 +251,9 @@ private:
 
     VkDescriptorSet getOrAllocateDescriptorSet(uint32_t frameIndex, TextureHandle texture,
                                                TextureHandle heightmap = INVALID_TEXTURE);
+    void invalidateDrawDescriptorCache();
+    void invalidateDrawDescriptorsForTexture(TextureHandle texture);
+    void refreshForwardPlusDescriptors(uint32_t frameIndex);
     VkDescriptorPool createPerDrawDescriptorPool();
     VkDescriptorSet allocateFromPerDrawPool(uint32_t frameIndex);
     void initializeDescriptorSet(VkDescriptorSet ds, uint32_t frameIndex, TextureHandle texture,
@@ -311,6 +314,7 @@ private:
 
     // Per-draw descriptor pool state (needed before PerThreadCommandPool)
     static constexpr uint32_t SETS_PER_POOL = 512;
+    static constexpr uint32_t POOLS_PRESIZED_PER_SLOT = 2;
     struct PerFrameDescriptorState {
         std::vector<VkDescriptorPool> pools;
         uint32_t current_pool = 0;
@@ -328,7 +332,7 @@ private:
 
         // Per-worker descriptor allocation (avoids contention on shared pools)
         PerFrameDescriptorState descriptor_state[MAX_FRAMES_IN_FLIGHT] = {};
-        std::unordered_map<VulkanDrawDescriptorKey, VkDescriptorSet, VulkanDrawDescriptorKeyHash> texture_cache;
+        std::unordered_map<VulkanDrawDescriptorKey, VkDescriptorSet, VulkanDrawDescriptorKeyHash> texture_cache[MAX_FRAMES_IN_FLIGHT];
 
         PerThreadCommandPool() = default;
         PerThreadCommandPool(PerThreadCommandPool&& o) noexcept
@@ -339,7 +343,7 @@ private:
                 descriptor_state[f] = std::move(o.descriptor_state[f]);
             }
             in_use.store(o.in_use.load(std::memory_order_relaxed), std::memory_order_relaxed);
-            texture_cache = std::move(o.texture_cache);
+            for (int f = 0; f < MAX_FRAMES_IN_FLIGHT; f++) texture_cache[f] = std::move(o.texture_cache[f]);
         }
         PerThreadCommandPool& operator=(PerThreadCommandPool&& o) noexcept {
             for (int f = 0; f < MAX_FRAMES_IN_FLIGHT; f++) {
@@ -348,7 +352,7 @@ private:
                 descriptor_state[f] = std::move(o.descriptor_state[f]);
             }
             in_use.store(o.in_use.load(std::memory_order_relaxed), std::memory_order_relaxed);
-            texture_cache = std::move(o.texture_cache);
+            for (int f = 0; f < MAX_FRAMES_IN_FLIGHT; f++) texture_cache[f] = std::move(o.texture_cache[f]);
             return *this;
         }
         PerThreadCommandPool(const PerThreadCommandPool&) = delete;
@@ -460,7 +464,7 @@ private:
     VkDescriptorPool global_descriptor_pool = VK_NULL_HANDLE;
     std::vector<VkDescriptorSet> descriptor_sets;
 
-    // Per-draw descriptor pools (dynamically growing, reset each frame).
+    // Per-draw descriptor pools, presized up front and retained across frames.
     // Structured as a per-context allocator for future multicore rendering:
     // each parallel recording context can get its own VulkanDescriptorContext
     // to eliminate contention on descriptor allocation.
@@ -470,7 +474,7 @@ private:
     // For multicore rendering, additional contexts can be created per worker thread.
     struct VulkanDescriptorContext {
         PerFrameDescriptorState state[2]; // One per frame in flight
-        std::unordered_map<VulkanDrawDescriptorKey, VkDescriptorSet, VulkanDrawDescriptorKeyHash> texture_cache;
+        std::unordered_map<VulkanDrawDescriptorKey, VkDescriptorSet, VulkanDrawDescriptorKeyHash> texture_cache[2];
         bool limit_warned = false;
 
         void reset(VkDevice device, uint32_t frame_index) {
@@ -480,7 +484,7 @@ private:
             }
             s.current_pool = 0;
             s.sets_allocated_in_pool = 0;
-            texture_cache.clear();
+            texture_cache[frame_index].clear();
         }
     };
 
@@ -488,11 +492,15 @@ private:
     PerFrameDescriptorState frame_descriptor_state[2]; // MAX_FRAMES_IN_FLIGHT
     bool descriptor_limit_warned = false;
 
-    // Cache: texture handle -> VkDescriptorSet (for reuse within a frame).
-    // Kept within-frame on purpose -- per-frame pools are reset in
-    // prepareFrame, which invalidates every set, so cross-frame reuse needs a
-    // persistent-pool layout split (deferred); hits/allocs are counted.
-    std::unordered_map<VulkanDrawDescriptorKey, VkDescriptorSet, VulkanDrawDescriptorKeyHash> texture_descriptor_cache;
+    // Retained descriptor sets, one cache per frame slot. A set writes
+    // the buffers of its own slot (global, light and per-object buffers,
+    // light storage and the Forward+ grid), so sets may only be reused
+    // on the same slot; that slot is fenced before it is recorded again,
+    // which makes retained sets safe to bind in later frames. Pools are
+    // never reset per frame, so a warm frame allocates nothing. Entries
+    // Entries are dropped when a texture is deleted or the shadow map is
+    // recreated; Forward+ bindings are rewritten when a grid buffer grows.
+    std::unordered_map<VulkanDrawDescriptorKey, VkDescriptorSet, VulkanDrawDescriptorKeyHash> texture_descriptor_cache[MAX_FRAMES_IN_FLIGHT];
 
     // Uniform buffers (per-frame) - GlobalUBO at binding 0
     std::vector<VkBuffer> uniform_buffers;
