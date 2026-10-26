@@ -1,7 +1,7 @@
 #include "EditorApp.hpp"
 #include "EditorIcons.hpp"
 #include "ImGui/ImGuiManager.hpp"
-#include "UI/RmlUiManager.h"
+#include "UI/RmlUiManager.h" // in-game (scene) HUD only; editor UI is ImGui
 #include "Console/Console.hpp"
 #include "Console/ConVar.hpp"
 #include "Debug/DebugDraw.hpp"
@@ -72,50 +72,7 @@ namespace
         return "";
     }
 
-    const char* rmlLaunchModeLabel(PIELaunchMode mode)
-    {
-        switch (mode)
-        {
-        case PIELaunchMode::SelectedViewport: return "Selected Viewport";
-        case PIELaunchMode::NewEditorWindow: return "New Editor Window";
-        case PIELaunchMode::VRPreview: return "VR Preview";
-        case PIELaunchMode::StandaloneGame: return "Standalone Game";
-        case PIELaunchMode::Simulate: return "Simulate";
-        }
-        return "Selected Viewport";
-    }
 
-    std::string buildRmlPlayLabel(const EditorState& state)
-    {
-        switch (state.pie_launch_mode)
-        {
-        case PIELaunchMode::SelectedViewport:
-            if (state.network_pie.net_mode != PIENetMode::Standalone && state.network_pie.num_players > 1)
-            {
-                const char* mode_short = (state.network_pie.net_mode == PIENetMode::ListenServer)
-                    ? "Listen"
-                    : "Dedicated";
-                return "Play " + std::to_string(state.network_pie.num_players) + "P " + mode_short;
-            }
-            if (state.network_pie.net_mode != PIENetMode::Standalone)
-            {
-                const char* mode_short = (state.network_pie.net_mode == PIENetMode::ListenServer)
-                    ? "Listen"
-                    : "Dedicated";
-                return std::string("Play ") + mode_short;
-            }
-            return "Play";
-        case PIELaunchMode::NewEditorWindow:
-            return "Window";
-        case PIELaunchMode::VRPreview:
-            return "VR";
-        case PIELaunchMode::StandaloneGame:
-            return "Standalone";
-        case PIELaunchMode::Simulate:
-            return "Simulate";
-        }
-        return "Play";
-    }
 
     std::filesystem::path getEditorCVarConfigPath()
     {
@@ -615,10 +572,10 @@ bool EditorApp::initialize(RenderAPIType api_type)
     if (m_editor_config && m_editor_config->ui_scale != 1.0f)
         applyUIScale(m_editor_config->ui_scale);
 
-    // Initialize RmlUi
+    // Initialize RmlUi for the in-game (scene) HUD only. Editor chrome is ImGui.
     if (!RmlUiManager::get().initialize(m_app.getWindow(), render_api, api_type))
     {
-        LOG_ENGINE_WARN("Failed to initialize RmlUi - continuing without UI");
+        LOG_ENGINE_WARN("Failed to initialize RmlUi - continuing without in-game HUD");
     }
 
     // Disable built-in console overlay since we have our own panel
@@ -656,6 +613,19 @@ bool EditorApp::initialize(RenderAPIType api_type)
     m_toolbar.callbacks.on_stop   = [this]() { stopPlay(); };
     m_toolbar.callbacks.on_eject  = [this]() { ejectFromPlay(); };
     m_toolbar.callbacks.on_return = [this]() { returnToPlay(); };
+    m_toolbar.callbacks.on_quick_launch_vr = [this]() {
+        if (m_state.isSimulationActive()) return;
+        m_state.pie_launch_mode = PIELaunchMode::VRPreview;
+        beginPlay();
+    };
+    m_toolbar.callbacks.on_refresh_openxr = []() {
+        XR::OpenXRSystem::get().shutdown();
+        XR::OpenXRSystem::get().initialize();
+    };
+    m_toolbar.callbacks.on_save = [this]() {
+        if (!m_state.isSimulationActive()) saveLevel();
+    };
+    m_toolbar.callbacks.on_settings = [this]() { m_show_editor_settings = true; };
 
     // Check if project has a game module DLL for network PIE
     {
@@ -849,183 +819,6 @@ bool EditorApp::initialize(RenderAPIType api_type)
     // Bind plugin manager panel to the host.
     m_plugin_manager_panel.bind(&m_plugin_host);
 
-    if (RmlUiManager::get().isInitialized())
-    {
-        EditorRmlGui::Callbacks callbacks;
-        callbacks.on_new_level = [this]() {
-            if (!m_state.isSimulationActive())
-                newLevel();
-        };
-        callbacks.on_open_level = [this]() {
-            if (!m_state.isSimulationActive())
-                requestOpenLevelDialog();
-        };
-        callbacks.on_save_level = [this]() {
-            if (!m_state.isSimulationActive())
-                saveLevel();
-        };
-        callbacks.on_save_level_as = [this]() {
-            if (!m_state.isSimulationActive())
-                requestSaveLevelAsDialog();
-        };
-        callbacks.on_package_project = [this]() {
-            if (!m_state.isSimulationActive())
-                requestPackageProjectDialog();
-        };
-        callbacks.on_undo = [this]() {
-            if (!m_state.isSimulationActive() && m_undo.canUndo())
-            {
-                const LevelData& snapshot = m_undo.undo();
-                restoreFromSnapshot(snapshot);
-            }
-        };
-        callbacks.on_redo = [this]() {
-            if (!m_state.isSimulationActive() && m_undo.canRedo())
-            {
-                const LevelData& snapshot = m_undo.redo();
-                restoreFromSnapshot(snapshot);
-            }
-        };
-        callbacks.on_copy = [this]() {
-            if (!m_state.isSimulationActive() && m_hierarchy.selected_entity != entt::null)
-                copySelectedEntity();
-        };
-        callbacks.on_paste = [this]() {
-            if (!m_state.isSimulationActive() && m_entity_clipboard.has_value())
-                pasteEntity();
-        };
-        callbacks.on_duplicate = [this]() {
-            if (!m_state.isSimulationActive() && m_hierarchy.selected_entity != entt::null)
-            {
-                m_undo.pushState(buildLevelDataFromECS(), "duplicate entity");
-                m_hierarchy.duplicateEntity(m_world.registry, m_hierarchy.selected_entity);
-                m_renderer.markBVHDirty();
-                m_state.unsaved_changes = true;
-            }
-        };
-        callbacks.on_delete = [this]() {
-            if (!m_state.isSimulationActive() && m_hierarchy.selected_entity != entt::null)
-            {
-                m_undo.pushState(buildLevelDataFromECS(), "delete entity");
-                m_inspector.mesh_path_cache.erase(m_hierarchy.selected_entity);
-                m_world.registry.destroy(m_hierarchy.selected_entity);
-                m_hierarchy.selected_entity = entt::null;
-                m_renderer.markBVHDirty();
-                m_state.unsaved_changes = true;
-            }
-        };
-        callbacks.on_settings = [this]() { m_show_editor_settings = true; };
-        callbacks.on_quit = [this]() {
-            if (m_state.isSimulationActive())
-                stopPlay();
-            m_running = false;
-        };
-        callbacks.on_play = [this]() {
-            if (!m_state.isSimulationActive())
-                beginPlay();
-        };
-        callbacks.on_pause = [this]() { pausePlay(); };
-        callbacks.on_resume = [this]() { resumePlay(); };
-        callbacks.on_stop = [this]() {
-            if (m_state.isSimulationActive())
-                stopPlay();
-        };
-        callbacks.on_eject = [this]() {
-            if (!m_external_pie_active)
-                ejectFromPlay();
-        };
-        callbacks.on_return = [this]() {
-            if (!m_external_pie_active)
-                returnToPlay();
-        };
-        callbacks.on_quick_launch_vr = [this]() {
-            if (m_state.isSimulationActive())
-                return;
-            m_state.pie_launch_mode = PIELaunchMode::VRPreview;
-            beginPlay();
-        };
-        callbacks.on_refresh_openxr = []() {
-            XR::OpenXRSystem::get().shutdown();
-            XR::OpenXRSystem::get().initialize();
-        };
-        callbacks.on_set_launch_mode = [this](const std::string& mode) {
-            if (m_state.isSimulationActive())
-                return;
-            if (mode == "selected_viewport")
-                m_state.pie_launch_mode = PIELaunchMode::SelectedViewport;
-            else if (mode == "new_editor_window")
-                m_state.pie_launch_mode = PIELaunchMode::NewEditorWindow;
-            else if (mode == "vr_preview")
-                m_state.pie_launch_mode = PIELaunchMode::VRPreview;
-            else if (mode == "standalone_game")
-                m_state.pie_launch_mode = PIELaunchMode::StandaloneGame;
-            else if (mode == "simulate")
-                m_state.pie_launch_mode = PIELaunchMode::Simulate;
-        };
-        callbacks.on_set_spawn_location = [this](const std::string& location) {
-            if (m_state.isSimulationActive())
-                return;
-            if (location == "current_camera")
-                m_state.pie_spawn_location = PIESpawnLocation::CurrentCameraLocation;
-            else if (location == "default_player_start")
-                m_state.pie_spawn_location = PIESpawnLocation::DefaultPlayerStart;
-        };
-        callbacks.on_set_net_mode = [this](const std::string& mode) {
-            if (m_state.isSimulationActive())
-                return;
-            if (mode == "standalone")
-                m_state.network_pie.net_mode = PIENetMode::Standalone;
-            else if (mode == "listen_server")
-                m_state.network_pie.net_mode = PIENetMode::ListenServer;
-            else if (mode == "dedicated_server")
-                m_state.network_pie.net_mode = PIENetMode::DedicatedServer;
-        };
-        callbacks.on_set_run_mode = [this](const std::string& mode) {
-            if (m_state.isSimulationActive())
-                return;
-            if (m_state.network_pie.net_mode == PIENetMode::Standalone)
-                return;
-            if (mode == "in_editor")
-                m_state.network_pie.run_mode = PIERunMode::InEditor;
-            else if (mode == "separate_windows")
-                m_state.network_pie.run_mode = PIERunMode::SeparateWindows;
-        };
-        callbacks.on_adjust_players = [this](int delta) {
-            if (m_state.isSimulationActive())
-                return;
-            if (m_state.network_pie.net_mode == PIENetMode::Standalone)
-                return;
-            m_state.network_pie.num_players = std::clamp(m_state.network_pie.num_players + delta, 1, 4);
-        };
-        callbacks.on_adjust_port = [this](int delta) {
-            if (m_state.isSimulationActive())
-                return;
-            if (m_state.network_pie.net_mode == PIENetMode::Standalone)
-                return;
-            const int port = std::clamp(static_cast<int>(m_state.network_pie.server_port) + delta, 1024, 65535);
-            m_state.network_pie.server_port = static_cast<uint16_t>(port);
-        };
-        callbacks.on_translate = [this]() { m_state.transform_mode = EditorState::TransformMode::Translate; };
-        callbacks.on_rotate = [this]() { m_state.transform_mode = EditorState::TransformMode::Rotate; };
-        callbacks.on_scale = [this]() { m_state.transform_mode = EditorState::TransformMode::Scale; };
-        callbacks.on_toggle_snap = [this]() { m_state.snap_enabled = !m_state.snap_enabled; };
-        callbacks.on_toggle_grid = [this]() { m_state.show_grid = !m_state.show_grid; };
-        callbacks.on_toggle_viewport = [this]() { m_show_viewport = !m_show_viewport; };
-        callbacks.on_toggle_toolbar = [this]() { m_show_toolbar = !m_show_toolbar; };
-        callbacks.on_toggle_hierarchy = [this]() { m_show_hierarchy = !m_show_hierarchy; };
-        callbacks.on_toggle_inspector = [this]() { m_show_inspector = !m_show_inspector; };
-        callbacks.on_toggle_level_settings = [this]() { m_show_level_settings = !m_show_level_settings; };
-        callbacks.on_toggle_content_browser = [this]() { m_show_content_browser = !m_show_content_browser; };
-        callbacks.on_toggle_console = [this]() { m_show_console = !m_show_console; };
-        callbacks.on_toggle_model_preview = [this]() { m_show_model_preview = !m_show_model_preview; };
-        callbacks.on_toggle_status_bar = [this]() { m_show_status_bar = !m_show_status_bar; };
-        callbacks.on_toggle_navmesh = [this]() { m_show_navmesh_panel = !m_show_navmesh_panel; };
-        callbacks.on_toggle_plugin_manager = [this]() { m_show_plugin_manager = !m_show_plugin_manager; };
-        callbacks.on_toggle_all_ui = [this]() { m_show_ui = !m_show_ui; };
-        callbacks.on_toggle_physics_debug = [this]() { m_show_physics_debug = !m_show_physics_debug; };
-        callbacks.on_toggle_performance = [this]() { m_show_performance_monitor = !m_show_performance_monitor; };
-        m_rml_gui.initialize(std::move(callbacks));
-    }
 
     SDL_SetWindowRelativeMouseMode(m_app.getWindow(), false);
 
@@ -1225,6 +1018,30 @@ void EditorApp::renderPluginPanels()
     }
 }
 
+void EditorApp::syncChromeState()
+{
+    IRenderAPI* render_api = m_app.getRenderAPI();
+    const RenderFrameStats render_stats = render_api ? render_api->getLastFrameStats() : RenderFrameStats{};
+    m_toolbar.external_pie_active = m_external_pie_active;
+    const XR::OpenXRStatus& xr_status = XR::OpenXRSystem::get().getStatus();
+    m_toolbar.xr_launch_label = (xr_status.hmd_available && !xr_status.system_name.empty())
+        ? "Meta Quest Link (Ready)" : "Meta Quest Link";
+    m_toolbar.xr_runtime_label = xr_status.runtime_name.empty()
+        ? "Runtime: not initialized" : ("Runtime: " + xr_status.runtime_name);
+    m_toolbar.xr_hmd_label = xr_status.system_name.empty()
+        ? "HMD: unavailable" : ("HMD: " + xr_status.system_name);
+    m_toolbar.xr_error = xr_status.last_error;
+
+    m_status_bar.network_pie_active = m_network_pie_active;
+    m_status_bar.spawned_processes = m_pie_processes.countRunning();
+    m_status_bar.external_pie_active = m_external_pie_active;
+    m_status_bar.backend_name = render_stats.backend_name ? render_stats.backend_name
+        : (render_api ? render_api->getAPIName() : "");
+    m_status_bar.project_name = m_project_manager.isLoaded() ? m_project_manager.getDescriptor().name : std::string();
+    m_status_bar.gpu_ms_valid = render_stats.gpu_frame_ms_valid;
+    m_status_bar.gpu_ms = render_stats.gpu_frame_ms;
+}
+
 void EditorApp::run()
 {
     Uint64 last_ticks = SDL_GetTicks();
@@ -1419,83 +1236,7 @@ void EditorApp::run()
             }
         }
 
-        if (m_rml_gui.isReady())
-        {
-            const RenderFrameStats render_stats = render_api->getLastFrameStats();
-            EditorRmlGui::FrameState rml_state;
-            rml_state.visible = m_show_ui;
-            rml_state.can_edit = !m_state.isSimulationActive();
-            rml_state.can_undo = !m_state.isSimulationActive() && m_undo.canUndo();
-            rml_state.can_redo = !m_state.isSimulationActive() && m_undo.canRedo();
-            rml_state.can_copy = !m_state.isSimulationActive() && m_hierarchy.selected_entity != entt::null;
-            rml_state.can_paste = !m_state.isSimulationActive() && m_entity_clipboard.has_value();
-            rml_state.can_duplicate = rml_state.can_copy;
-            rml_state.can_delete = rml_state.can_copy;
-            rml_state.simulation_active = m_state.isSimulationActive();
-            rml_state.paused = m_state.play_mode == PlayMode::Paused;
-            rml_state.ejected = m_state.play_mode == PlayMode::Ejected;
-            rml_state.unsaved_changes = m_state.unsaved_changes;
-            rml_state.external_pie_active = m_external_pie_active;
-            rml_state.network_pie_active = m_network_pie_active;
-            rml_state.has_game_module = m_toolbar.has_game_module;
-            rml_state.show_viewport = m_show_viewport;
-            rml_state.show_toolbar = m_show_toolbar;
-            rml_state.show_hierarchy = m_show_hierarchy;
-            rml_state.show_inspector = m_show_inspector;
-            rml_state.show_level_settings = m_show_level_settings;
-            rml_state.show_content_browser = m_show_content_browser;
-            rml_state.show_console = m_show_console;
-            rml_state.show_model_preview = m_show_model_preview;
-            rml_state.show_status_bar = m_show_status_bar;
-            rml_state.show_navmesh = m_show_navmesh_panel;
-            rml_state.show_plugin_manager = m_show_plugin_manager;
-            rml_state.show_ui = m_show_ui;
-            rml_state.show_physics_debug = m_show_physics_debug;
-            rml_state.show_performance_monitor = m_show_performance_monitor;
-            rml_state.transform_translate = m_state.transform_mode == EditorState::TransformMode::Translate;
-            rml_state.transform_rotate = m_state.transform_mode == EditorState::TransformMode::Rotate;
-            rml_state.transform_scale = m_state.transform_mode == EditorState::TransformMode::Scale;
-            rml_state.snap_enabled = m_state.snap_enabled;
-            rml_state.grid_enabled = m_state.show_grid;
-            rml_state.spawned_processes = m_pie_processes.countRunning();
-            rml_state.fps = m_state.fps;
-            rml_state.gpu_ms_valid = render_stats.gpu_frame_ms_valid;
-            rml_state.gpu_ms = render_stats.gpu_frame_ms;
-            rml_state.total_entities = m_state.total_entities;
-            rml_state.visible_entities = m_state.visible_entities;
-            rml_state.draw_calls = m_state.draw_calls;
-            rml_state.backend_name = render_stats.backend_name ? render_stats.backend_name : render_api->getAPIName();
-            rml_state.project_name = m_project_manager.isLoaded() ? m_project_manager.getDescriptor().name : std::string();
-            rml_state.current_save_path = m_current_save_path;
-            rml_state.play_label = buildRmlPlayLabel(m_state);
-            rml_state.launch_mode_label = rmlLaunchModeLabel(m_state.pie_launch_mode);
-            rml_state.launch_selected_viewport = m_state.pie_launch_mode == PIELaunchMode::SelectedViewport;
-            rml_state.launch_new_editor_window = m_state.pie_launch_mode == PIELaunchMode::NewEditorWindow;
-            rml_state.launch_vr_preview = m_state.pie_launch_mode == PIELaunchMode::VRPreview;
-            rml_state.launch_standalone_game = m_state.pie_launch_mode == PIELaunchMode::StandaloneGame;
-            rml_state.launch_simulate = m_state.pie_launch_mode == PIELaunchMode::Simulate;
-            rml_state.spawn_current_camera = m_state.pie_spawn_location == PIESpawnLocation::CurrentCameraLocation;
-            rml_state.spawn_default_player_start = m_state.pie_spawn_location == PIESpawnLocation::DefaultPlayerStart;
-            rml_state.net_standalone = m_state.network_pie.net_mode == PIENetMode::Standalone;
-            rml_state.net_listen_server = m_state.network_pie.net_mode == PIENetMode::ListenServer;
-            rml_state.net_dedicated_server = m_state.network_pie.net_mode == PIENetMode::DedicatedServer;
-            rml_state.run_in_editor = m_state.network_pie.run_mode == PIERunMode::InEditor;
-            rml_state.run_separate_windows = m_state.network_pie.run_mode == PIERunMode::SeparateWindows;
-            rml_state.network_players = m_state.network_pie.num_players;
-            rml_state.network_port = static_cast<int>(m_state.network_pie.server_port);
-            const XR::OpenXRStatus& xr_status = XR::OpenXRSystem::get().getStatus();
-            rml_state.xr_launch_label = (xr_status.hmd_available && !xr_status.system_name.empty())
-                ? "Meta Quest Link (Ready)"
-                : "Meta Quest Link";
-            rml_state.xr_runtime_label = xr_status.runtime_name.empty()
-                ? "Runtime: not initialized"
-                : ("Runtime: " + xr_status.runtime_name);
-            rml_state.xr_hmd_label = xr_status.system_name.empty()
-                ? "HMD: unavailable"
-                : ("HMD: " + xr_status.system_name);
-            rml_state.xr_error = xr_status.last_error;
-            m_rml_gui.update(rml_state);
-        }
+        syncChromeState();
 
         // --- Phase 2: Build ImGui UI ---
         {
@@ -1508,6 +1249,8 @@ void EditorApp::run()
                 RmlUiManager::get().beginFrame();
             }
 
+            renderTitleBar();
+            renderMainToolbar();
             renderDockspace();
 
             if (m_show_ui)
@@ -1613,12 +1356,8 @@ void EditorApp::run()
             m_lod_settings_panel.draw();
 
             // Status bar (fixed at bottom)
-            if (m_show_status_bar && !m_rml_gui.isReady())
-            {
-                m_status_bar.network_pie_active = m_network_pie_active;
-                m_status_bar.spawned_processes = m_pie_processes.countRunning();
+            if (m_show_status_bar)
                 m_status_bar.draw(m_state);
-            }
 
             renderOpenDialog();
             renderSaveAsDialog();
@@ -1805,7 +1544,6 @@ void EditorApp::shutdown()
     m_world.registry.clear();
     Threading::JobSystem::get().shutdown();
     Console::get().shutdown();
-    m_rml_gui.shutdown();
     RmlUiManager::get().shutdown();
     ImGuiManager::get().shutdown();
     XR::OpenXRSystem::get().shutdown();
@@ -2543,8 +2281,6 @@ void EditorApp::processEvents()
     while (SDL_PollEvent(&event))
     {
         ImGuiManager::get().processEvent(&event);
-        if (m_rml_gui.isReady())
-            RmlUiManager::get().processEditorEvent(event);
 
         switch (event.type)
         {
@@ -2843,6 +2579,97 @@ void EditorApp::processEvents()
 // Dockspace, menus, dialogs (mostly unchanged, with play-mode guards)
 // ─────────────────────────────────────────────────────────────────────────────
 
+void EditorApp::renderTitleBar()
+{
+    // Fixed menu/title row (Ferrite-style): a non-dockable, non-persisted
+    // window pinned to the top of the main viewport.
+    ImGuiViewport* viewport = ImGui::GetMainViewport();
+    m_title_bar_height = ImGui::GetFrameHeight();
+
+    ImGui::SetNextWindowPos(viewport->Pos);
+    ImGui::SetNextWindowSize(ImVec2(viewport->Size.x, m_title_bar_height));
+    ImGui::SetNextWindowViewport(viewport->ID);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+    ImGui::PushStyleColor(ImGuiCol_MenuBarBg, ImVec4(0.10f, 0.10f, 0.10f, 1.0f));
+    ImGui::Begin("##TitleBar", nullptr,
+        ImGuiWindowFlags_MenuBar | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoTitleBar |
+        ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
+        ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus |
+        ImGuiWindowFlags_NoSavedSettings);
+    ImGui::PopStyleVar(3);
+    ImGui::PopStyleColor();
+    renderMenuBar();
+    ImGui::End();
+}
+
+void EditorApp::renderMainToolbar()
+{
+    // Fixed main toolbar below the title bar and above the dockspace /
+    // viewport (Ferrite-style): Save/Undo/Redo on the left, the Play
+    // cluster and Settings right-aligned. Never docked or persisted.
+    m_top_chrome_height = m_title_bar_height;
+    if (!m_show_main_toolbar)
+        return;
+
+    ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const float toolbar_height = std::max(40.0f, ImGui::GetFrameHeight() + 12.0f);
+    m_top_chrome_height += toolbar_height;
+
+    ImGui::SetNextWindowPos(ImVec2(viewport->Pos.x, viewport->Pos.y + m_title_bar_height));
+    ImGui::SetNextWindowSize(ImVec2(viewport->Size.x, toolbar_height));
+    ImGui::SetNextWindowViewport(viewport->ID);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(6.0f, 6.0f));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.12f, 0.12f, 0.12f, 1.0f));
+    ImGui::Begin("##MainToolbar", nullptr,
+        ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoTitleBar |
+        ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
+        ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus |
+        ImGuiWindowFlags_NoSavedSettings);
+    ImGui::PopStyleVar(3);
+    ImGui::PopStyleColor();
+
+    const bool can_edit = !m_state.isSimulationActive();
+
+    // Left cluster: Save / Undo / Redo.
+    if (!can_edit) ImGui::BeginDisabled();
+    if (ImGui::Button("Save", ImVec2(0, 32)) && m_toolbar.callbacks.on_save)
+        m_toolbar.callbacks.on_save();
+    if (!can_edit) ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (!can_edit || !m_undo.canUndo()) ImGui::BeginDisabled();
+    if (ImGui::Button("Undo", ImVec2(0, 32)))
+    {
+        const LevelData& snapshot = m_undo.undo();
+        restoreFromSnapshot(snapshot);
+    }
+    if (!can_edit || !m_undo.canUndo()) ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (!can_edit || !m_undo.canRedo()) ImGui::BeginDisabled();
+    if (ImGui::Button("Redo", ImVec2(0, 32)))
+    {
+        const LevelData& snapshot = m_undo.redo();
+        restoreFromSnapshot(snapshot);
+    }
+    if (!can_edit || !m_undo.canRedo()) ImGui::EndDisabled();
+
+    // Right cluster: Play controls + Settings, right-aligned.
+    const float cluster_width = 500.0f;
+    ImGui::SameLine(std::max(ImGui::GetCursorPosX() + 12.0f,
+                             ImGui::GetWindowWidth() - 6.0f - cluster_width));
+    m_toolbar.drawPlayControls(m_state);
+    ImGui::SameLine();
+    if (ImGui::Button(ICON_FA_GEAR " Settings", ImVec2(0, 32)) && m_toolbar.callbacks.on_settings)
+        m_toolbar.callbacks.on_settings();
+
+    ImGui::End();
+}
+
 void EditorApp::renderDockspace()
 {
     ImGuiWindowFlags dockspace_flags =
@@ -2855,18 +2682,13 @@ void EditorApp::renderDockspace()
         ImGuiWindowFlags_NoNavFocus;
 
     ImGuiViewport* viewport = ImGui::GetMainViewport();
-    const bool use_rml_chrome = m_rml_gui.isReady() && m_show_ui;
-    if (!use_rml_chrome)
-        dockspace_flags |= ImGuiWindowFlags_MenuBar;
 
-    // Account for status bar at bottom
-    const float rml_topbar_height = use_rml_chrome ? 76.0f : 0.0f;
-    const float status_bar_height = (use_rml_chrome && m_show_status_bar)
-        ? 24.0f
-        : (m_show_status_bar ? (ImGui::GetFrameHeight() + ImGui::GetStyle().WindowPadding.y * 2.0f) : 0.0f);
+    // Account for the ImGui status bar at the bottom
+    const float status_bar_height = m_show_status_bar
+        ? (ImGui::GetFrameHeight() + ImGui::GetStyle().WindowPadding.y * 2.0f) : 0.0f;
 
-    ImGui::SetNextWindowPos(ImVec2(viewport->Pos.x, viewport->Pos.y + rml_topbar_height));
-    ImGui::SetNextWindowSize(ImVec2(viewport->Size.x, std::max(0.0f, viewport->Size.y - rml_topbar_height - status_bar_height)));
+    ImGui::SetNextWindowPos(ImVec2(viewport->Pos.x, viewport->Pos.y + m_top_chrome_height));
+    ImGui::SetNextWindowSize(ImVec2(viewport->Size.x, std::max(0.0f, viewport->Size.y - m_top_chrome_height - status_bar_height)));
     ImGui::SetNextWindowViewport(viewport->ID);
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
@@ -2885,7 +2707,7 @@ void EditorApp::renderDockspace()
     {
         ImGui::DockBuilderAddNode(dockspace_id, ImGuiDockNodeFlags_DockSpace);
         ImGui::DockBuilderSetNodeSize(dockspace_id,
-            ImVec2(viewport->Size.x, std::max(0.0f, viewport->Size.y - rml_topbar_height - status_bar_height)));
+            ImVec2(viewport->Size.x, std::max(0.0f, viewport->Size.y - m_top_chrome_height - status_bar_height)));
 
         ImGuiID dock_main = dockspace_id;
 
@@ -2913,9 +2735,6 @@ void EditorApp::renderDockspace()
     }
 
     ImGui::DockSpace(dockspace_id, ImVec2(0.0f, 0.0f));
-
-    if (!use_rml_chrome)
-        renderMenuBar();
 
     ImGui::End();
 }
@@ -3065,6 +2884,7 @@ void EditorApp::renderMenuBar()
         {
             ImGui::MenuItem("Viewport",        nullptr, &m_show_viewport);
             ImGui::MenuItem("Viewport Toolbar", nullptr, &m_show_toolbar);
+            ImGui::MenuItem("Play Toolbar", nullptr, &m_show_main_toolbar);
             ImGui::MenuItem("Hierarchy",       nullptr, &m_show_hierarchy);
             ImGui::MenuItem("Inspector",       nullptr, &m_show_inspector);
             ImGui::MenuItem("Level Settings",  nullptr, &m_show_level_settings);
@@ -3109,8 +2929,20 @@ void EditorApp::renderMenuBar()
             ImGui::EndMenu();
         }
 
+        if (ImGui::BeginMenu("Play"))
+        {
+            m_toolbar.drawPlayMenuItems(m_state);
+            ImGui::EndMenu();
+        }
+
         // Plugin-contributed main-menu items (File/Import/..., Tools/..., etc.)
         renderPluginMenus();
+
+        if (m_project_manager.isLoaded())
+        {
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 20.0f);
+            ImGui::TextDisabled("%s", m_project_manager.getDescriptor().name.c_str());
+        }
 
         // Display current file in the menu bar (with dirty indicator)
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 20.0f);

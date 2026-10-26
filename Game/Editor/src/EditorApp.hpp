@@ -40,7 +40,7 @@
 #include "PIEClientInstance.hpp"
 #include "PrefabEditor/PrefabEditorManager.hpp"
 #include "EditorPerformanceMonitor.hpp"
-#include "EditorRmlGui.hpp"
+
 
 class EditorApp
 {
@@ -80,6 +80,7 @@ private:
     bool m_show_inspector      = true;
     bool m_show_level_settings = true;
     bool m_show_toolbar        = true;
+    bool m_show_main_toolbar   = true;
     bool m_show_console        = true;
     bool m_show_content_browser = true;
     bool m_show_status_bar     = true;
@@ -119,6 +120,9 @@ private:
     bool m_show_open_dialog    = false;
     bool m_show_save_as_dialog = false;
 
+    float m_title_bar_height = 0.0f;
+    float m_top_chrome_height = 0.0f;
+
     // Panels
     SceneHierarchyPanel  m_hierarchy;
     InspectorPanel       m_inspector;
@@ -128,7 +132,6 @@ private:
     ContentBrowserPanel  m_content_browser;
     ViewportPanel        m_viewport;
     StatusBarPanel       m_status_bar;
-    EditorRmlGui         m_rml_gui;
     NavMeshPanel         m_navmesh_panel;
     PhysicsDebugPanel    m_physics_debug_panel;
     PerformanceMonitorPanel m_performance_monitor_panel;
@@ -201,6 +204,9 @@ private:
     void processEvents();
     void renderDockspace();
     void renderMenuBar();
+    void renderTitleBar();
+    void renderMainToolbar();
+    void syncChromeState();
     void requestOpenLevelDialog();
     void requestSaveLevelAsDialog();
     void requestPackageProjectDialog();

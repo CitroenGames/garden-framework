@@ -33,7 +33,7 @@ GizmoResult ViewportPanel::draw(ImTextureID scene_texture, EditorState& state,
     // --- Toolbar strip (inside the viewport window) ---
     if (toolbar && show_toolbar && *show_toolbar)
     {
-        float toolbar_height = ImGui::GetFrameHeight() + 8.0f;
+        float toolbar_height = 40.0f;
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8, 4));
         ImGui::BeginChild("##ToolbarStrip", ImVec2(0, toolbar_height), false,
                           ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);

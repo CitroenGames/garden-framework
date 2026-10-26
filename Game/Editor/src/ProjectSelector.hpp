@@ -3,7 +3,7 @@
 #include <string>
 
 // Lightweight project selector stage.
-// Uses SDL3 + SDL_Renderer + RmlUi (no Vulkan/D3D12/etc).
+// Uses SDL3 + SDL_Renderer + Dear ImGui (no Vulkan/D3D12/etc).
 // Returns the selected .garden project path, or empty string if user quit.
 class ProjectSelector
 {
