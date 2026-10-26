@@ -151,7 +151,7 @@ inline std::optional<ForwardPlusTileBounds> lightTileBounds(const glm::vec3& pos
                                                             uint32_t width, uint32_t height, uint32_t tilesX,
                                                             uint32_t tilesY, uint32_t tileSize, bool flipY)
 {
-    if (width == 0 || height == 0 || tilesX == 0 || tilesY == 0 || radius <= 0.0f)
+    if (width == 0 || height == 0 || tilesX == 0 || tilesY == 0 || !(radius > 0.0f))
         return std::nullopt;
 
     auto fullScreen = [&]() {

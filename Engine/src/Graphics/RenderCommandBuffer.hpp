@@ -364,7 +364,11 @@ public:
     // submission order.
     void sortWithViewDepth(const glm::mat4& viewMatrix, SortStats* stats = nullptr)
     {
-        if (m_commands.empty()) return;
+        if (m_commands.empty())
+        {
+            if (stats) fillSortStats(*stats, 0, 0);
+            return;
+        }
         std::vector<float> depths(m_commands.size());
         float minD = 0.0f, maxD = 0.0f;
         for (size_t i = 0; i < m_commands.size(); i++)
