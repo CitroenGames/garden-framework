@@ -3,7 +3,10 @@
 #include "InputManager.hpp"
 #include <memory>
 
-// Base class for any object that wants to receive input
+// Base class for any object that wants to receive input.
+// Reflection exemption (plan 2.6): polymorphic base with virtual bindings
+// and a shared_ptr<InputManager>, not a plain ECS data component. It is
+// intentionally NOT reflected or serialized.
 class InputComponent
 {
 protected:

@@ -41,7 +41,7 @@ public:
 
     // --- Layer management ---
 
-    int addLayer(BlendMode mode = BlendMode::Override);
+    int addLayer(AnimationBlendMode mode = AnimationBlendMode::Override);
     AnimationLayer& getLayer(int index);
     const AnimationLayer& getLayer(int index) const;
     void removeLayer(int index);

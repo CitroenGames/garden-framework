@@ -84,7 +84,8 @@ namespace
         switch (type)
         {
         case EPropertyType::Float: return *static_cast<const float*>(ptr);
-        case EPropertyType::Int: return *static_cast<const int*>(ptr);
+        case EPropertyType::Double: return *static_cast<const double*>(ptr);
+        case EPropertyType::Int: return readIntStorage(ptr, size);
         case EPropertyType::Bool: return *static_cast<const bool*>(ptr);
         case EPropertyType::EntityRef: return guidToString(*static_cast<const EntityGuid*>(ptr));
         case EPropertyType::String:
@@ -122,6 +123,7 @@ namespace
         switch (type)
         {
         case EPropertyType::Float: return value.is_number();
+        case EPropertyType::Double: return value.is_number();
         case EPropertyType::Int: return value.is_number_integer();
         case EPropertyType::Bool: return value.is_boolean();
         case EPropertyType::EntityRef:
@@ -167,9 +169,12 @@ namespace
         case EPropertyType::Float:
             if (!value.is_number()) return false;
             *static_cast<float*>(ptr) = value.get<float>(); return true;
+        case EPropertyType::Double:
+            if (!value.is_number()) return false;
+            *static_cast<double*>(ptr) = value.get<double>(); return true;
         case EPropertyType::Int:
             if (!value.is_number_integer()) return false;
-            *static_cast<int*>(ptr) = value.get<int>(); return true;
+            writeIntStorage(ptr, size, value.get<int>()); return true;
         case EPropertyType::Bool:
             if (!value.is_boolean()) return false;
             *static_cast<bool*>(ptr) = value.get<bool>(); return true;
@@ -295,6 +300,7 @@ namespace ReflectionPropertyOps
         case EPropertyType::Enum:      return EPropertyWidget::Enum;
         case EPropertyType::EntityRef: return EPropertyWidget::EntityRef;
         case EPropertyType::Entity:    return EPropertyWidget::EntityRef;
+        case EPropertyType::Double:    return EPropertyWidget::ReadOnly;
         default:                       return EPropertyWidget::ReadOnly;
         }
     }

@@ -3,8 +3,11 @@
 #include "EngineExport.h"
 #include "Reflection/Reflector.hpp"
 
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <random>
 #include <string>
 
 // Stable 128-bit entity identity (entity_lifecycle.md §2). {0,0} = null.
@@ -107,3 +110,58 @@ struct IdentityComponent
             .visible().tooltip("Stable entity GUID (hi-lo hex)").category("Identity");
     }
 };
+
+// GUID of an entity, or a null ref when it has no IdentityComponent.
+inline EntityRef entityRefOf(const entt::registry& r, entt::entity e)
+{
+    if (e == entt::null || !r.valid(e))
+        return EntityRef{};
+    const auto* id = r.try_get<IdentityComponent>(e);
+    return id ? EntityRef{id->guid} : EntityRef{};
+}
+
+inline EntityGuid generateEntityGuid()
+{
+    static std::atomic<uint64_t> state{[] {
+        std::random_device rd;
+        uint64_t s = (static_cast<uint64_t>(rd()) << 32) ^ rd();
+        s ^= static_cast<uint64_t>(
+            std::chrono::steady_clock::now().time_since_epoch().count());
+        return s != 0 ? s : 0x9e3779b97f4a7c15ull;
+    }()};
+    uint64_t local = state.fetch_add(0x9e3779b97f4a7c15ull, std::memory_order_relaxed);
+    EntityGuid guid{};
+    do
+    {
+        guid.hi = splitmix64Next(local);
+        guid.lo = splitmix64Next(local);
+        if (guid.isNull())
+            guid.lo = 1;
+    } while (guid.isNull());
+    return guid;
+}
+
+// Like entityRefOf, but assigns a fresh GUID first when missing so a
+// migrated EntityRef field never silently drops a live reference.
+inline EntityRef ensureEntityRef(entt::registry& r, entt::entity e)
+{
+    if (e == entt::null || !r.valid(e))
+        return EntityRef{};
+    if (auto* id = r.try_get<IdentityComponent>(e))
+        return EntityRef{id->guid};
+    const EntityGuid guid = generateEntityGuid();
+    r.emplace<IdentityComponent>(e, IdentityComponent{guid});
+    return EntityRef{guid};
+}
+
+// Resolve a GUID ref by scanning IdentityComponents (small registries;
+// EntityLifecycle::resolve is the indexed path when a lifecycle exists).
+inline entt::entity resolveEntityRef(entt::registry& r, EntityRef ref)
+{
+    if (ref.isNull())
+        return entt::null;
+    for (auto [e, id] : r.view<IdentityComponent>().each())
+        if (id.guid == ref.guid)
+            return r.valid(e) ? e : entt::null;
+    return entt::null;
+}

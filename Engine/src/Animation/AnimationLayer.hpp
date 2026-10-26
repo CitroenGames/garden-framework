@@ -7,7 +7,7 @@
 #include <algorithm>
 #include <cmath>
 
-enum class BlendMode
+enum class AnimationBlendMode
 {
     Override, // Layer pose replaces base (weighted by mask)
     Additive  // Layer pose adds to base
@@ -21,7 +21,7 @@ struct AnimationLayer
     Pose reference_pose; // for additive mode: the neutral/reference pose
 
     BoneMask mask;
-    BlendMode mode = BlendMode::Override;
+    AnimationBlendMode mode = AnimationBlendMode::Override;
     float weight = 1.0f; // overall layer weight
 
     float playback_time = 0.0f;

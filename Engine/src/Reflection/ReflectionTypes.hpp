@@ -33,6 +33,7 @@ enum class EPropertyType : uint8_t
     Enum,
     Array,
     EntityRef,
+    Double,
 };
 
 // ---- Property widget override ----

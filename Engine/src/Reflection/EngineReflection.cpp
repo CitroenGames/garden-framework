@@ -4,6 +4,10 @@
 #include "Components/PrefabInstanceComponent.hpp"
 #include "Components/HierarchyComponents.hpp"
 #include "Components/IdentityComponent.hpp"
+#include "Components/AnimationComponent.hpp"
+#include "Components/AudioSourceComponent.hpp"
+#include "Components/IKComponent.hpp"
+#include "GameFramework/GameFrameworkComponents.hpp"
 
 void registerEngineReflection(ReflectionRegistry& registry)
 {
@@ -24,6 +28,18 @@ void registerEngineReflection(ReflectionRegistry& registry)
     registry.reflect<PointLightComponent>("PointLightComponent");
     registry.reflect<SpotLightComponent>("SpotLightComponent");
     registry.reflect<PrefabInstanceComponent>("PrefabInstanceComponent");
+    // MeshComponent is exempt from reflection (plan 2.6 / prefabs_serialization.md
+    // §4): it holds a shared_ptr<mesh> GPU resource and is persisted via the
+    // level/prefab sidecar path (mesh path + render flags), not reflected JSON.
+    // InputComponent is likewise exempt: it is a polymorphic input base class,
+    // not an ECS data component (see Components/InputComponent.hpp).
+    registry.reflect<AnimationComponent>("AnimationComponent");
+    registry.reflect<AudioSourceComponent>("AudioSourceComponent");
+    registry.reflect<IKComponent>("IKComponent");
+    registry.reflect<GameFramework::GameModeComponent>("GameModeComponent");
+    registry.reflect<GameFramework::GameStateComponent>("GameStateComponent");
+    registry.reflect<GameFramework::PlayerStateComponent>("PlayerStateComponent");
+    registry.reflect<GameFramework::PlayerControllerComponent>("PlayerControllerComponent");
     registry.reflect<IdentityComponent>("IdentityComponent");
     // Hierarchy: ParentComponent is the load-authoritative link;
     // ChildrenComponent (vector<EntityRef>) is reflected/serialized and

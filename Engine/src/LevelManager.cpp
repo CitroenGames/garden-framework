@@ -3481,7 +3481,7 @@ bool LevelManager::instantiateLevelParallel(
             if (!entity_data.tracked_player_name.empty()) {
                 auto it = entity_map.find(entity_data.tracked_player_name);
                 if (it != entity_map.end()) {
-                    pr.tracked_player = it->second;
+                    pr.tracked_player = ensureEntityRef(game_world.registry, it->second);
                 } else {
                     LOG_ENGINE_WARN("PlayerRepresentation '{}' cannot find tracked player '{}'",
                                     entity_data.name, entity_data.tracked_player_name);
@@ -3499,8 +3499,8 @@ bool LevelManager::instantiateLevelParallel(
                 auto& cc = game_world.registry.get<ConstraintComponent>(e);
                 auto target_it = entity_map.find(entity_data.constraint_target_name);
                 if (target_it != entity_map.end()) {
-                    cc.target_entity = target_it->second;
-                    game_world.getPhysicsSystem().createConstraint(e, cc.target_entity, cc);
+                    cc.target_entity = ensureEntityRef(game_world.registry, target_it->second);
+                    game_world.getPhysicsSystem().createConstraint(e, target_it->second, cc);
                 } else {
                     LOG_ENGINE_WARN("Constraint on '{}' cannot find target '{}'",
                                     entity_data.name, entity_data.constraint_target_name);

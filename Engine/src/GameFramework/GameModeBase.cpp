@@ -735,8 +735,8 @@ void GameModeBase::syncPlayerEntryToEcs(PlayerControllerEntry& player)
 
     auto& player_state_component =
         m_world->registry.get_or_emplace<PlayerStateComponent>(player.player_state_entity);
-    copyPlayerStateToComponent(player_state_component, *player.player_state);
-    player_state_component.freecam = player.freecam;
+    copyPlayerStateToComponent(m_world->registry, player_state_component, *player.player_state);
+    player_state_component.freecam = ensureEntityRef(m_world->registry, player.freecam);
 
     if (!m_world->registry.valid(player.controller_entity) ||
         !m_world->registry.all_of<PlayerControllerComponent>(player.controller_entity))
@@ -747,10 +747,10 @@ void GameModeBase::syncPlayerEntryToEcs(PlayerControllerEntry& player)
     auto& controller_component =
         m_world->registry.get_or_emplace<PlayerControllerComponent>(player.controller_entity);
     controller_component.player_id = player.player_id;
-    controller_component.player_state = player.player_state_entity;
-    controller_component.pawn = player.pawn;
-    controller_component.freecam = player.freecam;
-    controller_component.start_spot = player.start_spot;
+    controller_component.player_state = ensureEntityRef(m_world->registry, player.player_state_entity);
+    controller_component.pawn = ensureEntityRef(m_world->registry, player.pawn);
+    controller_component.freecam = ensureEntityRef(m_world->registry, player.freecam);
+    controller_component.start_spot = ensureEntityRef(m_world->registry, player.start_spot);
     controller_component.portal = player.portal;
     controller_component.spectator = player.spectator;
     controller_component.local = true;

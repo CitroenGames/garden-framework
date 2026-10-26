@@ -1,14 +1,25 @@
 #pragma once
 
 #include "Animation/IKSolver.hpp"
+#include "Reflection/Reflector.hpp"
 #include <vector>
 #include <string>
 
 struct IKComponent
 {
+    // Constraint chains reference live bone indices/targets and are
+    // configured in code; nested-struct arrays are not reflectable, so
+    // only the authoring enable flag is serialized.
     std::vector<TwoBoneIKConstraint> two_bone_constraints;
     std::vector<FABRIKConstraint> fabrik_constraints;
     bool enabled = true;
+
+    static void reflect(Reflector<IKComponent>& r)
+    {
+        r.display("IK").category("Animation");
+        r.field<&IKComponent::enabled>("enabled")
+            .tooltip("Enable IK solving for this entity").category("IK");
+    }
 
     // Convenience: set up foot IK (thigh -> shin -> foot)
     void addFootIK(const Skeleton& skeleton,

@@ -110,11 +110,11 @@ void AnimationBlender::updatePose(float dt, int bone_count, Pose& out_pose)
 
         const auto& mask_weights = layer.mask.getWeights();
 
-        if (layer.mode == BlendMode::Override)
+        if (layer.mode == AnimationBlendMode::Override)
         {
             out_pose = Pose::maskedBlend(out_pose, layer_pose, layer.weight, mask_weights);
         }
-        else // BlendMode::Additive
+        else // AnimationBlendMode::Additive
         {
             // Compute additive result
             Pose additive_result = Pose::additiveBlend(out_pose, layer_pose,
@@ -135,7 +135,7 @@ void AnimationBlender::updatePose(float dt, int bone_count, Pose& out_pose)
 
 // ---- Layer management ----
 
-int AnimationBlender::addLayer(BlendMode mode)
+int AnimationBlender::addLayer(AnimationBlendMode mode)
 {
     ensureBaseLayer(); // make sure layer 0 exists
     AnimationLayer layer;

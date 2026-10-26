@@ -9,6 +9,7 @@
 #include <entt/entt.hpp>
 #include "Character/CharacterController.hpp"
 #include "mesh.hpp"
+#include "Components/IdentityComponent.hpp"
 #include "Reflection/Reflector.hpp"
 #include <algorithm>
 
@@ -544,14 +545,14 @@ struct PlayerStartComponent {
 };
 
 struct PlayerRepresentationComponent {
-    entt::entity tracked_player = entt::null;
+    EntityRef tracked_player;
     glm::vec3 position_offset;
     bool visible_only_freecam = true;
 
     static void reflect(Reflector<PlayerRepresentationComponent>& r) {
         r.display("Player Representation").category("Gameplay");
         r.field<&PlayerRepresentationComponent::tracked_player>("tracked_player")
-            .tooltip("Entity to track").category("Tracking");
+            .tooltip("Entity to track").widget(EPropertyWidget::EntityRef).category("Tracking");
         r.field<&PlayerRepresentationComponent::position_offset>("position_offset")
             .tooltip("Offset from tracked entity").drag(0.01f).category("Tracking");
         r.field<&PlayerRepresentationComponent::visible_only_freecam>("visible_only_freecam")
@@ -650,7 +651,7 @@ inline std::string constraintTypeToString(ConstraintType t)
 struct ConstraintComponent {
     ConstraintType type = ConstraintType::Fixed;
     std::string target_entity_name;
-    entt::entity target_entity = entt::null;
+    EntityRef target_entity;
 
     // Attachment points (local space of each body)
     glm::vec3 anchor_1 = glm::vec3(0.0f);
@@ -673,6 +674,8 @@ struct ConstraintComponent {
             .category("Constraint");
         r.field<&ConstraintComponent::target_entity_name>("target_entity_name")
             .tooltip("Name of target entity").category("Constraint");
+        r.field<&ConstraintComponent::target_entity>("target_entity")
+            .tooltip("Resolved target entity (stable GUID ref)").widget(EPropertyWidget::EntityRef).category("Constraint");
         r.field<&ConstraintComponent::anchor_1>("anchor_1")
             .tooltip("Local anchor on this body").drag(0.01f).category("Constraint");
         r.field<&ConstraintComponent::anchor_2>("anchor_2")

@@ -7,6 +7,10 @@
 #include "Components/HierarchyComponents.hpp"
 #include "Components/IdentityComponent.hpp"
 #include "ECS/Hierarchy.hpp"
+#include "Components/AnimationComponent.hpp"
+#include "Components/AudioSourceComponent.hpp"
+#include "Components/IKComponent.hpp"
+#include "GameFramework/GameFrameworkComponents.hpp"
 #include <vector>
 
 #include <cmath>
@@ -549,6 +553,134 @@ namespace
 
 }
 
+    bool testNewComponentRoundTrips()
+    {
+        const std::string name = "new component round trips (animation/audio/IK/gameframework/EntityRef)";
+        ReflectionRegistry reflection;
+        registerEngineReflection(reflection);
+        for (const char* n : {"AnimationComponent", "AudioSourceComponent", "IKComponent",
+                              "GameModeComponent", "GameStateComponent", "PlayerStateComponent", "PlayerControllerComponent"})
+            if (!reflection.findByName(n)) return fail(name, std::string("missing registration: ") + n);
+        if (reflection.count() != 28) return fail(name, "unexpected registered component count");
+        // Plan 2.6 exemptions: MeshComponent is sidecar-only (shared_ptr<mesh>
+        // GPU resource, persisted via level/prefab sidecar path) and
+        // InputComponent is a polymorphic base class, not a data component.
+        // Neither is registered for reflection.
+        if (reflection.findByName("MeshComponent")) return fail(name, "MeshComponent must stay sidecar-exempt");
+        if (reflection.findByName("InputComponent")) return fail(name, "InputComponent must stay exempt");
+
+        // Animation: authoring fields only; runtime state absent from JSON.
+        {
+            entt::registry reg; auto e = reg.create();
+            auto& c = reg.emplace<AnimationComponent>(e);
+            c.skeleton_path = "assets/hero.skel"; c.clip_names = {"idle", "run"};
+            c.default_clip = "idle"; c.playback_speed = 1.5f; c.loop = false; c.auto_play = true;
+            c.bone_matrices.assign(2, glm::mat4(2.0f));
+            auto j = ReflectionSerializer::serializeEntity(reg, e, reflection);
+            auto cj = j["components"]["AnimationComponent"];
+            for (const char* k : {"skeleton", "clips", "blender", "bone_matrices"})
+                if (cj.contains(k)) return fail(name, "animation runtime field serialized");
+            entt::registry reg2; auto e2 = reg2.create();
+            ReflectionSerializer::deserializeEntity(reg2, e2, j, reflection);
+            const auto& o = reg2.get<AnimationComponent>(e2);
+            if (o.skeleton_path != c.skeleton_path || o.clip_names != c.clip_names ||
+                o.default_clip != c.default_clip || !approx(o.playback_speed, 1.5f) ||
+                o.loop != false || o.auto_play != true || !o.bone_matrices.empty())
+                return fail(name, "animation fields mismatch");
+        }
+        // Audio: clip_path + tuning; resolved id/handle omitted.
+        {
+            entt::registry reg; auto e = reg.create();
+            auto& c = reg.emplace<AudioSourceComponent>(e);
+            c.clip_path = "assets/jump.wav"; c.volume = 0.5f; c.pitch = 1.25f;
+            c.min_distance = 2.0f; c.max_distance = 80.0f; c.spatial = false;
+            c.loop = true; c.auto_play = true; c.group = AudioGroup::Music;
+            c.clip = 42; c.active_handle = 99; c.started = true;
+            auto j = ReflectionSerializer::serializeEntity(reg, e, reflection);
+            auto cj = j["components"]["AudioSourceComponent"];
+            for (const char* k : {"clip", "active_handle", "started"})
+                if (cj.contains(k)) return fail(name, "audio runtime field serialized");
+            if (cj["group"] != "Music") return fail(name, "audio group not serialized by name");
+            entt::registry reg2; auto e2 = reg2.create();
+            ReflectionSerializer::deserializeEntity(reg2, e2, j, reflection);
+            const auto& o = reg2.get<AudioSourceComponent>(e2);
+            if (o.clip_path != c.clip_path || !approx(o.volume, 0.5f) || !approx(o.pitch, 1.25f) ||
+                o.group != AudioGroup::Music || o.clip != INVALID_AUDIO_CLIP ||
+                o.active_handle != INVALID_SOUND || o.started)
+                return fail(name, "audio fields mismatch");
+        }
+        // IK: enabled flag only.
+        {
+            entt::registry reg; auto e = reg.create();
+            reg.emplace<IKComponent>(e).enabled = false;
+            auto j = ReflectionSerializer::serializeEntity(reg, e, reflection);
+            auto cj = j["components"]["IKComponent"];
+            if (cj.size() != 1 || !cj.contains("enabled")) return fail(name, "IK serialized unexpected fields");
+            entt::registry reg2; auto e2 = reg2.create();
+            ReflectionSerializer::deserializeEntity(reg2, e2, j, reflection);
+            if (reg2.get<IKComponent>(e2).enabled) return fail(name, "IK enabled mismatch");
+        }
+        // MeshComponent: exempt from reflection (sidecar-only, see above).
+        // An entity carrying only MeshComponent serializes no MeshComponent
+        // JSON; the mesh is restored by the level/prefab sidecar path.
+        {
+            entt::registry reg; auto e = reg.create();
+            reg.emplace<MeshComponent>(e);
+            auto j = ReflectionSerializer::serializeEntity(reg, e, reflection);
+            if (j.contains("components") && j["components"].contains("MeshComponent"))
+                return fail(name, "MeshComponent must not serialize via reflection");
+        }
+        // GameFramework components + EntityRef GUID migration.
+        {
+            const EntityGuid g1{0xAA, 0x11}, g2{0xBB, 0x22}, g3{0xCC, 0x33};
+            entt::registry reg; auto e = reg.create();
+            auto& gm = reg.emplace<GameFramework::GameModeComponent>(e);
+            gm.map_name = "arena"; gm.options = "?game=tdm"; gm.delayed_start = true; gm.min_respawn_delay = 2.5f;
+            auto& gs = reg.emplace<GameFramework::GameStateComponent>(e);
+            gs.player_states = {EntityRef{g1}, EntityRef{g2}};
+            gs.server_world_time_seconds = 123.5; gs.elapsed_time = 77;
+            auto& ps = reg.emplace<GameFramework::PlayerStateComponent>(e);
+            ps.player_id = 7; ps.player_name = "Hero"; ps.score = 12.5f; ps.pawn = EntityRef{g1}; ps.freecam = EntityRef{g3};
+            auto& pc = reg.emplace<GameFramework::PlayerControllerComponent>(e);
+            pc.player_id = 7; pc.player_state = EntityRef{g2}; pc.pawn = EntityRef{g1};
+            pc.freecam = EntityRef{g3}; pc.start_spot = EntityRef{g1}; pc.portal = "gate"; pc.spectator = true;
+            auto& pr = reg.emplace<PlayerRepresentationComponent>(e);
+            pr.tracked_player = EntityRef{g1};
+            auto& cc = reg.emplace<ConstraintComponent>(e);
+            cc.target_entity = EntityRef{g2};
+
+            auto j = ReflectionSerializer::serializeEntity(reg, e, reflection);
+            if (!j["components"]["PlayerStateComponent"]["pawn"].is_string() ||
+                j["components"]["PlayerStateComponent"]["pawn"] != guidToString(g1))
+                return fail(name, "PlayerState pawn not a GUID string");
+            if (j["components"]["GameStateComponent"]["player_states"][1] != guidToString(g2))
+                return fail(name, "player_states not GUID strings");
+            if (!j["components"]["PlayerRepresentationComponent"]["tracked_player"].is_string() ||
+                !j["components"]["ConstraintComponent"]["target_entity"].is_string())
+                return fail(name, "migrated EntityRef fields not GUID strings");
+
+            entt::registry reg2; auto e2 = reg2.create();
+            ReflectionSerializer::deserializeEntity(reg2, e2, j, reflection);
+            const auto& ogm = reg2.get<GameFramework::GameModeComponent>(e2);
+            const auto& ogs = reg2.get<GameFramework::GameStateComponent>(e2);
+            const auto& ops = reg2.get<GameFramework::PlayerStateComponent>(e2);
+            const auto& opc = reg2.get<GameFramework::PlayerControllerComponent>(e2);
+            if (ogm.map_name != "arena" || ogm.options != "?game=tdm" || !ogm.delayed_start || !approx(ogm.min_respawn_delay, 2.5f))
+                return fail(name, "GameMode fields mismatch");
+            if (ogs.player_states.size() != 2 || ogs.player_states[0].guid != g1 ||
+                !approx(static_cast<float>(ogs.server_world_time_seconds), 123.5f) || ogs.elapsed_time != 77)
+                return fail(name, "GameState fields mismatch");
+            if (ops.player_id != 7 || ops.player_name != "Hero" || ops.pawn.guid != g1 || ops.freecam.guid != g3)
+                return fail(name, "PlayerState fields mismatch");
+            if (opc.player_state.guid != g2 || opc.start_spot.guid != g1 || opc.portal != "gate" || !opc.spectator)
+                return fail(name, "PlayerController fields mismatch");
+            if (reg2.get<PlayerRepresentationComponent>(e2).tracked_player.guid != g1 ||
+                reg2.get<ConstraintComponent>(e2).target_entity.guid != g2)
+                return fail(name, "migrated EntityRef fields mismatch");
+        }
+        return pass(name);
+    }
+
 int main()
 {
     bool ok = true;
@@ -560,5 +692,6 @@ int main()
     ok = testReflectedLevelJsonMigration() && ok;
     ok = testVectorRoundTrip() && ok;
     ok = testHierarchyChildrenSerialization() && ok;
+    ok = testNewComponentRoundTrips() && ok;
     return ok ? 0 : 1;
 }

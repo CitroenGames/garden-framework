@@ -15,10 +15,11 @@ inline void update_player_representations(entt::registry& registry, bool is_free
         auto& trans  = view.get<TransformComponent>(entity);
         auto& mesh_comp = view.get<MeshComponent>(entity);
 
-        if (registry.valid(pr.tracked_player) &&
-            registry.all_of<TransformComponent>(pr.tracked_player))
+        const entt::entity tracked = resolveEntityRef(registry, pr.tracked_player);
+        if (tracked != entt::null && registry.valid(tracked) &&
+            registry.all_of<TransformComponent>(tracked))
         {
-            const auto& target_trans = registry.get<TransformComponent>(pr.tracked_player);
+            const auto& target_trans = registry.get<TransformComponent>(tracked);
 
             // Sync position with offset
             trans.position = target_trans.position + pr.position_offset;

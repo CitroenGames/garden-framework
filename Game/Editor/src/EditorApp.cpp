@@ -447,19 +447,22 @@ namespace
         {
             if (auto* rep = play_world->registry.try_get<PlayerRepresentationComponent>(dst_entity))
             {
-                if (rep->tracked_player != entt::null)
+                if (!rep->tracked_player.isNull())
                 {
-                    auto it = entity_map.find(rep->tracked_player);
-                    rep->tracked_player = (it != entity_map.end()) ? it->second : entt::null;
+                    const entt::entity tracked =
+                        resolveEntityRef(editor_world.registry, rep->tracked_player);
+                    auto it = entity_map.find(tracked);
+                    rep->tracked_player = (it != entity_map.end())
+                        ? ensureEntityRef(play_world->registry, it->second) : EntityRef{};
                 }
             }
 
             if (auto* constraint = play_world->registry.try_get<ConstraintComponent>(dst_entity))
             {
-                constraint->target_entity = entt::null;
+                constraint->target_entity = EntityRef{};
                 auto it = name_map.find(constraint->target_entity_name);
                 if (it != name_map.end())
-                    constraint->target_entity = it->second;
+                    constraint->target_entity = ensureEntityRef(play_world->registry, it->second);
             }
         }
 
@@ -489,8 +492,9 @@ namespace
         for (auto entity : play_world->registry.view<ConstraintComponent>())
         {
             auto& constraint = play_world->registry.get<ConstraintComponent>(entity);
-            if (constraint.target_entity != entt::null)
-                play_world->getPhysicsSystem().createConstraint(entity, constraint.target_entity, constraint);
+            const entt::entity target = resolveEntityRef(play_world->registry, constraint.target_entity);
+            if (target != entt::null)
+                play_world->getPhysicsSystem().createConstraint(entity, target, constraint);
         }
 
         play_world->getPhysicsSystem().optimizeBroadPhase();

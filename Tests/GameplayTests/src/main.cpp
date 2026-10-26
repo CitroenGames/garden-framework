@@ -193,7 +193,7 @@ bool testGameModeUsesPortalPlayerStart()
     const auto* controller_component =
         game_world.registry.try_get<GameFramework::PlayerControllerComponent>(player->controller_entity);
     if (!controller_component ||
-        controller_component->start_spot != start_b ||
+        controller_component->start_spot != entityRefOf(game_world.registry, start_b) ||
         controller_component->portal != "B")
     {
         return fail(name, "portal start spot was not mirrored to the PlayerController component");
@@ -354,7 +354,7 @@ bool testGameModeSpawnsAtPlayerStart()
     if (!player_state_component)
         return fail(name, "PlayerState ECS component was not created");
     if (player_state_component->player_name != "Tester" ||
-        player_state_component->pawn != pawn)
+        player_state_component->pawn != entityRefOf(game_world.registry, pawn))
         return fail(name, "PlayerState ECS component was not synchronized");
 
     int controller_count = 0;
@@ -365,7 +365,7 @@ bool testGameModeSpawnsAtPlayerStart()
             controller_view.get<GameFramework::PlayerControllerComponent>(controller_entity);
         if (controller_component.player_id == 1 &&
             controller_component.player_state == state_component.player_states.front() &&
-            controller_component.pawn == pawn)
+            controller_component.pawn == entityRefOf(game_world.registry, pawn))
             ++controller_count;
     }
     if (controller_count != 1)

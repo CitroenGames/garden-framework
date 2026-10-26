@@ -179,9 +179,9 @@ void GameStateBase::syncGameStateComponent()
 
         auto& player_state_component =
             m_world->registry.get_or_emplace<PlayerStateComponent>(player_state_entity);
-        copyPlayerStateToComponent(player_state_component, *player_state);
+        copyPlayerStateToComponent(m_world->registry, player_state_component, *player_state);
 
-        component.player_states.push_back(player_state_entity);
+        component.player_states.push_back(ensureEntityRef(m_world->registry, player_state_entity));
         if (player_state->is_spectator)
             ++component.num_spectators;
         else

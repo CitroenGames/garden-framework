@@ -109,7 +109,7 @@ const PlayerStateComponent* getPlayerStateComponent(const entt::registry& regist
     return registry.valid(entity) ? registry.try_get<PlayerStateComponent>(entity) : nullptr;
 }
 
-void copyPlayerStateToComponent(PlayerStateComponent& component, const PlayerState& player_state)
+void copyPlayerStateToComponent(entt::registry& registry, PlayerStateComponent& component, const PlayerState& player_state)
 {
     component.player_id = player_state.player_id;
     component.player_name = player_state.player_name;
@@ -118,6 +118,6 @@ void copyPlayerStateToComponent(PlayerStateComponent& component, const PlayerSta
     component.is_spectator = player_state.is_spectator;
     component.is_inactive = player_state.is_inactive;
     component.start_time = player_state.start_time;
-    component.pawn = player_state.pawn;
+    component.pawn = ensureEntityRef(registry, player_state.pawn);
 }
 }

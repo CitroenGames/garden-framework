@@ -18,7 +18,10 @@ template<typename M, typename Enable = void>
 struct DeducePropertyType;
 
 template<> struct DeducePropertyType<float>        { static constexpr auto value = EPropertyType::Float; };
+template<> struct DeducePropertyType<double>       { static constexpr auto value = EPropertyType::Double; };
 template<> struct DeducePropertyType<int>          { static constexpr auto value = EPropertyType::Int; };
+template<> struct DeducePropertyType<uint16_t>     { static constexpr auto value = EPropertyType::Int; };
+template<> struct DeducePropertyType<uint32_t>     { static constexpr auto value = EPropertyType::Int; };
 template<> struct DeducePropertyType<bool>         { static constexpr auto value = EPropertyType::Bool; };
 template<> struct DeducePropertyType<std::string>  { static constexpr auto value = EPropertyType::String; };
 template<> struct DeducePropertyType<glm::vec2>    { static constexpr auto value = EPropertyType::Vec2; };
