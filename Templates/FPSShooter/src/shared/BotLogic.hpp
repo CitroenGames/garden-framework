@@ -1,0 +1,253 @@
+#pragma once
+// FPSShooter bots v1: pure, testable bot logic (game layer only).
+// Decision code consumes only BotPerceptComponent/blackboard/match-state
+// summaries passed in BotDecisionInput -- never raw enemy transforms.
+#include "CompetitiveLogic.hpp"
+#include "Network/NetworkProtocol.hpp"
+#include <glm/glm.hpp>
+#include <algorithm>
+#include <cmath>
+#include <functional>
+#include <vector>
+
+namespace Bots {
+
+inline constexpr uint16_t kBotClientIdBase = 40000;
+inline uint8_t clampDifficulty(int32_t d) { return (uint8_t)std::clamp<int32_t>(d, 0, 3); }
+
+struct DifficultyRow {
+    float reaction_time, aim_error_deg, aim_turn_rate_deg, burst_pause, view_distance, fov_deg, hearing_scale, memory_time, strafe_interval;
+    int32_t burst_len, retreat_hp;
+};
+inline constexpr DifficultyRow kDifficultyTable[4] = {
+    {0.60f, 6.0f, 180.0f, 0.45f, 45.0f,  90.0f, 0.70f,  2.0f, 0.0f, 3, 0},
+    {0.40f, 3.5f, 270.0f, 0.30f, 60.0f, 100.0f, 1.00f,  4.0f, 0.9f, 4, 25},
+    {0.25f, 1.8f, 400.0f, 0.20f, 75.0f, 110.0f, 1.15f,  7.0f, 0.7f, 5, 30},
+    {0.15f, 0.8f, 540.0f, 0.12f, 90.0f, 120.0f, 1.30f, 10.0f, 0.5f, 6, 35},
+};
+inline const DifficultyRow& difficultyFor(uint8_t d) { return kDifficultyTable[clampDifficulty(d)]; }
+
+inline uint32_t rngNext(uint32_t& s) { if (!s) s = 1; s ^= s << 13; s ^= s >> 17; s ^= s << 5; return s; }
+inline float rngUniform(uint32_t& s) { return (rngNext(s) >> 8) * (1.0f / 16777216.0f); } // [0,1)
+inline float rngSigned(uint32_t& s) { return rngUniform(s) * 2.0f - 1.0f; }
+
+enum class BotState : uint8_t { Idle, Buy, Advance, Plant, Defend, Defuse, Engage, Retreat, Spectate };
+struct NavAgentComponent {
+    float max_speed = 5.0f, max_accel = 20.0f, arrive_radius = 1.2f, waypoint_radius = 0.6f, repath_cooldown = 0.25f;
+    std::vector<glm::vec3> path; uint32_t path_index = 0;
+    glm::vec3 goal{0}; bool has_goal = false; bool path_valid = false;
+    float repath_timer = 0; glm::vec3 desired_velocity{0}; bool stuck = false;
+    int32_t path_failures = 0;
+};
+struct SteeringComponent { glm::vec3 velocity{0}; float stuck_time = 0; glm::vec3 last_pos{0}; bool has_last = false; uint8_t unstuck_phase = 0; float unstuck_timer = 0; float stuck_window_time = 0; glm::vec3 window_start{0}; };
+struct BotComponent {
+    uint8_t difficulty = 1; BotState state = BotState::Idle; BotState resume_state = BotState::Advance; bool has_resume = false;
+    float state_time = 0, next_decision_time = 0, engage_lost_time = 0, aim_yaw = 0, aim_pitch = 0;
+    uint32_t rng_state = 1; entt::entity pawn = entt::null; int32_t bot_index = 0;
+    bool buy_done = false;
+};
+struct BotPerceptComponent {
+    entt::entity visible_enemy = entt::null; glm::vec3 last_seen_pos{0}; float last_seen_age = 1e9f;
+    float visible_fraction = 0, confirm_timer = 0;
+    glm::vec3 heard_pos{0}; float heard_age = 1e9f, heard_loudness = 0;
+    bool bomb_planted_heard = false, bomb_beep_heard = false, sees_bomb_carrier = false, sees_planted_bomb = false;
+};
+struct BotIntentComponent {
+    glm::vec3 move_goal{0}; bool has_move_goal = false;
+    bool want_crouch = false, want_jump = false, want_use = false, want_attack = false;
+    float aim_yaw = 0, aim_pitch = 0; uint8_t want_weapon_slot = 0; int32_t buy_request_id = -1;
+};
+struct TeamBlackboardComponent { uint8_t team = 0; glm::vec3 last_contact_pos{0}; float last_contact_age = 1e9f; int8_t planned_site = -1; };
+
+// ---- Perception ----
+// blocked(origin, point) -> true when world geometry blocks that sample.
+struct EnemyCandidate { entt::entity entity = entt::null; glm::vec3 position{0}; };
+using BlockedFn = std::function<bool(const glm::vec3&, const glm::vec3&)>;
+inline glm::vec3 forwardFromYaw(float yaw) { return glm::vec3(std::sin(yaw), 0.0f, std::cos(yaw)); }
+
+inline void updatePerception(BotPerceptComponent& p, const glm::vec3& eye, float yaw,
+                             const std::vector<EnemyCandidate>& enemies, uint8_t difficulty, float dt, const BlockedFn& blocked) {
+    p.last_seen_age += dt; p.heard_age += dt;
+    const auto& d = difficultyFor(difficulty);
+    entt::entity best = entt::null; float best_frac = 0; glm::vec3 best_pos{0};
+    glm::vec3 fwd = forwardFromYaw(yaw);
+    for (const auto& e : enemies) {
+        glm::vec3 to = e.position - eye; float dist = glm::length(to);
+        if (dist > d.view_distance || dist < 0.001f) continue;
+        glm::vec3 flat(to.x, 0, to.z); float flat_len = glm::length(flat);
+        if (flat_len > 0.001f) {
+            float cosang = glm::dot(fwd, flat / flat_len);
+            float ang = std::acos(std::clamp(cosang, -1.0f, 1.0f));
+            if (ang > glm::radians(d.fov_deg) * 0.5f && dist > 3.0f) continue;
+        }
+        int vis = 0;
+        const float offs[3] = {0.3f, 1.35f, 1.65f};
+        for (float o : offs) { glm::vec3 pt = e.position + glm::vec3(0, o, 0); if (!blocked || !blocked(eye, pt)) ++vis; }
+        float frac = vis / 3.0f;
+        if (frac > best_frac) { best_frac = frac; best = e.entity; best_pos = e.position; }
+    }
+    p.visible_fraction = best_frac;
+    if (best_frac > 0.0f) { p.visible_enemy = best; p.last_seen_pos = best_pos; p.last_seen_age = 0.0f; p.confirm_timer += dt; }
+    else { p.visible_enemy = entt::null; p.confirm_timer = 0.0f; }
+}
+inline bool enemyConfirmed(const BotPerceptComponent& p, uint8_t difficulty) {
+    return p.visible_fraction > 0.0f && p.confirm_timer >= difficultyFor(difficulty).reaction_time;
+}
+
+// ---- Steering (no teleport: only desired velocity) ----
+inline void setPath(NavAgentComponent& n, const std::vector<glm::vec3>& pts, const glm::vec3& goal) {
+    n.path = pts; n.goal = goal; n.has_goal = true; n.path_valid = !pts.empty(); n.path_index = pts.size() > 1 ? 1 : 0; n.path_failures = pts.empty() ? n.path_failures + 1 : 0;
+}
+inline void updateSteering(NavAgentComponent& n, SteeringComponent& s, const glm::vec3& pos, float dt) {
+    n.desired_velocity = glm::vec3(0);
+    if (!s.has_last) { s.last_pos = pos; s.window_start = pos; s.has_last = true; }
+    if (!n.has_goal || !n.path_valid || n.path.empty()) { s.velocity = glm::vec3(0); return; }
+    while (n.path_index < n.path.size()) {
+        glm::vec3 to = n.path[n.path_index] - pos; to.y = 0;
+        if (glm::length(to) < n.waypoint_radius) { ++n.path_index; continue; } break;
+    }
+    if (n.path_index >= n.path.size()) { n.has_goal = false; s.velocity = glm::vec3(0); return; }
+    glm::vec3 target = n.path[n.path_index];
+    glm::vec3 to = target - pos; to.y = 0; float dist = glm::length(to);
+    glm::vec3 final_to = n.goal - pos; final_to.y = 0; float final_dist = glm::length(final_to);
+    float arrive = std::clamp(final_dist / std::max(n.arrive_radius, 0.01f), 0.25f, 1.0f);
+    glm::vec3 desired = dist > 0.001f ? (to / dist) * n.max_speed * arrive : glm::vec3(0);
+    // move_towards smoothing
+    glm::vec3 delta = desired - s.velocity; float max_delta = n.max_accel * dt; float len = glm::length(delta);
+    s.velocity = len > max_delta && len > 0.0f ? s.velocity + delta / len * max_delta : desired;
+    n.desired_velocity = s.velocity;
+    // Stuck: commanded >1 m/s but <0.15 m displacement over 0.75 s window.
+    s.stuck_window_time += dt;
+    if (s.stuck_window_time >= 0.75f) {
+        glm::vec3 disp = pos - s.window_start; disp.y = 0;
+        n.stuck = glm::length(n.desired_velocity) > 1.0f && glm::length(disp) < 0.15f;
+        s.stuck_time = n.stuck ? s.stuck_time + s.stuck_window_time : 0.0f;
+        s.window_start = pos; s.stuck_window_time = 0;
+    }
+    s.last_pos = pos;
+}
+
+// ---- Decision FSM ----
+struct BotDecisionInput {
+    Competitive::RoundPhase phase = Competitive::RoundPhase::Live;
+    Competitive::FpsTeam team = Competitive::FpsTeam::Attackers;
+    bool alive = true, is_carrier = false, bomb_planted = false, at_site = false, at_bomb = false;
+    glm::vec3 site_pos{0}; bool has_site = false; glm::vec3 bomb_pos{0}; bool has_bomb_pos = false;
+    int32_t health = 100; float dt = 0.1f; glm::vec3 bot_pos{0};
+};
+inline void setState(BotComponent& b, BotState s) { if (b.state != s) { b.state = s; b.state_time = 0; b.engage_lost_time = 0; } }
+
+inline void decide(BotComponent& b, const BotPerceptComponent& p, BotIntentComponent& intent, const BotDecisionInput& in) {
+    intent = BotIntentComponent{}; intent.aim_yaw = b.aim_yaw; intent.aim_pitch = b.aim_pitch;
+    b.state_time += in.dt;
+    const auto& diff = difficultyFor(b.difficulty);
+    if (!in.alive) { setState(b, BotState::Spectate); return; }
+    using P = Competitive::RoundPhase;
+    if (in.phase == P::Freeze) { if (b.state == BotState::Spectate || b.state == BotState::Idle || b.state == BotState::Advance) setState(b, BotState::Buy); }
+    else if (in.phase == P::Warmup || in.phase == P::WaitingForPlayers) { setState(b, BotState::Idle); return; }
+    else if (b.state == BotState::Buy && in.phase == P::Live) setState(b, BotState::Advance);
+    else if (b.state == BotState::Idle && in.phase == P::Live) setState(b, BotState::Advance);
+    else if (b.state == BotState::Spectate && in.phase == P::Live) return; // dead-revived handled by alive/Freeze
+
+    bool confirmed = enemyConfirmed(p, b.difficulty);
+    // Retreat trigger (checked before Engage overlay return).
+    if (b.state != BotState::Engage && b.state != BotState::Retreat && diff.retreat_hp > 0 && in.health > 0 && in.health < diff.retreat_hp && confirmed) {
+        b.resume_state = BotState::Advance; b.has_resume = true; setState(b, BotState::Retreat);
+    }
+    // Engage overlay
+    if (b.state != BotState::Engage && confirmed &&
+        (b.state == BotState::Advance || b.state == BotState::Plant || b.state == BotState::Defend || b.state == BotState::Defuse)) {
+        b.resume_state = b.state; b.has_resume = true; setState(b, BotState::Engage);
+    }
+    switch (b.state) {
+    case BotState::Idle: case BotState::Spectate: return;
+    case BotState::Buy: intent.buy_request_id = 0; if (in.phase == P::Live) setState(b, BotState::Advance); return;
+    case BotState::Engage: {
+        if (p.visible_fraction > 0.0f) { b.engage_lost_time = 0; intent.want_attack = true; glm::vec3 ad = p.last_seen_pos - in.bot_pos; intent.aim_yaw = std::atan2(ad.x, ad.z); intent.aim_pitch = std::clamp(std::atan2(1.35f, std::max(glm::length(glm::vec3(ad.x, 0, ad.z)), 0.01f)), -1.5f, 1.5f); }
+        else { b.engage_lost_time += in.dt; intent.aim_yaw = b.aim_yaw; if (b.engage_lost_time > 0.75f) { BotState r = b.has_resume ? b.resume_state : BotState::Advance; b.has_resume = false; setState(b, r); } }
+        return; }
+    case BotState::Retreat:
+        if (in.has_site) { intent.move_goal = in.site_pos; intent.has_move_goal = true; }
+        if (b.state_time > 2.0f && !confirmed) { BotState r = b.has_resume ? b.resume_state : BotState::Advance; b.has_resume = false; setState(b, in.bomb_planted ? BotState::Defend : r); }
+        return;
+    case BotState::Plant:
+        if (in.bomb_planted) { setState(b, BotState::Defend); return; }
+        if (!in.is_carrier) { setState(b, BotState::Advance); return; }
+        intent.want_use = true; return;
+    case BotState::Defuse:
+        if (!in.bomb_planted) { setState(b, BotState::Advance); return; }
+        intent.want_use = true; return;
+    case BotState::Defend:
+        if (in.team == Competitive::FpsTeam::Defenders && in.bomb_planted && in.at_bomb) { setState(b, BotState::Defuse); intent.want_use = true; }
+        return;
+    case BotState::Advance: default: {
+        if (in.bomb_planted) {
+            if (in.team == Competitive::FpsTeam::Defenders) {
+                if (in.at_bomb) { setState(b, BotState::Defuse); intent.want_use = true; return; }
+                if (in.has_bomb_pos) { intent.move_goal = in.bomb_pos; intent.has_move_goal = true; }
+                return;
+            }
+            setState(b, BotState::Defend); return;
+        }
+        if (in.is_carrier && in.at_site) { setState(b, BotState::Plant); intent.want_use = true; return; }
+        if (in.has_site) { intent.move_goal = in.site_pos; intent.has_move_goal = true; }
+        return; }
+    }
+}
+
+// ---- Buy plan (catalog aliases, skip-on-reject applied by server caller) ----
+enum class BuyPlanKind : uint8_t { Pistol, Force, Full, Eco, Save };
+struct BuyPlan { BuyPlanKind kind = BuyPlanKind::Save; std::vector<const char*> aliases; };
+inline BuyPlan selectBuyPlan(int32_t money, Competitive::FpsTeam team, uint8_t difficulty, uint8_t loss_streak) {
+    uint8_t d = clampDifficulty(difficulty);
+    bool ct = team == Competitive::FpsTeam::Defenders;
+    if (loss_streak >= 2 && money < 1500) { BuyPlan p{BuyPlanKind::Eco, {}}; if (money >= 300) p.aliases.push_back("p250"); return p; }
+    if (money >= 3500) { BuyPlan p{BuyPlanKind::Full, {}}; p.aliases.push_back(ct ? "m4a1" : "ak47"); p.aliases.push_back("vesthelm"); if (ct && d >= 1) p.aliases.push_back("defuser"); if (d >= 3) p.aliases.push_back("hegrenade"); return p; }
+    if (money >= 1500) { BuyPlan p{BuyPlanKind::Force, {}}; p.aliases.push_back(ct ? "mp9" : "mac10"); p.aliases.push_back("vest"); if (d >= 1 && money - (ct ? 1250 : 1050) - 650 >= 300) p.aliases.push_back("hegrenade"); return p; }
+    BuyPlan p{BuyPlanKind::Pistol, {}}; if (money >= 650 && d >= 2) p.aliases.push_back("vest"); return p;
+}
+
+// ---- Input synthesis: same Net::InputSample humans send ----
+inline float turnTowards(float cur, float target, float max_step) {
+    float d = target - cur; const float pi = 3.14159265358979323846f;
+    while (d > pi) d -= 2 * pi; while (d < -pi) d += 2 * pi;
+    return cur + std::clamp(d, -max_step, max_step);
+}
+inline Net::InputSample synthesizeInput(BotComponent& b, const NavAgentComponent& nav, const BotIntentComponent& intent, uint32_t tick, float dt) {
+    const auto& diff = difficultyFor(b.difficulty);
+    Net::InputSample s{}; s.tick = tick;
+    float target_yaw = intent.aim_yaw, target_pitch = intent.aim_pitch;
+    bool engaging = b.state == BotState::Engage;
+    if (engaging) {
+        // Aim error perturbs aim only; weapon spread is untouched server-side.
+        float err = glm::radians(diff.aim_error_deg);
+        target_yaw += rngSigned(b.rng_state) * err; target_pitch += rngSigned(b.rng_state) * err * 0.5f;
+    } else if (glm::length(nav.desired_velocity) > 0.1f) {
+        target_yaw = std::atan2(nav.desired_velocity.x, nav.desired_velocity.z); target_pitch = 0.0f;
+    }
+    float max_turn = glm::radians(diff.aim_turn_rate_deg) * std::max(dt, 0.0f);
+    b.aim_yaw = turnTowards(b.aim_yaw, target_yaw, max_turn > 0 ? max_turn : 6.28f);
+    b.aim_pitch = std::clamp(turnTowards(b.aim_pitch, target_pitch, max_turn > 0 ? max_turn : 6.28f), -1.5f, 1.5f);
+    s.camera_yaw = b.aim_yaw; s.camera_pitch = b.aim_pitch;
+    glm::vec3 wish = nav.desired_velocity;
+    if (intent.want_use) wish = glm::vec3(0); // plant/defuse hold: no movement
+    glm::vec3 fwd = forwardFromYaw(b.aim_yaw);
+    glm::vec3 right(-fwd.z, 0.0f, fwd.x); // yaw * (-1,0,0)
+    // right check: forward (sin,0,cos); yaw*(-1,0,0)=(-cos,0,sin)=(-fwd.z,0,fwd.x)
+    float speed = glm::length(glm::vec3(wish.x, 0, wish.z));
+    float scale = nav.max_speed > 0 ? std::clamp(speed / nav.max_speed, 0.0f, 1.0f) : 0.0f;
+    glm::vec3 dir = speed > 0.001f ? wish / speed : glm::vec3(0);
+    s.move_forward = std::clamp(glm::dot(dir, fwd) * scale, -1.0f, 1.0f);
+    s.move_right = std::clamp(glm::dot(dir, right) * scale, -1.0f, 1.0f);
+    if (s.move_forward > 0.01f) s.buttons |= Net::InputFlags::MOVE_FORWARD; else if (s.move_forward < -0.01f) s.buttons |= Net::InputFlags::MOVE_BACK;
+    if (s.move_right > 0.01f) s.buttons |= Net::InputFlags::MOVE_RIGHT; else if (s.move_right < -0.01f) s.buttons |= Net::InputFlags::MOVE_LEFT;
+    if (intent.want_use) s.buttons |= Net::InputFlags::USE;
+    if (intent.want_attack && engaging) s.buttons |= Net::InputFlags::ATTACK;
+    else if (intent.want_attack && b.state == BotState::Engage) s.buttons |= Net::InputFlags::ATTACK;
+    if (intent.want_jump) s.buttons |= Net::InputFlags::JUMP;
+    if (intent.want_crouch) s.buttons |= Net::InputFlags::CROUCH;
+    if (intent.want_weapon_slot) s.buttons = Net::withWeaponSelect(s.buttons, intent.want_weapon_slot);
+    return s;
+}
+
+} // namespace Bots

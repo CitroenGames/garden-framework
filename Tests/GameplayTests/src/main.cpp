@@ -984,6 +984,7 @@ bool testWeaponRosterIntegrity()
 }
 
 #include "C4Tests.hpp"
+#include "BotTests.hpp"
 int main()
 {
     bool ok = true;
@@ -1013,5 +1014,11 @@ int main()
     ok = testC4DefuseKit() && ok;
     ok = testC4Timer40() && ok;
     ok = testC4CarrierDropPickup() && ok;
+    ok = testBotDifficultyClampTable() && ok;
+    ok = testBotPerceptionBlindfold() && ok;
+    ok = testBotFsmPlantDefendDefuse() && ok;
+    ok = testBotSteeringArrivalStuck() && ok;
+    ok = testBotInputSynthesisShape() && ok;
+    ok = testBotBuyPlanByMoney() && ok;
     return ok ? 0 : 1;
 }
