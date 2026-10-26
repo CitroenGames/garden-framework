@@ -5,6 +5,7 @@
 #include "Audio/AudioSystem.hpp"
 #include "Animation/AnimationSystem.hpp"
 #include "GameFramework/GameMode.hpp"
+#include "Gameplay/GameplaySystems.hpp"
 #include "Utils/Log.hpp"
 
 GameSimulation::GameSimulation(world* game_world, std::shared_ptr<InputManager> input_mgr)
@@ -20,6 +21,7 @@ GameSimulation::~GameSimulation()
 
 void GameSimulation::registerSystems()
 {
+    registerGameplaySystems(*m_scheduler);
     // engine.timers is auto-registered by the scheduler in Gameplay (fixed dt).
     {
         SystemDescriptor d;

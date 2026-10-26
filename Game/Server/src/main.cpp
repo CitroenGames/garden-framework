@@ -19,6 +19,7 @@
 #include "Prefab/PrefabManager.hpp"
 #include "Assets/AssetManager.hpp"
 #include "Scheduler/SystemScheduler.hpp"
+#include "Gameplay/GameplaySystems.hpp"
 #include "ECS/EntityLifecycle.hpp"
 
 #ifdef _WIN32
@@ -209,6 +210,7 @@ int main(int argc, char* argv[])
     EntityLifecycle server_lifecycle(_world.registry);
     SystemScheduler server_scheduler(true, _world.getFixedDelta());
     server_scheduler.setLifecycle(&server_lifecycle);
+    registerGameplaySystems(server_scheduler);
     {
         // D6: server-authoritative trigger polling, headless (Physics phase).
         // step_physics (inside the DLL update) also polls post-step; the diff

@@ -8,6 +8,7 @@
 #include "Components/AudioSourceComponent.hpp"
 #include "Components/IKComponent.hpp"
 #include "GameFramework/GameFrameworkComponents.hpp"
+#include "Gameplay/GameplayComponents.hpp"
 
 void registerEngineReflection(ReflectionRegistry& registry)
 {
@@ -46,6 +47,12 @@ void registerEngineReflection(ReflectionRegistry& registry)
     // ChildrenComponent (vector<EntityRef>) is reflected/serialized and
     // rebuilt from Parent on load. WorldTransformComponent is derived
     // and intentionally unreflected.
+    registry.reflect<TeamComponent>("TeamComponent");
+    registry.reflect<CountdownTimerComponent>("CountdownTimerComponent");
+    registry.reflect<ResourceWalletComponent>("ResourceWalletComponent");
+    registry.reflect<InventoryComponent>("InventoryComponent");
+    registry.reflect<HealthComponent>("HealthComponent");
+    registry.reflect<ChannelComponent>("ChannelComponent");
     registry.reflect<ParentComponent>("ParentComponent");
     registry.reflect<ChildrenComponent>("ChildrenComponent");
     registry.reflect<HierarchyPolicyComponent>("HierarchyPolicyComponent");

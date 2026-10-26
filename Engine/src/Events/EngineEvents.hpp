@@ -141,6 +141,43 @@ struct TimerExpiredEvent
     bool repeating = false;
 };
 
+// --- Generic Gameplay Events (EngineCore, no product types) ---
+
+struct DamageAppliedEvent
+{
+    EntityRef target;
+    EntityRef instigator;
+    EntityRef source;
+    float amount = 0.0f;
+    float remaining_health = 0.0f;
+    uint32_t damage_type = 0;
+    bool killed = false;
+    uint64_t tick = 0;
+};
+
+struct EntityDiedEvent
+{
+    EntityRef target;
+    EntityRef instigator;
+    EntityRef source;
+    uint32_t damage_type = 0;
+    uint64_t tick = 0;
+};
+
+struct ChannelCompletedEvent
+{
+    EntityRef entity;
+    uint32_t channel_id = 0;
+    uint64_t tick = 0;
+};
+
+struct ChannelCancelledEvent
+{
+    EntityRef entity;
+    uint32_t channel_id = 0;
+    uint64_t tick = 0;
+};
+
 // --- Animation Events ---
 
 struct AnimationFinishedEvent

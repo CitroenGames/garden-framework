@@ -11,6 +11,7 @@ sources = {
     src/Debug/**/*.cpp
     src/Events/**/*.cpp
     src/GameFramework/**/*.cpp
+    src/Gameplay/**/*.cpp
     src/GameState/**/*.cpp
     src/Graphics/HeadlessRenderAPI.cpp
     src/Graphics/HeadlessMesh.cpp

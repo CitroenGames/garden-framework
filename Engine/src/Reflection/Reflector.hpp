@@ -23,6 +23,9 @@ template<> struct DeducePropertyType<int>          { static constexpr auto value
 template<> struct DeducePropertyType<uint16_t>     { static constexpr auto value = EPropertyType::Int; };
 template<> struct DeducePropertyType<uint32_t>     { static constexpr auto value = EPropertyType::Int; };
 template<> struct DeducePropertyType<bool>         { static constexpr auto value = EPropertyType::Bool; };
+template<> struct DeducePropertyType<uint8_t>      { static constexpr auto value = EPropertyType::Int; };
+template<> struct DeducePropertyType<int64_t>      { static constexpr auto value = EPropertyType::Int; };
+template<> struct DeducePropertyType<uint64_t>     { static constexpr auto value = EPropertyType::Int; };
 template<> struct DeducePropertyType<std::string>  { static constexpr auto value = EPropertyType::String; };
 template<> struct DeducePropertyType<glm::vec2>    { static constexpr auto value = EPropertyType::Vec2; };
 template<> struct DeducePropertyType<glm::vec3>    { static constexpr auto value = EPropertyType::Vec3; };
