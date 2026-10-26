@@ -881,6 +881,82 @@ static bool benchDescriptorCacheColdAgainstWarm(size_t distinct, size_t reps)
     return pass(name);
 }
 
+// Whole-frame cost trace on the counting backend: one synthetic frame is
+// recorded, ordered both ways, binned and replayed while every counter the
+// backend exposes is printed, so the cost of each stage stays visible.
+static bool traceFrameCosts()
+{
+    const std::string name = "frame cost trace accounts for every submitted draw";
+    const size_t drawCount = 4096;
+    const size_t lightCount = 4096;
+    HeadlessRenderAPI api;
+    IGPUMesh* mesh = makeUploadedMesh(api);
+
+    RenderCommandBuffer plain = makeUnsortedBuffer(mesh, drawCount);
+    auto start = std::chrono::steady_clock::now();
+    plain.sort();
+    const double sortNs = elapsedNsPerOp(std::chrono::steady_clock::now() - start, drawCount);
+
+    RenderCommandBuffer depthOrdered = makeUnsortedBuffer(mesh, drawCount);
+    const glm::mat4 view(1.0f);
+    start = std::chrono::steady_clock::now();
+    depthOrdered.sortWithViewDepth(view);
+    const double depthSortNs = elapsedNsPerOp(std::chrono::steady_clock::now() - start, drawCount);
+
+    std::vector<GPUPointLight> lights(lightCount);
+    for (size_t i = 0; i < lightCount; i++)
+    {
+        lights[i].position = glm::vec3((float)((int)(i % 16) - 8) * 0.4f,
+                                       (float)((int)((i / 16) % 16) - 8) * 0.4f,
+                                       -5.0f - (float)(i % 8));
+        lights[i].range = 0.5f;
+    }
+    const glm::mat4 proj = glm::perspective(glm::radians(90.0f), 1.0f, 0.1f, 1000.0f);
+    ForwardPlusBinningResult binned;
+    ForwardPlusBinningScratch scratch;
+    start = std::chrono::steady_clock::now();
+    binForwardPlusLightsInto(binned, scratch, lights.data(), (uint32_t)lightCount,
+                             nullptr, 0, view, proj, 160, 160, 0.1f, 1000.0f, true, true);
+    const double binNs = elapsedNsPerOp(std::chrono::steady_clock::now() - start, lightCount);
+
+    api.beginFrame();
+    start = std::chrono::steady_clock::now();
+    api.replayCommandBuffer(depthOrdered);
+    const double replayNs = elapsedNsPerOp(std::chrono::steady_clock::now() - start, drawCount);
+    const RenderFrameStats seq = api.getLastFrameStats();
+
+    HeadlessRenderAPI parallelApi;
+    parallelApi.beginFrame();
+    start = std::chrono::steady_clock::now();
+    parallelApi.replayCommandBufferParallel(depthOrdered);
+    const double parallelNs = elapsedNsPerOp(std::chrono::steady_clock::now() - start, drawCount);
+    const RenderFrameStats par = parallelApi.getLastFrameStats();
+
+    if (seq.submitted_draw_commands != drawCount || par.submitted_draw_commands != drawCount)
+        return fail(name, "submitted draw count does not match the recorded frame");
+    if (seq.backend_draw_calls != par.backend_draw_calls ||
+        seq.instanced_batches != par.instanced_batches)
+        return fail(name, "parallel replay breakdown differs from sequential replay");
+
+    const double draws = (double)drawCount;
+    std::cout << "[TRACE] frame draws=" << drawCount << " lights=" << lightCount << std::endl;
+    std::cout << "[TRACE] sort ns/draw=" << sortNs << " depth-sort ns/draw=" << depthSortNs << std::endl;
+    std::cout << "[TRACE] binning ns/light=" << binNs << " binned_indices=" << binned.lightIndices.size()
+              << " tiles=" << binned.tiles.size()
+              << " retained_capacity indices=" << binned.lightIndices.capacity()
+              << " cell_counts=" << scratch.cellCounts.capacity() << std::endl;
+    std::cout << "[TRACE] replay ns/draw=" << replayNs << " parallel ns/draw=" << parallelNs
+              << " backend_draws=" << seq.backend_draw_calls
+              << " batches=" << seq.instanced_batches << " instances=" << seq.instanced_instances
+              << " parallel_batches=" << par.parallel_replay_batches
+              << " parallel_workers=" << par.parallel_replay_workers << std::endl;
+    std::cout << "[TRACE] per-draw binds_skipped=" << (double)seq.state_binds_skipped / draws
+              << " descriptor_allocs=" << seq.descriptor_allocs
+              << " descriptor_hits=" << seq.descriptor_cache_hits << std::endl;
+    delete mesh;
+    return pass(name);
+}
+
 int main(){
     bool ok = true;
     ok &= testPackedKeyFieldPriority();
@@ -907,6 +983,7 @@ int main(){
     ok &= benchBinningRetainedAgainstOneOff(4096, 100);
     ok &= benchDepthSortAgainstPlainSort(10000, 20);
     ok &= benchDescriptorCacheColdAgainstWarm(64, 200);
+    ok &= traceFrameCosts();
     std::cout << (ok ? "all perf tests passed" : "perf tests FAILED") << std::endl;
     return ok ? 0 : 1;
 }
