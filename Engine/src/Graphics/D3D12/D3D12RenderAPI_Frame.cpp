@@ -174,8 +174,14 @@ void D3D12RenderAPI::endFrame()
     {
         auto& cv = *m_clientViewport;
 
-        bool wantSSAO = ssaoEnabled && m_ssaoBlurVPass.isInitialized();
-        bool wantShadowMask = (shadowQuality > 0) && m_shadowMaskPass.isInitialized() && m_shadowMapArray;
+        // SSAO and shadow-mask targets are sized for the post-process
+        // resources; running them against a differently sized viewport
+        // (for example while a resize is still pending) corrupts the
+        // half-resolution sampling, so they stay off until sizes match.
+        const bool postProcessSizeMatches =
+            viewport_width == pp_resources_width && viewport_height == pp_resources_height && !pp_resize_dirty;
+        bool wantSSAO = postProcessSizeMatches && ssaoEnabled && m_ssaoBlurVPass.isInitialized();
+        bool wantShadowMask = postProcessSizeMatches && (shadowQuality > 0) && m_shadowMaskPass.isInitialized() && m_shadowMapArray;
 
         if (m_useRenderGraph)
         {
@@ -201,7 +207,7 @@ void D3D12RenderAPI::endFrame()
         else
         {
             // Run SSAO pass before FXAA/tone-mapping (generates blurred SSAO texture)
-            if (ssaoEnabled && m_ssaoPass.isInitialized())
+            if (wantSSAO && m_ssaoPass.isInitialized())
                 renderSSAOPass(cv.getDepth(), cv.getDepthSRV(), viewport_width, viewport_height);
 
             // Run shadow mask pass (generates shadow factor texture from depth + shadow maps)

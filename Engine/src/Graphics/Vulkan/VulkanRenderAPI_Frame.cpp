@@ -334,7 +334,15 @@ void VulkanRenderAPI::endFrame()
     // Post-process only in standalone mode (viewport mode is handled by endSceneRender + renderUI)
     if (!isViewportMode())
     {
-        bool wantSSAO = ssaoEnabled && ssao_initialized;
+        // SSAO targets are half resolution; they only line up with the
+        // depth buffer while the swapchain extent still matches the size
+        // they were created for, so SSAO stays off across a mismatch.
+        const bool ssaoSizeMatches = ssao_initialized &&
+            static_cast<int>(swapchain_extent.width)  >= ssaoPass_.getWidth() * 2 &&
+            static_cast<int>(swapchain_extent.width)  <= ssaoPass_.getWidth() * 2 + 1 &&
+            static_cast<int>(swapchain_extent.height) >= ssaoPass_.getHeight() * 2 &&
+            static_cast<int>(swapchain_extent.height) <= ssaoPass_.getHeight() * 2 + 1;
+        bool wantSSAO = ssaoEnabled && ssao_initialized && ssaoSizeMatches;
         bool wantShadowMask = shadowQuality > 0 && shadow_mask_initialized && shadow_map_image != VK_NULL_HANDLE;
 
         if (m_useRenderGraph && fxaa_initialized)
