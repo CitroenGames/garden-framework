@@ -25,9 +25,11 @@ void registerEngineReflection(ReflectionRegistry& registry)
     registry.reflect<SpotLightComponent>("SpotLightComponent");
     registry.reflect<PrefabInstanceComponent>("PrefabInstanceComponent");
     registry.reflect<IdentityComponent>("IdentityComponent");
-    // Hierarchy: only ParentComponent is serialized (parent GUID, §5).
-    // ChildrenComponent is not reflected (no vector<EntityRef> reflection
-    // support; rebuilt on load) and WorldTransformComponent is derived.
+    // Hierarchy: ParentComponent is the load-authoritative link;
+    // ChildrenComponent (vector<EntityRef>) is reflected/serialized and
+    // rebuilt from Parent on load. WorldTransformComponent is derived
+    // and intentionally unreflected.
     registry.reflect<ParentComponent>("ParentComponent");
+    registry.reflect<ChildrenComponent>("ChildrenComponent");
     registry.reflect<HierarchyPolicyComponent>("HierarchyPolicyComponent");
 }

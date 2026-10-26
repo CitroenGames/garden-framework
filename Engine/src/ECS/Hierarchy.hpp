@@ -408,7 +408,8 @@ inline std::vector<entt::entity> collectDescendants(entt::registry& r,
 // creates all entities + ParentComponent (GUIDs already resolved through
 // IdentityComponent / EntityIndex); pass 2 calls this to rebuild every
 // ChildrenComponent from ParentComponent (the single source of truth).
-// ChildrenComponent and WorldTransformComponent are never saved.
+// ChildrenComponent is serialized as a mirror, but rebuild is authoritative;
+// WorldTransformComponent is never saved (derived).
 // Orphan parent GUID (target not in registry): entity becomes root,
 // ParentComponent is removed, warning logged.
 // ---------------------------------------------------------------------------

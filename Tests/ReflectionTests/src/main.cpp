@@ -4,6 +4,10 @@
 #include "Reflection/ReflectionRegistry.hpp"
 #include "Reflection/ReflectionSerializer.hpp"
 #include "LevelManager.hpp"
+#include "Components/HierarchyComponents.hpp"
+#include "Components/IdentityComponent.hpp"
+#include "ECS/Hierarchy.hpp"
+#include <vector>
 
 #include <cmath>
 #include <entt/entt.hpp>
@@ -50,6 +54,29 @@ namespace
             r.field<&TestComponent::matrix>("matrix");
             r.field<&TestComponent::mode>("mode").enumValues(test_mode_names, 2);
             r.field<&TestComponent::target>("target").visible();
+        }
+    };
+
+    struct VectorComponent
+    {
+        std::vector<float> floats;
+        std::vector<int> ints;
+        std::vector<bool> bools;
+        std::vector<std::string> strings;
+        std::vector<EntityRef> refs;
+        std::vector<glm::vec3> points;
+        float scalar = 0.0f;
+
+        static void reflect(Reflector<VectorComponent>& r)
+        {
+            r.display("Vector Component").category("Tests");
+            r.field<&VectorComponent::floats>("floats");
+            r.field<&VectorComponent::ints>("ints");
+            r.field<&VectorComponent::bools>("bools");
+            r.field<&VectorComponent::strings>("strings");
+            r.field<&VectorComponent::refs>("refs");
+            r.field<&VectorComponent::points>("points");
+            r.field<&VectorComponent::scalar>("scalar");
         }
     };
 
@@ -361,6 +388,165 @@ namespace
 
         return pass(name);
     }
+    bool testVectorRoundTrip()
+    {
+        const std::string name = "vector<T> round-trip (empty/scalars/strings/EntityRef/vec3)";
+        ReflectionRegistry reflection;
+        reflection.reflect<VectorComponent>("VectorComponent", "reflection_tests");
+        const ComponentDescriptor* desc = reflection.findByName("VectorComponent");
+        if (!desc) return fail(name, "VectorComponent not registered");
+        // Descriptor shape
+        int array_count = 0;
+        for (const auto& prop : desc->properties)
+        {
+            if (prop.name == "floats" && prop.type == EPropertyType::Array && prop.element_type == EPropertyType::Float) ++array_count;
+            if (prop.name == "ints" && prop.type == EPropertyType::Array && prop.element_type == EPropertyType::Int) ++array_count;
+            if (prop.name == "bools" && prop.type == EPropertyType::Array && prop.element_type == EPropertyType::Bool) ++array_count;
+            if (prop.name == "strings" && prop.type == EPropertyType::Array && prop.element_type == EPropertyType::String) ++array_count;
+            if (prop.name == "refs" && prop.type == EPropertyType::Array && prop.element_type == EPropertyType::EntityRef) ++array_count;
+            if (prop.name == "points" && prop.type == EPropertyType::Array && prop.element_type == EPropertyType::Vec3) ++array_count;
+        }
+        if (array_count != 6) return fail(name, "array element types not deduced");
+
+        entt::registry reg;
+        entt::entity e = reg.create();
+        auto& c = reg.emplace<VectorComponent>(e);
+        c.floats = {1.5f, -2.0f, 3.25f};
+        c.ints = {7, -8, 42};
+        c.bools = {true, false, true};
+        c.strings = {"alpha", "", "gamma delta"};
+        EntityRef r1; r1.guid = EntityGuid{0x1111, 0x2222};
+        EntityRef r2; r2.guid = EntityGuid{0xAAAA, 0xBBBB};
+        c.refs = {r1, EntityRef{}, r2};
+        c.points = {glm::vec3(1,2,3), glm::vec3(-4,5.5f,6)};
+        c.scalar = 9.5f;
+
+        nlohmann::json ej = ReflectionSerializer::serializeEntity(reg, e, reflection);
+        auto vc = ej["components"]["VectorComponent"];
+        if (!vc["floats"].is_array() || vc["floats"].size() != 3) return fail(name, "floats not JSON array");
+        if (vc["refs"][0] != guidToString(r1.guid)) return fail(name, "EntityRef element not GUID string");
+        if (vc["refs"][1] != guidToString(EntityGuid{})) return fail(name, "null EntityRef element wrong");
+        if (vc["points"][1][1] != 5.5f) return fail(name, "vec3 element wrong");
+
+        entt::registry reg2;
+        entt::entity e2 = reg2.create();
+        ReflectionSerializer::deserializeEntity(reg2, e2, ej, reflection);
+        if (!reg2.all_of<VectorComponent>(e2)) return fail(name, "vector component not added");
+        const auto& out = reg2.get<VectorComponent>(e2);
+        if (!ReflectionPropertyOps::componentPropertiesEqual(*desc, &c, &out)) return fail(name, "equality after round-trip failed");
+        if (out.floats != c.floats || out.ints != c.ints || out.strings != c.strings || out.refs != c.refs) return fail(name, "field mismatch after round-trip");
+        if (out.bools.size() != 3 || !out.bools[0] || out.bools[1] || !out.bools[2]) return fail(name, "bool vector mismatch");
+        if (!approx(out.points[1].y, 5.5f) || !approx(out.scalar, 9.5f)) return fail(name, "vec3/scalar mismatch");
+
+        // Copy (must deep-copy vectors, not memcpy the vector object)
+        VectorComponent copied;
+        ReflectionPropertyOps::copyComponentProperties(*desc, &c, &copied);
+        if (!ReflectionPropertyOps::componentPropertiesEqual(*desc, &c, &copied)) return fail(name, "copy mismatch");
+        copied.floats.push_back(99.0f);
+        if (c.floats.size() != 3) return fail(name, "copy aliased source vector");
+
+        // Equality detects difference
+        VectorComponent diff = c; diff.strings[0] = "changed";
+        if (ReflectionPropertyOps::componentPropertiesEqual(*desc, &c, &diff)) return fail(name, "equality missed string diff");
+
+        // Empty vectors round-trip
+        entt::registry reg3; entt::entity e3 = reg3.create(); reg3.emplace<VectorComponent>(e3);
+        nlohmann::json ej3 = ReflectionSerializer::serializeEntity(reg3, e3, reflection);
+        entt::registry reg4; entt::entity e4 = reg4.create();
+        ReflectionSerializer::deserializeEntity(reg4, e4, ej3, reflection);
+        const auto& out4 = reg4.get<VectorComponent>(e4);
+        if (!out4.floats.empty() || !out4.refs.empty() || !out4.strings.empty()) return fail(name, "empty vector round-trip not empty");
+
+        // Invalid element must not mutate existing value
+        VectorComponent guard; guard.floats = {1.0f, 2.0f};
+        const PropertyDescriptor* floats_prop = nullptr;
+        for (const auto& prop : desc->properties) if (prop.name == "floats") floats_prop = &prop;
+        if (!floats_prop) return fail(name, "floats prop missing");
+        if (ReflectionPropertyOps::deserializeProperty(*floats_prop, &guard, nlohmann::json::array({1.0f, "bad"})))
+            return fail(name, "invalid vector element reported success");
+        if (guard.floats.size() != 2 || !approx(guard.floats[0], 1.0f)) return fail(name, "invalid vector mutated value");
+        return pass(name);
+    }
+
+    bool testHierarchyChildrenSerialization()
+    {
+        const std::string name = "hierarchy Children serialization does not corrupt Parent";
+        ReflectionRegistry reflection;
+        registerEngineReflection(reflection);
+        if (!reflection.findByName("ChildrenComponent")) return fail(name, "ChildrenComponent not reflected");
+        if (reflection.findByName("WorldTransformComponent")) return fail(name, "WorldTransformComponent must stay unreflected");
+        const ComponentDescriptor* children_desc = reflection.findByName("ChildrenComponent");
+        bool is_array_ref = false;
+        for (const auto& prop : children_desc->properties)
+            if (prop.name == "children" && prop.type == EPropertyType::Array && prop.element_type == EPropertyType::EntityRef) is_array_ref = true;
+        if (!is_array_ref) return fail(name, "children is not Array<EntityRef>");
+
+        EntityGuid parent_guid{0x1000, 0x1};
+        EntityGuid child_guid{0x1000, 0x2};
+        EntityGuid child2_guid{0x1000, 0x3};
+        entt::registry reg;
+        entt::entity parent = reg.create();
+        entt::entity child = reg.create();
+        entt::entity child2 = reg.create();
+        reg.emplace<IdentityComponent>(parent).guid = parent_guid;
+        reg.emplace<IdentityComponent>(child).guid = child_guid;
+        reg.emplace<IdentityComponent>(child2).guid = child2_guid;
+        reg.emplace<TransformComponent>(parent);
+        reg.emplace<TransformComponent>(child);
+        reg.emplace<TransformComponent>(child2);
+        reg.emplace<ParentComponent>(child).parent = EntityRef{parent_guid};
+        reg.emplace<ParentComponent>(child2).parent = EntityRef{parent_guid};
+        auto& children = reg.emplace<ChildrenComponent>(parent);
+        children.children = {EntityRef{child_guid}, EntityRef{child2_guid}};
+
+        nlohmann::json level = ReflectionSerializer::serializeLevel(reg, reflection);
+        // Parent serialized as single GUID string, Children as array of GUID strings
+        bool saw_children = false, saw_parent = false;
+        for (auto& ej : level["entities"])
+        {
+            if (!ej.contains("components")) continue;
+            if (ej["components"].contains("ChildrenComponent"))
+            {
+                auto arr = ej["components"]["ChildrenComponent"]["children"];
+                if (!arr.is_array() || arr.size() != 2 || arr[0] != guidToString(child_guid)) return fail(name, "serialized Children wrong");
+                saw_children = true;
+            }
+            if (ej["components"].contains("ParentComponent"))
+            {
+                if (ej["components"]["ParentComponent"]["parent"] != guidToString(parent_guid)) return fail(name, "serialized Parent corrupted");
+                saw_parent = true;
+            }
+        }
+        if (!saw_children || !saw_parent) return fail(name, "hierarchy components missing in level JSON");
+
+        // Tamper Children in the file: rebuild from Parent must restore it and keep Parent intact
+        for (auto& ej : level["entities"])
+            if (ej.contains("components") && ej["components"].contains("ChildrenComponent"))
+                ej["components"]["ChildrenComponent"]["children"] = nlohmann::json::array();
+
+        entt::registry loaded;
+        ReflectionSerializer::deserializeLevel(loaded, level, reflection);
+        auto find_by_guid = [&](EntityGuid g) -> entt::entity {
+            for (auto [e, id] : loaded.view<IdentityComponent>().each()) if (id.guid == g) return e;
+            return entt::null;
+        };
+        entt::entity lparent = find_by_guid(parent_guid);
+        entt::entity lchild = find_by_guid(child_guid);
+        entt::entity lchild2 = find_by_guid(child2_guid);
+        if (lparent == entt::null || lchild == entt::null || lchild2 == entt::null) return fail(name, "loaded entities missing");
+        // Tampered empty Children was loaded as-is, Parent untouched
+        const auto* tampered = loaded.try_get<ChildrenComponent>(lparent);
+        if (!tampered || !tampered->children.empty()) return fail(name, "tampered Children not loaded as empty");
+        Hierarchy::rebuildChildren(loaded, {lchild, lchild2});
+        const auto* lp = loaded.try_get<ParentComponent>(lchild);
+        if (!lp || lp->parent.guid != parent_guid) return fail(name, "Parent corrupted after Children rebuild");
+        const auto* lc = loaded.try_get<ChildrenComponent>(lparent);
+        if (!lc || lc->children.size() != 2 || lc->children[0].guid != child_guid || lc->children[1].guid != child2_guid)
+            return fail(name, "Children not rebuilt from Parent");
+        if (Hierarchy::parentOf(loaded, lchild) != lparent) return fail(name, "parentOf broken after load+rebuild");
+        return pass(name);
+    }
+
 }
 
 int main()
@@ -372,5 +558,7 @@ int main()
     ok = testInvalidJsonDoesNotMutate() && ok;
     ok = testWaterComponentReflectionAndObjectVectorJson() && ok;
     ok = testReflectedLevelJsonMigration() && ok;
+    ok = testVectorRoundTrip() && ok;
+    ok = testHierarchyChildrenSerialization() && ok;
     return ok ? 0 : 1;
 }

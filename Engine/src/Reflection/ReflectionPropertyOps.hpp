@@ -18,4 +18,7 @@ namespace ReflectionPropertyOps
 
     ENGINE_API nlohmann::json serializeProperty(const PropertyDescriptor& prop, const void* component);
     ENGINE_API bool deserializeProperty(const PropertyDescriptor& prop, void* component, const nlohmann::json& value);
+    ENGINE_API size_t arraySize(const PropertyDescriptor& prop, const void* component);
+    ENGINE_API bool propertyValuesEqual(const PropertyDescriptor& prop, const void* a_component, const void* b_component);
+    ENGINE_API bool componentPropertiesEqual(const ComponentDescriptor& desc, const void* a_component, const void* b_component);
 }

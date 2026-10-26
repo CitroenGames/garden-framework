@@ -7,6 +7,7 @@
 #include <glm/gtc/quaternion.hpp>
 #include <initializer_list>
 #include <string>
+#include <vector>
 #include <type_traits>
 
 // ============================================================================
@@ -32,6 +33,16 @@ struct DeducePropertyType<M, std::enable_if_t<std::is_enum_v<M>>>
 {
     static constexpr auto value = EPropertyType::Enum;
 };
+
+template<typename T>
+struct DeducePropertyType<std::vector<T>>
+{
+    static constexpr auto value = EPropertyType::Array;
+    static constexpr auto element = DeducePropertyType<T>::value;
+};
+
+template<typename T> struct ReflectedFieldElement { using type = void; static constexpr bool is_array = false; };
+template<typename T> struct ReflectedFieldElement<std::vector<T>> { using type = T; static constexpr bool is_array = true; };
 
 template<typename>
 struct ReflectionMemberPointerTraits;
@@ -156,6 +167,17 @@ public:
         prop.name = std::move(name);
         prop.type = DeducePropertyType<Field>::value;
         prop.size = static_cast<uint32_t>(sizeof(Field));
+        if constexpr (ReflectedFieldElement<Field>::is_array)
+        {
+            using Elem = typename ReflectedFieldElement<Field>::type;
+            static_assert(DeducePropertyType<Elem>::value != EPropertyType::Array, "nested vector reflection not supported");
+            prop.element_type = DeducePropertyType<Elem>::value;
+            prop.element_size = static_cast<uint32_t>(sizeof(Elem));
+            prop.array_size = [](const void* field) -> size_t { return static_cast<const Field*>(field)->size(); };
+            prop.array_resize = [](void* field, size_t count) { static_cast<Field*>(field)->resize(count); };
+            prop.array_read_element = [](const void* field, size_t index, void* out) { const auto& v = *static_cast<const Field*>(field); if (index < v.size()) *static_cast<Elem*>(out) = v[index]; };
+            prop.array_write_element = [](void* field, size_t index, const void* in) { auto& v = *static_cast<Field*>(field); if (index < v.size()) v[index] = *static_cast<const Elem*>(in); };
+        }
         prop.mutable_data = [](void* component) -> void* {
             return static_cast<void*>(&(static_cast<T*>(component)->*Member));
         };

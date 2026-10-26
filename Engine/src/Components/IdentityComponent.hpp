@@ -89,14 +89,11 @@ struct DeducePropertyType<EntityGuid>
     static constexpr auto value = EPropertyType::String;
 };
 
-// EntityRef serializes as its GUID string, exactly like EntityGuid:
-// ReflectionPropertyOps treats a String property with
-// size == sizeof(EntityGuid) as a GUID (serialize/deserialize/copy), and
-// EntityRef's sole member is its guid at offset 0 with the same size.
+// EntityRef serializes as its GUID hex string (null GUID = no reference).
 template<>
 struct DeducePropertyType<EntityRef>
 {
-    static constexpr auto value = EPropertyType::String;
+    static constexpr auto value = EPropertyType::EntityRef;
 };
 
 struct IdentityComponent

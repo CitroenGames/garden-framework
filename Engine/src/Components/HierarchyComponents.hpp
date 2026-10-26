@@ -12,9 +12,10 @@
 // TransformComponent (Components.hpp) is the LOCAL transform for parented
 // entities; roots keep local == world.
 
-// Child-side link. Single source of truth for serialization: only this
-// component (its parent GUID) is saved; ChildrenComponent is rebuilt on
-// load (Hierarchy::rebuildChildren) and WorldTransformComponent is derived.
+// Child-side link. ParentComponent (its parent GUID) is the single source
+// of truth for hierarchy load; ChildrenComponent is reflected/serialized as
+// the authoring-order mirror and rebuilt from Parent on level load
+// (Hierarchy::rebuildChildren). WorldTransformComponent stays derived.
 struct ParentComponent
 {
     EntityRef parent; // null ref = root (component may exist during reparent)
@@ -30,15 +31,21 @@ struct ParentComponent
 };
 
 // Parent-side link. Mirror of ParentComponent, maintained ONLY by the
-// Hierarchy API (ECS/Hierarchy.hpp), never edited directly.
-// NOTE: not reflected. ChildrenComponent::children is vector<EntityRef> and
-// the reflection system has no vector<EPropertyType> support (no
-// DeducePropertyType<std::vector<...>>), so it cannot be serialized via
-// reflection. It is also never saved by design (hierarchy.md §5) - it is
-// rebuilt from ParentComponent on load.
+// Hierarchy API (ECS/Hierarchy.hpp), never edited directly by gameplay.
+// Reflected as vector<EntityRef> (JSON array of GUID strings). On level
+// load ParentComponent remains authoritative: rebuildChildren() rebuilds
+// this list, so a serialized Children list cannot corrupt Parent links.
 struct ChildrenComponent
 {
     std::vector<EntityRef> children; // authoring order
+
+    static void reflect(Reflector<ChildrenComponent>& r)
+    {
+        r.display("Children").category("Hierarchy");
+        r.field<&ChildrenComponent::children>("children")
+            .tooltip("Child entities (stable GUIDs, authoring order)")
+            .category("Hierarchy");
+    }
 };
 
 // Composed world transform, written ONLY by transform propagation

@@ -77,6 +77,7 @@ bool drawReflectedProperty(const PropertyDescriptor& prop, void* component,
         return false;
 
     const char* label = prop.meta.display_name.empty() ? prop.name.c_str() : prop.meta.display_name.c_str();
+    if (prop.type == EPropertyType::Array) { ImGui::TextDisabled("%s: [%zu]", label, ReflectionPropertyOps::arraySize(prop, component)); return false; }
     EPropertyWidget widget = ReflectionPropertyOps::resolveWidget(prop);
 
     // Read-only wrapper

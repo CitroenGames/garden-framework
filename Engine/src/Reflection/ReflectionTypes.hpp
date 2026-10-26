@@ -31,6 +31,8 @@ enum class EPropertyType : uint8_t
     Entity,
     AssetPath,
     Enum,
+    Array,
+    EntityRef,
 };
 
 // ---- Property widget override ----
@@ -79,6 +81,13 @@ struct PropertyDescriptor
     EPropertyType type;        // Data type
     uint32_t size = 0;         // sizeof the field
     PropertyMeta meta;         // Editor metadata
+
+    EPropertyType element_type = EPropertyType::Float;
+    uint32_t element_size = 0;
+    size_t (*array_size)(const void* field) = nullptr;
+    void (*array_resize)(void* field, size_t count) = nullptr;
+    void (*array_read_element)(const void* field, size_t index, void* out_element) = nullptr;
+    void (*array_write_element)(void* field, size_t index, const void* in_element) = nullptr;
 
     void* (*mutable_data)(void* component) = nullptr;
     const void* (*const_data)(const void* component) = nullptr;
