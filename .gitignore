@@ -53,9 +53,17 @@ bld/
 # (https://github.com/github/gitignore/pull/3736)
 #!**/[Bb]in/*.refresh
 
-# Allow Slang compiler binaries and libraries
-!Tools/slang-*/bin/**
-!Tools/slang-*/lib/**
+# Downloaded Slang compiler - fetched automatically by
+# compile_shaders_slang.bat / compile_shaders_slang.sh from
+# https://github.com/shader-slang/slang/releases/tag/v2026.20
+# on first run. Not committed to the repo.
+Tools/slang-2026.20/
+Tools/slang-*.zip
+Tools/slang-*.tar.gz
+
+# Allow Slang compiler binaries and libraries (legacy vendored copy)
+!Tools/slang-2026.5.2/bin/**
+!Tools/slang-2026.5.2/lib/**
 
 # Visual Studio 2015/2017 cache/options directory
 .vs/

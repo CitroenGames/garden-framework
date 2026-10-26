@@ -1,6 +1,8 @@
 @echo off
 REM Compile all Slang shaders to DXIL and SPIR-V
-REM Requires slangc in Tools\slang-2026.5.2\bin\
+REM Uses slangc from Tools\slang-2026.20\bin\ — downloaded automatically
+REM from https://github.com/shader-slang/slang/releases/tag/v2026.20
+REM on first run if missing. Tools\slang-2026.20\ is git-ignored.
 REM Metal output can be added when targeting macOS
 REM
 REM Note: pbr.slang and common.slang are modules imported by other shaders.
@@ -8,13 +10,22 @@ REM They are NOT compiled standalone — slangc resolves them automatically.
 
 setlocal enabledelayedexpansion
 
-set SLANGC=%~dp0Tools\slang-2026.5.2\bin\slangc.exe
+set SLANG_VERSION=2026.20
+set SLANG_TAG=v2026.20
+set SLANG_DIR=%~dp0Tools\slang-%SLANG_VERSION%
+set SLANGC=%SLANG_DIR%\bin\slangc.exe
 set SHADER_DIR=%~dp0assets\shaders\slang
 set OUT_D3D12=%~dp0assets\shaders\compiled\d3d12
 set OUT_VK=%~dp0assets\shaders\compiled\vulkan
 
 if not exist "%SLANGC%" (
+    call :ensure_slang
+)
+if not exist "%SLANGC%" (
     echo ERROR: slangc not found at %SLANGC%
+    echo Automatic download of Slang %SLANG_VERSION% failed. Check your internet connection,
+    echo or manually extract slang-%SLANG_VERSION%-windows-x86_64.zip from
+    echo https://github.com/shader-slang/slang/releases/tag/%SLANG_TAG% into %SLANG_DIR%\
     exit /b 1
 )
 
@@ -141,5 +152,88 @@ if errorlevel 1 (
 if errorlevel 1 (
     echo   FAILED: %NAME% [SPIR-V fragment]
     set /a ERRORS+=1
+)
+goto :eof
+
+REM ---------------------------------------------------------------------------
+REM Download and extract Slang %SLANG_VERSION% into %SLANG_DIR% if slangc is
+REM missing. The release archive is flat (bin\, lib\, include\ at its root),
+REM so extracting it into %SLANG_DIR% yields %SLANG_DIR%\bin\slangc.exe.
+:ensure_slang
+set SLANG_ARCH=x86_64
+if /i "%PROCESSOR_ARCHITECTURE%"=="ARM64" set SLANG_ARCH=aarch64
+if /i "%PROCESSOR_ARCHITEW6432%"=="ARM64" set SLANG_ARCH=aarch64
+set SLANG_ASSET=slang-%SLANG_VERSION%-windows-%SLANG_ARCH%.zip
+set SLANG_URL=https://github.com/shader-slang/slang/releases/download/%SLANG_TAG%/%SLANG_ASSET%
+set SLANG_TMP=%TEMP%\garden-slang-%SLANG_VERSION%
+set SLANG_ARCHIVE=%SLANG_TMP%\%SLANG_ASSET%
+set SLANG_STAGE=%SLANG_TMP%\extracted
+
+echo Slang %SLANG_VERSION% not found in %SLANG_DIR%\
+echo Downloading %SLANG_URL% ...
+if exist "%SLANG_TMP%" rmdir /s /q "%SLANG_TMP%"
+mkdir "%SLANG_STAGE%"
+if errorlevel 1 (
+    echo ERROR: Failed to create temp directory %SLANG_STAGE%
+    goto :eof
+)
+
+where curl.exe >nul 2>&1
+if not errorlevel 1 (
+    curl.exe -L --fail --retry 3 -o "%SLANG_ARCHIVE%" "%SLANG_URL%"
+) else (
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri '%SLANG_URL%' -OutFile '%SLANG_ARCHIVE%'"
+)
+if errorlevel 1 (
+    echo ERROR: Failed to download %SLANG_URL%
+    rmdir /s /q "%SLANG_TMP%"
+    goto :eof
+)
+if not exist "%SLANG_ARCHIVE%" (
+    echo ERROR: Download did not produce %SLANG_ARCHIVE%
+    rmdir /s /q "%SLANG_TMP%"
+    goto :eof
+)
+
+echo Extracting to %SLANG_DIR%\ ...
+where tar.exe >nul 2>&1
+if not errorlevel 1 (
+    tar.exe -xf "%SLANG_ARCHIVE%" -C "%SLANG_STAGE%"
+) else (
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "Expand-Archive -LiteralPath '%SLANG_ARCHIVE%' -DestinationPath '%SLANG_STAGE%' -Force"
+)
+if errorlevel 1 (
+    echo ERROR: Failed to extract %SLANG_ARCHIVE%
+    rmdir /s /q "%SLANG_TMP%"
+    goto :eof
+)
+
+REM Archive root normally contains bin\slangc.exe directly; tolerate a
+REM single nested top-level folder as well.
+set SLANG_ROOT=%SLANG_STAGE%
+if not exist "%SLANG_ROOT%\bin\slangc.exe" (
+    for /d %%D in ("%SLANG_STAGE%\*") do (
+        if exist "%%D\bin\slangc.exe" set SLANG_ROOT=%%D
+    )
+)
+if not exist "!SLANG_ROOT!\bin\slangc.exe" (
+    echo ERROR: slangc.exe not found in downloaded archive %SLANG_ASSET%
+    rmdir /s /q "%SLANG_TMP%"
+    goto :eof
+)
+
+if not exist "%SLANG_DIR%" mkdir "%SLANG_DIR%"
+robocopy "!SLANG_ROOT!" "%SLANG_DIR%" /E /NFL /NDL /NJH /NJS >nul
+if !errorlevel! geq 8 (
+    echo ERROR: Failed to copy Slang into %SLANG_DIR%\
+    rmdir /s /q "%SLANG_TMP%"
+    goto :eof
+)
+rmdir /s /q "%SLANG_TMP%"
+
+if exist "%SLANGC%" (
+    echo Slang %SLANG_VERSION% installed to %SLANG_DIR%\
+) else (
+    echo ERROR: Slang extraction did not produce %SLANGC%
 )
 goto :eof

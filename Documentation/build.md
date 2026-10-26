@@ -11,7 +11,7 @@ Generated project files are written to `build/`. Build outputs are written to `b
 * Sighmake available on `PATH`, or a platform-local Sighmake binary where the helper scripts expect it.
 * A C++20-capable compiler toolchain.
 * Vulkan SDK installed and discoverable by Sighmake. The build scripts currently call `find_package(Vulkan REQUIRED)` for the graphics module.
-* The bundled Slang compiler under `Tools/slang-2026.5.2/` for D3D12/Vulkan shader compilation.
+* The Slang compiler for D3D12/Vulkan shader compilation. `compile_shaders_slang.bat` / `compile_shaders_slang.sh` download Slang 2026.20 from the [official release](https://github.com/shader-slang/slang/releases/tag/v2026.20) into `Tools/slang-2026.20/` (git-ignored) on first run if it is not already present.
 
 ### Windows
 

@@ -1,0 +1,49 @@
+# Sourceless SDK stub.
+#
+# Drop this file at <SDK_ROOT>/Engine/Engine.buildscript inside a shipped
+# SDK distribution. A consuming project's buildscript stays identical to
+# the source-mode version — only ENGINE_PATH changes to point at the SDK
+# drop instead of the engine source repo:
+#
+#     include = ${ENGINE_PATH}/Engine/Engine.buildscript
+#     target_link_libraries(PRIVATE EngineSDK)
+#
+# Expected drop layout:
+#     <SDK_ROOT>/Engine/Engine.buildscript   (this file)
+#     <SDK_ROOT>/public/**                   (curated public headers,
+#                                             incl. header-only thirdparty:
+#                                             entt, GLM, enet, miniaudio)
+#     <SDK_ROOT>/bin/*.lib, *.dll            (prebuilt engine + thirdparty
+#                                             static libs, plus SDL3.dll
+#                                             runtime)
+#
+# The list below mirrors EngineCore.buildscript + EngineGraphics.buildscript
+# PUBLIC target_link_libraries, minus interface (header-only) projects which
+# contribute only includes, not .libs. `garden package-sdk` regenerates this
+# file by reading each PUBLIC dep's type and resolving type=lib/dll deps to
+# their built .lib path.
+
+[project:EngineSDK]
+type = lib
+public_includes = ../public
+public_libs = {
+    ../bin/EngineCore.lib
+    ../bin/EngineGraphics.lib
+    ../bin/SDL3.lib
+    ../bin/freetype.lib
+    ../bin/RmlUi.lib
+    ../bin/Pakker.lib
+    ../bin/tinygltf.lib
+    ../bin/tinyobjloader.lib
+    ../bin/spdlog.lib
+    ../bin/imgui-docking.lib
+    ../bin/imguizmo.lib
+    ../bin/vk-bootstrap.lib
+    ../bin/VMA.lib
+    ../bin/JoltPhysics.lib
+    ../bin/meshoptimizer.lib
+    ../bin/RecastNavigation.lib
+    ../bin/bc7enc.lib
+}
+std = 20
+utf8 = true

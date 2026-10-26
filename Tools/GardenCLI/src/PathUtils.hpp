@@ -1,0 +1,140 @@
+#pragma once
+
+#include <string>
+#include <filesystem>
+#include <cstdlib>
+
+namespace fs = std::filesystem;
+
+namespace PathUtils
+{
+
+// Returns the directory where engines.json is stored.
+// Creates it if it doesn't exist.
+inline fs::path getConfigDir()
+{
+#ifdef _WIN32
+    const char* appdata = std::getenv("APPDATA");
+    if (appdata)
+        return fs::path(appdata) / "Garden";
+    return fs::path("C:/Garden");
+#elif defined(__APPLE__)
+    const char* home = std::getenv("HOME");
+    if (home)
+        return fs::path(home) / "Library" / "Application Support" / "Garden";
+    return fs::path("/tmp/Garden");
+#else
+    // Linux: XDG_CONFIG_HOME or ~/.config
+    const char* xdg = std::getenv("XDG_CONFIG_HOME");
+    if (xdg && xdg[0] != '\0')
+        return fs::path(xdg) / "garden";
+    const char* home = std::getenv("HOME");
+    if (home)
+        return fs::path(home) / ".config" / "garden";
+    return fs::path("/tmp/garden");
+#endif
+}
+
+inline fs::path getEnginesJsonPath()
+{
+    return getConfigDir() / "engines.json";
+}
+
+// Returns the platform-specific editor executable name
+inline std::string getEditorExeName()
+{
+#ifdef _WIN32
+    return "Editor.exe";
+#else
+    return "Editor";
+#endif
+}
+
+// Search for the editor executable relative to an engine root.
+// Checks common build output locations.
+inline fs::path findEditorPath(const fs::path& engine_root)
+{
+    // Check common locations in order of preference
+    fs::path candidates[] = {
+        engine_root / "bin" / getEditorExeName(),
+        engine_root / getEditorExeName(),
+        engine_root / "x64" / "Release" / getEditorExeName(),
+        engine_root / "x64" / "Debug" / getEditorExeName(),
+        engine_root / "build" / "Release" / getEditorExeName(),
+        engine_root / "build" / "Debug" / getEditorExeName(),
+    };
+
+    for (auto& candidate : candidates)
+    {
+        if (fs::exists(candidate))
+            return fs::canonical(candidate);
+    }
+
+    return {}; // Not found
+}
+
+// Returns the platform-specific client (game) executable name
+inline std::string getClientExeName()
+{
+#ifdef _WIN32
+    return "Game.exe";
+#else
+    return "Game";
+#endif
+}
+
+// Search for the client (game) executable relative to an engine root.
+// Checks common build output locations.
+inline fs::path findClientPath(const fs::path& engine_root)
+{
+    fs::path candidates[] = {
+        engine_root / "bin" / getClientExeName(),
+        engine_root / getClientExeName(),
+        engine_root / "x64" / "Release" / getClientExeName(),
+        engine_root / "x64" / "Debug" / getClientExeName(),
+        engine_root / "build" / "Release" / getClientExeName(),
+        engine_root / "build" / "Debug" / getClientExeName(),
+    };
+
+    for (auto& candidate : candidates)
+    {
+        if (fs::exists(candidate))
+            return fs::canonical(candidate);
+    }
+
+    return {}; // Not found
+}
+
+// Returns the platform-specific server executable name
+inline std::string getServerExeName()
+{
+#ifdef _WIN32
+    return "Server.exe";
+#else
+    return "Server";
+#endif
+}
+
+// Search for the server executable relative to an engine root.
+// Checks common build output locations.
+inline fs::path findServerPath(const fs::path& engine_root)
+{
+    fs::path candidates[] = {
+        engine_root / "bin" / getServerExeName(),
+        engine_root / getServerExeName(),
+        engine_root / "x64" / "Release" / getServerExeName(),
+        engine_root / "x64" / "Debug" / getServerExeName(),
+        engine_root / "build" / "Release" / getServerExeName(),
+        engine_root / "build" / "Debug" / getServerExeName(),
+    };
+
+    for (auto& candidate : candidates)
+    {
+        if (fs::exists(candidate))
+            return fs::canonical(candidate);
+    }
+
+    return {}; // Not found
+}
+
+} // namespace PathUtils
