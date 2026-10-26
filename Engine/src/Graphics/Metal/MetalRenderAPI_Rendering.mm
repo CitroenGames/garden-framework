@@ -1,9 +1,12 @@
 #include "MetalRenderAPI.hpp"
 #include "MetalRenderAPI_Impl.hpp"
 #include "MetalMesh.hpp"
+#include "MetalSceneViewport.hpp"
 #include "Components/mesh.hpp"
 #include "Components/camera.hpp"
 #include "Utils/Vertex.hpp"
+#include "Graphics/ForwardPlusLightBinning.hpp"
+#include "Console/ConVar.hpp"
 
 #include "stb_image.h"
 
@@ -581,32 +584,49 @@ void MetalRenderAPI::setPointAndSpotLights(const LightCBuffer& lights)
                        lights.spotLights, lights.numSpotLights);
 }
 
-bool MetalRenderAPI::isDeferredActive() const
+void MetalRenderAPI::uploadForwardPlusGrid(const ForwardPlusGridUpload& upload)
 {
-    return m_useDeferred
-        && impl->lightingEnabled
-        && impl->gbufferPipeline
-        && impl->deferredLightingPipeline
-        && impl->fxaaPipeline
-        && impl->basicHDRPipeline
-        && impl->skyboxHDRPipeline;
-}
+    const uint32_t frame = impl->currentFrame;
+    if (frame >= MetalRenderAPIImpl::MAX_FRAMES_IN_FLIGHT || !impl->device) return;
+    const uint32_t tileCount = std::max(upload.tileCount, 1u);
+    const uint32_t indexCount = std::max(upload.lightIndexCount, 1u);
 
-void MetalRenderAPI::submitDeferredOpaqueCommands(const RenderCommandBuffer& cmds)
-{
-    impl->deferredOpaqueCmds = cmds;
-}
+    auto ensureBuffer = [&](id<MTLBuffer>& buffer, void*& mapped, uint32_t& capacity,
+                            uint32_t needed, NSUInteger elemSize, NSString* label) {
+        needed = std::max(needed, 1u);
+        if (buffer && capacity >= needed && mapped) return;
+        id<MTLBuffer> old = buffer;
+        if (old) {
+            impl->deletionQueue.push([old]() {}, MetalRenderAPIImpl::MAX_FRAMES_IN_FLIGHT);
+        }
+        buffer = [impl->device newBufferWithLength:elemSize * needed
+                                           options:MTLResourceStorageModeShared];
+        buffer.label = label;
+        mapped = buffer ? [buffer contents] : nullptr;
+        capacity = buffer ? needed : 0;
+        if (mapped) std::memset(mapped, 0, elemSize * needed);
+    };
 
-void MetalRenderAPI::submitDeferredTransparentCommands(const RenderCommandBuffer& cmds)
-{
-    impl->deferredTransparentCmds = cmds;
+    ensureBuffer(impl->forwardPlusTilesBuffers[frame], impl->forwardPlusTilesMapped[frame],
+                 impl->forwardPlusTilesCapacity[frame], tileCount,
+                 sizeof(ForwardPlusTile), @"ForwardPlus Tiles");
+    ensureBuffer(impl->forwardPlusIndicesBuffers[frame], impl->forwardPlusIndicesMapped[frame],
+                 impl->forwardPlusIndicesCapacity[frame], indexCount,
+                 sizeof(uint32_t), @"ForwardPlus Indices");
+
+    if (impl->forwardPlusTilesMapped[frame] && upload.tiles)
+        std::memcpy(impl->forwardPlusTilesMapped[frame], upload.tiles,
+                    sizeof(ForwardPlusTile) * tileCount);
+    if (impl->forwardPlusIndicesMapped[frame] && upload.lightIndices && upload.lightIndexCount > 0)
+        std::memcpy(impl->forwardPlusIndicesMapped[frame], upload.lightIndices,
+                    sizeof(uint32_t) * upload.lightIndexCount);
 }
 
 void MetalRenderAPI::uploadLightBuffers(const GPUPointLight* pts, int ptCount,
                                         const GPUSpotLight* spts, int spCount)
 {
-    ptCount = std::clamp(ptCount, 0, MetalRenderAPIImpl::MAX_LIGHTS_DEFERRED);
-    spCount = std::clamp(spCount, 0, MetalRenderAPIImpl::MAX_LIGHTS_DEFERRED);
+    ptCount = std::clamp(ptCount, 0, MetalRenderAPIImpl::MAX_LIGHTS_BUFFER);
+    spCount = std::clamp(spCount, 0, MetalRenderAPIImpl::MAX_LIGHTS_BUFFER);
     if (!pts) ptCount = 0;
     if (!spts) spCount = 0;
 
@@ -620,11 +640,64 @@ void MetalRenderAPI::uploadLightBuffers(const GPUPointLight* pts, int ptCount,
 
     impl->numPointLightsUploaded = ptCount;
     impl->numSpotLightsUploaded = spCount;
-    impl->currentLightInfo.numPointLights = ptCount;
-    impl->currentLightInfo.numSpotLights = spCount;
+
+    // Forward+ binning. flipY=true: Metal uses the unflipped
+    // glm::perspectiveRH_ZO projection (see initialize/resize) and fragment
+    // [[position]] is in top-left-origin framebuffer coordinates, so
+    // projected NDC y maps via (0.5 - ndcY*0.5) * height (the same Y flip
+    // ShadowCalculation applies in common.metal).
+    int binWidth = impl->viewportWidthRT > 0 ? impl->viewportWidthRT : impl->viewportWidth;
+    int binHeight = impl->viewportHeightRT > 0 ? impl->viewportHeightRT : impl->viewportHeight;
+    {
+        int sceneTarget = impl->activeSceneTarget;
+        if (sceneTarget < 0 && impl->editorSceneViewport)
+            sceneTarget = impl->editorSceneViewport->pieId();
+        if (sceneTarget >= 0) {
+            auto it = impl->pieViewports.find(sceneTarget);
+            if (it != impl->pieViewports.end() && it->second.width > 0 && it->second.height > 0) {
+                binWidth = it->second.width;
+                binHeight = it->second.height;
+            }
+        }
+    }
+    const bool haveViewport = binWidth > 0 && binHeight > 0;
+    const bool haveCamera = haveViewport && impl->viewMatrix != glm::mat4(0.0f)
+        && impl->projectionMatrix != glm::mat4(0.0f) && impl->projectionMatrix != glm::mat4(1.0f);
+    const bool fpEnabled = haveCamera && impl->lightingEnabled && CVAR_BOOL(r_light_zbinning);
+    ForwardPlusBinningResult binned = binForwardPlusLights(
+        pts, static_cast<uint32_t>(ptCount), spts, static_cast<uint32_t>(spCount),
+        impl->viewMatrix, impl->projectionMatrix,
+        static_cast<uint32_t>(std::max(binWidth, 1)), static_cast<uint32_t>(std::max(binHeight, 1)),
+        0.1f, 1000.0f, /*flipY=*/true, fpEnabled);
+    ForwardPlusGridUpload grid{};
+    grid.tiles = binned.tiles.data();
+    grid.tileCount = static_cast<uint32_t>(binned.tiles.size());
+    grid.lightIndices = binned.lightIndices.data();
+    grid.lightIndexCount = static_cast<uint32_t>(binned.lightIndices.size());
+    grid.tilesX = binned.tilesX;
+    grid.tilesY = binned.tilesY;
+    uploadForwardPlusGrid(grid);
+    const bool gridBound = frame < MetalRenderAPIImpl::MAX_FRAMES_IN_FLIGHT
+        && impl->forwardPlusTilesBuffers[frame] && impl->forwardPlusIndicesBuffers[frame];
+    impl->forwardPlusParams = glm::vec4(static_cast<float>(kForwardPlusTileSize),
+        static_cast<float>(binned.tilesX), static_cast<float>(binned.tilesY),
+        (fpEnabled && gridBound) ? 1.0f : 0.0f);
+
+    // CB counts: full buffer counts when Forward+ is on (the shader splits
+    // unified indices at numPointLights); previous CB-capped semantics when off.
+    if (fpEnabled) {
+        impl->currentLightInfo.numPointLights = ptCount;
+        impl->currentLightInfo.numSpotLights = spCount;
+    } else {
+        impl->currentLightInfo.numPointLights =
+            std::clamp(impl->currentLights.numPointLights, 0, MetalRenderAPIImpl::MAX_LIGHTS_BUFFER);
+        impl->currentLightInfo.numSpotLights =
+            std::clamp(impl->currentLights.numSpotLights, 0, MetalRenderAPIImpl::MAX_LIGHTS_BUFFER);
+    }
     impl->currentLightInfo.cameraPos = impl->currentLights.cameraPos;
     impl->currentLightInfo._pad = glm::vec2(0.0f);
     impl->currentLightInfo._pad2 = 0.0f;
+    impl->currentLightInfo.forwardPlusParams = impl->forwardPlusParams;
 }
 
 // ============================================================================
@@ -634,11 +707,6 @@ void MetalRenderAPI::uploadLightBuffers(const GPUPointLight* pts, int ptCount,
 void MetalRenderAPI::renderSkybox()
 {
     if (!impl->frameStarted || !impl->skyboxPipeline || impl->inShadowPass) return;
-
-    if (isDeferredActive()) {
-        impl->skyboxRequested = true;
-        return;
-    }
 
     if (!impl->mainPassActive || !impl->encoder) return;
 

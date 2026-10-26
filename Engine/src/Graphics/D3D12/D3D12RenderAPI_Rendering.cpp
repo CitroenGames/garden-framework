@@ -712,7 +712,7 @@ void D3D12RenderAPI::renderMesh(const mesh& m, const RenderState& state)
     // Upload light data once per frame, reuse cached address for subsequent meshes
     if (m_cachedLightCBAddr == 0)
     {
-        m_cachedLightCBAddr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(LightCBuffer), &current_lights);
+        m_cachedLightCBAddr = getLightCBAddress();
         if (m_cachedLightCBAddr == 0) return;
     }
     commandList->SetGraphicsRootConstantBufferView(4, m_cachedLightCBAddr);
@@ -813,7 +813,7 @@ void D3D12RenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t 
     // Upload light data once per frame, reuse cached address for subsequent meshes
     if (m_cachedLightCBAddr == 0)
     {
-        m_cachedLightCBAddr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(LightCBuffer), &current_lights);
+        m_cachedLightCBAddr = getLightCBAddress();
         if (m_cachedLightCBAddr == 0) return;
     }
     commandList->SetGraphicsRootConstantBufferView(4, m_cachedLightCBAddr);
@@ -905,6 +905,10 @@ void D3D12RenderAPI::flushAndReopenCommandList()
         commandList->SetGraphicsRootDescriptorTable(9, m_srvAllocator.getGPU(m_pointLightsSRVIndex[m_frameIndex]));
     if (m_spotLightsSRVIndex[m_frameIndex] != UINT(-1))
         commandList->SetGraphicsRootDescriptorTable(10, m_srvAllocator.getGPU(m_spotLightsSRVIndex[m_frameIndex]));
+    if (m_forwardPlusTilesSRVIndex[m_frameIndex] != UINT(-1))
+        commandList->SetGraphicsRootDescriptorTable(12, m_srvAllocator.getGPU(m_forwardPlusTilesSRVIndex[m_frameIndex]));
+    if (m_forwardPlusIndicesSRVIndex[m_frameIndex] != UINT(-1))
+        commandList->SetGraphicsRootDescriptorTable(13, m_srvAllocator.getGPU(m_forwardPlusIndicesSRVIndex[m_frameIndex]));
 
     // Restore PBR texture bindings (root params 5-8)
     if (m_defaultMetallicRoughnessTexture.srvIndex != UINT(-1))
@@ -971,7 +975,7 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
     // Upload light data once (workers will reference this address)
     if (m_cachedLightCBAddr == 0)
     {
-        m_cachedLightCBAddr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(LightCBuffer), &current_lights);
+        m_cachedLightCBAddr = getLightCBAddress();
         if (m_cachedLightCBAddr == 0)
         {
             replayCommandBuffer(cmds);
@@ -1046,8 +1050,6 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
             item.object_cb.heightmapTexelSize = cmd.heightmap_texel_size;
             item.object_cb.materialFlags = static_cast<int>(cmd.material_flags);
 
-            item.pso = m_replayPSOOverride;
-            if (!item.pso)
             {
                 RenderState rs;
                 rs.blend_mode = cmd.pso_key.blend;
@@ -1136,6 +1138,8 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
     auto dummyShadowSRVIdx = m_dummyShadowSRVIndex;
     auto pointLightsSRVIdx = m_pointLightsSRVIndex[m_frameIndex];
     auto spotLightsSRVIdx = m_spotLightsSRVIndex[m_frameIndex];
+    auto fpTilesSRVIdx = m_forwardPlusTilesSRVIndex[m_frameIndex];
+    auto fpIndicesSRVIdx = m_forwardPlusIndicesSRVIndex[m_frameIndex];
 
     // Launch parallel replay on worker threads
     std::vector<std::future<void>> futures;
@@ -1146,7 +1150,7 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
         futures.push_back(std::async(std::launch::async,
             [&, w, rootSig, srvHeap, rtState, shadowSRVIdx, globalCBAddr, lightCBAddr, uploadBuf, srvAlloc,
              pbrMetallicRoughnessSRV, pbrNormalSRV, pbrOcclusionSRV, pbrEmissiveSRV,
-             dummyShadowSRVIdx, pointLightsSRVIdx, spotLightsSRVIdx]()
+             dummyShadowSRVIdx, pointLightsSRVIdx, spotLightsSRVIdx, fpTilesSRVIdx, fpIndicesSRVIdx]()
             {
                 auto* cmdList = workers[w].entry->cmdList.Get();
 
@@ -1180,6 +1184,10 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
                     cmdList->SetGraphicsRootDescriptorTable(9, srvAlloc->getGPU(pointLightsSRVIdx));
                 if (spotLightsSRVIdx != UINT(-1))
                     cmdList->SetGraphicsRootDescriptorTable(10, srvAlloc->getGPU(spotLightsSRVIdx));
+                if (fpTilesSRVIdx != UINT(-1))
+                    cmdList->SetGraphicsRootDescriptorTable(12, srvAlloc->getGPU(fpTilesSRVIdx));
+                if (fpIndicesSRVIdx != UINT(-1))
+                    cmdList->SetGraphicsRootDescriptorTable(13, srvAlloc->getGPU(fpIndicesSRVIdx));
 
                 // Bind default PBR textures (root params 5-8)
                 if (pbrMetallicRoughnessSRV != UINT(-1))
@@ -1275,7 +1283,7 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
 
         // Capture the fence value that covers this pool submission. The pool
         // can't be reset until the GPU is past this. The per-frame-slot fence
-        // alone isn't enough — with NUM_FRAMES_IN_FLIGHT=2 it lags this one
+        // alone isn't enough Ã¢â‚¬â€ with NUM_FRAMES_IN_FLIGHT=2 it lags this one
         // by a full frame, leaving pool work from frame N-1 in flight when
         // frame N+1's ensureCommandListOpen calls resetAll().
         m_fenceValue++;
@@ -1307,6 +1315,18 @@ void D3D12RenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
             commandList->SetGraphicsRootDescriptorTable(7, m_srvAllocator.getGPU(m_defaultOcclusionTexture.srvIndex));
         if (m_defaultEmissiveTexture.srvIndex != UINT(-1))
             commandList->SetGraphicsRootDescriptorTable(8, m_srvAllocator.getGPU(m_defaultEmissiveTexture.srvIndex));
+        // Light + Forward+ tables: this list may have been reset since
+        // bindDummyRootParams ran (root args do not survive a reset), and the
+        // lit shader reads the Forward+ tile header whenever Forward+ is on.
+        // Bind them here so this path is self-sufficient like the parallel one.
+        if (m_pointLightsSRVIndex[m_frameIndex] != UINT(-1))
+            commandList->SetGraphicsRootDescriptorTable(9, m_srvAllocator.getGPU(m_pointLightsSRVIndex[m_frameIndex]));
+        if (m_spotLightsSRVIndex[m_frameIndex] != UINT(-1))
+            commandList->SetGraphicsRootDescriptorTable(10, m_srvAllocator.getGPU(m_spotLightsSRVIndex[m_frameIndex]));
+        if (m_forwardPlusTilesSRVIndex[m_frameIndex] != UINT(-1))
+            commandList->SetGraphicsRootDescriptorTable(12, m_srvAllocator.getGPU(m_forwardPlusTilesSRVIndex[m_frameIndex]));
+        if (m_forwardPlusIndicesSRVIndex[m_frameIndex] != UINT(-1))
+            commandList->SetGraphicsRootDescriptorTable(13, m_srvAllocator.getGPU(m_forwardPlusIndicesSRVIndex[m_frameIndex]));
         bindHeightmapTexture(INVALID_TEXTURE);
     }
 
@@ -1440,7 +1460,7 @@ void D3D12RenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
         // Upload light data once per frame
         if (m_cachedLightCBAddr == 0)
         {
-            m_cachedLightCBAddr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(LightCBuffer), &current_lights);
+            m_cachedLightCBAddr = getLightCBAddress();
             if (m_cachedLightCBAddr == 0) continue;
         }
         if (m_cachedLightCBAddr != lastLightCBAddr)
@@ -1449,9 +1469,8 @@ void D3D12RenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
             lastLightCBAddr = m_cachedLightCBAddr;
         }
 
-        // Select PSO from PSOKey (or honor caller-set GBuffer override).
-        ID3D12PipelineState* pso = m_replayPSOOverride;
-        if (!pso)
+        // Select PSO from PSOKey.
+        ID3D12PipelineState* pso = nullptr;
         {
             RenderState rs;
             rs.blend_mode = cmd.pso_key.blend;
@@ -1495,30 +1514,7 @@ void D3D12RenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
     }
 }
 
-void D3D12RenderAPI::setDeferredEnabled(bool enabled)
-{
-    m_useDeferred = enabled;
-}
-
-bool D3D12RenderAPI::isDeferredActive() const
-{
-    return m_useDeferred
-        && lighting_enabled
-        && m_gbufferPass.isInitialized()
-        && m_deferredLightingPass.isInitialized();
-}
-
-void D3D12RenderAPI::submitDeferredOpaqueCommands(const RenderCommandBuffer& cmds)
-{
-    m_deferredOpaqueCmds = cmds;
-}
-
-void D3D12RenderAPI::submitDeferredTransparentCommands(const RenderCommandBuffer& cmds)
-{
-    m_deferredTransparentCmds = cmds;
-}
-
-bool D3D12RenderAPI::createDeferredLightBuffers()
+bool D3D12RenderAPI::createLightBuffers()
 {
     D3D12_HEAP_PROPERTIES heap = {};
     heap.Type = D3D12_HEAP_TYPE_UPLOAD;
@@ -1529,7 +1525,7 @@ bool D3D12RenderAPI::createDeferredLightBuffers()
     {
         D3D12_RESOURCE_DESC desc = {};
         desc.Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER;
-        desc.Width            = stride * MAX_LIGHTS_DEFERRED;
+        desc.Width            = stride * MAX_LIGHTS_SB;
         desc.Height           = 1;
         desc.DepthOrArraySize = 1;
         desc.MipLevels        = 1;
@@ -1552,7 +1548,7 @@ bool D3D12RenderAPI::createDeferredLightBuffers()
         srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         srvDesc.Format                  = DXGI_FORMAT_UNKNOWN;
         srvDesc.Buffer.FirstElement        = 0;
-        srvDesc.Buffer.NumElements         = MAX_LIGHTS_DEFERRED;
+        srvDesc.Buffer.NumElements         = MAX_LIGHTS_SB;
         srvDesc.Buffer.StructureByteStride = static_cast<UINT>(stride);
         srvDesc.Buffer.Flags               = D3D12_BUFFER_SRV_FLAG_NONE;
 
@@ -1567,21 +1563,129 @@ bool D3D12RenderAPI::createDeferredLightBuffers()
     {
         if (!createStructuredBuffer(sizeof(GPUPointLight), m_pointLightsSB[i],
                                     m_pointLightsSBMapped[i], m_pointLightsSRVIndex[i],
-                                    L"DeferredPointLightsSB"))
+                                    L"PointLightsSB"))
             return false;
         if (!createStructuredBuffer(sizeof(GPUSpotLight), m_spotLightsSB[i],
                                     m_spotLightsSBMapped[i], m_spotLightsSRVIndex[i],
-                                    L"DeferredSpotLightsSB"))
+                                    L"SpotLightsSB"))
+            return false;
+        // Forward+ grid buffers must have valid SRVs from init, like the light
+        // SBs above: the lit shader reads the tile header whenever Forward+ is
+        // enabled, and a draw can reach a frame slot before its first
+        // uploadLightBuffers (e.g. endShadowPass -> bindDummyRootParams on
+        // frame 1). A zeroed single tile reads as sliceCount=1 / count=0.
+        if (!ensureForwardPlusBuffer(m_forwardPlusTilesSB[i], m_forwardPlusTilesMapped[i],
+                                     m_forwardPlusTilesSRVIndex[i], m_forwardPlusTilesCapacity[i],
+                                     1, static_cast<UINT>(sizeof(ForwardPlusTile)),
+                                     L"ForwardPlusTilesSB"))
+            return false;
+        if (!ensureForwardPlusBuffer(m_forwardPlusIndicesSB[i], m_forwardPlusIndicesMapped[i],
+                                     m_forwardPlusIndicesSRVIndex[i], m_forwardPlusIndicesCapacity[i],
+                                     1, static_cast<UINT>(sizeof(uint32_t)),
+                                     L"ForwardPlusLightIndicesSB"))
             return false;
     }
     return true;
 }
 
+namespace {
+// Shader-side LightCB (basic/skinned.slang, register b3): exactly 48 bytes.
+struct ShaderLightCB {
+    int32_t numPointLights = 0;
+    int32_t numSpotLights = 0;
+    float pad[2] = { 0.0f, 0.0f };
+    glm::vec3 cameraPos = glm::vec3(0.0f);
+    float pad2 = 0.0f;
+    glm::vec4 forwardPlusParams = glm::vec4(0.0f);
+};
+static_assert(sizeof(ShaderLightCB) == 48, "ShaderLightCB must be 48 bytes");
+} // namespace
+
+D3D12_GPU_VIRTUAL_ADDRESS D3D12RenderAPI::getLightCBAddress()
+{
+    if (m_cachedLightCBAddr != 0)
+        return m_cachedLightCBAddr;
+    ShaderLightCB cb{};
+    const bool fpEnabled = m_forwardPlusParams.w > 0.5f;
+    // Forward+ shader loop uses numPointLights as the point/spot split over the
+    // full StructuredBuffers; the fallback loop keeps the CB-capped counts.
+    cb.numPointLights = fpEnabled ? m_numPointLights : current_lights.numPointLights;
+    cb.numSpotLights = fpEnabled ? m_numSpotLights : current_lights.numSpotLights;
+    cb.cameraPos = current_lights.cameraPos;
+    cb.forwardPlusParams = m_forwardPlusParams;
+    m_cachedLightCBAddr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(cb), &cb);
+    return m_cachedLightCBAddr;
+}
+
+bool D3D12RenderAPI::ensureForwardPlusBuffer(ComPtr<ID3D12Resource>& res, void*& mapped, UINT& srvIndex, uint32_t& capacity, uint32_t needed, UINT stride, const wchar_t* name)
+{
+    if (!device) return false;
+    needed = std::max(needed, 1u);
+    if (res && capacity >= needed && mapped)
+        return true;
+    // Old buffer/SRV are retired through the deferred-release ring / descriptor-free ring.
+    if (res) deferredRelease(res);
+    if (srvIndex != UINT(-1)) { deferSRVFree(srvIndex); srvIndex = UINT(-1); }
+    mapped = nullptr;
+    capacity = needed;
+    D3D12_HEAP_PROPERTIES heap = {};
+    heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+    D3D12_RESOURCE_DESC desc = {};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    desc.Width = static_cast<UINT64>(stride) * capacity;
+    desc.Height = 1;
+    desc.DepthOrArraySize = 1;
+    desc.MipLevels = 1;
+    desc.Format = DXGI_FORMAT_UNKNOWN;
+    desc.SampleDesc.Count = 1;
+    desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    HRESULT hr = device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(res.GetAddressOf()));
+    if (FAILED(hr)) { capacity = 0; return false; }
+    res->SetName(name);
+    if (FAILED(res->Map(0, nullptr, &mapped))) { capacity = 0; return false; }
+    memset(mapped, 0, static_cast<size_t>(desc.Width));
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvDesc.Format = DXGI_FORMAT_UNKNOWN;
+    srvDesc.Buffer.FirstElement = 0;
+    srvDesc.Buffer.NumElements = capacity;
+    srvDesc.Buffer.StructureByteStride = stride;
+    srvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
+    srvIndex = m_srvAllocator.allocate();
+    if (srvIndex == UINT(-1)) return false;
+    device->CreateShaderResourceView(res.Get(), &srvDesc, m_srvAllocator.getCPU(srvIndex));
+    return true;
+}
+
+void D3D12RenderAPI::uploadForwardPlusGrid(const ForwardPlusGridUpload& upload)
+{
+    const uint32_t frame = m_frameIndex;
+    const uint32_t tileCount = std::max(upload.tileCount, 1u);
+    const uint32_t indexCount = upload.lightIndexCount;
+    const bool tilesOk = ensureForwardPlusBuffer(m_forwardPlusTilesSB[frame], m_forwardPlusTilesMapped[frame],
+        m_forwardPlusTilesSRVIndex[frame], m_forwardPlusTilesCapacity[frame], tileCount,
+        static_cast<UINT>(sizeof(ForwardPlusTile)), L"ForwardPlusTilesSB");
+    // Indices buffer holds at least 1 element so its SRV is always valid.
+    const bool indicesOk = ensureForwardPlusBuffer(m_forwardPlusIndicesSB[frame], m_forwardPlusIndicesMapped[frame],
+        m_forwardPlusIndicesSRVIndex[frame], m_forwardPlusIndicesCapacity[frame], std::max(indexCount, 1u),
+        static_cast<UINT>(sizeof(uint32_t)), L"ForwardPlusLightIndicesSB");
+    if (tilesOk && m_forwardPlusTilesMapped[frame] && upload.tiles)
+        memcpy(m_forwardPlusTilesMapped[frame], upload.tiles, sizeof(ForwardPlusTile) * tileCount);
+    if (indicesOk && m_forwardPlusIndicesMapped[frame] && upload.lightIndices && indexCount > 0)
+        memcpy(m_forwardPlusIndicesMapped[frame], upload.lightIndices, sizeof(uint32_t) * indexCount);
+    const bool enabled = tilesOk && indicesOk && upload.tilesX > 0 && upload.tilesY > 0;
+    // tilesX/tilesY in the upload describe grid dims; enabled flag is carried by
+    // the caller via tile data presence - uploadLightBuffers sets w afterwards.
+    (void)enabled;
+}
+
 void D3D12RenderAPI::uploadLightBuffers(const GPUPointLight* pts, int ptCount,
                                         const GPUSpotLight* spts, int spCount)
 {
-    if (ptCount > MAX_LIGHTS_DEFERRED) ptCount = MAX_LIGHTS_DEFERRED;
-    if (spCount > MAX_LIGHTS_DEFERRED) spCount = MAX_LIGHTS_DEFERRED;
+    if (ptCount > MAX_LIGHTS_SB) ptCount = MAX_LIGHTS_SB;
+    if (spCount > MAX_LIGHTS_SB) spCount = MAX_LIGHTS_SB;
     if (ptCount < 0) ptCount = 0;
     if (spCount < 0) spCount = 0;
 
@@ -1592,6 +1696,34 @@ void D3D12RenderAPI::uploadLightBuffers(const GPUPointLight* pts, int ptCount,
 
     m_numPointLights = ptCount;
     m_numSpotLights  = spCount;
+
+    // Forward+ binning. Guard unset camera: identity/zero matrices or no viewport.
+    const int binWidth = viewport_width_rt > 0 ? viewport_width_rt : viewport_width;
+    const int binHeight = viewport_height_rt > 0 ? viewport_height_rt : viewport_height;
+    const bool haveViewport = binWidth > 0 && binHeight > 0;
+    const bool haveCamera = haveViewport && view_matrix != glm::mat4(0.0f)
+        && projection_matrix != glm::mat4(0.0f) && projection_matrix != glm::mat4(1.0f);
+    const bool fpEnabled = haveCamera && lighting_enabled && CVAR_BOOL(r_light_zbinning);
+    ForwardPlusBinningResult binned = binForwardPlusLights(
+        pts, static_cast<uint32_t>(ptCount), spts, static_cast<uint32_t>(spCount),
+        view_matrix, projection_matrix,
+        static_cast<uint32_t>(std::max(binWidth, 1)), static_cast<uint32_t>(std::max(binHeight, 1)),
+        0.1f, 1000.0f, /*flipY=*/true, fpEnabled);
+    ForwardPlusGridUpload grid{};
+    grid.tiles = binned.tiles.data();
+    grid.tileCount = static_cast<uint32_t>(binned.tiles.size());
+    grid.lightIndices = binned.lightIndices.data();
+    grid.lightIndexCount = static_cast<uint32_t>(binned.lightIndices.size());
+    grid.tilesX = binned.tilesX;
+    grid.tilesY = binned.tilesY;
+    uploadForwardPlusGrid(grid);
+    const bool gridBound = m_forwardPlusTilesSRVIndex[m_frameIndex] != UINT(-1)
+        && m_forwardPlusIndicesSRVIndex[m_frameIndex] != UINT(-1);
+    m_forwardPlusParams = glm::vec4(static_cast<float>(kForwardPlusTileSize),
+        static_cast<float>(binned.tilesX), static_cast<float>(binned.tilesY),
+        (fpEnabled && gridBound) ? 1.0f : 0.0f);
+    current_lights.forwardPlusParams = m_forwardPlusParams;
+    m_cachedLightCBAddr = 0; // re-upload 48B LightCB with new counts/params
 }
 
 void D3D12RenderAPI::renderDebugLines(const vertex* vertices, size_t vertex_count)
@@ -1599,16 +1731,6 @@ void D3D12RenderAPI::renderDebugLines(const vertex* vertices, size_t vertex_coun
     if (!vertices || vertex_count < 2 || device_lost) return;
     if (in_shadow_pass) return;
     if (!m_psoDebugLines) return;
-
-    // Deferred path: buffer the vertices and let the RG TransparentForward pass
-    // draw them after the lighting pass. If we drew now, the lighting pass's
-    // full-screen write would wipe them (albedo/emissive are 0 at non-geometry
-    // pixels) and shipped colors would be black.
-    if (isDeferredActive()) {
-        m_deferredDebugLineVertices.insert(m_deferredDebugLineVertices.end(),
-                                           vertices, vertices + vertex_count);
-        return;
-    }
 
     renderDebugLinesDirect(vertices, vertex_count);
 }

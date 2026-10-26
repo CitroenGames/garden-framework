@@ -71,3 +71,28 @@ public float3 CalcSpotLight(SpotLightData light, float3 normal, float3 fragPos)
 
     return light.color * light.intensity * diff * atten * spotIntensity;
 }
+
+// One cell of the Forward+ light grid (16 bytes, mirrors ForwardPlusTile in
+// Engine/src/Graphics/ForwardPlusLightBinning.hpp). Element 0 of the tile
+// buffer is a grid header with the same layout: lightOffset = sliceCount,
+// lightCount = bits of zScale, padding0 = bits of zOffset,
+// padding1 = bits of zDistribution. Cells follow it, slice-major:
+// cell = (slice * tilesY + tileY) * tilesX + tileX, at element cell + 1.
+public struct ForwardPlusTile
+{
+    public uint lightOffset;
+    public uint lightCount;
+    public uint padding0;
+    public uint padding1;
+};
+
+// Slice of a view depth (positive in front, -viewZ) for the grid in `header`,
+// mirroring forwardPlusGridSlice() in ForwardPlusLightBinning.hpp.
+public uint forwardPlusGridSlice(ForwardPlusTile header, float viewDepth)
+{
+    uint sliceCount = max(header.lightOffset, 1u);
+    if (sliceCount <= 1u) return 0u;
+    float term = viewDepth * asfloat(header.lightCount) + asfloat(header.padding0);
+    float s = log2(max(term, 1.0f)) * asfloat(header.padding1);
+    return min(uint(max(s, 0.0f)), sliceCount - 1u);
+}

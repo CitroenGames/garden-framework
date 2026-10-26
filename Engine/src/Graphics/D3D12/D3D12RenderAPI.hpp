@@ -9,7 +9,7 @@
 #include "D3D12PSOCache.hpp"
 #include "D3D12PostProcessPass.hpp"
 #include <functional>
-#include "D3D12GBufferPass.hpp"
+#include "Graphics/ForwardPlusLightBinning.hpp"
 #include "D3D12ResourceStateTracker.hpp"
 #include "D3D12RGBackend.hpp"
 #include "D3D12PostProcessGraphBuilder.hpp"
@@ -137,8 +137,8 @@ private:
     std::vector<char> m_shadowAlphaTestVS, m_shadowAlphaTestPS;
     std::vector<char> m_skyVS, m_skyPS;
     std::vector<char> m_fxaaVS, m_fxaaPS;
-    std::vector<char> m_gbufferVS, m_gbufferPS;
-    std::vector<char> m_deferredLightingVS, m_deferredLightingPS;
+    
+    
 
     // Per-frame upload ring buffers for constant data
     UploadRingBuffer m_cbUploadBuffer[NUM_FRAMES_IN_FLIGHT];
@@ -188,10 +188,9 @@ private:
     bool in_shadow_pass = false;
     bool debugCascades = false;
 
-    // Deferred GBuffer geometry pass
-    D3D12GBufferPass m_gbufferPass;
-    // Deferred lighting fullscreen pass (reads GBuffer, writes HDR).
-    D3D12PostProcessPass m_deferredLightingPass;
+    // Forward+ light grid StructuredBuffers (per-frame ring, persistently mapped).
+    ComPtr<ID3D12Resource> m_forwardPlusTilesSB[NUM_FRAMES_IN_FLIGHT]; ComPtr<ID3D12Resource> m_forwardPlusIndicesSB[NUM_FRAMES_IN_FLIGHT]; UINT m_forwardPlusTilesSRVIndex[NUM_FRAMES_IN_FLIGHT] = { UINT(-1), UINT(-1) }; UINT m_forwardPlusIndicesSRVIndex[NUM_FRAMES_IN_FLIGHT] = { UINT(-1), UINT(-1) }; void* m_forwardPlusTilesMapped[NUM_FRAMES_IN_FLIGHT] = { nullptr, nullptr }; void* m_forwardPlusIndicesMapped[NUM_FRAMES_IN_FLIGHT] = { nullptr, nullptr }; uint32_t m_forwardPlusTilesCapacity[NUM_FRAMES_IN_FLIGHT] = { 0, 0 }; uint32_t m_forwardPlusIndicesCapacity[NUM_FRAMES_IN_FLIGHT] = { 0, 0 }; glm::vec4 m_forwardPlusParams = glm::vec4(16.0f, 1.0f, 1.0f, 0.0f); bool ensureForwardPlusBuffer(ComPtr<ID3D12Resource>& res, void*& mapped, UINT& srvIndex, uint32_t& capacity, uint32_t needed, UINT stride, const wchar_t* name);
+    
 
     // Post-processing (FXAA)
     D3D12PostProcessPass m_fxaaPass;
@@ -347,25 +346,17 @@ private:
     D3D12RGBackend m_rgBackend;
     D3D12PostProcessGraphBuilder m_ppGraphBuilder;
     bool m_useRenderGraph = true;
-    bool m_useDeferred = false;
+    
     bool m_skyboxRequested = false;
 
-    // Buffered opaque/transparent commands for the deferred path.
-    RenderCommandBuffer m_deferredOpaqueCmds;
-    RenderCommandBuffer m_deferredTransparentCmds;
-    // Buffered debug-line vertices for deferred replay. Forward draws them
-    // straight to HDR during the scene phase; in deferred we defer them into
-    // the TransparentForward RG pass so the lighting pass doesn't overwrite
-    // them with (albedo=0, emissive=0) pixels.
-    std::vector<vertex> m_deferredDebugLineVertices;
-    // Optional PSO override used by replayCommandBuffer main-pass loop. Set while
-    // replaying opaques into the GBuffer pass so the GBuffer PSO is bound instead
-    // of the forward-lit PSO.
-    ID3D12PipelineState* m_replayPSOOverride = nullptr;
+    
+    
+    
+    
 
-    // Deferred point/spot light StructuredBuffers. Per-frame to avoid GPU hazard
+    // Point/spot light StructuredBuffers. Per-frame to avoid GPU hazard
     // while the CPU writes the next frame's data. Persistently mapped.
-    static const int MAX_LIGHTS_DEFERRED = 256;
+    static const int MAX_LIGHTS_SB = 256;
     ComPtr<ID3D12Resource> m_pointLightsSB[NUM_FRAMES_IN_FLIGHT];
     ComPtr<ID3D12Resource> m_spotLightsSB[NUM_FRAMES_IN_FLIGHT];
     UINT m_pointLightsSRVIndex[NUM_FRAMES_IN_FLIGHT] = { UINT(-1), UINT(-1) };
@@ -374,7 +365,7 @@ private:
     void* m_spotLightsSBMapped[NUM_FRAMES_IN_FLIGHT]  = { nullptr, nullptr };
     int   m_numPointLights = 0;
     int   m_numSpotLights  = 0;
-    bool  createDeferredLightBuffers();
+    bool  createLightBuffers(); D3D12_GPU_VIRTUAL_ADDRESS getLightCBAddress(); void uploadForwardPlusGrid(const ForwardPlusGridUpload& upload) override;
     bool createDummyShadowTexture();
 
     void waitForFence(UINT64 fenceValue);
@@ -506,21 +497,18 @@ public:
     // Falls back to single-threaded replay for small command counts.
     void replayCommandBufferParallel(const RenderCommandBuffer& cmds) override;
 
-    void setDeferredEnabled(bool enabled) override;
-    bool isDeferredEnabled() const override { return m_useDeferred; }
-    bool isDeferredActive() const override;
+    
+    
+    
     bool supportsHeightmapDisplacement() const override { return true; }
-    void submitDeferredOpaqueCommands(const RenderCommandBuffer& cmds) override;
-    void submitDeferredTransparentCommands(const RenderCommandBuffer& cmds) override;
+    
+    
     void uploadLightBuffers(const GPUPointLight* pts, int ptCount,
                             const GPUSpotLight* spts, int spCount) override;
 
     // Debug line rendering
     void renderDebugLines(const vertex* vertices, size_t vertex_count) override;
-    // Unbuffered variant: draw debug lines directly onto whatever RT is currently
-    // bound. Used by the deferred RG pass to replay buffered vertices after
-    // lighting/skybox/transparent. Normal callers should use renderDebugLines,
-    // which routes through the deferred buffer when deferred is active.
+    // Draw debug lines directly onto whatever RT is currently bound.
     void renderDebugLinesDirect(const vertex* vertices, size_t vertex_count);
 
     const char* getAPIName() const override { return "D3D12"; }

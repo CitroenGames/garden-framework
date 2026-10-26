@@ -47,29 +47,6 @@ void MetalRenderAPI::beginFrame()
 
     bool editorMode = (impl->viewportTexture != nil || impl->editorSceneViewport != nullptr);
 
-    if (isDeferredActive()) {
-        impl->deferredOpaqueCmds.clear();
-        impl->deferredTransparentCmds.clear();
-        impl->deferredDebugLineVertices.clear();
-        impl->skyboxRequested = false;
-        impl->lastBoundPipeline = nil;
-        impl->lastBoundDepthStencil = nil;
-        impl->lastBoundVertexBuffer = nil;
-        impl->lastBoundTextureHandle = INVALID_TEXTURE;
-        impl->lastCullMode = MTLCullModeBack;
-        impl->shadowMapBound = false;
-        impl->perFrameUBOReady = false;
-        impl->drawCallCount = 0;
-        impl->lastFrameStats.backend_name = getAPIName();
-        impl->lastFrameStats.gpu_frame_ms_valid = false;
-        impl->lastFrameStats.submitted_draw_commands = 0;
-        impl->lastFrameStats.backend_draw_calls = 0;
-        impl->lastFrameStats.instanced_batches = 0;
-        impl->lastFrameStats.instanced_instances = 0;
-        impl->frameStarted = true;
-        return;
-    }
-
     // In editor mode, defer drawable acquisition to renderUI
     if (!editorMode) {
         if (!impl->ensureDrawable()) return;
@@ -211,12 +188,6 @@ void MetalRenderAPI::beginFrame()
 void MetalRenderAPI::endFrame()
 {
     if (!impl->frameStarted) return;
-
-    if (isDeferredActive()) {
-        impl->renderDeferredSceneToCurrentTarget(/*presentToDrawable=*/true,
-                                                 /*renderImGui=*/true);
-        return;
-    }
 
     // In editor mode, endSceneRender + renderUI handle finalization
     if (impl->viewportTexture || impl->editorSceneViewport || impl->activeSceneTarget >= 0) return;

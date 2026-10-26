@@ -62,27 +62,6 @@ struct MetalFXAAUniforms {
     glm::vec3 _pad = glm::vec3(0.0f);
 };
 
-struct alignas(16) MetalDeferredLightingUniforms {
-    glm::mat4 invViewProj;
-    glm::mat4 view;
-    glm::mat4 lightSpaceMatrices[4];
-    glm::vec4 cascadeSplits;
-    float cascadeSplit4;
-    int cascadeCount;
-    glm::vec2 shadowMapTexelSize;
-    glm::vec3 cameraPos;
-    float _pad0;
-    glm::vec3 lightDir;
-    float _pad1;
-    glm::vec3 lightAmbient;
-    float _pad2;
-    glm::vec3 lightDiffuse;
-    float _pad3;
-    int numPointLights;
-    int numSpotLights;
-    glm::vec2 _pad4;
-};
-
 // Fragment-stage light metadata. Point/spot payloads live in separate
 // per-frame buffers so Metal can use the same 256-light cap as Vulkan/D3D12.
 struct alignas(16) MetalLightCBuffer {
@@ -91,7 +70,9 @@ struct alignas(16) MetalLightCBuffer {
     glm::vec2 _pad = glm::vec2(0.0f);
     glm::vec3 cameraPos = glm::vec3(0.0f);
     float _pad2 = 0.0f;
+    glm::vec4 forwardPlusParams = glm::vec4(0.0f); // @32: x tileSize, y tilesX, z tilesY, w enabled
 };
+static_assert(sizeof(MetalLightCBuffer) == 48, "MetalLightCBuffer must be 48 bytes");
 
 // Per-object UBO for command buffer replay (matches Vulkan's PerObjectUBO).
 // Padded to 256 bytes for Metal's setVertexBufferOffset alignment requirement.

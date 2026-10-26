@@ -85,8 +85,9 @@ struct RenderFrameStats
 };
 
 // GPU light structures for point/spot light constant buffers.
-// MAX_LIGHTS is the forward-path CB cap. The deferred path uses a larger
-// StructuredBuffer (see MAX_LIGHTS_DEFERRED on backends like D3D12RenderAPI).
+// MAX_LIGHTS is the forward-path CB cap for the CB-resident light arrays.
+// The Forward+ path additionally uses larger StructuredBuffers carrying the
+// full light lists, with ForwardPlusLightBinning.hpp selecting per-tile subsets.
 static const int MAX_LIGHTS = 16;
 
 struct alignas(16) GPUPointLight {
@@ -102,8 +103,11 @@ struct alignas(16) GPUSpotLight {
     glm::vec3 attenuation; float outerCutoff;
 };
 
-// Shared backend light-cbuffer struct. Forward shaders read counts +
-// cameraPos from the CB; per-light data comes from backend StructuredBuffers.
+// Shared backend light-cbuffer struct. Forward shaders read counts,
+// forwardPlusParams + cameraPos from the CB; per-light data comes from
+// backend StructuredBuffers. Existing fields must not be reordered:
+// backends either upload this whole struct or map its tail fields into a
+// shader-sized UBO, so forwardPlusParams is appended at the very end.
 struct alignas(16) LightCBuffer {
     GPUPointLight pointLights[MAX_LIGHTS];
     GPUSpotLight  spotLights[MAX_LIGHTS];
@@ -112,7 +116,11 @@ struct alignas(16) LightCBuffer {
     float _pad[2];
     glm::vec3 cameraPos;
     float _pad2;
+    glm::vec4 forwardPlusParams; // x tileSize, y tilesX, z tilesY, w enabled(0/1)
 };
+
+// Defined in Graphics/ForwardPlusLightBinning.hpp (which includes this header).
+struct ForwardPlusTile;
 
 // Abstract rendering API interface
 class ENGINE_API IRenderAPI
@@ -218,22 +226,32 @@ public:
     // small buffers or if the backend doesn't support parallel replay.
     virtual void replayCommandBufferParallel(const RenderCommandBuffer& cmds) { replayCommandBuffer(cmds); }
 
-    // Deferred rendering controls. `isDeferredEnabled` reflects the desired
-    // toggle (matches the r_deferred CVar). `isDeferredActive` reports whether
-    // it is currently in effect (desired AND backend resources initialized).
-    // UI should bind to Enabled; the render path reads Active.
-    virtual void setDeferredEnabled(bool enabled) { (void)enabled; }
-    virtual bool isDeferredEnabled() const { return false; }
-    virtual bool isDeferredActive() const { return false; }
-    virtual void submitDeferredOpaqueCommands(const RenderCommandBuffer& cmds) { (void)cmds; }
-    virtual void submitDeferredTransparentCommands(const RenderCommandBuffer& cmds) { (void)cmds; }
 
     // Populate the backend light StructuredBuffers. Supports up to a
-    // backend-specific cap (256 per kind on D3D12/Vulkan).
+    // backend-specific cap (256 per kind on D3D12/Vulkan). Backends also bin
+    // the lights for Forward+ there: they call binForwardPlusLights()
+    // (Graphics/ForwardPlusLightBinning.hpp) with the frame view/projection,
+    // upload the grid via uploadForwardPlusGrid(), and set
+    // LightCBuffer::forwardPlusParams (w = 1 when binning ran).
     virtual void uploadLightBuffers(const GPUPointLight* pts, int ptCount,
                                     const GPUSpotLight* spts, int spCount) {
         (void)pts; (void)ptCount; (void)spts; (void)spCount;
     }
+
+    // Upload a binned Forward+ light grid (ForwardPlusLightBinning.hpp).
+    // `tiles` has tileCount entries with element 0 as the grid header;
+    // `lightIndices` holds lightIndexCount unified light indices. Binning
+    // runs inside the backend uploadLightBuffers(), so the renderer never
+    // calls this directly. Default: no-op.
+    struct ForwardPlusGridUpload {
+        const ForwardPlusTile* tiles = nullptr;
+        uint32_t tileCount = 0;
+        const uint32_t* lightIndices = nullptr;
+        uint32_t lightIndexCount = 0;
+        uint32_t tilesX = 0;
+        uint32_t tilesY = 0;
+    };
+    virtual void uploadForwardPlusGrid(const ForwardPlusGridUpload& upload) { (void)upload; }
 
     // Utility
     virtual const char* getAPIName() const = 0;

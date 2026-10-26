@@ -112,6 +112,22 @@ bool VulkanRenderAPI::createDescriptorSetLayout()
     instanceDataBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
     instanceDataBinding.pImmutableSamplers = nullptr;
 
+    // Binding 14: Forward+ tile grid StructuredBuffer (element 0 is the header).
+    VkDescriptorSetLayoutBinding forwardPlusTilesBinding{};
+    forwardPlusTilesBinding.binding = 14;
+    forwardPlusTilesBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    forwardPlusTilesBinding.descriptorCount = 1;
+    forwardPlusTilesBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    forwardPlusTilesBinding.pImmutableSamplers = nullptr;
+
+    // Binding 15: Forward+ light index StructuredBuffer.
+    VkDescriptorSetLayoutBinding forwardPlusIndicesBinding{};
+    forwardPlusIndicesBinding.binding = 15;
+    forwardPlusIndicesBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    forwardPlusIndicesBinding.descriptorCount = 1;
+    forwardPlusIndicesBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    forwardPlusIndicesBinding.pImmutableSamplers = nullptr;
+
     // Binding 13: heightmap texture sampled by vertex shaders for terrain displacement.
     VkDescriptorSetLayoutBinding heightmapBinding{};
     heightmapBinding.binding = 13;
@@ -120,10 +136,11 @@ bool VulkanRenderAPI::createDescriptorSetLayout()
     heightmapBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
     heightmapBinding.pImmutableSamplers = nullptr;
 
-    std::array<VkDescriptorSetLayoutBinding, 13> bindings = {
+    std::array<VkDescriptorSetLayoutBinding, 15> bindings = {
         uboLayoutBinding, samplerLayoutBinding, shadowMapBinding, lightUboBinding, perObjectUboBinding,
         metallicRoughnessBinding, normalMapBinding, occlusionBinding, emissiveBinding,
-        pointLightsBinding, spotLightsBinding, instanceDataBinding, heightmapBinding
+        pointLightsBinding, spotLightsBinding, instanceDataBinding, heightmapBinding,
+        forwardPlusTilesBinding, forwardPlusIndicesBinding
     };
 
     VkDescriptorSetLayoutCreateInfo layoutInfo{};

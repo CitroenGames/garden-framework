@@ -92,7 +92,7 @@ void D3D12RenderAPI::endSceneRender()
             auto& pie = *it->second;
 
             // Route PIE through the same render graph as the editor viewport so
-            // it gets skybox + deferred + SSAO + shadow-mask 1:1 with standalone.
+            // it gets skybox + SSAO + shadow-mask 1:1 with standalone.
             const bool postProcessSizeMatches =
                 pie.width() == pp_resources_width && pie.height() == pp_resources_height && !pp_resize_dirty;
             bool wantSSAO = postProcessSizeMatches && ssaoEnabled && m_ssaoBlurVPass.isInitialized()
@@ -112,10 +112,7 @@ void D3D12RenderAPI::endSceneRender()
                 cfg.renderImGui    = false;
                 cfg.renderRml      = m_sceneRmlEnabled;
 
-                if (isDeferredActive())
-                    cfg.wantShadowMask = false;
-
-                m_ppGraphBuilder.setFrameInputs(rtvHandle,
+                    m_ppGraphBuilder.setFrameInputs(rtvHandle,
                                                 pie.getHDR(),   pie.getHDRSRV(),   pie.getHDRRTV(),
                                                 pie.getDepth(), pie.getDepthSRV(), pie.getDepthDSV(),
                                                 pie.getOutput(), pie.getOutputRTV());
@@ -180,9 +177,6 @@ void D3D12RenderAPI::endSceneRender()
             cfg.wantShadowMask = wantShadowMask;
             cfg.renderImGui    = false;
             cfg.renderRml      = m_sceneRmlEnabled;
-
-            if (isDeferredActive())
-                cfg.wantShadowMask = false;
 
             m_ppGraphBuilder.setFrameInputs(rtvHandle,
                                             vp.getHDR(),   vp.getHDRSRV(),   vp.getHDRRTV(),

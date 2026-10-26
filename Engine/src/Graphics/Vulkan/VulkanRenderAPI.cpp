@@ -168,10 +168,6 @@ bool VulkanRenderAPI::initialize(WindowHandle window, int width, int height, flo
         return false;
     }
 
-    // Create deferred GBuffer + lighting passes (non-fatal — disables deferred if either fails)
-    createGBufferResources();
-    createDeferredLightingResources();
-
     // Create descriptor pool
     LOG_ENGINE_INFO("[Vulkan] Creating descriptor pool...");
     if (!createDescriptorPool()) {
@@ -394,19 +390,7 @@ void VulkanRenderAPI::shutdown()
         m_dummy_lights_allocation = VK_NULL_HANDLE;
     }
 
-    // Clean up deferred lighting CB buffers
-    for (size_t i = 0; i < m_deferred_lighting_cb_buffers.size(); ++i) {
-        if (m_deferred_lighting_cb_buffers[i] && vma_allocator) {
-            vmaDestroyBuffer(vma_allocator,
-                             m_deferred_lighting_cb_buffers[i],
-                             m_deferred_lighting_cb_allocations[i]);
-        }
-    }
-    m_deferred_lighting_cb_buffers.clear();
-    m_deferred_lighting_cb_allocations.clear();
-    m_deferred_lighting_cb_mapped.clear();
-
-    // Clean up deferred light SSBOs
+    // Clean up light SSBOs
     for (size_t i = 0; i < m_point_lights_buffers.size(); ++i) {
         if (m_point_lights_buffers[i] && vma_allocator)
             vmaDestroyBuffer(vma_allocator,
@@ -426,6 +410,24 @@ void VulkanRenderAPI::shutdown()
     m_spot_lights_buffers.clear();
     m_spot_lights_allocations.clear();
     m_spot_lights_mapped.clear();
+
+    // Clean up Forward+ grid SSBOs
+    for (size_t i = 0; i < m_forward_plus_tiles_buffers.size(); ++i) {
+        if (m_forward_plus_tiles_buffers[i] && vma_allocator)
+            vmaDestroyBuffer(vma_allocator, m_forward_plus_tiles_buffers[i], m_forward_plus_tiles_allocations[i]);
+    }
+    m_forward_plus_tiles_buffers.clear();
+    m_forward_plus_tiles_allocations.clear();
+    m_forward_plus_tiles_mapped.clear();
+    m_forward_plus_tiles_capacity.clear();
+    for (size_t i = 0; i < m_forward_plus_indices_buffers.size(); ++i) {
+        if (m_forward_plus_indices_buffers[i] && vma_allocator)
+            vmaDestroyBuffer(vma_allocator, m_forward_plus_indices_buffers[i], m_forward_plus_indices_allocations[i]);
+    }
+    m_forward_plus_indices_buffers.clear();
+    m_forward_plus_indices_allocations.clear();
+    m_forward_plus_indices_mapped.clear();
+    m_forward_plus_indices_capacity.clear();
 
     // Clean up per-object uniform buffers
     for (size_t i = 0; i < per_object_uniform_buffers.size(); i++) {

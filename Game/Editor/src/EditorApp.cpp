@@ -642,7 +642,6 @@ bool EditorApp::initialize(RenderAPIType api_type)
     render_api->setSSAOEnabled(CVAR_BOOL(r_ssao));
     render_api->setShadowQuality(CVAR_INT(r_shadowquality));
     render_api->setShadowCascadeCount(CVAR_INT(r_shadowcascades));
-    render_api->setDeferredEnabled(CVAR_BOOL(r_deferred));
     render_api->enableLighting(CVAR_BOOL(r_lighting));
     m_renderer.setDepthPrepassEnabled(CVAR_BOOL(r_depthprepass));
     m_renderer.setBVHEnabled(CVAR_BOOL(r_frustumculling));
@@ -3346,18 +3345,7 @@ void EditorApp::renderEditorSettings()
                     }
                 }
 
-                // Deferred Rendering toggle
-                {
-                    auto* cvar = CVAR_PTR(r_deferred);
-                    bool deferred = cvar ? cvar->getBool() : false;
-                    if (ImGui::Checkbox("Deferred Rendering", &deferred))
-                    {
-                        if (cvar) cvar->setInt(deferred ? 1 : 0);
-                        m_app.getRenderAPI()->setDeferredEnabled(deferred);
-                    }
-                    if (deferred && !m_app.getRenderAPI()->isDeferredActive())
-                        ImGui::TextDisabled("  Deferred requested; active backend resources are unavailable or lighting is disabled.");
-                }
+                // Forward+ light binning is driven by the r_light_zbinning cvar.
                 break;
             }
 
@@ -3486,7 +3474,7 @@ void EditorApp::renderEditorSettings()
             const char* cvar_names[] = { "r_fxaa", "r_ssao", "r_shadowquality", "r_shadowcascades", "r_sky", "r_lighting",
                                           "r_dynamiclights", "r_depthprepass", "r_frustumculling",
                                           "r_staticmesh_chunking", "r_staticmesh_chunk_tris",
-                                          "r_staticmesh_max_chunks", "r_deferred", "r_vsync" };
+                                          "r_staticmesh_max_chunks", "r_light_zbinning", "r_vsync" };
             for (const char* name : cvar_names)
             {
                 if (auto* cv = ConVarRegistry::get().find(name))
@@ -3496,7 +3484,6 @@ void EditorApp::renderEditorSettings()
             m_app.getRenderAPI()->setSSAOEnabled(CVAR_BOOL(r_ssao));
             m_app.getRenderAPI()->setShadowQuality(CVAR_INT(r_shadowquality));
             m_app.getRenderAPI()->setShadowCascadeCount(CVAR_INT(r_shadowcascades));
-            m_app.getRenderAPI()->setDeferredEnabled(CVAR_BOOL(r_deferred));
             m_app.getRenderAPI()->setVSyncEnabled(CVAR_BOOL(r_vsync));
             m_app.getRenderAPI()->enableLighting(CVAR_BOOL(r_lighting));
             m_renderer.setDepthPrepassEnabled(CVAR_BOOL(r_depthprepass));

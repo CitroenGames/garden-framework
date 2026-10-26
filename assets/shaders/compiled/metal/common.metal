@@ -55,7 +55,42 @@ struct LightCBuffer {
     float _pad[2];
     packed_float3 cameraPos;
     float _pad2;
+    float4 forwardPlusParams; // @32: x tileSize, y tilesX, z tilesY, w enabled(0/1)
 };
+
+// One Forward+ grid cell (16 bytes, mirrors ForwardPlusTile in
+// Engine/src/Graphics/ForwardPlusLightBinning.hpp). Element 0 of the tile
+// buffer is the grid header: lightOffset = sliceCount,
+// lightCount = bits of zScale, padding0 = bits of zOffset,
+// padding1 = bits of zDistribution. Cells follow it, slice-major.
+struct ForwardPlusTile {
+    uint lightOffset;
+    uint lightCount;
+    uint padding0;
+    uint padding1;
+};
+
+uint forwardPlusGridSlice(ForwardPlusTile header, float viewDepth)
+{
+    uint sliceCount = max(header.lightOffset, 1u);
+    if (sliceCount <= 1u) return 0u;
+    float term = viewDepth * as_type<float>(header.lightCount) + as_type<float>(header.padding0);
+    float s = log2(max(term, 1.0f)) * as_type<float>(header.padding1);
+    return min(uint(max(s, 0.0f)), sliceCount - 1u);
+}
+
+ForwardPlusTile forwardPlusCellAt(const device ForwardPlusTile* tiles, float4 fpParams,
+                                  float2 fragXY, float viewDepth)
+{
+    ForwardPlusTile header = tiles[0];
+    uint tilesX = max(uint(fpParams.y), 1u);
+    uint tilesY = max(uint(fpParams.z), 1u);
+    float tileSize = max(fpParams.x, 1.0f);
+    uint tx = min(uint(max(fragXY.x, 0.0f) / tileSize), tilesX - 1u);
+    uint ty = min(uint(max(fragXY.y, 0.0f) / tileSize), tilesY - 1u);
+    uint slice = forwardPlusGridSlice(header, viewDepth);
+    return tiles[((slice * tilesY + ty) * tilesX + tx) + 1u];
+}
 
 float3 CalcPointLight(PointLightData light, float3 normal, float3 fragPos)
 {

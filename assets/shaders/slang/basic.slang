@@ -61,10 +61,14 @@ cbuffer LightCB : register(b3)
     float2 _lightPad;
     float3 uCameraPos;
     float _lightPad2;
+    float4 uForwardPlusParams; // x tileSize, y tilesX, z tilesY, w enabled(0/1)
 };
 
 [[vk::binding(10, 0)]]StructuredBuffer<PointLightData> pointLights : register(t6);
 [[vk::binding(11, 0)]]StructuredBuffer<SpotLightData>  spotLights  : register(t7);
+
+[[vk::binding(14, 0)]]StructuredBuffer<ForwardPlusTile> forwardPlusTiles : register(t10);
+[[vk::binding(15, 0)]]StructuredBuffer<uint> forwardPlusLightIndices : register(t11);
 
 #ifdef TARGET_SPIRV
 struct InstanceData
@@ -151,7 +155,20 @@ int getCascadeIndex(float viewDepth)
 
 float ShadowCalculationSingle(int cascadeIndex, float3 fragPos, float3 normal, float2 screenPos)
 {
-    float4 fragPosLightSpace = mul(uLightSpaceMatrices[cascadeIndex], float4(fragPos, 1.0));
+    // Texel-scaled bias + normal offset derived from the light-space matrix
+    // (see Graphics/ShadowCascade.hpp).
+    float3 lightDir = normalize(-uLightDir);
+    float3 nrm = normalize(normal);
+    float ndotl = saturate(dot(nrm, lightDir));
+    float sinTheta = sqrt(saturate(1.0 - ndotl * ndotl));
+    float4x4 lsMat = uLightSpaceMatrices[cascadeIndex];
+    float xyScale = max(length(float3(lsMat[0][0], lsMat[0][1], lsMat[0][2])), 1e-6);
+    float zScale = max(length(float3(lsMat[2][0], lsMat[2][1], lsMat[2][2])), 1e-6);
+    float texelWorld = 2.0 * uShadowMapTexelSize.x / xyScale;
+    float depthPerTexel = texelWorld * zScale;
+    float3 samplePos = fragPos + nrm * (texelWorld * 1.5 * sinTheta);
+
+    float4 fragPosLightSpace = mul(uLightSpaceMatrices[cascadeIndex], float4(samplePos, 1.0));
     float3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
 
     projCoords.xy = projCoords.xy * 0.5 + 0.5;
@@ -162,13 +179,14 @@ float ShadowCalculationSingle(int cascadeIndex, float3 fragPos, float3 normal, f
     float currentDepth = projCoords.z;
     if (currentDepth > 1.0 || currentDepth < 0.0)
         return 1.0;
+    if (any(projCoords.xy < 0.0) || any(projCoords.xy > 1.0))
+        return 1.0;
 
-    float3 lightDir = normalize(-uLightDir);
-    float baseBias = max(0.0005 * (1.0 - dot(normalize(normal), lightDir)), 0.00005);
-    float bias = baseBias * (1.0 + float(cascadeIndex) * 0.5);
+    float tanTheta = min(sinTheta / max(ndotl, 0.05), 4.0);
+    float bias = depthPerTexel * (0.5 + tanTheta);
 
-    // Per-pixel rotation angle for Poisson disc (reduces banding)
-    float angle = frac(sin(dot(screenPos, float2(12.9898, 78.233))) * 43758.5453) * 6.28318530718;
+    // Interleaved gradient noise (Jimenez 2014) rotation for Poisson disc
+    float angle = frac(52.9829189 * frac(dot(screenPos, float2(0.06711056, 0.00583715)))) * 6.28318530718;
     float cosA = cos(angle);
     float sinA = sin(angle);
 
@@ -221,6 +239,20 @@ float ShadowCalculation(int cascadeIndex, float3 fragPos, float3 normal, float v
     return shadow;
 }
 
+
+// Forward+ grid lookup: header is forwardPlusTiles[0]; cell n is element n + 1,
+// slice-major. fragXY is input.position.xy of the current fragment.
+ForwardPlusTile forwardPlusCellAt(float2 fragXY, float viewDepth)
+{
+    ForwardPlusTile header = forwardPlusTiles[0];
+    uint tilesX = max(uint(uForwardPlusParams.y), 1u);
+    uint tilesY = max(uint(uForwardPlusParams.z), 1u);
+    float tileSize = max(uForwardPlusParams.x, 1.0f);
+    uint tx = min(uint(max(fragXY.x, 0.0f) / tileSize), tilesX - 1u);
+    uint ty = min(uint(max(fragXY.y, 0.0f) / tileSize), tilesY - 1u);
+    uint slice = forwardPlusGridSlice(header, viewDepth);
+    return forwardPlusTiles[((slice * tilesY + ty) * tilesX + tx) + 1u];
+}
 [shader("vertex")]
 #ifdef TARGET_SPIRV
 PSInput vertexMain(VSInput input, uint instanceId : SV_InstanceID)
@@ -346,15 +378,34 @@ float4 fragmentMain(PSInput input) : SV_TARGET
 
     float3 lighting = ambient + shadow * directLight;
 
-    // PBR point lights
-    for (int i = 0; i < numPointLights; i++)
-        lighting += CalcPBRPointLight(pointLights[i], N, V, input.fragPos,
-                                      albedo, metallic, roughness);
+    // PBR point/spot lights: Forward+ cell iteration when enabled, else all lights.
+    if (uForwardPlusParams.w > 0.5)
+    {
+        ForwardPlusTile cell = forwardPlusCellAt(input.position.xy, input.viewDepth);
+        uint fpCount = min(cell.lightCount, 64u);
+        for (uint i = 0; i < fpCount; i++)
+        {
+            uint idx = forwardPlusLightIndices[cell.lightOffset + i];
+            if (idx < uint(numPointLights))
+                lighting += CalcPBRPointLight(pointLights[idx], N, V, input.fragPos,
+                                              albedo, metallic, roughness);
+            else
+                lighting += CalcPBRSpotLight(spotLights[idx - uint(numPointLights)], N, V, input.fragPos,
+                                             albedo, metallic, roughness);
+        }
+    }
+    else
+    {
+        // PBR point lights
+        for (int i = 0; i < numPointLights; i++)
+            lighting += CalcPBRPointLight(pointLights[i], N, V, input.fragPos,
+                                          albedo, metallic, roughness);
 
-    // PBR spot lights
-    for (int j = 0; j < numSpotLights; j++)
-        lighting += CalcPBRSpotLight(spotLights[j], N, V, input.fragPos,
-                                     albedo, metallic, roughness);
+        // PBR spot lights
+        for (int j = 0; j < numSpotLights; j++)
+            lighting += CalcPBRSpotLight(spotLights[j], N, V, input.fragPos,
+                                         albedo, metallic, roughness);
+    }
 
     // Emissive
     float3 emissiveColor = uEmissive;

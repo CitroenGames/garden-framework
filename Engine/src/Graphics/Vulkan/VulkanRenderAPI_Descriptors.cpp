@@ -25,7 +25,7 @@ bool VulkanRenderAPI::createDescriptorPool()
     globalPoolSizes[2].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
     globalPoolSizes[2].descriptorCount = globalSets * 1; // PerObjectUBO (dynamic)
     globalPoolSizes[3].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    globalPoolSizes[3].descriptorCount = globalSets * 3; // pointLights + spotLights + instance data
+    globalPoolSizes[3].descriptorCount = globalSets * 5; // pointLights + spotLights + instance data + Forward+ tiles/indices
     globalPoolSizes[4].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     globalPoolSizes[4].descriptorCount = globalSets * 1; // heightmap
 
@@ -60,7 +60,7 @@ VkDescriptorPool VulkanRenderAPI::createPerDrawDescriptorPool()
     poolSizes[2].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
     poolSizes[2].descriptorCount = SETS_PER_POOL * 1; // PerObjectUBO (dynamic)
     poolSizes[3].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    poolSizes[3].descriptorCount = SETS_PER_POOL * 3; // pointLights + spotLights + instance data
+    poolSizes[3].descriptorCount = SETS_PER_POOL * 5; // pointLights + spotLights + instance data + Forward+ tiles/indices
     poolSizes[4].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     poolSizes[4].descriptorCount = SETS_PER_POOL * 1; // heightmap
 
@@ -157,41 +157,11 @@ bool VulkanRenderAPI::createUniformBuffers()
             std::memset(allocInfoOut.pMappedData, 0, bufferSize);
     }
 
-    // DeferredLightingCB uniform buffer (per-frame). Matches deferred_lighting.slang's
-    // DeferredLightingCB layout — ~640 bytes; round up to 1024 for safety.
+    // Per-frame point / spot light SSBOs for the forward shaders.
+    // MAX_LIGHTS_SB entries per kind; populated by uploadLightBuffers.
     {
-        constexpr VkDeviceSize bufferSize = 1024;
-        m_deferred_lighting_cb_buffers.resize(MAX_FRAMES_IN_FLIGHT);
-        m_deferred_lighting_cb_allocations.resize(MAX_FRAMES_IN_FLIGHT);
-        m_deferred_lighting_cb_mapped.resize(MAX_FRAMES_IN_FLIGHT);
-        for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i)
-        {
-            VkBufferCreateInfo bi{};
-            bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-            bi.size  = bufferSize;
-            bi.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
-
-            VmaAllocationCreateInfo ai{};
-            ai.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
-            ai.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
-
-            VmaAllocationInfo ao;
-            if (vmaCreateBuffer(vma_allocator, &bi, &ai,
-                                &m_deferred_lighting_cb_buffers[i],
-                                &m_deferred_lighting_cb_allocations[i], &ao) != VK_SUCCESS) {
-                printf("Failed to create deferred lighting CB %d\n", i);
-                return false;
-            }
-            m_deferred_lighting_cb_mapped[i] = ao.pMappedData;
-            if (ao.pMappedData) std::memset(ao.pMappedData, 0, bufferSize);
-        }
-    }
-
-    // Per-frame point / spot light SSBOs for the deferred lighting pass.
-    // MAX_LIGHTS_DEFERRED entries per kind; populated by uploadLightBuffers.
-    {
-        const VkDeviceSize ptSize = sizeof(GPUPointLight) * MAX_LIGHTS_DEFERRED;
-        const VkDeviceSize spSize = sizeof(GPUSpotLight)  * MAX_LIGHTS_DEFERRED;
+        const VkDeviceSize ptSize = sizeof(GPUPointLight) * MAX_LIGHTS_SB;
+        const VkDeviceSize spSize = sizeof(GPUSpotLight)  * MAX_LIGHTS_SB;
         m_point_lights_buffers.resize(MAX_FRAMES_IN_FLIGHT);
         m_point_lights_allocations.resize(MAX_FRAMES_IN_FLIGHT);
         m_point_lights_mapped.resize(MAX_FRAMES_IN_FLIGHT);
@@ -221,13 +191,33 @@ bool VulkanRenderAPI::createUniformBuffers()
             if (!makeSSBO(ptSize, m_point_lights_buffers[i],
                           m_point_lights_allocations[i],
                           m_point_lights_mapped[i])) {
-                printf("Failed to create deferred point-lights SSBO %d\n", i);
+                printf("Failed to create point-lights SSBO %d\n", i);
                 return false;
             }
             if (!makeSSBO(spSize, m_spot_lights_buffers[i],
                           m_spot_lights_allocations[i],
                           m_spot_lights_mapped[i])) {
-                printf("Failed to create deferred spot-lights SSBO %d\n", i);
+                printf("Failed to create spot-lights SSBO %d\n", i);
+                return false;
+            }
+        }
+    }
+
+    // Forward+ grid SSBOs (bindings 14/15). Minimal always-valid grid
+    // (header + one cell, one index); grown by uploadForwardPlusGrid().
+    {
+        m_forward_plus_tiles_buffers.assign(MAX_FRAMES_IN_FLIGHT, VK_NULL_HANDLE);
+        m_forward_plus_tiles_allocations.assign(MAX_FRAMES_IN_FLIGHT, nullptr);
+        m_forward_plus_tiles_mapped.assign(MAX_FRAMES_IN_FLIGHT, nullptr);
+        m_forward_plus_tiles_capacity.assign(MAX_FRAMES_IN_FLIGHT, 0);
+        m_forward_plus_indices_buffers.assign(MAX_FRAMES_IN_FLIGHT, VK_NULL_HANDLE);
+        m_forward_plus_indices_allocations.assign(MAX_FRAMES_IN_FLIGHT, nullptr);
+        m_forward_plus_indices_mapped.assign(MAX_FRAMES_IN_FLIGHT, nullptr);
+        m_forward_plus_indices_capacity.assign(MAX_FRAMES_IN_FLIGHT, 0);
+        for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+            if (!ensureForwardPlusBuffer(static_cast<uint32_t>(i), true, 2) ||
+                !ensureForwardPlusBuffer(static_cast<uint32_t>(i), false, 1)) {
+                printf("Failed to create Forward+ grid SSBO %d\n", i);
                 return false;
             }
         }
@@ -369,6 +359,7 @@ bool VulkanRenderAPI::createDescriptorSets()
             .writeBuffer(12, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &instanceDataInfo)
             .writeImage(13, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &heightmapInfo)
             .update(device);
+        writeForwardPlusDescriptors(static_cast<uint32_t>(i), descriptor_sets[i]);
     }
 
     // Per-draw descriptor sets are allocated on demand in getOrAllocateDescriptorSet()
@@ -538,6 +529,7 @@ void VulkanRenderAPI::initializeDescriptorSet(VkDescriptorSet ds, uint32_t frame
         .writeBuffer(12, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &instanceDataInfo)
         .writeImage(13, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &heightmapInfo)
         .update(device);
+    writeForwardPlusDescriptors(frameIndex, ds);
 }
 
 bool VulkanRenderAPI::createDefaultTexture()

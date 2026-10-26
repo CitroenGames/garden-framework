@@ -183,14 +183,6 @@ void D3D12RenderAPI::endFrame()
             cfg.renderImGui    = true;
             cfg.renderRml      = true;
 
-            if (isDeferredActive()) {
-                cfg.wantShadowMask = false;
-                // Shadows are applied inside the deferred lighting pass, so the
-                // screen-space ShadowMask is redundant (and would double-darken).
-                // SSAO is left on — tonemap multiplies it into the lit HDR, same
-                // as the forward path.
-            }
-
             m_ppGraphBuilder.setFrameInputs(rtvHandle,
                                             cv.getHDR(),   cv.getHDRSRV(),   cv.getHDRRTV(),
                                             cv.getDepth(), cv.getDepthSRV(), cv.getDepthDSV(),

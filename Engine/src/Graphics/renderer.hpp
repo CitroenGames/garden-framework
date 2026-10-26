@@ -95,8 +95,8 @@ public:
             spots.push_back(gpu);
         }
 
-        // Forward path (transparents) still uses the 16+16 cbuffer — fill it with
-        // the first MAX_LIGHTS of each. Full list goes to the deferred SBs below.
+        // Forward path still uses the 16+16 cbuffer arrays — fill them with
+        // the first MAX_LIGHTS of each. Full list goes to the Forward+ SBs below.
         LightCBuffer light_buffer{};
         int fwd_points = std::min(static_cast<int>(points.size()), MAX_LIGHTS);
         int fwd_spots  = std::min(static_cast<int>(spots.size()),  MAX_LIGHTS);
@@ -1146,7 +1146,6 @@ public:
         render_api->setSSAOEnabled(CVAR_BOOL(r_ssao));
         render_api->setShadowQuality(CVAR_INT(r_shadowquality));
         render_api->setShadowCascadeCount(CVAR_INT(r_shadowcascades));
-        render_api->setDeferredEnabled(CVAR_BOOL(r_deferred));
         render_api->setVSyncEnabled(CVAR_BOOL(r_vsync));
         render_api->enableLighting(global_lighting);
 
@@ -1315,10 +1314,7 @@ public:
                 RenderCommandBuffer opaque_cmds = record_opaque_parallel(
                     registry, opaque_entities, opaque_lod, global_lighting, &camera_frustum);
                 last_draw_calls += opaque_cmds.size();
-                if (render_api->isDeferredActive())
-                    render_api->submitDeferredOpaqueCommands(opaque_cmds);
-                else
-                    render_api->replayCommandBufferParallel(opaque_cmds);
+                render_api->replayCommandBufferParallel(opaque_cmds);
             }
 
             // Main lit pass: transparents (back-to-front, no sort - order matters)
@@ -1340,10 +1336,7 @@ public:
                 }
 
                 last_draw_calls += transparent_cmds.size();
-                if (render_api->isDeferredActive())
-                    render_api->submitDeferredTransparentCommands(transparent_cmds);
-                else
-                    render_api->replayCommandBuffer(transparent_cmds);
+                render_api->replayCommandBuffer(transparent_cmds);
             }
         }
         else
@@ -1381,7 +1374,7 @@ public:
         DebugDraw::get().render(render_api, c);
 
         // D3D12/Vulkan composite RmlUi during post-processing so UI lands on
-        // the resolved LDR target after deferred/tonemap work.
+        // the resolved LDR target after tonemap work.
         const std::string api_name = render_api->getAPIName();
         if (api_name != "D3D12" && api_name != "Vulkan")
             RmlUiManager::get().render();
@@ -1413,7 +1406,6 @@ public:
         render_api->setSSAOEnabled(CVAR_BOOL(r_ssao));
         render_api->setShadowQuality(CVAR_INT(r_shadowquality));
         render_api->setShadowCascadeCount(CVAR_INT(r_shadowcascades));
-        render_api->setDeferredEnabled(CVAR_BOOL(r_deferred));
         render_api->setVSyncEnabled(CVAR_BOOL(r_vsync));
         render_api->enableLighting(global_lighting);
 
@@ -1578,10 +1570,7 @@ public:
                 RenderCommandBuffer opaque_cmds = record_opaque_parallel(
                     registry, opaque_entities, opaque_lod, global_lighting, &camera_frustum);
                 last_draw_calls += opaque_cmds.size();
-                if (render_api->isDeferredActive())
-                    render_api->submitDeferredOpaqueCommands(opaque_cmds);
-                else
-                    render_api->replayCommandBufferParallel(opaque_cmds);
+                render_api->replayCommandBufferParallel(opaque_cmds);
             }
 
             // Main lit pass: transparents (back-to-front, sequential)
@@ -1602,10 +1591,7 @@ public:
                 }
 
                 last_draw_calls += transparent_cmds.size();
-                if (render_api->isDeferredActive())
-                    render_api->submitDeferredTransparentCommands(transparent_cmds);
-                else
-                    render_api->replayCommandBuffer(transparent_cmds);
+                render_api->replayCommandBuffer(transparent_cmds);
             }
         }
         else

@@ -20,6 +20,7 @@
 #include "stb_image.h"
 
 #include "VkInitHelpers.hpp"
+#include "VkDescriptorWriter.hpp"
 
 namespace {
 static constexpr size_t DEFAULT_PARALLEL_REPLAY_THRESHOLD = 512;
@@ -178,11 +179,14 @@ void VulkanRenderAPI::uploadLightUniformBuffer(uint32_t frameIndex)
         return;
 
     VulkanLightUBO lightUbo{};
-    lightUbo.numPointLights = std::clamp(m_num_point_lights_deferred, 0, MAX_LIGHTS_DEFERRED);
-    lightUbo.numSpotLights  = std::clamp(m_num_spot_lights_deferred, 0, MAX_LIGHTS_DEFERRED);
+    // Forward+ on: counts are the full SB counts (the shader splits
+    // point/spot by numPointLights). Off: existing m_num_* semantics.
+    lightUbo.numPointLights = std::clamp(m_num_point_lights, 0, MAX_LIGHTS_SB);
+    lightUbo.numSpotLights  = std::clamp(m_num_spot_lights, 0, MAX_LIGHTS_SB);
     lightUbo._lightPad      = glm::vec2(0.0f);
     lightUbo.cameraPos      = current_lights.cameraPos;
     lightUbo._lightPad2     = 0.0f;
+    lightUbo.forwardPlusParams = m_forwardPlusParams;
     std::memcpy(light_uniform_mapped[frameIndex], &lightUbo, sizeof(lightUbo));
 }
 
@@ -202,8 +206,8 @@ void VulkanRenderAPI::uploadCurrentForwardLightBuffers(uint32_t frameIndex)
                     sizeof(GPUSpotLight) * spotCount);
     }
 
-    m_num_point_lights_deferred = pointCount;
-    m_num_spot_lights_deferred  = spotCount;
+    m_num_point_lights = pointCount;
+    m_num_spot_lights  = spotCount;
 }
 
 // Camera and transforms
@@ -1082,14 +1086,12 @@ void VulkanRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
             continue;
         }
 
-        // Main pass / depth prepass: select pipeline from PSOKey, unless an
-        // override is active (deferred GBuffer pass binds gbufferPass_'s pipeline).
+        // Main pass / depth prepass: select pipeline from PSOKey.
         RenderState rs;
         rs.blend_mode = drawCmd.pso_key.blend;
         rs.cull_mode = drawCmd.pso_key.cull;
         rs.lighting = drawCmd.pso_key.lighting;
-        VkPipeline selectedPipeline = m_replayPipelineOverride
-            ? m_replayPipelineOverride : selectPipeline(rs);
+        VkPipeline selectedPipeline = selectPipeline(rs);
         if (selectedPipeline != last_bound_pipeline) {
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, selectedPipeline);
             last_bound_pipeline = selectedPipeline;
@@ -1302,7 +1304,7 @@ void VulkanRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmd
         rs.blend_mode = drawCmd.pso_key.blend;
         rs.cull_mode = drawCmd.pso_key.cull;
         rs.lighting = drawCmd.pso_key.lighting;
-        item.pipeline = m_replayPipelineOverride ? m_replayPipelineOverride : selectPipeline(rs);
+        item.pipeline = selectPipeline(rs);
         if (item.pipeline == VK_NULL_HANDLE) continue;
 
         item.texture = drawCmd.use_texture ? drawCmd.texture : INVALID_TEXTURE;
@@ -1613,12 +1615,6 @@ void VulkanRenderAPI::renderDebugLines(const vertex* vertices, size_t vertex_cou
     if (!vertices || vertex_count < 2 || !frame_started || device_lost) return;
     if (in_shadow_pass) return;
 
-    if (isDeferredActive()) {
-        m_deferredDebugLineVertices.insert(m_deferredDebugLineVertices.end(),
-                                           vertices, vertices + vertex_count);
-        return;
-    }
-
     renderDebugLinesDirect(vertices, vertex_count);
 }
 
@@ -1796,34 +1792,92 @@ IGPUMesh* VulkanRenderAPI::createMesh()
 }
 
 // ============================================================================
-// Deferred command routing (Phase A)
+// Forward+ light grid
 // ============================================================================
 
-bool VulkanRenderAPI::isDeferredActive() const
+bool VulkanRenderAPI::ensureForwardPlusBuffer(uint32_t frameIndex, bool tiles, uint32_t neededElements)
 {
-    return m_useDeferred
-        && lighting_enabled
-        && gbuffer_initialized
-        && deferred_lighting_initialized
-        && gbufferPass_.isInitialized()
-        && deferredLightingPass_.isInitialized();
+    auto& buffers     = tiles ? m_forward_plus_tiles_buffers     : m_forward_plus_indices_buffers;
+    auto& allocations = tiles ? m_forward_plus_tiles_allocations : m_forward_plus_indices_allocations;
+    auto& mapped      = tiles ? m_forward_plus_tiles_mapped      : m_forward_plus_indices_mapped;
+    auto& capacity    = tiles ? m_forward_plus_tiles_capacity    : m_forward_plus_indices_capacity;
+    if (frameIndex >= buffers.size()) return false;
+    neededElements = std::max(neededElements, 1u);
+    if (buffers[frameIndex] != VK_NULL_HANDLE && capacity[frameIndex] >= neededElements && mapped[frameIndex])
+        return true;
+
+    const VkDeviceSize elementSize = tiles ? sizeof(ForwardPlusTile) : sizeof(uint32_t);
+    VkBufferCreateInfo bi{};
+    bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bi.size  = elementSize * neededElements;
+    bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    VmaAllocationCreateInfo ai{};
+    ai.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
+    ai.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    VmaAllocationInfo ao{};
+    VkBuffer newBuffer = VK_NULL_HANDLE;
+    VmaAllocation newAllocation = nullptr;
+    if (vmaCreateBuffer(vma_allocator, &bi, &ai, &newBuffer, &newAllocation, &ao) != VK_SUCCESS)
+        return false;
+    if (ao.pMappedData) std::memset(ao.pMappedData, 0, static_cast<size_t>(bi.size));
+
+    if (buffers[frameIndex] != VK_NULL_HANDLE && vma_allocator) {
+        VkBuffer oldBuffer = buffers[frameIndex];
+        VmaAllocation oldAllocation = allocations[frameIndex];
+        VmaAllocator alloc = vma_allocator;
+        deletion_queue.push([alloc, oldBuffer, oldAllocation]() {
+            vmaDestroyBuffer(alloc, oldBuffer, oldAllocation);
+        });
+    }
+    buffers[frameIndex]     = newBuffer;
+    allocations[frameIndex] = newAllocation;
+    mapped[frameIndex]      = ao.pMappedData;
+    capacity[frameIndex]    = neededElements;
+    return true;
 }
 
-void VulkanRenderAPI::submitDeferredOpaqueCommands(const RenderCommandBuffer& cmds)
+void VulkanRenderAPI::writeForwardPlusDescriptors(uint32_t frameIndex, VkDescriptorSet ds)
 {
-    m_deferredOpaqueCmds = cmds;
+    if (ds == VK_NULL_HANDLE) return;
+    VkDescriptorBufferInfo tilesInfo{};
+    tilesInfo.buffer = (frameIndex < m_forward_plus_tiles_buffers.size() &&
+                        m_forward_plus_tiles_buffers[frameIndex] != VK_NULL_HANDLE)
+        ? m_forward_plus_tiles_buffers[frameIndex] : m_dummy_lights_buffer;
+    tilesInfo.offset = 0;
+    tilesInfo.range  = VK_WHOLE_SIZE;
+    VkDescriptorBufferInfo indicesInfo{};
+    indicesInfo.buffer = (frameIndex < m_forward_plus_indices_buffers.size() &&
+                          m_forward_plus_indices_buffers[frameIndex] != VK_NULL_HANDLE)
+        ? m_forward_plus_indices_buffers[frameIndex] : m_dummy_lights_buffer;
+    indicesInfo.offset = 0;
+    indicesInfo.range  = VK_WHOLE_SIZE;
+    VkDescriptorWriter(ds)
+        .writeBuffer(14, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &tilesInfo)
+        .writeBuffer(15, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &indicesInfo)
+        .update(device);
 }
 
-void VulkanRenderAPI::submitDeferredTransparentCommands(const RenderCommandBuffer& cmds)
+void VulkanRenderAPI::uploadForwardPlusGrid(const ForwardPlusGridUpload& upload)
 {
-    m_deferredTransparentCmds = cmds;
+    const uint32_t f = current_frame;
+    if (f >= m_forward_plus_tiles_buffers.size()) return;
+    const uint32_t tileCount  = std::max(upload.tileCount, 1u);
+    const uint32_t indexCount = upload.lightIndexCount;
+    const bool tilesOk   = ensureForwardPlusBuffer(f, true, tileCount);
+    const bool indicesOk = ensureForwardPlusBuffer(f, false, std::max(indexCount, 1u));
+    if (tilesOk && m_forward_plus_tiles_mapped[f] && upload.tiles)
+        std::memcpy(m_forward_plus_tiles_mapped[f], upload.tiles, sizeof(ForwardPlusTile) * tileCount);
+    if (indicesOk && m_forward_plus_indices_mapped[f] && upload.lightIndices && indexCount > 0)
+        std::memcpy(m_forward_plus_indices_mapped[f], upload.lightIndices, sizeof(uint32_t) * indexCount);
+    if (f < descriptor_sets.size() && descriptor_sets[f] != VK_NULL_HANDLE)
+        writeForwardPlusDescriptors(f, descriptor_sets[f]);
 }
 
 void VulkanRenderAPI::uploadLightBuffers(const GPUPointLight* pts, int ptCount,
                                          const GPUSpotLight*  spts, int spCount)
 {
-    if (ptCount > MAX_LIGHTS_DEFERRED) ptCount = MAX_LIGHTS_DEFERRED;
-    if (spCount > MAX_LIGHTS_DEFERRED) spCount = MAX_LIGHTS_DEFERRED;
+    if (ptCount > MAX_LIGHTS_SB) ptCount = MAX_LIGHTS_SB;
+    if (spCount > MAX_LIGHTS_SB) spCount = MAX_LIGHTS_SB;
     if (ptCount < 0) ptCount = 0;
     if (spCount < 0) spCount = 0;
     if (!pts) ptCount = 0;
@@ -1835,6 +1889,42 @@ void VulkanRenderAPI::uploadLightBuffers(const GPUPointLight* pts, int ptCount,
     if (f < m_spot_lights_mapped.size() && m_spot_lights_mapped[f] && spCount > 0)
         std::memcpy(m_spot_lights_mapped[f], spts, sizeof(GPUSpotLight)  * spCount);
 
-    m_num_point_lights_deferred = ptCount;
-    m_num_spot_lights_deferred  = spCount;
+    m_num_point_lights = ptCount;
+    m_num_spot_lights  = spCount;
+
+    // Forward+ binning. flipY=false: projection_matrix already carries the
+    // Vulkan Y flip ([1][1] *= -1 at creation), so projected NDC y maps to
+    // gl_FragCoord/SV_POSITION y (top-left origin) via (ndcY*0.5+0.5)*height,
+    // matching lightTileBounds with flipY=false (see ForwardPlusLightBinning.hpp).
+    const int binWidth  = viewport_width_rt > 0 ? viewport_width_rt
+                        : (current_render_extent.width > 0 ? static_cast<int>(current_render_extent.width)
+                                                           : viewport_width);
+    const int binHeight = viewport_height_rt > 0 ? viewport_height_rt
+                        : (current_render_extent.height > 0 ? static_cast<int>(current_render_extent.height)
+                                                            : viewport_height);
+    const bool haveViewport = binWidth > 0 && binHeight > 0;
+    const bool haveCamera = haveViewport && view_matrix != glm::mat4(0.0f)
+        && projection_matrix != glm::mat4(0.0f) && projection_matrix != glm::mat4(1.0f);
+    const bool fpEnabled = haveCamera && lighting_enabled && CVAR_BOOL(r_light_zbinning);
+    ForwardPlusBinningResult binned = binForwardPlusLights(
+        pts, static_cast<uint32_t>(ptCount), spts, static_cast<uint32_t>(spCount),
+        view_matrix, projection_matrix,
+        static_cast<uint32_t>(std::max(binWidth, 1)), static_cast<uint32_t>(std::max(binHeight, 1)),
+        0.1f, 1000.0f, /*flipY=*/false, fpEnabled);
+    ForwardPlusGridUpload grid{};
+    grid.tiles = binned.tiles.data();
+    grid.tileCount = static_cast<uint32_t>(binned.tiles.size());
+    grid.lightIndices = binned.lightIndices.data();
+    grid.lightIndexCount = static_cast<uint32_t>(binned.lightIndices.size());
+    grid.tilesX = binned.tilesX;
+    grid.tilesY = binned.tilesY;
+    uploadForwardPlusGrid(grid);
+    const bool gridBound = f < m_forward_plus_tiles_buffers.size()
+        && m_forward_plus_tiles_buffers[f] != VK_NULL_HANDLE
+        && f < m_forward_plus_indices_buffers.size()
+        && m_forward_plus_indices_buffers[f] != VK_NULL_HANDLE;
+    m_forwardPlusParams = glm::vec4(static_cast<float>(kForwardPlusTileSize),
+        static_cast<float>(binned.tilesX), static_cast<float>(binned.tilesY),
+        (fpEnabled && gridBound) ? 1.0f : 0.0f);
+    current_lights.forwardPlusParams = m_forwardPlusParams;
 }

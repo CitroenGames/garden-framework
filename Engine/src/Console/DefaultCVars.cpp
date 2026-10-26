@@ -56,7 +56,7 @@ CONVAR(r_occlusionculling, 0, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
        "Enable conservative screen-space occlusion culling for opaque meshes");
 
 CONVAR(r_light_zbinning, 1, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
-       "Enable tiled z-binned deferred point/spot light culling");
+       "Enable Forward+ tiled z-binned point/spot light culling (CPU binning, OpenStrike-style grid)");
 
 CONVAR(r_culling_debug, 0, ConVarFlags::CLIENT_ONLY,
        "Print culling diagnostics for renderer development");
@@ -81,9 +81,6 @@ CONVAR_BOUNDED(r_texture_streaming_min_resident_mips, 4, 1, 16,
 CONVAR(r_texture_streaming_debug, 0, ConVarFlags::CLIENT_ONLY,
        "Print compiled texture streaming decisions");
 
-CONVAR(r_deferred, 0, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
-       "Enable deferred rendering (opaque GBuffer + deferred lighting; transparents still forward). "
-       "Supported on D3D12 and Vulkan.");
 
 CONVAR(r_multicore_rendering, 1, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
        "Enable backend parallel command replay on supported render APIs");

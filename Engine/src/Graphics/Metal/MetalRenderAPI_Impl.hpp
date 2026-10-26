@@ -63,8 +63,6 @@ struct MetalRenderAPIImpl {
     id<MTLRenderPipelineState> unlitHDRPipelineAdditive = nil;
     id<MTLRenderPipelineState> debugLineHDRPipeline = nil;
     id<MTLRenderPipelineState> skyboxHDRPipeline = nil;
-    id<MTLRenderPipelineState> gbufferPipeline = nil;
-    id<MTLRenderPipelineState> deferredLightingPipeline = nil;
 
     // Depth prepass pipeline (no fragment function, no color writes)
     id<MTLRenderPipelineState> depthPrepassPipeline = nil;
@@ -79,7 +77,7 @@ struct MetalRenderAPIImpl {
 
     // Per-frame structured light buffers. Vulkan/D3D12 expose 256 dynamic
     // point and spot lights; keep the same cap for Metal's forward path.
-    static constexpr int MAX_LIGHTS_DEFERRED = 256;
+    static constexpr int MAX_LIGHTS_BUFFER = 256;
     id<MTLBuffer> pointLightBuffers[MAX_FRAMES_IN_FLIGHT] = {nil, nil, nil};
     id<MTLBuffer> spotLightBuffers[MAX_FRAMES_IN_FLIGHT] = {nil, nil, nil};
     void* pointLightMapped[MAX_FRAMES_IN_FLIGHT] = {nullptr, nullptr, nullptr};
@@ -88,6 +86,18 @@ struct MetalRenderAPIImpl {
     int numPointLightsUploaded = 0;
     int numSpotLightsUploaded = 0;
 
+    // Forward+ grid buffers (triple-buffered like the light buffers above).
+    // Tiles are 16B ForwardPlusTile entries (element 0 is the grid header);
+    // indices are 4B unified light indices. Always valid after initialize()
+    // (minimal 1-cell grid) so the forward shaders can always bind them.
+    id<MTLBuffer> forwardPlusTilesBuffers[MAX_FRAMES_IN_FLIGHT] = {nil, nil, nil};
+    id<MTLBuffer> forwardPlusIndicesBuffers[MAX_FRAMES_IN_FLIGHT] = {nil, nil, nil};
+    void* forwardPlusTilesMapped[MAX_FRAMES_IN_FLIGHT] = {nullptr, nullptr, nullptr};
+    void* forwardPlusIndicesMapped[MAX_FRAMES_IN_FLIGHT] = {nullptr, nullptr, nullptr};
+    uint32_t forwardPlusTilesCapacity[MAX_FRAMES_IN_FLIGHT] = {0, 0, 0};
+    uint32_t forwardPlusIndicesCapacity[MAX_FRAMES_IN_FLIGHT] = {0, 0, 0};
+    glm::vec4 forwardPlusParams = glm::vec4(16.0f, 1.0f, 1.0f, 0.0f);
+
     // Skybox
     id<MTLBuffer> skyboxVertexBuffer = nil;
 
@@ -95,10 +105,6 @@ struct MetalRenderAPIImpl {
     id<MTLBuffer> fxaaVertexBuffer = nil;
     id<MTLTexture> offscreenTexture = nil;
     id<MTLTexture> offscreenDepthTexture = nil;
-    id<MTLTexture> deferredHDRTexture = nil;
-    id<MTLTexture> gbuffer0Texture = nil;
-    id<MTLTexture> gbuffer1Texture = nil;
-    id<MTLTexture> gbuffer2Texture = nil;
     bool vsyncEnabled = true;
     bool fxaaEnabled = true;
     bool fxaaInitialized = false;
@@ -141,10 +147,6 @@ struct MetalRenderAPIImpl {
         // Offscreen texture for FXAA intermediate rendering
         id<MTLTexture> offscreenTexture = nil;
         id<MTLTexture> offscreenDepthTexture = nil;
-        id<MTLTexture> hdrTexture = nil;
-        id<MTLTexture> gbuffer0Texture = nil;
-        id<MTLTexture> gbuffer1Texture = nil;
-        id<MTLTexture> gbuffer2Texture = nil;
         int width = 0;
         int height = 0;
     };
@@ -205,10 +207,6 @@ struct MetalRenderAPIImpl {
 
     // Main pass state
     bool mainPassActive = false;
-    bool skyboxRequested = false;
-    RenderCommandBuffer deferredOpaqueCmds;
-    RenderCommandBuffer deferredTransparentCmds;
-    std::vector<vertex> deferredDebugLineVertices;
 
     // ImGui render pass descriptor (stored for ImGui rendering)
     MTLRenderPassDescriptor* imguiRenderPassDesc = nil;
@@ -240,11 +238,12 @@ struct MetalRenderAPIImpl {
 
     void updateLightInfoFromCurrentLights()
     {
-        currentLightInfo.numPointLights = std::clamp(currentLights.numPointLights, 0, MAX_LIGHTS_DEFERRED);
-        currentLightInfo.numSpotLights = std::clamp(currentLights.numSpotLights, 0, MAX_LIGHTS_DEFERRED);
+        currentLightInfo.numPointLights = std::clamp(currentLights.numPointLights, 0, MAX_LIGHTS_BUFFER);
+        currentLightInfo.numSpotLights = std::clamp(currentLights.numSpotLights, 0, MAX_LIGHTS_BUFFER);
         currentLightInfo.cameraPos = currentLights.cameraPos;
         currentLightInfo._pad = glm::vec2(0.0f);
         currentLightInfo._pad2 = 0.0f;
+        currentLightInfo.forwardPlusParams = forwardPlusParams;
     }
 
     void bindLightBuffers(id<MTLRenderCommandEncoder> enc)
@@ -260,6 +259,11 @@ struct MetalRenderAPIImpl {
             [enc setFragmentBuffer:pointLightBuffers[currentFrame] offset:0 atIndex:4];
         if (spotLightBuffers[currentFrame])
             [enc setFragmentBuffer:spotLightBuffers[currentFrame] offset:0 atIndex:5];
+        // Forward+ grid: Slang t10/t11 follow the t6->4 / t7->5 convention (-2).
+        if (forwardPlusTilesBuffers[currentFrame])
+            [enc setFragmentBuffer:forwardPlusTilesBuffers[currentFrame] offset:0 atIndex:8];
+        if (forwardPlusIndicesBuffers[currentFrame])
+            [enc setFragmentBuffer:forwardPlusIndicesBuffers[currentFrame] offset:0 atIndex:9];
     }
 
     void updatePerFrameUBO()
@@ -383,7 +387,6 @@ struct MetalRenderAPIImpl {
     void createOffscreenResources();
     void createViewportResources(int w, int h);
     void createPIEViewportTextures(PIEViewportTarget& target, int w, int h);
-    void renderDeferredSceneToCurrentTarget(bool presentToDrawable, bool renderImGui);
 
     // Defined in MetalRenderAPI_SSAO.mm
     void createSSAOResources(int w, int h);

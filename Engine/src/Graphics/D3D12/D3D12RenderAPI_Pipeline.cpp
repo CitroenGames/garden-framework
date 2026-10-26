@@ -23,8 +23,10 @@ bool D3D12RenderAPI::createRootSignature()
     // [9] Descriptor table: SRV t6 (point lights StructuredBuffer)
     // [10] Descriptor table: SRV t7 (spot lights StructuredBuffer)
     // [11] Descriptor table: SRV t8 (heightmap texture)
+    // [12] Descriptor table: SRV t10 (Forward+ tile grid StructuredBuffer)
+    // [13] Descriptor table: SRV t11 (Forward+ light index StructuredBuffer)
 
-    D3D12_ROOT_PARAMETER rootParams[12] = {};
+    D3D12_ROOT_PARAMETER rootParams[14] = {};
 
     // [0] Root CBV b0
     rootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
@@ -152,6 +154,28 @@ bool D3D12RenderAPI::createRootSignature()
     rootParams[11].DescriptorTable.pDescriptorRanges = &srvRange8;
     rootParams[11].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
 
+    // [12] Descriptor table: SRV t10 (Forward+ tiles)
+    D3D12_DESCRIPTOR_RANGE srvRangeFP0 = {};
+    srvRangeFP0.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    srvRangeFP0.NumDescriptors = 1;
+    srvRangeFP0.BaseShaderRegister = 10;
+    srvRangeFP0.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+    rootParams[12].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    rootParams[12].DescriptorTable.NumDescriptorRanges = 1;
+    rootParams[12].DescriptorTable.pDescriptorRanges = &srvRangeFP0;
+    rootParams[12].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    // [13] Descriptor table: SRV t11 (Forward+ light indices)
+    D3D12_DESCRIPTOR_RANGE srvRangeFP1 = {};
+    srvRangeFP1.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    srvRangeFP1.NumDescriptors = 1;
+    srvRangeFP1.BaseShaderRegister = 11;
+    srvRangeFP1.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+    rootParams[13].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    rootParams[13].DescriptorTable.NumDescriptorRanges = 1;
+    rootParams[13].DescriptorTable.pDescriptorRanges = &srvRangeFP1;
+    rootParams[13].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
     // Static samplers
     D3D12_STATIC_SAMPLER_DESC staticSamplers[6] = {};
 
@@ -192,7 +216,7 @@ bool D3D12RenderAPI::createRootSignature()
     }
 
     D3D12_ROOT_SIGNATURE_DESC rsDesc = {};
-    rsDesc.NumParameters = 12;
+    rsDesc.NumParameters = 14;
     rsDesc.pParameters = rootParams;
     rsDesc.NumStaticSamplers = 6;
     rsDesc.pStaticSamplers = staticSamplers;
@@ -252,17 +276,7 @@ bool D3D12RenderAPI::loadShaders()
     m_fxaaPS = readShaderBinary(shaderDir + "fxaa_ps.dxil");
     if (m_fxaaPS.empty()) return false;
 
-    m_gbufferVS = readShaderBinary(shaderDir + "gbuffer_vs.dxil");
-    if (m_gbufferVS.empty()) return false;
-    m_gbufferPS = readShaderBinary(shaderDir + "gbuffer_ps.dxil");
-    if (m_gbufferPS.empty()) return false;
-
-    m_deferredLightingVS = readShaderBinary(shaderDir + "deferred_lighting_vs.dxil");
-    if (m_deferredLightingVS.empty()) return false;
-    m_deferredLightingPS = readShaderBinary(shaderDir + "deferred_lighting_ps.dxil");
-    if (m_deferredLightingPS.empty()) return false;
-
-    LOG_ENGINE_TRACE("[D3D12] Loaded 14 DXIL shaders (basic, unlit, shadow, sky, fxaa, gbuffer, deferred_lighting)");
+    LOG_ENGINE_TRACE("[D3D12] Loaded DXIL shaders (basic, unlit, shadow, sky, fxaa)");
     return true;
 }
 

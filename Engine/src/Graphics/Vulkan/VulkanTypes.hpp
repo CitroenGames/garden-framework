@@ -103,8 +103,9 @@ struct VulkanLightUBO {
     glm::vec2 _lightPad;
     glm::vec3 cameraPos;
     float _lightPad2;
+    glm::vec4 forwardPlusParams; // x tileSize, y tilesX, z tilesY, w enabled(0/1)
 };
-static_assert(sizeof(VulkanLightUBO) == 32, "VulkanLightUBO must match basic.slang LightCB");
+static_assert(sizeof(VulkanLightUBO) == 48, "VulkanLightUBO must match basic.slang LightCB");
 
 // Per-object UBO structure (matches Slang shader PerObjectCB at binding 4)
 struct PerObjectUBO {

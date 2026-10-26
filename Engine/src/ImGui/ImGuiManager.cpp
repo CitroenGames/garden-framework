@@ -505,14 +505,7 @@ void ImGuiManager::render()
                         cvar->setInt(cascadeCount);
                 }
 
-                // Deferred rendering toggle
-                bool deferred = m_renderAPI->isDeferredEnabled();
-                if (ImGui::Checkbox("Deferred Rendering", &deferred))
-                {
-                    m_renderAPI->setDeferredEnabled(deferred);
-                    if (auto* cvar = CVAR_PTR(r_deferred))
-                        cvar->setInt(deferred ? 1 : 0);
-                }
+                // Forward+ light binning is driven by the r_light_zbinning cvar.
             }
         }
         ImGui::End();

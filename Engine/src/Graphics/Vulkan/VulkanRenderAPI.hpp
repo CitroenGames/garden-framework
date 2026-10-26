@@ -1,13 +1,12 @@
 #pragma once
 
 #include "Graphics/RenderAPI.hpp"
+#include "Graphics/ForwardPlusLightBinning.hpp"
 #include "Graphics/RenderCommandBuffer.hpp"
 #include "VulkanTypes.hpp"
 #include "VkDeletionQueue.hpp"
 #include "VkSamplerCache.hpp"
 #include "VulkanPostProcessPass.hpp"
-#include "VulkanGBufferPass.hpp"
-#include "VulkanDeferredLightingPass.hpp"
 #include "VulkanRGBackend.hpp"
 #include "VulkanPostProcessGraphBuilder.hpp"
 #include "Graphics/RenderGraph/RenderGraph.hpp"
@@ -144,13 +143,9 @@ public:
     virtual void setSSAORadius(float radius) override;
     virtual void setSSAOIntensity(float intensity) override;
 
-    void setDeferredEnabled(bool enabled) override { m_useDeferred = enabled; }
-    bool isDeferredEnabled() const override { return m_useDeferred; }
-    bool isDeferredActive() const override;
-    void submitDeferredOpaqueCommands(const RenderCommandBuffer& cmds) override;
-    void submitDeferredTransparentCommands(const RenderCommandBuffer& cmds) override;
     void uploadLightBuffers(const GPUPointLight* pts, int ptCount,
                             const GPUSpotLight* spts, int spCount) override;
+    void uploadForwardPlusGrid(const ForwardPlusGridUpload& upload) override;
 
     // Vulkan-specific accessors for VulkanMesh
     VkDevice getDevice() const { return device; }
@@ -510,24 +505,33 @@ private:
     VkBuffer m_dummy_lights_buffer = VK_NULL_HANDLE;
     VmaAllocation m_dummy_lights_allocation = VK_NULL_HANDLE;
 
-    // Per-frame uniform buffer for the DeferredLightingCB. Sized for one CB
-    // (~640 bytes); NUM_FRAMES_IN_FLIGHT=2 instances so consecutive frames
-    // can write without racing the GPU.
-    std::vector<VkBuffer> m_deferred_lighting_cb_buffers;
-    std::vector<VmaAllocation> m_deferred_lighting_cb_allocations;
-    std::vector<void*> m_deferred_lighting_cb_mapped;
-
-    // Per-frame point / spot light SSBOs for the deferred lighting pass.
-    // Sized for MAX_LIGHTS_DEFERRED entries; populated by uploadLightBuffers.
-    static constexpr int MAX_LIGHTS_DEFERRED = 256;
+    // Per-frame point / spot light SSBOs for the forward shaders.
+    // Sized for MAX_LIGHTS_SB entries; populated by uploadLightBuffers.
+    static constexpr int MAX_LIGHTS_SB = 256;
     std::vector<VkBuffer> m_point_lights_buffers;
     std::vector<VmaAllocation> m_point_lights_allocations;
     std::vector<void*> m_point_lights_mapped;
     std::vector<VkBuffer> m_spot_lights_buffers;
     std::vector<VmaAllocation> m_spot_lights_allocations;
     std::vector<void*> m_spot_lights_mapped;
-    int m_num_point_lights_deferred = 0;
-    int m_num_spot_lights_deferred  = 0;
+    int m_num_point_lights = 0;
+    int m_num_spot_lights  = 0;
+
+    // Forward+ light grid SSBOs (bindings 14/15), per frame in flight and
+    // persistently mapped like the light SSBOs above. Capacities are in
+    // elements; buffers are grown by uploadForwardPlusGrid() and always
+    // valid (minimal grid) so descriptors never dangle.
+    std::vector<VkBuffer> m_forward_plus_tiles_buffers;
+    std::vector<VmaAllocation> m_forward_plus_tiles_allocations;
+    std::vector<void*> m_forward_plus_tiles_mapped;
+    std::vector<uint32_t> m_forward_plus_tiles_capacity;
+    std::vector<VkBuffer> m_forward_plus_indices_buffers;
+    std::vector<VmaAllocation> m_forward_plus_indices_allocations;
+    std::vector<void*> m_forward_plus_indices_mapped;
+    std::vector<uint32_t> m_forward_plus_indices_capacity;
+    glm::vec4 m_forwardPlusParams = glm::vec4(16.0f, 1.0f, 1.0f, 0.0f);
+    bool ensureForwardPlusBuffer(uint32_t frameIndex, bool tiles, uint32_t neededElements);
+    void writeForwardPlusDescriptors(uint32_t frameIndex, VkDescriptorSet ds);
 
     // Per-object dynamic UBO ring buffer (per-frame) - PerObjectUBO at binding 4
     static constexpr uint32_t MAX_PER_OBJECT_DRAWS = 16384;
@@ -651,7 +655,6 @@ private:
     VkImageView offscreen_view = VK_NULL_HANDLE;
     VkSampler offscreen_sampler = VK_NULL_HANDLE;
     VkRenderPass offscreen_render_pass = VK_NULL_HANDLE;
-    VkRenderPass transparent_forward_render_pass = VK_NULL_HANDLE;
     std::vector<VkFramebuffer> offscreen_framebuffers;
     VkImage offscreen_depth_image = VK_NULL_HANDLE;
     VmaAllocation offscreen_depth_allocation = nullptr;
@@ -663,16 +666,6 @@ private:
     std::vector<VkFramebuffer> fxaa_framebuffers;      // Swapchain framebuffers (shared with renderUI)
     VkPipeline viewport_fxaa_pipeline = VK_NULL_HANDLE;
     bool fxaa_initialized = false;
-
-    // Deferred GBuffer geometry pass (PSO + 3-RT render pass owner)
-    VulkanGBufferPass gbufferPass_;
-    bool gbuffer_initialized = false;
-    VulkanDeferredLightingPass deferredLightingPass_;
-    bool deferred_lighting_initialized = false;
-    bool createGBufferResources();
-    void cleanupGBufferResources();
-    bool createDeferredLightingResources();
-    void cleanupDeferredLightingResources();
 
     // SSAO post-process passes
     VulkanPostProcessPass ssaoPass_;        // computation
@@ -717,20 +710,6 @@ private:
     VulkanRGBackend m_rgBackend;
     VulkanPostProcessGraphBuilder m_ppGraphBuilder;
     bool m_useRenderGraph = true;
-    bool m_useDeferred = false;
-
-    // Deferred-path command buffering (mirrors D3D12 layout). The renderer
-    // routes opaque/transparent draws here when isDeferredActive() returns
-    // true; the GBuffer / TransparentForward graph passes replay them.
-    RenderCommandBuffer m_deferredOpaqueCmds;
-    RenderCommandBuffer m_deferredTransparentCmds;
-    std::vector<vertex> m_deferredDebugLineVertices;
-
-    // Optional pipeline override for replay paths. When non-null, the buffered
-    // command replay loops bind this pipeline instead of the per-cmd selection.
-    // Set by the GBuffer pass (to bind gbufferPass_.getPipeline()) and cleared
-    // afterwards. Mirrors D3D12RenderAPI::m_replayPSOOverride.
-    VkPipeline m_replayPipelineOverride = VK_NULL_HANDLE;
 
     // Viewport render target for editor
     VkImage viewport_image = VK_NULL_HANDLE;

@@ -442,9 +442,6 @@ void VulkanRenderAPI::endSceneRender()
             cfg.renderRml      = m_sceneRmlEnabled;
             cfg.renderImGui    = false;
 
-            if (isDeferredActive())
-                cfg.wantShadowMask = false;
-
             m_ppGraphBuilder.setFrameInputs(
                 target.image, VK_IMAGE_LAYOUT_UNDEFINED,
                 RGFormat::RGBA16_FLOAT,
@@ -509,9 +506,6 @@ void VulkanRenderAPI::endSceneRender()
         cfg.wantShadowMask = wantShadowMask;
         cfg.renderRml      = m_sceneRmlEnabled;
         cfg.renderImGui    = false;
-
-        if (isDeferredActive())
-            cfg.wantShadowMask = false;
 
         m_ppGraphBuilder.setFrameInputs(
             viewport_image, VK_IMAGE_LAYOUT_UNDEFINED,
@@ -1053,7 +1047,7 @@ void VulkanRenderAPI::createPIEViewportResources(PIEViewportTarget& target, int 
     target.imgui_ds = ImGui_ImplVulkan_AddTexture(target.sampler, target.view,
                                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
-    // --- HDR scene image (rendered by the scene/deferred graph, sampled by tonemapping) ---
+    // --- HDR scene image (rendered by the scene graph, sampled by tonemapping) ---
     if (vkutil::createImage(vma_allocator, (uint32_t)w, (uint32_t)h, VK_FORMAT_R16G16B16A16_SFLOAT,
                             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
                             target.hdr_image, target.hdr_allocation) != VK_SUCCESS) {

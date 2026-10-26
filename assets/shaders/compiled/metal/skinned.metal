@@ -73,7 +73,9 @@ fragment float4 skinned_fragment(SkinnedVertexOut in [[stage_in]],
                                   sampler shadowSampler [[sampler(1)]],
                                   constant LightCBuffer& lights [[buffer(3)]],
                                   const device PointLightData* pointLights [[buffer(4)]],
-                                  const device SpotLightData* spotLights [[buffer(5)]])
+                                  const device SpotLightData* spotLights [[buffer(5)]],
+                                  const device ForwardPlusTile* forwardPlusTiles [[buffer(8)]],
+                                  const device uint* forwardPlusLightIndices [[buffer(9)]])
 {
     float3 norm = normalize(in.normal);
     float3 lightDir = normalize(-ubo.lightDir);
@@ -89,13 +91,26 @@ fragment float4 skinned_fragment(SkinnedVertexOut in [[stage_in]],
     }
     float3 lighting = ambient + shadow * diffuse;
 
-    // Point lights
-    for (int i = 0; i < lights.numPointLights; i++)
-        lighting += CalcPointLight(pointLights[i], norm, in.fragPos);
+    if (lights.forwardPlusParams.w > 0.5) {
+        ForwardPlusTile cell = forwardPlusCellAt(forwardPlusTiles, lights.forwardPlusParams,
+                                                 in.position.xy, in.viewDepth);
+        uint fpCount = min(cell.lightCount, 64u);
+        for (uint i = 0; i < fpCount; i++) {
+            uint idx = forwardPlusLightIndices[cell.lightOffset + i];
+            if (idx < uint(lights.numPointLights))
+                lighting += CalcPointLight(pointLights[idx], norm, in.fragPos);
+            else
+                lighting += CalcSpotLight(spotLights[idx - uint(lights.numPointLights)], norm, in.fragPos);
+        }
+    } else {
+        // Point lights
+        for (int i = 0; i < lights.numPointLights; i++)
+            lighting += CalcPointLight(pointLights[i], norm, in.fragPos);
 
-    // Spot lights
-    for (int j = 0; j < lights.numSpotLights; j++)
-        lighting += CalcSpotLight(spotLights[j], norm, in.fragPos);
+        // Spot lights
+        for (int j = 0; j < lights.numSpotLights; j++)
+            lighting += CalcSpotLight(spotLights[j], norm, in.fragPos);
+    }
 
     float4 texColor;
     if (ubo.useTexture != 0) {

@@ -118,13 +118,24 @@ float ShadowCalculationSingle(int cascadeIndex, float3 fragPos, float3 normal, f
     float currentDepth = projCoords.z;
     if (currentDepth > 1.0 || currentDepth < 0.0)
         return 1.0;
+    if (any(projCoords.xy < 0.0) || any(projCoords.xy > 1.0))
+        return 1.0;
 
+    // Texel-scaled bias derived from the light-space matrix (see
+    // Graphics/ShadowCascade.hpp). The reconstructed normal's orientation is
+    // unreliable, so use the absolute slope only and no normal offset here.
     float3 lightDir = normalize(-uLightDir);
-    float baseBias = max(0.0005 * (1.0 - dot(normalize(normal), lightDir)), 0.00005);
-    float bias = baseBias * (1.0 + float(cascadeIndex) * 0.5);
+    float ndotl = saturate(abs(dot(normalize(normal), lightDir)));
+    float sinTheta = sqrt(saturate(1.0 - ndotl * ndotl));
+    float4x4 lsMat = uLightSpaceMatrices[cascadeIndex];
+    float xyScale = max(length(float3(lsMat[0][0], lsMat[0][1], lsMat[0][2])), 1e-6);
+    float zScale = max(length(float3(lsMat[2][0], lsMat[2][1], lsMat[2][2])), 1e-6);
+    float depthPerTexel = (2.0 * uShadowMapTexelSize.x / xyScale) * zScale;
+    float tanTheta = min(sinTheta / max(ndotl, 0.05), 4.0);
+    float bias = depthPerTexel * (0.5 + tanTheta);
 
-    // Per-pixel rotation angle for Poisson disc (reduces banding)
-    float angle = frac(sin(dot(screenPos, float2(12.9898, 78.233))) * 43758.5453) * 6.28318530718;
+    // Interleaved gradient noise (Jimenez 2014) rotation for Poisson disc
+    float angle = frac(52.9829189 * frac(dot(screenPos, float2(0.06711056, 0.00583715)))) * 6.28318530718;
     float cosA = cos(angle);
     float sinA = sin(angle);
 

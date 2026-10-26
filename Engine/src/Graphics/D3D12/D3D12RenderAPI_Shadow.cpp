@@ -3,6 +3,7 @@
 #endif
 
 #include "D3D12RenderAPI.hpp"
+#include "Graphics/ShadowCascade.hpp"
 #include "Components/camera.hpp"
 #include "Utils/Log.hpp"
 #include "Utils/EnginePaths.hpp"
@@ -125,42 +126,28 @@ std::array<glm::vec3, 8> D3D12RenderAPI::getFrustumCornersWorldSpace(const glm::
     return corners;
 }
 
+// CSM Helper: Calculate light space matrix for a specific cascade.
+// Bounding-sphere fit + texel snapping (as in OpenStrike/Ferrite
+// FerriteEngine/src/renderer/csm/csm_split.cpp): a sphere's radius is
+// invariant under camera rotation, so the shadow texel size stays constant,
+// and snapping the window origin to whole texels in light space stops
+// shadows swimming/crawling as the camera moves. The old per-frame min/max
+// box changed size every frame and used a ~600-unit depth range
+// (minZ-10 .. maxZ+500), destroying depth precision and making the shader's
+// fixed normalised-depth bias meaningless.
 glm::mat4 D3D12RenderAPI::getLightSpaceMatrixForCascade(int cascadeIndex, const glm::vec3& lightDir,
                                                          const glm::mat4& viewMatrix, float fov, float aspect)
 {
-    float nearSplit = cascadeSplitDistances[cascadeIndex];
-    float farSplit = cascadeSplitDistances[cascadeIndex + 1];
+    float cascadeNear = cascadeSplitDistances[cascadeIndex];
+    float cascadeFar = cascadeSplitDistances[cascadeIndex + 1];
 
-    glm::mat4 cascadeProj = glm::perspectiveRH_ZO(glm::radians(fov), aspect, nearSplit, farSplit);
+    glm::mat4 cascadeProj = glm::perspectiveRH_ZO(glm::radians(fov), aspect, cascadeNear, cascadeFar);
     auto corners = getFrustumCornersWorldSpace(cascadeProj, viewMatrix);
 
-    glm::vec3 center(0.0f);
-    for (const auto& c : corners) center += c;
-    center /= 8.0f;
-
-    glm::vec3 up(0.0f, 1.0f, 0.0f);
-    if (std::abs(glm::dot(glm::normalize(lightDir), up)) > 0.99f)
-        up = glm::vec3(0.0f, 0.0f, 1.0f);
-
-    glm::mat4 lightView = glm::lookAt(center - lightDir * 100.0f, center, up);
-
-    float minX = std::numeric_limits<float>::max(), maxX = std::numeric_limits<float>::lowest();
-    float minY = std::numeric_limits<float>::max(), maxY = std::numeric_limits<float>::lowest();
-    float minZ = std::numeric_limits<float>::max(), maxZ = std::numeric_limits<float>::lowest();
-
-    for (const auto& c : corners)
-    {
-        glm::vec4 lc = lightView * glm::vec4(c, 1.0f);
-        minX = std::min(minX, lc.x); maxX = std::max(maxX, lc.x);
-        minY = std::min(minY, lc.y); maxY = std::max(maxY, lc.y);
-        minZ = std::min(minZ, lc.z); maxZ = std::max(maxZ, lc.z);
-    }
-
-    minZ -= 10.0f;
-    maxZ += 500.0f;
-
-    return glm::orthoRH_ZO(minX, maxX, minY, maxY, minZ, maxZ) * lightView;
+    // Bounding-sphere fit with texel snapping: see Graphics/ShadowCascade.hpp.
+    return fitShadowCascade(corners, lightDir, currentShadowSize).lightSpaceMatrix;
 }
+
 
 void D3D12RenderAPI::beginShadowPass(const glm::vec3& lightDir)
 {

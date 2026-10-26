@@ -1,4 +1,5 @@
 #include "VulkanRenderAPI.hpp"
+#include "Graphics/ShadowCascade.hpp"
 #include "Utils/Log.hpp"
 #include "Utils/EnginePaths.hpp"
 #include "Utils/Vertex.hpp"
@@ -53,66 +54,26 @@ std::array<glm::vec3, 8> VulkanRenderAPI::getFrustumCornersWorldSpace(const glm:
     return corners;
 }
 
-// CSM Helper: Calculate light space matrix for a specific cascade
+// CSM Helper: Calculate light space matrix for a specific cascade.
+// Bounding-sphere fit + texel snapping (as in OpenStrike/Ferrite
+// FerriteEngine/src/renderer/csm/csm_split.cpp): a sphere's radius is
+// invariant under camera rotation, so the shadow texel size stays constant,
+// and snapping the window origin to whole texels in light space stops
+// shadows swimming/crawling as the camera moves. The old per-frame min/max
+// box changed size every frame and used a ~600-unit depth range
+// (minZ-10 .. maxZ+500), destroying depth precision and making the shader's
+// fixed normalised-depth bias meaningless.
 glm::mat4 VulkanRenderAPI::getLightSpaceMatrixForCascade(int cascadeIndex, const glm::vec3& lightDir,
     const glm::mat4& viewMatrix, float fov, float aspect)
 {
-    // Get cascade near/far
     float cascadeNear = cascadeSplitDistances[cascadeIndex];
     float cascadeFar = cascadeSplitDistances[cascadeIndex + 1];
 
-    // Create projection for this cascade's frustum slice
     glm::mat4 cascadeProj = glm::perspectiveRH_ZO(glm::radians(fov), aspect, cascadeNear, cascadeFar);
-
-    // Get frustum corners in world space
     auto corners = getFrustumCornersWorldSpace(cascadeProj, viewMatrix);
 
-    // Calculate frustum center
-    glm::vec3 center(0.0f);
-    for (const auto& c : corners) {
-        center += c;
-    }
-    center /= 8.0f;
-
-    // Light view matrix
-    glm::vec3 direction = glm::normalize(lightDir);
-    glm::vec3 up = glm::vec3(0.0f, 1.0f, 0.0f);
-    if (std::abs(glm::dot(direction, up)) > 0.99f) {
-        up = glm::vec3(0.0f, 0.0f, 1.0f);
-    }
-
-    glm::mat4 lightView = glm::lookAt(
-        center - direction * 100.0f,
-        center,
-        up);
-
-    // Find bounding box in light space
-    float minX = std::numeric_limits<float>::max();
-    float maxX = std::numeric_limits<float>::lowest();
-    float minY = std::numeric_limits<float>::max();
-    float maxY = std::numeric_limits<float>::lowest();
-    float minZ = std::numeric_limits<float>::max();
-    float maxZ = std::numeric_limits<float>::lowest();
-
-    for (const auto& c : corners) {
-        glm::vec4 lsCorner = lightView * glm::vec4(c, 1.0f);
-        minX = std::min(minX, lsCorner.x);
-        maxX = std::max(maxX, lsCorner.x);
-        minY = std::min(minY, lsCorner.y);
-        maxY = std::max(maxY, lsCorner.y);
-        minZ = std::min(minZ, lsCorner.z);
-        maxZ = std::max(maxZ, lsCorner.z);
-    }
-
-    // Add padding to prevent edge artifacts
-    float padding = 10.0f;
-    minZ -= padding;
-    maxZ += 500.0f;
-
-    // Orthographic projection tightly fitted to frustum
-    glm::mat4 lightProj = glm::orthoRH_ZO(minX, maxX, minY, maxY, minZ, maxZ);
-
-    return lightProj * lightView;
+    // Bounding-sphere fit with texel snapping: see Graphics/ShadowCascade.hpp.
+    return fitShadowCascade(corners, lightDir, currentShadowSize).lightSpaceMatrix;
 }
 
 bool VulkanRenderAPI::createShadowResources()
@@ -179,8 +140,9 @@ bool VulkanRenderAPI::createShadowResources()
 
     // Create shadow sampler via cache
     SamplerKey shadowSamplerKey{};
-    shadowSamplerKey.magFilter = VK_FILTER_NEAREST;
-    shadowSamplerKey.minFilter = VK_FILTER_NEAREST;
+    // LINEAR comparison filtering gives hardware 2x2 PCF per tap; NEAREST made every Poisson tap blocky/aliased.
+    shadowSamplerKey.magFilter = VK_FILTER_LINEAR;
+    shadowSamplerKey.minFilter = VK_FILTER_LINEAR;
     shadowSamplerKey.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
     shadowSamplerKey.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
     shadowSamplerKey.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;

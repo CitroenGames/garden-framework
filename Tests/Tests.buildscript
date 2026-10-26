@@ -3,3 +3,5 @@ include = NetworkStressTests/NetworkStressTests.buildscript
 include = ReflectionTests/ReflectionTests.buildscript
 include = InputTests/InputTests.buildscript
 include = GameplayTests/GameplayTests.buildscript
+include = ShadowTests/ShadowTests.buildscript
+include = ForwardPlusTests/ForwardPlusTests.buildscript

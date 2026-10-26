@@ -353,9 +353,6 @@ void VulkanRenderAPI::endFrame()
             cfg.renderRml      = true;
             cfg.renderImGui    = true;
 
-            if (isDeferredActive())
-                cfg.wantShadowMask = false;
-
             m_ppGraphBuilder.setFrameInputs(
                 swapchain_images[current_image_index], VK_IMAGE_LAYOUT_UNDEFINED,
                 RGFormat::RGBA8_UNORM,
