@@ -156,6 +156,64 @@ static bool testSortWithViewDepthFrontToBack()
     return pass(name);
 }
 
+static IGPUMesh* makeUploadedMesh(HeadlessRenderAPI& api);
+
+// Depth ordering must stay inside each exact state group: draws that
+// differ only by texture keep their grouping, order front-to-back inside
+// the group, and replay with the same merged batches as a plain sort.
+static bool testDepthSortKeepsStateGroupsAndMerging()
+{
+    const std::string name = "depth-bucketed sort keeps state groups and merged batches";
+    HeadlessRenderAPI api;
+    IGPUMesh* mesh = makeUploadedMesh(api);
+    PSOKey main;
+    const glm::mat4 view(1.0f);
+
+    auto build = [&]() {
+        RenderCommandBuffer buf;
+        buf.recordDraw(mesh, glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.0f, -30.0f)), 7, true, main);
+        buf.recordDraw(mesh, glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.0f, -20.0f)), 8, true, main);
+        buf.recordDraw(mesh, glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.0f, -10.0f)), 7, true, main);
+        buf.recordDraw(mesh, glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.0f, -5.0f)), 8, true, main);
+        return buf;
+    };
+
+    RenderCommandBuffer depthSorted = build();
+    depthSorted.sortWithViewDepth(view);
+    if (depthSorted.size() != 4)
+        return fail(name, "command count changed during depth-bucketed sort");
+    if (depthSorted[0].texture != depthSorted[1].texture ||
+        depthSorted[2].texture != depthSorted[3].texture ||
+        depthSorted[0].texture == depthSorted[2].texture)
+        return fail(name, "texture groups are not contiguous after depth-bucketed sort");
+    for (size_t g = 0; g < 4; g += 2)
+    {
+        const float nearDepth = -depthSorted[g].model_matrix[3].z;
+        const float farDepth = -depthSorted[g + 1].model_matrix[3].z;
+        if (!(nearDepth < farDepth))
+            return fail(name, "draws inside a state group are not front-to-back");
+    }
+
+    RenderCommandBuffer plainSorted = build();
+    plainSorted.sort();
+    api.beginFrame();
+    api.replayCommandBuffer(plainSorted);
+    const RenderFrameStats plain = api.getLastFrameStats();
+    api.beginFrame();
+    api.replayCommandBuffer(depthSorted);
+    const RenderFrameStats depth = api.getLastFrameStats();
+    delete mesh;
+    if (plain.backend_draw_calls != 2 || plain.instanced_batches != 2 ||
+        plain.instanced_instances != 4)
+        return fail(name, "plain sort did not merge each texture group into one batch");
+    if (depth.backend_draw_calls != plain.backend_draw_calls ||
+        depth.instanced_batches != plain.instanced_batches ||
+        depth.instanced_instances != plain.instanced_instances ||
+        depth.submitted_draw_commands != plain.submitted_draw_commands)
+        return fail(name, "depth-bucketed replay counters differ from plain replay counters");
+    return pass(name);
+}
+
 static IGPUMesh* makeUploadedMesh(HeadlessRenderAPI& api)
 {
     IGPUMesh* mesh = api.createMesh();
@@ -695,6 +753,70 @@ static bool benchBinningRetainedAgainstOneOff(size_t count, size_t reps)
 // one retained backend. Both sides submit identical draws; the fresh side
 // allocates a descriptor set per distinct texture on every frame while the
 // retained side allocates only on the first frame.
+// The same unsorted draws ordered by the plain state sort and by the
+// depth-bucketed sort, then replayed on fresh counting backends. Both
+// sides must submit identical draws with identical merged batches; only
+// the ordering cost and the within-group draw order differ.
+static bool benchDepthSortAgainstPlainSort(size_t count, size_t reps)
+{
+    const std::string name = "depth-bucketed and plain sort replay identical draws";
+    HeadlessRenderAPI probe;
+    IGPUMesh* mesh = makeUploadedMesh(probe);
+    const glm::mat4 view(1.0f);
+
+    RenderCommandBuffer plainBuffer = makeUnsortedBuffer(mesh, count);
+    RenderCommandBuffer depthBuffer = makeUnsortedBuffer(mesh, count);
+    plainBuffer.sort();
+    depthBuffer.sortWithViewDepth(view);
+
+    HeadlessRenderAPI plainApi;
+    plainApi.beginFrame();
+    plainApi.replayCommandBuffer(plainBuffer);
+    const RenderFrameStats plainStats = plainApi.getLastFrameStats();
+    HeadlessRenderAPI depthApi;
+    depthApi.beginFrame();
+    depthApi.replayCommandBuffer(depthBuffer);
+    const RenderFrameStats depthStats = depthApi.getLastFrameStats();
+
+    if (plainStats.submitted_draw_commands != count ||
+        depthStats.submitted_draw_commands != count)
+        return fail(name, "submitted draw counts differ between the two sides");
+    if (depthStats.backend_draw_calls != plainStats.backend_draw_calls ||
+        depthStats.instanced_batches != plainStats.instanced_batches ||
+        depthStats.instanced_instances != plainStats.instanced_instances)
+        return fail(name, "merged replay counters differ between the two sides");
+
+    double plainNs = 0.0;
+    double depthNs = 0.0;
+    for (size_t rep = 0; rep < reps; rep++)
+    {
+        RenderCommandBuffer work = makeUnsortedBuffer(mesh, count);
+        const auto start = std::chrono::steady_clock::now();
+        work.sort();
+        plainNs += (double)std::chrono::duration_cast<std::chrono::nanoseconds>(
+                       std::chrono::steady_clock::now() - start).count();
+    }
+    for (size_t rep = 0; rep < reps; rep++)
+    {
+        RenderCommandBuffer work = makeUnsortedBuffer(mesh, count);
+        const auto start = std::chrono::steady_clock::now();
+        work.sortWithViewDepth(view);
+        depthNs += (double)std::chrono::duration_cast<std::chrono::nanoseconds>(
+                       std::chrono::steady_clock::now() - start).count();
+    }
+    const size_t ops = count * reps;
+    plainNs /= (double)ops;
+    depthNs /= (double)ops;
+    printHeadToHead("sort plain", ops, plainNs, "backend_draws",
+                    plainStats.backend_draw_calls);
+    printHeadToHead("sort depth-bucketed", ops, depthNs, "backend_draws",
+                    depthStats.backend_draw_calls);
+    const double deltaPct = plainNs > 0.0 ? (plainNs - depthNs) / plainNs * 100.0 : 0.0;
+    std::cout << "[BENCH] sort depth-bucketed vs plain ns/op delta_pct=" << deltaPct << std::endl;
+    delete mesh;
+    return pass(name);
+}
+
 static bool benchDescriptorCacheColdAgainstWarm(size_t distinct, size_t reps)
 {
     const std::string name = "cold and warm descriptor replay submit identical draws";
@@ -764,6 +886,7 @@ int main(){
     ok &= testPackedKeyFieldPriority();
     ok &= testSortGroupsByPipeline();
     ok &= testSortWithViewDepthFrontToBack();
+    ok &= testDepthSortKeepsStateGroupsAndMerging();
     ok &= testHeadlessReplaySkipsRedundantBinds();
     ok &= testHeadlessReplayAlternatingTexture();
     ok &= testHeadlessCoalescesIdenticalRun();
@@ -782,6 +905,7 @@ int main(){
     ok &= testHeadlessDescriptorCacheAcrossFrames();
     ok &= benchReplayMergedAgainstPerDraw(1024, 200);
     ok &= benchBinningRetainedAgainstOneOff(4096, 100);
+    ok &= benchDepthSortAgainstPlainSort(10000, 20);
     ok &= benchDescriptorCacheColdAgainstWarm(64, 200);
     std::cout << (ok ? "all perf tests passed" : "perf tests FAILED") << std::endl;
     return ok ? 0 : 1;

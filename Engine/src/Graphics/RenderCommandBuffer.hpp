@@ -303,49 +303,56 @@ public:
         m_commands.push_back(cmd);
     }
 
+    // Full state ordering shared by both sort orders: packed key first,
+    // then every remaining value a backend binds or a merged run compares,
+    // so draws that share all state stay adjacent under either order.
+    static bool drawStateLess(const DrawCommand& a, const DrawCommand& b)
+    {
+        auto vecLess = [](const glm::vec3& x, const glm::vec3& y)
+        {
+            if (x.x != y.x) return x.x < y.x;
+            if (x.y != y.y) return x.y < y.y;
+            return x.z < y.z;
+        };
+
+        uint64_t ka = a.packedSortKey();
+        uint64_t kb = b.packedSortKey();
+        if (ka != kb) return ka < kb;
+        if (a.use_texture != b.use_texture) return a.use_texture < b.use_texture;
+        if (a.texture != b.texture) return a.texture < b.texture;
+        if (a.gpu_mesh != b.gpu_mesh) return std::less<IGPUMesh*>{}(a.gpu_mesh, b.gpu_mesh);
+        if (a.start_vertex != b.start_vertex) return a.start_vertex < b.start_vertex;
+        if (a.vertex_count != b.vertex_count) return a.vertex_count < b.vertex_count;
+        if (a.alpha_cutoff != b.alpha_cutoff) return a.alpha_cutoff < b.alpha_cutoff;
+        if (a.use_heightmap_displacement != b.use_heightmap_displacement)
+            return a.use_heightmap_displacement < b.use_heightmap_displacement;
+        if (a.heightmap_texture != b.heightmap_texture) return a.heightmap_texture < b.heightmap_texture;
+        if (a.heightmap_height_scale != b.heightmap_height_scale) return a.heightmap_height_scale < b.heightmap_height_scale;
+        if (a.heightmap_height_offset != b.heightmap_height_offset) return a.heightmap_height_offset < b.heightmap_height_offset;
+        if (a.heightmap_texel_size.x != b.heightmap_texel_size.x) return a.heightmap_texel_size.x < b.heightmap_texel_size.x;
+        if (a.heightmap_texel_size.y != b.heightmap_texel_size.y) return a.heightmap_texel_size.y < b.heightmap_texel_size.y;
+        if (a.metallic != b.metallic) return a.metallic < b.metallic;
+        if (a.roughness != b.roughness) return a.roughness < b.roughness;
+        if (a.material_flags != b.material_flags) return a.material_flags < b.material_flags;
+        if (vecLess(a.color, b.color)) return true;
+        if (vecLess(b.color, a.color)) return false;
+        return vecLess(a.emissive, b.emissive);
+    }
+
     // Sort commands to minimize state changes (by PSO key, then texture).
     // Only use for opaque draws -- transparent draws must maintain back-to-front order.
     void sort()
     {
-        auto vecLess = [](const glm::vec3& a, const glm::vec3& b)
-        {
-            if (a.x != b.x) return a.x < b.x;
-            if (a.y != b.y) return a.y < b.y;
-            return a.z < b.z;
-        };
-
         std::sort(m_commands.begin(), m_commands.end(),
-            [&](const DrawCommand& a, const DrawCommand& b)
-            {
-                uint64_t ka = a.packedSortKey();
-                uint64_t kb = b.packedSortKey();
-                if (ka != kb) return ka < kb;
-                if (a.use_texture != b.use_texture) return a.use_texture < b.use_texture;
-                if (a.texture != b.texture) return a.texture < b.texture;
-                if (a.gpu_mesh != b.gpu_mesh) return std::less<IGPUMesh*>{}(a.gpu_mesh, b.gpu_mesh);
-                if (a.start_vertex != b.start_vertex) return a.start_vertex < b.start_vertex;
-                if (a.vertex_count != b.vertex_count) return a.vertex_count < b.vertex_count;
-                if (a.alpha_cutoff != b.alpha_cutoff) return a.alpha_cutoff < b.alpha_cutoff;
-                if (a.use_heightmap_displacement != b.use_heightmap_displacement)
-                    return a.use_heightmap_displacement < b.use_heightmap_displacement;
-                if (a.heightmap_texture != b.heightmap_texture) return a.heightmap_texture < b.heightmap_texture;
-                if (a.heightmap_height_scale != b.heightmap_height_scale) return a.heightmap_height_scale < b.heightmap_height_scale;
-                if (a.heightmap_height_offset != b.heightmap_height_offset) return a.heightmap_height_offset < b.heightmap_height_offset;
-                if (a.heightmap_texel_size.x != b.heightmap_texel_size.x) return a.heightmap_texel_size.x < b.heightmap_texel_size.x;
-                if (a.heightmap_texel_size.y != b.heightmap_texel_size.y) return a.heightmap_texel_size.y < b.heightmap_texel_size.y;
-                if (a.metallic != b.metallic) return a.metallic < b.metallic;
-                if (a.roughness != b.roughness) return a.roughness < b.roughness;
-                if (a.material_flags != b.material_flags) return a.material_flags < b.material_flags;
-                if (vecLess(a.color, b.color)) return true;
-                if (vecLess(b.color, a.color)) return false;
-                return vecLess(a.emissive, b.emissive);
-            });
+            [](const DrawCommand& a, const DrawCommand& b) { return drawStateLess(a, b); });
     }
 
-    // Depth-bucketed sort for opaque draws: groups by packed pipeline /
-    // material state, then orders front-to-back within each group using a
-    // 12-bit view-space depth bucket (near = 0). Transparent draws must NOT
-    // use this -- they require back-to-front submission order.
+    // Depth-bucketed sort for opaque draws: groups by the same full state
+    // order as sort(), then orders front-to-back within each state group
+    // using a 12-bit view-space depth bucket (near = 0), so state grouping
+    // and merged runs survive while nearer draws in a group submit first.
+    // Transparent draws must NOT use this -- they require back-to-front
+    // submission order.
     void sortWithViewDepth(const glm::mat4& viewMatrix)
     {
         if (m_commands.empty()) return;
@@ -368,16 +375,87 @@ public:
                 buckets[i] = (uint16_t)(t * 4095.0f + 0.5f);
             }
         }
-        std::vector<uint64_t> keys(m_commands.size());
+        // Flattened ordering fields in one contiguous array, compared in
+        // the same order as drawStateLess with the depth bucket last.
+        struct SortEntry
+        {
+            uint64_t packed = 0;
+            uint64_t mesh = 0;
+            size_t start_vertex = 0;
+            size_t vertex_count = 0;
+            TextureHandle texture = INVALID_TEXTURE;
+            TextureHandle heightmap_texture = INVALID_TEXTURE;
+            uint32_t material_flags = 0;
+            float alpha_cutoff = 0.0f;
+            float heightmap_height_scale = 0.0f;
+            float heightmap_height_offset = 0.0f;
+            float heightmap_texel_x = 0.0f;
+            float heightmap_texel_y = 0.0f;
+            float metallic = 0.0f;
+            float roughness = 0.0f;
+            glm::vec3 color = glm::vec3(0.0f);
+            glm::vec3 emissive = glm::vec3(0.0f);
+            uint16_t bucket = 0;
+            uint32_t index = 0;
+            bool use_texture = false;
+            bool use_heightmap = false;
+        };
+        std::vector<SortEntry> entries(m_commands.size());
         for (size_t i = 0; i < m_commands.size(); i++)
-            keys[i] = m_commands[i].packedSortKey(buckets[i]);
-        std::vector<size_t> order(m_commands.size());
-        for (size_t i = 0; i < order.size(); i++) order[i] = i;
-        std::stable_sort(order.begin(), order.end(),
-            [&](size_t a, size_t b) { return keys[a] < keys[b]; });
+        {
+            const DrawCommand& c = m_commands[i];
+            SortEntry& e = entries[i];
+            e.packed = c.packedSortKey();
+            e.mesh = (uint64_t)(uintptr_t)c.gpu_mesh;
+            e.start_vertex = c.start_vertex;
+            e.vertex_count = c.vertex_count;
+            e.texture = c.texture;
+            e.heightmap_texture = c.heightmap_texture;
+            e.material_flags = c.material_flags;
+            e.alpha_cutoff = c.alpha_cutoff;
+            e.heightmap_height_scale = c.heightmap_height_scale;
+            e.heightmap_height_offset = c.heightmap_height_offset;
+            e.heightmap_texel_x = c.heightmap_texel_size.x;
+            e.heightmap_texel_y = c.heightmap_texel_size.y;
+            e.metallic = c.metallic;
+            e.roughness = c.roughness;
+            e.color = c.color;
+            e.emissive = c.emissive;
+            e.bucket = buckets[i];
+            e.index = (uint32_t)i;
+            e.use_texture = c.use_texture;
+            e.use_heightmap = c.use_heightmap_displacement;
+        }
+        std::sort(entries.begin(), entries.end(),
+            [](const SortEntry& a, const SortEntry& b)
+            {
+                if (a.packed != b.packed) return a.packed < b.packed;
+                if (a.use_texture != b.use_texture) return a.use_texture < b.use_texture;
+                if (a.texture != b.texture) return a.texture < b.texture;
+                if (a.mesh != b.mesh) return a.mesh < b.mesh;
+                if (a.start_vertex != b.start_vertex) return a.start_vertex < b.start_vertex;
+                if (a.vertex_count != b.vertex_count) return a.vertex_count < b.vertex_count;
+                if (a.alpha_cutoff != b.alpha_cutoff) return a.alpha_cutoff < b.alpha_cutoff;
+                if (a.use_heightmap != b.use_heightmap) return a.use_heightmap < b.use_heightmap;
+                if (a.heightmap_texture != b.heightmap_texture) return a.heightmap_texture < b.heightmap_texture;
+                if (a.heightmap_height_scale != b.heightmap_height_scale) return a.heightmap_height_scale < b.heightmap_height_scale;
+                if (a.heightmap_height_offset != b.heightmap_height_offset) return a.heightmap_height_offset < b.heightmap_height_offset;
+                if (a.heightmap_texel_x != b.heightmap_texel_x) return a.heightmap_texel_x < b.heightmap_texel_x;
+                if (a.heightmap_texel_y != b.heightmap_texel_y) return a.heightmap_texel_y < b.heightmap_texel_y;
+                if (a.metallic != b.metallic) return a.metallic < b.metallic;
+                if (a.roughness != b.roughness) return a.roughness < b.roughness;
+                if (a.material_flags != b.material_flags) return a.material_flags < b.material_flags;
+                if (a.color.x != b.color.x) return a.color.x < b.color.x;
+                if (a.color.y != b.color.y) return a.color.y < b.color.y;
+                if (a.color.z != b.color.z) return a.color.z < b.color.z;
+                if (a.emissive.x != b.emissive.x) return a.emissive.x < b.emissive.x;
+                if (a.emissive.y != b.emissive.y) return a.emissive.y < b.emissive.y;
+                if (a.emissive.z != b.emissive.z) return a.emissive.z < b.emissive.z;
+                return a.bucket < b.bucket;
+            });
         std::vector<DrawCommand> sorted;
         sorted.reserve(m_commands.size());
-        for (size_t i : order) sorted.push_back(m_commands[i]);
+        for (const SortEntry& e : entries) sorted.push_back(m_commands[e.index]);
         m_commands = std::move(sorted);
     }
 

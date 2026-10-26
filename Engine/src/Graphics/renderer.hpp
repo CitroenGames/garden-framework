@@ -718,7 +718,8 @@ public:
         const std::vector<entt::entity>& entities,
         const std::vector<int>& lod_levels,
         bool global_lighting,
-        const Frustum* frustum = nullptr)
+        const Frustum* frustum = nullptr,
+        const glm::mat4* view_matrix = nullptr)
     {
         // For small entity counts, single-threaded recording is faster
         if (entities.size() < PARALLEL_CHUNK_SIZE)
@@ -733,7 +734,8 @@ public:
                 if (!mc || !t || !mc->m_mesh || !mc->m_mesh->visible) continue;
                 record_mesh_at_lod(*mc->m_mesh, *t, cmds, global_lighting, lod_levels[i], frustum);
             }
-            cmds.sort();
+            if (view_matrix) cmds.sortWithViewDepth(*view_matrix);
+            else cmds.sort();
             return cmds;
         }
 
@@ -782,7 +784,10 @@ public:
         for (auto& ctx : contexts)
             merged.append(std::move(ctx.command_buffer));
 
-        merged.sort(); // Sort by PSO+texture to minimize state changes
+        // Sort by PSO+texture to minimize state changes; with a view matrix
+        // the depth-bucketed order also runs front-to-back inside each group.
+        if (view_matrix) merged.sortWithViewDepth(*view_matrix);
+        else merged.sort();
         return merged;
     }
 
@@ -1311,8 +1316,9 @@ public:
 
             // Main lit pass: opaques - parallel recording, merge, sort, replay
             {
+                const glm::mat4 view_matrix = render_api->getViewMatrix();
                 RenderCommandBuffer opaque_cmds = record_opaque_parallel(
-                    registry, opaque_entities, opaque_lod, global_lighting, &camera_frustum);
+                    registry, opaque_entities, opaque_lod, global_lighting, &camera_frustum, &view_matrix);
                 last_draw_calls += opaque_cmds.size();
                 render_api->replayCommandBufferParallel(opaque_cmds);
             }
@@ -1567,8 +1573,9 @@ public:
 
             // Main lit pass: opaques - parallel recording
             {
+                const glm::mat4 view_matrix = render_api->getViewMatrix();
                 RenderCommandBuffer opaque_cmds = record_opaque_parallel(
-                    registry, opaque_entities, opaque_lod, global_lighting, &camera_frustum);
+                    registry, opaque_entities, opaque_lod, global_lighting, &camera_frustum, &view_matrix);
                 last_draw_calls += opaque_cmds.size();
                 render_api->replayCommandBufferParallel(opaque_cmds);
             }
