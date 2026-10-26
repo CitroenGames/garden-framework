@@ -18,3 +18,4 @@ include = SSAOBlurTests/SSAOBlurTests.buildscript
 include = SSAONoiseTests/SSAONoiseTests.buildscript
 include = SSAOInputTests/SSAOInputTests.buildscript
 include = EntityLifecycleTests/EntityLifecycleTests.buildscript
+include = HierarchyTests/HierarchyTests.buildscript

@@ -2,6 +2,7 @@
 #include "ReflectionRegistry.hpp"
 #include "Components/Components.hpp"
 #include "Components/PrefabInstanceComponent.hpp"
+#include "Components/HierarchyComponents.hpp"
 #include "Components/IdentityComponent.hpp"
 
 void registerEngineReflection(ReflectionRegistry& registry)
@@ -24,4 +25,9 @@ void registerEngineReflection(ReflectionRegistry& registry)
     registry.reflect<SpotLightComponent>("SpotLightComponent");
     registry.reflect<PrefabInstanceComponent>("PrefabInstanceComponent");
     registry.reflect<IdentityComponent>("IdentityComponent");
+    // Hierarchy: only ParentComponent is serialized (parent GUID, §5).
+    // ChildrenComponent is not reflected (no vector<EntityRef> reflection
+    // support; rebuilt on load) and WorldTransformComponent is derived.
+    registry.reflect<ParentComponent>("ParentComponent");
+    registry.reflect<HierarchyPolicyComponent>("HierarchyPolicyComponent");
 }

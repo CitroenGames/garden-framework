@@ -1,0 +1,472 @@
+#pragma once
+
+// Hierarchy API + transform propagation (hierarchy.md sections 3-5, D8).
+// Header-only, EngineCore, generic and FPS-free. TransformComponent is the
+// local transform; WorldTransformComponent is the derived world transform.
+// ParentComponent/ChildrenComponent mirrors are maintained ONLY here (and
+// by EntityLifecycle's destroy handling, which goes through this API).
+
+#include "Components/Components.hpp"
+#include "Components/HierarchyComponents.hpp"
+#include "Components/IdentityComponent.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <functional>
+#include <unordered_set>
+#include <utility>
+#include <vector>
+#include <entt/entt.hpp>
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_inverse.hpp>
+#include <glm/gtc/quaternion.hpp>
+#define GLM_ENABLE_EXPERIMENTAL
+#include <glm/gtx/euler_angles.hpp>
+#include <glm/gtx/matrix_decompose.hpp>
+
+namespace Hierarchy
+{
+inline constexpr int kMaxDepth = 64;
+
+namespace detail
+{
+inline EntityRef refOfEntity(entt::registry& r, entt::entity e)
+{
+    if (e == entt::null || !r.valid(e))
+        return EntityRef{};
+    const auto* id = r.try_get<IdentityComponent>(e);
+    return id ? EntityRef{id->guid} : EntityRef{};
+}
+
+inline entt::entity resolveRef(entt::registry& r, EntityRef ref)
+{
+    if (ref.isNull())
+        return entt::null;
+    // O(n) scan: hierarchies are small and resolution happens at
+    // attach/propagation boundaries, not per-component per frame.
+    // (EntityLifecycle::resolve offers the O(1) indexed path.)
+    for (auto [e, id] : r.view<IdentityComponent>().each())
+    {
+        if (id.guid == ref.guid)
+            return r.valid(e) ? e : entt::null;
+    }
+    return entt::null;
+}
+
+inline glm::mat4 localMatrix(entt::registry& r, entt::entity e)
+{
+    const auto* t = r.try_get<TransformComponent>(e);
+    return t ? t->getTransformMatrix() : glm::mat4(1.0f);
+}
+
+inline bool decomposeToLocal(const glm::mat4& m, TransformComponent& out)
+{
+    glm::vec3 scale{}, translation{}, skew{};
+    glm::quat rotation{};
+    glm::vec4 perspective{};
+    if (!glm::decompose(m, scale, rotation, translation, skew, perspective))
+        return false;
+    if (std::abs(scale.x) < 1e-8f || std::abs(scale.y) < 1e-8f ||
+        std::abs(scale.z) < 1e-8f)
+        return false;
+    float yaw = 0.0f, pitch = 0.0f, roll = 0.0f;
+    glm::extractEulerAngleYXZ(glm::mat4_cast(rotation), yaw, pitch, roll);
+    out.position = translation;
+    out.rotation = glm::vec3(glm::degrees(pitch), glm::degrees(yaw),
+                             glm::degrees(roll));
+    out.scale = scale;
+    return true;
+}
+
+inline void eraseChildRef(ChildrenComponent& children, EntityRef child_ref)
+{
+    auto& v = children.children;
+    v.erase(std::remove_if(v.begin(), v.end(),
+                           [&](const EntityRef& c) { return c == child_ref; }),
+            v.end());
+}
+
+inline bool containsChild(const ChildrenComponent& children, EntityRef child_ref)
+{
+    for (const EntityRef& c : children.children)
+        if (c == child_ref)
+            return true;
+    return false;
+}
+} // namespace detail
+
+inline entt::entity parentOf(entt::registry& r, entt::entity e)
+{
+    if (e == entt::null || !r.valid(e))
+        return entt::null;
+    const auto* p = r.try_get<ParentComponent>(e);
+    if (!p || p->parent.isNull())
+        return entt::null;
+    return detail::resolveRef(r, p->parent);
+}
+
+// Cycle-safe ancestor walk, max depth 64 (hierarchy.md section 3).
+inline bool isDescendantOf(entt::registry& r, entt::entity e,
+                           entt::entity ancestor)
+{
+    if (e == entt::null || ancestor == entt::null)
+        return false;
+    std::unordered_set<entt::entity> visited;
+    entt::entity cur = e;
+    for (int depth = 0; depth < kMaxDepth; ++depth)
+    {
+        if (!visited.insert(cur).second)
+            return false; // existing cycle: stop, do not claim descent
+        entt::entity p = parentOf(r, cur);
+        if (p == entt::null)
+            return false;
+        if (p == ancestor)
+            return true;
+        cur = p;
+    }
+    return false;
+}
+
+// World matrix composed from local transforms up the ancestor chain.
+// Independent of the propagation cache, so keep_world works mid-frame.
+inline glm::mat4 computeWorldMatrix(entt::registry& r, entt::entity e)
+{
+    std::vector<entt::entity> chain;
+    std::unordered_set<entt::entity> visited;
+    entt::entity cur = e;
+    while (cur != entt::null && r.valid(cur) &&
+           static_cast<int>(chain.size()) < kMaxDepth &&
+           visited.insert(cur).second)
+    {
+        chain.push_back(cur);
+        cur = parentOf(r, cur);
+    }
+    glm::mat4 world(1.0f);
+    for (auto it = chain.rbegin(); it != chain.rend(); ++it)
+        world = world * detail::localMatrix(r, *it);
+    return world;
+}
+
+inline void markDirty(entt::registry& r, entt::entity e);
+
+namespace detail
+{
+inline void markDirtyRecursive(entt::registry& r, entt::entity e, int depth,
+                               std::unordered_set<entt::entity>& visited)
+{
+    if (e == entt::null || !r.valid(e) || depth > kMaxDepth)
+        return;
+    if (!visited.insert(e).second)
+        return;
+    r.emplace_or_replace<HierarchyDirtyTag>(e);
+    if (auto* wt = r.try_get<WorldTransformComponent>(e))
+        wt->dirty = true;
+    const auto* children = r.try_get<ChildrenComponent>(e);
+    if (!children)
+        return;
+    const std::vector<EntityRef> snapshot = children->children;
+    for (EntityRef ref : snapshot)
+    {
+        entt::entity child = resolveRef(r, ref);
+        if (child != entt::null)
+            markDirtyRecursive(r, child, depth + 1, visited);
+    }
+}
+} // namespace detail
+
+// Marks e + whole subtree dirty (hierarchy.md section 3).
+inline void markDirty(entt::registry& r, entt::entity e)
+{
+    if (e == entt::null || !r.valid(e))
+        return;
+    std::unordered_set<entt::entity> visited;
+    detail::markDirtyRecursive(r, e, 0, visited);
+}
+
+// Removes e from its parent's Children list only; ParentComponent and
+// transforms are untouched. Used by EntityLifecycle before destroying e.
+inline void unlinkFromParentList(entt::registry& r, entt::entity e)
+{
+    entt::entity parent = parentOf(r, e);
+    if (parent == entt::null)
+        return;
+    if (auto* children = r.try_get<ChildrenComponent>(parent))
+        detail::eraseChildRef(*children, detail::refOfEntity(r, e));
+}
+
+inline void attach(entt::registry& r, entt::entity child,
+                   entt::entity parent, bool keep_world = false)
+{
+    if (child == entt::null || parent == entt::null || !r.valid(child) ||
+        !r.valid(parent))
+    {
+        std::fprintf(stderr, "[Hierarchy] attach rejected: invalid entity\n");
+        return;
+    }
+    if (child == parent || isDescendantOf(r, parent, child))
+    {
+        std::fprintf(stderr, "[Hierarchy] attach rejected: cycle\n");
+        return;
+    }
+    // keep_world is computed against the OLD ancestry before relinking.
+    glm::mat4 child_world(1.0f);
+    if (keep_world)
+        child_world = computeWorldMatrix(r, child);
+
+    if (r.all_of<ParentComponent>(child))
+        unlinkFromParentList(r, child);
+
+    if (keep_world)
+    {
+        const glm::mat4 parent_world = computeWorldMatrix(r, parent);
+        if (std::abs(glm::determinant(parent_world)) > 1e-8f)
+        {
+            auto& local = r.get_or_emplace<TransformComponent>(child);
+            detail::decomposeToLocal(glm::inverse(parent_world) * child_world,
+                                     local);
+        }
+    }
+
+    r.emplace_or_replace<ParentComponent>(child,
+                                          ParentComponent{detail::refOfEntity(r, parent)});
+    auto& children = r.get_or_emplace<ChildrenComponent>(parent);
+    const EntityRef child_ref = detail::refOfEntity(r, child);
+    if (!child_ref.isNull() && !detail::containsChild(children, child_ref))
+        children.children.push_back(child_ref);
+    if (!r.all_of<WorldTransformComponent>(child))
+        r.emplace<WorldTransformComponent>(child);
+    if (!r.all_of<WorldTransformComponent>(parent))
+        r.emplace<WorldTransformComponent>(parent);
+    markDirty(r, child);
+    markDirty(r, parent);
+}
+
+inline void detach(entt::registry& r, entt::entity child,
+                   bool keep_world = true)
+{
+    if (child == entt::null || !r.valid(child))
+        return;
+    if (!r.all_of<ParentComponent>(child))
+        return;
+    glm::mat4 world(1.0f);
+    if (keep_world)
+        world = computeWorldMatrix(r, child);
+    unlinkFromParentList(r, child);
+    r.remove<ParentComponent>(child);
+    if (keep_world)
+    {
+        auto& local = r.get_or_emplace<TransformComponent>(child);
+        detail::decomposeToLocal(world, local);
+    }
+    if (!r.all_of<WorldTransformComponent>(child))
+        r.emplace<WorldTransformComponent>(child);
+    markDirty(r, child);
+}
+
+// ---------------------------------------------------------------------------
+// Transform propagation (hierarchy.md section 4, Phase 1 rule).
+// Every entity with a ParentComponent or ChildrenComponent is propagated
+// every tick (hierarchies are small); roots without hierarchy are skipped.
+// Roots: local == world. Deterministic root order sorted by EntityRef GUID.
+// Depth-first; chains deeper than 64 stop propagating below the limit and
+// log once per root; that subtree stays frozen (documented failure case).
+// ---------------------------------------------------------------------------
+namespace detail
+{
+inline void propagateRecursive(entt::registry& r, entt::entity e,
+                               const glm::mat4& parent_matrix, int depth,
+                               bool& depth_logged,
+                               std::unordered_set<entt::entity>& visited)
+{
+    if (e == entt::null || !r.valid(e))
+        return;
+    if (depth > kMaxDepth)
+    {
+        if (!depth_logged)
+        {
+            std::fprintf(stderr,
+                         "[Hierarchy] propagation stopped: depth > 64\n");
+            depth_logged = true;
+        }
+        return;
+    }
+    if (!visited.insert(e).second)
+        return;
+    const glm::mat4 world = parent_matrix * localMatrix(r, e);
+    auto& wt = r.get_or_emplace<WorldTransformComponent>(e);
+    wt.matrix = world;
+    glm::vec3 scale{}, translation{}, skew{};
+    glm::quat rotation{};
+    glm::vec4 perspective{};
+    if (glm::decompose(world, scale, rotation, translation, skew, perspective))
+    {
+        wt.position = translation;
+        wt.rotation = rotation;
+        wt.scale = scale;
+    }
+    else
+    {
+        wt.position = glm::vec3(world[3]);
+        wt.rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+        wt.scale = glm::vec3(1.0f);
+    }
+    wt.dirty = false;
+    if (r.all_of<HierarchyDirtyTag>(e))
+        r.remove<HierarchyDirtyTag>(e);
+
+    const auto* children_comp = r.try_get<ChildrenComponent>(e);
+    if (!children_comp)
+        return;
+    const std::vector<EntityRef> snapshot = children_comp->children;
+    std::vector<EntityRef> stale;
+    for (EntityRef ref : snapshot)
+    {
+        entt::entity child = resolveRef(r, ref);
+        if (child == entt::null ||
+            child == entt::null)
+        {
+            stale.push_back(ref); // lazily pruned below (hierarchy.md §6)
+            continue;
+        }
+        if (!r.valid(child))
+        {
+            stale.push_back(ref);
+            continue;
+        }
+        propagateRecursive(r, child, world, depth + 1, depth_logged, visited);
+    }
+    if (!stale.empty())
+    {
+        if (auto* live = r.try_get<ChildrenComponent>(e))
+            for (EntityRef ref : stale)
+                eraseChildRef(*live, ref);
+    }
+}
+} // namespace detail
+
+inline void updateTransformPropagation(entt::registry& r)
+{
+    std::vector<entt::entity> roots;
+    for (entt::entity e : r.view<TransformComponent>())
+    {
+        const bool hierarchied = r.all_of<ParentComponent>(e) ||
+                                 r.all_of<ChildrenComponent>(e);
+        if (!hierarchied)
+            continue;
+        if (parentOf(r, e) == entt::null)
+            roots.push_back(e);
+    }
+    std::sort(roots.begin(), roots.end(),
+              [&r](entt::entity a, entt::entity b) {
+                  const EntityGuid ga = detail::refOfEntity(r, a).guid;
+                  const EntityGuid gb = detail::refOfEntity(r, b).guid;
+                  if (ga.hi != gb.hi) return ga.hi < gb.hi;
+                  if (ga.lo != gb.lo) return ga.lo < gb.lo;
+                  return static_cast<uint32_t>(a) < static_cast<uint32_t>(b);
+              });
+    std::unordered_set<entt::entity> visited;
+    for (entt::entity root : roots)
+    {
+        bool depth_logged = false;
+        detail::propagateRecursive(r, root, glm::mat4(1.0f), 0, depth_logged,
+                                   visited);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// All descendants of e (depth-first, cycle-safe, depth limit 64).
+inline std::vector<entt::entity> collectDescendants(entt::registry& r,
+                                                    entt::entity e)
+{
+    std::vector<entt::entity> out;
+    std::unordered_set<entt::entity> visited;
+    std::function<void(entt::entity, int)> walk =
+        [&](entt::entity cur, int depth) {
+            if (cur == entt::null || !r.valid(cur) || depth > kMaxDepth)
+                return;
+            if (!visited.insert(cur).second)
+                return;
+            const auto* children = r.try_get<ChildrenComponent>(cur);
+            if (!children)
+                return;
+            const std::vector<EntityRef> snapshot = children->children;
+            for (EntityRef ref : snapshot)
+            {
+                entt::entity child = detail::resolveRef(r, ref);
+                if (child == entt::null || !r.valid(child))
+                    continue;
+                out.push_back(child);
+                walk(child, depth + 1);
+            }
+        };
+    walk(e, 0);
+    return out;
+}
+
+// Serialization rebuild (hierarchy.md section 5). Two-pass load: pass 1
+// creates all entities + ParentComponent (GUIDs already resolved through
+// IdentityComponent / EntityIndex); pass 2 calls this to rebuild every
+// ChildrenComponent from ParentComponent (the single source of truth).
+// ChildrenComponent and WorldTransformComponent are never saved.
+// Orphan parent GUID (target not in registry): entity becomes root,
+// ParentComponent is removed, warning logged.
+// ---------------------------------------------------------------------------
+inline void rebuildChildren(entt::registry& r,
+                            const std::vector<entt::entity>& ordered_children)
+{
+    std::vector<entt::entity> holders;
+    for (auto [e, children] : r.view<ChildrenComponent>().each())
+    {
+        (void)children;
+        holders.push_back(e);
+    }
+    for (entt::entity e : holders)
+        if (auto* c = r.try_get<ChildrenComponent>(e))
+            c->children.clear();
+
+    for (entt::entity child : ordered_children)
+    {
+        if (child == entt::null || !r.valid(child))
+            continue;
+        const auto* p = r.try_get<ParentComponent>(child);
+        if (!p || p->parent.isNull())
+            continue;
+        entt::entity parent = detail::resolveRef(r, p->parent);
+        if (parent == entt::null)
+        {
+            std::fprintf(stderr,
+                         "[Hierarchy] rebuildChildren: orphan parent GUID, "
+                         "entity becomes root\n");
+            r.remove<ParentComponent>(child);
+            continue;
+        }
+        auto& children = r.get_or_emplace<ChildrenComponent>(parent);
+        const EntityRef child_ref = detail::refOfEntity(r, child);
+        if (!child_ref.isNull() &&
+            !detail::containsChild(children, child_ref))
+            children.children.push_back(child_ref);
+        if (!r.all_of<WorldTransformComponent>(child))
+            r.emplace<WorldTransformComponent>(child);
+        if (!r.all_of<WorldTransformComponent>(parent))
+            r.emplace<WorldTransformComponent>(parent);
+    }
+    // Mark every hierarchied root dirty for the next propagation tick.
+    for (entt::entity e : r.view<ParentComponent>())
+        markDirty(r, e);
+    for (entt::entity e : r.view<ChildrenComponent>())
+        markDirty(r, e);
+}
+
+// Scans ParentComponents in registry order. Callers loading from a file
+// should prefer the ordered overload, passing entities in file order so
+// Children order matches authoring order (hierarchy.md section 5).
+inline void rebuildChildren(entt::registry& r)
+{
+    std::vector<entt::entity> ordered;
+    for (entt::entity e : r.view<ParentComponent>())
+        ordered.push_back(e);
+    rebuildChildren(r, ordered);
+}
+
+} // namespace Hierarchy
