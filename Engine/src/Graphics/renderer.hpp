@@ -1131,7 +1131,14 @@ public:
         render_mesh_with_api(m, transform, api);
     }
 
-    void render_scene(entt::registry& registry, camera& c)
+    // Selects where a rendered frame ends up.
+    enum class FrameTarget
+    {
+        DirectToSwapchain,
+        RenderToTexture
+    };
+
+    void render_frame(entt::registry& registry, camera& c, FrameTarget target)
     {
         if (!render_api)
         {
@@ -1158,11 +1165,11 @@ public:
 
         auto view = registry.view<MeshComponent, TransformComponent>();
 
-        // Ensure BVH is built before shadow pass (both passes share the same BVH)
+        // Ensure the BVH is built before the shadow pass
         if (bvh_enabled && scene_bvh.needsRebuild())
             scene_bvh.build(registry);
 
-        // 1. Shadow Pass - CSM with per-cascade frustum culling (command buffer path)
+        // Shadow pass with cascaded shadow maps and per-cascade frustum culling
         if (render_api->getShadowQuality() > 0)
         {
         render_api->beginShadowPass(light_direction, c);
@@ -1210,7 +1217,7 @@ public:
         render_api->endShadowPass();
         } // shadow quality > 0
 
-        // 2. Main Render Pass
+        // Main render pass
         render_api->beginFrame();
         render_api->clear(glm::vec3(0.2f, 0.3f, 0.8f));
         render_api->setCamera(c);
@@ -1234,7 +1241,6 @@ public:
 
         if (bvh_enabled)
         {
-            // Extract camera frustum and query visible entities
             std::vector<entt::entity> visible_entities;
             scene_bvh.queryFrustum(camera_frustum, visible_entities);
 
@@ -1385,260 +1391,28 @@ public:
         if (api_name != "D3D12" && api_name != "Vulkan")
             RmlUiManager::get().render();
 
-        // Render ImGui UI (dev tools)
-        ImGuiManager::get().render();
-
-        // End frame
-        render_api->endFrame();
+        if (target == FrameTarget::DirectToSwapchain)
+        {
+            // ImGui overlays belong to the window presentation.
+            ImGuiManager::get().render();
+            render_api->endFrame();
+        }
+        else
+        {
+            // Offscreen rendering finalizes into the viewport texture.
+            render_api->endSceneRender();
+        }
     };
 
-    // Render scene to offscreen viewport texture (for editor).
-    // Does NOT render ImGui or call endFrame. Call endSceneRender() instead.
+    void render_scene(entt::registry& registry, camera& c)
+    {
+        render_frame(registry, c, FrameTarget::DirectToSwapchain);
+    }
+
     void render_scene_to_texture(entt::registry& registry, camera& c)
     {
-        if (!render_api)
-        {
-            printf("Error: No render API set for renderer\n");
-            return;
-        }
-
-        // Sync renderer state from CVars
-        bvh_enabled = CVAR_BOOL(r_frustumculling);
-        depth_prepass_enabled = CVAR_BOOL(r_depthprepass);
-        bool sky_enabled = CVAR_BOOL(r_sky);
-        bool dynamic_lights_enabled = CVAR_BOOL(r_dynamiclights);
-        bool global_lighting = CVAR_BOOL(r_lighting);
-        render_api->setFXAAEnabled(CVAR_BOOL(r_fxaa));
-        render_api->setSSAOEnabled(CVAR_BOOL(r_ssao));
-        render_api->setShadowQuality(CVAR_INT(r_shadowquality));
-        render_api->setShadowCascadeCount(CVAR_INT(r_shadowcascades));
-        render_api->setVSyncEnabled(CVAR_BOOL(r_vsync));
-        render_api->enableLighting(global_lighting);
-
-        last_draw_calls = 0;
-
-        auto view = registry.view<MeshComponent, TransformComponent>();
-
-        // Ensure BVH is built before shadow pass
-        if (bvh_enabled && scene_bvh.needsRebuild())
-            scene_bvh.build(registry);
-
-        // 1. Shadow Pass - CSM with per-cascade frustum culling (command buffer path)
-        if (render_api->getShadowQuality() > 0)
-        {
-        render_api->beginShadowPass(light_direction, c);
-        const glm::mat4* cascade_matrices = render_api->getLightSpaceMatrices();
-
-        for (int cascade = 0; cascade < render_api->getCascadeCount(); cascade++)
-        {
-            render_api->beginCascade(cascade);
-
-            RenderCommandBuffer shadow_cmds;
-            Frustum shadow_frustum;
-            const Frustum* shadow_frustum_ptr = nullptr;
-            if (cascade_matrices)
-            {
-                shadow_frustum.extractFromViewProjection(cascade_matrices[cascade]);
-                shadow_frustum_ptr = &shadow_frustum;
-            }
-
-            if (bvh_enabled && shadow_frustum_ptr)
-            {
-                std::vector<entt::entity> shadow_entities;
-                scene_bvh.queryFrustum(shadow_frustum, shadow_entities);
-
-                ensure_meshes_uploaded(registry, shadow_entities);
-                shadow_cmds = record_shadow_parallel(registry, shadow_entities, cascade, shadow_frustum_ptr);
-            }
-            else
-            {
-                std::vector<entt::entity> all_shadow;
-                for (auto entity : view)
-                {
-                    auto& mesh_comp = view.get<MeshComponent>(entity);
-                    if (mesh_comp.m_mesh && mesh_comp.m_mesh->visible && mesh_comp.m_mesh->casts_shadow)
-                    {
-                        prepare_water_mesh(registry, entity, mesh_comp);
-                        ensure_mesh_uploaded(*mesh_comp.m_mesh, render_api);
-                        all_shadow.push_back(entity);
-                    }
-                }
-                shadow_cmds = record_shadow_parallel(registry, all_shadow, cascade, shadow_frustum_ptr);
-            }
-
-            render_api->replayCommandBuffer(shadow_cmds);
-        }
-        render_api->endShadowPass();
-        } // shadow quality > 0
-
-        // 2. Main Render Pass to offscreen
-        render_api->beginFrame();
-        render_api->clear(glm::vec3(0.2f, 0.3f, 0.8f));
-        render_api->setCamera(c);
-        render_api->setLighting(ambient_light, diffuse_light, light_direction);
-        if (dynamic_lights_enabled)
-        {
-            gatherAndSetLights(registry, c);
-        }
-        else
-        {
-            LightCBuffer empty_lights{};
-            empty_lights.cameraPos = c.getPosition();
-            render_api->setPointAndSpotLights(empty_lights);
-        }
-
-        glm::mat4 proj = render_api->getProjectionMatrix();
-        glm::vec3 cam_pos = c.getPosition();
-        Frustum camera_frustum;
-        glm::mat4 camera_view_proj = proj * render_api->getViewMatrix();
-        camera_frustum.extractFromViewProjection(camera_view_proj);
-
-        if (bvh_enabled)
-        {
-            std::vector<entt::entity> visible_entities;
-            scene_bvh.queryFrustum(camera_frustum, visible_entities);
-            last_total_entities = scene_bvh.getTotalEntities();
-            last_visible_entities = visible_entities.size();
-
-            // Partition into opaque and transparent
-            std::vector<entt::entity> opaque_entities;
-            std::vector<entt::entity> transparent_entities;
-            opaque_entities.reserve(visible_entities.size());
-
-            for (auto entity : visible_entities)
-            {
-                auto* mesh_comp = registry.try_get<MeshComponent>(entity);
-                if (mesh_comp && mesh_comp->m_mesh && mesh_comp->m_mesh->transparent)
-                    transparent_entities.push_back(entity);
-                else
-                    opaque_entities.push_back(entity);
-            }
-
-            sort_entities_by_state(registry, opaque_entities, cam_pos);
-
-            std::sort(transparent_entities.begin(), transparent_entities.end(),
-                [&registry, &cam_pos](entt::entity a, entt::entity b) {
-                    auto* ta = registry.try_get<TransformComponent>(a);
-                    auto* tb = registry.try_get<TransformComponent>(b);
-                    if (!ta) return false;
-                    if (!tb) return true;
-                    return glm::dot(cam_pos - ta->position, cam_pos - ta->position) > glm::dot(cam_pos - tb->position, cam_pos - tb->position);
-                });
-
-            // Ensure all visible meshes are uploaded
-            ensure_meshes_uploaded(registry, opaque_entities);
-            ensure_meshes_uploaded(registry, transparent_entities);
-
-            // Pre-select LOD for opaque entities
-            std::vector<int> opaque_lod(opaque_entities.size(), 0);
-            for (size_t i = 0; i < opaque_entities.size(); ++i)
-            {
-                auto* mesh_comp = registry.try_get<MeshComponent>(opaque_entities[i]);
-                auto* t = registry.try_get<TransformComponent>(opaque_entities[i]);
-                if (!mesh_comp || !t || !mesh_comp->m_mesh) continue;
-                mesh& m = *mesh_comp->m_mesh;
-
-                if (!m.lod_levels.empty() && m.bounds_computed)
-                {
-                    if (m.force_lod >= 0)
-                    {
-                        opaque_lod[i] = m.force_lod;
-                    }
-                    else
-                    {
-                        int lod_count = m.getLODCount();
-                        std::vector<float> thresholds(lod_count, 0.0f);
-                        for (int j = 0; j < static_cast<int>(m.lod_levels.size()); ++j)
-                            thresholds[j + 1] = m.lod_levels[j].screen_threshold;
-
-                        opaque_lod[i] = LODSelector::selectLOD(
-                            cam_pos, t->position, m.aabb_min, m.aabb_max,
-                            proj, lod_count, thresholds.data(),
-                            t->scale
-                        );
-                    }
-                }
-            }
-
-            // Depth prepass: parallel record, then replay
-            if (depth_prepass_enabled && !opaque_entities.empty())
-            {
-                RenderCommandBuffer depth_cmds = record_depth_parallel(
-                    registry, opaque_entities, opaque_lod, &camera_frustum);
-
-                render_api->beginDepthPrepass();
-                render_api->replayCommandBuffer(depth_cmds);
-                render_api->endDepthPrepass();
-            }
-
-            // Main lit pass: opaques - parallel recording
-            {
-                const glm::mat4 view_matrix = render_api->getViewMatrix();
-                RenderCommandBuffer opaque_cmds = record_opaque_parallel(
-                    registry, opaque_entities, opaque_lod, global_lighting, &camera_frustum, &view_matrix);
-                last_draw_calls += opaque_cmds.size();
-                render_api->replayCommandBufferParallel(opaque_cmds);
-            }
-
-            // Main lit pass: transparents (back-to-front, sequential)
-            {
-                RenderCommandBuffer transparent_cmds;
-                transparent_cmds.reserve(transparent_entities.size());
-
-                for (auto entity : transparent_entities)
-                {
-                    if (!registry.valid(entity)) continue;
-                    auto* mesh_comp = registry.try_get<MeshComponent>(entity);
-                    auto* t = registry.try_get<TransformComponent>(entity);
-                    if (mesh_comp && t && mesh_comp->m_mesh && mesh_comp->m_mesh->visible)
-                    {
-                        record_mesh_with_lod(*mesh_comp->m_mesh, *t, transparent_cmds,
-                                             global_lighting, cam_pos, proj, &camera_frustum);
-                    }
-                }
-
-                last_draw_calls += transparent_cmds.size();
-                render_api->replayCommandBuffer(transparent_cmds);
-            }
-        }
-        else
-        {
-            last_total_entities = 0;
-            last_visible_entities = 0;
-
-            RenderCommandBuffer all_cmds;
-
-            for (auto entity : view)
-            {
-                auto& mesh_comp = view.get<MeshComponent>(entity);
-                const auto& t = view.get<TransformComponent>(entity);
-                if (mesh_comp.m_mesh && mesh_comp.m_mesh->visible)
-                {
-                    prepare_water_mesh(registry, entity, mesh_comp);
-                    ensure_mesh_uploaded(*mesh_comp.m_mesh, render_api);
-                    record_mesh_with_lod(*mesh_comp.m_mesh, t, all_cmds,
-                                         global_lighting, cam_pos, proj, &camera_frustum);
-                    last_total_entities++;
-                }
-            }
-            last_visible_entities = last_total_entities;
-            last_draw_calls = all_cmds.size();
-            render_api->replayCommandBuffer(all_cmds);
-        }
-
-        if (sky_enabled)
-            render_api->renderSkybox();
-        DebugDraw::get().render(render_api, c);
-
-        // D3D12/Vulkan composite RmlUi during endSceneRender(), after the
-        // scene target has been resolved to the viewport texture.
-        const std::string api_name = render_api->getAPIName();
-        if (api_name != "D3D12" && api_name != "Vulkan")
-            RmlUiManager::get().render();
-
-        // Finalize to viewport texture (NOT screen, NOT ImGui)
-        render_api->endSceneRender();
-    };
+        render_frame(registry, c, FrameTarget::RenderToTexture);
+    }
 
     // Access the scene BVH (for ray picking, etc.)
     SceneBVH& getSceneBVH() { return scene_bvh; }
