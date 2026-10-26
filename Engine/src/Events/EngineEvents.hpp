@@ -26,14 +26,12 @@ struct PhysicsStepEvent
 
 struct EntityCreatedEvent
 {
-    entt::entity entity = entt::null; // deprecated raw id, filled alongside ref
     EntityRef ref;
     std::string tag;
 };
 
 struct EntityDestroyedEvent
 {
-    entt::entity entity = entt::null; // deprecated raw id, filled alongside ref
     EntityRef ref;
     std::string tag;
 };

@@ -73,7 +73,6 @@ public:
         if (!tag.empty())
             m_registry.emplace_or_replace<TagComponent>(e, TagComponent{tag_str});
         EntityCreatedEvent ev;
-        ev.entity = e;
         ev.ref = EntityRef{guid};
         ev.tag = tag_str;
         EventBus::get().queue(std::move(ev)); // deferred per events.md
@@ -213,7 +212,6 @@ private:
     void publishDestroyed(entt::entity e)
     {
         EntityDestroyedEvent ev;
-        ev.entity = e;
         ev.ref = refOf(e);
         ev.tag = tagOf(e);
         EventBus::get().publish(std::move(ev)); // immediate, before destroy

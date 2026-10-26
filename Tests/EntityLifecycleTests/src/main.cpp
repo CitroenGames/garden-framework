@@ -26,16 +26,18 @@ int g_destroyed_count = 0;
 EntityGuid g_last_destroyed_guid{};
 bool g_destroyed_seen_valid = false;
 entt::registry* g_observe_registry = nullptr;
-entt::entity g_destroyed_entity = entt::null;
+EntityLifecycle* g_observe_lifecycle = nullptr;
 
 void onCreated(const EntityCreatedEvent&) { ++g_created_count; }
 void onDestroyed(const EntityDestroyedEvent& e)
 {
     ++g_destroyed_count;
     g_last_destroyed_guid = e.ref.guid;
-    g_destroyed_entity = e.entity;
-    if (g_observe_registry)
-        g_destroyed_seen_valid = g_observe_registry->valid(e.entity);
+    if (g_observe_lifecycle)
+    {
+        entt::entity resolved = g_observe_lifecycle->resolve(e.ref);
+        g_destroyed_seen_valid = resolved != entt::null && g_observe_registry && g_observe_registry->valid(resolved);
+    }
 }
 
 void resetBus()
@@ -47,7 +49,7 @@ void resetBus()
     g_destroyed_count = 0;
     g_destroyed_seen_valid = false;
     g_last_destroyed_guid = EntityGuid{};
-    g_destroyed_entity = entt::null;
+    g_observe_lifecycle = nullptr;
     g_observe_registry = nullptr;
 }
 
@@ -157,6 +159,7 @@ bool testL4()
     entt::registry reg;
     EntityLifecycle life(reg, 5);
     g_observe_registry = &reg;
+    g_observe_lifecycle = &life;
     std::vector<entt::entity> es;
     for (int i = 0; i < 3; ++i) es.push_back(life.create("e"));
     if (g_created_count != 0) return fail(name, "created events not deferred before flush");
