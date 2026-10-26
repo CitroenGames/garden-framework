@@ -140,3 +140,52 @@ bool testBotBuyPlanByMoney()
     for (auto* plan : {&full, &fullCt, &force, &eco}) for (auto* a : plan->aliases) if (!findCatalogByAlias(a)) return fail(name, std::string("alias not in catalog: ") + a);
     return pass(name);
 }
+
+bool testBotDebugRingWraps()
+{
+    const std::string name = "Bot_DebugRingWraps64";
+    using namespace Bots;
+    TransitionRingBuffer ring;
+    for (uint32_t i = 0; i < 100; ++i) ring.push(TransitionRecord{i, 1, BotState::Idle, BotState::Advance, "test"});
+    if (ring.size() != 64) return fail(name, "size not capped at 64");
+    if (ring.oldest().tick != 36 || ring.newest().tick != 99) return fail(name, "wrap did not keep newest 64");
+    if (ring.at(0).tick != 36 || ring.at(63).tick != 99) return fail(name, "at() ordering wrong");
+    return pass(name);
+}
+bool testBotDebugTransitionRecorded()
+{
+    const std::string name = "Bot_DebugTransitionRecorded";
+    using namespace Bots; using namespace Competitive;
+    TransitionRingBuffer ring;
+    BotComponent b; b.difficulty = 1; b.state = BotState::Advance; b.rng_state = 42; b.bot_index = 3;
+    BotPerceptComponent p; BotIntentComponent intent;
+    BotDecisionInput in; in.phase = RoundPhase::Live; in.team = FpsTeam::Attackers; in.is_carrier = true; in.at_site = true; in.has_site = true; in.site_pos = glm::vec3(10,0,0); in.dt = 0.1f;
+    decide(b, p, intent, in, &ring, 123);
+    if (ring.size() != 1) return fail(name, "transition not recorded");
+    const auto& r = ring.newest();
+    if (r.tick != 123 || r.bot_index != 3 || r.from != BotState::Advance || r.to != BotState::Plant || r.reason != "carrier_at_site") return fail(name, "record fields wrong");
+    // No ring: unchanged behaviour, no crash.
+    BotComponent b2 = b; BotIntentComponent i2; decide(b2, p, i2, in);
+    if (b2.state != BotState::Plant) return fail(name, "null-ring decide changed state");
+    return pass(name);
+}
+bool testBotDebugDumpFormatter()
+{
+    const std::string name = "Bot_DebugDumpFormatter";
+    using namespace Bots;
+    BotDumpInput d; d.bot_index = 2; d.team = 1; d.state = BotState::Advance; d.hp = 77; d.pos = glm::vec3(1,2,3); d.goal = glm::vec3(4,0,5); d.has_goal = true; d.path_valid = true; d.stuck = false; d.visible_age = 0.5f; d.heard_age = 2.0f;
+    std::string s = formatBotDump(d);
+    for (const char* k : {"[BotDebug]", "bot=2", "team=1", "state=Advance", "hp=77", "pos=", "goal=", "path_valid=1", "stuck=0", "percept_visible_age=", "percept_heard_age="}) if (s.find(k) == std::string::npos) return fail(name, std::string("missing key: ") + k);
+    if (s.find('\n') != std::string::npos) return fail(name, "dump not single-line");
+    return pass(name);
+}
+bool testBotDebugPausedNeutral()
+{
+    const std::string name = "Bot_DebugPausedNeutral";
+    using namespace Bots;
+    Net::InputSample s = synthesizeNeutralInput(9, 0.5f, -0.2f);
+    if (s.tick != 9 || s.buttons != 0 || s.move_forward != 0.0f || s.move_right != 0.0f) return fail(name, "paused sample not neutral");
+    if (!botApprox(s.camera_yaw, 0.5f) || !botApprox(s.camera_pitch, -0.2f)) return fail(name, "paused camera not preserved");
+    StuckLogLatch latch; if (!latch.check(true) || latch.check(true) || latch.check(false) || !latch.check(true)) return fail(name, "stuck latch not one-shot per episode");
+    return pass(name);
+}

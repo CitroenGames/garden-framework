@@ -6,8 +6,11 @@
 #include "Network/NetworkProtocol.hpp"
 #include <glm/glm.hpp>
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstdio>
 #include <functional>
+#include <string>
 #include <vector>
 
 namespace Bots {
@@ -127,6 +130,46 @@ inline void updateSteering(NavAgentComponent& n, SteeringComponent& s, const glm
     s.last_pos = pos;
 }
 
+// ---- AI debug v1 (bots.md section 10; inert unless caller wires it) ----
+inline const char* botStateName(BotState s) {
+    switch (s) {
+    case BotState::Idle: return "Idle"; case BotState::Buy: return "Buy"; case BotState::Advance: return "Advance";
+    case BotState::Plant: return "Plant"; case BotState::Defend: return "Defend"; case BotState::Defuse: return "Defuse";
+    case BotState::Engage: return "Engage"; case BotState::Retreat: return "Retreat"; case BotState::Spectate: return "Spectate";
+    } return "?";
+}
+struct TransitionRecord { uint32_t tick = 0; int32_t bot_index = 0; BotState from = BotState::Idle; BotState to = BotState::Idle; std::string reason; };
+struct TransitionRingBuffer {
+    static constexpr size_t kCapacity = 64;
+    std::array<TransitionRecord, kCapacity> records{}; size_t head = 0; size_t count = 0; uint64_t total_pushed = 0; // head = next write
+    void push(const TransitionRecord& r) { records[head] = r; head = (head + 1) % kCapacity; if (count < kCapacity) ++count; ++total_pushed; }
+    size_t size() const { return count; }
+    const TransitionRecord& oldest() const { return records[(head + kCapacity - count) % kCapacity]; }
+    const TransitionRecord& newest() const { return records[(head + kCapacity - 1) % kCapacity]; }
+    const TransitionRecord& at(size_t i) const { return records[(head + kCapacity - count + i) % kCapacity]; } // 0=oldest
+};
+inline std::string formatTransition(const TransitionRecord& r) {
+    char buf[256]; std::snprintf(buf, sizeof(buf), "[BotDebug] transition tick=%u bot=%d from=%s to=%s reason=%s",
+        r.tick, r.bot_index, botStateName(r.from), botStateName(r.to), r.reason.c_str()); return std::string(buf);
+}
+struct BotDumpInput {
+    int32_t bot_index = 0; int32_t team = 0; BotState state = BotState::Idle; int32_t hp = 0;
+    glm::vec3 pos{0}; glm::vec3 goal{0}; bool has_goal = false; bool path_valid = false; bool stuck = false;
+    float visible_age = 1e9f; float heard_age = 1e9f;
+};
+inline std::string formatBotDump(const BotDumpInput& d) {
+    char buf[384]; std::snprintf(buf, sizeof(buf),
+        "[BotDebug] bot=%d team=%d state=%s hp=%d pos=%.2f,%.2f,%.2f goal=%.2f,%.2f,%.2f path_valid=%d stuck=%d percept_visible_age=%.2f percept_heard_age=%.2f",
+        d.bot_index, d.team, botStateName(d.state), d.hp, d.pos.x, d.pos.y, d.pos.z,
+        d.has_goal ? d.goal.x : 0.0f, d.has_goal ? d.goal.y : 0.0f, d.has_goal ? d.goal.z : 0.0f,
+        d.path_valid ? 1 : 0, d.stuck ? 1 : 0, d.visible_age, d.heard_age); return std::string(buf);
+}
+// ai_pause_bots: neutral sample (no movement/attack/use), camera preserved.
+inline Net::InputSample synthesizeNeutralInput(uint32_t tick, float yaw = 0.0f, float pitch = 0.0f) {
+    Net::InputSample s{}; s.tick = tick; s.camera_yaw = yaw; s.camera_pitch = pitch; return s;
+}
+struct StuckLogLatch { bool emitted = false; bool check(bool stuck) { if (!stuck) { emitted = false; return false; } if (emitted) return false; emitted = true; return true; } };
+
 // ---- Decision FSM ----
 struct BotDecisionInput {
     Competitive::RoundPhase phase = Competitive::RoundPhase::Live;
@@ -137,59 +180,61 @@ struct BotDecisionInput {
 };
 inline void setState(BotComponent& b, BotState s) { if (b.state != s) { b.state = s; b.state_time = 0; b.engage_lost_time = 0; } }
 
-inline void decide(BotComponent& b, const BotPerceptComponent& p, BotIntentComponent& intent, const BotDecisionInput& in) {
+inline void decide(BotComponent& b, const BotPerceptComponent& p, BotIntentComponent& intent, const BotDecisionInput& in,
+                   TransitionRingBuffer* transitions = nullptr, uint32_t tick = 0) {
     intent = BotIntentComponent{}; intent.aim_yaw = b.aim_yaw; intent.aim_pitch = b.aim_pitch;
     b.state_time += in.dt;
     const auto& diff = difficultyFor(b.difficulty);
-    if (!in.alive) { setState(b, BotState::Spectate); return; }
+    auto tr = [&](BotState s, const char* reason) { if (b.state != s) { if (transitions) transitions->push(TransitionRecord{tick, b.bot_index, b.state, s, reason}); setState(b, s); } };
+    if (!in.alive) { tr(BotState::Spectate, "dead"); return; }
     using P = Competitive::RoundPhase;
-    if (in.phase == P::Freeze) { if (b.state == BotState::Spectate || b.state == BotState::Idle || b.state == BotState::Advance) setState(b, BotState::Buy); }
-    else if (in.phase == P::Warmup || in.phase == P::WaitingForPlayers) { setState(b, BotState::Idle); return; }
-    else if (b.state == BotState::Buy && in.phase == P::Live) setState(b, BotState::Advance);
-    else if (b.state == BotState::Idle && in.phase == P::Live) setState(b, BotState::Advance);
+    if (in.phase == P::Freeze) { if (b.state == BotState::Spectate || b.state == BotState::Idle || b.state == BotState::Advance) tr(BotState::Buy, "phase_freeze"); }
+    else if (in.phase == P::Warmup || in.phase == P::WaitingForPlayers) { tr(BotState::Idle, "phase_warmup"); return; }
+    else if (b.state == BotState::Buy && in.phase == P::Live) tr(BotState::Advance, "phase_live");
+    else if (b.state == BotState::Idle && in.phase == P::Live) tr(BotState::Advance, "phase_live");
     else if (b.state == BotState::Spectate && in.phase == P::Live) return; // dead-revived handled by alive/Freeze
 
     bool confirmed = enemyConfirmed(p, b.difficulty);
     // Retreat trigger (checked before Engage overlay return).
     if (b.state != BotState::Engage && b.state != BotState::Retreat && diff.retreat_hp > 0 && in.health > 0 && in.health < diff.retreat_hp && confirmed) {
-        b.resume_state = BotState::Advance; b.has_resume = true; setState(b, BotState::Retreat);
+        b.resume_state = BotState::Advance; b.has_resume = true; tr(BotState::Retreat, "retreat_low_hp");
     }
     // Engage overlay
     if (b.state != BotState::Engage && confirmed &&
         (b.state == BotState::Advance || b.state == BotState::Plant || b.state == BotState::Defend || b.state == BotState::Defuse)) {
-        b.resume_state = b.state; b.has_resume = true; setState(b, BotState::Engage);
+        b.resume_state = b.state; b.has_resume = true; tr(BotState::Engage, "engage_confirmed");
     }
     switch (b.state) {
     case BotState::Idle: case BotState::Spectate: return;
-    case BotState::Buy: intent.buy_request_id = 0; if (in.phase == P::Live) setState(b, BotState::Advance); return;
+    case BotState::Buy: intent.buy_request_id = 0; if (in.phase == P::Live) tr(BotState::Advance, "phase_live"); return;
     case BotState::Engage: {
         if (p.visible_fraction > 0.0f) { b.engage_lost_time = 0; intent.want_attack = true; glm::vec3 ad = p.last_seen_pos - in.bot_pos; intent.aim_yaw = std::atan2(ad.x, ad.z); intent.aim_pitch = std::clamp(std::atan2(1.35f, std::max(glm::length(glm::vec3(ad.x, 0, ad.z)), 0.01f)), -1.5f, 1.5f); }
-        else { b.engage_lost_time += in.dt; intent.aim_yaw = b.aim_yaw; if (b.engage_lost_time > 0.75f) { BotState r = b.has_resume ? b.resume_state : BotState::Advance; b.has_resume = false; setState(b, r); } }
+        else { b.engage_lost_time += in.dt; intent.aim_yaw = b.aim_yaw; if (b.engage_lost_time > 0.75f) { BotState r = b.has_resume ? b.resume_state : BotState::Advance; b.has_resume = false; tr(r, "engage_lost"); } }
         return; }
     case BotState::Retreat:
         if (in.has_site) { intent.move_goal = in.site_pos; intent.has_move_goal = true; }
-        if (b.state_time > 2.0f && !confirmed) { BotState r = b.has_resume ? b.resume_state : BotState::Advance; b.has_resume = false; setState(b, in.bomb_planted ? BotState::Defend : r); }
+        if (b.state_time > 2.0f && !confirmed) { BotState r = b.has_resume ? b.resume_state : BotState::Advance; b.has_resume = false; tr(in.bomb_planted ? BotState::Defend : r, "retreat_safe"); }
         return;
     case BotState::Plant:
-        if (in.bomb_planted) { setState(b, BotState::Defend); return; }
-        if (!in.is_carrier) { setState(b, BotState::Advance); return; }
+        if (in.bomb_planted) { tr(BotState::Defend, "planted"); return; }
+        if (!in.is_carrier) { tr(BotState::Advance, "not_carrier"); return; }
         intent.want_use = true; return;
     case BotState::Defuse:
-        if (!in.bomb_planted) { setState(b, BotState::Advance); return; }
+        if (!in.bomb_planted) { tr(BotState::Advance, "bomb_gone"); return; }
         intent.want_use = true; return;
     case BotState::Defend:
-        if (in.team == Competitive::FpsTeam::Defenders && in.bomb_planted && in.at_bomb) { setState(b, BotState::Defuse); intent.want_use = true; }
+        if (in.team == Competitive::FpsTeam::Defenders && in.bomb_planted && in.at_bomb) { tr(BotState::Defuse, "at_bomb"); intent.want_use = true; }
         return;
     case BotState::Advance: default: {
         if (in.bomb_planted) {
             if (in.team == Competitive::FpsTeam::Defenders) {
-                if (in.at_bomb) { setState(b, BotState::Defuse); intent.want_use = true; return; }
+                if (in.at_bomb) { tr(BotState::Defuse, "at_bomb"); intent.want_use = true; return; }
                 if (in.has_bomb_pos) { intent.move_goal = in.bomb_pos; intent.has_move_goal = true; }
                 return;
             }
-            setState(b, BotState::Defend); return;
+            tr(BotState::Defend, "planted"); return;
         }
-        if (in.is_carrier && in.at_site) { setState(b, BotState::Plant); intent.want_use = true; return; }
+        if (in.is_carrier && in.at_site) { tr(BotState::Plant, "carrier_at_site"); intent.want_use = true; return; }
         if (in.has_site) { intent.move_goal = in.site_pos; intent.has_move_goal = true; }
         return; }
     }

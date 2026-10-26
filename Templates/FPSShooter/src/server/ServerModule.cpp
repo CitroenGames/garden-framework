@@ -64,6 +64,13 @@ static std::unordered_map<uint16_t, uint8_t> g_bot_last_weapon_select;
 static void spawnPlayerForClient(uint16_t client_id); // defined with player spawning below
 static int32_t botCountFromEnv() { const char* v = std::getenv("FPS_BOTS"); return v ? std::max(0, std::atoi(v)) : 0; }
 static uint8_t botDifficultyFromEnv() { const char* v = std::getenv("FPS_BOT_DIFFICULTY"); return Bots::clampDifficulty(v ? std::atoi(v) : 1); }
+// AI debug v1 (bots.md s10): env switches (FPS_BOTS-style; ConVar plumbing would need
+// engine console wiring, env matches existing bot config). Default 0/false = inert.
+static int32_t aiDebugLevel() { static const int32_t v = [] { const char* e = std::getenv("AI_DEBUG"); return e ? std::max(0, std::atoi(e)) : 0; }(); return v; }
+static bool aiPauseBots() { static const bool v = [] { const char* e = std::getenv("AI_PAUSE_BOTS"); return e && std::atoi(e) != 0; }(); return v; }
+static Bots::TransitionRingBuffer g_bot_transitions;
+static float g_bot_debug_last_dump = -10.0f;
+static std::unordered_map<int32_t, Bots::StuckLogLatch> g_bot_stuck_latches;
 
 static const char* bombStateName(Competitive::BombState st)
 {
@@ -647,6 +654,8 @@ static void tickBots(float dt)
     world* w = g_server_services ? g_server_services->game_world : nullptr;
     if (!w || dt <= 0.0f) return;
     g_bot_world_time += dt;
+    const bool bot_debug_dump_now = aiDebugLevel() >= 1 && (g_bot_world_time - g_bot_debug_last_dump >= 1.0f);
+    if (bot_debug_dump_now) g_bot_debug_last_dump = g_bot_world_time;
     spawnBotsIfNeeded();
     std::vector<entt::entity> bots;
     { auto v = w->registry.view<Bots::BotComponent>(); for (auto e : v) bots.push_back(e); }
@@ -676,7 +685,10 @@ static void tickBots(float dt)
         din.bot_pos = pos; din.health = w->registry.get<FpsHealthComponent>(e).health; din.dt = dt;
         if (!g_bomb_system.config.sites.empty()) { const auto& s = g_bomb_system.config.sites[(size_t)std::abs(bot.bot_index) % g_bomb_system.config.sites.size()]; din.site_pos = s.centre; din.has_site = true; uint8_t si = 0; din.at_site = g_bomb_system.config.inSite(pos, si); }
         if (din.bomb_planted) { din.bomb_pos = g_bomb_system.bomb.planted_position; din.has_bomb_pos = true; din.at_bomb = glm::distance(pos, din.bomb_pos) <= g_bomb_system.config.defuse_range; }
-        Bots::decide(bot, percept, intent, din);
+        const int32_t dbg = aiDebugLevel();
+        const uint64_t trans_before = g_bot_transitions.total_pushed;
+        Bots::decide(bot, percept, intent, din, dbg >= 1 ? &g_bot_transitions : nullptr, g_bot_input_tick);
+        if (dbg >= 2 && g_bot_transitions.total_pushed > trans_before) { uint64_t n = std::min<uint64_t>(g_bot_transitions.total_pushed - trans_before, g_bot_transitions.size()); for (uint64_t i = 0; i < n; ++i) LOG_ENGINE_INFO("{}", Bots::formatTransition(g_bot_transitions.at(g_bot_transitions.size() - (size_t)n + (size_t)i))); }
         if (bot.state == Bots::BotState::Buy) executeBotBuy(client_id, e);
         if (g_round_system.state.phase == Competitive::RoundPhase::Live) bot.buy_done = false;
         // S3 path request (only when a navmesh path can be produced; no wall walking)
@@ -693,8 +705,13 @@ static void tickBots(float dt)
         // S4 steering + S5 synthesis into the same consumption path as humans
         Bots::updateSteering(nav, steer, pos, dt);
         if (bot.state == Bots::BotState::Engage && percept.visible_fraction > 0.0f) { /* aim via intent, no positional steering */ }
-        Net::InputSample sample = Bots::synthesizeInput(bot, nav, intent, ++g_bot_input_tick, dt);
+        Net::InputSample sample = aiPauseBots() ? Bots::synthesizeNeutralInput(++g_bot_input_tick, bot.aim_yaw, bot.aim_pitch)
+                                                : Bots::synthesizeInput(bot, nav, intent, ++g_bot_input_tick, dt);
         consumeBotInputSample(client_id, e, sample, dt);
+        if (dbg >= 1) {
+            if (g_bot_stuck_latches[bot.bot_index].check(nav.stuck)) LOG_ENGINE_WARN("[BotDebug] bot_stuck bot={} (F-AI-03)", bot.bot_index);
+            if (bot_debug_dump_now) { Bots::BotDumpInput dump; dump.bot_index = bot.bot_index; dump.team = (int32_t)team_id; dump.state = bot.state; dump.hp = w->registry.get<FpsHealthComponent>(e).health; dump.pos = pos; dump.goal = nav.goal; dump.has_goal = nav.has_goal; dump.path_valid = nav.path_valid; dump.stuck = nav.stuck; dump.visible_age = percept.last_seen_age; dump.heard_age = percept.heard_age; LOG_ENGINE_INFO("{}", Bots::formatBotDump(dump)); }
+        }
     }
 }
 

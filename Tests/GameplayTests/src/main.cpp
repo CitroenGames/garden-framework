@@ -1022,6 +1022,10 @@ int main()
     ok = testBotSteeringArrivalStuck() && ok;
     ok = testBotInputSynthesisShape() && ok;
     ok = testBotBuyPlanByMoney() && ok;
+    ok = testBotDebugRingWraps() && ok;
+    ok = testBotDebugTransitionRecorded() && ok;
+    ok = testBotDebugDumpFormatter() && ok;
+    ok = testBotDebugPausedNeutral() && ok;
     ok = testUiScreenTransitions() && ok;
     ok = testUiMenusRequireCompetitiveState() && ok;
     ok = testUiClockFormatting() && ok;
