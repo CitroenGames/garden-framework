@@ -121,6 +121,15 @@ public:
         return steps;
     }
 
+    // One fixed physics step without accumulator consumption.
+    // Used by SystemScheduler's Physics phase, which owns accumulation.
+    void stepPhysicsSingleStep()
+    {
+        physics_system->stepPhysics(registry);
+        ++simulation_tick;
+        simulation_time += fixed_delta;
+    }
+
     uint32_t getSimulationTick() const { return simulation_tick; }
     double getWorldTime() const { return simulation_time; }
     float getFixedDelta() const { return fixed_delta; }

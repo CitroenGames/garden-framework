@@ -18,6 +18,8 @@
 #include "Reflection/EngineReflection.hpp"
 #include "Prefab/PrefabManager.hpp"
 #include "Assets/AssetManager.hpp"
+#include "Scheduler/SystemScheduler.hpp"
+#include "ECS/EntityLifecycle.hpp"
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -199,6 +201,34 @@ int main(int argc, char* argv[])
     game_module.serverOnLevelLoaded();
     _world.startGameplayFramework();
 
+    // D5: dedicated server is driven by a SystemScheduler (server host).
+    // Existing work keeps its relative order: gameplay-framework tick
+    // then the game module's gardenServerUpdate, both in Gameplay with
+    // fixed_delta. The scheduler supplies the EventBus flush points,
+    // fixed-dt engine.timers, and lifecycle drains this host lacked.
+    EntityLifecycle server_lifecycle(_world.registry);
+    SystemScheduler server_scheduler(true, _world.getFixedDelta());
+    server_scheduler.setLifecycle(&server_lifecycle);
+    {
+        SystemDescriptor d;
+        d.name = "game.gameplay_framework";
+        d.phase = Phase::Gameplay;
+        d.update = [](entt::registry&, const Tick::SimulationTickContext& ctx) {
+            _world.tickGameplayFramework(ctx.fixed_delta);
+        };
+        server_scheduler.addSystem(std::move(d));
+    }
+    {
+        SystemDescriptor d;
+        d.name = "game.server_update";
+        d.phase = Phase::Gameplay;
+        d.run_after = {"game.gameplay_framework"};
+        d.update = [](entt::registry&, const Tick::SimulationTickContext& ctx) {
+            game_module.serverUpdate(ctx.fixed_delta);
+        };
+        server_scheduler.addSystem(std::move(d));
+    }
+
     LOG_ENGINE_INFO("Server started successfully");
 
     // Server loop
@@ -212,8 +242,7 @@ int main(int argc, char* argv[])
         float delta_time = (frame_start - delta_last) / 1000.0f;
         delta_last = frame_start;
 
-        _world.tickGameplayFramework(delta_time);
-        game_module.serverUpdate(delta_time);
+        server_scheduler.runFrame(_world.registry, delta_time);
 
         Uint64 frame_end_ns = SDL_GetTicksNS();
         app.lockFramerate(frame_start_ns, frame_end_ns);

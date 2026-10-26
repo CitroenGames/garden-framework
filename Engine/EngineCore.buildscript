@@ -23,6 +23,7 @@ sources = {
     src/Reflection/EngineReflection.cpp
     src/Reflection/ReflectionPropertyOps.cpp
     src/Reflection/ReflectionSerializer.cpp
+    src/Scheduler/**/*.cpp
     src/Scene/**/*.cpp
     src/Threading/**/*.cpp
     src/Timer/**/*.cpp

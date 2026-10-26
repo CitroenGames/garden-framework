@@ -6,6 +6,7 @@
 #include "PlayerController.hpp"
 #include "Components/Components.hpp"
 #include "Components/camera.hpp"
+#include "Scheduler/SystemScheduler.hpp"
 #include <memory>
 #include <entt/entt.hpp>
 
@@ -14,41 +15,40 @@ namespace GameFramework
     class GameModeBase;
 }
 
-// Encapsulates one frame of game-logic: physics, player controller,
-// animation, audio, timers, events, debug draw.
-// Does NOT own the world -- operates on one passed to it.
-// Does NOT handle rendering or window management.
+class EntityLifecycle;
+
+// Thin scheduler host (D5: retired as loop owner). Owns a SystemScheduler
+// and an EntityLifecycle for the world; update() delegates to
+// SystemScheduler::runFrame. The hand-ordered loop body is gone.
+// Client (Game.exe) and dedicated server do NOT use this class: they own
+// their own schedulers (server: Game/Server/src/main.cpp). This host is
+// only the editor standalone/legacy path.
 class ENGINE_API GameSimulation
 {
 public:
     GameSimulation(world* game_world, std::shared_ptr<InputManager> input_mgr);
     ~GameSimulation();
 
-    // Find player/freecam entities in the registry and create PlayerController.
-    // Call once after the world is populated with entities.
     void initialize();
-
-    // Run one frame of game logic.
     void update(float delta_time);
-
-    // Forward mouse motion to the PlayerController.
     void handleMouseMotion(float mouse_dy, float mouse_dx);
-
     void setPaused(bool paused);
     bool isPaused() const;
-
-    // Camera that should be used for rendering during play.
     camera& getActiveCamera();
-
     PlayerController* getPlayerController();
-
     entt::entity getPlayerEntity() const  { return m_player_entity; }
     entt::entity getFreecamEntity() const { return m_freecam_entity; }
+    SystemScheduler* getScheduler() { return m_scheduler.get(); }
 
 private:
+    void registerSystems();
+
     world*                          m_world;
     std::shared_ptr<InputManager>   m_input_manager;
     GameFramework::GameModeBase*    m_game_mode = nullptr;
+    std::unique_ptr<SystemScheduler> m_scheduler;
+    std::unique_ptr<EntityLifecycle> m_lifecycle;
+    float m_current_frame_dt = 0.0f;
 
     entt::entity m_player_entity     = entt::null;
     entt::entity m_freecam_entity    = entt::null;

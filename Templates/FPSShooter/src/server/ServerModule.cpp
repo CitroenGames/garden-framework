@@ -16,6 +16,7 @@
 #include "shared/WeaponSystem.hpp"
 #include "server/GameRules.hpp"
 #include "Utils/Log.hpp"
+#include "Events/EventBus.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -614,6 +615,11 @@ GAME_API void gardenServerUpdate(float delta_time)
 {
     if (!g_server_services) return;
 
+    // D5 migration step 1: deliver events queued last frame on the server.
+    // Timer ticking is owned by the host SystemScheduler (engine.timers,
+    // fixed dt) and is intentionally not duplicated here.
+    EventBus::get().flush();
+
     world* w = g_server_services->game_world;
 
     g_server_network.pumpNetworkEvents(delta_time);
@@ -670,6 +676,8 @@ GAME_API void gardenServerUpdate(float delta_time)
     }
 
     g_server_network.publishWorldState();
+
+    EventBus::get().flush();
 }
 
 GAME_API void gardenServerOnLevelLoaded()
