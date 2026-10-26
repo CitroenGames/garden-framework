@@ -35,6 +35,9 @@ public:
     // Execute the compiled graph through a backend.
     void execute(RGBackend& backend);
 
+    const RGStats& getStats() const { return m_stats; }
+    RGStats& stats() { return m_stats; }
+
     // Whether compile() succeeded.
     bool isCompiled() const { return m_compiled; }
 
@@ -50,6 +53,7 @@ private:
     // Called by RGBuilder::createTexture
     RGTextureHandle allocateResource(const RGTextureDesc& desc);
 
+    RGStats                     m_stats{};
     std::vector<RGPassNode>     m_passes;
     std::vector<RGResourceNode> m_resources;
     RGCompileResult             m_compileResult;

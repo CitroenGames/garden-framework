@@ -1,4 +1,5 @@
 #include "RenderGraph.hpp"
+#include <chrono>
 #include <sstream>
 
 void RenderGraph::reset()
@@ -6,6 +7,7 @@ void RenderGraph::reset()
     m_passes.clear();
     m_resources.clear();
     m_compileResult = {};
+    m_stats = RGStats{};
     m_compiled = false;
 }
 
@@ -50,8 +52,17 @@ void RenderGraph::setReferenceResolution(uint32_t width, uint32_t height)
 bool RenderGraph::compile()
 {
     m_compiled = false;
+    const auto start = std::chrono::steady_clock::now();
     m_compileResult = RGCompiler::compile(m_passes, m_resources, m_refWidth, m_refHeight);
+    const auto elapsed = std::chrono::steady_clock::now() - start;
     m_compiled = m_compileResult.valid;
+    m_stats.compile_ns = (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count();
+    m_stats.pass_count = (uint64_t)m_passes.size();
+    m_stats.resource_count = (uint64_t)m_resources.size();
+    m_stats.barrier_count = (uint64_t)m_compileResult.barriers.size();
+    uint64_t culled = 0;
+    for (const auto& pass : m_passes) if (pass.culled) ++culled;
+    m_stats.culled_count = culled;
     return m_compiled;
 }
 
@@ -74,6 +85,7 @@ void RenderGraph::execute(RGBackend& backend)
             h.index = ri;
             h.version = 0;
             backend.createTransientTexture(h, res.desc);
+            m_stats.transient_creates++;
         }
     }
 

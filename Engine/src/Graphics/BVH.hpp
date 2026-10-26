@@ -21,6 +21,15 @@ struct BVHNode
     bool isLeaf() const { return entity != entt::null; }
 };
 
+struct CullStats
+{
+    uint64_t builds = 0;
+    uint64_t entities_scanned = 0;
+    mutable uint64_t nodes_visited = 0;
+    mutable uint64_t aabb_tests = 0;
+    mutable uint64_t leaves_collected = 0;
+};
+
 // Scene BVH for frustum culling
 class SceneBVH
 {
@@ -45,8 +54,11 @@ public:
     // Get statistics
     size_t getNodeCount() const { return nodes.size(); }
     size_t getTotalEntities() const { return entity_count; }
+    const CullStats& getCullStats() const { return cull_stats; }
+    void resetCullStats() { cull_stats = CullStats{}; }
 
 private:
+    CullStats cull_stats{};
     std::vector<BVHNode> nodes;
     int root_index = -1;
     bool dirty = true;
@@ -78,6 +90,7 @@ private:
 
 inline void SceneBVH::build(entt::registry& registry)
 {
+    cull_stats.builds++;
     nodes.clear();
     root_index = -1;
     entity_count = 0;
@@ -117,6 +130,7 @@ inline void SceneBVH::build(entt::registry& registry)
     }
 
     entity_count = entity_bounds.size();
+    cull_stats.entities_scanned += (uint64_t)entity_count;
 
     if (entity_bounds.empty())
     {
@@ -224,7 +238,7 @@ inline void SceneBVH::collectAllLeaves(int nodeIndex, std::vector<entt::entity>&
 {
     if (nodeIndex < 0 || nodeIndex >= static_cast<int>(nodes.size())) return;
     const BVHNode& node = nodes[nodeIndex];
-    if (node.isLeaf()) { results.push_back(node.entity); return; }
+    if (node.isLeaf()) { results.push_back(node.entity); cull_stats.leaves_collected++; return; }
     if (node.left_child >= 0) collectAllLeaves(node.left_child, results);
     if (node.right_child >= 0) collectAllLeaves(node.right_child, results);
 }
@@ -237,6 +251,8 @@ inline void SceneBVH::queryFrustumRecursive(int nodeIndex, const Frustum& frustu
     }
 
     const BVHNode& node = nodes[nodeIndex];
+    cull_stats.nodes_visited++;
+    cull_stats.aabb_tests++;
 
     // Test this node's bounds against the frustum
     if (!frustum.intersectsAABB(node.bounds))

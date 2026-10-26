@@ -194,6 +194,14 @@ inline size_t instancedRunLength(const std::vector<DrawCommand>& cmds, size_t fi
     return length;
 }
 
+struct SortStats
+{
+    uint64_t temp_allocs = 0;
+    uint64_t temp_bytes = 0;
+    uint64_t groups = 0;
+    size_t max_run = 0;
+};
+
 // CPU-side command buffer that stores a flat list of self-contained draw commands.
 // Multiple threads can each own their own RenderCommandBuffer and record independently.
 // No GPU calls happen during recording -- all GPU work is deferred to replay.
@@ -341,10 +349,11 @@ public:
 
     // Sort commands to minimize state changes (by PSO key, then texture).
     // Only use for opaque draws -- transparent draws must maintain back-to-front order.
-    void sort()
+    void sort(SortStats* stats = nullptr)
     {
         std::sort(m_commands.begin(), m_commands.end(),
             [](const DrawCommand& a, const DrawCommand& b) { return drawStateLess(a, b); });
+        if (stats) fillSortStats(*stats, 0, 0);
     }
 
     // Depth-bucketed sort for opaque draws: groups by the same full state
@@ -353,7 +362,7 @@ public:
     // and merged runs survive while nearer draws in a group submit first.
     // Transparent draws must NOT use this -- they require back-to-front
     // submission order.
-    void sortWithViewDepth(const glm::mat4& viewMatrix)
+    void sortWithViewDepth(const glm::mat4& viewMatrix, SortStats* stats = nullptr)
     {
         if (m_commands.empty()) return;
         std::vector<float> depths(m_commands.size());
@@ -457,6 +466,11 @@ public:
         sorted.reserve(m_commands.size());
         for (const SortEntry& e : entries) sorted.push_back(m_commands[e.index]);
         m_commands = std::move(sorted);
+        if (stats)
+        {
+            const uint64_t bytes = (uint64_t)m_commands.size() * (uint64_t)(sizeof(float) + sizeof(uint16_t) + sizeof(SortEntry) + sizeof(DrawCommand));
+            fillSortStats(*stats, 4, bytes);
+        }
     }
 
     // Append all commands from another buffer (for merging parallel results)
@@ -484,6 +498,7 @@ public:
 
     void clear() { m_commands.clear(); }
     size_t size() const { return m_commands.size(); }
+    size_t capacity() const { return m_commands.capacity(); }
     bool empty() const { return m_commands.empty(); }
 
     const DrawCommand& operator[](size_t i) const { return m_commands[i]; }
@@ -494,6 +509,21 @@ public:
     auto end() const { return m_commands.end(); }
 
 private:
+    void fillSortStats(SortStats& stats, uint64_t allocs, uint64_t bytes) const
+    {
+        stats.temp_allocs = allocs;
+        stats.temp_bytes = bytes;
+        stats.groups = 0;
+        stats.max_run = 0;
+        for (size_t i = 0; i < m_commands.size();)
+        {
+            stats.groups++;
+            const size_t run = instancedRunLength(m_commands, i);
+            if (run > stats.max_run) stats.max_run = run;
+            i += (run ? run : 1);
+        }
+    }
+
     static glm::mat4 computeNormalMatrix(const glm::mat4& model_matrix)
     {
         glm::mat3 normalMat3 = glm::mat3(model_matrix);

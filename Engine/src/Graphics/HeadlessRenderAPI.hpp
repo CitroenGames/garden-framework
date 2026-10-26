@@ -71,6 +71,7 @@ public:
 private:
     RenderFrameStats m_lastFrameStats{};
     std::unordered_set<uint64_t> m_descriptorCache{};
+    std::unordered_set<uint64_t> m_psoCache{};
 
     virtual const char* getAPIName() const override { return "Headless"; }
 

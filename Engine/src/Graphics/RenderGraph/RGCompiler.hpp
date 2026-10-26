@@ -33,6 +33,17 @@ struct RGCompileResult {
     bool                   valid = false;
 };
 
+struct RGStats
+{
+    uint64_t compile_ns = 0;
+    uint64_t pass_count = 0;
+    uint64_t resource_count = 0;
+    uint64_t barrier_count = 0;
+    uint64_t culled_count = 0;
+    uint64_t transient_creates = 0;
+    uint64_t transient_reuses = 0;
+};
+
 // Compiles a render graph: topological sort, pass culling, barrier scheduling.
 class RGCompiler {
 public:

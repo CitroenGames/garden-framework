@@ -89,6 +89,13 @@ struct RenderFrameStats
     uint64_t state_binds_skipped = 0;
     uint64_t descriptor_allocs = 0;
     uint64_t descriptor_cache_hits = 0;
+    uint64_t binds_pso_skipped = 0;
+    uint64_t binds_texture_skipped = 0;
+    uint64_t binds_mesh_skipped = 0;
+    uint64_t pso_creates = 0;
+    uint64_t pso_hits = 0;
+    uint64_t upload_calls = 0;
+    uint64_t upload_bytes = 0;
 };
 
 // GPU light structures for point/spot light constant buffers.

@@ -215,6 +215,7 @@ void HeadlessRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
         else
         {
             m_lastFrameStats.state_binds_skipped++;
+            m_lastFrameStats.binds_pso_skipped++;
         }
 
         TextureHandle tex = cmd.use_texture ? cmd.texture : INVALID_TEXTURE;
@@ -226,6 +227,7 @@ void HeadlessRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
         else
         {
             m_lastFrameStats.state_binds_skipped++;
+            m_lastFrameStats.binds_texture_skipped++;
         }
 
         if (cmd.gpu_mesh != lastMesh)
@@ -235,6 +237,7 @@ void HeadlessRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
         else
         {
             m_lastFrameStats.state_binds_skipped++;
+            m_lastFrameStats.binds_mesh_skipped++;
         }
 
         // Descriptor sets are retained across frames, keyed by diffuse texture
@@ -251,6 +254,16 @@ void HeadlessRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
         {
             m_descriptorCache.insert(descKey);
             m_lastFrameStats.descriptor_allocs++;
+        }
+        const uint64_t psoKey = (uint64_t)cmd.pso_key.pipelineBits();
+        if (m_psoCache.find(psoKey) != m_psoCache.end())
+        {
+            m_lastFrameStats.pso_hits++;
+        }
+        else
+        {
+            m_psoCache.insert(psoKey);
+            m_lastFrameStats.pso_creates++;
         }
         }
         i += runLength;

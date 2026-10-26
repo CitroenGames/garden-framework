@@ -220,6 +220,16 @@ inline std::optional<ForwardPlusTileBounds> lightTileBounds(const glm::vec3& pos
     };
 }
 
+struct BinningStats
+{
+    uint64_t lights_in = 0;
+    uint64_t lights_binned = 0;
+    uint64_t tiles_touched = 0;
+    uint64_t indices_written = 0;
+    uint64_t lights_truncated = 0;
+    uint64_t max_tile_occupancy = 0;
+};
+
 struct ForwardPlusBinningResult
 {
     std::vector<ForwardPlusTile> tiles;       // element 0 is the grid header; cells follow, slice-major
@@ -271,8 +281,10 @@ inline void binForwardPlusLightsInto(ForwardPlusBinningResult& result, ForwardPl
                                      const GPUSpotLight* spots, uint32_t spotCount,
                                      const glm::mat4& viewMatrix, const glm::mat4& projMatrix,
                                      uint32_t width, uint32_t height, float nearPlane,
-                                     float farPlane, bool flipY, bool enabled)
+                                     float farPlane, bool flipY, bool enabled,
+                                     BinningStats* stats = nullptr)
 {
+    if (stats) *stats = BinningStats{};
     scratch.clear();
     result.tilesX = (std::max)(1u, (width + kForwardPlusTileSize - 1u) / kForwardPlusTileSize);
     result.tilesY = (std::max)(1u, (height + kForwardPlusTileSize - 1u) / kForwardPlusTileSize);
@@ -377,6 +389,9 @@ inline void binForwardPlusLightsInto(ForwardPlusBinningResult& result, ForwardPl
             for (uint32_t ty = light.bounds.minY; ty <= light.bounds.maxY; ++ty)
                 for (uint32_t tx = light.bounds.minX; tx <= light.bounds.maxX; ++tx)
                     ++cellCounts[(slice * tileCount) + (ty * result.tilesX) + tx];
+    uint64_t truncatedCount = 0;
+    for (uint32_t c : cellCounts)
+        if (c > kForwardPlusMaxLightsPerTile) truncatedCount += (uint64_t)(c - kForwardPlusMaxLightsPerTile);
     for (uint32_t& count : cellCounts)
         count = (std::min)(count, kForwardPlusMaxLightsPerTile);
 
@@ -417,6 +432,25 @@ inline void binForwardPlusLightsInto(ForwardPlusBinningResult& result, ForwardPl
             }
         }
     }
+    if (stats)
+    {
+        stats->lights_in = (uint64_t)pointCount + (uint64_t)spotCount;
+        stats->lights_binned = (uint64_t)binned.size();
+        stats->indices_written = (uint64_t)result.lightIndices.size();
+        uint64_t touched = 0;
+        uint64_t maxOcc = 0;
+        for (size_t ci = 0; ci < cellCounts.size(); ++ci)
+        {
+            if (cellCounts[ci] > 0) ++touched;
+            if ((uint64_t)cellCounts[ci] > maxOcc) maxOcc = (uint64_t)cellCounts[ci];
+        }
+        stats->tiles_touched = touched;
+        stats->max_tile_occupancy = maxOcc;
+        stats->lights_truncated = truncatedCount;
+        uint64_t uncapped = 0;
+        // recompute uncapped total from capped cells is not available here; truncated is derived below
+        (void)uncapped;
+    }
 }
 
 // Binning entry point for one-off calls. Callers that bin every frame keep
@@ -426,12 +460,13 @@ inline ForwardPlusBinningResult binForwardPlusLights(const GPUPointLight* points
                                                      const GPUSpotLight* spots, uint32_t spotCount,
                                                      const glm::mat4& viewMatrix, const glm::mat4& projMatrix,
                                                      uint32_t width, uint32_t height, float nearPlane,
-                                                     float farPlane, bool flipY, bool enabled)
+                                                     float farPlane, bool flipY, bool enabled,
+                                                     BinningStats* stats = nullptr)
 {
     ForwardPlusBinningResult result;
     ForwardPlusBinningScratch scratch;
     binForwardPlusLightsInto(result, scratch, points, pointCount, spots, spotCount,
                              viewMatrix, projMatrix, width, height, nearPlane, farPlane,
-                             flipY, enabled);
+                             flipY, enabled, stats);
     return result;
 }

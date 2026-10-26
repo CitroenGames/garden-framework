@@ -6,8 +6,10 @@
 #include "Graphics/HeadlessRenderAPI.hpp"
 #include "Graphics/IGPUMesh.hpp"
 #include "Graphics/ForwardPlusLightBinning.hpp"
+#include "Graphics/HeadlessMesh.hpp"
 #include "Utils/Vertex.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -881,6 +883,240 @@ static bool benchDescriptorCacheColdAgainstWarm(size_t distinct, size_t reps)
     return pass(name);
 }
 
+
+static RenderCommandBuffer makePassBuffer(IGPUMesh* mesh, const PSOKey& key, size_t count,
+                                          uint32_t distinctTextures, bool sortBuffer)
+{
+    RenderCommandBuffer buf;
+    buf.reserve(count);
+    for (size_t i = 0; i < count; i++)
+    {
+        const TextureHandle tex = (TextureHandle)(7u + (uint32_t)(distinctTextures ? (i % distinctTextures) : 0u));
+        const glm::mat4 model = glm::translate(glm::mat4(1.0f), glm::vec3((float)i, 0.0f, -10.0f));
+        buf.recordDraw(mesh, model, tex, true, key);
+    }
+    if (sortBuffer) buf.sort();
+    return buf;
+}
+
+static double medianOf(std::vector<double> values)
+{
+    if (values.empty()) return 0.0;
+    std::sort(values.begin(), values.end());
+    return values[values.size() / 2];
+}
+
+struct PassExpect
+{
+    const char* label;
+    PSOKey key;
+    size_t count;
+    uint32_t distinct;
+    bool sortBuffer;
+    uint64_t backend;
+    uint64_t batches;
+    uint64_t instances;
+};
+
+static bool testTracePerPassAccounting()
+{
+    const std::string name = "per-draw accounting matches recorded draws for every draw grouping";
+    HeadlessRenderAPI probe;
+    IGPUMesh* mesh = makeUploadedMesh(probe);
+    PSOKey blended;
+    blended.blend = BlendMode::Alpha;
+    const PassExpect cases[5] = {
+        {"shadow", PSOKey::shadowPass(), 1024, 1, false, 1024, 0, 0},
+        {"depth", PSOKey::depthPrepass(), 1024, 1, false, 1024, 0, 0},
+        {"opaque-identical", PSOKey{}, 2048, 1, true, 1, 1, 2048},
+        {"opaque-grouped", PSOKey{}, 2048, 8, true, 8, 8, 2048},
+        {"transparent", blended, 512, 4, false, 512, 0, 0},
+    };
+    for (const PassExpect& c : cases)
+    {
+        RenderCommandBuffer buf = makePassBuffer(mesh, c.key, c.count, c.distinct, c.sortBuffer);
+        HeadlessRenderAPI api;
+        api.beginFrame();
+        api.replayCommandBuffer(buf);
+        const RenderFrameStats seq = api.getLastFrameStats();
+        HeadlessRenderAPI parApi;
+        parApi.beginFrame();
+        parApi.replayCommandBufferParallel(buf);
+        const RenderFrameStats par = parApi.getLastFrameStats();
+        if (seq.submitted_draw_commands != c.count || seq.backend_draw_calls != c.backend ||
+            seq.instanced_batches != c.batches || seq.instanced_instances != c.instances)
+        {
+            delete mesh;
+            return fail(name, std::string(c.label) + " counters differ from recorded draws");
+        }
+        if (par.backend_draw_calls != seq.backend_draw_calls ||
+            par.instanced_batches != seq.instanced_batches ||
+            par.instanced_instances != seq.instanced_instances ||
+            par.state_binds_skipped != seq.state_binds_skipped ||
+            par.descriptor_allocs != seq.descriptor_allocs ||
+            par.descriptor_cache_hits != seq.descriptor_cache_hits)
+        {
+            delete mesh;
+            return fail(name, std::string(c.label) + " parallel counters differ from sequential counters");
+        }
+        if (par.parallel_replay_batches < 1 || par.parallel_replay_workers < 1)
+        {
+            delete mesh;
+            return fail(name, std::string(c.label) + " parallel counters did not populate");
+        }
+    }
+    delete mesh;
+    return pass(name);
+}
+
+static bool testTraceDescriptorColdWarmPerPass()
+{
+    const std::string name = "descriptor counting is cold then warm for every draw grouping";
+    HeadlessRenderAPI probe;
+    IGPUMesh* mesh = makeUploadedMesh(probe);
+    PSOKey blended;
+    blended.blend = BlendMode::Alpha;
+    const PassExpect cases[5] = {
+        {"shadow", PSOKey::shadowPass(), 1024, 1, false, 1024, 0, 0},
+        {"depth", PSOKey::depthPrepass(), 1024, 1, false, 1024, 0, 0},
+        {"opaque-identical", PSOKey{}, 2048, 1, true, 1, 1, 2048},
+        {"opaque-grouped", PSOKey{}, 2048, 8, true, 8, 8, 2048},
+        {"transparent", blended, 512, 4, false, 512, 0, 0},
+    };
+    for (const PassExpect& c : cases)
+    {
+        RenderCommandBuffer buf = makePassBuffer(mesh, c.key, c.count, c.distinct, c.sortBuffer);
+        HeadlessRenderAPI api;
+        api.beginFrame();
+        api.replayCommandBuffer(buf);
+        const RenderFrameStats cold = api.getLastFrameStats();
+        api.beginFrame();
+        api.replayCommandBuffer(buf);
+        const RenderFrameStats warm = api.getLastFrameStats();
+        if (cold.descriptor_allocs != c.distinct ||
+            cold.descriptor_cache_hits != c.count - c.distinct ||
+            cold.pso_creates != 1 || cold.pso_hits != c.count - 1)
+        {
+            delete mesh;
+            return fail(name, std::string(c.label) + " cold counters differ from distinct state count");
+        }
+        if (warm.descriptor_allocs != 0 || warm.descriptor_cache_hits != c.count ||
+            warm.pso_creates != 0 || warm.pso_hits != c.count)
+        {
+            delete mesh;
+            return fail(name, std::string(c.label) + " warm counters differ from submitted draws");
+        }
+    }
+    delete mesh;
+    return pass(name);
+}
+
+static bool testTraceAllocCapacityStable()
+{
+    const std::string name = "retained storage stays stable on identical repeated work";
+    std::vector<GPUPointLight> lights(4096);
+    for (size_t i = 0; i < lights.size(); i++)
+    {
+        lights[i].position = glm::vec3((float)((int)(i % 16) - 8) * 0.4f,
+                                       (float)((int)((i / 16) % 16) - 8) * 0.4f,
+                                       -5.0f - (float)(i % 8));
+        lights[i].range = 0.5f;
+    }
+    const glm::mat4 view(1.0f);
+    const glm::mat4 proj = glm::perspective(glm::radians(90.0f), 1.0f, 0.1f, 1000.0f);
+    ForwardPlusBinningResult binned;
+    ForwardPlusBinningScratch scratch;
+    BinningStats stats;
+    binForwardPlusLightsInto(binned, scratch, lights.data(), 4096, nullptr, 0,
+                             view, proj, 160, 160, 0.1f, 1000.0f, true, true, &stats);
+    const size_t tilesCap = binned.tiles.capacity();
+    const size_t indicesCap = binned.lightIndices.capacity();
+    const size_t cellCap = scratch.cellCounts.capacity();
+    const size_t writeCap = scratch.writeOffsets.capacity();
+    const size_t binnedCap = scratch.binned.capacity();
+    binForwardPlusLightsInto(binned, scratch, lights.data(), 4096, nullptr, 0,
+                             view, proj, 160, 160, 0.1f, 1000.0f, true, true, &stats);
+    if (binned.tiles.capacity() != tilesCap || binned.lightIndices.capacity() != indicesCap ||
+        scratch.cellCounts.capacity() != cellCap || scratch.writeOffsets.capacity() != writeCap ||
+        scratch.binned.capacity() != binnedCap)
+        return fail(name, "retained binning storage grew on an identical call");
+    if (stats.indices_written != binned.lightIndices.size() ||
+        stats.lights_binned > stats.lights_in || stats.max_tile_occupancy > 64)
+        return fail(name, "binning counters disagree with the produced result");
+    HeadlessRenderAPI probe;
+    IGPUMesh* mesh = makeUploadedMesh(probe);
+    RenderCommandBuffer buf = makePassBuffer(mesh, PSOKey{}, 256, 1, false);
+    const size_t cmdCap = buf.capacity();
+    buf.sort();
+    if (buf.capacity() != cmdCap)
+    {
+        delete mesh;
+        return fail(name, "command storage moved during ordering");
+    }
+    SortStats sortStats;
+    RenderCommandBuffer depthBuf = makePassBuffer(mesh, PSOKey{}, 256, 1, false);
+    depthBuf.sortWithViewDepth(view, &sortStats);
+    if (sortStats.temp_allocs == 0 || sortStats.groups == 0 || sortStats.max_run == 0)
+    {
+        delete mesh;
+        return fail(name, "depth ordering counters did not populate");
+    }
+    SortStats plainStats;
+    RenderCommandBuffer plainBuf = makePassBuffer(mesh, PSOKey{}, 256, 1, false);
+    plainBuf.sort(&plainStats);
+    if (plainStats.temp_allocs != 0 || plainStats.groups != sortStats.groups)
+    {
+        delete mesh;
+        return fail(name, "plain ordering counters differ from depth ordering counters");
+    }
+    delete mesh;
+    return pass(name);
+}
+
+static bool testTraceBindBreakdownSums()
+{
+    const std::string name = "bind breakdown adds up to the total skipped count";
+    HeadlessRenderAPI probe;
+    IGPUMesh* mesh = makeUploadedMesh(probe);
+    RenderCommandBuffer buf = makePassBuffer(mesh, PSOKey{}, 2048, 1, true);
+    HeadlessRenderAPI api;
+    api.beginFrame();
+    api.replayCommandBuffer(buf);
+    const RenderFrameStats s = api.getLastFrameStats();
+    delete mesh;
+    if (s.binds_pso_skipped + s.binds_texture_skipped + s.binds_mesh_skipped != s.state_binds_skipped)
+        return fail(name, "category counts do not add up to the total");
+    if (s.binds_pso_skipped != 2047 || s.binds_texture_skipped != 2047 || s.binds_mesh_skipped != 2047)
+        return fail(name, "category counts differ from follower count in an identical run");
+    return pass(name);
+}
+
+static bool testTraceSortStatsMatchRescan()
+{
+    const std::string name = "ordering counters match a rescan of the ordered draws";
+    HeadlessRenderAPI probe;
+    IGPUMesh* mesh = makeUploadedMesh(probe);
+    RenderCommandBuffer buf = makePassBuffer(mesh, PSOKey{}, 2048, 8, false);
+    SortStats stats;
+    buf.sort(&stats);
+    uint64_t groups = 0;
+    size_t maxRun = 0;
+    for (size_t i = 0; i < buf.size();)
+    {
+        groups++;
+        const size_t run = instancedRunLength(buf.commands(), i);
+        if (run > maxRun) maxRun = run;
+        i += run ? run : 1;
+    }
+    delete mesh;
+    if (stats.groups != groups || stats.max_run != maxRun)
+        return fail(name, "reported groups differ from a direct rescan");
+    if (buf.size() != 2048)
+        return fail(name, "ordering changed the draw count");
+    return pass(name);
+}
+
+
 // Whole-frame cost trace on the counting backend: one synthetic frame is
 // recorded, ordered both ways, binned and replayed while every counter the
 // backend exposes is printed, so the cost of each stage stays visible.
@@ -953,6 +1189,132 @@ static bool traceFrameCosts()
     std::cout << "[TRACE] per-draw binds_skipped=" << (double)seq.state_binds_skipped / draws
               << " descriptor_allocs=" << seq.descriptor_allocs
               << " descriptor_hits=" << seq.descriptor_cache_hits << std::endl;
+
+    {
+        HeadlessRenderAPI passProbe;
+        IGPUMesh* passMesh = makeUploadedMesh(passProbe);
+        PSOKey blended;
+        blended.blend = BlendMode::Alpha;
+        const PassExpect cases[5] = {
+            {"shadow", PSOKey::shadowPass(), 1024, 1, false, 1024, 0, 0},
+            {"depth", PSOKey::depthPrepass(), 1024, 1, false, 1024, 0, 0},
+            {"opaque-identical", PSOKey{}, 2048, 1, true, 1, 1, 2048},
+            {"opaque-grouped", PSOKey{}, 2048, 8, true, 8, 8, 2048},
+            {"transparent", blended, 512, 4, false, 512, 0, 0},
+        };
+        uint64_t accounted = 0;
+        for (const PassExpect& c : cases)
+        {
+            std::vector<double> recordSamples;
+            std::vector<double> replaySamples;
+            double sortSample = 0.0;
+            RenderFrameStats cold{};
+            RenderFrameStats warm{};
+            RenderFrameStats parStats{};
+            for (int repIdx = 0; repIdx < 6; repIdx++)
+            {
+                const auto r0 = std::chrono::steady_clock::now();
+                RenderCommandBuffer buf = makePassBuffer(passMesh, c.key, c.count, c.distinct, false);
+                const auto r1 = std::chrono::steady_clock::now();
+                if (c.sortBuffer)
+                {
+                    const auto s0 = std::chrono::steady_clock::now();
+                    buf.sort();
+                    sortSample = elapsedNsPerOp(std::chrono::steady_clock::now() - s0, c.count);
+                }
+                HeadlessRenderAPI replayApi;
+                replayApi.beginFrame();
+                const auto p0 = std::chrono::steady_clock::now();
+                replayApi.replayCommandBuffer(buf);
+                const auto p1 = std::chrono::steady_clock::now();
+                if (repIdx > 0)
+                {
+                    recordSamples.push_back(elapsedNsPerOp(r1 - r0, c.count));
+                    replaySamples.push_back(elapsedNsPerOp(p1 - p0, c.count));
+                }
+                if (repIdx == 1)
+                {
+                    cold = replayApi.getLastFrameStats();
+                    replayApi.beginFrame();
+                    replayApi.replayCommandBuffer(buf);
+                    warm = replayApi.getLastFrameStats();
+                    HeadlessRenderAPI freshPar;
+                    freshPar.beginFrame();
+                    freshPar.replayCommandBufferParallel(buf);
+                    parStats = freshPar.getLastFrameStats();
+                }
+            }
+            accounted += cold.submitted_draw_commands;
+            const int sortedFlag = c.sortBuffer ? 1 : 0;
+            std::cout << "[TRACE] pass=" << c.label << " draws=" << c.count
+                      << " record_ns/draw=" << medianOf(recordSamples)
+                      << " sort_ns/draw=" << (c.sortBuffer ? sortSample : 0.0)
+                      << " sorted=" << sortedFlag
+                      << " replay_ns/draw=" << medianOf(replaySamples)
+                      << " submitted=" << cold.submitted_draw_commands
+                      << " backend_draws=" << cold.backend_draw_calls
+                      << " batches=" << cold.instanced_batches
+                      << " instances=" << cold.instanced_instances
+                      << " binds_skipped=" << cold.state_binds_skipped
+                      << " desc_allocs=" << cold.descriptor_allocs
+                      << " desc_hits=" << cold.descriptor_cache_hits << std::endl;
+            std::cout << "[TRACE] pass=" << c.label << " warm desc_allocs=" << warm.descriptor_allocs
+                      << " desc_hits=" << warm.descriptor_cache_hits
+                      << " seq_eq_par=" << ((parStats.backend_draw_calls == cold.backend_draw_calls &&
+                                             parStats.state_binds_skipped == cold.state_binds_skipped) ? 1 : 0)
+                      << std::endl;
+            if (cold.submitted_draw_commands != c.count || cold.backend_draw_calls != c.backend)
+                return fail(name, "per-draw accounting differs from recorded draws");
+        }
+        HeadlessRenderAPI bindApi;
+        bindApi.beginFrame();
+        RenderCommandBuffer identical = makePassBuffer(passMesh, PSOKey{}, 2048, 1, true);
+        bindApi.replayCommandBuffer(identical);
+        const RenderFrameStats bs = bindApi.getLastFrameStats();
+        std::cout << "[TRACE] binds pso_skipped=" << bs.binds_pso_skipped
+                  << " texture_skipped=" << bs.binds_texture_skipped
+                  << " mesh_skipped=" << bs.binds_mesh_skipped
+                  << " sum_eq_total=" << ((bs.binds_pso_skipped + bs.binds_texture_skipped + bs.binds_mesh_skipped == bs.state_binds_skipped) ? 1 : 0)
+                  << " backend=" << bs.backend_name << std::endl;
+        std::cout << "[TRACE] per-backend backend=" << bs.backend_name
+                  << " gpu_frame_ms_valid=" << (bs.gpu_frame_ms_valid ? 1 : 0)
+                  << " gpu=unavailable-headless" << std::endl;
+        SortStats plainStats;
+        RenderCommandBuffer plainBuf = makePassBuffer(passMesh, PSOKey{}, 2048, 8, false);
+        plainBuf.sort(&plainStats);
+        SortStats depthStats;
+        RenderCommandBuffer depthBuf = makePassBuffer(passMesh, PSOKey{}, 2048, 8, false);
+        depthBuf.sortWithViewDepth(view, &depthStats);
+        std::cout << "[TRACE] sortstats sort_temp_allocs=" << plainStats.temp_allocs
+                  << " depthsort_temp_allocs=" << depthStats.temp_allocs
+                  << " depthsort_temp_bytes=" << depthStats.temp_bytes
+                  << " groups=" << plainStats.groups << " max_run=" << plainStats.max_run << std::endl;
+        BinningStats binStats;
+        ForwardPlusBinningResult bin2;
+        ForwardPlusBinningScratch scratch2;
+        binForwardPlusLightsInto(bin2, scratch2, lights.data(), (uint32_t)lightCount,
+                                 nullptr, 0, view, proj, 160, 160, 0.1f, 1000.0f, true, true, &binStats);
+        std::cout << "[TRACE] binning lights_in=" << binStats.lights_in
+                  << " lights_binned=" << binStats.lights_binned
+                  << " tiles_touched=" << binStats.tiles_touched
+                  << " indices_written=" << binStats.indices_written
+                  << " truncated=" << binStats.lights_truncated
+                  << " max_tile_occupancy=" << binStats.max_tile_occupancy << std::endl;
+        std::cout << "[TRACE] alloc cmd_capacity=" << plainBuf.capacity()
+                  << " tiles_capacity=" << bin2.tiles.capacity()
+                  << " indices_capacity=" << bin2.lightIndices.capacity()
+                  << " cell_counts_capacity=" << scratch2.cellCounts.capacity()
+                  << " binned_capacity=" << scratch2.binned.capacity() << std::endl;
+        std::cout << "[TRACE] cull=unavailable rg=unavailable" << std::endl;
+        HeadlessMesh* headlessMesh = static_cast<HeadlessMesh*>(passMesh);
+        std::cout << "[TRACE] pso creates=" << bs.pso_creates << " hits=" << bs.pso_hits
+                  << " upload_calls=" << headlessMesh->getUploadCalls()
+                  << " upload_bytes=" << headlessMesh->getUploadBytes()
+                  << " gpu_frame_ms_valid=" << (bs.gpu_frame_ms_valid ? 1 : 0)
+                  << " gpu=unavailable-headless" << std::endl;
+        std::cout << "[TRACE] frame-total passes_accounted=" << accounted << " draws=" << drawCount << std::endl;
+        delete passMesh;
+    }
     delete mesh;
     return pass(name);
 }
@@ -983,6 +1345,11 @@ int main(){
     ok &= benchBinningRetainedAgainstOneOff(4096, 100);
     ok &= benchDepthSortAgainstPlainSort(10000, 20);
     ok &= benchDescriptorCacheColdAgainstWarm(64, 200);
+    ok &= testTracePerPassAccounting();
+    ok &= testTraceDescriptorColdWarmPerPass();
+    ok &= testTraceAllocCapacityStable();
+    ok &= testTraceBindBreakdownSums();
+    ok &= testTraceSortStatsMatchRescan();
     ok &= traceFrameCosts();
     std::cout << (ok ? "all perf tests passed" : "perf tests FAILED") << std::endl;
     return ok ? 0 : 1;
