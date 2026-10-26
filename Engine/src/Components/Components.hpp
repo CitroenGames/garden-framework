@@ -246,6 +246,12 @@ struct CharacterControllerComponent {
     float stop_speed_ratio = 0.25f;
     float air_wish_speed_cap_ratio = 30.0f / 320.0f;
     float surface_friction = 1.0f;
+    float sprint_speed_scale = 1.5f;
+    float crouch_speed_scale = 0.45f;
+    float coyote_time = 0.12f;
+    float jump_buffer_time = 0.12f;
+    float max_fall_speed = 28.0f;
+    float fall_gravity_scale = 1.12f;
     float capsule_half_height = 0.9f;
     float capsule_radius = 0.3f;
     float mass = 80.0f;
@@ -260,6 +266,14 @@ struct CharacterControllerComponent {
     bool input_enabled = true;
 
     bool grounded = false;
+    float coyote_timer = 0.0f;
+    float jump_buffer_timer = 0.0f;
+    bool jump_was_held = false;
+    bool was_grounded = true;
+    bool jumped = false;
+    bool landed = false;
+    bool on_steep_ground = false;
+    float fall_speed = 0.0f;
     glm::vec3 ground_normal = glm::vec3(0, 1, 0);
     glm::vec3 ground_velocity = glm::vec3(0);
     bool swimming = false;

@@ -10,6 +10,8 @@
 namespace CharacterMoveFlags
 {
     constexpr uint8_t Jump = 1 << 0;
+    constexpr uint8_t Sprint = 1 << 1;
+    constexpr uint8_t Crouch = 1 << 2;
 }
 
 namespace CharacterWaterLevel
@@ -36,6 +38,14 @@ struct CharacterControllerState
     bool grounded = false;
     glm::vec3 ground_normal = glm::vec3(0.0f, 1.0f, 0.0f);
     glm::vec3 ground_velocity = glm::vec3(0.0f);
+    float coyote_timer = 0.0f;
+    float jump_buffer_timer = 0.0f;
+    bool jump_was_held = false;
+    bool was_grounded = true;
+    bool jumped = false;
+    bool landed = false;
+    bool on_steep_ground = false;
+    float fall_speed = 0.0f;
     int water_level = CharacterWaterLevel::None;
 };
 
@@ -60,6 +70,13 @@ namespace CharacterController
         float water_acceleration = 5.5f;
         float water_friction = 5.2f;
         float water_sink_speed = 1.75f;
+        float sprint_speed_scale = 1.5f;
+        float crouch_speed_scale = 0.45f;
+        float coyote_time = 0.12f;
+        float jump_buffer_time = 0.12f;
+        float max_fall_speed = 28.0f;
+        float fall_gravity_scale = 1.12f;
+        float jump_cut_multiplier = 0.45f;
     };
 
     struct WishMove
@@ -67,6 +84,21 @@ namespace CharacterController
         glm::vec3 direction = glm::vec3(0.0f);
         float speed = 0.0f;
     };
+
+    inline float jumpVelocityForHeight(float height, float gravity_magnitude)
+    {
+        return std::sqrt(2.0f * std::max(gravity_magnitude, 0.0f) * std::max(height, 0.0f));
+    }
+
+    inline float effectiveMaxSpeed(const MovementTuning& tuning, const CharacterMoveInput& input)
+    {
+        float scale = 1.0f;
+        if ((input.buttons & CharacterMoveFlags::Sprint) != 0)
+            scale = tuning.sprint_speed_scale;
+        if ((input.buttons & CharacterMoveFlags::Crouch) != 0)
+            scale = tuning.crouch_speed_scale;
+        return std::max(tuning.max_speed, 0.0f) * std::max(scale, 0.0f);
+    }
 
     inline bool wantsJump(const CharacterMoveInput& input)
     {
@@ -95,7 +127,9 @@ namespace CharacterController
 
         const glm::quat yaw_rotation = glm::quat(glm::vec3(0.0f, input.camera_yaw, 0.0f));
         const glm::vec3 forward = yaw_rotation * glm::vec3(0.0f, 0.0f, 1.0f);
-        const glm::vec3 right = yaw_rotation * glm::vec3(1.0f, 0.0f, 0.0f);
+        // Engine view convention: rendered screen-right is -X in wish space
+        // (verified in-game: +X strafed left). Positive move_right = right.
+        const glm::vec3 right = yaw_rotation * glm::vec3(-1.0f, 0.0f, 0.0f);
 
         glm::vec3 wish_velocity =
             forward * (clamped_forward * clamped_speed) +
@@ -131,7 +165,7 @@ namespace CharacterController
         const glm::quat yaw_rotation = glm::quat(glm::vec3(0.0f, input.camera_yaw, 0.0f));
 
         const glm::vec3 forward = look_rotation * glm::vec3(0.0f, 0.0f, 1.0f);
-        const glm::vec3 right = yaw_rotation * glm::vec3(1.0f, 0.0f, 0.0f);
+        const glm::vec3 right = yaw_rotation * glm::vec3(-1.0f, 0.0f, 0.0f);
 
         glm::vec3 wish_velocity =
             forward * (clamped_forward * clamped_speed) +
@@ -160,9 +194,6 @@ namespace CharacterController
     {
         velocity.y = 0.0f;
         const float speed = horizontalLength(velocity);
-        if (speed < 0.1f)
-            return velocity;
-
         const float control = speed < tuning.stop_speed ? tuning.stop_speed : speed;
         const float drop = control * std::max(tuning.friction, 0.0f) *
             std::max(tuning.surface_friction, 0.0f) * tuning.fixed_delta;
@@ -176,9 +207,6 @@ namespace CharacterController
     inline glm::vec3 applyWaterFriction(glm::vec3 velocity, const MovementTuning& tuning)
     {
         const float speed = glm::length(velocity);
-        if (speed < 0.1f)
-            return velocity;
-
         const float drop = speed * std::max(tuning.water_friction, 0.0f) *
             std::max(tuning.surface_friction, 0.0f) * tuning.fixed_delta;
         const float new_speed = std::max(speed - drop, 0.0f);
@@ -224,7 +252,7 @@ namespace CharacterController
         if (add_speed <= 0.0f)
             return velocity;
 
-        float accel_speed = std::max(tuning.air_acceleration, 0.0f) * wish_speed *
+        float accel_speed = std::max(tuning.air_acceleration, 0.0f) * capped_wish_speed *
             tuning.fixed_delta * std::max(tuning.surface_friction, 0.0f);
         if (accel_speed > add_speed)
             accel_speed = add_speed;
@@ -261,13 +289,35 @@ namespace CharacterController
         tuning.stop_speed = std::max(tuning.stop_speed, 0.0f);
         tuning.air_wish_speed_cap = std::max(tuning.air_wish_speed_cap, 0.0f);
         tuning.water_level = std::clamp(tuning.water_level, CharacterWaterLevel::None, CharacterWaterLevel::Eyes);
+        tuning.sprint_speed_scale = std::max(tuning.sprint_speed_scale, 0.0f);
+        tuning.crouch_speed_scale = std::max(tuning.crouch_speed_scale, 0.0f);
+        tuning.coyote_time = std::max(tuning.coyote_time, 0.0f);
+        tuning.jump_buffer_time = std::max(tuning.jump_buffer_time, 0.0f);
+        tuning.max_fall_speed = std::max(tuning.max_fall_speed, 0.0f);
+        tuning.fall_gravity_scale = std::max(tuning.fall_gravity_scale, 0.0f);
+        tuning.jump_cut_multiplier = std::clamp(tuning.jump_cut_multiplier, 0.0f, 1.0f);
 
         if (tuning.water_level >= CharacterWaterLevel::Waist)
-            return simulateWaterMovement(input, current, tuning);
+        {
+            CharacterControllerState water_result = simulateWaterMovement(input, current, tuning);
+            water_result.landed = false;
+            water_result.jumped = false;
+            water_result.was_grounded = false;
+            water_result.jump_was_held = wantsJump(input);
+            water_result.fall_speed = std::max(0.0f, -water_result.velocity.y);
+            return water_result;
+        }
 
         CharacterControllerState result = current;
-        const WishMove wish = buildWishMove(input, tuning.max_speed);
-        const bool jump = wantsJump(input) && current.grounded;
+        const WishMove wish = buildWishMove(input, effectiveMaxSpeed(tuning, input));
+        float coyote_timer = current.grounded ? tuning.coyote_time : std::max(current.coyote_timer - tuning.fixed_delta, 0.0f);
+        float jump_buffer_timer = wantsJump(input) ? tuning.jump_buffer_time : std::max(current.jump_buffer_timer - tuning.fixed_delta, 0.0f);
+        const bool jump = (current.grounded || coyote_timer > 0.0f) && (wantsJump(input) || jump_buffer_timer > 0.0f);
+        if (jump) { coyote_timer = 0.0f; jump_buffer_timer = 0.0f; }
+        result.coyote_timer = coyote_timer;
+        result.jump_buffer_timer = jump_buffer_timer;
+        result.jumped = jump;
+        result.landed = current.grounded && !current.was_grounded;
 
         glm::vec3 new_velocity = current.velocity;
         if (current.grounded)
@@ -278,11 +328,17 @@ namespace CharacterController
             if (!jump)
                 relative_velocity = applyFriction(relative_velocity, tuning);
 
+            glm::vec3 wish_dir = wish.direction;
+            if (glm::length(current.ground_normal) > 0.001f)
+            {
+                const glm::vec3 n = glm::normalize(current.ground_normal);
+                wish_dir = wish_dir - n * glm::dot(wish_dir, n);
+            }
             relative_velocity = accelerate(
-                relative_velocity, wish.direction, wish.speed, tuning.ground_acceleration, tuning);
+                relative_velocity, wish_dir, wish.speed, tuning.ground_acceleration, tuning);
 
-            if (!jump)
-                relative_velocity = clampVectorLength(relative_velocity, tuning.max_speed);
+            // No hard clamp: accelerate() caps projection at wish speed and
+            // friction decays any excess (bhop/platform) speed over time.
 
             new_velocity = current.ground_velocity;
             new_velocity.x += relative_velocity.x;
@@ -290,12 +346,12 @@ namespace CharacterController
 
             if (jump)
             {
-                new_velocity.y = current.velocity.y + tuning.jump_velocity;
+                new_velocity.y = tuning.jump_velocity + current.ground_velocity.y;
                 result.grounded = false;
             }
             else
             {
-                new_velocity.y = current.ground_velocity.y;
+                new_velocity.y = current.ground_velocity.y + relative_velocity.y;
             }
         }
         else
@@ -305,10 +361,31 @@ namespace CharacterController
 
             new_velocity.x = horizontal_velocity.x;
             new_velocity.z = horizontal_velocity.z;
+            result.ground_velocity = glm::vec3(0.0f);
+            if (jump)
+            {
+                new_velocity.y = tuning.jump_velocity + current.ground_velocity.y;
+                result.grounded = false;
+            }
         }
 
-        new_velocity += tuning.gravity * tuning.gravity_scale * tuning.fixed_delta;
-        new_velocity = clampVectorLength(new_velocity, tuning.max_velocity);
+        if (!jump && current.jump_was_held && !wantsJump(input) && new_velocity.y > 0.0f)
+            new_velocity.y *= tuning.jump_cut_multiplier;
+        if (!jump)
+        {
+            const float fall_scale = new_velocity.y < 0.0f ? tuning.fall_gravity_scale : 1.0f;
+            new_velocity += tuning.gravity * tuning.gravity_scale * fall_scale * tuning.fixed_delta;
+        }
+        {
+            glm::vec3 horiz(new_velocity.x, 0.0f, new_velocity.z);
+            horiz = clampVectorLength(horiz, tuning.max_velocity);
+            new_velocity.x = horiz.x;
+            new_velocity.z = horiz.z;
+            new_velocity.y = std::clamp(new_velocity.y, -tuning.max_fall_speed, tuning.max_velocity);
+            result.jump_was_held = wantsJump(input);
+            result.was_grounded = result.grounded;
+            result.fall_speed = result.grounded ? 0.0f : std::max(0.0f, -new_velocity.y);
+        }
 
         result.velocity = new_velocity;
         result.position += result.velocity * tuning.fixed_delta;

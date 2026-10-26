@@ -190,6 +190,12 @@ namespace
         tuning.stop_speed = tuning.max_speed * std::max(controller.stop_speed_ratio, 0.0f);
         tuning.air_wish_speed_cap = tuning.max_speed * std::max(controller.air_wish_speed_cap_ratio, 0.0f);
         tuning.surface_friction = std::max(controller.surface_friction, 0.0f);
+        tuning.sprint_speed_scale = std::max(controller.sprint_speed_scale, 0.0f);
+        tuning.crouch_speed_scale = std::max(controller.crouch_speed_scale, 0.0f);
+        tuning.coyote_time = std::max(controller.coyote_time, 0.0f);
+        tuning.jump_buffer_time = std::max(controller.jump_buffer_time, 0.0f);
+        tuning.max_fall_speed = std::max(controller.max_fall_speed, 0.0f);
+        tuning.fall_gravity_scale = std::max(controller.fall_gravity_scale, 0.0f);
         tuning.max_velocity = std::max(settings.max_character_velocity, 0.0f);
         return tuning;
     }
@@ -216,6 +222,14 @@ namespace
         {
             auto& cc = registry.get<CharacterControllerComponent>(entity);
             cc.grounded = state.grounded;
+            cc.coyote_timer = state.coyote_timer;
+            cc.jump_buffer_timer = state.jump_buffer_timer;
+            cc.jump_was_held = state.jump_was_held;
+            cc.was_grounded = state.was_grounded;
+            cc.jumped = state.jumped;
+            cc.landed = state.landed;
+            cc.on_steep_ground = state.on_steep_ground;
+            cc.fall_speed = state.fall_speed;
             cc.ground_normal = state.ground_normal;
             cc.ground_velocity = state.ground_velocity;
             cc.water_level = state.water_level;
@@ -235,6 +249,10 @@ struct CharacterControllerSystem::Runtime
 {
     JPH::Ref<JPH::CharacterVirtual> character;
     JPH::ShapeRefC shape;
+    float applied_capsule_half_height = 0.0f;
+    float applied_capsule_radius = 0.0f;
+    float applied_max_slope_angle = 0.0f;
+    float applied_mass = 0.0f;
 };
 
 CharacterControllerSystem::CharacterControllerSystem()
@@ -268,9 +286,10 @@ void CharacterControllerSystem::copyPlayerSettings(entt::registry& registry, ent
         return;
 
     const auto& player = registry.get<PlayerComponent>(entity);
+    const bool existed_before = registry.all_of<CharacterControllerComponent>(entity);
     auto& controller = registry.get_or_emplace<CharacterControllerComponent>(entity);
-    controller.move_speed = player.speed;
-    controller.jump_velocity = player.jump_force;
+    if (!existed_before) controller.move_speed = player.speed;
+    if (!existed_before) controller.jump_velocity = player.jump_force;
     controller.capsule_half_height = player.capsule_half_height;
     controller.capsule_radius = player.capsule_radius;
     controller.input_enabled = player.input_enabled;
@@ -329,6 +348,10 @@ JPH::BodyID CharacterControllerSystem::create(entt::registry& registry,
 
     auto runtime = std::make_unique<Runtime>();
     runtime->shape = shape;
+    runtime->applied_capsule_half_height = controller.capsule_half_height;
+    runtime->applied_capsule_radius = controller.capsule_radius;
+    runtime->applied_max_slope_angle = controller.max_slope_angle;
+    runtime->applied_mass = controller.mass;
     runtime->character = new JPH::CharacterVirtual(settings, toJoltR(transform.position),
         JPH::Quat::sIdentity(), entityUserData(entity), &physics_system);
     runtime->character->SetCharacterVsCharacterCollision(character_vs_character_collision.get());
@@ -381,6 +404,10 @@ CharacterControllerState CharacterControllerSystem::getState(entt::registry& reg
     if (registry.all_of<CharacterControllerComponent>(entity))
     {
         const auto& controller = registry.get<CharacterControllerComponent>(entity);
+        state.coyote_timer = controller.coyote_timer;
+        state.jump_buffer_timer = controller.jump_buffer_timer;
+        state.jump_was_held = controller.jump_was_held;
+        state.was_grounded = controller.was_grounded;
         state.grounded = controller.grounded;
         state.ground_normal = controller.ground_normal;
         state.ground_velocity = controller.ground_velocity;
@@ -400,6 +427,7 @@ CharacterControllerState CharacterControllerSystem::getState(entt::registry& reg
         state.position = toGlmR(character.GetPosition());
         state.velocity = toGlm(character.GetLinearVelocity());
         state.grounded = isCharacterGrounded(character.GetGroundState());
+        state.on_steep_ground = character.GetGroundState() == JPH::CharacterBase::EGroundState::OnSteepGround;
         state.ground_normal = character.IsSupported() ? toGlm(character.GetGroundNormal()) : glm::vec3(0, 1, 0);
         state.ground_velocity = toGlm(character.GetGroundVelocity());
     }
@@ -506,6 +534,21 @@ CharacterControllerState CharacterControllerSystem::simulate(entt::registry& reg
     if (it == entity_to_character.end() || !it->second || !it->second->character)
         return getState(registry, entity);
 
+    {
+        const auto& ctrl_check = registry.get<CharacterControllerComponent>(entity);
+        auto* rt_check = it->second.get();
+        const bool shape_changed =
+            std::abs(rt_check->applied_capsule_half_height - ctrl_check.capsule_half_height) > 1e-4f ||
+            std::abs(rt_check->applied_capsule_radius - ctrl_check.capsule_radius) > 1e-4f ||
+            std::abs(rt_check->applied_mass - ctrl_check.mass) > 1e-4f;
+        if (shape_changed)
+        {
+            create(registry, entity, physics_system, temp_allocator, body_to_entity, settings.layers);
+            it = entity_to_character.find(entity);
+            if (it == entity_to_character.end() || !it->second || !it->second->character)
+                return getState(registry, entity);
+        }
+    }
     if (delta_time <= 0.0f)
         delta_time = settings.fixed_delta;
 
@@ -513,6 +556,8 @@ CharacterControllerState CharacterControllerSystem::simulate(entt::registry& reg
     auto& character = *it->second->character;
 
     refresh(registry, entity, physics_system, temp_allocator, settings.layers);
+    character.SetMaxSlopeAngle(JPH::DegreesToRadians(glm::clamp(controller.max_slope_angle, 0.0f, 89.0f)));
+    it->second->applied_max_slope_angle = controller.max_slope_angle;
     CharacterControllerState current = getState(registry, entity);
     const WaterSample water = sampleWaterVolumes(registry, current, controller);
     current.water_level = water.level;
@@ -568,8 +613,8 @@ CharacterControllerState CharacterControllerSystem::simulate(entt::registry& reg
     character.SetLinearVelocity(toJolt(clampVelocity(effective_velocity, settings.max_character_velocity)));
 
     CharacterControllerState result = getState(registry, entity);
-    result.velocity = effective_velocity;
-    const WaterSample final_water = sampleWaterVolumes(registry, result, controller);
+    result.velocity = clampVelocity(effective_velocity, settings.max_character_velocity);
+    const WaterSample& final_water = water;
     result.water_level = final_water.level;
     if (final_water.swimming())
     {

@@ -33,6 +33,7 @@ private:
     glm::vec3 camera_spring_velocity = glm::vec3(0.0f);
     entt::entity camera_spring_entity = entt::null;
     bool camera_spring_initialized = false;
+    float character_delta_accumulator = 0.0f;
 
 public:
     PlayerController(std::shared_ptr<InputManager> input_mgr, world* w)
@@ -262,9 +263,11 @@ private:
 
         if (input_manager->is_key_held(SDL_SCANCODE_W)) input.move_forward += 1.0f;
         if (input_manager->is_key_held(SDL_SCANCODE_S)) input.move_forward -= 1.0f;
-        if (input_manager->is_key_held(SDL_SCANCODE_D)) input.move_right -= 1.0f;
-        if (input_manager->is_key_held(SDL_SCANCODE_A)) input.move_right += 1.0f;
-        if (input_manager->is_key_pressed(SDL_SCANCODE_SPACE)) input.buttons |= CharacterMoveFlags::Jump;
+        if (input_manager->is_key_held(SDL_SCANCODE_D)) input.move_right += 1.0f;
+        if (input_manager->is_key_held(SDL_SCANCODE_A)) input.move_right -= 1.0f;
+        if (input_manager->is_key_held(SDL_SCANCODE_SPACE)) input.buttons |= CharacterMoveFlags::Jump;
+        if (input_manager->is_key_held(SDL_SCANCODE_LSHIFT)) input.buttons |= CharacterMoveFlags::Sprint;
+        if (input_manager->is_key_held(SDL_SCANCODE_LCTRL) || input_manager->is_key_held(SDL_SCANCODE_C)) input.buttons |= CharacterMoveFlags::Crouch;
         input.camera_yaw = game_world->world_camera.rotation.y;
         input.camera_pitch = game_world->world_camera.rotation.x;
         return input;
@@ -292,8 +295,15 @@ private:
                 return;
 
             CharacterMoveInput input = collectPlayerMoveInput();
-            CharacterControllerState state =
-                game_world->simulate_character_controller(player_entity, input, game_world->fixed_delta);
+            CharacterControllerState state;
+            state.position = trans.position;
+            const float step = game_world->fixed_delta > 0.0f ? game_world->fixed_delta : delta;
+            character_delta_accumulator = std::min(character_delta_accumulator + std::max(delta, 0.0f), step * 5.0f);
+            while (character_delta_accumulator >= step)
+            {
+                character_delta_accumulator -= step;
+                state = game_world->simulate_character_controller(player_entity, input, step);
+            }
 
             followCamera(state.position, delta, player_entity);
             return;
@@ -315,7 +325,7 @@ private:
         CharacterController::MovementTuning tuning;
         tuning.max_speed = pc.speed;
         tuning.jump_velocity = pc.jump_force;
-        tuning.gravity = game_world->getGravity() * 9.81f;
+        tuning.gravity = game_world->getGravity() * game_world->getPhysicsSystem().getGravityAcceleration();
         tuning.fixed_delta = game_world->fixed_delta;
         tuning.stop_speed = std::max(pc.speed, 0.0f) * 0.25f;
         tuning.air_wish_speed_cap = std::max(pc.speed, 0.0f) * (30.0f / 320.0f);
@@ -323,6 +333,7 @@ private:
         const CharacterControllerState simulated =
             CharacterController::simulateSourceMovement(input, current, tuning);
         rb.velocity = simulated.velocity;
+        trans.position = simulated.position;
         pc.grounded = simulated.grounded;
         pc.ground_normal = simulated.ground_normal;
 

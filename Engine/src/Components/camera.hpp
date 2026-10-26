@@ -23,7 +23,7 @@ public:
     glm::quat camera_rot_quaternion() const
     {
         glm::vec3 clamped_rotation = rotation;
-        clamped_rotation.x = glm::clamp(clamped_rotation.x, -1.0f, 1.0f);
+        clamped_rotation.x = glm::clamp(clamped_rotation.x, -1.5f, 1.5f);
         return glm::quat(clamped_rotation);
     }
 

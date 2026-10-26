@@ -26,6 +26,7 @@ struct MovementState
     glm::vec3 velocity = glm::vec3(0.0f);
     bool grounded = false;
     glm::vec3 ground_normal = glm::vec3(0.0f, 1.0f, 0.0f);
+    glm::vec3 ground_velocity = glm::vec3(0.0f);
     int water_level = CharacterWaterLevel::None;
 };
 
@@ -74,6 +75,7 @@ namespace SharedMovement
         character_state.velocity = current.velocity;
         character_state.grounded = current.grounded;
         character_state.ground_normal = current.ground_normal;
+        character_state.ground_velocity = current.ground_velocity;
         character_state.water_level = current.water_level;
 
         CharacterController::MovementTuning tuning;
@@ -102,6 +104,7 @@ namespace SharedMovement
         result.velocity = simulated.velocity;
         result.grounded = simulated.grounded;
         result.ground_normal = simulated.ground_normal;
+        result.ground_velocity = simulated.ground_velocity;
         result.water_level = simulated.water_level;
         return result;
     }

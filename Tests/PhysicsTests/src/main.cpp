@@ -5,6 +5,7 @@
 #include "LevelManager.hpp"
 #include "PhysicsSystem.hpp"
 #include "PlayerController.hpp"
+#include "Character/FpsCharacter.hpp"
 #include "Reflection/EngineReflection.hpp"
 #include "Reflection/ReflectionRegistry.hpp"
 #include "Tick/TickSystem.hpp"
@@ -299,6 +300,22 @@ static CharacterController::MovementTuning makeSourceMovementTestTuning()
     return tuning;
 }
 
+static bool testWishMoveRightMatchesViewRight()
+{
+    const std::string name = "wish move right matches view right";
+    CharacterMoveInput input;
+    input.move_right = 1.0f;
+    const auto wish = CharacterController::buildWishMove(input, 10.0f);
+    if (!approx(wish.direction.x, -1.0f, 0.02f) || !approx(wish.direction.z, 0.0f, 0.02f))
+        return fail(name, "positive move_right did not map to engine view-right (-X at yaw 0)");
+    CharacterMoveInput left;
+    left.move_right = -1.0f;
+    const auto wish_left = CharacterController::buildWishMove(left, 10.0f);
+    if (!approx(wish_left.direction.x, 1.0f, 0.02f))
+        return fail(name, "negative move_right did not map to engine view-left (+X at yaw 0)");
+    return pass(name);
+}
+
 static bool testSourceGroundAcceleration()
 {
     const std::string name = "source movement ground acceleration";
@@ -456,6 +473,201 @@ static bool testSourceWaterMovement()
     if (swim_up.velocity.y >= tuning.jump_velocity)
         return fail(name, "water jump used full ground jump impulse");
 
+    return pass(name);
+}
+
+static float runJumpApex(bool hold_jump)
+{
+    const auto tuning = makeSourceMovementTestTuning();
+    CharacterControllerState state;
+    state.grounded = true;
+    CharacterMoveInput jump_input;
+    jump_input.buttons = CharacterMoveFlags::Jump;
+    state = CharacterController::simulateSourceMovement(jump_input, state, tuning);
+    float apex = state.position.y;
+    for (int i = 0; i < 240; ++i)
+    {
+        CharacterMoveInput input;
+        if (hold_jump)
+            input.buttons = CharacterMoveFlags::Jump;
+        state = CharacterController::simulateSourceMovement(input, state, tuning);
+        state.grounded = false;
+        apex = std::max(apex, state.position.y);
+        if (state.velocity.y < 0.0f && i > 5)
+        {
+            // Continue a few ticks past apex for completeness.
+        }
+    }
+    return apex;
+}
+
+static bool testJumpApexAndSetVelocity()
+{
+    const std::string name = "jump sets velocity and apex in range";
+    const auto tuning = makeSourceMovementTestTuning();
+    CharacterControllerState incoming;
+    incoming.grounded = true;
+    incoming.velocity = glm::vec3(0.0f, 2.0f, 0.0f);
+    CharacterMoveInput jump_input;
+    jump_input.buttons = CharacterMoveFlags::Jump;
+    const CharacterControllerState jump_tick =
+        CharacterController::simulateSourceMovement(jump_input, incoming, tuning);
+    if (!approx(jump_tick.velocity.y, tuning.jump_velocity, 0.02f))
+        return fail(name, "jump did not set vy to jump_velocity");
+    if (!jump_tick.jumped)
+        return fail(name, "jumped flag not set");
+    const float apex = runJumpApex(true);
+    if (apex < 1.0f || apex > 1.45f)
+        return fail(name, "jump apex out of [1.0,1.45]m");
+    return pass(name);
+}
+
+static bool testFrictionReachesExactlyZero()
+{
+    const std::string name = "friction reaches exactly zero";
+    const auto tuning = makeSourceMovementTestTuning();
+    CharacterControllerState state;
+    state.grounded = true;
+    state.velocity = glm::vec3(5.0f, 0.0f, 0.0f);
+    for (int i = 0; i < 60; ++i)
+    {
+        state = CharacterController::simulateSourceMovement(CharacterMoveInput{}, state, tuning);
+        state.grounded = true;
+    }
+    if (!approx(horizontalSpeed(state.velocity), 0.0f, 0.0001f))
+        return fail(name, "friction did not reach exactly zero");
+    if (std::abs(state.position.x) >= 1.0f)
+        return fail(name, "stop distance >= 1.0m");
+    return pass(name);
+}
+
+static bool testAirAccelCappedFirstTick()
+{
+    const std::string name = "air accel capped first tick";
+    const auto tuning = makeSourceMovementTestTuning();
+    CharacterControllerState state;
+    state.grounded = false;
+    state.was_grounded = false;
+    CharacterMoveInput input;
+    input.move_forward = 1.0f;
+    const CharacterControllerState result =
+        CharacterController::simulateSourceMovement(input, state, tuning);
+    if (horizontalSpeed(result.velocity) > 0.19f + 0.001f)
+        return fail(name, "air accel first tick exceeded capped formula");
+    if (horizontalSpeed(result.velocity) <= 0.0f)
+        return fail(name, "air accel did not move");
+    return pass(name);
+}
+
+static bool testSprintExceedsWalkMax()
+{
+    const std::string name = "sprint exceeds walk max";
+    const auto tuning = makeSourceMovementTestTuning();
+    CharacterControllerState state;
+    state.grounded = true;
+    CharacterMoveInput input;
+    input.move_forward = 1.0f;
+    input.buttons = CharacterMoveFlags::Sprint;
+    for (int i = 0; i < 120; ++i)
+    {
+        state = CharacterController::simulateSourceMovement(input, state, tuning);
+        state.grounded = true;
+    }
+    if (horizontalSpeed(state.velocity) <= tuning.max_speed)
+        return fail(name, "sprint did not exceed walk max");
+    return pass(name);
+}
+
+static bool testCoyoteJump()
+{
+    const std::string name = "coyote jump fires after leaving ground";
+    const auto tuning = makeSourceMovementTestTuning();
+    CharacterControllerState state;
+    state.grounded = true;
+    state = CharacterController::simulateSourceMovement(CharacterMoveInput{}, state, tuning);
+    state.grounded = false;
+    state = CharacterController::simulateSourceMovement(CharacterMoveInput{}, state, tuning);
+    state.grounded = false;
+    state = CharacterController::simulateSourceMovement(CharacterMoveInput{}, state, tuning);
+    state.grounded = false;
+    CharacterMoveInput jump_input;
+    jump_input.buttons = CharacterMoveFlags::Jump;
+    const CharacterControllerState result =
+        CharacterController::simulateSourceMovement(jump_input, state, tuning);
+    if (!result.jumped)
+        return fail(name, "coyote jump did not fire");
+    if (!approx(result.velocity.y, tuning.jump_velocity, 0.02f))
+        return fail(name, "coyote jump velocity wrong");
+    return pass(name);
+}
+
+static bool testJumpBufferFiresOnLanding()
+{
+    const std::string name = "jump buffer fires on landing";
+    const auto tuning = makeSourceMovementTestTuning();
+    CharacterControllerState state;
+    state.grounded = false;
+    state.was_grounded = false;
+    state.coyote_timer = 0.0f;
+    CharacterMoveInput jump_input;
+    jump_input.buttons = CharacterMoveFlags::Jump;
+    state = CharacterController::simulateSourceMovement(jump_input, state, tuning);
+    if (state.jumped)
+        return fail(name, "buffered jump fired in air");
+    state.grounded = true;
+    const CharacterControllerState result =
+        CharacterController::simulateSourceMovement(CharacterMoveInput{}, state, tuning);
+    if (!result.jumped)
+        return fail(name, "jump buffer did not fire on landing");
+    if (!approx(result.velocity.y, tuning.jump_velocity, 0.02f))
+        return fail(name, "buffered jump velocity wrong");
+    return pass(name);
+}
+
+static bool testVariableJumpCutLowersApex()
+{
+    const std::string name = "variable jump cut lowers apex";
+    const float held = runJumpApex(true);
+    const float cut = runJumpApex(false);
+    if (!(cut < held - 0.2f))
+        return fail(name, "jump cut did not lower apex");
+    return pass(name);
+}
+
+static bool testFallSpeedClampPreservesHorizontal()
+{
+    const std::string name = "fall speed clamped horizontal preserved";
+    const auto tuning = makeSourceMovementTestTuning();
+    CharacterControllerState state;
+    state.grounded = false;
+    state.was_grounded = false;
+    state.velocity = glm::vec3(3.0f, -100.0f, 0.0f);
+    const CharacterControllerState result =
+        CharacterController::simulateSourceMovement(CharacterMoveInput{}, state, tuning);
+    if (!approx(result.velocity.y, -tuning.max_fall_speed, 0.02f))
+        return fail(name, "fall speed not clamped at max_fall_speed");
+    if (!approx(result.velocity.x, 3.0f, 0.02f))
+        return fail(name, "horizontal velocity not preserved while falling");
+    return pass(name);
+}
+
+static bool testSlopeProjectedWish()
+{
+    const std::string name = "slope projected wish";
+    const auto tuning = makeSourceMovementTestTuning();
+    CharacterControllerState state;
+    state.grounded = true;
+    const float s = 0.70710678f;
+    state.ground_normal = glm::vec3(s, s, 0.0f);
+    CharacterMoveInput input;
+    input.move_right = 1.0f;
+    const CharacterControllerState result =
+        CharacterController::simulateSourceMovement(input, state, tuning);
+    const float expected = tuning.ground_acceleration * tuning.max_speed * tuning.fixed_delta * 0.5f;
+    if (!approx(result.velocity.x, -expected, 0.03f)) // view-right is -X (see strafe test)
+        return fail(name, "slope projection did not scale wish acceleration");
+    if (horizontalSpeed(result.velocity) >= tuning.ground_acceleration * tuning.max_speed * tuning.fixed_delta)
+        return fail(name, "slope wish retained full flat-ground acceleration");
     return pass(name);
 }
 
@@ -1204,6 +1416,8 @@ int main()
     ok = testFrameSplitKeepsDeterministicTickAndTime() && ok;
     run("tick context names substeps");
     ok = testTickContextNamesSubsteps() && ok;
+    run("wish move right matches view right");
+    ok = testWishMoveRightMatchesViewRight() && ok;
     run("source movement ground acceleration");
     ok = testSourceGroundAcceleration() && ok;
     run("source movement ground friction");
@@ -1216,6 +1430,24 @@ int main()
     ok = testSourceDiagonalInputClampsSpeed() && ok;
     run("source movement water swimming");
     ok = testSourceWaterMovement() && ok;
+    run("jump sets velocity and apex in range");
+    ok = testJumpApexAndSetVelocity() && ok;
+    run("friction reaches exactly zero");
+    ok = testFrictionReachesExactlyZero() && ok;
+    run("air accel capped first tick");
+    ok = testAirAccelCappedFirstTick() && ok;
+    run("sprint exceeds walk max");
+    ok = testSprintExceedsWalkMax() && ok;
+    run("coyote jump fires after leaving ground");
+    ok = testCoyoteJump() && ok;
+    run("jump buffer fires on landing");
+    ok = testJumpBufferFiresOnLanding() && ok;
+    run("variable jump cut lowers apex");
+    ok = testVariableJumpCutLowersApex() && ok;
+    run("fall speed clamped horizontal preserved");
+    ok = testFallSpeedClampPreservesHorizontal() && ok;
+    run("slope projected wish");
+    ok = testSlopeProjectedWish() && ok;
     run("dynamic gravity flag");
     ok = testDynamicGravityFlag() && ok;
     run("physics settings configure gravity");
