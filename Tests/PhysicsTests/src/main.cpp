@@ -1398,31 +1398,84 @@ static bool testD6LayerMatrix()
     return pass(name);
 }
 
-static bool testD6OverlapSphere()
+static bool testD6OverlapAnalyticCases()
 {
-    const std::string name = "D6 overlapSphere hits and misses";
+    const std::string name = "D6 analytic overlap inside edge and outside";
     world w; w.initializePhysics();
-    auto inside = makeDynamicBox(w, glm::vec3(0.0f, 0.0f, 0.0f));
-    auto outside = makeDynamicBox(w, glm::vec3(10.0f, 0.0f, 0.0f));
-    (void)outside;
+
+    // Each overlap query gets an isolated three-case set of axis-aligned boxes.
+    // Their half-extents are 0.5, so the exact touch point is the query's
+    // analytic half-extent plus 0.5 along one axis.
+    const glm::vec3 sphere_inside_center(0.0f, 0.0f, 0.0f);
+    const glm::vec3 sphere_touch_center(10.0f, 0.0f, 0.0f);
+    const glm::vec3 sphere_outside_center(20.0f, 0.0f, 0.0f);
+    const glm::vec3 box_inside_center(40.0f, 0.0f, 0.0f);
+    const glm::vec3 box_touch_center(50.0f, 0.0f, 0.0f);
+    const glm::vec3 box_outside_center(60.0f, 0.0f, 0.0f);
+    const glm::vec3 capsule_inside_center(80.0f, 0.0f, 0.0f);
+    const glm::vec3 capsule_touch_center(90.0f, 0.0f, 0.0f);
+    const glm::vec3 capsule_outside_center(100.0f, 0.0f, 0.0f);
+    const auto sphere_inside = makeStaticBox(w, sphere_inside_center);
+    const auto sphere_touch = makeStaticBox(w, sphere_touch_center + glm::vec3(1.5f, 0.0f, 0.0f));
+    makeStaticBox(w, sphere_outside_center + glm::vec3(1.51f, 0.0f, 0.0f));
+    const auto box_inside = makeStaticBox(w, box_inside_center);
+    const auto box_touch = makeStaticBox(w, box_touch_center + glm::vec3(1.5f, 0.0f, 0.0f));
+    makeStaticBox(w, box_outside_center + glm::vec3(1.51f, 0.0f, 0.0f));
+    const auto capsule_inside = makeStaticBox(w, capsule_inside_center);
+    const auto capsule_touch = makeStaticBox(w, capsule_touch_center + glm::vec3(0.0f, 1.5f, 0.0f));
+    makeStaticBox(w, capsule_outside_center + glm::vec3(0.0f, 1.51f, 0.0f));
+
     PhysicsSystem::QueryFilter f;
     PhysicsSystem::OverlapResult out[8];
-    uint32_t n = w.getPhysicsSystem().overlapSphere(glm::vec3(0.0f), 2.0f, f, out, 8);
-    if (n != 1 || out[0].entity != inside) return fail(name, "sphere overlap did not hit exactly the inside body");
-    n = w.getPhysicsSystem().overlapSphere(glm::vec3(20.0f, 0.0f, 0.0f), 2.0f, f, out, 8);
-    if (n != 0) return fail(name, "sphere overlap hit in empty space");
-    PhysicsSystem::QueryFilter ignore_f; ignore_f.ignore = inside;
-    n = w.getPhysicsSystem().overlapSphere(glm::vec3(0.0f), 2.0f, ignore_f, out, 8);
+
+    auto expectSingle = [&](const char* query, const char* relation, uint32_t count, entt::entity expected) {
+        if (count == 1 && out[0].entity == expected) return true;
+        std::cerr << "  " << query << " " << relation << ": expected one entity "
+                  << entt::to_integral(expected) << ", got " << count;
+        if (count == 1) std::cerr << " (entity " << entt::to_integral(out[0].entity) << ")";
+        std::cerr << std::endl;
+        return false;
+    };
+    auto expectNone = [&](const char* query, const char* relation, uint32_t count) {
+        if (count == 0) return true;
+        std::cerr << "  " << query << " " << relation << ": expected no entities, got " << count << std::endl;
+        return false;
+    };
+
+    uint32_t n = w.getPhysicsSystem().overlapSphere(sphere_inside_center, 1.0f, f, out, 8);
+    if (!expectSingle("sphere", "inside", n, sphere_inside)) return fail(name, "sphere inside case failed");
+    n = w.getPhysicsSystem().overlapSphere(sphere_touch_center, 1.0f, f, out, 8);
+    // At exact contact, the sphere and box surfaces meet at x = 1.0.
+    if (!expectSingle("sphere", "edge touch", n, sphere_touch)) return fail(name, "sphere edge-touch case failed");
+    n = w.getPhysicsSystem().overlapSphere(sphere_outside_center, 1.0f, f, out, 8);
+    if (!expectNone("sphere", "outside", n)) return fail(name, "sphere outside case failed");
+
+    n = w.getPhysicsSystem().overlapBox(box_inside_center, glm::vec3(1.0f), glm::vec3(0.0f), f, out, 8);
+    if (!expectSingle("box", "inside", n, box_inside)) return fail(name, "box inside case failed");
+    n = w.getPhysicsSystem().overlapBox(box_touch_center, glm::vec3(1.0f), glm::vec3(0.0f), f, out, 8);
+    if (!expectSingle("box", "edge touch", n, box_touch)) return fail(name, "box edge-touch case failed");
+    n = w.getPhysicsSystem().overlapBox(box_outside_center, glm::vec3(1.0f), glm::vec3(0.0f), f, out, 8);
+    if (!expectNone("box", "outside", n)) return fail(name, "box outside case failed");
+
+    n = w.getPhysicsSystem().overlapCapsule(capsule_inside_center, 0.5f, 0.5f, f, out, 8);
+    if (!expectSingle("capsule", "inside", n, capsule_inside)) return fail(name, "capsule inside case failed");
+    n = w.getPhysicsSystem().overlapCapsule(capsule_touch_center, 0.5f, 0.5f, f, out, 8);
+    if (!expectSingle("capsule", "edge touch", n, capsule_touch)) return fail(name, "capsule edge-touch case failed");
+    n = w.getPhysicsSystem().overlapCapsule(capsule_outside_center, 0.5f, 0.5f, f, out, 8);
+    if (!expectNone("capsule", "outside", n)) return fail(name, "capsule outside case failed");
+
+    // Preserve coverage for ignore and layer filters with a separate dynamic probe.
+    auto filter_probe = makeDynamicBox(w, glm::vec3(200.0f, 0.0f, 0.0f));
+    n = w.getPhysicsSystem().overlapSphere(glm::vec3(200.0f, 0.0f, 0.0f), 2.0f, f, out, 8);
+    if (!expectSingle("sphere", "filter probe", n, filter_probe))
+        return fail(name, "overlap filter probe was not found");
+    PhysicsSystem::QueryFilter ignore_f; ignore_f.ignore = filter_probe;
+    n = w.getPhysicsSystem().overlapSphere(glm::vec3(200.0f, 0.0f, 0.0f), 2.0f, ignore_f, out, 8);
     if (n != 0) return fail(name, "overlap ignored entity was still reported");
     PhysicsSystem::QueryFilter static_only;
     static_only.layer_mask = PhysicsObjectLayers::layerBit(PhysicsObjectLayers::StaticWorld);
-    n = w.getPhysicsSystem().overlapSphere(glm::vec3(0.0f), 2.0f, static_only, out, 8);
+    n = w.getPhysicsSystem().overlapSphere(glm::vec3(200.0f, 0.0f, 0.0f), 2.0f, static_only, out, 8);
     if (n != 0) return fail(name, "overlap layer_mask did not exclude dynamic bodies");
-    // overlapBox / overlapCapsule smoke (same filter path)
-    n = w.getPhysicsSystem().overlapBox(glm::vec3(0.0f), glm::vec3(1.0f), glm::vec3(0.0f), f, out, 8);
-    if (n != 1) return fail(name, "box overlap missed inside body");
-    n = w.getPhysicsSystem().overlapCapsule(glm::vec3(0.0f), 0.5f, 0.5f, f, out, 8);
-    if (n != 1) return fail(name, "capsule overlap missed inside body");
     return pass(name);
 }
 
@@ -1553,7 +1606,7 @@ static bool testD6TriggerOccupantCapacity()
     EventBus::get().sink<TriggerEnteredEvent>().connect<&onTriggerEntered>();
     {
         world w; w.initializePhysics();
-        makeTriggerBox(w, glm::vec3(0.0f), 5.0f, 9);
+        const auto trigger = makeTriggerBox(w, glm::vec3(0.0f), 5.0f, 9);
         constexpr int occupant_count = 70;
         for (int i = 0; i < occupant_count; ++i)
         {
@@ -1572,6 +1625,31 @@ static bool testD6TriggerOccupantCapacity()
             EventBus::get().sink<TriggerEnteredEvent>().disconnect<&onTriggerEntered>();
             EventBus::get().clear();
             return fail(name, "trigger overlap query truncated the occupant set");
+        }
+
+        const auto& first_state = w.registry.get<TriggerOverlapState>(trigger).occupants;
+        const std::vector<entt::entity> expected_state = first_state;
+        const auto entity_less = [](entt::entity a, entt::entity b) {
+            return entt::to_integral(a) < entt::to_integral(b);
+        };
+        if (expected_state.size() != occupant_count || !std::is_sorted(expected_state.begin(), expected_state.end(), entity_less))
+        {
+            EventBus::get().sink<TriggerEnteredEvent>().disconnect<&onTriggerEntered>();
+            EventBus::get().clear();
+            return fail(name, "TriggerOverlapState occupants were not complete and sorted");
+        }
+        for (int step = 0; step < 12; ++step)
+        {
+            w.getPhysicsSystem().stepPhysics(w.registry);
+            EventBus::get().flush();
+            const auto& current_state = w.registry.get<TriggerOverlapState>(trigger).occupants;
+            if (g_trigger_entered != occupant_count || current_state != expected_state ||
+                !std::is_sorted(current_state.begin(), current_state.end(), entity_less))
+            {
+                EventBus::get().sink<TriggerEnteredEvent>().disconnect<&onTriggerEntered>();
+                EventBus::get().clear();
+                return fail(name, "TriggerOverlapState order changed or emitted duplicate enters across fixed steps");
+            }
         }
     }
     EventBus::get().sink<TriggerEnteredEvent>().disconnect<&onTriggerEntered>();
@@ -2051,8 +2129,8 @@ int main()
     ok = testRaycastClosestCanIgnoreShooterBody() && ok;
     run("D6 layer matrix");
     ok = testD6LayerMatrix() && ok;
-    run("D6 overlapSphere hits and misses");
-    ok = testD6OverlapSphere() && ok;
+    run("D6 analytic overlap inside edge and outside");
+    ok = testD6OverlapAnalyticCases() && ok;
     run("D6 query filter excludes triggers by default");
     ok = testD6QueryFilterTriggers() && ok;
     run("D6 trigger enter exit exactly once");
