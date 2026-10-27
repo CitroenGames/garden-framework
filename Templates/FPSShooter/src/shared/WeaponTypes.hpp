@@ -38,6 +38,20 @@ inline constexpr uint8_t kCatalogTeamAttackers = 1;
 inline constexpr uint8_t kCatalogTeamDefenders = 2;
 inline constexpr uint8_t kCatalogTeamBoth = 3;
 
+// The compiled catalog is the purchase source of truth. A row without a
+// WeaponType has no WeaponComponent/loadout representation (current equipment
+// rows); behavior coverage such as grenade projectiles is deliberately not
+// inferred from this table.
+inline bool isCatalogBuyable(const WeaponCatalogDef& def)
+{
+    return def.price > 0;
+}
+
+inline bool isCatalogDataOnly(const WeaponCatalogDef& def)
+{
+    return def.weapon_type == WeaponType::COUNT;
+}
+
 inline const WeaponCatalogDef* weaponCatalog(size_t& out_count)
 {
     static const WeaponCatalogDef defs[] = {

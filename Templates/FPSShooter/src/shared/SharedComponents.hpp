@@ -35,6 +35,16 @@ struct FpsHealthComponent
     }
 };
 
+// Server-side latch for the template death lifecycle.  `resolved` prevents a
+// second lethal input from re-running drops, scoring, or event publication
+// before this pawn is respawned.  The sequence is local to the pawn and is
+// carried into the bounded death event for stable attribution after teardown.
+struct FpsDeathLifecycleComponent
+{
+    uint32_t sequence = 0;
+    bool resolved = false;
+};
+
 // Weapon type enumeration. Values double as inventory item_def ids (+1,
 // since InventoryComponent reserves item_def_id 0 for empty).
 enum class WeaponType : uint8_t

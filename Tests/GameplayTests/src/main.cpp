@@ -664,6 +664,41 @@ bool testFpsDropAndPickup()
     if (!FpsLogic::switchByWeaponSelect(inv2, lo2, w2, 1) || w2.weapon_type != WeaponType::SHOTGUN || w2.ammo != 8) return fail(name, "picked-up shotgun state wrong");
     return pass(name);
 }
+bool testFpsLoadoutInventoryInvariant()
+{
+    const std::string name = "FpsLoadoutInventoryInvariant";
+    InventoryComponent inv;
+    PlayerLoadoutComponent lo;
+    WeaponComponent weapon;
+    FpsLogic::grantLoadout(inv, lo, weapon, WeaponType::AK47);
+    if (!FpsLogic::hasMirroredLoadoutInventory(inv, lo))
+        return fail(name, "granted loadout did not mirror inventory");
+
+    // The synchronization boundary removes stale engine-only slots and repairs
+    // an invalid active slot to the first occupied template slot.
+    inv.slots[InventoryComponent::kMaxSlots - 1] = {999u, 1};
+    lo.active_slot = 99;
+    FpsLogic::syncInventory(inv, lo);
+    if (!FpsLogic::hasMirroredLoadoutInventory(inv, lo) || lo.active_slot != (int)WeaponSlot::Primary)
+        return fail(name, "sync did not restore a valid mirrored active slot");
+
+    auto dropped = FpsLogic::dropActive(inv, lo, weapon);
+    const FpsLogic::DroppedItem negative_ammo{WeaponType::SHOTGUN, -1, 0};
+    const FpsLogic::DroppedItem overfull_ammo{WeaponType::SHOTGUN, 9, 32};
+    if (!dropped || FpsLogic::tryPickup(inv, lo, weapon, negative_ammo) ||
+        FpsLogic::tryPickup(inv, lo, weapon, overfull_ammo))
+        return fail(name, "out-of-bounds pickup ammo was accepted");
+    if (!FpsLogic::hasMirroredLoadoutInventory(inv, lo))
+        return fail(name, "rejected pickup changed mirrored inventory");
+
+    const FpsLogic::DroppedItem valid_ammo{WeaponType::SHOTGUN, 8, 32};
+    if (!FpsLogic::tryPickup(inv, lo, weapon, valid_ammo) ||
+        !FpsLogic::switchToSlot(inv, lo, weapon, (int)WeaponSlot::Primary) ||
+        weapon.weapon_type != WeaponType::SHOTGUN || weapon.ammo != 8 || weapon.reserve_ammo != 32 ||
+        !FpsLogic::hasMirroredLoadoutInventory(inv, lo))
+        return fail(name, "valid pickup did not preserve bounded mirrored state");
+    return pass(name);
+}
 bool testDroppedWeaponEcsLifecycle()
 {
     const std::string name = "DroppedWeaponEcsLifecycle";
@@ -1058,16 +1093,28 @@ bool testWeaponRosterIntegrity()
     size_t n = 0; const WeaponCatalogDef* defs = weaponCatalog(n);
     if (n != 44) return fail(name, "catalog size " + std::to_string(n) + " != 44");
     for (size_t i = 0; i < n; ++i) {
-        if (defs[i].price <= 0) return fail(name, "non-positive price for " + std::string(defs[i].alias));
-        if (!defs[i].alias || !defs[i].name) return fail(name, "missing alias/name");
+        if (!isCatalogBuyable(defs[i])) return fail(name, "non-buyable catalog row " + std::to_string(defs[i].id));
+        if (!defs[i].alias || !defs[i].alias[0] || !defs[i].name || !defs[i].name[0]) return fail(name, "missing alias/name");
+        if (defs[i].id == 0 || findCatalogById(defs[i].id) != &defs[i] ||
+            findCatalogByAlias(defs[i].alias) != &defs[i])
+            return fail(name, "catalog lookup did not round-trip for " + std::string(defs[i].alias));
+        const bool data_only = isCatalogDataOnly(defs[i]);
+        if (data_only != (defs[i].kind == BuyItemKind::Equipment))
+            return fail(name, "catalog data-only classification mismatch for " + std::string(defs[i].alias));
         for (size_t j = i + 1; j < n; ++j) {
             if (defs[i].id == defs[j].id) return fail(name, "duplicate catalog id");
             if (std::strcmp(defs[i].alias, defs[j].alias) == 0) return fail(name, "duplicate alias " + std::string(defs[i].alias));
         }
-        if (defs[i].kind != BuyItemKind::Equipment && defs[i].weapon_type != WeaponType::COUNT) {
+        if (!data_only) {
+            if (!FpsLogic::isValidWeaponType(defs[i].weapon_type) ||
+                defs[i].slot != FpsLogic::slotForWeaponType(defs[i].weapon_type) ||
+                defs[i].mag < 0 || defs[i].reserve < 0)
+                return fail(name, "invalid weapon row " + std::string(defs[i].alias));
             const auto& wd = getWeaponDef(defs[i].weapon_type);
             if (wd.damage != defs[i].damage || wd.max_ammo != defs[i].mag || wd.max_reserve_ammo != defs[i].reserve || wd.pellets != defs[i].pellets)
                 return fail(name, "catalog/behaviour def mismatch for " + std::string(defs[i].alias));
+        } else if (defs[i].mag != 0 || defs[i].reserve != 0) {
+            return fail(name, "data-only row has weapon ammo " + std::string(defs[i].alias));
         }
     }
     const auto* ak = findCatalogByAlias("ak47");
@@ -1194,6 +1241,117 @@ bool testFpsDamageContract()
     return pass(name);
 }
 
+bool testFpsDeathLifecycle()
+{
+    const std::string name = "FpsDeathLifecycle";
+    using FpsServer::DeathTransitionRejectReason;
+
+    entt::registry registry;
+    const entt::entity attacker = registry.create();
+    const entt::entity victim = registry.create();
+    const entt::entity trade_a = registry.create();
+    const entt::entity trade_b = registry.create();
+    const entt::entity self = registry.create();
+    registry.emplace<FpsHealthComponent>(attacker, 100);
+    registry.emplace<FpsHealthComponent>(victim, 100);
+    registry.emplace<FpsHealthComponent>(trade_a, 100);
+    registry.emplace<FpsHealthComponent>(trade_b, 100);
+    registry.emplace<FpsHealthComponent>(self, 100);
+    auto& victim_weapon = registry.emplace<WeaponComponent>(victim, WeaponType::RIFLE);
+    victim_weapon.reloading = true;
+    victim_weapon.reload_timer = 1.0f;
+
+    // A lethal damage result enters the post-damage lifecycle once and makes
+    // the already-dead pawn ineligible for any further weapon action.
+    registry.get<FpsHealthComponent>(victim).takeDamage(100);
+    const auto first = FpsServer::beginFpsDeathTransition(registry, victim);
+    FpsServer::stopFpsWeaponActions(registry, victim);
+    const auto duplicate = FpsServer::beginFpsDeathTransition(registry, victim);
+    if (!first.transitioned || first.death_sequence != 1 || duplicate.transitioned ||
+        duplicate.reject_reason != DeathTransitionRejectReason::AlreadyResolved ||
+        duplicate.death_sequence != first.death_sequence || FpsServer::canUseFpsWeapon(registry, victim) ||
+        victim_weapon.reloading || victim_weapon.reload_timer != 0.0f) {
+        return fail(name, "duplicate lethal transition or dead weapon gate was wrong");
+    }
+
+    // Two lethal outcomes captured for the same simulation tick retain one
+    // independent transition each; neither victim can consume the other's
+    // latch or event sequence.
+    registry.get<FpsHealthComponent>(trade_a).takeDamage(100);
+    registry.get<FpsHealthComponent>(trade_b).takeDamage(100);
+    const auto trade_a_result = FpsServer::beginFpsDeathTransition(registry, trade_a);
+    const auto trade_b_result = FpsServer::beginFpsDeathTransition(registry, trade_b);
+    if (!trade_a_result.transitioned || !trade_b_result.transitioned ||
+        trade_a_result.death_sequence != 1 || trade_b_result.death_sequence != 1) {
+        return fail(name, "same-tick trade outcomes were not independently latched");
+    }
+
+    // The server resolver drops a primary through switchToSlot + dropActive.
+    // Start while holding the secondary to prove that it drops the primary's
+    // stored ammo, then leaves WeaponComponent and InventoryComponent on the
+    // fallback selected by dropActive.
+    InventoryComponent death_inventory;
+    PlayerLoadoutComponent death_loadout;
+    WeaponComponent death_weapon;
+    FpsLogic::grantLoadout(death_inventory, death_loadout, death_weapon);
+    death_weapon.ammo = 17;
+    death_weapon.reserve_ammo = 43;
+    if (!FpsLogic::switchToSlot(death_inventory, death_loadout, death_weapon,
+                                static_cast<int>(WeaponSlot::Secondary))) {
+        return fail(name, "death drop fixture could not select the secondary");
+    }
+    death_weapon.ammo = 4;
+    death_weapon.reserve_ammo = 20;
+    if (!FpsLogic::switchToSlot(death_inventory, death_loadout, death_weapon,
+                                static_cast<int>(WeaponSlot::Primary))) {
+        return fail(name, "death drop fixture could not select the primary");
+    }
+    const auto death_drop = FpsLogic::dropActive(death_inventory, death_loadout, death_weapon);
+    if (!death_drop || death_drop->type != WeaponType::RIFLE || death_drop->ammo != 17 ||
+        death_drop->reserve != 43 || death_loadout.active_slot != static_cast<int>(WeaponSlot::Secondary) ||
+        death_weapon.weapon_type != WeaponType::PISTOL || death_weapon.ammo != 4 ||
+        death_weapon.reserve_ammo != 20 ||
+        !FpsLogic::hasMirroredLoadoutInventory(death_inventory, death_loadout)) {
+        return fail(name, "death primary drop did not preserve loadout, weapon, and inventory mirrors");
+    }
+
+    // A self-inflicted death keeps its attribution in data-only event fields.
+    registry.get<FpsHealthComponent>(self).takeDamage(100);
+    const auto self_result = FpsServer::beginFpsDeathTransition(registry, self);
+    FpsServer::FpsDeathEvent self_event{7, 7, static_cast<uint8_t>(WeaponType::COUNT),
+        FpsServer::FpsDeathEventSelfInflicted, self_result.death_sequence, glm::vec3(1.0f, 2.0f, 3.0f)};
+    if (!self_result.transitioned || (self_event.flags & FpsServer::FpsDeathEventSelfInflicted) == 0 ||
+        self_event.attacker_client_id != self_event.victim_client_id) {
+        return fail(name, "self death attribution was not preserved");
+    }
+
+    // Event delivery needs no entity dereference after a disconnect.
+    const FpsServer::FpsDeathEvent disconnect_safe_event{12, 13, static_cast<uint8_t>(WeaponType::RIFLE),
+        FpsServer::FpsDeathEventNone, first.death_sequence, glm::vec3(4.0f, 5.0f, 6.0f)};
+    registry.destroy(attacker);
+    registry.destroy(victim);
+    if (disconnect_safe_event.attacker_client_id != 12 || disconnect_safe_event.victim_client_id != 13 ||
+        !approxVec3(disconnect_safe_event.death_position, glm::vec3(4.0f, 5.0f, 6.0f))) {
+        return fail(name, "disconnect-safe death event lost its value data");
+    }
+
+    // Respawn clears only the once-only latch and preserves its monotonically
+    // increasing sequence for the next event.
+    auto& self_health = registry.get<FpsHealthComponent>(self);
+    self_health.reset();
+    // reset() grants spawn protection.  This fixture exercises the next
+    // lethal request after that authoritative protection window has expired.
+    self_health.invulnerable_timer = 0.0f;
+    FpsServer::resetFpsDeathTransition(registry, self);
+    self_health.takeDamage(100);
+    const auto respawned_life = FpsServer::beginFpsDeathTransition(registry, self);
+    if (!respawned_life.transitioned || respawned_life.death_sequence != 2) {
+        return fail(name, "respawn did not reopen the next death lifecycle");
+    }
+
+    return pass(name);
+}
+
 #include "C4Tests.hpp"
 #include "BotTests.hpp"
 #include "UiLogicTests.hpp"
@@ -1216,6 +1374,7 @@ int main()
     ok = testFpsSpawnSelectionPerTeamFarthest() && ok;
     ok = testFpsSwitchChangesActiveDef() && ok;
     ok = testFpsDropAndPickup() && ok;
+    ok = testFpsLoadoutInventoryInvariant() && ok;
     ok = testDroppedWeaponEcsLifecycle() && ok;
     ok = testFpsDeathmatchScoreLimit() && ok;
     ok = testFpsTeamDeathmatchTeamScoreWin() && ok;
@@ -1230,6 +1389,7 @@ int main()
     ok = testWeaponRosterIntegrity() && ok;
     ok = testLagCompensatedShotPoseFallbackAndMissCount() && ok;
     ok = testFpsDamageContract() && ok;
+    ok = testFpsDeathLifecycle() && ok;
     ok = testC4PlantInterrupt() && ok;
     ok = testC4AuthoredTriggerOccupancy() && ok;
     ok = testC4DefuseKit() && ok;

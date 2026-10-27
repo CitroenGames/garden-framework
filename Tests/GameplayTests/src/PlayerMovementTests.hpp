@@ -4,8 +4,67 @@
 #include "InputManager.hpp"
 #include "shared/MovementInputPolicy.hpp"
 #include "shared/NetworkInputSampler.hpp"
+#include "shared/PlayerLifecycle.hpp"
 
 #include <string>
+
+bool testPlayerPawnLifecycleContract()
+{
+    const std::string name = "Player_PawnLifecycleContract";
+
+    entt::registry registry;
+    const entt::entity pawn = registry.create();
+    registry.emplace<FpsHealthComponent>(pawn, 100);
+    registry.emplace<TeamComponent>(pawn, TeamComponent{FpsLogic::kTeamAttackers});
+
+    Competitive::MatchStateComponent match;
+    match.phase = Competitive::RoundPhase::Freeze;
+    FPSShooter::synchronizePawnLifecycles(registry, match);
+    auto& lifecycle = registry.get<FPSShooter::FpsPawnLifecycleComponent>(pawn);
+    if (lifecycle.state != FPSShooter::FpsPawnLifecycleState::Active ||
+        !FPSShooter::isPawnMovementLocked(match.phase) ||
+        FPSShooter::isPawnMovementAllowed(registry.get<FpsHealthComponent>(pawn),
+                                           registry.get<TeamComponent>(pawn), true, match.phase))
+    {
+        return fail(name, "spawned Freeze pawn did not retain an active, movement-locked lifecycle");
+    }
+
+    match.phase = Competitive::RoundPhase::Live;
+    registry.get<FpsHealthComponent>(pawn).takeDamage(100);
+    FPSShooter::synchronizePawnLifecycles(registry, match);
+    if (lifecycle.state != FPSShooter::FpsPawnLifecycleState::Spectating ||
+        FPSShooter::isPawnMovementAllowed(registry.get<FpsHealthComponent>(pawn),
+                                           registry.get<TeamComponent>(pawn), true, match.phase))
+    {
+        return fail(name, "dead Live pawn did not transition to spectator with neutral movement");
+    }
+
+    match.phase = Competitive::RoundPhase::Freeze;
+    FPSShooter::synchronizePawnLifecycles(registry, match);
+    if (lifecycle.state != FPSShooter::FpsPawnLifecycleState::AwaitingSpawn)
+        return fail(name, "dead playing-team pawn did not wait for the Freeze respawn boundary");
+
+    registry.get<FpsHealthComponent>(pawn).reset();
+    FPSShooter::synchronizePawnLifecycles(registry, match);
+    if (lifecycle.state != FPSShooter::FpsPawnLifecycleState::Active)
+        return fail(name, "Freeze respawn did not reactivate the pawn");
+
+    registry.get<TeamComponent>(pawn).team_id = Competitive::teamId(Competitive::FpsTeam::Spectator);
+    match.phase = Competitive::RoundPhase::Live;
+    FPSShooter::synchronizePawnLifecycles(registry, match);
+    if (lifecycle.state != FPSShooter::FpsPawnLifecycleState::Spectating ||
+        FPSShooter::isPawnMovementAllowed(registry.get<FpsHealthComponent>(pawn),
+                                           registry.get<TeamComponent>(pawn), true, match.phase))
+        return fail(name, "spectator team retained a playable pawn lifecycle");
+
+    registry.destroy(pawn);
+    FPSShooter::synchronizePawnLifecycles(registry, match);
+    const auto remaining = registry.view<FPSShooter::FpsPawnLifecycleComponent>();
+    if (registry.valid(pawn) || remaining.begin() != remaining.end())
+        return fail(name, "disconnect cleanup retained lifecycle state for a destroyed pawn");
+
+    return pass(name);
+}
 
 bool testPlayerMovementInputContract()
 {
@@ -98,5 +157,5 @@ bool testPlayerMovementInputContract()
         return fail(name, "local controller and network prediction can both own movement");
     }
 
-    return pass(name);
+    return testPlayerPawnLifecycleContract() && pass(name);
 }

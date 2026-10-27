@@ -44,26 +44,106 @@ inline WeaponSlot slotForWeaponType(WeaponType t) {
     }
 }
 
+inline bool isValidWeaponType(WeaponType type)
+{
+    return static_cast<uint8_t>(type) < static_cast<uint8_t>(WeaponType::COUNT);
+}
+
+inline bool isValidLoadoutSlot(int slot)
+{
+    return slot >= 0 && slot < static_cast<int>(WeaponSlot::COUNT);
+}
+
+inline bool isValidSlotState(const WeaponSlotState& state, int slot)
+{
+    if (!state.occupied)
+        return state.ammo == 0 && state.reserve == 0;
+    if (!isValidLoadoutSlot(slot) || !isValidWeaponType(state.type) ||
+        static_cast<int>(slotForWeaponType(state.type)) != slot)
+        return false;
+    const WeaponDef& def = getWeaponDef(state.type);
+    return state.ammo >= 0 && state.ammo <= def.max_ammo &&
+           state.reserve >= 0 && state.reserve <= def.max_reserve_ammo;
+}
+
+inline void normalizeSlotState(WeaponSlotState& state, int slot)
+{
+    if (!state.occupied) {
+        state = WeaponSlotState{};
+        return;
+    }
+    if (!isValidLoadoutSlot(slot) || !isValidWeaponType(state.type) ||
+        static_cast<int>(slotForWeaponType(state.type)) != slot) {
+        state = WeaponSlotState{};
+        return;
+    }
+    const WeaponDef& def = getWeaponDef(state.type);
+    state.ammo = std::clamp(state.ammo, 0, def.max_ammo);
+    state.reserve = std::clamp(state.reserve, 0, def.max_reserve_ammo);
+}
+
+inline void normalizeLoadout(PlayerLoadoutComponent& lo)
+{
+    int first_occupied = -1;
+    for (int slot = 0; slot < static_cast<int>(WeaponSlot::COUNT); ++slot) {
+        normalizeSlotState(lo.slots[slot], slot);
+        if (first_occupied < 0 && lo.slots[slot].occupied)
+            first_occupied = slot;
+    }
+    if (!isValidLoadoutSlot(lo.active_slot) || !lo.slots[lo.active_slot].occupied)
+        lo.active_slot = first_occupied;
+}
+
 // ---- Inventory / loadout ----
 inline void saveActiveAmmo(PlayerLoadoutComponent& lo, const WeaponComponent& w) {
-    if (lo.active_slot < 0 || lo.active_slot >= (int)WeaponSlot::COUNT) return;
+    if (!isValidLoadoutSlot(lo.active_slot)) return;
     auto& s = lo.slots[lo.active_slot];
-    if (s.occupied && s.type == w.weapon_type) { s.ammo = w.ammo; s.reserve = w.reserve_ammo; }
+    if (s.occupied && s.type == w.weapon_type) {
+        s.ammo = w.ammo;
+        s.reserve = w.reserve_ammo;
+        normalizeSlotState(s, lo.active_slot);
+    }
 }
-inline void loadSlotIntoWeapon(PlayerLoadoutComponent& lo, WeaponComponent& w, int slot) {
+inline bool loadSlotIntoWeapon(PlayerLoadoutComponent& lo, WeaponComponent& w, int slot) {
+    normalizeLoadout(lo);
+    if (!isValidLoadoutSlot(slot) || !lo.slots[slot].occupied)
+        return false;
     const auto& s = lo.slots[slot];
     initWeapon(w, s.type);
     w.ammo = s.ammo; w.reserve_ammo = s.reserve;
     w.max_ammo = getWeaponDef(s.type).max_ammo;
     w.max_reserve_ammo = getWeaponDef(s.type).max_reserve_ammo;
+    return true;
 }
-inline void syncInventory(InventoryComponent& inv, const PlayerLoadoutComponent& lo) {
+inline void syncInventory(InventoryComponent& inv, PlayerLoadoutComponent& lo) {
+    normalizeLoadout(lo);
+    for (auto& slot : inv.slots)
+        slot = InventorySlot{};
     for (size_t i = 0; i < (size_t)WeaponSlot::COUNT; ++i) {
         auto& dst = inv.slots[i];
         if (lo.slots[i].occupied) { dst.item_def_id = itemDefId(lo.slots[i].type); dst.count = 1; }
-        else { dst.item_def_id = 0; dst.count = 0; }
     }
     inv.active_slot = lo.active_slot;
+}
+inline bool hasMirroredLoadoutInventory(const InventoryComponent& inv, const PlayerLoadoutComponent& lo) {
+    if (inv.active_slot != lo.active_slot || !isValidLoadoutSlot(lo.active_slot) ||
+        !lo.slots[lo.active_slot].occupied)
+        return false;
+    for (size_t i = 0; i < static_cast<size_t>(WeaponSlot::COUNT); ++i) {
+        if (!isValidSlotState(lo.slots[i], static_cast<int>(i)))
+            return false;
+        const InventorySlot& inventory_slot = inv.slots[i];
+        if (lo.slots[i].occupied) {
+            if (inventory_slot.item_def_id != itemDefId(lo.slots[i].type) || inventory_slot.count != 1)
+                return false;
+        } else if (!inventory_slot.empty()) {
+            return false;
+        }
+    }
+    for (size_t i = static_cast<size_t>(WeaponSlot::COUNT); i < inv.slots.size(); ++i)
+        if (!inv.slots[i].empty())
+            return false;
+    return true;
 }
 inline void grantLoadout(InventoryComponent& inv, PlayerLoadoutComponent& lo, WeaponComponent& w, WeaponType primary = WeaponType::RIFLE) {
     for (auto& s : lo.slots) s = WeaponSlotState{};
@@ -71,7 +151,7 @@ inline void grantLoadout(InventoryComponent& inv, PlayerLoadoutComponent& lo, We
         auto& s = lo.slots[(size_t)slot]; const auto& d = getWeaponDef(t);
         s.type = t; s.ammo = d.max_ammo; s.reserve = d.max_reserve_ammo; s.occupied = true;
     };
-    give(WeaponSlot::Primary, primary);
+    give(WeaponSlot::Primary, isValidWeaponType(primary) ? primary : WeaponType::RIFLE);
     give(WeaponSlot::Secondary, WeaponType::PISTOL);
     give(WeaponSlot::Melee, WeaponType::KNIFE);
     lo.active_slot = (int)WeaponSlot::Primary;
@@ -80,6 +160,8 @@ inline void grantLoadout(InventoryComponent& inv, PlayerLoadoutComponent& lo, We
 }
 // Give a weapon into its slot if free (used for shotgun reachability / pickups of new slot).
 inline bool giveWeapon(InventoryComponent& inv, PlayerLoadoutComponent& lo, WeaponComponent& w, WeaponType t) {
+    if (!isValidWeaponType(t)) return false;
+    normalizeLoadout(lo);
     int slot = (int)slotForWeaponType(t);
     if (lo.slots[slot].occupied) return false;
     const auto& d = getWeaponDef(t);
@@ -87,8 +169,14 @@ inline bool giveWeapon(InventoryComponent& inv, PlayerLoadoutComponent& lo, Weap
     syncInventory(inv, lo); (void)w; return true;
 }
 inline bool switchToSlot(InventoryComponent& inv, PlayerLoadoutComponent& lo, WeaponComponent& w, int slot) {
+    normalizeLoadout(lo);
     if (slot < 0 || slot >= (int)WeaponSlot::COUNT) return false;
-    if (!lo.slots[slot].occupied || slot == lo.active_slot) return slot == lo.active_slot && lo.slots[slot].occupied;
+    if (!lo.slots[slot].occupied) return false;
+    if (slot == lo.active_slot) {
+        loadSlotIntoWeapon(lo, w, slot);
+        syncInventory(inv, lo);
+        return true;
+    }
     saveActiveAmmo(lo, w);
     lo.active_slot = slot;
     loadSlotIntoWeapon(lo, w, slot);
@@ -108,6 +196,7 @@ inline WeaponType activeWeaponType(const PlayerLoadoutComponent& lo, const Weapo
 struct DroppedItem { WeaponType type; int32_t ammo; int32_t reserve; };
 // DROP: active Primary/Secondary/Grenade/Utility drops; Melee never droppable.
 inline std::optional<DroppedItem> dropActive(InventoryComponent& inv, PlayerLoadoutComponent& lo, WeaponComponent& w) {
+    normalizeLoadout(lo);
     int slot = lo.active_slot;
     if (slot < 0 || slot >= (int)WeaponSlot::COUNT) return std::nullopt;
     if (slot == (int)WeaponSlot::Melee) return std::nullopt;
@@ -126,9 +215,15 @@ inline std::optional<DroppedItem> dropActive(InventoryComponent& inv, PlayerLoad
 }
 // Walk-over pickup only if the weapon's slot is free.
 inline bool tryPickup(InventoryComponent& inv, PlayerLoadoutComponent& lo, WeaponComponent& w, const DroppedItem& item) {
+    if (!isValidWeaponType(item.type)) return false;
+    normalizeLoadout(lo);
     int slot = (int)slotForWeaponType(item.type);
     if (lo.slots[slot].occupied) return false;
     lo.slots[slot] = WeaponSlotState{item.type, item.ammo, item.reserve, true};
+    if (!isValidSlotState(lo.slots[slot], slot)) {
+        lo.slots[slot] = WeaponSlotState{};
+        return false;
+    }
     if (lo.active_slot < 0) { lo.active_slot = slot; loadSlotIntoWeapon(lo, w, slot); }
     syncInventory(inv, lo); return true;
 }

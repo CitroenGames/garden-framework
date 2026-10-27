@@ -17,6 +17,7 @@
 #include "shared/WeaponTypes.hpp"
 #include "shared/WeaponSystem.hpp"
 #include "shared/MovementInputPolicy.hpp"
+#include "shared/PlayerLifecycle.hpp"
 #include "shared/FpsGameLogic.hpp"
 #include "shared/WorldItemLifecycle.hpp"
 #include "shared/CompetitiveLogic.hpp"
@@ -247,6 +248,100 @@ static void sendWeaponState(uint16_t client_id, entt::entity player_entity, cons
     g_server_network.sendReliableToClient(client_id, writer);
 }
 
+static void publishFpsDeathEvent(const FpsServer::FpsDeathEvent& event)
+{
+    PlayerDiedMessage death_msg;
+    death_msg.victim_client_id = event.victim_client_id;
+    death_msg.killer_client_id = event.attacker_client_id;
+    death_msg.death_position = event.death_position;
+
+    BitWriter death_writer;
+    CombatSerializer::serialize(death_writer, death_msg);
+    for (uint16_t i = 1; i < g_server_network.getNextClientId(); ++i) {
+        const ClientInfo* client = g_server_network.getClientInfo(i);
+        if (client && client->peer)
+            g_server_network.sendReliableToClient(i, death_writer);
+    }
+}
+
+// Every authoritative death enters here after health has transitioned to dead.
+// The order is deliberate: latch/stop actions, capture event data, C4 and
+// loadout drops, score/match and existing economy hooks, then publish and
+// schedule any allowed respawn.  No later step dereferences the killer.
+static bool resolveFpsDeath(
+    world& game_world,
+    uint16_t attacker_client_id,
+    entt::entity victim_entity,
+    WeaponType weapon_type)
+{
+    if (!game_world.registry.valid(victim_entity) ||
+        !game_world.registry.all_of<NetworkedEntity, TransformComponent, FpsHealthComponent>(victim_entity))
+        return false;
+
+    const FpsServer::DeathTransitionResult transition =
+        FpsServer::beginFpsDeathTransition(game_world.registry, victim_entity);
+    if (!transition.transitioned)
+        return false;
+
+    FpsServer::stopFpsWeaponActions(game_world.registry, victim_entity);
+    const auto& victim_network = game_world.registry.get<NetworkedEntity>(victim_entity);
+    const uint16_t victim_client_id = victim_network.owner_client_id;
+    const glm::vec3 death_position = game_world.registry.get<TransformComponent>(victim_entity).position;
+    const bool self_inflicted = attacker_client_id == victim_client_id;
+    const FpsServer::FpsDeathEvent death_event{
+        attacker_client_id,
+        victim_client_id,
+        static_cast<uint8_t>(weapon_type),
+        self_inflicted ? FpsServer::FpsDeathEventSelfInflicted : FpsServer::FpsDeathEventNone,
+        transition.death_sequence,
+        death_position,
+    };
+
+    if (g_competitive && g_bomb_system.bomb.carrier == victim_entity)
+        g_bomb_system.onCarrierDeath(death_position);
+
+    if (game_world.registry.all_of<InventoryComponent, PlayerLoadoutComponent, WeaponComponent>(victim_entity)) {
+        auto& inventory = game_world.registry.get<InventoryComponent>(victim_entity);
+        auto& loadout = game_world.registry.get<PlayerLoadoutComponent>(victim_entity);
+        auto& weapon = game_world.registry.get<WeaponComponent>(victim_entity);
+        // Death drops the primary through the normal switch/drop path.  The
+        // switch saves the currently held weapon, loads the primary's stored
+        // ammo into WeaponComponent, and the drop selects/synchronizes its
+        // fallback.  Do not restore an old active slot afterward: dropActive
+        // has already made the fallback authoritative.
+        if (FpsLogic::switchToSlot(inventory, loadout, weapon, static_cast<int>(WeaponSlot::Primary))) {
+            if (auto dropped = FpsLogic::dropActive(inventory, loadout, weapon))
+                spawnDroppedWeapon(game_world, death_position, *dropped, victim_client_id);
+        }
+    }
+
+    g_game_rules.onPlayerKilled(game_world, attacker_client_id, victim_client_id);
+    if (g_competitive) {
+        if (self_inflicted) {
+            if (game_world.registry.all_of<Competitive::MoneyComponent>(victim_entity)) {
+                g_economy.applySuicidePenalty(game_world.registry.get<Competitive::MoneyComponent>(victim_entity));
+                sendEconomyState(victim_client_id, victim_entity);
+            }
+        } else {
+            const entt::entity killer_entity = findPlayerEntity(game_world, attacker_client_id);
+            if (killer_entity != entt::null && game_world.registry.all_of<Competitive::MoneyComponent>(killer_entity)) {
+                const WeaponCatalogDef* weapon_def = findCatalogByWeaponType(weapon_type);
+                if (weapon_def)
+                    g_economy.awardKill(game_world.registry.get<Competitive::MoneyComponent>(killer_entity), weapon_def);
+                else
+                    game_world.registry.get<Competitive::MoneyComponent>(killer_entity).wallet.add(300);
+                sendEconomyState(attacker_client_id, killer_entity);
+            }
+        }
+    }
+
+    publishFpsDeathEvent(death_event);
+    LOG_ENGINE_INFO("Player {} killed by player {} sequence={}", victim_client_id, attacker_client_id, transition.death_sequence);
+    if (!g_competitive || g_round_system.state.phase == Competitive::RoundPhase::Warmup)
+        g_game_rules.queueRespawn(victim_client_id);
+    return true;
+}
+
 // Process an authoritative attack input sample with lag compensation.
 static void fireServerShot(
     uint16_t shooter_client_id,
@@ -344,43 +439,8 @@ static void fireServerShot(
         g_server_network.sendReliableToClient(victim_client, dmg_writer);
         if (shooter_client_id != victim_client) g_server_network.sendReliableToClient(shooter_client_id, dmg_writer);
         LOG_ENGINE_TRACE("Player {} hit player {} for {} damage ({} pellets, hp: {})", shooter_client_id, victim_client, total_damage, kv.second, victim_health.health);
-        if (!victim_health.alive) {
-            auto& victim_trans = w->registry.get<TransformComponent>(victim_ent);
-            // Death drop: primary weapon becomes a pickup.
-            if (w->registry.all_of<InventoryComponent, PlayerLoadoutComponent, WeaponComponent>(victim_ent)) {
-                auto& vinv = w->registry.get<InventoryComponent>(victim_ent);
-                auto& vlo = w->registry.get<PlayerLoadoutComponent>(victim_ent);
-                auto& vw = w->registry.get<WeaponComponent>(victim_ent);
-                int prev = vlo.active_slot; vlo.active_slot = (int)WeaponSlot::Primary;
-                if (auto dropped = FpsLogic::dropActive(vinv, vlo, vw)) {
-                    spawnDroppedWeapon(*w, victim_trans.position, *dropped, victim_client);
-                }
-                vlo.active_slot = prev;
-            }
-            g_game_rules.onPlayerKilled(*w, shooter_client_id, victim_client);
-            if (g_competitive && shooter_client_id != victim_client) {
-                entt::entity killer_ent = findPlayerEntity(*w, shooter_client_id);
-                if (killer_ent != entt::null && w->registry.all_of<Competitive::MoneyComponent>(killer_ent)) {
-                    const WeaponCatalogDef* def = findCatalogByWeaponType(weapon.weapon_type);
-                    // Legacy weapons have no catalog entry: default kill award data.
-                    if (def) g_economy.awardKill(w->registry.get<Competitive::MoneyComponent>(killer_ent), def);
-                    else w->registry.get<Competitive::MoneyComponent>(killer_ent).wallet.add(300);
-                    sendEconomyState(shooter_client_id, killer_ent);
-                }
-            }
-            PlayerDiedMessage death_msg;
-            death_msg.victim_client_id = victim_client; death_msg.killer_client_id = shooter_client_id; death_msg.death_position = victim_trans.position;
-            BitWriter death_writer; CombatSerializer::serialize(death_writer, death_msg);
-            for (uint16_t i = 1; i < g_server_network.getNextClientId(); i++) {
-                const ClientInfo* client = g_server_network.getClientInfo(i);
-                if (client && client->peer) g_server_network.sendReliableToClient(i, death_writer);
-            }
-            LOG_ENGINE_INFO("Player {} killed by player {}", victim_client, shooter_client_id);
-            // Competitive Live: no respawn (spectates until next Freeze).
-            // Warmup keeps DM-style respawn.
-            if (!g_competitive || g_round_system.state.phase == Competitive::RoundPhase::Warmup)
-                g_game_rules.queueRespawn(victim_client);
-        }
+        if (damage_result.killed)
+            resolveFpsDeath(*w, shooter_client_id, victim_ent, weapon.weapon_type);
     }
 
     // Broadcast shoot result to all clients for visual effects (tracers)
@@ -432,7 +492,7 @@ static bool doDropWeapon(uint16_t client_id, entt::entity player_entity)
     if (!isWeaponLifecyclePhaseOpen() ||
         !w->registry.all_of<NetworkedEntity, FpsHealthComponent, InventoryComponent, PlayerLoadoutComponent, WeaponComponent, TransformComponent>(player_entity)) return false;
     const auto& networked = w->registry.get<NetworkedEntity>(player_entity);
-    if (!networked.is_player || networked.owner_client_id != client_id || !w->registry.get<FpsHealthComponent>(player_entity).alive) return false;
+    if (!networked.is_player || networked.owner_client_id != client_id || !FpsServer::canUseFpsWeapon(w->registry, player_entity)) return false;
     auto& inv = w->registry.get<InventoryComponent>(player_entity);
     auto& lo = w->registry.get<PlayerLoadoutComponent>(player_entity);
     auto& weapon = w->registry.get<WeaponComponent>(player_entity);
@@ -451,7 +511,7 @@ static bool doWeaponSelect(uint16_t client_id, entt::entity player_entity, uint8
     if (!isWeaponLifecyclePhaseOpen() ||
         !w->registry.all_of<NetworkedEntity, FpsHealthComponent, InventoryComponent, PlayerLoadoutComponent, WeaponComponent>(player_entity)) return false;
     const auto& networked = w->registry.get<NetworkedEntity>(player_entity);
-    if (!networked.is_player || networked.owner_client_id != client_id || !w->registry.get<FpsHealthComponent>(player_entity).alive) return false;
+    if (!networked.is_player || networked.owner_client_id != client_id || !FpsServer::canUseFpsWeapon(w->registry, player_entity)) return false;
     auto& inv = w->registry.get<InventoryComponent>(player_entity);
     auto& lo = w->registry.get<PlayerLoadoutComponent>(player_entity);
     auto& weapon = w->registry.get<WeaponComponent>(player_entity);
@@ -476,8 +536,7 @@ static void processWeaponInput(
         return;
     }
 
-    auto& health = w->registry.get<FpsHealthComponent>(player_entity);
-    if (!health.alive) {
+    if (!FpsServer::canUseFpsWeapon(w->registry, player_entity)) {
         return;
     }
 
@@ -520,6 +579,7 @@ static void respawnPlayer(uint16_t client_id, const glm::vec3& spawn_pos)
 
             // Reset state
             health.reset();
+            FpsServer::resetFpsDeathTransition(w->registry, entity);
             trans.position = spawn_pos;
 
             if (w->registry.all_of<RigidBodyComponent>(entity)) {
@@ -572,10 +632,12 @@ static void consumeBotInputSample(uint16_t client_id, entt::entity e, const Inpu
 {
     world* w = g_server_services ? g_server_services->game_world : nullptr;
     if (!w || !w->registry.valid(e)) return;
-    if (!w->registry.all_of<PlayerComponent, TransformComponent, RigidBodyComponent, FpsHealthComponent>(e)) return;
-    if (!FPSShooter::isMovementInputAllowed(
-            w->registry.get<FpsHealthComponent>(e).alive,
-            g_round_system.isMovementLocked())) return;
+    if (!w->registry.all_of<PlayerComponent, TransformComponent, RigidBodyComponent, FpsHealthComponent, TeamComponent>(e)) return;
+    if (!FPSShooter::isPawnMovementAllowed(
+            w->registry.get<FpsHealthComponent>(e),
+            w->registry.get<TeamComponent>(e),
+            g_competitive,
+            g_round_system.state.phase)) return;
     auto& player = w->registry.get<PlayerComponent>(e);
     auto& transform = w->registry.get<TransformComponent>(e);
     auto& rigidbody = w->registry.get<RigidBodyComponent>(e);
@@ -1365,6 +1427,13 @@ static void spawnPlayerForClient(uint16_t client_id)
             h.alive = false; h.health = 0;
         }
     }
+    auto& lifecycle = w->registry.emplace<FPSShooter::FpsPawnLifecycleComponent>(player_entity);
+    if (g_competitive) {
+        lifecycle.state = FPSShooter::derivePawnLifecycleState(
+            w->registry.get<FpsHealthComponent>(player_entity),
+            w->registry.get<TeamComponent>(player_entity),
+            g_round_system.state.phase);
+    }
 
     ensurePlayerPhysicsBody(*w, player_entity);
 
@@ -1513,9 +1582,14 @@ GAME_API bool gardenServerInit(EngineServices* services)
         if (!w->registry.all_of<FpsHealthComponent>(player_entity)) {
             return true;
         }
-        return FPSShooter::isMovementInputAllowed(
-            w->registry.get<FpsHealthComponent>(player_entity).alive,
-            g_competitive && g_round_system.isMovementLocked());
+        if (!w->registry.all_of<TeamComponent>(player_entity)) {
+            return !g_competitive;
+        }
+        return FPSShooter::isPawnMovementAllowed(
+            w->registry.get<FpsHealthComponent>(player_entity),
+            w->registry.get<TeamComponent>(player_entity),
+            g_competitive,
+            g_round_system.state.phase);
     });
 
     g_server_network.setInputSampleHandler([](
@@ -1612,6 +1686,7 @@ GAME_API void gardenServerUpdate(float delta_time)
         if (g_bot_target_count > 0) { (void)loadBotNavMesh(); tickBots(w->fixed_delta > 0.0f ? w->fixed_delta : delta_time); }
         tickBombServer(w->fixed_delta > 0.0f ? w->fixed_delta : delta_time);
         g_round_system.tick(w->fixed_delta > 0.0f ? w->fixed_delta : delta_time, rin);
+        FPSShooter::synchronizePawnLifecycles(w->registry, g_round_system.state);
         (void)prev_phase;
         // ROUND_STATE heartbeat 1 Hz (spec S7); phase changes broadcast on enter.
         static float s_round_heartbeat = 0.0f;
@@ -1646,25 +1721,7 @@ GAME_API void gardenServerUpdate(float delta_time)
             // Kill the player (suicide)
             health.alive = false;
             health.health = 0;
-
-            g_game_rules.onPlayerKilled(*w, net.owner_client_id, net.owner_client_id);
-
-            PlayerDiedMessage death_msg;
-            death_msg.victim_client_id = net.owner_client_id;
-            death_msg.killer_client_id = net.owner_client_id; // Suicide
-            death_msg.death_position = trans.position;
-
-            BitWriter death_writer;
-            CombatSerializer::serialize(death_writer, death_msg);
-
-            for (uint16_t i = 1; i < g_server_network.getNextClientId(); i++) {
-                const ClientInfo* client = g_server_network.getClientInfo(i);
-                if (client && client->peer)
-                    g_server_network.sendReliableToClient(i, death_writer);
-            }
-
-            if (!g_competitive || g_round_system.state.phase == Competitive::RoundPhase::Warmup)
-                g_game_rules.queueRespawn(net.owner_client_id);
+            resolveFpsDeath(*w, net.owner_client_id, entity, WeaponType::COUNT);
         }
     }
 

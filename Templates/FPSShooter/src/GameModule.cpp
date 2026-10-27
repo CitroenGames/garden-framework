@@ -20,6 +20,7 @@
 #include "shared/WeaponSystem.hpp"
 #include "shared/NetworkInputSampler.hpp"
 #include "shared/MovementInputPolicy.hpp"
+#include "shared/PlayerLifecycle.hpp"
 #include "GameHUD.hpp"
 #include "ui/UiLogic.hpp"
 #include "ui/UiInput.hpp"
@@ -654,7 +655,7 @@ GAME_API void gardenGameUpdate(float delta_time)
             FPSShooter::isLocalControllerMovementEnabled(true));
 
         const bool movement_locked = g_comp.has_round_state &&
-            g_comp.phase == Competitive::RoundPhase::Freeze;
+            FPSShooter::isPawnMovementLocked(g_comp.phase);
         const bool movement_allowed = FPSShooter::isMovementInputAllowed(
             g_local_alive, movement_locked);
         const auto& weapon_def = getWeaponDef(g_local_weapon_type);
