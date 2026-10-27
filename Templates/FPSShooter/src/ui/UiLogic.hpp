@@ -283,6 +283,106 @@ inline bool canOpenBuy(const ClientCompetitiveState& s,
 }
 inline bool canOpenTeamSelect(const ClientCompetitiveState& s) { return s.has_round_state; }
 
+// --- Core HUD source map (hud_menus U1) --------------------------------------
+// The HUD is a client presentation of sources that were already supplied by
+// authority.  This deliberately carries no locally predicted health, ammo, or
+// phase values: a disconnected client, a client without a possessed pawn, and
+// a client without an owner-targeted snapshot all render unavailable data.
+struct HudSourceState {
+    bool connected = false;
+    bool has_local_pawn = false;
+
+    // Replicated local-pawn health, when that component is available to the
+    // client.  The damage/respawn snapshot is the existing authoritative
+    // fallback for clients whose local entity has no FpsHealthComponent.
+    const FpsHealthComponent* pawn_health = nullptr;
+    bool has_damage_snapshot = false;
+    FpsHealthComponent damage_snapshot{};
+
+    // WEAPON_STATE is owner-targeted on the existing combat protocol.
+    bool has_weapon_snapshot = false;
+    WeaponComponent weapon_snapshot{};
+
+    // ROUND_STATE is a shared server snapshot.  A missing snapshot is not a
+    // local "waiting" decision; it stays unavailable until the server sends it.
+    const ClientCompetitiveState* competitive = nullptr;
+};
+
+struct HudCoreBindings {
+    bool connected = false;
+    std::string connection_text = "DISCONNECTED";
+    bool health_available = false;
+    int32_t health = 0;
+    int32_t max_health = 0;
+    std::string health_text = "UNAVAILABLE";
+    bool alive = false;
+    bool weapon_available = false;
+    std::string weapon_name = "UNAVAILABLE";
+    std::string ammo_text = "UNAVAILABLE";
+    std::string reserve_text = "UNAVAILABLE";
+    bool reloading = false;
+    bool phase_available = false;
+    std::string phase_text = "UNAVAILABLE";
+    std::string clock_text;
+    std::string round_text;
+    int32_t score_attackers = 0;
+    int32_t score_defenders = 0;
+    bool bomb_planted = false;
+};
+
+inline HudCoreBindings deriveHudCoreBindings(const HudSourceState& source)
+{
+    HudCoreBindings out;
+    out.connected = source.connected;
+    if (!source.connected)
+        return out;
+
+    out.connection_text = source.has_local_pawn ? "CONNECTED" : "AWAITING PLAYER";
+    if (!source.has_local_pawn)
+        return out;
+
+    // DAMAGE_EVENT/PLAYER_RESPAWN are the newest owner-targeted health
+    // reports, so they must supersede an older local ECS copy.
+    const FpsHealthComponent* health = source.has_damage_snapshot
+        ? &source.damage_snapshot
+        : source.pawn_health;
+    if (health) {
+        out.health_available = true;
+        out.health = std::max(0, health->health);
+        out.max_health = std::max(0, health->max_health);
+        out.health_text = std::to_string(out.health) + " / " + std::to_string(out.max_health);
+        out.alive = health->alive;
+    }
+
+    if (source.has_weapon_snapshot && hasWeaponDefinition(source.weapon_snapshot.weapon_type)) {
+        const WeaponComponent& weapon = source.weapon_snapshot;
+        const WeaponDef& def = getWeaponDef(weapon.weapon_type);
+        out.weapon_available = true;
+        out.weapon_name = def.name;
+        out.reloading = weapon.reloading;
+        if (weapon.reloading) {
+            out.ammo_text = "RELOADING";
+        } else {
+            out.ammo_text = std::to_string(std::max(0, weapon.ammo)) + " / " +
+                            std::to_string(std::max(0, weapon.max_ammo));
+        }
+        out.reserve_text = std::to_string(std::max(0, weapon.reserve_ammo)) + " / " +
+                           std::to_string(std::max(0, weapon.max_reserve_ammo));
+    }
+
+    if (source.competitive && source.competitive->has_round_state) {
+        const ClientCompetitiveState& comp = *source.competitive;
+        out.phase_available = true;
+        out.phase_text = formatPhaseText(comp.phase, comp.bomb_planted);
+        out.clock_text = formatClock(comp.phase, comp.phase_time_remaining, comp.bomb_planted);
+        out.round_text = "Round " + std::to_string(comp.round_number);
+        out.score_attackers = comp.score_attackers;
+        out.score_defenders = comp.score_defenders;
+        out.bomb_planted = comp.bomb_planted;
+    }
+    return out;
+}
+
 // --- Radar D10: fixed slots, north-up, teammates only --------------------------
 constexpr int kRadarSlots = 10;
 struct RadarBlip { bool visible = false; std::string x = "50.0%", y = "50.0%"; };

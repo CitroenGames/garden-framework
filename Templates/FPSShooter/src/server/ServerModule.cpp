@@ -1636,8 +1636,6 @@ static bool spawnPlayerForClient(uint16_t client_id, uint8_t requested_team)
 static void despawnPlayerForClient(uint16_t client_id)
 {
     world* w = g_server_services->game_world;
-    if (g_competitive)
-        g_buy_system.clearClient(client_id);
 
     auto view = w->registry.view<NetworkedEntity>();
     for (auto entity : view) {
@@ -1791,8 +1789,15 @@ GAME_API bool gardenServerInit(EngineServices* services)
 
     g_server_network.setOnClientDisconnected([](uint16_t client_id) {
         despawnPlayerForClient(client_id);
-        if (g_competitive)
+        if (g_competitive) {
+            // Sequence history belongs to the connected client, not its
+            // current pawn. A spectator/team transition may despawn and
+            // recreate that pawn, but must not make an earlier request
+            // replayable. A disconnect releases the client-id stream for a
+            // future connection.
+            g_buy_system.clearClient(client_id);
             g_sessions.remove(client_id);
+        }
     });
 
     g_server_network.setCustomMessageHandler([](uint16_t client_id, uint8_t message_type, BitReader& reader) {

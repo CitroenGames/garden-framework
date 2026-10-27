@@ -156,6 +156,71 @@ bool testUiClockFormatting()
     return pass(name);
 }
 
+bool testUiHudCoreBindingSources()
+{
+    const std::string name = "UiHud_CoreBindingSources";
+    using namespace UiLogic;
+
+    HudSourceState disconnected;
+    disconnected.has_local_pawn = true;
+    disconnected.has_damage_snapshot = true;
+    disconnected.damage_snapshot = FpsHealthComponent{100};
+    disconnected.weapon_snapshot = WeaponComponent{WeaponType::RIFLE};
+    disconnected.has_weapon_snapshot = true;
+    const auto offline = deriveHudCoreBindings(disconnected);
+    if (offline.connected || offline.connection_text != "DISCONNECTED" ||
+        offline.health_available || offline.weapon_available || offline.phase_available ||
+        offline.health_text != "UNAVAILABLE" || offline.ammo_text != "UNAVAILABLE")
+        return fail(name, "disconnected state exposed stale gameplay values");
+
+    HudSourceState late_join;
+    late_join.connected = true;
+    const auto waiting = deriveHudCoreBindings(late_join);
+    if (waiting.connection_text != "AWAITING PLAYER" || waiting.health_available ||
+        waiting.weapon_available || waiting.phase_text != "UNAVAILABLE")
+        return fail(name, "late join did not remain neutral");
+
+    FpsHealthComponent health{100};
+    health.health = 73;
+    HudSourceState pawn;
+    pawn.connected = true;
+    pawn.has_local_pawn = true;
+    pawn.pawn_health = &health;
+    const auto component_health = deriveHudCoreBindings(pawn);
+    if (!component_health.health_available || component_health.health != 73 ||
+        component_health.health_text != "73 / 100" || !component_health.alive)
+        return fail(name, "local pawn health was not bound");
+
+    pawn.has_damage_snapshot = true;
+    pawn.damage_snapshot = FpsHealthComponent{100};
+    pawn.damage_snapshot.health = 41;
+    pawn.damage_snapshot.alive = true;
+    WeaponComponent weapon{WeaponType::RIFLE};
+    weapon.ammo = 17;
+    weapon.max_ammo = 30;
+    weapon.reserve_ammo = 43;
+    weapon.max_reserve_ammo = 90;
+    pawn.has_weapon_snapshot = true;
+    pawn.weapon_snapshot = weapon;
+    ClientCompetitiveState round;
+    applyRoundState(round, static_cast<uint8_t>(RoundPhase::Live), 83.0f, 4, 2, 1, false);
+    pawn.competitive = &round;
+    const auto authoritative = deriveHudCoreBindings(pawn);
+    if (authoritative.health != 41 || authoritative.health_text != "41 / 100" ||
+        !authoritative.weapon_available || authoritative.weapon_name != "Rifle" ||
+        authoritative.ammo_text != "17 / 30" || authoritative.reserve_text != "43 / 90" ||
+        !authoritative.phase_available || authoritative.phase_text != "LIVE" ||
+        authoritative.clock_text != "1:23" || authoritative.round_text != "Round 4")
+        return fail(name, "authoritative HUD source map lost a core field");
+
+    weapon.reloading = true;
+    pawn.weapon_snapshot = weapon;
+    const auto reloading = deriveHudCoreBindings(pawn);
+    if (reloading.ammo_text != "RELOADING" || !reloading.reloading)
+        return fail(name, "weapon snapshot reload state was not retained");
+    return pass(name);
+}
+
 bool testUiBuyItemStateMatrix()
 {
     const std::string name = "UiBuy_ItemStateMatrix";

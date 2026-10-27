@@ -16,7 +16,7 @@
         <div class="kill-feed-text">{{ kill_feed }}</div>
     </div>
 
-    <div id="crosshair" data-if="alive" style="width: {{ crosshair_gap }}dp; height: {{ crosshair_gap }}dp;">
+    <div id="crosshair" data-if="health_available && alive" style="width: {{ crosshair_gap }}dp; height: {{ crosshair_gap }}dp;">
         <div class="hair hair-top"></div>
         <div class="hair hair-right"></div>
         <div class="hair hair-bottom"></div>
@@ -24,10 +24,10 @@
     </div>
 
     <div id="health-panel">
-        <div class="health-bar-bg">
+        <div class="health-bar-bg" data-if="health_available">
             <div class="health-bar-fill" style="width: {{ health }}%;"></div>
         </div>
-        <div class="health-text">{{ health }} / {{ max_health }}</div>
+        <div class="health-text">{{ health_text }}</div>
         <div class="status-text">ARMOR {{ armor }}</div>
         <div class="status-text" data-if="grounded">
             <span class="grounded">GROUNDED</span>
@@ -38,6 +38,8 @@
     </div>
 
     <div id="ammo-panel">
+        <div class="status-text">{{ connection_text }}</div>
+        <div class="status-text">{{ weapon_name }}</div>
         <div class="ammo-text">{{ ammo_text }}</div>
         <div class="reserve-text">RESERVE {{ reserve_text }}</div>
         <div class="score-text">K: {{ kills }} / D: {{ deaths }}</div>
@@ -80,7 +82,7 @@
     <div id="pause-panel" data-if="pause_visible">
         <div class="panel-title">PAUSED</div>
         <div class="buy-text">Esc Resume</div>
-    </div>    <div id="death-overlay" data-if="!alive">
+</div>    <div id="death-overlay" data-if="health_available && !alive">
         <div class="death-text">YOU DIED</div>
         <div class="respawn-text" data-if="death_timer != ''">{{ death_timer }}</div>
     </div>

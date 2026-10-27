@@ -27,11 +27,15 @@ bool GameHUD::initialize(const char* rmlPath)
     bound &= rml.dataModelBindString(m_model, "speed", "0.0");
     bound &= rml.dataModelBindBool(m_model, "grounded", false);
     bound &= rml.dataModelBindBool(m_model, "connected", false);
+    bound &= rml.dataModelBindString(m_model, "connection_text", "DISCONNECTED");
     bound &= rml.dataModelBindString(m_model, "ping", "0");
-    bound &= rml.dataModelBindInt(m_model, "health", 100);
-    bound &= rml.dataModelBindInt(m_model, "max_health", 100);
-    bound &= rml.dataModelBindString(m_model, "ammo_text", "30 / 30");
-    bound &= rml.dataModelBindString(m_model, "reserve_text", "90");
+    bound &= rml.dataModelBindBool(m_model, "health_available", false);
+    bound &= rml.dataModelBindInt(m_model, "health", 0);
+    bound &= rml.dataModelBindInt(m_model, "max_health", 0);
+    bound &= rml.dataModelBindString(m_model, "health_text", "UNAVAILABLE");
+    bound &= rml.dataModelBindString(m_model, "weapon_name", "UNAVAILABLE");
+    bound &= rml.dataModelBindString(m_model, "ammo_text", "UNAVAILABLE");
+    bound &= rml.dataModelBindString(m_model, "reserve_text", "UNAVAILABLE");
     bound &= rml.dataModelBindString(m_model, "crosshair_gap", "12.0");
     bound &= rml.dataModelBindBool(m_model, "alive", true);
     bound &= rml.dataModelBindString(m_model, "death_timer", "");
@@ -39,8 +43,8 @@ bool GameHUD::initialize(const char* rmlPath)
     bound &= rml.dataModelBindString(m_model, "deaths", "0");
     bound &= rml.dataModelBindString(m_model, "kill_feed", "");
     bound &= rml.dataModelBindBool(m_model, "reloading", false);
-    bound &= rml.dataModelBindString(m_model, "phase_text", "WAITING");
-    bound &= rml.dataModelBindString(m_model, "clock_text", "WAITING");
+    bound &= rml.dataModelBindString(m_model, "phase_text", "UNAVAILABLE");
+    bound &= rml.dataModelBindString(m_model, "clock_text", "");
     bound &= rml.dataModelBindString(m_model, "round_text", "");
     bound &= rml.dataModelBindInt(m_model, "score_t", 0);
     bound &= rml.dataModelBindInt(m_model, "score_ct", 0);
@@ -103,11 +107,9 @@ void GameHUD::shutdown()
 }
 
 void GameHUD::update(float fps, const glm::vec3& position, float speed, bool grounded,
-                     bool connected, float ping,
-                     int32_t health, int32_t max_health, int32_t ammo, int32_t max_ammo,
-                     int32_t reserve_ammo, int32_t max_reserve_ammo,
-                     bool alive, float death_timer, int32_t kills, int32_t deaths,
-                     const std::string& kill_feed, bool reloading, float weapon_spread)
+                     float ping, const UiLogic::HudCoreBindings& core,
+                     float death_timer, int32_t kills, int32_t deaths,
+                     const std::string& kill_feed, float weapon_spread)
 {
     if (!m_model)
         return;
@@ -132,34 +134,28 @@ void GameHUD::update(float fps, const glm::vec3& position, float speed, bool gro
     rml.dataModelSetString(m_model, "pos_z", pos_z);
     rml.dataModelSetString(m_model, "speed", speed_text);
     rml.dataModelSetBool(m_model, "grounded", grounded);
-    rml.dataModelSetBool(m_model, "connected", connected);
+    rml.dataModelSetBool(m_model, "connected", core.connected);
+    rml.dataModelSetString(m_model, "connection_text", core.connection_text.c_str());
     rml.dataModelSetString(m_model, "ping", ping_text);
 
     // Combat info
-    rml.dataModelSetInt(m_model, "health", health);
-    rml.dataModelSetInt(m_model, "max_health", max_health);
-
-    char ammo_buf[32];
-    if (reloading) {
-        snprintf(ammo_buf, sizeof(ammo_buf), "RELOADING");
-    } else {
-        snprintf(ammo_buf, sizeof(ammo_buf), "%d / %d", ammo, max_ammo);
-    }
-    rml.dataModelSetString(m_model, "ammo_text", ammo_buf);
-
-    char reserve_buf[32];
-    snprintf(reserve_buf, sizeof(reserve_buf), "%d / %d", reserve_ammo, max_reserve_ammo);
-    rml.dataModelSetString(m_model, "reserve_text", reserve_buf);
+    rml.dataModelSetBool(m_model, "health_available", core.health_available);
+    rml.dataModelSetInt(m_model, "health", core.health);
+    rml.dataModelSetInt(m_model, "max_health", core.max_health);
+    rml.dataModelSetString(m_model, "health_text", core.health_text.c_str());
+    rml.dataModelSetString(m_model, "weapon_name", core.weapon_name.c_str());
+    rml.dataModelSetString(m_model, "ammo_text", core.ammo_text.c_str());
+    rml.dataModelSetString(m_model, "reserve_text", core.reserve_text.c_str());
 
     char crosshair_gap_buf[32];
     const float crosshair_gap = std::clamp(8.0f + weapon_spread * 900.0f, 8.0f, 58.0f);
     FormatFloat(crosshair_gap_buf, sizeof(crosshair_gap_buf), crosshair_gap, 1);
     rml.dataModelSetString(m_model, "crosshair_gap", crosshair_gap_buf);
 
-    rml.dataModelSetBool(m_model, "alive", alive);
-    rml.dataModelSetBool(m_model, "reloading", reloading);
+    rml.dataModelSetBool(m_model, "alive", core.alive);
+    rml.dataModelSetBool(m_model, "reloading", core.reloading);
 
-    if (!alive && death_timer > 0.0f) {
+    if (core.health_available && !core.alive && death_timer > 0.0f) {
         char timer_buf[32];
         snprintf(timer_buf, sizeof(timer_buf), "Respawning in %.1f...", death_timer);
         rml.dataModelSetString(m_model, "death_timer", timer_buf);
@@ -180,6 +176,7 @@ void GameHUD::update(float fps, const glm::vec3& position, float speed, bool gro
     rml.dataModelDirtyAll(m_model);
 }
 void GameHUD::updateCompetitive(const UiLogic::ClientCompetitiveState& comp,
+                                const UiLogic::HudCoreBindings& core,
                                 const UiLogic::UiState& ui,
                                 const std::string& buy_text,
                                 const std::string& scoreboard_text,
@@ -187,18 +184,17 @@ void GameHUD::updateCompetitive(const UiLogic::ClientCompetitiveState& comp,
 {
     if (!m_model) return;
     RmlUiManager& rml = RmlUiManager::get();
-    rml.dataModelSetString(m_model, "phase_text", UiLogic::formatPhaseText(comp.phase, comp.bomb_planted).c_str());
-    rml.dataModelSetString(m_model, "clock_text", UiLogic::formatClock(comp.phase, comp.phase_time_remaining, comp.bomb_planted).c_str());
-    char round_buf[32]; snprintf(round_buf, sizeof(round_buf), "Round %d", (int)comp.round_number);
-    rml.dataModelSetString(m_model, "round_text", comp.has_round_state ? round_buf : "");
-    rml.dataModelSetInt(m_model, "score_t", comp.score_attackers);
-    rml.dataModelSetInt(m_model, "score_ct", comp.score_defenders);
+    rml.dataModelSetString(m_model, "phase_text", core.phase_text.c_str());
+    rml.dataModelSetString(m_model, "clock_text", core.clock_text.c_str());
+    rml.dataModelSetString(m_model, "round_text", core.round_text.c_str());
+    rml.dataModelSetInt(m_model, "score_t", core.score_attackers);
+    rml.dataModelSetInt(m_model, "score_ct", core.score_defenders);
     rml.dataModelSetInt(m_model, "money", comp.money);
     rml.dataModelSetInt(m_model, "buy_money", comp.money);
     rml.dataModelSetInt(m_model, "armor", comp.armor);
     rml.dataModelSetBool(m_model, "has_helmet", comp.has_helmet);
     rml.dataModelSetBool(m_model, "has_kit", comp.has_kit);
-    rml.dataModelSetBool(m_model, "bomb_planted", comp.bomb_planted);
+    rml.dataModelSetBool(m_model, "bomb_planted", core.bomb_planted);
     rml.dataModelSetBool(m_model, "buy_open", UiLogic::buyWindowOpen(comp));
     rml.dataModelSetBool(m_model, "buy_visible", ui.screen == UiLogic::UiScreen::Buy);
     rml.dataModelSetBool(m_model, "team_visible", ui.screen == UiLogic::UiScreen::TeamSelect);

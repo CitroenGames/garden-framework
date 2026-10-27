@@ -19,6 +19,7 @@
 #include <cmath>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -1378,6 +1379,68 @@ bool testCompetitiveBuyMatrix()
     return pass(name);
 }
 
+bool testCompetitiveBuySequenceBoundaries()
+{
+    const std::string name = "CompetitiveBuySequenceBoundaries";
+    using namespace Competitive;
+
+    const WeaponCatalogDef* ak = findCatalogByAlias("ak47");
+    if (!ak)
+        return fail(name, "ak47 missing");
+
+    BuySystem buy;
+    buy.config = fastCompConfig();
+    MoneyComponent money;
+    money.reset(ak->price, 16000);
+    InventoryComponent inventory;
+    PlayerLoadoutComponent loadout;
+    WeaponComponent weapon;
+    ArmorComponent armor;
+    FpsLogic::grantLoadout(inventory, loadout, weapon, WeaponType::PISTOL);
+    loadout.slots[static_cast<int>(WeaponSlot::Primary)] = WeaponSlotState{};
+    FpsLogic::syncInventory(inventory, loadout);
+
+    BuyContext context;
+    context.client_id = 91;
+    context.request_seq = std::numeric_limits<uint32_t>::max();
+    context.phase = RoundPhase::Freeze;
+    context.alive = true;
+    context.in_buy_zone = true;
+    context.team_id = teamId(FpsTeam::Attackers);
+    context.money = &money;
+    context.inventory = &inventory;
+    context.loadout = &loadout;
+    context.weapon = &weapon;
+    context.armor = &armor;
+
+    if (buy.buy(context, ak->id) != BuyResult::Ok || money.money() != 0)
+        return fail(name, "maximum sequence or exact-funds buy failed");
+
+    const int32_t balance_after_maximum = money.money();
+    context.request_seq = 0;
+    if (buy.buy(context, ak->id) != BuyResult::DuplicateRequest ||
+        money.money() != balance_after_maximum)
+        return fail(name, "wrapped sequence replay was accepted or charged");
+
+    // Only lifecycle ownership may reset the per-client sequence stream.
+    // ServerModule does this on disconnect, rather than on pawn despawn.
+    buy.clearClient(context.client_id);
+    money.reset(ak->price, 16000);
+    context.request_seq = 1;
+    if (buy.buy(context, ak->id) != BuyResult::Ok || money.money() != 0)
+        return fail(name, "disconnected client stream did not accept a fresh sequence");
+
+    MoneyComponent protocol_balance;
+    protocol_balance.wallet.balance = std::numeric_limits<int64_t>::max();
+    if (protocol_balance.money() != std::numeric_limits<int32_t>::max())
+        return fail(name, "wide wallet did not clamp to protocol maximum");
+    protocol_balance.wallet.balance = -1;
+    if (protocol_balance.money() != 0)
+        return fail(name, "negative wallet did not clamp to protocol minimum");
+
+    return pass(name);
+}
+
 bool testCompetitiveTeamAutoAssign()
 {
     const std::string name = "CompetitiveTeamAutoAssign";
@@ -1949,6 +2012,7 @@ int main()
     ok = testCompetitiveEconomyStreakCap() && ok;
     ok = testCompetitiveWorldEconomyHooks() && ok;
     ok = testCompetitiveBuyMatrix() && ok;
+    ok = testCompetitiveBuySequenceBoundaries() && ok;
     ok = testCompetitiveTeamAutoAssign() && ok;
     ok = testCompetitiveSessionFlow() && ok;
     ok = testCompetitiveBuyZoneOccupancy() && ok;
@@ -1966,6 +2030,8 @@ int main()
     ok = testC4WorldAuthority() && ok;
     ok = testGrenadeEffectLifecycle() && ok;
     ok = testGrenadeEffectImpactTargetsAndCleanup() && ok;
+    ok = testGrenadeProjectileMotionAndAuthoritativeImpact() && ok;
+    ok = testGrenadeOverlapsSurviveOwnerDeath() && ok;
     ok = testBotDifficultyClampTable() && ok;
     ok = testBotPerceptionBlindfold() && ok;
     ok = testBotFsmPlantDefendDefuse() && ok;
@@ -1987,6 +2053,7 @@ int main()
     ok = testUiModalInputIsolation() && ok;
     ok = testUiMenusRequireCompetitiveState() && ok;
     ok = testUiClockFormatting() && ok;
+    ok = testUiHudCoreBindingSources() && ok;
     ok = testUiBuyItemStateMatrix() && ok;
     ok = testUiScoreboardMoneyVisibility() && ok;
     ok = testUiRadarProjection() && ok;

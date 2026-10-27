@@ -37,6 +37,10 @@ struct FpsGrenadeProjectileComponent {
     uint16_t owner_client_id = 0;
     uint8_t owner_team_id = 0;
     glm::vec3 velocity{0.0f};
+    // Collision is resolved by the server's world-query adapter.  Store the
+    // reported point as value data so the fixed-tick detonation is independent
+    // of callback timing and cannot read a stale collision object.
+    glm::vec3 impact_position{0.0f};
     float fuse_remaining = 0.0f;
     float effect_duration = 0.0f;
     bool impact_requested = false;
@@ -117,19 +121,33 @@ inline entt::entity spawnGrenadeProjectile(
     registry.emplace<TransformComponent>(projectile, spawn.position.x, spawn.position.y, spawn.position.z);
     registry.emplace<FpsGrenadeProjectileComponent>(projectile, FpsGrenadeProjectileComponent{
         spawn.weapon_type, spawn.effect_kind, spawn.owner, spawn.owner_client_id, spawn.owner_team_id,
-        spawn.velocity, spawn.fuse_seconds, spawn.effect_duration_seconds, false, false});
+        spawn.velocity, spawn.position, spawn.fuse_seconds, spawn.effect_duration_seconds, false, false});
     return projectile;
 }
 
 // Collision integration is intentionally outside this foundation.  The server
 // collision path may request an impact; the next fixed tick owns detonation.
-inline bool requestGrenadeProjectileImpact(entt::registry& registry, entt::entity projectile)
+inline bool requestGrenadeProjectileImpact(
+    entt::registry& registry,
+    entt::entity projectile,
+    const glm::vec3& impact_position)
 {
     auto* state = registry.try_get<FpsGrenadeProjectileComponent>(projectile);
-    if (!state || state->detonation_latched)
+    if (!state || state->detonation_latched || !isFiniteGrenadeVector(impact_position))
         return false;
+    state->impact_position = impact_position;
     state->impact_requested = true;
     return true;
+}
+
+// Legacy callers that only know the projectile entity preserve the last
+// authoritative simulation position.  New collision adapters must use the
+// point-taking overload, which records the actual fixed-tick detonation point.
+inline bool requestGrenadeProjectileImpact(entt::registry& registry, entt::entity projectile)
+{
+    const auto* transform = registry.try_get<TransformComponent>(projectile);
+    return transform != nullptr && requestGrenadeProjectileImpact(
+        registry, projectile, transform->position);
 }
 
 // Produce a stable entity order before a future area/LOS rule examines targets.
@@ -213,9 +231,10 @@ inline FpsGrenadeTickResult tickGrenadeEffects(
         if (!registry.valid(projectile))
             continue;
         auto& state = registry.get<FpsGrenadeProjectileComponent>(projectile);
-        const auto& transform = registry.get<TransformComponent>(projectile);
+        auto& transform = registry.get<TransformComponent>(projectile);
         if (state.detonation_latched || state.effect_kind == FpsGrenadeEffectKind::None ||
             !isFiniteGrenadeVector(transform.position) || !std::isfinite(state.fuse_remaining) ||
+            !isFiniteGrenadeVector(state.velocity) || !isFiniteGrenadeVector(state.impact_position) ||
             !std::isfinite(state.effect_duration) || state.fuse_remaining < 0.0f ||
             state.effect_duration < 0.0f) {
             registry.destroy(projectile);
@@ -224,11 +243,17 @@ inline FpsGrenadeTickResult tickGrenadeEffects(
 
         const bool detonate = state.impact_requested || state.fuse_remaining <= fixed_delta;
         if (!detonate) {
+            // Projectile motion is simulation state.  Collision adapters run
+            // before this function and may replace the position through the
+            // impact request path; presentation never participates here.
+            transform.position += state.velocity * fixed_delta;
             state.fuse_remaining -= fixed_delta;
             continue;
         }
 
         state.detonation_latched = true;
+        if (state.impact_requested)
+            transform.position = state.impact_position;
         const entt::entity effect = registry.create();
         registry.emplace<TransformComponent>(effect, transform.position.x, transform.position.y, transform.position.z);
         registry.emplace<FpsGrenadeEffectComponent>(effect, FpsGrenadeEffectComponent{

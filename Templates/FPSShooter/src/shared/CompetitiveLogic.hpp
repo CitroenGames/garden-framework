@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -599,7 +600,13 @@ private:
 struct MoneyComponent {
     ResourceWalletComponent wallet; // balance = money, cap = money_cap
     uint8_t loss_streak = 0;
-    int32_t money() const { return static_cast<int32_t>(wallet.balance); }
+    // Competitive protocol messages carry a signed 32-bit balance. Keep the
+    // game-facing view representable even if a future generic wallet owner
+    // supplies a wider balance directly.
+    int32_t money() const {
+        return static_cast<int32_t>(std::clamp<int64_t>(wallet.balance, 0,
+            std::numeric_limits<int32_t>::max()));
+    }
     void reset(int32_t start, int32_t cap) {
         wallet = ResourceWalletComponent{};
         wallet.setCap(cap);

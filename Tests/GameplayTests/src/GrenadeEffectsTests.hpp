@@ -1,7 +1,17 @@
 // C4 grenade-effect foundation tests included by GameplayTests main.cpp.
 #include "shared/GrenadeEffects.hpp"
 
+#include <cstddef>
+#include <limits>
 #include <string>
+
+static std::size_t grenadeEffectCount(entt::registry& registry)
+{
+    std::size_t count = 0;
+    for ([[maybe_unused]] const auto entity : registry.view<FpsLogic::FpsGrenadeEffectComponent>())
+        ++count;
+    return count;
+}
 
 bool testGrenadeEffectLifecycle()
 {
@@ -85,5 +95,76 @@ bool testGrenadeEffectImpactTargetsAndCleanup()
     if (!registry.view<FpsLogic::FpsGrenadeProjectileComponent>().empty() ||
         !registry.view<FpsLogic::FpsGrenadeEffectComponent>().empty())
         return fail(name, "round/world cleanup left grenade authority entities behind");
+    return pass(name);
+}
+
+bool testGrenadeProjectileMotionAndAuthoritativeImpact()
+{
+    const std::string name = "Grenade_MotionImpactResolution";
+    entt::registry registry;
+    const entt::entity projectile = FpsLogic::spawnGrenadeProjectile(registry, {
+        WeaponType::HEGRENADE, FpsLogic::FpsGrenadeEffectKind::HighExplosive, entt::null, 41,
+        FpsLogic::kTeamAttackers, glm::vec3(1.0f, 2.0f, 3.0f), glm::vec3(8.0f, -4.0f, 2.0f),
+        1.0f, 0.5f});
+    if (projectile == entt::null)
+        return fail(name, "valid moving projectile was rejected");
+
+    const auto moving_tick = FpsLogic::tickGrenadeEffects(registry, 0.25f, true);
+    if (!moving_tick.detonated_projectiles.empty() ||
+        !approxVec3(registry.get<TransformComponent>(projectile).position, glm::vec3(3.0f, 1.0f, 3.5f)))
+        return fail(name, "fixed tick did not advance projectile simulation position");
+
+    if (FpsLogic::requestGrenadeProjectileImpact(
+            registry, projectile, glm::vec3(std::numeric_limits<float>::quiet_NaN(), 0.0f, 0.0f)) ||
+        !FpsLogic::requestGrenadeProjectileImpact(registry, projectile, glm::vec3(9.0f, 4.0f, -2.0f)))
+        return fail(name, "authoritative impact point validation was wrong");
+
+    const auto impact_tick = FpsLogic::tickGrenadeEffects(registry, 0.01f, true);
+    if (impact_tick.detonated_projectiles.size() != 1 ||
+        impact_tick.detonated_projectiles.front() != projectile || impact_tick.created_effects.size() != 1 ||
+        registry.valid(projectile))
+        return fail(name, "impact did not consume the projectile exactly once");
+    const auto effect = impact_tick.created_effects.front();
+    if (!approxVec3(registry.get<TransformComponent>(effect).position, glm::vec3(9.0f, 4.0f, -2.0f)) ||
+        FpsLogic::requestGrenadeProjectileImpact(registry, projectile, glm::vec3(0.0f)))
+        return fail(name, "effect did not resolve at the server collision point");
+    return pass(name);
+}
+
+bool testGrenadeOverlapsSurviveOwnerDeath()
+{
+    const std::string name = "Grenade_OverlapOwnerDeath";
+    entt::registry registry;
+    const entt::entity owner = registry.create();
+    registry.emplace<FpsHealthComponent>(owner, 100);
+    const entt::entity first = FpsLogic::spawnGrenadeProjectile(registry, {
+        WeaponType::SMOKEGRENADE, FpsLogic::FpsGrenadeEffectKind::Smoke, owner, 51,
+        FpsLogic::kTeamAttackers, glm::vec3(5.0f, 0.0f, 0.0f), glm::vec3(0.0f), 5.0f, 0.20f});
+    const entt::entity second = FpsLogic::spawnGrenadeProjectile(registry, {
+        WeaponType::FLASHBANG, FpsLogic::FpsGrenadeEffectKind::Flash, owner, 51,
+        FpsLogic::kTeamAttackers, glm::vec3(5.0f, 0.0f, 0.0f), glm::vec3(0.0f), 5.0f, 0.30f});
+    registry.get<FpsHealthComponent>(owner).takeDamage(100);
+    if (!FpsLogic::requestGrenadeProjectileImpact(registry, first, glm::vec3(5.0f)) ||
+        !FpsLogic::requestGrenadeProjectileImpact(registry, second, glm::vec3(5.0f)))
+        return fail(name, "overlap fixture could not report server impacts");
+
+    const auto detonated = FpsLogic::tickGrenadeEffects(registry, 0.01f, true);
+    if (detonated.created_effects.size() != 2 ||
+        registry.get<FpsHealthComponent>(owner).alive ||
+        grenadeEffectCount(registry) != 2)
+        return fail(name, "owner death did not preserve two authoritative effects");
+    const auto& first_effect = registry.get<FpsLogic::FpsGrenadeEffectComponent>(detonated.created_effects[0]);
+    const auto& second_effect = registry.get<FpsLogic::FpsGrenadeEffectComponent>(detonated.created_effects[1]);
+    if (first_effect.owner != owner || second_effect.owner != owner ||
+        first_effect.kind != FpsLogic::FpsGrenadeEffectKind::Smoke ||
+        second_effect.kind != FpsLogic::FpsGrenadeEffectKind::Flash)
+        return fail(name, "overlap effect order or owner attribution was not stable");
+
+    FpsLogic::tickGrenadeEffects(registry, 0.20f, true);
+    if (grenadeEffectCount(registry) != 1)
+        return fail(name, "overlapping effects did not retain their independent lifetimes");
+    FpsLogic::tickGrenadeEffects(registry, 0.10f, false);
+    if (!registry.view<FpsLogic::FpsGrenadeEffectComponent>().empty())
+        return fail(name, "round cleanup did not remove surviving overlapping effect");
     return pass(name);
 }

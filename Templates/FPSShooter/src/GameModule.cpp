@@ -216,12 +216,14 @@ static Net::ReconciliationSmoothing g_recon_smoothing;
 static int32_t g_local_health = 100;
 static int32_t g_local_max_health = 100;
 static bool g_local_alive = true;
+static bool g_has_authoritative_health_snapshot = false;
 static WeaponType g_local_weapon_type = WeaponType::RIFLE;
 static int32_t g_local_ammo = 30;
 static int32_t g_local_max_ammo = 30;
 static int32_t g_local_reserve_ammo = 90;
 static int32_t g_local_max_reserve_ammo = 90;
 static bool g_local_reloading = false;
+static bool g_has_authoritative_weapon_snapshot = false;
 static float g_local_fire_cooldown = 0.0f;
 static float g_local_accuracy_penalty = 0.0f;
 static float g_local_recoil_index = 0.0f;
@@ -377,6 +379,8 @@ GAME_API bool gardenGameInit(EngineServices* services)
             }
             if (msg.victim_client_id == g_network.getClientId()) {
                 g_local_health = msg.health_remaining;
+                g_local_alive = msg.health_remaining > 0;
+                g_has_authoritative_health_snapshot = true;
                 AudioEventSystem::get().play2D("player.hurt");
                 LOG_ENGINE_INFO("Took {} damage! Health: {}", msg.damage, g_local_health);
             }
@@ -398,6 +402,7 @@ GAME_API bool gardenGameInit(EngineServices* services)
                 AudioEventSystem::get().play2D("player.death");
                 g_local_alive = false;
                 g_local_health = 0;
+                g_has_authoritative_health_snapshot = true;
                 g_local_deaths++;
                 g_death_timer = RESPAWN_DELAY;
                 LOG_ENGINE_INFO("You died! Killed by Player {}", msg.killer_client_id);
@@ -435,6 +440,7 @@ GAME_API bool gardenGameInit(EngineServices* services)
                 g_local_alive = true;
                 g_local_health = msg.health;
                 g_local_max_health = msg.health;
+                g_has_authoritative_health_snapshot = true;
                 g_death_timer = 0.0f;
                 g_local_fire_cooldown = 0.0f;
                 g_local_reloading = false;
@@ -473,6 +479,7 @@ GAME_API bool gardenGameInit(EngineServices* services)
             g_local_weapon_spread = msg.spread;
             g_local_accuracy_penalty = msg.accuracy_penalty;
             g_local_recoil_index = msg.recoil_index;
+            g_has_authoritative_weapon_snapshot = true;
             break;
         }
         default:
@@ -906,12 +913,24 @@ GAME_API void gardenGameUpdate(float delta_time)
             kill_feed_text += it->killer_name + " killed " + it->victim_name;
         }
 
-        g_hud.update(fps, pos, speed, grounded, g_network.isConnected(),
-                     g_network.isConnected() ? g_network.getStats().ping_ms : 0.0f,
-                     g_local_health, g_local_max_health, g_local_ammo, g_local_max_ammo,
-                     g_local_reserve_ammo, g_local_max_reserve_ammo,
-                     g_local_alive, g_death_timer, g_local_kills, g_local_deaths,
-                     kill_feed_text, g_local_reloading, g_local_weapon_spread);
+        UiLogic::HudSourceState hud_source;
+        hud_source.connected = g_network.isConnected();
+        hud_source.has_local_pawn = hud_source.connected && game_world->registry.valid(g_player_entity);
+        if (hud_source.has_local_pawn)
+            hud_source.pawn_health = game_world->registry.try_get<FpsHealthComponent>(g_player_entity);
+        hud_source.has_damage_snapshot = g_has_authoritative_health_snapshot;
+        hud_source.damage_snapshot = FpsHealthComponent{g_local_max_health};
+        hud_source.damage_snapshot.health = g_local_health;
+        hud_source.damage_snapshot.alive = g_local_alive;
+        hud_source.has_weapon_snapshot = g_has_authoritative_weapon_snapshot;
+        hud_source.weapon_snapshot = makeLocalWeaponSnapshot();
+        hud_source.competitive = &g_comp;
+        const UiLogic::HudCoreBindings hud_core = UiLogic::deriveHudCoreBindings(hud_source);
+
+        g_hud.update(fps, pos, speed, grounded,
+                     hud_source.connected ? g_network.getStats().ping_ms : 0.0f,
+                     hud_core, g_death_timer, g_local_kills, g_local_deaths,
+                     kill_feed_text, g_local_weapon_spread);
         // Competitive HUD text (featured buy list + local scoreboard row only;
         // full roster/money snapshots are not replicated yet - no fabricated rows).
         std::string buy_text;
@@ -936,7 +955,7 @@ GAME_API void gardenGameUpdate(float delta_time)
             snprintf(line, sizeof(line), "%s K%d D%d money %d\n(full roster pending replication)", row.display_name.c_str(), row.kills, row.deaths, row.money_display);
             scoreboard_text = line;
         }
-        g_hud.updateCompetitive(g_comp, g_ui, buy_text, scoreboard_text, g_radar);
+        g_hud.updateCompetitive(g_comp, hud_core, g_ui, buy_text, scoreboard_text, g_radar);
     }
 }
 
@@ -994,6 +1013,7 @@ GAME_API void gardenOnLevelLoaded()
     g_local_health = 100;
     g_local_max_health = 100;
     g_local_alive = true;
+    g_has_authoritative_health_snapshot = false;
     g_local_kills = 0;
     g_local_deaths = 0;
     g_death_timer = 0.0f;
@@ -1010,6 +1030,7 @@ GAME_API void gardenOnLevelLoaded()
     g_local_reserve_ammo = def.max_reserve_ammo;
     g_local_max_reserve_ammo = def.max_reserve_ammo;
     g_local_reloading = false;
+    g_has_authoritative_weapon_snapshot = false;
     g_local_fire_cooldown = 0.0f;
     g_local_accuracy_penalty = 0.0f;
     g_local_recoil_index = 0.0f;
