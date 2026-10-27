@@ -971,6 +971,37 @@ bool testCompetitiveBuyMatrix()
     BuyContext ctx; ctx.client_id = 7; ctx.phase = RoundPhase::Freeze; ctx.alive = true;
     ctx.in_buy_zone = true; ctx.team_id = teamId(FpsTeam::Attackers);
     ctx.money = &money; ctx.inventory = &inv; ctx.loadout = &lo; ctx.weapon = &wpn; ctx.armor = &armor;
+    struct BuyState {
+        Competitive::MoneyComponent money;
+        InventoryComponent inventory;
+        PlayerLoadoutComponent loadout;
+        WeaponComponent weapon;
+        ArmorComponent armor;
+    };
+    auto snapshot = [&]() { return BuyState{money, inv, lo, wpn, armor}; };
+    auto unchanged = [](const BuyState& before, const BuyState& after) {
+        if (before.money.wallet.balance != after.money.wallet.balance || before.money.wallet.cap != after.money.wallet.cap ||
+            before.money.loss_streak != after.money.loss_streak || before.inventory.active_slot != after.inventory.active_slot ||
+            before.loadout.active_slot != after.loadout.active_slot || before.armor.armor != after.armor.armor ||
+            before.armor.has_helmet != after.armor.has_helmet || before.armor.has_defuse_kit != after.armor.has_defuse_kit)
+            return false;
+        for (size_t i = 0; i < before.inventory.slots.size(); ++i) {
+            if (before.inventory.slots[i].item_def_id != after.inventory.slots[i].item_def_id ||
+                before.inventory.slots[i].count != after.inventory.slots[i].count)
+                return false;
+        }
+        for (size_t i = 0; i < static_cast<size_t>(WeaponSlot::COUNT); ++i) {
+            const auto& a = before.loadout.slots[i]; const auto& b = after.loadout.slots[i];
+            if (a.type != b.type || a.ammo != b.ammo || a.reserve != b.reserve || a.occupied != b.occupied)
+                return false;
+        }
+        return before.weapon.weapon_type == after.weapon.weapon_type && before.weapon.ammo == after.weapon.ammo &&
+               before.weapon.max_ammo == after.weapon.max_ammo && before.weapon.reserve_ammo == after.weapon.reserve_ammo &&
+               before.weapon.max_reserve_ammo == after.weapon.max_reserve_ammo && before.weapon.fire_cooldown == after.weapon.fire_cooldown &&
+               before.weapon.reload_timer == after.weapon.reload_timer && before.weapon.accuracy_penalty == after.weapon.accuracy_penalty &&
+               before.weapon.recoil_index == after.weapon.recoil_index && before.weapon.time_since_last_shot == after.weapon.time_since_last_shot &&
+               before.weapon.reloading == after.weapon.reloading;
+    };
     const WeaponCatalogDef* ak = findCatalogByAlias("ak47");
     if (!ak) return fail(name, "ak47 missing");
     ctx.request_seq = 1;
@@ -978,18 +1009,24 @@ bool testCompetitiveBuyMatrix()
     if (money.money() != 5000 - 2700) return fail(name, "buy did not charge exactly price");
     if (lo.slots[(int)WeaponSlot::Primary].type != WeaponType::AK47) return fail(name, "AK not in primary slot");
     // Duplicate seq: exactly-once, no second charge.
+    BuyState duplicate_before = snapshot();
     if (buy.buy(ctx, ak->id) != BuyResult::DuplicateRequest) return fail(name, "duplicate seq not deduped");
-    if (money.money() != 5000 - 2700) return fail(name, "duplicate seq charged again");
+    if (!unchanged(duplicate_before, snapshot())) return fail(name, "duplicate seq mutated purchase state");
     // Insufficient funds.
     ctx.request_seq = 2; money.reset(100, 16000);
+    BuyState before = snapshot();
     if (buy.buy(ctx, ak->id) != BuyResult::InsufficientFunds) return fail(name, "funds reject wrong");
-    if (money.money() != 100) return fail(name, "failed buy mutated money");
+    if (!unchanged(before, snapshot())) return fail(name, "funds reject mutated purchase state");
     // Phase closed (RoundEnd).
     money.reset(9000, 16000); ctx.request_seq = 3; ctx.phase = RoundPhase::RoundEnd;
+    before = snapshot();
     if (buy.buy(ctx, ak->id) != BuyResult::PhaseClosed) return fail(name, "phase reject wrong");
+    if (!unchanged(before, snapshot())) return fail(name, "phase reject mutated purchase state");
     // Live after buy window.
     ctx.request_seq = 4; ctx.phase = RoundPhase::Live; ctx.seconds_into_live = 21.0f;
+    before = snapshot();
     if (buy.buy(ctx, ak->id) != BuyResult::BuyTimeExpired) return fail(name, "buy window reject wrong");
+    if (!unchanged(before, snapshot())) return fail(name, "buy window reject mutated purchase state");
     // Live inside window succeeds for a pistol.
     ctx.request_seq = 5; ctx.seconds_into_live = 5.0f;
     const auto* deagle = findCatalogByAlias("deagle");
@@ -997,35 +1034,49 @@ bool testCompetitiveBuyMatrix()
     if (buy.buy(ctx, deagle->id) != BuyResult::Ok) return fail(name, "Live in-window buy rejected");
     // Outside zone.
     ctx.request_seq = 6; ctx.phase = RoundPhase::Freeze; ctx.seconds_into_live = 0; ctx.in_buy_zone = false;
+    before = snapshot();
     if (buy.buy(ctx, ak->id) != BuyResult::OutsideBuyZone) return fail(name, "zone reject wrong");
+    if (!unchanged(before, snapshot())) return fail(name, "zone reject mutated purchase state");
     ctx.in_buy_zone = true;
     // Wrong team: M4A4 is Defenders-only, buyer is Attackers.
     ctx.request_seq = 7;
     const auto* m4 = findCatalogByAlias("m4a1");
+    before = snapshot();
     if (buy.buy(ctx, m4->id) != BuyResult::WrongTeam) return fail(name, "team reject wrong");
+    if (!unchanged(before, snapshot())) return fail(name, "team reject mutated purchase state");
     // Dead.
     ctx.request_seq = 8; ctx.alive = false;
+    before = snapshot();
     if (buy.buy(ctx, ak->id) != BuyResult::Dead) return fail(name, "dead reject wrong");
+    if (!unchanged(before, snapshot())) return fail(name, "dead reject mutated purchase state");
     ctx.alive = true;
     // Unknown item.
     ctx.request_seq = 9;
+    before = snapshot();
     if (buy.buy(ctx, 9999) != BuyResult::UnknownItem) return fail(name, "unknown reject wrong");
+    if (!unchanged(before, snapshot())) return fail(name, "unknown reject mutated purchase state");
     // Armor + kit: kit is Defenders-only; armor ok then AlreadyOwned.
     ctx.request_seq = 10;
     const auto* vest = findCatalogByAlias("vest");
     if (buy.buy(ctx, vest->id) != BuyResult::Ok || armor.armor != 100) return fail(name, "armor buy failed");
     ctx.request_seq = 11;
+    before = snapshot();
     if (buy.buy(ctx, vest->id) != BuyResult::AlreadyOwned) return fail(name, "armor re-buy not AlreadyOwned");
+    if (!unchanged(before, snapshot())) return fail(name, "owned reject mutated purchase state");
     ctx.request_seq = 12;
     const auto* kit = findCatalogByAlias("defuser");
+    before = snapshot();
     if (buy.buy(ctx, kit->id) != BuyResult::WrongTeam) return fail(name, "kit should be Defenders-only");
+    if (!unchanged(before, snapshot())) return fail(name, "kit team reject mutated purchase state");
     ctx.team_id = teamId(FpsTeam::Defenders); ctx.request_seq = 13;
     if (buy.buy(ctx, kit->id) != BuyResult::Ok || !armor.has_defuse_kit) return fail(name, "kit buy failed for Defender");
     // Grenade carry limit: second grenade while slot occupied.
     ctx.request_seq = 14; const auto* he = findCatalogByAlias("hegrenade");
     if (buy.buy(ctx, he->id) != BuyResult::Ok) return fail(name, "grenade buy failed");
     ctx.request_seq = 15; const auto* flash = findCatalogByAlias("flashbang");
+    before = snapshot();
     if (buy.buy(ctx, flash->id) != BuyResult::CarryLimit) return fail(name, "grenade carry limit wrong");
+    if (!unchanged(before, snapshot())) return fail(name, "carry reject mutated purchase state");
     // Replace occupied primary: old weapon returned as dropped (server spawns it).
     money.reset(9000, 16000); ctx.team_id = teamId(FpsTeam::Attackers); ctx.request_seq = 16;
     FpsLogic::DroppedItem dropped{WeaponType::COUNT, 0, 0};
@@ -1038,6 +1089,11 @@ bool testCompetitiveBuyMatrix()
     ctx.request_seq = 17; FpsLogic::DroppedItem none{WeaponType::COUNT, 0, 0};
     if (buy.buy(ctx, ak->id, &none) != BuyResult::Ok) return fail(name, "empty-slot buy rejected");
     if (none.type != WeaponType::COUNT) return fail(name, "empty slot produced a dropped weapon");
+    // A zero sequence is malformed and cannot bypass replay protection.
+    ctx.request_seq = 0;
+    before = snapshot();
+    if (buy.buy(ctx, ak->id) != BuyResult::DuplicateRequest) return fail(name, "zero sequence not rejected");
+    if (!unchanged(before, snapshot())) return fail(name, "zero sequence mutated purchase state");
     return pass(name);
 }
 
@@ -1457,6 +1513,7 @@ bool testFpsDeathLifecycle()
 }
 
 #include "C4Tests.hpp"
+#include "GrenadeEffectsTests.hpp"
 #include "BotTests.hpp"
 #include "UiLogicTests.hpp"
 #include "AudioTests.hpp"
@@ -1501,6 +1558,8 @@ int main()
     ok = testC4Timer40() && ok;
     ok = testC4CarrierDropPickup() && ok;
     ok = testC4WorldAuthority() && ok;
+    ok = testGrenadeEffectLifecycle() && ok;
+    ok = testGrenadeEffectImpactTargetsAndCleanup() && ok;
     ok = testBotDifficultyClampTable() && ok;
     ok = testBotPerceptionBlindfold() && ok;
     ok = testBotFsmPlantDefendDefuse() && ok;

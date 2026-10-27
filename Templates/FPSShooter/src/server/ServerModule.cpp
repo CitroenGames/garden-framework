@@ -21,6 +21,7 @@
 #include "shared/FpsAnimationPresentation.hpp"
 #include "shared/FpsGameLogic.hpp"
 #include "shared/WorldItemLifecycle.hpp"
+#include "shared/GrenadeEffects.hpp"
 #include "shared/CompetitiveLogic.hpp"
 #include "shared/BombSiteTriggers.hpp"
 #include "shared/BuyZoneTriggers.hpp"
@@ -1082,6 +1083,7 @@ static void competitiveFreezeBombSetup()
 {
     world* w = g_server_services ? g_server_services->game_world : nullptr;
     if (!w) return;
+    FpsLogic::clearGrenadeEffects(w->registry);
     (void)configureBombSites(*w);
     g_bomb_system.resetForRound();
     std::vector<entt::entity> attackers;
@@ -1281,6 +1283,10 @@ static void handleCompetitiveBuy(uint16_t client_id, BitReader& reader)
     // Type byte already consumed by the network dispatcher.
     uint32_t seq = reader.readUInt32();
     uint16_t item_id = reader.readUInt16();
+    if (reader.hasError()) {
+        LOG_ENGINE_WARN("Ignoring malformed competitive buy request from client {}", client_id);
+        return;
+    }
     world* w = g_server_services ? g_server_services->game_world : nullptr;
     if (!w) return;
     entt::entity e = findPlayerEntity(*w, client_id);
@@ -1443,6 +1449,7 @@ static void spawnPlayerForClient(uint16_t client_id)
             w->registry.get<FpsHealthComponent>(player_entity),
             w->registry.get<TeamComponent>(player_entity),
             g_round_system.state.phase);
+        FPSShooter::synchronizeSpectatorStates(w->registry, g_round_system.state);
     }
 
     ensurePlayerPhysicsBody(*w, player_entity);
@@ -1492,6 +1499,8 @@ static void spawnPlayerForClient(uint16_t client_id)
 static void despawnPlayerForClient(uint16_t client_id)
 {
     world* w = g_server_services->game_world;
+    if (g_competitive)
+        g_buy_system.clearClient(client_id);
 
     auto view = w->registry.view<NetworkedEntity>();
     for (auto entity : view) {
@@ -1661,6 +1670,7 @@ GAME_API void gardenServerShutdown()
     g_server_network.shutdown();
     if (g_server_services && g_server_services->game_world) {
         auto& registry = g_server_services->game_world->registry;
+        FpsLogic::clearGrenadeEffects(registry);
         if (registry.ctx().find<Competitive::CompetitiveWorldContext>())
             registry.ctx().erase<Competitive::CompetitiveWorldContext>();
     }
@@ -1707,7 +1717,12 @@ GAME_API void gardenServerUpdate(float delta_time)
         if (g_bot_target_count > 0) { (void)loadBotNavMesh(); tickBots(w->fixed_delta > 0.0f ? w->fixed_delta : delta_time); }
         tickBombServer(w->fixed_delta > 0.0f ? w->fixed_delta : delta_time);
         g_round_system.tick(w->fixed_delta > 0.0f ? w->fixed_delta : delta_time, rin);
+        FpsLogic::tickGrenadeEffects(
+            w->registry,
+            w->fixed_delta > 0.0f ? w->fixed_delta : delta_time,
+            g_round_system.state.phase == Competitive::RoundPhase::Live);
         FPSShooter::synchronizePawnLifecycles(w->registry, g_round_system.state);
+        FPSShooter::synchronizeSpectatorStates(w->registry, g_round_system.state);
         (void)prev_phase;
         // ROUND_STATE heartbeat 1 Hz (spec S7); phase changes broadcast on enter.
         auto& round_heartbeat = competitiveContext().round_heartbeat;

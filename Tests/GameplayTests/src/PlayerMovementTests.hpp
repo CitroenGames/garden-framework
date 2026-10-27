@@ -67,6 +67,89 @@ bool testPlayerPawnLifecycleContract()
     return pass(name);
 }
 
+bool testPlayerSpectatorStateContract()
+{
+    const std::string name = "Player_SpectatorStateContract";
+
+    entt::registry registry;
+    const entt::entity observer = registry.create();
+    const entt::entity teammate = registry.create();
+    const entt::entity enemy = registry.create();
+    const entt::entity dead_teammate = registry.create();
+    registry.emplace<FpsHealthComponent>(observer, 100).takeDamage(100);
+    registry.emplace<FpsHealthComponent>(teammate, 100);
+    registry.emplace<FpsHealthComponent>(enemy, 100);
+    registry.emplace<FpsHealthComponent>(dead_teammate, 100).takeDamage(100);
+    registry.emplace<TeamComponent>(observer, TeamComponent{FpsLogic::kTeamAttackers});
+    registry.emplace<TeamComponent>(teammate, TeamComponent{FpsLogic::kTeamAttackers});
+    registry.emplace<TeamComponent>(enemy, TeamComponent{FpsLogic::kTeamDefenders});
+    registry.emplace<TeamComponent>(dead_teammate, TeamComponent{FpsLogic::kTeamAttackers});
+
+    Competitive::MatchStateComponent match;
+    match.phase = Competitive::RoundPhase::Live;
+    FPSShooter::synchronizeSpectatorStates(registry, match);
+    if (const auto& spectator = registry.get<FPSShooter::FpsSpectatorComponent>(observer);
+        !spectator.eligible || spectator.mode != FPSShooter::FpsSpectatorMode::Free ||
+        !spectator.target.isNull()) {
+        return fail(name, "dead player did not enter the eligible free observer state");
+    }
+
+    if (FPSShooter::setSpectatorChaseTarget(registry, observer, entt::null, match.phase) ||
+        FPSShooter::setSpectatorChaseTarget(registry, observer, dead_teammate, match.phase) ||
+        FPSShooter::setSpectatorChaseTarget(registry, observer, enemy, match.phase)) {
+        return fail(name, "null, dead, or enemy chase target was accepted");
+    }
+    if (const auto& spectator = registry.get<FPSShooter::FpsSpectatorComponent>(observer);
+        spectator.mode != FPSShooter::FpsSpectatorMode::Free || !spectator.target.isNull())
+        return fail(name, "invalid chase target changed spectator state");
+
+    if (!FPSShooter::setSpectatorChaseTarget(registry, observer, teammate, match.phase))
+        return fail(name, "living teammate did not become the chase target");
+    if (const auto& spectator = registry.get<FPSShooter::FpsSpectatorComponent>(observer);
+        spectator.mode != FPSShooter::FpsSpectatorMode::Chase || spectator.target.isNull()) {
+        return fail(name, "living teammate did not become the chase target");
+    }
+
+    registry.get<FpsHealthComponent>(teammate).takeDamage(100);
+    FPSShooter::synchronizeSpectatorStates(registry, match);
+    if (const auto& spectator = registry.get<FPSShooter::FpsSpectatorComponent>(observer);
+        spectator.mode != FPSShooter::FpsSpectatorMode::Free || !spectator.target.isNull())
+        return fail(name, "target death did not clear the chase state");
+
+    registry.get<FpsHealthComponent>(teammate).reset();
+    if (!FPSShooter::setSpectatorChaseTarget(registry, observer, teammate, match.phase))
+        return fail(name, "restored teammate could not become a chase target");
+    registry.get<TeamComponent>(teammate).team_id = FpsLogic::kTeamDefenders;
+    FPSShooter::synchronizeSpectatorStates(registry, match);
+    if (const auto& spectator = registry.get<FPSShooter::FpsSpectatorComponent>(observer);
+        spectator.mode != FPSShooter::FpsSpectatorMode::Free || !spectator.target.isNull())
+        return fail(name, "target team change did not clear the chase state");
+
+    registry.get<TeamComponent>(teammate).team_id = FpsLogic::kTeamAttackers;
+    if (!FPSShooter::setSpectatorChaseTarget(registry, observer, teammate, match.phase))
+        return fail(name, "same-team target could not be restored before disconnect");
+    registry.destroy(teammate);
+    FPSShooter::synchronizeSpectatorStates(registry, match);
+    if (const auto& spectator = registry.get<FPSShooter::FpsSpectatorComponent>(observer);
+        spectator.mode != FPSShooter::FpsSpectatorMode::Free || !spectator.target.isNull())
+        return fail(name, "disconnected target did not clear the chase state");
+
+    const entt::entity next_teammate = registry.create();
+    registry.emplace<FpsHealthComponent>(next_teammate, 100);
+    registry.emplace<TeamComponent>(next_teammate, TeamComponent{FpsLogic::kTeamAttackers});
+    if (!FPSShooter::setSpectatorChaseTarget(registry, observer, next_teammate, match.phase))
+        return fail(name, "new teammate could not become a chase target");
+    match.phase = Competitive::RoundPhase::Freeze;
+    FPSShooter::synchronizeSpectatorStates(registry, match);
+    if (const auto& spectator = registry.get<FPSShooter::FpsSpectatorComponent>(observer);
+        spectator.eligible || spectator.mode != FPSShooter::FpsSpectatorMode::Free ||
+        !spectator.target.isNull()) {
+        return fail(name, "Freeze round transition did not reset spectator state");
+    }
+
+    return pass(name);
+}
+
 bool testPlayerAnimationParameterContract()
 {
     const std::string name = "Player_AnimationParameterContract";
@@ -231,5 +314,6 @@ bool testPlayerMovementInputContract()
         return fail(name, "local controller and network prediction can both own movement");
     }
 
-    return testPlayerPawnLifecycleContract() && testPlayerAnimationParameterContract() && pass(name);
+    return testPlayerPawnLifecycleContract() && testPlayerSpectatorStateContract() &&
+        testPlayerAnimationParameterContract() && pass(name);
 }

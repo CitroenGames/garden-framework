@@ -695,25 +695,30 @@ class BuySystem {
 public:
     ModeConfig config;
     // Execute one buy. DroppedItem (replaced primary/secondary) returned via
-    // out_dropped. Exactly-once: a repeated request_seq returns the cached
-    // result as DuplicateRequest with no mutation.
+    // out_dropped. Request sequences start at one and are exactly-once: a
+    // malformed zero or repeated sequence returns DuplicateRequest without
+    // touching the purchase state.
     BuyResult buy(const BuyContext& ctx, uint16_t item_id, FpsLogic::DroppedItem* out_dropped = nullptr) {
         // COUNT sentinel: caller spawns out_dropped only when type != COUNT.
         if (out_dropped) *out_dropped = FpsLogic::DroppedItem{WeaponType::COUNT, 0, 0};
+        if (ctx.request_seq == 0)
+            return BuyResult::DuplicateRequest;
         // Dedup first: replayed seq never re-charges / re-gives.
         auto seen = last_seq_.find(ctx.client_id);
-        if (ctx.request_seq != 0 && seen != last_seq_.end() && ctx.request_seq <= seen->second)
+        if (seen != last_seq_.end() && ctx.request_seq <= seen->second)
             return BuyResult::DuplicateRequest;
         BuyResult result = buyImpl(ctx, item_id, out_dropped);
-        if (ctx.request_seq != 0) {
-            last_seq_[ctx.client_id] = ctx.request_seq;
-            last_result_[ctx.client_id] = result;
-        }
+        last_seq_[ctx.client_id] = ctx.request_seq;
+        last_result_[ctx.client_id] = result;
         return result;
     }
     BuyResult lastResultFor(uint16_t client_id) const {
         auto it = last_result_.find(client_id);
         return it == last_result_.end() ? BuyResult::UnknownItem : it->second;
+    }
+    void clearClient(uint16_t client_id) {
+        last_seq_.erase(client_id);
+        last_result_.erase(client_id);
     }
 
 private:
@@ -722,7 +727,7 @@ private:
 
     BuyResult buyImpl(const BuyContext& ctx, uint16_t item_id, FpsLogic::DroppedItem* out_dropped) {
         const WeaponCatalogDef* def = findCatalogById(item_id);
-        if (!def) return BuyResult::UnknownItem;
+        if (!def || !isCatalogBuyable(*def)) return BuyResult::UnknownItem;
         if (!ctx.alive) return BuyResult::Dead;
         // Phase / window.
         if (ctx.phase == RoundPhase::Warmup || ctx.phase == RoundPhase::Freeze) {
@@ -738,38 +743,70 @@ private:
         if (team_bit == 0 || (def->team_mask & team_bit) == 0) return BuyResult::WrongTeam;
         if (!ctx.money || !ctx.inventory || !ctx.loadout || !ctx.weapon) return BuyResult::UnknownItem;
 
-        // Slot / ownership pre-checks (no mutation yet).
+        // Reject incomplete or inconsistent catalog rows before changing any
+        // player state. The static table is shared by client and server, but
+        // this keeps a future bad row from becoming a charge-without-grant.
         int slot = static_cast<int>(def->slot);
-        if (def->kind == BuyItemKind::Grenade) {
-            if (ctx.loadout->slots[slot].occupied) return BuyResult::CarryLimit;
+        const bool equipment = def->kind == BuyItemKind::Equipment;
+        if (def->kind != BuyItemKind::Weapon && def->kind != BuyItemKind::Grenade && !equipment) {
+            return BuyResult::UnknownItem;
+        } else if (equipment) {
+            if (!isCatalogDataOnly(*def) || (def->id != 42 && def->id != 43 && def->id != 44))
+                return BuyResult::UnknownItem;
+        } else if (isCatalogDataOnly(*def) || !FpsLogic::isValidLoadoutSlot(slot) ||
+                   !FpsLogic::isValidWeaponType(def->weapon_type) ||
+                   FpsLogic::slotForWeaponType(def->weapon_type) != def->slot) {
+            return BuyResult::UnknownItem;
         }
-        if (def->kind == BuyItemKind::Equipment) {
-            if (!ctx.armor) return BuyResult::UnknownItem;
-            if (def->id == 42 && ctx.armor->armor >= 100) return BuyResult::AlreadyOwned;
-            if (def->id == 43 && ctx.armor->armor >= 100 && ctx.armor->has_helmet) return BuyResult::AlreadyOwned;
-            if (def->id == 44 && ctx.armor->has_defuse_kit) return BuyResult::AlreadyOwned;
-        }
-        // Funds: wallet trySpend is atomic (no mutation on failure).
-        if (!ctx.money->wallet.trySpend(def->price)) return BuyResult::InsufficientFunds;
 
-        // Give (all-or-nothing past this point).
-        if (def->kind == BuyItemKind::Equipment) {
-            if (def->id == 42) ctx.armor->armor = 100;
-            else if (def->id == 43) { ctx.armor->armor = 100; ctx.armor->has_helmet = true; }
-            else if (def->id == 44) ctx.armor->has_defuse_kit = true;
-            return BuyResult::Ok;
+        // Work on copies until every validation and loadout operation has
+        // succeeded. Rejected requests therefore cannot leave a changed
+        // wallet, loadout, mirrored inventory, active weapon, or equipment.
+        MoneyComponent staged_money = *ctx.money;
+        InventoryComponent staged_inventory = *ctx.inventory;
+        PlayerLoadoutComponent staged_loadout = *ctx.loadout;
+        WeaponComponent staged_weapon = *ctx.weapon;
+        ArmorComponent staged_armor{};
+        if (ctx.armor) staged_armor = *ctx.armor;
+        FpsLogic::normalizeLoadout(staged_loadout);
+
+        // Slot / ownership pre-checks (no live-state mutation).
+        if (def->kind == BuyItemKind::Grenade) {
+            if (staged_loadout.slots[slot].occupied) return BuyResult::CarryLimit;
         }
-        // Weapon / grenade into its slot; an occupied primary/secondary is
-        // replaced (old weapon reported as dropped), per spec S4.5.
-        auto& target = ctx.loadout->slots[slot];
-        if (target.occupied && out_dropped) {
-            *out_dropped = FpsLogic::DroppedItem{target.type, target.ammo, target.reserve};
+        if (equipment) {
+            if (!ctx.armor) return BuyResult::UnknownItem;
+            if (def->id == 42 && staged_armor.armor >= 100) return BuyResult::AlreadyOwned;
+            if (def->id == 43 && staged_armor.armor >= 100 && staged_armor.has_helmet) return BuyResult::AlreadyOwned;
+            if (def->id == 44 && staged_armor.has_defuse_kit) return BuyResult::AlreadyOwned;
         }
-        bool was_active = ctx.loadout->active_slot == slot;
-        target = WeaponSlotState{def->weapon_type, def->mag, def->reserve, true};
-        if (ctx.loadout->active_slot < 0) ctx.loadout->active_slot = slot;
-        if (was_active) FpsLogic::loadSlotIntoWeapon(*ctx.loadout, *ctx.weapon, slot);
-        FpsLogic::syncInventory(*ctx.inventory, *ctx.loadout);
+        if (!staged_money.wallet.trySpend(def->price)) return BuyResult::InsufficientFunds;
+
+        FpsLogic::DroppedItem staged_dropped{WeaponType::COUNT, 0, 0};
+        if (equipment) {
+            if (def->id == 42) staged_armor.armor = 100;
+            else if (def->id == 43) { staged_armor.armor = 100; staged_armor.has_helmet = true; }
+            else staged_armor.has_defuse_kit = true;
+        } else {
+            // Weapon / grenade into its slot; an occupied primary/secondary is
+            // replaced (old weapon reported as dropped), per spec S4.5.
+            auto& target = staged_loadout.slots[slot];
+            if (target.occupied)
+                staged_dropped = FpsLogic::DroppedItem{target.type, target.ammo, target.reserve};
+            const bool was_active = staged_loadout.active_slot == slot;
+            target = WeaponSlotState{def->weapon_type, def->mag, def->reserve, true};
+            if (staged_loadout.active_slot < 0) staged_loadout.active_slot = slot;
+            if (was_active && !FpsLogic::loadSlotIntoWeapon(staged_loadout, staged_weapon, slot))
+                return BuyResult::UnknownItem;
+            FpsLogic::syncInventory(staged_inventory, staged_loadout);
+        }
+
+        *ctx.money = staged_money;
+        *ctx.inventory = staged_inventory;
+        *ctx.loadout = staged_loadout;
+        *ctx.weapon = staged_weapon;
+        if (ctx.armor) *ctx.armor = staged_armor;
+        if (out_dropped) *out_dropped = staged_dropped;
         return BuyResult::Ok;
     }
 };
