@@ -6,7 +6,7 @@
 // (world, entt::registry, shared component storage). The compatibility token
 // therefore includes both the source API revision and the C++ runtime/STL ABI
 // shape that changes between Debug/Release builds on MSVC.
-#define GARDEN_MODULE_API_REVISION 4
+#define GARDEN_MODULE_API_REVISION 5
 
 #if defined(_MSC_VER)
 #   define GARDEN_MODULE_COMPILER_FAMILY 1
@@ -62,6 +62,10 @@ struct EngineServices
     const char*          connect_address = nullptr;  // server address to connect to
     uint16_t             connect_port    = 0;        // server port to connect to
     uint16_t             listen_port     = 0;        // port for server to listen on
+
+    // FNV-1a hash of the exact level file loaded by the host (0 = no level or
+    // unavailable source). Added in API revision 5 for the v3 network handshake.
+    uint32_t             level_hash      = 0;
 };
 
 // Platform export macro for game DLLs

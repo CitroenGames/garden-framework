@@ -6,7 +6,6 @@
 #include "world.hpp"
 #include "LevelManager.hpp"
 #include "Components/Components.hpp"
-#include "Network/LevelHash.hpp"
 #include "Network/NetworkProtocol.hpp"
 #include "Network/NetworkSerializer.hpp"
 #include "Network/NetworkTypes.hpp"
@@ -1551,25 +1550,8 @@ GAME_API void gardenServerOnLevelLoaded()
 {
     if (!g_server_services) return;
     g_server_services->game_world->getPhysicsSystem().optimizeBroadPhase();
-    // D2 step 6: compute the v3 level hash for the loaded default level.
-    static const char* kCandidates[] = {
-        "assets/levels/main.level.json",
-        "Templates/FPSShooter/assets/levels/main.level.json",
-        "../Templates/FPSShooter/assets/levels/main.level.json",
-    };
-    for (const char* path : kCandidates) {
-        FILE* file = std::fopen(path, "rb");
-        if (!file) continue;
-        std::vector<uint8_t> bytes;
-        uint8_t chunk[8192];
-        size_t read = 0;
-        while ((read = std::fread(chunk, 1, sizeof(chunk), file)) > 0) {
-            bytes.insert(bytes.end(), chunk, chunk + read);
-        }
-        std::fclose(file);
-        g_server_network.setLevelHash(Net::computeLevelHashFromBytes(bytes));
-        break;
-    }
+    // The host hashes Project.default_level and passes the selected artifact.
+    g_server_network.setLevelHash(g_server_services->level_hash);
     (void)bakeBotNavMeshIfRequested();
     if (g_competitive && botCountFromEnv() > 0) { g_bot_target_count = botCountFromEnv(); (void)loadBotNavMesh(); }
     LOG_ENGINE_INFO("Server level loaded");

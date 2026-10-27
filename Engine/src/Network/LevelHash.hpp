@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <fstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -73,6 +74,29 @@ inline uint32_t computeLevelHashForCurrentCvars(const uint8_t* level_bytes, size
 inline uint32_t computeLevelHashFromBytes(const std::vector<uint8_t>& level_bytes)
 {
     return computeLevelHashForCurrentCvars(level_bytes.data(), level_bytes.size());
+}
+
+// Hash the exact level artifact selected and loaded by the host. This keeps
+// generated levels and packaged .level binaries tied to Project.default_level
+// instead of assuming the FPSShooter template's main.level.json path.
+// Returns 0 when the file cannot be read; 0 remains the no-level sentinel.
+inline uint32_t computeLevelHashFromFile(const std::string& level_path)
+{
+    if (level_path.empty()) return 0;
+
+    std::ifstream file(level_path, std::ios::binary | std::ios::ate);
+    if (!file.is_open()) return 0;
+
+    const std::streamoff file_size = static_cast<std::streamoff>(file.tellg());
+    if (file_size <= 0) return 0;
+
+    const auto size = static_cast<size_t>(file_size);
+    std::vector<uint8_t> bytes(size);
+    file.seekg(0, std::ios::beg);
+    if (!file.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(size)))
+        return 0;
+
+    return computeLevelHashFromBytes(bytes);
 }
 
 } // namespace Net

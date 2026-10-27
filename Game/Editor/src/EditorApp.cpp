@@ -1670,6 +1670,9 @@ void EditorApp::beginPlay()
             m_server_services.level_manager = &m_level_manager;
             m_server_services.api_version   = GARDEN_MODULE_API_VERSION;
             m_server_services.listen_port   = port;
+            // PIE runs the editor's in-memory snapshot, which may include
+            // unsaved edits and has no loaded-file byte source.
+            m_server_services.level_hash    = 0;
 
             if (!m_game_module.serverInit(&m_server_services))
             {
@@ -1701,6 +1704,7 @@ void EditorApp::beginPlay()
                 m_client_services.application      = &m_app;
                 m_client_services.level_manager    = &m_level_manager;
                 m_client_services.api_version      = GARDEN_MODULE_API_VERSION;
+                m_client_services.level_hash       = 0;
                 m_client_services.connect_address  = "127.0.0.1";
                 m_client_services.connect_port     = port;
 
@@ -1768,6 +1772,7 @@ void EditorApp::beginPlay()
                                 inst->services.application      = &m_app;
                                 inst->services.level_manager    = &m_level_manager;
                                 inst->services.api_version      = GARDEN_MODULE_API_VERSION;
+                                inst->services.level_hash        = 0;
                                 inst->services.connect_address  = "127.0.0.1";
                                 inst->services.connect_port     = port;
 
@@ -1857,6 +1862,7 @@ void EditorApp::beginPlay()
             m_client_services.application      = &m_app;
             m_client_services.level_manager    = &m_level_manager;
             m_client_services.api_version      = GARDEN_MODULE_API_VERSION;
+            m_client_services.level_hash       = 0;
             m_client_services.connect_address  = "127.0.0.1";
             m_client_services.connect_port     = port;
 
@@ -1917,6 +1923,7 @@ void EditorApp::beginPlay()
                             inst->services.application      = &m_app;
                             inst->services.level_manager    = &m_level_manager;
                             inst->services.api_version      = GARDEN_MODULE_API_VERSION;
+                            inst->services.level_hash        = 0;
                             inst->services.connect_address  = "127.0.0.1";
                             inst->services.connect_port     = port;
 
@@ -1975,6 +1982,7 @@ void EditorApp::beginPlay()
             m_client_services.application      = &m_app;
             m_client_services.level_manager    = &m_level_manager;
             m_client_services.api_version      = GARDEN_MODULE_API_VERSION;
+            m_client_services.level_hash       = 0;
 
             m_game_module.registerComponents(&m_reflection);
             m_level_manager.applyGameplayFrameworkSettings(m_play_snapshot.metadata, *m_play_world);

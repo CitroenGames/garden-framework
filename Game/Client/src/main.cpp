@@ -33,6 +33,7 @@
 #include "Reflection/ReflectionRegistry.hpp"
 #include "Reflection/EngineReflection.hpp"
 #include "Prefab/PrefabManager.hpp"
+#include "Network/LevelHash.hpp"
 
 namespace fs = std::filesystem;
 
@@ -304,12 +305,19 @@ int main(int argc, char* argv[])
     // Load default level
     LevelData level_data;
     std::string level_path = project_manager.getDescriptor().default_level;
+    uint32_t loaded_level_hash = 0;
     if (!level_path.empty())
     {
         level_path = Assets::AssetManager::get().resolveAssetPath(level_path);
         if (!level_manager.loadLevel(level_path, level_data))
         {
             LOG_ENGINE_FATAL("Failed to load level: {}", level_path);
+            quit_game(1);
+        }
+        loaded_level_hash = Net::computeLevelHashFromFile(level_path);
+        if (loaded_level_hash == 0)
+        {
+            LOG_ENGINE_ERROR("Loaded level '{}' could not be hashed for the network handshake", level_path);
             quit_game(1);
         }
 
@@ -346,6 +354,7 @@ int main(int argc, char* argv[])
     services.application = &app;
     services.level_manager = &level_manager;
     services.api_version = GARDEN_MODULE_API_VERSION;
+    services.level_hash = loaded_level_hash;
     services.connect_address = connect_addr.empty() ? nullptr : connect_addr.c_str();
     services.connect_port = connect_port;
 

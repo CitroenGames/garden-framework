@@ -11,6 +11,9 @@
 #include "Network/InterpolationBuffer.hpp"
 
 #include <cmath>
+#include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <string>
@@ -494,6 +497,29 @@ int testWireV3Handshake()
     auto h3 = Net::computeLevelHash(level_b, sizeof(level_b), {{"sv_cheats","0"},{"sv_gravity","800"}});
     if (h1 == h3) return fail(name, "one-byte level change kept hash");
     if (Net::finalizeLevelHash(0) != 1) return fail(name, "zero hash not remapped to 1");
+
+    // The host hashes the exact project-selected artifact, regardless of its
+    // generated name or whether the packager emitted JSON or binary bytes.
+    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto path = std::filesystem::temp_directory_path() /
+        ("garden_level_hash_" + std::to_string(stamp) + ".level.json");
+    struct RemoveFixture
+    {
+        std::filesystem::path path;
+        ~RemoveFixture() { std::error_code ec; std::filesystem::remove(path, ec); }
+    } remove_fixture{path};
+    const std::vector<uint8_t> file_bytes{'g','e','n','e','r','a','t','e','d','-','l','e','v','e','l'};
+    {
+        std::ofstream file(path, std::ios::binary);
+        if (!file.write(reinterpret_cast<const char*>(file_bytes.data()),
+                static_cast<std::streamsize>(file_bytes.size())))
+            return fail(name, "could not write level-hash fixture");
+    }
+    const auto file_hash = Net::computeLevelHashFromFile(path.string());
+    if (file_hash == 0 || file_hash != Net::computeLevelHashFromBytes(file_bytes))
+        return fail(name, "selected level file hash does not match its bytes");
+    if (Net::computeLevelHashFromFile(path.string() + ".missing") != 0)
+        return fail(name, "missing level file did not return no-level sentinel");
     return 0;
 }
 

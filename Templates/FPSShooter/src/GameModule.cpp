@@ -10,7 +10,6 @@
 #include "Components/Components.hpp"
 #include "Components/camera.hpp"
 #include "Network/ClientNetworkManager.hpp"
-#include "Network/LevelHash.hpp"
 #include "Network/SharedMovement.hpp"
 #include "shared/SharedComponents.hpp"
 #include "shared/CombatProtocol.hpp"
@@ -63,29 +62,11 @@ static CharacterMoveInput toCharacterMoveInput(const MovementInput& input)
     return out;
 }
 
-// Compute the v3 level hash for the template's default level and hand it
-// to the client network manager (D2 step 6). Missing file leaves hash 0
-// (no-level sentinel; both sides at 0 accept with a server warning).
-static void applyTemplateLevelHash(Net::ClientNetworkManager& net)
+// The host hashes its actual Project.default_level artifact and carries the
+// result in EngineServices, including for generated levels and package binaries.
+static void applyLoadedLevelHash(Net::ClientNetworkManager& net, uint32_t level_hash)
 {
-    static const char* kCandidates[] = {
-        "assets/levels/main.level.json",
-        "Templates/FPSShooter/assets/levels/main.level.json",
-        "../Templates/FPSShooter/assets/levels/main.level.json",
-    };
-    for (const char* path : kCandidates) {
-        FILE* file = std::fopen(path, "rb");
-        if (!file) continue;
-        std::vector<uint8_t> bytes;
-        uint8_t chunk[8192];
-        size_t read = 0;
-        while ((read = std::fread(chunk, 1, sizeof(chunk), file)) > 0) {
-            bytes.insert(bytes.end(), chunk, chunk + read);
-        }
-        std::fclose(file);
-        net.setLevelHash(Net::computeLevelHashFromBytes(bytes));
-        return;
-    }
+    net.setLevelHash(level_hash);
 }
 
 static MovementState toMovementState(const CharacterControllerState& state)
@@ -209,7 +190,7 @@ GAME_API bool gardenGameInit(EngineServices* services)
                           ? services->connect_address : "127.0.0.1";
     uint16_t port = services->connect_port ? services->connect_port : 7777;
 
-    applyTemplateLevelHash(g_network);
+    applyLoadedLevelHash(g_network, services->level_hash);
     if (!g_network.connectToServer(address, port, "Player")) {
         LOG_ENGINE_WARN("Failed to connect to server at {}:{} - running in offline mode", address, port);
     }
@@ -809,7 +790,7 @@ GAME_API void gardenGameUpdate(float delta_time)
 GAME_API void gardenOnLevelLoaded()
 {
     if (!g_services) return;
-    applyTemplateLevelHash(g_network);
+    applyLoadedLevelHash(g_network, g_services->level_hash);
 
     world* game_world = g_services->game_world;
 

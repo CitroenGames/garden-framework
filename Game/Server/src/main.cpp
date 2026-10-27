@@ -21,6 +21,7 @@
 #include "Scheduler/SystemScheduler.hpp"
 #include "Gameplay/GameplaySystems.hpp"
 #include "ECS/EntityLifecycle.hpp"
+#include "Network/LevelHash.hpp"
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -160,12 +161,19 @@ int main(int argc, char* argv[])
     // Load level
     LevelData level_data;
     std::string level_path = project_manager.getDescriptor().default_level;
+    uint32_t loaded_level_hash = 0;
     if (!level_path.empty())
     {
         level_path = Assets::AssetManager::get().resolveAssetPath(level_path);
         if (!level_manager.loadLevel(level_path, level_data))
         {
             LOG_ENGINE_FATAL("Failed to load level: {}", level_path);
+            shutdown_server(1);
+        }
+        loaded_level_hash = Net::computeLevelHashFromFile(level_path);
+        if (loaded_level_hash == 0)
+        {
+            LOG_ENGINE_ERROR("Loaded level '{}' could not be hashed for the network handshake", level_path);
             shutdown_server(1);
         }
 
@@ -189,6 +197,7 @@ int main(int argc, char* argv[])
     services.application = &app;
     services.level_manager = &level_manager;
     services.api_version = GARDEN_MODULE_API_VERSION;
+    services.level_hash = loaded_level_hash;
     services.listen_port = listen_port;
 
     PrefabManager::get().initialize(&reflection, render_api);
