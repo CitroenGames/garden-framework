@@ -98,8 +98,8 @@ private:
     // Entity interpolation for remote players
     std::unordered_map<uint32_t, EntityInterpolationBuffer> interp_buffers;
     // Latest network-authored state used to build interpolation snapshots.
-    // TransformComponent is also a render target, so it must not be read back
-    // as replication truth after interpolateRemoteEntities has written it.
+    // Rendering consumes a separate ECS presentation pose; TransformComponent
+    // remains the latest replicated/simulated state.
     std::unordered_map<uint32_t, InterpolationSnapshot> latest_interp_state;
     static constexpr uint32_t INTERP_DELAY_TICKS = DEFAULT_INTERP_DELAY_TICKS;
 
@@ -144,7 +144,8 @@ public:
     bool popAuthoritativeUpdate(MovementState& out_state, uint32_t& out_tick);
     const InputRingBuffer<128>& getInputHistory() const { return input_history; }
 
-    // Entity interpolation - call before rendering to smoothly position remote entities
+    // Entity interpolation - call before render-dependent representations and
+    // rendering to update remote PresentationTransformComponent poses.
     void interpolateRemoteEntities();
 
     // Stats

@@ -4,6 +4,7 @@
 
 #include "Components/Components.hpp"
 #include "Graphics/BVH.hpp"
+#include "PlayerRepSystem.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -328,6 +329,84 @@ static bool testMovedEntityStaleness()
     return pass(name);
 }
 
+static bool testPresentationPoseCulling()
+{
+    const std::string name = "presentation pose culling bypasses cached authoritative bounds";
+    entt::registry reg;
+    auto entity = spawn(reg, glm::vec3(0.0f), glm::vec3(1.0f));
+    auto& transform = reg.get<TransformComponent>(entity);
+    transform.scale = glm::vec3(2.0f, 3.0f, 4.0f);
+
+    SceneBVH bvh;
+    bvh.build(reg);
+    const auto build_count = bvh.getCullStats().builds;
+
+    PresentationTransformComponent presentation;
+    presentation.position = glm::vec3(100.0f, 0.0f, 0.0f);
+    presentation.rotation = glm::vec3(0.0f, 90.0f, 0.0f);
+    reg.emplace<PresentationTransformComponent>(entity, presentation);
+
+    const TransformComponent resolved = resolveRenderTransform(reg, entity);
+    if (glm::length(resolved.position - presentation.position) > 1e-5f ||
+        glm::length(resolved.rotation - presentation.rotation) > 1e-5f)
+        return fail(name, "render transform did not resolve presentation position and rotation");
+    if (glm::length(resolved.scale - transform.scale) > 1e-5f)
+        return fail(name, "render transform did not inherit authoritative scale");
+    if (glm::length(transform.position) > 1e-5f)
+        return fail(name, "resolving presentation pose changed authoritative TransformComponent");
+
+    const auto query_contains = [&](const Frustum& frustum) {
+        std::vector<entt::entity> visible;
+        bvh.queryFrustum(frustum, reg, visible);
+        return std::find(visible.begin(), visible.end(), entity) != visible.end();
+    };
+    if (!query_contains(boxFrustum(glm::vec3(95.0f, -5.0f, -5.0f),
+                                   glm::vec3(105.0f, 5.0f, 5.0f))))
+        return fail(name, "current presentation pose was culled by the old BVH bounds");
+    if (query_contains(boxFrustum(glm::vec3(-5.0f), glm::vec3(5.0f))))
+        return fail(name, "stale authoritative BVH bounds returned a moved presentation entity");
+    if (bvh.getCullStats().builds != build_count)
+        return fail(name, "presentation culling rebuilt the BVH instead of testing current pose");
+    return pass(name);
+}
+
+static bool testPlayerRepresentationUsesPresentationPose()
+{
+    const std::string name = "player representation follows source presentation pose";
+    entt::registry reg;
+    const entt::entity tracked = reg.create();
+    TransformComponent raw;
+    raw.position = glm::vec3(1.0f, 2.0f, 3.0f);
+    raw.rotation.y = 15.0f;
+    reg.emplace<TransformComponent>(tracked, raw);
+    PresentationTransformComponent presentation;
+    presentation.position = glm::vec3(8.0f, 4.0f, -2.0f);
+    presentation.rotation.y = 75.0f;
+    reg.emplace<PresentationTransformComponent>(tracked, presentation);
+
+    const entt::entity representation = reg.create();
+    TransformComponent representation_transform;
+    representation_transform.scale = glm::vec3(2.0f);
+    reg.emplace<TransformComponent>(representation, representation_transform);
+    MeshComponent mesh_comp;
+    mesh_comp.m_mesh = makeMesh(glm::vec3(1.0f));
+    reg.emplace<MeshComponent>(representation, mesh_comp);
+    PlayerRepresentationComponent player_rep;
+    player_rep.tracked_player = ensureEntityRef(reg, tracked);
+    player_rep.position_offset = glm::vec3(0.0f, 1.0f, 0.0f);
+    reg.emplace<PlayerRepresentationComponent>(representation, player_rep);
+
+    update_player_representations(reg, true);
+    const auto& result = reg.get<TransformComponent>(representation);
+    if (glm::length(result.position - glm::vec3(8.0f, 5.0f, -2.0f)) > 1e-5f)
+        return fail(name, "representation position did not use the source presentation pose");
+    if (std::abs(result.rotation.y - 75.0f) > 1e-5f)
+        return fail(name, "representation yaw did not use the source presentation pose");
+    if (glm::length(result.scale - glm::vec3(2.0f)) > 1e-5f)
+        return fail(name, "representation update changed its own scale");
+    return pass(name);
+}
+
 static bool testSmallCounts()
 {
     const std::string name = "two- and three-entity trees cull correctly";
@@ -452,6 +531,8 @@ int main()
     ok &= testDeepDegenerateBounds();
     ok &= testExcludedEntities();
     ok &= testMovedEntityStaleness();
+    ok &= testPresentationPoseCulling();
+    ok &= testPlayerRepresentationUsesPresentationPose();
     ok &= testSmallCounts();
     ok &= testExtractedPerspectiveFrustum();
     ok &= testRayPick();

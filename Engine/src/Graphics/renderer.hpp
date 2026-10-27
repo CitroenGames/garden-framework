@@ -65,7 +65,7 @@ public:
         for (auto entity : point_view)
         {
             const auto& pl = point_view.get<PointLightComponent>(entity);
-            const auto& t  = point_view.get<TransformComponent>(entity);
+            const TransformComponent t = resolveRenderTransform(registry, entity);
             GPUPointLight gpu{};
             gpu.position    = t.position;
             gpu.range       = pl.range;
@@ -80,7 +80,7 @@ public:
         for (auto entity : spot_view)
         {
             const auto& sl = spot_view.get<SpotLightComponent>(entity);
-            const auto& t  = spot_view.get<TransformComponent>(entity);
+            const TransformComponent t = resolveRenderTransform(registry, entity);
             GPUSpotLight gpu{};
             gpu.position    = t.position;
             gpu.range       = sl.range;
@@ -732,7 +732,8 @@ public:
                 auto* mc = registry.try_get<MeshComponent>(entities[i]);
                 auto* t = registry.try_get<TransformComponent>(entities[i]);
                 if (!mc || !t || !mc->m_mesh || !mc->m_mesh->visible) continue;
-                record_mesh_at_lod(*mc->m_mesh, *t, cmds, global_lighting, lod_levels[i], frustum);
+                const TransformComponent render_transform = resolveRenderTransform(registry, entities[i]);
+                record_mesh_at_lod(*mc->m_mesh, render_transform, cmds, global_lighting, lod_levels[i], frustum);
             }
             if (view_matrix) cmds.sortWithViewDepth(*view_matrix);
             else cmds.sort();
@@ -762,7 +763,8 @@ public:
                         auto* mc = registry.try_get<MeshComponent>(entities[i]);
                         auto* t = registry.try_get<TransformComponent>(entities[i]);
                         if (!mc || !t || !mc->m_mesh || !mc->m_mesh->visible) continue;
-                        record_mesh_at_lod(*mc->m_mesh, *t,
+                        const TransformComponent render_transform = resolveRenderTransform(registry, entities[i]);
+                        record_mesh_at_lod(*mc->m_mesh, render_transform,
                                            contexts[c].command_buffer, global_lighting, lod_levels[i], frustum);
                     }
                 }));
@@ -807,8 +809,10 @@ public:
                 if (!registry.valid(entity)) continue;
                 auto* mc = registry.try_get<MeshComponent>(entity);
                 auto* t = registry.try_get<TransformComponent>(entity);
-                if (mc && t && mc->m_mesh && mc->m_mesh->visible && mc->m_mesh->casts_shadow)
-                    record_shadow_draw(*mc->m_mesh, *t, cmds, cascade_index, frustum);
+                if (mc && t && mc->m_mesh && mc->m_mesh->visible && mc->m_mesh->casts_shadow) {
+                    const TransformComponent render_transform = resolveRenderTransform(registry, entity);
+                    record_shadow_draw(*mc->m_mesh, render_transform, cmds, cascade_index, frustum);
+                }
             }
             return cmds;
         }
@@ -833,8 +837,10 @@ public:
                         if (!registry.valid(entities[i])) continue;
                         auto* mc = registry.try_get<MeshComponent>(entities[i]);
                         auto* t = registry.try_get<TransformComponent>(entities[i]);
-                        if (mc && t && mc->m_mesh && mc->m_mesh->visible && mc->m_mesh->casts_shadow)
-                            record_shadow_draw(*mc->m_mesh, *t, buffers[c], cascade_index, frustum);
+                        if (mc && t && mc->m_mesh && mc->m_mesh->visible && mc->m_mesh->casts_shadow) {
+                            const TransformComponent render_transform = resolveRenderTransform(registry, entities[i]);
+                            record_shadow_draw(*mc->m_mesh, render_transform, buffers[c], cascade_index, frustum);
+                        }
                     }
                 }));
         }
@@ -869,7 +875,8 @@ public:
                 auto* mc = registry.try_get<MeshComponent>(entities[i]);
                 auto* t = registry.try_get<TransformComponent>(entities[i]);
                 if (!mc || !t || !mc->m_mesh || !mc->m_mesh->visible) continue;
-                record_depth_draw_at_lod(*mc->m_mesh, *t, cmds, lod_levels[i], frustum);
+                const TransformComponent render_transform = resolveRenderTransform(registry, entities[i]);
+                record_depth_draw_at_lod(*mc->m_mesh, render_transform, cmds, lod_levels[i], frustum);
             }
             return cmds;
         }
@@ -895,7 +902,8 @@ public:
                         auto* mc = registry.try_get<MeshComponent>(entities[i]);
                         auto* t = registry.try_get<TransformComponent>(entities[i]);
                         if (!mc || !t || !mc->m_mesh || !mc->m_mesh->visible) continue;
-                        record_depth_draw_at_lod(*mc->m_mesh, *t, buffers[c], lod_levels[i], frustum);
+                        const TransformComponent render_transform = resolveRenderTransform(registry, entities[i]);
+                        record_depth_draw_at_lod(*mc->m_mesh, render_transform, buffers[c], lod_levels[i], frustum);
                     }
                 }));
         }
@@ -939,7 +947,9 @@ public:
                 auto* ta = registry.try_get<TransformComponent>(a);
                 auto* tb = registry.try_get<TransformComponent>(b);
                 if (!ta || !tb) return false;
-                return glm::dot(cam_pos - ta->position, cam_pos - ta->position) < glm::dot(cam_pos - tb->position, cam_pos - tb->position);
+                const TransformComponent render_a = resolveRenderTransform(registry, a);
+                const TransformComponent render_b = resolveRenderTransform(registry, b);
+                return glm::dot(cam_pos - render_a.position, cam_pos - render_a.position) < glm::dot(cam_pos - render_b.position, cam_pos - render_b.position);
             });
     }
 
@@ -1191,7 +1201,7 @@ public:
             if (bvh_enabled && shadow_frustum_ptr)
             {
                 std::vector<entt::entity> shadow_entities;
-                scene_bvh.queryFrustum(shadow_frustum, shadow_entities);
+                scene_bvh.queryFrustum(shadow_frustum, registry, shadow_entities);
 
                 ensure_meshes_uploaded(registry, shadow_entities);
                 shadow_cmds = record_shadow_parallel(registry, shadow_entities, cascade, shadow_frustum_ptr);
@@ -1242,7 +1252,7 @@ public:
         if (bvh_enabled)
         {
             std::vector<entt::entity> visible_entities;
-            scene_bvh.queryFrustum(camera_frustum, visible_entities);
+            scene_bvh.queryFrustum(camera_frustum, registry, visible_entities);
 
             last_total_entities = scene_bvh.getTotalEntities();
             last_visible_entities = visible_entities.size();
@@ -1271,7 +1281,9 @@ public:
                     auto* tb = registry.try_get<TransformComponent>(b);
                     if (!ta) return false;
                     if (!tb) return true;
-                    return glm::dot(cam_pos - ta->position, cam_pos - ta->position) > glm::dot(cam_pos - tb->position, cam_pos - tb->position);
+                    const TransformComponent render_a = resolveRenderTransform(registry, a);
+                    const TransformComponent render_b = resolveRenderTransform(registry, b);
+                    return glm::dot(cam_pos - render_a.position, cam_pos - render_a.position) > glm::dot(cam_pos - render_b.position, cam_pos - render_b.position);
                 });
 
             // Ensure all visible meshes are uploaded before recording
@@ -1286,6 +1298,7 @@ public:
                 auto* t = registry.try_get<TransformComponent>(opaque_entities[i]);
                 if (!mesh_comp || !t || !mesh_comp->m_mesh) continue;
                 mesh& m = *mesh_comp->m_mesh;
+                const TransformComponent render_transform = resolveRenderTransform(registry, opaque_entities[i]);
 
                 if (!m.lod_levels.empty() && m.bounds_computed)
                 {
@@ -1301,9 +1314,9 @@ public:
                             thresholds[j + 1] = m.lod_levels[j].screen_threshold;
 
                         opaque_lod[i] = LODSelector::selectLOD(
-                            cam_pos, t->position, m.aabb_min, m.aabb_max,
+                            cam_pos, render_transform.position, m.aabb_min, m.aabb_max,
                             proj, lod_count, thresholds.data(),
-                            t->scale
+                            render_transform.scale
                         );
                     }
                 }
@@ -1342,7 +1355,8 @@ public:
                     auto* t = registry.try_get<TransformComponent>(entity);
                     if (mesh_comp && t && mesh_comp->m_mesh && mesh_comp->m_mesh->visible)
                     {
-                        record_mesh_with_lod(*mesh_comp->m_mesh, *t, transparent_cmds,
+                        const TransformComponent render_transform = resolveRenderTransform(registry, entity);
+                        record_mesh_with_lod(*mesh_comp->m_mesh, render_transform, transparent_cmds,
                                              global_lighting, cam_pos, proj, &camera_frustum);
                     }
                 }
@@ -1362,13 +1376,13 @@ public:
             for (auto entity : view)
             {
                 auto& mesh_comp = view.get<MeshComponent>(entity);
-                const auto& t = view.get<TransformComponent>(entity);
+                const TransformComponent render_transform = resolveRenderTransform(registry, entity);
 
                 if (mesh_comp.m_mesh && mesh_comp.m_mesh->visible)
                 {
                     prepare_water_mesh(registry, entity, mesh_comp);
                     ensure_mesh_uploaded(*mesh_comp.m_mesh, render_api);
-                    record_mesh_with_lod(*mesh_comp.m_mesh, t, all_cmds,
+                    record_mesh_with_lod(*mesh_comp.m_mesh, render_transform, all_cmds,
                                          global_lighting, cam_pos, proj, &camera_frustum);
                     last_total_entities++;
                 }

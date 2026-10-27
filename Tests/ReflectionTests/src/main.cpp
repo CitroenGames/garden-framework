@@ -481,6 +481,7 @@ namespace
         registerEngineReflection(reflection);
         if (!reflection.findByName("ChildrenComponent")) return fail(name, "ChildrenComponent not reflected");
         if (reflection.findByName("WorldTransformComponent")) return fail(name, "WorldTransformComponent must stay unreflected");
+        if (reflection.findByName("PresentationTransformComponent")) return fail(name, "PresentationTransformComponent must stay unreflected");
         const ComponentDescriptor* children_desc = reflection.findByName("ChildrenComponent");
         bool is_array_ref = false;
         for (const auto& prop : children_desc->properties)

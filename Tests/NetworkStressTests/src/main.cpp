@@ -581,7 +581,15 @@ static bool runInterpolationTickWrapManagerTest()
         if (state.error_count == 0) {
             client.interpolateRemoteEntities();
             const entt::entity entity = client.getEntityByNetworkId(kRemoteNetworkId);
-            const float rendered_x = client_world.registry.get<TransformComponent>(entity).position.x;
+            const auto& raw_transform = client_world.registry.get<TransformComponent>(entity);
+            const auto* presentation = client_world.registry.try_get<PresentationTransformComponent>(entity);
+            if (!presentation) {
+                state.addError("tick-zero interpolation did not produce a presentation pose");
+            }
+            if (std::abs(raw_transform.position.x - 0.01f) > 1.0e-5f) {
+                state.addError("tick-zero interpolation changed the latest raw network position");
+            }
+            const float rendered_x = presentation ? presentation->position.x : raw_transform.position.x;
             if (std::abs(rendered_x - 0.01f) > 1.0e-5f) {
                 state.addError("rendering was disabled at server tick zero instead of wrapping to 0xFFFFFFFE");
             }
@@ -627,7 +635,15 @@ static bool runInterpolationTickWrapManagerTest()
         if (state.error_count == 0) {
             client.interpolateRemoteEntities();
             const entt::entity entity = client.getEntityByNetworkId(kRemoteNetworkId);
-            const float rendered_x = client_world.registry.get<TransformComponent>(entity).position.x;
+            const auto& raw_transform = client_world.registry.get<TransformComponent>(entity);
+            const auto* presentation = client_world.registry.try_get<PresentationTransformComponent>(entity);
+            if (!presentation) {
+                state.addError("wrapped interpolation did not produce a presentation pose");
+            }
+            if (std::abs(raw_transform.position.x - 0.06f) > 1.0e-5f) {
+                state.addError("wrapped interpolation changed the latest raw tick-1 position");
+            }
+            const float rendered_x = presentation ? presentation->position.x : raw_transform.position.x;
             // At server tick 2, the 2-tick delay renders tick 0, which lies
             // two ticks into the three-tick FE->1 Hermite segment.
             if (std::abs(rendered_x - (0.01f + (1.0f / 30.0f))) > 1.0e-5f) {
@@ -756,9 +772,16 @@ static bool runRawRemoteInterpolationStateTest()
         if (state.error_count == 0) {
             client.interpolateRemoteEntities();
             const entt::entity entity = client.getEntityByNetworkId(kRemoteNetworkId);
-            const float rendered_x = client_world.registry.get<TransformComponent>(entity).position.x;
+            const auto& raw_transform = client_world.registry.get<TransformComponent>(entity);
+            const auto* presentation = client_world.registry.try_get<PresentationTransformComponent>(entity);
+            if (!presentation) {
+                state.addError("remote interpolation did not create a presentation pose");
+            } else if (std::abs(raw_transform.position.x - 3.0f) > 0.01f) {
+                state.addError("remote interpolation changed the latest authoritative TransformComponent position");
+            }
+            const float rendered_x = presentation ? presentation->position.x : raw_transform.position.x;
             if (!(rendered_x > 0.1f && rendered_x < 2.5f)) {
-                state.addError("tick 13 did not interpolate the ECS transform between the raw positions");
+                state.addError("tick 13 did not interpolate PresentationTransformComponent between raw positions");
             }
         }
 
@@ -773,14 +796,29 @@ static bool runRawRemoteInterpolationStateTest()
         if (state.error_count == 0) {
             client.interpolateRemoteEntities();
             const entt::entity entity = client.getEntityByNetworkId(kRemoteNetworkId);
-            const float rendered_x = client_world.registry.get<TransformComponent>(entity).position.x;
-            if (std::abs(rendered_x - 3.0f) > 0.01f) {
-                state.addError("rotation-only tick 16 reused the rendered tick 11 position instead of raw tick 13 position");
+            const auto& raw_transform = client_world.registry.get<TransformComponent>(entity);
+            const auto* presentation = client_world.registry.try_get<PresentationTransformComponent>(entity);
+            if (!presentation) {
+                state.addError("rotation-only update lost the remote presentation pose");
             }
+            if (std::abs(raw_transform.position.x - 3.0f) > 0.01f ||
+                std::abs(raw_transform.rotation.y - glm::degrees(0.5f)) > 0.01f) {
+                state.addError("rotation-only update did not preserve raw authoritative position and yaw");
+            }
+            const float rendered_x = presentation ? presentation->position.x : raw_transform.position.x;
+            if (std::abs(rendered_x - 3.0f) > 0.01f) {
+                state.addError("rotation-only tick 16 reused a rendered position instead of raw tick 13 position");
+            }
+            if (presentation && std::abs(presentation->rotation.y - glm::degrees(0.5f / 3.0f)) > 0.1f)
+                state.addError("tick 16 presentation yaw did not interpolate from the raw rotation-only update");
         }
     }
 
     client.disconnect("raw interpolation regression complete");
+    const entt::entity remote_entity = client.getEntityByNetworkId(kRemoteNetworkId);
+    if (remote_entity != entt::null &&
+        client_world.registry.all_of<PresentationTransformComponent>(remote_entity))
+        state.addError("disconnect left a transient remote presentation pose attached");
     for (int frame = 0; frame < 8 && server.getClientCount() != 0; ++frame) {
         server.update(0.0f);
         client.update(0.0f);

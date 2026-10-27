@@ -825,6 +825,11 @@ GAME_API void gardenGameUpdate(float delta_time)
         game_world->world_camera.position += offset;
     }
 
+    // Interpolation writes only the remote entities' presentation poses.
+    // Run it before representations copy their tracked source pose this frame.
+    if (g_network.isConnected())
+        g_network.interpolateRemoteEntities();
+
     // Update player representations
     update_player_representations(game_world->registry,
         g_player_controller ? g_player_controller->isFreecamMode() : false);
@@ -861,10 +866,6 @@ GAME_API void gardenGameUpdate(float delta_time)
     }
     AudioEventSystem::get().reapFinished([](SoundHandle h) { return AudioSystem::get().isSoundPlaying(h); });
     AudioSystem::get().update();
-
-    // Interpolate remote entities
-    if (g_network.isConnected())
-        g_network.interpolateRemoteEntities();
 
     // Update HUD
     {

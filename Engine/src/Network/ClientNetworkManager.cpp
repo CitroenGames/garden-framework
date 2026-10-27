@@ -840,6 +840,22 @@ void ClientNetworkManager::seedInterpolationState(uint32_t network_id,
     // A spawn/re-spawn establishes a new interpolation origin. Do not blend it
     // with snapshots from a previous lifetime of the same network id.
     interp_buffers.erase(network_id);
+
+    if (game_world != nullptr) {
+        const auto entity_it = network_id_to_entity.find(network_id);
+        if (entity_it != network_id_to_entity.end() &&
+            game_world->registry.valid(entity_it->second)) {
+            PresentationTransformComponent presentation;
+            if (const auto* transform = game_world->registry.try_get<TransformComponent>(entity_it->second))
+                presentation.rotation = transform->rotation;
+            presentation.position = position;
+            // Network yaw is radians; the presentation component shares the
+            // ECS degrees convention at this boundary.
+            presentation.rotation.y = glm::degrees(rotation_y);
+            game_world->registry.emplace_or_replace<PresentationTransformComponent>(
+                entity_it->second, presentation);
+        }
+    }
 }
 
 void ClientNetworkManager::mergeInterpolationState(const EntityUpdateData& update,
@@ -878,6 +894,13 @@ void ClientNetworkManager::pushInterpolationSnapshot(uint32_t network_id, uint32
 
 void ClientNetworkManager::clearInterpolationHistory()
 {
+    if (game_world != nullptr) {
+        for (const auto& [network_id, entity] : network_id_to_entity) {
+            (void)network_id;
+            if (game_world->registry.valid(entity))
+                game_world->registry.remove<PresentationTransformComponent>(entity);
+        }
+    }
     interp_buffers.clear();
     latest_interp_state.clear();
     has_received_server_tick = false;
@@ -1047,14 +1070,22 @@ void ClientNetworkManager::interpolateRemoteEntities()
         if (!game_world->registry.all_of<TransformComponent>(entity))
             continue;
 
+        auto* presentation = game_world->registry.try_get<PresentationTransformComponent>(entity);
+        if (!presentation) {
+            PresentationTransformComponent initial;
+            const auto& transform = game_world->registry.get<TransformComponent>(entity);
+            initial.position = transform.position;
+            initial.rotation = transform.rotation;
+            presentation = &game_world->registry.emplace<PresentationTransformComponent>(entity, initial);
+        }
+
         glm::vec3 interpolated_pos;
         float interpolated_rot;
         if (buffer.interpolate(render_anchor_tick, render_fraction,
                                interpolated_pos, interpolated_rot)) {
-            auto& transform = game_world->registry.get<TransformComponent>(entity);
-            transform.position = interpolated_pos;
+            presentation->position = interpolated_pos;
             // D4 point 4 (out): buffer radians -> ECS degrees.
-            transform.rotation.y = glm::degrees(interpolated_rot);
+            presentation->rotation.y = glm::degrees(interpolated_rot);
         }
     }
 }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Frustum.hpp"
+#include "Components/Components.hpp"
 #include <entt/entt.hpp>
 #include <vector>
 #include <algorithm>
@@ -42,6 +43,11 @@ public:
     // Query all entities visible in the frustum
     void queryFrustum(const Frustum& frustum, std::vector<entt::entity>& results) const;
 
+    // Presentation-aware render query. Static authoritative bounds stay in the
+    // BVH; presentation entities are checked at their current pose separately.
+    void queryFrustum(const Frustum& frustum, const entt::registry& registry,
+                      std::vector<entt::entity>& results) const;
+
     // Pick the closest entity hit by a ray. Returns entt::null if nothing hit.
     entt::entity rayPick(const glm::vec3& origin, const glm::vec3& direction) const;
 
@@ -76,10 +82,13 @@ private:
     int buildRecursive(std::vector<EntityBounds>& entities, size_t start, size_t end);
 
     // Recursive frustum query
-    void queryFrustumRecursive(int nodeIndex, const Frustum& frustum, std::vector<entt::entity>& results) const;
+    void queryFrustumRecursive(int nodeIndex, const Frustum& frustum,
+                               const entt::registry* registry,
+                               std::vector<entt::entity>& results) const;
 
     // Collect all leaf entities in a subtree (no frustum tests)
-    void collectAllLeaves(int nodeIndex, std::vector<entt::entity>& results) const;
+    void collectAllLeaves(int nodeIndex, const entt::registry* registry,
+                          std::vector<entt::entity>& results) const;
 
     // Recursive ray pick (returns closest hit entity)
     void rayPickRecursive(int nodeIndex, const glm::vec3& origin, const glm::vec3& direction,
@@ -231,19 +240,61 @@ inline void SceneBVH::queryFrustum(const Frustum& frustum, std::vector<entt::ent
         return;
     }
 
-    queryFrustumRecursive(root_index, frustum, results);
+    queryFrustumRecursive(root_index, frustum, nullptr, results);
 }
 
-inline void SceneBVH::collectAllLeaves(int nodeIndex, std::vector<entt::entity>& results) const
+inline void SceneBVH::queryFrustum(const Frustum& frustum, const entt::registry& registry,
+                                   std::vector<entt::entity>& results) const
+{
+    results.clear();
+
+    if (root_index >= 0 && !nodes.empty())
+        queryFrustumRecursive(root_index, frustum, &registry, results);
+
+    // Presentation poses can move away from the authoritative bounds stored
+    // in the tree, so they bypass stale nodes and get a current per-entity test.
+    auto presentation_view = registry.view<MeshComponent, TransformComponent,
+                                           PresentationTransformComponent>();
+    for (entt::entity entity : presentation_view)
+    {
+        const auto& mesh_comp = presentation_view.get<MeshComponent>(entity);
+        if (!mesh_comp.m_mesh || !mesh_comp.m_mesh->visible || !mesh_comp.m_mesh->is_valid)
+            continue;
+
+        mesh* m = mesh_comp.m_mesh.get();
+        if (!m->bounds_computed)
+            m->computeBounds();
+
+        const TransformComponent render_transform = resolveRenderTransform(registry, entity);
+        const AABB bounds = AABB::fromTransformedAABB(
+            m->aabb_min, m->aabb_max, render_transform.getTransformMatrix());
+        if (frustum.intersectsAABB(bounds)) {
+            results.push_back(entity);
+            cull_stats.leaves_collected++;
+        }
+    }
+}
+
+inline void SceneBVH::collectAllLeaves(int nodeIndex, const entt::registry* registry,
+                                       std::vector<entt::entity>& results) const
 {
     if (nodeIndex < 0 || nodeIndex >= static_cast<int>(nodes.size())) return;
     const BVHNode& node = nodes[nodeIndex];
-    if (node.isLeaf()) { results.push_back(node.entity); cull_stats.leaves_collected++; return; }
-    if (node.left_child >= 0) collectAllLeaves(node.left_child, results);
-    if (node.right_child >= 0) collectAllLeaves(node.right_child, results);
+    if (node.isLeaf()) {
+        if (!registry || (registry->valid(node.entity) &&
+                          !registry->all_of<PresentationTransformComponent>(node.entity))) {
+            results.push_back(node.entity);
+            cull_stats.leaves_collected++;
+        }
+        return;
+    }
+    if (node.left_child >= 0) collectAllLeaves(node.left_child, registry, results);
+    if (node.right_child >= 0) collectAllLeaves(node.right_child, registry, results);
 }
 
-inline void SceneBVH::queryFrustumRecursive(int nodeIndex, const Frustum& frustum, std::vector<entt::entity>& results) const
+inline void SceneBVH::queryFrustumRecursive(int nodeIndex, const Frustum& frustum,
+                                            const entt::registry* registry,
+                                            std::vector<entt::entity>& results) const
 {
     if (nodeIndex < 0 || nodeIndex >= static_cast<int>(nodes.size()))
     {
@@ -263,25 +314,27 @@ inline void SceneBVH::queryFrustumRecursive(int nodeIndex, const Frustum& frustu
     // If fully inside frustum, add all leaves without further tests
     if (frustum.containsAABB(node.bounds))
     {
-        collectAllLeaves(nodeIndex, results);
+        collectAllLeaves(nodeIndex, registry, results);
         return;
     }
 
     // If this is a leaf node, add the entity to results
     if (node.isLeaf())
     {
-        results.push_back(node.entity);
+        if (!registry || (registry->valid(node.entity) &&
+                          !registry->all_of<PresentationTransformComponent>(node.entity)))
+            results.push_back(node.entity);
         return;
     }
 
     // Recurse on children
     if (node.left_child >= 0)
     {
-        queryFrustumRecursive(node.left_child, frustum, results);
+        queryFrustumRecursive(node.left_child, frustum, registry, results);
     }
     if (node.right_child >= 0)
     {
-        queryFrustumRecursive(node.right_child, frustum, results);
+        queryFrustumRecursive(node.right_child, frustum, registry, results);
     }
 }
 

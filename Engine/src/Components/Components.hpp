@@ -41,6 +41,37 @@ struct TransformComponent {
     }
 };
 
+// Runtime-only render pose override. Simulation, physics, networking, and
+// serialization continue to use TransformComponent; render code resolves
+// these local position/rotation values while inheriting scale from it.
+struct PresentationTransformComponent {
+    glm::vec3 position{0.0f};
+    glm::vec3 rotation{0.0f};
+};
+
+inline TransformComponent resolveRenderTransform(
+    const TransformComponent& transform,
+    const PresentationTransformComponent* presentation)
+{
+    TransformComponent resolved = transform;
+    if (presentation) {
+        resolved.position = presentation->position;
+        resolved.rotation = presentation->rotation;
+    }
+    return resolved;
+}
+
+inline TransformComponent resolveRenderTransform(
+    const entt::registry& registry,
+    entt::entity entity)
+{
+    const auto* transform = registry.try_get<TransformComponent>(entity);
+    if (!transform)
+        return TransformComponent{};
+    return resolveRenderTransform(
+        *transform, registry.try_get<PresentationTransformComponent>(entity));
+}
+
 struct TagComponent {
     std::string name;
 

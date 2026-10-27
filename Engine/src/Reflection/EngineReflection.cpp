@@ -45,8 +45,8 @@ void registerEngineReflection(ReflectionRegistry& registry)
     registry.reflect<IdentityComponent>("IdentityComponent");
     // Hierarchy: ParentComponent is the load-authoritative link;
     // ChildrenComponent (vector<EntityRef>) is reflected/serialized and
-    // rebuilt from Parent on load. WorldTransformComponent is derived
-    // and intentionally unreflected.
+    // rebuilt from Parent on load. WorldTransformComponent is derived and
+    // PresentationTransformComponent is transient; both stay unreflected.
     registry.reflect<TeamComponent>("TeamComponent");
     registry.reflect<CountdownTimerComponent>("CountdownTimerComponent");
     registry.reflect<ResourceWalletComponent>("ResourceWalletComponent");

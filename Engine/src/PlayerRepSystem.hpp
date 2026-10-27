@@ -19,12 +19,13 @@ inline void update_player_representations(entt::registry& registry, bool is_free
         if (tracked != entt::null && registry.valid(tracked) &&
             registry.all_of<TransformComponent>(tracked))
         {
-            const auto& target_trans = registry.get<TransformComponent>(tracked);
+            const TransformComponent target_trans = resolveRenderTransform(registry, tracked);
 
             // Sync position with offset
             trans.position = target_trans.position + pr.position_offset;
 
-            // Sync Y rotation for character representation
+            // Keep render-only representations aligned with the source's
+            // current presentation pose when it has one.
             trans.rotation.y = target_trans.rotation.y;
         }
 
