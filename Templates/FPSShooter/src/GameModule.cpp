@@ -757,12 +757,12 @@ GAME_API void gardenGameUpdate(float delta_time)
                 float pos_error = glm::distance(server_state.position, trans.position);
                 if (pos_error > 0.01f)
                 {
-                    MovementState replay_state = server_state;
-                    g_network.getInputHistory().forEachFrom(server_tick, [&](const PredictionEntry& entry) {
-                        replay_state.grounded = entry.predicted_state.grounded;
-                        replay_state.ground_normal = entry.predicted_state.ground_normal;
-                        replay_state = apply_movement(entry.input, replay_state);
-                    });
+                    MovementState replay_state = g_network.getInputHistory().replayFrom(
+                        server_tick,
+                        server_state,
+                        [&](const MovementInput& input, const MovementState& start_state) {
+                            return apply_movement(input, start_state);
+                        });
 
                     trans.position = replay_state.position;
                     rb.velocity = replay_state.velocity;

@@ -117,6 +117,17 @@ public:
         }
     }
 
+    // Replay unacknowledged inputs in tick order, carrying each movement result
+    // into the next step instead of restoring stale predicted state snapshots.
+    template <typename Func>
+    MovementState replayFrom(uint32_t from_tick, MovementState state, Func&& apply_movement) const
+    {
+        forEachFrom(from_tick, [&](const PredictionEntry& entry) {
+            state = apply_movement(entry.input, state);
+        });
+        return state;
+    }
+
     size_t size() const { return count; }
 
     void clear()

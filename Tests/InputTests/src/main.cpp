@@ -847,6 +847,88 @@ namespace
         return ok;
     }
 
+    bool testPredictionReplayCarriesAuthoritativeMovementState()
+    {
+        Net::InputRingBuffer<4> history;
+        const uint32_t ticks[] = { 0xFFFFFFFFu, 1u };
+        for (uint32_t tick : ticks)
+        {
+            Net::PredictionEntry entry;
+            entry.tick = tick;
+            entry.valid = true;
+            entry.predicted_state.grounded = true;
+            entry.predicted_state.ground_normal = glm::vec3(0.0f, 1.0f, 0.0f);
+            history.push(entry);
+        }
+
+        Net::MovementState authoritative_state;
+        authoritative_state.velocity = glm::vec3(10.0f, 0.0f, 0.0f);
+        authoritative_state.grounded = false;
+        authoritative_state.ground_normal = glm::vec3(0.0f, 1.0f, 0.0f);
+        Net::MovementConfig movement_config;
+
+        const auto apply_movement = [&](const Net::MovementInput& input, const Net::MovementState& start_state) {
+            return Net::SharedMovement::simulate(input, start_state, movement_config);
+        };
+
+        uint32_t replayed_tick_count = 0;
+        const Net::MovementState replayed_state = history.replayFrom(
+            0xFFFFFFFEu, authoritative_state,
+            [&](const Net::MovementInput& input, const Net::MovementState& start_state) {
+                ++replayed_tick_count;
+                return apply_movement(input, start_state);
+            });
+
+        Net::MovementState direct_airborne_replay = authoritative_state;
+        history.forEachFrom(0xFFFFFFFEu, [&](const Net::PredictionEntry& entry) {
+            direct_airborne_replay = apply_movement(entry.input, direct_airborne_replay);
+        });
+
+        Net::MovementState stale_grounded_replay = authoritative_state;
+        history.forEachFrom(0xFFFFFFFEu, [&](const Net::PredictionEntry& entry) {
+            stale_grounded_replay.grounded = entry.predicted_state.grounded;
+            stale_grounded_replay.ground_normal = entry.predicted_state.ground_normal;
+            stale_grounded_replay = apply_movement(entry.input, stale_grounded_replay);
+        });
+
+        const bool matches_direct_airborne =
+            replayed_state.position.x == direct_airborne_replay.position.x &&
+            replayed_state.position.y == direct_airborne_replay.position.y &&
+            replayed_state.position.z == direct_airborne_replay.position.z &&
+            replayed_state.velocity.x == direct_airborne_replay.velocity.x &&
+            replayed_state.velocity.y == direct_airborne_replay.velocity.y &&
+            replayed_state.velocity.z == direct_airborne_replay.velocity.z &&
+            replayed_state.grounded == direct_airborne_replay.grounded &&
+            replayed_state.ground_normal.x == direct_airborne_replay.ground_normal.x &&
+            replayed_state.ground_normal.y == direct_airborne_replay.ground_normal.y &&
+            replayed_state.ground_normal.z == direct_airborne_replay.ground_normal.z;
+        const bool differs_from_stale_grounded =
+            replayed_state.position.x != stale_grounded_replay.position.x ||
+            replayed_state.position.y != stale_grounded_replay.position.y ||
+            replayed_state.position.z != stale_grounded_replay.position.z ||
+            replayed_state.velocity.x != stale_grounded_replay.velocity.x ||
+            replayed_state.velocity.y != stale_grounded_replay.velocity.y ||
+            replayed_state.velocity.z != stale_grounded_replay.velocity.z ||
+            replayed_state.grounded != stale_grounded_replay.grounded ||
+            replayed_state.ground_normal.x != stale_grounded_replay.ground_normal.x ||
+            replayed_state.ground_normal.y != stale_grounded_replay.ground_normal.y ||
+            replayed_state.ground_normal.z != stale_grounded_replay.ground_normal.z;
+
+        bool ok = expect(matches_direct_airborne,
+            "prediction replay carries authoritative airborne state across wrapped post-ack ticks");
+        ok = expect(differs_from_stale_grounded,
+            "SharedMovement replay differs from forcing stale grounded snapshots") && ok;
+        ok = expect(std::abs(replayed_state.velocity.x - authoritative_state.velocity.x) < 0.0001f,
+            "airborne SharedMovement preserves horizontal speed with neutral input") && ok;
+        ok = expect(std::abs(replayed_state.velocity.x - stale_grounded_replay.velocity.x) > 0.1f,
+            "stale grounded replay applies horizontal friction") && ok;
+        ok = expect(history.get(0xFFFFFFFFu) != nullptr && history.get(1u) != nullptr,
+            "prediction replay includes post-ack inputs across uint32 tick wrap") && ok;
+        ok = expect(replayed_tick_count == 2,
+            "prediction replay applies both newer inputs across uint32 tick wrap") && ok;
+        return ok;
+    }
+
     bool testLocalPlayerInputEcsProjection()
     {
         InputManager input;
@@ -974,6 +1056,7 @@ int main()
     ok = testActionRebindCallbacksAndProfile() && ok;
     ok = testNetworkInputSampler() && ok;
     ok = testInputRingBufferTickWrap() && ok;
+    ok = testPredictionReplayCarriesAuthoritativeMovementState() && ok;
     ok = testLocalPlayerInputEcsProjection() && ok;
 
     if (!ok)
