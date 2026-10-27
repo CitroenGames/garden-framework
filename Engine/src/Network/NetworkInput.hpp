@@ -33,6 +33,16 @@ inline InputSample makePrimaryInputSample(const InputCommandMessage& msg)
     return sample;
 }
 
+inline uint32_t resolveClientViewTick(bool has_view_tick, uint32_t sample_view_tick,
+                                      uint32_t last_received_server_tick)
+{
+    // The legacy acknowledgement is converted using uint32 serial arithmetic,
+    // so clients near tick zero receive the same delayed anchor across wrap.
+    return has_view_tick
+        ? sample_view_tick
+        : last_received_server_tick - DEFAULT_INTERP_DELAY_TICKS;
+}
+
 // Reserved WEAPON_SELECT value (7) decodes as "none"; counted, never fatal.
 inline uint16_t sanitizeWeaponSelect(uint16_t buttons, uint32_t* reject_counter)
 {

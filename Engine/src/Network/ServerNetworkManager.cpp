@@ -581,7 +581,9 @@ void ServerNetworkManager::handleInputCommand(uint16_t client_id, BitReader& rea
         move_input.camera_yaw = sample.camera_yaw;
         move_input.camera_pitch = sample.camera_pitch;
         move_input.buttons = sample.buttons;
-        move_input.view_server_tick = sample.view_server_tick;
+        const uint32_t client_view_tick = resolveClientViewTick(
+            include_view_tick, sample.view_server_tick, msg.last_received_tick);
+        move_input.view_server_tick = client_view_tick;
 
         MovementState move_state;
         move_state.position = transform.position;
@@ -607,10 +609,8 @@ void ServerNetworkManager::handleInputCommand(uint16_t client_id, BitReader& rea
 
         it->second.info.last_input_tick = sample.tick;
 
-        const uint32_t acknowledged_tick = include_view_tick
-            ? sample.view_server_tick : msg.last_received_tick;
         if (input_sample_handler) {
-            input_sample_handler(client_id, player_entity, sample, acknowledged_tick);
+            input_sample_handler(client_id, player_entity, sample, client_view_tick);
         }
 
         // WEAPON_SELECT edge: fire only when the value changes vs the last

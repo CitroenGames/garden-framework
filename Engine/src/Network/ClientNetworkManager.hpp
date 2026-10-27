@@ -73,6 +73,8 @@ private:
     static constexpr float INPUT_SEND_INTERVAL = 1.0f / 60.0f;  // 60Hz max
     InputState last_sent_input;
     uint32_t pending_input_tick = 0;
+    // Render anchor captured when this pending input sample is created.
+    uint32_t pending_input_view_server_tick = 0;
     bool has_pending_input = false;
 
     // Ping/RTT measurement
@@ -171,6 +173,8 @@ public:
     }
 
 private:
+    uint32_t currentRenderAnchorTick() const;
+
     // Event handlers
     void handleServerConnect(ENetEvent& event);
     void handleServerDisconnect(ENetEvent& event);

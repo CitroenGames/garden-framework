@@ -51,6 +51,11 @@ bool ClientNetworkManager::connectToServer(const char* address, uint16_t port, c
 
     clearInterpolationHistory();
     last_received_server_tick = 0;
+    has_received_server_tick = false;
+    pending_input_tick = 0;
+    pending_input_view_server_tick = 0;
+    has_pending_input = false;
+    recent_input_count = 0;
 
     // Store player name
     player_name = name;
@@ -131,7 +136,9 @@ void ClientNetworkManager::shutdown()
     client_id = 0;
     client_tick = 0;
     last_received_server_tick = 0;
+    has_received_server_tick = false;
     pending_input_tick = 0;
+    pending_input_view_server_tick = 0;
     has_pending_input = false;
     recent_input_count = 0;
     negotiated_capability_flags = 0;
@@ -209,7 +216,7 @@ void ClientNetworkManager::update(float delta_time)
             recent_inputs[0].camera_pitch = last_sent_input.camera_pitch;
             recent_inputs[0].move_forward = last_sent_input.move_forward;
             recent_inputs[0].move_right = last_sent_input.move_right;
-            recent_inputs[0].view_server_tick = last_received_server_tick;
+            recent_inputs[0].view_server_tick = pending_input_view_server_tick;
             if (recent_input_count < 3) recent_input_count++;
 
             // Create and send input command with redundant older inputs
@@ -222,7 +229,7 @@ void ClientNetworkManager::update(float delta_time)
             msg.camera_pitch = last_sent_input.camera_pitch;
             msg.move_forward = last_sent_input.move_forward;
             msg.move_right = last_sent_input.move_right;
-            msg.view_server_tick = last_received_server_tick;
+            msg.view_server_tick = recent_inputs[0].view_server_tick;
 
             // Include up to 2 older inputs for redundancy, oldest first.
             uint8_t redundant_count = (recent_input_count > 1) ? static_cast<uint8_t>(recent_input_count - 1) : 0;
@@ -285,6 +292,7 @@ void ClientNetworkManager::sendInputCommand(uint32_t command_tick, const InputSt
         pending_weapon_select = requested_select;
     }
     pending_input_tick = command_tick;
+    pending_input_view_server_tick = currentRenderAnchorTick();
     last_sent_input = input;
     last_sent_input.buttons |= latched_actions;
     if (pending_weapon_select != 0) {
@@ -299,6 +307,13 @@ uint32_t ClientNetworkManager::beginInputCommandTick()
         return client_tick;
     }
     return ++client_tick;
+}
+
+uint32_t ClientNetworkManager::currentRenderAnchorTick() const
+{
+    // The render timeline is a discrete server tick delayed by the active
+    // interpolation amount. Unsigned subtraction intentionally wraps at tick 0.
+    return last_received_server_tick - INTERP_DELAY_TICKS;
 }
 
 entt::entity ClientNetworkManager::getEntityByNetworkId(uint32_t net_id) const
@@ -1051,7 +1066,7 @@ void ClientNetworkManager::interpolateRemoteEntities()
 
     // Unsigned subtraction intentionally wraps when the delayed render tick
     // precedes tick zero. Keep sub-tick progress separate from the anchor.
-    const uint32_t render_anchor_tick = last_received_server_tick - INTERP_DELAY_TICKS;
+    const uint32_t render_anchor_tick = currentRenderAnchorTick();
     constexpr float render_fraction = 0.0f;
 
     for (auto& [net_id, buffer] : interp_buffers) {

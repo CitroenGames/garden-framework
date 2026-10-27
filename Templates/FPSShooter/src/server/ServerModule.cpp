@@ -241,20 +241,12 @@ static void sendWeaponState(uint16_t client_id, entt::entity player_entity, cons
     g_server_network.sendReliableToClient(client_id, writer);
 }
 
-static uint32_t getLagCompensatedAimTick(uint32_t acknowledged_server_tick)
-{
-    if (acknowledged_server_tick <= DEFAULT_INTERP_DELAY_TICKS) {
-        return acknowledged_server_tick;
-    }
-    return acknowledged_server_tick - DEFAULT_INTERP_DELAY_TICKS;
-}
-
 // Process an authoritative attack input sample with lag compensation.
 static void fireServerShot(
     uint16_t shooter_client_id,
     entt::entity shooter_entity,
     const InputSample& input,
-    uint32_t acknowledged_server_tick,
+    uint32_t client_view_tick,
     const WeaponComponent& weapon,
     float shot_spread)
 {
@@ -265,7 +257,7 @@ static void fireServerShot(
     const glm::vec3 ray_origin = getShootOrigin(shooter_transform);
     const glm::vec3 ray_dir = makeAimDirection(input.camera_pitch, input.camera_yaw);
 
-    const uint32_t rewind_tick = getLagCompensatedAimTick(acknowledged_server_tick);
+    const uint32_t rewind_tick = client_view_tick;
 
     // Per-pellet hits: every pellet that hits a player applies damage
     // independently (fixes best-pellet-only shotgun bug).
@@ -437,7 +429,7 @@ static void processWeaponInput(
     uint16_t client_id,
     entt::entity player_entity,
     const InputSample& input,
-    uint32_t acknowledged_server_tick)
+    uint32_t client_view_tick)
 {
     world* w = g_server_services ? g_server_services->game_world : nullptr;
     if (!w || !w->registry.valid(player_entity)) {
@@ -469,7 +461,7 @@ static void processWeaponInput(
         const float shot_spread = WeaponSystem::computeSpread(
             weapon, getWeaponAccuracyContext(*w, player_entity));
         if (WeaponSystem::tryFire(weapon)) {
-            fireServerShot(client_id, player_entity, input, acknowledged_server_tick, weapon, shot_spread);
+            fireServerShot(client_id, player_entity, input, client_view_tick, weapon, shot_spread);
         }
     } else if (wants_reload) {
         (void)WeaponSystem::tryReload(weapon);
@@ -1495,12 +1487,12 @@ GAME_API bool gardenServerInit(EngineServices* services)
         uint16_t client_id,
         entt::entity player_entity,
         const InputSample& input,
-        uint32_t acknowledged_server_tick) {
+        uint32_t client_view_tick) {
         if (g_competitive) {
             g_bomb_use_held[client_id] = (input.buttons & InputFlags::USE) != 0;
             g_bomb_last_buttons[client_id] = input.buttons;
         }
-        processWeaponInput(client_id, player_entity, input, acknowledged_server_tick);
+        processWeaponInput(client_id, player_entity, input, client_view_tick);
     });
 
     // D3: weapon-select fires once per value change (engine edge detection).

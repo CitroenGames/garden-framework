@@ -6,6 +6,7 @@
 #include "Network/InterpolationBuffer.hpp"
 #include "Network/LagHistory.hpp"
 #include "Network/LevelHash.hpp"
+#include "Network/NetworkInput.hpp"
 #include "Network/NetworkProtocol.hpp"
 #include "Network/NetworkSerializer.hpp"
 #include "Network/NetworkTypes.hpp"
@@ -552,6 +553,211 @@ static bool runLagHistoryTickWrapTest()
     }
 
     std::cout << "[PASS] LagHistoryTickWrapTests\n";
+    return true;
+}
+
+static bool runInputViewTickProtocolTest()
+{
+    Net::InputCommandMessage message;
+    message.client_tick = 3;
+    message.last_received_tick = 1;
+    message.view_server_tick = 2;
+
+    Net::InputSample redundant[2] = {};
+    redundant[0].tick = 1;
+    redundant[0].view_server_tick = 0xFFFFFFFFu;
+    redundant[1].tick = 2;
+    redundant[1].view_server_tick = 0u;
+
+    Net::BitWriter capable_writer;
+    Net::NetworkSerializer::serialize(capable_writer, message, redundant, 2, true);
+    Net::BitReader capable_reader(capable_writer.getData(), capable_writer.getByteSize());
+    Net::InputCommandMessage capable_message;
+    std::vector<Net::InputSample> capable_redundant;
+    if (!Net::NetworkSerializer::deserialize(capable_reader, capable_message, capable_redundant, true) ||
+        capable_message.view_server_tick != 2u || capable_redundant.size() != 2u ||
+        capable_redundant[0].tick != 1u || capable_redundant[0].view_server_tick != 0xFFFFFFFFu ||
+        capable_redundant[1].tick != 2u || capable_redundant[1].view_server_tick != 0u) {
+        std::cerr << "[FAIL] InputViewTickTests did not preserve primary and redundant CAP_VIEW_TICK values\n";
+        return false;
+    }
+
+    const auto chronological = Net::collectInputSamplesChronological(capable_message, capable_redundant);
+    if (chronological.size() != 3u || chronological[0].view_server_tick != 0xFFFFFFFFu ||
+        chronological[1].view_server_tick != 0u || chronological[2].view_server_tick != 2u) {
+        std::cerr << "[FAIL] InputViewTickTests changed view ticks while ordering redundant samples\n";
+        return false;
+    }
+
+    message.last_received_tick = 1u;
+    Net::BitWriter legacy_writer;
+    Net::NetworkSerializer::serialize(legacy_writer, message, redundant, 2, false);
+    Net::BitReader legacy_reader(legacy_writer.getData(), legacy_writer.getByteSize());
+    Net::InputCommandMessage legacy_message;
+    std::vector<Net::InputSample> legacy_redundant;
+    if (!Net::NetworkSerializer::deserialize(legacy_reader, legacy_message, legacy_redundant, false) ||
+        legacy_message.view_server_tick != 1u || legacy_redundant.size() != 2u ||
+        legacy_redundant[0].view_server_tick != 1u || legacy_redundant[1].view_server_tick != 1u) {
+        std::cerr << "[FAIL] InputViewTickTests did not retain legacy acknowledgement ticks for fallback\n";
+        return false;
+    }
+
+    if (Net::resolveClientViewTick(true, 0u, 1u) != 0u ||
+        Net::resolveClientViewTick(false, 123u, 50u) != 48u ||
+        Net::resolveClientViewTick(false, 123u, 1u) != 0xFFFFFFFFu) {
+        std::cerr << "[FAIL] InputViewTickTests did not apply direct CAP ticks and modular legacy fallback\n";
+        return false;
+    }
+
+    std::cout << "[PASS] InputViewTickProtocolTests\n";
+    return true;
+}
+
+static bool runInputViewTickLoopbackTest()
+{
+    TestState state;
+    world server_world;
+    server_world.setFixedDelta(kFixedDelta);
+
+    Net::ServerNetworkManager server;
+    if (!server.initialize()) {
+        std::cerr << "[FAIL] InputViewTickLoopbackTests could not initialize server\n";
+        return false;
+    }
+    server.setWorld(&server_world);
+    // Start immediately before uint32 wrap so the real client path captures a
+    // wrapped render anchor and carries it through redundant history.
+    server.advanceSimulationTicks(0xFFFFFFFEu);
+
+    bool allow_inputs = true;
+    struct CapturedViewTick {
+        uint16_t client_id;
+        uint32_t input_tick;
+        uint32_t sample_view_tick;
+        uint32_t callback_view_tick;
+    };
+    std::vector<CapturedViewTick> captured;
+    server.setOnClientConnected([&](uint16_t client_id) {
+        spawnServerPlayer(server_world, server, client_id);
+    });
+    server.setInputFilter([&](uint16_t, entt::entity) { return allow_inputs; });
+    server.setInputSampleHandler([&](uint16_t client_id, entt::entity,
+                                     const Net::InputSample& sample, uint32_t client_view_tick) {
+        captured.push_back({client_id, sample.tick, sample.view_server_tick, client_view_tick});
+    });
+
+    StressConfig config;
+    config.client_count = 2;
+    uint16_t port = 0;
+    if (!startServer(server, config, port)) {
+        std::cerr << "[FAIL] InputViewTickLoopbackTests could not start server\n";
+        server.shutdown();
+        return false;
+    }
+
+    world capable_world;
+    Net::ClientNetworkManager capable_client;
+    capable_client.setWorld(&capable_world);
+    bool clients_ready = capable_client.initialize() &&
+        capable_client.connectToServer("127.0.0.1", port, "view_tick_capable");
+    for (int frame = 0; clients_ready && frame < 600 && !capable_client.isConnected(); ++frame) {
+        capable_client.update(kFixedDelta);
+        server.update(0.0f);
+        capable_client.update(0.0f);
+        SDL_Delay(1);
+    }
+    if (!clients_ready || !capable_client.isConnected() || server.getClientCount() != 1u) {
+        state.addError("CAP_VIEW_TICK loopback client did not connect");
+    }
+
+    if (state.error_count == 0) {
+        server.advanceSimulationTicks(3u); // 0xFFFFFFFE -> 1
+        server.broadcastWorldState();
+        server.update(0.0f);
+        for (int frame = 0; frame < 120 && capable_client.getLastReceivedServerTick() != 1u; ++frame) {
+            capable_client.update(0.0f);
+            SDL_Delay(1);
+        }
+        if (capable_client.getLastReceivedServerTick() != 1u) {
+            state.addError("CAP_VIEW_TICK client did not receive wrapped server tick 1");
+        } else {
+            allow_inputs = false;
+            Net::InputState input;
+            capable_client.sendInputCommand(1u, input);
+            capable_client.update(0.0f); // Keep the sample pending while its view tick advances.
+
+            server.advanceSimulationTicks(3u); // 1 -> 4
+            server.broadcastWorldState();
+            server.update(0.0f);
+            for (int frame = 0; frame < 120 && capable_client.getLastReceivedServerTick() != 4u; ++frame) {
+                capable_client.update(0.0f);
+                SDL_Delay(1);
+            }
+            if (capable_client.getLastReceivedServerTick() != 4u) {
+                state.addError("CAP_VIEW_TICK client did not receive server tick 4");
+            } else {
+                capable_client.update(kFixedDelta * 2.0f); // Sends input 1 with captured view tick 0xFFFFFFFF.
+                server.update(0.0f);                       // Filter it so input 1 is resent as redundancy.
+                allow_inputs = true;
+                capable_client.sendInputCommand(2u, input);
+                capable_client.update(kFixedDelta * 2.0f);
+                server.update(0.0f);
+            }
+        }
+    }
+
+    if (captured.size() != 2u || captured[0].input_tick != 1u ||
+        captured[0].sample_view_tick != 0xFFFFFFFFu || captured[0].callback_view_tick != 0xFFFFFFFFu ||
+        captured[1].input_tick != 2u || captured[1].sample_view_tick != 2u ||
+        captured[1].callback_view_tick != 2u) {
+        state.addError("CAP_VIEW_TICK primary/redundant samples did not preserve their captured wrapped view ticks");
+    }
+
+    world legacy_world;
+    Net::ClientNetworkManager legacy_client;
+    legacy_client.setWorld(&legacy_world);
+    legacy_client.setClientCapabilityFlags(Net::CAP_ALL_KNOWN & ~Net::CAP_VIEW_TICK);
+    clients_ready = legacy_client.initialize() &&
+        legacy_client.connectToServer("127.0.0.1", port, "view_tick_legacy");
+    for (int frame = 0; clients_ready && frame < 600 && !legacy_client.isConnected(); ++frame) {
+        legacy_client.update(kFixedDelta);
+        server.update(0.0f);
+        legacy_client.update(0.0f);
+        SDL_Delay(1);
+    }
+    if (!clients_ready || !legacy_client.isConnected() || server.getClientCount() != 2u) {
+        state.addError("legacy input-view-tick loopback client did not connect");
+    } else {
+        Net::InputState input;
+        legacy_client.sendInputCommand(1u, input);
+        legacy_client.update(kFixedDelta * 2.0f);
+        server.update(0.0f);
+        if (captured.size() != 3u || captured.back().client_id != legacy_client.getClientId() ||
+            captured.back().input_tick != 1u || captured.back().sample_view_tick != 4u ||
+            captured.back().callback_view_tick != 2u) {
+            state.addError("legacy client callback did not receive the modular default-delay fallback");
+        }
+    }
+
+    capable_client.disconnect("input view tick regression complete");
+    legacy_client.disconnect("input view tick regression complete");
+    for (int frame = 0; frame < 8 && server.getClientCount() != 0; ++frame) {
+        server.update(0.0f);
+        capable_client.update(0.0f);
+        legacy_client.update(0.0f);
+        SDL_Delay(1);
+    }
+    capable_client.shutdown();
+    legacy_client.shutdown();
+    server.shutdown();
+
+    if (state.error_count != 0) {
+        for (const std::string& error : state.errors) {
+            std::cerr << "[FAIL] " << error << "\n";
+        }
+        return false;
+    }
+    std::cout << "[PASS] InputViewTickLoopbackTests\n";
     return true;
 }
 
@@ -1190,10 +1396,13 @@ int main(int argc, char** argv)
     const bool interpolation_buffer_wrap_ok = runInterpolationTickWrapBufferTest();
     const bool interpolation_jitter_ok = runInterpolationJitterBufferTest();
     const bool lag_history_wrap_ok = runLagHistoryTickWrapTest();
+    const bool input_view_tick_protocol_ok = runInputViewTickProtocolTest();
+    const bool input_view_tick_loopback_ok = runInputViewTickLoopbackTest();
     const bool interpolation_manager_wrap_ok = runInterpolationTickWrapManagerTest();
     const bool raw_interpolation_ok = runRawRemoteInterpolationStateTest();
     const bool ok = runNetworkStress(config);
     EE::CLog::Shutdown();
-    return (handshake_ok && interpolation_buffer_wrap_ok && interpolation_jitter_ok && lag_history_wrap_ok && interpolation_manager_wrap_ok &&
+    return (handshake_ok && interpolation_buffer_wrap_ok && interpolation_jitter_ok && lag_history_wrap_ok &&
+            input_view_tick_protocol_ok && input_view_tick_loopback_ok && interpolation_manager_wrap_ok &&
             raw_interpolation_ok && ok) ? 0 : 1;
 }

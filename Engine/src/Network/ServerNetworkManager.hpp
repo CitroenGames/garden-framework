@@ -24,11 +24,13 @@ namespace Net {
 
 using ServerCustomMessageHandler = std::function<void(uint16_t client_id, uint8_t message_type, BitReader& reader)>;
 using ServerInputFilter = std::function<bool(uint16_t client_id, entt::entity player_entity)>;
+// The final argument is the effective view tick: CAP_VIEW_TICK is passed
+// through per sample, while legacy acknowledgements receive the default delay.
 using ServerInputSampleHandler = std::function<void(
     uint16_t client_id,
     entt::entity player_entity,
     const InputSample& input,
-    uint32_t acknowledged_server_tick)>;
+    uint32_t client_view_tick)>;
 using ServerWeaponSelectHandler = std::function<void(
     uint16_t client_id,
     entt::entity player_entity,
