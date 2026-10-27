@@ -1,6 +1,7 @@
 #pragma once
 // C4 Stage 3.4 tests included by GameplayTests main.cpp (uses its fail/pass helpers).
 #include "shared/CompetitiveLogic.hpp"
+#include "shared/BombSiteTriggers.hpp"
 #include <cmath>
 #include <string>
 
@@ -63,6 +64,48 @@ bool testC4PlantInterrupt()
       for (int i = 0; i < 60; ++i) b.tick(1.0f / 60.0f, in);
       auto rel = in; rel.plant_use = false; b.tick(1.0f / 60.0f, rel);
       if (b.bomb.state != BombState::Carried) return fail(name, "USE release did not cancel"); }
+    return pass(name);
+}
+
+bool testC4AuthoredTriggerOccupancy()
+{
+    const std::string name = "C4_AuthoredTriggerOccupancy";
+    using namespace Competitive;
+    entt::registry reg;
+    const entt::entity carrier = reg.create();
+    const entt::entity site_a = reg.create();
+    reg.emplace<BombSiteComponent>(site_a, BombSiteComponent{1});
+    reg.emplace<TriggerComponent>(site_a, TriggerComponent{true, 1, true});
+    auto& state = reg.emplace<TriggerOverlapState>(site_a);
+
+    BombSystem bomb;
+    if (!bomb.assignCarrier(carrier)) return fail(name, "carrier assignment failed");
+    auto tickFromOccupancy = [&](bool use) {
+        BombTickInput in;
+        in.plant_use = use;
+        in.carrier_position = glm::vec3(0.0f);
+        in.plant_in_site = findBombSiteForOccupant(reg, carrier, in.plant_site);
+        bomb.tick(1.0f / 60.0f, in);
+    };
+
+    for (int i = 0; i < 180; ++i) tickFromOccupancy(true);
+    if (bomb.bomb.state != BombState::Carried || bomb.bomb.plant_channel != 0.0f)
+        return fail(name, "carrier outside authored trigger advanced planting");
+
+    state.occupants.push_back(carrier);
+    for (int i = 0; i < 60; ++i) tickFromOccupancy(true);
+    if (bomb.bomb.state != BombState::Planting || bomb.bomb.plant_channel <= 0.0f)
+        return fail(name, "occupancy did not start plant channel");
+
+    state.occupants.clear();
+    tickFromOccupancy(true);
+    if (bomb.bomb.state != BombState::Carried || bomb.bomb.plant_channel != 0.0f)
+        return fail(name, "leaving authored trigger did not cancel channel");
+
+    state.occupants.push_back(carrier);
+    for (int i = 0; i < 180; ++i) tickFromOccupancy(true);
+    if (bomb.bomb.state != BombState::Planted || bomb.bomb.site != 1)
+        return fail(name, "continuous authored-trigger occupancy did not complete plant");
     return pass(name);
 }
 

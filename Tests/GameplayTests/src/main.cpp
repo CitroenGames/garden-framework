@@ -1014,6 +1014,7 @@ int main()
     ok = testCompetitiveTeamAutoAssign() && ok;
     ok = testWeaponRosterIntegrity() && ok;
     ok = testC4PlantInterrupt() && ok;
+    ok = testC4AuthoredTriggerOccupancy() && ok;
     ok = testC4DefuseKit() && ok;
     ok = testC4Timer40() && ok;
     ok = testC4CarrierDropPickup() && ok;

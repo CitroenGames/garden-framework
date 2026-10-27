@@ -16,6 +16,7 @@
 #include "shared/WeaponSystem.hpp"
 #include "shared/FpsGameLogic.hpp"
 #include "shared/CompetitiveLogic.hpp"
+#include "shared/BombSiteTriggers.hpp"
 #include "shared/BotLogic.hpp"
 #include "Navigation/NavMesh.hpp"
 #include "Navigation/NavMeshPathfinder.hpp"
@@ -34,6 +35,7 @@
 #include <algorithm>
 #include <cmath>
 #include <glm/gtc/quaternion.hpp>
+#include <utility>
 
 static EngineServices* g_server_services = nullptr;
 static Net::ServerNetworkManager g_server_network;
@@ -52,6 +54,7 @@ static std::unordered_map<uint16_t, bool> g_bomb_use_held;
 static std::unordered_map<uint16_t, uint16_t> g_bomb_last_buttons;
 static std::unordered_map<uint32_t, int32_t> g_bomb_prev_health;
 static std::unordered_map<uint32_t, uint8_t> g_bomb_prev_weapon;
+static bool g_bomb_sites_authored = false;
 
 // ---- Bots v1 (FPS_BOTS=N, competitive only; DM/TDM unchanged) ----
 struct BotNavMeshResource { Navigation::NavMesh mesh; bool loaded = false; };
@@ -72,6 +75,7 @@ static bool aiPauseBots() { static const bool v = [] { const char* e = std::gete
 static Bots::TransitionRingBuffer g_bot_transitions;
 static float g_bot_debug_last_dump = -10.0f;
 static std::unordered_map<int32_t, Bots::StuckLogLatch> g_bot_stuck_latches;
+static bool bombSiteForPlayer(world& w, entt::entity player, uint8_t& out_site);
 
 static const char* bombStateName(Competitive::BombState st)
 {
@@ -728,7 +732,7 @@ static void tickBots(float dt)
         Bots::BotDecisionInput din; din.phase = g_round_system.state.phase; din.team = Competitive::teamFromId(team_id);
         din.alive = alive; din.is_carrier = g_bomb_system.bomb.carrier == e; din.bomb_planted = g_bomb_system.isPlanted();
         din.bot_pos = pos; din.health = w->registry.get<FpsHealthComponent>(e).health; din.dt = dt;
-        if (!g_bomb_system.config.sites.empty()) { const auto& s = g_bomb_system.config.sites[(size_t)std::abs(bot.bot_index) % g_bomb_system.config.sites.size()]; din.site_pos = s.centre; din.has_site = true; uint8_t si = 0; din.at_site = g_bomb_system.config.inSite(pos, si); }
+        if (!g_bomb_system.config.sites.empty()) { const auto& s = g_bomb_system.config.sites[(size_t)std::abs(bot.bot_index) % g_bomb_system.config.sites.size()]; din.site_pos = s.centre; din.has_site = true; uint8_t si = 0; din.at_site = bombSiteForPlayer(*w, e, si); }
         if (din.bomb_planted) { din.bomb_pos = g_bomb_system.bomb.planted_position; din.has_bomb_pos = true; din.at_bomb = glm::distance(pos, din.bomb_pos) <= g_bomb_system.config.defuse_range; }
         const int32_t dbg = aiDebugLevel();
         const uint64_t trans_before = g_bot_transitions.total_pushed;
@@ -826,35 +830,90 @@ static void competitiveFreezeRespawnAll()
         sendEconomyState(cid, e);
     }
 }
-// Bomb sites: no bomb-site volumes are exposed by the level, so use the
-// documented BombConfig fallback - Defender spawn centres + fallback radius.
-static bool loadAuthoredBombSites(std::vector<Competitive::BombSite>& out)
+// Load authored bomb sites from the FPSShooter sidecar. The fallback applies
+// only when no authored sidecar exists; invalid authored data fails closed.
+static bool loadAuthoredBombSites(std::vector<Competitive::BombSite>& out, bool& file_found)
 {
-    static bool s_tried = false; static std::vector<Competitive::BombSite> s_sites; static bool s_ok = false;
-    if (s_tried) { out = s_sites; return s_ok; }
+    static bool s_tried = false; static std::vector<Competitive::BombSite> s_sites; static bool s_ok = false; static bool s_file_found = false;
+    if (s_tried) { out = s_sites; file_found = s_file_found; return s_ok; }
     s_tried = true;
     static const char* kCandidates[] = {"assets/levels/main.sites.json", "Templates/FPSShooter/assets/levels/main.sites.json", "../Templates/FPSShooter/assets/levels/main.sites.json"};
     for (const char* path : kCandidates) {
         FILE* f = std::fopen(path, "rb"); if (!f) continue;
+        s_file_found = true;
         std::string text; char buf[4096]; size_t n = 0; while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) text.append(buf, n);
         std::fclose(f);
         std::string err;
-        if (!Competitive::parseAuthoredBombSites(text, s_sites, &err)) { LOG_ENGINE_ERROR("Bomb: authored sites {} rejected ({}); using fallback", path, err); s_sites.clear(); return false; }
+        if (!Competitive::parseAuthoredBombSites(text, s_sites, &err)) { LOG_ENGINE_ERROR("Bomb: authored sites {} rejected ({}); planting disabled", path, err); s_sites.clear(); file_found = true; return false; }
         if (g_bot_nav.loaded) {
-            for (const auto& s : s_sites) { glm::vec3 near_pt(0); if (!Navigation::NavMeshPathfinder::findNearestPoly(g_bot_nav.mesh, s.centre, near_pt)) { LOG_ENGINE_ERROR("Bomb: authored site {} off navmesh; using fallback", (int)s.site_index); s_sites.clear(); return false; } }
+            for (const auto& s : s_sites) { glm::vec3 near_pt(0); if (!Navigation::NavMeshPathfinder::findNearestPoly(g_bot_nav.mesh, s.centre, near_pt)) { LOG_ENGINE_ERROR("Bomb: authored site {} off navmesh; planting disabled", (int)s.site_index); s_sites.clear(); file_found = true; return false; } }
         }
         s_ok = true; out = s_sites;
+        file_found = true;
         LOG_ENGINE_INFO("Bomb: authored sites loaded from {} count={}", path, (int)s_sites.size());
         return true;
     }
     LOG_ENGINE_INFO("Bomb: no authored sites file found; using fallback");
+    file_found = false;
     return false;
 }
 static void configureBombSitesFallback();
-static bool configureBombSites()
+static void ensureAuthoredBombSiteTriggers(world& w, const std::vector<Competitive::BombSite>& sites)
+{
+    auto& registry = w.registry;
+    std::vector<entt::entity> current;
+    std::unordered_map<uint8_t, entt::entity> by_site;
+    auto view = registry.view<BombSiteComponent>();
+    for (entt::entity e : view) {
+        current.push_back(e);
+        by_site.emplace(view.get<BombSiteComponent>(e).site_index, e);
+    }
+
+    bool reusable = current.size() == sites.size();
+    for (const auto& site : sites) {
+        auto it = by_site.find(site.site_index);
+        if (it == by_site.end() || !registry.all_of<TransformComponent, ColliderComponent, TriggerComponent, TriggerOverlapState>(it->second)) {
+            reusable = false;
+            break;
+        }
+    }
+    if (reusable)
+        return;
+
+    for (entt::entity e : current) {
+        w.getPhysicsSystem().removeBody(e);
+        if (registry.valid(e)) registry.destroy(e);
+    }
+
+    for (const auto& site : sites) {
+        entt::entity e = registry.create();
+        registry.emplace<TransformComponent>(e, site.centre.x, site.centre.y, site.centre.z);
+        ColliderComponent collider;
+        collider.shape_type = ColliderShapeType::Sphere;
+        collider.sphere_radius = site.radius;
+        registry.emplace<ColliderComponent>(e, std::move(collider));
+        registry.emplace<TriggerComponent>(e, TriggerComponent{true, site.site_index, true});
+        registry.emplace<BombSiteComponent>(e, BombSiteComponent{site.site_index});
+        if (w.getPhysicsSystem().createTriggerBody(registry, e).IsInvalid())
+            LOG_ENGINE_ERROR("Bomb: failed to create authored site trigger {}", (int)site.site_index);
+    }
+}
+static bool configureBombSites(world& w)
 {
     std::vector<Competitive::BombSite> authored;
-    if (loadAuthoredBombSites(authored) && authored.size() >= 2) { g_bomb_system.config.sites = authored; return true; }
+    bool file_found = false;
+    if (loadAuthoredBombSites(authored, file_found) && authored.size() >= 2) {
+        g_bomb_system.config.sites = authored;
+        ensureAuthoredBombSiteTriggers(w, authored);
+        g_bomb_sites_authored = true;
+        return true;
+    }
+    if (file_found) {
+        g_bomb_system.config.sites.clear();
+        g_bomb_sites_authored = true; // malformed authored data fails closed
+        return false;
+    }
+    g_bomb_sites_authored = false;
     configureBombSitesFallback();
     return false;
 }
@@ -873,7 +932,7 @@ static void competitiveFreezeBombSetup()
 {
     world* w = g_server_services ? g_server_services->game_world : nullptr;
     if (!w) return;
-    (void)configureBombSites();
+    (void)configureBombSites(*w);
     g_bomb_system.resetForRound();
     std::vector<entt::entity> attackers;
     auto view = w->registry.view<NetworkedEntity, TeamComponent, FpsHealthComponent>();
@@ -889,6 +948,14 @@ static void competitiveFreezeBombSetup()
     g_bomb_system.assignCarrier(carrier);
     uint16_t cid = w->registry.get<NetworkedEntity>(carrier).owner_client_id;
     LOG_ENGINE_INFO("Bomb: carrier=client {} sites={}", cid, (int)g_bomb_system.config.sites.size());
+}
+static bool bombSiteForPlayer(world& w, entt::entity player, uint8_t& out_site)
+{
+    if (g_bomb_sites_authored)
+        return Competitive::findBombSiteForOccupant(w.registry, player, out_site);
+    if (!w.registry.valid(player) || !w.registry.all_of<TransformComponent>(player))
+        return false;
+    return g_bomb_system.config.inSite(w.registry.get<TransformComponent>(player).position, out_site);
 }
 static bool bombActorMoved(world& w, entt::entity e, uint16_t client_id)
 {
@@ -935,7 +1002,7 @@ static void tickBombServer(float dt)
         in.plant_dead = !w->registry.get<FpsHealthComponent>(carrier).alive;
         auto uit = g_bomb_use_held.find(cid);
         in.plant_use = uit != g_bomb_use_held.end() && uit->second;
-        in.plant_in_site = g_bomb_system.config.inSite(pos, in.plant_site);
+        in.plant_in_site = bombSiteForPlayer(*w, carrier, in.plant_site);
         in.plant_moved = bombActorMoved(*w, carrier, cid);
         in.plant_damaged = bombActorDamaged(*w, carrier);
         in.plant_weapon_switched = bombActorSwitched(*w, carrier);
