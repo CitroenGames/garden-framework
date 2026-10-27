@@ -8,6 +8,7 @@
 #include "Events/EventBus.hpp"
 #include "Events/EngineEvents.hpp"
 #include "Physics/PhysicsSettings.hpp"
+#include "Network/PredictionTypes.hpp"
 #include "PlayerController.hpp"
 #include "Character/FpsCharacter.hpp"
 #include "Reflection/EngineReflection.hpp"
@@ -2749,6 +2750,88 @@ static bool testServerClientCharacterMovementParity()
         " m at tick " + std::to_string(maximum_divergence_tick) + " across 600 ticks");
 }
 
+static bool testPredictionReplayPreservesCharacterCollision()
+{
+    const std::string name = "prediction replay preserves CharacterVirtual wall collision";
+    constexpr int replay_input_count = 90;
+
+    world w;
+    w.initializePhysics();
+    auto add_static_box = [](world& target, const glm::vec3& position, const glm::vec3& half_extents)
+    {
+        const entt::entity entity = target.registry.create();
+        target.registry.emplace<TransformComponent>(entity, position.x, position.y, position.z);
+        target.registry.emplace<RigidBodyComponent>(entity);
+        ColliderComponent collider;
+        collider.shape_type = ColliderShapeType::Box;
+        collider.box_half_extents = half_extents;
+        const auto shape = PhysicsSystem::createShapeFromCollider(collider, glm::vec3(1.0f));
+        return shape && !target.getPhysicsSystem().createStaticBody(
+            position, glm::vec3(0.0f), shape, entity).IsInvalid();
+    };
+
+    if (!add_static_box(w, glm::vec3(0.0f, -0.5f, 0.0f), glm::vec3(10.0f, 0.5f, 10.0f)))
+        return fail(name, "failed to create replay-test floor");
+    if (!add_static_box(w, glm::vec3(0.0f, 2.0f, 2.0f), glm::vec3(2.0f, 2.0f, 0.25f)))
+        return fail(name, "failed to create replay-test wall");
+
+    const entt::entity character = w.registry.create();
+    w.registry.emplace<TransformComponent>(character, 0.0f, 1.2f, 0.0f);
+    auto& controller = w.registry.emplace<CharacterControllerComponent>(character);
+    controller.move_speed = 4.0f;
+    controller.jump_velocity = 3.0f;
+    if (w.getPhysicsSystem().createCharacterController(w.registry, character).IsInvalid())
+        return fail(name, "failed to create replay-test CharacterController");
+
+    CharacterControllerState authoritative = w.get_character_controller_state(character);
+    authoritative.position = glm::vec3(0.0f, 1.2f, 0.0f);
+    authoritative.velocity = glm::vec3(0.0f);
+    if (!w.set_character_controller_state(character, authoritative))
+        return fail(name, "failed to restore authoritative CharacterController state");
+
+    Net::MovementState shared_state;
+    shared_state.position = authoritative.position;
+    shared_state.velocity = authoritative.velocity;
+    shared_state.grounded = authoritative.grounded;
+    shared_state.ground_normal = authoritative.ground_normal;
+    Net::MovementConfig shared_config;
+    shared_config.speed = controller.move_speed;
+    shared_config.jump_force = controller.jump_velocity;
+    shared_config.fixed_delta = w.fixed_delta;
+
+    Net::InputRingBuffer<128> history;
+    for (int tick = 0; tick < replay_input_count; ++tick)
+    {
+        Net::PredictionEntry entry;
+        entry.tick = static_cast<uint32_t>(tick + 1);
+        entry.input.move_forward = 1.0f;
+        entry.valid = true;
+        history.push(entry);
+    }
+
+    history.forEachFrom(0, [&](const Net::PredictionEntry& entry) {
+        CharacterMoveInput character_input;
+        character_input.move_forward = entry.input.move_forward;
+        w.simulate_character_controller(character, character_input, w.fixed_delta);
+        w.stepPhysicsSingleStep();
+    });
+    shared_state = history.replayFrom(0, shared_state,
+        [&](const Net::MovementInput& input, const Net::MovementState& start_state) {
+            return Net::SharedMovement::simulate(input, start_state, shared_config);
+        });
+
+    const glm::vec3 controller_position = w.get_character_controller_state(character).position;
+    if (controller_position.z > 1.6f)
+        return fail(name, "controller replay passed through the wall to z=" +
+            std::to_string(controller_position.z));
+    if (shared_state.position.z < 3.0f)
+        return fail(name, "collision-free SharedMovement did not pass through the wall to z=" +
+            std::to_string(shared_state.position.z));
+
+    return pass(name + ": CharacterVirtual stopped at z=" + std::to_string(controller_position.z) +
+        ", SharedMovement reached z=" + std::to_string(shared_state.position.z));
+}
+
 static bool containsLayerKey(const nlohmann::json& value)
 {
     if (value.is_object())
@@ -3298,6 +3381,8 @@ int main()
     ok = testD6SensorNonInterference() && ok;
     run("server/client same-build CharacterVirtual movement parity");
     ok = testServerClientCharacterMovementParity() && ok;
+    run("prediction replay preserves CharacterVirtual wall collision");
+    ok = testPredictionReplayPreservesCharacterCollision() && ok;
     run("D6-U1 level round-trip");
     ok = testD6LevelRoundTrip() && ok;
     run("D6-T1 legacy/current character layer comparison");

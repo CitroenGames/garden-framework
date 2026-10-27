@@ -757,12 +757,29 @@ GAME_API void gardenGameUpdate(float delta_time)
                 float pos_error = glm::distance(server_state.position, trans.position);
                 if (pos_error > 0.01f)
                 {
-                    MovementState replay_state = g_network.getInputHistory().replayFrom(
-                        server_tick,
-                        server_state,
-                        [&](const MovementInput& input, const MovementState& start_state) {
-                            return apply_movement(input, start_state);
-                        });
+                    MovementState replay_state = server_state;
+                    if (game_world->registry.all_of<CharacterControllerComponent>(g_player_entity))
+                    {
+                        // Restore the authoritative state once, then let the
+                        // same CharacterVirtual retain its contacts across all
+                        // unacknowledged input steps.
+                        game_world->set_character_controller_state(
+                            g_player_entity, toCharacterControllerState(server_state));
+                        g_network.getInputHistory().forEachFrom(server_tick,
+                            [&](const PredictionEntry& entry) {
+                                replay_state = toMovementState(game_world->simulate_character_controller(
+                                    g_player_entity, toCharacterMoveInput(entry.input), move_config.fixed_delta));
+                            });
+                    }
+                    else
+                    {
+                        replay_state = g_network.getInputHistory().replayFrom(
+                            server_tick,
+                            server_state,
+                            [&](const MovementInput& input, const MovementState& start_state) {
+                                return SharedMovement::simulate(input, start_state, move_config);
+                            });
+                    }
 
                     trans.position = replay_state.position;
                     rb.velocity = replay_state.velocity;
