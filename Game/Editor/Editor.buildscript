@@ -19,26 +19,56 @@ if(Windows)
 {
     subsystem = Console
 }
-sources = src/**/*.cpp
+sources = {
+    src/**/*.cpp
+    ../../Engine/Thirdparty/imgui-docking/backends/imgui_impl_sdlrenderer3.cpp
+}
+defines = IMGUI_IMPL_API=
 headers = src/**/*.hpp
+includes = {
+    src
+    ../../Engine/src
+    ../../Engine/Thirdparty/include
+    ../../Engine
+    ../../Engine/Thirdparty/OpenXR-SDK-1.1.59/include
+    ../../Engine/Thirdparty/RmlUi-6.2/Include
+    ../../Engine/Thirdparty/RmlUi-6.2/Backends
+    ../../Engine/Thirdparty/SDL3-3.4.4/include
+    ../../Engine/Thirdparty/freetype/include
+    ../../Engine/Thirdparty/ImGuizmo
+    ../../Engine/Thirdparty/imgui-docking
+    ../../Engine/Thirdparty/imgui-docking/backends
+    ../../Engine/Thirdparty/vma/include
+    ../../Engine/Thirdparty/vk-bootstrap/src
+    ../../Engine/Thirdparty/bc7enc
+    ../../Engine/Thirdparty/recastnavigation/Recast/Include
+    ../../Engine/Thirdparty/recastnavigation/Detour/Include
+    ../../Engine/Thirdparty/meshoptimizer/src
+    ../../Engine/Thirdparty/miniaudio
+    ../../Engine/Thirdparty/JoltPhysics-5.5.0
+    ../../Engine/Thirdparty/Pakker/src
+    ../../Engine/Thirdparty/enet/src
+    ../../Engine/Thirdparty/entt/src
+    ../../Engine/Thirdparty/spdlog-1.15.3/include
+    ../../Engine/Thirdparty/tinyobjloader
+    ../../Engine/Thirdparty/tinygltf-2.9.6
+    ../../Engine/Thirdparty/glm
+}
 if(Windows)
 {
-    includes = src, ${DirectX12_INCLUDE_DIRS}
-    libs = ${Vulkan_LIBRARIES}, ${DirectX12_LIBRARIES}, user32.lib
-    libdirs = ${Vulkan_LIBRARY_DIRS}, ${DirectX12_LIBRARY_DIRS}
+    libs = ${Vulkan_LIBRARIES}, ${DirectX12_LIBRARIES}, user32.lib, SDL3.lib
+    libdirs = ${Vulkan_LIBRARY_DIRS}, ${DirectX12_LIBRARY_DIRS}, ../../bin, ../../Engine/Thirdparty/SDL3-3.4.4/lib/x64
 }
 if(Linux)
 {
-    includes = src
-    libs = ${Vulkan_LIBRARIES}
-    libdirs = ${Vulkan_LIBRARY_DIRS}, ${SDL3_LIBRARY_DIRS}
+    libs = ${Vulkan_LIBRARIES}, ${SDL3_LIBRARIES}
+    libdirs = ${Vulkan_LIBRARY_DIRS}, ${SDL3_LIBRARY_DIRS}, ../../bin
     ldflags = -Wl,-rpath,/opt/homebrew/lib
 }
 if(macOS)
 {
-    includes = src
-    libs = ${Vulkan_LIBRARIES}, -framework Metal, -framework QuartzCore, -framework Cocoa, -framework Foundation, -lobjc
-    libdirs = ${Vulkan_LIBRARY_DIRS}, ${SDL3_LIBRARY_DIRS}
+    libs = ${Vulkan_LIBRARIES}, ${SDL3_LIBRARIES}, -framework Metal, -framework QuartzCore, -framework Cocoa, -framework Foundation, -lobjc
+    libdirs = ${Vulkan_LIBRARY_DIRS}, ${SDL3_LIBRARY_DIRS}, ../../bin
 }
 target_link_libraries(
     PRIVATE EngineCore

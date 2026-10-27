@@ -1,10 +1,12 @@
 #include "Log.hpp"
 #include "Console/Console.hpp"
+#include "Utils/EnginePaths.hpp"
 
 #include "spdlog/sinks/stdout_color_sinks.h"
 #include "spdlog/sinks/callback_sink.h"
 #include "spdlog/sinks/basic_file_sink.h"
 #include <chrono>
+#include <cstdio>
 
 #define EE_EngineName "Engine"
 #define EE_AppName "Client"
@@ -54,11 +56,26 @@ namespace EE
         S_LuaLogger = std::make_shared<spdlog::logger>( "LUA", spdlog::sinks_init_list { console_sink } );
 		S_LuaLogger->set_level(spdlog::level::trace);
 
-		// make it output to file
-        auto file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>( "Log.log", true );
-        S_EngineLogger->sinks().push_back( file_sink );
-        S_ClientLogger->sinks().push_back( file_sink );
-		S_LuaLogger->sinks().push_back( file_sink );
+		// Keep logs beside the executable rather than in the process working directory,
+		// which may belong to a launcher or be read-only (for example, WindowsApps).
+        std::shared_ptr<spdlog::sinks::basic_file_sink_mt> file_sink;
+        try
+        {
+            const auto log_path = EnginePaths::getExecutableDir() / "Log.log";
+            file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(log_path.string(), true);
+        }
+        catch (const spdlog::spdlog_ex& e)
+        {
+            // File logging is optional; retain stdout and the console callback sinks.
+            std::fprintf(stderr, "[CLog] Could not open log file beside the executable: %s\n", e.what());
+        }
+
+        if (file_sink)
+        {
+            S_EngineLogger->sinks().push_back(file_sink);
+            S_ClientLogger->sinks().push_back(file_sink);
+			S_LuaLogger->sinks().push_back(file_sink);
+        }
 
 		// Add callback sink to forward logs to Console
 		auto console_callback = std::make_shared<spdlog::sinks::callback_sink_mt>(
