@@ -30,6 +30,7 @@ sources = {
     src/Timer/**/*.cpp
     src/Utils/**/*.cpp
     src/InputManager.cpp
+    src/InputActionSystem.cpp
     src/world.cpp
     src/GameSimulation.cpp
     src/PhysicsSystem.cpp

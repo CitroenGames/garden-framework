@@ -28,6 +28,22 @@ struct ActionMapping
     SDL_Scancode key = SDL_SCANCODE_UNKNOWN;
 };
 
+enum class RawInputDevice : uint8_t
+{
+    Keyboard,
+    Mouse
+};
+
+// Ordered physical button transitions observed since the previous update().
+// This supplements the existing frame-state queries so higher-level input can
+// preserve taps that begin and end between evaluations.
+struct RawInputTransition
+{
+    RawInputDevice device = RawInputDevice::Keyboard;
+    int code = 0; // SDL_Scancode for Keyboard, SDL button id for Mouse.
+    bool is_down = false;
+};
+
 class ENGINE_API InputManager
 {
 private:
@@ -41,6 +57,8 @@ private:
     // Mouse button state tracking (SDL3 button ids: 1=L, 2=M, 3=R, 4=X1, 5=X2).
     std::array<bool, MouseButtonCount> current_mouse_button_states{};
     std::array<bool, MouseButtonCount> previous_mouse_button_states{};
+
+    std::vector<RawInputTransition> button_transitions;
 
     // Mouse data
     float mouse_delta_x = 0.0f;
@@ -82,6 +100,11 @@ public:
     bool is_mouse_button_pressed(uint8_t button) const;
     bool is_mouse_button_released(uint8_t button) const;
     bool is_mouse_button_held(uint8_t button) const;
+
+    const std::vector<RawInputTransition>& get_button_transitions() const
+    {
+        return button_transitions;
+    }
     
     // Mouse input - raw deltas
     float get_mouse_delta_x() const { return mouse_delta_x; }

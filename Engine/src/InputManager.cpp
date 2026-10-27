@@ -38,17 +38,27 @@ void InputManager::set_key_state(SDL_Scancode key, bool is_down)
 
     const std::size_t index = static_cast<std::size_t>(key);
     const bool was_down = current_key_states[index];
-    current_key_states[index] = is_down;
+    if (was_down == is_down)
+        return;
 
-    if (is_down && !was_down)
+    current_key_states[index] = is_down;
+    button_transitions.push_back({ RawInputDevice::Keyboard, static_cast<int>(key), is_down });
+
+    if (is_down)
         dispatch_action(key, InputActionState::Pressed);
-    else if (!is_down && was_down)
+    else
         dispatch_action(key, InputActionState::Released);
 }
 
 void InputManager::set_mouse_button_state(uint8_t button, bool is_down)
 {
-    current_mouse_button_states[static_cast<std::size_t>(button)] = is_down;
+    const std::size_t index = static_cast<std::size_t>(button);
+    const bool was_down = current_mouse_button_states[index];
+    if (was_down == is_down)
+        return;
+
+    current_mouse_button_states[index] = is_down;
+    button_transitions.push_back({ RawInputDevice::Mouse, static_cast<int>(button), is_down });
 }
 
 void InputManager::update()
@@ -56,6 +66,7 @@ void InputManager::update()
     // Update previous key states
     previous_key_states = current_key_states;
     previous_mouse_button_states = current_mouse_button_states;
+    button_transitions.clear();
 
     // Reset mouse deltas
     mouse_delta_x = 0.0f;
@@ -92,6 +103,17 @@ void InputManager::process_event(const SDL_Event& event)
 
 void InputManager::reset_state()
 {
+    for (std::size_t index = 0; index < current_key_states.size(); ++index)
+    {
+        if (current_key_states[index])
+            button_transitions.push_back({ RawInputDevice::Keyboard, static_cast<int>(index), false });
+    }
+    for (std::size_t index = 0; index < current_mouse_button_states.size(); ++index)
+    {
+        if (current_mouse_button_states[index])
+            button_transitions.push_back({ RawInputDevice::Mouse, static_cast<int>(index), false });
+    }
+
     current_key_states.fill(false);
     previous_key_states.fill(false);
     current_mouse_button_states.fill(false);
