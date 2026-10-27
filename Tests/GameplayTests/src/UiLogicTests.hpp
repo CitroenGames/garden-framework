@@ -3,6 +3,7 @@
 // Included by main.cpp.
 #include "ui/UiLogic.hpp"
 #include "ui/UiInput.hpp"
+#include "ui/CombatFeedPresentation.hpp"
 #include "InputManager.hpp"
 #include <string>
 
@@ -199,6 +200,55 @@ bool testUiClockFormatting()
     if (formatPhaseText(P::Freeze, false) != "FREEZE") return fail(name, "phase text freeze wrong");
     if (formatPhaseText(P::Live, true) != "BOMB PLANTED") return fail(name, "phase text planted wrong");
     if (formatClock(P::Warmup, 30.0f, false) != "WARMUP 0:30") return fail(name, "warmup clock wrong");
+    return pass(name);
+}
+
+bool testUiCombatFeedPresentationBoundary()
+{
+    const std::string name = "UiCombatFeed_PresentationBoundary";
+    UiLogic::CombatFeedPresentation feed;
+
+    // PLAYER_DIED has no victim when malformed. Do not create a presentable
+    // event for it, and do not synthesize a richer combat-feed record.
+    if (feed.recordPlayerDied(7, 0) || feed.count() != 0)
+        return fail(name, "invalid player-died event entered the client feed");
+
+    if (!feed.recordPlayerDied(7, 11) || !feed.recordPlayerDied(0, 12))
+        return fail(name, "valid current-protocol death event was rejected");
+    const auto* first = feed.entryAt(0);
+    const auto* second = feed.entryAt(1);
+    if (!first || !second || first->killer_client_id != 7 || first->victim_client_id != 11 ||
+        second->killer_client_id != 0 || second->victim_client_id != 12 ||
+        second->local_sequence != first->local_sequence + 1 ||
+        feed.buildText() != "World killed Player 12\nPlayer 7 killed Player 11")
+        return fail(name, "feed did not retain the existing player-died value fields in receive order");
+
+    // The bounded visual window discards the oldest record instead of growing
+    // without bound. The locally assigned sequence is only presentation order.
+    for (size_t i = 0; i < UiLogic::kCombatFeedPresentationCapacity; ++i) {
+        if (!feed.recordPlayerDied(static_cast<uint16_t>(20 + i), static_cast<uint16_t>(40 + i)))
+            return fail(name, "valid bounded feed record was rejected");
+    }
+    if (feed.count() != UiLogic::kCombatFeedPresentationCapacity ||
+        !feed.entryAt(0) || feed.entryAt(0)->victim_client_id != 40 ||
+        feed.buildText().find("Player 11") != std::string::npos)
+        return fail(name, "feed did not discard its oldest presentation record");
+
+    feed.tick(UiLogic::kCombatFeedPresentationLifetime - 0.1f);
+    if (feed.count() != UiLogic::kCombatFeedPresentationCapacity)
+        return fail(name, "feed expired before its presentation lifetime");
+    feed.tick(0.2f);
+    if (feed.count() != 0 || !feed.buildText().empty())
+        return fail(name, "feed did not expire its transient presentation records");
+
+    if (!feed.recordPlayerDied(3, 4))
+        return fail(name, "feed did not reopen after expiry");
+    const uint64_t before_clear = feed.entryAt(0)->local_sequence;
+    feed.clear();
+    if (feed.count() != 0 || !feed.buildText().empty())
+        return fail(name, "round or level clear retained client feed records");
+    if (!feed.recordPlayerDied(5, 6) || feed.entryAt(0)->local_sequence <= before_clear)
+        return fail(name, "clear reset local presentation ordering");
     return pass(name);
 }
 

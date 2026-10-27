@@ -44,6 +44,7 @@
 #include "Events/EventBus.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <glm/gtc/quaternion.hpp>
 #include <utility>
@@ -906,22 +907,36 @@ static void executeBotBuy(uint16_t client_id, entt::entity e)
     if (!w || !w->registry.all_of<TeamComponent, Competitive::MoneyComponent, InventoryComponent, PlayerLoadoutComponent, WeaponComponent, FpsHealthComponent, TransformComponent, Bots::BotComponent>(e)) return;
     auto& bot = w->registry.get<Bots::BotComponent>(e);
     if (bot.buy_done) return;
-    bot.buy_done = true; // one plan per Freeze; rejected items are skipped, never retried
+    // One bounded plan per Freeze.  A group may advance to a different
+    // catalog candidate after a recoverable rejection, but every exact item
+    // ID reaches BuySystem at most once in this pass.
+    bot.buy_done = true;
     uint8_t team = w->registry.get<TeamComponent>(e).team_id;
     auto plan = Bots::selectBuyPlan(w->registry.get<Competitive::MoneyComponent>(e).money(), Competitive::teamFromId(team), bot.difficulty, w->registry.get<Competitive::MoneyComponent>(e).loss_streak);
     glm::vec3 pos = w->registry.get<TransformComponent>(e).position;
-    for (const char* alias : plan.aliases) {
-        const WeaponCatalogDef* def = findCatalogByAlias(alias); if (!def) continue;
+    std::array<bool, static_cast<size_t>(Bots::BuyPlanGroup::Count)> group_complete{};
+    for (const Bots::BuyPlanRequest& request : plan.requests) {
+        const size_t group_index = static_cast<size_t>(request.group);
+        if (group_index >= group_complete.size() || group_complete[group_index]) continue;
+        const WeaponCatalogDef* def = findCatalogById(request.item_id);
+        if (!def || !Bots::catalogAvailableToBot(*def, Competitive::teamFromId(team))) continue;
         Competitive::BuyContext ctx; ctx.client_id = client_id; ctx.request_seq = ++botRuntime().buy_sequence[client_id];
-        ctx.phase = g_round_system.state.phase; ctx.seconds_into_live = 0.0f;
+        ctx.phase = g_round_system.state.phase;
+        ctx.seconds_into_live = ctx.phase == Competitive::RoundPhase::Live ? g_round_system.phaseElapsed() : 0.0f;
         ctx.alive = w->registry.get<FpsHealthComponent>(e).alive;
         ctx.in_buy_zone = Competitive::isInBuyZone(w->registry, e, team);
         ctx.team_id = team; ctx.money = &w->registry.get<Competitive::MoneyComponent>(e);
         ctx.inventory = &w->registry.get<InventoryComponent>(e); ctx.loadout = &w->registry.get<PlayerLoadoutComponent>(e);
         ctx.weapon = &w->registry.get<WeaponComponent>(e); ctx.armor = w->registry.all_of<ArmorComponent>(e) ? &w->registry.get<ArmorComponent>(e) : nullptr;
         FpsLogic::DroppedItem dropped{WeaponType::COUNT, 0, 0};
-        Competitive::BuyResult r = competitiveContext().onBuy(ctx, def->id, &dropped); // same BuySystem server path as human BUY_REQUEST
-        if (r != Competitive::BuyResult::Ok) continue; // skip-on-reject
+        // Same per-world BuySystem boundary as a client BUY_REQUEST.  The bot
+        // cannot create inventory, money, or a server-only purchase outcome.
+        Competitive::BuyResult r = competitiveContext().onBuy(ctx, request.item_id, &dropped);
+        if (r != Competitive::BuyResult::Ok) {
+            if (!Bots::shouldTryNextBotBuyCandidate(r)) group_complete[group_index] = true;
+            continue;
+        }
+        group_complete[group_index] = true;
         if (dropped.type != WeaponType::COUNT) spawnDroppedWeapon(*w, pos + glm::vec3(0.0f, 0.3f, 0.0f), dropped, client_id);
         if (def->kind != BuyItemKind::Equipment) sendWeaponState(client_id, e, *ctx.weapon);
     }

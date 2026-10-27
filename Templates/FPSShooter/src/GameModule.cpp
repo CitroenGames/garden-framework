@@ -23,6 +23,7 @@
 #include "shared/PlayerLifecycle.hpp"
 #include "shared/FpsAnimationPresentation.hpp"
 #include "GameHUD.hpp"
+#include "ui/CombatFeedPresentation.hpp"
 #include "ui/UiLogic.hpp"
 #include "ui/UiInput.hpp"
 #include "PlayerRepSystem.hpp"
@@ -234,13 +235,9 @@ static int32_t g_local_deaths = 0;
 static float g_death_timer = 0.0f; // Countdown shown on death screen
 static constexpr float RESPAWN_DELAY = 3.0f;
 
-// Kill feed entries
-struct KillFeedEntry {
-    std::string killer_name;
-    std::string victim_name;
-    float timer = 5.0f;
-};
-static std::vector<KillFeedEntry> g_kill_feed;
+// PLAYER_DIED is the only current all-client feed publication. The richer
+// server FpsCombatFeed has no corresponding wire message yet.
+static UiLogic::CombatFeedPresentation g_combat_feed;
 // Competitive client state (server-authoritative; client renders only).
 static UiLogic::UiState g_ui;
 static UiLogic::ConnectionLifecycle g_ui_connection;
@@ -438,11 +435,10 @@ GAME_API bool gardenGameInit(EngineServices* services)
                 LOG_ENGINE_WARN("Failed to deserialize PLAYER_DIED");
                 return;
             }
-            KillFeedEntry entry;
-            entry.killer_name = "Player " + std::to_string(msg.killer_client_id);
-            entry.victim_name = "Player " + std::to_string(msg.victim_client_id);
-            entry.timer = 5.0f;
-            g_kill_feed.push_back(entry);
+            if (!g_combat_feed.recordPlayerDied(msg.killer_client_id, msg.victim_client_id)) {
+                LOG_ENGINE_WARN("Ignoring PLAYER_DIED with invalid victim client id");
+                return;
+            }
 
             if (msg.victim_client_id == g_network.getClientId()) {
                 AudioEventSystem::get().play2D("player.death");
@@ -682,15 +678,7 @@ GAME_API void gardenGameUpdate(float delta_time)
     if (g_player_controller && !ui_modal)
         g_player_controller->updatePlayerLook(delta_time);
 
-    // Update kill feed timers
-    for (auto it = g_kill_feed.begin(); it != g_kill_feed.end(); ) {
-        it->timer -= delta_time;
-        if (it->timer <= 0.0f) {
-            it = g_kill_feed.erase(it);
-        } else {
-            ++it;
-        }
-    }
+    g_combat_feed.tick(delta_time);
 
     // Update death timer
     if (!g_local_alive && g_death_timer > 0.0f) {
@@ -956,13 +944,7 @@ GAME_API void gardenGameUpdate(float delta_time)
         accuracy_context.grounded = grounded;
         g_local_weapon_spread = WeaponSystem::computeSpread(makeLocalWeaponSnapshot(), accuracy_context);
 
-        // Build kill feed text (last 5 entries)
-        std::string kill_feed_text;
-        int count = 0;
-        for (auto it = g_kill_feed.rbegin(); it != g_kill_feed.rend() && count < 5; ++it, ++count) {
-            if (!kill_feed_text.empty()) kill_feed_text += "\n";
-            kill_feed_text += it->killer_name + " killed " + it->victim_name;
-        }
+        const std::string kill_feed_text = g_combat_feed.buildText();
 
         UiLogic::HudSourceState hud_source;
         hud_source.connected = g_network.isConnected();
@@ -1092,7 +1074,7 @@ GAME_API void gardenOnLevelLoaded()
     g_radar_throttle.reset();
     if (g_services->input_actions)
         UiInput::synchronizeModalContext(*g_services->input_actions, false, g_ui_modal_context_active);
-    g_kill_feed.clear();
+    g_combat_feed.clear();
 
     const auto& def = getWeaponDef(WeaponType::RIFLE);
     g_local_weapon_type = WeaponType::RIFLE;

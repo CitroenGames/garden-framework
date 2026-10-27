@@ -2222,6 +2222,7 @@ bool testFpsCombatFeedContract()
 #include "C4Tests.hpp"
 #include "GrenadeEffectsTests.hpp"
 #include "BotTests.hpp"
+#include "BlockMapSchemaTests.hpp"
 #include "UiLogicTests.hpp"
 #include "AudioTests.hpp"
 #include "NavMeshTests.hpp"
@@ -2289,6 +2290,7 @@ int main()
     ok = testBotEngageStrafes() && ok;
     ok = testBotBuyPlanByMoney() && ok;
     ok = testBotAuthoredRouteData() && ok;
+    ok = testBlockMapSchemaValidation() && ok;
     ok = testBotDebugRingWraps() && ok;
     ok = testBotDebugTransitionRecorded() && ok;
     ok = testBotDebugDumpFormatter() && ok;
@@ -2305,6 +2307,7 @@ int main()
     ok = testUiModalInputIsolation() && ok;
     ok = testUiMenusRequireCompetitiveState() && ok;
     ok = testUiClockFormatting() && ok;
+    ok = testUiCombatFeedPresentationBoundary() && ok;
     ok = testUiHudCoreBindingSources() && ok;
     ok = testUiAuthoritativeBuyTeamFeedback() && ok;
     ok = testUiBuyItemStateMatrix() && ok;

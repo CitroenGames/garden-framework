@@ -246,21 +246,112 @@ bool testBotBuyPlanByMoney()
 {
     const std::string name = "Bot_BuyPlanByMoney";
     using namespace Bots; using namespace Competitive;
+    auto requestDef = [&](const BuyPlanRequest& request) -> const WeaponCatalogDef* {
+        const WeaponCatalogDef* def = findCatalogById(request.item_id);
+        if (!def) return nullptr;
+        return def;
+    };
+    auto validatePlan = [&](const BuyPlan& plan, FpsTeam team, int32_t budget) -> bool {
+        std::array<size_t, static_cast<size_t>(BuyPlanGroup::Count)> group_counts{};
+        std::array<int32_t, static_cast<size_t>(BuyPlanGroup::Count)> last_price{};
+        std::array<bool, static_cast<size_t>(BuyPlanGroup::Count)> seen{};
+        for (const BuyPlanRequest& request : plan.requests) {
+            const size_t group = static_cast<size_t>(request.group);
+            const WeaponCatalogDef* def = requestDef(request);
+            if (group >= group_counts.size() || !def || !catalogAvailableToBot(*def, team) ||
+                def->price > budget || ++group_counts[group] > kBotBuyAttemptsPerGroup)
+                return false;
+            if (seen[group] && def->price > last_price[group]) return false;
+            seen[group] = true;
+            last_price[group] = def->price;
+            for (const BuyPlanRequest& prior : plan.requests)
+                if (&prior != &request && prior.item_id == request.item_id)
+                    return false;
+        }
+        return true;
+    };
+    auto firstInGroup = [](const BuyPlan& plan, BuyPlanGroup group) -> const BuyPlanRequest* {
+        for (const BuyPlanRequest& request : plan.requests)
+            if (request.group == group) return &request;
+        return nullptr;
+    };
+
     auto full = selectBuyPlan(5000, FpsTeam::Attackers, 1, 0);
-    if (full.kind != BuyPlanKind::Full || full.aliases.empty() || std::string(full.aliases[0]) != "ak47") return fail(name, "full buy wrong");
+    if (full.kind != BuyPlanKind::Full || !validatePlan(full, FpsTeam::Attackers, 5000))
+        return fail(name, "attacker full plan was not a bounded catalog plan");
+    const BuyPlanRequest* full_primary = firstInGroup(full, BuyPlanGroup::Primary);
+    const BuyPlanRequest* full_armor = firstInGroup(full, BuyPlanGroup::Armor);
+    if (!full_primary || !full_armor || requestDef(*full_primary)->slot != WeaponSlot::Primary ||
+        requestDef(*full_primary)->price + requestDef(*full_armor)->price > 5000)
+        return fail(name, "attacker full plan did not reserve a legal primary and armor");
+
     auto fullCt = selectBuyPlan(5000, FpsTeam::Defenders, 1, 0);
-    bool hasKit = false; for (auto* a : fullCt.aliases) if (std::string(a) == "defuser") hasKit = true;
-    if (fullCt.aliases.empty() || std::string(fullCt.aliases[0]) != "m4a1" || !hasKit) return fail(name, "CT full buy wrong (rifle/kit)");
+    const BuyPlanRequest* full_ct_primary = firstInGroup(fullCt, BuyPlanGroup::Primary);
+    const BuyPlanRequest* full_ct_team_item = firstInGroup(fullCt, BuyPlanGroup::TeamEquipment);
+    if (fullCt.kind != BuyPlanKind::Full || !validatePlan(fullCt, FpsTeam::Defenders, 5000) ||
+        !full_ct_primary || !full_ct_team_item ||
+        requestDef(*full_ct_primary)->slot != WeaponSlot::Primary ||
+        requestDef(*full_ct_team_item)->kind != BuyItemKind::Equipment ||
+        requestDef(*full_ct_team_item)->team_mask != kCatalogTeamDefenders)
+        return fail(name, "defender full plan missed its legal team equipment");
+
     auto force = selectBuyPlan(2000, FpsTeam::Attackers, 1, 0);
-    if (force.kind != BuyPlanKind::Force || force.aliases.empty() || std::string(force.aliases[0]) != "mac10") return fail(name, "force buy wrong");
+    const BuyPlanRequest* force_primary = firstInGroup(force, BuyPlanGroup::Primary);
+    const BuyPlanRequest* force_armor = firstInGroup(force, BuyPlanGroup::Armor);
+    if (force.kind != BuyPlanKind::Force || !validatePlan(force, FpsTeam::Attackers, 2000) ||
+        !force_primary || !force_armor ||
+        requestDef(*force_primary)->price + requestDef(*force_armor)->price > 2000)
+        return fail(name, "force plan exceeded its source-catalog budget");
+
     auto eco = selectBuyPlan(400, FpsTeam::Attackers, 1, 2);
-    if (eco.kind != BuyPlanKind::Eco || eco.aliases.empty() || std::string(eco.aliases[0]) != "p250") return fail(name, "eco buy wrong");
+    const BuyPlanRequest* eco_sidearm = firstInGroup(eco, BuyPlanGroup::Sidearm);
+    if (eco.kind != BuyPlanKind::Eco || !validatePlan(eco, FpsTeam::Attackers, 400) || !eco_sidearm ||
+        requestDef(*eco_sidearm)->slot != WeaponSlot::Secondary)
+        return fail(name, "eco plan did not use an affordable catalog sidearm");
+
     auto pistol = selectBuyPlan(800, FpsTeam::Attackers, 1, 0);
-    if (pistol.kind != BuyPlanKind::Pistol || !pistol.aliases.empty()) return fail(name, "pistol round Normal should save (no vest below Hard)");
+    if (pistol.kind != BuyPlanKind::Pistol || !pistol.requests.empty())
+        return fail(name, "normal pistol plan was not empty");
     auto pistolHard = selectBuyPlan(800, FpsTeam::Attackers, 2, 0);
-    if (pistolHard.aliases.empty() || std::string(pistolHard.aliases[0]) != "vest") return fail(name, "pistol Hard should buy vest");
-    // Every alias must resolve in catalog (server skip-on-reject relies on it).
-    for (auto* plan : {&full, &fullCt, &force, &eco}) for (auto* a : plan->aliases) if (!findCatalogByAlias(a)) return fail(name, std::string("alias not in catalog: ") + a);
+    const BuyPlanRequest* pistol_armor = firstInGroup(pistolHard, BuyPlanGroup::Armor);
+    if (pistolHard.kind != BuyPlanKind::Pistol || !validatePlan(pistolHard, FpsTeam::Attackers, 800) ||
+        !pistol_armor || requestDef(*pistol_armor)->kind != BuyItemKind::Equipment)
+        return fail(name, "hard pistol plan did not choose legal catalog equipment");
+
+    // Invalid teams and budgets never yield an invalid request, and all
+    // recoverable retry outcomes are explicit and bounded by per-group IDs.
+    const BuyPlan no_team = selectBuyPlan(16000, FpsTeam::None, 3, 0);
+    const BuyPlan no_money = selectBuyPlan(-1, FpsTeam::Attackers, 3, 0);
+    if (no_team.kind != BuyPlanKind::Save || !no_team.requests.empty() ||
+        no_money.kind != BuyPlanKind::Save || !no_money.requests.empty())
+        return fail(name, "invalid team or wallet produced a buy request");
+    if (!shouldTryNextBotBuyCandidate(BuyResult::UnknownItem) ||
+        !shouldTryNextBotBuyCandidate(BuyResult::InsufficientFunds) ||
+        !shouldTryNextBotBuyCandidate(BuyResult::WrongTeam) ||
+        shouldTryNextBotBuyCandidate(BuyResult::DuplicateRequest) ||
+        shouldTryNextBotBuyCandidate(BuyResult::PhaseClosed) ||
+        shouldTryNextBotBuyCandidate(BuyResult::AlreadyOwned) ||
+        shouldTryNextBotBuyCandidate(BuyResult::CarryLimit))
+        return fail(name, "buy retry contract was not bounded to alternate candidates");
+
+    // Cover every supported side/difficulty against small, exact-equipment,
+    // force, full, and cap-sized wallets.  This deliberately asserts catalog
+    // eligibility rather than a frozen alias choice.
+    for (const FpsTeam supported_team : {FpsTeam::Attackers, FpsTeam::Defenders}) {
+        for (uint8_t supported_difficulty = 0; supported_difficulty < 4; ++supported_difficulty) {
+            for (const int32_t supported_budget : {0, 50, 200, 400, 650, 800, 1600, 2000, 3500, 5000, 16000}) {
+                const BuyPlan generated = selectBuyPlan(supported_budget, supported_team,
+                                                        supported_difficulty, 2);
+                if (!validatePlan(generated, supported_team, supported_budget))
+                    return fail(name, "catalog plan invalid for a supported side/difficulty/budget");
+            }
+        }
+    }
+    WeaponCatalogDef empty_catalog_row{};
+    empty_catalog_row.price = 0;
+    empty_catalog_row.team_mask = kCatalogTeamBoth;
+    if (catalogAvailableToBot(empty_catalog_row, FpsTeam::Attackers))
+        return fail(name, "empty catalog row became bot-buyable");
     return pass(name);
 }
 

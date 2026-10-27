@@ -368,16 +368,170 @@ inline void decide(BotComponent& b, const BotPerceptComponent& p, BotIntentCompo
     }
 }
 
-// ---- Buy plan (catalog aliases, skip-on-reject applied by server caller) ----
+// ---- Buy planning -------------------------------------------------------------
+// Purchase intent is catalog-ID based.  The static catalog is the source of
+// truth for prices, team ownership and item shape; bot policy must not carry a
+// second alias or price table.  A group has a small, deterministic list of
+// alternatives.  The server tries each ID at most once through BuySystem and
+// never repeats a rejected request.
 enum class BuyPlanKind : uint8_t { Pistol, Force, Full, Eco, Save };
-struct BuyPlan { BuyPlanKind kind = BuyPlanKind::Save; std::vector<const char*> aliases; };
+enum class BuyPlanGroup : uint8_t { Primary, Armor, TeamEquipment, Grenade, Sidearm, Count };
+struct BuyPlanRequest { uint16_t item_id = 0; BuyPlanGroup group = BuyPlanGroup::Primary; };
+struct BuyPlan {
+    BuyPlanKind kind = BuyPlanKind::Save;
+    std::vector<BuyPlanRequest> requests;
+};
+
+inline constexpr size_t kBotBuyAttemptsPerGroup = 4;
+
+inline uint8_t catalogTeamBit(Competitive::FpsTeam team) {
+    return team == Competitive::FpsTeam::Attackers ? kCatalogTeamAttackers
+         : team == Competitive::FpsTeam::Defenders ? kCatalogTeamDefenders : 0;
+}
+
+inline bool catalogAvailableToBot(const WeaponCatalogDef& def, Competitive::FpsTeam team) {
+    const uint8_t team_bit = catalogTeamBit(team);
+    return team_bit != 0 && isCatalogBuyable(def) && (def.team_mask & team_bit) != 0;
+}
+
+template <typename Predicate>
+inline std::vector<const WeaponCatalogDef*> collectBotCatalogCandidates(Competitive::FpsTeam team,
+                                                                          int32_t max_price,
+                                                                          Predicate predicate) {
+    std::vector<const WeaponCatalogDef*> candidates;
+    if (max_price < 0 || !Competitive::isPlayingTeam(team)) return candidates;
+    size_t count = 0;
+    const WeaponCatalogDef* defs = weaponCatalog(count);
+    for (size_t i = 0; i < count; ++i) {
+        const WeaponCatalogDef& def = defs[i];
+        if (def.price <= max_price && catalogAvailableToBot(def, team) && predicate(def))
+            candidates.push_back(&def);
+    }
+    // Price is the only approved current purchase signal.  ID resolves equal
+    // prices without depending on table traversal or aliases.
+    std::sort(candidates.begin(), candidates.end(), [](const WeaponCatalogDef* a, const WeaponCatalogDef* b) {
+        return a->price != b->price ? a->price > b->price : a->id < b->id;
+    });
+    if (candidates.size() > kBotBuyAttemptsPerGroup)
+        candidates.resize(kBotBuyAttemptsPerGroup);
+    return candidates;
+}
+
+inline void appendBotBuyCandidates(BuyPlan& plan, BuyPlanGroup group,
+                                   const std::vector<const WeaponCatalogDef*>& candidates) {
+    for (const WeaponCatalogDef* candidate : candidates)
+        plan.requests.push_back(BuyPlanRequest{candidate->id, group});
+}
+
+inline const WeaponCatalogDef* firstBotCatalogCandidate(const std::vector<const WeaponCatalogDef*>& candidates) {
+    return candidates.empty() ? nullptr : candidates.front();
+}
+
+// Failures caused by a stale/bad catalog row or by a now-lower wallet may use
+// the next *different* catalog ID in the same capped group.  All state/phase
+// failures stop that group immediately; retrying them would create a request
+// loop without changing eligibility.
+inline bool shouldTryNextBotBuyCandidate(Competitive::BuyResult result) {
+    using R = Competitive::BuyResult;
+    return result == R::UnknownItem || result == R::InsufficientFunds || result == R::WrongTeam;
+}
+
 inline BuyPlan selectBuyPlan(int32_t money, Competitive::FpsTeam team, uint8_t difficulty, uint8_t loss_streak) {
-    uint8_t d = clampDifficulty(difficulty);
-    bool ct = team == Competitive::FpsTeam::Defenders;
-    if (loss_streak >= 2 && money < 1500) { BuyPlan p{BuyPlanKind::Eco, {}}; if (money >= 300) p.aliases.push_back("p250"); return p; }
-    if (money >= 3500) { BuyPlan p{BuyPlanKind::Full, {}}; p.aliases.push_back(ct ? "m4a1" : "ak47"); p.aliases.push_back("vesthelm"); if (ct && d >= 1) p.aliases.push_back("defuser"); if (d >= 3) p.aliases.push_back("hegrenade"); return p; }
-    if (money >= 1500) { BuyPlan p{BuyPlanKind::Force, {}}; p.aliases.push_back(ct ? "mp9" : "mac10"); p.aliases.push_back("vest"); if (d >= 1 && money - (ct ? 1250 : 1050) - 650 >= 300) p.aliases.push_back("hegrenade"); return p; }
-    BuyPlan p{BuyPlanKind::Pistol, {}}; if (money >= 650 && d >= 2) p.aliases.push_back("vest"); return p;
+    BuyPlan plan;
+    if (money <= 0 || !Competitive::isPlayingTeam(team)) return plan;
+    const uint8_t d = clampDifficulty(difficulty);
+    const uint8_t team_bit = catalogTeamBit(team);
+
+    const auto primary = [&](int32_t ceiling) {
+        return collectBotCatalogCandidates(team, ceiling, [](const WeaponCatalogDef& def) {
+            return def.kind == BuyItemKind::Weapon && def.slot == WeaponSlot::Primary;
+        });
+    };
+    const auto sidearm = [&](int32_t ceiling) {
+        return collectBotCatalogCandidates(team, ceiling, [](const WeaponCatalogDef& def) {
+            return def.kind == BuyItemKind::Weapon && def.slot == WeaponSlot::Secondary;
+        });
+    };
+    const auto universal_equipment = [&](int32_t ceiling) {
+        return collectBotCatalogCandidates(team, ceiling, [](const WeaponCatalogDef& def) {
+            return def.kind == BuyItemKind::Equipment && def.team_mask == kCatalogTeamBoth;
+        });
+    };
+    const auto team_equipment = [&](int32_t ceiling) {
+        return collectBotCatalogCandidates(team, ceiling, [team_bit](const WeaponCatalogDef& def) {
+            return def.kind == BuyItemKind::Equipment && def.team_mask == team_bit;
+        });
+    };
+    const auto grenade = [&](int32_t ceiling) {
+        return collectBotCatalogCandidates(team, ceiling, [](const WeaponCatalogDef& def) {
+            return def.kind == BuyItemKind::Grenade;
+        });
+    };
+
+    // Full buys reserve the best catalog equipment for both sides, any
+    // side-specific equipment (currently the defender kit), and a catalog
+    // grenade for the highest difficulty.  The remaining wallet defines the
+    // legal primary alternatives; no duplicated money thresholds are needed.
+    const auto full_armor = universal_equipment(money);
+    const WeaponCatalogDef* armor = firstBotCatalogCandidate(full_armor);
+    const auto full_team_equipment = team_equipment(money);
+    const WeaponCatalogDef* team_item = firstBotCatalogCandidate(full_team_equipment);
+    const auto full_grenade = d >= 3 ? grenade(money) : std::vector<const WeaponCatalogDef*>{};
+    const WeaponCatalogDef* grenade_item = firstBotCatalogCandidate(full_grenade);
+    const int32_t full_reserve = (armor ? armor->price : 0) + (team_item ? team_item->price : 0) +
+                                 (grenade_item ? grenade_item->price : 0);
+    const auto full_primary = primary(money - full_reserve);
+    if (!full_primary.empty()) {
+        plan.kind = BuyPlanKind::Full;
+        appendBotBuyCandidates(plan, BuyPlanGroup::Primary, full_primary);
+        if (armor) appendBotBuyCandidates(plan, BuyPlanGroup::Armor, full_armor);
+        if (team_item) appendBotBuyCandidates(plan, BuyPlanGroup::TeamEquipment, full_team_equipment);
+        if (grenade_item) appendBotBuyCandidates(plan, BuyPlanGroup::Grenade, full_grenade);
+        return plan;
+    }
+
+    // A force buy reserves the least expensive cross-team equipment row and
+    // then selects from the primary rows the current catalog can actually pay
+    // for.  This is intentionally derived from catalog contents, so a roster
+    // change cannot leave a stale hard-coded SMG threshold behind.
+    const auto force_armor = universal_equipment(money);
+    const WeaponCatalogDef* force_armor_item = force_armor.empty() ? nullptr : force_armor.back();
+    const auto force_primary = primary(money - (force_armor_item ? force_armor_item->price : 0));
+    if (!force_primary.empty()) {
+        plan.kind = BuyPlanKind::Force;
+        appendBotBuyCandidates(plan, BuyPlanGroup::Primary, force_primary);
+        if (force_armor_item) {
+            std::vector<const WeaponCatalogDef*> one_armor{force_armor_item};
+            appendBotBuyCandidates(plan, BuyPlanGroup::Armor, one_armor);
+        }
+        return plan;
+    }
+
+    // A loss-streak eco is only selected when the current catalog cannot
+    // assemble a force bundle. Its sidearm choice and affordability therefore
+    // come entirely from the same catalog as the server buy boundary.
+    if (loss_streak >= 2) {
+        const auto eco_sidearm = sidearm(money);
+        if (!eco_sidearm.empty()) {
+            plan.kind = BuyPlanKind::Eco;
+            appendBotBuyCandidates(plan, BuyPlanGroup::Sidearm, eco_sidearm);
+            return plan;
+        }
+    }
+
+    // Pistol-round policy contains no weapon alias: higher difficulties may
+    // buy the least expensive legal universal equipment if they can afford it.
+    if (d >= 2 && !force_armor.empty()) {
+        const WeaponCatalogDef* pistol_armor = force_armor.back();
+        if (pistol_armor && pistol_armor->price <= money) {
+            plan.kind = BuyPlanKind::Pistol;
+            std::vector<const WeaponCatalogDef*> one_armor{pistol_armor};
+            appendBotBuyCandidates(plan, BuyPlanGroup::Armor, one_armor);
+            return plan;
+        }
+    }
+    plan.kind = BuyPlanKind::Pistol;
+    return plan;
 }
 
 // ---- Input synthesis: same Net::InputSample humans send ----
