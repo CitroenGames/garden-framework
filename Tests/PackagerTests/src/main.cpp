@@ -10,8 +10,16 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <string>
 #include <vector>
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
@@ -122,6 +130,163 @@ PackageConfig packageConfig(const fs::path& output_root)
     config.package_name = "package";
     return config;
 }
+
+#ifdef _WIN32
+fs::path fpsShooterModulePath()
+{
+    // PackagerTests is built into <repository>/bin.  Keep the launch fixture
+    // self-contained after this one source-tree lookup: the packager must
+    // stage the module into the resulting package before Server.exe can load
+    // it from there.
+    return EnginePaths::getExecutableDir().parent_path() /
+        "Templates" / "FPSShooter" / "bin" / "FPSShooter.dll";
+}
+
+bool createPackagedServerFixture(const fs::path& root, ProjectManager& manager)
+{
+    const fs::path module_source = fpsShooterModulePath();
+    std::error_code ec;
+    if (!fs::is_regular_file(module_source, ec) || ec)
+        return false;
+
+    fs::create_directories(root / "bin", ec);
+    if (ec) return false;
+    fs::create_directories(root / "assets" / "levels", ec);
+    if (ec) return false;
+    fs::copy_file(module_source, root / "bin" / "FPSShooter.dll",
+                  fs::copy_options::overwrite_existing, ec);
+    if (ec) return false;
+    if (!writeText(root / "assets" / "levels" / "main.level.json",
+                   R"({"metadata":{"level_name":"Packaged Server Fixture"},"entities":[]})"))
+        return false;
+
+    const json garden = {
+        {"name", "PackagedServerFixture"},
+        {"engine_id", "test-engine"},
+        {"engine_version", "1.0"},
+        {"game_module", "bin/FPSShooter"},
+        {"default_level", "assets/levels/main.level.json"},
+        {"default_game_mode", "GameMode"},
+        {"default_game_state", "GameState"},
+        {"asset_directories", {"assets"}},
+        {"source_directory", "src/"},
+        {"buildscript", "PackagedServerFixture.buildscript"},
+    };
+    const fs::path garden_path = root / "PackagedServerFixture.garden";
+    return writeText(garden_path, garden.dump(4)) && manager.loadProject(garden_path.string());
+}
+
+std::string quoteWindowsArg(const fs::path& value)
+{
+    return "\"" + value.string() + "\"";
+}
+
+bool readText(const fs::path& path, std::string& out)
+{
+    std::ifstream input(path, std::ios::binary);
+    if (!input.is_open()) return false;
+    out.assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+    return input.good() || input.eof();
+}
+
+bool testPackagedServerLaunch()
+{
+    const std::string name = "packaged server starts from the packaged directory";
+    const fs::path module_source = fpsShooterModulePath();
+    if (!fs::is_regular_file(module_source))
+    {
+        std::cout << "[SKIP] " << name << ": FPSShooter.dll is absent at "
+                  << module_source.string() << std::endl;
+        return true;
+    }
+
+    TempDirectory temp("packaged_server_launch");
+    ProjectManager project;
+    if (!createPackagedServerFixture(temp.path / "project", project))
+        return fail(name, "could not create the minimal server project fixture");
+
+    PackageConfig config = packageConfig(temp.path / "out");
+    config.compile_levels_to_binary = true;
+    LevelManager levels;
+    const PackageResult result = ProjectPackager::packageProject(project, levels, config);
+    if (!result.success)
+        return fail(name, "could not package the server fixture: " + result.error_message);
+
+    const fs::path package_root = temp.path / "out" / "package";
+    const fs::path server_path = package_root / "bin" / "Server.exe";
+    if (!fs::is_regular_file(server_path))
+        return fail(name, "Server.exe was not staged into the package");
+
+    const fs::path log_path = temp.path / "server.log";
+    SECURITY_ATTRIBUTES security{};
+    security.nLength = sizeof(security);
+    security.bInheritHandle = TRUE;
+    HANDLE log_handle = CreateFileA(log_path.string().c_str(), GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, &security, CREATE_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (log_handle == INVALID_HANDLE_VALUE)
+        return fail(name, "could not create captured server log");
+
+    // Do not share the normal developer-server port. A PID-derived high port
+    // makes parallel test processes unlikely to contend while retaining an
+    // explicit port for this bounded launch contract.
+    const DWORD test_port = 39000 + (GetCurrentProcessId() % 1000);
+    const std::string command = quoteWindowsArg(server_path) + " --port " + std::to_string(test_port);
+    std::vector<char> command_line(command.begin(), command.end());
+    command_line.push_back('\0');
+    STARTUPINFOA startup{};
+    startup.cb = sizeof(startup);
+    startup.dwFlags = STARTF_USESTDHANDLES;
+    startup.hStdOutput = log_handle;
+    startup.hStdError = log_handle;
+    startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    PROCESS_INFORMATION process{};
+    if (!CreateProcessA(server_path.string().c_str(), command_line.data(), nullptr, nullptr,
+            TRUE, CREATE_NO_WINDOW, nullptr, package_root.string().c_str(), &startup, &process))
+    {
+        const DWORD error = GetLastError();
+        CloseHandle(log_handle);
+        return fail(name, "CreateProcessA failed with error " + std::to_string(error));
+    }
+    CloseHandle(log_handle);
+    CloseHandle(process.hThread);
+
+    bool started = false;
+    std::string output;
+    const ULONGLONG deadline = GetTickCount64() + 5000;
+    while (GetTickCount64() < deadline)
+    {
+        if (WaitForSingleObject(process.hProcess, 0) == WAIT_OBJECT_0)
+            break;
+        if (readText(log_path, output) && output.find("Server started successfully") != std::string::npos)
+        {
+            started = true;
+            break;
+        }
+        Sleep(25);
+    }
+
+    const DWORD wait_result = WaitForSingleObject(process.hProcess, 0);
+    DWORD exit_code = STILL_ACTIVE;
+    GetExitCodeProcess(process.hProcess, &exit_code);
+    if (wait_result != WAIT_OBJECT_0)
+    {
+        TerminateProcess(process.hProcess, 0);
+        WaitForSingleObject(process.hProcess, 5000);
+    }
+    CloseHandle(process.hProcess);
+    readText(log_path, output);
+
+    if (!started)
+    {
+        const std::string reason = wait_result == WAIT_OBJECT_0
+            ? "packaged server exited before startup with code " + std::to_string(exit_code)
+            : "packaged server did not report startup within 5 seconds";
+        return fail(name, reason + "; log: " + output);
+    }
+    return pass(name);
+}
+#endif
 
 bool testRequiredBinaries()
 {
@@ -460,6 +625,9 @@ int main()
         ok &= testAssetRootRelativeReferencePassesPackaging();
         ok &= testCompiledReferenceRequiresCookedOutput();
         ok &= testFailedLevelCompileDoesNotRewriteDefaultLevel();
+#ifdef _WIN32
+        ok &= testPackagedServerLaunch();
+#endif
     }
 
     std::cout << (ok ? (integration_skipped ? "PackagerTests: PASS (integration tests skipped)" : "PackagerTests: ALL PASS")

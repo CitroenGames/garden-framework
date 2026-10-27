@@ -8,6 +8,7 @@
 #include "Reflection/ReflectionRegistry.hpp"
 #include "world.hpp"
 #include "shared/FpsGameLogic.hpp"
+#include "shared/PlayerLifecycle.hpp"
 #include "shared/WorldItemLifecycle.hpp"
 #include "shared/CompetitiveLogic.hpp"
 #include "shared/BuyZoneTriggers.hpp"
@@ -1247,6 +1248,277 @@ bool testCompetitiveWorldPhaseAuthority()
     return pass(name);
 }
 
+// This drives the same world-owned competitive systems that ServerModule
+// composes: the runtime tick publishes the snapshot, BombSystem feeds the
+// RoundSystem through its hooks, and the phase/period/end callbacks apply the
+// ECS-facing work owned by the server adapter.  It is intentionally a
+// deterministic integration fixture, not a second match simulator.
+bool testCompetitiveFullRoundRuntimeIntegration()
+{
+    const std::string name = "CompetitiveFullRoundRuntimeIntegration";
+    using namespace Competitive;
+
+    entt::registry registry;
+    ModeConfig config = fastCompConfig();
+    config.max_rounds = 4;
+    config.overtime_enabled = false;
+    config.round_seconds = 0.05f;
+    auto& context = startCompetitiveWorldRuntime(registry, config);
+    context.bomb.config.plant_seconds = 0.01f;
+    context.bomb.config.defuse_with_kit_seconds = 0.02f;
+    context.bomb.config.bomb_timer_seconds = 5.0f;
+
+    struct Player {
+        uint16_t client_id = 0;
+        entt::entity entity = entt::null;
+    };
+    std::vector<Player> players;
+    auto playerFor = [&](uint16_t client_id) -> entt::entity {
+        for (const Player& player : players) {
+            if (player.client_id == client_id && registry.valid(player.entity))
+                return player.entity;
+        }
+        return entt::null;
+    };
+    auto createPawn = [&](uint16_t client_id, FpsTeam team) -> entt::entity {
+        const entt::entity pawn = registry.create();
+        registry.emplace<TeamComponent>(pawn, TeamComponent{teamId(team)});
+        registry.emplace<FpsHealthComponent>(pawn, 100);
+        auto& money = registry.emplace<MoneyComponent>(pawn);
+        context.onMatchStart(money);
+        auto& inventory = registry.emplace<InventoryComponent>(pawn);
+        auto& loadout = registry.emplace<PlayerLoadoutComponent>(pawn);
+        WeaponComponent weapon;
+        FpsLogic::grantLoadout(inventory, loadout, weapon, WeaponType::PISTOL);
+        registry.emplace<WeaponComponent>(pawn, weapon);
+        registry.emplace<ArmorComponent>(pawn);
+        players.push_back({client_id, pawn});
+        return pawn;
+    };
+    auto liveInput = [&]() {
+        RoundTickInput input;
+        for (const Player& player : players) {
+            if (!registry.valid(player.entity) ||
+                !registry.all_of<TeamComponent, FpsHealthComponent>(player.entity))
+                continue;
+            const FpsTeam team = teamFromId(registry.get<TeamComponent>(player.entity).team_id);
+            const bool alive = registry.get<FpsHealthComponent>(player.entity).alive;
+            if (team == FpsTeam::Attackers) {
+                ++input.attackers_connected;
+                if (alive) ++input.attackers_alive;
+            } else if (team == FpsTeam::Defenders) {
+                ++input.defenders_connected;
+                if (alive) ++input.defenders_alive;
+            }
+        }
+        return input;
+    };
+    auto tick = [&](float dt) {
+        return tickCompetitiveWorldRuntime(registry, dt, liveInput()) &&
+            context.snapshotMatches(registry);
+    };
+
+    if (!context.sessions.admit(1) || !context.sessions.admit(2) ||
+        !context.sessions.assignTeam(1, FpsTeam::Attackers, RoundPhase::WaitingForPlayers) ||
+        !context.sessions.assignTeam(2, FpsTeam::Defenders, RoundPhase::WaitingForPlayers)) {
+        return fail(name, "initial competitive sessions could not be admitted");
+    }
+    createPawn(1, FpsTeam::Attackers);
+    createPawn(2, FpsTeam::Defenders);
+
+    int freeze_entries = 0;
+    int period_resets = 0;
+    int round_end_callbacks = 0;
+    bool freeze_setup_failed = false;
+    context.round.on_phase_enter = [&](RoundPhase phase) {
+        if (phase != RoundPhase::Freeze)
+            return;
+        ++freeze_entries;
+        context.bomb.resetForRound();
+
+        // This follows the server's Freeze order: existing pawns are restored,
+        // delayed sessions gain a pawn only at this legal phase, then one
+        // current attacker becomes the bomb carrier.
+        for (const Player& player : players) {
+            if (!registry.valid(player.entity) ||
+                !registry.all_of<FpsHealthComponent, TeamComponent>(player.entity))
+                continue;
+            if (!FPSShooter::restorePawnAfterRespawn(
+                    registry, player.entity, WeaponType::PISTOL)) {
+                freeze_setup_failed = true;
+                continue;
+            }
+            const FpsTeam team = teamFromId(registry.get<TeamComponent>(player.entity).team_id);
+            if (context.sessions.contains(player.client_id) &&
+                !context.sessions.markSpawned(player.client_id, team, phase))
+                freeze_setup_failed = true;
+        }
+        for (uint16_t client_id : context.sessions.awaitingSpawnClients()) {
+            const SessionRecord* session = context.sessions.find(client_id);
+            if (session == nullptr)
+                continue;
+            if (playerFor(client_id) == entt::null)
+                createPawn(client_id, session->team);
+            if (!context.sessions.markSpawned(client_id, session->team, phase))
+                freeze_setup_failed = true;
+        }
+        for (const Player& player : players) {
+            if (!registry.valid(player.entity) || !registry.all_of<TeamComponent>(player.entity))
+                continue;
+            if (teamFromId(registry.get<TeamComponent>(player.entity).team_id) == FpsTeam::Attackers) {
+                if (!context.bomb.assignCarrier(player.entity))
+                    freeze_setup_failed = true;
+                break;
+            }
+        }
+    };
+    context.round.on_period_reset = [&](bool overtime) {
+        if (overtime) {
+            freeze_setup_failed = true;
+            return;
+        }
+        ++period_resets;
+        for (const Player& player : players) {
+            if (!registry.valid(player.entity) ||
+                !registry.all_of<TeamComponent, MoneyComponent, ArmorComponent>(player.entity))
+                continue;
+            auto& team = registry.get<TeamComponent>(player.entity);
+            team.team_id = team.team_id == FpsLogic::kTeamAttackers ? FpsLogic::kTeamDefenders
+                : team.team_id == FpsLogic::kTeamDefenders ? FpsLogic::kTeamAttackers : team.team_id;
+            context.onPeriodReset(registry.get<MoneyComponent>(player.entity), false);
+            registry.get<ArmorComponent>(player.entity) = ArmorComponent{};
+        }
+        context.sessions.swapPlayingTeams();
+    };
+    context.round.on_round_end = [&](RoundWinner winner, RoundEndReason reason) {
+        ++round_end_callbacks;
+        for (const Player& player : players) {
+            if (!registry.valid(player.entity) || !registry.all_of<TeamComponent, MoneyComponent>(player.entity))
+                continue;
+            context.onRoundEnd(registry.get<MoneyComponent>(player.entity),
+                teamFromId(registry.get<TeamComponent>(player.entity).team_id), winner, reason);
+        }
+    };
+
+    auto driveToLive = [&]() {
+        for (int i = 0; i < 20 && context.round.state.phase != RoundPhase::Live; ++i) {
+            if (!tick(0.06f))
+                return false;
+        }
+        return context.round.state.phase == RoundPhase::Live;
+    };
+    auto advanceRoundEnd = [&]() {
+        for (int i = 0; i < 20 && context.round.state.phase == RoundPhase::RoundEnd; ++i) {
+            if (!tick(0.06f))
+                return false;
+        }
+        return true;
+    };
+
+    if (!driveToLive() || freeze_entries != 1 || freeze_setup_failed ||
+        context.sessions.find(1)->state != SessionState::Active ||
+        context.sessions.find(2)->state != SessionState::Active ||
+        context.bomb.bomb.state != BombState::Carried) {
+        return fail(name, "Freeze did not activate sessions and assign the first carrier");
+    }
+
+    // Round 1: drive the real bomb channel and let IBombHooks deliver the
+    // defuse outcome to the world runtime.
+    const entt::entity first_carrier = context.bomb.bomb.carrier;
+    const entt::entity first_defender = playerFor(2);
+    BombTickInput plant;
+    plant.plant_use = true;
+    plant.plant_in_site = true;
+    plant.plant_site = 0;
+    context.bomb.tick(0.02f, plant);
+    entt::entity planter = entt::null;
+    if (context.bomb.bomb.state != BombState::Planted ||
+        !context.bomb.consumePlantCompleted(planter) || planter != first_carrier)
+        return fail(name, "bomb plant did not complete through the authoritative channel");
+    context.onBombPlanter(registry.get<MoneyComponent>(planter));
+    for (const Player& player : players) {
+        if (registry.valid(player.entity) && registry.all_of<TeamComponent, MoneyComponent>(player.entity) &&
+            teamFromId(registry.get<TeamComponent>(player.entity).team_id) == FpsTeam::Attackers)
+            context.onBombTeam(registry.get<MoneyComponent>(player.entity));
+    }
+    if (!tick(0.005f) || context.round.state.phase != RoundPhase::Live ||
+        !context.round.state.bomb_planted)
+        return fail(name, "planted bomb did not publish into the live match snapshot");
+    registry.get<ArmorComponent>(first_defender).has_defuse_kit = true;
+    BombTickInput defuse;
+    defuse.defuse_actor = first_defender;
+    defuse.defuse_use = true;
+    defuse.defuse_in_range = true;
+    defuse.defuse_has_kit = registry.get<ArmorComponent>(first_defender).has_defuse_kit;
+    context.bomb.tick(0.01f, defuse);
+    context.bomb.tick(0.02f, defuse);
+    entt::entity defuser = entt::null;
+    if (context.bomb.bomb.state != BombState::Defused ||
+        !context.bomb.consumeDefuseCompleted(defuser) || defuser != first_defender)
+        return fail(name, "bomb defuse did not complete through the authoritative channel");
+    context.onBombDefuse(registry.get<MoneyComponent>(defuser));
+    if (!tick(0.01f) || context.round.state.phase != RoundPhase::RoundEnd ||
+        context.round.state.last_reason != RoundEndReason::BombDefused ||
+        context.round.state.last_winner != RoundWinner::Defenders)
+        return fail(name, "defuse hook did not end the live round through the world runtime");
+    if (!advanceRoundEnd() || !driveToLive() || freeze_setup_failed)
+        return fail(name, "defuse round did not return to a usable second live round");
+
+    // Round 2: a normal elimination balances the score and reaches halftime.
+    registry.get<FpsHealthComponent>(playerFor(2)).alive = false;
+    registry.get<FpsHealthComponent>(playerFor(2)).health = 0;
+    if (!tick(0.01f) || context.round.state.phase != RoundPhase::RoundEnd ||
+        context.round.state.last_winner != RoundWinner::Attackers ||
+        !advanceRoundEnd() || context.round.state.phase != RoundPhase::Halftime)
+        return fail(name, "second round did not enter halftime through the runtime callbacks");
+    if (period_resets != 1 || context.sessions.find(1)->team != FpsTeam::Defenders ||
+        context.sessions.find(2)->team != FpsTeam::Attackers ||
+        registry.get<TeamComponent>(playerFor(1)).team_id != FpsLogic::kTeamDefenders ||
+        registry.get<TeamComponent>(playerFor(2)).team_id != FpsLogic::kTeamAttackers)
+        return fail(name, "halftime did not atomically swap ECS and session sides");
+
+    if (!driveToLive() || freeze_entries != 3 || freeze_setup_failed)
+        return fail(name, "second-half Freeze did not rebuild the competitive round state");
+
+    // Round 3: a carrier disconnect drops the bomb. A pawnless late join is
+    // admitted during Live and remains deferred until the following Freeze.
+    const entt::entity disconnected_carrier = context.bomb.bomb.carrier;
+    if (disconnected_carrier != playerFor(2) ||
+        !context.bomb.onCarrierDisconnect(glm::vec3(4.0f, 0.0f, 2.0f)) ||
+        context.bomb.bomb.state != BombState::Dropped)
+        return fail(name, "carrier disconnect did not drop the current round bomb");
+    registry.destroy(disconnected_carrier);
+    context.sessions.remove(2);
+    if (!context.sessions.admit(3) ||
+        !context.sessions.assignTeam(3, FpsTeam::Attackers, RoundPhase::Live) ||
+        context.sessions.decideSpawn(3, RoundPhase::Live, false).disposition !=
+            SessionSpawnDisposition::AwaitingLegalPhase || playerFor(3) != entt::null)
+        return fail(name, "Live late join was not retained pawnless until Freeze");
+    if (!tick(0.06f) || context.round.state.phase != RoundPhase::RoundEnd ||
+        context.round.state.last_reason != RoundEndReason::TargetSaved ||
+        context.round.state.last_winner != RoundWinner::Defenders || !advanceRoundEnd())
+        return fail(name, "unplanted timeout after carrier disconnect did not resolve for Defenders");
+    if (!driveToLive() || playerFor(3) == entt::null ||
+        context.sessions.find(3)->state != SessionState::Active || freeze_setup_failed)
+        return fail(name, "late join did not construct and activate on the next legal Freeze");
+
+    // Round 4: a final elimination gives a 2-2 regulation draw, then the
+    // match-end timer restores WaitingForPlayers through the canonical FSM.
+    registry.get<FpsHealthComponent>(playerFor(1)).alive = false;
+    registry.get<FpsHealthComponent>(playerFor(1)).health = 0;
+    if (!tick(0.01f) || context.round.state.phase != RoundPhase::RoundEnd ||
+        context.round.state.last_winner != RoundWinner::Attackers || !advanceRoundEnd() ||
+        context.round.state.phase != RoundPhase::MatchEnded ||
+        context.round.state.match_winner != RoundWinner::Draw || round_end_callbacks != 4)
+        return fail(name, "regulation draw did not reach MatchEnded with every round callback");
+    if (!tick(0.06f) || context.round.state.phase != RoundPhase::WaitingForPlayers ||
+        context.round.state.wins_attackers != 0 || context.round.state.wins_defenders != 0 ||
+        !context.snapshotMatches(registry))
+        return fail(name, "match-end restart did not reset the canonical and ECS match state");
+
+    return pass(name);
+}
+
 bool testCompetitiveEconomyStreakCap()
 {
     const std::string name = "CompetitiveEconomyStreakCap";
@@ -2277,6 +2549,7 @@ int main()
     ok = testCompetitiveTimerTargetSavedAndPause() && ok;
     ok = testCompetitiveTransitionWinMatrix() && ok;
     ok = testCompetitiveWorldPhaseAuthority() && ok;
+    ok = testCompetitiveFullRoundRuntimeIntegration() && ok;
     ok = testCompetitiveEconomyStreakCap() && ok;
     ok = testCompetitiveWorldEconomyHooks() && ok;
     ok = testCompetitiveBuyMatrix() && ok;
