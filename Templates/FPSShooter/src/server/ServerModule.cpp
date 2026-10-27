@@ -10,6 +10,7 @@
 #include "Network/NetworkSerializer.hpp"
 #include "Network/NetworkTypes.hpp"
 #include "Network/ServerNetworkManager.hpp"
+#include "server/LagCompensation.hpp"
 #include "shared/SharedComponents.hpp"
 #include "shared/CombatProtocol.hpp"
 #include "shared/WeaponTypes.hpp"
@@ -40,6 +41,7 @@
 
 static EngineServices* g_server_services = nullptr;
 static Net::ServerNetworkManager g_server_network;
+static FpsServer::LagCompensationTelemetry g_lag_compensation_telemetry;
 static Game::GameRules g_game_rules;
 // Competitive mode (FPS_GAME_MODE=competitive); DM/TDM paths unchanged when off.
 static bool g_competitive = false;
@@ -269,6 +271,23 @@ static void fireServerShot(
     std::unordered_map<entt::entity, int> pellet_hits;
     std::unordered_map<entt::entity, glm::vec3> pellet_hit_points;
     auto player_view = w->registry.view<NetworkedEntity, TransformComponent, FpsHealthComponent>();
+    std::vector<FpsServer::LagCompensationTarget> eligible_targets;
+    for (auto entity : player_view) {
+        if (entity == shooter_entity) continue;
+        const auto& net = player_view.get<NetworkedEntity>(entity);
+        const auto& health = player_view.get<FpsHealthComponent>(entity);
+        const auto& trans = player_view.get<TransformComponent>(entity);
+        if (!health.alive) continue;
+        eligible_targets.push_back({entity, net.network_id, net.owner_client_id, trans.position});
+    }
+    const auto rewound_targets = FpsServer::prepareLagCompensatedTargetsForShot(
+        eligible_targets,
+        rewind_tick,
+        [](uint32_t network_id, uint32_t target_tick, Net::ComponentSnapshot& out) {
+            return g_server_network.sampleLagCompensatedEntity(network_id, target_tick, out);
+        },
+        g_lag_compensation_telemetry);
+
     for (int pellet = 0; pellet < weapon_def.pellets; pellet++) {
         glm::vec3 pellet_dir = WeaponSystem::applySpread(ray_dir, shot_spread,
             input.tick * 31 + pellet * 7919 + shooter_client_id);
@@ -280,16 +299,9 @@ static void fireServerShot(
             best_hit_dist = trace_hit.distance; best_hit_point = trace_hit.hit_point;
             best_hit_entity_id = 0; best_hit_client_id = 0; best_hit_ent = entt::null;
         }
-        for (auto entity : player_view) {
-            if (entity == shooter_entity) continue;
-            auto& net = player_view.get<NetworkedEntity>(entity);
-            auto& health = player_view.get<FpsHealthComponent>(entity);
-            auto& trans = player_view.get<TransformComponent>(entity);
-            if (!health.alive) continue;
-            glm::vec3 target_position = trans.position;
-            ComponentSnapshot rewind_snapshot;
-            if (g_server_network.sampleLagCompensatedEntity(net.network_id, rewind_tick, rewind_snapshot))
-                target_position = rewind_snapshot.position;
+        for (const auto& target : rewound_targets) {
+            const entt::entity entity = target.entity;
+            const glm::vec3& target_position = target.position;
             glm::vec3 hit_point;
             if (rayCapsuleIntersect(ray_origin, pellet_dir, target_position, 0.4f, 1.8f, hit_point)) {
                 float dist = glm::distance(ray_origin, hit_point);
@@ -299,7 +311,7 @@ static void fireServerShot(
                     pellet_hit_points[entity] = hit_point;
                     if (dist < best_hit_dist) {
                         best_hit_dist = dist; best_hit_point = hit_point;
-                        best_hit_entity_id = net.network_id; best_hit_client_id = net.owner_client_id; best_hit_ent = entity;
+                        best_hit_entity_id = target.network_id; best_hit_client_id = target.owner_client_id; best_hit_ent = entity;
                     }
                 }
             }

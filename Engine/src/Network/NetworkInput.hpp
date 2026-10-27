@@ -4,7 +4,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 namespace Net {
@@ -41,6 +43,26 @@ inline uint32_t resolveClientViewTick(bool has_view_tick, uint32_t sample_view_t
     return has_view_tick
         ? sample_view_tick
         : last_received_server_tick - DEFAULT_INTERP_DELAY_TICKS;
+}
+
+inline uint32_t clampClientViewTick(uint32_t requested_view_tick,
+                                    uint32_t current_server_tick,
+                                    std::size_t retained_history_records)
+{
+    if (isTickNewer(requested_view_tick, current_server_tick)) {
+        return current_server_tick;
+    }
+
+    const std::size_t maximum_age_records = retained_history_records > 0
+        ? retained_history_records - 1
+        : 0;
+    const uint32_t maximum_age_ticks = static_cast<uint32_t>(
+        (std::min)(maximum_age_records, static_cast<std::size_t>((std::numeric_limits<int32_t>::max)())));
+    const uint32_t requested_age_ticks = current_server_tick - requested_view_tick;
+    if (requested_age_ticks > maximum_age_ticks) {
+        return current_server_tick - maximum_age_ticks;
+    }
+    return requested_view_tick;
 }
 
 // Reserved WEAPON_SELECT value (7) decodes as "none"; counted, never fatal.

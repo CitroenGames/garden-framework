@@ -12,6 +12,7 @@
 #include "shared/BuyZoneTriggers.hpp"
 #include "shared/CombatProtocol.hpp"
 #include "server/GameRules.hpp"
+#include "server/LagCompensation.hpp"
 
 #include <cmath>
 #include <cstring>
@@ -1005,6 +1006,51 @@ bool testWeaponRosterIntegrity()
     return pass(name);
 }
 
+bool testLagCompensatedShotPoseFallbackAndMissCount()
+{
+    const std::string name = "LagCompensatedShotPoseFallbackAndMissCount";
+    entt::registry registry;
+    const entt::entity sampled_entity = registry.create();
+    const entt::entity missing_entity = registry.create();
+    const std::vector<FpsServer::LagCompensationTarget> eligible_targets = {
+        {sampled_entity, 101u, 4u, glm::vec3(1.0f, 2.0f, 3.0f)},
+        {missing_entity, 102u, 5u, glm::vec3(7.0f, 8.0f, 9.0f)},
+    };
+
+    FpsServer::LagCompensationTelemetry telemetry;
+    uint32_t sample_calls = 0;
+    const auto shot_targets = FpsServer::prepareLagCompensatedTargetsForShot(
+        eligible_targets,
+        50u,
+        [&sample_calls](uint32_t network_id, uint32_t view_tick, Net::ComponentSnapshot& out) {
+            ++sample_calls;
+            if (view_tick != 50u || network_id != 101u) return false;
+            out.position = glm::vec3(4.0f, 5.0f, 6.0f);
+            return true;
+        },
+        telemetry);
+
+    if (shot_targets.size() != 2u || sample_calls != 2u ||
+        !approxVec3(shot_targets[0].position, glm::vec3(4.0f, 5.0f, 6.0f)) ||
+        !approxVec3(shot_targets[1].position, eligible_targets[1].current_position) ||
+        telemetry.target_history_sample_misses != 1u) {
+        return fail(name, "sampled pose, current-transform fallback, or per-target miss count was wrong");
+    }
+
+    size_t pellet_target_uses = 0;
+    for (int pellet = 0; pellet < 8; ++pellet) {
+        for (const auto& target : shot_targets) {
+            (void)target;
+            ++pellet_target_uses;
+        }
+    }
+    if (pellet_target_uses != 16u || sample_calls != 2u || telemetry.target_history_sample_misses != 1u) {
+        return fail(name, "multi-pellet use sampled targets or counted a history miss more than once");
+    }
+
+    return pass(name);
+}
+
 #include "C4Tests.hpp"
 #include "BotTests.hpp"
 #include "UiLogicTests.hpp"
@@ -1036,6 +1082,7 @@ int main()
     ok = testCompetitiveTeamAutoAssign() && ok;
     ok = testCompetitiveBuyZoneOccupancy() && ok;
     ok = testWeaponRosterIntegrity() && ok;
+    ok = testLagCompensatedShotPoseFallbackAndMissCount() && ok;
     ok = testC4PlantInterrupt() && ok;
     ok = testC4AuthoredTriggerOccupancy() && ok;
     ok = testC4DefuseKit() && ok;

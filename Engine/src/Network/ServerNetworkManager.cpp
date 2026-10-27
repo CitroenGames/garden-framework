@@ -581,8 +581,10 @@ void ServerNetworkManager::handleInputCommand(uint16_t client_id, BitReader& rea
         move_input.camera_yaw = sample.camera_yaw;
         move_input.camera_pitch = sample.camera_pitch;
         move_input.buttons = sample.buttons;
-        const uint32_t client_view_tick = resolveClientViewTick(
+        const uint32_t resolved_view_tick = resolveClientViewTick(
             include_view_tick, sample.view_server_tick, msg.last_received_tick);
+        const uint32_t client_view_tick = clampClientViewTick(
+            resolved_view_tick, current_tick, lag_history.getMaxRecords());
         move_input.view_server_tick = client_view_tick;
 
         MovementState move_state;

@@ -556,6 +556,28 @@ static bool runLagHistoryTickWrapTest()
     return true;
 }
 
+static bool runLagViewTickClampTest()
+{
+    // Eleven retained snapshots cover the current tick and ten ticks behind.
+    if (Net::clampClientViewTick(101u, 100u, 11u) != 100u ||
+        Net::clampClientViewTick(90u, 100u, 11u) != 90u ||
+        Net::clampClientViewTick(89u, 100u, 11u) != 90u) {
+        std::cerr << "[FAIL] LagViewTickClampTests failed future, window-edge, or old-tick clamp\n";
+        return false;
+    }
+
+    // The same bounds apply across uint32 wrap: current tick 1, window age 8.
+    if (Net::clampClientViewTick(2u, 1u, 9u) != 1u ||
+        Net::clampClientViewTick(0xFFFFFFFBu, 1u, 9u) != 0xFFFFFFFBu ||
+        Net::clampClientViewTick(0xFFFFFFF0u, 1u, 9u) != 0xFFFFFFF9u) {
+        std::cerr << "[FAIL] LagViewTickClampTests failed wrapped future, in-window, or old-tick clamp\n";
+        return false;
+    }
+
+    std::cout << "[PASS] LagViewTickClampTests\n";
+    return true;
+}
+
 static bool runInputViewTickProtocolTest()
 {
     Net::InputCommandMessage message;
@@ -1396,6 +1418,7 @@ int main(int argc, char** argv)
     const bool interpolation_buffer_wrap_ok = runInterpolationTickWrapBufferTest();
     const bool interpolation_jitter_ok = runInterpolationJitterBufferTest();
     const bool lag_history_wrap_ok = runLagHistoryTickWrapTest();
+    const bool lag_view_tick_clamp_ok = runLagViewTickClampTest();
     const bool input_view_tick_protocol_ok = runInputViewTickProtocolTest();
     const bool input_view_tick_loopback_ok = runInputViewTickLoopbackTest();
     const bool interpolation_manager_wrap_ok = runInterpolationTickWrapManagerTest();
@@ -1403,6 +1426,7 @@ int main(int argc, char** argv)
     const bool ok = runNetworkStress(config);
     EE::CLog::Shutdown();
     return (handshake_ok && interpolation_buffer_wrap_ok && interpolation_jitter_ok && lag_history_wrap_ok &&
+            lag_view_tick_clamp_ok &&
             input_view_tick_protocol_ok && input_view_tick_loopback_ok && interpolation_manager_wrap_ok &&
             raw_interpolation_ok && ok) ? 0 : 1;
 }
