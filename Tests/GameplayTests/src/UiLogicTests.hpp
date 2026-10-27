@@ -329,6 +329,90 @@ bool testUiScoreboardMoneyVisibility()
     return pass(name);
 }
 
+bool testUiScoreboardAuthoritativePresentation()
+{
+    const std::string name = "UiScoreboard_AuthoritativePresentation";
+    using namespace UiLogic;
+
+    ScoreboardPresentationSource unavailable;
+    if (buildScoreboardPresentation(unavailable).available ||
+        buildScoreboardPresentation(unavailable).text != "SCOREBOARD UNAVAILABLE")
+        return fail(name, "missing authoritative round snapshot was displayed as a match");
+
+    ClientCompetitiveState comp;
+    if (!applyRoundState(comp, static_cast<uint8_t>(RoundPhase::Live), 42.0f,
+                         7, 4, 3, true, 940, 100))
+        return fail(name, "initial authoritative round snapshot was rejected");
+    tickCompetitive(comp, 1.0f);
+    // A delayed snapshot cannot roll the phase, clock, score, or bomb state
+    // backward. A newer packet is allowed to correct the interpolated clock.
+    if (applyRoundState(comp, static_cast<uint8_t>(RoundPhase::Freeze), 6.0f,
+                        6, 3, 3, false, 900, 99) ||
+        comp.phase != RoundPhase::Live || !comp.bomb_planted || comp.round_number != 7)
+        return fail(name, "stale round snapshot replaced current presentation");
+    if (!applyRoundState(comp, static_cast<uint8_t>(RoundPhase::Live), 38.0f,
+                         7, 4, 3, true, 940, 101) ||
+        !comp.round_clock_corrected || comp.phase_time_remaining != 38.0f)
+        return fail(name, "newer server clock correction was not retained");
+    if (applyRoundState(comp, 255, 0.0f, 7, 4, 3, false, 0, 102) ||
+        comp.phase != RoundPhase::Live)
+        return fail(name, "invalid phase made the presentation state unavailable");
+
+    comp.local_team = FpsTeam::Attackers;
+    ScoreboardPresentationSource source;
+    source.connected = true;
+    source.competitive = &comp;
+    source.has_authoritative_roster = false;
+    ScoreboardRowInput local;
+    local.name = "Local\nPlayer";
+    local.side = FpsTeam::Attackers;
+    local.is_local = true;
+    local.alive = true;
+    local.kills = 6;
+    local.deaths = 2;
+    local.money = 4200;
+    local.ping = 31;
+    local.ping_available = true;
+    source.approved_rows.push_back(local);
+    auto partial = buildScoreboardPresentation(source);
+    if (!partial.available || partial.roster_available || partial.row_count != 1 ||
+        !partial.rows[0].money_visible || partial.rows[0].money_display != 4200 ||
+        partial.rows[0].assists_available || partial.rows[0].display_name.find('\n') != std::string::npos ||
+        partial.text.find("OBJECTIVE: BOMB PLANTED") == std::string::npos ||
+        partial.text.find("ROSTER UNAVAILABLE") == std::string::npos ||
+        partial.text.find("A-") == std::string::npos)
+        return fail(name, "partial authoritative roster leaked or invented display data");
+
+    source.has_authoritative_roster = true;
+    source.approved_rows.clear();
+    const auto empty = buildScoreboardPresentation(source);
+    if (!empty.available || !empty.roster_available || empty.row_count != 0 ||
+        empty.text.find("NO PLAYERS") == std::string::npos)
+        return fail(name, "empty authoritative roster was not explicit");
+    for (size_t i = 0; i < kScoreboardMaxRows + 2; ++i) {
+        ScoreboardRowInput row;
+        row.name = "Player " + std::to_string(i);
+        row.side = (i % 2 == 0) ? FpsTeam::Attackers : FpsTeam::Defenders;
+        row.money = 5000;
+        row.assists = 1;
+        row.assists_available = true;
+        source.approved_rows.push_back(row);
+    }
+    auto bounded = buildScoreboardPresentation(source);
+    if (!bounded.roster_available || !bounded.roster_truncated ||
+        bounded.row_count != kScoreboardMaxRows ||
+        bounded.rows[1].money_visible || bounded.rows[1].money_display != -1 ||
+        bounded.text.find("ROSTER TRUNCATED") == std::string::npos ||
+        bounded.text.find("Defenders Player 1 K0 D0 A1 P- $-") == std::string::npos)
+        return fail(name, "bounded roster did not preserve money visibility");
+
+    source.connected = false;
+    if (buildScoreboardPresentation(source).available)
+        return fail(name, "disconnect retained stale scoreboard data");
+
+    return pass(name);
+}
+
 bool testUiRadarProjection()
 {
     const std::string name = "UiRadar_D10Projection";

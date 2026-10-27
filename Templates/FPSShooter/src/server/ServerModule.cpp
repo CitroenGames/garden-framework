@@ -896,17 +896,44 @@ static void tickBots(float dt)
         glm::vec3 pos = w->registry.get<TransformComponent>(e).position;
         bool alive = w->registry.get<FpsHealthComponent>(e).alive;
         uint8_t team_id = w->registry.get<TeamComponent>(e).team_id;
+        const Competitive::FpsTeam bot_team = Competitive::teamFromId(team_id);
+        const bool bot_has_playing_team = Competitive::isPlayingTeam(bot_team);
+        // A sight sample is only valid while its target remains a living enemy.
+        // This revokes a destroyed, disconnected, respawned, or side-swapped
+        // target before the next staggered raycast pass reaches this bot.
+        bool current_target_eligible = true;
+        if (percept.visible_enemy != entt::null) {
+            const entt::entity target = percept.visible_enemy;
+            current_target_eligible = w->registry.valid(target) &&
+                w->registry.all_of<NetworkedEntity, TeamComponent, FpsHealthComponent>(target) &&
+                w->registry.get<NetworkedEntity>(target).is_player &&
+                w->registry.get<FpsHealthComponent>(target).alive &&
+                bot_has_playing_team &&
+                Competitive::isPlayingTeam(Competitive::teamFromId(
+                    w->registry.get<TeamComponent>(target).team_id)) &&
+                w->registry.get<TeamComponent>(target).team_id != team_id;
+        }
+        Bots::pruneCurrentSight(percept, current_target_eligible);
         // S1 perception (10 Hz staggered by bot_index % 6 fixed ticks)
         if (((uint32_t)(runtime.world_time * 60.0f) + (uint32_t)bot.bot_index) % 6u == 0u) {
             std::vector<Bots::EnemyCandidate> enemies;
             auto ev = w->registry.view<NetworkedEntity, TeamComponent, TransformComponent, FpsHealthComponent>();
-            for (auto en : ev) { if (en == e || !ev.get<NetworkedEntity>(en).is_player || !ev.get<FpsHealthComponent>(en).alive) continue; if (ev.get<TeamComponent>(en).team_id == team_id) continue; enemies.push_back(Bots::EnemyCandidate{en, ev.get<TransformComponent>(en).position}); }
+            for (auto en : ev) {
+                if (en == e || !bot_has_playing_team || !ev.get<NetworkedEntity>(en).is_player ||
+                    !ev.get<FpsHealthComponent>(en).alive)
+                    continue;
+                const uint8_t candidate_team_id = ev.get<TeamComponent>(en).team_id;
+                if (!Competitive::isPlayingTeam(Competitive::teamFromId(candidate_team_id)) ||
+                    candidate_team_id == team_id)
+                    continue;
+                enemies.push_back(Bots::EnemyCandidate{en, ev.get<TransformComponent>(en).position});
+            }
             glm::vec3 eye = pos + glm::vec3(0.0f, 1.62f, 0.0f);
             Bots::updatePerception(percept, eye, bot.aim_yaw, enemies, bot.difficulty, 0.1f,
                 [&](const glm::vec3& origin, const glm::vec3& point) { glm::vec3 d = point - origin; float dist = glm::length(d); if (dist < 0.01f) return false; auto hit = w->raycastClosest(origin, d / dist, dist, e); return hit.hit && hit.distance + 0.02f < dist; });
-        } else { percept.last_seen_age += dt; percept.heard_age += dt; }
+        } else { Bots::advancePerceptionClock(percept, bot.difficulty, dt); }
         // S2 decision (consumes percept + match summary only)
-        Bots::BotDecisionInput din; din.phase = g_round_system.state.phase; din.team = Competitive::teamFromId(team_id);
+        Bots::BotDecisionInput din; din.phase = g_round_system.state.phase; din.team = bot_team;
         din.alive = alive; din.is_carrier = g_bomb_system.bomb.carrier == e; din.bomb_planted = g_bomb_system.isPlanted();
         din.bot_pos = pos; din.health = w->registry.get<FpsHealthComponent>(e).health; din.dt = dt;
         if (!g_bomb_system.config.sites.empty()) { const auto& s = g_bomb_system.config.sites[(size_t)std::abs(bot.bot_index) % g_bomb_system.config.sites.size()]; din.site_pos = s.centre; din.has_site = true; uint8_t si = 0; din.at_site = bombSiteForPlayer(*w, e, si); }
@@ -1775,7 +1802,7 @@ GAME_API bool gardenServerInit(EngineServices* services)
     // worlds contain no round snapshot, bomb, buy, economy, session, or
     // stale bot state.
     despawnBotsForLevelTransition(*match_world);
-    Competitive::clearCompetitiveWorldContext(match_world->registry);
+    Competitive::stopCompetitiveWorldRuntime(match_world->registry);
     resetBotRuntime(*match_world);
     {
         FpsLogic::ModeConfig cfg = g_mode_composition.gameplayConfig();
@@ -1783,12 +1810,11 @@ GAME_API bool gardenServerInit(EngineServices* services)
         if (const char* tl = std::getenv("FPS_TIME_LIMIT")) { float v = (float)std::atof(tl); if (v > 0) cfg.time_limit_seconds = v; }
         g_game_rules.configureMode(g_mode_composition, cfg);
         if (g_competitive) {
-            Competitive::CompetitiveWorldContext& match_context =
-                match_world->registry.ctx().emplace<Competitive::CompetitiveWorldContext>();
             Competitive::ModeConfig ccfg; // all [P]/[V] values are data here
             if (const char* v = std::getenv("FPS_ROUND_SECONDS")) { float f = (float)std::atof(v); if (f > 0) ccfg.round_seconds = f; }
             if (const char* v = std::getenv("FPS_WARMUP_SECONDS")) { float f = (float)std::atof(v); if (f >= 0) ccfg.warmup_seconds = f; }
-            match_context.configure(ccfg);
+            Competitive::CompetitiveWorldContext& match_context =
+                Competitive::startCompetitiveWorldRuntime(match_world->registry, ccfg);
             g_bomb_system.on_transition = [](Competitive::BombState from, Competitive::BombState to) {
                 LOG_ENGINE_INFO("Bomb state {} -> {} carrier_valid={} timer={:.1f}", bombStateName(from), bombStateName(to),
                     g_bomb_system.bomb.carrier != entt::null, g_bomb_system.bomb.timer);
@@ -1811,7 +1837,6 @@ GAME_API bool gardenServerInit(EngineServices* services)
                 LOG_ENGINE_INFO("Competitive round end: winner={} reason={}", (int)winner, (int)reason);
                 competitiveRoundEndAwards(winner, reason);
             };
-            match_context.createMatchSnapshot(match_world->registry);
             LOG_ENGINE_INFO("FPSShooter mode: competitive max_rounds={} clinch={} round={}s freeze={}s warmup={}s",
                 ccfg.max_rounds, ccfg.winsToClinch(), ccfg.round_seconds, ccfg.freeze_seconds, ccfg.warmup_seconds);
         } else {
@@ -1929,10 +1954,7 @@ GAME_API void gardenServerShutdown()
     if (g_server_services && g_server_services->game_world) {
         auto& registry = g_server_services->game_world->registry;
         FpsLogic::clearGrenadeEffects(registry);
-        if (auto* context = registry.ctx().find<Competitive::CompetitiveWorldContext>()) {
-            context->destroyMatchSnapshot(registry);
-            registry.ctx().erase<Competitive::CompetitiveWorldContext>();
-        }
+        Competitive::stopCompetitiveWorldRuntime(registry);
         if (auto* runtime = registry.ctx().find<Bots::BotWorldRuntime>()) {
             runtime->reset();
             registry.ctx().erase<Bots::BotWorldRuntime>();
@@ -1980,8 +2002,8 @@ GAME_API void gardenServerUpdate(float delta_time)
         auto prev_phase = g_round_system.state.phase;
         if (botRuntime().target_count > 0) { (void)loadBotNavMesh(); tickBots(w->fixed_delta > 0.0f ? w->fixed_delta : delta_time); }
         tickBombServer(w->fixed_delta > 0.0f ? w->fixed_delta : delta_time);
-        g_round_system.tick(w->fixed_delta > 0.0f ? w->fixed_delta : delta_time, rin);
-        competitiveContext().syncMatchSnapshot(w->registry);
+        (void)Competitive::tickCompetitiveWorldRuntime(
+            w->registry, w->fixed_delta > 0.0f ? w->fixed_delta : delta_time, rin);
         FpsLogic::tickGrenadeEffects(
             w->registry,
             w->fixed_delta > 0.0f ? w->fixed_delta : delta_time,
@@ -2051,8 +2073,15 @@ GAME_API void gardenServerOnLevelLoaded()
     // and registry are reused by a host level transition.
     despawnBotsForLevelTransition(game_world);
     resetBotRuntime(game_world);
-    if (g_competitive)
+    if (g_competitive) {
+        // The runtime is started by gardenServerInit after the world exists.
+        // Repeated level notifications must only republish that world's
+        // current mirror; they do not install another callback set or carry
+        // a previous world snapshot forward.
+        competitiveContext().createMatchSnapshot(game_world.registry);
+        (void)competitiveContext().syncMatchSnapshot(game_world.registry);
         ensureBuyZoneTriggers(game_world);
+    }
     game_world.getPhysicsSystem().optimizeBroadPhase();
     // The host hashes Project.default_level and passes the selected artifact.
     g_server_network.setLevelHash(g_server_services->level_hash);

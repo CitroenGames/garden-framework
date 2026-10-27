@@ -277,28 +277,60 @@ inline const std::array<uint16_t, 10>& featuredBuyIds() {
     return ids;
 }
 
-// --- Scoreboard row model (hud_menus S5) --------------------------------------
+// --- Scoreboard row model (hud_menus U3) --------------------------------------
+//
+// The game protocol currently publishes only a shared ROUND_STATE and owner
+// snapshots (team and wallet).  It does not publish a roster.  Keep the
+// presentation formatter able to consume a future *approved* roster, but do
+// not populate it from replicated world entities: their side, stats, names,
+// wallet and liveness are not an approved scoreboard source.
+constexpr size_t kScoreboardMaxRows = 10;
+constexpr size_t kScoreboardNameMaxChars = 24;
+
 struct ScoreboardRowInput {
     std::string name;
     int32_t kills = 0, assists = 0, deaths = 0, money = 0, ping = 0;
     FpsTeam side = FpsTeam::None;
     bool is_local = false, alive = true, is_bot = false;
+    // Assists and per-player ping have no approved payload today.  A row may
+    // contain them only when its approved source explicitly says it has them.
+    bool assists_available = false;
+    bool ping_available = false;
 };
 struct ScoreboardRow {
     std::string display_name;
     int32_t kills = 0, assists = 0, deaths = 0, ping = 0;
     int32_t money_display = -1; // -1 = hidden (enemy money, spec S8)
-    bool money_visible = false;
+    bool money_visible = false, assists_available = false, ping_available = false;
     FpsTeam side = FpsTeam::None;
     bool is_local = false;
 };
+
+inline std::string scoreboardDisplayName(const std::string& source_name) {
+    std::string out;
+    out.reserve(std::min(source_name.size(), kScoreboardNameMaxChars));
+    for (const unsigned char ch : source_name) {
+        if (out.size() == kScoreboardNameMaxChars)
+            break;
+        // Rml receives a flat text field.  Keep untrusted display names on one
+        // row and leave markup escaping to Rml's data-model binding.
+        out += (ch >= 32 && ch != 127) ? static_cast<char>(ch) : ' ';
+    }
+    return out.empty() ? "PLAYER" : out;
+}
+
 inline ScoreboardRow buildScoreboardRow(const ScoreboardRowInput& in, FpsTeam viewer_team) {
     ScoreboardRow out;
-    out.display_name = in.name + (in.is_bot ? " [BOT]" : "") + (!in.alive ? " [DEAD]" : "");
-    out.kills = in.kills; out.assists = in.assists; out.deaths = in.deaths; out.ping = in.ping;
+    out.display_name = scoreboardDisplayName(in.name) + (in.is_bot ? " [BOT]" : "") + (!in.alive ? " [DEAD]" : "");
+    out.kills = std::max(0, in.kills);
+    out.assists = std::max(0, in.assists);
+    out.deaths = std::max(0, in.deaths);
+    out.ping = std::max(0, in.ping);
+    out.assists_available = in.assists_available;
+    out.ping_available = in.ping_available;
     out.side = in.side; out.is_local = in.is_local;
     out.money_visible = Competitive::isPlayingTeam(viewer_team) && in.side == viewer_team;
-    out.money_display = out.money_visible ? in.money : -1;
+    out.money_display = out.money_visible ? std::max(0, in.money) : -1;
     return out;
 }
 
@@ -310,6 +342,12 @@ struct ClientCompetitiveState {
     uint16_t round_number = 0;
     int32_t score_attackers = 0, score_defenders = 0;
     bool bomb_planted = false;
+    // ROUND_STATE provides this pair.  It is retained for ordering and for
+    // display correction; client time is only an interpolation between these
+    // authoritative snapshots.
+    uint32_t phase_deadline_tick = 0;
+    uint32_t round_server_tick = 0;
+    bool round_clock_corrected = false;
     int32_t money = 800;
     uint8_t loss_streak = 0;
     FpsTeam local_team = FpsTeam::None;
@@ -318,13 +356,52 @@ struct ClientCompetitiveState {
     int32_t armor = 0;
     bool has_helmet = false, has_kit = false;
 };
-inline void applyRoundState(ClientCompetitiveState& s, uint8_t phase, float remaining,
-                            uint16_t round_number, int32_t wins_a, int32_t wins_d, bool planted) {
+
+inline bool isKnownRoundPhase(RoundPhase phase) {
+    using P = RoundPhase;
+    switch (phase) {
+    case P::WaitingForPlayers:
+    case P::Warmup:
+    case P::Freeze:
+    case P::Live:
+    case P::RoundEnd:
+    case P::Halftime:
+    case P::MatchEnded:
+        return true;
+    }
+    return false;
+}
+
+inline bool isRoundStateAtLeastAsNew(uint32_t incoming_tick, uint32_t accepted_tick) {
+    // Standard wrapped tick ordering.  The protocol transport is reliable, but
+    // retaining this guard prevents a delayed custom-message path from making
+    // the displayed phase/clock regress.
+    return static_cast<int32_t>(incoming_tick - accepted_tick) >= 0;
+}
+
+inline bool applyRoundState(ClientCompetitiveState& s, uint8_t phase, float remaining,
+                            uint16_t round_number, int32_t wins_a, int32_t wins_d, bool planted,
+                            uint32_t phase_deadline_tick = 0, uint32_t server_tick = 0) {
     RoundPhase p = static_cast<RoundPhase>(phase);
-    if (!s.has_round_state || p != s.phase) s.phase_elapsed = 0.0f;
-    s.phase = p; s.phase_time_remaining = remaining; s.round_number = round_number;
-    s.score_attackers = wins_a; s.score_defenders = wins_d; s.bomb_planted = planted;
+    if (!isKnownRoundPhase(p) || !std::isfinite(remaining))
+        return false;
+    if (s.has_round_state && !isRoundStateAtLeastAsNew(server_tick, s.round_server_tick))
+        return false;
+
+    const float corrected_remaining = std::max(0.0f, remaining);
+    const bool phase_changed = !s.has_round_state || p != s.phase;
+    // tickCompetitive decrements the prior authoritative value between
+    // messages.  A non-trivial replacement is a server clock correction, not
+    // a local phase transition.
+    s.round_clock_corrected = s.has_round_state && !phase_changed &&
+        std::fabs(s.phase_time_remaining - corrected_remaining) > 0.2f;
+    if (phase_changed) s.phase_elapsed = 0.0f;
+    s.phase = p; s.phase_time_remaining = corrected_remaining; s.round_number = round_number;
+    s.score_attackers = std::max(0, wins_a); s.score_defenders = std::max(0, wins_d); s.bomb_planted = planted;
+    s.phase_deadline_tick = phase_deadline_tick;
+    s.round_server_tick = server_tick;
     s.has_round_state = true;
+    return true;
 }
 inline void applyEconomyState(ClientCompetitiveState& s, int32_t balance, uint8_t loss_streak) {
     s.money = balance; s.loss_streak = loss_streak; s.has_economy = true;
@@ -346,6 +423,76 @@ inline bool canOpenBuy(const ClientCompetitiveState& s,
     return s.has_round_state && buyWindowOpen(s, cfg);
 }
 inline bool canOpenTeamSelect(const ClientCompetitiveState& s) { return s.has_round_state; }
+
+// Flat text is used because the game-context Rml API exposes scalar bindings,
+// not collection binding.  `has_authoritative_roster` is deliberately
+// separate from `rows`: a local row is useful feedback, but it never claims a
+// complete player list in the absence of a roster protocol message.
+struct ScoreboardPresentationSource {
+    bool connected = false;
+    const ClientCompetitiveState* competitive = nullptr;
+    bool has_authoritative_roster = false;
+    std::vector<ScoreboardRowInput> approved_rows;
+};
+
+struct ScoreboardPresentation {
+    bool available = false;
+    bool roster_available = false;
+    bool roster_truncated = false;
+    std::array<ScoreboardRow, kScoreboardMaxRows> rows{};
+    size_t row_count = 0;
+    std::string text = "SCOREBOARD UNAVAILABLE";
+};
+
+inline void appendScoreboardRowText(std::string& text, const ScoreboardRow& row) {
+    text += teamDisplayName(row.side);
+    text += " ";
+    text += row.display_name;
+    text += " K" + std::to_string(row.kills);
+    text += " D" + std::to_string(row.deaths);
+    text += row.assists_available ? " A" + std::to_string(row.assists) : " A-";
+    text += row.ping_available ? " P" + std::to_string(row.ping) : " P-";
+    text += row.money_visible ? " $" + std::to_string(row.money_display) : " $-";
+}
+
+inline ScoreboardPresentation buildScoreboardPresentation(const ScoreboardPresentationSource& source) {
+    ScoreboardPresentation out;
+    if (!source.connected || !source.competitive || !source.competitive->has_round_state)
+        return out;
+
+    const ClientCompetitiveState& comp = *source.competitive;
+    out.available = true;
+    out.roster_available = source.has_authoritative_roster;
+    out.text = "Round " + std::to_string(comp.round_number) +
+        " ATK " + std::to_string(comp.score_attackers) +
+        " - " + std::to_string(comp.score_defenders) + " DEF\n" +
+        formatPhaseText(comp.phase, comp.bomb_planted) + " " +
+        formatClock(comp.phase, comp.phase_time_remaining, false);
+    if (comp.bomb_planted)
+        out.text += "\nOBJECTIVE: BOMB PLANTED";
+
+    for (const ScoreboardRowInput& input : source.approved_rows) {
+        if (out.row_count == kScoreboardMaxRows) {
+            out.roster_truncated = true;
+            break;
+        }
+        // Invalid/non-playing sides do not become a plausible team entry.
+        if (!isPublishedTeam(input.side))
+            continue;
+        const ScoreboardRow row = buildScoreboardRow(input, comp.local_team);
+        out.rows[out.row_count++] = row;
+        out.text += "\n";
+        appendScoreboardRowText(out.text, row);
+    }
+
+    if (!out.roster_available)
+        out.text += "\nROSTER UNAVAILABLE";
+    else if (out.roster_truncated)
+        out.text += "\nROSTER TRUNCATED";
+    else if (out.row_count == 0)
+        out.text += "\nNO PLAYERS";
+    return out;
+}
 
 // The result payload includes a server-owned wallet balance. Applying that
 // value is a presentation refresh, never a local price calculation. Catalog

@@ -1005,21 +1005,17 @@ bool testCompetitiveWorldPhaseAuthority()
 
     entt::registry first_world;
     entt::registry second_world;
-    auto& first = first_world.ctx().emplace<CompetitiveWorldContext>();
-    auto& second = second_world.ctx().emplace<CompetitiveWorldContext>();
-    first.enabled = true;
-    second.enabled = true;
-    first.round.configure(fastCompConfig());
-    second.round.configure(fastCompConfig());
-    first.createMatchSnapshot(first_world);
-    second.createMatchSnapshot(second_world);
+    auto& first = startCompetitiveWorldRuntime(first_world, fastCompConfig());
+    auto& second = startCompetitiveWorldRuntime(second_world, fastCompConfig());
     if (!first.snapshotMatches(first_world) || !second.snapshotMatches(second_world))
         return fail(name, "initial per-world match snapshots differ from their canonical rounds");
 
+    int retired_phase_callback_count = 0;
+    first.round.on_phase_enter = [&](RoundPhase) { ++retired_phase_callback_count; };
     auto tick_world = [&](CompetitiveWorldContext& context, entt::registry& registry,
                           float dt, RoundTickInput input) {
-        context.round.tick(dt, input);
-        return context.syncMatchSnapshot(registry) && context.snapshotMatches(registry);
+        return tickCompetitiveWorldRuntime(registry, dt, input) &&
+            context.snapshotMatches(registry);
     };
     auto drive_to_live = [&](CompetitiveWorldContext& context, entt::registry& registry) {
         for (int i = 0; i < 20 && context.round.state.phase != RoundPhase::Live; ++i)
@@ -1067,18 +1063,78 @@ bool testCompetitiveWorldPhaseAuthority()
         !first.snapshotMatches(first_world))
         return fail(name, "halftime snapshot did not retain canonical phase and wins");
 
+    // Use the same runtime APIs that server startup/teardown use.  This
+    // fixture deliberately puts state in every per-world lane before restart:
+    // callback, session, request sequence, player wallet/equipment, bomb and
+    // input edges.  Recreating one registry must not affect the other one.
+    const entt::entity retired_player = first_world.create();
+    auto& retired_money = first_world.emplace<MoneyComponent>(retired_player);
+    retired_money.reset(5000, first.round.config.money_cap);
+    first_world.emplace<ArmorComponent>(retired_player);
+    auto& retired_inventory = first_world.emplace<InventoryComponent>(retired_player);
+    auto& retired_loadout = first_world.emplace<PlayerLoadoutComponent>(retired_player);
+    WeaponComponent retired_weapon;
+    FpsLogic::grantLoadout(retired_inventory, retired_loadout, retired_weapon, WeaponType::PISTOL);
+    first_world.emplace<WeaponComponent>(retired_player, retired_weapon);
+    const WeaponCatalogDef* ak = findCatalogByAlias("ak47");
+    if (ak == nullptr)
+        return fail(name, "runtime lifecycle fixture catalog entry is missing");
+    BuyContext retired_buy;
+    retired_buy.client_id = 77;
+    retired_buy.request_seq = 1;
+    retired_buy.phase = RoundPhase::Freeze;
+    retired_buy.alive = true;
+    retired_buy.in_buy_zone = true;
+    retired_buy.team_id = teamId(FpsTeam::Attackers);
+    retired_buy.money = &retired_money;
+    retired_buy.inventory = &retired_inventory;
+    retired_buy.loadout = &retired_loadout;
+    retired_buy.weapon = &first_world.get<WeaponComponent>(retired_player);
+    retired_buy.armor = &first_world.get<ArmorComponent>(retired_player);
+    if (first.onBuy(retired_buy, ak->id) != BuyResult::Ok ||
+        first.buy.lastResultFor(retired_buy.client_id) != BuyResult::Ok ||
+        !first.sessions.admit(retired_buy.client_id) ||
+        !first.bomb.assignCarrier(retired_player)) {
+        return fail(name, "runtime lifecycle fixture did not populate world-owned state");
+    }
+    first.bomb_use_held.emplace(retired_buy.client_id, true);
+    first.bomb_last_buttons.emplace(retired_buy.client_id, 1);
+    first.bomb_prev_health.emplace(17, 100);
+    first.bomb_prev_weapon.emplace(17, 3);
+
     const entt::entity retired_snapshot = first.match_entity;
-    first.destroyMatchSnapshot(first_world);
-    if (first_world.valid(retired_snapshot) || first.match_entity != entt::null)
-        return fail(name, "teardown left the prior match snapshot alive");
-    first_world.ctx().erase<CompetitiveWorldContext>();
-    auto& restarted = first_world.ctx().emplace<CompetitiveWorldContext>();
-    restarted.enabled = true;
-    restarted.round.configure(fastCompConfig());
-    restarted.createMatchSnapshot(first_world);
+    const int retired_callback_count = retired_phase_callback_count;
+    stopCompetitiveWorldRuntime(first_world);
+    if (first_world.valid(retired_snapshot) ||
+        first_world.ctx().find<CompetitiveWorldContext>() != nullptr ||
+        first_world.all_of<MoneyComponent>(retired_player) ||
+        first_world.all_of<ArmorComponent>(retired_player)) {
+        return fail(name, "teardown retained snapshot, runtime, or player competitive state");
+    }
+    auto& restarted = startCompetitiveWorldRuntime(first_world, fastCompConfig());
     if (restarted.round.state.phase != RoundPhase::WaitingForPlayers ||
-        restarted.round.state.wins_attackers != 0 || !restarted.snapshotMatches(first_world))
-        return fail(name, "restarted world inherited phase or wins from its prior match");
+        restarted.round.state.wins_attackers != 0 || !restarted.snapshotMatches(first_world) ||
+        restarted.sessions.size() != 0 ||
+        restarted.buy.lastResultFor(retired_buy.client_id) != BuyResult::UnknownItem ||
+        restarted.bomb.bomb.state != BombState::Idle ||
+        !restarted.bomb_use_held.empty() || !restarted.bomb_last_buttons.empty() ||
+        !restarted.bomb_prev_health.empty() || !restarted.bomb_prev_weapon.empty()) {
+        return fail(name, "restarted world inherited phase, request, session, or bomb state");
+    }
+    if (!tickCompetitiveWorldRuntime(first_world, 0.01f, bothAlive()) ||
+        retired_callback_count == 0 ||
+        retired_phase_callback_count != retired_callback_count ||
+        !restarted.snapshotMatches(first_world)) {
+        return fail(name, "restarted world retained a callback or lost its phase mirror");
+    }
+    const entt::entity second_retired_snapshot = restarted.match_entity;
+    stopCompetitiveWorldRuntime(first_world);
+    auto& restarted_twice = startCompetitiveWorldRuntime(first_world, fastCompConfig());
+    if (first_world.valid(second_retired_snapshot) ||
+        !restarted_twice.snapshotMatches(first_world) ||
+        restarted_twice.round.state.phase != RoundPhase::WaitingForPlayers) {
+        return fail(name, "repeated teardown/restart retained the prior runtime snapshot");
+    }
     if (second.round.state.phase != RoundPhase::WaitingForPlayers || !second.snapshotMatches(second_world))
         return fail(name, "restarting one world changed the other world's authority");
     return pass(name);
@@ -2116,6 +2172,7 @@ int main()
     ok = testGrenadeOverlapsSurviveOwnerDeath() && ok;
     ok = testBotDifficultyClampTable() && ok;
     ok = testBotPerceptionBlindfold() && ok;
+    ok = testBotPerceptionPrivacyAndStaleTargets() && ok;
     ok = testBotFsmPlantDefendDefuse() && ok;
     ok = testBotSteeringArrivalStuck() && ok;
     ok = testBotInputSynthesisShape() && ok;
@@ -2140,6 +2197,7 @@ int main()
     ok = testUiAuthoritativeBuyTeamFeedback() && ok;
     ok = testUiBuyItemStateMatrix() && ok;
     ok = testUiScoreboardMoneyVisibility() && ok;
+    ok = testUiScoreboardAuthoritativePresentation() && ok;
     ok = testUiRadarProjection() && ok;
     ok = testAudioUnknownEventNoVoices() && ok;
     ok = testAudioVoiceStealingSelection() && ok;

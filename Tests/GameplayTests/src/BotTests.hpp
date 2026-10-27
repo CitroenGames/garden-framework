@@ -45,6 +45,53 @@ bool testBotPerceptionBlindfold()
     return pass(name);
 }
 
+bool testBotPerceptionPrivacyAndStaleTargets()
+{
+    const std::string name = "Bot_PerceptionPrivacyAndStaleTargets";
+    using namespace Bots;
+    entt::registry registry;
+    const entt::entity first = registry.create();
+    const entt::entity second = registry.create();
+    const glm::vec3 eye(0.0f, 1.62f, 0.0f);
+    const glm::vec3 shared_position(0.0f, 0.0f, 10.0f);
+    const auto clear = [](const glm::vec3&, const glm::vec3&) { return false; };
+
+    // Equal visibility must not select a target by view iteration order.
+    BotPerceptComponent ordered;
+    updatePerception(ordered, eye, 0.0f,
+                     {{second, shared_position}, {first, shared_position}}, 1, 0.1f, clear);
+    if (ordered.visible_enemy != first)
+        return fail(name, "equal-visibility target selection was not entity-stable");
+
+    // A different visible target starts a fresh reaction interval. The bot
+    // cannot combine visibility time from two different enemies.
+    for (int i = 0; i < 3; ++i)
+        updatePerception(ordered, eye, 0.0f, {{first, shared_position}}, 1, 0.1f, clear);
+    if (!enemyConfirmed(ordered, 1))
+        return fail(name, "baseline target did not confirm");
+    updatePerception(ordered, eye, 0.0f, {{second, shared_position}}, 1, 0.1f, clear);
+    if (enemyConfirmed(ordered, 1))
+        return fail(name, "reaction timer leaked across target switch");
+
+    // Lifecycle invalidation clears identity and remembered position immediately.
+    pruneCurrentSight(ordered, false);
+    if (ordered.visible_enemy != entt::null || ordered.visible_fraction != 0.0f ||
+        ordered.confirm_timer != 0.0f || hasSightMemory(ordered, 1))
+        return fail(name, "stale target retained visible or remembered state");
+
+    // Lost sight preserves an anonymous bounded memory only; it expires at the
+    // configured difficulty memory duration and cannot be used as a target ID.
+    BotPerceptComponent memory;
+    updatePerception(memory, eye, 0.0f, {{first, shared_position}}, 1, 0.1f, clear);
+    updatePerception(memory, eye, 0.0f, {}, 1, 0.1f, clear);
+    if (memory.visible_enemy != entt::null || !hasSightMemory(memory, 1))
+        return fail(name, "lost sight did not retain bounded anonymous memory");
+    advancePerceptionClock(memory, 1, difficultyFor(1).memory_time);
+    if (hasSightMemory(memory, 1) || memory.last_seen_pos != glm::vec3(0.0f))
+        return fail(name, "anonymous sight memory did not expire");
+    return pass(name);
+}
+
 bool testBotFsmPlantDefendDefuse()
 {
     const std::string name = "Bot_FsmPlantDefendDefuse";

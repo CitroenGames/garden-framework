@@ -329,7 +329,10 @@ GAME_API bool gardenGameInit(EngineServices* services)
         if (message_type == static_cast<uint8_t>(CompetitiveMessageType::ROUND_STATE)) {
             RoundStateMessage msg; if (!CompetitiveSerializer::deserialize(reader, msg)) return;
             auto prev = g_comp.phase;
-            UiLogic::applyRoundState(g_comp, msg.phase, msg.phase_time_remaining, msg.round_number, msg.wins_attackers, msg.wins_defenders, msg.bomb_planted != 0);
+            if (!UiLogic::applyRoundState(g_comp, msg.phase, msg.phase_time_remaining,
+                                          msg.round_number, msg.wins_attackers, msg.wins_defenders,
+                                          msg.bomb_planted != 0, msg.phase_deadline_tick, msg.server_tick))
+                return;
             if (g_comp.phase == Competitive::RoundPhase::MatchEnded) g_ui.screen = UiLogic::UiScreen::MatchEnd;
             else if (prev != g_comp.phase && g_ui.screen == UiLogic::UiScreen::Buy && !UiLogic::buyWindowOpen(g_comp)) {
                 UiLogic::closeToHud(g_ui); UiLogic::showNotice(g_ui, "Buy window closed");
@@ -934,8 +937,9 @@ GAME_API void gardenGameUpdate(float delta_time)
                      hud_source.connected ? g_network.getStats().ping_ms : 0.0f,
                      hud_core, g_death_timer, g_local_kills, g_local_deaths,
                      kill_feed_text, g_local_weapon_spread);
-        // Competitive HUD text (featured buy list + local scoreboard row only;
-        // full roster/money snapshots are not replicated yet - no fabricated rows).
+        // Competitive HUD text.  The protocol has no roster snapshot, so the
+        // scoreboard is explicit about that and contains only the local row
+        // backed by owner/shared authoritative messages.
         std::string buy_text;
         if (g_ui.screen == UiLogic::UiScreen::Buy) {
             char line[160];
@@ -949,14 +953,23 @@ GAME_API void gardenGameUpdate(float delta_time)
         }
         std::string scoreboard_text;
         if (UiLogic::scoreboardVisible(g_ui)) {
+            UiLogic::ScoreboardPresentationSource scoreboard_source;
+            scoreboard_source.connected = hud_source.connected;
+            scoreboard_source.competitive = &g_comp;
+            // Do not source remote scoreboard rows from local replicated ECS:
+            // their team/stat/money fields have not been published for this
+            // presentation.  A future roster message will set this true.
+            scoreboard_source.has_authoritative_roster = false;
             UiLogic::ScoreboardRowInput local_row;
             local_row.name = "Player " + std::to_string(g_network.getClientId());
             local_row.kills = g_local_kills; local_row.deaths = g_local_deaths;
-            local_row.money = g_comp.money; local_row.side = g_comp.local_team; local_row.is_local = true; local_row.alive = g_local_alive;
-            auto row = UiLogic::buildScoreboardRow(local_row, g_comp.local_team);
-            char line[200];
-            snprintf(line, sizeof(line), "%s K%d D%d money %d\n(full roster pending replication)", row.display_name.c_str(), row.kills, row.deaths, row.money_display);
-            scoreboard_text = line;
+            local_row.money = g_comp.money; local_row.side = g_comp.local_team;
+            local_row.is_local = true; local_row.alive = g_local_alive;
+            // Local transport RTT is the one ping value currently available.
+            local_row.ping = static_cast<int32_t>(std::max(0.0f, g_network.getStats().ping_ms));
+            local_row.ping_available = hud_source.connected;
+            scoreboard_source.approved_rows.push_back(std::move(local_row));
+            scoreboard_text = UiLogic::buildScoreboardPresentation(scoreboard_source).text;
         }
         g_hud.updateCompetitive(g_comp, hud_core, g_ui, buy_text, scoreboard_text, g_radar);
     }

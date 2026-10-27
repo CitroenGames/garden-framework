@@ -69,13 +69,47 @@ struct EnemyCandidate { entt::entity entity = entt::null; glm::vec3 position{0};
 using BlockedFn = std::function<bool(const glm::vec3&, const glm::vec3&)>;
 inline glm::vec3 forwardFromYaw(float yaw) { return glm::vec3(std::sin(yaw), 0.0f, std::cos(yaw)); }
 
+// The current target is a short-lived sight result. It must not survive an
+// entity lifecycle/team/alive change while the server is between sight passes.
+// Memory deliberately retains no entity identity, only a bounded position from
+// an already visible observation for future, explicitly authored behavior.
+inline void clearCurrentSight(BotPerceptComponent& p) {
+    p.visible_enemy = entt::null;
+    p.visible_fraction = 0.0f;
+    p.confirm_timer = 0.0f;
+}
+
+inline void forgetSightMemory(BotPerceptComponent& p) {
+    p.last_seen_pos = glm::vec3(0.0f);
+    p.last_seen_age = 1e9f;
+}
+
+inline bool hasSightMemory(const BotPerceptComponent& p, uint8_t difficulty) {
+    return p.last_seen_age < difficultyFor(difficulty).memory_time;
+}
+
+inline void advancePerceptionClock(BotPerceptComponent& p, uint8_t difficulty, float dt) {
+    const float elapsed = std::max(dt, 0.0f);
+    p.last_seen_age += elapsed;
+    p.heard_age += elapsed;
+    if (!hasSightMemory(p, difficulty)) forgetSightMemory(p);
+}
+
+inline void pruneCurrentSight(BotPerceptComponent& p, bool target_still_eligible) {
+    if (p.visible_enemy != entt::null && !target_still_eligible) {
+        clearCurrentSight(p);
+        forgetSightMemory(p);
+    }
+}
+
 inline void updatePerception(BotPerceptComponent& p, const glm::vec3& eye, float yaw,
                              const std::vector<EnemyCandidate>& enemies, uint8_t difficulty, float dt, const BlockedFn& blocked) {
-    p.last_seen_age += dt; p.heard_age += dt;
+    advancePerceptionClock(p, difficulty, dt);
     const auto& d = difficultyFor(difficulty);
     entt::entity best = entt::null; float best_frac = 0; glm::vec3 best_pos{0};
     glm::vec3 fwd = forwardFromYaw(yaw);
     for (const auto& e : enemies) {
+        if (e.entity == entt::null || !std::isfinite(e.position.x) || !std::isfinite(e.position.y) || !std::isfinite(e.position.z)) continue;
         glm::vec3 to = e.position - eye; float dist = glm::length(to);
         if (dist > d.view_distance || dist < 0.001f) continue;
         glm::vec3 flat(to.x, 0, to.z); float flat_len = glm::length(flat);
@@ -88,11 +122,26 @@ inline void updatePerception(BotPerceptComponent& p, const glm::vec3& eye, float
         const float offs[3] = {0.3f, 1.35f, 1.65f};
         for (float o : offs) { glm::vec3 pt = e.position + glm::vec3(0, o, 0); if (!blocked || !blocked(eye, pt)) ++vis; }
         float frac = vis / 3.0f;
-        if (frac > best_frac) { best_frac = frac; best = e.entity; best_pos = e.position; }
+        // Candidate collection can come from an ECS view. Preserve replayable
+        // selection when two visible candidates have the same coverage.
+        if (frac > best_frac ||
+            (frac == best_frac && frac > 0.0f &&
+             (best == entt::null || entt::to_integral(e.entity) < entt::to_integral(best)))) {
+            best_frac = frac;
+            best = e.entity;
+            best_pos = e.position;
+        }
     }
     p.visible_fraction = best_frac;
-    if (best_frac > 0.0f) { p.visible_enemy = best; p.last_seen_pos = best_pos; p.last_seen_age = 0.0f; p.confirm_timer += dt; }
-    else { p.visible_enemy = entt::null; p.confirm_timer = 0.0f; }
+    if (best_frac > 0.0f) {
+        if (p.visible_enemy != best) p.confirm_timer = 0.0f;
+        p.visible_enemy = best;
+        p.last_seen_pos = best_pos;
+        p.last_seen_age = 0.0f;
+        p.confirm_timer += std::max(dt, 0.0f);
+    } else {
+        clearCurrentSight(p);
+    }
 }
 inline bool enemyConfirmed(const BotPerceptComponent& p, uint8_t difficulty) {
     return p.visible_fraction > 0.0f && p.confirm_timer >= difficultyFor(difficulty).reaction_time;

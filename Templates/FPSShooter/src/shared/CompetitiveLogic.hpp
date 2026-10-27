@@ -1200,6 +1200,64 @@ inline void clearCompetitiveWorldContext(entt::registry& registry)
         context->destroyMatchSnapshot(registry);
         registry.ctx().erase<CompetitiveWorldContext>();
     }
+
+    // Wallet and equipment are durable player ECS state while a competitive
+    // world is running.  A world teardown must remove that mode-owned state
+    // as well: otherwise reusing a registry for a new level or a score mode
+    // can leave an old wallet behind after the round/bomb runtime is gone.
+    // Copy entities before removing components because EnTT views are
+    // invalidated by the removal.
+    std::vector<entt::entity> players;
+    auto money_view = registry.view<MoneyComponent>();
+    for (const entt::entity entity : money_view)
+        players.push_back(entity);
+    for (const entt::entity entity : players) {
+        if (registry.valid(entity))
+            registry.remove<MoneyComponent>(entity);
+    }
+
+    players.clear();
+    auto armor_view = registry.view<ArmorComponent>();
+    for (const entt::entity entity : armor_view)
+        players.push_back(entity);
+    for (const entt::entity entity : players) {
+        if (registry.valid(entity))
+            registry.remove<ArmorComponent>(entity);
+    }
+}
+
+// These three helpers are the FPSShooter template's explicit lifecycle
+// boundary.  They intentionally operate on an existing world registry rather
+// than adding a generic engine scheduler or singleton.  The owning server
+// calls start after it has selected competitive mode, tick once per gameplay
+// update, and stop before the world is released or reused.
+inline CompetitiveWorldContext& startCompetitiveWorldRuntime(
+    entt::registry& registry,
+    const ModeConfig& mode_config,
+    const EconomyConfig& economy_config = EconomyConfig{})
+{
+    clearCompetitiveWorldContext(registry);
+    auto& context = registry.ctx().emplace<CompetitiveWorldContext>();
+    context.configure(mode_config, economy_config);
+    context.createMatchSnapshot(registry);
+    return context;
+}
+
+inline bool tickCompetitiveWorldRuntime(
+    entt::registry& registry,
+    float delta_time,
+    const RoundTickInput& input)
+{
+    CompetitiveWorldContext* context = registry.ctx().find<CompetitiveWorldContext>();
+    if (context == nullptr || !context->enabled)
+        return false;
+    context->round.tick(delta_time, input);
+    return context->syncMatchSnapshot(registry);
+}
+
+inline void stopCompetitiveWorldRuntime(entt::registry& registry)
+{
+    clearCompetitiveWorldContext(registry);
 }
 
 } // namespace Competitive
