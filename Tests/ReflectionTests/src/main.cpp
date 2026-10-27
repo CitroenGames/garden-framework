@@ -561,7 +561,7 @@ namespace
         for (const char* n : {"AnimationComponent", "AudioSourceComponent", "IKComponent",
                               "GameModeComponent", "GameStateComponent", "PlayerStateComponent", "PlayerControllerComponent"})
             if (!reflection.findByName(n)) return fail(name, std::string("missing registration: ") + n);
-        if (reflection.count() != 28) return fail(name, "unexpected registered component count");
+        if (reflection.count() != 35) return fail(name, "unexpected registered component count");
         // Plan 2.6 exemptions: MeshComponent is sidecar-only (shared_ptr<mesh>
         // GPU resource, persisted via level/prefab sidecar path) and
         // InputComponent is a polymorphic base class, not a data component.
