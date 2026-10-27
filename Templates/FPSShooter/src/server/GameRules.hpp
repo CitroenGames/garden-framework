@@ -27,6 +27,7 @@ private:
     std::vector<PendingRespawn> pending_respawns;
     std::function<void(uint16_t client_id, const glm::vec3& spawn_pos)> on_respawn;
     std::function<void()> on_match_restart;
+    bool score_match_enabled = true;
 public:
     FpsLogic::MatchLogic match;
     GameRules() {
@@ -37,36 +38,65 @@ public:
             {{15,5,15}, FpsLogic::kTeamDefenders}, {{15,5,-15}, FpsLogic::kTeamDefenders}};
         match.configure(FpsLogic::deathmatchConfig());
     }
-    void configureMode(const FpsLogic::ModeConfig& c) { match.configure(c); }
+    void configureMode(const FpsLogic::ModeConfig& c) {
+        match.configure(c);
+        score_match_enabled = true;
+        pending_respawns.clear();
+    }
+    void configureMode(const FpsLogic::ModeComposition& composition) {
+        configureMode(composition, composition.gameplayConfig());
+    }
+    void configureMode(const FpsLogic::ModeComposition& composition, const FpsLogic::ModeConfig& config) {
+        match.configure(config);
+        score_match_enabled = composition.usesScoreMatch();
+        pending_respawns.clear();
+    }
+    bool usesScoreMatch() const { return score_match_enabled; }
     void setOnMatchRestart(std::function<void()> cb) { on_match_restart = std::move(cb); }
-    glm::vec3 getNextSpawnPoint() {
-        if (spawn_points.empty()) return glm::vec3(0,5,0);
+    bool tryGetNextSpawnPoint(glm::vec3& out_spawn) {
+        if (spawn_points.empty()) return false;
         glm::vec3 s = spawn_points[next_spawn_index];
         next_spawn_index = (next_spawn_index+1)%spawn_points.size();
-        return s;
+        out_spawn = s;
+        return true;
+    }
+    glm::vec3 getNextSpawnPoint() {
+        glm::vec3 spawn(0, 5, 0);
+        (void)tryGetNextSpawnPoint(spawn);
+        return spawn;
     }
     void setSpawnPoints(const std::vector<glm::vec3>& points) {
-        if (!points.empty()) { spawn_points = points; next_spawn_index = 0; }
+        spawn_points = points;
+        next_spawn_index = 0;
     }
     void setTeamSpawnPoints(const std::vector<FpsLogic::TeamSpawnPoint>& pts) {
-        if (!pts.empty()) { team_spawn_points = pts; next_team_spawn_index[0]=next_team_spawn_index[1]=next_team_spawn_index[2]=0; }
+        team_spawn_points = pts;
+        next_team_spawn_index[0]=next_team_spawn_index[1]=next_team_spawn_index[2]=0;
     }
     const std::vector<FpsLogic::TeamSpawnPoint>& getTeamSpawnPoints() const { return team_spawn_points; }
     // Farthest-from-enemies team spawn; round-robin fallback when no enemies.
-    glm::vec3 getSpawnPointForTeam(uint8_t team_id, const std::vector<glm::vec3>& enemy_positions) {
+    // Returns false only when neither the requested team nor the retained
+    // untagged fallback pool has a usable authored/default point.
+    bool tryGetSpawnPointForTeam(uint8_t team_id, const std::vector<glm::vec3>& enemy_positions,
+                                 glm::vec3& out_spawn) {
         std::vector<glm::vec3> cands;
         for (auto& sp : team_spawn_points) if (sp.team_id == team_id) cands.push_back(sp.position);
         if (cands.empty()) { // fallback: untagged pool
-            if (enemy_positions.empty()) return getNextSpawnPoint();
-            return spawn_points[FpsLogic::selectFarthestSpawnIndex(spawn_points, enemy_positions)];
+            if (enemy_positions.empty()) return tryGetNextSpawnPoint(out_spawn);
+            return FpsLogic::selectSpawnPosition(spawn_points, enemy_positions, out_spawn);
         }
         if (enemy_positions.empty()) {
             size_t& idx = next_team_spawn_index[team_id < 3 ? team_id : 0];
-            glm::vec3 s = cands[idx % cands.size()]; idx++; return s;
+            out_spawn = cands[idx % cands.size()]; idx++; return true;
         }
-        return cands[FpsLogic::selectFarthestSpawnIndex(cands, enemy_positions)];
+        return FpsLogic::selectSpawnPosition(cands, enemy_positions, out_spawn);
     }
-    glm::vec3 getSpawnForPlayer(world& w, uint16_t client_id, uint8_t team_id) {
+    glm::vec3 getSpawnPointForTeam(uint8_t team_id, const std::vector<glm::vec3>& enemy_positions) {
+        glm::vec3 spawn(0, 5, 0);
+        (void)tryGetSpawnPointForTeam(team_id, enemy_positions, spawn);
+        return spawn;
+    }
+    bool tryGetSpawnForPlayer(world& w, uint16_t client_id, uint8_t team_id, glm::vec3& out_spawn) {
         // Gather enemy positions (alive players on another team; in DM everyone else).
         std::vector<glm::vec3> enemies;
         auto view = w.registry.view<NetworkedEntity, TransformComponent, FpsHealthComponent>();
@@ -79,9 +109,14 @@ public:
             if (is_enemy) enemies.push_back(view.get<TransformComponent>(e).position);
         }
         if (match.config.mode == FpsLogic::FpsGameMode::TeamDeathmatch && team_id != FpsLogic::kTeamNone)
-            return getSpawnPointForTeam(team_id, enemies);
-        if (enemies.empty()) return getNextSpawnPoint();
-        return spawn_points[FpsLogic::selectFarthestSpawnIndex(spawn_points, enemies)];
+            return tryGetSpawnPointForTeam(team_id, enemies, out_spawn);
+        if (enemies.empty()) return tryGetNextSpawnPoint(out_spawn);
+        return FpsLogic::selectSpawnPosition(spawn_points, enemies, out_spawn);
+    }
+    glm::vec3 getSpawnForPlayer(world& w, uint16_t client_id, uint8_t team_id) {
+        glm::vec3 spawn(0, 5, 0);
+        (void)tryGetSpawnForPlayer(w, client_id, team_id, spawn);
+        return spawn;
     }
     uint8_t assignTeam(world& w) {
         if (match.config.mode != FpsLogic::FpsGameMode::TeamDeathmatch) return FpsLogic::kTeamNone;
@@ -96,6 +131,8 @@ public:
         pending_respawns.push_back({client_id, match.config.respawn_delay});
     }
     void onPlayerKilled(world& game_world, uint16_t killer_client_id, uint16_t victim_client_id) {
+        if (!score_match_enabled)
+            return;
         uint8_t killer_team = FpsLogic::kTeamNone;
         auto view = game_world.registry.view<NetworkedEntity, ScoreComponent>();
         for (auto entity : view) {
@@ -110,7 +147,7 @@ public:
         match.recordKill(killer_client_id, victim_client_id, killer_team);
     }
     void Update(world& game_world, float delta_time) {
-        if (match.tick(delta_time)) {
+        if (score_match_enabled && match.tick(delta_time)) {
             LOG_ENGINE_INFO("Match ended: winner_client={} winner_team={} - restarting", match.winner_client, (int)match.winner_team);
             match.restart();
             if (on_match_restart) on_match_restart();

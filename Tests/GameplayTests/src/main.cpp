@@ -617,6 +617,9 @@ bool testFpsSpawnSelectionPerTeamFarthest()
     glm::vec3 rr = rules.getSpawnPointForTeam(FpsLogic::kTeamAttackers, {});
     bool in_team = approxVec3(rr, glm::vec3(-15.0f,5.0f,-15.0f)) || approxVec3(rr, glm::vec3(-15.0f,5.0f,15.0f));
     if (!in_team) return fail(name, "round-robin fallback left team spawns");
+    glm::vec3 no_spawn;
+    if (FpsLogic::selectSpawnPosition({}, {glm::vec3(1.0f)}, no_spawn))
+        return fail(name, "empty spawn candidates produced a position");
     return pass(name);
 }
 bool testFpsSwitchChangesActiveDef()
@@ -800,6 +803,83 @@ bool testFpsTeamDeathmatchTeamScoreWin()
     FpsLogic::MatchLogic m2; m2.configure(cfg);
     m2.recordKill(5, 5, FpsLogic::kTeamDefenders);
     if (m2.team_scores[FpsLogic::kTeamDefenders] != 0 || m2.ended) return fail(name, "suicide scored in TDM");
+    return pass(name);
+}
+
+bool testFpsModeIsolationAndLifecycle()
+{
+    const std::string name = "FpsModeIsolationAndLifecycle";
+    const auto dm = FpsLogic::ModeComposition::fromEnvironmentValue("");
+    const auto tdm = FpsLogic::ModeComposition::fromEnvironmentValue("tdm");
+    const auto competitive = FpsLogic::ModeComposition::fromEnvironmentValue("competitive");
+
+    if (dm.usesCompetitiveSystems() || !dm.usesScoreMatch() || dm.usesTeamScoring() ||
+        dm.gameplayConfig().mode != FpsLogic::FpsGameMode::Deathmatch ||
+        tdm.usesCompetitiveSystems() || !tdm.usesScoreMatch() || !tdm.usesTeamScoring() ||
+        tdm.gameplayConfig().mode != FpsLogic::FpsGameMode::TeamDeathmatch ||
+        !competitive.usesCompetitiveSystems() || competitive.usesScoreMatch()) {
+        return fail(name, "mode composition did not isolate competitive authority");
+    }
+
+    entt::registry isolated_registry;
+    auto& stale_context = isolated_registry.ctx().emplace<Competitive::CompetitiveWorldContext>();
+    stale_context.configure(Competitive::ModeConfig{});
+    stale_context.createMatchSnapshot(isolated_registry);
+    const entt::entity stale_snapshot = stale_context.match_entity;
+    Competitive::clearCompetitiveWorldContext(isolated_registry);
+    if (isolated_registry.valid(stale_snapshot) ||
+        isolated_registry.ctx().find<Competitive::CompetitiveWorldContext>() != nullptr) {
+        return fail(name, "noncompetitive composition retained round, bomb, buy, or economy authority");
+    }
+
+    world game_world;
+    const entt::entity killer = game_world.registry.create();
+    const entt::entity victim = game_world.registry.create();
+    game_world.registry.emplace<Net::NetworkedEntity>(killer, 1001u, 1u, true);
+    game_world.registry.emplace<Net::NetworkedEntity>(victim, 1002u, 2u, true);
+    game_world.registry.emplace<TransformComponent>(killer, 0.0f, 0.0f, 0.0f);
+    game_world.registry.emplace<TransformComponent>(victim, 10.0f, 0.0f, 0.0f);
+    game_world.registry.emplace<FpsHealthComponent>(killer, 100);
+    game_world.registry.emplace<FpsHealthComponent>(victim, 100);
+    game_world.registry.emplace<TeamComponent>(killer, TeamComponent{FpsLogic::kTeamAttackers});
+    game_world.registry.emplace<TeamComponent>(victim, TeamComponent{FpsLogic::kTeamDefenders});
+    game_world.registry.emplace<ScoreComponent>(killer);
+    game_world.registry.emplace<ScoreComponent>(victim);
+
+    Game::GameRules dm_rules;
+    dm_rules.configureMode(dm);
+    uint16_t respawned_client = 0;
+    dm_rules.setOnRespawn([&](uint16_t client_id, const glm::vec3&) { respawned_client = client_id; });
+    dm_rules.onPlayerKilled(game_world, 1u, 2u);
+    dm_rules.queueRespawn(2u);
+    dm_rules.Update(game_world, dm_rules.match.config.respawn_delay * 0.5f);
+    if (game_world.registry.get<ScoreComponent>(killer).kills != 1 ||
+        game_world.registry.get<ScoreComponent>(victim).deaths != 1 ||
+        dm_rules.match.scoreOf(1u) != 1 || respawned_client != 0) {
+        return fail(name, "deathmatch did not preserve score and delayed respawn lifecycle");
+    }
+    dm_rules.Update(game_world, dm_rules.match.config.respawn_delay * 0.5f);
+    if (respawned_client != 2u)
+        return fail(name, "deathmatch did not respawn through the shared server lifecycle");
+    dm_rules.Update(game_world, dm_rules.match.config.time_limit_seconds);
+    if (!dm_rules.match.ended || dm_rules.match.winner_client != 1u)
+        return fail(name, "deathmatch did not apply its configured time limit");
+
+    Game::GameRules tdm_rules;
+    tdm_rules.configureMode(tdm);
+    tdm_rules.onPlayerKilled(game_world, 1u, 2u);
+    if (tdm_rules.match.team_scores[FpsLogic::kTeamAttackers] != 1)
+        return fail(name, "team deathmatch did not score the killer team");
+
+    Game::GameRules competitive_rules;
+    competitive_rules.configureMode(competitive);
+    competitive_rules.onPlayerKilled(game_world, 1u, 2u);
+    competitive_rules.Update(game_world, competitive_rules.match.config.time_limit_seconds);
+    if (competitive_rules.match.scoreOf(1u) != 0 || competitive_rules.match.elapsed != 0.0f ||
+        game_world.registry.get<ScoreComponent>(killer).kills != 2) {
+        return fail(name, "competitive score controller mutated a noncompetitive match path");
+    }
+
     return pass(name);
 }
 
@@ -1354,9 +1434,39 @@ bool testCompetitiveSessionFlow()
         late_join->state != SessionState::AwaitingSpawn)
         return fail(name, "late join did not remain pawnless until a legal spawn phase");
 
+    // A reserved late-join side counts toward capacity even before that player
+    // owns an ECS pawn. A second candidate therefore cannot overfill it.
+    ModeConfig one_per_side = cfg;
+    one_per_side.team_size = 1;
+    SessionCoordinator capacity_sessions;
+    if (!capacity_sessions.admit(8) || !capacity_sessions.assignTeam(8, FpsTeam::Attackers, RoundPhase::Live))
+        return fail(name, "capacity fixture did not reserve the late-join team");
+    int32_t reserved_attackers = 0, reserved_defenders = 0;
+    capacity_sessions.playingTeamCounts(reserved_attackers, reserved_defenders);
+    FpsTeam capacity_out = FpsTeam::None;
+    if (!capacity_sessions.admit(9) ||
+        validateSessionTeamSelect(capacity_sessions, 9, false, FpsTeam::Attackers, false,
+                                  reserved_attackers, reserved_defenders, RoundPhase::Live,
+                                  one_per_side, capacity_out) != TeamSelectResult::TeamFull ||
+        capacity_out != FpsTeam::None)
+        return fail(name, "pawnless late join did not reserve team capacity");
+
     if (!sessions.markSpawned(7, FpsTeam::Attackers, RoundPhase::Freeze) ||
         sessions.find(7)->state != SessionState::Active)
         return fail(name, "Freeze spawn did not transition the session active");
+
+    SessionCoordinator halftime_sessions;
+    if (!halftime_sessions.admit(20) || !halftime_sessions.admit(21) || !halftime_sessions.admit(22) ||
+        !halftime_sessions.assignTeam(20, FpsTeam::Attackers, RoundPhase::Freeze) ||
+        !halftime_sessions.assignTeam(21, FpsTeam::Defenders, RoundPhase::Live) ||
+        !halftime_sessions.assignTeam(22, FpsTeam::Spectator, RoundPhase::Freeze))
+        return fail(name, "halftime fixture did not initialize sessions");
+    halftime_sessions.swapPlayingTeams();
+    if (halftime_sessions.find(20)->team != FpsTeam::Defenders ||
+        halftime_sessions.find(21)->team != FpsTeam::Attackers ||
+        halftime_sessions.find(22)->team != FpsTeam::Spectator ||
+        halftime_sessions.find(21)->state != SessionState::AwaitingSpawn)
+        return fail(name, "halftime side swap did not preserve pending/spectator session state");
 
     FpsTeam switched_team = FpsTeam::None;
     const SessionRecord active_before_switch = *sessions.find(7);
@@ -1366,6 +1476,27 @@ bool testCompetitiveSessionFlow()
         sessions.find(7)->team != active_before_switch.team ||
         sessions.find(7)->state != active_before_switch.state)
         return fail(name, "Live ingress allowed an active-player team switch");
+
+    // Reproduce the server's existing-pawn switch path with no usable spawn
+    // data.  The GameRules query is the production spawn decision, rather than
+    // a direct empty-candidate helper call.  Its rejection must publish the
+    // old durable side and leave the matching session state untouched.
+    Game::GameRules no_spawn_rules;
+    no_spawn_rules.setSpawnPoints({});
+    no_spawn_rules.setTeamSpawnPoints({});
+    world no_spawn_world;
+    glm::vec3 unused_spawn;
+    if (no_spawn_rules.tryGetSpawnForPlayer(no_spawn_world, 7,
+                                            teamId(FpsTeam::Defenders), unused_spawn))
+        return fail(name, "empty server spawn configuration accepted a team switch");
+    const SessionRecord before_no_spawn_rejection = *sessions.find(7);
+    const TeamSelectReply no_spawn_reply =
+        rejectedTeamSelectForUnavailableSpawn(before_no_spawn_rejection.team);
+    if (no_spawn_reply.result != TeamSelectResult::SpawnUnavailable ||
+        no_spawn_reply.team != FpsTeam::Attackers ||
+        sessions.find(7)->team != before_no_spawn_rejection.team ||
+        sessions.find(7)->state != before_no_spawn_rejection.state)
+        return fail(name, "no-spawn team rejection did not retain the authoritative team state");
 
     FpsTeam invalid_team = FpsTeam::Attackers;
     if (validateSessionTeamSelect(sessions, 7, false, FpsTeam::None, false,
@@ -1788,6 +1919,7 @@ bool testFpsDeathLifecycle()
 #include "AudioTests.hpp"
 #include "NavMeshTests.hpp"
 #include "PlayerMovementTests.hpp"
+#include "CompetitiveProtocolTests.hpp"
 int main()
 {
     bool ok = true;
@@ -1808,6 +1940,7 @@ int main()
     ok = testDroppedWeaponEcsLifecycle() && ok;
     ok = testFpsDeathmatchScoreLimit() && ok;
     ok = testFpsTeamDeathmatchTeamScoreWin() && ok;
+    ok = testFpsModeIsolationAndLifecycle() && ok;
     ok = testPlayerMovementInputContract() && ok;
     ok = testCompetitiveRoundFsmFullCycleHalftimeClinch() && ok;
     ok = testCompetitiveOvertime() && ok;
@@ -1819,6 +1952,7 @@ int main()
     ok = testCompetitiveTeamAutoAssign() && ok;
     ok = testCompetitiveSessionFlow() && ok;
     ok = testCompetitiveBuyZoneOccupancy() && ok;
+    ok = testCompetitiveProtocolStatePublication() && ok;
     ok = testWeaponRosterIntegrity() && ok;
     ok = testWeaponAuthorityTiming() && ok;
     ok = testLagCompensatedShotPoseFallbackAndMissCount() && ok;

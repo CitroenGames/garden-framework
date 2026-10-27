@@ -646,7 +646,27 @@ struct EconomySystem {
 };
 
 // --- Teams: selection validation --------------------------------------------------
-enum class TeamSelectResult : uint8_t { Ok = 0, TeamFull = 1, BothFull = 2, PhaseClosed = 3, InvalidTeam = 4 };
+enum class TeamSelectResult : uint8_t {
+    Ok = 0,
+    TeamFull = 1,
+    BothFull = 2,
+    PhaseClosed = 3,
+    InvalidTeam = 4,
+    SpawnUnavailable = 5
+};
+
+// TEAM_RESULT must describe the durable team after handling a request.  A
+// permitted switch that cannot acquire a valid spawn is rejected before any
+// session or TeamComponent mutation, so report the prior authoritative side.
+struct TeamSelectReply {
+    TeamSelectResult result = TeamSelectResult::InvalidTeam;
+    FpsTeam team = FpsTeam::None;
+};
+
+inline TeamSelectReply rejectedTeamSelectForUnavailableSpawn(FpsTeam authoritative_team) {
+    return {TeamSelectResult::SpawnUnavailable, authoritative_team};
+}
+
 inline TeamSelectResult validateTeamSelect(FpsTeam desired, bool auto_assign,
                                            int32_t attackers, int32_t defenders,
                                            RoundPhase phase, const ModeConfig& cfg,
@@ -763,6 +783,35 @@ public:
             return false;
         record->state = SessionState::AwaitingSpawn;
         return true;
+    }
+
+    void playingTeamCounts(int32_t& attackers, int32_t& defenders) const {
+        attackers = 0;
+        defenders = 0;
+        for (const auto& entry : sessions_) {
+            if (entry.second.team == FpsTeam::Attackers) ++attackers;
+            else if (entry.second.team == FpsTeam::Defenders) ++defenders;
+        }
+    }
+
+    std::vector<uint16_t> awaitingSpawnClients() const {
+        std::vector<uint16_t> clients;
+        for (const auto& entry : sessions_) {
+            if (entry.second.state == SessionState::AwaitingSpawn &&
+                isPlayingTeam(entry.second.team))
+                clients.push_back(entry.first);
+        }
+        std::sort(clients.begin(), clients.end());
+        return clients;
+    }
+
+    void swapPlayingTeams() {
+        for (auto& entry : sessions_) {
+            if (entry.second.team == FpsTeam::Attackers)
+                entry.second.team = FpsTeam::Defenders;
+            else if (entry.second.team == FpsTeam::Defenders)
+                entry.second.team = FpsTeam::Attackers;
+        }
     }
 
     void remove(uint16_t client_id) { sessions_.erase(client_id); }
@@ -1137,5 +1186,13 @@ private:
         economy_transitions.last_amount = amount;
     }
 };
+
+inline void clearCompetitiveWorldContext(entt::registry& registry)
+{
+    if (auto* context = registry.ctx().find<CompetitiveWorldContext>()) {
+        context->destroyMatchSnapshot(registry);
+        registry.ctx().erase<CompetitiveWorldContext>();
+    }
+}
 
 } // namespace Competitive

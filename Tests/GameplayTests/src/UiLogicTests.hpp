@@ -36,6 +36,9 @@ bool testUiScreenTransitions()
       if (applyTeamResult(s, TeamSelectResult::TeamFull, FpsTeam::None, team)) return fail(name, "TeamFull accepted");
       if (s.screen != UiScreen::TeamSelect || team != FpsTeam::Attackers) return fail(name, "rejection changed screen/team");
       if (s.notice_text.empty() || s.notice_remaining <= 0.0f) return fail(name, "rejection set no notice");
+      if (applyTeamResult(s, TeamSelectResult::SpawnUnavailable, FpsTeam::Defenders, team)) return fail(name, "SpawnUnavailable accepted");
+      if (s.screen != UiScreen::TeamSelect || team != FpsTeam::Attackers ||
+          s.notice_text != "No valid spawn is available") return fail(name, "spawn rejection changed local team state");
       tickUi(s, 3.0f); if (!s.notice_text.empty()) return fail(name, "notice did not expire");
       if (!applyTeamResult(s, TeamSelectResult::Ok, FpsTeam::Defenders, team)) return fail(name, "team Ok rejected");
       if (team != FpsTeam::Defenders || s.screen != UiScreen::None) return fail(name, "team Ok did not apply/close"); }

@@ -26,6 +26,38 @@ enum class CompetitiveMessageType : uint8_t
     TEAM_RESULT = Net::CUSTOM_MESSAGE_START + 10    // 74 S->C reliable
 };
 
+// Delivery scope is part of the game protocol contract.  ROUND_STATE is the
+// shared match snapshot; wallet, team assignment, and buy outcome belong only
+// to the client that owns them.  There is intentionally no generic inventory
+// replication in this protocol: the existing owner-targeted WEAPON_STATE is
+// the available active-weapon snapshot.
+enum class CompetitiveMessageAudience : uint8_t
+{
+    Invalid,
+    AllConnectedClients,
+    OwningClient,
+    Server
+};
+
+constexpr CompetitiveMessageAudience competitiveMessageAudience(CompetitiveMessageType type)
+{
+    switch (type) {
+    case CompetitiveMessageType::ROUND_STATE: return CompetitiveMessageAudience::AllConnectedClients;
+    case CompetitiveMessageType::ECONOMY_STATE:
+    case CompetitiveMessageType::BUY_RESULT:
+    case CompetitiveMessageType::TEAM_RESULT: return CompetitiveMessageAudience::OwningClient;
+    case CompetitiveMessageType::BUY_REQUEST:
+    case CompetitiveMessageType::TEAM_SELECT: return CompetitiveMessageAudience::Server;
+    }
+    return CompetitiveMessageAudience::Invalid;
+}
+
+constexpr bool isCompetitiveOwnerOnlyMessage(uint8_t type)
+{
+    return competitiveMessageAudience(static_cast<CompetitiveMessageType>(type)) ==
+        CompetitiveMessageAudience::OwningClient;
+}
+
 struct RoundStateMessage
 {
     uint8_t type = static_cast<uint8_t>(CompetitiveMessageType::ROUND_STATE);

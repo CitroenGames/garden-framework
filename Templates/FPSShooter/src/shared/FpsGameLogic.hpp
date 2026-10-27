@@ -13,6 +13,7 @@
 #include <array>
 #include <cstdint>
 #include <optional>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -244,6 +245,14 @@ inline size_t selectFarthestSpawnIndex(const std::vector<glm::vec3>& cands, cons
     }
     return best;
 }
+inline bool selectSpawnPosition(const std::vector<glm::vec3>& candidates,
+                                const std::vector<glm::vec3>& enemies,
+                                glm::vec3& out_position) {
+    if (candidates.empty())
+        return false;
+    out_position = candidates[selectFarthestSpawnIndex(candidates, enemies)];
+    return true;
+}
 
 // ---- DM / TDM match logic ----
 enum class FpsGameMode : uint8_t { Deathmatch = 0, TeamDeathmatch = 1 };
@@ -257,6 +266,45 @@ struct ModeConfig {
 };
 inline ModeConfig deathmatchConfig() { ModeConfig c; c.mode = FpsGameMode::Deathmatch; c.score_limit = 25; return c; }
 inline ModeConfig teamDeathmatchConfig() { ModeConfig c; c.mode = FpsGameMode::TeamDeathmatch; c.score_limit = 100; return c; }
+
+// Server composition is deliberately separate from ModeConfig: DM/TDM share
+// movement, combat, respawn, and score rules, while competitive owns its
+// round, bomb, and economy authority.  Keep mode selection here so the server
+// has one source for deciding which authority is present in a world.
+enum class ServerMode : uint8_t {
+    Deathmatch = 0,
+    TeamDeathmatch,
+    Competitive,
+};
+
+struct ModeComposition {
+    ServerMode mode = ServerMode::Deathmatch;
+
+    static ModeComposition fromEnvironmentValue(std::string_view value) {
+        if (value == "competitive")
+            return {ServerMode::Competitive};
+        if (value == "tdm")
+            return {ServerMode::TeamDeathmatch};
+        return {ServerMode::Deathmatch};
+    }
+
+    bool usesCompetitiveSystems() const { return mode == ServerMode::Competitive; }
+    bool usesScoreMatch() const { return !usesCompetitiveSystems(); }
+    bool usesTeamScoring() const { return mode == ServerMode::TeamDeathmatch; }
+
+    ModeConfig gameplayConfig() const {
+        return usesTeamScoring() ? teamDeathmatchConfig() : deathmatchConfig();
+    }
+
+    const char* name() const {
+        switch (mode) {
+        case ServerMode::Deathmatch: return "deathmatch";
+        case ServerMode::TeamDeathmatch: return "team_deathmatch";
+        case ServerMode::Competitive: return "competitive";
+        }
+        return "deathmatch";
+    }
+};
 
 struct MatchLogic {
     ModeConfig config;

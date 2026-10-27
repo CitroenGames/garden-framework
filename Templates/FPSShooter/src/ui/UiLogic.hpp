@@ -114,6 +114,7 @@ inline const char* teamResultText(TeamSelectResult r) {
     case R::BothFull: return "Both teams are full";
     case R::PhaseClosed: return "Team change not allowed now";
     case R::InvalidTeam: return "Invalid team";
+    case R::SpawnUnavailable: return "No valid spawn is available";
     }
     return "Team change failed";
 }
