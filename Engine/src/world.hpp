@@ -222,6 +222,11 @@ public:
         return physics_system->teleportCharacterController(registry, entity, position);
     }
 
+    bool teleport_body(entt::entity entity, const glm::vec3& position, const glm::vec3& euler_degrees)
+    {
+        return physics_system->teleportBody(registry, entity, position, euler_degrees);
+    }
+
     // Configuration methods
     void setGravity(const glm::vec3& gravity)
     {

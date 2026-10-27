@@ -310,6 +310,11 @@ public:
         const CharacterControllerState& state);
     bool teleportCharacterController(entt::registry& registry, entt::entity entity, const glm::vec3& position);
 
+    // Move a dynamic or kinematic body, or delegate to CharacterVirtual. Dynamic
+    // velocity and accumulated ECS force are cleared; character contacts refresh.
+    bool teleportBody(entt::registry& registry, entt::entity entity,
+        const glm::vec3& position, const glm::vec3& euler_degrees);
+
     static constexpr uint32_t kMaxTriggerCount = 256;
 
     struct QueryFilter {

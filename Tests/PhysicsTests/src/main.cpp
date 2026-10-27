@@ -1889,6 +1889,179 @@ static bool testD6QueryIgnoreListRaycasts()
     return pass(name);
 }
 
+static bool testD6DynamicBodyTeleport()
+{
+    const std::string name = "D6 dynamic body teleport";
+    world w;
+    w.initializePhysics();
+
+    auto make_box_shape = [](const glm::vec3& half_extents)
+    {
+        ColliderComponent collider;
+        collider.shape_type = ColliderShapeType::Box;
+        collider.box_half_extents = half_extents;
+        return PhysicsSystem::createShapeFromCollider(collider, glm::vec3(1.0f));
+    };
+
+    const entt::entity floor = w.registry.create();
+    w.registry.emplace<TransformComponent>(floor, 0.0f, -0.5f, 0.0f);
+    w.registry.emplace<RigidBodyComponent>(floor);
+    const auto floor_shape = make_box_shape(glm::vec3(5.0f, 0.5f, 5.0f));
+    if (!floor_shape)
+        return fail(name, "failed to create resting floor");
+    w.getPhysicsSystem().createStaticBody(
+        glm::vec3(0.0f, -0.5f, 0.0f), glm::vec3(0.0f), floor_shape, floor);
+    if (!w.getPhysicsSystem().hasBody(floor))
+        return fail(name, "failed to create resting floor body");
+
+    const entt::entity crate = w.registry.create();
+    auto& crate_transform = w.registry.emplace<TransformComponent>(crate, 0.0f, 5.0f, 0.0f);
+    auto& crate_body = w.registry.emplace<RigidBodyComponent>(crate);
+    crate_body.velocity = glm::vec3(8.0f, 1.0f, -3.0f);
+    const auto crate_shape = make_box_shape(glm::vec3(0.5f));
+    if (!crate_shape)
+        return fail(name, "failed to create dynamic crate");
+    w.getPhysicsSystem().createDynamicBody(
+        crate_transform.position, crate_transform.rotation, crate_shape, crate);
+    if (!w.getPhysicsSystem().hasBody(crate))
+        return fail(name, "failed to create dynamic crate body");
+
+    // Seed non-zero Jolt velocity before teleporting so the test checks that
+    // the API clears both the ECS value and the live body motion state.
+    w.stepPhysicsSingleStep();
+    crate_body.force = glm::vec3(200.0f, 0.0f, 0.0f);
+    const glm::vec3 target(1.0f, 0.5f, 1.0f);
+    const glm::vec3 target_rotation(0.0f, 35.0f, 0.0f);
+    if (!w.teleport_body(crate, target, target_rotation))
+        return fail(name, "generic world teleport rejected a dynamic body");
+    if (glm::distance(crate_transform.position, target) > 0.001f ||
+        glm::distance(crate_transform.rotation, target_rotation) > 0.001f)
+        return fail(name, "teleport did not update the ECS pose");
+    if (glm::length(crate_body.velocity) > 0.001f || glm::length(crate_body.force) > 0.001f)
+        return fail(name, "teleport did not clear dynamic velocity and accumulated ECS force");
+    w.getPhysicsSystem().syncTransformsFromJolt(w.registry);
+    if (glm::length(crate_body.velocity) > 0.001f)
+        return fail(name, "teleport left stale velocity on the live Jolt body");
+
+    w.stepPhysicsSingleStep();
+    if (std::abs(crate_transform.position.x - target.x) > 0.03f ||
+        std::abs(crate_transform.position.z - target.z) > 0.03f)
+        return fail(name, "crate retained its pre-teleport horizontal velocity");
+    for (int tick = 0; tick < 60; ++tick)
+        w.stepPhysicsSingleStep();
+    if (std::abs(crate_transform.position.y - target.y) > 0.03f ||
+        glm::length(crate_body.velocity) > 0.1f)
+        return fail(name, "crate did not settle at the teleported resting target");
+
+    return pass(name);
+}
+
+static bool testD6KinematicPlatformCarriesCharacter()
+{
+    const std::string name = "D6 kinematic platform carries CharacterController";
+    world w;
+    w.initializePhysics();
+
+    ColliderComponent platform_collider;
+    platform_collider.shape_type = ColliderShapeType::Box;
+    platform_collider.box_half_extents = glm::vec3(2.0f, 0.25f, 2.0f);
+    const auto platform_shape = PhysicsSystem::createShapeFromCollider(platform_collider, glm::vec3(1.0f));
+    const entt::entity platform = w.registry.create();
+    auto& platform_transform = w.registry.emplace<TransformComponent>(platform, 0.0f, 0.25f, 0.0f);
+    auto& platform_body = w.registry.emplace<RigidBodyComponent>(platform);
+    platform_body.motion_type = BodyMotionType::Kinematic;
+    platform_body.apply_gravity = false;
+    if (!platform_shape)
+        return fail(name, "failed to create kinematic platform");
+    w.getPhysicsSystem().createKinematicBody(
+        platform_transform.position, platform_transform.rotation, platform_shape, platform);
+    if (!w.getPhysicsSystem().hasBody(platform))
+        return fail(name, "failed to create kinematic platform body");
+
+    const entt::entity character = w.registry.create();
+    auto& character_transform = w.registry.emplace<TransformComponent>(character, 0.0f, 1.75f, 0.0f);
+    w.registry.emplace<CharacterControllerComponent>(character);
+    w.getPhysicsSystem().createCharacterController(w.registry, character);
+    if (!w.getPhysicsSystem().hasCharacterController(character))
+        return fail(name, "failed to create CharacterController");
+
+    auto step_character = [&]()
+    {
+        w.simulate_character_controller(character, CharacterMoveInput{}, w.fixed_delta);
+        w.stepPhysicsSingleStep();
+        w.player_collisions(character);
+    };
+    for (int tick = 0; tick < 60; ++tick)
+        step_character();
+    if (!w.get_character_controller_state(character).grounded)
+        return fail(name, "capsule did not settle on the kinematic platform");
+
+    const float start_x = character_transform.position.x;
+    for (int tick = 0; tick < 30; ++tick)
+    {
+        platform_transform.position.x += 0.05f;
+        step_character();
+    }
+
+    const CharacterControllerState state = w.get_character_controller_state(character);
+    if (!state.grounded || state.ground_velocity.x < 0.1f)
+        return fail(name, "moving platform did not report non-zero character ground velocity");
+    if (character_transform.position.x < start_x + 0.25f)
+        return fail(name, "standing capsule was not carried by the moving platform");
+
+    return pass(name);
+}
+
+static bool testD6CharacterTeleportRefreshesContacts()
+{
+    const std::string name = "D6 CharacterController teleport refreshes contacts";
+    world w;
+    w.initializePhysics();
+
+    ColliderComponent floor_collider;
+    floor_collider.shape_type = ColliderShapeType::Box;
+    floor_collider.box_half_extents = glm::vec3(10.0f, 0.5f, 10.0f);
+    const auto floor_shape = PhysicsSystem::createShapeFromCollider(floor_collider, glm::vec3(1.0f));
+    const entt::entity floor = w.registry.create();
+    w.registry.emplace<TransformComponent>(floor, 0.0f, -0.5f, 0.0f);
+    w.registry.emplace<RigidBodyComponent>(floor);
+    if (!floor_shape)
+        return fail(name, "failed to create character floor");
+    w.getPhysicsSystem().createStaticBody(
+        glm::vec3(0.0f, -0.5f, 0.0f), glm::vec3(0.0f), floor_shape, floor);
+    if (!w.getPhysicsSystem().hasBody(floor))
+        return fail(name, "failed to create character floor body");
+
+    const entt::entity character = w.registry.create();
+    auto& transform = w.registry.emplace<TransformComponent>(character, 0.0f, 1.25f, 0.0f);
+    w.registry.emplace<CharacterControllerComponent>(character);
+    w.getPhysicsSystem().createCharacterController(w.registry, character);
+    if (!w.getPhysicsSystem().hasCharacterController(character))
+        return fail(name, "failed to create CharacterController");
+    for (int tick = 0; tick < 8; ++tick)
+    {
+        w.simulate_character_controller(character, CharacterMoveInput{}, w.fixed_delta);
+        w.stepPhysicsSingleStep();
+        w.player_collisions(character);
+    }
+    if (!w.get_character_controller_state(character).grounded)
+        return fail(name, "character did not establish floor contact before teleport");
+
+    const glm::vec3 target(20.0f, 10.0f, 0.0f);
+    const glm::vec3 target_rotation(0.0f, 120.0f, 0.0f);
+    if (!w.teleport_body(character, target, target_rotation))
+        return fail(name, "generic world teleport did not delegate to CharacterVirtual");
+    const CharacterControllerState state = w.get_character_controller_state(character);
+    if (glm::distance(state.position, target) > 0.001f || glm::length(state.velocity) > 0.001f)
+        return fail(name, "character teleport did not set position and clear velocity");
+    if (state.grounded || glm::length(state.ground_velocity) > 0.001f)
+        return fail(name, "character teleport did not refresh support contacts");
+    if (glm::distance(transform.rotation, target_rotation) > 0.001f)
+        return fail(name, "character teleport did not update ECS rotation");
+
+    return pass(name);
+}
+
 static bool testD6TriggerLifecycle()
 {
     const std::string name = "D6 trigger enter exit exactly once";
@@ -2902,6 +3075,12 @@ int main()
     ok = testD6QueryFilterTriggers() && ok;
     run("D6 query ignore-list raycasts");
     ok = testD6QueryIgnoreListRaycasts() && ok;
+    run("D6 dynamic body teleport");
+    ok = testD6DynamicBodyTeleport() && ok;
+    run("D6 kinematic platform carries CharacterController");
+    ok = testD6KinematicPlatformCarriesCharacter() && ok;
+    run("D6 CharacterController teleport refreshes contacts");
+    ok = testD6CharacterTeleportRefreshesContacts() && ok;
     run("D6 trigger enter exit exactly once");
     ok = testD6TriggerLifecycle() && ok;
     run("D6 trigger lifecycle with CharacterController");

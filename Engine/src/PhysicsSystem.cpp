@@ -703,6 +703,53 @@ bool PhysicsSystem::teleportCharacterController(entt::registry& registry, entt::
         registry, entity, position, *jolt_system, *temp_allocator, settings.layers);
 }
 
+bool PhysicsSystem::teleportBody(entt::registry& registry, entt::entity entity,
+    const glm::vec3& position, const glm::vec3& euler_degrees)
+{
+    if (!registry.valid(entity) || !isValidVec3(position) || !isValidVec3(euler_degrees) || stepping ||
+        !registry.all_of<TransformComponent>(entity))
+        return false;
+
+    if (registry.all_of<CharacterControllerComponent>(entity))
+    {
+        if (!hasCharacterController(entity) || !teleportCharacterController(registry, entity, position))
+            return false;
+
+        auto& transform = registry.get<TransformComponent>(entity);
+        transform.rotation = euler_degrees;
+        if (registry.all_of<RigidBodyComponent>(entity))
+            registry.get<RigidBodyComponent>(entity).force = glm::vec3(0.0f);
+        return true;
+    }
+
+    const auto body_it = entity_to_body.find(entity);
+    if (body_it == entity_to_body.end())
+        return false;
+    if (!initialized)
+        initialize();
+
+    JPH::BodyInterface& body_interface = jolt_system->GetBodyInterface();
+    const JPH::EMotionType motion_type = body_interface.GetMotionType(body_it->second);
+    if (motion_type != JPH::EMotionType::Dynamic && motion_type != JPH::EMotionType::Kinematic)
+        return false;
+
+    body_interface.SetPositionRotationAndVelocity(
+        body_it->second, toJoltR(position), toJoltQuat(euler_degrees),
+        JPH::Vec3::sZero(), JPH::Vec3::sZero());
+    body_interface.ActivateBody(body_it->second);
+
+    auto& transform = registry.get<TransformComponent>(entity);
+    transform.position = position;
+    transform.rotation = euler_degrees;
+    if (registry.all_of<RigidBodyComponent>(entity))
+    {
+        auto& rigid_body = registry.get<RigidBodyComponent>(entity);
+        rigid_body.velocity = glm::vec3(0.0f);
+        rigid_body.force = glm::vec3(0.0f);
+    }
+    return true;
+}
+
 CharacterControllerState PhysicsSystem::simulateCharacterController(entt::registry& registry, entt::entity entity,
     const CharacterMoveInput& input, float delta_time)
 {
