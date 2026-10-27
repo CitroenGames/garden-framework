@@ -32,6 +32,9 @@ namespace WeaponSystem
 
     inline float computeSpread(const WeaponComponent& wc, const AccuracyContext& context)
     {
+        if (!hasWeaponDefinition(wc.weapon_type))
+            return 0.0f;
+
         const auto& def = getWeaponDef(wc.weapon_type);
         const float move_start = std::max(context.max_speed * 0.34f, 0.001f);
         const float move_end = std::max(context.max_speed * 0.95f, move_start + 0.001f);
@@ -53,6 +56,9 @@ namespace WeaponSystem
     // Update weapon cooldowns and reload timers. Call once per tick.
     inline void tick(WeaponComponent& wc, float delta_time)
     {
+        if (!hasWeaponDefinition(wc.weapon_type))
+            return;
+
         delta_time = std::max(delta_time, 0.0f);
         const auto& def = getWeaponDef(wc.weapon_type);
 
@@ -79,10 +85,19 @@ namespace WeaponSystem
         }
     }
 
+    // Reload carries no transferable partial progress in the current weapon
+    // state. Switching or dropping therefore cancels it before the active
+    // slot is saved or a replacement definition is loaded.
+    inline void cancelReload(WeaponComponent& wc)
+    {
+        wc.reloading = false;
+        wc.reload_timer = 0.0f;
+    }
+
     // Attempt to fire. Returns true if shot was fired (consumes ammo, sets cooldown).
     inline bool tryFire(WeaponComponent& wc)
     {
-        if (!wc.canFire()) return false;
+        if (!hasWeaponDefinition(wc.weapon_type) || !wc.canFire()) return false;
 
         const auto& def = getWeaponDef(wc.weapon_type);
         wc.ammo--;
@@ -104,11 +119,14 @@ namespace WeaponSystem
     // Start manual reload. Returns true if reload started.
     inline bool tryReload(WeaponComponent& wc)
     {
+        if (!hasWeaponDefinition(wc.weapon_type)) return false;
+
         const auto& def = getWeaponDef(wc.weapon_type);
+        if (wc.reloading || wc.ammo < 0 || wc.ammo >= def.max_ammo || wc.reserve_ammo <= 0)
+            return false;
+
         wc.max_ammo = def.max_ammo;
         wc.max_reserve_ammo = def.max_reserve_ammo;
-        if (!wc.canReload()) return false;
-
         wc.reloading = true;
         wc.reload_timer = def.reload_time;
         return true;

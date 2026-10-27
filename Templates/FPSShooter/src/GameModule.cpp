@@ -21,6 +21,7 @@
 #include "shared/NetworkInputSampler.hpp"
 #include "shared/MovementInputPolicy.hpp"
 #include "shared/PlayerLifecycle.hpp"
+#include "shared/FpsAnimationPresentation.hpp"
 #include "GameHUD.hpp"
 #include "ui/UiLogic.hpp"
 #include "ui/UiInput.hpp"
@@ -457,8 +458,12 @@ GAME_API bool gardenGameInit(EngineServices* services)
                 LOG_ENGINE_WARN("Failed to deserialize WEAPON_STATE");
                 return;
             }
-            const uint8_t weapon_idx = std::min<uint8_t>(msg.weapon_type, static_cast<uint8_t>(WeaponType::COUNT) - 1);
-            g_local_weapon_type = static_cast<WeaponType>(weapon_idx);
+            const WeaponType received_weapon_type = static_cast<WeaponType>(msg.weapon_type);
+            if (!hasWeaponDefinition(received_weapon_type)) {
+                LOG_ENGINE_WARN("Ignoring WEAPON_STATE with invalid weapon type {}", msg.weapon_type);
+                return;
+            }
+            g_local_weapon_type = received_weapon_type;
             g_local_ammo = msg.ammo;
             g_local_max_ammo = msg.max_ammo;
             g_local_reserve_ammo = msg.reserve_ammo;
@@ -817,6 +822,10 @@ GAME_API void gardenGameUpdate(float delta_time)
     // Run it before representations copy their tracked source pose this frame.
     if (g_network.isConnected())
         g_network.interpolateRemoteEntities();
+
+    // Source-backed animation parameters are copied to existing player
+    // representations before animation presentation advances this frame.
+    FPSShooter::updateAnimationParameters(game_world->registry);
 
     // Update player representations
     update_player_representations(game_world->registry,

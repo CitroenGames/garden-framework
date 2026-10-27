@@ -18,6 +18,7 @@
 #include "shared/WeaponSystem.hpp"
 #include "shared/MovementInputPolicy.hpp"
 #include "shared/PlayerLifecycle.hpp"
+#include "shared/FpsAnimationPresentation.hpp"
 #include "shared/FpsGameLogic.hpp"
 #include "shared/WorldItemLifecycle.hpp"
 #include "shared/CompetitiveLogic.hpp"
@@ -47,21 +48,26 @@ static EngineServices* g_server_services = nullptr;
 static Net::ServerNetworkManager g_server_network;
 static FpsServer::LagCompensationTelemetry g_lag_compensation_telemetry;
 static Game::GameRules g_game_rules;
-// Competitive mode (FPS_GAME_MODE=competitive); DM/TDM paths unchanged when off.
-static bool g_competitive = false;
-static Competitive::RoundSystem g_round_system;
-static Competitive::BuySystem g_buy_system;
-static Competitive::EconomySystem g_economy;
-static Competitive::BombSystem g_bomb_system;
-static Competitive::BombHooksAdapter g_bomb_hooks{&g_bomb_system};
-// USE (E, InputFlags::USE) is the plant/defuse channel input: there is no
-// separate USE/interact message, and no C4 weapon item, so the assigned
-// carrier holding USE in a site plants and a Defender holding USE in range defuses.
-static std::unordered_map<uint16_t, bool> g_bomb_use_held;
-static std::unordered_map<uint16_t, uint16_t> g_bomb_last_buttons;
-static std::unordered_map<uint32_t, int32_t> g_bomb_prev_health;
-static std::unordered_map<uint32_t, uint8_t> g_bomb_prev_weapon;
-static bool g_bomb_sites_authored = false;
+
+// Competitive mode state lives in the active world's registry context.  The
+// aliases below deliberately keep the server integration readable while making
+// it impossible for bomb/match state to survive a world teardown.
+static Competitive::CompetitiveWorldContext& competitiveContext()
+{
+    return g_server_services->game_world->registry.ctx().get<Competitive::CompetitiveWorldContext>();
+}
+#define g_competitive (competitiveContext().enabled)
+#define g_round_system (competitiveContext().round)
+#define g_buy_system (competitiveContext().buy)
+#define g_economy (competitiveContext().economy)
+#define g_bomb_system (competitiveContext().bomb)
+#define g_bomb_hooks (competitiveContext().bomb_hooks)
+#define g_match_entity (competitiveContext().match_entity)
+#define g_bomb_use_held (competitiveContext().bomb_use_held)
+#define g_bomb_last_buttons (competitiveContext().bomb_last_buttons)
+#define g_bomb_prev_health (competitiveContext().bomb_prev_health)
+#define g_bomb_prev_weapon (competitiveContext().bomb_prev_weapon)
+#define g_bomb_sites_authored (competitiveContext().bomb_sites_authored)
 
 // ---- Bots v1 (FPS_BOTS=N, competitive only; DM/TDM unchanged) ----
 struct BotNavMeshResource { Navigation::NavMesh mesh; bool loaded = false; };
@@ -94,7 +100,6 @@ static const char* bombStateName(Competitive::BombState st)
     }
     return "?";
 }
-static entt::entity g_match_entity = entt::null;
 static entt::entity findPlayerEntity(world& w, uint16_t client_id); // defined with competitive helpers below
 static void sendEconomyState(uint16_t client_id, entt::entity e);
 static void spawnDroppedWeapon(world& w, const glm::vec3& pos, const FpsLogic::DroppedItem& item, uint16_t by);
@@ -541,6 +546,11 @@ static void processWeaponInput(
     }
 
     auto& weapon = w->registry.get<WeaponComponent>(player_entity);
+    if (!hasWeaponDefinition(weapon.weapon_type)) {
+        LOG_ENGINE_WARN("Rejecting weapon input from client {} for invalid weapon type {}",
+            client_id, static_cast<unsigned int>(weapon.weapon_type));
+        return;
+    }
     const bool wants_attack = (input.buttons & InputFlags::ATTACK) != 0;
     const bool wants_reload = (input.buttons & InputFlags::RELOAD) != 0;
     const bool wants_drop = (input.buttons & InputFlags::DROP) != 0;
@@ -1519,6 +1529,12 @@ static void despawnPlayerForClient(uint16_t client_id)
 GAME_API bool gardenServerInit(EngineServices* services)
 {
     g_server_services = services;
+    world* match_world = services->game_world;
+    auto* existing_context = match_world->registry.ctx().find<Competitive::CompetitiveWorldContext>();
+    Competitive::CompetitiveWorldContext& match_context = existing_context
+        ? *existing_context
+        : match_world->registry.ctx().emplace<Competitive::CompetitiveWorldContext>();
+    match_context.clear();
     {
         const char* mode_env = std::getenv("FPS_GAME_MODE");
         g_competitive = mode_env && std::strcmp(mode_env, "competitive") == 0;
@@ -1643,6 +1659,11 @@ GAME_API bool gardenServerInit(EngineServices* services)
 GAME_API void gardenServerShutdown()
 {
     g_server_network.shutdown();
+    if (g_server_services && g_server_services->game_world) {
+        auto& registry = g_server_services->game_world->registry;
+        if (registry.ctx().find<Competitive::CompetitiveWorldContext>())
+            registry.ctx().erase<Competitive::CompetitiveWorldContext>();
+    }
     g_server_services = nullptr;
 }
 
@@ -1689,9 +1710,9 @@ GAME_API void gardenServerUpdate(float delta_time)
         FPSShooter::synchronizePawnLifecycles(w->registry, g_round_system.state);
         (void)prev_phase;
         // ROUND_STATE heartbeat 1 Hz (spec S7); phase changes broadcast on enter.
-        static float s_round_heartbeat = 0.0f;
-        s_round_heartbeat += delta_time;
-        if (s_round_heartbeat >= 1.0f) { s_round_heartbeat = 0.0f; broadcastRoundState(); }
+        auto& round_heartbeat = competitiveContext().round_heartbeat;
+        round_heartbeat += delta_time;
+        if (round_heartbeat >= 1.0f) { round_heartbeat = 0.0f; broadcastRoundState(); }
     }
     g_game_rules.Update(*w, delta_time);
 
@@ -1735,6 +1756,7 @@ GAME_API void gardenServerUpdate(float delta_time)
         }
     }
 
+    FPSShooter::updateAnimationParameters(w->registry);
     g_server_network.publishWorldState();
 
     EventBus::get().flush();
@@ -1763,3 +1785,16 @@ GAME_API void gardenServerOnClientDisconnected(uint16_t client_id)
 {
     // Already handled via network callback in gardenServerInit
 }
+
+#undef g_competitive
+#undef g_round_system
+#undef g_buy_system
+#undef g_economy
+#undef g_bomb_system
+#undef g_bomb_hooks
+#undef g_match_entity
+#undef g_bomb_use_held
+#undef g_bomb_last_buttons
+#undef g_bomb_prev_health
+#undef g_bomb_prev_weapon
+#undef g_bomb_sites_authored

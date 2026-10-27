@@ -1129,6 +1129,110 @@ bool testWeaponRosterIntegrity()
     return pass(name);
 }
 
+bool testWeaponAuthorityTiming()
+{
+    const std::string name = "WeaponAuthorityTiming";
+
+    // Exercise each behavior-bearing row without asserting a balance value.
+    // A repeated held ATTACK sample must stay blocked by the authoritative
+    // cooldown and leave the accepted shot's state intact.
+    for (uint8_t value = 0; value < static_cast<uint8_t>(WeaponType::COUNT); ++value) {
+        const WeaponType type = static_cast<WeaponType>(value);
+        const WeaponDef& def = getWeaponDef(type);
+        if (!hasWeaponDefinition(type) || !def.name || !def.name[0] || def.fire_rate <= 0.0f ||
+            def.reload_time < 0.0f || def.max_ammo <= 0 || def.max_reserve_ammo < 0) {
+            return fail(name, "invalid behavior definition at weapon type " + std::to_string(value));
+        }
+
+        WeaponComponent weapon;
+        if (!initWeapon(weapon, type))
+            return fail(name, "could not initialize behavior definition " + std::to_string(value));
+        const int32_t initial_ammo = weapon.ammo;
+        if (!WeaponSystem::tryFire(weapon) || weapon.ammo != initial_ammo - 1 ||
+            !approx(weapon.fire_cooldown, def.fire_rate)) {
+            return fail(name, "accepted shot did not use its own definition " + std::to_string(value));
+        }
+
+        const int32_t blocked_ammo = weapon.ammo;
+        const float blocked_cooldown = weapon.fire_cooldown;
+        const bool blocked_reload = weapon.reloading;
+        if (WeaponSystem::tryFire(weapon) || weapon.ammo != blocked_ammo ||
+            weapon.fire_cooldown != blocked_cooldown || weapon.reloading != blocked_reload) {
+            return fail(name, "blocked repeated shot mutated state " + std::to_string(value));
+        }
+
+        weapon.fire_cooldown = 0.0f;
+        weapon.ammo = 0;
+        weapon.reloading = false;
+        weapon.reload_timer = 0.0f;
+        const int32_t empty_reserve = weapon.reserve_ammo;
+        if (WeaponSystem::tryFire(weapon) || weapon.ammo != 0 || weapon.reserve_ammo != empty_reserve) {
+            return fail(name, "empty shot consumed ammo " + std::to_string(value));
+        }
+
+        if (weapon.max_reserve_ammo > 0) {
+            weapon.ammo = weapon.max_ammo - 1;
+            weapon.reserve_ammo = 1;
+            if (!WeaponSystem::tryReload(weapon) || !weapon.reloading) {
+                return fail(name, "reload did not start " + std::to_string(value));
+            }
+            const int32_t reload_ammo = weapon.ammo;
+            const int32_t reload_reserve = weapon.reserve_ammo;
+            WeaponSystem::cancelReload(weapon);
+            WeaponSystem::tick(weapon, def.reload_time + 1.0f);
+            if (weapon.reloading || weapon.reload_timer != 0.0f || weapon.ammo != reload_ammo ||
+                weapon.reserve_ammo != reload_reserve) {
+                return fail(name, "cancelled reload changed ammo " + std::to_string(value));
+            }
+        }
+    }
+
+    WeaponComponent invalid;
+    invalid.weapon_type = WeaponType::COUNT;
+    invalid.ammo = 7;
+    invalid.max_ammo = 9;
+    invalid.reserve_ammo = 11;
+    invalid.max_reserve_ammo = 13;
+    invalid.fire_cooldown = 0.25f;
+    invalid.reload_timer = 0.5f;
+    invalid.accuracy_penalty = 0.75f;
+    invalid.recoil_index = 1.0f;
+    invalid.time_since_last_shot = 2.0f;
+    invalid.reloading = true;
+    const WeaponComponent invalid_before = invalid;
+    if (initWeapon(invalid, WeaponType::COUNT) || WeaponSystem::tryFire(invalid) ||
+        WeaponSystem::tryReload(invalid)) {
+        return fail(name, "invalid weapon id was accepted");
+    }
+    WeaponSystem::tick(invalid, 1.0f);
+    if (invalid.weapon_type != invalid_before.weapon_type || invalid.ammo != invalid_before.ammo ||
+        invalid.max_ammo != invalid_before.max_ammo || invalid.reserve_ammo != invalid_before.reserve_ammo ||
+        invalid.max_reserve_ammo != invalid_before.max_reserve_ammo ||
+        invalid.fire_cooldown != invalid_before.fire_cooldown || invalid.reload_timer != invalid_before.reload_timer ||
+        invalid.accuracy_penalty != invalid_before.accuracy_penalty || invalid.recoil_index != invalid_before.recoil_index ||
+        invalid.time_since_last_shot != invalid_before.time_since_last_shot || invalid.reloading != invalid_before.reloading ||
+        WeaponSystem::computeSpread(invalid, {}) != 0.0f) {
+        return fail(name, "invalid weapon id changed state or produced spread");
+    }
+
+    InventoryComponent inv;
+    PlayerLoadoutComponent loadout;
+    WeaponComponent active;
+    FpsLogic::grantLoadout(inv, loadout, active);
+    active.ammo = 17;
+    active.reserve_ammo = 43;
+    active.reloading = true;
+    active.reload_timer = 1.0f;
+    if (!FpsLogic::switchToSlot(inv, loadout, active, static_cast<int>(WeaponSlot::Secondary)) ||
+        active.reloading || active.reload_timer != 0.0f ||
+        loadout.slots[static_cast<int>(WeaponSlot::Primary)].ammo != 17 ||
+        loadout.slots[static_cast<int>(WeaponSlot::Primary)].reserve != 43) {
+        return fail(name, "switch did not cancel reload before saving active ammo");
+    }
+
+    return pass(name);
+}
+
 bool testLagCompensatedShotPoseFallbackAndMissCount()
 {
     const std::string name = "LagCompensatedShotPoseFallbackAndMissCount";
@@ -1387,6 +1491,7 @@ int main()
     ok = testCompetitiveTeamAutoAssign() && ok;
     ok = testCompetitiveBuyZoneOccupancy() && ok;
     ok = testWeaponRosterIntegrity() && ok;
+    ok = testWeaponAuthorityTiming() && ok;
     ok = testLagCompensatedShotPoseFallbackAndMissCount() && ok;
     ok = testFpsDamageContract() && ok;
     ok = testFpsDeathLifecycle() && ok;
@@ -1395,6 +1500,7 @@ int main()
     ok = testC4DefuseKit() && ok;
     ok = testC4Timer40() && ok;
     ok = testC4CarrierDropPickup() && ok;
+    ok = testC4WorldAuthority() && ok;
     ok = testBotDifficultyClampTable() && ok;
     ok = testBotPerceptionBlindfold() && ok;
     ok = testBotFsmPlantDefendDefuse() && ok;

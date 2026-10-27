@@ -4,6 +4,7 @@
 // Pure helpers so Tests/GameplayTests can exercise them without a server.
 #include "SharedComponents.hpp"
 #include "WeaponTypes.hpp"
+#include "WeaponSystem.hpp"
 // Engine gameplay primitives (Team/Inventory/Wallet/Timer/Channel). The
 // template health type is FpsHealthComponent, so no name collision remains.
 #include "Gameplay/GameplayComponents.hpp"
@@ -109,7 +110,8 @@ inline bool loadSlotIntoWeapon(PlayerLoadoutComponent& lo, WeaponComponent& w, i
     if (!isValidLoadoutSlot(slot) || !lo.slots[slot].occupied)
         return false;
     const auto& s = lo.slots[slot];
-    initWeapon(w, s.type);
+    if (!initWeapon(w, s.type))
+        return false;
     w.ammo = s.ammo; w.reserve_ammo = s.reserve;
     w.max_ammo = getWeaponDef(s.type).max_ammo;
     w.max_reserve_ammo = getWeaponDef(s.type).max_reserve_ammo;
@@ -172,6 +174,7 @@ inline bool switchToSlot(InventoryComponent& inv, PlayerLoadoutComponent& lo, We
     normalizeLoadout(lo);
     if (slot < 0 || slot >= (int)WeaponSlot::COUNT) return false;
     if (!lo.slots[slot].occupied) return false;
+    WeaponSystem::cancelReload(w);
     if (slot == lo.active_slot) {
         loadSlotIntoWeapon(lo, w, slot);
         syncInventory(inv, lo);
@@ -201,6 +204,7 @@ inline std::optional<DroppedItem> dropActive(InventoryComponent& inv, PlayerLoad
     if (slot < 0 || slot >= (int)WeaponSlot::COUNT) return std::nullopt;
     if (slot == (int)WeaponSlot::Melee) return std::nullopt;
     if (!lo.slots[slot].occupied) return std::nullopt;
+    WeaponSystem::cancelReload(w);
     saveActiveAmmo(lo, w);
     DroppedItem out{lo.slots[slot].type, lo.slots[slot].ammo, lo.slots[slot].reserve};
     lo.slots[slot] = WeaponSlotState{};

@@ -127,6 +127,13 @@ inline const WeaponCatalogDef* findCatalogByWeaponType(WeaponType type)
     return nullptr;
 }
 
+// WeaponType::COUNT is a sentinel used by equipment and must never acquire
+// the fallback behaviour of the first definition.
+inline bool hasWeaponDefinition(WeaponType type)
+{
+    return static_cast<uint8_t>(type) < static_cast<uint8_t>(WeaponType::COUNT);
+}
+
 // Weapon definition table -- data-driven weapon stats (behaviour).
 struct WeaponDef
 {
@@ -214,8 +221,11 @@ inline const WeaponDef& getWeaponDef(WeaponType type)
 }
 
 // Initialize a WeaponComponent from its type definition
-inline void initWeapon(WeaponComponent& wc, WeaponType type)
+inline bool initWeapon(WeaponComponent& wc, WeaponType type)
 {
+    if (!hasWeaponDefinition(type))
+        return false;
+
     const auto& def = getWeaponDef(type);
     wc.weapon_type = type;
     wc.ammo = def.max_ammo;
@@ -228,4 +238,5 @@ inline void initWeapon(WeaponComponent& wc, WeaponType type)
     wc.recoil_index = 0.0f;
     wc.time_since_last_shot = 1000.0f;
     wc.reloading = false;
+    return true;
 }

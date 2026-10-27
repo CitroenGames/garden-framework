@@ -774,4 +774,43 @@ private:
     }
 };
 
+// All mutable competitive authority belongs to the loaded server world.  The
+// server stores this in that world's registry context, so a level restart or a
+// second world cannot inherit a previous match, bomb channel, input edge, or
+// buy-request history.  The domain systems remain transition classes; this is
+// their ownership boundary rather than a second copy of their rules.
+struct CompetitiveWorldContext {
+    bool enabled = false;
+    RoundSystem round;
+    BuySystem buy;
+    EconomySystem economy;
+    BombSystem bomb;
+    BombHooksAdapter bomb_hooks;
+    entt::entity match_entity = entt::null;
+    std::unordered_map<uint16_t, bool> bomb_use_held;
+    std::unordered_map<uint16_t, uint16_t> bomb_last_buttons;
+    std::unordered_map<uint32_t, int32_t> bomb_prev_health;
+    std::unordered_map<uint32_t, uint8_t> bomb_prev_weapon;
+    bool bomb_sites_authored = false;
+    float round_heartbeat = 0.0f;
+
+    CompetitiveWorldContext() : bomb_hooks(&bomb) {}
+
+    void clear() {
+        enabled = false;
+        round = RoundSystem{};
+        buy = BuySystem{};
+        economy = EconomySystem{};
+        bomb = BombSystem{};
+        bomb_hooks.system = &bomb;
+        match_entity = entt::null;
+        bomb_use_held.clear();
+        bomb_last_buttons.clear();
+        bomb_prev_health.clear();
+        bomb_prev_weapon.clear();
+        bomb_sites_authored = false;
+        round_heartbeat = 0.0f;
+    }
+};
+
 } // namespace Competitive

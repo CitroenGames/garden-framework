@@ -5,6 +5,7 @@
 #include "shared/MovementInputPolicy.hpp"
 #include "shared/NetworkInputSampler.hpp"
 #include "shared/PlayerLifecycle.hpp"
+#include "shared/FpsAnimationPresentation.hpp"
 
 #include <string>
 
@@ -62,6 +63,79 @@ bool testPlayerPawnLifecycleContract()
     const auto remaining = registry.view<FPSShooter::FpsPawnLifecycleComponent>();
     if (registry.valid(pawn) || remaining.begin() != remaining.end())
         return fail(name, "disconnect cleanup retained lifecycle state for a destroyed pawn");
+
+    return pass(name);
+}
+
+bool testPlayerAnimationParameterContract()
+{
+    const std::string name = "Player_AnimationParameterContract";
+
+    entt::registry registry;
+    const entt::entity pawn = registry.create();
+    auto& health = registry.emplace<FpsHealthComponent>(pawn, 100);
+    auto& controller = registry.emplace<CharacterControllerComponent>(pawn);
+    controller.grounded = true;
+    auto& body = registry.emplace<RigidBodyComponent>(pawn);
+    body.velocity = glm::vec3(3.0f, 0.0f, 4.0f);
+    registry.emplace<TeamComponent>(pawn, TeamComponent{FpsLogic::kTeamAttackers});
+    auto& loadout = registry.emplace<PlayerLoadoutComponent>(pawn);
+    loadout.active_slot = static_cast<int32_t>(WeaponSlot::Primary);
+    loadout.slots[static_cast<size_t>(WeaponSlot::Primary)].occupied = true;
+    auto& weapon = registry.emplace<WeaponComponent>(pawn);
+    weapon.fire_cooldown = 0.15f;
+
+    FPSShooter::updateAnimationParameters(registry);
+    const auto& moving = registry.get<FPSShooter::FpsAnimationParametersComponent>(pawn);
+    if (!approx(moving.horizontal_speed, 5.0f) || moving.team_id != FpsLogic::kTeamAttackers ||
+        moving.active_weapon_slot != static_cast<int32_t>(WeaponSlot::Primary) ||
+        !moving.has_active_weapon || moving.idle || !moving.moving || moving.jumping ||
+        moving.reloading || !moving.firing || moving.dead)
+    {
+        return fail(name, "grounded moving parameter mapping was not deterministic");
+    }
+
+    body.velocity = glm::vec3(0.0f);
+    controller.grounded = false;
+    weapon.reloading = true;
+    FPSShooter::updateAnimationParameters(registry);
+    const auto& airborne = registry.get<FPSShooter::FpsAnimationParametersComponent>(pawn);
+    if (airborne.idle || airborne.moving || !airborne.jumping || !airborne.reloading ||
+        airborne.firing || airborne.dead)
+    {
+        return fail(name, "airborne reload parameters did not override movement and fire");
+    }
+
+    health.takeDamage(100);
+    FPSShooter::updateAnimationParameters(registry);
+    const auto& dead = registry.get<FPSShooter::FpsAnimationParametersComponent>(pawn);
+    if (!dead.dead || dead.idle || dead.moving || dead.jumping || dead.reloading || dead.firing)
+        return fail(name, "death did not clear live animation parameters");
+
+    const entt::entity representation = registry.create();
+    auto& player_representation = registry.emplace<PlayerRepresentationComponent>(representation);
+    player_representation.tracked_player = ensureEntityRef(registry, pawn);
+    FPSShooter::updateAnimationParameters(registry);
+    if (!registry.all_of<FPSShooter::FpsAnimationParametersComponent>(representation) ||
+        !registry.get<FPSShooter::FpsAnimationParametersComponent>(representation).dead)
+    {
+        return fail(name, "representation did not receive its tracked pawn parameters");
+    }
+
+    const entt::entity missing_representation = registry.create();
+    registry.emplace<PlayerRepresentationComponent>(missing_representation);
+    registry.emplace<FPSShooter::FpsAnimationParametersComponent>(missing_representation);
+    FPSShooter::updateAnimationParameters(registry);
+    if (registry.all_of<FPSShooter::FpsAnimationParametersComponent>(missing_representation))
+        return fail(name, "missing tracked pawn retained representation parameters");
+
+    registry.destroy(pawn);
+    FPSShooter::updateAnimationParameters(registry);
+    if (!registry.valid(representation) ||
+        registry.all_of<FPSShooter::FpsAnimationParametersComponent>(representation))
+    {
+        return fail(name, "missing or destroyed tracked pawn retained representation parameters");
+    }
 
     return pass(name);
 }
@@ -157,5 +231,5 @@ bool testPlayerMovementInputContract()
         return fail(name, "local controller and network prediction can both own movement");
     }
 
-    return testPlayerPawnLifecycleContract() && pass(name);
+    return testPlayerPawnLifecycleContract() && testPlayerAnimationParameterContract() && pass(name);
 }

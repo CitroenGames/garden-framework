@@ -190,3 +190,70 @@ bool testC4CarrierDropPickup()
     if (b2.bomb.state != BombState::Carried) return fail(name, "paused plant progressed");
     return pass(name);
 }
+
+bool testC4WorldAuthority()
+{
+    const std::string name = "C4_WorldAuthority";
+    using namespace Competitive;
+
+    entt::registry first_world;
+    entt::registry second_world;
+    const entt::entity first_carrier = first_world.create();
+    const entt::entity second_carrier = second_world.create();
+    auto& first = first_world.ctx().emplace<CompetitiveWorldContext>();
+    auto& second = second_world.ctx().emplace<CompetitiveWorldContext>();
+    first.enabled = true;
+    second.enabled = true;
+    first.bomb.config.sites = {BombSite{glm::vec3(0.0f), 5.0f, 0}};
+    second.bomb.config.sites = {BombSite{glm::vec3(100.0f), 5.0f, 1}};
+    first.bomb.config.plant_seconds = 0.05f;
+    first.bomb.config.bomb_timer_seconds = 0.10f;
+    if (!first.bomb.assignCarrier(first_carrier) || !second.bomb.assignCarrier(second_carrier))
+        return fail(name, "independent worlds did not receive separate carriers");
+
+    // Channel cancellation stays local to its owning world.
+    auto plant = plantInput();
+    for (int i = 0; i < 3; ++i) first.bomb.tick(0.01f, plant);
+    if (first.bomb.bomb.state != BombState::Planting || second.bomb.bomb.state != BombState::Carried)
+        return fail(name, "plant channel crossed world boundary");
+    auto interrupted = plant;
+    interrupted.plant_damaged = true;
+    first.bomb.tick(0.01f, interrupted);
+    if (first.bomb.bomb.state != BombState::Carried || first.bomb.bomb.plant_channel != 0.0f)
+        return fail(name, "damage interrupt did not reset the local channel");
+    if (second.bomb.bomb.state != BombState::Carried || second.bomb.bomb.plant_channel != 0.0f)
+        return fail(name, "damage interrupt mutated the other world");
+
+    first.round.configure(fastCompConfig());
+    first.round.bomb_hooks = &first.bomb_hooks;
+    tickComp(first.round, 0.01f, bothAlive());
+    for (int i = 0; i < 20 && first.round.state.phase != RoundPhase::Live; ++i)
+        tickComp(first.round, 0.06f, bothAlive());
+    for (int i = 0; i < 8 && first.bomb.bomb.state != BombState::Planted; ++i)
+        first.bomb.tick(0.01f, plant);
+    if (first.bomb.bomb.state != BombState::Planted)
+        return fail(name, "local bomb did not plant after a restarted channel");
+    if (second.bomb.bomb.state != BombState::Carried)
+        return fail(name, "plant completion leaked into the other world");
+
+    // The timer boundary is owned by this bomb, and the existing hook still
+    // supplies the one round outcome after the detonation is consumed.
+    BombTickInput idle;
+    first.bomb.tick(0.04f, idle);
+    if (first.bomb.bomb.state != BombState::Planted)
+        return fail(name, "bomb expired before its timer boundary");
+    first.bomb.tick(0.06f, idle);
+    if (first.bomb.bomb.state != BombState::Exploded || second.bomb.bomb.state != BombState::Carried)
+        return fail(name, "timer boundary was not isolated");
+    tickComp(first.round, 0.01f, bothAlive());
+    if (first.round.state.phase != RoundPhase::RoundEnd || first.round.state.last_reason != RoundEndReason::TargetBombed)
+        return fail(name, "world-owned bomb hook did not end the round");
+
+    first_world.ctx().erase<CompetitiveWorldContext>();
+    if (first_world.ctx().find<CompetitiveWorldContext>())
+        return fail(name, "world context survived teardown");
+    auto& restarted = first_world.ctx().emplace<CompetitiveWorldContext>();
+    if (restarted.enabled || restarted.bomb.bomb.state != BombState::Idle || restarted.round_heartbeat != 0.0f)
+        return fail(name, "recreated world inherited match authority");
+    return pass(name);
+}
