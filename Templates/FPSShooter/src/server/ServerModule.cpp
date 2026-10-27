@@ -63,12 +63,12 @@ static Competitive::CompetitiveWorldContext& competitiveContext()
 #define g_economy (competitiveContext().economy)
 #define g_bomb_system (competitiveContext().bomb)
 #define g_bomb_hooks (competitiveContext().bomb_hooks)
-#define g_match_entity (competitiveContext().match_entity)
 #define g_bomb_use_held (competitiveContext().bomb_use_held)
 #define g_bomb_last_buttons (competitiveContext().bomb_last_buttons)
 #define g_bomb_prev_health (competitiveContext().bomb_prev_health)
 #define g_bomb_prev_weapon (competitiveContext().bomb_prev_weapon)
 #define g_bomb_sites_authored (competitiveContext().bomb_sites_authored)
+#define g_sessions (competitiveContext().sessions)
 
 // ---- Bots v1 (FPS_BOTS=N, competitive only; DM/TDM unchanged) ----
 struct BotNavMeshResource { Navigation::NavMesh mesh; bool loaded = false; };
@@ -79,7 +79,8 @@ static uint32_t g_bot_input_tick = 1;
 static float g_bot_world_time = 0.0f;
 static std::unordered_map<uint16_t, uint32_t> g_bot_buy_seq;
 static std::unordered_map<uint16_t, uint8_t> g_bot_last_weapon_select;
-static void spawnPlayerForClient(uint16_t client_id); // defined with player spawning below
+static bool spawnPlayerForClient(uint16_t client_id, uint8_t requested_team = FpsLogic::kTeamNone); // defined with player spawning below
+static void despawnPlayerForClient(uint16_t client_id); // defined with player spawning below
 static int32_t botCountFromEnv() { const char* v = std::getenv("FPS_BOTS"); return v ? std::max(0, std::atoi(v)) : 0; }
 static uint8_t botDifficultyFromEnv() { const char* v = std::getenv("FPS_BOT_DIFFICULTY"); return Bots::clampDifficulty(v ? std::atoi(v) : 1); }
 // AI debug v1 (bots.md s10): env switches (FPS_BOTS-style; ConVar plumbing would need
@@ -323,19 +324,19 @@ static bool resolveFpsDeath(
 
     g_game_rules.onPlayerKilled(game_world, attacker_client_id, victim_client_id);
     if (g_competitive) {
+        Competitive::MoneyComponent* victim_money = game_world.registry.all_of<Competitive::MoneyComponent>(victim_entity)
+            ? &game_world.registry.get<Competitive::MoneyComponent>(victim_entity) : nullptr;
         if (self_inflicted) {
-            if (game_world.registry.all_of<Competitive::MoneyComponent>(victim_entity)) {
-                g_economy.applySuicidePenalty(game_world.registry.get<Competitive::MoneyComponent>(victim_entity));
+            if (victim_money) {
+                competitiveContext().onDeath(victim_money, nullptr, true, nullptr);
                 sendEconomyState(victim_client_id, victim_entity);
             }
         } else {
             const entt::entity killer_entity = findPlayerEntity(game_world, attacker_client_id);
             if (killer_entity != entt::null && game_world.registry.all_of<Competitive::MoneyComponent>(killer_entity)) {
                 const WeaponCatalogDef* weapon_def = findCatalogByWeaponType(weapon_type);
-                if (weapon_def)
-                    g_economy.awardKill(game_world.registry.get<Competitive::MoneyComponent>(killer_entity), weapon_def);
-                else
-                    game_world.registry.get<Competitive::MoneyComponent>(killer_entity).wallet.add(300);
+                competitiveContext().onDeath(victim_money,
+                    &game_world.registry.get<Competitive::MoneyComponent>(killer_entity), false, weapon_def);
                 sendEconomyState(attacker_client_id, killer_entity);
             }
         }
@@ -786,7 +787,7 @@ static void executeBotBuy(uint16_t client_id, entt::entity e)
         ctx.inventory = &w->registry.get<InventoryComponent>(e); ctx.loadout = &w->registry.get<PlayerLoadoutComponent>(e);
         ctx.weapon = &w->registry.get<WeaponComponent>(e); ctx.armor = w->registry.all_of<ArmorComponent>(e) ? &w->registry.get<ArmorComponent>(e) : nullptr;
         FpsLogic::DroppedItem dropped{WeaponType::COUNT, 0, 0};
-        Competitive::BuyResult r = g_buy_system.buy(ctx, def->id, &dropped); // same BuySystem server path as human BUY_REQUEST
+        Competitive::BuyResult r = competitiveContext().onBuy(ctx, def->id, &dropped); // same BuySystem server path as human BUY_REQUEST
         if (r != Competitive::BuyResult::Ok) continue; // skip-on-reject
         if (dropped.type != WeaponType::COUNT) spawnDroppedWeapon(*w, pos + glm::vec3(0.0f, 0.3f, 0.0f), dropped, client_id);
         if (def->kind != BuyItemKind::Equipment) sendWeaponState(client_id, e, *ctx.weapon);
@@ -884,10 +885,8 @@ static void sendEconomyState(uint16_t client_id, entt::entity e)
 static void broadcastRoundState()
 {
     world* w = g_server_services ? g_server_services->game_world : nullptr;
-    if (w && w->registry.valid(g_match_entity)) {
-        w->registry.get_or_emplace<Competitive::MatchStateComponent>(g_match_entity) = g_round_system.state;
-        w->registry.get_or_emplace<CountdownTimerComponent>(g_match_entity) = g_round_system.timer;
-    }
+    if (w)
+        competitiveContext().syncMatchSnapshot(w->registry);
     RoundStateMessage msg;
     msg.phase = static_cast<uint8_t>(g_round_system.state.phase);
     msg.phase_time_remaining = g_round_system.state.phase_time_remaining;
@@ -1200,8 +1199,8 @@ static void tickBombServer(float dt)
         auto pv = w->registry.view<NetworkedEntity, TeamComponent, Competitive::MoneyComponent>();
         for (auto e : pv) {
             if (!pv.get<NetworkedEntity>(e).is_player) continue;
-            if (e == planter) g_economy.awardPlantPlanter(pv.get<Competitive::MoneyComponent>(e));
-            if (pv.get<TeamComponent>(e).team_id == FpsLogic::kTeamAttackers) g_economy.awardPlantTeam(pv.get<Competitive::MoneyComponent>(e));
+            if (e == planter) competitiveContext().onBombPlanter(pv.get<Competitive::MoneyComponent>(e));
+            if (pv.get<TeamComponent>(e).team_id == FpsLogic::kTeamAttackers) competitiveContext().onBombTeam(pv.get<Competitive::MoneyComponent>(e));
             sendEconomyState(pv.get<NetworkedEntity>(e).owner_client_id, e);
         }
         broadcastRoundState();
@@ -1209,7 +1208,7 @@ static void tickBombServer(float dt)
     entt::entity defuser = entt::null;
     if (g_bomb_system.consumeDefuseCompleted(defuser) && defuser != entt::null && w->registry.valid(defuser)
         && w->registry.all_of<Competitive::MoneyComponent, NetworkedEntity>(defuser)) {
-        g_economy.awardDefuse(w->registry.get<Competitive::MoneyComponent>(defuser));
+        competitiveContext().onBombDefuse(w->registry.get<Competitive::MoneyComponent>(defuser));
         sendEconomyState(w->registry.get<NetworkedEntity>(defuser).owner_client_id, defuser);
     }
     // Detonation choice: no radial explosion damage; detonation ends the round
@@ -1228,8 +1227,7 @@ static void competitivePeriodReset(bool overtime)
         if (team.team_id == FpsLogic::kTeamAttackers) team.team_id = FpsLogic::kTeamDefenders;
         else if (team.team_id == FpsLogic::kTeamDefenders) team.team_id = FpsLogic::kTeamAttackers;
         if (w->registry.all_of<Competitive::MoneyComponent>(e))
-            w->registry.get<Competitive::MoneyComponent>(e).reset(
-                g_round_system.config.currentStartMoney(overtime), g_round_system.config.money_cap);
+            competitiveContext().onPeriodReset(w->registry.get<Competitive::MoneyComponent>(e), overtime);
         if (w->registry.all_of<ArmorComponent>(e)) w->registry.get<ArmorComponent>(e) = ArmorComponent{};
         // Strip weapons: pistol (team default) + knife only.
         if (w->registry.all_of<InventoryComponent, PlayerLoadoutComponent, WeaponComponent>(e)) {
@@ -1260,7 +1258,7 @@ static void competitiveRoundEndAwards(Competitive::RoundWinner winner, Competiti
         auto& net = view.get<NetworkedEntity>(e);
         if (!net.is_player) continue;
         auto& money = view.get<Competitive::MoneyComponent>(e);
-        g_economy.awardRoundEnd(money, Competitive::teamFromId(view.get<TeamComponent>(e).team_id), winner, reason);
+        competitiveContext().onRoundEnd(money, Competitive::teamFromId(view.get<TeamComponent>(e).team_id), winner, reason);
         sendEconomyState(net.owner_client_id, e);
     }
 }
@@ -1315,7 +1313,7 @@ static void handleCompetitiveBuy(uint16_t client_id, BitReader& reader)
     // Replaced weapon (if any) is returned in `dropped`; COUNT = none.
     // Detect a replaced weapon so it can be dropped into the world.
     const WeaponCatalogDef* def = findCatalogById(item_id);
-    Competitive::BuyResult result = g_buy_system.buy(ctx, item_id, &dropped);
+    Competitive::BuyResult result = competitiveContext().onBuy(ctx, item_id, &dropped);
     if (result == Competitive::BuyResult::Ok) {
         if (dropped.type != WeaponType::COUNT)
             spawnDroppedWeapon(*w, pos + glm::vec3(0.0f, 0.3f, 0.0f), dropped, client_id);
@@ -1337,10 +1335,20 @@ static void handleCompetitiveBuy(uint16_t client_id, BitReader& reader)
 }
 static void handleCompetitiveTeamSelect(uint16_t client_id, BitReader& reader)
 {
-    uint8_t desired = reader.readByte();
-    uint8_t auto_assign = reader.readByte();
+    TeamSelectMessage request;
+    if (!CompetitiveSerializer::deserialize(reader, request) || request.auto_assign > 1) {
+        LOG_ENGINE_WARN("Rejected malformed competitive team request from client {}", client_id);
+        return;
+    }
+
     world* w = g_server_services ? g_server_services->game_world : nullptr;
-    if (!w) return;
+    if (!w || !g_sessions.contains(client_id))
+        return;
+    if (!g_sessions.consumeTeamSelectRequest(client_id, g_server_network.getCurrentTick())) {
+        LOG_ENGINE_WARN("Rejected rate-limited competitive team request from client {}", client_id);
+        return;
+    }
+
     entt::entity e = findPlayerEntity(*w, client_id);
     int32_t na = 0, nd = 0;
     auto tv = w->registry.view<NetworkedEntity, TeamComponent>();
@@ -1350,16 +1358,37 @@ static void handleCompetitiveTeamSelect(uint16_t client_id, BitReader& reader)
         if (tid == FpsLogic::kTeamAttackers) na++; else if (tid == FpsLogic::kTeamDefenders) nd++;
     }
     Competitive::FpsTeam out = Competitive::FpsTeam::None;
-    Competitive::TeamSelectResult res = Competitive::validateTeamSelect(
-        Competitive::teamFromId(desired), auto_assign != 0, na, nd,
+    Competitive::TeamSelectResult res = Competitive::validateSessionTeamSelect(
+        g_sessions, client_id, e != entt::null,
+        Competitive::teamFromId(request.desired_team), request.auto_assign != 0, na, nd,
         g_round_system.state.phase, g_round_system.config, out);
-    if (res == Competitive::TeamSelectResult::Ok && e != entt::null && w->registry.all_of<TeamComponent>(e)) {
-        uint8_t old = w->registry.get<TeamComponent>(e).team_id;
-        w->registry.get<TeamComponent>(e).team_id = Competitive::teamId(out);
-        LOG_ENGINE_INFO("Competitive team select client={} team {}->{}", client_id, (int)old, (int)out);
-        if (Competitive::canSpawnNow(g_round_system.state.phase) &&
-            w->registry.all_of<FpsHealthComponent>(e) && !w->registry.get<FpsHealthComponent>(e).alive) {
-            respawnPlayer(client_id, g_game_rules.getSpawnForPlayer(*w, client_id, Competitive::teamId(out)));
+    if (res == Competitive::TeamSelectResult::Ok) {
+        if (out == Competitive::FpsTeam::Spectator) {
+            // Spectator selection has no pawn or view-target wire contract yet.
+            // Tear down an existing pawn before publishing TEAM_RESULT so input,
+            // physics, and snapshots cannot retain a playable spectator entity.
+            if (e != entt::null)
+                despawnPlayerForClient(client_id);
+            g_sessions.assignTeam(client_id, out, g_round_system.state.phase);
+        } else if (e == entt::null) {
+            if (g_sessions.assignTeam(client_id, out, g_round_system.state.phase)) {
+                // The existing validator permits a playing team only at a legal
+                // spawn boundary. The construction path remains separate from
+                // that admission decision.
+                (void)spawnPlayerForClient(client_id, Competitive::teamId(out));
+            }
+        } else if (w->registry.all_of<TeamComponent>(e)) {
+            const uint8_t old = w->registry.get<TeamComponent>(e).team_id;
+            if (g_sessions.assignTeam(client_id, out, g_round_system.state.phase) &&
+                (old != Competitive::teamId(out) ||
+                 (w->registry.all_of<FpsHealthComponent>(e) && !w->registry.get<FpsHealthComponent>(e).alive))) {
+                w->registry.get<TeamComponent>(e).team_id = Competitive::teamId(out);
+                // A permitted switch is an explicit new spawn: health, loadout,
+                // physics position, and the reliable respawn announcement all
+                // change together at the phase boundary.
+                respawnPlayer(client_id, g_game_rules.getSpawnForPlayer(*w, client_id, Competitive::teamId(out)));
+            }
+            LOG_ENGINE_INFO("Competitive team select client={} team {}->{}", client_id, (int)old, (int)Competitive::teamId(out));
         }
     }
     TeamResultMessage reply;
@@ -1371,24 +1400,34 @@ static void handleCompetitiveTeamSelect(uint16_t client_id, BitReader& reader)
 
 // ---- Player spawning (called by network callbacks) ----
 
-static void spawnPlayerForClient(uint16_t client_id)
+static bool spawnPlayerForClient(uint16_t client_id, uint8_t requested_team)
 {
+    if (!g_server_services || !g_server_services->game_world)
+        return false;
     world* w = g_server_services->game_world;
+    if (findPlayerEntity(*w, client_id) != entt::null)
+        return false;
 
-    uint8_t team_id = g_game_rules.assignTeam(*w);
+    uint8_t team_id = requested_team == FpsLogic::kTeamNone
+        ? g_game_rules.assignTeam(*w)
+        : requested_team;
     if (g_competitive) {
-        int32_t na = 0, nd = 0;
-        auto tv = w->registry.view<NetworkedEntity, TeamComponent>();
-        for (auto ent : tv) {
-            if (!tv.get<NetworkedEntity>(ent).is_player) continue;
-            uint8_t tid = tv.get<TeamComponent>(ent).team_id;
-            if (tid == FpsLogic::kTeamAttackers) na++; else if (tid == FpsLogic::kTeamDefenders) nd++;
+        if (requested_team == FpsLogic::kTeamNone) {
+            int32_t na = 0, nd = 0;
+            auto tv = w->registry.view<NetworkedEntity, TeamComponent>();
+            for (auto ent : tv) {
+                if (!tv.get<NetworkedEntity>(ent).is_player) continue;
+                uint8_t tid = tv.get<TeamComponent>(ent).team_id;
+                if (tid == FpsLogic::kTeamAttackers) na++; else if (tid == FpsLogic::kTeamDefenders) nd++;
+            }
+            Competitive::FpsTeam assigned = Competitive::autoAssignTeam(na, nd);
+            int32_t cnt = assigned == Competitive::FpsTeam::Attackers ? na : nd;
+            team_id = cnt >= g_round_system.config.team_size
+                ? Competitive::teamId(Competitive::FpsTeam::Spectator)
+                : Competitive::teamId(assigned);
         }
-        Competitive::FpsTeam assigned = Competitive::autoAssignTeam(na, nd);
-        int32_t cnt = assigned == Competitive::FpsTeam::Attackers ? na : nd;
-        team_id = cnt >= g_round_system.config.team_size
-            ? Competitive::teamId(Competitive::FpsTeam::Spectator)
-            : Competitive::teamId(assigned);
+        if (!Competitive::isPlayingTeam(Competitive::teamFromId(team_id)))
+            return false;
     }
     glm::vec3 spawn_pos = g_game_rules.getSpawnForPlayer(*w, client_id, team_id);
     entt::entity player_entity = w->registry.create();
@@ -1435,7 +1474,7 @@ static void spawnPlayerForClient(uint16_t client_id)
     w->registry.emplace<ScoreComponent>(player_entity);
     if (g_competitive) {
         auto& money = w->registry.emplace<Competitive::MoneyComponent>(player_entity);
-        money.reset(g_round_system.config.start_money, g_round_system.config.money_cap);
+        competitiveContext().onMatchStart(money);
         w->registry.emplace<ArmorComponent>(player_entity);
         // Late joiner (Live/RoundEnd) joins as dead observer, spawns next Freeze.
         if (!Competitive::canSpawnNow(g_round_system.state.phase)) {
@@ -1492,8 +1531,15 @@ static void spawnPlayerForClient(uint16_t client_id)
     }
 
     if (g_competitive) { broadcastRoundState(); sendEconomyState(client_id, player_entity); }
+    if (g_competitive && g_sessions.contains(client_id)) {
+        if (w->registry.get<FpsHealthComponent>(player_entity).alive)
+            g_sessions.markSpawned(client_id, Competitive::teamFromId(team_id), g_round_system.state.phase);
+        else
+            g_sessions.markAwaitingSpawn(client_id);
+    }
     LOG_ENGINE_INFO("Spawned player (net_id={}) for client {} at ({},{},{})",
         network_id, client_id, spawn_pos.x, spawn_pos.y, spawn_pos.z);
+    return true;
 }
 
 static void despawnPlayerForClient(uint16_t client_id)
@@ -1543,7 +1589,10 @@ GAME_API bool gardenServerInit(EngineServices* services)
     Competitive::CompetitiveWorldContext& match_context = existing_context
         ? *existing_context
         : match_world->registry.ctx().emplace<Competitive::CompetitiveWorldContext>();
-    match_context.clear();
+    // A repeated init can reuse the world registry.  Tear down the former
+    // snapshot before resetting the per-world authority so no stale match
+    // entity remains visible to ECS consumers.
+    match_context.destroyMatchSnapshot(match_world->registry);
     {
         const char* mode_env = std::getenv("FPS_GAME_MODE");
         g_competitive = mode_env && std::strcmp(mode_env, "competitive") == 0;
@@ -1556,15 +1605,12 @@ GAME_API bool gardenServerInit(EngineServices* services)
             Competitive::ModeConfig ccfg; // all [P]/[V] values are data here
             if (const char* v = std::getenv("FPS_ROUND_SECONDS")) { float f = (float)std::atof(v); if (f > 0) ccfg.round_seconds = f; }
             if (const char* v = std::getenv("FPS_WARMUP_SECONDS")) { float f = (float)std::atof(v); if (f >= 0) ccfg.warmup_seconds = f; }
-            g_round_system.configure(ccfg);
-            g_round_system.bomb_hooks = &g_bomb_hooks;
+            match_context.configure(ccfg);
             g_bomb_system.on_transition = [](Competitive::BombState from, Competitive::BombState to) {
                 LOG_ENGINE_INFO("Bomb state {} -> {} carrier_valid={} timer={:.1f}", bombStateName(from), bombStateName(to),
                     g_bomb_system.bomb.carrier != entt::null, g_bomb_system.bomb.timer);
             };
-            g_economy.config = Competitive::EconomyConfig{};
             g_bot_target_count = botCountFromEnv();
-            g_buy_system.config = ccfg;
             g_round_system.on_phase_enter = [](Competitive::RoundPhase ph) {
                 LOG_ENGINE_INFO("Competitive phase: {} round={} score A{}-D{} deadline_tick={}",
                     competitivePhaseName(ph), g_round_system.state.round_number,
@@ -1578,11 +1624,7 @@ GAME_API bool gardenServerInit(EngineServices* services)
                 LOG_ENGINE_INFO("Competitive round end: winner={} reason={}", (int)winner, (int)reason);
                 competitiveRoundEndAwards(winner, reason);
             };
-            // Singleton MatchStateComponent entity.
-            world* mw = services->game_world;
-            g_match_entity = mw->registry.create();
-            mw->registry.emplace<Competitive::MatchStateComponent>(g_match_entity, g_round_system.state);
-            mw->registry.emplace<CountdownTimerComponent>(g_match_entity, g_round_system.timer);
+            match_context.createMatchSnapshot(match_world->registry);
             LOG_ENGINE_INFO("FPSShooter mode: competitive max_rounds={} clinch={} round={}s freeze={}s warmup={}s",
                 ccfg.max_rounds, ccfg.winsToClinch(), ccfg.round_seconds, ccfg.freeze_seconds, ccfg.warmup_seconds);
         } else {
@@ -1638,11 +1680,24 @@ GAME_API bool gardenServerInit(EngineServices* services)
     });
 
     g_server_network.setOnClientConnected([](uint16_t client_id) {
-        spawnPlayerForClient(client_id);
+        if (!g_competitive) {
+            (void)spawnPlayerForClient(client_id);
+            return;
+        }
+
+        // Competitive admission deliberately creates no pawn. The client
+        // receives the established ROUND_STATE and uses the existing team
+        // request/result exchange to choose a side before a spawn is built.
+        if (g_sessions.admit(client_id)) {
+            broadcastRoundState();
+            LOG_ENGINE_INFO("Competitive session admitted for client {}; awaiting team selection", client_id);
+        }
     });
 
     g_server_network.setOnClientDisconnected([](uint16_t client_id) {
         despawnPlayerForClient(client_id);
+        if (g_competitive)
+            g_sessions.remove(client_id);
     });
 
     g_server_network.setCustomMessageHandler([](uint16_t client_id, uint8_t message_type, BitReader& reader) {
@@ -1671,8 +1726,10 @@ GAME_API void gardenServerShutdown()
     if (g_server_services && g_server_services->game_world) {
         auto& registry = g_server_services->game_world->registry;
         FpsLogic::clearGrenadeEffects(registry);
-        if (registry.ctx().find<Competitive::CompetitiveWorldContext>())
+        if (auto* context = registry.ctx().find<Competitive::CompetitiveWorldContext>()) {
+            context->destroyMatchSnapshot(registry);
             registry.ctx().erase<Competitive::CompetitiveWorldContext>();
+        }
     }
     g_server_services = nullptr;
 }
@@ -1717,6 +1774,7 @@ GAME_API void gardenServerUpdate(float delta_time)
         if (g_bot_target_count > 0) { (void)loadBotNavMesh(); tickBots(w->fixed_delta > 0.0f ? w->fixed_delta : delta_time); }
         tickBombServer(w->fixed_delta > 0.0f ? w->fixed_delta : delta_time);
         g_round_system.tick(w->fixed_delta > 0.0f ? w->fixed_delta : delta_time, rin);
+        competitiveContext().syncMatchSnapshot(w->registry);
         FpsLogic::tickGrenadeEffects(
             w->registry,
             w->fixed_delta > 0.0f ? w->fixed_delta : delta_time,
@@ -1807,9 +1865,9 @@ GAME_API void gardenServerOnClientDisconnected(uint16_t client_id)
 #undef g_economy
 #undef g_bomb_system
 #undef g_bomb_hooks
-#undef g_match_entity
 #undef g_bomb_use_held
 #undef g_bomb_last_buttons
 #undef g_bomb_prev_health
 #undef g_bomb_prev_weapon
 #undef g_bomb_sites_authored
+#undef g_sessions

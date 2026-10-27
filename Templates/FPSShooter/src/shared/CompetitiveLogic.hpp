@@ -63,6 +63,8 @@ struct EconomyConfig {
     int32_t win_elimination = 3250, win_bomb = 3500, win_defuse = 3500, win_time = 3250; // [P]
     int32_t loss_base = 1400, loss_step = 500, loss_cap_streak = 5; // 1400..3400
     int32_t plant_planter = 300, plant_team = 800, defuse_bonus = 300, suicide_penalty = -300; // [P]
+    // Existing server fallback for deaths without a catalog weapon definition.
+    int32_t uncatalogued_kill = 300;
 };
 
 // --- Round FSM ------------------------------------------------------------------
@@ -632,7 +634,7 @@ struct EconomySystem {
         return static_cast<int32_t>(m.wallet.add(amount));
     }
     int32_t awardKill(MoneyComponent& m, const WeaponCatalogDef* def) const {
-        return def ? static_cast<int32_t>(m.wallet.add(def->kill_award)) : 0;
+        return static_cast<int32_t>(m.wallet.add(def ? def->kill_award : config.uncatalogued_kill));
     }
     // Bomb economy hooks (called by the future bomb system).
     int32_t awardPlantPlanter(MoneyComponent& m) const { return static_cast<int32_t>(m.wallet.add(config.plant_planter)); }
@@ -648,10 +650,14 @@ enum class TeamSelectResult : uint8_t { Ok = 0, TeamFull = 1, BothFull = 2, Phas
 inline TeamSelectResult validateTeamSelect(FpsTeam desired, bool auto_assign,
                                            int32_t attackers, int32_t defenders,
                                            RoundPhase phase, const ModeConfig& cfg,
-                                           FpsTeam& out_team) {
+                                           FpsTeam& out_team,
+                                           bool allow_live_admission = false) {
     out_team = FpsTeam::None;
-    // Switch/join only in Warmup/Freeze (plus lobby/waiting) [P].
-    if (!(phase == RoundPhase::WaitingForPlayers || phase == RoundPhase::Warmup || phase == RoundPhase::Freeze))
+    // Switches remain closed outside a spawn boundary. A newly admitted,
+    // pawnless player may select a team during Live and wait for Freeze.
+    const bool regular_selection_phase = phase == RoundPhase::WaitingForPlayers ||
+        phase == RoundPhase::Warmup || phase == RoundPhase::Freeze;
+    if (!regular_selection_phase && !(allow_live_admission && phase == RoundPhase::Live))
         return TeamSelectResult::PhaseClosed;
     if (!auto_assign && desired == FpsTeam::Spectator) { out_team = desired; return TeamSelectResult::Ok; }
     FpsTeam target = auto_assign ? autoAssignTeam(attackers, defenders) : desired;
@@ -667,6 +673,127 @@ inline TeamSelectResult validateTeamSelect(FpsTeam desired, bool auto_assign,
 // Late joiner spawns next Freeze when joining during Live/RoundEnd.
 inline bool canSpawnNow(RoundPhase phase) {
     return phase == RoundPhase::WaitingForPlayers || phase == RoundPhase::Warmup || phase == RoundPhase::Freeze;
+}
+
+// --- Server session flow ---------------------------------------------------------
+// Connection transport owns peer authentication and client ids.  This template
+// coordinator owns the game-level consequence of an admitted client: team
+// choice, whether a pawn may exist, and the transition caused by teardown.
+// It intentionally has no reconnect credential or wire state; the existing
+// TEAM_RESULT and player spawn messages remain the published contract.
+enum class SessionState : uint8_t {
+    AwaitingTeam = 0,
+    AwaitingSpawn,
+    Active,
+    Spectating,
+};
+
+struct SessionRecord {
+    uint16_t client_id = 0;
+    FpsTeam team = FpsTeam::None;
+    SessionState state = SessionState::AwaitingTeam;
+    uint32_t last_team_select_tick = 0;
+    bool has_team_select_tick = false;
+};
+
+class SessionCoordinator {
+public:
+    // A compact server-tick throttle prevents duplicate/replayed selection
+    // bursts from repeatedly mutating a pawn.  It does not create a protocol
+    // result value because TEAM_RESULT has no rate-limit enum.
+    static constexpr uint32_t kTeamSelectIntervalTicks = 1;
+
+    bool admit(uint16_t client_id) {
+        if (client_id == 0 || sessions_.find(client_id) != sessions_.end())
+            return false;
+        SessionRecord record;
+        record.client_id = client_id;
+        sessions_.emplace(client_id, record);
+        return true;
+    }
+
+    bool contains(uint16_t client_id) const {
+        return sessions_.find(client_id) != sessions_.end();
+    }
+
+    const SessionRecord* find(uint16_t client_id) const {
+        const auto it = sessions_.find(client_id);
+        return it == sessions_.end() ? nullptr : &it->second;
+    }
+
+    SessionRecord* find(uint16_t client_id) {
+        const auto it = sessions_.find(client_id);
+        return it == sessions_.end() ? nullptr : &it->second;
+    }
+
+    bool consumeTeamSelectRequest(uint16_t client_id, uint32_t server_tick) {
+        SessionRecord* record = find(client_id);
+        if (record == nullptr)
+            return false;
+        if (record->has_team_select_tick &&
+            static_cast<uint32_t>(server_tick - record->last_team_select_tick) < kTeamSelectIntervalTicks)
+            return false;
+        record->last_team_select_tick = server_tick;
+        record->has_team_select_tick = true;
+        return true;
+    }
+
+    bool assignTeam(uint16_t client_id, FpsTeam team, RoundPhase phase) {
+        SessionRecord* record = find(client_id);
+        if (record == nullptr || (team != FpsTeam::Spectator && !isPlayingTeam(team)))
+            return false;
+        record->team = team;
+        record->state = team == FpsTeam::Spectator
+            ? SessionState::Spectating
+            : (canSpawnNow(phase) ? SessionState::Active : SessionState::AwaitingSpawn);
+        return true;
+    }
+
+    bool markSpawned(uint16_t client_id, FpsTeam team, RoundPhase phase) {
+        if (!assignTeam(client_id, team, phase) || !isPlayingTeam(team))
+            return false;
+        SessionRecord* record = find(client_id);
+        record->state = canSpawnNow(phase) ? SessionState::Active : SessionState::AwaitingSpawn;
+        return true;
+    }
+
+    bool markAwaitingSpawn(uint16_t client_id) {
+        SessionRecord* record = find(client_id);
+        if (record == nullptr || !isPlayingTeam(record->team))
+            return false;
+        record->state = SessionState::AwaitingSpawn;
+        return true;
+    }
+
+    void remove(uint16_t client_id) { sessions_.erase(client_id); }
+    void clear() { sessions_.clear(); }
+    size_t size() const { return sessions_.size(); }
+
+private:
+    std::unordered_map<uint16_t, SessionRecord> sessions_;
+};
+
+// Server ingress uses this before mutating an ECS TeamComponent or session.
+// The Live exception belongs only to a first team choice: an existing pawn or
+// any session that has already chosen a team stays subject to the normal phase
+// gate, so it cannot use a late join request as a team-switch path.
+inline TeamSelectResult validateSessionTeamSelect(const SessionCoordinator& sessions,
+                                                  uint16_t client_id,
+                                                  bool has_player_entity,
+                                                  FpsTeam desired,
+                                                  bool auto_assign,
+                                                  int32_t attackers,
+                                                  int32_t defenders,
+                                                  RoundPhase phase,
+                                                  const ModeConfig& cfg,
+                                                  FpsTeam& out_team) {
+    const SessionRecord* record = sessions.find(client_id);
+    const bool initial_admission = record != nullptr &&
+        !has_player_entity &&
+        record->state == SessionState::AwaitingTeam &&
+        record->team == FpsTeam::None;
+    return validateTeamSelect(desired, auto_assign, attackers, defenders, phase,
+                              cfg, out_team, initial_admission);
 }
 
 // --- Buy ----------------------------------------------------------------------------
@@ -811,6 +938,27 @@ private:
     }
 };
 
+enum class EconomyTransitionKind : uint8_t {
+    None = 0,
+    Buy,
+    DeathKill,
+    DeathSuicide,
+    BombPlanter,
+    BombTeam,
+    BombDefuse,
+    RoundEnd,
+    PeriodReset,
+};
+
+// This record is diagnostic state only.  It lets the server and pure tests
+// verify that a world applied the expected economy hook without creating a
+// second wallet or a parallel match authority.
+struct EconomyTransitionState {
+    uint64_t count = 0;
+    EconomyTransitionKind last_kind = EconomyTransitionKind::None;
+    int32_t last_amount = 0;
+};
+
 // All mutable competitive authority belongs to the loaded server world.  The
 // server stores this in that world's registry context, so a level restart or a
 // second world cannot inherit a previous match, bomb channel, input edge, or
@@ -823,6 +971,8 @@ struct CompetitiveWorldContext {
     EconomySystem economy;
     BombSystem bomb;
     BombHooksAdapter bomb_hooks;
+    SessionCoordinator sessions;
+    EconomyTransitionState economy_transitions;
     entt::entity match_entity = entt::null;
     std::unordered_map<uint16_t, bool> bomb_use_held;
     std::unordered_map<uint16_t, uint16_t> bomb_last_buttons;
@@ -831,7 +981,135 @@ struct CompetitiveWorldContext {
     bool bomb_sites_authored = false;
     float round_heartbeat = 0.0f;
 
-    CompetitiveWorldContext() : bomb_hooks(&bomb) {}
+    CompetitiveWorldContext() : bomb_hooks(&bomb) {
+        round.bomb_hooks = &bomb_hooks;
+    }
+
+    void configure(const ModeConfig& mode_config, const EconomyConfig& economy_config = EconomyConfig{}) {
+        clear();
+        enabled = true;
+        round.configure(mode_config);
+        round.bomb_hooks = &bomb_hooks;
+        buy.config = mode_config;
+        economy.config = economy_config;
+    }
+
+    BuyResult onBuy(const BuyContext& context, uint16_t item_id, FpsLogic::DroppedItem* out_dropped = nullptr) {
+        const int32_t before = context.money ? context.money->money() : 0;
+        const BuyResult result = buy.buy(context, item_id, out_dropped);
+        if (result == BuyResult::Ok && context.money)
+            recordEconomyTransition(EconomyTransitionKind::Buy, context.money->money() - before);
+        return result;
+    }
+
+    int32_t onDeath(MoneyComponent* victim, MoneyComponent* killer, bool self_inflicted,
+                    const WeaponCatalogDef* weapon_def) {
+        if (self_inflicted) {
+            if (!victim)
+                return 0;
+            const int32_t amount = economy.applySuicidePenalty(*victim);
+            recordEconomyTransition(EconomyTransitionKind::DeathSuicide, amount);
+            return amount;
+        }
+        if (!killer)
+            return 0;
+        const int32_t amount = economy.awardKill(*killer, weapon_def);
+        recordEconomyTransition(EconomyTransitionKind::DeathKill, amount);
+        return amount;
+    }
+
+    int32_t onBombPlanter(MoneyComponent& money) {
+        const int32_t amount = economy.awardPlantPlanter(money);
+        recordEconomyTransition(EconomyTransitionKind::BombPlanter, amount);
+        return amount;
+    }
+
+    int32_t onBombTeam(MoneyComponent& money) {
+        const int32_t amount = economy.awardPlantTeam(money);
+        recordEconomyTransition(EconomyTransitionKind::BombTeam, amount);
+        return amount;
+    }
+
+    int32_t onBombDefuse(MoneyComponent& money) {
+        const int32_t amount = economy.awardDefuse(money);
+        recordEconomyTransition(EconomyTransitionKind::BombDefuse, amount);
+        return amount;
+    }
+
+    int32_t onRoundEnd(MoneyComponent& money, FpsTeam player_team,
+                       RoundWinner winner, RoundEndReason reason) {
+        const int32_t amount = economy.awardRoundEnd(money, player_team, winner, reason);
+        recordEconomyTransition(EconomyTransitionKind::RoundEnd, amount);
+        return amount;
+    }
+
+    void onPeriodReset(MoneyComponent& money, bool overtime) {
+        const int32_t before = money.money();
+        money.reset(round.config.currentStartMoney(overtime), round.config.money_cap);
+        recordEconomyTransition(EconomyTransitionKind::PeriodReset, money.money() - before);
+    }
+
+    void onMatchStart(MoneyComponent& money) {
+        const int32_t before = money.money();
+        money.reset(round.config.currentStartMoney(false), round.config.money_cap);
+        recordEconomyTransition(EconomyTransitionKind::PeriodReset, money.money() - before);
+    }
+
+    // RoundSystem is the canonical match authority.  This entity is its
+    // one-way ECS publication for replication and systems that consume the
+    // match snapshot.  Keeping publication here makes the world boundary
+    // explicit and avoids a second writable match state.
+    void createMatchSnapshot(entt::registry& registry) {
+        if (!registry.valid(match_entity))
+            match_entity = registry.create();
+        syncMatchSnapshot(registry);
+    }
+
+    bool syncMatchSnapshot(entt::registry& registry) const {
+        if (!registry.valid(match_entity))
+            return false;
+        registry.get_or_emplace<MatchStateComponent>(match_entity) = round.state;
+        registry.get_or_emplace<CountdownTimerComponent>(match_entity) = round.timer;
+        return true;
+    }
+
+    bool snapshotMatches(const entt::registry& registry) const {
+        if (!registry.valid(match_entity) ||
+            !registry.all_of<MatchStateComponent, CountdownTimerComponent>(match_entity))
+            return false;
+
+        const auto& snapshot = registry.get<MatchStateComponent>(match_entity);
+        const auto& snapshot_timer = registry.get<CountdownTimerComponent>(match_entity);
+        const auto& canonical = round.state;
+        return snapshot.phase == canonical.phase &&
+            snapshot.phase_time_remaining == canonical.phase_time_remaining &&
+            snapshot.phase_deadline_tick == canonical.phase_deadline_tick &&
+            snapshot.server_tick == canonical.server_tick &&
+            snapshot.round_number == canonical.round_number &&
+            snapshot.wins_attackers == canonical.wins_attackers &&
+            snapshot.wins_defenders == canonical.wins_defenders &&
+            snapshot.ot_wins_attackers == canonical.ot_wins_attackers &&
+            snapshot.ot_wins_defenders == canonical.ot_wins_defenders &&
+            snapshot.first_half_wins_attackers == canonical.first_half_wins_attackers &&
+            snapshot.first_half_wins_defenders == canonical.first_half_wins_defenders &&
+            snapshot.bomb_planted == canonical.bomb_planted &&
+            snapshot.overtime == canonical.overtime &&
+            snapshot.paused == canonical.paused &&
+            snapshot.teams_swapped == canonical.teams_swapped &&
+            snapshot.last_reason == canonical.last_reason &&
+            snapshot.last_winner == canonical.last_winner &&
+            snapshot.match_winner == canonical.match_winner &&
+            snapshot_timer.duration == round.timer.duration &&
+            snapshot_timer.remaining == round.timer.remaining &&
+            snapshot_timer.running == round.timer.running &&
+            snapshot_timer.loop == round.timer.loop;
+    }
+
+    void destroyMatchSnapshot(entt::registry& registry) {
+        if (registry.valid(match_entity))
+            registry.destroy(match_entity);
+        clear();
+    }
 
     void clear() {
         enabled = false;
@@ -840,6 +1118,9 @@ struct CompetitiveWorldContext {
         economy = EconomySystem{};
         bomb = BombSystem{};
         bomb_hooks.system = &bomb;
+        round.bomb_hooks = &bomb_hooks;
+        sessions.clear();
+        economy_transitions = EconomyTransitionState{};
         match_entity = entt::null;
         bomb_use_held.clear();
         bomb_last_buttons.clear();
@@ -847,6 +1128,13 @@ struct CompetitiveWorldContext {
         bomb_prev_weapon.clear();
         bomb_sites_authored = false;
         round_heartbeat = 0.0f;
+    }
+
+private:
+    void recordEconomyTransition(EconomyTransitionKind kind, int32_t amount) {
+        ++economy_transitions.count;
+        economy_transitions.last_kind = kind;
+        economy_transitions.last_amount = amount;
     }
 };
 

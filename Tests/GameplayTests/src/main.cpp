@@ -914,6 +914,92 @@ bool testCompetitiveTimerTargetSavedAndPause()
     return pass(name);
 }
 
+bool testCompetitiveWorldPhaseAuthority()
+{
+    const std::string name = "CompetitiveWorld_PhaseAuthority";
+    using namespace Competitive;
+
+    entt::registry first_world;
+    entt::registry second_world;
+    auto& first = first_world.ctx().emplace<CompetitiveWorldContext>();
+    auto& second = second_world.ctx().emplace<CompetitiveWorldContext>();
+    first.enabled = true;
+    second.enabled = true;
+    first.round.configure(fastCompConfig());
+    second.round.configure(fastCompConfig());
+    first.createMatchSnapshot(first_world);
+    second.createMatchSnapshot(second_world);
+    if (!first.snapshotMatches(first_world) || !second.snapshotMatches(second_world))
+        return fail(name, "initial per-world match snapshots differ from their canonical rounds");
+
+    auto tick_world = [&](CompetitiveWorldContext& context, entt::registry& registry,
+                          float dt, RoundTickInput input) {
+        context.round.tick(dt, input);
+        return context.syncMatchSnapshot(registry) && context.snapshotMatches(registry);
+    };
+    auto drive_to_live = [&](CompetitiveWorldContext& context, entt::registry& registry) {
+        for (int i = 0; i < 20 && context.round.state.phase != RoundPhase::Live; ++i)
+            if (!tick_world(context, registry, 0.06f, bothAlive())) return false;
+        return context.round.state.phase == RoundPhase::Live;
+    };
+
+    // First world advances while the second remains at its own initial phase.
+    if (!tick_world(first, first_world, 0.01f, bothAlive()) ||
+        first.round.state.phase != RoundPhase::Warmup)
+        return fail(name, "first world did not enter Warmup with a synchronized snapshot");
+    if (second.round.state.phase != RoundPhase::WaitingForPlayers || !second.snapshotMatches(second_world))
+        return fail(name, "first-world transition changed the second world");
+    if (!drive_to_live(first, first_world))
+        return fail(name, "first world did not reach Live");
+
+    // The current FSM defines detonation before defuse when both signals land
+    // in one tick.  Keep that winner choice local to this world's inputs.
+    RoundTickInput simultaneous = bothAlive();
+    simultaneous.bomb_detonated = true;
+    simultaneous.bomb_defused = true;
+    if (!tick_world(first, first_world, 0.01f, simultaneous) ||
+        first.round.state.phase != RoundPhase::RoundEnd ||
+        first.round.state.last_winner != RoundWinner::Attackers ||
+        first.round.state.last_reason != RoundEndReason::TargetBombed)
+        return fail(name, "same-tick bomb win inputs did not use the configured order");
+    if (second.round.state.last_winner != RoundWinner::None || !second.snapshotMatches(second_world))
+        return fail(name, "first-world win input crossed into the second world");
+
+    // Finish the first half entirely through canonical round inputs.  Every
+    // tick republished above proves the ECS entity stays a mirror across the
+    // RoundEnd -> Halftime boundary.
+    for (int round = 1; round < 12; ++round) {
+        if (!drive_to_live(first, first_world))
+            return fail(name, "round cycle did not return to Live");
+        if (!tick_world(first, first_world, 0.01f, bothAlive(1, 0)))
+            return fail(name, "elimination win did not synchronize");
+        for (int i = 0; i < 20 && first.round.state.phase == RoundPhase::RoundEnd; ++i)
+            if (!tick_world(first, first_world, 0.06f, bothAlive()))
+                return fail(name, "round-end transition did not synchronize");
+    }
+    if (first.round.state.phase != RoundPhase::Halftime ||
+        first.round.state.wins_attackers != 12 ||
+        first.round.state.first_half_wins_attackers != 12 ||
+        !first.snapshotMatches(first_world))
+        return fail(name, "halftime snapshot did not retain canonical phase and wins");
+
+    const entt::entity retired_snapshot = first.match_entity;
+    first.destroyMatchSnapshot(first_world);
+    if (first_world.valid(retired_snapshot) || first.match_entity != entt::null)
+        return fail(name, "teardown left the prior match snapshot alive");
+    first_world.ctx().erase<CompetitiveWorldContext>();
+    auto& restarted = first_world.ctx().emplace<CompetitiveWorldContext>();
+    restarted.enabled = true;
+    restarted.round.configure(fastCompConfig());
+    restarted.createMatchSnapshot(first_world);
+    if (restarted.round.state.phase != RoundPhase::WaitingForPlayers ||
+        restarted.round.state.wins_attackers != 0 || !restarted.snapshotMatches(first_world))
+        return fail(name, "restarted world inherited phase or wins from its prior match");
+    if (second.round.state.phase != RoundPhase::WaitingForPlayers || !second.snapshotMatches(second_world))
+        return fail(name, "restarting one world changed the other world's authority");
+    return pass(name);
+}
+
 bool testCompetitiveEconomyStreakCap()
 {
     const std::string name = "CompetitiveEconomyStreakCap";
@@ -954,6 +1040,121 @@ bool testCompetitiveEconomyStreakCap()
     if (k.money() != 100) return fail(name, "AWP kill award wrong");
     eco.awardPlantPlanter(k); eco.awardPlantTeam(k);
     if (k.money() != 100 + 300 + 800) return fail(name, "plant hooks wrong");
+    return pass(name);
+}
+
+bool testCompetitiveWorldEconomyHooks()
+{
+    const std::string name = "CompetitiveWorld_EconomyHooks";
+    using namespace Competitive;
+
+    entt::registry first_world;
+    entt::registry second_world;
+    auto& first = first_world.ctx().emplace<CompetitiveWorldContext>();
+    auto& second = second_world.ctx().emplace<CompetitiveWorldContext>();
+    ModeConfig config = fastCompConfig();
+    first.configure(config);
+    second.configure(config);
+
+    MoneyComponent first_money;
+    MoneyComponent second_money;
+    first.onMatchStart(first_money);
+    second.onMatchStart(second_money);
+    if (first_money.money() != config.start_money || second_money.money() != config.start_money ||
+        first.economy_transitions.count != 1 || second.economy_transitions.count != 1)
+        return fail(name, "match-start money was not isolated per world");
+
+    // The buy request sequence is world-local.  Its successful money mutation
+    // must precede the later death and bomb hooks in this world's trace only.
+    first_money.reset(5000, config.money_cap);
+    InventoryComponent inventory;
+    PlayerLoadoutComponent loadout;
+    WeaponComponent weapon;
+    ArmorComponent armor;
+    FpsLogic::grantLoadout(inventory, loadout, weapon, WeaponType::PISTOL);
+    loadout.slots[static_cast<size_t>(WeaponSlot::Primary)] = WeaponSlotState{};
+    FpsLogic::syncInventory(inventory, loadout);
+    const WeaponCatalogDef* ak = findCatalogByAlias("ak47");
+    const WeaponCatalogDef* awp = findCatalogByAlias("awp");
+    if (!ak || !awp)
+        return fail(name, "economy fixture catalog entries are missing");
+    BuyContext buy_context;
+    buy_context.client_id = 42;
+    buy_context.request_seq = 1;
+    buy_context.phase = RoundPhase::Freeze;
+    buy_context.alive = true;
+    buy_context.in_buy_zone = true;
+    buy_context.team_id = teamId(FpsTeam::Attackers);
+    buy_context.money = &first_money;
+    buy_context.inventory = &inventory;
+    buy_context.loadout = &loadout;
+    buy_context.weapon = &weapon;
+    buy_context.armor = &armor;
+    if (first.onBuy(buy_context, ak->id) != BuyResult::Ok || first_money.money() != 5000 - ak->price ||
+        first.economy_transitions.count != 2 || first.economy_transitions.last_kind != EconomyTransitionKind::Buy ||
+        second.buy.lastResultFor(42) != BuyResult::UnknownItem)
+        return fail(name, "buy hook crossed worlds or did not record its transition");
+
+    MoneyComponent victim;
+    victim.reset(config.start_money, config.money_cap);
+    const int before_kill = first_money.money();
+    if (first.onDeath(&victim, &first_money, false, awp) != awp->kill_award ||
+        first_money.money() != before_kill + awp->kill_award ||
+        first.economy_transitions.count != 3 || first.economy_transitions.last_kind != EconomyTransitionKind::DeathKill)
+        return fail(name, "death hook did not award the catalog kill in order");
+    if (second_money.money() != config.start_money || second.economy_transitions.count != 1)
+        return fail(name, "death hook changed the second world");
+
+    const int before_plant = first_money.money();
+    if (first.onBombPlanter(first_money) != first.economy.config.plant_planter ||
+        first.onBombTeam(first_money) != first.economy.config.plant_team ||
+        first.onBombDefuse(victim) != first.economy.config.defuse_bonus ||
+        first_money.money() != before_plant + first.economy.config.plant_planter + first.economy.config.plant_team ||
+        first.economy_transitions.count != 6 || first.economy_transitions.last_kind != EconomyTransitionKind::BombDefuse)
+        return fail(name, "bomb economy hooks did not preserve their configured ordering");
+
+    bool round_end_after_phase = false;
+    first.round.on_round_end = [&](RoundWinner winner, RoundEndReason reason) {
+        round_end_after_phase = first.round.state.phase == RoundPhase::RoundEnd &&
+            first.onRoundEnd(first_money, FpsTeam::Attackers, winner, reason) > 0;
+    };
+    tickComp(first.round, 0.01f, bothAlive());
+    for (int i = 0; i < 20 && first.round.state.phase != RoundPhase::Live; ++i)
+        tickComp(first.round, 0.06f, bothAlive());
+    tickComp(first.round, 0.01f, bothAlive(1, 0));
+    if (!round_end_after_phase || first.economy_transitions.count != 7 ||
+        first.economy_transitions.last_kind != EconomyTransitionKind::RoundEnd)
+        return fail(name, "round-end reward did not follow the current phase transition hook");
+
+    first_money.loss_streak = 4;
+    first.onPeriodReset(first_money, false);
+    if (first_money.money() != config.start_money || first_money.wallet.cap != config.money_cap ||
+        first_money.loss_streak != 0 || first.economy_transitions.last_kind != EconomyTransitionKind::PeriodReset)
+        return fail(name, "regulation period reset did not use the configured money reset");
+    first_money.loss_streak = 3;
+    first.onPeriodReset(first_money, true);
+    if (first_money.money() != config.overtime_start_money || first_money.loss_streak != 0)
+        return fail(name, "overtime period reset did not use the configured money reset");
+
+    // Reusing the context must remove buy dedupe and every economy trace from
+    // the retired world.  A newly configured world starts a distinct match.
+    first.clear();
+    if (first.enabled || first.economy_transitions.count != 0 ||
+        first.economy_transitions.last_kind != EconomyTransitionKind::None ||
+        first.buy.lastResultFor(42) != BuyResult::UnknownItem ||
+        first.round.bomb_hooks != &first.bomb_hooks ||
+        first.bomb_hooks.system != &first.bomb)
+        return fail(name, "world clear retained stale economy or hook state");
+    first.configure(config);
+    if (first.round.bomb_hooks != &first.bomb_hooks ||
+        first.bomb_hooks.system != &first.bomb)
+        return fail(name, "world reconfigure did not restore owned bomb hooks");
+    MoneyComponent restarted_money;
+    restarted_money.reset(5000, config.money_cap);
+    buy_context.money = &restarted_money;
+    if (first.onBuy(buy_context, ak->id) != BuyResult::Ok || first.economy_transitions.count != 1 ||
+        second_money.money() != config.start_money || second.economy_transitions.count != 1)
+        return fail(name, "reconfigured world inherited stale buy or economy state");
     return pass(name);
 }
 
@@ -1115,6 +1316,74 @@ bool testCompetitiveTeamAutoAssign()
     if (validateTeamSelect(FpsTeam::None, true, 2, 2, RoundPhase::Warmup, cfg, out) != TeamSelectResult::Ok || out != FpsTeam::Defenders)
         return fail(name, "auto-assign in Warmup failed");
     if (!canSpawnNow(RoundPhase::Freeze) || canSpawnNow(RoundPhase::Live)) return fail(name, "late-join spawn gate wrong");
+    return pass(name);
+}
+
+bool testCompetitiveSessionFlow()
+{
+    const std::string name = "CompetitiveSessionFlow";
+    using namespace Competitive;
+
+    SessionCoordinator sessions;
+    ModeConfig cfg;
+    if (!sessions.admit(7) || sessions.admit(7) || sessions.size() != 1)
+        return fail(name, "admission did not create one deterministic session");
+    const SessionRecord* admitted = sessions.find(7);
+    if (admitted == nullptr || admitted->state != SessionState::AwaitingTeam ||
+        admitted->team != FpsTeam::None)
+        return fail(name, "competitive admission did not await a team without a pawn");
+
+    if (!sessions.consumeTeamSelectRequest(7, 100) ||
+        sessions.consumeTeamSelectRequest(7, 100) ||
+        !sessions.consumeTeamSelectRequest(7, 101))
+        return fail(name, "team-request throttle did not reject same-tick replay deterministically");
+
+    FpsTeam late_join_team = FpsTeam::None;
+    const SessionRecord admitted_before_selection = *sessions.find(7);
+    if (validateSessionTeamSelect(sessions, 7, false, FpsTeam::Attackers, false,
+                                  1, 1, RoundPhase::Live, cfg, late_join_team) != TeamSelectResult::Ok ||
+        late_join_team != FpsTeam::Attackers ||
+        sessions.find(7)->team != admitted_before_selection.team ||
+        sessions.find(7)->state != admitted_before_selection.state)
+        return fail(name, "Live ingress did not admit a pawnless team selection without mutation");
+
+    if (!sessions.assignTeam(7, late_join_team, RoundPhase::Live))
+        return fail(name, "late join team was not retained");
+    const SessionRecord* late_join = sessions.find(7);
+    if (late_join == nullptr || late_join->team != FpsTeam::Attackers ||
+        late_join->state != SessionState::AwaitingSpawn)
+        return fail(name, "late join did not remain pawnless until a legal spawn phase");
+
+    if (!sessions.markSpawned(7, FpsTeam::Attackers, RoundPhase::Freeze) ||
+        sessions.find(7)->state != SessionState::Active)
+        return fail(name, "Freeze spawn did not transition the session active");
+
+    FpsTeam switched_team = FpsTeam::None;
+    const SessionRecord active_before_switch = *sessions.find(7);
+    if (validateSessionTeamSelect(sessions, 7, true, FpsTeam::Defenders, false,
+                                  1, 1, RoundPhase::Live, cfg, switched_team) != TeamSelectResult::PhaseClosed ||
+        switched_team != FpsTeam::None ||
+        sessions.find(7)->team != active_before_switch.team ||
+        sessions.find(7)->state != active_before_switch.state)
+        return fail(name, "Live ingress allowed an active-player team switch");
+
+    FpsTeam invalid_team = FpsTeam::Attackers;
+    if (validateSessionTeamSelect(sessions, 7, false, FpsTeam::None, false,
+                                  1, 1, RoundPhase::Freeze, cfg, invalid_team) != TeamSelectResult::InvalidTeam ||
+        invalid_team != FpsTeam::None ||
+        sessions.find(7)->team != active_before_switch.team ||
+        sessions.find(7)->state != active_before_switch.state)
+        return fail(name, "invalid ingress team request partially mutated the active session");
+
+    if (!sessions.assignTeam(7, FpsTeam::Spectator, RoundPhase::Freeze) ||
+        sessions.find(7)->state != SessionState::Spectating)
+        return fail(name, "spectator selection did not publish a pawnless spectator state");
+    if (sessions.assignTeam(7, FpsTeam::None, RoundPhase::Freeze))
+        return fail(name, "invalid team changed session state");
+
+    sessions.remove(7);
+    if (sessions.contains(7) || sessions.size() != 0)
+        return fail(name, "disconnect cleanup retained the session record");
     return pass(name);
 }
 
@@ -1543,9 +1812,12 @@ int main()
     ok = testCompetitiveRoundFsmFullCycleHalftimeClinch() && ok;
     ok = testCompetitiveOvertime() && ok;
     ok = testCompetitiveTimerTargetSavedAndPause() && ok;
+    ok = testCompetitiveWorldPhaseAuthority() && ok;
     ok = testCompetitiveEconomyStreakCap() && ok;
+    ok = testCompetitiveWorldEconomyHooks() && ok;
     ok = testCompetitiveBuyMatrix() && ok;
     ok = testCompetitiveTeamAutoAssign() && ok;
+    ok = testCompetitiveSessionFlow() && ok;
     ok = testCompetitiveBuyZoneOccupancy() && ok;
     ok = testWeaponRosterIntegrity() && ok;
     ok = testWeaponAuthorityTiming() && ok;
