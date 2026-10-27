@@ -117,9 +117,7 @@
       },
       "mesh": {
         "path": "assets/models/grasscube.obj",
-        "textures": [
-          "textures/man.bmp"
-        ],
+        "textures": [],
         "culling": true,
         "transparent": false,
         "visible": true
