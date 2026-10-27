@@ -1996,6 +1996,25 @@ GAME_API bool gardenServerInit(EngineServices* services)
             Competitive::ModeConfig ccfg; // all [P]/[V] values are data here
             if (const char* v = std::getenv("FPS_ROUND_SECONDS")) { float f = (float)std::atof(v); if (f > 0) ccfg.round_seconds = f; }
             if (const char* v = std::getenv("FPS_WARMUP_SECONDS")) { float f = (float)std::atof(v); if (f >= 0) ccfg.warmup_seconds = f; }
+            const char* fast_match_env = std::getenv("FPS_TEST_FAST_MATCH");
+            const bool fast_match = fast_match_env && std::strcmp(fast_match_env, "1") == 0;
+            if (fast_match) {
+                // This is an explicit process-test configuration.  It keeps
+                // every duration valid while completing one regulation round
+                // promptly, without changing the production mode defaults.
+                ccfg.max_rounds = 1;
+                ccfg.overtime_max_rounds = 1;
+                ccfg.halftime_enabled = false;
+                ccfg.overtime_enabled = false;
+                ccfg.warmup_seconds = 1.0f;
+                ccfg.freeze_seconds = 1.0f;
+                ccfg.round_seconds = 5.0f;
+                ccfg.round_end_seconds = 1.0f;
+                ccfg.halftime_seconds = 1.0f;
+                ccfg.match_end_seconds = 1.0f;
+                ccfg.buy_window_after_live = 1.0f;
+                LOG_ENGINE_INFO("[ACCEPT] FPS_TEST_FAST_MATCH=1: one-round competitive process configuration enabled");
+            }
             Competitive::CompetitiveWorldContext& match_context =
                 Competitive::startCompetitiveWorldRuntime(match_world->registry, ccfg);
             g_bomb_system.on_transition = [](Competitive::BombState from, Competitive::BombState to) {
@@ -2052,13 +2071,23 @@ GAME_API bool gardenServerInit(EngineServices* services)
         if (!w->registry.all_of<FpsHealthComponent>(player_entity)) {
             return true;
         }
+        const auto& health = w->registry.get<FpsHealthComponent>(player_entity);
+        if (!health.alive) {
+            return false;
+        }
+        // Deathmatch and team deathmatch do not compose a competitive world
+        // context.  Their movement gate is the pawn's authoritative alive
+        // state, so do not evaluate the competitive round phase here.
+        if (!g_competitive) {
+            return true;
+        }
         if (!w->registry.all_of<TeamComponent>(player_entity)) {
-            return !g_competitive;
+            return false;
         }
         return FPSShooter::isPawnMovementAllowed(
-            w->registry.get<FpsHealthComponent>(player_entity),
+            health,
             w->registry.get<TeamComponent>(player_entity),
-            g_competitive,
+            true,
             g_round_system.state.phase);
     });
 

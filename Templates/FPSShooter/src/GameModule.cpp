@@ -23,6 +23,7 @@
 #include "shared/PlayerLifecycle.hpp"
 #include "shared/FpsAnimationPresentation.hpp"
 #include "GameHUD.hpp"
+#include "ClientAcceptanceScript.hpp"
 #include "ui/CombatFeedPresentation.hpp"
 #include "ui/UiLogic.hpp"
 #include "ui/UiInput.hpp"
@@ -197,6 +198,7 @@ static EngineServices* g_services = nullptr;
 static std::unique_ptr<PlayerController> g_player_controller;
 static Net::ClientNetworkManager g_network;
 static GameHUD g_hud;
+static FPSShooter::ClientAcceptanceScript g_acceptance_script;
 
 static entt::entity g_player_entity = entt::null;
 static entt::entity g_local_input_entity = entt::null;
@@ -253,10 +255,11 @@ static UiLogic::RadarPresentation g_radar;
 static UiLogic::RadarThrottle g_radar_throttle;
 static bool uiIsOwned(uint16_t id) { return std::find(g_owned_items.begin(), g_owned_items.end(), id) != g_owned_items.end(); }
 static bool uiIsEquipped(const WeaponCatalogDef& def) { return def.weapon_type != WeaponType::COUNT && def.weapon_type == g_local_weapon_type; }
-static void sendBuyRequest(uint16_t item_id) {
+static uint32_t sendBuyRequest(uint16_t item_id) {
     BuyRequestMessage msg; msg.request_seq = g_comp.next_buy_seq++; msg.item_id = item_id;
     Net::BitWriter writer; CompetitiveSerializer::serialize(writer, msg);
     g_network.sendCustomReliable(writer);
+    return msg.request_seq;
 }
 static void sendTeamSelect(Competitive::FpsTeam desired, bool auto_assign) {
     TeamSelectMessage msg; msg.desired_team = static_cast<uint8_t>(desired); msg.auto_assign = auto_assign ? 1 : 0;
@@ -360,6 +363,7 @@ GAME_API bool gardenGameInit(EngineServices* services)
     registerFpsAudioEvents();
 
     g_network.setWorld(services->game_world);
+    g_acceptance_script.loadFromEnvironment();
 
     g_network.setCustomMessageHandler([](uint8_t message_type, Net::BitReader& reader) {
         // Competitive messages (69-74): server-authoritative, client renders.
@@ -391,14 +395,16 @@ GAME_API bool gardenGameInit(EngineServices* services)
                 if (msg.item_id == 43) { g_comp.armor = 100; g_comp.has_helmet = true; }
                 if (msg.item_id == 44) g_comp.has_kit = true;
             }
+            g_acceptance_script.observeBuyResult(msg.request_seq, accepted);
             if (accepted) AudioEventSystem::get().play2D("ui.click");
             return;
         }
         if (message_type == static_cast<uint8_t>(CompetitiveMessageType::TEAM_RESULT)) {
             TeamResultMessage msg; if (!CompetitiveSerializer::deserialize(reader, msg)) return;
-            UiLogic::applyAuthoritativeTeamReply(
+            const bool accepted = UiLogic::applyAuthoritativeTeamReply(
                 g_ui, static_cast<Competitive::TeamSelectResult>(msg.result),
                 Competitive::teamFromId(msg.team), g_comp.local_team);
+            g_acceptance_script.observeTeamResult(accepted, Competitive::teamFromId(msg.team));
             return;
         }        switch (static_cast<CombatMessageType>(message_type)) {
         case CombatMessageType::SHOOT_RESULT: {
@@ -555,6 +561,7 @@ GAME_API void gardenGameShutdown()
     AudioSystem::get().shutdown();
     g_network.disconnect("Game closing");
     g_network.shutdown();
+    g_acceptance_script.reset();
     g_player_controller.reset();
     g_hud.shutdown();
     if (g_services && g_services->input_actions)
@@ -601,6 +608,21 @@ GAME_API void gardenGameUpdate(float delta_time)
             if (g_player_controller)
                 g_player_controller->setPossessedPlayer(g_player_entity);
         }
+    }
+
+    const entt::entity script_local_player = g_network.getLocalPlayerEntity();
+    FPSShooter::ClientAcceptanceObservation acceptance_observation;
+    acceptance_observation.connected = g_network.isConnected();
+    acceptance_observation.has_round_state = g_comp.has_round_state;
+    acceptance_observation.round_phase = g_comp.phase;
+    acceptance_observation.local_team = g_comp.local_team;
+    acceptance_observation.has_local_pawn = game_world->registry.valid(script_local_player);
+    const FPSShooter::ClientAcceptanceDispatch acceptance_dispatch =
+        g_acceptance_script.tick(delta_time, acceptance_observation);
+    if (acceptance_dispatch.kind == FPSShooter::ClientAcceptanceDispatch::Kind::Team) {
+        sendTeamSelect(acceptance_dispatch.team, acceptance_dispatch.auto_assign);
+    } else if (acceptance_dispatch.kind == FPSShooter::ClientAcceptanceDispatch::Kind::Buy) {
+        g_acceptance_script.noteBuyRequestSent(sendBuyRequest(acceptance_dispatch.item_id));
     }
 
     // Resolve UI state before projecting intent or consuming mouse/camera input.
@@ -710,14 +732,18 @@ GAME_API void gardenGameUpdate(float delta_time)
         const bool movement_allowed = FPSShooter::isMovementInputAllowed(
             g_local_alive, movement_locked);
         const auto& weapon_def = getWeaponDef(g_local_weapon_type);
+        const bool can_fire = g_local_fire_cooldown <= 0.0f && !g_local_reloading && g_local_ammo > 0;
+        const bool can_reload = !g_local_reloading && g_local_ammo < weapon_def.max_ammo && g_local_reserve_ammo > 0;
         InputState input_state = FPSShooter::sampleNetworkInput(
             *input_actions,
             game_world->world_camera.rotation.y,
             game_world->world_camera.rotation.x,
             movement_allowed,
             ui_modal,
-            g_local_fire_cooldown <= 0.0f && !g_local_reloading && g_local_ammo > 0,
-            !g_local_reloading && g_local_ammo < weapon_def.max_ammo && g_local_reserve_ammo > 0);
+            can_fire,
+            can_reload);
+        if (g_local_alive && !ui_modal)
+            g_acceptance_script.applyInput(input_state, movement_allowed, can_fire, can_reload);
 
         // Predict local weapon controls; the server consumes the same input flags authoritatively.
         if ((input_state.buttons & InputFlags::ATTACK) != 0)

@@ -1,5 +1,6 @@
 #include "GameModuleLoader.hpp"
 #include "GameFramework/GameModeRegistry.hpp"
+#include <atomic>
 #include <cstdio>
 #include <filesystem>
 
@@ -8,12 +9,24 @@
 #   include <windows.h>
 #else
 #   include <dlfcn.h>
+#   include <unistd.h>
 #endif
 
 namespace fs = std::filesystem;
 
 namespace
 {
+    std::atomic_uint64_t g_tempPathOrdinal{0};
+
+    uint64_t currentProcessId()
+    {
+#ifdef _WIN32
+        return static_cast<uint64_t>(GetCurrentProcessId());
+#else
+        return static_cast<uint64_t>(getpid());
+#endif
+    }
+
     int moduleApiRevision(int32_t version)
     {
         return (version >> 24) & 0xff;
@@ -108,8 +121,10 @@ std::string GameModuleLoader::makeTempPath(const std::string& original)
     std::string stem = p.stem().string();
     std::string ext = p.extension().string();
     fs::path dir = p.parent_path();
-    // e.g. MyGame_hot_3.dll
-    return (dir / (stem + "_hot_" + std::to_string(m_reload_counter) + ext)).string();
+    const uint64_t ordinal = g_tempPathOrdinal.fetch_add(1, std::memory_order_relaxed);
+    // e.g. MyGame_hot_1234_0_3.dll (process id, process-wide ordinal, reload counter)
+    return (dir / (stem + "_hot_" + std::to_string(currentProcessId()) + "_" +
+                   std::to_string(ordinal) + "_" + std::to_string(m_reload_counter) + ext)).string();
 }
 
 bool GameModuleLoader::load(const std::string& dll_path)
