@@ -1646,6 +1646,39 @@ static bool testD6QueryFilterTriggers()
     return pass(name);
 }
 
+static bool testD6QueryIgnoreListRaycasts()
+{
+    const std::string name = "D6 query ignore-list raycasts";
+    world w; w.initializePhysics();
+
+    const auto nearer_body = makeStaticBox(w, glm::vec3(0.0f, 0.0f, 2.0f));
+    const auto farther_body = makeStaticBox(w, glm::vec3(0.0f, 0.0f, 5.0f));
+    const glm::vec3 origin(0.0f, 0.0f, 0.0f);
+    const glm::vec3 direction(0.0f, 0.0f, 1.0f);
+
+    PhysicsSystem::RaycastResult hits[4];
+    uint32_t count = w.getPhysicsSystem().raycastAll(
+        origin, direction, 10.0f, PhysicsSystem::QueryFilter{}, hits, 4);
+    if (count != 2 || hits[0].entity != nearer_body || hits[1].entity != farther_body ||
+        hits[0].distance >= hits[1].distance)
+        return fail(name, "unfiltered raycastAll did not return both boxes distance-sorted");
+
+    const entt::entity ignored_entities[] = {nearer_body};
+    PhysicsSystem::QueryFilter ignore_nearer;
+    ignore_nearer.ignore_list = ignored_entities;
+    ignore_nearer.ignore_count = 1;
+
+    const auto closest = w.getPhysicsSystem().raycastClosest(origin, direction, 10.0f, ignore_nearer);
+    if (!closest.hit || closest.entity != farther_body)
+        return fail(name, "raycastClosest did not continue to the farther body after ignoring the nearer one");
+
+    count = w.getPhysicsSystem().raycastAll(origin, direction, 10.0f, ignore_nearer, hits, 4);
+    if (count != 1 || hits[0].entity != farther_body)
+        return fail(name, "raycastAll did not exclude the ignored body");
+
+    return pass(name);
+}
+
 static bool testD6TriggerLifecycle()
 {
     const std::string name = "D6 trigger enter exit exactly once";
@@ -2655,6 +2688,8 @@ int main()
     ok = testD6OverlapAnalyticCases() && ok;
     run("D6 query filter excludes triggers by default");
     ok = testD6QueryFilterTriggers() && ok;
+    run("D6 query ignore-list raycasts");
+    ok = testD6QueryIgnoreListRaycasts() && ok;
     run("D6 trigger enter exit exactly once");
     ok = testD6TriggerLifecycle() && ok;
     run("D6 trigger lifecycle with CharacterController");
