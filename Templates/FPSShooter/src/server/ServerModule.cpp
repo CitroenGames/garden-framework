@@ -610,9 +610,17 @@ static void respawnPlayer(uint16_t client_id, const glm::vec3& spawn_pos)
             auto& trans = view.get<TransformComponent>(entity);
             auto& health = view.get<FpsHealthComponent>(entity);
 
-            // Reset state
-            health.reset();
-            FpsServer::resetFpsDeathTransition(w->registry, entity);
+            // Restore the entire template pawn state at this respawn boundary.
+            // Position, physics, and replication continue below as server
+            // concerns, while the ECS health/loadout/lifecycle state becomes
+            // immediately coherent before the first respawn message.
+            uint8_t team2 = w->registry.all_of<TeamComponent>(entity)
+                ? w->registry.get<TeamComponent>(entity).team_id : FpsLogic::kTeamNone;
+            if (!FPSShooter::restorePawnAfterRespawn(
+                    w->registry, entity, primaryForClient(client_id, team2))) {
+                LOG_ENGINE_ERROR("Player {} respawn rejected: incomplete pawn components", client_id);
+                return;
+            }
             trans.position = spawn_pos;
 
             if (w->registry.all_of<RigidBodyComponent>(entity)) {
@@ -623,14 +631,8 @@ static void respawnPlayer(uint16_t client_id, const glm::vec3& spawn_pos)
 
             ensurePlayerPhysicsBody(*w, entity);
 
-            if (w->registry.all_of<WeaponComponent, InventoryComponent, PlayerLoadoutComponent>(entity)) {
-                auto& weapon = w->registry.get<WeaponComponent>(entity);
-                auto& inv2 = w->registry.get<InventoryComponent>(entity);
-                auto& lo2 = w->registry.get<PlayerLoadoutComponent>(entity);
-                uint8_t team2 = w->registry.all_of<TeamComponent>(entity) ? w->registry.get<TeamComponent>(entity).team_id : FpsLogic::kTeamNone;
-                FpsLogic::grantLoadout(inv2, lo2, weapon, primaryForClient(client_id, team2));
-                sendWeaponState(client_id, entity, weapon);
-            }
+            auto& weapon = w->registry.get<WeaponComponent>(entity);
+            sendWeaponState(client_id, entity, weapon);
 
             // Broadcast respawn to all clients
             PlayerRespawnMessage respawn_msg;
@@ -1686,7 +1688,9 @@ static void handleCompetitiveTeamSelect(uint16_t client_id, BitReader& reader)
             g_sessions.assignTeam(client_id, out, g_round_system.state.phase);
         } else if (e == entt::null) {
             if (g_sessions.assignTeam(client_id, out, g_round_system.state.phase)) {
-                if (Competitive::canSpawnNow(g_round_system.state.phase) &&
+                const Competitive::SessionSpawnDecision spawn_decision =
+                    g_sessions.decideSpawn(client_id, g_round_system.state.phase, false);
+                if (spawn_decision.shouldConstructPawn() &&
                     !spawnPlayerForClient(client_id, Competitive::teamId(out))) {
                     // Keep the accepted side reservation without creating a
                     // half-initialized pawn; Freeze will retry the real spawn.
@@ -1714,6 +1718,7 @@ static void handleCompetitiveTeamSelect(uint16_t client_id, BitReader& reader)
                     // physics position, and the reliable respawn announcement all
                     // change together at the phase boundary.
                     respawnPlayer(client_id, spawn_pos);
+                    g_sessions.markSpawned(client_id, out, g_round_system.state.phase);
                 }
             }
             LOG_ENGINE_INFO("Competitive team select client={} team {}->{}", client_id, (int)old, (int)Competitive::teamId(out));
@@ -1728,55 +1733,16 @@ static void handleCompetitiveTeamSelect(uint16_t client_id, BitReader& reader)
 
 // ---- Player spawning (called by network callbacks) ----
 
-static bool spawnPlayerForClient(uint16_t client_id, uint8_t requested_team)
+// Pawn construction is intentionally below the session/phase decision.  This
+// routine is only called with an authoritative team and a validated spawn;
+// its work is the ECS recipe, physics registration, and spawn publication.
+static bool constructPlayerPawnForClient(
+    world& game_world,
+    uint16_t client_id,
+    uint8_t team_id,
+    const glm::vec3& spawn_pos)
 {
-    if (!g_server_services || !g_server_services->game_world)
-        return false;
-    world* w = g_server_services->game_world;
-    if (findPlayerEntity(*w, client_id) != entt::null)
-        return false;
-
-    if (g_competitive && !Competitive::canSpawnNow(g_round_system.state.phase)) {
-        if (g_sessions.contains(client_id))
-            g_sessions.markAwaitingSpawn(client_id);
-        return false;
-    }
-
-    uint8_t team_id = requested_team == FpsLogic::kTeamNone
-        ? g_game_rules.assignTeam(*w)
-        : requested_team;
-    if (g_competitive) {
-        if (requested_team == FpsLogic::kTeamNone) {
-            int32_t na = 0, nd = 0;
-            competitiveTeamCounts(*w, na, nd);
-            Competitive::FpsTeam assigned = Competitive::autoAssignTeam(na, nd);
-            int32_t cnt = assigned == Competitive::FpsTeam::Attackers ? na : nd;
-            team_id = cnt >= g_round_system.config.team_size
-                ? Competitive::teamId(Competitive::FpsTeam::Spectator)
-                : Competitive::teamId(assigned);
-        }
-        if (!Competitive::isPlayingTeam(Competitive::teamFromId(team_id)))
-            return false;
-        if (requested_team != FpsLogic::kTeamNone) {
-            int32_t attackers = 0, defenders = 0;
-            competitiveTeamCounts(*w, attackers, defenders);
-            const int32_t count = team_id == FpsLogic::kTeamAttackers ? attackers : defenders;
-            const Competitive::SessionRecord* session = g_sessions.find(client_id);
-            const bool reserved = session != nullptr && session->team == Competitive::teamFromId(team_id);
-            if (count > g_round_system.config.team_size ||
-                (!reserved && count >= g_round_system.config.team_size)) {
-                LOG_ENGINE_WARN("Player spawn rejected for client {}: team {} is full", client_id, team_id);
-                return false;
-            }
-        }
-    }
-    glm::vec3 spawn_pos;
-    if (!g_game_rules.tryGetSpawnForPlayer(*w, client_id, team_id, spawn_pos)) {
-        if (g_competitive && g_sessions.contains(client_id))
-            g_sessions.markAwaitingSpawn(client_id);
-        LOG_ENGINE_ERROR("Player spawn rejected for client {}: no valid spawn point", client_id);
-        return false;
-    }
+    world* w = &game_world;
     entt::entity player_entity = w->registry.create();
     uint32_t network_id = g_server_network.registerEntity(player_entity);
 
@@ -1886,6 +1852,72 @@ static bool spawnPlayerForClient(uint16_t client_id, uint8_t requested_team)
     LOG_ENGINE_INFO("Spawned player (net_id={}) for client {} at ({},{},{})",
         network_id, client_id, spawn_pos.x, spawn_pos.y, spawn_pos.z);
     return true;
+}
+
+// Network callbacks use this adapter for policy and spawn-point selection;
+// constructPlayerPawnForClient above never re-evaluates a session phase.
+static bool spawnPlayerForClient(uint16_t client_id, uint8_t requested_team)
+{
+    if (!g_server_services || !g_server_services->game_world)
+        return false;
+    world* w = g_server_services->game_world;
+    if (findPlayerEntity(*w, client_id) != entt::null)
+        return false;
+
+    if (g_competitive) {
+        if (g_sessions.contains(client_id)) {
+            const Competitive::SessionSpawnDecision spawn_decision =
+                g_sessions.decideSpawn(client_id, g_round_system.state.phase, false);
+            if (!spawn_decision.shouldConstructPawn()) {
+                if (spawn_decision.disposition == Competitive::SessionSpawnDisposition::AwaitingLegalPhase)
+                    g_sessions.markAwaitingSpawn(client_id);
+                return false;
+            }
+            requested_team = Competitive::teamId(spawn_decision.team);
+        } else if (!Competitive::canSpawnNow(g_round_system.state.phase)) {
+            // Server-owned bots have no transport sessions, but retain the
+            // same legal-phase boundary as human competitive pawns.
+            return false;
+        }
+    }
+
+    uint8_t team_id = requested_team == FpsLogic::kTeamNone
+        ? g_game_rules.assignTeam(*w)
+        : requested_team;
+    if (g_competitive) {
+        if (requested_team == FpsLogic::kTeamNone) {
+            int32_t na = 0, nd = 0;
+            competitiveTeamCounts(*w, na, nd);
+            const Competitive::FpsTeam assigned = Competitive::autoAssignTeam(na, nd);
+            const int32_t count = assigned == Competitive::FpsTeam::Attackers ? na : nd;
+            team_id = count >= g_round_system.config.team_size
+                ? Competitive::teamId(Competitive::FpsTeam::Spectator)
+                : Competitive::teamId(assigned);
+        }
+        if (!Competitive::isPlayingTeam(Competitive::teamFromId(team_id)))
+            return false;
+        if (requested_team != FpsLogic::kTeamNone) {
+            int32_t attackers = 0, defenders = 0;
+            competitiveTeamCounts(*w, attackers, defenders);
+            const int32_t count = team_id == FpsLogic::kTeamAttackers ? attackers : defenders;
+            const Competitive::SessionRecord* session = g_sessions.find(client_id);
+            const bool reserved = session != nullptr && session->team == Competitive::teamFromId(team_id);
+            if (count > g_round_system.config.team_size ||
+                (!reserved && count >= g_round_system.config.team_size)) {
+                LOG_ENGINE_WARN("Player spawn rejected for client {}: team {} is full", client_id, team_id);
+                return false;
+            }
+        }
+    }
+
+    glm::vec3 spawn_pos;
+    if (!g_game_rules.tryGetSpawnForPlayer(*w, client_id, team_id, spawn_pos)) {
+        if (g_competitive && g_sessions.contains(client_id))
+            g_sessions.markAwaitingSpawn(client_id);
+        LOG_ENGINE_ERROR("Player spawn rejected for client {}: no valid spawn point", client_id);
+        return false;
+    }
+    return constructPlayerPawnForClient(*w, client_id, team_id, spawn_pos);
 }
 
 static void despawnPlayerForClient(uint16_t client_id)

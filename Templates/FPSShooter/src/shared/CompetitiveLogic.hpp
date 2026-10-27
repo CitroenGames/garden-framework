@@ -767,6 +767,28 @@ struct SessionRecord {
     bool has_team_select_tick = false;
 };
 
+// This is the template's pure admission decision.  It deliberately says
+// nothing about components, physics, NetIds, or network messages: the server
+// adapter owns pawn construction after this policy has allowed it.  Keeping
+// the answer value-only lets all ingress paths share the same phase rule.
+enum class SessionSpawnDisposition : uint8_t {
+    MissingSession = 0,
+    AwaitingTeam,
+    AwaitingLegalPhase,
+    ConstructPawn,
+    AlreadyHasPawn,
+    Spectating,
+};
+
+struct SessionSpawnDecision {
+    SessionSpawnDisposition disposition = SessionSpawnDisposition::MissingSession;
+    FpsTeam team = FpsTeam::None;
+
+    bool shouldConstructPawn() const {
+        return disposition == SessionSpawnDisposition::ConstructPawn;
+    }
+};
+
 class SessionCoordinator {
 public:
     // A compact server-tick throttle prevents duplicate/replayed selection
@@ -797,6 +819,26 @@ public:
         return it == sessions_.end() ? nullptr : &it->second;
     }
 
+    // The decision does not mutate the session.  A failed spawn recipe must
+    // not turn into an active session; only markSpawned after the adapter has
+    // constructed and announced the complete pawn.
+    SessionSpawnDecision decideSpawn(uint16_t client_id,
+                                     RoundPhase phase,
+                                     bool has_player_entity) const {
+        const SessionRecord* record = find(client_id);
+        if (record == nullptr)
+            return {};
+        if (has_player_entity)
+            return {SessionSpawnDisposition::AlreadyHasPawn, record->team};
+        if (record->team == FpsTeam::Spectator || record->state == SessionState::Spectating)
+            return {SessionSpawnDisposition::Spectating, FpsTeam::Spectator};
+        if (!isPlayingTeam(record->team))
+            return {SessionSpawnDisposition::AwaitingTeam, FpsTeam::None};
+        if (!canSpawnNow(phase))
+            return {SessionSpawnDisposition::AwaitingLegalPhase, record->team};
+        return {SessionSpawnDisposition::ConstructPawn, record->team};
+    }
+
     bool consumeTeamSelectRequest(uint16_t client_id, uint32_t server_tick) {
         SessionRecord* record = find(client_id);
         if (record == nullptr)
@@ -816,7 +858,8 @@ public:
         record->team = team;
         record->state = team == FpsTeam::Spectator
             ? SessionState::Spectating
-            : (canSpawnNow(phase) ? SessionState::Active : SessionState::AwaitingSpawn);
+            : SessionState::AwaitingSpawn;
+        (void)phase;
         return true;
     }
 

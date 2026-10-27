@@ -1641,6 +1641,13 @@ bool testCompetitiveSessionFlow()
     if (admitted == nullptr || admitted->state != SessionState::AwaitingTeam ||
         admitted->team != FpsTeam::None)
         return fail(name, "competitive admission did not await a team without a pawn");
+    const SessionSpawnDecision awaiting_team = sessions.decideSpawn(7, RoundPhase::Freeze, false);
+    if (awaiting_team.disposition != SessionSpawnDisposition::AwaitingTeam ||
+        sessions.find(7)->state != SessionState::AwaitingTeam)
+        return fail(name, "spawn coordinator did not keep a teamless session pawnless");
+    if (sessions.decideSpawn(99, RoundPhase::Freeze, false).disposition !=
+        SessionSpawnDisposition::MissingSession)
+        return fail(name, "spawn coordinator accepted a missing competitive session");
 
     if (!sessions.consumeTeamSelectRequest(7, 100) ||
         sessions.consumeTeamSelectRequest(7, 100) ||
@@ -1662,6 +1669,15 @@ bool testCompetitiveSessionFlow()
     if (late_join == nullptr || late_join->team != FpsTeam::Attackers ||
         late_join->state != SessionState::AwaitingSpawn)
         return fail(name, "late join did not remain pawnless until a legal spawn phase");
+    const SessionSpawnDecision live_deferred = sessions.decideSpawn(7, RoundPhase::Live, false);
+    if (live_deferred.disposition != SessionSpawnDisposition::AwaitingLegalPhase ||
+        live_deferred.team != FpsTeam::Attackers ||
+        sessions.find(7)->state != SessionState::AwaitingSpawn)
+        return fail(name, "Live spawn decision was not a non-mutating Freeze deferral");
+    const SessionSpawnDecision freeze_spawn = sessions.decideSpawn(7, RoundPhase::Freeze, false);
+    if (!freeze_spawn.shouldConstructPawn() || freeze_spawn.team != FpsTeam::Attackers ||
+        sessions.find(7)->state != SessionState::AwaitingSpawn)
+        return fail(name, "Freeze spawn decision did not remain separate from pawn construction");
 
     // A reserved late-join side counts toward capacity even before that player
     // owns an ECS pawn. A second candidate therefore cannot overfill it.
@@ -1683,6 +1699,9 @@ bool testCompetitiveSessionFlow()
     if (!sessions.markSpawned(7, FpsTeam::Attackers, RoundPhase::Freeze) ||
         sessions.find(7)->state != SessionState::Active)
         return fail(name, "Freeze spawn did not transition the session active");
+    if (sessions.decideSpawn(7, RoundPhase::Freeze, true).disposition !=
+        SessionSpawnDisposition::AlreadyHasPawn)
+        return fail(name, "spawn coordinator did not reject duplicate pawn construction");
 
     SessionCoordinator halftime_sessions;
     if (!halftime_sessions.admit(20) || !halftime_sessions.admit(21) || !halftime_sessions.admit(22) ||
@@ -1738,6 +1757,9 @@ bool testCompetitiveSessionFlow()
     if (!sessions.assignTeam(7, FpsTeam::Spectator, RoundPhase::Freeze) ||
         sessions.find(7)->state != SessionState::Spectating)
         return fail(name, "spectator selection did not publish a pawnless spectator state");
+    if (sessions.decideSpawn(7, RoundPhase::Freeze, false).disposition !=
+        SessionSpawnDisposition::Spectating)
+        return fail(name, "spawn coordinator permitted a spectator pawn");
     if (sessions.assignTeam(7, FpsTeam::None, RoundPhase::Freeze))
         return fail(name, "invalid team changed session state");
 

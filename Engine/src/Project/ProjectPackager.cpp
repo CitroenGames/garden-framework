@@ -161,6 +161,41 @@ static bool startsWithAssetDirectory(const fs::path& asset_path, const fs::path&
     return prefix_matches && (path.size() == directory.size() || path[directory.size()] == '/');
 }
 
+// Package metadata must describe files below the project/package roots. Letting
+// a manifest path escape those roots makes output depend on machine-local files
+// and can cause a package copy to write outside its requested root.
+static bool isRootRelativePath(const fs::path& path)
+{
+    if (path.empty() || path.is_absolute() || path.has_root_name() || path.has_root_directory())
+        return false;
+
+    const fs::path normalized = path.lexically_normal();
+    for (const auto& component : normalized)
+    {
+        if (component == "..")
+            return false;
+    }
+    return normalized != ".";
+}
+
+static bool isPackageName(const fs::path& path)
+{
+    return isRootRelativePath(path) && !path.has_parent_path() && path.filename() == path;
+}
+
+static bool isSameOrBelow(const fs::path& candidate, const fs::path& root)
+{
+    std::error_code ec;
+    const fs::path relative = fs::relative(fs::absolute(candidate), fs::absolute(root), ec);
+    if (ec || relative.empty())
+        return false;
+    if (relative == ".")
+        return true;
+
+    const auto first = relative.begin();
+    return first != relative.end() && *first != "..";
+}
+
 static bool packagedAssetExists(const fs::path& output_root, const std::string& asset_path,
                                 const std::vector<std::string>& asset_directories,
                                 bool compile_assets, const Assets::CompileConfig& compile_config)
@@ -282,10 +317,32 @@ PackageResult ProjectPackager::packageProjectInternal(
         setPhase(PackageProgress::Phase::Failed);
         return result;
     }
+    if (!isPackageName(fs::path(config.package_name)))
+    {
+        result.error_message = "Package name must be a single relative directory name.";
+        setPhase(PackageProgress::Phase::Failed);
+        return result;
+    }
 
     const auto& desc = project_manager.getDescriptor();
     const fs::path project_root = project_manager.getProjectRoot();
     const fs::path output_root = fs::path(config.output_directory) / config.package_name;
+
+    for (const auto& asset_dir : desc.asset_directories)
+    {
+        if (!isRootRelativePath(fs::path(asset_dir)))
+        {
+            result.error_message = "Asset directory must be project-relative and cannot escape the project: " + asset_dir;
+            setPhase(PackageProgress::Phase::Failed);
+            return result;
+        }
+    }
+    if (!desc.default_level.empty() && !isRootRelativePath(fs::path(desc.default_level)))
+    {
+        result.error_message = "Default level must be project-relative and cannot escape the project: " + desc.default_level;
+        setPhase(PackageProgress::Phase::Failed);
+        return result;
+    }
 
     // Check game module DLL exists
     std::string module_path = project_manager.getAbsoluteModulePath();
@@ -322,14 +379,11 @@ PackageResult ProjectPackager::packageProjectInternal(
         }
     }
 
-    // Prevent output inside project asset directories
+    // Prevent output inside (or equal to) project asset directories.
     for (const auto& asset_dir : desc.asset_directories)
     {
-        fs::path abs_asset = fs::absolute(project_root / asset_dir);
-        fs::path abs_output = fs::absolute(output_root);
-        std::error_code ec;
-        fs::path rel = fs::relative(abs_output, abs_asset, ec);
-        if (!ec && !rel.empty() && rel.native()[0] != '.')
+        const fs::path abs_asset = fs::absolute(project_root / asset_dir);
+        if (isSameOrBelow(output_root, abs_asset))
         {
             result.error_message = "Output directory cannot be inside project asset directory: " + abs_asset.string();
             setPhase(PackageProgress::Phase::Failed);
@@ -743,6 +797,9 @@ std::vector<std::string> ProjectPackager::validateBeforePackage(
     const auto& desc = project_manager.getDescriptor();
     const fs::path project_root = project_manager.getProjectRoot();
 
+    if (!isPackageName(fs::path(config.package_name)))
+        warnings.push_back("Package name must be a single relative directory name.");
+
     // Check game module DLL
     std::string module_path = project_manager.getAbsoluteModulePath();
     if (!module_path.empty() && !fs::exists(module_path))
@@ -751,6 +808,11 @@ std::vector<std::string> ProjectPackager::validateBeforePackage(
     // Check asset directories
     for (const auto& asset_dir : desc.asset_directories)
     {
+        if (!isRootRelativePath(fs::path(asset_dir)))
+        {
+            warnings.push_back("Asset directory must be project-relative and cannot escape the project: " + asset_dir);
+            continue;
+        }
         fs::path src = project_root / asset_dir;
         if (!fs::exists(src))
             warnings.push_back("Asset directory not found: " + src.string());
@@ -759,9 +821,14 @@ std::vector<std::string> ProjectPackager::validateBeforePackage(
     // Check default level
     if (!desc.default_level.empty())
     {
-        fs::path level_path = project_root / desc.default_level;
-        if (!fs::exists(level_path))
-            warnings.push_back("Default level not found: " + desc.default_level);
+        if (!isRootRelativePath(fs::path(desc.default_level)))
+            warnings.push_back("Default level must be project-relative and cannot escape the project: " + desc.default_level);
+        else
+        {
+            fs::path level_path = project_root / desc.default_level;
+            if (!fs::exists(level_path))
+                warnings.push_back("Default level not found: " + desc.default_level);
+        }
     }
 
     // Check if output already exists

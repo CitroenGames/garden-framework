@@ -192,6 +192,58 @@ bool testMissingAssetDirectoryFailsBeforeCopy()
     return pass(name);
 }
 
+bool testPackagePathsCannotEscapeRoots()
+{
+    const std::string name = "packager rejects package metadata paths outside its roots";
+    TempDirectory temp("path_roots");
+    LevelManager levels;
+
+    ProjectManager escaped_assets;
+    if (!createProjectFixture(temp.path / "asset_project", escaped_assets, {"../outside_assets"},
+                              R"({"metadata":{"level_name":"Escaped Assets"},"entities":[]})", false))
+        return fail(name, "could not create asset-path fixture");
+    PackageResult result = ProjectPackager::packageProject(
+        escaped_assets, levels, packageConfig(temp.path / "asset_out"));
+    if (result.success || result.error_message.find("Asset directory must be project-relative") == std::string::npos)
+        return fail(name, "parent-traversal asset directory was accepted: " + result.error_message);
+    if (fs::exists(temp.path / "asset_out" / "package"))
+        return fail(name, "asset traversal created a package output before failing");
+
+    ProjectManager escaped_level;
+    if (!createProjectFixture(temp.path / "level_project", escaped_level, {"assets"},
+                              R"({"metadata":{"level_name":"Escaped Level"},"entities":[]})"))
+        return fail(name, "could not create level-path fixture");
+    escaped_level.getDescriptor().default_level = "../outside.level";
+    result = ProjectPackager::packageProject(escaped_level, levels, packageConfig(temp.path / "level_out"));
+    if (result.success || result.error_message.find("Default level must be project-relative") == std::string::npos)
+        return fail(name, "parent-traversal default level was accepted: " + result.error_message);
+    if (fs::exists(temp.path / "level_out" / "package"))
+        return fail(name, "default-level traversal created a package output before failing");
+
+    ProjectManager package_name;
+    if (!createProjectFixture(temp.path / "name_project", package_name, {"assets"},
+                              R"({"metadata":{"level_name":"Package Name"},"entities":[]})"))
+        return fail(name, "could not create package-name fixture");
+    PackageConfig invalid_name = packageConfig(temp.path / "name_out");
+    invalid_name.package_name = "../outside_package";
+    result = ProjectPackager::packageProject(package_name, levels, invalid_name);
+    if (result.success || result.error_message.find("Package name must be a single relative") == std::string::npos)
+        return fail(name, "parent-traversal package name was accepted: " + result.error_message);
+    if (fs::exists(temp.path / "outside_package"))
+        return fail(name, "package-name traversal created output outside its requested root");
+
+    ProjectManager nested_output;
+    if (!createProjectFixture(temp.path / "nested_project", nested_output, {"assets"},
+                              R"({"metadata":{"level_name":"Nested Output"},"entities":[]})"))
+        return fail(name, "could not create nested-output fixture");
+    PackageConfig equal_to_asset = packageConfig(temp.path / "nested_project");
+    equal_to_asset.package_name = "assets";
+    result = ProjectPackager::packageProject(nested_output, levels, equal_to_asset);
+    if (result.success || result.error_message.find("Output directory cannot be inside project asset directory") == std::string::npos)
+        return fail(name, "output equal to an asset directory was accepted: " + result.error_message);
+    return pass(name);
+}
+
 bool testManifestUnknownFieldsRoundTrip()
 {
     const std::string name = "packager preserves unknown .garden fields";
@@ -390,6 +442,7 @@ int main()
     ok &= testRequiredBinaries();
     ok &= testMissingBinariesDetected();
     ok &= testMissingAssetDirectoryFailsBeforeCopy();
+    ok &= testPackagePathsCannotEscapeRoots();
 
     std::vector<std::string> missing_runtime_files;
     if (!packageIntegrationBinariesAvailable(missing_runtime_files))

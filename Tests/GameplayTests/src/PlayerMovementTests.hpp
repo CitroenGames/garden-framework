@@ -6,6 +6,7 @@
 #include "shared/NetworkInputSampler.hpp"
 #include "shared/PlayerLifecycle.hpp"
 #include "shared/FpsAnimationPresentation.hpp"
+#include "server/FpsDamage.hpp"
 
 #include <string>
 
@@ -145,6 +146,72 @@ bool testPlayerSpectatorStateContract()
         spectator.eligible || spectator.mode != FPSShooter::FpsSpectatorMode::Free ||
         !spectator.target.isNull()) {
         return fail(name, "Freeze round transition did not reset spectator state");
+    }
+
+    return pass(name);
+}
+
+bool testPlayerLocalSpawnSwitchKillRespawnContract()
+{
+    const std::string name = "Player_LocalSpawnSwitchKillRespawnContract";
+
+    entt::registry registry;
+    const entt::entity pawn = registry.create();
+    const entt::entity attacker = registry.create();
+    registry.emplace<FpsHealthComponent>(pawn, 100);
+    registry.emplace<TeamComponent>(pawn, TeamComponent{FpsLogic::kTeamAttackers});
+    auto& inventory = registry.emplace<InventoryComponent>(pawn);
+    auto& loadout = registry.emplace<PlayerLoadoutComponent>(pawn);
+    auto& weapon = registry.emplace<WeaponComponent>(pawn);
+    FpsLogic::grantLoadout(inventory, loadout, weapon, WeaponType::RIFLE);
+    registry.emplace<FPSShooter::FpsPawnLifecycleComponent>(pawn);
+    auto& spectator = registry.emplace<FPSShooter::FpsSpectatorComponent>(pawn);
+    spectator.eligible = true;
+    spectator.mode = FPSShooter::FpsSpectatorMode::Chase;
+
+    registry.emplace<FpsHealthComponent>(attacker, 100);
+    registry.emplace<TeamComponent>(attacker, TeamComponent{FpsLogic::kTeamDefenders});
+
+    // Save a non-default primary, switch away from it, then kill the pawn.
+    // This is the same switch/drop sequence used by the server death resolver.
+    weapon.ammo = 17;
+    weapon.reserve_ammo = 43;
+    if (!FpsLogic::switchToSlot(inventory, loadout, weapon, static_cast<int>(WeaponSlot::Secondary)) ||
+        weapon.weapon_type != WeaponType::PISTOL ||
+        !FpsLogic::switchToSlot(inventory, loadout, weapon, static_cast<int>(WeaponSlot::Primary))) {
+        return fail(name, "spawned pawn could not preserve a switched primary state");
+    }
+
+    FpsServer::DamagePolicy policy;
+    policy.require_opposing_teams = true;
+    const auto lethal = FpsServer::applyFpsDamage(registry, {attacker, pawn, 100}, policy);
+    const auto death = FpsServer::beginFpsDeathTransition(registry, pawn);
+    if (!lethal.killed || !death.transitioned || !FpsLogic::switchToSlot(
+            inventory, loadout, weapon, static_cast<int>(WeaponSlot::Primary))) {
+        return fail(name, "lethal spawn state did not enter the death transition");
+    }
+    const auto dropped = FpsLogic::dropActive(inventory, loadout, weapon);
+    if (!dropped || dropped->type != WeaponType::RIFLE || dropped->ammo != 17 ||
+        dropped->reserve != 43 || weapon.weapon_type != WeaponType::PISTOL ||
+        !FpsLogic::hasMirroredLoadoutInventory(inventory, loadout)) {
+        return fail(name, "death did not keep switched weapon and inventory state coherent");
+    }
+
+    // The respawn boundary must immediately reopen health/death/loadout and
+    // observer state as one local ECS transition, before any later world sync.
+    const auto& restored_health = registry.get<FpsHealthComponent>(pawn);
+    if (!FPSShooter::restorePawnAfterRespawn(registry, pawn, WeaponType::AK47) ||
+        !restored_health.alive || restored_health.health != restored_health.max_health ||
+        restored_health.invulnerable_timer <= 0.0f ||
+        registry.get<FpsDeathLifecycleComponent>(pawn).resolved ||
+        registry.get<FpsDeathLifecycleComponent>(pawn).sequence != death.death_sequence ||
+        registry.get<FPSShooter::FpsPawnLifecycleComponent>(pawn).state !=
+            FPSShooter::FpsPawnLifecycleState::Active ||
+        registry.get<FPSShooter::FpsSpectatorComponent>(pawn).eligible ||
+        registry.get<FPSShooter::FpsSpectatorComponent>(pawn).mode != FPSShooter::FpsSpectatorMode::Free ||
+        weapon.weapon_type != WeaponType::AK47 ||
+        !FpsLogic::hasMirroredLoadoutInventory(inventory, loadout)) {
+        return fail(name, "respawn did not atomically restore local pawn state");
     }
 
     return pass(name);
@@ -315,5 +382,6 @@ bool testPlayerMovementInputContract()
     }
 
     return testPlayerPawnLifecycleContract() && testPlayerSpectatorStateContract() &&
+        testPlayerLocalSpawnSwitchKillRespawnContract() &&
         testPlayerAnimationParameterContract() && pass(name);
 }

@@ -92,6 +92,42 @@ namespace FPSShooter
         spectator.target = EntityRef{};
     }
 
+    // Restore the template-owned pawn state at a confirmed respawn boundary.
+    // Health, the once-only death latch, loadout/inventory mirror, and local
+    // observer presentation must move together: otherwise a pawn can be alive
+    // with a stale dead/spectating presentation until a later world tick.
+    // The caller remains responsible for world position, physics body, and
+    // replication because those belong to the server spawn operation.
+    inline bool restorePawnAfterRespawn(
+        entt::registry& registry,
+        entt::entity pawn,
+        WeaponType primary_weapon)
+    {
+        if (pawn == entt::null || !registry.valid(pawn) ||
+            !registry.all_of<FpsHealthComponent, InventoryComponent,
+                             PlayerLoadoutComponent, WeaponComponent>(pawn))
+            return false;
+
+        auto& health = registry.get<FpsHealthComponent>(pawn);
+        auto& inventory = registry.get<InventoryComponent>(pawn);
+        auto& loadout = registry.get<PlayerLoadoutComponent>(pawn);
+        auto& weapon = registry.get<WeaponComponent>(pawn);
+
+        health.reset();
+        // Preserve the monotonic sequence for attribution while reopening the
+        // next death transition.  This duplicates no server policy; it is the
+        // ECS state reset that both local and networked respawns require.
+        registry.get_or_emplace<FpsDeathLifecycleComponent>(pawn).resolved = false;
+        FpsLogic::grantLoadout(inventory, loadout, weapon, primary_weapon);
+
+        auto& lifecycle = registry.get_or_emplace<FpsPawnLifecycleComponent>(pawn);
+        lifecycle.state = FpsPawnLifecycleState::Active;
+        auto& spectator = registry.get_or_emplace<FpsSpectatorComponent>(pawn);
+        spectator.eligible = false;
+        resetSpectatorState(spectator);
+        return FpsLogic::hasMirroredLoadoutInventory(inventory, loadout);
+    }
+
     inline bool setSpectatorFree(entt::registry& registry, entt::entity spectator_entity)
     {
         if (!registry.valid(spectator_entity) ||
