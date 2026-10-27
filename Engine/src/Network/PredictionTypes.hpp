@@ -1,5 +1,6 @@
 #pragma once
 
+#include "NetworkInput.hpp"
 #include "SharedMovement.hpp"
 #include <glm/glm.hpp>
 #include <array>
@@ -68,11 +69,11 @@ public:
     void discardUpTo(uint32_t tick)
     {
         // We don't physically remove - just mark invalid.
-        // Iteration skips invalid entries and entries with tick <= given.
+        // Iteration skips invalid entries and entries at or before the given tick.
         for (size_t i = 0; i < count; i++)
         {
             size_t idx = (head + N - count + i) % N;
-            if (entries[idx].valid && entries[idx].tick <= tick)
+            if (entries[idx].valid && !isTickNewer(entries[idx].tick, tick))
             {
                 entries[idx].valid = false;
             }
@@ -101,7 +102,7 @@ public:
         return nullptr;
     }
 
-    // Iterate all valid entries with tick > from_tick, in chronological order.
+    // Iterate all valid entries newer than from_tick, in chronological order.
     // Callback signature: void(const PredictionEntry&)
     template <typename Func>
     void forEachFrom(uint32_t from_tick, Func&& callback) const
@@ -109,7 +110,7 @@ public:
         for (size_t i = 0; i < count; i++)
         {
             size_t idx = (head + N - count + i) % N;
-            if (entries[idx].valid && entries[idx].tick > from_tick)
+            if (entries[idx].valid && isTickNewer(entries[idx].tick, from_tick))
             {
                 callback(entries[idx]);
             }

@@ -3,6 +3,7 @@
 #include "Components/LocalPlayerInputComponent.hpp"
 #include "LocalPlayerInputSystem.hpp"
 #include "NetworkInputSampler.hpp"
+#include "Network/PredictionTypes.hpp"
 #include "json.hpp"
 
 #include <SDL3/SDL.h>
@@ -813,6 +814,39 @@ namespace
         return ok;
     }
 
+    bool testInputRingBufferTickWrap()
+    {
+        Net::InputRingBuffer<4> history;
+        const uint32_t ticks[] = { 0xFFFFFFFEu, 0xFFFFFFFFu, 0u };
+        for (uint32_t tick : ticks)
+        {
+            Net::PredictionEntry entry;
+            entry.tick = tick;
+            entry.valid = true;
+            history.push(entry);
+        }
+
+        std::vector<uint32_t> replay_ticks;
+        history.forEachFrom(0xFFFFFFFFu, [&](const Net::PredictionEntry& entry) {
+            replay_ticks.push_back(entry.tick);
+        });
+        bool ok = expect(replay_ticks == std::vector<uint32_t>{ 0u },
+            "prediction history replays tick zero after tick 0xFFFFFFFF");
+
+        history.discardUpTo(0xFFFFFFFFu);
+        ok = expect(history.size() == 1 && history.get(0u) != nullptr &&
+            history.get(0xFFFFFFFFu) == nullptr,
+            "acknowledging tick 0xFFFFFFFF preserves wrapped tick zero") && ok;
+
+        replay_ticks.clear();
+        history.forEachFrom(0xFFFFFFFFu, [&](const Net::PredictionEntry& entry) {
+            replay_ticks.push_back(entry.tick);
+        });
+        ok = expect(replay_ticks == std::vector<uint32_t>{ 0u },
+            "wrapped tick zero remains replayable after acknowledgement") && ok;
+        return ok;
+    }
+
     bool testLocalPlayerInputEcsProjection()
     {
         InputManager input;
@@ -939,6 +973,7 @@ int main()
     ok = testActionContextPriorityAndModal() && ok;
     ok = testActionRebindCallbacksAndProfile() && ok;
     ok = testNetworkInputSampler() && ok;
+    ok = testInputRingBufferTickWrap() && ok;
     ok = testLocalPlayerInputEcsProjection() && ok;
 
     if (!ok)
