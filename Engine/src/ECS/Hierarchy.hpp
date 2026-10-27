@@ -32,6 +32,68 @@ namespace Hierarchy
 {
 inline constexpr int kMaxDepth = 64;
 
+// Physics keeps world-space Jolt state outside ECS, while hierarchy transforms
+// are local ECS data. These descriptors let direct hierarchy edits and staged
+// level loading enforce one policy without a PhysicsSystem dependency.
+struct PhysicsAttachmentNode
+{
+    bool has_rigid_body = false;
+    BodyMotionType rigid_body_motion = BodyMotionType::Dynamic;
+    bool has_character_controller = false;
+    // Static collider, trigger, or terrain collision bodies do not have a
+    // kinematic RigidBodyComponent authoring path.
+    bool has_non_kinematic_physics_body = false;
+    glm::vec3 local_scale = glm::vec3(1.0f);
+};
+
+enum class PhysicsAttachmentValidationResult
+{
+    Allowed,
+    ChildHasCharacterController,
+    ChildHasNonKinematicBody,
+    AncestorHasNonUnitScale,
+    InvalidAncestorChain,
+};
+
+inline bool hasUnitPhysicsAncestorScale(const glm::vec3& scale)
+{
+    constexpr float epsilon = 1e-4f;
+    return std::abs(scale.x - 1.0f) <= epsilon &&
+           std::abs(scale.y - 1.0f) <= epsilon &&
+           std::abs(scale.z - 1.0f) <= epsilon;
+}
+
+// Shared data-only predicate for every hierarchy attachment path. A child
+// without a physics body remains eligible; a child physics body must be a
+// kinematic RigidBodyComponent. CharacterVirtual, dynamic/static, trigger,
+// and terrain bodies stay roots. Each parent ancestor must have unit local
+// scale so the child body has a stable world-pose contract.
+inline PhysicsAttachmentValidationResult validatePhysicsAttachment(
+    const PhysicsAttachmentNode& child,
+    const std::vector<PhysicsAttachmentNode>& ancestors)
+{
+    if (child.has_character_controller)
+        return PhysicsAttachmentValidationResult::ChildHasCharacterController;
+    if (child.has_non_kinematic_physics_body ||
+        (child.has_rigid_body &&
+         child.rigid_body_motion != BodyMotionType::Kinematic))
+    {
+        return PhysicsAttachmentValidationResult::ChildHasNonKinematicBody;
+    }
+    // Ordinary hierarchy children have no Jolt body whose scale contract can
+    // be violated, so ancestor scale is irrelevant to them. Only an accepted
+    // kinematic RigidBodyComponent needs the unit-scale requirement.
+    if (!child.has_rigid_body)
+        return PhysicsAttachmentValidationResult::Allowed;
+
+    for (const PhysicsAttachmentNode& ancestor : ancestors)
+    {
+        if (!hasUnitPhysicsAncestorScale(ancestor.local_scale))
+            return PhysicsAttachmentValidationResult::AncestorHasNonUnitScale;
+    }
+    return PhysicsAttachmentValidationResult::Allowed;
+}
+
 namespace detail
 {
 inline EntityRef refOfEntity(entt::registry& r, entt::entity e)
@@ -136,6 +198,37 @@ inline bool containsChild(const ChildrenComponent& children, EntityRef child_ref
             return true;
     return false;
 }
+
+inline PhysicsAttachmentNode physicsAttachmentNodeFor(const entt::registry& r,
+                                                       entt::entity entity)
+{
+    PhysicsAttachmentNode node;
+    if (const auto* transform = r.try_get<TransformComponent>(entity))
+        node.local_scale = transform->scale;
+    if (const auto* rigid_body = r.try_get<RigidBodyComponent>(entity))
+    {
+        node.has_rigid_body = true;
+        node.rigid_body_motion = rigid_body->motion_type;
+    }
+    node.has_character_controller =
+        r.all_of<CharacterControllerComponent>(entity);
+
+    const auto* collider = r.try_get<ColliderComponent>(entity);
+    const bool has_static_collider =
+        !node.has_rigid_body && collider != nullptr;
+    // LevelManager currently creates a static mesh body for this combination,
+    // even when the authoring RigidBody motion is Kinematic.
+    const bool has_kinematic_mesh_body =
+        node.has_rigid_body &&
+        node.rigid_body_motion == BodyMotionType::Kinematic && collider &&
+        collider->shape_type == ColliderShapeType::Mesh;
+    const auto* terrain = r.try_get<TerrainComponent>(entity);
+    node.has_non_kinematic_physics_body =
+        has_static_collider || has_kinematic_mesh_body ||
+        (!node.has_rigid_body && r.all_of<TriggerComponent>(entity)) ||
+        (terrain && terrain->generate_collision);
+    return node;
+}
 } // namespace detail
 
 inline entt::entity parentOf(entt::registry& r, entt::entity e)
@@ -146,6 +239,37 @@ inline entt::entity parentOf(entt::registry& r, entt::entity e)
     if (!p || p->parent.isNull())
         return entt::null;
     return detail::resolveRef(r, p->parent);
+}
+
+// Runtime counterpart to the staged-data predicate above. Missing parent refs
+// end the chain like normal hierarchy resolution; cycles or a depth overflow
+// cannot be safely inspected and reject the edit.
+inline PhysicsAttachmentValidationResult validatePhysicsAttachment(
+    entt::registry& r, entt::entity child, entt::entity parent)
+{
+    if (child == entt::null || parent == entt::null || !r.valid(child) ||
+        !r.valid(parent))
+    {
+        return PhysicsAttachmentValidationResult::InvalidAncestorChain;
+    }
+
+    std::vector<PhysicsAttachmentNode> ancestors;
+    ancestors.reserve(kMaxDepth);
+    std::unordered_set<entt::entity> visited;
+    entt::entity current = parent;
+    while (current != entt::null && r.valid(current) &&
+           ancestors.size() < static_cast<std::size_t>(kMaxDepth))
+    {
+        if (!visited.insert(current).second)
+            return PhysicsAttachmentValidationResult::InvalidAncestorChain;
+        ancestors.push_back(detail::physicsAttachmentNodeFor(r, current));
+        current = parentOf(r, current);
+    }
+    if (current != entt::null && r.valid(current))
+        return PhysicsAttachmentValidationResult::InvalidAncestorChain;
+
+    return validatePhysicsAttachment(detail::physicsAttachmentNodeFor(r, child),
+                                     ancestors);
 }
 
 // Cycle-safe ancestor walk, max depth 64 (hierarchy.md section 3).
@@ -343,6 +467,15 @@ inline bool attach(entt::registry& r, entt::entity child,
     if (child == parent || isDescendantOf(r, parent, child))
     {
         std::fprintf(stderr, "[Hierarchy] attach rejected: cycle\n");
+        return false;
+    }
+    const PhysicsAttachmentValidationResult physics_validation =
+        validatePhysicsAttachment(r, child, parent);
+    if (physics_validation != PhysicsAttachmentValidationResult::Allowed)
+    {
+        std::fprintf(stderr,
+                     "[Hierarchy] attach rejected: physics hierarchy policy (%d)\n",
+                     static_cast<int>(physics_validation));
         return false;
     }
     // keep_world is computed against the OLD ancestry before relinking.

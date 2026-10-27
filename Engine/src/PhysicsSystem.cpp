@@ -1,5 +1,6 @@
 #include "PhysicsSystem.hpp"
 #include "Assets/CookedCollisionSerializer.hpp"
+#include "ECS/Hierarchy.hpp"
 #include "Utils/Log.hpp"
 #include <algorithm>
 #include <atomic>
@@ -7,6 +8,8 @@
 #include <cstdarg>
 #include <cstdlib>
 #include <thread>
+
+#include <glm/gtx/matrix_decompose.hpp>
 
 static void JoltTrace(const char* inFMT, ...)
 {
@@ -114,6 +117,43 @@ static bool isUsableTriangle(const vertex& v0, const vertex& v1, const vertex& v
     const glm::vec3 p2(v2.vx, v2.vy, v2.vz);
     const glm::vec3 area_vec = glm::cross(p1 - p0, p2 - p0);
     return glm::dot(area_vec, area_vec) > epsilon;
+}
+
+static bool hasUnitScale(const glm::vec3& scale)
+{
+    constexpr float kUnitScaleEpsilon = 1e-4f;
+    return std::isfinite(scale.x) && std::isfinite(scale.y) && std::isfinite(scale.z) &&
+           std::abs(scale.x - 1.0f) <= kUnitScaleEpsilon &&
+           std::abs(scale.y - 1.0f) <= kUnitScaleEpsilon &&
+           std::abs(scale.z - 1.0f) <= kUnitScaleEpsilon;
+}
+
+static bool decomposeKinematicWorldPose(const glm::mat4& matrix,
+                                        glm::vec3& position,
+                                        JPH::Quat& rotation)
+{
+    glm::vec3 scale{};
+    glm::quat orientation{};
+    glm::vec3 translation{};
+    glm::vec3 skew{};
+    glm::vec4 perspective{};
+    if (!glm::decompose(matrix, scale, orientation, translation, skew, perspective))
+        return false;
+
+    const float orientation_length_sq = glm::dot(orientation, orientation);
+    if (!std::isfinite(translation.x) || !std::isfinite(translation.y) ||
+        !std::isfinite(translation.z) || !std::isfinite(orientation.x) ||
+        !std::isfinite(orientation.y) || !std::isfinite(orientation.z) ||
+        !std::isfinite(orientation.w) || !std::isfinite(orientation_length_sq) ||
+        orientation_length_sq <= 1e-12f)
+    {
+        return false;
+    }
+
+    orientation = glm::normalize(orientation);
+    position = translation;
+    rotation = JPH::Quat(orientation.x, orientation.y, orientation.z, orientation.w);
+    return true;
 }
 
 class IgnoreEntityBodyFilter final : public JPH::BodyFilter
@@ -347,6 +387,7 @@ void PhysicsSystem::shutdown()
     entity_to_body.clear();
     body_to_entity.clear();
     trigger_entities.clear();
+    kinematic_hierarchy_sync_rejections.clear();
 
     contact_listener.reset();
     jolt_system.reset();
@@ -910,6 +951,7 @@ void PhysicsSystem::removeConstraint(entt::entity entity)
 void PhysicsSystem::removeBody(entt::entity entity)
 {
     trigger_entities.erase(std::remove(trigger_entities.begin(), trigger_entities.end(), entity), trigger_entities.end());
+    kinematic_hierarchy_sync_rejections.erase(entity);
     removeCharacterController(entity);
 
     // Remove any constraint associated with this entity first
@@ -1019,7 +1061,67 @@ void PhysicsSystem::syncTransformsToJolt(entt::registry& registry)
         if (motion_type == JPH::EMotionType::Kinematic)
         {
             auto& transform = registry.get<TransformComponent>(entity);
-            body_interface.MoveKinematic(body_id, toJoltR(transform.position), toJoltQuat(transform.rotation), fixed_delta);
+            const bool is_parented = registry.all_of<ParentComponent>(entity) &&
+                                     Hierarchy::parentOf(registry, entity) != entt::null;
+            if (!is_parented)
+            {
+                // Preserve the existing root-body contract exactly.
+                body_interface.MoveKinematic(body_id, toJoltR(transform.position),
+                                             toJoltQuat(transform.rotation), fixed_delta);
+                kinematic_hierarchy_sync_rejections.erase(entity);
+                continue;
+            }
+
+            bool hierarchy_valid = true;
+            const char* rejection_reason = nullptr;
+            std::unordered_set<entt::entity> visited;
+            visited.insert(entity);
+            entt::entity ancestor = Hierarchy::parentOf(registry, entity);
+            for (int depth = 0; ancestor != entt::null; ++depth)
+            {
+                if (depth >= Hierarchy::kMaxDepth || !visited.insert(ancestor).second)
+                {
+                    hierarchy_valid = false;
+                    rejection_reason = "ancestor chain is cyclic or exceeds the hierarchy depth limit";
+                    break;
+                }
+
+                if (const auto* ancestor_transform = registry.try_get<TransformComponent>(ancestor);
+                    ancestor_transform && !hasUnitScale(ancestor_transform->scale))
+                {
+                    hierarchy_valid = false;
+                    rejection_reason = "an ancestor has non-unit scale";
+                    break;
+                }
+                ancestor = Hierarchy::parentOf(registry, ancestor);
+            }
+
+            glm::vec3 world_position{};
+            JPH::Quat world_rotation = JPH::Quat::sIdentity();
+            if (hierarchy_valid && !decomposeKinematicWorldPose(
+                    Hierarchy::computeWorldMatrix(registry, entity),
+                    world_position, world_rotation))
+            {
+                hierarchy_valid = false;
+                rejection_reason = "the composed hierarchy pose is non-finite or non-decomposable";
+            }
+
+            if (!hierarchy_valid)
+            {
+                if (kinematic_hierarchy_sync_rejections.insert(entity).second)
+                {
+                    LOG_ENGINE_WARN(
+                        "Skipping hierarchy-child kinematic sync for entity {}: {}",
+                        static_cast<uint32_t>(entt::to_integral(entity)), rejection_reason);
+                }
+                continue;
+            }
+
+            kinematic_hierarchy_sync_rejections.erase(entity);
+            // The composed pose is an ephemeral physics input. TransformComponent
+            // remains the child's local, authored ECS transform.
+            body_interface.MoveKinematic(body_id, toJoltR(world_position), world_rotation,
+                                         fixed_delta);
             continue;
         }
 

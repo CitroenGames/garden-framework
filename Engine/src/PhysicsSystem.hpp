@@ -12,6 +12,7 @@
 #include <entt/entt.hpp>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 #include <memory>
 #include <cmath>
 #include <cassert>
@@ -209,6 +210,11 @@ private:
     bool initialized = false;
     bool stepping = false;
     std::vector<entt::entity> trigger_entities;
+
+    // A parented kinematic body cannot be moved safely while its ancestor
+    // chain violates the unit-scale contract. Keep this service-owned state
+    // only to bound diagnostics to one message per invalid interval.
+    std::unordered_set<entt::entity> kinematic_hierarchy_sync_rejections;
 
     // Helper: convert glm <-> Jolt types
     static JPH::Vec3 toJolt(const glm::vec3& v) { return JPH::Vec3(v.x, v.y, v.z); }

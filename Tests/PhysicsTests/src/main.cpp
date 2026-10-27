@@ -2021,6 +2021,137 @@ static bool testD6KinematicPlatformCarriesCharacter()
     return pass(name);
 }
 
+// H-E portions 2 and 3: a hierarchy-child kinematic body takes its pose from
+// the composed *current* local hierarchy, while its TransformComponent remains
+// the authored local value.  The character is deliberately left as a root:
+// it is an occupant of the parented Jolt platform, never a hierarchy child.
+static bool testHEParentedKinematicPlatformSync()
+{
+    const std::string name = "H-E parented kinematic sync composes pose and carries CharacterVirtual";
+    world w;
+    w.initializePhysics();
+    EntityLifecycle life(w.registry, 71);
+
+    const entt::entity parent = life.create();
+    auto& parent_transform = w.registry.emplace<TransformComponent>(parent, 4.0f, 0.0f, -3.0f);
+    parent_transform.rotation = {0.0f, 35.0f, 0.0f};
+
+    const entt::entity platform = life.create();
+    auto& platform_transform = w.registry.emplace<TransformComponent>(platform, 1.25f, 0.25f, 0.0f);
+    platform_transform.rotation = {0.0f, 20.0f, 0.0f};
+    const TransformComponent platform_local_before = platform_transform;
+    auto& platform_body = w.registry.emplace<RigidBodyComponent>(platform);
+    platform_body.motion_type = BodyMotionType::Kinematic;
+    platform_body.apply_gravity = false;
+    if (!Hierarchy::attach(w.registry, platform, parent))
+        return fail(name, "valid kinematic child attach was rejected");
+
+    ColliderComponent platform_collider;
+    platform_collider.shape_type = ColliderShapeType::Box;
+    platform_collider.box_half_extents = glm::vec3(2.0f, 0.25f, 2.0f);
+    const auto platform_shape = PhysicsSystem::createShapeFromCollider(platform_collider, glm::vec3(1.0f));
+    if (!platform_shape)
+        return fail(name, "failed to create hierarchy-platform shape");
+
+    const glm::mat4 initial_world = Hierarchy::computeWorldMatrix(w.registry, platform);
+    const glm::vec3 initial_position(initial_world[3]);
+    const JPH::BodyID platform_body_id = w.getPhysicsSystem().createKinematicBody(
+        initial_position, glm::vec3(0.0f), platform_shape, platform);
+    if (platform_body_id.IsInvalid())
+        return fail(name, "failed to create hierarchy-platform body");
+
+    const entt::entity character = w.registry.create();
+    auto& character_transform = w.registry.emplace<TransformComponent>(
+        character, initial_position.x, initial_position.y + 1.5f, initial_position.z);
+    w.registry.emplace<CharacterControllerComponent>(character);
+    if (w.getPhysicsSystem().createCharacterController(w.registry, character).IsInvalid())
+        return fail(name, "failed to create CharacterVirtual occupant");
+
+    // Observe the body solely through the engine's public collision-query
+    // boundary. The vertical probe is aimed at the expected composed centre;
+    // the side probe checks both the expected translated face and its rotated
+    // outward normal. Moving the parent six units below ensures that an old
+    // body pose cannot satisfy the centre probe by still overlapping it.
+    auto pose_matches_query = [&](const glm::mat4& world_pose, const char* stage)
+    {
+        const glm::vec3 center(world_pose[3]);
+        const glm::vec3 axis_x = glm::normalize(glm::vec3(world_pose[0]));
+        const glm::vec3 axis_y = glm::normalize(glm::vec3(world_pose[1]));
+        PhysicsSystem::QueryFilter filter;
+        filter.ignore = character;
+
+        const auto center_hit = w.getPhysicsSystem().raycastClosest(
+            center + axis_y * 4.0f, -axis_y, 8.0f, filter);
+        if (!center_hit.hit || center_hit.entity != platform)
+            return fail(name, std::string(stage) + " kinematic body was absent from its composed world position");
+
+        const auto side_hit = w.getPhysicsSystem().raycastClosest(
+            center + axis_x * 4.0f, -axis_x, 8.0f, filter);
+        const glm::vec3 expected_side = center + axis_x * platform_collider.box_half_extents.x;
+        if (!side_hit.hit || side_hit.entity != platform ||
+            glm::distance(side_hit.hit_point, expected_side) > 0.03f)
+            return fail(name, std::string(stage) + " kinematic body did not follow parent translation");
+        if (glm::dot(glm::normalize(side_hit.hit_normal), axis_x) < 0.999f)
+            return fail(name, std::string(stage) + " kinematic body did not compose parent and child rotation");
+        return true;
+    };
+
+    auto simulate_occupant = [&]()
+    {
+        w.simulate_character_controller(character, CharacterMoveInput{}, w.fixed_delta);
+        w.stepPhysicsSingleStep();
+        w.player_collisions(character);
+    };
+    for (int tick = 0; tick < 60; ++tick)
+        simulate_occupant();
+    if (!w.get_character_controller_state(character).grounded)
+        return fail(name, "CharacterVirtual did not settle on hierarchy platform");
+
+    const float character_start_x = character_transform.position.x;
+    for (int tick = 0; tick < 60; ++tick)
+    {
+        // Change only the ancestor. The platform local TRS must stay local.
+        parent_transform.position.x += 0.10f;
+        parent_transform.rotation.y += 1.0f;
+        simulate_occupant();
+    }
+
+    const glm::mat4 expected_world = Hierarchy::computeWorldMatrix(w.registry, platform);
+    if (!pose_matches_query(expected_world, "parent motion"))
+        return false;
+
+    if (glm::distance(platform_transform.position, platform_local_before.position) > 0.0001f ||
+        glm::distance(platform_transform.rotation, platform_local_before.rotation) > 0.0001f ||
+        glm::distance(platform_transform.scale, platform_local_before.scale) > 0.0001f)
+        return fail(name, "kinematic world sync overwrote the authored local transform");
+
+    const CharacterControllerState carried_state = w.get_character_controller_state(character);
+    if (!carried_state.grounded || carried_state.ground_velocity.x < 0.1f ||
+        character_transform.position.x < character_start_x + 0.25f)
+        return fail(name, "CharacterVirtual occupant was not carried by parent-only platform motion");
+
+    // A post-attach invalid ancestor scale must freeze the last valid Jolt
+    // pose. Restoring unit scale resumes at the current composed pose.
+    parent_transform.scale = {2.0f, 1.0f, 1.0f};
+    parent_transform.position += glm::vec3(3.0f, 0.0f, 0.0f);
+    w.getPhysicsSystem().syncTransformsToJolt(w.registry);
+    w.getPhysicsSystem().syncTransformsToJolt(w.registry);
+    if (!pose_matches_query(expected_world, "invalid-scale freeze"))
+        return false;
+
+    parent_transform.scale = glm::vec3(1.0f);
+    const glm::mat4 resumed_world = Hierarchy::computeWorldMatrix(w.registry, platform);
+    w.stepPhysicsSingleStep();
+    if (!pose_matches_query(resumed_world, "unit-scale resume"))
+        return false;
+    if (glm::distance(platform_transform.position, platform_local_before.position) > 0.0001f ||
+        glm::distance(platform_transform.rotation, platform_local_before.rotation) > 0.0001f ||
+        glm::distance(platform_transform.scale, platform_local_before.scale) > 0.0001f)
+        return fail(name, "resumed kinematic sync changed the authored local transform");
+
+    return pass(name);
+}
+
 static bool testD6CharacterTeleportRefreshesContacts()
 {
     const std::string name = "D6 CharacterController teleport refreshes contacts";
@@ -3322,6 +3453,200 @@ static entt::entity findEntityByTag(entt::registry& registry, const std::string&
     return entt::null;
 }
 
+// H-E portion 2 loaded-level boundary: body construction originally happened
+// before H-B restored ParentComponent links. This fixture observes Jolt before
+// the first physics step, so a later regular kinematic sync cannot mask a
+// body initialized from the child's local pose instead of its composed world
+// pose. The off-centre probe also distinguishes the parent-composed yaw from
+// an unrotated box.
+static bool testHELoadedKinematicChildInitializesAtComposedPose()
+{
+    using json = nlohmann::json;
+    const std::string name = "H-E loaded kinematic child initializes from restored world pose";
+    const EntityGuid parent_guid{0xE100, 0xE101};
+    const EntityGuid child_guid{0xE200, 0xE201};
+
+    LevelData level;
+    level.metadata.level_name = "H-E loaded hierarchy physics fixture";
+    LevelEntity child;
+    child.name = "he_loaded_kinematic_child";
+    child.type = EntityType::Physical;
+    child.position = {1.0f, 0.25f, 0.0f};
+    child.rotation = {0.0f, 0.0f, 0.0f};
+    child.scale = glm::vec3(1.0f);
+    child.has_rigidbody = true;
+    child.body_motion_type = "Kinematic";
+    child.apply_gravity = false;
+    child.has_collider = true;
+    child.collider_shape_type = "Box";
+    child.collider_box_half_extents = {2.0f, 0.25f, 0.5f};
+    child.reflected_components = json::object({
+        {"IdentityComponent", json::object({{"guid", guidToString(child_guid)}})},
+        {"ParentComponent", json::object({{"parent", guidToString(parent_guid)}})}
+    });
+
+    LevelEntity parent;
+    parent.name = "he_loaded_parent";
+    parent.type = EntityType::Static;
+    parent.position = {10.0f, 0.0f, 0.0f};
+    parent.rotation = {0.0f, 90.0f, 0.0f};
+    parent.scale = glm::vec3(1.0f);
+    parent.reflected_components = json::object({
+        {"IdentityComponent", json::object({{"guid", guidToString(parent_guid)}})}
+    });
+
+    // Child first also confirms the post-link initialization does not depend
+    // on authored file order.
+    level.entities.push_back(child);
+    level.entities.push_back(parent);
+
+    world w;
+    w.initializePhysics();
+    EntityLifecycle lifecycle(w.registry, 72);
+    LevelManager manager;
+    std::vector<entt::entity> created;
+    if (!manager.instantiateLevel(level, w, nullptr, nullptr, nullptr,
+                                  nullptr, false, &created))
+        return fail(name, "valid parented kinematic level was rejected");
+
+    const entt::entity loaded_parent = findEntityByTag(w.registry, "he_loaded_parent");
+    const entt::entity loaded_child = findEntityByTag(w.registry, "he_loaded_kinematic_child");
+    if (loaded_parent == entt::null || loaded_child == entt::null ||
+        !w.getPhysicsSystem().hasBody(loaded_child))
+        return fail(name, "loaded hierarchy or child Jolt body was missing");
+    if (Hierarchy::parentOf(w.registry, loaded_child) != loaded_parent)
+        return fail(name, "loaded child parent link was not restored");
+
+    const TransformComponent& loaded_local =
+        w.registry.get<TransformComponent>(loaded_child);
+    if (glm::distance(loaded_local.position, child.position) > 0.0001f ||
+        glm::distance(loaded_local.rotation, child.rotation) > 0.0001f ||
+        glm::distance(loaded_local.scale, child.scale) > 0.0001f)
+        return fail(name, "loaded body initialization overwrote child local transform");
+
+    const glm::mat4 expected_world =
+        Hierarchy::computeWorldMatrix(w.registry, loaded_child);
+    const glm::vec3 expected_position(expected_world[3]);
+    PhysicsSystem::OverlapResult results[4];
+    const PhysicsSystem::QueryFilter filter{};
+    const auto includes_child = [&](const glm::vec3& center)
+    {
+        const uint32_t count = w.getPhysicsSystem().overlapBox(
+            center, glm::vec3(0.04f), glm::vec3(0.0f), filter, results, 4);
+        for (uint32_t i = 0; i < count; ++i)
+            if (results[i].entity == loaded_child)
+                return true;
+        return false;
+    };
+    if (!includes_child(expected_position))
+        return fail(name, "child Jolt body was not initialized at composed parent translation");
+    if (!includes_child(expected_position + glm::vec3(0.0f, 0.0f, 1.25f)))
+        return fail(name, "child Jolt body was not initialized with composed parent rotation");
+
+    return pass(name);
+}
+
+// The staged load policy must classify a use_mesh_collision authoring request
+// the same way that the direct API classifies its resulting mesh collider:
+// as a static mesh body that cannot be a hierarchy child. This also keeps the
+// unit-scale constraint scoped to actual kinematic bodies, so ordinary ECS
+// children remain usable below scaled presentation parents.
+static bool testHEStagedMeshPolicyAndNonPhysicsScale()
+{
+    using json = nlohmann::json;
+    const std::string name = "H-E staged mesh policy matches direct attach and allows non-physics scaled children";
+
+    // Direct hierarchy API: a child with no physics component is allowed below
+    // a scaled parent. The scale invariant applies only to a kinematic body.
+    {
+        entt::registry registry;
+        EntityLifecycle lifecycle(registry, 73);
+        const entt::entity parent = lifecycle.create();
+        const entt::entity child = lifecycle.create();
+        registry.emplace<TransformComponent>(parent).scale = {2.0f, 1.0f, 1.0f};
+        registry.emplace<TransformComponent>(child);
+        if (!Hierarchy::attach(registry, child, parent))
+            return fail(name, "direct attach rejected a non-physics child below a scaled parent");
+        if (Hierarchy::parentOf(registry, child) != parent)
+            return fail(name, "direct non-physics child link was not written");
+    }
+
+    const EntityGuid parent_guid{0xE300, 0xE301};
+    const EntityGuid child_guid{0xE400, 0xE401};
+    const auto make_parent = [&]()
+    {
+        LevelEntity parent;
+        parent.name = "he_policy_parent";
+        parent.scale = {2.0f, 1.0f, 1.0f};
+        parent.reflected_components = json::object({
+            {"IdentityComponent", json::object({{"guid", guidToString(parent_guid)}})}
+        });
+        return parent;
+    };
+    const auto make_child = [&](const char* child_name)
+    {
+        LevelEntity child;
+        child.name = child_name;
+        child.reflected_components = json::object({
+            {"IdentityComponent", json::object({{"guid", guidToString(child_guid)}})},
+            {"ParentComponent", json::object({{"parent", guidToString(parent_guid)}})}
+        });
+        return child;
+    };
+
+    // The staged version has the same non-physics result and restores its
+    // link, confirming the preflight has not made ancestor scale global.
+    {
+        LevelData level;
+        level.metadata.level_name = "H-E non-physics scaled hierarchy fixture";
+        level.entities.push_back(make_parent());
+        level.entities.push_back(make_child("he_nonphysics_child"));
+        world game_world;
+        LevelManager manager;
+        std::vector<entt::entity> created;
+        if (!manager.instantiateLevel(level, game_world, nullptr, nullptr,
+                                      nullptr, nullptr, false, &created))
+            return fail(name, "staged load rejected a non-physics child below a scaled parent");
+        if (created.size() != 2 ||
+            Hierarchy::parentOf(game_world.registry, created[1]) != created[0])
+            return fail(name, "staged non-physics child link was not restored");
+    }
+
+    // A Physical kinematic child which requests visual mesh collision is
+    // destined to receive a Mesh ColliderComponent and static mesh body. The
+    // staged preflight must reject before it creates any registry entity or
+    // can create a Jolt body.
+    {
+        LevelData level;
+        level.metadata.level_name = "H-E staged kinematic mesh rejection fixture";
+        level.entities.push_back(make_parent());
+        LevelEntity child = make_child("he_kinematic_mesh_child");
+        child.type = EntityType::Physical;
+        child.body_motion_type = "Kinematic";
+        child.use_mesh_collision = true;
+        child.mesh_path = "fixtures/he_kinematic_mesh_collision.obj";
+        level.entities.push_back(child);
+
+        world game_world;
+        game_world.initializePhysics();
+        const entt::entity existing = game_world.registry.create();
+        game_world.registry.emplace<TagComponent>(existing, TagComponent{"existing"});
+        const size_t tag_count_before = game_world.registry.view<TagComponent>().size();
+        const size_t identity_count_before = game_world.registry.view<IdentityComponent>().size();
+        LevelManager manager;
+        std::vector<entt::entity> created;
+        if (manager.instantiateLevel(level, game_world, nullptr, nullptr,
+                                     nullptr, nullptr, false, &created))
+            return fail(name, "staged kinematic mesh child was accepted");
+        if (!created.empty() ||
+            game_world.registry.view<TagComponent>().size() != tag_count_before ||
+            game_world.registry.view<IdentityComponent>().size() != identity_count_before)
+            return fail(name, "staged mesh rejection mutated the registry before body creation");
+    }
+
+    return pass(name);
+}
+
 static LevelData makeHBCohortFixture()
 {
     using json = nlohmann::json;
@@ -3713,6 +4038,8 @@ int main()
     ok = testD6DynamicBodyTeleport() && ok;
     run("D6 kinematic platform carries CharacterController");
     ok = testD6KinematicPlatformCarriesCharacter() && ok;
+    run("H-E parented kinematic sync composes pose and carries CharacterVirtual");
+    ok = testHEParentedKinematicPlatformSync() && ok;
     run("D6 CharacterController teleport refreshes contacts");
     ok = testD6CharacterTeleportRefreshesContacts() && ok;
     run("D6 trigger enter exit exactly once");
@@ -3731,6 +4058,10 @@ int main()
     ok = testPredictionReplayPreservesCharacterCollision() && ok;
     run("D6-U1 level round-trip");
     ok = testD6LevelRoundTrip() && ok;
+    run("H-E loaded kinematic child initializes from restored world pose");
+    ok = testHELoadedKinematicChildInitializesAtComposedPose() && ok;
+    run("H-E staged mesh policy matches direct attach and allows non-physics scaled children");
+    ok = testHEStagedMeshPolicyAndNonPhysicsScale() && ok;
     run("D6-T1 legacy/current character layer comparison");
     ok = testD6LayerRenumberRegression(repo_root) && ok;
     run("FPSShooter level references");

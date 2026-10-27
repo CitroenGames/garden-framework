@@ -640,6 +640,88 @@ bool testDepthLimit()
     Hierarchy::updateTransformPropagation(reg);
     return pass(name);
 }
+
+// H-E portion 1: physics ownership is an attach-time hierarchy policy.  These
+// cases deliberately use Hierarchy::attach rather than the validator helper so
+// they prove callers cannot write an invalid link/mirror through the public
+// hierarchy API.
+bool testPhysicsAttachmentPolicyRejectsBeforeMutation()
+{
+    const std::string name = "H-E physics attachment policy rejects unsupported children before mutation";
+    EventBus::get().clear();
+
+    auto rejected_child = [&](const char* label, auto configure_child)
+    {
+        entt::registry reg;
+        EntityLifecycle life(reg, 60);
+        const entt::entity parent = makeEntity(reg, life, {4, 0, 0});
+        const entt::entity child = makeEntity(reg, life, {1, 2, 3});
+        configure_child(reg, child);
+
+        const TransformComponent child_before = reg.get<TransformComponent>(child);
+        if (Hierarchy::attach(reg, child, parent))
+            return fail(name, std::string(label) + " child attach was accepted");
+        if (reg.any_of<ParentComponent, ChildrenComponent,
+                       WorldTransformComponent, HierarchyDirtyTag>(child))
+            return fail(name, std::string(label) + " rejection mutated child hierarchy state");
+        if (reg.any_of<ChildrenComponent>(parent))
+            return fail(name, std::string(label) + " rejection created parent mirror state");
+        const TransformComponent& child_after = reg.get<TransformComponent>(child);
+        if (!nearVec(child_after.position, child_before.position) ||
+            !nearVec(child_after.rotation, child_before.rotation) ||
+            !nearVec(child_after.scale, child_before.scale))
+            return fail(name, std::string(label) + " rejection changed the local transform");
+        return true;
+    };
+
+    if (!rejected_child("dynamic", [](entt::registry& reg, entt::entity child) {
+            auto& body = reg.emplace<RigidBodyComponent>(child);
+            body.motion_type = BodyMotionType::Dynamic;
+        }))
+        return false;
+    if (!rejected_child("static", [](entt::registry& reg, entt::entity child) {
+            auto& body = reg.emplace<RigidBodyComponent>(child);
+            body.motion_type = BodyMotionType::Static;
+        }))
+        return false;
+    if (!rejected_child("CharacterVirtual", [](entt::registry& reg, entt::entity child) {
+            reg.emplace<CharacterControllerComponent>(child);
+        }))
+        return false;
+
+    // The invalid scale is on an ancestor rather than the immediate parent.
+    // This catches a validator that checks only the direct parent.
+    {
+        entt::registry reg;
+        EntityLifecycle life(reg, 61);
+        const entt::entity grandparent = makeEntity(reg, life, {0, 0, 0});
+        const entt::entity parent = makeEntity(reg, life, {1, 0, 0});
+        const entt::entity child = makeEntity(reg, life, {0, 2, 0});
+        if (!Hierarchy::attach(reg, parent, grandparent))
+            return fail(name, "valid non-physics parent setup was rejected");
+        reg.get<TransformComponent>(grandparent).scale = {2.0f, 1.0f, 1.0f};
+        auto& kinematic = reg.emplace<RigidBodyComponent>(child);
+        kinematic.motion_type = BodyMotionType::Kinematic;
+        kinematic.apply_gravity = false;
+
+        const TransformComponent child_before = reg.get<TransformComponent>(child);
+        const auto grandparent_children_before = reg.get<ChildrenComponent>(grandparent).children;
+        if (Hierarchy::attach(reg, child, parent))
+            return fail(name, "scaled-ancestor kinematic child attach was accepted");
+        if (reg.any_of<ParentComponent, ChildrenComponent,
+                       WorldTransformComponent, HierarchyDirtyTag>(child))
+            return fail(name, "scaled-ancestor rejection mutated child hierarchy state");
+        if (reg.get<ChildrenComponent>(grandparent).children != grandparent_children_before)
+            return fail(name, "scaled-ancestor rejection changed the existing grandparent mirror");
+        const TransformComponent& child_after = reg.get<TransformComponent>(child);
+        if (!nearVec(child_after.position, child_before.position) ||
+            !nearVec(child_after.rotation, child_before.rotation) ||
+            !nearVec(child_after.scale, child_before.scale))
+            return fail(name, "scaled-ancestor rejection changed the local transform");
+    }
+
+    return pass(name);
+}
 } // namespace
 
 int main()
@@ -661,6 +743,7 @@ int main()
     if (!testStaleParentAndRebuild()) ++failures;
     if (!testCohortRebuildPreservesUnrelatedMirrors()) ++failures;
     if (!testDepthLimit()) ++failures;
+    if (!testPhysicsAttachmentPolicyRejectsBeforeMutation()) ++failures;
     if (failures == 0)
         std::cout << "All HierarchyTests passed" << std::endl;
     else

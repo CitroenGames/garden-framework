@@ -27,6 +27,7 @@
 #include <iostream>
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <cctype>
 #include <filesystem>
@@ -36,6 +37,8 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <glm/gtx/euler_angles.hpp>
+#include <glm/gtx/matrix_decompose.hpp>
 
 using json = nlohmann::json;
 
@@ -507,6 +510,47 @@ struct LevelInstantiationPlan
     std::vector<size_t> parent_indices;
 };
 
+static Hierarchy::PhysicsAttachmentNode stagedPhysicsAttachmentNode(
+    const LevelEntity& entity)
+{
+    Hierarchy::PhysicsAttachmentNode node;
+    node.local_scale = entity.scale;
+    node.has_rigid_body = entity.has_rigidbody ||
+                          entity.type == EntityType::Physical ||
+                          entity.type == EntityType::Player;
+    node.rigid_body_motion = stringToBodyMotionType(entity.body_motion_type);
+    node.has_character_controller =
+        entity.type == EntityType::Player ||
+        hasComponentJson(entity.reflected_components,
+                         "CharacterControllerComponent");
+
+    const bool has_static_collider =
+        !node.has_rigid_body &&
+        ((entity.has_collider && entityTypeCanHaveLevelCollider(entity.type)) ||
+         entity.use_mesh_collision);
+    // setupLevelColliderComponent turns a visual-mesh collision request into
+    // a Mesh ColliderComponent. Level physics then creates that collider as a
+    // static mesh body even when the authored RigidBody is kinematic, matching
+    // the direct-attach predicate for a final mesh ColliderComponent.
+    const bool has_kinematic_mesh_body =
+        node.has_rigid_body &&
+        node.rigid_body_motion == BodyMotionType::Kinematic &&
+        ((entity.has_collider && entity.collider_shape_type == "Mesh") ||
+         entity.use_mesh_collision);
+    bool has_terrain_collision = false;
+    if (hasComponentJson(entity.reflected_components, "TerrainComponent"))
+    {
+        const json& terrain = entity.reflected_components["TerrainComponent"];
+        has_terrain_collision = terrain.value("generate_collision", true);
+    }
+    node.has_non_kinematic_physics_body =
+        has_static_collider || has_kinematic_mesh_body ||
+        (!node.has_rigid_body &&
+         hasComponentJson(entity.reflected_components, "TriggerComponent")) ||
+        has_terrain_collision;
+    return node;
+}
+
 static bool parseCanonicalGuid(const json& value, EntityGuid& out)
 {
     if (!value.is_string())
@@ -689,6 +733,35 @@ static bool prepareLevelInstantiation(const LevelData& level_data,
         }
         for (size_t index : path)
             visit_state[index] = 2;
+    }
+
+    // Apply the direct-attach policy while the level is still staged. A
+    // rejection occurs before registry mutation or Jolt body creation.
+    std::vector<Hierarchy::PhysicsAttachmentNode> physics_nodes;
+    physics_nodes.reserve(entity_count);
+    for (const LevelEntity& entity : level_data.entities)
+        physics_nodes.push_back(stagedPhysicsAttachmentNode(entity));
+    for (size_t child_index = 0; child_index < entity_count; ++child_index)
+    {
+        const size_t direct_parent = plan.parent_indices[child_index];
+        if (direct_parent == no_parent)
+            continue;
+
+        std::vector<Hierarchy::PhysicsAttachmentNode> ancestors;
+        for (size_t current = direct_parent; current != no_parent;
+             current = plan.parent_indices[current])
+        {
+            ancestors.push_back(physics_nodes[current]);
+        }
+        const auto result = Hierarchy::validatePhysicsAttachment(
+            physics_nodes[child_index], ancestors);
+        if (result != Hierarchy::PhysicsAttachmentValidationResult::Allowed)
+        {
+            LOG_ENGINE_ERROR(
+                "Level instantiation rejected: hierarchy physics policy ({}) for '{}'",
+                static_cast<int>(result), level_data.entities[child_index].name);
+            return false;
+        }
     }
 
     return true;
@@ -874,6 +947,42 @@ static PhysicsSystem::PhysicsBodyDesc makeBodyDesc(const LevelEntity& entity_dat
     return desc;
 }
 
+// The hierarchy policy has already established unit scale on every ancestor
+// of a kinematic child. Resolve its world pose directly from authoritative
+// local ECS data, rather than waiting for the derived transform cache.
+static bool resolveLevelKinematicBodyPose(entt::registry& registry,
+                                          entt::entity entity,
+                                          glm::vec3& out_position,
+                                          glm::vec3& out_rotation)
+{
+    const glm::mat4 world = Hierarchy::computeWorldMatrix(registry, entity);
+    glm::vec3 scale{}, translation{}, skew{};
+    glm::quat orientation{};
+    glm::vec4 perspective{};
+    if (!glm::decompose(world, scale, orientation, translation, skew, perspective))
+        return false;
+
+    const float orientation_length_sq = glm::dot(orientation, orientation);
+    if (!std::isfinite(translation.x) || !std::isfinite(translation.y) ||
+        !std::isfinite(translation.z) || !std::isfinite(orientation.x) ||
+        !std::isfinite(orientation.y) || !std::isfinite(orientation.z) ||
+        !std::isfinite(orientation.w) || !std::isfinite(orientation_length_sq) ||
+        orientation_length_sq <= 1e-12f)
+    {
+        return false;
+    }
+
+    orientation = glm::normalize(orientation);
+    float yaw = 0.0f;
+    float pitch = 0.0f;
+    float roll = 0.0f;
+    glm::extractEulerAngleYXZ(glm::mat4_cast(orientation), yaw, pitch, roll);
+    out_position = translation;
+    out_rotation = glm::vec3(glm::degrees(pitch), glm::degrees(yaw),
+                             glm::degrees(roll));
+    return true;
+}
+
 static bool createLevelPhysicsBody(world& game_world, entt::entity e, const LevelEntity& entity_data)
 {
     if (!game_world.registry.all_of<ColliderComponent, TransformComponent>(e))
@@ -893,6 +1002,17 @@ static bool createLevelPhysicsBody(world& game_world, entt::entity e, const Leve
 
         if (motion == BodyMotionType::Kinematic)
         {
+            glm::vec3 body_position = t.position;
+            glm::vec3 body_rotation = t.rotation;
+            if (Hierarchy::parentOf(game_world.registry, e) != entt::null &&
+                !resolveLevelKinematicBodyPose(game_world.registry, e,
+                                               body_position, body_rotation))
+            {
+                LOG_ENGINE_ERROR(
+                    "Entity '{}': failed to resolve composed hierarchy pose for kinematic body initialization",
+                    entity_data.name);
+                return false;
+            }
             if (col.shape_type == ColliderShapeType::Mesh)
             {
                 if (!col.is_mesh_valid())
@@ -900,7 +1020,7 @@ static bool createLevelPhysicsBody(world& game_world, entt::entity e, const Leve
                     LOG_ENGINE_ERROR("Entity '{}': kinematic mesh collider has no valid mesh", entity_data.name);
                     return false;
                 }
-                return game_world.getPhysicsSystem().createStaticMeshBody(t.position, t.rotation, t.scale, *col.get_mesh(), e, desc).IsInvalid() == false;
+                return game_world.getPhysicsSystem().createStaticMeshBody(body_position, body_rotation, t.scale, *col.get_mesh(), e, desc).IsInvalid() == false;
             }
 
             JPH::ShapeRefC shape = PhysicsSystem::createShapeFromCollider(col, t.scale);
@@ -910,7 +1030,7 @@ static bool createLevelPhysicsBody(world& game_world, entt::entity e, const Leve
                                  entity_data.name, colliderShapeTypeToString(col.shape_type));
                 return false;
             }
-            return game_world.getPhysicsSystem().createKinematicBody(t.position, t.rotation, shape, e, desc).IsInvalid() == false;
+            return game_world.getPhysicsSystem().createKinematicBody(body_position, body_rotation, shape, e, desc).IsInvalid() == false;
         }
 
         if (col.shape_type == ColliderShapeType::Mesh)
@@ -3594,7 +3714,6 @@ bool LevelManager::instantiateLevelParallel(
                                        instantiation_plan.reflected_components[entity_index]);
         setupLevelTerrainComponent(game_world.registry, e, entity_data, render_api);
         applyWaterComponentToEntityMesh(game_world.registry, e);
-        createLevelPhysicsBody(game_world, e, entity_data);
 
         // Player
         if (entity_data.type == EntityType::Player)
@@ -3698,6 +3817,14 @@ bool LevelManager::instantiateLevelParallel(
             ParentComponent{EntityRef{instantiation_plan.identity_guids[parent_index]}});
     }
     Hierarchy::rebuildChildren(game_world.registry, created_entities);
+
+    // Kinematic hierarchy children must be created from their composed world
+    // pose. Creating every non-player level body here also keeps the previous
+    // creation path while ensuring links exist before that pose is sampled.
+    // Player CharacterVirtual entities are roots by the staged policy and are
+    // created during the entity pass above.
+    for (size_t i = 0; i < created_entities.size(); ++i)
+        createLevelPhysicsBody(game_world, created_entities[i], level_data.entities[i]);
 
     // Second pass: Resolve references (PlayerRepresentation)
     for (size_t i = 0; i < level_data.entities.size(); ++i) {
