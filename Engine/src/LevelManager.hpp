@@ -261,7 +261,8 @@ public:
                          entt::entity* out_player_entity = nullptr,
                          entt::entity* out_freecam_entity = nullptr,
                          entt::entity* out_player_rep_entity = nullptr,
-                         bool create_authority_game_mode = true);
+                         bool create_authority_game_mode = true,
+                         std::vector<entt::entity>* out_created_entities = nullptr);
 
     // Parallel instantiation - reads all meshes from disk in parallel, then
     // finalizes GPU uploads and entity creation on the main thread.
@@ -271,7 +272,8 @@ public:
                                   entt::entity* out_player_entity = nullptr,
                                   entt::entity* out_freecam_entity = nullptr,
                                   entt::entity* out_player_rep_entity = nullptr,
-                                  bool create_authority_game_mode = true);
+                                  bool create_authority_game_mode = true,
+                                  std::vector<entt::entity>* out_created_entities = nullptr);
 
     void setReflectionRegistry(ReflectionRegistry* reflection) { m_reflection = reflection; }
     void setGameplayDefaults(std::string game_mode_class, std::string game_state_class);

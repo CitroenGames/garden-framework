@@ -3217,7 +3217,8 @@ bool LevelManager::instantiateLevelParallel(
     entt::entity* out_player_entity,
     entt::entity* out_freecam_entity,
     entt::entity* out_player_rep_entity,
-    bool create_authority_game_mode)
+    bool create_authority_game_mode,
+    std::vector<entt::entity>* out_created_entities)
 {
     LOG_ENGINE_INFO("Instantiating level (parallel): {}", level_data.metadata.level_name);
     ScopedLoadTimer timer("Level instantiation");
@@ -3292,6 +3293,7 @@ bool LevelManager::instantiateLevelParallel(
     if (out_player_entity) *out_player_entity = entt::null;
     if (out_freecam_entity) *out_freecam_entity = entt::null;
     if (out_player_rep_entity) *out_player_rep_entity = entt::null;
+    if (out_created_entities) out_created_entities->clear();
 
     // Map to store entities by name for reference resolution
     std::map<std::string, entt::entity> entity_map;
@@ -3336,6 +3338,8 @@ bool LevelManager::instantiateLevelParallel(
     {
         auto e = game_world.registry.create();
         created_entities.push_back(e);
+        if (out_created_entities)
+            out_created_entities->push_back(e);
 
         if (!entity_data.name.empty()) {
             entity_map[entity_data.name] = e;
@@ -3520,7 +3524,8 @@ bool LevelManager::instantiateLevel(
     entt::entity* out_player_entity,
     entt::entity* out_freecam_entity,
     entt::entity* out_player_rep_entity,
-    bool create_authority_game_mode)
+    bool create_authority_game_mode,
+    std::vector<entt::entity>* out_created_entities)
 {
     return instantiateLevelParallel(
         level_data,
@@ -3529,5 +3534,6 @@ bool LevelManager::instantiateLevel(
         out_player_entity,
         out_freecam_entity,
         out_player_rep_entity,
-        create_authority_game_mode);
+        create_authority_game_mode,
+        out_created_entities);
 }

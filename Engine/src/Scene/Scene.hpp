@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <entt/entt.hpp>
 #include "LevelManager.hpp"
+#include "Components/IdentityComponent.hpp"
 
 using SceneId = uint32_t;
 constexpr SceneId INVALID_SCENE = 0;
@@ -33,11 +34,11 @@ struct Scene
     SceneLoadState state = SceneLoadState::Unloaded;
     float load_progress = 0.0f;
 
-    // Entities created by this scene (for cleanup)
-    std::vector<entt::entity> owned_entities;
+    // Stable refs for the exact entities created by this scene activation.
+    std::vector<EntityRef> owned_entities;
 
     // Key entities
-    entt::entity player_entity = entt::null;
-    entt::entity freecam_entity = entt::null;
-    entt::entity player_rep_entity = entt::null;
+    EntityRef player_entity;
+    EntityRef freecam_entity;
+    EntityRef player_rep_entity;
 };
