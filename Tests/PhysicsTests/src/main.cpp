@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <bit>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -1163,6 +1164,127 @@ static bool testUseMeshCollisionCreatesBody(const fs::path& repo_root)
         return fail(name, "downward raycast did not hit mesh collider");
     if (hit_normal.y < 0.8f)
         return fail(name, "mesh collider hit normal is not upward");
+
+    return pass(name);
+}
+
+static bool testD6CookedMeshAndWaterMaterialExclusion()
+{
+    const std::string name = "D6-T6 cooked mesh raycast, character ground, and water exclusion";
+
+    const auto make_vertex = [](float x, float z)
+    {
+        return vertex{x, 0.0f, z, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    };
+
+    // Two separate horizontal quads: a solid region at x=[-3,-1] and a water
+    // region at x=[1,3]. Both are written into the same cooked cache.
+    std::vector<vertex> source_vertices = {
+        make_vertex(-3.0f, -2.0f), make_vertex(-3.0f,  2.0f), make_vertex(-1.0f,  2.0f),
+        make_vertex(-3.0f, -2.0f), make_vertex(-1.0f,  2.0f), make_vertex(-1.0f, -2.0f),
+        make_vertex( 1.0f, -2.0f), make_vertex( 1.0f,  2.0f), make_vertex( 3.0f,  2.0f),
+        make_vertex( 1.0f, -2.0f), make_vertex( 3.0f,  2.0f), make_vertex( 3.0f, -2.0f),
+    };
+
+    const fs::path cache_directory = fs::temp_directory_path() /
+        ("garden_physics_d6t6_" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::error_code create_error;
+    if (!fs::create_directory(cache_directory, create_error))
+        return fail(name, "failed to create isolated temporary cache directory: " + create_error.message());
+
+    struct ScopedDirectoryCleanup
+    {
+        fs::path path;
+        ~ScopedDirectoryCleanup()
+        {
+            std::error_code error;
+            fs::remove_all(path, error);
+        }
+    } cleanup{cache_directory};
+
+    const fs::path cooked_path = cache_directory / "d6_t6_mesh.gardenphys";
+    Assets::LODMeshData cooked_data;
+    cooked_data.vertices = source_vertices;
+    constexpr uint64_t source_hash = 0xD6D6D6D6D6D6D6D6ull;
+    const uint64_t source_file_size = static_cast<uint64_t>(source_vertices.size() * sizeof(vertex));
+    std::string cache_error;
+    if (!Assets::CookedCollisionSerializer::cookMeshToFile(
+            cooked_data, cooked_path.string(), source_hash, source_file_size, nullptr, &cache_error))
+        return fail(name, "failed to generate cooked mesh fixture: " + cache_error);
+
+    JPH::ShapeRefC loaded_shape;
+    if (!Assets::CookedCollisionSerializer::loadShape(
+            cooked_path.string(), source_hash, source_file_size, loaded_shape, &cache_error) || !loaded_shape)
+        return fail(name, "generated cooked mesh fixture could not be read: " + cache_error);
+
+    world w;
+    w.initializePhysics();
+    PhysicsSystem& physics = w.getPhysicsSystem();
+
+    // This cache-only mesh has no source triangles to fall back to, so a
+    // successful body and raycast prove the runtime path restored the cache.
+    mesh cooked_only_mesh(nullptr, 0);
+    cooked_only_mesh.collision_cache_path = cooked_path.string();
+    cooked_only_mesh.collision_source_hash = source_hash;
+    cooked_only_mesh.collision_source_file_size = source_file_size;
+    const entt::entity cooked_ground = w.registry.create();
+    if (physics.createStaticMeshBody(glm::vec3(0.0f), glm::vec3(0.0f), glm::vec3(1.0f),
+                                     cooked_only_mesh, cooked_ground).IsInvalid())
+        return fail(name, "cache-only static mesh body could not be created");
+
+    const auto cooked_hit = physics.raycastClosest(
+        glm::vec3(-2.0f, 5.0f, 0.0f), glm::vec3(0.0f, -1.0f, 0.0f), 10.0f);
+    if (!cooked_hit.hit || cooked_hit.entity != cooked_ground || cooked_hit.hit_normal.y < 0.8f)
+        return fail(name, "raycast did not hit the generated/read cooked static mesh");
+
+    const auto cooked_water_region_hit = physics.raycastClosest(
+        glm::vec3(2.0f, 5.0f, 0.0f), glm::vec3(0.0f, -1.0f, 0.0f), 10.0f);
+    if (!cooked_water_region_hit.hit || cooked_water_region_hit.entity != cooked_ground)
+        return fail(name, "cooked cache did not restore the second mesh region");
+
+    const entt::entity character = w.registry.create();
+    w.registry.emplace<TransformComponent>(character, -2.0f, 3.0f, 0.0f);
+    w.registry.emplace<CharacterControllerComponent>(character);
+    if (physics.createCharacterController(w.registry, character).IsInvalid())
+        return fail(name, "CharacterController could not be created above the cooked solid region");
+
+    for (int tick = 0; tick < 90; ++tick)
+    {
+        w.simulate_character_controller(character, CharacterMoveInput{}, w.fixed_delta);
+        physics.stepPhysics(w.registry);
+    }
+    const CharacterControllerState character_state = w.get_character_controller_state(character);
+    if (!character_state.grounded || character_state.ground_normal.y < 0.8f)
+        return fail(name, "CharacterController did not ground on the cooked solid mesh");
+
+    // The source mesh matches the cache data, and the valid cache contains
+    // both regions. Water ranges must bypass that cache and filter their
+    // triangles while the solid range remains collidable.
+    mesh water_source_mesh(source_vertices.data(), source_vertices.size());
+    water_source_mesh.uses_material_ranges = true;
+    water_source_mesh.material_ranges.emplace_back(0, 6, INVALID_TEXTURE, "stone");
+    MaterialRange water_range(6, 6, INVALID_TEXTURE, "ocean");
+    water_range.material_flags |= MaterialFlags::Water;
+    water_source_mesh.material_ranges.push_back(water_range);
+    water_source_mesh.collision_cache_path = cooked_path.string();
+    water_source_mesh.collision_source_hash = source_hash;
+    water_source_mesh.collision_source_file_size = source_file_size;
+
+    const entt::entity water_test_ground = w.registry.create();
+    if (physics.createStaticMeshBody(glm::vec3(10.0f, 0.0f, 0.0f), glm::vec3(0.0f), glm::vec3(1.0f),
+                                     water_source_mesh, water_test_ground).IsInvalid())
+        return fail(name, "water-range source mesh body could not be created");
+
+    const auto solid_hit = physics.raycastClosest(
+        glm::vec3(8.0f, 5.0f, 0.0f), glm::vec3(0.0f, -1.0f, 0.0f), 10.0f);
+    if (!solid_hit.hit || solid_hit.entity != water_test_ground)
+        return fail(name, "solid material region was absent from the water-range mesh body");
+
+    const auto water_hit = physics.raycastClosest(
+        glm::vec3(12.0f, 5.0f, 0.0f), glm::vec3(0.0f, -1.0f, 0.0f), 10.0f);
+    if (water_hit.hit)
+        return fail(name, "water material triangles remained collidable despite the material range");
 
     return pass(name);
 }
@@ -2519,6 +2641,8 @@ int main()
     ok = testLevelPlayerCreatesCharacterController() && ok;
     run("use_mesh_collision creates body");
     ok = testUseMeshCollisionCreatesBody(repo_root) && ok;
+    run("D6-T6 cooked mesh regression");
+    ok = testD6CookedMeshAndWaterMaterialExclusion() && ok;
     run("terrain builder heightmap mesh");
     ok = testTerrainBuilderHeightmapMesh(repo_root) && ok;
     run("level terrain creates mesh and collision");
