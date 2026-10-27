@@ -417,15 +417,105 @@ bool testUiRadarProjection()
 {
     const std::string name = "UiRadar_D10Projection";
     using namespace UiLogic;
-    auto centre = projectRadarBlip(50, 50, 0, 0, 100, true);
+    RadarMapTransform map;
+    map.configured = true;
+    map.world_width = 100.0f;
+    map.world_height = 100.0f;
+    auto centre = projectRadarBlip(50, 50, map, true);
     if (!centre.visible || centre.x != "50.0%" || centre.y != "50.0%") return fail(name, "centre blip wrong");
-    auto corner = projectRadarBlip(0, 100, 0, 0, 100, true);
+    auto corner = projectRadarBlip(0, 100, map, true);
     if (!corner.visible || corner.x != "0.0%" || corner.y != "100.0%") return fail(name, "corner blip wrong");
-    if (projectRadarBlip(150, 50, 0, 0, 100, true).visible) return fail(name, "off-map blip visible");
-    if (projectRadarBlip(50, 50, 0, 0, 100, false).visible) return fail(name, "dead blip visible");
-    if (projectRadarBlip(50, 50, 0, 0, 0, true).visible) return fail(name, "no-calibration blip visible");
+    if (projectRadarBlip(150, 50, map, true).visible) return fail(name, "off-map blip visible");
+    if (projectRadarBlip(50, 50, map, false).visible) return fail(name, "dead blip visible");
+    map.world_width = 0.0f;
+    if (projectRadarBlip(50, 50, map, true).visible) return fail(name, "no-calibration blip visible");
+    map.world_width = 100.0f;
+    map.rotation_degrees = 90.0f;
+    auto rotated = projectRadarBlip(100, 0, map, true);
+    if (!rotated.visible || rotated.x != "0.0%" || rotated.y != "100.0%")
+        return fail(name, "north-up map rotation wrong");
     RadarThrottle th; int updates = 0;
     for (int i = 0; i < 60; ++i) if (th.shouldUpdate(1.0f / 60.0f)) ++updates;
     if (updates < 9 || updates > 11) return fail(name, "10Hz throttle off: " + std::to_string(updates));
+    return pass(name);
+}
+
+bool testUiRadarPresentationPrivacy()
+{
+    const std::string name = "UiRadar_AuthorizedPresentation";
+    using namespace UiLogic;
+
+    ClientCompetitiveState competitive;
+    if (!applyRoundState(competitive, static_cast<uint8_t>(RoundPhase::Live), 40.0f,
+                         8, 4, 3, false, 400, 300))
+        return fail(name, "round source setup failed");
+    competitive.local_team = FpsTeam::Attackers;
+
+    RadarMapTransform map;
+    map.configured = true;
+    map.world_width = 100.0f;
+    map.world_height = 100.0f;
+
+    RadarPresentationSource source;
+    source.connected = true;
+    source.competitive = &competitive;
+    source.map = map;
+    source.local_stable_id = 11;
+    source.approved_locations.push_back({11, RadarLocationKind::LocalSelf,
+                                         FpsTeam::Attackers, true, 25.0f, 75.0f});
+    // These are deliberately labelled candidates, but only the explicitly
+    // authorized same-team one may be rendered. Enemy and bomb positions stay
+    // out of the D10 radar even when a caller attempts to supply them.
+    source.approved_locations.push_back({22, RadarLocationKind::ApprovedTeammate,
+                                         FpsTeam::Attackers, true, 50.0f, 50.0f});
+    source.approved_locations.push_back({33, RadarLocationKind::Enemy,
+                                         FpsTeam::Defenders, true, 60.0f, 60.0f});
+    source.approved_locations.push_back({44, RadarLocationKind::Bomb,
+                                         FpsTeam::Attackers, true, 70.0f, 70.0f});
+
+    RadarSlotState slots;
+    auto without_team_publication = buildRadarPresentation(slots, source);
+    if (!without_team_publication.visible || without_team_publication.neutral_visible ||
+        !without_team_publication.blips[0].visible ||
+        without_team_publication.blips[0].x != "25.0%" ||
+        without_team_publication.blips[0].y != "75.0%" ||
+        without_team_publication.blips[1].visible || without_team_publication.blips[2].visible)
+        return fail(name, "unpublished or non-team location reached radar scalars");
+
+    source.has_authoritative_team_locations = true;
+    auto with_team_publication = buildRadarPresentation(slots, source);
+    if (!with_team_publication.blips[1].visible ||
+        with_team_publication.blips[1].x != "50.0%" ||
+        with_team_publication.blips[1].y != "50.0%" ||
+        with_team_publication.blips[2].visible || with_team_publication.blips[3].visible)
+        return fail(name, "authorized teammate or prohibited location scalar binding wrong");
+
+    // A missing teammate does not make an existing survivor change slots.
+    source.approved_locations.clear();
+    source.approved_locations.push_back({11, RadarLocationKind::LocalSelf,
+                                         FpsTeam::Attackers, false, 25.0f, 75.0f});
+    source.approved_locations.push_back({55, RadarLocationKind::ApprovedTeammate,
+                                         FpsTeam::Attackers, true, 90.0f, 10.0f});
+    const auto two_teammates = buildRadarPresentation(slots, source);
+    if (!two_teammates.blips[2].visible || two_teammates.blips[0].visible)
+        return fail(name, "dead local marker or initial teammate slot wrong");
+    source.approved_locations.erase(source.approved_locations.begin() + 1);
+    source.approved_locations.push_back({55, RadarLocationKind::ApprovedTeammate,
+                                         FpsTeam::Attackers, true, 80.0f, 10.0f});
+    const auto stable_survivor = buildRadarPresentation(slots, source);
+    if (!stable_survivor.blips[2].visible || stable_survivor.blips[1].visible ||
+        stable_survivor.blips[2].x != "80.0%")
+        return fail(name, "surviving teammate slot was not stable");
+
+    RadarPresentationSource missing_map = source;
+    missing_map.map = {};
+    const auto neutral = buildRadarPresentation(slots, missing_map);
+    if (neutral.visible || !neutral.neutral_visible || neutral.neutral_text != "RADAR UNAVAILABLE" ||
+        neutral.blips[0].visible || neutral.blips[2].visible)
+        return fail(name, "missing map did not fall back to a neutral panel");
+    missing_map.connected = false;
+    if (buildRadarPresentation(slots, missing_map).neutral_visible)
+        return fail(name, "disconnected client displayed stale radar fallback");
+
     return pass(name);
 }

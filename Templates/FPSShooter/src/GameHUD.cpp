@@ -63,6 +63,8 @@ bool GameHUD::initialize(const char* rmlPath)
     bound &= rml.dataModelBindString(m_model, "scoreboard_text", "");
     bound &= rml.dataModelBindInt(m_model, "buy_money", 800);
     bound &= rml.dataModelBindBool(m_model, "radar_visible", false);
+    bound &= rml.dataModelBindBool(m_model, "radar_neutral_visible", false);
+    bound &= rml.dataModelBindString(m_model, "radar_status", "RADAR UNAVAILABLE");
     for (int i = 0; i < 10; ++i) {
         char n[24];
         snprintf(n, sizeof(n), "r%d_visible", i); bound &= rml.dataModelBindBool(m_model, n, false);
@@ -180,7 +182,7 @@ void GameHUD::updateCompetitive(const UiLogic::ClientCompetitiveState& comp,
                                 const UiLogic::UiState& ui,
                                 const std::string& buy_text,
                                 const std::string& scoreboard_text,
-                                const std::array<UiLogic::RadarBlip, UiLogic::kRadarSlots>& radar)
+                                const UiLogic::RadarPresentation& radar)
 {
     if (!m_model) return;
     RmlUiManager& rml = RmlUiManager::get();
@@ -203,13 +205,14 @@ void GameHUD::updateCompetitive(const UiLogic::ClientCompetitiveState& comp,
     rml.dataModelSetString(m_model, "notice_text", ui.notice_text.c_str());
     rml.dataModelSetString(m_model, "buy_text", buy_text.c_str());
     rml.dataModelSetString(m_model, "scoreboard_text", scoreboard_text.c_str());
-    bool any_radar = false; for (const auto& b : radar) any_radar = any_radar || b.visible;
-    rml.dataModelSetBool(m_model, "radar_visible", any_radar);
+    rml.dataModelSetBool(m_model, "radar_visible", radar.visible);
+    rml.dataModelSetBool(m_model, "radar_neutral_visible", radar.neutral_visible);
+    rml.dataModelSetString(m_model, "radar_status", radar.neutral_text.c_str());
     for (int i = 0; i < UiLogic::kRadarSlots; ++i) {
         char n[24];
-        snprintf(n, sizeof(n), "r%d_visible", i); rml.dataModelSetBool(m_model, n, radar[i].visible);
-        snprintf(n, sizeof(n), "r%d_x", i); rml.dataModelSetString(m_model, n, radar[i].x.c_str());
-        snprintf(n, sizeof(n), "r%d_y", i); rml.dataModelSetString(m_model, n, radar[i].y.c_str());
+        snprintf(n, sizeof(n), "r%d_visible", i); rml.dataModelSetBool(m_model, n, radar.blips[i].visible);
+        snprintf(n, sizeof(n), "r%d_x", i); rml.dataModelSetString(m_model, n, radar.blips[i].x.c_str());
+        snprintf(n, sizeof(n), "r%d_y", i); rml.dataModelSetString(m_model, n, radar.blips[i].y.c_str());
     }
     rml.dataModelDirtyAll(m_model);
 }

@@ -370,6 +370,16 @@ struct RoundTickInput {
     bool hasPlayingPlayers() const { return attackers_connected + defenders_connected > 0; }
 };
 
+// The result selected for a Live tick before its state is mutated.  Keeping
+// this selection pure makes the simultaneous-event policy visible to both the
+// server wiring and the deterministic gameplay tests.
+struct RoundOutcome {
+    RoundWinner winner = RoundWinner::None;
+    RoundEndReason reason = RoundEndReason::None;
+
+    bool resolved() const { return winner != RoundWinner::None; }
+};
+
 class RoundSystem {
 public:
     ModeConfig config;
@@ -422,6 +432,31 @@ public:
     }
     bool isMovementLocked() const { return state.phase == RoundPhase::Freeze; }
 
+    // The authoritative Live-tick winner order is fixed deliberately:
+    // detonation, defuse, Defender elimination, Attacker elimination, then
+    // an unplanted phase-timer expiry.  Thus a same-tick detonate/defuse is a
+    // detonation, simultaneous empty teams award Attackers by the existing
+    // Defender-elimination rule, and a planted bomb suppresses Attacker
+    // elimination and the round timer until the bomb itself resolves.
+    //
+    // `phase_timer_expired` is supplied only after the phase timer was ticked;
+    // callers use false for events that occur before that timer advances.
+    static RoundOutcome resolveLiveOutcome(const RoundTickInput& input,
+                                           bool phase_timer_expired) {
+        if (input.bomb_detonated)
+            return {RoundWinner::Attackers, RoundEndReason::TargetBombed};
+        if (input.bomb_defused)
+            return {RoundWinner::Defenders, RoundEndReason::BombDefused};
+        // Existing reason labels name the winning side's elimination outcome.
+        if (input.defenders_alive <= 0 && input.defenders_connected > 0)
+            return {RoundWinner::Attackers, RoundEndReason::AttackersElimination};
+        if (input.attackers_alive <= 0 && input.attackers_connected > 0 && !input.bomb_planted)
+            return {RoundWinner::Defenders, RoundEndReason::DefendersElimination};
+        if (phase_timer_expired && !input.bomb_planted)
+            return {RoundWinner::Defenders, RoundEndReason::TargetSaved};
+        return {};
+    }
+
     void tick(float dt, const RoundTickInput& in) {
         if (dt <= 0.0f || state.paused) return;
         state.server_tick += static_cast<uint32_t>(std::max(1.0f, dt * config.tick_rate));
@@ -442,20 +477,19 @@ public:
                 transitionTo(config.warmup_seconds > 0.0f ? RoundPhase::Warmup : RoundPhase::Freeze);
             break;
         case RoundPhase::Live: {
-            // Win checks every Live tick, spec S9 order.
-            if (input.bomb_detonated) { endRound(RoundWinner::Attackers, RoundEndReason::TargetBombed); break; }
-            if (input.bomb_defused) { endRound(RoundWinner::Defenders, RoundEndReason::BombDefused); break; }
-            if (input.defenders_alive <= 0 && input.defenders_connected > 0) {
-                endRound(RoundWinner::Attackers, RoundEndReason::AttackersElimination); break;
-            }
-            if (input.attackers_alive <= 0 && input.attackers_connected > 0 && !input.bomb_planted) {
-                endRound(RoundWinner::Defenders, RoundEndReason::DefendersElimination); break;
+            // Events resolve before the phase timer advances.  This preserves
+            // an event outcome on the exact tick that the timer reaches zero.
+            const RoundOutcome event_outcome = resolveLiveOutcome(input, false);
+            if (event_outcome.resolved()) {
+                endRound(event_outcome.winner, event_outcome.reason);
+                break;
             }
             if (timer.tick(dt)) {
-                if (input.bomb_planted) {
+                const RoundOutcome deadline_outcome = resolveLiveOutcome(input, true);
+                if (deadline_outcome.resolved()) {
+                    endRound(deadline_outcome.winner, deadline_outcome.reason);
+                } else if (input.bomb_planted) {
                     timer.start(config.round_seconds); // planted: round timer no longer ends round
-                } else {
-                    endRound(RoundWinner::Defenders, RoundEndReason::TargetSaved);
                 }
             }
             break;

@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <functional>
 #include <string>
@@ -41,6 +42,11 @@ struct NavAgentComponent {
     glm::vec3 goal{0}; bool has_goal = false; bool path_valid = false;
     float repath_timer = 0; glm::vec3 desired_velocity{0}; bool stuck = false;
     int32_t path_failures = 0;
+    // A request is owned by this bot until the world scheduler grants or
+    // rejects it.  The tick is deliberately data rather than wall-clock time:
+    // replay order remains stable regardless of frame duration.
+    bool path_request_pending = false;
+    uint32_t path_request_tick = 0;
 };
 struct SteeringComponent { glm::vec3 velocity{0}; float stuck_time = 0; glm::vec3 last_pos{0}; bool has_last = false; uint8_t unstuck_phase = 0; float unstuck_timer = 0; float stuck_window_time = 0; glm::vec3 window_start{0}; };
 struct BotComponent {
@@ -150,6 +156,78 @@ inline bool enemyConfirmed(const BotPerceptComponent& p, uint8_t difficulty) {
 // ---- Steering (no teleport: only desired velocity) ----
 inline void setPath(NavAgentComponent& n, const std::vector<glm::vec3>& pts, const glm::vec3& goal) {
     n.path = pts; n.goal = goal; n.has_goal = true; n.path_valid = !pts.empty(); n.path_index = pts.size() > 1 ? 1 : 0; n.path_failures = pts.empty() ? n.path_failures + 1 : 0;
+    n.path_request_pending = false;
+    n.path_request_tick = 0;
+}
+
+// ---- Bounded path scheduling ----
+// The server owns query execution, because it owns the per-world NavMesh.
+// These data helpers make selection deterministic and keep all motion on the
+// ordinary input path.  Older requests win; ties are broken by the stable bot
+// index and then owner id, never ECS-view iteration order.
+inline constexpr uint32_t kBotPathRequestsPerTick = 2;
+
+struct PathScheduleRequest {
+    int32_t bot_index = 0;
+    uint16_t owner_client_id = 0;
+    uint32_t queued_tick = 0;
+};
+
+inline bool pathRequestEarlier(const PathScheduleRequest& a, const PathScheduleRequest& b) {
+    if (a.queued_tick != b.queued_tick) return a.queued_tick < b.queued_tick;
+    if (a.bot_index != b.bot_index) return a.bot_index < b.bot_index;
+    return a.owner_client_id < b.owner_client_id;
+}
+
+inline std::vector<PathScheduleRequest> selectPathRequests(std::vector<PathScheduleRequest> pending,
+                                                            uint32_t budget = kBotPathRequestsPerTick) {
+    std::sort(pending.begin(), pending.end(), pathRequestEarlier);
+    if (pending.size() > budget) pending.resize(budget);
+    return pending;
+}
+
+inline bool pathGoalChanged(const NavAgentComponent& n, const glm::vec3& goal) {
+    glm::vec3 delta = goal - n.goal;
+    delta.y = 0.0f;
+    return !n.has_goal || !n.path_valid || glm::length(delta) > 2.0f || n.stuck;
+}
+
+inline void queuePathRequest(NavAgentComponent& n, uint32_t tick) {
+    if (!n.path_request_pending) {
+        n.path_request_pending = true;
+        n.path_request_tick = tick;
+    }
+}
+
+inline void cancelPathRequest(NavAgentComponent& n) {
+    n.path_request_pending = false;
+    n.path_request_tick = 0;
+}
+
+inline float pathFailureBackoff(const NavAgentComponent& n) {
+    const int32_t exponent = std::clamp(n.path_failures, 0, 3);
+    return std::min(n.repath_cooldown * static_cast<float>(1u << exponent), 2.0f);
+}
+
+inline void rejectPathRequest(NavAgentComponent& n) {
+    cancelPathRequest(n);
+    n.path.clear();
+    n.path_index = 0;
+    n.path_valid = false;
+    n.has_goal = false;
+    n.desired_velocity = glm::vec3(0.0f);
+    ++n.path_failures;
+    n.repath_timer = pathFailureBackoff(n);
+}
+
+inline void acceptPathRequest(NavAgentComponent& n, const std::vector<glm::vec3>& points,
+                              const glm::vec3& resolved_goal, SteeringComponent& s) {
+    setPath(n, points, resolved_goal);
+    n.repath_timer = n.repath_cooldown;
+    n.stuck = false;
+    s.stuck_time = 0.0f;
+    s.stuck_window_time = 0.0f;
+    s.window_start = s.last_pos;
 }
 inline void updateSteering(NavAgentComponent& n, SteeringComponent& s, const glm::vec3& pos, float dt) {
     n.desired_velocity = glm::vec3(0);

@@ -18,13 +18,12 @@ public:
                 const std::string& kill_feed, float weapon_spread);
 
     // Competitive HUD (hud_menus S2-S6, D10). Flat int/bool/string only.
-    // radar slots are all invisible until teammate replication exists (D10 deferred wiring).
     void updateCompetitive(const UiLogic::ClientCompetitiveState& comp,
                            const UiLogic::HudCoreBindings& core,
                            const UiLogic::UiState& ui,
                            const std::string& buy_text,
                            const std::string& scoreboard_text,
-                           const std::array<UiLogic::RadarBlip, UiLogic::kRadarSlots>& radar);
+                           const UiLogic::RadarPresentation& radar);
 
 private:
     void* m_document = nullptr;

@@ -66,6 +66,7 @@
         <div class="blip" data-if="r8_visible" style="left: {{ r8_x }}; top: {{ r8_y }};"></div>
         <div class="blip" data-if="r9_visible" style="left: {{ r9_x }}; top: {{ r9_y }};"></div>
     </div>
+    <div id="radar-neutral" data-if="radar_neutral_visible">{{ radar_status }}</div>
     <div id="notice" data-if="notice_text != ''"><div class="notice-text">{{ notice_text }}</div></div>
     <div id="buy-panel" data-if="buy_visible">
         <div class="panel-title">BUY (B/Esc close, 1-0 buy)</div>

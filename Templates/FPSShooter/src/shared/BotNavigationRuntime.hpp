@@ -47,6 +47,7 @@ struct BotWorldRuntime {
     bool error_logged = false;
     int32_t target_count = 0;
     uint32_t input_tick = 1;
+    uint32_t path_schedule_tick = 1;
     float world_time = 0.0f;
     TransitionRingBuffer transitions;
     float debug_last_dump = -10.0f;
@@ -67,6 +68,7 @@ struct BotWorldRuntime {
         error_logged = false;
         target_count = 0;
         input_tick = 1;
+        path_schedule_tick = 1;
         world_time = 0.0f;
         transitions = {};
         debug_last_dump = -10.0f;

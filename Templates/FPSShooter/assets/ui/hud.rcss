@@ -211,4 +211,5 @@ body {
 .panel-title { font-size: 16dp; font-weight: bold; color: #ffffff; margin-bottom: 6dp; }
 .buy-text { font-size: 13dp; color: #dddddd; white-space: pre-wrap; }
 #radar { position: absolute; top: 110dp; left: 12dp; width: 180dp; height: 180dp; background-color: #00000088; border-radius: 6dp; }
+#radar-neutral { position: absolute; top: 110dp; left: 12dp; width: 180dp; height: 180dp; background-color: #00000088; border-radius: 6dp; text-align: center; line-height: 180dp; color: #aaaaaa; font-size: 12dp; }
 .blip { position: absolute; width: 8dp; height: 8dp; margin-left: -4dp; margin-top: -4dp; background-color: #66ff66; border-radius: 4dp; }

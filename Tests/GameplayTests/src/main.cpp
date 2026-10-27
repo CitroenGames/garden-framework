@@ -998,6 +998,113 @@ bool testCompetitiveTimerTargetSavedAndPause()
     return pass(name);
 }
 
+bool testCompetitiveTransitionWinMatrix()
+{
+    const std::string name = "CompetitiveTransitionWinMatrix";
+    using namespace Competitive;
+
+    // This table is the public phase contract.  `transitionTo` owns the
+    // mutation; the matrix makes every rejected edge deterministic.
+    constexpr RoundPhase phases[] = {
+        RoundPhase::WaitingForPlayers, RoundPhase::Warmup, RoundPhase::Freeze,
+        RoundPhase::Live, RoundPhase::RoundEnd, RoundPhase::Halftime,
+        RoundPhase::MatchEnded,
+    };
+    constexpr bool legal[7][7] = {
+        {false, true,  true,  false, false, false, false},
+        {false, false, true,  false, false, false, false},
+        {false, false, false, true,  false, false, false},
+        {false, false, false, false, true,  false, false},
+        {false, false, true,  false, false, true,  true },
+        {false, false, true,  false, false, false, false},
+        {true,  true,  false, false, false, false, false},
+    };
+    for (size_t from = 0; from < 7; ++from) {
+        for (size_t to = 0; to < 7; ++to) {
+            if (RoundSystem::isLegalTransition(phases[from], phases[to]) != legal[from][to])
+                return fail(name, "phase legality matrix differs at " + std::to_string(from) + " -> " + std::to_string(to));
+        }
+    }
+
+    auto expect = [&](const RoundTickInput& input, bool expired,
+                      RoundWinner winner, RoundEndReason reason,
+                      const char* label) -> bool {
+        const RoundOutcome outcome = RoundSystem::resolveLiveOutcome(input, expired);
+        if (outcome.winner != winner || outcome.reason != reason)
+            return fail(name, std::string("unexpected outcome for ") + label);
+        return true;
+    };
+    RoundTickInput input = bothAlive();
+    input.bomb_detonated = true;
+    input.bomb_defused = true;
+    if (!expect(input, true, RoundWinner::Attackers, RoundEndReason::TargetBombed, "detonate/defuse tie")) return false;
+
+    input = bothAlive(0, 0);
+    if (!expect(input, false, RoundWinner::Attackers, RoundEndReason::AttackersElimination, "empty-team tie")) return false;
+
+    input = bothAlive(0, 1);
+    input.bomb_planted = true;
+    if (!expect(input, true, RoundWinner::None, RoundEndReason::None, "planted attacker elimination and deadline")) return false;
+
+    input = bothAlive(1, 1);
+    if (!expect(input, true, RoundWinner::Defenders, RoundEndReason::TargetSaved, "unplanted deadline")) return false;
+
+    input = {};
+    if (!expect(input, false, RoundWinner::None, RoundEndReason::None, "no connected teams")) return false;
+
+    // Pause freezes both timer owners.  The server passes the same pause bit
+    // into the bomb state machine as the round state machine.
+    RoundSystem round;
+    ModeConfig paused_config = fastCompConfig();
+    paused_config.round_seconds = 0.05f;
+    round.configure(paused_config);
+    tickComp(round, 0.01f, bothAlive());
+    for (int i = 0; i < 20 && round.state.phase != RoundPhase::Live; ++i)
+        tickComp(round, 0.06f, bothAlive());
+    const float round_before = round.timer.remaining;
+    const uint32_t tick_before = round.state.server_tick;
+    round.setPaused(true);
+    tickComp(round, 10.0f, bothAlive());
+    if (round.state.phase != RoundPhase::Live || round.timer.remaining != round_before ||
+        round.state.server_tick != tick_before)
+        return fail(name, "paused Live round advanced an authoritative timer");
+
+    BombSystem bomb;
+    bomb.bomb.state = BombState::Planted;
+    bomb.bomb.timer = 0.01f;
+    BombTickInput bomb_input;
+    bomb_input.paused = true;
+    bomb.tick(10.0f, bomb_input);
+    if (bomb.bomb.state != BombState::Planted || bomb.bomb.timer != 0.01f)
+        return fail(name, "paused planted bomb advanced an authoritative timer");
+
+    // The source defaults permit overtime after an exact regulation tie; if
+    // disabled, that same tie remains a draw at match end.
+    ModeConfig overtime_config = fastCompConfig();
+    overtime_config.max_rounds = 2;
+    overtime_config.overtime_max_rounds = 2;
+    overtime_config.halftime_enabled = false;
+    RoundSystem overtime;
+    overtime.configure(overtime_config);
+    tickComp(overtime, 0.01f, bothAlive());
+    playRound(overtime, RoundWinner::Attackers);
+    playRound(overtime, RoundWinner::Defenders);
+    if (!overtime.state.overtime || overtime.state.phase == RoundPhase::MatchEnded)
+        return fail(name, "configured regulation tie did not enter overtime");
+
+    overtime_config.overtime_enabled = false;
+    RoundSystem no_overtime;
+    no_overtime.configure(overtime_config);
+    tickComp(no_overtime, 0.01f, bothAlive());
+    playRound(no_overtime, RoundWinner::Attackers);
+    playRound(no_overtime, RoundWinner::Defenders);
+    if (no_overtime.state.phase != RoundPhase::MatchEnded ||
+        no_overtime.state.match_winner != RoundWinner::Draw)
+        return fail(name, "disabled overtime did not finish tied regulation as a draw");
+
+    return pass(name);
+}
+
 bool testCompetitiveWorldPhaseAuthority()
 {
     const std::string name = "CompetitiveWorld_PhaseAuthority";
@@ -2145,6 +2252,7 @@ int main()
     ok = testCompetitiveRoundFsmFullCycleHalftimeClinch() && ok;
     ok = testCompetitiveOvertime() && ok;
     ok = testCompetitiveTimerTargetSavedAndPause() && ok;
+    ok = testCompetitiveTransitionWinMatrix() && ok;
     ok = testCompetitiveWorldPhaseAuthority() && ok;
     ok = testCompetitiveEconomyStreakCap() && ok;
     ok = testCompetitiveWorldEconomyHooks() && ok;
@@ -2175,6 +2283,7 @@ int main()
     ok = testBotPerceptionPrivacyAndStaleTargets() && ok;
     ok = testBotFsmPlantDefendDefuse() && ok;
     ok = testBotSteeringArrivalStuck() && ok;
+    ok = testBotBoundedPathScheduling() && ok;
     ok = testBotInputSynthesisShape() && ok;
     ok = testBotEngageStrafes() && ok;
     ok = testBotBuyPlanByMoney() && ok;
@@ -2199,6 +2308,7 @@ int main()
     ok = testUiScoreboardMoneyVisibility() && ok;
     ok = testUiScoreboardAuthoritativePresentation() && ok;
     ok = testUiRadarProjection() && ok;
+    ok = testUiRadarPresentationPrivacy() && ok;
     ok = testAudioUnknownEventNoVoices() && ok;
     ok = testAudioVoiceStealingSelection() && ok;
     ok = testAudioPerEventCap() && ok;

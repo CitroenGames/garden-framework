@@ -663,21 +663,197 @@ inline HudCoreBindings deriveHudCoreBindings(const HudSourceState& source)
 }
 
 // --- Radar D10: fixed slots, north-up, teammates only --------------------------
+//
+// This is deliberately a presentation boundary.  It consumes locations only
+// when the caller has already classified them as local or server-authorized
+// teammate data.  It never accepts a client registry/entity view, which keeps
+// replicated enemy transforms from becoming a HUD data source by accident.
 constexpr int kRadarSlots = 10;
+
 struct RadarBlip { bool visible = false; std::string x = "50.0%", y = "50.0%"; };
-inline RadarBlip projectRadarBlip(float wx, float wz, float origin_x, float origin_z,
-                                  float world_size, bool alive) {
+
+// Content owns this calibration.  rotation_degrees rotates world X/Z into the
+// north-up image coordinate space around origin_x/origin_z before scaling.
+struct RadarMapTransform {
+    bool configured = false;
+    float origin_x = 0.0f;
+    float origin_z = 0.0f;
+    float world_width = 0.0f;
+    float world_height = 0.0f;
+    float rotation_degrees = 0.0f;
+};
+
+inline bool isValidRadarMapTransform(const RadarMapTransform& map) {
+    return map.configured && std::isfinite(map.origin_x) && std::isfinite(map.origin_z) &&
+        std::isfinite(map.world_width) && std::isfinite(map.world_height) &&
+        std::isfinite(map.rotation_degrees) && map.world_width > 0.0f && map.world_height > 0.0f;
+}
+
+inline RadarBlip projectRadarBlip(float wx, float wz, const RadarMapTransform& map, bool alive) {
     RadarBlip out;
-    if (!alive || world_size <= 0.0f) return out;
-    float u = (wx - origin_x) / world_size;
-    float v = (wz - origin_z) / world_size;
-    if (u < 0.0f || u > 1.0f || v < 0.0f || v > 1.0f) return out; // off-map hides
+    if (!alive || !isValidRadarMapTransform(map) || !std::isfinite(wx) || !std::isfinite(wz))
+        return out;
+
+    constexpr float kDegreesToRadians = 0.01745329251994329577f;
+    const float radians = map.rotation_degrees * kDegreesToRadians;
+    const float local_x = wx - map.origin_x;
+    const float local_z = wz - map.origin_z;
+    const float map_x = std::cos(radians) * local_x - std::sin(radians) * local_z;
+    const float map_z = std::sin(radians) * local_x + std::cos(radians) * local_z;
+    // `rotation_degrees` follows the content convention: positive values turn
+    // world X toward map-down/world Z.  The 90 degree calibration therefore
+    // maps world +X to the bottom edge of a north-up image.  Trigonometric
+    // cardinal rotations can land a few ulps outside an edge (for example,
+    // cos(90 degrees) * width).  Normalize only that numerical residue before
+    // applying the deliberate off-map rejection.
+    constexpr float kRadarBoundsEpsilon = 0.0001f;
+    float u = map_x / map.world_width;
+    float v = map_z / map.world_height;
+    if (u >= -kRadarBoundsEpsilon && u <= 1.0f + kRadarBoundsEpsilon)
+        u = std::clamp(u, 0.0f, 1.0f);
+    if (v >= -kRadarBoundsEpsilon && v <= 1.0f + kRadarBoundsEpsilon)
+        v = std::clamp(v, 0.0f, 1.0f);
+    if (u < 0.0f || u > 1.0f || v < 0.0f || v > 1.0f)
+        return out; // off-map hides rather than clamping to a misleading edge.
+
     char xb[16], yb[16];
     std::snprintf(xb, sizeof(xb), "%.1f%%", u * 100.0f);
     std::snprintf(yb, sizeof(yb), "%.1f%%", v * 100.0f);
     out.visible = true; out.x = xb; out.y = yb;
     return out;
 }
+
+enum class RadarLocationKind : uint8_t {
+    LocalSelf,
+    ApprovedTeammate,
+    Bomb,
+    Enemy,
+};
+
+// Network/custom-message code must create this value after applying its own
+// audience rules.  Raw replicated ECS entities intentionally cannot satisfy
+// this interface.
+struct RadarApprovedLocation {
+    uint32_t stable_id = 0;
+    RadarLocationKind kind = RadarLocationKind::Enemy;
+    FpsTeam team = FpsTeam::None;
+    bool alive = false;
+    float world_x = 0.0f;
+    float world_z = 0.0f;
+};
+
+struct RadarPresentationSource {
+    bool connected = false;
+    const ClientCompetitiveState* competitive = nullptr;
+    RadarMapTransform map;
+    uint32_t local_stable_id = 0;
+
+    // False until a server-owned team-location publication path exists.  The
+    // existing protocol has no such message, so the template currently sets
+    // this false and contributes only the local self location.
+    bool has_authoritative_team_locations = false;
+    std::vector<RadarApprovedLocation> approved_locations;
+};
+
+struct RadarSlotState {
+    uint16_t round_number = 0;
+    bool initialized = false;
+    std::array<uint32_t, kRadarSlots> stable_ids{};
+
+    void reset() {
+        round_number = 0;
+        initialized = false;
+        stable_ids.fill(0);
+    }
+};
+
+struct RadarPresentation {
+    bool visible = false;
+    bool neutral_visible = false;
+    std::string neutral_text = "RADAR UNAVAILABLE";
+    std::array<RadarBlip, kRadarSlots> blips{};
+};
+
+inline bool isApprovedRadarLocation(const RadarApprovedLocation& location,
+                                    const RadarPresentationSource& source) {
+    const ClientCompetitiveState* competitive = source.competitive;
+    if (!competitive || location.stable_id == 0)
+        return false;
+
+    switch (location.kind) {
+    case RadarLocationKind::LocalSelf:
+        return location.stable_id == source.local_stable_id;
+    case RadarLocationKind::ApprovedTeammate:
+        return source.has_authoritative_team_locations &&
+            Competitive::isPlayingTeam(competitive->local_team) &&
+            location.team == competitive->local_team &&
+            location.stable_id != source.local_stable_id;
+    case RadarLocationKind::Bomb:
+    case RadarLocationKind::Enemy:
+        // D10 keeps bomb status in the existing round HUD and never draws
+        // enemy locations.  A future bomb-location message must add a new
+        // reviewed presentation contract before it can appear here.
+        return false;
+    }
+    return false;
+}
+
+inline RadarPresentation buildRadarPresentation(
+    RadarSlotState& slots, const RadarPresentationSource& source) {
+    RadarPresentation out;
+    const ClientCompetitiveState* competitive = source.competitive;
+    if (!source.connected || !competitive || !competitive->has_round_state)
+        return out;
+
+    if (!isValidRadarMapTransform(source.map)) {
+        // Missing map calibration is a neutral content failure.  It leaves
+        // every slot hidden and does not block the rest of the competitive HUD.
+        out.neutral_visible = true;
+        return out;
+    }
+
+    out.visible = true;
+    if (!slots.initialized || slots.round_number != competitive->round_number) {
+        slots.initialized = true;
+        slots.round_number = competitive->round_number;
+        slots.stable_ids.fill(0);
+    }
+
+    // Slot zero is permanently reserved for the local marker.  Teammate slots
+    // retain their stable id for the round, so another player's death or leave
+    // cannot make surviving blips change identity.
+    for (const RadarApprovedLocation& location : source.approved_locations) {
+        if (!isApprovedRadarLocation(location, source))
+            continue;
+
+        int slot = -1;
+        if (location.kind == RadarLocationKind::LocalSelf) {
+            slot = 0;
+            slots.stable_ids[0] = location.stable_id;
+        } else {
+            for (int i = 1; i < kRadarSlots; ++i) {
+                if (slots.stable_ids[i] == location.stable_id) {
+                    slot = i;
+                    break;
+                }
+            }
+            if (slot < 0) {
+                for (int i = 1; i < kRadarSlots; ++i) {
+                    if (slots.stable_ids[i] == 0) {
+                        slots.stable_ids[i] = location.stable_id;
+                        slot = i;
+                        break;
+                    }
+                }
+            }
+        }
+        if (slot >= 0)
+            out.blips[slot] = projectRadarBlip(
+                location.world_x, location.world_z, source.map, location.alive);
+    }
+    return out;
+}
+
 struct RadarThrottle {
     float accumulator = 1.0f; // first update immediate
     bool shouldUpdate(float dt) {
@@ -685,6 +861,7 @@ struct RadarThrottle {
         if (accumulator >= 0.1f) { accumulator = 0.0f; return true; } // 10 Hz
         return false;
     }
+    void reset() { accumulator = 1.0f; }
 };
 
 } // namespace UiLogic

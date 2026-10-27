@@ -146,6 +146,50 @@ bool testBotSteeringArrivalStuck()
     return pass(name);
 }
 
+bool testBotBoundedPathScheduling()
+{
+    const std::string name = "Bot_BoundedPathScheduling";
+    using namespace Bots;
+
+    // Oldest pending request wins. Equal-age requests use the stable bot
+    // index, then owner id, rather than incidental registry-view ordering.
+    const std::vector<PathScheduleRequest> selected = selectPathRequests({
+        {9, 40009, 22}, {4, 40004, 18}, {2, 40002, 22}, {1, 40001, 22}, {3, 40003, 18}}, 3);
+    if (selected.size() != 3)
+        return fail(name, "scheduler did not enforce configured budget");
+    if (selected[0].bot_index != 3 || selected[1].bot_index != 4 || selected[2].bot_index != 1)
+        return fail(name, "scheduler order was not age then stable identity");
+
+    NavAgentComponent nav;
+    nav.repath_cooldown = 0.25f;
+    setPath(nav, {glm::vec3(0.0f), glm::vec3(8.0f, 0.0f, 0.0f)}, glm::vec3(8.0f, 0.0f, 0.0f));
+    nav.stuck = true;
+    if (!pathGoalChanged(nav, glm::vec3(8.0f, 0.0f, 0.0f)))
+        return fail(name, "stuck bot did not request a safe re-path");
+    queuePathRequest(nav, 77);
+    queuePathRequest(nav, 78);
+    if (!nav.path_request_pending || nav.path_request_tick != 77)
+        return fail(name, "request age changed while already queued");
+
+    // No path result must stop movement and back off rather than retrying
+    // every tick or keeping a stale path alive.
+    rejectPathRequest(nav);
+    if (nav.path_request_pending || nav.path_valid || nav.has_goal || nav.desired_velocity != glm::vec3(0.0f))
+        return fail(name, "failed path request retained movement state");
+    if (nav.path_failures != 1 || nav.repath_timer <= nav.repath_cooldown)
+        return fail(name, "failed path request did not apply bounded backoff");
+
+    SteeringComponent steering;
+    steering.last_pos = glm::vec3(3.0f, 0.0f, 0.0f);
+    steering.has_last = true;
+    acceptPathRequest(nav, {glm::vec3(3.0f, 0.0f, 0.0f), glm::vec3(6.0f, 0.0f, 0.0f)},
+                      glm::vec3(6.0f, 0.0f, 0.0f), steering);
+    if (!nav.path_valid || !nav.has_goal || nav.stuck || nav.path_request_pending ||
+        !approx(nav.repath_timer, nav.repath_cooldown))
+        return fail(name, "accepted path did not reset request and stuck state");
+    return pass(name);
+}
+
 bool testBotInputSynthesisShape()
 {
     const std::string name = "Bot_InputSynthesisShape";

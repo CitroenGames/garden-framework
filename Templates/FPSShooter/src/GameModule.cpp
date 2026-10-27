@@ -246,7 +246,13 @@ static UiLogic::UiState g_ui;
 static bool g_ui_modal_context_active = false;
 static UiLogic::ClientCompetitiveState g_comp;
 static std::vector<uint16_t> g_owned_items;
-static std::array<UiLogic::RadarBlip, UiLogic::kRadarSlots> g_radar{}; // D10: zero slots until teammate replication exists
+// Content has not supplied an authored radar calibration for the current
+// template level.  Keep this explicitly unconfigured instead of deriving a
+// misleading map from level bounds or client ECS.
+static UiLogic::RadarMapTransform g_radar_map;
+static UiLogic::RadarSlotState g_radar_slots;
+static UiLogic::RadarPresentation g_radar;
+static UiLogic::RadarThrottle g_radar_throttle;
 static bool uiIsOwned(uint16_t id) { return std::find(g_owned_items.begin(), g_owned_items.end(), id) != g_owned_items.end(); }
 static bool uiIsEquipped(const WeaponCatalogDef& def) { return def.weapon_type != WeaponType::COUNT && def.weapon_type == g_local_weapon_type; }
 static void sendBuyRequest(uint16_t item_id) {
@@ -274,6 +280,39 @@ static WeaponComponent makeLocalWeaponSnapshot()
     weapon.time_since_last_shot = g_local_time_since_last_shot;
     weapon.reloading = g_local_reloading;
     return weapon;
+}
+
+static void updateRadarPresentation(world& game_world, bool connected, float delta_time)
+{
+    if (!g_radar_throttle.shouldUpdate(delta_time))
+        return;
+
+    UiLogic::RadarPresentationSource source;
+    source.connected = connected;
+    source.competitive = &g_comp;
+    source.map = g_radar_map;
+    // Stable IDs are presenter-local keys only.  They are not network entity
+    // IDs and this code never enumerates remote replicated entities.
+    source.local_stable_id = static_cast<uint32_t>(g_network.getClientId()) + 1u;
+
+    if (connected && game_world.registry.valid(g_player_entity) &&
+        game_world.registry.all_of<TransformComponent>(g_player_entity)) {
+        const TransformComponent& transform = game_world.registry.get<TransformComponent>(g_player_entity);
+        UiLogic::RadarApprovedLocation self;
+        self.stable_id = source.local_stable_id;
+        self.kind = UiLogic::RadarLocationKind::LocalSelf;
+        self.team = g_comp.local_team;
+        self.alive = g_local_alive;
+        self.world_x = transform.position.x;
+        self.world_z = transform.position.z;
+        source.approved_locations.push_back(self);
+    }
+
+    // No current custom message publishes teammate positions with a team-only
+    // audience.  Do not substitute remote TransformComponents here: they may
+    // include enemies and would turn generic replication into radar authority.
+    source.has_authoritative_team_locations = false;
+    g_radar = UiLogic::buildRadarPresentation(g_radar_slots, source);
 }
 
 // ---- DLL exports ----
@@ -971,6 +1010,7 @@ GAME_API void gardenGameUpdate(float delta_time)
             scoreboard_source.approved_rows.push_back(std::move(local_row));
             scoreboard_text = UiLogic::buildScoreboardPresentation(scoreboard_source).text;
         }
+        updateRadarPresentation(*game_world, hud_source.connected, delta_time);
         g_hud.updateCompetitive(g_comp, hud_core, g_ui, buy_text, scoreboard_text, g_radar);
     }
 }
@@ -1035,6 +1075,10 @@ GAME_API void gardenOnLevelLoaded()
     g_death_timer = 0.0f;
     g_recon_smoothing.visual_offset = glm::vec3(0.0f);
     g_comp = UiLogic::ClientCompetitiveState{}; g_ui = UiLogic::UiState{}; g_owned_items.clear();
+    g_radar_map = {};
+    g_radar_slots.reset();
+    g_radar = {};
+    g_radar_throttle.reset();
     if (g_services->input_actions)
         UiInput::synchronizeModalContext(*g_services->input_actions, false, g_ui_modal_context_active);
     g_kill_feed.clear();
