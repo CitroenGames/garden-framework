@@ -3,6 +3,7 @@
 #include "Components/Components.hpp"
 #include "Network/BitStream.hpp"
 #include "Network/ClientNetworkManager.hpp"
+#include "Network/InterpolationBuffer.hpp"
 #include "Network/LagHistory.hpp"
 #include "Network/LevelHash.hpp"
 #include "Network/NetworkProtocol.hpp"
@@ -19,6 +20,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -414,6 +416,84 @@ static bool runInterpolationTickWrapBufferTest()
     }
 
     std::cout << "[PASS] InterpolationTickWrapBufferTests\n";
+    return true;
+}
+
+static bool runInterpolationJitterBufferTest()
+{
+    Net::EntityInterpolationBuffer jittered;
+    Net::EntityInterpolationBuffer ordered;
+    const auto add = [](Net::EntityInterpolationBuffer& buffer, uint32_t tick, float x) {
+        buffer.addSnapshot(tick, glm::vec3(x, 0.0f, 0.0f),
+                           glm::vec3(1.0f, 0.0f, 0.0f), false,
+                           static_cast<float>(tick) * 0.01f);
+    };
+
+    add(jittered, 10u, 0.0f);
+    add(jittered, 13u, 0.05f);
+    add(jittered, 11u, 100.0f); // Out-of-order stale state must be ignored.
+    add(jittered, 16u, 0.1f);
+
+    add(ordered, 10u, 0.0f);
+    add(ordered, 13u, 0.05f);
+    add(ordered, 16u, 0.1f);
+
+    constexpr float fractions[] = {0.0f, 0.25f, 0.5f, 0.75f};
+    float previous_x = -std::numeric_limits<float>::infinity();
+    for (uint32_t tick = 9u; tick <= 34u; ++tick) {
+        for (const float fraction : fractions) {
+            glm::vec3 jittered_position;
+            glm::vec3 ordered_position;
+            float jittered_rotation = 0.0f;
+            float ordered_rotation = 0.0f;
+            if (!jittered.interpolate(tick, fraction, jittered_position, jittered_rotation) ||
+                !ordered.interpolate(tick, fraction, ordered_position, ordered_rotation)) {
+                std::cerr << "[FAIL] InterpolationJitterBufferTests could not sample tick " << tick << "\n";
+                return false;
+            }
+
+            const bool finite = std::isfinite(jittered_position.x) &&
+                std::isfinite(jittered_position.y) && std::isfinite(jittered_position.z) &&
+                std::isfinite(jittered_rotation);
+            if (!finite || glm::distance(jittered_position, ordered_position) > 1.0e-5f ||
+                std::abs(jittered_rotation - ordered_rotation) > 1.0e-5f) {
+                std::cerr << "[FAIL] InterpolationJitterBufferTests diverged from ordered state at tick "
+                          << tick << " + " << fraction << "\n";
+                return false;
+            }
+            if (jittered_position.x + 1.0e-5f < previous_x) {
+                std::cerr << "[FAIL] InterpolationJitterBufferTests produced non-monotonic position at tick "
+                          << tick << " + " << fraction << "\n";
+                return false;
+            }
+            previous_x = jittered_position.x;
+        }
+    }
+
+    glm::vec3 at_extrapolation_cap;
+    glm::vec3 beyond_extrapolation_cap;
+    float rotation = 0.0f;
+    if (!jittered.interpolate(28u, 0.0f, at_extrapolation_cap, rotation) ||
+        !jittered.interpolate(34u, 0.75f, beyond_extrapolation_cap, rotation) ||
+        std::abs(at_extrapolation_cap.x - 0.3f) > 1.0e-5f ||
+        std::abs(beyond_extrapolation_cap.x - 0.3f) > 1.0e-5f) {
+        std::cerr << "[FAIL] InterpolationJitterBufferTests did not stop extrapolating after 12 ticks\n";
+        return false;
+    }
+
+    Net::EntityInterpolationBuffer duplicate;
+    add(duplicate, 10u, 0.0f);
+    add(duplicate, 13u, 0.05f);
+    add(duplicate, 16u, 0.1f);
+    add(duplicate, 16u, 0.2f); // An exact duplicate of newest may refresh its state.
+    glm::vec3 duplicate_position;
+    if (!duplicate.interpolate(16u, 0.0f, duplicate_position, rotation) ||
+        std::abs(duplicate_position.x - 0.2f) > 1.0e-5f) {
+        std::cerr << "[FAIL] InterpolationJitterBufferTests did not replace the newest duplicate tick\n";
+        return false;
+    }
+
+    std::cout << "[PASS] InterpolationJitterBufferTests\n";
     return true;
 }
 
@@ -1108,11 +1188,12 @@ int main(int argc, char** argv)
     }
     const bool handshake_ok = runWireV3HandshakeTests();
     const bool interpolation_buffer_wrap_ok = runInterpolationTickWrapBufferTest();
+    const bool interpolation_jitter_ok = runInterpolationJitterBufferTest();
     const bool lag_history_wrap_ok = runLagHistoryTickWrapTest();
     const bool interpolation_manager_wrap_ok = runInterpolationTickWrapManagerTest();
     const bool raw_interpolation_ok = runRawRemoteInterpolationStateTest();
     const bool ok = runNetworkStress(config);
     EE::CLog::Shutdown();
-    return (handshake_ok && interpolation_buffer_wrap_ok && lag_history_wrap_ok && interpolation_manager_wrap_ok &&
+    return (handshake_ok && interpolation_buffer_wrap_ok && interpolation_jitter_ok && lag_history_wrap_ok && interpolation_manager_wrap_ok &&
             raw_interpolation_ok && ok) ? 0 : 1;
 }

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "NetworkInput.hpp"
+
 #include <glm/glm.hpp>
 #include <array>
 #include <cstdint>
@@ -39,6 +41,18 @@ public:
     void addSnapshot(uint32_t tick, const glm::vec3& pos, const glm::vec3& vel,
                      bool grounded, float rot_y = 0.0f)
     {
+        if (count > 0) {
+            const size_t newest_idx = (head + MAX_SNAPSHOTS - 1) % MAX_SNAPSHOTS;
+            const auto& newest = buffer[newest_idx];
+            if (tick == newest.tick) {
+                buffer[newest_idx] = {tick, pos, vel, rot_y, grounded, true};
+                return;
+            }
+            if (!isTickNewer(tick, newest.tick)) {
+                return;
+            }
+        }
+
         buffer[head] = {tick, pos, vel, rot_y, grounded, true};
         head = (head + 1) % MAX_SNAPSHOTS;
         if (count < MAX_SNAPSHOTS)
