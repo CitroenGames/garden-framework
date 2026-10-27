@@ -15,6 +15,8 @@
 #include "Utils/Log.hpp"
 #include "world.hpp"
 
+#include "spdlog/sinks/callback_sink.h"
+
 #include <algorithm>
 #include <bit>
 #include <cctype>
@@ -24,6 +26,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -1567,6 +1570,33 @@ static bool testD6TriggerCapAndMeshRejection()
 {
     const std::string name = "D6 trigger cap and mesh rejection";
     if (PhysicsSystem::kMaxTriggerCount != 256) return fail(name, "soft cap is not 256");
+
+    struct CapturedLog
+    {
+        spdlog::level::level_enum level;
+        std::string message;
+    };
+    std::vector<CapturedLog> captured_logs;
+    auto engine_logger = EE::CLog::GetEngineLogger();
+    if (!engine_logger) return fail(name, "engine logger was not initialized");
+    auto capture_sink = std::make_shared<spdlog::sinks::callback_sink_mt>(
+        [&captured_logs](const spdlog::details::log_msg& msg)
+        {
+            captured_logs.push_back({ msg.level, std::string(msg.payload.data(), msg.payload.size()) });
+        });
+    struct SinkRegistration
+    {
+        std::shared_ptr<spdlog::logger> logger;
+        spdlog::sink_ptr sink;
+        ~SinkRegistration()
+        {
+            if (!logger) return;
+            auto& sinks = logger->sinks();
+            sinks.erase(std::remove(sinks.begin(), sinks.end(), sink), sinks.end());
+        }
+    } sink_registration{ engine_logger, capture_sink };
+    engine_logger->sinks().push_back(capture_sink);
+
     PhysicsSystemSettings settings; settings.max_trigger_count = 2;
     world w(settings); w.initializePhysics();
     auto t1 = makeTriggerBox(w, glm::vec3(0.0f), 1.0f, 1);
@@ -1582,19 +1612,59 @@ static bool testD6TriggerCapAndMeshRejection()
     if (!w.getPhysicsSystem().createTriggerBody(w.registry, mesh_trig).IsInvalid())
         return fail(name, "mesh trigger was not rejected");
     if (w.getPhysicsSystem().hasBody(mesh_trig)) return fail(name, "mesh trigger created a body");
+
+    const auto has_log = [&captured_logs](spdlog::level::level_enum level, const std::string& text)
+    {
+        return std::any_of(captured_logs.begin(), captured_logs.end(),
+            [level, &text](const CapturedLog& entry)
+            {
+                return entry.level == level && entry.message.find(text) != std::string::npos;
+            });
+    };
+    if (!has_log(spdlog::level::warn, "Mesh/ConvexHull trigger shapes are not supported in v1"))
+        return fail(name, "mesh trigger rejection did not produce the expected warning");
+
+    // Exercise the production hard cap with the default-sized trigger budget.
+    // Keep all accepted sensors away from the probe so the rejected 257th
+    // trigger is the only one that could have reported an enter at the origin.
+    captured_logs.clear();
+    constexpr uint32_t accepted_trigger_count = 256;
+    PhysicsSystemSettings hard_cap_settings;
+    if (hard_cap_settings.max_trigger_count != accepted_trigger_count)
+        return fail(name, "default trigger budget is not 256");
+    world hard_cap_world(hard_cap_settings);
+    hard_cap_world.initializePhysics();
+    for (uint32_t i = 0; i < accepted_trigger_count; ++i)
+    {
+        auto trigger = makeTriggerBox(hard_cap_world,
+            glm::vec3(1000.0f + float(i) * 10.0f, 0.0f, 0.0f), 1.0f, i + 1);
+        if (!hard_cap_world.getPhysicsSystem().hasBody(trigger))
+            return fail(name, "one of the first 256 primitive triggers was rejected");
+    }
+
+    auto trigger_257 = makeTriggerBox(hard_cap_world, glm::vec3(0.0f), 1.0f, 257);
+    if (hard_cap_world.getPhysicsSystem().hasBody(trigger_257))
+        return fail(name, "257th enabled primitive trigger created a body");
+    if (!hard_cap_world.registry.get<TriggerComponent>(trigger_257).enabled)
+        return fail(name, "257th trigger was not enabled");
+    if (!has_log(spdlog::level::err, "trigger cap (256) reached, failing closed"))
+        return fail(name, "257th trigger rejection did not produce the expected error log");
+
     EventBus::get().clear();
     g_trigger_entered = 0;
     EventBus::get().sink<TriggerEnteredEvent>().connect<&onTriggerEntered>();
-    makeDynamicBox(w, glm::vec3(20.0f, 0.0f, 0.0f));
-    // World keeps stepping.
-    w.getPhysicsSystem().stepPhysics(w.registry);
+    auto probe = makeDynamicBox(hard_cap_world, glm::vec3(0.0f), true);
+    const float probe_y_before = hard_cap_world.registry.get<TransformComponent>(probe).position.y;
+    for (int i = 0; i < 3; ++i)
+        hard_cap_world.getPhysicsSystem().stepPhysics(hard_cap_world.registry);
     EventBus::get().flush();
     EventBus::get().sink<TriggerEnteredEvent>().disconnect<&onTriggerEntered>();
     EventBus::get().clear();
     if (g_trigger_entered != 0) return fail(name, "failed/capped trigger emitted an enter event");
-    if (w.registry.all_of<TriggerOverlapState>(t3) &&
-        !w.registry.get<TriggerOverlapState>(t3).occupants.empty())
-        return fail(name, "failed/capped trigger retained occupants");
+    if (hard_cap_world.registry.all_of<TriggerOverlapState>(trigger_257))
+        return fail(name, "failed/capped trigger created overlap state");
+    if (hard_cap_world.registry.get<TransformComponent>(probe).position.y >= probe_y_before - 0.001f)
+        return fail(name, "world stopped stepping after the 257th trigger was rejected");
     return pass(name);
 }
 
