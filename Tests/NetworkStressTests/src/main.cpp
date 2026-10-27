@@ -3,6 +3,7 @@
 #include "Components/Components.hpp"
 #include "Network/BitStream.hpp"
 #include "Network/ClientNetworkManager.hpp"
+#include "Network/LagHistory.hpp"
 #include "Network/LevelHash.hpp"
 #include "Network/NetworkProtocol.hpp"
 #include "Network/NetworkSerializer.hpp"
@@ -413,6 +414,64 @@ static bool runInterpolationTickWrapBufferTest()
     }
 
     std::cout << "[PASS] InterpolationTickWrapBufferTests\n";
+    return true;
+}
+
+static bool runLagHistoryTickWrapTest()
+{
+    Net::LagHistory history;
+    Net::WorldSnapshot before_wrap(0xFFFFFFFEu);
+    Net::ComponentSnapshot before_state;
+    before_state.position = glm::vec3(0.0f, 0.0f, 0.0f);
+    before_state.velocity = glm::vec3(0.0f, 0.0f, 0.0f);
+    before_state.grounded = false;
+    before_state.ground_normal = glm::vec3(0.0f, 1.0f, 0.0f);
+    before_state.rotation_y = 0.25f;
+    before_wrap.setEntity(42, before_state);
+    history.recordSnapshot(before_wrap);
+
+    Net::WorldSnapshot after_wrap(1u);
+    Net::ComponentSnapshot after_state;
+    after_state.position = glm::vec3(6.0f, 3.0f, 0.0f);
+    after_state.velocity = glm::vec3(3.0f, 0.0f, -3.0f);
+    after_state.grounded = true;
+    after_state.ground_normal = glm::vec3(0.0f, 0.0f, 1.0f);
+    after_state.rotation_y = 1.75f;
+    after_wrap.setEntity(42, after_state);
+    history.recordSnapshot(after_wrap);
+
+    Net::ComponentSnapshot sampled;
+    if (!history.sample(42, 0u, sampled)) {
+        std::cerr << "[FAIL] LagHistoryTickWrapTests could not sample tick 0 between wrapped records\n";
+        return false;
+    }
+
+    constexpr float epsilon = 1.0e-4f;
+    if (glm::distance(sampled.position, glm::vec3(4.0f, 2.0f, 0.0f)) > epsilon ||
+        glm::distance(sampled.velocity, glm::vec3(2.0f, 0.0f, -2.0f)) > epsilon ||
+        !sampled.grounded ||
+        glm::distance(sampled.ground_normal, glm::vec3(0.0f, 1.0f / 3.0f, 2.0f / 3.0f)) > epsilon ||
+        std::abs(sampled.rotation_y - 1.25f) > epsilon) {
+        std::cerr << "[FAIL] LagHistoryTickWrapTests produced an incorrect wrapped sample\n";
+        return false;
+    }
+
+    if (history.sample(42, 0xFFFFFFFDu, sampled)) {
+        std::cerr << "[FAIL] LagHistoryTickWrapTests accepted a target older than the oldest record\n";
+        return false;
+    }
+    if (!history.sample(42, 0xFFFFFFFEu, sampled) ||
+        glm::distance(sampled.position, before_state.position) > epsilon) {
+        std::cerr << "[FAIL] LagHistoryTickWrapTests failed to return the exact oldest record\n";
+        return false;
+    }
+    if (!history.sample(42, 2u, sampled) ||
+        glm::distance(sampled.position, after_state.position) > epsilon) {
+        std::cerr << "[FAIL] LagHistoryTickWrapTests failed to clamp after the newest record\n";
+        return false;
+    }
+
+    std::cout << "[PASS] LagHistoryTickWrapTests\n";
     return true;
 }
 
@@ -1011,10 +1070,11 @@ int main(int argc, char** argv)
     }
     const bool handshake_ok = runWireV3HandshakeTests();
     const bool interpolation_buffer_wrap_ok = runInterpolationTickWrapBufferTest();
+    const bool lag_history_wrap_ok = runLagHistoryTickWrapTest();
     const bool interpolation_manager_wrap_ok = runInterpolationTickWrapManagerTest();
     const bool raw_interpolation_ok = runRawRemoteInterpolationStateTest();
     const bool ok = runNetworkStress(config);
     EE::CLog::Shutdown();
-    return (handshake_ok && interpolation_buffer_wrap_ok && interpolation_manager_wrap_ok &&
+    return (handshake_ok && interpolation_buffer_wrap_ok && lag_history_wrap_ok && interpolation_manager_wrap_ok &&
             raw_interpolation_ok && ok) ? 0 : 1;
 }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "EngineExport.h"
+#include "NetworkInput.hpp"
 #include "NetworkTypes.hpp"
 
 #include <algorithm>
@@ -57,29 +58,34 @@ public:
         }
 
         const auto& entity_records = it->second;
-        if (target_tick <= entity_records.front().tick) {
-            if (target_tick == entity_records.front().tick) {
-                out = entity_records.front().components;
-                return true;
-            }
+        const uint32_t oldest_tick = entity_records.front().tick;
+        const uint32_t newest_tick = entity_records.back().tick;
+        if (target_tick == oldest_tick) {
+            out = entity_records.front().components;
+            return true;
+        }
+        if (isTickNewer(oldest_tick, target_tick)) {
             return false;
         }
 
-        if (target_tick >= entity_records.back().tick) {
+        if (target_tick == newest_tick || isTickNewer(target_tick, newest_tick)) {
             out = entity_records.back().components;
             return true;
         }
 
         for (size_t i = 1; i < entity_records.size(); ++i) {
             const auto& b = entity_records[i];
-            if (target_tick > b.tick) {
+            if (isTickNewer(target_tick, b.tick)) {
                 continue;
             }
 
             const auto& a = entity_records[i - 1];
-            const float range = static_cast<float>(b.tick - a.tick);
-            const float t = range > 0.0f
-                ? static_cast<float>(target_tick - a.tick) / range
+            // The retained history is short, so these modular offsets are
+            // unambiguous under serial tick ordering even across uint32 wrap.
+            const uint32_t range_ticks = b.tick - a.tick;
+            const uint32_t target_offset_ticks = target_tick - a.tick;
+            const float t = range_ticks > 0
+                ? static_cast<float>(target_offset_ticks) / static_cast<float>(range_ticks)
                 : 0.0f;
 
             out.position = a.components.position + (b.components.position - a.components.position) * t;
