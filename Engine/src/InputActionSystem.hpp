@@ -43,15 +43,18 @@ struct InputBinding
         Key,
         MouseButton,
         MouseDeltaX,
-        MouseDeltaY
+        MouseDeltaY,
+        GamepadButton,
+        GamepadAxis
     };
 
     std::string action;
     Source source = Source::Key;
-    int code = 0; // SDL_Scancode or SDL mouse button id; delta sources use zero.
+    int code = 0; // SDL enum/scancode/button id; delta sources use zero.
     float scale = 1.0f;
     bool invert = false;
     uint8_t axis_target = 0; // Axis2D: 0 = x, 1 = y.
+    int slot = 0; // Logical gamepad slot; zero for keyboard/mouse.
 };
 
 struct MappingContext
@@ -62,9 +65,9 @@ struct MappingContext
     std::vector<InputBinding> bindings;
 };
 
-// Runtime action mapping layer over InputManager's existing keyboard and mouse
-// state. Action definitions and mapping contexts remain regular game data;
-// this class owns evaluation and callback lifetime.
+// Runtime action mapping layer over InputManager's keyboard, mouse, and
+// slot-aware gamepad state. Action definitions and mapping contexts remain
+// regular game data; this class owns evaluation and callback lifetime.
 class ENGINE_API InputActionSystem
 {
 public:
@@ -98,10 +101,11 @@ private:
     {
         InputBinding::Source source = InputBinding::Source::Key;
         int code = 0;
+        int slot = 0;
 
         bool operator==(const SourceIdentity& other) const
         {
-            return source == other.source && code == other.code;
+            return source == other.source && code == other.code && slot == other.slot;
         }
     };
 
@@ -122,7 +126,7 @@ private:
         bool held = false;
     };
 
-    using DigitalState = std::unordered_map<SourceIdentity, bool, SourceIdentityHash>;
+    using DigitalState = std::unordered_map<SourceIdentity, float, SourceIdentityHash>;
     using EvaluatedActions = std::unordered_map<std::string, EvaluatedAction>;
 
     std::unordered_map<std::string, InputActionDef> actions;

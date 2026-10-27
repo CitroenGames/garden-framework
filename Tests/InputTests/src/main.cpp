@@ -8,6 +8,7 @@
 #include <SDL3/SDL.h>
 #include <cmath>
 #include <cstdio>
+#include <string>
 #include <vector>
 
 namespace
@@ -36,6 +37,48 @@ namespace
         event.motion.xrel = xrel;
         event.motion.yrel = yrel;
         return event;
+    }
+
+    SDL_JoystickID attachVirtualGamepad(const char* name)
+    {
+        SDL_VirtualJoystickDesc description{};
+        SDL_INIT_INTERFACE(&description);
+        description.type = SDL_JOYSTICK_TYPE_GAMEPAD;
+        description.naxes = SDL_GAMEPAD_AXIS_COUNT;
+        description.nbuttons = SDL_GAMEPAD_BUTTON_COUNT;
+        description.button_mask = (uint32_t{ 1 } << SDL_GAMEPAD_BUTTON_COUNT) - 1;
+        description.axis_mask = (uint32_t{ 1 } << SDL_GAMEPAD_AXIS_COUNT) - 1;
+        description.name = name;
+        const SDL_JoystickID instance_id = SDL_AttachVirtualJoystick(&description);
+        if (instance_id == 0)
+            return instance_id;
+
+        SDL_Joystick* joystick = SDL_OpenJoystick(instance_id);
+        if (joystick)
+        {
+            SDL_SetJoystickVirtualAxis(joystick, SDL_GAMEPAD_AXIS_LEFT_TRIGGER, SDL_JOYSTICK_AXIS_MIN);
+            SDL_SetJoystickVirtualAxis(joystick, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, SDL_JOYSTICK_AXIS_MIN);
+            SDL_CloseJoystick(joystick);
+        }
+        return instance_id;
+    }
+
+    void pumpInputEvents(InputManager& input)
+    {
+        SDL_PumpEvents();
+        SDL_Event event{};
+        while (SDL_PollEvent(&event))
+            input.process_event(event);
+    }
+
+    int firstFreeGamepadSlot(const InputManager& input)
+    {
+        for (int slot = 0; slot < static_cast<int>(InputGamepadSlotCount); ++slot)
+        {
+            if (!input.gamepad(slot).connected)
+                return slot;
+        }
+        return -1;
     }
 
     bool expect(bool condition, const char* message)
@@ -307,6 +350,207 @@ namespace
         return ok;
     }
 
+    bool testGamepadInputFeed()
+    {
+        constexpr Uint32 sdl_flags = SDL_INIT_EVENTS | SDL_INIT_GAMEPAD;
+        const Uint32 already_initialized = SDL_WasInit(sdl_flags);
+        const Uint32 to_initialize = sdl_flags & ~already_initialized;
+        if (to_initialize != 0 && !SDL_InitSubSystem(to_initialize))
+            return expect(false, "SDL gamepad subsystem initializes for virtual-device tests");
+
+        SDL_JoystickID first_id = 0;
+        SDL_JoystickID second_id = 0;
+        SDL_JoystickID replacement_id = 0;
+        bool ok = [&]() {
+            InputManager input;
+            input.clear_all_mappings();
+
+            const int first_slot = firstFreeGamepadSlot(input);
+            first_id = attachVirtualGamepad("Garden input test pad one");
+            bool result = expect(first_id != 0 && first_slot >= 0,
+                "virtual gamepad attaches into the first available logical slot");
+            if (first_id == 0 || first_slot < 0)
+                return result;
+            pumpInputEvents(input);
+            result = expect(input.gamepad(first_slot).connected,
+                "gamepad-added event opens the virtual device") && result;
+
+            InputActionSystem actions;
+            actions.registerAction({ "PadTap", ActionValueType::Button, false });
+            actions.registerAction({ "LeftStickX", ActionValueType::Axis1D, false });
+            actions.registerAction({ "TriggerButton", ActionValueType::Button, false });
+            actions.registerAction({ "MoveForward", ActionValueType::Button, false });
+            actions.registerAction({ "MoveBack", ActionValueType::Button, false });
+            MappingContext context;
+            context.name = "GamepadTest";
+            InputBinding button_binding;
+            button_binding.action = "PadTap";
+            button_binding.source = InputBinding::Source::GamepadButton;
+            button_binding.code = SDL_GAMEPAD_BUTTON_SOUTH;
+            button_binding.slot = first_slot;
+            context.bindings.push_back(button_binding);
+            InputBinding stick_binding;
+            stick_binding.action = "LeftStickX";
+            stick_binding.source = InputBinding::Source::GamepadAxis;
+            stick_binding.code = SDL_GAMEPAD_AXIS_LEFTX;
+            stick_binding.slot = first_slot;
+            context.bindings.push_back(stick_binding);
+            InputBinding trigger_binding;
+            trigger_binding.action = "TriggerButton";
+            trigger_binding.source = InputBinding::Source::GamepadAxis;
+            trigger_binding.code = SDL_GAMEPAD_AXIS_LEFT_TRIGGER;
+            trigger_binding.slot = first_slot;
+            context.bindings.push_back(trigger_binding);
+            InputBinding forward_binding;
+            forward_binding.action = "MoveForward";
+            forward_binding.source = InputBinding::Source::GamepadAxis;
+            forward_binding.code = SDL_GAMEPAD_AXIS_LEFTY;
+            forward_binding.invert = true;
+            forward_binding.slot = first_slot;
+            context.bindings.push_back(forward_binding);
+            InputBinding back_binding = forward_binding;
+            back_binding.action = "MoveBack";
+            back_binding.invert = false;
+            context.bindings.push_back(back_binding);
+            result = expect(actions.pushContext(context), "gamepad bindings register with a logical slot") && result;
+
+            InputActionSystem restored_profile;
+            restored_profile.registerAction({ "LeftStickX", ActionValueType::Axis1D, false });
+            MappingContext restored_context;
+            restored_context.name = "GamepadTest";
+            restored_context.bindings.push_back(stick_binding);
+            restored_profile.registerContext(restored_context);
+            actions.rebind("GamepadTest", "LeftStickX", stick_binding);
+            const std::string profile = actions.serialiseProfile();
+            const std::string saved_slot = "\"slot\": " + std::to_string(first_slot);
+            std::size_t profile_warnings = 0;
+            result = expect(profile.find(saved_slot) != std::string::npos &&
+                restored_profile.loadProfile(profile, &profile_warnings) && profile_warnings == 0 &&
+                restored_profile.pushContext("GamepadTest"),
+                "gamepad profile stores its logical slot and reloads without warnings") && result;
+
+            SDL_Gamepad* gamepad = SDL_GetGamepadFromID(first_id);
+            SDL_Joystick* joystick = gamepad ? SDL_GetGamepadJoystick(gamepad) : nullptr;
+            result = expect(joystick != nullptr, "virtual gamepad is open for test input") && result;
+            if (joystick)
+            {
+                input.update();
+                SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_SOUTH, true);
+                pumpInputEvents(input);
+                SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_SOUTH, false);
+                pumpInputEvents(input);
+                actions.evaluate(input);
+                const ActionState& tap = actions.get("PadTap");
+                const uint32_t south_mask = uint32_t{ 1 } << SDL_GAMEPAD_BUTTON_SOUTH;
+                result = expect(tap.pressed && tap.released && tap.press_count == 1 && tap.release_count == 1 && !tap.held,
+                    "sub-frame gamepad tap preserves one press and release edge") && result;
+                result = expect((input.gamepad(first_slot).buttons_pressed_mask & south_mask) != 0,
+                    "gamepad pressed mask latches a tap for the current frame") && result;
+                input.update();
+                result = expect((input.gamepad(first_slot).buttons_pressed_mask & south_mask) == 0,
+                    "gamepad pressed mask clears on the next input frame") && result;
+
+                SDL_SetJoystickVirtualAxis(joystick, SDL_GAMEPAD_AXIS_LEFTX, 1638);
+                pumpInputEvents(input);
+                result = expect(glm::length(input.gamepad(first_slot).left_stick) == 0.0f,
+                    "stick value within the radial dead zone reads zero") && result;
+                SDL_SetJoystickVirtualAxis(joystick, SDL_GAMEPAD_AXIS_LEFTX, 32767);
+                pumpInputEvents(input);
+                actions.evaluate(input);
+                restored_profile.evaluate(input);
+                result = expect(std::abs(input.gamepad(first_slot).left_stick.x - 1.0f) < 0.001f &&
+                    std::abs(actions.axis("LeftStickX").x - 1.0f) < 0.001f &&
+                    std::abs(restored_profile.axis("LeftStickX").x - 1.0f) < 0.001f,
+                    "full stick deflection rescales to full range and feeds an axis action") && result;
+
+                SDL_SetJoystickVirtualAxis(joystick, SDL_GAMEPAD_AXIS_LEFTY, -32767);
+                pumpInputEvents(input);
+                actions.evaluate(input);
+                result = expect(actions.get("MoveForward").held && !actions.get("MoveBack").held,
+                    "negative stick direction activates only its matching button action") && result;
+                SDL_SetJoystickVirtualAxis(joystick, SDL_GAMEPAD_AXIS_LEFTY, 32767);
+                pumpInputEvents(input);
+                actions.evaluate(input);
+                result = expect(!actions.get("MoveForward").held && actions.get("MoveBack").held,
+                    "positive stick direction activates only its matching button action") && result;
+
+                SDL_SetJoystickVirtualAxis(joystick, SDL_GAMEPAD_AXIS_LEFT_TRIGGER, SDL_JOYSTICK_AXIS_MIN + 1310);
+                pumpInputEvents(input);
+                actions.evaluate(input);
+                result = expect(input.gamepad(first_slot).left_trigger == 0.0f && !actions.get("TriggerButton").held,
+                    "trigger dead zone suppresses low input") && result;
+                SDL_SetJoystickVirtualAxis(joystick, SDL_GAMEPAD_AXIS_LEFT_TRIGGER, 19660);
+                pumpInputEvents(input);
+                actions.evaluate(input);
+                result = expect(input.gamepad(first_slot).left_trigger > 0.5f && actions.get("TriggerButton").held,
+                    "trigger axis crosses its button threshold after dead-zone rescaling") && result;
+
+                SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_SOUTH, true);
+                pumpInputEvents(input);
+                input.set_gamepad_input_enabled(false);
+                actions.evaluate(input);
+                result = expect(input.gamepad(first_slot).connected && input.gamepad(first_slot).buttons_held == 0 &&
+                    input.gamepad(first_slot).left_trigger == 0.0f && !actions.get("TriggerButton").held &&
+                    (input.gamepad(first_slot).buttons_pressed_mask & south_mask) != 0 &&
+                    (input.gamepad(first_slot).buttons_released_mask & south_mask) != 0,
+                    "gameplay focus loss clears pad intent without disconnecting the device") && result;
+                input.update();
+                input.set_gamepad_input_enabled(true);
+                actions.evaluate(input);
+                result = expect(actions.get("TriggerButton").held && !actions.get("TriggerButton").pressed,
+                    "focus regain resamples a held trigger without a phantom press") && result;
+
+                const int second_slot = firstFreeGamepadSlot(input);
+                second_id = attachVirtualGamepad("Garden input test pad two");
+                result = expect(second_id != 0 && second_slot >= 0 && second_slot != first_slot,
+                    "second connected pad is assigned to a different free slot") && result;
+                if (second_id != 0 && second_slot >= 0)
+                {
+                    pumpInputEvents(input);
+                    result = expect(input.gamepad(second_slot).connected,
+                        "second gamepad-added event fills the next free slot") && result;
+                }
+
+                SDL_DetachVirtualJoystick(first_id);
+                first_id = 0;
+                pumpInputEvents(input);
+                actions.evaluate(input);
+                result = expect(!input.gamepad(first_slot).connected &&
+                    input.gamepad(first_slot).buttons_held == 0 &&
+                    (input.gamepad(first_slot).buttons_released_mask & south_mask) != 0 &&
+                    glm::length(input.gamepad(first_slot).left_stick) == 0.0f &&
+                    input.gamepad(first_slot).left_trigger == 0.0f &&
+                    (second_slot < 0 || input.gamepad(second_slot).connected) &&
+                    !actions.get("PadTap").held && !actions.get("TriggerButton").held &&
+                    actions.get("TriggerButton").released,
+                    "unplug releases held actions and leaves other slots unchanged") && result;
+
+                replacement_id = attachVirtualGamepad("Garden input test replacement pad");
+                result = expect(replacement_id != 0, "replacement virtual gamepad attaches") && result;
+                if (replacement_id != 0)
+                {
+                    pumpInputEvents(input);
+                    result = expect(input.gamepad(first_slot).connected &&
+                        (second_slot < 0 || input.gamepad(second_slot).connected),
+                        "replacement uses the freed slot without compacting existing devices") && result;
+                }
+            }
+
+            return result;
+        }();
+
+        if (first_id != 0)
+            SDL_DetachVirtualJoystick(first_id);
+        if (second_id != 0)
+            SDL_DetachVirtualJoystick(second_id);
+        if (replacement_id != 0)
+            SDL_DetachVirtualJoystick(replacement_id);
+
+        if (to_initialize != 0)
+            SDL_QuitSubSystem(to_initialize);
+        return ok;
+    }
+
     bool testActionContextPriorityAndModal()
     {
         InputManager input;
@@ -410,7 +654,7 @@ namespace
         nlohmann::json with_unknown = nlohmann::json::parse(profile);
         auto& bindings = with_unknown["contexts"][0]["bindings"];
         bindings.push_back({ { "action", "MissingAction" }, { "source", "key" }, { "code", SDL_SCANCODE_X } });
-        bindings.push_back({ { "action", "Jump" }, { "source", "gamepad_button" }, { "code", 0 } });
+        bindings.push_back({ { "action", "Jump" }, { "source", "future_unknown_source" }, { "code", 0 } });
         InputActionSystem tolerant;
         tolerant.registerAction({ "Jump", ActionValueType::Button, false });
         tolerant.registerAction({ "Fire", ActionValueType::Button, false });
@@ -647,6 +891,7 @@ int main()
     ok = testActionResetRelease() && ok;
     ok = testInputActionEdgesAndCounts() && ok;
     ok = testActionAxesAndMouseDelta() && ok;
+    ok = testGamepadInputFeed() && ok;
     ok = testActionContextPriorityAndModal() && ok;
     ok = testActionRebindCallbacksAndProfile() && ok;
     ok = testNetworkInputSampler() && ok;

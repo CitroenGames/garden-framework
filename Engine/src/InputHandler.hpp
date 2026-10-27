@@ -33,6 +33,7 @@ private:
         ui_mode = enabled;
         if (ui_mode)
             input_manager->reset_state();
+        input_manager->set_gamepad_input_enabled(!ui_mode && !ImGuiManager::get().wantCaptureKeyboard());
         set_relative_mouse_mode(!ui_mode);
     }
 
@@ -52,6 +53,11 @@ private:
         case SDL_EVENT_MOUSE_BUTTON_UP:
         case SDL_EVENT_MOUSE_WHEEL:
             return !ImGuiManager::get().wantCaptureMouse();
+
+        case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+        case SDL_EVENT_GAMEPAD_BUTTON_UP:
+        case SDL_EVENT_GAMEPAD_AXIS_MOTION:
+            return !ImGuiManager::get().wantCaptureKeyboard();
 
         default:
             return false;
@@ -110,6 +116,7 @@ public:
     void set_window(SDL_Window* w)
     {
         window = w;
+        input_manager->initialize_gamepads();
     }
 
     // Set a callback for when the application should quit
@@ -153,6 +160,7 @@ public:
     {
         // Update input manager at start of frame
         input_manager->update();
+        input_manager->set_gamepad_input_enabled(!ui_mode && !ImGuiManager::get().wantCaptureKeyboard());
 
         SDL_Event event;
         while (SDL_PollEvent(&event))
@@ -161,6 +169,16 @@ public:
             ImGuiManager::get().processEvent(&event);
 
             bool consumed = false;
+
+            // Device topology is tracked even while gameplay input is focused
+            // on a menu or the editor UI.
+            if (event.type == SDL_EVENT_GAMEPAD_ADDED ||
+                event.type == SDL_EVENT_GAMEPAD_REMOVED ||
+                event.type == SDL_EVENT_GAMEPAD_REMAPPED)
+            {
+                input_manager->process_event(event);
+                consumed = true;
+            }
 
             switch (event.type)
             {
@@ -197,6 +215,8 @@ public:
             if (!consumed && should_route_to_game_input(event))
                 input_manager->process_event(event);
         }
+
+        input_manager->set_gamepad_input_enabled(!ui_mode && !ImGuiManager::get().wantCaptureKeyboard());
     }
 
     // Reset quit state (useful for handling quit gracefully)

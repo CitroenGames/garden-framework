@@ -15,6 +15,7 @@ namespace
     using Source = InputBinding::Source;
 
     constexpr float ActiveEpsilon = 0.0001f;
+    constexpr float AxisButtonThreshold = 0.5f;
 
     const char* sourceName(Source source)
     {
@@ -24,6 +25,8 @@ namespace
         case Source::MouseButton: return "mouse_button";
         case Source::MouseDeltaX: return "mouse_delta_x";
         case Source::MouseDeltaY: return "mouse_delta_y";
+        case Source::GamepadButton: return "gamepad_button";
+        case Source::GamepadAxis: return "gamepad_axis";
         }
         return "unknown";
     }
@@ -34,6 +37,8 @@ namespace
         else if (value == "mouse_button") source = Source::MouseButton;
         else if (value == "mouse_delta_x") source = Source::MouseDeltaX;
         else if (value == "mouse_delta_y") source = Source::MouseDeltaY;
+        else if (value == "gamepad_button") source = Source::GamepadButton;
+        else if (value == "gamepad_axis") source = Source::GamepadAxis;
         else return false;
         return true;
     }
@@ -62,7 +67,7 @@ namespace
 
     bool sameSource(const InputBinding& left, const InputBinding& right)
     {
-        return left.source == right.source && left.code == right.code;
+        return left.source == right.source && left.code == right.code && left.slot == right.slot;
     }
 
     void incrementCount(uint32_t& count)
@@ -76,7 +81,9 @@ std::size_t InputActionSystem::SourceIdentityHash::operator()(const SourceIdenti
 {
     const std::size_t source_hash = std::hash<uint8_t>{}(static_cast<uint8_t>(source.source));
     const std::size_t code_hash = std::hash<int>{}(source.code);
-    return source_hash ^ (code_hash + 0x9e3779b9U + (source_hash << 6U) + (source_hash >> 2U));
+    const std::size_t combined = source_hash ^ (code_hash + 0x9e3779b9U + (source_hash << 6U) + (source_hash >> 2U));
+    const std::size_t slot_hash = std::hash<int>{}(source.slot);
+    return combined ^ (slot_hash + 0x9e3779b9U + (combined << 6U) + (combined >> 2U));
 }
 
 bool InputActionSystem::isValidActionType(ActionValueType type)
@@ -98,14 +105,19 @@ bool InputActionSystem::isReservedKey(int code)
 
 InputActionSystem::SourceIdentity InputActionSystem::identityOf(const InputBinding& binding)
 {
-    return { binding.source, binding.code };
+    return { binding.source, binding.code, binding.slot };
 }
 
 InputActionSystem::SourceIdentity InputActionSystem::identityOf(const RawInputTransition& transition)
 {
-    if (transition.device == RawInputDevice::Keyboard)
-        return { Source::Key, transition.code };
-    return { Source::MouseButton, transition.code };
+    switch (transition.device)
+    {
+    case RawInputDevice::Keyboard: return { Source::Key, transition.code, 0 };
+    case RawInputDevice::Mouse: return { Source::MouseButton, transition.code, 0 };
+    case RawInputDevice::GamepadButton: return { Source::GamepadButton, transition.code, transition.slot };
+    case RawInputDevice::GamepadAxis: return { Source::GamepadAxis, transition.code, transition.slot };
+    }
+    return {};
 }
 
 bool InputActionSystem::registerAction(const InputActionDef& action)
@@ -128,13 +140,19 @@ bool InputActionSystem::isValidBinding(const InputBinding& binding) const
     switch (binding.source)
     {
     case Source::Key:
-        return binding.code > SDL_SCANCODE_UNKNOWN && binding.code < SDL_SCANCODE_COUNT &&
+        return binding.slot == 0 && binding.code > SDL_SCANCODE_UNKNOWN && binding.code < SDL_SCANCODE_COUNT &&
             !isReservedKey(binding.code);
     case Source::MouseButton:
-        return binding.code > 0 && binding.code < 256;
+        return binding.slot == 0 && binding.code > 0 && binding.code < 256;
     case Source::MouseDeltaX:
     case Source::MouseDeltaY:
-        return binding.code == 0;
+        return binding.code == 0 && binding.slot == 0;
+    case Source::GamepadButton:
+        return binding.slot >= 0 && static_cast<std::size_t>(binding.slot) < InputGamepadSlotCount &&
+            binding.code >= 0 && binding.code < SDL_GAMEPAD_BUTTON_COUNT;
+    case Source::GamepadAxis:
+        return binding.slot >= 0 && static_cast<std::size_t>(binding.slot) < InputGamepadSlotCount &&
+            binding.code >= 0 && binding.code < SDL_GAMEPAD_AXIS_COUNT;
     }
     return false;
 }
@@ -234,12 +252,23 @@ InputActionSystem::DigitalState InputActionSystem::makeFrameStartState(const Inp
             if (binding.source == Source::Key)
             {
                 const auto id = identityOf(binding);
-                state[id] = input.is_key_held(static_cast<SDL_Scancode>(binding.code));
+                state[id] = input.is_key_held(static_cast<SDL_Scancode>(binding.code)) ? 1.0f : 0.0f;
             }
             else if (binding.source == Source::MouseButton)
             {
                 const auto id = identityOf(binding);
-                state[id] = input.is_mouse_button_held(static_cast<uint8_t>(binding.code));
+                state[id] = input.is_mouse_button_held(static_cast<uint8_t>(binding.code)) ? 1.0f : 0.0f;
+            }
+            else if (binding.source == Source::GamepadButton)
+            {
+                const auto id = identityOf(binding);
+                const uint32_t mask = uint32_t{ 1 } << static_cast<uint32_t>(binding.code);
+                state[id] = (input.gamepad(binding.slot).buttons_held & mask) != 0 ? 1.0f : 0.0f;
+            }
+            else if (binding.source == Source::GamepadAxis)
+            {
+                const auto id = identityOf(binding);
+                state[id] = input.gamepad(binding.slot).axes[static_cast<std::size_t>(binding.code)];
             }
         }
     }
@@ -250,7 +279,7 @@ InputActionSystem::DigitalState InputActionSystem::makeFrameStartState(const Inp
         const SourceIdentity id = identityOf(*it);
         const auto found = state.find(id);
         if (found != state.end())
-            found->second = !it->is_down;
+            found->second = it->previous_value;
     }
     return state;
 }
@@ -281,31 +310,38 @@ InputActionSystem::EvaluatedActions InputActionSystem::evaluateSources(
                 continue;
 
             float raw_value = 0.0f;
-            if (binding.source == Source::Key || binding.source == Source::MouseButton)
+            if (binding.source == Source::Key || binding.source == Source::MouseButton ||
+                binding.source == Source::GamepadButton || binding.source == Source::GamepadAxis)
             {
                 const auto state_it = digital_state.find(id);
                 if (state_it != digital_state.end() && state_it->second)
-                    raw_value = 1.0f;
+                    raw_value = state_it->second;
             }
             else if (binding.source == Source::MouseDeltaX)
                 raw_value = mouse_delta_x;
             else if (binding.source == Source::MouseDeltaY)
                 raw_value = mouse_delta_y;
 
-            const bool source_active = std::abs(raw_value) > ActiveEpsilon;
-            if (!source_active)
-                continue;
-
             EvaluatedAction& action_output = output_it->second;
+            float contribution = raw_value * binding.scale;
+            if (binding.invert)
+                contribution = -contribution;
+
             if (action_it->second.type == ActionValueType::Button)
             {
-                action_output.value.x = 1.0f;
+                const bool axis_source = binding.source == Source::GamepadAxis;
+                const bool active = axis_source
+                    ? contribution >= AxisButtonThreshold
+                    : std::abs(raw_value) > ActiveEpsilon;
+                if (active)
+                    action_output.value.x = 1.0f;
+                if (action_it->second.consume && active)
+                    consumed_after_context.insert(id);
             }
             else
             {
-                float contribution = raw_value * binding.scale;
-                if (binding.invert)
-                    contribution = -contribution;
+                if (std::abs(contribution) <= ActiveEpsilon)
+                    continue;
 
                 if (action_it->second.type == ActionValueType::Axis1D)
                     action_output.value.x += contribution;
@@ -315,7 +351,7 @@ InputActionSystem::EvaluatedActions InputActionSystem::evaluateSources(
                     action_output.value.y += contribution;
             }
 
-            if (action_it->second.consume)
+            if (action_it->second.type != ActionValueType::Button && action_it->second.consume)
                 consumed_after_context.insert(id);
         }
 
@@ -385,7 +421,7 @@ void InputActionSystem::evaluate(const InputManager& input, float dt)
     for (const RawInputTransition& transition : transitions)
     {
         const SourceIdentity id = identityOf(transition);
-        digital_state[id] = transition.is_down;
+        digital_state[id] = transition.value;
         current = evaluateDigital(digital_state);
 
         for (auto& [name, next] : next_states)
@@ -550,6 +586,7 @@ std::string InputActionSystem::serialiseProfile() const
             binding_json["action"] = binding.action;
             binding_json["source"] = sourceName(binding.source);
             binding_json["code"] = binding.code;
+            binding_json["slot"] = binding.slot;
             binding_json["scale"] = binding.scale;
             binding_json["invert"] = binding.invert;
             binding_json["axis_target"] = binding.axis_target;
@@ -620,6 +657,8 @@ bool InputActionSystem::loadProfile(const std::string& profile, std::size_t* war
             }
 
             bool valid_fields = true;
+            if (binding_json.contains("slot") && !readInt(binding_json["slot"], binding.slot))
+                valid_fields = false;
             if (binding_json.contains("code"))
             {
                 if (!readInt(binding_json["code"], binding.code))

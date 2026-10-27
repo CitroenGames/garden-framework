@@ -36,7 +36,7 @@ public:
     {
         if (api_type != RenderAPIType::Headless)
         {
-            if (!SDL_Init(SDL_INIT_VIDEO))
+            if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD))
             {
                 LOG_ENGINE_FATAL("SDL video initialization failed: {}", SDL_GetError());
                 return false;

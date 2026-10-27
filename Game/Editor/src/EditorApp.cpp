@@ -1748,6 +1748,7 @@ void EditorApp::beginPlay()
 
                 // Create input manager for client
                 m_game_input_manager = std::make_shared<InputManager>();
+                m_game_input_manager->initialize_gamepads();
                 m_level_manager.applyGameplayFrameworkSettings(
                     m_play_snapshot.metadata,
                     *m_play_world,
@@ -1908,6 +1909,7 @@ void EditorApp::beginPlay()
 
             // Create input manager for client
             m_game_input_manager = std::make_shared<InputManager>();
+            m_game_input_manager->initialize_gamepads();
             m_level_manager.applyGameplayFrameworkSettings(
                 m_play_snapshot.metadata,
                 *m_play_world,
@@ -2035,6 +2037,7 @@ void EditorApp::beginPlay()
     {
         // ---- Standalone project-DLL path: run the same game code as Game.exe ----
         m_game_input_manager = std::make_shared<InputManager>();
+        m_game_input_manager->initialize_gamepads();
 
         if (!dll_path.empty() && std::filesystem::exists(dll_path) && m_game_module.load(dll_path))
         {
@@ -2359,7 +2362,11 @@ void EditorApp::processEvents()
 {
     // Update game input manager at start of frame (resets deltas)
     if (m_game_input_manager)
+    {
         m_game_input_manager->update();
+        m_game_input_manager->set_gamepad_input_enabled(
+            m_state.play_mode == PlayMode::Playing && !ImGui::GetIO().WantCaptureKeyboard);
+    }
 
     SDL_Event event;
     while (SDL_PollEvent(&event))
@@ -2647,6 +2654,25 @@ void EditorApp::processEvents()
             }
             break;
 
+        case SDL_EVENT_GAMEPAD_ADDED:
+        case SDL_EVENT_GAMEPAD_REMOVED:
+        case SDL_EVENT_GAMEPAD_REMAPPED:
+            // Keep device topology current throughout a Play session. Controls
+            // remain gated separately by the editor's gameplay focus.
+            if (m_game_input_manager)
+                m_game_input_manager->process_event(event);
+            break;
+
+        case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+        case SDL_EVENT_GAMEPAD_BUTTON_UP:
+        case SDL_EVENT_GAMEPAD_AXIS_MOTION:
+            if (m_game_input_manager && m_state.play_mode == PlayMode::Playing &&
+                !ImGui::GetIO().WantCaptureKeyboard)
+            {
+                m_game_input_manager->process_event(event);
+            }
+            break;
+
         case SDL_EVENT_WINDOW_RESIZED:
         case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
             if (event.window.windowID == SDL_GetWindowID(m_app.getWindow()))
@@ -2657,6 +2683,10 @@ void EditorApp::processEvents()
             break;
         }
     }
+
+    if (m_game_input_manager)
+        m_game_input_manager->set_gamepad_input_enabled(
+            m_state.play_mode == PlayMode::Playing && !ImGui::GetIO().WantCaptureKeyboard);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

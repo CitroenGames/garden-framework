@@ -42,6 +42,7 @@
 #include <array>
 #include <cmath>
 #include <memory>
+#include <utility>
 
 using Net::InputState;
 using Net::MovementConfig;
@@ -93,6 +94,25 @@ static bool configureFPShooterInput(InputActionSystem& actions)
         gameplay.bindings.push_back({ "Move", InputBinding::Source::Key, scancode, 1.0f, invert, axis_target });
         gameplay.bindings.push_back({ button_action, InputBinding::Source::Key, scancode });
     };
+    auto gamepadButton = [&gameplay](const char* action, SDL_GamepadButton button) {
+        InputBinding binding;
+        binding.action = action;
+        binding.source = InputBinding::Source::GamepadButton;
+        binding.code = button;
+        binding.slot = 0;
+        gameplay.bindings.push_back(std::move(binding));
+    };
+    auto gamepadAxis = [&gameplay](const char* action, SDL_GamepadAxis axis, bool invert = false,
+                                   uint8_t axis_target = 0) {
+        InputBinding binding;
+        binding.action = action;
+        binding.source = InputBinding::Source::GamepadAxis;
+        binding.code = axis;
+        binding.invert = invert;
+        binding.axis_target = axis_target;
+        binding.slot = 0;
+        gameplay.bindings.push_back(std::move(binding));
+    };
 
     // The vector action supports future analog movement; separate directional
     // buttons retain the legacy flags when opposite keys are held together.
@@ -100,6 +120,12 @@ static bool configureFPShooterInput(InputActionSystem& actions)
     movementKey("MoveBack", SDL_SCANCODE_S, true, 1);
     movementKey("MoveLeft", SDL_SCANCODE_A, true, 0);
     movementKey("MoveRight", SDL_SCANCODE_D, false, 0);
+    gamepadAxis("Move", SDL_GAMEPAD_AXIS_LEFTX, false, 0);
+    gamepadAxis("Move", SDL_GAMEPAD_AXIS_LEFTY, true, 1);
+    gamepadAxis("MoveForward", SDL_GAMEPAD_AXIS_LEFTY, true);
+    gamepadAxis("MoveBack", SDL_GAMEPAD_AXIS_LEFTY);
+    gamepadAxis("MoveLeft", SDL_GAMEPAD_AXIS_LEFTX, true);
+    gamepadAxis("MoveRight", SDL_GAMEPAD_AXIS_LEFTX);
     key("Jump", SDL_SCANCODE_SPACE);
     key("FreecamVertical", SDL_SCANCODE_SPACE);
     key("Use", SDL_SCANCODE_E);
@@ -117,6 +143,12 @@ static bool configureFPShooterInput(InputActionSystem& actions)
     key("WeaponSlot4", SDL_SCANCODE_4);
     key("WeaponSlot5", SDL_SCANCODE_5);
     gameplay.bindings.push_back({ "Fire", InputBinding::Source::MouseButton, SDL_BUTTON_LEFT });
+    gamepadButton("Jump", SDL_GAMEPAD_BUTTON_SOUTH);
+    gamepadButton("Use", SDL_GAMEPAD_BUTTON_NORTH);
+    gamepadButton("Sprint", SDL_GAMEPAD_BUTTON_LEFT_STICK);
+    gamepadButton("Crouch", SDL_GAMEPAD_BUTTON_EAST);
+    gamepadButton("Reload", SDL_GAMEPAD_BUTTON_WEST);
+    gamepadAxis("Fire", SDL_GAMEPAD_AXIS_RIGHT_TRIGGER);
 
     return actions.pushContext(gameplay);
 }
