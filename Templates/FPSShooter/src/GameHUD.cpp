@@ -58,6 +58,10 @@ bool GameHUD::initialize(const char* rmlPath)
     bound &= rml.dataModelBindBool(m_model, "team_visible", false);
     bound &= rml.dataModelBindBool(m_model, "scoreboard_visible", false);
     bound &= rml.dataModelBindBool(m_model, "pause_visible", false);
+    bound &= rml.dataModelBindBool(m_model, "front_end_visible", false);
+    bound &= rml.dataModelBindBool(m_model, "settings_visible", false);
+    bound &= rml.dataModelBindString(m_model, "front_end_text", "");
+    bound &= rml.dataModelBindString(m_model, "settings_text", "");
     bound &= rml.dataModelBindString(m_model, "notice_text", "");
     bound &= rml.dataModelBindString(m_model, "buy_text", "");
     bound &= rml.dataModelBindString(m_model, "scoreboard_text", "");
@@ -89,6 +93,10 @@ bool GameHUD::initialize(const char* rmlPath)
         return false;
     }
 
+    // The HUD document is the sole verified game-context Rml document. Keep
+    // it alive across every template UI transition; panels supply the screen.
+    rml.setDocumentVisible(m_document, true);
+    m_document_visible = true;
     LOG_ENGINE_INFO("[HUD] Document loaded and shown");
     return true;
 }
@@ -101,6 +109,7 @@ void GameHUD::shutdown()
         rml.closeDocument(m_document);
         m_document = nullptr;
     }
+    m_document_visible = false;
     if (m_model)
     {
         rml.removeDataModel(m_model);
@@ -182,10 +191,15 @@ void GameHUD::updateCompetitive(const UiLogic::ClientCompetitiveState& comp,
                                 const UiLogic::UiState& ui,
                                 const std::string& buy_text,
                                 const std::string& scoreboard_text,
-                                const UiLogic::RadarPresentation& radar)
+                                const UiLogic::RadarPresentation& radar,
+                                const UiLogic::DocumentPresentation& document)
 {
     if (!m_model) return;
     RmlUiManager& rml = RmlUiManager::get();
+    if (m_document && m_document_visible != document.hud_document_visible) {
+        rml.setDocumentVisible(m_document, document.hud_document_visible);
+        m_document_visible = document.hud_document_visible;
+    }
     rml.dataModelSetString(m_model, "phase_text", core.phase_text.c_str());
     rml.dataModelSetString(m_model, "clock_text", core.clock_text.c_str());
     rml.dataModelSetString(m_model, "round_text", core.round_text.c_str());
@@ -202,6 +216,10 @@ void GameHUD::updateCompetitive(const UiLogic::ClientCompetitiveState& comp,
     rml.dataModelSetBool(m_model, "team_visible", ui.screen == UiLogic::UiScreen::TeamSelect);
     rml.dataModelSetBool(m_model, "scoreboard_visible", UiLogic::scoreboardVisible(ui));
     rml.dataModelSetBool(m_model, "pause_visible", ui.screen == UiLogic::UiScreen::Pause);
+    rml.dataModelSetBool(m_model, "front_end_visible", document.front_end_visible);
+    rml.dataModelSetBool(m_model, "settings_visible", document.settings_visible);
+    rml.dataModelSetString(m_model, "front_end_text", document.front_end_text.c_str());
+    rml.dataModelSetString(m_model, "settings_text", document.settings_text.c_str());
     rml.dataModelSetString(m_model, "notice_text", ui.notice_text.c_str());
     rml.dataModelSetString(m_model, "buy_text", buy_text.c_str());
     rml.dataModelSetString(m_model, "scoreboard_text", scoreboard_text.c_str());

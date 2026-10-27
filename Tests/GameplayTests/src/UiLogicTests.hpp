@@ -48,6 +48,52 @@ bool testUiScreenTransitions()
     return pass(name);
 }
 
+bool testUiDocumentLifecycle()
+{
+    const std::string name = "UiDocument_PersistentLifecycle";
+    using namespace UiLogic;
+
+    SettingsPresentation settings;
+    settings.vsync = true;
+    settings.fxaa = false;
+    settings.sensitivity = 2.5f;
+
+    UiState state;
+    auto in_match = buildDocumentPresentation(state, settings);
+    if (!in_match.hud_document_visible || in_match.front_end_visible || in_match.settings_visible)
+        return fail(name, "bare HUD did not keep one neutral document presentation");
+
+    if (!tryOpen(state, UiScreen::Pause) || !tryOpen(state, UiScreen::Settings))
+        return fail(name, "pause settings transition was rejected");
+    auto settings_view = buildDocumentPresentation(state, settings);
+    if (!settings_view.hud_document_visible || !settings_view.settings_visible ||
+        settings_view.front_end_visible || settings_view.settings_text.find("VSync: ON") == std::string::npos ||
+        settings_view.settings_text.find("FXAA: OFF") == std::string::npos ||
+        settings_view.settings_text.find("Sensitivity: 2.5") == std::string::npos)
+        return fail(name, "settings was not a HUD-owned, read-only presentation");
+    backFromSettings(state);
+    if (state.screen != UiScreen::Pause || !buildDocumentPresentation(state, settings).hud_document_visible)
+        return fail(name, "settings return discarded the persistent HUD presentation");
+
+    ConnectionLifecycle connection;
+    if (observeConnection(connection, state, false) || state.screen != UiScreen::Pause)
+        return fail(name, "initial offline observation changed local pause state");
+    if (observeConnection(connection, state, true))
+        return fail(name, "connection acquisition invented a menu transition");
+    if (!observeConnection(connection, state, false) || state.screen != UiScreen::MainMenu ||
+        state.scoreboard_held || state.notice_text != "Connection lost")
+        return fail(name, "connection loss did not clear stale gameplay UI state");
+    auto offline = buildDocumentPresentation(state, settings);
+    if (!offline.hud_document_visible || !offline.front_end_visible || offline.settings_visible ||
+        offline.front_end_text.find("Connection is unavailable") == std::string::npos)
+        return fail(name, "offline menu was not neutral or retained within the HUD document");
+
+    resetConnectionLifecycle(connection);
+    if (connection.observed_connected)
+        return fail(name, "connection lifecycle reset retained stale ownership");
+    return pass(name);
+}
+
 bool testUiModalInputIsolation()
 {
     const std::string name = "UiModal_InputIsolation";

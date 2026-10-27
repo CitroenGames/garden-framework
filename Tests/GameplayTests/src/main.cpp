@@ -2274,6 +2274,7 @@ int main()
     ok = testC4Timer40() && ok;
     ok = testC4CarrierDropPickup() && ok;
     ok = testC4WorldAuthority() && ok;
+    ok = testC4ObjectiveInterruptionsAndTeardown() && ok;
     ok = testGrenadeEffectLifecycle() && ok;
     ok = testGrenadeEffectImpactTargetsAndCleanup() && ok;
     ok = testGrenadeProjectileMotionAndAuthoritativeImpact() && ok;
@@ -2287,6 +2288,7 @@ int main()
     ok = testBotInputSynthesisShape() && ok;
     ok = testBotEngageStrafes() && ok;
     ok = testBotBuyPlanByMoney() && ok;
+    ok = testBotAuthoredRouteData() && ok;
     ok = testBotDebugRingWraps() && ok;
     ok = testBotDebugTransitionRecorded() && ok;
     ok = testBotDebugDumpFormatter() && ok;
@@ -2299,6 +2301,7 @@ int main()
     ok = testNavMeshHierarchyWorldBakeAndPath() && ok;
     ok = testNavMeshHierarchyStaleParentRootsBake() && ok;
     ok = testUiScreenTransitions() && ok;
+    ok = testUiDocumentLifecycle() && ok;
     ok = testUiModalInputIsolation() && ok;
     ok = testUiMenusRequireCompetitiveState() && ok;
     ok = testUiClockFormatting() && ok;

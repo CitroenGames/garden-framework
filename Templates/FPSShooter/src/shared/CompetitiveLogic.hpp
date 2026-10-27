@@ -220,6 +220,11 @@ struct BombTickInput {
     bool defuse_moved = false;
     bool defuse_damaged = false;
     bool defuse_dead = false;
+    // The authoritative owner of an active defuse disappeared before this
+    // tick (for example, disconnect/world despawn).  This is distinct from
+    // another defender pressing USE: a second actor must not steal a valid
+    // defuse channel.
+    bool defuse_interrupted = false;
     bool paused = false;
 };
 
@@ -320,6 +325,11 @@ public:
                 } else return;
             }
             if (bomb.state == BombState::Defusing) {
+                if (in.defuse_interrupted) {
+                    bomb.defuser = entt::null; bomb.defuse_channel = 0.0f;
+                    setState(BombState::Planted);
+                    return;
+                }
                 if (in.defuse_actor != bomb.defuser) return; // single defuser: second USE ignored
                 if (!in.defuse_use || !in.defuse_in_range || in.defuse_moved || in.defuse_damaged || in.defuse_dead) {
                     bomb.defuser = entt::null; bomb.defuse_channel = 0.0f;

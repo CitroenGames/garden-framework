@@ -82,8 +82,16 @@
     </div>
     <div id="pause-panel" data-if="pause_visible">
         <div class="panel-title">PAUSED</div>
-        <div class="buy-text">Esc Resume</div>
-</div>    <div id="death-overlay" data-if="health_available && !alive">
+        <div class="buy-text">Esc Resume  F10 Settings</div>
+    </div>
+    <div id="front-end-panel" data-if="front_end_visible">
+        <div class="panel-title">{{ front_end_text }}</div>
+    </div>
+    <div id="settings-panel" data-if="settings_visible">
+        <div class="panel-title">{{ settings_text }}</div>
+        <div class="buy-text">Esc Back</div>
+    </div>
+    <div id="death-overlay" data-if="health_available && !alive">
         <div class="death-text">YOU DIED</div>
         <div class="respawn-text" data-if="death_timer != ''">{{ death_timer }}</div>
     </div>

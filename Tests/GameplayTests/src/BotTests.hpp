@@ -1,5 +1,6 @@
 #pragma once
 #include "shared/BotLogic.hpp"
+#include "shared/BotRouteData.hpp"
 #include <cmath>
 #include <string>
 namespace {
@@ -260,6 +261,50 @@ bool testBotBuyPlanByMoney()
     if (pistolHard.aliases.empty() || std::string(pistolHard.aliases[0]) != "vest") return fail(name, "pistol Hard should buy vest");
     // Every alias must resolve in catalog (server skip-on-reject relies on it).
     for (auto* plan : {&full, &fullCt, &force, &eco}) for (auto* a : plan->aliases) if (!findCatalogByAlias(a)) return fail(name, std::string("alias not in catalog: ") + a);
+    return pass(name);
+}
+
+bool testBotAuthoredRouteData()
+{
+    const std::string name = "Bot_AuthoredRouteData";
+    using namespace Bots;
+    const std::string valid = R"({
+        "format":"fpsshooter_bot_routes", "version":1, "level":"main",
+        "routes":[
+            {"id":"t_a_long", "team":"attackers", "site":0, "points":[[0,0,0],[10,0,1]]},
+            {"id":"t_b_short", "team":"attackers", "site":1, "points":[[0,0,0],[20,0,2]]}
+        ],
+        "holds":[{"id":"ct_a_hold", "team":"defenders", "site":0, "point":[-5,0,3]}],
+        "patrols":[{"id":"ct_patrol", "team":"defenders", "points":[[-1,0,0],[-2,0,0]]}]
+    })";
+    AuthoredRouteData data;
+    std::string error;
+    if (!parseAuthoredRouteData(valid, data, &error))
+        return fail(name, "valid route sidecar rejected: " + error);
+    if (data.routes.size() != 2 || data.holds.size() != 1 || data.patrols.size() != 1)
+        return fail(name, "valid route collections parsed incorrectly");
+
+    glm::vec3 target(0.0f);
+    if (!selectAuthoredRouteTarget(data, Competitive::FpsTeam::Attackers, 0, 9, false, target) ||
+        !botApprox(target.x, 10.0f) || !botApprox(target.z, 1.0f))
+        return fail(name, "attacker route target was not selected by canonical site");
+    if (!selectAuthoredRouteTarget(data, Competitive::FpsTeam::Defenders, 0, 1, true, target) ||
+        !botApprox(target.x, -5.0f) || !botApprox(target.z, 3.0f))
+        return fail(name, "defender hold target was not selected deterministically");
+    if (selectAuthoredRouteTarget(data, Competitive::FpsTeam::Defenders, 1, 1, true, target))
+        return fail(name, "wrong-team/wrong-site tactical data leaked into selection");
+
+    // A partial sidecar is safe when it carries one valid collection. It has
+    // no implicit site, bomb, or enemy-location fields.
+    const std::string partial = R"({"format":"fpsshooter_bot_routes","version":1,"level":"main","holds":[{"id":"a","team":"any","point":[1,2,3]}]})";
+    if (!parseAuthoredRouteData(partial, data, &error) || data.holds.size() != 1 || !data.routes.empty())
+        return fail(name, "valid partial tactical sidecar was not retained safely");
+    if (parseAuthoredRouteData(R"({"format":"fpsshooter_bot_routes","version":1,"level":"main","routes":[{"id":"bad","team":"attackers","points":[[0,0,0]],"enemy_position":[9,9,9]}]})", data, &error) || !data.empty())
+        return fail(name, "unknown hidden-state field was accepted");
+    if (parseAuthoredRouteData(R"({"format":"fpsshooter_bot_routes","version":1,"level":"main","routes":[{"id":"bad","team":"attackers","points":[[0,0]}]})", data, &error) || !data.empty())
+        return fail(name, "malformed route point was accepted");
+    if (parseAuthoredRouteData(R"({"format":"fpsshooter_bot_routes","version":1,"level":"main","routes":[]})", data, &error) || !data.empty())
+        return fail(name, "empty tactical sidecar was accepted");
     return pass(name);
 }
 

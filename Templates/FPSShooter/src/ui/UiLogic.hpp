@@ -50,6 +50,33 @@ struct UiState {
     } team_reply;
 };
 
+// The module owns its network client.  UI only observes the connection edge
+// and selects a neutral presentation after an established connection drops;
+// it neither initiates a connection nor attempts to repair one.
+struct ConnectionLifecycle {
+    bool observed_connected = false;
+};
+
+inline bool observeConnection(ConnectionLifecycle& lifecycle, UiState& state, bool connected) {
+    const bool disconnected = lifecycle.observed_connected && !connected;
+    lifecycle.observed_connected = connected;
+    if (!disconnected)
+        return false;
+
+    // A stale gameplay modal must not keep suppressing input after its owning
+    // connection is gone.  The persistent HUD document remains the presenter;
+    // MainMenu is a neutral offline surface, not a connection command.
+    state.screen = UiScreen::MainMenu;
+    state.scoreboard_held = false;
+    state.notice_text = "Connection lost";
+    state.notice_remaining = 2.0f;
+    return true;
+}
+
+inline void resetConnectionLifecycle(ConnectionLifecycle& lifecycle) {
+    lifecycle.observed_connected = false;
+}
+
 inline bool isModal(UiScreen s) { return s != UiScreen::None && s != UiScreen::Scoreboard; }
 inline bool cursorWanted(const UiState& s) { return isModal(s.screen); }
 inline bool scoreboardVisible(const UiState& s) {
@@ -105,6 +132,55 @@ inline void tickUi(UiState& s, float dt) {
         s.notice_remaining -= dt;
         if (s.notice_remaining <= 0.0f) { s.notice_remaining = 0.0f; s.notice_text.clear(); }
     }
+}
+
+// One game-context Rml document is verified today.  These values describe
+// panels inside that document, so moving between screens never closes or
+// reloads the always-on HUD or its data model.
+struct SettingsPresentation {
+    bool vsync = false;
+    bool fxaa = false;
+    float sensitivity = 0.0f;
+};
+
+struct DocumentPresentation {
+    bool hud_document_visible = true;
+    bool front_end_visible = false;
+    bool settings_visible = false;
+    std::string front_end_text;
+    std::string settings_text;
+};
+
+inline std::string formatSettingsText(const SettingsPresentation& settings) {
+    char buffer[160];
+    std::snprintf(buffer, sizeof(buffer),
+                  "SETTINGS (read-only)\\nVSync: %s\\nFXAA: %s\\nSensitivity: %.1f\\nUse console settings; archived values save on exit.",
+                  settings.vsync ? "ON" : "OFF",
+                  settings.fxaa ? "ON" : "OFF",
+                  std::max(0.0f, settings.sensitivity));
+    return buffer;
+}
+
+inline DocumentPresentation buildDocumentPresentation(const UiState& state,
+                                                       const SettingsPresentation& settings) {
+    DocumentPresentation out;
+    switch (state.screen) {
+    case UiScreen::MainMenu:
+        out.front_end_visible = true;
+        out.front_end_text = "MAIN MENU\\nConnection is unavailable.";
+        break;
+    case UiScreen::Lobby:
+        out.front_end_visible = true;
+        out.front_end_text = "LOBBY\\nConnection flow is unavailable.";
+        break;
+    case UiScreen::Settings:
+        out.settings_visible = true;
+        out.settings_text = formatSettingsText(settings);
+        break;
+    default:
+        break;
+    }
+    return out;
 }
 
 inline const char* buyResultText(BuyResult r) {

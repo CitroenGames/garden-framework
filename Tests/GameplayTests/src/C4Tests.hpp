@@ -257,3 +257,92 @@ bool testC4WorldAuthority()
         return fail(name, "recreated world inherited match authority");
     return pass(name);
 }
+
+bool testC4ObjectiveInterruptionsAndTeardown()
+{
+    const std::string name = "C4_ObjectiveInterruptionsAndTeardown";
+    using namespace Competitive;
+    entt::registry reg;
+    const entt::entity carrier = reg.create();
+    const entt::entity defuser = reg.create();
+    const entt::entity second_defuser = reg.create();
+
+    // Pausing freezes a live plant channel instead of resetting or advancing
+    // it. The caller owns whether a match is paused; the bomb owns no second
+    // pause clock.
+    {
+        BombSystem b = makeBombSys(carrier);
+        auto plant = plantInput();
+        for (int i = 0; i < 30; ++i) b.tick(1.0f / 60.0f, plant);
+        const float held = b.bomb.plant_channel;
+        auto paused = plant;
+        paused.paused = true;
+        for (int i = 0; i < 120; ++i) b.tick(1.0f / 60.0f, paused);
+        if (b.bomb.state != BombState::Planting || std::abs(b.bomb.plant_channel - held) > 0.0001f)
+            return fail(name, "pause changed an active plant channel");
+    }
+
+    auto startDefuse = [&]() {
+        BombSystem b = makeBombSys(carrier);
+        plantFully(b);
+        auto input = defuseInput(defuser, false);
+        for (int i = 0; i < 30; ++i) b.tick(1.0f / 60.0f, input);
+        return b;
+    };
+
+    // Damage, movement, leaving range, weapon/USE loss (the supported input
+    // proxy), death, and explicit disconnect teardown all clear the channel.
+    for (int kind = 0; kind < 6; ++kind) {
+        BombSystem b = startDefuse();
+        if (b.bomb.state != BombState::Defusing || b.bomb.defuser != defuser)
+            return fail(name, "defuse did not start kind=" + std::to_string(kind));
+        auto interrupted = defuseInput(defuser, false);
+        if (kind == 0) interrupted.defuse_damaged = true;
+        else if (kind == 1) interrupted.defuse_moved = true;
+        else if (kind == 2) interrupted.defuse_in_range = false;
+        else if (kind == 3) interrupted.defuse_use = false;
+        else if (kind == 4) interrupted.defuse_dead = true;
+        else { interrupted.defuse_actor = entt::null; interrupted.defuse_interrupted = true; }
+        b.tick(1.0f / 60.0f, interrupted);
+        if (b.bomb.state != BombState::Planted || b.bomb.defuser != entt::null || b.bomb.defuse_channel != 0.0f)
+            return fail(name, "defuse interruption did not reset kind=" + std::to_string(kind));
+    }
+
+    // A second defender cannot replace a still-valid defuser. Their input is
+    // ignored until the channel becomes explicitly invalid.
+    {
+        BombSystem b = startDefuse();
+        const float held = b.bomb.defuse_channel;
+        b.tick(1.0f / 60.0f, defuseInput(second_defuser, true));
+        if (b.bomb.state != BombState::Defusing || b.bomb.defuser != defuser ||
+            std::abs(b.bomb.defuse_channel - held) > 0.0001f)
+            return fail(name, "second defuser replaced active channel");
+    }
+
+    // The exact final timer tick wins before defuse progress, preserving the
+    // state machine's documented deterministic explosion tie policy.
+    {
+        BombSystem b = startDefuse();
+        b.bomb.timer = 1.0f / 60.0f;
+        b.tick(1.0f / 60.0f, defuseInput(defuser, true));
+        if (b.bomb.state != BombState::Exploded || !b.consumeDetonated() || b.consumeDefused())
+            return fail(name, "exact timer boundary did not detonate once");
+    }
+
+    // Competitive teardown removes the per-world bomb authority and its
+    // mode-owned player state so a reused registry starts a new objective.
+    {
+        entt::registry world;
+        const entt::entity player = world.create();
+        auto& context = startCompetitiveWorldRuntime(world, ModeConfig{});
+        if (!context.bomb.assignCarrier(player))
+            return fail(name, "world context did not own carrier");
+        world.emplace<MoneyComponent>(player);
+        world.emplace<ArmorComponent>(player);
+        stopCompetitiveWorldRuntime(world);
+        if (world.ctx().find<CompetitiveWorldContext>() ||
+            world.all_of<MoneyComponent, ArmorComponent>(player))
+            return fail(name, "world teardown retained objective authority");
+    }
+    return pass(name);
+}

@@ -23,9 +23,11 @@ public:
                            const UiLogic::UiState& ui,
                            const std::string& buy_text,
                            const std::string& scoreboard_text,
-                           const UiLogic::RadarPresentation& radar);
+                           const UiLogic::RadarPresentation& radar,
+                           const UiLogic::DocumentPresentation& document);
 
 private:
     void* m_document = nullptr;
     void* m_model = nullptr;
+    bool m_document_visible = false;
 };

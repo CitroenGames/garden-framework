@@ -243,6 +243,7 @@ struct KillFeedEntry {
 static std::vector<KillFeedEntry> g_kill_feed;
 // Competitive client state (server-authoritative; client renders only).
 static UiLogic::UiState g_ui;
+static UiLogic::ConnectionLifecycle g_ui_connection;
 static bool g_ui_modal_context_active = false;
 static UiLogic::ClientCompetitiveState g_comp;
 static std::vector<uint16_t> g_owned_items;
@@ -593,6 +594,7 @@ GAME_API void gardenGameUpdate(float delta_time)
 
     // Network update
     g_network.update(delta_time);
+    UiLogic::observeConnection(g_ui_connection, g_ui, g_network.isConnected());
 
     if (g_network.isConnected())
     {
@@ -633,6 +635,10 @@ GAME_API void gardenGameUpdate(float delta_time)
             if (g_ui.screen == UiLogic::UiScreen::Settings) UiLogic::backFromSettings(g_ui);
             else if (g_ui.screen != UiLogic::UiScreen::None) UiLogic::closeToHud(g_ui);
             else UiLogic::tryOpen(g_ui, UiLogic::UiScreen::Pause);
+        }
+        if (g_ui.screen == UiLogic::UiScreen::Pause &&
+            input_manager->is_key_pressed(SDL_SCANCODE_F10)) {
+            UiLogic::tryOpen(g_ui, UiLogic::UiScreen::Settings);
         }
         if (g_ui.screen == UiLogic::UiScreen::Buy) {
             static const SDL_Scancode digits[10] = {SDL_SCANCODE_1,SDL_SCANCODE_2,SDL_SCANCODE_3,SDL_SCANCODE_4,SDL_SCANCODE_5,SDL_SCANCODE_6,SDL_SCANCODE_7,SDL_SCANCODE_8,SDL_SCANCODE_9,SDL_SCANCODE_0};
@@ -1011,7 +1017,12 @@ GAME_API void gardenGameUpdate(float delta_time)
             scoreboard_text = UiLogic::buildScoreboardPresentation(scoreboard_source).text;
         }
         updateRadarPresentation(*game_world, hud_source.connected, delta_time);
-        g_hud.updateCompetitive(g_comp, hud_core, g_ui, buy_text, scoreboard_text, g_radar);
+        UiLogic::SettingsPresentation settings;
+        settings.vsync = CVAR_BOOL(r_vsync);
+        settings.fxaa = CVAR_BOOL(r_fxaa);
+        settings.sensitivity = CVAR_FLOAT(sensitivity);
+        const UiLogic::DocumentPresentation document = UiLogic::buildDocumentPresentation(g_ui, settings);
+        g_hud.updateCompetitive(g_comp, hud_core, g_ui, buy_text, scoreboard_text, g_radar, document);
     }
 }
 
@@ -1074,7 +1085,7 @@ GAME_API void gardenOnLevelLoaded()
     g_local_deaths = 0;
     g_death_timer = 0.0f;
     g_recon_smoothing.visual_offset = glm::vec3(0.0f);
-    g_comp = UiLogic::ClientCompetitiveState{}; g_ui = UiLogic::UiState{}; g_owned_items.clear();
+    g_comp = UiLogic::ClientCompetitiveState{}; g_ui = UiLogic::UiState{}; g_ui_connection = {}; g_owned_items.clear();
     g_radar_map = {};
     g_radar_slots.reset();
     g_radar = {};

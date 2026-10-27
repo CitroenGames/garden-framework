@@ -207,7 +207,7 @@ body {
 .bomb-text { font-size: 13dp; color: #ff4444; }
 #notice { position: absolute; top: 22%; left: 50%; margin-left: -160dp; width: 320dp; padding: 8dp; background-color: #00000088; text-align: center; }
 .notice-text { color: #ffcc66; font-size: 15dp; }
-#buy-panel, #team-panel, #scoreboard-panel, #pause-panel { position: absolute; top: 18%; left: 50%; margin-left: -220dp; width: 440dp; padding: 12dp; background-color: #000000cc; border-radius: 6dp; }
+#buy-panel, #team-panel, #scoreboard-panel, #pause-panel, #front-end-panel, #settings-panel { position: absolute; top: 18%; left: 50%; margin-left: -220dp; width: 440dp; padding: 12dp; background-color: #000000cc; border-radius: 6dp; }
 .panel-title { font-size: 16dp; font-weight: bold; color: #ffffff; margin-bottom: 6dp; }
 .buy-text { font-size: 13dp; color: #dddddd; white-space: pre-wrap; }
 #radar { position: absolute; top: 110dp; left: 12dp; width: 180dp; height: 180dp; background-color: #00000088; border-radius: 6dp; }

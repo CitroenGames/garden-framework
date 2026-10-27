@@ -709,6 +709,61 @@ static std::string resolveBotNavAssetPath()
     return Assets::AssetManager::get().resolveAssetPath("levels/main.nav");
 }
 
+// Route data follows the same project asset-root contract as the cooked nav
+// mesh. It is template content, not an engine-level asset type, until a
+// generic selected-level sidecar API exists.
+static std::string resolveBotRouteAssetPath()
+{
+    return Assets::AssetManager::get().resolveAssetPath("levels/main.ai.json");
+}
+
+static bool validateAuthoredRouteDataOnNavMesh(Bots::BotWorldRuntime& runtime)
+{
+    if (!runtime.hasValidNavMesh()) return false;
+    auto validate_point = [&](const glm::vec3& point) {
+        glm::vec3 projected(0.0f);
+        return Navigation::NavMeshPathfinder::findNearestPoly(runtime.navmesh, point, projected) &&
+            glm::distance(point, projected) <= 1.0f;
+    };
+    for (const Bots::AuthoredRoute& route : runtime.route_data.routes)
+        for (const glm::vec3& point : route.points)
+            if (!validate_point(point)) return false;
+    for (const Bots::AuthoredHold& hold : runtime.route_data.holds)
+        if (!validate_point(hold.point)) return false;
+    for (const Bots::AuthoredPatrol& patrol : runtime.route_data.patrols)
+        for (const glm::vec3& point : patrol.points)
+            if (!validate_point(point)) return false;
+    return true;
+}
+
+static bool loadBotRouteData()
+{
+    auto& runtime = botRuntime();
+    if (runtime.route_attempted)
+        return runtime.route_status == Bots::RouteDataLoadStatus::Loaded;
+
+    const std::string resolved_path = resolveBotRouteAssetPath();
+    if (!runtime.loadResolvedRouteData(resolved_path)) {
+        if (runtime.route_status == Bots::RouteDataLoadStatus::Missing)
+            LOG_ENGINE_INFO("Bots: no authored route sidecar at {}; using canonical objective fallback", resolved_path);
+        else
+            LOG_ENGINE_ERROR("Bots: authored route sidecar {} rejected ({}); using canonical objective fallback",
+                resolved_path, runtime.route_error);
+        return false;
+    }
+    if (!validateAuthoredRouteDataOnNavMesh(runtime)) {
+        runtime.route_data.clear();
+        runtime.route_status = Bots::RouteDataLoadStatus::Invalid;
+        runtime.route_error = "one or more tactical points are not within 1m of the loaded navmesh";
+        LOG_ENGINE_ERROR("Bots: authored route sidecar {} rejected ({}); using canonical objective fallback",
+            resolved_path, runtime.route_error);
+        return false;
+    }
+    LOG_ENGINE_INFO("Bots: authored route data loaded from {} routes={} holds={} patrols={}",
+        resolved_path, runtime.route_data.routes.size(), runtime.route_data.holds.size(), runtime.route_data.patrols.size());
+    return true;
+}
+
 static bool loadBotNavMesh()
 {
     auto& runtime = botRuntime();
@@ -993,7 +1048,26 @@ static void tickBots(float dt)
         Bots::BotDecisionInput din; din.phase = g_round_system.state.phase; din.team = bot_team;
         din.alive = alive; din.is_carrier = g_bomb_system.bomb.carrier == e; din.bomb_planted = g_bomb_system.isPlanted();
         din.bot_pos = pos; din.health = w->registry.get<FpsHealthComponent>(e).health; din.dt = dt;
-        if (!g_bomb_system.config.sites.empty()) { const auto& s = g_bomb_system.config.sites[(size_t)std::abs(bot.bot_index) % g_bomb_system.config.sites.size()]; din.site_pos = s.centre; din.has_site = true; uint8_t si = 0; din.at_site = bombSiteForPlayer(*w, e, si); }
+        if (!g_bomb_system.config.sites.empty()) {
+            const uint64_t stable_bot_index = bot.bot_index < 0
+                ? static_cast<uint64_t>(-static_cast<int64_t>(bot.bot_index))
+                : static_cast<uint64_t>(bot.bot_index);
+            const auto& site = g_bomb_system.config.sites[
+                static_cast<size_t>(stable_bot_index % g_bomb_system.config.sites.size())];
+            din.site_pos = site.centre;
+            din.has_site = true;
+            // Tactical selection receives only public phase/team/site facts.
+            // It cannot receive enemy data or the current bomb location, so a
+            // sidecar cannot become a hidden-state blackboard.
+            glm::vec3 tactical_target(0.0f);
+            const bool prefer_hold = bot_team == Competitive::FpsTeam::Defenders;
+            if (runtime.route_status == Bots::RouteDataLoadStatus::Loaded &&
+                Bots::selectAuthoredRouteTarget(runtime.route_data, bot_team, site.site_index,
+                                                bot.bot_index, prefer_hold, tactical_target))
+                din.site_pos = tactical_target;
+            uint8_t occupied_site = 0;
+            din.at_site = bombSiteForPlayer(*w, e, occupied_site);
+        }
         if (din.bomb_planted) { din.bomb_pos = g_bomb_system.bomb.planted_position; din.has_bomb_pos = true; din.at_bomb = glm::distance(pos, din.bomb_pos) <= g_bomb_system.config.defuse_range; }
         const int32_t dbg = aiDebugLevel();
         const uint64_t trans_before = runtime.transitions.total_pushed;
@@ -1379,6 +1453,13 @@ static void tickBombServer(float dt)
     if (g_bomb_system.bomb.state == B::Planted || g_bomb_system.bomb.state == B::Defusing) {
         // Prefer the locked defuser; otherwise nearest USE-holding Defender in range.
         entt::entity best = g_bomb_system.bomb.defuser; float best_dist = 1e30f;
+        if (g_bomb_system.bomb.state == B::Defusing &&
+            (best == entt::null || !w->registry.valid(best) ||
+             !w->registry.all_of<TransformComponent, FpsHealthComponent, NetworkedEntity>(best))) {
+            // Keep the single-defuser rule for valid actors, but never leave
+            // a channel locked to a disconnected or despawned entity.
+            in.defuse_interrupted = true;
+        }
         auto pv = w->registry.view<NetworkedEntity, TeamComponent, TransformComponent, FpsHealthComponent>();
         for (auto e : pv) {
             if (!pv.get<NetworkedEntity>(e).is_player || !pv.get<FpsHealthComponent>(e).alive) continue;
@@ -2055,7 +2136,10 @@ GAME_API void gardenServerUpdate(float delta_time)
             else if (tid == FpsLogic::kTeamDefenders) { rin.defenders_connected++; if (alive) rin.defenders_alive++; }
         }
         auto prev_phase = g_round_system.state.phase;
-        if (botRuntime().target_count > 0) { (void)loadBotNavMesh(); tickBots(w->fixed_delta > 0.0f ? w->fixed_delta : delta_time); }
+        if (botRuntime().target_count > 0) {
+            if (loadBotNavMesh()) (void)loadBotRouteData();
+            tickBots(w->fixed_delta > 0.0f ? w->fixed_delta : delta_time);
+        }
         tickBombServer(w->fixed_delta > 0.0f ? w->fixed_delta : delta_time);
         (void)Competitive::tickCompetitiveWorldRuntime(
             w->registry, w->fixed_delta > 0.0f ? w->fixed_delta : delta_time, rin);
@@ -2143,7 +2227,7 @@ GAME_API void gardenServerOnLevelLoaded()
     (void)bakeBotNavMeshIfRequested();
     if (g_competitive && botCountFromEnv() > 0) {
         botRuntime().target_count = botCountFromEnv();
-        (void)loadBotNavMesh();
+        if (loadBotNavMesh()) (void)loadBotRouteData();
     }
     LOG_ENGINE_INFO("Server level loaded");
 }
