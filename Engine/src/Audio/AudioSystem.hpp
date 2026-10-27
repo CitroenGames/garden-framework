@@ -24,6 +24,14 @@ enum class AudioGroup : uint8_t
     COUNT
 };
 
+// Selects whether miniaudio owns an output device. NoDevice keeps the mixer
+// available for headless hosts and deterministic audio-system integration tests.
+enum class AudioBackendMode : uint8_t
+{
+    Default,
+    NoDevice
+};
+
 struct PlayParams
 {
     float volume = 1.0f;
@@ -52,7 +60,7 @@ public:
     }
 
     // Lifecycle
-    bool initialize();
+    bool initialize(AudioBackendMode mode = AudioBackendMode::Default);
     void shutdown();
 
     // Clip management

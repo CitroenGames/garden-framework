@@ -5,6 +5,10 @@
 #include "Components/AudioSourceComponent.hpp"
 #include "Components/IdentityComponent.hpp"
 #include "ECS/Hierarchy.hpp"
+#include <array>
+#include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <limits>
 
 namespace
@@ -31,6 +35,20 @@ SoundEventDef makeTestDef(const std::string& name, int priority = 50, int max_vo
 {
     SoundEventDef d; d.name = name; d.clip_paths = {"a.wav", "b.wav", "c.wav"};
     d.priority = priority; d.max_voices = max_voices; d.max_distance = 40.0f; return d;
+}
+
+bool writeSilentTestWav(const std::filesystem::path& path)
+{
+    // PCM WAV: 44.1 kHz mono, two silent samples.
+    static constexpr std::array<unsigned char, 48> wav = {
+        'R', 'I', 'F', 'F', 40, 0, 0, 0, 'W', 'A', 'V', 'E',
+        'f', 'm', 't', ' ', 16, 0, 0, 0, 1, 0, 1, 0,
+        0x44, 0xAC, 0, 0, 0x88, 0x58, 1, 0, 2, 0, 16, 0,
+        'd', 'a', 't', 'a', 4, 0, 0, 0, 0, 0, 0, 0,
+    };
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    file.write(reinterpret_cast<const char*>(wav.data()), static_cast<std::streamsize>(wav.size()));
+    return file.good();
 }
 }
 
@@ -146,7 +164,36 @@ bool testAudioServerExclusionHeadless()
 bool testAudioSourceFollowUsesSimulationHierarchyPose()
 {
     const std::string name = "Audio.SourceFollow";
+    auto& audio = AudioSystem::get();
+    const bool initialized_here = !audio.isInitialized();
+    if (initialized_here && !audio.initialize(AudioBackendMode::NoDevice))
+        return fail(name, "audio backend did not initialize");
+
     entt::registry reg;
+    const auto wav_path = std::filesystem::temp_directory_path() /
+        ("garden_audio_source_follow_" +
+         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".wav");
+    AudioClipId clip = INVALID_AUDIO_CLIP;
+    const auto cleanup = [&]() {
+        AudioSourceSystem::shutdown(reg);
+        if (clip != INVALID_AUDIO_CLIP)
+            audio.unloadClip(clip);
+        if (initialized_here)
+            audio.shutdown();
+        std::error_code error;
+        std::filesystem::remove(wav_path, error);
+    };
+    const auto fail_with_cleanup = [&](const char* reason) {
+        cleanup();
+        return fail(name, reason);
+    };
+
+    if (!writeSilentTestWav(wav_path))
+        return fail_with_cleanup("could not create test clip");
+    clip = audio.loadClip(wav_path.string());
+    if (clip == INVALID_AUDIO_CLIP)
+        return fail_with_cleanup("could not load test clip");
+
     const entt::entity parent = reg.create();
     const entt::entity child = reg.create();
     reg.emplace<IdentityComponent>(parent,
@@ -155,9 +202,13 @@ bool testAudioSourceFollowUsesSimulationHierarchyPose()
         IdentityComponent{EntityGuid{0x4000000000000002ull, 0x5000000000000002ull}});
     reg.emplace<TransformComponent>(parent, 10.0f, 2.0f, -3.0f);
     reg.emplace<TransformComponent>(child, 1.0f, 4.0f, 2.0f);
-    reg.emplace<AudioSourceComponent>(child);
+    auto& source = reg.emplace<AudioSourceComponent>(child);
+    source.clip = clip;
+    source.spatial = true;
+    source.loop = true;
+    source.auto_play = true;
     if (!Hierarchy::attach(reg, child, parent))
-        return fail(name, "failed to create source hierarchy");
+        return fail_with_cleanup("failed to create source hierarchy");
 
     // Render interpolation must not affect the simulation position heard by audio.
     reg.emplace<PresentationTransformComponent>(parent,
@@ -165,31 +216,28 @@ bool testAudioSourceFollowUsesSimulationHierarchyPose()
     reg.emplace<PresentationTransformComponent>(child,
         PresentationTransformComponent{{400.0f, 500.0f, 600.0f}, {0.0f, 0.0f, 45.0f}});
 
-    const auto initial = Hierarchy::resolveSimulationWorldPosition(reg, child);
-    if (!initial || !approxVec3(*initial, glm::vec3(11.0f, 6.0f, -1.0f)))
-        return fail(name, "child source did not resolve its simulation world position");
-
-    MockAudioBackend mock;
-    AudioEventSystem events;
-    events.setPlayFn(mock.playFn());
-    events.setStopFn(mock.stopFn());
-    events.setSeed(5);
-    events.registerEvent(makeTestDef("source.follow"));
-    if (events.play(reg, "source.follow", child) == INVALID_SOUND ||
-        mock.play_calls != 1 || !approxVec3(mock.positions.back(), *initial))
+    const size_t voices_before = audio.activeVoiceCount();
+    AudioSourceSystem::update(reg, 0.016f);
+    if (!source.started || source.active_handle == INVALID_SOUND ||
+        audio.activeVoiceCount() != voices_before + 1 ||
+        !approxVec3(audio.getSoundPosition(source.active_handle), glm::vec3(11.0f, 6.0f, -1.0f)))
     {
-        return fail(name, "entity-addressed event did not start at the source");
+        return fail_with_cleanup("spatial source did not start at the composed simulation position");
     }
 
     reg.get<TransformComponent>(parent).position = {20.0f, -1.0f, 7.0f};
-    const auto moved = Hierarchy::resolveSimulationWorldPosition(reg, child);
-    if (!moved || !approxVec3(*moved, glm::vec3(21.0f, 3.0f, 9.0f)))
-        return fail(name, "parent motion did not move child source position");
-    if (events.play(reg, "source.follow", child) == INVALID_SOUND ||
-        !approxVec3(mock.positions.back(), *moved))
-    {
-        return fail(name, "entity-addressed event did not follow parent motion");
-    }
+    reg.get<PresentationTransformComponent>(parent).position = {-100.0f, -200.0f, -300.0f};
+    reg.get<PresentationTransformComponent>(child).position = {-400.0f, -500.0f, -600.0f};
+    AudioSourceSystem::update(reg, 0.016f);
+    if (!approxVec3(audio.getSoundPosition(source.active_handle), glm::vec3(21.0f, 3.0f, 9.0f)))
+        return fail_with_cleanup("parent motion or presentation pose changed the source position incorrectly");
 
+    const SoundHandle handle = source.active_handle;
+    reg.destroy(child);
+    AudioSourceSystem::update(reg, 0.016f);
+    if (audio.activeVoiceCount() != voices_before || audio.isSoundPlaying(handle))
+        return fail_with_cleanup("destroyed source was not stopped within one update");
+
+    cleanup();
     return pass(name);
 }
