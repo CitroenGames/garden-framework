@@ -792,7 +792,7 @@ GAME_API void gardenGameUpdate(float delta_time)
             }
 
             // Decay visual smoothing offset each frame
-            g_recon_smoothing.update();
+            g_recon_smoothing.update(delta_time);
         }
 
         g_network.sendInputCommand(command_tick, input_state);

@@ -9,6 +9,7 @@
 #include <SDL3/SDL.h>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -929,6 +930,50 @@ namespace
         return ok;
     }
 
+    bool testReconciliationSmoothingFrameRateIndependence()
+    {
+        constexpr float elapsed_seconds = 0.5f;
+        constexpr int frame_rates[] = { 30, 60, 120 };
+        constexpr size_t frame_rate_count = sizeof(frame_rates) / sizeof(frame_rates[0]);
+        float final_offsets[frame_rate_count]{};
+
+        for (size_t rate_index = 0; rate_index < frame_rate_count; ++rate_index)
+        {
+            const int frame_rate = frame_rates[rate_index];
+            Net::ReconciliationSmoothing smoothing;
+            smoothing.onCorrection(glm::vec3(10.0f, 0.0f, 0.0f), glm::vec3(0.0f));
+
+            const int frame_count = static_cast<int>(elapsed_seconds * frame_rate);
+            const float delta_time = 1.0f / static_cast<float>(frame_rate);
+            for (int frame = 0; frame < frame_count; ++frame)
+                smoothing.update(delta_time);
+
+            final_offsets[rate_index] = glm::length(smoothing.visual_offset);
+        }
+
+        const float expected_60_hz_offset = 10.0f * std::pow(Net::ReconciliationSmoothing::DECAY_RATE, 30.0f);
+        bool ok = true;
+        for (size_t rate_index = 0; rate_index < frame_rate_count; ++rate_index)
+        {
+            ok = expect(final_offsets[rate_index] > Net::ReconciliationSmoothing::MIN_OFFSET,
+                "reconciliation smoothing remains above its minimum offset after 0.5 seconds") && ok;
+            ok = expect(std::abs(final_offsets[rate_index] - expected_60_hz_offset) < 0.0001f,
+                "30, 60, and 120 Hz smoothing match the expected 60 Hz decay curve") && ok;
+        }
+
+        Net::ReconciliationSmoothing invalid_delta_smoothing;
+        invalid_delta_smoothing.onCorrection(glm::vec3(10.0f, 0.0f, 0.0f), glm::vec3(0.0f));
+        invalid_delta_smoothing.update(0.0f);
+        invalid_delta_smoothing.update(-1.0f);
+        invalid_delta_smoothing.update(std::numeric_limits<float>::quiet_NaN());
+        invalid_delta_smoothing.update(std::numeric_limits<float>::infinity());
+        ok = expect(invalid_delta_smoothing.visual_offset.x == 10.0f &&
+            invalid_delta_smoothing.visual_offset.y == 0.0f &&
+            invalid_delta_smoothing.visual_offset.z == 0.0f,
+            "invalid reconciliation delta times leave the current visual offset unchanged") && ok;
+        return ok;
+    }
+
     bool testLocalPlayerInputEcsProjection()
     {
         InputManager input;
@@ -1057,6 +1102,7 @@ int main()
     ok = testNetworkInputSampler() && ok;
     ok = testInputRingBufferTickWrap() && ok;
     ok = testPredictionReplayCarriesAuthoritativeMovementState() && ok;
+    ok = testReconciliationSmoothingFrameRateIndependence() && ok;
     ok = testLocalPlayerInputEcsProjection() && ok;
 
     if (!ok)

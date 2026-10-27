@@ -4,6 +4,7 @@
 #include "SharedMovement.hpp"
 #include <glm/glm.hpp>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstddef>
 
@@ -26,10 +27,13 @@ struct ReconciliationSmoothing
         visual_offset = old_display_pos - new_logical_pos;
     }
 
-    // Decay the offset each frame
-    void update()
+    // Decay at a frame-rate-independent rate while preserving the 60 Hz curve.
+    void update(float delta_time)
     {
-        visual_offset *= DECAY_RATE;
+        if (!std::isfinite(delta_time) || delta_time <= 0.0f)
+            return;
+
+        visual_offset *= std::pow(DECAY_RATE, delta_time * 60.0f);
         if (glm::length(visual_offset) < MIN_OFFSET)
             visual_offset = glm::vec3(0.0f);
     }
