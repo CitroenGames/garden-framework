@@ -2,6 +2,7 @@
 #include "Audio/AudioSystem.hpp"
 #include "Components/AudioSourceComponent.hpp"
 #include "Components/Components.hpp"
+#include "ECS/Hierarchy.hpp"
 #include <unordered_map>
 
 namespace
@@ -39,7 +40,7 @@ void update(entt::registry& registry, float /*dt*/)
     for (entt::entity e : view)
     {
         auto& src = view.get<AudioSourceComponent>(e);
-        const auto& transform = view.get<TransformComponent>(e);
+        const auto world_position = Hierarchy::resolveSimulationWorldPosition(registry, e);
         if (src.clip == INVALID_AUDIO_CLIP && !src.clip_path.empty())
             src.clip = audio.loadClip(src.clip_path);
 
@@ -49,9 +50,10 @@ void update(entt::registry& registry, float /*dt*/)
             SoundHandle h = INVALID_SOUND;
             if (src.spatial)
             {
+                if (!world_position) continue;
                 Play3DParams p; p.volume = src.volume; p.pitch = src.pitch; p.loop = src.loop;
                 p.group = src.group; p.min_distance = src.min_distance; p.max_distance = src.max_distance;
-                h = audio.playSound3D(src.clip, transform.position, p);
+                h = audio.playSound3D(src.clip, *world_position, p);
             }
             else
             {
@@ -66,7 +68,10 @@ void update(entt::registry& registry, float /*dt*/)
             }
         }
         if (src.started && src.active_handle != INVALID_SOUND && src.spatial)
-            audio.setSoundPosition(src.active_handle, transform.position);
+        {
+            if (world_position)
+                audio.setSoundPosition(src.active_handle, *world_position);
+        }
     }
 }
 

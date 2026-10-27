@@ -1115,5 +1115,6 @@ int main()
     ok = testAudioClipPickNoRepeat() && ok;
     ok = testAudioDistanceCullingAndLookup() && ok;
     ok = testAudioServerExclusionHeadless() && ok;
+    ok = testAudioSourceFollowUsesSimulationHierarchyPose() && ok;
     return ok ? 0 : 1;
 }

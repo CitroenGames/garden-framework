@@ -3,6 +3,8 @@
 #include "Audio/SoundEvent.hpp"
 #include "Audio/AudioSourceSystem.hpp"
 #include "Components/AudioSourceComponent.hpp"
+#include "Components/IdentityComponent.hpp"
+#include "ECS/Hierarchy.hpp"
 #include <limits>
 
 namespace
@@ -12,11 +14,12 @@ struct MockAudioBackend
     SoundHandle next = 1;
     int play_calls = 0;
     std::vector<std::string> clips;
+    std::vector<glm::vec3> positions;
     std::vector<SoundHandle> stopped;
     AudioEventSystem::PlayFn playFn()
     {
-        return [this](const SoundEventDef&, const std::string& clip, const glm::vec3&, bool, float, float) {
-            ++play_calls; clips.push_back(clip); return next++;
+        return [this](const SoundEventDef&, const std::string& clip, const glm::vec3& position, bool, float, float) {
+            ++play_calls; clips.push_back(clip); positions.push_back(position); return next++;
         };
     }
     AudioEventSystem::StopFn stopFn()
@@ -137,5 +140,56 @@ bool testAudioServerExclusionHeadless()
     AudioSourceSystem::update(reg, 0.016f);
     reg.destroy(e);
     AudioSourceSystem::update(reg, 0.016f);
+    return pass(name);
+}
+
+bool testAudioSourceFollowUsesSimulationHierarchyPose()
+{
+    const std::string name = "Audio.SourceFollow";
+    entt::registry reg;
+    const entt::entity parent = reg.create();
+    const entt::entity child = reg.create();
+    reg.emplace<IdentityComponent>(parent,
+        IdentityComponent{EntityGuid{0x4000000000000001ull, 0x5000000000000001ull}});
+    reg.emplace<IdentityComponent>(child,
+        IdentityComponent{EntityGuid{0x4000000000000002ull, 0x5000000000000002ull}});
+    reg.emplace<TransformComponent>(parent, 10.0f, 2.0f, -3.0f);
+    reg.emplace<TransformComponent>(child, 1.0f, 4.0f, 2.0f);
+    reg.emplace<AudioSourceComponent>(child);
+    if (!Hierarchy::attach(reg, child, parent))
+        return fail(name, "failed to create source hierarchy");
+
+    // Render interpolation must not affect the simulation position heard by audio.
+    reg.emplace<PresentationTransformComponent>(parent,
+        PresentationTransformComponent{{100.0f, 200.0f, 300.0f}, {0.0f, 45.0f, 0.0f}});
+    reg.emplace<PresentationTransformComponent>(child,
+        PresentationTransformComponent{{400.0f, 500.0f, 600.0f}, {0.0f, 0.0f, 45.0f}});
+
+    const auto initial = Hierarchy::resolveSimulationWorldPosition(reg, child);
+    if (!initial || !approxVec3(*initial, glm::vec3(11.0f, 6.0f, -1.0f)))
+        return fail(name, "child source did not resolve its simulation world position");
+
+    MockAudioBackend mock;
+    AudioEventSystem events;
+    events.setPlayFn(mock.playFn());
+    events.setStopFn(mock.stopFn());
+    events.setSeed(5);
+    events.registerEvent(makeTestDef("source.follow"));
+    if (events.play(reg, "source.follow", child) == INVALID_SOUND ||
+        mock.play_calls != 1 || !approxVec3(mock.positions.back(), *initial))
+    {
+        return fail(name, "entity-addressed event did not start at the source");
+    }
+
+    reg.get<TransformComponent>(parent).position = {20.0f, -1.0f, 7.0f};
+    const auto moved = Hierarchy::resolveSimulationWorldPosition(reg, child);
+    if (!moved || !approxVec3(*moved, glm::vec3(21.0f, 3.0f, 9.0f)))
+        return fail(name, "parent motion did not move child source position");
+    if (events.play(reg, "source.follow", child) == INVALID_SOUND ||
+        !approxVec3(mock.positions.back(), *moved))
+    {
+        return fail(name, "entity-addressed event did not follow parent motion");
+    }
+
     return pass(name);
 }

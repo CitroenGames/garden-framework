@@ -34,6 +34,7 @@
 #include "Audio/AudioSystem.hpp"
 #include "Audio/SoundEvent.hpp"
 #include "Audio/AudioSourceSystem.hpp"
+#include "ECS/Hierarchy.hpp"
 #include "shared/FpsAudioEvents.hpp"
 #include "Animation/AnimationSystem.hpp"
 #include "Threading/JobSystem.hpp"
@@ -854,6 +855,7 @@ GAME_API void gardenGameUpdate(float delta_time)
     AnimationSystem::update(game_world->registry, delta_time);
 
     // Update audio listener
+    Hierarchy::updateTransformPropagation(game_world->registry);
     AudioSourceSystem::update(game_world->registry, delta_time);
     if (g_player_controller)
     {

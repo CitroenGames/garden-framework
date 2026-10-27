@@ -314,6 +314,20 @@ inline glm::mat4 computeWorldMatrix(entt::registry& r, entt::entity e)
     return world;
 }
 
+// Simulation-space position composed from TransformComponent local poses.
+// PresentationTransformComponent is intentionally not consulted here: render
+// interpolation must not move gameplay-facing consumers such as audio.
+inline std::optional<glm::vec3> resolveSimulationWorldPosition(
+    entt::registry& r, entt::entity e)
+{
+    if (e == entt::null || !r.valid(e) ||
+        !r.all_of<TransformComponent>(e))
+    {
+        return std::nullopt;
+    }
+    return glm::vec3(computeWorldMatrix(r, e)[3]);
+}
+
 namespace detail
 {
 // Resolve only unambiguous stable references. A duplicated identity makes a

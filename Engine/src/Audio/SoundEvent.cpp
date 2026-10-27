@@ -1,5 +1,6 @@
 #include "Audio/SoundEvent.hpp"
 #include "Components/Components.hpp"
+#include "ECS/Hierarchy.hpp"
 #include "Utils/Log.hpp"
 #include <algorithm>
 #include <cmath>
@@ -172,11 +173,8 @@ SoundHandle AudioEventSystem::play2D(const std::string& event_name)
 }
 SoundHandle AudioEventSystem::play(entt::registry& registry, const std::string& event_name, entt::entity at_entity)
 {
-    if (!registry.valid(at_entity)) return play2D(event_name);
-    glm::vec3 pos(0.0f);
-    if (auto* t = registry.try_get<TransformComponent>(at_entity)) pos = t->position;
-    else return play2D(event_name);
-    return playAt(event_name, pos);
+    const auto position = Hierarchy::resolveSimulationWorldPosition(registry, at_entity);
+    return position ? playAt(event_name, *position) : play2D(event_name);
 }
 void AudioEventSystem::stopAll()
 {
