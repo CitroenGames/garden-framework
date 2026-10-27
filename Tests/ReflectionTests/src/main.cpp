@@ -20,6 +20,7 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <iostream>
+#include <map>
 #include <string>
 #include <type_traits>
 
@@ -551,6 +552,90 @@ namespace
         return pass(name);
     }
 
+    bool testEntityRefLevelSaveLoadSave()
+    {
+        const std::string name = "level save/load/save preserves entity GUID and hierarchy references";
+        ReflectionRegistry reflection;
+        registerEngineReflection(reflection);
+
+        const EntityGuid parent_guid{0x1001, 0x10};
+        const EntityGuid child_guid{0x1002, 0x20};
+        const EntityGuid sibling_guid{0x1003, 0x30};
+
+        entt::registry source;
+        const entt::entity parent = source.create();
+        const entt::entity child = source.create();
+        const entt::entity sibling = source.create();
+        source.emplace<IdentityComponent>(parent, IdentityComponent{parent_guid});
+        source.emplace<IdentityComponent>(child, IdentityComponent{child_guid});
+        source.emplace<IdentityComponent>(sibling, IdentityComponent{sibling_guid});
+        source.emplace<ParentComponent>(child, ParentComponent{EntityRef{parent_guid}});
+        source.emplace<ParentComponent>(sibling, ParentComponent{EntityRef{parent_guid}});
+        source.emplace<ChildrenComponent>(parent,
+            ChildrenComponent{{EntityRef{child_guid}, EntityRef{sibling_guid}}});
+
+        const nlohmann::json first_save = ReflectionSerializer::serializeLevel(source, reflection);
+        auto entitiesByGuid = [](const nlohmann::json& level,
+                                 std::map<std::string, nlohmann::json>& entities) -> bool
+        {
+            if (!level.contains("entities") || !level["entities"].is_array())
+                return false;
+            for (const auto& entity_json : level["entities"])
+            {
+                if (!entity_json.contains("components") ||
+                    !entity_json["components"].contains("IdentityComponent"))
+                    return false;
+                const auto& identity = entity_json["components"]["IdentityComponent"];
+                if (!identity.contains("guid") || !identity["guid"].is_string())
+                    return false;
+                if (!entities.emplace(identity["guid"].get<std::string>(), entity_json).second)
+                    return false; // duplicate stable identity
+            }
+            return true;
+        };
+
+        std::map<std::string, nlohmann::json> first_by_guid;
+        if (!entitiesByGuid(first_save, first_by_guid) || first_by_guid.size() != 3)
+            return fail(name, "first save is missing unique identity GUIDs");
+
+        entt::registry loaded;
+        ReflectionSerializer::deserializeLevel(loaded, first_save, reflection);
+        const nlohmann::json second_save = ReflectionSerializer::serializeLevel(loaded, reflection);
+
+        std::map<std::string, nlohmann::json> second_by_guid;
+        if (!entitiesByGuid(second_save, second_by_guid) || second_by_guid.size() != first_by_guid.size())
+            return fail(name, "second save is missing or duplicates entity GUIDs");
+
+        const std::string parent_id = guidToString(parent_guid);
+        const std::string child_id = guidToString(child_guid);
+        const std::string sibling_id = guidToString(sibling_guid);
+        for (const std::string& guid : {parent_id, child_id, sibling_id})
+        {
+            const auto first = first_by_guid.find(guid);
+            const auto second = second_by_guid.find(guid);
+            if (first == first_by_guid.end() || second == second_by_guid.end())
+                return fail(name, "entity GUID changed across load and second save");
+            if (first->second["components"]["IdentityComponent"]["guid"] !=
+                second->second["components"]["IdentityComponent"]["guid"])
+                return fail(name, "serialized identity GUID changed on second save");
+        }
+
+        const auto& first_children = first_by_guid.at(parent_id)["components"]["ChildrenComponent"]["children"];
+        const auto& second_children = second_by_guid.at(parent_id)["components"]["ChildrenComponent"]["children"];
+        const nlohmann::json expected_children = nlohmann::json::array({child_id, sibling_id});
+        if (first_children != expected_children || second_children != expected_children)
+            return fail(name, "parent ChildrenComponent GUID references changed across round-trip");
+
+        for (const std::string& child_id_value : {child_id, sibling_id})
+        {
+            const auto& first_parent = first_by_guid.at(child_id_value)["components"]["ParentComponent"]["parent"];
+            const auto& second_parent = second_by_guid.at(child_id_value)["components"]["ParentComponent"]["parent"];
+            if (first_parent != parent_id || second_parent != parent_id || first_parent != second_parent)
+                return fail(name, "child ParentComponent GUID reference changed across round-trip");
+        }
+        return pass(name);
+    }
+
 }
 
     bool testNewComponentRoundTrips()
@@ -692,6 +777,7 @@ int main()
     ok = testReflectedLevelJsonMigration() && ok;
     ok = testVectorRoundTrip() && ok;
     ok = testHierarchyChildrenSerialization() && ok;
+    ok = testEntityRefLevelSaveLoadSave() && ok;
     ok = testNewComponentRoundTrips() && ok;
     return ok ? 0 : 1;
 }
