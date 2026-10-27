@@ -23,6 +23,7 @@
 #include <SDL3/SDL.h>
 #include "Threading/JobSystem.hpp"
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -59,6 +60,55 @@ namespace
     static constexpr int EDITOR_FPS_FALLBACK = 60;
     static constexpr int EDITOR_FPS_LEGACY_DEFAULT = 60;
     static constexpr int EDITOR_FPS_UNLIMITED_TARGET = 10000;
+
+    bool configureStandaloneLocalPlayerActions(
+        InputActionSystem& actions,
+        LocalPlayerInputActionNames& names,
+        std::string& context_name)
+    {
+        context_name = "EditorStandalone.LocalPlayer";
+        names.move = "EditorStandalone.Move";
+        names.jump = "EditorStandalone.Jump";
+        names.sprint = "EditorStandalone.Sprint";
+        names.crouch = "EditorStandalone.Crouch";
+        names.freecam_vertical = "EditorStandalone.FreecamVertical";
+        names.freecam_fast = "EditorStandalone.FreecamFast";
+
+        const std::array<InputActionDef, 6> definitions = {{
+            { names.move, ActionValueType::Axis2D, false },
+            { names.jump, ActionValueType::Button, false },
+            { names.sprint, ActionValueType::Button, false },
+            { names.crouch, ActionValueType::Button, false },
+            { names.freecam_vertical, ActionValueType::Axis1D, false },
+            { names.freecam_fast, ActionValueType::Button, false }
+        }};
+        for (const InputActionDef& definition : definitions)
+        {
+            if (!actions.registerAction(definition))
+                return false;
+        }
+
+        MappingContext context;
+        context.name = context_name;
+        context.priority = 0;
+        auto key = [&context](const std::string& action, SDL_Scancode code,
+                              bool invert = false, uint8_t axis_target = 0) {
+            context.bindings.push_back({
+                action, InputBinding::Source::Key, code, 1.0f, invert, axis_target });
+        };
+        key(names.move, SDL_SCANCODE_W, false, 1);
+        key(names.move, SDL_SCANCODE_S, true, 1);
+        key(names.move, SDL_SCANCODE_A, true, 0);
+        key(names.move, SDL_SCANCODE_D, false, 0);
+        key(names.jump, SDL_SCANCODE_SPACE);
+        key(names.sprint, SDL_SCANCODE_LSHIFT);
+        key(names.crouch, SDL_SCANCODE_LCTRL);
+        key(names.crouch, SDL_SCANCODE_C);
+        key(names.freecam_vertical, SDL_SCANCODE_SPACE, false, 0);
+        key(names.freecam_vertical, SDL_SCANCODE_LSHIFT, true, 0);
+        key(names.freecam_fast, SDL_SCANCODE_LSHIFT);
+        return actions.pushContext(context);
+    }
 
     const char* renderApiCliArg(RenderAPIType api_type)
     {
@@ -2019,7 +2069,14 @@ void EditorApp::beginPlay()
         if (!m_game_module_active)
         {
             // No project DLL is available; fall back to the engine-only simulation.
-            m_game_sim = std::make_unique<GameSimulation>(m_play_world.get(), m_game_input_manager);
+            LocalPlayerInputActionNames local_input_actions;
+            std::string local_input_context;
+            if (!configureStandaloneLocalPlayerActions(
+                    m_game_input_actions, local_input_actions, local_input_context))
+                LOG_ENGINE_ERROR("Failed to configure standalone local-player actions");
+            m_game_sim = std::make_unique<GameSimulation>(
+                m_play_world.get(), m_game_input_manager, &m_game_input_actions,
+                std::move(local_input_actions), std::move(local_input_context));
             m_game_sim->initialize();
         }
         m_play_world->startGameplayFramework();

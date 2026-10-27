@@ -1,5 +1,7 @@
 #include "InputManager.hpp"
 #include "InputActionSystem.hpp"
+#include "Components/LocalPlayerInputComponent.hpp"
+#include "LocalPlayerInputSystem.hpp"
 #include "NetworkInputSampler.hpp"
 #include "json.hpp"
 
@@ -533,6 +535,106 @@ namespace
             "sampler respects local fire and reload eligibility") && ok;
         return ok;
     }
+
+    bool testLocalPlayerInputEcsProjection()
+    {
+        InputManager input;
+        input.clear_all_mappings();
+        input.update();
+
+        InputActionSystem actions;
+        const LocalPlayerInputActionNames names{
+            "test.planar",
+            "test.hop",
+            "test.fast",
+            "test.low",
+            "test.fly",
+            "test.boost"
+        };
+        bool ok = true;
+        ok = expect(actions.registerAction({ names.move, ActionValueType::Axis2D, false }),
+            "local input test registers configured movement action") && ok;
+        ok = expect(actions.registerAction({ names.jump, ActionValueType::Button, false }),
+            "local input test registers configured jump action") && ok;
+        ok = expect(actions.registerAction({ names.sprint, ActionValueType::Button, false }),
+            "local input test registers configured sprint action") && ok;
+        ok = expect(actions.registerAction({ names.crouch, ActionValueType::Button, false }),
+            "local input test registers configured crouch action") && ok;
+        ok = expect(actions.registerAction({ names.freecam_vertical, ActionValueType::Axis1D, false }),
+            "local input test registers configured freecam axis") && ok;
+        ok = expect(actions.registerAction({ names.freecam_fast, ActionValueType::Button, false }),
+            "local input test registers configured freecam speed action") && ok;
+
+        MappingContext context;
+        context.name = "test.offline";
+        context.bindings = {
+            { names.move, InputBinding::Source::Key, SDL_SCANCODE_W, 1.0f, false, 1 },
+            { names.move, InputBinding::Source::Key, SDL_SCANCODE_D, 1.0f, false, 0 },
+            { names.jump, InputBinding::Source::Key, SDL_SCANCODE_SPACE },
+            { names.sprint, InputBinding::Source::Key, SDL_SCANCODE_LSHIFT },
+            { names.crouch, InputBinding::Source::Key, SDL_SCANCODE_LCTRL },
+            { names.freecam_vertical, InputBinding::Source::Key, SDL_SCANCODE_SPACE },
+            { names.freecam_vertical, InputBinding::Source::Key, SDL_SCANCODE_LSHIFT, 1.0f, true },
+            { names.freecam_fast, InputBinding::Source::Key, SDL_SCANCODE_LSHIFT }
+        };
+        ok = expect(actions.pushContext(context), "configured local input context activates") && ok;
+
+        entt::registry registry;
+        const entt::entity pawn = registry.create();
+        auto& local = registry.emplace<LocalPlayerInputComponent>(pawn);
+        local.actions = names;
+
+        input.process_event(makeKeyEvent(SDL_EVENT_KEY_DOWN, SDL_SCANCODE_W));
+        input.process_event(makeKeyEvent(SDL_EVENT_KEY_DOWN, SDL_SCANCODE_D));
+        input.process_event(makeKeyEvent(SDL_EVENT_KEY_DOWN, SDL_SCANCODE_SPACE));
+        input.process_event(makeKeyEvent(SDL_EVENT_KEY_DOWN, SDL_SCANCODE_LSHIFT));
+        input.process_event(makeKeyEvent(SDL_EVENT_KEY_DOWN, SDL_SCANCODE_LCTRL));
+        actions.evaluate(input);
+        updateLocalPlayerInputs(registry, actions);
+
+        const float diagonal_axis = 1.0f / std::sqrt(2.0f);
+        ok = expect(std::abs(local.move.x - diagonal_axis) < 0.001f &&
+            std::abs(local.move.y - diagonal_axis) < 0.001f,
+            "ECS input system copies configured planar action values") && ok;
+        ok = expect(local.jump_held && local.sprint_held && local.crouch_held,
+            "ECS input system preserves held player action semantics") && ok;
+        ok = expect(std::abs(local.freecam_move.x + diagonal_axis) < 0.001f &&
+            std::abs(local.freecam_move.y) < 0.001f &&
+            std::abs(local.freecam_move.z - diagonal_axis) < 0.001f && local.freecam_fast,
+            "ECS input system translates configured freecam intent") && ok;
+
+        input.update();
+        actions.evaluate(input);
+        updateLocalPlayerInputs(registry, actions);
+        ok = expect(local.jump_held,
+            "offline jump remains held across evaluations instead of becoming an edge") && ok;
+
+        local.input_enabled = false;
+        updateLocalPlayerInputs(registry, actions);
+        ok = expect(std::abs(local.move.x) < 0.001f && std::abs(local.move.y) < 0.001f && !local.jump_held &&
+            !local.sprint_held && !local.crouch_held &&
+            glm::length(local.freecam_move) < 0.001f && !local.freecam_fast,
+            "disabled local input clears every derived intent") && ok;
+
+        entt::registry ownership_registry;
+        const entt::entity first_pawn = ownership_registry.create();
+        const entt::entity second_pawn = ownership_registry.create();
+        entt::entity current_owner = entt::null;
+        setLocalPlayerInputOwner(ownership_registry, current_owner, first_pawn, names);
+        ok = expect(current_owner == first_pawn &&
+            ownership_registry.all_of<LocalPlayerInputComponent>(first_pawn),
+            "local input owner receives the transient component") && ok;
+        setLocalPlayerInputOwner(ownership_registry, current_owner, second_pawn, names);
+        ok = expect(current_owner == second_pawn &&
+            !ownership_registry.all_of<LocalPlayerInputComponent>(first_pawn) &&
+            ownership_registry.all_of<LocalPlayerInputComponent>(second_pawn),
+            "reassigned local ownership removes input from the previous pawn") && ok;
+        setLocalPlayerInputOwner(ownership_registry, current_owner, entt::null, names);
+        ok = expect(current_owner == entt::null &&
+            !ownership_registry.all_of<LocalPlayerInputComponent>(second_pawn),
+            "cleared local ownership leaves no remote pawn input component") && ok;
+        return ok;
+    }
 }
 
 int main()
@@ -548,6 +650,7 @@ int main()
     ok = testActionContextPriorityAndModal() && ok;
     ok = testActionRebindCallbacksAndProfile() && ok;
     ok = testNetworkInputSampler() && ok;
+    ok = testLocalPlayerInputEcsProjection() && ok;
 
     if (!ok)
         return 1;

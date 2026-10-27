@@ -8,7 +8,9 @@
 #include "PlayerController.hpp"
 #include "InputHandler.hpp"
 #include "InputActionSystem.hpp"
+#include "LocalPlayerInputSystem.hpp"
 #include "Components/Components.hpp"
+#include "Components/LocalPlayerInputComponent.hpp"
 #include "Components/camera.hpp"
 #include "Network/ClientNetworkManager.hpp"
 #include "Network/SharedMovement.hpp"
@@ -51,7 +53,7 @@ namespace SharedMovement = Net::SharedMovement;
 
 static bool configureFPShooterInput(InputActionSystem& actions)
 {
-    const std::array<InputActionDef, 18> definitions = {{
+    const std::array<InputActionDef, 20> definitions = {{
         { "Move", ActionValueType::Axis2D, false },
         { "MoveForward", ActionValueType::Button, false },
         { "MoveBack", ActionValueType::Button, false },
@@ -65,6 +67,8 @@ static bool configureFPShooterInput(InputActionSystem& actions)
         { "Drop", ActionValueType::Button, false },
         { "Fire", ActionValueType::Button, false },
         { "Reload", ActionValueType::Button, false },
+        { "FreecamVertical", ActionValueType::Axis1D, false },
+        { "FreecamFast", ActionValueType::Button, false },
         { "WeaponSlot1", ActionValueType::Button, false },
         { "WeaponSlot2", ActionValueType::Button, false },
         { "WeaponSlot3", ActionValueType::Button, false },
@@ -97,8 +101,11 @@ static bool configureFPShooterInput(InputActionSystem& actions)
     movementKey("MoveLeft", SDL_SCANCODE_A, true, 0);
     movementKey("MoveRight", SDL_SCANCODE_D, false, 0);
     key("Jump", SDL_SCANCODE_SPACE);
+    key("FreecamVertical", SDL_SCANCODE_SPACE);
     key("Use", SDL_SCANCODE_E);
     key("Sprint", SDL_SCANCODE_LSHIFT);
+    key("FreecamVertical", SDL_SCANCODE_LSHIFT, true);
+    key("FreecamFast", SDL_SCANCODE_LSHIFT);
     key("Crouch", SDL_SCANCODE_LCTRL);
     key("Crouch", SDL_SCANCODE_C);
     key("Walk", SDL_SCANCODE_LALT);
@@ -167,8 +174,18 @@ static Net::ClientNetworkManager g_network;
 static GameHUD g_hud;
 
 static entt::entity g_player_entity = entt::null;
+static entt::entity g_local_input_entity = entt::null;
 static entt::entity g_freecam_entity = entt::null;
 static entt::entity g_player_rep_entity = entt::null;
+static const LocalPlayerInputActionNames g_local_input_actions = {
+    "Move", "Jump", "Sprint", "Crouch", "FreecamVertical", "FreecamFast"
+};
+
+static void setLocalInputOwner(world& game_world, entt::entity owner)
+{
+    setLocalPlayerInputOwner(
+        game_world.registry, g_local_input_entity, owner, g_local_input_actions);
+}
 
 // Combat state
 static Net::ReconciliationSmoothing g_recon_smoothing;
@@ -453,6 +470,8 @@ GAME_API bool gardenGameInit(EngineServices* services)
 
 GAME_API void gardenGameShutdown()
 {
+    if (g_services && g_services->game_world)
+        setLocalInputOwner(*g_services->game_world, entt::null);
     ConVarRegistry::get().saveArchiveCvars("config.cfg");
     AudioSystem::get().shutdown();
     g_network.disconnect("Game closing");
@@ -499,6 +518,13 @@ GAME_API void gardenGameUpdate(float delta_time)
                 g_player_controller->setPossessedPlayer(g_player_entity);
         }
     }
+
+    const entt::entity local_input_owner = g_network.isConnected()
+        ? g_network.getLocalPlayerEntity()
+        : g_player_entity;
+    setLocalInputOwner(*game_world, local_input_owner);
+    if (input_actions)
+        updateLocalPlayerInputs(game_world->registry, *input_actions);
 
     if (g_player_controller && input_manager)
     {
@@ -845,6 +871,7 @@ GAME_API void gardenOnLevelLoaded()
     applyLoadedLevelHash(g_network, g_services->level_hash);
 
     world* game_world = g_services->game_world;
+    setLocalInputOwner(*game_world, entt::null);
 
     // Find player, freecam, and player rep entities
     g_player_entity = entt::null;
@@ -862,6 +889,13 @@ GAME_API void gardenOnLevelLoaded()
         if (game_world->registry.all_of<PlayerRepresentationComponent>(entity) && g_player_rep_entity == entt::null)
             g_player_rep_entity = entity;
     }
+
+    const entt::entity local_input_owner = g_network.isConnected()
+        ? g_network.getLocalPlayerEntity()
+        : g_player_entity;
+    if (g_network.isConnected() && game_world->registry.valid(local_input_owner))
+        g_player_entity = local_input_owner;
+    setLocalInputOwner(*game_world, local_input_owner);
 
     // Optimize broad phase after level load
     game_world->getPhysicsSystem().optimizeBroadPhase();

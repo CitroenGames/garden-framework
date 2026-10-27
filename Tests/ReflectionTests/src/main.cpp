@@ -1,4 +1,5 @@
 #include "Components/Components.hpp"
+#include "Components/LocalPlayerInputComponent.hpp"
 #include "Reflection/EngineReflection.hpp"
 #include "Reflection/ReflectionPropertyOps.hpp"
 #include "Reflection/ReflectionRegistry.hpp"
@@ -647,12 +648,12 @@ namespace
                               "GameModeComponent", "GameStateComponent", "PlayerStateComponent", "PlayerControllerComponent"})
             if (!reflection.findByName(n)) return fail(name, std::string("missing registration: ") + n);
         if (reflection.count() != 35) return fail(name, "unexpected registered component count");
-        // Plan 2.6 exemptions: MeshComponent is sidecar-only (shared_ptr<mesh>
-        // GPU resource, persisted via level/prefab sidecar path) and
-        // InputComponent is a polymorphic base class, not a data component.
-        // Neither is registered for reflection.
+        // MeshComponent is sidecar-only (shared_ptr<mesh> GPU resource,
+        // persisted via level/prefab sidecar path). LocalPlayerInputComponent
+        // is transient runtime intent. Neither is reflected.
         if (reflection.findByName("MeshComponent")) return fail(name, "MeshComponent must stay sidecar-exempt");
-        if (reflection.findByName("InputComponent")) return fail(name, "InputComponent must stay exempt");
+        if (reflection.findByName("LocalPlayerInputComponent"))
+            return fail(name, "LocalPlayerInputComponent must stay runtime-only");
 
         // Animation: authoring fields only; runtime state absent from JSON.
         {

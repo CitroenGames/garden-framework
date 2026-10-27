@@ -1,4 +1,7 @@
 #include "GameSimulation.hpp"
+#include "Components/LocalPlayerInputComponent.hpp"
+#include "InputActionSystem.hpp"
+#include "LocalPlayerInputSystem.hpp"
 #include "PlayerRepSystem.hpp"
 #include "ECS/EntityLifecycle.hpp"
 #include "Timer/TimerSystem.hpp"
@@ -9,14 +12,23 @@
 #include "Gameplay/GameplaySystems.hpp"
 #include "Utils/Log.hpp"
 
-GameSimulation::GameSimulation(world* game_world, std::shared_ptr<InputManager> input_mgr)
+GameSimulation::GameSimulation(world* game_world,
+                               std::shared_ptr<InputManager> input_mgr,
+                               InputActionSystem* input_actions,
+                               LocalPlayerInputActionNames local_input_actions,
+                               std::string local_input_context)
     : m_world(game_world)
     , m_input_manager(std::move(input_mgr))
+    , m_input_actions(input_actions)
+    , m_local_input_actions(std::move(local_input_actions))
+    , m_local_input_context(std::move(local_input_context))
 {
 }
 
 GameSimulation::~GameSimulation()
 {
+    if (m_input_actions && !m_local_input_context.empty())
+        m_input_actions->popContext(m_local_input_context.c_str());
     m_game_mode = nullptr;
 }
 
@@ -59,8 +71,19 @@ void GameSimulation::registerSystems()
     // in Presentation-adjacent offline handling with variable frame dt.
     {
         SystemDescriptor d;
+        d.name = "engine.local_player_input";
+        d.phase = Phase::Presentation;
+        d.update = [this](entt::registry& reg, const Tick::SimulationTickContext&) {
+            if (m_input_actions)
+                updateLocalPlayerInputs(reg, *m_input_actions);
+        };
+        m_scheduler->addSystem(std::move(d));
+    }
+    {
+        SystemDescriptor d;
         d.name = "engine.player_controller";
         d.phase = Phase::Presentation;
+        d.run_after = {"engine.local_player_input"};
         d.update = [this](entt::registry&, const Tick::SimulationTickContext&) {
             if (PlayerController* pc = getPlayerController())
                 pc->update(m_current_frame_dt);
@@ -149,6 +172,11 @@ void GameSimulation::initialize()
     {
         m_player_entity = primary_player->pawn;
         m_freecam_entity = primary_player->freecam;
+        if (m_world->registry.valid(m_player_entity))
+        {
+            auto& local_input = m_world->registry.get_or_emplace<LocalPlayerInputComponent>(m_player_entity);
+            local_input.actions = m_local_input_actions;
+        }
     }
 
     {

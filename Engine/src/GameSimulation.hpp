@@ -1,6 +1,7 @@
 #pragma once
 
 #include "EngineExport.h"
+#include "Components/LocalPlayerInputComponent.hpp"
 #include "world.hpp"
 #include "InputManager.hpp"
 #include "PlayerController.hpp"
@@ -8,6 +9,7 @@
 #include "Components/camera.hpp"
 #include "Scheduler/SystemScheduler.hpp"
 #include <memory>
+#include <string>
 #include <entt/entt.hpp>
 
 namespace GameFramework
@@ -16,6 +18,7 @@ namespace GameFramework
 }
 
 class EntityLifecycle;
+class InputActionSystem;
 
 // Thin scheduler host (D5: retired as loop owner). Owns a SystemScheduler
 // and an EntityLifecycle for the world; update() delegates to
@@ -26,7 +29,11 @@ class EntityLifecycle;
 class ENGINE_API GameSimulation
 {
 public:
-    GameSimulation(world* game_world, std::shared_ptr<InputManager> input_mgr);
+    GameSimulation(world* game_world,
+                   std::shared_ptr<InputManager> input_mgr,
+                   InputActionSystem* input_actions,
+                   LocalPlayerInputActionNames local_input_actions,
+                   std::string local_input_context);
     ~GameSimulation();
 
     void initialize();
@@ -45,6 +52,9 @@ private:
 
     world*                          m_world;
     std::shared_ptr<InputManager>   m_input_manager;
+    InputActionSystem*              m_input_actions = nullptr;
+    LocalPlayerInputActionNames     m_local_input_actions;
+    std::string                     m_local_input_context;
     GameFramework::GameModeBase*    m_game_mode = nullptr;
     std::unique_ptr<SystemScheduler> m_scheduler;
     std::unique_ptr<EntityLifecycle> m_lifecycle;

@@ -33,8 +33,8 @@ void registerEngineReflection(ReflectionRegistry& registry)
     // MeshComponent is exempt from reflection (plan 2.6 / prefabs_serialization.md
     // §4): it holds a shared_ptr<mesh> GPU resource and is persisted via the
     // level/prefab sidecar path (mesh path + render flags), not reflected JSON.
-    // InputComponent is likewise exempt: it is a polymorphic input base class,
-    // not an ECS data component (see Components/InputComponent.hpp).
+    // LocalPlayerInputComponent is runtime input intent and is intentionally
+    // not serialized or exposed to reflection.
     registry.reflect<AnimationComponent>("AnimationComponent");
     registry.reflect<AudioSourceComponent>("AudioSourceComponent");
     registry.reflect<IKComponent>("IKComponent");

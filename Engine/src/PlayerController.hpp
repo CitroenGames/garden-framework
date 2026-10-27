@@ -2,6 +2,7 @@
 
 #include "EngineExport.h"
 #include "Components/Components.hpp"
+#include "Components/LocalPlayerInputComponent.hpp"
 #include "Components/camera.hpp"
 #include "InputManager.hpp"
 #include "Utils/Log.hpp"
@@ -255,19 +256,14 @@ private:
             game_world->world_camera.position, desired_position, delta, *spring);
     }
 
-    CharacterMoveInput collectPlayerMoveInput() const
+    CharacterMoveInput collectPlayerMoveInput(const LocalPlayerInputComponent& local_input) const
     {
         CharacterMoveInput input;
-        if (!input_manager)
-            return input;
-
-        if (input_manager->is_key_held(SDL_SCANCODE_W)) input.move_forward += 1.0f;
-        if (input_manager->is_key_held(SDL_SCANCODE_S)) input.move_forward -= 1.0f;
-        if (input_manager->is_key_held(SDL_SCANCODE_D)) input.move_right += 1.0f;
-        if (input_manager->is_key_held(SDL_SCANCODE_A)) input.move_right -= 1.0f;
-        if (input_manager->is_key_held(SDL_SCANCODE_SPACE)) input.buttons |= CharacterMoveFlags::Jump;
-        if (input_manager->is_key_held(SDL_SCANCODE_LSHIFT)) input.buttons |= CharacterMoveFlags::Sprint;
-        if (input_manager->is_key_held(SDL_SCANCODE_LCTRL) || input_manager->is_key_held(SDL_SCANCODE_C)) input.buttons |= CharacterMoveFlags::Crouch;
+        input.move_forward = local_input.move.y;
+        input.move_right = local_input.move.x;
+        if (local_input.jump_held) input.buttons |= CharacterMoveFlags::Jump;
+        if (local_input.sprint_held) input.buttons |= CharacterMoveFlags::Sprint;
+        if (local_input.crouch_held) input.buttons |= CharacterMoveFlags::Crouch;
         input.camera_yaw = game_world->world_camera.rotation.y;
         input.camera_pitch = game_world->world_camera.rotation.x;
         return input;
@@ -288,13 +284,14 @@ private:
         if (game_world->registry.all_of<CharacterControllerComponent>(player_entity))
         {
             auto& controller = game_world->registry.get<CharacterControllerComponent>(player_entity);
+            auto* local_input = game_world->registry.try_get<LocalPlayerInputComponent>(player_entity);
             bool input_enabled = controller.input_enabled;
             if (game_world->registry.all_of<PlayerComponent>(player_entity))
                 input_enabled = input_enabled && game_world->registry.get<PlayerComponent>(player_entity).input_enabled;
-            if (!input_enabled || !input_manager)
+            if (!input_enabled || !local_input || !local_input->input_enabled)
                 return;
 
-            CharacterMoveInput input = collectPlayerMoveInput();
+            CharacterMoveInput input = collectPlayerMoveInput(*local_input);
             CharacterControllerState state;
             state.position = trans.position;
             const float step = game_world->fixed_delta > 0.0f ? game_world->fixed_delta : delta;
@@ -311,10 +308,11 @@ private:
 
         auto& pc = game_world->registry.get<PlayerComponent>(player_entity);
         auto& rb = game_world->registry.get<RigidBodyComponent>(player_entity);
-        if (!pc.input_enabled || !input_manager)
+        auto* local_input = game_world->registry.try_get<LocalPlayerInputComponent>(player_entity);
+        if (!pc.input_enabled || !local_input || !local_input->input_enabled)
             return;
 
-        CharacterMoveInput input = collectPlayerMoveInput();
+        CharacterMoveInput input = collectPlayerMoveInput(*local_input);
 
         CharacterControllerState current;
         current.position = trans.position;
@@ -352,22 +350,16 @@ private:
 
         auto& fc = game_world->registry.get<FreecamComponent>(freecam_entity);
         auto& trans = game_world->registry.get<TransformComponent>(freecam_entity);
+        auto* local_input = game_world->registry.try_get<LocalPlayerInputComponent>(player_entity);
 
-        if (!fc.input_enabled || !input_manager) return;
+        if (!fc.input_enabled || !local_input || !local_input->input_enabled) return;
 
-        glm::vec3 local_movement = glm::vec3(0, 0, 0);
-
-        if (input_manager->is_key_held(SDL_SCANCODE_W)) local_movement.z += 1.0f;
-        if (input_manager->is_key_held(SDL_SCANCODE_S)) local_movement.z -= 1.0f;
-        if (input_manager->is_key_held(SDL_SCANCODE_A)) local_movement.x += 1.0f;
-        if (input_manager->is_key_held(SDL_SCANCODE_D)) local_movement.x -= 1.0f;
-        if (input_manager->is_key_held(SDL_SCANCODE_SPACE)) local_movement.y += 1.0f;
-        if (input_manager->is_key_held(SDL_SCANCODE_LSHIFT)) local_movement.y -= 1.0f;
+        glm::vec3 local_movement = local_input->freecam_move;
 
         if (glm::length(local_movement) > 0)
             local_movement = glm::normalize(local_movement);
 
-        float current_speed = input_manager->is_key_held(SDL_SCANCODE_LSHIFT)
+        float current_speed = local_input->freecam_fast
             ? fc.fast_movement_speed
             : fc.movement_speed;
 

@@ -883,6 +883,61 @@ static bool testCameraSpringComponentOffsetsCamera()
     return pass(name);
 }
 
+static bool testPlayerControllerUsesLocalEcsInput()
+{
+    const std::string name = "player controller consumes local ECS input";
+    world w;
+    auto input = std::make_shared<InputManager>();
+    input->update();
+    SDL_Event key_down{};
+    key_down.type = SDL_EVENT_KEY_DOWN;
+    key_down.key.scancode = SDL_SCANCODE_W;
+    input->process_event(key_down);
+
+    const entt::entity pawn = w.registry.create();
+    w.registry.emplace<TransformComponent>(pawn);
+    auto& local_input = w.registry.emplace<LocalPlayerInputComponent>(pawn);
+    const entt::entity freecam = w.registry.create();
+    w.registry.emplace<TransformComponent>(freecam);
+    w.registry.emplace<FreecamComponent>(freecam);
+
+    PlayerController controller(input, &w);
+    controller.setPossessedPlayer(pawn);
+    controller.setPossessedFreecam(freecam);
+    controller.toggleFreecamMode();
+
+    const glm::vec3 initial_position = w.world_camera.position;
+    controller.update(0.25f);
+    if (glm::distance(w.world_camera.position, initial_position) > 0.001f)
+        return fail(name, "held raw W moved freecam without ECS input intent");
+
+    local_input.freecam_move.z = 1.0f;
+    controller.update(0.25f);
+    const glm::vec3 intent_position = w.world_camera.position;
+    if (glm::distance(intent_position, initial_position) < 0.1f)
+        return fail(name, "freecam did not consume movement intent from its pawn component");
+
+    local_input.clearIntent();
+    controller.update(0.25f);
+    if (glm::distance(w.world_camera.position, intent_position) > 0.001f)
+        return fail(name, "held raw W moved freecam after ECS intent was cleared");
+
+    auto& freecam_input = w.registry.get<FreecamComponent>(freecam);
+    local_input.freecam_move.z = 1.0f;
+    freecam_input.input_enabled = false;
+    controller.update(0.25f);
+    if (glm::distance(w.world_camera.position, intent_position) > 0.001f)
+        return fail(name, "disabled freecam input gate did not suppress ECS intent");
+
+    freecam_input.input_enabled = true;
+    local_input.input_enabled = false;
+    controller.update(0.25f);
+    if (glm::distance(w.world_camera.position, intent_position) > 0.001f)
+        return fail(name, "disabled local input gate did not suppress ECS intent");
+
+    return pass(name);
+}
+
 static bool testNetworkSpawnedPlayerGroundsOnMesh(const fs::path& repo_root)
 {
     const std::string name = "network-spawned player grounds on mesh";
@@ -1739,6 +1794,8 @@ int main()
     ok = testWaterComponentProvidesSwimmingVolume() && ok;
     run("camera spring offsets camera");
     ok = testCameraSpringComponentOffsetsCamera() && ok;
+    run("player controller consumes local ECS input");
+    ok = testPlayerControllerUsesLocalEcsInput() && ok;
     run("network-spawned player grounds on mesh");
     ok = testNetworkSpawnedPlayerGroundsOnMesh(repo_root) && ok;
     run("level player creates character controller");
