@@ -104,6 +104,7 @@ void ClientNetworkManager::disconnect(const char* reason)
     }
 
     setConnectionState(ConnectionState::DISCONNECTED);
+    clearInterpolationHistory();
 }
 
 void ClientNetworkManager::shutdown()
@@ -122,6 +123,7 @@ void ClientNetworkManager::shutdown()
     }
 
     server_peer = nullptr;
+    clearInterpolationHistory();
     network_id_to_entity.clear();
     client_id = 0;
     client_tick = 0;
@@ -342,6 +344,7 @@ void ClientNetworkManager::handleServerDisconnect(ENetEvent& event)
     network_id_to_entity.clear();
     local_player_entity = entt::null;
     local_player_network_id = 0;
+    clearInterpolationHistory();
 
     // Notify game layer
     if (on_disconnected) {
@@ -561,8 +564,9 @@ void ClientNetworkManager::handleWorldStateUpdate(BitReader& reader)
             // Remote entities: ensure entity exists, then push to interpolation buffer
             createOrUpdateEntity(update);
 
-            if (update.hasTransform() || update.hasRotation()) {
-                pushInterpolationSnapshot(update.entity_id, msg.server_tick);
+            if (update.hasTransform() || update.hasRotation() ||
+                update.hasVelocity() || update.hasGrounded()) {
+                mergeInterpolationState(update, msg.server_tick);
             }
         }
     }
@@ -641,6 +645,8 @@ void ClientNetworkManager::handleSpawnPlayer(BitReader& reader)
         local_player_network_id = msg.entity_id;
         game_world->create_character_controller(entity);
         LOG_ENGINE_INFO("Local player entity created");
+    } else {
+        seedInterpolationState(msg.entity_id, msg.position, msg.camera_yaw);
     }
 }
 
@@ -678,14 +684,12 @@ void ClientNetworkManager::handleSpawnEntity(BitReader& reader)
         transform.rotation.y = glm::degrees(msg.rotation_y);
         game_world->registry.emplace<TransformComponent>(entity, transform);
     }
+
+    seedInterpolationState(msg.network_id, msg.position, msg.rotation_y);
 }
 
 void ClientNetworkManager::handleDespawnPlayer(BitReader& reader)
 {
-    if (game_world == nullptr) {
-        return;
-    }
-
     DespawnPlayerMessage msg;
     if (!NetworkSerializer::deserialize(reader, msg)) {
         LOG_ENGINE_WARN("Failed to deserialize DESPAWN_PLAYER message");
@@ -709,11 +713,13 @@ void ClientNetworkManager::handleDisconnect(BitReader& reader)
     if (!NetworkSerializer::deserialize(reader, msg)) {
         LOG_ENGINE_WARN("Failed to deserialize DISCONNECT message");
         setConnectionState(ConnectionState::DISCONNECTED);
+        clearInterpolationHistory();
         return;
     }
 
     LOG_ENGINE_INFO("Server disconnected: {0}", msg.reason);
     setConnectionState(ConnectionState::DISCONNECTED);
+    clearInterpolationHistory();
 }
 
 void ClientNetworkManager::handlePong(BitReader& reader)
@@ -815,50 +821,68 @@ void ClientNetworkManager::createOrUpdateEntity(const EntityUpdateData& update)
     }
 }
 
+void ClientNetworkManager::seedInterpolationState(uint32_t network_id,
+                                                  const glm::vec3& position,
+                                                  float rotation_y)
+{
+    InterpolationSnapshot state;
+    state.tick = last_received_server_tick;
+    state.position = position;
+    state.rotation_y = rotation_y;
+    state.valid = true;
+    latest_interp_state[network_id] = state;
+
+    // A spawn/re-spawn establishes a new interpolation origin. Do not blend it
+    // with snapshots from a previous lifetime of the same network id.
+    interp_buffers.erase(network_id);
+}
+
+void ClientNetworkManager::mergeInterpolationState(const EntityUpdateData& update,
+                                                    uint32_t server_tick)
+{
+    InterpolationSnapshot& state = latest_interp_state[update.entity_id];
+    state.tick = server_tick;
+    if (update.hasTransform()) {
+        state.position = update.position;
+        state.valid = true;
+    }
+    if (update.hasVelocity()) {
+        state.velocity = update.velocity;
+    }
+    if (update.hasGrounded()) {
+        state.grounded = (update.grounded != 0);
+    }
+    if (update.hasRotation()) {
+        state.rotation_y = update.rotation_y;
+    }
+
+    pushInterpolationSnapshot(update.entity_id, server_tick);
+}
+
 void ClientNetworkManager::pushInterpolationSnapshot(uint32_t network_id, uint32_t server_tick)
 {
-    if (game_world == nullptr) {
+    const auto state_it = latest_interp_state.find(network_id);
+    if (state_it == latest_interp_state.end() || !state_it->second.valid) {
         return;
     }
 
-    entt::entity entity = getEntityByNetworkId(network_id);
-    if (entity == entt::null || !game_world->registry.valid(entity)) {
-        return;
-    }
+    const InterpolationSnapshot& state = state_it->second;
+    interp_buffers[network_id].addSnapshot(server_tick, state.position, state.velocity,
+                                           state.grounded, state.rotation_y);
+}
 
-    if (!game_world->registry.all_of<TransformComponent>(entity)) {
-        return;
-    }
-
-    const auto& transform = game_world->registry.get<TransformComponent>(entity);
-    glm::vec3 velocity(0.0f);
-    bool grounded = false;
-
-    if (game_world->registry.all_of<RigidBodyComponent>(entity)) {
-        velocity = game_world->registry.get<RigidBodyComponent>(entity).velocity;
-    }
-
-    if (game_world->registry.all_of<CharacterControllerComponent>(entity)) {
-        grounded = game_world->registry.get<CharacterControllerComponent>(entity).grounded;
-    } else if (game_world->registry.all_of<PlayerComponent>(entity)) {
-        grounded = game_world->registry.get<PlayerComponent>(entity).grounded;
-    }
-
-    auto& buffer = interp_buffers[network_id];
-    // D4 point 4 (in): buffer stores radians; ECS holds degrees.
-    buffer.addSnapshot(server_tick, transform.position, velocity, grounded, glm::radians(transform.rotation.y));
+void ClientNetworkManager::clearInterpolationHistory()
+{
+    interp_buffers.clear();
+    latest_interp_state.clear();
 }
 
 void ClientNetworkManager::deleteEntity(uint32_t network_id)
 {
-    if (game_world == nullptr) {
-        return;
-    }
-
     auto it = network_id_to_entity.find(network_id);
     if (it != network_id_to_entity.end()) {
         entt::entity entity = it->second;
-        if (game_world->registry.valid(entity)) {
+        if (game_world != nullptr && game_world->registry.valid(entity)) {
             game_world->getPhysicsSystem().removeBody(entity);
             game_world->registry.destroy(entity);
         }
@@ -872,6 +896,7 @@ void ClientNetworkManager::deleteEntity(uint32_t network_id)
 
     // Clean up interpolation buffer
     interp_buffers.erase(network_id);
+    latest_interp_state.erase(network_id);
 }
 
 bool ClientNetworkManager::sendReliableMessage(const BitWriter& writer)

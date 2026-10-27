@@ -14,6 +14,7 @@
 #include <SDL3/SDL.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -371,6 +372,150 @@ static bool runWireV3HandshakeTests()
     return true;
 }
 
+static bool runRawRemoteInterpolationStateTest()
+{
+    TestState state;
+    world server_world;
+    server_world.setFixedDelta(kFixedDelta);
+
+    Net::ServerNetworkManager server;
+    if (!server.initialize()) {
+        std::cerr << "[FAIL] RawRemoteInterpolationStateTests could not initialize server\n";
+        return false;
+    }
+    server.setWorld(&server_world);
+
+    StressConfig config;
+    config.client_count = 1;
+    uint16_t port = 0;
+    if (!startServer(server, config, port)) {
+        std::cerr << "[FAIL] RawRemoteInterpolationStateTests could not start server\n";
+        server.shutdown();
+        return false;
+    }
+
+    world client_world;
+    Net::ClientNetworkManager client;
+    client.setWorld(&client_world);
+    if (!client.initialize() || !client.connectToServer("127.0.0.1", port, "interp_raw")) {
+        std::cerr << "[FAIL] RawRemoteInterpolationStateTests could not connect client\n";
+        client.shutdown();
+        server.shutdown();
+        return false;
+    }
+
+    for (int frame = 0; frame < 600 && !client.isConnected(); ++frame) {
+        client.update(kFixedDelta);
+        server.update(0.0f);
+        client.update(0.0f);
+        SDL_Delay(1);
+    }
+    if (!client.isConnected() || server.getClientCount() != 1) {
+        state.addError("raw interpolation regression client did not connect");
+    }
+
+    constexpr uint32_t kRemoteNetworkId = 9001;
+    if (state.error_count == 0) {
+        Net::SpawnEntityMessage spawn;
+        spawn.network_id = kRemoteNetworkId;
+        spawn.position = glm::vec3(0.0f);
+        server.sendSpawnEntityToClient(client.getClientId(), spawn);
+        server.update(0.0f);
+
+        for (int frame = 0; frame < 120 &&
+             client.getEntityByNetworkId(kRemoteNetworkId) == entt::null; ++frame) {
+            client.update(0.0f);
+            SDL_Delay(1);
+        }
+        if (client.getEntityByNetworkId(kRemoteNetworkId) == entt::null) {
+            state.addError("raw interpolation regression did not receive SPAWN_ENTITY");
+        }
+    }
+
+    const auto sendWorldUpdate = [&](uint32_t tick, const Net::EntityUpdateData& update) {
+        Net::WorldStateUpdateMessage message;
+        message.server_tick = tick;
+        std::vector<Net::EntityUpdateData> updates{update};
+        Net::BitWriter writer;
+        Net::NetworkSerializer::serialize(writer, message, updates);
+        server.sendReliableToClient(client.getClientId(), writer);
+        server.update(0.0f);
+
+        for (int frame = 0; frame < 120 && client.getLastReceivedServerTick() != tick; ++frame) {
+            client.update(0.0f);
+            SDL_Delay(1);
+        }
+        return client.getLastReceivedServerTick() == tick;
+    };
+
+    if (state.error_count == 0) {
+        Net::EntityUpdateData first;
+        first.entity_id = kRemoteNetworkId;
+        first.flags = Net::ComponentFlags::TRANSFORM | Net::ComponentFlags::VELOCITY |
+                      Net::ComponentFlags::GROUNDED | Net::ComponentFlags::ROTATION;
+        first.position = glm::vec3(0.0f);
+        first.velocity = glm::vec3(0.0f);
+        first.grounded = 0;
+        first.rotation_y = 0.0f;
+        if (!sendWorldUpdate(10, first)) {
+            state.addError("raw interpolation regression did not receive tick 10");
+        }
+
+        Net::EntityUpdateData second;
+        second.entity_id = kRemoteNetworkId;
+        second.flags = Net::ComponentFlags::TRANSFORM;
+        second.position = glm::vec3(3.0f, 0.0f, 0.0f);
+        if (state.error_count == 0 && !sendWorldUpdate(13, second)) {
+            state.addError("raw interpolation regression did not receive tick 13");
+        }
+
+        if (state.error_count == 0) {
+            client.interpolateRemoteEntities();
+            const entt::entity entity = client.getEntityByNetworkId(kRemoteNetworkId);
+            const float rendered_x = client_world.registry.get<TransformComponent>(entity).position.x;
+            if (!(rendered_x > 0.1f && rendered_x < 2.5f)) {
+                state.addError("tick 13 did not interpolate the ECS transform between the raw positions");
+            }
+        }
+
+        Net::EntityUpdateData rotation_only;
+        rotation_only.entity_id = kRemoteNetworkId;
+        rotation_only.flags = Net::ComponentFlags::ROTATION;
+        rotation_only.rotation_y = 0.5f;
+        if (state.error_count == 0 && !sendWorldUpdate(16, rotation_only)) {
+            state.addError("raw interpolation regression did not receive tick 16");
+        }
+
+        if (state.error_count == 0) {
+            client.interpolateRemoteEntities();
+            const entt::entity entity = client.getEntityByNetworkId(kRemoteNetworkId);
+            const float rendered_x = client_world.registry.get<TransformComponent>(entity).position.x;
+            if (std::abs(rendered_x - 3.0f) > 0.01f) {
+                state.addError("rotation-only tick 16 reused the rendered tick 11 position instead of raw tick 13 position");
+            }
+        }
+    }
+
+    client.disconnect("raw interpolation regression complete");
+    for (int frame = 0; frame < 8 && server.getClientCount() != 0; ++frame) {
+        server.update(0.0f);
+        client.update(0.0f);
+        SDL_Delay(1);
+    }
+    client.shutdown();
+    server.shutdown();
+
+    if (state.error_count != 0) {
+        for (const std::string& error : state.errors) {
+            std::cerr << "[FAIL] " << error << "\n";
+        }
+        return false;
+    }
+
+    std::cout << "[PASS] RawRemoteInterpolationStateTests\n";
+    return true;
+}
+
 static bool runNetworkStress(const StressConfig& config)
 {
     TestState state;
@@ -640,7 +785,8 @@ int main(int argc, char** argv)
         EE::CLog::GetLuaLogger()->set_level(spdlog::level::warn);
     }
     const bool handshake_ok = runWireV3HandshakeTests();
+    const bool raw_interpolation_ok = runRawRemoteInterpolationStateTest();
     const bool ok = runNetworkStress(config);
     EE::CLog::Shutdown();
-    return (handshake_ok && ok) ? 0 : 1;
+    return (handshake_ok && raw_interpolation_ok && ok) ? 0 : 1;
 }

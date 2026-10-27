@@ -96,6 +96,10 @@ private:
 
     // Entity interpolation for remote players
     std::unordered_map<uint32_t, EntityInterpolationBuffer> interp_buffers;
+    // Latest network-authored state used to build interpolation snapshots.
+    // TransformComponent is also a render target, so it must not be read back
+    // as replication truth after interpolateRemoteEntities has written it.
+    std::unordered_map<uint32_t, InterpolationSnapshot> latest_interp_state;
     static constexpr float INTERP_DELAY_TICKS = static_cast<float>(DEFAULT_INTERP_DELAY_TICKS);
 
     // Network stats
@@ -186,7 +190,10 @@ private:
 
     // Entity management
     void createOrUpdateEntity(const EntityUpdateData& update);
+    void seedInterpolationState(uint32_t network_id, const glm::vec3& position, float rotation_y);
+    void mergeInterpolationState(const EntityUpdateData& update, uint32_t server_tick);
     void pushInterpolationSnapshot(uint32_t network_id, uint32_t server_tick);
+    void clearInterpolationHistory();
     void deleteEntity(uint32_t network_id);
 
     // Helper functions
