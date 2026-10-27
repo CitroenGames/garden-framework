@@ -1316,12 +1316,12 @@ void PhysicsSystem::updateTriggers(entt::registry& registry)
     std::sort(triggers.begin(), triggers.end(),
         [](entt::entity a, entt::entity b) { return entt::to_integral(a) < entt::to_integral(b); });
 
+    if (triggers.empty()) return;
+
     // A TriggerComponent is authoring data, not proof that its sensor body was
     // created. Keep failed bodies (unsupported shapes, cap, allocation) fail-
     // closed, while retaining overlap state for successfully-created triggers
     // whose body was later removed so their occupants still receive exits.
-    std::vector<OverlapResult> overlap_buffer(settings.max_bodies);
-    const uint32_t overlap_capacity = static_cast<uint32_t>(overlap_buffer.size());
 
     QueryFilter occupant_filter;
     occupant_filter.layer_mask = PhysicsObjectLayers::layerBit(settings.layers.dynamic_body) |
@@ -1342,6 +1342,12 @@ void PhysicsSystem::updateTriggers(entt::registry& registry)
             std::find(trigger_entities.begin(), trigger_entities.end(), trig) != trigger_entities.end();
         if (trigger.enabled && has_sensor_body)
         {
+            // Allocate lazily on the first live sensor query, then reuse this
+            // full-capacity scratch buffer across triggers and physics steps.
+            if (trigger_overlap_buffer.size() != settings.max_bodies)
+                trigger_overlap_buffer.resize(settings.max_bodies);
+            const uint32_t overlap_capacity = static_cast<uint32_t>(trigger_overlap_buffer.size());
+
             const auto& t = registry.get<TransformComponent>(trig);
             const auto& col = registry.get<ColliderComponent>(trig);
             uint32_t n = 0;
@@ -1350,28 +1356,28 @@ void PhysicsSystem::updateTriggers(entt::registry& registry)
             {
             case ColliderShapeType::Box:
                 n = overlapBox(t.position, col.box_half_extents * as, t.rotation, occupant_filter,
-                    overlap_buffer.data(), overlap_capacity);
+                    trigger_overlap_buffer.data(), overlap_capacity);
                 break;
             case ColliderShapeType::Sphere:
                 n = overlapSphere(t.position, col.sphere_radius * std::max({as.x, as.y, as.z}), occupant_filter,
-                    overlap_buffer.data(), overlap_capacity);
+                    trigger_overlap_buffer.data(), overlap_capacity);
                 break;
             case ColliderShapeType::Capsule:
                 n = overlapCapsule(t.position, col.capsule_half_height * as.y,
                     col.capsule_radius * std::max(as.x, as.z), occupant_filter,
-                    overlap_buffer.data(), overlap_capacity);
+                    trigger_overlap_buffer.data(), overlap_capacity);
                 break;
             case ColliderShapeType::Cylinder:
                 n = overlapCapsule(t.position, col.cylinder_half_height * as.y,
                     col.cylinder_radius * std::max(as.x, as.z), occupant_filter,
-                    overlap_buffer.data(), overlap_capacity);
+                    trigger_overlap_buffer.data(), overlap_capacity);
                 break;
             default:
                 break;
             }
             for (uint32_t i = 0; i < n; ++i)
             {
-                entt::entity other = overlap_buffer[i].entity;
+                entt::entity other = trigger_overlap_buffer[i].entity;
                 if (other == trig || !registry.valid(other)) continue;
                 if (std::find(now.begin(), now.end(), other) == now.end()) now.push_back(other);
             }

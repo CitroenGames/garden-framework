@@ -325,6 +325,13 @@ public:
         glm::vec3 point{0.0f};
     };
 
+private:
+    // Reused by trigger polling; temporary query storage belongs to the
+    // PhysicsSystem service, not to authored/runtime ECS state.
+    std::vector<OverlapResult> trigger_overlap_buffer;
+
+public:
+
     // Main physics update
     void stepPhysics(entt::registry& registry);
     JPH::BodyID createTriggerBody(entt::registry& registry, entt::entity entity);
