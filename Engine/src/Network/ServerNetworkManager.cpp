@@ -1,6 +1,7 @@
 #include "ServerNetworkManager.hpp"
 #include "NetworkRuntime.hpp"
 #include "NetworkTransport.hpp"
+#include "NetworkHierarchyValidation.hpp"
 #include "NetworkInput.hpp"
 #include "world.hpp"
 #include "Components/Components.hpp"
@@ -682,6 +683,12 @@ WorldSnapshot ServerNetworkManager::generateWorldSnapshot()
 
     for (auto entity : view) {
         auto& networked = view.get<NetworkedEntity>(entity);
+        if (!isNetworkHierarchyRoot(game_world->registry, entity)) {
+            ++stats.hierarchy_root_rejections;
+            LOG_ENGINE_WARN("Network snapshot skipped parented entity {} (network id {})",
+                            static_cast<uint32_t>(entity), networked.network_id);
+            continue;
+        }
         auto& transform = view.get<TransformComponent>(entity);
 
         ComponentSnapshot comp_snapshot;
@@ -859,6 +866,13 @@ void ServerNetworkManager::sendWorldStateToClient(uint16_t client_id, const Worl
 
 uint32_t ServerNetworkManager::registerEntity(entt::entity entity)
 {
+    if (game_world == nullptr || !isNetworkHierarchyRoot(game_world->registry, entity)) {
+        ++stats.hierarchy_root_rejections;
+        LOG_ENGINE_WARN("Network registration rejected parented or invalid entity {}",
+                        static_cast<uint32_t>(entity));
+        return 0;
+    }
+
     // D1: re-registering a live entity returns its existing NetId; the
     // wire identity is the server-assigned NetId only (GUID never sent).
     if (auto existing = entity_to_net_id.find(entity); existing != entity_to_net_id.end()) {

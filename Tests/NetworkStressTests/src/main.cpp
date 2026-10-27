@@ -1,6 +1,7 @@
 #define ENET_IMPLEMENTATION
 #include "enet.h"
 #include "Components/Components.hpp"
+#include "Components/HierarchyComponents.hpp"
 #include "Network/BitStream.hpp"
 #include "Network/ClientNetworkManager.hpp"
 #include "Network/InterpolationBuffer.hpp"
@@ -276,6 +277,209 @@ static int rawConnectAttempt(Net::ServerNetworkManager& server, uint16_t port,
     enet_host_flush(raw);
     enet_host_destroy(raw);
     return reject_code;
+}
+
+static bool runNetworkHierarchyBoundaryTests()
+{
+    TestState state;
+    world server_world;
+    server_world.setFixedDelta(kFixedDelta);
+
+    Net::ServerNetworkManager server;
+    if (!server.initialize()) {
+        std::cerr << "[FAIL] NetworkHierarchyBoundaryTests could not initialize server\n";
+        return false;
+    }
+    server.setWorld(&server_world);
+
+    const ParentComponent parented{EntityRef{EntityGuid{1u, 1u}}};
+    const entt::entity registration_candidate = server_world.registry.create();
+    server_world.registry.emplace<ParentComponent>(registration_candidate, parented);
+    if (server.registerEntity(registration_candidate) != 0u ||
+        server.getNetworkIdByEntity(registration_candidate) != 0u) {
+        state.addError("parented entity was registered for networking");
+    }
+    server_world.registry.remove<ParentComponent>(registration_candidate);
+    const uint32_t registration_id = server.registerEntity(registration_candidate);
+    if (registration_id == 0u) {
+        state.addError("root entity registration changed after hierarchy rejection");
+    }
+    server.unregisterEntity(registration_candidate);
+    server_world.registry.destroy(registration_candidate);
+
+    StressConfig config;
+    config.client_count = 1;
+    uint16_t port = 0;
+    if (!startServer(server, config, port)) {
+        std::cerr << "[FAIL] NetworkHierarchyBoundaryTests could not start server\n";
+        server.shutdown();
+        return false;
+    }
+
+    world client_world;
+    Net::ClientNetworkManager client;
+    client.setWorld(&client_world);
+    if (!client.initialize() || !client.connectToServer("127.0.0.1", port, "hierarchy_boundary")) {
+        std::cerr << "[FAIL] NetworkHierarchyBoundaryTests could not connect client\n";
+        client.shutdown();
+        server.shutdown();
+        return false;
+    }
+
+    for (int frame = 0; frame < 600 && !client.isConnected(); ++frame) {
+        client.update(kFixedDelta);
+        server.update(0.0f);
+        client.update(0.0f);
+        SDL_Delay(1);
+    }
+    if (!client.isConnected() || server.getClientCount() != 1u) {
+        state.addError("hierarchy boundary client did not connect");
+    }
+
+    constexpr uint32_t kRootNetworkId = 8101;
+    constexpr uint32_t kParentedNetworkId = 8102;
+    entt::entity root_entity = entt::null;
+    if (state.error_count == 0) {
+        root_entity = server_world.registry.create();
+        server_world.registry.emplace<Net::NetworkedEntity>(root_entity, kRootNetworkId);
+        server_world.registry.emplace<TransformComponent>(root_entity, 10.0f, 0.0f, 0.0f);
+
+        const entt::entity parented_entity = server_world.registry.create();
+        server_world.registry.emplace<Net::NetworkedEntity>(parented_entity, kParentedNetworkId);
+        server_world.registry.emplace<TransformComponent>(parented_entity, 99.0f, 0.0f, 0.0f);
+        server_world.registry.emplace<ParentComponent>(parented_entity, parented);
+    }
+
+    const auto sendSnapshot = [&]() {
+        server.advanceSimulationTicks(1u);
+        const uint32_t expected_tick = server.getCurrentTick();
+        server.broadcastWorldState();
+        server.update(0.0f);
+        for (int frame = 0; frame < 120 && client.getLastReceivedServerTick() != expected_tick; ++frame) {
+            client.update(0.0f);
+            SDL_Delay(1);
+        }
+        return client.getLastReceivedServerTick() == expected_tick;
+    };
+
+    if (state.error_count == 0 && !sendSnapshot()) {
+        state.addError("root snapshot did not reach client");
+    }
+
+    entt::entity client_root = entt::null;
+    if (state.error_count == 0) {
+        client_root = client.getEntityByNetworkId(kRootNetworkId);
+        const auto* root_transform = client_world.registry.try_get<TransformComponent>(client_root);
+        if (client_root == entt::null || root_transform == nullptr ||
+            std::abs(root_transform->position.x - 10.0f) > 1.0e-5f) {
+            state.addError("root snapshot behavior changed");
+        }
+        if (client.getEntityByNetworkId(kParentedNetworkId) != entt::null) {
+            state.addError("server snapshot emitted parented entity");
+        }
+        if (server.getStats().hierarchy_root_rejections < 2u) {
+            state.addError("server hierarchy rejection counter did not record registration and snapshot");
+        }
+    }
+
+    if (state.error_count == 0) {
+        client_world.registry.emplace<ParentComponent>(client_root, parented);
+        server_world.registry.get<TransformComponent>(root_entity).position.x = 20.0f;
+        if (!sendSnapshot()) {
+            state.addError("parented client state update did not arrive");
+        } else {
+            const auto& root_transform = client_world.registry.get<TransformComponent>(client_root);
+            if (std::abs(root_transform.position.x - 10.0f) > 1.0e-5f) {
+                state.addError("client state application rewrote a parented entity pose");
+            }
+            if (client.getStats().hierarchy_root_rejections == 0u) {
+                state.addError("client hierarchy rejection counter did not record state application");
+            }
+        }
+
+        client_world.registry.remove<ParentComponent>(client_root);
+        server_world.registry.get<TransformComponent>(root_entity).position.x = 30.0f;
+        if (!sendSnapshot()) {
+            state.addError("root client state update did not arrive after rejection");
+        } else if (std::abs(client_world.registry.get<TransformComponent>(client_root).position.x - 30.0f) > 1.0e-5f) {
+            state.addError("root client state application did not resume after rejection");
+        }
+    }
+
+    constexpr uint32_t kLocalNetworkId = 8103;
+    if (state.error_count == 0) {
+        Net::SpawnPlayerMessage spawn;
+        spawn.client_id = client.getClientId();
+        spawn.entity_id = kLocalNetworkId;
+        Net::BitWriter writer;
+        Net::NetworkSerializer::serialize(writer, spawn);
+        server.sendReliableToClient(client.getClientId(), writer);
+        server.update(0.0f);
+        for (int frame = 0; frame < 120 && client.getLocalPlayerEntity() == entt::null; ++frame) {
+            client.update(0.0f);
+            SDL_Delay(1);
+        }
+
+        const entt::entity local_player = client.getLocalPlayerEntity();
+        if (local_player == entt::null) {
+            state.addError("local prediction entity was not spawned");
+        } else {
+            client_world.registry.emplace<ParentComponent>(local_player, parented);
+            Net::MovementInput input;
+            Net::MovementState predicted;
+            client.storeInput(900u, input, predicted);
+            if (client.getInputHistory().get(900u) != nullptr) {
+                state.addError("prediction accepted a parented local player");
+            }
+
+            server.advanceSimulationTicks(1u);
+            Net::WorldStateUpdateMessage update_message;
+            update_message.server_tick = server.getCurrentTick();
+            Net::EntityUpdateData update;
+            update.entity_id = kLocalNetworkId;
+            update.flags = Net::ComponentFlags::TRANSFORM;
+            update.position = glm::vec3(40.0f, 0.0f, 0.0f);
+            Net::BitWriter update_writer;
+            Net::NetworkSerializer::serialize(update_writer, update_message,
+                                               std::vector<Net::EntityUpdateData>{update});
+            server.sendReliableToClient(client.getClientId(), update_writer);
+            server.update(0.0f);
+            for (int frame = 0; frame < 120 && client.getLastReceivedServerTick() != update_message.server_tick; ++frame) {
+                client.update(0.0f);
+                SDL_Delay(1);
+            }
+            Net::MovementState authoritative;
+            uint32_t authoritative_tick = 0;
+            if (client.popAuthoritativeUpdate(authoritative, authoritative_tick)) {
+                state.addError("parented local player accepted an authoritative prediction update");
+            }
+
+            client_world.registry.remove<ParentComponent>(local_player);
+            client.storeInput(901u, input, predicted);
+            if (client.getInputHistory().get(901u) == nullptr) {
+                state.addError("root local player prediction did not resume after rejection");
+            }
+        }
+    }
+
+    client.disconnect("hierarchy boundary regression complete");
+    for (int frame = 0; frame < 8 && server.getClientCount() != 0; ++frame) {
+        server.update(0.0f);
+        client.update(0.0f);
+        SDL_Delay(1);
+    }
+    client.shutdown();
+    server.shutdown();
+
+    if (state.error_count != 0) {
+        for (const std::string& error : state.errors) {
+            std::cerr << "[FAIL] " << error << "\n";
+        }
+        return false;
+    }
+
+    std::cout << "[PASS] NetworkHierarchyBoundaryTests\n";
+    return true;
 }
 
 static bool runWireV3HandshakeTests()
@@ -1415,6 +1619,7 @@ int main(int argc, char** argv)
         EE::CLog::GetLuaLogger()->set_level(spdlog::level::warn);
     }
     const bool handshake_ok = runWireV3HandshakeTests();
+    const bool hierarchy_boundary_ok = runNetworkHierarchyBoundaryTests();
     const bool interpolation_buffer_wrap_ok = runInterpolationTickWrapBufferTest();
     const bool interpolation_jitter_ok = runInterpolationJitterBufferTest();
     const bool lag_history_wrap_ok = runLagHistoryTickWrapTest();
@@ -1425,7 +1630,7 @@ int main(int argc, char** argv)
     const bool raw_interpolation_ok = runRawRemoteInterpolationStateTest();
     const bool ok = runNetworkStress(config);
     EE::CLog::Shutdown();
-    return (handshake_ok && interpolation_buffer_wrap_ok && interpolation_jitter_ok && lag_history_wrap_ok &&
+    return (handshake_ok && hierarchy_boundary_ok && interpolation_buffer_wrap_ok && interpolation_jitter_ok && lag_history_wrap_ok &&
             lag_view_tick_clamp_ok &&
             input_view_tick_protocol_ok && input_view_tick_loopback_ok && interpolation_manager_wrap_ok &&
             raw_interpolation_ok && ok) ? 0 : 1;

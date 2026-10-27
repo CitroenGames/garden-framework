@@ -133,6 +133,7 @@ struct NetworkStats
     uint64_t bytes_received = 0;
     uint64_t bytes_dropped_incoming = 0;
     uint64_t bytes_dropped_outgoing = 0;
+    uint64_t hierarchy_root_rejections = 0;
     float ping_ms = 0.0f;
     float rtt_ms = 0.0f;
     float jitter_ms = 0.0f;
@@ -157,6 +158,7 @@ struct NetworkStats
         bytes_received = 0;
         bytes_dropped_incoming = 0;
         bytes_dropped_outgoing = 0;
+        hierarchy_root_rejections = 0;
         ping_ms = 0.0f;
         rtt_ms = 0.0f;
         jitter_ms = 0.0f;

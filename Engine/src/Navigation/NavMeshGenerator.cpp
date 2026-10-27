@@ -1,5 +1,6 @@
 #include "NavMeshGenerator.hpp"
 #include "Components/Components.hpp"
+#include "ECS/Hierarchy.hpp"
 #include "Utils/Log.hpp"
 #include <glm/gtc/matrix_transform.hpp>
 #include <chrono>
@@ -54,16 +55,34 @@ NavMeshGenerator::extractWorldTriangles(entt::registry& registry)
                 continue;
         }
 
-        glm::mat4 transform = registry.get<TransformComponent>(entity).getTransformMatrix();
+        // Navigation data is world-space. Resolve from the current simulation
+        // hierarchy instead of the derived WorldTransformComponent cache so a
+        // bake does not depend on transform propagation having run this frame.
+        // computeWorldMatrix composes the full matrix, retaining shear from
+        // non-uniformly scaled ancestors, and treats unresolved parents as a
+        // root at this entity's local pose.
+        const glm::mat4 transform = Hierarchy::computeWorldMatrix(registry, entity);
 
         for (size_t i = 0; i + 2 < m->vertices_len; i += 3)
         {
             RawTriangle tri;
+            bool finite = true;
             for (int j = 0; j < 3; j++)
             {
                 const vertex& vtx = m->vertices[i + j];
                 glm::vec4 world_pos = transform * glm::vec4(vtx.vx, vtx.vy, vtx.vz, 1.0f);
                 tri.v[j] = glm::vec3(world_pos);
+                finite = finite && std::isfinite(world_pos.x) &&
+                         std::isfinite(world_pos.y) &&
+                         std::isfinite(world_pos.z) &&
+                         std::isfinite(world_pos.w);
+            }
+
+            if (!finite)
+            {
+                LOG_ENGINE_WARN("[NavMesh] Rejected non-finite transformed triangle on entity {}",
+                                static_cast<uint32_t>(entity));
+                continue;
             }
 
             glm::vec3 edge1 = tri.v[1] - tri.v[0];
@@ -71,8 +90,12 @@ NavMeshGenerator::extractWorldTriangles(entt::registry& registry)
             glm::vec3 cross = glm::cross(edge1, edge2);
             float len = glm::length(cross);
 
-            if (len < 1e-6f)
+            if (!std::isfinite(len) || len < 1e-6f)
+            {
+                LOG_ENGINE_WARN("[NavMesh] Rejected invalid transformed triangle on entity {}",
+                                static_cast<uint32_t>(entity));
                 continue;
+            }
 
             tri.normal = cross / len;
             out.push_back(tri);

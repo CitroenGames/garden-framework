@@ -1102,6 +1102,9 @@ int main()
     ok = testBombAuthoredSitesParse() && ok;
     ok = testNavMeshGenerateAndSerializerRoundTrip() && ok;
     ok = testNavMeshFindPathTwoPoly() && ok;
+    ok = testNavMeshHierarchyRootBake() && ok;
+    ok = testNavMeshHierarchyWorldBakeAndPath() && ok;
+    ok = testNavMeshHierarchyStaleParentRootsBake() && ok;
     ok = testUiScreenTransitions() && ok;
     ok = testUiModalInputIsolation() && ok;
     ok = testUiMenusRequireCompetitiveState() && ok;

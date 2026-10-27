@@ -195,7 +195,7 @@ private:
     void sendPing();
 
     // Entity management
-    void createOrUpdateEntity(const EntityUpdateData& update);
+    bool createOrUpdateEntity(const EntityUpdateData& update);
     void seedInterpolationState(uint32_t network_id, const glm::vec3& position, float rotation_y);
     void mergeInterpolationState(const EntityUpdateData& update, uint32_t server_tick);
     void pushInterpolationSnapshot(uint32_t network_id, uint32_t server_tick);

@@ -2,6 +2,7 @@
 #include "NetworkInput.hpp"
 #include "NetworkRuntime.hpp"
 #include "NetworkTransport.hpp"
+#include "NetworkHierarchyValidation.hpp"
 #include "world.hpp"
 #include "Components/Components.hpp"
 #include "Utils/Log.hpp"
@@ -563,6 +564,12 @@ void ClientNetworkManager::handleWorldStateUpdate(BitReader& reader)
         // For the local player: store authoritative state for reconciliation
         // instead of directly applying position/velocity
         if (update.entity_id == local_player_network_id && local_player_network_id != 0) {
+            if (!isNetworkHierarchyRoot(game_world->registry, local_player_entity)) {
+                ++stats.hierarchy_root_rejections;
+                LOG_ENGINE_WARN("Network prediction rejected parented local player (network id {})",
+                                update.entity_id);
+                continue;
+            }
             // Store the server's authoritative state
             if (update.hasTransform()) {
                 last_server_state.position = update.position;
@@ -582,7 +589,9 @@ void ClientNetworkManager::handleWorldStateUpdate(BitReader& reader)
             input_history.discardUpTo(msg.last_processed_input_tick);
         } else {
             // Remote entities: ensure entity exists, then push to interpolation buffer
-            createOrUpdateEntity(update);
+            if (!createOrUpdateEntity(update)) {
+                continue;
+            }
 
             if (update.hasTransform() || update.hasRotation() ||
                 update.hasVelocity() || update.hasGrounded()) {
@@ -684,6 +693,11 @@ void ClientNetworkManager::handleSpawnEntity(BitReader& reader)
 
     // Spawn for an id the client already has is a full update, not a dup.
     entt::entity entity = getEntityByNetworkId(msg.network_id);
+    if (entity != entt::null && !isNetworkHierarchyRoot(game_world->registry, entity)) {
+        ++stats.hierarchy_root_rejections;
+        LOG_ENGINE_WARN("Network spawn rejected parented entity (network id {})", msg.network_id);
+        return;
+    }
     if (entity == entt::null) {
         entity = game_world->registry.create();
         NetworkedEntity networked;
@@ -769,14 +783,21 @@ void ClientNetworkManager::sendPing()
     sendReliableMessage(writer);
 }
 
-void ClientNetworkManager::createOrUpdateEntity(const EntityUpdateData& update)
+bool ClientNetworkManager::createOrUpdateEntity(const EntityUpdateData& update)
 {
     if (game_world == nullptr) {
-        return;
+        return false;
     }
 
     // Find or create entity
     entt::entity entity = getEntityByNetworkId(update.entity_id);
+
+    if (entity != entt::null && !isNetworkHierarchyRoot(game_world->registry, entity)) {
+        ++stats.hierarchy_root_rejections;
+        LOG_ENGINE_WARN("Network state application rejected parented entity (network id {})",
+                        update.entity_id);
+        return false;
+    }
 
     if (entity == entt::null) {
         // Create new entity
@@ -839,6 +860,8 @@ void ClientNetworkManager::createOrUpdateEntity(const EntityUpdateData& update)
             controller.ground_normal = update.ground_normal;
         }
     }
+
+    return true;
 }
 
 void ClientNetworkManager::seedInterpolationState(uint32_t network_id,
@@ -1107,6 +1130,14 @@ void ClientNetworkManager::interpolateRemoteEntities()
 
 void ClientNetworkManager::storeInput(uint32_t tick, const MovementInput& input, const MovementState& predicted_state)
 {
+    if (game_world != nullptr && local_player_entity != entt::null &&
+        !isNetworkHierarchyRoot(game_world->registry, local_player_entity)) {
+        ++stats.hierarchy_root_rejections;
+        LOG_ENGINE_WARN("Network prediction rejected parented local player input (network id {})",
+                        local_player_network_id);
+        return;
+    }
+
     PredictionEntry entry;
     entry.tick = tick;
     entry.input = input;
