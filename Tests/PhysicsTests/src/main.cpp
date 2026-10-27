@@ -1,5 +1,6 @@
 #include "Assets/TerrainBuilder.hpp"
 #include "Assets/AssetManager.hpp"
+#include "Assets/CookedCollisionSerializer.hpp"
 #include "Components/Components.hpp"
 #include "Graphics/HeadlessRenderAPI.hpp"
 #include "LevelManager.hpp"
@@ -2080,6 +2081,173 @@ static bool testD6LevelRoundTrip()
     return pass(name);
 }
 
+static bool testD6LayerRenumberRegression(const fs::path& repo_root)
+{
+    const std::string name = "D6-T1 legacy/current character layer comparison";
+    const fs::path template_assets = repo_root / "Templates" / "FPSShooter" / "assets";
+    const fs::path source_level = template_assets / "levels" / "physics.level.json";
+    const fs::path cooked_cache = template_assets / "models" / "ground_plane.gardenphys";
+    const fs::path round_trip_path = fs::temp_directory_path() / "garden_d6_t1_physics.level.json";
+
+    auto read_bytes = [](const fs::path& path, std::vector<char>& bytes)
+    {
+        std::ifstream in(path, std::ios::binary);
+        if (!in) return false;
+        bytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        return !in.bad();
+    };
+
+    std::vector<char> cooked_before;
+    if (!fs::exists(source_level) || !fs::exists(cooked_cache) || !read_bytes(cooked_cache, cooked_before))
+        return fail(name, "FPSShooter physics fixture or its cooked ground cache is missing/unreadable");
+    if (cooked_before.empty())
+        return fail(name, "cooked ground cache is empty");
+
+    Assets::AssetManager::get().setAssetRoot(template_assets.string());
+    Assets::AssetManager::get().setAssetPrefix("assets");
+    HeadlessRenderAPI render_api;
+    Assets::AssetManager::get().initialize(&render_api);
+
+    LevelManager level_manager;
+    LevelData source_data;
+    if (!level_manager.loadLevel(source_level.string(), source_data))
+        return fail(name, "failed to load FPSShooter physics.level.json");
+    std::error_code remove_error;
+    fs::remove(round_trip_path, remove_error);
+    if (!level_manager.saveLevelToJSON(round_trip_path.string(), source_data))
+        return fail(name, "failed to save the serialized physics-level fixture");
+    LevelData round_tripped_data;
+    if (!level_manager.loadLevel(round_trip_path.string(), round_tripped_data))
+        return fail(name, "failed to reload the saved physics-level fixture");
+    if (round_tripped_data.entities.size() != source_data.entities.size())
+        return fail(name, "level save/load changed the serialized entity count");
+
+    struct NamedPosition
+    {
+        std::string name;
+        glm::vec3 position;
+    };
+    std::vector<NamedPosition> legacy_body_positions;
+    std::vector<NamedPosition> current_body_positions;
+    glm::vec3 legacy_character_position{0.0f};
+    glm::vec3 current_character_position{0.0f};
+    CharacterControllerState legacy_character_state;
+    CharacterControllerState current_character_state;
+
+    auto run_scene = [&](bool legacy_mapping,
+                         std::vector<NamedPosition>& body_positions,
+                         glm::vec3& character_position,
+                         CharacterControllerState& character_state)
+    {
+        PhysicsSystemSettings settings;
+        // Model the historical CharacterVirtual assignment from 1b051986^:
+        // the inner body and its query layer were DynamicProp (1). This uses
+        // today's two-layer-equivalent pair rules with only StaticWorld and
+        // DynamicProp bodies from the serialized fixture. It is a behavioral
+        // mapping comparison, not a run of the historical source revision.
+        if (legacy_mapping)
+            settings.layers.character_body = settings.layers.dynamic_body;
+
+        world w(settings);
+        w.initializePhysics();
+        LevelManager instance_manager;
+        std::vector<entt::entity> level_entities;
+        if (!instance_manager.instantiateLevel(round_tripped_data, w, &render_api,
+                                               nullptr, nullptr, nullptr, false, &level_entities))
+            return false;
+
+        entt::entity ground = entt::null;
+        for (entt::entity entity : level_entities)
+        {
+            if (!w.registry.all_of<TagComponent>(entity)) continue;
+            if (w.registry.get<TagComponent>(entity).name == "ground")
+                ground = entity;
+        }
+        if (ground == entt::null || !w.getPhysicsSystem().hasBody(ground) ||
+            !w.registry.all_of<MeshComponent>(ground))
+            return false;
+        const auto& ground_mesh = w.registry.get<MeshComponent>(ground).m_mesh;
+        if (!ground_mesh || ground_mesh->collision_cache_path.empty() ||
+            fs::path(ground_mesh->collision_cache_path).lexically_normal() != cooked_cache.lexically_normal())
+            return false;
+        JPH::ShapeRefC verified_cooked_shape;
+        std::string cache_error;
+        if (!Assets::CookedCollisionSerializer::loadShape(
+                ground_mesh->collision_cache_path, ground_mesh->collision_source_hash,
+                ground_mesh->collision_source_file_size, verified_cooked_shape, &cache_error) ||
+            !verified_cooked_shape)
+            return false;
+
+        const auto& layers = w.getPhysicsSystem().layerSettings();
+        if (legacy_mapping ? layers.character_body != layers.dynamic_body
+                           : layers.character_body == layers.dynamic_body)
+            return false;
+
+        const entt::entity character = w.registry.create();
+        w.registry.emplace<TransformComponent>(character, 5.0f, 1.2f, 1.0f);
+        w.registry.emplace<TagComponent>(character, "d6_t1_character");
+        auto& controller = w.registry.emplace<CharacterControllerComponent>(character);
+        controller.move_speed = 4.0f;
+        if (w.getPhysicsSystem().createCharacterController(w.registry, character).IsInvalid())
+            return false;
+
+        for (int tick = 0; tick < 120; ++tick)
+        {
+            CharacterMoveInput input;
+            if (tick < 80) input.move_forward = 1.0f;
+            w.simulate_character_controller(character, input, w.fixed_delta);
+            w.getPhysicsSystem().stepPhysics(w.registry);
+            w.player_collisions(character);
+        }
+
+        auto view = w.registry.view<TagComponent, TransformComponent>();
+        for (entt::entity entity : view)
+        {
+            if (!w.getPhysicsSystem().hasBody(entity)) continue;
+            body_positions.push_back({view.get<TagComponent>(entity).name,
+                                      view.get<TransformComponent>(entity).position});
+        }
+        std::sort(body_positions.begin(), body_positions.end(),
+            [](const NamedPosition& a, const NamedPosition& b) { return a.name < b.name; });
+        character_position = w.registry.get<TransformComponent>(character).position;
+        character_state = w.get_character_controller_state(character);
+        return body_positions.size() >= 4;
+    };
+
+    if (!run_scene(true, legacy_body_positions, legacy_character_position, legacy_character_state))
+        return fail(name, "legacy DynamicProp mapping did not instantiate the level, character, and cooked ground body");
+    std::vector<char> cooked_after_legacy;
+    if (!read_bytes(cooked_cache, cooked_after_legacy) || cooked_after_legacy != cooked_before)
+        return fail(name, "legacy-mapping run changed the cooked ground cache bytes");
+
+    if (!run_scene(false, current_body_positions, current_character_position, current_character_state))
+        return fail(name, "dedicated Character mapping did not instantiate the level, character, and cooked ground body");
+    std::vector<char> cooked_after_current;
+    if (!read_bytes(cooked_cache, cooked_after_current) || cooked_after_current != cooked_before)
+        return fail(name, "dedicated-Character run changed the cooked ground cache bytes");
+
+    auto same_vec3_bits = [](const glm::vec3& a, const glm::vec3& b)
+    {
+        return std::bit_cast<uint32_t>(a.x) == std::bit_cast<uint32_t>(b.x) &&
+               std::bit_cast<uint32_t>(a.y) == std::bit_cast<uint32_t>(b.y) &&
+               std::bit_cast<uint32_t>(a.z) == std::bit_cast<uint32_t>(b.z);
+    };
+    if (legacy_body_positions.size() != current_body_positions.size())
+        return fail(name, "physics body set changed between layer mappings");
+    for (size_t i = 0; i < legacy_body_positions.size(); ++i)
+    {
+        if (legacy_body_positions[i].name != current_body_positions[i].name ||
+            !same_vec3_bits(legacy_body_positions[i].position, current_body_positions[i].position))
+            return fail(name, "body positions differ after 120 steps at '" + legacy_body_positions[i].name + "'");
+    }
+    if (!same_vec3_bits(legacy_character_position, current_character_position) ||
+        !same_vec3_bits(legacy_character_state.position, current_character_state.position) ||
+        !same_vec3_bits(legacy_character_state.velocity, current_character_state.velocity))
+        return fail(name, "character position or velocity differs after 120 steps");
+
+    return pass(name);
+}
+
 
 static bool testFpsShooterLevelReferences(const fs::path& repo_root)
 {
@@ -2375,6 +2543,8 @@ int main()
     ok = testD6SensorNonInterference() && ok;
     run("D6-U1 level round-trip");
     ok = testD6LevelRoundTrip() && ok;
+    run("D6-T1 legacy/current character layer comparison");
+    ok = testD6LayerRenumberRegression(repo_root) && ok;
     run("FPSShooter level references");
     ok = testFpsShooterLevelReferences(repo_root) && ok;
     run("ThirdPerson template references");
