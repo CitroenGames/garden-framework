@@ -34,6 +34,12 @@ bool nearMat(const glm::mat4& a, const glm::mat4& b, float eps = 1e-5f)
             if (!near(a[c][r], b[c][r], eps)) return false;
     return true;
 }
+bool resolvesTo(entt::registry& reg, entt::entity entity,
+                const glm::mat4& expected)
+{
+    const auto resolved = Hierarchy::resolveRenderWorldMatrix(reg, entity);
+    return resolved.has_value() && nearMat(*resolved, expected);
+}
 
 entt::entity makeEntity(entt::registry& reg, EntityLifecycle& life,
                         const glm::vec3& pos)
@@ -56,6 +62,193 @@ bool hasChildRef(const ChildrenComponent& children, EntityRef child)
     for (const EntityRef& ref : children.children)
         if (ref == child) return true;
     return false;
+}
+
+bool testRenderWorldPoseResolver()
+{
+    const std::string name = "H-D render world pose resolves presentation hierarchy without mutation";
+    EventBus::get().clear();
+    entt::registry reg;
+    EntityLifecycle life(reg, 55);
+
+    const entt::entity root = makeEntity(reg, life, {10, 0, 0});
+    const entt::entity child = makeEntity(reg, life, {1, 2, 0});
+    const entt::entity leaf = makeEntity(reg, life, {0, 0, 2});
+    auto& root_transform = reg.get<TransformComponent>(root);
+    root_transform.rotation = {0, 20, 0};
+    root_transform.scale = {1.5f, 1.0f, 1.0f};
+    auto& child_transform = reg.get<TransformComponent>(child);
+    child_transform.rotation = {0, 0, 10};
+    child_transform.scale = {2.0f, 3.0f, 1.0f};
+    auto& leaf_transform = reg.get<TransformComponent>(leaf);
+    leaf_transform.rotation = {5, 0, 0};
+    leaf_transform.scale = {0.5f, 0.75f, 1.25f};
+
+    const PresentationTransformComponent root_presentation{{20, 0, 0}, {0, 45, 0}};
+    const PresentationTransformComponent child_presentation{{3, 1, 0}, {0, 0, 35}};
+    reg.emplace<PresentationTransformComponent>(root, root_presentation);
+    reg.emplace<PresentationTransformComponent>(child, child_presentation);
+    reg.emplace<ParentComponent>(child, ParentComponent{life.refOf(root)});
+    reg.emplace<ParentComponent>(leaf, ParentComponent{life.refOf(child)});
+
+    TransformComponent expected_root = root_transform;
+    expected_root.position = root_presentation.position;
+    expected_root.rotation = root_presentation.rotation;
+    TransformComponent expected_child = child_transform;
+    expected_child.position = child_presentation.position;
+    expected_child.rotation = child_presentation.rotation;
+    const glm::mat4 expected_root_matrix = expected_root.getTransformMatrix();
+    const glm::mat4 expected_child_matrix = expected_root_matrix *
+                                            expected_child.getTransformMatrix();
+    const glm::mat4 expected_leaf_matrix = expected_child_matrix *
+                                           leaf_transform.getTransformMatrix();
+
+    const TransformComponent root_before = root_transform;
+    const TransformComponent child_before = child_transform;
+    const TransformComponent leaf_before = leaf_transform;
+    const PresentationTransformComponent root_presentation_before =
+        reg.get<PresentationTransformComponent>(root);
+    const PresentationTransformComponent child_presentation_before =
+        reg.get<PresentationTransformComponent>(child);
+    const ParentComponent child_parent_before = reg.get<ParentComponent>(child);
+    const ParentComponent leaf_parent_before = reg.get<ParentComponent>(leaf);
+
+    if (!resolvesTo(reg, root, expected_root_matrix))
+        return fail(name, "root presentation pose was not resolved as a world matrix");
+    if (!resolvesTo(reg, child, expected_child_matrix))
+        return fail(name, "child did not compose parent and child presentation poses");
+    if (!resolvesTo(reg, leaf, expected_leaf_matrix))
+        return fail(name, "multilevel pose did not inherit presentation from ancestors");
+
+    if (!nearVec(root_transform.position, root_before.position) ||
+        !nearVec(root_transform.rotation, root_before.rotation) ||
+        !nearVec(root_transform.scale, root_before.scale) ||
+        !nearVec(child_transform.position, child_before.position) ||
+        !nearVec(child_transform.rotation, child_before.rotation) ||
+        !nearVec(child_transform.scale, child_before.scale) ||
+        !nearVec(leaf_transform.position, leaf_before.position) ||
+        !nearVec(leaf_transform.rotation, leaf_before.rotation) ||
+        !nearVec(leaf_transform.scale, leaf_before.scale))
+        return fail(name, "resolver mutated an authoritative local transform");
+    if (!nearVec(reg.get<PresentationTransformComponent>(root).position,
+                 root_presentation_before.position) ||
+        !nearVec(reg.get<PresentationTransformComponent>(root).rotation,
+                 root_presentation_before.rotation) ||
+        !nearVec(reg.get<PresentationTransformComponent>(child).position,
+                 child_presentation_before.position) ||
+        !nearVec(reg.get<PresentationTransformComponent>(child).rotation,
+                 child_presentation_before.rotation))
+        return fail(name, "resolver mutated presentation input");
+    if (reg.get<ParentComponent>(child).parent != child_parent_before.parent ||
+        reg.get<ParentComponent>(leaf).parent != leaf_parent_before.parent)
+        return fail(name, "resolver mutated hierarchy links");
+    for (entt::entity entity : {root, child, leaf})
+        if (reg.any_of<WorldTransformComponent, HierarchyDirtyTag>(entity))
+            return fail(name, "resolver wrote or created derived hierarchy state");
+
+    // Parent scale multiplied by child rotation produces a sheared full matrix.
+    const entt::entity scaled_root = makeEntity(reg, life, {0, 0, 0});
+    const entt::entity rotated_child = makeEntity(reg, life, {0, 0, 0});
+    reg.get<TransformComponent>(scaled_root).scale = {2, 1, 1};
+    reg.get<TransformComponent>(rotated_child).rotation = {0, 0, 45};
+    reg.emplace<ParentComponent>(rotated_child,
+                                 ParentComponent{life.refOf(scaled_root)});
+    const glm::mat4 expected_sheared =
+        reg.get<TransformComponent>(scaled_root).getTransformMatrix() *
+        reg.get<TransformComponent>(rotated_child).getTransformMatrix();
+    const auto resolved_sheared =
+        Hierarchy::resolveRenderWorldMatrix(reg, rotated_child);
+    if (!resolved_sheared)
+        return fail(name, "valid scale/rotation hierarchy did not resolve");
+    const glm::vec3 basis_x((*resolved_sheared)[0]);
+    const glm::vec3 basis_y((*resolved_sheared)[1]);
+    if (!nearMat(*resolved_sheared, expected_sheared) ||
+        std::abs(glm::dot(basis_x, basis_y)) < 1e-3f)
+        return fail(name, "inherited scale/shear was not preserved in the full matrix");
+
+    return pass(name);
+}
+
+bool testRenderWorldPoseInvalidParents()
+{
+    const std::string name = "H-D unresolved render parents fall back to local pose";
+    EventBus::get().clear();
+    entt::registry reg;
+    EntityLifecycle life(reg, 56);
+
+    const entt::entity stale_child = makeEntity(reg, life, {2, 3, 4});
+    reg.get<TransformComponent>(stale_child).scale = {2, 2, 2};
+    const PresentationTransformComponent presentation{{8, 9, 10}, {0, 0, 25}};
+    reg.emplace<PresentationTransformComponent>(stale_child, presentation);
+    const EntityRef stale_ref{EntityGuid{0xdead, 0xbeef}};
+    reg.emplace<ParentComponent>(stale_child, ParentComponent{stale_ref});
+    TransformComponent expected = reg.get<TransformComponent>(stale_child);
+    expected.position = presentation.position;
+    expected.rotation = presentation.rotation;
+    if (!resolvesTo(reg, stale_child, expected.getTransformMatrix()))
+        return fail(name, "stale parent did not resolve as a root at its presented local pose");
+    if (reg.get<ParentComponent>(stale_child).parent != stale_ref)
+        return fail(name, "stale parent fallback mutated its authored link");
+
+    const entt::entity invalid_ref_child = makeEntity(reg, life, {5, 6, 7});
+    reg.emplace<ParentComponent>(invalid_ref_child,
+        ParentComponent{EntityRef{EntityGuid{0, 42}}});
+    if (!resolvesTo(reg, invalid_ref_child,
+                    reg.get<TransformComponent>(invalid_ref_child).getTransformMatrix()))
+        return fail(name, "unresolvable identity ref did not use local pose");
+
+    const EntityGuid duplicate_guid{0xabc, 0xdef};
+    entt::registry ambiguous_reg;
+    const entt::entity duplicate_parent_a = ambiguous_reg.create();
+    const entt::entity duplicate_parent_b = ambiguous_reg.create();
+    ambiguous_reg.emplace<IdentityComponent>(duplicate_parent_a,
+                                             IdentityComponent{duplicate_guid});
+    ambiguous_reg.emplace<IdentityComponent>(duplicate_parent_b,
+                                             IdentityComponent{duplicate_guid});
+    ambiguous_reg.emplace<TransformComponent>(duplicate_parent_a, 100, 0, 0);
+    ambiguous_reg.emplace<TransformComponent>(duplicate_parent_b, 200, 0, 0);
+    const entt::entity ambiguous_ref_child = ambiguous_reg.create();
+    ambiguous_reg.emplace<IdentityComponent>(ambiguous_ref_child,
+                                             IdentityComponent{EntityGuid{1, 1}});
+    ambiguous_reg.emplace<TransformComponent>(ambiguous_ref_child, 7, 8, 9);
+    ambiguous_reg.emplace<ParentComponent>(ambiguous_ref_child,
+                                           ParentComponent{EntityRef{duplicate_guid}});
+    if (!resolvesTo(ambiguous_reg, ambiguous_ref_child,
+                    ambiguous_reg.get<TransformComponent>(ambiguous_ref_child).getTransformMatrix()))
+        return fail(name, "ambiguous parent identity did not use local pose");
+
+    const entt::entity null_parent_child = makeEntity(reg, life, {4, 3, 2});
+    reg.emplace<ParentComponent>(null_parent_child, ParentComponent{EntityRef{}});
+    if (!resolvesTo(reg, null_parent_child,
+                    reg.get<TransformComponent>(null_parent_child).getTransformMatrix()))
+        return fail(name, "null parent ref did not resolve as a root");
+
+    if (Hierarchy::resolveRenderWorldMatrix(reg, entt::null).has_value())
+        return fail(name, "invalid requested entity unexpectedly resolved a pose");
+    for (entt::entity entity : {stale_child, invalid_ref_child, null_parent_child})
+        if (reg.any_of<WorldTransformComponent, HierarchyDirtyTag>(entity))
+            return fail(name, "fallback mutated derived hierarchy state");
+    return pass(name);
+}
+
+bool testRenderWorldPoseCycle()
+{
+    const std::string name = "H-D cyclic render links fail without a query-dependent pose";
+    EventBus::get().clear();
+    entt::registry reg;
+    EntityLifecycle life(reg, 57);
+    const entt::entity a = makeEntity(reg, life, {10, 0, 0});
+    const entt::entity b = makeEntity(reg, life, {0, 20, 0});
+    const entt::entity descendant = makeEntity(reg, life, {0, 0, 3});
+    reg.emplace<ParentComponent>(a, ParentComponent{life.refOf(b)});
+    reg.emplace<ParentComponent>(b, ParentComponent{life.refOf(a)});
+    reg.emplace<ParentComponent>(descendant, ParentComponent{life.refOf(a)});
+
+    if (Hierarchy::resolveRenderWorldMatrix(reg, descendant).has_value())
+        return fail(name, "descendant traversal through a cyclic graph returned a pose");
+    if (Hierarchy::resolveRenderWorldMatrix(reg, a).has_value())
+        return fail(name, "direct cyclic traversal returned a pose");
+    return pass(name);
 }
 
 template<typename Configure>
@@ -452,6 +645,9 @@ bool testDepthLimit()
 int main()
 {
     int failures = 0;
+    if (!testRenderWorldPoseResolver()) ++failures;
+    if (!testRenderWorldPoseInvalidParents()) ++failures;
+    if (!testRenderWorldPoseCycle()) ++failures;
     if (!testIdentityPreconditions()) ++failures;
     if (!testRejectedReattachPreservesOriginalLink()) ++failures;
     if (!testAttachPropagate()) ++failures;

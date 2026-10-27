@@ -173,7 +173,7 @@ void PrefabEditorManager::renderAllPreviews()
         m_render_api->setPointAndSpotLights(empty_lights);
 
         TransformComponent identity;
-        renderer::render_mesh_with_api(*mc->m_mesh, identity, m_render_api);
+        renderer::render_mesh_with_api(*mc->m_mesh, identity.getTransformMatrix(), m_render_api);
 
         m_render_api->endSceneRender();
 

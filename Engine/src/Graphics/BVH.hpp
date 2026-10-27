@@ -1,10 +1,13 @@
 #pragma once
 
+#include "ECS/Hierarchy.hpp"
 #include "Frustum.hpp"
 #include "Components/Components.hpp"
 #include <entt/entt.hpp>
 #include <vector>
 #include <algorithm>
+#include <cmath>
+#include <unordered_set>
 
 // Forward declarations
 class mesh;
@@ -37,10 +40,11 @@ class SceneBVH
 public:
     SceneBVH() = default;
 
-    // Build BVH from all entities with MeshComponent and TransformComponent
+    // Build cached BVH bounds for static root renderables. Parent/presentation
+    // entities use live poses through the registry-aware query overload.
     void build(entt::registry& registry);
 
-    // Query all entities visible in the frustum
+    // Query entities represented by the cached static BVH bounds.
     void queryFrustum(const Frustum& frustum, std::vector<entt::entity>& results) const;
 
     // Presentation-aware render query. Static authoritative bounds stay in the
@@ -50,6 +54,11 @@ public:
 
     // Pick the closest entity hit by a ray. Returns entt::null if nothing hit.
     entt::entity rayPick(const glm::vec3& origin, const glm::vec3& direction) const;
+
+    // Registry-aware picking keeps cached root bounds while resolving parented
+    // and presentation-driven renderables from their current ECS pose.
+    entt::entity rayPick(const glm::vec3& origin, const glm::vec3& direction,
+                         const entt::registry& registry) const;
 
     // Mark the BVH as needing rebuild (e.g., when entities move or are added/removed)
     void markDirty() { dirty = true; }
@@ -69,6 +78,10 @@ private:
     int root_index = -1;
     bool dirty = true;
     size_t entity_count = 0;
+    // These entities are resolved against current ECS links at query time.
+    // Keeping only their handles lets the registry-aware path include an
+    // entity that was detached after build without retaining an old pose.
+    std::unordered_set<entt::entity> live_pose_entities;
 
     // Internal build data structure
     struct EntityBounds
@@ -92,10 +105,47 @@ private:
 
     // Recursive ray pick (returns closest hit entity)
     void rayPickRecursive(int nodeIndex, const glm::vec3& origin, const glm::vec3& direction,
-                          float& closest_t, entt::entity& closest_entity) const;
+                          const entt::registry* registry, float& closest_t,
+                          entt::entity& closest_entity) const;
+
+    bool usesLivePose(const entt::registry& registry, entt::entity entity) const;
 };
 
 // Implementation
+
+namespace SceneBVHDetail
+{
+inline bool isFinite(const glm::mat4& matrix)
+{
+    for (int column = 0; column < 4; ++column)
+        for (int row = 0; row < 4; ++row)
+            if (!std::isfinite(matrix[column][row]))
+                return false;
+    return true;
+}
+
+inline bool isFinite(const AABB& bounds)
+{
+    for (int axis = 0; axis < 3; ++axis)
+        if (!std::isfinite(bounds.min[axis]) || !std::isfinite(bounds.max[axis]))
+            return false;
+    return bounds.isValid();
+}
+
+inline bool isFinite(const glm::vec3& vector)
+{
+    return std::isfinite(vector.x) && std::isfinite(vector.y) &&
+           std::isfinite(vector.z);
+}
+} // namespace SceneBVHDetail
+
+inline bool SceneBVH::usesLivePose(const entt::registry& registry,
+                                   entt::entity entity) const
+{
+    return !registry.valid(entity) ||
+           live_pose_entities.find(entity) != live_pose_entities.end() ||
+           registry.any_of<ParentComponent, PresentationTransformComponent>(entity);
+}
 
 inline void SceneBVH::build(entt::registry& registry)
 {
@@ -104,6 +154,7 @@ inline void SceneBVH::build(entt::registry& registry)
     root_index = -1;
     entity_count = 0;
     dirty = false;
+    live_pose_entities.clear();
 
     // Collect all entities with MeshComponent and TransformComponent
     std::vector<EntityBounds> entity_bounds;
@@ -112,7 +163,8 @@ inline void SceneBVH::build(entt::registry& registry)
     for (auto entity : view)
     {
         auto& mesh_comp = view.get<MeshComponent>(entity);
-        const auto& transform = view.get<TransformComponent>(entity);
+        if (registry.any_of<ParentComponent, PresentationTransformComponent>(entity))
+            live_pose_entities.insert(entity);
 
         // Skip entities without valid meshes
         if (!mesh_comp.m_mesh || !mesh_comp.m_mesh->visible || !mesh_comp.m_mesh->is_valid)
@@ -128,8 +180,20 @@ inline void SceneBVH::build(entt::registry& registry)
             m->computeBounds();
         }
 
-        // Transform local AABB to world space
-        AABB world_aabb = AABB::fromTransformedAABB(m->aabb_min, m->aabb_max, transform.getTransformMatrix());
+        const auto render_world = Hierarchy::resolveRenderWorldMatrix(registry, entity);
+        if (!render_world || !SceneBVHDetail::isFinite(*render_world))
+            continue;
+
+        // Parent/presentation poses are evaluated against current ECS state
+        // during registry-aware culling. Do not retain their bounds here.
+        if (live_pose_entities.find(entity) != live_pose_entities.end())
+            continue;
+
+        // Transform local AABB to world space using the shared render pose.
+        AABB world_aabb = AABB::fromTransformedAABB(
+            m->aabb_min, m->aabb_max, *render_world);
+        if (!SceneBVHDetail::isFinite(world_aabb))
+            continue;
 
         EntityBounds eb;
         eb.entity = entity;
@@ -251,13 +315,17 @@ inline void SceneBVH::queryFrustum(const Frustum& frustum, const entt::registry&
     if (root_index >= 0 && !nodes.empty())
         queryFrustumRecursive(root_index, frustum, &registry, results);
 
-    // Presentation poses can move away from the authoritative bounds stored
-    // in the tree, so they bypass stale nodes and get a current per-entity test.
-    auto presentation_view = registry.view<MeshComponent, TransformComponent,
-                                           PresentationTransformComponent>();
-    for (entt::entity entity : presentation_view)
+    // Parent links and presentation overrides can change independently of the
+    // static BVH bounds. Resolve those entities from current ECS data each
+    // query, including entities that were parented/presented at build time
+    // and have since become roots.
+    auto render_view = registry.view<MeshComponent, TransformComponent>();
+    for (entt::entity entity : render_view)
     {
-        const auto& mesh_comp = presentation_view.get<MeshComponent>(entity);
+        if (!usesLivePose(registry, entity))
+            continue;
+
+        const auto& mesh_comp = render_view.get<MeshComponent>(entity);
         if (!mesh_comp.m_mesh || !mesh_comp.m_mesh->visible || !mesh_comp.m_mesh->is_valid)
             continue;
 
@@ -265,10 +333,13 @@ inline void SceneBVH::queryFrustum(const Frustum& frustum, const entt::registry&
         if (!m->bounds_computed)
             m->computeBounds();
 
-        const TransformComponent render_transform = resolveRenderTransform(registry, entity);
-        const AABB bounds = AABB::fromTransformedAABB(
-            m->aabb_min, m->aabb_max, render_transform.getTransformMatrix());
-        if (frustum.intersectsAABB(bounds)) {
+        const auto render_world = Hierarchy::resolveRenderWorldMatrix(registry, entity);
+        if (!render_world || !SceneBVHDetail::isFinite(*render_world))
+            continue;
+
+        const AABB bounds = AABB::fromTransformedAABB(m->aabb_min, m->aabb_max,
+                                                       *render_world);
+        if (SceneBVHDetail::isFinite(bounds) && frustum.intersectsAABB(bounds)) {
             results.push_back(entity);
             cull_stats.leaves_collected++;
         }
@@ -281,8 +352,7 @@ inline void SceneBVH::collectAllLeaves(int nodeIndex, const entt::registry* regi
     if (nodeIndex < 0 || nodeIndex >= static_cast<int>(nodes.size())) return;
     const BVHNode& node = nodes[nodeIndex];
     if (node.isLeaf()) {
-        if (!registry || (registry->valid(node.entity) &&
-                          !registry->all_of<PresentationTransformComponent>(node.entity))) {
+        if (!registry || !usesLivePose(*registry, node.entity)) {
             results.push_back(node.entity);
             cull_stats.leaves_collected++;
         }
@@ -321,8 +391,7 @@ inline void SceneBVH::queryFrustumRecursive(int nodeIndex, const Frustum& frustu
     // If this is a leaf node, add the entity to results
     if (node.isLeaf())
     {
-        if (!registry || (registry->valid(node.entity) &&
-                          !registry->all_of<PresentationTransformComponent>(node.entity)))
+        if (!registry || !usesLivePose(*registry, node.entity))
             results.push_back(node.entity);
         return;
     }
@@ -340,17 +409,82 @@ inline void SceneBVH::queryFrustumRecursive(int nodeIndex, const Frustum& frustu
 
 inline entt::entity SceneBVH::rayPick(const glm::vec3& origin, const glm::vec3& direction) const
 {
-    if (root_index < 0 || nodes.empty())
+    const float direction_length_squared = glm::dot(direction, direction);
+    if (!SceneBVHDetail::isFinite(origin) ||
+        !SceneBVHDetail::isFinite(direction) ||
+        !std::isfinite(direction_length_squared) ||
+        direction_length_squared <= 1e-16f || root_index < 0 || nodes.empty())
         return entt::null;
 
     float closest_t = std::numeric_limits<float>::max();
     entt::entity closest_entity = entt::null;
-    rayPickRecursive(root_index, origin, direction, closest_t, closest_entity);
+    rayPickRecursive(root_index, origin, direction, nullptr, closest_t, closest_entity);
+    return closest_entity;
+}
+
+inline entt::entity SceneBVH::rayPick(const glm::vec3& origin,
+                                     const glm::vec3& direction,
+                                     const entt::registry& registry) const
+{
+    const float direction_length_squared = glm::dot(direction, direction);
+    if (!SceneBVHDetail::isFinite(origin) ||
+        !SceneBVHDetail::isFinite(direction) ||
+        !std::isfinite(direction_length_squared) ||
+        direction_length_squared <= 1e-16f)
+        return entt::null;
+
+    float closest_t = std::numeric_limits<float>::max();
+    entt::entity closest_entity = entt::null;
+    if (root_index >= 0 && !nodes.empty())
+        rayPickRecursive(root_index, origin, direction, &registry, closest_t,
+                         closest_entity);
+
+    // Cached leaves cannot represent a current hierarchy or presentation pose.
+    // Resolve these renderables against live ECS values so parent movement and
+    // presentation overlays are pickable without rebuilding the static BVH.
+    auto render_view = registry.view<MeshComponent, TransformComponent>();
+    for (entt::entity entity : render_view)
+    {
+        if (!usesLivePose(registry, entity))
+            continue;
+
+        const auto& mesh_comp = render_view.get<MeshComponent>(entity);
+        if (!mesh_comp.m_mesh || !mesh_comp.m_mesh->visible ||
+            !mesh_comp.m_mesh->is_valid)
+            continue;
+
+        mesh* m = mesh_comp.m_mesh.get();
+        if (!m->bounds_computed)
+            m->computeBounds();
+
+        const auto render_world = Hierarchy::resolveRenderWorldMatrix(registry, entity);
+        if (!render_world || !SceneBVHDetail::isFinite(*render_world))
+            continue;
+
+        const AABB bounds = AABB::fromTransformedAABB(m->aabb_min, m->aabb_max,
+                                                       *render_world);
+        if (!SceneBVHDetail::isFinite(bounds))
+            continue;
+
+        float t_min = 0.0f;
+        if (!bounds.intersectsRay(origin, direction, t_min))
+            continue;
+
+        const float hit_t = std::max(t_min, 0.0f);
+        if (hit_t < closest_t)
+        {
+            closest_t = hit_t;
+            closest_entity = entity;
+        }
+    }
+
     return closest_entity;
 }
 
 inline void SceneBVH::rayPickRecursive(int nodeIndex, const glm::vec3& origin, const glm::vec3& direction,
-                                        float& closest_t, entt::entity& closest_entity) const
+                                        const entt::registry* registry,
+                                        float& closest_t,
+                                        entt::entity& closest_entity) const
 {
     if (nodeIndex < 0 || nodeIndex >= static_cast<int>(nodes.size()))
         return;
@@ -369,9 +503,22 @@ inline void SceneBVH::rayPickRecursive(int nodeIndex, const glm::vec3& origin, c
     // Leaf node: this entity is a candidate
     if (node.isLeaf())
     {
-        if (tMin < closest_t)
+        if (registry)
         {
-            closest_t = tMin;
+            // Ignore deleted, hidden, or now-live-pose leaves: their cached
+            // bounds are no longer authoritative for the current render pose.
+            if (!registry->valid(node.entity) || usesLivePose(*registry, node.entity))
+                return;
+            const auto* mesh_comp = registry->try_get<MeshComponent>(node.entity);
+            if (!mesh_comp || !mesh_comp->m_mesh || !mesh_comp->m_mesh->visible ||
+                !mesh_comp->m_mesh->is_valid)
+                return;
+        }
+
+        const float hit_t = std::max(tMin, 0.0f);
+        if (hit_t < closest_t)
+        {
+            closest_t = hit_t;
             closest_entity = node.entity;
         }
         return;
@@ -379,7 +526,9 @@ inline void SceneBVH::rayPickRecursive(int nodeIndex, const glm::vec3& origin, c
 
     // Recurse into both children
     if (node.left_child >= 0)
-        rayPickRecursive(node.left_child, origin, direction, closest_t, closest_entity);
+        rayPickRecursive(node.left_child, origin, direction, registry, closest_t,
+                         closest_entity);
     if (node.right_child >= 0)
-        rayPickRecursive(node.right_child, origin, direction, closest_t, closest_entity);
+        rayPickRecursive(node.right_child, origin, direction, registry, closest_t,
+                         closest_entity);
 }

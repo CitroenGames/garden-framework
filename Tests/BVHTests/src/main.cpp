@@ -3,6 +3,7 @@
 // exit code 0 means all tests passed.
 
 #include "Components/Components.hpp"
+#include "ECS/Hierarchy.hpp"
 #include "Graphics/BVH.hpp"
 #include "PlayerRepSystem.hpp"
 
@@ -53,6 +54,13 @@ static entt::entity spawn(entt::registry& reg, const glm::vec3& pos,
     mc.m_mesh = makeMesh(halfExtents, visible, valid);
     reg.emplace<MeshComponent>(e, mc);
     return e;
+}
+
+static void giveIdentity(entt::registry& reg, entt::entity entity, uint64_t id)
+{
+    IdentityComponent identity;
+    identity.guid = EntityGuid{0xB10C000000000000ull, id};
+    reg.emplace<IdentityComponent>(entity, identity);
 }
 
 // Axis-aligned box frustum: inside is [mn, mx] on every axis.
@@ -370,6 +378,98 @@ static bool testPresentationPoseCulling()
     return pass(name);
 }
 
+static bool testParentedPoseCullingUsesCurrentHierarchy()
+{
+    const std::string name = "parented culling follows current composed and presentation poses";
+    entt::registry reg;
+
+    const entt::entity parent = reg.create();
+    TransformComponent parent_transform;
+    parent_transform.position = glm::vec3(100.0f, 0.0f, 0.0f);
+    reg.emplace<TransformComponent>(parent, parent_transform);
+    giveIdentity(reg, parent, 1);
+
+    const entt::entity child = spawn(reg, glm::vec3(2.0f, 0.0f, 0.0f),
+                                     glm::vec3(1.0f));
+    giveIdentity(reg, child, 2);
+    if (!Hierarchy::attach(reg, child, parent))
+        return fail(name, "valid parent-child link was rejected");
+
+    SceneBVH bvh;
+    bvh.build(reg);
+    if (bvh.getTotalEntities() != 0)
+        return fail(name, "parented render pose was cached in static BVH bounds");
+    const auto build_count = bvh.getCullStats().builds;
+
+    const auto query_contains = [&](const Frustum& frustum) {
+        std::vector<entt::entity> visible;
+        bvh.queryFrustum(frustum, reg, visible);
+        return std::find(visible.begin(), visible.end(), child) != visible.end();
+    };
+    if (!query_contains(boxFrustum(glm::vec3(99.0f, -3.0f, -3.0f),
+                                   glm::vec3(103.0f, 3.0f, 3.0f))))
+        return fail(name, "initial composed parent pose was not visible");
+    if (query_contains(boxFrustum(glm::vec3(0.0f, -3.0f, -3.0f),
+                                  glm::vec3(4.0f, 3.0f, 3.0f))))
+        return fail(name, "child local pose leaked into world culling");
+
+    reg.get<TransformComponent>(parent).position = glm::vec3(0.0f);
+    if (!query_contains(boxFrustum(glm::vec3(0.0f, -3.0f, -3.0f),
+                                   glm::vec3(4.0f, 3.0f, 3.0f))))
+        return fail(name, "parent movement was hidden by a cached child pose");
+    if (query_contains(boxFrustum(glm::vec3(99.0f, -3.0f, -3.0f),
+                                  glm::vec3(103.0f, 3.0f, 3.0f))))
+        return fail(name, "old parent pose remained in culling results");
+
+    PresentationTransformComponent parent_presentation;
+    parent_presentation.position = glm::vec3(50.0f, 0.0f, 0.0f);
+    reg.emplace<PresentationTransformComponent>(parent, parent_presentation);
+    if (!query_contains(boxFrustum(glm::vec3(51.0f, -3.0f, -3.0f),
+                                   glm::vec3(55.0f, 3.0f, 3.0f))))
+        return fail(name, "ancestor presentation pose was not composed into child bounds");
+
+    PresentationTransformComponent child_presentation;
+    child_presentation.position = glm::vec3(10.0f, 0.0f, 0.0f);
+    reg.emplace<PresentationTransformComponent>(child, child_presentation);
+    if (!query_contains(boxFrustum(glm::vec3(59.0f, -3.0f, -3.0f),
+                                   glm::vec3(63.0f, 3.0f, 3.0f))))
+        return fail(name, "child presentation pose was not composed with its parent");
+    if (bvh.getCullStats().builds != build_count)
+        return fail(name, "live hierarchy culling rebuilt the BVH");
+    return pass(name);
+}
+
+static bool testUnresolvedRenderPosesAreSkippedSafely()
+{
+    const std::string name = "stale parent refs become roots and cyclic poses are skipped";
+    entt::registry reg;
+    const entt::entity stale_parent_child = spawn(
+        reg, glm::vec3(20.0f, 0.0f, 0.0f), glm::vec3(1.0f));
+    reg.emplace<ParentComponent>(stale_parent_child,
+        ParentComponent{EntityRef{EntityGuid{0xBAD0000000000000ull, 99}}});
+
+    const entt::entity cycle_a = spawn(reg, glm::vec3(0.0f), glm::vec3(1.0f));
+    const entt::entity cycle_b = spawn(reg, glm::vec3(40.0f, 0.0f, 0.0f),
+                                       glm::vec3(1.0f));
+    giveIdentity(reg, cycle_a, 10);
+    giveIdentity(reg, cycle_b, 11);
+    const EntityRef cycle_a_ref = entityRefOf(reg, cycle_a);
+    const EntityRef cycle_b_ref = entityRefOf(reg, cycle_b);
+    reg.emplace<ParentComponent>(cycle_a, ParentComponent{cycle_b_ref});
+    reg.emplace<ParentComponent>(cycle_b, ParentComponent{cycle_a_ref});
+
+    SceneBVH bvh;
+    bvh.build(reg);
+    std::vector<entt::entity> visible;
+    bvh.queryFrustum(boxFrustum(glm::vec3(-5.0f, -5.0f, -5.0f),
+                                glm::vec3(45.0f, 5.0f, 5.0f)), reg, visible);
+    if (visible.size() != 1 || visible.front() != stale_parent_child)
+        return fail(name, "stale ref fallback or cycle rejection returned the wrong set");
+    if (bvh.getTotalEntities() != 0)
+        return fail(name, "unresolved hierarchy poses were cached in static BVH bounds");
+    return pass(name);
+}
+
 static bool testPlayerRepresentationUsesPresentationPose()
 {
     const std::string name = "player representation follows source presentation pose";
@@ -474,6 +574,55 @@ static bool testRayPick()
     return pass(name);
 }
 
+static bool testRegistryAwareRayPickTracksRenderPose()
+{
+    const std::string name = "registry-aware ray picking follows current hierarchy and presentation poses";
+    entt::registry reg;
+
+    const entt::entity parent = reg.create();
+    TransformComponent parent_transform;
+    parent_transform.position = glm::vec3(0.0f, 0.0f, -5.0f);
+    reg.emplace<TransformComponent>(parent, parent_transform);
+    giveIdentity(reg, parent, 30);
+
+    const entt::entity child = spawn(reg, glm::vec3(0.0f), glm::vec3(0.5f));
+    giveIdentity(reg, child, 31);
+    if (!Hierarchy::attach(reg, child, parent))
+        return fail(name, "valid parent-child link was rejected");
+
+    // Build a nearer root leaf, then destroy it so the registry-aware
+    // overload must ignore its stale cached handle before considering the
+    // current hierarchy pose.
+    const entt::entity destroyed_root = spawn(
+        reg, glm::vec3(0.0f, 0.0f, -2.0f), glm::vec3(0.5f));
+
+    SceneBVH bvh;
+    bvh.build(reg);
+    reg.destroy(destroyed_root);
+    const glm::vec3 ray_origin(0.0f);
+    const glm::vec3 ray_direction(0.0f, 0.0f, -1.0f);
+    if (bvh.rayPick(ray_origin, ray_direction, reg) != child)
+        return fail(name, "initial ray did not hit the child at its composed world pose");
+
+    // The child is absent from the static BVH bounds. Its parent can move
+    // without rebuilding, and the registry-aware picker must observe it.
+    reg.get<TransformComponent>(parent).position = glm::vec3(20.0f, 0.0f, -5.0f);
+    if (bvh.rayPick(ray_origin, ray_direction, reg) != entt::null)
+        return fail(name, "old cached/local position remained pickable after parent movement");
+    if (bvh.rayPick(glm::vec3(20.0f, 0.0f, 0.0f), ray_direction, reg) != child)
+        return fail(name, "moved child was not pickable at its current composed pose");
+
+    PresentationTransformComponent presentation;
+    presentation.position = glm::vec3(0.0f, 0.0f, -10.0f);
+    reg.emplace<PresentationTransformComponent>(child, presentation);
+    const glm::vec3 between_old_and_presented_pose(20.0f, 0.0f, -8.0f);
+    if (bvh.rayPick(between_old_and_presented_pose, ray_direction, reg) != child)
+        return fail(name, "child presentation pose was not used for ray picking");
+    if (bvh.rayPick(ray_origin, ray_direction, reg) != entt::null)
+        return fail(name, "old composed child pose remained pickable after presentation moved it");
+    return pass(name);
+}
+
 static bool testRandomizedVsBruteForce()
 {
     const std::string name = "randomized scenes match brute force";
@@ -532,10 +681,13 @@ int main()
     ok &= testExcludedEntities();
     ok &= testMovedEntityStaleness();
     ok &= testPresentationPoseCulling();
+    ok &= testParentedPoseCullingUsesCurrentHierarchy();
+    ok &= testUnresolvedRenderPosesAreSkippedSafely();
     ok &= testPlayerRepresentationUsesPresentationPose();
     ok &= testSmallCounts();
     ok &= testExtractedPerspectiveFrustum();
     ok &= testRayPick();
+    ok &= testRegistryAwareRayPickTracksRenderPose();
     ok &= testRandomizedVsBruteForce();
     std::cout << (ok ? "all BVH tests passed" : "BVH tests FAILED") << std::endl;
     return ok ? 0 : 1;

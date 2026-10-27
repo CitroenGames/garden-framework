@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <functional>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -186,6 +187,91 @@ inline glm::mat4 computeWorldMatrix(entt::registry& r, entt::entity e)
     glm::mat4 world(1.0f);
     for (auto it = chain.rbegin(); it != chain.rend(); ++it)
         world = world * detail::localMatrix(r, *it);
+    return world;
+}
+
+namespace detail
+{
+// Resolve only unambiguous stable references. A duplicated identity makes a
+// runtime link ambiguous, so render resolution treats it like an unresolved
+// parent and roots the child at its local pose.
+inline entt::entity resolveUniqueRenderRef(const entt::registry& r,
+                                           EntityRef ref)
+{
+    if (ref.isNull())
+        return entt::null;
+
+    entt::entity match = entt::null;
+    for (auto [candidate, identity] : r.view<IdentityComponent>().each())
+    {
+        if (identity.guid != ref.guid)
+            continue;
+        if (match != entt::null)
+            return entt::null;
+        match = candidate;
+    }
+    return match != entt::null && r.valid(match) ? match : entt::null;
+}
+
+inline glm::mat4 renderLocalMatrix(const entt::registry& r, entt::entity e)
+{
+    return resolveRenderTransform(r, e).getTransformMatrix();
+}
+} // namespace detail
+
+// Ephemeral render pose resolved from current ECS state. Presentation values
+// overlay local position/rotation while scale remains authoritative on
+// TransformComponent. Full matrices are composed so inherited non-uniform
+// scale and shear survive; the derived WorldTransformComponent cache is never
+// read or written.
+//
+// Missing, null, stale, or ambiguous parent refs terminate the walk and make
+// that entity the root of the resolved chain. Invalid requested entities,
+// cycles, and chains deeper than kMaxDepth return no pose; choosing a cycle
+// break would make the same invalid hierarchy resolve differently depending
+// on which entity was queried. No fallback mutates ECS data or retains a
+// prior pose.
+inline std::optional<glm::mat4> resolveRenderWorldMatrix(
+    const entt::registry& r, entt::entity entity)
+{
+    if (entity == entt::null || !r.valid(entity))
+        return std::nullopt;
+
+    std::vector<entt::entity> chain;
+    chain.reserve(kMaxDepth);
+    std::unordered_set<entt::entity> visited;
+    entt::entity current = entity;
+    bool cycle_detected = false;
+
+    while (current != entt::null && r.valid(current) &&
+           chain.size() < static_cast<std::size_t>(kMaxDepth))
+    {
+        if (!visited.insert(current).second)
+        {
+            cycle_detected = true;
+            break;
+        }
+        chain.push_back(current);
+
+        const auto* parent = r.try_get<ParentComponent>(current);
+        if (!parent || parent->parent.isNull())
+        {
+            current = entt::null;
+            break;
+        }
+        current = detail::resolveUniqueRenderRef(r, parent->parent);
+        if (current == entt::null)
+            break;
+    }
+
+    if (cycle_detected ||
+        (chain.size() == static_cast<std::size_t>(kMaxDepth) &&
+         current != entt::null && r.valid(current)))
+        return std::nullopt;
+
+    glm::mat4 world(1.0f);
+    for (std::size_t i = chain.size(); i > 0; --i)
+        world *= detail::renderLocalMatrix(r, chain[i - 1]);
     return world;
 }
 

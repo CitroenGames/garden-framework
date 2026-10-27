@@ -3,6 +3,7 @@
 #include "Components/camera.hpp"
 #include "Components/Components.hpp"
 #include "Components/mesh.hpp"
+#include "ECS/Hierarchy.hpp"
 #include "RenderAPI.hpp"
 #include "RenderCommandBuffer.hpp"
 #include "RenderContext.hpp"
@@ -16,8 +17,11 @@
 #include "Threading/FrameSync.hpp"
 #include <entt/entt.hpp>
 #include <algorithm>
+#include <cmath>
 #include <future>
 #include <thread>
+#include <unordered_map>
+#include <unordered_set>
 
 class renderer
 {
@@ -40,6 +44,71 @@ public:
 
     bool depth_prepass_enabled = true;
 
+    using ResolvedRenderPoseMap = std::unordered_map<entt::entity, glm::mat4>;
+
+    static bool is_finite_render_pose(const glm::mat4& pose)
+    {
+        for (int column = 0; column < 4; ++column)
+            for (int row = 0; row < 4; ++row)
+                if (!std::isfinite(pose[column][row]))
+                    return false;
+        return true;
+    }
+
+    // Resolve each current render pose once per frame. The map is completed on
+    // the render thread before parallel command recording begins, so opaque,
+    // depth, and shadow consumers all read the same immutable matrix.
+    static ResolvedRenderPoseMap resolve_render_poses(const entt::registry& registry)
+    {
+        std::unordered_set<entt::entity> consumers;
+        for (entt::entity entity : registry.view<MeshComponent, TransformComponent>())
+            consumers.insert(entity);
+        for (entt::entity entity : registry.view<PointLightComponent, TransformComponent>())
+            consumers.insert(entity);
+        for (entt::entity entity : registry.view<SpotLightComponent, TransformComponent>())
+            consumers.insert(entity);
+
+        ResolvedRenderPoseMap poses;
+        poses.reserve(consumers.size());
+        for (entt::entity entity : consumers)
+        {
+            if (const auto world = Hierarchy::resolveRenderWorldMatrix(registry, entity);
+                world && is_finite_render_pose(*world))
+                poses.emplace(entity, *world);
+        }
+        return poses;
+    }
+
+    static const glm::mat4* find_render_pose(const ResolvedRenderPoseMap& poses,
+                                             entt::entity entity)
+    {
+        const auto it = poses.find(entity);
+        return it == poses.end() || !is_finite_render_pose(it->second)
+            ? nullptr
+            : &it->second;
+    }
+
+    static int select_lod_for_render_pose(const mesh& m, const glm::mat4& model,
+                                          const glm::vec3& camera_pos,
+                                          const glm::mat4& projection,
+                                          int lod_count,
+                                          const float* thresholds)
+    {
+        if (!is_finite_render_pose(model))
+            return 0;
+
+        // LODSelector consumes an AABB and a scalar scale. Transform the
+        // actual local bounds first so parent rotation, non-uniform scale and
+        // shear are represented without decomposing the geometry matrix.
+        const AABB world_bounds = AABB::fromTransformedAABB(
+            m.aabb_min, m.aabb_max, model);
+        const glm::vec3 center = (world_bounds.min + world_bounds.max) * 0.5f;
+        const glm::vec3 half_extent = (world_bounds.max - world_bounds.min) * 0.5f;
+        return LODSelector::selectLOD(camera_pos, center, -half_extent,
+                                      half_extent, projection, lod_count,
+                                      thresholds);
+    }
+
     renderer() : render_api(nullptr) {};
     renderer(IRenderAPI* api) : render_api(api) {};
 
@@ -54,7 +123,8 @@ public:
         light_direction = direction;
     }
 
-    void gatherAndSetLights(entt::registry& registry, camera& cam)
+    void gatherAndSetLights(entt::registry& registry, camera& cam,
+                            const ResolvedRenderPoseMap& render_poses)
     {
         std::vector<GPUPointLight> points;
         std::vector<GPUSpotLight>  spots;
@@ -65,9 +135,10 @@ public:
         for (auto entity : point_view)
         {
             const auto& pl = point_view.get<PointLightComponent>(entity);
-            const TransformComponent t = resolveRenderTransform(registry, entity);
+            const glm::mat4* model = find_render_pose(render_poses, entity);
+            if (!model) continue;
             GPUPointLight gpu{};
-            gpu.position    = t.position;
+            gpu.position    = glm::vec3((*model)[3]);
             gpu.range       = pl.range;
             gpu.color       = pl.color;
             gpu.intensity   = pl.intensity;
@@ -80,13 +151,16 @@ public:
         for (auto entity : spot_view)
         {
             const auto& sl = spot_view.get<SpotLightComponent>(entity);
-            const TransformComponent t = resolveRenderTransform(registry, entity);
+            const glm::mat4* model = find_render_pose(render_poses, entity);
+            if (!model) continue;
             GPUSpotLight gpu{};
-            gpu.position    = t.position;
+            gpu.position    = glm::vec3((*model)[3]);
             gpu.range       = sl.range;
-            glm::mat4 rot   = glm::eulerAngleYXZ(
-                glm::radians(t.rotation.y), glm::radians(t.rotation.x), glm::radians(t.rotation.z));
-            gpu.direction   = glm::normalize(glm::vec3(rot * glm::vec4(0.0f, 0.0f, -1.0f, 0.0f)));
+            const glm::vec3 direction = glm::mat3(*model) * glm::vec3(0.0f, 0.0f, -1.0f);
+            const float direction_length = glm::length(direction);
+            gpu.direction = direction_length > 1e-8f
+                ? direction / direction_length
+                : glm::vec3(0.0f, 0.0f, -1.0f);
             gpu.intensity   = sl.intensity;
             gpu.color       = sl.color;
             gpu.innerCutoff = glm::cos(glm::radians(sl.inner_cone_angle));
@@ -113,11 +187,11 @@ public:
     }
 
     // Depth prepass helper: render mesh depth-only with transform (immediate mode, legacy)
-    static void render_mesh_depth_only(mesh& m, const TransformComponent& transform, IRenderAPI* api)
+    static void render_mesh_depth_only(mesh& m, const glm::mat4& model, IRenderAPI* api)
     {
         if (!m.visible || !api) return;
         api->pushMatrix();
-        api->multiplyMatrix(transform.getTransformMatrix());
+        api->multiplyMatrix(model);
         api->renderMeshDepthOnly(m);
         api->popMatrix();
     }
@@ -292,13 +366,13 @@ public:
 
     // Record a single mesh draw into a command buffer.
     // Thread-safe: reads mesh state without mutation.
-    static void record_mesh_draw(const mesh& m, const TransformComponent& transform,
+    static void record_mesh_draw(const mesh& m, const glm::mat4& model,
                                  RenderCommandBuffer& cmds, bool global_lighting,
                                  const Frustum* frustum = nullptr)
     {
-        if (!m.visible || !m.gpu_mesh || !m.gpu_mesh->isUploaded()) return;
+        if (!is_finite_render_pose(model) || !m.visible || !m.gpu_mesh ||
+            !m.gpu_mesh->isUploaded()) return;
 
-        glm::mat4 model = transform.getTransformMatrix();
         RenderState base_state = m.getRenderState();
 
         if (m.uses_material_ranges && !m.material_ranges.empty())
@@ -347,14 +421,14 @@ public:
 
     // Record a LOD mesh draw into a command buffer.
     // Thread-safe: uses lod_level parameter instead of reading m.current_lod.
-    static void record_lod_mesh_draw(const mesh& m, const TransformComponent& transform,
+    static void record_lod_mesh_draw(const mesh& m, const glm::mat4& model,
                                      RenderCommandBuffer& cmds, bool global_lighting,
                                      IGPUMesh* lod_gpu_mesh, int lod_level,
                                      const Frustum* frustum = nullptr)
     {
-        if (!lod_gpu_mesh || !lod_gpu_mesh->isUploaded()) return;
+        if (!is_finite_render_pose(model) || !lod_gpu_mesh ||
+            !lod_gpu_mesh->isUploaded()) return;
 
-        glm::mat4 model = transform.getTransformMatrix();
         RenderState base_state = m.getRenderState();
 
         // Check for LOD-specific material ranges using the thread-safe accessor
@@ -423,7 +497,7 @@ public:
 
     // Record a mesh at a specific LOD level.
     // Thread-safe: uses getGPUMeshForLOD() instead of selectLOD() + getActiveGPUMesh().
-    static void record_mesh_at_lod(const mesh& m, const TransformComponent& transform,
+    static void record_mesh_at_lod(const mesh& m, const glm::mat4& model,
                                    RenderCommandBuffer& cmds, bool global_lighting, int lod_level,
                                    const Frustum* frustum = nullptr)
     {
@@ -434,21 +508,21 @@ public:
             IGPUMesh* active = m.getGPUMeshForLOD(lod_level);
             if (active && active != m.gpu_mesh)
             {
-                record_lod_mesh_draw(m, transform, cmds, global_lighting, active, lod_level, frustum);
+                record_lod_mesh_draw(m, model, cmds, global_lighting, active, lod_level, frustum);
                 return;
             }
         }
-        record_mesh_draw(m, transform, cmds, global_lighting, frustum);
+        record_mesh_draw(m, model, cmds, global_lighting, frustum);
     }
 
     // Record a mesh with automatic LOD selection.
     // Thread-safe: computes LOD locally, never writes to mesh state.
-    static void record_mesh_with_lod(const mesh& m, const TransformComponent& transform,
+    static void record_mesh_with_lod(const mesh& m, const glm::mat4& model,
                                      RenderCommandBuffer& cmds, bool global_lighting,
                                      const glm::vec3& camera_pos, const glm::mat4& projection,
                                      const Frustum* frustum = nullptr)
     {
-        if (!m.visible) return;
+        if (!is_finite_render_pose(model) || !m.visible) return;
 
         if (!m.lod_levels.empty() && m.bounds_computed)
         {
@@ -464,33 +538,28 @@ public:
                 for (int i = 0; i < static_cast<int>(m.lod_levels.size()); ++i)
                     thresholds[i + 1] = m.lod_levels[i].screen_threshold;
 
-                lod = LODSelector::selectLOD(
-                    camera_pos, transform.position,
-                    m.aabb_min, m.aabb_max,
-                    projection, lod_count, thresholds.data(),
-                    transform.scale
-                );
+                lod = select_lod_for_render_pose(m, model, camera_pos, projection,
+                                                 lod_count, thresholds.data());
             }
 
             IGPUMesh* active = m.getGPUMeshForLOD(lod);
             if (active && active != m.gpu_mesh)
             {
-                record_lod_mesh_draw(m, transform, cmds, global_lighting, active, lod, frustum);
+                record_lod_mesh_draw(m, model, cmds, global_lighting, active, lod, frustum);
                 return;
             }
         }
 
-        record_mesh_draw(m, transform, cmds, global_lighting, frustum);
+        record_mesh_draw(m, model, cmds, global_lighting, frustum);
     }
 
     // Record a depth-prepass draw command.
     // Thread-safe: reads mesh state without mutation.
-    static void record_depth_draw(const mesh& m, const TransformComponent& transform,
+    static void record_depth_draw(const mesh& m, const glm::mat4& model,
                                   RenderCommandBuffer& cmds, const Frustum* frustum = nullptr)
     {
-        if (!m.visible || !m.gpu_mesh || !m.gpu_mesh->isUploaded()) return;
-        glm::mat4 model = transform.getTransformMatrix();
-
+        if (!is_finite_render_pose(model) || !m.visible || !m.gpu_mesh ||
+            !m.gpu_mesh->isUploaded()) return;
         // Check if any material range needs special depth handling
         bool has_alpha_mask = false;
         bool has_alpha_blend = false;
@@ -537,14 +606,12 @@ public:
 
     // Record a depth-prepass draw at a specific LOD.
     // Thread-safe: uses getGPUMeshForLOD() instead of selectLOD().
-    static void record_depth_draw_at_lod(const mesh& m, const TransformComponent& transform,
+    static void record_depth_draw_at_lod(const mesh& m, const glm::mat4& model,
                                          RenderCommandBuffer& cmds, int lod_level,
                                          const Frustum* frustum = nullptr)
     {
-        if (!m.visible || !m.gpu_mesh) return;
+        if (!is_finite_render_pose(model) || !m.visible || !m.gpu_mesh) return;
         if (m.transparent) return;  // Don't depth-prepass transparent meshes
-
-        glm::mat4 model = transform.getTransformMatrix();
 
         // Determine which GPU mesh to use, and pick matching ranges. If a LOD
         // gpu_mesh has no per-LOD ranges, fall back to LOD0 so that
@@ -608,14 +675,12 @@ public:
 
     // Record a shadow pass draw command.
     // Thread-safe: computes shadow LOD locally, never writes to mesh state.
-    static void record_shadow_draw(const mesh& m, const TransformComponent& transform,
+    static void record_shadow_draw(const mesh& m, const glm::mat4& model,
                                    RenderCommandBuffer& cmds, int cascade_index,
                                    const Frustum* frustum = nullptr)
     {
-        if (!m.visible || !m.casts_shadow) return;
+        if (!is_finite_render_pose(model) || !m.visible || !m.casts_shadow) return;
         if (!m.gpu_mesh || !m.gpu_mesh->isUploaded()) return;
-
-        glm::mat4 model = transform.getTransformMatrix();
 
         // Determine the GPU mesh (LOD selection for shadows). When a LOD is
         // selected, also pick its per-LOD material_ranges (which use offsets
@@ -716,6 +781,7 @@ public:
     RenderCommandBuffer record_opaque_parallel(
         entt::registry& registry,
         const std::vector<entt::entity>& entities,
+        const ResolvedRenderPoseMap& render_poses,
         const std::vector<int>& lod_levels,
         bool global_lighting,
         const Frustum* frustum = nullptr,
@@ -732,8 +798,9 @@ public:
                 auto* mc = registry.try_get<MeshComponent>(entities[i]);
                 auto* t = registry.try_get<TransformComponent>(entities[i]);
                 if (!mc || !t || !mc->m_mesh || !mc->m_mesh->visible) continue;
-                const TransformComponent render_transform = resolveRenderTransform(registry, entities[i]);
-                record_mesh_at_lod(*mc->m_mesh, render_transform, cmds, global_lighting, lod_levels[i], frustum);
+                const glm::mat4* model = find_render_pose(render_poses, entities[i]);
+                if (!model) continue;
+                record_mesh_at_lod(*mc->m_mesh, *model, cmds, global_lighting, lod_levels[i], frustum);
             }
             if (view_matrix) cmds.sortWithViewDepth(*view_matrix);
             else cmds.sort();
@@ -763,8 +830,9 @@ public:
                         auto* mc = registry.try_get<MeshComponent>(entities[i]);
                         auto* t = registry.try_get<TransformComponent>(entities[i]);
                         if (!mc || !t || !mc->m_mesh || !mc->m_mesh->visible) continue;
-                        const TransformComponent render_transform = resolveRenderTransform(registry, entities[i]);
-                        record_mesh_at_lod(*mc->m_mesh, render_transform,
+                        const glm::mat4* model = find_render_pose(render_poses, entities[i]);
+                        if (!model) continue;
+                        record_mesh_at_lod(*mc->m_mesh, *model,
                                            contexts[c].command_buffer, global_lighting, lod_levels[i], frustum);
                     }
                 }));
@@ -797,6 +865,7 @@ public:
     RenderCommandBuffer record_shadow_parallel(
         entt::registry& registry,
         const std::vector<entt::entity>& entities,
+        const ResolvedRenderPoseMap& render_poses,
         int cascade_index,
         const Frustum* frustum = nullptr)
     {
@@ -810,8 +879,9 @@ public:
                 auto* mc = registry.try_get<MeshComponent>(entity);
                 auto* t = registry.try_get<TransformComponent>(entity);
                 if (mc && t && mc->m_mesh && mc->m_mesh->visible && mc->m_mesh->casts_shadow) {
-                    const TransformComponent render_transform = resolveRenderTransform(registry, entity);
-                    record_shadow_draw(*mc->m_mesh, render_transform, cmds, cascade_index, frustum);
+                    const glm::mat4* model = find_render_pose(render_poses, entity);
+                    if (!model) continue;
+                    record_shadow_draw(*mc->m_mesh, *model, cmds, cascade_index, frustum);
                 }
             }
             return cmds;
@@ -838,8 +908,9 @@ public:
                         auto* mc = registry.try_get<MeshComponent>(entities[i]);
                         auto* t = registry.try_get<TransformComponent>(entities[i]);
                         if (mc && t && mc->m_mesh && mc->m_mesh->visible && mc->m_mesh->casts_shadow) {
-                            const TransformComponent render_transform = resolveRenderTransform(registry, entities[i]);
-                            record_shadow_draw(*mc->m_mesh, render_transform, buffers[c], cascade_index, frustum);
+                            const glm::mat4* model = find_render_pose(render_poses, entities[i]);
+                            if (!model) continue;
+                            record_shadow_draw(*mc->m_mesh, *model, buffers[c], cascade_index, frustum);
                         }
                     }
                 }));
@@ -862,6 +933,7 @@ public:
     RenderCommandBuffer record_depth_parallel(
         entt::registry& registry,
         const std::vector<entt::entity>& entities,
+        const ResolvedRenderPoseMap& render_poses,
         const std::vector<int>& lod_levels,
         const Frustum* frustum = nullptr)
     {
@@ -875,8 +947,9 @@ public:
                 auto* mc = registry.try_get<MeshComponent>(entities[i]);
                 auto* t = registry.try_get<TransformComponent>(entities[i]);
                 if (!mc || !t || !mc->m_mesh || !mc->m_mesh->visible) continue;
-                const TransformComponent render_transform = resolveRenderTransform(registry, entities[i]);
-                record_depth_draw_at_lod(*mc->m_mesh, render_transform, cmds, lod_levels[i], frustum);
+                const glm::mat4* model = find_render_pose(render_poses, entities[i]);
+                if (!model) continue;
+                record_depth_draw_at_lod(*mc->m_mesh, *model, cmds, lod_levels[i], frustum);
             }
             return cmds;
         }
@@ -902,8 +975,9 @@ public:
                         auto* mc = registry.try_get<MeshComponent>(entities[i]);
                         auto* t = registry.try_get<TransformComponent>(entities[i]);
                         if (!mc || !t || !mc->m_mesh || !mc->m_mesh->visible) continue;
-                        const TransformComponent render_transform = resolveRenderTransform(registry, entities[i]);
-                        record_depth_draw_at_lod(*mc->m_mesh, render_transform, buffers[c], lod_levels[i], frustum);
+                        const glm::mat4* model = find_render_pose(render_poses, entities[i]);
+                        if (!model) continue;
+                        record_depth_draw_at_lod(*mc->m_mesh, *model, buffers[c], lod_levels[i], frustum);
                     }
                 }));
         }
@@ -923,10 +997,11 @@ public:
 
     // Sort entities by texture handle (primary) and distance (secondary, front-to-back)
     void sort_entities_by_state(entt::registry& registry, std::vector<entt::entity>& entities,
-                                const glm::vec3& cam_pos)
+                                const glm::vec3& cam_pos,
+                                const ResolvedRenderPoseMap& render_poses)
     {
         std::sort(entities.begin(), entities.end(),
-            [&registry, &cam_pos](entt::entity a, entt::entity b) {
+            [&registry, &cam_pos, &render_poses](entt::entity a, entt::entity b) {
                 auto* ma = registry.try_get<MeshComponent>(a);
                 auto* mb = registry.try_get<MeshComponent>(b);
                 if (!ma || !ma->m_mesh) return false;
@@ -944,25 +1019,26 @@ public:
                     return tex_a < tex_b;
 
                 // Secondary: front-to-back within same texture group
-                auto* ta = registry.try_get<TransformComponent>(a);
-                auto* tb = registry.try_get<TransformComponent>(b);
-                if (!ta || !tb) return false;
-                const TransformComponent render_a = resolveRenderTransform(registry, a);
-                const TransformComponent render_b = resolveRenderTransform(registry, b);
-                return glm::dot(cam_pos - render_a.position, cam_pos - render_a.position) < glm::dot(cam_pos - render_b.position, cam_pos - render_b.position);
+                const glm::mat4* pose_a = find_render_pose(render_poses, a);
+                const glm::mat4* pose_b = find_render_pose(render_poses, b);
+                if (!pose_a) return false;
+                if (!pose_b) return true;
+                const glm::vec3 pos_a = glm::vec3((*pose_a)[3]);
+                const glm::vec3 pos_b = glm::vec3((*pose_b)[3]);
+                return glm::dot(cam_pos - pos_a, cam_pos - pos_a) <
+                       glm::dot(cam_pos - pos_b, cam_pos - pos_b);
             });
     }
 
-    static void render_mesh_with_api(mesh& m, const TransformComponent& transform, IRenderAPI* api)
+    static void render_mesh_with_api(mesh& m, const glm::mat4& model, IRenderAPI* api)
     {
-        if (!m.visible || !api) return;
+        if (!is_finite_render_pose(model) || !m.visible || !api) return;
 
         // Apply object transformation using the complete transform matrix
         api->pushMatrix();
 
         // Use the complete transformation matrix that includes scale, rotation, and translation
-        glm::mat4 transform_mat = transform.getTransformMatrix();
-        api->multiplyMatrix(transform_mat);
+        api->multiplyMatrix(model);
 
         // Get render state from mesh
         RenderState state = m.getRenderState();
@@ -1009,7 +1085,7 @@ public:
     // Render a LOD mesh: temporarily swaps gpu_mesh and uses LOD-specific material ranges.
     // WARNING: NOT thread-safe — mutates and restores mesh state. Main thread only.
     // For parallel recording, use the thread-safe record_lod_mesh_draw() instead.
-    static void render_lod_mesh(mesh& m, const TransformComponent& transform,
+    static void render_lod_mesh(mesh& m, const glm::mat4& model,
                                  IRenderAPI* api, IGPUMesh* lod_gpu_mesh)
     {
         IGPUMesh* original_gpu = m.gpu_mesh;
@@ -1050,7 +1126,7 @@ public:
             }
         }
 
-        render_mesh_with_api(m, transform, api);
+        render_mesh_with_api(m, model, api);
 
         m.gpu_mesh = original_gpu;
         if (has_lod_materials)
@@ -1061,7 +1137,7 @@ public:
     }
 
     // LOD-aware rendering: selects appropriate LOD before drawing
-    static void render_mesh_with_lod(mesh& m, const TransformComponent& transform,
+    static void render_mesh_with_lod(mesh& m, const glm::mat4& model,
                                       IRenderAPI* api, const glm::vec3& camera_pos,
                                       const glm::mat4& projection)
     {
@@ -1082,28 +1158,24 @@ public:
                 for (int i = 0; i < static_cast<int>(m.lod_levels.size()); ++i)
                     thresholds[i + 1] = m.lod_levels[i].screen_threshold;
 
-                lod = LODSelector::selectLOD(
-                    camera_pos, transform.position,
-                    m.aabb_min, m.aabb_max,
-                    projection, lod_count, thresholds.data(),
-                    transform.scale
-                );
+                lod = select_lod_for_render_pose(m, model, camera_pos, projection,
+                                                 lod_count, thresholds.data());
             }
             m.selectLOD(lod);
 
             IGPUMesh* active = m.getActiveGPUMesh();
             if (active && active != m.gpu_mesh)
             {
-                render_lod_mesh(m, transform, api, active);
+                render_lod_mesh(m, model, api, active);
                 return;
             }
         }
 
-        render_mesh_with_api(m, transform, api);
+        render_mesh_with_api(m, model, api);
     }
 
     // Shadow-pass LOD: use coarser LODs for farther cascades
-    static void render_mesh_shadow_lod(mesh& m, const TransformComponent& transform,
+    static void render_mesh_shadow_lod(mesh& m, const glm::mat4& model,
                                         IRenderAPI* api, int cascade_index)
     {
         if (!m.visible || !m.casts_shadow || !api) return;
@@ -1115,15 +1187,15 @@ public:
             IGPUMesh* active = m.getActiveGPUMesh();
             if (active && active != m.gpu_mesh)
             {
-                render_lod_mesh(m, transform, api, active);
+                render_lod_mesh(m, model, api, active);
                 return;
             }
         }
-        render_mesh_with_api(m, transform, api);
+        render_mesh_with_api(m, model, api);
     }
 
     // Render mesh at a pre-selected LOD level
-    static void render_mesh_at_lod(mesh& m, const TransformComponent& transform,
+    static void render_mesh_at_lod(mesh& m, const glm::mat4& model,
                                     IRenderAPI* api, int lod_level)
     {
         if (!m.visible || !api) return;
@@ -1134,11 +1206,11 @@ public:
             IGPUMesh* active = m.getActiveGPUMesh();
             if (active && active != m.gpu_mesh)
             {
-                render_lod_mesh(m, transform, api, active);
+                render_lod_mesh(m, model, api, active);
                 return;
             }
         }
-        render_mesh_with_api(m, transform, api);
+        render_mesh_with_api(m, model, api);
     }
 
     // Selects where a rendered frame ends up.
@@ -1173,6 +1245,7 @@ public:
 
         last_draw_calls = 0;
 
+        const ResolvedRenderPoseMap render_poses = resolve_render_poses(registry);
         auto view = registry.view<MeshComponent, TransformComponent>();
 
         // Ensure the BVH is built before the shadow pass
@@ -1204,7 +1277,8 @@ public:
                 scene_bvh.queryFrustum(shadow_frustum, registry, shadow_entities);
 
                 ensure_meshes_uploaded(registry, shadow_entities);
-                shadow_cmds = record_shadow_parallel(registry, shadow_entities, cascade, shadow_frustum_ptr);
+                shadow_cmds = record_shadow_parallel(registry, shadow_entities, render_poses,
+                                                     cascade, shadow_frustum_ptr);
             }
             else
             {
@@ -1219,7 +1293,8 @@ public:
                         all_shadow.push_back(entity);
                     }
                 }
-                shadow_cmds = record_shadow_parallel(registry, all_shadow, cascade, shadow_frustum_ptr);
+                shadow_cmds = record_shadow_parallel(registry, all_shadow, render_poses,
+                                                     cascade, shadow_frustum_ptr);
             }
 
             render_api->replayCommandBuffer(shadow_cmds);
@@ -1234,7 +1309,7 @@ public:
         render_api->setLighting(ambient_light, diffuse_light, light_direction);
         if (dynamic_lights_enabled)
         {
-            gatherAndSetLights(registry, c);
+            gatherAndSetLights(registry, c, render_poses);
         }
         else
         {
@@ -1272,18 +1347,19 @@ public:
             }
 
             // Sort opaques by texture (primary) + distance (secondary)
-            sort_entities_by_state(registry, opaque_entities, cam_pos);
+            sort_entities_by_state(registry, opaque_entities, cam_pos, render_poses);
 
             // Sort transparents back-to-front
             std::sort(transparent_entities.begin(), transparent_entities.end(),
-                [&registry, &cam_pos](entt::entity a, entt::entity b) {
-                    auto* ta = registry.try_get<TransformComponent>(a);
-                    auto* tb = registry.try_get<TransformComponent>(b);
-                    if (!ta) return false;
-                    if (!tb) return true;
-                    const TransformComponent render_a = resolveRenderTransform(registry, a);
-                    const TransformComponent render_b = resolveRenderTransform(registry, b);
-                    return glm::dot(cam_pos - render_a.position, cam_pos - render_a.position) > glm::dot(cam_pos - render_b.position, cam_pos - render_b.position);
+                [&render_poses, &cam_pos](entt::entity a, entt::entity b) {
+                    const glm::mat4* pose_a = find_render_pose(render_poses, a);
+                    const glm::mat4* pose_b = find_render_pose(render_poses, b);
+                    if (!pose_a) return false;
+                    if (!pose_b) return true;
+                    const glm::vec3 pos_a = glm::vec3((*pose_a)[3]);
+                    const glm::vec3 pos_b = glm::vec3((*pose_b)[3]);
+                    return glm::dot(cam_pos - pos_a, cam_pos - pos_a) >
+                           glm::dot(cam_pos - pos_b, cam_pos - pos_b);
                 });
 
             // Ensure all visible meshes are uploaded before recording
@@ -1298,7 +1374,8 @@ public:
                 auto* t = registry.try_get<TransformComponent>(opaque_entities[i]);
                 if (!mesh_comp || !t || !mesh_comp->m_mesh) continue;
                 mesh& m = *mesh_comp->m_mesh;
-                const TransformComponent render_transform = resolveRenderTransform(registry, opaque_entities[i]);
+                const glm::mat4* model = find_render_pose(render_poses, opaque_entities[i]);
+                if (!model) continue;
 
                 if (!m.lod_levels.empty() && m.bounds_computed)
                 {
@@ -1313,11 +1390,8 @@ public:
                         for (int j = 0; j < static_cast<int>(m.lod_levels.size()); ++j)
                             thresholds[j + 1] = m.lod_levels[j].screen_threshold;
 
-                        opaque_lod[i] = LODSelector::selectLOD(
-                            cam_pos, render_transform.position, m.aabb_min, m.aabb_max,
-                            proj, lod_count, thresholds.data(),
-                            render_transform.scale
-                        );
+                        opaque_lod[i] = select_lod_for_render_pose(
+                            m, *model, cam_pos, proj, lod_count, thresholds.data());
                     }
                 }
             }
@@ -1326,7 +1400,7 @@ public:
             if (depth_prepass_enabled && !opaque_entities.empty())
             {
                 RenderCommandBuffer depth_cmds = record_depth_parallel(
-                    registry, opaque_entities, opaque_lod, &camera_frustum);
+                    registry, opaque_entities, render_poses, opaque_lod, &camera_frustum);
 
                 render_api->beginDepthPrepass();
                 render_api->replayCommandBuffer(depth_cmds);
@@ -1337,7 +1411,8 @@ public:
             {
                 const glm::mat4 view_matrix = render_api->getViewMatrix();
                 RenderCommandBuffer opaque_cmds = record_opaque_parallel(
-                    registry, opaque_entities, opaque_lod, global_lighting, &camera_frustum, &view_matrix);
+                    registry, opaque_entities, render_poses, opaque_lod,
+                    global_lighting, &camera_frustum, &view_matrix);
                 last_draw_calls += opaque_cmds.size();
                 render_api->replayCommandBufferParallel(opaque_cmds);
             }
@@ -1355,8 +1430,9 @@ public:
                     auto* t = registry.try_get<TransformComponent>(entity);
                     if (mesh_comp && t && mesh_comp->m_mesh && mesh_comp->m_mesh->visible)
                     {
-                        const TransformComponent render_transform = resolveRenderTransform(registry, entity);
-                        record_mesh_with_lod(*mesh_comp->m_mesh, render_transform, transparent_cmds,
+                        const glm::mat4* model = find_render_pose(render_poses, entity);
+                        if (!model) continue;
+                        record_mesh_with_lod(*mesh_comp->m_mesh, *model, transparent_cmds,
                                              global_lighting, cam_pos, proj, &camera_frustum);
                     }
                 }
@@ -1376,13 +1452,14 @@ public:
             for (auto entity : view)
             {
                 auto& mesh_comp = view.get<MeshComponent>(entity);
-                const TransformComponent render_transform = resolveRenderTransform(registry, entity);
+                const glm::mat4* model = find_render_pose(render_poses, entity);
+                if (!model) continue;
 
                 if (mesh_comp.m_mesh && mesh_comp.m_mesh->visible)
                 {
                     prepare_water_mesh(registry, entity, mesh_comp);
                     ensure_mesh_uploaded(*mesh_comp.m_mesh, render_api);
-                    record_mesh_with_lod(*mesh_comp.m_mesh, render_transform, all_cmds,
+                    record_mesh_with_lod(*mesh_comp.m_mesh, *model, all_cmds,
                                          global_lighting, cam_pos, proj, &camera_frustum);
                     last_total_entities++;
                 }

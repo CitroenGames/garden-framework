@@ -210,7 +210,7 @@ void ModelPreviewPanel::renderPreview()
 
     // Render the mesh at origin
     TransformComponent identity;
-    renderer::render_mesh_with_api(*m_mesh, identity, render_api);
+    renderer::render_mesh_with_api(*m_mesh, identity.getTransformMatrix(), render_api);
 
     m_mesh->force_lod = prev_force_lod;
 

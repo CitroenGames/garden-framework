@@ -352,6 +352,6 @@ void ViewportPanel::handlePicking(bool image_clicked, entt::registry& registry,
     glm::vec3 ray_dir = glm::normalize(glm::vec3(far_world) - ray_origin);
 
     // Pick using BVH
-    entt::entity hit = bvh.rayPick(ray_origin, ray_dir);
+    entt::entity hit = bvh.rayPick(ray_origin, ray_dir, registry);
     selected = hit; // entt::null if nothing was hit (deselects)
 }
