@@ -32,6 +32,8 @@
 #include <string>
 #include <vector>
 
+#include <glm/gtc/constants.hpp>
+
 namespace fs = std::filesystem;
 
 static fs::path findRepoRoot()
@@ -2544,6 +2546,209 @@ static bool testD6SensorNonInterference()
     return pass(name);
 }
 
+static bool testServerClientCharacterMovementParity()
+{
+    const std::string name = "server/client same-build CharacterVirtual movement parity";
+    constexpr int tick_count = 600;
+    constexpr float max_position_error_m = 0.05f;
+
+    PhysicsSystemSettings settings;
+    settings.worker_thread_count = 1;
+    world server_world(settings);
+    world client_world(settings);
+    entt::entity server_character = entt::null;
+    entt::entity client_character = entt::null;
+
+    auto add_static_box = [](world& w, const glm::vec3& position, const glm::vec3& half_extents)
+    {
+        const entt::entity entity = w.registry.create();
+        w.registry.emplace<TransformComponent>(entity, position.x, position.y, position.z);
+        w.registry.emplace<RigidBodyComponent>(entity);
+        ColliderComponent collider;
+        collider.shape_type = ColliderShapeType::Box;
+        collider.box_half_extents = half_extents;
+        const auto shape = PhysicsSystem::createShapeFromCollider(collider, glm::vec3(1.0f));
+        return shape && !w.getPhysicsSystem().createStaticBody(
+            position, glm::vec3(0.0f), shape, entity).IsInvalid();
+    };
+
+    auto setup_scene = [&](world& w, entt::entity& character)
+    {
+        w.initializePhysics();
+        if (!add_static_box(w, glm::vec3(0.0f, -0.5f, 0.0f), glm::vec3(50.0f, 0.5f, 50.0f)))
+            return false;
+        // The short obstacle exercises CharacterVirtual collision/step handling
+        // while leaving enough open floor for the full input script.
+        if (!add_static_box(w, glm::vec3(0.0f, 0.15f, 4.0f), glm::vec3(1.5f, 0.15f, 0.35f)))
+            return false;
+
+        character = w.registry.create();
+        auto& transform = w.registry.emplace<TransformComponent>(character, 0.0f, 1.2f, 0.0f);
+        auto& rigid_body = w.registry.emplace<RigidBodyComponent>(character);
+        rigid_body.apply_gravity = false;
+        auto& player = w.registry.emplace<PlayerComponent>(character);
+        player.speed = 4.0f;
+        player.jump_force = 3.0f;
+        auto& controller = w.registry.emplace<CharacterControllerComponent>(character);
+        controller.move_speed = player.speed;
+        controller.jump_velocity = player.jump_force;
+
+        if (w.getPhysicsSystem().createCharacterController(w.registry, character).IsInvalid())
+            return false;
+
+        // Both prediction and authority begin with the same resolved contact
+        // state, as they would after spawning the pawn into this fixture.
+        const CharacterControllerState initial = w.get_character_controller_state(character);
+        player.grounded = initial.grounded;
+        player.ground_normal = initial.ground_normal;
+        transform.position = initial.position;
+        rigid_body.velocity = initial.velocity;
+        return true;
+    };
+
+    if (!setup_scene(server_world, server_character) ||
+        !setup_scene(client_world, client_character))
+        return fail(name, "failed to create matching independent Jolt scenes");
+
+    auto scripted_input = [](int tick)
+    {
+        CharacterMoveInput input;
+        if (tick < 120)
+        {
+            input.move_forward = 1.0f;
+        }
+        else if (tick < 180)
+        {
+            input.move_forward = 0.75f;
+            input.move_right = 0.25f;
+            input.camera_yaw = 0.35f;
+        }
+        else if (tick < 195)
+        {
+            input.move_forward = 1.0f;
+            input.buttons |= CharacterMoveFlags::Jump;
+        }
+        else if (tick < 240)
+        {
+            input.move_forward = 0.6f;
+            input.move_right = 0.4f;
+            input.camera_yaw = 0.35f;
+        }
+        else if (tick < 300)
+        {
+            input.move_forward = -0.75f;
+            input.move_right = 0.5f;
+            input.camera_yaw = -0.7f;
+        }
+        else if (tick < 360)
+        {
+            // Deliberate neutral interval checks that stopping and gravity
+            // remain aligned after the earlier contacts and jump.
+        }
+        else if (tick < 420)
+        {
+            input.move_forward = 1.0f;
+            input.camera_yaw = glm::half_pi<float>();
+        }
+        else if (tick < 480)
+        {
+            input.move_forward = 0.8f;
+            input.camera_yaw = glm::pi<float>();
+        }
+        else if (tick < 490)
+        {
+            input.move_forward = 1.0f;
+            input.camera_yaw = glm::pi<float>();
+            input.buttons |= CharacterMoveFlags::Jump;
+        }
+        else if (tick < 540)
+        {
+            input.move_forward = 0.4f;
+            input.move_right = -1.0f;
+            input.camera_yaw = 2.5f;
+        }
+        return input;
+    };
+
+    auto client_start_state = [](world& w, entt::entity entity)
+    {
+        const auto& transform = w.registry.get<TransformComponent>(entity);
+        const auto& rigid_body = w.registry.get<RigidBodyComponent>(entity);
+        const auto& player = w.registry.get<PlayerComponent>(entity);
+        CharacterControllerState state;
+        state.position = transform.position;
+        state.velocity = rigid_body.velocity;
+        state.grounded = player.grounded;
+        state.ground_normal = player.ground_normal;
+        // This mirrors the client MovementState conversion: moving-ground
+        // velocity and water state are not carried in that prediction state.
+        return state;
+    };
+
+    auto write_network_state = [](world& w, entt::entity entity, const CharacterControllerState& state)
+    {
+        w.registry.get<TransformComponent>(entity).position = state.position;
+        auto& rigid_body = w.registry.get<RigidBodyComponent>(entity);
+        rigid_body.velocity = state.velocity;
+        auto& player = w.registry.get<PlayerComponent>(entity);
+        player.grounded = state.grounded;
+        player.ground_normal = state.ground_normal;
+    };
+
+    float maximum_divergence = 0.0f;
+    int maximum_divergence_tick = -1;
+    auto measure_divergence = [&](int tick)
+    {
+        const glm::vec3 server_position = server_world.registry.get<TransformComponent>(server_character).position;
+        const glm::vec3 client_position = client_world.registry.get<TransformComponent>(client_character).position;
+        const float divergence = glm::distance(server_position, client_position);
+        if (!std::isfinite(divergence))
+            return false;
+        if (divergence > maximum_divergence)
+        {
+            maximum_divergence = divergence;
+            maximum_divergence_tick = tick;
+        }
+        return divergence <= max_position_error_m;
+    };
+
+    for (int tick = 0; tick < tick_count; ++tick)
+    {
+        const CharacterMoveInput input = scripted_input(tick);
+
+        // ServerNetworkManager advances the existing CharacterVirtual directly.
+        const CharacterControllerState server_state = server_world.simulate_character_controller(
+            server_character, input, server_world.fixed_delta);
+        write_network_state(server_world, server_character, server_state);
+
+        // GameModule restores its ECS prediction state before advancing the
+        // same CharacterVirtual path for the corresponding input sample.
+        if (!client_world.set_character_controller_state(
+                client_character, client_start_state(client_world, client_character)))
+            return fail(name, "client-side CharacterVirtual state restore failed at tick " +
+                std::to_string(tick));
+        const CharacterControllerState client_state = client_world.simulate_character_controller(
+            client_character, input, client_world.fixed_delta);
+        write_network_state(client_world, client_character, client_state);
+
+        if (!measure_divergence(tick))
+            return fail(name, "position divergence exceeded 0.05 m during controller simulation at tick " +
+                std::to_string(tick) + " (max " + std::to_string(maximum_divergence) + " m)");
+
+        server_world.stepPhysicsSingleStep();
+        client_world.stepPhysicsSingleStep();
+        server_world.player_collisions(server_character);
+        client_world.player_collisions(client_character);
+
+        if (!measure_divergence(tick))
+            return fail(name, "position divergence exceeded 0.05 m after the fixed physics step at tick " +
+                std::to_string(tick) + " (max " + std::to_string(maximum_divergence) + " m)");
+    }
+
+    return pass(name + ": max position divergence " + std::to_string(maximum_divergence) +
+        " m at tick " + std::to_string(maximum_divergence_tick) + " across 600 ticks");
+}
+
 static bool containsLayerKey(const nlohmann::json& value)
 {
     if (value.is_object())
@@ -3091,6 +3296,8 @@ int main()
     ok = testD6TriggerOccupantCapacity() && ok;
     run("D6-T3 sensor non-interference");
     ok = testD6SensorNonInterference() && ok;
+    run("server/client same-build CharacterVirtual movement parity");
+    ok = testServerClientCharacterMovementParity() && ok;
     run("D6-U1 level round-trip");
     ok = testD6LevelRoundTrip() && ok;
     run("D6-T1 legacy/current character layer comparison");
