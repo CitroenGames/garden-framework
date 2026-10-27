@@ -19,6 +19,7 @@
 #include "Prefab/PrefabManager.hpp"
 #include "Assets/AssetManager.hpp"
 #include "Scheduler/SystemScheduler.hpp"
+#include "Scheduler/HierarchyTransformSystem.hpp"
 #include "Gameplay/GameplaySystems.hpp"
 #include "ECS/EntityLifecycle.hpp"
 #include "Network/LevelHash.hpp"
@@ -257,6 +258,7 @@ int main(int argc, char* argv[])
         };
         server_scheduler.addSystem(std::move(d));
     }
+    registerHierarchyTransformSystem(server_scheduler);
 
     LOG_ENGINE_INFO("Server started successfully");
 

@@ -10,6 +10,7 @@
 #include "Animation/AnimationSystem.hpp"
 #include "GameFramework/GameMode.hpp"
 #include "Gameplay/GameplaySystems.hpp"
+#include "Scheduler/HierarchyTransformSystem.hpp"
 #include "Utils/Log.hpp"
 
 GameSimulation::GameSimulation(world* game_world,
@@ -35,6 +36,7 @@ GameSimulation::~GameSimulation()
 void GameSimulation::registerSystems()
 {
     registerGameplaySystems(*m_scheduler);
+    registerHierarchyTransformSystem(*m_scheduler);
     // engine.timers is auto-registered by the scheduler in Gameplay (fixed dt).
     {
         SystemDescriptor d;

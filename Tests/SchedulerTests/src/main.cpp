@@ -1,5 +1,8 @@
 #include "Scheduler/SystemScheduler.hpp"
+#include "Scheduler/HierarchyTransformSystem.hpp"
+#include "Components/IdentityComponent.hpp"
 #include "ECS/EntityLifecycle.hpp"
+#include "ECS/Hierarchy.hpp"
 #include "Events/EventBus.hpp"
 #include "Events/EngineEvents.hpp"
 #include "Network/ServerNetworkManager.hpp"
@@ -12,6 +15,7 @@
 #include <limits>
 #include <string>
 #include <vector>
+#include <glm/gtc/matrix_transform.hpp>
 
 namespace
 {
@@ -279,6 +283,48 @@ bool testServerPhysicsBeforeGameplayCatchUp()
     return pass(name);
 }
 
+// S-D: the same generic hierarchy registration is used by editor standalone
+// GameSimulation and the dedicated server. A fixed Gameplay transform write
+// must be visible in the child's derived cache during the following Transform.
+bool testHierarchyPropagationAfterGameplay()
+{
+    const std::string name = "hierarchy propagation follows Gameplay in Transform";
+    entt::registry registry;
+    const entt::entity parent = registry.create();
+    const entt::entity child = registry.create();
+    registry.emplace<IdentityComponent>(parent,
+        IdentityComponent{EntityGuid{0x1000000000000001ull, 0x2000000000000001ull}});
+    registry.emplace<IdentityComponent>(child,
+        IdentityComponent{EntityGuid{0x1000000000000002ull, 0x2000000000000002ull}});
+    registry.emplace<TransformComponent>(parent, 0.0f, 0.0f, 0.0f);
+    registry.emplace<TransformComponent>(child, 1.0f, 0.0f, 0.0f);
+    Hierarchy::attach(registry, child, parent);
+
+    SystemScheduler scheduler(false, 1.0f / 60.0f, false);
+    if (!registerHierarchyTransformSystem(scheduler))
+        return fail(name, "failed to register generic hierarchy Transform system");
+    if (!scheduler.addSystem(makeSys("test.move_parent", Phase::Gameplay,
+        [parent](entt::registry& r, const Tick::SimulationTickContext&) {
+            r.get<TransformComponent>(parent).position.x = 10.0f;
+        })))
+        return fail(name, "failed to register Gameplay parent movement");
+
+    if (scheduler.runFrame(registry, scheduler.getFixedDelta()) != 1)
+        return fail(name, "expected exactly one consumed fixed tick");
+
+    const auto* world_transform = registry.try_get<WorldTransformComponent>(child);
+    if (!world_transform)
+        return fail(name, "child world-transform cache was not created");
+    const glm::mat4 expected = glm::translate(
+        glm::mat4(1.0f), glm::vec3(11.0f, 0.0f, 0.0f));
+    for (int column = 0; column < 4; ++column)
+        for (int row = 0; row < 4; ++row)
+            if (std::abs(world_transform->matrix[column][row] - expected[column][row]) > 1.0e-5f)
+                return fail(name, "child world-transform matrix did not include "
+                                  "Gameplay parent movement");
+    return pass(name);
+}
+
 int g_destroyed = 0;
 int g_created = 0;
 void onDestroyedEvt(const EntityDestroyedEvent&) { ++g_destroyed; }
@@ -372,6 +418,7 @@ int main()
     if (!testDisabled()) ++failures;
     if (!testHostFilter()) ++failures;
     if (!testServerPhysicsBeforeGameplayCatchUp()) ++failures;
+    if (!testHierarchyPropagationAfterGameplay()) ++failures;
     if (!testDestroyDrain()) ++failures;
     if (!testTimerFixed()) ++failures;
     if (failures == 0)
