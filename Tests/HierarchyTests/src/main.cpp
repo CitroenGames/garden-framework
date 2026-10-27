@@ -51,6 +51,119 @@ glm::vec3 worldPos(entt::registry& reg, entt::entity e)
     return reg.get<WorldTransformComponent>(e).position;
 }
 
+bool hasChildRef(const ChildrenComponent& children, EntityRef child)
+{
+    for (const EntityRef& ref : children.children)
+        if (ref == child) return true;
+    return false;
+}
+
+template<typename Configure>
+bool rejectedIdentityAttachLeavesFreshEntitiesUntouched(
+    const std::string& name, Configure configure)
+{
+    EventBus::get().clear();
+    entt::registry reg;
+    EntityLifecycle life(reg, 52);
+    entt::entity child = makeEntity(reg, life, {1, 2, 3});
+    entt::entity parent = makeEntity(reg, life, {4, 5, 6});
+    entt::entity other = makeEntity(reg, life, {7, 8, 9});
+    const glm::mat4 child_transform = reg.get<TransformComponent>(child).getTransformMatrix();
+    const glm::mat4 parent_transform = reg.get<TransformComponent>(parent).getTransformMatrix();
+    const glm::mat4 other_transform = reg.get<TransformComponent>(other).getTransformMatrix();
+
+    configure(reg, child, parent, other);
+    if (Hierarchy::attach(reg, child, parent))
+        return fail(name, "attach accepted invalid identity input");
+
+    for (entt::entity e : {child, parent, other})
+    {
+        if (reg.any_of<ParentComponent, ChildrenComponent,
+                       WorldTransformComponent, HierarchyDirtyTag>(e))
+            return fail(name, "rejected attach changed hierarchy state");
+    }
+    if (!nearMat(reg.get<TransformComponent>(child).getTransformMatrix(), child_transform) ||
+        !nearMat(reg.get<TransformComponent>(parent).getTransformMatrix(), parent_transform) ||
+        !nearMat(reg.get<TransformComponent>(other).getTransformMatrix(), other_transform))
+        return fail(name, "rejected attach changed a transform");
+    return true;
+}
+
+bool testIdentityPreconditions()
+{
+    const std::string name = "H-A identity preconditions reject before mutation";
+    if (!rejectedIdentityAttachLeavesFreshEntitiesUntouched(
+            "H-A missing child identity", [](entt::registry& reg, entt::entity child,
+                                               entt::entity, entt::entity) {
+                reg.remove<IdentityComponent>(child);
+            })) return false;
+    if (!rejectedIdentityAttachLeavesFreshEntitiesUntouched(
+            "H-A missing parent identity", [](entt::registry& reg, entt::entity,
+                                               entt::entity parent, entt::entity) {
+                reg.remove<IdentityComponent>(parent);
+            })) return false;
+    if (!rejectedIdentityAttachLeavesFreshEntitiesUntouched(
+            "H-A null child identity GUID", [](entt::registry& reg, entt::entity child,
+                                                entt::entity, entt::entity) {
+                reg.get<IdentityComponent>(child).guid = {};
+            })) return false;
+    if (!rejectedIdentityAttachLeavesFreshEntitiesUntouched(
+            "H-A null parent identity GUID", [](entt::registry& reg, entt::entity,
+                                                entt::entity parent, entt::entity) {
+                reg.get<IdentityComponent>(parent).guid = {};
+            })) return false;
+    if (!rejectedIdentityAttachLeavesFreshEntitiesUntouched(
+            "H-A duplicate child identity GUID", [](entt::registry& reg, entt::entity child,
+                                                     entt::entity, entt::entity other) {
+                reg.get<IdentityComponent>(other).guid =
+                    reg.get<IdentityComponent>(child).guid;
+            })) return false;
+    if (!rejectedIdentityAttachLeavesFreshEntitiesUntouched(
+            "H-A duplicate parent identity GUID", [](entt::registry& reg, entt::entity,
+                                                      entt::entity parent, entt::entity other) {
+                reg.get<IdentityComponent>(other).guid =
+                    reg.get<IdentityComponent>(parent).guid;
+            })) return false;
+    return pass(name);
+}
+
+bool testRejectedReattachPreservesOriginalLink()
+{
+    const std::string name = "H-A rejected reattach preserves original link and mirrors";
+    EventBus::get().clear();
+    entt::registry reg;
+    EntityLifecycle life(reg, 53);
+    entt::entity original_parent = makeEntity(reg, life, {10, 0, 0});
+    entt::entity new_parent = makeEntity(reg, life, {20, 0, 0});
+    entt::entity child = makeEntity(reg, life, {1, 0, 0});
+    entt::entity duplicate = makeEntity(reg, life, {30, 0, 0});
+    if (!Hierarchy::attach(reg, child, original_parent))
+        return fail(name, "valid initial attach was rejected");
+
+    const EntityRef original_parent_ref =
+        EntityRef{reg.get<IdentityComponent>(original_parent).guid};
+    const EntityRef child_ref{reg.get<IdentityComponent>(child).guid};
+    const std::vector<EntityRef> original_children =
+        reg.get<ChildrenComponent>(original_parent).children;
+    reg.get<IdentityComponent>(duplicate).guid =
+        reg.get<IdentityComponent>(new_parent).guid;
+
+    if (Hierarchy::attach(reg, child, new_parent))
+        return fail(name, "reattach accepted duplicated parent identity");
+    const auto* parent = reg.try_get<ParentComponent>(child);
+    if (!parent || parent->parent != original_parent_ref)
+        return fail(name, "child no longer points to original parent");
+    const auto* old_children = reg.try_get<ChildrenComponent>(original_parent);
+    if (!old_children || old_children->children != original_children ||
+        old_children->children.size() != 1 || !hasChildRef(*old_children, child_ref))
+        return fail(name, "original parent's Children mirror changed");
+    if (reg.all_of<ChildrenComponent>(new_parent) ||
+        reg.all_of<WorldTransformComponent>(new_parent) ||
+        reg.all_of<HierarchyDirtyTag>(new_parent))
+        return fail(name, "rejected target parent was mutated");
+    return pass(name);
+}
+
 // H1: attach + propagate, nested 3-level (doc hierarchy.md H1)
 bool testAttachPropagate()
 {
@@ -61,8 +174,8 @@ bool testAttachPropagate()
     entt::entity root = makeEntity(reg, life, {10, 0, 0});
     entt::entity child = makeEntity(reg, life, {1, 0, 0});
     entt::entity grand = makeEntity(reg, life, {0, 2, 0});
-    Hierarchy::attach(reg, child, root);
-    Hierarchy::attach(reg, grand, child);
+    if (!Hierarchy::attach(reg, child, root)) return fail(name, "valid root attach rejected");
+    if (!Hierarchy::attach(reg, grand, child)) return fail(name, "valid nested attach rejected");
     if (Hierarchy::parentOf(reg, child) != root) return fail(name, "parentOf(child)!=root");
     if (Hierarchy::parentOf(reg, grand) != child) return fail(name, "parentOf(grand)!=child");
     if (Hierarchy::parentOf(reg, root) != entt::null) return fail(name, "root has parent");
@@ -85,7 +198,7 @@ bool testRotation()
     entt::entity root = makeEntity(reg, life, {0, 0, 0});
     reg.get<TransformComponent>(root).rotation = {0, 90, 0};
     entt::entity child = makeEntity(reg, life, {1, 0, 0});
-    Hierarchy::attach(reg, child, root);
+    if (!Hierarchy::attach(reg, child, root)) return fail(name, "valid attach rejected");
     Hierarchy::updateTransformPropagation(reg);
     if (!nearVec(worldPos(reg, child), {0, 0, -1})) return fail(name, "child world != (0,0,-1)");
     return pass(name);
@@ -121,11 +234,11 @@ bool testCycleRejected()
     EntityLifecycle life(reg, 45);
     entt::entity a = makeEntity(reg, life, {0, 0, 0});
     entt::entity b = makeEntity(reg, life, {1, 0, 0});
-    Hierarchy::attach(reg, b, a);
-    Hierarchy::attach(reg, a, b); // would create A->B->A
+    if (!Hierarchy::attach(reg, b, a)) return fail(name, "valid initial attach rejected");
+    if (Hierarchy::attach(reg, a, b)) return fail(name, "cycle attach reported success"); // would create A->B->A
     if (Hierarchy::parentOf(reg, a) != entt::null) return fail(name, "cycle attach changed parentOf(A)");
     if (Hierarchy::parentOf(reg, b) != a) return fail(name, "hierarchy changed after rejected attach");
-    Hierarchy::attach(reg, a, a);
+    if (Hierarchy::attach(reg, a, a)) return fail(name, "self attach reported success");
     if (Hierarchy::parentOf(reg, a) != entt::null) return fail(name, "self attach not rejected");
     if (!Hierarchy::isDescendantOf(reg, b, a)) return fail(name, "isDescendantOf(B,A) false");
     if (Hierarchy::isDescendantOf(reg, a, b)) return fail(name, "isDescendantOf(A,B) true");
@@ -297,6 +410,8 @@ bool testDepthLimit()
 int main()
 {
     int failures = 0;
+    if (!testIdentityPreconditions()) ++failures;
+    if (!testRejectedReattachPreservesOriginalLink()) ++failures;
     if (!testAttachPropagate()) ++failures;
     if (!testRotation()) ++failures;
     if (!testKeepWorldAttach()) ++failures;

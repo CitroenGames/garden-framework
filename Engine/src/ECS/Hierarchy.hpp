@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
 #include <functional>
 #include <unordered_set>
@@ -37,6 +38,45 @@ inline EntityRef refOfEntity(entt::registry& r, entt::entity e)
         return EntityRef{};
     const auto* id = r.try_get<IdentityComponent>(e);
     return id ? EntityRef{id->guid} : EntityRef{};
+}
+
+inline bool getUniqueIdentityGuid(entt::registry& r, entt::entity e,
+                                  const char* role, EntityGuid& guid)
+{
+    const auto* identity = r.try_get<IdentityComponent>(e);
+    if (!identity)
+    {
+        std::fprintf(stderr,
+                     "[Hierarchy] attach rejected: %s entity has no IdentityComponent\n",
+                     role);
+        return false;
+    }
+    if (identity->guid.isNull())
+    {
+        std::fprintf(stderr,
+                     "[Hierarchy] attach rejected: %s entity has a null IdentityComponent GUID\n",
+                     role);
+        return false;
+    }
+
+    std::size_t matches = 0;
+    for (auto [candidate, candidate_identity] :
+         r.view<IdentityComponent>().each())
+    {
+        (void)candidate;
+        if (candidate_identity.guid == identity->guid)
+            ++matches;
+    }
+    if (matches != 1)
+    {
+        std::fprintf(stderr,
+                     "[Hierarchy] attach rejected: %s IdentityComponent GUID is duplicated in the registry\n",
+                     role);
+        return false;
+    }
+
+    guid = identity->guid;
+    return true;
 }
 
 inline entt::entity resolveRef(entt::registry& r, EntityRef ref)
@@ -195,19 +235,28 @@ inline void unlinkFromParentList(entt::registry& r, entt::entity e)
         detail::eraseChildRef(*children, detail::refOfEntity(r, e));
 }
 
-inline void attach(entt::registry& r, entt::entity child,
+// Returns true only when linked. Both entities must have distinct, non-null
+// GUIDs that occur exactly once in the registry.
+inline bool attach(entt::registry& r, entt::entity child,
                    entt::entity parent, bool keep_world = false)
 {
     if (child == entt::null || parent == entt::null || !r.valid(child) ||
         !r.valid(parent))
     {
         std::fprintf(stderr, "[Hierarchy] attach rejected: invalid entity\n");
-        return;
+        return false;
+    }
+    EntityGuid child_guid{};
+    EntityGuid parent_guid{};
+    if (!detail::getUniqueIdentityGuid(r, child, "child", child_guid) ||
+        !detail::getUniqueIdentityGuid(r, parent, "parent", parent_guid))
+    {
+        return false;
     }
     if (child == parent || isDescendantOf(r, parent, child))
     {
         std::fprintf(stderr, "[Hierarchy] attach rejected: cycle\n");
-        return;
+        return false;
     }
     // keep_world is computed against the OLD ancestry before relinking.
     glm::mat4 child_world(1.0f);
@@ -229,9 +278,9 @@ inline void attach(entt::registry& r, entt::entity child,
     }
 
     r.emplace_or_replace<ParentComponent>(child,
-                                          ParentComponent{detail::refOfEntity(r, parent)});
+                                          ParentComponent{EntityRef{parent_guid}});
     auto& children = r.get_or_emplace<ChildrenComponent>(parent);
-    const EntityRef child_ref = detail::refOfEntity(r, child);
+    const EntityRef child_ref{child_guid};
     if (!child_ref.isNull() && !detail::containsChild(children, child_ref))
         children.children.push_back(child_ref);
     if (!r.all_of<WorldTransformComponent>(child))
@@ -240,6 +289,7 @@ inline void attach(entt::registry& r, entt::entity child,
         r.emplace<WorldTransformComponent>(parent);
     markDirty(r, child);
     markDirty(r, parent);
+    return true;
 }
 
 inline void detach(entt::registry& r, entt::entity child,
