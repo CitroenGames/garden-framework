@@ -938,6 +938,72 @@ static bool testPlayerControllerUsesLocalEcsInput()
     return pass(name);
 }
 
+static bool testPlayerControllerConsumesGamepadLookIntent()
+{
+    const std::string name = "player controller consumes ECS gamepad look intent";
+    world w;
+    auto input = std::make_shared<InputManager>();
+    input->set_mouse_sensitivity_xy(3.0f, 3.0f);
+
+    const entt::entity pawn = w.registry.create();
+    w.registry.emplace<TransformComponent>(pawn);
+    auto& player = w.registry.emplace<PlayerComponent>(pawn);
+    player.mouse_sensitivity = 2.0f;
+    auto& character = w.registry.emplace<CharacterControllerComponent>(pawn);
+    auto& local_input = w.registry.emplace<LocalPlayerInputComponent>(pawn);
+    local_input.look = glm::vec2(1.0f, 1.0f);
+
+    PlayerController controller(input, &w);
+    controller.setPossessedPlayer(pawn);
+    controller.setMovementEnabled(false);
+
+    player.input_enabled = false;
+    controller.update(0.5f);
+    if (glm::length(w.world_camera.rotation) > 0.001f)
+        return fail(name, "disabled PlayerComponent input gate allowed camera look");
+
+    player.input_enabled = true;
+    character.input_enabled = false;
+    controller.update(0.5f);
+    if (glm::length(w.world_camera.rotation) > 0.001f)
+        return fail(name, "disabled CharacterController input gate allowed camera look");
+
+    character.input_enabled = true;
+    local_input.input_enabled = false;
+    controller.update(0.5f);
+    if (glm::length(w.world_camera.rotation) > 0.001f)
+        return fail(name, "disabled transient local input gate allowed camera look");
+
+    local_input.input_enabled = true;
+    for (int frame = 0; frame < 30; ++frame)
+        controller.update(1.0f / 60.0f);
+    const glm::vec3 thirty_frame_rotation = w.world_camera.rotation;
+    if (!approx(thirty_frame_rotation.y, -3.0f, 0.01f) ||
+        !approx(thirty_frame_rotation.x, 1.5f, 0.01f))
+        return fail(name, "look sensitivity or pitch clamp was not applied per player");
+
+    w.world_camera.rotation = glm::vec3(0.0f);
+    controller.updatePlayerLook(0.5f);
+    controller.update(0.5f);
+    if (!approx(w.world_camera.rotation.y, thirty_frame_rotation.y, 0.01f) ||
+        !approx(w.world_camera.rotation.x, thirty_frame_rotation.x, 0.01f))
+        return fail(name, "host-applied look intent was consumed twice by controller update");
+
+    w.world_camera.rotation = glm::vec3(0.0f);
+    controller.update(0.5f);
+    if (!approx(w.world_camera.rotation.y, thirty_frame_rotation.y, 0.01f) ||
+        !approx(w.world_camera.rotation.x, thirty_frame_rotation.x, 0.01f))
+        return fail(name, "gamepad look changed with frame rate for equal elapsed time");
+
+    w.world_camera.rotation = glm::vec3(0.0f);
+    controller.handleMouseMotion(10.0f, 10.0f);
+    if (!approx(w.world_camera.rotation.y, -0.06f, 0.001f) ||
+        !approx(w.world_camera.rotation.x, 0.06f, 0.001f))
+        return fail(name, "existing mouse-look sensitivity behavior changed");
+
+    return pass(name);
+}
+
 static bool testNetworkSpawnedPlayerGroundsOnMesh(const fs::path& repo_root)
 {
     const std::string name = "network-spawned player grounds on mesh";
@@ -1796,6 +1862,8 @@ int main()
     ok = testCameraSpringComponentOffsetsCamera() && ok;
     run("player controller consumes local ECS input");
     ok = testPlayerControllerUsesLocalEcsInput() && ok;
+    run("player controller consumes ECS gamepad look intent");
+    ok = testPlayerControllerConsumesGamepadLookIntent() && ok;
     run("network-spawned player grounds on mesh");
     ok = testNetworkSpawnedPlayerGroundsOnMesh(repo_root) && ok;
     run("level player creates character controller");

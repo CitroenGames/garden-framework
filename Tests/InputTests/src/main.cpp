@@ -381,6 +381,7 @@ namespace
             actions.registerAction({ "TriggerButton", ActionValueType::Button, false });
             actions.registerAction({ "MoveForward", ActionValueType::Button, false });
             actions.registerAction({ "MoveBack", ActionValueType::Button, false });
+            actions.registerAction({ "PadLook", ActionValueType::Axis2D, false });
             MappingContext context;
             context.name = "GamepadTest";
             InputBinding button_binding;
@@ -412,7 +413,24 @@ namespace
             back_binding.action = "MoveBack";
             back_binding.invert = false;
             context.bindings.push_back(back_binding);
+            InputBinding look_x_binding;
+            look_x_binding.action = "PadLook";
+            look_x_binding.source = InputBinding::Source::GamepadAxis;
+            look_x_binding.code = SDL_GAMEPAD_AXIS_RIGHTX;
+            look_x_binding.slot = first_slot;
+            context.bindings.push_back(look_x_binding);
+            InputBinding look_y_binding = look_x_binding;
+            look_y_binding.code = SDL_GAMEPAD_AXIS_RIGHTY;
+            look_y_binding.axis_target = 1;
+            context.bindings.push_back(look_y_binding);
             result = expect(actions.pushContext(context), "gamepad bindings register with a logical slot") && result;
+
+            entt::registry intent_registry;
+            const entt::entity look_pawn = intent_registry.create();
+            LocalPlayerInputActionNames look_actions;
+            look_actions.look = "PadLook";
+            auto& look_intent = intent_registry.emplace<LocalPlayerInputComponent>(look_pawn);
+            look_intent.actions = look_actions;
 
             InputActionSystem restored_profile;
             restored_profile.registerAction({ "LeftStickX", ActionValueType::Axis1D, false });
@@ -462,6 +480,21 @@ namespace
                     std::abs(actions.axis("LeftStickX").x - 1.0f) < 0.001f &&
                     std::abs(restored_profile.axis("LeftStickX").x - 1.0f) < 0.001f,
                     "full stick deflection rescales to full range and feeds an axis action") && result;
+
+                SDL_SetJoystickVirtualAxis(joystick, SDL_GAMEPAD_AXIS_RIGHTX, 32767);
+                pumpInputEvents(input);
+                actions.evaluate(input);
+                updateLocalPlayerInputs(intent_registry, actions);
+                result = expect(std::abs(look_intent.look.x - 1.0f) < 0.001f &&
+                    std::abs(look_intent.look.y) < 0.001f,
+                    "right-stick X action projects into local-player ECS look intent") && result;
+                SDL_SetJoystickVirtualAxis(joystick, SDL_GAMEPAD_AXIS_RIGHTY, -32767);
+                pumpInputEvents(input);
+                actions.evaluate(input);
+                updateLocalPlayerInputs(intent_registry, actions);
+                result = expect(std::abs(glm::length(look_intent.look) - 1.0f) < 0.001f &&
+                    look_intent.look.x > 0.7f && look_intent.look.y < -0.7f,
+                    "right-stick diagonal remains normalized in the projected Look action") && result;
 
                 SDL_SetJoystickVirtualAxis(joystick, SDL_GAMEPAD_AXIS_LEFTY, -32767);
                 pumpInputEvents(input);
@@ -793,7 +826,8 @@ namespace
             "test.fast",
             "test.low",
             "test.fly",
-            "test.boost"
+            "test.boost",
+            "test.look"
         };
         bool ok = true;
         ok = expect(actions.registerAction({ names.move, ActionValueType::Axis2D, false }),
@@ -808,6 +842,8 @@ namespace
             "local input test registers configured freecam axis") && ok;
         ok = expect(actions.registerAction({ names.freecam_fast, ActionValueType::Button, false }),
             "local input test registers configured freecam speed action") && ok;
+        ok = expect(actions.registerAction({ names.look, ActionValueType::Axis2D, false }),
+            "local input test registers configured look action") && ok;
 
         MappingContext context;
         context.name = "test.offline";
@@ -819,7 +855,9 @@ namespace
             { names.crouch, InputBinding::Source::Key, SDL_SCANCODE_LCTRL },
             { names.freecam_vertical, InputBinding::Source::Key, SDL_SCANCODE_SPACE },
             { names.freecam_vertical, InputBinding::Source::Key, SDL_SCANCODE_LSHIFT, 1.0f, true },
-            { names.freecam_fast, InputBinding::Source::Key, SDL_SCANCODE_LSHIFT }
+            { names.freecam_fast, InputBinding::Source::Key, SDL_SCANCODE_LSHIFT },
+            { names.look, InputBinding::Source::Key, SDL_SCANCODE_RIGHT, 1.0f, false, 0 },
+            { names.look, InputBinding::Source::Key, SDL_SCANCODE_DOWN, 1.0f, false, 1 }
         };
         ok = expect(actions.pushContext(context), "configured local input context activates") && ok;
 
@@ -833,6 +871,8 @@ namespace
         input.process_event(makeKeyEvent(SDL_EVENT_KEY_DOWN, SDL_SCANCODE_SPACE));
         input.process_event(makeKeyEvent(SDL_EVENT_KEY_DOWN, SDL_SCANCODE_LSHIFT));
         input.process_event(makeKeyEvent(SDL_EVENT_KEY_DOWN, SDL_SCANCODE_LCTRL));
+        input.process_event(makeKeyEvent(SDL_EVENT_KEY_DOWN, SDL_SCANCODE_RIGHT));
+        input.process_event(makeKeyEvent(SDL_EVENT_KEY_DOWN, SDL_SCANCODE_DOWN));
         actions.evaluate(input);
         updateLocalPlayerInputs(registry, actions);
 
@@ -842,6 +882,9 @@ namespace
             "ECS input system copies configured planar action values") && ok;
         ok = expect(local.jump_held && local.sprint_held && local.crouch_held,
             "ECS input system preserves held player action semantics") && ok;
+        ok = expect(std::abs(local.look.x - diagonal_axis) < 0.001f &&
+            std::abs(local.look.y - diagonal_axis) < 0.001f,
+            "ECS input system copies configured look action values") && ok;
         ok = expect(std::abs(local.freecam_move.x + diagonal_axis) < 0.001f &&
             std::abs(local.freecam_move.y) < 0.001f &&
             std::abs(local.freecam_move.z - diagonal_axis) < 0.001f && local.freecam_fast,
@@ -857,6 +900,7 @@ namespace
         updateLocalPlayerInputs(registry, actions);
         ok = expect(std::abs(local.move.x) < 0.001f && std::abs(local.move.y) < 0.001f && !local.jump_held &&
             !local.sprint_held && !local.crouch_held &&
+            glm::length(local.look) < 0.001f &&
             glm::length(local.freecam_move) < 0.001f && !local.freecam_fast,
             "disabled local input clears every derived intent") && ok;
 

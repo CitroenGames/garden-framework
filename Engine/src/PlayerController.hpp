@@ -35,6 +35,7 @@ private:
     entt::entity camera_spring_entity = entt::null;
     bool camera_spring_initialized = false;
     float character_delta_accumulator = 0.0f;
+    bool local_player_look_applied = false;
 
 public:
     PlayerController(std::shared_ptr<InputManager> input_mgr, world* w)
@@ -143,9 +144,57 @@ public:
         {
             updateFreecam(delta);
         }
+
+        local_player_look_applied = false;
+    }
+
+    // Hosts that sample camera angles before the controller's movement update
+    // can apply projected local-player look first. update() consumes it only
+    // once; standalone hosts can rely on update() to apply it automatically.
+    void updatePlayerLook(float delta)
+    {
+        if (!game_world || currently_possessed != PossessedEntityType::Player ||
+            !game_world->registry.valid(player_entity))
+            return;
+
+        const auto* local_input = game_world->registry.try_get<LocalPlayerInputComponent>(player_entity);
+        if (!local_input)
+            return;
+
+        applyGamepadLook(*local_input, delta);
+        local_player_look_applied = true;
     }
 
 private:
+    void applyGamepadLook(const LocalPlayerInputComponent& local_input, float delta)
+    {
+        if (!game_world || !game_world->registry.valid(player_entity) ||
+            !std::isfinite(delta) || delta <= 0.0f)
+            return;
+
+        float sensitivity = 1.0f;
+        if (game_world->registry.all_of<PlayerComponent>(player_entity))
+        {
+            const PlayerComponent& player = game_world->registry.get<PlayerComponent>(player_entity);
+            if (!player.input_enabled)
+                return;
+            sensitivity = player.mouse_sensitivity;
+        }
+        if (game_world->registry.all_of<CharacterControllerComponent>(player_entity) &&
+            !game_world->registry.get<CharacterControllerComponent>(player_entity).input_enabled)
+            return;
+
+        if (!local_input.input_enabled)
+            return;
+
+        const float sensitivity_x = input_manager ? input_manager->Sensitivity_X * sensitivity : sensitivity;
+        const float sensitivity_y = input_manager ? input_manager->Sensitivity_Y * sensitivity : sensitivity;
+        camera& active_cam = game_world->world_camera;
+        active_cam.rotation.y -= local_input.look.x * delta * sensitivity_x;
+        active_cam.rotation.x += local_input.look.y * delta * sensitivity_y;
+        active_cam.rotation.x = std::clamp(active_cam.rotation.x, -1.5f, 1.5f);
+    }
+
     void resetCameraSpring()
     {
         camera_spring_velocity = glm::vec3(0.0f);
@@ -274,6 +323,11 @@ private:
         if (!game_world->registry.valid(player_entity)) return;
 
         auto& trans = game_world->registry.get<TransformComponent>(player_entity);
+        if (!local_player_look_applied)
+        {
+            if (const auto* local_input = game_world->registry.try_get<LocalPlayerInputComponent>(player_entity))
+                applyGamepadLook(*local_input, delta);
+        }
 
         if (!movement_enabled)
         {

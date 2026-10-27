@@ -54,7 +54,7 @@ namespace SharedMovement = Net::SharedMovement;
 
 static bool configureFPShooterInput(InputActionSystem& actions)
 {
-    const std::array<InputActionDef, 20> definitions = {{
+    const std::array<InputActionDef, 21> definitions = {{
         { "Move", ActionValueType::Axis2D, false },
         { "MoveForward", ActionValueType::Button, false },
         { "MoveBack", ActionValueType::Button, false },
@@ -74,7 +74,8 @@ static bool configureFPShooterInput(InputActionSystem& actions)
         { "WeaponSlot2", ActionValueType::Button, false },
         { "WeaponSlot3", ActionValueType::Button, false },
         { "WeaponSlot4", ActionValueType::Button, false },
-        { "WeaponSlot5", ActionValueType::Button, false }
+        { "WeaponSlot5", ActionValueType::Button, false },
+        { "Look", ActionValueType::Axis2D, false }
     }};
 
     for (const InputActionDef& definition : definitions)
@@ -126,6 +127,8 @@ static bool configureFPShooterInput(InputActionSystem& actions)
     gamepadAxis("MoveBack", SDL_GAMEPAD_AXIS_LEFTY);
     gamepadAxis("MoveLeft", SDL_GAMEPAD_AXIS_LEFTX, true);
     gamepadAxis("MoveRight", SDL_GAMEPAD_AXIS_LEFTX);
+    gamepadAxis("Look", SDL_GAMEPAD_AXIS_RIGHTX, false, 0);
+    gamepadAxis("Look", SDL_GAMEPAD_AXIS_RIGHTY, false, 1);
     key("Jump", SDL_SCANCODE_SPACE);
     key("FreecamVertical", SDL_SCANCODE_SPACE);
     key("Use", SDL_SCANCODE_E);
@@ -210,7 +213,7 @@ static entt::entity g_local_input_entity = entt::null;
 static entt::entity g_freecam_entity = entt::null;
 static entt::entity g_player_rep_entity = entt::null;
 static const LocalPlayerInputActionNames g_local_input_actions = {
-    "Move", "Jump", "Sprint", "Crouch", "FreecamVertical", "FreecamFast"
+    "Move", "Jump", "Sprint", "Crouch", "FreecamVertical", "FreecamFast", "Look"
 };
 
 static void setLocalInputOwner(world& game_world, entt::entity owner)
@@ -565,6 +568,8 @@ GAME_API void gardenGameUpdate(float delta_time)
         if ((mouse_dx != 0.0f || mouse_dy != 0.0f) && !UiLogic::cursorWanted(g_ui))
             g_player_controller->handleMouseMotion(mouse_dy, mouse_dx);
     }
+    if (g_player_controller)
+        g_player_controller->updatePlayerLook(delta_time);
 
     // UI timers + keyboard-first menus (hud_menus S1/S3/S4/S5). Modal input is gated below.
     UiLogic::tickUi(g_ui, delta_time);

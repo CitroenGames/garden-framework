@@ -32,6 +32,7 @@ void updateLocalPlayerInputs(entt::registry& registry,
         local.jump_held = actionState(input_actions, local.actions.jump).held;
         local.sprint_held = actionState(input_actions, local.actions.sprint).held;
         local.crouch_held = actionState(input_actions, local.actions.crouch).held;
+        local.look = actionAxis(input_actions, local.actions.look);
 
         const float freecam_vertical = actionAxis(input_actions, local.actions.freecam_vertical).x;
         local.freecam_move = glm::vec3(-local.move.x, freecam_vertical, local.move.y);
