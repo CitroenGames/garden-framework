@@ -9,6 +9,7 @@
 #include "world.hpp"
 #include "shared/FpsGameLogic.hpp"
 #include "shared/CompetitiveLogic.hpp"
+#include "shared/BuyZoneTriggers.hpp"
 #include "shared/CombatProtocol.hpp"
 #include "server/GameRules.hpp"
 
@@ -946,10 +947,31 @@ bool testCompetitiveTeamAutoAssign()
     if (validateTeamSelect(FpsTeam::None, true, 2, 2, RoundPhase::Warmup, cfg, out) != TeamSelectResult::Ok || out != FpsTeam::Defenders)
         return fail(name, "auto-assign in Warmup failed");
     if (!canSpawnNow(RoundPhase::Freeze) || canSpawnNow(RoundPhase::Live)) return fail(name, "late-join spawn gate wrong");
-    // Buy zone fallback predicate.
-    std::vector<glm::vec3> spawns{{0, 0, 0}};
-    if (!isInBuyZone(glm::vec3(3, 0, 0), spawns, 12.0f) || isInBuyZone(glm::vec3(50, 0, 0), spawns, 12.0f))
-        return fail(name, "buy zone distance predicate wrong");
+    return pass(name);
+}
+
+bool testCompetitiveBuyZoneOccupancy()
+{
+    const std::string name = "CompetitiveBuyZoneOccupancy";
+    using namespace Competitive;
+    entt::registry registry;
+    const entt::entity player = registry.create();
+    const entt::entity outside_player = registry.create();
+    const entt::entity attackers_zone = registry.create();
+    registry.emplace<BuyZoneComponent>(attackers_zone, BuyZoneComponent{teamId(FpsTeam::Attackers)});
+    registry.emplace<TriggerComponent>(attackers_zone, TriggerComponent{true, 1000, true});
+    auto& occupancy = registry.emplace<TriggerOverlapState>(attackers_zone);
+    occupancy.occupants.push_back(player);
+
+    if (!isInBuyZone(registry, player, teamId(FpsTeam::Attackers)))
+        return fail(name, "own-team trigger occupancy was rejected");
+    if (isInBuyZone(registry, player, teamId(FpsTeam::Defenders)))
+        return fail(name, "opposing-team trigger occupancy was accepted");
+    if (isInBuyZone(registry, outside_player, teamId(FpsTeam::Attackers)))
+        return fail(name, "player without trigger occupancy was accepted");
+    if (isInBuyZone(registry, player, teamId(FpsTeam::Spectator)))
+        return fail(name, "spectator passed buy-zone validation");
+
     return pass(name);
 }
 
@@ -1012,6 +1034,7 @@ int main()
     ok = testCompetitiveEconomyStreakCap() && ok;
     ok = testCompetitiveBuyMatrix() && ok;
     ok = testCompetitiveTeamAutoAssign() && ok;
+    ok = testCompetitiveBuyZoneOccupancy() && ok;
     ok = testWeaponRosterIntegrity() && ok;
     ok = testC4PlantInterrupt() && ok;
     ok = testC4AuthoredTriggerOccupancy() && ok;

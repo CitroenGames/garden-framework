@@ -17,6 +17,7 @@
 #include "shared/FpsGameLogic.hpp"
 #include "shared/CompetitiveLogic.hpp"
 #include "shared/BombSiteTriggers.hpp"
+#include "shared/BuyZoneTriggers.hpp"
 #include "shared/BotLogic.hpp"
 #include "Navigation/NavMesh.hpp"
 #include "Navigation/NavMeshPathfinder.hpp"
@@ -676,15 +677,13 @@ static void executeBotBuy(uint16_t client_id, entt::entity e)
     bot.buy_done = true; // one plan per Freeze; rejected items are skipped, never retried
     uint8_t team = w->registry.get<TeamComponent>(e).team_id;
     auto plan = Bots::selectBuyPlan(w->registry.get<Competitive::MoneyComponent>(e).money(), Competitive::teamFromId(team), bot.difficulty, w->registry.get<Competitive::MoneyComponent>(e).loss_streak);
-    std::vector<glm::vec3> spawns;
-    for (auto& sp : g_game_rules.getTeamSpawnPoints()) if (sp.team_id == team) spawns.push_back(sp.position);
     glm::vec3 pos = w->registry.get<TransformComponent>(e).position;
     for (const char* alias : plan.aliases) {
         const WeaponCatalogDef* def = findCatalogByAlias(alias); if (!def) continue;
         Competitive::BuyContext ctx; ctx.client_id = client_id; ctx.request_seq = ++g_bot_buy_seq[client_id];
         ctx.phase = g_round_system.state.phase; ctx.seconds_into_live = 0.0f;
         ctx.alive = w->registry.get<FpsHealthComponent>(e).alive;
-        ctx.in_buy_zone = Competitive::isInBuyZone(pos, spawns, g_round_system.config.buy_zone_radius);
+        ctx.in_buy_zone = Competitive::isInBuyZone(w->registry, e, team);
         ctx.team_id = team; ctx.money = &w->registry.get<Competitive::MoneyComponent>(e);
         ctx.inventory = &w->registry.get<InventoryComponent>(e); ctx.loadout = &w->registry.get<PlayerLoadoutComponent>(e);
         ctx.weapon = &w->registry.get<WeaponComponent>(e); ctx.armor = w->registry.all_of<ArmorComponent>(e) ? &w->registry.get<ArmorComponent>(e) : nullptr;
@@ -917,6 +916,59 @@ static bool configureBombSites(world& w)
     configureBombSitesFallback();
     return false;
 }
+static void ensureBuyZoneTriggers(world& w)
+{
+    auto& registry = w.registry;
+    auto zones = registry.view<BuyZoneComponent>();
+    if (!zones.empty()) {
+        size_t authored_count = 0;
+        for (entt::entity e : zones) {
+            ++authored_count;
+            if (!registry.all_of<TransformComponent, ColliderComponent, TriggerComponent>(e)) {
+                LOG_ENGINE_ERROR("BuyZone: authored zone {} is missing transform/collider/trigger; zone is disabled",
+                    static_cast<uint32_t>(e));
+                continue;
+            }
+            if (!registry.all_of<TriggerOverlapState>(e) &&
+                w.getPhysicsSystem().createTriggerBody(registry, e).IsInvalid())
+                LOG_ENGINE_ERROR("BuyZone: failed to create authored trigger {}", static_cast<uint32_t>(e));
+        }
+        LOG_ENGINE_INFO("BuyZone: using {} authored team trigger(s)", authored_count);
+        return;
+    }
+
+    const float radius = g_round_system.config.buy_zone_radius;
+    if (!std::isfinite(radius) || radius <= 0.0f) {
+        LOG_ENGINE_ERROR("BuyZone: invalid spawn fallback radius {}; no buy zones created", radius);
+        return;
+    }
+
+    uint32_t trigger_id = 1000;
+    size_t created = 0;
+    for (const auto& spawn : g_game_rules.getTeamSpawnPoints()) {
+        const Competitive::FpsTeam team = Competitive::teamFromId(spawn.team_id);
+        if (!Competitive::isPlayingTeam(team))
+            continue;
+
+        const entt::entity e = registry.create();
+        registry.emplace<TransformComponent>(e, spawn.position.x, spawn.position.y, spawn.position.z);
+        ColliderComponent collider;
+        collider.shape_type = ColliderShapeType::Sphere;
+        collider.sphere_radius = radius;
+        registry.emplace<ColliderComponent>(e, std::move(collider));
+        registry.emplace<TriggerComponent>(e, TriggerComponent{true, trigger_id++, true});
+        registry.emplace<BuyZoneComponent>(e, BuyZoneComponent{spawn.team_id});
+        if (w.getPhysicsSystem().createTriggerBody(registry, e).IsInvalid()) {
+            LOG_ENGINE_ERROR("BuyZone: failed to create spawn fallback trigger for team {} at ({},{},{})",
+                static_cast<int>(spawn.team_id), spawn.position.x, spawn.position.y, spawn.position.z);
+            registry.destroy(e);
+            continue;
+        }
+        ++created;
+    }
+    LOG_ENGINE_INFO("BuyZone: created {} team-specific spawn fallback trigger(s), radius={:.2f} m",
+        created, radius);
+}
 static void configureBombSitesFallback()
 {
     g_bomb_system.config.sites.clear();
@@ -1142,16 +1194,13 @@ static void handleCompetitiveBuy(uint16_t client_id, BitReader& reader)
         return;
     }
     uint8_t team = w->registry.get<TeamComponent>(e).team_id;
-    // Buy zone: distance-to-team-spawn fallback (see CompetitiveLogic note).
-    std::vector<glm::vec3> spawns;
-    for (auto& sp : g_game_rules.getTeamSpawnPoints()) if (sp.team_id == team) spawns.push_back(sp.position);
     glm::vec3 pos = w->registry.get<TransformComponent>(e).position;
     Competitive::BuyContext ctx;
     ctx.client_id = client_id; ctx.request_seq = seq;
     ctx.phase = g_round_system.state.phase;
     ctx.seconds_into_live = g_round_system.state.phase == Competitive::RoundPhase::Live ? g_round_system.phaseElapsed() : 0.0f;
     ctx.alive = w->registry.get<FpsHealthComponent>(e).alive;
-    ctx.in_buy_zone = Competitive::isInBuyZone(pos, spawns, g_round_system.config.buy_zone_radius);
+    ctx.in_buy_zone = Competitive::isInBuyZone(w->registry, e, team);
     ctx.team_id = team;
     ctx.money = &w->registry.get<Competitive::MoneyComponent>(e);
     ctx.inventory = &w->registry.get<InventoryComponent>(e);
@@ -1616,7 +1665,10 @@ GAME_API void gardenServerUpdate(float delta_time)
 GAME_API void gardenServerOnLevelLoaded()
 {
     if (!g_server_services) return;
-    g_server_services->game_world->getPhysicsSystem().optimizeBroadPhase();
+    world& game_world = *g_server_services->game_world;
+    if (g_competitive)
+        ensureBuyZoneTriggers(game_world);
+    game_world.getPhysicsSystem().optimizeBroadPhase();
     // The host hashes Project.default_level and passes the selected artifact.
     g_server_network.setLevelHash(g_server_services->level_hash);
     (void)bakeBotNavMeshIfRequested();

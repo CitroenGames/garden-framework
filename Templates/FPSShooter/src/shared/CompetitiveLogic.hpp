@@ -48,7 +48,7 @@ struct ModeConfig {
     float halftime_seconds = 15.0f;   // [V]
     float match_end_seconds = 15.0f;  // [V]
     float buy_window_after_live = 20.0f; // [P]
-    float buy_zone_radius = 12.0f;    // distance-to-spawn buy zone fallback
+    float buy_zone_radius = 12.0f;    // sphere trigger radius used at team spawns when no authored zones exist
     int32_t start_money = 800;        // [P]
     int32_t overtime_start_money = 10000; // [P]
     int32_t money_cap = 16000;        // [P]
@@ -667,14 +667,6 @@ inline TeamSelectResult validateTeamSelect(FpsTeam desired, bool auto_assign,
 // Late joiner spawns next Freeze when joining during Live/RoundEnd.
 inline bool canSpawnNow(RoundPhase phase) {
     return phase == RoundPhase::WaitingForPlayers || phase == RoundPhase::Warmup || phase == RoundPhase::Freeze;
-}
-
-// Buy-zone check: distance-to-team-spawn fallback (chosen over trigger-volume
-// wiring in this stage; TriggerComponent zones can replace this predicate
-// without changing BuySystem, which takes in_buy_zone as an input).
-inline bool isInBuyZone(const glm::vec3& player_pos, const std::vector<glm::vec3>& team_spawns, float radius) {
-    for (const auto& s : team_spawns) if (glm::distance(player_pos, s) <= radius) return true;
-    return false;
 }
 
 // --- Buy ----------------------------------------------------------------------------
