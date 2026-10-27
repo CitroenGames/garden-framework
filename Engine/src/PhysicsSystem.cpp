@@ -1316,6 +1316,13 @@ void PhysicsSystem::updateTriggers(entt::registry& registry)
     std::sort(triggers.begin(), triggers.end(),
         [](entt::entity a, entt::entity b) { return entt::to_integral(a) < entt::to_integral(b); });
 
+    // A TriggerComponent is authoring data, not proof that its sensor body was
+    // created. Keep failed bodies (unsupported shapes, cap, allocation) fail-
+    // closed, while retaining overlap state for successfully-created triggers
+    // whose body was later removed so their occupants still receive exits.
+    std::vector<OverlapResult> overlap_buffer(settings.max_bodies);
+    const uint32_t overlap_capacity = static_cast<uint32_t>(overlap_buffer.size());
+
     QueryFilter occupant_filter;
     occupant_filter.layer_mask = PhysicsObjectLayers::layerBit(settings.layers.dynamic_body) |
                                  PhysicsObjectLayers::layerBit(settings.layers.character_body);
@@ -1325,37 +1332,46 @@ void PhysicsSystem::updateTriggers(entt::registry& registry)
     {
         if (!registry.valid(trig)) continue;
         const auto& trigger = registry.get<TriggerComponent>(trig);
-        auto& state = registry.get_or_emplace<TriggerOverlapState>(trig);
+        // Only create overlap state after createTriggerBody succeeded. This
+        // prevents rejected/capped TriggerComponents from generating events.
+        if (!registry.all_of<TriggerOverlapState>(trig)) continue;
+        auto& state = registry.get<TriggerOverlapState>(trig);
         std::vector<entt::entity> now;
-        if (trigger.enabled)
+        const bool has_sensor_body =
+            entity_to_body.find(trig) != entity_to_body.end() &&
+            std::find(trigger_entities.begin(), trigger_entities.end(), trig) != trigger_entities.end();
+        if (trigger.enabled && has_sensor_body)
         {
             const auto& t = registry.get<TransformComponent>(trig);
             const auto& col = registry.get<ColliderComponent>(trig);
-            OverlapResult buf[64];
             uint32_t n = 0;
             const glm::vec3 as = glm::abs(t.scale);
             switch (col.shape_type)
             {
             case ColliderShapeType::Box:
-                n = overlapBox(t.position, col.box_half_extents * as, t.rotation, occupant_filter, buf, 64);
+                n = overlapBox(t.position, col.box_half_extents * as, t.rotation, occupant_filter,
+                    overlap_buffer.data(), overlap_capacity);
                 break;
             case ColliderShapeType::Sphere:
-                n = overlapSphere(t.position, col.sphere_radius * std::max({as.x, as.y, as.z}), occupant_filter, buf, 64);
+                n = overlapSphere(t.position, col.sphere_radius * std::max({as.x, as.y, as.z}), occupant_filter,
+                    overlap_buffer.data(), overlap_capacity);
                 break;
             case ColliderShapeType::Capsule:
                 n = overlapCapsule(t.position, col.capsule_half_height * as.y,
-                    col.capsule_radius * std::max(as.x, as.z), occupant_filter, buf, 64);
+                    col.capsule_radius * std::max(as.x, as.z), occupant_filter,
+                    overlap_buffer.data(), overlap_capacity);
                 break;
             case ColliderShapeType::Cylinder:
                 n = overlapCapsule(t.position, col.cylinder_half_height * as.y,
-                    col.cylinder_radius * std::max(as.x, as.z), occupant_filter, buf, 64);
+                    col.cylinder_radius * std::max(as.x, as.z), occupant_filter,
+                    overlap_buffer.data(), overlap_capacity);
                 break;
             default:
                 break;
             }
             for (uint32_t i = 0; i < n; ++i)
             {
-                entt::entity other = buf[i].entity;
+                entt::entity other = overlap_buffer[i].entity;
                 if (other == trig || !registry.valid(other)) continue;
                 if (std::find(now.begin(), now.end(), other) == now.end()) now.push_back(other);
             }

@@ -1484,11 +1484,20 @@ static bool testD6TriggerLifecycle()
         step(); check("teleport out", 1, 1);
         w.registry.get<TransformComponent>(occupant).position = glm::vec3(0.0f);
         step(); check("re-enter", 2, 1);
-        // Destroy inside: remove Jolt body then destroy entity -> one exit, pruned.
+        // Removing an active trigger body must flush its remembered occupants
+        // through exits even though the authored trigger entity remains alive.
+        w.getPhysicsSystem().removeBody(trig);
+        step(); check("sensor body removed", 2, 2);
+        if (!w.registry.get<TriggerOverlapState>(trig).occupants.empty())
+            okk = false;
+
+        // Recreate the sensor, enter again, then destroy an occupant inside.
+        w.getPhysicsSystem().createTriggerBody(w.registry, trig);
+        step(); check("sensor body recreated", 3, 2);
         w.getPhysicsSystem().removeBody(occupant);
         w.registry.destroy(occupant);
-        step(); check("destroy inside", 2, 2);
-        step(); check("destroy pruned (no extra exit)", 2, 2);
+        step(); check("destroy inside", 3, 3);
+        step(); check("destroy pruned (no extra exit)", 3, 3);
         // Occupant set in state must be empty now.
         if (!w.registry.get<TriggerOverlapState>(trig).occupants.empty())
             okk = false;
@@ -1519,8 +1528,53 @@ static bool testD6TriggerCapAndMeshRejection()
     if (!w.getPhysicsSystem().createTriggerBody(w.registry, mesh_trig).IsInvalid())
         return fail(name, "mesh trigger was not rejected");
     if (w.getPhysicsSystem().hasBody(mesh_trig)) return fail(name, "mesh trigger created a body");
+    EventBus::get().clear();
+    g_trigger_entered = 0;
+    EventBus::get().sink<TriggerEnteredEvent>().connect<&onTriggerEntered>();
+    makeDynamicBox(w, glm::vec3(20.0f, 0.0f, 0.0f));
     // World keeps stepping.
     w.getPhysicsSystem().stepPhysics(w.registry);
+    EventBus::get().flush();
+    EventBus::get().sink<TriggerEnteredEvent>().disconnect<&onTriggerEntered>();
+    EventBus::get().clear();
+    if (g_trigger_entered != 0) return fail(name, "failed/capped trigger emitted an enter event");
+    if (w.registry.all_of<TriggerOverlapState>(t3) &&
+        !w.registry.get<TriggerOverlapState>(t3).occupants.empty())
+        return fail(name, "failed/capped trigger retained occupants");
+    return pass(name);
+}
+
+static bool testD6TriggerOccupantCapacity()
+{
+    const std::string name = "D6 trigger tracks more than 64 occupants";
+    EventBus::get().clear();
+    g_trigger_entered = 0;
+    EventBus::get().sink<TriggerEnteredEvent>().connect<&onTriggerEntered>();
+    {
+        world w; w.initializePhysics();
+        makeTriggerBox(w, glm::vec3(0.0f), 5.0f, 9);
+        constexpr int occupant_count = 70;
+        for (int i = 0; i < occupant_count; ++i)
+        {
+            const glm::vec3 pos(float(i % 8) * 0.2f, 1.0f + float(i / 8) * 0.2f, 0.0f);
+            auto e = w.registry.create();
+            w.registry.emplace<TransformComponent>(e, pos.x, pos.y, pos.z);
+            auto& rb = w.registry.emplace<RigidBodyComponent>(e);
+            rb.motion_type = BodyMotionType::Kinematic;
+            rb.apply_gravity = false;
+            w.getPhysicsSystem().createKinematicBody(pos, glm::vec3(0.0f), makeBoxShape(), e);
+        }
+        w.getPhysicsSystem().stepPhysics(w.registry);
+        EventBus::get().flush();
+        if (g_trigger_entered != occupant_count)
+        {
+            EventBus::get().sink<TriggerEnteredEvent>().disconnect<&onTriggerEntered>();
+            EventBus::get().clear();
+            return fail(name, "trigger overlap query truncated the occupant set");
+        }
+    }
+    EventBus::get().sink<TriggerEnteredEvent>().disconnect<&onTriggerEntered>();
+    EventBus::get().clear();
     return pass(name);
 }
 
@@ -1886,6 +1940,8 @@ int main()
     ok = testD6TriggerLifecycle() && ok;
     run("D6 trigger cap and mesh rejection");
     ok = testD6TriggerCapAndMeshRejection() && ok;
+    run("D6 trigger tracks more than 64 occupants");
+    ok = testD6TriggerOccupantCapacity() && ok;
     run("D6-U1 level round-trip");
     ok = testD6LevelRoundTrip() && ok;
     run("FPSShooter level references");
