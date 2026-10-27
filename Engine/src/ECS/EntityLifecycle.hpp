@@ -53,6 +53,12 @@ public:
                              .connect<&EntityLifecycle::onIdentityConstruct>(*this);
         m_on_destroy = m_registry.on_destroy<IdentityComponent>()
                            .connect<&EntityLifecycle::onIdentityDestroy>(*this);
+        // Registries cloned before this service is created (notably Editor
+        // PIE worlds) already contain identities, so seed the index after
+        // installing hooks for subsequent component changes.
+        for (auto [e, identity] : m_registry.view<IdentityComponent>().each())
+            if (!identity.guid.isNull())
+                index().by_guid[identity.guid] = e;
     }
 
     ~EntityLifecycle()

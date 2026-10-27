@@ -383,6 +383,48 @@ bool testStaleParentAndRebuild()
     return pass(name);
 }
 
+// H-B helper coverage: ordered rebuild is isolated to one level-load cohort.
+bool testCohortRebuildPreservesUnrelatedMirrors()
+{
+    const std::string name = "H-B cohort rebuild preserves unrelated mirrors and file order";
+    EventBus::get().clear();
+    entt::registry reg;
+    EntityLifecycle life(reg, 54);
+    const entt::entity outside_parent = makeEntity(reg, life, {0, 0, 0});
+    const entt::entity outside_child = makeEntity(reg, life, {0, 0, 0});
+    if (!Hierarchy::attach(reg, outside_child, outside_parent))
+        return fail(name, "failed to build unrelated hierarchy");
+    const auto outside_mirror = reg.get<ChildrenComponent>(outside_parent).children;
+
+    const entt::entity root = makeEntity(reg, life, {0, 0, 0});
+    const entt::entity first_child = makeEntity(reg, life, {0, 0, 0});
+    const entt::entity second_child = makeEntity(reg, life, {0, 0, 0});
+    const entt::entity external_parent_child = makeEntity(reg, life, {0, 0, 0});
+    const EntityRef root_ref = life.refOf(root);
+    const EntityRef first_ref = life.refOf(first_child);
+    const EntityRef second_ref = life.refOf(second_child);
+
+    reg.emplace<ParentComponent>(first_child, ParentComponent{root_ref});
+    reg.emplace<ParentComponent>(second_child, ParentComponent{root_ref});
+    reg.emplace<ParentComponent>(external_parent_child,
+                                 ParentComponent{life.refOf(outside_parent)});
+    reg.emplace<ChildrenComponent>(root, ChildrenComponent{{life.refOf(outside_child)}});
+    reg.emplace<ChildrenComponent>(first_child, ChildrenComponent{{second_ref}});
+
+    Hierarchy::rebuildChildren(reg,
+        {root, first_child, second_child, external_parent_child});
+
+    const auto* rebuilt = reg.try_get<ChildrenComponent>(root);
+    if (!rebuilt || rebuilt->children.size() != 2 ||
+        rebuilt->children[0] != first_ref || rebuilt->children[1] != second_ref)
+        return fail(name, "cohort Children mirror did not follow file order");
+    if (reg.get<ChildrenComponent>(outside_parent).children != outside_mirror)
+        return fail(name, "unrelated registry mirror changed");
+    if (reg.all_of<ParentComponent>(external_parent_child))
+        return fail(name, "external parent reference was not removed");
+    return pass(name);
+}
+
 // Depth limit 64 failure case: chain of 70 still terminates; node beyond
 // limit is not propagated (no crash, no hang).
 bool testDepthLimit()
@@ -421,6 +463,7 @@ int main()
     if (!testOrphanDestroy()) ++failures;
     if (!testReparentToRoot()) ++failures;
     if (!testStaleParentAndRebuild()) ++failures;
+    if (!testCohortRebuildPreservesUnrelatedMirrors()) ++failures;
     if (!testDepthLimit()) ++failures;
     if (failures == 0)
         std::cout << "All HierarchyTests passed" << std::endl;

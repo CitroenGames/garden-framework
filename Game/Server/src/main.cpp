@@ -159,6 +159,11 @@ int main(int argc, char* argv[])
 
     game_module.registerComponents(&reflection);
 
+    // LevelManager assigns final persistent identities while instantiating
+    // entities; install lifecycle indexing first so its construct hook sees
+    // those identities.
+    EntityLifecycle server_lifecycle(_world.registry);
+
     // Load level
     LevelData level_data;
     std::string level_path = project_manager.getDescriptor().default_level;
@@ -215,7 +220,6 @@ int main(int argc, char* argv[])
     // D5: dedicated server is driven by a SystemScheduler (server host).
     // World physics is advanced once per consumed fixed tick in Physics,
     // before the game module's server gameplay callback.
-    EntityLifecycle server_lifecycle(_world.registry);
     SystemScheduler server_scheduler(true, _world.getFixedDelta());
     server_scheduler.setLifecycle(&server_lifecycle);
     registerGameplaySystems(server_scheduler);

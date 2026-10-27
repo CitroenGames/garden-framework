@@ -1,6 +1,8 @@
 #include "LevelManager.hpp"
 #include "json.hpp"
 #include "Components/Components.hpp"
+#include "Components/IdentityComponent.hpp"
+#include "ECS/Hierarchy.hpp"
 #include "world.hpp"
 #include "Graphics/RenderAPI.hpp"
 #include "Utils/GltfLoader.hpp"
@@ -32,6 +34,7 @@
 #include <initializer_list>
 #include <limits>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 using json = nlohmann::json;
@@ -494,6 +497,201 @@ static void deserializeReflectedComponents(ReflectionRegistry* reflection,
     json entity_json = json::object();
     entity_json["components"] = components;
     ReflectionSerializer::deserializeEntity(registry, entity, entity_json, *reflection);
+}
+
+struct LevelInstantiationPlan
+{
+    std::vector<EntityGuid> identity_guids;
+    std::vector<json> reflected_components;
+    // Parent entity's index in the LevelData cohort, or size_t max for roots.
+    std::vector<size_t> parent_indices;
+};
+
+static bool parseCanonicalGuid(const json& value, EntityGuid& out)
+{
+    if (!value.is_string())
+        return false;
+    const std::string text = value.get<std::string>();
+    if (text.size() != 33 || text[16] != '-')
+        return false;
+    for (size_t i = 0; i < text.size(); ++i)
+    {
+        if (i == 16)
+            continue;
+        const char c = text[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+              (c >= 'A' && c <= 'F')))
+            return false;
+    }
+    return guidFromString(text, out);
+}
+
+static bool prepareLevelInstantiation(const LevelData& level_data,
+                                      const entt::registry& registry,
+                                      LevelInstantiationPlan& plan)
+{
+    const size_t entity_count = level_data.entities.size();
+    const size_t no_parent = std::numeric_limits<size_t>::max();
+    plan.identity_guids.resize(entity_count);
+    plan.reflected_components.resize(entity_count);
+    plan.parent_indices.assign(entity_count, no_parent);
+
+    std::unordered_set<EntityGuid, GuidHash> destination_guids;
+    for (auto [e, identity] : registry.view<IdentityComponent>().each())
+    {
+        (void)e;
+        if (!identity.guid.isNull())
+            destination_guids.insert(identity.guid);
+    }
+
+    std::vector<bool> has_serialized_identity(entity_count, false);
+    std::unordered_set<EntityGuid, GuidHash> cohort_guids;
+    cohort_guids.reserve(entity_count);
+
+    // First reserve and validate all persisted values so generated legacy IDs
+    // cannot collide with a later entity in this same file.
+    for (size_t i = 0; i < entity_count; ++i)
+    {
+        const json& components = level_data.entities[i].reflected_components;
+        if (!components.is_object())
+            continue;
+        auto identity_it = components.find("IdentityComponent");
+        if (identity_it == components.end() || identity_it->is_null())
+            continue;
+        if (!identity_it->is_object())
+        {
+            LOG_ENGINE_ERROR("Level instantiation rejected: IdentityComponent for '{}' is malformed",
+                             level_data.entities[i].name);
+            return false;
+        }
+
+        auto guid_it = identity_it->find("guid");
+        if (guid_it == identity_it->end() || guid_it->is_null())
+            continue;
+
+        EntityGuid guid{};
+        if (!parseCanonicalGuid(*guid_it, guid))
+        {
+            LOG_ENGINE_ERROR("Level instantiation rejected: malformed IdentityComponent GUID for '{}'",
+                             level_data.entities[i].name);
+            return false;
+        }
+        if (guid.isNull())
+            continue;
+        if (destination_guids.find(guid) != destination_guids.end())
+        {
+            LOG_ENGINE_ERROR("Level instantiation rejected: IdentityComponent GUID collision with destination registry for '{}'",
+                             level_data.entities[i].name);
+            return false;
+        }
+        if (!cohort_guids.insert(guid).second)
+        {
+            LOG_ENGINE_ERROR("Level instantiation rejected: duplicate IdentityComponent GUID in level cohort for '{}'",
+                             level_data.entities[i].name);
+            return false;
+        }
+        plan.identity_guids[i] = guid;
+        has_serialized_identity[i] = true;
+    }
+
+    for (size_t i = 0; i < entity_count; ++i)
+    {
+        if (has_serialized_identity[i])
+            continue;
+        EntityGuid guid{};
+        do
+        {
+            guid = generateEntityGuid();
+        } while (guid.isNull() ||
+                 destination_guids.find(guid) != destination_guids.end() ||
+                 !cohort_guids.insert(guid).second);
+        plan.identity_guids[i] = guid;
+    }
+
+    std::unordered_map<EntityGuid, size_t, GuidHash> cohort_by_guid;
+    cohort_by_guid.reserve(entity_count);
+    for (size_t i = 0; i < entity_count; ++i)
+        cohort_by_guid.emplace(plan.identity_guids[i], i);
+
+    // Parent is validated separately and installed only after every entity
+    // and final identity exists. ChildrenComponent is an ignored mirror.
+    for (size_t i = 0; i < entity_count; ++i)
+    {
+        const LevelEntity& entity = level_data.entities[i];
+        const json& components = entity.reflected_components;
+        json normalized = components.is_object() ? components : json::object();
+        normalized["IdentityComponent"] =
+            json::object({{"guid", guidToString(plan.identity_guids[i])}});
+        normalized.erase("ParentComponent");
+        normalized.erase("ChildrenComponent");
+        plan.reflected_components[i] = std::move(normalized);
+
+        if (!components.is_object())
+            continue;
+        auto parent_it = components.find("ParentComponent");
+        if (parent_it == components.end() || parent_it->is_null())
+            continue;
+        if (!parent_it->is_object())
+        {
+            LOG_ENGINE_ERROR("Level instantiation rejected: ParentComponent for '{}' is malformed",
+                             entity.name);
+            return false;
+        }
+        auto ref_it = parent_it->find("parent");
+        if (ref_it == parent_it->end() || ref_it->is_null())
+            continue;
+
+        EntityGuid parent_guid{};
+        if (!parseCanonicalGuid(*ref_it, parent_guid))
+        {
+            LOG_ENGINE_ERROR("Level instantiation rejected: malformed ParentComponent GUID for '{}'",
+                             entity.name);
+            return false;
+        }
+        if (parent_guid.isNull())
+            continue;
+
+        const auto parent_entity = cohort_by_guid.find(parent_guid);
+        if (parent_entity == cohort_by_guid.end())
+        {
+            LOG_ENGINE_WARN("Level entity '{}' references a missing or external parent {}; parent link removed",
+                            entity.name, guidToString(parent_guid));
+            continue;
+        }
+        if (parent_entity->second == i)
+        {
+            LOG_ENGINE_ERROR("Level instantiation rejected: '{}' is its own hierarchy parent",
+                             entity.name);
+            return false;
+        }
+        plan.parent_indices[i] = parent_entity->second;
+    }
+
+    // Each entity has at most one parent. A three-state walk rejects cycles
+    // without modifying the destination registry.
+    std::vector<uint8_t> visit_state(entity_count, 0);
+    for (size_t start = 0; start < entity_count; ++start)
+    {
+        if (visit_state[start] != 0)
+            continue;
+        std::vector<size_t> path;
+        size_t current = start;
+        while (current != no_parent && visit_state[current] == 0)
+        {
+            visit_state[current] = 1;
+            path.push_back(current);
+            current = plan.parent_indices[current];
+        }
+        if (current != no_parent && visit_state[current] == 1)
+        {
+            LOG_ENGINE_ERROR("Level instantiation rejected: hierarchy parent links contain a cycle");
+            return false;
+        }
+        for (size_t index : path)
+            visit_state[index] = 2;
+    }
+
+    return true;
 }
 
 static void applyWaterComponentToEntityMesh(entt::registry& registry, entt::entity entity)
@@ -3220,6 +3418,11 @@ bool LevelManager::instantiateLevelParallel(
     bool create_authority_game_mode,
     std::vector<entt::entity>* out_created_entities)
 {
+    LevelInstantiationPlan instantiation_plan;
+    if (!prepareLevelInstantiation(level_data, game_world.registry,
+                                  instantiation_plan))
+        return false;
+
     LOG_ENGINE_INFO("Instantiating level (parallel): {}", level_data.metadata.level_name);
     ScopedLoadTimer timer("Level instantiation");
 
@@ -3334,12 +3537,18 @@ bool LevelManager::instantiateLevelParallel(
     };
 
     // Create all entities (same logic as instantiateLevel, using preloaded data)
-    for (const auto& entity_data : level_data.entities)
+    for (size_t entity_index = 0; entity_index < level_data.entities.size(); ++entity_index)
     {
+        const auto& entity_data = level_data.entities[entity_index];
         auto e = game_world.registry.create();
         created_entities.push_back(e);
         if (out_created_entities)
             out_created_entities->push_back(e);
+
+        // All final GUIDs were selected by the read-only preflight. The
+        // lifecycle construct hook therefore observes the final value.
+        game_world.registry.emplace<IdentityComponent>(
+            e, IdentityComponent{instantiation_plan.identity_guids[entity_index]});
 
         if (!entity_data.name.empty()) {
             entity_map[entity_data.name] = e;
@@ -3381,7 +3590,8 @@ bool LevelManager::instantiateLevelParallel(
         }
 
         setupLevelColliderComponent(game_world.registry, e, entity_data, getOrFinalizeMesh);
-        deserializeReflectedComponents(m_reflection, game_world.registry, e, entity_data.reflected_components);
+        deserializeReflectedComponents(m_reflection, game_world.registry, e,
+                                       instantiation_plan.reflected_components[entity_index]);
         setupLevelTerrainComponent(game_world.registry, e, entity_data, render_api);
         applyWaterComponentToEntityMesh(game_world.registry, e);
         createLevelPhysicsBody(game_world, e, entity_data);
@@ -3474,6 +3684,20 @@ bool LevelManager::instantiateLevelParallel(
             cc.max_distance = entity_data.constraint_max_distance;
         }
     }
+
+    // Restore saved hierarchy links only after the entire LevelData cohort
+    // has its final identities. The preflight has removed null/external refs
+    // and rejected malformed, self-parented, or cyclic graphs.
+    for (size_t i = 0; i < created_entities.size(); ++i)
+    {
+        const size_t parent_index = instantiation_plan.parent_indices[i];
+        if (parent_index == std::numeric_limits<size_t>::max())
+            continue;
+        game_world.registry.emplace_or_replace<ParentComponent>(
+            created_entities[i],
+            ParentComponent{EntityRef{instantiation_plan.identity_guids[parent_index]}});
+    }
+    Hierarchy::rebuildChildren(game_world.registry, created_entities);
 
     // Second pass: Resolve references (PlayerRepresentation)
     for (size_t i = 0; i < level_data.entities.size(); ++i) {

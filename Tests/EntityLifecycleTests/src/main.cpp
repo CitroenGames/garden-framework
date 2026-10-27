@@ -211,6 +211,27 @@ bool testL6()
     if (reg.valid(e)) return fail(name, "entity valid after drain");
     return pass(name);
 }
+
+// L7: a service constructed after an Editor/PIE registry clone backfills IDs.
+bool testL7()
+{
+    const std::string name = "L7 constructor backfills cloned registry identities";
+    resetBus();
+    entt::registry reg;
+    const entt::entity first = reg.create();
+    const entt::entity second = reg.create();
+    const EntityGuid first_guid{0x101, 0x201};
+    const EntityGuid second_guid{0x102, 0x202};
+    reg.emplace<IdentityComponent>(first, first_guid);
+    reg.emplace<IdentityComponent>(second, second_guid);
+
+    EntityLifecycle life(reg, 12);
+    if (life.resolve(EntityRef{first_guid}) != first)
+        return fail(name, "first pre-existing identity was not indexed");
+    if (life.resolve(EntityRef{second_guid}) != second)
+        return fail(name, "second pre-existing identity was not indexed");
+    return pass(name);
+}
 } // namespace
 
 int main()
@@ -222,6 +243,7 @@ int main()
     if (!testL4()) ++failures;
     if (!testL5()) ++failures;
     if (!testL6()) ++failures;
+    if (!testL7()) ++failures;
     if (failures == 0)
         std::cout << "All EntityLifecycleTests passed" << std::endl;
     else

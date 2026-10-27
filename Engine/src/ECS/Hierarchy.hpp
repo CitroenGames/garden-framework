@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <functional>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -454,27 +455,35 @@ inline std::vector<entt::entity> collectDescendants(entt::registry& r,
     return out;
 }
 
-// Serialization rebuild (hierarchy.md section 5). Two-pass load: pass 1
-// creates all entities + ParentComponent (GUIDs already resolved through
-// IdentityComponent / EntityIndex); pass 2 calls this to rebuild every
-// ChildrenComponent from ParentComponent (the single source of truth).
-// ChildrenComponent is serialized as a mirror, but rebuild is authoritative;
-// WorldTransformComponent is never saved (derived).
-// Orphan parent GUID (target not in registry): entity becomes root,
-// ParentComponent is removed, warning logged.
+// Serialization rebuild (hierarchy.md section 5). The ordered list is one
+// load cohort: only its ChildrenComponent mirrors are cleared, and parent
+// references resolve only to identities in that cohort. ParentComponent is
+// authoritative; ChildrenComponent is rebuilt in the supplied file order.
+// WorldTransformComponent is derived and is never saved.
 // ---------------------------------------------------------------------------
 inline void rebuildChildren(entt::registry& r,
                             const std::vector<entt::entity>& ordered_children)
 {
-    std::vector<entt::entity> holders;
-    for (auto [e, children] : r.view<ChildrenComponent>().each())
+    std::unordered_map<EntityGuid, entt::entity, GuidHash> cohort_by_guid;
+    cohort_by_guid.reserve(ordered_children.size());
+    for (entt::entity e : ordered_children)
     {
-        (void)children;
-        holders.push_back(e);
+        if (e == entt::null || !r.valid(e))
+            continue;
+        const auto* identity = r.try_get<IdentityComponent>(e);
+        if (identity && !identity->guid.isNull())
+            cohort_by_guid.emplace(identity->guid, e);
     }
-    for (entt::entity e : holders)
+
+    // Serialized ChildrenComponent data is only a mirror. Clear mirrors on
+    // cohort entities and leave every unrelated registry entity untouched.
+    for (entt::entity e : ordered_children)
+    {
+        if (e == entt::null || !r.valid(e))
+            continue;
         if (auto* c = r.try_get<ChildrenComponent>(e))
             c->children.clear();
+    }
 
     for (entt::entity child : ordered_children)
     {
@@ -483,15 +492,16 @@ inline void rebuildChildren(entt::registry& r,
         const auto* p = r.try_get<ParentComponent>(child);
         if (!p || p->parent.isNull())
             continue;
-        entt::entity parent = detail::resolveRef(r, p->parent);
-        if (parent == entt::null)
+        auto parent_it = cohort_by_guid.find(p->parent.guid);
+        if (parent_it == cohort_by_guid.end())
         {
             std::fprintf(stderr,
-                         "[Hierarchy] rebuildChildren: orphan parent GUID, "
+                         "[Hierarchy] rebuildChildren: parent is outside the load cohort, "
                          "entity becomes root\n");
             r.remove<ParentComponent>(child);
             continue;
         }
+        const entt::entity parent = parent_it->second;
         auto& children = r.get_or_emplace<ChildrenComponent>(parent);
         const EntityRef child_ref = detail::refOfEntity(r, child);
         if (!child_ref.isNull() &&
@@ -502,20 +512,21 @@ inline void rebuildChildren(entt::registry& r,
         if (!r.all_of<WorldTransformComponent>(parent))
             r.emplace<WorldTransformComponent>(parent);
     }
-    // Mark every hierarchied root dirty for the next propagation tick.
-    for (entt::entity e : r.view<ParentComponent>())
-        markDirty(r, e);
-    for (entt::entity e : r.view<ChildrenComponent>())
-        markDirty(r, e);
+    // Only this load cohort is dirtied. Its rebuilt mirrors contain cohort
+    // children, so this cannot walk into unrelated registry hierarchies.
+    for (entt::entity e : ordered_children)
+        if (e != entt::null && r.valid(e) &&
+            r.any_of<ParentComponent, ChildrenComponent>(e))
+            markDirty(r, e);
 }
 
-// Scans ParentComponents in registry order. Callers loading from a file
-// should prefer the ordered overload, passing entities in file order so
-// Children order matches authoring order (hierarchy.md section 5).
+// Rebuilds the whole registry in registry order for callers without a saved
+// cohort. File loaders should use the ordered overload so mirrors preserve
+// LevelData file order and unrelated registry entities remain untouched.
 inline void rebuildChildren(entt::registry& r)
 {
     std::vector<entt::entity> ordered;
-    for (entt::entity e : r.view<ParentComponent>())
+    for (entt::entity e : r.view<entt::entity>())
         ordered.push_back(e);
     rebuildChildren(r, ordered);
 }

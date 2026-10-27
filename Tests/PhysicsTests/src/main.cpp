@@ -2,6 +2,10 @@
 #include "Assets/AssetManager.hpp"
 #include "Assets/CookedCollisionSerializer.hpp"
 #include "Components/Components.hpp"
+#include "Components/HierarchyComponents.hpp"
+#include "Components/IdentityComponent.hpp"
+#include "ECS/EntityLifecycle.hpp"
+#include "ECS/Hierarchy.hpp"
 #include "Graphics/HeadlessRenderAPI.hpp"
 #include "LevelManager.hpp"
 #include "PhysicsSystem.hpp"
@@ -13,6 +17,7 @@
 #include "Character/FpsCharacter.hpp"
 #include "Reflection/EngineReflection.hpp"
 #include "Reflection/ReflectionRegistry.hpp"
+#include "Reflection/ReflectionSerializer.hpp"
 #include "Tick/TickSystem.hpp"
 #include "Utils/Log.hpp"
 #include "world.hpp"
@@ -31,6 +36,7 @@
 #include <iterator>
 #include <memory>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include <glm/gtc/constants.hpp>
@@ -3276,6 +3282,346 @@ static bool testVRTemplateReferences(const fs::path& repo_root)
     return pass(name);
 }
 
+static bool roundTripHBPersistence(LevelManager& manager,
+                                   const LevelData& source,
+                                   bool binary,
+                                   LevelData& loaded,
+                                   std::string& error)
+{
+    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+    const fs::path path = fs::temp_directory_path() /
+        ("garden_hb_" + std::to_string(stamp) + (binary ? ".gardenbin" : ".json"));
+    const bool saved = binary
+        ? manager.saveLevelToBinary(path.string(), source)
+        : manager.saveLevelToJSON(path.string(), source);
+    if (!saved)
+    {
+        error = "failed to save " + std::string(binary ? "binary" : "JSON") + " fixture";
+        std::error_code ec;
+        fs::remove(path, ec);
+        return false;
+    }
+    const bool loaded_ok = binary
+        ? manager.loadLevelFromBinary(path.string(), loaded)
+        : manager.loadLevelFromJSON(path.string(), loaded);
+    std::error_code ec;
+    fs::remove(path, ec);
+    if (!loaded_ok)
+    {
+        error = "failed to reload " + std::string(binary ? "binary" : "JSON") + " fixture";
+        return false;
+    }
+    return true;
+}
+
+static entt::entity findEntityByTag(entt::registry& registry, const std::string& name)
+{
+    for (auto [entity, tag] : registry.view<TagComponent>().each())
+        if (tag.name == name)
+            return entity;
+    return entt::null;
+}
+
+static LevelData makeHBCohortFixture()
+{
+    using json = nlohmann::json;
+    LevelData level;
+    level.metadata.level_name = "H-B cohort fixture";
+    const EntityGuid root_guid{0xA100, 0xB100};
+    const EntityGuid first_guid{0xA200, 0xB200};
+    const EntityGuid external_guid{0xDEAD, 0xBEEF};
+    const EntityGuid fake_child_guid{0xFFFF, 0xFFFF};
+    const EntityGuid fake_mirror_guid{0xEEEE, 0xEEEE};
+
+    LevelEntity root;
+    root.name = "hb_root";
+    root.reflected_components = json::object({
+        {"IdentityComponent", json::object({{"guid", guidToString(root_guid)}})},
+        {"ChildrenComponent", json::object({{"children", json::array({guidToString(fake_child_guid)})}})}
+    });
+
+    LevelEntity first_child;
+    first_child.name = "hb_first_child";
+    first_child.reflected_components = json::object({
+        {"IdentityComponent", json::object({{"guid", guidToString(first_guid)}})},
+        {"ParentComponent", json::object({{"parent", guidToString(root_guid)}})},
+        {"ChildrenComponent", json::object({{"children", json::array({guidToString(fake_mirror_guid)})}})}
+    });
+    level.entities.push_back(first_child);
+    // The child intentionally precedes its parent in file order. Restore must
+    // wait until every cohort identity exists before resolving this link.
+    level.entities.push_back(root);
+
+    // A legacy entity without an IdentityComponent receives a generated ID.
+    LevelEntity missing_identity;
+    missing_identity.name = "hb_missing_identity";
+    missing_identity.reflected_components = json::object({
+        {"ParentComponent", json::object({{"parent", guidToString(root_guid)}})}
+    });
+    level.entities.push_back(missing_identity);
+
+    // A legacy serialized null identity also receives a generated ID.
+    LevelEntity null_identity;
+    null_identity.name = "hb_null_identity";
+    null_identity.reflected_components = json::object({
+        {"IdentityComponent", json::object({{"guid", guidToString(EntityGuid{})}})},
+        {"ParentComponent", json::object({{"parent", guidToString(root_guid)}})}
+    });
+    level.entities.push_back(null_identity);
+
+    // This destination-registry target is external to the cohort and must not
+    // be adopted as a parent during saved-level restore.
+    LevelEntity external_parent_child;
+    external_parent_child.name = "hb_external_parent_child";
+    external_parent_child.reflected_components = json::object({
+        {"ParentComponent", json::object({{"parent", guidToString(external_guid)}})}
+    });
+    level.entities.push_back(external_parent_child);
+
+    // A valid but absent GUID exercises the missing-parent policy separately
+    // from the existing destination-registry external-parent case.
+    LevelEntity missing_parent_child;
+    missing_parent_child.name = "hb_missing_parent_child";
+    missing_parent_child.reflected_components = json::object({
+        {"ParentComponent", json::object({{"parent", guidToString(EntityGuid{0xBAD, 0xBAD})}})}
+    });
+    level.entities.push_back(missing_parent_child);
+
+    LevelEntity null_component;
+    null_component.name = "hb_null_parent_component";
+    null_component.reflected_components = json::object({{"ParentComponent", nullptr}});
+    level.entities.push_back(null_component);
+
+    LevelEntity null_reference;
+    null_reference.name = "hb_null_parent_reference";
+    null_reference.reflected_components = json::object({
+        {"ParentComponent", json::object({{"parent", guidToString(EntityGuid{})}})}
+    });
+    level.entities.push_back(null_reference);
+    return level;
+}
+
+static bool testLevelManagerHBPersistenceAndCohortRestore()
+{
+    using json = nlohmann::json;
+    const std::string name = "LevelManager H-B JSON/binary identity and hierarchy restore";
+    for (bool binary : {false, true})
+    {
+        LevelManager manager;
+        ReflectionRegistry reflection;
+        registerEngineReflection(reflection);
+        manager.setReflectionRegistry(&reflection);
+
+        LevelData loaded;
+        std::string error;
+        if (!roundTripHBPersistence(manager, makeHBCohortFixture(), binary,
+                                   loaded, error))
+            return fail(name, error);
+
+        world game_world;
+        const EntityGuid outside_guid{0xDEAD, 0xBEEF};
+        const EntityRef outside_mirror_ref{EntityGuid{0xCAFE, 0xCAFE}};
+        const entt::entity outside_parent = game_world.registry.create();
+        game_world.registry.emplace<IdentityComponent>(outside_parent, outside_guid);
+        game_world.registry.emplace<TagComponent>(outside_parent, TagComponent{"outside_parent"});
+        game_world.registry.emplace<ChildrenComponent>(
+            outside_parent, ChildrenComponent{{outside_mirror_ref}});
+        const auto saved_outside_mirror =
+            game_world.registry.get<ChildrenComponent>(outside_parent).children;
+        EntityLifecycle lifecycle(game_world.registry, 83);
+
+        std::vector<entt::entity> created;
+        if (!manager.instantiateLevel(loaded, game_world, nullptr, nullptr,
+                                      nullptr, nullptr, false, &created))
+            return fail(name, "valid persisted cohort was rejected");
+        if (created.size() != loaded.entities.size())
+            return fail(name, "created entity count did not match LevelData order");
+
+        const entt::entity root = findEntityByTag(game_world.registry, "hb_root");
+        const entt::entity first = findEntityByTag(game_world.registry, "hb_first_child");
+        const entt::entity missing = findEntityByTag(game_world.registry, "hb_missing_identity");
+        const entt::entity null_id = findEntityByTag(game_world.registry, "hb_null_identity");
+        const entt::entity external_child = findEntityByTag(game_world.registry, "hb_external_parent_child");
+        const entt::entity missing_parent_child = findEntityByTag(game_world.registry, "hb_missing_parent_child");
+        const entt::entity null_component = findEntityByTag(game_world.registry, "hb_null_parent_component");
+        const entt::entity null_reference = findEntityByTag(game_world.registry, "hb_null_parent_reference");
+        if (root == entt::null || first == entt::null || missing == entt::null ||
+            null_id == entt::null || external_child == entt::null ||
+            missing_parent_child == entt::null ||
+            null_component == entt::null || null_reference == entt::null)
+            return fail(name, "one of the fixture entities was not instantiated");
+
+        const EntityGuid root_guid{0xA100, 0xB100};
+        const EntityGuid first_guid{0xA200, 0xB200};
+        if (game_world.registry.get<IdentityComponent>(root).guid != root_guid ||
+            game_world.registry.get<IdentityComponent>(first).guid != first_guid)
+            return fail(name, "valid serialized identity GUID was not preserved");
+
+        std::unordered_set<EntityGuid, GuidHash> unique_ids;
+        for (entt::entity entity : created)
+        {
+            if (!game_world.registry.all_of<IdentityComponent>(entity))
+                return fail(name, "loaded entity has no IdentityComponent");
+            const EntityGuid guid = game_world.registry.get<IdentityComponent>(entity).guid;
+            if (guid.isNull() || !unique_ids.insert(guid).second)
+                return fail(name, "loaded entity identity is null or duplicated");
+            if (lifecycle.resolve(EntityRef{guid}) != entity)
+                return fail(name, "lifecycle construct hook did not index the final identity");
+        }
+
+        const EntityGuid missing_guid = game_world.registry.get<IdentityComponent>(missing).guid;
+        const EntityGuid null_guid = game_world.registry.get<IdentityComponent>(null_id).guid;
+        if (missing_guid == null_guid || missing_guid.isNull() || null_guid.isNull())
+            return fail(name, "legacy missing/null identities were not assigned distinct GUIDs");
+        const json saved_missing = ReflectionSerializer::serializeEntity(
+            game_world.registry, missing, reflection);
+        const std::string reflected_missing_guid =
+            saved_missing["components"]["IdentityComponent"]["guid"].get<std::string>();
+        if (reflected_missing_guid != guidToString(missing_guid))
+            return fail(name, "generated legacy GUID is not present in reflected save data");
+
+        // Model EditorApp's save path: reflected live components are copied
+        // into LevelEntity, then the level format persists that representation.
+        LevelEntity editor_saved_entity;
+        editor_saved_entity.name = "hb_missing_identity";
+        editor_saved_entity.reflected_components = saved_missing["components"];
+        LevelData editor_saved_level;
+        editor_saved_level.metadata.level_name = "H-B editor save fixture";
+        editor_saved_level.entities.push_back(editor_saved_entity);
+        for (bool saved_as_binary : {false, true})
+        {
+            LevelData editor_reloaded_level;
+            if (!roundTripHBPersistence(manager, editor_saved_level, saved_as_binary,
+                                        editor_reloaded_level, error))
+                return fail(name, error);
+            if (editor_reloaded_level.entities.size() != 1 ||
+                editor_reloaded_level.entities[0].reflected_components
+                    ["IdentityComponent"]["guid"].get<std::string>() != reflected_missing_guid)
+                return fail(name, "generated GUID did not persist through editor-style JSON/binary save");
+        }
+
+        const auto* root_children = game_world.registry.try_get<ChildrenComponent>(root);
+        if (!root_children || root_children->children.size() != 3 ||
+            root_children->children[0] != EntityRef{first_guid} ||
+            root_children->children[1] != EntityRef{missing_guid} ||
+            root_children->children[2] != EntityRef{null_guid})
+            return fail(name, "Children mirror did not rebuild in LevelData file order");
+        if (!game_world.registry.all_of<ParentComponent>(first) ||
+            game_world.registry.get<ParentComponent>(first).parent != EntityRef{root_guid})
+            return fail(name, "valid in-cohort ParentComponent was not restored");
+        if (game_world.registry.all_of<ParentComponent>(external_child) ||
+            game_world.registry.all_of<ParentComponent>(missing_parent_child) ||
+            game_world.registry.all_of<ParentComponent>(null_component) ||
+            game_world.registry.all_of<ParentComponent>(null_reference))
+            return fail(name, "external/null parent data was not removed");
+        if (game_world.registry.get<ChildrenComponent>(outside_parent).children !=
+            saved_outside_mirror)
+            return fail(name, "cohort rebuild changed an unrelated registry mirror");
+    }
+    return pass(name);
+}
+
+static LevelData makeHBRejectedFixture(const std::string& scenario)
+{
+    using json = nlohmann::json;
+    LevelData level;
+    level.metadata.level_name = "H-B rejected fixture";
+    const EntityGuid first_guid{0x7100, 0x8100};
+    const EntityGuid second_guid{0x7200, 0x8200};
+    LevelEntity first;
+    first.name = "hb_rejected_first";
+    first.reflected_components = json::object({
+        {"IdentityComponent", json::object({{"guid", guidToString(first_guid)}})}
+    });
+
+    if (scenario == "malformed_identity")
+        first.reflected_components["IdentityComponent"]["guid"] = "not-a-guid";
+    else if (scenario == "malformed_parent")
+        first.reflected_components["ParentComponent"] =
+            json::object({{"parent", "not-a-guid"}});
+    else if (scenario == "self_link")
+        first.reflected_components["ParentComponent"] =
+            json::object({{"parent", guidToString(first_guid)}});
+
+    level.entities.push_back(first);
+    if (scenario == "duplicate")
+    {
+        LevelEntity second;
+        second.name = "hb_rejected_duplicate";
+        second.reflected_components = json::object({
+            {"IdentityComponent", json::object({{"guid", guidToString(first_guid)}})}
+        });
+        level.entities.push_back(second);
+    }
+    else if (scenario == "cycle")
+    {
+        level.entities[0].reflected_components["ParentComponent"] =
+            json::object({{"parent", guidToString(second_guid)}});
+        LevelEntity second;
+        second.name = "hb_rejected_cycle";
+        second.reflected_components = json::object({
+            {"IdentityComponent", json::object({{"guid", guidToString(second_guid)}})},
+            {"ParentComponent", json::object({{"parent", guidToString(first_guid)}})}
+        });
+        level.entities.push_back(second);
+    }
+    return level;
+}
+
+static bool testLevelManagerHBRejectsBeforeRegistryMutation()
+{
+    const std::string name = "LevelManager H-B rejects malformed cohorts before registry mutation";
+    const std::vector<std::string> scenarios = {
+        "malformed_identity", "malformed_parent", "duplicate", "collision",
+        "self_link", "cycle"
+    };
+    for (bool binary : {false, true})
+    {
+        for (const std::string& scenario : scenarios)
+        {
+            LevelManager manager;
+            ReflectionRegistry reflection;
+            registerEngineReflection(reflection);
+            manager.setReflectionRegistry(&reflection);
+            LevelData loaded;
+            std::string error;
+            if (!roundTripHBPersistence(manager, makeHBRejectedFixture(scenario),
+                                        binary, loaded, error))
+                return fail(name, error);
+
+            world game_world;
+            const EntityGuid existing_guid = scenario == "collision"
+                ? EntityGuid{0x7100, 0x8100}
+                : EntityGuid{0x9100, 0xA100};
+            const EntityRef existing_child_ref{EntityGuid{0xB100, 0xC100}};
+            const entt::entity existing = game_world.registry.create();
+            game_world.registry.emplace<IdentityComponent>(existing, existing_guid);
+            game_world.registry.emplace<TagComponent>(existing, TagComponent{"existing"});
+            game_world.registry.emplace<ChildrenComponent>(
+                existing, ChildrenComponent{{existing_child_ref}});
+            const size_t identity_count_before =
+                game_world.registry.view<IdentityComponent>().size();
+            const size_t tag_count_before =
+                game_world.registry.view<TagComponent>().size();
+            const auto outside_mirror_before =
+                game_world.registry.get<ChildrenComponent>(existing).children;
+            EntityLifecycle lifecycle(game_world.registry, 84);
+            std::vector<entt::entity> created;
+            if (manager.instantiateLevel(loaded, game_world, nullptr, nullptr,
+                                         nullptr, nullptr, false, &created))
+                return fail(name, scenario + " cohort was unexpectedly accepted");
+            if (!created.empty() ||
+                game_world.registry.view<IdentityComponent>().size() != identity_count_before ||
+                game_world.registry.view<TagComponent>().size() != tag_count_before)
+                return fail(name, scenario + " rejection mutated the destination registry");
+            if (game_world.registry.get<ChildrenComponent>(existing).children !=
+                outside_mirror_before)
+                return fail(name, scenario + " rejection changed an existing mirror");
+        }
+    }
+    return pass(name);
+}
+
 int main()
 {
     EE::CLog::Init();
@@ -3393,6 +3739,10 @@ int main()
     ok = testThirdPersonTemplateReferences(repo_root) && ok;
     run("VR template references");
     ok = testVRTemplateReferences(repo_root) && ok;
+    run("LevelManager H-B JSON/binary identity and hierarchy restore");
+    ok = testLevelManagerHBPersistenceAndCohortRestore() && ok;
+    run("LevelManager H-B rejects malformed cohorts before mutation");
+    ok = testLevelManagerHBRejectsBeforeRegistryMutation() && ok;
 
     Assets::AssetManager::get().shutdown();
     EE::CLog::Shutdown();
