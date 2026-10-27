@@ -7,6 +7,7 @@
 #include "shared/SharedComponents.hpp"
 #include "shared/WeaponTypes.hpp"
 #include "shared/FpsGameLogic.hpp"
+#include "shared/WorldItemLifecycle.hpp"
 #include <vector>
 #include <functional>
 #include "Utils/Log.hpp"
@@ -131,11 +132,7 @@ public:
             auto& h = view.get<FpsHealthComponent>(entity);
             if (h.invulnerable_timer > 0.0f) h.invulnerable_timer -= delta_time;
         }
-        // Dropped weapon despawn.
-        std::vector<entt::entity> expired;
-        auto dv = game_world.registry.view<DroppedWeaponComponent>();
-        for (auto e: dv) { auto& d=dv.get<DroppedWeaponComponent>(e); d.despawn_timer-=delta_time; if(d.despawn_timer<=0) expired.push_back(e); }
-        for (auto e: expired) game_world.registry.destroy(e);
+        FpsLogic::cleanupDroppedWeapons(game_world.registry, delta_time);
     }
 };
 } // namespace Game

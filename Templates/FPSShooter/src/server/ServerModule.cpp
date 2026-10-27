@@ -11,11 +11,14 @@
 #include "Network/NetworkTypes.hpp"
 #include "Network/ServerNetworkManager.hpp"
 #include "server/LagCompensation.hpp"
+#include "server/FpsDamage.hpp"
 #include "shared/SharedComponents.hpp"
 #include "shared/CombatProtocol.hpp"
 #include "shared/WeaponTypes.hpp"
 #include "shared/WeaponSystem.hpp"
+#include "shared/MovementInputPolicy.hpp"
 #include "shared/FpsGameLogic.hpp"
+#include "shared/WorldItemLifecycle.hpp"
 #include "shared/CompetitiveLogic.hpp"
 #include "shared/BombSiteTriggers.hpp"
 #include "shared/BuyZoneTriggers.hpp"
@@ -93,6 +96,7 @@ static const char* bombStateName(Competitive::BombState st)
 static entt::entity g_match_entity = entt::null;
 static entt::entity findPlayerEntity(world& w, uint16_t client_id); // defined with competitive helpers below
 static void sendEconomyState(uint16_t client_id, entt::entity e);
+static void spawnDroppedWeapon(world& w, const glm::vec3& pos, const FpsLogic::DroppedItem& item, uint16_t by);
 
 using namespace Net;
 
@@ -319,16 +323,23 @@ static void fireServerShot(
     }
     for (auto& kv : pellet_hits) {
         entt::entity victim_ent = kv.first;
-        if (!w->registry.valid(victim_ent)) continue;
-        auto& victim_health = w->registry.get<FpsHealthComponent>(victim_ent);
-        if (!victim_health.alive) continue;
+        FpsServer::DamagePolicy damage_policy;
+        damage_policy.require_live_phase = g_competitive;
+        damage_policy.phase = g_round_system.state.phase;
+        damage_policy.require_opposing_teams = g_competitive ||
+            g_game_rules.match.config.mode == FpsLogic::FpsGameMode::TeamDeathmatch;
+        int32_t total_damage = weapon_def.damage * kv.second;
+        const FpsServer::DamageResult damage_result = FpsServer::applyFpsDamage(
+            w->registry,
+            FpsServer::DamageRequest{shooter_entity, victim_ent, total_damage},
+            damage_policy);
+        if (!damage_result.applied) continue;
         uint16_t victim_client = w->registry.get<NetworkedEntity>(victim_ent).owner_client_id;
         glm::vec3 hp = pellet_hit_points[victim_ent];
-        int32_t total_damage = weapon_def.damage * kv.second;
-        victim_health.takeDamage(total_damage);
+        auto& victim_health = w->registry.get<FpsHealthComponent>(victim_ent);
         DamageEventMessage dmg_msg;
         dmg_msg.attacker_client_id = shooter_client_id; dmg_msg.victim_client_id = victim_client;
-        dmg_msg.damage = total_damage; dmg_msg.health_remaining = victim_health.health; dmg_msg.hit_position = hp;
+        dmg_msg.damage = damage_result.health_damage; dmg_msg.health_remaining = victim_health.health; dmg_msg.hit_position = hp;
         BitWriter dmg_writer; CombatSerializer::serialize(dmg_writer, dmg_msg);
         g_server_network.sendReliableToClient(victim_client, dmg_writer);
         if (shooter_client_id != victim_client) g_server_network.sendReliableToClient(shooter_client_id, dmg_writer);
@@ -342,9 +353,7 @@ static void fireServerShot(
                 auto& vw = w->registry.get<WeaponComponent>(victim_ent);
                 int prev = vlo.active_slot; vlo.active_slot = (int)WeaponSlot::Primary;
                 if (auto dropped = FpsLogic::dropActive(vinv, vlo, vw)) {
-                    entt::entity de = w->registry.create();
-                    TransformComponent dt; dt.position = victim_trans.position; w->registry.emplace<TransformComponent>(de, dt);
-                    w->registry.emplace<DroppedWeaponComponent>(de, DroppedWeaponComponent{dropped->type, dropped->ammo, dropped->reserve, victim_client, 30.0f});
+                    spawnDroppedWeapon(*w, victim_trans.position, *dropped, victim_client);
                 }
                 vlo.active_slot = prev;
             }
@@ -402,16 +411,28 @@ static WeaponType primaryForClient(uint16_t client_id, uint8_t team_id)
 }
 static void spawnDroppedWeapon(world& w, const glm::vec3& pos, const FpsLogic::DroppedItem& item, uint16_t by)
 {
+    if (static_cast<uint8_t>(item.type) >= static_cast<uint8_t>(WeaponType::COUNT) ||
+        item.type == WeaponType::KNIFE || item.ammo < 0 || item.reserve < 0)
+        return;
     entt::entity de = w.registry.create();
     TransformComponent dt; dt.position = pos;
     w.registry.emplace<TransformComponent>(de, dt);
     w.registry.emplace<DroppedWeaponComponent>(de, DroppedWeaponComponent{item.type, item.ammo, item.reserve, by, 30.0f});
 }
+static bool isWeaponLifecyclePhaseOpen()
+{
+    if (!g_competitive)
+        return true;
+    return FpsLogic::isWeaponLifecyclePhaseOpen(g_round_system.state.phase);
+}
 static bool doDropWeapon(uint16_t client_id, entt::entity player_entity)
 {
     world* w = g_server_services ? g_server_services->game_world : nullptr;
     if (!w || !w->registry.valid(player_entity)) return false;
-    if (!w->registry.all_of<InventoryComponent, PlayerLoadoutComponent, WeaponComponent, TransformComponent>(player_entity)) return false;
+    if (!isWeaponLifecyclePhaseOpen() ||
+        !w->registry.all_of<NetworkedEntity, FpsHealthComponent, InventoryComponent, PlayerLoadoutComponent, WeaponComponent, TransformComponent>(player_entity)) return false;
+    const auto& networked = w->registry.get<NetworkedEntity>(player_entity);
+    if (!networked.is_player || networked.owner_client_id != client_id || !w->registry.get<FpsHealthComponent>(player_entity).alive) return false;
     auto& inv = w->registry.get<InventoryComponent>(player_entity);
     auto& lo = w->registry.get<PlayerLoadoutComponent>(player_entity);
     auto& weapon = w->registry.get<WeaponComponent>(player_entity);
@@ -427,7 +448,10 @@ static bool doWeaponSelect(uint16_t client_id, entt::entity player_entity, uint8
 {
     world* w = g_server_services ? g_server_services->game_world : nullptr;
     if (!w || !w->registry.valid(player_entity)) return false;
-    if (!w->registry.all_of<InventoryComponent, PlayerLoadoutComponent, WeaponComponent>(player_entity)) return false;
+    if (!isWeaponLifecyclePhaseOpen() ||
+        !w->registry.all_of<NetworkedEntity, FpsHealthComponent, InventoryComponent, PlayerLoadoutComponent, WeaponComponent>(player_entity)) return false;
+    const auto& networked = w->registry.get<NetworkedEntity>(player_entity);
+    if (!networked.is_player || networked.owner_client_id != client_id || !w->registry.get<FpsHealthComponent>(player_entity).alive) return false;
     auto& inv = w->registry.get<InventoryComponent>(player_entity);
     auto& lo = w->registry.get<PlayerLoadoutComponent>(player_entity);
     auto& weapon = w->registry.get<WeaponComponent>(player_entity);
@@ -549,23 +573,20 @@ static void consumeBotInputSample(uint16_t client_id, entt::entity e, const Inpu
     world* w = g_server_services ? g_server_services->game_world : nullptr;
     if (!w || !w->registry.valid(e)) return;
     if (!w->registry.all_of<PlayerComponent, TransformComponent, RigidBodyComponent, FpsHealthComponent>(e)) return;
-    if (g_round_system.isMovementLocked()) return; // same as server input_filter (Freeze)
-    if (!w->registry.get<FpsHealthComponent>(e).alive) return; // same as server input_filter
+    if (!FPSShooter::isMovementInputAllowed(
+            w->registry.get<FpsHealthComponent>(e).alive,
+            g_round_system.isMovementLocked())) return;
     auto& player = w->registry.get<PlayerComponent>(e);
     auto& transform = w->registry.get<TransformComponent>(e);
     auto& rigidbody = w->registry.get<RigidBodyComponent>(e);
     transform.rotation.y = glm::degrees(input.camera_yaw);
     transform.rotation.x = glm::degrees(input.camera_pitch);
-    Net::MovementInput mi; mi.move_forward = input.move_forward; mi.move_right = input.move_right;
-    mi.camera_yaw = input.camera_yaw; mi.camera_pitch = input.camera_pitch; mi.buttons = input.buttons;
+    Net::MovementInput mi = FPSShooter::toMovementInput(input);
     Net::MovementConfig mc; mc.speed = player.speed; mc.jump_force = player.jump_force;
     mc.fixed_delta = w->fixed_delta > 0.0f ? w->fixed_delta : dt;
     Net::MovementState result;
     if (w->registry.all_of<CharacterControllerComponent>(e)) {
-        CharacterMoveInput ci; ci.move_forward = mi.move_forward; ci.move_right = mi.move_right; ci.camera_yaw = mi.camera_yaw; ci.camera_pitch = mi.camera_pitch;
-        if ((mi.buttons & InputFlags::JUMP) != 0) ci.buttons |= CharacterMoveFlags::Jump;
-        if ((mi.buttons & InputFlags::CROUCH) != 0) ci.buttons |= CharacterMoveFlags::Crouch;
-        if ((mi.buttons & InputFlags::SPRINT) != 0) ci.buttons |= CharacterMoveFlags::Sprint;
+        CharacterMoveInput ci = FPSShooter::toCharacterMoveInput(mi);
         auto cs = w->simulate_character_controller(e, ci, mc.fixed_delta);
         result.position = cs.position; result.velocity = cs.velocity; result.grounded = cs.grounded; result.ground_normal = cs.ground_normal;
     } else {
@@ -815,6 +836,7 @@ static void competitiveFreezeRespawnAll()
 {
     world* w = g_server_services ? g_server_services->game_world : nullptr;
     if (!w) return;
+    FpsLogic::clearDroppedWeapons(w->registry);
     std::vector<uint16_t> clients;
     auto view = w->registry.view<NetworkedEntity, TeamComponent>();
     for (auto e : view) {
@@ -1491,8 +1513,9 @@ GAME_API bool gardenServerInit(EngineServices* services)
         if (!w->registry.all_of<FpsHealthComponent>(player_entity)) {
             return true;
         }
-        if (g_competitive && g_round_system.isMovementLocked()) return false; // Freeze: movement locked
-        return w->registry.get<FpsHealthComponent>(player_entity).alive;
+        return FPSShooter::isMovementInputAllowed(
+            w->registry.get<FpsHealthComponent>(player_entity).alive,
+            g_competitive && g_round_system.isMovementLocked());
     });
 
     g_server_network.setInputSampleHandler([](
@@ -1645,31 +1668,14 @@ GAME_API void gardenServerUpdate(float delta_time)
         }
     }
 
-    // Walk-over pickup: dropped weapon -> player if its slot is free (1.2 m).
-    {
-        std::vector<entt::entity> consumed;
-        auto dv = w->registry.view<DroppedWeaponComponent, TransformComponent>();
-        auto pv2 = w->registry.view<NetworkedEntity, TransformComponent, FpsHealthComponent, InventoryComponent, PlayerLoadoutComponent, WeaponComponent>();
-        for (auto de : dv) {
-            auto& dw = dv.get<DroppedWeaponComponent>(de);
-            glm::vec3 dpos = dv.get<TransformComponent>(de).position;
-            for (auto pe : pv2) {
-                if (!pv2.get<FpsHealthComponent>(pe).alive) continue;
-                if (glm::distance(pv2.get<TransformComponent>(pe).position, dpos) > 1.2f) continue;
-                auto& inv3 = pv2.get<InventoryComponent>(pe);
-                auto& lo3 = pv2.get<PlayerLoadoutComponent>(pe);
-                auto& w3 = pv2.get<WeaponComponent>(pe);
-                FpsLogic::DroppedItem item{dw.weapon_type, dw.ammo, dw.reserve};
-                if (FpsLogic::tryPickup(inv3, lo3, w3, item)) {
-                    uint16_t cid = pv2.get<NetworkedEntity>(pe).owner_client_id;
-                    sendWeaponState(cid, pe, w3);
-                    LOG_ENGINE_INFO("Player {} picked up weapon {}", cid, (int)dw.weapon_type);
-                    consumed.push_back(de);
-                    break;
-                }
-            }
+    if (isWeaponLifecyclePhaseOpen()) {
+        const auto pickups = FpsLogic::processDroppedWeaponPickups(w->registry);
+        for (const FpsLogic::DroppedWeaponPickup& pickup : pickups) {
+            const auto& networked = w->registry.get<NetworkedEntity>(pickup.player);
+            const auto& weapon = w->registry.get<WeaponComponent>(pickup.player);
+            sendWeaponState(networked.owner_client_id, pickup.player, weapon);
+            LOG_ENGINE_INFO("Player {} picked up a dropped weapon", networked.owner_client_id);
         }
-        for (auto de : consumed) if (w->registry.valid(de)) w->registry.destroy(de);
     }
 
     g_server_network.publishWorldState();

@@ -8,10 +8,12 @@
 #include "Reflection/ReflectionRegistry.hpp"
 #include "world.hpp"
 #include "shared/FpsGameLogic.hpp"
+#include "shared/WorldItemLifecycle.hpp"
 #include "shared/CompetitiveLogic.hpp"
 #include "shared/BuyZoneTriggers.hpp"
 #include "shared/CombatProtocol.hpp"
 #include "server/GameRules.hpp"
+#include "server/FpsDamage.hpp"
 #include "server/LagCompensation.hpp"
 
 #include <cmath>
@@ -662,6 +664,80 @@ bool testFpsDropAndPickup()
     if (!FpsLogic::switchByWeaponSelect(inv2, lo2, w2, 1) || w2.weapon_type != WeaponType::SHOTGUN || w2.ammo != 8) return fail(name, "picked-up shotgun state wrong");
     return pass(name);
 }
+bool testDroppedWeaponEcsLifecycle()
+{
+    const std::string name = "DroppedWeaponEcsLifecycle";
+    entt::registry registry;
+    auto makePlayer = [&](uint16_t client_id, const glm::vec3& position) {
+        const entt::entity player = registry.create();
+        registry.emplace<Net::NetworkedEntity>(player, 1000u + client_id, client_id, true);
+        registry.emplace<TransformComponent>(player, position.x, position.y, position.z);
+        registry.emplace<FpsHealthComponent>(player, 100);
+        auto& inventory = registry.emplace<InventoryComponent>(player);
+        auto& loadout = registry.emplace<PlayerLoadoutComponent>(player);
+        auto& weapon = registry.emplace<WeaponComponent>(player);
+        FpsLogic::grantLoadout(inventory, loadout, weapon);
+        (void)FpsLogic::dropActive(inventory, loadout, weapon); // Leave Primary free for pickup.
+        return player;
+    };
+    const entt::entity first = makePlayer(1, glm::vec3(0.0f));
+    const entt::entity second = makePlayer(2, glm::vec3(0.0f));
+    const entt::entity dropped = registry.create();
+    registry.emplace<TransformComponent>(dropped, 0.0f, 0.0f, 0.0f);
+    registry.emplace<DroppedWeaponComponent>(dropped, WeaponType::SHOTGUN, 8, 32, static_cast<uint16_t>(99), 30.0f);
+
+    const auto pickups = FpsLogic::processDroppedWeaponPickups(registry);
+    if (pickups.size() != 1u || registry.valid(dropped))
+        return fail(name, "simultaneous pickup did not produce one deterministic winner");
+    const entt::entity winner = pickups[0].player;
+    const entt::entity loser = winner == first ? second : first;
+    if (!registry.get<PlayerLoadoutComponent>(winner).slots[(size_t)WeaponSlot::Primary].occupied ||
+        registry.get<PlayerLoadoutComponent>(loser).slots[(size_t)WeaponSlot::Primary].occupied)
+        return fail(name, "pickup winner or loser loadout changed incorrectly");
+
+    if (FpsLogic::tryPickupDroppedWeapon(registry, winner, dropped) !=
+        FpsLogic::DroppedWeaponPickupResult::MissingDroppedItem)
+        return fail(name, "stale dropped entity was not rejected");
+
+    const entt::entity occupied_drop = registry.create();
+    registry.emplace<TransformComponent>(occupied_drop, 0.0f, 0.0f, 0.0f);
+    registry.emplace<DroppedWeaponComponent>(occupied_drop, WeaponType::RIFLE, 30, 90, static_cast<uint16_t>(99), 30.0f);
+    if (FpsLogic::tryPickupDroppedWeapon(registry, winner, occupied_drop) !=
+        FpsLogic::DroppedWeaponPickupResult::SlotOccupied)
+        return fail(name, "occupied slot was not rejected");
+
+    const entt::entity far_drop = registry.create();
+    registry.emplace<TransformComponent>(far_drop, 10.0f, 0.0f, 0.0f);
+    registry.emplace<DroppedWeaponComponent>(far_drop, WeaponType::RIFLE, 30, 90, static_cast<uint16_t>(99), 30.0f);
+    const entt::entity free_player = makePlayer(3, glm::vec3(0.0f));
+    if (FpsLogic::tryPickupDroppedWeapon(registry, free_player, far_drop) !=
+        FpsLogic::DroppedWeaponPickupResult::OutOfRange)
+        return fail(name, "out-of-range pickup was accepted");
+
+    const entt::entity dead_drop = registry.create();
+    registry.emplace<TransformComponent>(dead_drop, 0.0f, 0.0f, 0.0f);
+    registry.emplace<DroppedWeaponComponent>(dead_drop, WeaponType::RIFLE, 30, 90, static_cast<uint16_t>(99), 30.0f);
+    registry.get<FpsHealthComponent>(free_player).alive = false;
+    if (FpsLogic::tryPickupDroppedWeapon(registry, free_player, dead_drop) !=
+        FpsLogic::DroppedWeaponPickupResult::PlayerIneligible)
+        return fail(name, "dead player pickup was accepted");
+
+    if (FpsLogic::isWeaponLifecyclePhaseOpen(Competitive::RoundPhase::RoundEnd) ||
+        FpsLogic::isWeaponLifecyclePhaseOpen(Competitive::RoundPhase::WaitingForPlayers) ||
+        !FpsLogic::isWeaponLifecyclePhaseOpen(Competitive::RoundPhase::Live))
+        return fail(name, "weapon lifecycle phase gate was wrong");
+
+    const entt::entity below_floor = registry.create();
+    registry.emplace<TransformComponent>(below_floor, 0.0f, FpsLogic::kDroppedWeaponMinimumWorldY - 1.0f, 0.0f);
+    registry.emplace<DroppedWeaponComponent>(below_floor, WeaponType::RIFLE, 30, 90, static_cast<uint16_t>(99), 30.0f);
+    FpsLogic::cleanupDroppedWeapons(registry, 0.0f);
+    if (registry.valid(below_floor)) return fail(name, "below-floor item was not cleaned up");
+
+    FpsLogic::clearDroppedWeapons(registry);
+    if (!registry.view<DroppedWeaponComponent>().empty())
+        return fail(name, "round reset left dropped items behind");
+    return pass(name);
+}
 bool testFpsDeathmatchScoreLimit()
 {
     const std::string name = "FpsDeathmatchScoreLimit";
@@ -1051,11 +1127,79 @@ bool testLagCompensatedShotPoseFallbackAndMissCount()
     return pass(name);
 }
 
+bool testFpsDamageContract()
+{
+    const std::string name = "FpsDamageContract";
+    using FpsServer::DamagePolicy;
+    using FpsServer::DamageRejectReason;
+    using FpsServer::DamageRequest;
+
+    entt::registry registry;
+    const entt::entity attacker = registry.create();
+    const entt::entity teammate = registry.create();
+    const entt::entity victim = registry.create();
+    const entt::entity protected_victim = registry.create();
+    const entt::entity dead_attacker = registry.create();
+    const entt::entity stale_victim = registry.create();
+    registry.emplace<FpsHealthComponent>(attacker, 100);
+    registry.emplace<FpsHealthComponent>(teammate, 100);
+    registry.emplace<FpsHealthComponent>(victim, 100);
+    registry.emplace<FpsHealthComponent>(protected_victim, 100).invulnerable_timer = 0.5f;
+    registry.emplace<FpsHealthComponent>(dead_attacker, 100).alive = false;
+    registry.emplace<TeamComponent>(attacker, TeamComponent{FpsLogic::kTeamAttackers});
+    registry.emplace<TeamComponent>(teammate, TeamComponent{FpsLogic::kTeamAttackers});
+    registry.emplace<TeamComponent>(victim, TeamComponent{FpsLogic::kTeamDefenders});
+    registry.emplace<TeamComponent>(protected_victim, TeamComponent{FpsLogic::kTeamDefenders});
+    registry.emplace<TeamComponent>(dead_attacker, TeamComponent{FpsLogic::kTeamAttackers});
+    registry.emplace<ArmorComponent>(victim, ArmorComponent{100, true, false});
+    registry.destroy(stale_victim);
+
+    DamagePolicy policy;
+    policy.require_live_phase = true;
+    policy.require_opposing_teams = true;
+    policy.phase = Competitive::RoundPhase::Freeze;
+    const auto phase_blocked = FpsServer::applyFpsDamage(registry, {attacker, victim, 25}, policy);
+    if (phase_blocked.applied || phase_blocked.reject_reason != DamageRejectReason::PhaseBlocked ||
+        registry.get<FpsHealthComponent>(victim).health != 100)
+        return fail(name, "Freeze damage changed health");
+
+    policy.phase = Competitive::RoundPhase::Live;
+    const auto team_blocked = FpsServer::applyFpsDamage(registry, {attacker, teammate, 25}, policy);
+    if (team_blocked.applied || team_blocked.reject_reason != DamageRejectReason::SameTeam ||
+        registry.get<FpsHealthComponent>(teammate).health != 100)
+        return fail(name, "same-team damage changed health");
+
+    const auto stale_blocked = FpsServer::applyFpsDamage(registry, {attacker, stale_victim, 25}, policy);
+    const auto self_blocked = FpsServer::applyFpsDamage(registry, {attacker, attacker, 25}, policy);
+    const auto dead_blocked = FpsServer::applyFpsDamage(registry, {dead_attacker, victim, 25}, policy);
+    const auto invulnerable_blocked = FpsServer::applyFpsDamage(registry, {attacker, protected_victim, 25}, policy);
+    if (stale_blocked.applied || stale_blocked.reject_reason != DamageRejectReason::InvalidEntity ||
+        self_blocked.applied || self_blocked.reject_reason != DamageRejectReason::SelfTarget ||
+        dead_blocked.applied || dead_blocked.reject_reason != DamageRejectReason::AttackerDead ||
+        invulnerable_blocked.applied || invulnerable_blocked.reject_reason != DamageRejectReason::Invulnerable ||
+        registry.get<FpsHealthComponent>(protected_victim).health != 100)
+        return fail(name, "invalid damage request mutated health");
+
+    auto applied = FpsServer::applyFpsDamage(registry, {attacker, victim, 25}, policy);
+    if (!applied.applied || applied.killed || applied.health_damage != 25 ||
+        registry.get<FpsHealthComponent>(victim).health != 75 || registry.get<ArmorComponent>(victim).armor != 100)
+        return fail(name, "live opposing-team damage did not preserve the unapproved armor contract");
+
+    auto lethal = FpsServer::applyFpsDamage(registry, {attacker, victim, 100}, policy);
+    auto duplicate_lethal = FpsServer::applyFpsDamage(registry, {attacker, victim, 100}, policy);
+    if (!lethal.applied || !lethal.killed || registry.get<FpsHealthComponent>(victim).health != 0 ||
+        duplicate_lethal.applied || duplicate_lethal.reject_reason != DamageRejectReason::VictimDead)
+        return fail(name, "duplicate lethal request was not rejected after the first death");
+
+    return pass(name);
+}
+
 #include "C4Tests.hpp"
 #include "BotTests.hpp"
 #include "UiLogicTests.hpp"
 #include "AudioTests.hpp"
 #include "NavMeshTests.hpp"
+#include "PlayerMovementTests.hpp"
 int main()
 {
     bool ok = true;
@@ -1072,8 +1216,10 @@ int main()
     ok = testFpsSpawnSelectionPerTeamFarthest() && ok;
     ok = testFpsSwitchChangesActiveDef() && ok;
     ok = testFpsDropAndPickup() && ok;
+    ok = testDroppedWeaponEcsLifecycle() && ok;
     ok = testFpsDeathmatchScoreLimit() && ok;
     ok = testFpsTeamDeathmatchTeamScoreWin() && ok;
+    ok = testPlayerMovementInputContract() && ok;
     ok = testCompetitiveRoundFsmFullCycleHalftimeClinch() && ok;
     ok = testCompetitiveOvertime() && ok;
     ok = testCompetitiveTimerTargetSavedAndPause() && ok;
@@ -1083,6 +1229,7 @@ int main()
     ok = testCompetitiveBuyZoneOccupancy() && ok;
     ok = testWeaponRosterIntegrity() && ok;
     ok = testLagCompensatedShotPoseFallbackAndMissCount() && ok;
+    ok = testFpsDamageContract() && ok;
     ok = testC4PlantInterrupt() && ok;
     ok = testC4AuthoredTriggerOccupancy() && ok;
     ok = testC4DefuseKit() && ok;

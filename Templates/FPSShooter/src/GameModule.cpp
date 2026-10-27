@@ -19,6 +19,7 @@
 #include "shared/WeaponTypes.hpp"
 #include "shared/WeaponSystem.hpp"
 #include "shared/NetworkInputSampler.hpp"
+#include "shared/MovementInputPolicy.hpp"
 #include "GameHUD.hpp"
 #include "ui/UiLogic.hpp"
 #include "ui/UiInput.hpp"
@@ -156,22 +157,6 @@ static bool configureFPShooterInput(InputActionSystem& actions)
     gamepadAxis("Fire", SDL_GAMEPAD_AXIS_RIGHT_TRIGGER);
 
     return UiInput::registerModalContext(actions) && actions.pushContext(gameplay);
-}
-
-static CharacterMoveInput toCharacterMoveInput(const MovementInput& input)
-{
-    CharacterMoveInput out;
-    out.move_forward = input.move_forward;
-    out.move_right = input.move_right;
-    out.camera_yaw = input.camera_yaw;
-    out.camera_pitch = input.camera_pitch;
-    if ((input.buttons & InputFlags::JUMP) != 0)
-        out.buttons |= CharacterMoveFlags::Jump;
-    if ((input.buttons & InputFlags::CROUCH) != 0)
-        out.buttons |= CharacterMoveFlags::Crouch;
-    if ((input.buttons & InputFlags::SPRINT) != 0)
-        out.buttons |= CharacterMoveFlags::Sprint;
-    return out;
 }
 
 // The host hashes its actual Project.default_level artifact and carries the
@@ -665,14 +650,19 @@ GAME_API void gardenGameUpdate(float delta_time)
         const uint32_t command_tick = g_network.beginInputCommandTick();
 
         // Disable PlayerController's built-in movement - SharedMovement handles it
-        g_player_controller->setMovementEnabled(false);
+        g_player_controller->setMovementEnabled(
+            FPSShooter::isLocalControllerMovementEnabled(true));
 
+        const bool movement_locked = g_comp.has_round_state &&
+            g_comp.phase == Competitive::RoundPhase::Freeze;
+        const bool movement_allowed = FPSShooter::isMovementInputAllowed(
+            g_local_alive, movement_locked);
         const auto& weapon_def = getWeaponDef(g_local_weapon_type);
         InputState input_state = FPSShooter::sampleNetworkInput(
             *input_actions,
             game_world->world_camera.rotation.y,
             game_world->world_camera.rotation.x,
-            g_local_alive,
+            movement_allowed,
             ui_modal,
             g_local_fire_cooldown <= 0.0f && !g_local_reloading && g_local_ammo > 0,
             !g_local_reloading && g_local_ammo < weapon_def.max_ammo && g_local_reserve_ammo > 0);
@@ -702,7 +692,7 @@ GAME_API void gardenGameUpdate(float delta_time)
         }
 
         // Client-side prediction for movement
-        if (g_local_alive &&
+        if (movement_allowed &&
             game_world->registry.valid(g_player_entity) &&
             game_world->registry.all_of<TransformComponent, RigidBodyComponent, PlayerComponent>(g_player_entity))
         {
@@ -710,12 +700,7 @@ GAME_API void gardenGameUpdate(float delta_time)
             auto& rb = game_world->registry.get<RigidBodyComponent>(g_player_entity);
             auto& pc = game_world->registry.get<PlayerComponent>(g_player_entity);
 
-            MovementInput move_input;
-            move_input.move_forward = input_state.move_forward;
-            move_input.move_right = input_state.move_right;
-            move_input.camera_yaw = input_state.camera_yaw;
-            move_input.camera_pitch = input_state.camera_pitch;
-            move_input.buttons = input_state.buttons;
+            MovementInput move_input = FPSShooter::toMovementInput(input_state);
 
             MovementState move_state;
             move_state.position = trans.position;
@@ -733,7 +718,7 @@ GAME_API void gardenGameUpdate(float delta_time)
                 {
                     game_world->set_character_controller_state(g_player_entity, toCharacterControllerState(start_state));
                     return toMovementState(game_world->simulate_character_controller(
-                        g_player_entity, toCharacterMoveInput(input), move_config.fixed_delta));
+                        g_player_entity, FPSShooter::toCharacterMoveInput(input), move_config.fixed_delta));
                 }
                 return SharedMovement::simulate(input, start_state, move_config);
             };
@@ -769,7 +754,7 @@ GAME_API void gardenGameUpdate(float delta_time)
                         g_network.getInputHistory().forEachFrom(server_tick,
                             [&](const PredictionEntry& entry) {
                                 replay_state = toMovementState(game_world->simulate_character_controller(
-                                    g_player_entity, toCharacterMoveInput(entry.input), move_config.fixed_delta));
+                                    g_player_entity, FPSShooter::toCharacterMoveInput(entry.input), move_config.fixed_delta));
                             });
                     }
                     else
@@ -801,7 +786,8 @@ GAME_API void gardenGameUpdate(float delta_time)
     else
     {
         if (g_player_controller)
-            g_player_controller->setMovementEnabled(true);
+            g_player_controller->setMovementEnabled(
+                FPSShooter::isLocalControllerMovementEnabled(false));
     }
 
     // Physics and player collisions
