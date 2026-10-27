@@ -212,26 +212,32 @@ int main(int argc, char* argv[])
     _world.startGameplayFramework();
 
     // D5: dedicated server is driven by a SystemScheduler (server host).
-    // Existing work keeps its relative order: gameplay-framework tick
-    // then the game module's gardenServerUpdate, both in Gameplay with
-    // fixed_delta. The scheduler supplies the EventBus flush points,
-    // fixed-dt engine.timers, and lifecycle drains this host lacked.
+    // World physics is advanced once per consumed fixed tick in Physics,
+    // before the game module's server gameplay callback.
     EntityLifecycle server_lifecycle(_world.registry);
     SystemScheduler server_scheduler(true, _world.getFixedDelta());
     server_scheduler.setLifecycle(&server_lifecycle);
     registerGameplaySystems(server_scheduler);
     {
-        // D6: server-authoritative trigger polling, headless (Physics phase).
-        // step_physics (inside the DLL update) also polls post-step; the diff
-        // makes this registration exactly-once.
         SystemDescriptor d;
-        d.name = "engine.triggers";
-        d.phase = Phase::Physics;
-        d.update = [](entt::registry& reg, const Tick::SimulationTickContext&) {
-            _world.getPhysicsSystem().updateTriggers(reg);
+        d.name = "game.server_pre_physics";
+        d.phase = Phase::PrePhysics;
+        d.update = [](entt::registry&, const Tick::SimulationTickContext& ctx) {
+            game_module.serverPrePhysics(ctx.fixed_delta);
         };
         server_scheduler.addSystem(std::move(d));
     }
+    {
+        SystemDescriptor d;
+        d.name = "engine.physics";
+        d.phase = Phase::Physics;
+        d.update = [](entt::registry&, const Tick::SimulationTickContext&) {
+            _world.stepPhysicsSingleStep();
+        };
+        server_scheduler.addSystem(std::move(d));
+    }
+    // PhysicsSystem polls triggers after each Jolt step, so the server does
+    // not register a second trigger query system here.
     {
         SystemDescriptor d;
         d.name = "game.gameplay_framework";

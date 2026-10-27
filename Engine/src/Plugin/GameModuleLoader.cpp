@@ -227,6 +227,7 @@ bool GameModuleLoader::resolveFunctions()
     // Optional server exports (nullptr if absent — that's fine)
     m_fnServerInit              = (FnServerInit)             platformGetProc(m_handle, "gardenServerInit");
     m_fnServerShutdown          = (FnServerShutdown)         platformGetProc(m_handle, "gardenServerShutdown");
+    m_fnServerPrePhysics        = (FnServerPrePhysics)       platformGetProc(m_handle, "gardenServerPrePhysics");
     m_fnServerUpdate            = (FnServerUpdate)           platformGetProc(m_handle, "gardenServerUpdate");
     m_fnServerOnLevelLoaded     = (FnServerOnLevelLoaded)    platformGetProc(m_handle, "gardenServerOnLevelLoaded");
     m_fnServerOnClientConnected    = (FnServerOnClientConnected)   platformGetProc(m_handle, "gardenServerOnClientConnected");
@@ -251,6 +252,7 @@ void GameModuleLoader::clearFunctionPointers()
 
     m_fnServerInit              = nullptr;
     m_fnServerShutdown          = nullptr;
+    m_fnServerPrePhysics        = nullptr;
     m_fnServerUpdate            = nullptr;
     m_fnServerOnLevelLoaded     = nullptr;
     m_fnServerOnClientConnected    = nullptr;
@@ -314,6 +316,11 @@ bool GameModuleLoader::serverInit(EngineServices* services)
 void GameModuleLoader::serverShutdown()
 {
     if (m_fnServerShutdown) m_fnServerShutdown();
+}
+
+void GameModuleLoader::serverPrePhysics(float fixed_delta)
+{
+    if (m_fnServerPrePhysics) m_fnServerPrePhysics(fixed_delta);
 }
 
 void GameModuleLoader::serverUpdate(float delta_time)

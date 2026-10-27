@@ -94,9 +94,13 @@ struct EngineServices
 //
 //   GAME_API bool        gardenServerInit(EngineServices* services);
 //   GAME_API void        gardenServerShutdown();
+//   GAME_API void        gardenServerPrePhysics(float fixed_delta);
 //   GAME_API void        gardenServerUpdate(float delta_time);
 //   GAME_API void        gardenServerOnLevelLoaded();
 //   GAME_API void        gardenServerOnClientConnected(uint16_t client_id);
 //   GAME_API void        gardenServerOnClientDisconnected(uint16_t client_id);
 //
+// gardenServerPrePhysics is called once per consumed server fixed tick, before
+// engine Physics. It is optional so modules without pre-physics work need not
+// export it.
 // ============================================================================

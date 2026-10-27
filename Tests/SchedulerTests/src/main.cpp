@@ -2,9 +2,14 @@
 #include "ECS/EntityLifecycle.hpp"
 #include "Events/EventBus.hpp"
 #include "Events/EngineEvents.hpp"
+#include "Network/ServerNetworkManager.hpp"
 #include "Timer/TimerSystem.hpp"
+#include "world.hpp"
 
+#include <cmath>
+#include <cstdint>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -179,6 +184,101 @@ bool testHostFilter()
     return pass(name);
 }
 
+// Server physics is one real world/Jolt step in Physics before gameplay for
+// every fixed scheduler tick, including all steps consumed by catch-up frames.
+bool testServerPhysicsBeforeGameplayCatchUp()
+{
+    const std::string name = "server physics precedes gameplay once per catch-up tick";
+    world server_world;
+    server_world.initializePhysics();
+
+    const entt::entity falling_body = server_world.registry.create();
+    server_world.registry.emplace<TransformComponent>(falling_body, 0.0f, 10.0f, 0.0f);
+    auto& rigid_body = server_world.registry.emplace<RigidBodyComponent>(falling_body);
+    rigid_body.mass = 1.0f;
+    rigid_body.apply_gravity = true;
+    auto& collider = server_world.registry.emplace<ColliderComponent>(falling_body);
+    collider.shape_type = ColliderShapeType::Box;
+    collider.box_half_extents = glm::vec3(0.5f);
+    const auto shape = PhysicsSystem::createShapeFromCollider(collider, glm::vec3(1.0f));
+    if (!shape || server_world.getPhysicsSystem().createDynamicBody(
+            glm::vec3(0.0f, 10.0f, 0.0f), glm::vec3(0.0f), shape, falling_body).IsInvalid())
+        return fail(name, "failed to create the Jolt-backed fixture body");
+
+    SystemScheduler server(true, server_world.getFixedDelta(), false);
+    Net::ServerNetworkManager server_network;
+    std::vector<std::string> trace;
+    uint32_t ingress_calls = 0;
+    uint32_t gameplay_calls = 0;
+    uint32_t applied_input_tick = (std::numeric_limits<uint32_t>::max)();
+    bool phase_order_valid = true;
+    SystemDescriptor ingress = makeSys("game.server_pre_physics", Phase::PrePhysics,
+        [&](entt::registry&, const Tick::SimulationTickContext& ctx) {
+            if (ctx.tick_index != server_world.getSimulationTick())
+                phase_order_valid = false;
+            applied_input_tick = ctx.tick_index;
+            trace.push_back("ingress:" + std::to_string(ctx.tick_index));
+            ++ingress_calls;
+        });
+    if (!server.addSystem(std::move(ingress)))
+        return fail(name, "failed to register server ingress system");
+
+    SystemDescriptor physics = makeSys("engine.physics", Phase::Physics,
+        [&](entt::registry&, const Tick::SimulationTickContext& ctx) {
+            if (applied_input_tick != ctx.tick_index || trace.empty() ||
+                trace.back() != "ingress:" + std::to_string(ctx.tick_index))
+                phase_order_valid = false;
+            server_world.stepPhysicsSingleStep();
+            trace.push_back("physics:" + std::to_string(ctx.tick_index));
+        });
+    if (!server.addSystem(std::move(physics)))
+        return fail(name, "failed to register server Physics system");
+
+    SystemDescriptor gameplay = makeSys("game.server_update", Phase::Gameplay,
+        [&](entt::registry&, const Tick::SimulationTickContext& ctx) {
+            if (server_world.getSimulationTick() != ctx.tick_index + 1 ||
+                trace.empty() || trace.back() != "physics:" + std::to_string(ctx.tick_index) ||
+                applied_input_tick != ctx.tick_index)
+                phase_order_valid = false;
+            server_network.advanceSimulationTicks(1);
+            if (server_network.getCurrentTick() != server_world.getSimulationTick())
+                phase_order_valid = false;
+            trace.push_back("gameplay:" + std::to_string(ctx.tick_index));
+            ++gameplay_calls;
+        });
+    if (!server.addSystem(std::move(gameplay)))
+        return fail(name, "failed to register server gameplay system");
+
+    const float fixed_delta = server_world.getFixedDelta();
+    if (server.runFrame(server_world.registry, fixed_delta * 0.5f) != 0)
+        return fail(name, "partial frame unexpectedly consumed a fixed tick");
+    if (server.runFrame(server_world.registry, fixed_delta * 2.5f) != 3)
+        return fail(name, "catch-up frame did not consume three fixed ticks");
+    if (server.runFrame(server_world.registry, fixed_delta * 2.0f) != 2)
+        return fail(name, "second catch-up frame did not consume two fixed ticks");
+
+    if (!phase_order_valid)
+        return fail(name, "ingress, Physics, and Gameplay were not aligned once per tick");
+    if (server_world.getSimulationTick() != 5 || server_network.getCurrentTick() != 5 ||
+        server.getTick() != 5 || ingress_calls != 5 || gameplay_calls != 5)
+        return fail(name, "scheduler, ingress, world, network, and gameplay ticks did not match five consumed ticks");
+    if (std::abs(server_world.getWorldTime() - static_cast<double>(fixed_delta) * 5.0) > 1.0e-6)
+        return fail(name, "world time did not advance by exactly one fixed delta per consumed tick");
+    if (trace.size() != 15)
+        return fail(name, "expected one ingress, Physics, and Gameplay event per consumed tick");
+    for (uint32_t tick = 0; tick < 5; ++tick)
+    {
+        if (trace[tick * 3] != "ingress:" + std::to_string(tick) ||
+            trace[tick * 3 + 1] != "physics:" + std::to_string(tick) ||
+            trace[tick * 3 + 2] != "gameplay:" + std::to_string(tick))
+            return fail(name, "ingress, Physics, and Gameplay order or tick identity was incorrect");
+    }
+    if (server_world.registry.get<TransformComponent>(falling_body).position.y >= 10.0f)
+        return fail(name, "catch-up scheduler frames did not advance the Jolt body");
+
+    return pass(name);
+}
+
 int g_destroyed = 0;
 int g_created = 0;
 void onDestroyedEvt(const EntityDestroyedEvent&) { ++g_destroyed; }
@@ -271,6 +371,7 @@ int main()
     if (!testFixedSteps()) ++failures;
     if (!testDisabled()) ++failures;
     if (!testHostFilter()) ++failures;
+    if (!testServerPhysicsBeforeGameplayCatchUp()) ++failures;
     if (!testDestroyDrain()) ++failures;
     if (!testTimerFixed()) ++failures;
     if (failures == 0)

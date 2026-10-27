@@ -43,6 +43,7 @@ public:
     bool hasServerSupport() const { return m_fnServerInit != nullptr; }
     bool serverInit(EngineServices* services);
     void serverShutdown();
+    void serverPrePhysics(float fixed_delta);
     void serverUpdate(float delta_time);
     void serverOnLevelLoaded();
     void serverOnClientConnected(uint16_t client_id);
@@ -78,6 +79,7 @@ private:
     // Server function pointers (optional)
     using FnServerInit              = bool(*)(EngineServices*);
     using FnServerShutdown          = void(*)();
+    using FnServerPrePhysics        = void(*)(float);
     using FnServerUpdate            = void(*)(float);
     using FnServerOnLevelLoaded     = void(*)();
     using FnServerOnClientConnected    = void(*)(uint16_t);
@@ -85,6 +87,7 @@ private:
 
     FnServerInit              m_fnServerInit              = nullptr;
     FnServerShutdown          m_fnServerShutdown          = nullptr;
+    FnServerPrePhysics        m_fnServerPrePhysics        = nullptr;
     FnServerUpdate            m_fnServerUpdate            = nullptr;
     FnServerOnLevelLoaded     m_fnServerOnLevelLoaded     = nullptr;
     FnServerOnClientConnected    m_fnServerOnClientConnected    = nullptr;

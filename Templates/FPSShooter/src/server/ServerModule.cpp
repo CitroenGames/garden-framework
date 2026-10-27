@@ -1549,6 +1549,16 @@ GAME_API void gardenServerShutdown()
     g_server_services = nullptr;
 }
 
+GAME_API void gardenServerPrePhysics(float fixed_delta)
+{
+    if (!g_server_services) return;
+
+    // Poll ENet and apply received input before this tick's Physics phase.
+    // Passing fixed_delta preserves the network statistics sampler's timing
+    // while keeping ingress aligned with each consumed simulation tick.
+    g_server_network.pumpNetworkEvents(fixed_delta);
+}
+
 GAME_API void gardenServerUpdate(float delta_time)
 {
     if (!g_server_services) return;
@@ -1560,9 +1570,10 @@ GAME_API void gardenServerUpdate(float delta_time)
 
     world* w = g_server_services->game_world;
 
-    g_server_network.pumpNetworkEvents(delta_time);
-    const uint32_t physics_steps = w->step_physics(delta_time);
-    g_server_network.advanceSimulationTicks(physics_steps);
+    // Network ingress runs in gardenServerPrePhysics before the scheduler's
+    // Physics phase. This callback runs once per consumed scheduler tick in
+    // Gameplay.
+    g_server_network.advanceSimulationTicks(1);
     updateServerPlayerCollisions(*w);
     if (g_competitive) {
         Competitive::RoundTickInput rin;
