@@ -21,6 +21,7 @@
 #include "shared/NetworkInputSampler.hpp"
 #include "GameHUD.hpp"
 #include "ui/UiLogic.hpp"
+#include "ui/UiInput.hpp"
 #include "PlayerRepSystem.hpp"
 
 #include "Utils/Log.hpp"
@@ -153,7 +154,7 @@ static bool configureFPShooterInput(InputActionSystem& actions)
     gamepadButton("Reload", SDL_GAMEPAD_BUTTON_WEST);
     gamepadAxis("Fire", SDL_GAMEPAD_AXIS_RIGHT_TRIGGER);
 
-    return actions.pushContext(gameplay);
+    return UiInput::registerModalContext(actions) && actions.pushContext(gameplay);
 }
 
 static CharacterMoveInput toCharacterMoveInput(const MovementInput& input)
@@ -252,6 +253,7 @@ struct KillFeedEntry {
 static std::vector<KillFeedEntry> g_kill_feed;
 // Competitive client state (server-authoritative; client renders only).
 static UiLogic::UiState g_ui;
+static bool g_ui_modal_context_active = false;
 static UiLogic::ClientCompetitiveState g_comp;
 static std::vector<uint16_t> g_owned_items;
 static std::array<UiLogic::RadarBlip, UiLogic::kRadarSlots> g_radar{}; // D10: zero slots until teammate replication exists
@@ -304,6 +306,7 @@ GAME_API bool gardenGameInit(EngineServices* services)
         return false;
     }
     g_services = services;
+    g_ui_modal_context_active = false;
     if (!configureFPShooterInput(*services->input_actions))
     {
         LOG_ENGINE_ERROR("Failed to register FPSShooter input actions");
@@ -514,7 +517,11 @@ GAME_API void gardenGameShutdown()
     g_player_controller.reset();
     g_hud.shutdown();
     if (g_services && g_services->input_actions)
+    {
+        g_services->input_actions->popContext(UiInput::ModalContextName);
         g_services->input_actions->popContext("Gameplay");
+    }
+    g_ui_modal_context_active = false;
     g_services = nullptr;
 }
 
@@ -554,24 +561,9 @@ GAME_API void gardenGameUpdate(float delta_time)
         }
     }
 
-    const entt::entity local_input_owner = g_network.isConnected()
-        ? g_network.getLocalPlayerEntity()
-        : g_player_entity;
-    setLocalInputOwner(*game_world, local_input_owner);
-    if (input_actions)
-        updateLocalPlayerInputs(game_world->registry, *input_actions);
-
-    if (g_player_controller && input_manager)
-    {
-        const float mouse_dx = input_manager->get_mouse_delta_x();
-        const float mouse_dy = input_manager->get_mouse_delta_y();
-        if ((mouse_dx != 0.0f || mouse_dy != 0.0f) && !UiLogic::cursorWanted(g_ui))
-            g_player_controller->handleMouseMotion(mouse_dy, mouse_dx);
-    }
-    if (g_player_controller)
-        g_player_controller->updatePlayerLook(delta_time);
-
-    // UI timers + keyboard-first menus (hud_menus S1/S3/S4/S5). Modal input is gated below.
+    // Resolve UI state before projecting intent or consuming mouse/camera input.
+    // Raw InputManager shortcuts remain available while the gameplay action
+    // context is blocked by the modal screen.
     UiLogic::tickUi(g_ui, delta_time);
     UiLogic::tickCompetitive(g_comp, delta_time);
     if (g_ui.screen == UiLogic::UiScreen::Buy && g_comp.has_round_state && !UiLogic::buyWindowOpen(g_comp)) {
@@ -609,6 +601,37 @@ GAME_API void gardenGameUpdate(float delta_time)
             if (input_manager->is_key_pressed(SDL_SCANCODE_4)) sendTeamSelect(Competitive::FpsTeam::Spectator, false);
         }
     }
+
+    const bool ui_modal = UiLogic::cursorWanted(g_ui);
+    if (input_actions && !UiInput::synchronizeModalContext(
+            *input_actions, ui_modal, g_ui_modal_context_active))
+    {
+        LOG_ENGINE_ERROR("Failed to synchronize FPSShooter modal input context");
+    }
+
+    const entt::entity local_input_owner = g_network.isConnected()
+        ? g_network.getLocalPlayerEntity()
+        : g_player_entity;
+    setLocalInputOwner(*game_world, local_input_owner);
+    if (input_actions)
+        updateLocalPlayerInputs(game_world->registry, *input_actions);
+
+    if (ui_modal && game_world->registry.valid(g_local_input_entity))
+    {
+        UiInput::suppressGameplayIntent(
+            game_world->registry.try_get<LocalPlayerInputComponent>(g_local_input_entity));
+    }
+
+    if (g_player_controller && input_manager)
+    {
+        const float mouse_dx = input_manager->get_mouse_delta_x();
+        const float mouse_dy = input_manager->get_mouse_delta_y();
+        if ((mouse_dx != 0.0f || mouse_dy != 0.0f) && !ui_modal)
+            g_player_controller->handleMouseMotion(mouse_dy, mouse_dx);
+    }
+    if (g_player_controller && !ui_modal)
+        g_player_controller->updatePlayerLook(delta_time);
+
     // Update kill feed timers
     for (auto it = g_kill_feed.begin(); it != g_kill_feed.end(); ) {
         it->timer -= delta_time;
@@ -643,7 +666,6 @@ GAME_API void gardenGameUpdate(float delta_time)
         // Disable PlayerController's built-in movement - SharedMovement handles it
         g_player_controller->setMovementEnabled(false);
 
-        const bool ui_modal = UiLogic::cursorWanted(g_ui);
         const auto& weapon_def = getWeaponDef(g_local_weapon_type);
         InputState input_state = FPSShooter::sampleNetworkInput(
             *input_actions,
@@ -961,6 +983,8 @@ GAME_API void gardenOnLevelLoaded()
     g_death_timer = 0.0f;
     g_recon_smoothing.visual_offset = glm::vec3(0.0f);
     g_comp = UiLogic::ClientCompetitiveState{}; g_ui = UiLogic::UiState{}; g_owned_items.clear();
+    if (g_services->input_actions)
+        UiInput::synchronizeModalContext(*g_services->input_actions, false, g_ui_modal_context_active);
     g_kill_feed.clear();
 
     const auto& def = getWeaponDef(WeaponType::RIFLE);

@@ -1,6 +1,9 @@
 #pragma once
-// HUD/menus v1 pure-logic tests (hud_menus.md S1-S6, D10). Included by main.cpp.
+// HUD/menus v1 logic and input-isolation tests (hud_menus.md S1-S6, D10).
+// Included by main.cpp.
 #include "ui/UiLogic.hpp"
+#include "ui/UiInput.hpp"
+#include "InputManager.hpp"
 #include <string>
 
 bool testUiScreenTransitions()
@@ -39,6 +42,80 @@ bool testUiScreenTransitions()
     { UiState s; s.screen = UiScreen::Buy;
       if (applyBuyResult(s, BuyResult::InsufficientFunds)) return fail(name, "poor buy accepted");
       if (s.screen != UiScreen::Buy || s.notice_text != "Insufficient funds") return fail(name, "buy rejection changed screen/notice"); }
+    return pass(name);
+}
+
+bool testUiModalInputIsolation()
+{
+    const std::string name = "UiModal_InputIsolation";
+    InputManager input;
+    InputActionSystem actions;
+    actions.registerAction({ "Move", ActionValueType::Button, false });
+    actions.registerAction({ "Fire", ActionValueType::Button, false });
+
+    MappingContext gameplay;
+    gameplay.name = "Gameplay";
+    gameplay.bindings = {
+        { "Move", InputBinding::Source::Key, SDL_SCANCODE_W },
+        { "Fire", InputBinding::Source::MouseButton, SDL_BUTTON_LEFT }
+    };
+
+    if (!actions.registerContext(gameplay) || !UiInput::registerModalContext(actions) ||
+        !actions.pushContext("Gameplay"))
+        return fail(name, "gameplay/modal contexts failed to register");
+
+    input.update();
+    SDL_Event key_down{};
+    key_down.type = SDL_EVENT_KEY_DOWN;
+    key_down.key.scancode = SDL_SCANCODE_W;
+    input.process_event(key_down);
+    SDL_Event mouse_down{};
+    mouse_down.type = SDL_EVENT_MOUSE_BUTTON_DOWN;
+    mouse_down.button.button = SDL_BUTTON_LEFT;
+    input.process_event(mouse_down);
+    actions.evaluate(input);
+    if (!actions.get("Move").held || !actions.get("Fire").held)
+        return fail(name, "gameplay inputs did not activate before opening a modal");
+
+    UiLogic::UiState ui;
+    if (!UiLogic::tryOpen(ui, UiLogic::UiScreen::Buy))
+        return fail(name, "buy modal did not open");
+    bool modal_context_active = false;
+    if (!UiInput::synchronizeModalContext(actions, UiLogic::cursorWanted(ui), modal_context_active) ||
+        !modal_context_active)
+        return fail(name, "modal context did not activate");
+
+    LocalPlayerInputComponent local_input;
+    local_input.move = glm::vec2(1.0f, 0.0f);
+    local_input.look = glm::vec2(0.0f, 1.0f);
+    local_input.jump_held = true;
+    local_input.sprint_held = true;
+    local_input.crouch_held = true;
+    local_input.freecam_move = glm::vec3(1.0f);
+    local_input.freecam_fast = true;
+    UiInput::suppressGameplayIntent(&local_input);
+    if (glm::length(local_input.move) > 0.0001f || glm::length(local_input.look) > 0.0001f ||
+        local_input.jump_held || local_input.sprint_held || local_input.crouch_held ||
+        glm::length(local_input.freecam_move) > 0.0001f || local_input.freecam_fast)
+        return fail(name, "modal did not clear current-frame local ECS intent");
+
+    input.update();
+    actions.evaluate(input);
+    if (actions.get("Move").held || actions.get("Fire").held ||
+        actions.get("Move").pressed || actions.get("Fire").pressed)
+        return fail(name, "modal context allowed gameplay input or emitted an edge");
+
+    UiLogic::closeToHud(ui);
+    if (!UiInput::synchronizeModalContext(actions, UiLogic::cursorWanted(ui), modal_context_active) ||
+        modal_context_active)
+        return fail(name, "modal context did not deactivate after close");
+
+    input.update();
+    actions.evaluate(input);
+    if (!actions.get("Move").held || !actions.get("Fire").held ||
+        actions.get("Move").pressed || actions.get("Fire").pressed)
+        return fail(name, "closing modal failed to restore held inputs without phantom presses");
+
     return pass(name);
 }
 

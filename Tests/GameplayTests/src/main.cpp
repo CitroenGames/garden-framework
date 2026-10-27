@@ -1032,6 +1032,7 @@ int main()
     ok = testNavMeshGenerateAndSerializerRoundTrip() && ok;
     ok = testNavMeshFindPathTwoPoly() && ok;
     ok = testUiScreenTransitions() && ok;
+    ok = testUiModalInputIsolation() && ok;
     ok = testUiMenusRequireCompetitiveState() && ok;
     ok = testUiClockFormatting() && ok;
     ok = testUiBuyItemStateMatrix() && ok;
