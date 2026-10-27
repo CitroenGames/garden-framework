@@ -29,6 +29,25 @@ struct UiState {
     bool scoreboard_held = false;
     std::string notice_text;
     float notice_remaining = 0.0f;
+
+    // Owner-only BUY_RESULT / TEAM_RESULT are retained as presentation data.
+    // These fields never authorize a purchase or team change; the server has
+    // already made that decision before the client sees them.
+    struct BuyReply {
+        bool received = false;
+        uint16_t item_id = 0;
+        BuyResult result = BuyResult::UnknownItem;
+        std::string item_name = "UNAVAILABLE";
+        std::string text;
+        bool accepted = false;
+    } buy_reply;
+    struct TeamReply {
+        bool received = false;
+        TeamSelectResult result = TeamSelectResult::InvalidTeam;
+        FpsTeam assigned = FpsTeam::None;
+        std::string text;
+        bool accepted = false;
+    } team_reply;
 };
 
 inline bool isModal(UiScreen s) { return s != UiScreen::None && s != UiScreen::Scoreboard; }
@@ -117,6 +136,51 @@ inline const char* teamResultText(TeamSelectResult r) {
     case R::SpawnUnavailable: return "No valid spawn is available";
     }
     return "Team change failed";
+}
+
+inline const char* teamDisplayName(FpsTeam team) {
+    switch (team) {
+    case FpsTeam::Attackers: return "Attackers";
+    case FpsTeam::Defenders: return "Defenders";
+    case FpsTeam::Spectator: return "Spectator";
+    default: return "UNAVAILABLE";
+    }
+}
+
+inline bool isKnownBuyResult(BuyResult result) {
+    switch (result) {
+    case BuyResult::Ok:
+    case BuyResult::UnknownItem:
+    case BuyResult::InsufficientFunds:
+    case BuyResult::WrongTeam:
+    case BuyResult::OutsideBuyZone:
+    case BuyResult::BuyTimeExpired:
+    case BuyResult::Dead:
+    case BuyResult::SlotOccupied:
+    case BuyResult::AlreadyOwned:
+    case BuyResult::PhaseClosed:
+    case BuyResult::DuplicateRequest:
+    case BuyResult::CarryLimit:
+        return true;
+    }
+    return false;
+}
+
+inline bool isKnownTeamResult(TeamSelectResult result) {
+    switch (result) {
+    case TeamSelectResult::Ok:
+    case TeamSelectResult::TeamFull:
+    case TeamSelectResult::BothFull:
+    case TeamSelectResult::PhaseClosed:
+    case TeamSelectResult::InvalidTeam:
+    case TeamSelectResult::SpawnUnavailable:
+        return true;
+    }
+    return false;
+}
+
+inline bool isPublishedTeam(FpsTeam team) {
+    return team == FpsTeam::Attackers || team == FpsTeam::Defenders || team == FpsTeam::Spectator;
 }
 
 // Rejection: notice only, screen and local team stay exactly as they were.
@@ -282,6 +346,74 @@ inline bool canOpenBuy(const ClientCompetitiveState& s,
     return s.has_round_state && buyWindowOpen(s, cfg);
 }
 inline bool canOpenTeamSelect(const ClientCompetitiveState& s) { return s.has_round_state; }
+
+// The result payload includes a server-owned wallet balance. Applying that
+// value is a presentation refresh, never a local price calculation. Catalog
+// data only supplies a label for the numeric item id carried by BUY_RESULT.
+inline bool applyAuthoritativeBuyReply(UiState& ui, ClientCompetitiveState& competitive,
+                                       uint16_t item_id, BuyResult result,
+                                       int32_t authoritative_balance) {
+    if (!isKnownBuyResult(result)) {
+        ui.buy_reply = {};
+        ui.buy_reply.received = true;
+        ui.buy_reply.item_id = item_id;
+        ui.buy_reply.text = "Buy response unavailable";
+        showNotice(ui, ui.buy_reply.text);
+        return false;
+    }
+
+    const WeaponCatalogDef* item = findCatalogById(item_id);
+    ui.buy_reply.received = true;
+    ui.buy_reply.item_id = item_id;
+    ui.buy_reply.result = result;
+    ui.buy_reply.item_name = item ? item->name : "UNAVAILABLE";
+    ui.buy_reply.accepted = result == BuyResult::Ok;
+
+    competitive.money = authoritative_balance;
+    competitive.has_economy = true;
+
+    if (result == BuyResult::Ok) {
+        ui.buy_reply.text = item
+            ? "Purchased " + ui.buy_reply.item_name
+            : "Purchase confirmed";
+    } else if (item) {
+        ui.buy_reply.text = ui.buy_reply.item_name + ": " + buyResultText(result);
+    } else {
+        // A rejected unknown numeric id must not be made to look like a
+        // catalog row. It stays a neutral server-result presentation.
+        ui.buy_reply.text = buyResultText(result);
+    }
+    showNotice(ui, ui.buy_reply.text);
+    return ui.buy_reply.accepted;
+}
+
+// TEAM_RESULT publishes the server's durable assignment. A malformed OK
+// reply is presentation failure, so it cannot close the menu or mutate the
+// local side display.
+inline bool applyAuthoritativeTeamReply(UiState& ui, TeamSelectResult result,
+                                        FpsTeam assigned, FpsTeam& local_team) {
+    if (!isKnownTeamResult(result) || (result == TeamSelectResult::Ok && !isPublishedTeam(assigned))) {
+        ui.team_reply = {};
+        ui.team_reply.received = true;
+        ui.team_reply.assigned = assigned;
+        ui.team_reply.text = "Team response unavailable";
+        showNotice(ui, ui.team_reply.text);
+        return false;
+    }
+
+    ui.team_reply.received = true;
+    ui.team_reply.result = result;
+    ui.team_reply.assigned = assigned;
+    ui.team_reply.accepted = result == TeamSelectResult::Ok;
+    ui.team_reply.text = result == TeamSelectResult::Ok
+        ? std::string("Joined ") + teamDisplayName(assigned)
+        : teamResultText(result);
+
+    if (!applyTeamResult(ui, result, assigned, local_team))
+        return false;
+    showNotice(ui, ui.team_reply.text);
+    return true;
+}
 
 // --- Core HUD source map (hud_menus U1) --------------------------------------
 // The HUD is a client presentation of sources that were already supplied by

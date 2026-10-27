@@ -9,7 +9,7 @@ namespace Navigation
 {
 
 static constexpr uint32_t NAVMESH_MAGIC   = 0x4E41564D; // "NAVM"
-static constexpr uint32_t NAVMESH_VERSION = 2; // Version 2 = Recast/Detour format
+static constexpr uint32_t NAVMESH_VERSION = NavMeshSerializer::kCurrentVersion; // Version 2 = Recast/Detour format
 
 bool NavMeshSerializer::save(const NavMesh& navmesh, const std::string& filepath)
 {

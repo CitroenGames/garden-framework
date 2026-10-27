@@ -5,7 +5,9 @@
 #include "Navigation/NavMeshGenerator.hpp"
 #include "Navigation/NavMeshPathfinder.hpp"
 #include "Navigation/NavMeshSerializer.hpp"
+#include "shared/BotNavigationRuntime.hpp"
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <vector>
@@ -70,6 +72,81 @@ bool testNavMeshFindPathTwoPoly()
     if (glm::distance(path.waypoints.back(), glm::vec3(8.f, 0.f, 0.f)) > 1.5f) return fail(name, "path does not end near goal");
     Navigation::NavPath bad = Navigation::NavMeshPathfinder::findPath(mesh, glm::vec3(500.f, 0.f, 500.f), glm::vec3(8.f, 0.f, 0.f));
     if (bad.valid) return fail(name, "findPath from off-mesh point unexpectedly valid");
+    return pass(name);
+}
+
+bool testBotNavWorldResourceLifecycle()
+{
+    const std::string name = "Bot_NavWorldResourceLifecycle";
+    Navigation::NavMeshGenerator::GenerationStats stats;
+    Navigation::NavMesh mesh;
+    if (!makeGroundNavMesh(mesh, stats)) return fail(name, "fixture navmesh generation failed");
+
+    const auto directory = std::filesystem::temp_directory_path() / "garden_bot_nav_runtime";
+    const auto first_path = directory / "first.nav";
+    const auto second_path = directory / "second.nav";
+    const auto corrupt_path = directory / "corrupt.nav";
+    std::error_code ec;
+    std::filesystem::remove_all(directory, ec);
+    std::filesystem::create_directories(directory, ec);
+    if (ec) return fail(name, "could not create fixture directory");
+    if (!Navigation::NavMeshSerializer::save(mesh, first_path.string()) ||
+        !Navigation::NavMeshSerializer::save(mesh, second_path.string())) {
+        std::filesystem::remove_all(directory, ec);
+        return fail(name, "could not save fixture navmeshes");
+    }
+
+    // Separate registry resources must own independent Detour allocations and
+    // state. Loading one must not make the other valid, and reset must leave
+    // no stale path/mesh for a later level.
+    Bots::BotWorldRuntime first_world;
+    Bots::BotWorldRuntime second_world;
+    if (!first_world.loadResolvedNavMesh(first_path.string()) ||
+        !first_world.hasValidNavMesh() ||
+        first_world.nav_status != Bots::NavMeshLoadStatus::Loaded ||
+        first_world.nav_format_version != Navigation::NavMeshSerializer::kCurrentVersion ||
+        second_world.hasValidNavMesh()) {
+        std::filesystem::remove_all(directory, ec);
+        return fail(name, "first world load leaked into second world");
+    }
+    first_world.target_count = 4;
+    first_world.input_tick = 42;
+    first_world.reset();
+    if (first_world.hasValidNavMesh() || !first_world.resolved_nav_path.empty() ||
+        first_world.target_count != 0 || first_world.input_tick != 1 ||
+        first_world.nav_format_version != 0 ||
+        first_world.nav_status != Bots::NavMeshLoadStatus::NotRequested) {
+        std::filesystem::remove_all(directory, ec);
+        return fail(name, "reset retained level-owned bot state");
+    }
+
+    // A missing asset and a malformed existing asset must both clear a prior
+    // good mesh, but diagnostics must distinguish the operator action needed.
+    if (!first_world.loadResolvedNavMesh(first_path.string()) ||
+        first_world.loadResolvedNavMesh((directory / "missing.nav").string()) ||
+        first_world.hasValidNavMesh() ||
+        first_world.nav_status != Bots::NavMeshLoadStatus::Missing) {
+        std::filesystem::remove_all(directory, ec);
+        return fail(name, "missing asset did not safely disable bots");
+    }
+    {
+        std::ofstream corrupt(corrupt_path, std::ios::binary);
+        corrupt << "not a navmesh";
+    }
+    if (first_world.loadResolvedNavMesh(corrupt_path.string()) ||
+        first_world.hasValidNavMesh() ||
+        first_world.nav_status != Bots::NavMeshLoadStatus::Invalid) {
+        std::filesystem::remove_all(directory, ec);
+        return fail(name, "corrupt asset did not safely disable bots");
+    }
+    if (!second_world.loadResolvedNavMesh(second_path.string()) ||
+        !second_world.hasValidNavMesh() ||
+        second_world.resolved_nav_path != second_path.string()) {
+        std::filesystem::remove_all(directory, ec);
+        return fail(name, "second world could not load independently");
+    }
+
+    std::filesystem::remove_all(directory, ec);
     return pass(name);
 }
 

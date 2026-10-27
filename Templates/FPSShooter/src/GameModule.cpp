@@ -342,21 +342,24 @@ GAME_API bool gardenGameInit(EngineServices* services)
         }
         if (message_type == static_cast<uint8_t>(CompetitiveMessageType::BUY_RESULT)) {
             BuyResultMessage msg; if (!CompetitiveSerializer::deserialize(reader, msg)) return;
-            g_comp.money = msg.balance;
             auto result = static_cast<Competitive::BuyResult>(msg.result);
-            if (result == Competitive::BuyResult::Ok) {
+            const bool accepted = UiLogic::applyAuthoritativeBuyReply(
+                g_ui, g_comp, msg.item_id, result, msg.balance);
+            if (accepted) {
                 if (!uiIsOwned(msg.item_id)) g_owned_items.push_back(msg.item_id);
                 if (msg.item_id == 42) g_comp.armor = 100;
                 if (msg.item_id == 43) { g_comp.armor = 100; g_comp.has_helmet = true; }
                 if (msg.item_id == 44) g_comp.has_kit = true;
             }
-            if (result == Competitive::BuyResult::Ok) AudioEventSystem::get().play2D("ui.click");
-            UiLogic::applyBuyResult(g_ui, result); return;
+            if (accepted) AudioEventSystem::get().play2D("ui.click");
+            return;
         }
         if (message_type == static_cast<uint8_t>(CompetitiveMessageType::TEAM_RESULT)) {
             TeamResultMessage msg; if (!CompetitiveSerializer::deserialize(reader, msg)) return;
-            UiLogic::applyTeamResult(g_ui, static_cast<Competitive::TeamSelectResult>(msg.result),
-                                     Competitive::teamFromId(msg.team), g_comp.local_team); return;
+            UiLogic::applyAuthoritativeTeamReply(
+                g_ui, static_cast<Competitive::TeamSelectResult>(msg.result),
+                Competitive::teamFromId(msg.team), g_comp.local_team);
+            return;
         }        switch (static_cast<CombatMessageType>(message_type)) {
         case CombatMessageType::SHOOT_RESULT: {
             ShootResultMessage msg;

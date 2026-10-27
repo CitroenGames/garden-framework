@@ -221,6 +221,67 @@ bool testUiHudCoreBindingSources()
     return pass(name);
 }
 
+bool testUiAuthoritativeBuyTeamFeedback()
+{
+    const std::string name = "UiAuthoritative_BuyTeamFeedback";
+    using namespace UiLogic;
+
+    ClientCompetitiveState competitive;
+    competitive.money = 800;
+    UiState ui;
+    ui.screen = UiScreen::Buy;
+
+    // The result's balance wins over both the old local display and any
+    // catalog price. The UI never calculates the new wallet itself.
+    if (!applyAuthoritativeBuyReply(ui, competitive, 26, BuyResult::Ok, 4300) ||
+        competitive.money != 4300 || !competitive.has_economy ||
+        !ui.buy_reply.received || !ui.buy_reply.accepted ||
+        ui.buy_reply.item_name != "AK-47" || ui.buy_reply.text != "Purchased AK-47" ||
+        ui.notice_text != "Purchased AK-47" || ui.screen != UiScreen::Buy)
+        return fail(name, "accepted catalog buy was not projected from BUY_RESULT");
+
+    // Rejections, duplicate replies, and phase closure only change neutral
+    // feedback. They preserve the modal and take the reply balance verbatim.
+    if (applyAuthoritativeBuyReply(ui, competitive, 26, BuyResult::DuplicateRequest, 4300) ||
+        competitive.money != 4300 || ui.buy_reply.accepted ||
+        ui.buy_reply.text != "AK-47: Duplicate request" || ui.screen != UiScreen::Buy)
+        return fail(name, "duplicate BUY_RESULT changed more than presentation state");
+    if (applyAuthoritativeBuyReply(ui, competitive, 26, BuyResult::PhaseClosed, 4100) ||
+        competitive.money != 4100 || ui.buy_reply.text != "AK-47: Buy window closed" ||
+        ui.screen != UiScreen::Buy)
+        return fail(name, "phase-closed BUY_RESULT was not displayed from server data");
+    if (applyAuthoritativeBuyReply(ui, competitive, 9999, BuyResult::UnknownItem, 4100) ||
+        ui.buy_reply.item_name != "UNAVAILABLE" || ui.buy_reply.text != "Unknown item")
+        return fail(name, "unknown numeric item was fabricated as a catalog row");
+
+    const int32_t balance_before_invalid = competitive.money;
+    if (applyAuthoritativeBuyReply(ui, competitive, 26, static_cast<BuyResult>(255), 1) ||
+        competitive.money != balance_before_invalid ||
+        ui.buy_reply.text != "Buy response unavailable" || ui.screen != UiScreen::Buy)
+        return fail(name, "invalid BUY_RESULT changed authoritative display state");
+
+    FpsTeam local_team = FpsTeam::Attackers;
+    ui.screen = UiScreen::TeamSelect;
+    if (applyAuthoritativeTeamReply(ui, TeamSelectResult::TeamFull, FpsTeam::Defenders, local_team) ||
+        local_team != FpsTeam::Attackers || ui.screen != UiScreen::TeamSelect ||
+        !ui.team_reply.received || ui.team_reply.accepted ||
+        ui.team_reply.text != "Team is full")
+        return fail(name, "team rejection mutated local assignment");
+    if (!applyAuthoritativeTeamReply(ui, TeamSelectResult::Ok, FpsTeam::Defenders, local_team) ||
+        local_team != FpsTeam::Defenders || ui.screen != UiScreen::None ||
+        !ui.team_reply.accepted || ui.team_reply.text != "Joined Defenders" ||
+        ui.notice_text != "Joined Defenders")
+        return fail(name, "team success did not apply the durable server assignment");
+
+    ui.screen = UiScreen::TeamSelect;
+    if (applyAuthoritativeTeamReply(ui, TeamSelectResult::Ok, FpsTeam::None, local_team) ||
+        local_team != FpsTeam::Defenders || ui.screen != UiScreen::TeamSelect ||
+        ui.team_reply.text != "Team response unavailable")
+        return fail(name, "malformed successful TEAM_RESULT changed local assignment");
+
+    return pass(name);
+}
+
 bool testUiBuyItemStateMatrix()
 {
     const std::string name = "UiBuy_ItemStateMatrix";

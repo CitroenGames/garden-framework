@@ -12,6 +12,7 @@
 #include "shared/CompetitiveLogic.hpp"
 #include "shared/BuyZoneTriggers.hpp"
 #include "shared/CombatProtocol.hpp"
+#include "shared/FpsCombatFeed.hpp"
 #include "server/GameRules.hpp"
 #include "server/FpsDamage.hpp"
 #include "server/LagCompensation.hpp"
@@ -851,10 +852,12 @@ bool testFpsModeIsolationAndLifecycle()
     dm_rules.configureMode(dm);
     uint16_t respawned_client = 0;
     dm_rules.setOnRespawn([&](uint16_t client_id, const glm::vec3&) { respawned_client = client_id; });
-    dm_rules.onPlayerKilled(game_world, 1u, 2u);
+    const FpsCombat::ScoreChange dm_score_change = dm_rules.onPlayerKilled(game_world, 1u, 2u);
     dm_rules.queueRespawn(2u);
     dm_rules.Update(game_world, dm_rules.match.config.respawn_delay * 0.5f);
-    if (game_world.registry.get<ScoreComponent>(killer).kills != 1 ||
+    if (dm_score_change.killer_kills != 1 || dm_score_change.victim_deaths != 1 ||
+        !dm_score_change.match_kill_recorded ||
+        game_world.registry.get<ScoreComponent>(killer).kills != 1 ||
         game_world.registry.get<ScoreComponent>(victim).deaths != 1 ||
         dm_rules.match.scoreOf(1u) != 1 || respawned_client != 0) {
         return fail(name, "deathmatch did not preserve score and delayed respawn lifecycle");
@@ -874,9 +877,9 @@ bool testFpsModeIsolationAndLifecycle()
 
     Game::GameRules competitive_rules;
     competitive_rules.configureMode(competitive);
-    competitive_rules.onPlayerKilled(game_world, 1u, 2u);
+    const FpsCombat::ScoreChange competitive_score_change = competitive_rules.onPlayerKilled(game_world, 1u, 2u);
     competitive_rules.Update(game_world, competitive_rules.match.config.time_limit_seconds);
-    if (competitive_rules.match.scoreOf(1u) != 0 || competitive_rules.match.elapsed != 0.0f ||
+    if (competitive_score_change.any() || competitive_rules.match.scoreOf(1u) != 0 || competitive_rules.match.elapsed != 0.0f ||
         game_world.registry.get<ScoreComponent>(killer).kills != 2) {
         return fail(name, "competitive score controller mutated a noncompetitive match path");
     }
@@ -1975,6 +1978,84 @@ bool testFpsDeathLifecycle()
     return pass(name);
 }
 
+bool testFpsCombatFeedContract()
+{
+    const std::string name = "FpsCombatFeedContract";
+    entt::registry registry;
+
+    // A stale/no-owner victim is rejected before it can enter a client feed.
+    FpsCombat::CombatFeedEvent stale;
+    if (FpsCombat::recordCombatFeedEvent(registry, stale) !=
+        FpsCombat::CombatFeedRecordResult::InvalidVictim)
+        return fail(name, "stale victim id entered the feed");
+
+    // These values mirror the server resolver's FpsDeathEvent -> GameRules
+    // ordering.  Names and entity handles are intentionally absent so a
+    // rename or disconnect after this point cannot mutate attribution.
+    const FpsServer::FpsDeathEvent death_event{
+        10, 20, static_cast<uint8_t>(WeaponType::RIFLE),
+        FpsServer::FpsDeathEventNone, 3, glm::vec3(1.0f, 2.0f, 3.0f)};
+    FpsCombat::CombatFeedEvent first = FpsServer::makeCombatFeedEvent(
+        death_event, {1, 1, true});
+    FpsCombat::CombatFeedEvent second = first;
+    second.killer_client_id = 30;
+    second.victim_client_id = 40;
+    second.weapon_type = static_cast<uint8_t>(WeaponType::PISTOL);
+    second.death_sequence = 1;
+
+    if (FpsCombat::recordCombatFeedEvent(registry, first) != FpsCombat::CombatFeedRecordResult::Recorded ||
+        FpsCombat::recordCombatFeedEvent(registry, second) != FpsCombat::CombatFeedRecordResult::Recorded)
+        return fail(name, "authoritative deaths did not enter the feed");
+
+    const auto& feed = FpsCombat::combatFeed(registry);
+    const auto* first_record = FpsCombat::combatFeedRecordAt(feed, 0);
+    const auto* second_record = FpsCombat::combatFeedRecordAt(feed, 1);
+    if (feed.count != 2 || !first_record || !second_record ||
+        first_record->event.killer_client_id != 10 || first_record->event.victim_client_id != 20 ||
+        first_record->event.score_change.killer_kills != 1 || first_record->event.score_change.victim_deaths != 1 ||
+        !first_record->event.score_change.match_kill_recorded ||
+        second_record->event.killer_client_id != 30 || second_record->event.victim_client_id != 40 ||
+        second_record->publication_sequence != first_record->publication_sequence + 1) {
+        return fail(name, "same-tick death ordering or approved score deltas were not explicit");
+    }
+    const uint64_t second_sequence = second_record->publication_sequence;
+
+    FpsCombat::CombatFeedEvent invalid_flags = first;
+    invalid_flags.flags = 0x80;
+    if (FpsCombat::recordCombatFeedEvent(registry, invalid_flags) !=
+        FpsCombat::CombatFeedRecordResult::InvalidFlags)
+        return fail(name, "unknown death flags entered the feed");
+
+    FpsCombat::CombatFeedEvent self = first;
+    self.killer_client_id = self.victim_client_id;
+    self.flags = FpsCombat::kCombatFeedKnownFlags;
+    self.score_change = {};
+    if (FpsCombat::recordCombatFeedEvent(registry, self) != FpsCombat::CombatFeedRecordResult::Recorded)
+        return fail(name, "self-inflicted value event was rejected");
+
+    // The component retains a bounded most-recent window.
+    for (size_t i = 0; i < FpsCombat::kCombatFeedCapacity + 2; ++i) {
+        FpsCombat::CombatFeedEvent event = first;
+        event.death_sequence = static_cast<uint32_t>(10 + i);
+        if (FpsCombat::recordCombatFeedEvent(registry, event) != FpsCombat::CombatFeedRecordResult::Recorded)
+            return fail(name, "bounded feed rejected a valid event");
+    }
+    if (feed.count != FpsCombat::kCombatFeedCapacity ||
+        !FpsCombat::combatFeedRecordAt(feed, 0) ||
+        FpsCombat::combatFeedRecordAt(feed, 0)->publication_sequence <= second_sequence)
+        return fail(name, "bounded feed did not retain ordered recent events");
+
+    const uint64_t previous_sequence = FpsCombat::combatFeedRecordAt(feed, feed.count - 1)->publication_sequence;
+    FpsCombat::clearCombatFeed(registry);
+    if (feed.count != 0 || feed.first != 0)
+        return fail(name, "round clear retained feed records");
+    if (FpsCombat::recordCombatFeedEvent(registry, first) != FpsCombat::CombatFeedRecordResult::Recorded ||
+        FpsCombat::combatFeedRecordAt(feed, 0)->publication_sequence <= previous_sequence)
+        return fail(name, "round clear reset publication ordering");
+
+    return pass(name);
+}
+
 #include "C4Tests.hpp"
 #include "GrenadeEffectsTests.hpp"
 #include "BotTests.hpp"
@@ -2022,6 +2103,7 @@ int main()
     ok = testLagCompensatedShotPoseFallbackAndMissCount() && ok;
     ok = testFpsDamageContract() && ok;
     ok = testFpsDeathLifecycle() && ok;
+    ok = testFpsCombatFeedContract() && ok;
     ok = testC4PlantInterrupt() && ok;
     ok = testC4AuthoredTriggerOccupancy() && ok;
     ok = testC4DefuseKit() && ok;
@@ -2046,6 +2128,7 @@ int main()
     ok = testBombAuthoredSitesParse() && ok;
     ok = testNavMeshGenerateAndSerializerRoundTrip() && ok;
     ok = testNavMeshFindPathTwoPoly() && ok;
+    ok = testBotNavWorldResourceLifecycle() && ok;
     ok = testNavMeshHierarchyRootBake() && ok;
     ok = testNavMeshHierarchyWorldBakeAndPath() && ok;
     ok = testNavMeshHierarchyStaleParentRootsBake() && ok;
@@ -2054,6 +2137,7 @@ int main()
     ok = testUiMenusRequireCompetitiveState() && ok;
     ok = testUiClockFormatting() && ok;
     ok = testUiHudCoreBindingSources() && ok;
+    ok = testUiAuthoritativeBuyTeamFeedback() && ok;
     ok = testUiBuyItemStateMatrix() && ok;
     ok = testUiScoreboardMoneyVisibility() && ok;
     ok = testUiRadarProjection() && ok;

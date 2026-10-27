@@ -7,6 +7,7 @@
 #include "shared/SharedComponents.hpp"
 #include "shared/WeaponTypes.hpp"
 #include "shared/FpsGameLogic.hpp"
+#include "shared/FpsCombatFeed.hpp"
 #include "shared/WorldItemLifecycle.hpp"
 #include <vector>
 #include <functional>
@@ -130,9 +131,10 @@ public:
         for (auto& pr: pending_respawns) if (pr.client_id==client_id) return;
         pending_respawns.push_back({client_id, match.config.respawn_delay});
     }
-    void onPlayerKilled(world& game_world, uint16_t killer_client_id, uint16_t victim_client_id) {
+    FpsCombat::ScoreChange onPlayerKilled(world& game_world, uint16_t killer_client_id, uint16_t victim_client_id) {
+        FpsCombat::ScoreChange change;
         if (!score_match_enabled)
-            return;
+            return change;
         uint8_t killer_team = FpsLogic::kTeamNone;
         auto view = game_world.registry.view<NetworkedEntity, ScoreComponent>();
         for (auto entity : view) {
@@ -140,11 +142,17 @@ public:
             auto& score = view.get<ScoreComponent>(entity);
             if (net.owner_client_id == killer_client_id && killer_client_id != victim_client_id) {
                 score.kills++;
+                change.killer_kills = 1;
                 if (game_world.registry.all_of<TeamComponent>(entity)) killer_team = game_world.registry.get<TeamComponent>(entity).team_id;
             }
-            if (net.owner_client_id == victim_client_id) score.deaths++;
+            if (net.owner_client_id == victim_client_id) {
+                score.deaths++;
+                change.victim_deaths = 1;
+            }
         }
         match.recordKill(killer_client_id, victim_client_id, killer_team);
+        change.match_kill_recorded = killer_client_id != 0 && killer_client_id != victim_client_id;
+        return change;
     }
     void Update(world& game_world, float delta_time) {
         if (score_match_enabled && match.tick(delta_time)) {

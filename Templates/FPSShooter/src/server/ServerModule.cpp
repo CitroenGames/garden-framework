@@ -20,12 +20,15 @@
 #include "shared/PlayerLifecycle.hpp"
 #include "shared/FpsAnimationPresentation.hpp"
 #include "shared/FpsGameLogic.hpp"
+#include "shared/FpsCombatFeed.hpp"
 #include "shared/WorldItemLifecycle.hpp"
 #include "shared/GrenadeEffects.hpp"
 #include "shared/CompetitiveLogic.hpp"
 #include "shared/BombSiteTriggers.hpp"
 #include "shared/BuyZoneTriggers.hpp"
 #include "shared/BotLogic.hpp"
+#include "shared/BotNavigationRuntime.hpp"
+#include "Assets/AssetManager.hpp"
 #include "Navigation/NavMesh.hpp"
 #include "Navigation/NavMeshPathfinder.hpp"
 #include "Navigation/NavMeshSerializer.hpp"
@@ -72,14 +75,22 @@ static Competitive::CompetitiveWorldContext& competitiveContext()
 #define g_sessions (competitiveContext().sessions)
 
 // ---- Bots v1 (FPS_BOTS=N, competitive only; DM/TDM unchanged) ----
-struct BotNavMeshResource { Navigation::NavMesh mesh; bool loaded = false; };
-static BotNavMeshResource g_bot_nav;
-static bool g_bots_attempted = false, g_bots_enabled = false, g_bots_error_logged = false;
-static int32_t g_bot_target_count = 0;
-static uint32_t g_bot_input_tick = 1;
-static float g_bot_world_time = 0.0f;
-static std::unordered_map<uint16_t, uint32_t> g_bot_buy_seq;
-static std::unordered_map<uint16_t, uint8_t> g_bot_last_weapon_select;
+// Navigation and bot execution state is registry-owned.  A server DLL can be
+// reused across level/world lifetimes, so no bot resource may live in a DLL
+// static that survives the world it describes.
+static Bots::BotWorldRuntime& botRuntime()
+{
+    return g_server_services->game_world->registry.ctx().get<Bots::BotWorldRuntime>();
+}
+
+static void resetBotRuntime(world& game_world)
+{
+    if (auto* runtime = game_world.registry.ctx().find<Bots::BotWorldRuntime>())
+        runtime->reset();
+    else
+        game_world.registry.ctx().emplace<Bots::BotWorldRuntime>();
+}
+
 static bool spawnPlayerForClient(uint16_t client_id, uint8_t requested_team = FpsLogic::kTeamNone); // defined with player spawning below
 static void despawnPlayerForClient(uint16_t client_id); // defined with player spawning below
 static int32_t botCountFromEnv() { const char* v = std::getenv("FPS_BOTS"); return v ? std::max(0, std::atoi(v)) : 0; }
@@ -88,9 +99,6 @@ static uint8_t botDifficultyFromEnv() { const char* v = std::getenv("FPS_BOT_DIF
 // engine console wiring, env matches existing bot config). Default 0/false = inert.
 static int32_t aiDebugLevel() { static const int32_t v = [] { const char* e = std::getenv("AI_DEBUG"); return e ? std::max(0, std::atoi(e)) : 0; }(); return v; }
 static bool aiPauseBots() { static const bool v = [] { const char* e = std::getenv("AI_PAUSE_BOTS"); return e && std::atoi(e) != 0; }(); return v; }
-static Bots::TransitionRingBuffer g_bot_transitions;
-static float g_bot_debug_last_dump = -10.0f;
-static std::unordered_map<int32_t, Bots::StuckLogLatch> g_bot_stuck_latches;
 static bool bombSiteForPlayer(world& w, entt::entity player, uint8_t& out_site);
 
 static const char* bombStateName(Competitive::BombState st)
@@ -326,7 +334,8 @@ static bool resolveFpsDeath(
         }
     }
 
-    g_game_rules.onPlayerKilled(game_world, attacker_client_id, victim_client_id);
+    const FpsCombat::ScoreChange score_change =
+        g_game_rules.onPlayerKilled(game_world, attacker_client_id, victim_client_id);
     if (g_competitive) {
         Competitive::MoneyComponent* victim_money = game_world.registry.all_of<Competitive::MoneyComponent>(victim_entity)
             ? &game_world.registry.get<Competitive::MoneyComponent>(victim_entity) : nullptr;
@@ -346,6 +355,13 @@ static bool resolveFpsDeath(
         }
     }
 
+    // This records the exact value-only death event that enters the existing
+    // all-client message path, paired only with score changes GameRules just
+    // applied.  Competitive has no kill-score contract, so its delta remains
+    // explicit zero rather than inferring a reward or economy effect here.
+    const FpsCombat::CombatFeedEvent feed_event =
+        FpsServer::makeCombatFeedEvent(death_event, score_change);
+    (void)FpsCombat::recordCombatFeedEvent(game_world.registry, feed_event);
     publishFpsDeathEvent(death_event);
     LOG_ENGINE_INFO("Player {} killed by player {} sequence={}", victim_client_id, attacker_client_id, transition.death_sequence);
     if (!g_competitive || g_round_system.state.phase == Competitive::RoundPhase::Warmup)
@@ -675,27 +691,44 @@ static void consumeBotInputSample(uint16_t client_id, entt::entity e, const Inpu
     g_bomb_use_held[client_id] = (input.buttons & InputFlags::USE) != 0;
     g_bomb_last_buttons[client_id] = input.buttons;
     processWeaponInput(client_id, e, input, g_server_network.getCurrentTick());
+    auto& runtime = botRuntime();
     uint8_t sel = Net::getWeaponSelect(input.buttons);
-    auto it = g_bot_last_weapon_select.find(client_id);
-    if (sel != 0 && (it == g_bot_last_weapon_select.end() || it->second != sel)) doWeaponSelect(client_id, e, sel);
-    g_bot_last_weapon_select[client_id] = sel;
+    auto it = runtime.last_weapon_select.find(client_id);
+    if (sel != 0 && (it == runtime.last_weapon_select.end() || it->second != sel)) doWeaponSelect(client_id, e, sel);
+    runtime.last_weapon_select[client_id] = sel;
+}
+
+// The host changes CWD to the selected project root and initializes
+// AssetManager with that project's asset root before the module loads.  The
+// current module API exposes only a level hash, not the selected level path,
+// so the explicit template asset contract remains levels/main.nav.  The
+// result is resolved by AssetManager rather than probing checkout-relative
+// paths.  A future generic selected-level-path API can derive the stem here.
+static std::string resolveBotNavAssetPath()
+{
+    return Assets::AssetManager::get().resolveAssetPath("levels/main.nav");
 }
 
 static bool loadBotNavMesh()
 {
-    if (g_bots_attempted) return g_bots_enabled;
-    g_bots_attempted = true;
-    static const char* kNavCandidates[] = {"assets/levels/main.nav", "Templates/FPSShooter/assets/levels/main.nav", "../Templates/FPSShooter/assets/levels/main.nav"};
-    for (const char* path : kNavCandidates) {
-        Navigation::NavMesh mesh;
-        if (Navigation::NavMeshSerializer::load(mesh, path) && mesh.valid) {
-            g_bot_nav.mesh = std::move(mesh); g_bot_nav.loaded = true; g_bots_enabled = true;
-            LOG_ENGINE_INFO("Bots: navmesh loaded from {}", path);
-            return true;
-        }
+    auto& runtime = botRuntime();
+    if (runtime.nav_attempted) return runtime.hasValidNavMesh();
+    const std::string resolved_path = resolveBotNavAssetPath();
+    if (runtime.loadResolvedNavMesh(resolved_path)) {
+        LOG_ENGINE_INFO("Bots: navmesh status={} format=v{} path={} polys={}",
+            Bots::navMeshLoadStatusName(runtime.nav_status), runtime.nav_format_version,
+            runtime.resolved_nav_path,
+            runtime.navmesh.total_polys);
+        return true;
     }
-    g_bots_enabled = false; // F-AI-01: never straight-line wall walking
-    if (!g_bots_error_logged) { g_bots_error_logged = true; LOG_ENGINE_ERROR("Bots disabled: navmesh missing/invalid (F-AI-01); match continues human-only. Fix: run server once with FPS_BAKE_NAV=1 FPS_GAME_MODE=competitive to bake assets/levels/main.nav, then relaunch with FPS_BOTS=N (see Templates/FPSShooter/BOTS.txt)"); }
+    // F-AI-01: never straight-line wall walking.  The actual resolved path is
+    // logged so missing/corrupt project assets can be repaired without relying
+    // on the process working directory.
+    if (!runtime.error_logged) {
+        runtime.error_logged = true;
+        LOG_ENGINE_ERROR("Bots disabled: navmesh status={} path={} (F-AI-01); match continues human-only",
+            Bots::navMeshLoadStatusName(runtime.nav_status), runtime.resolved_nav_path);
+    }
     return false;
 }
 
@@ -706,16 +739,19 @@ static bool bakeBotNavMeshIfRequested()
 {
     const char* env = std::getenv("FPS_BAKE_NAV");
     if (!env || std::atoi(env) == 0) return false;
-    static bool s_done = false;
-    if (s_done) return g_bot_nav.loaded;
-    s_done = true;
+    auto& runtime = botRuntime();
+    if (runtime.nav_attempted) return runtime.hasValidNavMesh();
+    runtime.nav_attempted = true;
     world* w = g_server_services ? g_server_services->game_world : nullptr;
     if (!w) { LOG_ENGINE_ERROR("BakeNav: no game world; cannot bake"); return false; }
-    static const char* kNavCandidates[] = {"assets/levels/main.nav", "Templates/FPSShooter/assets/levels/main.nav", "../Templates/FPSShooter/assets/levels/main.nav"};
-    std::string out_path = kNavCandidates[0];
-    for (const char* cand : kNavCandidates) {
-        std::filesystem::path p(cand);
-        if (p.has_parent_path() && std::filesystem::is_directory(p.parent_path())) { out_path = cand; break; }
+    const std::string out_path = resolveBotNavAssetPath();
+    runtime.resolved_nav_path = out_path;
+    const std::filesystem::path output_path(out_path);
+    if (out_path.empty() || !output_path.has_parent_path() ||
+        !std::filesystem::is_directory(output_path.parent_path())) {
+        runtime.nav_status = Bots::NavMeshLoadStatus::Missing;
+        LOG_ENGINE_ERROR("BakeNav: resolved project nav asset directory is unavailable: {}", out_path);
+        return false;
     }
     Navigation::NavMeshConfig cfg;
     cfg.agent_height = 1.8f; cfg.agent_radius = 0.35f; cfg.cell_size = 0.25f;
@@ -724,18 +760,55 @@ static bool bakeBotNavMeshIfRequested()
     Navigation::NavMeshGenerator::GenerationStats stats;
     Navigation::NavMesh baked = Navigation::NavMeshGenerator::generate(w->registry, cfg, &stats);
     if (!baked.valid || baked.total_polys <= 0) {
+        runtime.nav_status = Bots::NavMeshLoadStatus::Invalid;
         LOG_ENGINE_ERROR("BakeNav: generation produced 0 polys (source_tris={}); NOT writing {}", stats.source_triangles, out_path);
         return false;
     }
-    if (!Navigation::NavMeshSerializer::save(baked, out_path)) {
-        LOG_ENGINE_ERROR("BakeNav: serializer save failed to {}", out_path);
+    const std::filesystem::path final_path(out_path);
+    const std::filesystem::path temp_path = final_path.string() + ".tmp";
+    const std::filesystem::path backup_path = final_path.string() + ".previous";
+    std::error_code file_error;
+    std::filesystem::remove(temp_path, file_error);
+    if (!Navigation::NavMeshSerializer::save(baked, temp_path.string())) {
+        runtime.nav_status = Bots::NavMeshLoadStatus::Invalid;
+        LOG_ENGINE_ERROR("BakeNav: serializer save failed to temporary {}", temp_path.string());
         return false;
     }
     Navigation::NavMesh check;
-    if (!Navigation::NavMeshSerializer::load(check, out_path) || !check.valid || check.total_polys <= 0) {
-        LOG_ENGINE_ERROR("BakeNav: round-trip load failed for {}", out_path);
+    if (!Navigation::NavMeshSerializer::load(check, temp_path.string()) || !check.valid || check.total_polys <= 0) {
+        runtime.nav_status = Bots::NavMeshLoadStatus::Invalid;
+        std::filesystem::remove(temp_path, file_error);
+        LOG_ENGINE_ERROR("BakeNav: temporary round-trip load failed for {}", temp_path.string());
         return false;
     }
+    std::filesystem::remove(backup_path, file_error);
+    const bool had_previous = std::filesystem::exists(final_path, file_error) && !file_error;
+    if (had_previous) {
+        std::filesystem::rename(final_path, backup_path, file_error);
+        if (file_error) {
+            runtime.nav_status = Bots::NavMeshLoadStatus::Invalid;
+            std::filesystem::remove(temp_path, file_error);
+            LOG_ENGINE_ERROR("BakeNav: could not preserve existing {} before replacement", out_path);
+            return false;
+        }
+    }
+    std::filesystem::rename(temp_path, final_path, file_error);
+    if (file_error) {
+        if (had_previous) {
+            std::error_code restore_error;
+            std::filesystem::rename(backup_path, final_path, restore_error);
+        }
+        runtime.nav_status = Bots::NavMeshLoadStatus::Invalid;
+        std::filesystem::remove(temp_path, file_error);
+        LOG_ENGINE_ERROR("BakeNav: could not replace resolved asset {}", out_path);
+        return false;
+    }
+    if (had_previous)
+        std::filesystem::remove(backup_path, file_error);
+    runtime.navmesh = std::move(check);
+    runtime.nav_format_version = Navigation::NavMeshSerializer::kCurrentVersion;
+    runtime.nav_status = Bots::NavMeshLoadStatus::Loaded;
+    runtime.bots_enabled = true;
     std::error_code ec;
     const auto bytes = std::filesystem::file_size(out_path, ec);
     LOG_ENGINE_INFO("BakeNav: wrote {} polys={} bake_ms={:.1f} source_tris={} roundtrip_polys={} bytes={}",
@@ -745,12 +818,13 @@ static bool bakeBotNavMeshIfRequested()
 
 static void spawnBotsIfNeeded()
 {
-    if (!g_bots_enabled) return;
+    auto& runtime = botRuntime();
+    if (!runtime.hasValidNavMesh()) return;
     world* w = g_server_services ? g_server_services->game_world : nullptr;
     if (!w) return;
     int32_t existing = 0;
     { auto v = w->registry.view<Bots::BotComponent>(); for (auto e : v) { (void)e; ++existing; } }
-    for (int32_t i = existing; i < g_bot_target_count; ++i) {
+    for (int32_t i = existing; i < runtime.target_count; ++i) {
         // Fill empty team slots only (team_size per team).
         int32_t na = 0, nd = 0;
         auto tv = w->registry.view<NetworkedEntity, TeamComponent>();
@@ -783,7 +857,7 @@ static void executeBotBuy(uint16_t client_id, entt::entity e)
     glm::vec3 pos = w->registry.get<TransformComponent>(e).position;
     for (const char* alias : plan.aliases) {
         const WeaponCatalogDef* def = findCatalogByAlias(alias); if (!def) continue;
-        Competitive::BuyContext ctx; ctx.client_id = client_id; ctx.request_seq = ++g_bot_buy_seq[client_id];
+        Competitive::BuyContext ctx; ctx.client_id = client_id; ctx.request_seq = ++botRuntime().buy_sequence[client_id];
         ctx.phase = g_round_system.state.phase; ctx.seconds_into_live = 0.0f;
         ctx.alive = w->registry.get<FpsHealthComponent>(e).alive;
         ctx.in_buy_zone = Competitive::isInBuyZone(w->registry, e, team);
@@ -801,12 +875,13 @@ static void executeBotBuy(uint16_t client_id, entt::entity e)
 
 static void tickBots(float dt)
 {
-    if (!g_bots_enabled) return;
+    auto& runtime = botRuntime();
+    if (!runtime.hasValidNavMesh()) return;
     world* w = g_server_services ? g_server_services->game_world : nullptr;
     if (!w || dt <= 0.0f) return;
-    g_bot_world_time += dt;
-    const bool bot_debug_dump_now = aiDebugLevel() >= 1 && (g_bot_world_time - g_bot_debug_last_dump >= 1.0f);
-    if (bot_debug_dump_now) g_bot_debug_last_dump = g_bot_world_time;
+    runtime.world_time += dt;
+    const bool bot_debug_dump_now = aiDebugLevel() >= 1 && (runtime.world_time - runtime.debug_last_dump >= 1.0f);
+    if (bot_debug_dump_now) runtime.debug_last_dump = runtime.world_time;
     spawnBotsIfNeeded();
     std::vector<entt::entity> bots;
     { auto v = w->registry.view<Bots::BotComponent>(); for (auto e : v) bots.push_back(e); }
@@ -822,7 +897,7 @@ static void tickBots(float dt)
         bool alive = w->registry.get<FpsHealthComponent>(e).alive;
         uint8_t team_id = w->registry.get<TeamComponent>(e).team_id;
         // S1 perception (10 Hz staggered by bot_index % 6 fixed ticks)
-        if (((uint32_t)(g_bot_world_time * 60.0f) + (uint32_t)bot.bot_index) % 6u == 0u) {
+        if (((uint32_t)(runtime.world_time * 60.0f) + (uint32_t)bot.bot_index) % 6u == 0u) {
             std::vector<Bots::EnemyCandidate> enemies;
             auto ev = w->registry.view<NetworkedEntity, TeamComponent, TransformComponent, FpsHealthComponent>();
             for (auto en : ev) { if (en == e || !ev.get<NetworkedEntity>(en).is_player || !ev.get<FpsHealthComponent>(en).alive) continue; if (ev.get<TeamComponent>(en).team_id == team_id) continue; enemies.push_back(Bots::EnemyCandidate{en, ev.get<TransformComponent>(en).position}); }
@@ -837,18 +912,18 @@ static void tickBots(float dt)
         if (!g_bomb_system.config.sites.empty()) { const auto& s = g_bomb_system.config.sites[(size_t)std::abs(bot.bot_index) % g_bomb_system.config.sites.size()]; din.site_pos = s.centre; din.has_site = true; uint8_t si = 0; din.at_site = bombSiteForPlayer(*w, e, si); }
         if (din.bomb_planted) { din.bomb_pos = g_bomb_system.bomb.planted_position; din.has_bomb_pos = true; din.at_bomb = glm::distance(pos, din.bomb_pos) <= g_bomb_system.config.defuse_range; }
         const int32_t dbg = aiDebugLevel();
-        const uint64_t trans_before = g_bot_transitions.total_pushed;
-        Bots::decide(bot, percept, intent, din, dbg >= 1 ? &g_bot_transitions : nullptr, g_bot_input_tick);
-        if (dbg >= 2 && g_bot_transitions.total_pushed > trans_before) { uint64_t n = std::min<uint64_t>(g_bot_transitions.total_pushed - trans_before, g_bot_transitions.size()); for (uint64_t i = 0; i < n; ++i) LOG_ENGINE_INFO("{}", Bots::formatTransition(g_bot_transitions.at(g_bot_transitions.size() - (size_t)n + (size_t)i))); }
+        const uint64_t trans_before = runtime.transitions.total_pushed;
+        Bots::decide(bot, percept, intent, din, dbg >= 1 ? &runtime.transitions : nullptr, runtime.input_tick);
+        if (dbg >= 2 && runtime.transitions.total_pushed > trans_before) { uint64_t n = std::min<uint64_t>(runtime.transitions.total_pushed - trans_before, runtime.transitions.size()); for (uint64_t i = 0; i < n; ++i) LOG_ENGINE_INFO("{}", Bots::formatTransition(runtime.transitions.at(runtime.transitions.size() - (size_t)n + (size_t)i))); }
         if (bot.state == Bots::BotState::Buy) executeBotBuy(client_id, e);
         if (g_round_system.state.phase == Competitive::RoundPhase::Live) bot.buy_done = false;
         // S3 path request (only when a navmesh path can be produced; no wall walking)
         nav.repath_timer -= dt;
-        if (intent.has_move_goal && g_bot_nav.loaded) {
+        if (intent.has_move_goal && runtime.hasValidNavMesh()) {
             glm::vec3 goal = intent.move_goal; glm::vec3 to_goal = goal - nav.goal; to_goal.y = 0;
             if ((!nav.has_goal || glm::length(to_goal) > 2.0f) && nav.repath_timer <= 0.0f) {
                 nav.repath_timer = nav.repath_cooldown;
-                Navigation::NavPath path = Navigation::NavMeshPathfinder::findPath(g_bot_nav.mesh, pos, goal);
+                Navigation::NavPath path = Navigation::NavMeshPathfinder::findPath(runtime.navmesh, pos, goal);
                 if (path.valid) Bots::setPath(nav, path.waypoints, goal); else { nav.path_valid = false; nav.has_goal = false; ++nav.path_failures; }
             }
         } else if (intent.has_move_goal) { nav.path_valid = false; nav.has_goal = false; }
@@ -857,11 +932,11 @@ static void tickBots(float dt)
         if (!intent.has_move_goal) { nav.has_goal = false; nav.desired_velocity = glm::vec3(0); }
         // S4 steering + S5 synthesis into the same consumption path as humans
         Bots::updateSteering(nav, steer, pos, dt);
-        Net::InputSample sample = aiPauseBots() ? Bots::synthesizeNeutralInput(++g_bot_input_tick, bot.aim_yaw, bot.aim_pitch)
-                                                : Bots::synthesizeInput(bot, nav, intent, ++g_bot_input_tick, dt);
+        Net::InputSample sample = aiPauseBots() ? Bots::synthesizeNeutralInput(++runtime.input_tick, bot.aim_yaw, bot.aim_pitch)
+                                                : Bots::synthesizeInput(bot, nav, intent, ++runtime.input_tick, dt);
         consumeBotInputSample(client_id, e, sample, dt);
         if (dbg >= 1) {
-            if (g_bot_stuck_latches[bot.bot_index].check(nav.stuck)) LOG_ENGINE_WARN("[BotDebug] bot_stuck bot={} (F-AI-03)", bot.bot_index);
+            if (runtime.stuck_latches[bot.bot_index].check(nav.stuck)) LOG_ENGINE_WARN("[BotDebug] bot_stuck bot={} (F-AI-03)", bot.bot_index);
             if (bot_debug_dump_now) { Bots::BotDumpInput dump; dump.bot_index = bot.bot_index; dump.team = (int32_t)team_id; dump.state = bot.state; dump.hp = w->registry.get<FpsHealthComponent>(e).health; dump.pos = pos; dump.goal = nav.goal; dump.has_goal = nav.has_goal; dump.path_valid = nav.path_valid; dump.stuck = nav.stuck; dump.visible_age = percept.last_seen_age; dump.heard_age = percept.heard_age; LOG_ENGINE_INFO("{}", Bots::formatBotDump(dump)); }
         }
     }
@@ -999,8 +1074,10 @@ static bool loadAuthoredBombSites(std::vector<Competitive::BombSite>& out, bool&
         std::fclose(f);
         std::string err;
         if (!Competitive::parseAuthoredBombSites(text, s_sites, &err)) { LOG_ENGINE_ERROR("Bomb: authored sites {} rejected ({}); planting disabled", path, err); s_sites.clear(); file_found = true; return false; }
-        if (g_bot_nav.loaded) {
-            for (const auto& s : s_sites) { glm::vec3 near_pt(0); if (!Navigation::NavMeshPathfinder::findNearestPoly(g_bot_nav.mesh, s.centre, near_pt)) { LOG_ENGINE_ERROR("Bomb: authored site {} off navmesh; planting disabled", (int)s.site_index); s_sites.clear(); file_found = true; return false; } }
+        const auto* runtime = g_server_services && g_server_services->game_world
+            ? g_server_services->game_world->registry.ctx().find<Bots::BotWorldRuntime>() : nullptr;
+        if (runtime && runtime->hasValidNavMesh()) {
+            for (const auto& s : s_sites) { glm::vec3 near_pt(0); if (!Navigation::NavMeshPathfinder::findNearestPoly(runtime->navmesh, s.centre, near_pt)) { LOG_ENGINE_ERROR("Bomb: authored site {} off navmesh; planting disabled", (int)s.site_index); s_sites.clear(); file_found = true; return false; } }
         }
         s_ok = true; out = s_sites;
         file_found = true;
@@ -1671,6 +1748,18 @@ static void despawnPlayerForClient(uint16_t client_id)
     }
 }
 
+static void despawnBotsForLevelTransition(world& game_world)
+{
+    // Keep bot pawn lifetime coupled to the world resource.  A level reload
+    // must not leave old-map bots alive while navigation is still unresolved.
+    std::vector<uint16_t> client_ids;
+    auto bots = game_world.registry.view<Bots::BotComponent, NetworkedEntity>();
+    for (const entt::entity entity : bots)
+        client_ids.push_back(bots.get<NetworkedEntity>(entity).owner_client_id);
+    for (const uint16_t client_id : client_ids)
+        despawnPlayerForClient(client_id);
+}
+
 // ---- Server DLL exports ----
 
 GAME_API bool gardenServerInit(EngineServices* services)
@@ -1682,9 +1771,12 @@ GAME_API bool gardenServerInit(EngineServices* services)
         mode_env ? std::string_view(mode_env) : std::string_view{});
 
     // A repeated init can reuse the world registry.  Remove every competitive
-    // authority before composing the selected mode so DM/TDM worlds contain no
-    // round snapshot, bomb, buy, economy, or session state.
+    // authority and bot pawn before composing the selected mode so DM/TDM
+    // worlds contain no round snapshot, bomb, buy, economy, session, or
+    // stale bot state.
+    despawnBotsForLevelTransition(*match_world);
     Competitive::clearCompetitiveWorldContext(match_world->registry);
+    resetBotRuntime(*match_world);
     {
         FpsLogic::ModeConfig cfg = g_mode_composition.gameplayConfig();
         if (const char* lim = std::getenv("FPS_SCORE_LIMIT")) { int v = std::atoi(lim); if (v > 0) cfg.score_limit = v; }
@@ -1701,13 +1793,17 @@ GAME_API bool gardenServerInit(EngineServices* services)
                 LOG_ENGINE_INFO("Bomb state {} -> {} carrier_valid={} timer={:.1f}", bombStateName(from), bombStateName(to),
                     g_bomb_system.bomb.carrier != entt::null, g_bomb_system.bomb.timer);
             };
-            g_bot_target_count = botCountFromEnv();
+            botRuntime().target_count = botCountFromEnv();
             g_round_system.on_phase_enter = [](Competitive::RoundPhase ph) {
                 LOG_ENGINE_INFO("Competitive phase: {} round={} score A{}-D{} deadline_tick={}",
                     competitivePhaseName(ph), g_round_system.state.round_number,
                     (int)g_round_system.state.wins_attackers, (int)g_round_system.state.wins_defenders,
                     g_round_system.state.phase_deadline_tick);
-                if (ph == Competitive::RoundPhase::Freeze) { competitiveFreezeRespawnAll(); competitiveFreezeBombSetup(); }
+                if (ph == Competitive::RoundPhase::Freeze) {
+                    FpsCombat::clearCombatFeed(g_server_services->game_world->registry);
+                    competitiveFreezeRespawnAll();
+                    competitiveFreezeBombSetup();
+                }
                 broadcastRoundState();
             };
             g_round_system.on_period_reset = [](bool overtime) { competitivePeriodReset(overtime); };
@@ -1723,6 +1819,13 @@ GAME_API bool gardenServerInit(EngineServices* services)
                 g_mode_composition.name(), cfg.score_limit, cfg.time_limit_seconds);
         }
     }
+
+    // Score modes clear their bounded feed at the same authoritative match
+    // restart boundary that resets MatchLogic scores.
+    g_game_rules.setOnMatchRestart([]() {
+        if (g_server_services && g_server_services->game_world)
+            FpsCombat::clearCombatFeed(g_server_services->game_world->registry);
+    });
 
     uint16_t port = services->listen_port ? services->listen_port : 7777;
 
@@ -1830,6 +1933,10 @@ GAME_API void gardenServerShutdown()
             context->destroyMatchSnapshot(registry);
             registry.ctx().erase<Competitive::CompetitiveWorldContext>();
         }
+        if (auto* runtime = registry.ctx().find<Bots::BotWorldRuntime>()) {
+            runtime->reset();
+            registry.ctx().erase<Bots::BotWorldRuntime>();
+        }
     }
     g_server_services = nullptr;
 }
@@ -1871,7 +1978,7 @@ GAME_API void gardenServerUpdate(float delta_time)
             else if (tid == FpsLogic::kTeamDefenders) { rin.defenders_connected++; if (alive) rin.defenders_alive++; }
         }
         auto prev_phase = g_round_system.state.phase;
-        if (g_bot_target_count > 0) { (void)loadBotNavMesh(); tickBots(w->fixed_delta > 0.0f ? w->fixed_delta : delta_time); }
+        if (botRuntime().target_count > 0) { (void)loadBotNavMesh(); tickBots(w->fixed_delta > 0.0f ? w->fixed_delta : delta_time); }
         tickBombServer(w->fixed_delta > 0.0f ? w->fixed_delta : delta_time);
         g_round_system.tick(w->fixed_delta > 0.0f ? w->fixed_delta : delta_time, rin);
         competitiveContext().syncMatchSnapshot(w->registry);
@@ -1939,13 +2046,21 @@ GAME_API void gardenServerOnLevelLoaded()
 {
     if (!g_server_services) return;
     world& game_world = *g_server_services->game_world;
+    // A new level owns a new navigation resource.  This also disables bots
+    // until its resolved project asset has been checked, even if the same DLL
+    // and registry are reused by a host level transition.
+    despawnBotsForLevelTransition(game_world);
+    resetBotRuntime(game_world);
     if (g_competitive)
         ensureBuyZoneTriggers(game_world);
     game_world.getPhysicsSystem().optimizeBroadPhase();
     // The host hashes Project.default_level and passes the selected artifact.
     g_server_network.setLevelHash(g_server_services->level_hash);
     (void)bakeBotNavMeshIfRequested();
-    if (g_competitive && botCountFromEnv() > 0) { g_bot_target_count = botCountFromEnv(); (void)loadBotNavMesh(); }
+    if (g_competitive && botCountFromEnv() > 0) {
+        botRuntime().target_count = botCountFromEnv();
+        (void)loadBotNavMesh();
+    }
     LOG_ENGINE_INFO("Server level loaded");
 }
 

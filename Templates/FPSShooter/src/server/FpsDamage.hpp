@@ -2,6 +2,7 @@
 
 #include "Gameplay/GameplayComponents.hpp"
 #include "shared/CompetitiveLogic.hpp"
+#include "shared/FpsCombatFeed.hpp"
 #include "shared/SharedComponents.hpp"
 
 #include <cstdint>
@@ -62,6 +63,20 @@ struct FpsDeathEvent {
     uint32_t death_sequence = 0;
     glm::vec3 death_position{0.0f};
 };
+
+inline FpsCombat::CombatFeedEvent makeCombatFeedEvent(
+    const FpsDeathEvent& death_event,
+    const FpsCombat::ScoreChange& score_change)
+{
+    return {
+        death_event.attacker_client_id,
+        death_event.victim_client_id,
+        death_event.weapon_type,
+        death_event.flags,
+        death_event.death_sequence,
+        score_change,
+    };
+}
 
 enum class DeathTransitionRejectReason : uint8_t {
     None = 0,
