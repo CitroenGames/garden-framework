@@ -16,6 +16,7 @@
 #include "world.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -1402,6 +1403,37 @@ static bool testD6TriggerCapAndMeshRejection()
     return pass(name);
 }
 
+static bool containsLayerKey(const nlohmann::json& value)
+{
+    if (value.is_object())
+    {
+        for (auto it = value.begin(); it != value.end(); ++it)
+        {
+            std::string normalized_key;
+            for (unsigned char c : it.key())
+            {
+                if (std::isalnum(c))
+                    normalized_key.push_back(static_cast<char>(std::tolower(c)));
+            }
+            const bool has_layer_name =
+                normalized_key.find("objectlayer") != std::string::npos ||
+                normalized_key.find("physicslayer") != std::string::npos ||
+                normalized_key.find("collisionlayer") != std::string::npos ||
+                (normalized_key.find("layer") != std::string::npos &&
+                 normalized_key.find("player") == std::string::npos);
+            if (has_layer_name || containsLayerKey(it.value()))
+                return true;
+        }
+    }
+    else if (value.is_array())
+    {
+        for (const auto& item : value)
+            if (containsLayerKey(item))
+                return true;
+    }
+    return false;
+}
+
 static bool testD6LevelRoundTrip()
 {
     const std::string name = "D6-U1 level round-trip (no persisted layer indices)";
@@ -1427,8 +1459,9 @@ static bool testD6LevelRoundTrip()
     LevelManager lm;
     if (!lm.saveLevelToJSON(tmp.string(), data)) return fail(name, "saveLevelToJSON failed");
     std::ifstream in(tmp); std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    if (text.find("layer") != std::string::npos && text.find("player") == std::string::npos)
-        return fail(name, "saved level unexpectedly persists a physics layer value");
+    const nlohmann::json saved = nlohmann::json::parse(text, nullptr, false);
+    if (saved.is_discarded()) return fail(name, "saved JSON level could not be parsed");
+    if (containsLayerKey(saved)) return fail(name, "saved level unexpectedly persists a physics layer field");
     LevelData loaded;
     if (!lm.loadLevelFromJSON(tmp.string(), loaded)) return fail(name, "loadLevelFromJSON failed");
     if (loaded.entities.size() != 2) return fail(name, "round-trip entity count changed");
