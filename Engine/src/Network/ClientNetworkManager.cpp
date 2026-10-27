@@ -49,6 +49,9 @@ bool ClientNetworkManager::connectToServer(const char* address, uint16_t port, c
         return false;
     }
 
+    clearInterpolationHistory();
+    last_received_server_tick = 0;
+
     // Store player name
     player_name = name;
 
@@ -458,6 +461,7 @@ void ClientNetworkManager::handleConnectAccept(BitReader& reader)
     client_id = msg.client_id;
     client_tick = 0;
     last_received_server_tick = msg.server_tick;
+    has_received_server_tick = true;
     negotiated_capability_flags = msg.capability_flags;
 
     setConnectionState(ConnectionState::CONNECTED);
@@ -513,7 +517,7 @@ void ClientNetworkManager::handleWorldStateUpdate(BitReader& reader)
         return;
     }
 
-    if (last_received_server_tick != 0 && !isTickNewer(msg.server_tick, last_received_server_tick)) {
+    if (has_received_server_tick && !isTickNewer(msg.server_tick, last_received_server_tick)) {
         LOG_ENGINE_WARN("Dropping stale WORLD_STATE_UPDATE tick {} (last accepted {})",
                         msg.server_tick,
                         last_received_server_tick);
@@ -523,6 +527,7 @@ void ClientNetworkManager::handleWorldStateUpdate(BitReader& reader)
 
     // Update last received server tick
     last_received_server_tick = msg.server_tick;
+    has_received_server_tick = true;
 
     std::unordered_set<uint32_t> full_snapshot_entities;
     if (msg.isFullSnapshot()) {
@@ -875,6 +880,7 @@ void ClientNetworkManager::clearInterpolationHistory()
 {
     interp_buffers.clear();
     latest_interp_state.clear();
+    has_received_server_tick = false;
 }
 
 void ClientNetworkManager::deleteEntity(uint32_t network_id)
@@ -1017,13 +1023,13 @@ void ClientNetworkManager::handleCVarInitialSync(BitReader& reader)
 
 void ClientNetworkManager::interpolateRemoteEntities()
 {
-    if (game_world == nullptr || last_received_server_tick == 0)
+    if (game_world == nullptr || !has_received_server_tick)
         return;
 
-    // Render remote entities slightly in the past to ensure we have two snapshots to lerp between
-    float render_tick = static_cast<float>(last_received_server_tick) - INTERP_DELAY_TICKS;
-    if (render_tick < 0.0f)
-        render_tick = 0.0f;
+    // Unsigned subtraction intentionally wraps when the delayed render tick
+    // precedes tick zero. Keep sub-tick progress separate from the anchor.
+    const uint32_t render_anchor_tick = last_received_server_tick - INTERP_DELAY_TICKS;
+    constexpr float render_fraction = 0.0f;
 
     for (auto& [net_id, buffer] : interp_buffers) {
         // Skip local player - handled by prediction
@@ -1043,7 +1049,8 @@ void ClientNetworkManager::interpolateRemoteEntities()
 
         glm::vec3 interpolated_pos;
         float interpolated_rot;
-        if (buffer.interpolate(render_tick, interpolated_pos, interpolated_rot)) {
+        if (buffer.interpolate(render_anchor_tick, render_fraction,
+                               interpolated_pos, interpolated_rot)) {
             auto& transform = game_world->registry.get<TransformComponent>(entity);
             transform.position = interpolated_pos;
             // D4 point 4 (out): buffer radians -> ECS degrees.

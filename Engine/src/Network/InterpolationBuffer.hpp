@@ -45,11 +45,24 @@ public:
             count++;
     }
 
-    // Interpolate to a fractional render tick.
+    // Interpolate relative to an integer tick anchor. Keeping the fraction
+    // separate avoids converting absolute uint32 ticks to float near wrap.
     // Returns true if interpolation succeeded, false if insufficient data.
-    bool interpolate(float render_tick, glm::vec3& out_position, float& out_rotation) const
+    bool interpolate(uint32_t anchor_tick, float fraction,
+                     glm::vec3& out_position, float& out_rotation) const
     {
         if (count < 1) return false;
+
+        if (!std::isfinite(fraction) || fraction < 0.0f) {
+            fraction = 0.0f;
+        } else if (fraction == 1.0f) {
+            // Treat an exact fraction as the next integer anchor so a
+            // snapshot on that tick is classified correctly.
+            ++anchor_tick;
+            fraction = 0.0f;
+        } else if (fraction > 1.0f) {
+            fraction = std::nextafter(1.0f, 0.0f);
+        }
 
         if (count == 1) {
             size_t idx = (head + MAX_SNAPSHOTS - 1) % MAX_SNAPSHOTS;
@@ -58,7 +71,8 @@ public:
             return true;
         }
 
-        // Find two surrounding snapshots: a.tick <= render_tick <= b.tick
+        // Compare each snapshot as a serial-relative offset from the render
+        // anchor. The retained 32-snapshot window is safely below 2^31 ticks.
         const InterpolationSnapshot* snap_a = nullptr;
         const InterpolationSnapshot* snap_b = nullptr;
 
@@ -68,7 +82,8 @@ public:
             const auto& snap = buffer[idx];
             if (!snap.valid) continue;
 
-            if (static_cast<float>(snap.tick) <= render_tick) {
+            const int32_t tick_offset = static_cast<int32_t>(snap.tick - anchor_tick);
+            if (static_cast<float>(tick_offset) <= fraction) {
                 snap_a = &snap;
             } else {
                 snap_b = &snap;
@@ -78,8 +93,12 @@ public:
 
         if (snap_a && snap_b) {
             // Hermite interpolation between snapshots
-            float range = static_cast<float>(snap_b->tick - snap_a->tick);
-            float t = (range > 0.0f) ? (render_tick - static_cast<float>(snap_a->tick)) / range : 0.0f;
+            const uint32_t range_ticks = snap_b->tick - snap_a->tick;
+            const float range = static_cast<float>(range_ticks);
+            const uint32_t ticks_from_a_to_anchor = anchor_tick - snap_a->tick;
+            float t = (range_ticks > 0)
+                ? (static_cast<float>(ticks_from_a_to_anchor) + fraction) / range
+                : 0.0f;
             t = glm::clamp(t, 0.0f, 1.0f);
 
             // Check for teleport
@@ -113,8 +132,12 @@ public:
 
         if (snap_a) {
             // Past the latest snapshot - extrapolate using velocity (capped)
-            float extrap_ticks = render_tick - static_cast<float>(snap_a->tick);
-            if (extrap_ticks > MAX_EXTRAP_TICKS) extrap_ticks = MAX_EXTRAP_TICKS;
+            const uint32_t whole_extrap_ticks = anchor_tick - snap_a->tick;
+            float extrap_ticks = static_cast<float>(whole_extrap_ticks) + fraction;
+            if (whole_extrap_ticks > static_cast<uint32_t>(MAX_EXTRAP_TICKS) ||
+                extrap_ticks > MAX_EXTRAP_TICKS) {
+                extrap_ticks = MAX_EXTRAP_TICKS;
+            }
 
             float extrap_time = extrap_ticks * TICK_DURATION;
             out_position = snap_a->position + snap_a->velocity * extrap_time;

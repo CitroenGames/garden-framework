@@ -47,6 +47,7 @@ private:
     uint16_t client_id = 0;
     uint32_t client_tick = 0;
     uint32_t last_received_server_tick = 0;
+    bool has_received_server_tick = false;
     ConnectionState connection_state = ConnectionState::DISCONNECTED;
     std::string player_name;
 
@@ -100,7 +101,7 @@ private:
     // TransformComponent is also a render target, so it must not be read back
     // as replication truth after interpolateRemoteEntities has written it.
     std::unordered_map<uint32_t, InterpolationSnapshot> latest_interp_state;
-    static constexpr float INTERP_DELAY_TICKS = static_cast<float>(DEFAULT_INTERP_DELAY_TICKS);
+    static constexpr uint32_t INTERP_DELAY_TICKS = DEFAULT_INTERP_DELAY_TICKS;
 
     // Network stats
     NetworkStats stats;

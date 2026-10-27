@@ -372,6 +372,231 @@ static bool runWireV3HandshakeTests()
     return true;
 }
 
+static bool runInterpolationTickWrapBufferTest()
+{
+    Net::EntityInterpolationBuffer buffer;
+    const glm::vec3 start(0.0f);
+    const glm::vec3 finish(1.0f / 20.0f, 0.0f, 0.0f);
+    const glm::vec3 velocity(1.0f, 0.0f, 0.0f);
+    buffer.addSnapshot(0xFFFFFFFEu, start, velocity, false, 0.0f);
+    buffer.addSnapshot(1u, finish, velocity, false, 0.3f);
+
+    glm::vec3 position;
+    float rotation = 0.0f;
+    if (!buffer.interpolate(0xFFFFFFFFu, 0.0f, position, rotation)) {
+        std::cerr << "[FAIL] InterpolationTickWrapBufferTests did not interpolate the wrapped segment\n";
+        return false;
+    }
+
+    // Three ticks span 0.05 s; equal endpoint velocities make this Hermite
+    // segment linear, so the middle tick is 1/60 m and 0.1 radians.
+    if (std::abs(position.x - (1.0f / 60.0f)) > 1.0e-5f ||
+        std::abs(position.y) > 1.0e-5f || std::abs(position.z) > 1.0e-5f ||
+        std::abs(rotation - 0.1f) > 1.0e-5f) {
+        std::cerr << "[FAIL] InterpolationTickWrapBufferTests produced an incorrect wrapped Hermite sample: x="
+                  << position.x << " rotation=" << rotation << "\n";
+        return false;
+    }
+
+    if (!buffer.interpolate(0xFFFFFFFFu, 0.25f, position, rotation) ||
+        std::abs(position.x - (1.25f / 60.0f)) > 1.0e-5f ||
+        std::abs(rotation - 0.125f) > 1.0e-5f) {
+        std::cerr << "[FAIL] InterpolationTickWrapBufferTests lost fractional render progress\n";
+        return false;
+    }
+
+    if (!buffer.interpolate(0xFFFFFFFFu, 1.0f, position, rotation) ||
+        std::abs(position.x - (1.0f / 30.0f)) > 1.0e-5f ||
+        std::abs(rotation - 0.2f) > 1.0e-5f) {
+        std::cerr << "[FAIL] InterpolationTickWrapBufferTests did not normalize a full fraction to the next anchor\n";
+        return false;
+    }
+
+    std::cout << "[PASS] InterpolationTickWrapBufferTests\n";
+    return true;
+}
+
+static bool runInterpolationTickWrapManagerTest()
+{
+    TestState state;
+    world server_world;
+    server_world.setFixedDelta(kFixedDelta);
+
+    Net::ServerNetworkManager server;
+    if (!server.initialize()) {
+        std::cerr << "[FAIL] InterpolationTickWrapManagerTests could not initialize server\n";
+        return false;
+    }
+    server.setWorld(&server_world);
+
+    StressConfig config;
+    config.client_count = 1;
+    uint16_t port = 0;
+    if (!startServer(server, config, port)) {
+        std::cerr << "[FAIL] InterpolationTickWrapManagerTests could not start server\n";
+        server.shutdown();
+        return false;
+    }
+    server.advanceSimulationTicks(0xFFFFFFFDu);
+
+    world client_world;
+    Net::ClientNetworkManager client;
+    client.setWorld(&client_world);
+    if (!client.initialize() || !client.connectToServer("127.0.0.1", port, "interp_wrap")) {
+        std::cerr << "[FAIL] InterpolationTickWrapManagerTests could not connect client\n";
+        client.shutdown();
+        server.shutdown();
+        return false;
+    }
+
+    for (int frame = 0; frame < 600 && !client.isConnected(); ++frame) {
+        client.update(kFixedDelta);
+        server.update(0.0f);
+        client.update(0.0f);
+        SDL_Delay(1);
+    }
+    if (!client.isConnected() || server.getClientCount() != 1) {
+        state.addError("interpolation wrap client did not connect");
+    } else if (client.getLastReceivedServerTick() != 0xFFFFFFFDu) {
+        state.addError("CONNECT_ACCEPT did not establish tick 0xFFFFFFFD as the server tick baseline");
+    }
+
+    constexpr uint32_t kRemoteNetworkId = 9002;
+    if (state.error_count == 0) {
+        Net::SpawnEntityMessage spawn;
+        spawn.network_id = kRemoteNetworkId;
+        spawn.position = glm::vec3(0.0f);
+        server.sendSpawnEntityToClient(client.getClientId(), spawn);
+        server.update(0.0f);
+
+        for (int frame = 0; frame < 120 &&
+             client.getEntityByNetworkId(kRemoteNetworkId) == entt::null; ++frame) {
+            client.update(0.0f);
+            SDL_Delay(1);
+        }
+        if (client.getEntityByNetworkId(kRemoteNetworkId) == entt::null) {
+            state.addError("interpolation wrap test did not receive SPAWN_ENTITY");
+        }
+    }
+
+    const auto sendWorldUpdate = [&](uint32_t tick, const std::vector<Net::EntityUpdateData>& updates) {
+        Net::WorldStateUpdateMessage message;
+        message.server_tick = tick;
+        Net::BitWriter writer;
+        Net::NetworkSerializer::serialize(writer, message, updates);
+        server.sendReliableToClient(client.getClientId(), writer);
+        server.update(0.0f);
+
+        for (int frame = 0; frame < 120 && client.getLastReceivedServerTick() != tick; ++frame) {
+            client.update(0.0f);
+            SDL_Delay(1);
+        }
+        return client.getLastReceivedServerTick() == tick;
+    };
+
+    const auto pumpClient = [&]() {
+        for (int frame = 0; frame < 8; ++frame) {
+            client.update(0.0f);
+            SDL_Delay(1);
+        }
+    };
+
+    if (state.error_count == 0) {
+        Net::EntityUpdateData before_wrap;
+        before_wrap.entity_id = kRemoteNetworkId;
+        before_wrap.flags = Net::ComponentFlags::TRANSFORM | Net::ComponentFlags::VELOCITY |
+                            Net::ComponentFlags::ROTATION;
+        before_wrap.position = glm::vec3(0.01f, 0.0f, 0.0f);
+        before_wrap.velocity = glm::vec3(1.0f, 0.0f, 0.0f);
+        before_wrap.rotation_y = 0.0f;
+        if (!sendWorldUpdate(0xFFFFFFFEu, {before_wrap})) {
+            state.addError("interpolation wrap test did not accept tick 0xFFFFFFFE");
+        }
+
+        // Tick zero is a valid update but adds no entity snapshot, keeping it
+        // between the two snapshots used to render at tick zero below.
+        if (state.error_count == 0 && !sendWorldUpdate(0u, {})) {
+            state.addError("interpolation wrap test did not accept tick 0");
+        }
+
+        if (state.error_count == 0) {
+            client.interpolateRemoteEntities();
+            const entt::entity entity = client.getEntityByNetworkId(kRemoteNetworkId);
+            const float rendered_x = client_world.registry.get<TransformComponent>(entity).position.x;
+            if (std::abs(rendered_x - 0.01f) > 1.0e-5f) {
+                state.addError("rendering was disabled at server tick zero instead of wrapping to 0xFFFFFFFE");
+            }
+        }
+
+        if (state.error_count == 0) {
+            Net::EntityUpdateData stale;
+            stale.entity_id = kRemoteNetworkId;
+            stale.flags = Net::ComponentFlags::TRANSFORM;
+            stale.position = glm::vec3(99.0f, 0.0f, 0.0f);
+            Net::WorldStateUpdateMessage message;
+            message.server_tick = 0xFFFFFFFFu;
+            Net::BitWriter writer;
+            Net::NetworkSerializer::serialize(writer, message, std::vector<Net::EntityUpdateData>{stale});
+            const uint64_t dropped_before = client.getStats().packets_dropped_incoming;
+            server.sendReliableToClient(client.getClientId(), writer);
+            server.update(0.0f);
+            pumpClient();
+            if (client.getLastReceivedServerTick() != 0u) {
+                state.addError("stale tick 0xFFFFFFFF replaced the accepted server tick zero");
+            }
+            if (client.getStats().packets_dropped_incoming <= dropped_before) {
+                state.addError("stale predecessor tick 0xFFFFFFFF was not counted as dropped");
+            }
+        }
+
+        Net::EntityUpdateData after_wrap;
+        after_wrap.entity_id = kRemoteNetworkId;
+        after_wrap.flags = Net::ComponentFlags::TRANSFORM;
+        after_wrap.position = glm::vec3(0.06f, 0.0f, 0.0f);
+        if (state.error_count == 0 && !sendWorldUpdate(1u, {after_wrap})) {
+            state.addError("interpolation wrap test did not accept tick 1 after tick zero");
+        }
+
+        Net::EntityUpdateData later;
+        later.entity_id = kRemoteNetworkId;
+        later.flags = Net::ComponentFlags::ROTATION;
+        later.rotation_y = 0.5f;
+        if (state.error_count == 0 && !sendWorldUpdate(2u, {later})) {
+            state.addError("interpolation wrap test did not accept tick 2");
+        }
+
+        if (state.error_count == 0) {
+            client.interpolateRemoteEntities();
+            const entt::entity entity = client.getEntityByNetworkId(kRemoteNetworkId);
+            const float rendered_x = client_world.registry.get<TransformComponent>(entity).position.x;
+            // At server tick 2, the 2-tick delay renders tick 0, which lies
+            // two ticks into the three-tick FE->1 Hermite segment.
+            if (std::abs(rendered_x - (0.01f + (1.0f / 30.0f))) > 1.0e-5f) {
+                state.addError("render tick zero was not interpolated between snapshots 0xFFFFFFFE and 1");
+            }
+        }
+    }
+
+    client.disconnect("interpolation tick wrap regression complete");
+    for (int frame = 0; frame < 8 && server.getClientCount() != 0; ++frame) {
+        server.update(0.0f);
+        client.update(0.0f);
+        SDL_Delay(1);
+    }
+    client.shutdown();
+    server.shutdown();
+
+    if (state.error_count != 0) {
+        for (const std::string& error : state.errors) {
+            std::cerr << "[FAIL] " << error << "\n";
+        }
+        return false;
+    }
+
+    std::cout << "[PASS] InterpolationTickWrapManagerTests\n";
+    return true;
+}
+
 static bool runRawRemoteInterpolationStateTest()
 {
     TestState state;
@@ -785,8 +1010,11 @@ int main(int argc, char** argv)
         EE::CLog::GetLuaLogger()->set_level(spdlog::level::warn);
     }
     const bool handshake_ok = runWireV3HandshakeTests();
+    const bool interpolation_buffer_wrap_ok = runInterpolationTickWrapBufferTest();
+    const bool interpolation_manager_wrap_ok = runInterpolationTickWrapManagerTest();
     const bool raw_interpolation_ok = runRawRemoteInterpolationStateTest();
     const bool ok = runNetworkStress(config);
     EE::CLog::Shutdown();
-    return (handshake_ok && raw_interpolation_ok && ok) ? 0 : 1;
+    return (handshake_ok && interpolation_buffer_wrap_ok && interpolation_manager_wrap_ok &&
+            raw_interpolation_ok && ok) ? 0 : 1;
 }
