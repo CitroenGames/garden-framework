@@ -694,6 +694,216 @@ static JPH::ShapeRefC makeBoxShape()
     return PhysicsSystem::createShapeFromCollider(col, glm::vec3(1.0f));
 }
 
+static bool testCharacterControllerPhysicalStepsAndSlopes()
+{
+    const std::string name = "CharacterController physical steps and slopes";
+
+    auto add_static_box = [](world& w,
+                             const glm::vec3& position,
+                             const glm::vec3& half_extents,
+                             const glm::vec3& rotation)
+    {
+        const entt::entity entity = w.registry.create();
+        w.registry.emplace<TransformComponent>(entity, position.x, position.y, position.z);
+        w.registry.emplace<RigidBodyComponent>(entity);
+        auto& collider = w.registry.emplace<ColliderComponent>(entity);
+        collider.shape_type = ColliderShapeType::Box;
+        collider.box_half_extents = half_extents;
+        const auto shape = PhysicsSystem::createShapeFromCollider(collider, glm::vec3(1.0f));
+        return shape && !w.getPhysicsSystem().createStaticBody(position, rotation, shape, entity).IsInvalid();
+    };
+
+    auto make_sharp_step_mesh = [](float step_height)
+    {
+        std::vector<vertex> vertices;
+        vertices.reserve(36);
+        auto append_triangle = [&vertices](const glm::vec3& a,
+                                           const glm::vec3& b,
+                                           const glm::vec3& c)
+        {
+            auto append_vertex = [&vertices](const glm::vec3& p)
+            {
+                vertices.push_back(vertex{
+                    p.x, p.y, p.z,
+                    0.0f, 0.0f, 0.0f,
+                    0.0f, 0.0f,
+                    0.0f, 0.0f, 0.0f, 0.0f});
+            };
+            append_vertex(a);
+            append_vertex(b);
+            append_vertex(c);
+        };
+
+        constexpr float half_x = 2.0f;
+        constexpr float half_z = 0.5f;
+        const float half_y = step_height * 0.5f;
+        const glm::vec3 lbn(-half_x, -half_y, -half_z);
+        const glm::vec3 ltn(-half_x,  half_y, -half_z);
+        const glm::vec3 rtn( half_x,  half_y, -half_z);
+        const glm::vec3 rbn( half_x, -half_y, -half_z);
+        const glm::vec3 lbp(-half_x, -half_y,  half_z);
+        const glm::vec3 ltp(-half_x,  half_y,  half_z);
+        const glm::vec3 rtp( half_x,  half_y,  half_z);
+        const glm::vec3 rbp( half_x, -half_y,  half_z);
+
+        // Outward-wound triangles retain the box's sharp edges in the static mesh.
+        append_triangle(ltn, ltp, rtp); append_triangle(ltn, rtp, rtn); // top (+Y)
+        append_triangle(lbn, rbn, rbp); append_triangle(lbn, rbp, lbp); // bottom (-Y)
+        append_triangle(lbn, ltn, rtn); append_triangle(lbn, rtn, rbn); // front (-Z)
+        append_triangle(lbp, rbp, rtp); append_triangle(lbp, rtp, ltp); // back (+Z)
+        append_triangle(lbn, lbp, ltp); append_triangle(lbn, ltp, ltn); // left (-X)
+        append_triangle(rbn, rtn, rtp); append_triangle(rbn, rtp, rbp); // right (+X)
+        return vertices;
+    };
+
+    auto run_step_case = [&](float step_height, bool should_climb)
+    {
+        world w;
+        w.initializePhysics();
+        if (!add_static_box(w, glm::vec3(0.0f, -0.25f, 0.0f),
+                            glm::vec3(4.0f, 0.25f, 8.0f), glm::vec3(0.0f)))
+            return fail(name, "failed to create step-test floor");
+
+        // Use the public static-mesh path for a sharp ledge. Garden's public
+        // box collider intentionally uses Jolt's default convex radius, which
+        // rounds the edge and changes the effective step height.
+        const entt::entity step_entity = w.registry.create();
+        w.registry.emplace<TransformComponent>(step_entity, 0.0f, step_height * 0.5f, 2.0f);
+        w.registry.emplace<RigidBodyComponent>(step_entity);
+        std::vector<vertex> step_vertices = make_sharp_step_mesh(step_height);
+        mesh step_mesh(step_vertices.data(), step_vertices.size());
+        if (w.getPhysicsSystem().createStaticMeshBody(
+                glm::vec3(0.0f, step_height * 0.5f, 2.0f), glm::vec3(0.0f),
+                glm::vec3(1.0f), step_mesh, step_entity).IsInvalid())
+            return fail(name, "failed to create step obstacle");
+
+        const entt::entity character = w.registry.create();
+        auto& transform = w.registry.emplace<TransformComponent>(character, 0.0f, 0.0f, 0.0f);
+        auto& controller = w.registry.emplace<CharacterControllerComponent>(character);
+        // Start exactly at floor contact; the previous 5 cm gap combined with
+        // collision tolerances near the 5 cm box bevel affected the 0.5 m case.
+        transform.position.y = controller.capsule_half_height + controller.capsule_radius;
+        controller.move_speed = 4.0f;
+        if (w.getPhysicsSystem().createCharacterController(w.registry, character).IsInvalid())
+            return fail(name, "failed to create step-test CharacterController");
+
+        CharacterMoveInput forward;
+        forward.move_forward = 1.0f;
+        bool crossed_step = false;
+        float highest_center_on_step = 0.0f;
+        float furthest_center = 0.0f;
+        for (int tick = 0; tick < 300; ++tick)
+        {
+            const CharacterControllerState state =
+                w.simulate_character_controller(character, forward, w.fixed_delta);
+            w.stepPhysicsSingleStep();
+            furthest_center = (std::max)(furthest_center, state.position.z);
+            if (state.position.z >= 1.4f && state.position.z <= 2.8f)
+                highest_center_on_step = (std::max)(highest_center_on_step, state.position.y);
+            if (state.position.z > 2.8f)
+            {
+                crossed_step = true;
+                break;
+            }
+        }
+
+        if (should_climb)
+        {
+            if (!crossed_step)
+                return fail(name, "capsule did not traverse the 0.35 m step");
+            if (highest_center_on_step < 1.4f)
+                return fail(name, "capsule traversed the 0.35 m step without rising onto its top");
+        }
+        else
+        {
+            if (crossed_step || furthest_center >= 1.45f)
+                return fail(name, "capsule crossed the 0.5 m step despite the 0.4 m step-up limit");
+            if (highest_center_on_step >= 1.4f)
+                return fail(name, "capsule rose onto the 0.5 m step");
+        }
+        return true;
+    };
+
+    if (!run_step_case(0.35f, true) || !run_step_case(0.5f, false))
+        return false;
+
+    auto run_slope_case = [&](float angle_degrees, bool should_ground)
+    {
+        world w;
+        w.initializePhysics();
+        if (!add_static_box(w, glm::vec3(0.0f, -0.25f, 0.0f),
+                            glm::vec3(4.0f, 0.25f, 8.0f), glm::vec3(0.0f)))
+            return fail(name, "failed to create slope-test floor");
+
+        constexpr float half_length = 2.5f;
+        constexpr float half_thickness = 0.1f;
+        const float angle_radians = glm::radians(angle_degrees);
+        const float center_y = half_length * std::sin(angle_radians) -
+                               half_thickness * std::cos(angle_radians);
+        if (!add_static_box(w,
+                            glm::vec3(0.0f, center_y, 0.0f),
+                            glm::vec3(3.0f, half_thickness, half_length),
+                            glm::vec3(-angle_degrees, 0.0f, 0.0f)))
+            return fail(name, "failed to create rotated slope collider");
+
+        const float cos_angle = std::cos(angle_radians);
+        const float sin_angle = std::sin(angle_radians);
+        constexpr float local_surface_z = -1.5f;
+        // Transform a point on the box's actual top face (local y =
+        // half_thickness) through its X rotation of -angle.
+        const float surface_y = center_y + half_thickness * cos_angle +
+                                local_surface_z * sin_angle;
+        const float start_z = -half_thickness * sin_angle +
+                              local_surface_z * cos_angle;
+        const entt::entity character = w.registry.create();
+        auto& controller = w.registry.emplace<CharacterControllerComponent>(character);
+        // CharacterVirtual is centered on the transform. Its vertical support
+        // over a slope is half-height*cos(angle) + radius along the slope
+        // normal, equivalent to this vertical offset at fixed world z.
+        const float capsule_support_height = controller.capsule_half_height +
+                                            controller.capsule_radius / cos_angle;
+        w.registry.emplace<TransformComponent>(character, 0.0f,
+            surface_y + capsule_support_height + 0.02f, start_z);
+        if (w.getPhysicsSystem().createCharacterController(w.registry, character).IsInvalid())
+            return fail(name, "failed to create slope-test CharacterController");
+
+        bool observed_expected_ground_state = false;
+        bool component_state_synced = false;
+        CharacterControllerState state;
+        for (int tick = 0; tick < 8; ++tick)
+        {
+            state = w.simulate_character_controller(character, CharacterMoveInput{}, w.fixed_delta);
+            w.stepPhysicsSingleStep();
+            w.player_collisions(character);
+            if (should_ground)
+            {
+                if (state.grounded && !state.on_steep_ground && state.ground_normal.y > 0.65f)
+                    observed_expected_ground_state = true;
+            }
+            else if (state.on_steep_ground && !state.grounded)
+            {
+                observed_expected_ground_state = true;
+                component_state_synced = controller.on_steep_ground;
+            }
+        }
+
+        if (!observed_expected_ground_state)
+        {
+            return fail(name, should_ground
+                ? "capsule did not ground on the 40 degree slope"
+                : "capsule did not report sliding on steep ground at 60 degrees");
+        }
+        if (!should_ground && !component_state_synced)
+            return fail(name, "on_steep_ground was not synchronized to CharacterControllerComponent");
+        return true;
+    };
+
+    if (!run_slope_case(40.0f, true) || !run_slope_case(60.0f, false))
+        return false;
+
+    return pass(name);
+}
+
 static bool testDynamicGravityFlag()
 {
     const std::string name = "dynamic gravity flag";
@@ -2670,6 +2880,8 @@ int main()
     ok = testPlayerControllerConsumesGamepadLookIntent() && ok;
     run("network-spawned player grounds on mesh");
     ok = testNetworkSpawnedPlayerGroundsOnMesh(repo_root) && ok;
+    run("CharacterController physical steps and slopes");
+    ok = testCharacterControllerPhysicalStepsAndSlopes() && ok;
     run("level player creates character controller");
     ok = testLevelPlayerCreatesCharacterController() && ok;
     run("use_mesh_collision creates body");
