@@ -1335,6 +1335,22 @@ static uint32_t g_last_trigger_id = 0;
 static void onTriggerEntered(const TriggerEnteredEvent& e) { ++g_trigger_entered; g_last_trigger_id = e.trigger_id; }
 static void onTriggerExited(const TriggerExitedEvent& e) { ++g_trigger_exited; g_last_trigger_id = e.trigger_id; }
 
+struct TriggerLifecycleCapture
+{
+    std::vector<TriggerEnteredEvent> entered;
+    std::vector<TriggerExitedEvent> exited;
+};
+
+static void captureTriggerEntered(TriggerLifecycleCapture& capture, const TriggerEnteredEvent& event)
+{
+    capture.entered.push_back(event);
+}
+
+static void captureTriggerExited(TriggerLifecycleCapture& capture, const TriggerExitedEvent& event)
+{
+    capture.exited.push_back(event);
+}
+
 static entt::entity makeDynamicBox(world& w, const glm::vec3& pos, bool gravity = false)
 {
     auto e = w.registry.create();
@@ -1563,6 +1579,150 @@ static bool testD6TriggerLifecycle()
     EventBus::get().sink<TriggerExitedEvent>().disconnect<&onTriggerExited>();
     EventBus::get().clear();
     if (!okk) return fail(name, "enter/exit counts were not exactly-once (see above)");
+    return pass(name);
+}
+
+static bool testD6CharacterTriggerLifecycle()
+{
+    const std::string name = "D6 trigger lifecycle with CharacterController";
+    constexpr uint32_t trigger_id = 304;
+
+    EventBus::get().flush<TriggerEnteredEvent>();
+    EventBus::get().flush<TriggerExitedEvent>();
+    TriggerLifecycleCapture capture;
+    entt::scoped_connection entered_connection{
+        EventBus::get().sink<TriggerEnteredEvent>().connect<&captureTriggerEntered>(capture) };
+    entt::scoped_connection exited_connection{
+        EventBus::get().sink<TriggerExitedEvent>().connect<&captureTriggerExited>(capture) };
+
+    world w;
+    w.initializePhysics();
+
+    auto ground = w.registry.create();
+    w.registry.emplace<TransformComponent>(ground, 0.0f, -0.5f, 0.0f);
+    w.registry.emplace<RigidBodyComponent>(ground);
+    ColliderComponent ground_collider;
+    ground_collider.shape_type = ColliderShapeType::Box;
+    ground_collider.box_half_extents = glm::vec3(20.0f, 0.5f, 20.0f);
+    const auto ground_shape = PhysicsSystem::createShapeFromCollider(ground_collider, glm::vec3(1.0f));
+    if (!ground_shape || w.getPhysicsSystem().createStaticBody(
+            glm::vec3(0.0f, -0.5f, 0.0f), glm::vec3(0.0f), ground_shape, ground).IsInvalid())
+        return fail(name, "failed to create character ground");
+
+    const auto trigger = makeTriggerBox(w, glm::vec3(0.0f, 1.0f, 4.0f), 2.0f, trigger_id);
+    if (!w.getPhysicsSystem().hasBody(trigger))
+        return fail(name, "trigger body was not created");
+
+    const auto character = w.registry.create();
+    w.registry.emplace<TransformComponent>(character, 0.0f, 1.25f, 0.0f);
+    auto& controller = w.registry.emplace<CharacterControllerComponent>(character);
+    controller.move_speed = 4.0f;
+    controller.jump_velocity = 3.0f;
+    if (w.getPhysicsSystem().createCharacterController(w.registry, character).IsInvalid())
+        return fail(name, "failed to create CharacterController");
+
+    auto step = [&](const CharacterMoveInput& input)
+    {
+        w.simulate_character_controller(character, input, w.fixed_delta);
+        w.stepPhysicsSingleStep();
+        w.player_collisions(character);
+        EventBus::get().flush<TriggerEnteredEvent>();
+        EventBus::get().flush<TriggerExitedEvent>();
+    };
+    auto is_occupant = [&]()
+    {
+        const auto& occupants = w.registry.get<TriggerOverlapState>(trigger).occupants;
+        return std::find(occupants.begin(), occupants.end(), character) != occupants.end();
+    };
+    auto check_events = [&](std::size_t enters, std::size_t exits, const char* phase)
+    {
+        if (capture.entered.size() != enters || capture.exited.size() != exits)
+        {
+            std::cerr << "  character trigger " << phase << ": entered=" << capture.entered.size()
+                      << "/" << enters << " exited=" << capture.exited.size() << "/" << exits << std::endl;
+            return false;
+        }
+        for (const auto& event : capture.entered)
+            if (event.trigger != trigger || event.other != character || event.trigger_id != trigger_id)
+                return false;
+        for (const auto& event : capture.exited)
+            if (event.trigger != trigger || event.other != character || event.trigger_id != trigger_id)
+                return false;
+        return true;
+    };
+
+    step(CharacterMoveInput{});
+    if (is_occupant() || !check_events(0, 0, "initially outside"))
+        return fail(name, "character began inside the trigger or emitted an event");
+
+    CharacterMoveInput forward;
+    forward.move_forward = 1.0f;
+    bool reached_trigger_center = false;
+    for (int tick = 0; tick < 120; ++tick)
+    {
+        step(forward);
+        if (w.get_character_controller_state(character).position.z >= 4.0f)
+        {
+            reached_trigger_center = true;
+            break;
+        }
+    }
+    if (!reached_trigger_center || !is_occupant() || !check_events(1, 0, "entry by movement"))
+        return fail(name, "moving CharacterController did not enter exactly once");
+
+    for (int tick = 0; tick < 600; ++tick)
+        step(CharacterMoveInput{});
+    if (!is_occupant() || !check_events(1, 0, "600 idle fixed ticks"))
+        return fail(name, "idle CharacterController emitted duplicate edges or left the trigger");
+
+    CharacterMoveInput backward;
+    backward.move_forward = -1.0f;
+    bool left_trigger = false;
+    for (int tick = 0; tick < 180; ++tick)
+    {
+        step(backward);
+        if (!is_occupant())
+        {
+            left_trigger = true;
+            break;
+        }
+    }
+    if (!left_trigger || !check_events(1, 1, "leave by movement"))
+        return fail(name, "moving CharacterController did not leave with exactly one exit");
+    for (int tick = 0; tick < 10; ++tick)
+        step(CharacterMoveInput{});
+    if (is_occupant() || !check_events(1, 1, "idle outside"))
+        return fail(name, "outside idle ticks emitted a duplicate edge");
+
+    bool reentered = false;
+    for (int tick = 0; tick < 180; ++tick)
+    {
+        step(forward);
+        if (is_occupant())
+        {
+            reentered = true;
+            break;
+        }
+    }
+    if (!reentered || !check_events(2, 1, "re-entry by movement"))
+        return fail(name, "moving CharacterController did not re-enter exactly once");
+
+    w.getPhysicsSystem().removeBody(character);
+    w.registry.destroy(character);
+    w.stepPhysicsSingleStep();
+    EventBus::get().flush<TriggerEnteredEvent>();
+    EventBus::get().flush<TriggerExitedEvent>();
+    if (!check_events(2, 2, "destroy while inside") ||
+        capture.exited.back().other != character ||
+        !w.registry.get<TriggerOverlapState>(trigger).occupants.empty())
+        return fail(name, "destroyed character did not emit one exit and prune overlap state");
+
+    w.stepPhysicsSingleStep();
+    EventBus::get().flush<TriggerEnteredEvent>();
+    EventBus::get().flush<TriggerExitedEvent>();
+    if (!check_events(2, 2, "destroyed occupant pruned"))
+        return fail(name, "destroyed character caused a duplicate event after pruning");
+
     return pass(name);
 }
 
@@ -2205,6 +2365,8 @@ int main()
     ok = testD6QueryFilterTriggers() && ok;
     run("D6 trigger enter exit exactly once");
     ok = testD6TriggerLifecycle() && ok;
+    run("D6 trigger lifecycle with CharacterController");
+    ok = testD6CharacterTriggerLifecycle() && ok;
     run("D6 trigger cap and mesh rejection");
     ok = testD6TriggerCapAndMeshRejection() && ok;
     run("D6 trigger tracks more than 64 occupants");
