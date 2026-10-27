@@ -1531,8 +1531,8 @@ static bool testD6TriggerLifecycle()
         step(); check("outside", 0, 0);
         w.registry.get<TransformComponent>(occupant).position = glm::vec3(0.0f); // teleport in
         step(); check("teleport in", 1, 0);
-        for (int i = 0; i < 10; ++i) step();
-        check("idle inside (no duplicates)", 1, 0);
+        for (int i = 0; i < 600; ++i) step(); // 600 fixed-step ticks
+        check("idle inside for 600 ticks (no duplicates)", 1, 0);
         if (g_last_trigger_id != 7) { EventBus::get().sink<TriggerEnteredEvent>().disconnect<&onTriggerEntered>(); EventBus::get().sink<TriggerExitedEvent>().disconnect<&onTriggerExited>(); return fail(name, "trigger_id was not propagated"); }
         w.registry.get<TransformComponent>(occupant).position = glm::vec3(10.0f, 0.0f, 0.0f); // teleport out
         step(); check("teleport out", 1, 1);
