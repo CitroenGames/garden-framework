@@ -16,6 +16,7 @@
 #include "world.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
@@ -1578,6 +1579,124 @@ static bool testD6TriggerOccupantCapacity()
     return pass(name);
 }
 
+static bool testD6SensorNonInterference()
+{
+    const std::string name = "D6-T3 sensor non-interference";
+    EventBus::get().clear();
+
+    world control_world;
+    world sensor_world;
+    entt::entity control_player = entt::null;
+    entt::entity sensor_player = entt::null;
+    entt::entity unused_trigger = entt::null;
+    entt::entity sensor_trigger = entt::null;
+    auto setup_scene = [](world& w, bool with_trigger, entt::entity& player, entt::entity& trigger)
+    {
+        w.initializePhysics();
+
+        auto ground = w.registry.create();
+        w.registry.emplace<TransformComponent>(ground, 0.0f, -0.5f, 0.0f);
+        w.registry.emplace<RigidBodyComponent>(ground);
+        ColliderComponent ground_collider;
+        ground_collider.shape_type = ColliderShapeType::Box;
+        ground_collider.box_half_extents = glm::vec3(20.0f, 0.5f, 20.0f);
+        const auto ground_shape = PhysicsSystem::createShapeFromCollider(
+            ground_collider, glm::vec3(1.0f));
+        if (!ground_shape || w.getPhysicsSystem().createStaticBody(
+                glm::vec3(0.0f, -0.5f, 0.0f), glm::vec3(0.0f), ground_shape, ground).IsInvalid())
+            return false;
+
+        player = w.registry.create();
+        w.registry.emplace<TransformComponent>(player, 0.0f, 1.25f, 0.0f);
+        auto& controller = w.registry.emplace<CharacterControllerComponent>(player);
+        controller.move_speed = 4.0f;
+        controller.jump_velocity = 3.0f;
+        if (w.getPhysicsSystem().createCharacterController(w.registry, player).IsInvalid())
+            return false;
+
+        if (with_trigger)
+        {
+            trigger = makeTriggerBox(w, glm::vec3(0.0f, 1.0f, 4.0f), 2.0f, 303);
+            if (!w.getPhysicsSystem().hasBody(trigger))
+                return false;
+        }
+        return true;
+    };
+
+    if (!setup_scene(control_world, false, control_player, unused_trigger) ||
+        !setup_scene(sensor_world, true, sensor_player, sensor_trigger))
+    {
+        EventBus::get().clear();
+        return fail(name, "failed to create matching character scenes and trigger body");
+    }
+
+    auto same_float_bits = [](float a, float b)
+    {
+        return std::bit_cast<uint32_t>(a) == std::bit_cast<uint32_t>(b);
+    };
+    auto same_vec3_bits = [&](const glm::vec3& a, const glm::vec3& b)
+    {
+        return same_float_bits(a.x, b.x) && same_float_bits(a.y, b.y) && same_float_bits(a.z, b.z);
+    };
+    auto same_motion_trace = [&](const CharacterControllerState& a, const CharacterControllerState& b)
+    {
+        return same_vec3_bits(a.position, b.position) && same_vec3_bits(a.velocity, b.velocity);
+    };
+
+    bool sensor_overlapped_character = false;
+    for (int tick = 0; tick < 270; ++tick)
+    {
+        CharacterMoveInput input;
+        if (tick >= 30 && tick < 180)
+            input.move_forward = 1.0f;
+        else if (tick >= 180 && tick < 210)
+        {
+            input.move_forward = 0.6f;
+            input.move_right = 0.4f;
+        }
+        else if (tick >= 210 && tick < 240)
+            input.move_forward = -0.5f;
+        if (tick >= 90 && tick < 100)
+            input.buttons |= CharacterMoveFlags::Jump;
+
+        const CharacterControllerState control_step = control_world.simulate_character_controller(
+            control_player, input, control_world.fixed_delta);
+        const CharacterControllerState sensor_step = sensor_world.simulate_character_controller(
+            sensor_player, input, sensor_world.fixed_delta);
+        if (!same_motion_trace(control_step, sensor_step))
+        {
+            EventBus::get().clear();
+            return fail(name, "character movement diverged during controller simulation at tick " +
+                std::to_string(tick));
+        }
+
+        control_world.getPhysicsSystem().stepPhysics(control_world.registry);
+        sensor_world.getPhysicsSystem().stepPhysics(sensor_world.registry);
+        control_world.player_collisions(control_player);
+        sensor_world.player_collisions(sensor_player);
+
+        const CharacterControllerState control_state =
+            control_world.get_character_controller_state(control_player);
+        const CharacterControllerState sensor_state =
+            sensor_world.get_character_controller_state(sensor_player);
+        if (!same_motion_trace(control_state, sensor_state))
+        {
+            EventBus::get().clear();
+            return fail(name, "character movement diverged after physics step at tick " +
+                std::to_string(tick));
+        }
+
+        const auto& occupants = sensor_world.registry.get<TriggerOverlapState>(sensor_trigger).occupants;
+        if (std::find(occupants.begin(), occupants.end(), sensor_player) != occupants.end())
+            sensor_overlapped_character = true;
+    }
+
+    EventBus::get().clear();
+    if (!sensor_overlapped_character)
+        return fail(name, "character never overlapped the sensor during the movement trace");
+    return pass(name);
+}
+
 static bool containsLayerKey(const nlohmann::json& value)
 {
     if (value.is_object())
@@ -1942,6 +2061,8 @@ int main()
     ok = testD6TriggerCapAndMeshRejection() && ok;
     run("D6 trigger tracks more than 64 occupants");
     ok = testD6TriggerOccupantCapacity() && ok;
+    run("D6-T3 sensor non-interference");
+    ok = testD6SensorNonInterference() && ok;
     run("D6-U1 level round-trip");
     ok = testD6LevelRoundTrip() && ok;
     run("FPSShooter level references");
