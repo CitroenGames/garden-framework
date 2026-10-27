@@ -10,6 +10,7 @@
 #include "EditorState.hpp"
 #include "GameSimulation.hpp"
 #include "InputManager.hpp"
+#include "InputActionSystem.hpp"
 #include "Components/camera.hpp"
 #include "panels/SceneHierarchyPanel.hpp"
 #include "panels/InspectorPanel.hpp"
@@ -162,6 +163,7 @@ private:
     // --- Play In Editor (PIE) ---
     std::unique_ptr<GameSimulation> m_game_sim;
     std::shared_ptr<InputManager>   m_game_input_manager;
+    InputActionSystem               m_game_input_actions;
     std::unique_ptr<world>          m_play_world; // isolated runtime world for Player 1 PIE
 
     // Snapshot data (saved on Play, restored on Stop)

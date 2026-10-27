@@ -1068,6 +1068,16 @@ void EditorApp::run()
         m_undo.beginFrame();
 
         processEvents();
+        if (m_game_input_manager)
+            m_game_input_actions.evaluate(*m_game_input_manager, m_delta_time);
+        for (auto& inst : m_pie_clients)
+        {
+            if (inst && inst->initialized && inst->input_manager)
+            {
+                inst->input_manager->update();
+                inst->input_actions.evaluate(*inst->input_manager, m_delta_time);
+            }
+        }
         if (XR::OpenXRSystem::get().isPIEActive())
             XR::OpenXRSystem::get().pollEvents();
         if (m_external_pie_active && m_pie_processes.countRunning() == 0)
@@ -1700,6 +1710,7 @@ void EditorApp::beginPlay()
                 m_client_services.game_world      = m_play_world.get();
                 m_client_services.render_api       = m_app.getRenderAPI();
                 m_client_services.input_manager    = m_game_input_manager.get();
+                m_client_services.input_actions    = &m_game_input_actions;
                 m_client_services.reflection       = &m_reflection;
                 m_client_services.application      = &m_app;
                 m_client_services.level_manager    = &m_level_manager;
@@ -1768,6 +1779,7 @@ void EditorApp::beginPlay()
                                 inst->services.game_world      = &inst->client_world;
                                 inst->services.render_api       = m_app.getRenderAPI();
                                 inst->services.input_manager    = inst->input_manager.get();
+                                inst->services.input_actions    = &inst->input_actions;
                                 inst->services.reflection       = &m_reflection;
                                 inst->services.application      = &m_app;
                                 inst->services.level_manager    = &m_level_manager;
@@ -1858,6 +1870,7 @@ void EditorApp::beginPlay()
             m_client_services.game_world      = m_play_world.get();
             m_client_services.render_api       = m_app.getRenderAPI();
             m_client_services.input_manager    = m_game_input_manager.get();
+            m_client_services.input_actions    = &m_game_input_actions;
             m_client_services.reflection       = &m_reflection;
             m_client_services.application      = &m_app;
             m_client_services.level_manager    = &m_level_manager;
@@ -1919,6 +1932,7 @@ void EditorApp::beginPlay()
                             inst->services.game_world      = &inst->client_world;
                             inst->services.render_api       = m_app.getRenderAPI();
                             inst->services.input_manager    = inst->input_manager.get();
+                            inst->services.input_actions    = &inst->input_actions;
                             inst->services.reflection       = &m_reflection;
                             inst->services.application      = &m_app;
                             inst->services.level_manager    = &m_level_manager;
@@ -1978,6 +1992,7 @@ void EditorApp::beginPlay()
             m_client_services.game_world      = m_play_world.get();
             m_client_services.render_api       = m_app.getRenderAPI();
             m_client_services.input_manager    = m_game_input_manager.get();
+            m_client_services.input_actions    = &m_game_input_actions;
             m_client_services.reflection       = &m_reflection;
             m_client_services.application      = &m_app;
             m_client_services.level_manager    = &m_level_manager;

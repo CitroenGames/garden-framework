@@ -8,6 +8,7 @@
 #include "EngineExport.h"
 #include "enet.h"
 #include "NetworkProtocol.hpp"
+#include "NetworkInputState.hpp"
 #include "NetworkTypes.hpp"
 #include "BitStream.hpp"
 #include "NetworkSerializer.hpp"
@@ -30,16 +31,6 @@ enum class ConnectionState : uint8_t
     DISCONNECTED = 0,
     CONNECTING = 1,
     CONNECTED = 2
-};
-
-// Input state structure for sending to server
-struct InputState
-{
-    uint16_t buttons = 0;             // Button flags (uint16, wire v3)
-    float camera_yaw = 0.0f;
-    float camera_pitch = 0.0f;
-    float move_forward = 0.0f;        // -1.0 to 1.0
-    float move_right = 0.0f;          // -1.0 to 1.0
 };
 
 // Client Network Manager - handles all client-side networking

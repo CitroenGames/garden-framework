@@ -7,6 +7,7 @@
 #include "LevelManager.hpp"
 #include "PlayerController.hpp"
 #include "InputHandler.hpp"
+#include "InputActionSystem.hpp"
 #include "Components/Components.hpp"
 #include "Components/camera.hpp"
 #include "Network/ClientNetworkManager.hpp"
@@ -15,6 +16,7 @@
 #include "shared/CombatProtocol.hpp"
 #include "shared/WeaponTypes.hpp"
 #include "shared/WeaponSystem.hpp"
+#include "shared/NetworkInputSampler.hpp"
 #include "GameHUD.hpp"
 #include "ui/UiLogic.hpp"
 #include "PlayerRepSystem.hpp"
@@ -35,6 +37,7 @@
 
 #include <SDL3/SDL.h>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <memory>
 
@@ -45,6 +48,71 @@ using Net::MovementState;
 using Net::PredictionEntry;
 namespace InputFlags = Net::InputFlags;
 namespace SharedMovement = Net::SharedMovement;
+
+static bool configureFPShooterInput(InputActionSystem& actions)
+{
+    const std::array<InputActionDef, 18> definitions = {{
+        { "Move", ActionValueType::Axis2D, false },
+        { "MoveForward", ActionValueType::Button, false },
+        { "MoveBack", ActionValueType::Button, false },
+        { "MoveLeft", ActionValueType::Button, false },
+        { "MoveRight", ActionValueType::Button, false },
+        { "Jump", ActionValueType::Button, false },
+        { "Use", ActionValueType::Button, false },
+        { "Sprint", ActionValueType::Button, false },
+        { "Crouch", ActionValueType::Button, false },
+        { "Walk", ActionValueType::Button, false },
+        { "Drop", ActionValueType::Button, false },
+        { "Fire", ActionValueType::Button, false },
+        { "Reload", ActionValueType::Button, false },
+        { "WeaponSlot1", ActionValueType::Button, false },
+        { "WeaponSlot2", ActionValueType::Button, false },
+        { "WeaponSlot3", ActionValueType::Button, false },
+        { "WeaponSlot4", ActionValueType::Button, false },
+        { "WeaponSlot5", ActionValueType::Button, false }
+    }};
+
+    for (const InputActionDef& definition : definitions)
+    {
+        if (!actions.registerAction(definition))
+            return false;
+    }
+
+    MappingContext gameplay;
+    gameplay.name = "Gameplay";
+    gameplay.priority = 0;
+
+    auto key = [&gameplay](const char* action, SDL_Scancode scancode, bool invert = false, uint8_t axis_target = 0) {
+        gameplay.bindings.push_back({ action, InputBinding::Source::Key, scancode, 1.0f, invert, axis_target });
+    };
+    auto movementKey = [&gameplay](const char* button_action, SDL_Scancode scancode, bool invert, uint8_t axis_target) {
+        gameplay.bindings.push_back({ "Move", InputBinding::Source::Key, scancode, 1.0f, invert, axis_target });
+        gameplay.bindings.push_back({ button_action, InputBinding::Source::Key, scancode });
+    };
+
+    // The vector action supports future analog movement; separate directional
+    // buttons retain the legacy flags when opposite keys are held together.
+    movementKey("MoveForward", SDL_SCANCODE_W, false, 1);
+    movementKey("MoveBack", SDL_SCANCODE_S, true, 1);
+    movementKey("MoveLeft", SDL_SCANCODE_A, true, 0);
+    movementKey("MoveRight", SDL_SCANCODE_D, false, 0);
+    key("Jump", SDL_SCANCODE_SPACE);
+    key("Use", SDL_SCANCODE_E);
+    key("Sprint", SDL_SCANCODE_LSHIFT);
+    key("Crouch", SDL_SCANCODE_LCTRL);
+    key("Crouch", SDL_SCANCODE_C);
+    key("Walk", SDL_SCANCODE_LALT);
+    key("Drop", SDL_SCANCODE_G);
+    key("Reload", SDL_SCANCODE_R);
+    key("WeaponSlot1", SDL_SCANCODE_1);
+    key("WeaponSlot2", SDL_SCANCODE_2);
+    key("WeaponSlot3", SDL_SCANCODE_3);
+    key("WeaponSlot4", SDL_SCANCODE_4);
+    key("WeaponSlot5", SDL_SCANCODE_5);
+    gameplay.bindings.push_back({ "Fire", InputBinding::Source::MouseButton, SDL_BUTTON_LEFT });
+
+    return actions.pushContext(gameplay);
+}
 
 static CharacterMoveInput toCharacterMoveInput(const MovementInput& input)
 {
@@ -178,7 +246,18 @@ GAME_API const char* gardenGetGameName()
 
 GAME_API bool gardenGameInit(EngineServices* services)
 {
+    if (!services || !services->input_actions)
+    {
+        LOG_ENGINE_ERROR("The host did not provide the required input action service");
+        return false;
+    }
     g_services = services;
+    if (!configureFPShooterInput(*services->input_actions))
+    {
+        LOG_ENGINE_ERROR("Failed to register FPSShooter input actions");
+        g_services = nullptr;
+        return false;
+    }
 
     // Initialize networking
     if (!g_network.initialize()) {
@@ -380,6 +459,8 @@ GAME_API void gardenGameShutdown()
     g_network.shutdown();
     g_player_controller.reset();
     g_hud.shutdown();
+    if (g_services && g_services->input_actions)
+        g_services->input_actions->popContext("Gameplay");
     g_services = nullptr;
 }
 
@@ -394,6 +475,7 @@ GAME_API void gardenGameUpdate(float delta_time)
 
     world* game_world = g_services->game_world;
     auto input_manager = g_services->input_manager;
+    auto input_actions = g_services->input_actions;
 
     // Flush deferred events from previous frame
     EventBus::get().flush();
@@ -491,54 +573,27 @@ GAME_API void gardenGameUpdate(float delta_time)
             g_local_recoil_index, delta_time, 1.0f / std::max(local_weapon_def.recoil_decay_rate, 0.001f));
 
     // Send player input to server and run client-side prediction
-    if (g_network.isConnected() && input_manager)
+    if (g_network.isConnected() && input_actions)
     {
         const uint32_t command_tick = g_network.beginInputCommandTick();
 
         // Disable PlayerController's built-in movement - SharedMovement handles it
         g_player_controller->setMovementEnabled(false);
 
-        InputState input_state;
-        input_state.buttons = 0;
-
         const bool ui_modal = UiLogic::cursorWanted(g_ui);
-        if (g_local_alive && !ui_modal) {
-            if (input_manager->is_key_held(SDL_SCANCODE_W)) input_state.buttons |= InputFlags::MOVE_FORWARD;
-            if (input_manager->is_key_held(SDL_SCANCODE_S)) input_state.buttons |= InputFlags::MOVE_BACK;
-            if (input_manager->is_key_held(SDL_SCANCODE_A)) input_state.buttons |= InputFlags::MOVE_LEFT;
-            if (input_manager->is_key_held(SDL_SCANCODE_D)) input_state.buttons |= InputFlags::MOVE_RIGHT;
-            if (input_manager->is_key_pressed(SDL_SCANCODE_SPACE)) input_state.buttons |= InputFlags::JUMP;
-            if (input_manager->is_key_held(SDL_SCANCODE_E)) input_state.buttons |= InputFlags::USE;
-            // D3 held posture / modifier bits (mirrors PlayerController mapping)
-            if (input_manager->is_key_held(SDL_SCANCODE_LSHIFT)) input_state.buttons |= InputFlags::SPRINT;
-            if (input_manager->is_key_held(SDL_SCANCODE_LCTRL) || input_manager->is_key_held(SDL_SCANCODE_C)) input_state.buttons |= InputFlags::CROUCH;
-            if (input_manager->is_key_held(SDL_SCANCODE_LALT)) input_state.buttons |= InputFlags::WALK;
-            // D3 edge actions: drop (G) and weapon select (digits 1-5, absolute slot)
-            if (input_manager->is_key_pressed(SDL_SCANCODE_G)) input_state.buttons |= InputFlags::DROP;
-            if (input_manager->is_key_pressed(SDL_SCANCODE_1)) input_state.buttons = Net::withWeaponSelect(input_state.buttons, 1);
-            if (input_manager->is_key_pressed(SDL_SCANCODE_2)) input_state.buttons = Net::withWeaponSelect(input_state.buttons, 2);
-            if (input_manager->is_key_pressed(SDL_SCANCODE_3)) input_state.buttons = Net::withWeaponSelect(input_state.buttons, 3);
-            if (input_manager->is_key_pressed(SDL_SCANCODE_4)) input_state.buttons = Net::withWeaponSelect(input_state.buttons, 4);
-            if (input_manager->is_key_pressed(SDL_SCANCODE_5)) input_state.buttons = Net::withWeaponSelect(input_state.buttons, 5);
-        }
-
-        input_state.camera_yaw = game_world->world_camera.rotation.y;
-        input_state.camera_pitch = game_world->world_camera.rotation.x;
-        input_state.move_forward = 0.0f;
-        input_state.move_right = 0.0f;
-
-        if (input_state.buttons & InputFlags::MOVE_FORWARD) input_state.move_forward += 1.0f;
-        if (input_state.buttons & InputFlags::MOVE_BACK) input_state.move_forward -= 1.0f;
-        if (input_state.buttons & InputFlags::MOVE_RIGHT) input_state.move_right += 1.0f;
-        if (input_state.buttons & InputFlags::MOVE_LEFT) input_state.move_right -= 1.0f;
+        const auto& weapon_def = getWeaponDef(g_local_weapon_type);
+        InputState input_state = FPSShooter::sampleNetworkInput(
+            *input_actions,
+            game_world->world_camera.rotation.y,
+            game_world->world_camera.rotation.x,
+            g_local_alive,
+            ui_modal,
+            g_local_fire_cooldown <= 0.0f && !g_local_reloading && g_local_ammo > 0,
+            !g_local_reloading && g_local_ammo < weapon_def.max_ammo && g_local_reserve_ammo > 0);
 
         // Predict local weapon controls; the server consumes the same input flags authoritatively.
-        if (g_local_alive && !ui_modal && input_manager->is_mouse_button_held(1) && g_local_fire_cooldown <= 0.0f && !g_local_reloading && g_local_ammo > 0)
+        if ((input_state.buttons & InputFlags::ATTACK) != 0)
         {
-            const auto& weapon_def = getWeaponDef(g_local_weapon_type);
-
-            input_state.buttons |= InputFlags::ATTACK;
-
             // Consume ammo locally (client prediction)
             g_local_ammo--;
             g_local_fire_cooldown = weapon_def.fire_rate;
@@ -553,14 +608,11 @@ GAME_API void gardenGameUpdate(float delta_time)
             }
         }
 
-        // Handle reload (R key)
-        if (g_local_alive && !ui_modal && input_manager->is_key_pressed(SDL_SCANCODE_R) && !g_local_reloading) {
-            const auto& weapon_def = getWeaponDef(g_local_weapon_type);
-            if (g_local_ammo < weapon_def.max_ammo && g_local_reserve_ammo > 0) {
-                input_state.buttons |= InputFlags::RELOAD;
-                g_local_reloading = true;
-                // Reload timer handled by server, client just shows the state
-            }
+        // Reload is sampled from the same named action as the network command.
+        if ((input_state.buttons & InputFlags::RELOAD) != 0)
+        {
+            g_local_reloading = true;
+            // Reload timer handled by server, client just shows the state
         }
 
         // Client-side prediction for movement

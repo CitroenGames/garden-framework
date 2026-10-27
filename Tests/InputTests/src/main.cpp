@@ -1,5 +1,6 @@
 #include "InputManager.hpp"
 #include "InputActionSystem.hpp"
+#include "NetworkInputSampler.hpp"
 #include "json.hpp"
 
 #include <SDL3/SDL.h>
@@ -454,6 +455,84 @@ namespace
         ok = expect(restored.get("Fire").held, "unrelated default sources survive source overrides") && ok;
         return ok;
     }
+
+    bool testNetworkInputSampler()
+    {
+        InputManager input;
+        InputActionSystem actions;
+        for (const char* name : { "MoveForward", "MoveBack", "MoveLeft", "MoveRight", "Jump", "Use",
+                 "Sprint", "Crouch", "Walk", "Drop", "Fire", "Reload", "WeaponSlot1", "WeaponSlot2",
+                 "WeaponSlot3", "WeaponSlot4", "WeaponSlot5" })
+            actions.registerAction({ name, ActionValueType::Button, false });
+
+        MappingContext gameplay;
+        gameplay.name = "Gameplay";
+        gameplay.bindings = {
+            { "MoveForward", InputBinding::Source::Key, SDL_SCANCODE_W },
+            { "MoveBack", InputBinding::Source::Key, SDL_SCANCODE_S },
+            { "MoveLeft", InputBinding::Source::Key, SDL_SCANCODE_A },
+            { "MoveRight", InputBinding::Source::Key, SDL_SCANCODE_D },
+            { "Jump", InputBinding::Source::Key, SDL_SCANCODE_SPACE },
+            { "Use", InputBinding::Source::Key, SDL_SCANCODE_E },
+            { "Sprint", InputBinding::Source::Key, SDL_SCANCODE_LSHIFT },
+            { "Crouch", InputBinding::Source::Key, SDL_SCANCODE_LCTRL },
+            { "Walk", InputBinding::Source::Key, SDL_SCANCODE_LALT },
+            { "Drop", InputBinding::Source::Key, SDL_SCANCODE_G },
+            { "Fire", InputBinding::Source::MouseButton, SDL_BUTTON_LEFT },
+            { "Reload", InputBinding::Source::Key, SDL_SCANCODE_R },
+            { "WeaponSlot1", InputBinding::Source::Key, SDL_SCANCODE_1 },
+            { "WeaponSlot2", InputBinding::Source::Key, SDL_SCANCODE_2 },
+            { "WeaponSlot3", InputBinding::Source::Key, SDL_SCANCODE_3 },
+            { "WeaponSlot4", InputBinding::Source::Key, SDL_SCANCODE_4 },
+            { "WeaponSlot5", InputBinding::Source::Key, SDL_SCANCODE_5 }
+        };
+
+        bool ok = expect(actions.pushContext(gameplay), "FPSShooter sampler test context activates");
+        input.update();
+        input.process_event(makeKeyEvent(SDL_EVENT_KEY_DOWN, SDL_SCANCODE_W));
+        input.process_event(makeKeyEvent(SDL_EVENT_KEY_DOWN, SDL_SCANCODE_S));
+        input.process_event(makeKeyEvent(SDL_EVENT_KEY_DOWN, SDL_SCANCODE_A));
+        input.process_event(makeKeyEvent(SDL_EVENT_KEY_DOWN, SDL_SCANCODE_D));
+        input.process_event(makeKeyEvent(SDL_EVENT_KEY_DOWN, SDL_SCANCODE_SPACE));
+        input.process_event(makeKeyEvent(SDL_EVENT_KEY_DOWN, SDL_SCANCODE_E));
+        input.process_event(makeKeyEvent(SDL_EVENT_KEY_DOWN, SDL_SCANCODE_LSHIFT));
+        input.process_event(makeKeyEvent(SDL_EVENT_KEY_DOWN, SDL_SCANCODE_LCTRL));
+        input.process_event(makeKeyEvent(SDL_EVENT_KEY_DOWN, SDL_SCANCODE_LALT));
+        input.process_event(makeKeyEvent(SDL_EVENT_KEY_DOWN, SDL_SCANCODE_G));
+        input.process_event(makeKeyEvent(SDL_EVENT_KEY_DOWN, SDL_SCANCODE_R));
+        input.process_event(makeKeyEvent(SDL_EVENT_KEY_DOWN, SDL_SCANCODE_2));
+        input.process_event(makeMouseButtonEvent(SDL_EVENT_MOUSE_BUTTON_DOWN, SDL_BUTTON_LEFT));
+        actions.evaluate(input);
+
+        const Net::InputState sampled = FPSShooter::sampleNetworkInput(actions, 1.25f, -0.5f, true, false, true, true);
+        ok = expect(sampled.camera_yaw == 1.25f && sampled.camera_pitch == -0.5f,
+            "sampler preserves camera angles") && ok;
+        ok = expect((sampled.buttons & (Net::InputFlags::MOVE_FORWARD | Net::InputFlags::MOVE_BACK |
+                Net::InputFlags::MOVE_LEFT | Net::InputFlags::MOVE_RIGHT)) ==
+                (Net::InputFlags::MOVE_FORWARD | Net::InputFlags::MOVE_BACK | Net::InputFlags::MOVE_LEFT |
+                    Net::InputFlags::MOVE_RIGHT) && sampled.move_forward == 0.0f && sampled.move_right == 0.0f,
+            "sampler preserves simultaneous opposing movement flags") && ok;
+        ok = expect((sampled.buttons & (Net::InputFlags::JUMP | Net::InputFlags::USE | Net::InputFlags::SPRINT |
+                Net::InputFlags::CROUCH | Net::InputFlags::WALK | Net::InputFlags::DROP |
+                Net::InputFlags::ATTACK | Net::InputFlags::RELOAD)) ==
+                (Net::InputFlags::JUMP | Net::InputFlags::USE | Net::InputFlags::SPRINT |
+                    Net::InputFlags::CROUCH | Net::InputFlags::WALK | Net::InputFlags::DROP |
+                    Net::InputFlags::ATTACK | Net::InputFlags::RELOAD),
+            "sampler maps held and edge actions to existing network flags") && ok;
+        ok = expect(Net::getWeaponSelect(sampled.buttons) == 2, "sampler maps weapon selection to the network value field") && ok;
+
+        const Net::InputState modal = FPSShooter::sampleNetworkInput(actions, 1.25f, -0.5f, true, true, true, true);
+        ok = expect(modal.buttons == 0 && modal.move_forward == 0.0f && modal.move_right == 0.0f &&
+            modal.camera_yaw == 1.25f && modal.camera_pitch == -0.5f,
+            "sampler keeps camera values and blocks gameplay input while UI modal") && ok;
+        const Net::InputState dead = FPSShooter::sampleNetworkInput(actions, 1.25f, -0.5f, false, false, true, true);
+        ok = expect(dead.buttons == 0 && dead.move_forward == 0.0f && dead.move_right == 0.0f,
+            "sampler blocks gameplay input while the local player is dead") && ok;
+        const Net::InputState blocked_weapon = FPSShooter::sampleNetworkInput(actions, 1.25f, -0.5f, true, false, false, false);
+        ok = expect((blocked_weapon.buttons & (Net::InputFlags::ATTACK | Net::InputFlags::RELOAD)) == 0,
+            "sampler respects local fire and reload eligibility") && ok;
+        return ok;
+    }
 }
 
 int main()
@@ -468,6 +547,7 @@ int main()
     ok = testActionAxesAndMouseDelta() && ok;
     ok = testActionContextPriorityAndModal() && ok;
     ok = testActionRebindCallbacksAndProfile() && ok;
+    ok = testNetworkInputSampler() && ok;
 
     if (!ok)
         return 1;

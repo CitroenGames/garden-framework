@@ -21,6 +21,7 @@
 #include "Plugin/GameModuleLoader.hpp"
 #include "Project/ProjectManager.hpp"
 #include "InputHandler.hpp"
+#include "InputActionSystem.hpp"
 #include "Utils/Log.hpp"
 #include "Utils/EnginePaths.hpp"
 #include "ImGui/ImGuiManager.hpp"
@@ -291,6 +292,7 @@ int main(int argc, char* argv[])
     input_handler.set_quit_callback([]() { quit_game(0); });
     input_handler.set_resize_callback([](int w, int h) { app.onWindowResized(w, h); });
     auto input_manager = input_handler.get_input_manager();
+    InputActionSystem input_actions;
 
     // Initialize world and physics
     _world = world();
@@ -350,6 +352,7 @@ int main(int argc, char* argv[])
     services.game_world = &_world;
     services.render_api = render_api;
     services.input_manager = input_manager.get();
+    services.input_actions = &input_actions;
     services.reflection = &reflection;
     services.application = &app;
     services.level_manager = &level_manager;
@@ -384,6 +387,7 @@ int main(int argc, char* argv[])
                 RmlUiManager::get().beginFrame();
 
             input_handler.process_events();
+            input_actions.evaluate(*input_manager);
 
             if (input_handler.is_window_minimized())
             {

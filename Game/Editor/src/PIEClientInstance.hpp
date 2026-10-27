@@ -3,6 +3,7 @@
 #include "world.hpp"
 #include "Plugin/GameModuleLoader.hpp"
 #include "InputManager.hpp"
+#include "InputActionSystem.hpp"
 #include "Graphics/SceneViewport.hpp"
 #include <memory>
 #include <string>
@@ -17,6 +18,7 @@ struct PIEClientInstance
     world client_world;                               // isolated ECS + physics
     GameModuleLoader game_module;                     // separate DLL copy = isolated statics
     std::shared_ptr<InputManager> input_manager;      // per-client input
+    InputActionSystem input_actions;                  // host-owned action state for this client
     EngineServices services{};                        // passed to game DLL init
 
     // Caller-owned scene viewport. Created via render_api->createSceneViewport.

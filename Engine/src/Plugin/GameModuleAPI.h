@@ -6,7 +6,7 @@
 // (world, entt::registry, shared component storage). The compatibility token
 // therefore includes both the source API revision and the C++ runtime/STL ABI
 // shape that changes between Debug/Release builds on MSVC.
-#define GARDEN_MODULE_API_REVISION 5
+#define GARDEN_MODULE_API_REVISION 6
 
 #if defined(_MSC_VER)
 #   define GARDEN_MODULE_COMPILER_FAMILY 1
@@ -41,6 +41,7 @@
 class world;
 class IRenderAPI;
 class InputManager;
+class InputActionSystem;
 class ReflectionRegistry;
 class Application;
 class LevelManager;
@@ -52,6 +53,7 @@ struct EngineServices
     world*               game_world;
     IRenderAPI*          render_api;
     InputManager*        input_manager;
+    InputActionSystem*   input_actions;
     ReflectionRegistry*  reflection;
     Application*         application;
     LevelManager*        level_manager;

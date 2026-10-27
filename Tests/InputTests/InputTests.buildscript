@@ -7,7 +7,7 @@ if(Windows)
 }
 sources = src/main.cpp
 headers = src/**/*.hpp
-includes = src
+includes = src, ../../Templates/FPSShooter/src/shared
 target_link_libraries(
     PRIVATE EngineCore
 )
