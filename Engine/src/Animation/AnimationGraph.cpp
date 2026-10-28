@@ -1,5 +1,6 @@
 #include "AnimationGraph.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <unordered_set>
 #include <utility>
@@ -24,6 +25,24 @@ bool finiteValue(const AnimGraphParameterValue& value)
     if (const auto* vector = std::get_if<glm::vec3>(&value))
         return std::isfinite(vector->x) && std::isfinite(vector->y) && std::isfinite(vector->z);
     return true;
+}
+
+bool conditionAllowsType(AnimGraphConditionOperator op, AnimGraphParameterType type)
+{
+    switch (op)
+    {
+    case AnimGraphConditionOperator::Equal:
+    case AnimGraphConditionOperator::NotEqual:
+        return true;
+    case AnimGraphConditionOperator::Less:
+    case AnimGraphConditionOperator::LessEqual:
+    case AnimGraphConditionOperator::Greater:
+    case AnimGraphConditionOperator::GreaterEqual:
+        return type == AnimGraphParameterType::Int || type == AnimGraphParameterType::Float;
+    case AnimGraphConditionOperator::IsTrue:
+        return type == AnimGraphParameterType::Bool;
+    }
+    return false;
 }
 
 void add(AnimGraphValidationReport& report, const char* code, std::string message)
@@ -136,6 +155,53 @@ std::shared_ptr<const AnimGraph> makeGraph(AnimGraphDefinition definition,
             (machine.entry_state < definition.states.size() &&
              definition.states[machine.entry_state].machine_index != machine_index))
             add(report, "ANIM_GRAPH_ENTRY_STATE", "machine entry state must belong to that machine");
+    }
+
+    for (const auto& transition : definition.transitions)
+    {
+        if (transition.from_state >= definition.states.size() || transition.to_state >= definition.states.size())
+        {
+            add(report, "ANIM_GRAPH_TRANSITION_STATE", "transition references a state outside the graph");
+        }
+        else if (definition.states[transition.from_state].machine_index !=
+                 definition.states[transition.to_state].machine_index)
+        {
+            add(report, "ANIM_GRAPH_TRANSITION_MACHINE", "transition states must belong to the same machine");
+        }
+        if (!std::isfinite(transition.blend_duration) || transition.blend_duration < 0.0f)
+            add(report, "ANIM_GRAPH_TRANSITION_BLEND", "transition blend duration must be finite and non-negative");
+        if (!std::isfinite(transition.exit_time) ||
+            (transition.exit_time != -1.0f && (transition.exit_time < 0.0f || transition.exit_time > 1.0f)))
+            add(report, "ANIM_GRAPH_TRANSITION_EXIT", "transition exit time must be -1 or a normalized value");
+        else if (transition.exit_time >= 0.0f && transition.from_state < definition.states.size() &&
+                 definition.states[transition.from_state].source != AnimGraphPoseSource::Clip)
+            add(report, "ANIM_GRAPH_TRANSITION_EXIT_SOURCE", "normalized exit time requires a clip source state");
+        for (const auto& condition : transition.conditions)
+        {
+            const auto parameter = std::find_if(definition.parameters.begin(), definition.parameters.end(),
+                [&condition](const AnimGraphParameterDefinition& candidate) { return candidate.name == condition.parameter; });
+            if (condition.parameter.empty() || parameter == definition.parameters.end())
+            {
+                add(report, "ANIM_GRAPH_CONDITION_PARAMETER", "transition condition references a missing parameter");
+                continue;
+            }
+            if (!conditionAllowsType(condition.op, parameter->type))
+                add(report, "ANIM_GRAPH_CONDITION_OPERATOR", "transition condition operator does not support the parameter type");
+            if (!valueMatches(parameter->type, condition.value))
+                add(report, "ANIM_GRAPH_CONDITION_TYPE", "transition condition value does not match its parameter type");
+            else if (!finiteValue(condition.value))
+                add(report, "ANIM_GRAPH_CONDITION_NONFINITE", "transition condition value must be finite");
+        }
+    }
+
+    for (const auto& notify : definition.notifies)
+    {
+        if (notify.clip_name.empty() || !resources->findClip(notify.clip_name))
+            add(report, "ANIM_GRAPH_NOTIFY_CLIP", "notify references a missing clip");
+        if (notify.event_name.empty())
+            add(report, "ANIM_GRAPH_NOTIFY_NAME", "notify event name must be non-empty");
+        if (!std::isfinite(notify.normalized_time) || notify.normalized_time < 0.0f || notify.normalized_time > 1.0f)
+            add(report, "ANIM_GRAPH_NOTIFY_TIME", "notify time must be finite and normalized");
     }
 
     if (!report.valid()) return nullptr;

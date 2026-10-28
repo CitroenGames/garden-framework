@@ -33,9 +33,8 @@ struct AnimGraphParameterDefinition
     AnimGraphParameterValue default_value = false;
 };
 
-// AN-3 foundation intentionally admits only the two source forms needed to
-// establish fixed-tick ownership. Blend/Additive nodes and transitions are
-// added by later AN-3 packages after their own validation rules are defined.
+// AN-3 v1 admits the source forms needed for deterministic state machines.
+// Blend/Additive nodes are a later graph contract and are rejected here.
 enum class AnimGraphPoseSource : uint8_t
 {
     RestPose,
@@ -58,6 +57,44 @@ struct AnimGraphMachineDefinition
     uint32_t entry_state = 0;
 };
 
+enum class AnimGraphConditionOperator : uint8_t
+{
+    Equal,
+    NotEqual,
+    Less,
+    LessEqual,
+    Greater,
+    GreaterEqual,
+    IsTrue,
+};
+
+struct AnimGraphCondition
+{
+    std::string parameter;
+    AnimGraphConditionOperator op = AnimGraphConditionOperator::IsTrue;
+    AnimGraphParameterValue value = false;
+};
+
+// Kept in authored table order. Runtime examines this table linearly so the
+// first eligible transition is the sole transition that a machine may take in
+// a fixed tick.
+struct AnimGraphTransitionDefinition
+{
+    uint32_t from_state = UINT32_MAX;
+    uint32_t to_state = UINT32_MAX;
+    float blend_duration = 0.2f;
+    float exit_time = -1.0f;
+    std::vector<AnimGraphCondition> conditions;
+};
+
+// Notify names are opaque engine data. The graph never interprets them.
+struct AnimGraphNotifyDefinition
+{
+    std::string clip_name;
+    float normalized_time = 0.0f;
+    std::string event_name;
+};
+
 struct AnimGraphDefinition
 {
     // The resource signature is the graph's skeleton/resource owner binding.
@@ -69,6 +106,8 @@ struct AnimGraphDefinition
     // The data shape remains a table for the later layered graph package; the
     // foundation validates exactly one base machine so it never drops a pose.
     std::vector<AnimGraphMachineDefinition> machines;
+    std::vector<AnimGraphTransitionDefinition> transitions;
+    std::vector<AnimGraphNotifyDefinition> notifies;
 };
 
 struct AnimGraphValidationError
@@ -102,6 +141,8 @@ public:
     const std::vector<AnimGraphParameterDefinition>& parameters() const { return m_definition.parameters; }
     const std::vector<AnimGraphStateDefinition>& states() const { return m_definition.states; }
     const std::vector<AnimGraphMachineDefinition>& machines() const { return m_definition.machines; }
+    const std::vector<AnimGraphTransitionDefinition>& transitions() const { return m_definition.transitions; }
+    const std::vector<AnimGraphNotifyDefinition>& notifies() const { return m_definition.notifies; }
 
     int parameterIndex(std::string_view name) const;
     int machineIndex(std::string_view name) const;

@@ -1041,6 +1041,126 @@ bool testGraphDeterministicReplayAndReinitialize()
         return fail(name, "graph replacement did not reset runtime schema at a fixed-tick boundary");
     return pass(name);
 }
+
+std::vector<AnimationNotifyEvent> g_graph_notifies;
+std::vector<AnimationStateChangedEvent> g_graph_state_changes;
+void onGraphNotify(const AnimationNotifyEvent& event) { g_graph_notifies.push_back(event); }
+void onGraphStateChanged(const AnimationStateChangedEvent& event) { g_graph_state_changes.push_back(event); }
+
+bool testGraphTransitionsAndEvents()
+{
+    const std::string name = "AN-3 graph transitions follow authored order and queue opaque events";
+    const auto resources = makeResources(makeRestSkeleton(), {makeGraphClip()});
+    if (!resources) return fail(name, "could not build immutable animation resources");
+
+    AnimGraphDefinition definition;
+    definition.resource_signature = resources->sourceSignature();
+    definition.parameters = {
+        {"go", AnimGraphParameterType::Bool, false},
+        {"speed", AnimGraphParameterType::Float, 0.0f},
+    };
+    definition.states = {
+        {"idle", 0, AnimGraphPoseSource::Clip, "graph_move", 1.0f, true},
+        {"walk", 0, AnimGraphPoseSource::Clip, "graph_move", 1.0f, true},
+        {"run", 0, AnimGraphPoseSource::Clip, "graph_move", 2.0f, true},
+    };
+    definition.machines = {{"locomotion", 0}};
+    definition.transitions = {
+        {0, 1, 0.5f, -1.0f, {{"go", AnimGraphConditionOperator::IsTrue, true}}},
+        {0, 2, 0.5f, -1.0f, {{"go", AnimGraphConditionOperator::IsTrue, true}}},
+        {1, 2, 0.75f, -1.0f, {{"speed", AnimGraphConditionOperator::Greater, 5.0f}}},
+        {2, 2, 0.25f, -1.0f, {{"speed", AnimGraphConditionOperator::Greater, 100.0f}}},
+    };
+    definition.notifies = {{"graph_move", 0.5f, "footstep"}};
+    AnimGraphValidationReport report;
+    const auto graph = AnimGraphValidation::makeGraph(std::move(definition), resources, report);
+    if (!graph || !report.valid()) return fail(name, "could not publish a valid transition graph");
+
+    EventBus::get().clear();
+    EventBus::get().sink<AnimationNotifyEvent>().connect<&onGraphNotify>();
+    EventBus::get().sink<AnimationStateChangedEvent>().connect<&onGraphStateChanged>();
+    g_graph_notifies.clear();
+    g_graph_state_changes.clear();
+    entt::registry registry;
+    const entt::entity entity = registry.create();
+    registry.emplace<AnimGraphComponent>(entity).graph = graph;
+    registry.emplace<AnimGraphStateComponent>(entity);
+    AnimGraphSystem::advance(registry, 0.3f);
+    if (!AnimGraphSystem::setBool(registry, entity, "go", true))
+        return fail(name, "could not set valid Bool transition parameter");
+    AnimGraphSystem::advance(registry, 0.3f);
+    auto& runtime = registry.get<AnimGraphStateComponent>(entity);
+    if (runtime.machines[0].active_state != 1 || runtime.machines[0].fading_from_state != 0 ||
+        !near(runtime.machines[0].fading_from_time, 0.6f) || !near(runtime.machines[0].state_time, 0.0f))
+        return fail(name, "first authored transition did not win or did not start a deterministic fade");
+
+    if (!AnimGraphSystem::setFloat(registry, entity, "speed", 6.0f))
+        return fail(name, "could not set valid Float transition parameter");
+    AnimGraphSystem::advance(registry, 0.2f);
+    if (runtime.machines[0].active_state != 2 || runtime.machines[0].fading_from_state != 1 ||
+        !near(runtime.machines[0].fading_from_time, 0.2f) || !near(runtime.machines[0].fade_duration, 0.75f))
+        return fail(name, "interrupted fade did not use the previous destination as its source");
+    AnimGraphSystem::evaluate(registry, false);
+    if (runtime.machines[0].active_state != 2 || !near(runtime.machines[0].state_time, 0.0f))
+        return fail(name, "presentation evaluation mutated transition state");
+    if (!AnimGraphSystem::setFloat(registry, entity, "speed", 101.0f))
+        return fail(name, "could not set self-transition parameter");
+    AnimGraphSystem::advance(registry, 0.1f);
+    if (runtime.machines[0].active_state != 2 || runtime.machines[0].fading_from_state != 2 ||
+        !near(runtime.machines[0].state_time, 0.0f) || !near(runtime.machines[0].fading_from_time, 0.1f))
+        return fail(name, "self transition did not restart the entered state deterministically");
+
+    EventBus::get().flush();
+    EventBus::get().sink<AnimationNotifyEvent>().disconnect<&onGraphNotify>();
+    EventBus::get().sink<AnimationStateChangedEvent>().disconnect<&onGraphStateChanged>();
+    EventBus::get().clear();
+    if (g_graph_state_changes.size() != 3 || g_graph_state_changes[0].machine != "locomotion" ||
+        g_graph_state_changes[0].from_state != "idle" || g_graph_state_changes[0].to_state != "walk" ||
+        g_graph_state_changes[1].from_state != "walk" || g_graph_state_changes[1].to_state != "run" ||
+        g_graph_state_changes[2].from_state != "run" || g_graph_state_changes[2].to_state != "run" ||
+        g_graph_notifies.size() != 1 || g_graph_notifies[0].name != "footstep" ||
+        g_graph_notifies[0].state != 0 || !near(g_graph_notifies[0].clip_time, 0.5f))
+        return fail(name, "graph did not queue the expected authored state and opaque notify events");
+    return pass(name);
+}
+
+bool testGraphTransitionValidationAndExitGate()
+{
+    const std::string name = "AN-3 graph rejects invalid conditions and gates normalized exits";
+    const auto resources = makeResources(makeRestSkeleton(), {makeGraphClip()});
+    if (!resources) return fail(name, "could not build immutable animation resources");
+    AnimGraphDefinition invalid;
+    invalid.resource_signature = resources->sourceSignature();
+    invalid.parameters = {{"go", AnimGraphParameterType::Bool, false}};
+    invalid.states = {{"idle", 0, AnimGraphPoseSource::Clip, "graph_move", 1.0f, true},
+                      {"rest", 0, AnimGraphPoseSource::RestPose, "", 1.0f, true}};
+    invalid.machines = {{"base", 0}};
+    invalid.transitions = {{0, 1, -1.0f, 2.0f, {{"go", AnimGraphConditionOperator::Less, false}}}};
+    invalid.notifies = {{"missing", 1.1f, ""}};
+    AnimGraphValidationReport report;
+    if (AnimGraphValidation::makeGraph(invalid, resources, report) || report.errors.size() < 5)
+        return fail(name, "invalid current graph contract was published or under-reported");
+
+    AnimGraphDefinition gated;
+    gated.resource_signature = resources->sourceSignature();
+    gated.parameters = {{"go", AnimGraphParameterType::Bool, true}};
+    gated.states = invalid.states;
+    gated.machines = {{"base", 0}};
+    gated.transitions = {{0, 1, 0.0f, 0.5f, {{"go", AnimGraphConditionOperator::IsTrue, true}}}};
+    const auto graph = AnimGraphValidation::makeGraph(std::move(gated), resources, report);
+    if (!graph) return fail(name, "valid exit-gated graph was rejected");
+    entt::registry registry;
+    const entt::entity entity = registry.create();
+    registry.emplace<AnimGraphComponent>(entity).graph = graph;
+    registry.emplace<AnimGraphStateComponent>(entity);
+    AnimGraphSystem::advance(registry, 0.4f);
+    if (AnimGraphSystem::activeState(registry, entity, "base") != 0)
+        return fail(name, "transition fired before normalized exit time");
+    AnimGraphSystem::advance(registry, 0.1f);
+    if (AnimGraphSystem::activeState(registry, entity, "base") != 1)
+        return fail(name, "transition did not fire at normalized exit time");
+    return pass(name);
+}
 } // namespace
 
 int main()
@@ -1058,5 +1178,7 @@ int main()
     ok = testGraphFoundationValidation() && ok;
     ok = testGraphFixedTickAndEvaluation() && ok;
     ok = testGraphDeterministicReplayAndReinitialize() && ok;
+    ok = testGraphTransitionsAndEvents() && ok;
+    ok = testGraphTransitionValidationAndExitGate() && ok;
     return ok ? 0 : 1;
 }

@@ -186,6 +186,24 @@ struct AnimationFinishedEvent
     std::string clip_name;
 };
 
+// Animation graph names are authored opaque payloads. Consumers decide what
+// a notify means; EngineCore only preserves fixed-tick ordering.
+struct AnimationNotifyEvent
+{
+    entt::entity entity = entt::null;
+    std::string name;
+    int state = -1;
+    float clip_time = 0.0f;
+};
+
+struct AnimationStateChangedEvent
+{
+    entt::entity entity = entt::null;
+    std::string machine;
+    std::string from_state;
+    std::string to_state;
+};
+
 // --- Input Events ---
 
 struct InputActionEvent
