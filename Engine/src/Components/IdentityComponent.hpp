@@ -156,12 +156,19 @@ inline EntityRef ensureEntityRef(entt::registry& r, entt::entity e)
 
 // Resolve a GUID ref by scanning IdentityComponents (small registries;
 // EntityLifecycle::resolve is the indexed path when a lifecycle exists).
+// Duplicate live owners are ambiguous and must not resolve.
 inline entt::entity resolveEntityRef(const entt::registry& r, EntityRef ref)
 {
     if (ref.isNull())
         return entt::null;
+    entt::entity result = entt::null;
     for (auto [e, id] : r.view<IdentityComponent>().each())
-        if (id.guid == ref.guid)
-            return r.valid(e) ? e : entt::null;
-    return entt::null;
+    {
+        if (id.guid != ref.guid || !r.valid(e))
+            continue;
+        if (result != entt::null)
+            return entt::null;
+        result = e;
+    }
+    return result;
 }

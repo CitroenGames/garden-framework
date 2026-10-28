@@ -278,8 +278,13 @@ garden::ecs::EntityHandle world::createScopedEntity()
 
 garden::ecs::EntityHandle world::restoreScopedEntity(EntityRef reference)
 {
-    if (active_queries || reference.isNull() || resolveEntityRef(registry, reference) != entt::null)
-        return {};
+    if (active_queries || reference.isNull()) return {};
+    // Count owners directly: a resolver that rejects ambiguity cannot distinguish
+    // an absent GUID from an already duplicated one.
+    for (const auto [candidate, identity] : registry.view<IdentityComponent>().each()) {
+        (void)candidate;
+        if (identity.guid == reference.guid) return {};
+    }
 
     entt::entity entity = entt::null;
     try {
@@ -297,11 +302,20 @@ garden::ecs::EntityHandle world::restoreScopedEntity(EntityRef reference)
         // Publish the final identity only after scope exists, so identity hooks
         // observe a fully scoped entity and index the supplied GUID directly.
         registry.emplace<IdentityComponent>(entity, IdentityComponent{reference.guid});
-        // Construct hooks may remove or alter identity. Do not publish a
-        // scoped handle unless the supplied identity survived those hooks.
+        // Hooks may alter the scope or introduce another owner of the GUID.
+        // Revalidate all of it before publishing a handle.
         const auto* identity = registry.valid(entity)
             ? registry.try_get<IdentityComponent>(entity) : nullptr;
-        if (!identity || identity->guid != reference.guid) {
+        const auto* marker = registry.valid(entity)
+            ? registry.try_get<ScopedEntityMarker>(entity) : nullptr;
+        size_t owners = 0;
+        for (const auto [candidate, other] : registry.view<IdentityComponent>().each()) {
+            (void)candidate;
+            if (other.guid == reference.guid) ++owners;
+        }
+        if (!identity || identity->guid != reference.guid || !marker ||
+            marker->store != &component_state->store || marker->key.slot != key.slot ||
+            marker->key.generation != key.generation || marker->serial != serial || owners != 1) {
             if (registry.valid(entity)) registry.destroy(entity);
             return {};
         }
@@ -311,7 +325,9 @@ garden::ecs::EntityHandle world::restoreScopedEntity(EntityRef reference)
         result.m_serial = serial;
         return result;
     } catch (...) {
-        if (entity != entt::null && registry.valid(entity)) registry.destroy(entity);
+        if (entity != entt::null && registry.valid(entity)) {
+            try { registry.destroy(entity); } catch (...) {}
+        }
         return {};
     }
 }

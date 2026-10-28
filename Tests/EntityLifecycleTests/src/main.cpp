@@ -878,6 +878,42 @@ bool testL22()
     resetBus();
     return pass(name);
 }
+// L23: the raw scan fails closed on corrupt duplicate identities.
+bool testL23()
+{
+    const std::string name = "L23 raw EntityRef scan rejects duplicate owners";
+    entt::registry reg;
+    const EntityGuid guid{0x1234, 0x5678};
+    const EntityRef ref{guid};
+    const entt::entity first = reg.create();
+    reg.emplace<IdentityComponent>(first, guid);
+    const entt::entity null_owner = reg.create();
+    reg.emplace<IdentityComponent>(null_owner, EntityGuid{});
+
+    if (resolveEntityRef(reg, EntityRef{}) != entt::null)
+        return fail(name, "null reference resolved to a null identity");
+    if (resolveEntityRef(reg, EntityRef{EntityGuid{0x1234, 0x5679}}) != entt::null)
+        return fail(name, "missing reference resolved");
+    if (resolveEntityRef(reg, ref) != first)
+        return fail(name, "unique reference did not resolve");
+
+    const entt::entity duplicate = reg.create();
+    reg.emplace<IdentityComponent>(duplicate, guid);
+    if (resolveEntityRef(reg, ref) != entt::null)
+        return fail(name, "duplicate reference resolved to an arbitrary owner");
+    if (!reg.valid(first) || !reg.valid(duplicate) ||
+        reg.get<IdentityComponent>(first).guid != guid ||
+        reg.get<IdentityComponent>(duplicate).guid != guid)
+        return fail(name, "lookup changed the duplicate owners");
+
+    reg.destroy(duplicate);
+    if (resolveEntityRef(reg, ref) != first)
+        return fail(name, "remaining owner did not resolve after duplicate removal");
+    reg.destroy(first);
+    if (resolveEntityRef(reg, ref) != entt::null)
+        return fail(name, "removed reference still resolved");
+    return pass(name);
+}
 } // namespace
 
 int main()
@@ -905,6 +941,7 @@ int main()
     if (!testL20()) ++failures;
     if (!testL21()) ++failures;
     if (!testL22()) ++failures;
+    if (!testL23()) ++failures;
     if (failures == 0)
         std::cout << "All EntityLifecycleTests passed" << std::endl;
     else

@@ -209,6 +209,96 @@ void identityBoundary() {
           "throwing outer query releases the snapshot for subsequent identity conversion");
 }
 
+// Exercise construction hooks through the existing registry bridge. The marker
+// type is private, so the fixture identifies the other storage on the newly
+// constructed entity without exposing that type as a public API.
+struct RestoreHookFixture {
+    enum class Action { Duplicate, RemoveMarker, ReplaceMarker };
+    static inline world* target = nullptr;
+    static inline Action action = Action::Duplicate;
+    static inline entt::entity operation = entt::null;
+    static inline entt::entity sideEffect = entt::null;
+    static inline EntityHandle replacement{};
+    static inline bool fired = false;
+
+    static void onIdentity(entt::registry& registry, entt::entity entity) {
+        if (fired) return;
+        fired = true;
+        operation = entity;
+        const EntityRef ref{registry.get<IdentityComponent>(entity).guid};
+        if (action == Action::Duplicate) {
+            sideEffect = registry.create();
+            registry.emplace<IdentityComponent>(sideEffect, IdentityComponent{ref.guid});
+            return;
+        }
+        auto* identityStorage = &registry.storage<IdentityComponent>();
+        for (auto&& [id, storage] : registry.storage()) {
+            (void)id;
+            if (&storage != identityStorage && storage.contains(entity)) {
+                storage.erase(entity);
+                break;
+            }
+        }
+        if (action == Action::ReplaceMarker) replacement = target->scopedEntity(ref);
+    }
+};
+
+void singleRestoreHooks() {
+    world w;
+    const EntityRef existingRef{{0xe001, 0xf001}};
+    const auto existing = w.restoreScopedEntity(existingRef);
+    const bool prepared = w.isEntityValid(existing) &&
+        w.add<WorldValue>(existing, 73) == ComponentStoreResult::Success;
+    check(prepared, "prepare single restore hook sentinel");
+    if (!prepared) return;
+    const auto sentinelIntact = [&]() {
+        WorldValue* value = nullptr;
+        return w.isEntityValid(existing) && w.persistedReference(existing) == existingRef &&
+            w.get<WorldValue>(existing, value) == ComponentStoreResult::Success && value && value->number == 73;
+    };
+    auto sink = w.registry.on_construct<IdentityComponent>();
+    sink.connect<&RestoreHookFixture::onIdentity>();
+    RestoreHookFixture::target = &w;
+    const auto run = [&](RestoreHookFixture::Action action, EntityRef ref) {
+        RestoreHookFixture::action = action;
+        RestoreHookFixture::fired = false;
+        RestoreHookFixture::operation = entt::null;
+        RestoreHookFixture::sideEffect = entt::null;
+        RestoreHookFixture::replacement = {};
+        return w.restoreScopedEntity(ref);
+    };
+    const EntityRef duplicateRef{{0xe002, 0xf002}};
+    const auto duplicate = run(RestoreHookFixture::Action::Duplicate, duplicateRef);
+    const auto sideEffect = RestoreHookFixture::sideEffect;
+    check(RestoreHookFixture::fired && !w.isEntityValid(duplicate) &&
+          !w.registry.valid(RestoreHookFixture::operation) && w.registry.valid(sideEffect) &&
+          w.registry.get<IdentityComponent>(sideEffect).guid == duplicateRef.guid && sentinelIntact(),
+          "hook-created duplicate rejects restore, rolls back only the operation entity");
+    // External hook effects remain; a second preexisting owner must also make
+    // preflight fail even when GUID resolution rejects ambiguous identities.
+    const auto secondOwner = w.registry.create();
+    w.registry.emplace<IdentityComponent>(secondOwner, IdentityComponent{duplicateRef.guid});
+    RestoreHookFixture::fired = false;
+    const auto preexisting = w.restoreScopedEntity(duplicateRef);
+    check(!w.isEntityValid(preexisting) && !RestoreHookFixture::fired &&
+          w.registry.valid(sideEffect) && w.registry.valid(secondOwner) && sentinelIntact(),
+          "preflight rejects an already ambiguous GUID without changing its owners");
+    w.registry.destroy(sideEffect);
+    w.registry.destroy(secondOwner);
+
+    const auto removed = run(RestoreHookFixture::Action::RemoveMarker, EntityRef{{0xe003, 0xf003}});
+    check(RestoreHookFixture::fired && !w.isEntityValid(removed) &&
+          !w.registry.valid(RestoreHookFixture::operation) && sentinelIntact(),
+          "hook removing the scope marker rejects and rolls back restore");
+    const auto replaced = run(RestoreHookFixture::Action::ReplaceMarker, EntityRef{{0xe004, 0xf004}});
+    check(RestoreHookFixture::fired && !w.isEntityValid(replaced) &&
+          !w.isEntityValid(RestoreHookFixture::replacement) &&
+          !w.registry.valid(RestoreHookFixture::operation) && sentinelIntact(),
+          "hook replacing the marker with a new serial rejects and rolls back restore");
+    sink.disconnect<&RestoreHookFixture::onIdentity>();
+    RestoreHookFixture::target = nullptr;
+}
+
 void cohortRestore() {
     world w;
     const EntityRef existingRef{{0xc001, 0xd001}};
@@ -547,6 +637,7 @@ int main() {
     if (queryRegistration != ComponentCatalogResult::Success) return 1;
     basicAndReuse();
     identityBoundary();
+    singleRestoreHooks();
     cohortRestore();
     moves();
     teardown();
