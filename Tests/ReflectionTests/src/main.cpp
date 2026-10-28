@@ -660,9 +660,8 @@ namespace
         {
             entt::registry reg; auto e = reg.create();
             auto& c = reg.emplace<SkeletonComponent>(e);
-            c.skeleton_path = "assets/hero.skel"; c.clip_names = {"idle", "run"};
+            c.animation_resource_path = "assets/hero.canim"; c.animation_skin_index = 3;
             c.default_clip = "idle"; c.playback_speed = 1.5f; c.loop = false; c.auto_play = true;
-            c.resources.reset();
             auto j = ReflectionSerializer::serializeEntity(reg, e, reflection);
             auto cj = j["components"]["SkeletonComponent"];
             for (const char* k : {"resources", "blender", "bone_matrices"})
@@ -670,9 +669,10 @@ namespace
             entt::registry reg2; auto e2 = reg2.create();
             ReflectionSerializer::deserializeEntity(reg2, e2, j, reflection);
             const auto& o = reg2.get<SkeletonComponent>(e2);
-            if (o.skeleton_path != c.skeleton_path || o.clip_names != c.clip_names ||
+            if (o.animation_resource_path != c.animation_resource_path ||
+                o.animation_skin_index != c.animation_skin_index ||
                 o.default_clip != c.default_clip || !approx(o.playback_speed, 1.5f) ||
-                o.loop != false || o.auto_play != true || o.resources)
+                o.loop != false || o.auto_play != true)
                 return fail(name, "animation fields mismatch");
         }
         // Audio: clip_path + tuning; resolved id/handle omitted.

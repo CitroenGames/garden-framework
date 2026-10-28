@@ -1,9 +1,12 @@
 #define GLM_ENABLE_EXPERIMENTAL
 
 #include "Animation/AnimationComponentMigration.hpp"
+#include "Assets/AssetManager.hpp"
 #include "Animation/CompiledAnimationSerializer.hpp"
 #include "Animation/GltfAnimationLoader.hpp"
 #include "Animation/AnimationResourceValidation.hpp"
+#include "Animation/AnimationResourceService.hpp"
+#include "Animation/AnimationResourceBindingSystem.hpp"
 #include "Animation/AnimationClip.hpp"
 #include "Animation/AnimationSampling.hpp"
 #include "Animation/AnimationSystem.hpp"
@@ -12,6 +15,7 @@
 #include "Animation/Skeleton.hpp"
 #include "Components/AnimPlaybackComponent.hpp"
 #include "Components/AnimPoseComponent.hpp"
+#include "Components/AnimResourceBindingComponent.hpp"
 #include "Components/IKComponent.hpp"
 #include "Components/SkeletonComponent.hpp"
 #include "Events/EngineEvents.hpp"
@@ -26,6 +30,7 @@
 #include <tiny_gltf.h>
 
 #include <cmath>
+#include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -33,6 +38,7 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 #include <unordered_map>
 
@@ -344,6 +350,87 @@ bool testCanmSerialization()
     cleanup();
     return pass(name);
 }
+
+bool testResourceServiceAndBinding()
+{
+    const std::string name = "AN-2 service deduplicates immutable CANM and binding retains a failed replacement";
+    const fs::path root = fs::temp_directory_path() / "garden_an2_resource_service";
+    std::error_code ec;
+    fs::remove_all(root, ec);
+    fs::create_directories(root, ec);
+    if (ec) return fail(name, "could not create service fixture directory");
+    const auto cleanup = [&]() {
+        AnimationResourceService::get().shutdown();
+        Assets::AssetManager::get().setAssetRoot({});
+        std::error_code ignored;
+        fs::remove_all(root, ignored);
+    };
+
+    CompiledAnimationData source;
+    source.skins = {{0, makeRestSkeleton(), {makeChainClip("idle")}, "service-fixture"}};
+    AnimationResourceError error;
+    if (!CompiledAnimationSerializer::save(source, (root / "hero.canim").string(), &error))
+    {
+        cleanup();
+        return fail(name, "could not write valid CANM fixture: " + error.code);
+    }
+
+    Assets::AssetManager::get().setAssetRoot(root.string());
+    const AnimationResourceKey valid{"hero.canim", 0};
+    const auto first = AnimationResourceService::get().request(valid);
+    const auto duplicate = AnimationResourceService::get().request({"./hero.canim", 0});
+    std::shared_ptr<const AnimationResourceSet> ready;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (!ready && std::chrono::steady_clock::now() < deadline)
+    {
+        AnimationResourceService::get().update();
+        ready = AnimationResourceService::get().tryGetReady(first);
+        std::this_thread::yield();
+    }
+    if (!ready || AnimationResourceService::get().tryGetReady(duplicate) != ready)
+    {
+        cleanup();
+        return fail(name, "canonical requests did not share one published immutable resource");
+    }
+
+    entt::registry registry;
+    const entt::entity entity = registry.create();
+    auto& authored = registry.emplace<SkeletonComponent>(entity);
+    authored.animation_resource_path = "hero.canim";
+    authored.default_clip = "idle";
+    authored.auto_play = true;
+    AnimationResourceBindingSystem::update(registry);
+    auto& binding = registry.get<AnimResourceBindingComponent>(entity);
+    if (binding.active != ready)
+    {
+        cleanup();
+        return fail(name, "binding did not consume the service safe-boundary publication");
+    }
+    AnimationSystem::update(registry, 0.0f, false);
+    auto& playback = registry.get<AnimPlaybackComponent>(entity);
+    if (!playback.current_clip || !playback.playing)
+    {
+        cleanup();
+        return fail(name, "first valid binding did not seed its default clip");
+    }
+
+    authored.animation_resource_path = "missing.txt";
+    AnimationResourceBindingSystem::update(registry);
+    if (binding.active != ready || binding.state != AnimationResourceState::Failed ||
+        !AnimationResourceService::get().getError(binding.ticket))
+    {
+        cleanup();
+        return fail(name, "failed replacement cleared the last valid resource");
+    }
+    AnimationSystem::update(registry, 0.0f, false);
+    if (!registry.get<AnimPoseComponent>(entity).pose_valid)
+    {
+        cleanup();
+        return fail(name, "failed replacement did not retain the valid rest-pose boundary");
+    }
+    cleanup();
+    return pass(name);
+}
 bool testImmutableResourceValidation()
 {
     const std::string name = "AN-2 validates immutable skeleton and clip resources before publication";
@@ -625,7 +712,7 @@ bool testSystemRestAndInvalidPlayback()
     entt::registry registry;
     const entt::entity entity = registry.create();
     auto& binding = registry.emplace<SkeletonComponent>(entity);
-    binding.resources = makeResources(skeleton);
+    registry.emplace<AnimResourceBindingComponent>(entity).active = makeResources(skeleton);
     binding.auto_play = true;
     binding.default_clip = "missing";
     AnimationSystem::update(registry, 0.0f, false);
@@ -678,7 +765,7 @@ bool testIkOrder()
     entt::registry registry;
     const entt::entity entity = registry.create();
     auto& binding = registry.emplace<SkeletonComponent>(entity);
-    binding.resources = makeResources(skeleton);
+    registry.emplace<AnimResourceBindingComponent>(entity).active = makeResources(skeleton);
     auto& playback = registry.emplace<AnimPlaybackComponent>(entity);
     playback.initialized = true; playback.current_clip = clip; playback.playing = true;
     auto& ik = registry.emplace<IKComponent>(entity);
@@ -701,7 +788,8 @@ bool testCompletionEvent()
     g_finished_events = 0; g_finished_clip.clear();
     entt::registry registry;
     const entt::entity entity = registry.create();
-    auto& binding = registry.emplace<SkeletonComponent>(entity); binding.resources = makeResources(makeRestSkeleton());
+    auto& binding = registry.emplace<SkeletonComponent>(entity);
+    registry.emplace<AnimResourceBindingComponent>(entity).active = makeResources(makeRestSkeleton());
     auto& playback = registry.emplace<AnimPlaybackComponent>(entity);
     playback.initialized = true;
     auto completion_clip = makeChainClip("complete_once", 0.25f);
@@ -710,7 +798,7 @@ bool testCompletionEvent()
     AnimationSystem::update(registry, 0.5f);
     EventBus::get().flush<AnimationFinishedEvent>();
     Pose completed_rest;
-    AnimationSampling::makeRestPose(*binding.resources->skeleton(), completed_rest);
+    AnimationSampling::makeRestPose(*registry.get<AnimResourceBindingComponent>(entity).active->skeleton(), completed_rest);
     if (!nearPose(registry.get<AnimPoseComponent>(entity).local_pose, completed_rest))
         return fail(name, "completed playback did not return to the skeleton rest pose");
     AnimationSystem::update(registry, 0.5f);
@@ -731,10 +819,8 @@ bool testReflectionAndMigration()
 
     entt::registry registry; const entt::entity entity = registry.create();
     auto& binding = registry.emplace<SkeletonComponent>(entity);
-    binding.skeleton_path = "assets/fixtures/three_bone.skeleton"; binding.clip_names = {"idle", "run"};
+    binding.animation_resource_path = "assets/fixtures/three_bone.canim"; binding.animation_skin_index = 0;
     binding.default_clip = "idle"; binding.playback_speed = 1.25f; binding.loop = false; binding.auto_play = true;
-    binding.resources = makeResources(makeRestSkeleton(),
-        std::vector<std::shared_ptr<const AnimationClip>>{makeChainClip("idle")});
     registry.emplace<AnimPlaybackComponent>(entity).current_clip = makeChainClip("runtime");
     registry.emplace<AnimPoseComponent>(entity).bone_matrices.assign(3, glm::mat4(2.0f));
     const nlohmann::json serialized = ReflectionSerializer::serializeEntity(registry, entity, reflection);
@@ -766,9 +852,10 @@ bool testReflectionAndMigration()
     entt::registry loaded; ReflectionSerializer::deserializeLevel(loaded, legacy_level, reflection);
     const auto loaded_entity = *loaded.view<SkeletonComponent>().begin();
     const auto& out = loaded.get<SkeletonComponent>(loaded_entity);
-    if (out.skeleton_path != binding.skeleton_path || out.clip_names != binding.clip_names ||
+    if (out.animation_resource_path != binding.animation_resource_path ||
+        out.animation_skin_index != binding.animation_skin_index ||
         out.default_clip != binding.default_clip || !near(out.playback_speed, binding.playback_speed) ||
-        out.loop != binding.loop || out.auto_play != binding.auto_play || out.resources ||
+        out.loop != binding.loop || out.auto_play != binding.auto_play ||
         loaded.any_of<AnimPlaybackComponent, AnimPoseComponent>(loaded_entity))
         return fail(name, "migrated authoring data did not round-trip without runtime state");
     return pass(name);
@@ -779,6 +866,7 @@ int main()
 {
     bool ok = true;
     ok = testCanmSerialization() && ok;
+    ok = testResourceServiceAndBinding() && ok;
     ok = testImmutableResourceValidation() && ok;
     ok = testCheckedGltfAnimationSource() && ok;
     ok = testRestPoseAndOverlay() && ok;

@@ -1,32 +1,37 @@
 #pragma once
 
-#include "Animation/AnimationResourceSet.hpp"
+#include "Animation/AnimationResourceService.hpp"
 #include "Reflection/Reflector.hpp"
 
-#include <memory>
 #include <string>
-#include <vector>
 
-// Reflected authoring binding. The resolved immutable resource set is runtime
-// data and is deliberately excluded from level/prefab serialization.
+// Reflected authoring binding. The resolved immutable set and all load state
+// belong to AnimResourceBindingComponent and are never serialized.
 struct SkeletonComponent
 {
-    std::string skeleton_path;
-    std::vector<std::string> clip_names;
+    // Kept scalar because the reflection format currently has no nested-object
+    // property support. Together these form AnimationResourceKey.
+    std::string animation_resource_path;
+    uint32_t animation_skin_index = 0;
     std::string default_clip;
     float playback_speed = 1.0f;
     bool loop = true;
     bool auto_play = false;
 
-    std::shared_ptr<const AnimationResourceSet> resources;
+    AnimationResourceKey resourceKey() const
+    {
+        return {animation_resource_path, animation_skin_index};
+    }
 
     static void reflect(Reflector<SkeletonComponent>& r)
     {
         r.display("Skeleton").category("Animation");
-        r.field<&SkeletonComponent::skeleton_path>("skeleton_path")
-            .tooltip("Skeleton asset path").assetPath().category("Assets");
-        r.field<&SkeletonComponent::clip_names>("clip_names")
-            .tooltip("Names of animation clips available to this entity").category("Clips");
+        // The current reflector has scalar fields only. These two fields are
+        // the stable serialized representation of AnimationResourceKey.
+        r.field<&SkeletonComponent::animation_resource_path>("animation_resource_path")
+            .tooltip("Cooked CANM resource path").assetPath().category("Assets");
+        r.field<&SkeletonComponent::animation_skin_index>("animation_skin_index")
+            .tooltip("Skin table index in the cooked CANM resource").category("Assets");
         r.field<&SkeletonComponent::default_clip>("default_clip")
             .tooltip("Clip played on spawn when auto_play is set").category("Clips");
         r.field<&SkeletonComponent::playback_speed>("playback_speed")

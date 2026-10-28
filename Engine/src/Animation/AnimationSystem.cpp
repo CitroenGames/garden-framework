@@ -1,8 +1,10 @@
 #include "AnimationSystem.hpp"
 
 #include "Animation/AnimationSampling.hpp"
+#include "Animation/AnimationResourceSet.hpp"
 #include "Components/AnimPlaybackComponent.hpp"
 #include "Components/AnimPoseComponent.hpp"
+#include "Components/AnimResourceBindingComponent.hpp"
 #include "Components/IKComponent.hpp"
 #include "Components/SkeletonComponent.hpp"
 #include "IKSolver.hpp"
@@ -14,7 +16,9 @@
 
 namespace
 {
-void seedPlayback(const SkeletonComponent& skeleton, AnimPlaybackComponent& playback)
+void seedPlayback(const SkeletonComponent& skeleton,
+                  const std::shared_ptr<const AnimationResourceSet>& resources,
+                  AnimPlaybackComponent& playback)
 {
     if (playback.initialized)
         return;
@@ -22,12 +26,9 @@ void seedPlayback(const SkeletonComponent& skeleton, AnimPlaybackComponent& play
     playback.initialized = true;
     playback.speed = skeleton.playback_speed;
     playback.looping = skeleton.loop;
-    if (!skeleton.auto_play || skeleton.default_clip.empty())
+    if (!skeleton.auto_play || skeleton.default_clip.empty() || !resources)
         return;
-
-    if (!skeleton.resources)
-        return;
-    playback.current_clip = skeleton.resources->findClip(skeleton.default_clip);
+    playback.current_clip = resources->findClip(skeleton.default_clip);
     if (!playback.current_clip)
         return;
     playback.time = 0.0f;
@@ -101,9 +102,11 @@ void update(entt::registry& registry, float dt, bool build_skinning_palette)
         auto& skeleton_binding = view.get<SkeletonComponent>(entity);
         auto& playback = registry.get_or_emplace<AnimPlaybackComponent>(entity);
         auto& pose = registry.get_or_emplace<AnimPoseComponent>(entity);
-        seedPlayback(skeleton_binding, playback);
+        const auto* resource_binding = registry.try_get<AnimResourceBindingComponent>(entity);
+        const auto resources = resource_binding ? resource_binding->active : nullptr;
+        seedPlayback(skeleton_binding, resources, playback);
 
-        const Skeleton* skeleton = skeleton_binding.resources ? skeleton_binding.resources->skeleton() : nullptr;
+        const Skeleton* skeleton = resources ? resources->skeleton() : nullptr;
         if (!skeleton || skeleton->getBoneCount() <= 0)
         {
             pose.local_pose.resize(0);

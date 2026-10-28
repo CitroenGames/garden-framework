@@ -9,6 +9,8 @@
 #include "Audio/SoundEvent.hpp"
 #include "Audio/AudioSourceSystem.hpp"
 #include "Animation/AnimationSystem.hpp"
+#include "Animation/AnimationResourceBindingSystem.hpp"
+#include "Animation/AnimationResourceService.hpp"
 #include "GameFramework/GameMode.hpp"
 #include "Gameplay/GameplaySystems.hpp"
 #include "Scheduler/HierarchyTransformSystem.hpp"
@@ -110,6 +112,8 @@ void GameSimulation::registerSystems()
         d.phase = Phase::Presentation;
         d.run_after = {"engine.player_representation"};
         d.update = [this](entt::registry& reg, const Tick::SimulationTickContext&) {
+            AnimationResourceService::get().update();
+            AnimationResourceBindingSystem::update(reg);
             AnimationSystem::update(reg, m_current_frame_dt);
         };
         m_scheduler->addSystem(std::move(d));
