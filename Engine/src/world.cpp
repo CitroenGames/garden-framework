@@ -9,7 +9,6 @@
 world::world(const PhysicsSystemSettings& physics_settings)
     : simulation_ticks(physics_settings.fixed_delta)
 {
-    gameplay_framework = std::make_unique<GameFramework::GameFrameworkRuntime>();
     fixed_delta = physics_settings.fixed_delta;
     physics_system = std::make_unique<PhysicsSystem>(physics_settings);
     fixed_delta = physics_system->getFixedDelta();
