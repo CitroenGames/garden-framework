@@ -338,6 +338,9 @@ namespace
         LevelEntity entity;
         entity.name = "Old Name";
         entity.type = EntityType::Static;
+        entity.position = {7.0f, 8.0f, 9.0f};
+        entity.rotation = {10.0f, 11.0f, 12.0f};
+        entity.scale = {4.0f, 5.0f, 6.0f};
         entity.reflected_components = nlohmann::json::object();
         entity.reflected_components["TagComponent"]["name"] = "Reflected Entity";
         entity.reflected_components["TransformComponent"]["position"] = {1.0f, 2.0f, 3.0f};
@@ -363,10 +366,16 @@ namespace
         saved >> raw;
         saved.close();
 
-        if (!raw["entities"][0].contains("components"))
-            return fail(name, "saved level did not use reflected components block");
-        if (raw["entities"][0].contains("transform"))
-            return fail(name, "saved reflected level also wrote legacy transform block");
+        const auto& saved_entity = raw["entities"][0];
+        if (!saved_entity.contains("components") || saved_entity["components"] != entity.reflected_components)
+            return fail(name, "saved level did not preserve reflected components block");
+        const nlohmann::json expected_transform = {
+            {"position", {{"x", 7.0f}, {"y", 8.0f}, {"z", 9.0f}}},
+            {"rotation", {{"x", 10.0f}, {"y", 11.0f}, {"z", 12.0f}}},
+            {"scale", {{"x", 4.0f}, {"y", 5.0f}, {"z", 6.0f}}}
+        };
+        if (!saved_entity.contains("transform") || saved_entity["transform"] != expected_transform)
+            return fail(name, "saved level did not preserve legacy transform block");
 
         LevelData loaded;
         if (!manager.loadLevelFromJSON(path.string(), loaded))
@@ -645,10 +654,21 @@ namespace
         const std::string name = "new component round trips (skeleton/audio/IK/gameframework/EntityRef)";
         ReflectionRegistry reflection;
         registerEngineReflection(reflection);
-        for (const char* n : {"SkeletonComponent", "AudioSourceComponent", "IKComponent",
-                              "GameModeComponent", "GameStateComponent", "PlayerStateComponent", "PlayerControllerComponent"})
+        const char* expected_components[] = {
+            "TransformComponent", "TagComponent", "TerrainComponent", "RigidBodyComponent",
+            "ColliderComponent", "TriggerComponent", "ConstraintComponent", "CharacterControllerComponent",
+            "WaterVolumeComponent", "WaterComponent", "PlayerComponent", "CameraSpringComponent",
+            "FreecamComponent", "PlayerStartComponent", "PlayerRepresentationComponent", "PointLightComponent",
+            "SpotLightComponent", "PrefabInstanceComponent", "SkeletonComponent", "AudioSourceComponent",
+            "IKComponent", "GameModeComponent", "GameStateComponent", "PlayerStateComponent",
+            "PlayerControllerComponent", "IdentityComponent", "RenderableComponent", "TeamComponent",
+            "CountdownTimerComponent", "ResourceWalletComponent", "InventoryComponent", "HealthComponent",
+            "ChannelComponent", "ParentComponent", "ChildrenComponent", "HierarchyPolicyComponent"
+        };
+        for (const char* n : expected_components)
             if (!reflection.findByName(n)) return fail(name, std::string("missing registration: ") + n);
-        if (reflection.count() != 35) return fail(name, "unexpected registered component count");
+        if (reflection.count() != sizeof(expected_components) / sizeof(expected_components[0]))
+            return fail(name, "unexpected registered component count");
         // MeshComponent is sidecar-only (shared_ptr<mesh> GPU resource,
         // persisted via level/prefab sidecar path). LocalPlayerInputComponent
         // is transient runtime intent. Neither is reflected.

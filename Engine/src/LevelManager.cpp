@@ -661,8 +661,9 @@ static bool prepareLevelInstantiation(const LevelData& level_data,
         const LevelEntity& entity = level_data.entities[i];
         const json& components = entity.reflected_components;
         json normalized = components.is_object() ? components : json::object();
-        normalized["IdentityComponent"] =
-            json::object({{"guid", guidToString(plan.identity_guids[i])}});
+        // Identity was selected by preflight and installed by scoped restore.
+        // Reflection must never replace that authoritative value.
+        normalized.erase("IdentityComponent");
         normalized.erase("ParentComponent");
         normalized.erase("ChildrenComponent");
         plan.reflected_components[i] = std::move(normalized);
@@ -3579,21 +3580,73 @@ bool LevelManager::instantiateLevelParallel(
     // PHASE 3: SEQUENTIAL FINALIZE - Main thread: GPU uploads, ECS, physics
     // ========================================================================
 
-    // Apply world settings
+    // Restore the entire identity cohort before changing settings, publishing
+    // outputs, or giving entities to feature services. A failed restore leaves
+    // the destination and caller-owned outputs untouched.
+    std::unordered_map<EntityGuid, size_t, GuidHash> cohort_indices;
+    cohort_indices.reserve(instantiation_plan.identity_guids.size());
+    for (size_t i = 0; i < instantiation_plan.identity_guids.size(); ++i)
+        cohort_indices.emplace(instantiation_plan.identity_guids[i], i);
+
+    std::vector<entt::entity> created_entities(level_data.entities.size());
+    for (auto& entity : created_entities)
+        entity = entt::null;
+    std::vector<size_t> identity_occurrences(instantiation_plan.identity_guids.size(), 0);
+    std::vector<garden::ecs::EntityHandle> restored_handles;
+    restored_handles.reserve(level_data.entities.size());
+    for (const EntityGuid& guid : instantiation_plan.identity_guids)
+    {
+        const auto handle = game_world.restoreScopedEntity(EntityRef{guid});
+        if (handle == garden::ecs::EntityHandle{})
+            break;
+        restored_handles.push_back(handle);
+    }
+    const size_t restored_count = restored_handles.size();
+
+    // Internal legacy bridge: take one snapshot for the level component and
+    // physics passes, which still use raw entities. Scoped restore owns identity
+    // construction; this lookup does not create or alter identity.
+    bool valid_cohort = restored_count == instantiation_plan.identity_guids.size();
+    for (auto [entity, identity] : game_world.registry.view<IdentityComponent>().each())
+    {
+        const auto it = cohort_indices.find(identity.guid);
+        if (it != cohort_indices.end())
+        {
+            ++identity_occurrences[it->second];
+            if (it->second < restored_count)
+                created_entities[it->second] = entity;
+        }
+    }
+    for (size_t i = 0; i < created_entities.size(); ++i)
+    {
+        if (identity_occurrences[i] != 1 || created_entities[i] == entt::null)
+            valid_cohort = false;
+    }
+
+    if (!valid_cohort)
+    {
+        // Retire by scoped handle even if a construct hook removed or changed
+        // identity; looking up by the expected GUID would miss that entity.
+        for (auto it = restored_handles.rbegin(); it != restored_handles.rend(); ++it)
+        {
+            if (game_world.destroyEntity(*it) != garden::ecs::ComponentStoreResult::Success)
+                LOG_ENGINE_ERROR("Level instantiation: failed to retire a restored entity");
+        }
+        LOG_ENGINE_ERROR("Level instantiation rejected: failed to restore scoped identity");
+        return false;
+    }
+
+    // Apply world settings only after scoped creation has succeeded.
     game_world.setGravity(level_data.metadata.gravity);
     game_world.setFixedDelta(level_data.metadata.fixed_delta);
     applyGameplayFrameworkSettings(level_data.metadata, game_world, "", create_authority_game_mode);
 
-    // Initialize output pointers
-    if (out_player_entity) *out_player_entity = entt::null;
-    if (out_freecam_entity) *out_freecam_entity = entt::null;
-    if (out_player_rep_entity) *out_player_rep_entity = entt::null;
-    if (out_created_entities) out_created_entities->clear();
+    entt::entity player_entity = entt::null;
+    entt::entity freecam_entity = entt::null;
+    entt::entity player_rep_entity = entt::null;
 
     // Map to store entities by name for reference resolution
     std::map<std::string, entt::entity> entity_map;
-    std::vector<entt::entity> created_entities;
-    created_entities.reserve(level_data.entities.size());
 
     // Cache finalized resources to avoid duplicate GPU uploads for same path.
     // Entity components receive lightweight instance views so per-entity render
@@ -3632,15 +3685,7 @@ bool LevelManager::instantiateLevelParallel(
     for (size_t entity_index = 0; entity_index < level_data.entities.size(); ++entity_index)
     {
         const auto& entity_data = level_data.entities[entity_index];
-        auto e = game_world.registry.create();
-        created_entities.push_back(e);
-        if (out_created_entities)
-            out_created_entities->push_back(e);
-
-        // All final GUIDs were selected by the read-only preflight. The
-        // lifecycle construct hook therefore observes the final value.
-        game_world.registry.emplace<IdentityComponent>(
-            e, IdentityComponent{instantiation_plan.identity_guids[entity_index]});
+        const auto e = created_entities[entity_index];
 
         if (!entity_data.name.empty()) {
             entity_map[entity_data.name] = e;
@@ -3713,7 +3758,7 @@ bool LevelManager::instantiateLevelParallel(
                 game_world.getPhysicsSystem().createPlayerBody(game_world.registry, e);
             }
 
-            if (out_player_entity) *out_player_entity = e;
+            player_entity = e;
         }
 
         // Freecam
@@ -3724,7 +3769,7 @@ bool LevelManager::instantiateLevelParallel(
             fc.fast_movement_speed = entity_data.fast_movement_speed;
             fc.mouse_sensitivity = entity_data.mouse_sensitivity;
 
-            if (out_freecam_entity) *out_freecam_entity = e;
+            freecam_entity = e;
         }
 
         // Player Rep
@@ -3733,7 +3778,7 @@ bool LevelManager::instantiateLevelParallel(
             auto& pr = game_world.registry.get_or_emplace<PlayerRepresentationComponent>(e);
             pr.position_offset = entity_data.position_offset;
 
-            if (out_player_rep_entity) *out_player_rep_entity = e;
+            player_rep_entity = e;
         }
 
         if (entity_data.type == EntityType::PointLight)
@@ -3835,6 +3880,11 @@ bool LevelManager::instantiateLevelParallel(
             }
         }
     }
+
+    if (out_player_entity) *out_player_entity = player_entity;
+    if (out_freecam_entity) *out_freecam_entity = freecam_entity;
+    if (out_player_rep_entity) *out_player_rep_entity = player_rep_entity;
+    if (out_created_entities) *out_created_entities = std::move(created_entities);
 
     LOG_ENGINE_INFO("Level instantiation complete (parallel): {} entities", level_data.entities.size());
     return true;

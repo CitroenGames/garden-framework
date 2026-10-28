@@ -39,6 +39,7 @@
 #include <memory>
 #include <string>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include <glm/gtc/constants.hpp>
@@ -4087,6 +4088,15 @@ static LevelData makeHBCohortFixture()
         {"ParentComponent", json::object({{"parent", guidToString(EntityGuid{})}})}
     });
     level.entities.push_back(null_reference);
+
+    LevelEntity player;
+    player.name = "hb_player";
+    player.type = EntityType::Player;
+    player.reflected_components = json::object({
+        {"IdentityComponent", json::object({{"guid", guidToString(EntityGuid{0xA300, 0xB300})}})},
+        {"PlayerComponent", json::object({{"speed", 4.5f}})}
+    });
+    level.entities.push_back(player);
     return level;
 }
 
@@ -4134,16 +4144,19 @@ static bool testLevelManagerHBPersistenceAndCohortRestore()
         const entt::entity missing_parent_child = findEntityByTag(game_world.registry, "hb_missing_parent_child");
         const entt::entity null_component = findEntityByTag(game_world.registry, "hb_null_parent_component");
         const entt::entity null_reference = findEntityByTag(game_world.registry, "hb_null_parent_reference");
+        const entt::entity player = findEntityByTag(game_world.registry, "hb_player");
         if (root == entt::null || first == entt::null || missing == entt::null ||
             null_id == entt::null || external_child == entt::null ||
             missing_parent_child == entt::null ||
-            null_component == entt::null || null_reference == entt::null)
+            null_component == entt::null || null_reference == entt::null || player == entt::null)
             return fail(name, "one of the fixture entities was not instantiated");
 
         const EntityGuid root_guid{0xA100, 0xB100};
         const EntityGuid first_guid{0xA200, 0xB200};
+        const EntityGuid player_guid{0xA300, 0xB300};
         if (game_world.registry.get<IdentityComponent>(root).guid != root_guid ||
-            game_world.registry.get<IdentityComponent>(first).guid != first_guid)
+            game_world.registry.get<IdentityComponent>(first).guid != first_guid ||
+            game_world.registry.get<IdentityComponent>(player).guid != player_guid)
             return fail(name, "valid serialized identity GUID was not preserved");
 
         std::unordered_set<EntityGuid, GuidHash> unique_ids;
@@ -4157,6 +4170,28 @@ static bool testLevelManagerHBPersistenceAndCohortRestore()
             if (lifecycle.resolve(EntityRef{guid}) != entity)
                 return fail(name, "lifecycle construct hook did not index the final identity");
         }
+
+        // Query directly: scopedEntity(ref) would lazily repair a missing marker.
+        std::unordered_set<EntityGuid, GuidHash> queried_ids;
+        bool invalid_query_identity = false;
+        const auto query_result = game_world.query<const TransformComponent>(
+            [&](garden::ecs::EntityHandle handle, const TransformComponent&) {
+                const EntityRef reference = game_world.persistedReference(handle);
+                if (reference.isNull() || !queried_ids.insert(reference.guid).second)
+                    invalid_query_identity = true;
+            });
+        if (query_result != garden::ecs::ComponentStoreResult::Success ||
+            invalid_query_identity || queried_ids != unique_ids)
+            return fail(name, "Garden transform query did not expose exactly the loaded identities");
+
+        std::unordered_set<EntityGuid, GuidHash> queried_players;
+        const auto player_query_result = game_world.query<const PlayerComponent, const TransformComponent>(
+            [&](garden::ecs::EntityHandle handle, const PlayerComponent&, const TransformComponent&) {
+                queried_players.insert(game_world.persistedReference(handle).guid);
+            });
+        if (player_query_result != garden::ecs::ComponentStoreResult::Success ||
+            queried_players.size() != 1 || queried_players.count(player_guid) != 1)
+            return fail(name, "Garden player/transform query did not expose the saved player GUID");
 
         const EntityGuid missing_guid = game_world.registry.get<IdentityComponent>(missing).guid;
         const EntityGuid null_guid = game_world.registry.get<IdentityComponent>(null_id).guid;
@@ -4288,26 +4323,106 @@ static bool testLevelManagerHBRejectsBeforeRegistryMutation()
             game_world.registry.emplace<TagComponent>(existing, TagComponent{"existing"});
             game_world.registry.emplace<ChildrenComponent>(
                 existing, ChildrenComponent{{existing_child_ref}});
-            const size_t identity_count_before =
-                game_world.registry.view<IdentityComponent>().size();
             const size_t tag_count_before =
                 game_world.registry.view<TagComponent>().size();
             const auto outside_mirror_before =
                 game_world.registry.get<ChildrenComponent>(existing).children;
             EntityLifecycle lifecycle(game_world.registry, 84);
+            const EntityRef scoped_ref{EntityGuid{0xDD00, 0xEE00}};
+            const auto scoped = game_world.restoreScopedEntity(scoped_ref);
+            if (!game_world.isEntityValid(scoped) ||
+                game_world.add<TransformComponent>(scoped) != garden::ecs::ComponentStoreResult::Success)
+                return fail(name, "could not create existing scoped query sentinel");
+            const auto query_scoped = [&]() {
+                std::unordered_set<EntityGuid, GuidHash> ids;
+                const auto result = game_world.query<const TransformComponent>(
+                    [&](garden::ecs::EntityHandle handle, const TransformComponent&) {
+                        ids.insert(game_world.persistedReference(handle).guid);
+                    });
+                return std::make_pair(result, ids);
+            };
+            const auto scoped_before = query_scoped();
+            if (scoped_before.first != garden::ecs::ComponentStoreResult::Success ||
+                scoped_before.second.size() != 1 || scoped_before.second.count(scoped_ref.guid) != 1)
+                return fail(name, "existing scoped query sentinel was not visible");
+            // Include the sentinel in the destination counts checked after rejection.
+            const size_t scoped_identity_count_before =
+                game_world.registry.view<IdentityComponent>().size();
             std::vector<entt::entity> created;
             if (manager.instantiateLevel(loaded, game_world, nullptr, nullptr,
                                          nullptr, nullptr, false, &created))
                 return fail(name, scenario + " cohort was unexpectedly accepted");
             if (!created.empty() ||
-                game_world.registry.view<IdentityComponent>().size() != identity_count_before ||
+                game_world.registry.view<IdentityComponent>().size() != scoped_identity_count_before ||
                 game_world.registry.view<TagComponent>().size() != tag_count_before)
                 return fail(name, scenario + " rejection mutated the destination registry");
             if (game_world.registry.get<ChildrenComponent>(existing).children !=
                 outside_mirror_before)
                 return fail(name, scenario + " rejection changed an existing mirror");
+            if (query_scoped() != scoped_before)
+                return fail(name, scenario + " rejection changed Garden-queryable entities");
         }
     }
+    return pass(name);
+}
+
+static void failSecondLevelIdentity(entt::registry& registry, entt::entity entity)
+{
+    if (registry.get<IdentityComponent>(entity).guid == EntityGuid{0x7200, 0x8200})
+        throw 1;
+}
+
+static bool testLevelManagerScopedRestoreRollback()
+{
+    const std::string name = "LevelManager rolls back failed scoped cohort restore";
+    LevelManager manager;
+    world game_world;
+    EntityLifecycle lifecycle(game_world.registry, 85);
+    const EntityRef sentinel_ref{EntityGuid{0xDD00, 0xEE00}};
+    const auto sentinel = game_world.restoreScopedEntity(sentinel_ref);
+    if (!game_world.isEntityValid(sentinel) ||
+        game_world.add<TransformComponent>(sentinel) != garden::ecs::ComponentStoreResult::Success)
+        return fail(name, "could not create existing scoped sentinel");
+    const size_t identities_before = game_world.registry.view<IdentityComponent>().size();
+    const float fixed_delta_before = game_world.fixed_delta;
+    const glm::vec3 gravity_before = game_world.getGravity();
+
+    LevelData level;
+    level.metadata.fixed_delta = fixed_delta_before * 2.0f;
+    level.metadata.gravity = gravity_before + glm::vec3(1.0f, 2.0f, 3.0f);
+    for (const EntityGuid guid : {EntityGuid{0x7100, 0x8100}, EntityGuid{0x7200, 0x8200}})
+    {
+        LevelEntity entity;
+        entity.reflected_components = nlohmann::json::object({
+            {"IdentityComponent", nlohmann::json::object({{"guid", guidToString(guid)}})}
+        });
+        level.entities.push_back(entity);
+    }
+    auto connection = game_world.registry.on_construct<IdentityComponent>()
+        .connect<&failSecondLevelIdentity>();
+    entt::entity player_output = entt::entity{123};
+    std::vector<entt::entity> created{entt::entity{456}};
+    const bool success = manager.instantiateLevel(level, game_world, nullptr, &player_output,
+                                                   nullptr, nullptr, false, &created);
+    connection.release();
+    if (success || player_output != entt::entity{123} ||
+        created != std::vector<entt::entity>{entt::entity{456}} ||
+        game_world.fixed_delta != fixed_delta_before ||
+        game_world.getGravity() != gravity_before ||
+        game_world.registry.view<IdentityComponent>().size() != identities_before ||
+        lifecycle.resolve(EntityRef{EntityGuid{0x7100, 0x8100}}) != entt::null ||
+        lifecycle.resolve(EntityRef{EntityGuid{0x7200, 0x8200}}) != entt::null ||
+        game_world.persistedReference(sentinel) != sentinel_ref)
+        return fail(name, "failed restore changed existing state or published partial output");
+    size_t visits = 0;
+    bool sentinel_only = true;
+    const auto result = game_world.query<const TransformComponent>(
+        [&](garden::ecs::EntityHandle handle, const TransformComponent&) {
+            ++visits;
+            sentinel_only = sentinel_only && game_world.persistedReference(handle) == sentinel_ref;
+        });
+    if (result != garden::ecs::ComponentStoreResult::Success || visits != 1 || !sentinel_only)
+        return fail(name, "failed restore changed Garden query results");
     return pass(name);
 }
 
@@ -4442,6 +4557,8 @@ int main()
     ok = testLevelManagerHBPersistenceAndCohortRestore() && ok;
     run("LevelManager H-B rejects malformed cohorts before mutation");
     ok = testLevelManagerHBRejectsBeforeRegistryMutation() && ok;
+    run("LevelManager rolls back failed scoped cohort restore");
+    ok = testLevelManagerScopedRestoreRollback() && ok;
 
     Assets::AssetManager::get().shutdown();
     EE::CLog::Shutdown();

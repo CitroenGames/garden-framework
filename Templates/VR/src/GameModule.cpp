@@ -38,14 +38,14 @@ namespace
 
     EntityRef findPlayer(world& game_world)
     {
-        auto view = game_world.registry.view<PlayerComponent, TransformComponent>();
-        for (const entt::entity entity : view)
-        {
-            const EntityRef player = entityRefOf(game_world.registry, entity);
-            if (!player.isNull())
-                return player;
-        }
-        return {};
+        EntityRef player{};
+        const auto result = game_world.query<PlayerComponent, TransformComponent>(
+            [&](garden::ecs::EntityHandle entity, PlayerComponent&, TransformComponent&)
+            {
+                if (player.isNull())
+                    player = game_world.persistedReference(entity);
+            });
+        return result == garden::ecs::ComponentStoreResult::Success ? player : EntityRef{};
     }
 
     CharacterMoveInput collectMoveInput()

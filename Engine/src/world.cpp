@@ -296,6 +296,14 @@ garden::ecs::EntityHandle world::restoreScopedEntity(EntityRef reference)
         // Publish the final identity only after scope exists, so identity hooks
         // observe a fully scoped entity and index the supplied GUID directly.
         registry.emplace<IdentityComponent>(entity, IdentityComponent{reference.guid});
+        // Construct hooks may remove or alter identity. Do not publish a
+        // scoped handle unless the supplied identity survived those hooks.
+        const auto* identity = registry.valid(entity)
+            ? registry.try_get<IdentityComponent>(entity) : nullptr;
+        if (!identity || identity->guid != reference.guid) {
+            if (registry.valid(entity)) registry.destroy(entity);
+            return {};
+        }
         garden::ecs::EntityHandle result;
         result.m_world = component_state->token;
         result.m_entity = static_cast<uint32_t>(entt::to_integral(entity));
