@@ -173,6 +173,7 @@ static Competitive::CompetitiveWorldContext& competitiveContext()
 // Navigation and bot execution state is registry-owned.  A server DLL can be
 // reused across level/world lifetimes, so no bot resource may live in a DLL
 // static that survives the world it describes.
+static void destroyTeamBlackboards(world& game_world);
 static Bots::BotWorldRuntime& botRuntime()
 {
     return g_server_services->game_world->registry.ctx().get<Bots::BotWorldRuntime>();
@@ -180,6 +181,7 @@ static Bots::BotWorldRuntime& botRuntime()
 
 static void resetBotRuntime(world& game_world)
 {
+    destroyTeamBlackboards(game_world);
     if (auto* runtime = game_world.registry.ctx().find<Bots::BotWorldRuntime>())
         runtime->reset();
     else
@@ -1110,20 +1112,35 @@ static const std::string& resolveBotRouteAssetPath()
 
 static bool validateAuthoredRouteDataOnNavMesh(Bots::BotWorldRuntime& runtime)
 {
-    if (!runtime.hasValidNavMesh()) return false;
+    if (!runtime.hasValidNavMesh() || !Bots::validateAuthoredObjectiveData(runtime.route_data) ||
+        g_bomb_system.config.sites.size() != Bots::kCompetitiveSiteCount)
+        return false;
     auto validate_point = [&](const glm::vec3& point) {
         glm::vec3 projected(0.0f);
         return Navigation::NavMeshPathfinder::findNearestPoly(runtime.navmesh, point, projected) &&
             glm::distance(point, projected) <= 1.0f;
     };
-    for (const Bots::AuthoredRoute& route : runtime.route_data.routes)
+    for (const Bots::AuthoredAnchor& anchor : runtime.route_data.anchors) {
+        uint8_t bound_site = Bots::kInvalidAuthoredAnchor;
+        if (!validate_point(anchor.point) || anchor.site_index >= g_bomb_system.config.sites.size() ||
+            !g_bomb_system.config.inSite(anchor.point, bound_site) || bound_site != anchor.site_index)
+            return false;
+    }
+    for (const Bots::AuthoredRoute& route : runtime.route_data.routes) {
         for (const glm::vec3& point : route.points)
             if (!validate_point(point)) return false;
-    for (const Bots::AuthoredHold& hold : runtime.route_data.holds)
+        uint8_t route_site = Bots::kInvalidAuthoredAnchor;
+        if (!g_bomb_system.config.inSite(route.points.back(), route_site) ||
+            route_site != route.site_index)
+            return false;
+    }
+    for (const Bots::AuthoredHold& hold : runtime.route_data.holds) {
         if (!validate_point(hold.point)) return false;
-    for (const Bots::AuthoredPatrol& patrol : runtime.route_data.patrols)
-        for (const glm::vec3& point : patrol.points)
-            if (!validate_point(point)) return false;
+        uint8_t hold_site = Bots::kInvalidAuthoredAnchor;
+        if (!g_bomb_system.config.inSite(hold.point, hold_site) ||
+            hold_site != hold.site_index)
+            return false;
+    }
     return true;
 }
 
@@ -1132,14 +1149,16 @@ static bool loadBotRouteData()
     auto& runtime = botRuntime();
     if (runtime.route_attempted)
         return runtime.route_status == Bots::RouteDataLoadStatus::Loaded;
+    const auto disableObjectiveBoards = [&]() {
+        if (g_server_services && g_server_services->game_world)
+            destroyTeamBlackboards(*g_server_services->game_world);
+    };
 
     const std::string resolved_path = resolveBotRouteAssetPath();
     if (!runtime.loadResolvedRouteData(resolved_path)) {
-        if (runtime.route_status == Bots::RouteDataLoadStatus::Missing)
-            LOG_ENGINE_INFO("Bots: no authored route sidecar at {}; using canonical objective fallback", resolved_path);
-        else
-            LOG_ENGINE_ERROR("Bots: authored route sidecar {} rejected ({}); using canonical objective fallback",
-                resolved_path, runtime.route_error);
+        disableObjectiveBoards();
+        LOG_ENGINE_ERROR("Bots: authored v2 objective sidecar {} unavailable ({}); objective movement disabled",
+            resolved_path, runtime.route_error);
         return false;
     }
     if (!Bots::authoredRouteLevelMatchesSelectedStem(runtime.route_data, g_selected_level_sidecars.stem)) {
@@ -1148,20 +1167,22 @@ static bool loadBotRouteData()
         runtime.route_status = Bots::RouteDataLoadStatus::Invalid;
         runtime.route_error = "declares level '" + declared_level + "' instead of selected stem '" +
             g_selected_level_sidecars.stem + "'";
-        LOG_ENGINE_ERROR("Bots: authored route sidecar {} rejected ({}); using canonical objective fallback",
+        disableObjectiveBoards();
+        LOG_ENGINE_ERROR("Bots: authored v2 objective sidecar {} rejected ({}); objective movement disabled",
             resolved_path, runtime.route_error);
         return false;
     }
     if (!validateAuthoredRouteDataOnNavMesh(runtime)) {
         runtime.route_data.clear();
         runtime.route_status = Bots::RouteDataLoadStatus::Invalid;
-        runtime.route_error = "one or more tactical points are not within 1m of the loaded navmesh";
-        LOG_ENGINE_ERROR("Bots: authored route sidecar {} rejected ({}); using canonical objective fallback",
+        runtime.route_error = "v2 anchors, role coverage, site binding, or tactical points failed validation";
+        disableObjectiveBoards();
+        LOG_ENGINE_ERROR("Bots: authored v2 objective sidecar {} rejected ({}); objective movement disabled",
             resolved_path, runtime.route_error);
         return false;
     }
-    LOG_ENGINE_INFO("Bots: authored route data loaded from {} routes={} holds={} patrols={}",
-        resolved_path, runtime.route_data.routes.size(), runtime.route_data.holds.size(), runtime.route_data.patrols.size());
+    LOG_ENGINE_INFO("Bots: authored v2 objective data loaded from {} anchors={} routes={} holds={}",
+        resolved_path, runtime.route_data.anchors.size(), runtime.route_data.routes.size(), runtime.route_data.holds.size());
     return true;
 }
 
@@ -1467,6 +1488,180 @@ static Bots::LocalBlockDetail probeBotLocalBlock(world& game_world, entt::entity
     return Bots::LocalBlockDetail::Static;
 }
 
+static size_t teamBlackboardIndex(Competitive::FpsTeam team)
+{
+    return team == Competitive::FpsTeam::Attackers ? 0u :
+        team == Competitive::FpsTeam::Defenders ? 1u : Bots::kCompetitiveSiteCount;
+}
+
+static void destroyTeamBlackboards(world& game_world)
+{
+    auto* runtime = game_world.registry.ctx().find<Bots::BotWorldRuntime>();
+    if (!runtime) return;
+    for (entt::entity entity : runtime->team_blackboard_entities)
+        if (entity != entt::null && game_world.registry.valid(entity))
+            game_world.registry.destroy(entity);
+    runtime->team_blackboard_entities.fill(entt::null);
+}
+
+static bool ensureTeamBlackboards(world& game_world, Bots::BotWorldRuntime& runtime)
+{
+    for (const Competitive::FpsTeam team : {Competitive::FpsTeam::Attackers, Competitive::FpsTeam::Defenders}) {
+        const size_t index = teamBlackboardIndex(team);
+        entt::entity& entity = runtime.team_blackboard_entities[index];
+        if (entity != entt::null && game_world.registry.valid(entity) &&
+            game_world.registry.all_of<Bots::TeamBlackboardComponent>(entity) &&
+            game_world.registry.get<Bots::TeamBlackboardComponent>(entity).team == Competitive::teamId(team))
+            continue;
+        if (entity != entt::null && game_world.registry.valid(entity))
+            game_world.registry.destroy(entity);
+        entity = game_world.registry.create();
+        game_world.registry.emplace<Bots::TeamBlackboardComponent>(
+            entity, Bots::TeamBlackboardComponent{Competitive::teamId(team)});
+    }
+    return true;
+}
+
+static Bots::TeamBlackboardSummary validatedTeamBlackboardSummary(
+    const world& game_world, const Bots::BotWorldRuntime& runtime, Competitive::FpsTeam team,
+    uint32_t current_tick)
+{
+    Bots::TeamBlackboardSummary summary{};
+    const size_t index = teamBlackboardIndex(team);
+    if (index >= runtime.team_blackboard_entities.size()) return summary;
+    const entt::entity entity = runtime.team_blackboard_entities[index];
+    if (entity == entt::null || !game_world.registry.valid(entity) ||
+        !game_world.registry.all_of<Bots::TeamBlackboardComponent>(entity))
+        return summary;
+    const auto& board = game_world.registry.get<Bots::TeamBlackboardComponent>(entity);
+    if (board.team != Competitive::teamId(team)) return summary;
+    summary.team = board.team;
+    for (size_t slot = 0; slot < board.contacts.size(); ++slot) {
+        const auto& contact = board.contacts[slot];
+        if (contact.anchor_index != slot ||
+            contact.confidence != Bots::TeamContactConfidence::ConfirmedSight ||
+            current_tick < contact.observed_tick ||
+            current_tick - contact.observed_tick >= Bots::kTeamContactValidityTicks)
+            continue;
+        summary.contacts[slot] = contact;
+    }
+    if (board.objective.site_index < Bots::kCompetitiveSiteCount &&
+        board.objective.kind != Bots::TeamObjectiveKind::None &&
+        current_tick < board.objective.expires_at_tick)
+        summary.objective = board.objective;
+    return summary;
+}
+
+static void pruneAndPlanTeamBlackboards(world& game_world, Bots::BotWorldRuntime& runtime,
+                                        uint32_t current_tick)
+{
+    if (runtime.route_status != Bots::RouteDataLoadStatus::Loaded ||
+        !Bots::validateAuthoredObjectiveData(runtime.route_data))
+        return;
+    for (const Competitive::FpsTeam team : {Competitive::FpsTeam::Attackers, Competitive::FpsTeam::Defenders}) {
+        const entt::entity entity = runtime.team_blackboard_entities[teamBlackboardIndex(team)];
+        if (entity == entt::null || !game_world.registry.valid(entity) ||
+            !game_world.registry.all_of<Bots::TeamBlackboardComponent>(entity))
+            continue;
+        auto& board = game_world.registry.get<Bots::TeamBlackboardComponent>(entity);
+        for (size_t slot = 0; slot < board.contacts.size(); ++slot) {
+            const auto& contact = board.contacts[slot];
+            if (contact.anchor_index != slot ||
+                contact.confidence != Bots::TeamContactConfidence::ConfirmedSight ||
+                current_tick < contact.observed_tick ||
+                current_tick - contact.observed_tick >= Bots::kTeamContactValidityTicks)
+                board.contacts[slot] = {};
+        }
+        Bots::TeamObjectiveIntent selected{};
+        if (!Bots::selectTeamObjective(runtime.route_data, team, g_round_system.state.phase,
+                                       g_round_system.state.round_number, g_bomb_system.isPlanted(),
+                                       g_bomb_system.bomb.site, selected)) {
+            board.objective = {};
+            continue;
+        }
+        const bool compatible = board.objective.kind == selected.kind &&
+            board.objective.site_index == selected.site_index &&
+            board.objective.selected_round == selected.selected_round &&
+            current_tick < board.objective.expires_at_tick;
+        if (!compatible) {
+            selected.expires_at_tick = current_tick + Bots::kTeamObjectiveValidityTicks;
+            board.objective = selected;
+        }
+    }
+}
+
+static void mergeVisibleTeamContacts(world& game_world, Bots::BotWorldRuntime& runtime,
+                                     const std::vector<entt::entity>& bots,
+                                     uint32_t current_tick, float dt)
+{
+    struct Proposal {
+        Competitive::FpsTeam team = Competitive::FpsTeam::None;
+        uint8_t anchor_index = Bots::kInvalidAuthoredAnchor;
+        uint32_t observed_tick = 0;
+        int32_t bot_index = 0;
+        uint16_t owner_client_id = 0;
+    };
+    std::vector<Proposal> proposals;
+    for (const entt::entity entity : bots) {
+        if (!game_world.registry.valid(entity) ||
+            !game_world.registry.all_of<Bots::BotComponent, Bots::BotPerceptComponent,
+                                        TeamComponent, FpsHealthComponent, NetworkedEntity>(entity))
+            continue;
+        const auto& percept = game_world.registry.get<Bots::BotPerceptComponent>(entity);
+        const Competitive::FpsTeam team =
+            Competitive::teamFromId(game_world.registry.get<TeamComponent>(entity).team_id);
+        const entt::entity target = percept.visible_enemy;
+        if (!Competitive::isPlayingTeam(team) || target == entt::null ||
+            percept.last_seen_age > dt + 0.0001f || !game_world.registry.valid(target) ||
+            !game_world.registry.all_of<TransformComponent, TeamComponent, FpsHealthComponent>(target) ||
+            !Bots::isOpposingLivingPlayer(team,
+                Competitive::teamFromId(game_world.registry.get<TeamComponent>(target).team_id),
+                true, game_world.registry.get<FpsHealthComponent>(target).alive))
+            continue;
+        // Raw target space exists only in this local mapping step. The
+        // proposal retains just the selected authored anchor index.
+        const glm::vec3 observed = game_world.registry.get<TransformComponent>(target).position;
+        uint8_t anchor_index = Bots::kInvalidAuthoredAnchor;
+        float best_distance = std::numeric_limits<float>::infinity();
+        for (const Bots::AuthoredAnchor& anchor : runtime.route_data.anchors) {
+            const glm::vec3 delta = observed - anchor.point;
+            const float distance = glm::dot(delta, delta);
+            if (distance < best_distance ||
+                (distance == best_distance && anchor.site_index < anchor_index)) {
+                best_distance = distance;
+                anchor_index = anchor.site_index;
+            }
+        }
+        if (anchor_index >= Bots::kCompetitiveSiteCount) continue;
+        const auto& bot = game_world.registry.get<Bots::BotComponent>(entity);
+        proposals.push_back({team, anchor_index, current_tick, bot.bot_index,
+            game_world.registry.get<NetworkedEntity>(entity).owner_client_id});
+    }
+    std::sort(proposals.begin(), proposals.end(), [](const Proposal& a, const Proposal& b) {
+        if (a.team != b.team) return Competitive::teamId(a.team) < Competitive::teamId(b.team);
+        if (a.anchor_index != b.anchor_index) return a.anchor_index < b.anchor_index;
+        if (a.observed_tick != b.observed_tick) return a.observed_tick > b.observed_tick;
+        if (a.bot_index != b.bot_index) return a.bot_index < b.bot_index;
+        return a.owner_client_id < b.owner_client_id;
+    });
+    std::array<std::array<bool, Bots::kCompetitiveSiteCount>, Bots::kCompetitiveSiteCount> merged{};
+    for (const Proposal& proposal : proposals) {
+        const size_t board_index = teamBlackboardIndex(proposal.team);
+        if (board_index >= runtime.team_blackboard_entities.size() ||
+            merged[board_index][proposal.anchor_index])
+            continue;
+        const entt::entity board_entity = runtime.team_blackboard_entities[board_index];
+        if (board_entity == entt::null || !game_world.registry.valid(board_entity) ||
+            !game_world.registry.all_of<Bots::TeamBlackboardComponent>(board_entity))
+            continue;
+        auto& contact = game_world.registry.get<Bots::TeamBlackboardComponent>(
+            board_entity).contacts[proposal.anchor_index];
+        contact = {proposal.anchor_index, proposal.observed_tick,
+                   Bots::TeamContactConfidence::ConfirmedSight};
+        merged[board_index][proposal.anchor_index] = true;
+    }
+}
+
 static void tickBots(float dt)
 {
     auto& runtime = botRuntime();
@@ -1490,9 +1685,21 @@ static void tickBots(float dt)
         const uint16_t owner_b = w->registry.all_of<NetworkedEntity>(b) ? w->registry.get<NetworkedEntity>(b).owner_client_id : 0;
         return owner_a < owner_b;
     });
+    // Blackboard lifecycle and planning run before individual decisions. The
+    // board entities are server-only ECS facts; the runtime keeps only their
+    // two world-local handles.
+    if (runtime.route_status == Bots::RouteDataLoadStatus::Loaded &&
+        Bots::validateAuthoredObjectiveData(runtime.route_data)) {
+        (void)ensureTeamBlackboards(*w, runtime);
+    }
     const std::vector<Bots::BotHearingCandidate> hearing_candidates =
         runtime.noise_ring.hearingCandidates();
     const uint32_t hearing_tick = g_server_network.getCurrentTick();
+    if (runtime.route_status == Bots::RouteDataLoadStatus::Loaded &&
+        Bots::validateAuthoredObjectiveData(runtime.route_data)) {
+        mergeVisibleTeamContacts(*w, runtime, bots, hearing_tick, dt);
+        pruneAndPlanTeamBlackboards(*w, runtime, hearing_tick);
+    }
 
     // Queries queued during the previous bot update are considered together
     // before executing any query.  This one-tick handoff lets the fixed budget
@@ -1685,23 +1892,19 @@ static void tickBots(float dt)
         Bots::BotDecisionInput din; din.phase = g_round_system.state.phase; din.team = bot_team;
         din.alive = alive; din.is_carrier = g_bomb_system.bomb.carrier == e; din.bomb_planted = g_bomb_system.isPlanted();
         din.bot_pos = pos; din.health = w->registry.get<FpsHealthComponent>(e).health; din.dt = dt;
-        if (!g_bomb_system.config.sites.empty()) {
-            const uint64_t stable_bot_index = bot.bot_index < 0
-                ? static_cast<uint64_t>(-static_cast<int64_t>(bot.bot_index))
-                : static_cast<uint64_t>(bot.bot_index);
-            const auto& site = g_bomb_system.config.sites[
-                static_cast<size_t>(stable_bot_index % g_bomb_system.config.sites.size())];
-            din.site_pos = site.centre;
-            din.has_site = true;
-            // Tactical selection receives only public phase/team/site facts.
-            // It cannot receive enemy data or the current bomb location, so a
-            // sidecar cannot become a hidden-state blackboard.
+        din.team_blackboard = validatedTeamBlackboardSummary(
+            *w, runtime, bot_team, g_server_network.getCurrentTick());
+        if (runtime.route_status == Bots::RouteDataLoadStatus::Loaded &&
+            din.team_blackboard.objective.kind != Bots::TeamObjectiveKind::None) {
             glm::vec3 tactical_target(0.0f);
-            const bool prefer_hold = bot_team == Competitive::FpsTeam::Defenders;
-            if (runtime.route_status == Bots::RouteDataLoadStatus::Loaded &&
-                Bots::selectAuthoredRouteTarget(runtime.route_data, bot_team, site.site_index,
-                                                bot.bot_index, prefer_hold, tactical_target))
+            if (Bots::selectBotObjectiveTarget(runtime.route_data, bot_team,
+                                                din.team_blackboard.objective,
+                                                bot.bot_index, tactical_target)) {
                 din.site_pos = tactical_target;
+                din.has_site = true;
+            }
+        }
+        if (!g_bomb_system.config.sites.empty()) {
             uint8_t occupied_site = 0;
             din.at_site = bombSiteForPlayer(*w, e, occupied_site);
         }
@@ -3317,6 +3520,7 @@ GAME_API void gardenServerShutdown()
         FpsLogic::clearWorldItemReplicationRuntime(registry);
         registry.ctx().erase<WorldItemReplicationDiagnosticContext>();
         FpsLogic::clearGrenadeEffects(registry);
+        destroyTeamBlackboards(*g_server_services->game_world);
         Competitive::stopCompetitiveWorldRuntime(registry);
         if (auto* runtime = registry.ctx().find<Bots::BotWorldRuntime>()) {
             runtime->reset();

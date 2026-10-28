@@ -825,8 +825,15 @@ bool testNavMeshSelectedLevelRouteMatrix()
     if (!Bots::authoredRouteLevelMatchesSelectedStem(route_data, sidecars.stem))
         return fail(name, "selected bot route sidecar declares a different level stem: " +
             route_data.level + " for " + sidecars.stem);
-    if (route_data.routes.empty() || route_data.holds.empty())
-        return fail(name, "selected bot route sidecar requires attacker routes and defender holds");
+    if (!Bots::validateAuthoredObjectiveData(route_data))
+        return fail(name, "selected bot route sidecar lacks complete v2 objective coverage");
+    Competitive::BombConfig site_config;
+    site_config.sites = sites;
+    for (const Bots::AuthoredAnchor& anchor : route_data.anchors) {
+        uint8_t mapped_site = Bots::kInvalidAuthoredAnchor;
+        if (!site_config.inSite(anchor.point, mapped_site) || mapped_site != anchor.site_index)
+            return fail(name, "selected bot anchor does not bind to its declared site");
+    }
 
     const auto describePoint = [](const glm::vec3& point) {
         return "(" + std::to_string(point.x) + ", " + std::to_string(point.y) +
@@ -948,15 +955,16 @@ bool testNavMeshSelectedLevelRouteMatrix()
             return false;
     }
 
-    // Attackers select routes and defenders select holds in ServerModule.
-    // Exercise the same deterministic selector and prove each selected target
-    // remains reachable from every spawn on that team.
-    const auto verifySelectedTargets = [&](Competitive::FpsTeam team, bool prefer_hold) {
+    // Exercise every public v2 objective and prove each deterministic,
+    // per-bot target remains reachable from every eligible spawn.
+    const auto verifySelectedTargets = [&](Competitive::FpsTeam team, bool planted) {
         for (const Competitive::BombSite& site : sites) {
             for (int32_t bot_index = 0; bot_index < 8; ++bot_index) {
                 glm::vec3 target(0.0f);
-                if (!Bots::selectAuthoredRouteTarget(route_data, team, site.site_index,
-                                                     bot_index, prefer_hold, target))
+                Bots::TeamObjectiveIntent objective{};
+                if (!Bots::selectTeamObjective(route_data, team, Competitive::RoundPhase::Live,
+                                               site.site_index, planted, site.site_index, objective) ||
+                    !Bots::selectBotObjectiveTarget(route_data, team, objective, bot_index, target))
                     return fail(name, "no selected tactical target for team/site pair");
                 for (const FpsContent::CompetitiveTeamSpawn& spawn : competitive_data.team_spawns) {
                     if (spawn.team != team)
@@ -970,6 +978,8 @@ bool testNavMeshSelectedLevelRouteMatrix()
         return true;
     };
     if (!verifySelectedTargets(Competitive::FpsTeam::Attackers, false) ||
+        !verifySelectedTargets(Competitive::FpsTeam::Defenders, false) ||
+        !verifySelectedTargets(Competitive::FpsTeam::Attackers, true) ||
         !verifySelectedTargets(Competitive::FpsTeam::Defenders, true))
         return false;
 

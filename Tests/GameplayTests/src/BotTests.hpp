@@ -749,45 +749,62 @@ bool testBotAuthoredRouteData()
     const std::string name = "Bot_AuthoredRouteData";
     using namespace Bots;
     const std::string valid = R"({
-        "format":"fpsshooter_bot_routes", "version":1, "level":"main",
+        "format":"fpsshooter_bot_routes", "version":2, "level":"main",
+        "anchors":[{"id":"a","site":0,"point":[0,0,0]},{"id":"b","site":1,"point":[20,0,0]}],
         "routes":[
-            {"id":"t_a_long", "team":"attackers", "site":0, "points":[[0,0,0],[10,0,1]]},
-            {"id":"t_b_short", "team":"attackers", "site":1, "points":[[0,0,0],[20,0,2]]}
+            {"id":"t_a_long", "team":"attackers", "site":0, "phase":"live_unplanted", "role":"attack_approach", "points":[[0,0,0],[10,0,1]]},
+            {"id":"t_b_short", "team":"attackers", "site":1, "phase":"live_unplanted", "role":"attack_approach", "points":[[0,0,0],[20,0,2]]}
         ],
-        "holds":[{"id":"ct_a_hold", "team":"defenders", "site":0, "point":[-5,0,3]}],
-        "patrols":[{"id":"ct_patrol", "team":"defenders", "points":[[-1,0,0],[-2,0,0]]}]
+        "holds":[
+            {"id":"ct_a_hold", "team":"defenders", "site":0, "phase":"live_unplanted", "role":"hold", "point":[-5,0,3]},
+            {"id":"ct_b_hold", "team":"defenders", "site":1, "phase":"live_unplanted", "role":"hold", "point":[-6,0,3]},
+            {"id":"t_a_hold", "team":"attackers", "site":0, "phase":"live_planted", "role":"hold", "point":[10,0,1]},
+            {"id":"t_b_hold", "team":"attackers", "site":1, "phase":"live_planted", "role":"hold", "point":[20,0,2]},
+            {"id":"ct_a_retake", "team":"defenders", "site":0, "phase":"live_planted", "role":"retake", "point":[-5,0,3]},
+            {"id":"ct_b_retake", "team":"defenders", "site":1, "phase":"live_planted", "role":"retake", "point":[-6,0,3]}
+        ]
     })";
     AuthoredRouteData data;
     std::string error;
     if (!parseAuthoredRouteData(valid, data, &error))
         return fail(name, "valid route sidecar rejected: " + error);
-    if (data.routes.size() != 2 || data.holds.size() != 1 || data.patrols.size() != 1)
+    if (data.anchors.size() != 2 || data.routes.size() != 2 || data.holds.size() != 6 ||
+        !validateAuthoredObjectiveData(data))
         return fail(name, "valid route collections parsed incorrectly");
     if (!authoredRouteLevelMatchesSelectedStem(data, "levels/main") ||
         authoredRouteLevelMatchesSelectedStem(data, "levels/de_block01"))
         return fail(name, "route sidecar declaration did not bind to its selected level stem");
 
+    TeamObjectiveIntent attack{};
+    if (!selectTeamObjective(data, Competitive::FpsTeam::Attackers, Competitive::RoundPhase::Live,
+                             0, false, 0, attack) ||
+        attack.kind != TeamObjectiveKind::AttackApproach || attack.site_index != 0)
+        return fail(name, "public attacker objective was not selected");
     glm::vec3 target(0.0f);
-    if (!selectAuthoredRouteTarget(data, Competitive::FpsTeam::Attackers, 0, 9, false, target) ||
+    if (!selectBotObjectiveTarget(data, Competitive::FpsTeam::Attackers, attack, 9, target) ||
         !botApprox(target.x, 10.0f) || !botApprox(target.z, 1.0f))
         return fail(name, "attacker route target was not selected by canonical site");
-    if (!selectAuthoredRouteTarget(data, Competitive::FpsTeam::Defenders, 0, 1, true, target) ||
+    TeamObjectiveIntent defender_hold{};
+    if (!selectTeamObjective(data, Competitive::FpsTeam::Defenders, Competitive::RoundPhase::Live,
+                             0, false, 0, defender_hold) ||
+        defender_hold.kind != TeamObjectiveKind::Hold ||
+        !selectBotObjectiveTarget(data, Competitive::FpsTeam::Defenders, defender_hold, 1, target) ||
         !botApprox(target.x, -5.0f) || !botApprox(target.z, 3.0f))
-        return fail(name, "defender hold target was not selected deterministically");
-    if (selectAuthoredRouteTarget(data, Competitive::FpsTeam::Defenders, 1, 1, true, target))
-        return fail(name, "wrong-team/wrong-site tactical data leaked into selection");
+        return fail(name, "defender unplanted hold target was not selected deterministically");
+    TeamObjectiveIntent retake{};
+    if (!selectTeamObjective(data, Competitive::FpsTeam::Defenders, Competitive::RoundPhase::Live,
+                             0, true, 0, retake) ||
+        retake.kind != TeamObjectiveKind::Retake ||
+        !selectBotObjectiveTarget(data, Competitive::FpsTeam::Defenders, retake, 1, target) ||
+        !botApprox(target.x, -5.0f) || !botApprox(target.z, 3.0f))
+        return fail(name, "defender retake target was not selected deterministically");
 
-    // A partial sidecar is safe when it carries one valid collection. It has
-    // no implicit site, bomb, or enemy-location fields.
-    const std::string partial = R"({"format":"fpsshooter_bot_routes","version":1,"level":"main","holds":[{"id":"a","team":"any","point":[1,2,3]}]})";
-    if (!parseAuthoredRouteData(partial, data, &error) || data.holds.size() != 1 || !data.routes.empty())
-        return fail(name, "valid partial tactical sidecar was not retained safely");
-    if (parseAuthoredRouteData(R"({"format":"fpsshooter_bot_routes","version":1,"level":"main","routes":[{"id":"bad","team":"attackers","points":[[0,0,0]],"enemy_position":[9,9,9]}]})", data, &error) || !data.empty())
-        return fail(name, "unknown hidden-state field was accepted");
-    if (parseAuthoredRouteData(R"({"format":"fpsshooter_bot_routes","version":1,"level":"main","routes":[{"id":"bad","team":"attackers","points":[[0,0]}]})", data, &error) || !data.empty())
-        return fail(name, "malformed route point was accepted");
     if (parseAuthoredRouteData(R"({"format":"fpsshooter_bot_routes","version":1,"level":"main","routes":[]})", data, &error) || !data.empty())
-        return fail(name, "empty tactical sidecar was accepted");
+        return fail(name, "v1 tactical sidecar was accepted");
+    if (parseAuthoredRouteData(R"({"format":"fpsshooter_bot_routes","version":2,"level":"main","anchors":[],"routes":[],"holds":[],"patrols":[]})", data, &error) || !data.empty())
+        return fail(name, "removed patrol collection was accepted");
+    if (parseAuthoredRouteData(R"({"format":"fpsshooter_bot_routes","version":2,"level":"main","anchors":[{"id":"a","site":0,"point":[0,0,0]},{"id":"a","site":1,"point":[0,0,0]}],"routes":[],"holds":[]})", data, &error) || !data.empty())
+        return fail(name, "duplicate authored id was accepted");
     return pass(name);
 }
 

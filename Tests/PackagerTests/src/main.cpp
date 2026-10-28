@@ -429,7 +429,7 @@ bool testPackagedDeBlock01CompetitiveServer()
         "FPSShooter selected level stem=levels/de_block01",
         "Bots: navmesh status=loaded format=v" +
             std::to_string(Navigation::NavMeshSerializer::kCurrentVersion),
-        "Bots: authored route data loaded",
+        "Bots: authored v2 objective data loaded",
         "Bots: spawned bot client 40000",
         "[BotDebug] bot=0",
         "path_valid=1",

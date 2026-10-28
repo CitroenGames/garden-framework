@@ -251,7 +251,39 @@ struct BotIntentComponent {
     bool want_crouch = false, want_jump = false, want_use = false, want_attack = false;
     float aim_yaw = 0, aim_pitch = 0; uint8_t want_weapon_slot = 0; int32_t buy_request_id = -1;
 };
-struct TeamBlackboardComponent { uint8_t team = 0; glm::vec3 last_contact_pos{0}; float last_contact_age = 1e9f; int8_t planned_site = -1; };
+// The two-site bound is a selected competitive-map contract. Blackboard
+// entities retain only stable, value-only team facts; no transform or entity
+// identity can cross this boundary.
+inline constexpr uint8_t kCompetitiveSiteCount = 2;
+inline constexpr uint8_t kInvalidAuthoredAnchor = 0xff;
+inline constexpr uint8_t kAnyRouteSite = 0xff;
+// Template tactical policy, expressed in fixed server ticks. These values are
+// intentionally named so expiry tests can exercise each boundary.
+inline constexpr uint32_t kTeamContactValidityTicks = 180;
+inline constexpr uint32_t kTeamObjectiveValidityTicks = 60;
+enum class TeamObjectiveKind : uint8_t { None, AttackApproach, Hold, Retake };
+enum class TeamContactConfidence : uint8_t { None, ConfirmedSight };
+struct TeamBlackboardContact {
+    uint8_t anchor_index = kInvalidAuthoredAnchor;
+    uint32_t observed_tick = 0;
+    TeamContactConfidence confidence = TeamContactConfidence::None;
+};
+struct TeamObjectiveIntent {
+    uint8_t site_index = kAnyRouteSite;
+    TeamObjectiveKind kind = TeamObjectiveKind::None;
+    uint32_t selected_round = 0;
+    uint32_t expires_at_tick = 0;
+};
+struct TeamBlackboardComponent {
+    uint8_t team = 0;
+    std::array<TeamBlackboardContact, kCompetitiveSiteCount> contacts{};
+    TeamObjectiveIntent objective{};
+};
+struct TeamBlackboardSummary {
+    uint8_t team = 0;
+    std::array<TeamBlackboardContact, kCompetitiveSiteCount> contacts{};
+    TeamObjectiveIntent objective{};
+};
 
 // ---- Perception ----
 // blocked(target, origin, point) -> true when a weapon trace reaches an
@@ -940,6 +972,9 @@ struct BotDecisionInput {
     bool alive = true, is_carrier = false, bomb_planted = false, at_site = false, at_bomb = false;
     glm::vec3 site_pos{0}; bool has_site = false; glm::vec3 bomb_pos{0}; bool has_bomb_pos = false;
     int32_t health = 100; float dt = 0.1f; glm::vec3 bot_pos{0};
+    // This is copied by the server after validation. Decision code receives
+    // no registry, entity, callback, raw sight position, or route-data handle.
+    TeamBlackboardSummary team_blackboard{};
 };
 inline void setState(BotComponent& b, BotState s) { if (b.state != s) { b.state = s; b.state_time = 0; b.engage_lost_time = 0; if (s == BotState::Engage) b.strafe_timer = 0; } }
 
@@ -1010,7 +1045,11 @@ inline void decide(BotComponent& b, const BotPerceptComponent& p, BotIntentCompo
         if (in.bomb_planted) {
             if (in.team == Competitive::FpsTeam::Defenders) {
                 if (in.at_bomb) { tr(BotState::Defuse, "at_bomb"); intent.want_use = true; return; }
-                if (in.has_bomb_pos) { intent.move_goal = in.bomb_pos; intent.has_move_goal = true; }
+                // A validated team objective can provide a retake target.
+                // Bomb state still owns use/defuse authority and the fallback
+                // remains the public planted position when no v2 target exists.
+                if (in.has_site) { intent.move_goal = in.site_pos; intent.has_move_goal = true; }
+                else if (in.has_bomb_pos) { intent.move_goal = in.bomb_pos; intent.has_move_goal = true; }
                 return;
             }
             tr(BotState::Defend, "planted"); return;

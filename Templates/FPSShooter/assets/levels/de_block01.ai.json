@@ -1,58 +1,29 @@
 {
   "format": "fpsshooter_bot_routes",
-  "version": 1,
+  "version": 2,
   "level": "de_block01",
+  "anchors": [
+    { "id": "site_a_anchor", "site": 0, "point": [53.5, 1.2, 37.5] },
+    { "id": "site_b_anchor", "site": 1, "point": [10.5, 1.2, 10.5] }
+  ],
   "routes": [
-    {
-      "id": "attackers_a_low",
-      "team": "attackers",
-      "site": 0,
-      "points": [[52.0, 1.2, 39.0]]
-    },
-    {
-      "id": "attackers_a_high",
-      "team": "attackers",
-      "site": 0,
-      "points": [[55.0, 1.2, 36.0]]
-    },
-    {
-      "id": "attackers_b_low",
-      "team": "attackers",
-      "site": 1,
-      "points": [[9.0, 1.2, 12.0]]
-    },
-    {
-      "id": "attackers_b_high",
-      "team": "attackers",
-      "site": 1,
-      "points": [[12.0, 1.2, 9.0]]
-    }
+    { "id": "attack_a_low", "team": "attackers", "site": 0, "phase": "live_unplanted", "role": "attack_approach", "points": [[52.0, 1.2, 39.0]] },
+    { "id": "attack_a_high", "team": "attackers", "site": 0, "phase": "live_unplanted", "role": "attack_approach", "points": [[55.0, 1.2, 36.0]] },
+    { "id": "attack_b_low", "team": "attackers", "site": 1, "phase": "live_unplanted", "role": "attack_approach", "points": [[9.0, 1.2, 12.0]] },
+    { "id": "attack_b_high", "team": "attackers", "site": 1, "phase": "live_unplanted", "role": "attack_approach", "points": [[12.0, 1.2, 9.0]] }
   ],
   "holds": [
-    {
-      "id": "defenders_a_low",
-      "team": "defenders",
-      "site": 0,
-      "point": [52.0, 1.2, 39.0]
-    },
-    {
-      "id": "defenders_a_high",
-      "team": "defenders",
-      "site": 0,
-      "point": [55.0, 1.2, 36.0]
-    },
-    {
-      "id": "defenders_b_low",
-      "team": "defenders",
-      "site": 1,
-      "point": [9.0, 1.2, 12.0]
-    },
-    {
-      "id": "defenders_b_high",
-      "team": "defenders",
-      "site": 1,
-      "point": [12.0, 1.2, 9.0]
-    }
-  ],
-  "patrols": []
+    { "id": "defend_a_low", "team": "defenders", "site": 0, "phase": "live_unplanted", "role": "hold", "point": [52.0, 1.2, 39.0] },
+    { "id": "defend_a_high", "team": "defenders", "site": 0, "phase": "live_unplanted", "role": "hold", "point": [55.0, 1.2, 36.0] },
+    { "id": "defend_b_low", "team": "defenders", "site": 1, "phase": "live_unplanted", "role": "hold", "point": [9.0, 1.2, 12.0] },
+    { "id": "defend_b_high", "team": "defenders", "site": 1, "phase": "live_unplanted", "role": "hold", "point": [12.0, 1.2, 9.0] },
+    { "id": "attack_hold_a_low", "team": "attackers", "site": 0, "phase": "live_planted", "role": "hold", "point": [52.0, 1.2, 39.0] },
+    { "id": "attack_hold_a_high", "team": "attackers", "site": 0, "phase": "live_planted", "role": "hold", "point": [55.0, 1.2, 36.0] },
+    { "id": "attack_hold_b_low", "team": "attackers", "site": 1, "phase": "live_planted", "role": "hold", "point": [9.0, 1.2, 12.0] },
+    { "id": "attack_hold_b_high", "team": "attackers", "site": 1, "phase": "live_planted", "role": "hold", "point": [12.0, 1.2, 9.0] },
+    { "id": "retake_a_low", "team": "defenders", "site": 0, "phase": "live_planted", "role": "retake", "point": [52.0, 1.2, 39.0] },
+    { "id": "retake_a_high", "team": "defenders", "site": 0, "phase": "live_planted", "role": "retake", "point": [55.0, 1.2, 36.0] },
+    { "id": "retake_b_low", "team": "defenders", "site": 1, "phase": "live_planted", "role": "retake", "point": [9.0, 1.2, 12.0] },
+    { "id": "retake_b_high", "team": "defenders", "site": 1, "phase": "live_planted", "role": "retake", "point": [12.0, 1.2, 9.0] }
+  ]
 }

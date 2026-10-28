@@ -161,6 +161,10 @@ struct BotWorldRuntime {
     std::string route_error;
     RouteDataLoadStatus route_status = RouteDataLoadStatus::NotRequested;
     bool route_attempted = false;
+    // Handles are world-resource routing state only. The mutable tactical
+    // facts stay on these two ECS component entities.
+    std::array<entt::entity, kCompetitiveSiteCount> team_blackboard_entities{
+        entt::null, entt::null};
     bool bots_enabled = false;
     bool error_logged = false;
     int32_t target_count = 0;
@@ -258,6 +262,7 @@ struct BotWorldRuntime {
         route_error.clear();
         route_status = RouteDataLoadStatus::NotRequested;
         route_attempted = false;
+        team_blackboard_entities.fill(entt::null);
         bots_enabled = false;
         error_logged = false;
         target_count = 0;
