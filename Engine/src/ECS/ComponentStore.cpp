@@ -80,6 +80,24 @@ ComponentStoreResult ComponentStore::get(ComponentId id, ComponentEntityKey enti
     out = it->second->data;
     return ComponentStoreResult::Success;
 }
+ComponentStoreResult ComponentStore::snapshotEntities(ComponentId id, std::vector<ComponentEntityKey>& out) const noexcept {
+    out.clear();
+    ComponentLease lease;
+    auto acquired = ComponentCatalog::instance().acquire(id, ComponentPinKind::Operation, lease);
+    if (acquired != ComponentCatalogResult::Success) return catalogResult(acquired);
+    try {
+        auto it = m_impl->values.lower_bound(Key{id.slot, id.generation, 0});
+        for (; it != m_impl->values.end(); ++it) {
+            const auto& entryKey = it->first;
+            if (std::get<0>(entryKey) != id.slot || std::get<1>(entryKey) != id.generation) break;
+            out.push_back({std::get<2>(entryKey), it->second->generation});
+        }
+        return ComponentStoreResult::Success;
+    } catch (...) {
+        out.clear();
+        return ComponentStoreResult::ResourceExhausted;
+    }
+}
 ComponentStoreResult ComponentStore::remove(ComponentId id, ComponentEntityKey entity) noexcept {
     void* ignored = nullptr;
     auto result = get(id, entity, ignored);

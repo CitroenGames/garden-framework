@@ -9,6 +9,9 @@
 #include "PhysicsSystem.hpp"
 #include "Tick/TickSystem.hpp"
 #include <cstdint>
+#include <array>
+#include <functional>
+#include <type_traits>
 #include <vector>
 #include <memory>
 #include <string>
@@ -34,10 +37,12 @@ private:
     Tick::FixedTickAccumulator simulation_ticks;
     uint32_t simulation_tick = 0;
     double simulation_time = 0.0;
+    uint32_t active_queries = 0;
 
     garden::ecs::ComponentStore& componentStore() noexcept;
     const garden::ecs::ComponentStore& componentStore() const noexcept;
     garden::ecs::ComponentStoreResult scopedKey(garden::ecs::EntityHandle, garden::ecs::ComponentEntityKey&) const noexcept;
+    garden::ecs::EntityHandle handleForKey(garden::ecs::ComponentEntityKey) const noexcept;
 
     template<class T>
     static garden::ecs::ComponentStoreResult resolveType(garden::ecs::ComponentId& id) noexcept
@@ -82,6 +87,8 @@ public:
 
     explicit world(const PhysicsSystemSettings& physics_settings = PhysicsSystemSettings());
 
+    // Move construction requires no active query on the source; violation
+    // terminates. Move assignment is a no-op while either world is queried.
     world(world&&) noexcept;
     world& operator=(world&&) noexcept;
     world(const world&) = delete;
@@ -103,6 +110,7 @@ public:
     template<class T, class... Args>
     garden::ecs::ComponentStoreResult add(garden::ecs::EntityHandle entity, Args&&... args)
     {
+        if (active_queries) return garden::ecs::ComponentStoreResult::StructuralMutationDuringQuery;
         garden::ecs::ComponentEntityKey key;
         auto result = scopedKey(entity, key);
         if (result != garden::ecs::ComponentStoreResult::Success) return result;
@@ -168,6 +176,7 @@ public:
     template<class T>
     garden::ecs::ComponentStoreResult remove(garden::ecs::EntityHandle entity)
     {
+        if (active_queries) return garden::ecs::ComponentStoreResult::StructuralMutationDuringQuery;
         garden::ecs::ComponentEntityKey key;
         auto result = scopedKey(entity, key);
         if (result != garden::ecs::ComponentStoreResult::Success) return result;
@@ -175,6 +184,62 @@ public:
         result = resolveType<T>(id);
         if (result != garden::ecs::ComponentStoreResult::Success) return result;
         return componentStore().remove(id, key);
+    }
+
+    // Order is unspecified. The callback receives a scoped handle and references
+    // to all requested components; explicit const types yield const references.
+    // Queries may nest, but Garden structural mutations are rejected until all
+    // callbacks return. World shutdown/reset are no-ops during a query. Direct
+    // registry mutations bypass this guard. Access is externally synchronized;
+    // the world must outlive every callback.
+    template<class... Ts, class Callback>
+    garden::ecs::ComponentStoreResult query(Callback&& callback)
+    {
+        using namespace garden::ecs;
+        static_assert(sizeof...(Ts) > 0, "A query requires at least one component type");
+        static_assert(((!std::is_reference_v<Ts> && !std::is_volatile_v<Ts>) && ...));
+        if constexpr (sizeof...(Ts) == 0) return ComponentStoreResult::InternalError;
+        else {
+            struct Guard {
+                world& owner;
+                explicit Guard(world& w) : owner(w) { ++owner.active_queries; }
+                ~Guard() { --owner.active_queries; }
+            } guard(*this);
+            std::array<ComponentId, sizeof...(Ts)> ids{};
+            ComponentStoreResult result = ComponentStoreResult::Success;
+            size_t index = 0;
+            ((result == ComponentStoreResult::Success
+                ? result = resolveType<std::remove_const_t<Ts>>(ids[index++]) : result), ...);
+            if (result != ComponentStoreResult::Success) return result;
+            if (!component_state) return ComponentStoreResult::Success;
+            std::vector<ComponentEntityKey> candidates;
+            bool first = true;
+            for (const auto id : ids) {
+                std::vector<ComponentEntityKey> pool;
+                result = componentStore().snapshotEntities(id, pool);
+                if (result != ComponentStoreResult::Success) return result;
+                if (first || pool.size() < candidates.size()) candidates.swap(pool);
+                first = false;
+            }
+            for (const auto key : candidates) {
+                std::array<void*, sizeof...(Ts)> values{};
+                bool match = true;
+                for (size_t i = 0; i < ids.size(); ++i) {
+                    result = componentStore().get(ids[i], key, values[i]);
+                    if (result == ComponentStoreResult::NotFound) { match = false; break; }
+                    if (result != ComponentStoreResult::Success) return result;
+                }
+                if (!match) continue;
+                const auto handle = handleForKey(key);
+                if (!handle.m_world) return ComponentStoreResult::InternalError;
+                try {
+                    [&]<size_t... I>(std::index_sequence<I...>) {
+                        std::invoke(callback, handle, *static_cast<Ts*>(values[I])...);
+                    }(std::index_sequence_for<Ts...>{});
+                } catch (...) { return ComponentStoreResult::CallbackFailed; }
+            }
+            return ComponentStoreResult::Success;
+        }
     }
 
     // Returned component pointers may be invalidated by structural changes to

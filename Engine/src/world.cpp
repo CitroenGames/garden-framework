@@ -5,6 +5,7 @@
 #include "GameFramework/GameStateBase.hpp"
 
 #include <atomic>
+#include <exception>
 #include <utility>
 
 namespace {
@@ -37,7 +38,11 @@ world::world(const PhysicsSystemSettings& physics_settings)
 }
 
 world::world(world&& other) noexcept
-    : component_state(std::move(other.component_state))
+    : component_state([&other] {
+        // Moving the source would invalidate an active callback's world.
+        if (other.active_queries) std::terminate();
+        return std::move(other.component_state);
+    }())
     , physics_system(std::move(other.physics_system))
     , gameplay_framework(std::move(other.gameplay_framework))
     , simulation_ticks(std::move(other.simulation_ticks))
@@ -54,7 +59,7 @@ world::world(world&& other) noexcept
 
 world& world::operator=(world&& other) noexcept
 {
-    if (this == &other)
+    if (this == &other || active_queries || other.active_queries)
         return *this;
     shutdown();
     component_state = std::move(other.component_state);
@@ -104,6 +109,7 @@ bool world::hasGameplayFrameworkStarted() const { return gameplay_framework && g
 
 void world::shutdown()
 {
+    if (active_queries) return;
     clearGameplayFramework();
 
     if (physics_system)
@@ -117,6 +123,7 @@ void world::shutdown()
 
 void world::resetWorld()
 {
+    if (active_queries) return;
     shutdown();
     if (physics_system)
         physics_system->initialize();
@@ -134,6 +141,7 @@ bool world::isEntityValid(EntityRef entity) const
 
 EntityRef world::createEntity()
 {
+    if (active_queries) return {};
     const entt::entity entity = registry.create();
     return ensureEntityRef(registry, entity);
 }
@@ -178,8 +186,23 @@ bool world::isEntityValid(garden::ecs::EntityHandle handle) const noexcept
     return scopedKey(handle, key) == garden::ecs::ComponentStoreResult::Success;
 }
 
+garden::ecs::EntityHandle world::handleForKey(garden::ecs::ComponentEntityKey key) const noexcept
+{
+    if (!component_state || !key.generation) return {};
+    const auto entity = entt::entt_traits<entt::entity>::construct(key.slot, key.generation - 1u);
+    if (!registry.valid(entity) || !registry.all_of<ScopedEntityMarker>(entity)) return {};
+    const auto& marker = registry.get<ScopedEntityMarker>(entity);
+    if (marker.key.slot != key.slot || marker.key.generation != key.generation) return {};
+    garden::ecs::EntityHandle handle;
+    handle.m_world = component_state->token;
+    handle.m_entity = static_cast<uint32_t>(entt::to_integral(entity));
+    handle.m_serial = marker.serial;
+    return handle;
+}
+
 garden::ecs::EntityHandle world::scopedEntity(EntityRef reference)
 {
+    if (active_queries) return {};
     if (reference.isNull()) return {};
     entt::entity entity = entt::null;
     for (auto [candidate, identity] : registry.view<IdentityComponent>().each()) {
@@ -211,11 +234,13 @@ garden::ecs::EntityHandle world::scopedEntity(EntityRef reference)
 
 garden::ecs::EntityHandle world::createScopedEntity()
 {
+    if (active_queries) return {};
     return scopedEntity(createEntity());
 }
 
 garden::ecs::ComponentStoreResult world::destroyEntity(garden::ecs::EntityHandle handle) noexcept
 {
+    if (active_queries) return garden::ecs::ComponentStoreResult::StructuralMutationDuringQuery;
     garden::ecs::ComponentEntityKey key;
     const auto result = scopedKey(handle, key);
     if (result != garden::ecs::ComponentStoreResult::Success) return result;

@@ -5,6 +5,7 @@
 #include <tuple>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace garden::ecs {
 
@@ -21,7 +22,8 @@ struct ComponentEntityKey {
 
 enum class ComponentStoreResult {
     Success, InvalidEntity, StaleEntity, StaleComponent, Duplicate, NotFound, UnregisteredType,
-    TypeMismatch, ConstructionFailed, ResourceExhausted, InternalError
+    TypeMismatch, ConstructionFailed, ResourceExhausted, InternalError,
+    StructuralMutationDuringQuery, CallbackFailed
 };
 
 // Externally synchronized. Returned pointers remain stable until removal or
@@ -51,6 +53,10 @@ public:
     }
 
     ComponentStoreResult get(ComponentId, ComponentEntityKey, void*& out) const noexcept;
+    // Copies the keys present for a registered component, in unspecified order.
+    // Empty pools succeed; errors clear out. The caller must synchronize structural
+    // changes and validate keys against the world before using them.
+    ComponentStoreResult snapshotEntities(ComponentId, std::vector<ComponentEntityKey>& out) const noexcept;
     ComponentStoreResult remove(ComponentId, ComponentEntityKey) noexcept;
     // Called by the world before recycling an entity slot.
     ComponentStoreResult removeEntity(ComponentEntityKey) noexcept;

@@ -3,6 +3,7 @@
 
 #include <array>
 #include <iostream>
+#include <type_traits>
 #include <utility>
 
 struct WorldValue {
@@ -14,6 +15,7 @@ struct WorldValue {
     ~WorldValue() noexcept { ++destroyed; }
 };
 struct UnregisteredValue { int number = 0; };
+struct QueryValue { int number = 0; };
 
 namespace garden::ecs {
 template<> struct ComponentType<WorldValue> {
@@ -21,6 +23,9 @@ template<> struct ComponentType<WorldValue> {
 };
 template<> struct ComponentType<UnregisteredValue> {
     static constexpr ComponentKey key{"garden.tests.UnregisteredWorldValue", 1};
+};
+template<> struct ComponentType<QueryValue> {
+    static constexpr ComponentKey key{"garden.tests.QueryValue", 1};
 };
 }
 
@@ -122,6 +127,95 @@ void teardown() {
     check(w.isEntityValid(third) && w.get<WorldValue>(third, value) == ComponentStoreResult::NotFound && !value,
           "reset starts with empty component storage");
 }
+
+void queries() {
+    world w;
+    const auto both = w.createScopedEntity();
+    const auto onlyWorld = w.createScopedEntity();
+    const auto onlyQuery = w.createScopedEntity();
+    check(w.add<WorldValue>(both, 10) == ComponentStoreResult::Success &&
+          w.add<QueryValue>(both, QueryValue{3}) == ComponentStoreResult::Success &&
+          w.add<WorldValue>(onlyWorld, 20) == ComponentStoreResult::Success &&
+          w.add<QueryValue>(onlyQuery, QueryValue{7}) == ComponentStoreResult::Success,
+          "prepare joined query components");
+
+    int visits = 0;
+    bool matched = true;
+    const auto joined = w.query<WorldValue, const QueryValue>(
+        [&](EntityHandle entity, WorldValue& value, const QueryValue& increment) {
+            ++visits;
+            matched = matched && entity == both && value.number == 10 && increment.number == 3;
+            value.number += increment.number;
+        });
+    WorldValue* value = nullptr;
+    check(joined == ComponentStoreResult::Success && visits == 1 && matched &&
+          w.get<WorldValue>(both, value) == ComponentStoreResult::Success && value && value->number == 13 &&
+          w.get<WorldValue>(onlyWorld, value) == ComponentStoreResult::Success && value && value->number == 20,
+          "mixed-owner joined query visits only matches and persists mutable writes");
+
+    visits = 0;
+    const auto read = w.query<const WorldValue, const QueryValue>(
+        [&](EntityHandle entity, auto& v, auto& q) {
+            static_assert(std::is_const_v<std::remove_reference_t<decltype(v)>>);
+            static_assert(std::is_const_v<std::remove_reference_t<decltype(q)>>);
+            ++visits;
+            matched = matched && entity == both && v.number == 13 && q.number == 3;
+        });
+    check(read == ComponentStoreResult::Success && visits == 1 && matched,
+          "const query yields read-only component references");
+
+    visits = 0;
+    const auto nested = w.query<WorldValue>([&](EntityHandle, WorldValue&) {
+        const auto inner = w.query<const QueryValue>([&](EntityHandle, const QueryValue&) { ++visits; });
+        matched = matched && inner == ComponentStoreResult::Success;
+    });
+    check(nested == ComponentStoreResult::Success && visits == 4 && matched,
+          "nested queries visit inner matches for each outer match");
+
+    const auto callbackFailure = w.query<WorldValue>([](EntityHandle, WorldValue&) { throw 17; });
+    check(callbackFailure == ComponentStoreResult::CallbackFailed &&
+          w.remove<WorldValue>(onlyWorld) == ComponentStoreResult::Success &&
+          w.add<WorldValue>(onlyWorld, 20) == ComponentStoreResult::Success,
+          "callback exceptions report failure and release the query guard");
+
+    world empty;
+    visits = 0;
+    const auto emptyResult = empty.query<WorldValue, QueryValue>(
+        [&](EntityHandle, WorldValue&, QueryValue&) { ++visits; });
+    const auto missingResult = w.query<WorldValue, UnregisteredValue>(
+        [&](EntityHandle, WorldValue&, UnregisteredValue&) { ++visits; });
+    check(emptyResult == ComponentStoreResult::Success && missingResult == ComponentStoreResult::UnregisteredType && visits == 0,
+          "empty registered pools and unregistered types do not invoke callbacks");
+
+    ComponentStoreResult addResult = ComponentStoreResult::Success;
+    ComponentStoreResult removeResult = ComponentStoreResult::Success;
+    ComponentStoreResult destroyResult = ComponentStoreResult::Success;
+    bool scopedCreationRejected = false;
+    bool creationRejected = false;
+    const auto guarded = w.query<WorldValue, QueryValue>(
+        [&](EntityHandle entity, WorldValue&, QueryValue&) {
+            addResult = w.add<QueryValue>(onlyWorld, QueryValue{9});
+            removeResult = w.remove<WorldValue>(entity);
+            destroyResult = w.destroyEntity(onlyQuery);
+            scopedCreationRejected = !w.isEntityValid(w.createScopedEntity());
+            creationRejected = w.createEntity().isNull();
+            w.shutdown();
+            w.resetWorld();
+        });
+    bool present = false;
+    QueryValue* queryValue = nullptr;
+    check(guarded == ComponentStoreResult::Success &&
+          addResult == ComponentStoreResult::StructuralMutationDuringQuery &&
+          removeResult == ComponentStoreResult::StructuralMutationDuringQuery &&
+          destroyResult == ComponentStoreResult::StructuralMutationDuringQuery &&
+          scopedCreationRejected && creationRejected &&
+          w.isEntityValid(both) && w.isEntityValid(onlyWorld) && w.isEntityValid(onlyQuery) &&
+          w.has<QueryValue>(onlyWorld, present) == ComponentStoreResult::Success && !present &&
+          w.get<WorldValue>(both, value) == ComponentStoreResult::Success && value && value->number == 13 &&
+          w.get<WorldValue>(onlyWorld, value) == ComponentStoreResult::Success && value && value->number == 20 &&
+          w.get<QueryValue>(onlyQuery, queryValue) == ComponentStoreResult::Success && queryValue && queryValue->number == 7,
+          "query rejects structural mutations without changing state");
+}
 }
 
 int main() {
@@ -129,15 +223,22 @@ int main() {
     std::array<uint8_t, 32> digest{};
     digest[0] = 0xe1;
     const auto owner = ComponentOwnerId::module(digest, 1);
-    garden::ecs::ComponentDescriptor descriptor{ComponentType<WorldValue>::key, owner, sizeof(WorldValue), alignof(WorldValue),
+    garden::ecs::ComponentDescriptor descriptor{ComponentType<WorldValue>::key, ComponentOwnerId::engineCore(), sizeof(WorldValue), alignof(WorldValue),
         componentCapabilities<WorldValue>(), makeComponentOperations<WorldValue>()};
     ComponentId id{};
     const auto registration = catalog.registerComponent(descriptor, id);
     check(registration == ComponentCatalogResult::Success, "register component metadata");
     if (registration != ComponentCatalogResult::Success) return 1;
+    garden::ecs::ComponentDescriptor queryDescriptor{ComponentType<QueryValue>::key, owner, sizeof(QueryValue), alignof(QueryValue),
+        componentCapabilities<QueryValue>(), makeComponentOperations<QueryValue>()};
+    ComponentId queryId{};
+    const auto queryRegistration = catalog.registerComponent(queryDescriptor, queryId);
+    check(queryRegistration == ComponentCatalogResult::Success, "register query component metadata");
+    if (queryRegistration != ComponentCatalogResult::Success) return 1;
     basicAndReuse();
     moves();
     teardown();
+    queries();
     check(WorldValue::constructed == WorldValue::destroyed, "all component values destroyed exactly once");
     check(catalog.unregisterOwner(owner) == ComponentCatalogResult::Success, "worlds release catalog leases");
     return failures ? 1 : 0;
