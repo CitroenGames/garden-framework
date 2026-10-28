@@ -5,9 +5,20 @@
 #include "Utils/Log.hpp"
 
 #include <utility>
+#include <exception>
 
 namespace GameFramework
 {
+namespace
+{
+// Logging is best effort at this boundary: it must not turn a handled
+// callback failure into a second exception after framework retirement.
+void logCallbackFailure(const char* operation, const char* detail) noexcept
+{
+    try { LOG_ENGINE_ERROR("GameFramework {} callback failed: {}", operation, detail); }
+    catch (...) {}
+}
+}
 GameFrameworkRuntime::GameFrameworkRuntime() = default;
 GameFrameworkRuntime::~GameFrameworkRuntime() = default;
 
@@ -15,7 +26,11 @@ void GameFrameworkRuntime::setAuthorityGameMode(world& game_world, std::unique_p
 {
     m_mode = std::move(mode);
     if (m_mode)
-        m_mode->bindWorld(game_world);
+    {
+        try { m_mode->bindWorld(game_world); }
+        catch (const std::exception& e) { logCallbackFailure("bind", e.what()); }
+        catch (...) { logCallbackFailure("bind", "unknown exception"); }
+    }
 }
 
 void GameFrameworkRuntime::setGameState(std::unique_ptr<GameStateBase> state)
@@ -89,9 +104,14 @@ void GameFrameworkRuntime::tick(world& game_world, float delta_time)
 
 void GameFrameworkRuntime::shutdown()
 {
-    if (m_state && m_initialized)
-        m_state->shutdown();
+    const bool was_initialized = m_initialized;
     m_initialized = false;
     m_started = false;
+    if (m_state && was_initialized)
+    {
+        try { m_state->shutdown(); }
+        catch (const std::exception& e) { logCallbackFailure("shutdown", e.what()); }
+        catch (...) { logCallbackFailure("shutdown", "unknown exception"); }
+    }
 }
 }

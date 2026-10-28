@@ -4474,6 +4474,109 @@ protected:
     void syncGameModeComponent() override { throw std::runtime_error("injected configuration failure"); }
 };
 
+class RetiringThrowingLevelState : public GameFramework::GameStateBase
+{
+public:
+    explicit RetiringThrowingLevelState(bool& shutdown_called) : m_shutdown_called(shutdown_called) {}
+    void shutdown() override
+    {
+        m_shutdown_called = true;
+        throw std::runtime_error("injected shutdown failure after mutation");
+    }
+private:
+    bool& m_shutdown_called;
+};
+
+class BindThrowingLevelMode : public GameFramework::GameModeBase
+{
+public:
+    BindThrowingLevelMode(int& detached_syncs, int& bound_syncs)
+        : m_detached_syncs(detached_syncs), m_bound_syncs(bound_syncs) {}
+    const char* getClassName() const override { return "BindThrowingLevelMode"; }
+protected:
+    void syncGameModeComponent() override
+    {
+        if (!getWorld()) { ++m_detached_syncs; return; }
+        ++m_bound_syncs;
+        throw std::runtime_error("injected bind sync failure");
+    }
+private:
+    int& m_detached_syncs;
+    int& m_bound_syncs;
+};
+
+static bool testLevelManagerFrameworkCommitCallbackFailures()
+{
+    const std::string name = "LevelManager commits despite framework callback failures";
+    auto& registry = GameFramework::GameModeRegistry::get();
+    struct Unregister
+    {
+        ~Unregister() { GameFramework::GameModeRegistry::get().unregisterBySource("level-commit-test"); }
+    } unregister;
+
+    // Exercise shutdown on authority and client paths, and a separate bind-only
+    // sync failure after detached settings have already succeeded.
+    for (int fault = 0; fault != 3; ++fault)
+    {
+        bool shutdown_called = false;
+        int detached_syncs = 0, bound_syncs = 0;
+        registry.registerGameMode("BindThrowingLevelMode", [&] {
+            return std::make_unique<BindThrowingLevelMode>(detached_syncs, bound_syncs);
+        }, "level-commit-test");
+        world w;
+        w.initializePhysics();
+        w.setAuthorityGameMode(std::make_unique<GameFramework::GameMode>());
+        if (fault != 2)
+            w.setGameState(std::make_unique<RetiringThrowingLevelState>(shutdown_called));
+        else
+            w.setGameState(std::make_unique<GameFramework::GameState>());
+        if (!w.initializeGameplayFramework()) return fail(name, "initial framework failed to initialize");
+        w.startGameplayFramework();
+        const EntityRef sentinel_ref{EntityGuid{0xDF01, 0xEF02}};
+        const auto sentinel = w.restoreScopedEntity(sentinel_ref);
+        entt::entity sentinel_entity = entt::null;
+        auto identities = w.registry.view<IdentityComponent>();
+        for (const auto entity : identities)
+            if (identities.get<IdentityComponent>(entity).guid == sentinel_ref.guid)
+                sentinel_entity = entity;
+        ColliderComponent collider;
+        collider.shape_type = ColliderShapeType::Box;
+        collider.box_half_extents = glm::vec3(0.5f);
+        const auto shape = PhysicsSystem::createShapeFromCollider(collider, glm::vec3(1.0f));
+        if (sentinel_entity == entt::null || !shape)
+            return fail(name, "failed to create sentinel physics fixture");
+        w.getPhysicsSystem().createStaticBody(glm::vec3(0.0f), glm::vec3(0.0f), shape, sentinel_entity);
+        if (!w.getPhysicsSystem().hasBody(sentinel_entity))
+            return fail(name, "sentinel static body was not created");
+        LevelData level;
+        level.metadata.gravity = w.getGravity() + glm::vec3(1, 2, 3);
+        level.metadata.fixed_delta = w.getFixedDelta() * 2;
+        if (fault == 2) level.metadata.game_mode_class = "BindThrowingLevelMode";
+        level.entities.emplace_back();
+        entt::entity player = entt::entity{123}, freecam = entt::entity{124}, rep = entt::entity{125};
+        std::vector<entt::entity> created{entt::entity{456}};
+        LevelManager manager;
+        if (!manager.instantiateLevel(level, w, nullptr, &player, &freecam, &rep, fault != 1, &created))
+            return fail(name, "callback failure reported a failed level");
+        if ((fault != 2 && !shutdown_called) ||
+            (fault == 2 && (detached_syncs == 0 || bound_syncs != 1 ||
+                            dynamic_cast<BindThrowingLevelMode*>(w.getAuthorityGameMode()) == nullptr ||
+                            w.getAuthorityGameMode()->getWorld() != &w)) ||
+            (fault == 1 && w.getAuthorityGameMode() != nullptr) ||
+            !w.getGameState() || w.isGameplayFrameworkInitialized() || w.hasGameplayFrameworkStarted() ||
+            w.getGravity() != level.metadata.gravity || w.getFixedDelta() != level.metadata.fixed_delta ||
+            w.persistedReference(sentinel) != sentinel_ref || !w.registry.valid(sentinel_entity) ||
+            !w.registry.all_of<IdentityComponent>(sentinel_entity) ||
+            w.registry.get<IdentityComponent>(sentinel_entity).guid != sentinel_ref.guid ||
+            !w.getPhysicsSystem().hasBody(sentinel_entity) ||
+            created.size() != 1 ||
+            !w.registry.valid(created[0]) || w.registry.view<IdentityComponent>().size() != 2 ||
+            player != entt::null || freecam != entt::null || rep != entt::null)
+            return fail(name, "replacement, cohort, settings or outputs were not consistently published");
+    }
+    return pass(name);
+}
+
 static bool testLevelManagerFrameworkFailureRollback()
 {
     const std::string name = "LevelManager framework replacement failure rollback";
@@ -4795,6 +4898,7 @@ int main()
     ok = testLevelManagerScopedRestoreRollback() && ok;
     ok = testLevelManagerPostCreationRollback() && ok;
     ok = testLevelManagerFrameworkFailureRollback() && ok;
+    ok = testLevelManagerFrameworkCommitCallbackFailures() && ok;
     ok = testLevelManagerLargeIdentityCohort() && ok;
 
     Assets::AssetManager::get().shutdown();

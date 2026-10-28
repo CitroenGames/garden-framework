@@ -17,6 +17,8 @@ public:
     GameFrameworkRuntime();
     ~GameFrameworkRuntime();
 
+    // Ownership is installed before binding. A throwing bind/sync is logged;
+    // the installed mode remains bound but its synchronization may be partial.
     void setAuthorityGameMode(world& game_world, std::unique_ptr<GameModeBase> mode);
     GameModeBase* getAuthorityGameMode() { return m_mode.get(); }
     const GameModeBase* getAuthorityGameMode() const { return m_mode.get(); }
@@ -29,6 +31,8 @@ public:
     bool initialize(world& game_world, const std::string& map_name = "", const std::string& options = "");
     void start(world& game_world);
     void tick(world& game_world, float delta_time);
+    // Clear lifecycle flags before invoking shutdown. Callback exceptions are
+    // logged and suppressed; callback side effects are not reversible.
     void shutdown();
     bool isInitialized() const { return m_initialized; }
     bool hasStarted() const { return m_started; }
