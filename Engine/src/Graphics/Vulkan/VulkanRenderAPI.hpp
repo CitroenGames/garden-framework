@@ -127,6 +127,10 @@ public:
     // Debug line rendering
     virtual void renderDebugLines(const vertex* vertices, size_t vertex_count) override;
 
+    // R-3 is D3D12-first. Refuse the pass before any world-frame state changes.
+    bool beginViewmodelPass(const ViewmodelSettings&) override { return false; }
+    void endViewmodelPass() override {}
+
     virtual const char* getAPIName() const override { return "Vulkan"; }
     RenderFrameStats getLastFrameStats() const override;
 

@@ -28,6 +28,7 @@ struct vertex;
 class mesh;
 class camera;
 class IGPUMesh;
+struct ViewmodelSettings;
 
 // Texture handle - opaque to the user
 typedef unsigned int TextureHandle;
@@ -229,6 +230,12 @@ public:
     virtual void beginDepthPrepass() {}
     virtual void endDepthPrepass() {}
     virtual void renderMeshDepthOnly(const mesh& m) { (void)m; }
+
+    // Starts a renderer-owned depth-clear viewmodel sub-pass. Returning false
+    // means the backend did not alter its world-frame state and callers must
+    // skip all viewmodel draws. This keeps unsupported backends safe.
+    virtual bool beginViewmodelPass(const ViewmodelSettings& settings) { (void)settings; return false; }
+    virtual void endViewmodelPass() {}
 
     // Command buffer replay (for multicore rendering)
     // Replays a pre-recorded command buffer of self-contained draw commands.

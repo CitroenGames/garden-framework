@@ -68,6 +68,10 @@ public:
     virtual void replayCommandBufferParallel(const RenderCommandBuffer& cmds) override;
     virtual RenderFrameStats getLastFrameStats() const override;
 
+    // Headless has no depth target. Refuse before any world-frame state can change.
+    bool beginViewmodelPass(const ViewmodelSettings&) override { return false; }
+    void endViewmodelPass() override {}
+
 private:
     RenderFrameStats m_lastFrameStats{};
     std::unordered_set<uint64_t> m_descriptorCache{};

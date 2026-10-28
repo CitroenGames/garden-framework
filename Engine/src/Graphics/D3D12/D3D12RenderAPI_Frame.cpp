@@ -4,6 +4,7 @@
 
 #include "D3D12RenderAPI.hpp"
 #include "Components/camera.hpp"
+#include "Graphics/ViewmodelPass.hpp"
 #include "UI/RmlUiManager.h"
 #include "Utils/Log.hpp"
 #include "imgui.h"
@@ -385,6 +386,89 @@ void D3D12RenderAPI::clear(const glm::vec3& color)
         commandList->ClearDepthStencilView(m_dsvAllocator.getCPU(cv.getDepthDSV()),
                                             D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, nullptr);
     }
+}
+
+bool D3D12RenderAPI::beginViewmodelPass(const ViewmodelSettings& settings)
+{
+    // Do every validation before touching the current target. An unsupported
+    // or malformed request must leave the world pass exactly as it was.
+    if (device_lost || m_viewmodelPass.active || !m_commandListOpen ||
+        !m_currentRT.valid || in_shadow_pass || !isViewmodelSettingsValid(settings))
+        return false;
+
+    const float width = m_currentRT.viewport.Width;
+    const float height = m_currentRT.viewport.Height;
+    const float fov = settings.fov_degrees == 0.0f ? field_of_view : settings.fov_degrees;
+    const float near_plane = settings.near_plane == 0.0f ? 0.1f : settings.near_plane;
+    if (!std::isfinite(width) || !std::isfinite(height) || width <= 0.0f || height <= 0.0f ||
+        !std::isfinite(fov) || fov <= 1.0f || fov >= 179.0f || near_plane >= settings.far_plane)
+        return false;
+
+    m_viewmodelPass.active = true;
+    m_viewmodelPass.projection = projection_matrix;
+    m_viewmodelPass.target = m_currentRT;
+    m_viewmodelPass.last_pso = last_bound_pso;
+    m_viewmodelPass.last_shadow_pso = last_bound_shadow_pso;
+    m_viewmodelPass.bound_texture = currentBoundTexture;
+    m_viewmodelPass.bound_heightmap_texture = currentBoundHeightmapTexture;
+    m_viewmodelPass.pbr_tables_bound = m_pbrDefaultTablesBound;
+    m_viewmodelPass.depth_prepass = in_depth_prepass;
+
+    // Rebind the saved scene target explicitly: standalone, editor and PIE
+    // all share the same scoped pass and only their cached target differs.
+    commandList->OMSetRenderTargets(1, &m_currentRT.rtvHandle, FALSE, &m_currentRT.dsvHandle);
+    commandList->RSSetViewports(1, &m_currentRT.viewport);
+    commandList->RSSetScissorRects(1, &m_currentRT.scissor);
+    commandList->ClearDepthStencilView(m_currentRT.dsvHandle, D3D12_CLEAR_FLAG_DEPTH,
+                                       1.0f, 0, 0, nullptr);
+
+    projection_matrix = glm::perspectiveRH_ZO(glm::radians(fov), width / height,
+                                               near_plane, settings.far_plane);
+    global_cbuffer_dirty = true;
+    m_cachedGlobalCBAddr = 0;
+    updateGlobalCBuffer();
+    global_cbuffer_dirty = false;
+
+    // Draw-command replay must bind its own pass state. Do not let cached
+    // world bindings suppress those binds after the depth clear.
+    last_bound_pso = nullptr;
+    last_bound_shadow_pso = nullptr;
+    currentBoundTexture = INVALID_TEXTURE;
+    currentBoundHeightmapTexture = INVALID_TEXTURE;
+    m_pbrDefaultTablesBound = false;
+    in_depth_prepass = false;
+    return true;
+}
+
+void D3D12RenderAPI::endViewmodelPass()
+{
+    if (!m_viewmodelPass.active)
+        return;
+
+    const ViewmodelPassState saved = m_viewmodelPass;
+    m_viewmodelPass.active = false;
+
+    // Restore the exact scene target and viewport first. This is harmless for
+    // direct-to-swapchain, editor and PIE targets, and avoids inheriting any
+    // state a later viewmodel implementation might alter.
+    commandList->OMSetRenderTargets(1, &saved.target.rtvHandle, FALSE, &saved.target.dsvHandle);
+    commandList->RSSetViewports(1, &saved.target.viewport);
+    commandList->RSSetScissorRects(1, &saved.target.scissor);
+
+    projection_matrix = saved.projection;
+    global_cbuffer_dirty = true;
+    m_cachedGlobalCBAddr = 0;
+    updateGlobalCBuffer();
+    global_cbuffer_dirty = false;
+
+    if (saved.last_pso)
+        commandList->SetPipelineState(saved.last_pso);
+    last_bound_pso = saved.last_pso;
+    last_bound_shadow_pso = saved.last_shadow_pso;
+    currentBoundTexture = saved.bound_texture;
+    currentBoundHeightmapTexture = saved.bound_heightmap_texture;
+    m_pbrDefaultTablesBound = saved.pbr_tables_bound;
+    in_depth_prepass = saved.depth_prepass;
 }
 
 // ============================================================================

@@ -279,6 +279,20 @@ private:
     };
     FrameRenderTargetState m_currentRT;
 
+    struct ViewmodelPassState
+    {
+        bool active = false;
+        glm::mat4 projection = glm::mat4(1.0f);
+        FrameRenderTargetState target{};
+        ID3D12PipelineState* last_pso = nullptr;
+        ID3D12PipelineState* last_shadow_pso = nullptr;
+        TextureHandle bound_texture = INVALID_TEXTURE;
+        TextureHandle bound_heightmap_texture = INVALID_TEXTURE;
+        bool pbr_tables_bound = false;
+        bool depth_prepass = false;
+    };
+    ViewmodelPassState m_viewmodelPass;
+
     // Flush the main command list (close + submit), then reopen it for further work.
     // Used to interleave parallel command list submissions.
     void flushAndReopenCommandList();
@@ -511,6 +525,9 @@ public:
     void beginDepthPrepass() override;
     void endDepthPrepass() override;
     void renderMeshDepthOnly(const mesh& m) override;
+
+    bool beginViewmodelPass(const ViewmodelSettings& settings) override;
+    void endViewmodelPass() override;
 
     IGPUMesh* createMesh() override;
 

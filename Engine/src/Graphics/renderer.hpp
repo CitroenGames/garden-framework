@@ -1487,6 +1487,92 @@ public:
             render_api->replayCommandBuffer(all_cmds);
         }
 
+        // The viewmodel is a separate owner-scoped presentation pass. It is
+        // intentionally collected outside the world BVH/frustum: camera-bound
+        // geometry can sit inside the world near plane, while the backend uses
+        // the dedicated projection selected by ViewmodelSettings.
+        if (!view_context.viewer.isNull() &&
+            resolveEntityRef(registry, view_context.viewer) != entt::null &&
+            isViewmodelSettingsValid(view_context.viewmodel))
+        {
+            ViewContext viewmodel_context = view_context;
+            viewmodel_context.is_viewmodel_pass = true;
+            viewmodel_context.layer_mask = renderLayerMask(RenderLayer::ViewModel);
+
+            std::vector<entt::entity> viewmodel_opaque;
+            std::vector<entt::entity> viewmodel_transparent;
+            for (const entt::entity entity : mesh_view)
+            {
+                const auto& mesh_comp = mesh_view.get<MeshComponent>(entity);
+                const auto& renderable = mesh_view.get<RenderableComponent>(entity);
+                // Viewmodel visibility deliberately has an owner equality
+                // check in addition to the layer predicate. The predicate is
+                // shared with generic collection and admits every ViewModel
+                // layer; this pass may admit only the active viewer's rig.
+                if (!mesh_comp.m_mesh || !mesh_comp.m_mesh->visible ||
+                    renderable.owner != view_context.viewer ||
+                    !isRenderableVisible(registry, renderable, viewmodel_context) ||
+                    !find_render_pose(render_poses, entity))
+                    continue;
+                if (mesh_comp.m_mesh->transparent)
+                    viewmodel_transparent.push_back(entity);
+                else
+                    viewmodel_opaque.push_back(entity);
+            }
+
+            if ((!viewmodel_opaque.empty() || !viewmodel_transparent.empty()) &&
+                render_api->beginViewmodelPass(view_context.viewmodel))
+            {
+                ensure_meshes_uploaded(registry, viewmodel_opaque);
+                ensure_meshes_uploaded(registry, viewmodel_transparent);
+
+                const glm::mat4 viewmodel_projection = render_api->getProjectionMatrix();
+                const glm::mat4 viewmodel_view = render_api->getViewMatrix();
+                const glm::vec3 viewmodel_camera_position = c.getPosition();
+
+                RenderCommandBuffer opaque_commands;
+                opaque_commands.reserve(viewmodel_opaque.size());
+                for (const entt::entity entity : viewmodel_opaque)
+                {
+                    const auto* mesh_comp = registry.try_get<MeshComponent>(entity);
+                    const glm::mat4* model = find_render_pose(render_poses, entity);
+                    if (mesh_comp && mesh_comp->m_mesh && model)
+                        record_mesh_with_lod(*mesh_comp->m_mesh, *model, opaque_commands,
+                                             global_lighting, viewmodel_camera_position,
+                                             viewmodel_projection);
+                }
+                opaque_commands.sortWithViewDepth(viewmodel_view);
+                last_draw_calls += opaque_commands.size();
+                render_api->replayCommandBuffer(opaque_commands);
+
+                std::sort(viewmodel_transparent.begin(), viewmodel_transparent.end(),
+                    [&render_poses, &viewmodel_camera_position](entt::entity a, entt::entity b) {
+                        const glm::mat4* pose_a = find_render_pose(render_poses, a);
+                        const glm::mat4* pose_b = find_render_pose(render_poses, b);
+                        if (!pose_a) return false;
+                        if (!pose_b) return true;
+                        const glm::vec3 pos_a = glm::vec3((*pose_a)[3]);
+                        const glm::vec3 pos_b = glm::vec3((*pose_b)[3]);
+                        return glm::dot(viewmodel_camera_position - pos_a, viewmodel_camera_position - pos_a) >
+                               glm::dot(viewmodel_camera_position - pos_b, viewmodel_camera_position - pos_b);
+                    });
+                RenderCommandBuffer transparent_commands;
+                transparent_commands.reserve(viewmodel_transparent.size());
+                for (const entt::entity entity : viewmodel_transparent)
+                {
+                    const auto* mesh_comp = registry.try_get<MeshComponent>(entity);
+                    const glm::mat4* model = find_render_pose(render_poses, entity);
+                    if (mesh_comp && mesh_comp->m_mesh && model)
+                        record_mesh_with_lod(*mesh_comp->m_mesh, *model, transparent_commands,
+                                             global_lighting, viewmodel_camera_position,
+                                             viewmodel_projection);
+                }
+                last_draw_calls += transparent_commands.size();
+                render_api->replayCommandBuffer(transparent_commands);
+                render_api->endViewmodelPass();
+            }
+        }
+
         // Render skybox before post-processing (immediate mode - small sequential workload)
         if (sky_enabled)
             render_api->renderSkybox();

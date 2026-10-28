@@ -61,6 +61,57 @@ public:
     }
 };
 
+class ViewmodelCapturingHeadlessRenderAPI final : public HeadlessRenderAPI
+{
+public:
+    bool accept_viewmodel = true;
+    bool viewmodel_active = false;
+    int begin_viewmodel_count = 0;
+    int end_viewmodel_count = 0;
+    glm::mat4 projection = glm::mat4(1.0f);
+    glm::mat4 saved_projection = glm::mat4(1.0f);
+    std::vector<IGPUMesh*> world_draws;
+    std::vector<IGPUMesh*> viewmodel_draws;
+
+    glm::mat4 getProjectionMatrix() const override { return projection; }
+    glm::mat4 getViewMatrix() const override { return glm::mat4(1.0f); }
+
+    bool beginViewmodelPass(const ViewmodelSettings& settings) override
+    {
+        ++begin_viewmodel_count;
+        if (!accept_viewmodel || viewmodel_active || !isViewmodelSettingsValid(settings))
+            return false;
+        viewmodel_active = true;
+        saved_projection = projection;
+        const float fov = settings.fov_degrees == 0.0f ? 75.0f : settings.fov_degrees;
+        const float near_plane = settings.near_plane == 0.0f ? 0.1f : settings.near_plane;
+        projection = glm::perspectiveRH_ZO(glm::radians(fov), 1.0f,
+                                            near_plane, settings.far_plane);
+        return true;
+    }
+
+    void endViewmodelPass() override
+    {
+        if (!viewmodel_active)
+            return;
+        projection = saved_projection;
+        viewmodel_active = false;
+        ++end_viewmodel_count;
+    }
+
+    void replayCommandBuffer(const RenderCommandBuffer& commands) override
+    {
+        for (const DrawCommand& command : commands)
+        {
+            if (viewmodel_active)
+                viewmodel_draws.push_back(command.gpu_mesh);
+            else
+                world_draws.push_back(command.gpu_mesh);
+        }
+        HeadlessRenderAPI::replayCommandBuffer(commands);
+    }
+};
+
 static vertex g_dummy_vertex[1];
 
 static Frustum boxFrustum(const glm::vec3& min, const glm::vec3& max)
@@ -555,6 +606,91 @@ static bool testNonFiniteRenderPosesAreSkipped()
     return pass(name);
 }
 
+static bool testViewmodelDepthClearPassOwnershipAndRestore()
+{
+    const std::string name = "viewmodel pass draws only the live viewer owner and restores backend state";
+    entt::registry registry;
+    UploadedMeshDouble world_gpu;
+    UploadedMeshDouble own_viewmodel_gpu;
+    UploadedMeshDouble other_viewmodel_gpu;
+
+    const entt::entity owner = registry.create();
+    registry.emplace<IdentityComponent>(owner, IdentityComponent{EntityGuid{9, 1}});
+    const entt::entity other = registry.create();
+    registry.emplace<IdentityComponent>(other, IdentityComponent{EntityGuid{9, 2}});
+
+    const auto add_mesh = [&](entt::entity entity, UploadedMeshDouble& gpu,
+                              uint32_t layers, EntityRef mesh_owner) {
+        registry.emplace<TransformComponent>(entity, TransformComponent{});
+        auto render_mesh = std::make_shared<mesh>(g_dummy_vertex, 1);
+        render_mesh->gpu_mesh = &gpu;
+        render_mesh->owns_gpu_mesh = false;
+        render_mesh->aabb_min = glm::vec3(-0.25f);
+        render_mesh->aabb_max = glm::vec3(0.25f);
+        render_mesh->bounds_computed = true;
+        MeshComponent mesh_component;
+        mesh_component.m_mesh = std::move(render_mesh);
+        registry.emplace<MeshComponent>(entity, std::move(mesh_component));
+        RenderableComponent renderable;
+        renderable.layers = layers;
+        renderable.owner = mesh_owner;
+        registry.emplace<RenderableComponent>(entity, renderable);
+    };
+
+    const entt::entity world = registry.create();
+    add_mesh(world, world_gpu, renderLayerMask(RenderLayer::World), EntityRef{});
+    const entt::entity own_viewmodel = registry.create();
+    add_mesh(own_viewmodel, own_viewmodel_gpu, renderLayerMask(RenderLayer::ViewModel),
+             entityRefOf(registry, owner));
+    const entt::entity other_viewmodel = registry.create();
+    add_mesh(other_viewmodel, other_viewmodel_gpu, renderLayerMask(RenderLayer::ViewModel),
+             entityRefOf(registry, other));
+
+    ViewmodelCapturingHeadlessRenderAPI api;
+    renderer render_host(&api);
+    camera cam;
+    ViewContext view;
+    view.viewer = entityRefOf(registry, owner);
+    view.viewmodel.fov_degrees = 60.0f;
+    view.viewmodel.near_plane = 0.05f;
+    view.viewmodel.far_plane = 10.0f;
+    const glm::mat4 original_projection = api.projection;
+    render_host.render_frame(registry, cam, renderer::FrameTarget::RenderToTexture, view);
+
+    if (api.begin_viewmodel_count != 1 || api.end_viewmodel_count != 1 || api.viewmodel_active)
+        return fail(name, "viewmodel backend scope was not entered and exited exactly once");
+    if (!matrixNear(api.projection, original_projection))
+        return fail(name, "viewmodel scope did not restore the world projection");
+    if (std::find(api.viewmodel_draws.begin(), api.viewmodel_draws.end(), &own_viewmodel_gpu) == api.viewmodel_draws.end())
+        return fail(name, "own viewmodel mesh was not replayed inside the depth-clear scope");
+    if (std::find(api.viewmodel_draws.begin(), api.viewmodel_draws.end(), &other_viewmodel_gpu) != api.viewmodel_draws.end() ||
+        std::find(api.viewmodel_draws.begin(), api.viewmodel_draws.end(), &world_gpu) != api.viewmodel_draws.end())
+        return fail(name, "viewmodel scope admitted a foreign owner or world mesh");
+    if (std::find(api.world_draws.begin(), api.world_draws.end(), &world_gpu) == api.world_draws.end())
+        return fail(name, "world renderable was not preserved in the world pass");
+
+    const RenderableComponent before = registry.get<RenderableComponent>(own_viewmodel);
+    view.viewmodel.near_plane = view.viewmodel.far_plane;
+    const size_t draws_before_invalid = api.viewmodel_draws.size();
+    render_host.render_frame(registry, cam, renderer::FrameTarget::RenderToTexture, view);
+    if (api.begin_viewmodel_count != 1 || api.end_viewmodel_count != 1 ||
+        api.viewmodel_draws.size() != draws_before_invalid)
+        return fail(name, "invalid viewmodel settings did not skip only the sub-pass");
+    const RenderableComponent& after = registry.get<RenderableComponent>(own_viewmodel);
+    if (after.layers != before.layers || after.owner != before.owner || after.casts_shadow != before.casts_shadow)
+        return fail(name, "rendering mutated the owner renderable component");
+
+    ViewmodelCapturingHeadlessRenderAPI unsupported_api;
+    unsupported_api.accept_viewmodel = false;
+    renderer unsupported_renderer(&unsupported_api);
+    view.viewmodel.near_plane = 0.05f;
+    unsupported_renderer.render_frame(registry, cam, renderer::FrameTarget::RenderToTexture, view);
+    if (unsupported_api.begin_viewmodel_count != 1 || unsupported_api.end_viewmodel_count != 0 ||
+        !unsupported_api.viewmodel_draws.empty())
+        return fail(name, "unsupported backend changed world output by replaying viewmodel commands");
+    return pass(name);
+}
+
 int main()
 {
     bool ok = true;
@@ -565,5 +701,6 @@ int main()
     ok &= testRenderPoseFeedsLodAndSortConsumers();
     ok &= testLightConsumersUseComposedPose();
     ok &= testNonFiniteRenderPosesAreSkipped();
+    ok &= testViewmodelDepthClearPassOwnershipAndRestore();
     return ok ? 0 : 1;
 }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Components/IdentityComponent.hpp"
+#include "Graphics/ViewmodelPass.hpp"
 #include "Reflection/Reflector.hpp"
 
 #include <cstdint>
@@ -44,6 +45,7 @@ struct ViewContext
     EntityRef viewer{};
     uint32_t layer_mask = renderLayerMask(RenderLayer::World);
     bool is_viewmodel_pass = false;
+    ViewmodelSettings viewmodel{};
 };
 
 inline bool hasRenderLayer(const RenderableComponent& renderable, RenderLayer layer)

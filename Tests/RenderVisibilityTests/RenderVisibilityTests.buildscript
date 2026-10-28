@@ -7,12 +7,13 @@ if(Windows)
 }
 sources = src/main.cpp
 headers = src/**/*.hpp
-# renderer.hpp includes ImGuiManager.hpp even in CPU-only recorder tests.
-# Keep the target linked to EngineCore, but expose the public ImGui headers
-# required by that renderer header.
+# renderer.hpp invokes the EngineGraphics-owned UI managers at frame finalization.
+# The CPU-only fixture still instantiates that production path, so it must link
+# the DLL that owns those exported implementations.
 includes = src, ../../Engine/Thirdparty/imgui-docking
 target_link_libraries(
     PRIVATE EngineCore
+    PRIVATE EngineGraphics
 )
 multiprocessor = true
 simd = AdvancedVectorExtensions2

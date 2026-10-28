@@ -63,6 +63,10 @@ public:
     // Debug rendering
     virtual void renderDebugLines(const vertex* vertices, size_t vertex_count) override;
 
+    // R-3 is D3D12-first. Refuse the pass before any world-frame state changes.
+    bool beginViewmodelPass(const ViewmodelSettings&) override { return false; }
+    void endViewmodelPass() override {}
+
     // Depth prepass
     virtual void beginDepthPrepass() override;
     virtual void endDepthPrepass() override;
