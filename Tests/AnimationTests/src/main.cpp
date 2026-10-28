@@ -1,6 +1,7 @@
 #define GLM_ENABLE_EXPERIMENTAL
 
 #include "Animation/AnimationComponentMigration.hpp"
+#include "Animation/CompiledAnimationSerializer.hpp"
 #include "Animation/GltfAnimationLoader.hpp"
 #include "Animation/AnimationResourceValidation.hpp"
 #include "Animation/AnimationClip.hpp"
@@ -26,6 +27,8 @@
 
 #include <cmath>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -137,6 +140,209 @@ std::shared_ptr<const AnimationClip> makeClip(AnimationClipDefinition clip, int 
 {
     AnimationResourceError error;
     return AnimationResourceValidation::makeClip(std::move(clip), bone_count, error);
+}
+
+namespace fs = std::filesystem;
+
+bool readBinary(const fs::path& path, std::vector<unsigned char>& bytes)
+{
+    std::ifstream input(path, std::ios::binary);
+    if (!input) return false;
+    input.seekg(0, std::ios::end);
+    const auto length = input.tellg();
+    if (length < 0) return false;
+    input.seekg(0, std::ios::beg);
+    bytes.resize(static_cast<size_t>(length));
+    return bytes.empty() || static_cast<bool>(input.read(reinterpret_cast<char*>(bytes.data()), length));
+}
+
+bool writeBinary(const fs::path& path, const std::vector<unsigned char>& bytes)
+{
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    if (!output) return false;
+    output.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    return static_cast<bool>(output);
+}
+
+void writeU32(std::vector<unsigned char>& bytes, size_t offset, uint32_t value)
+{
+    for (size_t index = 0; index < 4; ++index)
+        bytes[offset + index] = static_cast<unsigned char>(value >> (index * 8));
+}
+
+uint32_t readU32(const std::vector<unsigned char>& bytes, size_t offset)
+{
+    return static_cast<uint32_t>(bytes[offset]) |
+        (static_cast<uint32_t>(bytes[offset + 1]) << 8) |
+        (static_cast<uint32_t>(bytes[offset + 2]) << 16) |
+        (static_cast<uint32_t>(bytes[offset + 3]) << 24);
+}
+
+void writeU64(std::vector<unsigned char>& bytes, size_t offset, uint64_t value)
+{
+    for (size_t index = 0; index < 8; ++index)
+        bytes[offset + index] = static_cast<unsigned char>(value >> (index * 8));
+}
+
+uint32_t crc32(const std::vector<unsigned char>& bytes, size_t offset)
+{
+    uint32_t crc = 0xffffffffu;
+    for (size_t index = offset; index < bytes.size(); ++index)
+    {
+        crc ^= bytes[index];
+        for (int bit = 0; bit < 8; ++bit)
+            crc = (crc >> 1) ^ (0xedb88320u & (0u - (crc & 1u)));
+    }
+    return ~crc;
+}
+
+bool rejectsCanm(const fs::path& path, const char* expected_code)
+{
+    CompiledAnimationData decoded;
+    AnimationResourceError error;
+    return !CompiledAnimationSerializer::load(decoded, path.string(), &error) &&
+        error.code == expected_code && decoded.skins.empty();
+}
+
+bool testCanmSerialization()
+{
+    const std::string name = "AN-2 CANM packages decode deterministically and reject corrupt bytes";
+    const fs::path root = fs::temp_directory_path() / "garden_an2_canm_tests";
+    std::error_code cleanup_error;
+    fs::remove_all(root, cleanup_error);
+    fs::create_directories(root, cleanup_error);
+    if (cleanup_error) return fail(name, "could not create temporary CANM directory");
+    const auto cleanup = [&]() { std::error_code ignored; fs::remove_all(root, ignored); };
+
+    const auto skeleton = makeRestSkeleton();
+    CompiledAnimationData source;
+    source.header.source_hash = 0x1122334455667788ull;
+    source.header.cook_fingerprint = 0x8877665544332211ull;
+    source.skins = {
+        {3, skeleton, {makeChainClip("run")}, "fixture/skin-three"},
+        {1, skeleton, {makeChainClip("idle")}, "fixture/skin-one"},
+    };
+    const fs::path package = root / "fixture.canim";
+    const fs::path package_second = root / "fixture-second.canim";
+    AnimationResourceError error;
+    if (!CompiledAnimationSerializer::save(source, package.string(), &error) || !error.code.empty() ||
+        !CompiledAnimationSerializer::save(source, package_second.string(), &error))
+    {
+        cleanup();
+        return fail(name, "valid immutable resources did not serialize: " + error.code);
+    }
+    std::vector<unsigned char> valid;
+    std::vector<unsigned char> repeated;
+    if (!readBinary(package, valid) || !readBinary(package_second, repeated) || valid != repeated ||
+        valid.size() <= CANM_HEADER_BYTES)
+    {
+        cleanup();
+        return fail(name, "CANM output was not deterministic");
+    }
+    CompiledAnimationData loaded;
+    if (!CompiledAnimationSerializer::load(loaded, package.string(), &error) || !error.code.empty() ||
+        loaded.header.source_hash != source.header.source_hash ||
+        loaded.header.cook_fingerprint != source.header.cook_fingerprint || loaded.skins.size() != 2 ||
+        loaded.skins[0].skin_index != 1 || loaded.skins[1].skin_index != 3 || !loaded.skins[0].resource ||
+        !loaded.skins[0].resource->findClip("idle") || !loaded.skins[1].resource->findClip("run"))
+    {
+        cleanup();
+        return fail(name, "valid CANM package did not publish canonical immutable resources");
+    }
+
+    const auto writeAndReject = [&](const char* filename, std::vector<unsigned char> bytes,
+                                    const char* expected_code) {
+        const fs::path corrupted = root / filename;
+        return writeBinary(corrupted, bytes) && rejectsCanm(corrupted, expected_code);
+    };
+    std::vector<unsigned char> bad = valid;
+    bad[0] ^= 0x01;
+    if (!writeAndReject("bad_magic.canim", bad, "CANM_MAGIC"))
+    {
+        cleanup(); return fail(name, "bad CANM magic was accepted or unnamed");
+    }
+    bad = valid;
+    writeU32(bad, 4, CANM_VERSION + 1);
+    if (!writeAndReject("bad_version.canim", bad, "CANM_VERSION"))
+    {
+        cleanup(); return fail(name, "bad CANM version was accepted or unnamed");
+    }
+    bad = valid;
+    writeU32(bad, 8, 0x10);
+    if (!writeAndReject("bad_flags.canim", bad, "CANM_FLAGS"))
+    {
+        cleanup(); return fail(name, "unknown CANM flags were accepted or unnamed");
+    }
+    bad = valid;
+    writeU32(bad, 12, 1);
+    if (!writeAndReject("bad_reserved.canim", bad, "CANM_RESERVED"))
+    {
+        cleanup(); return fail(name, "non-zero CANM reserved header was accepted");
+    }
+    bad = valid;
+    bad.push_back(0);
+    if (!writeAndReject("trailing_file.canim", bad, "CANM_TRAILING_BYTES"))
+    {
+        cleanup(); return fail(name, "trailing CANM file bytes were accepted or unnamed");
+    }
+    bad = valid;
+    bad.push_back(0);
+    writeU64(bad, 32, static_cast<uint64_t>(bad.size() - CANM_HEADER_BYTES));
+    writeU32(bad, 44, crc32(bad, CANM_HEADER_BYTES));
+    if (!writeAndReject("trailing_payload.canim", bad, "CANM_TRAILING_BYTES"))
+    {
+        cleanup(); return fail(name, "declared CANM payload trailing bytes were accepted");
+    }
+    bad = valid;
+    bad[CANM_HEADER_BYTES] ^= 0x80;
+    if (!writeAndReject("bad_crc.canim", bad, "CANM_CRC"))
+    {
+        cleanup(); return fail(name, "corrupt CANM payload did not fail checksum validation");
+    }
+    bad = valid;
+    bad[CANM_HEADER_BYTES + 8] = 0xff; // first source-signature byte
+    writeU32(bad, 44, crc32(bad, CANM_HEADER_BYTES));
+    if (!writeAndReject("bad_utf8.canim", bad, "CANM_UTF8"))
+    {
+        cleanup(); return fail(name, "invalid CANM UTF-8 was accepted or unnamed");
+    }
+    bad = valid;
+    // First skin: index + signature length + signature + bone/clip counts, then bone ID.
+    const uint32_t signature_length = static_cast<uint32_t>(source.skins[1].source_signature.size());
+    const size_t first_bone_id = CANM_HEADER_BYTES + 4 + 4 + signature_length + 4 + 4;
+    writeU32(bad, first_bone_id, 99);
+    writeU32(bad, 44, crc32(bad, CANM_HEADER_BYTES));
+    if (!writeAndReject("bad_bone.canim", bad, "ANIM_BONE_PARENT_ORDER"))
+    {
+        cleanup(); return fail(name, "invalid CANM bone table bypassed immutable skeleton validation");
+    }
+    bad = valid;
+    size_t first_channel = CANM_HEADER_BYTES + 4;
+    first_channel += 4 + readU32(bad, first_channel); // source signature
+    first_channel += 8; // bone and clip counts
+    const uint32_t bones = readU32(bad, CANM_HEADER_BYTES + 4 + 4 + signature_length);
+    for (uint32_t index = 0; index < bones; ++index)
+    {
+        first_channel += 8; // ID and parent
+        first_channel += 4 + readU32(bad, first_channel); // name
+        first_channel += 16 * sizeof(float) * 2; // inverse bind and rest matrices
+    }
+    first_channel += 4 + readU32(bad, first_channel); // clip name
+    first_channel += 4 + 4 + 4; // timing and channel count
+    writeU32(bad, first_channel + 4, 0x80);
+    writeU32(bad, 44, crc32(bad, CANM_HEADER_BYTES));
+    if (!writeAndReject("bad_channel_flags.canim", bad, "CANM_CHANNEL_FLAGS"))
+    {
+        cleanup(); return fail(name, "unknown CANM channel flags were accepted or unnamed");
+    }
+    bad = valid;
+    bad.resize(CANM_HEADER_BYTES + 7);
+    if (!writeAndReject("truncated_payload.canim", bad, "CANM_PAYLOAD_SIZE"))
+    {
+        cleanup(); return fail(name, "truncated CANM payload was accepted or unnamed");
+    }
+    cleanup();
+    return pass(name);
 }
 bool testImmutableResourceValidation()
 {
@@ -572,6 +778,7 @@ bool testReflectionAndMigration()
 int main()
 {
     bool ok = true;
+    ok = testCanmSerialization() && ok;
     ok = testImmutableResourceValidation() && ok;
     ok = testCheckedGltfAnimationSource() && ok;
     ok = testRestPoseAndOverlay() && ok;
