@@ -5,7 +5,7 @@
     "buildscript": "FPSShooter.buildscript",
     "default_game_mode": "GameMode",
     "default_game_state": "GameState",
-    "default_level": "assets/levels/main.level.json",
+    "default_level": "assets/levels/de_block01.level.json",
     "engine_id": "3d1f07a1f336",
     "engine_version": "1.0",
     "game_module": "bin/FPSShooter",

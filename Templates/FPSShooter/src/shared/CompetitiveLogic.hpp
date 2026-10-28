@@ -144,7 +144,7 @@ struct BombConfig {
     }
 };
 
-// Authored bomb sites for a shipped level (assets/levels/main.sites.json).
+// Authored bomb sites for the host-selected level (<stem>.sites.json).
 // Format: {"sites":[{"name":"A","centre":[x,y,z],"radius":r}, ...]}
 // Returns false (out cleared) on any malformed/insufficient data so the
 // caller can fall back to the Defender-spawn fallback above.

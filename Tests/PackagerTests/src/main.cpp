@@ -674,6 +674,26 @@ bool packageIntegrationBinariesAvailable(std::vector<std::string>& missing)
     missing = ProjectPackager::missingEngineBinaries(EnginePaths::getExecutableDir().string(), true);
     return missing.empty();
 }
+
+bool testSelectedLevelArtifactPathNormalization()
+{
+    const std::string name = "Selected level artifact path normalization";
+    const auto source = ProjectManager::normalizeSelectedLevelArtifactPath(
+        "assets/levels/../levels/de_block01.level.json");
+    if (!source || *source != "assets/levels/de_block01.level.json")
+        return fail(name, "source artifact was not normalized");
+
+    const auto packaged = ProjectManager::normalizeSelectedLevelArtifactPath(
+        "assets/levels/de_block01.level");
+    if (!packaged || *packaged != "assets/levels/de_block01.level")
+        return fail(name, "packaged artifact was not accepted");
+
+    for (const std::string& malformed : {"../escape.level.json", "assets/levels/escape.json", "", "C:/outside.level"})
+        if (ProjectManager::normalizeSelectedLevelArtifactPath(malformed))
+            return fail(name, "invalid artifact was accepted: " + malformed);
+
+    return pass(name);
+}
 } // namespace
 
 int main()
@@ -684,6 +704,7 @@ int main()
     ok &= testMissingBinariesDetected();
     ok &= testMissingAssetDirectoryFailsBeforeCopy();
     ok &= testPackagePathsCannotEscapeRoots();
+    ok &= testSelectedLevelArtifactPathNormalization();
 
     std::vector<std::string> missing_runtime_files;
     if (!packageIntegrationBinariesAvailable(missing_runtime_files))

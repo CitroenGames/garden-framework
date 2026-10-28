@@ -6,7 +6,7 @@
 // (world, entt::registry, shared component storage). The compatibility token
 // therefore includes both the source API revision and the C++ runtime/STL ABI
 // shape that changes between Debug/Release builds on MSVC.
-#define GARDEN_MODULE_API_REVISION 6
+#define GARDEN_MODULE_API_REVISION 7
 
 #if defined(_MSC_VER)
 #   define GARDEN_MODULE_COMPILER_FAMILY 1
@@ -68,6 +68,12 @@ struct EngineServices
     // FNV-1a hash of the exact level file loaded by the host (0 = no level or
     // unavailable source). Added in API revision 5 for the v3 network handshake.
     uint32_t             level_hash      = 0;
+
+    // Normalized project-relative source or packaged level artifact selected by
+    // the host. Host-owned storage remains valid until module shutdown. A null
+    // value means the host has no selected on-disk level (for example, an
+    // unsaved editor snapshot).
+    const char*          selected_level_path = nullptr;
 };
 
 // Platform export macro for game DLLs

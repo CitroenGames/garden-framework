@@ -24,6 +24,8 @@
 #include "shared/WorldItemLifecycle.hpp"
 #include "shared/GrenadeEffects.hpp"
 #include "shared/CompetitiveLogic.hpp"
+#include "shared/CompetitiveMapData.hpp"
+#include "shared/SelectedLevelSidecars.hpp"
 #include "shared/BombSiteTriggers.hpp"
 #include "shared/BuyZoneTriggers.hpp"
 #include "shared/BotLogic.hpp"
@@ -46,6 +48,8 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <fstream>
+#include <iterator>
 #include <glm/gtc/quaternion.hpp>
 #include <utility>
 
@@ -54,6 +58,11 @@ static Net::ServerNetworkManager g_server_network;
 static FpsServer::LagCompensationTelemetry g_lag_compensation_telemetry;
 static Game::GameRules g_game_rules;
 static FpsLogic::ModeComposition g_mode_composition;
+static FpsContent::CompetitiveMapData g_competitive_map_data;
+static FpsContent::SelectedLevelSidecars g_selected_level_sidecars;
+static bool g_selected_level_sidecars_valid = false;
+static bool g_competitive_map_sidecar_valid = false;
+static bool g_competitive_map_ready = false;
 
 // Competitive mode state lives in the active world's registry context.  The
 // aliases below deliberately keep the server integration readable while making
@@ -701,23 +710,38 @@ static void consumeBotInputSample(uint16_t client_id, entt::entity e, const Inpu
     runtime.last_weapon_select[client_id] = sel;
 }
 
-// The host changes CWD to the selected project root and initializes
-// AssetManager with that project's asset root before the module loads.  The
-// current module API exposes only a level hash, not the selected level path,
-// so the explicit template asset contract remains levels/main.nav.  The
-// result is resolved by AssetManager rather than probing checkout-relative
-// paths.  A future generic selected-level-path API can derive the stem here.
-static std::string resolveBotNavAssetPath()
+// The generic host supplies the selected project-relative level artifact.
+// Resolve all template sidecars together once per init so navigation, routes,
+// competitive markers, and bomb sites cannot accidentally span different maps.
+static bool configureSelectedLevelSidecars()
 {
-    return Assets::AssetManager::get().resolveAssetPath("levels/main.nav");
+    g_selected_level_sidecars.clear();
+    g_selected_level_sidecars_valid = false;
+    std::string error;
+    const char* selected = g_server_services ? g_server_services->selected_level_path : nullptr;
+    if (!FpsContent::resolveSelectedLevelSidecars(selected ? selected : "",
+                                                  g_selected_level_sidecars, &error)) {
+        LOG_ENGINE_ERROR("FPSShooter selected-level sidecar resolution failed: {}", error);
+        return false;
+    }
+    g_selected_level_sidecars_valid = true;
+    LOG_ENGINE_INFO("FPSShooter selected level stem={} competitive={} sites={} nav={} ai={}",
+        g_selected_level_sidecars.stem,
+        g_selected_level_sidecars.competitive_path,
+        g_selected_level_sidecars.sites_path,
+        g_selected_level_sidecars.nav_path,
+        g_selected_level_sidecars.ai_path);
+    return true;
 }
 
-// Route data follows the same project asset-root contract as the cooked nav
-// mesh. It is template content, not an engine-level asset type, until a
-// generic selected-level sidecar API exists.
-static std::string resolveBotRouteAssetPath()
+static const std::string& resolveBotNavAssetPath()
 {
-    return Assets::AssetManager::get().resolveAssetPath("levels/main.ai.json");
+    return g_selected_level_sidecars.nav_path;
+}
+
+static const std::string& resolveBotRouteAssetPath()
+{
+    return g_selected_level_sidecars.ai_path;
 }
 
 static bool validateAuthoredRouteDataOnNavMesh(Bots::BotWorldRuntime& runtime)
@@ -791,8 +815,8 @@ static bool loadBotNavMesh()
 }
 
 // Explicit opt-in bake (FPS_BAKE_NAV=1): generate from the loaded level registry,
-// save to the first loadBotNavMesh candidate whose directory exists, verify by
-// round-trip load. Never writes on generation failure. Runtime (no env) unchanged.
+// save to the selected level nav sidecar, verify by round-trip load. Never
+// writes on generation failure. Runtime (no env) unchanged.
 static bool bakeBotNavMeshIfRequested()
 {
     const char* env = std::getenv("FPS_BAKE_NAV");
@@ -1232,34 +1256,130 @@ static void competitiveFreezeRespawnAll()
             LOG_ENGINE_ERROR("Competitive late-join spawn deferred for client {}", cid);
     }
 }
+
+// D11 owns competitive starts and buy volumes in a template-local sidecar.
+// The asset root comes from the selected project host; never use CWD probes
+// here because a package must resolve the same marker path as the source tree.
+enum class CompetitiveMapLoadResult : uint8_t { Absent, Loaded, Rejected };
+
+static CompetitiveMapLoadResult loadCompetitiveMapData(FpsContent::CompetitiveMapData& out)
+{
+    out.clear();
+    const std::string& path = g_selected_level_sidecars.competitive_path;
+    std::error_code exists_error;
+    const bool exists = std::filesystem::exists(path, exists_error);
+    if (exists_error) {
+        LOG_ENGINE_ERROR("Competitive map: could not inspect resolved sidecar {} ({})", path, exists_error.message());
+        return CompetitiveMapLoadResult::Rejected;
+    }
+    if (!exists) {
+        return CompetitiveMapLoadResult::Absent;
+    }
+
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        LOG_ENGINE_ERROR("Competitive map: resolved sidecar {} is unreadable", path);
+        return CompetitiveMapLoadResult::Rejected;
+    }
+    const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    FpsContent::CompetitiveMapData parsed;
+    std::string error;
+    if (!FpsContent::parseCompetitiveMapData(text, parsed, &error)) {
+        LOG_ENGINE_ERROR("Competitive map: resolved sidecar {} rejected ({})", path, error);
+        return CompetitiveMapLoadResult::Rejected;
+    }
+    out = std::move(parsed);
+    LOG_ENGINE_INFO("Competitive map: loaded {} team spawns and {} buy zones from {}",
+        out.team_spawns.size(), out.buy_zones.size(), path);
+    return CompetitiveMapLoadResult::Loaded;
+}
+
+// This runs before the competitive context and network callbacks are created.
+// A malformed present file is never replaced by legacy values.  An absent file
+// is allowed only for noncompetitive development modes.
+static bool configureCompetitiveMapData()
+{
+    g_competitive_map_data.clear();
+    g_competitive_map_sidecar_valid = false;
+    g_competitive_map_ready = false;
+
+    FpsContent::CompetitiveMapData parsed;
+    const CompetitiveMapLoadResult result = loadCompetitiveMapData(parsed);
+    if (result == CompetitiveMapLoadResult::Rejected)
+        return false;
+    if (result == CompetitiveMapLoadResult::Absent) {
+        if (g_competitive) {
+            LOG_ENGINE_ERROR("Competitive map activation failed: {} is required for competitive mode",
+                g_selected_level_sidecars.competitive_logical_path);
+            return false;
+        }
+        LOG_ENGINE_INFO("Competitive map: development fallback remains active because {} is absent",
+            g_selected_level_sidecars.competitive_logical_path);
+        return true;
+    }
+
+    // Parse completion is the atomic application boundary: no GameRules or ECS
+    // marker state changed before the whole document passed validation.
+    g_game_rules.setTeamSpawnPoints(FpsContent::competitiveMapTeamSpawnPoints(parsed));
+    g_competitive_map_data = std::move(parsed);
+    g_competitive_map_sidecar_valid = true;
+    return true;
+}
+
 // Load authored bomb sites from the FPSShooter sidecar. The fallback applies
 // only when no authored sidecar exists; invalid authored data fails closed.
 static bool loadAuthoredBombSites(std::vector<Competitive::BombSite>& out, bool& file_found)
 {
-    static bool s_tried = false; static std::vector<Competitive::BombSite> s_sites; static bool s_ok = false; static bool s_file_found = false;
-    if (s_tried) { out = s_sites; file_found = s_file_found; return s_ok; }
-    s_tried = true;
-    static const char* kCandidates[] = {"assets/levels/main.sites.json", "Templates/FPSShooter/assets/levels/main.sites.json", "../Templates/FPSShooter/assets/levels/main.sites.json"};
-    for (const char* path : kCandidates) {
-        FILE* f = std::fopen(path, "rb"); if (!f) continue;
-        s_file_found = true;
-        std::string text; char buf[4096]; size_t n = 0; while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) text.append(buf, n);
-        std::fclose(f);
-        std::string err;
-        if (!Competitive::parseAuthoredBombSites(text, s_sites, &err)) { LOG_ENGINE_ERROR("Bomb: authored sites {} rejected ({}); planting disabled", path, err); s_sites.clear(); file_found = true; return false; }
-        const auto* runtime = g_server_services && g_server_services->game_world
-            ? g_server_services->game_world->registry.ctx().find<Bots::BotWorldRuntime>() : nullptr;
-        if (runtime && runtime->hasValidNavMesh()) {
-            for (const auto& s : s_sites) { glm::vec3 near_pt(0); if (!Navigation::NavMeshPathfinder::findNearestPoly(runtime->navmesh, s.centre, near_pt)) { LOG_ENGINE_ERROR("Bomb: authored site {} off navmesh; planting disabled", (int)s.site_index); s_sites.clear(); file_found = true; return false; } }
-        }
-        s_ok = true; out = s_sites;
-        file_found = true;
-        LOG_ENGINE_INFO("Bomb: authored sites loaded from {} count={}", path, (int)s_sites.size());
-        return true;
-    }
-    LOG_ENGINE_INFO("Bomb: no authored sites file found; using fallback");
+    out.clear();
     file_found = false;
-    return false;
+    if (!g_selected_level_sidecars_valid) {
+        LOG_ENGINE_ERROR("Bomb: selected-level sidecars are unavailable; planting is disabled");
+        file_found = true;
+        return false;
+    }
+
+    const std::string& path = g_selected_level_sidecars.sites_path;
+    std::error_code exists_error;
+    const bool exists = std::filesystem::exists(path, exists_error);
+    if (exists_error) {
+        LOG_ENGINE_ERROR("Bomb: could not inspect authored sites {} ({}); planting is disabled",
+            path, exists_error.message());
+        file_found = true;
+        return false;
+    }
+    if (!exists) {
+        LOG_ENGINE_INFO("Bomb: no authored sites file at {}; using fallback when mode permits", path);
+        return false;
+    }
+
+    file_found = true;
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        LOG_ENGINE_ERROR("Bomb: authored sites {} are unreadable; planting is disabled", path);
+        return false;
+    }
+    const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    std::vector<Competitive::BombSite> parsed;
+    std::string error;
+    if (!Competitive::parseAuthoredBombSites(text, parsed, &error)) {
+        LOG_ENGINE_ERROR("Bomb: authored sites {} rejected ({}); planting is disabled", path, error);
+        return false;
+    }
+    const auto* runtime = g_server_services && g_server_services->game_world
+        ? g_server_services->game_world->registry.ctx().find<Bots::BotWorldRuntime>() : nullptr;
+    if (runtime && runtime->hasValidNavMesh()) {
+        for (const Competitive::BombSite& site : parsed) {
+            glm::vec3 nearest(0.0f);
+            if (!Navigation::NavMeshPathfinder::findNearestPoly(runtime->navmesh, site.centre, nearest)) {
+                LOG_ENGINE_ERROR("Bomb: authored site {} from {} is off the selected navmesh; planting is disabled",
+                    static_cast<int>(site.site_index), path);
+                return false;
+            }
+        }
+    }
+    out = std::move(parsed);
+    LOG_ENGINE_INFO("Bomb: authored sites loaded from {} count={}", path, static_cast<int>(out.size()));
+    return true;
 }
 static void configureBombSitesFallback();
 static void ensureAuthoredBombSiteTriggers(world& w, const std::vector<Competitive::BombSite>& sites)
@@ -1318,34 +1438,65 @@ static bool configureBombSites(world& w)
         return false;
     }
     g_bomb_sites_authored = false;
+    if (g_competitive) {
+        LOG_ENGINE_ERROR("Bomb: competitive mode requires {}", g_selected_level_sidecars.sites_logical_path);
+        return false;
+    }
     configureBombSitesFallback();
     return false;
 }
-static void ensureBuyZoneTriggers(world& w)
+static void clearBuyZoneTriggers(world& w)
 {
     auto& registry = w.registry;
     auto zones = registry.view<BuyZoneComponent>();
-    if (!zones.empty()) {
-        size_t authored_count = 0;
-        for (entt::entity e : zones) {
-            ++authored_count;
-            if (!registry.all_of<TransformComponent, ColliderComponent, TriggerComponent>(e)) {
-                LOG_ENGINE_ERROR("BuyZone: authored zone {} is missing transform/collider/trigger; zone is disabled",
-                    static_cast<uint32_t>(e));
-                continue;
-            }
-            if (!registry.all_of<TriggerOverlapState>(e) &&
-                w.getPhysicsSystem().createTriggerBody(registry, e).IsInvalid())
-                LOG_ENGINE_ERROR("BuyZone: failed to create authored trigger {}", static_cast<uint32_t>(e));
-        }
-        LOG_ENGINE_INFO("BuyZone: using {} authored team trigger(s)", authored_count);
-        return;
+    std::vector<entt::entity> existing;
+    for (const entt::entity e : zones)
+        existing.push_back(e);
+    for (const entt::entity e : existing) {
+        w.getPhysicsSystem().removeBody(e);
+        if (registry.valid(e)) registry.destroy(e);
     }
+}
+
+static bool ensureAuthoredBuyZoneTriggers(world& w, const FpsContent::CompetitiveMapData& data)
+{
+    auto& registry = w.registry;
+    clearBuyZoneTriggers(w);
+    std::vector<entt::entity> created;
+    uint32_t trigger_id = 1000;
+    for (const FpsContent::CompetitiveBuyZone& zone : data.buy_zones) {
+        const entt::entity e = registry.create();
+        created.push_back(e);
+        registry.emplace<TransformComponent>(e, zone.centre.x, zone.centre.y, zone.centre.z);
+        ColliderComponent collider;
+        collider.shape_type = ColliderShapeType::Sphere;
+        collider.sphere_radius = zone.radius;
+        registry.emplace<ColliderComponent>(e, std::move(collider));
+        registry.emplace<TriggerComponent>(e, TriggerComponent{true, trigger_id++, true});
+        registry.emplace<BuyZoneComponent>(e, BuyZoneComponent{Competitive::teamId(zone.team)});
+        if (w.getPhysicsSystem().createTriggerBody(registry, e).IsInvalid()) {
+            LOG_ENGINE_ERROR("BuyZone: failed to create competitive sidecar trigger {}", zone.id);
+            for (const entt::entity created_entity : created) {
+                w.getPhysicsSystem().removeBody(created_entity);
+                if (registry.valid(created_entity)) registry.destroy(created_entity);
+            }
+            return false;
+        }
+    }
+    LOG_ENGINE_INFO("BuyZone: created {} competitive sidecar trigger(s)", created.size());
+    return true;
+}
+
+static bool ensureBuyZoneTriggers(world& w)
+{
+    auto& registry = w.registry;
+    if (g_competitive_map_sidecar_valid)
+        return ensureAuthoredBuyZoneTriggers(w, g_competitive_map_data);
 
     const float radius = g_round_system.config.buy_zone_radius;
     if (!std::isfinite(radius) || radius <= 0.0f) {
         LOG_ENGINE_ERROR("BuyZone: invalid spawn fallback radius {}; no buy zones created", radius);
-        return;
+        return false;
     }
 
     uint32_t trigger_id = 1000;
@@ -1373,6 +1524,7 @@ static void ensureBuyZoneTriggers(world& w)
     }
     LOG_ENGINE_INFO("BuyZone: created {} team-specific spawn fallback trigger(s), radius={:.2f} m",
         created, radius);
+    return created != 0;
 }
 static void configureBombSitesFallback()
 {
@@ -1875,6 +2027,10 @@ static bool spawnPlayerForClient(uint16_t client_id, uint8_t requested_team)
         return false;
 
     if (g_competitive) {
+        if (!g_competitive_map_ready) {
+            LOG_ENGINE_ERROR("Competitive spawn rejected for client {}: competitive markers are not activated", client_id);
+            return false;
+        }
         if (g_sessions.contains(client_id)) {
             const Competitive::SessionSpawnDecision spawn_decision =
                 g_sessions.decideSpawn(client_id, g_round_system.state.phase, false);
@@ -1989,6 +2145,13 @@ GAME_API bool gardenServerInit(EngineServices* services)
     const char* mode_env = std::getenv("FPS_GAME_MODE");
     g_mode_composition = FpsLogic::ModeComposition::fromEnvironmentValue(
         mode_env ? std::string_view(mode_env) : std::string_view{});
+    // Reset retained template state before resolving this world's sidecar.
+    // This prevents a preceding level from supplying stale competitive starts.
+    g_game_rules = Game::GameRules{};
+    if (!configureSelectedLevelSidecars()) {
+        LOG_ENGINE_ERROR("FPSShooter initialization rejected before mode setup");
+        return false;
+    }
 
     // A repeated init can reuse the world registry.  Remove every competitive
     // authority and bot pawn before composing the selected mode so DM/TDM
@@ -2002,6 +2165,10 @@ GAME_API bool gardenServerInit(EngineServices* services)
         if (const char* lim = std::getenv("FPS_SCORE_LIMIT")) { int v = std::atoi(lim); if (v > 0) cfg.score_limit = v; }
         if (const char* tl = std::getenv("FPS_TIME_LIMIT")) { float v = (float)std::atof(tl); if (v > 0) cfg.time_limit_seconds = v; }
         g_game_rules.configureMode(g_mode_composition, cfg);
+        if (!configureCompetitiveMapData()) {
+            LOG_ENGINE_ERROR("FPSShooter competitive marker setup failed before network initialization");
+            return false;
+        }
         if (g_competitive) {
             Competitive::ModeConfig ccfg; // all [P]/[V] values are data here
             if (const char* v = std::getenv("FPS_ROUND_SECONDS")) { float f = (float)std::atof(v); if (f > 0) ccfg.round_seconds = f; }
@@ -2127,6 +2294,11 @@ GAME_API bool gardenServerInit(EngineServices* services)
             return;
         }
 
+        if (!g_competitive_map_ready) {
+            LOG_ENGINE_ERROR("Competitive session rejected for client {}: competitive markers are not activated", client_id);
+            return;
+        }
+
         // Competitive admission deliberately creates no pawn. The client
         // receives the established ROUND_STATE and uses the existing team
         // request/result exchange to choose a side before a spawn is built.
@@ -2212,7 +2384,7 @@ GAME_API void gardenServerUpdate(float delta_time)
     // Gameplay.
     g_server_network.advanceSimulationTicks(1);
     updateServerPlayerCollisions(*w);
-    if (g_competitive) {
+    if (g_competitive && g_competitive_map_ready) {
         Competitive::RoundTickInput rin;
         auto pv = w->registry.view<NetworkedEntity, TeamComponent, FpsHealthComponent>();
         for (auto e : pv) {
@@ -2299,20 +2471,29 @@ GAME_API void gardenServerOnLevelLoaded()
     // and registry are reused by a host level transition.
     despawnBotsForLevelTransition(game_world);
     resetBotRuntime(game_world);
+    // The host hashes Project.default_level and passes the selected artifact.
+    g_server_network.setLevelHash(g_server_services->level_hash);
     if (g_competitive) {
+        // Apply every marker authority before admitting a session.  A valid
+        // competitive document alone cannot activate a map with missing or
+        // malformed same-stem bomb-site content.
+        if (!g_competitive_map_sidecar_valid ||
+            !(g_competitive_map_ready = ensureBuyZoneTriggers(game_world)) ||
+            !configureBombSites(game_world)) {
+            g_competitive_map_ready = false;
+            LOG_ENGINE_ERROR("Competitive map activation failed: no session, pawn, or round will be admitted");
+            return;
+        }
         // The runtime is started by gardenServerInit after the world exists.
         // Repeated level notifications must only republish that world's
         // current mirror; they do not install another callback set or carry
         // a previous world snapshot forward.
         competitiveContext().createMatchSnapshot(game_world.registry);
         (void)competitiveContext().syncMatchSnapshot(game_world.registry);
-        ensureBuyZoneTriggers(game_world);
     }
     game_world.getPhysicsSystem().optimizeBroadPhase();
-    // The host hashes Project.default_level and passes the selected artifact.
-    g_server_network.setLevelHash(g_server_services->level_hash);
     (void)bakeBotNavMeshIfRequested();
-    if (g_competitive && botCountFromEnv() > 0) {
+    if (g_competitive && g_competitive_map_ready && botCountFromEnv() > 0) {
         botRuntime().target_count = botCountFromEnv();
         if (loadBotNavMesh()) (void)loadBotRouteData();
     }

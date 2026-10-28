@@ -1733,6 +1733,8 @@ void EditorApp::beginPlay()
             // PIE runs the editor's in-memory snapshot, which may include
             // unsaved edits and has no loaded-file byte source.
             m_server_services.level_hash    = 0;
+            m_server_services.selected_level_path = m_selected_level_artifact_path.empty()
+                ? nullptr : m_selected_level_artifact_path.c_str();
 
             if (!m_game_module.serverInit(&m_server_services))
             {
@@ -1767,6 +1769,8 @@ void EditorApp::beginPlay()
                 m_client_services.level_manager    = &m_level_manager;
                 m_client_services.api_version      = GARDEN_MODULE_API_VERSION;
                 m_client_services.level_hash       = 0;
+                m_client_services.selected_level_path = m_selected_level_artifact_path.empty()
+                    ? nullptr : m_selected_level_artifact_path.c_str();
                 m_client_services.connect_address  = "127.0.0.1";
                 m_client_services.connect_port     = port;
 
@@ -1836,6 +1840,8 @@ void EditorApp::beginPlay()
                                 inst->services.level_manager    = &m_level_manager;
                                 inst->services.api_version      = GARDEN_MODULE_API_VERSION;
                                 inst->services.level_hash        = 0;
+                                inst->services.selected_level_path = m_selected_level_artifact_path.empty()
+                                    ? nullptr : m_selected_level_artifact_path.c_str();
                                 inst->services.connect_address  = "127.0.0.1";
                                 inst->services.connect_port     = port;
 
@@ -1928,6 +1934,8 @@ void EditorApp::beginPlay()
             m_client_services.level_manager    = &m_level_manager;
             m_client_services.api_version      = GARDEN_MODULE_API_VERSION;
             m_client_services.level_hash       = 0;
+            m_client_services.selected_level_path = m_selected_level_artifact_path.empty()
+                ? nullptr : m_selected_level_artifact_path.c_str();
             m_client_services.connect_address  = "127.0.0.1";
             m_client_services.connect_port     = port;
 
@@ -1990,6 +1998,8 @@ void EditorApp::beginPlay()
                             inst->services.level_manager    = &m_level_manager;
                             inst->services.api_version      = GARDEN_MODULE_API_VERSION;
                             inst->services.level_hash        = 0;
+                            inst->services.selected_level_path = m_selected_level_artifact_path.empty()
+                                ? nullptr : m_selected_level_artifact_path.c_str();
                             inst->services.connect_address  = "127.0.0.1";
                             inst->services.connect_port     = port;
 
@@ -2051,6 +2061,8 @@ void EditorApp::beginPlay()
             m_client_services.level_manager    = &m_level_manager;
             m_client_services.api_version      = GARDEN_MODULE_API_VERSION;
             m_client_services.level_hash       = 0;
+            m_client_services.selected_level_path = m_selected_level_artifact_path.empty()
+                ? nullptr : m_selected_level_artifact_path.c_str();
 
             m_game_module.registerComponents(&m_reflection);
             m_level_manager.applyGameplayFrameworkSettings(m_play_snapshot.metadata, *m_play_world);
@@ -3751,6 +3763,7 @@ void EditorApp::newLevel()
     m_level_data = LevelData{};
     m_level_settings.metadata = &m_level_data.metadata;
     m_current_save_path.clear();
+    m_selected_level_artifact_path.clear();
     m_state.unsaved_changes = false;
     m_undo.clear();
 
@@ -3786,6 +3799,8 @@ void EditorApp::openLevel(const std::string& path)
     buildMeshPathCache();
 
     m_current_save_path = path;
+    const auto selected_level_path = ProjectManager::normalizeSelectedLevelArtifactPath(path);
+    m_selected_level_artifact_path = selected_level_path.value_or("");
     std::strncpy(m_save_path_buf, path.c_str(), sizeof(m_save_path_buf) - 1);
     m_save_path_buf[sizeof(m_save_path_buf) - 1] = '\0';
     m_state.unsaved_changes = false;

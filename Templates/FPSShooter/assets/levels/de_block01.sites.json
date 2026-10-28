@@ -1,0 +1,10 @@
+{
+  "format": "fpsshooter_bomb_sites",
+  "version": 1,
+  "level": "de_block01",
+  "note": "A and B centres are the centres of the authored source-map site rectangles: A x=50,z=34,width=7,depth=7; B x=7,z=7,width=7,depth=7. Their 3m radii stay inside those 7m square planted areas.",
+  "sites": [
+    { "name": "A", "centre": [53.5, 1.2, 37.5], "radius": 3.0 },
+    { "name": "B", "centre": [10.5, 1.2, 10.5], "radius": 3.0 }
+  ]
+}

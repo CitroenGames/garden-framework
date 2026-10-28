@@ -166,7 +166,15 @@ int main(int argc, char* argv[])
 
     // Load level
     LevelData level_data;
-    std::string level_path = project_manager.getDescriptor().default_level;
+    const auto selected_level_artifact = ProjectManager::normalizeSelectedLevelArtifactPath(
+        project_manager.getDescriptor().default_level);
+    if (!project_manager.getDescriptor().default_level.empty() && !selected_level_artifact)
+    {
+        LOG_ENGINE_FATAL("Selected level path is invalid or escapes the project: {}",
+            project_manager.getDescriptor().default_level);
+        shutdown_server(1);
+    }
+    std::string level_path = selected_level_artifact.value_or("");
     uint32_t loaded_level_hash = 0;
     if (!level_path.empty())
     {
@@ -204,6 +212,7 @@ int main(int argc, char* argv[])
     services.level_manager = &level_manager;
     services.api_version = GARDEN_MODULE_API_VERSION;
     services.level_hash = loaded_level_hash;
+    services.selected_level_path = selected_level_artifact ? selected_level_artifact->c_str() : nullptr;
     services.listen_port = listen_port;
 
     PrefabManager::get().initialize(&reflection, render_api);

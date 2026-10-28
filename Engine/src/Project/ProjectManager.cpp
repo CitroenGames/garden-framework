@@ -61,6 +61,39 @@ bool ProjectManager::loadProject(const std::string& project_file_path)
     return true;
 }
 
+std::optional<std::string> ProjectManager::normalizeSelectedLevelArtifactPath(
+    const std::string& project_relative_path)
+{
+    if (project_relative_path.empty())
+        return std::nullopt;
+
+    const fs::path input(project_relative_path);
+    if (input.is_absolute() || input.has_root_name() || input.has_root_directory())
+        return std::nullopt;
+
+    const fs::path normalized = input.lexically_normal();
+    if (normalized.empty() || normalized == ".")
+        return std::nullopt;
+
+    for (const fs::path& component : normalized)
+    {
+        if (component == "..")
+            return std::nullopt;
+    }
+
+    const std::string normalized_path = normalized.generic_string();
+    constexpr const char* source_suffix = ".level.json";
+    constexpr const char* packaged_suffix = ".level";
+    const bool is_source_level = normalized_path.size() > std::char_traits<char>::length(source_suffix) &&
+        normalized_path.ends_with(source_suffix);
+    const bool is_packaged_level = normalized_path.size() > std::char_traits<char>::length(packaged_suffix) &&
+        normalized_path.ends_with(packaged_suffix);
+    if (!is_source_level && !is_packaged_level)
+        return std::nullopt;
+
+    return normalized_path;
+}
+
 bool ProjectManager::createProjectFromTemplate(const std::string& template_path,
                                                 const std::string& destination_dir,
                                                 const std::string& project_name)

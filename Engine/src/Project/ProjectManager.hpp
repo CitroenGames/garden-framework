@@ -1,6 +1,7 @@
 #pragma once
 
 #include "EngineExport.h"
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -60,6 +61,13 @@ public:
 
     // Resolve a project-relative path to absolute
     std::string resolveProjectPath(const std::string& relative) const;
+
+    // Normalizes a selected level artifact path for consumption by a runtime
+    // module. The returned value is always project-relative and uses forward
+    // slashes. Only source .level.json and packaged .level artifacts are part
+    // of the level-host contract. Invalid or escaping paths return nullopt.
+    static std::optional<std::string> normalizeSelectedLevelArtifactPath(
+        const std::string& project_relative_path);
 
 private:
     ProjectDescriptor m_descriptor;

@@ -5,9 +5,16 @@
 #include "Navigation/NavMeshGenerator.hpp"
 #include "Navigation/NavMeshPathfinder.hpp"
 #include "Navigation/NavMeshSerializer.hpp"
+#include "Project/ProjectManager.hpp"
 #include "shared/BotNavigationRuntime.hpp"
+#include "shared/CompetitiveLogic.hpp"
+#include "shared/CompetitiveMapData.hpp"
+#include "shared/SelectedLevelSidecars.hpp"
+#include <array>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <memory>
 #include <string>
 #include <vector>
@@ -294,5 +301,231 @@ bool testNavMeshHierarchyStaleParentRootsBake()
         return fail(name, "stale parent did not use the child local root pose");
     if (glm::distance(nearest, transform.position) > 0.75f)
         return fail(name, "stale parent bake did not remain at the root pose");
+    return pass(name);
+}
+
+static std::filesystem::path findFpSShooterProjectDescriptor()
+{
+    // GameplayTests can be launched from the checkout root or bin/. The
+    // selected-level contract begins with the project descriptor, not a
+    // hardcoded content stem or a process-working-directory sidecar probe.
+    constexpr std::array<const char*, 3> candidates = {
+        "Templates/FPSShooter/FPSShooter.garden",
+        "../Templates/FPSShooter/FPSShooter.garden",
+        "../../Templates/FPSShooter/FPSShooter.garden",
+    };
+    for (const char* candidate : candidates) {
+        const std::filesystem::path path(candidate);
+        if (std::filesystem::is_regular_file(path))
+            return path;
+    }
+    return {};
+}
+
+class ScopedNavTestAssetRoot
+{
+public:
+    explicit ScopedNavTestAssetRoot(const std::filesystem::path& root)
+        : m_assets(Assets::AssetManager::get()), m_previous_root(m_assets.getAssetRoot())
+    {
+        m_assets.setAssetRoot(root.string());
+    }
+
+    ~ScopedNavTestAssetRoot()
+    {
+        m_assets.setAssetRoot(m_previous_root);
+    }
+
+private:
+    Assets::AssetManager& m_assets;
+    std::string m_previous_root;
+};
+
+static std::string describeNavRouteCapacity(
+    const Navigation::NavPathCapacityDiagnostic& diagnostic)
+{
+    if (!diagnostic.endpoints_projected)
+        return "diagnostic=nearest-poly-failed";
+    if (!diagnostic.expanded_query_initialized)
+        return "diagnostic=temporary-query-init-failed";
+
+    const auto describeQuery = [](const Navigation::NavPathQueryCapacityStatus& status) {
+        std::string details;
+        const auto append = [&details](const char* detail) {
+            if (!details.empty())
+                details += "|";
+            details += detail;
+        };
+        if (status.failed) append("failure");
+        if (!status.failed) append("success");
+        if (status.partial) append("partial");
+        if (status.buffer_too_small) append("buffer-too-small");
+        if (status.out_of_nodes) append("out-of-nodes");
+        return details + ", polyCount=" + std::to_string(status.corridor_count) +
+            ", corridorCap=" + std::to_string(status.corridor_capacity) +
+            ", nodeCap=" + std::to_string(status.node_capacity);
+    };
+
+    const auto& current = diagnostic.current;
+    std::string classification;
+    if (current.out_of_nodes)
+        classification = "node-pool-exhausted";
+    else if (current.buffer_too_small)
+        classification = "output-buffer-bounded";
+    else if (current.partial)
+        classification = "partial";
+    else
+        classification = "no-current-capacity-detail";
+    return "diagnostic=" + classification + " current(" + describeQuery(current) +
+        ") expanded(" + describeQuery(diagnostic.expanded) + ")";
+}
+
+bool testNavMeshSelectedLevelRouteMatrix()
+{
+    const std::string name = "NavMesh_SelectedLevelRouteMatrix";
+    const std::filesystem::path project_path = findFpSShooterProjectDescriptor();
+    if (project_path.empty())
+        return fail(name, "FPSShooter project descriptor was not found");
+
+    ProjectManager project;
+    if (!project.loadProject(project_path.string()))
+        return fail(name, "could not load FPSShooter project descriptor");
+    const auto selected_level = ProjectManager::normalizeSelectedLevelArtifactPath(
+        project.getDescriptor().default_level);
+    if (!selected_level)
+        return fail(name, "project default level is not a normalized source or packaged level artifact");
+
+    // Same-stem resolution must use the project AssetManager root, exactly as
+    // the module does.  Scope this state so the test cannot leak its source
+    // project root into later fixtures.
+    ScopedNavTestAssetRoot asset_root(
+        std::filesystem::path(project.getProjectRoot()) / "assets");
+    FpsContent::SelectedLevelSidecars sidecars;
+    std::string sidecar_error;
+    if (!FpsContent::resolveSelectedLevelSidecars(*selected_level, sidecars, &sidecar_error))
+        return fail(name, "selected level sidecars could not be resolved: " + sidecar_error);
+
+    const std::filesystem::path nav_path = sidecars.nav_path;
+    if (!std::filesystem::is_regular_file(nav_path))
+        return fail(name, "selected nav artifact is missing: " + sidecars.nav_logical_path);
+
+    std::ifstream nav_file(nav_path, std::ios::binary);
+    uint32_t nav_version = 0;
+    uint32_t nav_magic = 0;
+    nav_file.read(reinterpret_cast<char*>(&nav_magic), sizeof(nav_magic));
+    nav_file.read(reinterpret_cast<char*>(&nav_version), sizeof(nav_version));
+    if (!nav_file || nav_version != Navigation::NavMeshSerializer::kCurrentVersion)
+        return fail(name, "selected nav artifact has an unsupported format version: " +
+            sidecars.nav_logical_path);
+
+    Bots::BotWorldRuntime runtime;
+    if (!runtime.loadResolvedNavMesh(nav_path.string()) ||
+        !runtime.hasValidNavMesh() ||
+        runtime.nav_format_version != Navigation::NavMeshSerializer::kCurrentVersion ||
+        runtime.navmesh.total_polys <= 0) {
+        return fail(name, "selected nav artifact was not current and non-empty: " +
+            sidecars.nav_logical_path);
+    }
+
+    std::ifstream competitive_file(sidecars.competitive_path, std::ios::binary);
+    if (!competitive_file)
+        return fail(name, "selected competitive marker sidecar is unreadable: " +
+            sidecars.competitive_logical_path);
+    const std::string competitive_text((std::istreambuf_iterator<char>(competitive_file)),
+                                       std::istreambuf_iterator<char>());
+    FpsContent::CompetitiveMapData competitive_data;
+    std::string competitive_error;
+    if (!FpsContent::parseCompetitiveMapData(competitive_text, competitive_data, &competitive_error))
+        return fail(name, "selected competitive marker sidecar was rejected: " +
+            competitive_error);
+
+    std::ifstream sites_file(sidecars.sites_path, std::ios::binary);
+    if (!sites_file)
+        return fail(name, "selected bomb-site sidecar is unreadable: " + sidecars.sites_logical_path);
+    const std::string sites_text((std::istreambuf_iterator<char>(sites_file)),
+                                 std::istreambuf_iterator<char>());
+    std::vector<Competitive::BombSite> sites;
+    std::string sites_error;
+    if (!Competitive::parseAuthoredBombSites(sites_text, sites, &sites_error) || sites.size() != 2)
+        return fail(name, "selected authored A/B sites were rejected: " + sites_error);
+
+    const auto describePoint = [](const glm::vec3& point) {
+        return "(" + std::to_string(point.x) + ", " + std::to_string(point.y) +
+            ", " + std::to_string(point.z) + ")";
+    };
+
+    // A complete result is required for every route.  The detailed diagnostic
+    // retains the former capacity evidence so a failure distinguishes missing
+    // topology from a production query capacity limit.
+    const auto verifyRoute = [&](std::string_view route_kind, std::string_view from_id,
+                                 const glm::vec3& from, std::string_view to_id,
+                                 const glm::vec3& to) {
+        glm::vec3 projected_from{};
+        glm::vec3 projected_to{};
+        if (!Navigation::NavMeshPathfinder::findNearestPoly(runtime.navmesh, from, projected_from) ||
+            !Navigation::NavMeshPathfinder::findNearestPoly(runtime.navmesh, to, projected_to)) {
+            return fail(name, "route=" + std::string(route_kind) + " from=" + std::string(from_id) +
+                " rawFrom=" + describePoint(from) + " to=" + std::string(to_id) +
+                " rawTo=" + describePoint(to) + " did not project to " + sidecars.nav_logical_path);
+        }
+
+        const Navigation::NavPath path = Navigation::NavMeshPathfinder::findPath(
+            runtime.navmesh, projected_from, projected_to);
+        if (!path.valid || path.waypoints.empty()) {
+            const Navigation::NavPathCapacityDiagnostic diagnostic =
+                Navigation::NavMeshPathfinder::diagnosePathCapacity(
+                    runtime.navmesh, projected_from, projected_to);
+            return fail(name, "route=" + std::string(route_kind) + " from=" + std::string(from_id) +
+                " projectedFrom=" + describePoint(projected_from) + " to=" + std::string(to_id) +
+                " projectedTo=" + describePoint(projected_to) + " " +
+                describeNavRouteCapacity(diagnostic));
+        }
+
+        const float endpoint_distance = glm::distance(path.waypoints.back(), projected_to);
+        if (endpoint_distance > 0.5f) {
+            return fail(name, "route endpoint miss route=" + std::string(route_kind) +
+                " from=" + std::string(from_id) + " projectedFrom=" +
+                describePoint(projected_from) + " to=" + std::string(to_id) +
+                " projectedTo=" + describePoint(projected_to) + " end=" +
+                describePoint(path.waypoints.back()) + " distance=" +
+                std::to_string(endpoint_distance));
+        }
+        return true;
+    };
+
+    for (const FpsContent::CompetitiveTeamSpawn& spawn : competitive_data.team_spawns) {
+        for (const Competitive::BombSite& site : sites) {
+            if (!verifyRoute("team-spawn-to-site", spawn.id, spawn.position,
+                             "site-" + std::to_string(site.site_index), site.centre))
+                return false;
+        }
+        for (const FpsContent::CompetitiveBuyZone& buy_zone : competitive_data.buy_zones) {
+            if (buy_zone.team != spawn.team)
+                continue;
+            if (!verifyRoute("team-spawn-to-own-buy", spawn.id, spawn.position,
+                             buy_zone.id, buy_zone.centre))
+                return false;
+        }
+    }
+
+    for (const FpsContent::CompetitiveBuyZone& buy_zone : competitive_data.buy_zones) {
+        for (const Competitive::BombSite& site : sites) {
+            if (!verifyRoute("buy-to-site", buy_zone.id, buy_zone.centre,
+                             "site-" + std::to_string(site.site_index), site.centre))
+                return false;
+        }
+    }
+
+    for (size_t from_index = 0; from_index < sites.size(); ++from_index) {
+        for (size_t to_index = 0; to_index < sites.size(); ++to_index) {
+            if (from_index == to_index)
+                continue;
+            if (!verifyRoute("site-to-site", "site-" + std::to_string(sites[from_index].site_index),
+                             sites[from_index].centre,
+                             "site-" + std::to_string(sites[to_index].site_index),
+                             sites[to_index].centre))
+                return false;
+        }
+    }
     return pass(name);
 }

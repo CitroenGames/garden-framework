@@ -1,0 +1,63 @@
+{
+  "metadata": {
+    "level_name": "de_block01 Competitive Blockout",
+    "author": "Garden Framework",
+    "version": "1.0",
+    "world": {
+      "gravity": {
+        "x": 0.0,
+        "y": -1.0,
+        "z": 0.0
+      },
+      "fixed_delta": 0.016
+    },
+    "lighting": {
+      "ambient": {
+        "r": 0.25,
+        "g": 0.28,
+        "b": 0.32
+      },
+      "diffuse": {
+        "r": 0.82,
+        "g": 0.86,
+        "b": 0.92
+      },
+      "direction": {
+        "x": -0.35,
+        "y": -1.0,
+        "z": 0.25
+      }
+    }
+  },
+  "entities": [
+    {
+      "name": "de_block01_collision",
+      "type": "Renderable",
+      "transform": {
+        "position": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "rotation": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "scale": {
+          "x": 1.0,
+          "y": 1.0,
+          "z": 1.0
+        }
+      },
+      "mesh": {
+        "path": "assets/models/de_block01_collision.gltf",
+        "textures": [],
+        "culling": true,
+        "transparent": false,
+        "visible": true,
+        "use_mesh_collision": true
+      }
+    }
+  ]
+}

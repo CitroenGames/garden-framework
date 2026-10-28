@@ -1,0 +1,16 @@
+{
+  "format": "fpsshooter_competitive",
+  "version": 1,
+  "team_spawns": [
+    { "id": "attackers_01", "team": "attackers", "position": [7.0, 1.2, 40.0] },
+    { "id": "attackers_02", "team": "attackers", "position": [11.0, 1.2, 40.0] },
+    { "id": "attackers_03", "team": "attackers", "position": [15.0, 1.2, 40.0] },
+    { "id": "defenders_01", "team": "defenders", "position": [57.0, 1.2, 8.0] },
+    { "id": "defenders_02", "team": "defenders", "position": [53.0, 1.2, 8.0] },
+    { "id": "defenders_03", "team": "defenders", "position": [49.0, 1.2, 8.0] }
+  ],
+  "buy_zones": [
+    { "id": "attackers_buy", "team": "attackers", "centre": [11.5, 1.2, 40.0], "radius": 7.0 },
+    { "id": "defenders_buy", "team": "defenders", "centre": [52.5, 1.2, 8.0], "radius": 7.0 }
+  ]
+}

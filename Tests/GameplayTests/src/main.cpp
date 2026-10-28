@@ -2787,6 +2787,7 @@ bool testClientAcceptanceScriptAuthorityAndInput()
 #include "NavMeshTests.hpp"
 #include "PlayerMovementTests.hpp"
 #include "CompetitiveProtocolTests.hpp"
+#include "CompetitiveMapDataTests.hpp"
 int main()
 {
     bool ok = true;
@@ -2809,6 +2810,7 @@ int main()
     ok = testFpsTeamDeathmatchTeamScoreWin() && ok;
     ok = testFpsModeIsolationAndLifecycle() && ok;
     ok = testCompetitiveCompositionUsesTeamSpawnPolicy() && ok;
+    ok = testCompetitiveMapDataSchema() && ok;
     ok = testPlayerMovementInputContract() && ok;
     ok = testCompetitiveRoundFsmFullCycleHalftimeClinch() && ok;
     ok = testCompetitiveOvertime() && ok;
@@ -2860,6 +2862,7 @@ int main()
     ok = testBombAuthoredSitesParse() && ok;
     ok = testNavMeshGenerateAndSerializerRoundTrip() && ok;
     ok = testNavMeshFindPathTwoPoly() && ok;
+    ok = testNavMeshSelectedLevelRouteMatrix() && ok;
     ok = testBotNavWorldResourceLifecycle() && ok;
     ok = testNavMeshHierarchyRootBake() && ok;
     ok = testNavMeshHierarchyWorldBakeAndPath() && ok;

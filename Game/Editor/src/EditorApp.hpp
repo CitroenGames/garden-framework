@@ -111,6 +111,7 @@ private:
 
     // Save path
     std::string m_current_save_path;
+    std::string m_selected_level_artifact_path;
 
     // Cached window title (to avoid SDL_SetWindowTitle every frame)
     std::string m_last_window_title;
