@@ -137,7 +137,7 @@ inline PacketSendResult sendPacketToPeer(ENetPeer* peer, const BitWriter& writer
     if (shouldDropForSaturation(peer, reliability)) {
         LOG_ENGINE_WARN("Dropping {0} message because peer send queue is saturated ({1} bytes queued)",
                         getPacketReliabilityName(reliability),
-                        peer->outgoingDataTotal);
+                        getPeerPendingOutboundBytes(peer));
         return PacketSendResult::Saturated;
     }
 

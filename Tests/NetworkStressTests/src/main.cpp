@@ -10,6 +10,7 @@
 #include "Network/NetworkInput.hpp"
 #include "Network/NetworkProtocol.hpp"
 #include "Network/NetworkSerializer.hpp"
+#include "Network/NetworkTransport.hpp"
 #include "Network/NetworkTypes.hpp"
 #include "Network/ServerNetworkManager.hpp"
 #include "Utils/Log.hpp"
@@ -18,6 +19,7 @@
 #include <SDL3/SDL.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -148,6 +150,93 @@ static void sleepForNetworkTurn(const StressConfig& config)
     if (config.sleep_between_frames) {
         SDL_Delay(1);
     }
+}
+
+static void initializeEnetList(ENetList& list)
+{
+    list.sentinel.next = &list.sentinel;
+    list.sentinel.previous = &list.sentinel;
+}
+
+static bool runTransportPendingQueueAccountingTests()
+{
+    TestState state;
+    ENetPeer peer{};
+    peer.state = ENET_PEER_STATE_CONNECTED;
+    initializeEnetList(peer.outgoingCommands);
+    initializeEnetList(peer.outgoingSendReliableCommands);
+    initializeEnetList(peer.sentReliableCommands);
+
+    // ENet clears this bandwidth-throttle counter each epoch even when it is
+    // not a measure of current queued work. An empty peer must remain healthy.
+    peer.outgoingDataTotal = Net::NETWORK_MAX_UNRELIABLE_QUEUE_BYTES;
+    if (Net::getPeerPendingOutboundBytes(&peer) != 0u ||
+        Net::isPeerSendQueueSaturated(&peer, Net::NETWORK_MAX_UNRELIABLE_QUEUE_BYTES)) {
+        state.addError("stale ENet bandwidth accounting saturated an empty peer");
+    }
+
+    ENetOutgoingCommand unsent{};
+    unsent.command.header.command = ENET_PROTOCOL_COMMAND_SEND_UNRELIABLE;
+    unsent.fragmentLength = 60000;
+    enet_list_insert(enet_list_end(&peer.outgoingCommands), &unsent);
+
+    ENetOutgoingCommand queued_reliable{};
+    queued_reliable.command.header.command =
+        ENET_PROTOCOL_COMMAND_SEND_RELIABLE | ENET_PROTOCOL_COMMAND_FLAG_ACKNOWLEDGE;
+    queued_reliable.fragmentLength = 40000;
+    enet_list_insert(enet_list_end(&peer.outgoingSendReliableCommands), &queued_reliable);
+
+    ENetOutgoingCommand in_flight_reliable{};
+    in_flight_reliable.command.header.command =
+        ENET_PROTOCOL_COMMAND_SEND_RELIABLE | ENET_PROTOCOL_COMMAND_FLAG_ACKNOWLEDGE;
+    in_flight_reliable.fragmentLength = 40000;
+    enet_list_insert(enet_list_end(&peer.sentReliableCommands), &in_flight_reliable);
+
+    const uint64_t expected_unreliable_pending =
+        static_cast<uint64_t>(enet_protocol_command_size(unsent.command.header.command)) + unsent.fragmentLength +
+        static_cast<uint64_t>(enet_protocol_command_size(queued_reliable.command.header.command)) + queued_reliable.fragmentLength +
+        static_cast<uint64_t>(enet_protocol_command_size(in_flight_reliable.command.header.command)) + in_flight_reliable.fragmentLength;
+    peer.outgoingDataTotal = 0;
+
+    if (Net::getPeerPendingOutboundBytes(&peer) != expected_unreliable_pending) {
+        state.addError("pending outbound command bytes omitted a live ENet queue");
+    }
+    if (!Net::isPeerSendQueueSaturated(&peer, Net::NETWORK_MAX_UNRELIABLE_QUEUE_BYTES)) {
+        state.addError("live ENet command queues did not trigger saturation");
+    }
+
+    // The connection-health policy intentionally uses a larger generic limit
+    // than unreliable send admission. Retain enough in-flight work to cross it.
+    std::array<ENetOutgoingCommand, 6> retained_reliable{};
+    uint64_t expected_pending = expected_unreliable_pending;
+    for (ENetOutgoingCommand& command : retained_reliable) {
+        command.command.header.command =
+            ENET_PROTOCOL_COMMAND_SEND_RELIABLE | ENET_PROTOCOL_COMMAND_FLAG_ACKNOWLEDGE;
+        command.fragmentLength = (std::numeric_limits<enet_uint16>::max)();
+        enet_list_insert(enet_list_end(&peer.sentReliableCommands), &command);
+        expected_pending += static_cast<uint64_t>(enet_protocol_command_size(command.command.header.command));
+        expected_pending += command.fragmentLength;
+    }
+    if (!Net::isPeerSendQueueSaturated(&peer)) {
+        state.addError("pending outbound command bytes did not trigger generic saturation");
+    }
+
+    Net::NetworkStats stats;
+    Net::updateStatsFromPeer(stats, &peer, nullptr);
+    if (stats.outgoing_queue_bytes != expected_pending ||
+        stats.trouble != Net::NetworkConnectionTrouble::Saturated) {
+        state.addError("transport stats did not report live pending outbound bytes");
+    }
+
+    if (state.error_count != 0) {
+        for (const std::string& error : state.errors) {
+            std::cerr << "[FAIL] " << error << "\n";
+        }
+        return false;
+    }
+
+    std::cout << "[PASS] TransportPendingQueueAccountingTests\n";
+    return true;
 }
 
 static void pumpNetwork(Net::ServerNetworkManager& server, std::vector<std::unique_ptr<StressClient>>& clients, float delta_time)
@@ -1456,6 +1545,135 @@ static bool runRawRemoteInterpolationStateTest()
     return true;
 }
 
+// This covers the manager path, where every sample is created by the normal
+// fixed-rate client input send loop. It deliberately exceeds two unreliable
+// queue windows cumulatively, then requires the actual pending queue to drain
+// and the final command to arrive at the server.
+static bool runUnreliableQueueDrainRegressionTest()
+{
+    constexpr uint32_t kInputFrames = 4800u;
+    constexpr uint64_t kMinimumCumulativeBytes =
+        static_cast<uint64_t>(Net::NETWORK_MAX_UNRELIABLE_QUEUE_BYTES) * 2u;
+
+    TestState state;
+    world server_world;
+    server_world.setFixedDelta(kFixedDelta);
+
+    Net::ServerNetworkManager server;
+    if (!server.initialize()) {
+        std::cerr << "[FAIL] UnreliableQueueDrainRegressionTests could not initialize server\n";
+        return false;
+    }
+    server.setWorld(&server_world);
+
+    uint32_t highest_input_tick = 0;
+    uint64_t input_samples = 0;
+    server.setOnClientConnected([&](uint16_t client_id) {
+        spawnServerPlayer(server_world, server, client_id);
+    });
+    server.setInputFilter([&](uint16_t, entt::entity player_entity) {
+        return server_world.registry.valid(player_entity);
+    });
+    server.setInputSampleHandler([&](uint16_t, entt::entity,
+                                     const Net::InputSample& sample, uint32_t) {
+        ++input_samples;
+        highest_input_tick = (std::max)(highest_input_tick, sample.tick);
+    });
+
+    StressConfig config;
+    config.client_count = 1;
+    uint16_t port = 0;
+    if (!startServer(server, config, port)) {
+        std::cerr << "[FAIL] UnreliableQueueDrainRegressionTests could not start server\n";
+        server.shutdown();
+        return false;
+    }
+
+    world client_world;
+    Net::ClientNetworkManager client;
+    client.setWorld(&client_world);
+    if (!client.initialize() || !client.connectToServer("127.0.0.1", port, "queue_drain")) {
+        std::cerr << "[FAIL] UnreliableQueueDrainRegressionTests could not connect client\n";
+        client.shutdown();
+        server.shutdown();
+        return false;
+    }
+
+    for (uint32_t frame = 0; frame < config.connect_frame_budget && !client.isConnected(); ++frame) {
+        client.update(kFixedDelta);
+        server.update(kFixedDelta);
+        client.update(0.0f);
+        SDL_Delay(1);
+    }
+    if (!client.isConnected() || server.getClientCount() != 1u) {
+        state.addError("queue-drain loopback client did not connect");
+    }
+
+    for (uint32_t tick = 1u; state.error_count == 0 && tick <= kInputFrames; ++tick) {
+        Net::InputState input;
+        input.move_forward = (tick & 1u) != 0u ? 1.0f : -1.0f;
+        input.move_right = (tick % 3u) == 0u ? 0.5f : -0.5f;
+        input.camera_yaw = static_cast<float>(tick % 360u) * 0.01f;
+        input.camera_pitch = static_cast<float>(tick % 90u) * 0.005f;
+        input.buttons = (tick % 61u) == 0u ? Net::InputFlags::JUMP : 0u;
+        client.sendInputCommand(tick, input);
+
+        client.update(kFixedDelta);
+        server.update(kFixedDelta);
+        client.update(0.0f);
+        SDL_Delay(1);
+    }
+
+    // The socket turns remain bounded, but the final assertion observes a
+    // queue after all normal input traffic has had a chance to leave it.
+    for (uint32_t frame = 0; frame < 600u && highest_input_tick < kInputFrames; ++frame) {
+        client.update(kFixedDelta);
+        server.update(kFixedDelta);
+        client.update(0.0f);
+        SDL_Delay(1);
+    }
+
+    const Net::NetworkStats& client_stats = client.getStats();
+    if (client_stats.bytes_sent < kMinimumCumulativeBytes) {
+        state.addError("normal-cadence input traffic did not continue beyond two unreliable queue windows");
+    }
+    if (client_stats.packets_dropped_outgoing != 0u) {
+        state.addError("normal-cadence input traffic was dropped after cumulative queue-window traffic");
+    }
+    if (highest_input_tick != kInputFrames || input_samples < kInputFrames) {
+        state.addError("server did not receive every normal-cadence input after the queue window was crossed");
+    }
+    if (client_stats.outgoing_queue_bytes >= Net::NETWORK_MAX_UNRELIABLE_QUEUE_BYTES) {
+        state.addError("client pending send queue did not drain after normal-cadence traffic");
+    }
+    if (!client.isConnected() || server.getClientCount() != 1u) {
+        state.addError("queue-drain loopback connection did not remain live");
+    }
+
+    client.disconnect("queue-drain regression complete");
+    for (uint32_t frame = 0; frame < 120u && server.getClientCount() != 0u; ++frame) {
+        client.update(kFixedDelta);
+        server.update(kFixedDelta);
+        client.update(0.0f);
+        SDL_Delay(1);
+    }
+    if (server.getClientCount() != 0u) {
+        state.addError("queue-drain loopback client did not disconnect");
+    }
+    client.shutdown();
+    server.shutdown();
+
+    if (state.error_count != 0) {
+        for (const std::string& error : state.errors) {
+            std::cerr << "[FAIL] " << error << "\n";
+        }
+        return false;
+    }
+
+    std::cout << "[PASS] UnreliableQueueDrainRegressionTests\n";
+    return true;
+}
+
 static bool runNetworkStress(const StressConfig& config)
 {
     TestState state;
@@ -1727,6 +1945,7 @@ int main(int argc, char** argv)
         EE::CLog::GetLuaLogger()->set_level(spdlog::level::warn);
     }
     const bool handshake_ok = runWireV3HandshakeTests();
+    const bool transport_pending_queue_accounting_ok = runTransportPendingQueueAccountingTests();
     const bool custom_ingress_ok = runCustomIngressRejectionTests();
     const bool hierarchy_boundary_ok = runNetworkHierarchyBoundaryTests();
     const bool interpolation_buffer_wrap_ok = runInterpolationTickWrapBufferTest();
@@ -1737,10 +1956,11 @@ int main(int argc, char** argv)
     const bool input_view_tick_loopback_ok = runInputViewTickLoopbackTest();
     const bool interpolation_manager_wrap_ok = runInterpolationTickWrapManagerTest();
     const bool raw_interpolation_ok = runRawRemoteInterpolationStateTest();
+    const bool unreliable_queue_drain_ok = runUnreliableQueueDrainRegressionTest();
     const bool ok = runNetworkStress(config);
     EE::CLog::Shutdown();
-    return (handshake_ok && custom_ingress_ok && hierarchy_boundary_ok && interpolation_buffer_wrap_ok && interpolation_jitter_ok && lag_history_wrap_ok &&
+    return (handshake_ok && transport_pending_queue_accounting_ok && custom_ingress_ok && hierarchy_boundary_ok && interpolation_buffer_wrap_ok && interpolation_jitter_ok && lag_history_wrap_ok &&
             lag_view_tick_clamp_ok &&
             input_view_tick_protocol_ok && input_view_tick_loopback_ok && interpolation_manager_wrap_ok &&
-            raw_interpolation_ok && ok) ? 0 : 1;
+            raw_interpolation_ok && unreliable_queue_drain_ok && ok) ? 0 : 1;
 }

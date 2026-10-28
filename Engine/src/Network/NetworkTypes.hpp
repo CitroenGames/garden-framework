@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <cmath>
+#include <limits>
 #include <string>
 #include <unordered_map>
 #include <glm/glm.hpp>
@@ -222,11 +223,48 @@ inline float enetPacketLossToPercent(uint32_t packet_loss)
 
 constexpr uint32_t NETWORK_DEFAULT_SATURATED_QUEUE_BYTES = 512u * 1024u;
 
+// ENet's outgoingDataTotal is a bandwidth-throttle accounting counter. It is
+// reset at every ENet bandwidth epoch and does not decrease when commands
+// leave the transport queues, so it cannot describe current send pressure.
+inline uint64_t getPendingOutgoingCommandBytes(const ENetList& commands)
+{
+    uint64_t byte_count = 0;
+    for (ENetListIterator iterator = enet_list_begin(&commands);
+         iterator != enet_list_end(&commands);
+         iterator = enet_list_next(iterator)) {
+        const auto* command = reinterpret_cast<const ENetOutgoingCommand*>(iterator);
+        byte_count += static_cast<uint64_t>(enet_protocol_command_size(command->command.header.command));
+        byte_count += static_cast<uint64_t>(command->fragmentLength);
+    }
+    return byte_count;
+}
+
+// Include unsent commands and sent reliable commands awaiting acknowledgement:
+// all three lists retain outbound work and consume peer send capacity.
+inline uint64_t getPeerPendingOutboundBytes(const ENetPeer* peer)
+{
+    if (peer == nullptr) {
+        return 0;
+    }
+
+    return getPendingOutgoingCommandBytes(peer->outgoingCommands) +
+           getPendingOutgoingCommandBytes(peer->outgoingSendReliableCommands) +
+           getPendingOutgoingCommandBytes(peer->sentReliableCommands);
+}
+
+inline uint32_t getPeerPendingOutboundBytesForStats(const ENetPeer* peer)
+{
+    const uint64_t byte_count = getPeerPendingOutboundBytes(peer);
+    return byte_count > static_cast<uint64_t>((std::numeric_limits<uint32_t>::max)())
+        ? (std::numeric_limits<uint32_t>::max)()
+        : static_cast<uint32_t>(byte_count);
+}
+
 inline bool isPeerSendQueueSaturated(
     const ENetPeer* peer,
     uint32_t queued_byte_limit = NETWORK_DEFAULT_SATURATED_QUEUE_BYTES)
 {
-    return peer != nullptr && peer->outgoingDataTotal >= queued_byte_limit;
+    return getPeerPendingOutboundBytes(peer) >= static_cast<uint64_t>(queued_byte_limit);
 }
 
 inline void updateStatsFromPeer(NetworkStats& stats, const ENetPeer* peer, const ENetHost* host)
@@ -243,7 +281,7 @@ inline void updateStatsFromPeer(NetworkStats& stats, const ENetPeer* peer, const
     stats.jitter_ms = static_cast<float>(peer->roundTripTimeVariance);
     stats.packet_loss_percent = enetPacketLossToPercent(peer->packetLoss);
     stats.packet_loss_variance_percent = enetPacketLossToPercent(peer->packetLossVariance);
-    stats.outgoing_queue_bytes = peer->outgoingDataTotal;
+    stats.outgoing_queue_bytes = getPeerPendingOutboundBytesForStats(peer);
 
     if (host != nullptr && peer->lastReceiveTime > 0) {
         stats.time_since_last_receive_seconds =
