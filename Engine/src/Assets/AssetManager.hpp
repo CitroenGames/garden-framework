@@ -68,10 +68,6 @@ public:
     // Already-absolute paths are returned as-is.
     std::string resolveAssetPath(const std::string& path) const;
 
-    // Scan level files and collect all referenced asset paths (mesh, texture, collider).
-    // Useful for packaging validation.
-    static std::vector<std::string> collectLevelAssets(const std::string& levels_directory);
-
     void registerLoader(std::unique_ptr<IAssetLoader> loader);
 
     // Remove every loader whose getSourceId() matches `source_id`. Used by

@@ -1,14 +1,10 @@
 #include "AssetManager.hpp"
 #include "Utils/Log.hpp"
-#include "json.hpp"
 #include <filesystem>
-#include <fstream>
 #include <algorithm>
 #include <cstring>
-#include <set>
 
 namespace fs = std::filesystem;
-using json = nlohmann::json;
 
 namespace Assets {
 
@@ -135,64 +131,6 @@ std::string AssetManager::resolveAssetPath(const std::string& path) const {
     }
 
     return candidate.generic_string();
-}
-
-std::vector<std::string> AssetManager::collectLevelAssets(const std::string& levels_directory) {
-    std::set<std::string> asset_paths;
-
-    if (!fs::exists(levels_directory) || !fs::is_directory(levels_directory))
-        return {};
-
-    for (const auto& entry : fs::recursive_directory_iterator(levels_directory)) {
-        if (!entry.is_regular_file())
-            continue;
-
-        std::string ext = entry.path().extension().string();
-        if (ext != ".json")
-            continue;
-
-        // Check if it's a level file (contains .level.json suffix)
-        std::string filename = entry.path().filename().string();
-        if (filename.size() < 11 || filename.substr(filename.size() - 11) != ".level.json")
-            continue;
-
-        std::ifstream file(entry.path());
-        if (!file.is_open())
-            continue;
-
-        json j;
-        try { file >> j; } catch (...) { continue; }
-
-        if (!j.contains("entities") || !j["entities"].is_array())
-            continue;
-
-        for (const auto& ent : j["entities"]) {
-            // Mesh path
-            if (ent.contains("mesh") && ent["mesh"].contains("path")) {
-                std::string mesh_path = ent["mesh"]["path"].get<std::string>();
-                if (!mesh_path.empty())
-                    asset_paths.insert(mesh_path);
-
-                // Texture paths listed in the entity
-                if (ent["mesh"].contains("textures") && ent["mesh"]["textures"].is_array()) {
-                    for (const auto& tex : ent["mesh"]["textures"]) {
-                        std::string tex_path = tex.get<std::string>();
-                        if (!tex_path.empty())
-                            asset_paths.insert(tex_path);
-                    }
-                }
-            }
-
-            // Collider mesh
-            if (ent.contains("collider") && ent["collider"].contains("mesh_path")) {
-                std::string col_path = ent["collider"]["mesh_path"].get<std::string>();
-                if (!col_path.empty())
-                    asset_paths.insert(col_path);
-            }
-        }
-    }
-
-    return std::vector<std::string>(asset_paths.begin(), asset_paths.end());
 }
 
 void AssetManager::registerLoader(std::unique_ptr<IAssetLoader> loader) {

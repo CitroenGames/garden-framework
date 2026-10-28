@@ -5,6 +5,7 @@
 #include "Assets/CookedCollisionSerializer.hpp"
 #include "Animation/CompiledAnimationSerializer.hpp"
 #include "Project/PackageDependency.hpp"
+#include "Project/PackageLevelDependencyExtractor.hpp"
 #include "Project/PackageStructuredDependencyExtractor.hpp"
 #include "Project/PackageReceipt.hpp"
 #include "Utils/FileHash.hpp"
@@ -239,12 +240,6 @@ private:
     bool published_ = false;
 };
 
-bool isLevelJson(const fs::path& path)
-{
-    const std::string filename = path.filename().string();
-    return filename.size() > 11 && filename.ends_with(".level.json");
-}
-
 bool resolveStaticLogical(const std::string& request, const std::vector<std::string>& roots,
                           const fs::path& project, const fs::path& staged, std::string& out)
 {
@@ -257,8 +252,6 @@ bool resolveStaticLogical(const std::string& request, const std::vector<std::str
     {
         std::error_code ec;
         if (fs::exists(project / candidate, ec) || fs::exists(staged / candidate, ec)) { out = candidate; return true; }
-        fs::path cooked(candidate); cooked.replace_extension(".cmesh");
-        if (fs::exists(staged / cooked, ec)) { out = candidate; return true; }
     }
     out = candidates.front();
     return true;
@@ -364,49 +357,41 @@ void discoverStaticDependencies(PackageDependencyGraph& graph, std::vector<std::
                                 const std::vector<std::string>& roots, const std::string& default_level,
                                 bool compiled_models)
 {
-    auto addRef = [&](const std::string& requested, PackageDependencyKind kind, const std::string& owner, bool compile_mesh) {
+    auto addRef = [&](const std::string& requested, PackageDependencyKind kind, const std::string& owner,
+                      bool compile_mesh, const std::string& extractor_id = std::string(PackageLevelDependencyExtractor::SourceId)) {
         std::string source;
-        if (!resolveStaticLogical(requested, roots, project, staged, source)) { errors.push_back(pkgError("PKG-PATH-INVALID", requested + " required by " + owner)); return; }
-        addStaticDependency(graph, errors, project, staged, source, kind, owner, compile_mesh);
+        if (!resolveStaticLogical(requested, roots, project, staged, source)) { errors.push_back(pkgError("PKG-PATH-INVALID", requested + " required by " + owner)); return false; }
+        const bool added = addStaticDependency(graph, errors, project, staged, source, kind, owner, compile_mesh, extractor_id);
         if (kind == PackageDependencyKind::Mesh && compile_mesh && isCompiledMeshSource(fs::path(source)))
         {
             const std::string collision = Assets::CookedCollisionSerializer::defaultPathForAsset(source);
             addStaticDependency(graph, errors, project, staged, collision, PackageDependencyKind::Collision, source, false);
         }
+        return added;
     };
-    addRef(default_level, PackageDependencyKind::Level, "", false);
-    const fs::path levels = staged / "assets" / "levels";
-    std::error_code ec;
-    if (!fs::is_directory(levels, ec) || ec) return;
-    for (fs::recursive_directory_iterator it(levels, ec), end; !ec && it != end; it.increment(ec))
+    std::string level;
+    if (!resolveStaticLogical(default_level, roots, project, staged, level))
     {
-        if (!it->is_regular_file(ec) || ec || !isLevelJson(it->path())) continue;
-        const fs::path rel = fs::relative(it->path(), staged, ec);
-        std::string level;
-        if (ec || !normalizePackageLogicalPath(rel.generic_string(), level)) { errors.push_back(pkgError("PKG-LEVEL-PATH", it->path().string())); continue; }
-        addStaticDependency(graph, errors, project, staged, level, PackageDependencyKind::Level, "", false);
-        json document; std::ifstream input(it->path());
-        try { input >> document; } catch (const std::exception& e) { errors.push_back(pkgError("PKG-LEVEL-PARSE", level + ": " + e.what())); continue; }
-        if (!document.contains("entities") || !document["entities"].is_array()) { errors.push_back(pkgError("PKG-LEVEL-PARSE", level + ": entities array is missing")); continue; }
-        for (const json& entity : document["entities"])
-        {
-            if (entity.contains("mesh") && entity["mesh"].is_object() && entity["mesh"].contains("path") && entity["mesh"]["path"].is_string())
-                addRef(entity["mesh"]["path"].get<std::string>(), PackageDependencyKind::Mesh, level, compiled_models);
-            if (entity.contains("collider") && entity["collider"].is_object() && entity["collider"].contains("mesh_path") && entity["collider"]["mesh_path"].is_string())
-            {
-                const std::string path = entity["collider"]["mesh_path"].get<std::string>();
-                const bool collision = fs::path(path).extension() == ".gardenphys";
-                addRef(path, collision ? PackageDependencyKind::Collision : PackageDependencyKind::Mesh, level, !collision && compiled_models);
-            }
-            if (entity.contains("components") && entity["components"].is_object())
-            {
-                const auto found = entity["components"].find("SkeletonComponent");
-                if (found != entity["components"].end() && found->is_object() && found->contains("animation_resource_path") && (*found)["animation_resource_path"].is_string())
-                    addRef((*found)["animation_resource_path"].get<std::string>(), PackageDependencyKind::AnimationClip, level, false);
-            }
-        }
+        errors.push_back(pkgError("PKG-PATH-INVALID", default_level));
+        return;
     }
-    if (ec) errors.push_back(pkgError("PKG-LEVEL-ENUMERATE", ec.message()));
+    if (!addStaticDependency(graph, errors, project, staged, level,
+                             PackageDependencyKind::Level, "", false,
+                             std::string(PackageLevelDependencyExtractor::SourceId)))
+        return;
+
+    std::vector<PackageDependencyRequest> children;
+    std::string extract_error;
+    if (!PackageLevelDependencyExtractor::extract(level, (staged / level).string(),
+                                                  children, extract_error))
+    {
+        errors.push_back(extract_error);
+        return;
+    }
+    for (const PackageDependencyRequest& child : children)
+        addRef(child.logical_path, child.kind, child.owner_logical_path,
+               child.kind == PackageDependencyKind::Mesh && compiled_models,
+               child.extractor_id);
 }
 
 bool finalizeStaticDependencies(const std::vector<PackageDependency>& discovered, const fs::path& staged,
@@ -804,117 +789,63 @@ PackageResult ProjectPackager::packageProjectInternal(
 
     // --- Optionally compile levels to binary ---
     std::string default_level = desc.default_level;
-    bool default_level_compiled = false;
 
     if (config.compile_levels_to_binary)
     {
         setPhase(PackageProgress::Phase::CompilingLevels);
-        LOG_ENGINE_INFO("[Packager] Compiling levels to binary...");
-
-        // Find all .level.json files in the output
-        fs::recursive_directory_iterator level_it(output_root / "assets", ec);
-        const fs::recursive_directory_iterator level_end;
-        if (ec)
+        if (!default_level.ends_with(".level.json"))
         {
-            result.error_message = "Failed to enumerate package assets for level compilation: " + ec.message();
+            result.error_message = "PKG-LEVEL-CONTRACT: default level must use the current .level.json source contract: " + default_level;
             setPhase(PackageProgress::Phase::Failed);
             return result;
         }
-        for (; level_it != level_end; level_it.increment(ec))
+        const fs::path source_level_path = output_root / default_level;
+        std::error_code level_ec;
+        if (!fs::is_regular_file(source_level_path, level_ec) || level_ec)
         {
-            if (ec)
-            {
-                result.error_message = "Failed to enumerate package assets for level compilation: " + ec.message();
-                setPhase(PackageProgress::Phase::Failed);
-                return result;
-            }
-
-            const auto& entry = *level_it;
-            std::error_code status_ec;
-            if (!entry.is_regular_file(status_ec))
-            {
-                if (status_ec)
-                {
-                    result.error_message = "Failed to inspect packaged level candidate '" + entry.path().string() + "': " + status_ec.message();
-                    setPhase(PackageProgress::Phase::Failed);
-                    return result;
-                }
-                continue;
-            }
-
-            std::string filename = entry.path().filename().string();
-            if (filename.size() > 11 && filename.substr(filename.size() - 11) == ".level.json")
-            {
-                std::string json_path = entry.path().string();
-                std::string binary_path = json_path.substr(0, json_path.size() - 11) + ".level";
-
-                bool level_compiled = false;
-                try
-                {
-                    level_compiled = level_manager.compileLevel(json_path, binary_path);
-                }
-                catch (const std::exception& e)
-                {
-                    result.error_message = "Failed to compile level: " + filename + ": " + e.what();
-                    LOG_ENGINE_ERROR("[Packager] {}", result.error_message);
-                    setPhase(PackageProgress::Phase::Failed);
-                    return result;
-                }
-                catch (...)
-                {
-                    result.error_message = "Failed to compile level: " + filename + ": unexpected exception";
-                    LOG_ENGINE_ERROR("[Packager] {}", result.error_message);
-                    setPhase(PackageProgress::Phase::Failed);
-                    return result;
-                }
-
-                if (level_compiled)
-                {
-                    // Remove the JSON original
-                    std::error_code remove_ec;
-                    if (!fs::remove(entry.path(), remove_ec) || remove_ec)
-                    {
-                        result.error_message = "Failed to remove source level after compilation '" + entry.path().string() + "': " +
-                            (remove_ec ? remove_ec.message() : "file was not removed");
-                        setPhase(PackageProgress::Phase::Failed);
-                        return result;
-                    }
-
-                    ++result.levels_compiled;
-                    if (entry.path().lexically_relative(output_root).lexically_normal() == fs::path(desc.default_level).lexically_normal())
-                        default_level_compiled = true;
-                    LOG_ENGINE_INFO("[Packager] Compiled: {}", filename);
-                }
-                else
-                {
-                    std::string msg = "Failed to compile level: " + filename;
-                    result.warnings.push_back(msg);
-                    result.error_message = msg;
-                    LOG_ENGINE_ERROR("[Packager] {}", msg);
-                    setPhase(PackageProgress::Phase::Failed);
-                    return result;
-                }
-            }
-        }
-        if (ec)
-        {
-            result.error_message = "Failed to enumerate package assets for level compilation: " + ec.message();
+            result.error_message = "PKG-DEPENDENCY-MISSING: " + default_level +
+                (level_ec ? " (" + level_ec.message() + ")" : "");
             setPhase(PackageProgress::Phase::Failed);
             return result;
         }
-
-        // Update default_level extension
-        if (default_level.size() > 11 &&
-            default_level.substr(default_level.size() - 11) == ".level.json")
+        fs::path binary_level_path = source_level_path;
+        binary_level_path.replace_extension();
+        binary_level_path.replace_extension(".level");
+        bool level_compiled = false;
+        try
         {
-            if (!default_level_compiled)
-            {
-                result.error_message = "Default level was not compiled: " + default_level;
-                setPhase(PackageProgress::Phase::Failed);
-                return result;
-            }
-            default_level = default_level.substr(0, default_level.size() - 11) + ".level";
+            level_compiled = level_manager.compileLevel(source_level_path.string(), binary_level_path.string());
         }
+        catch (const std::exception& e)
+        {
+            result.error_message = "Failed to compile level: " + default_level + ": " + e.what();
+            LOG_ENGINE_ERROR("[Packager] {}", result.error_message);
+            setPhase(PackageProgress::Phase::Failed);
+            return result;
+        }
+        catch (...)
+        {
+            result.error_message = "Failed to compile level: " + default_level + ": unexpected exception";
+            LOG_ENGINE_ERROR("[Packager] {}", result.error_message);
+            setPhase(PackageProgress::Phase::Failed);
+            return result;
+        }
+        if (!level_compiled)
+        {
+            result.error_message = "Failed to compile level: " + default_level;
+            setPhase(PackageProgress::Phase::Failed);
+            return result;
+        }
+        if (!fs::remove(source_level_path, level_ec) || level_ec)
+        {
+            result.error_message = "Failed to remove source level after compilation '" + source_level_path.string() + "': " +
+                (level_ec ? level_ec.message() : "file was not removed");
+            setPhase(PackageProgress::Phase::Failed);
+            return result;
+        }
+        ++result.levels_compiled;
+        default_level = default_level.substr(0, default_level.size() - 11) + ".level";
+        LOG_ENGINE_INFO("[Packager] Compiled: {}", source_level_path.filename().string());
     }
 
     // --- Write .garden file ---

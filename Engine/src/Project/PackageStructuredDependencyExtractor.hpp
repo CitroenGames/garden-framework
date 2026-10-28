@@ -18,14 +18,6 @@ struct ENGINE_API PackageStructuredDependencyRoot
     std::string extractor_id;
 };
 
-struct ENGINE_API PackageDependencyRequest
-{
-    std::string logical_path;
-    PackageDependencyKind kind = PackageDependencyKind::StructuredData;
-    std::string owner_logical_path;
-    std::string extractor_id;
-};
-
 // Stateless schema dispatch for data formats that EngineCore owns.  Templates
 // supply roots and choose an extractor id; the returned edges stay opaque to
 // the package graph except for their generic kind and logical path.

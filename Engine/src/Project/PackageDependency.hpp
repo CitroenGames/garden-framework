@@ -27,6 +27,17 @@ enum class PackageDependencyKind : uint8_t
     ModuleData
 };
 
+// One direct, typed discovery edge. Extractors do not own graph traversal,
+// path containment, or artifact validation; ProjectPackager applies those
+// common rules after receiving these requests.
+struct ENGINE_API PackageDependencyRequest
+{
+    std::string logical_path;
+    PackageDependencyKind kind = PackageDependencyKind::StructuredData;
+    std::string owner_logical_path;
+    std::string extractor_id;
+};
+
 ENGINE_API std::string_view packageDependencyKindName(PackageDependencyKind kind);
 ENGINE_API bool parsePackageDependencyKind(std::string_view value, PackageDependencyKind& out_kind);
 

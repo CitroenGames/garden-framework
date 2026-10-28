@@ -1,6 +1,7 @@
 #include "Assets/AssetManager.hpp"
 #include "Navigation/NavMeshSerializer.hpp"
 #include "Project/ProjectPackager.hpp"
+#include "Project/PackageLevelDependencyExtractor.hpp"
 #include "Project/PackageStructuredDependencyExtractor.hpp"
 #include "Project/PackageReceipt.hpp"
 #include "Utils/FileHash.hpp"
@@ -199,6 +200,78 @@ bool testStructuredDependencyExtractorSchemas()
     if (PackageStructuredDependencyExtractors::extract(root, table_path.string(), children, version, error) ||
         error.find("PKG-EXTRACTOR-MISSING") == std::string::npos)
         return fail(name, "unknown structured extractor did not fail closed");
+    return pass(name);
+}
+
+bool testLevelDependencyExtractorTypedEdges()
+{
+    const std::string name = "level dependency extractor returns typed canonical owner edges";
+    TempDirectory temp("typed_level_edges");
+    const fs::path level_path = temp.path / "assets" / "levels" / "nested.level.json";
+    if (!writeText(level_path,
+        R"({"metadata":{"level_name":"Typed Edges"},"entities":[{"mesh":{"path":"assets/models/room.gltf","textures":["assets/textures/trim.png","assets/textures/wall.png"]}},{"collider":{"mesh_path":"assets/models/room.gardenphys"}}]})"))
+        return fail(name, "could not write level fixture");
+
+    std::vector<PackageDependencyRequest> children;
+    std::string error;
+    const std::string owner = "assets/levels/nested.level.json";
+    if (!PackageLevelDependencyExtractor::extract(owner, level_path.string(), children, error))
+        return fail(name, "extraction failed: " + error);
+    if (children.size() != 4)
+        return fail(name, "extractor did not return each mesh, texture, and collider edge");
+
+    const std::vector<std::pair<std::string, PackageDependencyKind>> expected = {
+        {"assets/models/room.gltf", PackageDependencyKind::Mesh},
+        {"assets/textures/trim.png", PackageDependencyKind::Texture},
+        {"assets/textures/wall.png", PackageDependencyKind::Texture},
+        {"assets/models/room.gardenphys", PackageDependencyKind::Collision},
+    };
+    for (size_t index = 0; index < expected.size(); ++index)
+    {
+        if (children[index].logical_path != expected[index].first ||
+            children[index].kind != expected[index].second ||
+            children[index].owner_logical_path != owner ||
+            children[index].extractor_id != PackageLevelDependencyExtractor::SourceId)
+            return fail(name, "typed edge did not retain its canonical owner contract");
+    }
+
+    PackageDependencyGraph graph;
+    for (const PackageDependencyRequest& child : children)
+    {
+        PackageDependency dependency;
+        dependency.logical_path = child.logical_path;
+        dependency.kind = child.kind;
+        dependency.owner_logical_path = child.owner_logical_path;
+        dependency.extractor_id = child.extractor_id;
+        dependency.source_logical_path = child.logical_path;
+        if (!graph.add(dependency, &error))
+            return fail(name, "could not add typed edge to package graph: " + error);
+    }
+    const auto canonical = graph.dependencies();
+    if (!std::is_sorted(canonical.begin(), canonical.end(), [](const PackageDependency& lhs, const PackageDependency& rhs) {
+            if (lhs.logical_path != rhs.logical_path) return lhs.logical_path < rhs.logical_path;
+            return static_cast<uint8_t>(lhs.kind) < static_cast<uint8_t>(rhs.kind);
+        }) || canonical.size() != expected.size())
+        return fail(name, "typed level edges did not produce deterministic canonical receipt order");
+    return pass(name);
+}
+
+bool testLevelDependencyExtractorNamesMalformedOwner()
+{
+    const std::string name = "level dependency extractor names malformed field owner";
+    TempDirectory temp("malformed_level_field");
+    const fs::path level_path = temp.path / "assets" / "levels" / "broken.level.json";
+    if (!writeText(level_path,
+        R"({"metadata":{"level_name":"Malformed"},"entities":[{"mesh":{"path":"assets/models/room.gltf","textures":[42]}}]})"))
+        return fail(name, "could not write malformed level fixture");
+
+    std::vector<PackageDependencyRequest> children;
+    std::string error;
+    if (PackageLevelDependencyExtractor::extract("assets/levels/broken.level.json",
+                                                 level_path.string(), children, error))
+        return fail(name, "extractor accepted malformed texture field");
+    if (error.find("PKG-LEVEL-FIELD: assets/levels/broken.level.json entities[0].mesh.textures[0]") == std::string::npos)
+        return fail(name, "malformed field diagnostic did not name the owning level: " + error);
     return pass(name);
 }
 
@@ -978,13 +1051,15 @@ bool testAssetRootRelativeReferencePassesPackaging()
     TempDirectory temp("asset_root_reference");
     ProjectManager project;
     if (!createProjectFixture(temp.path / "project", project, {"assets/"},
-                              R"({"metadata":{"level_name":"Asset Root Reference"},"entities":[{"mesh":{"path":"assets/models/kept.gltf","textures":["textures/foo.bmp"]}}]})"))
+                              R"({"metadata":{"level_name":"Asset Root Reference"},"entities":[{"mesh":{"path":"assets/models/kept.gltf","textures":["textures/foo.bmp"]}},{"collider":{"mesh_path":"assets/models/kept_collision.gardenphys"}}]})"))
         return fail(name, "could not create project fixture");
 
     if (!writeText(temp.path / "project" / "assets" / "textures" / "foo.bmp", "texture fixture"))
         return fail(name, "could not create the referenced texture under the configured asset root");
     if (!writeText(temp.path / "project" / "assets" / "models" / "kept.gltf", "model fixture"))
         return fail(name, "could not create the explicitly project-relative model");
+    if (!writeText(temp.path / "project" / "assets" / "models" / "kept_collision.gardenphys", "collision fixture"))
+        return fail(name, "could not create the typed collider fixture");
 
     LevelManager levels;
     const PackageResult result = ProjectPackager::packageProject(
@@ -994,12 +1069,32 @@ bool testAssetRootRelativeReferencePassesPackaging()
         return fail(name, "referenced texture was not copied under the configured asset root");
     if (!fs::exists(temp.path / "out" / "package" / "assets" / "models" / "kept.gltf"))
         return fail(name, "explicit project-relative model was not preserved without a duplicate asset prefix");
-    if (result.dependencies_discovered != 2 || result.dependencies_validated != 2 ||
+    if (result.dependencies_discovered != 4 || result.dependencies_validated != 4 ||
         !fs::is_regular_file(temp.path / "out" / "package" / PackageReceiptSerializer::Filename))
-        return fail(name, "static closure receipt did not record the level and mesh dependencies");
+        return fail(name, "static closure receipt did not record the level mesh texture and collider dependencies");
     const auto receipt = PackageReceiptSerializer::verifyStaged((temp.path / "out" / "package").string());
     if (!receipt.valid)
         return fail(name, "published closure receipt failed verification");
+    PackageReceipt written_receipt;
+    std::string receipt_error;
+    if (!PackageReceiptSerializer::readStaged((temp.path / "out" / "package").string(),
+                                               written_receipt, &receipt_error))
+        return fail(name, "could not read canonical receipt: " + receipt_error);
+    const std::vector<std::pair<std::string, PackageDependencyKind>> expected_edges = {
+        {"assets/levels/main.level.json", PackageDependencyKind::Level},
+        {"assets/models/kept.gltf", PackageDependencyKind::Mesh},
+        {"assets/models/kept_collision.gardenphys", PackageDependencyKind::Collision},
+        {"assets/textures/foo.bmp", PackageDependencyKind::Texture},
+    };
+    if (written_receipt.dependencies.size() != expected_edges.size())
+        return fail(name, "receipt did not preserve every typed level edge");
+    for (size_t index = 0; index < expected_edges.size(); ++index)
+    {
+        const PackageDependency& dependency = written_receipt.dependencies[index];
+        if (dependency.logical_path != expected_edges[index].first || dependency.kind != expected_edges[index].second ||
+            (index > 0 && dependency.owner_logical_path != "assets/levels/main.level.json"))
+            return fail(name, "receipt typed level edges were not canonical or owner-labeled");
+    }
     return pass(name);
 }
 
@@ -1242,6 +1337,8 @@ int main()
     ok &= testSelectedLevelArtifactPathNormalization();
     ok &= testPackageDependencyGraphCanonicalization();
     ok &= testStructuredDependencyExtractorSchemas();
+    ok &= testLevelDependencyExtractorTypedEdges();
+    ok &= testLevelDependencyExtractorNamesMalformedOwner();
     ok &= testPackageReceiptRoundTripAndStageVerification();
     ok &= testPackageReceiptRejectsNonCanonicalInput();
 
