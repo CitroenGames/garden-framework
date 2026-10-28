@@ -7,6 +7,7 @@ include = GameplayTests/GameplayTests.buildscript
 include = PackagerTests/PackagerTests.buildscript
 include = AssetPipelineTests/AssetPipelineTests.buildscript
 include = GameModuleContractTests/GameModuleContractTests.buildscript
+include = GameModuleLifecycleTests/GameModuleLifecycleTests.buildscript
 include = ShadowTests/ShadowTests.buildscript
 include = ForwardPlusTests/ForwardPlusTests.buildscript
 include = PerfTests/PerfTests.buildscript
