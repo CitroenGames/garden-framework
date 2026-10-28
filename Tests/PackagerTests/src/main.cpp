@@ -71,6 +71,26 @@ bool writeText(const fs::path& path, const std::string& content)
     return out.good();
 }
 
+bool writeBytes(const fs::path& path, const std::vector<char>& content)
+{
+    std::error_code ec;
+    fs::create_directories(path.parent_path(), ec);
+    if (ec) return false;
+
+    std::ofstream out(path, std::ios::binary);
+    if (!out.is_open()) return false;
+    out.write(content.data(), static_cast<std::streamsize>(content.size()));
+    return out.good();
+}
+
+bool readBytes(const fs::path& path, std::vector<char>& content)
+{
+    std::ifstream input(path, std::ios::binary);
+    if (!input.is_open()) return false;
+    content.assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+    return input.good() || input.eof();
+}
+
 std::string moduleFilename()
 {
 #ifdef _WIN32
@@ -457,6 +477,62 @@ bool testManifestUnknownFieldsRoundTrip()
     return pass(name);
 }
 
+bool testNavSidecarSurvivesRawAndCookedPackaging()
+{
+    const std::string name = "packager preserves binary nav sidecars in raw and cooked packages";
+    TempDirectory temp("nav_sidecar");
+    ProjectManager project;
+    if (!createProjectFixture(temp.path / "project", project, {"assets"},
+                              R"({"metadata":{"level_name":"Nav Sidecar"},"entities":[]})"))
+        return fail(name, "could not create project fixture");
+
+    const std::vector<char> nav_bytes = {
+        'N', 'A', 'V', '0', '\0', '\x7f', '\x01', '\x02', '\xff', '\n', 's', 'i', 'd', 'e', 'c', 'a', 'r'
+    };
+    const fs::path source_nav = temp.path / "project" / "assets" / "levels" / "main.nav";
+    if (!writeBytes(source_nav, nav_bytes))
+        return fail(name, "could not write binary nav fixture");
+
+    auto verify_sidecar = [&](const fs::path& package_root, const std::string& path_name) {
+        std::vector<char> packaged_bytes;
+        const fs::path packaged_nav = package_root / "assets" / "levels" / "main.nav";
+        if (!readBytes(packaged_nav, packaged_bytes))
+            return fail(name, path_name + " package did not contain the nav sidecar");
+        if (packaged_bytes != nav_bytes)
+            return fail(name, path_name + " package changed the nav sidecar bytes");
+        return true;
+    };
+
+    LevelManager levels;
+    PackageConfig raw_config = packageConfig(temp.path / "raw_out");
+    const PackageResult raw_result = ProjectPackager::packageProject(project, levels, raw_config);
+    if (!raw_result.success)
+        return fail(name, "raw package failed: " + raw_result.error_message);
+    if (!verify_sidecar(temp.path / "raw_out" / "package", "raw"))
+        return false;
+
+    auto& job_system = Threading::JobSystem::get();
+    const bool initialized_here = !job_system.isInitialized();
+    if (initialized_here && !job_system.initialize(1))
+        return fail(name, "could not initialize the asset compiler job system");
+
+    PackageConfig cooked_config = packageConfig(temp.path / "cooked_out");
+    cooked_config.compile_assets = true;
+    cooked_config.compile_levels_to_binary = true;
+    const PackageResult cooked_result = ProjectPackager::packageProject(project, levels, cooked_config);
+    if (initialized_here)
+        job_system.shutdown();
+
+    if (!cooked_result.success)
+        return fail(name, "cooked package failed: " + cooked_result.error_message);
+    const fs::path cooked_root = temp.path / "cooked_out" / "package";
+    if (!verify_sidecar(cooked_root, "cooked"))
+        return false;
+    if (!fs::is_regular_file(cooked_root / "assets" / "levels" / "main.level"))
+        return fail(name, "cooked package did not compile the level alongside its nav sidecar");
+    return pass(name);
+}
+
 bool testAssetCopyFailureStopsPackaging()
 {
     const std::string name = "packager fails on project asset copy errors";
@@ -620,6 +696,7 @@ int main()
     else
     {
         ok &= testManifestUnknownFieldsRoundTrip();
+        ok &= testNavSidecarSurvivesRawAndCookedPackaging();
         ok &= testAssetCopyFailureStopsPackaging();
         ok &= testMissingReferencedAssetFailsPackaging();
         ok &= testAssetRootRelativeReferencePassesPackaging();

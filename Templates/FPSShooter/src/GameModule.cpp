@@ -500,7 +500,6 @@ GAME_API bool gardenGameInit(EngineServices* services)
                 g_local_time_since_last_shot = 1000.0f;
                 g_local_weapon_spread = 0.0f;
                 g_recon_smoothing.visual_offset = glm::vec3(0.0f);
-    g_comp = UiLogic::ClientCompetitiveState{}; g_ui = UiLogic::UiState{}; g_owned_items.clear();
 
                 LOG_ENGINE_INFO("Respawned with {} health", msg.health);
             }

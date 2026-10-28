@@ -17,9 +17,14 @@
 #include "server/GameRules.hpp"
 #include "server/FpsDamage.hpp"
 #include "server/LagCompensation.hpp"
+#include "ClientAcceptanceScript.hpp"
 
+#include <chrono>
 #include <cmath>
 #include <cstring>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -49,6 +54,41 @@ bool pass(const std::string& name)
 {
     std::cout << "[PASS] " << name << std::endl;
     return true;
+}
+
+class ScopedEnvironmentValue
+{
+public:
+    explicit ScopedEnvironmentValue(const char* name)
+        : m_name(name)
+    {
+        if (const char* current = std::getenv(name)) {
+            m_had_value = true;
+            m_value = current;
+        }
+    }
+
+    bool set(const char* value) const
+    {
+        return _putenv_s(m_name.c_str(), value) == 0;
+    }
+
+    ~ScopedEnvironmentValue()
+    {
+        _putenv_s(m_name.c_str(), m_had_value ? m_value.c_str() : "");
+    }
+
+private:
+    std::string m_name;
+    std::string m_value;
+    bool m_had_value = false;
+};
+
+bool writeClientAcceptanceScript(const std::filesystem::path& path, const char* contents)
+{
+    std::ofstream output(path, std::ios::trunc);
+    output << contents;
+    return output.good();
 }
 
 class TestDefaultGameMode : public GameFramework::GameMode
@@ -883,6 +923,54 @@ bool testFpsModeIsolationAndLifecycle()
     if (competitive_score_change.any() || competitive_rules.match.scoreOf(1u) != 0 || competitive_rules.match.elapsed != 0.0f ||
         game_world.registry.get<ScoreComponent>(killer).kills != 2) {
         return fail(name, "competitive score controller mutated a noncompetitive match path");
+    }
+
+    return pass(name);
+}
+
+bool testCompetitiveCompositionUsesTeamSpawnPolicy()
+{
+    const std::string name = "CompetitiveCompositionUsesTeamSpawnPolicy";
+    const auto dm = FpsLogic::ModeComposition::fromEnvironmentValue("");
+    const auto tdm = FpsLogic::ModeComposition::fromEnvironmentValue("tdm");
+    const auto competitive = FpsLogic::ModeComposition::fromEnvironmentValue("competitive");
+    const std::vector<glm::vec3> ffa_points{{100.0f, 5.0f, 0.0f}};
+    const std::vector<FpsLogic::TeamSpawnPoint> team_points{
+        {{-20.0f, 5.0f, 0.0f}, FpsLogic::kTeamAttackers},
+        {{20.0f, 5.0f, 0.0f}, FpsLogic::kTeamDefenders},
+    };
+
+    world game_world;
+    glm::vec3 spawn;
+
+    Game::GameRules competitive_rules;
+    competitive_rules.configureMode(competitive);
+    competitive_rules.setSpawnPoints(ffa_points);
+    competitive_rules.setTeamSpawnPoints(team_points);
+    if (competitive_rules.match.config.mode != FpsLogic::FpsGameMode::Deathmatch ||
+        !competitive_rules.tryGetSpawnForPlayer(game_world, 1, FpsLogic::kTeamAttackers, spawn) ||
+        !approxVec3(spawn, team_points[0].position) ||
+        !competitive_rules.tryGetSpawnForPlayer(game_world, 2, FpsLogic::kTeamDefenders, spawn) ||
+        !approxVec3(spawn, team_points[1].position)) {
+        return fail(name, "competitive composition did not use matching team spawn points");
+    }
+
+    Game::GameRules dm_rules;
+    dm_rules.configureMode(dm);
+    dm_rules.setSpawnPoints(ffa_points);
+    dm_rules.setTeamSpawnPoints(team_points);
+    if (!dm_rules.tryGetSpawnForPlayer(game_world, 3, FpsLogic::kTeamAttackers, spawn) ||
+        !approxVec3(spawn, ffa_points[0])) {
+        return fail(name, "deathmatch no longer uses its untagged spawn policy");
+    }
+
+    Game::GameRules tdm_rules;
+    tdm_rules.configureMode(tdm);
+    tdm_rules.setSpawnPoints(ffa_points);
+    tdm_rules.setTeamSpawnPoints(team_points);
+    if (!tdm_rules.tryGetSpawnForPlayer(game_world, 4, FpsLogic::kTeamAttackers, spawn) ||
+        !approxVec3(spawn, team_points[0].position)) {
+        return fail(name, "team deathmatch no longer uses its team spawn policy");
     }
 
     return pass(name);
@@ -2513,6 +2601,161 @@ bool testFpsCombatFeedContract()
     return pass(name);
 }
 
+bool testClientAcceptanceScriptAuthorityAndInput()
+{
+    const std::string name = "ClientAcceptanceScript.AuthorityAndInput";
+    const auto script_path = std::filesystem::temp_directory_path() /
+        ("garden_client_acceptance_" +
+         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".txt");
+    std::error_code remove_error;
+    const auto cleanup = [&]() { std::filesystem::remove(script_path, remove_error); };
+    const auto fail_with_cleanup = [&](const char* reason) {
+        cleanup();
+        return fail(name, reason);
+    };
+
+    ScopedEnvironmentValue script_environment("FPS_TEST_ACTION_SCRIPT");
+    if (!script_environment.set(""))
+        return fail_with_cleanup("could not clear the script environment");
+
+    FPSShooter::ClientAcceptanceScript script;
+    script.loadFromEnvironment();
+    const FPSShooter::ClientAcceptanceObservation no_authority{};
+    if (script.active() || script.tick(0.0f, no_authority).kind != FPSShooter::ClientAcceptanceDispatch::Kind::None)
+        return fail_with_cleanup("absent script was not inert");
+
+    if (!writeClientAcceptanceScript(script_path, "team attackers extra\n"))
+        return fail_with_cleanup("could not write malformed script");
+    if (!script_environment.set(script_path.string().c_str()))
+        return fail_with_cleanup("could not configure malformed script");
+    script.loadFromEnvironment();
+    if (script.active() || script.tick(1.0f, no_authority).kind != FPSShooter::ClientAcceptanceDispatch::Kind::None)
+        return fail_with_cleanup("malformed script was not inert");
+
+    if (!writeClientAcceptanceScript(script_path,
+        "# acceptance fixture\n"
+        "team attackers\n"
+        "buy 42\n"
+        "input 100 forward right use fire reload\n"
+        "wait 50\n"
+        "buy 43\n")) {
+        return fail_with_cleanup("could not write valid script");
+    }
+    script.loadFromEnvironment();
+    if (!script.active())
+        return fail_with_cleanup("valid script did not activate");
+
+    FPSShooter::ClientAcceptanceObservation team_observation;
+    team_observation.connected = true;
+    if (script.tick(0.0f, team_observation).kind != FPSShooter::ClientAcceptanceDispatch::Kind::None)
+        return fail_with_cleanup("team dispatched before round authority");
+    team_observation.has_round_state = true;
+    team_observation.has_local_pawn = true;
+    if (script.tick(0.0f, team_observation).kind != FPSShooter::ClientAcceptanceDispatch::Kind::None)
+        return fail_with_cleanup("team dispatched with an already spawned pawn");
+    team_observation.has_local_pawn = false;
+    const auto team_dispatch = script.tick(0.0f, team_observation);
+    if (team_dispatch.kind != FPSShooter::ClientAcceptanceDispatch::Kind::Team ||
+        team_dispatch.team != Competitive::FpsTeam::Attackers || team_dispatch.auto_assign) {
+        return fail_with_cleanup("valid team action did not dispatch with its configured request");
+    }
+    if (script.tick(0.0f, team_observation).kind != FPSShooter::ClientAcceptanceDispatch::Kind::None)
+        return fail_with_cleanup("team action advanced without a result");
+    script.observeBuyResult(1, true);
+    if (script.tick(0.0f, team_observation).kind != FPSShooter::ClientAcceptanceDispatch::Kind::None)
+        return fail_with_cleanup("unrelated buy result advanced team action");
+    script.observeTeamResult(true, Competitive::FpsTeam::Attackers);
+
+    FPSShooter::ClientAcceptanceObservation pawn_observation;
+    pawn_observation.connected = true;
+    pawn_observation.has_round_state = true;
+    pawn_observation.round_phase = Competitive::RoundPhase::Freeze;
+    pawn_observation.local_team = Competitive::FpsTeam::Attackers;
+    if (script.tick(0.0f, pawn_observation).kind != FPSShooter::ClientAcceptanceDispatch::Kind::None)
+        return fail_with_cleanup("buy dispatched before the authoritative pawn observation");
+    pawn_observation.has_local_pawn = true;
+    const auto buy_dispatch = script.tick(0.0f, pawn_observation);
+    if (buy_dispatch.kind != FPSShooter::ClientAcceptanceDispatch::Kind::Buy || buy_dispatch.item_id != 42)
+        return fail_with_cleanup("buy did not wait for authoritative pawn state");
+    script.observeBuyResult(99, true);
+    if (script.tick(0.0f, pawn_observation).kind != FPSShooter::ClientAcceptanceDispatch::Kind::None)
+        return fail_with_cleanup("buy action advanced without its sent request sequence");
+    script.noteBuyRequestSent(100);
+    script.observeBuyResult(99, true);
+    if (script.tick(0.0f, pawn_observation).kind != FPSShooter::ClientAcceptanceDispatch::Kind::None)
+        return fail_with_cleanup("buy action advanced after a mismatched result sequence");
+    script.observeBuyResult(100, true);
+
+    pawn_observation.has_local_pawn = false;
+    if (script.tick(0.0f, pawn_observation).kind != FPSShooter::ClientAcceptanceDispatch::Kind::None)
+        return fail_with_cleanup("input began before the authoritative pawn observation");
+    pawn_observation.has_local_pawn = true;
+    if (script.tick(0.0f, pawn_observation).kind != FPSShooter::ClientAcceptanceDispatch::Kind::None)
+        return fail_with_cleanup("input action unexpectedly emitted a network command");
+    Net::InputState restricted_input;
+    restricted_input.buttons = Net::InputFlags::ATTACK2;
+    restricted_input.camera_yaw = 7.0f;
+    restricted_input.camera_pitch = -3.0f;
+    restricted_input.move_forward = 0.25f;
+    restricted_input.move_right = -0.5f;
+    script.applyInput(restricted_input, false, false, false);
+    if ((restricted_input.buttons & (Net::InputFlags::MOVE_FORWARD | Net::InputFlags::MOVE_RIGHT |
+                                    Net::InputFlags::ATTACK | Net::InputFlags::RELOAD)) != 0 ||
+        (restricted_input.buttons & (Net::InputFlags::ATTACK2 | Net::InputFlags::USE)) !=
+            (Net::InputFlags::ATTACK2 | Net::InputFlags::USE) ||
+        !approx(restricted_input.move_forward, 0.25f) || !approx(restricted_input.move_right, -0.5f) ||
+        !approx(restricted_input.camera_yaw, 7.0f) || !approx(restricted_input.camera_pitch, -3.0f)) {
+        return fail_with_cleanup("input capability gates or camera preservation failed");
+    }
+
+    Net::InputState permitted_input;
+    permitted_input.move_forward = 0.5f;
+    permitted_input.move_right = 0.5f;
+    script.applyInput(permitted_input, true, true, true);
+    const uint16_t expected_input = Net::InputFlags::MOVE_FORWARD | Net::InputFlags::MOVE_RIGHT |
+        Net::InputFlags::USE | Net::InputFlags::ATTACK | Net::InputFlags::RELOAD;
+    if ((permitted_input.buttons & expected_input) != expected_input ||
+        !approx(permitted_input.move_forward, 1.0f) || !approx(permitted_input.move_right, 1.0f)) {
+        return fail_with_cleanup("input flags or movement axes were not applied");
+    }
+
+    script.tick(0.099f, pawn_observation);
+    Net::InputState before_duration;
+    script.applyInput(before_duration, true, true, true);
+    if ((before_duration.buttons & expected_input) != expected_input)
+        return fail_with_cleanup("input action ended before its configured duration");
+    script.tick(0.002f, pawn_observation);
+    Net::InputState after_duration;
+    script.applyInput(after_duration, true, true, true);
+    if (after_duration.buttons != 0)
+        return fail_with_cleanup("input action remained active after its configured duration");
+    script.tick(0.0f, pawn_observation);
+    script.tick(0.051f, pawn_observation);
+
+    pawn_observation.local_team = Competitive::FpsTeam::None;
+    if (script.tick(0.0f, pawn_observation).kind != FPSShooter::ClientAcceptanceDispatch::Kind::None)
+        return fail_with_cleanup("post-wait buy dispatched after its team authority was lost");
+    pawn_observation.local_team = Competitive::FpsTeam::Attackers;
+    pawn_observation.has_round_state = false;
+    if (script.tick(0.0f, pawn_observation).kind != FPSShooter::ClientAcceptanceDispatch::Kind::None)
+        return fail_with_cleanup("post-wait buy dispatched after its round authority was lost");
+    pawn_observation.has_round_state = true;
+    pawn_observation.has_local_pawn = false;
+    if (script.tick(0.0f, pawn_observation).kind != FPSShooter::ClientAcceptanceDispatch::Kind::None)
+        return fail_with_cleanup("post-wait buy dispatched after its pawn authority was lost");
+    pawn_observation.has_local_pawn = true;
+    const auto post_wait_buy = script.tick(0.0f, pawn_observation);
+    if (post_wait_buy.kind != FPSShooter::ClientAcceptanceDispatch::Kind::Buy || post_wait_buy.item_id != 43)
+        return fail_with_cleanup("post-wait buy did not wait for restored authority");
+    script.noteBuyRequestSent(101);
+    script.observeBuyResult(101, true);
+    if (script.active())
+        return fail_with_cleanup("post-wait buy result did not complete the valid script");
+
+    cleanup();
+    return pass(name);
+}
+
 #include "C4Tests.hpp"
 #include "GrenadeEffectsTests.hpp"
 #include "BotTests.hpp"
@@ -2543,6 +2786,7 @@ int main()
     ok = testFpsDeathmatchScoreLimit() && ok;
     ok = testFpsTeamDeathmatchTeamScoreWin() && ok;
     ok = testFpsModeIsolationAndLifecycle() && ok;
+    ok = testCompetitiveCompositionUsesTeamSpawnPolicy() && ok;
     ok = testPlayerMovementInputContract() && ok;
     ok = testCompetitiveRoundFsmFullCycleHalftimeClinch() && ok;
     ok = testCompetitiveOvertime() && ok;
@@ -2564,6 +2808,7 @@ int main()
     ok = testFpsDamageContract() && ok;
     ok = testFpsDeathLifecycle() && ok;
     ok = testFpsCombatFeedContract() && ok;
+    ok = testClientAcceptanceScriptAuthorityAndInput() && ok;
     ok = testC4PlantInterrupt() && ok;
     ok = testC4AuthoredTriggerOccupancy() && ok;
     ok = testC4DefuseKit() && ok;

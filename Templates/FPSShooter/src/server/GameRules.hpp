@@ -29,6 +29,11 @@ private:
     std::function<void(uint16_t client_id, const glm::vec3& spawn_pos)> on_respawn;
     std::function<void()> on_match_restart;
     bool score_match_enabled = true;
+    // Spawn topology is selected by the server composition, separately from
+    // the score rules stored in MatchLogic. Competitive intentionally keeps
+    // the deathmatch score config because its rounds are owned elsewhere,
+    // while still requiring team-specific player starts.
+    bool team_spawn_policy_enabled = false;
 public:
     FpsLogic::MatchLogic match;
     GameRules() {
@@ -42,6 +47,7 @@ public:
     void configureMode(const FpsLogic::ModeConfig& c) {
         match.configure(c);
         score_match_enabled = true;
+        team_spawn_policy_enabled = c.mode == FpsLogic::FpsGameMode::TeamDeathmatch;
         pending_respawns.clear();
     }
     void configureMode(const FpsLogic::ModeComposition& composition) {
@@ -50,6 +56,8 @@ public:
     void configureMode(const FpsLogic::ModeComposition& composition, const FpsLogic::ModeConfig& config) {
         match.configure(config);
         score_match_enabled = composition.usesScoreMatch();
+        team_spawn_policy_enabled = composition.usesCompetitiveSystems() ||
+            config.mode == FpsLogic::FpsGameMode::TeamDeathmatch;
         pending_respawns.clear();
     }
     bool usesScoreMatch() const { return score_match_enabled; }
@@ -100,16 +108,17 @@ public:
     bool tryGetSpawnForPlayer(world& w, uint16_t client_id, uint8_t team_id, glm::vec3& out_spawn) {
         // Gather enemy positions (alive players on another team; in DM everyone else).
         std::vector<glm::vec3> enemies;
+        const bool uses_team_spawns = team_spawn_policy_enabled && team_id != FpsLogic::kTeamNone;
         auto view = w.registry.view<NetworkedEntity, TransformComponent, FpsHealthComponent>();
         for (auto e : view) {
             auto& net = view.get<NetworkedEntity>(e);
             if (!net.is_player || net.owner_client_id == client_id) continue;
             if (!view.get<FpsHealthComponent>(e).alive) continue;
             uint8_t other_team = w.registry.all_of<TeamComponent>(e) ? w.registry.get<TeamComponent>(e).team_id : FpsLogic::kTeamNone;
-            bool is_enemy = (match.config.mode == FpsLogic::FpsGameMode::Deathmatch) || other_team != team_id;
+            bool is_enemy = !uses_team_spawns || other_team != team_id;
             if (is_enemy) enemies.push_back(view.get<TransformComponent>(e).position);
         }
-        if (match.config.mode == FpsLogic::FpsGameMode::TeamDeathmatch && team_id != FpsLogic::kTeamNone)
+        if (uses_team_spawns)
             return tryGetSpawnPointForTeam(team_id, enemies, out_spawn);
         if (enemies.empty()) return tryGetNextSpawnPoint(out_spawn);
         return FpsLogic::selectSpawnPosition(spawn_points, enemies, out_spawn);
