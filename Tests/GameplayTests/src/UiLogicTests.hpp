@@ -249,6 +249,19 @@ bool testUiCombatFeedPresentationBoundary()
         return fail(name, "round or level clear retained client feed records");
     if (!feed.recordPlayerDied(5, 6) || feed.entryAt(0)->local_sequence <= before_clear)
         return fail(name, "clear reset local presentation ordering");
+
+    UiLogic::CombatFeedPresentation versioned_feed;
+    CombatEventMessage versioned_event;
+    versioned_event.killer_client_id = 8;
+    versioned_event.victim_client_id = 9;
+    versioned_event.weapon_type = static_cast<uint8_t>(WeaponType::RIFLE);
+    versioned_event.death_sequence = 2;
+    versioned_event.publication_sequence = 12;
+    if (!versioned_feed.recordCombatEvent(versioned_event) || !versioned_feed.entryAt(0) ||
+        versioned_feed.entryAt(0)->death_sequence != 2 ||
+        versioned_feed.entryAt(0)->publication_sequence != 12 ||
+        versioned_feed.entryAt(0)->weapon_type != static_cast<uint8_t>(WeaponType::RIFLE))
+        return fail(name, "versioned combat event did not retain authoritative feed fields");
     return pass(name);
 }
 

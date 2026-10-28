@@ -37,6 +37,13 @@ enum class WorldItemMessageType : uint8_t
     WORLD_ITEM_REMOVE = Net::CUSTOM_MESSAGE_START + 12  // 76 S->C reliable
 };
 
+// Versioned all-client combat publication.  This remains a template payload:
+// EngineCore only gates the exact protocol version that admits it.
+enum class CombatEventMessageType : uint8_t
+{
+    COMBAT_EVENT = Net::CUSTOM_MESSAGE_START + 13 // 77 S->C reliable
+};
+
 enum class WorldItemMessageAudience : uint8_t
 {
     Invalid,
@@ -272,6 +279,47 @@ struct PlayerDiedMessage
     glm::vec3 death_position = glm::vec3(0);
 };
 
+// A death is identified by the victim's per-life sequence. publication_sequence
+// carries the server's total feed order when multiple victims die in one tick.
+// Score fields are the exact already-applied GameRules deltas; clients display
+// them and must never recalculate authoritative score from attribution.
+struct CombatEventMessage
+{
+    uint8_t type = static_cast<uint8_t>(CombatEventMessageType::COMBAT_EVENT);
+    uint16_t killer_client_id = 0;
+    uint16_t victim_client_id = 0;
+    uint8_t weapon_type = 0;
+    uint8_t flags = 0;
+    uint32_t death_sequence = 0;
+    uint64_t publication_sequence = 0;
+    int8_t killer_kills = 0;
+    int8_t victim_deaths = 0;
+    uint8_t match_kill_recorded = 0;
+};
+
+constexpr uint8_t kCombatEventKnownFlags = 1u << 0; // self-inflicted
+
+inline bool isValidCombatEventWeaponType(uint8_t wire_weapon_type)
+{
+    // COUNT is the existing template's explicit environmental/no-weapon
+    // placeholder for authoritative non-weapon deaths.
+    return wire_weapon_type <= static_cast<uint8_t>(WeaponType::COUNT);
+}
+
+inline bool isValidCombatEvent(const CombatEventMessage& message)
+{
+    if (message.type != static_cast<uint8_t>(CombatEventMessageType::COMBAT_EVENT) ||
+        message.victim_client_id == 0 || message.death_sequence == 0 ||
+        message.publication_sequence == 0 ||
+        !isValidCombatEventWeaponType(message.weapon_type) ||
+        (message.flags & ~kCombatEventKnownFlags) != 0 ||
+        message.match_kill_recorded > 1)
+        return false;
+
+    const bool self_inflicted = (message.flags & kCombatEventKnownFlags) != 0;
+    return self_inflicted == (message.killer_client_id == message.victim_client_id);
+}
+
 struct PlayerRespawnMessage
 {
     uint8_t type = static_cast<uint8_t>(CombatMessageType::PLAYER_RESPAWN);
@@ -391,6 +439,37 @@ namespace CombatSerializer
         msg.killer_client_id = reader.readUInt16();
         msg.death_position = reader.readVector3f();
         return !reader.hasError();
+    }
+
+    inline bool serialize(Net::BitWriter& writer, const CombatEventMessage& msg) {
+        if (!isValidCombatEvent(msg)) return false;
+        writer.writeByte(msg.type);
+        writer.writeUInt16(msg.killer_client_id);
+        writer.writeUInt16(msg.victim_client_id);
+        writer.writeByte(msg.weapon_type);
+        writer.writeByte(msg.flags);
+        writer.writeUInt32(msg.death_sequence);
+        writer.writeBits(msg.publication_sequence, 64);
+        writer.writeByte(static_cast<uint8_t>(msg.killer_kills));
+        writer.writeByte(static_cast<uint8_t>(msg.victim_deaths));
+        writer.writeByte(msg.match_kill_recorded);
+        return true;
+    }
+
+    inline bool deserialize(Net::BitReader& reader, CombatEventMessage& msg) {
+        msg.type = reader.readByte();
+        if (msg.type != static_cast<uint8_t>(CombatEventMessageType::COMBAT_EVENT)) return false;
+        msg.killer_client_id = reader.readUInt16();
+        msg.victim_client_id = reader.readUInt16();
+        msg.weapon_type = reader.readByte();
+        msg.flags = reader.readByte();
+        msg.death_sequence = reader.readUInt32();
+        msg.publication_sequence = reader.readBits(64);
+        msg.killer_kills = static_cast<int8_t>(reader.readByte());
+        msg.victim_deaths = static_cast<int8_t>(reader.readByte());
+        msg.match_kill_recorded = reader.readByte();
+        return !reader.hasError() && reader.getBitPosition() == reader.getBufferSize() * 8 &&
+            isValidCombatEvent(msg);
     }
 
     inline void serialize(Net::BitWriter& writer, const PlayerRespawnMessage& msg) {

@@ -417,20 +417,38 @@ static void sendWeaponState(uint16_t client_id, entt::entity player_entity, cons
     g_server_network.sendReliableToClient(client_id, writer);
 }
 
-static void publishFpsDeathEvent(const FpsServer::FpsDeathEvent& event)
+static bool publishFpsDeathEvent(
+    const FpsCombat::CombatFeedRecord& record,
+    const FpsServer::FpsDeathEvent& legacy_event)
 {
+    // Serialize the richer versioned publication before sending any legacy
+    // compatibility notification. A serialization failure never changes the
+    // already-resolved health, score, drop, or round state.
+    const CombatEventMessage combat_event = FpsCombat::makeCombatEventMessage(record);
+    BitWriter combat_writer;
+    if (!CombatSerializer::serialize(combat_writer, combat_event)) {
+        LOG_ENGINE_ERROR("Failed to serialize COMBAT_EVENT victim={} sequence={}",
+            combat_event.victim_client_id, combat_event.death_sequence);
+        return false;
+    }
+
     PlayerDiedMessage death_msg;
-    death_msg.victim_client_id = event.victim_client_id;
-    death_msg.killer_client_id = event.attacker_client_id;
-    death_msg.death_position = event.death_position;
+    death_msg.victim_client_id = legacy_event.victim_client_id;
+    death_msg.killer_client_id = legacy_event.attacker_client_id;
+    death_msg.death_position = legacy_event.death_position;
 
     BitWriter death_writer;
     CombatSerializer::serialize(death_writer, death_msg);
     for (uint16_t i = 1; i < g_server_network.getNextClientId(); ++i) {
         const ClientInfo* client = g_server_network.getClientInfo(i);
-        if (client && client->peer)
+        if (client && client->peer) {
+            g_server_network.sendReliableToClient(i, combat_writer);
+            // Keep PLAYER_DIED published for the scoped P1 migration. v5
+            // clients use COMBAT_EVENT for idempotent feed/count state.
             g_server_network.sendReliableToClient(i, death_writer);
+        }
     }
+    return true;
 }
 
 static int32_t botIndexForEntity(world& game_world, entt::entity entity)
@@ -526,8 +544,16 @@ static bool resolveFpsDeath(
     // explicit zero rather than inferring a reward or economy effect here.
     const FpsCombat::CombatFeedEvent feed_event =
         FpsServer::makeCombatFeedEvent(death_event, score_change);
-    (void)FpsCombat::recordCombatFeedEvent(game_world.registry, feed_event);
-    publishFpsDeathEvent(death_event);
+    if (FpsCombat::recordCombatFeedEvent(game_world.registry, feed_event) ==
+        FpsCombat::CombatFeedRecordResult::Recorded) {
+        const FpsCombat::CombatFeedComponent& feed = FpsCombat::combatFeed(game_world.registry);
+        const FpsCombat::CombatFeedRecord* record = FpsCombat::combatFeedRecordAt(feed, feed.count - 1);
+        if (record)
+            (void)publishFpsDeathEvent(*record, death_event);
+    } else {
+        LOG_ENGINE_ERROR("Failed to record COMBAT_EVENT victim={} sequence={}",
+            death_event.victim_client_id, death_event.death_sequence);
+    }
     if (attacker_bot_index >= 0 || victim_bot_index >= 0) {
         LOG_ENGINE_INFO("[BotAcceptance] lethal_death attacker_client={} attacker_bot={} victim_client={} victim_bot={} sequence={}",
             attacker_client_id, attacker_bot_index, victim_client_id, victim_bot_index, transition.death_sequence);

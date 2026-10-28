@@ -1,5 +1,7 @@
 #pragma once
 
+#include "shared/CombatProtocol.hpp"
+
 #include <array>
 #include <algorithm>
 #include <cstddef>
@@ -20,6 +22,10 @@ constexpr float kCombatFeedPresentationLifetime = 5.0f;
 struct CombatFeedPresentationEntry {
     uint16_t killer_client_id = 0;
     uint16_t victim_client_id = 0;
+    uint8_t weapon_type = 0;
+    uint8_t flags = 0;
+    uint32_t death_sequence = 0;
+    uint64_t publication_sequence = 0;
     uint64_t local_sequence = 0;
     float remaining_seconds = 0.0f;
 };
@@ -38,6 +44,35 @@ public:
         CombatFeedPresentationEntry& entry = m_entries[write_index];
         entry.killer_client_id = killer_client_id;
         entry.victim_client_id = victim_client_id;
+        entry.weapon_type = 0;
+        entry.flags = 0;
+        entry.death_sequence = 0;
+        entry.publication_sequence = 0;
+        entry.local_sequence = m_next_sequence++;
+        entry.remaining_seconds = kCombatFeedPresentationLifetime;
+        if (m_count < kCombatFeedPresentationCapacity)
+            ++m_count;
+        else
+            m_first = (m_first + 1) % kCombatFeedPresentationCapacity;
+        return true;
+    }
+
+    // Identity acceptance stays in the template client-world cache. This
+    // presentation layer only formats a message that has already passed that
+    // cache and structural protocol validation.
+    bool recordCombatEvent(const CombatEventMessage& event)
+    {
+        if (!isValidCombatEvent(event))
+            return false;
+
+        const size_t write_index = (m_first + m_count) % kCombatFeedPresentationCapacity;
+        CombatFeedPresentationEntry& entry = m_entries[write_index];
+        entry.killer_client_id = event.killer_client_id;
+        entry.victim_client_id = event.victim_client_id;
+        entry.weapon_type = event.weapon_type;
+        entry.flags = event.flags;
+        entry.death_sequence = event.death_sequence;
+        entry.publication_sequence = event.publication_sequence;
         entry.local_sequence = m_next_sequence++;
         entry.remaining_seconds = kCombatFeedPresentationLifetime;
         if (m_count < kCombatFeedPresentationCapacity)

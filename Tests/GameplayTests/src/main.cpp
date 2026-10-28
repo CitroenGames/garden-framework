@@ -2996,6 +2996,63 @@ bool testFpsCombatFeedContract()
     }
     const uint64_t second_sequence = second_record->publication_sequence;
 
+    // The versioned wire payload is a direct value projection of the server
+    // record: identity, total order, weapon/flags, and already-applied score
+    // changes cannot diverge at publication time.
+    const CombatEventMessage first_wire = FpsCombat::makeCombatEventMessage(*first_record);
+    if (!isValidCombatEvent(first_wire) ||
+        first_wire.killer_client_id != first_record->event.killer_client_id ||
+        first_wire.victim_client_id != first_record->event.victim_client_id ||
+        first_wire.death_sequence != first_record->event.death_sequence ||
+        first_wire.publication_sequence != first_record->publication_sequence ||
+        first_wire.weapon_type != first_record->event.weapon_type ||
+        first_wire.flags != first_record->event.flags ||
+        first_wire.killer_kills != first_record->event.score_change.killer_kills ||
+        first_wire.victim_deaths != first_record->event.score_change.victim_deaths ||
+        first_wire.match_kill_recorded != 1) {
+        return fail(name, "combat event wire payload diverged from its feed record");
+    }
+
+    Net::BitWriter combat_writer;
+    if (!CombatSerializer::serialize(combat_writer, first_wire))
+        return fail(name, "valid combat event did not serialize");
+    CombatEventMessage combat_round_trip;
+    Net::BitReader combat_reader(combat_writer.getData(), combat_writer.getByteSize());
+    if (!CombatSerializer::deserialize(combat_reader, combat_round_trip) ||
+        combat_round_trip.publication_sequence != first_wire.publication_sequence ||
+        combat_round_trip.death_sequence != first_wire.death_sequence)
+        return fail(name, "combat event did not round-trip exactly");
+
+    FpsCombat::ClientCombatEventIdentityCache client_cache;
+    if (client_cache.accept(first_wire) != FpsCombat::ClientCombatEventAcceptResult::Accepted ||
+        client_cache.accept(first_wire) != FpsCombat::ClientCombatEventAcceptResult::Duplicate)
+        return fail(name, "client combat cache did not accept then deduplicate identity");
+    CombatEventMessage older = first_wire;
+    older.death_sequence--;
+    if (client_cache.accept(older) != FpsCombat::ClientCombatEventAcceptResult::Older)
+        return fail(name, "client combat cache accepted an older victim sequence");
+    CombatEventMessage invalid_self_attribution = first_wire;
+    invalid_self_attribution.killer_client_id = invalid_self_attribution.victim_client_id;
+    if (client_cache.accept(invalid_self_attribution) != FpsCombat::ClientCombatEventAcceptResult::Invalid)
+        return fail(name, "client combat cache accepted inconsistent self attribution");
+    const CombatEventMessage second_wire = FpsCombat::makeCombatEventMessage(*second_record);
+    if (client_cache.accept(second_wire) != FpsCombat::ClientCombatEventAcceptResult::Accepted)
+        return fail(name, "client combat cache rejected a same-tick second victim");
+    for (size_t i = 0; i < FpsCombat::kClientCombatEventIdentityCapacity; ++i) {
+        CombatEventMessage unique = first_wire;
+        unique.victim_client_id = static_cast<uint16_t>(100 + i);
+        unique.death_sequence = 1;
+        unique.publication_sequence = 100 + i;
+        if (client_cache.accept(unique) != FpsCombat::ClientCombatEventAcceptResult::Accepted)
+            return fail(name, "client combat cache rejected a bounded unique identity");
+    }
+    if (client_cache.count() != FpsCombat::kClientCombatEventIdentityCapacity)
+        return fail(name, "client combat cache did not evict its oldest identity");
+    client_cache.clear();
+    if (client_cache.count() != 0 ||
+        client_cache.accept(first_wire) != FpsCombat::ClientCombatEventAcceptResult::Accepted)
+        return fail(name, "client combat cache did not reset with its world/session");
+
     FpsCombat::CombatFeedEvent invalid_flags = first;
     invalid_flags.flags = 0x80;
     if (FpsCombat::recordCombatFeedEvent(registry, invalid_flags) !=

@@ -17,6 +17,7 @@
 #include "Network/SharedMovement.hpp"
 #include "shared/SharedComponents.hpp"
 #include "shared/CombatProtocol.hpp"
+#include "shared/FpsCombatFeed.hpp"
 #include "shared/WorldItemPresentation.hpp"
 #include "shared/WeaponTypes.hpp"
 #include "shared/WeaponSystem.hpp"
@@ -323,6 +324,7 @@ static constexpr size_t kMaxClientAcceptanceCombatReceipts = 16;
 static uint64_t g_combat_receipt_generation = 0;
 static std::vector<FPSShooter::ClientAcceptanceDamageReceipt> g_damage_acceptance_receipts;
 static std::vector<FPSShooter::ClientAcceptanceDeathReceipt> g_death_acceptance_receipts;
+static FpsCombat::ClientCombatEventIdentityCache g_combat_event_identity_cache;
 
 template <typename Receipt>
 static void appendClientAcceptanceCombatReceipt(std::vector<Receipt>& receipts, Receipt receipt)
@@ -340,6 +342,7 @@ static void clearWorldItemAcceptanceReceipts()
     g_combat_receipt_generation = 0;
     g_damage_acceptance_receipts.clear();
     g_death_acceptance_receipts.clear();
+    g_combat_event_identity_cache.clear();
 }
 
 static entt::entity g_player_entity = entt::null;
@@ -379,8 +382,8 @@ static int32_t g_local_deaths = 0;
 static float g_death_timer = 0.0f; // Countdown shown on death screen
 static constexpr float RESPAWN_DELAY = 3.0f;
 
-// PLAYER_DIED is the only current all-client feed publication. The richer
-// server FpsCombatFeed has no corresponding wire message yet.
+// The template receives versioned COMBAT_EVENT records and formats only events
+// accepted by its bounded identity cache.
 static UiLogic::CombatFeedPresentation g_combat_feed;
 // Competitive client state (server-authoritative; client renders only).
 static UiLogic::UiState g_ui;
@@ -778,6 +781,46 @@ GAME_API bool gardenGameInit(EngineServices* services)
                 result == FpsLogic::WorldItemPresentationRemoveResult::Removed ? "removed" : "unknown_remove");
             return;
         }
+        if (message_type == static_cast<uint8_t>(CombatEventMessageType::COMBAT_EVENT)) {
+            CombatEventMessage msg;
+            if (!CombatSerializer::deserialize(reader, msg)) {
+                LOG_ENGINE_WARN("Ignoring malformed COMBAT_EVENT");
+                return;
+            }
+
+            const FpsCombat::ClientCombatEventAcceptResult result =
+                g_combat_event_identity_cache.accept(msg);
+            if (result != FpsCombat::ClientCombatEventAcceptResult::Accepted) {
+                LOG_ENGINE_INFO("Ignoring COMBAT_EVENT victim={} sequence={} result={}",
+                    msg.victim_client_id, msg.death_sequence, static_cast<unsigned>(result));
+                return;
+            }
+            LOG_ENGINE_INFO("COMBAT_EVENT accepted killer={} victim={} weapon={} flags={} death_sequence={} publication_sequence={}",
+                msg.killer_client_id, msg.victim_client_id, msg.weapon_type, msg.flags,
+                msg.death_sequence, msg.publication_sequence);
+            if (!g_combat_feed.recordCombatEvent(msg)) {
+                LOG_ENGINE_WARN("Ignoring COMBAT_EVENT rejected by feed presentation");
+                return;
+            }
+
+            if (msg.victim_client_id == g_network.getClientId()) {
+                appendClientAcceptanceCombatReceipt(g_death_acceptance_receipts,
+                    FPSShooter::ClientAcceptanceDeathReceipt{
+                        msg.killer_client_id, msg.victim_client_id, ++g_combat_receipt_generation
+                    });
+                AudioEventSystem::get().play2D("player.death");
+                g_local_alive = false;
+                g_local_health = 0;
+                g_has_authoritative_health_snapshot = true;
+                g_local_deaths += msg.victim_deaths;
+                g_death_timer = RESPAWN_DELAY;
+                LOG_ENGINE_INFO("COMBAT_EVENT accepted victim={} sequence={} weapon={} flags={}",
+                    msg.victim_client_id, msg.death_sequence, msg.weapon_type, msg.flags);
+            }
+            if (msg.killer_client_id == g_network.getClientId())
+                g_local_kills += msg.killer_kills;
+            return;
+        }
         switch (static_cast<CombatMessageType>(message_type)) {
         case CombatMessageType::SHOOT_RESULT: {
             ShootResultMessage msg;
@@ -817,28 +860,9 @@ GAME_API bool gardenGameInit(EngineServices* services)
                 LOG_ENGINE_WARN("Failed to deserialize PLAYER_DIED");
                 return;
             }
-            if (!g_combat_feed.recordPlayerDied(msg.killer_client_id, msg.victim_client_id)) {
-                LOG_ENGINE_WARN("Ignoring PLAYER_DIED with invalid victim client id");
-                return;
-            }
-
-            if (msg.victim_client_id == g_network.getClientId()) {
-                appendClientAcceptanceCombatReceipt(g_death_acceptance_receipts,
-                    FPSShooter::ClientAcceptanceDeathReceipt{
-                        msg.killer_client_id, msg.victim_client_id, ++g_combat_receipt_generation
-                    });
-                AudioEventSystem::get().play2D("player.death");
-                g_local_alive = false;
-                g_local_health = 0;
-                g_has_authoritative_health_snapshot = true;
-                g_local_deaths++;
-                g_death_timer = RESPAWN_DELAY;
-                LOG_ENGINE_INFO("You died! Killed by Player {}", msg.killer_client_id);
-            }
-            if (msg.killer_client_id == g_network.getClientId() &&
-                msg.killer_client_id != msg.victim_client_id) {
-                g_local_kills++;
-            }
+            // P1 retains PLAYER_DIED on the wire for its existing consumers,
+            // but v5 clients derive idempotent presentation, local counts,
+            // and acceptance receipts solely from the preceding COMBAT_EVENT.
             break;
         }
         case CombatMessageType::PLAYER_RESPAWN: {

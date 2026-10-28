@@ -15,6 +15,7 @@
 #include "Network/ServerNetworkManager.hpp"
 #include "Utils/Log.hpp"
 #include "world.hpp"
+#include "../../../Templates/FPSShooter/src/shared/FpsCombatFeed.hpp"
 
 #include <SDL3/SDL.h>
 
@@ -571,7 +572,7 @@ static bool runNetworkHierarchyBoundaryTests()
     return true;
 }
 
-static bool runWireV4HandshakeTests()
+static bool runWireV5HandshakeTests()
 {
     TestState state;
     world server_world;
@@ -631,13 +632,20 @@ static bool runWireV4HandshakeTests()
     }
     if (server.getClientCount() != 0) state.addError("v3 reject allocated a client id");
 
+    // v4 had no versioned COMBAT_EVENT and must be rejected before allocation
+    // or template custom-message dispatch.
+    if (rawConnectAttempt(server, port, 4, 0x1234ABCDu, Net::CAP_ALL_KNOWN) != 1) {
+        state.addError("v4 client was not rejected with VersionMismatch (1)");
+    }
+    if (server.getClientCount() != 0) state.addError("v4 reject allocated a client id");
+
     // Current client with wrong level hash -> LevelMismatch (2), no id allocated.
     if (rawConnectAttempt(server, port, Net::NETWORK_PROTOCOL_VERSION, 0x99999999u, Net::CAP_ALL_KNOWN) != 2) {
         state.addError("wrong level hash was not rejected with LevelMismatch (2)");
     }
     if (server.getClientCount() != 0) state.addError("level reject allocated a client id");
 
-    // Valid v4 client (real manager, matching hash) connects; caps echo.
+    // Valid v5 client (real manager, matching hash) connects; caps echo.
     {
         world client_world;
         Net::ClientNetworkManager client;
@@ -656,8 +664,8 @@ static bool runWireV4HandshakeTests()
             server.pumpNetworkEvents(kFixedDelta);
             SDL_Delay(1);
         }
-        if (!client.isConnected()) state.addError("valid v4 client did not connect");
-        if (server.getClientCount() != 1) state.addError("valid v4 client was not allocated exactly one id");
+        if (!client.isConnected()) state.addError("valid v5 client did not connect");
+        if (server.getClientCount() != 1) state.addError("valid v5 client was not allocated exactly one id");
         if (client.getNegotiatedCapabilityFlags() != Net::CAP_ALL_KNOWN) {
             state.addError("accept did not echo negotiated capability flags");
         }
@@ -676,7 +684,109 @@ static bool runWireV4HandshakeTests()
         }
         return false;
     }
-    std::cout << "[PASS] WireV4HandshakeTests\n";
+    std::cout << "[PASS] WireV5HandshakeTests\n";
+    return true;
+}
+
+static bool runCombatEventProtocolTests()
+{
+    TestState state;
+    CombatEventMessage valid;
+    valid.killer_client_id = 7;
+    valid.victim_client_id = 9;
+    valid.weapon_type = static_cast<uint8_t>(WeaponType::RIFLE);
+    valid.death_sequence = 3;
+    valid.publication_sequence = 42;
+    valid.killer_kills = 1;
+    valid.victim_deaths = 1;
+    valid.match_kill_recorded = 1;
+
+    Net::BitWriter valid_writer;
+    if (!CombatSerializer::serialize(valid_writer, valid)) {
+        state.addError("valid combat event did not serialize");
+    } else {
+        CombatEventMessage parsed;
+        Net::BitReader reader(valid_writer.getData(), valid_writer.getByteSize());
+        if (!CombatSerializer::deserialize(reader, parsed) ||
+            parsed.victim_client_id != valid.victim_client_id ||
+            parsed.death_sequence != valid.death_sequence ||
+            parsed.publication_sequence != valid.publication_sequence) {
+            state.addError("valid combat event did not deserialize exactly");
+        }
+    }
+
+    const auto writeRaw = [](Net::BitWriter& writer, uint16_t victim, uint8_t weapon, uint8_t flags, uint8_t match_kill_recorded) {
+        writer.writeByte(static_cast<uint8_t>(CombatEventMessageType::COMBAT_EVENT));
+        writer.writeUInt16(7);
+        writer.writeUInt16(victim);
+        writer.writeByte(weapon);
+        writer.writeByte(flags);
+        writer.writeUInt32(3);
+        writer.writeBits(42, 64);
+        writer.writeByte(1);
+        writer.writeByte(1);
+        writer.writeByte(match_kill_recorded);
+    };
+    FpsCombat::ClientCombatEventIdentityCache client_cache;
+    {
+        Net::BitWriter malformed_writer;
+        writeRaw(malformed_writer, 9, static_cast<uint8_t>(WeaponType::RIFLE), 0x80, 1);
+        CombatEventMessage parsed;
+        Net::BitReader reader(malformed_writer.getData(), malformed_writer.getByteSize());
+        if (CombatSerializer::deserialize(reader, parsed))
+            state.addError("combat event with unknown flags deserialized");
+    }
+    {
+        Net::BitWriter malformed_writer;
+        writeRaw(malformed_writer, 0, static_cast<uint8_t>(WeaponType::RIFLE), 0, 1);
+        CombatEventMessage parsed;
+        Net::BitReader reader(malformed_writer.getData(), malformed_writer.getByteSize());
+        if (CombatSerializer::deserialize(reader, parsed))
+            state.addError("combat event with zero victim deserialized");
+    }
+    {
+        Net::BitWriter malformed_writer;
+        writeRaw(malformed_writer, 9, 0xff, 0, 1);
+        CombatEventMessage parsed;
+        Net::BitReader reader(malformed_writer.getData(), malformed_writer.getByteSize());
+        if (CombatSerializer::deserialize(reader, parsed))
+            state.addError("combat event with unknown weapon enum deserialized");
+    }
+    {
+        Net::BitWriter malformed_writer;
+        writeRaw(malformed_writer, 7, static_cast<uint8_t>(WeaponType::RIFLE), 0, 1);
+        CombatEventMessage parsed;
+        Net::BitReader reader(malformed_writer.getData(), malformed_writer.getByteSize());
+        if (CombatSerializer::deserialize(reader, parsed))
+            state.addError("combat event with inconsistent self attribution deserialized");
+    }
+    {
+        Net::BitWriter malformed_writer;
+        writeRaw(malformed_writer, 9, static_cast<uint8_t>(WeaponType::RIFLE), 0, 2);
+        CombatEventMessage parsed;
+        Net::BitReader reader(malformed_writer.getData(), malformed_writer.getByteSize());
+        if (CombatSerializer::deserialize(reader, parsed))
+            state.addError("combat event with invalid match flag deserialized");
+    }
+    {
+        Net::BitWriter trailing_writer;
+        if (CombatSerializer::serialize(trailing_writer, valid)) {
+            trailing_writer.writeByte(0x7f);
+            CombatEventMessage parsed;
+            Net::BitReader reader(trailing_writer.getData(), trailing_writer.getByteSize());
+            if (CombatSerializer::deserialize(reader, parsed))
+                state.addError("trailing combat event payload deserialized");
+        }
+    }
+    if (client_cache.count() != 0)
+        state.addError("malformed combat event mutated template client cache");
+
+    if (state.error_count != 0) {
+        for (const std::string& error : state.errors)
+            std::cerr << "[FAIL] " << error << "\n";
+        return false;
+    }
+    std::cout << "[PASS] CombatEventProtocolTests\n";
     return true;
 }
 
@@ -2295,7 +2405,8 @@ int main(int argc, char** argv)
         EE::CLog::GetClientLogger()->set_level(spdlog::level::warn);
         EE::CLog::GetLuaLogger()->set_level(spdlog::level::warn);
     }
-    const bool handshake_ok = runWireV4HandshakeTests();
+    const bool handshake_ok = runWireV5HandshakeTests();
+    const bool combat_event_protocol_ok = runCombatEventProtocolTests();
     const bool transport_pending_queue_accounting_ok = runTransportPendingQueueAccountingTests();
     const bool custom_ingress_ok = runCustomIngressRejectionTests();
     const bool hierarchy_boundary_ok = runNetworkHierarchyBoundaryTests();
@@ -2313,7 +2424,7 @@ int main(int argc, char** argv)
     const bool input_burst_admission_ok = runInputBurstAdmissionRegressionTest();
     const bool ok = runNetworkStress(config);
     EE::CLog::Shutdown();
-    return (handshake_ok && transport_pending_queue_accounting_ok && custom_ingress_ok && hierarchy_boundary_ok && interpolation_buffer_wrap_ok && interpolation_jitter_ok && lag_history_wrap_ok &&
+    return (handshake_ok && combat_event_protocol_ok && transport_pending_queue_accounting_ok && custom_ingress_ok && hierarchy_boundary_ok && interpolation_buffer_wrap_ok && interpolation_jitter_ok && lag_history_wrap_ok &&
             lag_view_tick_clamp_ok &&
             input_view_tick_protocol_ok && input_view_tick_loopback_ok && interpolation_manager_wrap_ok &&
             raw_interpolation_ok && blocked_input_cursor_ok && unreliable_queue_drain_ok && input_send_credit_ok &&
