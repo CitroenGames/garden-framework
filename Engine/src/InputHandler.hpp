@@ -1,6 +1,7 @@
 #pragma once
 
 #include "InputManager.hpp"
+#include "Input/GameInputModeService.hpp"
 #include "ImGui/ImGuiManager.hpp"
 #include "UI/RmlUiManager.h"
 #include <SDL3/SDL.h>
@@ -9,6 +10,7 @@
 
 // Global input handler that processes SDL events and manages the InputManager
 class InputHandler
+    : public IGameInputModeService
 {
 private:
     std::shared_ptr<InputManager> input_manager;
@@ -18,11 +20,18 @@ private:
     bool should_quit = false;
     bool ui_mode = false;  // When true, mouse is visible and game input is paused
     bool is_minimized_state = false;
+    GameInputModeState game_input_mode;
 
     void set_relative_mouse_mode(bool enabled)
     {
         if (window)
             SDL_SetWindowRelativeMouseMode(window, enabled);
+    }
+
+    void refresh_gamepad_input_enabled()
+    {
+        input_manager->set_gamepad_input_enabled(
+            game_input_mode.gameplayInputEnabled() && !ImGuiManager::get().wantCaptureKeyboard());
     }
 
     void set_ui_mode(bool enabled)
@@ -31,33 +40,31 @@ private:
             return;
 
         ui_mode = enabled;
-        if (ui_mode)
-            input_manager->reset_state();
-        input_manager->set_gamepad_input_enabled(!ui_mode && !ImGuiManager::get().wantCaptureKeyboard());
-        set_relative_mouse_mode(!ui_mode);
+        game_input_mode.setHostUiActive(ui_mode);
+        refresh_gamepad_input_enabled();
     }
 
     bool should_route_to_game_input(const SDL_Event& event) const
     {
-        if (ui_mode)
-            return false;
-
         switch (event.type)
         {
         case SDL_EVENT_KEY_DOWN:
         case SDL_EVENT_KEY_UP:
-            return !ImGuiManager::get().wantCaptureKeyboard();
+            return game_input_mode.keyboardInputEnabled() &&
+                   !ImGuiManager::get().wantCaptureKeyboard();
 
         case SDL_EVENT_MOUSE_MOTION:
         case SDL_EVENT_MOUSE_BUTTON_DOWN:
         case SDL_EVENT_MOUSE_BUTTON_UP:
         case SDL_EVENT_MOUSE_WHEEL:
-            return !ImGuiManager::get().wantCaptureMouse();
+            return game_input_mode.gameplayInputEnabled() &&
+                   !ImGuiManager::get().wantCaptureMouse();
 
         case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
         case SDL_EVENT_GAMEPAD_BUTTON_UP:
         case SDL_EVENT_GAMEPAD_AXIS_MOTION:
-            return !ImGuiManager::get().wantCaptureKeyboard();
+            return game_input_mode.gameplayInputEnabled() &&
+                   !ImGuiManager::get().wantCaptureKeyboard();
 
         default:
             return false;
@@ -106,8 +113,12 @@ private:
 
 public:
     InputHandler()
+        : input_manager(std::make_shared<InputManager>())
+        , game_input_mode(*input_manager, [this](bool gameplay_pointer_capture) {
+            set_relative_mouse_mode(gameplay_pointer_capture);
+            refresh_gamepad_input_enabled();
+        })
     {
-        input_manager = std::make_shared<InputManager>();
     }
 
     ~InputHandler() = default;
@@ -117,6 +128,12 @@ public:
     {
         window = w;
         input_manager->initialize_gamepads();
+        game_input_mode.synchronize();
+    }
+
+    bool requestGameInputMode(GameInputMode mode) override
+    {
+        return game_input_mode.request(mode);
     }
 
     // Set a callback for when the application should quit
@@ -160,7 +177,7 @@ public:
     {
         // Update input manager at start of frame
         input_manager->update();
-        input_manager->set_gamepad_input_enabled(!ui_mode && !ImGuiManager::get().wantCaptureKeyboard());
+        refresh_gamepad_input_enabled();
 
         SDL_Event event;
         while (SDL_PollEvent(&event))
@@ -201,6 +218,16 @@ public:
                 consumed = true;
                 break;
 
+            case SDL_EVENT_WINDOW_FOCUS_LOST:
+                game_input_mode.setWindowFocused(false);
+                consumed = true;
+                break;
+
+            case SDL_EVENT_WINDOW_FOCUS_GAINED:
+                game_input_mode.setWindowFocused(true);
+                consumed = true;
+                break;
+
             case SDL_EVENT_WINDOW_RESIZED:
             case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
                 if (resize_callback && window && event.window.windowID == SDL_GetWindowID(window))
@@ -209,14 +236,25 @@ public:
                 break;
             }
 
+            // UI-pointer mode keeps raw keyboard delivery available to the
+            // module's keyboard-first modal commands.  Rml still receives
+            // the same event afterwards, preserving its focus/text routing.
+            const bool route_keyboard_before_rml =
+                !consumed &&
+                game_input_mode.requestedMode() == GameInputMode::UiPointer &&
+                (event.type == SDL_EVENT_KEY_DOWN || event.type == SDL_EVENT_KEY_UP) &&
+                should_route_to_game_input(event);
+            if (route_keyboard_before_rml)
+                input_manager->process_event(event);
+
             if (!consumed && RmlUiManager::get().isInitialized())
                 consumed = RmlUiManager::get().processEvent(event);
 
-            if (!consumed && should_route_to_game_input(event))
+            if (!route_keyboard_before_rml && !consumed && should_route_to_game_input(event))
                 input_manager->process_event(event);
         }
 
-        input_manager->set_gamepad_input_enabled(!ui_mode && !ImGuiManager::get().wantCaptureKeyboard());
+        refresh_gamepad_input_enabled();
     }
 
     // Reset quit state (useful for handling quit gracefully)

@@ -361,6 +361,7 @@ int main(int argc, char* argv[])
     services.render_api = render_api;
     services.input_manager = input_manager.get();
     services.input_actions = &input_actions;
+    services.input_mode_service = &input_handler;
     services.reflection = &reflection;
     services.application = &app;
     services.level_manager = &level_manager;

@@ -1,5 +1,6 @@
 #include "InputManager.hpp"
 #include "InputActionSystem.hpp"
+#include "Input/GameInputModeService.hpp"
 #include "Components/LocalPlayerInputComponent.hpp"
 #include "LocalPlayerInputSystem.hpp"
 #include "NetworkInputSampler.hpp"
@@ -643,6 +644,69 @@ namespace
         return ok;
     }
 
+    bool testGameInputModeTransitions()
+    {
+        InputManager input;
+        std::vector<bool> pointer_capture_requests;
+        GameInputModeState mode(input, [&pointer_capture_requests](bool gameplay_pointer_capture) {
+            pointer_capture_requests.push_back(gameplay_pointer_capture);
+        });
+
+        bool ok = true;
+        mode.synchronize();
+        ok = expect(pointer_capture_requests.size() == 1 && pointer_capture_requests.back() &&
+                        mode.gameplayInputEnabled() && mode.keyboardInputEnabled(),
+            "initial generic input mode captures the gameplay pointer") && ok;
+
+        input.update();
+        input.process_event(makeKeyEvent(SDL_EVENT_KEY_DOWN, SDL_SCANCODE_W));
+        input.process_event(makeMouseButtonEvent(SDL_EVENT_MOUSE_BUTTON_DOWN, SDL_BUTTON_LEFT));
+        ok = expect(input.is_key_held(SDL_SCANCODE_W) && input.is_mouse_button_held(SDL_BUTTON_LEFT),
+            "input mode fixture sampled gameplay intent before UI entry") && ok;
+
+        ok = expect(mode.request(GameInputMode::UiPointer) && !mode.gameplayInputEnabled() &&
+                        pointer_capture_requests.size() == 2 && !pointer_capture_requests.back(),
+            "UI entry releases pointer capture once") && ok;
+        ok = expect(!input.is_key_held(SDL_SCANCODE_W) && !input.is_mouse_button_held(SDL_BUTTON_LEFT),
+            "UI entry neutralizes already sampled keyboard and mouse intent") && ok;
+        input.update();
+        if (mode.keyboardInputEnabled())
+            input.process_event(makeKeyEvent(SDL_EVENT_KEY_DOWN, SDL_SCANCODE_ESCAPE));
+        ok = expect(mode.keyboardInputEnabled() && input.is_key_pressed(SDL_SCANCODE_ESCAPE),
+            "UI pointer mode retains keyboard delivery for modal commands") && ok;
+        ok = expect(mode.request(GameInputMode::UiPointer) && pointer_capture_requests.size() == 2,
+            "repeated UI request is idempotent") && ok;
+
+        ok = expect(mode.request(GameInputMode::GameplayPointerCapture) && mode.gameplayInputEnabled() &&
+                        pointer_capture_requests.size() == 3 && pointer_capture_requests.back(),
+            "gameplay exit restores pointer capture") && ok;
+        ok = expect(!input.is_key_held(SDL_SCANCODE_W) && !input.is_mouse_button_held(SDL_BUTTON_LEFT),
+            "gameplay restore clears keyboard and mouse state sampled during UI") && ok;
+
+        mode.setWindowFocused(false);
+        ok = expect(!mode.gameplayInputEnabled() && pointer_capture_requests.size() == 4 &&
+                        !pointer_capture_requests.back() && !mode.keyboardInputEnabled(),
+            "focus loss releases captured pointer") && ok;
+        mode.setWindowFocused(false);
+        ok = expect(pointer_capture_requests.size() == 4,
+            "repeated focus loss is idempotent") && ok;
+        mode.setWindowFocused(true);
+        ok = expect(mode.gameplayInputEnabled() && pointer_capture_requests.size() == 5 &&
+                        pointer_capture_requests.back() && mode.keyboardInputEnabled(),
+            "focus regain restores requested gameplay capture") && ok;
+
+        mode.setHostUiActive(true);
+        ok = expect(!mode.gameplayInputEnabled() && pointer_capture_requests.size() == 6 &&
+                        !pointer_capture_requests.back() && !mode.keyboardInputEnabled(),
+            "host UI takes pointer capture without changing the game request") && ok;
+        mode.setHostUiActive(false);
+        ok = expect(mode.gameplayInputEnabled() && pointer_capture_requests.size() == 7 &&
+                        pointer_capture_requests.back(),
+            "host UI exit restores the requested gameplay capture") && ok;
+
+        return ok;
+    }
+
     bool testActionRebindCallbacksAndProfile()
     {
         InputActionSystem actions;
@@ -1201,6 +1265,7 @@ int main()
     ok = testActionAxesAndMouseDelta() && ok;
     ok = testGamepadInputFeed() && ok;
     ok = testActionContextPriorityAndModal() && ok;
+    ok = testGameInputModeTransitions() && ok;
     ok = testActionRebindCallbacksAndProfile() && ok;
     ok = testNetworkInputSampler() && ok;
     ok = testFixedNetworkInputCadence() && ok;

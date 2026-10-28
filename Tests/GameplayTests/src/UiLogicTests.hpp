@@ -128,13 +128,42 @@ bool testUiModalInputIsolation()
     if (!actions.get("Move").held || !actions.get("Fire").held)
         return fail(name, "gameplay inputs did not activate before opening a modal");
 
+    std::vector<bool> pointer_capture_requests;
+    GameInputModeState host_input_mode(input, [&pointer_capture_requests](bool capture) {
+        pointer_capture_requests.push_back(capture);
+    });
+    host_input_mode.synchronize();
+    struct RecordingInputModeService final : IGameInputModeService
+    {
+        GameInputModeState& state;
+        std::vector<GameInputMode> requests;
+
+        explicit RecordingInputModeService(GameInputModeState& input_state)
+            : state(input_state)
+        {
+        }
+
+        bool requestGameInputMode(GameInputMode mode) override
+        {
+            requests.push_back(mode);
+            return state.request(mode);
+        }
+    } input_mode{host_input_mode};
+
     UiLogic::UiState ui;
     if (!UiLogic::tryOpen(ui, UiLogic::UiScreen::Buy))
         return fail(name, "buy modal did not open");
     bool modal_context_active = false;
-    if (!UiInput::synchronizeModalContext(actions, UiLogic::cursorWanted(ui), modal_context_active) ||
-        !modal_context_active)
-        return fail(name, "modal context did not activate");
+    bool modal_input_mode_active = false;
+    if (!UiInput::synchronizeModalInput(actions, &input_mode, UiLogic::cursorWanted(ui),
+                                         modal_context_active, modal_input_mode_active) ||
+        !modal_context_active || !modal_input_mode_active || input_mode.requests.size() != 1 ||
+        input_mode.requests.back() != GameInputMode::UiPointer)
+        return fail(name, "modal did not activate its host UI pointer mode");
+    if (!UiInput::synchronizeModalInput(actions, &input_mode, UiLogic::cursorWanted(ui),
+                                         modal_context_active, modal_input_mode_active) ||
+        input_mode.requests.size() != 1)
+        return fail(name, "repeated modal synchronization requested host mode twice");
 
     LocalPlayerInputComponent local_input;
     local_input.move = glm::vec2(1.0f, 0.0f);
@@ -156,16 +185,40 @@ bool testUiModalInputIsolation()
         actions.get("Move").pressed || actions.get("Fire").pressed)
         return fail(name, "modal context allowed gameplay input or emitted an edge");
 
+    // The generic UI-pointer host policy keeps keyboard-first modal commands
+    // visible to the template, while the modal action context still masks
+    // gameplay bindings sourced from those events.
+    input.update();
+    SDL_Event modal_key_down{};
+    modal_key_down.type = SDL_EVENT_KEY_DOWN;
+    modal_key_down.key.scancode = SDL_SCANCODE_B;
+    if (host_input_mode.keyboardInputEnabled())
+        input.process_event(modal_key_down);
+    actions.evaluate(input);
+    if (!input.is_key_pressed(SDL_SCANCODE_B) || actions.get("Move").held ||
+        actions.get("Fire").held || actions.get("Move").pressed || actions.get("Fire").pressed)
+        return fail(name, "modal keyboard routing bypassed raw command input or revived gameplay actions");
+
     UiLogic::closeToHud(ui);
-    if (!UiInput::synchronizeModalContext(actions, UiLogic::cursorWanted(ui), modal_context_active) ||
-        modal_context_active)
-        return fail(name, "modal context did not deactivate after close");
+    if (!UiInput::synchronizeModalInput(actions, &input_mode, UiLogic::cursorWanted(ui),
+                                         modal_context_active, modal_input_mode_active) ||
+        modal_context_active || modal_input_mode_active || input_mode.requests.size() != 2 ||
+        input_mode.requests.back() != GameInputMode::GameplayPointerCapture)
+        return fail(name, "modal did not restore host gameplay pointer mode after close");
 
     input.update();
     actions.evaluate(input);
-    if (!actions.get("Move").held || !actions.get("Fire").held ||
+    if (actions.get("Move").held || actions.get("Fire").held ||
         actions.get("Move").pressed || actions.get("Fire").pressed)
-        return fail(name, "closing modal failed to restore held inputs without phantom presses");
+        return fail(name, "closing modal revived pre-modal gameplay input");
+
+    // Editor/server hosts intentionally provide no standalone game pointer
+    // service.  Their action context continues to isolate input without
+    // treating absence as a module error.
+    bool unavailable_active = false;
+    if (!UiInput::synchronizeModalInputMode(nullptr, true, unavailable_active) || !unavailable_active ||
+        !UiInput::synchronizeModalInputMode(nullptr, false, unavailable_active) || unavailable_active)
+        return fail(name, "unavailable input mode service did not remain a safe no-op");
 
     return pass(name);
 }

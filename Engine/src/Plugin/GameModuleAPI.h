@@ -1,12 +1,14 @@
 #pragma once
 
+#include "Input/GameInputModeService.hpp"
+
 #include <cstdint>
 
 // Game modules pass STL-heavy engine objects across the DLL boundary
 // (world, entt::registry, shared component storage). The compatibility token
 // therefore includes both the source API revision and the C++ runtime/STL ABI
 // shape that changes between Debug/Release builds on MSVC.
-#define GARDEN_MODULE_API_REVISION 7
+#define GARDEN_MODULE_API_REVISION 8
 
 #if defined(_MSC_VER)
 #   define GARDEN_MODULE_COMPILER_FAMILY 1
@@ -40,7 +42,6 @@
 // Forward declarations
 class world;
 class IRenderAPI;
-class InputManager;
 class InputActionSystem;
 class ReflectionRegistry;
 class Application;
@@ -57,6 +58,9 @@ struct EngineServices
     ReflectionRegistry*  reflection;
     Application*         application;
     LevelManager*        level_manager;
+    // Optional generic client-host input service.  It is deliberately null
+    // for server and unsupported editor hosts.
+    IGameInputModeService* input_mode_service = nullptr;
     uint32_t             api_version;
 
     // Network PIE fields (added in API version 3).
