@@ -4291,6 +4291,10 @@ int main()
     ok = testGrenadeProjectileMotionAndAuthoritativeImpact() && ok;
     ok = testGrenadeOverlapsSurviveOwnerDeath() && ok;
     ok = testBotDifficultyClampTable() && ok;
+    ok = testBotHearingRangeSelectionAndBlur() && ok;
+    ok = testBotHearingExpiryOcclusionAndWorldReset() && ok;
+    ok = testBotHearingBombProducerPolicy() && ok;
+    ok = testBotHearingSightWinsAndInvestigatesOnly() && ok;
     ok = testBotPerceptionBlindfold() && ok;
     ok = testBotPerceptionWeaponLineObstruction() && ok;
     ok = testBotPerceptionPrivacyAndStaleTargets() && ok;

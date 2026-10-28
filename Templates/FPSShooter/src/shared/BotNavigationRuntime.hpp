@@ -51,6 +51,66 @@ struct NavigationDiagnosticRing {
     const NavigationDiagnosticRecord& at(size_t index) const { return records[(head + kCapacity - count + index) % kCapacity]; }
 };
 
+// Anonymous per-world records are retained only long enough for the staggered
+// hearing pass.  They have no producer identity and never leave server memory.
+struct NoiseRecord {
+    glm::vec3 origin{0.0f};
+    uint32_t emission_tick = 0;
+    uint32_t serial = 0;
+    float loudness = 0.0f;
+    BotHeardNoiseCategory category = BotHeardNoiseCategory::None;
+};
+
+struct NoiseRing {
+    static constexpr size_t kCapacity = 64;
+    std::array<NoiseRecord, kCapacity> records{};
+    size_t head = 0;
+    size_t count = 0;
+    uint32_t next_serial = 1;
+    uint64_t accepted = 0;
+    uint64_t rejected = 0;
+    uint64_t overwritten = 0;
+
+    bool publish(BotHeardNoiseCategory category, const glm::vec3& origin,
+                 uint32_t emission_tick, float loudness)
+    {
+        if (!isValidHearingCategory(category) || !isFiniteBotVector(origin) ||
+            !std::isfinite(loudness) || loudness <= 0.0f || loudness > 1.0f ||
+            next_serial == 0) {
+            ++rejected;
+            return false;
+        }
+        const uint32_t serial = next_serial++;
+        records[head] = NoiseRecord{origin, emission_tick, serial, loudness, category};
+        head = (head + 1) % kCapacity;
+        if (count < kCapacity)
+            ++count;
+        else
+            ++overwritten;
+        ++accepted;
+        return true;
+    }
+
+    size_t size() const { return count; }
+    const NoiseRecord& at(size_t index) const
+    {
+        return records[(head + kCapacity - count + index) % kCapacity];
+    }
+
+    std::vector<BotHearingCandidate> hearingCandidates() const
+    {
+        std::vector<BotHearingCandidate> candidates;
+        candidates.reserve(count);
+        for (size_t index = 0; index < count; ++index) {
+            const NoiseRecord& record = at(index);
+            candidates.push_back(BotHearingCandidate{
+                record.origin, record.emission_tick, record.serial,
+                record.loudness, record.category});
+        }
+        return candidates;
+    }
+};
+
 enum class NavMeshLoadStatus : uint8_t {
     NotRequested,
     Loaded,
@@ -109,6 +169,7 @@ struct BotWorldRuntime {
     float world_time = 0.0f;
     TransitionRingBuffer transitions;
     NavigationDiagnosticRing navigation_diagnostics;
+    NoiseRing noise_ring;
     uint32_t capacity_diagnostic_calls = 0;
     uint32_t capacity_diagnostic_suppressions = 0;
     uint32_t navigation_recoveries = 0;
@@ -123,6 +184,16 @@ struct BotWorldRuntime {
     std::unordered_map<uint16_t, uint8_t> last_weapon_select;
 
     bool hasValidNavMesh() const { return bots_enabled && navmesh.valid; }
+
+    bool publishNoise(BotHeardNoiseCategory category, const glm::vec3& origin,
+                      uint32_t emission_tick, float loudness)
+    {
+        if (!hasValidNavMesh()) {
+            ++noise_ring.rejected;
+            return false;
+        }
+        return noise_ring.publish(category, origin, emission_tick, loudness);
+    }
 
     bool beginCapacityDiagnostic(uint32_t tick)
     {
@@ -160,11 +231,15 @@ struct BotWorldRuntime {
         std::snprintf(buffer, sizeof(buffer),
             "[BotDebug] navigation_diagnostics count=%zu recoveries=%u capacity_calls=%u "
             "capacity_suppressions=%u avoidance_queries=%u avoidance_samples=%u "
-            "doorway_yields=%u doorway_repaths=%u last_tick=%u last_bot=%d last_category=%s "
+            "doorway_yields=%u doorway_repaths=%u noise_accepted=%llu noise_rejected=%llu "
+            "noise_overwritten=%llu last_tick=%u last_bot=%d last_category=%s "
             "last_detail=%s last_recovery=%u last_capacity_suppressed=%d",
             navigation_diagnostics.size(), navigation_recoveries,
             capacity_diagnostic_calls, capacity_diagnostic_suppressions,
             avoidance_queries, avoidance_samples, doorway_yields, doorway_repaths,
+            static_cast<unsigned long long>(noise_ring.accepted),
+            static_cast<unsigned long long>(noise_ring.rejected),
+            static_cast<unsigned long long>(noise_ring.overwritten),
             last.tick, last.bot_index, navFailureCategoryName(last.category),
             localBlockDetailName(last.detail), last.recovery_count,
             last.capacity_inspection_suppressed ? 1 : 0);
@@ -191,6 +266,7 @@ struct BotWorldRuntime {
         world_time = 0.0f;
         transitions = {};
         navigation_diagnostics = {};
+        noise_ring = {};
         capacity_diagnostic_calls = 0;
         capacity_diagnostic_suppressions = 0;
         navigation_recoveries = 0;

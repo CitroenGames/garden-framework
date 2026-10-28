@@ -145,13 +145,106 @@ struct BotComponent {
     float state_time = 0, next_decision_time = 0, engage_lost_time = 0, aim_yaw = 0, aim_pitch = 0;
     float strafe_timer = 0; int8_t strafe_dir = 1; // Engage strafe pattern (bots.md: flips every strafe_interval)
     uint32_t rng_state = 1; entt::entity pawn = entt::null; int32_t bot_index = 0;
+    uint32_t last_hearing_investigation_serial = 0;
     bool buy_done = false;
 };
+
+// Hearing is an anonymous value observation.  The bot-local component never
+// receives the world record's source identity or unblurred origin.
+enum class BotHeardNoiseCategory : uint8_t {
+    None,
+    WeaponFire,
+    BombPlanted,
+    BombDefused,
+    BombDetonated,
+    GrenadeDetonation,
+};
+
+inline constexpr float kNoHearingAge = 1.0e9f;
+inline constexpr uint32_t kBotHearingTicksPerSecond = 60u;
+inline constexpr uint32_t kBotHearingCandidateCap = 8u;
+inline constexpr uint32_t kBotHearingIntervalTicks = 6u;
+inline constexpr float kBotHearingMinimumLoudness = 0.20f;
+inline constexpr float kBotHearingBlockedMultiplier = 0.45f;
+
+struct BotHearingProfile {
+    float radius = 0.0f;
+    float lifetime = 0.0f;
+    float blur_radius = 0.0f;
+};
+
+inline BotHearingProfile hearingProfile(BotHeardNoiseCategory category)
+{
+    switch (category) {
+    case BotHeardNoiseCategory::WeaponFire: return {45.0f, 1.50f, 2.0f};
+    case BotHeardNoiseCategory::BombPlanted: return {55.0f, 2.50f, 1.5f};
+    case BotHeardNoiseCategory::BombDefused: return {55.0f, 2.50f, 1.5f};
+    case BotHeardNoiseCategory::BombDetonated: return {85.0f, 2.50f, 2.5f};
+    case BotHeardNoiseCategory::GrenadeDetonation: return {35.0f, 1.25f, 2.0f};
+    case BotHeardNoiseCategory::None: break;
+    }
+    return {};
+}
+
+inline float hearingBaseLoudness(BotHeardNoiseCategory category)
+{
+    switch (category) {
+    case BotHeardNoiseCategory::WeaponFire: return 1.0f;
+    case BotHeardNoiseCategory::BombPlanted:
+    case BotHeardNoiseCategory::BombDefused: return 0.90f;
+    case BotHeardNoiseCategory::BombDetonated: return 1.0f;
+    case BotHeardNoiseCategory::GrenadeDetonation: return 0.75f;
+    case BotHeardNoiseCategory::None: break;
+    }
+    return 0.0f;
+}
+
+inline BotHeardNoiseCategory completedBombNoiseCategory(Competitive::BombState from,
+                                                        Competitive::BombState to)
+{
+    using B = Competitive::BombState;
+    if (from == B::Planting && to == B::Planted)
+        return BotHeardNoiseCategory::BombPlanted;
+    if (from == B::Defusing && to == B::Defused)
+        return BotHeardNoiseCategory::BombDefused;
+    if ((from == B::Planted || from == B::Defusing) && to == B::Exploded)
+        return BotHeardNoiseCategory::BombDetonated;
+    return BotHeardNoiseCategory::None;
+}
+
+inline bool isValidHearingCategory(BotHeardNoiseCategory category)
+{
+    return hearingProfile(category).radius > 0.0f;
+}
+
+inline bool isFiniteBotVector(const glm::vec3& value)
+{
+    return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
+}
+
+struct BotHearingSummary {
+    glm::vec3 investigation_pos{0.0f};
+    float age = kNoHearingAge;
+    float loudness = 0.0f;
+    BotHeardNoiseCategory category = BotHeardNoiseCategory::None;
+    uint32_t observation_serial = 0;
+};
+
+// This is a server-local selection value.  It intentionally has no entity,
+// peer, client, weapon, or inventory field and is never a decision input.
+struct BotHearingCandidate {
+    glm::vec3 origin{0.0f};
+    uint32_t emission_tick = 0;
+    uint32_t serial = 0;
+    float loudness = 0.0f;
+    BotHeardNoiseCategory category = BotHeardNoiseCategory::None;
+};
+
 struct BotPerceptComponent {
     entt::entity visible_enemy = entt::null; glm::vec3 last_seen_pos{0}; glm::vec3 last_seen_aim_point{0}; float last_seen_age = 1e9f;
     float visible_fraction = 0, confirm_timer = 0;
-    glm::vec3 heard_pos{0}; float heard_age = 1e9f, heard_loudness = 0;
-    bool bomb_planted_heard = false, bomb_beep_heard = false, sees_bomb_carrier = false, sees_planted_bomb = false;
+    BotHearingSummary hearing{};
+    bool sees_bomb_carrier = false, sees_planted_bomb = false;
 };
 struct BotIntentComponent {
     glm::vec3 move_goal{0}; bool has_move_goal = false;
@@ -190,11 +283,127 @@ inline bool hasSightMemory(const BotPerceptComponent& p, uint8_t difficulty) {
     return p.last_seen_age < difficultyFor(difficulty).memory_time;
 }
 
-inline void advancePerceptionClock(BotPerceptComponent& p, uint8_t difficulty, float dt) {
+inline bool hasFreshHearing(const BotHearingSummary& summary)
+{
+    const BotHearingProfile profile = hearingProfile(summary.category);
+    return profile.lifetime > 0.0f && summary.observation_serial != 0 &&
+        isFiniteBotVector(summary.investigation_pos) && std::isfinite(summary.age) &&
+        summary.age >= 0.0f && summary.age < profile.lifetime &&
+        std::isfinite(summary.loudness) && summary.loudness >= kBotHearingMinimumLoudness &&
+        summary.loudness <= 1.0f;
+}
+
+inline bool hasFreshHearing(const BotPerceptComponent& percept)
+{
+    return hasFreshHearing(percept.hearing);
+}
+
+inline void clearHearing(BotPerceptComponent& percept)
+{
+    percept.hearing = {};
+}
+
+inline void advanceHearingClock(BotPerceptComponent& percept, float dt)
+{
+    if (percept.hearing.category == BotHeardNoiseCategory::None)
+        return;
+    percept.hearing.age += std::max(dt, 0.0f);
+    if (!hasFreshHearing(percept))
+        clearHearing(percept);
+}
+
+inline bool hearingCandidateBetter(const BotHearingCandidate& candidate,
+                                   const BotHearingCandidate& current)
+{
+    if (candidate.loudness != current.loudness)
+        return candidate.loudness > current.loudness;
+    if (candidate.emission_tick != current.emission_tick)
+        return candidate.emission_tick > current.emission_tick;
+    return candidate.serial > current.serial;
+}
+
+inline bool isHearingCandidateEligible(const BotHearingCandidate& candidate,
+                                       const glm::vec3& listener_position,
+                                       uint8_t difficulty, uint32_t current_tick,
+                                       uint32_t last_observation_serial)
+{
+    if (!isFiniteBotVector(listener_position) || !isFiniteBotVector(candidate.origin) ||
+        !isValidHearingCategory(candidate.category) || candidate.serial == 0 ||
+        candidate.serial <= last_observation_serial || !std::isfinite(candidate.loudness) ||
+        candidate.loudness <= 0.0f || candidate.loudness > 1.0f)
+        return false;
+    const BotHearingProfile profile = hearingProfile(candidate.category);
+    const float age = static_cast<float>(current_tick - candidate.emission_tick) /
+        static_cast<float>(kBotHearingTicksPerSecond);
+    if (age < 0.0f || age >= profile.lifetime)
+        return false;
+    return glm::distance(listener_position, candidate.origin) <=
+        profile.radius * difficultyFor(difficulty).hearing_scale;
+}
+
+inline bool selectHearingCandidate(const std::vector<BotHearingCandidate>& candidates,
+                                   const glm::vec3& listener_position, uint8_t difficulty,
+                                   uint32_t current_tick, uint32_t last_observation_serial,
+                                   BotHearingCandidate& selected)
+{
+    std::vector<BotHearingCandidate> eligible;
+    eligible.reserve(candidates.size());
+    for (const BotHearingCandidate& candidate : candidates) {
+        if (!isHearingCandidateEligible(candidate, listener_position, difficulty,
+                                        current_tick, last_observation_serial))
+            continue;
+        eligible.push_back(candidate);
+    }
+    std::sort(eligible.begin(), eligible.end(), [](const BotHearingCandidate& left,
+                                                   const BotHearingCandidate& right) {
+        return hearingCandidateBetter(left, right);
+    });
+    if (eligible.empty())
+        return false;
+    if (eligible.size() > kBotHearingCandidateCap)
+        eligible.resize(kBotHearingCandidateCap);
+    selected = eligible.front();
+    return true;
+}
+
+inline glm::vec3 blurredHearingPosition(const glm::vec3& origin, uint32_t serial,
+                                        int32_t stable_bot_index,
+                                        BotHeardNoiseCategory category)
+{
+    if (!isFiniteBotVector(origin) || serial == 0 || !isValidHearingCategory(category))
+        return glm::vec3(0.0f);
+    uint32_t seed = serial ^ (static_cast<uint32_t>(stable_bot_index) * 0x9e3779b9u);
+    const float x = rngSigned(seed);
+    const float z = rngSigned(seed);
+    const glm::vec2 direction = glm::length(glm::vec2(x, z)) > 0.0001f
+        ? glm::normalize(glm::vec2(x, z)) : glm::vec2(1.0f, 0.0f);
+    const float radius = hearingProfile(category).blur_radius * rngUniform(seed);
+    return origin + glm::vec3(direction.x * radius, 0.0f, direction.y * radius);
+}
+
+inline bool applyHearingObservation(BotPerceptComponent& percept,
+                                    const BotHearingCandidate& candidate,
+                                    const glm::vec3& investigation_position,
+                                    float observed_loudness)
+{
+    if (!isValidHearingCategory(candidate.category) || candidate.serial == 0 ||
+        !isFiniteBotVector(investigation_position) || !std::isfinite(observed_loudness) ||
+        observed_loudness < kBotHearingMinimumLoudness || observed_loudness > 1.0f)
+        return false;
+    percept.hearing = {investigation_position, 0.0f, observed_loudness,
+                       candidate.category, candidate.serial};
+    return true;
+}
+
+inline void advanceSightClock(BotPerceptComponent& p, uint8_t difficulty, float dt) {
     const float elapsed = std::max(dt, 0.0f);
     p.last_seen_age += elapsed;
-    p.heard_age += elapsed;
     if (!hasSightMemory(p, difficulty)) forgetSightMemory(p);
+}
+
+inline void advancePerceptionClock(BotPerceptComponent& p, uint8_t difficulty, float dt) {
+    advanceSightClock(p, difficulty, dt);
+    advanceHearingClock(p, dt);
 }
 
 inline void pruneCurrentSight(BotPerceptComponent& p, bool target_still_eligible) {
@@ -206,7 +415,7 @@ inline void pruneCurrentSight(BotPerceptComponent& p, bool target_still_eligible
 
 inline void updatePerception(BotPerceptComponent& p, const glm::vec3& eye, float yaw,
                              const std::vector<EnemyCandidate>& enemies, uint8_t difficulty, float dt, const BlockedFn& blocked) {
-    advancePerceptionClock(p, difficulty, dt);
+    advanceSightClock(p, difficulty, dt);
     const auto& d = difficultyFor(difficulty);
     entt::entity best = entt::null; float best_frac = 0; glm::vec3 best_pos{0}; glm::vec3 best_aim_point{0};
     glm::vec3 fwd = forwardFromYaw(yaw);
@@ -681,6 +890,16 @@ inline const char* botStateName(BotState s) {
     case BotState::Engage: return "Engage"; case BotState::Retreat: return "Retreat"; case BotState::Spectate: return "Spectate";
     } return "?";
 }
+inline const char* heardNoiseCategoryName(BotHeardNoiseCategory category) {
+    switch (category) {
+    case BotHeardNoiseCategory::None: return "None";
+    case BotHeardNoiseCategory::WeaponFire: return "WeaponFire";
+    case BotHeardNoiseCategory::BombPlanted: return "BombPlanted";
+    case BotHeardNoiseCategory::BombDefused: return "BombDefused";
+    case BotHeardNoiseCategory::BombDetonated: return "BombDetonated";
+    case BotHeardNoiseCategory::GrenadeDetonation: return "GrenadeDetonation";
+    } return "?";
+}
 struct TransitionRecord { uint32_t tick = 0; int32_t bot_index = 0; BotState from = BotState::Idle; BotState to = BotState::Idle; std::string reason; };
 struct TransitionRingBuffer {
     static constexpr size_t kCapacity = 64;
@@ -697,15 +916,16 @@ inline std::string formatTransition(const TransitionRecord& r) {
 }
 struct BotDumpInput {
     int32_t bot_index = 0; int32_t team = 0; BotState state = BotState::Idle; int32_t hp = 0;
-    glm::vec3 pos{0}; glm::vec3 goal{0}; bool has_goal = false; bool path_valid = false; bool stuck = false;
+    bool route_active = false; bool path_valid = false; bool stuck = false;
     float visible_age = 1e9f; float heard_age = 1e9f;
+    BotHeardNoiseCategory heard_category = BotHeardNoiseCategory::None;
 };
 inline std::string formatBotDump(const BotDumpInput& d) {
     char buf[384]; std::snprintf(buf, sizeof(buf),
-        "[BotDebug] bot=%d team=%d state=%s hp=%d pos=%.2f,%.2f,%.2f goal=%.2f,%.2f,%.2f path_valid=%d stuck=%d percept_visible_age=%.2f percept_heard_age=%.2f",
-        d.bot_index, d.team, botStateName(d.state), d.hp, d.pos.x, d.pos.y, d.pos.z,
-        d.has_goal ? d.goal.x : 0.0f, d.has_goal ? d.goal.y : 0.0f, d.has_goal ? d.goal.z : 0.0f,
-        d.path_valid ? 1 : 0, d.stuck ? 1 : 0, d.visible_age, d.heard_age); return std::string(buf);
+        "[BotDebug] bot=%d team=%d state=%s hp=%d route_active=%d path_valid=%d stuck=%d percept_visible_age=%.2f percept_heard_category=%s percept_heard_age=%.2f",
+        d.bot_index, d.team, botStateName(d.state), d.hp, d.route_active ? 1 : 0,
+        d.path_valid ? 1 : 0, d.stuck ? 1 : 0, d.visible_age,
+        heardNoiseCategoryName(d.heard_category), d.heard_age); return std::string(buf);
 }
 // ai_pause_bots: neutral sample (no movement/attack/use), camera preserved.
 inline Net::InputSample synthesizeNeutralInput(uint32_t tick, float yaw = 0.0f, float pitch = 0.0f) {
@@ -729,6 +949,13 @@ inline void decide(BotComponent& b, const BotPerceptComponent& p, BotIntentCompo
     b.state_time += in.dt;
     const auto& diff = difficultyFor(b.difficulty);
     auto tr = [&](BotState s, const char* reason) { if (b.state != s) { if (transitions) transitions->push(TransitionRecord{tick, b.bot_index, b.state, s, reason}); setState(b, s); } };
+    auto record_hearing_investigation = [&]() {
+        if (b.last_hearing_investigation_serial == p.hearing.observation_serial)
+            return;
+        b.last_hearing_investigation_serial = p.hearing.observation_serial;
+        if (transitions)
+            transitions->push(TransitionRecord{tick, b.bot_index, b.state, b.state, "investigate_hearing"});
+    };
     if (!in.alive) { tr(BotState::Spectate, "dead"); return; }
     using P = Competitive::RoundPhase;
     if (in.phase == P::Freeze) { if (b.state == BotState::Spectate || b.state == BotState::Idle || b.state == BotState::Advance) tr(BotState::Buy, "phase_freeze"); }
@@ -738,6 +965,8 @@ inline void decide(BotComponent& b, const BotPerceptComponent& p, BotIntentCompo
     else if (b.state == BotState::Spectate && in.phase == P::Live) return; // dead-revived handled by alive/Freeze
 
     bool confirmed = enemyConfirmed(p, b.difficulty);
+    const bool investigate_hearing = in.phase == P::Live && !confirmed && hasFreshHearing(p) &&
+        (b.state == BotState::Idle || b.state == BotState::Advance || b.state == BotState::Defend);
     // Retreat trigger (checked before Engage overlay return).
     if (b.state != BotState::Engage && b.state != BotState::Retreat && diff.retreat_hp > 0 && in.health > 0 && in.health < diff.retreat_hp && confirmed) {
         b.resume_state = BotState::Advance; b.has_resume = true; tr(BotState::Retreat, "retreat_low_hp");
@@ -775,6 +1004,7 @@ inline void decide(BotComponent& b, const BotPerceptComponent& p, BotIntentCompo
         intent.want_use = true; return;
     case BotState::Defend:
         if (in.team == Competitive::FpsTeam::Defenders && in.bomb_planted && in.at_bomb) { tr(BotState::Defuse, "at_bomb"); intent.want_use = true; }
+        else if (investigate_hearing) { record_hearing_investigation(); intent.move_goal = p.hearing.investigation_pos; intent.has_move_goal = true; }
         return;
     case BotState::Advance: default: {
         if (in.bomb_planted) {
@@ -786,6 +1016,12 @@ inline void decide(BotComponent& b, const BotPerceptComponent& p, BotIntentCompo
             tr(BotState::Defend, "planted"); return;
         }
         if (in.is_carrier && in.at_site) { tr(BotState::Plant, "carrier_at_site"); intent.want_use = true; return; }
+        if (investigate_hearing) {
+            record_hearing_investigation();
+            intent.move_goal = p.hearing.investigation_pos;
+            intent.has_move_goal = true;
+            return;
+        }
         if (in.has_site) { intent.move_goal = in.site_pos; intent.has_move_goal = true; }
         return; }
     }

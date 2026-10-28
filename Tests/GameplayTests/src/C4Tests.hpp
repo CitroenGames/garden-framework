@@ -290,6 +290,36 @@ bool testC4ObjectiveInterruptionsAndTeardown()
         return b;
     };
 
+    // Starting a channel has the same stability rule as maintaining one.
+    // Residual movement or damage on an otherwise valid USE sample must not
+    // create a start/cancel transition in the same tick.
+    {
+        BombSystem b = makeBombSys(carrier);
+        plantFully(b);
+        int defuse_starts = 0;
+        b.on_transition = [&defuse_starts](BombState from, BombState to) {
+            if (from == BombState::Planted && to == BombState::Defusing)
+                ++defuse_starts;
+        };
+        auto moving = defuseInput(defuser, false);
+        moving.defuse_moved = true;
+        b.tick(1.0f / 60.0f, moving);
+        auto damaged = defuseInput(defuser, false);
+        damaged.defuse_damaged = true;
+        b.tick(1.0f / 60.0f, damaged);
+        if (b.bomb.state != BombState::Planted || b.bomb.defuser != entt::null ||
+            b.bomb.defuse_channel != 0.0f || defuse_starts != 0)
+            return fail(name, "unstable USE started a defuse channel");
+        const auto stable = defuseInput(defuser, false);
+        b.tick(1.0f / 60.0f, stable);
+        if (b.bomb.state != BombState::Defusing || b.bomb.defuser != defuser ||
+            defuse_starts != 1)
+            return fail(name, "stable USE did not start exactly one defuse channel");
+        b.tick(1.0f / 60.0f, stable);
+        if (defuse_starts != 1)
+            return fail(name, "active stable channel reported a second start");
+    }
+
     // Damage, movement, leaving range, weapon/USE loss (the supported input
     // proxy), death, and explicit disconnect teardown all clear the channel.
     for (int kind = 0; kind < 6; ++kind) {

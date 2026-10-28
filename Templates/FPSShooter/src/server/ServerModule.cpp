@@ -186,6 +186,18 @@ static void resetBotRuntime(world& game_world)
         game_world.registry.ctx().emplace<Bots::BotWorldRuntime>();
 }
 
+// Template-local producer seam for accepted authoritative events.  The
+// per-world ring owns only anonymous values and rejects an inactive runtime.
+static bool publishAuthoritativeNoise(Bots::BotHeardNoiseCategory category,
+                                     const glm::vec3& origin, float loudness)
+{
+    if (!g_server_services || !g_server_services->game_world ||
+        !Bots::isFiniteBotVector(origin) || !std::isfinite(loudness))
+        return false;
+    return botRuntime().publishNoise(category, origin,
+        g_server_network.getCurrentTick(), loudness);
+}
+
 static bool spawnPlayerForClient(uint16_t client_id, uint8_t requested_team = FpsLogic::kTeamNone); // defined with player spawning below
 static void despawnPlayerForClient(uint16_t client_id); // defined with player spawning below
 static int32_t botCountFromEnv() { const char* v = std::getenv("FPS_BOTS"); return v ? std::max(0, std::atoi(v)) : 0; }
@@ -583,6 +595,12 @@ static void fireServerShot(
     const auto& weapon_def = getWeaponDef(weapon.weapon_type);
     const glm::vec3 ray_origin = getShootOrigin(shooter_transform);
     const glm::vec3 ray_dir = makeAimDirection(input.camera_pitch, input.camera_yaw);
+
+    // This function is reached only after weapon input admitted a shot. A
+    // miss remains audible, while rejected input never reaches this producer.
+    if (Bots::isFiniteBotVector(ray_origin) && Bots::isFiniteBotVector(ray_dir))
+        (void)publishAuthoritativeNoise(Bots::BotHeardNoiseCategory::WeaponFire,
+            ray_origin, Bots::hearingBaseLoudness(Bots::BotHeardNoiseCategory::WeaponFire));
 
     const uint32_t rewind_tick = client_view_tick;
 
@@ -1472,6 +1490,9 @@ static void tickBots(float dt)
         const uint16_t owner_b = w->registry.all_of<NetworkedEntity>(b) ? w->registry.get<NetworkedEntity>(b).owner_client_id : 0;
         return owner_a < owner_b;
     });
+    const std::vector<Bots::BotHearingCandidate> hearing_candidates =
+        runtime.noise_ring.hearingCandidates();
+    const uint32_t hearing_tick = g_server_network.getCurrentTick();
 
     // Queries queued during the previous bot update are considered together
     // before executing any query.  This one-tick handoff lets the fixed budget
@@ -1589,8 +1610,15 @@ static void tickBots(float dt)
                     w->registry.get<FpsHealthComponent>(target).alive);
         }
         Bots::pruneCurrentSight(percept, current_target_eligible);
+        // Hearing has its own fixed-tick age. Sight keeps its existing 10 Hz
+        // confirmation cadence below, so neither sense can stretch the other.
+        Bots::advanceHearingClock(percept, dt);
+        if (g_round_system.state.phase != Competitive::RoundPhase::Live)
+            Bots::clearHearing(percept);
         // S1 perception (10 Hz staggered by bot_index % 6 fixed ticks)
-        if (((uint32_t)(runtime.world_time * 60.0f) + (uint32_t)bot.bot_index) % 6u == 0u) {
+        const bool sense_now = ((uint32_t)(runtime.world_time * 60.0f) +
+            (uint32_t)bot.bot_index) % Bots::kBotHearingIntervalTicks == 0u;
+        if (sense_now) {
             const entt::entity previous_sight = percept.visible_enemy;
             std::vector<Bots::EnemyCandidate> enemies;
             auto ev = w->registry.view<NetworkedEntity, TeamComponent, TransformComponent, FpsHealthComponent>();
@@ -1626,7 +1654,33 @@ static void tickBots(float dt)
                     bot.bot_index, client_id,
                     w->registry.get<NetworkedEntity>(percept.visible_enemy).owner_client_id);
             }
-        } else { Bots::advancePerceptionClock(percept, bot.difficulty, dt); }
+        } else { Bots::advanceSightClock(percept, bot.difficulty, dt); }
+        // The ring is anonymous before it reaches this pass. Range filtering
+        // and stable value ranking happen before exactly one obstruction ray.
+        if (sense_now && !hearing_candidates.empty()) {
+            Bots::BotHearingCandidate selected;
+            if (Bots::selectHearingCandidate(hearing_candidates, pos, bot.difficulty,
+                                             hearing_tick, percept.hearing.observation_serial, selected)) {
+                const glm::vec3 to_noise = selected.origin - pos;
+                const float distance = glm::length(to_noise);
+                bool blocked = false;
+                if (distance >= 0.01f) {
+                    const PhysicsSystem::RaycastResult hit = w->raycastClosest(
+                        pos, to_noise / distance, distance, e);
+                    blocked = hit.hit && hit.distance + 0.02f < distance;
+                }
+                const float observed_loudness = selected.loudness *
+                    (blocked ? Bots::kBotHearingBlockedMultiplier : 1.0f);
+                if (observed_loudness < Bots::kBotHearingMinimumLoudness) {
+                    Bots::clearHearing(percept);
+                } else {
+                    const glm::vec3 investigation = Bots::blurredHearingPosition(
+                        selected.origin, selected.serial, bot.bot_index, selected.category);
+                    (void)Bots::applyHearingObservation(percept, selected, investigation,
+                        observed_loudness);
+                }
+            }
+        }
         // S2 decision (consumes percept + match summary only)
         Bots::BotDecisionInput din; din.phase = g_round_system.state.phase; din.team = bot_team;
         din.alive = alive; din.is_carrier = g_bomb_system.bomb.carrier == e; din.bomb_planted = g_bomb_system.isPlanted();
@@ -1732,7 +1786,7 @@ static void tickBots(float dt)
         consumeBotInputSample(client_id, e, sample, dt);
         if (dbg >= 1) {
             if (runtime.stuck_latches[bot.bot_index].check(nav.stuck)) LOG_ENGINE_WARN("[BotDebug] bot_stuck bot={} (F-AI-03)", bot.bot_index);
-            if (bot_debug_dump_now) { Bots::BotDumpInput dump; dump.bot_index = bot.bot_index; dump.team = (int32_t)team_id; dump.state = bot.state; dump.hp = w->registry.get<FpsHealthComponent>(e).health; dump.pos = pos; dump.goal = nav.goal; dump.has_goal = nav.has_goal; dump.path_valid = nav.path_valid; dump.stuck = nav.stuck; dump.visible_age = percept.last_seen_age; dump.heard_age = percept.heard_age; LOG_ENGINE_INFO("{}", Bots::formatBotDump(dump)); }
+            if (bot_debug_dump_now) { Bots::BotDumpInput dump; dump.bot_index = bot.bot_index; dump.team = (int32_t)team_id; dump.state = bot.state; dump.hp = w->registry.get<FpsHealthComponent>(e).health; dump.route_active = nav.has_goal; dump.path_valid = nav.path_valid; dump.stuck = nav.stuck; dump.visible_age = percept.last_seen_age; dump.heard_age = percept.hearing.age; dump.heard_category = percept.hearing.category; LOG_ENGINE_INFO("{}", Bots::formatBotDump(dump)); }
         }
     }
     if (bot_debug_dump_now)
@@ -3091,6 +3145,11 @@ GAME_API bool gardenServerInit(EngineServices* services)
             g_bomb_system.on_transition = [](Competitive::BombState from, Competitive::BombState to) {
                 LOG_ENGINE_INFO("Bomb state {} -> {} carrier_valid={} timer={:.1f}", bombStateName(from), bombStateName(to),
                     g_bomb_system.bomb.carrier != entt::null, g_bomb_system.bomb.timer);
+                const Bots::BotHeardNoiseCategory category =
+                    Bots::completedBombNoiseCategory(from, to);
+                if (category != Bots::BotHeardNoiseCategory::None)
+                    (void)publishAuthoritativeNoise(category, g_bomb_system.bomb.planted_position,
+                        Bots::hearingBaseLoudness(category));
             };
             botRuntime().target_count = botCountFromEnv();
             g_round_system.on_phase_enter = [](Competitive::RoundPhase ph) {
@@ -3314,10 +3373,21 @@ GAME_API void gardenServerUpdate(float delta_time)
         tickBombServer(w->fixed_delta > 0.0f ? w->fixed_delta : delta_time);
         (void)Competitive::tickCompetitiveWorldRuntime(
             w->registry, w->fixed_delta > 0.0f ? w->fixed_delta : delta_time, rin);
-        FpsLogic::tickGrenadeEffects(
+        const FpsLogic::FpsGrenadeTickResult grenade_tick = FpsLogic::tickGrenadeEffects(
             w->registry,
             w->fixed_delta > 0.0f ? w->fixed_delta : delta_time,
             g_round_system.state.phase == Competitive::RoundPhase::Live);
+        for (const entt::entity effect : grenade_tick.created_effects) {
+            if (!w->registry.valid(effect) ||
+                !w->registry.all_of<TransformComponent, FpsLogic::FpsGrenadeEffectComponent>(effect))
+                continue;
+            const auto& effect_state = w->registry.get<FpsLogic::FpsGrenadeEffectComponent>(effect);
+            const glm::vec3& effect_position = w->registry.get<TransformComponent>(effect).position;
+            if (effect_state.kind != FpsLogic::FpsGrenadeEffectKind::None)
+                (void)publishAuthoritativeNoise(Bots::BotHeardNoiseCategory::GrenadeDetonation,
+                    effect_position, Bots::hearingBaseLoudness(
+                        Bots::BotHeardNoiseCategory::GrenadeDetonation));
+        }
         FPSShooter::synchronizePawnLifecycles(w->registry, g_round_system.state);
         FPSShooter::synchronizeSpectatorStates(w->registry, g_round_system.state);
         (void)prev_phase;

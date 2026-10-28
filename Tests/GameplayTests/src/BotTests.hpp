@@ -1,7 +1,9 @@
 #pragma once
 #include "shared/BotLogic.hpp"
 #include "shared/BotRouteData.hpp"
+#include "shared/BotNavigationRuntime.hpp"
 #include <cmath>
+#include <limits>
 #include <string>
 namespace {
 bool botApprox(float a, float b, float e = 0.001f) { return std::abs(a - b) <= e; }
@@ -19,6 +21,163 @@ bool testBotDifficultyClampTable()
     if (!botApprox(difficultyFor(99).reaction_time, 0.15f)) return fail(name, "unknown difficulty not clamped to Expert range via [0,3]");
     // Unknown byte stored on component is clamped at read time.
     if (!botApprox(difficultyFor(250).aim_turn_rate_deg, 540.0f)) return fail(name, "unknown clamp turn rate wrong");
+    return pass(name);
+}
+
+bool testBotHearingRangeSelectionAndBlur()
+{
+    const std::string name = "Bot_HearingRangeSelectionAndBlur";
+    using namespace Bots;
+    const glm::vec3 listener(0.0f);
+    BotHearingCandidate boundary{{31.5f, 0.0f, 0.0f}, 100, 1, 1.0f,
+                                 BotHeardNoiseCategory::WeaponFire};
+    if (!isHearingCandidateEligible(boundary, listener, 0, 100, 0))
+        return fail(name, "easy difficulty rejected its exact radius boundary");
+    boundary.origin.x += 0.01f;
+    if (isHearingCandidateEligible(boundary, listener, 0, 100, 0))
+        return fail(name, "easy difficulty accepted outside its scaled radius");
+    if (!isHearingCandidateEligible(boundary, listener, 1, 100, 0))
+        return fail(name, "normal difficulty did not retain the broader range");
+
+    const BotHearingCandidate quieter{{4.0f, 0.0f, 0.0f}, 90, 3, 0.80f,
+                                      BotHeardNoiseCategory::WeaponFire};
+    const BotHearingCandidate older{{5.0f, 0.0f, 0.0f}, 89, 7, 0.90f,
+                                    BotHeardNoiseCategory::WeaponFire};
+    const BotHearingCandidate newer{{6.0f, 0.0f, 0.0f}, 95, 4, 0.90f,
+                                    BotHeardNoiseCategory::WeaponFire};
+    const BotHearingCandidate serial_tie{{7.0f, 0.0f, 0.0f}, 95, 8, 0.90f,
+                                         BotHeardNoiseCategory::WeaponFire};
+    BotHearingCandidate first;
+    BotHearingCandidate second;
+    if (!selectHearingCandidate({quieter, older, newer, serial_tie}, listener, 1, 100, 0, first) ||
+        !selectHearingCandidate({serial_tie, newer, older, quieter}, listener, 1, 100, 0, second) ||
+        first.serial != 8 || second.serial != first.serial)
+        return fail(name, "hearing selection was not loudness then tick then serial stable");
+
+    const glm::vec3 blur_a = blurredHearingPosition(serial_tie.origin, serial_tie.serial, 3,
+                                                    serial_tie.category);
+    const glm::vec3 blur_repeat = blurredHearingPosition(serial_tie.origin, serial_tie.serial, 3,
+                                                         serial_tie.category);
+    const glm::vec3 blur_other = blurredHearingPosition(serial_tie.origin, serial_tie.serial, 4,
+                                                        serial_tie.category);
+    const float cap = hearingProfile(serial_tie.category).blur_radius;
+    if (!isFiniteBotVector(blur_a) || blur_a != blur_repeat ||
+        glm::distance(blur_a, serial_tie.origin) > cap + 0.001f ||
+        glm::distance(blur_other, serial_tie.origin) > cap + 0.001f)
+        return fail(name, "deterministic blur escaped its finite category cap");
+    return pass(name);
+}
+
+bool testBotHearingExpiryOcclusionAndWorldReset()
+{
+    const std::string name = "Bot_HearingExpiryOcclusionAndWorldReset";
+    using namespace Bots;
+    BotPerceptComponent percept;
+    const BotHearingCandidate fire{{8.0f, 0.0f, 0.0f}, 10, 4, 0.75f,
+                                   BotHeardNoiseCategory::WeaponFire};
+    if (!applyHearingObservation(percept, fire, glm::vec3(7.5f, 0.0f, 0.0f), fire.loudness) ||
+        !hasFreshHearing(percept))
+        return fail(name, "open hearing observation was not retained");
+    advanceHearingClock(percept, -1.0f);
+    if (!botApprox(percept.hearing.age, 0.0f))
+        return fail(name, "negative time changed hearing age");
+    advanceHearingClock(percept, hearingProfile(fire.category).lifetime);
+    if (hasFreshHearing(percept) || percept.hearing.category != BotHeardNoiseCategory::None)
+        return fail(name, "hearing did not clear at its lifetime boundary");
+
+    const float muffled = fire.loudness * kBotHearingBlockedMultiplier;
+    if (!applyHearingObservation(percept, fire, glm::vec3(7.5f, 0.0f, 0.0f), muffled) ||
+        !hasFreshHearing(percept))
+        return fail(name, "blocked hearing above the threshold was rejected");
+    clearHearing(percept);
+    if (applyHearingObservation(percept, fire, glm::vec3(7.5f, 0.0f, 0.0f),
+                                kBotHearingMinimumLoudness - 0.01f))
+        return fail(name, "below-threshold blocked hearing became an observation");
+
+    NoiseRing ring;
+    for (uint32_t index = 0; index < NoiseRing::kCapacity + 1; ++index) {
+        if (!ring.publish(BotHeardNoiseCategory::WeaponFire, glm::vec3(static_cast<float>(index), 0.0f, 0.0f),
+                          index, 1.0f))
+            return fail(name, "valid ring record was rejected");
+    }
+    const auto retained = ring.hearingCandidates();
+    if (ring.size() != NoiseRing::kCapacity || ring.at(0).serial != 2 || ring.overwritten != 1 ||
+        retained.empty() || retained.front().serial != 2)
+        return fail(name, "ring did not deterministically evict its oldest record");
+    BotWorldRuntime runtime;
+    if (runtime.publishNoise(BotHeardNoiseCategory::WeaponFire, glm::vec3(0.0f), 1, 1.0f) ||
+        runtime.noise_ring.rejected != 1)
+        return fail(name, "stopped world runtime accepted a noise record");
+    runtime.noise_ring = ring;
+    runtime.reset();
+    if (runtime.noise_ring.size() != 0 || runtime.noise_ring.accepted != 0 || runtime.noise_ring.next_serial != 1)
+        return fail(name, "world reset retained hearing records or serial state");
+    return pass(name);
+}
+
+bool testBotHearingBombProducerPolicy()
+{
+    const std::string name = "Bot_HearingBombProducerPolicy";
+    using namespace Bots;
+    using B = Competitive::BombState;
+    if (completedBombNoiseCategory(B::Planting, B::Planted) != BotHeardNoiseCategory::BombPlanted ||
+        completedBombNoiseCategory(B::Defusing, B::Defused) != BotHeardNoiseCategory::BombDefused ||
+        completedBombNoiseCategory(B::Planted, B::Exploded) != BotHeardNoiseCategory::BombDetonated ||
+        completedBombNoiseCategory(B::Defusing, B::Exploded) != BotHeardNoiseCategory::BombDetonated ||
+        completedBombNoiseCategory(B::Carried, B::Planting) != BotHeardNoiseCategory::None ||
+        completedBombNoiseCategory(B::Planting, B::Carried) != BotHeardNoiseCategory::None ||
+        completedBombNoiseCategory(B::Dropped, B::Carried) != BotHeardNoiseCategory::None)
+        return fail(name, "bomb hearing producer policy accepted a non-completed transition");
+    NoiseRing ring;
+    if (ring.publish(BotHeardNoiseCategory::WeaponFire, glm::vec3(std::numeric_limits<float>::infinity()), 1, 1.0f) ||
+        ring.publish(BotHeardNoiseCategory::None, glm::vec3(0.0f), 1, 1.0f) ||
+        ring.publish(BotHeardNoiseCategory::WeaponFire, glm::vec3(0.0f), 1, 0.0f) || ring.size() != 0)
+        return fail(name, "rejected producer input entered the ring");
+    return pass(name);
+}
+
+bool testBotHearingSightWinsAndInvestigatesOnly()
+{
+    const std::string name = "Bot_HearingSightWinsAndInvestigatesOnly";
+    using namespace Bots;
+    const BotHearingCandidate hearing_source{{11.0f, 0.0f, 4.0f}, 1, 9, 1.0f,
+                                             BotHeardNoiseCategory::WeaponFire};
+    BotDecisionInput input;
+    input.phase = Competitive::RoundPhase::Live;
+    input.team = Competitive::FpsTeam::Attackers;
+    input.bot_pos = glm::vec3(0.0f);
+    input.has_site = true;
+    input.site_pos = glm::vec3(30.0f, 0.0f, 0.0f);
+
+    BotPerceptComponent hearing_only;
+    if (!applyHearingObservation(hearing_only, hearing_source, glm::vec3(10.0f, 0.0f, 3.0f), 1.0f))
+        return fail(name, "hearing fixture could not create a value-only summary");
+    BotComponent investigator;
+    investigator.state = BotState::Advance;
+    BotIntentComponent investigate_intent;
+    TransitionRingBuffer transitions;
+    decide(investigator, hearing_only, investigate_intent, input, &transitions, 55);
+    if (!investigate_intent.has_move_goal || investigate_intent.move_goal != hearing_only.hearing.investigation_pos ||
+        investigate_intent.want_attack || investigate_intent.want_use || investigator.state != BotState::Advance ||
+        transitions.size() != 1 || transitions.newest().reason != "investigate_hearing")
+        return fail(name, "hearing changed combat/use state instead of only supplying movement");
+    input.phase = Competitive::RoundPhase::Freeze;
+    input.has_site = false;
+    decide(investigator, hearing_only, investigate_intent, input);
+    if (investigate_intent.has_move_goal || investigate_intent.want_attack || investigate_intent.want_use)
+        return fail(name, "freeze phase accepted a hearing investigation request");
+
+    BotPerceptComponent sight_and_hearing = hearing_only;
+    sight_and_hearing.visible_fraction = 1.0f;
+    sight_and_hearing.confirm_timer = 1.0f;
+    sight_and_hearing.last_seen_aim_point = glm::vec3(0.0f, kBotWeaponAimHeight, 12.0f);
+    BotComponent engaged;
+    engaged.state = BotState::Advance;
+    input.phase = Competitive::RoundPhase::Live;
+    BotIntentComponent engage_intent;
+    decide(engaged, sight_and_hearing, engage_intent, input);
+    if (engaged.state != BotState::Engage || !engage_intent.want_attack || engage_intent.has_move_goal)
+        return fail(name, "confirmed sight did not win over hearing");
     return pass(name);
 }
 
@@ -664,9 +823,14 @@ bool testBotDebugDumpFormatter()
 {
     const std::string name = "Bot_DebugDumpFormatter";
     using namespace Bots;
-    BotDumpInput d; d.bot_index = 2; d.team = 1; d.state = BotState::Advance; d.hp = 77; d.pos = glm::vec3(1,2,3); d.goal = glm::vec3(4,0,5); d.has_goal = true; d.path_valid = true; d.stuck = false; d.visible_age = 0.5f; d.heard_age = 2.0f;
+    BotDumpInput d; d.bot_index = 2; d.team = 1; d.state = BotState::Advance; d.hp = 77;
+    d.route_active = true; d.path_valid = true; d.stuck = false; d.visible_age = 0.5f;
+    d.heard_age = 2.0f; d.heard_category = BotHeardNoiseCategory::WeaponFire;
     std::string s = formatBotDump(d);
-    for (const char* k : {"[BotDebug]", "bot=2", "team=1", "state=Advance", "hp=77", "pos=", "goal=", "path_valid=1", "stuck=0", "percept_visible_age=", "percept_heard_age="}) if (s.find(k) == std::string::npos) return fail(name, std::string("missing key: ") + k);
+    for (const char* k : {"[BotDebug]", "bot=2", "team=1", "state=Advance", "hp=77", "route_active=1", "path_valid=1", "stuck=0", "percept_visible_age=", "percept_heard_category=WeaponFire", "percept_heard_age="}) if (s.find(k) == std::string::npos) return fail(name, std::string("missing key: ") + k);
+    for (const char* forbidden : {"pos=", "position=", "goal=", "1.00,2.00,3.00", "4.00,0.00,5.00"})
+        if (s.find(forbidden) != std::string::npos)
+            return fail(name, std::string("coordinate-bearing debug field leaked: ") + forbidden);
     if (s.find('\n') != std::string::npos) return fail(name, "dump not single-line");
     return pass(name);
 }

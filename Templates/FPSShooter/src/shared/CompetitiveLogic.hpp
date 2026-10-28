@@ -317,7 +317,8 @@ public:
                 return;
             }
             if (bomb.state == BombState::Planted) {
-                if (in.defuse_use && in.defuse_in_range && in.defuse_actor != entt::null && !in.defuse_dead) {
+                if (in.defuse_use && in.defuse_in_range && in.defuse_actor != entt::null &&
+                    !in.defuse_moved && !in.defuse_damaged && !in.defuse_dead) {
                     bomb.defuser = in.defuse_actor; bomb.defuse_channel = 0.0f;
                     active_defuse_duration_ = in.defuse_has_kit ? config.defuse_with_kit_seconds
                                                                 : config.defuse_without_kit_seconds;
