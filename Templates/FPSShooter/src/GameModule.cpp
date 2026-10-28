@@ -1342,11 +1342,6 @@ GAME_API void gardenGameUpdate(float delta_time)
         hud_source.weapon_snapshot = makeLocalWeaponSnapshot();
         hud_source.competitive = &g_comp;
         const UiLogic::HudCoreBindings hud_core = UiLogic::deriveHudCoreBindings(hud_source);
-
-        g_hud.update(fps, pos, speed, grounded,
-                     hud_source.connected ? g_network.getStats().ping_ms : 0.0f,
-                     hud_core, g_death_timer, g_local_kills, g_local_deaths,
-                     kill_feed_text, g_local_weapon_spread);
         // Competitive HUD text.  The protocol has no roster snapshot, so the
         // scoreboard is explicit about that and contains only the local row
         // backed by owner/shared authoritative messages.
@@ -1387,7 +1382,27 @@ GAME_API void gardenGameUpdate(float delta_time)
         settings.fxaa = CVAR_BOOL(r_fxaa);
         settings.sensitivity = CVAR_FLOAT(sensitivity);
         const UiLogic::DocumentPresentation document = UiLogic::buildDocumentPresentation(g_ui, settings);
-        g_hud.updateCompetitive(g_comp, hud_core, g_ui, buy_text, scoreboard_text, g_radar, document);
+        FpsHud::HudProjectionInput hud_view_input;
+        hud_view_input.fps = fps;
+        hud_view_input.position_x = pos.x;
+        hud_view_input.position_y = pos.y;
+        hud_view_input.position_z = pos.z;
+        hud_view_input.speed = speed;
+        hud_view_input.grounded = grounded;
+        hud_view_input.ping = hud_source.connected ? g_network.getStats().ping_ms : 0.0f;
+        hud_view_input.core = &hud_core;
+        hud_view_input.competitive = &g_comp;
+        hud_view_input.ui = &g_ui;
+        hud_view_input.radar = &g_radar;
+        hud_view_input.document = &document;
+        hud_view_input.death_timer = g_death_timer;
+        hud_view_input.kills = g_local_kills;
+        hud_view_input.deaths = g_local_deaths;
+        hud_view_input.weapon_spread = g_local_weapon_spread;
+        hud_view_input.kill_feed = kill_feed_text;
+        hud_view_input.buy_text = buy_text;
+        hud_view_input.scoreboard_text = scoreboard_text;
+        g_hud.updateView(FpsHud::projectHudView(hud_view_input));
     }
 }
 

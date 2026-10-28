@@ -4,6 +4,7 @@
 #include "ui/UiLogic.hpp"
 #include "ui/UiInput.hpp"
 #include "ui/CombatFeedPresentation.hpp"
+#include "ui/HudViewState.hpp"
 #include "InputManager.hpp"
 #include <string>
 
@@ -330,6 +331,143 @@ bool testUiHudCoreBindingSources()
     return pass(name);
 }
 
+bool testUiHudViewProjectionAndLifecycle()
+{
+    const std::string name = "UiHudView_ProjectionAndLifecycle";
+    using namespace UiLogic;
+
+    HudCoreBindings disconnected_core;
+    FpsHud::HudProjectionInput disconnected_input;
+    disconnected_input.fps = 144.0f;
+    disconnected_input.position_x = 12.5f;
+    disconnected_input.core = &disconnected_core;
+    disconnected_input.kill_feed = std::string(FpsHud::kMaxHudTextChars + 12, 'X');
+    const auto disconnected = FpsHud::projectHudView(disconnected_input);
+    if (disconnected.connected || disconnected.health_available || disconnected.weapon_name != "UNAVAILABLE" ||
+        disconnected.phase_text != "UNAVAILABLE" || disconnected.money != 0 ||
+        !disconnected.kill_feed.empty() || disconnected.kills != "0")
+        return fail(name, "disconnected projection retained gameplay state");
+
+    HudCoreBindings late_join_core;
+    late_join_core.connected = true;
+    late_join_core.connection_text = "AWAITING PLAYER";
+    FpsHud::HudProjectionInput late_join_input;
+    late_join_input.core = &late_join_core;
+    const auto late_join = FpsHud::projectHudView(late_join_input);
+    if (!late_join.connected || late_join.connection_text != "AWAITING PLAYER" ||
+        late_join.health_available || late_join.ammo_text != "UNAVAILABLE" || late_join.alive)
+        return fail(name, "late join did not remain neutral without a pawn or weapon");
+
+    HudCoreBindings core;
+    core.connected = true;
+    core.connection_text = "CONNECTED";
+    core.health_available = true;
+    core.health = 73;
+    core.max_health = 100;
+    core.health_text = "73 / 100";
+    core.alive = false;
+    core.weapon_available = true;
+    core.weapon_name = "Rifle";
+    core.ammo_text = "17 / 30";
+    core.reserve_text = "43 / 90";
+    core.reloading = true;
+    core.phase_available = true;
+    core.phase_text = "LIVE";
+    core.clock_text = "1:23";
+    core.round_text = "Round 4";
+    core.score_attackers = 4;
+    core.score_defenders = 2;
+    core.bomb_planted = true;
+
+    ClientCompetitiveState comp;
+    if (!applyRoundState(comp, static_cast<uint8_t>(RoundPhase::Live), 83.0f, 4, 4, 2, true))
+        return fail(name, "authoritative round projection source setup failed");
+    applyEconomyState(comp, 4300, 0);
+    if (!comp.has_economy)
+        return fail(name, "authoritative economy projection source setup failed");
+    comp.armor = 100;
+    comp.has_helmet = true;
+    comp.has_kit = true;
+
+    UiState ui;
+    ui.screen = UiScreen::Buy;
+    if (applyAuthoritativeBuyReply(ui, comp, 26, BuyResult::InsufficientFunds, 4300) ||
+        !ui.buy_reply.received || ui.buy_reply.accepted)
+        return fail(name, "rejected buy fixture was not retained as presentation data");
+    const int32_t rejected_balance = comp.money;
+
+    RadarPresentation radar;
+    radar.visible = true;
+    radar.blips[0].visible = true;
+    radar.blips[0].x = "25.0%";
+    radar.blips[0].y = "75.0%";
+    SettingsPresentation settings;
+    const DocumentPresentation document = buildDocumentPresentation(ui, settings);
+
+    FpsHud::HudProjectionInput active_input;
+    active_input.fps = 120.0f;
+    active_input.position_x = 1.0f;
+    active_input.position_y = 2.0f;
+    active_input.position_z = 3.0f;
+    active_input.speed = 4.5f;
+    active_input.grounded = true;
+    active_input.ping = 31.0f;
+    active_input.core = &core;
+    active_input.competitive = &comp;
+    active_input.ui = &ui;
+    active_input.radar = &radar;
+    active_input.document = &document;
+    active_input.death_timer = 2.2f;
+    active_input.kills = 6;
+    active_input.deaths = 2;
+    active_input.weapon_spread = 0.02f;
+    active_input.kill_feed = std::string(FpsHud::kMaxHudTextChars + 12, 'X');
+    active_input.buy_text = "1 Rifle $2700 [Poor]";
+    const auto active = FpsHud::projectHudView(active_input);
+    if (!active.health_available || active.health != 73 || active.weapon_name != "Rifle" ||
+        active.ammo_text != "17 / 30" || !active.reloading || active.death_timer != "Respawning in 2.2..." ||
+        active.phase_text != "LIVE" || active.clock_text != "1:23" || active.score_attackers != 4 ||
+        !active.bomb_planted || active.money != rejected_balance || active.buy_money != rejected_balance ||
+        !active.buy_visible || active.buy_text.empty() || active.notice_text != ui.notice_text ||
+        !active.radar_visible || !active.radar_blips[0].visible || active.radar_blips[0].x != "25.0%" ||
+        active.kill_feed.size() != FpsHud::kMaxHudTextChars)
+        return fail(name, "accepted HUD values or rejected owner reply were not projected");
+
+    FpsHud::HudViewStateCache cache;
+    if (cache.previous())
+        return fail(name, "fresh HUD cache was not empty");
+    cache.commit(active);
+    if (!cache.previous() || *cache.previous() != active)
+        return fail(name, "identical second projection would not be cached");
+    FpsHud::HudViewState phase_correction = active;
+    phase_correction.phase_text = "FREEZE";
+    phase_correction.clock_text = "FREEZE 0:06";
+    if (*cache.previous() == phase_correction)
+        return fail(name, "phase correction was hidden by the cache");
+    cache.commit(phase_correction);
+    if (!cache.previous() || cache.previous()->phase_text != "FREEZE")
+        return fail(name, "phase correction did not replace cached projection");
+
+    FpsHud::ResourceLifecycle lifecycle;
+    size_t action_count = 99;
+    if (lifecycle.shutdownActions(action_count).size() != 2 || action_count != 0)
+        return fail(name, "failed model initialization retained cleanup actions");
+    lifecycle.modelCreated();
+    const auto document_failed_actions = lifecycle.shutdownActions(action_count);
+    if (action_count != 1 || document_failed_actions[0] != FpsHud::ResourceCleanupAction::RemoveModel)
+        return fail(name, "document failure would not remove the partial model");
+    lifecycle.documentCreated();
+    const auto ordered_actions = lifecycle.shutdownActions(action_count);
+    if (action_count != 2 || ordered_actions[0] != FpsHud::ResourceCleanupAction::CloseDocument ||
+        ordered_actions[1] != FpsHud::ResourceCleanupAction::RemoveModel)
+        return fail(name, "shutdown order did not close document before removing model");
+    lifecycle.reset();
+    lifecycle.shutdownActions(action_count);
+    if (action_count != 0)
+        return fail(name, "repeated shutdown retained stale resources");
+
+    return pass(name);
+}
 bool testUiAuthoritativeBuyTeamFeedback()
 {
     const std::string name = "UiAuthoritative_BuyTeamFeedback";

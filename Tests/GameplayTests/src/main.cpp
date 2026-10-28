@@ -4317,6 +4317,7 @@ int main()
     ok = testUiClockFormatting() && ok;
     ok = testUiCombatFeedPresentationBoundary() && ok;
     ok = testUiHudCoreBindingSources() && ok;
+    ok = testUiHudViewProjectionAndLifecycle() && ok;
     ok = testUiAuthoritativeBuyTeamFeedback() && ok;
     ok = testUiBuyItemStateMatrix() && ok;
     ok = testUiScoreboardMoneyVisibility() && ok;
