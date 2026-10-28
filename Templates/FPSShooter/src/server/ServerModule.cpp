@@ -1339,6 +1339,83 @@ static bool capacityDiagnosticConfirmsProductionExhaustion(
     return diagnostic.endpoints_projected && production_exhausted && expanded_complete;
 }
 
+// AI-N2 observes only nearby Character-layer player pawns. The transient
+// identity fields below exist solely to make the fixed-cap overlap result
+// replay-stable before BotLogic strips them into anonymous value samples.
+static bool isLocalAvoidanceParticipant(world& game_world, entt::entity entity)
+{
+    if (!game_world.registry.valid(entity) ||
+        !game_world.registry.all_of<NetworkedEntity, FpsHealthComponent, TeamComponent,
+                                    TransformComponent, CharacterControllerComponent>(entity))
+        return false;
+    const auto& networked = game_world.registry.get<NetworkedEntity>(entity);
+    const auto& health = game_world.registry.get<FpsHealthComponent>(entity);
+    const auto& team = game_world.registry.get<TeamComponent>(entity);
+    if (!networked.is_player || networked.owner_client_id == 0 || !health.alive ||
+        !Competitive::isPlayingTeam(Competitive::teamFromId(team.team_id)))
+        return false;
+    if (game_world.registry.all_of<Bots::BotComponent>(entity))
+        return true;
+    const ClientInfo* client = g_server_network.getClientInfo(networked.owner_client_id);
+    return g_sessions.contains(networked.owner_client_id) && client && client->peer;
+}
+
+static bool botSeparationEligible(const Bots::BotComponent& bot,
+                                  const Bots::BotIntentComponent& intent,
+                                  const Bots::NavAgentComponent& nav,
+                                  const Bots::SteeringComponent& steering,
+                                  bool alive)
+{
+    return !aiPauseBots() && alive &&
+        g_round_system.state.phase == Competitive::RoundPhase::Live &&
+        nav.path_valid && nav.has_goal && !nav.path.empty() &&
+        bot.state != Bots::BotState::Engage && !intent.want_attack && !intent.want_use &&
+        steering.horizontal_command_speed > Bots::kBotStuckCommandSpeed;
+}
+
+static std::vector<Bots::LocalAvoidanceSample> collectBotLocalAvoidanceSamples(
+    world& game_world, entt::entity bot_entity, const glm::vec3& bot_position,
+    int32_t self_bot_index, uint16_t self_owner_client_id, Bots::BotWorldRuntime& runtime)
+{
+    // Do not truncate this raw query at the eight steering samples: physics
+    // order is not the D13 actor-key order.  The bounded collection buffer is
+    // sorted and capped below before identities are stripped into values.
+    std::array<PhysicsSystem::OverlapResult, Bots::kBotAvoidanceCollectionCap> hits{};
+    PhysicsSystem::QueryFilter filter;
+    filter.ignore = bot_entity;
+    filter.layer_mask = PhysicsObjectLayers::layerBit(PhysicsObjectLayers::Character);
+    filter.hit_triggers = false;
+    ++runtime.avoidance_queries;
+    const uint32_t hit_count = game_world.overlapSphere(bot_position, Bots::kBotAvoidanceQueryRadius,
+        filter, hits.data(), static_cast<uint32_t>(hits.size()));
+
+    std::vector<Bots::LocalActorCandidate> candidates;
+    candidates.reserve(hit_count);
+    for (uint32_t index = 0; index < hit_count; ++index) {
+        const entt::entity candidate_entity = hits[index].entity;
+        if (candidate_entity == bot_entity || !isLocalAvoidanceParticipant(game_world, candidate_entity))
+            continue;
+        const glm::vec3 candidate_position =
+            game_world.registry.get<TransformComponent>(candidate_entity).position;
+        glm::vec3 offset = candidate_position - bot_position;
+        offset.y = 0.0f;
+        const float distance = glm::length(offset);
+        if (!std::isfinite(offset.x) || !std::isfinite(offset.z) ||
+            !std::isfinite(distance) || distance > Bots::kBotAvoidanceQueryRadius)
+            continue;
+        const auto& networked = game_world.registry.get<NetworkedEntity>(candidate_entity);
+        const bool human_present = !game_world.registry.all_of<Bots::BotComponent>(candidate_entity);
+        int32_t bot_index = 0;
+        if (!human_present)
+            bot_index = game_world.registry.get<Bots::BotComponent>(candidate_entity).bot_index;
+        candidates.push_back({offset, human_present, bot_index, networked.owner_client_id});
+    }
+    const std::vector<Bots::LocalActorCandidate> ordered =
+        Bots::sortAndCapLocalActorCandidates(std::move(candidates));
+    runtime.avoidance_samples += static_cast<uint32_t>(ordered.size());
+    return Bots::makeLocalAvoidanceSamples(ordered, self_bot_index, self_owner_client_id);
+}
+
 // This is recovery telemetry only.  It starts at the bot controller centre,
 // uses its current route waypoint, ignores the bot itself, and returns a
 // redacted detail instead of exposing a hit point or actor identity to bot
@@ -1601,15 +1678,32 @@ static void tickBots(float dt)
         // walk the bot toward its pre-Engage goal while it aims/strafes.
         if (!intent.has_move_goal) { Bots::cancelPathRequest(nav); nav.has_goal = false; nav.desired_velocity = glm::vec3(0); }
         // S4 steering + S5 synthesis into the same consumption path as humans.
-        // Probe before steering so a confirmed physical block wins over the
-        // same interval's low-progress test.  The probe receives only the
-        // bot's own controller centre and waypoint direction.
+        // The existing forward probe remains the sole static classifier. AI-N2
+        // only uses its redacted Crowd result to gate a local yield, and its
+        // Character-layer overlap is a fixed-cap input to pure value planning.
+        const bool separation_eligible = botSeparationEligible(bot, intent, nav, steer, alive);
+        std::vector<Bots::LocalAvoidanceSample> local_samples;
+        if (separation_eligible)
+            local_samples = collectBotLocalAvoidanceSamples(*w, e, pos, bot.bot_index,
+                client_id, runtime);
         const Bots::LocalBlockDetail block_detail =
             probeBotLocalBlock(*w, e, nav, steer, pos);
+        const Bots::LocalAvoidancePlan priority_plan =
+            Bots::planLocalAvoidance(glm::vec3(0.0f), local_samples, nav.max_speed);
+        const bool was_doorway_yield = nav.doorway_yielding;
+        const bool doorway_yield = Bots::advanceDoorwayWait(nav,
+            block_detail == Bots::LocalBlockDetail::Crowd,
+            separation_eligible, priority_plan.lower_doorway_priority);
+        if (doorway_yield && !was_doorway_yield)
+            ++runtime.doorway_yields;
+        const bool doorway_repath_episode = nav.doorway_crowd_ticks >=
+            Bots::kBotDoorwayPriorityTicks;
         const Bots::NavigationRecoveryResult recovery =
-            Bots::tickNavigationRecovery(nav, steer, pos, block_detail, dt);
+            Bots::tickNavigationRecovery(nav, steer, pos, block_detail, dt, doorway_yield);
         if (recovery.category == Bots::NavFailureCategory::LocalBlock) {
             ++runtime.navigation_recoveries;
+            if (recovery.detail == Bots::LocalBlockDetail::Crowd && doorway_repath_episode)
+                ++runtime.doorway_repaths;
             runtime.recordNavigationDiagnostic(runtime.path_schedule_tick, bot.bot_index,
                 recovery.category, recovery.detail,
                 nav.recovery_count);
@@ -1617,6 +1711,20 @@ static void tickBots(float dt)
             ++runtime.navigation_recoveries;
             runtime.recordNavigationDiagnostic(runtime.path_schedule_tick, bot.bot_index,
                 recovery.category, recovery.detail, nav.recovery_count);
+        }
+        if (recovery.category == Bots::NavFailureCategory::None && separation_eligible) {
+            const Bots::LocalAvoidancePlan avoidance =
+                Bots::planLocalAvoidance(nav.desired_velocity, local_samples, nav.max_speed);
+            if (doorway_yield) {
+                // This is ordinary neutral input only. Keep the underlying
+                // route/steering data intact so a departed priority actor can
+                // release the bot on the next fixed tick without a new path.
+                nav.desired_velocity = glm::vec3(0.0f);
+            } else {
+                nav.desired_velocity = avoidance.desired_velocity;
+                steer.horizontal_command_speed = glm::length(
+                    glm::vec2(nav.desired_velocity.x, nav.desired_velocity.z));
+            }
         }
         Net::InputSample sample = aiPauseBots() ? Bots::synthesizeNeutralInput(++runtime.input_tick, bot.aim_yaw, bot.aim_pitch)
                                                 : Bots::synthesizeInput(bot, nav, intent, ++runtime.input_tick, dt);

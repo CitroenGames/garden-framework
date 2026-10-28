@@ -1,5 +1,6 @@
 #pragma once
 #include "Components/Components.hpp"
+#include "world.hpp"
 #include "ECS/Hierarchy.hpp"
 #include "Navigation/NavMesh.hpp"
 #include "Navigation/NavMeshGenerator.hpp"
@@ -11,6 +12,9 @@
 #include "shared/CompetitiveLogic.hpp"
 #include "shared/CompetitiveMapData.hpp"
 #include "shared/SelectedLevelSidecars.hpp"
+#include "shared/SharedComponents.hpp"
+#include "Network/NetworkTypes.hpp"
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <filesystem>
@@ -61,6 +65,175 @@ static Navigation::NavMeshConfig navigationAdmissionFixtureConfig()
     cfg.agent_height = 1.8f; cfg.agent_radius = 0.35f; cfg.cell_size = 0.25f;
     cfg.cell_height = 0.2f; cfg.max_climb = 0.5f; cfg.max_edge_len = 2.0f;
     return cfg;
+}
+
+// AI-N2's server gather is template-owned. This fixture puts real 0.30 m
+// CharacterVirtual bodies around a 1.20 m clear, 1.00 m deep physical doorway
+// and exercises the generic character query it uses.  It never moves a
+// transform directly: crossing uses the public character simulation path.
+bool testBotLocalSeparationCharacterWorldFixture()
+{
+    const std::string name = "Bot_LocalSeparationCharacterWorldFixture";
+    constexpr float kDoorwayClearSpan = 1.20f;
+    constexpr float kDoorwayDepth = 1.00f;
+    constexpr float kControllerCentreY = 1.20f;
+    constexpr float kFixedDt = 1.0f / 60.0f;
+
+    const auto addStaticBox = [](world& fixture, const glm::vec3& position,
+                                 const glm::vec3& half_extents) {
+        const entt::entity wall = fixture.registry.create();
+        fixture.registry.emplace<TransformComponent>(wall, position.x, position.y, position.z);
+        fixture.registry.emplace<RigidBodyComponent>(wall);
+        auto& collider = fixture.registry.emplace<ColliderComponent>(wall);
+        collider.shape_type = ColliderShapeType::Box;
+        collider.box_half_extents = half_extents;
+        const JPH::ShapeRefC shape = PhysicsSystem::createShapeFromCollider(collider, glm::vec3(1.0f));
+        return shape && !fixture.getPhysicsSystem().createStaticBody(
+            position, glm::vec3(0.0f), shape, wall).IsInvalid();
+    };
+
+    for (const size_t cohort_size : {size_t{2}, size_t{5}, size_t{9}}) {
+        world fixture;
+        fixture.initializePhysics();
+        if (!addStaticBox(fixture, glm::vec3(0.0f, -0.25f, 0.0f),
+                          glm::vec3(8.0f, 0.25f, 12.0f)))
+            return fail(name, "could not create doorway floor");
+        // The inside wall faces are exactly +/- 0.60 m, leaving the decided
+        // 1.20 m span; their Z half extent gives the decided 1.00 m depth.
+        const float wall_centre_x = kDoorwayClearSpan * 0.5f + 1.4f;
+        if (!addStaticBox(fixture, glm::vec3(-wall_centre_x, 1.30f, 0.0f),
+                          glm::vec3(1.4f, 1.30f, kDoorwayDepth * 0.5f)) ||
+            !addStaticBox(fixture, glm::vec3(wall_centre_x, 1.30f, 0.0f),
+                          glm::vec3(1.4f, 1.30f, kDoorwayDepth * 0.5f)))
+            return fail(name, "could not create 1.20m doorway walls");
+
+        std::vector<entt::entity> actors;
+        actors.reserve(cohort_size);
+        for (size_t index = 0; index < cohort_size; ++index) {
+            // The first two physically face each other through the opening.
+            // Remaining actors are actual queued character bodies, outside
+            // the opening so the first priority release is observable.
+            const glm::vec3 position = index == 0 ? glm::vec3(0.0f, kControllerCentreY, -0.75f) :
+                index == 1 ? glm::vec3(0.0f, kControllerCentreY, 0.75f) :
+                glm::vec3(0.0f, kControllerCentreY, 2.20f + static_cast<float>(index) * 0.75f);
+            const entt::entity actor = fixture.registry.create();
+            actors.push_back(actor);
+            fixture.registry.emplace<TransformComponent>(actor, position.x, position.y, position.z);
+            auto& controller = fixture.registry.emplace<CharacterControllerComponent>(actor);
+            controller.capsule_radius = 0.30f;
+            controller.move_speed = 5.0f;
+            fixture.registry.emplace<Net::NetworkedEntity>(actor,
+                static_cast<uint32_t>(index + 1u), static_cast<uint16_t>(40000u + index), true);
+            fixture.registry.emplace<FpsHealthComponent>(actor);
+            if (fixture.getPhysicsSystem().createCharacterController(fixture.registry, actor).IsInvalid())
+                return fail(name, "could not create doorway character actor");
+        }
+
+        // One bounded Character-layer overlap per cohort actor.  Raw physics
+        // results may use the larger collection buffer, but each actor's
+        // stable value set is capped at the D13 eight samples afterwards.
+        uint32_t avoidance_queries = 0;
+        uint32_t avoidance_samples = 0;
+        std::vector<std::vector<Bots::LocalActorCandidate>> visible(cohort_size);
+        for (size_t observer = 0; observer < cohort_size; ++observer) {
+            PhysicsSystem::QueryFilter filter;
+            filter.ignore = actors[observer];
+            filter.layer_mask = PhysicsObjectLayers::layerBit(PhysicsObjectLayers::Character);
+            filter.hit_triggers = false;
+            std::array<PhysicsSystem::OverlapResult, Bots::kBotAvoidanceCollectionCap> hits{};
+            const glm::vec3 observer_position =
+                fixture.registry.get<TransformComponent>(actors[observer]).position;
+            const uint32_t count = fixture.overlapSphere(observer_position,
+                Bots::kBotAvoidanceQueryRadius, filter, hits.data(),
+                static_cast<uint32_t>(hits.size()));
+            ++avoidance_queries;
+            if (count > hits.size())
+                return fail(name, "doorway overlap exceeded its bounded collection buffer");
+            std::vector<Bots::LocalActorCandidate> candidates;
+            for (uint32_t hit_index = 0; hit_index < count; ++hit_index) {
+                const auto it = std::find(actors.begin(), actors.end(), hits[hit_index].entity);
+                if (it == actors.end())
+                    continue;
+                const size_t candidate_index = static_cast<size_t>(it - actors.begin());
+                glm::vec3 offset = fixture.registry.get<TransformComponent>(actors[candidate_index]).position -
+                    observer_position;
+                offset.y = 0.0f;
+                candidates.push_back({offset, false, static_cast<int32_t>(candidate_index),
+                                      static_cast<uint16_t>(40000u + candidate_index)});
+            }
+            visible[observer] = Bots::sortAndCapLocalActorCandidates(std::move(candidates));
+            avoidance_samples += static_cast<uint32_t>(visible[observer].size());
+            if (visible[observer].size() > Bots::kBotAvoidanceSampleCap)
+                return fail(name, "doorway stable sample cap was not applied after collection");
+        }
+        if (avoidance_queries != cohort_size ||
+            avoidance_samples > avoidance_queries * Bots::kBotAvoidanceSampleCap)
+            return fail(name, "doorway query or sample count escaped its fixed bounds");
+
+        const auto winner_samples = Bots::makeLocalAvoidanceSamples(visible[0], 0, 40000);
+        const auto yielder_samples = Bots::makeLocalAvoidanceSamples(visible[1], 1, 40001);
+        if (Bots::planLocalAvoidance(glm::vec3(0.0f, 0.0f, 5.0f), winner_samples, 5.0f)
+                .lower_doorway_priority ||
+            !Bots::planLocalAvoidance(glm::vec3(0.0f, 0.0f, -5.0f), yielder_samples, 5.0f)
+                .lower_doorway_priority)
+            return fail(name, "doorway priority was not stable for the physical pair");
+
+        // The ordinary AI-N1 forward-probe shape sees the actual opposing
+        // character through the physical opening.  Holding this real crowd
+        // arrangement for 45 fixed ticks yields exactly one existing recovery.
+        const glm::vec3 yielder_position = fixture.registry.get<TransformComponent>(actors[1]).position;
+        const PhysicsSystem::RaycastResult physical_crowd = fixture.raycastClosest(
+            yielder_position, glm::vec3(0.0f, 0.0f, -1.0f), 1.25f, actors[1]);
+        if (!physical_crowd.hit || physical_crowd.entity != actors[0])
+            return fail(name, "doorway forward probe did not observe the opposing character");
+        Bots::NavAgentComponent repath_nav;
+        Bots::SteeringComponent repath_steering;
+        Bots::setPath(repath_nav, {yielder_position, glm::vec3(0.0f, kControllerCentreY, -3.0f)},
+                      glm::vec3(0.0f, kControllerCentreY, -3.0f));
+        for (uint16_t tick = 0; tick < Bots::kBotLocalBlockConfirmTicks; ++tick) {
+            const bool yield = Bots::advanceDoorwayWait(repath_nav, true, true, true);
+            if (tick + 1u < Bots::kBotDoorwayPriorityTicks && yield)
+                return fail(name, "doorway yielder entered neutral movement before 15 fixed ticks");
+            if (tick + 1u >= Bots::kBotDoorwayPriorityTicks &&
+                tick + 1u < Bots::kBotLocalBlockConfirmTicks && !yield)
+                return fail(name, "doorway yielder did not retain deterministic priority wait");
+            const Bots::NavigationRecoveryResult recovery = Bots::tickNavigationRecovery(
+                repath_nav, repath_steering, yielder_position, Bots::LocalBlockDetail::Crowd,
+                kFixedDt, yield);
+            if (tick + 1u < Bots::kBotLocalBlockConfirmTicks &&
+                recovery.category != Bots::NavFailureCategory::None)
+                return fail(name, "doorway recovered before the fixed 45-tick boundary");
+            if (tick + 1u == Bots::kBotLocalBlockConfirmTicks &&
+                (recovery.category != Bots::NavFailureCategory::LocalBlock ||
+                 recovery.detail != Bots::LocalBlockDetail::Crowd || repath_nav.recovery_count != 1u))
+                return fail(name, "doorway did not issue exactly one bounded crowd recovery");
+        }
+
+        // A released yielder traverses the real gap by normal character input.
+        // Removing the departed priority actor is a lifecycle event; no body
+        // or transform is repositioned to make room.
+        fixture.getPhysicsSystem().removeCharacterController(actors[0]);
+        fixture.registry.destroy(actors[0]);
+        Bots::NavAgentComponent release_nav;
+        Bots::setPath(release_nav, {yielder_position, glm::vec3(0.0f, kControllerCentreY, -3.0f)},
+                      glm::vec3(0.0f, kControllerCentreY, -3.0f));
+        if (Bots::advanceDoorwayWait(release_nav, false, true, true) ||
+            release_nav.doorway_yielding || release_nav.doorway_crowd_ticks != 0)
+            return fail(name, "clear doorway did not release the yielder");
+        CharacterMoveInput cross_opening;
+        cross_opening.move_forward = 1.0f;
+        cross_opening.camera_yaw = 3.14159265f;
+        float furthest_crossed_z = yielder_position.z;
+        for (uint16_t tick = 0; tick < 180u; ++tick) {
+            const CharacterControllerState state = fixture.simulate_character_controller(
+                actors[1], cross_opening, kFixedDt);
+            fixture.stepPhysicsSingleStep();
+            furthest_crossed_z = std::min(furthest_crossed_z, state.position.z);
+        }
+        if (furthest_crossed_z > -0.75f)
+            return fail(name, "released yielder did not cross the physical doorway through normal input");
+    }
+    return pass(name);
 }
 
 // Two projected islands with an eight metre gap.  Detour must distinguish

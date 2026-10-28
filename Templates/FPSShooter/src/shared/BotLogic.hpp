@@ -120,6 +120,14 @@ struct NavAgentComponent {
     NavFailureCategory last_failure = NavFailureCategory::None;
     bool local_block_confirmed = false;
     bool capacity_failure_active = false;
+    // AI-N2 doorway state belongs to the affected pawn. It is only a bounded
+    // local wait over the existing Crowd probe; it owns neither a route nor a
+    // physics object and never grants passage.
+    uint32_t route_generation = 0;
+    uint32_t doorway_route_generation = 0;
+    uint32_t doorway_path_index = 0;
+    uint16_t doorway_crowd_ticks = 0;
+    bool doorway_yielding = false;
     // A request is owned by this bot until the world scheduler grants or
     // rejects it.  The tick is deliberately data rather than wall-clock time:
     // replay order remains stable regardless of frame duration.
@@ -257,6 +265,11 @@ inline void setPath(NavAgentComponent& n, const std::vector<glm::vec3>& pts, con
     n.path = pts; n.goal = goal; n.has_goal = true; n.path_valid = !pts.empty(); n.path_index = pts.size() > 1 ? 1 : 0; n.path_failures = pts.empty() ? n.path_failures + 1 : 0;
     n.path_request_pending = false;
     n.path_request_tick = 0;
+    ++n.route_generation;
+    n.doorway_route_generation = 0;
+    n.doorway_path_index = 0;
+    n.doorway_crowd_ticks = 0;
+    n.doorway_yielding = false;
 }
 
 // ---- Bounded path scheduling ----
@@ -318,6 +331,11 @@ inline void rejectPathRequest(NavAgentComponent& n) {
     ++n.path_failures;
     n.repath_timer = pathFailureBackoff(n);
     n.route_age = 0.0f;
+    ++n.route_generation;
+    n.doorway_route_generation = 0;
+    n.doorway_path_index = 0;
+    n.doorway_crowd_ticks = 0;
+    n.doorway_yielding = false;
 }
 
 inline void acceptPathRequest(NavAgentComponent& n, const std::vector<glm::vec3>& points,
@@ -342,6 +360,136 @@ inline void acceptPathRequest(NavAgentComponent& n, const std::vector<glm::vec3>
 inline constexpr float kBotLocalBlockConfirmSeconds = 0.75f;
 inline constexpr uint16_t kBotLocalBlockConfirmTicks = 45u;
 inline constexpr float kBotStuckCommandSpeed = 1.0f;
+
+// AI-N2 is deliberately a local, template-owned velocity adjustment. The
+// server creates these value samples only after filtering generic character
+// overlaps. Nothing below retains an entity, player, team, route, or target.
+inline constexpr float kBotAvoidanceQueryRadius = 2.40f;
+inline constexpr uint32_t kBotAvoidanceSampleCap = 8u;
+// Physics queries require a caller-owned output array.  Keep a bounded
+// collection buffer larger than the contract sample cap so the server can
+// order all nearby returned candidates by stable actor key before selecting
+// the eight value samples consumed by steering.
+inline constexpr uint32_t kBotAvoidanceCollectionCap = 32u;
+inline constexpr float kBotAvoidanceClearance = 0.90f;
+inline constexpr float kBotAvoidanceMaxContribution = 2.00f;
+inline constexpr uint16_t kBotDoorwayPriorityTicks = 15u;
+
+struct LocalActorCandidate {
+    glm::vec3 horizontal_offset{0.0f};
+    bool human_present = false;
+    int32_t bot_index = 0;
+    uint16_t owner_client_id = 0;
+};
+
+// The server owns these transient keys only long enough to make overlap order
+// deterministic. Conversion immediately strips them before planning movement.
+inline bool localActorCandidateEarlier(const LocalActorCandidate& a, const LocalActorCandidate& b)
+{
+    if (a.human_present != b.human_present) return a.human_present;
+    if (a.human_present) return a.owner_client_id < b.owner_client_id;
+    if (a.bot_index != b.bot_index) return a.bot_index < b.bot_index;
+    return a.owner_client_id < b.owner_client_id;
+}
+
+struct LocalAvoidanceSample {
+    glm::vec3 horizontal_offset{0.0f};
+    bool has_doorway_priority = false;
+};
+
+inline std::vector<LocalActorCandidate> sortAndCapLocalActorCandidates(
+    std::vector<LocalActorCandidate> candidates)
+{
+    std::sort(candidates.begin(), candidates.end(), localActorCandidateEarlier);
+    if (candidates.size() > kBotAvoidanceSampleCap)
+        candidates.resize(kBotAvoidanceSampleCap);
+    return candidates;
+}
+
+inline std::vector<LocalAvoidanceSample> makeLocalAvoidanceSamples(
+    const std::vector<LocalActorCandidate>& candidates,
+    int32_t self_bot_index, uint16_t self_owner_client_id)
+{
+    std::vector<LocalAvoidanceSample> samples;
+    samples.reserve(candidates.size());
+    for (const LocalActorCandidate& candidate : candidates) {
+        const bool priority = candidate.human_present ||
+            candidate.bot_index < self_bot_index ||
+            (candidate.bot_index == self_bot_index &&
+             candidate.owner_client_id < self_owner_client_id);
+        samples.push_back({candidate.horizontal_offset, priority});
+    }
+    return samples;
+}
+
+struct LocalAvoidancePlan {
+    glm::vec3 desired_velocity{0.0f};
+    glm::vec3 contribution{0.0f};
+    bool lower_doorway_priority = false;
+};
+
+inline LocalAvoidancePlan planLocalAvoidance(const glm::vec3& desired_velocity,
+                                              const std::vector<LocalAvoidanceSample>& samples,
+                                              float max_speed)
+{
+    LocalAvoidancePlan plan;
+    glm::vec3 desired = desired_velocity;
+    desired.y = 0.0f;
+    glm::vec3 sum(0.0f);
+    for (const LocalAvoidanceSample& sample : samples) {
+        glm::vec3 offset = sample.horizontal_offset;
+        offset.y = 0.0f;
+        const float distance = glm::length(offset);
+        if (distance >= kBotAvoidanceClearance || distance < 0.01f)
+            continue;
+        const float weight = (kBotAvoidanceClearance - distance) / kBotAvoidanceClearance;
+        sum -= (offset / distance) * (kBotAvoidanceMaxContribution * weight);
+    }
+    const float sum_length = glm::length(sum);
+    if (sum_length > kBotAvoidanceMaxContribution)
+        sum *= kBotAvoidanceMaxContribution / sum_length;
+    const float merged_length = glm::length(desired + sum);
+    plan.desired_velocity = desired + sum;
+    if (merged_length > std::max(max_speed, 0.0f) && merged_length > 0.0f)
+        plan.desired_velocity *= std::max(max_speed, 0.0f) / merged_length;
+    plan.contribution = sum;
+    for (const LocalAvoidanceSample& sample : samples)
+        plan.lower_doorway_priority = plan.lower_doorway_priority || sample.has_doorway_priority;
+    return plan;
+}
+
+inline void clearDoorwayWait(NavAgentComponent& n)
+{
+    n.doorway_route_generation = 0;
+    n.doorway_path_index = 0;
+    n.doorway_crowd_ticks = 0;
+    n.doorway_yielding = false;
+}
+
+// A changed route/waypoint starts a new continuous crowd interval. Priority
+// is deliberately recomputed by the caller each fixed tick from local samples.
+inline bool advanceDoorwayWait(NavAgentComponent& n, bool continuous_crowd,
+                               bool separation_eligible, bool lower_priority)
+{
+    if (!continuous_crowd || !separation_eligible) {
+        clearDoorwayWait(n);
+        return false;
+    }
+    if (n.doorway_route_generation != n.route_generation ||
+        n.doorway_path_index != n.path_index) {
+        n.doorway_route_generation = n.route_generation;
+        n.doorway_path_index = n.path_index;
+        n.doorway_crowd_ticks = 1u;
+        n.doorway_yielding = false;
+        return false;
+    }
+    if (n.doorway_crowd_ticks < kBotLocalBlockConfirmTicks)
+        ++n.doorway_crowd_ticks;
+    n.doorway_yielding = lower_priority &&
+        n.doorway_crowd_ticks >= kBotDoorwayPriorityTicks &&
+        n.doorway_crowd_ticks < kBotLocalBlockConfirmTicks;
+    return n.doorway_yielding;
+}
 
 // The probe itself stays server-owned because it needs generic physics.  This
 // value helper only tracks persistence of an already-redacted result, so it is
@@ -414,13 +562,23 @@ inline void updateSteering(NavAgentComponent& n, SteeringComponent& s,
 // cannot accidentally prove a different recovery path than the server uses.
 inline NavigationRecoveryResult tickNavigationRecovery(
     NavAgentComponent& n, SteeringComponent& s, const glm::vec3& pos,
-    LocalBlockDetail observed_block, float dt)
+    LocalBlockDetail observed_block, float dt, bool suppress_stuck = false)
 {
     if (observeLocalBlock(n, observed_block, dt)) {
         recoverNavigation(n, s, NavFailureCategory::LocalBlock);
         return {NavFailureCategory::LocalBlock, observed_block};
     }
     updateSteering(n, s, pos, dt);
+    if (suppress_stuck) {
+        // A deliberate doorway yield is neutral input, not failed movement.
+        // Drop its low-progress window so yielding cannot become AI-N1 Stuck.
+        n.stuck = false;
+        s.stuck_time = 0.0f;
+        s.stuck_window_time = 0.0f;
+        s.stuck_window_ticks = 0;
+        s.window_start = pos;
+        return {};
+    }
     if (n.stuck) {
         recoverNavigation(n, s, NavFailureCategory::Stuck);
         return {NavFailureCategory::Stuck, LocalBlockDetail::None};

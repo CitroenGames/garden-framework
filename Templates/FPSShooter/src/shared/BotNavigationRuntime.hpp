@@ -112,6 +112,10 @@ struct BotWorldRuntime {
     uint32_t capacity_diagnostic_calls = 0;
     uint32_t capacity_diagnostic_suppressions = 0;
     uint32_t navigation_recoveries = 0;
+    uint32_t avoidance_queries = 0;
+    uint32_t avoidance_samples = 0;
+    uint32_t doorway_yields = 0;
+    uint32_t doorway_repaths = 0;
     uint32_t capacity_diagnostic_next_tick = 0;
     float debug_last_dump = -10.0f;
     std::unordered_map<int32_t, StuckLogLatch> stuck_latches;
@@ -155,10 +159,12 @@ struct BotWorldRuntime {
         char buffer[512];
         std::snprintf(buffer, sizeof(buffer),
             "[BotDebug] navigation_diagnostics count=%zu recoveries=%u capacity_calls=%u "
-            "capacity_suppressions=%u last_tick=%u last_bot=%d last_category=%s "
+            "capacity_suppressions=%u avoidance_queries=%u avoidance_samples=%u "
+            "doorway_yields=%u doorway_repaths=%u last_tick=%u last_bot=%d last_category=%s "
             "last_detail=%s last_recovery=%u last_capacity_suppressed=%d",
             navigation_diagnostics.size(), navigation_recoveries,
             capacity_diagnostic_calls, capacity_diagnostic_suppressions,
+            avoidance_queries, avoidance_samples, doorway_yields, doorway_repaths,
             last.tick, last.bot_index, navFailureCategoryName(last.category),
             localBlockDetailName(last.detail), last.recovery_count,
             last.capacity_inspection_suppressed ? 1 : 0);
@@ -188,6 +194,10 @@ struct BotWorldRuntime {
         capacity_diagnostic_calls = 0;
         capacity_diagnostic_suppressions = 0;
         navigation_recoveries = 0;
+        avoidance_queries = 0;
+        avoidance_samples = 0;
+        doorway_yields = 0;
+        doorway_repaths = 0;
         capacity_diagnostic_next_tick = 0;
         debug_last_dump = -10.0f;
         stuck_latches.clear();

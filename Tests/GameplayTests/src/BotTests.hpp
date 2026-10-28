@@ -325,6 +325,102 @@ bool testBotBoundedPathScheduling()
     return pass(name);
 }
 
+bool testBotLocalSeparationDoorwayValues()
+{
+    const std::string name = "Bot_LocalSeparationDoorwayValues";
+    using namespace Bots;
+    const glm::vec3 forward(0.0f, 0.0f, 5.0f);
+
+    // Empty and clearance-boundary rows preserve the authored route command.
+    if (planLocalAvoidance(forward, {}, 5.0f).desired_velocity != forward ||
+        planLocalAvoidance(forward, {{{kBotAvoidanceClearance, 0.0f, 0.0f}, false}}, 5.0f).desired_velocity != forward)
+        return fail(name, "empty or clearance-boundary sample altered route steering");
+
+    // Equal lateral samples cannot invent a left/right bias. An asymmetric
+    // sample may turn away, but its horizontal correction and final command
+    // stay inside the fixed caps.
+    const LocalAvoidancePlan symmetric = planLocalAvoidance(forward,
+        {{{0.45f, 0.0f, 0.0f}, false}, {{-0.45f, 0.0f, 0.0f}, false}}, 5.0f);
+    if (!botApprox(symmetric.contribution.x, 0.0f) || !botApprox(symmetric.desired_velocity.x, 0.0f))
+        return fail(name, "symmetric local samples caused lateral drift");
+    const LocalAvoidancePlan asymmetric = planLocalAvoidance(forward,
+        {{{0.20f, 0.0f, 0.35f}, false}, {{0.40f, 0.0f, -0.10f}, false}}, 5.0f);
+    if (!std::isfinite(asymmetric.desired_velocity.x) || !std::isfinite(asymmetric.desired_velocity.z) ||
+        asymmetric.desired_velocity.y != 0.0f ||
+        glm::length(asymmetric.contribution) > kBotAvoidanceMaxContribution + 0.0001f ||
+        glm::length(asymmetric.desired_velocity) > 5.0001f)
+        return fail(name, "asymmetric local plan escaped finite horizontal caps");
+
+    // A nine-body physics overlap can arrive in either incidental physics
+    // order.  Stable actor ordering must select exactly the same eight bot
+    // keys before the D13 steering cap is applied.
+    std::vector<LocalActorCandidate> physics_order;
+    for (const int32_t index : {7, 3, 9, 1, 8, 2, 6, 4, 5})
+        physics_order.push_back({glm::vec3(static_cast<float>(index) * 0.1f, 0.0f, 0.0f), false,
+                                 index, static_cast<uint16_t>(40000 + index)});
+    const auto ordered = sortAndCapLocalActorCandidates(physics_order);
+    std::reverse(physics_order.begin(), physics_order.end());
+    const auto reversed = sortAndCapLocalActorCandidates(physics_order);
+    if (ordered.size() != kBotAvoidanceSampleCap || reversed.size() != ordered.size())
+        return fail(name, "stable candidate cap changed");
+    for (size_t i = 0; i < ordered.size(); ++i) {
+        if (ordered[i].bot_index != static_cast<int32_t>(i + 1) ||
+            ordered[i].bot_index != reversed[i].bot_index ||
+            ordered[i].owner_client_id != reversed[i].owner_client_id)
+            return fail(name, "nine-candidate selection depended on physics order");
+    }
+    const auto samples = makeLocalAvoidanceSamples(ordered, 5, 40005);
+    if (!planLocalAvoidance(forward, samples, 5.0f).lower_doorway_priority)
+        return fail(name, "lower stable bot key did not retain doorway priority");
+    const auto human_samples = makeLocalAvoidanceSamples(
+        {{glm::vec3(0.4f, 0.0f, 0.0f), true, 0, 7}}, 0, 40000);
+    if (!planLocalAvoidance(forward, human_samples, 5.0f).lower_doorway_priority)
+        return fail(name, "present human did not retain doorway priority");
+
+    // Two, five, and nine actor doorway cohorts use the exact 15/45 fixed
+    // tick wait. The lowest key moves; each other bot yields without letting
+    // the normal AI-N1 Stuck branch create a second recovery.
+    for (const int32_t cohort_size : {2, 5, 9}) {
+        for (int32_t bot_index = 0; bot_index < cohort_size; ++bot_index) {
+            NavAgentComponent nav;
+            SteeringComponent steering;
+            setPath(nav, {glm::vec3(0.0f), glm::vec3(0.0f, 0.0f, 8.0f)}, glm::vec3(0.0f, 0.0f, 8.0f));
+            bool saw_yield = false;
+            for (uint16_t tick = 1; tick < kBotLocalBlockConfirmTicks; ++tick) {
+                const bool lower_priority = bot_index != 0;
+                const bool yield = advanceDoorwayWait(nav, true, true, lower_priority);
+                const NavigationRecoveryResult result = tickNavigationRecovery(
+                    nav, steering, glm::vec3(0.0f), LocalBlockDetail::Crowd,
+                    1.0f / 60.0f, yield);
+                if (result.category != NavFailureCategory::None)
+                    return fail(name, "doorway cohort recovered before the 45th tick");
+                if (yield) saw_yield = true;
+                if (yield && nav.stuck)
+                    return fail(name, "deliberate doorway yield entered AI-N1 Stuck");
+            }
+            if ((bot_index == 0 && saw_yield) || (bot_index != 0 && !saw_yield))
+                return fail(name, "doorway winner/yielder priority changed in cohort");
+            const bool yield_at_boundary = advanceDoorwayWait(nav, true, true, bot_index != 0);
+            const NavigationRecoveryResult boundary = tickNavigationRecovery(
+                nav, steering, glm::vec3(0.0f), LocalBlockDetail::Crowd,
+                1.0f / 60.0f, yield_at_boundary);
+            if (boundary.category != NavFailureCategory::LocalBlock ||
+                boundary.detail != LocalBlockDetail::Crowd || nav.recovery_count != 1 ||
+                yield_at_boundary)
+                return fail(name, "doorway boundary did not perform exactly one normal crowd recovery");
+        }
+    }
+
+    NavAgentComponent bypass_nav;
+    setPath(bypass_nav, {glm::vec3(0.0f), glm::vec3(0.0f, 0.0f, 8.0f)}, glm::vec3(0.0f, 0.0f, 8.0f));
+    for (uint16_t tick = 0; tick < kBotDoorwayPriorityTicks; ++tick)
+        (void)advanceDoorwayWait(bypass_nav, true, true, true);
+    if (!bypass_nav.doorway_yielding || advanceDoorwayWait(bypass_nav, true, false, true) ||
+        bypass_nav.doorway_crowd_ticks != 0 || bypass_nav.doorway_yielding)
+        return fail(name, "combat/use bypass did not clear doorway state");
+    return pass(name);
+}
+
 bool testBotInputSynthesisShape()
 {
     const std::string name = "Bot_InputSynthesisShape";
