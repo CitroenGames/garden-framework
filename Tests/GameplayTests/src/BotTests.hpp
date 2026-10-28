@@ -30,19 +30,76 @@ bool testBotPerceptionBlindfold()
     std::vector<EnemyCandidate> enemies{{enemy, glm::vec3(0, 0, 10)}};
     // Behind wall: every sample blocked.
     BotPerceptComponent p;
-    for (int i = 0; i < 50; ++i) updatePerception(p, glm::vec3(0, 1.62f, 0), 0.0f, enemies, 1, 0.1f, [](const glm::vec3&, const glm::vec3&) { return true; });
+    for (int i = 0; i < 50; ++i) updatePerception(p, glm::vec3(0, 1.62f, 0), 0.0f, enemies, 1, 0.1f, [](entt::entity, const glm::vec3&, const glm::vec3&) { return true; });
     if (p.visible_fraction != 0.0f || p.visible_enemy != entt::null || enemyConfirmed(p, 1)) return fail(name, "walled enemy leaked into percept");
     // Visible: confirms only after Normal reaction 0.40s.
     BotPerceptComponent p2;
-    updatePerception(p2, glm::vec3(0, 1.62f, 0), 0.0f, enemies, 1, 0.1f, [](const glm::vec3&, const glm::vec3&) { return false; });
+    updatePerception(p2, glm::vec3(0, 1.62f, 0), 0.0f, enemies, 1, 0.1f, [](entt::entity, const glm::vec3&, const glm::vec3&) { return false; });
     if (p2.visible_fraction != 1.0f || enemyConfirmed(p2, 1)) return fail(name, "confirmed before reaction_time");
-    for (int i = 0; i < 3; ++i) updatePerception(p2, glm::vec3(0, 1.62f, 0), 0.0f, enemies, 1, 0.1f, [](const glm::vec3&, const glm::vec3&) { return false; });
+    for (int i = 0; i < 3; ++i) updatePerception(p2, glm::vec3(0, 1.62f, 0), 0.0f, enemies, 1, 0.1f, [](entt::entity, const glm::vec3&, const glm::vec3&) { return false; });
     if (!enemyConfirmed(p2, 1)) return fail(name, "not confirmed after reaction_time (0.4s)");
     if (p2.last_seen_age != 0.0f) return fail(name, "last_seen_age not reset");
     // Behind bot: FOV rejects (dist > 3).
     BotPerceptComponent p3; std::vector<EnemyCandidate> behind{{enemy, glm::vec3(0, 0, -10)}};
-    updatePerception(p3, glm::vec3(0, 1.62f, 0), 0.0f, behind, 1, 0.1f, [](const glm::vec3&, const glm::vec3&) { return false; });
+    updatePerception(p3, glm::vec3(0, 1.62f, 0), 0.0f, behind, 1, 0.1f, [](entt::entity, const glm::vec3&, const glm::vec3&) { return false; });
     if (p3.visible_fraction != 0.0f) return fail(name, "enemy behind bot visible");
+    return pass(name);
+}
+
+bool testBotPerceptionWeaponLineObstruction()
+{
+    const std::string name = "Bot_PerceptionWeaponLineObstruction";
+    using namespace Bots;
+    entt::registry registry;
+    const entt::entity clear_enemy = registry.create();
+    const entt::entity divider_enemy = registry.create();
+    const glm::vec3 eye(0.0f, kBotWeaponOriginHeight, 0.0f);
+    const glm::vec3 clear_position(0.0f, 0.0f, 10.0f);
+    const glm::vec3 divider_position(4.0f, 0.0f, 10.0f);
+    bool saw_canonical_aim_line = false;
+    const auto weapon_trace = [&](entt::entity target, const glm::vec3& origin, const glm::vec3& point) {
+        if (target == divider_enemy)
+            return true; // central solid divider is the first weapon-trace hit.
+        if (target == clear_enemy && origin == eye &&
+            point == clear_position + glm::vec3(0.0f, kBotWeaponAimHeight, 0.0f))
+            saw_canonical_aim_line = true;
+        return false;
+    };
+
+    BotPerceptComponent percept;
+    updatePerception(percept, eye, 0.0f,
+                     {{divider_enemy, divider_position}, {clear_enemy, clear_position}},
+                     1, 0.1f, weapon_trace);
+    if (!saw_canonical_aim_line)
+        return fail(name, "perception did not query the server weapon aim line");
+    if (percept.visible_enemy != clear_enemy || percept.last_seen_aim_point !=
+        clear_position + glm::vec3(0.0f, kBotWeaponAimHeight, 0.0f))
+        return fail(name, "divider-blocked target entered bot percept");
+    for (int i = 0; i < 3; ++i)
+        updatePerception(percept, eye, 0.0f, {{clear_enemy, clear_position}}, 1, 0.1f, weapon_trace);
+    BotComponent clear_bot;
+    clear_bot.state = BotState::Advance;
+    BotIntentComponent clear_intent;
+    BotDecisionInput clear_input;
+    clear_input.phase = Competitive::RoundPhase::Live;
+    clear_input.team = Competitive::FpsTeam::Attackers;
+    clear_input.bot_pos = glm::vec3(0.0f);
+    clear_input.dt = 0.1f;
+    decide(clear_bot, percept, clear_intent, clear_input);
+    if (clear_bot.state != BotState::Engage || !clear_intent.want_attack)
+        return fail(name, "clear weapon line did not authorize an engagement");
+
+    BotPerceptComponent blocked_only;
+    updatePerception(blocked_only, eye, 0.0f, {{divider_enemy, divider_position}},
+                     1, 0.1f, weapon_trace);
+    if (blocked_only.visible_enemy != entt::null || blocked_only.visible_fraction != 0.0f)
+        return fail(name, "blocked weapon line entered bot percept");
+    BotComponent blocked_bot;
+    blocked_bot.state = BotState::Advance;
+    BotIntentComponent blocked_intent;
+    decide(blocked_bot, blocked_only, blocked_intent, clear_input);
+    if (blocked_bot.state == BotState::Engage || blocked_intent.want_attack)
+        return fail(name, "blocked weapon line authorized an engagement");
     return pass(name);
 }
 
@@ -55,7 +112,7 @@ bool testBotPerceptionPrivacyAndStaleTargets()
     const entt::entity second = registry.create();
     const glm::vec3 eye(0.0f, 1.62f, 0.0f);
     const glm::vec3 shared_position(0.0f, 0.0f, 10.0f);
-    const auto clear = [](const glm::vec3&, const glm::vec3&) { return false; };
+    const auto clear = [](entt::entity, const glm::vec3&, const glm::vec3&) { return false; };
 
     // Equal visibility must not select a target by view iteration order.
     BotPerceptComponent ordered;

@@ -44,12 +44,43 @@ namespace FPSShooter
         WaitBombPlanted,
         HoldUseLive,
         HoldUseDefuse,
+        AimFireAtRemoteLive,
+        ArmDamageFromRemote,
+        ArmDeathFromRemote,
+        WaitDamageFromRemote,
+        WaitDeathFromRemote,
         Wait
     };
 
     // These are observations of the template-owned client presentation index.
     // They are receipts from accepted server-to-client messages, not replicated
     // entities or client-side pickup authority.
+    // Remote pawn facts are copied from the ordinary replicated entity view.
+    // They are presentation observations only; an acceptance action can aim
+    // an ordinary input command from them but cannot mutate a remote pawn.
+    struct ClientAcceptanceRemotePlayer
+    {
+        uint16_t client_id = 0;
+        float position_x = 0.0f;
+        float position_z = 0.0f;
+    };
+
+    // These receipts are created only from accepted server combat messages.
+    // They deliberately retain values, not a server entity reference.
+    struct ClientAcceptanceDamageReceipt
+    {
+        uint16_t attacker_client_id = 0;
+        uint16_t victim_client_id = 0;
+        uint64_t receipt_generation = 0;
+    };
+
+    struct ClientAcceptanceDeathReceipt
+    {
+        uint16_t killer_client_id = 0;
+        uint16_t victim_client_id = 0;
+        uint64_t receipt_generation = 0;
+    };
+
     struct ClientAcceptanceWorldItem
     {
         uint32_t world_item_id = 0;
@@ -81,6 +112,7 @@ namespace FPSShooter
     struct ClientAcceptanceObservation
     {
         bool connected = false;
+        uint16_t local_client_id = 0;
         bool has_round_state = false;
         // ROUND_STATE is received on the existing reliable competitive channel.
         bool bomb_planted = false;
@@ -100,6 +132,10 @@ namespace FPSShooter
         float authoritative_pawn_position_z = 0.0f;
         uint64_t authoritative_pawn_snapshot_generation = 0;
         uint32_t last_authoritative_input_tick = 0;
+        std::vector<ClientAcceptanceRemotePlayer> remote_players;
+        std::vector<ClientAcceptanceDamageReceipt> damage_receipts;
+        std::vector<ClientAcceptanceDeathReceipt> death_receipts;
+        uint64_t combat_receipt_generation = 0;
         std::vector<ClientAcceptanceWorldItem> world_items;
         std::vector<ClientAcceptanceWorldItemRemoval> world_item_removals;
         std::vector<ClientAcceptanceWorldItemWeaponReceipt> world_item_weapon_receipts;
@@ -150,6 +186,7 @@ namespace FPSShooter
             Competitive::FpsTeam team = Competitive::FpsTeam::None;
             bool auto_assign = false;
             uint16_t item_id = 0;
+            uint16_t remote_client_id = 0;
             uint32_t world_item_id = 0;
             uint16_t input_buttons = 0;
             uint8_t weapon_select = 0;
@@ -165,7 +202,8 @@ namespace FPSShooter
             RunningMoveToLive, WaitingForWorldItemPresent, WaitingForWorldItemRemoved,
             RunningMoveToWorldItemLive, RunningSelectSlot, RunningTapDrop,
             WaitingForWeaponState, WaitingForBombPlanted, RunningHoldUseLive,
-            RunningHoldUseDefuse, Waiting };
+            RunningHoldUseDefuse, RunningAimFireAtRemoteLive,
+            WaitingForDamageFromRemote, WaitingForDeathFromRemote, Waiting };
 
         bool loadFile(const char* path, std::string& error);
         void disable(const std::string& reason);
@@ -174,6 +212,14 @@ namespace FPSShooter
         bool canRunLivePawnAction(const ClientAcceptanceObservation& observation) const;
         bool canRunWeaponLifecycleAction(const ClientAcceptanceObservation& observation) const;
         bool canWaitForBombPlanted(const ClientAcceptanceObservation& observation) const;
+        const ClientAcceptanceRemotePlayer* findRemotePlayer(
+            uint16_t client_id, const ClientAcceptanceObservation& observation) const;
+        bool hasDamageFromRemoteAfter(uint16_t client_id, uint64_t receipt_generation,
+                                      const ClientAcceptanceObservation& observation) const;
+        bool hasDeathFromRemoteAfter(uint16_t client_id, uint64_t receipt_generation,
+                                     const ClientAcceptanceObservation& observation) const;
+        bool hasArmedTerminalCombatReceipts(const ClientAcceptanceObservation& observation) const;
+        bool advanceToArmedCombatReceiptWaits();
         const ClientAcceptanceWorldItem* findWorldItem(
             uint32_t world_item_id, const ClientAcceptanceObservation& observation) const;
         const ClientAcceptanceWorldItemRemoval* findWorldItemRemovalAfter(
@@ -189,6 +235,8 @@ namespace FPSShooter
         bool atAuthoritativeMoveTarget(const Action& action,
                                        const ClientAcceptanceObservation& observation) const;
         void updateMoveYaw(const Action& action, const ClientAcceptanceObservation& observation);
+        void updateRemoteAimYaw(const ClientAcceptanceRemotePlayer& remote,
+                                const ClientAcceptanceObservation& observation);
         void advanceAction();
 
         bool m_enabled = false;
@@ -198,6 +246,15 @@ namespace FPSShooter
         float m_elapsed_seconds = 0.0f;
         float m_move_yaw = 0.0f;
         float m_move_forward = 0.0f;
+        float m_remote_aim_yaw = 0.0f;
+        uint64_t m_combat_receipt_start_generation = 0;
+        // An arm action samples a combat-receipt boundary before ordinary
+        // movement. The matching wait later claims this boundary; receipts
+        // never advance the script until that wait is active.
+        uint16_t m_armed_damage_receipt_source_client_id = 0;
+        uint64_t m_armed_damage_receipt_start_generation = 0;
+        uint16_t m_armed_death_receipt_source_client_id = 0;
+        uint64_t m_armed_death_receipt_start_generation = 0;
         uint64_t m_move_start_snapshot_generation = 0;
         uint64_t m_world_item_removal_start_generation = 0;
         // A target remove observed only after ordinary steering must survive
@@ -332,6 +389,12 @@ namespace FPSShooter
         m_elapsed_seconds = 0.0f;
         m_move_yaw = 0.0f;
         m_move_forward = 0.0f;
+        m_remote_aim_yaw = 0.0f;
+        m_combat_receipt_start_generation = 0;
+        m_armed_damage_receipt_source_client_id = 0;
+        m_armed_damage_receipt_start_generation = 0;
+        m_armed_death_receipt_source_client_id = 0;
+        m_armed_death_receipt_start_generation = 0;
         m_move_start_snapshot_generation = 0;
         m_world_item_removal_start_generation = 0;
         m_causal_world_item_removal_id = 0;
@@ -410,6 +473,44 @@ namespace FPSShooter
                     return false;
                 }
                 action.kind = ClientAcceptanceActionKind::MoveToLive;
+            } else if (tokens[0] == "aim_fire_at_remote_live" && tokens.size() == 3) {
+                uint32_t remote_client_id = 0;
+                if (!parseUnsigned(tokens[1], remote_client_id) || remote_client_id == 0 ||
+                    remote_client_id > UINT16_MAX ||
+                    !parseUnsigned(tokens[2], action.duration_ms) || action.duration_ms == 0 ||
+                    action.duration_ms > kMaxDurationMs) {
+                    error = "client action script disabled: invalid aim_fire_at_remote_live on line " +
+                        std::to_string(line_number);
+                    return false;
+                }
+                action.kind = ClientAcceptanceActionKind::AimFireAtRemoteLive;
+                action.remote_client_id = static_cast<uint16_t>(remote_client_id);
+            } else if ((tokens[0] == "arm_damage_from" || tokens[0] == "arm_death_from") && tokens.size() == 2) {
+                uint32_t remote_client_id = 0;
+                if (!parseUnsigned(tokens[1], remote_client_id) || remote_client_id == 0 ||
+                    remote_client_id > UINT16_MAX) {
+                    error = "client action script disabled: invalid combat receipt arm on line " +
+                        std::to_string(line_number);
+                    return false;
+                }
+                action.kind = tokens[0] == "arm_damage_from"
+                    ? ClientAcceptanceActionKind::ArmDamageFromRemote
+                    : ClientAcceptanceActionKind::ArmDeathFromRemote;
+                action.remote_client_id = static_cast<uint16_t>(remote_client_id);
+            } else if ((tokens[0] == "wait_damage_from" || tokens[0] == "wait_death_from") && tokens.size() == 3) {
+                uint32_t remote_client_id = 0;
+                if (!parseUnsigned(tokens[1], remote_client_id) || remote_client_id == 0 ||
+                    remote_client_id > UINT16_MAX ||
+                    !parseUnsigned(tokens[2], action.duration_ms) || action.duration_ms == 0 ||
+                    action.duration_ms > kMaxDurationMs) {
+                    error = "client action script disabled: invalid combat receipt wait on line " +
+                        std::to_string(line_number);
+                    return false;
+                }
+                action.kind = tokens[0] == "wait_damage_from"
+                    ? ClientAcceptanceActionKind::WaitDamageFromRemote
+                    : ClientAcceptanceActionKind::WaitDeathFromRemote;
+                action.remote_client_id = static_cast<uint16_t>(remote_client_id);
             } else if (tokens[0] == "wait_world_item_present" && tokens.size() == 3) {
                 if (!parseUnsigned(tokens[1], action.world_item_id) || action.world_item_id == 0 ||
                     !parseUnsigned(tokens[2], action.duration_ms) || action.duration_ms == 0 ||
@@ -560,6 +661,40 @@ namespace FPSShooter
             observation.round_phase == Competitive::RoundPhase::Live;
     }
 
+    inline const ClientAcceptanceRemotePlayer* ClientAcceptanceScript::findRemotePlayer(
+        uint16_t client_id, const ClientAcceptanceObservation& observation) const
+    {
+        const auto remote = std::find_if(observation.remote_players.begin(), observation.remote_players.end(),
+            [client_id](const ClientAcceptanceRemotePlayer& candidate) {
+                return candidate.client_id == client_id;
+            });
+        return remote == observation.remote_players.end() ? nullptr : &*remote;
+    }
+
+    inline bool ClientAcceptanceScript::hasDamageFromRemoteAfter(
+        uint16_t client_id, uint64_t receipt_generation,
+        const ClientAcceptanceObservation& observation) const
+    {
+        return std::any_of(observation.damage_receipts.begin(), observation.damage_receipts.end(),
+            [client_id, receipt_generation, &observation](const ClientAcceptanceDamageReceipt& receipt) {
+                return receipt.attacker_client_id == client_id &&
+                    receipt.victim_client_id == observation.local_client_id &&
+                    receipt.receipt_generation > receipt_generation;
+            });
+    }
+
+    inline bool ClientAcceptanceScript::hasDeathFromRemoteAfter(
+        uint16_t client_id, uint64_t receipt_generation,
+        const ClientAcceptanceObservation& observation) const
+    {
+        return std::any_of(observation.death_receipts.begin(), observation.death_receipts.end(),
+            [client_id, receipt_generation, &observation](const ClientAcceptanceDeathReceipt& receipt) {
+                return receipt.killer_client_id == client_id &&
+                    receipt.victim_client_id == observation.local_client_id &&
+                    receipt.receipt_generation > receipt_generation;
+            });
+    }
+
     inline const ClientAcceptanceWorldItem* ClientAcceptanceScript::findWorldItem(
         uint32_t world_item_id, const ClientAcceptanceObservation& observation) const
     {
@@ -606,6 +741,48 @@ namespace FPSShooter
             observation.authoritative_weapon_state_generation > m_weapon_state_wait_start_generation &&
             (m_expected_weapon_type == WeaponType::COUNT ||
              observation.authoritative_weapon_type == m_expected_weapon_type);
+    }
+
+    inline bool ClientAcceptanceScript::hasArmedTerminalCombatReceipts(
+        const ClientAcceptanceObservation& observation) const
+    {
+        // This is continuity evidence for an already-running route only. It
+        // does not claim either receipt: the later explicit waits do that.
+        return m_armed_damage_receipt_source_client_id != 0 &&
+            m_armed_damage_receipt_source_client_id == m_armed_death_receipt_source_client_id &&
+            hasDamageFromRemoteAfter(m_armed_damage_receipt_source_client_id,
+                m_armed_damage_receipt_start_generation, observation) &&
+            hasDeathFromRemoteAfter(m_armed_death_receipt_source_client_id,
+                m_armed_death_receipt_start_generation, observation);
+    }
+
+    inline bool ClientAcceptanceScript::advanceToArmedCombatReceiptWaits()
+    {
+        // A terminal death may interrupt a multi-waypoint route just before
+        // its two already-armed receipt waits. Skip only further movement and
+        // remote-aim actions, and only when they end in that exact wait pair.
+        size_t candidate = m_index + 1;
+        while (candidate < m_actions.size()) {
+            const Action& next = m_actions[candidate];
+            if (next.kind == ClientAcceptanceActionKind::WaitDamageFromRemote &&
+                next.remote_client_id == m_armed_damage_receipt_source_client_id) {
+                if (candidate + 1 >= m_actions.size())
+                    return false;
+                const Action& death_wait = m_actions[candidate + 1];
+                if (death_wait.kind != ClientAcceptanceActionKind::WaitDeathFromRemote ||
+                    death_wait.remote_client_id != m_armed_death_receipt_source_client_id)
+                    return false;
+                m_index = candidate - 1;
+                advanceAction();
+                return true;
+            }
+            if (next.kind != ClientAcceptanceActionKind::MoveToLive &&
+                next.kind != ClientAcceptanceActionKind::AimFireAtRemoteLive) {
+                return false;
+            }
+            ++candidate;
+        }
+        return false;
     }
 
     inline bool ClientAcceptanceScript::moveHasAuthoritativeArrival(
@@ -661,6 +838,17 @@ namespace FPSShooter
         }
     }
 
+    inline void ClientAcceptanceScript::updateRemoteAimYaw(
+        const ClientAcceptanceRemotePlayer& remote,
+        const ClientAcceptanceObservation& observation)
+    {
+        // The action reads only a remote entity's replicated transform and
+        // stable network owner ID. It writes the existing camera/ATTACK input
+        // fields; hit validation remains entirely on the server.
+        m_remote_aim_yaw = std::atan2(remote.position_x - observation.local_position_x,
+                                      remote.position_z - observation.local_position_z);
+    }
+
     inline void ClientAcceptanceScript::advanceAction()
     {
         ++m_index;
@@ -696,6 +884,8 @@ namespace FPSShooter
         m_elapsed_seconds = 0.0f;
         m_move_yaw = 0.0f;
         m_move_forward = 0.0f;
+        m_remote_aim_yaw = 0.0f;
+        m_combat_receipt_start_generation = 0;
         m_move_start_snapshot_generation = 0;
         m_world_item_removal_start_generation = 0;
         m_weapon_state_wait_start_generation = 0;
@@ -753,6 +943,64 @@ namespace FPSShooter
                 updateMoveYaw(action, observation);
                 LOG_ENGINE_INFO("[ACCEPT] move_to_live begin line={} x={} z={} tolerance={} timeout_ms={}",
                     action.source_line, action.target_x, action.target_z, action.tolerance, action.duration_ms);
+            } else if (action.kind == ClientAcceptanceActionKind::AimFireAtRemoteLive) {
+                const ClientAcceptanceRemotePlayer* remote =
+                    findRemotePlayer(action.remote_client_id, observation);
+                if (!remote || !canRunLivePawnAction(observation)) return dispatch;
+                m_state = State::RunningAimFireAtRemoteLive;
+                m_elapsed_seconds = 0.0f;
+                updateRemoteAimYaw(*remote, observation);
+                LOG_ENGINE_INFO("[ACCEPT] aim_fire_at_remote_live begin line={} target_client={} timeout_ms={}",
+                    action.source_line, action.remote_client_id, action.duration_ms);
+            } else if (action.kind == ClientAcceptanceActionKind::ArmDamageFromRemote ||
+                       action.kind == ClientAcceptanceActionKind::ArmDeathFromRemote) {
+                if (!canRunLivePawnAction(observation)) return dispatch;
+                if (action.kind == ClientAcceptanceActionKind::ArmDamageFromRemote) {
+                    m_armed_damage_receipt_source_client_id = action.remote_client_id;
+                    m_armed_damage_receipt_start_generation = observation.combat_receipt_generation;
+                } else {
+                    m_armed_death_receipt_source_client_id = action.remote_client_id;
+                    m_armed_death_receipt_start_generation = observation.combat_receipt_generation;
+                }
+                LOG_ENGINE_INFO("[ACCEPT] {} armed line={} source_client={} baseline_generation={}",
+                    action.kind == ClientAcceptanceActionKind::ArmDamageFromRemote ? "arm_damage_from" : "arm_death_from",
+                    action.source_line, action.remote_client_id, observation.combat_receipt_generation);
+                // Arming only records the accepted-message boundary. A later
+                // matching wait is the sole action that may consume a receipt.
+                advanceAction();
+                return dispatch;
+            } else if (action.kind == ClientAcceptanceActionKind::WaitDamageFromRemote ||
+                       action.kind == ClientAcceptanceActionKind::WaitDeathFromRemote) {
+                const bool has_armed_receipt =
+                    (action.kind == ClientAcceptanceActionKind::WaitDamageFromRemote &&
+                     m_armed_damage_receipt_source_client_id == action.remote_client_id &&
+                     hasDamageFromRemoteAfter(action.remote_client_id,
+                         m_armed_damage_receipt_start_generation, observation)) ||
+                    (action.kind == ClientAcceptanceActionKind::WaitDeathFromRemote &&
+                     m_armed_death_receipt_source_client_id == action.remote_client_id &&
+                     hasDeathFromRemoteAfter(action.remote_client_id,
+                         m_armed_death_receipt_start_generation, observation));
+                if (!canRunLivePawnAction(observation) && !has_armed_receipt) return dispatch;
+                m_state = action.kind == ClientAcceptanceActionKind::WaitDamageFromRemote
+                    ? State::WaitingForDamageFromRemote : State::WaitingForDeathFromRemote;
+                m_elapsed_seconds = 0.0f;
+                if (action.kind == ClientAcceptanceActionKind::WaitDamageFromRemote &&
+                    m_armed_damage_receipt_source_client_id == action.remote_client_id) {
+                    m_combat_receipt_start_generation = m_armed_damage_receipt_start_generation;
+                    m_armed_damage_receipt_source_client_id = 0;
+                    m_armed_damage_receipt_start_generation = 0;
+                } else if (action.kind == ClientAcceptanceActionKind::WaitDeathFromRemote &&
+                           m_armed_death_receipt_source_client_id == action.remote_client_id) {
+                    m_combat_receipt_start_generation = m_armed_death_receipt_start_generation;
+                    m_armed_death_receipt_source_client_id = 0;
+                    m_armed_death_receipt_start_generation = 0;
+                } else {
+                    m_combat_receipt_start_generation = observation.combat_receipt_generation;
+                }
+                LOG_ENGINE_INFO("[ACCEPT] {} begin line={} source_client={} timeout_ms={} baseline_generation={}",
+                    action.kind == ClientAcceptanceActionKind::WaitDamageFromRemote ? "wait_damage_from" : "wait_death_from",
+                    action.source_line, action.remote_client_id, action.duration_ms,
+                    m_combat_receipt_start_generation);
             } else if (action.kind == ClientAcceptanceActionKind::WaitWorldItemPresent) {
                 if (!observation.connected || !observation.has_world_item_presentation_world) return dispatch;
                 m_state = State::WaitingForWorldItemPresent;
@@ -913,6 +1161,12 @@ namespace FPSShooter
             return dispatch;
         case State::RunningMoveToLive:
             if (!canRunLivePawnAction(observation)) {
+                if (hasArmedTerminalCombatReceipts(observation) &&
+                    advanceToArmedCombatReceiptWaits()) {
+                    LOG_ENGINE_INFO("[ACCEPT] move_to_live interrupted by armed terminal combat receipts line={}",
+                        action.source_line);
+                    return dispatch;
+                }
                 disable("client action script stopped: move_to_live lost authoritative Live pawn state on line " +
                     std::to_string(action.source_line));
                 return dispatch;
@@ -1015,6 +1269,54 @@ namespace FPSShooter
             m_elapsed_seconds += std::max(delta_time, 0.0f);
             if (m_elapsed_seconds * 1000.0f >= static_cast<float>(action.duration_ms)) {
                 disable("client action script stopped: move_to_world_item_live timed out on line " +
+                    std::to_string(action.source_line));
+            }
+            return dispatch;
+        }
+        case State::RunningAimFireAtRemoteLive: {
+            if (!canRunLivePawnAction(observation)) {
+                disable("client action script stopped: aim_fire_at_remote_live lost authoritative Live pawn state on line " +
+                    std::to_string(action.source_line));
+                return dispatch;
+            }
+            const ClientAcceptanceRemotePlayer* remote = findRemotePlayer(action.remote_client_id, observation);
+            if (!remote) {
+                disable("client action script stopped: aim_fire_at_remote_live lost replicated remote target on line " +
+                    std::to_string(action.source_line));
+                return dispatch;
+            }
+            updateRemoteAimYaw(*remote, observation);
+            m_elapsed_seconds += std::max(delta_time, 0.0f);
+            if (m_elapsed_seconds * 1000.0f >= static_cast<float>(action.duration_ms)) {
+                LOG_ENGINE_INFO("[ACCEPT] aim_fire_at_remote_live complete line={} target_client={}",
+                    action.source_line, action.remote_client_id);
+                advanceAction();
+            }
+            return dispatch;
+        }
+        case State::WaitingForDamageFromRemote:
+        case State::WaitingForDeathFromRemote: {
+            // A matching fresh receipt can itself transition the local pawn out of
+            // Live. Inspect it first so the terminal event is not rejected by the
+            // ordinary Live-pawn gate that remains required while waiting.
+            const bool observed = m_state == State::WaitingForDamageFromRemote
+                ? hasDamageFromRemoteAfter(action.remote_client_id, m_combat_receipt_start_generation, observation)
+                : hasDeathFromRemoteAfter(action.remote_client_id, m_combat_receipt_start_generation, observation);
+            if (observed) {
+                LOG_ENGINE_INFO("[ACCEPT] {} observed authoritative receipt line={} source_client={}",
+                    m_state == State::WaitingForDamageFromRemote ? "wait_damage_from" : "wait_death_from",
+                    action.source_line, action.remote_client_id);
+                advanceAction();
+                return dispatch;
+            }
+            if (!canRunLivePawnAction(observation)) {
+                disable("client action script stopped: combat receipt wait lost authoritative Live pawn state on line " +
+                    std::to_string(action.source_line));
+                return dispatch;
+            }
+            m_elapsed_seconds += std::max(delta_time, 0.0f);
+            if (m_elapsed_seconds * 1000.0f >= static_cast<float>(action.duration_ms)) {
+                disable("client action script stopped: combat receipt wait timed out on line " +
                     std::to_string(action.source_line));
             }
             return dispatch;
@@ -1162,6 +1464,13 @@ namespace FPSShooter
             state.move_forward = m_move_forward;
             state.move_right = 0.0f;
             state.camera_yaw = m_move_yaw;
+            return;
+        }
+        if (m_state == State::RunningAimFireAtRemoteLive) {
+            if (can_fire) {
+                state.buttons |= ATTACK;
+                state.camera_yaw = m_remote_aim_yaw;
+            }
             return;
         }
         if (m_state == State::RunningHoldUseLive || m_state == State::RunningHoldUseDefuse) {

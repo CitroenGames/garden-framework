@@ -317,11 +317,29 @@ struct WorldItemAcceptanceRemoveReceipt
 };
 static std::unordered_map<uint32_t, WorldItemAcceptanceRemoveReceipt> g_world_item_remove_receipts;
 
+// The action driver only needs a short, post-action receipt window. Keep this
+// value-only cache bounded so ordinary combat cannot accumulate diagnostics.
+static constexpr size_t kMaxClientAcceptanceCombatReceipts = 16;
+static uint64_t g_combat_receipt_generation = 0;
+static std::vector<FPSShooter::ClientAcceptanceDamageReceipt> g_damage_acceptance_receipts;
+static std::vector<FPSShooter::ClientAcceptanceDeathReceipt> g_death_acceptance_receipts;
+
+template <typename Receipt>
+static void appendClientAcceptanceCombatReceipt(std::vector<Receipt>& receipts, Receipt receipt)
+{
+    if (receipts.size() == kMaxClientAcceptanceCombatReceipts)
+        receipts.erase(receipts.begin());
+    receipts.push_back(std::move(receipt));
+}
+
 static void clearWorldItemAcceptanceReceipts()
 {
     g_world_item_receipt_generation = 0;
     g_world_item_upsert_receipts.clear();
     g_world_item_remove_receipts.clear();
+    g_combat_receipt_generation = 0;
+    g_damage_acceptance_receipts.clear();
+    g_death_acceptance_receipts.clear();
 }
 
 static entt::entity g_player_entity = entt::null;
@@ -781,6 +799,10 @@ GAME_API bool gardenGameInit(EngineServices* services)
                 return;
             }
             if (msg.victim_client_id == g_network.getClientId()) {
+                appendClientAcceptanceCombatReceipt(g_damage_acceptance_receipts,
+                    FPSShooter::ClientAcceptanceDamageReceipt{
+                        msg.attacker_client_id, msg.victim_client_id, ++g_combat_receipt_generation
+                    });
                 g_local_health = msg.health_remaining;
                 g_local_alive = msg.health_remaining > 0;
                 g_has_authoritative_health_snapshot = true;
@@ -801,6 +823,10 @@ GAME_API bool gardenGameInit(EngineServices* services)
             }
 
             if (msg.victim_client_id == g_network.getClientId()) {
+                appendClientAcceptanceCombatReceipt(g_death_acceptance_receipts,
+                    FPSShooter::ClientAcceptanceDeathReceipt{
+                        msg.killer_client_id, msg.victim_client_id, ++g_combat_receipt_generation
+                    });
                 AudioEventSystem::get().play2D("player.death");
                 g_local_alive = false;
                 g_local_health = 0;
@@ -982,6 +1008,7 @@ GAME_API void gardenGameUpdate(float delta_time)
     const entt::entity script_local_player = g_network.getLocalPlayerEntity();
     FPSShooter::ClientAcceptanceObservation acceptance_observation;
     acceptance_observation.connected = g_network.isConnected();
+    acceptance_observation.local_client_id = g_network.getClientId();
     acceptance_observation.has_round_state = g_comp.has_round_state;
     acceptance_observation.bomb_planted = g_comp.bomb_planted;
     acceptance_observation.round_phase = g_comp.phase;
@@ -1003,6 +1030,31 @@ GAME_API void gardenGameUpdate(float delta_time)
         g_authoritative_pawn_snapshot_generation;
     acceptance_observation.last_authoritative_input_tick =
         g_last_authoritative_input_tick;
+    // Remote player data comes from the ordinary client replication registry.
+    // No server-only bot or target data is exposed to the acceptance driver.
+    if (g_acceptance_script.active()) {
+        const auto remote_players = game_world->registry.view<Net::NetworkedEntity, TransformComponent>();
+        for (const entt::entity entity : remote_players) {
+            const Net::NetworkedEntity& networked = remote_players.get<Net::NetworkedEntity>(entity);
+            if (!networked.is_player || networked.owner_client_id == 0 ||
+                networked.owner_client_id == acceptance_observation.local_client_id) {
+                continue;
+            }
+            const TransformComponent& transform = remote_players.get<TransformComponent>(entity);
+            acceptance_observation.remote_players.push_back({
+                networked.owner_client_id, transform.position.x, transform.position.z
+            });
+        }
+        std::sort(acceptance_observation.remote_players.begin(),
+                  acceptance_observation.remote_players.end(),
+                  [](const FPSShooter::ClientAcceptanceRemotePlayer& a,
+                     const FPSShooter::ClientAcceptanceRemotePlayer& b) {
+                      return a.client_id < b.client_id;
+                  });
+        acceptance_observation.damage_receipts = g_damage_acceptance_receipts;
+        acceptance_observation.death_receipts = g_death_acceptance_receipts;
+        acceptance_observation.combat_receipt_generation = g_combat_receipt_generation;
+    }
     acceptance_observation.has_world_item_presentation_world =
         g_world_item_presentation_world == game_world;
     if (g_acceptance_script.active() && g_world_item_presentation_world == game_world) {

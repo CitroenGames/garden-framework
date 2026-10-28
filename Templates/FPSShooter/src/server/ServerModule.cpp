@@ -1237,9 +1237,12 @@ static void spawnBotsIfNeeded()
         int32_t na = 0, nd = 0;
         auto tv = w->registry.view<NetworkedEntity, TeamComponent>();
         for (auto e : tv) { if (!tv.get<NetworkedEntity>(e).is_player) continue; uint8_t tid = tv.get<TeamComponent>(e).team_id; if (tid == FpsLogic::kTeamAttackers) ++na; else if (tid == FpsLogic::kTeamDefenders) ++nd; }
-        if (na >= g_round_system.config.team_size && nd >= g_round_system.config.team_size) break;
+        const Competitive::FpsTeam bot_join_team = g_competitive
+            ? Bots::selectCompetitiveBotJoinTeam(na, nd, g_round_system.config.team_size)
+            : Competitive::FpsTeam::None;
+        if (g_competitive && !Competitive::isPlayingTeam(bot_join_team)) break;
         uint16_t bot_client = (uint16_t)(Bots::kBotClientIdBase + (uint32_t)i);
-        spawnPlayerForClient(bot_client); // same player-spawn path as humans
+        spawnPlayerForClient(bot_client, Competitive::teamId(bot_join_team)); // same player-spawn path as humans
         entt::entity e = findPlayerEntity(*w, bot_client);
         if (e == entt::null) { LOG_ENGINE_ERROR("Bots: spawn failed for bot client {}", bot_client); break; }
         auto& bot = w->registry.emplace<Bots::BotComponent>(e);
@@ -1385,12 +1388,11 @@ static void tickBots(float dt)
             const entt::entity target = percept.visible_enemy;
             current_target_eligible = w->registry.valid(target) &&
                 w->registry.all_of<NetworkedEntity, TeamComponent, FpsHealthComponent>(target) &&
-                w->registry.get<NetworkedEntity>(target).is_player &&
-                w->registry.get<FpsHealthComponent>(target).alive &&
-                bot_has_playing_team &&
-                Competitive::isPlayingTeam(Competitive::teamFromId(
-                    w->registry.get<TeamComponent>(target).team_id)) &&
-                w->registry.get<TeamComponent>(target).team_id != team_id;
+                Bots::isOpposingLivingPlayer(
+                    bot_team,
+                    Competitive::teamFromId(w->registry.get<TeamComponent>(target).team_id),
+                    w->registry.get<NetworkedEntity>(target).is_player,
+                    w->registry.get<FpsHealthComponent>(target).alive);
         }
         Bots::pruneCurrentSight(percept, current_target_eligible);
         // S1 perception (10 Hz staggered by bot_index % 6 fixed ticks)
@@ -1399,18 +1401,30 @@ static void tickBots(float dt)
             std::vector<Bots::EnemyCandidate> enemies;
             auto ev = w->registry.view<NetworkedEntity, TeamComponent, TransformComponent, FpsHealthComponent>();
             for (auto en : ev) {
-                if (en == e || !bot_has_playing_team || !ev.get<NetworkedEntity>(en).is_player ||
-                    !ev.get<FpsHealthComponent>(en).alive)
-                    continue;
-                const uint8_t candidate_team_id = ev.get<TeamComponent>(en).team_id;
-                if (!Competitive::isPlayingTeam(Competitive::teamFromId(candidate_team_id)) ||
-                    candidate_team_id == team_id)
+                if (en == e || !Bots::isOpposingLivingPlayer(
+                        bot_team,
+                        Competitive::teamFromId(ev.get<TeamComponent>(en).team_id),
+                        ev.get<NetworkedEntity>(en).is_player,
+                        ev.get<FpsHealthComponent>(en).alive))
                     continue;
                 enemies.push_back(Bots::EnemyCandidate{en, ev.get<TransformComponent>(en).position});
             }
-            glm::vec3 eye = pos + glm::vec3(0.0f, 1.62f, 0.0f);
+            // The bot can only acquire an enemy through the same first-hit
+            // physics query its eventual weapon trace uses.  Passing the
+            // candidate entity prevents a target-owned body from counting as
+            // an obstruction while any level/body hit before the target point
+            // (including the central divider) rejects the sight sample.
+            const glm::vec3 eye = getShootOrigin(w->registry.get<TransformComponent>(e));
             Bots::updatePerception(percept, eye, bot.aim_yaw, enemies, bot.difficulty, 0.1f,
-                [&](const glm::vec3& origin, const glm::vec3& point) { glm::vec3 d = point - origin; float dist = glm::length(d); if (dist < 0.01f) return false; auto hit = w->raycastClosest(origin, d / dist, dist, e); return hit.hit && hit.distance + 0.02f < dist; });
+                [&](entt::entity target, const glm::vec3& origin, const glm::vec3& point) {
+                    const glm::vec3 delta = point - origin;
+                    const float distance = glm::length(delta);
+                    if (distance < 0.01f)
+                        return false;
+                    const PhysicsSystem::RaycastResult hit =
+                        w->raycastClosest(origin, delta / distance, distance, e);
+                    return hit.hit && hit.entity != target && hit.distance + 0.02f < distance;
+                });
             if (percept.visible_enemy != entt::null && percept.visible_enemy != previous_sight &&
                 w->registry.valid(percept.visible_enemy) &&
                 w->registry.all_of<NetworkedEntity>(percept.visible_enemy)) {

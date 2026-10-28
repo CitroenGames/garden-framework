@@ -1910,6 +1910,121 @@ static bool runInputSendCreditRegressionTest()
     return true;
 }
 
+// A stalled client can generate several fixed commands before its transport
+// gets another service turn. The client must send one coalesced primary on
+// that turn, preserving generic edge inputs, so the server does not see a
+// burst of new ticks in one simulation tick.
+static bool runInputBurstAdmissionRegressionTest()
+{
+    TestState state;
+    world server_world;
+    server_world.setFixedDelta(kFixedDelta);
+
+    Net::ServerNetworkManager server;
+    if (!server.initialize()) {
+        std::cerr << "[FAIL] InputBurstAdmissionRegressionTests could not initialize server\n";
+        return false;
+    }
+    server.setWorld(&server_world);
+
+    uint32_t highest_input_tick = 0;
+    uint32_t received_samples = 0;
+    uint16_t received_buttons = 0;
+    server.setOnClientConnected([&](uint16_t client_id) {
+        spawnServerPlayer(server_world, server, client_id);
+    });
+    server.setInputFilter([&](uint16_t, entt::entity player_entity) {
+        return server_world.registry.valid(player_entity);
+    });
+    server.setInputSampleHandler([&](uint16_t, entt::entity,
+                                     const Net::InputSample& sample, uint32_t) {
+        ++received_samples;
+        highest_input_tick = (std::max)(highest_input_tick, sample.tick);
+        received_buttons = sample.buttons;
+    });
+
+    StressConfig config;
+    config.client_count = 1;
+    uint16_t port = 0;
+    if (!startServer(server, config, port)) {
+        std::cerr << "[FAIL] InputBurstAdmissionRegressionTests could not start server\n";
+        server.shutdown();
+        return false;
+    }
+
+    world client_world;
+    Net::ClientNetworkManager client;
+    client.setWorld(&client_world);
+    if (!client.initialize() || !client.connectToServer("127.0.0.1", port, "input_burst")) {
+        std::cerr << "[FAIL] InputBurstAdmissionRegressionTests could not connect client\n";
+        client.shutdown();
+        server.shutdown();
+        return false;
+    }
+
+    for (uint32_t frame = 0; frame < config.connect_frame_budget && !client.isConnected(); ++frame) {
+        client.update(kFixedDelta);
+        server.update(kFixedDelta);
+        client.update(0.0f);
+        SDL_Delay(1);
+    }
+    if (!client.isConnected() || server.getClientCount() != 1u) {
+        state.addError("input-burst loopback client did not connect");
+    }
+
+    Net::InputState input;
+    input.buttons = Net::InputFlags::DROP;
+    client.sendInputCommand(1u, input);
+    input.buttons = Net::InputFlags::JUMP;
+    client.sendInputCommand(2u, input);
+    input.buttons = Net::withWeaponSelect(0, 2u);
+    client.sendInputCommand(3u, input);
+    input.buttons = Net::InputFlags::RELOAD;
+    client.sendInputCommand(4u, input);
+    input.buttons = 0;
+    client.sendInputCommand(5u, input);
+
+    // One long client frame must not drain five primary commands. The latest
+    // tick reaches the server and its pending action edges remain intact.
+    client.update(5.0f * kFixedDelta);
+    for (uint32_t frame = 0; frame < 120u && highest_input_tick < 5u; ++frame) {
+        server.update(kFixedDelta);
+        client.update(0.0f);
+        SDL_Delay(1);
+    }
+    if (highest_input_tick != 5u || received_samples != 1u) {
+        state.addError("a stalled client emitted multiple newly accepted input ticks in one server interval");
+    }
+    const uint16_t expected_edges = Net::InputFlags::DROP | Net::InputFlags::JUMP | Net::InputFlags::RELOAD;
+    if ((received_buttons & expected_edges) != expected_edges ||
+        Net::getWeaponSelect(received_buttons) != 2u) {
+        state.addError("coalesced input did not preserve pending action edges and latest weapon selection");
+    }
+
+    client.disconnect("input-burst regression complete");
+    for (uint32_t frame = 0; frame < 120u && server.getClientCount() != 0u; ++frame) {
+        client.update(kFixedDelta);
+        server.update(kFixedDelta);
+        client.update(0.0f);
+        SDL_Delay(1);
+    }
+    if (server.getClientCount() != 0u) {
+        state.addError("input-burst loopback client did not disconnect");
+    }
+    client.shutdown();
+    server.shutdown();
+
+    if (state.error_count != 0) {
+        for (const std::string& error : state.errors) {
+            std::cerr << "[FAIL] " << error << "\n";
+        }
+        return false;
+    }
+
+    std::cout << "[PASS] InputBurstAdmissionRegressionTests\n";
+    return true;
+}
+
 static bool runNetworkStress(const StressConfig& config)
 {
     TestState state;
@@ -2195,10 +2310,12 @@ int main(int argc, char** argv)
     const bool blocked_input_cursor_ok = runBlockedInputCursorRegressionTest();
     const bool unreliable_queue_drain_ok = runUnreliableQueueDrainRegressionTest();
     const bool input_send_credit_ok = runInputSendCreditRegressionTest();
+    const bool input_burst_admission_ok = runInputBurstAdmissionRegressionTest();
     const bool ok = runNetworkStress(config);
     EE::CLog::Shutdown();
     return (handshake_ok && transport_pending_queue_accounting_ok && custom_ingress_ok && hierarchy_boundary_ok && interpolation_buffer_wrap_ok && interpolation_jitter_ok && lag_history_wrap_ok &&
             lag_view_tick_clamp_ok &&
             input_view_tick_protocol_ok && input_view_tick_loopback_ok && interpolation_manager_wrap_ok &&
-            raw_interpolation_ok && blocked_input_cursor_ok && unreliable_queue_drain_ok && input_send_credit_ok && ok) ? 0 : 1;
+            raw_interpolation_ok && blocked_input_cursor_ok && unreliable_queue_drain_ok && input_send_credit_ok &&
+            input_burst_admission_ok && ok) ? 0 : 1;
 }

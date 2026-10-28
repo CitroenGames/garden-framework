@@ -19,6 +19,37 @@ namespace Bots {
 inline constexpr uint16_t kBotClientIdBase = 40000;
 inline uint8_t clampDifficulty(int32_t d) { return (uint8_t)std::clamp<int32_t>(d, 0, 3); }
 
+// Candidate eligibility is deliberately value-only. The server is the sole
+// caller that turns a qualifying ECS row into an EnemyCandidate with a
+// transform/raycast; decisions receive only the later percept summary.
+inline bool isOpposingLivingPlayer(Competitive::FpsTeam observer_team,
+                                   Competitive::FpsTeam candidate_team,
+                                   bool candidate_is_player, bool candidate_alive)
+{
+    return candidate_is_player && candidate_alive &&
+        Competitive::isPlayingTeam(observer_team) &&
+        Competitive::isPlayingTeam(candidate_team) && observer_team != candidate_team;
+}
+
+// Bots use an authored tie-break only when filling a competitive roster. This
+// gives a bot-first acceptance run a stable Attacker and leaves the normal
+// human team-selection policy unchanged. Capacity remains enforced by the
+// existing server spawn boundary.
+inline Competitive::FpsTeam selectCompetitiveBotJoinTeam(int32_t attackers, int32_t defenders,
+                                                         int32_t team_size)
+{
+    const bool attackers_open = attackers < team_size;
+    const bool defenders_open = defenders < team_size;
+    if (!attackers_open && !defenders_open)
+        return Competitive::FpsTeam::None;
+    if (!attackers_open)
+        return Competitive::FpsTeam::Defenders;
+    if (!defenders_open)
+        return Competitive::FpsTeam::Attackers;
+    return attackers <= defenders ? Competitive::FpsTeam::Attackers
+                                  : Competitive::FpsTeam::Defenders;
+}
+
 struct DifficultyRow {
     float reaction_time, aim_error_deg, aim_turn_rate_deg, burst_pause, view_distance, fov_deg, hearing_scale, memory_time, strafe_interval;
     int32_t burst_len, retreat_hp;
@@ -57,7 +88,7 @@ struct BotComponent {
     bool buy_done = false;
 };
 struct BotPerceptComponent {
-    entt::entity visible_enemy = entt::null; glm::vec3 last_seen_pos{0}; float last_seen_age = 1e9f;
+    entt::entity visible_enemy = entt::null; glm::vec3 last_seen_pos{0}; glm::vec3 last_seen_aim_point{0}; float last_seen_age = 1e9f;
     float visible_fraction = 0, confirm_timer = 0;
     glm::vec3 heard_pos{0}; float heard_age = 1e9f, heard_loudness = 0;
     bool bomb_planted_heard = false, bomb_beep_heard = false, sees_bomb_carrier = false, sees_planted_bomb = false;
@@ -70,9 +101,13 @@ struct BotIntentComponent {
 struct TeamBlackboardComponent { uint8_t team = 0; glm::vec3 last_contact_pos{0}; float last_contact_age = 1e9f; int8_t planned_site = -1; };
 
 // ---- Perception ----
-// blocked(origin, point) -> true when world geometry blocks that sample.
+// blocked(target, origin, point) -> true when a weapon trace reaches an
+// obstruction before the target point.  The target identity is required so a
+// target-owned physics body is not mistaken for level geometry.
 struct EnemyCandidate { entt::entity entity = entt::null; glm::vec3 position{0}; };
-using BlockedFn = std::function<bool(const glm::vec3&, const glm::vec3&)>;
+using BlockedFn = std::function<bool(entt::entity, const glm::vec3&, const glm::vec3&)>;
+inline constexpr float kBotWeaponOriginHeight = 0.62f;
+inline constexpr float kBotWeaponAimHeight = 1.35f;
 inline glm::vec3 forwardFromYaw(float yaw) { return glm::vec3(std::sin(yaw), 0.0f, std::cos(yaw)); }
 
 // The current target is a short-lived sight result. It must not survive an
@@ -87,6 +122,7 @@ inline void clearCurrentSight(BotPerceptComponent& p) {
 
 inline void forgetSightMemory(BotPerceptComponent& p) {
     p.last_seen_pos = glm::vec3(0.0f);
+    p.last_seen_aim_point = glm::vec3(0.0f);
     p.last_seen_age = 1e9f;
 }
 
@@ -112,11 +148,12 @@ inline void updatePerception(BotPerceptComponent& p, const glm::vec3& eye, float
                              const std::vector<EnemyCandidate>& enemies, uint8_t difficulty, float dt, const BlockedFn& blocked) {
     advancePerceptionClock(p, difficulty, dt);
     const auto& d = difficultyFor(difficulty);
-    entt::entity best = entt::null; float best_frac = 0; glm::vec3 best_pos{0};
+    entt::entity best = entt::null; float best_frac = 0; glm::vec3 best_pos{0}; glm::vec3 best_aim_point{0};
     glm::vec3 fwd = forwardFromYaw(yaw);
     for (const auto& e : enemies) {
         if (e.entity == entt::null || !std::isfinite(e.position.x) || !std::isfinite(e.position.y) || !std::isfinite(e.position.z)) continue;
-        glm::vec3 to = e.position - eye; float dist = glm::length(to);
+        const glm::vec3 aim_point = e.position + glm::vec3(0.0f, kBotWeaponAimHeight, 0.0f);
+        glm::vec3 to = aim_point - eye; float dist = glm::length(to);
         if (dist > d.view_distance || dist < 0.001f) continue;
         glm::vec3 flat(to.x, 0, to.z); float flat_len = glm::length(flat);
         if (flat_len > 0.001f) {
@@ -124,9 +161,17 @@ inline void updatePerception(BotPerceptComponent& p, const glm::vec3& eye, float
             float ang = std::acos(std::clamp(cosang, -1.0f, 1.0f));
             if (ang > glm::radians(d.fov_deg) * 0.5f && dist > 3.0f) continue;
         }
+        // The engagement point must be clear on the same line the server will
+        // later use for the bot's weapon trace.  Peripheral capsule samples
+        // may refine sight coverage, but can never authorize a shot through a
+        // divider that blocks this canonical line.
+        if (blocked && blocked(e.entity, eye, aim_point)) continue;
         int vis = 0;
-        const float offs[3] = {0.3f, 1.35f, 1.65f};
-        for (float o : offs) { glm::vec3 pt = e.position + glm::vec3(0, o, 0); if (!blocked || !blocked(eye, pt)) ++vis; }
+        const float offs[3] = {0.3f, kBotWeaponAimHeight, 1.65f};
+        for (float o : offs) {
+            const glm::vec3 pt = e.position + glm::vec3(0.0f, o, 0.0f);
+            if (!blocked || !blocked(e.entity, eye, pt)) ++vis;
+        }
         float frac = vis / 3.0f;
         // Candidate collection can come from an ECS view. Preserve replayable
         // selection when two visible candidates have the same coverage.
@@ -136,6 +181,7 @@ inline void updatePerception(BotPerceptComponent& p, const glm::vec3& eye, float
             best_frac = frac;
             best = e.entity;
             best_pos = e.position;
+            best_aim_point = aim_point;
         }
     }
     p.visible_fraction = best_frac;
@@ -143,6 +189,7 @@ inline void updatePerception(BotPerceptComponent& p, const glm::vec3& eye, float
         if (p.visible_enemy != best) p.confirm_timer = 0.0f;
         p.visible_enemy = best;
         p.last_seen_pos = best_pos;
+        p.last_seen_aim_point = best_aim_point;
         p.last_seen_age = 0.0f;
         p.confirm_timer += std::max(dt, 0.0f);
     } else {
@@ -336,7 +383,15 @@ inline void decide(BotComponent& b, const BotPerceptComponent& p, BotIntentCompo
     case BotState::Idle: case BotState::Spectate: return;
     case BotState::Buy: intent.buy_request_id = 0; if (in.phase == P::Live) tr(BotState::Advance, "phase_live"); return;
     case BotState::Engage: {
-        if (p.visible_fraction > 0.0f) { b.engage_lost_time = 0; intent.want_attack = true; glm::vec3 ad = p.last_seen_pos - in.bot_pos; intent.aim_yaw = std::atan2(ad.x, ad.z); intent.aim_pitch = std::clamp(std::atan2(1.35f, std::max(glm::length(glm::vec3(ad.x, 0, ad.z)), 0.01f)), -1.5f, 1.5f); }
+        if (p.visible_fraction > 0.0f) {
+            b.engage_lost_time = 0;
+            intent.want_attack = true;
+            const glm::vec3 weapon_origin = in.bot_pos + glm::vec3(0.0f, kBotWeaponOriginHeight, 0.0f);
+            const glm::vec3 ad = p.last_seen_aim_point - weapon_origin;
+            intent.aim_yaw = std::atan2(ad.x, ad.z);
+            intent.aim_pitch = std::clamp(std::atan2(ad.y,
+                std::max(glm::length(glm::vec3(ad.x, 0.0f, ad.z)), 0.01f)), -1.5f, 1.5f);
+        }
         else { b.engage_lost_time += in.dt; intent.aim_yaw = b.aim_yaw; if (b.engage_lost_time > 0.75f) { BotState r = b.has_resume ? b.resume_state : BotState::Advance; b.has_resume = false; tr(r, "engage_lost"); } }
         return; }
     case BotState::Retreat:

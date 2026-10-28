@@ -8,6 +8,7 @@
 #include "Reflection/ReflectionRegistry.hpp"
 #include "world.hpp"
 #include "shared/FpsGameLogic.hpp"
+#include "shared/BotLogic.hpp"
 #include "shared/PlayerLifecycle.hpp"
 #include "shared/WorldItemLifecycle.hpp"
 #include "shared/WorldItemReplication.hpp"
@@ -3904,6 +3905,259 @@ bool testClientAcceptanceScriptWorldItemActions()
     return pass(name);
 }
 
+
+bool testClientAcceptanceScriptBotCombatActions()
+{
+    const std::string name = "ClientAcceptanceScript.BotCombatActions";
+    const auto script_path = std::filesystem::temp_directory_path() /
+        ("garden_client_bot_combat_actions_" +
+         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".txt");
+    std::error_code remove_error;
+    const auto cleanup = [&]() { std::filesystem::remove(script_path, remove_error); };
+    const auto fail_with_cleanup = [&](const char* reason) {
+        cleanup();
+        return fail(name, reason);
+    };
+
+    ScopedEnvironmentValue script_environment("FPS_TEST_ACTION_SCRIPT");
+    FPSShooter::ClientAcceptanceScript script;
+    for (const char* invalid : {
+             "aim_fire_at_remote_live 0 100\n",
+             "aim_fire_at_remote_live 70000 100\n",
+             "aim_fire_at_remote_live 40000 0\n",
+             "wait_damage_from 0 100\n",
+             "wait_death_from 40000 100 extra\n",
+             "arm_damage_from 0\n",
+             "arm_death_from 40000 extra\n"}) {
+        if (!writeClientAcceptanceScript(script_path, invalid) ||
+            !script_environment.set(script_path.string().c_str())) {
+            return fail_with_cleanup("could not configure invalid bot combat action script");
+        }
+        script.loadFromEnvironment();
+        if (script.active())
+            return fail_with_cleanup("invalid bot combat action grammar enabled the script");
+    }
+
+    if (!writeClientAcceptanceScript(script_path,
+        "aim_fire_at_remote_live 40000 100\n"
+        "wait_damage_from 40000 100\n"
+        "wait_death_from 40000 100\n") ||
+        !script_environment.set(script_path.string().c_str())) {
+        return fail_with_cleanup("could not configure bot combat action script");
+    }
+    script.loadFromEnvironment();
+    FPSShooter::ClientAcceptanceObservation observation;
+    observation.connected = true;
+    observation.local_client_id = 7;
+    observation.has_round_state = true;
+    observation.local_team = Competitive::FpsTeam::Defenders;
+    observation.has_local_pawn = true;
+    observation.has_local_transform = true;
+    observation.local_position_x = 0.0f;
+    observation.local_position_z = 0.0f;
+    observation.round_phase = Competitive::RoundPhase::Live;
+    observation.remote_players = {{40000, 10.0f, 0.0f}};
+
+    script.tick(0.0f, observation);
+    Net::InputState aim_input;
+    script.applyInput(aim_input, true, true, true);
+    if ((aim_input.buttons & Net::InputFlags::ATTACK) == 0 ||
+        !approx(aim_input.camera_yaw, 1.5707963f, 0.001f)) {
+        return fail_with_cleanup("remote replicated target did not drive ordinary aim/fire input");
+    }
+    // An unavailable fire capability must not fabricate an attack edge.
+    Net::InputState blocked_input;
+    script.applyInput(blocked_input, true, false, true);
+    if ((blocked_input.buttons & Net::InputFlags::ATTACK) != 0)
+        return fail_with_cleanup("remote aim action bypassed ordinary fire capability");
+
+    script.tick(0.1f, observation); // complete aim/fire
+    script.tick(0.0f, observation); // begin damage wait, baseline generation 0
+    observation.combat_receipt_generation = 1;
+    observation.damage_receipts = {{123, 7, 1}};
+    script.tick(0.0f, observation);
+    if (!script.active())
+        return fail_with_cleanup("wrong attacker damage receipt completed acceptance");
+    observation.damage_receipts = {{40000, 8, 2}};
+    observation.combat_receipt_generation = 2;
+    script.tick(0.0f, observation);
+    if (!script.active())
+        return fail_with_cleanup("wrong victim damage receipt completed acceptance");
+    observation.damage_receipts = {{40000, 7, 3}};
+    observation.combat_receipt_generation = 3;
+    script.tick(0.0f, observation); // consumes authoritative local damage
+    script.tick(0.0f, observation); // begin death wait with generation 3
+    observation.death_receipts = {{40000, 7, 3}};
+    script.tick(0.0f, observation);
+    if (!script.active())
+        return fail_with_cleanup("stale death receipt completed acceptance");
+    observation.death_receipts = {{40000, 7, 4}};
+    observation.combat_receipt_generation = 4;
+    // PLAYER_DIED updates the authoritative presentation state in the same
+    // client frame as its death receipt. The fresh matching receipt must close
+    // the wait before the regular Live-pawn gate observes that terminal state.
+    observation.round_phase = Competitive::RoundPhase::RoundEnd;
+    observation.has_local_pawn = false;
+    observation.has_local_transform = false;
+    script.tick(0.0f, observation);
+    if (script.active())
+        return fail_with_cleanup("new authoritative bot death receipt did not complete after terminal pawn state");
+
+    // Arm receipt boundaries before ordinary movement. Matching accepted
+    // messages may arrive while that movement is still active, but only the
+    // later explicit waits can consume them.
+    if (!writeClientAcceptanceScript(script_path,
+        "arm_damage_from 40000\n"
+        "arm_death_from 40000\n"
+        "move_to_live 10 0 0.5 100\n"
+        "wait_damage_from 40000 100\n"
+        "wait_death_from 40000 100\n") ||
+        !script_environment.set(script_path.string().c_str())) {
+        return fail_with_cleanup("could not configure pre-armed bot combat action script");
+    }
+    script.loadFromEnvironment();
+    observation.connected = true;
+    observation.local_client_id = 7;
+    observation.has_round_state = true;
+    observation.local_team = Competitive::FpsTeam::Defenders;
+    observation.has_local_pawn = true;
+    observation.has_local_transform = true;
+    observation.local_position_x = 0.0f;
+    observation.local_position_z = 0.0f;
+    observation.round_phase = Competitive::RoundPhase::Live;
+    observation.has_authoritative_pawn_position = true;
+    observation.authoritative_pawn_position_x = 0.0f;
+    observation.authoritative_pawn_position_z = 0.0f;
+    observation.authoritative_pawn_snapshot_generation = 10;
+    observation.last_authoritative_input_tick = 0;
+    observation.combat_receipt_generation = 10;
+    observation.damage_receipts = {{40000, 7, 10}}; // equal-to-baseline is stale
+    observation.death_receipts = {{40000, 7, 10}};
+
+    script.tick(0.0f, observation); // arm damage
+    script.tick(0.0f, observation); // arm death
+    script.tick(0.0f, observation); // begin ordinary movement
+    Net::InputState move_input;
+    script.applyInput(move_input, true, true, true);
+    if ((move_input.buttons & Net::InputFlags::MOVE_FORWARD) == 0)
+        return fail_with_cleanup("pre-armed combat script did not retain ordinary movement");
+    script.noteInputCommandSent(44, true);
+
+    // Both matching receipts arrive before the movement action completes.
+    observation.damage_receipts = {{40000, 7, 11}};
+    observation.death_receipts = {{40000, 7, 12}};
+    observation.combat_receipt_generation = 12;
+    observation.authoritative_pawn_position_x = 10.0f;
+    observation.authoritative_pawn_snapshot_generation = 11;
+    observation.last_authoritative_input_tick = 44;
+    script.tick(0.0f, observation); // movement advances; receipts stay armed
+    if (!script.active())
+        return fail_with_cleanup("receipt arriving during movement completed acceptance without a wait");
+    script.tick(0.0f, observation); // begin damage wait using arm boundary
+    if (!script.active())
+        return fail_with_cleanup("pre-armed damage receipt completed before its explicit wait");
+    script.tick(0.0f, observation); // consume damage receipt
+    script.tick(0.0f, observation); // begin death wait using arm boundary
+    if (!script.active())
+        return fail_with_cleanup("pre-armed death receipt completed before its explicit wait");
+    script.tick(0.0f, observation); // consume death receipt
+    if (script.active())
+        return fail_with_cleanup("pre-armed receipts received during movement were not consumed by later waits");
+
+    // A terminal PLAYER_DIED update can arrive before a multi-waypoint route
+    // reaches its next target. Fresh, matching receipts armed before that
+    // route may preserve continuity to the exact later waits, but do not
+    // complete either wait until it becomes active.
+    if (!writeClientAcceptanceScript(script_path,
+        "arm_damage_from 40000\n"
+        "arm_death_from 40000\n"
+        "move_to_live 10 0 0.5 100\n"
+        "move_to_live 20 0 0.5 100\n"
+        "aim_fire_at_remote_live 40000 100\n"
+        "wait_damage_from 40000 100\n"
+        "wait_death_from 40000 100\n") ||
+        !script_environment.set(script_path.string().c_str())) {
+        return fail_with_cleanup("could not configure terminal pre-armed bot combat script");
+    }
+    script.loadFromEnvironment();
+    observation.has_local_pawn = true;
+    observation.has_local_transform = true;
+    observation.round_phase = Competitive::RoundPhase::Live;
+    observation.authoritative_pawn_position_x = 0.0f;
+    observation.authoritative_pawn_position_z = 0.0f;
+    observation.authoritative_pawn_snapshot_generation = 20;
+    observation.last_authoritative_input_tick = 0;
+    observation.combat_receipt_generation = 20;
+    observation.damage_receipts = {{40000, 7, 20}};
+    observation.death_receipts = {{40000, 7, 20}};
+    script.tick(0.0f, observation); // arm damage
+    script.tick(0.0f, observation); // arm death
+    script.tick(0.0f, observation); // begin first route action
+    Net::InputState terminal_move_input;
+    script.applyInput(terminal_move_input, true, true, true);
+    if ((terminal_move_input.buttons & Net::InputFlags::MOVE_FORWARD) == 0)
+        return fail_with_cleanup("terminal pre-armed script did not begin ordinary movement");
+    script.noteInputCommandSent(45, true);
+    observation.damage_receipts = {{40000, 7, 21}};
+    observation.death_receipts = {{40000, 7, 22}};
+    observation.combat_receipt_generation = 22;
+    observation.has_local_pawn = false;
+    observation.has_local_transform = false;
+    observation.round_phase = Competitive::RoundPhase::RoundEnd;
+    script.tick(0.0f, observation); // terminal route interruption reaches wait_damage
+    if (!script.active())
+        return fail_with_cleanup("terminal pre-armed route stopped before receipt waits");
+    script.tick(0.0f, observation); // start damage wait while terminal
+    if (!script.active())
+        return fail_with_cleanup("terminal pre-armed damage wait completed before consuming receipt");
+    script.tick(0.0f, observation); // consume damage receipt
+    script.tick(0.0f, observation); // start death wait while terminal
+    if (!script.active())
+        return fail_with_cleanup("terminal pre-armed death wait completed before consuming receipt");
+    script.tick(0.0f, observation); // consume death receipt
+    if (script.active())
+        return fail_with_cleanup("terminal pre-armed route did not finish at later receipt waits");
+
+    // Losing the local Live pawn without that exact armed receipt pair still
+    // fails the ordinary waypoint action.
+    if (!writeClientAcceptanceScript(script_path, "move_to_live 10 0 0.5 100\n") ||
+        !script_environment.set(script_path.string().c_str())) {
+        return fail_with_cleanup("could not configure unarmed terminal movement script");
+    }
+    script.loadFromEnvironment();
+    observation.has_local_pawn = true;
+    observation.has_local_transform = true;
+    observation.round_phase = Competitive::RoundPhase::Live;
+    script.tick(0.0f, observation); // begin move
+    observation.has_local_pawn = false;
+    observation.has_local_transform = false;
+    observation.round_phase = Competitive::RoundPhase::RoundEnd;
+    script.tick(0.0f, observation);
+    if (script.active())
+        return fail_with_cleanup("unarmed terminal movement bypassed the Live-pawn failure gate");
+
+    using namespace Bots;
+    if (selectCompetitiveBotJoinTeam(0, 0, 5) != Competitive::FpsTeam::Attackers ||
+        selectCompetitiveBotJoinTeam(1, 0, 5) != Competitive::FpsTeam::Defenders ||
+        selectCompetitiveBotJoinTeam(5, 3, 5) != Competitive::FpsTeam::Defenders ||
+        selectCompetitiveBotJoinTeam(5, 5, 5) != Competitive::FpsTeam::None) {
+        return fail_with_cleanup("bot-first competitive roster ordering was not deterministic");
+    }
+    if (!isOpposingLivingPlayer(Competitive::FpsTeam::Attackers,
+                                Competitive::FpsTeam::Defenders, true, true) ||
+        isOpposingLivingPlayer(Competitive::FpsTeam::Attackers,
+                               Competitive::FpsTeam::Attackers, true, true) ||
+        isOpposingLivingPlayer(Competitive::FpsTeam::Attackers,
+                               Competitive::FpsTeam::Defenders, false, true) ||
+        isOpposingLivingPlayer(Competitive::FpsTeam::Attackers,
+                               Competitive::FpsTeam::Defenders, true, false)) {
+        return fail_with_cleanup("bot enemy eligibility did not require an alive opposing player");
+    }
+
+    cleanup();
+    return pass(name);
+}
+
 #include "C4Tests.hpp"
 #include "GrenadeEffectsTests.hpp"
 #include "BotTests.hpp"
@@ -3963,6 +4217,7 @@ int main()
     ok = testClientAcceptanceScriptAuthorityAndInput() && ok;
     ok = testClientAcceptanceScriptLiveBombActions() && ok;
     ok = testClientAcceptanceScriptWorldItemActions() && ok;
+    ok = testClientAcceptanceScriptBotCombatActions() && ok;
     ok = testC4PlantInterrupt() && ok;
     ok = testC4AuthoredTriggerOccupancy() && ok;
     ok = testC4DefuseKit() && ok;
@@ -3976,6 +4231,7 @@ int main()
     ok = testGrenadeOverlapsSurviveOwnerDeath() && ok;
     ok = testBotDifficultyClampTable() && ok;
     ok = testBotPerceptionBlindfold() && ok;
+    ok = testBotPerceptionWeaponLineObstruction() && ok;
     ok = testBotPerceptionPrivacyAndStaleTargets() && ok;
     ok = testBotFsmPlantDefendDefuse() && ok;
     ok = testBotSteeringArrivalStuck() && ok;

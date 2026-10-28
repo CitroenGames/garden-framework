@@ -79,7 +79,10 @@ private:
     };
     // Game.exe now mints input per consumed fixed step. A FIFO prevents a
     // 30 Hz render frame with two fixed steps from overwriting its first
-    // command before the transport's 60 Hz send pump runs.
+    // command before the transport's 60 Hz send pump runs. Keep the pending
+    // window short: a client hitch must not later emit several new samples in
+    // one server simulation tick and spend the server's per-tick input budget.
+    static constexpr std::size_t MAX_QUEUED_INPUT_COMMANDS = 2;
     std::deque<QueuedInputCommand> queued_input_commands;
 
     // Ping/RTT measurement

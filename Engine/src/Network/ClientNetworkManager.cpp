@@ -205,13 +205,18 @@ void ClientNetworkManager::update(float delta_time)
         }
     }
 
-    // Rate-limited fixed-command sending (60 Hz) with redundant inputs. A
-    // catch-up render frame may enqueue several already-predicted commands;
-    // drain every elapsed send interval so their tick sequence remains intact.
+    // Rate-limited fixed-command sending (60 Hz) with redundant inputs. Send
+    // at most one new primary sample per client update. A hitch may generate
+    // several predicted fixed steps, but sending all of them together would
+    // make an otherwise healthy client appear to exceed the server's
+    // per-simulation-tick input budget. Pending commands are coalesced at
+    // enqueue time while preserving edge actions.
     if (connection_state == ConnectionState::CONNECTED && !queued_input_commands.empty()) {
         input_send_timer += std::max(delta_time, 0.0f);
-        while (input_send_timer >= INPUT_SEND_INTERVAL && !queued_input_commands.empty()) {
-            input_send_timer -= INPUT_SEND_INTERVAL;
+        if (input_send_timer >= INPUT_SEND_INTERVAL) {
+            // Do not turn elapsed wall time from a stalled frame into credit
+            // for an immediate follow-up burst on a zero-delta service pass.
+            input_send_timer = 0.0f;
             const QueuedInputCommand command = queued_input_commands.front();
             queued_input_commands.pop_front();
 
@@ -294,6 +299,29 @@ void ClientNetworkManager::sendInputCommand(uint32_t command_tick, const InputSt
     command.tick = command_tick;
     command.view_server_tick = currentRenderAnchorTick();
     command.input = input;
+
+    if (queued_input_commands.size() >= MAX_QUEUED_INPUT_COMMANDS) {
+        // Input ticks that have not left this client cannot each be applied by
+        // the server after a hitch without creating a same-server-tick burst.
+        // Keep the newest continuous state and preserve the existing generic
+        // one-shot input contract. WEAPON_SELECT is a value field, so retain
+        // the latest pending nonzero selection just as the old single-slot
+        // sender did.
+        uint16_t latched_actions = command.input.buttons & INPUT_ACTION_LATCH_MASK;
+        uint8_t latest_weapon_select = 0;
+        for (const QueuedInputCommand& pending : queued_input_commands) {
+            latched_actions |= pending.input.buttons & INPUT_ACTION_LATCH_MASK;
+            const uint8_t pending_select = getWeaponSelect(pending.input.buttons);
+            if (pending_select != 0)
+                latest_weapon_select = pending_select;
+        }
+        const uint8_t requested_select = getWeaponSelect(command.input.buttons);
+        if (requested_select != 0)
+            latest_weapon_select = requested_select;
+        command.input.buttons |= latched_actions;
+        command.input.buttons = withWeaponSelect(command.input.buttons, latest_weapon_select);
+        queued_input_commands.clear();
+    }
     queued_input_commands.push_back(command);
 }
 
