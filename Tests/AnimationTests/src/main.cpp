@@ -1,6 +1,7 @@
 #define GLM_ENABLE_EXPERIMENTAL
 
 #include "Animation/AnimationComponentMigration.hpp"
+#include "Animation/AnimationResourceBindingMigration.hpp"
 #include "Assets/AssetManager.hpp"
 #include "Animation/CompiledAnimationSerializer.hpp"
 #include "Animation/GltfAnimationLoader.hpp"
@@ -860,6 +861,65 @@ bool testReflectionAndMigration()
         return fail(name, "migrated authoring data did not round-trip without runtime state");
     return pass(name);
 }
+
+bool testResourceBindingMigration()
+{
+    const std::string name = "AN-2 atomically migrates SkeletonComponent resource bindings";
+    nlohmann::json old_binding = {
+        {"skeleton_path", "assets/characters/hero.canim"},
+        {"clip_names", nlohmann::json::array({"idle", "run"})},
+        {"default_clip", "idle"},
+        {"playback_speed", 1.25f},
+        {"loop", false},
+        {"auto_play", true}
+    };
+    nlohmann::json level = {{"format", "garden_reflected"}, {"version", 1},
+        {"entities", nlohmann::json::array({
+            {{"components", {{"SkeletonComponent", old_binding}}}},
+            {{"components", nlohmann::json::object()}}
+        })}};
+    std::string error;
+    if (!AnimationResourceBindingMigration::migrateLevel(level, error) || !error.empty())
+        return fail(name, "level migration failed: " + error);
+    const auto& migrated = level["entities"][0]["components"]["SkeletonComponent"];
+    if (migrated.contains("skeleton_path") || migrated.contains("clip_names") ||
+        migrated.value("animation_resource_path", "") != "assets/characters/hero.canim" ||
+        migrated.value("animation_skin_index", 99u) != 0u ||
+        migrated.value("default_clip", "") != "idle" ||
+        !near(migrated.value("playback_speed", 0.0f), 1.25f) || migrated.value("loop", true) ||
+        !migrated.value("auto_play", false))
+        return fail(name, "migration did not preserve authored defaults or remove AN-1 fields");
+
+    const nlohmann::json migrated_copy = level;
+    if (!AnimationResourceBindingMigration::migrateLevel(level, error) || level != migrated_copy)
+        return fail(name, "new-format migration was not idempotent");
+
+    nlohmann::json prefab = {{"format", "garden_prefab"}, {"version", 2},
+        {"nodes", nlohmann::json::array({{{"components", {{"SkeletonComponent", old_binding}}}}})}};
+    if (!AnimationResourceBindingMigration::migratePrefab(prefab, error) ||
+        prefab["nodes"][0]["components"]["SkeletonComponent"].contains("clip_names"))
+        return fail(name, "prefab migration did not replace the AN-1 binding");
+
+    const nlohmann::json mixed_binding = {{"skeleton_path", "legacy.canim"},
+        {"animation_resource_path", "mixed.canim"}, {"animation_skin_index", 0}};
+    nlohmann::json invalid = {{"entities", nlohmann::json::array({
+        {{"components", {{"SkeletonComponent", old_binding}}}},
+        {{"components", {{"SkeletonComponent", mixed_binding}}}}
+    })}};
+    const nlohmann::json original_invalid = invalid;
+    if (AnimationResourceBindingMigration::migrateLevel(invalid, error) || error.empty() || invalid != original_invalid)
+        return fail(name, "failed migration was not atomic or did not reject mixed fields");
+
+    ReflectionRegistry reflection;
+    registerEngineReflection(reflection);
+    entt::registry runtime;
+    const entt::entity rejected = runtime.create();
+    ReflectionSerializer::deserializeEntity(runtime, rejected,
+        {{"components", {{"SkeletonComponent", old_binding}}}}, reflection);
+    if (runtime.any_of<SkeletonComponent>(rejected))
+        return fail(name, "runtime accepted an unmigrated AN-1 SkeletonComponent payload");
+    return pass(name);
+}
 } // namespace
 
 int main()
@@ -874,5 +934,6 @@ int main()
     ok = testIkOrder() && ok;
     ok = testCompletionEvent() && ok;
     ok = testReflectionAndMigration() && ok;
+    ok = testResourceBindingMigration() && ok;
     return ok ? 0 : 1;
 }

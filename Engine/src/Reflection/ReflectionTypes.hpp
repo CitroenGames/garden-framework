@@ -105,6 +105,10 @@ struct ComponentDescriptor
     uint32_t type_id = 0;      // entt::type_hash<T>::value()
     size_t size = 0;           // sizeof(T)
     bool removable = true;      // Can be removed in editor inspector
+    // Most reflected components remain forward-compatible with additional
+    // fields. Schema migrations can opt into strict payload ownership when an
+    // omitted field would otherwise leave an invalid, partially-loaded object.
+    bool reject_unknown_properties = false;
 
     std::vector<PropertyDescriptor> properties;
 

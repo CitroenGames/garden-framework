@@ -674,6 +674,13 @@ namespace
                 o.default_clip != c.default_clip || !approx(o.playback_speed, 1.5f) ||
                 o.loop != false || o.auto_play != true)
                 return fail(name, "animation fields mismatch");
+
+            entt::registry legacy_reg; auto legacy_entity = legacy_reg.create();
+            auto legacy = j;
+            legacy["components"]["SkeletonComponent"]["skeleton_path"] = "assets/legacy.canim";
+            ReflectionSerializer::deserializeEntity(legacy_reg, legacy_entity, legacy, reflection);
+            if (legacy_reg.any_of<SkeletonComponent>(legacy_entity))
+                return fail(name, "legacy SkeletonComponent fields were not rejected");
         }
         // Audio: clip_path + tuning; resolved id/handle omitted.
         {

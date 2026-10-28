@@ -25,7 +25,7 @@ struct SkeletonComponent
 
     static void reflect(Reflector<SkeletonComponent>& r)
     {
-        r.display("Skeleton").category("Animation");
+        r.display("Skeleton").category("Animation").rejectUnknownProperties();
         // The current reflector has scalar fields only. These two fields are
         // the stable serialized representation of AnimationResourceKey.
         r.field<&SkeletonComponent::animation_resource_path>("animation_resource_path")

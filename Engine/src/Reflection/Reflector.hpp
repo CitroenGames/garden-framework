@@ -160,6 +160,9 @@ public:
     Reflector& removable(bool r)
     { m_desc.removable = r; return *this; }
 
+    Reflector& rejectUnknownProperties()
+    { m_desc.reject_unknown_properties = true; return *this; }
+
     template<auto Member>
     PropertyBuilder field(std::string name)
     {

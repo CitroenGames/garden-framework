@@ -3,6 +3,31 @@
 
 using json = nlohmann::json;
 
+namespace
+{
+bool hasOnlyKnownProperties(const ComponentDescriptor& desc, const json& component)
+{
+    if (!component.is_object())
+        return false;
+
+    for (const auto& [name, _] : component.items())
+    {
+        bool known = false;
+        for (const auto& property : desc.properties)
+        {
+            if (property.name == name)
+            {
+                known = true;
+                break;
+            }
+        }
+        if (!known)
+            return false;
+    }
+    return true;
+}
+} // namespace
+
 // ---- Component-level ----
 
 json ReflectionSerializer::serializeComponent(
@@ -68,6 +93,13 @@ void ReflectionSerializer::deserializeEntity(
         if (!desc)
         {
             fprintf(stderr, "[ReflectionSerializer] Unknown component '%s', skipping\n",
+                    comp_name.c_str());
+            continue;
+        }
+
+        if (desc->reject_unknown_properties && !hasOnlyKnownProperties(*desc, comp_json))
+        {
+            fprintf(stderr, "[ReflectionSerializer] Rejected obsolete or malformed properties for component '%s'\n",
                     comp_name.c_str());
             continue;
         }
