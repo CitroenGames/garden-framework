@@ -33,10 +33,30 @@ namespace FPSShooter
         Buy,
         Input,
         MoveToLive,
+        WaitWorldItemPresent,
+        WaitWorldItemRemoved,
+        MoveToWorldItemLive,
         WaitBombPlanted,
         HoldUseLive,
         HoldUseDefuse,
         Wait
+    };
+
+    // These are observations of the template-owned client presentation index.
+    // They are receipts from accepted server-to-client messages, not replicated
+    // entities or client-side pickup authority.
+    struct ClientAcceptanceWorldItem
+    {
+        uint32_t world_item_id = 0;
+        float position_x = 0.0f;
+        float position_z = 0.0f;
+        uint64_t upsert_receipt_generation = 0;
+    };
+
+    struct ClientAcceptanceWorldItemRemoval
+    {
+        uint32_t world_item_id = 0;
+        uint64_t receipt_generation = 0;
     };
 
     struct ClientAcceptanceObservation
@@ -61,6 +81,10 @@ namespace FPSShooter
         float authoritative_pawn_position_z = 0.0f;
         uint64_t authoritative_pawn_snapshot_generation = 0;
         uint32_t last_authoritative_input_tick = 0;
+        std::vector<ClientAcceptanceWorldItem> world_items;
+        std::vector<ClientAcceptanceWorldItemRemoval> world_item_removals;
+        uint64_t world_item_receipt_generation = 0;
+        bool has_world_item_presentation_world = false;
     };
 
     struct ClientAcceptanceDispatch
@@ -102,6 +126,7 @@ namespace FPSShooter
             Competitive::FpsTeam team = Competitive::FpsTeam::None;
             bool auto_assign = false;
             uint16_t item_id = 0;
+            uint32_t world_item_id = 0;
             uint16_t input_buttons = 0;
             float target_x = 0.0f;
             float target_z = 0.0f;
@@ -111,7 +136,9 @@ namespace FPSShooter
         };
 
         enum class State : uint8_t { Ready, WaitingForTeamResult, WaitingForBuyResult, RunningInput,
-            RunningMoveToLive, WaitingForBombPlanted, RunningHoldUseLive, RunningHoldUseDefuse, Waiting };
+            RunningMoveToLive, WaitingForWorldItemPresent, WaitingForWorldItemRemoved,
+            RunningMoveToWorldItemLive, WaitingForBombPlanted, RunningHoldUseLive,
+            RunningHoldUseDefuse, Waiting };
 
         bool loadFile(const char* path, std::string& error);
         void disable(const std::string& reason);
@@ -119,6 +146,10 @@ namespace FPSShooter
         bool canDispatchPawnAction(const ClientAcceptanceObservation& observation) const;
         bool canRunLivePawnAction(const ClientAcceptanceObservation& observation) const;
         bool canWaitForBombPlanted(const ClientAcceptanceObservation& observation) const;
+        const ClientAcceptanceWorldItem* findWorldItem(
+            uint32_t world_item_id, const ClientAcceptanceObservation& observation) const;
+        bool hasWorldItemRemovalAfter(uint32_t world_item_id, uint64_t receipt_generation,
+                                      const ClientAcceptanceObservation& observation) const;
         bool moveHasAuthoritativeArrival(const Action& action,
                                           const ClientAcceptanceObservation& observation) const;
         bool atAuthoritativeMoveTarget(const Action& action,
@@ -134,6 +165,7 @@ namespace FPSShooter
         float m_move_yaw = 0.0f;
         float m_move_forward = 0.0f;
         uint64_t m_move_start_snapshot_generation = 0;
+        uint64_t m_world_item_removal_start_generation = 0;
         // The first ordinary command emitted after the waypoint's steering
         // starts. A later authoritative receipt must acknowledge it before
         // the waypoint may complete.
@@ -234,6 +266,7 @@ namespace FPSShooter
         m_move_yaw = 0.0f;
         m_move_forward = 0.0f;
         m_move_start_snapshot_generation = 0;
+        m_world_item_removal_start_generation = 0;
         m_move_steering_input_tick = 0;
         m_expected_buy_sequence = 0;
     }
@@ -304,6 +337,35 @@ namespace FPSShooter
                     return false;
                 }
                 action.kind = ClientAcceptanceActionKind::MoveToLive;
+            } else if (tokens[0] == "wait_world_item_present" && tokens.size() == 3) {
+                if (!parseUnsigned(tokens[1], action.world_item_id) || action.world_item_id == 0 ||
+                    !parseUnsigned(tokens[2], action.duration_ms) || action.duration_ms == 0 ||
+                    action.duration_ms > kMaxDurationMs) {
+                    error = "client action script disabled: invalid wait_world_item_present on line " +
+                        std::to_string(line_number);
+                    return false;
+                }
+                action.kind = ClientAcceptanceActionKind::WaitWorldItemPresent;
+            } else if (tokens[0] == "wait_world_item_removed" && tokens.size() == 3) {
+                if (!parseUnsigned(tokens[1], action.world_item_id) || action.world_item_id == 0 ||
+                    !parseUnsigned(tokens[2], action.duration_ms) || action.duration_ms == 0 ||
+                    action.duration_ms > kMaxDurationMs) {
+                    error = "client action script disabled: invalid wait_world_item_removed on line " +
+                        std::to_string(line_number);
+                    return false;
+                }
+                action.kind = ClientAcceptanceActionKind::WaitWorldItemRemoved;
+            } else if (tokens[0] == "move_to_world_item_live" && tokens.size() == 4) {
+                if (!parseUnsigned(tokens[1], action.world_item_id) || action.world_item_id == 0 ||
+                    !parseFiniteFloat(tokens[2], action.tolerance) ||
+                    !parseUnsigned(tokens[3], action.duration_ms) ||
+                    action.tolerance <= 0.0f || action.tolerance > kMaxMoveTolerance ||
+                    action.duration_ms == 0 || action.duration_ms > kMaxDurationMs) {
+                    error = "client action script disabled: invalid move_to_world_item_live on line " +
+                        std::to_string(line_number);
+                    return false;
+                }
+                action.kind = ClientAcceptanceActionKind::MoveToWorldItemLive;
             } else if (tokens[0] == "wait_bomb_planted" && tokens.size() == 2) {
                 if (!parseUnsigned(tokens[1], action.duration_ms) || action.duration_ms == 0 || action.duration_ms > kMaxDurationMs) {
                     error = "client action script disabled: invalid wait_bomb_planted timeout on line " + std::to_string(line_number);
@@ -384,6 +446,27 @@ namespace FPSShooter
     {
         return canDispatchPawnAction(observation) &&
             observation.round_phase == Competitive::RoundPhase::Live;
+    }
+
+    inline const ClientAcceptanceWorldItem* ClientAcceptanceScript::findWorldItem(
+        uint32_t world_item_id, const ClientAcceptanceObservation& observation) const
+    {
+        const auto item = std::find_if(observation.world_items.begin(), observation.world_items.end(),
+            [world_item_id](const ClientAcceptanceWorldItem& candidate) {
+                return candidate.world_item_id == world_item_id;
+            });
+        return item == observation.world_items.end() ? nullptr : &*item;
+    }
+
+    inline bool ClientAcceptanceScript::hasWorldItemRemovalAfter(
+        uint32_t world_item_id, uint64_t receipt_generation,
+        const ClientAcceptanceObservation& observation) const
+    {
+        return std::any_of(observation.world_item_removals.begin(), observation.world_item_removals.end(),
+            [world_item_id, receipt_generation](const ClientAcceptanceWorldItemRemoval& removal) {
+                return removal.world_item_id == world_item_id &&
+                    removal.receipt_generation > receipt_generation;
+            });
     }
 
     inline bool ClientAcceptanceScript::moveHasAuthoritativeArrival(
@@ -500,6 +583,33 @@ namespace FPSShooter
                 updateMoveYaw(action, observation);
                 LOG_ENGINE_INFO("[ACCEPT] move_to_live begin line={} x={} z={} tolerance={} timeout_ms={}",
                     action.source_line, action.target_x, action.target_z, action.tolerance, action.duration_ms);
+            } else if (action.kind == ClientAcceptanceActionKind::WaitWorldItemPresent) {
+                if (!observation.connected || !observation.has_world_item_presentation_world) return dispatch;
+                m_state = State::WaitingForWorldItemPresent;
+                m_elapsed_seconds = 0.0f;
+                LOG_ENGINE_INFO("[ACCEPT] wait_world_item_present begin line={} id={} timeout_ms={}",
+                    action.source_line, action.world_item_id, action.duration_ms);
+            } else if (action.kind == ClientAcceptanceActionKind::WaitWorldItemRemoved) {
+                if (!observation.connected || !observation.has_world_item_presentation_world ||
+                    !findWorldItem(action.world_item_id, observation)) return dispatch;
+                m_state = State::WaitingForWorldItemRemoved;
+                m_elapsed_seconds = 0.0f;
+                m_world_item_removal_start_generation = observation.world_item_receipt_generation;
+                LOG_ENGINE_INFO("[ACCEPT] wait_world_item_removed begin line={} id={} timeout_ms={}",
+                    action.source_line, action.world_item_id, action.duration_ms);
+            } else if (action.kind == ClientAcceptanceActionKind::MoveToWorldItemLive) {
+                const ClientAcceptanceWorldItem* item = findWorldItem(action.world_item_id, observation);
+                if (!item || !observation.has_world_item_presentation_world || !canRunLivePawnAction(observation)) return dispatch;
+                action.target_x = item->position_x;
+                action.target_z = item->position_z;
+                m_state = State::RunningMoveToWorldItemLive;
+                m_elapsed_seconds = 0.0f;
+                m_move_start_snapshot_generation = observation.authoritative_pawn_snapshot_generation;
+                m_move_steering_input_tick = 0;
+                updateMoveYaw(action, observation);
+                LOG_ENGINE_INFO("[ACCEPT] move_to_world_item_live begin line={} id={} x={} z={} tolerance={} timeout_ms={}",
+                    action.source_line, action.world_item_id, action.target_x, action.target_z,
+                    action.tolerance, action.duration_ms);
             } else if (action.kind == ClientAcceptanceActionKind::WaitBombPlanted) {
                 if (!canWaitForBombPlanted(observation)) return dispatch;
                 m_state = State::WaitingForBombPlanted;
@@ -553,6 +663,71 @@ namespace FPSShooter
                     std::to_string(action.source_line));
             }
             return dispatch;
+        case State::WaitingForWorldItemPresent:
+            if (!observation.connected || !observation.has_world_item_presentation_world) {
+                disable("client action script stopped: wait_world_item_present lost connection or client world on line " +
+                    std::to_string(action.source_line));
+                return dispatch;
+            }
+            if (findWorldItem(action.world_item_id, observation)) {
+                LOG_ENGINE_INFO("[ACCEPT] wait_world_item_present observed accepted receipt line={} id={}",
+                    action.source_line, action.world_item_id);
+                advanceAction();
+                return dispatch;
+            }
+            m_elapsed_seconds += std::max(delta_time, 0.0f);
+            if (m_elapsed_seconds * 1000.0f >= static_cast<float>(action.duration_ms)) {
+                disable("client action script stopped: wait_world_item_present timed out on line " +
+                    std::to_string(action.source_line));
+            }
+            return dispatch;
+        case State::WaitingForWorldItemRemoved:
+            if (!observation.connected || !observation.has_world_item_presentation_world) {
+                disable("client action script stopped: wait_world_item_removed lost connection or client world on line " +
+                    std::to_string(action.source_line));
+                return dispatch;
+            }
+            if (hasWorldItemRemovalAfter(action.world_item_id, m_world_item_removal_start_generation, observation)) {
+                LOG_ENGINE_INFO("[ACCEPT] wait_world_item_removed observed accepted receipt line={} id={}",
+                    action.source_line, action.world_item_id);
+                advanceAction();
+                return dispatch;
+            }
+            m_elapsed_seconds += std::max(delta_time, 0.0f);
+            if (m_elapsed_seconds * 1000.0f >= static_cast<float>(action.duration_ms)) {
+                disable("client action script stopped: wait_world_item_removed timed out on line " +
+                    std::to_string(action.source_line));
+            }
+            return dispatch;
+        case State::RunningMoveToWorldItemLive: {
+            const ClientAcceptanceWorldItem* item = findWorldItem(action.world_item_id, observation);
+            if (!item || !observation.has_world_item_presentation_world) {
+                disable("client action script stopped: move_to_world_item_live item disappeared on line " +
+                    std::to_string(action.source_line));
+                return dispatch;
+            }
+            if (!canRunLivePawnAction(observation)) {
+                disable("client action script stopped: move_to_world_item_live lost authoritative Live pawn state on line " +
+                    std::to_string(action.source_line));
+                return dispatch;
+            }
+            action.target_x = item->position_x;
+            action.target_z = item->position_z;
+            if (moveHasAuthoritativeArrival(action, observation)) {
+                LOG_ENGINE_INFO("[ACCEPT] move_to_world_item_live arrived line={} id={} authoritative_snapshot={} acknowledged_input={}",
+                    action.source_line, action.world_item_id, observation.authoritative_pawn_snapshot_generation,
+                    observation.last_authoritative_input_tick);
+                advanceAction();
+                return dispatch;
+            }
+            updateMoveYaw(action, observation);
+            m_elapsed_seconds += std::max(delta_time, 0.0f);
+            if (m_elapsed_seconds * 1000.0f >= static_cast<float>(action.duration_ms)) {
+                disable("client action script stopped: move_to_world_item_live timed out on line " +
+                    std::to_string(action.source_line));
+            }
+            return dispatch;
+        }
         case State::WaitingForBombPlanted:
             if (!canWaitForBombPlanted(observation)) {
                 disable("client action script stopped: wait_bomb_planted lost authoritative Live round state on line " +
@@ -635,13 +810,14 @@ namespace FPSShooter
 
     inline bool ClientAcceptanceScript::isMoveToLiveSteering() const
     {
-        return m_state == State::RunningMoveToLive;
+        return m_state == State::RunningMoveToLive ||
+            m_state == State::RunningMoveToWorldItemLive;
     }
 
     inline void ClientAcceptanceScript::noteInputCommandSent(uint32_t command_tick,
                                                                bool steering_move_emitted)
     {
-        if (m_enabled && m_index < m_actions.size() && m_state == State::RunningMoveToLive &&
+        if (m_enabled && m_index < m_actions.size() && isMoveToLiveSteering() &&
             steering_move_emitted && m_move_steering_input_tick == 0 && command_tick != 0)
             m_move_steering_input_tick = command_tick;
     }
@@ -667,7 +843,7 @@ namespace FPSShooter
 
         const Action& action = m_actions[m_index];
         using namespace Net::InputFlags;
-        if (m_state == State::RunningMoveToLive) {
+        if (isMoveToLiveSteering()) {
             if (!movement_allowed)
                 return;
             // The acceptance path changes only the ordinary movement command

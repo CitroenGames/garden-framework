@@ -211,6 +211,18 @@ static uint64_t g_authoritative_pawn_snapshot_generation = 0;
 static uint32_t g_last_authoritative_input_tick = 0;
 static FpsLogic::WorldItemPresentationIndex g_world_item_presentation_entities;
 static world* g_world_item_presentation_world = nullptr;
+// Acceptance-only receipts mirror successful application to the local
+// presentation index. They never drive gameplay or send a client message.
+static uint64_t g_world_item_receipt_generation = 0;
+static std::unordered_map<uint32_t, uint64_t> g_world_item_upsert_receipts;
+static std::unordered_map<uint32_t, uint64_t> g_world_item_remove_receipts;
+
+static void clearWorldItemAcceptanceReceipts()
+{
+    g_world_item_receipt_generation = 0;
+    g_world_item_upsert_receipts.clear();
+    g_world_item_remove_receipts.clear();
+}
 
 static entt::entity g_player_entity = entt::null;
 static entt::entity g_local_input_entity = entt::null;
@@ -516,6 +528,7 @@ GAME_API bool gardenGameInit(EngineServices* services)
     g_authoritative_pawn_snapshot_generation = 0;
     g_last_authoritative_input_tick = 0;
     g_world_item_presentation_entities.clear();
+    clearWorldItemAcceptanceReceipts();
     g_world_item_presentation_world = services->game_world;
     if (!configureFPShooterInput(*services->input_actions))
     {
@@ -605,7 +618,8 @@ GAME_API bool gardenGameInit(EngineServices* services)
                 LOG_ENGINE_WARN("Ignoring invalid WORLD_ITEM_UPSERT id={}", msg.world_item_id);
                 return;
             }
-            LOG_ENGINE_INFO("WORLD_ITEM_UPSERT id={} {}", msg.world_item_id,
+            g_world_item_upsert_receipts[msg.world_item_id] = ++g_world_item_receipt_generation;
+            LOG_ENGINE_INFO("WORLD_ITEM_UPSERT accepted id={} {}", msg.world_item_id,
                 result == FpsLogic::WorldItemPresentationUpsertResult::Created ? "created" : "updated");
             return;
         }
@@ -626,7 +640,9 @@ GAME_API bool gardenGameInit(EngineServices* services)
                 LOG_ENGINE_WARN("Ignoring invalid WORLD_ITEM_REMOVE id={}", msg.world_item_id);
                 return;
             }
-            LOG_ENGINE_INFO("WORLD_ITEM_REMOVE id={} {}", msg.world_item_id,
+            if (result == FpsLogic::WorldItemPresentationRemoveResult::Removed)
+                g_world_item_remove_receipts[msg.world_item_id] = ++g_world_item_receipt_generation;
+            LOG_ENGINE_INFO("WORLD_ITEM_REMOVE accepted id={} {}", msg.world_item_id,
                 result == FpsLogic::WorldItemPresentationRemoveResult::Removed ? "removed" : "unknown_remove");
             return;
         }
@@ -797,6 +813,7 @@ GAME_API void gardenGameShutdown()
     g_authoritative_pawn_position = glm::vec3(0.0f);
     g_authoritative_pawn_snapshot_generation = 0;
     g_last_authoritative_input_tick = 0;
+    clearWorldItemAcceptanceReceipts();
     g_player_controller.reset();
     g_hud.shutdown();
     if (g_services && g_services->input_actions)
@@ -869,6 +886,27 @@ GAME_API void gardenGameUpdate(float delta_time)
         g_authoritative_pawn_snapshot_generation;
     acceptance_observation.last_authoritative_input_tick =
         g_last_authoritative_input_tick;
+    acceptance_observation.has_world_item_presentation_world =
+        g_world_item_presentation_world == game_world;
+    if (g_acceptance_script.active() && g_world_item_presentation_world == game_world) {
+        acceptance_observation.world_item_receipt_generation = g_world_item_receipt_generation;
+        acceptance_observation.world_items.reserve(g_world_item_presentation_entities.size());
+        for (const auto& [world_item_id, entity] : g_world_item_presentation_entities) {
+            const auto receipt = g_world_item_upsert_receipts.find(world_item_id);
+            if (receipt == g_world_item_upsert_receipts.end() ||
+                !game_world->registry.valid(entity) ||
+                !game_world->registry.all_of<TransformComponent>(entity)) {
+                continue;
+            }
+            const TransformComponent& transform = game_world->registry.get<TransformComponent>(entity);
+            acceptance_observation.world_items.push_back({
+                world_item_id, transform.position.x, transform.position.z, receipt->second
+            });
+        }
+        acceptance_observation.world_item_removals.reserve(g_world_item_remove_receipts.size());
+        for (const auto& [world_item_id, receipt_generation] : g_world_item_remove_receipts)
+            acceptance_observation.world_item_removals.push_back({ world_item_id, receipt_generation });
+    }
     const FPSShooter::ClientAcceptanceDispatch acceptance_dispatch =
         g_acceptance_script.tick(delta_time, acceptance_observation);
     if (acceptance_dispatch.kind == FPSShooter::ClientAcceptanceDispatch::Kind::Team) {
@@ -1161,6 +1199,7 @@ GAME_API void gardenOnLevelLoaded()
             game_world->registry, g_world_item_presentation_entities);
     else
         g_world_item_presentation_entities.clear();
+    clearWorldItemAcceptanceReceipts();
     g_world_item_presentation_world = game_world;
     setLocalInputOwner(*game_world, entt::null);
 

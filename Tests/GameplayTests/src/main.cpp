@@ -3405,6 +3405,142 @@ bool testClientAcceptanceScriptLiveBombActions()
     return pass(name);
 }
 
+bool testClientAcceptanceScriptWorldItemActions()
+{
+    const std::string name = "ClientAcceptanceScript.WorldItemActions";
+    const auto script_path = std::filesystem::temp_directory_path() /
+        ("garden_client_world_item_actions_" +
+         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".txt");
+    std::error_code remove_error;
+    const auto cleanup = [&]() { std::filesystem::remove(script_path, remove_error); };
+    const auto fail_with_cleanup = [&](const char* reason) {
+        cleanup();
+        return fail(name, reason);
+    };
+
+    ScopedEnvironmentValue script_environment("FPS_TEST_ACTION_SCRIPT");
+    FPSShooter::ClientAcceptanceScript script;
+    const char* invalid_scripts[] = {
+        "wait_world_item_present 0 100\n",
+        "wait_world_item_present 1 0\n",
+        "wait_world_item_present 1 100 extra\n",
+        "wait_world_item_removed 0 100\n",
+        "wait_world_item_removed 1 0\n",
+        "move_to_world_item_live 0 1 100\n",
+        "move_to_world_item_live 1 0 100\n",
+        "move_to_world_item_live 1 1 0\n",
+        "move_to_world_item_live 1 1 100 extra\n"
+    };
+    for (const char* invalid : invalid_scripts) {
+        if (!writeClientAcceptanceScript(script_path, invalid) ||
+            !script_environment.set(script_path.string().c_str())) {
+            return fail_with_cleanup("could not configure invalid world-item action script");
+        }
+        script.loadFromEnvironment();
+        if (script.active())
+            return fail_with_cleanup("invalid world-item grammar enabled the script");
+    }
+
+    FPSShooter::ClientAcceptanceObservation observation;
+    observation.connected = true;
+    observation.has_world_item_presentation_world = true;
+    observation.world_item_receipt_generation = 1;
+
+    if (!writeClientAcceptanceScript(script_path,
+        "wait_world_item_present 77 100\n"
+        "wait_world_item_removed 77 100\n") ||
+        !script_environment.set(script_path.string().c_str())) {
+        return fail_with_cleanup("could not configure receipt wait script");
+    }
+    script.loadFromEnvironment();
+    script.tick(0.0f, observation); // starts present wait
+    script.tick(0.05f, observation);
+    if (!script.active())
+        return fail_with_cleanup("present wait ended without an accepted presentation receipt");
+
+    observation.world_items.push_back({77, 4.0f, 3.0f, 1});
+    script.tick(0.0f, observation); // present receipt advances
+    script.tick(0.0f, observation); // starts removal wait and snapshots generation 1
+    observation.world_items.clear();
+    observation.world_item_removals.push_back({77, 1});
+    script.tick(0.0f, observation);
+    if (!script.active())
+        return fail_with_cleanup("removal wait accepted a receipt from before it began");
+
+    observation.world_item_receipt_generation = 2;
+    observation.world_item_removals.back().receipt_generation = 2;
+    script.tick(0.0f, observation);
+    if (script.active())
+        return fail_with_cleanup("removal wait did not require and consume a newer accepted remove receipt");
+
+    if (!writeClientAcceptanceScript(script_path,
+        "move_to_world_item_live 88 0.5 1000\n") ||
+        !script_environment.set(script_path.string().c_str())) {
+        return fail_with_cleanup("could not configure world-item movement script");
+    }
+    script.loadFromEnvironment();
+    observation.has_round_state = true;
+    observation.local_team = Competitive::FpsTeam::Attackers;
+    observation.has_local_pawn = true;
+    observation.has_local_transform = true;
+    observation.round_phase = Competitive::RoundPhase::Live;
+    observation.has_authoritative_pawn_position = true;
+    observation.authoritative_pawn_position_x = 0.0f;
+    observation.authoritative_pawn_position_z = 0.0f;
+    observation.authoritative_pawn_snapshot_generation = 4;
+    observation.last_authoritative_input_tick = 9;
+    observation.world_item_receipt_generation = 3;
+    observation.world_item_removals.clear();
+    observation.world_items = {{88, 10.0f, 0.0f, 3}};
+    script.tick(0.0f, observation);
+    Net::InputState move_input;
+    script.applyInput(move_input, true, true, true);
+    if ((move_input.buttons & Net::InputFlags::MOVE_FORWARD) == 0 ||
+        !approx(move_input.camera_yaw, 1.5707963f, 0.001f)) {
+        return fail_with_cleanup("world-item movement did not reuse ordinary forward/yaw steering");
+    }
+    script.noteInputCommandSent(10, true);
+    observation.authoritative_pawn_position_x = 9.6f;
+    observation.authoritative_pawn_snapshot_generation = 5;
+    observation.last_authoritative_input_tick = 10;
+    script.tick(0.0f, observation);
+    if (script.active())
+        return fail_with_cleanup("world-item movement did not require authoritative arrival acknowledgement");
+
+    if (!writeClientAcceptanceScript(script_path,
+        "move_to_world_item_live 89 0.5 1000\n") ||
+        !script_environment.set(script_path.string().c_str())) {
+        return fail_with_cleanup("could not configure disappearing world-item script");
+    }
+    script.loadFromEnvironment();
+    observation.authoritative_pawn_position_x = 0.0f;
+    observation.authoritative_pawn_snapshot_generation = 6;
+    observation.last_authoritative_input_tick = 10;
+    observation.world_items = {{89, 10.0f, 0.0f, 4}};
+    script.tick(0.0f, observation);
+    observation.world_items.clear();
+    observation.world_item_receipt_generation = 5;
+    observation.world_item_removals = {{89, 5}};
+    script.tick(0.0f, observation);
+    if (script.active())
+        return fail_with_cleanup("world-item movement continued after the accepted presentation disappeared");
+
+    if (!writeClientAcceptanceScript(script_path, "wait_world_item_present 90 100\n") ||
+        !script_environment.set(script_path.string().c_str())) {
+        return fail_with_cleanup("could not configure world-item timeout script");
+    }
+    script.loadFromEnvironment();
+    observation.world_items.clear();
+    observation.world_item_removals.clear();
+    script.tick(0.0f, observation);
+    script.tick(0.1f, observation);
+    if (script.active())
+        return fail_with_cleanup("world-item receipt wait did not stop at its timeout");
+
+    cleanup();
+    return pass(name);
+}
+
 #include "C4Tests.hpp"
 #include "GrenadeEffectsTests.hpp"
 #include "BotTests.hpp"
@@ -3463,6 +3599,7 @@ int main()
     ok = testFpsCombatFeedContract() && ok;
     ok = testClientAcceptanceScriptAuthorityAndInput() && ok;
     ok = testClientAcceptanceScriptLiveBombActions() && ok;
+    ok = testClientAcceptanceScriptWorldItemActions() && ok;
     ok = testC4PlantInterrupt() && ok;
     ok = testC4AuthoredTriggerOccupancy() && ok;
     ok = testC4DefuseKit() && ok;
