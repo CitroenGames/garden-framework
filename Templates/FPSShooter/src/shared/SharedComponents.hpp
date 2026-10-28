@@ -3,6 +3,11 @@
 #include <cstdint>
 #include <string>
 
+// Template-owned world-item bounds shared by authoritative dropped-weapon
+// lifecycle validation and its presentation protocol. EngineCore deliberately
+// has no knowledge of this FPS-specific world rule.
+inline constexpr float kWorldItemMinimumWorldY = -50.0f;
+
 // Template health (distinct from engine ::HealthComponent in GameplayComponents.hpp;
 // both headers may be included together, no macro aliasing).
 struct FpsHealthComponent
@@ -100,6 +105,15 @@ struct DroppedWeaponComponent
     int32_t reserve = 0;
     uint16_t dropped_by = 0;
     float despawn_timer = 30.0f;
+};
+
+// Stable template protocol identity for a server-authoritative dropped item.
+// This intentionally differs from Net::NetworkedEntity: world-item messages
+// identify a client presentation object and do not make the item an EngineCore
+// snapshot entity.
+struct WorldItemReplicationIdComponent
+{
+    uint32_t value = 0;
 };
 
 // Weapon component attached to player entities

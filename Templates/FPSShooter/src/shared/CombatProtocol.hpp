@@ -2,7 +2,9 @@
 
 #include "Network/BitStream.hpp"
 #include "Network/NetworkProtocol.hpp"
+#include "WeaponTypes.hpp"
 
+#include <cmath>
 #include <cstdint>
 #include <glm/glm.hpp>
 
@@ -25,6 +27,37 @@ enum class CompetitiveMessageType : uint8_t
     TEAM_SELECT = Net::CUSTOM_MESSAGE_START + 9,    // 73 C->S reliable
     TEAM_RESULT = Net::CUSTOM_MESSAGE_START + 10    // 74 S->C reliable
 };
+
+// Template-owned durable world-item presentation messages. These values are
+// reserved after the competitive range and must remain distinct from generic
+// EngineCore message types and future template custom messages.
+enum class WorldItemMessageType : uint8_t
+{
+    WORLD_ITEM_UPSERT = Net::CUSTOM_MESSAGE_START + 11, // 75 S->C reliable
+    WORLD_ITEM_REMOVE = Net::CUSTOM_MESSAGE_START + 12  // 76 S->C reliable
+};
+
+enum class WorldItemMessageAudience : uint8_t
+{
+    Invalid,
+    ServerToClient
+};
+
+constexpr WorldItemMessageAudience worldItemMessageAudience(WorldItemMessageType type)
+{
+    switch (type) {
+    case WorldItemMessageType::WORLD_ITEM_UPSERT:
+    case WorldItemMessageType::WORLD_ITEM_REMOVE:
+        return WorldItemMessageAudience::ServerToClient;
+    }
+    return WorldItemMessageAudience::Invalid;
+}
+
+constexpr bool isWorldItemServerToClientMessage(uint8_t type)
+{
+    return worldItemMessageAudience(static_cast<WorldItemMessageType>(type)) ==
+        WorldItemMessageAudience::ServerToClient;
+}
 
 // Delivery scope is part of the game protocol contract.  ROUND_STATE is the
 // shared match snapshot; wallet, team assignment, and buy outcome belong only
@@ -110,6 +143,67 @@ struct TeamResultMessage
     uint8_t team = 0;   // Competitive::FpsTeam
 };
 
+// The yaw is radians on the wire, matching the existing network convention.
+// Callers canonicalize it to [-pi, pi) before send; receivers validate that
+// range so equivalent orientations cannot produce distinct replicated poses.
+struct WorldItemUpsertMessage
+{
+    uint8_t type = static_cast<uint8_t>(WorldItemMessageType::WORLD_ITEM_UPSERT);
+    uint32_t world_item_id = 0;
+    uint8_t weapon_type = 0;
+    glm::vec3 position = glm::vec3(0.0f);
+    float yaw = 0.0f;
+};
+
+struct WorldItemRemoveMessage
+{
+    uint8_t type = static_cast<uint8_t>(WorldItemMessageType::WORLD_ITEM_REMOVE);
+    uint32_t world_item_id = 0;
+};
+
+constexpr float kWorldItemYawPi = 3.14159265358979323846f;
+constexpr float kWorldItemYawTwoPi = 2.0f * kWorldItemYawPi;
+
+inline float normalizeWorldItemYaw(float yaw)
+{
+    if (!std::isfinite(yaw))
+        return yaw;
+    float normalized = std::fmod(yaw + kWorldItemYawPi, kWorldItemYawTwoPi);
+    if (normalized < 0.0f)
+        normalized += kWorldItemYawTwoPi;
+    return normalized - kWorldItemYawPi;
+}
+
+inline bool isNormalizedWorldItemYaw(float yaw)
+{
+    return std::isfinite(yaw) && yaw >= -kWorldItemYawPi && yaw < kWorldItemYawPi;
+}
+
+inline bool isValidWorldItemPosition(const glm::vec3& position)
+{
+    return std::isfinite(position.x) && std::isfinite(position.y) && std::isfinite(position.z) &&
+        position.y >= kWorldItemMinimumWorldY;
+}
+
+inline bool isValidWorldItemWeaponType(uint8_t wire_weapon_type)
+{
+    const WeaponType weapon_type = static_cast<WeaponType>(wire_weapon_type);
+    return hasWeaponDefinition(weapon_type) && weapon_type != WeaponType::KNIFE;
+}
+
+inline bool isValidWorldItemUpsert(const WorldItemUpsertMessage& message)
+{
+    return message.type == static_cast<uint8_t>(WorldItemMessageType::WORLD_ITEM_UPSERT) &&
+        message.world_item_id != 0 && isValidWorldItemWeaponType(message.weapon_type) &&
+        isValidWorldItemPosition(message.position) && isNormalizedWorldItemYaw(message.yaw);
+}
+
+inline bool isValidWorldItemRemove(const WorldItemRemoveMessage& message)
+{
+    return message.type == static_cast<uint8_t>(WorldItemMessageType::WORLD_ITEM_REMOVE) &&
+        message.world_item_id != 0;
+}
+
 // Client-to-server commands are validated structurally by the serializer and
 // semantically before the server session or ECS is touched. Keep these wire
 // bounds here so the server callback and focused protocol tests share one
@@ -180,6 +274,42 @@ struct WeaponStateMessage
 
 namespace CombatSerializer
 {
+    inline bool serialize(Net::BitWriter& writer, const WorldItemUpsertMessage& msg) {
+        if (!isValidWorldItemUpsert(msg)) return false;
+        writer.writeByte(msg.type);
+        writer.writeUInt32(msg.world_item_id);
+        writer.writeByte(msg.weapon_type);
+        writer.writeVector3f(msg.position);
+        writer.writeFloat(msg.yaw);
+        return true;
+    }
+
+    inline bool deserialize(Net::BitReader& reader, WorldItemUpsertMessage& msg) {
+        msg.type = reader.readByte();
+        if (msg.type != static_cast<uint8_t>(WorldItemMessageType::WORLD_ITEM_UPSERT)) return false;
+        msg.world_item_id = reader.readUInt32();
+        msg.weapon_type = reader.readByte();
+        msg.position = reader.readVector3f();
+        msg.yaw = reader.readFloat();
+        return !reader.hasError() && reader.getBitPosition() == reader.getBufferSize() * 8 &&
+            isValidWorldItemUpsert(msg);
+    }
+
+    inline bool serialize(Net::BitWriter& writer, const WorldItemRemoveMessage& msg) {
+        if (!isValidWorldItemRemove(msg)) return false;
+        writer.writeByte(msg.type);
+        writer.writeUInt32(msg.world_item_id);
+        return true;
+    }
+
+    inline bool deserialize(Net::BitReader& reader, WorldItemRemoveMessage& msg) {
+        msg.type = reader.readByte();
+        if (msg.type != static_cast<uint8_t>(WorldItemMessageType::WORLD_ITEM_REMOVE)) return false;
+        msg.world_item_id = reader.readUInt32();
+        return !reader.hasError() && reader.getBitPosition() == reader.getBufferSize() * 8 &&
+            isValidWorldItemRemove(msg);
+    }
+
     inline void serialize(Net::BitWriter& writer, const ShootResultMessage& msg) {
         writer.writeByte(msg.type);
         writer.writeUInt16(msg.shooter_client_id);

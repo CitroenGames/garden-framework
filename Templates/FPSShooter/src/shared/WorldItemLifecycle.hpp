@@ -14,7 +14,7 @@
 namespace FpsLogic {
 
 constexpr float kDroppedWeaponPickupRadius = 1.2f;
-constexpr float kDroppedWeaponMinimumWorldY = -50.0f;
+constexpr float kDroppedWeaponMinimumWorldY = kWorldItemMinimumWorldY;
 
 inline bool isWeaponLifecyclePhaseOpen(Competitive::RoundPhase phase)
 {

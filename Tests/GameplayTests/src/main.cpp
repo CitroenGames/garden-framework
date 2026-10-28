@@ -10,6 +10,7 @@
 #include "shared/FpsGameLogic.hpp"
 #include "shared/PlayerLifecycle.hpp"
 #include "shared/WorldItemLifecycle.hpp"
+#include "shared/WorldItemReplication.hpp"
 #include "shared/CompetitiveLogic.hpp"
 #include "shared/BuyZoneTriggers.hpp"
 #include "shared/CombatProtocol.hpp"
@@ -819,6 +820,164 @@ bool testDroppedWeaponEcsLifecycle()
         return fail(name, "round reset left dropped items behind");
     return pass(name);
 }
+bool testWorldItemProtocolAndReplicationIds()
+{
+    const std::string name = "WorldItemProtocol_AndReplicationIds";
+
+    if (static_cast<uint8_t>(WorldItemMessageType::WORLD_ITEM_UPSERT) !=
+            Net::CUSTOM_MESSAGE_START + 11 ||
+        static_cast<uint8_t>(WorldItemMessageType::WORLD_ITEM_REMOVE) !=
+            Net::CUSTOM_MESSAGE_START + 12 ||
+        !isWorldItemServerToClientMessage(static_cast<uint8_t>(WorldItemMessageType::WORLD_ITEM_UPSERT)) ||
+        !isWorldItemServerToClientMessage(static_cast<uint8_t>(WorldItemMessageType::WORLD_ITEM_REMOVE)) ||
+        isWorldItemServerToClientMessage(static_cast<uint8_t>(CompetitiveMessageType::TEAM_RESULT))) {
+        return fail(name, "world-item custom message range or direction changed");
+    }
+
+    WorldItemUpsertMessage upsert;
+    upsert.world_item_id = 71;
+    upsert.weapon_type = static_cast<uint8_t>(WeaponType::AK47);
+    upsert.position = glm::vec3(4.0f, 1.0f, -8.0f);
+    upsert.yaw = normalizeWorldItemYaw(7.0f);
+    Net::BitWriter upsert_writer;
+    if (!CombatSerializer::serialize(upsert_writer, upsert) || upsert_writer.getByteSize() != 22u)
+        return fail(name, "valid upsert did not serialize to the fixed wire layout");
+    Net::BitReader upsert_reader(upsert_writer.getData(), upsert_writer.getByteSize());
+    WorldItemUpsertMessage received_upsert;
+    if (!CombatSerializer::deserialize(upsert_reader, received_upsert) ||
+        received_upsert.world_item_id != upsert.world_item_id ||
+        received_upsert.weapon_type != upsert.weapon_type ||
+        !approxVec3(received_upsert.position, upsert.position) || received_upsert.yaw != upsert.yaw) {
+        return fail(name, "valid upsert did not round trip");
+    }
+
+    // Replay is safe at the codec boundary: identical durable upserts retain
+    // their same stable key. Client-side idempotent application is WI-3.
+    Net::BitReader duplicate_upsert_reader(upsert_writer.getData(), upsert_writer.getByteSize());
+    WorldItemUpsertMessage duplicate_upsert;
+    if (!CombatSerializer::deserialize(duplicate_upsert_reader, duplicate_upsert) ||
+        duplicate_upsert.world_item_id != received_upsert.world_item_id) {
+        return fail(name, "duplicate upsert changed its stable item key");
+    }
+
+    auto writeRawUpsert = [](Net::BitWriter& writer, uint8_t type, uint32_t id,
+                              uint8_t weapon_type, const glm::vec3& position, float yaw) {
+        writer.writeByte(type);
+        writer.writeUInt32(id);
+        writer.writeByte(weapon_type);
+        writer.writeVector3f(position);
+        writer.writeFloat(yaw);
+    };
+    auto rejectsRawUpsert = [&](uint8_t type, uint32_t id, uint8_t weapon_type,
+                                const glm::vec3& position, float yaw) {
+        Net::BitWriter writer;
+        writeRawUpsert(writer, type, id, weapon_type, position, yaw);
+        Net::BitReader reader(writer.getData(), writer.getByteSize());
+        WorldItemUpsertMessage decoded;
+        return !CombatSerializer::deserialize(reader, decoded);
+    };
+
+    if (!rejectsRawUpsert(static_cast<uint8_t>(WorldItemMessageType::WORLD_ITEM_REMOVE), upsert.world_item_id,
+                          upsert.weapon_type, upsert.position, upsert.yaw) ||
+        !rejectsRawUpsert(static_cast<uint8_t>(WorldItemMessageType::WORLD_ITEM_UPSERT), 0,
+                          upsert.weapon_type, upsert.position, upsert.yaw) ||
+        !rejectsRawUpsert(static_cast<uint8_t>(WorldItemMessageType::WORLD_ITEM_UPSERT), upsert.world_item_id,
+                          static_cast<uint8_t>(WeaponType::COUNT), upsert.position, upsert.yaw) ||
+        !rejectsRawUpsert(static_cast<uint8_t>(WorldItemMessageType::WORLD_ITEM_UPSERT), upsert.world_item_id,
+                          static_cast<uint8_t>(WeaponType::KNIFE), upsert.position, upsert.yaw) ||
+        !rejectsRawUpsert(static_cast<uint8_t>(WorldItemMessageType::WORLD_ITEM_UPSERT), upsert.world_item_id,
+                          upsert.weapon_type, glm::vec3(std::numeric_limits<float>::infinity(), 1.0f, 0.0f), upsert.yaw) ||
+        !rejectsRawUpsert(static_cast<uint8_t>(WorldItemMessageType::WORLD_ITEM_UPSERT), upsert.world_item_id,
+                          upsert.weapon_type, glm::vec3(0.0f, kWorldItemMinimumWorldY - 0.1f, 0.0f), upsert.yaw) ||
+        !rejectsRawUpsert(static_cast<uint8_t>(WorldItemMessageType::WORLD_ITEM_UPSERT), upsert.world_item_id,
+                          upsert.weapon_type, upsert.position, std::numeric_limits<float>::quiet_NaN()) ||
+        !rejectsRawUpsert(static_cast<uint8_t>(WorldItemMessageType::WORLD_ITEM_UPSERT), upsert.world_item_id,
+                          upsert.weapon_type, upsert.position, kWorldItemYawPi)) {
+        return fail(name, "malformed world-item upsert reached semantics");
+    }
+
+    for (size_t length = 0; length < upsert_writer.getByteSize(); ++length) {
+        Net::BitReader truncated_reader(upsert_writer.getData(), length);
+        WorldItemUpsertMessage truncated;
+        if (CombatSerializer::deserialize(truncated_reader, truncated))
+            return fail(name, "truncated upsert reached semantics");
+    }
+    Net::BitWriter trailing_upsert;
+    if (!CombatSerializer::serialize(trailing_upsert, upsert))
+        return fail(name, "valid upsert could not prepare trailing-byte fixture");
+    trailing_upsert.writeByte(0xff);
+    Net::BitReader trailing_upsert_reader(trailing_upsert.getData(), trailing_upsert.getByteSize());
+    if (CombatSerializer::deserialize(trailing_upsert_reader, received_upsert))
+        return fail(name, "upsert with trailing bytes reached semantics");
+
+    WorldItemRemoveMessage remove;
+    // A remove is valid even when no local presentation knows this ID yet;
+    // idempotent unknown-removal handling belongs to the WI-3 receiver.
+    remove.world_item_id = 0x77u;
+    Net::BitWriter remove_writer;
+    if (!CombatSerializer::serialize(remove_writer, remove) || remove_writer.getByteSize() != 5u)
+        return fail(name, "valid remove did not serialize to the fixed wire layout");
+    Net::BitReader remove_reader(remove_writer.getData(), remove_writer.getByteSize());
+    WorldItemRemoveMessage received_remove;
+    if (!CombatSerializer::deserialize(remove_reader, received_remove) ||
+        received_remove.world_item_id != remove.world_item_id)
+        return fail(name, "valid remove did not round trip");
+    Net::BitReader duplicate_remove_reader(remove_writer.getData(), remove_writer.getByteSize());
+    WorldItemRemoveMessage duplicate_remove;
+    if (!CombatSerializer::deserialize(duplicate_remove_reader, duplicate_remove) ||
+        duplicate_remove.world_item_id != remove.world_item_id)
+        return fail(name, "duplicate removal did not preserve its stable item key");
+
+    Net::BitWriter zero_remove_writer;
+    zero_remove_writer.writeByte(static_cast<uint8_t>(WorldItemMessageType::WORLD_ITEM_REMOVE));
+    zero_remove_writer.writeUInt32(0);
+    Net::BitReader zero_remove_reader(zero_remove_writer.getData(), zero_remove_writer.getByteSize());
+    if (CombatSerializer::deserialize(zero_remove_reader, received_remove))
+        return fail(name, "zero item id removal reached semantics");
+    for (size_t length = 0; length < remove_writer.getByteSize(); ++length) {
+        Net::BitReader truncated_remove_reader(remove_writer.getData(), length);
+        WorldItemRemoveMessage truncated;
+        if (CombatSerializer::deserialize(truncated_remove_reader, truncated))
+            return fail(name, "truncated remove reached semantics");
+    }
+    Net::BitWriter wrong_remove_writer;
+    wrong_remove_writer.writeByte(static_cast<uint8_t>(WorldItemMessageType::WORLD_ITEM_UPSERT));
+    wrong_remove_writer.writeUInt32(remove.world_item_id);
+    Net::BitReader wrong_remove_reader(wrong_remove_writer.getData(), wrong_remove_writer.getByteSize());
+    if (CombatSerializer::deserialize(wrong_remove_reader, received_remove))
+        return fail(name, "remove handler accepted an upsert type");
+    Net::BitWriter trailing_remove_writer;
+    if (!CombatSerializer::serialize(trailing_remove_writer, remove))
+        return fail(name, "valid remove could not prepare trailing-byte fixture");
+    trailing_remove_writer.writeByte(0xff);
+    Net::BitReader trailing_remove_reader(trailing_remove_writer.getData(), trailing_remove_writer.getByteSize());
+    if (CombatSerializer::deserialize(trailing_remove_reader, received_remove))
+        return fail(name, "remove with trailing bytes reached semantics");
+
+    entt::registry first_world;
+    const uint32_t first_id = FpsLogic::allocateWorldItemReplicationId(first_world);
+    const uint32_t second_id = FpsLogic::allocateWorldItemReplicationId(first_world);
+    const entt::entity retired_item = first_world.create();
+    first_world.emplace<WorldItemReplicationIdComponent>(retired_item, first_id);
+    first_world.destroy(retired_item);
+    const uint32_t third_id = FpsLogic::allocateWorldItemReplicationId(first_world);
+    if (first_id != 1u || second_id != 2u || third_id != 3u ||
+        !first_world.ctx().find<WorldItemReplicationRuntime>()) {
+        return fail(name, "world-scoped allocator did not issue monotonic nonzero IDs");
+    }
+    entt::registry second_world;
+    if (FpsLogic::allocateWorldItemReplicationId(second_world) != 1u)
+        return fail(name, "new world did not begin a fresh world-item ID epoch");
+    WorldItemReplicationRuntime exhausted;
+    exhausted.next_id = (std::numeric_limits<uint32_t>::max)();
+    if (exhausted.allocateId() != (std::numeric_limits<uint32_t>::max)() ||
+        exhausted.allocateId() != 0u || !exhausted.exhausted) {
+        return fail(name, "world-item ID allocator wrapped after exhaustion");
+    }
+
+    return pass(name);
+}
+
 bool testFpsDeathmatchScoreLimit()
 {
     const std::string name = "FpsDeathmatchScoreLimit";
@@ -3107,6 +3266,7 @@ int main()
     ok = testFpsDropAndPickup() && ok;
     ok = testFpsLoadoutInventoryInvariant() && ok;
     ok = testDroppedWeaponEcsLifecycle() && ok;
+    ok = testWorldItemProtocolAndReplicationIds() && ok;
     ok = testFpsDeathmatchScoreLimit() && ok;
     ok = testFpsTeamDeathmatchTeamScoreWin() && ok;
     ok = testFpsModeIsolationAndLifecycle() && ok;
