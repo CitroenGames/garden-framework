@@ -1,12 +1,16 @@
+#include "Assets/AssetManager.hpp"
+#include "Navigation/NavMeshSerializer.hpp"
 #include "Project/ProjectPackager.hpp"
 #include "Project/ProjectManager.hpp"
 #include "LevelManager.hpp"
 #include "Threading/JobSystem.hpp"
 #include "Utils/EnginePaths.hpp"
+#include "../../../Templates/FPSShooter/src/shared/SelectedLevelSidecars.hpp"
 #include "json.hpp"
 
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -240,6 +244,25 @@ private:
     bool had_original_ = false;
 };
 
+class ScopedPackagedAssetRoot
+{
+public:
+    explicit ScopedPackagedAssetRoot(const fs::path& root)
+        : assets_(Assets::AssetManager::get()), previous_root_(assets_.getAssetRoot())
+    {
+        assets_.setAssetRoot(root.string());
+    }
+
+    ~ScopedPackagedAssetRoot()
+    {
+        assets_.setAssetRoot(previous_root_);
+    }
+
+private:
+    Assets::AssetManager& assets_;
+    std::string previous_root_;
+};
+
 bool testPackagedDeBlock01CompetitiveServer()
 {
     const std::string name = "packaged FPSShooter de_block01 competitive server preserves selected-level closure";
@@ -279,8 +302,29 @@ bool testPackagedDeBlock01CompetitiveServer()
         try { descriptor_file >> descriptor; }
         catch (...) { return fail(name, "packaged FPSShooter descriptor is not valid JSON"); }
     }
-    if (descriptor.value("default_level", std::string{}) != "assets/levels/de_block01.level")
+    const std::string packaged_selected_level = descriptor.value("default_level", std::string{});
+    if (packaged_selected_level != "assets/levels/de_block01.level")
         return fail(name, "packaged descriptor did not select compiled de_block01.level");
+
+    // Resolve through the package asset root, matching the server module's
+    // selected-level boundary.  The test must not accidentally pass by
+    // finding source-tree sidecars through its process working directory.
+    ScopedPackagedAssetRoot packaged_assets(package_root / "assets");
+    FpsContent::SelectedLevelSidecars packaged_sidecars;
+    std::string sidecar_error;
+    if (!FpsContent::resolveSelectedLevelSidecars(packaged_selected_level,
+                                                  packaged_sidecars, &sidecar_error))
+        return fail(name, "packaged selected-level sidecars did not resolve: " + sidecar_error);
+    const std::vector<std::pair<std::string, fs::path>> expected_resolved_sidecars = {
+        {packaged_sidecars.nav_path, package_root / "assets/levels/de_block01.nav"},
+        {packaged_sidecars.ai_path, package_root / "assets/levels/de_block01.ai.json"},
+        {packaged_sidecars.competitive_path, package_root / "assets/levels/de_block01.competitive.json"},
+        {packaged_sidecars.sites_path, package_root / "assets/levels/de_block01.sites.json"},
+    };
+    for (const auto& [resolved, expected] : expected_resolved_sidecars) {
+        if (fs::path(resolved).lexically_normal() != expected.lexically_normal())
+            return fail(name, "selected-level resolver escaped package assets: " + resolved);
+    }
 
     const std::vector<fs::path> required_artifacts = {
         "bin/FPSShooter.dll",
@@ -306,6 +350,19 @@ bool testPackagedDeBlock01CompetitiveServer()
         source_nav.empty() || source_nav != packaged_nav)
         return fail(name, "packaged de_block01 nav sidecar was not preserved byte-for-byte");
 
+    std::ifstream packaged_nav_file(packaged_sidecars.nav_path, std::ios::binary);
+    uint32_t nav_magic = 0;
+    uint32_t nav_version = 0;
+    packaged_nav_file.read(reinterpret_cast<char*>(&nav_magic), sizeof(nav_magic));
+    packaged_nav_file.read(reinterpret_cast<char*>(&nav_version), sizeof(nav_version));
+    if (!packaged_nav_file || nav_magic != 0x4E41564Du ||
+        nav_version != Navigation::NavMeshSerializer::kCurrentVersion)
+        return fail(name, "packaged selected nav sidecar has an unsupported serializer header");
+    Navigation::NavMesh packaged_navmesh;
+    if (!Navigation::NavMeshSerializer::load(packaged_navmesh, packaged_sidecars.nav_path) ||
+        !packaged_navmesh.valid || packaged_navmesh.total_polys <= 0)
+        return fail(name, "packaged selected nav sidecar was not loadable by the current serializer");
+
     const std::vector<std::pair<fs::path, fs::path>> preserved_sidecars_and_collision = {
         {source_levels / "de_block01.competitive.json", package_root / "assets/levels/de_block01.competitive.json"},
         {source_levels / "de_block01.sites.json", package_root / "assets/levels/de_block01.sites.json"},
@@ -322,6 +379,8 @@ bool testPackagedDeBlock01CompetitiveServer()
             source_bytes.empty() || source_bytes != packaged_bytes)
             return fail(name, "package did not preserve " + source.filename().string() + " byte-for-byte");
     }
+    if (!fs::is_regular_file(packaged_sidecars.ai_path))
+        return fail(name, "packaged selected-level resolver did not locate the bot route sidecar");
 
     const fs::path server_path = package_root / "bin" / "Server.exe";
     if (!fs::is_regular_file(server_path))
@@ -354,6 +413,7 @@ bool testPackagedDeBlock01CompetitiveServer()
         ScopedEnvironmentValue game_mode("FPS_GAME_MODE", "competitive");
         ScopedEnvironmentValue bots("FPS_BOTS", "2");
         ScopedEnvironmentValue fast_match("FPS_TEST_FAST_MATCH", "1");
+        ScopedEnvironmentValue ai_debug("AI_DEBUG", "1");
         if (!CreateProcessA(server_path.string().c_str(), command_line.data(), nullptr, nullptr,
                 TRUE, CREATE_NO_WINDOW, nullptr, package_root.string().c_str(), &startup, &process))
         {
@@ -367,14 +427,18 @@ bool testPackagedDeBlock01CompetitiveServer()
 
     const std::vector<std::string> required_log_lines = {
         "FPSShooter selected level stem=levels/de_block01",
-        "Bots: navmesh status=loaded",
+        "Bots: navmesh status=loaded format=v" +
+            std::to_string(Navigation::NavMeshSerializer::kCurrentVersion),
         "Bots: authored route data loaded",
+        "Bots: spawned bot client 40000",
+        "[BotDebug] bot=0",
+        "path_valid=1",
         "[ACCEPT] FPS_TEST_FAST_MATCH=1",
         "Server started successfully",
     };
     bool observed_all = false;
     std::string output;
-    const ULONGLONG deadline = GetTickCount64() + 8000;
+    const ULONGLONG deadline = GetTickCount64() + 10000;
     while (GetTickCount64() < deadline)
     {
         if (WaitForSingleObject(process.hProcess, 0) == WAIT_OBJECT_0)
@@ -404,7 +468,7 @@ bool testPackagedDeBlock01CompetitiveServer()
     {
         const std::string reason = wait_result == WAIT_OBJECT_0
             ? "packaged competitive server exited before selected-level startup with code " + std::to_string(exit_code)
-            : "packaged competitive server did not report selected-level startup within 8 seconds";
+            : "packaged competitive server did not report selected-level navigation within 10 seconds";
         return fail(name, reason + "; log: " + output);
     }
     return pass(name);
