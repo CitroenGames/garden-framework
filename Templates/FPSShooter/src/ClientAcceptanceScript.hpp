@@ -54,7 +54,11 @@ namespace FPSShooter
         float local_position_x = 0.0f;
         float local_position_z = 0.0f;
         // These are latched only when the ordinary local-pawn reconciliation
-        // consumes a received WORLD_STATE_UPDATE.
+        // consumes a received WORLD_STATE_UPDATE. They are deliberately
+        // distinct from the predicted local Transform used to steer.
+        bool has_authoritative_pawn_position = false;
+        float authoritative_pawn_position_x = 0.0f;
+        float authoritative_pawn_position_z = 0.0f;
         uint64_t authoritative_pawn_snapshot_generation = 0;
         uint32_t last_authoritative_input_tick = 0;
     };
@@ -79,9 +83,10 @@ namespace FPSShooter
         void observeTeamResult(bool accepted, Competitive::FpsTeam assigned);
         void observeBuyResult(uint32_t request_sequence, bool accepted);
         void noteBuyRequestSent(uint32_t request_sequence);
-        // Called after the ordinary input command is queued for transport.
-        // It never sends an extra acceptance-only message.
-        void noteInputCommandSent(uint32_t command_tick);
+        // Called after an ordinary forward steering command is queued for
+        // transport. It never sends an extra acceptance-only message.
+        void noteInputCommandSent(uint32_t command_tick, bool steering_move_emitted);
+        bool isMoveToLiveSteering() const;
 
         // Applies the active scripted INPUT_COMMAND intent after the ordinary
         // action sampler has built its state. move_to_live adjusts only the
@@ -114,8 +119,11 @@ namespace FPSShooter
         bool canDispatchPawnAction(const ClientAcceptanceObservation& observation) const;
         bool canRunLivePawnAction(const ClientAcceptanceObservation& observation) const;
         bool canWaitForBombPlanted(const ClientAcceptanceObservation& observation) const;
-        bool moveHasAuthoritativeArrival(const ClientAcceptanceObservation& observation) const;
-        bool atMoveTarget(const Action& action, const ClientAcceptanceObservation& observation) const;
+        bool moveHasAuthoritativeArrival(const Action& action,
+                                          const ClientAcceptanceObservation& observation) const;
+        bool atAuthoritativeMoveTarget(const Action& action,
+                                       const ClientAcceptanceObservation& observation) const;
+        void updateMoveYaw(const Action& action, const ClientAcceptanceObservation& observation);
         void advanceAction();
 
         bool m_enabled = false;
@@ -124,9 +132,12 @@ namespace FPSShooter
         State m_state = State::Ready;
         float m_elapsed_seconds = 0.0f;
         float m_move_yaw = 0.0f;
+        float m_move_forward = 0.0f;
         uint64_t m_move_start_snapshot_generation = 0;
-        uint32_t m_move_last_sent_input_tick = 0;
-        bool m_move_arrived = false;
+        // The first ordinary command emitted after the waypoint's steering
+        // starts. A later authoritative receipt must acknowledge it before
+        // the waypoint may complete.
+        uint32_t m_move_steering_input_tick = 0;
         uint32_t m_expected_buy_sequence = 0;
     };
 }
@@ -221,9 +232,9 @@ namespace FPSShooter
         m_state = State::Ready;
         m_elapsed_seconds = 0.0f;
         m_move_yaw = 0.0f;
+        m_move_forward = 0.0f;
         m_move_start_snapshot_generation = 0;
-        m_move_last_sent_input_tick = 0;
-        m_move_arrived = false;
+        m_move_steering_input_tick = 0;
         m_expected_buy_sequence = 0;
     }
 
@@ -375,21 +386,57 @@ namespace FPSShooter
             observation.round_phase == Competitive::RoundPhase::Live;
     }
 
-    inline bool ClientAcceptanceScript::moveHasAuthoritativeArrival(const ClientAcceptanceObservation& observation) const
-    {
-        if (m_move_last_sent_input_tick == 0 ||
-            observation.authoritative_pawn_snapshot_generation <= m_move_start_snapshot_generation)
-            return false;
-        return static_cast<int32_t>(observation.last_authoritative_input_tick -
-            m_move_last_sent_input_tick) >= 0;
-    }
-
-    inline bool ClientAcceptanceScript::atMoveTarget(
+    inline bool ClientAcceptanceScript::moveHasAuthoritativeArrival(
         const Action& action, const ClientAcceptanceObservation& observation) const
     {
-        const float dx = action.target_x - observation.local_position_x;
-        const float dz = action.target_z - observation.local_position_z;
+        if (!observation.has_authoritative_pawn_position ||
+            m_move_steering_input_tick == 0 ||
+            observation.authoritative_pawn_snapshot_generation <= m_move_start_snapshot_generation ||
+            static_cast<int32_t>(observation.last_authoritative_input_tick -
+                m_move_steering_input_tick) < 0) {
+            return false;
+        }
+        return atAuthoritativeMoveTarget(action, observation);
+    }
+
+    inline bool ClientAcceptanceScript::atAuthoritativeMoveTarget(
+        const Action& action, const ClientAcceptanceObservation& observation) const
+    {
+        const float dx = action.target_x - observation.authoritative_pawn_position_x;
+        const float dz = action.target_z - observation.authoritative_pawn_position_z;
         return dx * dx + dz * dz <= action.tolerance * action.tolerance;
+    }
+
+    inline void ClientAcceptanceScript::updateMoveYaw(
+        const Action& action, const ClientAcceptanceObservation& observation)
+    {
+        // Prefer a fresh reconciliation position so steering follows the
+        // server pawn. Before the first received snapshot, use presentation
+        // prediction only to produce an ordinary forward/yaw input.
+        const bool has_fresh_authority = observation.has_authoritative_pawn_position &&
+            observation.authoritative_pawn_snapshot_generation > m_move_start_snapshot_generation;
+        const float current_x = has_fresh_authority ? observation.authoritative_pawn_position_x :
+            observation.local_position_x;
+        const float current_z = has_fresh_authority ? observation.authoritative_pawn_position_z :
+            observation.local_position_z;
+        const float delta_x = action.target_x - current_x;
+        const float delta_z = action.target_z - current_z;
+        m_move_yaw = std::atan2(delta_x, delta_z);
+
+        // Reconciliation snapshots are intentionally delayed from the input
+        // stream. Full forward thrust with a yaw that chases such a snapshot
+        // has enough inertia to orbit a waypoint. Scale the ordinary forward
+        // axis inside an eight-unit approach radius so the server pawn brakes
+        // before the next reconciliation update. Keep input neutral once the
+        // current steering source is already inside the requested tolerance;
+        // completion still requires the later authoritative receipt below.
+        constexpr float kMoveApproachDistance = 8.0f;
+        const float distance = std::sqrt(delta_x * delta_x + delta_z * delta_z);
+        if (distance <= action.tolerance) {
+            m_move_forward = 0.0f;
+        } else {
+            m_move_forward = std::clamp(distance / kMoveApproachDistance, 0.12f, 1.0f);
+        }
     }
 
     inline void ClientAcceptanceScript::advanceAction()
@@ -398,9 +445,9 @@ namespace FPSShooter
         m_state = State::Ready;
         m_elapsed_seconds = 0.0f;
         m_move_yaw = 0.0f;
+        m_move_forward = 0.0f;
         m_move_start_snapshot_generation = 0;
-        m_move_last_sent_input_tick = 0;
-        m_move_arrived = false;
+        m_move_steering_input_tick = 0;
         m_expected_buy_sequence = 0;
         if (m_index == m_actions.size()) {
             m_enabled = false;
@@ -442,18 +489,15 @@ namespace FPSShooter
                     action.duration_ms, action.input_buttons);
             } else if (action.kind == ClientAcceptanceActionKind::MoveToLive) {
                 if (!canRunLivePawnAction(observation)) return dispatch;
-                if (atMoveTarget(action, observation)) {
-                    LOG_ENGINE_INFO("[ACCEPT] move_to_live already arrived line={}", action.source_line);
-                    advanceAction();
-                    return dispatch;
-                }
+                // Do not accept a target-looking predicted transform or a
+                // spawn snapshot already present at action start. Completion
+                // requires a later reconciliation snapshot and a receipt for
+                // the normal movement command below.
                 m_state = State::RunningMoveToLive;
                 m_elapsed_seconds = 0.0f;
                 m_move_start_snapshot_generation = observation.authoritative_pawn_snapshot_generation;
-                m_move_last_sent_input_tick = 0;
-                m_move_arrived = false;
-                m_move_yaw = std::atan2(action.target_x - observation.local_position_x,
-                    action.target_z - observation.local_position_z);
+                m_move_steering_input_tick = 0;
+                updateMoveYaw(action, observation);
                 LOG_ENGINE_INFO("[ACCEPT] move_to_live begin line={} x={} z={} tolerance={} timeout_ms={}",
                     action.source_line, action.target_x, action.target_z, action.tolerance, action.duration_ms);
             } else if (action.kind == ClientAcceptanceActionKind::WaitBombPlanted) {
@@ -493,23 +537,16 @@ namespace FPSShooter
                     std::to_string(action.source_line));
                 return dispatch;
             }
-            if (atMoveTarget(action, observation)) {
-                if (!m_move_arrived) {
-                    m_move_arrived = true;
-                    LOG_ENGINE_INFO("[ACCEPT] move_to_live target observed line={}; awaiting authoritative snapshot/input acknowledgement",
-                        action.source_line);
-                }
-                if (moveHasAuthoritativeArrival(observation)) {
-                    LOG_ENGINE_INFO("[ACCEPT] move_to_live arrived line={} authoritative_snapshot={} acknowledged_input={}",
-                        action.source_line, observation.authoritative_pawn_snapshot_generation,
-                        observation.last_authoritative_input_tick);
-                    advanceAction();
-                    return dispatch;
-                }
-            } else {
-                m_move_yaw = std::atan2(action.target_x - observation.local_position_x,
-                    action.target_z - observation.local_position_z);
+            if (moveHasAuthoritativeArrival(action, observation)) {
+                LOG_ENGINE_INFO("[ACCEPT] move_to_live arrived line={} authoritative_snapshot={} acknowledged_input={}",
+                    action.source_line, observation.authoritative_pawn_snapshot_generation,
+                    observation.last_authoritative_input_tick);
+                advanceAction();
+                return dispatch;
             }
+            // Keep emitting ordinary forward input while either the receipt or
+            // the reconciliation position is still short of the waypoint.
+            updateMoveYaw(action, observation);
             m_elapsed_seconds += std::max(delta_time, 0.0f);
             if (m_elapsed_seconds * 1000.0f >= static_cast<float>(action.duration_ms)) {
                 disable("client action script stopped: move_to_live timed out on line " +
@@ -596,11 +633,17 @@ namespace FPSShooter
             m_expected_buy_sequence = request_sequence;
     }
 
-    inline void ClientAcceptanceScript::noteInputCommandSent(uint32_t command_tick)
+    inline bool ClientAcceptanceScript::isMoveToLiveSteering() const
+    {
+        return m_state == State::RunningMoveToLive;
+    }
+
+    inline void ClientAcceptanceScript::noteInputCommandSent(uint32_t command_tick,
+                                                               bool steering_move_emitted)
     {
         if (m_enabled && m_index < m_actions.size() && m_state == State::RunningMoveToLive &&
-            !m_move_arrived && command_tick != 0)
-            m_move_last_sent_input_tick = command_tick;
+            steering_move_emitted && m_move_steering_input_tick == 0 && command_tick != 0)
+            m_move_steering_input_tick = command_tick;
     }
 
     inline void ClientAcceptanceScript::observeBuyResult(uint32_t request_sequence, bool accepted)
@@ -625,14 +668,14 @@ namespace FPSShooter
         const Action& action = m_actions[m_index];
         using namespace Net::InputFlags;
         if (m_state == State::RunningMoveToLive) {
-            if (!movement_allowed || m_move_arrived)
+            if (!movement_allowed)
                 return;
             // The acceptance path changes only the ordinary movement command
-            // and its yaw. Position stays server-authoritative and arrives via
-            // the local pawn Transform observed by tick().
+            // and its yaw. Completion observes the separately latched
+            // reconciliation position, never this predicted Transform.
             state.buttons &= static_cast<uint16_t>(~(MOVE_FORWARD | MOVE_BACK | MOVE_LEFT | MOVE_RIGHT));
             state.buttons |= MOVE_FORWARD;
-            state.move_forward = 1.0f;
+            state.move_forward = m_move_forward;
             state.move_right = 0.0f;
             state.camera_yaw = m_move_yaw;
             return;

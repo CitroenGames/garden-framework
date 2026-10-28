@@ -203,6 +203,8 @@ static GameHUD g_hud;
 static FPSShooter::ClientAcceptanceScript g_acceptance_script;
 // Latches supplied by the ordinary client reconciliation path. The acceptance
 // driver observes them but does not introduce a separate acknowledgement wire path.
+static bool g_has_authoritative_pawn_position = false;
+static glm::vec3 g_authoritative_pawn_position(0.0f);
 static uint64_t g_authoritative_pawn_snapshot_generation = 0;
 static uint32_t g_last_authoritative_input_tick = 0;
 
@@ -345,6 +347,9 @@ static void runFixedClientInputStep(world& game_world,
         edges);
     if (g_local_alive && !ui_modal)
         g_acceptance_script.applyInput(input_state, movement_allowed, can_fire, can_reload);
+    const bool acceptance_steering_move_emitted = g_local_alive && !ui_modal && movement_allowed &&
+        g_acceptance_script.isMoveToLiveSteering() &&
+        (input_state.buttons & InputFlags::MOVE_FORWARD) != 0;
 
     // Client prediction mirrors the command stream. The server remains
     // authoritative for ammo, reload, and movement correction.
@@ -403,6 +408,11 @@ static void runFixedClientInputStep(world& game_world,
         uint32_t server_tick;
         if (g_network.popAuthoritativeUpdate(server_state, server_tick))
         {
+            // Keep the received local-pawn pose apart from the replayed
+            // Transform. Scripted acceptance can therefore wait for the same
+            // ordinary reconciliation truth the player receives.
+            g_has_authoritative_pawn_position = true;
+            g_authoritative_pawn_position = server_state.position;
             ++g_authoritative_pawn_snapshot_generation;
             g_last_authoritative_input_tick = server_tick;
             glm::vec3 old_display_pos = g_recon_smoothing.getDisplayPosition(trans.position);
@@ -439,7 +449,7 @@ static void runFixedClientInputStep(world& game_world,
     }
 
     g_network.sendInputCommand(command_tick, input_state);
-    g_acceptance_script.noteInputCommandSent(command_tick);
+    g_acceptance_script.noteInputCommandSent(command_tick, acceptance_steering_move_emitted);
 }
 
 static void updateRadarPresentation(world& game_world, bool connected, float delta_time)
@@ -497,6 +507,8 @@ GAME_API bool gardenGameInit(EngineServices* services)
     g_services = services;
     g_ui_modal_context_active = false;
     g_client_input_cadence.reset();
+    g_has_authoritative_pawn_position = false;
+    g_authoritative_pawn_position = glm::vec3(0.0f);
     g_authoritative_pawn_snapshot_generation = 0;
     g_last_authoritative_input_tick = 0;
     if (!configureFPShooterInput(*services->input_actions))
@@ -725,6 +737,8 @@ GAME_API void gardenGameShutdown()
     g_network.shutdown();
     g_client_input_cadence.reset();
     g_acceptance_script.reset();
+    g_has_authoritative_pawn_position = false;
+    g_authoritative_pawn_position = glm::vec3(0.0f);
     g_authoritative_pawn_snapshot_generation = 0;
     g_last_authoritative_input_tick = 0;
     g_player_controller.reset();
@@ -792,6 +806,9 @@ GAME_API void gardenGameUpdate(float delta_time)
         acceptance_observation.local_position_x = local_transform.position.x;
         acceptance_observation.local_position_z = local_transform.position.z;
     }
+    acceptance_observation.has_authoritative_pawn_position = g_has_authoritative_pawn_position;
+    acceptance_observation.authoritative_pawn_position_x = g_authoritative_pawn_position.x;
+    acceptance_observation.authoritative_pawn_position_z = g_authoritative_pawn_position.z;
     acceptance_observation.authoritative_pawn_snapshot_generation =
         g_authoritative_pawn_snapshot_generation;
     acceptance_observation.last_authoritative_input_tick =

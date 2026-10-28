@@ -2850,6 +2850,14 @@ bool testClientAcceptanceScriptLiveBombActions()
         return fail_with_cleanup("move_to_live emitted input without local transform");
 
     observation.has_local_transform = true;
+    // A stale spawn snapshot can already look like the waypoint. It must not
+    // advance the action until a newer reconciliation snapshot arrives after
+    // ordinary steering starts.
+    observation.has_authoritative_pawn_position = true;
+    observation.authoritative_pawn_position_x = 10.0f;
+    observation.authoritative_pawn_position_z = 0.0f;
+    observation.authoritative_pawn_snapshot_generation = 4;
+    observation.last_authoritative_input_tick = 99;
     script.tick(0.0f, observation);
     Net::InputState move_input;
     move_input.buttons = Net::InputFlags::MOVE_BACK;
@@ -2863,22 +2871,48 @@ bool testClientAcceptanceScriptLiveBombActions()
         !approx(move_input.camera_yaw, 1.5707963f, 0.001f)) {
         return fail_with_cleanup("move_to_live did not emit its ordinary forward/yaw input");
     }
-    script.noteInputCommandSent(10);
+    script.noteInputCommandSent(10, true);
 
-    // Local prediction observing the target is insufficient. The action holds
-    // neutral input until a newer received local-pawn snapshot acknowledges
-    // the ordinary command that drove the move.
+    // Neither the stale spawn pose nor a predicted target position is enough.
+    // The driver keeps using normal forward/yaw input until a newer received
+    // position is inside tolerance and the first steering command was
+    // processed by the server.
+    script.tick(0.0f, observation);
+    Net::InputState stale_spawn_input;
+    script.applyInput(stale_spawn_input, true, true, true);
+    if (!script.active() || (stale_spawn_input.buttons & Net::InputFlags::MOVE_FORWARD) == 0)
+        return fail_with_cleanup("move_to_live accepted or stopped at a stale spawn pose");
+
     observation.local_position_x = 9.6f;
     script.tick(0.0f, observation);
-    Net::InputState awaiting_authority;
-    script.applyInput(awaiting_authority, true, true, true);
-    if (awaiting_authority.buttons != 0)
-        return fail_with_cleanup("move_to_live kept steering after local target observation");
-    observation.authoritative_pawn_snapshot_generation = 1;
+    Net::InputState predicted_arrival_input;
+    script.applyInput(predicted_arrival_input, true, true, true);
+    if ((predicted_arrival_input.buttons & Net::InputFlags::MOVE_FORWARD) == 0)
+        return fail_with_cleanup("move_to_live stopped at predicted arrival without a received delta");
+
+    observation.authoritative_pawn_position_x = 0.0f;
+    observation.authoritative_pawn_position_z = 0.0f;
+    observation.authoritative_pawn_snapshot_generation = 5;
     observation.last_authoritative_input_tick = 9;
     script.tick(0.0f, observation);
     if (!script.active())
         return fail_with_cleanup("move_to_live accepted an older input acknowledgement");
+
+    // Full thrust at each delayed reconciliation point makes a forward-only
+    // controller orbit a waypoint. The action uses the engine's yaw convention
+    // (atan2(delta_x, delta_z)) and proportionally brakes as it approaches.
+    observation.authoritative_pawn_position_x = 8.4f;
+    observation.authoritative_pawn_snapshot_generation = 6;
+    script.tick(0.0f, observation);
+    Net::InputState approach_input;
+    script.applyInput(approach_input, true, true, true);
+    if (!approx(approach_input.camera_yaw, 1.5707963f, 0.001f) ||
+        !approx(approach_input.move_forward, 0.2f, 0.001f)) {
+        return fail_with_cleanup("move_to_live did not brake while preserving cardinal steering yaw");
+    }
+
+    observation.authoritative_pawn_position_x = 9.6f;
+    observation.authoritative_pawn_snapshot_generation = 7;
     observation.last_authoritative_input_tick = 10;
     script.tick(0.0f, observation);
     script.tick(0.0f, observation); // begin wait_bomb_planted
@@ -2904,6 +2938,39 @@ bool testClientAcceptanceScriptLiveBombActions()
     script.tick(0.002f, observation);
     if (script.active())
         return fail_with_cleanup("hold_use_live did not complete at its configured duration");
+
+    // An arbitrary diagonal uses the same yaw convention and the same
+    // approach-distance scaling as cardinal waypoints.
+    if (!writeClientAcceptanceScript(script_path, "move_to_live 10 10 0.5 1000\n") ||
+        !script_environment.set(script_path.string().c_str())) {
+        return fail_with_cleanup("could not configure diagonal move action");
+    }
+    script.loadFromEnvironment();
+    observation.local_position_x = 0.0f;
+    observation.local_position_z = 0.0f;
+    observation.authoritative_pawn_position_x = 0.0f;
+    observation.authoritative_pawn_position_z = 0.0f;
+    observation.authoritative_pawn_snapshot_generation = 8;
+    observation.last_authoritative_input_tick = 20;
+    script.tick(0.0f, observation);
+    Net::InputState diagonal_start_input;
+    script.applyInput(diagonal_start_input, true, true, true);
+    if (!approx(diagonal_start_input.camera_yaw, 0.7853982f, 0.001f) ||
+        !approx(diagonal_start_input.move_forward, 1.0f, 0.001f)) {
+        return fail_with_cleanup("move_to_live did not emit the expected diagonal steering yaw");
+    }
+    script.noteInputCommandSent(21, true);
+    observation.authoritative_pawn_position_x = 6.0f;
+    observation.authoritative_pawn_position_z = 6.0f;
+    observation.authoritative_pawn_snapshot_generation = 9;
+    observation.last_authoritative_input_tick = 20;
+    script.tick(0.0f, observation);
+    Net::InputState diagonal_approach_input;
+    script.applyInput(diagonal_approach_input, true, true, true);
+    if (!approx(diagonal_approach_input.camera_yaw, 0.7853982f, 0.001f) ||
+        !approx(diagonal_approach_input.move_forward, 0.7071068f, 0.001f)) {
+        return fail_with_cleanup("move_to_live did not proportionally brake toward a diagonal waypoint");
+    }
 
     // Defuse completion is an explicit objective action.  It must start only
     // after the reliable planted state arrives, and it must wait for the

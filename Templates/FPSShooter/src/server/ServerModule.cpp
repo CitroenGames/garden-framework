@@ -64,6 +64,33 @@ static bool g_selected_level_sidecars_valid = false;
 static bool g_competitive_map_sidecar_valid = false;
 static bool g_competitive_map_ready = false;
 
+// Process-acceptance diagnostics only.  This stays in the world context so a
+// restarted world cannot inherit log-rate state from an earlier server.
+struct AcceptanceMovementTraceRuntime {
+    std::unordered_map<uint16_t, uint32_t> last_logged_server_tick;
+};
+
+static bool acceptanceMovementTraceEnabled()
+{
+    static const bool enabled = [] {
+        const char* value = std::getenv("FPS_ACCEPTANCE_MOVEMENT_TRACE");
+        return value && std::strcmp(value, "1") == 0;
+    }();
+    return enabled;
+}
+
+static AcceptanceMovementTraceRuntime& acceptanceMovementTraceRuntime(world& game_world)
+{
+    if (auto* runtime = game_world.registry.ctx().find<AcceptanceMovementTraceRuntime>())
+        return *runtime;
+    return game_world.registry.ctx().emplace<AcceptanceMovementTraceRuntime>();
+}
+
+static void resetAcceptanceMovementTraceRuntime(world& game_world)
+{
+    acceptanceMovementTraceRuntime(game_world).last_logged_server_tick.clear();
+}
+
 // Competitive mode state lives in the active world's registry context.  The
 // aliases below deliberately keep the server integration readable while making
 // it impossible for bomb/match state to survive a world teardown.
@@ -127,6 +154,57 @@ static void sendAuthoritativeTeamState(uint16_t client_id, Competitive::FpsTeam 
 static void spawnDroppedWeapon(world& w, const glm::vec3& pos, const FpsLogic::DroppedItem& item, uint16_t by);
 
 using namespace Net;
+
+// Records only inputs that ServerNetworkManager has already accepted and
+// applied to a connected human pawn.  Bots never have an ENet ClientInfo, so
+// their synthetic owner ids cannot enter this diagnostic path.
+static void traceAcceptedHumanMovement(
+    uint16_t client_id,
+    entt::entity player_entity,
+    const InputSample& input)
+{
+    if (!g_competitive || !acceptanceMovementTraceEnabled())
+        return;
+
+    world* w = g_server_services ? g_server_services->game_world : nullptr;
+    if (!w || !w->registry.valid(player_entity) ||
+        !w->registry.all_of<NetworkedEntity, TransformComponent, RigidBodyComponent>(player_entity))
+        return;
+
+    // getClientInfo is backed only by a connected ENet peer.  Check both the
+    // peer and pawn ownership so tracing remains observational even if a
+    // template caller ever invokes the shared handler manually.
+    const ClientInfo* client = g_server_network.getClientInfo(client_id);
+    const auto& networked = w->registry.get<NetworkedEntity>(player_entity);
+    if (!client || !client->peer || !networked.is_player || networked.owner_client_id != client_id)
+        return;
+
+    constexpr uint32_t kTraceIntervalTicks = 30;
+    const uint32_t server_tick = g_server_network.getCurrentTick();
+    auto& runtime = acceptanceMovementTraceRuntime(*w);
+    auto [it, inserted] = runtime.last_logged_server_tick.try_emplace(client_id, server_tick);
+    if (!inserted) {
+        if (static_cast<uint32_t>(server_tick - it->second) < kTraceIntervalTicks)
+            return;
+        it->second = server_tick;
+    }
+
+    const auto& transform = w->registry.get<TransformComponent>(player_entity);
+    const auto& body = w->registry.get<RigidBodyComponent>(player_entity);
+    LOG_ENGINE_INFO(
+        "[AcceptanceMovement] client={} server_tick={} input_tick={} accepted_tick={} pos=({:.2f},{:.2f},{:.2f}) velocity=({:.2f},{:.2f},{:.2f}) forward={:.3f} right={:.3f} yaw={:.3f} buttons={} budget={}",
+        client_id,
+        server_tick,
+        input.tick,
+        client->last_input_tick,
+        transform.position.x, transform.position.y, transform.position.z,
+        body.velocity.x, body.velocity.y, body.velocity.z,
+        input.move_forward,
+        input.move_right,
+        input.camera_yaw,
+        static_cast<unsigned>(input.buttons),
+        client->input_tick_budget);
+}
 
 static bool ensurePlayerPhysicsBody(world& w, entt::entity player_entity)
 {
@@ -2243,6 +2321,8 @@ GAME_API bool gardenServerInit(EngineServices* services)
     despawnBotsForLevelTransition(*match_world);
     Competitive::stopCompetitiveWorldRuntime(match_world->registry);
     resetBotRuntime(*match_world);
+    if (acceptanceMovementTraceEnabled())
+        resetAcceptanceMovementTraceRuntime(*match_world);
     {
         FpsLogic::ModeConfig cfg = g_mode_composition.gameplayConfig();
         if (const char* lim = std::getenv("FPS_SCORE_LIMIT")) { int v = std::atoi(lim); if (v > 0) cfg.score_limit = v; }
@@ -2301,6 +2381,9 @@ GAME_API bool gardenServerInit(EngineServices* services)
             };
             LOG_ENGINE_INFO("FPSShooter mode: competitive max_rounds={} clinch={} round={}s freeze={}s warmup={}s",
                 ccfg.max_rounds, ccfg.winsToClinch(), ccfg.round_seconds, ccfg.freeze_seconds, ccfg.warmup_seconds);
+            if (acceptanceMovementTraceEnabled()) {
+                LOG_ENGINE_INFO("[AcceptanceMovement] enabled by FPS_ACCEPTANCE_MOVEMENT_TRACE=1; connected human input is logged at most once per 30 server ticks");
+            }
         } else {
             LOG_ENGINE_INFO("FPSShooter mode: {} score_limit={} time_limit={}",
                 g_mode_composition.name(), cfg.score_limit, cfg.time_limit_seconds);
@@ -2360,6 +2443,7 @@ GAME_API bool gardenServerInit(EngineServices* services)
             g_bomb_use_held[client_id] = (input.buttons & InputFlags::USE) != 0;
             g_bomb_last_buttons[client_id] = input.buttons;
         }
+        traceAcceptedHumanMovement(client_id, player_entity, input);
         processWeaponInput(client_id, player_entity, input, client_view_tick);
     });
 
@@ -2437,6 +2521,7 @@ GAME_API void gardenServerShutdown()
             runtime->reset();
             registry.ctx().erase<Bots::BotWorldRuntime>();
         }
+        registry.ctx().erase<AcceptanceMovementTraceRuntime>();
     }
     g_server_services = nullptr;
 }
