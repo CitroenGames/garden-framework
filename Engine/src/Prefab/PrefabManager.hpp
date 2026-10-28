@@ -22,10 +22,10 @@ struct PropertyOverride {
 };
 
 struct PrefabData {
-    nlohmann::json json;          // normalized v2 document after load
+    nlohmann::json json;          // validated current-format document after load
     std::string path;
     std::string name;
-    int version = 0;              // file version as loaded (1 = migrated)
+    int version = 0;              // validated current format version
     EntityGuid root_guid;
     bool valid = false;
 };
@@ -74,14 +74,14 @@ public:
         const std::string& collider_mesh_path = "");
 
     // Load a prefab from disk (does not create an entity). Checks the
-    // format and version: version > supported fails, version 1 is migrated
-    // to v2 in memory (migratePrefabV1toV2), anything malformed fails.
+    // format and version must exactly match the current prefab format; anything
+    // malformed or from another version fails.
     static bool loadPrefab(
         const std::string& file_path,
         PrefabData& out_data);
 
-    // Normalize a parsed prefab document to v2. Returns false (and does not
-    // modify out) when the document is not a supported prefab.
+    // Validate a parsed current-format prefab document. Returns false (and does
+    // not modify out) when the document is not a supported prefab.
     static bool normalizePrefabJson(const nlohmann::json& in, PrefabData& out_data);
 
     // Instantiate a loaded prefab: fresh GUIDs for every node, internal

@@ -155,8 +155,9 @@ bool testSubtreeInstantiateTwice()
     PrefabData data;
     if (!PrefabManager::loadPrefab(path, data))
         return fail(name, "loadPrefab failed");
-    if (!data.valid || data.version != 1 && data.json["version"] != 2)
-        return fail(name, "not normalized to v2");
+    if (!data.valid || data.version != PrefabManager::kPrefabVersion ||
+        data.json["version"] != PrefabManager::kPrefabVersion)
+        return fail(name, "current prefab version was not retained");
     if (data.json["nodes"].size() != 3)
         return fail(name, "expected 3 nodes");
     if (data.root_guid != t.root_guid)
@@ -306,33 +307,26 @@ bool testSpawnAtRootOnly()
     return pass(name);
 }
 
-// v1 single-entity prefab loads through the migrator and spawns.
-bool testV1Loads()
+// Legacy prefabs must fail the current-format validation before they can mutate a registry.
+bool testLegacyV1Rejected()
 {
-    const std::string name = "Prefab v1 single-entity loads via migrator";
+    const std::string name = "Prefab v1 rejected by current format validation";
     EventBus::get().clear();
     const std::string path = prefabPath("legacy.prefab");
     writeFile(path,
         "{\"format\":\"garden_prefab\",\"version\":1,\"name\":\"Legacy\","
-        "\"components\":{\"TagComponent\":{\"name\":\"Legacy\"},"
-        "\"TransformComponent\":{\"position\":[1,2,3],\"rotation\":[0,0,0],\"scale\":[1,1,1]}}}");
+        "\"components\":{\"TagComponent\":{\"name\":\"Legacy\"}}}");
     PrefabData data;
-    if (!PrefabManager::loadPrefab(path, data))
-        return fail(name, "v1 loadPrefab failed");
-    if (data.version != 1 || !data.valid || data.json["version"] != 2 ||
-        data.json["nodes"].size() != 1)
-        return fail(name, "v1 not migrated to a 1-node v2 document");
+    if (PrefabManager::loadPrefab(path, data))
+        return fail(name, "legacy v1 prefab was accepted");
+
     entt::registry reg;
     EntityLifecycle life(reg, 17);
-    entt::entity e = PrefabManager::get().spawn(reg, path);
-    if (e == entt::null)
-        return fail(name, "v1 spawn failed");
-    if (!nearVec(reg.get<TransformComponent>(e).position, {1, 2, 3}))
-        return fail(name, "v1 transform wrong");
-    if (reg.get<TagComponent>(e).name != "Legacy")
-        return fail(name, "v1 tag wrong");
-    if (!reg.all_of<PrefabInstanceComponent>(e))
-        return fail(name, "v1 spawn missing instance component");
+    const size_t before = entityCount(reg);
+    if (PrefabManager::get().spawn(reg, path) != entt::null)
+        return fail(name, "legacy v1 prefab spawned an entity");
+    if (entityCount(reg) != before)
+        return fail(name, "legacy v1 prefab mutated the registry");
     return pass(name);
 }
 
@@ -511,7 +505,7 @@ int main()
     if (!testSubtreeInstantiateTwice()) ++failures;
     if (!testOverrides()) ++failures;
     if (!testSpawnAtRootOnly()) ++failures;
-    if (!testV1Loads()) ++failures;
+    if (!testLegacyV1Rejected()) ++failures;
     if (!testRejectedFiles()) ++failures;
     if (!testNested()) ++failures;
 

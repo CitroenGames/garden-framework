@@ -352,49 +352,11 @@ bool PrefabManager::savePrefab(
 }
 
 // ---------------------------------------------------------------------------
-// Load + version gate + v1 migration (plan §5).
+// Load + current-format validation.
 // ---------------------------------------------------------------------------
 namespace
 {
-bool migratePrefabV1toV2(const json& in, json& out)
-{
-    const EntityGuid guid = generateEntityGuid();
-    json node;
-    node["guid"] = guidToString(guid);
-    if (in.contains("name") && in["name"].is_string())
-        node["name"] = in["name"];
-    node["components"] = in.contains("components") ? filteredComponents(in["components"])
-                                                   : json::object();
-    node["children"] = json::array();
-
-    json sidecars = json::object();
-    json sidecar;
-    bool has_sidecar = false;
-    if (in.contains("mesh") && in["mesh"].is_object())
-    {
-        sidecar.update(in["mesh"]);
-        has_sidecar = true;
-    }
-    if (in.contains("collider") && in["collider"].is_object() &&
-        in["collider"].contains("mesh_path"))
-    {
-        sidecar["collider_mesh_path"] = in["collider"]["mesh_path"];
-        has_sidecar = true;
-    }
-    if (has_sidecar)
-        sidecars[guidToString(guid)] = std::move(sidecar);
-
-    out = json::object();
-    out["format"] = "garden_prefab";
-    out["version"] = 2;
-    out["name"] = in.contains("name") ? in["name"] : json("Unnamed");
-    out["root"] = guidToString(guid);
-    out["nodes"] = json::array({std::move(node)});
-    out["sidecars"] = std::move(sidecars);
-    return true;
-}
-
-bool validateV2(const json& doc, EntityGuid& root_out)
+bool validateCurrentPrefab(const json& doc, EntityGuid& root_out)
 {
     if (!doc.contains("nodes") || !doc["nodes"].is_array() || doc["nodes"].empty())
         return false;
@@ -420,43 +382,29 @@ bool PrefabManager::normalizePrefabJson(const json& in, PrefabData& out_data)
 {
     if (!in.is_object() || !in.contains("format") || in["format"] != "garden_prefab")
     {
-        LOG_ENGINE_ERROR("PrefabManager — not a valid prefab document (bad format)");
+        LOG_ENGINE_ERROR("PrefabManager: not a valid prefab document (bad format)");
         return false;
     }
     if (!in.contains("version") || !in["version"].is_number_integer())
     {
-        LOG_ENGINE_ERROR("PrefabManager — prefab has no version field; rejected");
+        LOG_ENGINE_ERROR("PrefabManager: prefab has no version field; rejected");
         return false;
     }
+
     const int version = in["version"].get<int>();
-    if (version > kPrefabVersion)
+    if (version != kPrefabVersion)
     {
-        LOG_ENGINE_ERROR("PrefabManager — prefab version {} is newer than supported {}; rejected",
+        LOG_ENGINE_ERROR("PrefabManager: prefab version {} is unsupported; current version is {}; rejected",
                          version, kPrefabVersion);
-        return false;
-    }
-    if (version < 1)
-    {
-        LOG_ENGINE_ERROR("PrefabManager — prefab version {} is invalid; rejected", version);
         return false;
     }
 
     PrefabData result;
     result.version = version;
-    if (version == 1)
+    result.json = in;
+    if (!validateCurrentPrefab(result.json, result.root_guid))
     {
-        LOG_ENGINE_INFO("PrefabManager — migrating prefab from v1 to v2");
-        if (!migratePrefabV1toV2(in, result.json))
-            return false;
-    }
-    else
-    {
-        result.json = in;
-    }
-
-    if (!validateV2(result.json, result.root_guid))
-    {
-        LOG_ENGINE_ERROR("PrefabManager — prefab failed v2 validation (nodes/root); rejected");
+        LOG_ENGINE_ERROR("PrefabManager: prefab failed current-format validation (nodes/root); rejected");
         return false;
     }
     result.name = result.json.contains("name") && result.json["name"].is_string()
@@ -572,7 +520,7 @@ PrefabInstantiateResult PrefabManager::instantiateInternal(
     // Validate fully before creating anything: a rejected prefab must leave
     // the registry unchanged (plan P6).
     EntityGuid root_check;
-    if (!prefab.valid || !validateV2(prefab.json, root_check) || root_check != prefab.root_guid)
+    if (!prefab.valid || !validateCurrentPrefab(prefab.json, root_check) || root_check != prefab.root_guid)
     {
         LOG_ENGINE_ERROR("PrefabManager::instantiate — invalid prefab data; nothing created");
         return result;
@@ -894,7 +842,7 @@ bool PrefabManager::applyOverrides(entt::registry& registry, entt::entity instan
 }
 
 // ---------------------------------------------------------------------------
-// spawn / spawnAt: v1-compatible entry points over instantiate().
+// spawn / spawnAt convenience entry points over instantiate().
 // ---------------------------------------------------------------------------
 entt::entity PrefabManager::spawn(entt::registry& registry, const std::string& prefab_path)
 {
