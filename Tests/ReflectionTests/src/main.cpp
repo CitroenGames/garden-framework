@@ -544,7 +544,7 @@ namespace
         // Tampered empty Children was loaded as-is, Parent untouched
         const auto* tampered = loaded.try_get<ChildrenComponent>(lparent);
         if (!tampered || !tampered->children.empty()) return fail(name, "tampered Children not loaded as empty");
-        Hierarchy::rebuildChildren(loaded, {lchild, lchild2});
+        Hierarchy::rebuildChildren(loaded, {lparent, lchild, lchild2});
         const auto* lp = loaded.try_get<ParentComponent>(lchild);
         if (!lp || lp->parent.guid != parent_guid) return fail(name, "Parent corrupted after Children rebuild");
         const auto* lc = loaded.try_get<ChildrenComponent>(lparent);
