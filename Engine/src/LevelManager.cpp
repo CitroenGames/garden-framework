@@ -3704,9 +3704,11 @@ bool LevelManager::instantiateLevelParallel(
         {
             if (!entity_data.mesh_path.empty()) {
                 auto mesh_ptr = getOrFinalizeMesh(entity_data.mesh_path, entity_data);
-                if (mesh_ptr) {
-                    game_world.registry.emplace<MeshComponent>(e, mesh_ptr);
+                if (!mesh_ptr) {
+                    LOG_ENGINE_ERROR("Required mesh '{}' could not be loaded for entity '{}'", entity_data.mesh_path, entity_data.name);
+                    throw std::runtime_error("required CPU mesh construction failed");
                 }
+                game_world.registry.emplace<MeshComponent>(e, mesh_ptr);
             }
         }
 
