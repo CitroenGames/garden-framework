@@ -4339,6 +4339,10 @@ int main()
     ok = testUiRadarPresentationPrivacy() && ok;
     ok = testUiCompetitivePresentationProjection() && ok;
     ok = testAudioUnknownEventNoVoices() && ok;
+    ok = testAudioEventTableRoundTrip() && ok;
+    ok = testAudioEventTableRejectsMalformedDefinitions() && ok;
+    ok = testAudioEventTableReplacementKeepsActiveVoices() && ok;
+    ok = testFpsAudioEventTableRegistration() && ok;
     ok = testAudioVoiceStealingSelection() && ok;
     ok = testAudioPerEventCap() && ok;
     ok = testAudioClipPickNoRepeat() && ok;

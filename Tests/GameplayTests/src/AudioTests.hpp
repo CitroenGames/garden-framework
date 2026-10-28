@@ -1,10 +1,12 @@
 #pragma once
 #include "Audio/AudioSystem.hpp"
 #include "Audio/SoundEvent.hpp"
+#include "Audio/SoundEventTable.hpp"
 #include "Audio/AudioSourceSystem.hpp"
 #include "Components/AudioSourceComponent.hpp"
 #include "Components/IdentityComponent.hpp"
 #include "ECS/Hierarchy.hpp"
+#include "shared/FpsAudioEvents.hpp"
 #include <array>
 #include <chrono>
 #include <filesystem>
@@ -62,6 +64,129 @@ bool testAudioUnknownEventNoVoices()
     if (sys.activeVoiceCount() != 0 || mock.play_calls != 0) return fail(name, "unknown started voices");
     if (sys.diagnosticLogCount() > 1) return fail(name, "unknown log not rate-limited");
     if (sys.findEvent("no.such.event") != nullptr) return fail(name, "unknown lookup hit");
+    return pass(name);
+}
+
+bool testAudioEventTableRoundTrip()
+{
+    const std::string name = "Audio.EventTableRoundTrip";
+    SoundEventDef first = makeTestDef("ambient.wind", 42, 3);
+    first.volume = 0.75f;
+    first.pitch_min = 0.8f;
+    first.pitch_max = 1.2f;
+    first.group = AudioGroup::Music;
+    first.min_distance = 2.0f;
+    first.max_distance = 80.0f;
+    SoundEventDef second = makeTestDef("ui.confirm", 80, 1);
+    second.clip_paths = {"ui/confirm.wav"};
+    second.group = AudioGroup::UI;
+
+    SoundEventTable original;
+    std::string error;
+    if (!SoundEventTable::create(SoundEventTable::CurrentVersion,
+                                 {first, second}, original, &error))
+        return fail(name, "could not create source table: " + error);
+
+    std::string serialized;
+    if (!original.serialize(serialized, &error))
+        return fail(name, "could not serialize table: " + error);
+
+    SoundEventTable round_trip;
+    if (!SoundEventTable::deserialize(serialized, round_trip, &error))
+        return fail(name, "could not deserialize table: " + error);
+    if (round_trip.version() != SoundEventTable::CurrentVersion ||
+        round_trip.definitions().size() != 2)
+        return fail(name, "round-trip table shape changed");
+    const SoundEventDef& result = round_trip.definitions().front();
+    if (result.name != first.name || result.clip_paths != first.clip_paths ||
+        result.volume != first.volume || result.pitch_min != first.pitch_min ||
+        result.pitch_max != first.pitch_max || result.group != first.group ||
+        result.min_distance != first.min_distance || result.max_distance != first.max_distance ||
+        result.priority != first.priority || result.max_voices != first.max_voices ||
+        result.loop != first.loop)
+        return fail(name, "round-trip definition changed");
+    return pass(name);
+}
+
+bool testAudioEventTableRejectsMalformedDefinitions()
+{
+    const std::string name = "Audio.EventTableMalformed";
+    const std::vector<std::string> documents = {
+        "{",
+        R"({"schema":"garden.sound-events","version":2,"events":[]})",
+        R"({"schema":"other","version":1,"events":[]})",
+        R"({"schema":"garden.sound-events","version":1,"events":[{"id":"bad","clips":[],"volume":1,"pitch_min":1,"pitch_max":1,"group":"sfx","min_distance":1,"max_distance":2,"priority":50,"max_voices":1,"loop":false}]})",
+        R"({"schema":"garden.sound-events","version":1,"events":[{"id":"bad","clips":["clip.wav"],"volume":-1,"pitch_min":1,"pitch_max":1,"group":"sfx","min_distance":1,"max_distance":2,"priority":50,"max_voices":1,"loop":false}]})",
+        R"({"schema":"garden.sound-events","version":1,"events":[{"id":"bad","clips":["clip.wav"],"volume":1,"pitch_min":1.1,"pitch_max":1,"group":"sfx","min_distance":1,"max_distance":2,"priority":50,"max_voices":1,"loop":false}]})",
+        R"({"schema":"garden.sound-events","version":1,"events":[{"id":"bad","clips":["clip.wav"],"volume":1,"pitch_min":1,"pitch_max":1,"group":"sfx","min_distance":4,"max_distance":2,"priority":50,"max_voices":1,"loop":false}]})",
+        R"({"schema":"garden.sound-events","version":1,"events":[{"id":"bad","clips":["clip.wav"],"volume":1,"pitch_min":1,"pitch_max":1,"group":"sfx","min_distance":1,"max_distance":2,"priority":101,"max_voices":1,"loop":false}]})",
+        R"({"schema":"garden.sound-events","version":1,"events":[{"id":"bad","clips":["clip.wav"],"volume":1,"pitch_min":1,"pitch_max":1,"group":"sfx","min_distance":1,"max_distance":2,"priority":50,"max_voices":-1,"loop":false}]})",
+        R"({"schema":"garden.sound-events","version":1,"events":[{"id":"bad","clips":["clip.wav"],"volume":1,"pitch_min":1,"pitch_max":1,"group":"invalid","min_distance":1,"max_distance":2,"priority":50,"max_voices":1,"loop":false}]})",
+    };
+    for (const std::string& document : documents)
+    {
+        SoundEventTable rejected;
+        std::string error;
+        if (SoundEventTable::deserialize(document, rejected, &error) || error.empty())
+            return fail(name, "malformed document was accepted without a named error");
+    }
+
+    SoundEventDef duplicate = makeTestDef("duplicate");
+    SoundEventTable rejected;
+    std::string error;
+    if (SoundEventTable::create(SoundEventTable::CurrentVersion, {duplicate, duplicate}, rejected, &error) ||
+        error.find("duplicate") == std::string::npos)
+        return fail(name, "duplicate event id was not rejected deterministically");
+    return pass(name);
+}
+
+bool testAudioEventTableReplacementKeepsActiveVoices()
+{
+    const std::string name = "Audio.EventTableReplacement";
+    AudioEventSystem sys;
+    MockAudioBackend mock;
+    sys.setPlayFn(mock.playFn());
+    sys.setStopFn(mock.stopFn());
+    sys.setSeed(9);
+
+    SoundEventTable first;
+    SoundEventTable second;
+    std::string error;
+    if (!SoundEventTable::create(1, {makeTestDef("before")}, first, &error) ||
+        !SoundEventTable::create(1, {makeTestDef("after")}, second, &error) ||
+        !sys.replaceEventTable(first, &error))
+        return fail(name, "could not install initial table: " + error);
+    if (sys.play2D("before") == INVALID_SOUND || sys.activeVoiceCount() != 1)
+        return fail(name, "initial table did not start a voice");
+    if (!sys.replaceEventTable(second, &error))
+        return fail(name, "replacement table rejected: " + error);
+    if (sys.activeVoiceCount() != 1 || !mock.stopped.empty())
+        return fail(name, "replacement invalidated an active voice");
+    if (sys.play2D("before") != INVALID_SOUND || sys.play2D("after") == INVALID_SOUND)
+        return fail(name, "replacement did not atomically change future lookups");
+    return pass(name);
+}
+
+bool testFpsAudioEventTableRegistration()
+{
+    const std::string name = "Audio.FpsTemplateEventTable";
+    const SoundEventTable& table = fpsAudioEventTable();
+    std::string error;
+    if (!table.validate(&error) || table.version() != SoundEventTable::CurrentVersion)
+        return fail(name, "template table is invalid: " + error);
+
+    AudioEventSystem sys;
+    if (!sys.replaceEventTable(table, &error) || sys.eventCount() != 5)
+        return fail(name, "template table was not registered: " + error);
+    constexpr const char* referenced_events[] = {
+        "weapon.fire", "player.footstep", "player.hurt", "player.death", "ui.click",
+    };
+    for (const char* event_name : referenced_events)
+    {
+        const SoundEventDef* definition = sys.findEvent(event_name);
+        if (!definition || definition->clip_paths.empty() || definition->clip_paths.front().empty())
+            return fail(name, "template event has no clip binding: " + std::string(event_name));
+    }
     return pass(name);
 }
 

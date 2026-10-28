@@ -11,6 +11,8 @@
 #include <unordered_map>
 #include <vector>
 
+class SoundEventTable;
+
 // Data-driven sound event definition. Event names and clip paths are
 // owned by game/template data; the engine ships no event names.
 struct SoundEventDef
@@ -44,7 +46,13 @@ public:
         return instance;
     }
 
-    void registerEvent(SoundEventDef def);
+    // Incremental registration is for code-owned template data. Duplicates and
+    // invalid definitions reject without changing the current table.
+    bool registerEvent(SoundEventDef def, std::string* error = nullptr);
+    // Replace all definitions as one presentation-frame operation. Existing
+    // active voices retain their mixer ownership until naturally reaped or
+    // stopped; only future event lookups use the replacement table.
+    bool replaceEventTable(const SoundEventTable& table, std::string* error = nullptr);
     void clearEvents();
     const SoundEventDef* findEvent(const std::string& name) const;
     size_t eventCount() const { return m_events.size(); }

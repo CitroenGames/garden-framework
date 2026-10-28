@@ -1,4 +1,5 @@
 #include "Audio/SoundEvent.hpp"
+#include "Audio/SoundEventTable.hpp"
 #include "Components/Components.hpp"
 #include "ECS/Hierarchy.hpp"
 #include "Utils/Log.hpp"
@@ -26,11 +27,35 @@ SoundHandle defaultPlay(const SoundEventDef& def, const std::string& clip_path,
 void defaultStop(SoundHandle h) { AudioSystem::get().stopSound(h); }
 }
 
-void AudioEventSystem::registerEvent(SoundEventDef def)
+bool AudioEventSystem::registerEvent(SoundEventDef def, std::string* error)
 {
-    if (def.name.empty()) return;
+    SoundEventTable candidate;
+    if (!SoundEventTable::create(SoundEventTable::CurrentVersion, {def}, candidate, error))
+        return false;
     std::string key = def.name;
-    m_events[key] = std::move(def);
+    if (m_events.contains(key))
+    {
+        if (error)
+            *error = "duplicate sound event id '" + key + "'";
+        return false;
+    }
+    m_events.emplace(std::move(key), std::move(def));
+    return true;
+}
+
+bool AudioEventSystem::replaceEventTable(const SoundEventTable& table, std::string* error)
+{
+    if (!table.validate(error))
+        return false;
+
+    std::unordered_map<std::string, SoundEventDef> replacement;
+    replacement.reserve(table.definitions().size());
+    for (const SoundEventDef& definition : table.definitions())
+        replacement.emplace(definition.name, definition);
+
+    m_events.swap(replacement);
+    m_last_clip.clear();
+    return true;
 }
 void AudioEventSystem::clearEvents() { m_events.clear(); m_last_clip.clear(); }
 const SoundEventDef* AudioEventSystem::findEvent(const std::string& name) const
