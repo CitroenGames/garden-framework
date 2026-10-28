@@ -7,6 +7,7 @@
 
 #include <atomic>
 #include <exception>
+#include <unordered_set>
 #include <utility>
 
 namespace {
@@ -312,6 +313,70 @@ garden::ecs::EntityHandle world::restoreScopedEntity(EntityRef reference)
     } catch (...) {
         if (entity != entt::null && registry.valid(entity)) registry.destroy(entity);
         return {};
+    }
+}
+
+bool world::restoreScopedEntities(const std::vector<EntityRef>& references,
+                                  std::vector<garden::ecs::EntityHandle>& out_handles)
+{
+    if (active_queries) return false;
+    std::vector<entt::entity> entities;
+    std::vector<garden::ecs::EntityHandle> handles;
+    try {
+        std::unordered_set<EntityGuid, GuidHash> requested;
+        requested.reserve(references.size());
+        for (const auto& ref : references)
+            if (ref.isNull() || !requested.insert(ref.guid).second) return false;
+        for (const auto [entity, identity] : registry.view<IdentityComponent>().each()) {
+            (void)entity;
+            if (requested.count(identity.guid)) return false;
+        }
+        entities.reserve(references.size());
+        handles.reserve(references.size());
+        if (!component_state) component_state = std::make_unique<ComponentWorldState>();
+        auto sink = registry.on_destroy<ScopedEntityMarker>();
+        sink.disconnect<&retireScopedEntity>();
+        sink.connect<&retireScopedEntity>();
+        for (const auto& ref : references) {
+            if (!component_state->nextSerial) throw 0;
+            const entt::entity entity = registry.create();
+            entities.push_back(entity);
+            const garden::ecs::ComponentEntityKey key{
+                static_cast<uint32_t>(entt::to_entity(entity)),
+                static_cast<uint32_t>(entt::to_version(entity)) + 1u};
+            const uint64_t serial = component_state->nextSerial++;
+            registry.emplace<ScopedEntityMarker>(entity, &component_state->store, key, serial);
+            registry.emplace<IdentityComponent>(entity, IdentityComponent{ref.guid});
+            if (!registry.valid(entity) || !registry.all_of<ScopedEntityMarker, IdentityComponent>(entity) ||
+                registry.get<IdentityComponent>(entity).guid != ref.guid)
+                throw 0;
+            garden::ecs::EntityHandle handle;
+            handle.m_world = component_state->token;
+            handle.m_entity = static_cast<uint32_t>(entt::to_integral(entity));
+            handle.m_serial = serial;
+            handles.push_back(handle);
+        }
+        // Hooks may have modified identities or created colliding entities.
+        std::unordered_map<EntityGuid, size_t, GuidHash> counts;
+        counts.reserve(references.size());
+        for (const auto [entity, identity] : registry.view<IdentityComponent>().each()) {
+            (void)entity;
+            if (requested.count(identity.guid)) ++counts[identity.guid];
+        }
+        for (size_t i = 0; i < references.size(); ++i)
+            if (!registry.valid(entities[i]) ||
+                !registry.all_of<ScopedEntityMarker, IdentityComponent>(entities[i]) ||
+                registry.get<ScopedEntityMarker>(entities[i]).serial != handles[i].m_serial ||
+                registry.get<IdentityComponent>(entities[i]).guid != references[i].guid ||
+                counts[references[i].guid] != 1) throw 0;
+        out_handles = std::move(handles);
+        return true;
+    } catch (...) {
+        for (auto it = entities.rbegin(); it != entities.rend(); ++it)
+            if (registry.valid(*it)) {
+                try { registry.destroy(*it); } catch (...) {}
+            }
+        return false;
     }
 }
 

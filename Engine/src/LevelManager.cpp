@@ -34,6 +34,7 @@
 #include <functional>
 #include <initializer_list>
 #include <limits>
+#include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -873,14 +874,14 @@ static void setupLevelColliderComponent(entt::registry& registry,
     }
 }
 
-static void setupLevelTerrainComponent(entt::registry& registry,
+static bool setupLevelTerrainComponent(entt::registry& registry,
                                        entt::entity e,
                                        const LevelEntity& entity_data,
                                        IRenderAPI* render_api)
 {
     auto* terrain = registry.try_get<TerrainComponent>(e);
     if (!terrain || terrain->heightmap_path.empty())
-        return;
+        return true;
 
     const std::string resolved_heightmap =
         Assets::AssetManager::get().resolveAssetPath(terrain->heightmap_path);
@@ -893,7 +894,7 @@ static void setupLevelTerrainComponent(entt::registry& registry,
     {
         LOG_ENGINE_ERROR("Entity '{}': failed to build terrain: {}",
                          entity_data.name, terrain_mesh.error_message);
-        return;
+        return false;
     }
 
     auto render_mesh = terrain_mesh.render_mesh;
@@ -932,6 +933,7 @@ static void setupLevelTerrainComponent(entt::registry& registry,
         col.restitution = terrain->restitution;
         LOG_ENGINE_INFO("Entity '{}': using heightmap terrain collision", entity_data.name);
     }
+    return true;
 }
 
 static PhysicsSystem::PhysicsBodyDesc makeBodyDesc(const LevelEntity& entity_data, const ColliderComponent& col, bool player_body = false)
@@ -3593,14 +3595,12 @@ bool LevelManager::instantiateLevelParallel(
         entity = entt::null;
     std::vector<size_t> identity_occurrences(instantiation_plan.identity_guids.size(), 0);
     std::vector<garden::ecs::EntityHandle> restored_handles;
-    restored_handles.reserve(level_data.entities.size());
+    std::vector<EntityRef> references;
+    references.reserve(instantiation_plan.identity_guids.size());
     for (const EntityGuid& guid : instantiation_plan.identity_guids)
-    {
-        const auto handle = game_world.restoreScopedEntity(EntityRef{guid});
-        if (handle == garden::ecs::EntityHandle{})
-            break;
-        restored_handles.push_back(handle);
-    }
+        references.push_back(EntityRef{guid});
+    if (!game_world.restoreScopedEntities(references, restored_handles))
+        return false;
     const size_t restored_count = restored_handles.size();
 
     // Internal legacy bridge: take one snapshot for the level component and
@@ -3636,10 +3636,9 @@ bool LevelManager::instantiateLevelParallel(
         return false;
     }
 
-    // Apply world settings only after scoped creation has succeeded.
-    game_world.setGravity(level_data.metadata.gravity);
-    game_world.setFixedDelta(level_data.metadata.fixed_delta);
-    applyGameplayFrameworkSettings(level_data.metadata, game_world, "", create_authority_game_mode);
+    const auto previous_gravity = game_world.getGravity();
+    const auto previous_delta = game_world.getFixedDelta();
+    try {
 
     entt::entity player_entity = entt::null;
     entt::entity freecam_entity = entt::null;
@@ -3729,7 +3728,8 @@ bool LevelManager::instantiateLevelParallel(
         setupLevelColliderComponent(game_world.registry, e, entity_data, getOrFinalizeMesh);
         deserializeReflectedComponents(m_reflection, game_world.registry, e,
                                        instantiation_plan.reflected_components[entity_index]);
-        setupLevelTerrainComponent(game_world.registry, e, entity_data, render_api);
+        if (!setupLevelTerrainComponent(game_world.registry, e, entity_data, render_api))
+            throw std::runtime_error("terrain construction failed");
         applyWaterComponentToEntityMesh(game_world.registry, e);
 
         // Player
@@ -3756,6 +3756,8 @@ bool LevelManager::instantiateLevelParallel(
 
             {
                 game_world.getPhysicsSystem().createPlayerBody(game_world.registry, e);
+                if (!game_world.getPhysicsSystem().hasCharacterController(e))
+                    throw std::runtime_error("player controller construction failed");
             }
 
             player_entity = e;
@@ -3841,7 +3843,10 @@ bool LevelManager::instantiateLevelParallel(
     // Player CharacterVirtual entities are roots by the staged policy and are
     // created during the entity pass above.
     for (size_t i = 0; i < created_entities.size(); ++i)
-        createLevelPhysicsBody(game_world, created_entities[i], level_data.entities[i]);
+        if (level_data.entities[i].type != EntityType::Player &&
+            game_world.registry.all_of<ColliderComponent, TransformComponent>(created_entities[i]) &&
+            !createLevelPhysicsBody(game_world, created_entities[i], level_data.entities[i]))
+            throw std::runtime_error("physics body construction failed");
 
     // Second pass: Resolve references (PlayerRepresentation)
     for (size_t i = 0; i < level_data.entities.size(); ++i) {
@@ -3872,7 +3877,8 @@ bool LevelManager::instantiateLevelParallel(
                 auto target_it = entity_map.find(entity_data.constraint_target_name);
                 if (target_it != entity_map.end()) {
                     cc.target_entity = ensureEntityRef(game_world.registry, target_it->second);
-                    game_world.getPhysicsSystem().createConstraint(e, target_it->second, cc);
+                    if (!game_world.getPhysicsSystem().createConstraint(e, target_it->second, cc))
+                        throw std::runtime_error("constraint construction failed");
                 } else {
                     LOG_ENGINE_WARN("Constraint on '{}' cannot find target '{}'",
                                     entity_data.name, entity_data.constraint_target_name);
@@ -3881,6 +3887,10 @@ bool LevelManager::instantiateLevelParallel(
         }
     }
 
+    game_world.setGravity(level_data.metadata.gravity);
+    game_world.setFixedDelta(level_data.metadata.fixed_delta);
+    applyGameplayFrameworkSettings(level_data.metadata, game_world, "", create_authority_game_mode);
+
     if (out_player_entity) *out_player_entity = player_entity;
     if (out_freecam_entity) *out_freecam_entity = freecam_entity;
     if (out_player_rep_entity) *out_player_rep_entity = player_rep_entity;
@@ -3888,6 +3898,20 @@ bool LevelManager::instantiateLevelParallel(
 
     LOG_ENGINE_INFO("Level instantiation complete (parallel): {} entities", level_data.entities.size());
     return true;
+    } catch (...) {
+        // Constraints must be removed before any of their bodies.
+        for (auto e : created_entities)
+            game_world.getPhysicsSystem().removeConstraint(e);
+        for (auto e : created_entities)
+            game_world.getPhysicsSystem().removeBody(e);
+        for (auto it = restored_handles.rbegin(); it != restored_handles.rend(); ++it)
+            if (game_world.destroyEntity(*it) != garden::ecs::ComponentStoreResult::Success)
+                LOG_ENGINE_ERROR("Level instantiation: failed to retire a restored entity");
+        game_world.setGravity(previous_gravity);
+        game_world.setFixedDelta(previous_delta);
+        LOG_ENGINE_ERROR("Level instantiation failed during construction");
+        return false;
+    }
 }
 
 bool LevelManager::instantiateLevel(

@@ -4372,6 +4372,89 @@ static void failSecondLevelIdentity(entt::registry& registry, entt::entity entit
         throw 1;
 }
 
+static bool testLevelManagerLargeIdentityCohort()
+{
+    const std::string name = "LevelManager restores a large identity cohort";
+    LevelManager manager;
+    world w;
+    const EntityRef sentinel_ref{EntityGuid{0xCC00, 0xDD00}};
+    const auto sentinel = w.restoreScopedEntity(sentinel_ref);
+    LevelData level;
+    constexpr size_t count = 2048;
+    for (size_t i = 0; i < count; ++i)
+    {
+        LevelEntity entity;
+        entity.reflected_components = nlohmann::json::object({
+            {"IdentityComponent", {{"guid", guidToString(EntityGuid{0xF000u + i, 0xA000u + i})}}}
+        });
+        level.entities.push_back(std::move(entity));
+    }
+    std::vector<entt::entity> created;
+    if (!manager.instantiateLevel(level, w, nullptr, nullptr, nullptr, nullptr, false, &created) ||
+        created.size() != count || w.persistedReference(sentinel) != sentinel_ref)
+        return fail(name, "cohort restore failed or changed sentinel");
+    for (size_t i = 0; i < count; ++i)
+        if (w.registry.get<IdentityComponent>(created[i]).guid != EntityGuid{0xF000u + i, 0xA000u + i})
+            return fail(name, "cohort order or identity changed");
+    return pass(name);
+}
+
+static std::vector<entt::entity> levelRollbackObserved;
+static bool levelRollbackThrowComponent = false;
+static void observeLevelRollbackTransform(entt::registry&, entt::entity entity)
+{
+    levelRollbackObserved.push_back(entity);
+    if (levelRollbackThrowComponent && levelRollbackObserved.size() == 2)
+        throw 1;
+}
+
+static bool testLevelManagerPostCreationRollback()
+{
+    const std::string name = "LevelManager rolls back component and physics failures";
+    for (bool component_failure : {true, false})
+    {
+        LevelManager manager;
+        world w;
+        const EntityRef sentinel_ref{EntityGuid{0xDD01, 0xEE01}};
+        const auto sentinel = w.restoreScopedEntity(sentinel_ref);
+        const auto old_gravity = w.getGravity();
+        const auto old_delta = w.getFixedDelta();
+        LevelData level;
+        level.metadata.gravity = old_gravity + glm::vec3(1, 2, 3);
+        level.metadata.fixed_delta = old_delta * 2;
+        for (int i = 0; i != 2; ++i)
+        {
+            LevelEntity entity;
+            entity.type = EntityType::Physical;
+            entity.has_collider = true;
+            entity.collider_shape_type = i == 0 ? "Box" : "Mesh";
+            entity.reflected_components = nlohmann::json::object({
+                {"IdentityComponent", {{"guid", guidToString(EntityGuid{0xA100u + i, 0xB100u + i})}}}
+            });
+            level.entities.push_back(entity);
+        }
+        levelRollbackObserved.clear();
+        levelRollbackThrowComponent = component_failure;
+        auto connection = w.registry.on_construct<TransformComponent>().connect<&observeLevelRollbackTransform>();
+        entt::entity player = entt::entity{123};
+        std::vector<entt::entity> created{entt::entity{456}};
+        const bool success = manager.instantiateLevel(level, w, nullptr, &player, nullptr, nullptr, false, &created);
+        connection.release();
+        levelRollbackThrowComponent = false;
+        if (success || levelRollbackObserved.size() != 2 || player != entt::entity{123} ||
+            created != std::vector<entt::entity>{entt::entity{456}} ||
+            w.getGravity() != old_gravity || w.getFixedDelta() != old_delta ||
+            w.persistedReference(sentinel) != sentinel_ref ||
+            w.registry.view<IdentityComponent>().size() != 1)
+            return fail(name, "failure changed sentinel, settings, or outputs");
+        for (auto e : levelRollbackObserved)
+            if (w.registry.valid(e) || w.getPhysicsSystem().hasBody(e) ||
+                w.getPhysicsSystem().hasCharacterController(e))
+                return fail(name, "failed cohort retained entity or physics state");
+    }
+    return pass(name);
+}
+
 static bool testLevelManagerScopedRestoreRollback()
 {
     const std::string name = "LevelManager rolls back failed scoped cohort restore";
@@ -4559,6 +4642,8 @@ int main()
     ok = testLevelManagerHBRejectsBeforeRegistryMutation() && ok;
     run("LevelManager rolls back failed scoped cohort restore");
     ok = testLevelManagerScopedRestoreRollback() && ok;
+    ok = testLevelManagerPostCreationRollback() && ok;
+    ok = testLevelManagerLargeIdentityCohort() && ok;
 
     Assets::AssetManager::get().shutdown();
     EE::CLog::Shutdown();

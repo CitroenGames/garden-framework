@@ -116,6 +116,10 @@ public:
     // Restore a unique, non-null persisted identity. Failure returns an invalid
     // handle; creation is forbidden during a query.
     garden::ecs::EntityHandle restoreScopedEntity(EntityRef reference);
+    // Restores a unique cohort after validating the destination in one scan.
+    // On failure no cohort handles are published and restored entities retire.
+    bool restoreScopedEntities(const std::vector<EntityRef>& references,
+                               std::vector<garden::ecs::EntityHandle>& out_handles);
     garden::ecs::EntityHandle scopedEntity(EntityRef entity);
     // Returns null for invalid handles or missing, null, or ambiguous identity.
     // This read does not assign identity or scope and is safe during queries.
