@@ -871,65 +871,81 @@ bool testWorldItemProtocolAndReplicationIds()
         return fail(name, "world-item custom message range or direction changed");
     }
 
+    if (!isValidWorldItemUpsertDelivery(static_cast<uint8_t>(WorldItemUpsertDelivery::Live)) ||
+        !isValidWorldItemUpsertDelivery(static_cast<uint8_t>(WorldItemUpsertDelivery::AdmissionReplay)) ||
+        isValidWorldItemUpsertDelivery(2u)) {
+        return fail(name, "world-item delivery provenance enum validation changed");
+    }
+
     WorldItemUpsertMessage upsert;
     upsert.world_item_id = 71;
+    upsert.delivery = static_cast<uint8_t>(WorldItemUpsertDelivery::AdmissionReplay);
     upsert.weapon_type = static_cast<uint8_t>(WeaponType::AK47);
     upsert.position = glm::vec3(4.0f, 1.0f, -8.0f);
     upsert.yaw = normalizeWorldItemYaw(7.0f);
     Net::BitWriter upsert_writer;
-    if (!CombatSerializer::serialize(upsert_writer, upsert) || upsert_writer.getByteSize() != 22u)
+    if (!CombatSerializer::serialize(upsert_writer, upsert) || upsert_writer.getByteSize() != 23u)
         return fail(name, "valid upsert did not serialize to the fixed wire layout");
     Net::BitReader upsert_reader(upsert_writer.getData(), upsert_writer.getByteSize());
     WorldItemUpsertMessage received_upsert;
     if (!CombatSerializer::deserialize(upsert_reader, received_upsert) ||
         received_upsert.world_item_id != upsert.world_item_id ||
+        received_upsert.delivery != upsert.delivery ||
         received_upsert.weapon_type != upsert.weapon_type ||
         !approxVec3(received_upsert.position, upsert.position) || received_upsert.yaw != upsert.yaw) {
         return fail(name, "valid upsert did not round trip");
     }
 
-    // Replay is safe at the codec boundary: identical durable upserts retain
-    // their same stable key. Client-side idempotent application is WI-3.
+    // Replayed upserts retain both their stable key and server-authored delivery
+    // provenance. Client-side idempotent application is WI-3.
     Net::BitReader duplicate_upsert_reader(upsert_writer.getData(), upsert_writer.getByteSize());
     WorldItemUpsertMessage duplicate_upsert;
     if (!CombatSerializer::deserialize(duplicate_upsert_reader, duplicate_upsert) ||
-        duplicate_upsert.world_item_id != received_upsert.world_item_id) {
-        return fail(name, "duplicate upsert changed its stable item key");
+        duplicate_upsert.world_item_id != received_upsert.world_item_id ||
+        duplicate_upsert.delivery != received_upsert.delivery) {
+        return fail(name, "duplicate upsert changed its stable key or provenance");
     }
 
     auto writeRawUpsert = [](Net::BitWriter& writer, uint8_t type, uint32_t id,
-                              uint8_t weapon_type, const glm::vec3& position, float yaw) {
+                              uint8_t delivery, uint8_t weapon_type,
+                              const glm::vec3& position, float yaw) {
         writer.writeByte(type);
         writer.writeUInt32(id);
+        writer.writeByte(delivery);
         writer.writeByte(weapon_type);
         writer.writeVector3f(position);
         writer.writeFloat(yaw);
     };
-    auto rejectsRawUpsert = [&](uint8_t type, uint32_t id, uint8_t weapon_type,
-                                const glm::vec3& position, float yaw) {
+    auto rejectsRawUpsert = [&](uint8_t type, uint32_t id, uint8_t delivery,
+                                uint8_t weapon_type, const glm::vec3& position, float yaw) {
         Net::BitWriter writer;
-        writeRawUpsert(writer, type, id, weapon_type, position, yaw);
+        writeRawUpsert(writer, type, id, delivery, weapon_type, position, yaw);
         Net::BitReader reader(writer.getData(), writer.getByteSize());
         WorldItemUpsertMessage decoded;
         return !CombatSerializer::deserialize(reader, decoded);
     };
 
     if (!rejectsRawUpsert(static_cast<uint8_t>(WorldItemMessageType::WORLD_ITEM_REMOVE), upsert.world_item_id,
-                          upsert.weapon_type, upsert.position, upsert.yaw) ||
+                          upsert.delivery, upsert.weapon_type, upsert.position, upsert.yaw) ||
         !rejectsRawUpsert(static_cast<uint8_t>(WorldItemMessageType::WORLD_ITEM_UPSERT), 0,
-                          upsert.weapon_type, upsert.position, upsert.yaw) ||
+                          upsert.delivery, upsert.weapon_type, upsert.position, upsert.yaw) ||
         !rejectsRawUpsert(static_cast<uint8_t>(WorldItemMessageType::WORLD_ITEM_UPSERT), upsert.world_item_id,
-                          static_cast<uint8_t>(WeaponType::COUNT), upsert.position, upsert.yaw) ||
+                          0xffu, upsert.weapon_type, upsert.position, upsert.yaw) ||
         !rejectsRawUpsert(static_cast<uint8_t>(WorldItemMessageType::WORLD_ITEM_UPSERT), upsert.world_item_id,
-                          static_cast<uint8_t>(WeaponType::KNIFE), upsert.position, upsert.yaw) ||
+                          upsert.delivery, static_cast<uint8_t>(WeaponType::COUNT), upsert.position, upsert.yaw) ||
         !rejectsRawUpsert(static_cast<uint8_t>(WorldItemMessageType::WORLD_ITEM_UPSERT), upsert.world_item_id,
-                          upsert.weapon_type, glm::vec3(std::numeric_limits<float>::infinity(), 1.0f, 0.0f), upsert.yaw) ||
+                          upsert.delivery, static_cast<uint8_t>(WeaponType::KNIFE), upsert.position, upsert.yaw) ||
         !rejectsRawUpsert(static_cast<uint8_t>(WorldItemMessageType::WORLD_ITEM_UPSERT), upsert.world_item_id,
-                          upsert.weapon_type, glm::vec3(0.0f, kWorldItemMinimumWorldY - 0.1f, 0.0f), upsert.yaw) ||
+                          upsert.delivery, upsert.weapon_type,
+                          glm::vec3(std::numeric_limits<float>::infinity(), 1.0f, 0.0f), upsert.yaw) ||
         !rejectsRawUpsert(static_cast<uint8_t>(WorldItemMessageType::WORLD_ITEM_UPSERT), upsert.world_item_id,
-                          upsert.weapon_type, upsert.position, std::numeric_limits<float>::quiet_NaN()) ||
+                          upsert.delivery, upsert.weapon_type,
+                          glm::vec3(0.0f, kWorldItemMinimumWorldY - 0.1f, 0.0f), upsert.yaw) ||
         !rejectsRawUpsert(static_cast<uint8_t>(WorldItemMessageType::WORLD_ITEM_UPSERT), upsert.world_item_id,
-                          upsert.weapon_type, upsert.position, kWorldItemYawPi)) {
+                          upsert.delivery, upsert.weapon_type, upsert.position,
+                          std::numeric_limits<float>::quiet_NaN()) ||
+        !rejectsRawUpsert(static_cast<uint8_t>(WorldItemMessageType::WORLD_ITEM_UPSERT), upsert.world_item_id,
+                          upsert.delivery, upsert.weapon_type, upsert.position, kWorldItemYawPi)) {
         return fail(name, "malformed world-item upsert reached semantics");
     }
 

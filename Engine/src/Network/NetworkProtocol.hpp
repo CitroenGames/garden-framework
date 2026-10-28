@@ -11,9 +11,13 @@
 
 namespace Net {
 
-// Protocol version for compatibility checking (wire v3, exact-match)
-constexpr uint32_t NETWORK_PROTOCOL_VERSION = 3;
-constexpr uint32_t NETWORK_PROTOCOL_MIN_SUPPORTED = 3; // exact-match policy kept
+// Protocol version for compatibility checking (wire v4, exact-match).
+//
+// v4 gates the changed custom-message upsert schema: v3 did not carry its
+// delivery provenance byte. Exact matching rejects an older module before any
+// custom payload can be dispatched.
+constexpr uint32_t NETWORK_PROTOCOL_VERSION = 4;
+constexpr uint32_t NETWORK_PROTOCOL_MIN_SUPPORTED = 4; // exact-match policy kept
 constexpr uint16_t MAX_NETWORKED_ENTITIES = 2048;
 constexpr uint16_t MAX_SYNCED_CVARS = 1024;
 constexpr uint8_t CUSTOM_MESSAGE_START = 64;
@@ -53,7 +57,7 @@ inline std::string normalizePlayerName(std::string_view raw_name)
     return normalized.empty() ? std::string("Player") : normalized;
 }
 
-// Capability bits negotiated in the v3 handshake (intersection, echoed in accept).
+// Capability bits negotiated in the v4 handshake (intersection, echoed in accept).
 // A missing optional capability disables the feature; it is not a reject.
 constexpr uint32_t CAP_HAS_EXT = 1u << 0;    // generic replication extension block
 constexpr uint32_t CAP_VIEW_TICK = 1u << 1;  // InputSample.view_server_tick present

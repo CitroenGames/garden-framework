@@ -56,7 +56,7 @@ namespace NetworkSerializer
         return true;
     }
 
-    // Serialize ConnectRequestMessage (v3: level_hash + capability_flags,
+    // Serialize ConnectRequestMessage (v4: level_hash + capability_flags,
     // the v2 checksum field is deleted)
     inline void serialize(BitWriter& writer, const ConnectRequestMessage& msg) {
         writer.writeByte(static_cast<uint8_t>(msg.type));
@@ -99,7 +99,7 @@ namespace NetworkSerializer
         return !reader.hasError();
     }
 
-    // Serialize ConnectRejectMessage (v3: reject_code byte + reason)
+    // Serialize ConnectRejectMessage (v4: reject_code byte + reason)
     inline void serialize(BitWriter& writer, const ConnectRejectMessage& msg) {
         writer.writeByte(static_cast<uint8_t>(msg.type));
         writer.writeByte(msg.reject_code);

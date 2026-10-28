@@ -424,7 +424,7 @@ int testPredictionAndInterpolation()
 
     glm::vec3 pos;
     float rot = 0.0f;
-    if (!buffer.interpolate(11.0f, pos, rot)) return fail(name, "interpolation failed");
+    if (!buffer.interpolate(11u, 0.0f, pos, rot)) return fail(name, "interpolation failed");
     if (!approxEqual(pos.x, 1.0f, 0.05f)) return fail(name, "interpolated position mismatch");
     if (!approxEqual(rot, 45.0f * kDeg, 0.05f)) return fail(name, "interpolated rotation mismatch");
 
@@ -434,19 +434,19 @@ int testPredictionAndInterpolation()
     wrap_buffer.addSnapshot(12, glm::vec3(0), glm::vec3(0), false, -170.0f * kDeg);
     glm::vec3 wrap_pos;
     float wrap_rot = 0.0f;
-    if (!wrap_buffer.interpolate(11.0f, wrap_pos, wrap_rot)) return fail(name, "wrap interpolation failed");
+    if (!wrap_buffer.interpolate(11u, 0.0f, wrap_pos, wrap_rot)) return fail(name, "wrap interpolation failed");
     if (std::abs(wrap_rot) < 170.0f * kDeg) return fail(name, "wrap lerp went through zero");
     return 0;
 }
 
-int testWireV3Handshake()
+int testWireV4Handshake()
 {
-    const char* name = "WireV3Handshake";
-    if (Net::NETWORK_PROTOCOL_VERSION != 3) return fail(name, "protocol version is not 3");
-    if (Net::NETWORK_PROTOCOL_MIN_SUPPORTED != 3) return fail(name, "min supported is not 3");
+    const char* name = "WireV4Handshake";
+    if (Net::NETWORK_PROTOCOL_VERSION != 4) return fail(name, "protocol version is not 4");
+    if (Net::NETWORK_PROTOCOL_MIN_SUPPORTED != 4) return fail(name, "min supported is not 4");
 
     Net::ConnectRequestMessage req;
-    std::strncpy(req.player_name, "v3player", 31);
+    std::strncpy(req.player_name, "v4player", 31);
     req.level_hash = 0xDEADBEEFu;
     req.capability_flags = Net::CAP_HAS_EXT | Net::CAP_VIEW_TICK;
     Net::BitWriter writer;
@@ -455,14 +455,14 @@ int testWireV3Handshake()
     if (!Net::NetworkSerializer::tryPeekProtocolVersion(writer.getData(), writer.getByteSize(), peeked)) {
         return fail(name, "version peek failed");
     }
-    if (peeked != 3) return fail(name, "peeked version mismatch");
+    if (peeked != Net::NETWORK_PROTOCOL_VERSION) return fail(name, "peeked version mismatch");
     Net::BitReader reader(writer.getData(), writer.getByteSize());
     Net::ConnectRequestMessage out;
     if (!Net::NetworkSerializer::deserialize(reader, out)) return fail(name, "connect request round-trip failed");
     if (out.level_hash != 0xDEADBEEFu || out.capability_flags != req.capability_flags) {
         return fail(name, "connect request fields mismatch");
     }
-    if (std::string(out.player_name) != "v3player") return fail(name, "player name mismatch");
+    if (std::string(out.player_name) != "v4player") return fail(name, "player name mismatch");
 
     Net::ConnectAcceptMessage accept;
     accept.client_id = 7;
@@ -713,7 +713,7 @@ int main()
     failures += testNetworkStats();
     failures += testLagHistory();
     failures += testPredictionAndInterpolation();
-    failures += testWireV3Handshake();
+    failures += testWireV4Handshake();
     failures += testExtRoundTrip();
     failures += testButtonsAndViewTick();
     failures += testSpawnRadians();

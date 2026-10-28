@@ -51,6 +51,7 @@
 #include <cmath>
 #include <fstream>
 #include <iterator>
+#include <string_view>
 #include <glm/gtc/quaternion.hpp>
 #include <utility>
 
@@ -91,6 +92,58 @@ static void resetAcceptanceMovementTraceRuntime(world& game_world)
 {
     acceptanceMovementTraceRuntime(game_world).last_logged_server_tick.clear();
 }
+
+// These labels are diagnostics for the template's durable world-item path.
+// The per-world context is deliberately separate from item authority and is
+// read only while the existing lifecycle callback destroys an item.
+enum class WorldItemRemovalReason : uint8_t {
+    Pickup,
+    ExpiryOrBounds,
+    FreezeClear,
+    LevelClear,
+    Shutdown
+};
+
+static constexpr const char* worldItemRemovalReasonName(WorldItemRemovalReason reason)
+{
+    switch (reason) {
+    case WorldItemRemovalReason::Pickup: return "pickup";
+    case WorldItemRemovalReason::ExpiryOrBounds: return "expiry_or_bounds";
+    case WorldItemRemovalReason::FreezeClear: return "freeze_clear";
+    case WorldItemRemovalReason::LevelClear: return "level_clear";
+    case WorldItemRemovalReason::Shutdown: return "shutdown";
+    }
+    return "level_clear";
+}
+
+struct WorldItemReplicationDiagnosticContext {
+    WorldItemRemovalReason removal_reason = WorldItemRemovalReason::LevelClear;
+};
+
+static WorldItemReplicationDiagnosticContext& worldItemReplicationDiagnostics(entt::registry& registry)
+{
+    if (auto* context = registry.ctx().find<WorldItemReplicationDiagnosticContext>())
+        return *context;
+    return registry.ctx().emplace<WorldItemReplicationDiagnosticContext>();
+}
+
+class ScopedWorldItemRemovalReason {
+public:
+    ScopedWorldItemRemovalReason(entt::registry& registry, WorldItemRemovalReason reason)
+        : m_context(worldItemReplicationDiagnostics(registry)), m_previous(m_context.removal_reason)
+    {
+        m_context.removal_reason = reason;
+    }
+
+    ~ScopedWorldItemRemovalReason()
+    {
+        m_context.removal_reason = m_previous;
+    }
+
+private:
+    WorldItemReplicationDiagnosticContext& m_context;
+    WorldItemRemovalReason m_previous;
+};
 
 // Competitive mode state lives in the active world's registry context.  The
 // aliases below deliberately keep the server integration readable while making
@@ -152,7 +205,7 @@ static const char* bombStateName(Competitive::BombState st)
 static entt::entity findPlayerEntity(world& w, uint16_t client_id); // defined with competitive helpers below
 static void sendEconomyState(uint16_t client_id, entt::entity e);
 static void sendAuthoritativeTeamState(uint16_t client_id, Competitive::FpsTeam team);
-static void spawnDroppedWeapon(world& w, const glm::vec3& pos, const FpsLogic::DroppedItem& item, uint16_t by);
+static void spawnDroppedWeapon(world& w, const glm::vec3& pos, const FpsLogic::DroppedItem& item, uint16_t by, std::string_view cause);
 static void removeReplicatedDroppedWeapon(entt::registry& registry, entt::entity dropped_item);
 static void replayWorldItemsToClient(world& w, uint16_t client_id);
 
@@ -442,7 +495,7 @@ static bool resolveFpsDeath(
         // has already made the fallback authoritative.
         if (FpsLogic::switchToSlot(inventory, loadout, weapon, static_cast<int>(WeaponSlot::Primary))) {
             if (auto dropped = FpsLogic::dropActive(inventory, loadout, weapon))
-                spawnDroppedWeapon(game_world, death_position, *dropped, victim_client_id);
+                spawnDroppedWeapon(game_world, death_position, *dropped, victim_client_id, "death");
         }
     }
 
@@ -626,6 +679,7 @@ static WeaponType primaryForClient(uint16_t client_id, uint8_t team_id)
 static bool buildWorldItemUpsert(
     const world& w,
     entt::entity dropped_item,
+    WorldItemUpsertDelivery delivery,
     WorldItemUpsertMessage& out_message)
 {
     if (!w.registry.valid(dropped_item) ||
@@ -636,33 +690,57 @@ static bool buildWorldItemUpsert(
     const auto& dropped = w.registry.get<DroppedWeaponComponent>(dropped_item);
     const auto& replication_id = w.registry.get<WorldItemReplicationIdComponent>(dropped_item);
     out_message.world_item_id = replication_id.value;
+    out_message.delivery = static_cast<uint8_t>(delivery);
     out_message.weapon_type = static_cast<uint8_t>(dropped.weapon_type);
     out_message.position = transform.position;
     out_message.yaw = normalizeWorldItemYaw(glm::radians(transform.rotation.y));
     return isValidWorldItemUpsert(out_message);
 }
 
-static bool sendWorldItemUpsertToClient(world& w, uint16_t client_id, entt::entity dropped_item)
+static bool sendWorldItemUpsertToClient(
+    world& w,
+    uint16_t client_id,
+    entt::entity dropped_item,
+    WorldItemUpsertDelivery delivery,
+    std::string_view cause)
 {
     const ClientInfo* client = g_server_network.getClientInfo(client_id);
     if (!client || !client->peer)
         return false;
 
     WorldItemUpsertMessage message;
-    if (!buildWorldItemUpsert(w, dropped_item, message))
+    if (!buildWorldItemUpsert(w, dropped_item, delivery, message))
         return false;
 
     BitWriter writer;
     if (!CombatSerializer::serialize(writer, message))
         return false;
     g_server_network.sendReliableToClient(client_id, writer);
+    LOG_ENGINE_INFO(
+        "WORLD_ITEM_UPSERT id={} delivery={} cause={} recipient={} weapon={} pos=({:.2f},{:.2f},{:.2f})",
+        message.world_item_id, worldItemUpsertDeliveryName(delivery), cause, client_id, static_cast<unsigned>(message.weapon_type),
+        message.position.x, message.position.y, message.position.z);
     return true;
 }
 
-static void publishWorldItemToConnectedPeers(world& w, entt::entity dropped_item)
+static void publishWorldItemToConnectedPeers(
+    world& w,
+    entt::entity dropped_item,
+    std::string_view cause)
 {
+    WorldItemUpsertMessage message;
+    if (!buildWorldItemUpsert(w, dropped_item, WorldItemUpsertDelivery::Live, message)) {
+        LOG_ENGINE_WARN("Skipping invalid world-item broadcast cause={}", cause);
+        return;
+    }
+
+    LOG_ENGINE_INFO(
+        "WORLD_ITEM_UPSERT id={} delivery=live cause={} recipient=broadcast weapon={} pos=({:.2f},{:.2f},{:.2f})",
+        message.world_item_id, cause, static_cast<unsigned>(message.weapon_type),
+        message.position.x, message.position.y, message.position.z);
     for (uint16_t client_id = 1; client_id < g_server_network.getNextClientId(); ++client_id)
-        (void)sendWorldItemUpsertToClient(w, client_id, dropped_item);
+        (void)sendWorldItemUpsertToClient(
+            w, client_id, dropped_item, WorldItemUpsertDelivery::Live, cause);
 }
 
 static void sendWorldItemRemoveToConnectedPeers(uint32_t world_item_id)
@@ -692,6 +770,9 @@ static void removeReplicatedDroppedWeapon(entt::registry& registry, entt::entity
 
     if (registry.all_of<WorldItemReplicationIdComponent>(dropped_item)) {
         const uint32_t world_item_id = registry.get<WorldItemReplicationIdComponent>(dropped_item).value;
+        const auto reason = worldItemReplicationDiagnostics(registry).removal_reason;
+        LOG_ENGINE_INFO("WORLD_ITEM_REMOVE id={} delivery=broadcast reason={}",
+            world_item_id, worldItemRemovalReasonName(reason));
         sendWorldItemRemoveToConnectedPeers(world_item_id);
     }
     registry.destroy(dropped_item);
@@ -704,12 +785,18 @@ static void replayWorldItemsToClient(world& w, uint16_t client_id)
         return;
 
     for (const entt::entity dropped_item : FpsLogic::collectWorldItemsForReplay(w.registry)) {
-        if (!sendWorldItemUpsertToClient(w, client_id, dropped_item))
+        if (!sendWorldItemUpsertToClient(
+                w, client_id, dropped_item, WorldItemUpsertDelivery::AdmissionReplay, "admission_replay"))
             LOG_ENGINE_WARN("Skipping invalid world-item replay entity for client {}", client_id);
     }
 }
 
-static void spawnDroppedWeapon(world& w, const glm::vec3& pos, const FpsLogic::DroppedItem& item, uint16_t by)
+static void spawnDroppedWeapon(
+    world& w,
+    const glm::vec3& pos,
+    const FpsLogic::DroppedItem& item,
+    uint16_t by,
+    std::string_view cause)
 {
     if (!isValidWorldItemWeaponType(static_cast<uint8_t>(item.type)) ||
         !isValidWorldItemPosition(pos) || item.ammo < 0 || item.reserve < 0) {
@@ -729,7 +816,7 @@ static void spawnDroppedWeapon(world& w, const glm::vec3& pos, const FpsLogic::D
     w.registry.emplace<TransformComponent>(de, dt);
     w.registry.emplace<DroppedWeaponComponent>(de, DroppedWeaponComponent{item.type, item.ammo, item.reserve, by, 30.0f});
     w.registry.emplace<WorldItemReplicationIdComponent>(de, world_item_id);
-    publishWorldItemToConnectedPeers(w, de);
+    publishWorldItemToConnectedPeers(w, de, cause);
 
     const int32_t bot_index = botIndexForClient(w, by);
     if (bot_index >= 0) {
@@ -757,7 +844,7 @@ static bool doDropWeapon(uint16_t client_id, entt::entity player_entity)
     auto dropped = FpsLogic::dropActive(inv, lo, weapon);
     if (!dropped) return false;
     glm::vec3 pos = w->registry.get<TransformComponent>(player_entity).position + glm::vec3(0.0f, 0.3f, 0.0f);
-    spawnDroppedWeapon(*w, pos, *dropped, client_id);
+    spawnDroppedWeapon(*w, pos, *dropped, client_id, "manual_drop");
     sendWeaponState(client_id, player_entity, weapon);
     LOG_ENGINE_INFO("Player {} dropped weapon {}", client_id, (int)dropped->type);
     return true;
@@ -1199,7 +1286,7 @@ static void executeBotBuy(uint16_t client_id, entt::entity e)
             continue;
         }
         group_complete[group_index] = true;
-        if (dropped.type != WeaponType::COUNT) spawnDroppedWeapon(*w, pos + glm::vec3(0.0f, 0.3f, 0.0f), dropped, client_id);
+        if (dropped.type != WeaponType::COUNT) spawnDroppedWeapon(*w, pos + glm::vec3(0.0f, 0.3f, 0.0f), dropped, client_id, "bot_buy_replacement");
         if (def->kind != BuyItemKind::Equipment) sendWeaponState(client_id, e, *ctx.weapon);
     }
     sendEconomyState(client_id, e);
@@ -1480,7 +1567,11 @@ static void competitiveFreezeRespawnAll()
 {
     world* w = g_server_services ? g_server_services->game_world : nullptr;
     if (!w) return;
-    FpsLogic::clearDroppedWeapons(w->registry, removeReplicatedDroppedWeapon);
+    {
+        ScopedWorldItemRemovalReason removal_reason(
+            w->registry, WorldItemRemovalReason::FreezeClear);
+        FpsLogic::clearDroppedWeapons(w->registry, removeReplicatedDroppedWeapon);
+    }
     std::vector<uint16_t> clients;
     auto view = w->registry.view<NetworkedEntity, TeamComponent>();
     for (auto e : view) {
@@ -2056,7 +2147,7 @@ static bool handleCompetitiveBuy(uint16_t client_id, BitReader& reader)
     Competitive::BuyResult result = competitiveContext().onBuy(ctx, item_id, &dropped);
     if (result == Competitive::BuyResult::Ok) {
         if (dropped.type != WeaponType::COUNT)
-            spawnDroppedWeapon(*w, pos + glm::vec3(0.0f, 0.3f, 0.0f), dropped, client_id);
+            spawnDroppedWeapon(*w, pos + glm::vec3(0.0f, 0.3f, 0.0f), dropped, client_id, "buy_replacement");
         if (def && def->kind != BuyItemKind::Equipment)
             sendWeaponState(client_id, e, *ctx.weapon);
 
@@ -2409,7 +2500,11 @@ GAME_API bool gardenServerInit(EngineServices* services)
 {
     g_server_services = services;
     world* match_world = services->game_world;
-    FpsLogic::clearDroppedWeapons(match_world->registry, removeReplicatedDroppedWeapon);
+    {
+        ScopedWorldItemRemovalReason removal_reason(
+            match_world->registry, WorldItemRemovalReason::LevelClear);
+        FpsLogic::clearDroppedWeapons(match_world->registry, removeReplicatedDroppedWeapon);
+    }
     FpsLogic::clearWorldItemReplicationRuntime(match_world->registry);
     const char* mode_env = std::getenv("FPS_GAME_MODE");
     g_mode_composition = FpsLogic::ModeComposition::fromEnvironmentValue(
@@ -2623,8 +2718,12 @@ GAME_API void gardenServerShutdown()
 {
     if (g_server_services && g_server_services->game_world) {
         auto& registry = g_server_services->game_world->registry;
-        FpsLogic::clearDroppedWeapons(registry, removeReplicatedDroppedWeapon);
+        {
+            ScopedWorldItemRemovalReason removal_reason(registry, WorldItemRemovalReason::Shutdown);
+            FpsLogic::clearDroppedWeapons(registry, removeReplicatedDroppedWeapon);
+        }
         FpsLogic::clearWorldItemReplicationRuntime(registry);
+        registry.ctx().erase<WorldItemReplicationDiagnosticContext>();
         FpsLogic::clearGrenadeEffects(registry);
         Competitive::stopCompetitiveWorldRuntime(registry);
         if (auto* runtime = registry.ctx().find<Bots::BotWorldRuntime>()) {
@@ -2694,7 +2793,11 @@ GAME_API void gardenServerUpdate(float delta_time)
         if (round_heartbeat >= 1.0f) { round_heartbeat = 0.0f; broadcastRoundState(); }
     }
     g_game_rules.Update(*w, delta_time);
-    FpsLogic::cleanupDroppedWeapons(w->registry, delta_time, removeReplicatedDroppedWeapon);
+    {
+        ScopedWorldItemRemovalReason removal_reason(
+            w->registry, WorldItemRemovalReason::ExpiryOrBounds);
+        FpsLogic::cleanupDroppedWeapons(w->registry, delta_time, removeReplicatedDroppedWeapon);
+    }
 
     // Update weapon cooldowns for all players
     auto weapon_view = w->registry.view<WeaponComponent, NetworkedEntity>();
@@ -2727,6 +2830,7 @@ GAME_API void gardenServerUpdate(float delta_time)
     }
 
     if (isWeaponLifecyclePhaseOpen()) {
+        ScopedWorldItemRemovalReason removal_reason(w->registry, WorldItemRemovalReason::Pickup);
         const auto pickups = FpsLogic::processDroppedWeaponPickups(
             w->registry,
             FpsLogic::kDroppedWeaponPickupRadius,
@@ -2752,7 +2856,11 @@ GAME_API void gardenServerOnLevelLoaded()
     // A new level owns a new navigation resource.  This also disables bots
     // until its resolved project asset has been checked, even if the same DLL
     // and registry are reused by a host level transition.
-    FpsLogic::clearDroppedWeapons(game_world.registry, removeReplicatedDroppedWeapon);
+    {
+        ScopedWorldItemRemovalReason removal_reason(
+            game_world.registry, WorldItemRemovalReason::LevelClear);
+        FpsLogic::clearDroppedWeapons(game_world.registry, removeReplicatedDroppedWeapon);
+    }
     FpsLogic::clearWorldItemReplicationRuntime(game_world.registry);
     despawnBotsForLevelTransition(game_world);
     resetBotRuntime(game_world);

@@ -270,6 +270,7 @@ static UiLogic::ConnectionLifecycle g_ui_connection;
 static bool g_ui_modal_context_active = false;
 static UiLogic::ClientCompetitiveState g_comp;
 static std::vector<uint16_t> g_owned_items;
+
 // Content has not supplied an authored radar calibration for the current
 // template level.  Keep this explicitly unconfigured instead of deriving a
 // misleading map from level bounds or client ECS.
@@ -595,10 +596,10 @@ GAME_API bool gardenGameInit(EngineServices* services)
         }
         if (message_type == static_cast<uint8_t>(CompetitiveMessageType::TEAM_RESULT)) {
             TeamResultMessage msg; if (!CompetitiveSerializer::deserialize(reader, msg)) return;
+            const Competitive::FpsTeam team = Competitive::teamFromId(msg.team);
             const bool accepted = UiLogic::applyAuthoritativeTeamReply(
-                g_ui, static_cast<Competitive::TeamSelectResult>(msg.result),
-                Competitive::teamFromId(msg.team), g_comp.local_team);
-            g_acceptance_script.observeTeamResult(accepted, Competitive::teamFromId(msg.team));
+                g_ui, static_cast<Competitive::TeamSelectResult>(msg.result), team, g_comp.local_team);
+            g_acceptance_script.observeTeamResult(accepted, team);
             return;
         }
         if (message_type == static_cast<uint8_t>(WorldItemMessageType::WORLD_ITEM_UPSERT)) {
@@ -619,8 +620,12 @@ GAME_API bool gardenGameInit(EngineServices* services)
                 return;
             }
             g_world_item_upsert_receipts[msg.world_item_id] = ++g_world_item_receipt_generation;
-            LOG_ENGINE_INFO("WORLD_ITEM_UPSERT accepted id={} {}", msg.world_item_id,
-                result == FpsLogic::WorldItemPresentationUpsertResult::Created ? "created" : "updated");
+            LOG_ENGINE_INFO(
+                "WORLD_ITEM_UPSERT accepted id={} delivery={} result={} weapon={} pos=({:.2f},{:.2f},{:.2f})",
+                msg.world_item_id,
+                worldItemUpsertDeliveryName(static_cast<WorldItemUpsertDelivery>(msg.delivery)),
+                result == FpsLogic::WorldItemPresentationUpsertResult::Created ? "created" : "updated",
+                static_cast<unsigned>(msg.weapon_type), msg.position.x, msg.position.y, msg.position.z);
             return;
         }
         if (message_type == static_cast<uint8_t>(WorldItemMessageType::WORLD_ITEM_REMOVE)) {
@@ -642,7 +647,8 @@ GAME_API bool gardenGameInit(EngineServices* services)
             }
             if (result == FpsLogic::WorldItemPresentationRemoveResult::Removed)
                 g_world_item_remove_receipts[msg.world_item_id] = ++g_world_item_receipt_generation;
-            LOG_ENGINE_INFO("WORLD_ITEM_REMOVE accepted id={} {}", msg.world_item_id,
+            LOG_ENGINE_INFO("WORLD_ITEM_REMOVE accepted id={} result={}",
+                msg.world_item_id,
                 result == FpsLogic::WorldItemPresentationRemoveResult::Removed ? "removed" : "unknown_remove");
             return;
         }

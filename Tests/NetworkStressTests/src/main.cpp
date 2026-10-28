@@ -571,7 +571,7 @@ static bool runNetworkHierarchyBoundaryTests()
     return true;
 }
 
-static bool runWireV3HandshakeTests()
+static bool runWireV4HandshakeTests()
 {
     TestState state;
     world server_world;
@@ -624,13 +624,20 @@ static bool runWireV3HandshakeTests()
     }
     if (server.getClientCount() != 0) state.addError("v2 reject allocated a client id");
 
-    // v3 client with wrong level hash -> LevelMismatch (2), no id allocated.
-    if (rawConnectAttempt(server, port, 3, 0x99999999u, Net::CAP_ALL_KNOWN) != 2) {
+    // v3 client has the old template custom-message schema and must be rejected
+    // before its payload can reach the game-module handler.
+    if (rawConnectAttempt(server, port, 3, 0x1234ABCDu, Net::CAP_ALL_KNOWN) != 1) {
+        state.addError("v3 client was not rejected with VersionMismatch (1)");
+    }
+    if (server.getClientCount() != 0) state.addError("v3 reject allocated a client id");
+
+    // Current client with wrong level hash -> LevelMismatch (2), no id allocated.
+    if (rawConnectAttempt(server, port, Net::NETWORK_PROTOCOL_VERSION, 0x99999999u, Net::CAP_ALL_KNOWN) != 2) {
         state.addError("wrong level hash was not rejected with LevelMismatch (2)");
     }
     if (server.getClientCount() != 0) state.addError("level reject allocated a client id");
 
-    // Valid v3 client (real manager, matching hash) connects; caps echo.
+    // Valid v4 client (real manager, matching hash) connects; caps echo.
     {
         world client_world;
         Net::ClientNetworkManager client;
@@ -649,8 +656,8 @@ static bool runWireV3HandshakeTests()
             server.pumpNetworkEvents(kFixedDelta);
             SDL_Delay(1);
         }
-        if (!client.isConnected()) state.addError("valid v3 client did not connect");
-        if (server.getClientCount() != 1) state.addError("valid v3 client was not allocated exactly one id");
+        if (!client.isConnected()) state.addError("valid v4 client did not connect");
+        if (server.getClientCount() != 1) state.addError("valid v4 client was not allocated exactly one id");
         if (client.getNegotiatedCapabilityFlags() != Net::CAP_ALL_KNOWN) {
             state.addError("accept did not echo negotiated capability flags");
         }
@@ -669,7 +676,7 @@ static bool runWireV3HandshakeTests()
         }
         return false;
     }
-    std::cout << "[PASS] WireV3HandshakeTests\n";
+    std::cout << "[PASS] WireV4HandshakeTests\n";
     return true;
 }
 
@@ -2173,7 +2180,7 @@ int main(int argc, char** argv)
         EE::CLog::GetClientLogger()->set_level(spdlog::level::warn);
         EE::CLog::GetLuaLogger()->set_level(spdlog::level::warn);
     }
-    const bool handshake_ok = runWireV3HandshakeTests();
+    const bool handshake_ok = runWireV4HandshakeTests();
     const bool transport_pending_queue_accounting_ok = runTransportPendingQueueAccountingTests();
     const bool custom_ingress_ok = runCustomIngressRejectionTests();
     const bool hierarchy_boundary_ok = runNetworkHierarchyBoundaryTests();

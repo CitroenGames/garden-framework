@@ -17,7 +17,7 @@ enum class CombatMessageType : uint8_t
     WEAPON_STATE = Net::CUSTOM_MESSAGE_START + 4
 };
 
-// Competitive mode messages (wire v3 custom messages >= CUSTOM_MESSAGE_START+5 = 69).
+// Competitive mode custom-message range (starting at CUSTOM_MESSAGE_START+5 = 69).
 enum class CompetitiveMessageType : uint8_t
 {
     ROUND_STATE = Net::CUSTOM_MESSAGE_START + 5,    // 69 S->C reliable
@@ -42,6 +42,29 @@ enum class WorldItemMessageAudience : uint8_t
     Invalid,
     ServerToClient
 };
+
+// Delivery provenance is explicit on every durable upsert so diagnostics and
+// acceptance drivers never infer replay from unrelated session messages.
+enum class WorldItemUpsertDelivery : uint8_t
+{
+    Live = 0,
+    AdmissionReplay = 1
+};
+
+constexpr bool isValidWorldItemUpsertDelivery(uint8_t delivery)
+{
+    return delivery == static_cast<uint8_t>(WorldItemUpsertDelivery::Live) ||
+        delivery == static_cast<uint8_t>(WorldItemUpsertDelivery::AdmissionReplay);
+}
+
+constexpr const char* worldItemUpsertDeliveryName(WorldItemUpsertDelivery delivery)
+{
+    switch (delivery) {
+    case WorldItemUpsertDelivery::Live: return "live";
+    case WorldItemUpsertDelivery::AdmissionReplay: return "replay";
+    }
+    return "invalid";
+}
 
 constexpr WorldItemMessageAudience worldItemMessageAudience(WorldItemMessageType type)
 {
@@ -150,6 +173,7 @@ struct WorldItemUpsertMessage
 {
     uint8_t type = static_cast<uint8_t>(WorldItemMessageType::WORLD_ITEM_UPSERT);
     uint32_t world_item_id = 0;
+    uint8_t delivery = static_cast<uint8_t>(WorldItemUpsertDelivery::Live);
     uint8_t weapon_type = 0;
     glm::vec3 position = glm::vec3(0.0f);
     float yaw = 0.0f;
@@ -194,7 +218,8 @@ inline bool isValidWorldItemWeaponType(uint8_t wire_weapon_type)
 inline bool isValidWorldItemUpsert(const WorldItemUpsertMessage& message)
 {
     return message.type == static_cast<uint8_t>(WorldItemMessageType::WORLD_ITEM_UPSERT) &&
-        message.world_item_id != 0 && isValidWorldItemWeaponType(message.weapon_type) &&
+        message.world_item_id != 0 && isValidWorldItemUpsertDelivery(message.delivery) &&
+        isValidWorldItemWeaponType(message.weapon_type) &&
         isValidWorldItemPosition(message.position) && isNormalizedWorldItemYaw(message.yaw);
 }
 
@@ -278,6 +303,7 @@ namespace CombatSerializer
         if (!isValidWorldItemUpsert(msg)) return false;
         writer.writeByte(msg.type);
         writer.writeUInt32(msg.world_item_id);
+        writer.writeByte(msg.delivery);
         writer.writeByte(msg.weapon_type);
         writer.writeVector3f(msg.position);
         writer.writeFloat(msg.yaw);
@@ -288,6 +314,7 @@ namespace CombatSerializer
         msg.type = reader.readByte();
         if (msg.type != static_cast<uint8_t>(WorldItemMessageType::WORLD_ITEM_UPSERT)) return false;
         msg.world_item_id = reader.readUInt32();
+        msg.delivery = reader.readByte();
         msg.weapon_type = reader.readByte();
         msg.position = reader.readVector3f();
         msg.yaw = reader.readFloat();
