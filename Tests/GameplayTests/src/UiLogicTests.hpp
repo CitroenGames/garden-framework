@@ -4,6 +4,7 @@
 #include "ui/UiLogic.hpp"
 #include "ui/UiInput.hpp"
 #include "ui/CombatFeedPresentation.hpp"
+#include "ui/CompetitivePresentationProjection.hpp"
 #include "ui/HudViewState.hpp"
 #include "InputManager.hpp"
 #include <string>
@@ -817,5 +818,137 @@ bool testUiRadarPresentationPrivacy()
     if (buildRadarPresentation(slots, missing_map).neutral_visible)
         return fail(name, "disconnected client displayed stale radar fallback");
 
+    return pass(name);
+}
+
+bool testUiCompetitivePresentationProjection()
+{
+    const std::string name = "UiCompetitivePresentation_CacheProjection";
+    using namespace UiLogic;
+
+    ClientCompetitiveState competitive;
+    if (!applyRoundState(competitive, static_cast<uint8_t>(RoundPhase::Live), 45.0f,
+                         8, 4, 3, false, 900, 600))
+        return fail(name, "competitive projection setup rejected authoritative round");
+    competitive.local_team = FpsTeam::Attackers;
+
+    CompetitivePresentationSnapshotMessage snapshot;
+    snapshot.match_instance_id = 51;
+    snapshot.presentation_revision = 1;
+    snapshot.source_server_tick = 600;
+    snapshot.recipient_team = Competitive::teamId(FpsTeam::Attackers);
+    snapshot.recipient_stable_player_id = 10;
+    snapshot.phase = static_cast<uint8_t>(RoundPhase::Live);
+    snapshot.phase_deadline_tick = 900;
+    snapshot.round_number = 8;
+    snapshot.roster_count = 4;
+    snapshot.roster[0] = {10, "Local", Competitive::teamId(FpsTeam::Attackers),
+        static_cast<uint8_t>(CompetitivePresentationRosterState::Alive), 4, 1, 0, 1, 3200, 17};
+    snapshot.roster[1] = {20, "Bot", Competitive::teamId(FpsTeam::Attackers),
+        static_cast<uint8_t>(CompetitivePresentationRosterState::Alive), 2, 3, 1, 1, 900, 24};
+    snapshot.roster[2] = {30, "Enemy", Competitive::teamId(FpsTeam::Defenders),
+        static_cast<uint8_t>(CompetitivePresentationRosterState::Dead), 5, 6, 0, 0, 0, 35};
+    snapshot.roster[3] = {40, "Waiting", Competitive::teamId(FpsTeam::Attackers),
+        static_cast<uint8_t>(CompetitivePresentationRosterState::Spectating), 0, 0, 0, 1, 400, 1};
+    snapshot.radar_count = 3;
+    snapshot.radar[0] = {10, static_cast<uint8_t>(CompetitivePresentationRadarKind::Self), glm::vec3(25, 0, 75)};
+    snapshot.radar[1] = {20, static_cast<uint8_t>(CompetitivePresentationRadarKind::Teammate), glm::vec3(50, 0, 50)};
+    snapshot.radar[2] = {std::numeric_limits<uint32_t>::max(),
+        static_cast<uint8_t>(CompetitivePresentationRadarKind::Objective), glm::vec3(90, 0, 10)};
+
+    CompetitivePresentationSnapshotCache cache;
+    if (cache.accept(snapshot) != CompetitivePresentationSnapshotAcceptResult::AcceptedInitial)
+        return fail(name, "valid projection snapshot did not enter cache");
+
+    const ScoreboardPresentationSource scoreboard_source =
+        projectCompetitivePresentationScoreboard(cache, true, &competitive);
+    const ScoreboardPresentation scoreboard = buildScoreboardPresentation(scoreboard_source);
+    if (!scoreboard.roster_available || scoreboard.row_count != 4 ||
+        !scoreboard.rows[0].is_local || !scoreboard.rows[0].money_visible ||
+        scoreboard.rows[0].money_display != 3200 || !scoreboard.rows[1].money_visible ||
+        scoreboard.rows[2].money_visible || scoreboard.rows[2].money_display != -1 ||
+        scoreboard.rows[2].state != ScoreboardPlayerState::Dead ||
+        scoreboard.rows[2].display_name.find("[DEAD]") == std::string::npos ||
+        scoreboard.rows[3].state != ScoreboardPlayerState::Spectating ||
+        scoreboard.rows[3].display_name.find("[SPECTATING]") == std::string::npos ||
+        scoreboard.rows[0].assists_available || !scoreboard.rows[0].ping_available)
+        return fail(name, "cached roster was not mapped with explicit state and privacy");
+
+    RadarMapTransform map;
+    map.configured = true;
+    map.world_width = 100.0f;
+    map.world_height = 100.0f;
+    RadarSlotState slots;
+    const RadarPresentation radar = buildRadarPresentation(slots,
+        projectCompetitivePresentationRadar(cache, true, &competitive, map));
+    if (!radar.visible || radar.neutral_visible || !radar.blips[0].visible ||
+        !radar.blips[1].visible || radar.blips[0].x != "25.0%" ||
+        radar.blips[0].y != "75.0%" || radar.blips[1].x != "50.0%" ||
+        radar.blips[1].y != "50.0%" || radar.blips[2].visible)
+        return fail(name, "snapshot radar projected data other than self and teammate records");
+
+    const RadarPresentation neutral = buildRadarPresentation(slots,
+        projectCompetitivePresentationRadar(cache, true, &competitive, RadarMapTransform{}));
+    if (neutral.visible || !neutral.neutral_visible || neutral.neutral_text != "RADAR UNAVAILABLE")
+        return fail(name, "missing calibration did not retain neutral radar state");
+
+    CompetitivePresentationSnapshotMessage dead_local = snapshot;
+    dead_local.presentation_revision = 2;
+    dead_local.roster[0].state = static_cast<uint8_t>(CompetitivePresentationRosterState::Dead);
+    // Dead recipients deliberately omit Self radar. The local scoreboard row
+    // must still be identified from durable recipient context.
+    dead_local.radar_count = 1;
+    dead_local.radar[0] = {20, static_cast<uint8_t>(CompetitivePresentationRadarKind::Teammate),
+        glm::vec3(50, 0, 50)};
+    if (cache.accept(dead_local) != CompetitivePresentationSnapshotAcceptResult::AcceptedNewerRevision)
+        return fail(name, "dead-local snapshot without self radar did not replace cache state");
+    const ScoreboardPresentation dead_scoreboard = buildScoreboardPresentation(
+        projectCompetitivePresentationScoreboard(cache, true, &competitive));
+    if (!dead_scoreboard.rows[0].is_local ||
+        dead_scoreboard.rows[0].state != ScoreboardPlayerState::Dead)
+        return fail(name, "dead local roster row lost durable recipient identity");
+
+    CompetitivePresentationSnapshotMessage mismatched_self = dead_local;
+    mismatched_self.presentation_revision = 3;
+    mismatched_self.roster[0].state = static_cast<uint8_t>(CompetitivePresentationRosterState::Alive);
+    mismatched_self.roster[0].team = Competitive::teamId(FpsTeam::Defenders);
+    mismatched_self.radar[0] = {10, static_cast<uint8_t>(CompetitivePresentationRadarKind::Self),
+        glm::vec3(25, 0, 75)};
+    if (cache.accept(mismatched_self) != CompetitivePresentationSnapshotAcceptResult::RejectedInvalid ||
+        cache.snapshot()->presentation_revision != dead_local.presentation_revision)
+        return fail(name, "mismatched self radar team replaced accepted recipient state");
+
+    CompetitivePresentationSnapshotMessage replacement = dead_local;
+    replacement.presentation_revision = 3;
+    replacement.roster_count = 1;
+    replacement.roster[0] = {10, "Local", Competitive::teamId(FpsTeam::Attackers),
+        static_cast<uint8_t>(CompetitivePresentationRosterState::Awaiting), 4, 1, 0, 1, 3200, 17};
+    replacement.radar_count = 0;
+    if (cache.accept(replacement) != CompetitivePresentationSnapshotAcceptResult::AcceptedNewerRevision)
+        return fail(name, "newer snapshot did not replace cached projection state");
+    const ScoreboardPresentation replacement_scoreboard = buildScoreboardPresentation(
+        projectCompetitivePresentationScoreboard(cache, true, &competitive));
+    const RadarPresentation replacement_radar = buildRadarPresentation(slots,
+        projectCompetitivePresentationRadar(cache, true, &competitive, map));
+    if (replacement_scoreboard.row_count != 1 ||
+        replacement_scoreboard.rows[0].state != ScoreboardPlayerState::Awaiting ||
+        replacement_scoreboard.rows[0].display_name.find("[AWAITING]") == std::string::npos ||
+        replacement_radar.blips[0].visible || replacement_radar.blips[1].visible)
+        return fail(name, "replacement snapshot retained stale roster or radar entries");
+
+    cache.clear();
+    const ScoreboardPresentationSource empty_source =
+        projectCompetitivePresentationScoreboard(cache, true, &competitive);
+    if (empty_source.has_authoritative_roster || !empty_source.approved_rows.empty() ||
+        projectCompetitivePresentationRadar(cache, true, &competitive, map).has_authoritative_team_locations)
+        return fail(name, "empty cache fabricated local roster or radar state");
+
+    ScoreboardRowInput hidden_same_team;
+    hidden_same_team.name = "Hidden";
+    hidden_same_team.side = FpsTeam::Attackers;
+    hidden_same_team.money = 9999;
+    hidden_same_team.money_available = false;
+    if (buildScoreboardRow(hidden_same_team, FpsTeam::Attackers).money_visible)
+        return fail(name, "same-team row bypassed explicit hidden-money grant");
     return pass(name);
 }

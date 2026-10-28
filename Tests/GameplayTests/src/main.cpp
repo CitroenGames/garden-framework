@@ -4331,6 +4331,7 @@ int main()
     ok = testUiScoreboardAuthoritativePresentation() && ok;
     ok = testUiRadarProjection() && ok;
     ok = testUiRadarPresentationPrivacy() && ok;
+    ok = testUiCompetitivePresentationProjection() && ok;
     ok = testAudioUnknownEventNoVoices() && ok;
     ok = testAudioVoiceStealingSelection() && ok;
     ok = testAudioPerEventCap() && ok;

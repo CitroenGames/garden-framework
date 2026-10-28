@@ -29,6 +29,7 @@
 #include "GameHUD.hpp"
 #include "ClientAcceptanceScript.hpp"
 #include "ui/CombatFeedPresentation.hpp"
+#include "ui/CompetitivePresentationProjection.hpp"
 #include "ui/UiLogic.hpp"
 #include "ui/UiInput.hpp"
 #include "PlayerRepSystem.hpp"
@@ -596,36 +597,13 @@ static void runFixedClientInputStep(world& game_world,
         command_tick, acceptance_steering_move_emitted, g_authoritative_weapon_state_generation);
 }
 
-static void updateRadarPresentation(world& game_world, bool connected, float delta_time)
+static void updateRadarPresentation(bool connected, float delta_time)
 {
     if (!g_radar_throttle.shouldUpdate(delta_time))
         return;
-
-    UiLogic::RadarPresentationSource source;
-    source.connected = connected;
-    source.competitive = &g_comp;
-    source.map = g_radar_map;
-    // Stable IDs are presenter-local keys only.  They are not network entity
-    // IDs and this code never enumerates remote replicated entities.
-    source.local_stable_id = static_cast<uint32_t>(g_network.getClientId()) + 1u;
-
-    if (connected && game_world.registry.valid(g_player_entity) &&
-        game_world.registry.all_of<TransformComponent>(g_player_entity)) {
-        const TransformComponent& transform = game_world.registry.get<TransformComponent>(g_player_entity);
-        UiLogic::RadarApprovedLocation self;
-        self.stable_id = source.local_stable_id;
-        self.kind = UiLogic::RadarLocationKind::LocalSelf;
-        self.team = g_comp.local_team;
-        self.alive = g_local_alive;
-        self.world_x = transform.position.x;
-        self.world_z = transform.position.z;
-        source.approved_locations.push_back(self);
-    }
-
-    // No current custom message publishes teammate positions with a team-only
-    // audience.  Do not substitute remote TransformComponents here: they may
-    // include enemies and would turn generic replication into radar authority.
-    source.has_authoritative_team_locations = false;
+    const UiLogic::RadarPresentationSource source =
+        UiLogic::projectCompetitivePresentationRadar(
+            g_competitive_presentation_cache, connected, &g_comp, g_radar_map);
     g_radar = UiLogic::buildRadarPresentation(g_radar_slots, source);
 }
 
@@ -1400,25 +1378,12 @@ GAME_API void gardenGameUpdate(float delta_time)
         }
         std::string scoreboard_text;
         if (UiLogic::scoreboardVisible(g_ui)) {
-            UiLogic::ScoreboardPresentationSource scoreboard_source;
-            scoreboard_source.connected = hud_source.connected;
-            scoreboard_source.competitive = &g_comp;
-            // Do not source remote scoreboard rows from local replicated ECS:
-            // their team/stat/money fields have not been published for this
-            // presentation.  A future roster message will set this true.
-            scoreboard_source.has_authoritative_roster = false;
-            UiLogic::ScoreboardRowInput local_row;
-            local_row.name = "Player " + std::to_string(g_network.getClientId());
-            local_row.kills = g_local_kills; local_row.deaths = g_local_deaths;
-            local_row.money = g_comp.money; local_row.side = g_comp.local_team;
-            local_row.is_local = true; local_row.alive = g_local_alive;
-            // Local transport RTT is the one ping value currently available.
-            local_row.ping = static_cast<int32_t>(std::max(0.0f, g_network.getStats().ping_ms));
-            local_row.ping_available = hud_source.connected;
-            scoreboard_source.approved_rows.push_back(std::move(local_row));
+            const UiLogic::ScoreboardPresentationSource scoreboard_source =
+                UiLogic::projectCompetitivePresentationScoreboard(
+                    g_competitive_presentation_cache, hud_source.connected, &g_comp);
             scoreboard_text = UiLogic::buildScoreboardPresentation(scoreboard_source).text;
         }
-        updateRadarPresentation(*game_world, hud_source.connected, delta_time);
+        updateRadarPresentation(hud_source.connected, delta_time);
         UiLogic::SettingsPresentation settings;
         settings.vsync = CVAR_BOOL(r_vsync);
         settings.fxaa = CVAR_BOOL(r_fxaa);

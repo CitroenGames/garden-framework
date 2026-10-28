@@ -363,11 +363,21 @@ inline const std::array<uint16_t, 10>& featuredBuyIds() {
 constexpr size_t kScoreboardMaxRows = 10;
 constexpr size_t kScoreboardNameMaxChars = 24;
 
+enum class ScoreboardPlayerState : uint8_t {
+    Awaiting,
+    Alive,
+    Dead,
+    Spectating
+};
+
 struct ScoreboardRowInput {
     std::string name;
     int32_t kills = 0, assists = 0, deaths = 0, money = 0, ping = 0;
     FpsTeam side = FpsTeam::None;
     bool is_local = false, alive = true, is_bot = false;
+    ScoreboardPlayerState state = ScoreboardPlayerState::Alive;
+    // The source must explicitly grant wallet display; team matching alone never grants it.
+    bool money_available = true;
     // Assists and per-player ping have no approved payload today.  A row may
     // contain them only when its approved source explicitly says it has them.
     bool assists_available = false;
@@ -378,6 +388,7 @@ struct ScoreboardRow {
     int32_t kills = 0, assists = 0, deaths = 0, ping = 0;
     int32_t money_display = -1; // -1 = hidden (enemy money, spec S8)
     bool money_visible = false, assists_available = false, ping_available = false;
+    ScoreboardPlayerState state = ScoreboardPlayerState::Alive;
     FpsTeam side = FpsTeam::None;
     bool is_local = false;
 };
@@ -397,7 +408,17 @@ inline std::string scoreboardDisplayName(const std::string& source_name) {
 
 inline ScoreboardRow buildScoreboardRow(const ScoreboardRowInput& in, FpsTeam viewer_team) {
     ScoreboardRow out;
-    out.display_name = scoreboardDisplayName(in.name) + (in.is_bot ? " [BOT]" : "") + (!in.alive ? " [DEAD]" : "");
+    ScoreboardPlayerState state = in.state;
+    if (!in.alive && state == ScoreboardPlayerState::Alive)
+        state = ScoreboardPlayerState::Dead;
+    out.display_name = scoreboardDisplayName(in.name) + (in.is_bot ? " [BOT]" : "");
+    switch (state) {
+    case ScoreboardPlayerState::Awaiting: out.display_name += " [AWAITING]"; break;
+    case ScoreboardPlayerState::Dead: out.display_name += " [DEAD]"; break;
+    case ScoreboardPlayerState::Spectating: out.display_name += " [SPECTATING]"; break;
+    case ScoreboardPlayerState::Alive: break;
+    }
+    out.state = state;
     out.kills = std::max(0, in.kills);
     out.assists = std::max(0, in.assists);
     out.deaths = std::max(0, in.deaths);
@@ -405,7 +426,7 @@ inline ScoreboardRow buildScoreboardRow(const ScoreboardRowInput& in, FpsTeam vi
     out.assists_available = in.assists_available;
     out.ping_available = in.ping_available;
     out.side = in.side; out.is_local = in.is_local;
-    out.money_visible = Competitive::isPlayingTeam(viewer_team) && in.side == viewer_team;
+    out.money_visible = in.money_available && Competitive::isPlayingTeam(viewer_team) && in.side == viewer_team;
     out.money_display = out.money_visible ? std::max(0, in.money) : -1;
     return out;
 }
