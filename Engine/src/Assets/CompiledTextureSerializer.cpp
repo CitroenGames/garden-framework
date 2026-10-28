@@ -155,6 +155,7 @@ bool CompiledTextureSerializer::loadHeader(CtexHeader& header, const std::string
     file.read(reinterpret_cast<char*>(&header), sizeof(CtexHeader));
     if (!file) return false;
     if (header.magic != CTEX_MAGIC) return false;
+    if (header.version != CTEX_VERSION) return false;
 
     return true;
 }

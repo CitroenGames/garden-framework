@@ -1,5 +1,6 @@
 #pragma once
 
+#include "EngineExport.h"
 #include "AssetTypes.hpp"
 #include <atomic>
 #include <functional>
@@ -17,7 +18,7 @@ using ProgressCallback = std::function<void(AssetId, float progress, LoadState s
 
 class AssetManager;
 
-class AssetHandle {
+class ENGINE_API AssetHandle {
 public:
     AssetHandle() = default;
     explicit AssetHandle(AssetId id, AssetManager* manager = nullptr);

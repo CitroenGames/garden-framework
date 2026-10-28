@@ -56,41 +56,85 @@ void AssetManager::shutdown() {
     LOG_ENGINE_INFO("AssetManager: Shutdown complete");
 }
 
+namespace {
+
+// Asset paths are resource identities. Normalize spellings before they reach
+// the cache, but retain logical case rather than folding it.
+std::string normalizeSeparators(std::string path)
+{
+    std::replace(path.begin(), path.end(), '\\', '/');
+    return path;
+}
+
+bool isWithinRoot(const fs::path& root, const fs::path& candidate)
+{
+    const fs::path relative = candidate.lexically_relative(root);
+    if (relative.empty())
+        return candidate == root;
+    if (relative.is_absolute())
+        return false;
+
+    for (const auto& component : relative) {
+        if (component == "..")
+            return false;
+    }
+    return true;
+}
+
+fs::path canonicalOrLexical(const fs::path& path)
+{
+    std::error_code ec;
+    fs::path canonical = fs::weakly_canonical(path, ec);
+    return ec ? path.lexically_normal() : canonical;
+}
+
+} // namespace
+
 void AssetManager::setAssetRoot(const std::string& root) {
-    m_asset_root = root;
-    // Normalize trailing separator
-    if (!m_asset_root.empty() && m_asset_root.back() != '/' && m_asset_root.back() != '\\')
-        m_asset_root += '/';
+    if (root.empty()) {
+        m_asset_root.clear();
+        return;
+    }
+
+    std::error_code ec;
+    fs::path absolute = fs::absolute(fs::path(normalizeSeparators(root)), ec);
+    m_asset_root = canonicalOrLexical(ec ? fs::path(normalizeSeparators(root)) : absolute).generic_string();
     LOG_ENGINE_INFO("AssetManager: Asset root set to '{}'", m_asset_root);
 }
 
 void AssetManager::setAssetPrefix(const std::string& prefix) {
-    m_asset_prefix = prefix;
-    // Normalize trailing separator
-    if (!m_asset_prefix.empty() && m_asset_prefix.back() != '/' && m_asset_prefix.back() != '\\')
+    m_asset_prefix = normalizeSeparators(prefix);
+    if (!m_asset_prefix.empty() && m_asset_prefix.back() != '/')
         m_asset_prefix += '/';
 }
 
 std::string AssetManager::resolveAssetPath(const std::string& path) const {
     if (path.empty())
-        return path;
+        return {};
 
-    // Already absolute — return as-is
-    if (fs::path(path).is_absolute())
-        return path;
-
-    // No asset root — return as-is (CWD-relative)
-    if (m_asset_root.empty())
-        return path;
-
-    // Strip asset prefix if the path starts with it (e.g. "assets/models/foo" -> "models/foo")
-    std::string resolved = path;
-    if (!m_asset_prefix.empty() && resolved.size() > m_asset_prefix.size() &&
+    std::string resolved = normalizeSeparators(path);
+    if (!m_asset_prefix.empty() && resolved.size() >= m_asset_prefix.size() &&
         resolved.compare(0, m_asset_prefix.size(), m_asset_prefix) == 0) {
         resolved = resolved.substr(m_asset_prefix.size());
     }
 
-    return (fs::path(m_asset_root) / resolved).string();
+    fs::path candidate(resolved);
+    if (m_asset_root.empty())
+        return candidate.lexically_normal().generic_string();
+
+    const fs::path root(m_asset_root);
+    if (!candidate.is_absolute())
+        candidate = root / candidate;
+    candidate = canonicalOrLexical(candidate);
+
+    // Resolve symlinks before containment, so a link in the project cannot
+    // make an outside resource appear project-owned.
+    if (!isWithinRoot(root, candidate)) {
+        LOG_ENGINE_ERROR("AssetManager: Asset path '{}' escapes configured root '{}'", path, m_asset_root);
+        return {};
+    }
+
+    return candidate.generic_string();
 }
 
 std::vector<std::string> AssetManager::collectLevelAssets(const std::string& levels_directory) {
@@ -195,49 +239,66 @@ AssetHandle AssetManager::loadAsync(const std::string& path,
         return AssetHandle();
     }
 
-    {
-        std::lock_guard<std::mutex> lock(m_path_mutex);
-        auto it = m_path_to_id.find(path);
-        if (it != m_path_to_id.end()) {
-            AssetState* state = getAssetState(it->second);
-            if (state && state->state.load(std::memory_order_acquire) == LoadState::Ready) {
-                if (on_complete) {
-                    on_complete(it->second, true, state->data);
-                }
-                return AssetHandle(it->second, this);
-            }
-        }
-    }
-
-    IAssetLoader* loader = findLoaderForPath(path);
-    if (!loader) {
-        LOG_ENGINE_ERROR("AssetManager: No loader found for '{}'", path);
+    const std::string canonical_path = resolveAssetPath(path);
+    if (canonical_path.empty()) {
+        LOG_ENGINE_ERROR("AssetManager: Invalid asset path '{}'", path);
         return AssetHandle();
     }
 
-    AssetId id = m_next_id.fetch_add(1, std::memory_order_relaxed);
-
-    auto asset_state = std::make_unique<AssetState>();
-    asset_state->id = id;
-    asset_state->path = path;
-    asset_state->type = loader->getAssetType();
-    asset_state->state.store(LoadState::Queued, std::memory_order_release);
-    asset_state->on_complete = on_complete;
-    asset_state->on_progress = on_progress;
-
-    AssetState* state_ptr = asset_state.get();
-
+    AssetId id = INVALID_ASSET_ID;
     {
-        std::unique_lock<std::shared_mutex> lock(m_assets_mutex);
-        m_assets[id] = std::move(asset_state);
+        // Existing identities remain retrievable even after their loader is
+        // unregistered. The loader only governs creation of a new resource.
+        std::scoped_lock lock(m_assets_mutex, m_path_mutex);
+        const auto existing = m_path_to_id.find(canonical_path);
+        if (existing != m_path_to_id.end())
+            id = existing->second;
     }
 
-    {
-        std::lock_guard<std::mutex> lock(m_path_mutex);
-        m_path_to_id[path] = id;
+    if (id != INVALID_ASSET_ID) {
+        AssetState* state = getAssetState(id);
+        if (state && state->state.load(std::memory_order_acquire) == LoadState::Ready && on_complete)
+            on_complete(id, true, state->data);
+        return AssetHandle(id, this);
     }
 
-    std::string base_path = path.substr(0, path.find_last_of("/\\") + 1);
+    IAssetLoader* loader = findLoaderForPath(canonical_path);
+    if (!loader) {
+        LOG_ENGINE_ERROR("AssetManager: No loader found for '{}'", canonical_path);
+        return AssetHandle();
+    }
+
+    bool created = false;
+    {
+        // Recheck after loader selection, then insert state and key together.
+        // Every lifecycle state is represented by one identity even for racing callers.
+        std::scoped_lock lock(m_assets_mutex, m_path_mutex);
+        const auto existing = m_path_to_id.find(canonical_path);
+        if (existing != m_path_to_id.end()) {
+            id = existing->second;
+        } else {
+            id = m_next_id.fetch_add(1, std::memory_order_relaxed);
+            auto asset_state = std::make_unique<AssetState>();
+            asset_state->id = id;
+            asset_state->path = canonical_path;
+            asset_state->type = loader->getAssetType();
+            asset_state->state.store(LoadState::Queued, std::memory_order_release);
+            asset_state->on_complete = std::move(on_complete);
+            asset_state->on_progress = std::move(on_progress);
+            m_assets.emplace(id, std::move(asset_state));
+            m_path_to_id.emplace(canonical_path, id);
+            created = true;
+        }
+    }
+
+    if (!created) {
+        AssetState* state = getAssetState(id);
+        if (state && state->state.load(std::memory_order_acquire) == LoadState::Ready && on_complete)
+            on_complete(id, true, state->data);
+        return AssetHandle(id, this);
+    }
+
+    const std::string base_path = canonical_path.substr(0, canonical_path.find_last_of("/\\") + 1);
 
     Threading::JobPriority job_priority = Threading::JobPriority::Normal;
     if (priority == LoadPriority::High || priority == LoadPriority::Immediate) {
@@ -247,10 +308,10 @@ AssetHandle AssetManager::loadAsync(const std::string& path,
     }
 
     auto load_job = Threading::JobSystem::get().createJob()
-        .setName("Load: " + path)
+        .setName("Load: " + canonical_path)
         .setPriority(job_priority)
         .setContext(Threading::JobContext::Worker)
-        .setWork([this, id, path, base_path, loader]() {
+        .setWork([this, id, canonical_path, base_path, loader]() {
             updateProgress(id, 0.1f, LoadState::LoadingIO);
 
             LoadContext context;
@@ -260,7 +321,7 @@ AssetHandle AssetManager::loadAsync(const std::string& path,
 
             updateProgress(id, 0.3f, LoadState::Parsing);
 
-            LoadResult result = loader->loadFromFile(path, context);
+            LoadResult result = loader->loadFromFile(canonical_path, context);
 
             if (!result.success) {
                 failLoad(id, result.error_message);
@@ -280,7 +341,7 @@ AssetHandle AssetManager::loadAsync(const std::string& path,
             updateProgress(id, 0.8f, LoadState::UploadingGPU);
 
             auto gpu_job = Threading::JobSystem::get().createJob()
-                .setName("GPU Upload: " + path)
+                .setName("GPU Upload: " + canonical_path)
                 .setPriority(Threading::JobPriority::High)
                 .setContext(Threading::JobContext::MainThread)
                 .setWork([this, id, loader]() {
@@ -418,8 +479,10 @@ std::optional<AssetError> AssetManager::getError(AssetId id) const {
 }
 
 bool AssetManager::isLoaded(const std::string& path) const {
+    const std::string canonical_path = resolveAssetPath(path);
+    if (canonical_path.empty()) return false;
     std::lock_guard<std::mutex> lock(m_path_mutex);
-    auto it = m_path_to_id.find(path);
+    auto it = m_path_to_id.find(canonical_path);
     if (it == m_path_to_id.end()) return false;
 
     AssetState* state = getAssetState(it->second);
@@ -427,8 +490,10 @@ bool AssetManager::isLoaded(const std::string& path) const {
 }
 
 AssetHandle AssetManager::getLoadedAsset(const std::string& path) const {
+    const std::string canonical_path = resolveAssetPath(path);
+    if (canonical_path.empty()) return AssetHandle();
     std::lock_guard<std::mutex> lock(m_path_mutex);
-    auto it = m_path_to_id.find(path);
+    auto it = m_path_to_id.find(canonical_path);
     if (it != m_path_to_id.end()) {
         return AssetHandle(it->second, const_cast<AssetManager*>(this));
     }

@@ -309,6 +309,7 @@ bool CompiledMeshSerializer::loadHeader(CmeshHeader& header, const std::string& 
     file.read(reinterpret_cast<char*>(&header), sizeof(CmeshHeader));
     if (!file) return false;
     if (header.magic != CMESH_MAGIC) return false;
+    if (header.version < 2 || header.version > CMESH_VERSION) return false;
 
     return true;
 }
