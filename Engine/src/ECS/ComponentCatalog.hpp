@@ -1,6 +1,7 @@
 #pragma once
 
 #include "EngineExport.h"
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <string_view>
@@ -21,6 +22,23 @@ struct ComponentId {
     friend bool operator==(const ComponentId&, const ComponentId&) = default;
 };
 
+// Module identities come from the host's verified image and validated API/ABI
+// token. EngineCore has a separate reserved identity, not a synthetic digest.
+enum class ComponentOwnerKind : uint8_t { Invalid, EngineCore, Module };
+struct ComponentOwnerId {
+    ComponentOwnerKind kind = ComponentOwnerKind::Invalid;
+    std::array<uint8_t, 32> imageSha256{};
+    int32_t apiAbiVersion = 0;
+
+    static constexpr ComponentOwnerId engineCore() noexcept {
+        return {ComponentOwnerKind::EngineCore, {}, 0};
+    }
+    static constexpr ComponentOwnerId module(std::array<uint8_t, 32> digest, int32_t token) noexcept {
+        return {ComponentOwnerKind::Module, digest, token};
+    }
+    friend bool operator==(const ComponentOwnerId&, const ComponentOwnerId&) = default;
+};
+
 enum ComponentCapability : uint32_t {
     ComponentDefaultConstruct = 1u << 0,
     ComponentCopyConstruct = 1u << 1,
@@ -39,7 +57,7 @@ struct ComponentOperations {
 
 struct ComponentDescriptor {
     ComponentKey key;
-    uint64_t ownerId = 0;
+    ComponentOwnerId ownerId;
     size_t size = 0;
     size_t alignment = 0;
     uint32_t capabilities = 0;
@@ -89,7 +107,7 @@ public:
     ComponentCatalogResult registerComponent(const ComponentDescriptor&, ComponentId& outId) noexcept;
     ComponentCatalogResult resolve(const ComponentDescriptor&, ComponentId& outId) const noexcept;
     // Atomically retire all of the owner's components, or none if any is pinned.
-    ComponentCatalogResult unregisterOwner(uint64_t ownerId) noexcept;
+    ComponentCatalogResult unregisterOwner(ComponentOwnerId ownerId) noexcept;
     // On failure, acquire leaves an existing outLease unchanged.
     ComponentCatalogResult acquire(ComponentId, ComponentPinKind, ComponentLease& outLease) noexcept;
 

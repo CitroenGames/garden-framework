@@ -44,15 +44,20 @@ bool copy(void* p, const void* source) noexcept {
 bool serialize(const void* p, void* context) noexcept {
     *static_cast<int*>(context) = static_cast<const Value*>(p)->number; return true;
 }
+constexpr ComponentOwnerId moduleOwner(uint8_t byte, int32_t token = 1) {
+    std::array<uint8_t, 32> digest{};
+    digest[0] = byte;
+    return ComponentOwnerId::module(digest, token);
+}
 ComponentDescriptor descriptor() {
-    return {{"garden.tests.CatalogValue", 3}, 0x4267, sizeof(Value), alignof(Value),
+    return {{"garden.tests.CatalogValue", 3}, moduleOwner(1), sizeof(Value), alignof(Value),
         ComponentDefaultConstruct | ComponentCopyConstruct | ComponentSerialize,
         {construct, destroy, copy, serialize}};
 }
 }
 void testStore() {
     auto& catalog = ComponentCatalog::instance();
-    constexpr uint64_t owner = 0x98765;
+    constexpr auto owner = moduleOwner(2);
     ComponentDescriptor d{ComponentType<StoreValue>::key, owner, sizeof(StoreValue), alignof(StoreValue),
         componentCapabilities<StoreValue>(), makeComponentOperations<StoreValue>()};
     ComponentId id{};
@@ -130,10 +135,15 @@ int main() {
     check(catalog.registerComponent(conflict, found) == ComponentCatalogResult::Conflict,
         "conflicting revision registration rejected");
     conflict = d;
-    ++conflict.ownerId;
+    conflict.ownerId.imageSha256[31] = 1;
     check(catalog.resolve(conflict, found) == ComponentCatalogResult::Conflict &&
         catalog.registerComponent(conflict, found) == ComponentCatalogResult::Conflict,
-        "different owner conflicts on resolve and registration");
+        "different final digest byte conflicts on resolve and registration");
+    conflict = d;
+    ++conflict.ownerId.apiAbiVersion;
+    check(catalog.resolve(conflict, found) == ComponentCatalogResult::Conflict &&
+        catalog.registerComponent(conflict, found) == ComponentCatalogResult::Conflict,
+        "different API ABI token conflicts on resolve and registration");
     auto sibling = d;
     sibling.key.name = "garden.tests.CatalogSibling";
     ComponentId siblingId{};
@@ -174,7 +184,38 @@ int main() {
     invalid.capabilities |= 1u << 31;
     check(catalog.registerComponent(invalid, found) == ComponentCatalogResult::InvalidDescriptor,
         "unknown capability bits rejected");
-    check(catalog.unregisterOwner(d.ownerId + 1) == ComponentCatalogResult::NotFound,
+    invalid = d;
+    invalid.ownerId = {};
+    check(catalog.registerComponent(invalid, found) == ComponentCatalogResult::InvalidDescriptor &&
+        catalog.resolve(invalid, found) == ComponentCatalogResult::InvalidDescriptor &&
+        catalog.unregisterOwner(invalid.ownerId) == ComponentCatalogResult::InvalidDescriptor,
+        "empty owner rejected by registration resolve and retirement");
+    invalid.ownerId = ComponentOwnerId::module({}, 1);
+    check(catalog.registerComponent(invalid, found) == ComponentCatalogResult::InvalidDescriptor,
+        "module owner with empty digest rejected");
+    invalid.ownerId = moduleOwner(1, 0);
+    check(catalog.registerComponent(invalid, found) == ComponentCatalogResult::InvalidDescriptor,
+        "module owner with empty ABI token rejected");
+    invalid.ownerId = ComponentOwnerId::engineCore();
+    invalid.ownerId.imageSha256[0] = 1;
+    check(catalog.registerComponent(invalid, found) == ComponentCatalogResult::InvalidDescriptor,
+        "malformed reserved engine owner rejected");
+    invalid.ownerId = ComponentOwnerId::engineCore();
+    invalid.ownerId.apiAbiVersion = 1;
+    check(catalog.registerComponent(invalid, found) == ComponentCatalogResult::InvalidDescriptor,
+        "reserved engine owner with module token rejected");
+    invalid.ownerId.kind = static_cast<ComponentOwnerKind>(99);
+    check(catalog.unregisterOwner(invalid.ownerId) == ComponentCatalogResult::InvalidDescriptor,
+        "unknown owner kind rejected");
+    auto engine = d;
+    engine.key.name = "garden.tests.EngineValue";
+    engine.ownerId = ComponentOwnerId::engineCore();
+    ComponentId engineId{};
+    check(catalog.registerComponent(engine, engineId) == ComponentCatalogResult::Success &&
+        catalog.resolve(engine, found) == ComponentCatalogResult::Success && found == engineId &&
+        catalog.unregisterOwner(engine.ownerId) == ComponentCatalogResult::Success,
+        "reserved engine owner registers resolves and retires");
+    check(catalog.unregisterOwner(moduleOwner(3)) == ComponentCatalogResult::NotFound,
         "unknown owner cannot retire registrations");
 
     ComponentLease operation;

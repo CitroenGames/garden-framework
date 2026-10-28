@@ -44,9 +44,19 @@ bool validName(std::string_view name) noexcept {
     return hasSeparator;
 }
 
+bool validOwner(const ComponentOwnerId& owner) noexcept {
+    bool hasDigest = false;
+    for (const auto byte : owner.imageSha256) hasDigest |= byte != 0;
+    if (owner.kind == ComponentOwnerKind::EngineCore)
+        return !hasDigest && owner.apiAbiVersion == 0;
+    if (owner.kind == ComponentOwnerKind::Module)
+        return hasDigest && owner.apiAbiVersion != 0;
+    return false;
+}
+
 bool validMetadata(const ComponentDescriptor& d) noexcept {
     constexpr uint32_t known = ComponentDefaultConstruct | ComponentCopyConstruct | ComponentSerialize;
-    return validName(d.key.name) && d.key.revision != 0 && d.ownerId != 0 && d.size != 0 &&
+    return validName(d.key.name) && d.key.revision != 0 && validOwner(d.ownerId) && d.size != 0 &&
         d.alignment != 0 && (d.alignment & (d.alignment - 1)) == 0 && d.size % d.alignment == 0 &&
         (d.capabilities & ~known) == 0;
 }
@@ -155,7 +165,8 @@ ComponentCatalogResult ComponentCatalog::resolve(const ComponentDescriptor& d, C
     }
 }
 
-ComponentCatalogResult ComponentCatalog::unregisterOwner(uint64_t ownerId) noexcept {
+ComponentCatalogResult ComponentCatalog::unregisterOwner(ComponentOwnerId ownerId) noexcept {
+    if (!validOwner(ownerId)) return ComponentCatalogResult::InvalidDescriptor;
     try {
         std::lock_guard lock(m_impl->mutex);
         bool found = false;
