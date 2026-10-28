@@ -218,9 +218,7 @@ SoundHandle AudioSystem::playSound(AudioClipId clip_id, const PlayParams& params
     }
 
     // Configure
-    float effective_volume = params.volume * group_volumes[static_cast<int>(params.group)]
-                           * group_volumes[static_cast<int>(AudioGroup::Master)];
-    ma_sound_set_volume(active.sound.get(), effective_volume);
+    ma_sound_set_volume(active.sound.get(), params.volume * group_volumes[static_cast<int>(params.group)]);
     ma_sound_set_pitch(active.sound.get(), params.pitch);
     ma_sound_set_looping(active.sound.get(), params.loop);
 
@@ -269,9 +267,7 @@ SoundHandle AudioSystem::playSound3D(AudioClipId clip_id, const glm::vec3& posit
     }
 
     // Configure
-    float effective_volume = params.volume * group_volumes[static_cast<int>(params.group)]
-                           * group_volumes[static_cast<int>(AudioGroup::Master)];
-    ma_sound_set_volume(active.sound.get(), effective_volume);
+    ma_sound_set_volume(active.sound.get(), params.volume * group_volumes[static_cast<int>(params.group)]);
     ma_sound_set_pitch(active.sound.get(), params.pitch);
     ma_sound_set_looping(active.sound.get(), params.loop);
 
@@ -340,6 +336,7 @@ void AudioSystem::setListenerPosition(const glm::vec3& position, const glm::vec3
 
 void AudioSystem::setMasterVolume(float volume)
 {
+    if (!std::isfinite(volume)) return;
     group_volumes[static_cast<int>(AudioGroup::Master)] = volume;
     if (initialized)
     {
@@ -350,9 +347,14 @@ void AudioSystem::setMasterVolume(float volume)
 void AudioSystem::setGroupVolume(AudioGroup group, float volume)
 {
     if (!std::isfinite(volume)) return;
+    if (group == AudioGroup::Master)
+    {
+        setMasterVolume(volume);
+        return;
+    }
     group_volumes[static_cast<int>(group)] = volume;
     if (!initialized) return;
-    for (auto& s : impl->sounds) { if (!s.active) continue; float eff = s.base_volume * group_volumes[static_cast<int>(s.group)] * group_volumes[static_cast<int>(AudioGroup::Master)]; ma_sound_set_volume(s.sound.get(), eff); }
+    for (auto& s : impl->sounds) { if (!s.active || s.group != group) continue; ma_sound_set_volume(s.sound.get(), s.base_volume * volume); }
 }
 
 float AudioSystem::getGroupVolume(AudioGroup group) const
@@ -371,7 +373,7 @@ bool AudioSystem::setSoundVolume(SoundHandle handle, float volume)
 {
     if (!std::isfinite(volume)) return false;
     if (!initialized) return false;
-    for (auto& s : impl->sounds) if (s.handle == handle && s.active) { s.base_volume = volume; float eff = volume * group_volumes[static_cast<int>(s.group)] * group_volumes[static_cast<int>(AudioGroup::Master)]; ma_sound_set_volume(s.sound.get(), eff); return true; }
+    for (auto& s : impl->sounds) if (s.handle == handle && s.active) { s.base_volume = volume; ma_sound_set_volume(s.sound.get(), volume * group_volumes[static_cast<int>(s.group)]); return true; }
     return false;
 }
 bool AudioSystem::setSoundPitch(SoundHandle handle, float pitch)
@@ -390,6 +392,7 @@ bool AudioSystem::setSoundPaused(SoundHandle handle, bool paused)
 size_t AudioSystem::activeVoiceCount() const { size_t n = 0; for (auto& s : impl->sounds) if (s.active) ++n; return n; }
 glm::vec3 AudioSystem::getSoundPosition(SoundHandle handle) const { for (auto& s : impl->sounds) if (s.handle == handle && s.active) return s.position; return glm::vec3(0.0f); }
 float AudioSystem::getSoundVolume(SoundHandle handle) const { for (auto& s : impl->sounds) if (s.handle == handle && s.active) return s.base_volume; return 0.0f; }
+float AudioSystem::getEffectiveSoundVolume(SoundHandle handle) const { for (auto& s : impl->sounds) if (s.handle == handle && s.active) return s.base_volume * group_volumes[static_cast<int>(s.group)] * group_volumes[static_cast<int>(AudioGroup::Master)]; return 0.0f; }
 float AudioSystem::getSoundPitch(SoundHandle handle) const { for (auto& s : impl->sounds) if (s.handle == handle && s.active) return s.pitch; return 0.0f; }
 
 void AudioSystem::update()

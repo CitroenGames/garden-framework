@@ -11,6 +11,21 @@ struct VoiceBudget
 {
     int max_voices = 64;
     int max_per_event = 8;
+
+    // Zero is an explicit hard cap: it admits no event voices. Negative
+    // values are invalid configuration, never an alias for "unlimited".
+    bool isValid() const { return max_voices >= 0 && max_per_event >= 0; }
+};
+
+// Centralized counters make a measured production budget possible without
+// putting mixer ownership or transient one-shots into ECS.
+struct VoiceBudgetStats
+{
+    uint64_t admitted = 0;
+    uint64_t dropped = 0;
+    uint64_t stolen = 0;
+    uint64_t reaped = 0;
+    size_t peak_active = 0;
 };
 
 struct VoiceCandidate

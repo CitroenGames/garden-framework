@@ -57,8 +57,12 @@ public:
     const SoundEventDef* findEvent(const std::string& name) const;
     size_t eventCount() const { return m_events.size(); }
 
-    void setBudget(const VoiceBudget& budget) { m_budget = budget; }
+    // Reject invalid configuration without changing the active budget. A zero
+    // cap is valid and explicitly disables admission at that scope.
+    bool setBudget(const VoiceBudget& budget);
     const VoiceBudget& budget() const { return m_budget; }
+    const VoiceBudgetStats& budgetStats() const { return m_budget_stats; }
+    void resetBudgetStats() { m_budget_stats = {}; }
     void setPlayFn(PlayFn fn) { m_play_fn = std::move(fn); }
     void setStopFn(StopFn fn) { m_stop_fn = std::move(fn); }
     void resetBackendToDefault();
@@ -89,6 +93,7 @@ private:
     struct TrackedVoice { SoundHandle handle; std::string event_name; int priority; float gain; uint64_t sequence; bool loop; };
     std::vector<TrackedVoice> m_voices;
     VoiceBudget m_budget;
+    VoiceBudgetStats m_budget_stats;
     PlayFn m_play_fn;
     StopFn m_stop_fn;
     glm::vec3 m_listener{0.0f};

@@ -83,6 +83,10 @@ public:
     size_t activeVoiceCount() const;
     glm::vec3 getSoundPosition(SoundHandle handle) const;
     float getSoundVolume(SoundHandle handle) const;
+    // Includes the voice base gain, its live group gain, and the master gain.
+    // This is diagnostic state for tests/profiling; callers still author base
+    // gains through PlayParams and setSoundVolume.
+    float getEffectiveSoundVolume(SoundHandle handle) const;
     float getSoundPitch(SoundHandle handle) const;
     void stopAllSounds();
     bool isSoundPlaying(SoundHandle handle) const;

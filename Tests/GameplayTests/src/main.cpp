@@ -4345,6 +4345,8 @@ int main()
     ok = testFpsAudioEventTableRegistration() && ok;
     ok = testAudioVoiceStealingSelection() && ok;
     ok = testAudioPerEventCap() && ok;
+    ok = testAudioVoiceBudgetAdmissionAndCleanup() && ok;
+    ok = testAudioLiveGroupControl() && ok;
     ok = testAudioClipPickNoRepeat() && ok;
     ok = testAudioDistanceCullingAndLookup() && ok;
     ok = testAudioServerExclusionHeadless() && ok;

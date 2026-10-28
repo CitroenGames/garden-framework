@@ -6,6 +6,7 @@
 #include "ECS/EntityLifecycle.hpp"
 #include "Timer/TimerSystem.hpp"
 #include "Audio/AudioSystem.hpp"
+#include "Audio/SoundEvent.hpp"
 #include "Audio/AudioSourceSystem.hpp"
 #include "Animation/AnimationSystem.hpp"
 #include "GameFramework/GameMode.hpp"
@@ -134,6 +135,10 @@ void GameSimulation::registerSystems()
             camera& cam = getActiveCamera();
             AudioSystem::get().setListenerPosition(
                 cam.getPosition(), cam.camera_forward(), cam.getUpVector());
+            AudioEventSystem::get().setListenerPosition(cam.getPosition());
+            AudioEventSystem::get().reapFinished([](SoundHandle handle) {
+                return AudioSystem::get().isSoundPlaying(handle);
+            });
             AudioSystem::get().update();
         };
         m_scheduler->addSystem(std::move(d));

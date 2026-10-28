@@ -9,6 +9,7 @@
 #include "shared/FpsAudioEvents.hpp"
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -200,6 +201,10 @@ bool testAudioVoiceStealingSelection()
     cands.erase(cands.begin());
     pick = selectVoiceToSteal(cands, false);
     if (!pick || cands[*pick].handle != 2) return fail(name, "quietest not stolen on priority tie");
+    std::vector<VoiceCandidate> exact_tie = {
+        {4, "e", 50, 0.5f, 8, false}, {5, "e", 50, 0.5f, 3, false}};
+    pick = selectVoiceToSteal(exact_tie, false);
+    if (!pick || exact_tie[*pick].handle != 5) return fail(name, "oldest not stolen on exact tie");
     std::vector<VoiceCandidate> loops = {{9, "e", 1, 0.1f, 1, true}};
     if (selectVoiceToSteal(loops, false).has_value()) return fail(name, "loop stolen by one-shot");
     // Global cap integration: 3rd (high priority) steals lowest-priority voice.
@@ -225,6 +230,140 @@ bool testAudioPerEventCap()
     sys.play2D("capped"); sys.play2D("capped"); sys.play2D("capped"); sys.play2D("capped");
     if (sys.activeVoiceCountForEvent("capped") != 2) return fail(name, "per-event cap not held");
     if (mock.stopped.empty()) return fail(name, "cap did not steal within event");
+    return pass(name);
+}
+
+bool testAudioVoiceBudgetAdmissionAndCleanup()
+{
+    const std::string name = "Audio.VoiceBudgetAdmission";
+    AudioEventSystem sys;
+    MockAudioBackend mock;
+    sys.setPlayFn(mock.playFn());
+    sys.setStopFn(mock.stopFn());
+    sys.setSeed(13);
+
+    // Zero has an explicit no-admission meaning at both budget scopes and at
+    // an authored event cap. Invalid values do not replace a valid budget.
+    if (!sys.setBudget({0, 8}) || sys.registerEvent(makeTestDef("zero.global")) == false ||
+        sys.play2D("zero.global") != INVALID_SOUND || sys.activeVoiceCount() != 0)
+        return fail(name, "zero global cap admitted a voice");
+    if (!sys.setBudget({8, 0}) || sys.play2D("zero.global") != INVALID_SOUND)
+        return fail(name, "zero per-event cap admitted a voice");
+    if (!sys.setBudget({8, 8}))
+        return fail(name, "valid budget rejected");
+    auto zero_event = makeTestDef("zero.event");
+    zero_event.max_voices = 0;
+    if (!sys.registerEvent(zero_event) || sys.play2D("zero.event") != INVALID_SOUND)
+        return fail(name, "zero authored event cap admitted a voice");
+    if (sys.setBudget({-1, 8}) || sys.budget().max_voices != 8)
+        return fail(name, "invalid budget changed active configuration");
+
+    // A newly lower-priority version of an event cannot evict a retained
+    // higher-priority active voice from the earlier immutable table.
+    SoundEventTable high_table;
+    SoundEventTable low_table;
+    std::string error;
+    auto high = makeTestDef("retuned", 90, 1);
+    auto low = makeTestDef("retuned", 10, 1);
+    if (!SoundEventTable::create(1, {high}, high_table, &error) ||
+        !SoundEventTable::create(1, {low}, low_table, &error) ||
+        !sys.replaceEventTable(high_table, &error) ||
+        sys.play2D("retuned") == INVALID_SOUND ||
+        !sys.replaceEventTable(low_table, &error))
+        return fail(name, "could not set up priority-retune admission test");
+    const size_t stopped_before_lower = mock.stopped.size();
+    if (sys.play2D("retuned") != INVALID_SOUND || sys.activeVoiceCount() != 1 ||
+        mock.stopped.size() != stopped_before_lower)
+        return fail(name, "lower-priority event stole a higher-priority active voice");
+
+    // A paused distant loop remains an owned mixer voice even while its
+    // backend reports not-playing. A one-shot may not steal it.
+    sys.stopAll();
+    sys.resetBudgetStats();
+    if (!sys.setBudget({1, 8}))
+        return fail(name, "loop budget rejected");
+    auto distant_loop = makeTestDef("ambient.loop", 1, 1);
+    distant_loop.loop = true;
+    auto one_shot = makeTestDef("near.one_shot", 100, 1);
+    if (!sys.registerEvent(distant_loop) || !sys.registerEvent(one_shot) ||
+        sys.play2D("ambient.loop") == INVALID_SOUND)
+        return fail(name, "could not start retained loop");
+    sys.reapFinished([](SoundHandle) { return false; });
+    if (sys.activeVoiceCount() != 1 || sys.play2D("near.one_shot") != INVALID_SOUND ||
+        sys.budgetStats().dropped != 1)
+        return fail(name, "paused loop was reaped or stolen by a one-shot");
+
+    // Finished one-shots are reclaimed deterministically and counters expose
+    // the peak/admission/drop/steal receipt needed by a future real-mix run.
+    sys.stopAll();
+    sys.resetBudgetStats();
+    if (!sys.setBudget({2, 2}) || sys.play2D("near.one_shot") == INVALID_SOUND)
+        return fail(name, "could not start cleanup one-shot");
+    sys.reapFinished([](SoundHandle) { return false; });
+    const VoiceBudgetStats& stats = sys.budgetStats();
+    if (sys.activeVoiceCount() != 0 || stats.admitted != 1 || stats.reaped != 1 ||
+        stats.peak_active != 1)
+        return fail(name, "cleanup counters or voice ledger were incorrect");
+    return pass(name);
+}
+
+bool testAudioLiveGroupControl()
+{
+    const std::string name = "Audio.LiveGroupControl";
+    auto& audio = AudioSystem::get();
+    const bool initialized_here = !audio.isInitialized();
+    const auto wav_path = std::filesystem::temp_directory_path() /
+        ("garden_audio_group_control_" +
+         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".wav");
+    AudioClipId clip = INVALID_AUDIO_CLIP;
+    SoundHandle sfx = INVALID_SOUND;
+    SoundHandle music = INVALID_SOUND;
+    const auto cleanup = [&]() {
+        if (sfx != INVALID_SOUND) audio.stopSound(sfx);
+        if (music != INVALID_SOUND) audio.stopSound(music);
+        if (clip != INVALID_AUDIO_CLIP) audio.unloadClip(clip);
+        audio.setMasterVolume(1.0f);
+        audio.setGroupVolume(AudioGroup::SFX, 1.0f);
+        audio.setGroupVolume(AudioGroup::Music, 1.0f);
+        if (initialized_here && audio.isInitialized()) audio.shutdown();
+        std::error_code error;
+        std::filesystem::remove(wav_path, error);
+    };
+    const auto fail_with_cleanup = [&](const char* reason) {
+        cleanup();
+        return fail(name, reason);
+    };
+
+    if (initialized_here && !audio.initialize(AudioBackendMode::NoDevice))
+        return fail(name, "audio backend did not initialize");
+    if (!writeSilentTestWav(wav_path))
+        return fail_with_cleanup("could not create test clip");
+    clip = audio.loadClip(wav_path.string());
+    if (clip == INVALID_AUDIO_CLIP)
+        return fail_with_cleanup("could not load test clip");
+
+    audio.setMasterVolume(1.0f);
+    audio.setGroupVolume(AudioGroup::SFX, 1.0f);
+    audio.setGroupVolume(AudioGroup::Music, 1.0f);
+    PlayParams sfx_params; sfx_params.volume = 0.8f; sfx_params.loop = true; sfx_params.group = AudioGroup::SFX;
+    PlayParams music_params; music_params.volume = 0.6f; music_params.loop = true; music_params.group = AudioGroup::Music;
+    sfx = audio.playSound(clip, sfx_params);
+    music = audio.playSound(clip, music_params);
+    if (sfx == INVALID_SOUND || music == INVALID_SOUND)
+        return fail_with_cleanup("could not start group-control voices");
+
+    audio.setGroupVolume(AudioGroup::SFX, 0.25f);
+    audio.setMasterVolume(0.5f);
+    if (std::fabs(audio.getEffectiveSoundVolume(sfx) - 0.1f) > 0.0001f ||
+        std::fabs(audio.getEffectiveSoundVolume(music) - 0.3f) > 0.0001f ||
+        std::fabs(audio.getGroupVolume(AudioGroup::SFX) - 0.25f) > 0.0001f)
+        return fail_with_cleanup("live group retune did not preserve group isolation");
+    audio.setGroupVolume(AudioGroup::Master, 0.25f);
+    if (std::fabs(audio.getMasterVolume() - 0.25f) > 0.0001f ||
+        std::fabs(audio.getEffectiveSoundVolume(sfx) - 0.05f) > 0.0001f)
+        return fail_with_cleanup("master group alias did not retune active voices");
+
+    cleanup();
     return pass(name);
 }
 

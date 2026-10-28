@@ -58,6 +58,12 @@ bool AudioEventSystem::replaceEventTable(const SoundEventTable& table, std::stri
     return true;
 }
 void AudioEventSystem::clearEvents() { m_events.clear(); m_last_clip.clear(); }
+bool AudioEventSystem::setBudget(const VoiceBudget& budget)
+{
+    if (!budget.isValid()) return false;
+    m_budget = budget;
+    return true;
+}
 const SoundEventDef* AudioEventSystem::findEvent(const std::string& name) const
 {
     auto it = m_events.find(name);
@@ -102,23 +108,30 @@ bool AudioEventSystem::enforceCaps(const SoundEventDef& def, float gain)
         SoundHandle h = m_voices[idx].handle;
         if (m_stop_fn) m_stop_fn(h); else defaultStop(h);
         m_voices.erase(m_voices.begin() + static_cast<long>(idx));
+        ++m_budget_stats.stolen;
     };
+    // Zero is a hard, explicit no-admission cap at either scope.
+    if (m_budget.max_voices == 0 || m_budget.max_per_event == 0 || def.max_voices == 0)
+    {
+        ++m_budget_stats.dropped;
+        return false;
+    }
     // Per-event cap: steal from the same event (same priority -> quietest/oldest).
     int per_event_cap = std::min(def.max_voices, m_budget.max_per_event);
-    if (per_event_cap >= 0)
+    while (static_cast<int>(activeVoiceCountForEvent(def.name)) >= per_event_cap)
     {
-        while (static_cast<int>(activeVoiceCountForEvent(def.name)) >= per_event_cap && per_event_cap > 0)
+        std::vector<VoiceCandidate> cands;
+        std::vector<size_t> idxs;
+        for (size_t i = 0; i < m_voices.size(); ++i)
+            if (m_voices[i].event_name == def.name)
+            { cands.push_back({m_voices[i].handle, m_voices[i].event_name, m_voices[i].priority, m_voices[i].gain, m_voices[i].sequence, m_voices[i].loop}); idxs.push_back(i); }
+        auto pick = selectVoiceToSteal(cands, def.loop);
+        if (!pick || cands[*pick].priority > def.priority)
         {
-            std::vector<VoiceCandidate> cands;
-            std::vector<size_t> idxs;
-            for (size_t i = 0; i < m_voices.size(); ++i)
-                if (m_voices[i].event_name == def.name)
-                { cands.push_back({m_voices[i].handle, m_voices[i].event_name, m_voices[i].priority, m_voices[i].gain, m_voices[i].sequence, m_voices[i].loop}); idxs.push_back(i); }
-            auto pick = selectVoiceToSteal(cands, def.loop);
-            if (!pick) return false;
-            stop_voice(idxs[*pick]);
+            ++m_budget_stats.dropped;
+            return false;
         }
-        if (per_event_cap == 0) return false;
+        stop_voice(idxs[*pick]);
     }
     // Global budget.
     while (m_budget.max_voices > 0 && static_cast<int>(m_voices.size()) >= m_budget.max_voices)
@@ -126,9 +139,17 @@ bool AudioEventSystem::enforceCaps(const SoundEventDef& def, float gain)
         std::vector<VoiceCandidate> cands;
         for (auto& v : m_voices) cands.push_back({v.handle, v.event_name, v.priority, v.gain, v.sequence, v.loop});
         auto pick = selectVoiceToSteal(cands, def.loop);
-        if (!pick) return false;
+        if (!pick)
+        {
+            ++m_budget_stats.dropped;
+            return false;
+        }
         // Only steal a strictly lower-or-equal priority voice.
-        if (cands[*pick].priority > def.priority) return false;
+        if (cands[*pick].priority > def.priority)
+        {
+            ++m_budget_stats.dropped;
+            return false;
+        }
         stop_voice(*pick);
     }
     (void)gain;
@@ -170,6 +191,8 @@ SoundHandle AudioEventSystem::playInternal(const SoundEventDef& def, const glm::
     }
     m_last_clip[def.name] = idx;
     m_voices.push_back({handle, def.name, def.priority, gain, m_next_sequence++, def.loop});
+    ++m_budget_stats.admitted;
+    m_budget_stats.peak_active = std::max(m_budget_stats.peak_active, m_voices.size());
     return handle;
 }
 
@@ -209,6 +232,8 @@ void AudioEventSystem::stopAll()
 void AudioEventSystem::reapFinished(const std::function<bool(SoundHandle)>& is_playing)
 {
     if (!is_playing) return;
+    const size_t before = m_voices.size();
     m_voices.erase(std::remove_if(m_voices.begin(), m_voices.end(),
         [&](const TrackedVoice& v) { return !v.loop && !is_playing(v.handle); }), m_voices.end());
+    m_budget_stats.reaped += before - m_voices.size();
 }
