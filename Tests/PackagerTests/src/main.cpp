@@ -1,6 +1,8 @@
 #include "Assets/AssetManager.hpp"
 #include "Navigation/NavMeshSerializer.hpp"
 #include "Project/ProjectPackager.hpp"
+#include "Project/PackageReceipt.hpp"
+#include "Utils/FileHash.hpp"
 #include "Project/ProjectManager.hpp"
 #include "LevelManager.hpp"
 #include "Threading/JobSystem.hpp"
@@ -934,6 +936,137 @@ bool testFailedLevelCompileDoesNotRewriteDefaultLevel()
     return pass(name);
 }
 
+bool testPackageDependencyGraphCanonicalization()
+{
+    const std::string name = "Package dependency graph canonicalization";
+    PackageDependency texture;
+    texture.logical_path = "assets\\textures\\wall.tga";
+    texture.kind = PackageDependencyKind::Texture;
+    texture.owner_logical_path = "assets/levels/main.level.json";
+    texture.extractor_id = "level-v1";
+    texture.source_logical_path = "assets/textures/wall.tga";
+    texture.source_hash_fnv1a64 = 2;
+    texture.cooked_hash_fnv1a64 = 3;
+    texture.cook_fingerprint = 4;
+    texture.format_version = 2;
+    texture.byte_size = 12;
+
+    PackageDependency second_owner = texture;
+    second_owner.owner_logical_path = "assets/materials/wall.material";
+    PackageDependencyGraph graph;
+    if (!graph.add(texture) || !graph.add(second_owner))
+        return fail(name, "identical graph node was not accepted from two owners");
+    const auto dependencies = graph.dependencies();
+    if (dependencies.size() != 1 || dependencies[0].logical_path != "assets/textures/wall.tga" ||
+        dependencies[0].owner_logical_path != "assets/levels/main.level.json")
+        return fail(name, "canonical dependency identity or owner was not stable");
+    const auto owners = graph.ownersFor({PackageDependencyKind::Texture, "assets/textures/wall.tga"});
+    if (owners.size() != 2 || owners[0] != "assets/levels/main.level.json" ||
+        owners[1] != "assets/materials/wall.material")
+        return fail(name, "all reverse owners were not retained in bytewise order");
+
+    PackageDependency conflict = texture;
+    conflict.cooked_hash_fnv1a64 = 9;
+    std::string error;
+    if (graph.add(conflict, &error) || error.find("PKG-IDENTITY-CONFLICT") == std::string::npos)
+        return fail(name, "conflicting node identity was not rejected");
+    for (const std::string& invalid : {"", "assets//wall.tga", "assets/./wall.tga", "assets/../wall.tga", "C:/wall.tga", "/wall.tga"})
+    {
+        std::string normalized;
+        if (normalizePackageLogicalPath(invalid, normalized))
+            return fail(name, "invalid logical path was accepted: " + invalid);
+    }
+    return pass(name);
+}
+
+PackageReceipt makeReceiptFixture(const fs::path& stage)
+{
+    const fs::path texture = stage / "assets" / "textures" / "wall.tga";
+    writeText(texture, "receipt wall bytes");
+
+    PackageReceipt receipt;
+    receipt.package_name = "package";
+    receipt.project_name = "ReceiptFixture";
+    receipt.engine_version = "1.0";
+    receipt.default_level = "assets/levels/main.level.json";
+    receipt.game_module = "bin/ReceiptFixture";
+
+    PackageDependency dependency;
+    dependency.logical_path = "assets/textures/wall.tga";
+    dependency.kind = PackageDependencyKind::Texture;
+    dependency.owner_logical_path = "assets/levels/main.level.json";
+    dependency.extractor_id = "level-v1";
+    dependency.source_logical_path = dependency.logical_path;
+    dependency.source_hash_fnv1a64 = Utils::hashFile(texture.string());
+    dependency.cooked_hash_fnv1a64 = Utils::hashFile(texture.string());
+    dependency.byte_size = static_cast<uint64_t>(fs::file_size(texture));
+    receipt.dependencies.push_back(std::move(dependency));
+    return receipt;
+}
+
+bool testPackageReceiptRoundTripAndStageVerification()
+{
+    const std::string name = "Package receipt deterministic staged verification";
+    TempDirectory temp("receipt_round_trip");
+    const fs::path stage = temp.path / ".package.staging-test";
+    fs::create_directories(stage);
+    PackageReceipt receipt = makeReceiptFixture(stage);
+    std::string error;
+    if (!PackageReceiptSerializer::writeStaged(receipt, stage.string(), &error))
+        return fail(name, "receipt write failed: " + error);
+
+    const fs::path receipt_path = stage / PackageReceiptSerializer::Filename;
+    std::string first_bytes;
+    { std::ifstream input(receipt_path, std::ios::binary); first_bytes.assign(std::istreambuf_iterator<char>(input), {}); }
+    if (!PackageReceiptSerializer::writeStaged(receipt, stage.string(), &error))
+        return fail(name, "repeat receipt write failed: " + error);
+    std::string second_bytes;
+    { std::ifstream input(receipt_path, std::ios::binary); second_bytes.assign(std::istreambuf_iterator<char>(input), {}); }
+    if (first_bytes != second_bytes)
+        return fail(name, "canonical receipt bytes changed on repeat write");
+
+    PackageReceipt loaded;
+    if (!PackageReceiptSerializer::readStaged(stage.string(), loaded, &error) || loaded.dependencies.size() != 1)
+        return fail(name, "receipt did not round-trip: " + error);
+    const auto verification = PackageReceiptSerializer::verifyStaged(stage.string());
+    if (!verification.valid)
+        return fail(name, "valid staged receipt failed verification: " + (verification.errors.empty() ? "unknown" : verification.errors.front()));
+
+    if (!writeText(stage / "assets" / "textures" / "wall.tga", "receipt wall bytes changed"))
+        return fail(name, "could not corrupt staged fixture");
+    const auto corrupted = PackageReceiptSerializer::verifyStaged(stage.string());
+    if (corrupted.valid || corrupted.errors.empty() || corrupted.errors.front().find("assets/textures/wall.tga") == std::string::npos)
+        return fail(name, "corrupted staged dependency did not identify its receipt entry");
+    return pass(name);
+}
+
+bool testPackageReceiptRejectsNonCanonicalInput()
+{
+    const std::string name = "Package receipt rejects noncanonical input";
+    TempDirectory temp("receipt_reject");
+    const fs::path stage = temp.path / "stage";
+    fs::create_directories(stage);
+    PackageReceipt receipt = makeReceiptFixture(stage);
+    std::string error;
+    if (!PackageReceiptSerializer::writeStaged(receipt, stage.string(), &error))
+        return fail(name, "fixture receipt write failed: " + error);
+
+    const fs::path receipt_path = stage / PackageReceiptSerializer::Filename;
+    json document;
+    { std::ifstream input(receipt_path); input >> document; }
+    document["dependencies"].push_back(document["dependencies"][0]);
+    { std::ofstream output(receipt_path); output << document.dump(4) << '\n'; }
+    PackageReceipt loaded;
+    if (PackageReceiptSerializer::readStaged(stage.string(), loaded, &error) || error.find("PKG-RECEIPT-DUPLICATE") == std::string::npos)
+        return fail(name, "duplicate dependency was not rejected: " + error);
+
+    document["dependencies"].erase(document["dependencies"].begin() + 1);
+    document["closure_hash_fnv1a64"] = "0x0000000000000000";
+    { std::ofstream output(receipt_path); output << document.dump(4) << '\n'; }
+    if (PackageReceiptSerializer::readStaged(stage.string(), loaded, &error) || error.find("PKG-RECEIPT-HASH") == std::string::npos)
+        return fail(name, "closure hash mismatch was not rejected: " + error);
+    return pass(name);
+}
 bool packageIntegrationBinariesAvailable(std::vector<std::string>& missing)
 {
     missing = ProjectPackager::missingEngineBinaries(EnginePaths::getExecutableDir().string(), true);
@@ -970,6 +1103,9 @@ int main()
     ok &= testMissingAssetDirectoryFailsBeforeCopy();
     ok &= testPackagePathsCannotEscapeRoots();
     ok &= testSelectedLevelArtifactPathNormalization();
+    ok &= testPackageDependencyGraphCanonicalization();
+    ok &= testPackageReceiptRoundTripAndStageVerification();
+    ok &= testPackageReceiptRejectsNonCanonicalInput();
 
     std::vector<std::string> missing_runtime_files;
     if (!packageIntegrationBinariesAvailable(missing_runtime_files))
