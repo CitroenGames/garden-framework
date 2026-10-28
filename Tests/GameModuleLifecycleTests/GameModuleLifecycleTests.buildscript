@@ -22,3 +22,5 @@ include = fixtures/client_recorder.buildscript
 include = fixtures/server_recorder.buildscript
 include = fixtures/client_init_fails.buildscript
 include = fixtures/server_init_fails.buildscript
+include = fixtures/owned_teardown_recorder.buildscript
+include = fixtures/owned_teardown_init_fails.buildscript

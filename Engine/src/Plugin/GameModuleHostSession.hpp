@@ -36,6 +36,11 @@ public:
         std::function<void()> quiesce;
         std::function<void()> release_module_resources;
         std::function<void(const std::string& source_id)> remove_module_registrations;
+        // Cancels event, job, UI, and similar host callbacks registered by
+        // this module. It runs after quiesce and before module shutdown while
+        // callback destructors still have a loaded image. Appended to retain
+        // aggregate initialization at existing executable call sites.
+        std::function<void(const std::string& source_id)> release_module_callbacks;
     };
 
     explicit GameModuleHostSession(HostOperations operations = {});

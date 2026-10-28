@@ -1,6 +1,7 @@
 #include "Plugin/GameModuleHostSession.hpp"
 
 #include "Reflection/ReflectionRegistry.hpp"
+#include "GameFramework/GameModeRegistry.hpp"
 
 #include <utility>
 
@@ -170,8 +171,22 @@ void GameModuleHostSession::stop()
     if (m_operations.quiesce)
         m_operations.quiesce();
 
+    // Prevent every host callback or factory from retaining module code
+    // across shutdown. These removals intentionally occur while the image is
+    // still loaded, before any role shutdown callback or resource destructor.
+    if (!m_source_id.empty())
+    {
+        if (m_operations.release_module_callbacks)
+            m_operations.release_module_callbacks(m_source_id);
+        GameFramework::GameModeRegistry::get().unregisterBySource(m_source_id);
+        if (m_reflection)
+            m_reflection->unregisterBySource(m_source_id.c_str());
+        if (m_operations.remove_module_registrations)
+            m_operations.remove_module_registrations(m_source_id);
+    }
+
     // Callback code must remain loaded until every completed role has shut
-    // down.  A failed init deliberately leaves its role flag false.
+    // down. A failed init deliberately leaves its role flag false.
     if (m_play_started)
         m_loader.onPlayStop();
     if (m_client_initialised)
@@ -182,10 +197,6 @@ void GameModuleHostSession::stop()
     m_phase = Phase::Teardown;
     if (m_operations.release_module_resources)
         m_operations.release_module_resources();
-    if (m_reflection && !m_source_id.empty())
-        m_reflection->unregisterBySource(m_source_id.c_str());
-    if (m_operations.remove_module_registrations && !m_source_id.empty())
-        m_operations.remove_module_registrations(m_source_id);
 
     m_loader.unload();
     m_reflection = nullptr;

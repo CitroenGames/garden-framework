@@ -1,4 +1,8 @@
 #include "Plugin/GameModuleAPI.h"
+#include "GameFramework/GameModeRegistry.hpp"
+#include "GameFramework/GameModeBase.hpp"
+
+#include <memory>
 
 #include <cstdlib>
 #include <fstream>
@@ -26,7 +30,19 @@ GAME_API bool gardenGameInit(EngineServices*)
 #endif
 }
 GAME_API void gardenGameShutdown() { record("client.shutdown"); }
-GAME_API void gardenRegisterComponents(ReflectionRegistry*) { record("register_components"); }
+GAME_API void gardenRegisterComponents(ReflectionRegistry*)
+{
+    record("register_components");
+#if defined(FIXTURE_OWNED_TEARDOWN)
+    // This factory closes over a function emitted by this DLL. The host must
+    // remove it by its explicit game-name source before unloading the image.
+    GameFramework::GameModeRegistry::get().registerGameMode(
+        "GameModuleLifecycleOwnedFactory",
+        []() { return std::make_unique<GameFramework::GameModeBase>(); },
+        "GameModuleLifecycleFixture");
+    record("factory.registered");
+#endif
+}
 GAME_API void gardenGameUpdate(float) { record("client.update"); }
 GAME_API void gardenOnLevelLoaded() { record("client.level_loaded"); }
 GAME_API void gardenOnPlayStart() { record("client.play_start"); }
