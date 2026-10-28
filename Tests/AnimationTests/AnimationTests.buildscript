@@ -11,6 +11,7 @@ sources = {
     ../../Engine/src/Animation/AnimationClip.cpp
     ../../Engine/src/Animation/BoneMask.cpp
     ../../Engine/src/Animation/IKSolver.cpp
+    ../../Engine/src/Animation/GltfAnimationLoader.cpp
     ../../Engine/src/Animation/Pose.cpp
     ../../Engine/src/Animation/Skeleton.cpp
 }

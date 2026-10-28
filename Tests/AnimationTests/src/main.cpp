@@ -1,6 +1,7 @@
 #define GLM_ENABLE_EXPERIMENTAL
 
 #include "Animation/AnimationComponentMigration.hpp"
+#include "Animation/GltfAnimationLoader.hpp"
 #include "Animation/AnimationResourceValidation.hpp"
 #include "Animation/AnimationClip.hpp"
 #include "Animation/AnimationSampling.hpp"
@@ -21,8 +22,10 @@
 #include <entt/entt.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtx/quaternion.hpp>
+#include <tiny_gltf.h>
 
 #include <cmath>
+#include <cstring>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -179,6 +182,176 @@ bool testImmutableResourceValidation()
         return fail(name, "immutable set did not enforce unique named clips");
     return pass(name);
 }
+template<typename T>
+void appendBytes(std::vector<unsigned char>& bytes, const std::vector<T>& values)
+{
+    const size_t offset = bytes.size();
+    bytes.resize(offset + values.size() * sizeof(T));
+    std::memcpy(bytes.data() + offset, values.data(), values.size() * sizeof(T));
+}
+
+int addAccessor(tinygltf::Model& model, size_t offset, size_t byte_count, size_t count, int type)
+{
+    tinygltf::BufferView view;
+    view.buffer = 0;
+    view.byteOffset = offset;
+    view.byteLength = byte_count;
+    model.bufferViews.push_back(view);
+    tinygltf::Accessor accessor;
+    accessor.bufferView = static_cast<int>(model.bufferViews.size() - 1);
+    accessor.byteOffset = 0;
+    accessor.componentType = TINYGLTF_COMPONENT_TYPE_FLOAT;
+    accessor.type = type;
+    accessor.count = count;
+    model.accessors.push_back(accessor);
+    return static_cast<int>(model.accessors.size() - 1);
+}
+
+tinygltf::Model makeCheckedGltf()
+{
+    tinygltf::Model model;
+    tinygltf::Node root;
+    root.name = "root";
+    model.nodes.push_back(root);
+    tinygltf::Skin skin;
+    skin.name = "test-skin";
+    skin.joints = {0};
+    model.skins.push_back(skin);
+
+    tinygltf::Buffer buffer;
+    const std::vector<float> times = {0.0f, 1.0f};
+    const std::vector<float> translations = {0.0f, 0.0f, 0.0f, 2.0f, 3.0f, 4.0f};
+    appendBytes(buffer.data, times);
+    const size_t translation_offset = buffer.data.size();
+    appendBytes(buffer.data, translations);
+    model.buffers.push_back(std::move(buffer));
+    const int time_accessor = addAccessor(model, 0, times.size() * sizeof(float), times.size(), TINYGLTF_TYPE_SCALAR);
+    const int translation_accessor = addAccessor(model, translation_offset,
+        translations.size() * sizeof(float), times.size(), TINYGLTF_TYPE_VEC3);
+
+    tinygltf::Animation animation;
+    animation.name = "move";
+    tinygltf::AnimationSampler sampler;
+    sampler.input = time_accessor;
+    sampler.output = translation_accessor;
+    sampler.interpolation = "LINEAR";
+    animation.samplers.push_back(sampler);
+    tinygltf::AnimationChannel channel;
+    channel.sampler = 0;
+    channel.target_node = 0;
+    channel.target_path = "translation";
+    animation.channels.push_back(channel);
+    model.animations.push_back(std::move(animation));
+    return model;
+}
+
+bool rejectsGltf(tinygltf::Model model, const char* expected_code)
+{
+    GltfAnimationData data;
+    AnimationResourceError error;
+    if (GltfAnimationLoader::load(model, data, &error) || error.code != expected_code ||
+        data.skeleton || !data.clips.empty())
+        return false;
+    return true;
+}
+
+bool testCheckedGltfAnimationSource()
+{
+    const std::string name = "AN-2 glTF animation source rejects malformed accessors and structural input";
+    tinygltf::Model valid = makeCheckedGltf();
+    GltfAnimationData data;
+    AnimationResourceError error;
+    if (!GltfAnimationLoader::load(valid, data, &error) || !error.code.empty() || !data.skeleton ||
+        data.clips.size() != 1 || data.clips[0]->name() != "move" || !data.has_animation)
+        return fail(name, "valid checked glTF source did not publish one immutable resource");
+
+    tinygltf::Model bad = valid;
+    bad.accessors[0].bufferView = 99;
+    if (!rejectsGltf(std::move(bad), "ANIM_ACCESSOR_VIEW"))
+        return fail(name, "invalid accessor view was accepted or unnamed");
+
+    bad = valid;
+    bad.bufferViews[0].byteStride = 8;
+    if (!rejectsGltf(std::move(bad), "ANIM_ACCESSOR_LAYOUT"))
+        return fail(name, "interleaved animation accessor was accepted");
+
+    bad = valid;
+    bad.accessors[0].byteOffset = 4096;
+    if (!rejectsGltf(std::move(bad), "ANIM_ACCESSOR_RANGE"))
+        return fail(name, "out-of-range animation accessor was accepted");
+
+    bad = valid;
+    bad.accessors[0].sparse.isSparse = true;
+    if (!rejectsGltf(std::move(bad), "ANIM_ACCESSOR_SPARSE"))
+        return fail(name, "sparse animation accessor was accepted");
+
+    bad = valid;
+    bad.animations[0].channels[0].sampler = -1;
+    if (!rejectsGltf(std::move(bad), "ANIM_SAMPLER_INDEX"))
+        return fail(name, "invalid animation sampler index was accepted");
+
+    bad = valid;
+    bad.animations[0].samplers[0].output = 0;
+    if (!rejectsGltf(std::move(bad), "ANIM_ACCESSOR_TYPE"))
+        return fail(name, "wrong output accessor shape was accepted");
+
+    bad = valid;
+    bad.accessors[1].count = 1;
+    if (!rejectsGltf(std::move(bad), "ANIM_SAMPLER_COUNT"))
+        return fail(name, "mismatched sampler key counts were accepted");
+
+    bad = valid;
+    bad.animations[0].samplers[0].interpolation = "CUBICSPLINE";
+    if (!rejectsGltf(std::move(bad), "ANIM_UNSUPPORTED_INTERPOLATION"))
+        return fail(name, "unsupported interpolation was accepted");
+
+    bad = valid;
+    const float duplicate_time = 0.0f;
+    std::memcpy(bad.buffers[0].data.data() + sizeof(float), &duplicate_time, sizeof(float));
+    if (!rejectsGltf(std::move(bad), "ANIM_INVALID_KEY"))
+        return fail(name, "non-increasing key times were accepted");
+
+    bad = valid;
+    bad.skins[0].joints = {0, 0};
+    if (!rejectsGltf(std::move(bad), "ANIM_BONE_DUPLICATE"))
+        return fail(name, "duplicate skin joint was accepted");
+
+    bad = valid;
+    bad.nodes[0].children.push_back(9);
+    if (!rejectsGltf(std::move(bad), "ANIM_BONE_NODE"))
+        return fail(name, "invalid skeleton child node was accepted");
+
+    bad = valid;
+    tinygltf::Node intermediary;
+    intermediary.name = "intermediary";
+    intermediary.children = {0};
+    bad.nodes.push_back(intermediary);
+    if (!rejectsGltf(std::move(bad), "ANIM_BONE_HIERARCHY"))
+        return fail(name, "non-joint immediate parent was accepted");
+
+    bad = valid;
+    tinygltf::Node second_joint;
+    second_joint.name = "second";
+    bad.nodes.push_back(second_joint);
+    bad.skins[0].joints = {0, 1};
+    const size_t bind_offset = bad.buffers[0].data.size();
+    appendBytes(bad.buffers[0].data, std::vector<float>(16, 1.0f));
+    bad.skins[0].inverseBindMatrices = addAccessor(bad, bind_offset, 16 * sizeof(float), 1, TINYGLTF_TYPE_MAT4);
+    if (!rejectsGltf(std::move(bad), "ANIM_BIND_COUNT"))
+        return fail(name, "partial inverse bind array was accepted");
+
+    bad = valid;
+    bad.animations[0].name.clear();
+    if (!rejectsGltf(std::move(bad), "ANIM_CLIP_NAME"))
+        return fail(name, "unnamed clip was accepted");
+
+    bad = valid;
+    bad.animations[0].channels.push_back(bad.animations[0].channels[0]);
+    if (!rejectsGltf(std::move(bad), "ANIM_DUPLICATE_CHANNEL"))
+        return fail(name, "duplicate property channel was accepted");
+    return pass(name);
+}
+
 bool testRestPoseAndOverlay()
 {
     const std::string name = "AN-1 pose sampling preserves skeleton rest until authored keys override it";
@@ -400,6 +573,7 @@ int main()
 {
     bool ok = true;
     ok = testImmutableResourceValidation() && ok;
+    ok = testCheckedGltfAnimationSource() && ok;
     ok = testRestPoseAndOverlay() && ok;
     ok = testSystemRestAndInvalidPlayback() && ok;
     ok = testIkOrder() && ok;
