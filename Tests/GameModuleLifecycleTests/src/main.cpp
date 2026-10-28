@@ -1,5 +1,8 @@
 #include "Plugin/GameModuleHostSession.hpp"
 #include "ECS/ComponentStore.hpp"
+#include "ECS/ComponentOperations.hpp"
+#include "world.hpp"
+#include "../fixtures/LifecycleQueryComponents.hpp"
 #include "Reflection/ReflectionRegistry.hpp"
 #include "GameFramework/GameModeRegistry.hpp"
 
@@ -541,6 +544,70 @@ namespace
         if (!provider.unload() || fs::exists(image) ||
             catalog.resolve(query, id) != ComponentCatalogResult::NotFound)
             return fail(name, "provider did not retire its descriptor after lease release");
+        return pass(name);
+    }
+
+    bool testCrossDllMixedQuery()
+    {
+        using namespace garden::ecs;
+        const std::string name = "GameModuleLifecycle_CrossDllMixedQuery";
+        ScopedRecorder recorder("ecs_mixed_query");
+        auto& catalog = ComponentCatalog::instance();
+        garden::ecs::ComponentDescriptor engineDescriptor{ComponentType<EngineQueryComponent>::key,
+            ComponentOwnerId::engineCore(), sizeof(EngineQueryComponent), alignof(EngineQueryComponent),
+            componentCapabilities<EngineQueryComponent>(), makeComponentOperations<EngineQueryComponent>()};
+        ComponentId engineId{};
+        if (catalog.registerComponent(engineDescriptor, engineId) != ComponentCatalogResult::Success)
+            return fail(name, "engine component registration failed");
+
+        GameModuleLoader provider;
+        if (!provider.load(fixturePath("ecs_provider").string()) ||
+            !provider.registerEcsComponents() || !provider.isComponentProvider())
+            return fail(name, "provider load or registration failed");
+        const fs::path image = provider.getLoadedImagePath();
+        const garden::ecs::ComponentDescriptor moduleDescriptor{ComponentType<ModuleFixtureComponent>::key,
+            *provider.getComponentOwnerId(), sizeof(ModuleFixtureComponent), alignof(ModuleFixtureComponent),
+            ComponentDefaultConstruct, {}};
+        ComponentId moduleId{};
+        if (catalog.resolve(moduleDescriptor, moduleId) != ComponentCatalogResult::Success)
+            return fail(name, "module descriptor did not resolve");
+
+        // Declared after the loader so every failure destroys values before the DLL is retired.
+        {
+            world w;
+            const auto both = w.createScopedEntity();
+            const auto engineOnly = w.createScopedEntity();
+            if (!w.isEntityValid(both) || !w.isEntityValid(engineOnly) ||
+                w.add<ModuleFixtureComponent>(both) != ComponentStoreResult::Success ||
+                w.add<EngineQueryComponent>(both, EngineQueryComponent{12}) != ComponentStoreResult::Success ||
+                w.add<EngineQueryComponent>(engineOnly, EngineQueryComponent{99}) != ComponentStoreResult::Success)
+                return fail(name, "could not create query values");
+
+#ifdef _WIN32
+            HMODULE handle = LoadLibraryA(image.string().c_str());
+            if (!handle) return fail(name, "could not find provider fixture image");
+            auto query = reinterpret_cast<bool(*)(world*, EntityHandle)>(GetProcAddress(handle, "fixtureQueryMixed"));
+            FreeLibrary(handle);
+#else
+            void* handle = dlopen(image.string().c_str(), RTLD_NOW);
+            if (!handle) return fail(name, "could not find provider fixture image");
+            auto query = reinterpret_cast<bool(*)(world*, EntityHandle)>(dlsym(handle, "fixtureQueryMixed"));
+            dlclose(handle);
+#endif
+            EngineQueryComponent* engine = nullptr;
+            if (!query || !query(&w, both) ||
+                w.get<EngineQueryComponent>(both, engine) != ComponentStoreResult::Success ||
+                !engine || engine->value != 85)
+                return fail(name, "provider mixed query did not join the registered values");
+            if (provider.unload() || !provider.isLoaded() || !fs::exists(image) || !recorder.events().empty())
+                return fail(name, "provider retired while the module value was live");
+            if (w.destroyEntity(both) != ComponentStoreResult::Success ||
+                !equals(recorder.events(), {"ecs.component.destroy"}) || !provider.isLoaded() || !fs::exists(image))
+                return fail(name, "entity destruction did not invoke the module destructor while loaded");
+        }
+        if (!provider.unload() || provider.isLoaded() || fs::exists(image) ||
+            catalog.resolve(moduleDescriptor, moduleId) != ComponentCatalogResult::NotFound)
+            return fail(name, "provider did not retire after entity destruction");
         return pass(name);
     }
 
@@ -1183,6 +1250,7 @@ int main()
     ok = testPostTeardownInitFailureRecovery() && ok;
     ok = testContentIdentity() && ok;
     ok = testModuleComponentRegistration() && ok;
+    ok = testCrossDllMixedQuery() && ok;
     ok = testStoredModuleComponentRetirement() && ok;
     ok = testModuleComponentBatchFailures() && ok;
     ok = testProviderRetirement() && ok;

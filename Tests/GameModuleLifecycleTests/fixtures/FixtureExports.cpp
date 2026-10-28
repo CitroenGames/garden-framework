@@ -3,6 +3,8 @@
 #include "GameFramework/GameModeBase.hpp"
 #include "Events/EventBus.hpp"
 #include "ECS/ComponentStore.hpp"
+#include "world.hpp"
+#include "LifecycleQueryComponents.hpp"
 
 #include <memory>
 #include <new>
@@ -65,11 +67,9 @@ GAME_API bool gardenGameInit(EngineServices*)
     return true;
 #endif
 }
+ModuleFixtureComponent::~ModuleFixtureComponent() noexcept { record("ecs.component.destroy"); }
+
 namespace {
-    struct ModuleFixtureComponent {
-        int value = 73;
-        ~ModuleFixtureComponent() noexcept { record("ecs.component.destroy"); }
-    };
     bool constructModuleComponent(void* storage) noexcept
     {
         ::new (storage) ModuleFixtureComponent{};
@@ -81,12 +81,21 @@ namespace {
     }
 }
 
-template<> struct garden::ecs::ComponentType<ModuleFixtureComponent> {
-    static constexpr garden::ecs::ComponentKey key{"tests.lifecycle.ModuleFixtureComponent", 1};
-    static constexpr uint32_t capabilities = garden::ecs::ComponentDefaultConstruct;
-};
-
 #if defined(FIXTURE_ECS_PROVIDER)
+GAME_API bool fixtureQueryMixed(world* w, garden::ecs::EntityHandle expected)
+{
+    if (!w) return false;
+    int visits = 0;
+    bool matched = true;
+    const auto result = w->query<EngineQueryComponent, ModuleFixtureComponent>(
+        [&](garden::ecs::EntityHandle entity, EngineQueryComponent& engine, ModuleFixtureComponent& module) {
+            ++visits;
+            matched = matched && entity == expected && engine.value == 12 && module.value == 73;
+            engine.value += module.value;
+        });
+    return result == garden::ecs::ComponentStoreResult::Success && visits == 1 && matched;
+}
+
 GAME_API garden::ecs::ComponentStoreResult fixtureStoreAdd(
     garden::ecs::ComponentStore* store, garden::ecs::ComponentId id,
     garden::ecs::ComponentEntityKey entity)
