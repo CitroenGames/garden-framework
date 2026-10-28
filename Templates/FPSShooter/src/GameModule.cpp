@@ -1062,6 +1062,12 @@ GAME_API void gardenRegisterComponents(ReflectionRegistry* registry)
     // Register game-specific components here
 }
 
+GAME_API bool gardenRegisterEcsComponents(ModuleComponentSink*)
+{
+    // The template does not yet register any module-owned ECS components.
+    return true;
+}
+
 GAME_API void gardenGameUpdate(float delta_time)
 {
     if (!g_services) return;

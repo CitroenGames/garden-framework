@@ -28,3 +28,8 @@ include = fixtures/generation_a.buildscript
 include = fixtures/generation_b.buildscript
 include = fixtures/candidate_missing_game_update.buildscript
 include = fixtures/candidate_abi_mismatch.buildscript
+
+include = fixtures/ecs_provider.buildscript
+include = fixtures/ecs_bad_batch.buildscript
+include = fixtures/ecs_export_false.buildscript
+include = fixtures/ecs_sticky_failure.buildscript

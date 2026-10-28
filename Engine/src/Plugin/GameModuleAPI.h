@@ -1,6 +1,9 @@
 #pragma once
 
 #include "Input/GameInputModeService.hpp"
+#include "ECS/ComponentCatalog.hpp"
+
+#include <cstddef>
 
 #include <cstdint>
 
@@ -8,7 +11,7 @@
 // (world, entt::registry, shared component storage). The compatibility token
 // therefore includes both the source API revision and the C++ runtime/STL ABI
 // shape that changes between Debug/Release builds on MSVC.
-#define GARDEN_MODULE_API_REVISION 8
+#define GARDEN_MODULE_API_REVISION 9
 
 #if defined(_MSC_VER)
 #   define GARDEN_MODULE_COMPILER_FAMILY 1
@@ -46,6 +49,22 @@ class InputActionSystem;
 class ReflectionRegistry;
 class Application;
 class LevelManager;
+
+// Synchronous registration input. The host owns identity and copies key bytes
+// during submit; the module must not retain the sink or use it asynchronously.
+struct ModuleComponentDescriptor {
+    const char* key_utf8;
+    size_t key_length;
+    uint32_t revision;
+    size_t size;
+    size_t alignment;
+    uint32_t capabilities;
+    garden::ecs::ComponentOperations operations;
+};
+struct ModuleComponentSink {
+    void* context;
+    bool (*submit)(void*, const ModuleComponentDescriptor*) noexcept;
+};
 
 // Bundle of engine system pointers passed to the game DLL.
 // The DLL must NOT create its own instances of these — it uses the host's.
@@ -95,6 +114,8 @@ struct EngineServices
 //   GAME_API bool        gardenGameInit(EngineServices* services);
 //   GAME_API void        gardenGameShutdown();
 //   GAME_API void        gardenRegisterComponents(ReflectionRegistry* registry);
+//   GAME_API bool        gardenRegisterEcsComponents(ModuleComponentSink* sink);
+// The ECS export must catch its own exceptions and return false on failure.
 //   GAME_API void        gardenGameUpdate(float delta_time);
 //
 // Init returning false must synchronously roll back every thread, callback and

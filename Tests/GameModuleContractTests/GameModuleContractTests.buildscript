@@ -37,3 +37,5 @@ include = fixtures/abi_compiler_family_mismatch.buildscript
 include = fixtures/abi_compiler_version_mismatch.buildscript
 include = fixtures/abi_stl_debug_level_mismatch.buildscript
 include = fixtures/abi_debug_runtime_mismatch.buildscript
+
+include = fixtures/client_missing_register_ecs_components.buildscript

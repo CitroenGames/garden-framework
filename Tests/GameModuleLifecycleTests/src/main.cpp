@@ -504,6 +504,68 @@ namespace
         return pass(name);
     }
 
+    bool testModuleComponentRegistration()
+    {
+        using namespace garden::ecs;
+        const std::string name = "GameModuleLifecycle_RealModuleComponentRegistration";
+        ScopedRecorder recorder("ecs_pending_borrower");
+        GameModuleLoader provider, borrower;
+        if (!provider.load(fixturePath("ecs_provider").string()) ||
+            !borrower.load(fixturePath("ecs_provider").string()))
+            return fail(name, "provider or pending borrower load failed");
+        if (borrower.registerEcsComponents() || borrower.init(nullptr) || !recorder.events().empty())
+            return fail(name, "pending borrower activated or dispatched a callback");
+        if (!provider.registerEcsComponents() || !borrower.registerEcsComponents())
+            return fail(name, "provider registration did not make the borrower ready");
+        const auto owner = *provider.getComponentOwnerId();
+        garden::ecs::ComponentDescriptor query{{"tests.lifecycle.ModuleFixtureComponent", 1}, owner,
+            sizeof(int), alignof(int), ComponentDefaultConstruct, {}};
+        ComponentId id;
+        auto& catalog = ComponentCatalog::instance();
+        if (catalog.resolve(query, id) != ComponentCatalogResult::Success)
+            return fail(name, "registered module descriptor did not resolve");
+        ComponentLease lease;
+        if (catalog.acquire(id, ComponentPinKind::Operation, lease) != ComponentCatalogResult::Success ||
+            !lease.descriptor() || lease.descriptor()->ownerId != owner ||
+            !lease.descriptor()->operations.defaultConstruct || !lease.descriptor()->operations.destroy)
+            return fail(name, "module operation lease or injected owner missing");
+        alignas(int) unsigned char storage[sizeof(int)];
+        if (!lease.descriptor()->operations.defaultConstruct(storage) || *reinterpret_cast<int*>(storage) != 73)
+            return fail(name, "provider operation did not construct its value");
+        lease.descriptor()->operations.destroy(storage);
+        const auto image = provider.getLoadedImagePath();
+        if (!borrower.unload() || provider.unload() || !fs::exists(image))
+            return fail(name, "provider image retired with an outstanding operation lease");
+        lease.reset();
+        if (!provider.unload() || fs::exists(image) ||
+            catalog.resolve(query, id) != ComponentCatalogResult::NotFound)
+            return fail(name, "provider did not retire its descriptor after lease release");
+        return pass(name);
+    }
+
+    bool testModuleComponentBatchFailures()
+    {
+        using namespace garden::ecs;
+        const std::string name = "GameModuleLifecycle_ModuleComponentBatchRollback";
+        auto& catalog = ComponentCatalog::instance();
+        for (const char* fixture : {"ecs_bad_batch", "ecs_export_false", "ecs_sticky_failure"})
+        {
+            GameModuleLoader loader;
+            if (!loader.load(fixturePath(fixture).string()))
+                return fail(name, std::string("fixture load failed: ") + fixture);
+            garden::ecs::ComponentDescriptor query{{"tests.lifecycle.ModuleFixtureComponent", 1}, *loader.getComponentOwnerId(),
+                sizeof(int), alignof(int), ComponentDefaultConstruct, {}};
+            ComponentId id;
+            if (loader.registerEcsComponents() || catalog.resolve(query, id) != ComponentCatalogResult::NotFound)
+                return fail(name, std::string("failed export published a partial batch: ") + fixture);
+            GameModuleLoader rejectedBorrower;
+            if (rejectedBorrower.load(fixturePath(fixture).string()) || rejectedBorrower.isLoaded())
+                return fail(name, std::string("failed generation accepted a borrower: ") + fixture);
+            if (!loader.unload()) return fail(name, std::string("failed fixture did not unload: ") + fixture);
+        }
+        return pass(name);
+    }
+
     bool testProviderRetirement()
     {
         using namespace garden::ecs;
@@ -793,7 +855,7 @@ namespace
             dlclose(handle);
             setenv("GARDEN_TEST_MODULE_EVENT", "1", 1);
 #endif
-            const bool initialized = loader.init(nullptr);
+            const bool initialized = loader.registerEcsComponents() && loader.init(nullptr);
 #ifdef _WIN32
             _putenv_s("GARDEN_TEST_MODULE_EVENT", "");
 #else
@@ -1041,7 +1103,9 @@ int main()
                                        std::string("client_init_fails"), std::string("server_init_fails"),
                                        std::string("owned_teardown_recorder"), std::string("owned_teardown_init_fails"),
                                        std::string("generation_a"), std::string("generation_b"),
-                                       std::string("candidate_missing_game_update"), std::string("candidate_abi_mismatch")})
+                                       std::string("candidate_missing_game_update"), std::string("candidate_abi_mismatch"),
+                                       std::string("ecs_provider"), std::string("ecs_bad_batch"),
+                                       std::string("ecs_export_false"), std::string("ecs_sticky_failure")})
     {
         if (!fs::exists(fixturePath(fixture)))
         {
@@ -1059,6 +1123,8 @@ int main()
     ok = testOwnedTeardownAndNoPostUnloadDispatch() && ok;
     ok = testPostTeardownInitFailureRecovery() && ok;
     ok = testContentIdentity() && ok;
+    ok = testModuleComponentRegistration() && ok;
+    ok = testModuleComponentBatchFailures() && ok;
     ok = testProviderRetirement() && ok;
     ok = testCleanupExceptionAfterUnload() && ok;
     ok = testOrphanedProviderRetry() && ok;

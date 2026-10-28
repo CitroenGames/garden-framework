@@ -58,6 +58,10 @@ GAME_API void gardenGameShutdown() { record("client.shutdown"); }
 GAME_API void gardenRegisterComponents(ReflectionRegistry*) { record("client.register_components"); }
 #endif
 
+#ifndef FIXTURE_OMIT_REGISTER_ECS_COMPONENTS
+GAME_API bool gardenRegisterEcsComponents(ModuleComponentSink*) { return true; }
+#endif
+
 #ifndef FIXTURE_OMIT_GAME_UPDATE
 GAME_API void gardenGameUpdate(float) { record("client.update"); }
 #endif

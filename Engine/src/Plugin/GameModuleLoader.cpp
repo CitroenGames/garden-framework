@@ -345,6 +345,7 @@ namespace
         void* game_init = nullptr;
         void* game_shutdown = nullptr;
         void* register_components = nullptr;
+        void* register_ecs_components = nullptr;
         void* game_update = nullptr;
         void* on_level_loaded = nullptr;
         void* on_play_start = nullptr;
@@ -365,6 +366,7 @@ namespace
         exports.game_init = platformGetProc(handle, "gardenGameInit");
         exports.game_shutdown = platformGetProc(handle, "gardenGameShutdown");
         exports.register_components = platformGetProc(handle, "gardenRegisterComponents");
+        exports.register_ecs_components = platformGetProc(handle, "gardenRegisterEcsComponents");
         exports.game_update = platformGetProc(handle, "gardenGameUpdate");
         exports.on_level_loaded = platformGetProc(handle, "gardenOnLevelLoaded");
         exports.on_play_start = platformGetProc(handle, "gardenOnPlayStart");
@@ -383,6 +385,7 @@ namespace
             {"gardenGameInit", exports.game_init},
             {"gardenGameShutdown", exports.game_shutdown},
             {"gardenRegisterComponents", exports.register_components},
+            {"gardenRegisterEcsComponents", exports.register_ecs_components},
             {"gardenGameUpdate", exports.game_update},
         };
         for (const auto& [name, pointer] : required)
@@ -701,7 +704,9 @@ namespace
         return CandidatePreparation::Success;
     }
 
+    enum class RegistrationState { Pending, Registering, Complete, Failed };
     struct Generation {
+        RegistrationState registration = RegistrationState::Pending;
         garden::ecs::ComponentOwnerId owner;
         void* providerHandle = nullptr;
         std::string root, path;
@@ -788,6 +793,7 @@ void GameModuleLoader::moveFrom(GameModuleLoader&& other) noexcept
     m_fnGameInit = other.m_fnGameInit;
     m_fnGameShutdown = other.m_fnGameShutdown;
     m_fnRegisterComponents = other.m_fnRegisterComponents;
+    m_fnRegisterEcsComponents = other.m_fnRegisterEcsComponents;
     m_fnGameUpdate = other.m_fnGameUpdate;
     m_fnOnLevelLoaded = other.m_fnOnLevelLoaded;
     m_fnOnPlayStart = other.m_fnOnPlayStart;
@@ -876,7 +882,7 @@ bool GameModuleLoader::attachGeneration() noexcept
         std::lock_guard lock(registry.mutex);
         for (auto& existing : registry.generations) {
             if (existing->owner != m_component_owner_id) continue;
-            if (existing->retiring) return false;
+            if (existing->retiring || existing->registration == RegistrationState::Failed) return false;
             ++existing->borrowers;
             m_generation = existing.get();
             m_is_provider = false;
@@ -962,6 +968,7 @@ bool GameModuleLoader::beginRetirement() noexcept
         auto& registry = generationRegistry();
         std::lock_guard lock(registry.mutex);
         auto* generation = static_cast<Generation*>(m_generation);
+        if (generation->registration == RegistrationState::Registering) return false;
         if (garden::ecs::ComponentCatalog::instance().beginRetirement(m_component_owner_id) != garden::ecs::ComponentCatalogResult::Success) return false;
         generation->retiring = true;
         return generation->borrowers == 0;
@@ -978,6 +985,7 @@ bool GameModuleLoader::unload() noexcept
             std::lock_guard lock(registry.mutex);
             auto* generation = static_cast<Generation*>(m_generation);
             if (m_is_provider) {
+                if (generation->registration == RegistrationState::Registering) return false;
                 if (garden::ecs::ComponentCatalog::instance().beginRetirement(m_component_owner_id) != garden::ecs::ComponentCatalogResult::Success) return false;
                 generation->retiring = true;
                 if (generation->borrowers || !EventBus::get().moduleSourceCanRetire(m_component_owner_id)) return false;
@@ -1052,6 +1060,7 @@ bool GameModuleLoader::resolveFunctions()
     m_fnGameInit = reinterpret_cast<FnGameInit>(exports.game_init);
     m_fnGameShutdown = reinterpret_cast<FnGameShutdown>(exports.game_shutdown);
     m_fnRegisterComponents = reinterpret_cast<FnRegisterComponents>(exports.register_components);
+    m_fnRegisterEcsComponents = reinterpret_cast<FnRegisterEcsComponents>(exports.register_ecs_components);
     m_fnGameUpdate = reinterpret_cast<FnGameUpdate>(exports.game_update);
     m_fnOnLevelLoaded = reinterpret_cast<FnOnLevelLoaded>(exports.on_level_loaded);
     m_fnOnPlayStart = reinterpret_cast<FnOnPlayStart>(exports.on_play_start);
@@ -1073,6 +1082,7 @@ void GameModuleLoader::clearFunctionPointers()
     m_fnGameInit = nullptr;
     m_fnGameShutdown = nullptr;
     m_fnRegisterComponents = nullptr;
+    m_fnRegisterEcsComponents = nullptr;
     m_fnGameUpdate = nullptr;
     m_fnOnLevelLoaded = nullptr;
     m_fnOnPlayStart = nullptr;
@@ -1086,16 +1096,104 @@ void GameModuleLoader::clearFunctionPointers()
     m_fnServerOnClientDisconnected = nullptr;
 }
 
+namespace {
+struct EcsRegistrationStage {
+    struct Item { std::string name; ModuleComponentDescriptor descriptor; };
+    garden::ecs::ComponentOwnerId owner;
+    std::vector<Item> items;
+    bool failed = false;
+
+    static bool submit(void* context, const ModuleComponentDescriptor* input) noexcept {
+        auto* stage = static_cast<EcsRegistrationStage*>(context);
+        if (!stage || stage->failed) return false;
+        try {
+            if (!input || !input->key_utf8 || !input->key_length) {
+                stage->failed = true;
+                return false;
+            }
+            Item item{std::string(input->key_utf8, input->key_length), *input};
+            garden::ecs::ComponentDescriptor descriptor{{item.name, input->revision}, stage->owner,
+                input->size, input->alignment, input->capabilities, input->operations};
+            if (!garden::ecs::isValidComponentDescriptor(descriptor)) {
+                stage->failed = true;
+                return false;
+            }
+            stage->items.push_back(std::move(item));
+            return true;
+        } catch (...) {
+            stage->failed = true;
+            return false;
+        }
+    }
+};
+}
+
+bool GameModuleLoader::ecsRegistrationComplete() const noexcept
+{
+    try {
+        if (!m_generation || m_retirement_requested) return false;
+        auto& registry = generationRegistry();
+        std::lock_guard lock(registry.mutex);
+        auto* generation = static_cast<Generation*>(m_generation);
+        return !generation->retiring && generation->registration == RegistrationState::Complete;
+    } catch (...) { return false; }
+}
+
+bool GameModuleLoader::registerEcsComponents() noexcept
+{
+    Generation* generation = nullptr;
+    try {
+        if (!m_generation || !m_fnRegisterEcsComponents || m_retirement_requested) return false;
+        auto& registry = generationRegistry();
+        {
+            std::lock_guard lock(registry.mutex);
+            generation = static_cast<Generation*>(m_generation);
+            if (generation->retiring) return false;
+            if (generation->registration == RegistrationState::Complete) return true;
+            if (!m_is_provider || generation->registration != RegistrationState::Pending) return false;
+            generation->registration = RegistrationState::Registering;
+        }
+        bool success = false;
+        try {
+            EcsRegistrationStage stage{m_component_owner_id};
+            ModuleComponentSink sink{&stage, &EcsRegistrationStage::submit};
+            EventBus::ModuleSourceScope scope(m_component_owner_id);
+            const bool accepted = m_fnRegisterEcsComponents(&sink);
+            if (accepted && !stage.failed) {
+                std::vector<garden::ecs::ComponentDescriptor> descriptors;
+                std::vector<garden::ecs::ComponentId> ids(stage.items.size());
+                descriptors.reserve(stage.items.size());
+                for (const auto& item : stage.items) {
+                    const auto& d = item.descriptor;
+                    descriptors.push_back({{item.name, d.revision}, {}, d.size, d.alignment,
+                                           d.capabilities, d.operations});
+                }
+                success = garden::ecs::ComponentCatalog::instance().registerBatch(
+                    m_component_owner_id, descriptors, ids) == garden::ecs::ComponentCatalogResult::Success;
+            }
+        } catch (...) { success = false; }
+        {
+            std::lock_guard lock(registry.mutex);
+            generation->registration = success ? RegistrationState::Complete : RegistrationState::Failed;
+        }
+        return success;
+    } catch (...) {
+        // A mutex failure after entry leaves the generation conservatively pinned
+        // in Registering, preventing activation and retirement.
+        return false;
+    }
+}
+
 int32_t GameModuleLoader::getAPIVersion() { EventBus::ModuleSourceScope scope(m_component_owner_id); return m_fnGetAPIVersion ? m_fnGetAPIVersion() : -1; }
 const char* GameModuleLoader::getGameName() { EventBus::ModuleSourceScope scope(m_component_owner_id); return m_fnGetGameName ? m_fnGetGameName() : "Unknown"; }
-bool GameModuleLoader::init(EngineServices* services) { EventBus::ModuleSourceScope scope(m_component_owner_id); return m_fnGameInit ? m_fnGameInit(services) : false; }
+bool GameModuleLoader::init(EngineServices* services) { EventBus::ModuleSourceScope scope(m_component_owner_id); return ecsRegistrationComplete() && m_fnGameInit ? m_fnGameInit(services) : false; }
 void GameModuleLoader::shutdown() { EventBus::ModuleSourceScope scope(m_component_owner_id); if (m_fnGameShutdown) m_fnGameShutdown(); }
-void GameModuleLoader::registerComponents(ReflectionRegistry* registry) { EventBus::ModuleSourceScope scope(m_component_owner_id); if (m_is_provider && m_fnRegisterComponents) m_fnRegisterComponents(registry); }
+void GameModuleLoader::registerComponents(ReflectionRegistry* registry) { EventBus::ModuleSourceScope scope(m_component_owner_id); if (ecsRegistrationComplete() && m_is_provider && m_fnRegisterComponents) m_fnRegisterComponents(registry); }
 void GameModuleLoader::update(float delta_time) { EventBus::ModuleSourceScope scope(m_component_owner_id); if (m_fnGameUpdate) m_fnGameUpdate(delta_time); }
 void GameModuleLoader::onLevelLoaded() { EventBus::ModuleSourceScope scope(m_component_owner_id); if (m_fnOnLevelLoaded) m_fnOnLevelLoaded(); }
 void GameModuleLoader::onPlayStart() { EventBus::ModuleSourceScope scope(m_component_owner_id); if (m_fnOnPlayStart) m_fnOnPlayStart(); }
 void GameModuleLoader::onPlayStop() { EventBus::ModuleSourceScope scope(m_component_owner_id); if (m_fnOnPlayStop) m_fnOnPlayStop(); }
-bool GameModuleLoader::serverInit(EngineServices* services) { EventBus::ModuleSourceScope scope(m_component_owner_id); return m_fnServerInit ? m_fnServerInit(services) : false; }
+bool GameModuleLoader::serverInit(EngineServices* services) { EventBus::ModuleSourceScope scope(m_component_owner_id); return ecsRegistrationComplete() && m_fnServerInit ? m_fnServerInit(services) : false; }
 void GameModuleLoader::serverShutdown() { EventBus::ModuleSourceScope scope(m_component_owner_id); if (m_fnServerShutdown) m_fnServerShutdown(); }
 void GameModuleLoader::serverPrePhysics(float fixed_delta) { EventBus::ModuleSourceScope scope(m_component_owner_id); if (m_fnServerPrePhysics) m_fnServerPrePhysics(fixed_delta); }
 void GameModuleLoader::serverUpdate(float delta_time) { EventBus::ModuleSourceScope scope(m_component_owner_id); if (m_fnServerUpdate) m_fnServerUpdate(delta_time); }

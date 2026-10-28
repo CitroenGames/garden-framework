@@ -74,6 +74,10 @@ bool sameMetadata(const ComponentDescriptor& a, const ComponentDescriptor& b) no
 }
 }
 
+bool isValidComponentDescriptor(const ComponentDescriptor& descriptor) noexcept {
+    return validDescriptor(descriptor);
+}
+
 struct ComponentCatalog::Impl {
     struct Entry {
         std::string name;

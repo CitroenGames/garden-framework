@@ -1908,6 +1908,14 @@ void EditorApp::beginPlay()
                                     continue;
                                 }
 
+                                if (!inst->game_module.registerEcsComponents())
+                                {
+                                    LOG_ENGINE_WARN("ECS component registration failed for Player {}", i);
+                                    if (!inst->release())
+                                        m_pie_clients.push_back(std::move(inst));
+                                    continue;
+                                }
+
                                 // Create render target
                                 inst->viewport = m_app.getRenderAPI()->createSceneViewport(640, 480);
                                 if (!inst->viewport)
@@ -2082,6 +2090,14 @@ void EditorApp::beginPlay()
                             if (!inst->game_module.load(dll_path))
                             {
                                 LOG_ENGINE_WARN("Failed to load DLL copy for Player {}", i);
+                                if (!inst->release())
+                                    m_pie_clients.push_back(std::move(inst));
+                                continue;
+                            }
+
+                            if (!inst->game_module.registerEcsComponents())
+                            {
+                                LOG_ENGINE_WARN("ECS component registration failed for Player {}", i);
                                 if (!inst->release())
                                     m_pie_clients.push_back(std::move(inst));
                                 continue;

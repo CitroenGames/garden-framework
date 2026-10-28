@@ -478,6 +478,7 @@ namespace
             {"client_missing_game_init", "gardenGameInit"},
             {"client_missing_game_shutdown", "gardenGameShutdown"},
             {"client_missing_register_components", "gardenRegisterComponents"},
+            {"client_missing_register_ecs_components", "gardenRegisterEcsComponents"},
             {"client_missing_game_update", "gardenGameUpdate"},
         };
 
@@ -540,6 +541,8 @@ namespace
             std::string error;
             if (!loadAccepted(loader, paths.fixture(fixture_name), error)) return fail(name, error);
             if (!loader.isLoaded() || loader.hasServerSupport()) return fail(name, "client-only module reported the wrong load state");
+            if (loader.init(nullptr) || !loader.registerEcsComponents())
+                return fail(name, "initialization gate or ECS registration failed");
             if (!loader.init(nullptr) || loader.serverInit(nullptr)) return fail(name, "client/server initialization returned an unexpected result");
             loader.registerComponents(nullptr);
             loader.update(0.016f);
@@ -605,6 +608,7 @@ namespace
             if (!loadAccepted(loader, paths.fixture(test_case.fixture), error)) return fail(name, error);
             if (loader.hasServerSupport() != test_case.has_server_support)
                 return fail(name, "server capability marker had the wrong value");
+            if (!loader.registerEcsComponents()) return fail(name, "ECS registration failed");
             const bool server_init = loader.serverInit(nullptr);
             if (server_init != test_case.has_server_support)
                 return fail(name, "server init result did not match the server capability marker");
@@ -630,7 +634,7 @@ int main()
     const std::vector<std::string> fixtures = {
         "client_complete", "client_missing_get_api_version", "client_missing_get_game_name",
         "client_missing_game_init", "client_missing_game_shutdown", "client_missing_register_components",
-        "client_missing_game_update", "client_lifecycle_absent", "client_lifecycle_recorder", "server_none",
+        "client_missing_game_update", "client_missing_register_ecs_components", "client_lifecycle_absent", "client_lifecycle_recorder", "server_none",
         "server_init_only", "server_partial", "server_callbacks_without_init", "server_complete_recorder",
         "abi_revision_mismatch", "abi_compiler_family_mismatch", "abi_compiler_version_mismatch",
         "abi_stl_debug_level_mismatch", "abi_debug_runtime_mismatch",

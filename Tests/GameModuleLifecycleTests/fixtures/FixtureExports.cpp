@@ -4,6 +4,7 @@
 #include "Events/EventBus.hpp"
 
 #include <memory>
+#include <new>
 
 #include <cstdlib>
 #include <fstream>
@@ -60,6 +61,44 @@ GAME_API bool gardenGameInit(EngineServices*)
     record("client.init.rollback_callback");
     return false;
 #else
+    return true;
+#endif
+}
+namespace {
+    struct ModuleFixtureComponent { int value; };
+    bool constructModuleComponent(void* storage) noexcept
+    {
+        ::new (storage) ModuleFixtureComponent{73};
+        return true;
+    }
+    void destroyModuleComponent(void* storage) noexcept
+    {
+        static_cast<ModuleFixtureComponent*>(storage)->~ModuleFixtureComponent();
+    }
+}
+
+GAME_API bool gardenRegisterEcsComponents(ModuleComponentSink* sink)
+{
+#if defined(FIXTURE_ECS_PROVIDER) || defined(FIXTURE_ECS_BAD_BATCH) || defined(FIXTURE_ECS_EXPORT_FALSE) || defined(FIXTURE_ECS_STICKY_FAILURE)
+    constexpr char key[] = "tests.lifecycle.ModuleFixtureComponent";
+    ModuleComponentDescriptor descriptor{key, sizeof(key) - 1, 1, sizeof(ModuleFixtureComponent),
+        alignof(ModuleFixtureComponent), garden::ecs::ComponentDefaultConstruct,
+        {constructModuleComponent, destroyModuleComponent, nullptr, nullptr}};
+    if (!sink || !sink->submit(sink->context, &descriptor)) return false;
+#if defined(FIXTURE_ECS_BAD_BATCH)
+    // Duplicate follows a valid entry; the host must reject the whole batch.
+    return sink->submit(sink->context, &descriptor);
+#elif defined(FIXTURE_ECS_EXPORT_FALSE)
+    return false;
+#elif defined(FIXTURE_ECS_STICKY_FAILURE)
+    descriptor.key_utf8 = nullptr;
+    sink->submit(sink->context, &descriptor);
+    return true; // Ignoring a failed submit must not publish the first descriptor.
+#else
+    return true;
+#endif
+#else
+    (void)sink;
     return true;
 #endif
 }

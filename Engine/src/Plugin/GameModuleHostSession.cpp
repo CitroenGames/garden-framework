@@ -41,6 +41,10 @@ bool GameModuleHostSession::loadAndRegister(const std::string& module_path, Refl
     }
 
     m_callbacks_exposed = true;
+    if (!m_loader.registerEcsComponents()) {
+        failAndStop("module ECS component registration failed");
+        return false;
+    }
     m_loader.registerComponents(m_reflection);
     m_phase = Phase::Registered;
     return true;
@@ -211,6 +215,7 @@ bool GameModuleHostSession::activatePromotedCandidate(ReflectionRegistry& reflec
         return false;
 
     m_last_failure.clear();
+    m_phase = Phase::Registered;
     m_reflection = &reflection;
     m_source_id = m_loader.getGameName();
     if (m_source_id.empty() || m_source_id == "Unknown")
@@ -220,6 +225,10 @@ bool GameModuleHostSession::activatePromotedCandidate(ReflectionRegistry& reflec
     }
 
     m_callbacks_exposed = true;
+    if (!m_loader.registerEcsComponents()) {
+        failAndStop("module ECS component registration failed");
+        return false;
+    }
     m_loader.registerComponents(m_reflection);
     m_phase = Phase::Registered;
 

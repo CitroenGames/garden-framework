@@ -25,6 +25,11 @@ GAME_API void gardenGameShutdown()
     g_services = nullptr;
 }
 
+GAME_API bool gardenRegisterEcsComponents(ModuleComponentSink*)
+{
+    return true;
+}
+
 GAME_API void gardenRegisterComponents(ReflectionRegistry* registry)
 {
     // Register your game components here:

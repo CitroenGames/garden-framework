@@ -75,6 +75,8 @@ public:
     bool        init(EngineServices* services);
     void        shutdown();
     void        registerComponents(ReflectionRegistry* registry);
+    [[nodiscard]] bool registerEcsComponents() noexcept;
+    bool ecsRegistrationComplete() const noexcept;
     void        update(float delta_time);
     void        onLevelLoaded();
     void        onPlayStart();
@@ -108,6 +110,7 @@ private:
     using FnGetGameName         = const char*(*)();
     using FnGameInit            = bool(*)(EngineServices*);
     using FnGameShutdown        = void(*)();
+    using FnRegisterEcsComponents = bool(*)(ModuleComponentSink*);
     using FnRegisterComponents  = void(*)(ReflectionRegistry*);
     using FnGameUpdate          = void(*)(float);
     using FnOnLevelLoaded       = void(*)();
@@ -119,6 +122,7 @@ private:
     FnGameInit           m_fnGameInit            = nullptr;
     FnGameShutdown       m_fnGameShutdown        = nullptr;
     FnRegisterComponents m_fnRegisterComponents  = nullptr;
+    FnRegisterEcsComponents m_fnRegisterEcsComponents = nullptr;
     FnGameUpdate         m_fnGameUpdate          = nullptr;
     FnOnLevelLoaded      m_fnOnLevelLoaded       = nullptr;
     FnOnPlayStart        m_fnOnPlayStart         = nullptr;

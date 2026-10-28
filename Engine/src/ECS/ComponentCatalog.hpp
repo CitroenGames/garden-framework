@@ -65,6 +65,9 @@ struct ComponentDescriptor {
     ComponentOperations operations;
 };
 
+// Validate a complete descriptor before staging it for a batch.
+ENGINE_API bool isValidComponentDescriptor(const ComponentDescriptor&) noexcept;
+
 enum class ComponentCatalogResult {
     // DuplicateKey means a compatible borrower; registerComponent returns the
     // provider's existing ID and leaves the provider's operations unchanged.
