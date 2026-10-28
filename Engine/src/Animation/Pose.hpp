@@ -1,10 +1,12 @@
 #pragma once
 
+#include "EngineExport.h"
+
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <vector>
 
-struct BonePose
+struct ENGINE_API BonePose
 {
     glm::vec3 translation{0.0f};
     glm::quat rotation{1.0f, 0.0f, 0.0f, 0.0f}; // identity quaternion
@@ -24,7 +26,7 @@ struct BonePose
     static BonePose additive(const BonePose& base, const BonePose& delta, float weight);
 };
 
-class Pose
+class ENGINE_API Pose
 {
 public:
     Pose() = default;

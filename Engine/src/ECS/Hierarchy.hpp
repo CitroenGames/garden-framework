@@ -415,6 +415,16 @@ inline std::optional<glm::mat4> resolveRenderWorldMatrix(
 
 inline void markDirty(entt::registry& r, entt::entity e);
 
+// Converts an affine local matrix into the engine's single authored local
+// transform representation. Rig pose application and keep-world hierarchy
+// attachment deliberately share this conversion so both preserve the YXZ
+// Euler contract of TransformComponent.
+inline bool decomposeToTransformComponent(const glm::mat4& matrix,
+                                          TransformComponent& out)
+{
+    return detail::decomposeToLocal(matrix, out);
+}
+
 namespace detail
 {
 inline void markDirtyRecursive(entt::registry& r, entt::entity e, int depth,
