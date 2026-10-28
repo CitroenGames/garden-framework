@@ -8,13 +8,16 @@
 #include "Events/EngineEvents.hpp"
 #include "Events/EventBus.hpp"
 
+#include <algorithm>
 #include <cassert>
 #include <chrono>
 #include <cstdint>
+#include <list>
 #include <random>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 #include <entt/entt.hpp>
 
@@ -23,23 +26,65 @@ struct PendingDestroy {};
 // GUID -> entity index (entity_lifecycle.md §2). Stored in registry.ctx.
 struct EntityIndex
 {
+    // An entry whose value is entt::null represents an ambiguous GUID.
+    // Keep that entry so identity generation still reserves the GUID.
     std::unordered_map<EntityGuid, entt::entity, GuidHash> by_guid;
 
     entt::entity resolve(EntityRef ref) const
     {
-        if (ref.isNull())
+        if (degraded || ref.isNull())
             return entt::null;
         auto it = by_guid.find(ref.guid);
         return it != by_guid.end() ? it->second : entt::null;
     }
+
+private:
+    friend class EntityLifecycle;
+    // A failed allocation or detected inconsistency invalidates the entire
+    // index. This flag requires no allocation and stays set until rebuilt.
+    bool degraded = false;
+    // Zero is reserved. Clearing advances the shared epoch and skips zero on
+    // wrap; a queue must not survive a full 2^64-1 clear cycle.
+    uint64_t clear_generation = 1;
+    // Only ambiguous identities need a list. Destruction signals can arrive
+    // before a bulk storage clear removes any of its components.
+    std::unordered_map<EntityGuid, std::vector<entt::entity>, GuidHash> duplicate_owners;
 };
 
 // Thin lifecycle service over a registry (entity_lifecycle.md §3).
-// One per registry; maintains EntityIndex in registry.ctx via Identity hooks.
+// Instances share EntityIndex and destruction guards through the registry;
+// each instance owns its deferred queue.
 // Hierarchy destroy policies (hierarchy.md section 6) are applied in
 // drainDestroyQueue()/destroyImmediate() via the Hierarchy API.
 class EntityLifecycle // header-only (like other component headers); no ENGINE_API
 {
+    struct DestroyInProgress {};
+    // Survives an exception and is shared by all services on this registry.
+    struct DestroyPublicationStarted {};
+
+    // The marker is shared by all lifecycle instances using this registry.
+    // Its scope includes publication, hierarchy cleanup, and final retirement.
+    class DestructionGuard
+    {
+    public:
+        DestructionGuard(entt::registry& registry, entt::entity entity)
+            : m_registry(registry), m_entity(entity)
+        {
+            m_registry.emplace<DestroyInProgress>(m_entity);
+        }
+        ~DestructionGuard()
+        {
+            if (m_registry.valid(m_entity) && m_registry.all_of<DestroyInProgress>(m_entity))
+                m_registry.remove<DestroyInProgress>(m_entity);
+        }
+        DestructionGuard(const DestructionGuard&) = delete;
+        DestructionGuard& operator=(const DestructionGuard&) = delete;
+
+    private:
+        entt::registry& m_registry;
+        entt::entity m_entity;
+    };
+
 public:
     // guid_seed != 0 selects deterministic generation (replay/tests).
     // guid_seed == 0 derives a random startup seed.
@@ -49,6 +94,7 @@ public:
     {
         if (!m_registry.ctx().contains<EntityIndex>())
             m_registry.ctx().emplace<EntityIndex>();
+        m_queue_generation = index().clear_generation;
         m_on_construct = m_registry.on_construct<IdentityComponent>()
                              .connect<&EntityLifecycle::onIdentityConstruct>(*this);
         m_on_destroy = m_registry.on_destroy<IdentityComponent>()
@@ -56,9 +102,12 @@ public:
         // Registries cloned before this service is created (notably Editor
         // PIE worlds) already contain identities, so seed the index after
         // installing hooks for subsequent component changes.
+        index().by_guid.clear();
+        index().duplicate_owners.clear();
+        index().degraded = false;
         for (auto [e, identity] : m_registry.view<IdentityComponent>().each())
             if (!identity.guid.isNull())
-                index().by_guid[identity.guid] = e;
+                recordIdentity(identity.guid, e);
     }
 
     ~EntityLifecycle()
@@ -87,32 +136,46 @@ public:
 
     void destroy(entt::entity e) // deferred
     {
+        discardStaleQueue();
         if (e == entt::null || !m_registry.valid(e))
             return;
         if (m_registry.all_of<PendingDestroy>(e))
             return;
         m_registry.emplace<PendingDestroy>(e);
-        m_queue.push_back(e);
+        try
+        {
+            m_queue.push_back(e);
+        }
+        catch (...)
+        {
+            m_registry.remove<PendingDestroy>(e);
+            throw;
+        }
     }
 
     void destroyImmediate(entt::entity e)
     {
-        if (e == entt::null || !m_registry.valid(e))
+        discardStaleQueue();
+        if (e == entt::null || !m_registry.valid(e) || m_registry.all_of<DestroyInProgress>(e))
             return;
-        publishDestroyed(e);
-        if (m_registry.all_of<PendingDestroy>(e))
+        DestructionGuard guard(m_registry, e);
+        try
         {
+            publishDestroyedOnce(e);
+            if (m_registry.valid(e))
+                applyHierarchyDestroy(e, true);
+            if (m_registry.valid(e))
+                m_registry.destroy(e); // on_destroy hook erases index entry
+            removeQueuedEntity(e);
         }
-        applyHierarchyDestroy(e, true);
-        if (m_registry.all_of<PendingDestroy>(e))
+        catch (...)
         {
-        if (m_registry.all_of<PendingDestroy>(e))
-        {
-            for (size_t i = 0; i < m_queue.size(); ++i)
-                if (m_queue[i] == e) { m_queue.erase(m_queue.begin() + static_cast<long>(i)); break; }
+            // A previously queued request remains in its original position.
+            // For an unqueued entity, make a later drain resume retirement.
+            if (m_registry.valid(e) && !m_registry.all_of<PendingDestroy>(e))
+                destroy(e);
+            throw;
         }
-        }
-        m_registry.destroy(e); // on_destroy hook erases index entry
     }
 
     bool isPendingDestroy(entt::entity e) const
@@ -122,31 +185,78 @@ public:
 
     void drainDestroyQueue()
     {
+        discardStaleQueue();
         if (m_draining)
         {
             assert(false && "EntityLifecycle::drainDestroyQueue re-entered");
             return;
         }
         m_draining = true;
-        // Loop so CascadeDestroy children enqueued during this drain are
-        // also drained in the same pass, FIFO (hierarchy.md section 6).
-        while (!m_queue.empty())
+        struct DrainGuard
         {
-        std::vector<entt::entity> queue;
-        queue.swap(m_queue);
-        for (entt::entity e : queue)
+            bool& draining;
+            ~DrainGuard() { draining = false; }
+        } drain_guard{m_draining};
+        const uint64_t drain_generation = m_queue_generation;
+        // Splicing restores an interrupted batch ahead of newly queued work
+        // without allocating while an exception is already in flight.
+        while (!m_queue.empty() && drain_generation == index().clear_generation)
         {
-            if (!m_registry.valid(e))
-                continue;
-            publishDestroyed(e); // BEFORE destroy; handlers may read components
-            applyHierarchyDestroy(e, false);
-            m_registry.destroy(e);
+            std::list<entt::entity> queue;
+            queue.splice(queue.end(), m_queue);
+            try
+            {
+                while (!queue.empty() && drain_generation == index().clear_generation)
+                {
+                    const entt::entity e = queue.front();
+                    if (!m_registry.valid(e) || !m_registry.all_of<PendingDestroy>(e))
+                    {
+                        queue.pop_front();
+                        continue;
+                    }
+                    if (m_registry.all_of<DestroyInProgress>(e))
+                    {
+                        // A peer is destroying this entity. Keep this request
+                        // and its successors in FIFO order for a later pass.
+                        m_queue.splice(m_queue.begin(), queue);
+                        return;
+                    }
+                    DestructionGuard guard(m_registry, e);
+                    publishDestroyedOnce(e);
+                    if (m_registry.valid(e))
+                        applyHierarchyDestroy(e, false);
+                    if (m_registry.valid(e))
+                        m_registry.destroy(e);
+                    queue.pop_front();
+                }
+            }
+            catch (...)
+            {
+                if (drain_generation == index().clear_generation)
+                    m_queue.splice(m_queue.begin(), queue);
+                else if (!queue.empty())
+                {
+                    // clear() cancels the remainder, but publication commits
+                    // the current entity even when a later observer throws.
+                    const entt::entity current = queue.front();
+                    if (m_registry.valid(current) &&
+                        m_registry.all_of<DestroyPublicationStarted>(current) &&
+                        !m_registry.all_of<PendingDestroy>(current))
+                    {
+                        discardStaleQueue();
+                        m_registry.emplace<PendingDestroy>(current);
+                        m_queue.splice(m_queue.begin(), queue, queue.begin());
+                    }
+                }
+                throw;
+            }
         }
-        } // while (!m_queue.empty())
-        m_draining = false;
     }
 
-    size_t pendingCount() const { return m_queue.size(); }
+    size_t pendingCount() const
+    {
+        return m_queue_generation == index().clear_generation ? m_queue.size() : 0;
+    }
 
     EntityRef refOf(entt::entity e) const
     {
@@ -158,6 +268,23 @@ public:
 
     entt::entity resolve(EntityRef ref) const
     {
+        if (ref.isNull())
+            return entt::null;
+        if (index().degraded)
+        {
+            // The const registry view does not create component storage or
+            // allocate. Reject an ambiguous GUID even in a damaged index.
+            entt::entity found = entt::null;
+            for (auto [candidate, identity] : std::as_const(m_registry).view<IdentityComponent>().each())
+            {
+                if (identity.guid != ref.guid)
+                    continue;
+                if (found != entt::null)
+                    return entt::null;
+                found = candidate;
+            }
+            return found;
+        }
         entt::entity e = index().resolve(ref);
         if (e != entt::null && !m_registry.valid(e))
             return entt::null;
@@ -176,8 +303,23 @@ public:
 
     void clear()
     {
+        auto& generation = index().clear_generation;
+        if (++generation == 0)
+            ++generation;
         m_queue.clear();
+        m_queue_generation = generation;
+        // Cancelling the queue must also make live entities eligible for
+        // aliveView and a later destroy request. Avoid creating an empty pool.
+        if (std::as_const(m_registry).storage<PendingDestroy>())
+            m_registry.clear<PendingDestroy>();
         index().by_guid.clear();
+        index().duplicate_owners.clear();
+        index().degraded = false;
+        // clear() can be called before the registry is cleared. Rebuild from
+        // its live identities rather than allowing new GUIDs to collide.
+        for (auto [e, identity] : std::as_const(m_registry).view<IdentityComponent>().each())
+            if (!identity.guid.isNull())
+                recordIdentity(identity.guid, e);
     }
 
     template<typename... Ts>
@@ -187,6 +329,21 @@ public:
     }
 
 private:
+    void discardStaleQueue()
+    {
+        if (m_queue_generation != index().clear_generation)
+        {
+            m_queue.clear();
+            m_queue_generation = index().clear_generation;
+        }
+    }
+
+    void removeQueuedEntity(entt::entity e)
+    {
+        discardStaleQueue();
+        m_queue.remove(e);
+    }
+
     static uint64_t randomSeed()
     {
         std::random_device rd;
@@ -205,8 +362,21 @@ private:
             g.lo = splitmix64Next(m_guid_state);
             if (g.isNull())
                 g.lo = 1;
-        } while (index().by_guid.find(g) != index().by_guid.end());
+        } while (guidExists(g));
         return g;
+    }
+
+    bool guidExists(EntityGuid guid) const
+    {
+        if (!index().degraded)
+            return index().by_guid.find(guid) != index().by_guid.end();
+        for (auto [entity, identity] : std::as_const(m_registry).view<IdentityComponent>().each())
+        {
+            (void)entity;
+            if (identity.guid == guid)
+                return true;
+        }
+        return false;
     }
 
     std::string tagOf(entt::entity e) const
@@ -215,12 +385,21 @@ private:
         return tag ? tag->name : std::string{};
     }
 
-    void publishDestroyed(entt::entity e)
+    void publishDestroyedOnce(entt::entity e)
     {
+        if (m_registry.all_of<DestroyPublicationStarted>(e))
+            return;
         EntityDestroyedEvent ev;
         ev.ref = refOf(e);
         ev.tag = tagOf(e);
-        EventBus::get().publish(std::move(ev)); // immediate, before destroy
+        // Prepare the dispatcher before committing publication so allocation
+        // failures before dispatch leave the event eligible for retry.
+        auto& bus = EventBus::get();
+        (void)bus.sink<EntityDestroyedEvent>();
+        // A callback can throw after other observers have seen this event.
+        // Keep the marker until retirement so no lifecycle republishes it.
+        m_registry.emplace<DestroyPublicationStarted>(e);
+        bus.publish(std::move(ev)); // immediate, before destroy
     }
 
     // hierarchy.md section 6: apply E's destroy policy to its children,
@@ -284,27 +463,105 @@ private:
         Hierarchy::unlinkFromParentList(m_registry, e);
     }
 
+    void indexIdentity(EntityGuid guid, entt::entity e)
+    {
+        auto& entity_index = index();
+        auto [it, inserted] = entity_index.by_guid.try_emplace(guid, e);
+        if (inserted || it->second == e)
+            return;
+        if (it->second == entt::null)
+        {
+            auto owners = entity_index.duplicate_owners.find(guid);
+            if (owners == entity_index.duplicate_owners.end())
+            {
+                entity_index.degraded = true;
+                return;
+            }
+            if (std::find(owners->second.begin(), owners->second.end(), e) == owners->second.end())
+                owners->second.push_back(e);
+            return;
+        }
+
+        // Build the owner list before marking the lookup ambiguous. If an
+        // allocation fails, recordIdentity marks the index degraded.
+        std::vector<entt::entity> owners{it->second, e};
+        if (!entity_index.duplicate_owners.emplace(guid, std::move(owners)).second)
+        {
+            entity_index.degraded = true;
+            return;
+        }
+        it->second = entt::null;
+    }
+
+    void recordIdentity(EntityGuid guid, entt::entity e) noexcept
+    {
+        auto& entity_index = index();
+        if (entity_index.degraded)
+            return;
+        try
+        {
+            indexIdentity(guid, e);
+        }
+        catch (...)
+        {
+            // The component is already present when EnTT invokes this hook.
+            // Never trust a partially updated index after allocation failure.
+            entity_index.degraded = true;
+        }
+    }
+
     void onIdentityConstruct(entt::registry& r, entt::entity e)
     {
         const auto& id = r.get<IdentityComponent>(e);
         if (!id.guid.isNull())
-            index().by_guid[id.guid] = e;
+            recordIdentity(id.guid, e);
     }
 
     void onIdentityDestroy(entt::registry& r, entt::entity e)
     {
         const auto* id = r.try_get<IdentityComponent>(e);
-        if (!id)
+        if (!id || id->guid.isNull() || index().degraded)
             return;
         auto& map = index().by_guid;
         auto it = map.find(id->guid);
-        if (it != map.end() && it->second == e)
+        if (it == map.end())
+            return; // Another lifecycle subscriber may already have retired it.
+        if (it->second == e)
+        {
             map.erase(it);
+            return;
+        }
+        if (it->second != entt::null)
+            return; // Another subscriber may already have restored this owner.
+
+        auto& duplicates = index().duplicate_owners;
+        auto owners_it = duplicates.find(id->guid);
+        if (owners_it == duplicates.end())
+        {
+            index().degraded = true;
+            return;
+        }
+        auto& owners = owners_it->second;
+        const auto owner_it = std::find(owners.begin(), owners.end(), e);
+        if (owner_it == owners.end())
+            return; // This owner may already have been removed by a subscriber.
+        owners.erase(owner_it);
+        if (owners.size() == 1)
+        {
+            it->second = owners.front();
+            duplicates.erase(owners_it);
+        }
+        else if (owners.empty())
+        {
+            map.erase(it);
+            duplicates.erase(owners_it);
+        }
     }
 
     entt::registry& m_registry;
     uint64_t m_guid_state;
-    std::vector<entt::entity> m_queue;
+    std::list<entt::entity> m_queue;
+    uint64_t m_queue_generation = 0;
     bool m_draining = false;
     entt::scoped_connection m_on_construct;
     entt::scoped_connection m_on_destroy;

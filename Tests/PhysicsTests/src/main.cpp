@@ -2,6 +2,7 @@
 #include "Assets/TerrainBuilder.hpp"
 #include "Assets/AssetManager.hpp"
 #include "Assets/AssetScanner.hpp"
+#include "Assets/CompiledMeshSerializer.hpp"
 #include "Assets/CookedCollisionSerializer.hpp"
 #include "Components/Components.hpp"
 #include "Components/HierarchyComponents.hpp"
@@ -4548,14 +4549,17 @@ static bool testLevelManagerRequiredCpuMeshRollback(const fs::path& repo_root)
 class NeverUploadedMesh : public IGPUMesh
 {
 public:
-    explicit NeverUploadedMesh(int& live) : m_live(live) { ++m_live; }
+    NeverUploadedMesh(int& live, int& uploads, size_t& vertex_count)
+        : m_live(live), m_uploads(uploads), m_vertex_count(vertex_count) { ++m_live; }
     ~NeverUploadedMesh() override { --m_live; }
-    void uploadMeshData(const vertex*, size_t) override {}
+    void uploadMeshData(const vertex*, size_t count) override { ++m_uploads; m_vertex_count = count; }
     void updateMeshData(const vertex*, size_t, size_t) override {}
     bool isUploaded() const override { return false; }
     size_t getVertexCount() const override { return 0; }
 private:
     int& m_live;
+    int& m_uploads;
+    size_t& m_vertex_count;
 };
 
 class FailingMeshRenderAPI : public HeadlessRenderAPI
@@ -4565,10 +4569,12 @@ public:
     IGPUMesh* createMesh() override
     {
         ++create_calls;
-        return m_return_null ? nullptr : new NeverUploadedMesh(live_meshes);
+        return m_return_null ? nullptr : new NeverUploadedMesh(live_meshes, upload_calls, uploaded_vertices);
     }
     int create_calls = 0;
     int live_meshes = 0;
+    int upload_calls = 0;
+    size_t uploaded_vertices = 0;
 private:
     bool m_return_null;
 };
@@ -4630,6 +4636,117 @@ static bool testLevelManagerRequiredGpuMeshRollback(const fs::path& repo_root)
             if (w.registry.valid(entity) || w.getPhysicsSystem().hasBody(entity) ||
                 w.getPhysicsSystem().hasCharacterController(entity))
                 return fail(name, "GPU failure retained cohort entity or physics state");
+    }
+    return pass(name);
+}
+
+static bool testLevelManagerCompiledGpuMeshRollback()
+{
+    const std::string name = "LevelManager compiled GPU mesh failure rollback";
+    const fs::path fixture_root = fs::temp_directory_path() /
+        ("garden_physics_i1_compiled_mesh_" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::error_code fixture_error;
+    if (!fs::create_directory(fixture_root, fixture_error))
+        return fail(name, "failed to create isolated fixture directory: " + fixture_error.message());
+    struct ScopedDirectoryCleanup
+    {
+        fs::path path;
+        ~ScopedDirectoryCleanup()
+        {
+            std::error_code error;
+            fs::remove_all(path, error);
+        }
+    } cleanup{fixture_root};
+
+    auto& assets = Assets::AssetManager::get();
+    struct ScopedAssetRootRestore
+    {
+        std::string previous_root;
+        ~ScopedAssetRootRestore() { Assets::AssetManager::get().setAssetRoot(previous_root); }
+    } restore_asset_root{assets.getAssetRoot()};
+    assets.setAssetRoot(fixture_root.string());
+
+    // Only the compiled sibling exists, so an upload attempt proves that the
+    // compiled preload/finalization path was reached rather than the OBJ path.
+    const fs::path source_path = fixture_root / "compiled_fixture.obj";
+    const fs::path compiled_path = fixture_root / "compiled_fixture.cmesh";
+    Assets::CompiledMeshData compiled;
+    compiled.header.magic = Assets::CMESH_MAGIC;
+    compiled.header.version = Assets::CMESH_VERSION;
+    compiled.header.lod_count = 1;
+    compiled.header.aabb_max[0] = 1.0f;
+    compiled.header.aabb_max[1] = 1.0f;
+    compiled.lod_levels.emplace_back();
+    auto& vertices = compiled.lod_levels.front().vertices;
+    vertices.resize(3);
+    vertices[1].vx = 1.0f;
+    vertices[2].vy = 1.0f;
+    Assets::CompiledMeshData loaded;
+    if (!Assets::CompiledMeshSerializer::save(compiled, compiled_path.string()) ||
+        !Assets::CompiledMeshSerializer::load(loaded, compiled_path.string()) ||
+        loaded.lod_levels.size() != 1 || loaded.lod_levels[0].vertices.size() != 3 ||
+        fs::exists(source_path))
+        return fail(name, "could not create a valid compiled-only mesh fixture");
+
+    for (bool return_null : {true, false})
+    {
+        FailingMeshRenderAPI render_api(return_null);
+        LevelManager manager;
+        world w;
+        w.initializePhysics();
+        const EntityRef sentinel_ref{EntityGuid{0xDC03, 0xEC03}};
+        const auto sentinel = w.restoreScopedEntity(sentinel_ref);
+        entt::entity sentinel_entity = entt::null;
+        for (auto [entity, identity] : w.registry.view<IdentityComponent>().each())
+            if (identity.guid == sentinel_ref.guid) sentinel_entity = entity;
+        ColliderComponent collider;
+        collider.shape_type = ColliderShapeType::Box;
+        collider.box_half_extents = glm::vec3(0.5f);
+        const auto shape = PhysicsSystem::createShapeFromCollider(collider, glm::vec3(1.0f));
+        if (sentinel_entity == entt::null || !shape ||
+            w.getPhysicsSystem().createStaticBody(glm::vec3(0.0f), glm::vec3(0.0f), shape, sentinel_entity).IsInvalid())
+            return fail(name, "could not create sentinel static body");
+
+        const auto old_gravity = w.getGravity();
+        const auto old_delta = w.getFixedDelta();
+        LevelData level;
+        level.metadata.gravity = old_gravity + glm::vec3(1, 2, 3);
+        level.metadata.fixed_delta = old_delta * 2;
+        LevelEntity player;
+        player.type = EntityType::Player;
+        level.entities.push_back(player);
+        LevelEntity visual;
+        visual.type = EntityType::Renderable;
+        visual.mesh_path = "compiled_fixture.obj";
+        level.entities.push_back(visual);
+
+        levelRollbackObserved.clear();
+        meshRollbackWorld = &w;
+        meshRollbackPlayerHadController = false;
+        auto connection = w.registry.on_construct<TransformComponent>().connect<&observeMeshRollbackTransform>();
+        entt::entity player_out = entt::entity{123}, freecam_out = entt::entity{124}, rep_out = entt::entity{125};
+        std::vector<entt::entity> created{entt::entity{456}};
+        const bool success = manager.instantiateLevel(level, w, &render_api, &player_out, &freecam_out, &rep_out, false, &created);
+        connection.release();
+        meshRollbackWorld = nullptr;
+
+        const bool expected_upload = return_null
+            ? render_api.upload_calls == 0
+            : render_api.upload_calls == 1 && render_api.uploaded_vertices == 3;
+        if (success || render_api.create_calls != 1 || !expected_upload || render_api.live_meshes != 0 ||
+            levelRollbackObserved.size() != 2 || !meshRollbackPlayerHadController ||
+            player_out != entt::entity{123} || freecam_out != entt::entity{124} || rep_out != entt::entity{125} ||
+            created != std::vector<entt::entity>{entt::entity{456}} ||
+            w.getGravity() != old_gravity || w.getFixedDelta() != old_delta ||
+            w.persistedReference(sentinel) != sentinel_ref || !w.registry.valid(sentinel_entity) ||
+            !w.getPhysicsSystem().hasBody(sentinel_entity) || w.registry.view<IdentityComponent>().size() != 1 ||
+            w.registry.view<MeshComponent>().size() != 0)
+            return fail(name, "compiled GPU failure did not preserve the previous world and outputs");
+        for (const auto entity : levelRollbackObserved)
+            if (w.registry.valid(entity) || w.getPhysicsSystem().hasBody(entity) ||
+                w.getPhysicsSystem().hasCharacterController(entity))
+                return fail(name, "compiled GPU failure retained cohort entity or physics state");
     }
     return pass(name);
 }
@@ -5071,6 +5188,7 @@ int main()
     ok = testLevelManagerPostCreationRollback() && ok;
     ok = testLevelManagerRequiredCpuMeshRollback(repo_root) && ok;
     ok = testLevelManagerRequiredGpuMeshRollback(repo_root) && ok;
+    ok = testLevelManagerCompiledGpuMeshRollback() && ok;
     ok = testLevelManagerFrameworkFailureRollback() && ok;
     ok = testLevelManagerFrameworkCommitCallbackFailures() && ok;
     ok = testLevelManagerLargeIdentityCohort() && ok;

@@ -6,6 +6,7 @@
 #include <iostream>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 struct WorldValue {
     static inline int constructed = 0;
@@ -206,6 +207,78 @@ void identityBoundary() {
           read.persistedReference(fresh) == freshRef &&
           read.persistedReference(ambiguousHandle) == ambiguousRef,
           "throwing outer query releases the snapshot for subsequent identity conversion");
+}
+
+void cohortRestore() {
+    world w;
+    const EntityRef existingRef{{0xc001, 0xd001}};
+    const auto existing = w.restoreScopedEntity(existingRef);
+    const auto companion = w.createScopedEntity();
+    const EntityRef companionRef = w.persistedReference(companion);
+    const bool prepared = w.isEntityValid(existing) && w.isEntityValid(companion) &&
+        !companionRef.isNull() &&
+        w.add<WorldValue>(existing, 11) == ComponentStoreResult::Success &&
+        w.add<WorldValue>(companion, 22) == ComponentStoreResult::Success &&
+        w.add<QueryValue>(existing, QueryValue{7}) == ComponentStoreResult::Success;
+    check(prepared, "prepare cohort restore sentinels");
+    if (!prepared) return;
+
+    const std::vector<EntityHandle> initialOutput{companion, existing};
+    std::vector<EntityHandle> output = initialOutput;
+    const auto sentinelsIntact = [&]() {
+        WorldValue* first = nullptr;
+        WorldValue* second = nullptr;
+        return w.isEntityValid(existing) && w.isEntityValid(companion) &&
+            w.persistedReference(existing) == existingRef &&
+            w.persistedReference(companion) == companionRef &&
+            w.scopedEntity(existingRef) == existing && w.scopedEntity(companionRef) == companion &&
+            w.get<WorldValue>(existing, first) == ComponentStoreResult::Success && first && first->number == 11 &&
+            w.get<WorldValue>(companion, second) == ComponentStoreResult::Success && second && second->number == 22;
+    };
+
+    const EntityRef duplicate{{0xc002, 0xd002}};
+    const bool duplicateResult = w.restoreScopedEntities({duplicate, duplicate}, output);
+    check(!duplicateResult && output == initialOutput && sentinelsIntact() &&
+          !w.isEntityValid(w.scopedEntity(duplicate)),
+          "cohort rejects duplicate requested GUID without publishing or changing outputs");
+
+    const EntityRef collisionBefore{{0xc003, 0xd003}};
+    const EntityRef collisionAfter{{0xc004, 0xd004}};
+    const bool collisionResult = w.restoreScopedEntities({collisionBefore, existingRef, collisionAfter}, output);
+    check(!collisionResult && output == initialOutput && sentinelsIntact() &&
+          !w.isEntityValid(w.scopedEntity(collisionBefore)) &&
+          !w.isEntityValid(w.scopedEntity(collisionAfter)),
+          "cohort rejects destination collision before publishing any member");
+
+    const EntityRef beforeNull{{0xc005, 0xd005}};
+    const bool nullResult = w.restoreScopedEntities({beforeNull, EntityRef{}}, output);
+    check(!nullResult && output == initialOutput && sentinelsIntact() &&
+          !w.isEntityValid(w.scopedEntity(beforeNull)),
+          "cohort rejects a null GUID without publishing or changing outputs");
+
+    const EntityRef duringQuery{{0xc006, 0xd006}};
+    bool queryRejected = false;
+    int queryVisits = 0;
+    const auto queryResult = w.query<const QueryValue>([&](EntityHandle entity, const QueryValue& value) {
+        ++queryVisits;
+        queryRejected = entity == existing && value.number == 7 &&
+            w.persistedReference(entity) == existingRef &&
+            !w.restoreScopedEntities({duringQuery}, output);
+    });
+    check(queryResult == ComponentStoreResult::Success && queryVisits == 1 && queryRejected &&
+          output == initialOutput && sentinelsIntact() &&
+          !w.isEntityValid(w.scopedEntity(duringQuery)),
+          "active query rejects cohort restore without changing outputs or identities");
+
+    const EntityRef firstRef{{0xc007, 0xd007}};
+    const EntityRef secondRef{{0xc008, 0xd008}};
+    const bool success = w.restoreScopedEntities({firstRef, secondRef}, output);
+    const bool ordered = success && output.size() == 2 && output[0] != output[1] &&
+        w.isEntityValid(output[0]) && w.isEntityValid(output[1]) &&
+        w.persistedReference(output[0]) == firstRef && w.persistedReference(output[1]) == secondRef &&
+        w.scopedEntity(firstRef) == output[0] && w.scopedEntity(secondRef) == output[1];
+    check(ordered && sentinelsIntact(),
+          "successful cohort publishes exact requested identities in input order");
 }
 
 void moves() {
@@ -474,6 +547,7 @@ int main() {
     if (queryRegistration != ComponentCatalogResult::Success) return 1;
     basicAndReuse();
     identityBoundary();
+    cohortRestore();
     moves();
     teardown();
     queries();
