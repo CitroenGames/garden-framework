@@ -2,6 +2,7 @@
 
 #include "Network/NetworkInputState.hpp"
 #include "shared/CompetitiveLogic.hpp"
+#include "shared/WeaponTypes.hpp"
 
 #include <cstdint>
 #include <string>
@@ -36,6 +37,10 @@ namespace FPSShooter
         WaitWorldItemPresent,
         WaitWorldItemRemoved,
         MoveToWorldItemLive,
+        SelectSlot,
+        TapDrop,
+        WaitWeaponState,
+        WaitWeaponStateFromItem,
         WaitBombPlanted,
         HoldUseLive,
         HoldUseDefuse,
@@ -56,6 +61,15 @@ namespace FPSShooter
     struct ClientAcceptanceWorldItemRemoval
     {
         uint32_t world_item_id = 0;
+        uint64_t receipt_generation = 0;
+    };
+
+    // A durable receipt cache is separate from presentation rows so a pickup
+    // action can compare the later owner weapon state after the item is gone.
+    struct ClientAcceptanceWorldItemWeaponReceipt
+    {
+        uint32_t world_item_id = 0;
+        WeaponType weapon_type = WeaponType::COUNT;
         uint64_t receipt_generation = 0;
     };
 
@@ -83,8 +97,12 @@ namespace FPSShooter
         uint32_t last_authoritative_input_tick = 0;
         std::vector<ClientAcceptanceWorldItem> world_items;
         std::vector<ClientAcceptanceWorldItemRemoval> world_item_removals;
+        std::vector<ClientAcceptanceWorldItemWeaponReceipt> world_item_weapon_receipts;
         uint64_t world_item_receipt_generation = 0;
         bool has_world_item_presentation_world = false;
+        bool has_authoritative_weapon_state = false;
+        WeaponType authoritative_weapon_type = WeaponType::COUNT;
+        uint64_t authoritative_weapon_state_generation = 0;
     };
 
     struct ClientAcceptanceDispatch
@@ -109,7 +127,8 @@ namespace FPSShooter
         void noteBuyRequestSent(uint32_t request_sequence);
         // Called after an ordinary forward steering command is queued for
         // transport. It never sends an extra acceptance-only message.
-        void noteInputCommandSent(uint32_t command_tick, bool steering_move_emitted);
+        void noteInputCommandSent(uint32_t command_tick, bool steering_move_emitted,
+                                  uint64_t weapon_state_generation = 0);
         bool isMoveToLiveSteering() const;
 
         // Applies the active scripted INPUT_COMMAND intent after the ordinary
@@ -128,6 +147,8 @@ namespace FPSShooter
             uint16_t item_id = 0;
             uint32_t world_item_id = 0;
             uint16_t input_buttons = 0;
+            uint8_t weapon_select = 0;
+            WeaponType weapon_type = WeaponType::COUNT;
             float target_x = 0.0f;
             float target_z = 0.0f;
             float tolerance = 0.0f;
@@ -137,7 +158,8 @@ namespace FPSShooter
 
         enum class State : uint8_t { Ready, WaitingForTeamResult, WaitingForBuyResult, RunningInput,
             RunningMoveToLive, WaitingForWorldItemPresent, WaitingForWorldItemRemoved,
-            RunningMoveToWorldItemLive, WaitingForBombPlanted, RunningHoldUseLive,
+            RunningMoveToWorldItemLive, RunningSelectSlot, RunningTapDrop,
+            WaitingForWeaponState, WaitingForBombPlanted, RunningHoldUseLive,
             RunningHoldUseDefuse, Waiting };
 
         bool loadFile(const char* path, std::string& error);
@@ -145,11 +167,15 @@ namespace FPSShooter
         bool canDispatchTeam(const ClientAcceptanceObservation& observation) const;
         bool canDispatchPawnAction(const ClientAcceptanceObservation& observation) const;
         bool canRunLivePawnAction(const ClientAcceptanceObservation& observation) const;
+        bool canRunWeaponLifecycleAction(const ClientAcceptanceObservation& observation) const;
         bool canWaitForBombPlanted(const ClientAcceptanceObservation& observation) const;
         const ClientAcceptanceWorldItem* findWorldItem(
             uint32_t world_item_id, const ClientAcceptanceObservation& observation) const;
         bool hasWorldItemRemovalAfter(uint32_t world_item_id, uint64_t receipt_generation,
                                       const ClientAcceptanceObservation& observation) const;
+        const ClientAcceptanceWorldItemWeaponReceipt* findWorldItemWeaponReceipt(
+            uint32_t world_item_id, const ClientAcceptanceObservation& observation) const;
+        bool hasExpectedWeaponStateAfter(const ClientAcceptanceObservation& observation) const;
         bool moveHasAuthoritativeArrival(const Action& action,
                                           const ClientAcceptanceObservation& observation) const;
         bool atAuthoritativeMoveTarget(const Action& action,
@@ -166,6 +192,8 @@ namespace FPSShooter
         float m_move_forward = 0.0f;
         uint64_t m_move_start_snapshot_generation = 0;
         uint64_t m_world_item_removal_start_generation = 0;
+        uint64_t m_weapon_state_wait_start_generation = 0;
+        WeaponType m_expected_weapon_type = WeaponType::COUNT;
         // The first ordinary command emitted after the waypoint's steering
         // starts. A later authoritative receipt must acknowledge it before
         // the waypoint may complete.
@@ -215,6 +243,30 @@ namespace FPSShooter::ClientAcceptanceScriptDetail
         if (token == "defenders") { team = Competitive::FpsTeam::Defenders; return true; }
         if (token == "spectator") { team = Competitive::FpsTeam::Spectator; return true; }
         return false;
+    }
+
+    inline bool parseWeaponSelect(const std::string& token, uint8_t& out)
+    {
+        if (token == "primary") { out = 1; return true; }
+        if (token == "secondary") { out = 2; return true; }
+        if (token == "melee") { out = 3; return true; }
+        if (token == "grenade") { out = 4; return true; }
+        if (token == "utility") { out = 5; return true; }
+        return false;
+    }
+
+    inline bool parseWeaponAlias(const std::string& token, WeaponType& out)
+    {
+        if (token == "rifle") { out = WeaponType::RIFLE; return true; }
+        if (token == "shotgun") { out = WeaponType::SHOTGUN; return true; }
+        if (token == "pistol") { out = WeaponType::PISTOL; return true; }
+        if (token == "knife") { out = WeaponType::KNIFE; return true; }
+        if (token == "grenade") { out = WeaponType::GRENADE; return true; }
+        const WeaponCatalogDef* definition = findCatalogByAlias(token.c_str());
+        if (!definition || !hasWeaponDefinition(definition->weapon_type))
+            return false;
+        out = definition->weapon_type;
+        return true;
     }
 
     inline bool parseInputFlag(const std::string& token, uint16_t& flag)
@@ -267,6 +319,8 @@ namespace FPSShooter
         m_move_forward = 0.0f;
         m_move_start_snapshot_generation = 0;
         m_world_item_removal_start_generation = 0;
+        m_weapon_state_wait_start_generation = 0;
+        m_expected_weapon_type = WeaponType::COUNT;
         m_move_steering_input_tick = 0;
         m_expected_buy_sequence = 0;
     }
@@ -366,6 +420,37 @@ namespace FPSShooter
                     return false;
                 }
                 action.kind = ClientAcceptanceActionKind::MoveToWorldItemLive;
+            } else if (tokens[0] == "select_slot" && tokens.size() == 3) {
+                if (!parseWeaponSelect(tokens[1], action.weapon_select) ||
+                    !parseUnsigned(tokens[2], action.duration_ms) || action.duration_ms == 0 ||
+                    action.duration_ms > kMaxDurationMs) {
+                    error = "client action script disabled: invalid select_slot on line " + std::to_string(line_number);
+                    return false;
+                }
+                action.kind = ClientAcceptanceActionKind::SelectSlot;
+            } else if (tokens[0] == "tap_drop" && tokens.size() == 2) {
+                if (!parseUnsigned(tokens[1], action.duration_ms) || action.duration_ms == 0 ||
+                    action.duration_ms > kMaxDurationMs) {
+                    error = "client action script disabled: invalid tap_drop on line " + std::to_string(line_number);
+                    return false;
+                }
+                action.kind = ClientAcceptanceActionKind::TapDrop;
+            } else if (tokens[0] == "wait_weapon_state" && tokens.size() == 3) {
+                if (!parseWeaponAlias(tokens[1], action.weapon_type) ||
+                    !parseUnsigned(tokens[2], action.duration_ms) || action.duration_ms == 0 ||
+                    action.duration_ms > kMaxDurationMs) {
+                    error = "client action script disabled: invalid wait_weapon_state on line " + std::to_string(line_number);
+                    return false;
+                }
+                action.kind = ClientAcceptanceActionKind::WaitWeaponState;
+            } else if (tokens[0] == "wait_weapon_state_from_item" && tokens.size() == 3) {
+                if (!parseUnsigned(tokens[1], action.world_item_id) || action.world_item_id == 0 ||
+                    !parseUnsigned(tokens[2], action.duration_ms) || action.duration_ms == 0 ||
+                    action.duration_ms > kMaxDurationMs) {
+                    error = "client action script disabled: invalid wait_weapon_state_from_item on line " + std::to_string(line_number);
+                    return false;
+                }
+                action.kind = ClientAcceptanceActionKind::WaitWeaponStateFromItem;
             } else if (tokens[0] == "wait_bomb_planted" && tokens.size() == 2) {
                 if (!parseUnsigned(tokens[1], action.duration_ms) || action.duration_ms == 0 || action.duration_ms > kMaxDurationMs) {
                     error = "client action script disabled: invalid wait_bomb_planted timeout on line " + std::to_string(line_number);
@@ -442,6 +527,14 @@ namespace FPSShooter
             observation.round_phase == Competitive::RoundPhase::Live;
     }
 
+    inline bool ClientAcceptanceScript::canRunWeaponLifecycleAction(const ClientAcceptanceObservation& observation) const
+    {
+        using Phase = Competitive::RoundPhase;
+        return canDispatchPawnAction(observation) &&
+            (observation.round_phase == Phase::Warmup || observation.round_phase == Phase::Freeze ||
+             observation.round_phase == Phase::Live);
+    }
+
     inline bool ClientAcceptanceScript::canWaitForBombPlanted(const ClientAcceptanceObservation& observation) const
     {
         return canDispatchPawnAction(observation) &&
@@ -467,6 +560,25 @@ namespace FPSShooter
                 return removal.world_item_id == world_item_id &&
                     removal.receipt_generation > receipt_generation;
             });
+    }
+
+    inline const ClientAcceptanceWorldItemWeaponReceipt* ClientAcceptanceScript::findWorldItemWeaponReceipt(
+        uint32_t world_item_id, const ClientAcceptanceObservation& observation) const
+    {
+        const auto receipt = std::find_if(observation.world_item_weapon_receipts.begin(),
+            observation.world_item_weapon_receipts.end(), [world_item_id](const auto& candidate) {
+                return candidate.world_item_id == world_item_id;
+            });
+        return receipt == observation.world_item_weapon_receipts.end() ? nullptr : &*receipt;
+    }
+
+    inline bool ClientAcceptanceScript::hasExpectedWeaponStateAfter(
+        const ClientAcceptanceObservation& observation) const
+    {
+        return observation.has_authoritative_weapon_state &&
+            observation.authoritative_weapon_state_generation > m_weapon_state_wait_start_generation &&
+            (m_expected_weapon_type == WeaponType::COUNT ||
+             observation.authoritative_weapon_type == m_expected_weapon_type);
     }
 
     inline bool ClientAcceptanceScript::moveHasAuthoritativeArrival(
@@ -530,6 +642,9 @@ namespace FPSShooter
         m_move_yaw = 0.0f;
         m_move_forward = 0.0f;
         m_move_start_snapshot_generation = 0;
+        m_world_item_removal_start_generation = 0;
+        m_weapon_state_wait_start_generation = 0;
+        m_expected_weapon_type = WeaponType::COUNT;
         m_move_steering_input_tick = 0;
         m_expected_buy_sequence = 0;
         if (m_index == m_actions.size()) {
@@ -610,6 +725,40 @@ namespace FPSShooter
                 LOG_ENGINE_INFO("[ACCEPT] move_to_world_item_live begin line={} id={} x={} z={} tolerance={} timeout_ms={}",
                     action.source_line, action.world_item_id, action.target_x, action.target_z,
                     action.tolerance, action.duration_ms);
+            } else if (action.kind == ClientAcceptanceActionKind::SelectSlot) {
+                if (!canRunWeaponLifecycleAction(observation)) return dispatch;
+                m_state = State::RunningSelectSlot;
+                m_elapsed_seconds = 0.0f;
+                m_expected_weapon_type = WeaponType::COUNT;
+                LOG_ENGINE_INFO("[ACCEPT] select_slot begin line={} select={} timeout_ms={}",
+                    action.source_line, static_cast<unsigned>(action.weapon_select), action.duration_ms);
+            } else if (action.kind == ClientAcceptanceActionKind::TapDrop) {
+                if (!canRunWeaponLifecycleAction(observation)) return dispatch;
+                m_state = State::RunningTapDrop;
+                m_elapsed_seconds = 0.0f;
+                m_expected_weapon_type = WeaponType::COUNT;
+                LOG_ENGINE_INFO("[ACCEPT] tap_drop begin line={} timeout_ms={}",
+                    action.source_line, action.duration_ms);
+            } else if (action.kind == ClientAcceptanceActionKind::WaitWeaponState ||
+                       action.kind == ClientAcceptanceActionKind::WaitWeaponStateFromItem) {
+                if (!canRunWeaponLifecycleAction(observation)) return dispatch;
+                if (action.kind == ClientAcceptanceActionKind::WaitWeaponStateFromItem) {
+                    const ClientAcceptanceWorldItemWeaponReceipt* item_receipt =
+                        findWorldItemWeaponReceipt(action.world_item_id, observation);
+                    if (!item_receipt || !hasWeaponDefinition(item_receipt->weapon_type)) {
+                        disable("client action script stopped: wait_weapon_state_from_item lacks accepted item receipt on line " +
+                            std::to_string(action.source_line));
+                        return dispatch;
+                    }
+                    m_expected_weapon_type = item_receipt->weapon_type;
+                } else {
+                    m_expected_weapon_type = action.weapon_type;
+                }
+                m_state = State::WaitingForWeaponState;
+                m_elapsed_seconds = 0.0f;
+                m_weapon_state_wait_start_generation = observation.authoritative_weapon_state_generation;
+                LOG_ENGINE_INFO("[ACCEPT] wait_weapon_state begin line={} expected_weapon={} timeout_ms={}",
+                    action.source_line, static_cast<unsigned>(m_expected_weapon_type), action.duration_ms);
             } else if (action.kind == ClientAcceptanceActionKind::WaitBombPlanted) {
                 if (!canWaitForBombPlanted(observation)) return dispatch;
                 m_state = State::WaitingForBombPlanted;
@@ -640,6 +789,38 @@ namespace FPSShooter
             LOG_ENGINE_INFO("[ACCEPT] {} complete line={}",
                 m_state == State::RunningInput ? "input" : "wait", action.source_line);
             advanceAction();
+            return dispatch;
+        case State::RunningSelectSlot:
+        case State::RunningTapDrop:
+            if (!canRunWeaponLifecycleAction(observation)) {
+                disable("client action script stopped: normal input action lost pawn or lifecycle authority on line " +
+                    std::to_string(action.source_line));
+                return dispatch;
+            }
+            m_elapsed_seconds += std::max(delta_time, 0.0f);
+            if (m_elapsed_seconds * 1000.0f >= static_cast<float>(action.duration_ms)) {
+                disable("client action script stopped: normal input action was not sent on line " +
+                    std::to_string(action.source_line));
+            }
+            return dispatch;
+        case State::WaitingForWeaponState:
+            if (!canRunWeaponLifecycleAction(observation)) {
+                disable("client action script stopped: wait_weapon_state lost pawn or lifecycle authority on line " +
+                    std::to_string(action.source_line));
+                return dispatch;
+            }
+            if (hasExpectedWeaponStateAfter(observation)) {
+                LOG_ENGINE_INFO("[ACCEPT] wait_weapon_state observed owner receipt line={} weapon={} generation={}",
+                    action.source_line, static_cast<unsigned>(observation.authoritative_weapon_type),
+                    observation.authoritative_weapon_state_generation);
+                advanceAction();
+                return dispatch;
+            }
+            m_elapsed_seconds += std::max(delta_time, 0.0f);
+            if (m_elapsed_seconds * 1000.0f >= static_cast<float>(action.duration_ms)) {
+                disable("client action script stopped: wait_weapon_state timed out on line " +
+                    std::to_string(action.source_line));
+            }
             return dispatch;
         case State::RunningMoveToLive:
             if (!canRunLivePawnAction(observation)) {
@@ -815,11 +996,28 @@ namespace FPSShooter
     }
 
     inline void ClientAcceptanceScript::noteInputCommandSent(uint32_t command_tick,
-                                                               bool steering_move_emitted)
+                                                               bool steering_move_emitted,
+                                                               uint64_t weapon_state_generation)
     {
-        if (m_enabled && m_index < m_actions.size() && isMoveToLiveSteering() &&
-            steering_move_emitted && m_move_steering_input_tick == 0 && command_tick != 0)
+        if (!m_enabled || m_index >= m_actions.size())
+            return;
+        if (isMoveToLiveSteering() && steering_move_emitted &&
+            m_move_steering_input_tick == 0 && command_tick != 0) {
             m_move_steering_input_tick = command_tick;
+            return;
+        }
+        if (m_state == State::RunningSelectSlot || m_state == State::RunningTapDrop) {
+            const Action& action = m_actions[m_index];
+            m_state = State::WaitingForWeaponState;
+            m_elapsed_seconds = 0.0f;
+            // This baseline is sampled exactly after the one ordinary input
+            // command is enqueued, so an older owner state cannot satisfy the
+            // action even if it arrives later in the frame.
+            m_weapon_state_wait_start_generation = weapon_state_generation;
+            LOG_ENGINE_INFO("[ACCEPT] {} command sent line={} tick={} weapon_generation={}",
+                action.kind == ClientAcceptanceActionKind::SelectSlot ? "select_slot" : "tap_drop",
+                action.source_line, command_tick, weapon_state_generation);
+        }
     }
 
     inline void ClientAcceptanceScript::observeBuyResult(uint32_t request_sequence, bool accepted)
@@ -858,6 +1056,25 @@ namespace FPSShooter
         }
         if (m_state == State::RunningHoldUseLive || m_state == State::RunningHoldUseDefuse) {
             state.buttons |= USE;
+            return;
+        }
+        if (m_state == State::RunningSelectSlot) {
+            state.buttons = Net::withWeaponSelect(state.buttons, action.weapon_select);
+            return;
+        }
+        if (m_state == State::RunningTapDrop) {
+            state.buttons &= static_cast<uint16_t>(~DROP);
+            state.buttons |= DROP;
+            return;
+        }
+        if (m_state == State::WaitingForWeaponState &&
+            (action.kind == ClientAcceptanceActionKind::SelectSlot ||
+             action.kind == ClientAcceptanceActionKind::TapDrop)) {
+            // The driver guarantees that its edge is present in exactly one
+            // ordinary command. It neither holds the bit nor emits a custom
+            // acceptance message while waiting for the server receipt.
+            state.buttons = Net::withWeaponSelect(state.buttons, 0);
+            state.buttons &= static_cast<uint16_t>(~DROP);
             return;
         }
         if (m_state != State::RunningInput)

@@ -29,7 +29,8 @@ enum class DroppedWeaponPickupResult : uint8_t {
     InvalidDroppedItem,
     PlayerIneligible,
     OutOfRange,
-    SlotOccupied
+    SlotOccupied,
+    DropperMustLeavePickupRadius
 };
 
 struct DroppedWeaponPickup {
@@ -78,9 +79,24 @@ inline DroppedWeaponPickupResult tryPickupDroppedWeapon(
     if (!isValidDroppedWeapon(dropped) || !isDroppedWeaponInWorldBounds(dropped_transform) ||
         !isDroppedWeaponInWorldBounds(player_transform))
         return DroppedWeaponPickupResult::InvalidDroppedItem;
-    if (!(pickup_radius >= 0.0f) || !std::isfinite(pickup_radius) ||
-        glm::distance(player_transform.position, dropped_transform.position) > pickup_radius)
+    if (!(pickup_radius >= 0.0f) || !std::isfinite(pickup_radius))
         return DroppedWeaponPickupResult::OutOfRange;
+    const float pickup_distance = glm::distance(player_transform.position, dropped_transform.position);
+    if (pickup_distance > pickup_radius) {
+        // The only transition for manual-drop departure is an authoritative
+        // owner position outside the same radius used for pickup.
+        if (auto* exit = registry.try_get<DroppedWeaponDropperExitComponent>(dropped_item);
+            exit && exit->must_leave_pickup_radius &&
+            exit->blocked_client_id == networked.owner_client_id) {
+            registry.remove<DroppedWeaponDropperExitComponent>(dropped_item);
+        }
+        return DroppedWeaponPickupResult::OutOfRange;
+    }
+    if (const auto* exit = registry.try_get<DroppedWeaponDropperExitComponent>(dropped_item);
+        exit && exit->must_leave_pickup_radius &&
+        exit->blocked_client_id == networked.owner_client_id) {
+        return DroppedWeaponPickupResult::DropperMustLeavePickupRadius;
+    }
 
     auto& inventory = registry.get<InventoryComponent>(player);
     auto& loadout = registry.get<PlayerLoadoutComponent>(player);

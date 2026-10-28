@@ -107,6 +107,16 @@ struct DroppedWeaponComponent
     float despawn_timer = 30.0f;
 };
 
+// A voluntary drop remains unavailable to its dropper until the server has
+// observed that pawn leave the ordinary pickup radius. This is template-owned
+// ECS gameplay state: other eligible players remain able to collect the item,
+// and death/buy-replacement drops simply omit this component.
+struct DroppedWeaponDropperExitComponent
+{
+    uint16_t blocked_client_id = 0;
+    bool must_leave_pickup_radius = true;
+};
+
 // Stable template protocol identity for a server-authoritative dropped item.
 // This intentionally differs from Net::NetworkedEntity: world-item messages
 // identify a client presentation object and do not make the item an EngineCore

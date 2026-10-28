@@ -205,7 +205,7 @@ static const char* bombStateName(Competitive::BombState st)
 static entt::entity findPlayerEntity(world& w, uint16_t client_id); // defined with competitive helpers below
 static void sendEconomyState(uint16_t client_id, entt::entity e);
 static void sendAuthoritativeTeamState(uint16_t client_id, Competitive::FpsTeam team);
-static void spawnDroppedWeapon(world& w, const glm::vec3& pos, const FpsLogic::DroppedItem& item, uint16_t by, std::string_view cause);
+static void spawnDroppedWeapon(world& w, const glm::vec3& pos, const FpsLogic::DroppedItem& item, uint16_t by, std::string_view cause, bool require_dropper_exit = false);
 static void removeReplicatedDroppedWeapon(entt::registry& registry, entt::entity dropped_item);
 static void replayWorldItemsToClient(world& w, uint16_t client_id);
 
@@ -796,7 +796,8 @@ static void spawnDroppedWeapon(
     const glm::vec3& pos,
     const FpsLogic::DroppedItem& item,
     uint16_t by,
-    std::string_view cause)
+    std::string_view cause,
+    bool require_dropper_exit)
 {
     if (!isValidWorldItemWeaponType(static_cast<uint8_t>(item.type)) ||
         !isValidWorldItemPosition(pos) || item.ammo < 0 || item.reserve < 0) {
@@ -815,6 +816,8 @@ static void spawnDroppedWeapon(
     dt.position = pos;
     w.registry.emplace<TransformComponent>(de, dt);
     w.registry.emplace<DroppedWeaponComponent>(de, DroppedWeaponComponent{item.type, item.ammo, item.reserve, by, 30.0f});
+    if (require_dropper_exit)
+        w.registry.emplace<DroppedWeaponDropperExitComponent>(de, by, true);
     w.registry.emplace<WorldItemReplicationIdComponent>(de, world_item_id);
     publishWorldItemToConnectedPeers(w, de, cause);
 
@@ -844,7 +847,7 @@ static bool doDropWeapon(uint16_t client_id, entt::entity player_entity)
     auto dropped = FpsLogic::dropActive(inv, lo, weapon);
     if (!dropped) return false;
     glm::vec3 pos = w->registry.get<TransformComponent>(player_entity).position + glm::vec3(0.0f, 0.3f, 0.0f);
-    spawnDroppedWeapon(*w, pos, *dropped, client_id, "manual_drop");
+    spawnDroppedWeapon(*w, pos, *dropped, client_id, "manual_drop", true);
     sendWeaponState(client_id, player_entity, weapon);
     LOG_ENGINE_INFO("Player {} dropped weapon {}", client_id, (int)dropped->type);
     return true;

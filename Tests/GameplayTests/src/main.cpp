@@ -828,6 +828,54 @@ bool testDroppedWeaponEcsLifecycle()
         FpsLogic::DroppedWeaponPickupResult::PlayerIneligible)
         return fail(name, "dead player pickup was accepted");
 
+    // A voluntary drop must remain server-side and unavailable to its dropper
+    // until that pawn has been observed outside the ordinary pickup radius.
+    // Other eligible players retain immediate pickup eligibility.
+    entt::registry exit_registry;
+    auto makeExitPlayer = [&](uint16_t client_id, const glm::vec3& position) {
+        const entt::entity player = exit_registry.create();
+        exit_registry.emplace<Net::NetworkedEntity>(player, 2000u + client_id, client_id, true);
+        exit_registry.emplace<TransformComponent>(player, position.x, position.y, position.z);
+        exit_registry.emplace<FpsHealthComponent>(player, 100);
+        auto& inventory = exit_registry.emplace<InventoryComponent>(player);
+        auto& loadout = exit_registry.emplace<PlayerLoadoutComponent>(player);
+        auto& weapon = exit_registry.emplace<WeaponComponent>(player);
+        FpsLogic::grantLoadout(inventory, loadout, weapon);
+        (void)FpsLogic::dropActive(inventory, loadout, weapon);
+        return player;
+    };
+    const entt::entity exit_owner = makeExitPlayer(41, glm::vec3(0.0f));
+    const entt::entity other_player = makeExitPlayer(42, glm::vec3(0.0f));
+    const entt::entity other_eligible_drop = exit_registry.create();
+    exit_registry.emplace<TransformComponent>(other_eligible_drop, 0.0f, 0.0f, 0.0f);
+    exit_registry.emplace<DroppedWeaponComponent>(other_eligible_drop, WeaponType::SHOTGUN, 8, 32, static_cast<uint16_t>(41), 30.0f);
+    exit_registry.emplace<DroppedWeaponDropperExitComponent>(other_eligible_drop, static_cast<uint16_t>(41), true);
+    if (FpsLogic::tryPickupDroppedWeapon(exit_registry, exit_owner, other_eligible_drop) !=
+            FpsLogic::DroppedWeaponPickupResult::DropperMustLeavePickupRadius ||
+        FpsLogic::tryPickupDroppedWeapon(exit_registry, other_player, other_eligible_drop) !=
+            FpsLogic::DroppedWeaponPickupResult::PickedUp) {
+        return fail(name, "manual-drop owner exclusion did not preserve other-player pickup eligibility");
+    }
+
+    const entt::entity owner_exit_drop = exit_registry.create();
+    exit_registry.emplace<TransformComponent>(owner_exit_drop, 0.0f, 0.0f, 0.0f);
+    exit_registry.emplace<DroppedWeaponComponent>(owner_exit_drop, WeaponType::RIFLE, 30, 90, static_cast<uint16_t>(41), 30.0f);
+    exit_registry.emplace<DroppedWeaponDropperExitComponent>(owner_exit_drop, static_cast<uint16_t>(41), true);
+    if (FpsLogic::tryPickupDroppedWeapon(exit_registry, exit_owner, owner_exit_drop) !=
+        FpsLogic::DroppedWeaponPickupResult::DropperMustLeavePickupRadius)
+        return fail(name, "manual-drop owner could immediately reacquire its item");
+    exit_registry.get<TransformComponent>(exit_owner).position.x =
+        FpsLogic::kDroppedWeaponPickupRadius + 0.1f;
+    if (FpsLogic::tryPickupDroppedWeapon(exit_registry, exit_owner, owner_exit_drop) !=
+            FpsLogic::DroppedWeaponPickupResult::OutOfRange ||
+        exit_registry.all_of<DroppedWeaponDropperExitComponent>(owner_exit_drop)) {
+        return fail(name, "manual-drop owner departure did not clear only after leaving pickup radius");
+    }
+    exit_registry.get<TransformComponent>(exit_owner).position.x = 0.0f;
+    if (FpsLogic::tryPickupDroppedWeapon(exit_registry, exit_owner, owner_exit_drop) !=
+        FpsLogic::DroppedWeaponPickupResult::PickedUp)
+        return fail(name, "manual-drop owner stayed blocked after an authoritative departure");
+
     if (FpsLogic::isWeaponLifecyclePhaseOpen(Competitive::RoundPhase::RoundEnd) ||
         FpsLogic::isWeaponLifecyclePhaseOpen(Competitive::RoundPhase::WaitingForPlayers) ||
         !FpsLogic::isWeaponLifecyclePhaseOpen(Competitive::RoundPhase::Live))
@@ -3463,7 +3511,16 @@ bool testClientAcceptanceScriptWorldItemActions()
         "move_to_world_item_live 0 1 100\n",
         "move_to_world_item_live 1 0 100\n",
         "move_to_world_item_live 1 1 0\n",
-        "move_to_world_item_live 1 1 100 extra\n"
+        "move_to_world_item_live 1 1 100 extra\n",
+        "select_slot invalid 100\n",
+        "select_slot secondary 0\n",
+        "select_slot secondary 100 extra\n",
+        "tap_drop 0\n",
+        "tap_drop 100 extra\n",
+        "wait_weapon_state unknown 100\n",
+        "wait_weapon_state p250 0\n",
+        "wait_weapon_state_from_item 0 100\n",
+        "wait_weapon_state_from_item 1 0\n"
     };
     for (const char* invalid : invalid_scripts) {
         if (!writeClientAcceptanceScript(script_path, invalid) ||
@@ -3506,6 +3563,97 @@ bool testClientAcceptanceScriptWorldItemActions()
     script.tick(0.0f, observation);
     if (script.active())
         return fail_with_cleanup("removal wait did not require and consume a newer accepted remove receipt");
+
+    // Slot selection and drop are ordinary INPUT_COMMAND edges. The script
+    // must clear them immediately and wait for a newer owner-only WEAPON_STATE
+    // rather than predicting a loadout mutation. The item type receipt stays
+    // available after the item itself is removed.
+    if (!writeClientAcceptanceScript(script_path,
+        "select_slot secondary 100\n"
+        "tap_drop 100\n"
+        "wait_weapon_state_from_item 77 100\n") ||
+        !script_environment.set(script_path.string().c_str())) {
+        return fail_with_cleanup("could not configure selection and drop action script");
+    }
+    script.loadFromEnvironment();
+    observation.has_round_state = true;
+    observation.local_team = Competitive::FpsTeam::Attackers;
+    observation.has_local_pawn = true;
+    observation.round_phase = Competitive::RoundPhase::Live;
+    observation.has_authoritative_weapon_state = true;
+    observation.authoritative_weapon_type = WeaponType::RIFLE;
+    observation.authoritative_weapon_state_generation = 5;
+    observation.world_item_weapon_receipts = {{77, WeaponType::P250, 3}};
+    observation.world_items.clear();
+    observation.world_item_removals.clear();
+    if (script.tick(0.0f, observation).kind != FPSShooter::ClientAcceptanceDispatch::Kind::None)
+        return fail_with_cleanup("selection action emitted a custom dispatch");
+    Net::InputState select_input;
+    select_input.buttons = Net::withWeaponSelect(Net::InputFlags::DROP, 5);
+    script.applyInput(select_input, true, true, true);
+    if (Net::getWeaponSelect(select_input.buttons) != 2 ||
+        (select_input.buttons & Net::InputFlags::DROP) == 0)
+        return fail_with_cleanup("select_slot did not write exactly the existing select field");
+    script.noteInputCommandSent(70, false, observation.authoritative_weapon_state_generation);
+    Net::InputState after_select;
+    after_select.buttons = Net::withWeaponSelect(Net::InputFlags::DROP, 2);
+    script.applyInput(after_select, true, true, true);
+    if (Net::getWeaponSelect(after_select.buttons) != 0 ||
+        (after_select.buttons & Net::InputFlags::DROP) != 0)
+        return fail_with_cleanup("selection command did not clear on the next normal input");
+    script.tick(0.0f, observation);
+    if (!script.active())
+        return fail_with_cleanup("old owner weapon state satisfied select_slot");
+    observation.authoritative_weapon_state_generation = 6;
+    observation.authoritative_weapon_type = WeaponType::PISTOL;
+    script.tick(0.0f, observation);
+
+    script.tick(0.0f, observation); // start one-command drop
+    Net::InputState drop_input;
+    drop_input.buttons = Net::withWeaponSelect(Net::InputFlags::MOVE_FORWARD, 4);
+    script.applyInput(drop_input, true, true, true);
+    if ((drop_input.buttons & Net::InputFlags::DROP) == 0 ||
+        Net::getWeaponSelect(drop_input.buttons) != 4)
+        return fail_with_cleanup("tap_drop did not set only its normal DROP edge");
+    script.noteInputCommandSent(71, false, observation.authoritative_weapon_state_generation);
+    Net::InputState after_drop;
+    after_drop.buttons = Net::withWeaponSelect(Net::InputFlags::DROP, 3);
+    script.applyInput(after_drop, true, true, true);
+    if ((after_drop.buttons & Net::InputFlags::DROP) != 0 ||
+        Net::getWeaponSelect(after_drop.buttons) != 0)
+        return fail_with_cleanup("tap_drop did not clear its edge after one command");
+    observation.authoritative_weapon_state_generation = 7;
+    observation.authoritative_weapon_type = WeaponType::RIFLE;
+    script.tick(0.0f, observation);
+
+    script.tick(0.0f, observation); // start cached-item weapon wait
+    observation.authoritative_weapon_state_generation = 8;
+    observation.authoritative_weapon_type = WeaponType::RIFLE;
+    script.tick(0.0f, observation);
+    if (!script.active())
+        return fail_with_cleanup("wait_weapon_state_from_item accepted a mismatched owner state");
+    observation.authoritative_weapon_state_generation = 9;
+    observation.authoritative_weapon_type = WeaponType::P250;
+    script.tick(0.0f, observation);
+    if (script.active())
+        return fail_with_cleanup("wait_weapon_state_from_item did not use the cached accepted item type");
+
+    const char* slot_names[] = { "primary", "secondary", "melee", "grenade", "utility" };
+    for (uint8_t expected_select = 1; expected_select <= 5; ++expected_select) {
+        const std::string slot_script = std::string("select_slot ") + slot_names[expected_select - 1] + " 100\n";
+        if (!writeClientAcceptanceScript(script_path, slot_script.c_str()) ||
+            !script_environment.set(script_path.string().c_str()))
+            return fail_with_cleanup("could not configure slot mapping action script");
+        script.loadFromEnvironment();
+        script.tick(0.0f, observation);
+        Net::InputState mapped_input;
+        script.applyInput(mapped_input, true, true, true);
+        if (Net::getWeaponSelect(mapped_input.buttons) != expected_select)
+            return fail_with_cleanup("select_slot changed the established 1-5 input mapping");
+        script.noteInputCommandSent(80 + expected_select, false, observation.authoritative_weapon_state_generation);
+        ++observation.authoritative_weapon_state_generation;
+        script.tick(0.0f, observation);
+    }
 
     if (!writeClientAcceptanceScript(script_path,
         "move_to_world_item_live 88 0.5 1000\n") ||

@@ -300,7 +300,12 @@ static void bindWorldItemVisual(entt::registry& registry, uint32_t world_item_id
 // Acceptance-only receipts mirror successful application to the local
 // presentation index. They never drive gameplay or send a client message.
 static uint64_t g_world_item_receipt_generation = 0;
-static std::unordered_map<uint32_t, uint64_t> g_world_item_upsert_receipts;
+struct WorldItemAcceptanceUpsertReceipt
+{
+    uint64_t generation = 0;
+    WeaponType weapon_type = WeaponType::COUNT;
+};
+static std::unordered_map<uint32_t, WorldItemAcceptanceUpsertReceipt> g_world_item_upsert_receipts;
 static std::unordered_map<uint32_t, uint64_t> g_world_item_remove_receipts;
 
 static void clearWorldItemAcceptanceReceipts()
@@ -337,6 +342,8 @@ static int32_t g_local_reserve_ammo = 90;
 static int32_t g_local_max_reserve_ammo = 90;
 static bool g_local_reloading = false;
 static bool g_has_authoritative_weapon_snapshot = false;
+// Counts accepted owner-only WEAPON_STATE receipts for causal acceptance waits.
+static uint64_t g_authoritative_weapon_state_generation = 0;
 static float g_local_fire_cooldown = 0.0f;
 static float g_local_accuracy_penalty = 0.0f;
 static float g_local_recoil_index = 0.0f;
@@ -552,7 +559,8 @@ static void runFixedClientInputStep(world& game_world,
     }
 
     g_network.sendInputCommand(command_tick, input_state);
-    g_acceptance_script.noteInputCommandSent(command_tick, acceptance_steering_move_emitted);
+    g_acceptance_script.noteInputCommandSent(
+        command_tick, acceptance_steering_move_emitted, g_authoritative_weapon_state_generation);
 }
 
 static void updateRadarPresentation(world& game_world, bool connected, float delta_time)
@@ -707,7 +715,9 @@ GAME_API bool gardenGameInit(EngineServices* services)
                 return;
             }
             bindWorldItemVisual(g_services->game_world->registry, msg.world_item_id);
-            g_world_item_upsert_receipts[msg.world_item_id] = ++g_world_item_receipt_generation;
+            g_world_item_upsert_receipts[msg.world_item_id] = {
+                ++g_world_item_receipt_generation, static_cast<WeaponType>(msg.weapon_type)
+            };
             LOG_ENGINE_INFO(
                 "WORLD_ITEM_UPSERT accepted id={} delivery={} result={} weapon={} pos=({:.2f},{:.2f},{:.2f})",
                 msg.world_item_id,
@@ -861,6 +871,7 @@ GAME_API bool gardenGameInit(EngineServices* services)
             g_local_accuracy_penalty = msg.accuracy_penalty;
             g_local_recoil_index = msg.recoil_index;
             g_has_authoritative_weapon_snapshot = true;
+            ++g_authoritative_weapon_state_generation;
             break;
         }
         default:
@@ -996,13 +1007,22 @@ GAME_API void gardenGameUpdate(float delta_time)
             }
             const TransformComponent& transform = game_world->registry.get<TransformComponent>(entity);
             acceptance_observation.world_items.push_back({
-                world_item_id, transform.position.x, transform.position.z, receipt->second
+                world_item_id, transform.position.x, transform.position.z, receipt->second.generation
             });
         }
         acceptance_observation.world_item_removals.reserve(g_world_item_remove_receipts.size());
         for (const auto& [world_item_id, receipt_generation] : g_world_item_remove_receipts)
             acceptance_observation.world_item_removals.push_back({ world_item_id, receipt_generation });
+        acceptance_observation.world_item_weapon_receipts.reserve(g_world_item_upsert_receipts.size());
+        for (const auto& [world_item_id, receipt] : g_world_item_upsert_receipts) {
+            acceptance_observation.world_item_weapon_receipts.push_back({
+                world_item_id, receipt.weapon_type, receipt.generation
+            });
+        }
     }
+    acceptance_observation.has_authoritative_weapon_state = g_has_authoritative_weapon_snapshot;
+    acceptance_observation.authoritative_weapon_type = g_local_weapon_type;
+    acceptance_observation.authoritative_weapon_state_generation = g_authoritative_weapon_state_generation;
     const FPSShooter::ClientAcceptanceDispatch acceptance_dispatch =
         g_acceptance_script.tick(delta_time, acceptance_observation);
     if (acceptance_dispatch.kind == FPSShooter::ClientAcceptanceDispatch::Kind::Team) {
@@ -1370,6 +1390,7 @@ GAME_API void gardenOnLevelLoaded()
     g_local_max_reserve_ammo = def.max_reserve_ammo;
     g_local_reloading = false;
     g_has_authoritative_weapon_snapshot = false;
+    g_authoritative_weapon_state_generation = 0;
     g_local_fire_cooldown = 0.0f;
     g_local_accuracy_penalty = 0.0f;
     g_local_recoil_index = 0.0f;
