@@ -216,6 +216,119 @@ void queries() {
           w.get<QueryValue>(onlyQuery, queryValue) == ComponentStoreResult::Success && queryValue && queryValue->number == 7,
           "query rejects structural mutations without changing state");
 }
+
+void engineAdapters() {
+    world w, other;
+    const EntityRef ref = w.createEntity();
+    const auto entity = w.scopedEntity(ref);
+    const auto raw = resolveEntityRef(w.registry, ref);
+    const auto foreign = other.createScopedEntity();
+    check(raw != entt::null && w.add<TransformComponent>(entity, 2.0f, 3.0f, 4.0f) == ComponentStoreResult::Success &&
+          w.add<PlayerComponent>(entity) == ComponentStoreResult::Success,
+          "Garden adds engine components to adapter pools");
+    TransformComponent* transform = nullptr;
+    PlayerComponent* player = nullptr;
+    bool present = false;
+    check(w.get<TransformComponent>(entity, transform) == ComponentStoreResult::Success && transform &&
+          transform == w.registry.try_get<TransformComponent>(raw) && transform->position.x == 2.0f &&
+          w.get<PlayerComponent>(entity, player) == ComponentStoreResult::Success && player &&
+          player == w.registry.try_get<PlayerComponent>(raw) &&
+          w.has<PlayerComponent>(entity, present) == ComponentStoreResult::Success && present &&
+          w.add<TransformComponent>(entity) == ComponentStoreResult::Duplicate,
+          "Garden access and registry access share authoritative engine values");
+    if (transform && player) {
+        transform->position.x = 8.0f;
+        player->speed = 5.0f;
+    }
+    const world& cw = w;
+    const TransformComponent* readTransform = nullptr;
+    check(cw.get<TransformComponent>(entity, readTransform) == ComponentStoreResult::Success &&
+          readTransform == w.registry.try_get<TransformComponent>(raw) && readTransform &&
+          readTransform->position.x == 8.0f && w.registry.get<PlayerComponent>(raw).speed == 5.0f,
+          "const access and registry observe Garden writes");
+
+    const EntityRef secondRef = w.createEntity();
+    const auto second = w.scopedEntity(secondRef);
+    const auto secondRaw = resolveEntityRef(w.registry, secondRef);
+    w.registry.emplace<TransformComponent>(secondRaw, 12.0f, 0.0f, 0.0f);
+    w.registry.emplace<PlayerComponent>(secondRaw);
+    check(w.get<TransformComponent>(second, transform) == ComponentStoreResult::Success &&
+          transform == w.registry.try_get<TransformComponent>(secondRaw) && transform && transform->position.x == 12.0f &&
+          w.add<QueryValue>(entity, QueryValue{3}) == ComponentStoreResult::Success,
+          "registry-created engine components are visible to Garden");
+    int visits = 0;
+    bool matched = true;
+    ComponentStoreResult guarded = ComponentStoreResult::Success;
+    const auto joined = w.query<TransformComponent, PlayerComponent, const QueryValue>(
+        [&](EntityHandle found, TransformComponent& t, PlayerComponent& p, const QueryValue& module) {
+            ++visits;
+            matched = matched && found == entity && &t == w.registry.try_get<TransformComponent>(raw) &&
+                      &p == w.registry.try_get<PlayerComponent>(raw) && module.number == 3;
+            t.position.x += module.number;
+            p.speed += module.number;
+            guarded = w.remove<PlayerComponent>(found);
+        });
+    check(joined == ComponentStoreResult::Success && visits == 1 && matched &&
+          guarded == ComponentStoreResult::StructuralMutationDuringQuery &&
+          w.registry.get<TransformComponent>(raw).position.x == 11.0f &&
+          w.registry.get<PlayerComponent>(raw).speed == 8.0f &&
+          w.get<TransformComponent>(entity, transform) == ComponentStoreResult::Success &&
+          transform == w.registry.try_get<TransformComponent>(raw) && transform->position.x == 11.0f,
+          "engine and module pools join with shared writes and mutation guard");
+
+    // Raw entities without an existing scope, including those with no identity,
+    // must not be assigned identity or scope merely by a query.
+    const auto anonymous = w.registry.create();
+    w.registry.emplace<TransformComponent>(anonymous);
+    const auto unscoped = w.registry.create();
+    const EntityGuid unscopedGuid = generateEntityGuid();
+    w.registry.emplace<IdentityComponent>(unscoped, IdentityComponent{unscopedGuid});
+    w.registry.emplace<TransformComponent>(unscoped);
+    const auto duplicate = w.registry.create();
+    w.registry.emplace<IdentityComponent>(duplicate, IdentityComponent{ref.guid});
+    w.registry.emplace<TransformComponent>(duplicate);
+    visits = 0;
+    matched = true;
+    const auto invalidQuery = w.query<const TransformComponent>([&](EntityHandle found, const TransformComponent&) {
+        ++visits;
+        matched = matched && found == second;
+    });
+    check(invalidQuery == ComponentStoreResult::Success && visits == 1 && matched &&
+          !w.registry.all_of<IdentityComponent>(anonymous) &&
+          w.registry.get<IdentityComponent>(unscoped).guid == unscopedGuid &&
+          w.registry.get<IdentityComponent>(duplicate).guid == ref.guid,
+          "query skips unscoped and ambiguous identities without repairing them");
+    w.registry.destroy(duplicate);
+    const auto nullIdentity = w.registry.get<IdentityComponent>(raw).guid;
+    w.registry.get<IdentityComponent>(raw).guid = {};
+    visits = 0;
+    matched = true;
+    const auto nullQuery = w.query<const TransformComponent>([&](EntityHandle found, const TransformComponent&) {
+        ++visits;
+        matched = matched && found == second;
+    });
+    check(nullQuery == ComponentStoreResult::Success && visits == 1 && matched &&
+          w.registry.get<IdentityComponent>(raw).guid.isNull(),
+          "query skips null identities without repairing them");
+    w.registry.get<IdentityComponent>(raw).guid = nullIdentity;
+
+    check(w.get<TransformComponent>(foreign, transform) == ComponentStoreResult::InvalidEntity && !transform &&
+          w.add<PlayerComponent>(EntityHandle{}) == ComponentStoreResult::InvalidEntity &&
+          w.remove<PlayerComponent>(foreign) == ComponentStoreResult::InvalidEntity,
+          "adapter rejects foreign and unscoped handles");
+    check(w.remove<PlayerComponent>(entity) == ComponentStoreResult::Success &&
+          !w.registry.all_of<PlayerComponent>(raw) &&
+          w.remove<PlayerComponent>(entity) == ComponentStoreResult::NotFound &&
+          w.has<PlayerComponent>(entity, present) == ComponentStoreResult::Success && !present &&
+          w.remove<TransformComponent>(entity) == ComponentStoreResult::Success &&
+          !w.registry.all_of<TransformComponent>(raw) &&
+          w.get<TransformComponent>(entity, transform) == ComponentStoreResult::NotFound && !transform,
+          "removing adapter values removes the registry values");
+    check(w.destroyEntity(second) == ComponentStoreResult::Success &&
+          w.get<TransformComponent>(second, transform) == ComponentStoreResult::StaleEntity && !transform &&
+          w.add<PlayerComponent>(second) == ComponentStoreResult::StaleEntity,
+          "adapter rejects stale handles");
+}
 }
 
 int main() {
@@ -239,6 +352,7 @@ int main() {
     moves();
     teardown();
     queries();
+    engineAdapters();
     check(WorldValue::constructed == WorldValue::destroyed, "all component values destroyed exactly once");
     check(catalog.unregisterOwner(owner) == ComponentCatalogResult::Success, "worlds release catalog leases");
     return failures ? 1 : 0;

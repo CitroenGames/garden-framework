@@ -14,6 +14,8 @@
 #include "Reflection/Reflector.hpp"
 #include <algorithm>
 #include <vector>
+#include "ECS/ComponentStore.hpp"
+#include "ECS/ComponentOperations.hpp"
 
 struct TransformComponent {
     glm::vec3 position;
@@ -526,6 +528,17 @@ struct PlayerComponent {
             .tooltip("Capsule radius").drag(0.01f).range(0.01f, 5.0f).category("Collision");
     }
 };
+
+namespace garden::ecs {
+template<> struct ComponentType<::TransformComponent> {
+    static constexpr ComponentKey key{"garden.Transform", 1};
+    static constexpr uint32_t capabilities = componentCapabilities<::TransformComponent>();
+};
+template<> struct ComponentType<::PlayerComponent> {
+    static constexpr ComponentKey key{"garden.Player", 1};
+    static constexpr uint32_t capabilities = componentCapabilities<::PlayerComponent>();
+};
+}
 
 struct CameraSpringComponent {
     bool enabled = true;

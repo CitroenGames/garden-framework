@@ -73,6 +73,8 @@ EntityRef ClientNetworkEcsBridge::spawnPlayer(world& w, const SpawnPlayerMessage
 
     // Assign a Garden identity before publishing the network entity.
     const EntityRef entity_ref = ensureEntityRef(w.registry, entity);
+    if (!w.isEntityValid(w.scopedEntity(entity_ref)))
+        LOG_ENGINE_ERROR("Could not register scoped identity for network player {}", msg.entity_id);
     storage->entities[msg.entity_id] = entity;
     if (local) storage->local = entity;
     return entity_ref;

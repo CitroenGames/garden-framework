@@ -12,6 +12,7 @@
 #include <array>
 #include <functional>
 #include <type_traits>
+#include <unordered_map>
 #include <vector>
 #include <memory>
 #include <string>
@@ -42,7 +43,15 @@ private:
     garden::ecs::ComponentStore& componentStore() noexcept;
     const garden::ecs::ComponentStore& componentStore() const noexcept;
     garden::ecs::ComponentStoreResult scopedKey(garden::ecs::EntityHandle, garden::ecs::ComponentEntityKey&) const noexcept;
-    garden::ecs::EntityHandle handleForKey(garden::ecs::ComponentEntityKey) const noexcept;
+    using IdentityCounts = std::unordered_map<EntityGuid, size_t, GuidHash>;
+    garden::ecs::ComponentStoreResult snapshotIdentityCounts(IdentityCounts&) const noexcept;
+    garden::ecs::EntityHandle handleForKey(garden::ecs::ComponentEntityKey, const IdentityCounts&) const noexcept;
+    static garden::ecs::ComponentStoreResult validateBackend(garden::ecs::ComponentKey, garden::ecs::ComponentId) noexcept;
+    bool isAdapted(garden::ecs::ComponentId) const noexcept;
+    garden::ecs::ComponentStoreResult addAdapted(garden::ecs::ComponentId, garden::ecs::ComponentEntityKey, bool (*)(void*, void*) noexcept, void*) noexcept;
+    garden::ecs::ComponentStoreResult getValue(garden::ecs::ComponentId, garden::ecs::ComponentEntityKey, void*&) const noexcept;
+    garden::ecs::ComponentStoreResult removeValue(garden::ecs::ComponentId, garden::ecs::ComponentEntityKey) noexcept;
+    garden::ecs::ComponentStoreResult snapshotValues(garden::ecs::ComponentId, std::vector<garden::ecs::ComponentEntityKey>&) const noexcept;
 
     template<class T>
     static garden::ecs::ComponentStoreResult resolveType(garden::ecs::ComponentId& id) noexcept
@@ -56,7 +65,7 @@ private:
         const auto result = ComponentCatalog::instance().resolveType(ComponentType<T>::key,
             sizeof(T), alignof(T), capabilities, id);
         switch (result) {
-        case ComponentCatalogResult::Success: return ComponentStoreResult::Success;
+        case ComponentCatalogResult::Success: return validateBackend(ComponentType<T>::key, id);
         case ComponentCatalogResult::NotFound: return ComponentStoreResult::UnregisteredType;
         case ComponentCatalogResult::Conflict: return ComponentStoreResult::TypeMismatch;
         case ComponentCatalogResult::ResourceExhausted: return ComponentStoreResult::ResourceExhausted;
@@ -117,11 +126,24 @@ public:
         garden::ecs::ComponentId id;
         result = resolveType<T>(id);
         if (result != garden::ecs::ComponentStoreResult::Success) return result;
+        if (isAdapted(id)) {
+            auto arguments = std::forward_as_tuple(std::forward<Args>(args)...);
+            auto construct = [](void* destination, void* context) noexcept -> bool {
+                try {
+                    auto& tuple = *static_cast<decltype(arguments)*>(context);
+                    std::apply([destination](auto&&... values) {
+                        ::new (destination) T(std::forward<decltype(values)>(values)...);
+                    }, std::move(tuple));
+                    return true;
+                } catch (...) { return false; }
+            };
+            return addAdapted(id, key, construct, &arguments);
+        }
         return componentStore().add<T>(id, key, std::forward<Args>(args)...);
     }
 
-    // Returned pointers are valid until that value is removed, its entity is
-    // destroyed, or the world is reset or destroyed. Externally synchronize access.
+    // Pointers can be invalidated by structural changes to the same component
+    // pool, entity destruction, or world reset/destruction. Synchronize access.
     template<class T>
     garden::ecs::ComponentStoreResult get(garden::ecs::EntityHandle entity, T*& out)
     {
@@ -133,7 +155,7 @@ public:
         result = resolveType<T>(id);
         if (result != garden::ecs::ComponentStoreResult::Success) return result;
         void* value = nullptr;
-        result = componentStore().get(id, key, value);
+        result = getValue(id, key, value);
         if (result == garden::ecs::ComponentStoreResult::Success) out = static_cast<T*>(value);
         return result;
     }
@@ -149,7 +171,7 @@ public:
         result = resolveType<T>(id);
         if (result != garden::ecs::ComponentStoreResult::Success) return result;
         void* value = nullptr;
-        result = componentStore().get(id, key, value);
+        result = getValue(id, key, value);
         if (result == garden::ecs::ComponentStoreResult::Success) out = static_cast<const T*>(value);
         return result;
     }
@@ -165,7 +187,7 @@ public:
         result = resolveType<T>(id);
         if (result != garden::ecs::ComponentStoreResult::Success) return result;
         void* value = nullptr;
-        result = componentStore().get(id, key, value);
+        result = getValue(id, key, value);
         if (result == garden::ecs::ComponentStoreResult::NotFound)
             return garden::ecs::ComponentStoreResult::Success;
         if (result == garden::ecs::ComponentStoreResult::Success)
@@ -183,14 +205,16 @@ public:
         garden::ecs::ComponentId id;
         result = resolveType<T>(id);
         if (result != garden::ecs::ComponentStoreResult::Success) return result;
-        return componentStore().remove(id, key);
+        return removeValue(id, key);
     }
 
     // Order is unspecified. The callback receives a scoped handle and references
     // to all requested components; explicit const types yield const references.
     // Queries may nest, but Garden structural mutations are rejected until all
     // callbacks return. World shutdown/reset are no-ops during a query. Direct
-    // registry mutations bypass this guard. Access is externally synchronized;
+    // registry mutations bypass this guard and must not occur during a query.
+    // Identity uniqueness is checked against a read-only snapshot at query entry.
+    // Access is externally synchronized;
     // the world must outlive every callback.
     template<class... Ts, class Callback>
     garden::ecs::ComponentStoreResult query(Callback&& callback)
@@ -216,22 +240,25 @@ public:
             bool first = true;
             for (const auto id : ids) {
                 std::vector<ComponentEntityKey> pool;
-                result = componentStore().snapshotEntities(id, pool);
+                result = snapshotValues(id, pool);
                 if (result != ComponentStoreResult::Success) return result;
                 if (first || pool.size() < candidates.size()) candidates.swap(pool);
                 first = false;
             }
+            IdentityCounts identityCounts;
+            result = snapshotIdentityCounts(identityCounts);
+            if (result != ComponentStoreResult::Success) return result;
             for (const auto key : candidates) {
                 std::array<void*, sizeof...(Ts)> values{};
                 bool match = true;
                 for (size_t i = 0; i < ids.size(); ++i) {
-                    result = componentStore().get(ids[i], key, values[i]);
+                    result = getValue(ids[i], key, values[i]);
                     if (result == ComponentStoreResult::NotFound) { match = false; break; }
                     if (result != ComponentStoreResult::Success) return result;
                 }
                 if (!match) continue;
-                const auto handle = handleForKey(key);
-                if (!handle.m_world) return ComponentStoreResult::InternalError;
+                const auto handle = handleForKey(key, identityCounts);
+                if (!handle.m_world) continue;
                 try {
                     [&]<size_t... I>(std::index_sequence<I...>) {
                         std::invoke(callback, handle, *static_cast<Ts*>(values[I])...);

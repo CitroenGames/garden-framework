@@ -3,6 +3,7 @@
 #include "GameFramework/GameFrameworkRuntime.hpp"
 #include "GameFramework/GameModeBase.hpp"
 #include "GameFramework/GameStateBase.hpp"
+#include "ECS/EngineComponentAdapters.hpp"
 
 #include <atomic>
 #include <exception>
@@ -31,6 +32,7 @@ struct world::ComponentWorldState {
 world::world(const PhysicsSystemSettings& physics_settings)
     : simulation_ticks(physics_settings.fixed_delta)
 {
+    garden::ecs::engine_adapters::registerComponents();
     fixed_delta = physics_settings.fixed_delta;
     physics_system = std::make_unique<PhysicsSystem>(physics_settings);
     fixed_delta = physics_system->getFixedDelta();
@@ -165,6 +167,19 @@ EntityRef world::findEntityByTag(const std::string& name) const
 garden::ecs::ComponentStore& world::componentStore() noexcept { return component_state->store; }
 const garden::ecs::ComponentStore& world::componentStore() const noexcept { return component_state->store; }
 
+garden::ecs::ComponentStoreResult world::validateBackend(garden::ecs::ComponentKey key, garden::ecs::ComponentId id) noexcept
+{ return garden::ecs::engine_adapters::validate(key, id); }
+bool world::isAdapted(garden::ecs::ComponentId id) const noexcept
+{ return garden::ecs::engine_adapters::handles(id); }
+garden::ecs::ComponentStoreResult world::addAdapted(garden::ecs::ComponentId id, garden::ecs::ComponentEntityKey key, bool (*construct)(void*, void*) noexcept, void* context) noexcept
+{ return garden::ecs::engine_adapters::add(registry, id, key, construct, context); }
+garden::ecs::ComponentStoreResult world::getValue(garden::ecs::ComponentId id, garden::ecs::ComponentEntityKey key, void*& out) const noexcept
+{ return isAdapted(id) ? garden::ecs::engine_adapters::get(registry, id, key, out) : componentStore().get(id, key, out); }
+garden::ecs::ComponentStoreResult world::removeValue(garden::ecs::ComponentId id, garden::ecs::ComponentEntityKey key) noexcept
+{ return isAdapted(id) ? garden::ecs::engine_adapters::remove(registry, id, key) : componentStore().remove(id, key); }
+garden::ecs::ComponentStoreResult world::snapshotValues(garden::ecs::ComponentId id, std::vector<garden::ecs::ComponentEntityKey>& out) const noexcept
+{ return isAdapted(id) ? garden::ecs::engine_adapters::snapshot(registry, id, out) : componentStore().snapshotEntities(id, out); }
+
 garden::ecs::ComponentStoreResult world::scopedKey(garden::ecs::EntityHandle handle,
     garden::ecs::ComponentEntityKey& key) const noexcept
 {
@@ -186,13 +201,31 @@ bool world::isEntityValid(garden::ecs::EntityHandle handle) const noexcept
     return scopedKey(handle, key) == garden::ecs::ComponentStoreResult::Success;
 }
 
-garden::ecs::EntityHandle world::handleForKey(garden::ecs::ComponentEntityKey key) const noexcept
+garden::ecs::ComponentStoreResult world::snapshotIdentityCounts(IdentityCounts& counts) const noexcept
+{
+    try {
+        for (const auto [entity, identity] : registry.view<IdentityComponent>().each()) {
+            (void)entity;
+            if (!identity.guid.isNull()) ++counts[identity.guid];
+        }
+        return garden::ecs::ComponentStoreResult::Success;
+    } catch (...) {
+        return garden::ecs::ComponentStoreResult::ResourceExhausted;
+    }
+}
+
+garden::ecs::EntityHandle world::handleForKey(garden::ecs::ComponentEntityKey key,
+    const IdentityCounts& counts) const noexcept
 {
     if (!component_state || !key.generation) return {};
     const auto entity = entt::entt_traits<entt::entity>::construct(key.slot, key.generation - 1u);
     if (!registry.valid(entity) || !registry.all_of<ScopedEntityMarker>(entity)) return {};
     const auto& marker = registry.get<ScopedEntityMarker>(entity);
     if (marker.key.slot != key.slot || marker.key.generation != key.generation) return {};
+    const auto* identity = registry.try_get<IdentityComponent>(entity);
+    if (!identity || identity->guid.isNull()) return {};
+    const auto count = counts.find(identity->guid);
+    if (count == counts.end() || count->second != 1) return {};
     garden::ecs::EntityHandle handle;
     handle.m_world = component_state->token;
     handle.m_entity = static_cast<uint32_t>(entt::to_integral(entity));

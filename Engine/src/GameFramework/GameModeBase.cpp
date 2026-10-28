@@ -16,6 +16,17 @@
 
 namespace GameFramework
 {
+namespace
+{
+EntityRef registerScopedPlayerEntity(world& game_world, entt::entity entity, const char* role)
+{
+    const EntityRef reference = ensureEntityRef(game_world.registry, entity);
+    if (!game_world.isEntityValid(game_world.scopedEntity(reference)))
+        LOG_ENGINE_ERROR("Could not register scoped identity for {}", role);
+    return reference;
+}
+}
+
 PlayerControllerEntry::PlayerControllerEntry() = default;
 PlayerControllerEntry::~PlayerControllerEntry() = default;
 PlayerControllerEntry::PlayerControllerEntry(PlayerControllerEntry&&) noexcept = default;
@@ -230,8 +241,12 @@ void GameModeBase::handleStartingNewPlayer(PlayerControllerEntry& new_player)
             new_player.player_state->is_spectator = true;
 
         new_player.freecam = findOrCreateFreecamFor(new_player);
-        if (new_player.controller && m_world && m_world->registry.valid(new_player.freecam))
-            new_player.controller->setPossessedFreecam(ensureEntityRef(m_world->registry, new_player.freecam));
+        if (m_world && m_world->registry.valid(new_player.freecam))
+        {
+            const EntityRef freecam_ref = registerScopedPlayerEntity(*m_world, new_player.freecam, "freecam");
+            if (new_player.controller)
+                new_player.controller->setPossessedFreecam(freecam_ref);
+        }
         syncPlayerEntryToEcs(new_player);
         return;
     }
@@ -556,12 +571,16 @@ void GameModeBase::finishRestartPlayer(PlayerControllerEntry& player)
         return;
 
     player.freecam = findOrCreateFreecamFor(player);
+    const EntityRef pawn_ref = registerScopedPlayerEntity(*m_world, player.pawn, "player pawn");
+    EntityRef freecam_ref;
+    if (m_world->registry.valid(player.freecam))
+        freecam_ref = registerScopedPlayerEntity(*m_world, player.freecam, "freecam");
 
     if (player.controller)
     {
-        player.controller->setPossessedPlayer(ensureEntityRef(m_world->registry, player.pawn));
+        player.controller->setPossessedPlayer(pawn_ref);
         if (m_world->registry.valid(player.freecam))
-            player.controller->setPossessedFreecam(ensureEntityRef(m_world->registry, player.freecam));
+            player.controller->setPossessedFreecam(freecam_ref);
     }
 
     if (player.player_state)
