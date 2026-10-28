@@ -457,6 +457,9 @@ struct ShootResultMessage
     glm::vec3 hit_position = glm::vec3(0);
     uint32_t hit_entity_id = 0;
     uint8_t weapon_type = 0;
+    // Monotonic per shooter while the server session is live. Presentation
+    // consumers use it to suppress duplicated or reordered transport data.
+    uint64_t presentation_sequence = 0;
 };
 
 struct DamageEventMessage
@@ -467,6 +470,8 @@ struct DamageEventMessage
     int32_t damage = 0;
     int32_t health_remaining = 0;
     glm::vec3 hit_position = glm::vec3(0);
+    // Monotonic per victim while the server session is live.
+    uint64_t presentation_sequence = 0;
 };
 
 struct PlayerDiedMessage
@@ -590,6 +595,7 @@ namespace CombatSerializer
         writer.writeVector3f(msg.hit_position);
         writer.writeUInt32(msg.hit_entity_id);
         writer.writeByte(msg.weapon_type);
+        writer.writeBits(msg.presentation_sequence, 64);
     }
 
     inline bool deserialize(Net::BitReader& reader, ShootResultMessage& msg) {
@@ -600,6 +606,7 @@ namespace CombatSerializer
         msg.hit_position = reader.readVector3f();
         msg.hit_entity_id = reader.readUInt32();
         msg.weapon_type = reader.readByte();
+        msg.presentation_sequence = reader.readBits(64);
         return !reader.hasError();
     }
 
@@ -610,6 +617,7 @@ namespace CombatSerializer
         writer.writeUInt32(static_cast<uint32_t>(msg.damage));
         writer.writeUInt32(static_cast<uint32_t>(msg.health_remaining));
         writer.writeVector3f(msg.hit_position);
+        writer.writeBits(msg.presentation_sequence, 64);
     }
 
     inline bool deserialize(Net::BitReader& reader, DamageEventMessage& msg) {
@@ -620,6 +628,7 @@ namespace CombatSerializer
         msg.damage = static_cast<int32_t>(reader.readUInt32());
         msg.health_remaining = static_cast<int32_t>(reader.readUInt32());
         msg.hit_position = reader.readVector3f();
+        msg.presentation_sequence = reader.readBits(64);
         return !reader.hasError();
     }
 

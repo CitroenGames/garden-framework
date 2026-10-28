@@ -4339,6 +4339,8 @@ int main()
     ok = testUiRadarPresentationPrivacy() && ok;
     ok = testUiCompetitivePresentationProjection() && ok;
     ok = testAudioUnknownEventNoVoices() && ok;
+    ok = testAudioPresentationRouting() && ok;
+    ok = testFpsAudioPresentationMappings() && ok;
     ok = testAudioEventTableRoundTrip() && ok;
     ok = testAudioEventTableRejectsMalformedDefinitions() && ok;
     ok = testAudioEventTableReplacementKeepsActiveVoices() && ok;

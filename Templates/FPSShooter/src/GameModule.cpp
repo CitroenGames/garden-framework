@@ -14,6 +14,7 @@
 #include "Components/LocalPlayerInputComponent.hpp"
 #include "Components/camera.hpp"
 #include "Network/ClientNetworkManager.hpp"
+#include "Network/NetworkTypes.hpp"
 #include "Network/SharedMovement.hpp"
 #include "shared/SharedComponents.hpp"
 #include "shared/CombatProtocol.hpp"
@@ -43,9 +44,11 @@
 #include "Debug/DebugDraw.hpp"
 #include "Audio/AudioSystem.hpp"
 #include "Audio/SoundEvent.hpp"
+#include "Audio/AudioEventRouter.hpp"
 #include "Audio/AudioSourceSystem.hpp"
 #include "ECS/Hierarchy.hpp"
 #include "shared/FpsAudioEvents.hpp"
+#include "shared/FpsAudioRouting.hpp"
 #include "Animation/AnimationSystem.hpp"
 #include "Threading/JobSystem.hpp"
 
@@ -327,6 +330,7 @@ static uint64_t g_combat_receipt_generation = 0;
 static std::vector<FPSShooter::ClientAcceptanceDamageReceipt> g_damage_acceptance_receipts;
 static std::vector<FPSShooter::ClientAcceptanceDeathReceipt> g_death_acceptance_receipts;
 static FpsCombat::ClientCombatEventIdentityCache g_combat_event_identity_cache;
+static AudioEventRouter g_audio_event_router(AudioEventSystem::get());
 
 template <typename Receipt>
 static void appendClientAcceptanceCombatReceipt(std::vector<Receipt>& receipts, Receipt receipt)
@@ -345,6 +349,26 @@ static void clearWorldItemAcceptanceReceipts()
     g_damage_acceptance_receipts.clear();
     g_death_acceptance_receipts.clear();
     g_combat_event_identity_cache.clear();
+    g_audio_event_router.clear();
+}
+
+static bool tryGetClientPresentationPosition(uint16_t client_id, glm::vec3& position)
+{
+    if (!g_services || !g_services->game_world || client_id == 0)
+        return false;
+
+    auto entities = g_services->game_world->registry.view<Net::NetworkedEntity, TransformComponent>();
+    for (const entt::entity entity : entities) {
+        if (entities.get<Net::NetworkedEntity>(entity).owner_client_id != client_id)
+            continue;
+        const auto world_position = Hierarchy::resolveSimulationWorldPosition(
+            g_services->game_world->registry, entity);
+        if (!world_position)
+            return false;
+        position = *world_position;
+        return true;
+    }
+    return false;
 }
 
 static entt::entity g_player_entity = entt::null;
@@ -817,7 +841,6 @@ GAME_API bool gardenGameInit(EngineServices* services)
                     FPSShooter::ClientAcceptanceDeathReceipt{
                         msg.killer_client_id, msg.victim_client_id, ++g_combat_receipt_generation
                     });
-                AudioEventSystem::get().play2D("player.death");
                 g_local_alive = false;
                 g_local_health = 0;
                 g_has_authoritative_health_snapshot = true;
@@ -825,6 +848,12 @@ GAME_API bool gardenGameInit(EngineServices* services)
                 g_death_timer = RESPAWN_DELAY;
                 LOG_ENGINE_INFO("COMBAT_EVENT accepted victim={} sequence={} weapon={} flags={}",
                     msg.victim_client_id, msg.death_sequence, msg.weapon_type, msg.flags);
+            }
+            glm::vec3 death_position(0.0f);
+            if (msg.victim_client_id == g_network.getClientId() ||
+                tryGetClientPresentationPosition(msg.victim_client_id, death_position)) {
+                (void)g_audio_event_router.route(
+                    FpsAudio::makeDeathEvent(msg, g_network.getClientId(), death_position));
             }
             if (msg.killer_client_id == g_network.getClientId())
                 g_local_kills += msg.killer_kills;
@@ -841,7 +870,8 @@ GAME_API bool gardenGameInit(EngineServices* services)
                 ? glm::vec3(1.0f, 0.3f, 0.0f)
                 : glm::vec3(1.0f, 1.0f, 0.5f);
             DebugDraw::get().drawLine(msg.ray_origin, msg.hit_position, color, 0.15f);
-            AudioEventSystem::get().playAt("weapon.fire", msg.ray_origin);
+            (void)g_audio_event_router.route(
+                FpsAudio::makeFireEvent(msg, g_network.getClientId()));
             break;
         }
         case CombatMessageType::DAMAGE_EVENT: {
@@ -850,6 +880,8 @@ GAME_API bool gardenGameInit(EngineServices* services)
                 LOG_ENGINE_WARN("Failed to deserialize DAMAGE_EVENT");
                 return;
             }
+            (void)g_audio_event_router.route(
+                FpsAudio::makeHurtEvent(msg, g_network.getClientId()));
             if (msg.victim_client_id == g_network.getClientId()) {
                 appendClientAcceptanceCombatReceipt(g_damage_acceptance_receipts,
                     FPSShooter::ClientAcceptanceDamageReceipt{
@@ -858,7 +890,6 @@ GAME_API bool gardenGameInit(EngineServices* services)
                 g_local_health = msg.health_remaining;
                 g_local_alive = msg.health_remaining > 0;
                 g_has_authoritative_health_snapshot = true;
-                AudioEventSystem::get().play2D("player.hurt");
                 LOG_ENGINE_INFO("Took {} damage! Health: {}", msg.damage, g_local_health);
             }
             break;
@@ -1034,8 +1065,10 @@ GAME_API void gardenGameUpdate(float delta_time)
 
     // Network update
     g_network.update(delta_time);
-    if (UiLogic::observeConnection(g_ui_connection, g_ui, g_network.isConnected()))
+    if (UiLogic::observeConnection(g_ui_connection, g_ui, g_network.isConnected())) {
         g_competitive_presentation_cache.clear();
+        g_audio_event_router.clear();
+    }
 
     if (g_network.isConnected())
     {

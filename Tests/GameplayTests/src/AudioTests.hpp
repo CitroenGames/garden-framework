@@ -1,12 +1,14 @@
 #pragma once
 #include "Audio/AudioSystem.hpp"
 #include "Audio/SoundEvent.hpp"
+#include "Audio/AudioEventRouter.hpp"
 #include "Audio/SoundEventTable.hpp"
 #include "Audio/AudioSourceSystem.hpp"
 #include "Components/AudioSourceComponent.hpp"
 #include "Components/IdentityComponent.hpp"
 #include "ECS/Hierarchy.hpp"
 #include "shared/FpsAudioEvents.hpp"
+#include "shared/FpsAudioRouting.hpp"
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -65,6 +67,88 @@ bool testAudioUnknownEventNoVoices()
     if (sys.activeVoiceCount() != 0 || mock.play_calls != 0) return fail(name, "unknown started voices");
     if (sys.diagnosticLogCount() > 1) return fail(name, "unknown log not rate-limited");
     if (sys.findEvent("no.such.event") != nullptr) return fail(name, "unknown lookup hit");
+    return pass(name);
+}
+
+bool testAudioPresentationRouting()
+{
+    const std::string name = "Audio.PresentationRouting";
+    AudioEventSystem events;
+    MockAudioBackend mock;
+    events.setPlayFn(mock.playFn());
+    events.setStopFn(mock.stopFn());
+    std::string error;
+    if (!events.registerEvent(makeTestDef("weapon.fire"), &error) ||
+        !events.registerEvent(makeTestDef("player.hurt"), &error))
+        return fail(name, "could not configure fake events: " + error);
+
+    AudioEventRouter router(events, 2);
+    const AudioPresentationEvent remote{7, 10, "weapon.fire", {2.0f, 3.0f, 4.0f},
+                                        AudioPresentationRoute::RemoteSpatial};
+    if (router.route(remote) != AudioPresentationRouteResult::Played || mock.play_calls != 1 ||
+        glm::distance(mock.positions.back(), remote.position) > 0.001f)
+        return fail(name, "remote route did not use positional playback");
+    if (router.route(remote) != AudioPresentationRouteResult::Duplicate || mock.play_calls != 1)
+        return fail(name, "duplicate route reached mixer");
+
+    AudioPresentationEvent older = remote;
+    older.sequence = 9;
+    if (router.route(older) != AudioPresentationRouteResult::Reordered || mock.play_calls != 1)
+        return fail(name, "reordered route reached mixer");
+
+    const AudioPresentationEvent local{7, 11, "player.hurt", {99.0f, 0.0f, 0.0f},
+                                       AudioPresentationRoute::Local2D};
+    if (router.route(local) != AudioPresentationRouteResult::Played || mock.play_calls != 2 ||
+        glm::distance(mock.positions.back(), glm::vec3(0.0f)) > 0.001f)
+        return fail(name, "local route did not use 2D playback");
+
+    AudioPresentationEvent invalid = remote;
+    invalid.source_id = 0;
+    invalid.sequence = 12;
+    if (router.route(invalid) != AudioPresentationRouteResult::Invalid || mock.play_calls != 2)
+        return fail(name, "invalid event reached mixer");
+    return pass(name);
+}
+
+bool testFpsAudioPresentationMappings()
+{
+    const std::string name = "Audio.FpsPresentationMappings";
+    ShootResultMessage shot;
+    shot.shooter_client_id = 3;
+    shot.presentation_sequence = 7;
+    shot.ray_origin = {1.0f, 2.0f, 3.0f};
+    const AudioPresentationEvent remote_shot = FpsAudio::makeFireEvent(shot, 2);
+    if (remote_shot.event_name != "weapon.fire" ||
+        remote_shot.source_id != FpsAudio::presentationSource(3, 1) ||
+        remote_shot.sequence != 7 || remote_shot.route != AudioPresentationRoute::RemoteSpatial ||
+        glm::distance(remote_shot.position, shot.ray_origin) > 0.001f)
+        return fail(name, "remote shot mapping changed source or position");
+    const AudioPresentationEvent local_shot = FpsAudio::makeFireEvent(shot, 3);
+    if (local_shot.route != AudioPresentationRoute::Local2D)
+        return fail(name, "local shot was not 2D");
+    Net::BitWriter shot_writer;
+    CombatSerializer::serialize(shot_writer, shot);
+    Net::BitReader shot_reader(shot_writer.getData(), shot_writer.getByteSize());
+    ShootResultMessage decoded_shot;
+    if (!CombatSerializer::deserialize(shot_reader, decoded_shot) ||
+        decoded_shot.presentation_sequence != shot.presentation_sequence)
+        return fail(name, "shot presentation sequence was not retained on wire");
+
+    DamageEventMessage hurt;
+    hurt.victim_client_id = 3;
+    hurt.presentation_sequence = 8;
+    hurt.hit_position = {4.0f, 5.0f, 6.0f};
+    const AudioPresentationEvent local_hurt = FpsAudio::makeHurtEvent(hurt, 3);
+    if (local_hurt.event_name != "player.hurt" || local_hurt.sequence != 8 ||
+        local_hurt.route != AudioPresentationRoute::Local2D)
+        return fail(name, "local hurt mapping changed");
+    Net::BitWriter hurt_writer;
+    CombatSerializer::serialize(hurt_writer, hurt);
+    Net::BitReader hurt_reader(hurt_writer.getData(), hurt_writer.getByteSize());
+    DamageEventMessage decoded_hurt;
+    if (!CombatSerializer::deserialize(hurt_reader, decoded_hurt) ||
+        decoded_hurt.presentation_sequence != hurt.presentation_sequence)
+        return fail(name, "hurt presentation sequence was not retained on wire");
     return pass(name);
 }
 

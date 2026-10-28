@@ -69,6 +69,14 @@ static FpsContent::SelectedLevelSidecars g_selected_level_sidecars;
 static bool g_selected_level_sidecars_valid = false;
 static bool g_competitive_map_sidecar_valid = false;
 static bool g_competitive_map_ready = false;
+// Ordering lives in this template protocol state. The dedicated server stamps
+// presentations but does not initialize or call the audio service.
+static std::unordered_map<uint16_t, uint64_t> g_presentation_event_sequences;
+
+static uint64_t nextPresentationEventSequence(uint16_t source_client_id)
+{
+    return ++g_presentation_event_sequences[source_client_id];
+}
 
 // Process-acceptance diagnostics only.  This stays in the world context so a
 // restarted world cannot inherit log-rate state from an earlier server.
@@ -683,6 +691,7 @@ static void fireServerShot(
         DamageEventMessage dmg_msg;
         dmg_msg.attacker_client_id = shooter_client_id; dmg_msg.victim_client_id = victim_client;
         dmg_msg.damage = damage_result.health_damage; dmg_msg.health_remaining = victim_health.health; dmg_msg.hit_position = hp;
+        dmg_msg.presentation_sequence = nextPresentationEventSequence(victim_client);
         BitWriter dmg_writer; CombatSerializer::serialize(dmg_writer, dmg_msg);
         const ClientInfo* victim_peer = g_server_network.getClientInfo(victim_client);
         if (victim_peer && victim_peer->peer)
@@ -707,6 +716,7 @@ static void fireServerShot(
     result_msg.hit_position = best_hit_point;
     result_msg.hit_entity_id = best_hit_entity_id;
     result_msg.weapon_type = static_cast<uint8_t>(weapon.weapon_type);
+    result_msg.presentation_sequence = nextPresentationEventSequence(shooter_client_id);
 
     BitWriter result_writer;
     CombatSerializer::serialize(result_writer, result_msg);
@@ -3284,6 +3294,7 @@ static void despawnBotsForLevelTransition(world& game_world)
 GAME_API bool gardenServerInit(EngineServices* services)
 {
     g_server_services = services;
+    g_presentation_event_sequences.clear();
     world* match_world = services->game_world;
     {
         ScopedWorldItemRemovalReason removal_reason(
@@ -3529,6 +3540,7 @@ GAME_API void gardenServerShutdown()
         registry.ctx().erase<AcceptanceMovementTraceRuntime>();
     }
     g_server_network.shutdown();
+    g_presentation_event_sequences.clear();
     g_server_services = nullptr;
 }
 
