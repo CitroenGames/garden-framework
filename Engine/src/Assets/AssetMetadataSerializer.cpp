@@ -4,10 +4,165 @@
 #include <filesystem>
 #include <ctime>
 #include <cstdio>
+#include <chrono>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+#endif
 
 using json = nlohmann::json;
 
 namespace Assets {
+namespace {
+std::string temporarySiblingPath(const std::string& path)
+{
+    const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+    return path + ".tmp." + std::to_string(nonce);
+}
+
+bool publishTemporaryFile(const std::string& temporary_path, const std::string& output_path)
+{
+#ifdef _WIN32
+    if (MoveFileExA(temporary_path.c_str(), output_path.c_str(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0)
+        return true;
+#else
+    std::error_code ec;
+    std::filesystem::rename(temporary_path, output_path, ec);
+    if (!ec)
+        return true;
+#endif
+    std::error_code ignored;
+    std::filesystem::remove(temporary_path, ignored);
+    return false;
+}
+
+bool isNonNegativeInteger(const json& value)
+{
+    return value.is_number_unsigned() ||
+           (value.is_number_integer() && value.get<int64_t>() >= 0);
+}
+
+bool isNumber(const json& value)
+{
+    return value.is_number();
+}
+
+bool optionalFieldHasType(const json& object, const char* name,
+                          bool (*is_valid)(const json&))
+{
+    return !object.contains(name) || is_valid(object.at(name));
+}
+
+bool optionalVec3(const json& object, const char* name)
+{
+    if (!object.contains(name))
+        return true;
+
+    const json& value = object.at(name);
+    return value.is_array() && value.size() == 3 &&
+           isNumber(value[0]) && isNumber(value[1]) && isNumber(value[2]);
+}
+
+bool validateMetadataDocument(const json& document)
+{
+    if (!document.is_object())
+        return false;
+
+    if (!optionalFieldHasType(document, "version", [](const json& value) {
+            return value.is_number_integer();
+        }) ||
+        !optionalFieldHasType(document, "generated_at", [](const json& value) {
+            return value.is_string();
+        }))
+        return false;
+
+    if (document.contains("source")) {
+        const json& source = document.at("source");
+        if (!source.is_object() ||
+            !optionalFieldHasType(source, "path", [](const json& value) { return value.is_string(); }) ||
+            !optionalFieldHasType(source, "hash", isNonNegativeInteger) ||
+            !optionalFieldHasType(source, "file_size", isNonNegativeInteger) ||
+            !optionalFieldHasType(source, "cook_fingerprint", isNonNegativeInteger))
+            return false;
+    }
+
+    if (document.contains("mesh")) {
+        const json& mesh = document.at("mesh");
+        if (!mesh.is_object() ||
+            !optionalFieldHasType(mesh, "vertex_count", isNonNegativeInteger) ||
+            !optionalFieldHasType(mesh, "index_count", isNonNegativeInteger) ||
+            !optionalFieldHasType(mesh, "triangle_count", isNonNegativeInteger) ||
+            !optionalFieldHasType(mesh, "submesh_count", isNonNegativeInteger) ||
+            !optionalVec3(mesh, "aabb_min") || !optionalVec3(mesh, "aabb_max"))
+            return false;
+    }
+
+    if (document.contains("lod")) {
+        const json& lod = document.at("lod");
+        if (!lod.is_object() ||
+            !optionalFieldHasType(lod, "enabled", [](const json& value) { return value.is_boolean(); }))
+            return false;
+
+        if (lod.contains("levels")) {
+            const json& levels = lod.at("levels");
+            if (!levels.is_array())
+                return false;
+            for (const json& level : levels) {
+                if (!level.is_object() ||
+                    !optionalFieldHasType(level, "level", [](const json& value) { return value.is_number_integer(); }) ||
+                    !optionalFieldHasType(level, "ratio", isNumber) ||
+                    !optionalFieldHasType(level, "error", isNumber) ||
+                    !optionalFieldHasType(level, "threshold", isNumber) ||
+                    !optionalFieldHasType(level, "vertices", isNonNegativeInteger) ||
+                    !optionalFieldHasType(level, "indices", isNonNegativeInteger) ||
+                    !optionalFieldHasType(level, "triangles", isNonNegativeInteger) ||
+                    !optionalFieldHasType(level, "file", [](const json& value) { return value.is_string(); }))
+                    return false;
+            }
+        }
+
+        if (lod.contains("config")) {
+            const json& config = lod.at("config");
+            if (!config.is_object() ||
+                !optionalFieldHasType(config, "max_levels", [](const json& value) { return value.is_number_integer(); }) ||
+                !optionalFieldHasType(config, "error_threshold", isNumber) ||
+                !optionalFieldHasType(config, "lock_borders", [](const json& value) { return value.is_boolean(); }) ||
+                !optionalFieldHasType(config, "allow_attribute_collapse", [](const json& value) { return value.is_boolean(); }) ||
+                !optionalFieldHasType(config, "prune_disconnected", [](const json& value) { return value.is_boolean(); }))
+                return false;
+            if (config.contains("target_ratios")) {
+                const json& ratios = config.at("target_ratios");
+                if (!ratios.is_array())
+                    return false;
+                for (const json& ratio : ratios) {
+                    if (!isNumber(ratio))
+                        return false;
+                }
+            }
+        }
+    }
+
+    if (document.contains("collision")) {
+        const json& collision = document.at("collision");
+        if (!collision.is_object() ||
+            !optionalFieldHasType(collision, "enabled", [](const json& value) { return value.is_boolean(); }) ||
+            !optionalFieldHasType(collision, "file", [](const json& value) { return value.is_string(); }) ||
+            !optionalFieldHasType(collision, "backend", [](const json& value) { return value.is_string(); }) ||
+            !optionalFieldHasType(collision, "cook_version", isNonNegativeInteger) ||
+            !optionalFieldHasType(collision, "source_hash", isNonNegativeInteger) ||
+            !optionalFieldHasType(collision, "source_file_size", isNonNegativeInteger) ||
+            !optionalFieldHasType(collision, "jolt_version", isNonNegativeInteger) ||
+            !optionalFieldHasType(collision, "vertices", isNonNegativeInteger) ||
+            !optionalFieldHasType(collision, "triangles", isNonNegativeInteger))
+            return false;
+    }
+
+    return true;
+}
+} // namespace
 
 bool AssetMetadataSerializer::save(const AssetMetadata& metadata, const std::string& meta_path)
 {
@@ -19,6 +174,7 @@ bool AssetMetadataSerializer::save(const AssetMetadata& metadata, const std::str
     j["source"]["path"] = metadata.source_path;
     j["source"]["hash"] = metadata.source_hash;
     j["source"]["file_size"] = metadata.source_file_size;
+    j["source"]["cook_fingerprint"] = metadata.cook_fingerprint;
 
     // Mesh stats
     j["mesh"]["vertex_count"] = metadata.vertex_count;
@@ -68,14 +224,23 @@ bool AssetMetadataSerializer::save(const AssetMetadata& metadata, const std::str
     // Timestamp
     j["generated_at"] = metadata.generated_at;
 
-    std::ofstream file(meta_path);
+    const std::string temporary_path = temporarySiblingPath(meta_path);
+    std::ofstream file(temporary_path, std::ios::binary);
     if (!file.is_open())
     {
-        printf("AssetMetadataSerializer: Failed to open %s for writing\n", meta_path.c_str());
+        printf("AssetMetadataSerializer: Failed to open %s for writing\n", temporary_path.c_str());
         return false;
     }
 
     file << j.dump(2);
+    file.close();
+    if (!file || !publishTemporaryFile(temporary_path, meta_path))
+    {
+        std::error_code ignored;
+        std::filesystem::remove(temporary_path, ignored);
+        printf("AssetMetadataSerializer: Failed to atomically publish %s\n", meta_path.c_str());
+        return false;
+    }
     return true;
 }
 
@@ -85,18 +250,24 @@ bool AssetMetadataSerializer::load(AssetMetadata& metadata, const std::string& m
     if (!file.is_open())
         return false;
 
-    json j;
-    try
+    // Asset data is untrusted input and this target disables C++ exceptions. Use the
+    // non-throwing parser and validate every accessed field before deserializing it.
+    json j = json::parse(file, nullptr, false);
+    if (j.is_discarded() || !validateMetadataDocument(j))
     {
-        file >> j;
-    }
-    catch (const json::parse_error& e)
-    {
-        printf("AssetMetadataSerializer: Parse error in %s: %s\n", meta_path.c_str(), e.what());
+        printf("AssetMetadataSerializer: Invalid metadata in %s\n", meta_path.c_str());
         return false;
     }
 
-    metadata.version = j.value("version", 1);
+    const int serialized_version = j.value("version", 1);
+    if (serialized_version < 1 || serialized_version > 3)
+    {
+        printf("AssetMetadataSerializer: Unsupported version %d in %s\n", serialized_version, meta_path.c_str());
+        return false;
+    }
+    // v1/v2 are migrated deliberately: their wire fields are read below and the missing
+    // v3 fingerprint remains zero so the cooker will recook before calling it fresh.
+    metadata.version = 3;
 
     // Source info
     if (j.contains("source"))
@@ -105,6 +276,7 @@ bool AssetMetadataSerializer::load(AssetMetadata& metadata, const std::string& m
         metadata.source_path = src.value("path", "");
         metadata.source_hash = src.value("hash", (uint64_t)0);
         metadata.source_file_size = src.value("file_size", (uint64_t)0);
+        metadata.cook_fingerprint = src.value("cook_fingerprint", (uint64_t)0);
     }
 
     // Mesh stats

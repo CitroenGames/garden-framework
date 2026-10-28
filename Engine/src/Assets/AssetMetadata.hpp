@@ -19,12 +19,13 @@ struct LODLevelInfo {
 };
 
 struct AssetMetadata {
-    int version = 2;
+    int version = 3;
 
     // Source file info
     std::string source_path;
     uint64_t source_hash = 0;
     uint64_t source_file_size = 0;
+    uint64_t cook_fingerprint = 0; // source, tool/schema and cook configuration identity
 
     // Mesh statistics (LOD0)
     size_t vertex_count = 0;

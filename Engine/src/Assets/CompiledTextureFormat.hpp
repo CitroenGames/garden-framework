@@ -5,7 +5,7 @@
 namespace Assets {
 
 static constexpr uint32_t CTEX_MAGIC   = 0x43544558; // "CTEX"
-static constexpr uint32_t CTEX_VERSION = 1;
+static constexpr uint32_t CTEX_VERSION = 2;
 
 enum class TexCompressionFormat : uint32_t {
     RGBA8 = 0,   // Uncompressed fallback
@@ -29,6 +29,7 @@ struct CtexHeader {
     uint32_t mip_count;
     uint32_t flags;
     uint64_t source_hash;    // FNV-1a of source file for incremental builds
+    uint64_t cook_fingerprint; // source, tool/schema and cook configuration identity
 };
 
 struct CtexMipEntry {

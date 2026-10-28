@@ -5,7 +5,7 @@
 namespace Assets {
 
 static constexpr uint32_t CMESH_MAGIC   = 0x434D5348; // "CMSH"
-static constexpr uint32_t CMESH_VERSION = 3; // v3 stores per-range bounds for chunk culling
+static constexpr uint32_t CMESH_VERSION = 4; // v4 adds the deterministic cook fingerprint
 
 enum CmeshFlags : uint32_t {
     CMESH_FLAG_HAS_INDICES   = 1 << 0,
@@ -23,6 +23,7 @@ struct CmeshHeader {
     float    aabb_min[3];
     float    aabb_max[3];
     uint64_t source_hash;        // FNV-1a of source file for incremental builds
+    uint64_t cook_fingerprint;   // source, tool/schema and cook configuration identity
 };
 
 } // namespace Assets

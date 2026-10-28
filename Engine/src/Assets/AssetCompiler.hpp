@@ -16,6 +16,8 @@ struct CompileConfig {
     TexCompressionFormat default_color_format = TexCompressionFormat::BC7;
     TexCompressionFormat normal_map_format    = TexCompressionFormat::BC5;
     int  bc7_quality     = 1; // 0 = fast, 1 = balanced, 2 = best
+    uint32_t cooker_version = 1; // bump for behavior changes not represented above
+    bool inject_publish_failure = false; // test-only deterministic publish interruption
 };
 
 struct CompileProgress {
@@ -57,6 +59,12 @@ public:
         bool is_normal_map = false);
 
     // Check whether the compiled output is still up-to-date vs the source.
+    static bool isUpToDate(
+        const std::string& source_path,
+        const std::string& compiled_path,
+        const CompileConfig& config);
+
+    // Default-config compatibility query. New callers that cook with a config must pass it.
     static bool isUpToDate(
         const std::string& source_path,
         const std::string& compiled_path);

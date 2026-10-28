@@ -199,11 +199,11 @@ bool CompiledMeshSerializer::load(CompiledMeshData& data, const std::string& fil
         printf("CompiledMeshSerializer: Invalid magic in %s\n", filepath.c_str());
         return false;
     }
-    if (data.header.version < 2 || data.header.version > CMESH_VERSION) {
+    if (data.header.version != CMESH_VERSION) {
         printf("CompiledMeshSerializer: Unsupported version %u in %s\n", data.header.version, filepath.c_str());
         return false;
     }
-    const bool has_range_bounds = data.header.version >= 3;
+    const bool has_range_bounds = true;
 
     // --- Submesh table ---
     data.submeshes.resize(data.header.submesh_count);
@@ -309,7 +309,7 @@ bool CompiledMeshSerializer::loadHeader(CmeshHeader& header, const std::string& 
     file.read(reinterpret_cast<char*>(&header), sizeof(CmeshHeader));
     if (!file) return false;
     if (header.magic != CMESH_MAGIC) return false;
-    if (header.version < 2 || header.version > CMESH_VERSION) return false;
+    if (header.version != CMESH_VERSION) return false;
 
     return true;
 }

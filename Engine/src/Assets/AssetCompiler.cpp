@@ -25,6 +25,13 @@
 #include <cmath>
 #include <cstring>
 #include <mutex>
+#include <chrono>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -55,6 +62,79 @@ static std::string replaceExtension(const std::string& path, const std::string& 
     fs::path p(path);
     p.replace_extension(new_ext);
     return p.string();
+}
+
+static uint64_t fnvAppend(uint64_t hash, const void* bytes, size_t count)
+{
+    const auto* data = static_cast<const uint8_t*>(bytes);
+    for (size_t i = 0; i < count; ++i) {
+        hash ^= data[i];
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
+template <typename T>
+static void fingerprintAppend(uint64_t& hash, const T& value)
+{
+    hash = fnvAppend(hash, &value, sizeof(value));
+}
+
+static uint64_t computeCookFingerprint(uint64_t source_hash, const CompileConfig& config,
+                                       bool normal_map, const AssetMetadata* metadata)
+{
+    // This is deliberately a byte-level, versioned identity. Add every result-affecting
+    // option here when changing a cooker; generated timestamps and incremental mode are excluded.
+    uint64_t hash = 14695981039346656037ull;
+    constexpr uint32_t fingerprint_schema = 1;
+    fingerprintAppend(hash, fingerprint_schema);
+    fingerprintAppend(hash, source_hash);
+    fingerprintAppend(hash, config.cooker_version);
+    fingerprintAppend(hash, config.compile_models);
+    fingerprintAppend(hash, config.compile_textures);
+    fingerprintAppend(hash, config.generate_mipmaps);
+    fingerprintAppend(hash, config.default_color_format);
+    fingerprintAppend(hash, config.normal_map_format);
+    fingerprintAppend(hash, config.bc7_quality);
+    fingerprintAppend(hash, normal_map);
+
+    if (metadata) {
+        fingerprintAppend(hash, metadata->lod_enabled);
+        fingerprintAppend(hash, metadata->lod_config.max_lod_levels);
+        const uint64_t ratio_count = metadata->lod_config.target_ratios.size();
+        fingerprintAppend(hash, ratio_count);
+        for (const float ratio : metadata->lod_config.target_ratios)
+            fingerprintAppend(hash, ratio);
+        fingerprintAppend(hash, metadata->lod_config.target_error_threshold);
+        fingerprintAppend(hash, metadata->lod_config.lock_borders);
+        fingerprintAppend(hash, metadata->lod_config.allow_attribute_collapse);
+        fingerprintAppend(hash, metadata->lod_config.prune_disconnected);
+    }
+    return hash;
+}
+
+static std::string makeTemporarySiblingPath(const std::string& output_path)
+{
+    const fs::path output(output_path);
+    const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+    return (output.parent_path() / (output.filename().string() + ".tmp." + std::to_string(nonce))).string();
+}
+
+static bool publishTemporaryFile(const std::string& temporary_path, const std::string& output_path)
+{
+#ifdef _WIN32
+    if (MoveFileExA(temporary_path.c_str(), output_path.c_str(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0)
+        return true;
+#else
+    std::error_code ec;
+    fs::rename(temporary_path, output_path, ec);
+    if (!ec)
+        return true;
+#endif
+    std::error_code ignored;
+    fs::remove(temporary_path, ignored);
+    return false;
 }
 
 static uint8_t encodeGltfAlphaMode(const std::string& alpha_mode)
@@ -143,19 +223,21 @@ static std::vector<CompiledMeshData::MaterialRef> buildFallbackMaterialRefs(
     return refs;
 }
 
-static void updateCollisionMetadataForModel(const std::string& source_path,
+static bool updateCollisionMetadataForModel(const std::string& source_path,
                                             const LODMeshData& collision_mesh,
                                             uint64_t source_hash,
-                                            uint64_t source_file_size)
+                                            uint64_t source_file_size,
+                                            uint64_t cook_fingerprint)
 {
     AssetMetadata metadata;
     const std::string meta_path = AssetMetadataSerializer::getMetaPath(source_path);
     const bool had_metadata = AssetMetadataSerializer::load(metadata, meta_path);
 
-    metadata.version = std::max(metadata.version, 2);
+    metadata.version = std::max(metadata.version, 3);
     metadata.source_path = fs::path(source_path).filename().string();
     metadata.source_hash = source_hash;
     metadata.source_file_size = source_file_size;
+    metadata.cook_fingerprint = cook_fingerprint;
 
     if (!had_metadata)
     {
@@ -177,13 +259,17 @@ static void updateCollisionMetadataForModel(const std::string& source_path,
             &metadata.collision,
             &error))
     {
-        metadata.collision = {};
         LOG_ENGINE_WARN("[AssetCompiler] Failed to generate collision for {}: {}",
                         source_path, error);
+        return false;
     }
 
     if (!AssetMetadataSerializer::save(metadata, meta_path))
+    {
         LOG_ENGINE_WARN("[AssetCompiler] Failed to update metadata collision block: {}", meta_path);
+        return false;
+    }
+    return true;
 }
 
 // Check if texture has meaningful alpha (any pixel with alpha < 255)
@@ -336,43 +422,52 @@ TexCompressionFormat AssetCompiler::inferTextureFormat(
 // isUpToDate
 // ================================================================
 
-bool AssetCompiler::isUpToDate(const std::string& source_path, const std::string& compiled_path)
+bool AssetCompiler::isUpToDate(const std::string& source_path, const std::string& compiled_path,
+                                const CompileConfig& config)
 {
     if (!fs::exists(compiled_path))
         return false;
 
-    uint64_t source_hash = Utils::hashFile(source_path);
+    const uint64_t source_hash = Utils::hashFile(source_path);
     if (source_hash == 0)
         return false;
 
-    // Try as .cmesh first
-    std::string ext = toLower(fs::path(compiled_path).extension().string());
+    const std::string ext = toLower(fs::path(compiled_path).extension().string());
     if (ext == ".cmesh") {
         CmeshHeader header{};
-        if (CompiledMeshSerializer::loadHeader(header, compiled_path))
-        {
-            if (header.source_hash != source_hash)
-                return false;
+        if (!CompiledMeshSerializer::loadHeader(header, compiled_path) || header.source_hash != source_hash)
+            return false;
 
-            AssetMetadata metadata;
-            if (!AssetMetadataSerializer::load(metadata, AssetMetadataSerializer::getMetaPath(source_path)))
-                return false;
-            if (!metadata.collision.enabled || metadata.collision.file_path.empty())
-                return false;
-            if (metadata.collision.source_hash != 0 && metadata.collision.source_hash != source_hash)
-                return false;
+        AssetMetadata metadata;
+        if (!AssetMetadataSerializer::load(metadata, AssetMetadataSerializer::getMetaPath(source_path)) ||
+            metadata.version < 3 || metadata.cook_fingerprint == 0 ||
+            !metadata.collision.enabled || metadata.collision.file_path.empty() ||
+            metadata.collision.cook_version != CookedCollisionSerializer::FORMAT_VERSION ||
+            (metadata.collision.source_hash != 0 && metadata.collision.source_hash != source_hash))
+            return false;
 
-            fs::path collision_path(metadata.collision.file_path);
-            if (collision_path.is_relative())
-                collision_path = fs::path(source_path).parent_path() / collision_path;
-            return fs::exists(collision_path);
-        }
-    } else if (ext == ".ctex") {
+        const uint64_t expected = computeCookFingerprint(source_hash, config, false, &metadata);
+        if (header.cook_fingerprint != expected || metadata.cook_fingerprint != expected)
+            return false;
+
+        fs::path collision_path(metadata.collision.file_path);
+        if (collision_path.is_relative())
+            collision_path = fs::path(source_path).parent_path() / collision_path;
+        return fs::exists(collision_path);
+    }
+    if (ext == ".ctex") {
         CtexHeader header{};
-        if (CompiledTextureSerializer::loadHeader(header, compiled_path))
-            return header.source_hash == source_hash;
+        const bool normal_map = looksLikeNormalMap(source_path);
+        return CompiledTextureSerializer::loadHeader(header, compiled_path) &&
+               header.source_hash == source_hash &&
+               header.cook_fingerprint == computeCookFingerprint(source_hash, config, normal_map, nullptr);
     }
     return false;
+}
+
+bool AssetCompiler::isUpToDate(const std::string& source_path, const std::string& compiled_path)
+{
+    return isUpToDate(source_path, compiled_path, CompileConfig{});
 }
 
 // ================================================================
@@ -445,6 +540,8 @@ bool AssetCompiler::compileTexture(
     if (is_normal_map || looksLikeNormalMap(source_path))
         tex_data.header.flags = CTEX_FLAG_NORMAL_MAP;
     tex_data.header.source_hash = Utils::hashFile(source_path);
+    tex_data.header.cook_fingerprint = computeCookFingerprint(
+        tex_data.header.source_hash, config, is_normal_map || looksLikeNormalMap(source_path), nullptr);
 
     tex_data.mip_levels.resize(mip_count);
 
@@ -489,10 +586,29 @@ bool AssetCompiler::compileTexture(
         }
     }
 
-    // Create output directory and write
-    fs::create_directories(fs::path(output_path).parent_path());
-    if (!CompiledTextureSerializer::save(tex_data, output_path)) {
-        LOG_ENGINE_ERROR("[AssetCompiler] Failed to write {}", output_path);
+    // Serialize and validate a sibling file before atomically publishing it. A failed
+    // cook can therefore never replace the last valid output.
+    std::error_code output_ec;
+    fs::create_directories(fs::path(output_path).parent_path(), output_ec);
+    if (output_ec) {
+        LOG_ENGINE_ERROR("[AssetCompiler] Failed to create output directory for {}: {}", output_path, output_ec.message());
+        return false;
+    }
+    const std::string temporary_path = makeTemporarySiblingPath(output_path);
+    if (!CompiledTextureSerializer::save(tex_data, temporary_path)) {
+        LOG_ENGINE_ERROR("[AssetCompiler] Failed to stage {}", output_path);
+        return false;
+    }
+    CtexHeader staged_header{};
+    if (!CompiledTextureSerializer::loadHeader(staged_header, temporary_path) ||
+        staged_header.cook_fingerprint != tex_data.header.cook_fingerprint || config.inject_publish_failure) {
+        std::error_code ignored;
+        fs::remove(temporary_path, ignored);
+        LOG_ENGINE_ERROR("[AssetCompiler] Staged texture validation or publish injection failed for {}", output_path);
+        return false;
+    }
+    if (!publishTemporaryFile(temporary_path, output_path)) {
+        LOG_ENGINE_ERROR("[AssetCompiler] Failed to atomically publish {}", output_path);
         return false;
     }
 
@@ -586,10 +702,12 @@ bool AssetCompiler::compileModel(
     // Check for existing pre-generated LOD data
     std::string meta_path = AssetMetadataSerializer::getMetaPath(source_path);
     AssetMetadata existing_meta;
+    bool have_existing_metadata = false;
     bool have_existing_lods = false;
 
     if (fs::exists(meta_path)) {
         if (AssetMetadataSerializer::load(existing_meta, meta_path)) {
+            have_existing_metadata = true;
             uint64_t current_hash = Utils::hashFile(source_path);
             if (current_hash == existing_meta.source_hash && existing_meta.lod_enabled)
                 have_existing_lods = true;
@@ -703,6 +821,13 @@ bool AssetCompiler::compileModel(
     cmesh.header.version = CMESH_VERSION;
     cmesh.header.flags   = CMESH_FLAG_HAS_INDICES;
     cmesh.header.source_hash = Utils::hashFile(source_path);
+    // updateCollisionMetadataForModel retains authored settings and sets lod_enabled=false for
+    // a new or malformed metadata file. Mirror that final decision in the fingerprint.
+    AssetMetadata final_metadata_settings = existing_meta;
+    if (!have_existing_metadata)
+        final_metadata_settings.lod_enabled = false;
+    cmesh.header.cook_fingerprint = computeCookFingerprint(
+        cmesh.header.source_hash, config, false, &final_metadata_settings);
 
     if (lod_meshes.size() > 1)
         cmesh.header.flags |= CMESH_FLAG_HAS_LODS;
@@ -755,23 +880,49 @@ bool AssetCompiler::compileModel(
         cmesh.header.aabb_max[0] = bmax.x; cmesh.header.aabb_max[1] = bmax.y; cmesh.header.aabb_max[2] = bmax.z;
     }
 
+    if (config.inject_publish_failure)
+    {
+        LOG_ENGINE_ERROR("[AssetCompiler] Publish interruption injected for {}", output_path);
+        return false;
+    }
+
     if (!cmesh.lod_levels.empty())
     {
         LODMeshData collision_mesh;
         collision_mesh.vertices = cmesh.lod_levels[0].vertices;
         collision_mesh.indices = cmesh.lod_levels[0].indices;
         collision_mesh.submesh_ranges = cmesh.lod_levels[0].submesh_ranges;
-        updateCollisionMetadataForModel(
-            source_path,
-            collision_mesh,
-            cmesh.header.source_hash,
-            Utils::getFileSize(source_path));
+        if (!updateCollisionMetadataForModel(
+                source_path,
+                collision_mesh,
+                cmesh.header.source_hash,
+                Utils::getFileSize(source_path),
+                cmesh.header.cook_fingerprint))
+            return false;
     }
 
-    // Write .cmesh
-    fs::create_directories(fs::path(output_path).parent_path());
-    if (!CompiledMeshSerializer::save(cmesh, output_path)) {
-        LOG_ENGINE_ERROR("[AssetCompiler] Failed to write {}", output_path);
+    // Validate the complete staged cmesh before replacing the existing artifact.
+    std::error_code output_ec;
+    fs::create_directories(fs::path(output_path).parent_path(), output_ec);
+    if (output_ec) {
+        LOG_ENGINE_ERROR("[AssetCompiler] Failed to create output directory for {}: {}", output_path, output_ec.message());
+        return false;
+    }
+    const std::string temporary_path = makeTemporarySiblingPath(output_path);
+    if (!CompiledMeshSerializer::save(cmesh, temporary_path)) {
+        LOG_ENGINE_ERROR("[AssetCompiler] Failed to stage {}", output_path);
+        return false;
+    }
+    CmeshHeader staged_header{};
+    if (!CompiledMeshSerializer::loadHeader(staged_header, temporary_path) ||
+        staged_header.cook_fingerprint != cmesh.header.cook_fingerprint) {
+        std::error_code ignored;
+        fs::remove(temporary_path, ignored);
+        LOG_ENGINE_ERROR("[AssetCompiler] Staged mesh validation failed for {}", output_path);
+        return false;
+    }
+    if (!publishTemporaryFile(temporary_path, output_path)) {
+        LOG_ENGINE_ERROR("[AssetCompiler] Failed to atomically publish {}", output_path);
         return false;
     }
 
@@ -828,6 +979,8 @@ struct SharedCompileProgress {
         p.current_asset = current_asset;
         p.errors   = errors;
         p.warnings = warnings;
+        std::sort(p.errors.begin(), p.errors.end());
+        std::sort(p.warnings.begin(), p.warnings.end());
         return p;
     }
 
@@ -921,6 +1074,10 @@ CompileProgress AssetCompiler::compileAll(
         work_items.push_back(std::move(item));
     }
 
+    std::sort(work_items.begin(), work_items.end(), [](const AssetWorkItem& lhs, const AssetWorkItem& rhs) {
+        return lhs.relative_path < rhs.relative_path;
+    });
+
     LOG_ENGINE_INFO("[AssetCompiler] Collected {} work items ({} from '{}')",
                     work_items.size(), source_root, output_root);
 
@@ -949,7 +1106,7 @@ CompileProgress AssetCompiler::compileAll(
                 shared->notifyProgress(item.relative_path);
 
                 if (item.type == AssetWorkItem::Model) {
-                    if (cfg.incremental && isUpToDate(item.source_path, item.output_path)) {
+                    if (cfg.incremental && isUpToDate(item.source_path, item.output_path, cfg)) {
                         LOG_ENGINE_TRACE("[AssetCompiler] Skipped (up-to-date): {}", item.relative_path);
                         shared->skipped_assets.fetch_add(1, std::memory_order_relaxed);
                         shared->completed_assets.fetch_add(1, std::memory_order_relaxed);
@@ -971,7 +1128,7 @@ CompileProgress AssetCompiler::compileAll(
                     }
                 }
                 else if (item.type == AssetWorkItem::Texture) {
-                    if (cfg.incremental && isUpToDate(item.source_path, item.output_path)) {
+                    if (cfg.incremental && isUpToDate(item.source_path, item.output_path, cfg)) {
                         LOG_ENGINE_TRACE("[AssetCompiler] Skipped (up-to-date): {}", item.relative_path);
                         shared->skipped_assets.fetch_add(1, std::memory_order_relaxed);
                         shared->completed_assets.fetch_add(1, std::memory_order_relaxed);

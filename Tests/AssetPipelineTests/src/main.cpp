@@ -1,4 +1,5 @@
 #include "Assets/AssetManager.hpp"
+#include "Assets/AssetCompiler.hpp"
 #include "Assets/AssetMetadataSerializer.hpp"
 #include "Assets/AssetScanner.hpp"
 #include "Assets/CompiledMeshSerializer.hpp"
@@ -75,6 +76,49 @@ bool writeBinary(const fs::path& path, const T& value)
     if (!file.is_open()) return false;
     file.write(reinterpret_cast<const char*>(&value), sizeof(value));
     return file.good();
+}
+
+bool writeTriangleObj(const fs::path& path)
+{
+    return writeText(path,
+        "v 0 0 0\n"
+        "v 1 0 0\n"
+        "v 0 1 0\n"
+        "vt 0 0\n"
+        "vt 1 0\n"
+        "vt 0 1\n"
+        "f 1/1 2/2 3/3\n");
+}
+
+bool writeRgbaTga(const fs::path& path)
+{
+    std::error_code ec;
+    fs::create_directories(path.parent_path(), ec);
+    if (ec) return false;
+
+    // Uncompressed 2x2 BGRA TGA, bottom-left origin. It exercises the actual stb decode path.
+    const uint8_t header[18] = {0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 2, 0, 32, 0};
+    const uint8_t pixels[] = {
+        0, 0, 255, 255,  0, 255, 0, 255,
+        255, 0, 0, 255,  255, 255, 255, 255,
+    };
+    std::ofstream file(path, std::ios::binary);
+    if (!file.is_open()) return false;
+    file.write(reinterpret_cast<const char*>(header), sizeof(header));
+    file.write(reinterpret_cast<const char*>(pixels), sizeof(pixels));
+    return file.good();
+}
+
+std::vector<uint8_t> readBytes(const fs::path& path)
+{
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    if (!file.is_open()) return {};
+    const std::streamsize size = file.tellg();
+    if (size <= 0) return {};
+    std::vector<uint8_t> bytes(static_cast<size_t>(size));
+    file.seekg(0);
+    file.read(reinterpret_cast<char*>(bytes.data()), size);
+    return file ? bytes : std::vector<uint8_t>{};
 }
 
 bool waitUntil(const std::function<bool()>& predicate, std::chrono::milliseconds timeout = 3000ms)
@@ -267,10 +311,11 @@ bool testMetadataRoundTrip()
     if (ec) return fail(name, "could not create metadata directory");
 
     Assets::AssetMetadata source;
-    source.version = 2;
+    source.version = 3;
     source.source_path = "models/crate.gltf";
     source.source_hash = 0x1234567890abcdefull;
     source.source_file_size = 4567;
+    source.cook_fingerprint = 0x4a7b1c2d3e5f6071ull;
     source.vertex_count = 111;
     source.index_count = 222;
     source.triangle_count = 74;
@@ -304,7 +349,7 @@ bool testMetadataRoundTrip()
 
     if (loaded.version != source.version || loaded.source_path != source.source_path ||
         loaded.source_hash != source.source_hash || loaded.source_file_size != source.source_file_size ||
-        loaded.vertex_count != source.vertex_count || loaded.index_count != source.index_count ||
+        loaded.cook_fingerprint != source.cook_fingerprint || loaded.vertex_count != source.vertex_count || loaded.index_count != source.index_count ||
         loaded.triangle_count != source.triangle_count || loaded.submesh_count != source.submesh_count ||
         loaded.aabb_min != source.aabb_min || loaded.aabb_max != source.aabb_max ||
         loaded.lod_levels.size() != 1 || loaded.lod_levels[0].level != source.lod_levels[0].level ||
@@ -332,6 +377,29 @@ bool testMetadataRoundTrip()
         loaded.collision.triangle_count != source.collision.triangle_count ||
         loaded.generated_at != source.generated_at)
         return fail(name, "loaded metadata did not preserve the authored fields");
+
+    return pass(name);
+}
+
+bool testCorruptMetadataIsRejected()
+{
+    const std::string name = "corrupt metadata is rejected without implicit migration";
+    TempDirectory temp("corrupt_metadata");
+    const fs::path meta_path = temp.path / "fixture.gltf.meta";
+    if (!writeText(meta_path, "{ this is not metadata"))
+        return fail(name, "could not write malformed metadata fixture");
+
+    Assets::AssetMetadata metadata;
+    if (Assets::AssetMetadataSerializer::load(metadata, meta_path.string()))
+        return fail(name, "malformed metadata was accepted");
+    if (!writeText(meta_path, "{\"version\": \"not-a-number\"}"))
+        return fail(name, "could not write type-corrupt metadata fixture");
+    if (Assets::AssetMetadataSerializer::load(metadata, meta_path.string()))
+        return fail(name, "type-corrupt metadata was accepted");
+    if (!writeText(meta_path, "{\"version\": 99}"))
+        return fail(name, "could not write unsupported-version metadata fixture");
+    if (Assets::AssetMetadataSerializer::load(metadata, meta_path.string()))
+        return fail(name, "unsupported metadata version was accepted");
 
     return pass(name);
 }
@@ -377,6 +445,123 @@ bool testScannerFreshness()
     return pass(name);
 }
 
+bool testTransactionalModelCooking()
+{
+    const std::string name = "model cook publishes matching cmesh collision and metadata only after success";
+    TempDirectory temp("transactional_model_cook");
+    const fs::path source = temp.path / "source" / "triangle.obj";
+    const fs::path output = temp.path / "cooked" / "triangle.cmesh";
+    const fs::path metadata_path = source.string() + ".meta";
+    const fs::path collision_path = source.parent_path() / "triangle.gardenphys";
+    if (!writeTriangleObj(source))
+        return fail(name, "could not write a real model source fixture");
+
+    Assets::CompileConfig config;
+    config.cooker_version = 9;
+    if (!Assets::AssetCompiler::compileModel(source.string(), output.string(), config))
+        return fail(name, "initial real model cook failed");
+    if (!Assets::AssetCompiler::isUpToDate(source.string(), output.string(), config))
+        return fail(name, "published model output was not accepted as fresh");
+
+    Assets::CmeshHeader header{};
+    Assets::AssetMetadata metadata;
+    if (!Assets::CompiledMeshSerializer::loadHeader(header, output.string()) ||
+        header.cook_fingerprint == 0 ||
+        !Assets::AssetMetadataSerializer::load(metadata, metadata_path.string()) ||
+        metadata.version < 3 || metadata.cook_fingerprint != header.cook_fingerprint ||
+        !metadata.collision.enabled || !fs::exists(collision_path))
+        return fail(name, "model publication did not leave matching cmesh metadata and collision artifacts");
+
+    const auto cmesh_before_failure = readBytes(output);
+    const auto metadata_before_failure = readBytes(metadata_path);
+    const auto collision_before_failure = readBytes(collision_path);
+    Assets::CompileConfig interrupted = config;
+    interrupted.inject_publish_failure = true;
+    if (Assets::AssetCompiler::compileModel(source.string(), output.string(), interrupted))
+        return fail(name, "injected model publish interruption unexpectedly succeeded");
+    if (readBytes(output) != cmesh_before_failure ||
+        readBytes(metadata_path) != metadata_before_failure ||
+        readBytes(collision_path) != collision_before_failure)
+        return fail(name, "injected model interruption replaced one of the last valid artifacts");
+
+    if (!writeText(source, "malformed model source"))
+        return fail(name, "could not corrupt the model source fixture");
+    if (Assets::AssetCompiler::compileModel(source.string(), output.string(), config))
+        return fail(name, "malformed model source unexpectedly compiled");
+    if (readBytes(output) != cmesh_before_failure ||
+        readBytes(metadata_path) != metadata_before_failure ||
+        readBytes(collision_path) != collision_before_failure)
+        return fail(name, "malformed model source replaced one of the last valid artifacts");
+
+    return pass(name);
+}
+
+bool testTransactionalDeterministicTextureCooking()
+{
+    const std::string name = "texture cooks are deterministic, configuration-aware, and retain last-good output";
+    TempDirectory temp("transactional_cook");
+    const fs::path source = temp.path / "source" / "crate.tga";
+    const fs::path output = temp.path / "cooked" / "crate.ctex";
+    const fs::path repeat_output = temp.path / "repeat" / "crate.ctex";
+    if (!writeRgbaTga(source))
+        return fail(name, "could not write a real texture source fixture");
+
+    Assets::CompileConfig config;
+    config.default_color_format = Assets::TexCompressionFormat::RGBA8;
+    config.normal_map_format = Assets::TexCompressionFormat::RGBA8;
+    config.generate_mipmaps = false;
+    config.cooker_version = 7;
+
+    if (!Assets::AssetCompiler::compileTexture(source.string(), output.string(), config))
+        return fail(name, "initial real texture cook failed");
+    const auto first = readBytes(output);
+    if (first.empty() || !Assets::AssetCompiler::isUpToDate(source.string(), output.string(), config))
+        return fail(name, "initial output was not accepted as fresh");
+
+    if (!Assets::AssetCompiler::compileTexture(source.string(), repeat_output.string(), config))
+        return fail(name, "clean repeat cook failed");
+    if (first != readBytes(repeat_output))
+        return fail(name, "two clean cooks emitted different bytes");
+
+    Assets::CompileConfig changed_config = config;
+    changed_config.generate_mipmaps = true;
+    if (Assets::AssetCompiler::isUpToDate(source.string(), output.string(), changed_config))
+        return fail(name, "a cook configuration change did not invalidate the output");
+    changed_config = config;
+    ++changed_config.cooker_version;
+    if (Assets::AssetCompiler::isUpToDate(source.string(), output.string(), changed_config))
+        return fail(name, "a cooker version change did not invalidate the output");
+
+    // A corrupted header must be rejected and a subsequent recook must repair it.
+    {
+        std::fstream corrupt(output, std::ios::binary | std::ios::in | std::ios::out);
+        uint32_t invalid_magic = 0;
+        corrupt.write(reinterpret_cast<const char*>(&invalid_magic), sizeof(invalid_magic));
+    }
+    if (Assets::AssetCompiler::isUpToDate(source.string(), output.string(), config))
+        return fail(name, "corrupt cooked header was accepted as fresh");
+    if (!Assets::AssetCompiler::compileTexture(source.string(), output.string(), config) ||
+        !Assets::AssetCompiler::isUpToDate(source.string(), output.string(), config))
+        return fail(name, "recook did not replace a corrupt header with a fresh output");
+
+    const auto valid_before_failure = readBytes(output);
+    Assets::CompileConfig interrupted = config;
+    interrupted.inject_publish_failure = true;
+    if (Assets::AssetCompiler::compileTexture(source.string(), output.string(), interrupted))
+        return fail(name, "injected publish interruption unexpectedly succeeded");
+    if (readBytes(output) != valid_before_failure)
+        return fail(name, "injected interruption replaced the last valid cooked output");
+
+    if (!writeText(source, "malformed texture source"))
+        return fail(name, "could not corrupt the source fixture");
+    if (Assets::AssetCompiler::compileTexture(source.string(), output.string(), config))
+        return fail(name, "malformed source unexpectedly compiled");
+    if (readBytes(output) != valid_before_failure)
+        return fail(name, "malformed source replaced the last valid cooked output");
+
+    return pass(name);
+}
+
 bool testCookedHeaderValidation()
 {
     const std::string name = "cmesh and ctex header readers reject invalid magic and unsupported versions";
@@ -390,6 +575,11 @@ bool testCookedHeaderValidation()
     Assets::CmeshHeader mesh_loaded{};
     if (!Assets::CompiledMeshSerializer::loadHeader(mesh_loaded, valid_mesh.string()))
         return fail(name, "valid cmesh header was rejected");
+    mesh.version = Assets::CMESH_VERSION - 1;
+    const fs::path old_mesh_version = temp.path / "old_version.cmesh";
+    if (!writeBinary(old_mesh_version, mesh) || Assets::CompiledMeshSerializer::loadHeader(mesh_loaded, old_mesh_version.string()))
+        return fail(name, "old cmesh version was accepted");
+    mesh.version = Assets::CMESH_VERSION;
 
     mesh.magic = 0;
     const fs::path invalid_mesh_magic = temp.path / "invalid_magic.cmesh";
@@ -412,6 +602,11 @@ bool testCookedHeaderValidation()
     Assets::CtexHeader texture_loaded{};
     if (!Assets::CompiledTextureSerializer::loadHeader(texture_loaded, valid_texture.string()))
         return fail(name, "valid ctex header was rejected");
+    texture.version = Assets::CTEX_VERSION - 1;
+    const fs::path old_texture_version = temp.path / "old_version.ctex";
+    if (!writeBinary(old_texture_version, texture) || Assets::CompiledTextureSerializer::loadHeader(texture_loaded, old_texture_version.string()))
+        return fail(name, "old ctex version was accepted");
+    texture.version = Assets::CTEX_VERSION;
 
     texture.magic = 0;
     const fs::path invalid_texture_magic = temp.path / "invalid_magic.ctex";
@@ -436,7 +631,10 @@ int main()
         testRequestDeduplicationAcrossLoadStates,
         testLoaderUnregistration,
         testMetadataRoundTrip,
+        testCorruptMetadataIsRejected,
         testScannerFreshness,
+        testTransactionalModelCooking,
+        testTransactionalDeterministicTextureCooking,
         testCookedHeaderValidation,
     };
 

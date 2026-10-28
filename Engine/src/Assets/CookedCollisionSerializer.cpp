@@ -11,6 +11,13 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <chrono>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+#endif
 #include <limits>
 #include <glm/geometric.hpp>
 
@@ -55,6 +62,29 @@ namespace {
     std::string makeError(const std::string& prefix, const std::string& path)
     {
         return prefix + ": " + path;
+    }
+
+    std::string temporarySiblingPath(const std::string& path)
+    {
+        const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+        return path + ".tmp." + std::to_string(nonce);
+    }
+
+    bool publishTemporaryFile(const std::string& temporary_path, const std::string& output_path)
+    {
+#ifdef _WIN32
+        if (MoveFileExA(temporary_path.c_str(), output_path.c_str(),
+                        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0)
+            return true;
+#else
+        std::error_code ec;
+        fs::rename(temporary_path, output_path, ec);
+        if (!ec)
+            return true;
+#endif
+        std::error_code ignored;
+        fs::remove(temporary_path, ignored);
+        return false;
     }
 
     bool buildShape(const LODMeshData& mesh_data,
@@ -174,19 +204,29 @@ bool CookedCollisionSerializer::cookMeshToFile(const LODMeshData& mesh_data,
     if (!output_fs_path.parent_path().empty())
         fs::create_directories(output_fs_path.parent_path());
 
-    std::ofstream file(output_path, std::ios::binary);
-    if (!file.is_open())
+    const std::string temporary_path = temporarySiblingPath(output_path);
     {
-        if (out_error) *out_error = makeError("failed to open cooked collision for writing", output_path);
-        return false;
-    }
+        std::ofstream file(temporary_path, std::ios::binary);
+        if (!file.is_open())
+        {
+            if (out_error) *out_error = makeError("failed to open cooked collision for writing", temporary_path);
+            return false;
+        }
 
-    file.write(reinterpret_cast<const char*>(&header), sizeof(header));
-    JPH::StreamOutWrapper stream(file);
-    shape->SaveBinaryState(stream);
-    if (file.fail() || stream.IsFailed())
+        file.write(reinterpret_cast<const char*>(&header), sizeof(header));
+        JPH::StreamOutWrapper stream(file);
+        shape->SaveBinaryState(stream);
+        if (file.fail() || stream.IsFailed())
+        {
+            std::error_code ignored;
+            fs::remove(temporary_path, ignored);
+            if (out_error) *out_error = makeError("failed to write cooked collision", output_path);
+            return false;
+        }
+    }
+    if (!publishTemporaryFile(temporary_path, output_path))
     {
-        if (out_error) *out_error = makeError("failed to write cooked collision", output_path);
+        if (out_error) *out_error = makeError("failed to atomically publish cooked collision", output_path);
         return false;
     }
 

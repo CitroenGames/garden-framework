@@ -11,7 +11,7 @@ namespace Assets {
 
 class ENGINE_API CookedCollisionSerializer {
 public:
-    static constexpr uint32_t FORMAT_VERSION = 1;
+    static constexpr uint32_t FORMAT_VERSION = 2; // v2 requires transactional, fingerprinted asset metadata
 
     static std::string defaultFileNameForAsset(const std::string& asset_path);
     static std::string defaultPathForAsset(const std::string& asset_path);
