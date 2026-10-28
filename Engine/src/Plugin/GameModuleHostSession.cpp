@@ -143,6 +143,32 @@ bool GameModuleHostSession::reloadCandidate(const std::string& module_path, Refl
     if (m_phase != Phase::Playing || module_path.empty())
         return false;
 
+    // Authoritative server reload is a host policy. The session must not
+    // unload the active module until the host proves a scheduler safe point
+    // and an empty connected-client set. There is deliberately no drain,
+    // disconnect, or best-effort fallback here.
+    if (m_server_initialised)
+    {
+        if (!m_operations.query_server_reload_state)
+        {
+            m_last_failure = "server module reload refused: host did not provide reload state";
+            return false;
+        }
+
+        const ServerReloadState server_state = m_operations.query_server_reload_state();
+        if (!server_state.at_scheduler_safe_point)
+        {
+            m_last_failure = "server module reload refused: host is not at a scheduler safe point";
+            return false;
+        }
+        if (server_state.connected_client_count != 0)
+        {
+            m_last_failure = "server module reload refused: " +
+                std::to_string(server_state.connected_client_count) + " client(s) remain connected";
+            return false;
+        }
+    }
+
     // Candidate owns a separate generation root and is fully ABI/export
     // validated before the active image is quiesced. No candidate callback is
     // legal before this point.

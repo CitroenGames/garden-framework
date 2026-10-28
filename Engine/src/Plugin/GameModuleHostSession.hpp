@@ -3,6 +3,7 @@
 #include "EngineExport.h"
 #include "Plugin/GameModuleLoader.hpp"
 
+#include <cstddef>
 #include <functional>
 #include <string>
 
@@ -27,6 +28,17 @@ public:
         Teardown,
     };
 
+    // A dedicated or listen-server host supplies this only at a scheduler
+    // boundary where no module callback is in flight.  The session rejects a
+    // server-role reload when the host cannot prove this state, or while an
+    // authoritative client remains connected.  Network ownership stays with
+    // the host; the generic module session never drains or disconnects peers.
+    struct ServerReloadState
+    {
+        bool at_scheduler_safe_point = false;
+        size_t connected_client_count = 0;
+    };
+
     // These operations are owned by the executable or PIE host.  They must
     // release every host callback/resource that could enter module code before
     // the image is unloaded.  The session deliberately does not assume a
@@ -41,6 +53,9 @@ public:
         // callback destructors still have a loaded image. Appended to retain
         // aggregate initialization at existing executable call sites.
         std::function<void(const std::string& source_id)> release_module_callbacks;
+        // Required for server-role reloads. An absent callback is an
+        // unprovable server state and therefore refuses the reload.
+        std::function<ServerReloadState()> query_server_reload_state;
     };
 
     explicit GameModuleHostSession(HostOperations operations = {});

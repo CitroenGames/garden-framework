@@ -113,6 +113,8 @@ namespace
         size_t released_resource_count = 0;
         size_t removed_registration_count = 0;
         size_t dispatched_callback_count = 0;
+        bool server_reload_safe_point = true;
+        size_t connected_server_clients = 0;
 
         void addCallbackToken(std::string source_id, std::string kind)
         {
@@ -149,6 +151,10 @@ namespace
                             events.push_back("host.cancel:" + token.kind);
                         }
                     }
+                },
+                [this]() {
+                    return GameModuleHostSession::ServerReloadState{
+                        server_reload_safe_point, connected_server_clients};
                 },
             };
         }
@@ -506,6 +512,41 @@ namespace
         return pass(name);
     }
 
+    bool testConnectedServerReloadRefusalKeepsActive()
+    {
+        const std::string name = "GameModuleLifecycle_L10_ConnectedServerReloadRefusal";
+        ScopedRecorder recorder("connected_server_reload");
+        HostLedger ledger;
+        ledger.connected_server_clients = 1;
+        ReflectionRegistry reflection;
+        GameModuleHostSession session(ledger.operations());
+
+        if (!session.loadAndRegister(fixturePath("server_recorder").string(), reflection) ||
+            !session.initialiseServer(nullptr) || !session.notifyServerLevelLoaded() ||
+            !session.beginPlaying(false))
+            return fail(name, "server did not reach Playing");
+
+        const fs::path active_image = session.loader().getLoadedImagePath();
+        session.updateServer(0.016f);
+        if (session.reloadCandidate(fixturePath("server_recorder").string(), reflection, nullptr))
+            return fail(name, "reload promoted while an authoritative client was connected");
+
+        if (session.phase() != GameModuleHostSession::Phase::Playing || !session.loader().isLoaded() ||
+            session.loader().getLoadedImagePath() != active_image.string() || !fs::exists(active_image) ||
+            session.lastFailure().find("1 client(s) remain connected") == std::string::npos ||
+            !ledger.events.empty())
+            return fail(name, "connected-client refusal changed the active server or began teardown");
+
+        session.updateServer(0.016f);
+        session.stop();
+        if (!equals(recorder.events(), {
+                "register_components", "server.init", "server.level_loaded", "server.update",
+                "server.update", "server.shutdown"}))
+            return fail(name, "active server was not callable after reload refusal");
+        if (!expectLedger(name, ledger)) return false;
+        return pass(name);
+    }
+
 }
 
 int main()
@@ -533,5 +574,6 @@ int main()
     ok = testPostTeardownInitFailureRecovery() && ok;
     ok = testCandidatePromotion() && ok;
     ok = testCandidateRefusalKeepsActive() && ok;
+    ok = testConnectedServerReloadRefusalKeepsActive() && ok;
     return ok ? 0 : 1;
 }
