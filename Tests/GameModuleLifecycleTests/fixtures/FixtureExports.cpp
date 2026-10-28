@@ -1,6 +1,7 @@
 #include "Plugin/GameModuleAPI.h"
 #include "GameFramework/GameModeRegistry.hpp"
 #include "GameFramework/GameModeBase.hpp"
+#include "Events/EventBus.hpp"
 
 #include <memory>
 
@@ -28,6 +29,9 @@ namespace
         if (recorder) recorder << recorderPrefix() << event_name << '\n';
     }
 
+    struct FixtureEvent { int value = 0; };
+    void fixtureEventCallback(const FixtureEvent&) { record("event.callback"); }
+
     constexpr int32_t fixtureApiVersion()
     {
 #if defined(FIXTURE_ABI_MISMATCH)
@@ -40,12 +44,20 @@ namespace
     }
 }
 
-GAME_API int32_t gardenGetAPIVersion() { return fixtureApiVersion(); }
-GAME_API const char* gardenGetGameName() { return "GameModuleLifecycleFixture"; }
+GAME_API int32_t gardenGetAPIVersion() {
+    if (std::getenv("GARDEN_TEST_MODULE_METADATA_EVENT"))
+        EventBus::get().sink<FixtureEvent>().connect<&fixtureEventCallback>();
+    return fixtureApiVersion();
+}
+GAME_API const char* gardenGetGameName() { return std::getenv("GARDEN_TEST_INVALID_MODULE_NAME") ? "" : "GameModuleLifecycleFixture"; }
 GAME_API bool gardenGameInit(EngineServices*)
 {
     record("client.init");
+    if (std::getenv("GARDEN_TEST_MODULE_EVENT"))
+        EventBus::get().sink<FixtureEvent>().connect<&fixtureEventCallback>();
 #if defined(FIXTURE_CLIENT_INIT_FAILS)
+    // The failure path must clean its partially registered callback itself.
+    record("client.init.rollback_callback");
     return false;
 #else
     return true;
@@ -77,6 +89,7 @@ GAME_API bool gardenServerInit(EngineServices*)
 {
     record("server.init");
 #if defined(FIXTURE_SERVER_INIT_FAILS)
+    record("server.init.rollback_callback");
     return false;
 #else
     return true;
@@ -87,3 +100,9 @@ GAME_API void gardenServerPrePhysics(float) { record("server.pre_physics"); }
 GAME_API void gardenServerUpdate(float) { record("server.update"); }
 GAME_API void gardenServerOnLevelLoaded() { record("server.level_loaded"); }
 #endif
+
+// Test-only operations are obtained from the exact provider image by the host.
+GAME_API bool fixtureConstruct(void* storage) noexcept { *static_cast<int*>(storage) = 73; return true; }
+GAME_API void fixtureDestroy(void* storage) noexcept { *static_cast<int*>(storage) = 0; }
+
+GAME_API void fixtureFireEvent() { EventBus::get().publish(FixtureEvent{1}); }

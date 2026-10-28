@@ -114,6 +114,10 @@ public:
     ComponentCatalogResult resolve(const ComponentDescriptor&, ComponentId& outId) const noexcept;
     // Atomically retire all of the owner's components, or none if any is pinned.
     ComponentCatalogResult unregisterOwner(ComponentOwnerId ownerId) noexcept;
+    // The loader serializes generation attachment with these transitions.
+    // beginRetirement blocks subsequent registrations before pins are checked.
+    ComponentCatalogResult beginRetirement(ComponentOwnerId ownerId) noexcept;
+    ComponentCatalogResult reopenOwner(ComponentOwnerId ownerId) noexcept;
     // On failure, acquire leaves an existing outLease unchanged.
     ComponentCatalogResult acquire(ComponentId, ComponentPinKind, ComponentLease& outLease) noexcept;
 

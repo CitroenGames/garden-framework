@@ -85,6 +85,7 @@ struct ComponentCatalog::Impl {
     };
     mutable std::mutex mutex;
     std::vector<std::unique_ptr<Entry>> entries;
+    std::vector<ComponentOwnerId> retiring;
 };
 
 ComponentCatalog::ComponentCatalog(Impl* impl) noexcept : m_impl(impl) {}
@@ -107,6 +108,7 @@ ComponentCatalogResult ComponentCatalog::registerComponent(const ComponentDescri
     if (!validDescriptor(d)) return ComponentCatalogResult::InvalidDescriptor;
     try {
         std::lock_guard lock(m_impl->mutex);
+        for (const auto& owner : m_impl->retiring) if (owner == d.ownerId) return ComponentCatalogResult::InUse;
         size_t freeSlot = m_impl->entries.size();
         for (size_t i = 0; i < m_impl->entries.size(); ++i) {
             const auto& e = *m_impl->entries[i];
@@ -151,6 +153,7 @@ ComponentCatalogResult ComponentCatalog::registerBatch(ComponentOwnerId owner,
         return ComponentCatalogResult::InvalidDescriptor;
     try {
         std::lock_guard lock(m_impl->mutex);
+        for (const auto& blocked : m_impl->retiring) if (blocked == owner) return ComponentCatalogResult::InUse;
         struct Staged { size_t slot; std::unique_ptr<Impl::Entry> entry; };
         std::vector<Staged> staged;
         std::vector<ComponentId> ids(descriptors.size());
@@ -223,6 +226,26 @@ ComponentCatalogResult ComponentCatalog::resolve(const ComponentDescriptor& d, C
     } catch (...) {
         return ComponentCatalogResult::InternalError;
     }
+}
+
+ComponentCatalogResult ComponentCatalog::beginRetirement(ComponentOwnerId owner) noexcept {
+    if (!validOwner(owner)) return ComponentCatalogResult::InvalidDescriptor;
+    try {
+        std::lock_guard lock(m_impl->mutex);
+        for (const auto& blocked : m_impl->retiring)
+            if (blocked == owner) return ComponentCatalogResult::Success;
+        m_impl->retiring.push_back(owner);
+        return ComponentCatalogResult::Success;
+    } catch (...) { return ComponentCatalogResult::ResourceExhausted; }
+}
+
+ComponentCatalogResult ComponentCatalog::reopenOwner(ComponentOwnerId owner) noexcept {
+    try {
+        std::lock_guard lock(m_impl->mutex);
+        for (auto it = m_impl->retiring.begin(); it != m_impl->retiring.end(); ++it)
+            if (*it == owner) { m_impl->retiring.erase(it); break; }
+        return ComponentCatalogResult::Success;
+    } catch (...) { return ComponentCatalogResult::InternalError; }
 }
 
 ComponentCatalogResult ComponentCatalog::unregisterOwner(ComponentOwnerId ownerId) noexcept {

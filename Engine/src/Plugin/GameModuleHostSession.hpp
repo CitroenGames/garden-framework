@@ -56,6 +56,9 @@ public:
         // Required for server-role reloads. An absent callback is an
         // unprovable server state and therefore refuses the reload.
         std::function<ServerReloadState()> query_server_reload_state;
+        // After shutdown and resource release, prove every module job/event/UI callback is drained.
+        // Absence or false refuses retirement while the image stays loaded.
+        std::function<bool(const garden::ecs::ComponentOwnerId&)> module_callbacks_drained;
     };
 
     explicit GameModuleHostSession(HostOperations operations = {});
@@ -73,6 +76,8 @@ public:
     // Client and server roles may coexist in a listen-server session.  A
     // failed init immediately follows the bounded teardown path; its role's
     // shutdown export is never called because initialization did not finish.
+    // A failed module init must synchronously roll back every thread, callback
+    // and resource it created before returning false.
     bool initialiseClient(EngineServices* services);
     bool initialiseServer(EngineServices* services);
 
@@ -101,7 +106,7 @@ public:
     // Performs the ordered quiesce -> optional play-stop -> role shutdown ->
     // host cleanup -> registration removal -> image unload sequence.  Safe to
     // call more than once.
-    void stop();
+    [[nodiscard]] bool stop();
 
     Phase phase() const { return m_phase; }
     bool isPlaying() const { return m_phase == Phase::Playing; }
@@ -133,4 +138,7 @@ private:
     bool m_editor_session = false;
     bool m_play_started = false;
     bool m_stopping = false;
+    bool m_quiesce_completed = false;
+    bool m_callbacks_exposed = false;
+    bool m_registrations_removed = false;
 };

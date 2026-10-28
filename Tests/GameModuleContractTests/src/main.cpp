@@ -292,7 +292,7 @@ namespace
             reason = "following client_complete load did not retain a module handle";
             return false;
         }
-        loader.unload();
+        if (!loader.unload()) return fail(name, "loader unload refused");
         return true;
     }
 
@@ -334,7 +334,7 @@ namespace
         if (directChildCount(generation_root) != 2)
             return fail(name, "refused candidate left an owned generation behind");
 
-        loader.unload();
+        if (!loader.unload()) return fail(name, "loader unload refused");
         if (fs::exists(generation_root)) return fail(name, "normal unload left its private generation root behind");
         if (!fs::exists(paths.fixture("client_complete"))) return fail(name, "normal unload removed the source module");
         return pass(name);
@@ -363,7 +363,7 @@ namespace
         loader.onPlayStop();
         if (!hasExactly(recorder.events(), {"client.level_loaded", "client.play_start", "client.play_stop"}))
             return fail(name, "promoted candidate did not receive its lifecycle callbacks");
-        loader.unload();
+        if (!loader.unload()) return fail(name, "loader unload refused");
         if (fs::exists(generation_root)) return fail(name, "promoted generation root remained after unload");
         return pass(name);
     }
@@ -389,7 +389,7 @@ namespace
             previous = current;
         }
 
-        loader.unload();
+        if (!loader.unload()) return fail(name, "loader unload refused");
         if (fs::exists(generation_root)) return fail(name, "repeat cycle cleanup left a private generation root behind");
         if (!fs::exists(source)) return fail(name, "repeat cycle cleanup removed the source module");
         return pass(name);
@@ -437,7 +437,7 @@ namespace
                                                       OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (reload_source_lock == INVALID_HANDLE_VALUE)
         {
-            active_loader.unload();
+            if (!active_loader.unload()) return fail(name, "loader unload refused");
             return fail(name, "could not lock the source image for candidate-copy refusal");
         }
         StderrCapture reload_capture;
@@ -448,22 +448,22 @@ namespace
         if (reloaded || !active_loader.isLoaded() || active_loader.getLoadedImagePath() != active_image.string() ||
             !fs::exists(active_image))
         {
-            active_loader.unload();
+            if (!active_loader.unload()) return fail(name, "loader unload refused");
             return fail(name, "owned-copy candidate failure changed the active generation");
         }
         if (!contains(reload_error, "Could not copy module source") || !contains(reload_error, "Reload deferred") ||
             contains(reload_error, "loading source in place") || contains(reload_error, "source fallback"))
         {
-            active_loader.unload();
+            if (!active_loader.unload()) return fail(name, "loader unload refused");
             return fail(name, "candidate-copy failure did not preserve the active generation: " + reload_error);
         }
         active_loader.update(0.016f);
         if (!hasExactly(recorder.events(), {"client.update", "client.update"}))
         {
-            active_loader.unload();
+            if (!active_loader.unload()) return fail(name, "loader unload refused");
             return fail(name, "active generation did not remain callable after candidate-copy refusal");
         }
-        active_loader.unload();
+        if (!active_loader.unload()) return fail(name, "loader unload refused");
 #else
         (void)paths;
 #endif
@@ -555,7 +555,7 @@ namespace
             loader.shutdown();
             if (!hasExactly(recorder.events(), {"client.init", "client.register_components", "client.update", "client.shutdown"}))
                 return fail(name, "optional hooks were dispatched or required hooks were not recorded");
-            loader.unload();
+            if (!loader.unload()) return fail(name, "loader unload refused");
             std::string recovery_error;
             if (!verifyRecovery(paths, fixture_name, recovery_error)) return fail(name, recovery_error);
         }
@@ -574,7 +574,7 @@ namespace
         loader.onPlayStop();
         if (!hasExactly(recorder.events(), {"client.level_loaded", "client.play_start", "client.play_stop"}))
             return fail(name, "lifecycle wrappers did not dispatch exactly once");
-        loader.unload();
+        if (!loader.unload()) return fail(name, "loader unload refused");
         std::string recovery_error;
         if (!verifyRecovery(paths, "client_lifecycle_recorder", recovery_error)) return fail(name, recovery_error);
         return pass(name);
@@ -616,7 +616,7 @@ namespace
             loader.serverOnClientDisconnected(3);
             if (!hasExactly(recorder.events(), test_case.expected))
                 return fail(name, "present and absent server wrappers did not follow the fixture export set");
-            loader.unload();
+            if (!loader.unload()) return fail(name, "loader unload refused");
             std::string recovery_error;
             if (!verifyRecovery(paths, test_case.fixture, recovery_error)) return fail(name, recovery_error);
         }

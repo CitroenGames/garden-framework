@@ -10,6 +10,7 @@ sources = {
     src/Console/**/*.cpp
     src/Debug/**/*.cpp
     src/ECS/**/*.cpp
+    src/Events/EventBus.cpp
     src/Events/**/*.cpp
     src/GameFramework/**/*.cpp
     src/Gameplay/**/*.cpp

@@ -28,6 +28,7 @@
 #include "UI/RmlUiManager.h"
 #include "Console/ConVar.hpp"
 #include "Threading/JobSystem.hpp"
+#include "Events/EventBus.hpp"
 #include "Assets/AssetManager.hpp"
 #include "Assets/GltfAssetLoader.hpp"
 #include "Audio/AudioSystem.hpp"
@@ -42,10 +43,26 @@ static Application app;
 static renderer _renderer;
 static world _world;
 static InputHandler input_handler;
-static GameModuleHostSession game_module;
 static ProjectManager project_manager;
 static LevelManager level_manager;
 static ReflectionRegistry reflection;
+static bool game_module_resources_released = false;
+static GameModuleHostSession game_module(GameModuleHostSession::HostOperations{
+    {},
+    []() {
+        game_module_resources_released = true;
+        Threading::JobSystem::get().barrier();
+        Threading::JobSystem::get().shutdown();
+        _world.shutdown();
+        AudioSystem::get().shutdown();
+        Assets::AssetManager::get().shutdown();
+    },
+    {}, {}, {},
+    [](const garden::ecs::ComponentOwnerId& owner) {
+        Threading::JobSystem::get().barrier();
+        return Threading::JobSystem::get().getPendingJobCount() == 0 &&
+               EventBus::moduleSourceCanRetire(owner);
+    }});
 
 static void quit_game(int code)
 {
@@ -53,11 +70,19 @@ static void quit_game(int code)
 
     // Stop the host session while the world and host services remain valid.
     // It invokes the module shutdown callback before unloading its image.
-    game_module.stop();
-    AudioSystem::get().shutdown();
-    Assets::AssetManager::get().shutdown();
-    Threading::JobSystem::get().shutdown();
-    _world.registry.clear();
+    if (!game_module.stop())
+    {
+        LOG_ENGINE_ERROR("Game module retirement refused: {}", game_module.lastFailure());
+        _exit(1);
+    }
+    // The session can be idle if startup failed before loading a module.
+    if (!game_module_resources_released)
+    {
+        Threading::JobSystem::get().shutdown();
+        _world.shutdown();
+        AudioSystem::get().shutdown();
+        Assets::AssetManager::get().shutdown();
+    }
     RmlUiManager::get().shutdown();
     ImGuiManager::get().shutdown();
     app.shutdown();

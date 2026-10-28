@@ -4,6 +4,7 @@
 #include "GameFramework/GameModeRegistry.hpp"
 
 #include <utility>
+#include <cstdio>
 
 GameModuleHostSession::GameModuleHostSession(HostOperations operations)
     : m_operations(std::move(operations))
@@ -12,7 +13,10 @@ GameModuleHostSession::GameModuleHostSession(HostOperations operations)
 
 GameModuleHostSession::~GameModuleHostSession()
 {
-    stop();
+    if (!stop()) {
+        fprintf(stderr, "[GameModule] Host destruction quarantined an image with unproven cleanup\n");
+        m_loader.quarantine();
+    }
 }
 
 bool GameModuleHostSession::loadAndRegister(const std::string& module_path, ReflectionRegistry& reflection)
@@ -27,6 +31,7 @@ bool GameModuleHostSession::loadAndRegister(const std::string& module_path, Refl
         return false;
     }
 
+    m_phase = Phase::Registered; // A loaded image must be retired even if its source id is invalid.
     m_reflection = &reflection;
     m_source_id = m_loader.getGameName();
     if (m_source_id.empty() || m_source_id == "Unknown")
@@ -35,6 +40,7 @@ bool GameModuleHostSession::loadAndRegister(const std::string& module_path, Refl
         return false;
     }
 
+    m_callbacks_exposed = true;
     m_loader.registerComponents(m_reflection);
     m_phase = Phase::Registered;
     return true;
@@ -182,12 +188,19 @@ bool GameModuleHostSession::reloadCandidate(const std::string& module_path, Refl
     const bool client_role = m_client_initialised;
     const bool server_role = m_server_initialised;
     const bool editor_session = m_editor_session;
-    stop();
+    if (!stop()) {
+        // A validated candidate has received no callbacks or registrations.
+        if (!candidate.unload()) m_last_failure += "; candidate retirement refused";
+        return false;
+    }
 
     // stop() has released A's registrations and library. Moving transfers
     // B's handle and ownership lease without exposing an empty active loader
     // to a host tick.
-    m_loader = std::move(candidate);
+    if (!m_loader.replaceWith(std::move(candidate))) {
+        if (!candidate.unload()) m_last_failure = "candidate retirement refused";
+        return false;
+    }
     return activatePromotedCandidate(reflection, services, client_role, server_role, editor_session);
 }
 
@@ -206,6 +219,7 @@ bool GameModuleHostSession::activatePromotedCandidate(ReflectionRegistry& reflec
         return false;
     }
 
+    m_callbacks_exposed = true;
     m_loader.registerComponents(m_reflection);
     m_phase = Phase::Registered;
 
@@ -245,47 +259,56 @@ void GameModuleHostSession::updateServer(float fixed_delta)
 void GameModuleHostSession::failAndStop(const char* failure)
 {
     m_last_failure = failure;
-    stop();
+    if (!stop()) m_last_failure += "; module retirement refused";
 }
 
-void GameModuleHostSession::stop()
+bool GameModuleHostSession::stop()
 {
-    if (m_stopping || m_phase == Phase::Idle)
-        return;
-
+    if (m_phase == Phase::Idle) return true;
+    if (m_stopping) return false;
+    if (!m_loader.beginRetirement()) {
+        m_last_failure = "module retirement refused: borrowers remain";
+        return false;
+    }
     m_stopping = true;
-    m_phase = Phase::Quiescing;
-    if (m_operations.quiesce)
-        m_operations.quiesce();
-
-    // Prevent every host callback or factory from retaining module code
-    // across shutdown. These removals intentionally occur while the image is
-    // still loaded, before any role shutdown callback or resource destructor.
-    if (!m_source_id.empty())
-    {
-        if (m_operations.release_module_callbacks)
+    if (m_phase != Phase::Teardown) {
+        m_phase = Phase::Quiescing;
+        if (!m_quiesce_completed) {
+            if (m_operations.quiesce) m_operations.quiesce();
+            m_quiesce_completed = true;
+        }
+        if (!m_source_id.empty() && m_operations.release_module_callbacks)
             m_operations.release_module_callbacks(m_source_id);
-        GameFramework::GameModeRegistry::get().unregisterBySource(m_source_id);
-        if (m_reflection)
-            m_reflection->unregisterBySource(m_source_id.c_str());
+        // A successful role shutdown must join its module-owned threads. A
+        // failed init must already have rolled them back before returning.
+        if (m_play_started) m_loader.onPlayStop();
+        if (m_client_initialised) m_loader.shutdown();
+        if (m_server_initialised) m_loader.serverShutdown();
+        m_phase = Phase::Teardown;
+        if (m_operations.release_module_resources) m_operations.release_module_resources();
+    }
+    // Host checks the scheduler only after module shutdown and resource release.
+    // On refusal none of those one-time steps may be repeated.
+    const auto* owner = m_loader.getComponentOwnerId();
+    if (m_callbacks_exposed && (!owner || !m_operations.module_callbacks_drained || !m_operations.module_callbacks_drained(*owner))) {
+        m_last_failure = "module retirement refused: host cannot prove callbacks are drained";
+        m_stopping = false;
+        return false;
+    }
+    if (!m_registrations_removed && !m_source_id.empty()) {
+        if (m_loader.isComponentProvider()) {
+            GameFramework::GameModeRegistry::get().unregisterBySource(m_source_id);
+            if (m_reflection) m_reflection->unregisterBySource(m_source_id.c_str());
+        }
         if (m_operations.remove_module_registrations)
             m_operations.remove_module_registrations(m_source_id);
+        m_registrations_removed = true;
     }
-
-    // Callback code must remain loaded until every completed role has shut
-    // down. A failed init deliberately leaves its role flag false.
-    if (m_play_started)
-        m_loader.onPlayStop();
-    if (m_client_initialised)
-        m_loader.shutdown();
-    if (m_server_initialised)
-        m_loader.serverShutdown();
-
-    m_phase = Phase::Teardown;
-    if (m_operations.release_module_resources)
-        m_operations.release_module_resources();
-
-    m_loader.unload();
+    if (!m_loader.unload()) {
+        m_last_failure = "module retirement refused: borrowers or component leases remain";
+        m_stopping = false;
+        return false;
+    }
     m_reflection = nullptr;
     m_source_id.clear();
     m_client_initialised = false;
@@ -294,6 +317,10 @@ void GameModuleHostSession::stop()
     m_server_level_loaded = false;
     m_editor_session = false;
     m_play_started = false;
+    m_callbacks_exposed = false;
+    m_quiesce_completed = false;
+    m_registrations_removed = false;
     m_phase = Phase::Idle;
     m_stopping = false;
+    return true;
 }

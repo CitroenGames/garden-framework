@@ -174,9 +174,6 @@ private:
     bool        m_mouse_captured_for_game = false; // true when mouse is locked for game input
 
     // --- Network PIE ---
-    // Player 1 owns one lifecycle session. The session keeps the game image
-    // loaded until the PIE worlds and host resources are torn down.
-    std::unique_ptr<GameModuleHostSession> m_game_module_session;
     ReflectionRegistry m_reflection;
     world              m_server_world;             // separate ECS world for listen server
     EngineServices     m_server_services{};
@@ -186,8 +183,6 @@ private:
     bool               m_external_pie_active = false; // true when a play mode owns an external Game.exe process
     PIEProcessManager  m_pie_processes;
 
-    // Multi-viewport PIE: additional client instances (Player 2-4) for InEditor mode
-    std::vector<std::unique_ptr<PIEClientInstance>> m_pie_clients;
     int m_focused_pie_client = -1;                 // -1 = Player 1 (main viewport)
 
     // PIE state transitions
@@ -223,6 +218,11 @@ private:
 
     // Project manager
     ProjectManager m_project_manager;
+
+    // Destroy borrowers first, then the provider session, while services and
+    // reflection used by their teardown are still alive.
+    std::unique_ptr<GameModuleHostSession> m_game_module_session;
+    std::vector<std::unique_ptr<PIEClientInstance>> m_pie_clients;
 
     // Packaging
     bool m_show_package_dialog = false;

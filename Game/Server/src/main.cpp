@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 
@@ -18,6 +19,8 @@
 #include "Reflection/EngineReflection.hpp"
 #include "Prefab/PrefabManager.hpp"
 #include "Assets/AssetManager.hpp"
+#include "Threading/JobSystem.hpp"
+#include "Events/EventBus.hpp"
 #include "Scheduler/SystemScheduler.hpp"
 #include "Scheduler/HierarchyTransformSystem.hpp"
 #include "Gameplay/GameplaySystems.hpp"
@@ -35,17 +38,38 @@ namespace fs = std::filesystem;
 
 static Application app;
 static world _world;
-static GameModuleHostSession game_module;
 static ProjectManager project_manager;
 static LevelManager level_manager;
 static ReflectionRegistry reflection;
+static bool game_module_resources_released = false;
+static GameModuleHostSession game_module(GameModuleHostSession::HostOperations{
+    {},
+    []() {
+        game_module_resources_released = true;
+        _world.shutdown();
+        Assets::AssetManager::get().shutdown();
+    },
+    {}, {}, {},
+    [](const garden::ecs::ComponentOwnerId& owner) {
+        Threading::JobSystem::get().barrier();
+        return Threading::JobSystem::get().getPendingJobCount() == 0 &&
+               EventBus::moduleSourceCanRetire(owner);
+    }});
 
 static void shutdown_server(int code)
 {
     // Stop the host session while the world and scheduler-owned state remain
     // valid. The session dispatches server shutdown before unloading the DLL.
-    game_module.stop();
-    _world.registry.clear();
+    if (!game_module.stop())
+    {
+        LOG_ENGINE_ERROR("Game module retirement refused: {}", game_module.lastFailure());
+        std::_Exit(1);
+    }
+    if (!game_module_resources_released)
+    {
+        _world.shutdown();
+        Assets::AssetManager::get().shutdown();
+    }
     app.shutdown();
     EE::CLog::Shutdown();
     exit(code);

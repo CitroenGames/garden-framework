@@ -14,19 +14,35 @@ class ENGINE_API GameModuleLoader
 {
 public:
     GameModuleLoader();
+    // An active loader without an explicit cleanup-confirmed unload is
+    // quarantined for process lifetime; destruction never implies cleanup.
     ~GameModuleLoader();
 
     GameModuleLoader(const GameModuleLoader&) = delete;
     GameModuleLoader& operator=(const GameModuleLoader&) = delete;
     GameModuleLoader(GameModuleLoader&& other) noexcept;
-    GameModuleLoader& operator=(GameModuleLoader&& other) noexcept;
+    GameModuleLoader& operator=(GameModuleLoader&& other) = delete;
+    // The old image has the same host-cleanup prerequisite as unload().
+    [[nodiscard]] bool replaceWith(GameModuleLoader&& other) noexcept;
 
     // Load a game DLL from an owned generation copy. Source-image loading is
     // deliberately unsupported: a failed copy leaves the loader idle.
     bool load(const std::string& dll_path);
 
-    // Unload the currently loaded DLL.
-    void unload();
+    // Retire the image only after the host has drained all non-catalog
+    // callbacks, jobs, reflection and other module-owned resources.
+    [[nodiscard]] bool beginRetirement() noexcept;
+    [[nodiscard]] bool unload() noexcept;
+    // Retry orphaned providers only after the host has drained all non-catalog
+    // callbacks, jobs, reflection and other module-owned resources.
+    [[nodiscard]] static bool retryRetiredGenerations() noexcept;
+    // Fault-injection seam for lifecycle tests; pass nullptr to restore cleanup.
+    using CleanupTestHook = void (*)();
+    static void setCleanupTestHook(CleanupTestHook hook) noexcept;
+    // Permanently retain the image when host-owned callback cleanup was not
+    // proven. No automatic retry can safely reconstruct those obligations.
+    void quarantine() noexcept;
+    bool isComponentProvider() const noexcept { return m_generation && m_is_provider; }
 
     // Prepare and validate a distinct candidate before releasing the current
     // image. This primitive deliberately does not invoke game lifecycle
@@ -76,6 +92,9 @@ public:
     void serverOnClientDisconnected(uint16_t client_id);
 
 private:
+    void* m_generation = nullptr;
+    bool m_is_provider = false;
+    bool m_retirement_requested = false;
     void* m_handle = nullptr;         // HMODULE or dlopen handle
     std::string m_source_path;        // Original DLL path
     std::string m_loaded_path;        // Active owned generation image
@@ -124,5 +143,6 @@ private:
 
     void clearFunctionPointers();
     bool resolveFunctions();
+    bool attachGeneration() noexcept;
     void moveFrom(GameModuleLoader&& other) noexcept;
 };

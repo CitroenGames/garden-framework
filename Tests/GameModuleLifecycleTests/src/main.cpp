@@ -14,6 +14,8 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#else
+#include <dlfcn.h>
 #endif
 
 namespace fs = std::filesystem;
@@ -156,6 +158,7 @@ namespace
                     return GameModuleHostSession::ServerReloadState{
                         server_reload_safe_point, connected_server_clients};
                 },
+                [](const garden::ecs::ComponentOwnerId&) { return true; }, // fixture owns no asynchronous callbacks
             };
         }
 
@@ -170,7 +173,7 @@ namespace
     {
         return equals(ledger.events, {
             "host.quiesce", "host.release_callbacks:GameModuleLifecycleFixture",
-            "host.remove:GameModuleLifecycleFixture", "host.release_resources"}) ||
+            "host.release_resources", "host.remove:GameModuleLifecycleFixture"}) ||
             fail(name, "host cleanup was not quiesce -> callback/factory removal -> resource release");
     }
 
@@ -187,7 +190,7 @@ namespace
                 !session.beginPlaying(false))
                 return fail(name, "standalone client did not reach Playing");
             session.updateClient(0.016f);
-            session.stop();
+            if (!session.stop()) return fail(name, "session stop refused");
             if (!equals(recorder.events(), {"register_components", "client.init", "client.level_loaded", "client.update", "client.shutdown"}))
                 return fail(name, "standalone callback sequence was incorrect");
             if (!expectLedger(name, ledger)) return false;
@@ -201,7 +204,7 @@ namespace
                 !session.initialiseClient(nullptr) || !session.notifyClientLevelLoaded() ||
                 !session.beginPlaying(true))
                 return fail(name, "PIE client did not reach Playing");
-            session.stop();
+            if (!session.stop()) return fail(name, "session stop refused");
             if (!equals(recorder.events(), {"register_components", "client.init", "client.level_loaded", "client.play_start", "client.play_stop", "client.shutdown"}))
                 return fail(name, "PIE did not pair play-start and play-stop around shutdown");
             if (!expectLedger(name, ledger)) return false;
@@ -221,7 +224,7 @@ namespace
             return fail(name, "server did not reach Playing");
         session.updateServerPrePhysics(0.016f);
         session.updateServer(0.016f);
-        session.stop();
+        if (!session.stop()) return fail(name, "session stop refused");
         if (!equals(recorder.events(), {"register_components", "server.init", "server.level_loaded", "server.pre_physics", "server.update", "server.shutdown"}))
             return fail(name, "server callback order was incorrect");
         if (!expectLedger(name, ledger)) return false;
@@ -241,7 +244,7 @@ namespace
             return fail(name, "listen server did not reach Playing");
         session.updateServer(0.016f);
         session.updateClient(0.016f);
-        session.stop();
+        if (!session.stop()) return fail(name, "session stop refused");
         if (!equals(recorder.events(), {"register_components", "server.init", "server.level_loaded", "client.init", "client.level_loaded", "client.play_start", "server.update", "client.update", "client.play_stop", "client.shutdown", "server.shutdown"}))
             return fail(name, "listen-server order did not preserve server-first init and client-first shutdown");
         if (!expectLedger(name, ledger)) return false;
@@ -275,8 +278,8 @@ namespace
             if (initialised || session.phase() != GameModuleHostSession::Phase::Idle || session.lastFailure().empty())
                 return fail(name, "failed initialization left a callable session: " + fixture);
             const std::vector<std::string> expected = fixture == "client_init_fails"
-                ? std::vector<std::string>{"register_components", "client.init"}
-                : std::vector<std::string>{"register_components", "client.init", "server.init", "client.shutdown"};
+                ? std::vector<std::string>{"register_components", "client.init", "client.init.rollback_callback"}
+                : std::vector<std::string>{"register_components", "client.init", "server.init", "server.init.rollback_callback", "client.shutdown"};
             if (!equals(recorder.events(), expected))
                 return fail(name, "failed initialization dispatched level/update/shutdown callbacks: " + fixture);
             if (!expectLedger(name, ledger)) return false;
@@ -289,7 +292,7 @@ namespace
         if (!recovery.loadAndRegister(fixturePath("client_recorder").string(), recovery_reflection) ||
             !recovery.initialiseClient(nullptr) || !recovery.notifyClientLevelLoaded() || !recovery.beginPlaying(false))
             return fail(name, "valid module could not load after failed initialization cleanup");
-        recovery.stop();
+        if (!recovery.stop()) return fail(name, "recovery stop refused");
         return expectLedger(name, recovery_ledger) ? pass(name) : false;
     }
 
@@ -313,18 +316,18 @@ namespace
             !session.initialiseClient(nullptr) || !session.notifyClientLevelLoaded() ||
             !session.beginPlaying(true))
             return fail(name, "fallback PIE candidate did not reach Playing on the reused session");
-        session.stop();
+        if (!session.stop()) return fail(name, "session stop refused");
 
         if (!equals(recorder.events(), {
-                "register_components", "client.init",
+                "register_components", "client.init", "client.init.rollback_callback",
                 "register_components", "client.init", "client.level_loaded",
                 "client.play_start", "client.play_stop", "client.shutdown"}))
             return fail(name, "fallback module did not receive a complete paired PIE lifecycle");
         if (!equals(ledger.events, {
                 "host.quiesce", "host.release_callbacks:GameModuleLifecycleFixture",
-                "host.remove:GameModuleLifecycleFixture", "host.release_resources",
+                "host.release_resources", "host.remove:GameModuleLifecycleFixture",
                 "host.quiesce", "host.release_callbacks:GameModuleLifecycleFixture",
-                "host.remove:GameModuleLifecycleFixture", "host.release_resources"}))
+                "host.release_resources", "host.remove:GameModuleLifecycleFixture"}))
             return fail(name, "PIE fallback did not clean each candidate before reuse");
         return pass(name);
     }
@@ -357,7 +360,7 @@ namespace
             !session.beginPlaying(false))
             return fail(name, "owned teardown fixture did not reach Playing");
         session.updateClient(0.016f);
-        session.stop();
+        if (!session.stop()) return fail(name, "session stop refused");
 
         if (session.loader().isLoaded() || session.phase() != GameModuleHostSession::Phase::Idle ||
             ledger.activeCallbackCount() != 0 || ledger.released_callback_count != 3 ||
@@ -382,7 +385,7 @@ namespace
         const std::vector<std::string> expected_ledger = {
             "host.quiesce", "host.release_callbacks:GameModuleLifecycleFixture",
             "host.cancel:event", "host.cancel:job", "host.cancel:ui",
-            "host.remove:GameModuleLifecycleFixture", "host.release_resources"};
+            "host.release_resources", "host.remove:GameModuleLifecycleFixture"};
         if (!equals(ledger.events, expected_ledger))
             return fail(name, "owned callback cancellation did not precede module shutdown");
         return pass(name);
@@ -406,7 +409,7 @@ namespace
             !session.beginPlaying(false))
             return fail(name, "initial generation A did not reach Playing");
         session.updateClient(0.016f);
-        session.stop();
+        if (!session.stop()) return fail(name, "session stop refused");
         if (session.loader().isLoaded() || session.phase() != GameModuleHostSession::Phase::Idle)
             return fail(name, "generation A did not unload before candidate B");
 
@@ -434,7 +437,7 @@ namespace
             !session.initialiseClient(nullptr) || !session.notifyClientLevelLoaded() ||
             !session.beginPlaying(false))
             return fail(name, "valid generation C could not recover from B's bounded cleanup");
-        session.stop();
+        if (!session.stop()) return fail(name, "session stop refused");
         if (session.loader().isLoaded() || ledger.released_resource_count != 3 ||
             ledger.removed_registration_count != 3)
             return fail(name, "recovery did not release each generation exactly once");
@@ -491,11 +494,436 @@ namespace
         if (second.getComponentOwnerId() || !moved.getComponentOwnerId() || *moved.getComponentOwnerId() != identity)
             return fail(name, "identity did not follow image ownership on move");
         GameModuleLoader assigned;
-        assigned = std::move(moved);
+        if (!assigned.replaceWith(std::move(moved))) return fail(name, "move replacement refused");
         if (moved.getComponentOwnerId() || !assigned.getComponentOwnerId() || *assigned.getComponentOwnerId() != identity)
             return fail(name, "identity did not follow image ownership on move assignment");
-        first.unload();
+        if (first.unload()) return fail(name, "provider unloaded while borrowed");
+        if (!assigned.unload() || !first.unload()) return fail(name, "retry after borrower release failed");
         if (first.getComponentOwnerId()) return fail(name, "unloaded image retained an identity");
+        if (!different.unload()) return fail(name, "different provider cleanup refused");
+        return pass(name);
+    }
+
+    bool testProviderRetirement()
+    {
+        using namespace garden::ecs;
+        const std::string name = "GameModuleLifecycle_ProviderRetirement";
+        GameModuleLoader provider, borrower, replacement;
+        if (!provider.load(fixturePath("generation_a").string()) ||
+            !borrower.load(fixturePath("generation_a").string()) ||
+            !provider.isComponentProvider() || borrower.isComponentProvider())
+            return fail(name, "provider and borrower were not distinguished");
+        const auto owner = *provider.getComponentOwnerId();
+        const auto image = provider.getLoadedImagePath();
+#ifdef _WIN32
+        HMODULE imageHandle = LoadLibraryA(image.c_str());
+        if (!imageHandle) return fail(name, "could not acquire provider fixture exports");
+        auto construct = reinterpret_cast<bool(*)(void*) noexcept>(GetProcAddress(imageHandle, "fixtureConstruct"));
+        auto destroy = reinterpret_cast<void(*)(void*) noexcept>(GetProcAddress(imageHandle, "fixtureDestroy"));
+        FreeLibrary(imageHandle);
+#else
+        void* imageHandle = dlopen(image.c_str(), RTLD_NOW);
+        if (!imageHandle) return fail(name, "could not acquire provider fixture exports");
+        auto construct = reinterpret_cast<bool(*)(void*) noexcept>(dlsym(imageHandle, "fixtureConstruct"));
+        auto destroy = reinterpret_cast<void(*)(void*) noexcept>(dlsym(imageHandle, "fixtureDestroy"));
+        dlclose(imageHandle);
+#endif
+        if (!construct || !destroy) return fail(name, "fixture operation exports missing");
+        garden::ecs::ComponentDescriptor descriptor{{"fixture.provider", 1}, owner, sizeof(int), alignof(int),
+            ComponentDefaultConstruct, {construct, destroy, nullptr, nullptr}};
+        auto& catalog = ComponentCatalog::instance();
+        ComponentId id;
+        if (catalog.registerComponent(descriptor, id) != ComponentCatalogResult::Success)
+            return fail(name, "provider descriptor was not registered");
+        ComponentLease operation, instance;
+        if (catalog.acquire(id, ComponentPinKind::Operation, operation) != ComponentCatalogResult::Success ||
+            catalog.acquire(id, ComponentPinKind::LiveInstance, instance) != ComponentCatalogResult::Success)
+            return fail(name, "could not pin provider callbacks");
+        int value = 0;
+        if (!operation.descriptor()->operations.defaultConstruct(&value) || value != 73)
+            return fail(name, "provider callback did not execute");
+        if (provider.unload() || !fs::exists(image) || replacement.load(fixturePath("generation_a").string()))
+            return fail(name, "retiring provider accepted unload or new attachment");
+        ComponentId blocked;
+        if (catalog.registerComponent(descriptor, blocked) != ComponentCatalogResult::InUse)
+            return fail(name, "retirement did not block new registration");
+        if (!borrower.unload() || provider.unload()) return fail(name, "leases did not prevent retirement");
+        operation.descriptor()->operations.destroy(&value);
+        operation.reset();
+        if (provider.unload()) return fail(name, "live instance did not prevent retirement");
+        instance.reset();
+        if (!provider.unload() || fs::exists(image) ||
+            catalog.acquire(id, ComponentPinKind::Operation, operation) != ComponentCatalogResult::StaleId)
+            return fail(name, "retry failed to retire catalog before releasing provider");
+        return pass(name);
+    }
+
+    void throwCleanupForTest() { throw 17; }
+
+    bool testCleanupExceptionAfterUnload()
+    {
+        const std::string name = "GameModuleLifecycle_CleanupExceptionAfterUnload";
+        GameModuleLoader provider, borrower;
+        if (!provider.load(fixturePath("generation_a").string()) ||
+            !borrower.load(fixturePath("generation_a").string())) return fail(name, "load failed");
+        const auto providerRoot = provider.getOwnedGenerationRoot();
+        const auto borrowerRoot = borrower.getOwnedGenerationRoot();
+        struct Restore {
+            std::string providerRoot, borrowerRoot;
+            ~Restore() {
+                GameModuleLoader::setCleanupTestHook(nullptr);
+                std::error_code ec;
+                fs::remove_all(providerRoot, ec);
+                fs::remove_all(borrowerRoot, ec);
+            }
+        } restore{providerRoot, borrowerRoot};
+        GameModuleLoader::setCleanupTestHook(throwCleanupForTest);
+        if (!borrower.unload() || borrower.isLoaded() || !borrower.unload())
+            return fail(name, "cleanup exception left borrower attached or unload retry unsafe");
+        if (!provider.unload() || provider.isLoaded() || !provider.unload())
+            return fail(name, "cleanup exception left provider attached or unload retry unsafe");
+        GameModuleLoader::setCleanupTestHook(nullptr);
+        GameModuleLoader replacement;
+        if (!replacement.load(fixturePath("generation_a").string()) || !replacement.isComponentProvider() ||
+            !replacement.unload()) return fail(name, "old generation bookkeeping survived cleanup exception");
+        return pass(name);
+    }
+
+    bool testOrphanedProviderRetry()
+    {
+        using namespace garden::ecs;
+        const std::string name = "GameModuleLifecycle_OrphanedProviderRetry";
+        GameModuleLoader borrower;
+        std::string image;
+        {
+            GameModuleLoader provider;
+            if (!provider.load(fixturePath("generation_a").string()) ||
+                !borrower.load(fixturePath("generation_a").string())) return fail(name, "load failed");
+            image = provider.getLoadedImagePath();
+            // This fixture has no host resources; explicit unload asserts cleanup.
+            if (provider.unload()) return fail(name, "provider retired while borrowed");
+        }
+        if (!fs::exists(image) || !borrower.unload() || !fs::exists(image))
+            return fail(name, "orphan provider image was not retained");
+        // This fixture has no host-owned resources. Real hosts must drain them first.
+        if (!GameModuleLoader::retryRetiredGenerations() || fs::exists(image))
+            return fail(name, "orphan retry did not release provider");
+        return pass(name);
+    }
+
+    bool testOrphanedPinnedProviderRetry()
+    {
+        using namespace garden::ecs;
+        const std::string name = "GameModuleLifecycle_OrphanedPinnedProviderRetry";
+        ComponentLease lease;
+        std::string image;
+        {
+            GameModuleLoader provider;
+            if (!provider.load(fixturePath("generation_a").string())) return fail(name, "load failed");
+            image = provider.getLoadedImagePath();
+            garden::ecs::ComponentDescriptor descriptor{{"fixture.orphan.pin", 1}, *provider.getComponentOwnerId(),
+                sizeof(int), alignof(int), 0, {nullptr, +[](void*) noexcept {}, nullptr, nullptr}};
+            ComponentId id;
+            auto& catalog = ComponentCatalog::instance();
+            if (catalog.registerComponent(descriptor, id) != ComponentCatalogResult::Success ||
+                catalog.acquire(id, ComponentPinKind::LiveInstance, lease) != ComponentCatalogResult::Success ||
+                provider.unload()) return fail(name, "pin did not refuse explicit retirement");
+        }
+        if (!fs::exists(image) || GameModuleLoader::retryRetiredGenerations())
+            return fail(name, "orphan retry ignored a live lease");
+        lease.reset();
+        if (!GameModuleLoader::retryRetiredGenerations() || fs::exists(image))
+            return fail(name, "orphan did not retire after lease release");
+        return pass(name);
+    }
+
+    void testDestroy(void*) noexcept {}
+
+    bool testInvalidSourceRetiresLoadedImage()
+    {
+        const std::string name = "GameModuleLifecycle_InvalidSourceRetiresImage";
+        HostLedger ledger;
+        ReflectionRegistry reflection;
+        GameModuleHostSession session(ledger.operations());
+#ifdef _WIN32
+        _putenv_s("GARDEN_TEST_INVALID_MODULE_NAME", "1");
+#else
+        setenv("GARDEN_TEST_INVALID_MODULE_NAME", "1", 1);
+#endif
+        const bool loaded = session.loadAndRegister(fixturePath("generation_a").string(), reflection);
+#ifdef _WIN32
+        _putenv_s("GARDEN_TEST_INVALID_MODULE_NAME", "");
+#else
+        unsetenv("GARDEN_TEST_INVALID_MODULE_NAME");
+#endif
+        if (loaded || session.loader().isLoaded() || session.phase() != GameModuleHostSession::Phase::Idle)
+            return fail(name, "failed source validation retained a loaded image");
+        return pass(name);
+    }
+
+    bool testHostRetirementRetry()
+    {
+        using namespace garden::ecs;
+        const std::string name = "GameModuleLifecycle_HostRetirementRetry";
+        ScopedRecorder recorder("host_retirement");
+        HostLedger ledger;
+        ReflectionRegistry reflection;
+        GameModuleHostSession session(ledger.operations());
+        GameModuleLoader borrower;
+        if (!session.loadAndRegister(fixturePath("generation_a").string(), reflection) ||
+            !session.initialiseClient(nullptr) || !session.notifyClientLevelLoaded() ||
+            !session.beginPlaying(false) || !borrower.load(fixturePath("generation_a").string()))
+            return fail(name, "sessions did not start");
+        borrower.registerComponents(&reflection);
+        if (!equals(recorder.events(), {"A.register_components", "A.client.init", "A.client.level_loaded"}))
+            return fail(name, "borrower registered reflection callbacks");
+        garden::ecs::ComponentDescriptor descriptor{{"fixture.host", 1}, *session.loader().getComponentOwnerId(),
+            sizeof(int), alignof(int), 0, {nullptr, testDestroy, nullptr, nullptr}};
+        ComponentId id;
+        auto& catalog = ComponentCatalog::instance();
+        ComponentLease lease;
+        if (catalog.registerComponent(descriptor, id) != ComponentCatalogResult::Success ||
+            catalog.acquire(id, ComponentPinKind::LiveInstance, lease) != ComponentCatalogResult::Success)
+            return fail(name, "could not pin host owner");
+        if (session.stop() || session.phase() != GameModuleHostSession::Phase::Playing || !ledger.events.empty())
+            return fail(name, "borrower refusal performed teardown");
+        if (!borrower.unload() || session.stop() || session.phase() != GameModuleHostSession::Phase::Teardown)
+            return fail(name, "lease refusal did not retain teardown state");
+        const auto events = recorder.events();
+        const auto hostEvents = ledger.events;
+        lease.reset();
+        if (!session.stop() || recorder.events() != events || ledger.events != hostEvents ||
+            !expectLedger(name, ledger)) return fail(name, "retry repeated teardown or did not finish");
+        return pass(name);
+    }
+
+    bool testHostCallbackProofRefusal()
+    {
+        const std::string name = "GameModuleLifecycle_HostCallbackProof";
+        ScopedRecorder recorder("callback_proof");
+        HostLedger ledger;
+        ReflectionRegistry reflection;
+        auto operations = ledger.operations();
+        bool drained = false;
+        operations.module_callbacks_drained = [&](const garden::ecs::ComponentOwnerId&) { return drained; };
+        GameModuleHostSession session(std::move(operations));
+        if (!session.loadAndRegister(fixturePath("generation_a").string(), reflection) ||
+            !session.initialiseClient(nullptr) || !session.notifyClientLevelLoaded() || !session.beginPlaying(false))
+            return fail(name, "session did not start");
+        if (session.stop() || session.phase() != GameModuleHostSession::Phase::Teardown ||
+            ledger.events != std::vector<std::string>{"host.quiesce", "host.release_callbacks:GameModuleLifecycleFixture", "host.release_resources"} ||
+            !session.loader().isLoaded()) return fail(name, "unproven callbacks did not refuse safely");
+        drained = true;
+        if (!session.stop() || !expectLedger(name, ledger)) return fail(name, "drained retry failed or repeated quiesce");
+        return pass(name);
+    }
+
+    bool testDestructorQuarantinesUnprovenCallbacks()
+    {
+        const std::string name = "GameModuleLifecycle_DestructorQuarantine";
+        const auto directory = fs::temp_directory_path() / ("garden_quarantine_" +
+            std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        std::error_code ec;
+        fs::create_directories(directory, ec);
+        const auto source = directory / fixturePath("generation_a").filename();
+        fs::copy_file(fixturePath("generation_a"), source, ec);
+        if (ec) return fail(name, "could not copy fixture");
+        { std::ofstream out(source, std::ios::binary | std::ios::app); out.put('Q'); }
+        HostLedger ledger;
+        ReflectionRegistry reflection;
+        auto operations = ledger.operations();
+        operations.module_callbacks_drained = [](const garden::ecs::ComponentOwnerId&) { return false; };
+        std::string image;
+        bool (*construct)(void*) noexcept = nullptr;
+        {
+            GameModuleHostSession session(std::move(operations));
+            if (!session.loadAndRegister(source.string(), reflection) ||
+                !session.initialiseClient(nullptr) || !session.notifyClientLevelLoaded() || !session.beginPlaying(false))
+                return fail(name, "fixture did not start");
+            image = session.loader().getLoadedImagePath();
+#ifdef _WIN32
+            auto handle = LoadLibraryA(image.c_str());
+            if (!handle) return fail(name, "could not inspect fixture");
+            construct = reinterpret_cast<bool(*)(void*) noexcept>(GetProcAddress(handle, "fixtureConstruct"));
+            FreeLibrary(handle);
+#else
+            auto handle = dlopen(image.c_str(), RTLD_NOW);
+            if (!handle) return fail(name, "could not inspect fixture");
+            construct = reinterpret_cast<bool(*)(void*) noexcept>(dlsym(handle, "fixtureConstruct"));
+            dlclose(handle);
+#endif
+            if (!construct || session.stop()) return fail(name, "host cleanup proof unexpectedly passed");
+        }
+        int value = 0;
+        if (!fs::exists(image) || !construct(&value) || value != 73 ||
+            GameModuleLoader::retryRetiredGenerations() || !fs::exists(image))
+            return fail(name, "destructor unmapped or made unproven cleanup retryable");
+        fs::remove_all(directory, ec);
+        return pass(name);
+    }
+
+    bool testModuleEventBusRefusesUnload()
+    {
+        const std::string name = "GameModuleLifecycle_ModuleEventBusRefusesUnload";
+        ScopedRecorder recorder("module_event");
+        const auto directory = fs::temp_directory_path() / ("garden_module_event_" +
+            std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        std::error_code ec;
+        fs::create_directories(directory, ec);
+        const auto source = directory / fixturePath("generation_a").filename();
+        fs::copy_file(fixturePath("generation_a"), source, ec);
+        if (ec) return fail(name, "could not copy fixture");
+        { std::ofstream out(source, std::ios::binary | std::ios::app); out.put('E'); }
+        std::string image;
+        void (*fire)() = nullptr;
+        {
+            GameModuleLoader loader;
+            if (!loader.load(source.string())) return fail(name, "fixture load failed");
+            image = loader.getLoadedImagePath();
+#ifdef _WIN32
+            auto handle = LoadLibraryA(image.c_str());
+            if (!handle) return fail(name, "could not inspect fixture");
+            fire = reinterpret_cast<void(*)()>(GetProcAddress(handle, "fixtureFireEvent"));
+            FreeLibrary(handle);
+            _putenv_s("GARDEN_TEST_MODULE_EVENT", "1");
+#else
+            auto handle = dlopen(image.c_str(), RTLD_NOW);
+            if (!handle) return fail(name, "could not inspect fixture");
+            fire = reinterpret_cast<void(*)()>(dlsym(handle, "fixtureFireEvent"));
+            dlclose(handle);
+            setenv("GARDEN_TEST_MODULE_EVENT", "1", 1);
+#endif
+            const bool initialized = loader.init(nullptr);
+#ifdef _WIN32
+            _putenv_s("GARDEN_TEST_MODULE_EVENT", "");
+#else
+            unsetenv("GARDEN_TEST_MODULE_EVENT");
+#endif
+            if (!fire || !initialized || loader.unload())
+                return fail(name, "module EventBus registration did not refuse unload");
+        }
+        fire();
+        const auto events = recorder.events();
+        if (!fs::exists(image) || events.empty() || events.back() != "A.event.callback" ||
+            GameModuleLoader::retryRetiredGenerations())
+            return fail(name, "event callback or image did not survive refused retirement");
+        fs::remove_all(directory, ec);
+        return pass(name);
+    }
+
+    bool testRejectedCandidateEventBusRetention()
+    {
+        const std::string name = "GameModuleLifecycle_RejectedCandidateEventBusRetention";
+        ScopedRecorder recorder("rejected_event");
+        GameModuleLoader loader;
+#ifdef _WIN32
+        _putenv_s("GARDEN_TEST_MODULE_METADATA_EVENT", "1");
+#else
+        setenv("GARDEN_TEST_MODULE_METADATA_EVENT", "1", 1);
+#endif
+        const bool accepted = loader.load(fixturePath("candidate_abi_mismatch").string());
+#ifdef _WIN32
+        _putenv_s("GARDEN_TEST_MODULE_METADATA_EVENT", "");
+#else
+        unsetenv("GARDEN_TEST_MODULE_METADATA_EVENT");
+#endif
+        if (accepted || loader.isLoaded()) return fail(name, "ABI mismatch was accepted");
+        std::error_code ec;
+        fs::path image;
+        for (fs::recursive_directory_iterator it(loader.getOwnedGenerationRoot(), ec), end; !ec && it != end; it.increment(ec))
+            if (it->path().extension() == fixturePath("candidate_abi_mismatch").extension()) image = it->path();
+        if (ec || image.empty()) return fail(name, "hazardous rejected candidate was not retained");
+#ifdef _WIN32
+        auto handle = LoadLibraryA(image.string().c_str());
+        if (!handle) return fail(name, "retained image was not accessible");
+        auto fire = reinterpret_cast<void(*)()>(GetProcAddress(handle, "fixtureFireEvent"));
+        FreeLibrary(handle);
+#else
+        auto handle = dlopen(image.string().c_str(), RTLD_NOW);
+        if (!handle) return fail(name, "retained image was not accessible");
+        auto fire = reinterpret_cast<void(*)()>(dlsym(handle, "fixtureFireEvent"));
+        dlclose(handle);
+#endif
+        if (!fire) return fail(name, "retained event export missing");
+        fire();
+        const auto events = recorder.events();
+        if (std::find(events.begin(), events.end(), "B.event.callback") == events.end())
+            return fail(name, "retained event listener was not callable");
+        return pass(name);
+    }
+
+    bool testBareLoaderDestructorQuarantines()
+    {
+        const std::string name = "GameModuleLifecycle_BareLoaderDestructorQuarantine";
+        const auto directory = fs::temp_directory_path() / ("garden_bare_quarantine_" +
+            std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        std::error_code ec;
+        fs::create_directories(directory, ec);
+        const auto source = directory / fixturePath("generation_a").filename();
+        fs::copy_file(fixturePath("generation_a"), source, ec);
+        if (ec) return fail(name, "could not copy fixture");
+        { std::ofstream out(source, std::ios::binary | std::ios::app); out.put('B'); }
+        std::string image;
+        bool (*construct)(void*) noexcept = nullptr;
+        {
+            GameModuleLoader loader;
+            if (!loader.load(source.string())) return fail(name, "fixture load failed");
+            image = loader.getLoadedImagePath();
+#ifdef _WIN32
+            auto handle = LoadLibraryA(image.c_str());
+            if (!handle) return fail(name, "could not inspect fixture");
+            construct = reinterpret_cast<bool(*)(void*) noexcept>(GetProcAddress(handle, "fixtureConstruct"));
+            FreeLibrary(handle);
+#else
+            auto handle = dlopen(image.c_str(), RTLD_NOW);
+            if (!handle) return fail(name, "could not inspect fixture");
+            construct = reinterpret_cast<bool(*)(void*) noexcept>(dlsym(handle, "fixtureConstruct"));
+            dlclose(handle);
+#endif
+            if (!construct) return fail(name, "missing fixture operation");
+        }
+        int value = 0;
+        if (!fs::exists(image) || !construct(&value) || value != 73 ||
+            GameModuleLoader::retryRetiredGenerations() || !fs::exists(image))
+            return fail(name, "bare loader destructor did not quarantine the image");
+        fs::remove_all(directory, ec);
+        return pass(name);
+    }
+
+    bool testSameOwnerReloadRefusal()
+    {
+        const std::string name = "GameModuleLifecycle_SameOwnerReloadRefusal";
+        ScopedRecorder recorder("same_owner_reload");
+        HostLedger ledger;
+        ReflectionRegistry reflection;
+        GameModuleHostSession session(ledger.operations());
+        if (!session.loadAndRegister(fixturePath("generation_a").string(), reflection) ||
+            !session.initialiseClient(nullptr) || !session.notifyClientLevelLoaded() || !session.beginPlaying(false))
+            return fail(name, "session did not start");
+        const auto image = session.loader().getLoadedImagePath();
+        if (session.reloadCandidate(fixturePath("generation_a").string(), reflection, nullptr) ||
+            session.phase() != GameModuleHostSession::Phase::Playing ||
+            session.loader().getLoadedImagePath() != image || !ledger.events.empty())
+            return fail(name, "same-owner reload promoted or tore down the provider");
+        if (!session.stop()) return fail(name, "provider did not retire after candidate release");
+        return pass(name);
+    }
+
+    bool testMoveReplacementRefusal()
+    {
+        const std::string name = "GameModuleLifecycle_MoveReplacementRefusal";
+        GameModuleLoader provider, borrower, incoming;
+        if (!provider.load(fixturePath("generation_a").string()) ||
+            !borrower.load(fixturePath("generation_a").string()) ||
+            !incoming.load(fixturePath("generation_b").string())) return fail(name, "load failed");
+        const auto image = provider.getLoadedImagePath();
+        const auto incomingImage = incoming.getLoadedImagePath();
+        if (provider.replaceWith(std::move(incoming)) || provider.getLoadedImagePath() != image ||
+            incoming.getLoadedImagePath() != incomingImage || !fs::exists(image))
+            return fail(name, "busy replacement lost either image");
+        if (!borrower.unload() || !provider.replaceWith(std::move(incoming)) ||
+            provider.getLoadedImagePath() != incomingImage || !provider.unload())
+            return fail(name, "replacement did not succeed after borrower release");
         return pass(name);
     }
 
@@ -523,7 +951,7 @@ namespace
             return fail(name, "candidate promotion did not atomically exchange the active generation");
 
         session.updateClient(0.016f);
-        session.stop();
+        if (!session.stop()) return fail(name, "session stop refused");
         if (!equals(recorder.events(), {
                 "A.register_components", "A.client.init", "A.client.level_loaded", "A.client.update",
                 "A.client.shutdown", "B.register_components", "B.client.init", "B.client.level_loaded",
@@ -559,7 +987,7 @@ namespace
                 return fail(name, "candidate refusal changed active generation A: " + rejected_candidate);
 
             session.updateClient(0.016f);
-            session.stop();
+            if (!session.stop()) return fail(name, "session stop refused");
             if (!equals(recorder.events(), {
                     "A.register_components", "A.client.init", "A.client.level_loaded", "A.client.update",
                     "A.client.update", "A.client.shutdown"}))
@@ -596,7 +1024,7 @@ namespace
             return fail(name, "connected-client refusal changed the active server or began teardown");
 
         session.updateServer(0.016f);
-        session.stop();
+        if (!session.stop()) return fail(name, "session stop refused");
         if (!equals(recorder.events(), {
                 "register_components", "server.init", "server.level_loaded", "server.update",
                 "server.update", "server.shutdown"}))
@@ -631,8 +1059,21 @@ int main()
     ok = testOwnedTeardownAndNoPostUnloadDispatch() && ok;
     ok = testPostTeardownInitFailureRecovery() && ok;
     ok = testContentIdentity() && ok;
+    ok = testProviderRetirement() && ok;
+    ok = testCleanupExceptionAfterUnload() && ok;
+    ok = testOrphanedProviderRetry() && ok;
+    ok = testOrphanedPinnedProviderRetry() && ok;
+    ok = testHostRetirementRetry() && ok;
+    ok = testInvalidSourceRetiresLoadedImage() && ok;
+    ok = testHostCallbackProofRefusal() && ok;
+    ok = testSameOwnerReloadRefusal() && ok;
+    ok = testMoveReplacementRefusal() && ok;
     ok = testCandidatePromotion() && ok;
     ok = testCandidateRefusalKeepsActive() && ok;
     ok = testConnectedServerReloadRefusalKeepsActive() && ok;
+    ok = testDestructorQuarantinesUnprovenCallbacks() && ok;
+    ok = testBareLoaderDestructorQuarantines() && ok;
+    ok = testModuleEventBusRefusesUnload() && ok;
+    ok = testRejectedCandidateEventBusRetention() && ok;
     return ok ? 0 : 1;
 }

@@ -23,6 +23,7 @@
 #include "ImGuizmo.h"
 #include <SDL3/SDL.h>
 #include "Threading/JobSystem.hpp"
+#include "Events/EventBus.hpp"
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -1578,6 +1579,13 @@ void EditorApp::shutdown()
     if (m_state.isSimulationActive())
         stopPlay();
 
+    if (m_state.isSimulationActive() || !m_pie_clients.empty() ||
+        (m_game_module_session && !m_game_module_session->stop()))
+    {
+        LOG_ENGINE_ERROR("Editor shutdown: game module retirement is still pending");
+        return;
+    }
+
     // Save window geometry to config
     if (m_app.getWindow())
     {
@@ -1637,6 +1645,22 @@ void EditorApp::beginPlay()
     if (m_state.isSimulationActive())
         return; // already playing
 
+    for (auto& inst : m_pie_clients)
+    {
+        if (inst && !inst->release())
+        {
+            LOG_ENGINE_ERROR("PIE: Player {} module retirement is still pending", inst->player_index);
+            return;
+        }
+    }
+    m_pie_clients.clear();
+    if (m_game_module_session && !m_game_module_session->stop())
+    {
+        LOG_ENGINE_ERROR("PIE: Previous game module retirement is still pending");
+        return;
+    }
+    m_game_module_session.reset();
+
     if (m_state.pie_launch_mode == PIELaunchMode::NewEditorWindow ||
         m_state.pie_launch_mode == PIELaunchMode::StandaloneGame)
     {
@@ -1690,13 +1714,22 @@ void EditorApp::beginPlay()
     // destructors can still execute module code.
     m_game_module_session = std::make_unique<GameModuleHostSession>(
         GameModuleHostSession::HostOperations{
-            [this]() { m_game_module_active = false; },
             [this]() {
+                m_game_module_active = false;
+                Threading::JobSystem::get().barrier();
+            },
+            [this]() {
+                Threading::JobSystem::get().barrier();
                 m_game_input_manager.reset();
                 m_server_world.resetWorld();
                 m_play_world.reset();
             },
-            {}});
+            {}, {}, {},
+            [](const garden::ecs::ComponentOwnerId& owner) {
+                Threading::JobSystem::get().barrier();
+                return Threading::JobSystem::get().getPendingJobCount() == 0 &&
+                       EventBus::moduleSourceCanRetire(owner);
+            }});
 
     // Determine if we should use the game DLL for network PIE
     const bool simulate_mode = (m_state.pie_launch_mode == PIELaunchMode::Simulate);
@@ -1717,6 +1750,11 @@ void EditorApp::beginPlay()
         if (!m_game_module_session->loadAndRegister(dll_path, m_reflection))
         {
             LOG_ENGINE_ERROR("Failed to load game module '{}' — falling back to Standalone", dll_path);
+            if (!m_game_module_session->stop())
+            {
+                LOG_ENGINE_ERROR("PIE: Game module retirement refused: {}", m_game_module_session->lastFailure());
+                return;
+            }
             use_network_pie = false;
         }
     }
@@ -1728,7 +1766,11 @@ void EditorApp::beginPlay()
         if (!m_game_module_session->loader().hasServerSupport())
         {
             LOG_ENGINE_WARN("Game module has no server support — falling back to Standalone");
-            m_game_module_session->stop();
+            if (!m_game_module_session->stop())
+            {
+                LOG_ENGINE_ERROR("PIE: Game module retirement refused: {}", m_game_module_session->lastFailure());
+                return;
+            }
             use_network_pie = false;
         }
         else
@@ -1763,7 +1805,11 @@ void EditorApp::beginPlay()
             if (!m_game_module_session->initialiseServer(&m_server_services))
             {
                 LOG_ENGINE_ERROR("Server initialization failed — falling back to Standalone");
-                m_game_module_session->stop();
+                if (!m_game_module_session->stop())
+                {
+                    LOG_ENGINE_ERROR("PIE: Game module retirement refused: {}", m_game_module_session->lastFailure());
+                    return;
+                }
                 use_network_pie = false;
             }
             else
@@ -1771,7 +1817,11 @@ void EditorApp::beginPlay()
                 if (!m_game_module_session->notifyServerLevelLoaded())
                 {
                     LOG_ENGINE_ERROR("Server level callback failed — falling back to Standalone");
-                    m_game_module_session->stop();
+                    if (!m_game_module_session->stop())
+                    {
+                        LOG_ENGINE_ERROR("PIE: Game module retirement refused: {}", m_game_module_session->lastFailure());
+                        return;
+                    }
                     use_network_pie = false;
                 }
                 else
@@ -1815,7 +1865,11 @@ void EditorApp::beginPlay()
                         !m_game_module_session->beginPlaying(true))
                     {
                         LOG_ENGINE_ERROR("Client PIE lifecycle did not reach Playing");
-                        m_game_module_session->stop();
+                        if (!m_game_module_session->stop())
+                        {
+                            LOG_ENGINE_ERROR("PIE: Game module retirement refused: {}", m_game_module_session->lastFailure());
+                            return;
+                        }
                         use_network_pie = false;
                     }
                     else
@@ -1849,7 +1903,8 @@ void EditorApp::beginPlay()
                                 if (!inst->game_module.load(dll_path))
                                 {
                                     LOG_ENGINE_WARN("Failed to load DLL copy for Player {}", i);
-                                    inst->client_world.resetWorld();
+                                    if (!inst->release())
+                                        m_pie_clients.push_back(std::move(inst));
                                     continue;
                                 }
 
@@ -1858,8 +1913,8 @@ void EditorApp::beginPlay()
                                 if (!inst->viewport)
                                 {
                                     LOG_ENGINE_WARN("Failed to create PIE viewport for Player {}", i);
-                                    inst->game_module.unload();
-                                    inst->client_world.resetWorld();
+                                    if (!inst->release())
+                                        m_pie_clients.push_back(std::move(inst));
                                     continue;
                                 }
 
@@ -1893,8 +1948,8 @@ void EditorApp::beginPlay()
                                 {
                                     LOG_ENGINE_WARN("Client init failed for Player {}", i);
                                     inst->viewport.reset();
-                                    inst->game_module.unload();
-                                    inst->client_world.resetWorld();
+                                    if (!inst->release())
+                                        m_pie_clients.push_back(std::move(inst));
                                     continue;
                                 }
 
@@ -1942,7 +1997,11 @@ void EditorApp::beginPlay()
         if (!m_pie_processes.spawnServer(server_exe, project_path, port))
         {
             LOG_ENGINE_ERROR("Failed to spawn dedicated server — falling back to Standalone");
-            m_game_module_session->stop();
+            if (!m_game_module_session->stop())
+            {
+                LOG_ENGINE_ERROR("PIE: Game module retirement refused: {}", m_game_module_session->lastFailure());
+                return;
+            }
             use_network_pie = false;
         }
         else
@@ -1989,7 +2048,11 @@ void EditorApp::beginPlay()
                 {
                     LOG_ENGINE_ERROR("Dedicated-server client PIE lifecycle did not reach Playing");
                     m_pie_processes.killAll();
-                    m_game_module_session->stop();
+                    if (!m_game_module_session->stop())
+                    {
+                        LOG_ENGINE_ERROR("PIE: Game module retirement refused: {}", m_game_module_session->lastFailure());
+                        return;
+                    }
                     use_network_pie = false;
                 }
                 else
@@ -2019,7 +2082,8 @@ void EditorApp::beginPlay()
                             if (!inst->game_module.load(dll_path))
                             {
                                 LOG_ENGINE_WARN("Failed to load DLL copy for Player {}", i);
-                                inst->client_world.resetWorld();
+                                if (!inst->release())
+                                    m_pie_clients.push_back(std::move(inst));
                                 continue;
                             }
 
@@ -2027,8 +2091,8 @@ void EditorApp::beginPlay()
                             if (!inst->viewport)
                             {
                                 LOG_ENGINE_WARN("Failed to create PIE viewport for Player {}", i);
-                                inst->game_module.unload();
-                                inst->client_world.resetWorld();
+                                if (!inst->release())
+                                    m_pie_clients.push_back(std::move(inst));
                                 continue;
                             }
 
@@ -2061,8 +2125,8 @@ void EditorApp::beginPlay()
                             {
                                 LOG_ENGINE_WARN("Client init failed for Player {}", i);
                                 inst->viewport.reset();
-                                inst->game_module.unload();
-                                inst->client_world.resetWorld();
+                                if (!inst->release())
+                                    m_pie_clients.push_back(std::move(inst));
                                 continue;
                             }
 
@@ -2141,12 +2205,21 @@ void EditorApp::beginPlay()
             else
             {
                 LOG_ENGINE_ERROR("Standalone game module initialization failed - falling back to engine simulation");
-                m_game_module_session->stop();
+                if (!m_game_module_session->stop())
+                {
+                    LOG_ENGINE_ERROR("PIE: Game module retirement refused: {}", m_game_module_session->lastFailure());
+                    return;
+                }
             }
         }
 
         if (!m_game_module_active)
         {
+            if (m_game_module_session->loader().isLoaded() && !m_game_module_session->stop())
+            {
+                LOG_ENGINE_ERROR("PIE: Game module retirement refused: {}", m_game_module_session->lastFailure());
+                return;
+            }
             if (!m_play_world)
             {
                 m_play_world = cloneEditorWorldForPIE(
@@ -2260,6 +2333,8 @@ void EditorApp::stopPlay()
         return; // not playing
 
     LOG_ENGINE_INFO("--- PIE: Stopping play mode ---");
+    // No further game callbacks may be dispatched if retirement needs a retry.
+    m_game_module_active = false;
     XR::OpenXRSystem::get().endPIE();
 
     if (m_external_pie_active)
@@ -2270,9 +2345,9 @@ void EditorApp::stopPlay()
     }
 
     // 1. Tear down project DLL PIE or standalone simulation
-    if (m_game_module_active)
+    if (m_game_module_active || m_game_module_session)
     {
-        if (m_network_pie_active)
+        if (m_network_pie_active || !m_pie_clients.empty())
         {
             // Kill spawned processes first (clients disconnect before server shuts down)
             m_pie_processes.killAll();
@@ -2287,13 +2362,10 @@ void EditorApp::stopPlay()
             }
             for (auto& inst : m_pie_clients)
             {
-                if (inst && inst->initialized)
+                if (inst && !inst->release())
                 {
-                    inst->game_module.shutdown();
-                    inst->game_module.unload();
-                    inst->viewport.reset();
-                    inst->client_world.resetWorld();
-                    inst->initialized = false;
+                    LOG_ENGINE_ERROR("PIE: Player {} module retirement refused", inst->player_index);
+                    return;
                 }
             }
             m_pie_clients.clear();
@@ -2305,7 +2377,11 @@ void EditorApp::stopPlay()
         // registration removal and image unload.
         if (m_game_module_session)
         {
-            m_game_module_session->stop();
+            if (!m_game_module_session->stop())
+            {
+                LOG_ENGINE_ERROR("PIE: Game module retirement refused: {}", m_game_module_session->lastFailure());
+                return;
+            }
             m_game_module_session.reset();
         }
         m_game_module_active = false;
@@ -2468,7 +2544,11 @@ void EditorApp::processEvents()
         case SDL_EVENT_QUIT:
             if (m_state.isSimulationActive())
                 stopPlay();
-            m_running = false;
+            if (!m_state.isSimulationActive() && m_pie_clients.empty() &&
+                (!m_game_module_session || m_game_module_session->stop()))
+                m_running = false;
+            else
+                LOG_ENGINE_ERROR("Editor close refused: game module retirement is still pending");
             break;
 
         case SDL_EVENT_KEY_DOWN:
@@ -3025,7 +3105,11 @@ void EditorApp::renderMenuBar()
             {
                 if (m_state.isSimulationActive())
                     stopPlay();
-                m_running = false;
+                if (!m_state.isSimulationActive() && m_pie_clients.empty() &&
+                    (!m_game_module_session || m_game_module_session->stop()))
+                    m_running = false;
+                else
+                    LOG_ENGINE_ERROR("Editor close refused: game module retirement is still pending");
             }
 
             ImGui::EndMenu();

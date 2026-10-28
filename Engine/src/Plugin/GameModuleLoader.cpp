@@ -1,5 +1,6 @@
 #include "GameModuleLoader.hpp"
 #include "GameFramework/GameModeRegistry.hpp"
+#include "Events/EventBus.hpp"
 
 #include <algorithm>
 #include <array>
@@ -7,6 +8,8 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
+#include <memory>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -28,6 +31,7 @@ namespace
 
     std::atomic_uint64_t g_generationOrdinal{0};
     std::atomic_uint64_t g_sessionOrdinal{0};
+    std::atomic<GameModuleLoader::CleanupTestHook> g_cleanupTestHook{nullptr};
 
     uint64_t currentProcessId()
     {
@@ -290,6 +294,20 @@ namespace
         }
     }
 
+    // File cleanup occurs after unmapping. It is best effort and must never
+    // unwind across committed image/attachment bookkeeping.
+    void cleanupOwnedNoThrow(const std::string& root, const std::string& generation,
+                             const std::vector<std::string>& files) noexcept
+    {
+        try {
+            if (auto hook = g_cleanupTestHook.load(std::memory_order_acquire)) hook();
+            removeOwnedGeneration(fs::path(root), fs::path(generation), files);
+            removeEmptyOwnedRoot(fs::path(root));
+        } catch (...) {
+            fprintf(stderr, "[GameModule] Retaining generation files after cleanup exception\n");
+        }
+    }
+
     bool ensureOwnedRoot(const fs::path& root, std::string& error)
     {
         std::error_code ec;
@@ -412,10 +430,25 @@ namespace
 
         void reset()
         {
+            if (handle && identity.kind == garden::ecs::ComponentOwnerKind::Module &&
+                !EventBus::get().moduleSourceCanRetire(identity)) {
+                // A rejected or abandoned image may own persistent dispatcher
+                // callbacks/pools. Keep its OS handle and files for process life.
+                fprintf(stderr, "[GameModule] Retaining candidate with EventBus use\n");
+                handle = nullptr;
+                generation_path.clear();
+                owned_files.clear();
+                loaded_path.clear();
+                return;
+            }
             platformUnload(handle);
             handle = nullptr;
-            if (!generation_path.empty())
-                removeOwnedGeneration(generation_root, generation_path, owned_files);
+            try {
+                if (!generation_path.empty())
+                    removeOwnedGeneration(generation_root, generation_path, owned_files);
+            } catch (...) {
+                fprintf(stderr, "[GameModule] Retaining candidate files after cleanup exception\n");
+            }
             generation_path.clear();
             owned_files.clear();
             loaded_path.clear();
@@ -644,6 +677,10 @@ namespace
             }
         }
 
+        // The digest is verified, while the ABI token is provisional until the
+        // metadata export returns. Rejected candidates use this same key.
+        candidate.identity = garden::ecs::ComponentOwnerId::module(image_digest, GARDEN_MODULE_API_VERSION);
+        EventBus::ModuleSourceScope candidateScope(candidate.identity);
         candidate.handle = platformLoad(candidate.loaded_path.string());
         if (!candidate.handle)
         {
@@ -664,6 +701,34 @@ namespace
         return CandidatePreparation::Success;
     }
 
+    struct Generation {
+        garden::ecs::ComponentOwnerId owner;
+        void* providerHandle = nullptr;
+        std::string root, path;
+        std::vector<std::string> files;
+        size_t borrowers = 0;
+        bool retiring = false;
+        bool providerAttached = true;
+        bool cleanupUnproven = false;
+    };
+    // Intentionally process-lifetime: a failed destructor must not unmap code.
+    struct GenerationRegistry { std::mutex mutex; std::vector<std::unique_ptr<Generation>> generations; };
+    GenerationRegistry& generationRegistry() {
+        static auto* registry = new GenerationRegistry;
+        return *registry;
+    }
+    bool finishRetirement(GenerationRegistry& registry, Generation* g) {
+        using namespace garden::ecs;
+        if (g->borrowers || !EventBus::get().moduleSourceCanRetire(g->owner)) return false;
+        const auto result = ComponentCatalog::instance().unregisterOwner(g->owner);
+        if (result != ComponentCatalogResult::Success && result != ComponentCatalogResult::NotFound) return false;
+        platformUnload(g->providerHandle);
+        cleanupOwnedNoThrow(g->root, g->path, g->files);
+        for (auto it = registry.generations.begin(); it != registry.generations.end(); ++it)
+            if (it->get() == g) { registry.generations.erase(it); break; }
+        return true;
+    }
+
 }
 
 GameModuleLoader::GameModuleLoader()
@@ -675,7 +740,22 @@ GameModuleLoader::GameModuleLoader()
 
 GameModuleLoader::~GameModuleLoader()
 {
-    unload();
+    if (!m_handle) return;
+    if (m_retirement_requested && m_generation && m_is_provider) {
+        // Explicit unload is the host's assertion that non-catalog cleanup
+        // completed. A refused provider remains process-owned and retryable.
+        try {
+            auto& registry = generationRegistry();
+            std::lock_guard lock(registry.mutex);
+            static_cast<Generation*>(m_generation)->providerAttached = false;
+        } catch (...) {
+            // The attached control block remains pinned for process life.
+        }
+        return;
+    }
+    // A destructor cannot establish host cleanup. Preserve both provider and
+    // borrower images indefinitely rather than executing an implicit unload.
+    quarantine();
 }
 
 GameModuleLoader::GameModuleLoader(GameModuleLoader&& other) noexcept
@@ -683,18 +763,19 @@ GameModuleLoader::GameModuleLoader(GameModuleLoader&& other) noexcept
     moveFrom(std::move(other));
 }
 
-GameModuleLoader& GameModuleLoader::operator=(GameModuleLoader&& other) noexcept
+bool GameModuleLoader::replaceWith(GameModuleLoader&& other) noexcept
 {
-    if (this != &other)
-    {
-        unload();
-        moveFrom(std::move(other));
-    }
-    return *this;
+    if (this == &other) return true;
+    if (!unload()) return false;
+    moveFrom(std::move(other));
+    return true;
 }
 
 void GameModuleLoader::moveFrom(GameModuleLoader&& other) noexcept
 {
+    m_generation = other.m_generation;
+    m_is_provider = other.m_is_provider;
+    m_retirement_requested = other.m_retirement_requested;
     m_handle = other.m_handle;
     m_source_path = std::move(other.m_source_path);
     m_loaded_path = std::move(other.m_loaded_path);
@@ -719,6 +800,9 @@ void GameModuleLoader::moveFrom(GameModuleLoader&& other) noexcept
     m_fnServerOnClientConnected = other.m_fnServerOnClientConnected;
     m_fnServerOnClientDisconnected = other.m_fnServerOnClientDisconnected;
 
+    other.m_generation = nullptr;
+    other.m_is_provider = false;
+    other.m_retirement_requested = false;
     other.m_handle = nullptr;
     other.m_source_path.clear();
     other.m_loaded_path.clear();
@@ -747,16 +831,16 @@ bool GameModuleLoader::loadReloadCandidate(const std::string& dll_path)
     m_generation_path = candidate.releaseGenerationPath();
     m_owned_generation_files = candidate.releaseOwnedFiles();
     m_component_owner_id = std::move(candidate.identity);
-    if (resolveFunctions()) return true;
+    if (resolveFunctions() && attachGeneration()) return true;
 
-    unload();
+    (void)unload();
     return false;
 }
 
 bool GameModuleLoader::load(const std::string& dll_path)
 {
-    if (m_handle)
-        unload();
+    if (m_handle && !unload())
+        return false;
 
     PreparedModule candidate(m_generation_root);
     if (prepareOwnedCandidate(dll_path, candidate) != CandidatePreparation::Success)
@@ -774,9 +858,9 @@ bool GameModuleLoader::load(const std::string& dll_path)
     m_owned_generation_files = candidate.releaseOwnedFiles();
     m_component_owner_id = std::move(candidate.identity);
 
-    if (!resolveFunctions())
+    if (!resolveFunctions() || !attachGeneration())
     {
-        unload();
+        (void)unload();
         return false;
     }
 
@@ -785,24 +869,144 @@ bool GameModuleLoader::load(const std::string& dll_path)
     return true;
 }
 
-void GameModuleLoader::unload()
+bool GameModuleLoader::attachGeneration() noexcept
+{
+    try {
+        auto& registry = generationRegistry();
+        std::lock_guard lock(registry.mutex);
+        for (auto& existing : registry.generations) {
+            if (existing->owner != m_component_owner_id) continue;
+            if (existing->retiring) return false;
+            ++existing->borrowers;
+            m_generation = existing.get();
+            m_is_provider = false;
+            return true;
+        }
+        auto generation = std::make_unique<Generation>();
+        generation->owner = m_component_owner_id;
+        generation->providerHandle = m_handle;
+        generation->root = m_generation_root;
+        generation->path = m_generation_path;
+        generation->files = m_owned_generation_files;
+        registry.generations.push_back(std::move(generation));
+        auto* inserted = registry.generations.back().get();
+        if (garden::ecs::ComponentCatalog::instance().reopenOwner(m_component_owner_id) != garden::ecs::ComponentCatalogResult::Success) {
+            registry.generations.pop_back();
+            return false;
+        }
+        m_generation = inserted;
+        m_is_provider = true;
+        return true;
+    } catch (...) { return false; }
+}
+
+void GameModuleLoader::setCleanupTestHook(CleanupTestHook hook) noexcept
+{
+    g_cleanupTestHook.store(hook, std::memory_order_release);
+}
+
+bool GameModuleLoader::retryRetiredGenerations() noexcept
+{
+    try {
+        auto& registry = generationRegistry();
+        std::lock_guard lock(registry.mutex);
+        bool complete = true;
+        for (size_t i = 0; i < registry.generations.size();) {
+            auto* g = registry.generations[i].get();
+            if (!g->providerAttached) {
+                if (g->cleanupUnproven) { complete = false; ++i; continue; }
+                if (!g->retiring) {
+                    if (garden::ecs::ComponentCatalog::instance().beginRetirement(g->owner) != garden::ecs::ComponentCatalogResult::Success) { complete = false; ++i; continue; }
+                    g->retiring = true;
+                }
+                if (finishRetirement(registry, g)) continue;
+                complete = false;
+            }
+            ++i;
+        }
+        return complete;
+    } catch (...) { return false; }
+}
+
+void GameModuleLoader::quarantine() noexcept
 {
     if (!m_handle) return;
-
-    const std::string game_name = getGameName();
-    GameFramework::GameModeRegistry::get().unregisterBySource(game_name);
-    clearFunctionPointers();
-    platformUnload(m_handle);
+    // A borrower retains its own image and attachment forever, blocking its
+    // provider. A provider is retained by its process-owned control block.
+    // Even if locking fails, do not unload: the still-attached control block
+    // cannot be retried and the OS handle remains live until process exit.
+    try {
+        if (m_generation && m_is_provider) {
+            auto& registry = generationRegistry();
+            std::lock_guard lock(registry.mutex);
+            auto* g = static_cast<Generation*>(m_generation);
+            // Block future attachments; if catalog gating cannot allocate, the
+            // image remains pinned forever even for any later registration.
+            g->retiring = true;
+            (void)garden::ecs::ComponentCatalog::instance().beginRetirement(g->owner);
+            g->cleanupUnproven = true;
+            g->providerAttached = false;
+        }
+    } catch (...) {}
+    m_generation = nullptr;
     m_handle = nullptr;
+    m_is_provider = false;
+    m_retirement_requested = false;
+    clearFunctionPointers();
+}
 
-    if (!m_generation_path.empty())
-        removeOwnedGeneration(m_generation_root, m_generation_path, m_owned_generation_files);
-    m_source_path.clear();
-    m_loaded_path.clear();
-    m_generation_path.clear();
-    m_owned_generation_files.clear();
-    m_component_owner_id = {};
-    removeEmptyOwnedRoot(m_generation_root);
+bool GameModuleLoader::beginRetirement() noexcept
+{
+    if (!m_generation || !m_is_provider) return true;
+    try {
+        auto& registry = generationRegistry();
+        std::lock_guard lock(registry.mutex);
+        auto* generation = static_cast<Generation*>(m_generation);
+        if (garden::ecs::ComponentCatalog::instance().beginRetirement(m_component_owner_id) != garden::ecs::ComponentCatalogResult::Success) return false;
+        generation->retiring = true;
+        return generation->borrowers == 0;
+    } catch (...) { return false; }
+}
+
+bool GameModuleLoader::unload() noexcept
+{
+    if (!m_handle) return true;
+    m_retirement_requested = true;
+    try {
+        if (m_generation) {
+            auto& registry = generationRegistry();
+            std::lock_guard lock(registry.mutex);
+            auto* generation = static_cast<Generation*>(m_generation);
+            if (m_is_provider) {
+                if (garden::ecs::ComponentCatalog::instance().beginRetirement(m_component_owner_id) != garden::ecs::ComponentCatalogResult::Success) return false;
+                generation->retiring = true;
+                if (generation->borrowers || !EventBus::get().moduleSourceCanRetire(m_component_owner_id)) return false;
+                // Host owns cleanup of reflection, jobs and framework callbacks.
+                if (!finishRetirement(registry, generation)) return false;
+            } else {
+                if (!EventBus::get().moduleSourceCanRetire(m_component_owner_id)) return false;
+                --generation->borrowers;
+                platformUnload(m_handle);
+                cleanupOwnedNoThrow(m_generation_root, m_generation_path, m_owned_generation_files);
+            }
+        } else {
+            if (m_component_owner_id.kind == garden::ecs::ComponentOwnerKind::Module &&
+                !EventBus::get().moduleSourceCanRetire(m_component_owner_id)) return false;
+            platformUnload(m_handle);
+            cleanupOwnedNoThrow(m_generation_root, m_generation_path, m_owned_generation_files);
+        }
+        m_generation = nullptr;
+        m_is_provider = false;
+        m_retirement_requested = false;
+        m_handle = nullptr;
+        clearFunctionPointers();
+        m_source_path.clear();
+        m_loaded_path.clear();
+        m_generation_path.clear();
+        m_owned_generation_files.clear();
+        m_component_owner_id = {};
+        return true;
+    } catch (...) { return false; }
 }
 
 bool GameModuleLoader::reload(const std::string& dll_path)
@@ -820,7 +1024,7 @@ bool GameModuleLoader::reload(const std::string& dll_path)
     }
 
     printf("[GameModule] Promoting validated candidate for '%s'...\n", candidate.source_path.string().c_str());
-    unload();
+    if (!unload()) return false;
     m_handle = candidate.releaseHandle();
     m_source_path = candidate.source_path.string();
     m_loaded_path = candidate.loaded_path.string();
@@ -828,9 +1032,9 @@ bool GameModuleLoader::reload(const std::string& dll_path)
     m_owned_generation_files = candidate.releaseOwnedFiles();
     m_component_owner_id = std::move(candidate.identity);
 
-    if (!resolveFunctions())
+    if (!resolveFunctions() || !attachGeneration())
     {
-        unload();
+        (void)unload();
         return false;
     }
     printf("[GameModule] Reloaded '%s' (game: %s, server: %s)\n",
@@ -882,19 +1086,19 @@ void GameModuleLoader::clearFunctionPointers()
     m_fnServerOnClientDisconnected = nullptr;
 }
 
-int32_t GameModuleLoader::getAPIVersion() { return m_fnGetAPIVersion ? m_fnGetAPIVersion() : -1; }
-const char* GameModuleLoader::getGameName() { return m_fnGetGameName ? m_fnGetGameName() : "Unknown"; }
-bool GameModuleLoader::init(EngineServices* services) { return m_fnGameInit ? m_fnGameInit(services) : false; }
-void GameModuleLoader::shutdown() { if (m_fnGameShutdown) m_fnGameShutdown(); }
-void GameModuleLoader::registerComponents(ReflectionRegistry* registry) { if (m_fnRegisterComponents) m_fnRegisterComponents(registry); }
-void GameModuleLoader::update(float delta_time) { if (m_fnGameUpdate) m_fnGameUpdate(delta_time); }
-void GameModuleLoader::onLevelLoaded() { if (m_fnOnLevelLoaded) m_fnOnLevelLoaded(); }
-void GameModuleLoader::onPlayStart() { if (m_fnOnPlayStart) m_fnOnPlayStart(); }
-void GameModuleLoader::onPlayStop() { if (m_fnOnPlayStop) m_fnOnPlayStop(); }
-bool GameModuleLoader::serverInit(EngineServices* services) { return m_fnServerInit ? m_fnServerInit(services) : false; }
-void GameModuleLoader::serverShutdown() { if (m_fnServerShutdown) m_fnServerShutdown(); }
-void GameModuleLoader::serverPrePhysics(float fixed_delta) { if (m_fnServerPrePhysics) m_fnServerPrePhysics(fixed_delta); }
-void GameModuleLoader::serverUpdate(float delta_time) { if (m_fnServerUpdate) m_fnServerUpdate(delta_time); }
-void GameModuleLoader::serverOnLevelLoaded() { if (m_fnServerOnLevelLoaded) m_fnServerOnLevelLoaded(); }
-void GameModuleLoader::serverOnClientConnected(uint16_t client_id) { if (m_fnServerOnClientConnected) m_fnServerOnClientConnected(client_id); }
-void GameModuleLoader::serverOnClientDisconnected(uint16_t client_id) { if (m_fnServerOnClientDisconnected) m_fnServerOnClientDisconnected(client_id); }
+int32_t GameModuleLoader::getAPIVersion() { EventBus::ModuleSourceScope scope(m_component_owner_id); return m_fnGetAPIVersion ? m_fnGetAPIVersion() : -1; }
+const char* GameModuleLoader::getGameName() { EventBus::ModuleSourceScope scope(m_component_owner_id); return m_fnGetGameName ? m_fnGetGameName() : "Unknown"; }
+bool GameModuleLoader::init(EngineServices* services) { EventBus::ModuleSourceScope scope(m_component_owner_id); return m_fnGameInit ? m_fnGameInit(services) : false; }
+void GameModuleLoader::shutdown() { EventBus::ModuleSourceScope scope(m_component_owner_id); if (m_fnGameShutdown) m_fnGameShutdown(); }
+void GameModuleLoader::registerComponents(ReflectionRegistry* registry) { EventBus::ModuleSourceScope scope(m_component_owner_id); if (m_is_provider && m_fnRegisterComponents) m_fnRegisterComponents(registry); }
+void GameModuleLoader::update(float delta_time) { EventBus::ModuleSourceScope scope(m_component_owner_id); if (m_fnGameUpdate) m_fnGameUpdate(delta_time); }
+void GameModuleLoader::onLevelLoaded() { EventBus::ModuleSourceScope scope(m_component_owner_id); if (m_fnOnLevelLoaded) m_fnOnLevelLoaded(); }
+void GameModuleLoader::onPlayStart() { EventBus::ModuleSourceScope scope(m_component_owner_id); if (m_fnOnPlayStart) m_fnOnPlayStart(); }
+void GameModuleLoader::onPlayStop() { EventBus::ModuleSourceScope scope(m_component_owner_id); if (m_fnOnPlayStop) m_fnOnPlayStop(); }
+bool GameModuleLoader::serverInit(EngineServices* services) { EventBus::ModuleSourceScope scope(m_component_owner_id); return m_fnServerInit ? m_fnServerInit(services) : false; }
+void GameModuleLoader::serverShutdown() { EventBus::ModuleSourceScope scope(m_component_owner_id); if (m_fnServerShutdown) m_fnServerShutdown(); }
+void GameModuleLoader::serverPrePhysics(float fixed_delta) { EventBus::ModuleSourceScope scope(m_component_owner_id); if (m_fnServerPrePhysics) m_fnServerPrePhysics(fixed_delta); }
+void GameModuleLoader::serverUpdate(float delta_time) { EventBus::ModuleSourceScope scope(m_component_owner_id); if (m_fnServerUpdate) m_fnServerUpdate(delta_time); }
+void GameModuleLoader::serverOnLevelLoaded() { EventBus::ModuleSourceScope scope(m_component_owner_id); if (m_fnServerOnLevelLoaded) m_fnServerOnLevelLoaded(); }
+void GameModuleLoader::serverOnClientConnected(uint16_t client_id) { EventBus::ModuleSourceScope scope(m_component_owner_id); if (m_fnServerOnClientConnected) m_fnServerOnClientConnected(client_id); }
+void GameModuleLoader::serverOnClientDisconnected(uint16_t client_id) { EventBus::ModuleSourceScope scope(m_component_owner_id); if (m_fnServerOnClientDisconnected) m_fnServerOnClientDisconnected(client_id); }

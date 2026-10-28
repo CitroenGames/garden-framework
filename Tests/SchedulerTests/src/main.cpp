@@ -406,6 +406,57 @@ bool testTimerFixed()
     return pass(name);
 }
 
+int g_engine_listener_calls = 0;
+int g_module_listener_calls = 0;
+void engineListener(const TimerExpiredEvent&) { ++g_engine_listener_calls; }
+void moduleListener(const TimerExpiredEvent&) { ++g_module_listener_calls; }
+
+bool testModuleEventRetirementGate()
+{
+    const std::string name = "Module event use refuses retirement without clearing engine listeners";
+    std::array<uint8_t, 32> digest{};
+    digest[0] = 0x71;
+    const auto owner = garden::ecs::ComponentOwnerId::module(digest, 42);
+    digest[0] = 0x72;
+    const auto other = garden::ecs::ComponentOwnerId::module(digest, 42);
+    digest[0] = 0x73;
+    const auto untyped_flush = garden::ecs::ComponentOwnerId::module(digest, 42);
+    digest[0] = 0x74;
+    const auto typed_flush = garden::ecs::ComponentOwnerId::module(digest, 42);
+    auto& bus = EventBus::get();
+    {
+        EventBus::ModuleSourceScope scope(untyped_flush);
+        bus.flush();
+    }
+    {
+        EventBus::ModuleSourceScope scope(typed_flush);
+        bus.flush<TimerExpiredEvent>();
+    }
+    if (!EventBus::moduleSourceCanRetire(untyped_flush))
+        return fail(name, "untyped flush incorrectly blocked retirement");
+    if (EventBus::moduleSourceCanRetire(typed_flush))
+        return fail(name, "typed flush did not block retirement");
+    g_engine_listener_calls = g_module_listener_calls = 0;
+    bus.sink<TimerExpiredEvent>().connect<&engineListener>();
+    {
+        EventBus::ModuleSourceScope scope(owner);
+        bus.sink<TimerExpiredEvent>().connect<&moduleListener>();
+    }
+    const bool blocked = !EventBus::moduleSourceCanRetire(owner);
+    const bool other_allowed = EventBus::moduleSourceCanRetire(other);
+    bus.publish(TimerExpiredEvent{0, false});
+    bus.sink<TimerExpiredEvent>().disconnect<&moduleListener>();
+    bus.publish(TimerExpiredEvent{0, false});
+    bus.sink<TimerExpiredEvent>().disconnect<&engineListener>();
+    if (!blocked) return fail(name, "module listener did not block retirement");
+    if (!other_allowed) return fail(name, "unrelated module source was blocked");
+    if (g_engine_listener_calls != 2 || g_module_listener_calls != 1)
+        return fail(name, "listener delivery or engine listener preservation failed");
+    if (EventBus::moduleSourceCanRetire(owner))
+        return fail(name, "disconnect incorrectly cleared retained pool hazard");
+    return pass(name);
+}
+
 } // namespace
 
 int main()
@@ -421,6 +472,7 @@ int main()
     if (!testHierarchyPropagationAfterGameplay()) ++failures;
     if (!testDestroyDrain()) ++failures;
     if (!testTimerFixed()) ++failures;
+    if (!testModuleEventRetirementGate()) ++failures;
     if (failures == 0)
         std::cout << "All SchedulerTests passed" << std::endl;
     else

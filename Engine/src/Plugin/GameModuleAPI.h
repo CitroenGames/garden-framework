@@ -97,6 +97,18 @@ struct EngineServices
 //   GAME_API void        gardenRegisterComponents(ReflectionRegistry* registry);
 //   GAME_API void        gardenGameUpdate(float delta_time);
 //
+// Init returning false must synchronously roll back every thread, callback and
+// resource created by that init; its matching shutdown export is not called.
+// Successful role shutdown must join all module-created threads before return.
+// The host separately drains host-owned jobs and callbacks before unmapping.
+//
+// EventBus access from a module is supported only on the host thread during
+// an exported module callback. DLL static initialization/destruction and
+// module-created worker threads must not access EventBus. Direct module use
+// of sink/publish/queue/emplace currently prevents image retirement because
+// EnTT event-pool lifetime is not yet owned by the host. Non-templated
+// flush() is permitted; flush<Event>() can create a pool and blocks retirement.
+//
 // Optional client lifecycle exports (resolved at runtime — absent = no-op):
 //
 //   GAME_API void        gardenOnLevelLoaded();
