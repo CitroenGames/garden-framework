@@ -805,6 +805,7 @@ static bool runCompetitivePresentationProtocolTests()
     snapshot.presentation_revision = 0xfffffffeu;
     snapshot.source_server_tick = 400;
     snapshot.recipient_team = 1;
+    snapshot.recipient_stable_player_id = 101;
     snapshot.phase = 3;
     snapshot.phase_deadline_tick = 800;
     snapshot.round_number = 12;
@@ -827,6 +828,7 @@ static bool runCompetitivePresentationProtocolTests()
         if (!CompetitiveSerializer::deserialize(reader, decoded) ||
             decoded.match_instance_id != snapshot.match_instance_id ||
             decoded.presentation_revision != snapshot.presentation_revision ||
+            decoded.recipient_stable_player_id != snapshot.recipient_stable_player_id ||
             decoded.roster[0].money != 3100 || decoded.roster[1].money_visible != 0) {
             state.addError("presentation snapshot round-trip changed receiver-filtered data");
         }
@@ -847,6 +849,9 @@ static bool runCompetitivePresentationProtocolTests()
     invalid = snapshot;
     invalid.roster[1].stable_player_id = 101;
     if (CompetitiveSerializer::serialize(writer, invalid)) state.addError("duplicate presentation row identity serialized");
+    invalid = snapshot;
+    invalid.recipient_stable_player_id = 0;
+    if (CompetitiveSerializer::serialize(writer, invalid)) state.addError("missing presentation recipient identity serialized");
     invalid = snapshot;
     invalid.radar[1].kind = 3;
     if (CompetitiveSerializer::serialize(writer, invalid)) state.addError("unknown radar policy enum serialized");
@@ -1771,64 +1776,191 @@ static bool runBlockedInputCursorRegressionTest()
         return false;
     }
 
-    world client_world;
-    Net::ClientNetworkManager client;
-    client.setWorld(&client_world);
-    if (!client.initialize() || !client.connectToServer("127.0.0.1", port, "blocked_input_cursor")) {
-        std::cerr << "[FAIL] BlockedInputCursorRegressionTests could not connect client\n";
-        client.shutdown();
+    // This test targets the server's INPUT_COMMAND parser and filter. Use a
+    // raw ENet peer rather than ClientNetworkManager so client-side pacing
+    // cannot coalesce the deliberately distinct rejected samples before they
+    // reach handleInputCommand.
+    ENetHost* raw = enet_host_create(nullptr, 1, Net::NETWORK_CHANNEL_COUNT, 0, 0);
+    if (raw == nullptr) {
+        std::cerr << "[FAIL] BlockedInputCursorRegressionTests could not create raw ENet client\n";
         server.shutdown();
         return false;
     }
 
-    for (uint32_t frame = 0; frame < config.connect_frame_budget && !client.isConnected(); ++frame) {
-        client.update(kFixedDelta);
-        server.update(0.0f);
-        client.update(0.0f);
-        SDL_Delay(1);
-    }
-    if (!client.isConnected() || server.getClientCount() != 1u) {
-        state.addError("blocked-input loopback client did not connect");
+    ENetAddress address{};
+    enet_address_set_host(&address, "127.0.0.1");
+    address.port = port;
+    ENetPeer* raw_peer = enet_host_connect(raw, &address, Net::NETWORK_CHANNEL_COUNT, 0);
+    if (raw_peer == nullptr) {
+        std::cerr << "[FAIL] BlockedInputCursorRegressionTests could not start raw ENet connection\n";
+        enet_host_destroy(raw);
+        server.shutdown();
+        return false;
     }
 
-    Net::InputState input;
-    input.move_forward = 1.0f;
-    // Send five command packets while rejected. The last four packets carry
-    // redundancy, so the final live packet would replay ticks 4-5 if
-    // the server left its accepted-input cursor at zero.
-    for (uint32_t tick = 1u; state.error_count == 0 && tick <= 5u; ++tick) {
-        client.sendInputCommand(tick, input);
-        client.update(kFixedDelta * 2.0f);
-        server.update(0.0f);
-        client.update(0.0f);
+    bool connect_request_sent = false;
+    bool raw_disconnected = false;
+    uint16_t raw_client_id = 0;
+    auto serviceRawPeer = [&]() {
+        ENetEvent event{};
+        while (enet_host_service(raw, &event, 0) > 0) {
+            if (event.type == ENET_EVENT_TYPE_CONNECT && !connect_request_sent) {
+                connect_request_sent = true;
+                Net::ConnectRequestMessage request;
+                std::strncpy(request.player_name, "blocked_input_cursor", sizeof(request.player_name) - 1u);
+                request.capability_flags = 0; // The raw fixture sends the legacy input layout below.
+                Net::BitWriter writer;
+                Net::NetworkSerializer::serialize(writer, request);
+                ENetPacket* packet = enet_packet_create(
+                    writer.getData(), writer.getByteSize(), ENET_PACKET_FLAG_RELIABLE);
+                if (packet == nullptr || enet_peer_send(raw_peer,
+                    static_cast<uint8_t>(Net::NetworkChannel::RELIABLE_ORDERED), packet) < 0) {
+                    if (packet != nullptr) {
+                        enet_packet_destroy(packet);
+                    }
+                    state.addError("raw blocked-input fixture could not send CONNECT_REQUEST");
+                } else {
+                    enet_host_flush(raw);
+                }
+            } else if (event.type == ENET_EVENT_TYPE_RECEIVE) {
+                Net::BitReader reader(event.packet->data, event.packet->dataLength);
+                Net::ConnectAcceptMessage accept;
+                if (Net::NetworkSerializer::deserialize(reader, accept)) {
+                    raw_client_id = accept.client_id;
+                }
+                enet_packet_destroy(event.packet);
+            } else if (event.type == ENET_EVENT_TYPE_DISCONNECT ||
+                       event.type == ENET_EVENT_TYPE_DISCONNECT_TIMEOUT) {
+                raw_disconnected = true;
+            }
+        }
+    };
+
+    for (uint32_t frame = 0;
+         frame < config.connect_frame_budget && raw_client_id == 0 && !raw_disconnected;
+         ++frame) {
+        serviceRawPeer();
+        server.update(kFixedDelta);
+        serviceRawPeer();
         SDL_Delay(1);
+    }
+    if (!connect_request_sent || raw_client_id == 0 || raw_disconnected || server.getClientCount() != 1u) {
+        state.addError("raw blocked-input fixture did not complete the server handshake");
+    }
+
+    const Net::ClientInfo* initial_info = server.getClientInfo(raw_client_id);
+    const uint32_t initial_budget = initial_info != nullptr ? initial_info->input_tick_budget : 0u;
+
+    auto sendRawInput = [&](uint32_t primary_tick, uint32_t redundant_a, uint32_t redundant_b) {
+        Net::InputCommandMessage message;
+        message.client_tick = primary_tick;
+        message.last_received_tick = 0;
+        message.move_forward = 1.0f;
+
+        std::array<Net::InputSample, 2> redundant{};
+        uint8_t redundant_count = 0;
+        const auto appendRedundant = [&](uint32_t tick) {
+            if (tick == 0u) {
+                return;
+            }
+            Net::InputSample& sample = redundant[redundant_count++];
+            sample.tick = tick;
+            sample.move_forward = 1.0f;
+        };
+        appendRedundant(redundant_a);
+        appendRedundant(redundant_b);
+
+        Net::BitWriter writer;
+        Net::NetworkSerializer::serialize(
+            writer, message, redundant.data(), redundant_count, false);
+        ENetPacket* packet = enet_packet_create(writer.getData(), writer.getByteSize(), 0);
+        if (packet == nullptr || enet_peer_send(raw_peer,
+            static_cast<uint8_t>(Net::NetworkChannel::UNRELIABLE_SEQUENCED), packet) < 0) {
+            if (packet != nullptr) {
+                enet_packet_destroy(packet);
+            }
+            state.addError("raw blocked-input fixture could not send INPUT_COMMAND");
+            return false;
+        }
+        enet_host_flush(raw);
+        return true;
+    };
+
+    auto driveRawInputToCursor = [&](uint32_t expected_tick, const char* phase) {
+        uint32_t observed_cursor = 0;
+        for (uint32_t frame = 0; frame < 120u; ++frame) {
+            server.update(kFixedDelta);
+            serviceRawPeer();
+            if (const Net::ClientInfo* info = server.getClientInfo(raw_client_id)) {
+                observed_cursor = info->last_input_tick;
+                if (observed_cursor == expected_tick) {
+                    return true;
+                }
+            }
+            SDL_Delay(1);
+        }
+        state.addError(std::string(phase) + " input cursor was not confirmed at tick " +
+                       std::to_string(expected_tick) + " (observed=" +
+                       std::to_string(observed_cursor) + ')');
+        return false;
+    };
+
+    // Each blocked packet carries redundant prior samples. Valid monotonic
+    // input must advance only the transport cursor: no callback and no budget
+    // consumption while the game filter remains closed.
+    bool observed_all_blocked_inputs = true;
+    for (uint32_t tick = 1u; tick <= 5u; ++tick) {
+        const uint32_t redundant_a = tick > 1u ? tick - 1u : 0u;
+        const uint32_t redundant_b = tick > 2u ? tick - 2u : 0u;
+        if (!sendRawInput(tick, redundant_b, redundant_a) ||
+            !driveRawInputToCursor(tick, "blocked")) {
+            observed_all_blocked_inputs = false;
+            break;
+        }
     }
     if (!applied_ticks.empty()) {
         state.addError("input filter rejection invoked the gameplay sample handler");
     }
+    if (const Net::ClientInfo* info = server.getClientInfo(raw_client_id);
+        info == nullptr || info->input_tick_budget != initial_budget) {
+        state.addError("input filter rejection consumed the live input budget");
+    }
 
-    allow_inputs = true;
-    for (uint32_t tick = 6u; state.error_count == 0 && tick <= 7u; ++tick) {
-        client.sendInputCommand(tick, input);
-        client.update(kFixedDelta * 2.0f);
-        server.update(0.0f);
-        client.update(0.0f);
-        SDL_Delay(1);
+    allow_inputs = observed_all_blocked_inputs;
+    bool observed_all_live_inputs = observed_all_blocked_inputs;
+    // Include rejected ticks in the open packets. The server must skip them
+    // from the advanced cursor and invoke gameplay only for new ticks 6 and 7.
+    if (observed_all_live_inputs &&
+        (!sendRawInput(6u, 4u, 5u) || !driveRawInputToCursor(6u, "live"))) {
+        observed_all_live_inputs = false;
+    }
+    if (observed_all_live_inputs &&
+        (!sendRawInput(7u, 5u, 6u) || !driveRawInputToCursor(7u, "live"))) {
+        observed_all_live_inputs = false;
     }
     if (applied_ticks.size() != 2u || applied_ticks[0] != 6u || applied_ticks[1] != 7u) {
-        state.addError("blocked redundant input replayed or exhausted the live input budget");
+        std::string observed_ticks;
+        for (const uint32_t applied_tick : applied_ticks) {
+            if (!observed_ticks.empty()) {
+                observed_ticks += ',';
+            }
+            observed_ticks += std::to_string(applied_tick);
+        }
+        state.addError("blocked redundant input replayed or exhausted the live input budget (observed=" +
+                       (observed_ticks.empty() ? std::string("none") : observed_ticks) + ')');
     }
 
-    client.disconnect("blocked-input cursor regression complete");
+    enet_peer_disconnect(raw_peer, 0);
+    enet_host_flush(raw);
     for (uint32_t frame = 0; frame < 120u && server.getClientCount() != 0u; ++frame) {
-        client.update(0.0f);
-        server.update(0.0f);
+        server.update(kFixedDelta);
+        serviceRawPeer();
         SDL_Delay(1);
     }
     if (server.getClientCount() != 0u) {
         state.addError("blocked-input loopback client did not disconnect");
     }
-    client.shutdown();
+    enet_host_destroy(raw);
     server.shutdown();
 
     if (state.error_count != 0) {
@@ -2033,6 +2165,12 @@ static bool runInputSendCreditRegressionTest()
     Net::InputState input;
     input.move_forward = 1.0f;
     client.sendInputCommand(1u, input);
+    // Admission is based on observed server progress. Publish one normal
+    // snapshot after input is pending, then let the client receive credit.
+    for (uint32_t frame = 0; frame < 3u; ++frame) {
+        server.update(kFixedDelta);
+        client.update(0.0f);
+    }
     // This deliberately leaves nearly one second of unused send time after
     // the one queued command has been sent.
     client.update(1.0f);
@@ -2059,6 +2197,11 @@ static bool runInputSendCreditRegressionTest()
         state.addError("an idle client sent a later input using stale send credit");
     }
 
+    // A new command remains pending until the server proves it has advanced.
+    for (uint32_t frame = 0; frame < 3u; ++frame) {
+        server.update(kFixedDelta);
+        client.update(0.0f);
+    }
     client.update(kFixedDelta);
     for (uint32_t frame = 0; frame < 120u && highest_input_tick < 2u; ++frame) {
         server.update(0.0f);
@@ -2066,7 +2209,7 @@ static bool runInputSendCreditRegressionTest()
         SDL_Delay(1);
     }
     if (highest_input_tick != 2u || received_samples < 2u) {
-        state.addError("later fixed input did not send after a real interval");
+        state.addError("later fixed input did not send after authoritative server progress");
     }
 
     client.disconnect("input-send-credit regression complete");
@@ -2166,6 +2309,12 @@ static bool runInputBurstAdmissionRegressionTest()
     input.buttons = 0;
     client.sendInputCommand(5u, input);
 
+    // Supply observed server progress after the fixed-command hitch is queued.
+    for (uint32_t frame = 0; frame < 3u; ++frame) {
+        server.update(kFixedDelta);
+        client.update(0.0f);
+    }
+
     // One long client frame must not drain five primary commands. The latest
     // tick reaches the server and its pending action edges remain intact.
     client.update(5.0f * kFixedDelta);
@@ -2204,6 +2353,144 @@ static bool runInputBurstAdmissionRegressionTest()
     }
 
     std::cout << "[PASS] InputBurstAdmissionRegressionTests\n";
+    return true;
+}
+
+// Two independently paced clients may keep producing fixed commands while the
+// server's simulation is stalled. They must retain only the latest coalesced
+// command until new authoritative ticks arrive, rather than exhausting the
+// server's same-tick budget and losing that latest state.
+static bool runTwoClientInputStallAdmissionRegressionTest()
+{
+    TestState state;
+    world server_world;
+    server_world.setFixedDelta(kFixedDelta);
+
+    Net::ServerNetworkManager server;
+    if (!server.initialize()) {
+        std::cerr << "[FAIL] TwoClientInputStallAdmissionRegressionTests could not initialize server\n";
+        return false;
+    }
+    server.setWorld(&server_world);
+
+    std::array<uint32_t, 3> highest_input_tick{};
+    std::array<uint32_t, 3> received_samples{};
+    server.setOnClientConnected([&](uint16_t client_id) {
+        spawnServerPlayer(server_world, server, client_id);
+    });
+    server.setInputFilter([&](uint16_t, entt::entity player_entity) {
+        return server_world.registry.valid(player_entity);
+    });
+    server.setInputSampleHandler([&](uint16_t client_id, entt::entity,
+                                     const Net::InputSample& sample, uint32_t) {
+        if (client_id < highest_input_tick.size()) {
+            ++received_samples[client_id];
+            highest_input_tick[client_id] = (std::max)(highest_input_tick[client_id], sample.tick);
+        }
+    });
+
+    StressConfig config;
+    config.client_count = 2;
+    uint16_t port = 0;
+    if (!startServer(server, config, port)) {
+        std::cerr << "[FAIL] TwoClientInputStallAdmissionRegressionTests could not start server\n";
+        server.shutdown();
+        return false;
+    }
+
+    world client_a_world;
+    world client_b_world;
+    Net::ClientNetworkManager client_a;
+    Net::ClientNetworkManager client_b;
+    client_a.setWorld(&client_a_world);
+    client_b.setWorld(&client_b_world);
+    if (!client_a.initialize() || !client_b.initialize() ||
+        !client_a.connectToServer("127.0.0.1", port, "input_stall_a") ||
+        !client_b.connectToServer("127.0.0.1", port, "input_stall_b")) {
+        std::cerr << "[FAIL] TwoClientInputStallAdmissionRegressionTests could not connect clients\n";
+        client_a.shutdown();
+        client_b.shutdown();
+        server.shutdown();
+        return false;
+    }
+
+    for (uint32_t frame = 0;
+         frame < config.connect_frame_budget && (!client_a.isConnected() || !client_b.isConnected());
+         ++frame) {
+        client_a.update(kFixedDelta);
+        client_b.update(kFixedDelta);
+        server.update(kFixedDelta);
+        client_a.update(0.0f);
+        client_b.update(0.0f);
+        SDL_Delay(1);
+    }
+    if (!client_a.isConnected() || !client_b.isConnected() || server.getClientCount() != 2u) {
+        state.addError("two-client input-stall loopback clients did not connect");
+    }
+
+    Net::InputState input;
+    input.move_forward = 1.0f;
+    // Hold server simulation while both clients continue their ordinary local
+    // fixed cadence. The final sample must remain queued locally.
+    for (uint32_t tick = 1; tick <= 12u; ++tick) {
+        client_a.sendInputCommand(tick, input);
+        client_b.sendInputCommand(tick, input);
+        client_a.update(kFixedDelta);
+        client_b.update(kFixedDelta);
+    }
+    server.update(0.0f);
+    client_a.update(0.0f);
+    client_b.update(0.0f);
+
+    if (highest_input_tick[1] >= 12u || highest_input_tick[2] >= 12u) {
+        state.addError("stalled clients spent unsignaled server credit on their latest command");
+    }
+    if (received_samples[1] == 0u || received_samples[2] == 0u) {
+        state.addError("two-client input-stall setup did not admit initial input samples");
+    }
+
+    // Resume authoritative ticks long enough to publish a new world snapshot.
+    // The retained latest command then becomes admissible for both clients.
+    for (uint32_t frame = 0; frame < 12u; ++frame) {
+        server.update(kFixedDelta);
+        client_a.update(0.0f);
+        client_b.update(0.0f);
+    }
+    client_a.update(kFixedDelta);
+    client_b.update(kFixedDelta);
+    server.update(0.0f);
+    client_a.update(0.0f);
+    client_b.update(0.0f);
+
+    if (highest_input_tick[1] != 12u || highest_input_tick[2] != 12u) {
+        state.addError("latest coalesced input was not delivered after server progress resumed");
+    }
+
+    client_a.disconnect("two-client input-stall regression complete");
+    client_b.disconnect("two-client input-stall regression complete");
+    for (uint32_t frame = 0; frame < 120u && server.getClientCount() != 0u; ++frame) {
+        client_a.update(kFixedDelta);
+        client_b.update(kFixedDelta);
+        server.update(kFixedDelta);
+        client_a.update(0.0f);
+        client_b.update(0.0f);
+        SDL_Delay(1);
+    }
+    if (server.getClientCount() != 0u) {
+        state.addError("two-client input-stall loopback clients did not disconnect");
+    }
+    client_a.shutdown();
+    client_b.shutdown();
+    server.shutdown();
+
+    if (state.error_count != 0) {
+        for (const std::string& error : state.errors) {
+            std::cerr << "[FAIL] " << error << "\n";
+        }
+        return false;
+    }
+
+    std::cout << "[PASS] TwoClientInputStallAdmissionRegressionTests\n";
     return true;
 }
 
@@ -2495,11 +2782,12 @@ int main(int argc, char** argv)
     const bool unreliable_queue_drain_ok = runUnreliableQueueDrainRegressionTest();
     const bool input_send_credit_ok = runInputSendCreditRegressionTest();
     const bool input_burst_admission_ok = runInputBurstAdmissionRegressionTest();
+    const bool two_client_input_stall_admission_ok = runTwoClientInputStallAdmissionRegressionTest();
     const bool ok = runNetworkStress(config);
     EE::CLog::Shutdown();
     return (handshake_ok && combat_event_protocol_ok && competitive_presentation_protocol_ok && transport_pending_queue_accounting_ok && custom_ingress_ok && hierarchy_boundary_ok && interpolation_buffer_wrap_ok && interpolation_jitter_ok && lag_history_wrap_ok &&
             lag_view_tick_clamp_ok &&
             input_view_tick_protocol_ok && input_view_tick_loopback_ok && interpolation_manager_wrap_ok &&
             raw_interpolation_ok && blocked_input_cursor_ok && unreliable_queue_drain_ok && input_send_credit_ok &&
-            input_burst_admission_ok && ok) ? 0 : 1;
+            input_burst_admission_ok && two_client_input_stall_admission_ok && ok) ? 0 : 1;
 }

@@ -483,6 +483,11 @@ void ServerNetworkManager::handleConnectRequest(ENetPeer* peer, BitReader& reade
     const std::string normalized_player_name = normalizePlayerName(msg.player_name);
     ClientInfo info(client_id, normalized_player_name, peer);
     info.capability_flags = msg.capability_flags & server_capability_flags;
+    // The initial burst is the only credit a new client has before this
+    // connection observes a simulation tick. Start later accrual from the
+    // connection baseline so uptime before the join cannot become extra
+    // input budget.
+    info.last_input_budget_server_tick = current_tick;
     ClientConnection connection(info);
     clients[client_id] = connection;
 

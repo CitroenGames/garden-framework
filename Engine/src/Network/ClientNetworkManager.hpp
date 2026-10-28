@@ -70,6 +70,11 @@ private:
 
     // Input rate limiting
     float input_send_timer = 0.0f;
+    // Input admission is funded by authoritative server-tick progress. This
+    // prevents a client from accumulating an unbounded local-time backlog
+    // while the server is stalled and later receiving it in one tick.
+    uint32_t input_send_budget = 0;
+    uint32_t last_input_send_server_tick = 0;
     static constexpr float INPUT_SEND_INTERVAL = 1.0f / 60.0f;  // 60Hz max
     struct QueuedInputCommand
     {

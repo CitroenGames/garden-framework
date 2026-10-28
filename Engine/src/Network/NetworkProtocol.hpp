@@ -22,6 +22,9 @@ constexpr uint16_t MAX_NETWORKED_ENTITIES = 2048;
 constexpr uint16_t MAX_SYNCED_CVARS = 1024;
 constexpr uint8_t CUSTOM_MESSAGE_START = 64;
 constexpr uint8_t MAX_INPUT_SAMPLES_PER_PACKET = 3;
+// Each newly connected client starts with this many generic input samples.
+// Client admission keeps no more unused credit than this while it is idle.
+constexpr uint32_t INITIAL_INPUT_TICK_BUDGET = 3;
 constexpr uint8_t DEFAULT_INTERP_DELAY_TICKS = 2;
 constexpr uint8_t NETWORK_CHANNEL_COUNT = 3;
 constexpr size_t NETWORK_MAX_PLAYER_NAME_CHARS = 31;

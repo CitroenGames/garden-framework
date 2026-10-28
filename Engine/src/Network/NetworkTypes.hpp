@@ -9,6 +9,7 @@
 #include <unordered_map>
 #include <glm/glm.hpp>
 #include "enet.h"
+#include "NetworkProtocol.hpp"
 
 namespace Net {
 
@@ -309,7 +310,7 @@ struct ClientInfo
     uint32_t last_acknowledged_tick = 0;  // Last tick the client acknowledged
     uint32_t last_input_tick = 0;         // Last tick we received input from client
     uint32_t last_input_budget_server_tick = 0;
-    uint32_t input_tick_budget = 3;
+    uint32_t input_tick_budget = INITIAL_INPUT_TICK_BUDGET;
     uint32_t capability_flags = 0; // negotiated CAP_* bits for this client
     uint16_t last_weapon_select = 0; // last applied WEAPON_SELECT value (0 = none)
     float ping_ms = 0.0f;

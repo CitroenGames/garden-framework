@@ -55,6 +55,8 @@ bool ClientNetworkManager::connectToServer(const char* address, uint16_t port, c
     last_received_server_tick = 0;
     has_received_server_tick = false;
     input_send_timer = 0.0f;
+    input_send_budget = 0;
+    last_input_send_server_tick = 0;
     queued_input_commands.clear();
     recent_inputs[0] = {};
     recent_inputs[1] = {};
@@ -142,6 +144,8 @@ void ClientNetworkManager::shutdown()
     last_received_server_tick = 0;
     has_received_server_tick = false;
     input_send_timer = 0.0f;
+    input_send_budget = 0;
+    last_input_send_server_tick = 0;
     queued_input_commands.clear();
     recent_inputs[0] = {};
     recent_inputs[1] = {};
@@ -206,17 +210,23 @@ void ClientNetworkManager::update(float delta_time)
     }
 
     // Rate-limited fixed-command sending (60 Hz) with redundant inputs. Send
-    // at most one new primary sample per client update. A hitch may generate
-    // several predicted fixed steps, but sending all of them together would
-    // make an otherwise healthy client appear to exceed the server's
-    // per-simulation-tick input budget. Pending commands are coalesced at
-    // enqueue time while preserving edge actions.
+    // at most one new primary sample per client update. Server-tick credit
+    // bounds the client to progress it has observed from the authoritative
+    // simulation: a server hitch therefore coalesces pending input locally
+    // instead of making its next event pump receive a burst of new ticks.
     if (connection_state == ConnectionState::CONNECTED && !queued_input_commands.empty()) {
-        input_send_timer += std::max(delta_time, 0.0f);
-        if (input_send_timer >= INPUT_SEND_INTERVAL) {
+        if (input_send_budget == 0) {
+            // Local wall time is only a rate limiter. It is not permission to
+            // send while the server has stopped advancing.
+            input_send_timer = 0.0f;
+        } else {
+            input_send_timer += std::max(delta_time, 0.0f);
+        }
+        if (input_send_budget > 0 && input_send_timer >= INPUT_SEND_INTERVAL) {
             // Do not turn elapsed wall time from a stalled frame into credit
             // for an immediate follow-up burst on a zero-delta service pass.
             input_send_timer = 0.0f;
+            --input_send_budget;
             const QueuedInputCommand command = queued_input_commands.front();
             queued_input_commands.pop_front();
 
@@ -257,10 +267,13 @@ void ClientNetworkManager::update(float delta_time)
         }
     }
 
-    // Send credit belongs to queued fixed commands. Do not carry the remainder
-    // of a long frame into a later command after the FIFO has drained.
+    // Local wall time never carries across an empty command queue. Preserve
+    // only the server's initial safe burst so a normal render frame can use
+    // already observed progress, while an idle client cannot bank an
+    // unbounded first-input backlog.
     if (connection_state == ConnectionState::CONNECTED && queued_input_commands.empty()) {
         input_send_timer = 0.0f;
+        input_send_budget = (std::min)(input_send_budget, INITIAL_INPUT_TICK_BUDGET);
     }
 
     // Ping/RTT measurement
@@ -501,6 +514,13 @@ void ClientNetworkManager::handleConnectAccept(BitReader& reader)
     client_tick = 0;
     last_received_server_tick = msg.server_tick;
     has_received_server_tick = true;
+    // CONNECT_ACCEPT establishes the remote tick baseline and grants the
+    // same bounded startup burst the server reserves for a new client. That
+    // burst lets normal input begin before the first state snapshot arrives;
+    // later admission is funded only by observed WORLD_STATE_UPDATE progress.
+    last_input_send_server_tick = msg.server_tick;
+    input_send_budget = INITIAL_INPUT_TICK_BUDGET;
+    input_send_timer = 0.0f;
     negotiated_capability_flags = msg.capability_flags;
 
     setConnectionState(ConnectionState::CONNECTED);
@@ -564,7 +584,15 @@ void ClientNetworkManager::handleWorldStateUpdate(BitReader& reader)
         return;
     }
 
-    // Update last received server tick
+    // Update last received server tick and fund primary input admission with
+    // the same monotonic authoritative timebase. The shared cap matches the
+    // server input burst budget.
+    if (isTickNewer(msg.server_tick, last_input_send_server_tick)) {
+        const uint32_t elapsed_ticks = msg.server_tick - last_input_send_server_tick;
+        input_send_budget = (std::min)(
+            input_send_budget + elapsed_ticks, MAX_INPUT_BURST_TICKS);
+        last_input_send_server_tick = msg.server_tick;
+    }
     last_received_server_tick = msg.server_tick;
     has_received_server_tick = true;
 

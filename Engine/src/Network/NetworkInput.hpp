@@ -112,16 +112,13 @@ inline void accrueInputTickBudget(
     uint32_t& available_ticks,
     uint32_t max_burst = MAX_INPUT_BURST_TICKS)
 {
-    if (last_budget_server_tick == 0) {
-        last_budget_server_tick = current_server_tick;
-        available_ticks = (std::min)(available_ticks, max_burst);
-        return;
-    }
-
     if (!isTickNewer(current_server_tick, last_budget_server_tick)) {
         return;
     }
 
+    // Tick zero is a valid baseline. Treat progress away from it exactly like
+    // any other serial increment so a fresh server grants the same bounded
+    // credit as a long-running server.
     const uint32_t elapsed_ticks = current_server_tick - last_budget_server_tick;
     available_ticks = (std::min)(available_ticks + elapsed_ticks, max_burst);
     last_budget_server_tick = current_server_tick;
