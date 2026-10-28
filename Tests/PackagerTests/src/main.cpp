@@ -2,8 +2,11 @@
 #include "Navigation/NavMeshSerializer.hpp"
 #include "Project/ProjectPackager.hpp"
 #include "Project/PackageLevelDependencyExtractor.hpp"
+#include "Project/PackageMeshDependencyExtractor.hpp"
 #include "Project/PackageStructuredDependencyExtractor.hpp"
 #include "Project/PackageReceipt.hpp"
+#include "Assets/CompiledMeshFormat.hpp"
+#include "Assets/CompiledMeshSerializer.hpp"
 #include "Utils/FileHash.hpp"
 #include "Project/ProjectManager.hpp"
 #include "LevelManager.hpp"
@@ -158,6 +161,78 @@ PackageConfig packageConfig(const fs::path& output_root)
     config.output_directory = output_root.string();
     config.package_name = "package";
     return config;
+}
+
+bool writeCookedMeshFixture(const fs::path& path, const std::string& texture_path,
+                            uint64_t cook_fingerprint = 0x1a2b3c4d5e6f7081ull)
+{
+    std::error_code ec;
+    fs::create_directories(path.parent_path(), ec);
+    if (ec) return false;
+
+    Assets::CompiledMeshData mesh;
+    mesh.header.magic = Assets::CMESH_MAGIC;
+    mesh.header.version = Assets::CMESH_VERSION;
+    mesh.header.flags = Assets::CMESH_FLAG_HAS_INDICES | Assets::CMESH_FLAG_HAS_LODS |
+                        Assets::CMESH_FLAG_HAS_MATERIALS;
+    mesh.header.source_hash = 0x123456789abcdef0ull;
+    mesh.header.cook_fingerprint = cook_fingerprint;
+
+    Assets::CompiledMeshData::MaterialRef material;
+    material.name = "fixture_material";
+    material.textures.push_back({0, texture_path});
+    mesh.material_refs.push_back(std::move(material));
+    mesh.header.material_ref_count = static_cast<uint32_t>(mesh.material_refs.size());
+
+    mesh.lod_levels.emplace_back();
+    mesh.lod_levels.front().vertices.resize(1);
+    mesh.header.lod_count = static_cast<uint32_t>(mesh.lod_levels.size());
+    return Assets::CompiledMeshSerializer::save(mesh, path.string());
+}
+
+bool testCookedMeshDependencyExtractorCurrentContract()
+{
+    const std::string name = "cooked mesh extractor closes current material texture and collision edges";
+    TempDirectory temp("cmesh_extract");
+    const fs::path cmesh = temp.path / "assets" / "models" / "room.cmesh";
+    if (!writeCookedMeshFixture(cmesh, "textures/wall.png"))
+        return fail(name, "could not create current cmesh fixture");
+
+    std::vector<PackageDependencyRequest> children;
+    uint32_t format_version = 0;
+    uint64_t cook_fingerprint = 0;
+    std::string error;
+    if (!PackageMeshDependencyExtractor::extract("assets/models/room.cmesh", cmesh.string(),
+                                                  children, format_version, cook_fingerprint, error))
+        return fail(name, "extraction failed: " + error);
+    if (format_version != Assets::CMESH_VERSION || cook_fingerprint == 0 || children.size() != 2)
+        return fail(name, "current cmesh contract was not retained");
+
+    const std::vector<std::pair<std::string, PackageDependencyKind>> expected = {
+        {"assets/models/room.gardenphys", PackageDependencyKind::Collision},
+        {"assets/models/textures/wall.png", PackageDependencyKind::Texture},
+    };
+    for (size_t index = 0; index < expected.size(); ++index)
+    {
+        if (children[index].logical_path != expected[index].first ||
+            children[index].kind != expected[index].second ||
+            children[index].owner_logical_path != "assets/models/room.cmesh" ||
+            children[index].extractor_id != PackageMeshDependencyExtractor::SourceId)
+            return fail(name, "mesh child edge was not deterministic and owner-labeled");
+    }
+
+    if (!writeCookedMeshFixture(cmesh, "textures/wall.png", 0) ||
+        PackageMeshDependencyExtractor::extract("assets/models/room.cmesh", cmesh.string(),
+                                                 children, format_version, cook_fingerprint, error) ||
+        error.find("PKG-MESH-FINGERPRINT: assets/models/room.cmesh") == std::string::npos)
+        return fail(name, "missing current cook fingerprint was accepted: " + error);
+
+    if (!writeBytes(cmesh, {'C', 'M', 'S', 'H'}) ||
+        PackageMeshDependencyExtractor::extract("assets/models/room.cmesh", cmesh.string(),
+                                                 children, format_version, cook_fingerprint, error) ||
+        error.find("PKG-MESH-INVALID: assets/models/room.cmesh") == std::string::npos)
+        return fail(name, "corrupt cmesh contract was accepted: " + error);
+    return pass(name);
 }
 
 bool testStructuredDependencyExtractorSchemas()
@@ -1137,6 +1212,52 @@ bool testCompiledReferenceRequiresCookedOutput()
     return pass(name);
 }
 
+bool testCookedMeshClosureNamesMissingLeaf()
+{
+    const std::string name = "packager closes cooked mesh children and names a missing leaf owner";
+    TempDirectory temp("cmesh_closure");
+    ProjectManager project;
+    if (!createProjectFixture(temp.path / "project", project, {"assets"},
+        R"({"metadata":{"level_name":"Cooked Mesh Closure"},"entities":[{"mesh":{"path":"assets/models/room.cmesh"}}]})"))
+        return fail(name, "could not create project fixture");
+
+    const fs::path asset_root = temp.path / "project" / "assets" / "models";
+    if (!writeCookedMeshFixture(asset_root / "room.cmesh", "textures/wall.png") ||
+        !writeText(asset_root / "room.gardenphys", "collision fixture") ||
+        !writeText(asset_root / "textures" / "wall.png", "texture fixture"))
+        return fail(name, "could not create cooked mesh leaves");
+
+    LevelManager levels;
+    const PackageResult result = ProjectPackager::packageProject(project, levels,
+                                                                   packageConfig(temp.path / "out"));
+    if (!result.success)
+        return fail(name, "package failed: " + result.error_message);
+
+    PackageReceipt receipt;
+    std::string error;
+    if (!PackageReceiptSerializer::readStaged((temp.path / "out" / "package").string(), receipt, &error))
+        return fail(name, "could not read package receipt: " + error);
+    const auto texture = std::find_if(receipt.dependencies.begin(), receipt.dependencies.end(),
+        [](const PackageDependency& dependency) {
+            return dependency.logical_path == "assets/models/textures/wall.png" &&
+                   dependency.kind == PackageDependencyKind::Texture &&
+                   dependency.owner_logical_path == "assets/models/room.cmesh";
+        });
+    if (texture == receipt.dependencies.end())
+        return fail(name, "receipt did not retain the mesh material texture edge");
+
+    std::error_code ec;
+    fs::remove(asset_root / "textures" / "wall.png", ec);
+    if (ec) return fail(name, "could not remove texture leaf");
+    const PackageResult missing = ProjectPackager::packageProject(project, levels,
+                                                                    packageConfig(temp.path / "out"));
+    if (missing.success)
+        return fail(name, "package accepted a missing cooked-mesh texture leaf");
+    if (missing.error_message.find("PKG-DEPENDENCY-MISSING: assets/models/textures/wall.png required by assets/models/room.cmesh") == std::string::npos)
+        return fail(name, "missing mesh leaf did not name the cmesh owner: " + missing.error_message);
+    return pass(name);
+}
+
 bool testStagedPackagingReplacesObstructedPriorOutput()
 {
     const std::string name = "packager stages level compilation before replacing an obstructed prior output";
@@ -1337,6 +1458,7 @@ int main()
     ok &= testSelectedLevelArtifactPathNormalization();
     ok &= testPackageDependencyGraphCanonicalization();
     ok &= testStructuredDependencyExtractorSchemas();
+    ok &= testCookedMeshDependencyExtractorCurrentContract();
     ok &= testLevelDependencyExtractorTypedEdges();
     ok &= testLevelDependencyExtractorNamesMalformedOwner();
     ok &= testPackageReceiptRoundTripAndStageVerification();
@@ -1361,6 +1483,7 @@ int main()
         ok &= testDeclaredSoundEventMissingClipNamesOwner();
         ok &= testAssetRootRelativeReferencePassesPackaging();
         ok &= testCompiledReferenceRequiresCookedOutput();
+        ok &= testCookedMeshClosureNamesMissingLeaf();
         ok &= testStagedPackagingReplacesObstructedPriorOutput();
 #ifdef _WIN32
         ok &= testPackagedServerLaunch();

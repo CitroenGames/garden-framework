@@ -6,6 +6,7 @@
 #include "Animation/CompiledAnimationSerializer.hpp"
 #include "Project/PackageDependency.hpp"
 #include "Project/PackageLevelDependencyExtractor.hpp"
+#include "Project/PackageMeshDependencyExtractor.hpp"
 #include "Project/PackageStructuredDependencyExtractor.hpp"
 #include "Project/PackageReceipt.hpp"
 #include "Utils/FileHash.hpp"
@@ -297,6 +298,49 @@ bool addStaticDependency(PackageDependencyGraph& graph, std::vector<std::string>
     return true;
 }
 
+void discoverCookedMeshDependencies(PackageDependencyGraph& graph, std::vector<std::string>& errors,
+                                    const fs::path& project, const fs::path& staged,
+                                    const std::vector<std::string>& roots,
+                                    const std::string& source)
+{
+    fs::path cooked_path(source);
+    cooked_path.replace_extension(".cmesh");
+    std::string cooked_logical_path;
+    if (!normalizePackageLogicalPath(cooked_path.generic_string(), cooked_logical_path))
+    {
+        errors.push_back(pkgError("PKG-PATH-INVALID", source));
+        return;
+    }
+
+    std::vector<PackageDependencyRequest> children;
+    uint32_t format_version = 0;
+    uint64_t cook_fingerprint = 0;
+    std::string extract_error;
+    if (!PackageMeshDependencyExtractor::extract(cooked_logical_path,
+                                                  (staged / cooked_logical_path).string(),
+                                                  children, format_version, cook_fingerprint,
+                                                  extract_error))
+    {
+        errors.push_back(extract_error);
+        return;
+    }
+    (void)format_version;
+    (void)cook_fingerprint;
+
+    for (const PackageDependencyRequest& child : children)
+    {
+        std::string child_source;
+        if (!resolveStaticLogical(child.logical_path, roots, project, staged, child_source))
+        {
+            errors.push_back(pkgError("PKG-PATH-INVALID", child.logical_path +
+                                      " required by " + cooked_logical_path));
+            continue;
+        }
+        addStaticDependency(graph, errors, project, staged, child_source, child.kind,
+                            child.owner_logical_path, false, child.extractor_id);
+    }
+}
+
 // Structured roots are intentionally declared by a template/package caller.
 // The packager only dispatches the selected data schema and never executes or
 // scans module C++ in an attempt to discover sound or animation references.
@@ -362,10 +406,12 @@ void discoverStaticDependencies(PackageDependencyGraph& graph, std::vector<std::
         std::string source;
         if (!resolveStaticLogical(requested, roots, project, staged, source)) { errors.push_back(pkgError("PKG-PATH-INVALID", requested + " required by " + owner)); return false; }
         const bool added = addStaticDependency(graph, errors, project, staged, source, kind, owner, compile_mesh, extractor_id);
-        if (kind == PackageDependencyKind::Mesh && compile_mesh && isCompiledMeshSource(fs::path(source)))
+        if (kind == PackageDependencyKind::Mesh &&
+            ((compile_mesh && isCompiledMeshSource(fs::path(source))) ||
+             fs::path(source).extension() == ".cmesh"))
         {
-            const std::string collision = Assets::CookedCollisionSerializer::defaultPathForAsset(source);
-            addStaticDependency(graph, errors, project, staged, collision, PackageDependencyKind::Collision, source, false);
+            if (added)
+                discoverCookedMeshDependencies(graph, errors, project, staged, roots, source);
         }
         return added;
     };
