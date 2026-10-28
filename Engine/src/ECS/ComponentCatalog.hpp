@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string_view>
+#include <span>
 
 namespace garden::ecs {
 
@@ -105,6 +106,11 @@ public:
     // Deliberately process-lifetime so static leases can safely release at shutdown.
     static ComponentCatalog& instance() noexcept;
     ComponentCatalogResult registerComponent(const ComponentDescriptor&, ComponentId& outId) noexcept;
+    // Host supplies the owner; descriptor owner fields are ignored. Same-batch
+    // duplicate names are rejected. On failure every output ID is invalid.
+    // Compatible existing providers retain their operations and IDs.
+    ComponentCatalogResult registerBatch(ComponentOwnerId owner, std::span<const ComponentDescriptor> descriptors,
+        std::span<ComponentId> outIds) noexcept;
     ComponentCatalogResult resolve(const ComponentDescriptor&, ComponentId& outId) const noexcept;
     // Atomically retire all of the owner's components, or none if any is pinned.
     ComponentCatalogResult unregisterOwner(ComponentOwnerId ownerId) noexcept;

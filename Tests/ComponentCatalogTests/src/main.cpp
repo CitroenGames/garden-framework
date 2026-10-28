@@ -105,7 +105,67 @@ void testStore() {
         stale.add<StoreValue>(id, first, 1) == ComponentStoreResult::StaleComponent,
         "retired catalog generation rejected");
 }
+void testBatch() {
+    auto& catalog = ComponentCatalog::instance();
+    constexpr auto owner = moduleOwner(7);
+    auto first = descriptor();
+    first.key.name = "garden.tests.BatchFirst";
+    first.ownerId = owner;
+    ComponentId existing{};
+    check(catalog.registerComponent(first, existing) == ComponentCatalogResult::Success,
+        "batch fixture provider registered");
+    auto borrowed = first;
+    borrowed.ownerId = moduleOwner(8); // ignored in favor of host identity
+    borrowed.operations.defaultConstruct = alternateConstruct;
+    auto fresh = first;
+    fresh.key.name = "garden.tests.BatchFresh";
+    fresh.ownerId = {};
+    std::array<ComponentDescriptor, 2> input{borrowed, fresh};
+    std::array<ComponentId, 2> ids{};
+    check(catalog.registerBatch(owner, input, ids) == ComponentCatalogResult::Success &&
+        ids[0] == existing && ids[1].slot != UINT32_MAX && ids[1] != existing,
+        "batch resolves existing provider and injects host owner");
+    ComponentLease lease;
+    check(catalog.acquire(ids[0], ComponentPinKind::Operation, lease) == ComponentCatalogResult::Success &&
+        lease.descriptor()->operations.defaultConstruct == construct && lease.descriptor()->ownerId == owner,
+        "batch preserves existing provider operations");
+    lease.reset();
+    check(catalog.acquire(ids[1], ComponentPinKind::Operation, lease) == ComponentCatalogResult::Success &&
+        lease.descriptor()->ownerId == owner, "new batch descriptor uses host owner");
+    lease.reset();
+    auto pending = first;
+    pending.key.name = "garden.tests.BatchPending";
+    auto invalid = first;
+    invalid.operations.destroy = nullptr;
+    input = {pending, invalid};
+    ids = {existing, existing};
+    ComponentId found{};
+    check(catalog.registerBatch(owner, input, ids) == ComponentCatalogResult::InvalidDescriptor &&
+        ids[0] == ComponentId{} && ids[1] == ComponentId{} &&
+        catalog.resolve(pending, found) == ComponentCatalogResult::NotFound,
+        "invalid later entry leaves batch unpublished and IDs invalid");
+    auto conflict = first;
+    ++conflict.key.revision;
+    input = {pending, conflict};
+    ids = {existing, existing};
+    check(catalog.registerBatch(owner, input, ids) == ComponentCatalogResult::Conflict &&
+        ids[0] == ComponentId{} && ids[1] == ComponentId{} &&
+        catalog.resolve(pending, found) == ComponentCatalogResult::NotFound &&
+        catalog.resolve(first, found) == ComponentCatalogResult::Success && found == existing,
+        "conflict rolls back new entries without retiring prior provider");
+    input = {pending, pending};
+    ids = {existing, existing};
+    check(catalog.registerBatch(owner, input, ids) == ComponentCatalogResult::Conflict &&
+        ids[0] == ComponentId{} && ids[1] == ComponentId{} &&
+        catalog.resolve(pending, found) == ComponentCatalogResult::NotFound,
+        "same-batch duplicate name rejected atomically");
+    ids = {existing, existing};
+    check(catalog.registerBatch({}, input, ids) == ComponentCatalogResult::InvalidDescriptor &&
+        ids[0] == ComponentId{} && ids[1] == ComponentId{}, "invalid host owner rejected");
+    check(catalog.unregisterOwner(owner) == ComponentCatalogResult::Success, "batch fixture cleanup");
+}
 int main() {
+    testBatch();
     testStore();
     auto& catalog = ComponentCatalog::instance();
     auto d = descriptor();

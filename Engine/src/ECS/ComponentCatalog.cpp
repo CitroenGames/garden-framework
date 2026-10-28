@@ -144,6 +144,66 @@ ComponentCatalogResult ComponentCatalog::registerComponent(const ComponentDescri
     }
 }
 
+ComponentCatalogResult ComponentCatalog::registerBatch(ComponentOwnerId owner,
+    std::span<const ComponentDescriptor> descriptors, std::span<ComponentId> outIds) noexcept {
+    for (auto& id : outIds) id = {};
+    if (!validOwner(owner) || outIds.size() != descriptors.size())
+        return ComponentCatalogResult::InvalidDescriptor;
+    try {
+        std::lock_guard lock(m_impl->mutex);
+        struct Staged { size_t slot; std::unique_ptr<Impl::Entry> entry; };
+        std::vector<Staged> staged;
+        std::vector<ComponentId> ids(descriptors.size());
+        staged.reserve(descriptors.size());
+        size_t nextFree = 0;
+        size_t appendCount = 0;
+        for (size_t i = 0; i < descriptors.size(); ++i) {
+            auto d = descriptors[i];
+            d.ownerId = owner;
+            if (!validDescriptor(d)) return ComponentCatalogResult::InvalidDescriptor;
+            for (size_t j = 0; j < i; ++j)
+                if (descriptors[j].key.name == d.key.name) return ComponentCatalogResult::Conflict;
+            bool existing = false;
+            for (size_t slot = 0; slot < m_impl->entries.size(); ++slot) {
+                const auto& entry = *m_impl->entries[slot];
+                if (entry.active && entry.name == d.key.name) {
+                    if (!sameMetadata(entry.descriptor, d)) return ComponentCatalogResult::Conflict;
+                    ids[i] = {static_cast<uint32_t>(slot), entry.generation};
+                    existing = true;
+                    break;
+                }
+            }
+            if (existing) continue;
+            while (nextFree < m_impl->entries.size() &&
+                (m_impl->entries[nextFree]->active || m_impl->entries[nextFree]->generation == UINT32_MAX))
+                ++nextFree;
+            const size_t slot = nextFree < m_impl->entries.size() ? nextFree++ : m_impl->entries.size() + appendCount++;
+            if (slot >= UINT32_MAX) return ComponentCatalogResult::ResourceExhausted;
+            auto entry = std::make_unique<Impl::Entry>();
+            entry->name = d.key.name;
+            entry->descriptor = d;
+            entry->descriptor.key.name = entry->name;
+            if (slot < m_impl->entries.size()) entry->generation = m_impl->entries[slot]->generation;
+            entry->active = true;
+            ids[i] = {static_cast<uint32_t>(slot), entry->generation};
+            staged.push_back({slot, std::move(entry)});
+        }
+        // No operation after reserve can allocate or throw. Inactive slots have
+        // no leases, so replacing their entries preserves all live descriptors.
+        m_impl->entries.reserve(m_impl->entries.size() + appendCount);
+        for (auto& item : staged) {
+            if (item.slot < m_impl->entries.size()) m_impl->entries[item.slot].swap(item.entry);
+            else m_impl->entries.push_back(std::move(item.entry));
+        }
+        for (size_t i = 0; i < ids.size(); ++i) outIds[i] = ids[i];
+        return ComponentCatalogResult::Success;
+    } catch (const std::bad_alloc&) {
+        return ComponentCatalogResult::ResourceExhausted;
+    } catch (...) {
+        return ComponentCatalogResult::InternalError;
+    }
+}
+
 ComponentCatalogResult ComponentCatalog::resolve(const ComponentDescriptor& d, ComponentId& outId) const noexcept {
     outId = {};
     if (!validMetadata(d)) return ComponentCatalogResult::InvalidDescriptor;
