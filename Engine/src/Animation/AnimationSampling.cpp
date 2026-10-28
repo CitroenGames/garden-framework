@@ -19,7 +19,7 @@ void makeRestPose(const Skeleton& skeleton, Pose& out_pose)
 void overlayClip(const AnimationClip& clip, float time, Pose& in_out_pose)
 {
     const int bone_count = in_out_pose.getBoneCount();
-    for (const BoneAnimation& channel : clip.channels)
+    for (const BoneAnimation& channel : clip.channels())
     {
         if (channel.bone_index < 0 || channel.bone_index >= bone_count)
             continue;

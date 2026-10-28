@@ -12,7 +12,7 @@ public:
     // --- Legacy API (operates on layer 0) ---
 
     // Play a clip (optionally with crossfade from current)
-    void play(std::shared_ptr<AnimationClip> clip, float blend_time = 0.0f);
+    void play(std::shared_ptr<const AnimationClip> clip, float blend_time = 0.0f);
 
     // Stop playback
     void stop();

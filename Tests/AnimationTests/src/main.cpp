@@ -1,6 +1,7 @@
 #define GLM_ENABLE_EXPERIMENTAL
 
 #include "Animation/AnimationComponentMigration.hpp"
+#include "Animation/AnimationResourceValidation.hpp"
 #include "Animation/AnimationClip.hpp"
 #include "Animation/AnimationSampling.hpp"
 #include "Animation/AnimationSystem.hpp"
@@ -92,37 +93,92 @@ Bone makeBone(const char* name, int parent, const glm::vec3& translation,
 
 std::shared_ptr<const Skeleton> makeRestSkeleton()
 {
-    auto skeleton = std::make_shared<Skeleton>();
-    skeleton->addBone(makeBone("root", -1, {3.0f, -2.0f, 1.0f}, glm::angleAxis(0.4f, glm::vec3(0, 0, 1)), {1.5f, 1.0f, 0.75f}));
-    skeleton->addBone(makeBone("mid", 0, {1.0f, 2.0f, 0.5f}, glm::angleAxis(-0.2f, glm::vec3(0, 1, 0)), {0.8f, 1.2f, 1.0f}));
-    skeleton->addBone(makeBone("end", 1, {-0.5f, 0.25f, 2.0f}, glm::angleAxis(0.3f, glm::vec3(1, 0, 0)), {1.0f, 0.9f, 1.1f}));
+    std::vector<Bone> bones;
+    bones.push_back(makeBone("root", -1, {3.0f, -2.0f, 1.0f}, glm::angleAxis(0.4f, glm::vec3(0, 0, 1)), {1.5f, 1.0f, 0.75f}));
+    bones.push_back(makeBone("mid", 0, {1.0f, 2.0f, 0.5f}, glm::angleAxis(-0.2f, glm::vec3(0, 1, 0)), {0.8f, 1.2f, 1.0f}));
+    bones.push_back(makeBone("end", 1, {-0.5f, 0.25f, 2.0f}, glm::angleAxis(0.3f, glm::vec3(1, 0, 0)), {1.0f, 0.9f, 1.1f}));
+    for (int index = 0; index < static_cast<int>(bones.size()); ++index) bones[index].id = index;
+    AnimationResourceError error;
+    auto skeleton = AnimationResourceValidation::makeSkeleton(std::move(bones), error);
     return skeleton;
 }
 
 std::shared_ptr<const AnimationResourceSet> makeResources(
     std::shared_ptr<const Skeleton> skeleton,
-    std::unordered_map<std::string, std::shared_ptr<const AnimationClip>> clips = {})
+    std::vector<std::shared_ptr<const AnimationClip>> clips = {})
 {
-    return std::make_shared<AnimationResourceSet>(std::move(skeleton), std::move(clips));
+    AnimationResourceError error;
+    return AnimationResourceValidation::makeResourceSet(
+        std::move(skeleton), std::move(clips), "animation-tests", error);
 }
 
-std::shared_ptr<AnimationClip> makeChainClip(const char* name = "chain")
+std::shared_ptr<const AnimationClip> makeChainClip(const char* name = "chain", float duration = 2.0f)
 {
-    auto clip = std::make_shared<AnimationClip>();
-    clip->name = name;
-    clip->duration = 2.0f;
+    AnimationClipDefinition clip;
+    clip.name = name;
+    clip.duration = duration;
     for (int index = 0; index < 3; ++index)
     {
         BoneAnimation channel;
         channel.bone_index = index;
-        channel.position_keys = {{0.0f, {0.0f, 0.0f, 0.0f}}, {2.0f, {0.0f, 0.0f, 0.0f}}};
+        channel.position_keys = {{0.0f, {0.0f, 0.0f, 0.0f}}, {duration, {0.0f, 0.0f, 0.0f}}};
         channel.rotation_keys = {{0.0f, glm::quat(1.0f, 0.0f, 0.0f, 0.0f)}};
         channel.scale_keys = {{0.0f, {1.0f, 1.0f, 1.0f}}};
-        clip->channels.push_back(std::move(channel));
+        clip.channels.push_back(std::move(channel));
     }
-    return clip;
+    AnimationResourceError error;
+    return AnimationResourceValidation::makeClip(std::move(clip), 3, error);
 }
 
+std::shared_ptr<const AnimationClip> makeClip(AnimationClipDefinition clip, int bone_count = 3)
+{
+    AnimationResourceError error;
+    return AnimationResourceValidation::makeClip(std::move(clip), bone_count, error);
+}
+bool testImmutableResourceValidation()
+{
+    const std::string name = "AN-2 validates immutable skeleton and clip resources before publication";
+    const auto skeleton = makeRestSkeleton();
+    if (!skeleton || skeleton->getBoneCount() != 3 || skeleton->getBoneByName("mid")->id != 1)
+        return fail(name, "valid ordered skeleton was not published");
+
+    std::vector<Bone> invalid = {makeBone("root", -1, {}), makeBone("child", 1, {})};
+    invalid[0].id = 0; invalid[1].id = 1;
+    AnimationResourceError error;
+    if (AnimationResourceValidation::makeSkeleton(invalid, error) || error.code != "ANIM_BONE_PARENT_ORDER")
+        return fail(name, "parent-after-child skeleton was accepted");
+
+    invalid = {makeBone("root", -1, {}), makeBone("root", 0, {})};
+    invalid[0].id = 0; invalid[1].id = 1;
+    if (AnimationResourceValidation::makeSkeleton(invalid, error) || error.code != "ANIM_BONE_NAME")
+        return fail(name, "duplicate bone name was accepted");
+
+    AnimationClipDefinition duplicate;
+    duplicate.name = "duplicate"; duplicate.duration = 1.0f;
+    for (int index = 0; index < 2; ++index)
+    {
+        BoneAnimation channel; channel.bone_index = 0;
+        channel.position_keys = {{0.0f, {0.0f, 0.0f, 0.0f}}};
+        duplicate.channels.push_back(std::move(channel));
+    }
+    if (AnimationResourceValidation::makeClip(duplicate, skeleton->getBoneCount(), error) ||
+        error.code != "ANIM_DUPLICATE_CHANNEL")
+        return fail(name, "duplicate clip channel was accepted");
+
+    AnimationClipDefinition nonfinite;
+    nonfinite.name = "nonfinite"; nonfinite.duration = 0.0f;
+    BoneAnimation channel; channel.bone_index = 0;
+    channel.rotation_keys = {{0.0f, glm::quat(std::numeric_limits<float>::quiet_NaN(), 0.0f, 0.0f, 0.0f)}};
+    nonfinite.channels.push_back(std::move(channel));
+    if (AnimationResourceValidation::makeClip(nonfinite, skeleton->getBoneCount(), error) ||
+        error.code != "ANIM_INVALID_KEY")
+        return fail(name, "non-finite rotation key was accepted");
+
+    const auto idle = makeChainClip("idle");
+    if (!makeResources(skeleton, {idle}) || makeResources(skeleton, {idle, idle}))
+        return fail(name, "immutable set did not enforce unique named clips");
+    return pass(name);
+}
 bool testRestPoseAndOverlay()
 {
     const std::string name = "AN-1 pose sampling preserves skeleton rest until authored keys override it";
@@ -130,19 +186,22 @@ bool testRestPoseAndOverlay()
     Pose rest;
     AnimationSampling::makeRestPose(*skeleton, rest);
 
-    AnimationClip empty;
-    Pose empty_result = rest;
-    AnimationSampling::overlayClip(empty, 0.0f, empty_result);
-    if (!nearPose(empty_result, rest))
-        return fail(name, "empty clip did not preserve every non-identity rest transform");
+    AnimationClipDefinition empty;
+    empty.name = "empty";
+    AnimationResourceError error;
+    if (AnimationResourceValidation::makeClip(empty, skeleton->getBoneCount(), error) || error.code != "ANIM_EMPTY_CLIP")
+        return fail(name, "empty clip bypassed immutable validation");
 
-    AnimationClip partial;
+    AnimationClipDefinition partial;
+    partial.name = "partial";
+    partial.duration = 0.0f;
     BoneAnimation channel;
     channel.bone_index = 1;
     channel.position_keys = {{0.0f, {9.0f, 8.0f, 7.0f}}};
     partial.channels.push_back(channel);
+    const auto partial_clip = makeClip(std::move(partial));
     Pose partial_result = rest;
-    AnimationSampling::overlayClip(partial, 0.0f, partial_result);
+    AnimationSampling::overlayClip(*partial_clip, 0.0f, partial_result);
     if (!nearVec(partial_result[1].translation, {9.0f, 8.0f, 7.0f}) ||
         std::abs(glm::dot(partial_result[1].rotation, rest[1].rotation)) < 0.999f ||
         !nearVec(partial_result[1].scale, rest[1].scale) ||
@@ -157,15 +216,18 @@ bool testRestPoseAndOverlay()
         !nearVec(partial_result[2].translation, rest[2].translation))
         return fail(name, "omitted bones did not retain rest pose");
 
-    AnimationClip explicit_identity;
+    AnimationClipDefinition explicit_identity;
+    explicit_identity.name = "identity";
+    explicit_identity.duration = 0.0f;
     BoneAnimation identity;
     identity.bone_index = 0;
     identity.position_keys = {{0.0f, glm::vec3(0.0f)}};
     identity.rotation_keys = {{0.0f, glm::quat(1.0f, 0.0f, 0.0f, 0.0f)}};
     identity.scale_keys = {{0.0f, glm::vec3(1.0f)}};
     explicit_identity.channels.push_back(identity);
+    const auto identity_clip = makeClip(std::move(explicit_identity));
     Pose identity_result = rest;
-    AnimationSampling::overlayClip(explicit_identity, 0.0f, identity_result);
+    AnimationSampling::overlayClip(*identity_clip, 0.0f, identity_result);
     if (!nearVec(identity_result[0].translation, glm::vec3(0.0f)) ||
         std::abs(glm::dot(identity_result[0].rotation, glm::quat(1, 0, 0, 0))) < 0.999f ||
         !nearVec(identity_result[0].scale, glm::vec3(1.0f)))
@@ -195,7 +257,7 @@ bool testSystemRestAndInvalidPlayback()
     if (!pose.pose_valid || !nearPose(pose.local_pose, expected_rest) || !pose.bone_matrices.empty())
         return fail(name, "stopped binding did not evaluate rest or allocated a headless palette");
 
-    playback.current_clip = std::make_shared<AnimationClip>();
+    playback.current_clip.reset();
     playback.playing = true;
     AnimationSystem::update(registry, 0.0f, false);
     if (!nearPose(pose.local_pose, expected_rest))
@@ -263,8 +325,7 @@ bool testCompletionEvent()
     auto& binding = registry.emplace<SkeletonComponent>(entity); binding.resources = makeResources(makeRestSkeleton());
     auto& playback = registry.emplace<AnimPlaybackComponent>(entity);
     playback.initialized = true;
-    auto completion_clip = makeChainClip("complete_once");
-    completion_clip->duration = 0.25f;
+    auto completion_clip = makeChainClip("complete_once", 0.25f);
     playback.current_clip = completion_clip;
     playback.playing = true; playback.looping = false;
     AnimationSystem::update(registry, 0.5f);
@@ -294,7 +355,7 @@ bool testReflectionAndMigration()
     binding.skeleton_path = "assets/fixtures/three_bone.skeleton"; binding.clip_names = {"idle", "run"};
     binding.default_clip = "idle"; binding.playback_speed = 1.25f; binding.loop = false; binding.auto_play = true;
     binding.resources = makeResources(makeRestSkeleton(),
-        std::unordered_map<std::string, std::shared_ptr<const AnimationClip>>{{"idle", makeChainClip("idle")}});
+        std::vector<std::shared_ptr<const AnimationClip>>{makeChainClip("idle")});
     registry.emplace<AnimPlaybackComponent>(entity).current_clip = makeChainClip("runtime");
     registry.emplace<AnimPoseComponent>(entity).bone_matrices.assign(3, glm::mat4(2.0f));
     const nlohmann::json serialized = ReflectionSerializer::serializeEntity(registry, entity, reflection);
@@ -338,6 +399,7 @@ bool testReflectionAndMigration()
 int main()
 {
     bool ok = true;
+    ok = testImmutableResourceValidation() && ok;
     ok = testRestPoseAndOverlay() && ok;
     ok = testSystemRestAndInvalidPlayback() && ok;
     ok = testIkOrder() && ok;

@@ -15,8 +15,8 @@ enum class AnimationBlendMode
 
 struct AnimationLayer
 {
-    std::shared_ptr<AnimationClip> clip;
-    std::shared_ptr<AnimationClip> blend_from_clip; // clip we're crossfading from within this layer
+    std::shared_ptr<const AnimationClip> clip;
+    std::shared_ptr<const AnimationClip> blend_from_clip; // clip we're crossfading from within this layer
 
     Pose reference_pose; // for additive mode: the neutral/reference pose
 
@@ -35,7 +35,7 @@ struct AnimationLayer
     float blend_elapsed = 0.0f;
     float blend_from_time = 0.0f;
 
-    void play(std::shared_ptr<AnimationClip> new_clip, float blend_time = 0.0f)
+    void play(std::shared_ptr<const AnimationClip> new_clip, float blend_time = 0.0f)
     {
         if (!new_clip) return;
 
@@ -77,15 +77,15 @@ struct AnimationLayer
         // Advance time
         playback_time += dt * playback_speed;
 
-        if (playback_time >= clip->duration)
+        if (playback_time >= clip->duration())
         {
             if (looping)
             {
-                playback_time = std::fmod(playback_time, clip->duration);
+                playback_time = std::fmod(playback_time, clip->duration());
             }
             else
             {
-                playback_time = clip->duration;
+                playback_time = clip->duration();
                 playing = false;
             }
         }
@@ -102,9 +102,9 @@ struct AnimationLayer
             // Sample old clip
             Pose old_pose(bone_count);
             float old_time = blend_from_time + blend_elapsed * playback_speed;
-            if (blend_from_clip->duration > 0.0f && old_time > blend_from_clip->duration)
+            if (blend_from_clip->duration() > 0.0f && old_time > blend_from_clip->duration())
             {
-                old_time = std::fmod(old_time, blend_from_clip->duration);
+                old_time = std::fmod(old_time, blend_from_clip->duration());
             }
             blend_from_clip->samplePose(old_time, bone_count, old_pose);
 

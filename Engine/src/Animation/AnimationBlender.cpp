@@ -13,7 +13,7 @@ void AnimationBlender::ensureBaseLayer()
 
 // ---- Legacy API (delegates to layer 0) ----
 
-void AnimationBlender::play(std::shared_ptr<AnimationClip> clip, float blend_time)
+void AnimationBlender::play(std::shared_ptr<const AnimationClip> clip, float blend_time)
 {
     ensureBaseLayer();
     layers[0].play(std::move(clip), blend_time);

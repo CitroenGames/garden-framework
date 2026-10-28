@@ -69,7 +69,7 @@ void AnimationClip::sample(float time, int bone_count, std::vector<glm::mat4>& o
 {
     out_local_poses.resize(bone_count, glm::mat4(1.0f));
 
-    for (const auto& channel : channels)
+    for (const auto& channel : m_channels)
     {
         if (channel.bone_index < 0 || channel.bone_index >= bone_count) continue;
 
@@ -95,7 +95,7 @@ void AnimationClip::samplePose(float time, int bone_count, Pose& out_pose) const
         out_pose[i] = BonePose::identity();
     }
 
-    for (const auto& channel : channels)
+    for (const auto& channel : m_channels)
     {
         if (channel.bone_index < 0 || channel.bone_index >= bone_count) continue;
 

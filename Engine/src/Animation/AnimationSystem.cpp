@@ -49,24 +49,24 @@ bool advancePlayback(AnimPlaybackComponent& playback, float dt, std::string& com
         return true;
 
     const AnimationClip& clip = *playback.current_clip;
-    if (clip.duration <= 0.0f || !std::isfinite(clip.duration))
+    if (clip.duration() <= 0.0f || !std::isfinite(clip.duration()))
         return true;
 
     playback.time += dt * playback.speed;
-    if (playback.time < clip.duration)
+    if (playback.time < clip.duration())
         return true;
 
     if (playback.looping)
     {
-        playback.time = std::fmod(playback.time, clip.duration);
+        playback.time = std::fmod(playback.time, clip.duration());
         return true;
     }
 
-    playback.time = clip.duration;
+    playback.time = clip.duration();
     playback.playing = false;
     if (!playback.completion_reported)
     {
-        completed_clip = clip.name;
+        completed_clip = clip.name();
         playback.completion_reported = true;
     }
     return false;
@@ -82,8 +82,8 @@ void applyBlend(const Skeleton& skeleton, AnimPlaybackComponent& playback, float
     Pose previous_pose;
     AnimationSampling::makeRestPose(skeleton, previous_pose);
     float previous_time = playback.blend_from_time + playback.blend_elapsed * playback.speed;
-    if (playback.blend_from_clip->duration > 0.0f && previous_time > playback.blend_from_clip->duration)
-        previous_time = std::fmod(previous_time, playback.blend_from_clip->duration);
+    if (playback.blend_from_clip->duration() > 0.0f && previous_time > playback.blend_from_clip->duration())
+        previous_time = std::fmod(previous_time, playback.blend_from_clip->duration());
     AnimationSampling::overlayClip(*playback.blend_from_clip, previous_time, previous_pose);
     in_out_pose = Pose::blend(previous_pose, in_out_pose, factor);
     if (factor >= 1.0f)

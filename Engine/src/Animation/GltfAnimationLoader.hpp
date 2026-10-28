@@ -12,8 +12,8 @@ namespace tinygltf { class Model; }
 
 struct GltfAnimationData
 {
-    std::shared_ptr<Skeleton> skeleton;
-    std::vector<std::shared_ptr<AnimationClip>> clips;
+    std::shared_ptr<const Skeleton> skeleton;
+    std::vector<std::shared_ptr<const AnimationClip>> clips;
     std::vector<skinned_vertex> skinned_vertices;
     bool has_animation = false;
 };
@@ -25,10 +25,10 @@ namespace GltfAnimationLoader
     bool load(const tinygltf::Model& model, GltfAnimationData& out_data);
 
     // Load only skeleton (joints + inverse bind matrices)
-    std::shared_ptr<Skeleton> loadSkeleton(const tinygltf::Model& model, int skin_index);
+    std::shared_ptr<const Skeleton> loadSkeleton(const tinygltf::Model& model, int skin_index);
 
     // Load animation clips
-    std::vector<std::shared_ptr<AnimationClip>> loadAnimations(
+    std::vector<std::shared_ptr<const AnimationClip>> loadAnimations(
         const tinygltf::Model& model,
         const Skeleton& skeleton);
 

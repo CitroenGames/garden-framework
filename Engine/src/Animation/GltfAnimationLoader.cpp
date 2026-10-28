@@ -1,4 +1,5 @@
 #include "GltfAnimationLoader.hpp"
+#include "AnimationResourceValidation.hpp"
 #include "Utils/Log.hpp"
 #include "Utils/TangentGenerator.hpp"
 
@@ -72,13 +73,13 @@ static glm::mat4 getNodeLocalTransform(const tinygltf::Node& node)
     return t * r * s;
 }
 
-std::shared_ptr<Skeleton> loadSkeleton(const tinygltf::Model& model, int skin_index)
+std::shared_ptr<const Skeleton> loadSkeleton(const tinygltf::Model& model, int skin_index)
 {
     if (skin_index < 0 || skin_index >= static_cast<int>(model.skins.size()))
         return nullptr;
 
     const auto& skin = model.skins[skin_index];
-    auto skeleton = std::make_shared<Skeleton>();
+    std::vector<Bone> bones;
 
     // Load inverse bind matrices
     std::vector<glm::mat4> inverse_bind_matrices;
@@ -137,20 +138,26 @@ std::shared_ptr<Skeleton> loadSkeleton(const tinygltf::Model& model, int skin_in
             if (bone.parent_id >= 0) break;
         }
 
-        skeleton->addBone(bone);
+        bones.push_back(std::move(bone));
     }
 
-    LOG_ENGINE_INFO("Loaded skeleton with {} bones from skin '{}'",
-        skeleton->getBoneCount(), skin.name);
 
+    AnimationResourceError error;
+    auto skeleton = AnimationResourceValidation::makeSkeleton(std::move(bones), error);
+    if (!skeleton)
+    {
+        LOG_ENGINE_WARN("Rejected glTF skeleton: {}", error.code);
+        return nullptr;
+    }
+    LOG_ENGINE_INFO("Loaded skeleton with {} bones from skin '{}'", skeleton->getBoneCount(), skin.name);
     return skeleton;
 }
 
-std::vector<std::shared_ptr<AnimationClip>> loadAnimations(
+std::vector<std::shared_ptr<const AnimationClip>> loadAnimations(
     const tinygltf::Model& model,
     const Skeleton& skeleton)
 {
-    std::vector<std::shared_ptr<AnimationClip>> clips;
+    std::vector<std::shared_ptr<const AnimationClip>> clips;
 
     // Build node-to-bone map
     // We need the skin's joints to map node indices to bone indices
@@ -166,9 +173,9 @@ std::vector<std::shared_ptr<AnimationClip>> loadAnimations(
 
     for (const auto& anim : model.animations)
     {
-        auto clip = std::make_shared<AnimationClip>();
-        clip->name = anim.name.empty() ? "unnamed" : anim.name;
-        clip->duration = 0.0f;
+        AnimationClipDefinition clip;
+        clip.name = anim.name.empty() ? "unnamed" : anim.name;
+        clip.duration = 0.0f;
 
         for (const auto& channel : anim.channels)
         {
@@ -182,7 +189,7 @@ std::vector<std::shared_ptr<AnimationClip>> loadAnimations(
 
             // Find or create BoneAnimation for this bone
             BoneAnimation* bone_anim = nullptr;
-            for (auto& ba : clip->channels)
+            for (auto& ba : clip.channels)
             {
                 if (ba.bone_index == bone_index)
                 {
@@ -192,8 +199,8 @@ std::vector<std::shared_ptr<AnimationClip>> loadAnimations(
             }
             if (!bone_anim)
             {
-                clip->channels.push_back({});
-                bone_anim = &clip->channels.back();
+                clip.channels.push_back({});
+                bone_anim = &clip.channels.back();
                 bone_anim->bone_index = bone_index;
                 const auto* bone = skeleton.getBone(bone_index);
                 if (bone) bone_anim->bone_name = bone->name;
@@ -210,8 +217,8 @@ std::vector<std::shared_ptr<AnimationClip>> loadAnimations(
             // Track max duration
             for (size_t i = 0; i < time_count; i++)
             {
-                if (times[i] > clip->duration)
-                    clip->duration = times[i];
+                if (times[i] > clip.duration)
+                    clip.duration = times[i];
             }
 
             // Read output (values)
@@ -262,11 +269,19 @@ std::vector<std::shared_ptr<AnimationClip>> loadAnimations(
             }
         }
 
-        if (!clip->channels.empty())
+        if (!clip.channels.empty())
         {
+            AnimationResourceError error;
+            auto immutable_clip = AnimationResourceValidation::makeClip(
+                std::move(clip), skeleton.getBoneCount(), error);
+            if (!immutable_clip)
+            {
+                LOG_ENGINE_WARN("Rejected glTF animation: {}", error.code);
+                continue;
+            }
             LOG_ENGINE_INFO("Loaded animation '{}' ({:.2f}s, {} channels)",
-                clip->name, clip->duration, clip->channels.size());
-            clips.push_back(std::move(clip));
+                immutable_clip->name(), immutable_clip->duration(), immutable_clip->channels().size());
+            clips.push_back(std::move(immutable_clip));
         }
     }
 
