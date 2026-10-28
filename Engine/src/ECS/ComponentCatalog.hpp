@@ -50,7 +50,7 @@ enum class ComponentCatalogResult {
     // DuplicateKey means a compatible borrower; registerComponent returns the
     // provider's existing ID and leaves the provider's operations unchanged.
     Success, InvalidDescriptor, DuplicateKey, Conflict, NotFound, StaleId,
-    InUse, ResourceExhausted
+    InUse, ResourceExhausted, InternalError
 };
 
 enum class ComponentPinKind { Operation, LiveInstance };
@@ -85,22 +85,23 @@ private:
 class ENGINE_API ComponentCatalog {
 public:
     // Deliberately process-lifetime so static leases can safely release at shutdown.
-    static ComponentCatalog& instance();
-    ComponentCatalogResult registerComponent(const ComponentDescriptor&, ComponentId& outId);
-    ComponentCatalogResult resolve(const ComponentDescriptor&, ComponentId& outId) const;
+    static ComponentCatalog& instance() noexcept;
+    ComponentCatalogResult registerComponent(const ComponentDescriptor&, ComponentId& outId) noexcept;
+    ComponentCatalogResult resolve(const ComponentDescriptor&, ComponentId& outId) const noexcept;
     // Atomically retire all of the owner's components, or none if any is pinned.
-    ComponentCatalogResult unregisterOwner(uint64_t ownerId);
-    ComponentCatalogResult acquire(ComponentId, ComponentPinKind, ComponentLease& outLease);
+    ComponentCatalogResult unregisterOwner(uint64_t ownerId) noexcept;
+    // On failure, acquire leaves an existing outLease unchanged.
+    ComponentCatalogResult acquire(ComponentId, ComponentPinKind, ComponentLease& outLease) noexcept;
 
     ComponentCatalog(const ComponentCatalog&) = delete;
     ComponentCatalog& operator=(const ComponentCatalog&) = delete;
 
 private:
     friend class ComponentLease;
-    ComponentCatalog();
+    struct Impl;
+    explicit ComponentCatalog(Impl* impl) noexcept;
     ~ComponentCatalog();
     void release(ComponentId, ComponentPinKind) noexcept;
-    struct Impl;
     Impl* m_impl;
 };
 

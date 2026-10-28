@@ -1,10 +1,31 @@
 #include "ECS/ComponentCatalog.hpp"
+#include "ECS/ComponentStore.hpp"
+#include "ECS/ComponentOperations.hpp"
 
 #include <iostream>
+#include <cstdint>
+#include <stdexcept>
 #include <new>
 #include <string>
 #include <utility>
 
+struct alignas(128) StoreValue {
+    static inline int constructed = 0;
+    static inline int destroyed = 0;
+    int number;
+    explicit StoreValue(int n) : number(n) {
+        if (n < 0) throw std::runtime_error("construction failed");
+        ++constructed;
+    }
+    StoreValue(const StoreValue&) = delete;
+    StoreValue(StoreValue&&) = delete;
+    ~StoreValue() noexcept { ++destroyed; }
+};
+struct WrongStoreValue { alignas(128) unsigned char data[128]; };
+namespace garden::ecs {
+template<> struct ComponentType<StoreValue> { static constexpr ComponentKey key{"garden.tests.StoreValue", 1}; };
+template<> struct ComponentType<WrongStoreValue> { static constexpr ComponentKey key{"garden.tests.WrongStoreValue", 1}; };
+}
 using namespace garden::ecs;
 namespace {
 int failures = 0;
@@ -29,7 +50,58 @@ ComponentDescriptor descriptor() {
         {construct, destroy, copy, serialize}};
 }
 }
+void testStore() {
+    auto& catalog = ComponentCatalog::instance();
+    constexpr uint64_t owner = 0x98765;
+    ComponentDescriptor d{ComponentType<StoreValue>::key, owner, sizeof(StoreValue), alignof(StoreValue),
+        componentCapabilities<StoreValue>(), makeComponentOperations<StoreValue>()};
+    ComponentId id{};
+    check(catalog.registerComponent(d, id) == ComponentCatalogResult::Success, "register store value");
+    ComponentEntityKey first{17, 1};
+    ComponentEntityKey second{17, 2};
+    {
+        ComponentStore store;
+        void* ptr = nullptr;
+        check(store.add<WrongStoreValue>(id, first) == ComponentStoreResult::TypeMismatch,
+            "wrong component key rejected even for matching layout");
+        check(store.add<StoreValue>(id, first, -1) == ComponentStoreResult::ConstructionFailed &&
+            StoreValue::constructed == 0 && StoreValue::destroyed == 0 &&
+            store.get(id, first, ptr) == ComponentStoreResult::NotFound,
+            "failed constructor leaves no value or destructor call");
+        check(store.add<StoreValue>(id, first, 42) == ComponentStoreResult::Success &&
+            store.get(id, first, ptr) == ComponentStoreResult::Success && ptr &&
+            reinterpret_cast<uintptr_t>(ptr) % alignof(StoreValue) == 0 &&
+            static_cast<StoreValue*>(ptr)->number == 42,
+            "store constructs aligned non-movable value");
+        check(store.add<StoreValue>(id, first, 43) == ComponentStoreResult::Duplicate &&
+            store.add<StoreValue>(id, second, 43) == ComponentStoreResult::StaleEntity &&
+            store.get(id, second, ptr) == ComponentStoreResult::StaleEntity && !ptr &&
+            store.removeEntity(second) == ComponentStoreResult::StaleEntity,
+            "duplicate and stale generation rejected");
+        check(catalog.unregisterOwner(owner) == ComponentCatalogResult::InUse,
+            "stored value retains provider lease");
+        check(store.removeEntity(first) == ComponentStoreResult::Success && StoreValue::destroyed == 1 &&
+            store.get(id, first, ptr) == ComponentStoreResult::NotFound,
+            "entity retirement destroys and removes value");
+        check(store.add<StoreValue>(id, second, 44) == ComponentStoreResult::Success &&
+            store.remove(id, second) == ComponentStoreResult::Success && StoreValue::destroyed == 2 &&
+            store.remove(id, second) == ComponentStoreResult::NotFound,
+            "slot reuse and explicit removal destroy exactly once");
+        check(store.add<StoreValue>(id, first, 45) == ComponentStoreResult::Success,
+            "store value for scope cleanup");
+    }
+    check(StoreValue::constructed == 3 && StoreValue::destroyed == 3,
+        "store destruction drains remaining values");
+    check(catalog.unregisterOwner(owner) == ComponentCatalogResult::Success,
+        "provider retires after store destruction");
+    ComponentStore stale;
+    void* ptr = nullptr;
+    check(stale.get(id, first, ptr) == ComponentStoreResult::StaleComponent &&
+        stale.add<StoreValue>(id, first, 1) == ComponentStoreResult::StaleComponent,
+        "retired catalog generation rejected");
+}
 int main() {
+    testStore();
     auto& catalog = ComponentCatalog::instance();
     auto d = descriptor();
     ComponentId id{};
@@ -112,6 +184,15 @@ int main() {
         "unknown pin kind rejected");
     check(catalog.acquire(id, ComponentPinKind::Operation, operation) == ComponentCatalogResult::Success,
         "acquire operation lease");
+    check(catalog.acquire(ComponentId{}, ComponentPinKind::Operation, operation) == ComponentCatalogResult::StaleId &&
+        operation.descriptor() && operation.descriptor()->key == d.key &&
+        catalog.unregisterOwner(d.ownerId) == ComponentCatalogResult::InUse,
+        "failed acquisition preserves existing provider lease");
+    check(catalog.acquire(siblingId, ComponentPinKind::Operation, operation) == ComponentCatalogResult::Success &&
+        operation.descriptor() && operation.descriptor()->key == sibling.key,
+        "successful acquisition replaces existing lease");
+    check(catalog.acquire(id, ComponentPinKind::Operation, operation) == ComponentCatalogResult::Success,
+        "replace operation lease with original provider");
     check(catalog.unregisterOwner(d.ownerId) == ComponentCatalogResult::InUse,
         "operation lease blocks owner retirement");
     check(catalog.resolve(sibling, found) == ComponentCatalogResult::Success && found == siblingId &&

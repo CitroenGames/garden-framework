@@ -5,6 +5,17 @@
 #include <string>
 #include <cstdint>
 #include <vector>
+#include <array>
+
+// Full SHA-256 of the verified owned image and the validated API/compiler ABI
+// token. SHA-256 identity has a negligible but nonzero collision probability.
+struct GameModuleContentIdentity
+{
+    std::array<uint8_t, 32> image_sha256{};
+    int32_t api_abi_version = 0;
+
+    bool operator==(const GameModuleContentIdentity&) const = default;
+};
 
 // Loads and manages a game module DLL at runtime.
 // Handles hot-reload by copying the DLL before loading (Windows locks loaded DLLs).
@@ -46,6 +57,9 @@ public:
     const std::string& getLoadedPath() const { return m_source_path; }
     const std::string& getLoadedImagePath() const { return m_loaded_path; }
     const std::string& getOwnedGenerationRoot() const { return m_generation_root; }
+    // Valid only while loaded; callers retaining it across unload must copy it.
+    const GameModuleContentIdentity* getContentIdentity() const
+    { return m_handle ? &m_content_identity : nullptr; }
 
     // ---- Client hooks (first six are required; lifecycle hooks are optional) ----
 
@@ -77,6 +91,7 @@ private:
     std::string m_generation_root;    // Private process/session generation root
     std::string m_generation_path;    // Active owned generation directory, if any
     std::vector<std::string> m_owned_generation_files;
+    GameModuleContentIdentity m_content_identity;
 
     // Core client pointers are required; lifecycle pointers are optional.
     using FnGetAPIVersion       = int32_t(*)();

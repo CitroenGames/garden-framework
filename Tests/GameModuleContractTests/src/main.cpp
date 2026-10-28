@@ -1,4 +1,5 @@
 #include "Plugin/GameModuleLoader.hpp"
+#include "ECS/ComponentOperations.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -23,6 +24,35 @@ namespace fs = std::filesystem;
 
 namespace
 {
+    struct CopyOnlyComponent
+    {
+        explicit CopyOnlyComponent(int v) : value(v) {}
+        CopyOnlyComponent(const CopyOnlyComponent&) = default;
+        int value;
+    };
+
+    struct DefaultOnlyComponent
+    {
+        DefaultOnlyComponent() = default;
+        DefaultOnlyComponent(const DefaultOnlyComponent&) = delete;
+    };
+
+    struct NeitherComponent
+    {
+        NeitherComponent() = delete;
+        NeitherComponent(const NeitherComponent&) = delete;
+    };
+
+    struct ThrowingComponent
+    {
+        static inline int destructions = 0;
+        static inline bool throw_default = false;
+        static inline bool throw_copy = false;
+        ThrowingComponent() { if (throw_default) throw 1; }
+        ThrowingComponent(const ThrowingComponent&) { if (throw_copy) throw 2; }
+        ~ThrowingComponent() noexcept { ++destructions; }
+    };
+
     bool fail(const std::string& name, const std::string& reason)
     {
         std::cerr << "[FAIL] " << name << ": " << reason << std::endl;
@@ -33,6 +63,52 @@ namespace
     {
         std::cout << "[PASS] " << name << std::endl;
         return true;
+    }
+
+    bool testComponentOperations()
+    {
+        using namespace garden::ecs;
+        const std::string name = "ComponentOperations_ConstructionAndCapabilities";
+        constexpr auto copy = makeComponentOperations<CopyOnlyComponent>();
+        constexpr auto defaults = makeComponentOperations<DefaultOnlyComponent>();
+        constexpr auto neither = makeComponentOperations<NeitherComponent>();
+        constexpr auto throwing = makeComponentOperations<ThrowingComponent>();
+        if (componentCapabilities<CopyOnlyComponent>() != ComponentCopyConstruct ||
+            copy.defaultConstruct || !copy.copyConstruct || !copy.destroy || copy.serialize ||
+            componentCapabilities<DefaultOnlyComponent>() != ComponentDefaultConstruct ||
+            !defaults.defaultConstruct || defaults.copyConstruct || !defaults.destroy ||
+            componentCapabilities<NeitherComponent>() != 0 || neither.defaultConstruct ||
+            neither.copyConstruct || !neither.destroy ||
+            componentCapabilities<ThrowingComponent>() != (ComponentDefaultConstruct | ComponentCopyConstruct))
+            return fail(name, "operation pointers and capability flags do not match type support");
+
+        alignas(CopyOnlyComponent) unsigned char copy_storage[sizeof(CopyOnlyComponent)];
+        CopyOnlyComponent source(42);
+        if (!copy.copyConstruct(copy_storage, &source) ||
+            reinterpret_cast<CopyOnlyComponent*>(copy_storage)->value != 42)
+            return fail(name, "copy construction failed or lost the source value");
+        copy.destroy(copy_storage);
+
+        alignas(DefaultOnlyComponent) unsigned char default_storage[sizeof(DefaultOnlyComponent)];
+        if (!defaults.defaultConstruct(default_storage)) return fail(name, "default construction failed");
+        defaults.destroy(default_storage);
+
+        alignas(ThrowingComponent) unsigned char first[sizeof(ThrowingComponent)];
+        alignas(ThrowingComponent) unsigned char second[sizeof(ThrowingComponent)];
+        ThrowingComponent::destructions = 0;
+        ThrowingComponent::throw_default = true;
+        if (throwing.defaultConstruct(first)) return fail(name, "throwing default constructor succeeded");
+        ThrowingComponent::throw_default = false;
+        if (!throwing.defaultConstruct(first)) return fail(name, "default construction did not recover");
+        ThrowingComponent::throw_copy = true;
+        if (throwing.copyConstruct(second, first)) return fail(name, "throwing copy constructor succeeded");
+        ThrowingComponent::throw_copy = false;
+        if (!throwing.copyConstruct(second, first)) return fail(name, "copy construction did not recover");
+        throwing.destroy(second);
+        throwing.destroy(first);
+        if (ThrowingComponent::destructions != 2)
+            return fail(name, "failed constructions created or destroyed an object");
+        return pass(name);
     }
 
     std::vector<std::string> readEvents(const fs::path& path)
@@ -569,6 +645,7 @@ int main()
     }
 
     bool ok = true;
+    ok = testComponentOperations() && ok;
     ok = testRequiredExportRejections(paths) && ok;
     ok = testAbiRejections(paths) && ok;
     ok = testClientOptionalHooks(paths) && ok;

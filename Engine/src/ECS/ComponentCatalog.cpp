@@ -3,6 +3,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <string>
 #include <vector>
 
@@ -76,101 +77,151 @@ struct ComponentCatalog::Impl {
     std::vector<std::unique_ptr<Entry>> entries;
 };
 
-ComponentCatalog::ComponentCatalog() : m_impl(new Impl) {}
-ComponentCatalog::~ComponentCatalog() { delete m_impl; }
+ComponentCatalog::ComponentCatalog(Impl* impl) noexcept : m_impl(impl) {}
+ComponentCatalog::~ComponentCatalog() = default;
 
-ComponentCatalog& ComponentCatalog::instance() {
-    static ComponentCatalog* const catalog = new ComponentCatalog;
+ComponentCatalog& ComponentCatalog::instance() noexcept {
+    // Static storage avoids a fallible singleton allocation. Intentionally never
+    // destroy these objects: leases in other static destructors can still release.
+    alignas(Impl) static unsigned char implStorage[sizeof(Impl)];
+    alignas(ComponentCatalog) static unsigned char catalogStorage[sizeof(ComponentCatalog)];
+    static ComponentCatalog* const catalog = []() noexcept {
+        auto* impl = ::new (implStorage) Impl;
+        return ::new (catalogStorage) ComponentCatalog(impl);
+    }();
     return *catalog;
 }
 
-ComponentCatalogResult ComponentCatalog::registerComponent(const ComponentDescriptor& d, ComponentId& outId) {
+ComponentCatalogResult ComponentCatalog::registerComponent(const ComponentDescriptor& d, ComponentId& outId) noexcept {
     outId = {};
     if (!validDescriptor(d)) return ComponentCatalogResult::InvalidDescriptor;
-    std::lock_guard lock(m_impl->mutex);
-    size_t freeSlot = m_impl->entries.size();
-    for (size_t i = 0; i < m_impl->entries.size(); ++i) {
-        const auto& e = *m_impl->entries[i];
-        if (e.active && e.name == d.key.name) {
-            if (!sameMetadata(e.descriptor, d)) return ComponentCatalogResult::Conflict;
-            outId = {static_cast<uint32_t>(i), e.generation};
-            return ComponentCatalogResult::DuplicateKey;
+    try {
+        std::lock_guard lock(m_impl->mutex);
+        size_t freeSlot = m_impl->entries.size();
+        for (size_t i = 0; i < m_impl->entries.size(); ++i) {
+            const auto& e = *m_impl->entries[i];
+            if (e.active && e.name == d.key.name) {
+                if (!sameMetadata(e.descriptor, d)) return ComponentCatalogResult::Conflict;
+                outId = {static_cast<uint32_t>(i), e.generation};
+                return ComponentCatalogResult::DuplicateKey;
+            }
+            if (!e.active && e.generation != UINT32_MAX && freeSlot == m_impl->entries.size()) freeSlot = i;
         }
-        if (!e.active && e.generation != UINT32_MAX && freeSlot == m_impl->entries.size()) freeSlot = i;
-    }
-    if (freeSlot == m_impl->entries.size()) {
         if (freeSlot >= UINT32_MAX) return ComponentCatalogResult::ResourceExhausted;
-        m_impl->entries.push_back(std::make_unique<Impl::Entry>());
+        // Complete all fallible work before changing an existing slot or publishing
+        // a new one. The final swap and descriptor assignments cannot throw.
+        std::string name(d.key.name);
+        if (freeSlot == m_impl->entries.size()) {
+            auto entry = std::make_unique<Impl::Entry>();
+            entry->name.swap(name);
+            entry->descriptor = d;
+            entry->descriptor.key.name = entry->name;
+            entry->active = true;
+            m_impl->entries.push_back(std::move(entry));
+        } else {
+            auto& entry = *m_impl->entries[freeSlot];
+            entry.name.swap(name);
+            entry.descriptor = d;
+            entry.descriptor.key.name = entry.name;
+            entry.active = true;
+        }
+        outId = {static_cast<uint32_t>(freeSlot), m_impl->entries[freeSlot]->generation};
+        return ComponentCatalogResult::Success;
+    } catch (const std::bad_alloc&) {
+        return ComponentCatalogResult::ResourceExhausted;
+    } catch (...) {
+        return ComponentCatalogResult::InternalError;
     }
-    auto& e = *m_impl->entries[freeSlot];
-    e.name.assign(d.key.name.data(), d.key.name.size());
-    e.descriptor = d;
-    e.descriptor.key.name = e.name;
-    e.active = true;
-    outId = {static_cast<uint32_t>(freeSlot), e.generation};
-    return ComponentCatalogResult::Success;
 }
 
-ComponentCatalogResult ComponentCatalog::resolve(const ComponentDescriptor& d, ComponentId& outId) const {
+ComponentCatalogResult ComponentCatalog::resolve(const ComponentDescriptor& d, ComponentId& outId) const noexcept {
     outId = {};
     if (!validMetadata(d)) return ComponentCatalogResult::InvalidDescriptor;
-    std::lock_guard lock(m_impl->mutex);
-    for (size_t i = 0; i < m_impl->entries.size(); ++i) {
-        const auto& e = *m_impl->entries[i];
-        if (e.active && e.name == d.key.name) {
-            if (!sameMetadata(e.descriptor, d)) return ComponentCatalogResult::Conflict;
-            outId = {static_cast<uint32_t>(i), e.generation};
-            return ComponentCatalogResult::Success;
+    try {
+        std::lock_guard lock(m_impl->mutex);
+        for (size_t i = 0; i < m_impl->entries.size(); ++i) {
+            const auto& e = *m_impl->entries[i];
+            if (e.active && e.name == d.key.name) {
+                if (!sameMetadata(e.descriptor, d)) return ComponentCatalogResult::Conflict;
+                outId = {static_cast<uint32_t>(i), e.generation};
+                return ComponentCatalogResult::Success;
+            }
         }
+        return ComponentCatalogResult::NotFound;
+    } catch (const std::bad_alloc&) {
+        return ComponentCatalogResult::ResourceExhausted;
+    } catch (...) {
+        return ComponentCatalogResult::InternalError;
     }
-    return ComponentCatalogResult::NotFound;
 }
 
-ComponentCatalogResult ComponentCatalog::unregisterOwner(uint64_t ownerId) {
-    std::lock_guard lock(m_impl->mutex);
-    bool found = false;
-    for (const auto& entry : m_impl->entries) {
-        const auto& e = *entry;
-        if (!e.active || e.descriptor.ownerId != ownerId) continue;
-        found = true;
-        if (e.operations || e.instances) return ComponentCatalogResult::InUse;
+ComponentCatalogResult ComponentCatalog::unregisterOwner(uint64_t ownerId) noexcept {
+    try {
+        std::lock_guard lock(m_impl->mutex);
+        bool found = false;
+        for (const auto& entry : m_impl->entries) {
+            const auto& e = *entry;
+            if (!e.active || e.descriptor.ownerId != ownerId) continue;
+            found = true;
+            if (e.operations || e.instances) return ComponentCatalogResult::InUse;
+        }
+        if (!found) return ComponentCatalogResult::NotFound;
+        for (auto& entry : m_impl->entries) {
+            auto& e = *entry;
+            if (!e.active || e.descriptor.ownerId != ownerId) continue;
+            e.active = false;
+            e.descriptor = {};
+            e.name.clear();
+            if (e.generation != UINT32_MAX) ++e.generation;
+        }
+        return ComponentCatalogResult::Success;
+    } catch (const std::bad_alloc&) {
+        return ComponentCatalogResult::ResourceExhausted;
+    } catch (...) {
+        return ComponentCatalogResult::InternalError;
     }
-    if (!found) return ComponentCatalogResult::NotFound;
-    for (auto& entry : m_impl->entries) {
-        auto& e = *entry;
-        if (!e.active || e.descriptor.ownerId != ownerId) continue;
-        e.active = false;
-        e.descriptor = {};
-        e.name.clear();
-        if (e.generation != UINT32_MAX) ++e.generation;
-    }
-    return ComponentCatalogResult::Success;
 }
 
-ComponentCatalogResult ComponentCatalog::acquire(ComponentId id, ComponentPinKind kind, ComponentLease& outLease) {
+ComponentCatalogResult ComponentCatalog::acquire(ComponentId id, ComponentPinKind kind, ComponentLease& outLease) noexcept {
     if (kind != ComponentPinKind::Operation && kind != ComponentPinKind::LiveInstance)
         return ComponentCatalogResult::InvalidDescriptor;
-    // Reset before locking, since releasing an existing lease also takes the mutex.
-    outLease.reset();
-    std::lock_guard lock(m_impl->mutex);
-    if (id.slot >= m_impl->entries.size()) return ComponentCatalogResult::StaleId;
-    auto& e = *m_impl->entries[id.slot];
-    if (!e.active || e.generation != id.generation) return ComponentCatalogResult::StaleId;
-    auto& count = kind == ComponentPinKind::Operation ? e.operations : e.instances;
-    if (count == std::numeric_limits<uint64_t>::max()) return ComponentCatalogResult::ResourceExhausted;
-    ++count;
-    outLease.m_catalog = this;
-    outLease.m_descriptor = &e.descriptor;
-    outLease.m_id = id;
-    outLease.m_kind = kind;
-    return ComponentCatalogResult::Success;
+    try {
+        std::lock_guard lock(m_impl->mutex);
+        if (id.slot >= m_impl->entries.size()) return ComponentCatalogResult::StaleId;
+        auto& e = *m_impl->entries[id.slot];
+        if (!e.active || e.generation != id.generation) return ComponentCatalogResult::StaleId;
+        auto& count = kind == ComponentPinKind::Operation ? e.operations : e.instances;
+        if (count == std::numeric_limits<uint64_t>::max()) return ComponentCatalogResult::ResourceExhausted;
+        ++count;
+        if (outLease.m_catalog) {
+            // All leases come from the one process catalog; update both counts
+            // while holding the same lock, after the replacement is validated.
+            auto& previous = *m_impl->entries[outLease.m_id.slot];
+            auto& previousCount = outLease.m_kind == ComponentPinKind::Operation
+                ? previous.operations : previous.instances;
+            --previousCount;
+        }
+        outLease.m_catalog = this;
+        outLease.m_descriptor = &e.descriptor;
+        outLease.m_id = id;
+        outLease.m_kind = kind;
+        return ComponentCatalogResult::Success;
+    } catch (const std::bad_alloc&) {
+        return ComponentCatalogResult::ResourceExhausted;
+    } catch (...) {
+        return ComponentCatalogResult::InternalError;
+    }
 }
 
 void ComponentCatalog::release(ComponentId id, ComponentPinKind kind) noexcept {
-    std::lock_guard lock(m_impl->mutex);
-    auto& e = *m_impl->entries[id.slot];
-    auto& count = kind == ComponentPinKind::Operation ? e.operations : e.instances;
-    --count;
+    try {
+        std::lock_guard lock(m_impl->mutex);
+        auto& e = *m_impl->entries[id.slot];
+        auto& count = kind == ComponentPinKind::Operation ? e.operations : e.instances;
+        --count;
+    } catch (...) {
+        // Preserve the pin if locking fails; retirement must remain blocked.
+    }
 }
 
 ComponentLease::~ComponentLease() { reset(); }
