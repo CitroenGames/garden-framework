@@ -31,7 +31,7 @@
 #include "UndoSystem.hpp"
 #include <optional>
 #include "EditorConfig.hpp"
-#include "Plugin/GameModuleLoader.hpp"
+#include "Plugin/GameModuleHostSession.hpp"
 #include "Plugin/EditorPluginHost.hpp"
 #include "Plugin/EditorPanelRegistry.hpp"
 #include "Plugin/MenuRegistry.hpp"
@@ -174,7 +174,9 @@ private:
     bool        m_mouse_captured_for_game = false; // true when mouse is locked for game input
 
     // --- Network PIE ---
-    GameModuleLoader   m_game_module;              // Player 1 DLL (or only DLL in listen server)
+    // Player 1 owns one lifecycle session. The session keeps the game image
+    // loaded until the PIE worlds and host resources are torn down.
+    std::unique_ptr<GameModuleHostSession> m_game_module_session;
     ReflectionRegistry m_reflection;
     world              m_server_world;             // separate ECS world for listen server
     EngineServices     m_server_services{};

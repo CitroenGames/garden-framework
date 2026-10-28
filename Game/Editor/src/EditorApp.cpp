@@ -1152,12 +1152,12 @@ void EditorApp::run()
                     if (m_network_pie_active && m_state.network_pie.net_mode == PIENetMode::ListenServer)
                     {
                         m_server_world.tickGameplayFramework(m_delta_time);
-                        m_game_module.serverUpdate(m_delta_time);
+                        m_game_module_session->updateServer(m_delta_time);
                     }
 
                     if (m_play_world)
                         m_play_world->tickGameplayFramework(m_delta_time);
-                    m_game_module.update(m_delta_time);
+                    m_game_module_session->updateClient(m_delta_time);
                     if (m_state.play_mode != PlayMode::Ejected)
                         m_renderer.markBVHDirty();
 
@@ -1670,6 +1670,21 @@ void EditorApp::beginPlay()
     }
     applyPIESpawnLocation();
 
+    // This session is the owner of the Player 1 game image.  The editor
+    // dispatches module callbacks only on its frame thread, so clearing the
+    // active flag is the safe-point fence.  Its resource operation destroys
+    // worlds before the module image is unloaded, while their component
+    // destructors can still execute module code.
+    m_game_module_session = std::make_unique<GameModuleHostSession>(
+        GameModuleHostSession::HostOperations{
+            [this]() { m_game_module_active = false; },
+            [this]() {
+                m_game_input_manager.reset();
+                m_server_world.resetWorld();
+                m_play_world.reset();
+            },
+            {}});
+
     // Determine if we should use the game DLL for network PIE
     const bool simulate_mode = (m_state.pie_launch_mode == PIELaunchMode::Simulate);
     bool use_network_pie = !simulate_mode && (m_state.network_pie.net_mode != PIENetMode::Standalone);
@@ -1686,14 +1701,10 @@ void EditorApp::beginPlay()
         // ---- Network PIE path: load game DLL, run server + client ----
 
         // Load game DLL
-        if (!m_game_module.load(dll_path))
+        if (!m_game_module_session->loadAndRegister(dll_path, m_reflection))
         {
             LOG_ENGINE_ERROR("Failed to load game module '{}' — falling back to Standalone", dll_path);
             use_network_pie = false;
-        }
-        else
-        {
-            m_game_module.registerComponents(&m_reflection);
         }
     }
 
@@ -1701,10 +1712,10 @@ void EditorApp::beginPlay()
     {
         // --- Listen Server: server + client in-process ---
 
-        if (!m_game_module.hasServerSupport())
+        if (!m_game_module_session->loader().hasServerSupport())
         {
             LOG_ENGINE_WARN("Game module has no server support — falling back to Standalone");
-            m_game_module.unload();
+            m_game_module_session->stop();
             use_network_pie = false;
         }
         else
@@ -1736,16 +1747,22 @@ void EditorApp::beginPlay()
             m_server_services.selected_level_path = m_selected_level_artifact_path.empty()
                 ? nullptr : m_selected_level_artifact_path.c_str();
 
-            if (!m_game_module.serverInit(&m_server_services))
+            if (!m_game_module_session->initialiseServer(&m_server_services))
             {
                 LOG_ENGINE_ERROR("Server initialization failed — falling back to Standalone");
-                m_server_world.resetWorld();
-                m_game_module.unload();
+                m_game_module_session->stop();
                 use_network_pie = false;
             }
             else
             {
-                m_game_module.serverOnLevelLoaded();
+                if (!m_game_module_session->notifyServerLevelLoaded())
+                {
+                    LOG_ENGINE_ERROR("Server level callback failed — falling back to Standalone");
+                    m_game_module_session->stop();
+                    use_network_pie = false;
+                }
+                else
+                {
                 m_server_world.startGameplayFramework();
 
                 // Create input manager for client
@@ -1774,17 +1791,22 @@ void EditorApp::beginPlay()
                 m_client_services.connect_address  = "127.0.0.1";
                 m_client_services.connect_port     = port;
 
-                if (!m_game_module.init(&m_client_services))
+                if (!m_game_module_session->initialiseClient(&m_client_services))
                 {
                     LOG_ENGINE_ERROR("Client initialization failed");
-                    m_game_module.serverShutdown();
-                    m_server_world.resetWorld();
-                    m_game_module.unload();
                     use_network_pie = false;
                 }
                 else
                 {
-                    m_game_module.onLevelLoaded();
+                    if (!m_game_module_session->notifyClientLevelLoaded() ||
+                        !m_game_module_session->beginPlaying(true))
+                    {
+                        LOG_ENGINE_ERROR("Client PIE lifecycle did not reach Playing");
+                        m_game_module_session->stop();
+                        use_network_pie = false;
+                    }
+                    else
+                    {
                     m_play_world->startGameplayFramework();
                     m_game_module_active = true;
                     m_network_pie_active = true;
@@ -1887,6 +1909,8 @@ void EditorApp::beginPlay()
                     }
 
                     LOG_ENGINE_INFO("--- PIE: Listen Server started on port {} ---", port);
+                    }
+                }
                 }
             }
         }
@@ -1905,7 +1929,7 @@ void EditorApp::beginPlay()
         if (!m_pie_processes.spawnServer(server_exe, project_path, port))
         {
             LOG_ENGINE_ERROR("Failed to spawn dedicated server — falling back to Standalone");
-            m_game_module.unload();
+            m_game_module_session->stop();
             use_network_pie = false;
         }
         else
@@ -1939,16 +1963,24 @@ void EditorApp::beginPlay()
             m_client_services.connect_address  = "127.0.0.1";
             m_client_services.connect_port     = port;
 
-            if (!m_game_module.init(&m_client_services))
+            if (!m_game_module_session->initialiseClient(&m_client_services))
             {
                 LOG_ENGINE_ERROR("Client initialization failed");
                 m_pie_processes.killAll();
-                m_game_module.unload();
                 use_network_pie = false;
             }
             else
             {
-                m_game_module.onLevelLoaded();
+                if (!m_game_module_session->notifyClientLevelLoaded() ||
+                    !m_game_module_session->beginPlaying(true))
+                {
+                    LOG_ENGINE_ERROR("Dedicated-server client PIE lifecycle did not reach Playing");
+                    m_pie_processes.killAll();
+                    m_game_module_session->stop();
+                    use_network_pie = false;
+                }
+                else
+                {
                 m_play_world->startGameplayFramework();
                 m_game_module_active = true;
                 m_network_pie_active = true;
@@ -2039,6 +2071,7 @@ void EditorApp::beginPlay()
                 }
 
                 LOG_ENGINE_INFO("--- PIE: Dedicated Server mode on port {} ---", port);
+                }
             }
         }
     }
@@ -2046,10 +2079,28 @@ void EditorApp::beginPlay()
     if (!use_network_pie && !m_network_pie_active)
     {
         // ---- Standalone project-DLL path: run the same game code as Game.exe ----
+        // A failed network module init releases its world before unloading the
+        // image. Recreate the isolated world before using the engine-only or
+        // standalone-module fallback path.
+        if (!m_play_world)
+        {
+            m_play_world = cloneEditorWorldForPIE(
+                m_world,
+                m_play_snapshot.metadata,
+                m_reflection,
+                m_level_manager);
+            if (!m_play_world)
+            {
+                LOG_ENGINE_ERROR("PIE: Failed to recreate isolated play world after module cleanup");
+                return;
+            }
+            applyPIESpawnLocation();
+        }
         m_game_input_manager = std::make_shared<InputManager>();
         m_game_input_manager->initialize_gamepads();
 
-        if (!dll_path.empty() && std::filesystem::exists(dll_path) && m_game_module.load(dll_path))
+        if (!dll_path.empty() && std::filesystem::exists(dll_path) &&
+            m_game_module_session->loadAndRegister(dll_path, m_reflection))
         {
             m_client_services = {};
             m_client_services.game_world      = m_play_world.get();
@@ -2064,12 +2115,12 @@ void EditorApp::beginPlay()
             m_client_services.selected_level_path = m_selected_level_artifact_path.empty()
                 ? nullptr : m_selected_level_artifact_path.c_str();
 
-            m_game_module.registerComponents(&m_reflection);
             m_level_manager.applyGameplayFrameworkSettings(m_play_snapshot.metadata, *m_play_world);
             m_play_world->initializeGameplayFramework(m_play_snapshot.metadata.level_name, "");
-            if (m_game_module.init(&m_client_services))
+            if (m_game_module_session->initialiseClient(&m_client_services) &&
+                m_game_module_session->notifyClientLevelLoaded() &&
+                m_game_module_session->beginPlaying(true))
             {
-                m_game_module.onLevelLoaded();
                 m_play_world->startGameplayFramework();
                 m_game_module_active = true;
                 LOG_ENGINE_INFO("--- PIE: Standalone game module initialized ---");
@@ -2077,12 +2128,26 @@ void EditorApp::beginPlay()
             else
             {
                 LOG_ENGINE_ERROR("Standalone game module initialization failed - falling back to engine simulation");
-                m_game_module.unload();
+                m_game_module_session->stop();
             }
         }
 
         if (!m_game_module_active)
         {
+            if (!m_play_world)
+            {
+                m_play_world = cloneEditorWorldForPIE(
+                    m_world,
+                    m_play_snapshot.metadata,
+                    m_reflection,
+                    m_level_manager);
+                if (!m_play_world)
+                {
+                    LOG_ENGINE_ERROR("PIE: Failed to recreate isolated play world for engine simulation");
+                    return;
+                }
+                applyPIESpawnLocation();
+            }
             // No project DLL is available; fall back to the engine-only simulation.
             LocalPlayerInputActionNames local_input_actions;
             std::string local_input_context;
@@ -2219,18 +2284,14 @@ void EditorApp::stopPlay()
             m_focused_pie_client = -1;
         }
 
-        // Shutdown Player 1 client
-        m_game_module.shutdown();
-
-        // Shutdown server (only for listen server — dedicated server was a separate process)
-        if (m_network_pie_active && m_state.network_pie.net_mode == PIENetMode::ListenServer)
+        // The host session performs the editor sequence: play-stop, client
+        // shutdown, listen-server shutdown, world/resource release, then
+        // registration removal and image unload.
+        if (m_game_module_session)
         {
-            m_game_module.serverShutdown();
-            m_server_world.resetWorld();
+            m_game_module_session->stop();
+            m_game_module_session.reset();
         }
-
-        m_game_module.unload();
-        m_game_input_manager.reset();
         m_game_module_active = false;
         m_network_pie_active = false;
 

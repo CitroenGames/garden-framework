@@ -236,6 +236,40 @@ namespace
         recovery.stop();
         return expectLedger(name, recovery_ledger) ? pass(name) : false;
     }
+
+    bool testEditorFailureFallbackReusesSession()
+    {
+        const std::string name = "GameModuleLifecycle_EditorPieFallbackReuse";
+        ScopedRecorder recorder("editor_fallback");
+        HostLedger ledger;
+        ReflectionRegistry reflection;
+        GameModuleHostSession session(ledger.operations());
+
+        // Editor PIE retains its host-session object while it recreates the
+        // play world after a failed module init. Verify that the same session
+        // can return from its bounded cleanup to Idle and then issue a fully
+        // paired PIE lifecycle for the fallback module.
+        if (!session.loadAndRegister(fixturePath("client_init_fails").string(), reflection) ||
+            session.initialiseClient(nullptr) || session.phase() != GameModuleHostSession::Phase::Idle)
+            return fail(name, "failed PIE candidate did not return its host session to Idle");
+
+        if (!session.loadAndRegister(fixturePath("client_recorder").string(), reflection) ||
+            !session.initialiseClient(nullptr) || !session.notifyClientLevelLoaded() ||
+            !session.beginPlaying(true))
+            return fail(name, "fallback PIE candidate did not reach Playing on the reused session");
+        session.stop();
+
+        if (!equals(recorder.events(), {
+                "register_components", "client.init",
+                "register_components", "client.init", "client.level_loaded",
+                "client.play_start", "client.play_stop", "client.shutdown"}))
+            return fail(name, "fallback module did not receive a complete paired PIE lifecycle");
+        if (!equals(ledger.events, {
+                "host.quiesce", "host.release_resources", "host.remove:GameModuleLifecycleFixture",
+                "host.quiesce", "host.release_resources", "host.remove:GameModuleLifecycleFixture"}))
+            return fail(name, "PIE fallback did not clean each candidate before reuse");
+        return pass(name);
+    }
 }
 
 int main()
@@ -255,5 +289,6 @@ int main()
     ok = testDedicatedServer() && ok;
     ok = testListenServer() && ok;
     ok = testFailedInitialisationRecovery() && ok;
+    ok = testEditorFailureFallbackReusesSession() && ok;
     return ok ? 0 : 1;
 }
