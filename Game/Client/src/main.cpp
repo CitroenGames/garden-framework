@@ -18,7 +18,7 @@
 #include "world.hpp"
 #include "LevelManager.hpp"
 #include "Graphics/renderer.hpp"
-#include "Plugin/GameModuleLoader.hpp"
+#include "Plugin/GameModuleHostSession.hpp"
 #include "Project/ProjectManager.hpp"
 #include "InputHandler.hpp"
 #include "InputActionSystem.hpp"
@@ -42,7 +42,7 @@ static Application app;
 static renderer _renderer;
 static world _world;
 static InputHandler input_handler;
-static GameModuleLoader game_module;
+static GameModuleHostSession game_module;
 static ProjectManager project_manager;
 static LevelManager level_manager;
 static ReflectionRegistry reflection;
@@ -51,11 +51,9 @@ static void quit_game(int code)
 {
     ConVarRegistry::get().saveArchiveCvars("config.cfg");
 
-    if (game_module.isLoaded())
-    {
-        game_module.shutdown();
-        game_module.unload();
-    }
+    // Stop the host session while the world and host services remain valid.
+    // It invokes the module shutdown callback before unloading its image.
+    game_module.stop();
     AudioSystem::get().shutdown();
     Assets::AssetManager::get().shutdown();
     Threading::JobSystem::get().shutdown();
@@ -280,12 +278,11 @@ int main(int argc, char* argv[])
     level_manager.setReflectionRegistry(&reflection);
 
     std::string dll_path = project_manager.getAbsoluteModulePath();
-    if (!game_module.load(dll_path))
+    if (!game_module.loadAndRegister(dll_path, reflection))
     {
         LOG_ENGINE_FATAL("Failed to load game module: {}", dll_path);
         quit_game(1);
     }
-    game_module.registerComponents(&reflection);
 
     // Set up input
     input_handler.set_window(app.getWindow());
@@ -373,14 +370,23 @@ int main(int argc, char* argv[])
 
     PrefabManager::get().initialize(&reflection, render_api);
 
-    if (!game_module.init(&services))
+    if (!game_module.initialiseClient(&services))
     {
         LOG_ENGINE_FATAL("Game module initialization failed");
         quit_game(1);
     }
 
-    game_module.onLevelLoaded();
+    if (!game_module.notifyClientLevelLoaded())
+    {
+        LOG_ENGINE_FATAL("Game module level-loaded callback could not be dispatched");
+        quit_game(1);
+    }
     _world.startGameplayFramework();
+    if (!game_module.beginPlaying(false))
+    {
+        LOG_ENGINE_FATAL("Game module did not reach the playing lifecycle phase");
+        quit_game(1);
+    }
 
     // Main game loop
     Uint64 delta_last = SDL_GetTicks();
@@ -415,7 +421,7 @@ int main(int argc, char* argv[])
 
             // Let the game DLL handle all game logic
             _world.tickGameplayFramework(delta_time);
-            game_module.update(delta_time);
+            game_module.updateClient(delta_time);
 
             // Render using the world camera (updated by the game DLL)
             _renderer.render_scene(_world.registry, _world.world_camera);

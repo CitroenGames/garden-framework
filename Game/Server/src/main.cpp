@@ -12,7 +12,7 @@
 #include "Application.hpp"
 #include "world.hpp"
 #include "LevelManager.hpp"
-#include "Plugin/GameModuleLoader.hpp"
+#include "Plugin/GameModuleHostSession.hpp"
 #include "Project/ProjectManager.hpp"
 #include "Reflection/ReflectionRegistry.hpp"
 #include "Reflection/EngineReflection.hpp"
@@ -35,18 +35,16 @@ namespace fs = std::filesystem;
 
 static Application app;
 static world _world;
-static GameModuleLoader game_module;
+static GameModuleHostSession game_module;
 static ProjectManager project_manager;
 static LevelManager level_manager;
 static ReflectionRegistry reflection;
 
 static void shutdown_server(int code)
 {
-    if (game_module.isLoaded())
-    {
-        game_module.serverShutdown();
-        game_module.unload();
-    }
+    // Stop the host session while the world and scheduler-owned state remain
+    // valid. The session dispatches server shutdown before unloading the DLL.
+    game_module.stop();
     _world.registry.clear();
     app.shutdown();
     EE::CLog::Shutdown();
@@ -145,19 +143,17 @@ int main(int argc, char* argv[])
 
     // Load game DLL before the level so reflected game components can be imported.
     std::string dll_path = project_manager.getAbsoluteModulePath();
-    if (!game_module.load(dll_path))
+    if (!game_module.loadAndRegister(dll_path, reflection))
     {
         LOG_ENGINE_FATAL("Failed to load game module: {}", dll_path);
         shutdown_server(1);
     }
 
-    if (!game_module.hasServerSupport())
+    if (!game_module.loader().hasServerSupport())
     {
-        LOG_ENGINE_FATAL("Game module '{}' does not export server hooks", game_module.getGameName());
+        LOG_ENGINE_FATAL("Game module '{}' does not export server hooks", game_module.loader().getGameName());
         shutdown_server(1);
     }
-
-    game_module.registerComponents(&reflection);
 
     // LevelManager assigns final persistent identities while instantiating
     // entities; install lifecycle indexing first so its construct hook sees
@@ -217,14 +213,23 @@ int main(int argc, char* argv[])
 
     PrefabManager::get().initialize(&reflection, render_api);
 
-    if (!game_module.serverInit(&services))
+    if (!game_module.initialiseServer(&services))
     {
         LOG_ENGINE_FATAL("Server module initialization failed");
         shutdown_server(1);
     }
 
-    game_module.serverOnLevelLoaded();
+    if (!game_module.notifyServerLevelLoaded())
+    {
+        LOG_ENGINE_FATAL("Server module level-loaded callback could not be dispatched");
+        shutdown_server(1);
+    }
     _world.startGameplayFramework();
+    if (!game_module.beginPlaying(false))
+    {
+        LOG_ENGINE_FATAL("Server module did not reach the playing lifecycle phase");
+        shutdown_server(1);
+    }
 
     // D5: dedicated server is driven by a SystemScheduler (server host).
     // World physics is advanced once per consumed fixed tick in Physics,
@@ -237,7 +242,7 @@ int main(int argc, char* argv[])
         d.name = "game.server_pre_physics";
         d.phase = Phase::PrePhysics;
         d.update = [](entt::registry&, const Tick::SimulationTickContext& ctx) {
-            game_module.serverPrePhysics(ctx.fixed_delta);
+            game_module.updateServerPrePhysics(ctx.fixed_delta);
         };
         server_scheduler.addSystem(std::move(d));
     }
@@ -267,7 +272,7 @@ int main(int argc, char* argv[])
         d.phase = Phase::Gameplay;
         d.run_after = {"game.gameplay_framework"};
         d.update = [](entt::registry&, const Tick::SimulationTickContext& ctx) {
-            game_module.serverUpdate(ctx.fixed_delta);
+            game_module.updateServer(ctx.fixed_delta);
         };
         server_scheduler.addSystem(std::move(d));
     }
