@@ -1595,26 +1595,34 @@ static const char* competitivePhaseName(Competitive::RoundPhase ph)
     }
     return "?";
 }
-static void handleCompetitiveBuy(uint16_t client_id, BitReader& reader)
+static bool handleCompetitiveBuy(uint16_t client_id, BitReader& reader)
 {
     // Custom-message callbacks retain the complete packet, including its type
     // byte.  Decode the full request so sequence and item fields stay aligned.
     BuyRequestMessage request;
     if (!CompetitiveSerializer::deserialize(reader, request)) {
         LOG_ENGINE_WARN("Ignoring malformed competitive buy request from client {}", client_id);
-        return;
+        return false;
+    }
+    if (!isValidCompetitiveBuyRequest(request)) {
+        LOG_ENGINE_WARN("Ignoring zero-sequence competitive buy request from client {}", client_id);
+        return false;
+    }
+    if (!g_sessions.consumeBuyRequest(client_id, g_server_network.getCurrentTick())) {
+        LOG_ENGINE_WARN("Rejected rate-limited competitive buy request from client {}", client_id);
+        return false;
     }
     const uint32_t seq = request.request_seq;
     const uint16_t item_id = request.item_id;
     world* w = g_server_services ? g_server_services->game_world : nullptr;
-    if (!w) return;
+    if (!w) return false;
     entt::entity e = findPlayerEntity(*w, client_id);
     BuyResultMessage reply; reply.request_seq = seq; reply.item_id = item_id;
     if (e == entt::null || !w->registry.all_of<TeamComponent, Competitive::MoneyComponent, InventoryComponent, PlayerLoadoutComponent, WeaponComponent, FpsHealthComponent, TransformComponent>(e)) {
         reply.result = static_cast<uint8_t>(Competitive::BuyResult::Dead);
         BitWriter bw; CompetitiveSerializer::serialize(bw, reply);
         sendCompetitiveOwnerMessage(client_id, bw);
-        return;
+        return true;
     }
     uint8_t team = w->registry.get<TeamComponent>(e).team_id;
     glm::vec3 pos = w->registry.get<TransformComponent>(e).position;
@@ -1653,21 +1661,22 @@ static void handleCompetitiveBuy(uint16_t client_id, BitReader& reader)
     sendCompetitiveOwnerMessage(client_id, bw);
     sendEconomyState(client_id, e);
     LOG_ENGINE_INFO("Competitive buy client={} item={} result={} balance={}", client_id, item_id, (int)result, reply.balance);
+    return true;
 }
-static void handleCompetitiveTeamSelect(uint16_t client_id, BitReader& reader)
+static bool handleCompetitiveTeamSelect(uint16_t client_id, BitReader& reader)
 {
     TeamSelectMessage request;
-    if (!CompetitiveSerializer::deserialize(reader, request) || request.auto_assign > 1) {
+    if (!CompetitiveSerializer::deserialize(reader, request) || !isValidCompetitiveTeamSelectRequest(request)) {
         LOG_ENGINE_WARN("Rejected malformed competitive team request from client {}", client_id);
-        return;
+        return false;
     }
 
     world* w = g_server_services ? g_server_services->game_world : nullptr;
     if (!w || !g_sessions.contains(client_id))
-        return;
+        return false;
     if (!g_sessions.consumeTeamSelectRequest(client_id, g_server_network.getCurrentTick())) {
         LOG_ENGINE_WARN("Rejected rate-limited competitive team request from client {}", client_id);
-        return;
+        return false;
     }
 
     entt::entity e = findPlayerEntity(*w, client_id);
@@ -1729,6 +1738,7 @@ static void handleCompetitiveTeamSelect(uint16_t client_id, BitReader& reader)
     reply.team = static_cast<uint8_t>(out);
     BitWriter bw; CompetitiveSerializer::serialize(bw, reply);
     sendCompetitiveOwnerMessage(client_id, bw);
+    return true;
 }
 
 // ---- Player spawning (called by network callbacks) ----
@@ -2142,13 +2152,14 @@ GAME_API bool gardenServerInit(EngineServices* services)
 
     g_server_network.setCustomMessageHandler([](uint16_t client_id, uint8_t message_type, BitReader& reader) {
         if (g_competitive && message_type == static_cast<uint8_t>(CompetitiveMessageType::BUY_REQUEST)) {
-            handleCompetitiveBuy(client_id, reader); return;
+            return handleCompetitiveBuy(client_id, reader);
         }
         if (g_competitive && message_type == static_cast<uint8_t>(CompetitiveMessageType::TEAM_SELECT)) {
-            handleCompetitiveTeamSelect(client_id, reader); return;
+            return handleCompetitiveTeamSelect(client_id, reader);
         }
         LOG_ENGINE_WARN("Ignoring unauthoritative client custom message {} from client {}",
             static_cast<int>(message_type), client_id);
+        return false;
     });
 
     // Set up respawn handler

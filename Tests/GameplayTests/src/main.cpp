@@ -2013,6 +2013,25 @@ bool testCompetitiveSessionFlow()
         sessions.consumeTeamSelectRequest(7, 100) ||
         !sessions.consumeTeamSelectRequest(7, 101))
         return fail(name, "team-request throttle did not reject same-tick replay deterministically");
+    if (!sessions.consumeTeamSelectRequest(7, 102) ||
+        !sessions.consumeTeamSelectRequest(7, 103) ||
+        sessions.consumeTeamSelectRequest(7, 104))
+        return fail(name, "team-request budget did not bound a one-second flood");
+    const SessionRecord budget_rejected_team = *sessions.find(7);
+    if (budget_rejected_team.team != FpsTeam::None ||
+        budget_rejected_team.state != SessionState::AwaitingTeam ||
+        !sessions.consumeTeamSelectRequest(7, 160))
+        return fail(name, "team-request budget rejection changed session authority or did not refill");
+    for (uint8_t i = 0; i < SessionCoordinator::kBuyRequestsPerWindow; ++i) {
+        if (!sessions.consumeBuyRequest(7, 200))
+            return fail(name, "buy-request burst was rejected before its declared budget");
+    }
+    const SessionRecord buy_budget_before_rejection = *sessions.find(7);
+    if (sessions.consumeBuyRequest(7, 200) ||
+        sessions.find(7)->team != buy_budget_before_rejection.team ||
+        sessions.find(7)->state != buy_budget_before_rejection.state ||
+        !sessions.consumeBuyRequest(7, 260))
+        return fail(name, "buy-request budget rejection mutated session authority or did not refill");
 
     FpsTeam late_join_team = FpsTeam::None;
     const SessionRecord admitted_before_selection = *sessions.find(7);
@@ -2126,6 +2145,9 @@ bool testCompetitiveSessionFlow()
     sessions.remove(7);
     if (sessions.contains(7) || sessions.size() != 0)
         return fail(name, "disconnect cleanup retained the session record");
+    if (!sessions.admit(7) || !sessions.consumeBuyRequest(7, 300))
+        return fail(name, "disconnect cleanup retained a buy-request budget for a reused client id");
+    sessions.remove(7);
     return pass(name);
 }
 

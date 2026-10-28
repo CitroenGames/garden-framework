@@ -108,6 +108,42 @@ bool testCompetitiveProtocolStatePublication()
         return fail(name, "server buy handler wire decode was offset by the message type");
     }
 
+    Net::BitWriter truncated_buy;
+    truncated_buy.writeByte(static_cast<uint8_t>(CompetitiveMessageType::BUY_REQUEST));
+    truncated_buy.writeUInt32(1);
+    Net::BitReader truncated_buy_reader(truncated_buy.getData(), truncated_buy.getByteSize());
+    if (CompetitiveSerializer::deserialize(truncated_buy_reader, received_request)) {
+        return fail(name, "truncated buy request reached server semantics");
+    }
+    Net::BitWriter trailing_buy;
+    CompetitiveSerializer::serialize(trailing_buy, request);
+    trailing_buy.writeByte(0xff);
+    Net::BitReader trailing_buy_reader(trailing_buy.getData(), trailing_buy.getByteSize());
+    if (CompetitiveSerializer::deserialize(trailing_buy_reader, received_request)) {
+        return fail(name, "buy request with trailing payload reached server semantics");
+    }
+
+    TeamSelectMessage team_request;
+    team_request.desired_team = Competitive::teamId(Competitive::FpsTeam::Attackers);
+    team_request.auto_assign = 0;
+    if (!isValidCompetitiveBuyRequest(request) || isValidCompetitiveBuyRequest(BuyRequestMessage{}) ||
+        !isValidCompetitiveTeamSelectRequest(team_request)) {
+        return fail(name, "valid competitive client-request bounds were rejected");
+    }
+    team_request.desired_team = 4;
+    if (isValidCompetitiveTeamSelectRequest(team_request)) {
+        return fail(name, "out-of-range team enum passed client-request validation");
+    }
+    team_request.desired_team = Competitive::teamId(Competitive::FpsTeam::Attackers);
+    Net::BitWriter trailing_team;
+    CompetitiveSerializer::serialize(trailing_team, team_request);
+    trailing_team.writeByte(0xff);
+    Net::BitReader trailing_team_reader(trailing_team.getData(), trailing_team.getByteSize());
+    TeamSelectMessage received_team_request;
+    if (CompetitiveSerializer::deserialize(trailing_team_reader, received_team_request)) {
+        return fail(name, "team request with trailing payload reached server semantics");
+    }
+
     Net::BitReader wrong_reader(economy_writer.getData(), economy_writer.getByteSize());
     RoundStateMessage wrong_type;
     if (CompetitiveSerializer::deserialize(wrong_reader, wrong_type))

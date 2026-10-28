@@ -765,6 +765,12 @@ struct SessionRecord {
     SessionState state = SessionState::AwaitingTeam;
     uint32_t last_team_select_tick = 0;
     bool has_team_select_tick = false;
+    uint32_t team_request_window_start_tick = 0;
+    uint8_t team_requests_in_window = 0;
+    bool has_team_request_window = false;
+    uint32_t buy_request_window_start_tick = 0;
+    uint8_t buy_requests_in_window = 0;
+    bool has_buy_request_window = false;
 };
 
 // This is the template's pure admission decision.  It deliberately says
@@ -795,6 +801,12 @@ public:
     // bursts from repeatedly mutating a pawn.  It does not create a protocol
     // result value because TEAM_RESULT has no rate-limit enum.
     static constexpr uint32_t kTeamSelectIntervalTicks = 1;
+    // These are server-tick budgets for human UI actions, deliberately owned
+    // by the connection session rather than pawn ECS. A team menu has one
+    // deliberate action and the buy menu permits a short multi-item burst.
+    static constexpr uint32_t kRequestBudgetWindowTicks = 60;
+    static constexpr uint8_t kTeamSelectRequestsPerWindow = 4;
+    static constexpr uint8_t kBuyRequestsPerWindow = 8;
 
     bool admit(uint16_t client_id) {
         if (client_id == 0 || sessions_.find(client_id) != sessions_.end())
@@ -846,9 +858,21 @@ public:
         if (record->has_team_select_tick &&
             static_cast<uint32_t>(server_tick - record->last_team_select_tick) < kTeamSelectIntervalTicks)
             return false;
+        if (!consumeRequestBudget(record->team_request_window_start_tick,
+                                  record->team_requests_in_window,
+                                  record->has_team_request_window,
+                                  kTeamSelectRequestsPerWindow, server_tick))
+            return false;
         record->last_team_select_tick = server_tick;
         record->has_team_select_tick = true;
         return true;
+    }
+
+    bool consumeBuyRequest(uint16_t client_id, uint32_t server_tick) {
+        SessionRecord* record = find(client_id);
+        return record != nullptr && consumeRequestBudget(record->buy_request_window_start_tick,
+            record->buy_requests_in_window, record->has_buy_request_window,
+            kBuyRequestsPerWindow, server_tick);
     }
 
     bool assignTeam(uint16_t client_id, FpsTeam team, RoundPhase phase) {
@@ -913,6 +937,20 @@ public:
     size_t size() const { return sessions_.size(); }
 
 private:
+    static bool consumeRequestBudget(uint32_t& window_start_tick, uint8_t& requests_in_window,
+                                     bool& has_window, uint8_t window_limit, uint32_t server_tick) {
+        if (!has_window ||
+            static_cast<uint32_t>(server_tick - window_start_tick) >= kRequestBudgetWindowTicks) {
+            window_start_tick = server_tick;
+            requests_in_window = 0;
+            has_window = true;
+        }
+        if (requests_in_window >= window_limit)
+            return false;
+        ++requests_in_window;
+        return true;
+    }
+
     std::unordered_map<uint16_t, SessionRecord> sessions_;
 };
 

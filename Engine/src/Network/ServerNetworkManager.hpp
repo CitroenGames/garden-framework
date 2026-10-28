@@ -22,7 +22,10 @@ class world;
 
 namespace Net {
 
-using ServerCustomMessageHandler = std::function<void(uint16_t client_id, uint8_t message_type, BitReader& reader)>;
+// Return true only after the game-specific handler accepted the complete
+// message. False makes the generic transport account the packet as an
+// incoming rejection without giving EngineCore any game-message knowledge.
+using ServerCustomMessageHandler = std::function<bool(uint16_t client_id, uint8_t message_type, BitReader& reader)>;
 using ServerInputFilter = std::function<bool(uint16_t client_id, entt::entity player_entity)>;
 // The final argument is the effective view tick: CAP_VIEW_TICK is passed
 // through per sample, while legacy acknowledgements receive the default delay.

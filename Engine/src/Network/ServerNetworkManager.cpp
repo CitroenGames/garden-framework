@@ -399,9 +399,14 @@ void ServerNetworkManager::handleClientMessage(ENetEvent& event)
         default: {
             auto it = peer_to_client_id.find(event.peer);
             if (msg_type >= CUSTOM_MESSAGE_START && it != peer_to_client_id.end() && on_custom_message) {
-                on_custom_message(it->second, msg_type, reader);
+                if (!on_custom_message(it->second, msg_type, reader)) {
+                    LOG_ENGINE_WARN("Dropping rejected custom message type {} from client {}",
+                                    static_cast<int>(msg_type), it->second);
+                    recordDroppedFromPeer(event.peer, event.packet->dataLength);
+                }
             } else {
                 LOG_ENGINE_WARN("Received unknown message type: {0}", static_cast<int>(msg_type));
+                recordDroppedFromPeer(event.peer, event.packet->dataLength);
             }
             break;
         }
@@ -475,12 +480,13 @@ void ServerNetworkManager::handleConnectRequest(ENetPeer* peer, BitReader& reade
     peer_to_client_id[peer] = client_id;
 
     // Create client info
-    ClientInfo info(client_id, msg.player_name, peer);
+    const std::string normalized_player_name = normalizePlayerName(msg.player_name);
+    ClientInfo info(client_id, normalized_player_name, peer);
     info.capability_flags = msg.capability_flags & server_capability_flags;
     ClientConnection connection(info);
     clients[client_id] = connection;
 
-    LOG_ENGINE_INFO("Client {0} connected: {1}", client_id, msg.player_name);
+    LOG_ENGINE_INFO("Client {0} connected: {1}", client_id, normalized_player_name);
 
     // Send accept message
     BitWriter writer;

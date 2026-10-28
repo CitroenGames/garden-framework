@@ -110,6 +110,21 @@ struct TeamResultMessage
     uint8_t team = 0;   // Competitive::FpsTeam
 };
 
+// Client-to-server commands are validated structurally by the serializer and
+// semantically before the server session or ECS is touched. Keep these wire
+// bounds here so the server callback and focused protocol tests share one
+// definition without moving FPS session policy into EngineCore.
+constexpr bool isValidCompetitiveBuyRequest(const BuyRequestMessage& message)
+{
+    return message.request_seq != 0;
+}
+
+constexpr bool isValidCompetitiveTeamSelectRequest(const TeamSelectMessage& message)
+{
+    constexpr uint8_t kSpectatorTeamId = 3;
+    return message.auto_assign <= 1 && message.desired_team <= kSpectatorTeamId;
+}
+
 struct ShootResultMessage
 {
     uint8_t type = static_cast<uint8_t>(CombatMessageType::SHOOT_RESULT);
@@ -308,7 +323,7 @@ namespace CompetitiveSerializer
         msg.type = reader.readByte();
         if (msg.type != static_cast<uint8_t>(CompetitiveMessageType::BUY_REQUEST)) return false;
         msg.request_seq = reader.readUInt32(); msg.item_id = reader.readUInt16();
-        return !reader.hasError();
+        return !reader.hasError() && reader.getBitPosition() == reader.getBufferSize() * 8;
     }
     inline void serialize(Net::BitWriter& writer, const BuyResultMessage& msg) {
         writer.writeByte(msg.type); writer.writeUInt32(msg.request_seq); writer.writeUInt16(msg.item_id);
@@ -328,7 +343,7 @@ namespace CompetitiveSerializer
         msg.type = reader.readByte();
         if (msg.type != static_cast<uint8_t>(CompetitiveMessageType::TEAM_SELECT)) return false;
         msg.desired_team = reader.readByte(); msg.auto_assign = reader.readByte();
-        return !reader.hasError();
+        return !reader.hasError() && reader.getBitPosition() == reader.getBufferSize() * 8;
     }
     inline void serialize(Net::BitWriter& writer, const TeamResultMessage& msg) {
         writer.writeByte(msg.type); writer.writeByte(msg.result); writer.writeByte(msg.team);

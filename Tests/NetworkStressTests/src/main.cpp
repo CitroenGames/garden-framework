@@ -548,7 +548,7 @@ static bool runWireV3HandshakeTests()
         client.setWorld(&client_world);
         if (!client.initialize()) state.addError("valid client init failed");
         client.setLevelHash(0x1234ABCDu);
-        if (!client.connectToServer("127.0.0.1", port, "valid")) state.addError("valid client connect failed");
+        if (!client.connectToServer("127.0.0.1", port, "\t  valid \n name\x7f")) state.addError("valid client connect failed");
         for (int frame = 0; frame < 600 && !client.isConnected(); ++frame) {
             client.update(kFixedDelta);
             server.pumpNetworkEvents(kFixedDelta);
@@ -565,6 +565,10 @@ static bool runWireV3HandshakeTests()
         if (client.getNegotiatedCapabilityFlags() != Net::CAP_ALL_KNOWN) {
             state.addError("accept did not echo negotiated capability flags");
         }
+        const Net::ClientInfo* info = server.getClientInfo(client.getClientId());
+        if (info == nullptr || info->player_name != "valid name") {
+            state.addError("server did not normalize the admitted player name");
+        }
         client.disconnect("handshake test done");
         client.shutdown();
     }
@@ -577,6 +581,108 @@ static bool runWireV3HandshakeTests()
         return false;
     }
     std::cout << "[PASS] WireV3HandshakeTests\n";
+    return true;
+}
+
+static bool runCustomIngressRejectionTests()
+{
+    TestState state;
+    if (Net::normalizePlayerName(" \t\r\n") != "Player" ||
+        Net::normalizePlayerName("Alpha\tBeta  Gamma") != "Alpha Beta Gamma") {
+        state.addError("player-name normalization was not stable");
+    }
+
+    world server_world;
+    server_world.setFixedDelta(kFixedDelta);
+    Net::ServerNetworkManager server;
+    if (!server.initialize()) {
+        std::cerr << "[FAIL] custom ingress test: server init failed\n";
+        return false;
+    }
+    server.setWorld(&server_world);
+
+    uint32_t accepted_messages = 0;
+    uint32_t rejected_messages = 0;
+    constexpr uint8_t ingress_type = Net::CUSTOM_MESSAGE_START + 12;
+    server.setCustomMessageHandler([&](uint16_t, uint8_t message_type, Net::BitReader& reader) {
+        const uint8_t wire_type = reader.readByte();
+        const uint32_t sequence = reader.readUInt32();
+        const bool exact = !reader.hasError() && reader.getBitPosition() == reader.getBufferSize() * 8;
+        if (message_type != ingress_type || wire_type != ingress_type || sequence == 0 || !exact) {
+            ++rejected_messages;
+            return false;
+        }
+        ++accepted_messages;
+        return true;
+    });
+
+    uint16_t port = 0;
+    StressConfig config;
+    config.client_count = 1;
+    if (!startServer(server, config, port)) {
+        std::cerr << "[FAIL] custom ingress test: server start failed\n";
+        server.shutdown();
+        return false;
+    }
+
+    world client_world;
+    Net::ClientNetworkManager client;
+    client.setWorld(&client_world);
+    if (!client.initialize() || !client.connectToServer("127.0.0.1", port, "ingress")) {
+        std::cerr << "[FAIL] custom ingress test: client connect setup failed\n";
+        client.shutdown();
+        server.shutdown();
+        return false;
+    }
+    for (int frame = 0; frame < 600 && !client.isConnected(); ++frame) {
+        client.update(kFixedDelta);
+        server.pumpNetworkEvents(kFixedDelta);
+        SDL_Delay(1);
+    }
+    if (!client.isConnected() || server.getClientCount() != 1) {
+        state.addError("custom ingress fixture did not establish one authenticated client");
+    } else {
+        const uint64_t drops_before = server.getStats().packets_dropped_incoming;
+        constexpr uint32_t malformed_burst = 16;
+        for (uint32_t message = 0; message < malformed_burst; ++message) {
+            Net::BitWriter malformed;
+            malformed.writeByte(ingress_type);
+            client.sendCustomReliable(malformed);
+        }
+        for (int frame = 0; frame < 240 && rejected_messages < malformed_burst; ++frame) {
+            client.update(kFixedDelta);
+            server.pumpNetworkEvents(kFixedDelta);
+            SDL_Delay(1);
+        }
+        if (rejected_messages != malformed_burst || accepted_messages != 0 ||
+            server.getStats().packets_dropped_incoming < drops_before + malformed_burst ||
+            !client.isConnected()) {
+            state.addError("malformed custom-message burst was not rejected, counted, and connection-safe");
+        }
+
+        Net::BitWriter valid;
+        valid.writeByte(ingress_type);
+        valid.writeUInt32(1);
+        client.sendCustomReliable(valid);
+        for (int frame = 0; frame < 120 && accepted_messages == 0; ++frame) {
+            client.update(kFixedDelta);
+            server.pumpNetworkEvents(kFixedDelta);
+            SDL_Delay(1);
+        }
+        if (accepted_messages != 1 || rejected_messages != malformed_burst || !client.isConnected()) {
+            state.addError("valid custom message did not follow a rejected ingress packet safely");
+        }
+    }
+
+    client.disconnect("custom ingress test done");
+    client.shutdown();
+    server.shutdown();
+    if (state.error_count != 0) {
+        for (const std::string& error : state.errors)
+            std::cerr << "[FAIL] " << error << "\n";
+        return false;
+    }
+    std::cout << "[PASS] CustomIngressRejectionTests\n";
     return true;
 }
 
@@ -1406,27 +1512,27 @@ static bool runNetworkStress(const StressConfig& config)
 
         if (reader.hasError()) {
             state.addError("server received truncated custom stress message");
-            return;
+            return false;
         }
         if (wire_type != message_type) {
             state.addError("custom stress message type mismatch");
-            return;
+            return false;
         }
         if (declared_client_id != client_id) {
             state.addError("custom stress message client id mismatch");
-            return;
+            return false;
         }
         if (checksum != makeChecksum(client_id, sequence, message_type)) {
             state.addError("custom stress message checksum mismatch");
-            return;
+            return false;
         }
         if (payload != (sequence ^ 0xa5a55a5au)) {
             state.addError("custom stress message payload mismatch");
-            return;
+            return false;
         }
         if (client_id == 0 || client_id > config.client_count) {
             state.addError("custom stress message out-of-range client id");
-            return;
+            return false;
         }
 
         if (message_type == kReliableStressMessage) {
@@ -1442,7 +1548,9 @@ static bool runNetworkStress(const StressConfig& config)
             ++unreliable_by_client[client_id];
         } else {
             state.addError("unknown custom stress message type");
+            return false;
         }
+        return true;
     });
 
     uint16_t port = 0;
@@ -1619,6 +1727,7 @@ int main(int argc, char** argv)
         EE::CLog::GetLuaLogger()->set_level(spdlog::level::warn);
     }
     const bool handshake_ok = runWireV3HandshakeTests();
+    const bool custom_ingress_ok = runCustomIngressRejectionTests();
     const bool hierarchy_boundary_ok = runNetworkHierarchyBoundaryTests();
     const bool interpolation_buffer_wrap_ok = runInterpolationTickWrapBufferTest();
     const bool interpolation_jitter_ok = runInterpolationJitterBufferTest();
@@ -1630,7 +1739,7 @@ int main(int argc, char** argv)
     const bool raw_interpolation_ok = runRawRemoteInterpolationStateTest();
     const bool ok = runNetworkStress(config);
     EE::CLog::Shutdown();
-    return (handshake_ok && hierarchy_boundary_ok && interpolation_buffer_wrap_ok && interpolation_jitter_ok && lag_history_wrap_ok &&
+    return (handshake_ok && custom_ingress_ok && hierarchy_boundary_ok && interpolation_buffer_wrap_ok && interpolation_jitter_ok && lag_history_wrap_ok &&
             lag_view_tick_clamp_ok &&
             input_view_tick_protocol_ok && input_view_tick_loopback_ok && interpolation_manager_wrap_ok &&
             raw_interpolation_ok && ok) ? 0 : 1;

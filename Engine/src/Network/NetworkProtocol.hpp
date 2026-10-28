@@ -2,7 +2,10 @@
 
 #define NOMINMAX  // Prevent Windows.h min/max macros from interfering
 
+#include <algorithm>
 #include <cstdint>
+#include <string>
+#include <string_view>
 #include <vector>
 #include <glm/glm.hpp>
 
@@ -17,6 +20,38 @@ constexpr uint8_t CUSTOM_MESSAGE_START = 64;
 constexpr uint8_t MAX_INPUT_SAMPLES_PER_PACKET = 3;
 constexpr uint8_t DEFAULT_INTERP_DELAY_TICKS = 2;
 constexpr uint8_t NETWORK_CHANNEL_COUNT = 3;
+constexpr size_t NETWORK_MAX_PLAYER_NAME_CHARS = 31;
+
+// Connection names cross an untrusted wire boundary before they reach logs,
+// scoreboards, or game-owned session state. Keep the stored form display-safe
+// and deterministic: printable ASCII only, normalized spacing, and a stable
+// fallback for an empty result. The protocol itself remains a 32-byte
+// NUL-terminated field.
+inline std::string normalizePlayerName(std::string_view raw_name)
+{
+    std::string normalized;
+    normalized.reserve((std::min)(raw_name.size(), NETWORK_MAX_PLAYER_NAME_CHARS));
+    bool pending_space = false;
+    for (const unsigned char ch : raw_name) {
+        if (ch == '\0')
+            break;
+        if (ch >= 0x20 && ch <= 0x7e) {
+            if (ch == ' ') {
+                pending_space = !normalized.empty();
+            } else {
+                if (pending_space && normalized.size() < NETWORK_MAX_PLAYER_NAME_CHARS)
+                    normalized.push_back(' ');
+                pending_space = false;
+                if (normalized.size() < NETWORK_MAX_PLAYER_NAME_CHARS)
+                    normalized.push_back(static_cast<char>(ch));
+            }
+        } else if (!normalized.empty()) {
+            // Do not let filtered control bytes concatenate two visual tokens.
+            pending_space = true;
+        }
+    }
+    return normalized.empty() ? std::string("Player") : normalized;
+}
 
 // Capability bits negotiated in the v3 handshake (intersection, echoed in accept).
 // A missing optional capability disables the feature; it is not a reject.
