@@ -3602,7 +3602,8 @@ bool LevelManager::instantiateLevelParallel(
     for (auto& entity : created_entities)
         entity = entt::null;
     std::vector<size_t> identity_occurrences(instantiation_plan.identity_guids.size(), 0);
-    std::vector<garden::ecs::EntityHandle> restored_handles;
+    world::ConstructionTransaction transaction{&game_world};
+    auto& restored_handles = transaction.entities;
     std::vector<EntityRef> references;
     references.reserve(instantiation_plan.identity_guids.size());
     for (const EntityGuid& guid : instantiation_plan.identity_guids)
@@ -3633,13 +3634,9 @@ bool LevelManager::instantiateLevelParallel(
 
     if (!valid_cohort)
     {
-        // Retire by scoped handle even if a construct hook removed or changed
-        // identity; looking up by the expected GUID would miss that entity.
-        for (auto it = restored_handles.rbegin(); it != restored_handles.rend(); ++it)
-        {
-            if (game_world.destroyEntity(*it) != garden::ecs::ComponentStoreResult::Success)
-                LOG_ENGINE_ERROR("Level instantiation: failed to retire a restored entity");
-        }
+        const auto rollback = game_world.abortUnpublished(transaction);
+        if (!rollback.cleanupComplete())
+            LOG_ENGINE_ERROR("Level instantiation: unpublished rollback incomplete at phase {}", static_cast<int>(rollback.phase));
         LOG_ENGINE_ERROR("Level instantiation rejected: failed to restore scoped identity");
         return false;
     }
@@ -3907,16 +3904,12 @@ bool LevelManager::instantiateLevelParallel(
     if (out_created_entities) *out_created_entities = std::move(created_entities);
 
     LOG_ENGINE_INFO("Level instantiation complete (parallel): {} entities", level_data.entities.size());
+    transaction.committed = true;
     return true;
     } catch (...) {
-        // Constraints must be removed before any of their bodies.
-        for (auto e : created_entities)
-            game_world.getPhysicsSystem().removeConstraint(e);
-        for (auto e : created_entities)
-            game_world.getPhysicsSystem().removeBody(e);
-        for (auto it = restored_handles.rbegin(); it != restored_handles.rend(); ++it)
-            if (game_world.destroyEntity(*it) != garden::ecs::ComponentStoreResult::Success)
-                LOG_ENGINE_ERROR("Level instantiation: failed to retire a restored entity");
+        const auto rollback = game_world.abortUnpublished(transaction);
+        if (!rollback.cleanupComplete())
+            LOG_ENGINE_ERROR("Level instantiation: unpublished rollback incomplete at phase {}", static_cast<int>(rollback.phase));
         game_world.setGravity(previous_gravity);
         game_world.setFixedDelta(previous_delta);
         LOG_ENGINE_ERROR("Level instantiation failed during construction");

@@ -53,7 +53,7 @@ struct PIEClientInstance
         Threading::JobSystem::get().barrier();
         viewport.reset();
         input_manager.reset();
-        client_world.shutdown();
+        if (!client_world.shutdown().cleanupComplete()) return false;
         const auto* owner = game_module.getComponentOwnerId();
         if (Threading::JobSystem::get().getPendingJobCount() != 0 ||
             (owner && !EventBus::moduleSourceCanRetire(*owner)))

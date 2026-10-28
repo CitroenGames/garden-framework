@@ -42,15 +42,6 @@ void GameModeBase::bindWorld(world& game_world)
     syncGameModeComponent();
 }
 
-void GameModeBase::rebindMovedWorld(world& previous, world& current)
-{
-    if (m_world == &previous)
-        m_world = &current;
-    for (auto& player : m_players)
-        if (player.controller && player.controller->game_world == &previous)
-            player.controller->game_world = &current;
-}
-
 void GameModeBase::initGame(world& game_world,
                             const std::string& map_name,
                             const std::string& options,

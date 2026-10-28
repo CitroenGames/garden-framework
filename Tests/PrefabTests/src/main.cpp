@@ -2,7 +2,7 @@
 #include "Components/HierarchyComponents.hpp"
 #include "Components/IdentityComponent.hpp"
 #include "Components/PrefabInstanceComponent.hpp"
-#include "ECS/EntityLifecycle.hpp"
+#include "world.hpp"
 #include "ECS/Hierarchy.hpp"
 #include "Events/EventBus.hpp"
 #include "Prefab/PrefabManager.hpp"
@@ -102,13 +102,22 @@ struct AuthoredTree
     EntityGuid root_guid, child_guid, grand_guid, external_guid;
 };
 
-AuthoredTree authorTree(entt::registry& reg, EntityLifecycle& life)
+entt::entity createTagged(world& w, const char* tag)
 {
+    const auto ref = w.createEntity();
+    const auto entity = resolveEntityRef(w.registry, ref);
+    if (entity != entt::null) w.registry.emplace<TagComponent>(entity, TagComponent{tag});
+    return entity;
+}
+
+AuthoredTree authorTree(world& w)
+{
+    auto& reg = w.registry;
     AuthoredTree t;
-    t.root = life.create("Root");
-    t.child = life.create("Child");
-    t.grand = life.create("Grand");
-    t.external = life.create("External");
+    t.root = createTagged(w, "Root");
+    t.child = createTagged(w, "Child");
+    t.grand = createTagged(w, "Grand");
+    t.external = createTagged(w, "External");
     auto setPos = [&](entt::entity e, glm::vec3 p) {
         auto& tr = reg.emplace<TransformComponent>(e);
         tr.position = p;
@@ -134,9 +143,10 @@ AuthoredTree authorTree(entt::registry& reg, EntityLifecycle& life)
 
 bool saveTreePrefab(const std::string& file)
 {
-    entt::registry reg;
-    EntityLifecycle life(reg, 42);
-    AuthoredTree t = authorTree(reg, life);
+    world test_world;
+
+    auto& reg = test_world.registry;
+    AuthoredTree t = authorTree(test_world);
     return PrefabManager::get().savePrefab(reg, t.root, prefabPath(file));
 }
 
@@ -146,9 +156,9 @@ bool testSubtreeInstantiateTwice()
 {
     const std::string name = "Prefab v2 subtree instantiate twice";
     EventBus::get().clear();
-    entt::registry author;
-    EntityLifecycle author_life(author, 42);
-    AuthoredTree t = authorTree(author, author_life);
+    world author_world;
+    auto& author = author_world.registry;
+    AuthoredTree t = authorTree(author_world);
     const std::string path = prefabPath("tree.prefab");
     if (!PrefabManager::get().savePrefab(author, t.root, path))
         return fail(name, "savePrefab failed");
@@ -164,8 +174,10 @@ bool testSubtreeInstantiateTwice()
     if (data.root_guid != t.root_guid)
         return fail(name, "file root guid != authoring root guid");
 
-    entt::registry reg;
-    EntityLifecycle life(reg, 7);
+    world test_world;
+
+
+    auto& reg = test_world.registry;
     PrefabInstantiateResult a = PrefabManager::get().instantiate(reg, data);
     PrefabInstantiateResult b = PrefabManager::get().instantiate(reg, data);
     if (!a.success || !b.success)
@@ -242,8 +254,10 @@ bool testOverrides()
     if (!findNodeGuid(data, "Child", child_src))
         return fail(name, "child node not found in file");
 
-    entt::registry reg;
-    EntityLifecycle life(reg, 11);
+    world test_world;
+
+
+    auto& reg = test_world.registry;
     PrefabInstantiateOptions opts;
     opts.overrides.push_back(PropertyOverride{child_src, "TransformComponent", "position",
                                               nlohmann::json::array({9.0, 9.0, 9.0})});
@@ -284,8 +298,9 @@ bool testSpawnAtRootOnly()
     EventBus::get().clear();
     if (!saveTreePrefab("tree3.prefab"))
         return fail(name, "save failed");
-    entt::registry reg;
-    EntityLifecycle life(reg, 13);
+    world test_world;
+
+    auto& reg = test_world.registry;
     entt::entity root = PrefabManager::get().spawnAt(reg, prefabPath("tree3.prefab"), 100, 0, 0);
     if (root == entt::null)
         return fail(name, "spawnAt failed");
@@ -321,8 +336,10 @@ bool testLegacyV1Rejected()
     if (PrefabManager::loadPrefab(path, data))
         return fail(name, "legacy v1 prefab was accepted");
 
-    entt::registry reg;
-    EntityLifecycle life(reg, 17);
+    world test_world;
+
+
+    auto& reg = test_world.registry;
     const size_t before = entityCount(reg);
     if (PrefabManager::get().spawn(reg, path) != entt::null)
         return fail(name, "legacy v1 prefab spawned an entity");
@@ -336,8 +353,9 @@ bool testRejectedFiles()
 {
     const std::string name = "Prefab version-mismatch/corrupt rejected safely";
     EventBus::get().clear();
-    entt::registry reg;
-    EntityLifecycle life(reg, 19);
+    world test_world;
+
+    auto& reg = test_world.registry;
     const size_t before = entityCount(reg);
 
     const std::string future = prefabPath("future.prefab");
@@ -373,9 +391,10 @@ bool testNested()
     EventBus::get().clear();
     // Inner prefab: one node.
     {
-        entt::registry reg;
-        EntityLifecycle life(reg, 23);
-        entt::entity inner = life.create("Inner");
+        world test_world;
+
+        auto& reg = test_world.registry;
+        entt::entity inner = createTagged(test_world, "Inner");
         auto& tr = reg.emplace<TransformComponent>(inner);
         tr.position = {1, 2, 3};
         if (!PrefabManager::get().savePrefab(reg, inner, prefabPath("inner.prefab")))
@@ -428,8 +447,10 @@ bool testNested()
         return std::pair{root_g, nest_g};
     };
 
-    entt::registry reg;
-    EntityLifecycle life(reg, 29);
+    world test_world;
+
+
+    auto& reg = test_world.registry;
     // Happy path with an override on the nested root.
     makeOuter("outer.prefab", prefabPath("inner.prefab"), true);
     entt::entity root = PrefabManager::get().spawn(reg, prefabPath("outer.prefab"));
@@ -507,9 +528,10 @@ bool testReflectedFailureRollback()
             node["prefab_instance"]["overrides"] = nlohmann::json::array();
         }
     {
-        entt::registry reg;
-        EntityLifecycle life(reg, 10);
-        const auto sentinel = authorTree(reg, life);
+        world test_world;
+
+        auto& reg = test_world.registry;
+        const auto sentinel = authorTree(test_world);
         const auto before = entityCount(reg);
         const auto root_children = reg.get<ChildrenComponent>(sentinel.root).children;
         const auto child_children = reg.get<ChildrenComponent>(sentinel.child).children;
@@ -530,9 +552,10 @@ bool testReflectedFailureRollback()
     const auto original_desc = *g_reflection.findByName("PrefabLinkComponent");
     for (int fault = 0; fault != 3; ++fault)
     {
-        entt::registry reg;
-        EntityLifecycle life(reg, 11);
-        const auto sentinel = authorTree(reg, life);
+        world test_world;
+
+        auto& reg = test_world.registry;
+        const auto sentinel = authorTree(test_world);
         const auto before = entityCount(reg);
         const auto children = reg.get<ChildrenComponent>(sentinel.root).children;
         auto bad = outer;
@@ -556,8 +579,9 @@ bool testReflectedFailureRollback()
     if (!saveTreePrefab("revert_failure.prefab")) return fail(name, "could not save revert fixture");
     PrefabData source;
     if (!PrefabManager::loadPrefab(prefabPath("revert_failure.prefab"), source)) return fail(name, "could not load revert fixture");
-    entt::registry reg;
-    EntityLifecycle life(reg, 12);
+    world test_world;
+
+    auto& reg = test_world.registry;
     auto instance = PrefabManager::get().instantiate(reg, source);
     if (!instance.success) return fail(name, "could not instantiate revert fixture");
     reg.get<TransformComponent>(instance.root).position = {77, 78, 79};

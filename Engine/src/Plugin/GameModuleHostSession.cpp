@@ -294,8 +294,13 @@ bool GameModuleHostSession::stop()
         if (m_client_initialised) m_loader.shutdown();
         if (m_server_initialised) m_loader.serverShutdown();
         m_phase = Phase::Teardown;
-        if (m_operations.release_module_resources) m_operations.release_module_resources();
     }
+    if (!m_resources_released && m_operations.release_module_resources && !m_operations.release_module_resources()) {
+        m_last_failure = "module retirement refused: host resource cleanup incomplete";
+        m_stopping = false;
+        return false;
+    }
+    m_resources_released = true;
     // Host checks the scheduler only after module shutdown and resource release.
     // On refusal none of those one-time steps may be repeated.
     const auto* owner = m_loader.getComponentOwnerId();
@@ -328,6 +333,7 @@ bool GameModuleHostSession::stop()
     m_play_started = false;
     m_callbacks_exposed = false;
     m_quiesce_completed = false;
+    m_resources_released = false;
     m_registrations_removed = false;
     m_phase = Phase::Idle;
     m_stopping = false;

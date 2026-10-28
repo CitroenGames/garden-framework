@@ -67,82 +67,37 @@ bool testFrameworkRuntimeLifecycle()
     return pass(name);
 }
 
-class MovingState final : public GameFramework::GameStateBase
+class ResetState final : public GameFramework::GameStateBase
 {
 public:
-    explicit MovingState(int& shutdown_count) : shutdown_count(shutdown_count) {}
-    void shutdown() override
-    {
-        ++shutdown_count;
-        GameStateBase::shutdown();
-    }
+    explicit ResetState(int& shutdowns) : shutdowns(shutdowns) {}
+    void shutdown() override { ++shutdowns; GameStateBase::shutdown(); }
 private:
-    int& shutdown_count;
+    int& shutdowns;
 };
 
-bool testFrameworkWorldMoveLifecycle()
+bool testFrameworkWorldResetLifecycle()
 {
-    const std::string name = "Framework world move lifecycle";
-    int source_shutdowns = 0;
-    int destination_shutdowns = 0;
-    int reused_shutdowns = 0;
-    int assignment_source_shutdowns = 0;
-    world source;
-    auto mode = std::make_unique<GameFramework::GameModeBase>();
-    auto* mode_ptr = mode.get();
-    auto state = std::make_unique<MovingState>(source_shutdowns);
-    auto* state_ptr = state.get();
-    source.setGameState(std::move(state));
-    source.setAuthorityGameMode(std::move(mode));
-    if (!source.initializeGameplayFramework("move-map", "") )
-        return fail(name, "source did not initialize");
-    source.startGameplayFramework();
-    state_ptr->tick(0.5f);
-    world moved(std::move(source));
-    if (moved.getAuthorityGameMode() != mode_ptr || moved.getGameState() != state_ptr ||
-        mode_ptr->getWorld() != &moved || state_ptr->getWorld() != &moved ||
-        !moved.isGameplayFrameworkInitialized() || !moved.hasGameplayFrameworkStarted() ||
-        state_ptr->getServerWorldTimeSeconds() < 0.5)
-        return fail(name, "move construction did not preserve and rebind state");
-    source.startGameplayFramework();
-    source.tickGameplayFramework(0.1f);
-    if (source.initializeGameplayFramework() || source.getGameState() || source.getAuthorityGameMode())
-        return fail(name, "moved-from framework was not empty");
-    source.setGameState(std::make_unique<MovingState>(reused_shutdowns));
-    source.startGameplayFramework();
-    source.tickGameplayFramework(0.1f);
-    if (!source.hasGameplayFrameworkStarted() || source.getGameState()->getWorld() != &source)
-        return fail(name, "moved-from state could not be reused");
-    source.clearGameplayFramework();
-    source.setAuthorityGameMode(std::make_unique<GameFramework::GameModeBase>());
-    if (!source.getAuthorityGameMode() || source.getAuthorityGameMode()->getWorld() != &source)
-        return fail(name, "moved-from mode setter failed");
-    source.clearGameplayFramework();
-
-    world destination;
-    destination.setGameState(std::make_unique<MovingState>(destination_shutdowns));
-    destination.startGameplayFramework();
-    destination = std::move(moved);
-    if (destination_shutdowns != 1 || destination.getAuthorityGameMode() != mode_ptr ||
-        destination.getGameState() != state_ptr || mode_ptr->getWorld() != &destination ||
-        state_ptr->getWorld() != &destination || !destination.hasGameplayFrameworkStarted() ||
-        source_shutdowns != 0)
-        return fail(name, "move assignment lost state or skipped destination shutdown");
-    moved.setGameState(std::make_unique<MovingState>(assignment_source_shutdowns));
-    moved.startGameplayFramework();
-    moved.tickGameplayFramework(0.1f);
-    if (!moved.hasGameplayFrameworkStarted() || moved.getGameState()->getWorld() != &moved)
-        return fail(name, "move-assigned source could not be reused");
-    moved.clearGameplayFramework();
-    destination.tickGameplayFramework(0.25f);
-    if (state_ptr->getServerWorldTimeSeconds() < 0.75)
-        return fail(name, "moved state did not continue ticking");
-    destination = std::move(destination);
-    if (destination.getGameState() != state_ptr || destination_shutdowns != 1)
-        return fail(name, "self move assignment changed framework");
-    destination.clearGameplayFramework();
-    if (source_shutdowns != 1 || reused_shutdowns != 1 || assignment_source_shutdowns != 1)
-        return fail(name, "framework shutdown count changed");
+    const std::string name = "Framework world reset lifecycle";
+    int shutdowns = 0;
+    world w;
+    world* const address = &w;
+    const auto old_entity = w.createScopedEntity();
+    w.setGameState(std::make_unique<ResetState>(shutdowns));
+    w.startGameplayFramework();
+    if (!w.hasGameplayFrameworkStarted())
+        return fail(name, "framework did not start");
+    w.resetWorld();
+    if (&w != address || w.isEntityValid(old_entity) || w.getGameState() ||
+        w.hasGameplayFrameworkStarted() || shutdowns != 1)
+        return fail(name, "reset did not retire the prior world state");
+    w.setGameState(std::make_unique<ResetState>(shutdowns));
+    w.startGameplayFramework();
+    if (!w.hasGameplayFrameworkStarted() || w.getGameState()->getWorld() != address)
+        return fail(name, "framework did not restart at the original world address");
+    w.clearGameplayFramework();
+    if (shutdowns != 2)
+        return fail(name, "restarted framework did not shut down");
     return pass(name);
 }
 

@@ -17,6 +17,8 @@
 #include <cmath>
 #include <cassert>
 
+struct RetirementFence;
+
 // Jolt includes
 #include <Jolt/Jolt.h>
 #include <Jolt/RegisterTypes.h>
@@ -203,7 +205,10 @@ private:
     std::unique_ptr<EngineContactListener> contact_listener;
 
     // Constraint management
-    std::unordered_map<entt::entity, JPH::Ref<JPH::Constraint>> entity_to_constraint;
+    struct ConstraintRecord { entt::entity target; JPH::Ref<JPH::Constraint> constraint; };
+    std::unordered_map<entt::entity, ConstraintRecord> entity_to_constraint;
+    const RetirementFence* retirement_fence = nullptr;
+    bool isRetiring(entt::entity entity) const noexcept;
 
     CharacterControllerSystem character_controllers;
 
@@ -289,6 +294,9 @@ public:
     // Shape creation
     static void ensureJoltRegistered();
     static JPH::ShapeRefC createShapeFromCollider(const ColliderComponent& collider, const glm::vec3& scale);
+
+    // The world owns the fence and clears the binding before it expires.
+    void bindRetirementFence(const RetirementFence* fence) noexcept { retirement_fence = fence; }
 
     // Body management
     JPH::BodyID createStaticBody(const glm::vec3& position, const glm::vec3& rotation, const JPH::ShapeRefC& shape, entt::entity entity);
@@ -406,6 +414,7 @@ public:
     // Constraint management
     JPH::Constraint* createConstraint(entt::entity entityA, entt::entity entityB, const ConstraintComponent& constraint);
     void removeConstraint(entt::entity entity);
+    void removeConstraintsTouching(const std::vector<entt::entity>& entities);
 
     // Access Jolt system
     JPH::PhysicsSystem* getJoltSystem() { return jolt_system.get(); }

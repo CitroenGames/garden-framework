@@ -139,7 +139,6 @@ public:
 
 private:
     friend class GameFrameworkRuntime;
-    void rebindMovedWorld(world& previous, world& current);
 
 protected:
     virtual void onPostLogin(PlayerControllerEntry& new_player);

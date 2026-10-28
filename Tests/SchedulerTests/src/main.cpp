@@ -1,7 +1,6 @@
 #include "Scheduler/SystemScheduler.hpp"
 #include "Scheduler/HierarchyTransformSystem.hpp"
 #include "Components/IdentityComponent.hpp"
-#include "ECS/EntityLifecycle.hpp"
 #include "ECS/Hierarchy.hpp"
 #include "Events/EventBus.hpp"
 #include "Events/EngineEvents.hpp"
@@ -13,6 +12,7 @@
 #include <cstdint>
 #include <iostream>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <vector>
 #include <glm/gtc/matrix_transform.hpp>
@@ -338,31 +338,102 @@ bool testDestroyDrain()
     g_destroyed = 0; g_created = 0;
     EventBus::get().sink<EntityDestroyedEvent>().connect<&onDestroyedEvt>();
     EventBus::get().sink<EntityCreatedEvent>().connect<&onCreatedEvt>();
-    entt::registry reg;
-    EntityLifecycle life(reg, 1234);
+    world w;
+    auto victim = w.createScopedEntity();
     SystemScheduler sched(false, 1.0f / 60.0f, false);
-    sched.setLifecycle(&life);
-    entt::entity victim = life.create("victim");
+    sched.bindWorld(&w);
     bool valid_in_transform = false;
     bool valid_in_gameplay_after_destroy = false;
     sched.addSystem(makeSys("killer", Phase::Gameplay,
-        [&](entt::registry& r, const Tick::SimulationTickContext&) {
-            life.destroy(victim);
-            valid_in_gameplay_after_destroy = r.valid(victim);
+        [&](entt::registry&, const Tick::SimulationTickContext&) {
+            w.requestRetirement(victim);
+            valid_in_gameplay_after_destroy = w.isEntityValid(victim);
         }));
     sched.addSystem(makeSys("checker", Phase::Transform,
-        [&](entt::registry& r, const Tick::SimulationTickContext&) {
-            valid_in_transform = r.valid(victim);
+        [&](entt::registry&, const Tick::SimulationTickContext&) {
+            valid_in_transform = w.isEntityValid(victim);
         }));
-    sched.runFrame(reg, 1.0f / 60.0f);
+    sched.runFrame(w.registry, 1.0f / 60.0f);
     EventBus::get().sink<EntityDestroyedEvent>().disconnect<&onDestroyedEvt>();
     EventBus::get().sink<EntityCreatedEvent>().disconnect<&onCreatedEvt>();
     EventBus::get().clear();
-    if (!valid_in_gameplay_after_destroy) return fail(name, "entity invalid immediately after destroy()");
-    if (!valid_in_transform) return fail(name, "entity invalid in Transform (drained too early)");
-    if (reg.valid(victim)) return fail(name, "entity still valid after FrameEnd drain");
-    if (g_destroyed != 1) return fail(name, "destroyed event not delivered, count=" + std::to_string(g_destroyed));
-    if (g_created != 1) return fail(name, "created event not flushed, count=" + std::to_string(g_created));
+    if (!valid_in_gameplay_after_destroy || !valid_in_transform) return fail(name, "entity retired before FrameEnd");
+    if (w.isEntityValid(victim)) return fail(name, "entity still valid after FrameEnd drain");
+    if (!sched.lastRetirementResult().cleanupComplete()) return fail(name, "drain failed");
+    if (g_destroyed != 1) return fail(name, "destroyed event not delivered");
+    return pass(name);
+}
+
+bool testPausedAndZeroStepDrain()
+{
+    const std::string name = "paused, zero-step and teardown retirement drains";
+    world w;
+    SystemScheduler scheduler(false, 1.0f / 60.0f, false);
+    scheduler.bindWorld(&w);
+    auto paused = w.createScopedEntity();
+    w.requestRetirement(paused);
+    scheduler.setPaused(true);
+    scheduler.runFrame(w.registry, 0.0f);
+    if (w.isEntityValid(paused) || !scheduler.lastRetirementResult().cleanupComplete())
+        return fail(name, "paused drain failed");
+    auto zero = w.createScopedEntity();
+    w.requestRetirement(zero);
+    scheduler.setPaused(false);
+    scheduler.runFrame(w.registry, 0.0f);
+    if (w.isEntityValid(zero) || !scheduler.lastRetirementResult().cleanupComplete())
+        return fail(name, "zero-step drain failed");
+    auto teardown = w.createScopedEntity();
+    w.requestRetirement(teardown);
+    if (!scheduler.drainRetirements().cleanupComplete() || w.isEntityValid(teardown))
+        return fail(name, "explicit teardown drain failed");
+    world other;
+    scheduler.runFrame(other.registry, 0.0f);
+    if (scheduler.lastRetirementResult().status != LifecycleStatus::WrongWorld)
+        return fail(name, "scheduler accepted a different registry");
+    scheduler.bindWorld(nullptr);
+    return pass(name);
+}
+
+bool g_throw_retirement_observer = false;
+void throwRetirementObserver(const EntityDestroyedEvent&)
+{
+    if (g_throw_retirement_observer) {
+        g_throw_retirement_observer = false;
+        throw std::runtime_error("scheduler retirement observer fixture");
+    }
+}
+
+bool testInterruptedFixedStepsRetry()
+{
+    const std::string name = "interrupted fixed steps survive retirement observer failure";
+    world w;
+    const auto victim = w.createScopedEntity();
+    SystemScheduler scheduler(false, 1.0f / 60.0f, false);
+    scheduler.bindWorld(&w);
+    scheduler.setManageEventBus(false);
+    std::vector<uint32_t> ticks;
+    scheduler.addSystem(makeSys("test.retire", Phase::Gameplay,
+        [&](entt::registry&, const Tick::SimulationTickContext& ctx) {
+            ticks.push_back(ctx.tick_index);
+            if (ctx.tick_index == 0) w.requestRetirement(victim);
+        }));
+    EventBus::get().sink<EntityDestroyedEvent>().connect<&throwRetirementObserver>();
+    g_throw_retirement_observer = true;
+    const uint32_t first = scheduler.runFrame(w.registry, scheduler.getFixedDelta() * 3.0f);
+    const auto failure = scheduler.lastRetirementResult().status;
+    scheduler.setPaused(true);
+    const uint32_t paused = scheduler.runFrame(w.registry, 0.0f);
+    scheduler.setPaused(false);
+    const uint32_t retried = scheduler.runFrame(w.registry, 0.0f);
+    const uint32_t empty = scheduler.runFrame(w.registry, 0.0f);
+    EventBus::get().sink<EntityDestroyedEvent>().disconnect<&throwRetirementObserver>();
+    if (first != 1 || failure != LifecycleStatus::ObserverFailure)
+        return fail(name, "expected failure before the second of three ticks");
+    if (paused != 0 || retried != 2 || empty != 0 ||
+        ticks != std::vector<uint32_t>{0, 1, 2} || scheduler.getTick() != 3)
+        return fail(name, "unrun ticks were lost, duplicated, or ran while paused");
+    if (w.isEntityValid(victim) || !scheduler.lastRetirementResult().cleanupComplete())
+        return fail(name, "retirement did not complete on retry");
     return pass(name);
 }
 
@@ -471,6 +542,8 @@ int main()
     if (!testServerPhysicsBeforeGameplayCatchUp()) ++failures;
     if (!testHierarchyPropagationAfterGameplay()) ++failures;
     if (!testDestroyDrain()) ++failures;
+    if (!testPausedAndZeroStepDrain()) ++failures;
+    if (!testInterruptedFixedStepsRetry()) ++failures;
     if (!testTimerFixed()) ++failures;
     if (!testModuleEventRetirementGate()) ++failures;
     if (failures == 0)

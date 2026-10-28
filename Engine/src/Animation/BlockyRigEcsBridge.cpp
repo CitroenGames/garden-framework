@@ -5,7 +5,6 @@
 #include "Components/BlockyRigComponent.hpp"
 #include "Components/Components.hpp"
 #include "Components/HierarchyComponents.hpp"
-#include "ECS/EntityLifecycle.hpp"
 #include "ECS/Hierarchy.hpp"
 #include "world.hpp"
 
@@ -56,17 +55,18 @@ bool writeNodeLocal(entt::registry& registry, entt::entity node_entity,
     return true;
 }
 
-void destroyCreated(EntityLifecycle& lifecycle, const std::vector<entt::entity>& created)
+void destroyCreated(world& game_world, const std::vector<entt::entity>& created)
 {
     for (auto it = created.rbegin(); it != created.rend(); ++it)
-        lifecycle.destroyImmediate(*it);
+        (void)game_world.retireEntity(game_world.scopedEntity(entityRefOf(game_world.registry, *it)));
 }
 } // namespace
 
 namespace
 {
-bool spawnImpl(entt::registry& registry, EntityLifecycle& lifecycle, entt::entity rig_root)
+bool spawnImpl(world& game_world, entt::entity rig_root)
 {
+    auto& registry = game_world.registry;
     if (rig_root == entt::null || !registry.valid(rig_root))
         return false;
     const auto* binding = registry.try_get<BlockyRigComponent>(rig_root);
@@ -89,7 +89,7 @@ bool spawnImpl(entt::registry& registry, EntityLifecycle& lifecycle, entt::entit
     std::vector<entt::entity> created;
     created.reserve(nodes.size());
     std::vector<EntityRef> node_refs(nodes.size());
-    const EntityRef root_ref = lifecycle.refOf(rig_root);
+    const EntityRef root_ref = entityRefOf(registry, rig_root);
     if (root_ref.isNull())
         return false;
 
@@ -97,7 +97,9 @@ bool spawnImpl(entt::registry& registry, EntityLifecycle& lifecycle, entt::entit
     registry.get_or_emplace<WorldTransformComponent>(rig_root);
     for (size_t index = 0; index < nodes.size(); ++index)
     {
-        const entt::entity node_entity = lifecycle.create("BlockyRigNode");
+        const EntityRef node_ref = game_world.createEntity("BlockyRigNode");
+        const entt::entity node_entity = resolveEntityRef(registry, node_ref);
+        if (node_entity == entt::null) { destroyCreated(game_world, created); return false; }
         created.push_back(node_entity);
         registry.emplace<TransformComponent>(node_entity);
         registry.emplace<WorldTransformComponent>(node_entity);
@@ -112,10 +114,10 @@ bool spawnImpl(entt::registry& registry, EntityLifecycle& lifecycle, entt::entit
         if (!Hierarchy::attach(registry, node_entity, parent, false) ||
             !writeNodeLocal(registry, node_entity, nodes[index], nodes[index].rest_pose))
         {
-            destroyCreated(lifecycle, created);
+            destroyCreated(game_world, created);
             return false;
         }
-        node_refs[index] = lifecycle.refOf(node_entity);
+        node_refs[index] = entityRefOf(registry, node_entity);
     }
 
     registry.emplace_or_replace<HierarchyPolicyComponent>(
@@ -126,8 +128,9 @@ bool spawnImpl(entt::registry& registry, EntityLifecycle& lifecycle, entt::entit
     return true;
 }
 
-void updateImpl(entt::registry& registry, EntityLifecycle& lifecycle)
+void updateImpl(world& game_world)
 {
+    auto& registry = game_world.registry;
     std::vector<entt::entity> roots;
     for (const entt::entity root : registry.view<BlockyRigComponent>())
         roots.push_back(root);
@@ -139,7 +142,7 @@ void updateImpl(entt::registry& registry, EntityLifecycle& lifecycle)
         if (!binding.rig)
             continue;
         if (!registry.all_of<BlockyRigInstanceComponent>(root))
-            (void)spawnImpl(registry, lifecycle, root);
+            (void)spawnImpl(game_world, root);
 
         auto* instance = registry.try_get<BlockyRigInstanceComponent>(root);
         if (!instance || !instance->spawned || instance->rig != binding.rig)
@@ -154,7 +157,7 @@ void updateImpl(entt::registry& registry, EntityLifecycle& lifecycle)
         for (size_t index = 0; index < nodes.size(); ++index)
         {
             EntityRef& node_ref = instance->node_entities[index];
-            const entt::entity node_entity = lifecycle.resolve(node_ref);
+            const entt::entity node_entity = resolveEntityRef(registry, node_ref);
             if (node_entity == entt::null)
             {
                 node_ref = {};
@@ -177,12 +180,13 @@ EntityRef createRoot(world& game_world, std::shared_ptr<const BlockyRig> rig,
     if (!rig)
         return {};
 
-    EntityLifecycle lifecycle(game_world.registry);
-    const entt::entity root = lifecycle.create(tag);
+    const EntityRef root_ref = game_world.createEntity(tag);
+    const entt::entity root = resolveEntityRef(game_world.registry, root_ref);
+    if (root == entt::null) return {};
     game_world.registry.emplace<BlockyRigComponent>(root, BlockyRigComponent{std::move(rig)});
     game_world.registry.emplace<TransformComponent>(root);
     game_world.registry.emplace<WorldTransformComponent>(root);
-    return lifecycle.refOf(root);
+    return root_ref;
 }
 
 bool bind(world& game_world, EntityRef rig_root, std::shared_ptr<const BlockyRig> rig)
@@ -190,8 +194,7 @@ bool bind(world& game_world, EntityRef rig_root, std::shared_ptr<const BlockyRig
     if (rig_root.isNull() || !rig)
         return false;
 
-    EntityLifecycle lifecycle(game_world.registry);
-    const entt::entity root = lifecycle.resolve(rig_root);
+    const entt::entity root = resolveEntityRef(game_world.registry, rig_root);
     if (root == entt::null || game_world.registry.all_of<BlockyRigInstanceComponent>(root))
         return false;
 
@@ -202,21 +205,18 @@ bool bind(world& game_world, EntityRef rig_root, std::shared_ptr<const BlockyRig
 
 bool spawn(world& game_world, EntityRef rig_root)
 {
-    EntityLifecycle lifecycle(game_world.registry);
-    return spawnImpl(game_world.registry, lifecycle, lifecycle.resolve(rig_root));
+    return spawnImpl(game_world, resolveEntityRef(game_world.registry, rig_root));
 }
 
 void update(world& game_world)
 {
-    EntityLifecycle lifecycle(game_world.registry);
-    updateImpl(game_world.registry, lifecycle);
+    updateImpl(game_world);
 }
 
 bool setLocalPose(world& game_world, EntityRef rig_root, const Pose& local_pose,
                   bool pose_valid)
 {
-    EntityLifecycle lifecycle(game_world.registry);
-    const entt::entity root = lifecycle.resolve(rig_root);
+    const entt::entity root = resolveEntityRef(game_world.registry, rig_root);
     if (root == entt::null || !game_world.registry.all_of<BlockyRigComponent>(root))
         return false;
 
@@ -229,8 +229,7 @@ bool setLocalPose(world& game_world, EntityRef rig_root, const Pose& local_pose,
 bool setRootTransform(world& game_world, EntityRef rig_root,
                       const BlockyRigTransform& transform)
 {
-    EntityLifecycle lifecycle(game_world.registry);
-    const entt::entity root = lifecycle.resolve(rig_root);
+    const entt::entity root = resolveEntityRef(game_world.registry, rig_root);
     if (root == entt::null || !game_world.registry.all_of<BlockyRigComponent>(root))
         return false;
 
@@ -268,21 +267,17 @@ std::optional<BlockyRigNodeState> nodeState(const world& game_world, EntityRef n
 
 bool destroyNode(world& game_world, EntityRef node)
 {
-    EntityLifecycle lifecycle(game_world.registry);
-    const entt::entity entity = lifecycle.resolve(node);
+    const entt::entity entity = resolveEntityRef(game_world.registry, node);
     if (entity == entt::null || !game_world.registry.all_of<BlockyRigNodeComponent>(entity))
         return false;
-    lifecycle.destroyImmediate(entity);
-    return true;
+    return game_world.retireEntity(game_world.scopedEntity(node)).cleanupComplete();
 }
 
 bool destroyRoot(world& game_world, EntityRef rig_root)
 {
-    EntityLifecycle lifecycle(game_world.registry);
-    const entt::entity root = lifecycle.resolve(rig_root);
+    const entt::entity root = resolveEntityRef(game_world.registry, rig_root);
     if (root == entt::null || !game_world.registry.all_of<BlockyRigComponent>(root))
         return false;
-    lifecycle.destroyImmediate(root);
-    return true;
+    return game_world.retireEntity(game_world.scopedEntity(rig_root)).cleanupComplete();
 }
 } // namespace BlockyRigEcsBridge

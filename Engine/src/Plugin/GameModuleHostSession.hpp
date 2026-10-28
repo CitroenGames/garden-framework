@@ -46,7 +46,9 @@ public:
     struct HostOperations
     {
         std::function<void()> quiesce;
-        std::function<void()> release_module_resources;
+        // Return false on partial cleanup; stop retains the image and retries
+        // this operation without repeating role shutdown.
+        std::function<bool()> release_module_resources;
         std::function<void(const std::string& source_id)> remove_module_registrations;
         // Cancels event, job, UI, and similar host callbacks registered by
         // this module. It runs after quiesce and before module shutdown while
@@ -139,6 +141,7 @@ private:
     bool m_play_started = false;
     bool m_stopping = false;
     bool m_quiesce_completed = false;
+    bool m_resources_released = false;
     bool m_callbacks_exposed = false;
     bool m_registrations_removed = false;
 };

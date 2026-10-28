@@ -4297,7 +4297,7 @@ int main()
     bool ok = true;
     ok = testPlayerStartReflectionRegistered() && ok;
     ok = testFrameworkRuntimeLifecycle() && ok;
-    ok = testFrameworkWorldMoveLifecycle() && ok;
+    ok = testFrameworkWorldResetLifecycle() && ok;
     ok = testGameModeRegistryCreatesBuiltins() && ok;
     ok = testGameModeUsesPortalPlayerStart() && ok;
     ok = testGameModeUnrealStyleHooks() && ok;

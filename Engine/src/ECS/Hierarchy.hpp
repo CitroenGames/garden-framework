@@ -4,11 +4,12 @@
 // Header-only, EngineCore, generic and FPS-free. TransformComponent is the
 // local transform; WorldTransformComponent is the derived world transform.
 // ParentComponent/ChildrenComponent mirrors are maintained ONLY here (and
-// by EntityLifecycle's destroy handling, which goes through this API).
+// by world-owned retirement, which goes through this API).
 
 #include "Components/Components.hpp"
 #include "Components/HierarchyComponents.hpp"
 #include "Components/IdentityComponent.hpp"
+#include "RetirementFence.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -149,7 +150,6 @@ inline entt::entity resolveRef(entt::registry& r, EntityRef ref)
         return entt::null;
     // O(n) scan: hierarchies are small and resolution happens at
     // attach/propagation boundaries, not per-component per frame.
-    // (EntityLifecycle::resolve offers the O(1) indexed path.)
     for (auto [e, id] : r.view<IdentityComponent>().each())
     {
         if (id.guid == ref.guid)
@@ -460,7 +460,7 @@ inline void markDirty(entt::registry& r, entt::entity e)
 }
 
 // Removes e from its parent's Children list only; ParentComponent and
-// transforms are untouched. Used by EntityLifecycle before destroying e.
+// transforms are untouched. World retirement calls this before destroying e.
 inline void unlinkFromParentList(entt::registry& r, entt::entity e)
 {
     entt::entity parent = parentOf(r, e);
@@ -472,8 +472,10 @@ inline void unlinkFromParentList(entt::registry& r, entt::entity e)
 
 // Returns true only when linked. Both entities must have distinct, non-null
 // GUIDs that occur exactly once in the registry.
-inline bool attach(entt::registry& r, entt::entity child,
-                   entt::entity parent, bool keep_world = false)
+namespace detail
+{
+inline bool attachImpl(entt::registry& r, entt::entity child,
+                       entt::entity parent, bool keep_world, bool retirement_policy)
 {
     if (child == entt::null || parent == entt::null || !r.valid(child) ||
         !r.valid(parent))
@@ -481,6 +483,10 @@ inline bool attach(entt::registry& r, entt::entity child,
         std::fprintf(stderr, "[Hierarchy] attach rejected: invalid entity\n");
         return false;
     }
+    if (const auto* binding = r.ctx().find<RetirementFenceBinding>();
+        !retirement_policy && binding && binding->fence &&
+        (binding->fence->blocks(child) || binding->fence->blocks(parent)))
+        return false;
     EntityGuid child_guid{};
     EntityGuid parent_guid{};
     if (!detail::getUniqueIdentityGuid(r, child, "child", child_guid) ||
@@ -536,6 +542,14 @@ inline bool attach(entt::registry& r, entt::entity child,
     return true;
 }
 
+} // namespace detail
+
+inline bool attach(entt::registry& r, entt::entity child,
+                   entt::entity parent, bool keep_world = false)
+{
+    return detail::attachImpl(r, child, parent, keep_world, false);
+}
+
 inline void detach(entt::registry& r, entt::entity child,
                    bool keep_world = true)
 {
@@ -556,6 +570,35 @@ inline void detach(entt::registry& r, entt::entity child,
     if (!r.all_of<WorldTransformComponent>(child))
         r.emplace<WorldTransformComponent>(child);
     markDirty(r, child);
+}
+
+// Internal lifecycle policy: cohort children are retired separately. The
+// privileged attach is limited to the reparenting required by this operation.
+inline bool retireEntity(entt::registry& r, entt::entity entity,
+                         const RetirementFence& fence)
+{
+    if (entity == entt::null || !r.valid(entity)) return false;
+    const auto* children = r.try_get<ChildrenComponent>(entity);
+    const std::vector<EntityRef> snapshot = children ? children->children : std::vector<EntityRef>{};
+    HierarchyDestroyPolicy policy = HierarchyDestroyPolicy::OrphanToParent;
+    if (const auto* p = r.try_get<HierarchyPolicyComponent>(entity))
+        policy = p->on_parent_destroyed;
+    const entt::entity grandparent = parentOf(r, entity);
+    for (EntityRef ref : snapshot)
+    {
+        const entt::entity child = detail::resolveRef(r, ref);
+        if (child == entt::null || !r.valid(child) || fence.contains(child) || fence.isPending(child)) continue;
+        if (policy == HierarchyDestroyPolicy::CascadeDestroy || policy == HierarchyDestroyPolicy::COUNT)
+            return false;
+        if (policy == HierarchyDestroyPolicy::OrphanToParent && grandparent != entt::null &&
+            !fence.blocks(grandparent))
+        {
+            if (!detail::attachImpl(r, child, grandparent, true, true)) return false;
+        }
+        else detach(r, child, true);
+    }
+    unlinkFromParentList(r, entity);
+    return true;
 }
 
 // ---------------------------------------------------------------------------

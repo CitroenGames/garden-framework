@@ -1,7 +1,9 @@
 #include "PhysicsSystem.hpp"
 #include "Assets/CookedCollisionSerializer.hpp"
 #include "ECS/Hierarchy.hpp"
+#include "ECS/RetirementFence.hpp"
 #include "Utils/Log.hpp"
+#include <Jolt/Physics/Body/BodyLockMulti.h>
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -367,7 +369,7 @@ void PhysicsSystem::shutdown()
     if (jolt_system)
     {
         for (auto& [entity, constraint] : entity_to_constraint)
-            jolt_system->RemoveConstraint(constraint);
+            jolt_system->RemoveConstraint(constraint.constraint);
     }
     entity_to_constraint.clear();
 
@@ -421,9 +423,15 @@ void PhysicsSystem::optimizeBroadPhase()
         jolt_system->OptimizeBroadPhase();
 }
 
+bool PhysicsSystem::isRetiring(entt::entity entity) const noexcept
+{
+    return retirement_fence && retirement_fence->blocks(entity);
+}
+
 JPH::BodyID PhysicsSystem::createStaticBody(const glm::vec3& position, const glm::vec3& rotation, const JPH::ShapeRefC& shape, entt::entity entity,
     const PhysicsBodyDesc& desc)
 {
+    if (isRetiring(entity)) return JPH::BodyID();
     if (!initialized) initialize();
     if (!shape) return JPH::BodyID();
     if (entity_to_body.find(entity) != entity_to_body.end())
@@ -515,6 +523,7 @@ JPH::ShapeRefC PhysicsSystem::createShapeFromCollider(const ColliderComponent& c
 JPH::BodyID PhysicsSystem::createDynamicBody(const glm::vec3& position, const glm::vec3& rotation, const JPH::ShapeRefC& shape, entt::entity entity,
     const PhysicsBodyDesc& desc)
 {
+    if (isRetiring(entity)) return JPH::BodyID();
     if (!initialized) initialize();
     if (!shape) return JPH::BodyID();
     if (entity_to_body.find(entity) != entity_to_body.end())
@@ -564,6 +573,7 @@ JPH::BodyID PhysicsSystem::createDynamicBody(const glm::vec3& position, const gl
 JPH::BodyID PhysicsSystem::createKinematicBody(const glm::vec3& position, const glm::vec3& rotation, const JPH::ShapeRefC& shape, entt::entity entity,
     const PhysicsBodyDesc& desc)
 {
+    if (isRetiring(entity)) return JPH::BodyID();
     if (!initialized) initialize();
     if (!shape) return JPH::BodyID();
     if (entity_to_body.find(entity) != entity_to_body.end())
@@ -692,7 +702,7 @@ JPH::BodyID PhysicsSystem::createStaticMeshBody(const glm::vec3& position, const
 
 JPH::BodyID PhysicsSystem::createPlayerBody(entt::registry& registry, entt::entity entity)
 {
-    if (!registry.valid(entity))
+    if (isRetiring(entity) || !registry.valid(entity))
         return JPH::BodyID();
     if (!registry.all_of<TransformComponent, RigidBodyComponent, PlayerComponent>(entity))
         return JPH::BodyID();
@@ -703,7 +713,7 @@ JPH::BodyID PhysicsSystem::createPlayerBody(entt::registry& registry, entt::enti
 
 JPH::BodyID PhysicsSystem::createCharacterController(entt::registry& registry, entt::entity entity)
 {
-    if (!registry.valid(entity))
+    if (isRetiring(entity) || !registry.valid(entity))
         return JPH::BodyID();
     if (!registry.all_of<TransformComponent, CharacterControllerComponent>(entity))
         return JPH::BodyID();
@@ -873,15 +883,18 @@ PhysicsSystem::ShapeCastResult PhysicsSystem::boxCast(const glm::vec3& origin, c
 
 JPH::Constraint* PhysicsSystem::createConstraint(entt::entity entityA, entt::entity entityB, const ConstraintComponent& constraint)
 {
-    if (!initialized) return nullptr;
+    if (!initialized || entityA == entityB || isRetiring(entityA) || isRetiring(entityB) ||
+        entity_to_constraint.find(entityA) != entity_to_constraint.end()) return nullptr;
 
     auto itA = entity_to_body.find(entityA);
     auto itB = entity_to_body.find(entityB);
     if (itA == entity_to_body.end() || itB == entity_to_body.end()) return nullptr;
 
-    JPH::BodyLockWrite lockA(jolt_system->GetBodyLockInterface(), itA->second);
-    JPH::BodyLockWrite lockB(jolt_system->GetBodyLockInterface(), itB->second);
-    if (!lockA.Succeeded() || !lockB.Succeeded()) return nullptr;
+    const JPH::BodyID body_ids[] = {itA->second, itB->second};
+    JPH::BodyLockMultiWrite locks(jolt_system->GetBodyLockInterface(), body_ids, 2);
+    JPH::Body* bodyA = locks.GetBody(0);
+    JPH::Body* bodyB = locks.GetBody(1);
+    if (!bodyA || !bodyB) return nullptr;
 
     JPH::TwoBodyConstraint* jolt_constraint = nullptr;
 
@@ -890,7 +903,7 @@ JPH::Constraint* PhysicsSystem::createConstraint(entt::entity entityA, entt::ent
     case ConstraintType::Fixed: {
         JPH::FixedConstraintSettings settings;
         settings.mAutoDetectPoint = true;
-        jolt_constraint = settings.Create(lockA.GetBody(), lockB.GetBody());
+        jolt_constraint = settings.Create(*bodyA, *bodyB);
         break;
     }
     case ConstraintType::Hinge: {
@@ -904,7 +917,7 @@ JPH::Constraint* PhysicsSystem::createConstraint(entt::entity entityA, entt::ent
         settings.mNormalAxis2 = JPH::Vec3::sAxisX();
         settings.mLimitsMin = glm::radians(constraint.hinge_min_limit);
         settings.mLimitsMax = glm::radians(constraint.hinge_max_limit);
-        jolt_constraint = settings.Create(lockA.GetBody(), lockB.GetBody());
+        jolt_constraint = settings.Create(*bodyA, *bodyB);
         break;
     }
     case ConstraintType::Point: {
@@ -912,7 +925,7 @@ JPH::Constraint* PhysicsSystem::createConstraint(entt::entity entityA, entt::ent
         settings.mSpace = JPH::EConstraintSpace::LocalToBodyCOM;
         settings.mPoint1 = toJolt(constraint.anchor_1);
         settings.mPoint2 = toJolt(constraint.anchor_2);
-        jolt_constraint = settings.Create(lockA.GetBody(), lockB.GetBody());
+        jolt_constraint = settings.Create(*bodyA, *bodyB);
         break;
     }
     case ConstraintType::Distance: {
@@ -922,15 +935,17 @@ JPH::Constraint* PhysicsSystem::createConstraint(entt::entity entityA, entt::ent
         settings.mPoint2 = toJolt(constraint.anchor_2);
         if (constraint.min_distance >= 0.0f) settings.mMinDistance = constraint.min_distance;
         if (constraint.max_distance >= 0.0f) settings.mMaxDistance = constraint.max_distance;
-        jolt_constraint = settings.Create(lockA.GetBody(), lockB.GetBody());
+        jolt_constraint = settings.Create(*bodyA, *bodyB);
         break;
     }
     }
 
     if (jolt_constraint)
     {
+        // Prepare the owning record before registering with Jolt, so allocation
+        // failure cannot leave an untracked live constraint.
+        entity_to_constraint.emplace(entityA, ConstraintRecord{entityB, jolt_constraint});
         jolt_system->AddConstraint(jolt_constraint);
-        entity_to_constraint[entityA] = jolt_constraint;
         LOG_ENGINE_INFO("Created {} constraint between entities", constraintTypeToString(constraint.type));
     }
 
@@ -943,19 +958,42 @@ void PhysicsSystem::removeConstraint(entt::entity entity)
     if (it == entity_to_constraint.end()) return;
 
     if (jolt_system)
-        jolt_system->RemoveConstraint(it->second);
+        jolt_system->RemoveConstraint(it->second.constraint);
 
     entity_to_constraint.erase(it);
+}
+
+void PhysicsSystem::removeConstraintsTouching(const std::vector<entt::entity>& entities)
+{
+    for (auto it = entity_to_constraint.begin(); it != entity_to_constraint.end(); )
+    {
+        const auto touches = [&entities](entt::entity endpoint) {
+            return std::find(entities.begin(), entities.end(), endpoint) != entities.end();
+        };
+        if (touches(it->first) || touches(it->second.target))
+        {
+            if (jolt_system) jolt_system->RemoveConstraint(it->second.constraint);
+            it = entity_to_constraint.erase(it);
+        }
+        else ++it;
+    }
 }
 
 void PhysicsSystem::removeBody(entt::entity entity)
 {
     trigger_entities.erase(std::remove(trigger_entities.begin(), trigger_entities.end(), entity), trigger_entities.end());
     kinematic_hierarchy_sync_rejections.erase(entity);
+    // Revalidate both endpoints immediately before removing any body.
+    for (auto it = entity_to_constraint.begin(); it != entity_to_constraint.end(); )
+    {
+        if (it->first == entity || it->second.target == entity)
+        {
+            if (jolt_system) jolt_system->RemoveConstraint(it->second.constraint);
+            it = entity_to_constraint.erase(it);
+        }
+        else ++it;
+    }
     removeCharacterController(entity);
-
-    // Remove any constraint associated with this entity first
-    removeConstraint(entity);
 
     auto it = entity_to_body.find(entity);
     if (it == entity_to_body.end()) return;
@@ -1414,7 +1452,7 @@ PhysicsSystem::ShapeCastResult PhysicsSystem::boxCast(const glm::vec3& origin, c
 
 JPH::BodyID PhysicsSystem::createTriggerBody(entt::registry& registry, entt::entity entity)
 {
-    if (!registry.valid(entity)) return JPH::BodyID();
+    if (isRetiring(entity) || !registry.valid(entity)) return JPH::BodyID();
     if (!registry.all_of<TransformComponent, ColliderComponent, TriggerComponent>(entity)) return JPH::BodyID();
     if (!initialized) initialize();
     const auto& collider = registry.get<ColliderComponent>(entity);

@@ -17,11 +17,10 @@ namespace GameFramework
     class GameModeBase;
 }
 
-class EntityLifecycle;
 class InputActionSystem;
 
 // Thin scheduler host (D5: retired as loop owner). Owns a SystemScheduler
-// and an EntityLifecycle for the world; update() delegates to
+// bound to the world; update() delegates to
 // SystemScheduler::runFrame. The hand-ordered loop body is gone.
 // Client (Game.exe) and dedicated server do NOT use this class: they own
 // their own schedulers (server: Game/Server/src/main.cpp). This host is
@@ -57,7 +56,6 @@ private:
     std::string                     m_local_input_context;
     GameFramework::GameModeBase*    m_game_mode = nullptr;
     std::unique_ptr<SystemScheduler> m_scheduler;
-    std::unique_ptr<EntityLifecycle> m_lifecycle;
     float m_current_frame_dt = 0.0f;
 
     EntityRef m_player_entity{};

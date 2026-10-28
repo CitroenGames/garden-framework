@@ -4,7 +4,6 @@
 #include "InputActionSystem.hpp"
 #include "LocalPlayerInputSystem.hpp"
 #include "PlayerRepSystem.hpp"
-#include "ECS/EntityLifecycle.hpp"
 #include "Timer/TimerSystem.hpp"
 #include "Audio/AudioSystem.hpp"
 #include "Audio/SoundEvent.hpp"
@@ -33,6 +32,7 @@ GameSimulation::GameSimulation(world* game_world,
 
 GameSimulation::~GameSimulation()
 {
+    if (m_scheduler) m_scheduler->bindWorld(nullptr);
     if (m_input_actions && !m_local_input_context.empty())
         m_input_actions->popContext(m_local_input_context.c_str());
     m_game_mode = nullptr;
@@ -199,9 +199,8 @@ void GameSimulation::initialize()
 
     m_world->getPhysicsSystem().getJoltSystem()->OptimizeBroadPhase();
 
-    m_lifecycle = std::make_unique<EntityLifecycle>(m_world->registry);
     m_scheduler = std::make_unique<SystemScheduler>(false, m_world->getFixedDelta());
-    m_scheduler->setLifecycle(m_lifecycle.get());
+    m_scheduler->bindWorld(m_world);
     m_scheduler->setPaused(m_paused);
     registerSystems();
 
@@ -218,6 +217,10 @@ void GameSimulation::update(float delta_time)
         return;
     m_current_frame_dt = delta_time;
     m_scheduler->runFrame(m_world->registry, delta_time);
+    if (!m_scheduler->lastRetirementResult().cleanupComplete()) {
+        LOG_ENGINE_ERROR("GameSimulation retirement drain failed (status={})", static_cast<int>(m_scheduler->lastRetirementResult().status));
+        m_scheduler->setPaused(true);
+    }
 }
 
 void GameSimulation::handleMouseMotion(float mouse_dy, float mouse_dx)

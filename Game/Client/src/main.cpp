@@ -50,12 +50,13 @@ static bool game_module_resources_released = false;
 static GameModuleHostSession game_module(GameModuleHostSession::HostOperations{
     {},
     []() {
-        game_module_resources_released = true;
         Threading::JobSystem::get().barrier();
+        if (!_world.shutdown().cleanupComplete()) return false;
+        game_module_resources_released = true;
         Threading::JobSystem::get().shutdown();
-        _world.shutdown();
         AudioSystem::get().shutdown();
         Assets::AssetManager::get().shutdown();
+        return true;
     },
     {}, {}, {},
     [](const garden::ecs::ComponentOwnerId& owner) {
@@ -78,8 +79,11 @@ static void quit_game(int code)
     // The session can be idle if startup failed before loading a module.
     if (!game_module_resources_released)
     {
+        if (!_world.shutdown().cleanupComplete()) {
+            LOG_ENGINE_ERROR("World shutdown incomplete");
+            _exit(1);
+        }
         Threading::JobSystem::get().shutdown();
-        _world.shutdown();
         AudioSystem::get().shutdown();
         Assets::AssetManager::get().shutdown();
     }
@@ -317,10 +321,12 @@ int main(int argc, char* argv[])
     InputActionSystem input_actions;
 
     // Initialize world and physics
-    _world = world();
     // The client host supplies its initial view; a generic world starts at the origin.
+    if (!_world.resetWorld().cleanupComplete()) {
+        LOG_ENGINE_FATAL("World reset incomplete");
+        quit_game(1);
+    }
     _world.world_camera = camera(0, 0, -5);
-    _world.initializePhysics();
 
     // Parse network CLI args before level instantiation so connecting clients
     // create only GameState, not an authority GameMode.

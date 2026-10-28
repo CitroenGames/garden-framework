@@ -1,7 +1,7 @@
 #include "Components/Components.hpp"
 #include "Components/HierarchyComponents.hpp"
 #include "Components/IdentityComponent.hpp"
-#include "ECS/EntityLifecycle.hpp"
+#include "world.hpp"
 #include "ECS/Hierarchy.hpp"
 #include "Events/EventBus.hpp"
 
@@ -41,10 +41,10 @@ bool resolvesTo(entt::registry& reg, entt::entity entity,
     return resolved.has_value() && nearMat(*resolved, expected);
 }
 
-entt::entity makeEntity(entt::registry& reg, EntityLifecycle& life,
+entt::entity makeEntity(entt::registry& reg, world& owner,
                         const glm::vec3& pos)
 {
-    entt::entity e = life.create();
+    entt::entity e = resolveEntityRef(reg, owner.persistedReference(owner.createScopedEntity()));
     auto& t = reg.emplace<TransformComponent>(e);
     t.position = pos;
     t.rotation = glm::vec3(0.0f);
@@ -68,12 +68,12 @@ bool testRenderWorldPoseResolver()
 {
     const std::string name = "H-D render world pose resolves presentation hierarchy without mutation";
     EventBus::get().clear();
-    entt::registry reg;
-    EntityLifecycle life(reg, 55);
+    world owner;
+    auto& reg = owner.registry;
 
-    const entt::entity root = makeEntity(reg, life, {10, 0, 0});
-    const entt::entity child = makeEntity(reg, life, {1, 2, 0});
-    const entt::entity leaf = makeEntity(reg, life, {0, 0, 2});
+    const entt::entity root = makeEntity(reg, owner, {10, 0, 0});
+    const entt::entity child = makeEntity(reg, owner, {1, 2, 0});
+    const entt::entity leaf = makeEntity(reg, owner, {0, 0, 2});
     auto& root_transform = reg.get<TransformComponent>(root);
     root_transform.rotation = {0, 20, 0};
     root_transform.scale = {1.5f, 1.0f, 1.0f};
@@ -88,8 +88,8 @@ bool testRenderWorldPoseResolver()
     const PresentationTransformComponent child_presentation{{3, 1, 0}, {0, 0, 35}};
     reg.emplace<PresentationTransformComponent>(root, root_presentation);
     reg.emplace<PresentationTransformComponent>(child, child_presentation);
-    reg.emplace<ParentComponent>(child, ParentComponent{life.refOf(root)});
-    reg.emplace<ParentComponent>(leaf, ParentComponent{life.refOf(child)});
+    reg.emplace<ParentComponent>(child, ParentComponent{EntityRef{reg.get<IdentityComponent>(root).guid}});
+    reg.emplace<ParentComponent>(leaf, ParentComponent{EntityRef{reg.get<IdentityComponent>(child).guid}});
 
     TransformComponent expected_root = root_transform;
     expected_root.position = root_presentation.position;
@@ -147,12 +147,12 @@ bool testRenderWorldPoseResolver()
             return fail(name, "resolver wrote or created derived hierarchy state");
 
     // Parent scale multiplied by child rotation produces a sheared full matrix.
-    const entt::entity scaled_root = makeEntity(reg, life, {0, 0, 0});
-    const entt::entity rotated_child = makeEntity(reg, life, {0, 0, 0});
+    const entt::entity scaled_root = makeEntity(reg, owner, {0, 0, 0});
+    const entt::entity rotated_child = makeEntity(reg, owner, {0, 0, 0});
     reg.get<TransformComponent>(scaled_root).scale = {2, 1, 1};
     reg.get<TransformComponent>(rotated_child).rotation = {0, 0, 45};
     reg.emplace<ParentComponent>(rotated_child,
-                                 ParentComponent{life.refOf(scaled_root)});
+                                 ParentComponent{EntityRef{reg.get<IdentityComponent>(scaled_root).guid}});
     const glm::mat4 expected_sheared =
         reg.get<TransformComponent>(scaled_root).getTransformMatrix() *
         reg.get<TransformComponent>(rotated_child).getTransformMatrix();
@@ -173,10 +173,10 @@ bool testRenderWorldPoseInvalidParents()
 {
     const std::string name = "H-D unresolved render parents fall back to local pose";
     EventBus::get().clear();
-    entt::registry reg;
-    EntityLifecycle life(reg, 56);
+    world owner;
+    auto& reg = owner.registry;
 
-    const entt::entity stale_child = makeEntity(reg, life, {2, 3, 4});
+    const entt::entity stale_child = makeEntity(reg, owner, {2, 3, 4});
     reg.get<TransformComponent>(stale_child).scale = {2, 2, 2};
     const PresentationTransformComponent presentation{{8, 9, 10}, {0, 0, 25}};
     reg.emplace<PresentationTransformComponent>(stale_child, presentation);
@@ -190,7 +190,7 @@ bool testRenderWorldPoseInvalidParents()
     if (reg.get<ParentComponent>(stale_child).parent != stale_ref)
         return fail(name, "stale parent fallback mutated its authored link");
 
-    const entt::entity invalid_ref_child = makeEntity(reg, life, {5, 6, 7});
+    const entt::entity invalid_ref_child = makeEntity(reg, owner, {5, 6, 7});
     reg.emplace<ParentComponent>(invalid_ref_child,
         ParentComponent{EntityRef{EntityGuid{0, 42}}});
     if (!resolvesTo(reg, invalid_ref_child,
@@ -217,7 +217,7 @@ bool testRenderWorldPoseInvalidParents()
                     ambiguous_reg.get<TransformComponent>(ambiguous_ref_child).getTransformMatrix()))
         return fail(name, "ambiguous parent identity did not use local pose");
 
-    const entt::entity null_parent_child = makeEntity(reg, life, {4, 3, 2});
+    const entt::entity null_parent_child = makeEntity(reg, owner, {4, 3, 2});
     reg.emplace<ParentComponent>(null_parent_child, ParentComponent{EntityRef{}});
     if (!resolvesTo(reg, null_parent_child,
                     reg.get<TransformComponent>(null_parent_child).getTransformMatrix()))
@@ -235,14 +235,14 @@ bool testRenderWorldPoseCycle()
 {
     const std::string name = "H-D cyclic render links fail without a query-dependent pose";
     EventBus::get().clear();
-    entt::registry reg;
-    EntityLifecycle life(reg, 57);
-    const entt::entity a = makeEntity(reg, life, {10, 0, 0});
-    const entt::entity b = makeEntity(reg, life, {0, 20, 0});
-    const entt::entity descendant = makeEntity(reg, life, {0, 0, 3});
-    reg.emplace<ParentComponent>(a, ParentComponent{life.refOf(b)});
-    reg.emplace<ParentComponent>(b, ParentComponent{life.refOf(a)});
-    reg.emplace<ParentComponent>(descendant, ParentComponent{life.refOf(a)});
+    world owner;
+    auto& reg = owner.registry;
+    const entt::entity a = makeEntity(reg, owner, {10, 0, 0});
+    const entt::entity b = makeEntity(reg, owner, {0, 20, 0});
+    const entt::entity descendant = makeEntity(reg, owner, {0, 0, 3});
+    reg.emplace<ParentComponent>(a, ParentComponent{EntityRef{reg.get<IdentityComponent>(b).guid}});
+    reg.emplace<ParentComponent>(b, ParentComponent{EntityRef{reg.get<IdentityComponent>(a).guid}});
+    reg.emplace<ParentComponent>(descendant, ParentComponent{EntityRef{reg.get<IdentityComponent>(a).guid}});
 
     if (Hierarchy::resolveRenderWorldMatrix(reg, descendant).has_value())
         return fail(name, "descendant traversal through a cyclic graph returned a pose");
@@ -256,11 +256,11 @@ bool rejectedIdentityAttachLeavesFreshEntitiesUntouched(
     const std::string& name, Configure configure)
 {
     EventBus::get().clear();
-    entt::registry reg;
-    EntityLifecycle life(reg, 52);
-    entt::entity child = makeEntity(reg, life, {1, 2, 3});
-    entt::entity parent = makeEntity(reg, life, {4, 5, 6});
-    entt::entity other = makeEntity(reg, life, {7, 8, 9});
+    world owner;
+    auto& reg = owner.registry;
+    entt::entity child = makeEntity(reg, owner, {1, 2, 3});
+    entt::entity parent = makeEntity(reg, owner, {4, 5, 6});
+    entt::entity other = makeEntity(reg, owner, {7, 8, 9});
     const glm::mat4 child_transform = reg.get<TransformComponent>(child).getTransformMatrix();
     const glm::mat4 parent_transform = reg.get<TransformComponent>(parent).getTransformMatrix();
     const glm::mat4 other_transform = reg.get<TransformComponent>(other).getTransformMatrix();
@@ -324,12 +324,12 @@ bool testRejectedReattachPreservesOriginalLink()
 {
     const std::string name = "H-A rejected reattach preserves original link and mirrors";
     EventBus::get().clear();
-    entt::registry reg;
-    EntityLifecycle life(reg, 53);
-    entt::entity original_parent = makeEntity(reg, life, {10, 0, 0});
-    entt::entity new_parent = makeEntity(reg, life, {20, 0, 0});
-    entt::entity child = makeEntity(reg, life, {1, 0, 0});
-    entt::entity duplicate = makeEntity(reg, life, {30, 0, 0});
+    world owner;
+    auto& reg = owner.registry;
+    entt::entity original_parent = makeEntity(reg, owner, {10, 0, 0});
+    entt::entity new_parent = makeEntity(reg, owner, {20, 0, 0});
+    entt::entity child = makeEntity(reg, owner, {1, 0, 0});
+    entt::entity duplicate = makeEntity(reg, owner, {30, 0, 0});
     if (!Hierarchy::attach(reg, child, original_parent))
         return fail(name, "valid initial attach was rejected");
 
@@ -362,11 +362,11 @@ bool testAttachPropagate()
 {
     const std::string name = "H1 attach+propagate nested 3-level";
     EventBus::get().clear();
-    entt::registry reg;
-    EntityLifecycle life(reg, 42);
-    entt::entity root = makeEntity(reg, life, {10, 0, 0});
-    entt::entity child = makeEntity(reg, life, {1, 0, 0});
-    entt::entity grand = makeEntity(reg, life, {0, 2, 0});
+    world owner;
+    auto& reg = owner.registry;
+    entt::entity root = makeEntity(reg, owner, {10, 0, 0});
+    entt::entity child = makeEntity(reg, owner, {1, 0, 0});
+    entt::entity grand = makeEntity(reg, owner, {0, 2, 0});
     if (!Hierarchy::attach(reg, child, root)) return fail(name, "valid root attach rejected");
     if (!Hierarchy::attach(reg, grand, child)) return fail(name, "valid nested attach rejected");
     if (Hierarchy::parentOf(reg, child) != root) return fail(name, "parentOf(child)!=root");
@@ -386,11 +386,11 @@ bool testRotation()
 {
     const std::string name = "H2 rotated parent propagation";
     EventBus::get().clear();
-    entt::registry reg;
-    EntityLifecycle life(reg, 43);
-    entt::entity root = makeEntity(reg, life, {0, 0, 0});
+    world owner;
+    auto& reg = owner.registry;
+    entt::entity root = makeEntity(reg, owner, {0, 0, 0});
     reg.get<TransformComponent>(root).rotation = {0, 90, 0};
-    entt::entity child = makeEntity(reg, life, {1, 0, 0});
+    entt::entity child = makeEntity(reg, owner, {1, 0, 0});
     if (!Hierarchy::attach(reg, child, root)) return fail(name, "valid attach rejected");
     Hierarchy::updateTransformPropagation(reg);
     if (!nearVec(worldPos(reg, child), {0, 0, -1})) return fail(name, "child world != (0,0,-1)");
@@ -402,10 +402,10 @@ bool testKeepWorldAttach()
 {
     const std::string name = "H3 keep_world attach preserves world";
     EventBus::get().clear();
-    entt::registry reg;
-    EntityLifecycle life(reg, 44);
-    entt::entity root = makeEntity(reg, life, {10, 0, 0});
-    entt::entity child = makeEntity(reg, life, {11, 0, 0});
+    world owner;
+    auto& reg = owner.registry;
+    entt::entity root = makeEntity(reg, owner, {10, 0, 0});
+    entt::entity child = makeEntity(reg, owner, {11, 0, 0});
     Hierarchy::updateTransformPropagation(reg); // no hierarchy yet: skipped
     const glm::mat4 before = Hierarchy::computeWorldMatrix(reg, child);
     Hierarchy::attach(reg, child, root, true);
@@ -423,10 +423,10 @@ bool testCycleRejected()
 {
     const std::string name = "H4 cycle attach rejected";
     EventBus::get().clear();
-    entt::registry reg;
-    EntityLifecycle life(reg, 45);
-    entt::entity a = makeEntity(reg, life, {0, 0, 0});
-    entt::entity b = makeEntity(reg, life, {1, 0, 0});
+    world owner;
+    auto& reg = owner.registry;
+    entt::entity a = makeEntity(reg, owner, {0, 0, 0});
+    entt::entity b = makeEntity(reg, owner, {1, 0, 0});
     if (!Hierarchy::attach(reg, b, a)) return fail(name, "valid initial attach rejected");
     if (Hierarchy::attach(reg, a, b)) return fail(name, "cycle attach reported success"); // would create A->B->A
     if (Hierarchy::parentOf(reg, a) != entt::null) return fail(name, "cycle attach changed parentOf(A)");
@@ -443,10 +443,10 @@ bool testDetach()
 {
     const std::string name = "H-detach child becomes root, world preserved";
     EventBus::get().clear();
-    entt::registry reg;
-    EntityLifecycle life(reg, 46);
-    entt::entity root = makeEntity(reg, life, {10, 0, 0});
-    entt::entity child = makeEntity(reg, life, {1, 0, 0});
+    world owner;
+    auto& reg = owner.registry;
+    entt::entity root = makeEntity(reg, owner, {10, 0, 0});
+    entt::entity child = makeEntity(reg, owner, {1, 0, 0});
     Hierarchy::attach(reg, child, root);
     Hierarchy::updateTransformPropagation(reg);
     Hierarchy::detach(reg, child);
@@ -466,18 +466,18 @@ bool testCascadeDestroy()
 {
     const std::string name = "H6 cascade destroy removes subtree only";
     EventBus::get().clear();
-    entt::registry reg;
-    EntityLifecycle life(reg, 47);
-    entt::entity root = makeEntity(reg, life, {0, 0, 0});
+    world owner;
+    auto& reg = owner.registry;
+    entt::entity root = makeEntity(reg, owner, {0, 0, 0});
     reg.emplace<HierarchyPolicyComponent>(root).on_parent_destroyed =
         HierarchyDestroyPolicy::CascadeDestroy;
-    entt::entity child = makeEntity(reg, life, {1, 0, 0});
-    entt::entity grand = makeEntity(reg, life, {0, 1, 0});
-    entt::entity other = makeEntity(reg, life, {5, 5, 5});
+    entt::entity child = makeEntity(reg, owner, {1, 0, 0});
+    entt::entity grand = makeEntity(reg, owner, {0, 1, 0});
+    entt::entity other = makeEntity(reg, owner, {5, 5, 5});
     Hierarchy::attach(reg, child, root);
     Hierarchy::attach(reg, grand, child);
-    life.destroy(root);
-    life.drainDestroyQueue();
+    owner.requestRetirement(owner.scopedEntity(EntityRef{reg.get<IdentityComponent>(root).guid}));
+    owner.drainRetirements();
     if (reg.valid(root)) return fail(name, "root still valid");
     if (reg.valid(child)) return fail(name, "child still valid after cascade");
     if (reg.valid(grand)) return fail(name, "grandchild still valid after cascade");
@@ -490,25 +490,25 @@ bool testOrphanDestroy()
 {
     const std::string name = "H5 orphan destroy reparents, world preserved";
     EventBus::get().clear();
-    entt::registry reg;
-    EntityLifecycle life(reg, 48);
-    entt::entity gp = makeEntity(reg, life, {10, 0, 0});
-    entt::entity parent = makeEntity(reg, life, {1, 0, 0});
-    entt::entity child = makeEntity(reg, life, {0, 2, 0});
+    world owner;
+    auto& reg = owner.registry;
+    entt::entity gp = makeEntity(reg, owner, {10, 0, 0});
+    entt::entity parent = makeEntity(reg, owner, {1, 0, 0});
+    entt::entity child = makeEntity(reg, owner, {0, 2, 0});
     Hierarchy::attach(reg, parent, gp);
     Hierarchy::attach(reg, child, parent);
     Hierarchy::updateTransformPropagation(reg);
     const glm::vec3 before = worldPos(reg, child); // (11,2,0)
-    life.destroy(parent); // default OrphanToParent
-    life.drainDestroyQueue();
+    owner.requestRetirement(owner.scopedEntity(EntityRef{reg.get<IdentityComponent>(parent).guid})); // default OrphanToParent
+    owner.drainRetirements();
     if (reg.valid(parent)) return fail(name, "parent still valid");
     if (!reg.valid(child)) return fail(name, "child destroyed under orphan policy");
     if (Hierarchy::parentOf(reg, child) != gp) return fail(name, "child not reparented to grandparent");
     Hierarchy::updateTransformPropagation(reg);
     if (!nearVec(worldPos(reg, child), before, 1e-5f)) return fail(name, "child world changed after orphan");
     // Root-parent variant: destroying a root orphans children to root.
-    life.destroy(gp);
-    life.drainDestroyQueue();
+    owner.requestRetirement(owner.scopedEntity(EntityRef{reg.get<IdentityComponent>(gp).guid}));
+    owner.drainRetirements();
     if (!reg.valid(child)) return fail(name, "child destroyed when root parent died");
     if (Hierarchy::parentOf(reg, child) != entt::null) return fail(name, "child not orphaned to root");
     Hierarchy::updateTransformPropagation(reg);
@@ -521,18 +521,18 @@ bool testReparentToRoot()
 {
     const std::string name = "H5b ReparentToRoot destroy policy";
     EventBus::get().clear();
-    entt::registry reg;
-    EntityLifecycle life(reg, 49);
-    entt::entity gp = makeEntity(reg, life, {10, 0, 0});
-    entt::entity parent = makeEntity(reg, life, {1, 0, 0});
+    world owner;
+    auto& reg = owner.registry;
+    entt::entity gp = makeEntity(reg, owner, {10, 0, 0});
+    entt::entity parent = makeEntity(reg, owner, {1, 0, 0});
     reg.emplace<HierarchyPolicyComponent>(parent).on_parent_destroyed =
         HierarchyDestroyPolicy::ReparentToRoot;
-    entt::entity child = makeEntity(reg, life, {0, 2, 0});
+    entt::entity child = makeEntity(reg, owner, {0, 2, 0});
     Hierarchy::attach(reg, parent, gp);
     Hierarchy::attach(reg, child, parent);
     Hierarchy::updateTransformPropagation(reg);
-    life.destroy(parent);
-    life.drainDestroyQueue();
+    owner.requestRetirement(owner.scopedEntity(EntityRef{reg.get<IdentityComponent>(parent).guid}));
+    owner.drainRetirements();
     if (Hierarchy::parentOf(reg, child) != entt::null) return fail(name, "child not reparented to root");
     Hierarchy::updateTransformPropagation(reg);
     if (!nearVec(worldPos(reg, child), {11, 2, 0}, 1e-5f)) return fail(name, "child world changed");
@@ -546,11 +546,11 @@ bool testStaleParentAndRebuild()
 {
     const std::string name = "H-stale parent resolve + rebuildChildren";
     EventBus::get().clear();
-    entt::registry reg;
-    EntityLifecycle life(reg, 50);
-    entt::entity root = makeEntity(reg, life, {10, 0, 0});
-    entt::entity child = makeEntity(reg, life, {1, 0, 0});
-    entt::entity grand = makeEntity(reg, life, {0, 2, 0});
+    world owner;
+    auto& reg = owner.registry;
+    entt::entity root = makeEntity(reg, owner, {10, 0, 0});
+    entt::entity child = makeEntity(reg, owner, {1, 0, 0});
+    entt::entity grand = makeEntity(reg, owner, {0, 2, 0});
     Hierarchy::attach(reg, child, root);
     Hierarchy::attach(reg, grand, child);
     // Simulate load: drop Children, rebuild from Parent only.
@@ -563,9 +563,9 @@ bool testStaleParentAndRebuild()
     Hierarchy::updateTransformPropagation(reg);
     if (!nearVec(worldPos(reg, grand), {11, 2, 0})) return fail(name, "world wrong after rebuild+propagate");
     // Stale parent: raw registry destroy bypasses lifecycle policy.
-    EntityRef child_ref = life.refOf(child);
+    EntityRef child_ref = EntityRef{reg.get<IdentityComponent>(child).guid};
     reg.destroy(root);
-    if (life.resolve(child_ref) != child) return fail(name, "child resolve broken");
+    if (resolveEntityRef(reg, child_ref) != child) return fail(name, "child resolve broken");
     if (Hierarchy::parentOf(reg, child) != entt::null)
         return fail(name, "stale parent did not resolve to null");
     Hierarchy::rebuildChildren(reg); // must orphan child to root
@@ -581,27 +581,27 @@ bool testCohortRebuildPreservesUnrelatedMirrors()
 {
     const std::string name = "H-B cohort rebuild preserves unrelated mirrors and file order";
     EventBus::get().clear();
-    entt::registry reg;
-    EntityLifecycle life(reg, 54);
-    const entt::entity outside_parent = makeEntity(reg, life, {0, 0, 0});
-    const entt::entity outside_child = makeEntity(reg, life, {0, 0, 0});
+    world owner;
+    auto& reg = owner.registry;
+    const entt::entity outside_parent = makeEntity(reg, owner, {0, 0, 0});
+    const entt::entity outside_child = makeEntity(reg, owner, {0, 0, 0});
     if (!Hierarchy::attach(reg, outside_child, outside_parent))
         return fail(name, "failed to build unrelated hierarchy");
     const auto outside_mirror = reg.get<ChildrenComponent>(outside_parent).children;
 
-    const entt::entity root = makeEntity(reg, life, {0, 0, 0});
-    const entt::entity first_child = makeEntity(reg, life, {0, 0, 0});
-    const entt::entity second_child = makeEntity(reg, life, {0, 0, 0});
-    const entt::entity external_parent_child = makeEntity(reg, life, {0, 0, 0});
-    const EntityRef root_ref = life.refOf(root);
-    const EntityRef first_ref = life.refOf(first_child);
-    const EntityRef second_ref = life.refOf(second_child);
+    const entt::entity root = makeEntity(reg, owner, {0, 0, 0});
+    const entt::entity first_child = makeEntity(reg, owner, {0, 0, 0});
+    const entt::entity second_child = makeEntity(reg, owner, {0, 0, 0});
+    const entt::entity external_parent_child = makeEntity(reg, owner, {0, 0, 0});
+    const EntityRef root_ref = EntityRef{reg.get<IdentityComponent>(root).guid};
+    const EntityRef first_ref = EntityRef{reg.get<IdentityComponent>(first_child).guid};
+    const EntityRef second_ref = EntityRef{reg.get<IdentityComponent>(second_child).guid};
 
     reg.emplace<ParentComponent>(first_child, ParentComponent{root_ref});
     reg.emplace<ParentComponent>(second_child, ParentComponent{root_ref});
     reg.emplace<ParentComponent>(external_parent_child,
-                                 ParentComponent{life.refOf(outside_parent)});
-    reg.emplace<ChildrenComponent>(root, ChildrenComponent{{life.refOf(outside_child)}});
+                                 ParentComponent{EntityRef{reg.get<IdentityComponent>(outside_parent).guid}});
+    reg.emplace<ChildrenComponent>(root, ChildrenComponent{{EntityRef{reg.get<IdentityComponent>(outside_child).guid}}});
     reg.emplace<ChildrenComponent>(first_child, ChildrenComponent{{second_ref}});
 
     Hierarchy::rebuildChildren(reg,
@@ -624,13 +624,13 @@ bool testDepthLimit()
 {
     const std::string name = "H-depth limit 64 terminates";
     EventBus::get().clear();
-    entt::registry reg;
-    EntityLifecycle life(reg, 51);
+    world owner;
+    auto& reg = owner.registry;
     std::vector<entt::entity> chain;
-    chain.push_back(makeEntity(reg, life, {0, 0, 0}));
+    chain.push_back(makeEntity(reg, owner, {0, 0, 0}));
     for (int i = 1; i < 70; ++i)
     {
-        chain.push_back(makeEntity(reg, life, {1, 0, 0}));
+        chain.push_back(makeEntity(reg, owner, {1, 0, 0}));
         Hierarchy::attach(reg, chain.back(), chain[chain.size() - 2]);
     }
     Hierarchy::updateTransformPropagation(reg);
@@ -652,10 +652,10 @@ bool testPhysicsAttachmentPolicyRejectsBeforeMutation()
 
     auto rejected_child = [&](const char* label, auto configure_child)
     {
-        entt::registry reg;
-        EntityLifecycle life(reg, 60);
-        const entt::entity parent = makeEntity(reg, life, {4, 0, 0});
-        const entt::entity child = makeEntity(reg, life, {1, 2, 3});
+        world owner;
+        auto& reg = owner.registry;
+        const entt::entity parent = makeEntity(reg, owner, {4, 0, 0});
+        const entt::entity child = makeEntity(reg, owner, {1, 2, 3});
         configure_child(reg, child);
 
         const TransformComponent child_before = reg.get<TransformComponent>(child);
@@ -692,11 +692,11 @@ bool testPhysicsAttachmentPolicyRejectsBeforeMutation()
     // The invalid scale is on an ancestor rather than the immediate parent.
     // This catches a validator that checks only the direct parent.
     {
-        entt::registry reg;
-        EntityLifecycle life(reg, 61);
-        const entt::entity grandparent = makeEntity(reg, life, {0, 0, 0});
-        const entt::entity parent = makeEntity(reg, life, {1, 0, 0});
-        const entt::entity child = makeEntity(reg, life, {0, 2, 0});
+        world owner;
+        auto& reg = owner.registry;
+        const entt::entity grandparent = makeEntity(reg, owner, {0, 0, 0});
+        const entt::entity parent = makeEntity(reg, owner, {1, 0, 0});
+        const entt::entity child = makeEntity(reg, owner, {0, 2, 0});
         if (!Hierarchy::attach(reg, parent, grandparent))
             return fail(name, "valid non-physics parent setup was rejected");
         reg.get<TransformComponent>(grandparent).scale = {2.0f, 1.0f, 1.0f};
@@ -722,11 +722,34 @@ bool testPhysicsAttachmentPolicyRejectsBeforeMutation()
 
     return pass(name);
 }
+bool testRetirementHierarchyFence()
+{
+    const std::string name = "L1 hierarchy retirement fence and policy";
+    RetirementFence fence;
+    world owner;
+    auto& reg = owner.registry;
+    const auto grandparent = makeEntity(reg, owner, {1, 0, 0});
+    const auto parent = makeEntity(reg, owner, {2, 0, 0});
+    const auto child = makeEntity(reg, owner, {3, 0, 0});
+    const auto outsider = makeEntity(reg, owner, {0, 0, 0});
+    if (!Hierarchy::attach(reg, parent, grandparent) || !Hierarchy::attach(reg, child, parent))
+        return fail(name, "setup failed");
+    fence.entities = {parent};
+    reg.ctx().get<RetirementFenceBinding>().fence = &fence;
+    if (Hierarchy::attach(reg, outsider, parent) || Hierarchy::attach(reg, parent, outsider))
+        return fail(name, "attach accepted a retiring endpoint");
+    const auto before = Hierarchy::computeWorldMatrix(reg, child);
+    if (!Hierarchy::retireEntity(reg, parent, fence) || Hierarchy::parentOf(reg, child) != grandparent ||
+        !nearMat(before, Hierarchy::computeWorldMatrix(reg, child)))
+        return fail(name, "privileged orphan policy failed to preserve the surviving child");
+    return pass(name);
+}
 } // namespace
 
 int main()
 {
     int failures = 0;
+    if (!testRetirementHierarchyFence()) ++failures;
     if (!testRenderWorldPoseResolver()) ++failures;
     if (!testRenderWorldPoseInvalidParents()) ++failures;
     if (!testRenderWorldPoseCycle()) ++failures;

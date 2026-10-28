@@ -26,7 +26,6 @@ public:
     GameStateBase* getGameState() { return m_state.get(); }
     const GameStateBase* getGameState() const { return m_state.get(); }
 
-    void rebindMovedWorld(world& previous, world& current);
     void clear();
     bool initialize(world& game_world, const std::string& map_name = "", const std::string& options = "");
     void start(world& game_world);

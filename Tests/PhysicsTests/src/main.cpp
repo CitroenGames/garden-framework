@@ -7,8 +7,8 @@
 #include "Components/Components.hpp"
 #include "Components/HierarchyComponents.hpp"
 #include "Components/IdentityComponent.hpp"
-#include "ECS/EntityLifecycle.hpp"
 #include "ECS/Hierarchy.hpp"
+#include "ECS/RetirementFence.hpp"
 #include "Graphics/HeadlessRenderAPI.hpp"
 #include "GameFramework/GameMode.hpp"
 #include "GameFramework/GameState.hpp"
@@ -717,6 +717,7 @@ static void run(const std::string& name)
 
 static JPH::ShapeRefC makeBoxShape()
 {
+    PhysicsSystem::ensureJoltRegistered();
     ColliderComponent col;
     col.shape_type = ColliderShapeType::Box;
     col.box_half_extents = glm::vec3(0.5f);
@@ -2076,13 +2077,12 @@ static bool testHEParentedKinematicPlatformSync()
     world w;
     CharacterPhysicsService character_physics(w);
     w.initializePhysics();
-    EntityLifecycle life(w.registry, 71);
 
-    const entt::entity parent = life.create();
+    const entt::entity parent = resolveEntityRef(w.registry, w.persistedReference(w.createScopedEntity()));
     auto& parent_transform = w.registry.emplace<TransformComponent>(parent, 4.0f, 0.0f, -3.0f);
     parent_transform.rotation = {0.0f, 35.0f, 0.0f};
 
-    const entt::entity platform = life.create();
+    const entt::entity platform = resolveEntityRef(w.registry, w.persistedReference(w.createScopedEntity()));
     auto& platform_transform = w.registry.emplace<TransformComponent>(platform, 1.25f, 0.25f, 0.0f);
     platform_transform.rotation = {0.0f, 20.0f, 0.0f};
     const TransformComponent platform_local_before = platform_transform;
@@ -3875,7 +3875,6 @@ static bool testHELoadedKinematicChildInitializesAtComposedPose()
 
     world w;
     w.initializePhysics();
-    EntityLifecycle lifecycle(w.registry, 72);
     LevelManager manager;
     std::vector<entt::entity> created;
     if (!manager.instantiateLevel(level, w, nullptr, nullptr, nullptr,
@@ -3932,10 +3931,10 @@ static bool testHEStagedMeshPolicyAndNonPhysicsScale()
     // Direct hierarchy API: a child with no physics component is allowed below
     // a scaled parent. The scale invariant applies only to a kinematic body.
     {
-        entt::registry registry;
-        EntityLifecycle lifecycle(registry, 73);
-        const entt::entity parent = lifecycle.create();
-        const entt::entity child = lifecycle.create();
+        world owner;
+        auto& registry = owner.registry;
+        const entt::entity parent = resolveEntityRef(registry, owner.persistedReference(owner.createScopedEntity()));
+        const entt::entity child = resolveEntityRef(registry, owner.persistedReference(owner.createScopedEntity()));
         registry.emplace<TransformComponent>(parent).scale = {2.0f, 1.0f, 1.0f};
         registry.emplace<TransformComponent>(child);
         if (!Hierarchy::attach(registry, child, parent))
@@ -4135,7 +4134,6 @@ static bool testLevelManagerHBPersistenceAndCohortRestore()
             outside_parent, ChildrenComponent{{outside_mirror_ref}});
         const auto saved_outside_mirror =
             game_world.registry.get<ChildrenComponent>(outside_parent).children;
-        EntityLifecycle lifecycle(game_world.registry, 83);
 
         std::vector<entt::entity> created;
         if (!manager.instantiateLevel(loaded, game_world, nullptr, nullptr,
@@ -4175,7 +4173,7 @@ static bool testLevelManagerHBPersistenceAndCohortRestore()
             const EntityGuid guid = game_world.registry.get<IdentityComponent>(entity).guid;
             if (guid.isNull() || !unique_ids.insert(guid).second)
                 return fail(name, "loaded entity identity is null or duplicated");
-            if (lifecycle.resolve(EntityRef{guid}) != entity)
+            if (resolveEntityRef(game_world.registry, EntityRef{guid}) != entity)
                 return fail(name, "lifecycle construct hook did not index the final identity");
         }
 
@@ -4335,7 +4333,6 @@ static bool testLevelManagerHBRejectsBeforeRegistryMutation()
                 game_world.registry.view<TagComponent>().size();
             const auto outside_mirror_before =
                 game_world.registry.get<ChildrenComponent>(existing).children;
-            EntityLifecycle lifecycle(game_world.registry, 84);
             const EntityRef scoped_ref{EntityGuid{0xDD00, 0xEE00}};
             const auto scoped = game_world.restoreScopedEntity(scoped_ref);
             if (!game_world.isEntityValid(scoped) ||
@@ -5002,7 +4999,6 @@ static bool testLevelManagerScopedRestoreRollback()
     const std::string name = "LevelManager rolls back failed scoped cohort restore";
     LevelManager manager;
     world game_world;
-    EntityLifecycle lifecycle(game_world.registry, 85);
     const EntityRef sentinel_ref{EntityGuid{0xDD00, 0xEE00}};
     const auto sentinel = game_world.restoreScopedEntity(sentinel_ref);
     if (!game_world.isEntityValid(sentinel) ||
@@ -5035,8 +5031,8 @@ static bool testLevelManagerScopedRestoreRollback()
         game_world.fixed_delta != fixed_delta_before ||
         game_world.getGravity() != gravity_before ||
         game_world.registry.view<IdentityComponent>().size() != identities_before ||
-        lifecycle.resolve(EntityRef{EntityGuid{0x7100, 0x8100}}) != entt::null ||
-        lifecycle.resolve(EntityRef{EntityGuid{0x7200, 0x8200}}) != entt::null ||
+        resolveEntityRef(game_world.registry, EntityRef{EntityGuid{0x7100, 0x8100}}) != entt::null ||
+        resolveEntityRef(game_world.registry, EntityRef{EntityGuid{0x7200, 0x8200}}) != entt::null ||
         game_world.persistedReference(sentinel) != sentinel_ref)
         return fail(name, "failed restore changed existing state or published partial output");
     size_t visits = 0;
@@ -5051,11 +5047,126 @@ static bool testLevelManagerScopedRestoreRollback()
     return pass(name);
 }
 
+namespace {
+world* retirement_test_world = nullptr;
+entt::entity retirement_root = entt::null, retirement_child = entt::null, retirement_outside = entt::null, retirement_probe = entt::null;
+JPH::ShapeRefC retirement_shape;
+int retirement_callbacks = 0;
+bool retirement_callback_ok = true;
+void onRetirementPhysicsEvent(const EntityDestroyedEvent& event)
+{
+    auto& w = *retirement_test_world;
+    auto& physics = w.getPhysicsSystem();
+    const auto current = resolveEntityRef(w.registry, event.ref);
+    retirement_callback_ok = retirement_callback_ok && current != entt::null && w.registry.valid(current) &&
+        w.registry.all_of<TransformComponent>(current) && physics.hasBody(current);
+    ConstraintComponent probe_constraint;
+    const bool outside_constraint_released = physics.createConstraint(retirement_outside, retirement_probe, probe_constraint) != nullptr;
+    retirement_callback_ok = retirement_callback_ok && outside_constraint_released;
+    if (outside_constraint_released) physics.removeConstraint(retirement_outside);
+    if (retirement_callbacks == 0)
+        retirement_callback_ok = retirement_callback_ok && physics.hasBody(retirement_root) && physics.hasBody(retirement_child);
+    ConstraintComponent constraint;
+    retirement_callback_ok = retirement_callback_ok &&
+        !Hierarchy::attach(w.registry, retirement_outside, retirement_child) &&
+        !Hierarchy::attach(w.registry, retirement_child, retirement_outside) &&
+        physics.createConstraint(retirement_outside, retirement_child, constraint) == nullptr &&
+        physics.createConstraint(retirement_child, retirement_outside, constraint) == nullptr &&
+        physics.createDynamicBody(glm::vec3(0), glm::vec3(0), retirement_shape, retirement_child).IsInvalid() &&
+        physics.createCharacterController(w.registry, retirement_child).IsInvalid();
+    ++retirement_callbacks;
+}
+}
+
+static bool testWorldRetirementPhysicsCallbacks()
+{
+    const std::string name = "L1 world retirement physics callback ordering";
+    world w;
+    const auto root_handle = w.createScopedEntity();
+    const auto child_handle = w.createScopedEntity();
+    const auto outside_handle = w.createScopedEntity();
+    const auto probe_handle = w.createScopedEntity();
+    retirement_root = resolveEntityRef(w.registry, w.persistedReference(root_handle));
+    retirement_child = resolveEntityRef(w.registry, w.persistedReference(child_handle));
+    retirement_outside = resolveEntityRef(w.registry, w.persistedReference(outside_handle));
+    retirement_probe = resolveEntityRef(w.registry, w.persistedReference(probe_handle));
+    retirement_shape = makeBoxShape();
+    auto& physics = w.getPhysicsSystem();
+    for (auto e : {retirement_root, retirement_child, retirement_outside, retirement_probe})
+    {
+        w.registry.emplace<TransformComponent>(e);
+        if (physics.createDynamicBody(glm::vec3(static_cast<float>(entt::to_integral(e)) * 3, 0, 0),
+                                      glm::vec3(0), retirement_shape, e).IsInvalid())
+            return fail(name, "body setup failed");
+    }
+    w.registry.emplace<HierarchyPolicyComponent>(retirement_root).on_parent_destroyed = HierarchyDestroyPolicy::CascadeDestroy;
+    if (!Hierarchy::attach(w.registry, retirement_child, retirement_root)) return fail(name, "hierarchy setup failed");
+    w.registry.emplace<CharacterControllerComponent>(retirement_child);
+    ConstraintComponent constraint;
+    if (!physics.createConstraint(retirement_outside, retirement_child, constraint) ||
+        !physics.createConstraint(retirement_root, retirement_child, constraint))
+        return fail(name, "constraint setup failed");
+    retirement_test_world = &w;
+    retirement_callbacks = 0;
+    retirement_callback_ok = true;
+    EventBus::get().sink<EntityDestroyedEvent>().connect<&onRetirementPhysicsEvent>();
+    const auto request = w.requestRetirement(root_handle);
+    const auto result = w.drainRetirements();
+    EventBus::get().sink<EntityDestroyedEvent>().disconnect<&onRetirementPhysicsEvent>();
+    retirement_test_world = nullptr;
+    retirement_shape = nullptr;
+    if (request.status != LifecycleStatus::Queued || !result.cleanupComplete() || retirement_callbacks != 2 || !retirement_callback_ok ||
+        physics.hasBody(retirement_root) || physics.hasBody(retirement_child) || !physics.hasBody(retirement_outside))
+        return fail(name, "cohort cleanup, event visibility, or callback fence failed");
+    return pass(name);
+}
+
+static bool testRetirementPhysicsFenceAndEndpoints()
+{
+    const std::string name = "L1 physics retirement fence and constraint endpoints";
+    PhysicsSystem physics;
+    entt::registry registry;
+    const auto a = registry.create(), b = registry.create(), c = registry.create(), d = registry.create();
+    auto shape = makeBoxShape();
+    for (auto e : {a, b, c, d})
+        if (physics.createDynamicBody(glm::vec3(static_cast<float>(entt::to_integral(e)) * 3.0f, 0, 0),
+                                      glm::vec3(0), shape, e).IsInvalid())
+            return fail(name, "body setup failed");
+    ConstraintComponent constraint;
+    if (!physics.createConstraint(a, b, constraint) || !physics.createConstraint(c, d, constraint))
+        return fail(name, "constraint setup failed");
+    if (physics.createConstraint(a, d, constraint) || physics.createConstraint(c, a, constraint))
+        return fail(name, "duplicate source replaced or orphaned its constraint");
+    RetirementFence fence{{b, d}};
+    physics.bindRetirementFence(&fence);
+    physics.removeConstraintsTouching(fence.entities);
+    if (!physics.hasBody(b) || !physics.hasBody(d) ||
+        !physics.createConstraint(a, c, constraint) || !physics.createConstraint(c, a, constraint))
+        return fail(name, "cohort constraints were not removed before bodies");
+    physics.removeConstraint(a);
+    physics.removeConstraint(c);
+    if (physics.createConstraint(a, b, constraint) || physics.createConstraint(b, a, constraint) ||
+        !physics.createDynamicBody(glm::vec3(0), glm::vec3(0), shape, b).IsInvalid() || !physics.hasBody(b))
+        return fail(name, "fence allowed creation or replaced a retiring body");
+    registry.emplace<TransformComponent>(b);
+    registry.emplace<CharacterControllerComponent>(b);
+    if (!physics.createCharacterController(registry, b).IsInvalid())
+        return fail(name, "fence allowed controller creation");
+    physics.bindRetirementFence(nullptr);
+    if (!physics.createConstraint(a, b, constraint)) return fail(name, "constraint recreation failed");
+    physics.removeBody(b);
+    if (!physics.hasBody(a) || !physics.createConstraint(a, c, constraint))
+        return fail(name, "target body removal left an outside-owned constraint");
+    return pass(name);
+}
+
 int main()
 {
     EE::CLog::Init();
     fs::path repo_root = findRepoRoot();
     bool ok = true;
+    ok = testRetirementPhysicsFenceAndEndpoints() && ok;
+    ok = testWorldRetirementPhysicsCallbacks() && ok;
     run("fixed tick accumulator carries partial time");
     ok = testFixedTickAccumulatorCarriesPartialTime() && ok;
     run("fixed tick accumulator caps catch-up");

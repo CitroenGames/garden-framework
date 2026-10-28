@@ -1,6 +1,5 @@
 #include "world.hpp"
 #include "ECS/ComponentOperations.hpp"
-#include "ECS/EntityLifecycle.hpp"
 
 #include <array>
 #include <iostream>
@@ -67,7 +66,7 @@ void basicAndReuse() {
           "unregistered type is rejected and clears output");
     check(b.get<WorldValue>(entity, value) == ComponentStoreResult::InvalidEntity && !value &&
           b.add<WorldValue>(entity, 9) == ComponentStoreResult::InvalidEntity &&
-          b.destroyEntity(entity) == ComponentStoreResult::InvalidEntity,
+          b.retireEntity(entity).status == LifecycleStatus::WrongWorld,
           "foreign world cannot access or destroy entity");
     check(a.remove<WorldValue>(entity) == ComponentStoreResult::Success &&
           a.remove<WorldValue>(entity) == ComponentStoreResult::NotFound &&
@@ -75,27 +74,26 @@ void basicAndReuse() {
           a.has<WorldValue>(entity, present) == ComponentStoreResult::Success && !present,
           "removed component is absent");
     check(a.add<WorldValue>(entity, 11) == ComponentStoreResult::Success &&
-          a.destroyEntity(entity) == ComponentStoreResult::Success && !a.isEntityValid(entity),
+          a.retireEntity(entity).cleanupComplete() && !a.isEntityValid(entity),
           "destroy invalidates entity and clears its value");
     const auto replacement = a.createScopedEntity();
     check(a.isEntityValid(replacement) && replacement != entity &&
           a.add<WorldValue>(replacement, 22) == ComponentStoreResult::Success &&
           a.get<WorldValue>(entity, value) == ComponentStoreResult::StaleEntity && !value &&
-          a.destroyEntity(entity) == ComponentStoreResult::StaleEntity &&
+          a.retireEntity(entity).status == LifecycleStatus::Stale &&
           a.get<WorldValue>(replacement, value) == ComponentStoreResult::Success && value && value->number == 22,
           "replacement generation remains isolated from stale handle");
 }
 
 void identityBoundary() {
     world w, other;
-    EntityLifecycle lifecycle(w.registry);
     const auto fresh = w.createScopedEntity();
     const world& read = w;
     const EntityRef freshRef = read.persistedReference(fresh);
     const auto freshRaw = resolveEntityRef(w.registry, freshRef);
     check(w.isEntityValid(fresh) && !freshRef.isNull() && freshRaw != entt::null &&
           w.registry.get<IdentityComponent>(freshRaw).guid == freshRef.guid &&
-          lifecycle.resolve(freshRef) == freshRaw && w.scopedEntity(freshRef) == fresh,
+          w.scopedEntity(freshRef) == fresh,
           "fresh scoped entity has a unique persisted identity");
 
     const EntityRef requested{{0x123456789abcdef0ull, 0xfedcba9876543210ull}};
@@ -103,36 +101,32 @@ void identityBoundary() {
     const auto raw = resolveEntityRef(w.registry, requested);
     check(w.isEntityValid(restored) && raw != entt::null &&
           w.registry.get<IdentityComponent>(raw).guid == requested.guid &&
-          lifecycle.resolve(requested) == raw && read.persistedReference(restored) == requested &&
+          read.persistedReference(restored) == requested &&
           w.scopedEntity(requested) == restored,
-          "restore preserves the exact requested identity and indexes it");
+          "restore preserves the exact requested identity");
 
     const auto count = w.registry.storage<entt::entity>().free_list();
-    const auto index = lifecycle.index().by_guid;
     const auto duplicate = w.restoreScopedEntity(requested);
     const auto nullRestore = w.restoreScopedEntity(EntityRef{});
     check(!w.isEntityValid(duplicate) && !w.isEntityValid(nullRestore) &&
           w.registry.storage<entt::entity>().free_list() == count &&
-          lifecycle.index().by_guid == index && lifecycle.resolve(requested) == raw &&
+          resolveEntityRef(w.registry, requested) == raw &&
           w.registry.get<IdentityComponent>(raw).guid == requested.guid,
-          "duplicate and null restoration leave entities and identity index unchanged");
+          "duplicate and null restoration leave identities unchanged");
 
     const auto foreign = other.createScopedEntity();
     check(read.persistedReference(restored) == requested &&
           read.persistedReference(EntityHandle{}).isNull() &&
           read.persistedReference(foreign).isNull() &&
           other.persistedReference(restored).isNull() &&
-          w.registry.storage<entt::entity>().free_list() == count &&
-          lifecycle.index().by_guid == index,
+          w.registry.storage<entt::entity>().free_list() == count,
           "reference conversion is read-only and rejects null and foreign handles");
 
     // Corrupt identities directly to verify conversion does not repair them.
     const auto anonymous = w.registry.create();
     w.registry.emplace<IdentityComponent>(anonymous, IdentityComponent{requested.guid});
-    const auto ambiguousIndex = lifecycle.index().by_guid;
     check(read.persistedReference(restored).isNull() &&
-          w.registry.get<IdentityComponent>(anonymous).guid == requested.guid &&
-          lifecycle.index().by_guid == ambiguousIndex,
+          w.registry.get<IdentityComponent>(anonymous).guid == requested.guid,
           "conversion rejects ambiguous identity without changing the registry");
     w.registry.destroy(anonymous);
     w.registry.get<IdentityComponent>(raw).guid = {};
@@ -145,7 +139,7 @@ void identityBoundary() {
           !w.registry.all_of<IdentityComponent>(raw),
           "conversion does not assign a missing identity");
 
-    check(w.destroyEntity(restored) == ComponentStoreResult::Success &&
+    check(w.retireEntity(restored).cleanupComplete() &&
           read.persistedReference(restored).isNull(),
           "conversion rejects a stale handle");
 
@@ -153,7 +147,6 @@ void identityBoundary() {
           "prepare identity query guard");
     const EntityRef duringQuery{{0x31415926ull, 0x27182818ull}};
     const auto beforeQueryCount = w.registry.storage<entt::entity>().free_list();
-    const auto beforeQueryIndex = lifecycle.index().by_guid;
     bool rejected = false;
     bool readSucceeded = false;
     const auto queryResult = w.query<QueryValue>([&](EntityHandle entity, QueryValue&) {
@@ -162,7 +155,6 @@ void identityBoundary() {
     });
     check(queryResult == ComponentStoreResult::Success && rejected && readSucceeded &&
           w.registry.storage<entt::entity>().free_list() == beforeQueryCount &&
-          lifecycle.index().by_guid == beforeQueryIndex &&
           resolveEntityRef(w.registry, duringQuery) == entt::null,
           "query permits conversion and rejects restoration without mutation");
 
@@ -371,27 +363,8 @@ void cohortRestore() {
           "successful cohort publishes exact requested identities in input order");
 }
 
-void moves() {
-    world source;
-    const auto original = source.createScopedEntity();
-    check(source.add<WorldValue>(original, 31) == ComponentStoreResult::Success, "prepare move construction");
-    world moved(std::move(source));
-    WorldValue* value = nullptr;
-    const auto fresh = source.createScopedEntity();
-    check(moved.isEntityValid(original) && !source.isEntityValid(original) &&
-          source.isEntityValid(fresh) && !moved.isEntityValid(fresh) &&
-          moved.get<WorldValue>(original, value) == ComponentStoreResult::Success && value && value->number == 31,
-          "move construction transfers handles and isolates moved-from world");
-    world target;
-    const auto oldTarget = target.createScopedEntity();
-    check(target.add<WorldValue>(oldTarget, 99) == ComponentStoreResult::Success, "prepare move assignment");
-    target = std::move(moved);
-    const auto movedFresh = moved.createScopedEntity();
-    check(target.isEntityValid(original) && !target.isEntityValid(oldTarget) &&
-          !moved.isEntityValid(original) && moved.isEntityValid(movedFresh) &&
-          target.get<WorldValue>(original, value) == ComponentStoreResult::Success && value && value->number == 31,
-          "move assignment retires destination and transfers source handles");
-}
+static_assert(!std::is_copy_constructible_v<world> && !std::is_copy_assignable_v<world>);
+static_assert(!std::is_move_constructible_v<world> && !std::is_move_assignable_v<world>);
 
 void teardown() {
     world w;
@@ -476,25 +449,28 @@ void queries() {
 
     ComponentStoreResult addResult = ComponentStoreResult::Success;
     ComponentStoreResult removeResult = ComponentStoreResult::Success;
-    ComponentStoreResult destroyResult = ComponentStoreResult::Success;
+    LifecycleStatus destroyResult = LifecycleStatus::Completed;
     bool scopedCreationRejected = false;
     bool creationRejected = false;
+    LifecycleStatus shutdownResult = LifecycleStatus::Completed;
+    LifecycleStatus resetResult = LifecycleStatus::Completed;
     const auto guarded = w.query<WorldValue, QueryValue>(
         [&](EntityHandle entity, WorldValue&, QueryValue&) {
             addResult = w.add<QueryValue>(onlyWorld, QueryValue{9});
             removeResult = w.remove<WorldValue>(entity);
-            destroyResult = w.destroyEntity(onlyQuery);
+            destroyResult = w.retireEntity(onlyQuery).status;
             scopedCreationRejected = !w.isEntityValid(w.createScopedEntity());
             creationRejected = w.createEntity().isNull();
-            w.shutdown();
-            w.resetWorld();
+            shutdownResult = w.shutdown().status;
+            resetResult = w.resetWorld().status;
         });
     bool present = false;
     QueryValue* queryValue = nullptr;
     check(guarded == ComponentStoreResult::Success &&
           addResult == ComponentStoreResult::StructuralMutationDuringQuery &&
           removeResult == ComponentStoreResult::StructuralMutationDuringQuery &&
-          destroyResult == ComponentStoreResult::StructuralMutationDuringQuery &&
+          destroyResult == LifecycleStatus::QueryActive &&
+          shutdownResult == LifecycleStatus::QueryActive && resetResult == LifecycleStatus::QueryActive &&
           scopedCreationRejected && creationRejected &&
           w.isEntityValid(both) && w.isEntityValid(onlyWorld) && w.isEntityValid(onlyQuery) &&
           w.has<QueryValue>(onlyWorld, present) == ComponentStoreResult::Success && !present &&
@@ -611,7 +587,7 @@ void engineAdapters() {
           !w.registry.all_of<TransformComponent>(raw) &&
           w.get<TransformComponent>(entity, transform) == ComponentStoreResult::NotFound && !transform,
           "removing adapter values removes the registry values");
-    check(w.destroyEntity(second) == ComponentStoreResult::Success &&
+    check(w.retireEntity(second).cleanupComplete() &&
           w.get<TransformComponent>(second, transform) == ComponentStoreResult::StaleEntity && !transform &&
           w.add<PlayerComponent>(second) == ComponentStoreResult::StaleEntity,
           "adapter rejects stale handles");
@@ -639,7 +615,6 @@ int main() {
     identityBoundary();
     singleRestoreHooks();
     cohortRestore();
-    moves();
     teardown();
     queries();
     engineAdapters();

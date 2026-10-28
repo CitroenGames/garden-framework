@@ -24,7 +24,6 @@
 #include "Scheduler/SystemScheduler.hpp"
 #include "Scheduler/HierarchyTransformSystem.hpp"
 #include "Gameplay/GameplaySystems.hpp"
-#include "ECS/EntityLifecycle.hpp"
 #include "Network/LevelHash.hpp"
 
 #ifdef _WIN32
@@ -42,12 +41,19 @@ static ProjectManager project_manager;
 static LevelManager level_manager;
 static ReflectionRegistry reflection;
 static bool game_module_resources_released = false;
+static SystemScheduler* active_scheduler = nullptr;
 static GameModuleHostSession game_module(GameModuleHostSession::HostOperations{
     {},
     []() {
+        if (active_scheduler) {
+            if (!active_scheduler->drainRetirements().cleanupComplete()) return false;
+            active_scheduler->bindWorld(nullptr);
+            active_scheduler = nullptr;
+        }
+        if (!_world.shutdown().cleanupComplete()) return false;
         game_module_resources_released = true;
-        _world.shutdown();
         Assets::AssetManager::get().shutdown();
+        return true;
     },
     {}, {}, {},
     [](const garden::ecs::ComponentOwnerId& owner) {
@@ -67,7 +73,15 @@ static void shutdown_server(int code)
     }
     if (!game_module_resources_released)
     {
-        _world.shutdown();
+        if (active_scheduler) {
+            if (!active_scheduler->drainRetirements().cleanupComplete()) std::_Exit(1);
+            active_scheduler->bindWorld(nullptr);
+            active_scheduler = nullptr;
+        }
+        if (!_world.shutdown().cleanupComplete()) {
+            LOG_ENGINE_ERROR("World shutdown incomplete");
+            std::_Exit(1);
+        }
         Assets::AssetManager::get().shutdown();
     }
     app.shutdown();
@@ -159,8 +173,10 @@ int main(int argc, char* argv[])
     }
 
     // Initialize world and physics
-    _world = world();
-    _world.initializePhysics();
+    if (!_world.resetWorld().cleanupComplete()) {
+        LOG_ENGINE_FATAL("World reset incomplete");
+        shutdown_server(1);
+    }
 
     registerEngineReflection(reflection);
     level_manager.setReflectionRegistry(&reflection);
@@ -178,11 +194,6 @@ int main(int argc, char* argv[])
         LOG_ENGINE_FATAL("Game module '{}' does not export server hooks", game_module.loader().getGameName());
         shutdown_server(1);
     }
-
-    // LevelManager assigns final persistent identities while instantiating
-    // entities; install lifecycle indexing first so its construct hook sees
-    // those identities.
-    EntityLifecycle server_lifecycle(_world.registry);
 
     // Load level
     LevelData level_data;
@@ -259,7 +270,8 @@ int main(int argc, char* argv[])
     // World physics is advanced once per consumed fixed tick in Physics,
     // before the game module's server gameplay callback.
     SystemScheduler server_scheduler(true, _world.getFixedDelta());
-    server_scheduler.setLifecycle(&server_lifecycle);
+    server_scheduler.bindWorld(&_world);
+    active_scheduler = &server_scheduler;
     registerGameplaySystems(server_scheduler);
     {
         SystemDescriptor d;
@@ -316,6 +328,10 @@ int main(int argc, char* argv[])
         delta_last = frame_start;
 
         server_scheduler.runFrame(_world.registry, delta_time);
+        if (!server_scheduler.lastRetirementResult().cleanupComplete()) {
+            LOG_ENGINE_ERROR("Server retirement drain failed (status={})", static_cast<int>(server_scheduler.lastRetirementResult().status));
+            running = false;
+        }
 
         Uint64 frame_end_ns = SDL_GetTicksNS();
         app.lockFramerate(frame_start_ns, frame_end_ns);

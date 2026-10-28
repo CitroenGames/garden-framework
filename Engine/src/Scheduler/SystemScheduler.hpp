@@ -2,6 +2,7 @@
 
 #include "EngineExport.h"
 #include "Tick/TickSystem.hpp"
+#include "world.hpp"
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -9,7 +10,6 @@
 #include <vector>
 #include <entt/entt.hpp>
 
-class EntityLifecycle;
 
 // Phase model: plan/engine/core/system_scheduler.md section 2 (decided D5).
 // Fixed phases run once per fixed step; variable phases once per frame.
@@ -52,7 +52,7 @@ struct SystemDescriptor
 // Generic per-host scheduler (EngineCore, no game/product types).
 // Owns one FixedTickAccumulator, the two EventBus flush points
 // (start of FrameBegin, end of FrameEnd; events.md 3.2) and the
-// EntityLifecycle drain points (before PrePhysics per fixed step and
+// world retirement drain points (before PrePhysics per fixed step and
 // at FrameEnd; system_scheduler.md section 2 frame algorithm).
 // When register_builtin_timers is set, "engine.timers" is registered in
 // Gameplay and ticked with fixed_delta (D5 rule 3).
@@ -79,8 +79,11 @@ public:
         return m_order[phaseIndex(phase)];
     }
 
-    void setLifecycle(EntityLifecycle* lifecycle) { m_lifecycle = lifecycle; }
-    EntityLifecycle* lifecycle() const { return m_lifecycle; }
+    // The host must detach before shutting down or destroying the world.
+    void bindWorld(world* value) { m_world = value; }
+    world* boundWorld() const { return m_world; }
+    LifecycleResult drainRetirements();
+    const LifecycleResult& lastRetirementResult() const { return m_last_retirement; }
     void setManageEventBus(bool on) { m_manage_event_bus = on; }
     void setPaused(bool paused) { m_paused = paused; }
     bool isPaused() const { return m_paused; }
@@ -92,7 +95,10 @@ public:
     double getWorldTime() const { return m_world_time; }
     Tick::FixedTickAccumulator& accumulator() { return m_accumulator; }
 
-    // Runs one frame; returns the number of fixed steps consumed.
+    // Paused frames drain before and after paused presentation. Zero-step
+    // frames drain at FrameEnd. Failures stop the frame and are exposed in
+    // lastRetirementResult(); teardown can call drainRetirements directly.
+    // Returns the number of fixed steps actually run.
     uint32_t runFrame(entt::registry& registry, float frame_dt);
 
 private:
@@ -110,9 +116,12 @@ private:
     std::vector<std::string> m_order[kPhaseCount];
     std::vector<const Entry*> m_sorted[kPhaseCount];
     Tick::FixedTickAccumulator m_accumulator;
-    EntityLifecycle* m_lifecycle = nullptr;
+    world* m_world = nullptr;
+    LifecycleResult m_last_retirement{};
     uint64_t m_next_index = 0;
     uint32_t m_tick = 0;
+    // Steps reserved by an interrupted frame; paused frames leave these alone.
+    uint32_t m_pending_steps = 0;
     double m_world_time = 0.0;
     bool m_is_server = false;
     bool m_paused = false;

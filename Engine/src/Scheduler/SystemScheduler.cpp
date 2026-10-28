@@ -1,5 +1,5 @@
 #include "Scheduler/SystemScheduler.hpp"
-#include "ECS/EntityLifecycle.hpp"
+
 #include "Events/EventBus.hpp"
 #include "Timer/TimerSystem.hpp"
 #include "Utils/Log.hpp"
@@ -209,12 +209,37 @@ void SystemScheduler::runPhase(entt::registry& r, Phase phase, const Tick::Simul
     }
 }
 
+LifecycleResult SystemScheduler::drainRetirements()
+{
+    m_last_retirement = m_world ? m_world->drainRetirements() : LifecycleResult{};
+    return m_last_retirement;
+}
+
 uint32_t SystemScheduler::runFrame(entt::registry& registry, float frame_dt)
 {
+    if (m_world && &m_world->registry != &registry) {
+        m_last_retirement.status = LifecycleStatus::WrongWorld;
+        return 0;
+    }
+    m_last_retirement = {};
+    bool observer_failed = false;
+    size_t completed = 0;
+    auto drain = [&]() {
+        auto result = drainRetirements();
+        completed += result.completed;
+        observer_failed |= result.status == LifecycleStatus::CompletedWithObserverFailure;
+        result.completed = completed;
+        if (result.status == LifecycleStatus::Completed && observer_failed)
+            result.status = LifecycleStatus::CompletedWithObserverFailure;
+        m_last_retirement = result;
+        return result.cleanupComplete();
+    };
     if (m_paused)
     {
         if (m_manage_event_bus) EventBus::get().flush();
+        if (!drain()) return 0;
         runPhase(registry, Phase::Presentation, frameContext(), true);
+        if (!drain()) return 0;
         if (m_manage_event_bus) EventBus::get().flush();
         return 0;
     }
@@ -223,7 +248,15 @@ uint32_t SystemScheduler::runFrame(entt::registry& registry, float frame_dt)
     if (m_manage_event_bus) EventBus::get().flush();
     runPhase(registry, Phase::FrameBegin, frameContext(), false);
 
-    const uint32_t steps = m_accumulator.consume(frame_dt);
+    const uint32_t new_steps = m_accumulator.consume(frame_dt);
+    // Keep previously reserved steps even if the host changed the catch-up
+    // limit. New elapsed time remains subject to the accumulator's cap.
+    const uint32_t limit = std::max(m_pending_steps, m_accumulator.getMaxStepsPerAdvance());
+    const uint32_t admitted = std::min(new_steps, limit - m_pending_steps);
+    const uint32_t steps = m_pending_steps + admitted;
+    if (m_pending_steps && steps == limit && std::isfinite(frame_dt) && frame_dt > 0.0f)
+        m_accumulator.reset();
+    m_pending_steps = steps;
     for (uint32_t i = 0; i < steps; ++i)
     {
         Tick::SimulationTickContext ctx;
@@ -233,18 +266,19 @@ uint32_t SystemScheduler::runFrame(entt::registry& registry, float frame_dt)
         ctx.fixed_delta = m_accumulator.getFixedDelta();
         ctx.world_time = m_world_time;
 
-        if (m_lifecycle) m_lifecycle->drainDestroyQueue();
+        if (!drain()) return i;
         runPhase(registry, Phase::PrePhysics, ctx, false);
         runPhase(registry, Phase::Physics, ctx, false);
         runPhase(registry, Phase::Gameplay, ctx, false);
         runPhase(registry, Phase::Transform, ctx, false);
         ++m_tick;
         m_world_time += ctx.fixed_delta;
+        --m_pending_steps;
     }
 
     runPhase(registry, Phase::Presentation, frameContext(), false);
     runPhase(registry, Phase::FrameEnd, frameContext(), false);
-    if (m_lifecycle) m_lifecycle->drainDestroyQueue();
+    if (!drain()) return steps;
     // FrameEnd: flush point 2
     if (m_manage_event_bus) EventBus::get().flush();
     return steps;

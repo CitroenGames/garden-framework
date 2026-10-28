@@ -1626,7 +1626,10 @@ void EditorApp::shutdown()
         api->setEditorViewport(nullptr);
     }
     m_main_viewport.reset();
-    m_world.registry.clear();
+    if (!m_world.shutdown().cleanupComplete()) {
+        LOG_ENGINE_ERROR("Editor world shutdown incomplete");
+        return;
+    }
     Threading::JobSystem::get().shutdown();
     Console::get().shutdown();
     RmlUiManager::get().shutdown();
@@ -1720,9 +1723,11 @@ void EditorApp::beginPlay()
             },
             [this]() {
                 Threading::JobSystem::get().barrier();
+                if (!m_server_world.shutdown().cleanupComplete()) return false;
+                if (m_play_world && !m_play_world->shutdown().cleanupComplete()) return false;
                 m_game_input_manager.reset();
-                m_server_world.resetWorld();
                 m_play_world.reset();
+                return true;
             },
             {}, {}, {},
             [](const garden::ecs::ComponentOwnerId& owner) {
@@ -1778,8 +1783,10 @@ void EditorApp::beginPlay()
             uint16_t port = m_state.network_pie.server_port;
 
             // Initialize a separate server world
-            m_server_world = world();
-            m_server_world.initializePhysics();
+            if (!m_server_world.resetWorld().cleanupComplete()) {
+                LOG_ENGINE_ERROR("PIE: Server world reset incomplete");
+                return;
+            }
 
             // Instantiate level into server world
             m_level_manager.instantiateLevelParallel(m_play_snapshot, m_server_world,
@@ -1891,8 +1898,10 @@ void EditorApp::beginPlay()
                                 inst->window_title = "Player " + std::to_string(i);
 
                                 // Create isolated world
-                                inst->client_world = world();
-                                inst->client_world.initializePhysics();
+                                if (!inst->client_world.resetWorld().cleanupComplete()) {
+                                    LOG_ENGINE_ERROR("PIE: Client world reset incomplete");
+                                    return;
+                                }
                                 m_level_manager.instantiateLevelParallel(m_play_snapshot, inst->client_world,
                                     m_app.getRenderAPI(), nullptr, nullptr, nullptr, false);
                                 inst->client_world.initializeGameplayFramework(
@@ -2079,8 +2088,10 @@ void EditorApp::beginPlay()
                             auto inst = std::make_unique<PIEClientInstance>();
                             inst->player_index = i;
                             inst->window_title = "Player " + std::to_string(i);
-                            inst->client_world = world();
-                            inst->client_world.initializePhysics();
+                            if (!inst->client_world.resetWorld().cleanupComplete()) {
+                                LOG_ENGINE_ERROR("PIE: Client world reset incomplete");
+                                return;
+                            }
                             m_level_manager.instantiateLevelParallel(m_play_snapshot, inst->client_world,
                                 m_app.getRenderAPI(), nullptr, nullptr, nullptr, false);
                             inst->client_world.initializeGameplayFramework(
@@ -2407,8 +2418,21 @@ void EditorApp::stopPlay()
     }
     else
     {
+        if (m_game_sim && m_game_sim->getScheduler()) {
+            auto* scheduler = m_game_sim->getScheduler();
+            if (!scheduler->drainRetirements().cleanupComplete()) {
+                LOG_ENGINE_ERROR("PIE: Scheduler retirement drain incomplete");
+                return;
+            }
+            scheduler->bindWorld(nullptr);
+        }
         m_game_sim.reset();
         m_game_input_manager.reset();
+    }
+
+    if (m_play_world && !m_play_world->shutdown().cleanupComplete()) {
+        LOG_ENGINE_ERROR("PIE: World shutdown incomplete");
+        return;
     }
 
     // 2. Drop the isolated runtime world. The editor scene stayed resident,
@@ -3935,7 +3959,10 @@ void EditorApp::newLevel()
 {
     if (auto* api = m_app.getRenderAPI())
         api->waitForGPU();
-    m_world.registry.clear();
+    if (!m_world.resetWorld(m_world.getPhysicsSystem().getSettings()).cleanupComplete()) {
+        LOG_ENGINE_ERROR("Editor world reset incomplete");
+        return;
+    }
     m_level_manager.cleanup();
     m_inspector.mesh_path_cache.clear();
     m_hierarchy.selected_entity = entt::null;
@@ -3964,7 +3991,10 @@ void EditorApp::openLevel(const std::string& path)
 
     if (auto* api = m_app.getRenderAPI())
         api->waitForGPU();
-    m_world.registry.clear();
+    if (!m_world.resetWorld(m_world.getPhysicsSystem().getSettings()).cleanupComplete()) {
+        LOG_ENGINE_ERROR("Editor world reset incomplete");
+        return;
+    }
     m_level_manager.cleanup();
     m_inspector.mesh_path_cache.clear();
     m_hierarchy.selected_entity = entt::null;
@@ -4187,7 +4217,10 @@ void EditorApp::restoreFromSnapshot(const LevelData& snapshot)
     // Clear and restore
     if (auto* api = m_app.getRenderAPI())
         api->waitForGPU();
-    m_world.registry.clear();
+    if (!m_world.resetWorld(m_world.getPhysicsSystem().getSettings()).cleanupComplete()) {
+        LOG_ENGINE_ERROR("Editor world reset incomplete");
+        return;
+    }
     m_level_manager.cleanup();
     m_inspector.mesh_path_cache.clear();
     m_hierarchy.selected_entity = entt::null;

@@ -119,6 +119,7 @@ namespace
         size_t released_resource_count = 0;
         size_t removed_registration_count = 0;
         size_t dispatched_callback_count = 0;
+        bool resources_can_release = true;
         bool server_reload_safe_point = true;
         size_t connected_server_clients = 0;
 
@@ -141,6 +142,7 @@ namespace
                 [this]() {
                     ++released_resource_count;
                     events.push_back("host.release_resources");
+                    return resources_can_release;
                 },
                 [this](const std::string& source) {
                     ++removed_registration_count;
@@ -601,7 +603,7 @@ namespace
                 return fail(name, "provider mixed query did not join the registered values");
             if (provider.unload() || !provider.isLoaded() || !fs::exists(image) || !recorder.events().empty())
                 return fail(name, "provider retired while the module value was live");
-            if (w.destroyEntity(both) != ComponentStoreResult::Success ||
+            if (!w.retireEntity(both).cleanupComplete() ||
                 !equals(recorder.events(), {"ecs.component.destroy"}) || !provider.isLoaded() || !fs::exists(image))
                 return fail(name, "entity destruction did not invoke the module destructor while loaded");
         }
@@ -882,6 +884,27 @@ namespace
         lease.reset();
         if (!session.stop() || recorder.events() != events || ledger.events != hostEvents ||
             !expectLedger(name, ledger)) return fail(name, "retry repeated teardown or did not finish");
+        return pass(name);
+    }
+
+    bool testHostResourceRetry()
+    {
+        const std::string name = "GameModuleLifecycle_HostResourceRetry";
+        ScopedRecorder recorder("resource_retry");
+        HostLedger ledger;
+        ledger.resources_can_release = false;
+        ReflectionRegistry reflection;
+        GameModuleHostSession session(ledger.operations());
+        if (!session.loadAndRegister(fixturePath("generation_a").string(), reflection) ||
+            !session.initialiseClient(nullptr) || !session.notifyClientLevelLoaded() || !session.beginPlaying(false))
+            return fail(name, "session did not start");
+        if (session.stop() || session.phase() != GameModuleHostSession::Phase::Teardown || !session.loader().isLoaded())
+            return fail(name, "failed resource cleanup did not retain image");
+        const auto moduleEvents = recorder.events();
+        ledger.resources_can_release = true;
+        if (!session.stop() || recorder.events() != moduleEvents || ledger.released_resource_count != 2 ||
+            ledger.removed_registration_count != 1)
+            return fail(name, "retry did not complete or repeated module shutdown");
         return pass(name);
     }
 
@@ -1258,6 +1281,7 @@ int main()
     ok = testOrphanedProviderRetry() && ok;
     ok = testOrphanedPinnedProviderRetry() && ok;
     ok = testHostRetirementRetry() && ok;
+    ok = testHostResourceRetry() && ok;
     ok = testInvalidSourceRetiresLoadedImage() && ok;
     ok = testHostCallbackProofRefusal() && ok;
     ok = testSameOwnerReloadRefusal() && ok;

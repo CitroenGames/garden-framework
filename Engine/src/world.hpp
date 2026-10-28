@@ -16,8 +16,30 @@
 #include <vector>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <entt/entt.hpp>
+
+class LevelManager;
+struct RetirementFence;
+
+enum class LifecycleStatus {
+    Completed, CompletedWithObserverFailure, Queued, AlreadyPending, Alive, Pending,
+    Invalid, WrongWorld, Stale, QueryActive, Reentrant, AllocationFailure,
+    ObserverFailure, Partial, InternalFailure
+};
+enum class LifecyclePhase { None, Prepare, Constraints, Event, Hierarchy, Physics, Components, Identity };
+// `completed` counts entities retired by this operation, including those
+// completed before an error. `entity` and `phase` identify interrupted work.
+struct LifecycleResult {
+    LifecycleStatus status = LifecycleStatus::Completed;
+    LifecyclePhase phase = LifecyclePhase::None;
+    garden::ecs::EntityHandle entity{};
+    size_t completed = 0;
+    bool cleanupComplete() const noexcept {
+        return status == LifecycleStatus::Completed || status == LifecycleStatus::CompletedWithObserverFailure;
+    }
+};
 
 namespace GameFramework
 {
@@ -31,6 +53,20 @@ class ENGINE_API world
 private:
     // CharacterPhysicsService implements its Garden handle API through this private seam.
     friend class CharacterPhysicsService;
+    friend class LevelManager;
+    struct LifecycleState;
+    std::unique_ptr<LifecycleState> lifecycle_state;
+    std::unique_ptr<RetirementFence> retirement_fence;
+    struct ConstructionTransaction {
+        world* owner;
+        std::vector<garden::ecs::EntityHandle> entities;
+        bool committed = false;
+    };
+    LifecycleResult abortUnpublished(ConstructionTransaction&) noexcept;
+    LifecycleStatus validateLifecycleHandle(garden::ecs::EntityHandle) const noexcept;
+    LifecycleResult retireRaw(entt::entity, bool unpublished) noexcept;
+    LifecycleResult processRetirement() noexcept;
+    void markWorldActive() noexcept;
     struct ComponentWorldState;
     std::unique_ptr<ComponentWorldState> component_state;
     std::unique_ptr<PhysicsSystem> physics_system;
@@ -97,10 +133,8 @@ public:
 
     explicit world(const PhysicsSystemSettings& physics_settings = PhysicsSystemSettings());
 
-    // Move construction requires no active query on the source; violation
-    // terminates. Move assignment is a no-op while either world is queried.
-    world(world&&) noexcept;
-    world& operator=(world&&) noexcept;
+    world(world&&) = delete;
+    world& operator=(world&&) = delete;
     world(const world&) = delete;
     world& operator=(const world&) = delete;
 
@@ -108,11 +142,11 @@ public:
 
     // Creates a Garden entity handle with a stable identity. Gameplay code uses
     // this handle instead of storage-library entity values.
-    EntityRef createEntity();
+    EntityRef createEntity(std::string_view tag = {});
 
-    // Scoped identities move with the world and expire on destruction or reset.
+    // Scoped identities expire on world destruction or reset.
     // Converting a persisted reference never repairs or assigns its identity.
-    garden::ecs::EntityHandle createScopedEntity();
+    garden::ecs::EntityHandle createScopedEntity(std::string_view tag = {});
     // Restore a unique, non-null persisted identity. Failure returns an invalid
     // handle; creation is forbidden during a query.
     garden::ecs::EntityHandle restoreScopedEntity(EntityRef reference);
@@ -125,7 +159,13 @@ public:
     // This read does not assign identity or scope and is safe during queries.
     EntityRef persistedReference(garden::ecs::EntityHandle entity) const;
     bool isEntityValid(garden::ecs::EntityHandle entity) const noexcept;
-    garden::ecs::ComponentStoreResult destroyEntity(garden::ecs::EntityHandle entity) noexcept;
+    // Requests are FIFO and may be made inside a query. Pending entities are
+    // omitted from subsequent query callbacks; the current callback completes.
+    // A failed observer attempt is never replayed on retry.
+    LifecycleResult requestRetirement(garden::ecs::EntityHandle entity) noexcept;
+    LifecycleResult retireEntity(garden::ecs::EntityHandle entity) noexcept;
+    LifecycleResult drainRetirements() noexcept;
+    LifecycleResult retirementState(garden::ecs::EntityHandle entity) const noexcept;
 
     template<class T, class... Args>
     garden::ecs::ComponentStoreResult add(garden::ecs::EntityHandle entity, Args&&... args)
@@ -222,7 +262,7 @@ public:
     // Order is unspecified. The callback receives a scoped handle and references
     // to all requested components; explicit const types yield const references.
     // Queries may nest, but Garden structural mutations are rejected until all
-    // callbacks return. World shutdown/reset are no-ops during a query. Direct
+    // callbacks return. World shutdown/reset report QueryActive during a query. Direct
     // registry mutations bypass this guard and must not occur during a query.
     // Identity uniqueness is checked against a read-only snapshot at query entry.
     // Access is externally synchronized;
@@ -276,7 +316,7 @@ public:
                 }
                 if (!match) continue;
                 const auto handle = handleForKey(key, identityCounts);
-                if (!handle.m_world) continue;
+                if (!handle.m_world || retirementState(handle).status == LifecycleStatus::Pending) continue;
                 try {
                     [&]<size_t... I>(std::index_sequence<I...>) {
                         std::invoke(callback, handle, *static_cast<Ts*>(values[I])...);
@@ -362,6 +402,7 @@ public:
     // Initialize Jolt physics (call after world construction)
     void initializePhysics()
     {
+        markWorldActive();
         physics_system->initialize();
     }
 
@@ -490,9 +531,10 @@ public:
         return true;
     }
 
-    void shutdown();
+    // A partial result retains retirement progress for a later retry.
+    LifecycleResult shutdown() noexcept;
 
     // Full reset: tear down physics, clear ECS, reinitialize.
     // Used by the editor to restore pre-play state.
-    void resetWorld();
+    LifecycleResult resetWorld(const PhysicsSystemSettings& settings = PhysicsSystemSettings{}) noexcept;
 };

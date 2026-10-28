@@ -38,14 +38,6 @@ void GameFrameworkRuntime::setGameState(std::unique_ptr<GameStateBase> state)
     m_state = std::move(state);
 }
 
-void GameFrameworkRuntime::rebindMovedWorld(world& previous, world& current)
-{
-    if (m_mode)
-        m_mode->rebindMovedWorld(previous, current);
-    if (m_state && m_state->m_world == &previous)
-        m_state->m_world = &current;
-}
-
 void GameFrameworkRuntime::clear()
 {
     shutdown();
