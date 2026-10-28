@@ -71,9 +71,11 @@ bool validateMetadataDocument(const json& document)
     if (!document.is_object())
         return false;
 
-    if (!optionalFieldHasType(document, "version", [](const json& value) {
-            return value.is_number_integer();
-        }) ||
+    // Metadata is a hard-cutover format. A missing, legacy, or future version is
+    // not compatible with the current cooker and must be regenerated.
+    if (!document.contains("version") ||
+        !document.at("version").is_number_integer() ||
+        document.at("version").get<int64_t>() != 3 ||
         !optionalFieldHasType(document, "generated_at", [](const json& value) {
             return value.is_string();
         }))
@@ -166,9 +168,16 @@ bool validateMetadataDocument(const json& document)
 
 bool AssetMetadataSerializer::save(const AssetMetadata& metadata, const std::string& meta_path)
 {
+    if (metadata.version != 3)
+    {
+        printf("AssetMetadataSerializer: Refusing to write non-current version %d to %s\n",
+               metadata.version, meta_path.c_str());
+        return false;
+    }
+
     json j;
 
-    j["version"] = metadata.version;
+    j["version"] = 3;
 
     // Source info
     j["source"]["path"] = metadata.source_path;
@@ -259,14 +268,6 @@ bool AssetMetadataSerializer::load(AssetMetadata& metadata, const std::string& m
         return false;
     }
 
-    const int serialized_version = j.value("version", 1);
-    if (serialized_version < 1 || serialized_version > 3)
-    {
-        printf("AssetMetadataSerializer: Unsupported version %d in %s\n", serialized_version, meta_path.c_str());
-        return false;
-    }
-    // v1/v2 are migrated deliberately: their wire fields are read below and the missing
-    // v3 fingerprint remains zero so the cooker will recook before calling it fresh.
     metadata.version = 3;
 
     // Source info

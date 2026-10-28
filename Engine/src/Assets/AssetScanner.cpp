@@ -159,7 +159,7 @@ static bool buildAndSaveMetadata(const std::string& asset_path,
                                   const std::string& timestamp)
 {
     AssetMetadata metadata;
-    metadata.version = 2;
+    metadata.version = 3;
     metadata.source_path = fs::path(asset_path).filename().string();
     metadata.source_hash = Utils::hashFile(asset_path);
     metadata.source_file_size = Utils::getFileSize(asset_path);

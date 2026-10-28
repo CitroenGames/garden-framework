@@ -420,10 +420,23 @@ bool testCorruptMetadataIsRejected()
         return fail(name, "could not write type-corrupt metadata fixture");
     if (Assets::AssetMetadataSerializer::load(metadata, meta_path.string()))
         return fail(name, "type-corrupt metadata was accepted");
-    if (!writeText(meta_path, "{\"version\": 99}"))
-        return fail(name, "could not write unsupported-version metadata fixture");
-    if (Assets::AssetMetadataSerializer::load(metadata, meta_path.string()))
-        return fail(name, "unsupported metadata version was accepted");
+    const std::vector<std::pair<std::string, std::string>> rejected_versions = {
+        {"missing", "{}"},
+        {"legacy-v1", "{\"version\": 1}"},
+        {"legacy-v2", "{\"version\": 2}"},
+        {"future", "{\"version\": 99}"},
+    };
+    for (const auto& [label, contents] : rejected_versions)
+    {
+        if (!writeText(meta_path, contents))
+            return fail(name, "could not write " + label + " metadata fixture");
+        if (Assets::AssetMetadataSerializer::load(metadata, meta_path.string()))
+            return fail(name, label + " metadata version was accepted");
+    }
+
+    metadata.version = 2;
+    if (Assets::AssetMetadataSerializer::save(metadata, meta_path.string()))
+        return fail(name, "writer accepted a legacy metadata version");
 
     return pass(name);
 }
@@ -492,7 +505,7 @@ bool testTransactionalModelCooking()
     if (!Assets::CompiledMeshSerializer::loadHeader(header, output.string()) ||
         header.cook_fingerprint == 0 ||
         !Assets::AssetMetadataSerializer::load(metadata, metadata_path.string()) ||
-        metadata.version < 3 || metadata.cook_fingerprint != header.cook_fingerprint ||
+        metadata.version != 3 || metadata.cook_fingerprint != header.cook_fingerprint ||
         !metadata.collision.enabled || !fs::exists(collision_path))
         return fail(name, "model publication did not leave matching cmesh metadata and collision artifacts");
 

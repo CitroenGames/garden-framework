@@ -265,7 +265,7 @@ static bool updateCollisionMetadataForModel(const std::string& source_path,
     const std::string meta_path = AssetMetadataSerializer::getMetaPath(source_path);
     const bool had_metadata = AssetMetadataSerializer::load(metadata, meta_path);
 
-    metadata.version = std::max(metadata.version, 3);
+    metadata.version = 3;
     metadata.source_path = fs::path(source_path).filename().string();
     metadata.source_hash = source_hash;
     metadata.source_file_size = source_file_size;
@@ -472,7 +472,7 @@ bool AssetCompiler::isUpToDate(const std::string& source_path, const std::string
 
         AssetMetadata metadata;
         if (!AssetMetadataSerializer::load(metadata, AssetMetadataSerializer::getMetaPath(source_path)) ||
-            metadata.version < 3 || metadata.cook_fingerprint == 0 ||
+            metadata.version != 3 || metadata.cook_fingerprint == 0 ||
             !metadata.collision.enabled || metadata.collision.file_path.empty() ||
             metadata.collision.cook_version != CookedCollisionSerializer::FORMAT_VERSION ||
             (metadata.collision.source_hash != 0 && metadata.collision.source_hash != source_hash))
