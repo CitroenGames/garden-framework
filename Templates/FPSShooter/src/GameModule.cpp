@@ -17,6 +17,7 @@
 #include "Network/NetworkTypes.hpp"
 #include "Network/SharedMovement.hpp"
 #include "shared/SharedComponents.hpp"
+#include "shared/FpsReplication.hpp"
 #include "shared/CombatProtocol.hpp"
 #include "shared/CompetitivePresentationCache.hpp"
 #include "shared/FpsCombatFeed.hpp"
@@ -256,7 +257,6 @@ static std::shared_ptr<mesh> resolveWorldItemVisualMesh()
         entity.culling = true;
         entity.transparent = false;
         entity.visible = true;
-        entity.casts_shadow = true;
         entity.force_lod = -1;
         loaded_mesh = g_services->level_manager->loadMesh(entity, g_services->render_api);
     } else {
@@ -301,6 +301,7 @@ static void bindWorldItemVisual(entt::registry& registry, uint32_t world_item_id
     if (!visual_mesh)
         return;
     registry.get_or_emplace<MeshComponent>(entry->second).m_mesh = visual_mesh;
+    registry.get_or_emplace<RenderableComponent>(entry->second);
 }
 
 // Acceptance-only receipts mirror successful application to the local
@@ -651,6 +652,12 @@ GAME_API bool gardenGameInit(EngineServices* services)
         return false;
     }
     g_services = services;
+    if (!FPSShooter::Replication::registerReplicationComponents())
+    {
+        LOG_ENGINE_ERROR("Failed to register current FPSShooter replication descriptors");
+        g_services = nullptr;
+        return false;
+    }
     g_ui_modal_context_active = false;
     g_ui_input_mode_active = false;
     g_client_input_cadence.reset();
@@ -666,6 +673,7 @@ GAME_API bool gardenGameInit(EngineServices* services)
     if (!configureFPShooterInput(*services->input_actions))
     {
         LOG_ENGINE_ERROR("Failed to register FPSShooter input actions");
+        FPSShooter::Replication::unregisterReplicationComponents();
         g_services = nullptr;
         return false;
     }
@@ -673,6 +681,8 @@ GAME_API bool gardenGameInit(EngineServices* services)
     // Initialize networking
     if (!g_network.initialize()) {
         LOG_ENGINE_FATAL("Failed to initialize Client Network");
+        FPSShooter::Replication::unregisterReplicationComponents();
+        g_services = nullptr;
         return false;
     }
 
@@ -1014,6 +1024,7 @@ GAME_API void gardenGameShutdown()
     AudioSystem::get().shutdown();
     g_network.disconnect("Game closing");
     g_network.shutdown();
+    FPSShooter::Replication::unregisterReplicationComponents();
     g_client_input_cadence.reset();
     g_acceptance_script.reset();
     g_has_authoritative_pawn_position = false;

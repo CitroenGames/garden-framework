@@ -7,6 +7,8 @@
 #include <limits>
 #include <string>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 #include <glm/glm.hpp>
 #include "enet.h"
 #include "NetworkProtocol.hpp"
@@ -71,11 +73,13 @@ struct EntitySnapshot
 {
     uint32_t entity_id = 0;
     ComponentSnapshot components;
+    std::vector<ReplicatedExtEntry> ext_entries;
     bool exists = true;  // False if entity was deleted
 
     EntitySnapshot() = default;
-    EntitySnapshot(uint32_t id, const ComponentSnapshot& comp)
-        : entity_id(id), components(comp), exists(true) {}
+    EntitySnapshot(uint32_t id, const ComponentSnapshot& comp,
+                   std::vector<ReplicatedExtEntry> ext = {})
+        : entity_id(id), components(comp), ext_entries(std::move(ext)), exists(true) {}
 };
 
 // World snapshot - represents the entire networked world state at a specific tick
@@ -88,8 +92,9 @@ struct WorldSnapshot
     WorldSnapshot(uint32_t t) : tick(t) {}
 
     // Add or update an entity in this snapshot
-    void setEntity(uint32_t entity_id, const ComponentSnapshot& components) {
-        entities[entity_id] = EntitySnapshot(entity_id, components);
+    void setEntity(uint32_t entity_id, const ComponentSnapshot& components,
+                   std::vector<ReplicatedExtEntry> ext_entries = {}) {
+        entities[entity_id] = EntitySnapshot(entity_id, components, std::move(ext_entries));
     }
 
     // Mark an entity as deleted

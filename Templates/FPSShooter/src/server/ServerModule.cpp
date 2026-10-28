@@ -13,6 +13,7 @@
 #include "server/LagCompensation.hpp"
 #include "server/FpsDamage.hpp"
 #include "shared/SharedComponents.hpp"
+#include "shared/FpsReplication.hpp"
 #include "shared/CombatProtocol.hpp"
 #include "shared/WeaponTypes.hpp"
 #include "shared/WeaponSystem.hpp"
@@ -3294,6 +3295,11 @@ static void despawnBotsForLevelTransition(world& game_world)
 GAME_API bool gardenServerInit(EngineServices* services)
 {
     g_server_services = services;
+    if (!FPSShooter::Replication::registerReplicationComponents()) {
+        LOG_ENGINE_ERROR("Failed to register current FPSShooter replication descriptors");
+        g_server_services = nullptr;
+        return false;
+    }
     g_presentation_event_sequences.clear();
     world* match_world = services->game_world;
     {
@@ -3310,6 +3316,8 @@ GAME_API bool gardenServerInit(EngineServices* services)
     g_game_rules = Game::GameRules{};
     if (!configureSelectedLevelSidecars()) {
         LOG_ENGINE_ERROR("FPSShooter initialization rejected before mode setup");
+        FPSShooter::Replication::unregisterReplicationComponents();
+        g_server_services = nullptr;
         return false;
     }
 
@@ -3329,6 +3337,8 @@ GAME_API bool gardenServerInit(EngineServices* services)
         g_game_rules.configureMode(g_mode_composition, cfg);
         if (!configureCompetitiveMapData()) {
             LOG_ENGINE_ERROR("FPSShooter competitive marker setup failed before network initialization");
+            FPSShooter::Replication::unregisterReplicationComponents();
+            g_server_services = nullptr;
             return false;
         }
         if (g_competitive) {
@@ -3405,6 +3415,9 @@ GAME_API bool gardenServerInit(EngineServices* services)
 
     if (!g_server_network.initialize() || !g_server_network.startServer(port)) {
         LOG_ENGINE_FATAL("Failed to initialize server network on port {}", port);
+        g_server_network.shutdown();
+        FPSShooter::Replication::unregisterReplicationComponents();
+        g_server_services = nullptr;
         return false;
     }
 
@@ -3540,6 +3553,7 @@ GAME_API void gardenServerShutdown()
         registry.ctx().erase<AcceptanceMovementTraceRuntime>();
     }
     g_server_network.shutdown();
+    FPSShooter::Replication::unregisterReplicationComponents();
     g_presentation_event_sequences.clear();
     g_server_services = nullptr;
 }

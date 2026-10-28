@@ -32,6 +32,48 @@ bool approxEqual(float a, float b, float epsilon = 0.001f)
     return std::abs(a - b) <= epsilon;
 }
 
+struct BridgeFixtureComponent
+{
+    uint8_t value = 0;
+};
+
+bool unusedExtract(const entt::registry&, entt::entity, Net::ReplicatedExtEntry&)
+{
+    return false;
+}
+
+bool validateOpaqueEntry(const Net::ReplicatedExtEntry& entry)
+{
+    return entry.field_mask != 0 && !entry.payload.empty();
+}
+
+void unusedApply(entt::registry&, entt::entity, const Net::ReplicatedExtEntry&)
+{
+}
+
+bool extractBridgeFixture(const entt::registry& registry, entt::entity entity,
+                          Net::ReplicatedExtEntry& out)
+{
+    const BridgeFixtureComponent* component = registry.try_get<BridgeFixtureComponent>(entity);
+    if (component == nullptr) return false;
+    out.component_id = 77;
+    out.field_mask = 0x1;
+    out.payload = {component->value};
+    return true;
+}
+
+bool validateBridgeFixture(const Net::ReplicatedExtEntry& entry)
+{
+    return (entry.component_id == 77 || entry.component_id == 78) &&
+           entry.field_mask == 0x1 && entry.payload.size() == 1 && entry.payload[0] <= 100;
+}
+
+void applyBridgeFixture(entt::registry& registry, entt::entity entity,
+                        const Net::ReplicatedExtEntry& entry)
+{
+    registry.emplace_or_replace<BridgeFixtureComponent>(entity, BridgeFixtureComponent{entry.payload[0]});
+}
+
 int testBitStream()
 {
     const char* name = "BitStream";
@@ -439,14 +481,17 @@ int testPredictionAndInterpolation()
     return 0;
 }
 
-int testWireV4Handshake()
+int testWireCurrentHandshake()
 {
-    const char* name = "WireV4Handshake";
-    if (Net::NETWORK_PROTOCOL_VERSION != 4) return fail(name, "protocol version is not 4");
-    if (Net::NETWORK_PROTOCOL_MIN_SUPPORTED != 4) return fail(name, "min supported is not 4");
+    const char* name = "WireCurrentHandshake";
+    const uint32_t current_protocol = Net::NETWORK_PROTOCOL_VERSION;
+    if (current_protocol == 0) return fail(name, "current protocol version is zero");
+    if (Net::NETWORK_PROTOCOL_MIN_SUPPORTED != current_protocol)
+        return fail(name, "protocol no longer uses exact current-version admission");
 
     Net::ConnectRequestMessage req;
-    std::strncpy(req.player_name, "v4player", 31);
+    req.protocol_version = current_protocol;
+    std::strncpy(req.player_name, "currentplayer", 31);
     req.level_hash = 0xDEADBEEFu;
     req.capability_flags = Net::CAP_HAS_EXT | Net::CAP_VIEW_TICK;
     Net::BitWriter writer;
@@ -455,14 +500,15 @@ int testWireV4Handshake()
     if (!Net::NetworkSerializer::tryPeekProtocolVersion(writer.getData(), writer.getByteSize(), peeked)) {
         return fail(name, "version peek failed");
     }
-    if (peeked != Net::NETWORK_PROTOCOL_VERSION) return fail(name, "peeked version mismatch");
+    if (peeked != current_protocol) return fail(name, "peeked current version mismatch");
     Net::BitReader reader(writer.getData(), writer.getByteSize());
     Net::ConnectRequestMessage out;
     if (!Net::NetworkSerializer::deserialize(reader, out)) return fail(name, "connect request round-trip failed");
-    if (out.level_hash != 0xDEADBEEFu || out.capability_flags != req.capability_flags) {
+    if (out.protocol_version != current_protocol || out.level_hash != 0xDEADBEEFu ||
+        out.capability_flags != req.capability_flags) {
         return fail(name, "connect request fields mismatch");
     }
-    if (std::string(out.player_name) != "v4player") return fail(name, "player name mismatch");
+    if (std::string(out.player_name) != "currentplayer") return fail(name, "player name mismatch");
 
     Net::ConnectAcceptMessage accept;
     accept.client_id = 7;
@@ -527,7 +573,11 @@ int testExtRoundTrip()
 {
     const char* name = "ExtRoundTrip";
     Net::ReplicationRegistry::get().clear();
-    Net::ReplicationRegistry::get().registerComponent(42, {{"a",0,nullptr,nullptr},{"b",1,nullptr,nullptr},{"c",2,nullptr,nullptr}});
+    if (!Net::ReplicationRegistry::get().registerComponent({
+            42, {{"a", 0}, {"b", 1}, {"c", 2}},
+            &unusedExtract, &validateOpaqueEntry, &unusedApply})) {
+        return fail(name, "could not register extension fixture descriptor");
+    }
 
     Net::WorldStateUpdateMessage msg;
     msg.server_tick = 50;
@@ -570,6 +620,23 @@ int testExtRoundTrip()
     if (!out2_updates[0].ext_entries.empty()) return fail(name, "unknown component was not skipped");
     if (!approxEqual(out2_updates[1].position.x, 4.0f)) return fail(name, "following entity after skip mismatch");
 
+    // A known descriptor with a field bit outside its current contract rejects
+    // its complete extension block while preserving the next framed entity.
+    Net::ReplicationRegistry::get().clear();
+    if (!Net::ReplicationRegistry::get().registerComponent({
+            42, {{"a", 0}}, &unusedExtract, &validateOpaqueEntry, &unusedApply})) {
+        return fail(name, "could not register mismatch fixture descriptor");
+    }
+    Net::BitReader mismatch_reader(writer.getData(), writer.getByteSize());
+    Net::WorldStateUpdateMessage mismatch_message;
+    std::vector<Net::EntityUpdateData> mismatch_updates;
+    if (!Net::NetworkSerializer::deserialize(mismatch_reader, mismatch_message, mismatch_updates))
+        return fail(name, "mismatched descriptor failed structural parsing");
+    if (!mismatch_updates[0].ext_entries.empty())
+        return fail(name, "mismatched descriptor did not reject extension block");
+    if (!approxEqual(mismatch_updates[1].position.x, 4.0f))
+        return fail(name, "mismatched descriptor disturbed following entity");
+
     // Truncated ext_len: whole message rejected, zero entities applied.
     Net::BitReader trunc_reader(writer.getData(), writer.getByteSize() - 1);
     Net::WorldStateUpdateMessage out3;
@@ -585,6 +652,78 @@ int testExtRoundTrip()
     Net::NetworkSerializer::serialize(ew, empty);
     if (ew.getByteSize() != 5) return fail(name, "flags=0 entity size is not 5 bytes");
     Net::ReplicationRegistry::get().clear();
+    return 0;
+}
+
+int testEcsReplicationBridge()
+{
+    const char* name = "EcsReplicationBridge";
+    Net::ReplicationRegistry& registry = Net::ReplicationRegistry::get();
+    registry.clear();
+    if (!registry.registerComponent({77, {{"value", 0}},
+                                    &extractBridgeFixture, &validateBridgeFixture, &applyBridgeFixture}) ||
+        !registry.registerComponent({78, {{"value", 0}},
+                                    &unusedExtract, &validateBridgeFixture, &applyBridgeFixture})) {
+        return fail(name, "could not register current ECS descriptors");
+    }
+
+    entt::registry server_registry;
+    const entt::entity source = server_registry.create();
+    server_registry.emplace<BridgeFixtureComponent>(source, BridgeFixtureComponent{22});
+    std::vector<Net::ReplicatedExtEntry> extracted;
+    if (!registry.extractEntity(server_registry, source, extracted) || extracted.size() != 1 ||
+        extracted[0].component_id != 77 || extracted[0].payload != std::vector<uint8_t>{22}) {
+        return fail(name, "registered ECS component did not extract opaque data");
+    }
+
+    // A component-only delta is current wire data: it has no built-in flags,
+    // but HAS_EXT frames it and preserves its opaque entry exactly.
+    Net::WorldStateUpdateMessage delta_message;
+    delta_message.server_tick = 7;
+    delta_message.delta_from_tick = 6;
+    delta_message.snapshot_flags = Net::SnapshotFlags::HAS_EXT;
+    Net::EntityUpdateData delta_update;
+    delta_update.entity_id = 90;
+    delta_update.ext_entries = extracted;
+    Net::BitWriter delta_writer;
+    Net::NetworkSerializer::serialize(delta_writer, delta_message, {delta_update});
+    Net::BitReader delta_reader(delta_writer.getData(), delta_writer.getByteSize());
+    Net::WorldStateUpdateMessage decoded_delta;
+    std::vector<Net::EntityUpdateData> decoded_delta_updates;
+    if (!Net::NetworkSerializer::deserialize(delta_reader, decoded_delta, decoded_delta_updates) ||
+        decoded_delta_updates.size() != 1 || decoded_delta_updates[0].flags != 0 ||
+        decoded_delta_updates[0].ext_entries.size() != 1 ||
+        decoded_delta_updates[0].ext_entries[0].component_id != extracted[0].component_id ||
+        decoded_delta_updates[0].ext_entries[0].field_mask != extracted[0].field_mask ||
+        decoded_delta_updates[0].ext_entries[0].payload != extracted[0].payload) {
+        return fail(name, "component-only delta did not round-trip");
+    }
+
+    entt::registry client_registry;
+    const entt::entity target = client_registry.create();
+    client_registry.emplace<BridgeFixtureComponent>(target, BridgeFixtureComponent{3});
+
+    // Validation is complete before any apply callback. The valid first entry
+    // must not write when the second current descriptor rejects its payload.
+    std::vector<Net::ReplicatedExtEntry> invalid_batch = extracted;
+    invalid_batch.push_back({78, 0x1, {101}});
+    if (registry.applyEcsEntries(client_registry, target, invalid_batch) ||
+        client_registry.get<BridgeFixtureComponent>(target).value != 3) {
+        return fail(name, "invalid extension batch partially mutated ECS");
+    }
+
+    if (!registry.applyEcsEntries(client_registry, target, extracted) ||
+        client_registry.get<BridgeFixtureComponent>(target).value != 22) {
+        return fail(name, "validated extension batch did not apply atomically");
+    }
+
+    if (registry.validateEcsEntries({{77, 0x2, {22}}}))
+        return fail(name, "current descriptor accepted unknown field bit");
+
+    if (!registry.unregisterComponent(77) || !registry.unregisterComponent(78) ||
+        registry.isRegistered(77) || registry.isRegistered(78)) {
+        return fail(name, "template lifecycle unregister left a descriptor behind");
+    }
     return 0;
 }
 
@@ -713,8 +852,9 @@ int main()
     failures += testNetworkStats();
     failures += testLagHistory();
     failures += testPredictionAndInterpolation();
-    failures += testWireV4Handshake();
+    failures += testWireCurrentHandshake();
     failures += testExtRoundTrip();
+    failures += testEcsReplicationBridge();
     failures += testButtonsAndViewTick();
     failures += testSpawnRadians();
     failures += testTruncatedFuzz();

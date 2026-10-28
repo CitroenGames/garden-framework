@@ -2,6 +2,7 @@
 #include "NetworkRuntime.hpp"
 #include "NetworkTransport.hpp"
 #include "NetworkHierarchyValidation.hpp"
+#include "ReplicationRegistry.hpp"
 #include "NetworkInput.hpp"
 #include "world.hpp"
 #include "Components/Components.hpp"
@@ -741,7 +742,13 @@ WorldSnapshot ServerNetworkManager::generateWorldSnapshot()
             comp_snapshot.ground_normal = player.ground_normal;
         }
 
-        snapshot.setEntity(networked.network_id, comp_snapshot);
+        std::vector<ReplicatedExtEntry> ext_entries;
+        if (!ReplicationRegistry::get().extractEntity(game_world->registry, entity, ext_entries)) {
+            LOG_ENGINE_WARN("Network snapshot skipped entity {} because a replicated ECS descriptor rejected its current data",
+                            networked.network_id);
+            continue;
+        }
+        snapshot.setEntity(networked.network_id, comp_snapshot, std::move(ext_entries));
     }
 
     return snapshot;
@@ -820,8 +827,30 @@ std::vector<EntityUpdateData> ServerNetworkManager::generateDeltaUpdate(
             }
         }
 
-        // Only add update if something changed
-        if (update.flags != 0) {
+        // Extension components are opaque ECS snapshots. A full snapshot carries
+        // every current entry; a delta carries only entries whose exact current
+        // stable id/mask/payload changed. Component removal needs an explicit
+        // protocol operation and is intentionally not inferred from omission.
+        const auto ext_entries_equal = [](const std::vector<ReplicatedExtEntry>& a,
+                                          const std::vector<ReplicatedExtEntry>& b) {
+            if (a.size() != b.size()) return false;
+            for (size_t i = 0; i < a.size(); ++i) {
+                if (a[i].component_id != b[i].component_id ||
+                    a[i].field_mask != b[i].field_mask || a[i].payload != b[i].payload) {
+                    return false;
+                }
+            }
+            return true;
+        };
+        if (full_snapshot || !baseline_entity ||
+            !ext_entries_equal(entity_snapshot.ext_entries, baseline_entity->ext_entries)) {
+            update.ext_entries = entity_snapshot.ext_entries;
+        }
+
+        // An extension-only delta deliberately has flags=0. HAS_EXT frames the
+        // block, so it remains a valid entity update instead of a legacy empty
+        // built-in update.
+        if (update.flags != 0 || !update.ext_entries.empty()) {
             updates.push_back(update);
         }
     }

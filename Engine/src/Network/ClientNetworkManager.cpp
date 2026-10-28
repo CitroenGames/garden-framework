@@ -3,6 +3,7 @@
 #include "NetworkRuntime.hpp"
 #include "NetworkTransport.hpp"
 #include "NetworkHierarchyValidation.hpp"
+#include "ReplicationRegistry.hpp"
 #include "world.hpp"
 #include "Components/Components.hpp"
 #include "Utils/Log.hpp"
@@ -584,6 +585,22 @@ void ClientNetworkManager::handleWorldStateUpdate(BitReader& reader)
         return;
     }
 
+    // Validate the entire packet's registered extension contract before its
+    // tick, built-ins, mappings, or ECS components can change. Unknown ids
+    // have already been skipped by the length-framed decoder. Known mask
+    // mismatches clear only that entity's extension block in the decoder;
+    // callback/payload mismatches reject this packet as one receive unit.
+    for (const EntityUpdateData& update : entities) {
+        if (!update.shouldDelete() &&
+            !ReplicationRegistry::get().validateEcsEntries(update.ext_entries)) {
+            ++ReplicationRegistry::get().ext_ecs_apply_reject_count;
+            LOG_ENGINE_WARN("Dropping WORLD_STATE_UPDATE tick {} because an ECS extension descriptor rejected it",
+                            msg.server_tick);
+            recordDroppedIncomingPacket(stats, 0);
+            return;
+        }
+    }
+
     // Update last received server tick and fund primary input admission with
     // the same monotonic authoritative timebase. The shared cap matches the
     // server input burst budget.
@@ -638,6 +655,10 @@ void ClientNetworkManager::handleWorldStateUpdate(BitReader& reader)
 
             // Discard acknowledged inputs from prediction history
             input_history.discardUpTo(msg.last_processed_input_tick);
+            if (!ReplicationRegistry::get().applyEcsEntries(
+                    game_world->registry, local_player_entity, update.ext_entries)) {
+                LOG_ENGINE_ERROR("Validated local ECS extension failed to apply for network id {}", update.entity_id);
+            }
         } else {
             // Remote entities: ensure entity exists, then push to interpolation buffer
             if (!createOrUpdateEntity(update)) {
@@ -910,6 +931,14 @@ bool ClientNetworkManager::createOrUpdateEntity(const EntityUpdateData& update)
             controller.grounded = (update.grounded != 0);
             controller.ground_normal = update.ground_normal;
         }
+    }
+
+    // All entries were packet-validated before entity creation. apply performs
+    // a second defensive check and commits only after all component entries are
+    // valid, so one malformed extension cannot leave a partial ECS write.
+    if (!ReplicationRegistry::get().applyEcsEntries(game_world->registry, entity, update.ext_entries)) {
+        LOG_ENGINE_ERROR("Validated ECS extension failed to apply for network id {}", update.entity_id);
+        return false;
     }
 
     return true;
