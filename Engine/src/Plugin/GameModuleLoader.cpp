@@ -435,7 +435,7 @@ namespace
         fs::path source_path;
         fs::path loaded_path;
         std::vector<std::string> owned_files;
-        GameModuleContentIdentity identity;
+        garden::ecs::ComponentOwnerId identity;
         void* handle = nullptr;
     };
 
@@ -599,7 +599,8 @@ namespace
         }
 
         SourceStamp after{};
-        if (!verifyOwnedImage(candidate.source_path, partial_image, candidate.identity.image_sha256) ||
+        std::array<uint8_t, 32> image_digest{};
+        if (!verifyOwnedImage(candidate.source_path, partial_image, image_digest) ||
             !captureRegularSourceStamp(candidate.source_path, after, error) || !sameSourceStamp(before, after))
         {
             fprintf(stderr, "[GameModule] Deferred module load because source changed while copied: '%s'\n",
@@ -652,12 +653,14 @@ namespace
             return CandidatePreparation::CandidateRefused;
         }
         CandidateExports exports;
+        int32_t api_abi_version = 0;
         if (!resolveCandidateExports(candidate.handle, candidate.source_path.string(), exports) ||
-            !validateCandidateVersion(exports, candidate.source_path.string(), candidate.identity.api_abi_version))
+            !validateCandidateVersion(exports, candidate.source_path.string(), api_abi_version))
         {
             candidate.reset();
             return CandidatePreparation::CandidateRefused;
         }
+        candidate.identity = garden::ecs::ComponentOwnerId::module(image_digest, api_abi_version);
         return CandidatePreparation::Success;
     }
 
@@ -698,7 +701,7 @@ void GameModuleLoader::moveFrom(GameModuleLoader&& other) noexcept
     m_generation_root = std::move(other.m_generation_root);
     m_generation_path = std::move(other.m_generation_path);
     m_owned_generation_files = std::move(other.m_owned_generation_files);
-    m_content_identity = std::move(other.m_content_identity);
+    m_component_owner_id = std::move(other.m_component_owner_id);
     m_fnGetAPIVersion = other.m_fnGetAPIVersion;
     m_fnGetGameName = other.m_fnGetGameName;
     m_fnGameInit = other.m_fnGameInit;
@@ -721,7 +724,7 @@ void GameModuleLoader::moveFrom(GameModuleLoader&& other) noexcept
     other.m_loaded_path.clear();
     other.m_generation_path.clear();
     other.m_owned_generation_files.clear();
-    other.m_content_identity = {};
+    other.m_component_owner_id = {};
     other.clearFunctionPointers();
 }
 
@@ -743,7 +746,7 @@ bool GameModuleLoader::loadReloadCandidate(const std::string& dll_path)
     m_loaded_path = candidate.loaded_path.string();
     m_generation_path = candidate.releaseGenerationPath();
     m_owned_generation_files = candidate.releaseOwnedFiles();
-    m_content_identity = std::move(candidate.identity);
+    m_component_owner_id = std::move(candidate.identity);
     if (resolveFunctions()) return true;
 
     unload();
@@ -769,7 +772,7 @@ bool GameModuleLoader::load(const std::string& dll_path)
     m_loaded_path = candidate.loaded_path.string();
     m_generation_path = candidate.releaseGenerationPath();
     m_owned_generation_files = candidate.releaseOwnedFiles();
-    m_content_identity = std::move(candidate.identity);
+    m_component_owner_id = std::move(candidate.identity);
 
     if (!resolveFunctions())
     {
@@ -798,7 +801,7 @@ void GameModuleLoader::unload()
     m_loaded_path.clear();
     m_generation_path.clear();
     m_owned_generation_files.clear();
-    m_content_identity = {};
+    m_component_owner_id = {};
     removeEmptyOwnedRoot(m_generation_root);
 }
 
@@ -823,7 +826,7 @@ bool GameModuleLoader::reload(const std::string& dll_path)
     m_loaded_path = candidate.loaded_path.string();
     m_generation_path = candidate.releaseGenerationPath();
     m_owned_generation_files = candidate.releaseOwnedFiles();
-    m_content_identity = std::move(candidate.identity);
+    m_component_owner_id = std::move(candidate.identity);
 
     if (!resolveFunctions())
     {

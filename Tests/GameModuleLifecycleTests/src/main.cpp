@@ -455,32 +455,47 @@ namespace
         if (ec) return fail(name, "could not copy fixture");
 
         GameModuleLoader first, second, different, rejected;
-        if (first.getContentIdentity() || !first.load(fixturePath("generation_a").string()) ||
-            !second.load(copy.string()) || !first.getContentIdentity() || !second.getContentIdentity())
+        if (first.getComponentOwnerId() || !first.load(fixturePath("generation_a").string()) ||
+            !second.load(copy.string()) || !first.getComponentOwnerId() || !second.getComponentOwnerId())
             return fail(name, "duplicate images did not load with identity");
-        const GameModuleContentIdentity identity = *first.getContentIdentity();
+        const garden::ecs::ComponentOwnerId identity = *first.getComponentOwnerId();
         if (first.getLoadedImagePath() == second.getLoadedImagePath() ||
-            identity != *second.getContentIdentity() || identity.api_abi_version != GARDEN_MODULE_API_VERSION)
+            identity != *second.getComponentOwnerId() ||
+            identity.kind != garden::ecs::ComponentOwnerKind::Module ||
+            identity.apiAbiVersion != GARDEN_MODULE_API_VERSION ||
+            identity == garden::ecs::ComponentOwnerId::engineCore())
             return fail(name, "duplicate owned images or accepted ABI differ");
 
-        GameModuleContentIdentity other_abi = identity;
-        ++other_abi.api_abi_version;
+        garden::ecs::ComponentOwnerId other_abi = identity;
+        ++other_abi.apiAbiVersion;
         if (identity == other_abi) return fail(name, "ABI is absent from identity comparison");
+
+        for (size_t i = 0; i < identity.imageSha256.size(); ++i)
+        {
+            auto other_digest = identity;
+            other_digest.imageSha256[i] ^= 1;
+            if (identity == other_digest) return fail(name, "digest byte is absent from identity comparison");
+        }
 
         // Appended overlay leaves the loadable image intact while changing its bytes.
         { std::ofstream out(copy, std::ios::binary | std::ios::app); out.put('\x5a'); if (!out) return fail(name, "could not modify fixture copy"); }
-        if (!different.load(copy.string()) || !different.getContentIdentity() ||
-            identity == *different.getContentIdentity())
+        if (!different.load(copy.string()) || !different.getComponentOwnerId() ||
+            identity == *different.getComponentOwnerId())
             return fail(name, "different image bytes did not change identity");
-        if (rejected.load(fixturePath("candidate_abi_mismatch").string()) || rejected.getContentIdentity() ||
-            rejected.load((directory / "missing.dll").string()) || rejected.getContentIdentity())
+        if (rejected.load(fixturePath("candidate_abi_mismatch").string()) || rejected.getComponentOwnerId() ||
+            rejected.load(fixturePath("candidate_missing_game_update").string()) || rejected.getComponentOwnerId() ||
+            rejected.load((directory / "missing.dll").string()) || rejected.getComponentOwnerId())
             return fail(name, "rejected candidate exposed an identity");
 
         GameModuleLoader moved(std::move(second));
-        if (second.getContentIdentity() || !moved.getContentIdentity() || *moved.getContentIdentity() != identity)
+        if (second.getComponentOwnerId() || !moved.getComponentOwnerId() || *moved.getComponentOwnerId() != identity)
             return fail(name, "identity did not follow image ownership on move");
+        GameModuleLoader assigned;
+        assigned = std::move(moved);
+        if (moved.getComponentOwnerId() || !assigned.getComponentOwnerId() || *assigned.getComponentOwnerId() != identity)
+            return fail(name, "identity did not follow image ownership on move assignment");
         first.unload();
-        if (first.getContentIdentity()) return fail(name, "unloaded image retained an identity");
+        if (first.getComponentOwnerId()) return fail(name, "unloaded image retained an identity");
         return pass(name);
     }
 
