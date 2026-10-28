@@ -4545,6 +4545,95 @@ static bool testLevelManagerRequiredCpuMeshRollback(const fs::path& repo_root)
     return pass(name);
 }
 
+class NeverUploadedMesh : public IGPUMesh
+{
+public:
+    explicit NeverUploadedMesh(int& live) : m_live(live) { ++m_live; }
+    ~NeverUploadedMesh() override { --m_live; }
+    void uploadMeshData(const vertex*, size_t) override {}
+    void updateMeshData(const vertex*, size_t, size_t) override {}
+    bool isUploaded() const override { return false; }
+    size_t getVertexCount() const override { return 0; }
+private:
+    int& m_live;
+};
+
+class FailingMeshRenderAPI : public HeadlessRenderAPI
+{
+public:
+    explicit FailingMeshRenderAPI(bool return_null) : m_return_null(return_null) {}
+    IGPUMesh* createMesh() override
+    {
+        ++create_calls;
+        return m_return_null ? nullptr : new NeverUploadedMesh(live_meshes);
+    }
+    int create_calls = 0;
+    int live_meshes = 0;
+private:
+    bool m_return_null;
+};
+
+static bool testLevelManagerRequiredGpuMeshRollback(const fs::path& repo_root)
+{
+    const std::string name = "LevelManager required GPU mesh failure rollback";
+    Assets::AssetManager::get().setAssetRoot((repo_root / "Templates" / "FPSShooter" / "assets").string());
+    Assets::AssetManager::get().setAssetPrefix("assets");
+    for (bool return_null : {true, false})
+    {
+        FailingMeshRenderAPI render_api(return_null);
+        LevelManager manager;
+        world w;
+        w.initializePhysics();
+        const EntityRef sentinel_ref{EntityGuid{0xDC02, 0xEC02}};
+        const auto sentinel = w.restoreScopedEntity(sentinel_ref);
+        entt::entity sentinel_entity = entt::null;
+        for (auto [entity, identity] : w.registry.view<IdentityComponent>().each())
+            if (identity.guid == sentinel_ref.guid) sentinel_entity = entity;
+        ColliderComponent collider;
+        collider.shape_type = ColliderShapeType::Box;
+        collider.box_half_extents = glm::vec3(0.5f);
+        const auto shape = PhysicsSystem::createShapeFromCollider(collider, glm::vec3(1.0f));
+        if (sentinel_entity == entt::null || !shape ||
+            w.getPhysicsSystem().createStaticBody(glm::vec3(0.0f), glm::vec3(0.0f), shape, sentinel_entity).IsInvalid())
+            return fail(name, "could not create sentinel static body");
+        const auto old_gravity = w.getGravity();
+        const auto old_delta = w.getFixedDelta();
+        LevelData level;
+        level.metadata.gravity = old_gravity + glm::vec3(1, 2, 3);
+        level.metadata.fixed_delta = old_delta * 2;
+        LevelEntity player;
+        player.type = EntityType::Player;
+        level.entities.push_back(player);
+        LevelEntity visual;
+        visual.type = EntityType::Renderable;
+        visual.mesh_path = "assets/models/ground_plane.obj";
+        level.entities.push_back(visual);
+        levelRollbackObserved.clear();
+        meshRollbackWorld = &w;
+        meshRollbackPlayerHadController = false;
+        auto connection = w.registry.on_construct<TransformComponent>().connect<&observeMeshRollbackTransform>();
+        entt::entity player_out = entt::entity{123}, freecam_out = entt::entity{124}, rep_out = entt::entity{125};
+        std::vector<entt::entity> created{entt::entity{456}};
+        const bool success = manager.instantiateLevel(level, w, &render_api, &player_out, &freecam_out, &rep_out, false, &created);
+        connection.release();
+        meshRollbackWorld = nullptr;
+        if (success || render_api.create_calls == 0 || render_api.live_meshes != 0 ||
+            levelRollbackObserved.size() != 2 || !meshRollbackPlayerHadController ||
+            player_out != entt::entity{123} || freecam_out != entt::entity{124} || rep_out != entt::entity{125} ||
+            created != std::vector<entt::entity>{entt::entity{456}} ||
+            w.getGravity() != old_gravity || w.getFixedDelta() != old_delta ||
+            w.persistedReference(sentinel) != sentinel_ref || !w.registry.valid(sentinel_entity) ||
+            !w.getPhysicsSystem().hasBody(sentinel_entity) || w.registry.view<IdentityComponent>().size() != 1 ||
+            w.registry.view<MeshComponent>().size() != 0)
+            return fail(name, "GPU failure did not preserve the previous world and outputs");
+        for (const auto entity : levelRollbackObserved)
+            if (w.registry.valid(entity) || w.getPhysicsSystem().hasBody(entity) ||
+                w.getPhysicsSystem().hasCharacterController(entity))
+                return fail(name, "GPU failure retained cohort entity or physics state");
+    }
+    return pass(name);
+}
+
 class ThrowingLevelState : public GameFramework::GameStateBase
 {
 public:
@@ -4981,6 +5070,7 @@ int main()
     ok = testLevelManagerScopedRestoreRollback() && ok;
     ok = testLevelManagerPostCreationRollback() && ok;
     ok = testLevelManagerRequiredCpuMeshRollback(repo_root) && ok;
+    ok = testLevelManagerRequiredGpuMeshRollback(repo_root) && ok;
     ok = testLevelManagerFrameworkFailureRollback() && ok;
     ok = testLevelManagerFrameworkCommitCallbackFailures() && ok;
     ok = testLevelManagerLargeIdentityCohort() && ok;

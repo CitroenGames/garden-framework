@@ -444,6 +444,8 @@ public:
         {
             gpu_mesh = api->createMesh();
             owns_gpu_mesh = true;
+            if (!gpu_mesh)
+                return;
         }
 
         // Deduplicate vertices and create index buffer

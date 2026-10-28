@@ -3218,6 +3218,11 @@ std::shared_ptr<mesh> LevelManager::finalizeCompiledMeshGPU(
         }
     }
 
+    if (render_api && !m_ptr->isUploadedToGPU()) {
+        LOG_ENGINE_ERROR("Failed to upload required base mesh: {}", preload.resolved_path);
+        return nullptr;
+    }
+
     // Set AABB from header
     m_ptr->aabb_min = glm::vec3(cmesh.header.aabb_min[0], cmesh.header.aabb_min[1], cmesh.header.aabb_min[2]);
     m_ptr->aabb_max = glm::vec3(cmesh.header.aabb_max[0], cmesh.header.aabb_max[1], cmesh.header.aabb_max[2]);
@@ -3496,6 +3501,11 @@ std::shared_ptr<mesh> LevelManager::finalizeMeshGPU(
         } else if (!uploadChunkedMaterialMesh(m_ptr, render_api)) {
             m_ptr->uploadToGPU(render_api);
         }
+    }
+
+    if (render_api && !m_ptr->isUploadedToGPU()) {
+        LOG_ENGINE_ERROR("Failed to upload required base mesh: {}", preload.resolved_path);
+        return nullptr;
     }
 
     return m_ptr;
