@@ -11,6 +11,7 @@
 #include "shared/PlayerLifecycle.hpp"
 #include "shared/WorldItemLifecycle.hpp"
 #include "shared/WorldItemReplication.hpp"
+#include "shared/WorldItemPresentation.hpp"
 #include "shared/CompetitiveLogic.hpp"
 #include "shared/BuyZoneTriggers.hpp"
 #include "shared/CombatProtocol.hpp"
@@ -1032,6 +1033,115 @@ bool testWorldItemProtocolAndReplicationIds()
         return fail(name, "world-item ID allocator wrapped after exhaustion");
     }
 
+    return pass(name);
+}
+
+bool testWorldItemPresentationLifecycle()
+{
+    const std::string name = "WorldItemPresentation_Lifecycle";
+    entt::registry registry;
+    FpsLogic::WorldItemPresentationIndex presentations;
+
+    WorldItemUpsertMessage first;
+    first.world_item_id = 71u;
+    first.weapon_type = static_cast<uint8_t>(WeaponType::AK47);
+    first.position = glm::vec3(4.0f, 1.5f, -8.0f);
+    first.yaw = 0.5f;
+    if (FpsLogic::upsertWorldItemPresentation(registry, presentations, first) !=
+            FpsLogic::WorldItemPresentationUpsertResult::Created ||
+        presentations.size() != 1u) {
+        return fail(name, "valid upsert did not create one indexed presentation entity");
+    }
+
+    const entt::entity first_entity = presentations.at(first.world_item_id);
+    if (!registry.valid(first_entity) ||
+        !registry.all_of<TransformComponent, DroppedWeaponPresentationComponent>(first_entity) ||
+        registry.all_of<Net::NetworkedEntity>(first_entity) ||
+        registry.all_of<RigidBodyComponent>(first_entity) ||
+        registry.all_of<CharacterControllerComponent>(first_entity) ||
+        registry.all_of<PlayerComponent>(first_entity) ||
+        registry.all_of<DroppedWeaponComponent>(first_entity) ||
+        registry.all_of<WorldItemReplicationIdComponent>(first_entity)) {
+        return fail(name, "presentation entity had the wrong ECS authority shape");
+    }
+    const auto& first_transform = registry.get<TransformComponent>(first_entity);
+    const auto& first_presentation = registry.get<DroppedWeaponPresentationComponent>(first_entity);
+    if (!approxVec3(first_transform.position, first.position) ||
+        !approx(first_transform.rotation.y, glm::degrees(first.yaw)) ||
+        first_presentation.world_item_id != first.world_item_id ||
+        first_presentation.weapon_type != WeaponType::AK47) {
+        return fail(name, "created presentation entity did not retain the wire pose and type");
+    }
+
+    WorldItemUpsertMessage updated = first;
+    updated.weapon_type = static_cast<uint8_t>(WeaponType::AWP);
+    updated.position = glm::vec3(-2.0f, 3.0f, 11.0f);
+    updated.yaw = -0.75f;
+    if (FpsLogic::upsertWorldItemPresentation(registry, presentations, updated) !=
+            FpsLogic::WorldItemPresentationUpsertResult::Updated ||
+        presentations.size() != 1u || presentations.at(updated.world_item_id) != first_entity ||
+        !registry.valid(first_entity)) {
+        return fail(name, "duplicate upsert did not update its existing entity in place");
+    }
+    const auto& updated_transform = registry.get<TransformComponent>(first_entity);
+    const auto& updated_presentation = registry.get<DroppedWeaponPresentationComponent>(first_entity);
+    if (!approxVec3(updated_transform.position, updated.position) ||
+        !approx(updated_transform.rotation.y, glm::degrees(updated.yaw)) ||
+        updated_presentation.weapon_type != WeaponType::AWP) {
+        return fail(name, "duplicate upsert did not update pose and weapon type");
+    }
+
+    WorldItemUpsertMessage second = first;
+    second.world_item_id = 99u;
+    if (FpsLogic::upsertWorldItemPresentation(registry, presentations, second) !=
+            FpsLogic::WorldItemPresentationUpsertResult::Created ||
+        presentations.size() != 2u) {
+        return fail(name, "second valid world-item ID did not create a second entity");
+    }
+
+    WorldItemRemoveMessage unknown_remove;
+    unknown_remove.world_item_id = 1234u;
+    if (FpsLogic::removeWorldItemPresentation(registry, presentations, unknown_remove) !=
+            FpsLogic::WorldItemPresentationRemoveResult::Unknown ||
+        presentations.size() != 2u) {
+        return fail(name, "unknown valid removal changed the presentation index");
+    }
+
+    WorldItemRemoveMessage remove_first;
+    remove_first.world_item_id = first.world_item_id;
+    if (FpsLogic::removeWorldItemPresentation(registry, presentations, remove_first) !=
+            FpsLogic::WorldItemPresentationRemoveResult::Removed || registry.valid(first_entity) ||
+        presentations.size() != 1u ||
+        FpsLogic::removeWorldItemPresentation(registry, presentations, remove_first) !=
+            FpsLogic::WorldItemPresentationRemoveResult::Unknown) {
+        return fail(name, "known removal was not exact-once and idempotent");
+    }
+
+    const entt::entity stale_entity = presentations.at(second.world_item_id);
+    registry.destroy(stale_entity);
+    if (FpsLogic::upsertWorldItemPresentation(registry, presentations, second) !=
+            FpsLogic::WorldItemPresentationUpsertResult::Created ||
+        presentations.at(second.world_item_id) == stale_entity ||
+        !registry.valid(presentations.at(second.world_item_id))) {
+        return fail(name, "stale presentation index entry did not recreate a complete row");
+    }
+
+    const size_t before_invalid = presentations.size();
+    WorldItemUpsertMessage invalid_upsert = second;
+    invalid_upsert.world_item_id = 0u;
+    WorldItemRemoveMessage invalid_remove;
+    if (FpsLogic::upsertWorldItemPresentation(registry, presentations, invalid_upsert) !=
+            FpsLogic::WorldItemPresentationUpsertResult::Rejected ||
+        FpsLogic::removeWorldItemPresentation(registry, presentations, invalid_remove) !=
+            FpsLogic::WorldItemPresentationRemoveResult::Rejected ||
+        presentations.size() != before_invalid) {
+        return fail(name, "invalid message reached presentation ECS mutation");
+    }
+
+    const entt::entity current_entity = presentations.at(second.world_item_id);
+    FpsLogic::clearWorldItemPresentations(registry, presentations);
+    if (!presentations.empty() || registry.valid(current_entity))
+        return fail(name, "world clear left a presentation entity or index entry behind");
     return pass(name);
 }
 
@@ -3324,6 +3434,7 @@ int main()
     ok = testFpsLoadoutInventoryInvariant() && ok;
     ok = testDroppedWeaponEcsLifecycle() && ok;
     ok = testWorldItemProtocolAndReplicationIds() && ok;
+    ok = testWorldItemPresentationLifecycle() && ok;
     ok = testFpsDeathmatchScoreLimit() && ok;
     ok = testFpsTeamDeathmatchTeamScoreWin() && ok;
     ok = testFpsModeIsolationAndLifecycle() && ok;

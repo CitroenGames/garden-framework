@@ -116,6 +116,16 @@ struct WorldItemReplicationIdComponent
     uint32_t value = 0;
 };
 
+// Client-only presentation state for a replicated dropped item. This is
+// deliberately distinct from both the server's DroppedWeaponComponent and
+// EngineCore's Net::NetworkedEntity: it carries only enough information for a
+// template renderer to identify a durable world-item presentation row.
+struct DroppedWeaponPresentationComponent
+{
+    uint32_t world_item_id = 0;
+    WeaponType weapon_type = WeaponType::RIFLE;
+};
+
 // Weapon component attached to player entities
 struct WeaponComponent
 {

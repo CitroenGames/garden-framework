@@ -16,6 +16,7 @@
 #include "Network/SharedMovement.hpp"
 #include "shared/SharedComponents.hpp"
 #include "shared/CombatProtocol.hpp"
+#include "shared/WorldItemPresentation.hpp"
 #include "shared/WeaponTypes.hpp"
 #include "shared/WeaponSystem.hpp"
 #include "shared/NetworkInputSampler.hpp"
@@ -50,6 +51,7 @@
 #include <cmath>
 #include <cstdint>
 #include <memory>
+#include <unordered_map>
 #include <utility>
 
 using Net::InputState;
@@ -207,6 +209,8 @@ static bool g_has_authoritative_pawn_position = false;
 static glm::vec3 g_authoritative_pawn_position(0.0f);
 static uint64_t g_authoritative_pawn_snapshot_generation = 0;
 static uint32_t g_last_authoritative_input_tick = 0;
+static FpsLogic::WorldItemPresentationIndex g_world_item_presentation_entities;
+static world* g_world_item_presentation_world = nullptr;
 
 static entt::entity g_player_entity = entt::null;
 static entt::entity g_local_input_entity = entt::null;
@@ -511,6 +515,8 @@ GAME_API bool gardenGameInit(EngineServices* services)
     g_authoritative_pawn_position = glm::vec3(0.0f);
     g_authoritative_pawn_snapshot_generation = 0;
     g_last_authoritative_input_tick = 0;
+    g_world_item_presentation_entities.clear();
+    g_world_item_presentation_world = services->game_world;
     if (!configureFPShooterInput(*services->input_actions))
     {
         LOG_ENGINE_ERROR("Failed to register FPSShooter input actions");
@@ -581,7 +587,50 @@ GAME_API bool gardenGameInit(EngineServices* services)
                 Competitive::teamFromId(msg.team), g_comp.local_team);
             g_acceptance_script.observeTeamResult(accepted, Competitive::teamFromId(msg.team));
             return;
-        }        switch (static_cast<CombatMessageType>(message_type)) {
+        }
+        if (message_type == static_cast<uint8_t>(WorldItemMessageType::WORLD_ITEM_UPSERT)) {
+            WorldItemUpsertMessage msg;
+            if (!CombatSerializer::deserialize(reader, msg)) {
+                LOG_ENGINE_WARN("Ignoring malformed WORLD_ITEM_UPSERT");
+                return;
+            }
+            if (!g_services || !g_services->game_world ||
+                g_world_item_presentation_world != g_services->game_world) {
+                LOG_ENGINE_WARN("Ignoring WORLD_ITEM_UPSERT without an active client world");
+                return;
+            }
+            const auto result = FpsLogic::upsertWorldItemPresentation(
+                g_services->game_world->registry, g_world_item_presentation_entities, msg);
+            if (result == FpsLogic::WorldItemPresentationUpsertResult::Rejected) {
+                LOG_ENGINE_WARN("Ignoring invalid WORLD_ITEM_UPSERT id={}", msg.world_item_id);
+                return;
+            }
+            LOG_ENGINE_INFO("WORLD_ITEM_UPSERT id={} {}", msg.world_item_id,
+                result == FpsLogic::WorldItemPresentationUpsertResult::Created ? "created" : "updated");
+            return;
+        }
+        if (message_type == static_cast<uint8_t>(WorldItemMessageType::WORLD_ITEM_REMOVE)) {
+            WorldItemRemoveMessage msg;
+            if (!CombatSerializer::deserialize(reader, msg)) {
+                LOG_ENGINE_WARN("Ignoring malformed WORLD_ITEM_REMOVE");
+                return;
+            }
+            if (!g_services || !g_services->game_world ||
+                g_world_item_presentation_world != g_services->game_world) {
+                LOG_ENGINE_WARN("Ignoring WORLD_ITEM_REMOVE without an active client world");
+                return;
+            }
+            const auto result = FpsLogic::removeWorldItemPresentation(
+                g_services->game_world->registry, g_world_item_presentation_entities, msg);
+            if (result == FpsLogic::WorldItemPresentationRemoveResult::Rejected) {
+                LOG_ENGINE_WARN("Ignoring invalid WORLD_ITEM_REMOVE id={}", msg.world_item_id);
+                return;
+            }
+            LOG_ENGINE_INFO("WORLD_ITEM_REMOVE id={} {}", msg.world_item_id,
+                result == FpsLogic::WorldItemPresentationRemoveResult::Removed ? "removed" : "unknown_remove");
+            return;
+        }
+        switch (static_cast<CombatMessageType>(message_type)) {
         case CombatMessageType::SHOOT_RESULT: {
             ShootResultMessage msg;
             if (!CombatSerializer::deserialize(reader, msg)) {
@@ -729,8 +778,15 @@ GAME_API bool gardenGameInit(EngineServices* services)
 
 GAME_API void gardenGameShutdown()
 {
-    if (g_services && g_services->game_world)
+    if (g_services && g_services->game_world) {
+        if (g_world_item_presentation_world == g_services->game_world)
+            FpsLogic::clearWorldItemPresentations(
+                g_services->game_world->registry, g_world_item_presentation_entities);
+        else
+            g_world_item_presentation_entities.clear();
+        g_world_item_presentation_world = nullptr;
         setLocalInputOwner(*g_services->game_world, entt::null);
+    }
     ConVarRegistry::get().saveArchiveCvars("config.cfg");
     AudioSystem::get().shutdown();
     g_network.disconnect("Game closing");
@@ -1099,6 +1155,13 @@ GAME_API void gardenOnLevelLoaded()
     applyLoadedLevelHash(g_network, g_services->level_hash);
 
     world* game_world = g_services->game_world;
+    if (!game_world) return;
+    if (g_world_item_presentation_world == game_world)
+        FpsLogic::clearWorldItemPresentations(
+            game_world->registry, g_world_item_presentation_entities);
+    else
+        g_world_item_presentation_entities.clear();
+    g_world_item_presentation_world = game_world;
     setLocalInputOwner(*game_world, entt::null);
 
     // Find player, freecam, and player rep entities
