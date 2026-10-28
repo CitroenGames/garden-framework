@@ -87,6 +87,9 @@ NavPath NavMeshPathfinder::findPath(const NavMesh& navmesh,
     dtStatus status = navmesh.dt_query->findPath(startRef, goalRef,
                                                   &start.x, &goal.x,
                                                   &filter, polys, &polyCount, PATH_MAX_POLYS);
+    result.query_capacity_exhausted =
+        dtStatusDetail(status, DT_BUFFER_TOO_SMALL) ||
+        dtStatusDetail(status, DT_OUT_OF_NODES);
     if (!isCompletePathStatus(status) || polyCount == 0)
         return result;
 
@@ -97,6 +100,10 @@ NavPath NavMeshPathfinder::findPath(const NavMesh& navmesh,
     const dtStatus straightPathStatus = navmesh.dt_query->findStraightPath(
         &start.x, &goal.x, polys, polyCount, straightPath, nullptr, nullptr,
         &straightPathCount, PATH_MAX_POLYS);
+
+    result.query_capacity_exhausted = result.query_capacity_exhausted ||
+        dtStatusDetail(straightPathStatus, DT_BUFFER_TOO_SMALL) ||
+        dtStatusDetail(straightPathStatus, DT_OUT_OF_NODES);
 
     if (!isCompletePathStatus(straightPathStatus) || straightPathCount == 0)
         return result;

@@ -11,6 +11,8 @@
 #include "shared/BotLogic.hpp"
 
 #include <cstdint>
+#include <array>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -18,6 +20,36 @@
 #include <unordered_map>
 
 namespace Bots {
+
+struct NavigationDiagnosticRecord {
+    uint32_t tick = 0;
+    int32_t bot_index = 0;
+    NavFailureCategory category = NavFailureCategory::None;
+    LocalBlockDetail detail = LocalBlockDetail::None;
+    uint32_t recovery_count = 0;
+    bool capacity_inspection_suppressed = false;
+};
+
+// A world-owned ring gives operators the last navigation episodes without
+// retaining pawn transforms, path points, or peer identifiers.
+struct NavigationDiagnosticRing {
+    static constexpr size_t kCapacity = 64;
+    std::array<NavigationDiagnosticRecord, kCapacity> records{};
+    size_t head = 0;
+    size_t count = 0;
+    uint64_t total_pushed = 0;
+
+    void push(const NavigationDiagnosticRecord& record) {
+        records[head] = record;
+        head = (head + 1) % kCapacity;
+        if (count < kCapacity) ++count;
+        ++total_pushed;
+    }
+    size_t size() const { return count; }
+    const NavigationDiagnosticRecord& oldest() const { return records[(head + kCapacity - count) % kCapacity]; }
+    const NavigationDiagnosticRecord& newest() const { return records[(head + kCapacity - 1) % kCapacity]; }
+    const NavigationDiagnosticRecord& at(size_t index) const { return records[(head + kCapacity - count + index) % kCapacity]; }
+};
 
 enum class NavMeshLoadStatus : uint8_t {
     NotRequested,
@@ -76,12 +108,62 @@ struct BotWorldRuntime {
     uint32_t path_schedule_tick = 1;
     float world_time = 0.0f;
     TransitionRingBuffer transitions;
+    NavigationDiagnosticRing navigation_diagnostics;
+    uint32_t capacity_diagnostic_calls = 0;
+    uint32_t capacity_diagnostic_suppressions = 0;
+    uint32_t navigation_recoveries = 0;
+    uint32_t capacity_diagnostic_next_tick = 0;
     float debug_last_dump = -10.0f;
     std::unordered_map<int32_t, StuckLogLatch> stuck_latches;
     std::unordered_map<uint16_t, uint32_t> buy_sequence;
     std::unordered_map<uint16_t, uint8_t> last_weapon_select;
 
     bool hasValidNavMesh() const { return bots_enabled && navmesh.valid; }
+
+    bool beginCapacityDiagnostic(uint32_t tick)
+    {
+        // The schedule tick is a fixed server tick.  The 60-tick interval is
+        // one second at the current 60 Hz server cadence and is independent
+        // for every BotWorldRuntime.
+        if (tick < capacity_diagnostic_next_tick) {
+            ++capacity_diagnostic_suppressions;
+            return false;
+        }
+        capacity_diagnostic_next_tick = tick + 60u;
+        ++capacity_diagnostic_calls;
+        return true;
+    }
+
+    void recordNavigationDiagnostic(uint32_t tick, int32_t bot_index,
+                                    NavFailureCategory category, LocalBlockDetail detail,
+                                    uint32_t recovery_count, bool capacity_suppressed = false)
+    {
+        if (category != NavFailureCategory::LocalBlock)
+            detail = LocalBlockDetail::None;
+        navigation_diagnostics.push(NavigationDiagnosticRecord{
+            tick, bot_index, category, detail, recovery_count, capacity_suppressed});
+    }
+
+    // This aggregate is intentionally the only periodic navigation telemetry.
+    // It gives operators a bounded per-world summary without publishing a
+    // transform, route point, target, hit entity, or peer identifier.
+    std::string formatNavigationDiagnosticSnapshot() const
+    {
+        const NavigationDiagnosticRecord empty{};
+        const NavigationDiagnosticRecord& last = navigation_diagnostics.size() > 0
+            ? navigation_diagnostics.newest() : empty;
+        char buffer[512];
+        std::snprintf(buffer, sizeof(buffer),
+            "[BotDebug] navigation_diagnostics count=%zu recoveries=%u capacity_calls=%u "
+            "capacity_suppressions=%u last_tick=%u last_bot=%d last_category=%s "
+            "last_detail=%s last_recovery=%u last_capacity_suppressed=%d",
+            navigation_diagnostics.size(), navigation_recoveries,
+            capacity_diagnostic_calls, capacity_diagnostic_suppressions,
+            last.tick, last.bot_index, navFailureCategoryName(last.category),
+            localBlockDetailName(last.detail), last.recovery_count,
+            last.capacity_inspection_suppressed ? 1 : 0);
+        return std::string(buffer);
+    }
 
     void reset()
     {
@@ -102,6 +184,11 @@ struct BotWorldRuntime {
         path_schedule_tick = 1;
         world_time = 0.0f;
         transitions = {};
+        navigation_diagnostics = {};
+        capacity_diagnostic_calls = 0;
+        capacity_diagnostic_suppressions = 0;
+        navigation_recoveries = 0;
+        capacity_diagnostic_next_tick = 0;
         debug_last_dump = -10.0f;
         stuck_latches.clear();
         buy_sequence.clear();

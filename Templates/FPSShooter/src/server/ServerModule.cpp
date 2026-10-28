@@ -1324,6 +1324,50 @@ static void executeBotBuy(uint16_t client_id, entt::entity e)
     sendEconomyState(client_id, e);
 }
 
+static bool capacityDiagnosticConfirmsProductionExhaustion(
+    const Navigation::NavPathCapacityDiagnostic& diagnostic)
+{
+    const bool production_exhausted = diagnostic.current.buffer_too_small ||
+        diagnostic.current.out_of_nodes;
+    const bool expanded_complete = diagnostic.expanded_query_initialized &&
+        !diagnostic.expanded.failed && !diagnostic.expanded.partial &&
+        !diagnostic.expanded.buffer_too_small && !diagnostic.expanded.out_of_nodes &&
+        diagnostic.expanded.corridor_count > 0;
+    return diagnostic.endpoints_projected && production_exhausted && expanded_complete;
+}
+
+// This is recovery telemetry only.  It starts at the bot controller centre,
+// uses its current route waypoint, ignores the bot itself, and returns a
+// redacted detail instead of exposing a hit point or actor identity to bot
+// decisions.  AI-N2 owns any actual local-separation policy.
+static Bots::LocalBlockDetail probeBotLocalBlock(world& game_world, entt::entity bot_entity,
+                                                 const Bots::NavAgentComponent& nav,
+                                                 const Bots::SteeringComponent& steering,
+                                                 const glm::vec3& controller_centre)
+{
+    glm::vec3 direction(0.0f);
+    if (steering.horizontal_command_speed <= Bots::kBotStuckCommandSpeed ||
+        !Bots::currentWaypointDirection(nav, controller_centre, direction))
+        return Bots::LocalBlockDetail::None;
+
+    float capsule_radius = 0.3f;
+    if (game_world.registry.all_of<CharacterControllerComponent>(bot_entity))
+        capsule_radius = game_world.registry.get<CharacterControllerComponent>(bot_entity).capsule_radius;
+    const float range = Bots::localBlockProbeRange(capsule_radius, nav);
+    const PhysicsSystem::RaycastResult hit =
+        game_world.raycastClosest(controller_centre, direction, range, bot_entity);
+    if (!hit.hit)
+        return Bots::LocalBlockDetail::None;
+    if (hit.entity != entt::null && game_world.registry.valid(hit.entity) &&
+        game_world.registry.all_of<NetworkedEntity, FpsHealthComponent>(hit.entity)) {
+        const auto& networked = game_world.registry.get<NetworkedEntity>(hit.entity);
+        const auto& health = game_world.registry.get<FpsHealthComponent>(hit.entity);
+        if (networked.is_player && health.alive)
+            return Bots::LocalBlockDetail::Crowd;
+    }
+    return Bots::LocalBlockDetail::Static;
+}
+
 static void tickBots(float dt)
 {
     auto& runtime = botRuntime();
@@ -1381,14 +1425,57 @@ static void tickBots(float dt)
         glm::vec3 nav_start(0.0f), nav_goal(0.0f);
         // Project both endpoints before querying.  A failed projection clears
         // the path and backs off; bots never fall through to direct movement.
-        if (!Navigation::NavMeshPathfinder::findNearestPoly(runtime.navmesh, start, nav_start) ||
-            !Navigation::NavMeshPathfinder::findNearestPoly(runtime.navmesh, requested_goal, nav_goal)) {
+        if (!Navigation::NavMeshPathfinder::findNearestPoly(runtime.navmesh, start, nav_start)) {
+            nav.capacity_failure_active = false;
+            nav.last_failure = Bots::NavFailureCategory::StartOffMesh;
             Bots::rejectPathRequest(nav);
+            runtime.recordNavigationDiagnostic(runtime.path_schedule_tick,
+                w->registry.get<Bots::BotComponent>(e).bot_index, nav.last_failure,
+                Bots::LocalBlockDetail::None, nav.recovery_count);
+            continue;
+        }
+        if (!Navigation::NavMeshPathfinder::findNearestPoly(runtime.navmesh, requested_goal, nav_goal)) {
+            nav.capacity_failure_active = false;
+            nav.last_failure = Bots::NavFailureCategory::GoalOffMesh;
+            Bots::rejectPathRequest(nav);
+            runtime.recordNavigationDiagnostic(runtime.path_schedule_tick,
+                w->registry.get<Bots::BotComponent>(e).bot_index, nav.last_failure,
+                Bots::LocalBlockDetail::None, nav.recovery_count);
             continue;
         }
         Navigation::NavPath path = Navigation::NavMeshPathfinder::findPath(runtime.navmesh, nav_start, nav_goal);
         if (!path.valid || path.waypoints.empty()) {
+            // The engine's bounded production query returns an empty route for
+            // either topology or capacity exhaustion.  The isolated query is
+            // the only available discriminator, and is strictly per-world
+            // rate limited.  An already-confirmed capacity episode performs
+            // neither another expanded query nor another diagnostic append.
+            if (nav.capacity_failure_active) {
+                Bots::rejectPathRequest(nav);
+                continue;
+            }
+            // Only a production Detour capacity status can enter the
+            // per-world diagnostic cooldown. A topological miss remains
+            // NoPath even while another bot's capacity inspection is gated.
+            const bool capacity_gate_open = path.query_capacity_exhausted &&
+                runtime.beginCapacityDiagnostic(runtime.path_schedule_tick);
+            bool capacity_confirmed = false;
+            if (path.query_capacity_exhausted && capacity_gate_open) {
+                const Navigation::NavPathCapacityDiagnostic diagnostic =
+                    Navigation::NavMeshPathfinder::diagnosePathCapacity(runtime.navmesh, nav_start, nav_goal);
+                capacity_confirmed = capacityDiagnosticConfirmsProductionExhaustion(diagnostic);
+            }
+            const Bots::NavAdmissionClassification classification = Bots::classifyNavAdmission(
+                true, true, false, path.query_capacity_exhausted,
+                capacity_gate_open, capacity_confirmed);
+            if (classification.category == Bots::NavFailureCategory::QueryCapacity)
+                nav.capacity_failure_active = true;
+            nav.last_failure = classification.category;
             Bots::rejectPathRequest(nav);
+            runtime.recordNavigationDiagnostic(runtime.path_schedule_tick,
+                w->registry.get<Bots::BotComponent>(e).bot_index, classification.category,
+                Bots::LocalBlockDetail::None, nav.recovery_count,
+                classification.capacity_inspection_suppressed);
             continue;
         }
         Bots::acceptPathRequest(nav, path.waypoints, nav_goal, steer);
@@ -1510,8 +1597,24 @@ static void tickBots(float dt)
         // No move goal (incl. Engage): drop any stale path so steering does not
         // walk the bot toward its pre-Engage goal while it aims/strafes.
         if (!intent.has_move_goal) { Bots::cancelPathRequest(nav); nav.has_goal = false; nav.desired_velocity = glm::vec3(0); }
-        // S4 steering + S5 synthesis into the same consumption path as humans
-        Bots::updateSteering(nav, steer, pos, dt);
+        // S4 steering + S5 synthesis into the same consumption path as humans.
+        // Probe before steering so a confirmed physical block wins over the
+        // same interval's low-progress test.  The probe receives only the
+        // bot's own controller centre and waypoint direction.
+        const Bots::LocalBlockDetail block_detail =
+            probeBotLocalBlock(*w, e, nav, steer, pos);
+        const Bots::NavigationRecoveryResult recovery =
+            Bots::tickNavigationRecovery(nav, steer, pos, block_detail, dt);
+        if (recovery.category == Bots::NavFailureCategory::LocalBlock) {
+            ++runtime.navigation_recoveries;
+            runtime.recordNavigationDiagnostic(runtime.path_schedule_tick, bot.bot_index,
+                recovery.category, recovery.detail,
+                nav.recovery_count);
+        } else if (recovery.category == Bots::NavFailureCategory::Stuck) {
+            ++runtime.navigation_recoveries;
+            runtime.recordNavigationDiagnostic(runtime.path_schedule_tick, bot.bot_index,
+                recovery.category, recovery.detail, nav.recovery_count);
+        }
         Net::InputSample sample = aiPauseBots() ? Bots::synthesizeNeutralInput(++runtime.input_tick, bot.aim_yaw, bot.aim_pitch)
                                                 : Bots::synthesizeInput(bot, nav, intent, ++runtime.input_tick, dt);
         consumeBotInputSample(client_id, e, sample, dt);
@@ -1520,6 +1623,8 @@ static void tickBots(float dt)
             if (bot_debug_dump_now) { Bots::BotDumpInput dump; dump.bot_index = bot.bot_index; dump.team = (int32_t)team_id; dump.state = bot.state; dump.hp = w->registry.get<FpsHealthComponent>(e).health; dump.pos = pos; dump.goal = nav.goal; dump.has_goal = nav.has_goal; dump.path_valid = nav.path_valid; dump.stuck = nav.stuck; dump.visible_age = percept.last_seen_age; dump.heard_age = percept.heard_age; LOG_ENGINE_INFO("{}", Bots::formatBotDump(dump)); }
         }
     }
+    if (bot_debug_dump_now)
+        LOG_ENGINE_INFO("{}", runtime.formatNavigationDiagnosticSnapshot());
 }
 
 // ---- Competitive mode helpers ----

@@ -16,6 +16,10 @@ struct NavPath
 {
     std::vector<glm::vec3> waypoints;
     bool valid = false;
+    // The bounded production query observed a Detour capacity limit while
+    // resolving this path.  Callers still need an isolated diagnostic before
+    // treating this as a capacity category; topology failures leave it false.
+    bool query_capacity_exhausted = false;
 };
 
 struct NavMeshConfig

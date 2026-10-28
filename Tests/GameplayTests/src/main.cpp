@@ -4292,6 +4292,7 @@ int main()
     ok = testBotPerceptionPrivacyAndStaleTargets() && ok;
     ok = testBotFsmPlantDefendDefuse() && ok;
     ok = testBotSteeringArrivalStuck() && ok;
+    ok = testBotNavigationRecoveryValueRules() && ok;
     ok = testBotBoundedPathScheduling() && ok;
     ok = testBotInputSynthesisShape() && ok;
     ok = testBotEngageStrafes() && ok;
@@ -4305,8 +4306,10 @@ int main()
     ok = testBombAuthoredSitesParse() && ok;
     ok = testNavMeshGenerateAndSerializerRoundTrip() && ok;
     ok = testNavMeshFindPathTwoPoly() && ok;
+    ok = testBotNavigationAdmissionClassification() && ok;
     ok = testNavMeshSelectedLevelRouteMatrix() && ok;
     ok = testBotNavWorldResourceLifecycle() && ok;
+    ok = testBotNavigationDiagnosticWorldIsolation() && ok;
     ok = testNavMeshHierarchyRootBake() && ok;
     ok = testNavMeshHierarchyWorldBakeAndPath() && ok;
     ok = testNavMeshHierarchyStaleParentRootsBake() && ok;

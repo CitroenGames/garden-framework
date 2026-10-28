@@ -67,19 +67,71 @@ inline float rngUniform(uint32_t& s) { return (rngNext(s) >> 8) * (1.0f / 167772
 inline float rngSigned(uint32_t& s) { return rngUniform(s) * 2.0f - 1.0f; }
 
 enum class BotState : uint8_t { Idle, Buy, Advance, Plant, Defend, Defuse, Engage, Retreat, Spectate };
+
+// An admitted navigation request has one terminal classification.  The detail
+// deliberately refines LocalBlock only; it never becomes a competing reason.
+enum class NavFailureCategory : uint8_t {
+    None,
+    StartOffMesh,
+    GoalOffMesh,
+    NoPath,
+    QueryCapacity,
+    LocalBlock,
+    Stuck,
+};
+
+enum class LocalBlockDetail : uint8_t { None, Static, Crowd };
+
+inline const char* navFailureCategoryName(NavFailureCategory category)
+{
+    switch (category) {
+    case NavFailureCategory::None: return "none";
+    case NavFailureCategory::StartOffMesh: return "start_off_mesh";
+    case NavFailureCategory::GoalOffMesh: return "goal_off_mesh";
+    case NavFailureCategory::NoPath: return "no_path";
+    case NavFailureCategory::QueryCapacity: return "query_capacity";
+    case NavFailureCategory::LocalBlock: return "local_block";
+    case NavFailureCategory::Stuck: return "stuck";
+    }
+    return "unknown";
+}
+
+inline const char* localBlockDetailName(LocalBlockDetail detail)
+{
+    switch (detail) {
+    case LocalBlockDetail::None: return "none";
+    case LocalBlockDetail::Static: return "static";
+    case LocalBlockDetail::Crowd: return "crowd";
+    }
+    return "unknown";
+}
+
 struct NavAgentComponent {
     float max_speed = 5.0f, max_accel = 20.0f, arrive_radius = 1.2f, waypoint_radius = 0.6f, repath_cooldown = 0.25f;
     std::vector<glm::vec3> path; uint32_t path_index = 0;
     glm::vec3 goal{0}; bool has_goal = false; bool path_valid = false;
     float repath_timer = 0; glm::vec3 desired_velocity{0}; bool stuck = false;
     int32_t path_failures = 0;
+    float route_age = 0.0f;
+    float local_block_time = 0.0f;
+    uint16_t local_block_ticks = 0;
+    LocalBlockDetail local_block_detail = LocalBlockDetail::None;
+    uint32_t recovery_count = 0;
+    NavFailureCategory last_failure = NavFailureCategory::None;
+    bool local_block_confirmed = false;
+    bool capacity_failure_active = false;
     // A request is owned by this bot until the world scheduler grants or
     // rejects it.  The tick is deliberately data rather than wall-clock time:
     // replay order remains stable regardless of frame duration.
     bool path_request_pending = false;
     uint32_t path_request_tick = 0;
 };
-struct SteeringComponent { glm::vec3 velocity{0}; float stuck_time = 0; glm::vec3 last_pos{0}; bool has_last = false; uint8_t unstuck_phase = 0; float unstuck_timer = 0; float stuck_window_time = 0; glm::vec3 window_start{0}; };
+struct SteeringComponent {
+    glm::vec3 velocity{0}; float stuck_time = 0; glm::vec3 last_pos{0}; bool has_last = false;
+    uint8_t unstuck_phase = 0; float unstuck_timer = 0; float stuck_window_time = 0;
+    uint16_t stuck_window_ticks = 0;
+    glm::vec3 window_start{0}; float horizontal_command_speed = 0.0f;
+};
 struct BotComponent {
     uint8_t difficulty = 1; BotState state = BotState::Idle; BotState resume_state = BotState::Advance; bool has_resume = false;
     float state_time = 0, next_decision_time = 0, engage_lost_time = 0, aim_yaw = 0, aim_pitch = 0;
@@ -265,6 +317,7 @@ inline void rejectPathRequest(NavAgentComponent& n) {
     n.desired_velocity = glm::vec3(0.0f);
     ++n.path_failures;
     n.repath_timer = pathFailureBackoff(n);
+    n.route_age = 0.0f;
 }
 
 inline void acceptPathRequest(NavAgentComponent& n, const std::vector<glm::vec3>& points,
@@ -272,19 +325,171 @@ inline void acceptPathRequest(NavAgentComponent& n, const std::vector<glm::vec3>
     setPath(n, points, resolved_goal);
     n.repath_timer = n.repath_cooldown;
     n.stuck = false;
+    n.route_age = 0.0f;
+    n.local_block_time = 0.0f;
+    n.local_block_ticks = 0;
+    n.local_block_detail = LocalBlockDetail::None;
+    n.local_block_confirmed = false;
+    n.last_failure = NavFailureCategory::None;
+    n.capacity_failure_active = false;
     s.stuck_time = 0.0f;
     s.stuck_window_time = 0.0f;
+    s.stuck_window_ticks = 0;
+    s.window_start = s.last_pos;
+    s.horizontal_command_speed = 0.0f;
+}
+
+inline constexpr float kBotLocalBlockConfirmSeconds = 0.75f;
+inline constexpr uint16_t kBotLocalBlockConfirmTicks = 45u;
+inline constexpr float kBotStuckCommandSpeed = 1.0f;
+
+// The probe itself stays server-owned because it needs generic physics.  This
+// value helper only tracks persistence of an already-redacted result, so it is
+// deterministic and does not retain a hit point or entity identity.
+inline bool observeLocalBlock(NavAgentComponent& n, LocalBlockDetail observed, float dt)
+{
+    const float elapsed = std::max(dt, 0.0f);
+    if (observed == LocalBlockDetail::None) {
+        n.local_block_time = 0.0f;
+        n.local_block_ticks = 0;
+        n.local_block_detail = LocalBlockDetail::None;
+        n.local_block_confirmed = false;
+        return false;
+    }
+    if (n.local_block_detail != observed) {
+        n.local_block_detail = observed;
+        n.local_block_time = elapsed;
+        n.local_block_ticks = elapsed > 0.0f ? 1u : 0u;
+        n.local_block_confirmed = false;
+        return false;
+    }
+    n.local_block_time += elapsed;
+    if (elapsed > 0.0f && n.local_block_ticks < kBotLocalBlockConfirmTicks)
+        ++n.local_block_ticks;
+    // The server invokes this on its 60 Hz fixed tick.  Keep the elapsed
+    // value for diagnostics, but use the equivalent tick count for the
+    // recovery threshold so 45 x (1 / 60) confirms exactly once despite
+    // binary floating-point rounding.
+    if (!n.local_block_confirmed &&
+        (n.local_block_ticks >= kBotLocalBlockConfirmTicks ||
+         n.local_block_time + 0.00001f >= kBotLocalBlockConfirmSeconds)) {
+        n.local_block_confirmed = true;
+        return true;
+    }
+    return false;
+}
+
+inline void recoverNavigation(NavAgentComponent& n, SteeringComponent& s,
+                              NavFailureCategory category)
+{
+    // Recovery deliberately reuses the normal failed-request backoff.  It
+    // clears movement state only; the caller's next intent queues a fresh
+    // Detour request instead of writing a transform, velocity, or body.
+    rejectPathRequest(n);
+    n.stuck = false;
+    n.last_failure = category;
+    ++n.recovery_count;
+    n.local_block_time = 0.0f;
+    n.local_block_ticks = 0;
+    n.local_block_detail = LocalBlockDetail::None;
+    n.local_block_confirmed = false;
+    s.velocity = glm::vec3(0.0f);
+    s.horizontal_command_speed = 0.0f;
+    s.stuck_time = 0.0f;
+    s.stuck_window_time = 0.0f;
+    s.stuck_window_ticks = 0;
     s.window_start = s.last_pos;
 }
-inline void updateSteering(NavAgentComponent& n, SteeringComponent& s, const glm::vec3& pos, float dt) {
+
+struct NavigationRecoveryResult {
+    NavFailureCategory category = NavFailureCategory::None;
+    LocalBlockDetail detail = LocalBlockDetail::None;
+};
+
+inline void updateSteering(NavAgentComponent& n, SteeringComponent& s,
+                           const glm::vec3& pos, float dt);
+
+// Shared S4 branch used by tickBots.  The caller owns the physics probe; this
+// helper owns the mutually-exclusive LocalBlock/Stuck ordering so a fixture
+// cannot accidentally prove a different recovery path than the server uses.
+inline NavigationRecoveryResult tickNavigationRecovery(
+    NavAgentComponent& n, SteeringComponent& s, const glm::vec3& pos,
+    LocalBlockDetail observed_block, float dt)
+{
+    if (observeLocalBlock(n, observed_block, dt)) {
+        recoverNavigation(n, s, NavFailureCategory::LocalBlock);
+        return {NavFailureCategory::LocalBlock, observed_block};
+    }
+    updateSteering(n, s, pos, dt);
+    if (n.stuck) {
+        recoverNavigation(n, s, NavFailureCategory::Stuck);
+        return {NavFailureCategory::Stuck, LocalBlockDetail::None};
+    }
+    return {};
+}
+
+struct NavAdmissionClassification {
+    NavFailureCategory category = NavFailureCategory::None;
+    bool inspect_capacity = false;
+    bool capacity_inspection_suppressed = false;
+};
+
+// Endpoint order is explicit: a start failure wins when both endpoints are
+// off mesh.  A capacity label requires a production capacity signal; a
+// cooldown can suppress only the expanded confirmation, never relabel a
+// topological NoPath.  With an open gate, inspect_capacity asks the caller to
+// run the isolated query and call again with capacity_confirmed set.
+inline NavAdmissionClassification classifyNavAdmission(
+    bool start_projected, bool goal_projected, bool route_valid,
+    bool production_capacity_exhausted, bool capacity_gate_open,
+    bool capacity_confirmed)
+{
+    if (!start_projected)
+        return {NavFailureCategory::StartOffMesh};
+    if (!goal_projected)
+        return {NavFailureCategory::GoalOffMesh};
+    if (route_valid)
+        return {};
+    if (!production_capacity_exhausted)
+        return {NavFailureCategory::NoPath};
+    if (capacity_confirmed)
+        return {NavFailureCategory::QueryCapacity};
+    if (!capacity_gate_open)
+        return {NavFailureCategory::QueryCapacity, false, true};
+    return {NavFailureCategory::NoPath, true, false};
+}
+
+inline bool currentWaypointDirection(const NavAgentComponent& n, const glm::vec3& pos,
+                                     glm::vec3& out_direction)
+{
+    if (!n.has_goal || !n.path_valid || n.path.empty() || n.path_index >= n.path.size())
+        return false;
+    glm::vec3 delta = n.path[n.path_index] - pos;
+    delta.y = 0.0f;
+    const float length = glm::length(delta);
+    if (length <= 0.001f)
+        return false;
+    out_direction = delta / length;
+    return true;
+}
+
+inline float localBlockProbeRange(float capsule_radius, const NavAgentComponent& n)
+{
+    return std::max(2.0f * std::max(capsule_radius, 0.0f) + 0.05f,
+                    std::max(n.max_speed, 0.0f) * std::max(n.repath_cooldown, 0.0f));
+}
+
+inline void updateSteering(NavAgentComponent& n, SteeringComponent& s,
+                           const glm::vec3& pos, float dt) {
     n.desired_velocity = glm::vec3(0);
     if (!s.has_last) { s.last_pos = pos; s.window_start = pos; s.has_last = true; }
-    if (!n.has_goal || !n.path_valid || n.path.empty()) { s.velocity = glm::vec3(0); return; }
+    if (!n.has_goal || !n.path_valid || n.path.empty()) { s.velocity = glm::vec3(0); s.horizontal_command_speed = 0.0f; n.route_age = 0.0f; return; }
+    n.route_age += std::max(dt, 0.0f);
     while (n.path_index < n.path.size()) {
         glm::vec3 to = n.path[n.path_index] - pos; to.y = 0;
         if (glm::length(to) < n.waypoint_radius) { ++n.path_index; continue; } break;
     }
-    if (n.path_index >= n.path.size()) { n.has_goal = false; s.velocity = glm::vec3(0); return; }
+    if (n.path_index >= n.path.size()) { n.has_goal = false; s.velocity = glm::vec3(0); s.horizontal_command_speed = 0.0f; return; }
     glm::vec3 target = n.path[n.path_index];
     glm::vec3 to = target - pos; to.y = 0; float dist = glm::length(to);
     glm::vec3 final_to = n.goal - pos; final_to.y = 0; float final_dist = glm::length(final_to);
@@ -294,13 +499,18 @@ inline void updateSteering(NavAgentComponent& n, SteeringComponent& s, const glm
     glm::vec3 delta = desired - s.velocity; float max_delta = n.max_accel * dt; float len = glm::length(delta);
     s.velocity = len > max_delta && len > 0.0f ? s.velocity + delta / len * max_delta : desired;
     n.desired_velocity = s.velocity;
+    s.horizontal_command_speed = glm::length(glm::vec2(n.desired_velocity.x, n.desired_velocity.z));
     // Stuck: commanded >1 m/s but <0.15 m displacement over 0.75 s window.
-    s.stuck_window_time += dt;
-    if (s.stuck_window_time >= 0.75f) {
+    const float elapsed = std::max(dt, 0.0f);
+    s.stuck_window_time += elapsed;
+    if (elapsed > 0.0f && s.stuck_window_ticks < kBotLocalBlockConfirmTicks)
+        ++s.stuck_window_ticks;
+    if (s.stuck_window_ticks >= kBotLocalBlockConfirmTicks ||
+        s.stuck_window_time + 0.00001f >= kBotLocalBlockConfirmSeconds) {
         glm::vec3 disp = pos - s.window_start; disp.y = 0;
-        n.stuck = glm::length(n.desired_velocity) > 1.0f && glm::length(disp) < 0.15f;
+        n.stuck = s.horizontal_command_speed > kBotStuckCommandSpeed && glm::length(disp) < 0.15f;
         s.stuck_time = n.stuck ? s.stuck_time + s.stuck_window_time : 0.0f;
-        s.window_start = pos; s.stuck_window_time = 0;
+        s.window_start = pos; s.stuck_window_time = 0; s.stuck_window_ticks = 0;
     }
     s.last_pos = pos;
 }

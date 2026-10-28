@@ -204,6 +204,83 @@ bool testBotSteeringArrivalStuck()
     return pass(name);
 }
 
+bool testBotNavigationRecoveryValueRules()
+{
+    const std::string name = "Bot_NavigationRecoveryValueRules";
+    using namespace Bots;
+    if (std::string(navFailureCategoryName(NavFailureCategory::StartOffMesh)) != "start_off_mesh" ||
+        std::string(navFailureCategoryName(NavFailureCategory::QueryCapacity)) != "query_capacity" ||
+        std::string(localBlockDetailName(LocalBlockDetail::Crowd)) != "crowd")
+        return fail(name, "stable failure labels changed");
+
+    // Exercise the exact S4 branch that tickBots invokes.  It must not fire
+    // early, then must make LocalBlock win on the 45th 60 Hz tick even though
+    // the frozen steering window would also become eligible that tick.
+    NavAgentComponent nav;
+    SteeringComponent steer;
+    setPath(nav, {glm::vec3(0.0f), glm::vec3(8.0f, 0.0f, 0.0f)}, glm::vec3(8.0f, 0.0f, 0.0f));
+    const glm::vec3 frozen(0.0f);
+    for (int i = 0; i < 44; ++i) {
+        if (tickNavigationRecovery(nav, steer, frozen, LocalBlockDetail::Static,
+                                   1.0f / 60.0f).category != NavFailureCategory::None)
+            return fail(name, "static probe recovered before 45 fixed ticks");
+    }
+    const NavigationRecoveryResult local = tickNavigationRecovery(
+        nav, steer, frozen, LocalBlockDetail::Static, 1.0f / 60.0f);
+    if (local.category != NavFailureCategory::LocalBlock ||
+        local.detail != LocalBlockDetail::Static || nav.last_failure != local.category ||
+        nav.recovery_count != 1 || nav.path_valid || nav.has_goal ||
+        nav.desired_velocity != glm::vec3(0.0f) ||
+        nav.repath_timer <= nav.repath_cooldown || nav.local_block_detail != LocalBlockDetail::None)
+        return fail(name, "local recovery did not win the shared fixed-tick interval");
+
+    // A changed detail and clear probe restart confirmation. A continuous
+    // crowd probe gets its own LocalBlock detail, never a second category.
+    setPath(nav, {glm::vec3(0.0f), glm::vec3(8.0f, 0.0f, 0.0f)}, glm::vec3(8.0f, 0.0f, 0.0f));
+    for (int i = 0; i < 44; ++i)
+        if (observeLocalBlock(nav, LocalBlockDetail::Crowd, 1.0f / 60.0f))
+            return fail(name, "crowd probe recovered early");
+    if (observeLocalBlock(nav, LocalBlockDetail::Static, 1.0f / 60.0f) ||
+        observeLocalBlock(nav, LocalBlockDetail::None, 1.0f / 60.0f))
+        return fail(name, "changed or clear probe did not restart confirmation");
+    NavAgentComponent crowd_nav;
+    SteeringComponent crowd_steer;
+    setPath(crowd_nav, {glm::vec3(0.0f), glm::vec3(8.0f, 0.0f, 0.0f)}, glm::vec3(8.0f, 0.0f, 0.0f));
+    for (int i = 0; i < 44; ++i)
+        if (tickNavigationRecovery(crowd_nav, crowd_steer, frozen,
+                                   LocalBlockDetail::Crowd, 1.0f / 60.0f).category != NavFailureCategory::None)
+            return fail(name, "crowd branch recovered early");
+    const NavigationRecoveryResult crowd = tickNavigationRecovery(
+        crowd_nav, crowd_steer, frozen, LocalBlockDetail::Crowd, 1.0f / 60.0f);
+    if (crowd.category != NavFailureCategory::LocalBlock ||
+        crowd.detail != LocalBlockDetail::Crowd || crowd_nav.recovery_count != 1)
+        return fail(name, "continuous crowd probe did not recover as LocalBlock");
+
+    // With no confirmed probe, the same frozen 45-tick steering window is a
+    // distinct Stuck episode.
+    NavAgentComponent stuck_nav;
+    SteeringComponent stuck_steer;
+    setPath(stuck_nav, {glm::vec3(0.0f), glm::vec3(8.0f, 0.0f, 0.0f)}, glm::vec3(8.0f, 0.0f, 0.0f));
+    for (int i = 0; i < 44; ++i)
+        if (tickNavigationRecovery(stuck_nav, stuck_steer, frozen, LocalBlockDetail::None,
+                                   1.0f / 60.0f).category != NavFailureCategory::None)
+            return fail(name, "unblocked frozen bot recovered early");
+    const NavigationRecoveryResult stuck = tickNavigationRecovery(
+        stuck_nav, stuck_steer, frozen, LocalBlockDetail::None, 1.0f / 60.0f);
+    if (stuck.category != NavFailureCategory::Stuck ||
+        stuck_nav.last_failure != NavFailureCategory::Stuck ||
+        stuck_nav.recovery_count != 1 || stuck.detail != LocalBlockDetail::None)
+        return fail(name, "unblocked frozen bot did not produce only Stuck");
+
+    NavAgentComponent range_nav;
+    range_nav.max_speed = 5.0f;
+    range_nav.repath_cooldown = 0.25f;
+    if (!botApprox(localBlockProbeRange(0.3f, range_nav), 1.25f) ||
+        !botApprox(localBlockProbeRange(1.0f, range_nav), 2.05f))
+        return fail(name, "probe range did not use capsule and backoff bounds");
+    return pass(name);
+}
+
 bool testBotBoundedPathScheduling()
 {
     const std::string name = "Bot_BoundedPathScheduling";

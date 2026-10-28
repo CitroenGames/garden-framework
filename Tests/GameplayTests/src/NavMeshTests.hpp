@@ -45,6 +45,62 @@ static bool makeGroundNavMesh(Navigation::NavMesh& out, Navigation::NavMeshGener
     return out.valid && out.total_polys > 0;
 }
 
+static void appendFlatNavQuad(std::vector<vertex>& backing, float min_x, float max_x,
+                              float min_z, float max_z)
+{
+    const auto add = [&](float x, float z) {
+        backing.push_back({x, 0.f, z, 0.f, 1.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 1.f});
+    };
+    add(min_x, min_z); add(max_x, max_z); add(max_x, min_z);
+    add(min_x, min_z); add(min_x, max_z); add(max_x, max_z);
+}
+
+static Navigation::NavMeshConfig navigationAdmissionFixtureConfig()
+{
+    Navigation::NavMeshConfig cfg;
+    cfg.agent_height = 1.8f; cfg.agent_radius = 0.35f; cfg.cell_size = 0.25f;
+    cfg.cell_height = 0.2f; cfg.max_climb = 0.5f; cfg.max_edge_len = 2.0f;
+    return cfg;
+}
+
+// Two projected islands with an eight metre gap.  Detour must distinguish
+// this topology miss from a production query capacity limit.
+static bool makeDisconnectedAdmissionNavMesh(
+    Navigation::NavMesh& out, Navigation::NavMeshGenerator::GenerationStats& stats)
+{
+    std::vector<vertex> backing;
+    appendFlatNavQuad(backing, -16.f, -4.f, -4.f, 4.f);
+    appendFlatNavQuad(backing, 4.f, 16.f, -4.f, 4.f);
+    auto ground = std::make_shared<mesh>(backing.data(), backing.size());
+    entt::registry reg;
+    const entt::entity entity = reg.create();
+    reg.emplace<TransformComponent>(entity, TransformComponent(0.f, 0.f, 0.f));
+    reg.emplace<MeshComponent>(entity, MeshComponent{ground});
+    out = Navigation::NavMeshGenerator::generate(reg, navigationAdmissionFixtureConfig(), &stats);
+    return out.valid && out.total_polys > 1;
+}
+
+// A 600 m, two metre-wide corridor forces the bounded 256-poly production
+// query to exhaust while the diagnostic query can complete with its expanded
+// corridor and node capacities.
+static bool makeCapacityAdmissionNavMesh(
+    Navigation::NavMesh& out, Navigation::NavMeshGenerator::GenerationStats& stats)
+{
+    std::vector<vertex> backing;
+    backing.reserve(300u * 6u);
+    for (int segment = 0; segment < 300; ++segment) {
+        const float min_x = -300.f + static_cast<float>(segment) * 2.f;
+        appendFlatNavQuad(backing, min_x, min_x + 2.f, -1.f, 1.f);
+    }
+    auto ground = std::make_shared<mesh>(backing.data(), backing.size());
+    entt::registry reg;
+    const entt::entity entity = reg.create();
+    reg.emplace<TransformComponent>(entity, TransformComponent(0.f, 0.f, 0.f));
+    reg.emplace<MeshComponent>(entity, MeshComponent{ground});
+    out = Navigation::NavMeshGenerator::generate(reg, navigationAdmissionFixtureConfig(), &stats);
+    return out.valid && out.total_polys > 256;
+}
+
 bool testNavMeshGenerateAndSerializerRoundTrip()
 {
     const std::string name = "NavMesh_GenerateSerializerRoundTrip";
@@ -80,6 +136,83 @@ bool testNavMeshFindPathTwoPoly()
     if (glm::distance(path.waypoints.back(), glm::vec3(8.f, 0.f, 0.f)) > 1.5f) return fail(name, "path does not end near goal");
     Navigation::NavPath bad = Navigation::NavMeshPathfinder::findPath(mesh, glm::vec3(500.f, 0.f, 500.f), glm::vec3(8.f, 0.f, 0.f));
     if (bad.valid) return fail(name, "findPath from off-mesh point unexpectedly valid");
+    return pass(name);
+}
+
+bool testBotNavigationAdmissionClassification()
+{
+    const std::string name = "Bot_NavigationAdmissionClassification";
+    using namespace Bots;
+
+    Navigation::NavMeshGenerator::GenerationStats ground_stats;
+    Navigation::NavMesh ground;
+    if (!makeGroundNavMesh(ground, ground_stats))
+        return fail(name, "ground fixture generation failed");
+    glm::vec3 projected{};
+    const bool start_projected = Navigation::NavMeshPathfinder::findNearestPoly(
+        ground, glm::vec3(-8.f, 0.f, 0.f), projected);
+    const bool goal_projected = Navigation::NavMeshPathfinder::findNearestPoly(
+        ground, glm::vec3(8.f, 0.f, 0.f), projected);
+    const bool off_mesh = Navigation::NavMeshPathfinder::findNearestPoly(
+        ground, glm::vec3(500.f, 0.f, 500.f), projected);
+    if (!start_projected || !goal_projected || off_mesh)
+        return fail(name, "endpoint projection fixture did not separate mesh and off-mesh points");
+    if (classifyNavAdmission(false, goal_projected, false, false, true, false).category !=
+            NavFailureCategory::StartOffMesh ||
+        classifyNavAdmission(false, false, false, false, true, false).category !=
+            NavFailureCategory::StartOffMesh ||
+        classifyNavAdmission(start_projected, false, false, false, true, false).category !=
+            NavFailureCategory::GoalOffMesh)
+        return fail(name, "endpoint projection categories or both-off-mesh precedence changed");
+
+    Navigation::NavMeshGenerator::GenerationStats disconnected_stats;
+    Navigation::NavMesh disconnected;
+    if (!makeDisconnectedAdmissionNavMesh(disconnected, disconnected_stats))
+        return fail(name, "disconnected topology fixture generation failed");
+    glm::vec3 disconnected_start{};
+    glm::vec3 disconnected_goal{};
+    if (!Navigation::NavMeshPathfinder::findNearestPoly(disconnected, glm::vec3(-10.f, 0.f, 0.f), disconnected_start) ||
+        !Navigation::NavMeshPathfinder::findNearestPoly(disconnected, glm::vec3(10.f, 0.f, 0.f), disconnected_goal))
+        return fail(name, "disconnected endpoints did not project");
+    const Navigation::NavPath disconnected_path = Navigation::NavMeshPathfinder::findPath(
+        disconnected, disconnected_start, disconnected_goal);
+    if (disconnected_path.valid || disconnected_path.query_capacity_exhausted ||
+        classifyNavAdmission(true, true, false, disconnected_path.query_capacity_exhausted,
+                             false, false).category != NavFailureCategory::NoPath)
+        return fail(name, "topology NoPath was mislabeled during the capacity cooldown");
+
+    Navigation::NavMeshGenerator::GenerationStats capacity_stats;
+    Navigation::NavMesh capacity;
+    if (!makeCapacityAdmissionNavMesh(capacity, capacity_stats))
+        return fail(name, "capacity fixture did not exceed production corridor capacity");
+    glm::vec3 capacity_start{};
+    glm::vec3 capacity_goal{};
+    if (!Navigation::NavMeshPathfinder::findNearestPoly(capacity, glm::vec3(-299.f, 0.f, 0.f), capacity_start) ||
+        !Navigation::NavMeshPathfinder::findNearestPoly(capacity, glm::vec3(299.f, 0.f, 0.f), capacity_goal))
+        return fail(name, "capacity endpoints did not project");
+    const Navigation::NavPath capacity_path = Navigation::NavMeshPathfinder::findPath(
+        capacity, capacity_start, capacity_goal);
+    if (capacity_path.valid || !capacity_path.query_capacity_exhausted)
+        return fail(name, "long corridor did not report production capacity exhaustion");
+    const NavAdmissionClassification awaiting_capacity = classifyNavAdmission(
+        true, true, false, capacity_path.query_capacity_exhausted, true, false);
+    if (awaiting_capacity.category != NavFailureCategory::NoPath || !awaiting_capacity.inspect_capacity)
+        return fail(name, "production capacity signal did not request bounded confirmation");
+    const Navigation::NavPathCapacityDiagnostic diagnostic =
+        Navigation::NavMeshPathfinder::diagnosePathCapacity(capacity, capacity_start, capacity_goal);
+    const bool capacity_confirmed = diagnostic.endpoints_projected &&
+        (diagnostic.current.buffer_too_small || diagnostic.current.out_of_nodes) &&
+        diagnostic.expanded_query_initialized && !diagnostic.expanded.failed &&
+        !diagnostic.expanded.partial && !diagnostic.expanded.buffer_too_small &&
+        !diagnostic.expanded.out_of_nodes && diagnostic.expanded.corridor_count > 0;
+    if (!capacity_confirmed || classifyNavAdmission(true, true, false, true, true, true).category !=
+            NavFailureCategory::QueryCapacity)
+        return fail(name, "expanded capacity confirmation did not produce QueryCapacity");
+    const NavAdmissionClassification suppressed_capacity = classifyNavAdmission(
+        true, true, false, true, false, false);
+    if (suppressed_capacity.category != NavFailureCategory::QueryCapacity ||
+        !suppressed_capacity.capacity_inspection_suppressed)
+        return fail(name, "evidenced capacity did not retain its suppressed category");
     return pass(name);
 }
 
@@ -155,6 +288,63 @@ bool testBotNavWorldResourceLifecycle()
     }
 
     std::filesystem::remove_all(directory, ec);
+    return pass(name);
+}
+
+bool testBotNavigationDiagnosticWorldIsolation()
+{
+    const std::string name = "Bot_NavigationDiagnosticWorldIsolation";
+    Bots::BotWorldRuntime first;
+    Bots::BotWorldRuntime second;
+
+    // Append order remains stable across wrap and retains no route position,
+    // waypoint, target, or entity identity in the per-world record.
+    for (uint32_t tick = 1; tick <= 65; ++tick) {
+        const Bots::NavFailureCategory category = (tick & 1u)
+            ? Bots::NavFailureCategory::NoPath : Bots::NavFailureCategory::LocalBlock;
+        first.recordNavigationDiagnostic(tick, 7, category,
+            category == Bots::NavFailureCategory::LocalBlock
+                ? Bots::LocalBlockDetail::Static : Bots::LocalBlockDetail::Crowd,
+            tick / 4u);
+    }
+    if (first.navigation_diagnostics.size() != Bots::NavigationDiagnosticRing::kCapacity ||
+        first.navigation_diagnostics.oldest().tick != 2 ||
+        first.navigation_diagnostics.newest().tick != 65 ||
+        first.navigation_diagnostics.at(0).detail != Bots::LocalBlockDetail::Static ||
+        first.navigation_diagnostics.at(1).detail != Bots::LocalBlockDetail::None)
+        return fail(name, "diagnostic ring did not retain stable bounded records");
+
+    // Capacity inspection gates belong to a world. A suppressed new episode
+    // increments only that world's counter, then opens after 60 fixed ticks.
+    if (!first.beginCapacityDiagnostic(10) || first.beginCapacityDiagnostic(11) ||
+        first.capacity_diagnostic_calls != 1 || first.capacity_diagnostic_suppressions != 1 ||
+        !first.beginCapacityDiagnostic(70))
+        return fail(name, "capacity diagnostic gate did not rate limit at fixed ticks");
+    if (!second.beginCapacityDiagnostic(11) || second.capacity_diagnostic_calls != 1 ||
+        second.capacity_diagnostic_suppressions != 0)
+        return fail(name, "capacity diagnostic state leaked between worlds");
+
+    const std::string snapshot = first.formatNavigationDiagnosticSnapshot();
+    for (const char* field : {"[BotDebug] navigation_diagnostics", "count=64", "recoveries=0",
+                              "capacity_calls=2", "capacity_suppressions=1", "last_tick=65",
+                              "last_bot=7", "last_category=no_path", "last_detail=none",
+                              "last_recovery=16", "last_capacity_suppressed=0"}) {
+        if (snapshot.find(field) == std::string::npos)
+            return fail(name, std::string("navigation snapshot missing field: ") + field);
+    }
+    for (const char* forbidden : {"pos=", "path=", "target=", "hit=", "entity=", "peer="}) {
+        if (snapshot.find(forbidden) != std::string::npos)
+            return fail(name, std::string("navigation snapshot leaked field: ") + forbidden);
+    }
+
+    first.navigation_recoveries = 3;
+    first.reset();
+    if (first.navigation_diagnostics.size() != 0 || first.capacity_diagnostic_calls != 0 ||
+        first.capacity_diagnostic_suppressions != 0 || first.navigation_recoveries != 0 ||
+        !first.beginCapacityDiagnostic(0))
+        return fail(name, "world reset retained navigation diagnostic state");
+    if (second.navigation_diagnostics.size() != 0 || second.capacity_diagnostic_calls != 1)
+        return fail(name, "first world reset changed second world diagnostic state");
     return pass(name);
 }
 
