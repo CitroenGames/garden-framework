@@ -62,6 +62,11 @@ namespace FPSShooter
     {
         uint32_t world_item_id = 0;
         uint64_t receipt_generation = 0;
+        // The owner-only WEAPON_STATE generation that had already been
+        // accepted when this removal was applied.  A later owner receipt can
+        // therefore be tied to this exact removal even when both messages are
+        // drained before the next action-script tick.
+        uint64_t owner_weapon_state_generation_at_receipt = 0;
     };
 
     // A durable receipt cache is separate from presentation rows so a pickup
@@ -171,6 +176,9 @@ namespace FPSShooter
         bool canWaitForBombPlanted(const ClientAcceptanceObservation& observation) const;
         const ClientAcceptanceWorldItem* findWorldItem(
             uint32_t world_item_id, const ClientAcceptanceObservation& observation) const;
+        const ClientAcceptanceWorldItemRemoval* findWorldItemRemovalAfter(
+            uint32_t world_item_id, uint64_t receipt_generation,
+            const ClientAcceptanceObservation& observation) const;
         bool hasWorldItemRemovalAfter(uint32_t world_item_id, uint64_t receipt_generation,
                                       const ClientAcceptanceObservation& observation) const;
         const ClientAcceptanceWorldItemWeaponReceipt* findWorldItemWeaponReceipt(
@@ -192,6 +200,13 @@ namespace FPSShooter
         float m_move_forward = 0.0f;
         uint64_t m_move_start_snapshot_generation = 0;
         uint64_t m_world_item_removal_start_generation = 0;
+        // A target remove observed only after ordinary steering must survive
+        // the transition to the following receipt action.  It is evidence of
+        // disappearance, not evidence that this client won the pickup.
+        uint32_t m_causal_world_item_removal_id = 0;
+        uint64_t m_causal_world_item_removal_generation = 0;
+        uint64_t m_causal_world_item_removal_weapon_state_generation = 0;
+        uint32_t m_causal_world_item_removal_input_tick = 0;
         uint64_t m_weapon_state_wait_start_generation = 0;
         WeaponType m_expected_weapon_type = WeaponType::COUNT;
         // The first ordinary command emitted after the waypoint's steering
@@ -319,6 +334,10 @@ namespace FPSShooter
         m_move_forward = 0.0f;
         m_move_start_snapshot_generation = 0;
         m_world_item_removal_start_generation = 0;
+        m_causal_world_item_removal_id = 0;
+        m_causal_world_item_removal_generation = 0;
+        m_causal_world_item_removal_weapon_state_generation = 0;
+        m_causal_world_item_removal_input_tick = 0;
         m_weapon_state_wait_start_generation = 0;
         m_expected_weapon_type = WeaponType::COUNT;
         m_move_steering_input_tick = 0;
@@ -551,15 +570,23 @@ namespace FPSShooter
         return item == observation.world_items.end() ? nullptr : &*item;
     }
 
-    inline bool ClientAcceptanceScript::hasWorldItemRemovalAfter(
+    inline const ClientAcceptanceWorldItemRemoval* ClientAcceptanceScript::findWorldItemRemovalAfter(
         uint32_t world_item_id, uint64_t receipt_generation,
         const ClientAcceptanceObservation& observation) const
     {
-        return std::any_of(observation.world_item_removals.begin(), observation.world_item_removals.end(),
+        const auto removal = std::find_if(observation.world_item_removals.begin(), observation.world_item_removals.end(),
             [world_item_id, receipt_generation](const ClientAcceptanceWorldItemRemoval& removal) {
                 return removal.world_item_id == world_item_id &&
                     removal.receipt_generation > receipt_generation;
             });
+        return removal == observation.world_item_removals.end() ? nullptr : &*removal;
+    }
+
+    inline bool ClientAcceptanceScript::hasWorldItemRemovalAfter(
+        uint32_t world_item_id, uint64_t receipt_generation,
+        const ClientAcceptanceObservation& observation) const
+    {
+        return findWorldItemRemovalAfter(world_item_id, receipt_generation, observation) != nullptr;
     }
 
     inline const ClientAcceptanceWorldItemWeaponReceipt* ClientAcceptanceScript::findWorldItemWeaponReceipt(
@@ -637,6 +664,34 @@ namespace FPSShooter
     inline void ClientAcceptanceScript::advanceAction()
     {
         ++m_index;
+        if (m_causal_world_item_removal_id != 0) {
+            // A pickup receipt may be observed while ordinary movement is
+            // still the active action. Keep that exact remove boundary across
+            // the documented acknowledgement path:
+            // move -> wait removed -> select slot -> wait item weapon state.
+            // The final wait still requires a newer matching owner-only
+            // WEAPON_STATE, so neither the remove nor an old owner state can
+            // complete the pickup action on its own.
+            size_t candidate_index = m_index;
+            if (candidate_index < m_actions.size() &&
+                m_actions[candidate_index].kind == ClientAcceptanceActionKind::WaitWorldItemRemoved &&
+                m_actions[candidate_index].world_item_id == m_causal_world_item_removal_id) {
+                ++candidate_index;
+            }
+            if (candidate_index < m_actions.size() &&
+                m_actions[candidate_index].kind == ClientAcceptanceActionKind::SelectSlot) {
+                ++candidate_index;
+            }
+            const bool next_action_can_consume_causal_removal = candidate_index < m_actions.size() &&
+                m_actions[candidate_index].kind == ClientAcceptanceActionKind::WaitWeaponStateFromItem &&
+                m_actions[candidate_index].world_item_id == m_causal_world_item_removal_id;
+            if (!next_action_can_consume_causal_removal) {
+                m_causal_world_item_removal_id = 0;
+                m_causal_world_item_removal_generation = 0;
+                m_causal_world_item_removal_weapon_state_generation = 0;
+                m_causal_world_item_removal_input_tick = 0;
+            }
+        }
         m_state = State::Ready;
         m_elapsed_seconds = 0.0f;
         m_move_yaw = 0.0f;
@@ -705,6 +760,19 @@ namespace FPSShooter
                 LOG_ENGINE_INFO("[ACCEPT] wait_world_item_present begin line={} id={} timeout_ms={}",
                     action.source_line, action.world_item_id, action.duration_ms);
             } else if (action.kind == ClientAcceptanceActionKind::WaitWorldItemRemoved) {
+                if (m_causal_world_item_removal_id == action.world_item_id) {
+                    LOG_ENGINE_INFO(
+                        "[ACCEPT] wait_world_item_removed acknowledged movement-causal receipt line={} id={} receipt={} input_tick={}",
+                        action.source_line, action.world_item_id, m_causal_world_item_removal_generation,
+                        m_causal_world_item_removal_input_tick);
+                    // Keep the receipt boundary until the documented later
+                    // wait_weapon_state_from_item claims it. This lets an
+                    // intervening ordinary select-slot acknowledgement arrive
+                    // before the item-state wait begins without erasing the
+                    // causal pickup boundary.
+                    advanceAction();
+                    return dispatch;
+                }
                 if (!observation.connected || !observation.has_world_item_presentation_world ||
                     !findWorldItem(action.world_item_id, observation)) return dispatch;
                 m_state = State::WaitingForWorldItemRemoved;
@@ -720,6 +788,11 @@ namespace FPSShooter
                 m_state = State::RunningMoveToWorldItemLive;
                 m_elapsed_seconds = 0.0f;
                 m_move_start_snapshot_generation = observation.authoritative_pawn_snapshot_generation;
+                m_world_item_removal_start_generation = observation.world_item_receipt_generation;
+                m_causal_world_item_removal_id = 0;
+                m_causal_world_item_removal_generation = 0;
+                m_causal_world_item_removal_weapon_state_generation = 0;
+                m_causal_world_item_removal_input_tick = 0;
                 m_move_steering_input_tick = 0;
                 updateMoveYaw(action, observation);
                 LOG_ENGINE_INFO("[ACCEPT] move_to_world_item_live begin line={} id={} x={} z={} tolerance={} timeout_ms={}",
@@ -756,7 +829,23 @@ namespace FPSShooter
                 }
                 m_state = State::WaitingForWeaponState;
                 m_elapsed_seconds = 0.0f;
-                m_weapon_state_wait_start_generation = observation.authoritative_weapon_state_generation;
+                // If a move action reached an accepted target removal in the
+                // preceding tick, retain the generation captured by the
+                // removal callback. This accepts only an owner state received
+                // after that exact removal, even if the transport drained both
+                // messages before this action first runs. Removal alone never
+                // completes this weapon wait.
+                if (action.kind == ClientAcceptanceActionKind::WaitWeaponStateFromItem &&
+                    m_causal_world_item_removal_id == action.world_item_id) {
+                    m_weapon_state_wait_start_generation =
+                        m_causal_world_item_removal_weapon_state_generation;
+                    m_causal_world_item_removal_id = 0;
+                    m_causal_world_item_removal_generation = 0;
+                    m_causal_world_item_removal_weapon_state_generation = 0;
+                    m_causal_world_item_removal_input_tick = 0;
+                } else {
+                    m_weapon_state_wait_start_generation = observation.authoritative_weapon_state_generation;
+                }
                 LOG_ENGINE_INFO("[ACCEPT] wait_weapon_state begin line={} expected_weapon={} timeout_ms={}",
                     action.source_line, static_cast<unsigned>(m_expected_weapon_type), action.duration_ms);
             } else if (action.kind == ClientAcceptanceActionKind::WaitBombPlanted) {
@@ -883,6 +972,27 @@ namespace FPSShooter
         case State::RunningMoveToWorldItemLive: {
             const ClientAcceptanceWorldItem* item = findWorldItem(action.world_item_id, observation);
             if (!item || !observation.has_world_item_presentation_world) {
+                const ClientAcceptanceWorldItemRemoval* removal = findWorldItemRemovalAfter(
+                    action.world_item_id, m_world_item_removal_start_generation, observation);
+                if (removal && m_move_steering_input_tick != 0) {
+                    // A matching, newer removal after an actual ordinary
+                    // steering command can race the final reconciliation
+                    // snapshot. Carry only the receipt identity, its ordering
+                    // boundary, and the command tick to the next action. Do
+                    // not treat this as a pickup: the following owner-only
+                    // WEAPON_STATE still has to match the cached item type.
+                    m_causal_world_item_removal_id = removal->world_item_id;
+                    m_causal_world_item_removal_generation = removal->receipt_generation;
+                    m_causal_world_item_removal_weapon_state_generation =
+                        removal->owner_weapon_state_generation_at_receipt;
+                    m_causal_world_item_removal_input_tick = m_move_steering_input_tick;
+                    LOG_ENGINE_INFO(
+                        "[ACCEPT] move_to_world_item_live observed movement-causal target removal line={} id={} receipt={} input_tick={} owner_weapon_generation={}",
+                        action.source_line, action.world_item_id, removal->receipt_generation,
+                        m_move_steering_input_tick, removal->owner_weapon_state_generation_at_receipt);
+                    advanceAction();
+                    return dispatch;
+                }
                 disable("client action script stopped: move_to_world_item_live item disappeared on line " +
                     std::to_string(action.source_line));
                 return dispatch;

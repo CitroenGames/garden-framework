@@ -300,13 +300,22 @@ static void bindWorldItemVisual(entt::registry& registry, uint32_t world_item_id
 // Acceptance-only receipts mirror successful application to the local
 // presentation index. They never drive gameplay or send a client message.
 static uint64_t g_world_item_receipt_generation = 0;
+// Counts accepted owner-only WEAPON_STATE receipts for causal acceptance waits.
+// It is declared with the receipt cache because a world-item removal records
+// the exact owner-state boundary observed at its callback.
+static uint64_t g_authoritative_weapon_state_generation = 0;
 struct WorldItemAcceptanceUpsertReceipt
 {
     uint64_t generation = 0;
     WeaponType weapon_type = WeaponType::COUNT;
 };
 static std::unordered_map<uint32_t, WorldItemAcceptanceUpsertReceipt> g_world_item_upsert_receipts;
-static std::unordered_map<uint32_t, uint64_t> g_world_item_remove_receipts;
+struct WorldItemAcceptanceRemoveReceipt
+{
+    uint64_t generation = 0;
+    uint64_t owner_weapon_state_generation_at_receipt = 0;
+};
+static std::unordered_map<uint32_t, WorldItemAcceptanceRemoveReceipt> g_world_item_remove_receipts;
 
 static void clearWorldItemAcceptanceReceipts()
 {
@@ -342,8 +351,6 @@ static int32_t g_local_reserve_ammo = 90;
 static int32_t g_local_max_reserve_ammo = 90;
 static bool g_local_reloading = false;
 static bool g_has_authoritative_weapon_snapshot = false;
-// Counts accepted owner-only WEAPON_STATE receipts for causal acceptance waits.
-static uint64_t g_authoritative_weapon_state_generation = 0;
 static float g_local_fire_cooldown = 0.0f;
 static float g_local_accuracy_penalty = 0.0f;
 static float g_local_recoil_index = 0.0f;
@@ -743,8 +750,11 @@ GAME_API bool gardenGameInit(EngineServices* services)
                 LOG_ENGINE_WARN("Ignoring invalid WORLD_ITEM_REMOVE id={}", msg.world_item_id);
                 return;
             }
-            if (result == FpsLogic::WorldItemPresentationRemoveResult::Removed)
-                g_world_item_remove_receipts[msg.world_item_id] = ++g_world_item_receipt_generation;
+            if (result == FpsLogic::WorldItemPresentationRemoveResult::Removed) {
+                g_world_item_remove_receipts[msg.world_item_id] = {
+                    ++g_world_item_receipt_generation, g_authoritative_weapon_state_generation
+                };
+            }
             LOG_ENGINE_INFO("WORLD_ITEM_REMOVE accepted id={} result={}",
                 msg.world_item_id,
                 result == FpsLogic::WorldItemPresentationRemoveResult::Removed ? "removed" : "unknown_remove");
@@ -1011,8 +1021,10 @@ GAME_API void gardenGameUpdate(float delta_time)
             });
         }
         acceptance_observation.world_item_removals.reserve(g_world_item_remove_receipts.size());
-        for (const auto& [world_item_id, receipt_generation] : g_world_item_remove_receipts)
-            acceptance_observation.world_item_removals.push_back({ world_item_id, receipt_generation });
+        for (const auto& [world_item_id, receipt] : g_world_item_remove_receipts)
+            acceptance_observation.world_item_removals.push_back({
+                world_item_id, receipt.generation, receipt.owner_weapon_state_generation_at_receipt
+            });
         acceptance_observation.world_item_weapon_receipts.reserve(g_world_item_upsert_receipts.size());
         for (const auto& [world_item_id, receipt] : g_world_item_upsert_receipts) {
             acceptance_observation.world_item_weapon_receipts.push_back({

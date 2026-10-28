@@ -3707,6 +3707,187 @@ bool testClientAcceptanceScriptWorldItemActions()
     if (script.active())
         return fail_with_cleanup("world-item movement continued after the accepted presentation disappeared");
 
+    // A target can be removed by the authoritative pickup pass after an
+    // ordinary steering command but before the next reconciliation snapshot.
+    // Preserve that specific removal boundary so a following owner receipt is
+    // still observable. The remove itself must not complete the script.
+    if (!writeClientAcceptanceScript(script_path,
+        "move_to_world_item_live 91 0.5 1000\n"
+        "wait_weapon_state_from_item 91 100\n") ||
+        !script_environment.set(script_path.string().c_str())) {
+        return fail_with_cleanup("could not configure causal world-item removal script");
+    }
+    script.loadFromEnvironment();
+    observation.authoritative_pawn_position_x = 0.0f;
+    observation.authoritative_pawn_position_z = 0.0f;
+    observation.authoritative_pawn_snapshot_generation = 7;
+    observation.last_authoritative_input_tick = 10;
+    observation.authoritative_weapon_state_generation = 40;
+    observation.authoritative_weapon_type = WeaponType::RIFLE;
+    observation.world_item_receipt_generation = 10;
+    observation.world_item_weapon_receipts = {{91, WeaponType::P250, 10}};
+    observation.world_item_removals.clear();
+    observation.world_items = {{91, 10.0f, 0.0f, 10}};
+    script.tick(0.0f, observation);
+    Net::InputState causal_move_input;
+    script.applyInput(causal_move_input, true, true, true);
+    if ((causal_move_input.buttons & Net::InputFlags::MOVE_FORWARD) == 0)
+        return fail_with_cleanup("causal world-item removal test did not emit ordinary steering");
+    script.noteInputCommandSent(11, true, observation.authoritative_weapon_state_generation);
+    observation.world_items.clear();
+    observation.world_item_receipt_generation = 11;
+    observation.world_item_removals = {{91, 11, 40}};
+    script.tick(0.0f, observation); // accepts only the movement-causal target remove
+    if (!script.active())
+        return fail_with_cleanup("movement-causal target removal was treated as a completed pickup");
+    // This owner state is delivered after the removal but before the following
+    // script action starts. Its generation must remain eligible.
+    observation.authoritative_weapon_state_generation = 41;
+    observation.authoritative_weapon_type = WeaponType::P250;
+    script.tick(0.0f, observation); // starts cached-item wait at removal boundary
+    script.tick(0.0f, observation); // consumes newer matching owner receipt
+    if (script.active())
+        return fail_with_cleanup("remove-before-owner-state ordering lost the causal owner receipt");
+
+    // The runtime pickup script acknowledges the disappearance before it
+    // switches to the newly acquired slot. Both owner receipts can arrive
+    // before the final item-state wait starts, so that wait must retain the
+    // exact movement-causal removal boundary through the acknowledgement and
+    // select-slot action. It still needs a newer matching owner state.
+    if (!writeClientAcceptanceScript(script_path,
+        "move_to_world_item_live 96 0.5 1000\n"
+        "wait_world_item_removed 96 100\n"
+        "select_slot secondary 100\n"
+        "wait_weapon_state_from_item 96 100\n") ||
+        !script_environment.set(script_path.string().c_str())) {
+        return fail_with_cleanup("could not configure causal receipt handoff script");
+    }
+    script.loadFromEnvironment();
+    observation.authoritative_pawn_position_x = 0.0f;
+    observation.authoritative_pawn_position_z = 0.0f;
+    observation.authoritative_pawn_snapshot_generation = 8;
+    observation.last_authoritative_input_tick = 10;
+    observation.authoritative_weapon_state_generation = 80;
+    observation.authoritative_weapon_type = WeaponType::RIFLE;
+    observation.world_item_receipt_generation = 50;
+    observation.world_item_weapon_receipts = {{96, WeaponType::P250, 50}};
+    observation.world_item_removals.clear();
+    observation.world_items = {{96, 10.0f, 0.0f, 50}};
+    script.tick(0.0f, observation); // starts ordinary movement
+    Net::InputState handoff_move_input;
+    script.applyInput(handoff_move_input, true, true, true);
+    if ((handoff_move_input.buttons & Net::InputFlags::MOVE_FORWARD) == 0)
+        return fail_with_cleanup("causal receipt handoff test did not emit ordinary steering");
+    script.noteInputCommandSent(15, true, observation.authoritative_weapon_state_generation);
+    observation.world_items.clear();
+    observation.world_item_receipt_generation = 51;
+    observation.world_item_removals = {{96, 51, 80}};
+    script.tick(0.0f, observation); // carries the movement-causal removal
+    if (!script.active())
+        return fail_with_cleanup("causal receipt handoff treated removal as a completed pickup");
+    observation.authoritative_weapon_state_generation = 81;
+    observation.authoritative_weapon_type = WeaponType::P250;
+    script.tick(0.0f, observation); // acknowledges wait_world_item_removed
+    script.tick(0.0f, observation); // starts select_slot
+    Net::InputState handoff_select_input;
+    script.applyInput(handoff_select_input, true, true, true);
+    if (Net::getWeaponSelect(handoff_select_input.buttons) != 2)
+        return fail_with_cleanup("causal receipt handoff did not preserve the ordinary select-slot action");
+    script.noteInputCommandSent(16, false, observation.authoritative_weapon_state_generation);
+    observation.authoritative_weapon_state_generation = 82;
+    observation.authoritative_weapon_type = WeaponType::P250;
+    script.tick(0.0f, observation); // select receives its own newer owner receipt
+    script.tick(0.0f, observation); // starts item wait from the removal boundary
+    script.tick(0.0f, observation); // accepts the causal newer matching owner state
+    if (script.active())
+        return fail_with_cleanup("causal receipt handoff lost its removal boundary after select_slot");
+
+    // A matching target remove without a later owner receipt never proves that
+    // this client picked it up. It must time out even though the target was
+    // removed after ordinary steering.
+    if (!writeClientAcceptanceScript(script_path,
+        "move_to_world_item_live 92 0.5 100\n"
+        "wait_weapon_state_from_item 92 100\n") ||
+        !script_environment.set(script_path.string().c_str())) {
+        return fail_with_cleanup("could not configure no-owner-receipt world-item script");
+    }
+    script.loadFromEnvironment();
+    observation.authoritative_pawn_snapshot_generation = 8;
+    observation.authoritative_weapon_state_generation = 50;
+    observation.authoritative_weapon_type = WeaponType::RIFLE;
+    observation.world_item_receipt_generation = 20;
+    observation.world_item_weapon_receipts = {{92, WeaponType::P250, 20}};
+    observation.world_item_removals.clear();
+    observation.world_items = {{92, 10.0f, 0.0f, 20}};
+    script.tick(0.0f, observation);
+    Net::InputState no_owner_move_input;
+    script.applyInput(no_owner_move_input, true, true, true);
+    script.noteInputCommandSent(12, true, observation.authoritative_weapon_state_generation);
+    observation.world_items.clear();
+    observation.world_item_receipt_generation = 21;
+    observation.world_item_removals = {{92, 21, 50}};
+    script.tick(0.0f, observation);
+    script.tick(0.0f, observation); // starts owner wait using boundary generation 50
+    script.tick(0.1f, observation);
+    if (script.active())
+        return fail_with_cleanup("world-item removal alone satisfied pickup acceptance");
+
+    // An unrelated receipt, even paired with a matching owner weapon state,
+    // cannot convert a disappeared target into this client's pickup.
+    if (!writeClientAcceptanceScript(script_path,
+        "move_to_world_item_live 93 0.5 1000\n"
+        "wait_weapon_state_from_item 93 100\n") ||
+        !script_environment.set(script_path.string().c_str())) {
+        return fail_with_cleanup("could not configure unrelated-remove world-item script");
+    }
+    script.loadFromEnvironment();
+    observation.authoritative_pawn_snapshot_generation = 9;
+    observation.authoritative_weapon_state_generation = 60;
+    observation.authoritative_weapon_type = WeaponType::RIFLE;
+    observation.world_item_receipt_generation = 30;
+    observation.world_item_weapon_receipts = {{93, WeaponType::P250, 30}};
+    observation.world_item_removals.clear();
+    observation.world_items = {{93, 10.0f, 0.0f, 30}};
+    script.tick(0.0f, observation);
+    Net::InputState unrelated_move_input;
+    script.applyInput(unrelated_move_input, true, true, true);
+    script.noteInputCommandSent(13, true, observation.authoritative_weapon_state_generation);
+    observation.world_items.clear();
+    observation.world_item_receipt_generation = 31;
+    observation.world_item_removals = {{94, 31, 60}};
+    observation.authoritative_weapon_state_generation = 61;
+    observation.authoritative_weapon_type = WeaponType::P250;
+    script.tick(0.0f, observation);
+    if (script.active())
+        return fail_with_cleanup("unrelated world-item removal was accepted as the target pickup");
+
+    // The receipt must also be newer than the movement action's recorded
+    // world-item boundary. Replaying an old target removal cannot bridge this
+    // ordering gap.
+    if (!writeClientAcceptanceScript(script_path,
+        "move_to_world_item_live 95 0.5 1000\n"
+        "wait_weapon_state_from_item 95 100\n") ||
+        !script_environment.set(script_path.string().c_str())) {
+        return fail_with_cleanup("could not configure stale-remove world-item script");
+    }
+    script.loadFromEnvironment();
+    observation.authoritative_pawn_snapshot_generation = 10;
+    observation.authoritative_weapon_state_generation = 70;
+    observation.authoritative_weapon_type = WeaponType::RIFLE;
+    observation.world_item_receipt_generation = 40;
+    observation.world_item_weapon_receipts = {{95, WeaponType::P250, 40}};
+    observation.world_item_removals.clear();
+    observation.world_items = {{95, 10.0f, 0.0f, 40}};
+    script.tick(0.0f, observation);
+    Net::InputState stale_move_input;
+    script.applyInput(stale_move_input, true, true, true);
+    script.noteInputCommandSent(14, true, observation.authoritative_weapon_state_generation);
+    observation.world_items.clear();
+    observation.world_item_removals = {{95, 40, 70}};
+    script.tick(0.0f, observation);
+    if (script.active())
+        return fail_with_cleanup("stale world-item target removal was accepted after steering");
+
     if (!writeClientAcceptanceScript(script_path, "wait_world_item_present 90 100\n") ||
         !script_environment.set(script_path.string().c_str())) {
         return fail_with_cleanup("could not configure world-item timeout script");
