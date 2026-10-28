@@ -1,9 +1,11 @@
+include = AnimationTests/AnimationTests.buildscript
 include = PhysicsTests/PhysicsTests.buildscript
 include = NetworkStressTests/NetworkStressTests.buildscript
 include = ReflectionTests/ReflectionTests.buildscript
 include = InputTests/InputTests.buildscript
 include = GameplayTests/GameplayTests.buildscript
 include = PackagerTests/PackagerTests.buildscript
+include = AssetPipelineTests/AssetPipelineTests.buildscript
 include = ShadowTests/ShadowTests.buildscript
 include = ForwardPlusTests/ForwardPlusTests.buildscript
 include = PerfTests/PerfTests.buildscript
