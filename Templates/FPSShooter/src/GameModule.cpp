@@ -48,6 +48,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <memory>
 #include <utility>
 
@@ -200,6 +201,10 @@ static Net::ClientNetworkManager g_network;
 static FPSShooter::FixedNetworkInputCadence g_client_input_cadence;
 static GameHUD g_hud;
 static FPSShooter::ClientAcceptanceScript g_acceptance_script;
+// Latches supplied by the ordinary client reconciliation path. The acceptance
+// driver observes them but does not introduce a separate acknowledgement wire path.
+static uint64_t g_authoritative_pawn_snapshot_generation = 0;
+static uint32_t g_last_authoritative_input_tick = 0;
 
 static entt::entity g_player_entity = entt::null;
 static entt::entity g_local_input_entity = entt::null;
@@ -398,6 +403,8 @@ static void runFixedClientInputStep(world& game_world,
         uint32_t server_tick;
         if (g_network.popAuthoritativeUpdate(server_state, server_tick))
         {
+            ++g_authoritative_pawn_snapshot_generation;
+            g_last_authoritative_input_tick = server_tick;
             glm::vec3 old_display_pos = g_recon_smoothing.getDisplayPosition(trans.position);
             const float pos_error = glm::distance(server_state.position, trans.position);
             if (pos_error > 0.01f)
@@ -432,6 +439,7 @@ static void runFixedClientInputStep(world& game_world,
     }
 
     g_network.sendInputCommand(command_tick, input_state);
+    g_acceptance_script.noteInputCommandSent(command_tick);
 }
 
 static void updateRadarPresentation(world& game_world, bool connected, float delta_time)
@@ -489,6 +497,8 @@ GAME_API bool gardenGameInit(EngineServices* services)
     g_services = services;
     g_ui_modal_context_active = false;
     g_client_input_cadence.reset();
+    g_authoritative_pawn_snapshot_generation = 0;
+    g_last_authoritative_input_tick = 0;
     if (!configureFPShooterInput(*services->input_actions))
     {
         LOG_ENGINE_ERROR("Failed to register FPSShooter input actions");
@@ -524,7 +534,8 @@ GAME_API bool gardenGameInit(EngineServices* services)
             auto prev = g_comp.phase;
             if (!UiLogic::applyRoundState(g_comp, msg.phase, msg.phase_time_remaining,
                                           msg.round_number, msg.wins_attackers, msg.wins_defenders,
-                                          msg.bomb_planted != 0, msg.phase_deadline_tick, msg.server_tick))
+                                          msg.bomb_planted != 0, msg.phase_deadline_tick, msg.server_tick,
+                                          msg.last_reason))
                 return;
             if (g_comp.phase == Competitive::RoundPhase::MatchEnded) g_ui.screen = UiLogic::UiScreen::MatchEnd;
             else if (prev != g_comp.phase && g_ui.screen == UiLogic::UiScreen::Buy && !UiLogic::buyWindowOpen(g_comp)) {
@@ -714,6 +725,8 @@ GAME_API void gardenGameShutdown()
     g_network.shutdown();
     g_client_input_cadence.reset();
     g_acceptance_script.reset();
+    g_authoritative_pawn_snapshot_generation = 0;
+    g_last_authoritative_input_tick = 0;
     g_player_controller.reset();
     g_hud.shutdown();
     if (g_services && g_services->input_actions)
@@ -766,9 +779,23 @@ GAME_API void gardenGameUpdate(float delta_time)
     FPSShooter::ClientAcceptanceObservation acceptance_observation;
     acceptance_observation.connected = g_network.isConnected();
     acceptance_observation.has_round_state = g_comp.has_round_state;
+    acceptance_observation.bomb_planted = g_comp.bomb_planted;
     acceptance_observation.round_phase = g_comp.phase;
+    acceptance_observation.last_round_end_reason = g_comp.last_round_end_reason;
     acceptance_observation.local_team = g_comp.local_team;
     acceptance_observation.has_local_pawn = game_world->registry.valid(script_local_player);
+    if (acceptance_observation.has_local_pawn &&
+        game_world->registry.all_of<TransformComponent>(script_local_player)) {
+        const TransformComponent& local_transform =
+            game_world->registry.get<TransformComponent>(script_local_player);
+        acceptance_observation.has_local_transform = true;
+        acceptance_observation.local_position_x = local_transform.position.x;
+        acceptance_observation.local_position_z = local_transform.position.z;
+    }
+    acceptance_observation.authoritative_pawn_snapshot_generation =
+        g_authoritative_pawn_snapshot_generation;
+    acceptance_observation.last_authoritative_input_tick =
+        g_last_authoritative_input_tick;
     const FPSShooter::ClientAcceptanceDispatch acceptance_dispatch =
         g_acceptance_script.tick(delta_time, acceptance_observation);
     if (acceptance_dispatch.kind == FPSShooter::ClientAcceptanceDispatch::Kind::Team) {

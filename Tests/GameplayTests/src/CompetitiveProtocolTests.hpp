@@ -29,6 +29,7 @@ bool testCompetitiveProtocolStatePublication()
     round.wins_attackers = 8;
     round.wins_defenders = 5;
     round.bomb_planted = 1;
+    round.last_reason = static_cast<uint8_t>(Competitive::RoundEndReason::BombDefused);
 
     Net::BitWriter round_writer;
     CompetitiveSerializer::serialize(round_writer, round);
@@ -49,10 +50,13 @@ bool testCompetitiveProtocolStatePublication()
     UiLogic::ClientCompetitiveState client;
     UiLogic::applyRoundState(client, received_round.phase, received_round.phase_time_remaining,
                              received_round.round_number, received_round.wins_attackers,
-                             received_round.wins_defenders, received_round.bomb_planted != 0);
+                             received_round.wins_defenders, received_round.bomb_planted != 0,
+                             received_round.phase_deadline_tick, received_round.server_tick,
+                             received_round.last_reason);
     if (!client.has_round_state || client.phase != Competitive::RoundPhase::Live ||
         client.round_number != 14 || client.score_attackers != 8 ||
-        client.score_defenders != 5 || !client.bomb_planted) {
+        client.score_defenders != 5 || !client.bomb_planted ||
+        client.last_round_end_reason != Competitive::RoundEndReason::BombDefused) {
         return fail(name, "client round handler did not retain the server snapshot");
     }
 

@@ -12,6 +12,8 @@
 
 #include <algorithm>
 #include <charconv>
+#include <cmath>
+#include <limits>
 #include <cstddef>
 #include <cctype>
 #include <cstdlib>
@@ -30,6 +32,10 @@ namespace FPSShooter
         Team,
         Buy,
         Input,
+        MoveToLive,
+        WaitBombPlanted,
+        HoldUseLive,
+        HoldUseDefuse,
         Wait
     };
 
@@ -37,9 +43,20 @@ namespace FPSShooter
     {
         bool connected = false;
         bool has_round_state = false;
+        // ROUND_STATE is received on the existing reliable competitive channel.
+        bool bomb_planted = false;
         Competitive::RoundPhase round_phase = Competitive::RoundPhase::WaitingForPlayers;
+        Competitive::RoundEndReason last_round_end_reason = Competitive::RoundEndReason::None;
         Competitive::FpsTeam local_team = Competitive::FpsTeam::None;
         bool has_local_pawn = false;
+        // Only populated from the replicated/predicted local pawn Transform.
+        bool has_local_transform = false;
+        float local_position_x = 0.0f;
+        float local_position_z = 0.0f;
+        // These are latched only when the ordinary local-pawn reconciliation
+        // consumes a received WORLD_STATE_UPDATE.
+        uint64_t authoritative_pawn_snapshot_generation = 0;
+        uint32_t last_authoritative_input_tick = 0;
     };
 
     struct ClientAcceptanceDispatch
@@ -62,9 +79,13 @@ namespace FPSShooter
         void observeTeamResult(bool accepted, Competitive::FpsTeam assigned);
         void observeBuyResult(uint32_t request_sequence, bool accepted);
         void noteBuyRequestSent(uint32_t request_sequence);
+        // Called after the ordinary input command is queued for transport.
+        // It never sends an extra acceptance-only message.
+        void noteInputCommandSent(uint32_t command_tick);
 
         // Applies the active scripted INPUT_COMMAND intent after the ordinary
-        // action sampler has built its state. Camera fields are never changed.
+        // action sampler has built its state. move_to_live adjusts only the
+        // normal command yaw; all other script actions preserve camera fields.
         void applyInput(Net::InputState& state, bool movement_allowed, bool can_fire, bool can_reload) const;
 
         bool active() const { return m_enabled; }
@@ -77,16 +98,24 @@ namespace FPSShooter
             bool auto_assign = false;
             uint16_t item_id = 0;
             uint16_t input_buttons = 0;
+            float target_x = 0.0f;
+            float target_z = 0.0f;
+            float tolerance = 0.0f;
             uint32_t duration_ms = 0;
             uint32_t source_line = 0;
         };
 
-        enum class State : uint8_t { Ready, WaitingForTeamResult, WaitingForBuyResult, RunningInput, Waiting };
+        enum class State : uint8_t { Ready, WaitingForTeamResult, WaitingForBuyResult, RunningInput,
+            RunningMoveToLive, WaitingForBombPlanted, RunningHoldUseLive, RunningHoldUseDefuse, Waiting };
 
         bool loadFile(const char* path, std::string& error);
         void disable(const std::string& reason);
         bool canDispatchTeam(const ClientAcceptanceObservation& observation) const;
         bool canDispatchPawnAction(const ClientAcceptanceObservation& observation) const;
+        bool canRunLivePawnAction(const ClientAcceptanceObservation& observation) const;
+        bool canWaitForBombPlanted(const ClientAcceptanceObservation& observation) const;
+        bool moveHasAuthoritativeArrival(const ClientAcceptanceObservation& observation) const;
+        bool atMoveTarget(const Action& action, const ClientAcceptanceObservation& observation) const;
         void advanceAction();
 
         bool m_enabled = false;
@@ -94,6 +123,10 @@ namespace FPSShooter
         size_t m_index = 0;
         State m_state = State::Ready;
         float m_elapsed_seconds = 0.0f;
+        float m_move_yaw = 0.0f;
+        uint64_t m_move_start_snapshot_generation = 0;
+        uint32_t m_move_last_sent_input_tick = 0;
+        bool m_move_arrived = false;
         uint32_t m_expected_buy_sequence = 0;
     };
 }
@@ -103,6 +136,8 @@ namespace FPSShooter::ClientAcceptanceScriptDetail
     inline constexpr size_t kMaxActions = 128;
     inline constexpr size_t kMaxLineLength = 256;
     inline constexpr uint32_t kMaxDurationMs = 60000;
+    inline constexpr float kMaxMoveCoordinate = 100000.0f;
+    inline constexpr float kMaxMoveTolerance = 1000.0f;
 
     inline std::string trim(std::string text)
     {
@@ -118,6 +153,15 @@ namespace FPSShooter::ClientAcceptanceScriptDetail
         const char* end = begin + token.size();
         const auto [ptr, error] = std::from_chars(begin, end, out);
         return error == std::errc{} && ptr == end;
+    }
+
+    inline bool parseFiniteFloat(std::string_view token, float& out)
+    {
+        if (token.empty()) return false;
+        const char* begin = token.data();
+        const char* end = begin + token.size();
+        const auto [ptr, error] = std::from_chars(begin, end, out);
+        return error == std::errc{} && ptr == end && std::isfinite(out);
     }
 
     inline bool parseTeam(const std::string& token, Competitive::FpsTeam& team, bool& auto_assign)
@@ -176,6 +220,10 @@ namespace FPSShooter
         m_index = 0;
         m_state = State::Ready;
         m_elapsed_seconds = 0.0f;
+        m_move_yaw = 0.0f;
+        m_move_start_snapshot_generation = 0;
+        m_move_last_sent_input_tick = 0;
+        m_move_arrived = false;
         m_expected_buy_sequence = 0;
     }
 
@@ -232,6 +280,37 @@ namespace FPSShooter
                     return false;
                 }
                 action.kind = ClientAcceptanceActionKind::Wait;
+            } else if (tokens[0] == "move_to_live" && tokens.size() == 5) {
+                if (!parseFiniteFloat(tokens[1], action.target_x) ||
+                    !parseFiniteFloat(tokens[2], action.target_z) ||
+                    !parseFiniteFloat(tokens[3], action.tolerance) ||
+                    !parseUnsigned(tokens[4], action.duration_ms) ||
+                    std::abs(action.target_x) > kMaxMoveCoordinate ||
+                    std::abs(action.target_z) > kMaxMoveCoordinate ||
+                    action.tolerance <= 0.0f || action.tolerance > kMaxMoveTolerance ||
+                    action.duration_ms == 0 || action.duration_ms > kMaxDurationMs) {
+                    error = "client action script disabled: invalid move_to_live on line " + std::to_string(line_number);
+                    return false;
+                }
+                action.kind = ClientAcceptanceActionKind::MoveToLive;
+            } else if (tokens[0] == "wait_bomb_planted" && tokens.size() == 2) {
+                if (!parseUnsigned(tokens[1], action.duration_ms) || action.duration_ms == 0 || action.duration_ms > kMaxDurationMs) {
+                    error = "client action script disabled: invalid wait_bomb_planted timeout on line " + std::to_string(line_number);
+                    return false;
+                }
+                action.kind = ClientAcceptanceActionKind::WaitBombPlanted;
+            } else if (tokens[0] == "hold_use_live" && tokens.size() == 2) {
+                if (!parseUnsigned(tokens[1], action.duration_ms) || action.duration_ms == 0 || action.duration_ms > kMaxDurationMs) {
+                    error = "client action script disabled: invalid hold_use_live duration on line " + std::to_string(line_number);
+                    return false;
+                }
+                action.kind = ClientAcceptanceActionKind::HoldUseLive;
+            } else if (tokens[0] == "hold_use_defuse" && tokens.size() == 2) {
+                if (!parseUnsigned(tokens[1], action.duration_ms) || action.duration_ms == 0 || action.duration_ms > kMaxDurationMs) {
+                    error = "client action script disabled: invalid hold_use_defuse timeout on line " + std::to_string(line_number);
+                    return false;
+                }
+                action.kind = ClientAcceptanceActionKind::HoldUseDefuse;
             } else if (tokens[0] == "input" && tokens.size() >= 3) {
                 if (!parseUnsigned(tokens[1], action.duration_ms) || action.duration_ms == 0 || action.duration_ms > kMaxDurationMs) {
                     error = "client action script disabled: invalid input duration on line " + std::to_string(line_number);
@@ -284,11 +363,44 @@ namespace FPSShooter
             Competitive::isPlayingTeam(observation.local_team) && observation.has_local_pawn;
     }
 
+    inline bool ClientAcceptanceScript::canRunLivePawnAction(const ClientAcceptanceObservation& observation) const
+    {
+        return canDispatchPawnAction(observation) && observation.has_local_transform &&
+            observation.round_phase == Competitive::RoundPhase::Live;
+    }
+
+    inline bool ClientAcceptanceScript::canWaitForBombPlanted(const ClientAcceptanceObservation& observation) const
+    {
+        return canDispatchPawnAction(observation) &&
+            observation.round_phase == Competitive::RoundPhase::Live;
+    }
+
+    inline bool ClientAcceptanceScript::moveHasAuthoritativeArrival(const ClientAcceptanceObservation& observation) const
+    {
+        if (m_move_last_sent_input_tick == 0 ||
+            observation.authoritative_pawn_snapshot_generation <= m_move_start_snapshot_generation)
+            return false;
+        return static_cast<int32_t>(observation.last_authoritative_input_tick -
+            m_move_last_sent_input_tick) >= 0;
+    }
+
+    inline bool ClientAcceptanceScript::atMoveTarget(
+        const Action& action, const ClientAcceptanceObservation& observation) const
+    {
+        const float dx = action.target_x - observation.local_position_x;
+        const float dz = action.target_z - observation.local_position_z;
+        return dx * dx + dz * dz <= action.tolerance * action.tolerance;
+    }
+
     inline void ClientAcceptanceScript::advanceAction()
     {
         ++m_index;
         m_state = State::Ready;
         m_elapsed_seconds = 0.0f;
+        m_move_yaw = 0.0f;
+        m_move_start_snapshot_generation = 0;
+        m_move_last_sent_input_tick = 0;
+        m_move_arrived = false;
         m_expected_buy_sequence = 0;
         if (m_index == m_actions.size()) {
             m_enabled = false;
@@ -328,6 +440,38 @@ namespace FPSShooter
                 m_elapsed_seconds = 0.0f;
                 LOG_ENGINE_INFO("[ACCEPT] input begin line={} duration_ms={} buttons={}", action.source_line,
                     action.duration_ms, action.input_buttons);
+            } else if (action.kind == ClientAcceptanceActionKind::MoveToLive) {
+                if (!canRunLivePawnAction(observation)) return dispatch;
+                if (atMoveTarget(action, observation)) {
+                    LOG_ENGINE_INFO("[ACCEPT] move_to_live already arrived line={}", action.source_line);
+                    advanceAction();
+                    return dispatch;
+                }
+                m_state = State::RunningMoveToLive;
+                m_elapsed_seconds = 0.0f;
+                m_move_start_snapshot_generation = observation.authoritative_pawn_snapshot_generation;
+                m_move_last_sent_input_tick = 0;
+                m_move_arrived = false;
+                m_move_yaw = std::atan2(action.target_x - observation.local_position_x,
+                    action.target_z - observation.local_position_z);
+                LOG_ENGINE_INFO("[ACCEPT] move_to_live begin line={} x={} z={} tolerance={} timeout_ms={}",
+                    action.source_line, action.target_x, action.target_z, action.tolerance, action.duration_ms);
+            } else if (action.kind == ClientAcceptanceActionKind::WaitBombPlanted) {
+                if (!canWaitForBombPlanted(observation)) return dispatch;
+                m_state = State::WaitingForBombPlanted;
+                m_elapsed_seconds = 0.0f;
+                LOG_ENGINE_INFO("[ACCEPT] wait_bomb_planted begin line={} timeout_ms={}",
+                    action.source_line, action.duration_ms);
+            } else if (action.kind == ClientAcceptanceActionKind::HoldUseLive) {
+                if (!canRunLivePawnAction(observation)) return dispatch;
+                m_state = State::RunningHoldUseLive;
+                m_elapsed_seconds = 0.0f;
+                LOG_ENGINE_INFO("[ACCEPT] hold_use_live begin line={} duration_ms={}", action.source_line, action.duration_ms);
+            } else if (action.kind == ClientAcceptanceActionKind::HoldUseDefuse) {
+                if (!canRunLivePawnAction(observation) || !observation.bomb_planted) return dispatch;
+                m_state = State::RunningHoldUseDefuse;
+                m_elapsed_seconds = 0.0f;
+                LOG_ENGINE_INFO("[ACCEPT] hold_use_defuse begin line={} timeout_ms={}", action.source_line, action.duration_ms);
             } else {
                 if (!observation.connected || !observation.has_round_state) return dispatch;
                 m_state = State::Waiting;
@@ -342,6 +486,89 @@ namespace FPSShooter
             LOG_ENGINE_INFO("[ACCEPT] {} complete line={}",
                 m_state == State::RunningInput ? "input" : "wait", action.source_line);
             advanceAction();
+            return dispatch;
+        case State::RunningMoveToLive:
+            if (!canRunLivePawnAction(observation)) {
+                disable("client action script stopped: move_to_live lost authoritative Live pawn state on line " +
+                    std::to_string(action.source_line));
+                return dispatch;
+            }
+            if (atMoveTarget(action, observation)) {
+                if (!m_move_arrived) {
+                    m_move_arrived = true;
+                    LOG_ENGINE_INFO("[ACCEPT] move_to_live target observed line={}; awaiting authoritative snapshot/input acknowledgement",
+                        action.source_line);
+                }
+                if (moveHasAuthoritativeArrival(observation)) {
+                    LOG_ENGINE_INFO("[ACCEPT] move_to_live arrived line={} authoritative_snapshot={} acknowledged_input={}",
+                        action.source_line, observation.authoritative_pawn_snapshot_generation,
+                        observation.last_authoritative_input_tick);
+                    advanceAction();
+                    return dispatch;
+                }
+            } else {
+                m_move_yaw = std::atan2(action.target_x - observation.local_position_x,
+                    action.target_z - observation.local_position_z);
+            }
+            m_elapsed_seconds += std::max(delta_time, 0.0f);
+            if (m_elapsed_seconds * 1000.0f >= static_cast<float>(action.duration_ms)) {
+                disable("client action script stopped: move_to_live timed out on line " +
+                    std::to_string(action.source_line));
+            }
+            return dispatch;
+        case State::WaitingForBombPlanted:
+            if (!canWaitForBombPlanted(observation)) {
+                disable("client action script stopped: wait_bomb_planted lost authoritative Live round state on line " +
+                    std::to_string(action.source_line));
+                return dispatch;
+            }
+            if (observation.bomb_planted) {
+                LOG_ENGINE_INFO("[ACCEPT] wait_bomb_planted observed authoritative round state line={}", action.source_line);
+                advanceAction();
+                return dispatch;
+            }
+            m_elapsed_seconds += std::max(delta_time, 0.0f);
+            if (m_elapsed_seconds * 1000.0f >= static_cast<float>(action.duration_ms)) {
+                disable("client action script stopped: wait_bomb_planted timed out on line " +
+                    std::to_string(action.source_line));
+            }
+            return dispatch;
+        case State::RunningHoldUseLive:
+            if (!canRunLivePawnAction(observation)) {
+                disable("client action script stopped: hold_use_live lost authoritative Live pawn state on line " +
+                    std::to_string(action.source_line));
+                return dispatch;
+            }
+            m_elapsed_seconds += std::max(delta_time, 0.0f);
+            if (m_elapsed_seconds * 1000.0f >= static_cast<float>(action.duration_ms)) {
+                LOG_ENGINE_INFO("[ACCEPT] hold_use_live complete line={}", action.source_line);
+                advanceAction();
+            }
+            return dispatch;
+        case State::RunningHoldUseDefuse:
+            // This is deliberately narrower than hold_use_live: a defuse
+            // action succeeds only when the existing reliable ROUND_STATE
+            // reports the server's BombDefused outcome.  Other Live exits,
+            // including death, disconnect, detonation, and elimination, stay
+            // failures instead of being silently accepted.
+            if (observation.has_round_state &&
+                observation.round_phase == Competitive::RoundPhase::RoundEnd &&
+                observation.last_round_end_reason == Competitive::RoundEndReason::BombDefused) {
+                LOG_ENGINE_INFO("[ACCEPT] hold_use_defuse observed authoritative BombDefused round end line={}",
+                    action.source_line);
+                advanceAction();
+                return dispatch;
+            }
+            if (!canRunLivePawnAction(observation)) {
+                disable("client action script stopped: hold_use_defuse lost Live state without authoritative BombDefused on line " +
+                    std::to_string(action.source_line));
+                return dispatch;
+            }
+            m_elapsed_seconds += std::max(delta_time, 0.0f);
+            if (m_elapsed_seconds * 1000.0f >= static_cast<float>(action.duration_ms)) {
+                disable("client action script stopped: hold_use_defuse timed out awaiting authoritative BombDefused on line " +
+                    std::to_string(action.source_line));
+            }
             return dispatch;
         case State::WaitingForTeamResult:
         case State::WaitingForBuyResult:
@@ -369,6 +596,13 @@ namespace FPSShooter
             m_expected_buy_sequence = request_sequence;
     }
 
+    inline void ClientAcceptanceScript::noteInputCommandSent(uint32_t command_tick)
+    {
+        if (m_enabled && m_index < m_actions.size() && m_state == State::RunningMoveToLive &&
+            !m_move_arrived && command_tick != 0)
+            m_move_last_sent_input_tick = command_tick;
+    }
+
     inline void ClientAcceptanceScript::observeBuyResult(uint32_t request_sequence, bool accepted)
     {
         if (!m_enabled || m_index >= m_actions.size() || m_state != State::WaitingForBuyResult ||
@@ -385,11 +619,32 @@ namespace FPSShooter
 
     inline void ClientAcceptanceScript::applyInput(Net::InputState& state, bool movement_allowed, bool can_fire, bool can_reload) const
     {
-        if (!m_enabled || m_index >= m_actions.size() || m_state != State::RunningInput)
+        if (!m_enabled || m_index >= m_actions.size())
             return;
+
         const Action& action = m_actions[m_index];
-        const uint16_t scripted = action.input_buttons;
         using namespace Net::InputFlags;
+        if (m_state == State::RunningMoveToLive) {
+            if (!movement_allowed || m_move_arrived)
+                return;
+            // The acceptance path changes only the ordinary movement command
+            // and its yaw. Position stays server-authoritative and arrives via
+            // the local pawn Transform observed by tick().
+            state.buttons &= static_cast<uint16_t>(~(MOVE_FORWARD | MOVE_BACK | MOVE_LEFT | MOVE_RIGHT));
+            state.buttons |= MOVE_FORWARD;
+            state.move_forward = 1.0f;
+            state.move_right = 0.0f;
+            state.camera_yaw = m_move_yaw;
+            return;
+        }
+        if (m_state == State::RunningHoldUseLive || m_state == State::RunningHoldUseDefuse) {
+            state.buttons |= USE;
+            return;
+        }
+        if (m_state != State::RunningInput)
+            return;
+
+        const uint16_t scripted = action.input_buttons;
         const uint16_t movement_bits = scripted & (MOVE_FORWARD | MOVE_BACK | MOVE_LEFT | MOVE_RIGHT | JUMP | CROUCH | SPRINT | WALK);
         if (movement_allowed) {
             state.buttons |= movement_bits;
@@ -404,4 +659,5 @@ namespace FPSShooter
         state.move_forward = std::clamp(state.move_forward, -1.0f, 1.0f);
         state.move_right = std::clamp(state.move_right, -1.0f, 1.0f);
     }
+
 }

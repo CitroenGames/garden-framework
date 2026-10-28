@@ -418,6 +418,9 @@ struct ClientCompetitiveState {
     uint16_t round_number = 0;
     int32_t score_attackers = 0, score_defenders = 0;
     bool bomb_planted = false;
+    // Retained from the reliable ROUND_STATE snapshot.  Objective acceptance
+    // actions use this only to identify the authoritative round resolution.
+    Competitive::RoundEndReason last_round_end_reason = Competitive::RoundEndReason::None;
     // ROUND_STATE provides this pair.  It is retained for ordering and for
     // display correction; client time is only an interpolation between these
     // authoritative snapshots.
@@ -457,7 +460,8 @@ inline bool isRoundStateAtLeastAsNew(uint32_t incoming_tick, uint32_t accepted_t
 
 inline bool applyRoundState(ClientCompetitiveState& s, uint8_t phase, float remaining,
                             uint16_t round_number, int32_t wins_a, int32_t wins_d, bool planted,
-                            uint32_t phase_deadline_tick = 0, uint32_t server_tick = 0) {
+                            uint32_t phase_deadline_tick = 0, uint32_t server_tick = 0,
+                            uint8_t last_round_end_reason = 0) {
     RoundPhase p = static_cast<RoundPhase>(phase);
     if (!isKnownRoundPhase(p) || !std::isfinite(remaining))
         return false;
@@ -474,6 +478,7 @@ inline bool applyRoundState(ClientCompetitiveState& s, uint8_t phase, float rema
     if (phase_changed) s.phase_elapsed = 0.0f;
     s.phase = p; s.phase_time_remaining = corrected_remaining; s.round_number = round_number;
     s.score_attackers = std::max(0, wins_a); s.score_defenders = std::max(0, wins_d); s.bomb_planted = planted;
+    s.last_round_end_reason = static_cast<Competitive::RoundEndReason>(last_round_end_reason);
     s.phase_deadline_tick = phase_deadline_tick;
     s.round_server_tick = server_tick;
     s.has_round_state = true;

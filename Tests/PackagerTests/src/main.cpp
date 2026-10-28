@@ -12,6 +12,7 @@
 #include <iostream>
 #include <iterator>
 #include <string>
+#include <utility>
 #include <vector>
 
 #ifdef _WIN32
@@ -207,6 +208,206 @@ bool readText(const fs::path& path, std::string& out)
     if (!input.is_open()) return false;
     out.assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
     return input.good() || input.eof();
+}
+
+class ScopedEnvironmentValue
+{
+public:
+    ScopedEnvironmentValue(const char* name, const char* value)
+        : name_(name)
+    {
+        const DWORD required = GetEnvironmentVariableA(name, nullptr, 0);
+        if (required > 0)
+        {
+            std::vector<char> buffer(required);
+            if (GetEnvironmentVariableA(name, buffer.data(), required) > 0)
+            {
+                had_original_ = true;
+                original_ = buffer.data();
+            }
+        }
+        SetEnvironmentVariableA(name, value);
+    }
+
+    ~ScopedEnvironmentValue()
+    {
+        SetEnvironmentVariableA(name_.c_str(), had_original_ ? original_.c_str() : nullptr);
+    }
+
+private:
+    std::string name_;
+    std::string original_;
+    bool had_original_ = false;
+};
+
+bool testPackagedDeBlock01CompetitiveServer()
+{
+    const std::string name = "packaged FPSShooter de_block01 competitive server preserves selected-level closure";
+    const fs::path repository_root = EnginePaths::getExecutableDir().parent_path();
+    const fs::path project_path = repository_root / "Templates" / "FPSShooter" / "FPSShooter.garden";
+    const fs::path source_levels = repository_root / "Templates" / "FPSShooter" / "assets" / "levels";
+    const fs::path source_models = repository_root / "Templates" / "FPSShooter" / "assets" / "models";
+    const fs::path source_maps = repository_root / "Templates" / "FPSShooter" / "assets" / "maps";
+
+    if (!fs::is_regular_file(project_path) || !fs::is_regular_file(fpsShooterModulePath()))
+    {
+        std::cout << "[SKIP] " << name << ": FPSShooter project or module is unavailable" << std::endl;
+        return true;
+    }
+
+    ProjectManager project;
+    if (!project.loadProject(project_path.string()))
+        return fail(name, "could not load the FPSShooter project descriptor");
+    if (project.getDescriptor().default_level != "assets/levels/de_block01.level.json")
+        return fail(name, "the FPSShooter descriptor did not select de_block01 source level");
+
+    TempDirectory temp("packaged_de_block01_competitive");
+    PackageConfig config = packageConfig(temp.path / "out");
+    config.compile_levels_to_binary = true;
+    LevelManager levels;
+    const PackageResult result = ProjectPackager::packageProject(project, levels, config);
+    if (!result.success)
+        return fail(name, "could not package FPSShooter: " + result.error_message);
+
+    const fs::path package_root = temp.path / "out" / "package";
+    const fs::path packaged_descriptor = package_root / "FPSShooter.garden";
+    json descriptor;
+    {
+        std::ifstream descriptor_file(packaged_descriptor);
+        if (!descriptor_file.is_open())
+            return fail(name, "packaged FPSShooter descriptor was not written");
+        try { descriptor_file >> descriptor; }
+        catch (...) { return fail(name, "packaged FPSShooter descriptor is not valid JSON"); }
+    }
+    if (descriptor.value("default_level", std::string{}) != "assets/levels/de_block01.level")
+        return fail(name, "packaged descriptor did not select compiled de_block01.level");
+
+    const std::vector<fs::path> required_artifacts = {
+        "bin/FPSShooter.dll",
+        "assets/levels/de_block01.level",
+        "assets/levels/de_block01.competitive.json",
+        "assets/levels/de_block01.sites.json",
+        "assets/levels/de_block01.nav",
+        "assets/levels/de_block01.ai.json",
+        "assets/models/de_block01_collision.gltf",
+        "assets/models/de_block01_collision.bin",
+        "assets/maps/de_block01.map.json",
+    };
+    for (const fs::path& artifact : required_artifacts)
+        if (!fs::is_regular_file(package_root / artifact))
+            return fail(name, "packaged artifact is missing: " + artifact.generic_string());
+    if (fs::exists(package_root / "assets" / "levels" / "de_block01.level.json"))
+        return fail(name, "source de_block01 level was retained after binary compilation");
+
+    std::vector<char> source_nav;
+    std::vector<char> packaged_nav;
+    if (!readBytes(source_levels / "de_block01.nav", source_nav) ||
+        !readBytes(package_root / "assets" / "levels" / "de_block01.nav", packaged_nav) ||
+        source_nav.empty() || source_nav != packaged_nav)
+        return fail(name, "packaged de_block01 nav sidecar was not preserved byte-for-byte");
+
+    const std::vector<std::pair<fs::path, fs::path>> preserved_sidecars_and_collision = {
+        {source_levels / "de_block01.competitive.json", package_root / "assets/levels/de_block01.competitive.json"},
+        {source_levels / "de_block01.sites.json", package_root / "assets/levels/de_block01.sites.json"},
+        {source_levels / "de_block01.ai.json", package_root / "assets/levels/de_block01.ai.json"},
+        {source_models / "de_block01_collision.gltf", package_root / "assets/models/de_block01_collision.gltf"},
+        {source_models / "de_block01_collision.bin", package_root / "assets/models/de_block01_collision.bin"},
+        {source_maps / "de_block01.map.json", package_root / "assets/maps/de_block01.map.json"},
+    };
+    for (const auto& [source, packaged] : preserved_sidecars_and_collision)
+    {
+        std::vector<char> source_bytes;
+        std::vector<char> packaged_bytes;
+        if (!readBytes(source, source_bytes) || !readBytes(packaged, packaged_bytes) ||
+            source_bytes.empty() || source_bytes != packaged_bytes)
+            return fail(name, "package did not preserve " + source.filename().string() + " byte-for-byte");
+    }
+
+    const fs::path server_path = package_root / "bin" / "Server.exe";
+    if (!fs::is_regular_file(server_path))
+        return fail(name, "Server.exe was not staged into the FPSShooter package");
+
+    const fs::path log_path = temp.path / "competitive_server.log";
+    SECURITY_ATTRIBUTES security{};
+    security.nLength = sizeof(security);
+    security.bInheritHandle = TRUE;
+    HANDLE log_handle = CreateFileA(log_path.string().c_str(), GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, &security, CREATE_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (log_handle == INVALID_HANDLE_VALUE)
+        return fail(name, "could not create captured competitive server log");
+
+    const DWORD test_port = 40000 + (GetCurrentProcessId() % 1000);
+    const std::string command = quoteWindowsArg(server_path) + " --port " + std::to_string(test_port);
+    std::vector<char> command_line(command.begin(), command.end());
+    command_line.push_back('\0');
+    STARTUPINFOA startup{};
+    startup.cb = sizeof(startup);
+    startup.dwFlags = STARTF_USESTDHANDLES;
+    startup.hStdOutput = log_handle;
+    startup.hStdError = log_handle;
+    startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    PROCESS_INFORMATION process{};
+    {
+        // Test-only process configuration. Each variable is restored before
+        // this function returns so PackagerTests does not affect later tests.
+        ScopedEnvironmentValue game_mode("FPS_GAME_MODE", "competitive");
+        ScopedEnvironmentValue bots("FPS_BOTS", "2");
+        ScopedEnvironmentValue fast_match("FPS_TEST_FAST_MATCH", "1");
+        if (!CreateProcessA(server_path.string().c_str(), command_line.data(), nullptr, nullptr,
+                TRUE, CREATE_NO_WINDOW, nullptr, package_root.string().c_str(), &startup, &process))
+        {
+            const DWORD error = GetLastError();
+            CloseHandle(log_handle);
+            return fail(name, "CreateProcessA failed with error " + std::to_string(error));
+        }
+    }
+    CloseHandle(log_handle);
+    CloseHandle(process.hThread);
+
+    const std::vector<std::string> required_log_lines = {
+        "FPSShooter selected level stem=levels/de_block01",
+        "Bots: navmesh status=loaded",
+        "Bots: authored route data loaded",
+        "[ACCEPT] FPS_TEST_FAST_MATCH=1",
+        "Server started successfully",
+    };
+    bool observed_all = false;
+    std::string output;
+    const ULONGLONG deadline = GetTickCount64() + 8000;
+    while (GetTickCount64() < deadline)
+    {
+        if (WaitForSingleObject(process.hProcess, 0) == WAIT_OBJECT_0)
+            break;
+        if (readText(log_path, output))
+        {
+            observed_all = std::all_of(required_log_lines.begin(), required_log_lines.end(),
+                [&](const std::string& line) { return output.find(line) != std::string::npos; });
+            if (observed_all)
+                break;
+        }
+        Sleep(25);
+    }
+
+    const DWORD wait_result = WaitForSingleObject(process.hProcess, 0);
+    DWORD exit_code = STILL_ACTIVE;
+    GetExitCodeProcess(process.hProcess, &exit_code);
+    if (wait_result != WAIT_OBJECT_0)
+    {
+        TerminateProcess(process.hProcess, 0);
+        WaitForSingleObject(process.hProcess, 5000);
+    }
+    CloseHandle(process.hProcess);
+    readText(log_path, output);
+
+    if (!observed_all)
+    {
+        const std::string reason = wait_result == WAIT_OBJECT_0
+            ? "packaged competitive server exited before selected-level startup with code " + std::to_string(exit_code)
+            : "packaged competitive server did not report selected-level startup within 8 seconds";
+        return fail(name, reason + "; log: " + output);
+    }
+    return pass(name);
 }
 
 bool testPackagedServerLaunch()
@@ -725,6 +926,7 @@ int main()
         ok &= testFailedLevelCompileDoesNotRewriteDefaultLevel();
 #ifdef _WIN32
         ok &= testPackagedServerLaunch();
+        ok &= testPackagedDeBlock01CompetitiveServer();
 #endif
     }
 

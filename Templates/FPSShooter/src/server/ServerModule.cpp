@@ -265,6 +265,12 @@ static WeaponStateMessage makeWeaponStateMessage(world& w, entt::entity player_e
 
 static void sendWeaponState(uint16_t client_id, entt::entity player_entity, const WeaponComponent& weapon)
 {
+    const ClientInfo* client = g_server_network.getClientInfo(client_id);
+    // Bots are normal player ECS entities, but they are server-owned and do
+    // not have an ENet peer.  Weapon state is owner-private, so a synthetic
+    // bot id must never be treated as a transport destination.
+    if (!client || !client->peer)
+        return;
     world* w = g_server_services ? g_server_services->game_world : nullptr;
     const WeaponStateMessage msg = (w && w->registry.valid(player_entity))
         ? makeWeaponStateMessage(*w, player_entity, weapon)
@@ -293,6 +299,19 @@ static void publishFpsDeathEvent(const FpsServer::FpsDeathEvent& event)
     }
 }
 
+static int32_t botIndexForEntity(world& game_world, entt::entity entity)
+{
+    if (!game_world.registry.valid(entity) ||
+        !game_world.registry.all_of<Bots::BotComponent>(entity))
+        return -1;
+    return game_world.registry.get<Bots::BotComponent>(entity).bot_index;
+}
+
+static int32_t botIndexForClient(world& game_world, uint16_t client_id)
+{
+    return botIndexForEntity(game_world, findPlayerEntity(game_world, client_id));
+}
+
 // Every authoritative death enters here after health has transitioned to dead.
 // The order is deliberate: latch/stop actions, capture event data, C4 and
 // loadout drops, score/match and existing economy hooks, then publish and
@@ -317,6 +336,8 @@ static bool resolveFpsDeath(
     const uint16_t victim_client_id = victim_network.owner_client_id;
     const glm::vec3 death_position = game_world.registry.get<TransformComponent>(victim_entity).position;
     const bool self_inflicted = attacker_client_id == victim_client_id;
+    const int32_t attacker_bot_index = botIndexForClient(game_world, attacker_client_id);
+    const int32_t victim_bot_index = botIndexForEntity(game_world, victim_entity);
     const FpsServer::FpsDeathEvent death_event{
         attacker_client_id,
         victim_client_id,
@@ -373,6 +394,10 @@ static bool resolveFpsDeath(
         FpsServer::makeCombatFeedEvent(death_event, score_change);
     (void)FpsCombat::recordCombatFeedEvent(game_world.registry, feed_event);
     publishFpsDeathEvent(death_event);
+    if (attacker_bot_index >= 0 || victim_bot_index >= 0) {
+        LOG_ENGINE_INFO("[BotAcceptance] lethal_death attacker_client={} attacker_bot={} victim_client={} victim_bot={} sequence={}",
+            attacker_client_id, attacker_bot_index, victim_client_id, victim_bot_index, transition.death_sequence);
+    }
     LOG_ENGINE_INFO("Player {} killed by player {} sequence={}", victim_client_id, attacker_client_id, transition.death_sequence);
     if (!g_competitive || g_round_system.state.phase == Competitive::RoundPhase::Warmup)
         g_game_rules.queueRespawn(victim_client_id);
@@ -467,14 +492,25 @@ static void fireServerShot(
             damage_policy);
         if (!damage_result.applied) continue;
         uint16_t victim_client = w->registry.get<NetworkedEntity>(victim_ent).owner_client_id;
+        const int32_t shooter_bot_index = botIndexForEntity(*w, shooter_entity);
+        const int32_t victim_bot_index = botIndexForEntity(*w, victim_ent);
         glm::vec3 hp = pellet_hit_points[victim_ent];
         auto& victim_health = w->registry.get<FpsHealthComponent>(victim_ent);
         DamageEventMessage dmg_msg;
         dmg_msg.attacker_client_id = shooter_client_id; dmg_msg.victim_client_id = victim_client;
         dmg_msg.damage = damage_result.health_damage; dmg_msg.health_remaining = victim_health.health; dmg_msg.hit_position = hp;
         BitWriter dmg_writer; CombatSerializer::serialize(dmg_writer, dmg_msg);
-        g_server_network.sendReliableToClient(victim_client, dmg_writer);
-        if (shooter_client_id != victim_client) g_server_network.sendReliableToClient(shooter_client_id, dmg_writer);
+        const ClientInfo* victim_peer = g_server_network.getClientInfo(victim_client);
+        if (victim_peer && victim_peer->peer)
+            g_server_network.sendReliableToClient(victim_client, dmg_writer);
+        const ClientInfo* shooter_peer = g_server_network.getClientInfo(shooter_client_id);
+        if (shooter_client_id != victim_client && shooter_peer && shooter_peer->peer)
+            g_server_network.sendReliableToClient(shooter_client_id, dmg_writer);
+        if (shooter_bot_index >= 0 || victim_bot_index >= 0) {
+            LOG_ENGINE_INFO("[BotAcceptance] damage attacker_client={} attacker_bot={} victim_client={} victim_bot={} damage={} health={}",
+                shooter_client_id, shooter_bot_index, victim_client, victim_bot_index,
+                damage_result.health_damage, victim_health.health);
+        }
         LOG_ENGINE_TRACE("Player {} hit player {} for {} damage ({} pellets, hp: {})", shooter_client_id, victim_client, total_damage, kv.second, victim_health.health);
         if (damage_result.killed)
             resolveFpsDeath(*w, shooter_client_id, victim_ent, weapon.weapon_type);
@@ -515,6 +551,11 @@ static void spawnDroppedWeapon(world& w, const glm::vec3& pos, const FpsLogic::D
     TransformComponent dt; dt.position = pos;
     w.registry.emplace<TransformComponent>(de, dt);
     w.registry.emplace<DroppedWeaponComponent>(de, DroppedWeaponComponent{item.type, item.ammo, item.reserve, by, 30.0f});
+    const int32_t bot_index = botIndexForClient(w, by);
+    if (bot_index >= 0) {
+        LOG_ENGINE_INFO("[BotAcceptance] drop bot={} client={} weapon={} ammo={} reserve={}",
+            bot_index, by, static_cast<unsigned int>(item.type), item.ammo, item.reserve);
+    }
 }
 static bool isWeaponLifecyclePhaseOpen()
 {
@@ -598,6 +639,11 @@ static void processWeaponInput(
         const float shot_spread = WeaponSystem::computeSpread(
             weapon, getWeaponAccuracyContext(*w, player_entity));
         if (WeaponSystem::tryFire(weapon)) {
+            const int32_t bot_index = botIndexForEntity(*w, player_entity);
+            if (bot_index >= 0) {
+                LOG_ENGINE_INFO("[BotAcceptance] accepted_fire bot={} client={} tick={} weapon={}",
+                    bot_index, client_id, input.tick, static_cast<unsigned int>(weapon.weapon_type));
+            }
             fireServerShot(client_id, player_entity, input, client_view_tick, weapon, shot_spread);
         }
     } else if (wants_reload) {
@@ -1079,6 +1125,7 @@ static void tickBots(float dt)
         Bots::pruneCurrentSight(percept, current_target_eligible);
         // S1 perception (10 Hz staggered by bot_index % 6 fixed ticks)
         if (((uint32_t)(runtime.world_time * 60.0f) + (uint32_t)bot.bot_index) % 6u == 0u) {
+            const entt::entity previous_sight = percept.visible_enemy;
             std::vector<Bots::EnemyCandidate> enemies;
             auto ev = w->registry.view<NetworkedEntity, TeamComponent, TransformComponent, FpsHealthComponent>();
             for (auto en : ev) {
@@ -1094,6 +1141,13 @@ static void tickBots(float dt)
             glm::vec3 eye = pos + glm::vec3(0.0f, 1.62f, 0.0f);
             Bots::updatePerception(percept, eye, bot.aim_yaw, enemies, bot.difficulty, 0.1f,
                 [&](const glm::vec3& origin, const glm::vec3& point) { glm::vec3 d = point - origin; float dist = glm::length(d); if (dist < 0.01f) return false; auto hit = w->raycastClosest(origin, d / dist, dist, e); return hit.hit && hit.distance + 0.02f < dist; });
+            if (percept.visible_enemy != entt::null && percept.visible_enemy != previous_sight &&
+                w->registry.valid(percept.visible_enemy) &&
+                w->registry.all_of<NetworkedEntity>(percept.visible_enemy)) {
+                LOG_ENGINE_INFO("[BotAcceptance] sight bot={} client={} target_client={}",
+                    bot.bot_index, client_id,
+                    w->registry.get<NetworkedEntity>(percept.visible_enemy).owner_client_id);
+            }
         } else { Bots::advancePerceptionClock(percept, bot.difficulty, dt); }
         // S2 decision (consumes percept + match summary only)
         Bots::BotDecisionInput din; din.phase = g_round_system.state.phase; din.team = bot_team;
@@ -1122,7 +1176,16 @@ static void tickBots(float dt)
         if (din.bomb_planted) { din.bomb_pos = g_bomb_system.bomb.planted_position; din.has_bomb_pos = true; din.at_bomb = glm::distance(pos, din.bomb_pos) <= g_bomb_system.config.defuse_range; }
         const int32_t dbg = aiDebugLevel();
         const uint64_t trans_before = runtime.transitions.total_pushed;
+        const Bots::BotState state_before_decision = bot.state;
         Bots::decide(bot, percept, intent, din, dbg >= 1 ? &runtime.transitions : nullptr, runtime.input_tick);
+        if (state_before_decision != Bots::BotState::Engage && bot.state == Bots::BotState::Engage) {
+            uint16_t target_client_id = 0;
+            if (percept.visible_enemy != entt::null && w->registry.valid(percept.visible_enemy) &&
+                w->registry.all_of<NetworkedEntity>(percept.visible_enemy))
+                target_client_id = w->registry.get<NetworkedEntity>(percept.visible_enemy).owner_client_id;
+            LOG_ENGINE_INFO("[BotAcceptance] engage bot={} client={} target_client={}",
+                bot.bot_index, client_id, target_client_id);
+        }
         if (dbg >= 2 && runtime.transitions.total_pushed > trans_before) { uint64_t n = std::min<uint64_t>(runtime.transitions.total_pushed - trans_before, runtime.transitions.size()); for (uint64_t i = 0; i < n; ++i) LOG_ENGINE_INFO("{}", Bots::formatTransition(runtime.transitions.at(runtime.transitions.size() - (size_t)n + (size_t)i))); }
         if (bot.state == Bots::BotState::Buy) executeBotBuy(client_id, e);
         if (g_round_system.state.phase == Competitive::RoundPhase::Live) bot.buy_done = false;
@@ -1181,6 +1244,12 @@ static void sendCompetitiveOwnerMessage(uint16_t client_id, const BitWriter& wri
         LOG_ENGINE_ERROR("Refusing competitive message with non-owner audience on private channel");
         return;
     }
+    const ClientInfo* client = g_server_network.getClientInfo(client_id);
+    // A bot has a synthetic player id but no session/peer.  Private replies
+    // belong only to a connected human owner; public state still uses the
+    // peer-filtered broadcast paths below.
+    if (!client || !client->peer)
+        return;
     g_server_network.sendReliableToClient(client_id, writer);
 }
 static void sendEconomyState(uint16_t client_id, entt::entity e)
@@ -1973,7 +2042,9 @@ static bool constructPlayerPawnForClient(
 
     ensurePlayerPhysicsBody(*w, player_entity);
 
-    g_server_network.setClientPlayerEntity(client_id, network_id);
+    const ClientInfo* owning_client = g_server_network.getClientInfo(client_id);
+    if (owning_client && owning_client->peer)
+        g_server_network.setClientPlayerEntity(client_id, network_id);
     sendWeaponState(client_id, player_entity, weapon_component);
 
     // Broadcast spawn to all clients (camera_yaw is radians on the wire, D4)
@@ -1993,21 +2064,23 @@ static bool constructPlayerPawnForClient(
     }
 
     // Send existing players to the new client
-    auto view = w->registry.view<NetworkedEntity, TransformComponent, PlayerComponent>();
-    for (auto entity : view) {
-        auto& networked = view.get<NetworkedEntity>(entity);
-        auto& trans = view.get<TransformComponent>(entity);
-        if (networked.owner_client_id == client_id) continue;
+    if (owning_client && owning_client->peer) {
+        auto view = w->registry.view<NetworkedEntity, TransformComponent, PlayerComponent>();
+        for (auto entity : view) {
+            auto& networked = view.get<NetworkedEntity>(entity);
+            auto& trans = view.get<TransformComponent>(entity);
+            if (networked.owner_client_id == client_id) continue;
 
-        SpawnPlayerMessage existing_msg;
-        existing_msg.client_id = networked.owner_client_id;
-        existing_msg.entity_id = networked.network_id;
-        existing_msg.position = trans.position;
-        existing_msg.camera_yaw = glm::radians(trans.rotation.y);
+            SpawnPlayerMessage existing_msg;
+            existing_msg.client_id = networked.owner_client_id;
+            existing_msg.entity_id = networked.network_id;
+            existing_msg.position = trans.position;
+            existing_msg.camera_yaw = glm::radians(trans.rotation.y);
 
-        BitWriter existing_writer;
-        NetworkSerializer::serialize(existing_writer, existing_msg);
-        g_server_network.sendReliableToClient(client_id, existing_writer);
+            BitWriter existing_writer;
+            NetworkSerializer::serialize(existing_writer, existing_msg);
+            g_server_network.sendReliableToClient(client_id, existing_writer);
+        }
     }
 
     if (g_competitive) {

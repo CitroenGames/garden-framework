@@ -2778,6 +2778,240 @@ bool testClientAcceptanceScriptAuthorityAndInput()
     return pass(name);
 }
 
+bool testClientAcceptanceScriptLiveBombActions()
+{
+    const std::string name = "ClientAcceptanceScript.LiveBombActions";
+    const auto script_path = std::filesystem::temp_directory_path() /
+        ("garden_client_live_actions_" +
+         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".txt");
+    std::error_code remove_error;
+    const auto cleanup = [&]() { std::filesystem::remove(script_path, remove_error); };
+    const auto fail_with_cleanup = [&](const char* reason) {
+        cleanup();
+        return fail(name, reason);
+    };
+
+    ScopedEnvironmentValue script_environment("FPS_TEST_ACTION_SCRIPT");
+    FPSShooter::ClientAcceptanceScript script;
+    const char* invalid_scripts[] = {
+        "move_to_live 1 2 0 100\n",
+        "move_to_live nan 2 1 100\n",
+        "move_to_live 1 2 1 0\n",
+        "move_to_live 1 2 1 100 extra\n",
+        "wait_bomb_planted 0\n",
+        "wait_bomb_planted 100 extra\n",
+        "hold_use_live 0\n",
+        "hold_use_live 100 extra\n",
+        "hold_use_defuse 0\n",
+        "hold_use_defuse 100 extra\n"
+    };
+    for (const char* invalid : invalid_scripts) {
+        if (!writeClientAcceptanceScript(script_path, invalid) ||
+            !script_environment.set(script_path.string().c_str())) {
+            return fail_with_cleanup("could not configure invalid live action script");
+        }
+        script.loadFromEnvironment();
+        if (script.active())
+            return fail_with_cleanup("invalid live action grammar enabled the script");
+    }
+
+    if (!writeClientAcceptanceScript(script_path,
+        "move_to_live 10 0 0.5 1000\n"
+        "wait_bomb_planted 1000\n"
+        "hold_use_live 100\n") ||
+        !script_environment.set(script_path.string().c_str())) {
+        return fail_with_cleanup("could not configure valid live action script");
+    }
+    script.loadFromEnvironment();
+    if (!script.active())
+        return fail_with_cleanup("valid live action script did not activate");
+
+    FPSShooter::ClientAcceptanceObservation observation;
+    observation.connected = true;
+    observation.has_round_state = true;
+    observation.local_team = Competitive::FpsTeam::Attackers;
+    observation.has_local_pawn = true;
+    observation.has_local_transform = true;
+    observation.local_position_x = 0.0f;
+    observation.local_position_z = 0.0f;
+    observation.round_phase = Competitive::RoundPhase::Freeze;
+    script.tick(0.0f, observation);
+    Net::InputState frozen_input;
+    script.applyInput(frozen_input, true, true, true);
+    if (frozen_input.buttons != 0 || !approx(frozen_input.move_forward, 0.0f))
+        return fail_with_cleanup("move_to_live emitted input before authoritative Live phase");
+
+    observation.round_phase = Competitive::RoundPhase::Live;
+    observation.has_local_transform = false;
+    script.tick(0.0f, observation);
+    Net::InputState missing_transform_input;
+    script.applyInput(missing_transform_input, true, true, true);
+    if (missing_transform_input.buttons != 0)
+        return fail_with_cleanup("move_to_live emitted input without local transform");
+
+    observation.has_local_transform = true;
+    script.tick(0.0f, observation);
+    Net::InputState move_input;
+    move_input.buttons = Net::InputFlags::MOVE_BACK;
+    move_input.move_forward = -1.0f;
+    move_input.move_right = 0.5f;
+    script.applyInput(move_input, true, true, true);
+    if ((move_input.buttons & (Net::InputFlags::MOVE_FORWARD | Net::InputFlags::MOVE_BACK |
+                               Net::InputFlags::MOVE_LEFT | Net::InputFlags::MOVE_RIGHT)) !=
+            Net::InputFlags::MOVE_FORWARD ||
+        !approx(move_input.move_forward, 1.0f) || !approx(move_input.move_right, 0.0f) ||
+        !approx(move_input.camera_yaw, 1.5707963f, 0.001f)) {
+        return fail_with_cleanup("move_to_live did not emit its ordinary forward/yaw input");
+    }
+    script.noteInputCommandSent(10);
+
+    // Local prediction observing the target is insufficient. The action holds
+    // neutral input until a newer received local-pawn snapshot acknowledges
+    // the ordinary command that drove the move.
+    observation.local_position_x = 9.6f;
+    script.tick(0.0f, observation);
+    Net::InputState awaiting_authority;
+    script.applyInput(awaiting_authority, true, true, true);
+    if (awaiting_authority.buttons != 0)
+        return fail_with_cleanup("move_to_live kept steering after local target observation");
+    observation.authoritative_pawn_snapshot_generation = 1;
+    observation.last_authoritative_input_tick = 9;
+    script.tick(0.0f, observation);
+    if (!script.active())
+        return fail_with_cleanup("move_to_live accepted an older input acknowledgement");
+    observation.last_authoritative_input_tick = 10;
+    script.tick(0.0f, observation);
+    script.tick(0.0f, observation); // begin wait_bomb_planted
+    Net::InputState awaiting_bomb;
+    script.applyInput(awaiting_bomb, true, true, true);
+    if (awaiting_bomb.buttons != 0)
+        return fail_with_cleanup("wait_bomb_planted emitted local input before reliable round state");
+
+    observation.bomb_planted = true;
+    script.tick(0.0f, observation);
+    script.tick(0.0f, observation); // begin hold_use_live after the authoritative state
+    Net::InputState hold_input;
+    script.applyInput(hold_input, true, true, true);
+    if ((hold_input.buttons & Net::InputFlags::USE) == 0 ||
+        (hold_input.buttons & Net::InputFlags::MOVE_FORWARD) != 0) {
+        return fail_with_cleanup("hold_use_live did not wait for bomb-planted authority");
+    }
+    script.tick(0.099f, observation);
+    Net::InputState before_hold_complete;
+    script.applyInput(before_hold_complete, true, true, true);
+    if ((before_hold_complete.buttons & Net::InputFlags::USE) == 0)
+        return fail_with_cleanup("hold_use_live ended before its configured duration");
+    script.tick(0.002f, observation);
+    if (script.active())
+        return fail_with_cleanup("hold_use_live did not complete at its configured duration");
+
+    // Defuse completion is an explicit objective action.  It must start only
+    // after the reliable planted state arrives, and it must wait for the
+    // authoritative BombDefused round result instead of treating its timer as
+    // proof that a defuse occurred.
+    if (!writeClientAcceptanceScript(script_path,
+        "hold_use_defuse 1000\n"
+        "wait 1\n") ||
+        !script_environment.set(script_path.string().c_str())) {
+        return fail_with_cleanup("could not configure defuse completion script");
+    }
+    script.loadFromEnvironment();
+    observation.round_phase = Competitive::RoundPhase::Live;
+    observation.bomb_planted = false;
+    observation.last_round_end_reason = Competitive::RoundEndReason::None;
+    script.tick(0.0f, observation);
+    Net::InputState unplanted_defuse_input;
+    script.applyInput(unplanted_defuse_input, true, true, true);
+    if (unplanted_defuse_input.buttons != 0)
+        return fail_with_cleanup("hold_use_defuse emitted input before authoritative planted state");
+
+    observation.bomb_planted = true;
+    script.tick(0.0f, observation);
+    Net::InputState defuse_input;
+    script.applyInput(defuse_input, true, true, true);
+    if ((defuse_input.buttons & Net::InputFlags::USE) == 0)
+        return fail_with_cleanup("hold_use_defuse did not emit ordinary use input");
+
+    // A round-end snapshot can arrive after the server has removed the pawn.
+    // The accepted BombDefused outcome must still finish this explicit action.
+    observation.round_phase = Competitive::RoundPhase::RoundEnd;
+    observation.last_round_end_reason = Competitive::RoundEndReason::BombDefused;
+    observation.has_local_pawn = false;
+    observation.has_local_transform = false;
+    script.tick(0.0f, observation);
+    if (!script.active())
+        return fail_with_cleanup("hold_use_defuse rejected authoritative BombDefused round end");
+    // The successful objective action advances to the following wait; its
+    // first tick enters that action and the next one completes its duration.
+    script.tick(0.0f, observation);
+    script.tick(0.01f, observation);
+    if (script.active())
+        return fail_with_cleanup("hold_use_defuse did not advance after authoritative BombDefused round end");
+
+    if (!writeClientAcceptanceScript(script_path, "hold_use_defuse 1000\n") ||
+        !script_environment.set(script_path.string().c_str())) {
+        return fail_with_cleanup("could not configure defuse failure script");
+    }
+    script.loadFromEnvironment();
+    observation.round_phase = Competitive::RoundPhase::Live;
+    observation.bomb_planted = true;
+    observation.last_round_end_reason = Competitive::RoundEndReason::None;
+    observation.has_local_pawn = true;
+    observation.has_local_transform = true;
+    script.tick(0.0f, observation);
+    observation.round_phase = Competitive::RoundPhase::RoundEnd;
+    observation.last_round_end_reason = Competitive::RoundEndReason::TargetBombed;
+    script.tick(0.0f, observation);
+    if (script.active())
+        return fail_with_cleanup("hold_use_defuse accepted a non-defuse authoritative round end");
+
+    if (!writeClientAcceptanceScript(script_path, "move_to_live 10 0 0.5 100\n") ||
+        !script_environment.set(script_path.string().c_str())) {
+        return fail_with_cleanup("could not configure move timeout script");
+    }
+    script.loadFromEnvironment();
+    observation.connected = true;
+    observation.has_round_state = true;
+    observation.local_team = Competitive::FpsTeam::Attackers;
+    observation.has_local_pawn = true;
+    observation.has_local_transform = true;
+    observation.bomb_planted = false;
+    observation.round_phase = Competitive::RoundPhase::Live;
+    observation.last_round_end_reason = Competitive::RoundEndReason::None;
+    observation.local_position_x = 0.0f;
+    observation.local_position_z = 0.0f;
+    observation.authoritative_pawn_snapshot_generation = 0;
+    observation.last_authoritative_input_tick = 0;
+    script.tick(0.0f, observation);
+    script.tick(0.2f, observation);
+    if (script.active())
+        return fail_with_cleanup("move_to_live did not stop at its timeout");
+
+    if (!writeClientAcceptanceScript(script_path, "wait_bomb_planted 100\n") ||
+        !script_environment.set(script_path.string().c_str())) {
+        return fail_with_cleanup("could not configure bomb wait timeout script");
+    }
+    script.loadFromEnvironment();
+    script.tick(0.0f, observation);
+    script.tick(0.1f, observation);
+    if (script.active())
+        return fail_with_cleanup("wait_bomb_planted did not stop at its timeout");
+
+    if (!writeClientAcceptanceScript(script_path, "hold_use_live 100\n") ||
+        !script_environment.set(script_path.string().c_str())) {
+        return fail_with_cleanup("could not configure live loss script");
+    }
+    script.loadFromEnvironment();
+    script.tick(0.0f, observation);
+    observation.round_phase = Competitive::RoundPhase::Freeze;
+    script.tick(0.0f, observation);
+    if (script.active())
+        return fail_with_cleanup("hold_use_live continued after authoritative Live phase was lost");
+
+    cleanup();
+    return pass(name);
+}
+
 #include "C4Tests.hpp"
 #include "GrenadeEffectsTests.hpp"
 #include "BotTests.hpp"
@@ -2833,6 +3067,7 @@ int main()
     ok = testFpsDeathLifecycle() && ok;
     ok = testFpsCombatFeedContract() && ok;
     ok = testClientAcceptanceScriptAuthorityAndInput() && ok;
+    ok = testClientAcceptanceScriptLiveBombActions() && ok;
     ok = testC4PlantInterrupt() && ok;
     ok = testC4AuthoredTriggerOccupancy() && ok;
     ok = testC4DefuseKit() && ok;
