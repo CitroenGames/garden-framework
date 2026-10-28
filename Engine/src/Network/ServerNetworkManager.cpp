@@ -543,7 +543,25 @@ void ServerNetworkManager::handleInputCommand(uint16_t client_id, BitReader& rea
         return;
     }
 
+    const auto samples = collectInputSamplesChronological(msg, redundant_inputs);
+
+    // A game may reject input while a pawn is frozen, dead, or otherwise
+    // unable to act. Keep the transport cursor current for valid, monotonic
+    // samples without spending the action budget or invoking any gameplay
+    // path. Otherwise their redundant copies become newly eligible when the
+    // filter opens and can consume the first live tick's budget.
     if (input_filter && !input_filter(client_id, player_entity)) {
+        for (const auto& sample : samples) {
+            if (!isValidInputSample(sample)) {
+                LOG_ENGINE_WARN("Client {0} sent invalid input sample at tick {1}", client_id, sample.tick);
+                recordDroppedFromPeer(it->second.info.peer, 0);
+                continue;
+            }
+
+            if (shouldAcceptInputTick(sample.tick, it->second.info.last_input_tick)) {
+                it->second.info.last_input_tick = sample.tick;
+            }
+        }
         return;
     }
 
@@ -556,7 +574,6 @@ void ServerNetworkManager::handleInputCommand(uint16_t client_id, BitReader& rea
     movement_config.jump_force = player.jump_force;
     movement_config.fixed_delta = game_world->fixed_delta;
 
-    const auto samples = collectInputSamplesChronological(msg, redundant_inputs);
     accrueInputTickBudget(
         current_tick,
         it->second.info.last_input_budget_server_tick,

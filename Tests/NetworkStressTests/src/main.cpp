@@ -1127,11 +1127,9 @@ static bool runInputViewTickLoopbackTest()
         }
     }
 
-    if (captured.size() != 2u || captured[0].input_tick != 1u ||
-        captured[0].sample_view_tick != 0xFFFFFFFFu || captured[0].callback_view_tick != 0xFFFFFFFFu ||
-        captured[1].input_tick != 2u || captured[1].sample_view_tick != 2u ||
-        captured[1].callback_view_tick != 2u) {
-        state.addError("CAP_VIEW_TICK primary/redundant samples did not preserve their captured wrapped view ticks");
+    if (captured.size() != 1u || captured[0].input_tick != 2u ||
+        captured[0].sample_view_tick != 2u || captured[0].callback_view_tick != 2u) {
+        state.addError("CAP_VIEW_TICK filter rejection did not discard its redundant input before the live sample");
     }
 
     world legacy_world;
@@ -1153,7 +1151,7 @@ static bool runInputViewTickLoopbackTest()
         legacy_client.sendInputCommand(1u, input);
         legacy_client.update(kFixedDelta * 2.0f);
         server.update(0.0f);
-        if (captured.size() != 3u || captured.back().client_id != legacy_client.getClientId() ||
+        if (captured.size() != 2u || captured.back().client_id != legacy_client.getClientId() ||
             captured.back().input_tick != 1u || captured.back().sample_view_tick != 4u ||
             captured.back().callback_view_tick != 2u) {
             state.addError("legacy client callback did not receive the modular default-delay fallback");
@@ -1545,6 +1543,116 @@ static bool runRawRemoteInterpolationStateTest()
     return true;
 }
 
+// Input received during a game-level freeze/dead gate must advance only the
+// generic transport cursor. When the gate opens, redundant samples from the
+// blocked phase must neither reach game callbacks nor consume the live input
+// budget ahead of new commands.
+static bool runBlockedInputCursorRegressionTest()
+{
+    TestState state;
+    world server_world;
+    server_world.setFixedDelta(kFixedDelta);
+
+    Net::ServerNetworkManager server;
+    if (!server.initialize()) {
+        std::cerr << "[FAIL] BlockedInputCursorRegressionTests could not initialize server\n";
+        return false;
+    }
+    server.setWorld(&server_world);
+
+    bool allow_inputs = false;
+    std::vector<uint32_t> applied_ticks;
+    server.setOnClientConnected([&](uint16_t client_id) {
+        spawnServerPlayer(server_world, server, client_id);
+    });
+    server.setInputFilter([&](uint16_t, entt::entity player_entity) {
+        return allow_inputs && server_world.registry.valid(player_entity);
+    });
+    server.setInputSampleHandler([&](uint16_t, entt::entity,
+                                     const Net::InputSample& sample, uint32_t) {
+        applied_ticks.push_back(sample.tick);
+    });
+
+    StressConfig config;
+    config.client_count = 1;
+    uint16_t port = 0;
+    if (!startServer(server, config, port)) {
+        std::cerr << "[FAIL] BlockedInputCursorRegressionTests could not start server\n";
+        server.shutdown();
+        return false;
+    }
+
+    world client_world;
+    Net::ClientNetworkManager client;
+    client.setWorld(&client_world);
+    if (!client.initialize() || !client.connectToServer("127.0.0.1", port, "blocked_input_cursor")) {
+        std::cerr << "[FAIL] BlockedInputCursorRegressionTests could not connect client\n";
+        client.shutdown();
+        server.shutdown();
+        return false;
+    }
+
+    for (uint32_t frame = 0; frame < config.connect_frame_budget && !client.isConnected(); ++frame) {
+        client.update(kFixedDelta);
+        server.update(0.0f);
+        client.update(0.0f);
+        SDL_Delay(1);
+    }
+    if (!client.isConnected() || server.getClientCount() != 1u) {
+        state.addError("blocked-input loopback client did not connect");
+    }
+
+    Net::InputState input;
+    input.move_forward = 1.0f;
+    // Send five command packets while rejected. The last four packets carry
+    // redundancy, so the final live packet would replay ticks 4-5 if
+    // the server left its accepted-input cursor at zero.
+    for (uint32_t tick = 1u; state.error_count == 0 && tick <= 5u; ++tick) {
+        client.sendInputCommand(tick, input);
+        client.update(kFixedDelta * 2.0f);
+        server.update(0.0f);
+        client.update(0.0f);
+        SDL_Delay(1);
+    }
+    if (!applied_ticks.empty()) {
+        state.addError("input filter rejection invoked the gameplay sample handler");
+    }
+
+    allow_inputs = true;
+    for (uint32_t tick = 6u; state.error_count == 0 && tick <= 7u; ++tick) {
+        client.sendInputCommand(tick, input);
+        client.update(kFixedDelta * 2.0f);
+        server.update(0.0f);
+        client.update(0.0f);
+        SDL_Delay(1);
+    }
+    if (applied_ticks.size() != 2u || applied_ticks[0] != 6u || applied_ticks[1] != 7u) {
+        state.addError("blocked redundant input replayed or exhausted the live input budget");
+    }
+
+    client.disconnect("blocked-input cursor regression complete");
+    for (uint32_t frame = 0; frame < 120u && server.getClientCount() != 0u; ++frame) {
+        client.update(0.0f);
+        server.update(0.0f);
+        SDL_Delay(1);
+    }
+    if (server.getClientCount() != 0u) {
+        state.addError("blocked-input loopback client did not disconnect");
+    }
+    client.shutdown();
+    server.shutdown();
+
+    if (state.error_count != 0) {
+        for (const std::string& error : state.errors) {
+            std::cerr << "[FAIL] " << error << "\n";
+        }
+        return false;
+    }
+
+    std::cout << "[PASS] BlockedInputCursorRegressionTests\n";
+    return true;
+}
+
 // This covers the manager path, where every sample is created by the normal
 // fixed-rate client input send loop. It deliberately exceeds two unreliable
 // queue windows cumulatively, then requires the actual pending queue to drain
@@ -1671,6 +1779,127 @@ static bool runUnreliableQueueDrainRegressionTest()
     }
 
     std::cout << "[PASS] UnreliableQueueDrainRegressionTests\n";
+    return true;
+}
+
+// A long update may drain a short fixed-command FIFO. The unused part of that
+// update must not become credit for an input queued later while the client is
+// idle, or the next command bypasses the 60 Hz send interval.
+static bool runInputSendCreditRegressionTest()
+{
+    TestState state;
+    world server_world;
+    server_world.setFixedDelta(kFixedDelta);
+
+    Net::ServerNetworkManager server;
+    if (!server.initialize()) {
+        std::cerr << "[FAIL] InputSendCreditRegressionTests could not initialize server\n";
+        return false;
+    }
+    server.setWorld(&server_world);
+
+    uint32_t highest_input_tick = 0;
+    uint32_t received_samples = 0;
+    server.setOnClientConnected([&](uint16_t client_id) {
+        spawnServerPlayer(server_world, server, client_id);
+    });
+    server.setInputFilter([&](uint16_t, entt::entity player_entity) {
+        return server_world.registry.valid(player_entity);
+    });
+    server.setInputSampleHandler([&](uint16_t, entt::entity,
+                                     const Net::InputSample& sample, uint32_t) {
+        ++received_samples;
+        highest_input_tick = (std::max)(highest_input_tick, sample.tick);
+    });
+
+    StressConfig config;
+    config.client_count = 1;
+    uint16_t port = 0;
+    if (!startServer(server, config, port)) {
+        std::cerr << "[FAIL] InputSendCreditRegressionTests could not start server\n";
+        server.shutdown();
+        return false;
+    }
+
+    world client_world;
+    Net::ClientNetworkManager client;
+    client.setWorld(&client_world);
+    if (!client.initialize() || !client.connectToServer("127.0.0.1", port, "input_credit")) {
+        std::cerr << "[FAIL] InputSendCreditRegressionTests could not connect client\n";
+        client.shutdown();
+        server.shutdown();
+        return false;
+    }
+
+    for (uint32_t frame = 0; frame < config.connect_frame_budget && !client.isConnected(); ++frame) {
+        client.update(kFixedDelta);
+        server.update(kFixedDelta);
+        client.update(0.0f);
+        SDL_Delay(1);
+    }
+    if (!client.isConnected() || server.getClientCount() != 1u) {
+        state.addError("input-send-credit loopback client did not connect");
+    }
+
+    Net::InputState input;
+    input.move_forward = 1.0f;
+    client.sendInputCommand(1u, input);
+    // This deliberately leaves nearly one second of unused send time after
+    // the one queued command has been sent.
+    client.update(1.0f);
+    for (uint32_t frame = 0; frame < 120u && highest_input_tick < 1u; ++frame) {
+        server.update(0.0f);
+        client.update(0.0f);
+        SDL_Delay(1);
+    }
+    if (highest_input_tick != 1u) {
+        state.addError("long update did not send the initial fixed input command");
+    }
+
+    client.sendInputCommand(2u, input);
+    // No time has elapsed since the new command was queued. Service both
+    // hosts to distinguish a queued packet from a packet that has not been
+    // sent by the client transport yet.
+    for (uint32_t frame = 0; frame < 8u; ++frame) {
+        client.update(0.0f);
+        server.update(0.0f);
+        client.update(0.0f);
+        SDL_Delay(1);
+    }
+    if (highest_input_tick != 1u || received_samples != 1u) {
+        state.addError("an idle client sent a later input using stale send credit");
+    }
+
+    client.update(kFixedDelta);
+    for (uint32_t frame = 0; frame < 120u && highest_input_tick < 2u; ++frame) {
+        server.update(0.0f);
+        client.update(0.0f);
+        SDL_Delay(1);
+    }
+    if (highest_input_tick != 2u || received_samples < 2u) {
+        state.addError("later fixed input did not send after a real interval");
+    }
+
+    client.disconnect("input-send-credit regression complete");
+    for (uint32_t frame = 0; frame < 120u && server.getClientCount() != 0u; ++frame) {
+        client.update(0.0f);
+        server.update(0.0f);
+        SDL_Delay(1);
+    }
+    if (server.getClientCount() != 0u) {
+        state.addError("input-send-credit loopback client did not disconnect");
+    }
+    client.shutdown();
+    server.shutdown();
+
+    if (state.error_count != 0) {
+        for (const std::string& error : state.errors) {
+            std::cerr << "[FAIL] " << error << "\n";
+        }
+        return false;
+    }
+
+    std::cout << "[PASS] InputSendCreditRegressionTests\n";
     return true;
 }
 
@@ -1956,11 +2185,13 @@ int main(int argc, char** argv)
     const bool input_view_tick_loopback_ok = runInputViewTickLoopbackTest();
     const bool interpolation_manager_wrap_ok = runInterpolationTickWrapManagerTest();
     const bool raw_interpolation_ok = runRawRemoteInterpolationStateTest();
+    const bool blocked_input_cursor_ok = runBlockedInputCursorRegressionTest();
     const bool unreliable_queue_drain_ok = runUnreliableQueueDrainRegressionTest();
+    const bool input_send_credit_ok = runInputSendCreditRegressionTest();
     const bool ok = runNetworkStress(config);
     EE::CLog::Shutdown();
     return (handshake_ok && transport_pending_queue_accounting_ok && custom_ingress_ok && hierarchy_boundary_ok && interpolation_buffer_wrap_ok && interpolation_jitter_ok && lag_history_wrap_ok &&
             lag_view_tick_clamp_ok &&
             input_view_tick_protocol_ok && input_view_tick_loopback_ok && interpolation_manager_wrap_ok &&
-            raw_interpolation_ok && unreliable_queue_drain_ok && ok) ? 0 : 1;
+            raw_interpolation_ok && blocked_input_cursor_ok && unreliable_queue_drain_ok && input_send_credit_ok && ok) ? 0 : 1;
 }

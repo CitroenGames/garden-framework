@@ -252,6 +252,12 @@ void ClientNetworkManager::update(float delta_time)
         }
     }
 
+    // Send credit belongs to queued fixed commands. Do not carry the remainder
+    // of a long frame into a later command after the FIFO has drained.
+    if (connection_state == ConnectionState::CONNECTED && queued_input_commands.empty()) {
+        input_send_timer = 0.0f;
+    }
+
     // Ping/RTT measurement
     if (connection_state == ConnectionState::CONNECTED) {
         ping_timer += delta_time;
