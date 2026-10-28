@@ -9,6 +9,9 @@
 #include "ECS/EntityLifecycle.hpp"
 #include "ECS/Hierarchy.hpp"
 #include "Graphics/HeadlessRenderAPI.hpp"
+#include "GameFramework/GameMode.hpp"
+#include "GameFramework/GameState.hpp"
+#include "GameFramework/GameModeRegistry.hpp"
 #include "LevelManager.hpp"
 #include "PhysicsSystem.hpp"
 #include "Events/EventBus.hpp"
@@ -4459,6 +4462,108 @@ static bool testLevelManagerPostCreationRollback()
     return pass(name);
 }
 
+class ThrowingLevelState : public GameFramework::GameStateBase
+{
+public:
+    void receivedGameModeClass() override { throw std::runtime_error("injected configuration failure"); }
+};
+
+class ThrowingLevelMode : public GameFramework::GameModeBase
+{
+protected:
+    void syncGameModeComponent() override { throw std::runtime_error("injected configuration failure"); }
+};
+
+static bool testLevelManagerFrameworkFailureRollback()
+{
+    const std::string name = "LevelManager framework replacement failure rollback";
+    auto& registry = GameFramework::GameModeRegistry::get();
+    // The default names are restored even when an assertion returns early.
+    struct RestoreFactories
+    {
+        ~RestoreFactories()
+        {
+            auto& r = GameFramework::GameModeRegistry::get();
+            r.registerGameMode("GameMode", [] { return std::make_unique<GameFramework::GameMode>(); });
+            r.registerGameState("GameState", [] { return std::make_unique<GameFramework::GameState>(); });
+            r.unregisterBySource("level-framework-test");
+        }
+    } restore;
+
+    // Authority mode/state null and throw, client state null and throw, and
+    // client and authority detached configuration throws. Null defaults cannot fall back.
+    for (int fault = 0; fault != 8; ++fault)
+    {
+        registry.registerGameMode("GameMode", [fault]() -> std::unique_ptr<GameFramework::GameModeBase> {
+            if (fault == 0) return nullptr;
+            if (fault == 1) throw std::runtime_error("injected mode factory failure");
+            if (fault == 7) return std::make_unique<ThrowingLevelMode>();
+            return std::make_unique<GameFramework::GameMode>();
+        });
+        registry.registerGameState("GameState", [fault]() -> std::unique_ptr<GameFramework::GameStateBase> {
+            if (fault == 2 || fault == 4) return nullptr;
+            if (fault == 3 || fault == 5) throw std::runtime_error("injected state factory failure");
+            if (fault == 6) return std::make_unique<ThrowingLevelState>();
+            return std::make_unique<GameFramework::GameState>();
+        });
+
+        world w;
+        w.setAuthorityGameMode(std::make_unique<GameFramework::GameMode>());
+        w.setGameState(std::make_unique<GameFramework::GameState>());
+        if (!w.initializeGameplayFramework()) return fail(name, "initial framework failed to initialize");
+        w.startGameplayFramework();
+        auto* old_mode = w.getAuthorityGameMode();
+        auto* old_state = w.getGameState();
+        const auto old_time = old_state->getServerWorldTimeSeconds();
+        const EntityRef sentinel_ref{EntityGuid{0xDE01, 0xEF01}};
+        const auto sentinel = w.restoreScopedEntity(sentinel_ref);
+        const auto old_gravity = w.getGravity();
+        const auto old_delta = w.getFixedDelta();
+        LevelData level;
+        level.metadata.gravity = old_gravity + glm::vec3(1, 2, 3);
+        level.metadata.fixed_delta = old_delta * 2;
+        LevelEntity entity;
+        entity.type = EntityType::Physical;
+        entity.has_collider = true;
+        entity.collider_shape_type = "Box";
+        level.entities.push_back(entity);
+        levelRollbackObserved.clear();
+        auto connection = w.registry.on_construct<TransformComponent>().connect<&observeLevelRollbackTransform>();
+        entt::entity player = entt::entity{123}, freecam = entt::entity{124}, rep = entt::entity{125};
+        std::vector<entt::entity> created{entt::entity{456}};
+        LevelManager manager;
+        const bool success = manager.instantiateLevel(level, w, nullptr, &player, &freecam, &rep, fault < 4 || fault == 7, &created);
+        connection.release();
+        if (success || w.getAuthorityGameMode() != old_mode || w.getGameState() != old_state ||
+            !w.isGameplayFrameworkInitialized() || !w.hasGameplayFrameworkStarted() ||
+            !old_state->hasBegunPlay() || old_mode->getGameState() != old_state ||
+            w.getGravity() != old_gravity || w.getFixedDelta() != old_delta ||
+            w.persistedReference(sentinel) != sentinel_ref || w.registry.view<IdentityComponent>().size() != 1 ||
+            player != entt::entity{123} || freecam != entt::entity{124} || rep != entt::entity{125} ||
+            created != std::vector<entt::entity>{entt::entity{456}} || levelRollbackObserved.size() != 1)
+            return fail(name, "failure changed framework, world, settings or outputs");
+        for (auto e : levelRollbackObserved)
+            if (w.registry.valid(e) || w.getPhysicsSystem().hasBody(e))
+                return fail(name, "failed cohort retained entity or physics body");
+        w.tickGameplayFramework(0.25f);
+        if (old_state->getServerWorldTimeSeconds() <= old_time)
+            return fail(name, "previous framework no longer ticks");
+    }
+
+    registry.registerGameMode("GameMode", [] { return std::make_unique<GameFramework::GameMode>(); });
+    registry.registerGameState("GameState", [] { return std::make_unique<GameFramework::GameState>(); });
+    registry.registerGameMode("NullLevelMode", []() -> std::unique_ptr<GameFramework::GameModeBase> { return nullptr; }, "level-framework-test");
+    registry.registerGameState("NullLevelState", []() -> std::unique_ptr<GameFramework::GameStateBase> { return nullptr; }, "level-framework-test");
+    LevelData fallback;
+    fallback.metadata.game_mode_class = "NullLevelMode";
+    fallback.metadata.game_state_class = "NullLevelState";
+    world w;
+    LevelManager manager;
+    if (!manager.instantiateLevel(fallback, w, nullptr) || !w.getAuthorityGameMode() || !w.getGameState())
+        return fail(name, "successful fallback was rejected");
+    return pass(name);
+}
+
 static bool testLevelManagerReflectedFailureRollback()
 {
     const std::string name = "LevelManager reflected failure rolls back cohort";
@@ -4689,6 +4794,7 @@ int main()
     ok = testLevelManagerReflectedFailureRollback() && ok;
     ok = testLevelManagerScopedRestoreRollback() && ok;
     ok = testLevelManagerPostCreationRollback() && ok;
+    ok = testLevelManagerFrameworkFailureRollback() && ok;
     ok = testLevelManagerLargeIdentityCohort() && ok;
 
     Assets::AssetManager::get().shutdown();

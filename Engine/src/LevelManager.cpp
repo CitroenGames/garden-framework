@@ -1415,16 +1415,13 @@ void LevelManager::applyGameplayFrameworkSettings(const LevelMetadata& metadata,
     const std::string game_state_class =
         resolvedGameStateClass(metadata, m_default_game_state_class, options);
 
-    game_world.shutdownGameplayFramework();
-
     if (create_authority_game_mode)
     {
         auto game_mode = createGameModeOrFallback(game_mode_class);
         if (!game_mode)
         {
             LOG_ENGINE_WARN("Failed to create GameMode '{}'", game_mode_class);
-            game_world.clearGameplayFramework();
-            return;
+            throw std::runtime_error("GameMode construction failed");
         }
 
         if (game_mode_class != game_mode->getClassName())
@@ -1437,6 +1434,7 @@ void LevelManager::applyGameplayFrameworkSettings(const LevelMetadata& metadata,
         if (!game_state)
         {
             LOG_ENGINE_WARN("Failed to create GameState '{}'", game_state_class);
+            throw std::runtime_error("GameState construction failed");
         }
         else if (game_state_class != game_state->getClassName())
         {
@@ -1444,32 +1442,25 @@ void LevelManager::applyGameplayFrameworkSettings(const LevelMetadata& metadata,
                             game_state_class, game_state->getClassName());
         }
 
+        applyGameModeRuntimeSettings(*game_mode, metadata);
+        game_world.shutdownGameplayFramework();
         game_world.setAuthorityGameMode(std::move(game_mode));
         game_world.setGameState(std::move(game_state));
-
-        if (GameModeBase* game_mode = game_world.getAuthorityGameMode())
-            applyGameModeRuntimeSettings(*game_mode, metadata);
         return;
     }
-
-    if (game_world.getAuthorityGameMode())
-        game_world.setAuthorityGameMode(nullptr);
 
     auto game_state = createGameStateOrFallback(game_state_class);
     if (!game_state)
     {
         LOG_ENGINE_WARN("Failed to create client GameState '{}'", game_state_class);
-        game_world.setGameState(nullptr);
-        return;
+        throw std::runtime_error("client GameState construction failed");
     }
 
+    game_state->setAuthorityGameMode(nullptr);
+    game_state->setGameModeClassName(game_mode_class);
+    game_world.shutdownGameplayFramework();
+    game_world.setAuthorityGameMode(nullptr);
     game_world.setGameState(std::move(game_state));
-
-    if (GameStateBase* game_state = game_world.getGameState())
-    {
-        game_state->setAuthorityGameMode(nullptr);
-        game_state->setGameModeClassName(game_mode_class);
-    }
 }
 
 bool LevelManager::loadLevel(const std::string& path, LevelData& out_level_data)
