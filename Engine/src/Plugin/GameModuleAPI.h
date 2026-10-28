@@ -88,7 +88,7 @@ struct EngineServices
 #endif
 
 // ============================================================================
-// Required exports from every game DLL (client):
+// Required core client exports from every game DLL:
 //
 //   GAME_API int32_t     gardenGetAPIVersion();
 //   GAME_API const char* gardenGetGameName();
@@ -96,6 +96,9 @@ struct EngineServices
 //   GAME_API void        gardenGameShutdown();
 //   GAME_API void        gardenRegisterComponents(ReflectionRegistry* registry);
 //   GAME_API void        gardenGameUpdate(float delta_time);
+//
+// Optional client lifecycle exports (resolved at runtime — absent = no-op):
+//
 //   GAME_API void        gardenOnLevelLoaded();
 //   GAME_API void        gardenOnPlayStart();
 //   GAME_API void        gardenOnPlayStop();

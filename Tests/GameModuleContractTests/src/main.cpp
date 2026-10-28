@@ -1,0 +1,399 @@
+#include "Plugin/GameModuleLoader.hpp"
+
+#include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <string>
+#include <utility>
+#include <vector>
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
+
+namespace fs = std::filesystem;
+
+namespace
+{
+    bool fail(const std::string& name, const std::string& reason)
+    {
+        std::cerr << "[FAIL] " << name << ": " << reason << std::endl;
+        return false;
+    }
+
+    bool pass(const std::string& name)
+    {
+        std::cout << "[PASS] " << name << std::endl;
+        return true;
+    }
+
+    std::vector<std::string> readEvents(const fs::path& path)
+    {
+        std::vector<std::string> events;
+        std::ifstream file(path);
+        for (std::string line; std::getline(file, line);)
+        {
+            if (!line.empty()) events.push_back(line);
+        }
+        return events;
+    }
+
+    bool contains(const std::string& text, const std::string& expected)
+    {
+        return text.find(expected) != std::string::npos;
+    }
+
+    bool hasExactly(const std::vector<std::string>& actual, std::vector<std::string> expected)
+    {
+        std::vector<std::string> sorted_actual = actual;
+        std::sort(sorted_actual.begin(), sorted_actual.end());
+        std::sort(expected.begin(), expected.end());
+        return sorted_actual == expected;
+    }
+
+    fs::path executableDirectory()
+    {
+#ifdef _WIN32
+        char executable_path[32768]{};
+        const DWORD length = GetModuleFileNameA(nullptr, executable_path, static_cast<DWORD>(sizeof(executable_path)));
+        if (length != 0 && length < sizeof(executable_path))
+            return fs::path(executable_path).parent_path();
+#endif
+        return fs::current_path();
+    }
+
+    class ScopedRecorder final
+    {
+    public:
+        explicit ScopedRecorder(const std::string& label)
+        {
+            const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+            m_path = fs::temp_directory_path() /
+                ("garden_game_module_contract_" + label + "_" + std::to_string(stamp) + ".log");
+#ifdef _WIN32
+            _putenv_s("GARDEN_GAME_MODULE_CONTRACT_RECORDER", m_path.string().c_str());
+#else
+            setenv("GARDEN_GAME_MODULE_CONTRACT_RECORDER", m_path.string().c_str(), 1);
+#endif
+        }
+
+        ~ScopedRecorder()
+        {
+#ifdef _WIN32
+            _putenv_s("GARDEN_GAME_MODULE_CONTRACT_RECORDER", "");
+#else
+            unsetenv("GARDEN_GAME_MODULE_CONTRACT_RECORDER");
+#endif
+            std::error_code ec;
+            fs::remove(m_path, ec);
+        }
+
+        std::vector<std::string> events() const { return readEvents(m_path); }
+
+    private:
+        fs::path m_path;
+    };
+
+    class StderrCapture final
+    {
+    public:
+        StderrCapture()
+        {
+            std::fflush(stderr);
+#ifdef _WIN32
+            m_saved_stderr = _dup(_fileno(stderr));
+#else
+            m_saved_stderr = dup(fileno(stderr));
+#endif
+            m_capture = std::tmpfile();
+            if (m_saved_stderr < 0 || !m_capture) return;
+#ifdef _WIN32
+            m_active = _dup2(_fileno(m_capture), _fileno(stderr)) == 0;
+#else
+            m_active = dup2(fileno(m_capture), fileno(stderr)) == 0;
+#endif
+        }
+
+        ~StderrCapture()
+        {
+            restore();
+            if (m_capture) std::fclose(m_capture);
+        }
+
+        std::string finish()
+        {
+            restore();
+            if (!m_capture) return {};
+            std::fflush(m_capture);
+            std::rewind(m_capture);
+            std::string output;
+            char buffer[512];
+            while (const size_t count = std::fread(buffer, 1, sizeof(buffer), m_capture))
+                output.append(buffer, count);
+            std::fclose(m_capture);
+            m_capture = nullptr;
+            return output;
+        }
+
+    private:
+        void restore()
+        {
+            if (m_active)
+            {
+                std::fflush(stderr);
+#ifdef _WIN32
+                _dup2(m_saved_stderr, _fileno(stderr));
+#else
+                dup2(m_saved_stderr, fileno(stderr));
+#endif
+                m_active = false;
+            }
+            if (m_saved_stderr >= 0)
+            {
+#ifdef _WIN32
+                _close(m_saved_stderr);
+#else
+                close(m_saved_stderr);
+#endif
+                m_saved_stderr = -1;
+            }
+        }
+
+        int m_saved_stderr = -1;
+        FILE* m_capture = nullptr;
+        bool m_active = false;
+    };
+
+    struct ContractPaths
+    {
+        fs::path fixture_directory;
+
+        fs::path fixture(const std::string& name) const
+        {
+#ifdef _WIN32
+            return fixture_directory / (name + ".dll");
+#elif defined(__APPLE__)
+            return fixture_directory / ("lib" + name + ".dylib");
+#else
+            return fixture_directory / ("lib" + name + ".so");
+#endif
+        }
+    };
+
+    bool loadAccepted(GameModuleLoader& loader, const fs::path& fixture, std::string& error)
+    {
+        StderrCapture capture;
+        const bool loaded = loader.load(fixture.string());
+        error = capture.finish();
+        return loaded;
+    }
+
+    bool verifyRecovery(const ContractPaths& paths, const std::string& name, std::string& reason)
+    {
+        ScopedRecorder recorder(name + "_recovery");
+        GameModuleLoader loader;
+        std::string error;
+        if (!loadAccepted(loader, paths.fixture("client_complete"), error))
+        {
+            reason = "following client_complete load failed: " + error;
+            return false;
+        }
+        if (!loader.isLoaded())
+        {
+            reason = "following client_complete load did not retain a module handle";
+            return false;
+        }
+        loader.unload();
+        return true;
+    }
+
+    bool testRequiredExportRejections(const ContractPaths& paths)
+    {
+        const std::vector<std::pair<std::string, std::string>> cases = {
+            {"client_missing_get_api_version", "gardenGetAPIVersion"},
+            {"client_missing_get_game_name", "gardenGetGameName"},
+            {"client_missing_game_init", "gardenGameInit"},
+            {"client_missing_game_shutdown", "gardenGameShutdown"},
+            {"client_missing_register_components", "gardenRegisterComponents"},
+            {"client_missing_game_update", "gardenGameUpdate"},
+        };
+
+        for (const auto& [fixture_name, missing_export] : cases)
+        {
+            const std::string name = "GameModuleContract_RequiredExport_" + missing_export;
+            ScopedRecorder recorder(fixture_name);
+            GameModuleLoader loader;
+            StderrCapture capture;
+            const bool loaded = loader.load(paths.fixture(fixture_name).string());
+            const std::string error = capture.finish();
+            if (loaded || loader.isLoaded())
+                return fail(name, "fixture with a missing core export was accepted");
+            if (!recorder.events().empty())
+                return fail(name, "refused module executed a callback");
+            if (!contains(error, paths.fixture(fixture_name).string()) || !contains(error, missing_export))
+                return fail(name, "diagnostic did not name the source fixture and missing export: " + error);
+            std::string recovery_error;
+            if (!verifyRecovery(paths, fixture_name, recovery_error)) return fail(name, recovery_error);
+        }
+        return pass("GameModuleContract_RequiredExportRejections");
+    }
+
+    bool testAbiRejections(const ContractPaths& paths)
+    {
+        const std::vector<std::pair<std::string, std::string>> cases = {
+            {"abi_revision_mismatch", "api_revision"},
+            {"abi_compiler_family_mismatch", "compiler_family"},
+            {"abi_compiler_version_mismatch", "compiler_version"},
+            {"abi_stl_debug_level_mismatch", "stl_debug_level"},
+            {"abi_debug_runtime_mismatch", "debug_runtime"},
+        };
+
+        for (const auto& [fixture_name, field] : cases)
+        {
+            const std::string name = "GameModuleContract_Abi_" + field;
+            ScopedRecorder recorder(fixture_name);
+            GameModuleLoader loader;
+            StderrCapture capture;
+            const bool loaded = loader.load(paths.fixture(fixture_name).string());
+            const std::string error = capture.finish();
+            if (loaded || loader.isLoaded()) return fail(name, "ABI-mismatched fixture was accepted");
+            if (!recorder.events().empty()) return fail(name, "refused ABI fixture executed a callback");
+            if (!contains(error, paths.fixture(fixture_name).string()) || !contains(error, "DLL=") ||
+                !contains(error, "Engine=") || !contains(error, field))
+                return fail(name, "diagnostic did not name fixture, packed tokens, and differing field: " + error);
+            std::string recovery_error;
+            if (!verifyRecovery(paths, fixture_name, recovery_error)) return fail(name, recovery_error);
+        }
+        return pass("GameModuleContract_AbiRejections");
+    }
+
+    bool testClientOptionalHooks(const ContractPaths& paths)
+    {
+        for (const std::string& fixture_name : {std::string("client_complete"), std::string("client_lifecycle_absent")})
+        {
+            const std::string name = "GameModuleContract_ClientOptionalHooks_" + fixture_name;
+            ScopedRecorder recorder(fixture_name);
+            GameModuleLoader loader;
+            std::string error;
+            if (!loadAccepted(loader, paths.fixture(fixture_name), error)) return fail(name, error);
+            if (!loader.isLoaded() || loader.hasServerSupport()) return fail(name, "client-only module reported the wrong load state");
+            if (!loader.init(nullptr) || loader.serverInit(nullptr)) return fail(name, "client/server initialization returned an unexpected result");
+            loader.registerComponents(nullptr);
+            loader.update(0.016f);
+            loader.onLevelLoaded();
+            loader.onPlayStart();
+            loader.onPlayStop();
+            loader.serverShutdown();
+            loader.serverPrePhysics(0.016f);
+            loader.serverUpdate(0.016f);
+            loader.serverOnLevelLoaded();
+            loader.serverOnClientConnected(1);
+            loader.serverOnClientDisconnected(1);
+            loader.shutdown();
+            if (!hasExactly(recorder.events(), {"client.init", "client.register_components", "client.update", "client.shutdown"}))
+                return fail(name, "optional hooks were dispatched or required hooks were not recorded");
+            loader.unload();
+            std::string recovery_error;
+            if (!verifyRecovery(paths, fixture_name, recovery_error)) return fail(name, recovery_error);
+        }
+        return pass("GameModuleContract_ClientOptionalHooks");
+    }
+
+    bool testClientLifecycleRecorder(const ContractPaths& paths)
+    {
+        const std::string name = "GameModuleContract_ClientLifecycleRecorder";
+        ScopedRecorder recorder("client_lifecycle_recorder");
+        GameModuleLoader loader;
+        std::string error;
+        if (!loadAccepted(loader, paths.fixture("client_lifecycle_recorder"), error)) return fail(name, error);
+        loader.onLevelLoaded();
+        loader.onPlayStart();
+        loader.onPlayStop();
+        if (!hasExactly(recorder.events(), {"client.level_loaded", "client.play_start", "client.play_stop"}))
+            return fail(name, "lifecycle wrappers did not dispatch exactly once");
+        loader.unload();
+        std::string recovery_error;
+        if (!verifyRecovery(paths, "client_lifecycle_recorder", recovery_error)) return fail(name, recovery_error);
+        return pass(name);
+    }
+
+    bool testServerShapes(const ContractPaths& paths)
+    {
+        struct Case
+        {
+            const char* fixture;
+            bool has_server_support;
+            std::vector<std::string> expected;
+        };
+        const std::vector<Case> cases = {
+            {"server_none", false, {}},
+            {"server_init_only", true, {"server.init"}},
+            {"server_partial", true, {"server.init", "server.update", "server.client_connected"}},
+            {"server_callbacks_without_init", false, {"server.update", "server.client_connected"}},
+            {"server_complete_recorder", true, {"server.init", "server.shutdown", "server.pre_physics", "server.update", "server.level_loaded", "server.client_connected", "server.client_disconnected"}},
+        };
+
+        for (const Case& test_case : cases)
+        {
+            const std::string name = "GameModuleContract_Server_" + std::string(test_case.fixture);
+            ScopedRecorder recorder(test_case.fixture);
+            GameModuleLoader loader;
+            std::string error;
+            if (!loadAccepted(loader, paths.fixture(test_case.fixture), error)) return fail(name, error);
+            if (loader.hasServerSupport() != test_case.has_server_support)
+                return fail(name, "server capability marker had the wrong value");
+            const bool server_init = loader.serverInit(nullptr);
+            if (server_init != test_case.has_server_support)
+                return fail(name, "server init result did not match the server capability marker");
+            loader.serverShutdown();
+            loader.serverPrePhysics(0.016f);
+            loader.serverUpdate(0.016f);
+            loader.serverOnLevelLoaded();
+            loader.serverOnClientConnected(3);
+            loader.serverOnClientDisconnected(3);
+            if (!hasExactly(recorder.events(), test_case.expected))
+                return fail(name, "present and absent server wrappers did not follow the fixture export set");
+            loader.unload();
+            std::string recovery_error;
+            if (!verifyRecovery(paths, test_case.fixture, recovery_error)) return fail(name, recovery_error);
+        }
+        return pass("GameModuleContract_ServerShapes");
+    }
+}
+
+int main()
+{
+    const ContractPaths paths{executableDirectory() / "GameModuleContractFixtures"};
+    const std::vector<std::string> fixtures = {
+        "client_complete", "client_missing_get_api_version", "client_missing_get_game_name",
+        "client_missing_game_init", "client_missing_game_shutdown", "client_missing_register_components",
+        "client_missing_game_update", "client_lifecycle_absent", "client_lifecycle_recorder", "server_none",
+        "server_init_only", "server_partial", "server_callbacks_without_init", "server_complete_recorder",
+        "abi_revision_mismatch", "abi_compiler_family_mismatch", "abi_compiler_version_mismatch",
+        "abi_stl_debug_level_mismatch", "abi_debug_runtime_mismatch",
+    };
+    for (const std::string& fixture : fixtures)
+    {
+        if (!fs::exists(paths.fixture(fixture)))
+        {
+            fail("GameModuleContract_FixtureLayout", "missing fixture: " + paths.fixture(fixture).string());
+            return 1;
+        }
+    }
+
+    bool ok = true;
+    ok = testRequiredExportRejections(paths) && ok;
+    ok = testAbiRejections(paths) && ok;
+    ok = testClientOptionalHooks(paths) && ok;
+    ok = testClientLifecycleRecorder(paths) && ok;
+    ok = testServerShapes(paths) && ok;
+    return ok ? 0 : 1;
+}

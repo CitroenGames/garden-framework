@@ -1,0 +1,39 @@
+[project:GameModuleContractTests]
+type = exe
+outdir = ../../bin/
+if(Windows)
+{
+    subsystem = Console
+}
+sources = src/main.cpp
+headers = src/**/*.hpp
+includes = src
+target_link_libraries(
+    PRIVATE EngineCore
+)
+multiprocessor = true
+simd = AdvancedVectorExtensions2
+std = 20
+utf8 = true
+exception_handling = false
+buffer_security_check = false
+
+include = fixtures/client_complete.buildscript
+include = fixtures/client_missing_get_api_version.buildscript
+include = fixtures/client_missing_get_game_name.buildscript
+include = fixtures/client_missing_game_init.buildscript
+include = fixtures/client_missing_game_shutdown.buildscript
+include = fixtures/client_missing_register_components.buildscript
+include = fixtures/client_missing_game_update.buildscript
+include = fixtures/client_lifecycle_absent.buildscript
+include = fixtures/client_lifecycle_recorder.buildscript
+include = fixtures/server_none.buildscript
+include = fixtures/server_init_only.buildscript
+include = fixtures/server_partial.buildscript
+include = fixtures/server_callbacks_without_init.buildscript
+include = fixtures/server_complete_recorder.buildscript
+include = fixtures/abi_revision_mismatch.buildscript
+include = fixtures/abi_compiler_family_mismatch.buildscript
+include = fixtures/abi_compiler_version_mismatch.buildscript
+include = fixtures/abi_stl_debug_level_mismatch.buildscript
+include = fixtures/abi_debug_runtime_mismatch.buildscript

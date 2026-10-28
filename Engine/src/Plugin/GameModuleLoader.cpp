@@ -54,7 +54,7 @@ namespace
 
     void printModuleVersionFields(const char* label, int32_t version)
     {
-        fprintf(stderr, "%s=%d (api=%d compiler=%d:%d stl_debug=%d debug_runtime=%d)",
+        fprintf(stderr, "%s=%d (api_revision=%d compiler_family=%d compiler_version=%d stl_debug_level=%d debug_runtime=%d)",
                 label,
                 version,
                 moduleApiRevision(version),
@@ -62,6 +62,25 @@ namespace
                 moduleCompilerVersion(version),
                 moduleStlDebugLevel(version),
                 moduleDebugRuntime(version));
+    }
+
+    void printModuleVersionDifferences(int32_t dll_version, int32_t engine_version)
+    {
+        const char* separator = "";
+        fprintf(stderr, " differing fields: ");
+        const auto print_if_different = [&](const char* name, int dll_value, int engine_value)
+        {
+            if (dll_value == engine_value)
+                return;
+            fprintf(stderr, "%s%s(%d != %d)", separator, name, dll_value, engine_value);
+            separator = ", ";
+        };
+
+        print_if_different("api_revision", moduleApiRevision(dll_version), moduleApiRevision(engine_version));
+        print_if_different("compiler_family", moduleCompilerFamily(dll_version), moduleCompilerFamily(engine_version));
+        print_if_different("compiler_version", moduleCompilerVersion(dll_version), moduleCompilerVersion(engine_version));
+        print_if_different("stl_debug_level", moduleStlDebugLevel(dll_version), moduleStlDebugLevel(engine_version));
+        print_if_different("debug_runtime", moduleDebugRuntime(dll_version), moduleDebugRuntime(engine_version));
     }
 }
 
@@ -165,7 +184,6 @@ bool GameModuleLoader::load(const std::string& dll_path)
 
     if (!resolveFunctions())
     {
-        fprintf(stderr, "[GameModule] DLL loaded but missing required exports\n");
         unload();
         return false;
     }
@@ -176,17 +194,18 @@ bool GameModuleLoader::load(const std::string& dll_path)
     {
         if (moduleApiRevision(version) == 0)
         {
-            fprintf(stderr, "[GameModule] API/ABI mismatch: DLL=%d (legacy API token), ",
-                    version);
+            fprintf(stderr, "[GameModule] API/ABI mismatch for '%s': DLL=%d (legacy API token), ",
+                    dll_path.c_str(), version);
         }
         else
         {
-            fprintf(stderr, "[GameModule] API/ABI mismatch: ");
+            fprintf(stderr, "[GameModule] API/ABI mismatch for '%s': ", dll_path.c_str());
             printModuleVersionFields("DLL", version);
             fprintf(stderr, ", ");
         }
 
         printModuleVersionFields("Engine", GARDEN_MODULE_API_VERSION);
+        printModuleVersionDifferences(version, GARDEN_MODULE_API_VERSION);
         fprintf(stderr, "\n");
         unload();
         return false;
@@ -248,9 +267,31 @@ bool GameModuleLoader::resolveFunctions()
     m_fnServerOnClientConnected    = (FnServerOnClientConnected)   platformGetProc(m_handle, "gardenServerOnClientConnected");
     m_fnServerOnClientDisconnected = (FnServerOnClientDisconnected)platformGetProc(m_handle, "gardenServerOnClientDisconnected");
 
-    // Only the client exports are required
-    return m_fnGetAPIVersion && m_fnGetGameName && m_fnGameInit &&
-           m_fnGameShutdown && m_fnRegisterComponents && m_fnGameUpdate;
+    // Only the six core client exports are required. Diagnose the first one
+    // precisely so module authors can repair a refused load without guessing.
+    struct RequiredExport
+    {
+        const char* name;
+        bool resolved;
+    };
+    const RequiredExport required_exports[] = {
+        {"gardenGetAPIVersion", m_fnGetAPIVersion != nullptr},
+        {"gardenGetGameName", m_fnGetGameName != nullptr},
+        {"gardenGameInit", m_fnGameInit != nullptr},
+        {"gardenGameShutdown", m_fnGameShutdown != nullptr},
+        {"gardenRegisterComponents", m_fnRegisterComponents != nullptr},
+        {"gardenGameUpdate", m_fnGameUpdate != nullptr},
+    };
+    for (const RequiredExport& required : required_exports)
+    {
+        if (!required.resolved)
+        {
+            fprintf(stderr, "[GameModule] Module '%s' is missing required client export '%s'\n",
+                    m_source_path.c_str(), required.name);
+            return false;
+        }
+    }
+    return true;
 }
 
 void GameModuleLoader::clearFunctionPointers()

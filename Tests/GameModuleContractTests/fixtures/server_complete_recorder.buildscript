@@ -1,0 +1,15 @@
+[project:server_complete_recorder]
+type = dll
+outdir = ../../../bin/GameModuleContractFixtures/
+sources = FixtureExports.cpp
+includes = ../../../Engine/src
+target_link_libraries(
+    PRIVATE EngineCore
+)
+defines = FIXTURE_SERVER_COMPLETE
+multiprocessor = true
+simd = AdvancedVectorExtensions2
+std = 20
+utf8 = true
+exception_handling = false
+buffer_security_check = false

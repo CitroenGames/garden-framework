@@ -26,7 +26,7 @@ public:
     bool isLoaded() const { return m_handle != nullptr; }
     const std::string& getLoadedPath() const { return m_source_path; }
 
-    // ---- Client hooks (required) ----
+    // ---- Client hooks (first six are required; lifecycle hooks are optional) ----
 
     int32_t     getAPIVersion();
     const char* getGameName();
@@ -55,7 +55,7 @@ private:
     std::string m_loaded_path;        // Temp copy path (for hot-reload)
     int m_reload_counter = 0;         // Increments each reload for unique temp names
 
-    // Client function pointers (required)
+    // Core client pointers are required; lifecycle pointers are optional.
     using FnGetAPIVersion       = int32_t(*)();
     using FnGetGameName         = const char*(*)();
     using FnGameInit            = bool(*)(EngineServices*);
