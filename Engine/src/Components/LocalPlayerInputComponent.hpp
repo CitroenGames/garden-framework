@@ -27,6 +27,8 @@ struct LocalPlayerInputComponent
     // update. These fields are deliberately transient and unreflected.
     glm::vec2 move{ 0.0f };
     bool jump_held = false;
+    // Retain a short press until a character simulation step consumes it.
+    bool jump_press_pending = false;
     bool sprint_held = false;
     bool crouch_held = false;
     glm::vec2 look{ 0.0f };
@@ -37,6 +39,7 @@ struct LocalPlayerInputComponent
     {
         move = glm::vec2(0.0f);
         jump_held = false;
+        jump_press_pending = false;
         sprint_held = false;
         crouch_held = false;
         look = glm::vec2(0.0f);

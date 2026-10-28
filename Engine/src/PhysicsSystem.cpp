@@ -1150,14 +1150,16 @@ void PhysicsSystem::syncTransformsToJolt(entt::registry& registry)
     }
 }
 
+bool PhysicsSystem::refreshCharacterController(entt::registry& registry, entt::entity entity)
+{
+    if (!initialized || !registry.valid(entity) || !hasCharacterController(entity))
+        return false;
+    return character_controllers.refresh(registry, entity, *jolt_system, *temp_allocator, settings.layers);
+}
+
 void PhysicsSystem::handlePlayerCollisions(entt::registry& registry, entt::entity playerEntity)
 {
     if (!initialized || !registry.valid(playerEntity)) return;
-    if (registry.all_of<CharacterControllerComponent>(playerEntity) && hasCharacterController(playerEntity))
-    {
-        character_controllers.refresh(registry, playerEntity, *jolt_system, *temp_allocator, settings.layers);
-        return;
-    }
     if (!registry.all_of<TransformComponent, RigidBodyComponent, PlayerComponent>(playerEntity)) return;
 
     auto& player = registry.get<PlayerComponent>(playerEntity);

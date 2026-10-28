@@ -13,6 +13,7 @@ class world;
 namespace GameFramework
 {
 class GameModeBase;
+class GameFrameworkRuntime;
 
 class ENGINE_API GameStateBase
 {
@@ -62,6 +63,7 @@ public:
     float getServerWorldTimeSecondsUpdateFrequency() const { return m_server_time_update_frequency; }
 
 protected:
+    friend class GameFrameworkRuntime;
     virtual void syncGameStateComponent();
 
     world* m_world = nullptr;

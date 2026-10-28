@@ -1,14 +1,104 @@
 #pragma once
 
+#include "Character/CharacterPhysicsService.hpp"
 #include "InputActionSystem.hpp"
 #include "InputManager.hpp"
+#include "Network/PredictionSystem.hpp"
 #include "shared/MovementInputPolicy.hpp"
+#include "shared/FpsMovementTuning.hpp"
 #include "shared/NetworkInputSampler.hpp"
 #include "shared/PlayerLifecycle.hpp"
 #include "shared/FpsAnimationPresentation.hpp"
 #include "server/FpsDamage.hpp"
 
 #include <string>
+#include <limits>
+
+
+bool testPlayerMovementTuning()
+{
+    const std::string name = "Player_MovementTuning";
+    world game_world;
+    const EntityRef pawn = game_world.createEntity();
+    const Net::MovementState initial_state;
+    if (!Net::PredictionSystem::initializePawn(game_world, pawn, initial_state) ||
+        !Net::PredictionSystem::configureMovement(game_world, pawn,
+            FPSShooter::kMoveSpeed, FPSShooter::kJumpVelocity) ||
+        Net::PredictionSystem::configureMovement(game_world, EntityRef{}, 4.5f, 3.0f) ||
+        Net::PredictionSystem::configureMovement(game_world, pawn, -1.0f, 3.0f) ||
+        Net::PredictionSystem::configureMovement(game_world, pawn, 4.5f,
+                                                 std::numeric_limits<float>::quiet_NaN()))
+        return fail(name, "controller configuration did not validate its handle and values");
+
+    // Standalone levels locate their authored pawn by its template tag.
+    LevelData level;
+    LevelEntity level_player;
+    level_player.name = "player";
+    level_player.type = EntityType::Player;
+    level_player.position = glm::vec3(0.0f, 2.0f, 0.0f);
+    level.entities.push_back(level_player);
+    world standalone_world;
+    CharacterPhysicsService standalone_physics(standalone_world);
+    standalone_world.initializePhysics();
+    LevelManager level_manager;
+    if (!level_manager.instantiateLevel(level, standalone_world, nullptr))
+        return fail(name, "standalone level did not instantiate");
+    const EntityRef standalone_pawn = standalone_world.findEntityByTag("player");
+    if (standalone_pawn.isNull() ||
+        !standalone_physics.hasController(standalone_pawn) ||
+        !Net::PredictionSystem::configureMovement(standalone_world, standalone_pawn,
+            FPSShooter::kMoveSpeed, FPSShooter::kJumpVelocity) ||
+        !standalone_world.findEntityByTag("missing").isNull())
+        return fail(name, "standalone pawn lookup or movement configuration failed");
+
+    PlayerComponent player;
+    CharacterControllerComponent controller;
+    FPSShooter::applyMovementTuning(player, controller);
+    if (player.speed != controller.move_speed || player.jump_force != controller.jump_velocity)
+        return fail(name, "player and controller tuning disagree");
+
+    CharacterController::MovementTuning tuning;
+    tuning.max_speed = controller.move_speed;
+    tuning.jump_velocity = controller.jump_velocity;
+    tuning.fixed_delta = 1.0f / 60.0f;
+    tuning.sprint_speed_scale = controller.sprint_speed_scale;
+    tuning.crouch_speed_scale = controller.crouch_speed_scale;
+    tuning.stop_speed = tuning.max_speed * controller.stop_speed_ratio;
+    tuning.air_wish_speed_cap = tuning.max_speed * controller.air_wish_speed_cap_ratio;
+    auto groundSpeed = [&](uint16_t buttons) {
+        CharacterControllerState state;
+        state.grounded = true;
+        CharacterMoveInput input;
+        input.move_forward = 1.0f;
+        input.buttons = buttons;
+        for (int i = 0; i < 180; ++i) {
+            state = CharacterController::simulateSourceMovement(input, state, tuning);
+            state.grounded = true;
+        }
+        return glm::length(glm::vec2(state.velocity.x, state.velocity.z));
+    };
+    const float walk = groundSpeed(0);
+    const float sprint = groundSpeed(CharacterMoveFlags::Sprint);
+    const float crouch = groundSpeed(CharacterMoveFlags::Crouch);
+    if (walk < 4.4f || walk > 4.6f || sprint < 6.6f || sprint > 6.9f ||
+        crouch < 1.9f || crouch > 2.1f)
+        return fail(name, "ground speed outside template bounds");
+
+    CharacterControllerState state;
+    state.grounded = true;
+    CharacterMoveInput jump;
+    jump.buttons = CharacterMoveFlags::Jump;
+    state = CharacterController::simulateSourceMovement(jump, state, tuning);
+    float apex = state.position.y;
+    for (int i = 0; i < 120; ++i) {
+        state = CharacterController::simulateSourceMovement(jump, state, tuning);
+        state.grounded = false;
+        apex = std::max(apex, state.position.y);
+    }
+    if (apex < 0.40f || apex > 0.55f)
+        return fail(name, "held jump apex outside template bounds");
+    return pass(name);
+}
 
 bool testPlayerPawnLifecycleContract()
 {
@@ -307,12 +397,22 @@ bool testPlayerMovementInputContract()
     gameplay.name = "PlayerMovementTest";
     gameplay.bindings = {
         {"Jump", InputBinding::Source::Key, SDL_SCANCODE_SPACE},
+        {"MoveForward", InputBinding::Source::Key, SDL_SCANCODE_W},
+        {"MoveRight", InputBinding::Source::Key, SDL_SCANCODE_D},
         {"Sprint", InputBinding::Source::Key, SDL_SCANCODE_LSHIFT},
         {"Crouch", InputBinding::Source::Key, SDL_SCANCODE_LCTRL},
     };
     if (!actions.registerContext(gameplay) || !actions.pushContext("PlayerMovementTest"))
         return fail(name, "could not activate input context");
 
+    input.update();
+    for (const SDL_Scancode key : {SDL_SCANCODE_W, SDL_SCANCODE_D}) {
+        SDL_Event event{};
+        event.type = SDL_EVENT_KEY_DOWN;
+        event.key.scancode = key;
+        input.process_event(event);
+    }
+    actions.evaluate(input);
     input.update();
     for (const SDL_Scancode key : {SDL_SCANCODE_SPACE, SDL_SCANCODE_LSHIFT, SDL_SCANCODE_LCTRL}) {
         SDL_Event event{};
@@ -325,17 +425,16 @@ bool testPlayerMovementInputContract()
         actions, 0.25f, -0.1f, true, false, false, false);
     const uint16_t movement_buttons = Net::InputFlags::JUMP |
         Net::InputFlags::CROUCH | Net::InputFlags::SPRINT;
-    if ((client_input.buttons & movement_buttons) != movement_buttons)
-        return fail(name, "input sampler lost sprint, crouch, or jump");
+    if ((client_input.buttons & movement_buttons) != movement_buttons ||
+        client_input.move_forward != 1.0f || client_input.move_right != 1.0f)
+        return fail(name, "input sampler lost movement or jump while direction keys were held");
 
     input.update();
     actions.evaluate(input);
     const Net::InputState held_input = FPSShooter::sampleNetworkInput(
         actions, 0.25f, -0.1f, true, false, false, false);
-    if ((held_input.buttons & Net::InputFlags::JUMP) != 0 ||
-        (held_input.buttons & (Net::InputFlags::CROUCH | Net::InputFlags::SPRINT)) !=
-            (Net::InputFlags::CROUCH | Net::InputFlags::SPRINT)) {
-        return fail(name, "jump was not edge-sampled or held movement modifiers were lost");
+    if ((held_input.buttons & movement_buttons) != movement_buttons) {
+        return fail(name, "held jump or movement modifiers were lost");
     }
 
     const Net::MovementInput predicted = FPSShooter::toMovementInput(client_input);
@@ -343,6 +442,7 @@ bool testPlayerMovementInputContract()
     const uint16_t expected_character_buttons = CharacterMoveFlags::Jump |
         CharacterMoveFlags::Crouch | CharacterMoveFlags::Sprint;
     if (predicted_character.buttons != expected_character_buttons ||
+        predicted_character.move_forward != 1.0f || predicted_character.move_right != 1.0f ||
         !approx(predicted_character.camera_yaw, client_input.camera_yaw) ||
         !approx(predicted_character.camera_pitch, client_input.camera_pitch)) {
         return fail(name, "prediction bridge did not preserve movement intent");
@@ -358,6 +458,7 @@ bool testPlayerMovementInputContract()
     const CharacterMoveInput authoritative_character =
         FPSShooter::toCharacterMoveInput(FPSShooter::toMovementInput(authoritative_sample));
     if (authoritative_character.buttons != expected_character_buttons ||
+        authoritative_character.move_forward != 1.0f || authoritative_character.move_right != 1.0f ||
         !approx(authoritative_character.camera_yaw, client_input.camera_yaw) ||
         !approx(authoritative_character.camera_pitch, client_input.camera_pitch)) {
         return fail(name, "authoritative bridge did not preserve movement intent");

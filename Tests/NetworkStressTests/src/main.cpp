@@ -34,6 +34,20 @@
 
 namespace {
 
+// Test fixture bridge for inspecting legacy raw ECS state around network refs.
+namespace NetworkTestEcsBridge
+{
+    EntityRef entityRef(world& test_world, entt::entity entity)
+    {
+        return ensureEntityRef(test_world.registry, entity);
+    }
+
+    entt::entity resolve(world& test_world, EntityRef entity)
+    {
+        return resolveEntityRef(test_world.registry, entity);
+    }
+}
+
 constexpr float kFixedDelta = 1.0f / 60.0f;
 constexpr uint8_t kReliableStressMessage = Net::CUSTOM_MESSAGE_START;
 constexpr uint8_t kUnreliableStressMessage = Net::CUSTOM_MESSAGE_START + 1;
@@ -488,11 +502,11 @@ static bool runNetworkHierarchyBoundaryTests()
         server.sendSpawnEntityToClient(client.getClientId(), root_spawn);
         server.update(0.0f);
         for (int frame = 0; frame < 120 &&
-             client.getEntityByNetworkId(kRootNetworkId) == entt::null; ++frame) {
+             client.getEntityRefByNetworkId(kRootNetworkId).isNull(); ++frame) {
             client.update(0.0f);
             SDL_Delay(1);
         }
-        if (client.getEntityByNetworkId(kRootNetworkId) == entt::null) {
+        if (client.getEntityRefByNetworkId(kRootNetworkId).isNull()) {
             state.addError("root spawn recipe did not reach client");
         }
     }
@@ -503,13 +517,13 @@ static bool runNetworkHierarchyBoundaryTests()
 
     entt::entity client_root = entt::null;
     if (state.error_count == 0) {
-        client_root = client.getEntityByNetworkId(kRootNetworkId);
+        client_root = NetworkTestEcsBridge::resolve(client_world, client.getEntityRefByNetworkId(kRootNetworkId));
         const auto* root_transform = client_world.registry.try_get<TransformComponent>(client_root);
         if (client_root == entt::null || root_transform == nullptr ||
             std::abs(root_transform->position.x - 10.0f) > 1.0e-5f) {
             state.addError("root snapshot behavior changed");
         }
-        if (client.getEntityByNetworkId(kParentedNetworkId) != entt::null) {
+        if (!client.getEntityRefByNetworkId(kParentedNetworkId).isNull()) {
             state.addError("server snapshot emitted parented entity");
         }
         if (server.getStats().hierarchy_root_rejections < 2u) {
@@ -550,12 +564,12 @@ static bool runNetworkHierarchyBoundaryTests()
         Net::NetworkSerializer::serialize(writer, spawn);
         server.sendReliableToClient(client.getClientId(), writer);
         server.update(0.0f);
-        for (int frame = 0; frame < 120 && client.getLocalPlayerEntity() == entt::null; ++frame) {
+        for (int frame = 0; frame < 120 && client.getLocalPlayerEntityRef().isNull(); ++frame) {
             client.update(0.0f);
             SDL_Delay(1);
         }
 
-        const entt::entity local_player = client.getLocalPlayerEntity();
+        const entt::entity local_player = NetworkTestEcsBridge::resolve(client_world, client.getLocalPlayerEntityRef());
         if (local_player == entt::null) {
             state.addError("local prediction entity was not spawned");
         } else {
@@ -1488,7 +1502,7 @@ static bool runArchetypeDispatchReorderTest()
         for (int frame = 0; frame < 120; ++frame) {
             client.update(0.0f);
             server.update(0.0f);
-            if (client.getEntityByNetworkId(kReorderedId) != entt::null) return;
+            if (!client.getEntityRefByNetworkId(kReorderedId).isNull()) return;
             SDL_Delay(1);
         }
     };
@@ -1509,7 +1523,7 @@ static bool runArchetypeDispatchReorderTest()
             client.update(0.0f);
             SDL_Delay(1);
         }
-        if (client.getEntityByNetworkId(kReorderedId) != entt::null) {
+        if (!client.getEntityRefByNetworkId(kReorderedId).isNull()) {
             state.addError("snapshot before spawn constructed a bare entity");
         }
 
@@ -1519,18 +1533,18 @@ static bool runArchetypeDispatchReorderTest()
         spawn.position = glm::vec3(1.0f, 0.0f, 1.0f);
         sendRawSpawn(spawn);
         pumpClient();
-        const entt::entity entity = client.getEntityByNetworkId(kReorderedId);
-        if (entity == entt::null || !client_world.registry.valid(entity)) {
+        const EntityRef entity = client.getEntityRefByNetworkId(kReorderedId);
+        const auto* transform = client_world.tryGetComponent<TransformComponent>(entity);
+        if (!client_world.isEntityValid(entity) || !transform) {
             state.addError("registered recipe did not create reordered entity");
         } else {
-            const auto& transform = client_world.registry.get<TransformComponent>(entity);
-            if (glm::distance(transform.position, before_spawn.position) > 0.001f ||
-                std::abs(transform.rotation.y - glm::degrees(before_spawn.rotation_y)) > 0.001f) {
+            if (glm::distance(transform->position, before_spawn.position) > 0.001f ||
+                std::abs(transform->rotation.y - glm::degrees(before_spawn.rotation_y)) > 0.001f) {
                 state.addError("held snapshot was not replayed after recipe initialization");
             }
             sendRawSpawn(spawn);
             for (int frame = 0; frame < 12; ++frame) { client.update(0.0f); server.update(0.0f); }
-            if (client.getEntityByNetworkId(kReorderedId) != entity) {
+            if (client.getEntityRefByNetworkId(kReorderedId) != entity) {
                 state.addError("duplicate spawn changed the initialized entity");
             }
         }
@@ -1540,7 +1554,7 @@ static bool runArchetypeDispatchReorderTest()
         unknown.archetype_id = 0x7002;
         sendRawSpawn(unknown);
         for (int frame = 0; frame < 12; ++frame) { client.update(0.0f); server.update(0.0f); }
-        if (client.getEntityByNetworkId(unknown.network_id) != entt::null) {
+        if (!client.getEntityRefByNetworkId(unknown.network_id).isNull()) {
             state.addError("unknown recipe created an entity");
         }
 
@@ -1550,7 +1564,7 @@ static bool runArchetypeDispatchReorderTest()
         malformed.init_ext = {1};
         sendRawSpawn(malformed);
         for (int frame = 0; frame < 12; ++frame) { client.update(0.0f); server.update(0.0f); }
-        if (client.getEntityByNetworkId(malformed.network_id) != entt::null) {
+        if (!client.getEntityRefByNetworkId(malformed.network_id).isNull()) {
             state.addError("malformed initial state created an entity");
         }
 
@@ -1572,8 +1586,27 @@ static bool runArchetypeDispatchReorderTest()
         despawned.archetype_id = kGenericStressArchetypeId;
         sendRawSpawn(despawned);
         for (int frame = 0; frame < 12; ++frame) { client.update(0.0f); server.update(0.0f); }
-        if (client.getEntityByNetworkId(despawned.network_id) != entt::null) {
+        if (!client.getEntityRefByNetworkId(despawned.network_id).isNull()) {
             state.addError("despawn-before-spawn created an entity");
+        }
+    }
+
+    // A published Garden reference must stop resolving after the entity dies,
+    // even if the underlying ECS slot is reused.
+    if (state.error_count == 0) {
+        const EntityRef published = client.getEntityRefByNetworkId(kReorderedId);
+        const entt::entity old_entity = NetworkTestEcsBridge::resolve(client_world, published);
+        if (published.isNull() || old_entity == entt::null) {
+            state.addError("network lookup did not publish a resolvable entity reference");
+        } else {
+            client_world.registry.destroy(old_entity);
+            const entt::entity replacement = client_world.registry.create();
+            NetworkTestEcsBridge::entityRef(client_world, replacement);
+            if (!client.getEntityRefByNetworkId(kReorderedId).isNull() ||
+                NetworkTestEcsBridge::resolve(client_world, published) != entt::null) {
+                state.addError("network entity reference survived destruction or slot reuse");
+            }
+            client_world.registry.destroy(replacement);
         }
     }
 
@@ -1648,11 +1681,11 @@ static bool runInterpolationTickWrapManagerTest()
         server.update(0.0f);
 
         for (int frame = 0; frame < 120 &&
-             client.getEntityByNetworkId(kRemoteNetworkId) == entt::null; ++frame) {
+             client.getEntityRefByNetworkId(kRemoteNetworkId).isNull(); ++frame) {
             client.update(0.0f);
             SDL_Delay(1);
         }
-        if (client.getEntityByNetworkId(kRemoteNetworkId) == entt::null) {
+        if (client.getEntityRefByNetworkId(kRemoteNetworkId).isNull()) {
             state.addError("interpolation wrap test did not receive SPAWN_ENTITY");
         }
     }
@@ -1699,9 +1732,13 @@ static bool runInterpolationTickWrapManagerTest()
 
         if (state.error_count == 0) {
             client.interpolateRemoteEntities();
-            const entt::entity entity = client.getEntityByNetworkId(kRemoteNetworkId);
-            const auto& raw_transform = client_world.registry.get<TransformComponent>(entity);
-            const auto* presentation = client_world.registry.try_get<PresentationTransformComponent>(entity);
+            const EntityRef entity = client.getEntityRefByNetworkId(kRemoteNetworkId);
+            const auto* authoritative_transform = client_world.tryGetComponent<TransformComponent>(entity);
+            const TransformComponent fallback_transform{};
+            if (!authoritative_transform)
+                state.addError("remote entity has no authoritative transform");
+            const auto& raw_transform = authoritative_transform ? *authoritative_transform : fallback_transform;
+            const auto* presentation = client_world.tryGetComponent<PresentationTransformComponent>(entity);
             if (!presentation) {
                 state.addError("tick-zero interpolation did not produce a presentation pose");
             }
@@ -1753,9 +1790,13 @@ static bool runInterpolationTickWrapManagerTest()
 
         if (state.error_count == 0) {
             client.interpolateRemoteEntities();
-            const entt::entity entity = client.getEntityByNetworkId(kRemoteNetworkId);
-            const auto& raw_transform = client_world.registry.get<TransformComponent>(entity);
-            const auto* presentation = client_world.registry.try_get<PresentationTransformComponent>(entity);
+            const EntityRef entity = client.getEntityRefByNetworkId(kRemoteNetworkId);
+            const auto* authoritative_transform = client_world.tryGetComponent<TransformComponent>(entity);
+            const TransformComponent fallback_transform{};
+            if (!authoritative_transform)
+                state.addError("remote entity has no authoritative transform");
+            const auto& raw_transform = authoritative_transform ? *authoritative_transform : fallback_transform;
+            const auto* presentation = client_world.tryGetComponent<PresentationTransformComponent>(entity);
             if (!presentation) {
                 state.addError("wrapped interpolation did not produce a presentation pose");
             }
@@ -1843,11 +1884,11 @@ static bool runRawRemoteInterpolationStateTest()
         server.update(0.0f);
 
         for (int frame = 0; frame < 120 &&
-             client.getEntityByNetworkId(kRemoteNetworkId) == entt::null; ++frame) {
+             client.getEntityRefByNetworkId(kRemoteNetworkId).isNull(); ++frame) {
             client.update(0.0f);
             SDL_Delay(1);
         }
-        if (client.getEntityByNetworkId(kRemoteNetworkId) == entt::null) {
+        if (client.getEntityRefByNetworkId(kRemoteNetworkId).isNull()) {
             state.addError("raw interpolation regression did not receive SPAWN_ENTITY");
         }
     }
@@ -1891,9 +1932,13 @@ static bool runRawRemoteInterpolationStateTest()
 
         if (state.error_count == 0) {
             client.interpolateRemoteEntities();
-            const entt::entity entity = client.getEntityByNetworkId(kRemoteNetworkId);
-            const auto& raw_transform = client_world.registry.get<TransformComponent>(entity);
-            const auto* presentation = client_world.registry.try_get<PresentationTransformComponent>(entity);
+            const EntityRef entity = client.getEntityRefByNetworkId(kRemoteNetworkId);
+            const auto* authoritative_transform = client_world.tryGetComponent<TransformComponent>(entity);
+            const TransformComponent fallback_transform{};
+            if (!authoritative_transform)
+                state.addError("remote entity has no authoritative transform");
+            const auto& raw_transform = authoritative_transform ? *authoritative_transform : fallback_transform;
+            const auto* presentation = client_world.tryGetComponent<PresentationTransformComponent>(entity);
             if (!presentation) {
                 state.addError("remote interpolation did not create a presentation pose");
             } else if (std::abs(raw_transform.position.x - 3.0f) > 0.01f) {
@@ -1915,9 +1960,13 @@ static bool runRawRemoteInterpolationStateTest()
 
         if (state.error_count == 0) {
             client.interpolateRemoteEntities();
-            const entt::entity entity = client.getEntityByNetworkId(kRemoteNetworkId);
-            const auto& raw_transform = client_world.registry.get<TransformComponent>(entity);
-            const auto* presentation = client_world.registry.try_get<PresentationTransformComponent>(entity);
+            const EntityRef entity = client.getEntityRefByNetworkId(kRemoteNetworkId);
+            const auto* authoritative_transform = client_world.tryGetComponent<TransformComponent>(entity);
+            const TransformComponent fallback_transform{};
+            if (!authoritative_transform)
+                state.addError("remote entity has no authoritative transform");
+            const auto& raw_transform = authoritative_transform ? *authoritative_transform : fallback_transform;
+            const auto* presentation = client_world.tryGetComponent<PresentationTransformComponent>(entity);
             if (!presentation) {
                 state.addError("rotation-only update lost the remote presentation pose");
             }
@@ -1935,9 +1984,8 @@ static bool runRawRemoteInterpolationStateTest()
     }
 
     client.disconnect("raw interpolation regression complete");
-    const entt::entity remote_entity = client.getEntityByNetworkId(kRemoteNetworkId);
-    if (remote_entity != entt::null &&
-        client_world.registry.all_of<PresentationTransformComponent>(remote_entity))
+    const EntityRef remote_entity = client.getEntityRefByNetworkId(kRemoteNetworkId);
+    if (client_world.hasComponent<PresentationTransformComponent>(remote_entity))
         state.addError("disconnect left a transient remote presentation pose attached");
     for (int frame = 0; frame < 8 && server.getClientCount() != 0; ++frame) {
         server.update(0.0f);

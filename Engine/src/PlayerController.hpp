@@ -1,6 +1,7 @@
 #pragma once
 
 #include "EngineExport.h"
+#include "Character/CharacterPhysicsService.hpp"
 #include "Components/Components.hpp"
 #include "Components/LocalPlayerInputComponent.hpp"
 #include "Components/camera.hpp"
@@ -12,8 +13,9 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
-#include <entt/entt.hpp>
 #include <memory>
+
+namespace GameFramework { class GameModeBase; }
 
 enum class PossessedEntityType
 {
@@ -24,23 +26,24 @@ enum class PossessedEntityType
 class ENGINE_API PlayerController
 {
 private:
-    entt::entity player_entity;
-    entt::entity freecam_entity;
+    friend class GameFramework::GameModeBase;
+    EntityRef player_entity;
+    EntityRef freecam_entity;
     std::shared_ptr<InputManager> input_manager;
     PossessedEntityType currently_possessed;
     bool freecam_mode_enabled;
     bool movement_enabled = true; // When false, updatePlayer() only does camera follow (networked mode)
     world* game_world;
     glm::vec3 camera_spring_velocity = glm::vec3(0.0f);
-    entt::entity camera_spring_entity = entt::null;
+    EntityRef camera_spring_entity{};
     bool camera_spring_initialized = false;
     float character_delta_accumulator = 0.0f;
     bool local_player_look_applied = false;
 
 public:
     PlayerController(std::shared_ptr<InputManager> input_mgr, world* w)
-        : player_entity(entt::null),
-          freecam_entity(entt::null),
+        : player_entity{},
+          freecam_entity{},
           input_manager(input_mgr),
           currently_possessed(PossessedEntityType::Player),
           freecam_mode_enabled(false),
@@ -68,20 +71,25 @@ public:
         });
     }
 
-    void setPossessedPlayer(entt::entity player)
+    // Refresh collision and ground state for the currently assigned player.
+    void updatePlayerCollision();
+
+    void setPossessedPlayer(EntityRef player)
     {
         player_entity = player;
         resetCameraSpring();
     }
 
-    void setPossessedFreecam(entt::entity freecam)
+    void setPossessedFreecam(EntityRef freecam)
     {
         freecam_entity = freecam;
     }
 
     void toggleFreecamMode()
     {
-        if (!game_world->registry.valid(player_entity) || !game_world->registry.valid(freecam_entity))
+        if (!game_world || !game_world->isEntityValid(player_entity) || !game_world->isEntityValid(freecam_entity) ||
+            !game_world->hasComponent<TransformComponent>(player_entity) ||
+            !game_world->hasComponent<TransformComponent>(freecam_entity))
             return;
 
         freecam_mode_enabled = !freecam_mode_enabled;
@@ -91,8 +99,8 @@ public:
         {
             currently_possessed = PossessedEntityType::Freecam;
 
-            auto& p_trans = game_world->registry.get<TransformComponent>(player_entity);
-            auto& f_trans = game_world->registry.get<TransformComponent>(freecam_entity);
+            auto& p_trans = *game_world->tryGetComponent<TransformComponent>(player_entity);
+            auto& f_trans = *game_world->tryGetComponent<TransformComponent>(freecam_entity);
             f_trans.position = p_trans.position;
 
             printf("Switched to freecam mode\n");
@@ -111,14 +119,14 @@ public:
         camera& active_cam = game_world->world_camera;
         float sensitivity = 1.0f;
 
-        if (currently_possessed == PossessedEntityType::Player && game_world->registry.valid(player_entity))
+        if (currently_possessed == PossessedEntityType::Player && game_world->hasComponent<PlayerComponent>(player_entity))
         {
-            auto& pc = game_world->registry.get<PlayerComponent>(player_entity);
+            auto& pc = *game_world->tryGetComponent<PlayerComponent>(player_entity);
             sensitivity = pc.mouse_sensitivity;
         }
-        else if (currently_possessed == PossessedEntityType::Freecam && game_world->registry.valid(freecam_entity))
+        else if (currently_possessed == PossessedEntityType::Freecam && game_world->hasComponent<FreecamComponent>(freecam_entity))
         {
-            auto& fc = game_world->registry.get<FreecamComponent>(freecam_entity);
+            auto& fc = *game_world->tryGetComponent<FreecamComponent>(freecam_entity);
             sensitivity = fc.mouse_sensitivity;
         }
 
@@ -154,10 +162,10 @@ public:
     void updatePlayerLook(float delta)
     {
         if (!game_world || currently_possessed != PossessedEntityType::Player ||
-            !game_world->registry.valid(player_entity))
+            !game_world->isEntityValid(player_entity))
             return;
 
-        const auto* local_input = game_world->registry.try_get<LocalPlayerInputComponent>(player_entity);
+        const auto* local_input = game_world->tryGetComponent<LocalPlayerInputComponent>(player_entity);
         if (!local_input)
             return;
 
@@ -168,20 +176,20 @@ public:
 private:
     void applyGamepadLook(const LocalPlayerInputComponent& local_input, float delta)
     {
-        if (!game_world || !game_world->registry.valid(player_entity) ||
+        if (!game_world || !game_world->isEntityValid(player_entity) ||
             !std::isfinite(delta) || delta <= 0.0f)
             return;
 
         float sensitivity = 1.0f;
-        if (game_world->registry.all_of<PlayerComponent>(player_entity))
+        if (game_world->hasComponent<PlayerComponent>(player_entity))
         {
-            const PlayerComponent& player = game_world->registry.get<PlayerComponent>(player_entity);
+            const PlayerComponent& player = *game_world->tryGetComponent<PlayerComponent>(player_entity);
             if (!player.input_enabled)
                 return;
             sensitivity = player.mouse_sensitivity;
         }
-        if (game_world->registry.all_of<CharacterControllerComponent>(player_entity) &&
-            !game_world->registry.get<CharacterControllerComponent>(player_entity).input_enabled)
+        if (game_world->hasComponent<CharacterControllerComponent>(player_entity) &&
+            !game_world->tryGetComponent<CharacterControllerComponent>(player_entity)->input_enabled)
             return;
 
         if (!local_input.input_enabled)
@@ -198,31 +206,14 @@ private:
     void resetCameraSpring()
     {
         camera_spring_velocity = glm::vec3(0.0f);
-        camera_spring_entity = entt::null;
+        camera_spring_entity = EntityRef{};
         camera_spring_initialized = false;
     }
 
     glm::vec3 resolveCameraSpringCollision(const glm::vec3& pivot,
                                            const glm::vec3& desired_position,
                                            const CameraSpringComponent& spring,
-                                           entt::entity target_entity)
-    {
-        if (!spring.collision_enabled)
-            return desired_position;
-
-        const glm::vec3 arm = desired_position - pivot;
-        const float arm_length = glm::length(arm);
-        if (arm_length <= 0.001f)
-            return desired_position;
-
-        PhysicsSystem::RaycastResult hit = game_world->raycastClosest(
-            pivot, arm / arm_length, arm_length, target_entity);
-        if (!hit.hit)
-            return desired_position;
-
-        const float adjusted_distance = std::max(hit.distance - std::max(spring.collision_padding, 0.0f), 0.0f);
-        return pivot + (arm / arm_length) * adjusted_distance;
-    }
+                                           EntityRef target_entity);
 
     glm::vec3 stepCameraSpring(const glm::vec3& current_position,
                                const glm::vec3& target_position,
@@ -249,11 +240,11 @@ private:
         return target_position + new_offset;
     }
 
-    void followCamera(const glm::vec3& position, float delta, entt::entity target_entity)
+    void followCamera(const glm::vec3& position, float delta, EntityRef target_entity)
     {
         CameraSpringComponent* spring = nullptr;
-        if (game_world->registry.valid(target_entity))
-            spring = game_world->registry.try_get<CameraSpringComponent>(target_entity);
+        if (game_world->isEntityValid(target_entity))
+            spring = game_world->tryGetComponent<CameraSpringComponent>(target_entity);
 
         if (!spring || !spring->enabled)
         {
@@ -264,9 +255,9 @@ private:
             return;
         }
 
-        if (spring->rotate_target_yaw && game_world->registry.all_of<TransformComponent>(target_entity))
+        if (spring->rotate_target_yaw && game_world->hasComponent<TransformComponent>(target_entity))
         {
-            auto& target_transform = game_world->registry.get<TransformComponent>(target_entity);
+            auto& target_transform = *game_world->tryGetComponent<TransformComponent>(target_entity);
             target_transform.rotation.y = glm::degrees(game_world->world_camera.rotation.y);
         }
 
@@ -310,7 +301,7 @@ private:
         CharacterMoveInput input;
         input.move_forward = local_input.move.y;
         input.move_right = local_input.move.x;
-        if (local_input.jump_held) input.buttons |= CharacterMoveFlags::Jump;
+        if (local_input.jump_held || local_input.jump_press_pending) input.buttons |= CharacterMoveFlags::Jump;
         if (local_input.sprint_held) input.buttons |= CharacterMoveFlags::Sprint;
         if (local_input.crouch_held) input.buttons |= CharacterMoveFlags::Crouch;
         input.camera_yaw = game_world->world_camera.rotation.y;
@@ -320,51 +311,70 @@ private:
 
     void updatePlayer(float delta)
     {
-        if (!game_world->registry.valid(player_entity)) return;
+        if (!game_world->hasComponent<TransformComponent>(player_entity)) return;
 
-        auto& trans = game_world->registry.get<TransformComponent>(player_entity);
+        auto& trans = *game_world->tryGetComponent<TransformComponent>(player_entity);
         if (!local_player_look_applied)
         {
-            if (const auto* local_input = game_world->registry.try_get<LocalPlayerInputComponent>(player_entity))
+            if (const auto* local_input = game_world->tryGetComponent<LocalPlayerInputComponent>(player_entity))
                 applyGamepadLook(*local_input, delta);
         }
 
         if (!movement_enabled)
         {
+            if (auto* local_input = game_world->tryGetComponent<LocalPlayerInputComponent>(player_entity))
+                local_input->jump_press_pending = false;
             followCamera(trans.position, delta, player_entity);
             return;
         }
 
-        if (game_world->registry.all_of<CharacterControllerComponent>(player_entity))
+        if (game_world->hasComponent<CharacterControllerComponent>(player_entity))
         {
-            auto& controller = game_world->registry.get<CharacterControllerComponent>(player_entity);
-            auto* local_input = game_world->registry.try_get<LocalPlayerInputComponent>(player_entity);
+            auto& controller = *game_world->tryGetComponent<CharacterControllerComponent>(player_entity);
+            auto* local_input = game_world->tryGetComponent<LocalPlayerInputComponent>(player_entity);
             bool input_enabled = controller.input_enabled;
-            if (game_world->registry.all_of<PlayerComponent>(player_entity))
-                input_enabled = input_enabled && game_world->registry.get<PlayerComponent>(player_entity).input_enabled;
+            if (game_world->hasComponent<PlayerComponent>(player_entity))
+                input_enabled = input_enabled && game_world->tryGetComponent<PlayerComponent>(player_entity)->input_enabled;
             if (!input_enabled || !local_input || !local_input->input_enabled)
+            {
+                if (local_input) local_input->jump_press_pending = false;
                 return;
+            }
 
             CharacterMoveInput input = collectPlayerMoveInput(*local_input);
             CharacterControllerState state;
             state.position = trans.position;
             const float step = game_world->fixed_delta > 0.0f ? game_world->fixed_delta : delta;
             character_delta_accumulator = std::min(character_delta_accumulator + std::max(delta, 0.0f), step * 5.0f);
+            CharacterPhysicsService character_physics(*game_world);
             while (character_delta_accumulator >= step)
             {
                 character_delta_accumulator -= step;
-                state = game_world->simulate_character_controller(player_entity, input, step);
+                if (!character_physics.simulateController(player_entity, input, step, state))
+                {
+                    LOG_ENGINE_WARN("Failed to simulate local character controller");
+                    break;
+                }
+                local_input->jump_press_pending = false;
+                if (!local_input->jump_held)
+                    input.buttons &= ~CharacterMoveFlags::Jump;
             }
 
             followCamera(state.position, delta, player_entity);
             return;
         }
 
-        auto& pc = game_world->registry.get<PlayerComponent>(player_entity);
-        auto& rb = game_world->registry.get<RigidBodyComponent>(player_entity);
-        auto* local_input = game_world->registry.try_get<LocalPlayerInputComponent>(player_entity);
+        if (!game_world->hasComponent<PlayerComponent>(player_entity) ||
+            !game_world->hasComponent<RigidBodyComponent>(player_entity)) return;
+
+        auto& pc = *game_world->tryGetComponent<PlayerComponent>(player_entity);
+        auto& rb = *game_world->tryGetComponent<RigidBodyComponent>(player_entity);
+        auto* local_input = game_world->tryGetComponent<LocalPlayerInputComponent>(player_entity);
         if (!pc.input_enabled || !local_input || !local_input->input_enabled)
+        {
+            if (local_input) local_input->jump_press_pending = false;
             return;
+        }
 
         CharacterMoveInput input = collectPlayerMoveInput(*local_input);
 
@@ -384,6 +394,7 @@ private:
 
         const CharacterControllerState simulated =
             CharacterController::simulateSourceMovement(input, current, tuning);
+        local_input->jump_press_pending = false;
         rb.velocity = simulated.velocity;
         trans.position = simulated.position;
         pc.grounded = simulated.grounded;
@@ -399,13 +410,15 @@ private:
 
     void updateFreecam(float delta)
     {
-        if (!game_world->registry.valid(freecam_entity)) return;
+        if (!game_world->hasComponent<FreecamComponent>(freecam_entity) ||
+            !game_world->hasComponent<TransformComponent>(freecam_entity)) return;
         resetCameraSpring();
 
-        auto& fc = game_world->registry.get<FreecamComponent>(freecam_entity);
-        auto& trans = game_world->registry.get<TransformComponent>(freecam_entity);
-        auto* local_input = game_world->registry.try_get<LocalPlayerInputComponent>(player_entity);
+        auto& fc = *game_world->tryGetComponent<FreecamComponent>(freecam_entity);
+        auto& trans = *game_world->tryGetComponent<TransformComponent>(freecam_entity);
+        auto* local_input = game_world->tryGetComponent<LocalPlayerInputComponent>(player_entity);
 
+        if (local_input) local_input->jump_press_pending = false;
         if (!fc.input_enabled || !local_input || !local_input->input_enabled) return;
 
         glm::vec3 local_movement = local_input->freecam_move;

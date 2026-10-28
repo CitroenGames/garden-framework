@@ -630,6 +630,16 @@ CharacterControllerState CharacterControllerSystem::simulate(entt::registry& reg
 
     CharacterControllerState result = getState(registry, entity);
     result.velocity = clampVelocity(effective_velocity, settings.max_character_velocity);
+    // Jolt owns collision results; the movement simulation owns jump history.
+    // Reading Jolt back alone would restore the previous tick's timers and
+    // button state and discard the jump and landing events.
+    result.coyote_timer = predicted.coyote_timer;
+    result.jump_buffer_timer = predicted.jump_buffer_timer;
+    result.jump_was_held = predicted.jump_was_held;
+    result.jumped = predicted.jumped;
+    result.landed = result.grounded && !current.was_grounded;
+    result.was_grounded = result.grounded;
+    result.fall_speed = result.grounded ? 0.0f : std::max(0.0f, -result.velocity.y);
     const WaterSample& final_water = water;
     result.water_level = final_water.level;
     if (final_water.swimming())

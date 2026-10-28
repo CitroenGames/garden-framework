@@ -1934,26 +1934,7 @@ bool LevelManager::saveLevelToJSON(const std::string& json_path, const LevelData
         e["type"] = entityTypeToString(le.type);
 
         if (le.reflected_components.is_object() && !le.reflected_components.empty())
-        {
             e["components"] = le.reflected_components;
-
-            if (!le.mesh_path.empty())
-            {
-                e["mesh"]["path"]              = le.mesh_path;
-                e["mesh"]["textures"]          = le.texture_paths;
-                e["mesh"]["culling"]           = le.culling;
-                e["mesh"]["transparent"]       = le.transparent;
-                e["mesh"]["visible"]           = le.visible;
-                e["mesh"]["force_lod"]         = le.force_lod;
-                e["mesh"]["use_mesh_collision"]= le.use_mesh_collision;
-            }
-
-            if (!le.collider_mesh_path.empty())
-                e["collider"]["mesh_path"] = le.collider_mesh_path;
-
-            entities_array.push_back(e);
-            continue;
-        }
 
         e["transform"]["position"] = {{"x", le.position.x}, {"y", le.position.y}, {"z", le.position.z}};
         e["transform"]["rotation"] = {{"x", le.rotation.x}, {"y", le.rotation.y}, {"z", le.rotation.z}};

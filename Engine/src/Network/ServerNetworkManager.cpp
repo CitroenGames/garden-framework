@@ -5,6 +5,7 @@
 #include "ReplicationRegistry.hpp"
 #include "SpawnRecipeRegistry.hpp"
 #include "NetworkInput.hpp"
+#include "Character/CharacterPhysicsService.hpp"
 #include "world.hpp"
 #include "Components/Components.hpp"
 #include "SharedMovement.hpp"
@@ -624,14 +625,20 @@ void ServerNetworkManager::handleInputCommand(uint16_t client_id, BitReader& rea
         move_state.grounded = player.grounded;
         move_state.ground_normal = player.ground_normal;
 
-        MovementState result;
+        MovementState result = move_state;
         if (game_world->registry.all_of<CharacterControllerComponent>(player_entity)) {
-            CharacterControllerState controller_state = game_world->simulate_character_controller(
-                player_entity, toCharacterMoveInput(move_input), movement_config.fixed_delta);
-            result.position = controller_state.position;
-            result.velocity = controller_state.velocity;
-            result.grounded = controller_state.grounded;
-            result.ground_normal = controller_state.ground_normal;
+            CharacterPhysicsService character_physics(*game_world);
+            CharacterControllerState controller_state;
+            if (character_physics.simulateController(
+                    ensureEntityRef(game_world->registry, player_entity), toCharacterMoveInput(move_input),
+                    movement_config.fixed_delta, controller_state)) {
+                result.position = controller_state.position;
+                result.velocity = controller_state.velocity;
+                result.grounded = controller_state.grounded;
+                result.ground_normal = controller_state.ground_normal;
+            } else {
+                LOG_ENGINE_WARN("Failed to simulate character controller for client {}", client_id);
+            }
         } else {
             result = SharedMovement::simulate(move_input, move_state, movement_config);
         }

@@ -1,4 +1,5 @@
 #pragma once
+#include "Character/CharacterPhysicsService.hpp"
 #include "Components/Components.hpp"
 #include "world.hpp"
 #include "ECS/Hierarchy.hpp"
@@ -94,6 +95,7 @@ bool testBotLocalSeparationCharacterWorldFixture()
 
     for (const size_t cohort_size : {size_t{2}, size_t{5}, size_t{9}}) {
         world fixture;
+        CharacterPhysicsService character_physics(fixture);
         fixture.initializePhysics();
         if (!addStaticBox(fixture, glm::vec3(0.0f, -0.25f, 0.0f),
                           glm::vec3(8.0f, 0.25f, 12.0f)))
@@ -225,8 +227,10 @@ bool testBotLocalSeparationCharacterWorldFixture()
         cross_opening.camera_yaw = 3.14159265f;
         float furthest_crossed_z = yielder_position.z;
         for (uint16_t tick = 0; tick < 180u; ++tick) {
-            const CharacterControllerState state = fixture.simulate_character_controller(
-                actors[1], cross_opening, kFixedDt);
+            CharacterControllerState state;
+            if (!character_physics.simulateController(
+                    ensureEntityRef(fixture.registry, actors[1]), cross_opening, kFixedDt, state))
+                return fail(name, "failed to simulate doorway crossing");
             fixture.stepPhysicsSingleStep();
             furthest_crossed_z = std::min(furthest_crossed_z, state.position.z);
         }

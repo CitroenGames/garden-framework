@@ -293,6 +293,8 @@ int main(int argc, char* argv[])
 
     // Initialize world and physics
     _world = world();
+    // The client host supplies its initial view; a generic world starts at the origin.
+    _world.world_camera = camera(0, 0, -5);
     _world.initializePhysics();
 
     // Parse network CLI args before level instantiation so connecting clients

@@ -9,6 +9,7 @@
 #include "Utils/FileDialog.hpp"
 #include "Utils/EnginePaths.hpp"
 #include "Components/Components.hpp"
+#include "Character/CharacterPhysicsService.hpp"
 #include "Components/PrefabInstanceComponent.hpp"
 #include "Prefab/PrefabManager.hpp"
 #include "Reflection/EngineReflection.hpp"
@@ -490,6 +491,15 @@ namespace
 
             cloneReflectedComponents(play_world->registry, dst_entity, editor_world.registry, src_entity, reflection);
 
+            // Reflected copying can overwrite an earlier generated identity
+            // with a null identity from legacy editor content. Ensure the
+            // completed clone has a usable handle before services receive it.
+            auto* identity = play_world->registry.try_get<IdentityComponent>(dst_entity);
+            if (!identity)
+                ensureEntityRef(play_world->registry, dst_entity);
+            else if (identity->guid.isNull())
+                identity->guid = generateEntityGuid();
+
             if (auto* tag = play_world->registry.try_get<TagComponent>(dst_entity))
                 name_map[tag->name] = dst_entity;
         }
@@ -705,6 +715,7 @@ bool EditorApp::initialize(RenderAPIType api_type)
 
         // Create entity with Tag + Transform + MeshComponent
         auto entity = m_world.registry.create();
+        ensureEntityRef(m_world.registry, entity);
         m_world.registry.emplace<TagComponent>(entity, entity_name);
         m_world.registry.emplace<TransformComponent>(entity);
         auto& mc = m_world.registry.emplace<MeshComponent>(entity);
@@ -2230,8 +2241,11 @@ void EditorApp::applyPIESpawnLocation()
         m_play_world->world_camera.position = m_pre_play_editor_cam.position;
         m_play_world->world_camera.rotation = m_pre_play_editor_cam.rotation;
 
-        if (m_play_world->getPhysicsSystem().hasCharacterController(entity))
-            m_play_world->teleport_character_controller(entity, transform.position);
+        const EntityRef player_ref = entityRefOf(m_play_world->registry, entity);
+        CharacterPhysicsService character_physics(*m_play_world);
+        CharacterControllerState controller_state;
+        if (character_physics.readControllerState(player_ref, controller_state))
+            character_physics.teleportController(player_ref, transform.position);
 
         LOG_ENGINE_INFO("PIE: Player start moved to current editor camera location");
         return;
@@ -4458,6 +4472,13 @@ void EditorApp::pasteEntity()
         if (auto* tag = m_world.registry.try_get<TagComponent>(entity))
             tag->name = le.name + " (Pasted)";
     }
+
+    // Clipboard data may carry the source identity. A pasted entity is new,
+    // so give it a fresh GUID instead of aliasing the source in this world.
+    if (auto* identity = m_world.registry.try_get<IdentityComponent>(entity))
+        identity->guid = generateEntityGuid();
+    else
+        ensureEntityRef(m_world.registry, entity);
 
     m_hierarchy.selected_entity = entity;
     m_state.unsaved_changes = true;

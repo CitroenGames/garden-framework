@@ -2,9 +2,13 @@
 #include "InputActionSystem.hpp"
 #include "Input/GameInputModeService.hpp"
 #include "Components/LocalPlayerInputComponent.hpp"
+#include "Components/ClientPredictionComponent.hpp"
+#include "Components/Components.hpp"
 #include "LocalPlayerInputSystem.hpp"
 #include "NetworkInputSampler.hpp"
 #include "Network/PredictionTypes.hpp"
+#include "Network/PredictionSystem.hpp"
+#include "world.hpp"
 #include "json.hpp"
 
 #include <SDL3/SDL.h>
@@ -428,7 +432,8 @@ namespace
             context.bindings.push_back(look_y_binding);
             result = expect(actions.pushContext(context), "gamepad bindings register with a logical slot") && result;
 
-            entt::registry intent_registry;
+            world intent_world;
+            auto& intent_registry = intent_world.registry;
             const entt::entity look_pawn = intent_registry.create();
             LocalPlayerInputActionNames look_actions;
             look_actions.look = "PadLook";
@@ -487,14 +492,14 @@ namespace
                 SDL_SetJoystickVirtualAxis(joystick, SDL_GAMEPAD_AXIS_RIGHTX, 32767);
                 pumpInputEvents(input);
                 actions.evaluate(input);
-                updateLocalPlayerInputs(intent_registry, actions);
+                updateLocalPlayerInputs(intent_world, actions);
                 result = expect(std::abs(look_intent.look.x - 1.0f) < 0.001f &&
                     std::abs(look_intent.look.y) < 0.001f,
                     "right-stick X action projects into local-player ECS look intent") && result;
                 SDL_SetJoystickVirtualAxis(joystick, SDL_GAMEPAD_AXIS_RIGHTY, -32767);
                 pumpInputEvents(input);
                 actions.evaluate(input);
-                updateLocalPlayerInputs(intent_registry, actions);
+                updateLocalPlayerInputs(intent_world, actions);
                 result = expect(std::abs(glm::length(look_intent.look) - 1.0f) < 0.001f &&
                     look_intent.look.x > 0.7f && look_intent.look.y < -0.7f,
                     "right-stick diagonal remains normalized in the projected Look action") && result;
@@ -921,7 +926,7 @@ namespace
         const std::vector<uint16_t> commands_144 = sampleFixedInputFrameShape(144);
 
         bool ok = expect(commands_30.size() == 60 && commands_60.size() == 60 && commands_144.size() == 60,
-            "fixed client cadence emits sixty command ticks for 30/60/144 Hz frame shapes") && ok;
+            "fixed client cadence emits sixty command ticks for 30/60/144 Hz frame shapes");
         ok = expect(commands_30 == commands_60 && commands_60 == commands_144,
             "fixed client cadence preserves the command sequence across render frame shapes") && ok;
 
@@ -1141,6 +1146,125 @@ namespace
         return ok;
     }
 
+    bool testEcsPredictionReconciliation()
+    {
+        world game_world;
+        const EntityRef pawn = game_world.createEntity();
+
+        Net::MovementConfig movement_config;
+        movement_config.fixed_delta = 1.0f / 60.0f;
+        Net::MovementInput input;
+        input.move_forward = 1.0f;
+        Net::MovementState authoritative;
+        authoritative.grounded = true;
+        authoritative.ground_normal = glm::vec3(0.0f, 1.0f, 0.0f);
+        const Net::MovementState expected = Net::SharedMovement::simulate(
+            input, authoritative, movement_config);
+        Net::MovementState predicted = expected;
+        predicted.position += glm::vec3(2.0f, 0.0f, 0.0f);
+
+        const bool initialized = Net::PredictionSystem::initializePawn(game_world, pawn, predicted);
+        const bool recorded = initialized && Net::PredictionSystem::recordInput(
+            game_world, pawn, 1u, input, expected);
+
+        Net::PredictionReplayAdapter adapter;
+        adapter.simulate = [movement_config](world&, EntityRef,
+                                             const Net::MovementInput& replay_input,
+                                             const Net::MovementState& replay_state) {
+            return Net::SharedMovement::simulate(replay_input, replay_state, movement_config);
+        };
+        const Net::PredictionReconcileResult result = Net::PredictionSystem::reconcile(
+            game_world, pawn, authoritative, 0u, adapter);
+
+        Net::MovementState reconciled_state;
+        Net::MovementState presentation_state;
+        Net::PredictionDiagnostics diagnostics;
+        bool ok = expect(recorded, "prediction records replay history through the Garden entity API");
+        ok = expect(result == Net::PredictionReconcileResult::Applied,
+            "prediction reconciliation accepts the first authoritative acknowledgement") && ok;
+        ok = expect(Net::PredictionSystem::getMovementState(game_world, pawn, reconciled_state) &&
+            glm::distance(reconciled_state.position, expected.position) < 0.0001f,
+            "ECS reconciliation replays unacknowledged input from authoritative movement state") && ok;
+        ok = expect(Net::PredictionSystem::getDiagnostics(game_world, pawn, diagnostics) &&
+            diagnostics.input_history_size == 1u && diagnostics.correction_count == 1u &&
+            diagnostics.replayed_input_count == 1u,
+            "ECS prediction retains post-ack replay input and counts the correction") && ok;
+        ok = expect(Net::PredictionSystem::getPresentationState(game_world, pawn, presentation_state) &&
+            glm::distance(presentation_state.position, reconciled_state.position) > 0.01f,
+            "reconciliation writes visual correction only to the transient presentation pose") && ok;
+
+        const glm::vec3 reconciled_position = reconciled_state.position;
+        const Net::PredictionReconcileResult duplicate_result = Net::PredictionSystem::reconcile(
+            game_world, pawn, authoritative, 0u, adapter);
+        ok = expect(duplicate_result == Net::PredictionReconcileResult::IgnoredStale &&
+            Net::PredictionSystem::getMovementState(game_world, pawn, reconciled_state) &&
+            reconciled_state.position == reconciled_position &&
+            Net::PredictionSystem::getDiagnostics(game_world, pawn, diagnostics) &&
+            diagnostics.stale_update_count == 1u,
+            "duplicate authoritative acknowledgement cannot write a stale local pose") && ok;
+
+        Net::PredictionSystem::updatePresentation(game_world, pawn, 1.0f / 60.0f);
+        ok = expect(Net::PredictionSystem::getMovementState(game_world, pawn, reconciled_state) &&
+            reconciled_state.position == reconciled_position,
+            "presentation smoothing never overwrites the authoritative transform") && ok;
+
+        Net::PredictionSystem::reset(game_world, pawn);
+        ok = expect(Net::PredictionSystem::getDiagnostics(game_world, pawn, diagnostics) &&
+            diagnostics.input_history_size == 0u && !diagnostics.has_authoritative_tick &&
+            Net::PredictionSystem::getPresentationState(game_world, pawn, presentation_state) &&
+            presentation_state.position == reconciled_position,
+            "prediction reset clears replay and visual state at the pawn lifecycle boundary") && ok;
+        return ok;
+    }
+    bool testMovingJumpAcknowledgement()
+    {
+        world game_world;
+        const EntityRef pawn = game_world.createEntity();
+        Net::MovementConfig config;
+        Net::MovementState start;
+        start.grounded = true;
+        Net::MovementInput move;
+        move.move_forward = 1.0f;
+        const Net::MovementState acknowledged = Net::SharedMovement::simulate(move, start, config);
+        move.buttons = Net::InputFlags::JUMP;
+        const Net::MovementState jumping = Net::SharedMovement::simulate(move, acknowledged, config);
+
+        bool ok = expect(jumping.position.y > acknowledged.position.y + 0.01f && !jumping.grounded,
+            "moving jump produces an airborne predicted pose");
+        ok = expect(Net::PredictionSystem::initializePawn(game_world, pawn, jumping) &&
+            Net::PredictionSystem::recordInput(game_world, pawn, 1u, Net::MovementInput{}, acknowledged) &&
+            Net::PredictionSystem::recordInput(game_world, pawn, 2u, move, jumping),
+            "moving jump prediction records both command states") && ok;
+        auto* controller = game_world.tryGetComponent<CharacterControllerComponent>(pawn);
+        if (!controller)
+            return expect(false, "moving jump controller exists") && ok;
+        controller->jump_was_held = true;
+        controller->jump_buffer_timer = 0.04f;
+
+        bool restored = false;
+        bool replayed = false;
+        Net::PredictionReplayAdapter adapter;
+        adapter.restore_authoritative = [&](world&, EntityRef, const Net::MovementState&) {
+            restored = true;
+            return true;
+        };
+        adapter.simulate = [&](world&, EntityRef, const Net::MovementInput&, const Net::MovementState& state) {
+            replayed = true;
+            return state;
+        };
+        const auto result = Net::PredictionSystem::reconcile(game_world, pawn, acknowledged, 1u, adapter);
+        Net::MovementState current;
+        Net::PredictionDiagnostics diagnostics;
+        ok = expect(result == Net::PredictionReconcileResult::Applied && !restored && !replayed &&
+            Net::PredictionSystem::getMovementState(game_world, pawn, current) &&
+            glm::distance(current.position, jumping.position) < 0.0001f && !current.grounded &&
+            controller->jump_was_held && controller->jump_buffer_timer == 0.04f &&
+            Net::PredictionSystem::getDiagnostics(game_world, pawn, diagnostics) &&
+            diagnostics.correction_count == 0 && diagnostics.input_history_size == 1,
+            "in-sync acknowledgement preserves a newer moving jump and its controller history") && ok;
+        return ok;
+    }
+
     bool testLocalPlayerInputEcsProjection()
     {
         InputManager input;
@@ -1189,7 +1313,8 @@ namespace
         };
         ok = expect(actions.pushContext(context), "configured local input context activates") && ok;
 
-        entt::registry registry;
+        world input_world;
+        auto& registry = input_world.registry;
         const entt::entity pawn = registry.create();
         auto& local = registry.emplace<LocalPlayerInputComponent>(pawn);
         local.actions = names;
@@ -1202,7 +1327,7 @@ namespace
         input.process_event(makeKeyEvent(SDL_EVENT_KEY_DOWN, SDL_SCANCODE_RIGHT));
         input.process_event(makeKeyEvent(SDL_EVENT_KEY_DOWN, SDL_SCANCODE_DOWN));
         actions.evaluate(input);
-        updateLocalPlayerInputs(registry, actions);
+        updateLocalPlayerInputs(input_world, actions);
 
         const float diagonal_axis = 1.0f / std::sqrt(2.0f);
         ok = expect(std::abs(local.move.x - diagonal_axis) < 0.001f &&
@@ -1220,34 +1345,54 @@ namespace
 
         input.update();
         actions.evaluate(input);
-        updateLocalPlayerInputs(registry, actions);
+        updateLocalPlayerInputs(input_world, actions);
         ok = expect(local.jump_held,
             "offline jump remains held across evaluations instead of becoming an edge") && ok;
 
+        // Simulate a controller step consuming the original press, then a
+        // complete tap on a render frame with no character step.
+        local.jump_press_pending = false;
+        input.update();
+        input.process_event(makeKeyEvent(SDL_EVENT_KEY_UP, SDL_SCANCODE_SPACE));
+        actions.evaluate(input);
+        updateLocalPlayerInputs(input_world, actions);
+        input.update();
+        input.process_event(makeKeyEvent(SDL_EVENT_KEY_DOWN, SDL_SCANCODE_SPACE));
+        input.process_event(makeKeyEvent(SDL_EVENT_KEY_UP, SDL_SCANCODE_SPACE));
+        actions.evaluate(input);
+        updateLocalPlayerInputs(input_world, actions);
+        ok = expect(!local.jump_held && local.jump_press_pending && local.move.y > 0.0f,
+            "offline moving tap is retained even when press and release share a frame") && ok;
+        input.update();
+        actions.evaluate(input);
+        updateLocalPlayerInputs(input_world, actions);
+        ok = expect(!local.jump_held && local.jump_press_pending,
+            "offline moving tap survives until a character step consumes it") && ok;
+
         local.input_enabled = false;
-        updateLocalPlayerInputs(registry, actions);
+        updateLocalPlayerInputs(input_world, actions);
         ok = expect(std::abs(local.move.x) < 0.001f && std::abs(local.move.y) < 0.001f && !local.jump_held &&
-            !local.sprint_held && !local.crouch_held &&
+            !local.jump_press_pending && !local.sprint_held && !local.crouch_held &&
             glm::length(local.look) < 0.001f &&
             glm::length(local.freecam_move) < 0.001f && !local.freecam_fast,
             "disabled local input clears every derived intent") && ok;
 
-        entt::registry ownership_registry;
-        const entt::entity first_pawn = ownership_registry.create();
-        const entt::entity second_pawn = ownership_registry.create();
-        entt::entity current_owner = entt::null;
-        setLocalPlayerInputOwner(ownership_registry, current_owner, first_pawn, names);
-        ok = expect(current_owner == first_pawn &&
-            ownership_registry.all_of<LocalPlayerInputComponent>(first_pawn),
+        world ownership_world;
+        const EntityRef first_ref = ownership_world.createEntity();
+        const EntityRef second_ref = ownership_world.createEntity();
+        EntityRef current_owner{};
+        setLocalPlayerInputOwner(ownership_world, current_owner, first_ref, names);
+        ok = expect(current_owner == first_ref &&
+            ownership_world.hasComponent<LocalPlayerInputComponent>(first_ref),
             "local input owner receives the transient component") && ok;
-        setLocalPlayerInputOwner(ownership_registry, current_owner, second_pawn, names);
-        ok = expect(current_owner == second_pawn &&
-            !ownership_registry.all_of<LocalPlayerInputComponent>(first_pawn) &&
-            ownership_registry.all_of<LocalPlayerInputComponent>(second_pawn),
+        setLocalPlayerInputOwner(ownership_world, current_owner, second_ref, names);
+        ok = expect(current_owner == second_ref &&
+            !ownership_world.hasComponent<LocalPlayerInputComponent>(first_ref) &&
+            ownership_world.hasComponent<LocalPlayerInputComponent>(second_ref),
             "reassigned local ownership removes input from the previous pawn") && ok;
-        setLocalPlayerInputOwner(ownership_registry, current_owner, entt::null, names);
-        ok = expect(current_owner == entt::null &&
-            !ownership_registry.all_of<LocalPlayerInputComponent>(second_pawn),
+        setLocalPlayerInputOwner(ownership_world, current_owner, {}, names);
+        ok = expect(current_owner.isNull() &&
+            !ownership_world.hasComponent<LocalPlayerInputComponent>(second_ref),
             "cleared local ownership leaves no remote pawn input component") && ok;
         return ok;
     }
@@ -1272,6 +1417,8 @@ int main()
     ok = testInputRingBufferTickWrap() && ok;
     ok = testPredictionReplayCarriesAuthoritativeMovementState() && ok;
     ok = testReconciliationSmoothingFrameRateIndependence() && ok;
+    ok = testEcsPredictionReconciliation() && ok;
+    ok = testMovingJumpAcknowledgement() && ok;
     ok = testLocalPlayerInputEcsProjection() && ok;
 
     if (!ok)

@@ -1,5 +1,6 @@
 #include "GameFramework/GameModeBase.hpp"
 
+#include "Character/CharacterPhysicsService.hpp"
 #include "Events/EngineEvents.hpp"
 #include "Events/EventBus.hpp"
 #include "GameFramework/GameFrameworkComponents.hpp"
@@ -28,6 +29,15 @@ void GameModeBase::bindWorld(world& game_world)
 {
     m_world = &game_world;
     syncGameModeComponent();
+}
+
+void GameModeBase::rebindMovedWorld(world& previous, world& current)
+{
+    if (m_world == &previous)
+        m_world = &current;
+    for (auto& player : m_players)
+        if (player.controller && player.controller->game_world == &previous)
+            player.controller->game_world = &current;
 }
 
 void GameModeBase::initGame(world& game_world,
@@ -221,7 +231,7 @@ void GameModeBase::handleStartingNewPlayer(PlayerControllerEntry& new_player)
 
         new_player.freecam = findOrCreateFreecamFor(new_player);
         if (new_player.controller && m_world && m_world->registry.valid(new_player.freecam))
-            new_player.controller->setPossessedFreecam(new_player.freecam);
+            new_player.controller->setPossessedFreecam(ensureEntityRef(m_world->registry, new_player.freecam));
         syncPlayerEntryToEcs(new_player);
         return;
     }
@@ -525,7 +535,11 @@ entt::entity GameModeBase::spawnDefaultPawnAtTransform(PlayerControllerEntry& pl
     }
 
     if (m_world->registry.all_of<CharacterControllerComponent>(pawn))
-        m_world->teleport_character_controller(pawn, spawn_transform.position);
+    {
+        CharacterPhysicsService character_physics(*m_world);
+        if (!character_physics.teleportController(ensureEntityRef(m_world->registry, pawn), spawn_transform.position))
+            LOG_ENGINE_WARN("Failed to teleport character controller for spawned pawn");
+    }
 
     return pawn;
 }
@@ -545,9 +559,9 @@ void GameModeBase::finishRestartPlayer(PlayerControllerEntry& player)
 
     if (player.controller)
     {
-        player.controller->setPossessedPlayer(player.pawn);
+        player.controller->setPossessedPlayer(ensureEntityRef(m_world->registry, player.pawn));
         if (m_world->registry.valid(player.freecam))
-            player.controller->setPossessedFreecam(player.freecam);
+            player.controller->setPossessedFreecam(ensureEntityRef(m_world->registry, player.freecam));
     }
 
     if (player.player_state)

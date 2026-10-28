@@ -4,6 +4,7 @@
 
 #include "Plugin/GameModuleAPI.h"
 #include "world.hpp"
+#include "Character/CharacterPhysicsService.hpp"
 #include "LevelManager.hpp"
 #include "Components/Components.hpp"
 #include "Network/NetworkProtocol.hpp"
@@ -18,6 +19,7 @@
 #include "shared/WeaponTypes.hpp"
 #include "shared/WeaponSystem.hpp"
 #include "shared/MovementInputPolicy.hpp"
+#include "shared/FpsMovementTuning.hpp"
 #include "shared/PlayerLifecycle.hpp"
 #include "shared/FpsAnimationPresentation.hpp"
 #include "shared/FpsGameLogic.hpp"
@@ -308,12 +310,13 @@ static bool ensurePlayerPhysicsBody(world& w, entt::entity player_entity)
 static void updateServerPlayerCollisions(world& w)
 {
     auto view = w.registry.view<NetworkedEntity, PlayerComponent, RigidBodyComponent, TransformComponent>();
+    CharacterPhysicsService character_physics(w);
     for (auto entity : view)
     {
         const auto& net = view.get<NetworkedEntity>(entity);
         if (!net.is_player)
             continue;
-        w.player_collisions(entity);
+        character_physics.refreshController(entityRefOf(w.registry, entity));
     }
 }
 
@@ -1045,7 +1048,7 @@ static void respawnPlayer(uint16_t client_id, const glm::vec3& spawn_pos)
 
 
 // Equivalence (bots.md S7): humans reach movement in ServerNetworkManager::handleInputCommand
-// (simulate_character_controller / SharedMovement::simulate, then input_sample_handler).
+// (character controller / SharedMovement::simulate, then input_sample_handler).
 // Bots have no ENet client, so consumeBotInputSample performs the identical steps in the
 // identical order with the synthesized sample, then calls the same handler body
 // (bomb USE bookkeeping + processWeaponInput + weapon-select edge).
@@ -1070,8 +1073,13 @@ static void consumeBotInputSample(uint16_t client_id, entt::entity e, const Inpu
     Net::MovementState result;
     if (w->registry.all_of<CharacterControllerComponent>(e)) {
         CharacterMoveInput ci = FPSShooter::toCharacterMoveInput(mi);
-        auto cs = w->simulate_character_controller(e, ci, mc.fixed_delta);
-        result.position = cs.position; result.velocity = cs.velocity; result.grounded = cs.grounded; result.ground_normal = cs.ground_normal;
+        CharacterPhysicsService character_physics(*w);
+        CharacterControllerState cs;
+        if (character_physics.simulateController(ensureEntityRef(w->registry, e), ci, mc.fixed_delta, cs)) {
+            result.position = cs.position; result.velocity = cs.velocity; result.grounded = cs.grounded; result.ground_normal = cs.ground_normal;
+        } else {
+            result.position = transform.position; result.velocity = rigidbody.velocity; result.grounded = player.grounded; result.ground_normal = player.ground_normal;
+        }
     } else {
         Net::MovementState cur; cur.position = transform.position; cur.velocity = rigidbody.velocity; cur.grounded = player.grounded; cur.ground_normal = player.ground_normal;
         result = Net::SharedMovement::simulate(mi, cur, mc);
@@ -3068,20 +3076,16 @@ static bool constructPlayerPawnForClient(
     w->registry.emplace<RigidBodyComponent>(player_entity, rigidbody);
 
     PlayerComponent player;
-    player.speed = 10.0f;
-    player.jump_force = 5.0f;
     player.mouse_sensitivity = 1.0f;
     player.grounded = false;
     player.input_enabled = true;
-    w->registry.emplace<PlayerComponent>(player_entity, player);
-
     CharacterControllerComponent controller;
-    controller.move_speed = player.speed;
-    controller.jump_velocity = player.jump_force;
+    FPSShooter::applyMovementTuning(player, controller);
     controller.capsule_half_height = player.capsule_half_height;
     controller.capsule_radius = player.capsule_radius;
     controller.mass = rigidbody.mass;
     controller.input_enabled = player.input_enabled;
+    w->registry.emplace<PlayerComponent>(player_entity, player);
     w->registry.emplace<CharacterControllerComponent>(player_entity, controller);
 
     // Add combat components

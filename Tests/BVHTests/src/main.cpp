@@ -6,6 +6,7 @@
 #include "ECS/Hierarchy.hpp"
 #include "Graphics/BVH.hpp"
 #include "PlayerRepSystem.hpp"
+#include "world.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -473,7 +474,8 @@ static bool testUnresolvedRenderPosesAreSkippedSafely()
 static bool testPlayerRepresentationUsesPresentationPose()
 {
     const std::string name = "player representation follows source presentation pose";
-    entt::registry reg;
+    world game_world;
+    auto& reg = game_world.registry;
     const entt::entity tracked = reg.create();
     TransformComponent raw;
     raw.position = glm::vec3(1.0f, 2.0f, 3.0f);
@@ -496,7 +498,7 @@ static bool testPlayerRepresentationUsesPresentationPose()
     player_rep.position_offset = glm::vec3(0.0f, 1.0f, 0.0f);
     reg.emplace<PlayerRepresentationComponent>(representation, player_rep);
 
-    update_player_representations(reg, true);
+    update_player_representations(game_world, true);
     const auto& result = reg.get<TransformComponent>(representation);
     if (glm::length(result.position - glm::vec3(8.0f, 5.0f, -2.0f)) > 1e-5f)
         return fail(name, "representation position did not use the source presentation pose");

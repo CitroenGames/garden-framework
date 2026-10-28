@@ -207,6 +207,10 @@ private:
 
     CharacterControllerSystem character_controllers;
 
+    // Private ECS/Jolt bridge for the Garden character physics service.
+    friend class CharacterPhysicsService;
+    bool refreshCharacterController(entt::registry& registry, entt::entity entity);
+
     bool initialized = false;
     bool stepping = false;
     std::vector<entt::entity> trigger_entities;

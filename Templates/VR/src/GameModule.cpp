@@ -5,6 +5,7 @@
 #include "Utils/Log.hpp"
 #include "XR/OpenXRSystem.hpp"
 #include "world.hpp"
+#include "Character/CharacterPhysicsService.hpp"
 
 #include <SDL3/SDL.h>
 #include <algorithm>
@@ -20,7 +21,7 @@ namespace
 
     EngineServices* g_services = nullptr;
     std::shared_ptr<InputManager> g_input_manager;
-    entt::entity g_player_entity = entt::null;
+    EntityRef g_player_entity{};
     bool g_owns_openxr = false;
     float g_yaw = 0.0f;
     float g_pitch = 0.0f;
@@ -35,12 +36,16 @@ namespace
         return degrees * 0.01745329252f;
     }
 
-    entt::entity findPlayer(world& game_world)
+    EntityRef findPlayer(world& game_world)
     {
         auto view = game_world.registry.view<PlayerComponent, TransformComponent>();
-        for (entt::entity entity : view)
-            return entity;
-        return entt::null;
+        for (const entt::entity entity : view)
+        {
+            const EntityRef player = entityRefOf(game_world.registry, entity);
+            if (!player.isNull())
+                return player;
+        }
+        return {};
     }
 
     CharacterMoveInput collectMoveInput()
@@ -128,7 +133,7 @@ GAME_API void gardenGameShutdown()
         XR::OpenXRSystem::get().shutdown();
 
     g_owns_openxr = false;
-    g_player_entity = entt::null;
+    g_player_entity = {};
     g_input_manager.reset();
     g_services = nullptr;
 }
@@ -140,7 +145,7 @@ GAME_API void gardenRegisterComponents(ReflectionRegistry* registry)
 
 GAME_API void gardenGameUpdate(float delta_time)
 {
-    if (!g_services || !g_services->game_world || g_player_entity == entt::null)
+    if (!g_services || !g_services->game_world || g_player_entity.isNull())
         return;
 
     XR::OpenXRSystem& xr = XR::OpenXRSystem::get();
@@ -148,7 +153,7 @@ GAME_API void gardenGameUpdate(float delta_time)
         xr.pollEvents();
 
     world& game_world = *g_services->game_world;
-    if (!game_world.registry.valid(g_player_entity))
+    if (!game_world.isEntityValid(g_player_entity))
         return;
 
     updateLookInput();
@@ -156,9 +161,11 @@ GAME_API void gardenGameUpdate(float delta_time)
     const float clamped_delta = std::clamp(delta_time, 0.0f, kMaxFrameDelta);
     game_world.step_physics(clamped_delta);
 
-    CharacterControllerState state = game_world.simulate_character_controller(
-        g_player_entity, collectMoveInput(), clamped_delta);
-    game_world.player_collisions(g_player_entity);
+    CharacterPhysicsService character_physics(game_world);
+    CharacterControllerState state;
+    if (!character_physics.simulateController(g_player_entity, collectMoveInput(), clamped_delta, state))
+        return;
+    character_physics.refreshController(g_player_entity);
 
     updateCameraFromBody(state);
 }
@@ -170,24 +177,30 @@ GAME_API void gardenOnLevelLoaded()
 
     world& game_world = *g_services->game_world;
     g_player_entity = findPlayer(game_world);
-    if (g_player_entity == entt::null)
+    if (g_player_entity.isNull())
     {
         LOG_ENGINE_WARN("[VRTemplate] No Player entity found in the loaded level");
         return;
     }
 
-    auto& transform = game_world.registry.get<TransformComponent>(g_player_entity);
+    auto& transform = *game_world.tryGetComponent<TransformComponent>(g_player_entity);
     const bool spawned_at_camera =
         glm::distance(game_world.world_camera.position, transform.position) < 0.01f;
 
     if (spawned_at_camera)
         transform.position.y -= kHeadOffsetY;
 
-    if (!game_world.getPhysicsSystem().hasCharacterController(g_player_entity))
-        game_world.create_character_controller(g_player_entity);
+    CharacterPhysicsService character_physics(game_world);
+    CharacterControllerState state;
+    if (!character_physics.readControllerState(g_player_entity, state) &&
+        !character_physics.createController(g_player_entity))
+    {
+        LOG_ENGINE_WARN("[VRTemplate] Failed to create the player character controller");
+        return;
+    }
 
     if (spawned_at_camera)
-        game_world.teleport_character_controller(g_player_entity, transform.position);
+        character_physics.teleportController(g_player_entity, transform.position);
 
     g_pitch = spawned_at_camera
         ? clampPitch(game_world.world_camera.rotation.x)
@@ -196,8 +209,8 @@ GAME_API void gardenOnLevelLoaded()
         ? game_world.world_camera.rotation.y
         : degreesToRadians(transform.rotation.y);
 
-    CharacterControllerState state = game_world.get_character_controller_state(g_player_entity);
-    updateCameraFromBody(state);
+    if (character_physics.readControllerState(g_player_entity, state))
+        updateCameraFromBody(state);
 }
 
 GAME_API void gardenOnPlayStart()

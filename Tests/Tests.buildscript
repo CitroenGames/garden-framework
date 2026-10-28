@@ -29,3 +29,4 @@ include = PrefabTests/PrefabTests.buildscript
 include = SchedulerTests/SchedulerTests.buildscript
 include = GameplayPrimitivesTests/GameplayPrimitivesTests.buildscript
 include = SceneManagerTests/SceneManagerTests.buildscript
+include = ComponentCatalogTests/ComponentCatalogTests.buildscript

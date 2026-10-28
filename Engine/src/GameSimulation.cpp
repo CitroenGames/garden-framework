@@ -1,4 +1,5 @@
 #include "GameSimulation.hpp"
+#include "GameSimulationEcsBridge.hpp"
 #include "Components/LocalPlayerInputComponent.hpp"
 #include "InputActionSystem.hpp"
 #include "LocalPlayerInputSystem.hpp"
@@ -67,11 +68,10 @@ void GameSimulation::registerSystems()
         d.name = "engine.player_collisions";
         d.phase = Phase::Physics;
         d.run_after = {"engine.physics"};
-        d.update = [this](entt::registry&, const Tick::SimulationTickContext&) {
-            if (m_world->registry.valid(m_player_entity))
-                m_world->player_collisions(m_player_entity);
-        };
-        m_scheduler->addSystem(std::move(d));
+        GameSimulationEcsBridge::addWorldSystem(*m_scheduler, std::move(d), [this] {
+            if (PlayerController* controller = getPlayerController())
+                controller->updatePlayerCollision();
+        });
     }
     // PlayerController::update is not split (D5 rule 5): whole call runs
     // in Presentation-adjacent offline handling with variable frame dt.
@@ -79,11 +79,10 @@ void GameSimulation::registerSystems()
         SystemDescriptor d;
         d.name = "engine.local_player_input";
         d.phase = Phase::Presentation;
-        d.update = [this](entt::registry& reg, const Tick::SimulationTickContext&) {
+        GameSimulationEcsBridge::addWorldSystem(*m_scheduler, std::move(d), [this] {
             if (m_input_actions)
-                updateLocalPlayerInputs(reg, *m_input_actions);
-        };
-        m_scheduler->addSystem(std::move(d));
+                updateLocalPlayerInputs(*m_world, *m_input_actions);
+        });
     }
     {
         SystemDescriptor d;
@@ -101,11 +100,10 @@ void GameSimulation::registerSystems()
         d.name = "engine.player_representation";
         d.phase = Phase::Presentation;
         d.run_after = {"engine.player_controller"};
-        d.update = [this](entt::registry& reg, const Tick::SimulationTickContext&) {
+        GameSimulationEcsBridge::addWorldSystem(*m_scheduler, std::move(d), [this] {
             PlayerController* pc = getPlayerController();
-            update_player_representations(reg, pc ? pc->isFreecamMode() : false);
-        };
-        m_scheduler->addSystem(std::move(d));
+            update_player_representations(*m_world, pc ? pc->isFreecamMode() : false);
+        });
     }
     {
         SystemDescriptor d;
@@ -184,13 +182,10 @@ void GameSimulation::initialize()
 
     if (const GameFramework::PlayerControllerEntry* primary_player = m_game_mode->getPrimaryPlayer())
     {
-        m_player_entity = primary_player->pawn;
+        m_player_entity = GameSimulationEcsBridge::primaryPawn(*m_world, *m_game_mode);
         m_freecam_entity = primary_player->freecam;
-        if (m_world->registry.valid(m_player_entity))
-        {
-            auto& local_input = m_world->registry.get_or_emplace<LocalPlayerInputComponent>(m_player_entity);
-            local_input.actions = m_local_input_actions;
-        }
+        setLocalPlayerInputOwner(*m_world, m_player_entity, m_player_entity,
+                                 m_local_input_actions);
     }
 
     {
@@ -213,7 +208,7 @@ void GameSimulation::initialize()
     m_initialized = true;
 
     LOG_ENGINE_INFO("GameSimulation initialized (player={}, freecam={})",
-        m_world->registry.valid(m_player_entity),
+        m_world->isEntityValid(m_player_entity),
         m_world->registry.valid(m_freecam_entity));
 }
 

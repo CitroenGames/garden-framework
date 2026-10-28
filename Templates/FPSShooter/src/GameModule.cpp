@@ -4,6 +4,7 @@
 
 #include "Application.hpp"
 #include "world.hpp"
+#include "Character/CharacterPhysicsService.hpp"
 #include "LevelManager.hpp"
 #include "Assets/AssetManager.hpp"
 #include "PlayerController.hpp"
@@ -14,6 +15,7 @@
 #include "Components/LocalPlayerInputComponent.hpp"
 #include "Components/camera.hpp"
 #include "Network/ClientNetworkManager.hpp"
+#include "Network/PredictionSystem.hpp"
 #include "Network/NetworkTypes.hpp"
 #include "Network/SharedMovement.hpp"
 #include "shared/SharedComponents.hpp"
@@ -26,6 +28,7 @@
 #include "shared/WeaponSystem.hpp"
 #include "shared/NetworkInputSampler.hpp"
 #include "shared/MovementInputPolicy.hpp"
+#include "shared/FpsMovementTuning.hpp"
 #include "shared/PlayerLifecycle.hpp"
 #include "shared/FpsAnimationPresentation.hpp"
 #include "GameHUD.hpp"
@@ -67,7 +70,6 @@ using Net::InputState;
 using Net::MovementConfig;
 using Net::MovementInput;
 using Net::MovementState;
-using Net::PredictionEntry;
 namespace InputFlags = Net::InputFlags;
 namespace SharedMovement = Net::SharedMovement;
 
@@ -372,22 +374,21 @@ static bool tryGetClientPresentationPosition(uint16_t client_id, glm::vec3& posi
     return false;
 }
 
-static entt::entity g_player_entity = entt::null;
-static entt::entity g_local_input_entity = entt::null;
-static entt::entity g_freecam_entity = entt::null;
+static EntityRef g_player_entity{};
+static EntityRef g_local_input_entity{};
+static EntityRef g_freecam_entity{};
 static entt::entity g_player_rep_entity = entt::null;
 static const LocalPlayerInputActionNames g_local_input_actions = {
     "Move", "Jump", "Sprint", "Crouch", "FreecamVertical", "FreecamFast", "Look"
 };
 
-static void setLocalInputOwner(world& game_world, entt::entity owner)
+static void setLocalInputOwner(world& game_world, EntityRef owner)
 {
     setLocalPlayerInputOwner(
-        game_world.registry, g_local_input_entity, owner, g_local_input_actions);
+        game_world, g_local_input_entity, owner, g_local_input_actions);
 }
 
 // Combat state
-static Net::ReconciliationSmoothing g_recon_smoothing;
 static int32_t g_local_health = 100;
 static int32_t g_local_max_health = 100;
 static bool g_local_alive = true;
@@ -536,42 +537,54 @@ static void runFixedClientInputStep(world& game_world,
     if ((input_state.buttons & InputFlags::RELOAD) != 0)
         g_local_reloading = true;
 
-    if (movement_allowed &&
-        game_world.registry.valid(g_player_entity) &&
-        game_world.registry.all_of<TransformComponent, RigidBodyComponent, PlayerComponent>(g_player_entity))
+    const EntityRef prediction_pawn = g_network.getLocalPlayerEntityRef();
+    auto* trans = game_world.tryGetComponent<TransformComponent>(prediction_pawn);
+    auto* rb = game_world.tryGetComponent<RigidBodyComponent>(prediction_pawn);
+    auto* pc = game_world.tryGetComponent<PlayerComponent>(prediction_pawn);
+    if (movement_allowed && trans && rb && pc)
     {
-        auto& trans = game_world.registry.get<TransformComponent>(g_player_entity);
-        auto& rb = game_world.registry.get<RigidBodyComponent>(g_player_entity);
-        auto& pc = game_world.registry.get<PlayerComponent>(g_player_entity);
-
-        MovementInput move_input = FPSShooter::toMovementInput(input_state);
+        const MovementInput move_input = FPSShooter::toMovementInput(input_state);
         MovementState move_state;
-        move_state.position = trans.position;
-        move_state.velocity = rb.velocity;
-        move_state.grounded = pc.grounded;
-        move_state.ground_normal = pc.ground_normal;
+        move_state.position = trans->position;
+        move_state.velocity = rb->velocity;
+        move_state.grounded = pc->grounded;
+        move_state.ground_normal = pc->ground_normal;
 
         MovementConfig move_config;
-        move_config.speed = pc.speed;
-        move_config.jump_force = pc.jump_force;
+        move_config.speed = pc->speed;
+        move_config.jump_force = pc->jump_force;
         move_config.fixed_delta = fixed_delta;
 
+        CharacterPhysicsService character_physics(game_world);
         auto apply_movement = [&](const MovementInput& input, const MovementState& start_state) {
-            if (game_world.registry.all_of<CharacterControllerComponent>(g_player_entity))
+            CharacterControllerState controller_state;
+            if (character_physics.hasController(prediction_pawn))
             {
-                game_world.set_character_controller_state(g_player_entity, toCharacterControllerState(start_state));
-                return toMovementState(game_world.simulate_character_controller(
-                    g_player_entity, FPSShooter::toCharacterMoveInput(input), fixed_delta));
+                if (!character_physics.readControllerState(prediction_pawn, controller_state))
+                    return start_state;
+                // Keep controller jump history while updating the predicted pose.
+                // Rebuilding the state from the wire-facing movement fields here
+                // discards held-button and jump timer state on every command.
+                controller_state.position = start_state.position;
+                controller_state.velocity = start_state.velocity;
+                controller_state.grounded = start_state.grounded;
+                controller_state.ground_normal = start_state.ground_normal;
+                controller_state.water_level = start_state.water_level;
+                if (character_physics.writeControllerState(prediction_pawn, controller_state) &&
+                    character_physics.simulateController(
+                        prediction_pawn, FPSShooter::toCharacterMoveInput(input), fixed_delta, controller_state))
+                    return toMovementState(controller_state);
+                return start_state;
             }
             return SharedMovement::simulate(input, start_state, move_config);
         };
 
-        MovementState result = apply_movement(move_input, move_state);
+        const MovementState result = apply_movement(move_input, move_state);
         g_network.storeInput(command_tick, move_input, result);
-        trans.position = result.position;
-        rb.velocity = result.velocity;
-        pc.grounded = result.grounded;
-        pc.ground_normal = result.ground_normal;
+        trans->position = result.position;
+        rb->velocity = result.velocity;
+        pc->grounded = result.grounded;
+        pc->ground_normal = result.ground_normal;
 
         MovementState server_state;
         uint32_t server_tick;
@@ -584,36 +597,32 @@ static void runFixedClientInputStep(world& game_world,
             g_authoritative_pawn_position = server_state.position;
             ++g_authoritative_pawn_snapshot_generation;
             g_last_authoritative_input_tick = server_tick;
-            glm::vec3 old_display_pos = g_recon_smoothing.getDisplayPosition(trans.position);
-            const float pos_error = glm::distance(server_state.position, trans.position);
-            if (pos_error > 0.01f)
-            {
-                MovementState replay_state = server_state;
-                if (game_world.registry.all_of<CharacterControllerComponent>(g_player_entity))
-                {
-                    game_world.set_character_controller_state(
-                        g_player_entity, toCharacterControllerState(server_state));
-                    g_network.getInputHistory().forEachFrom(server_tick,
-                        [&](const PredictionEntry& entry) {
-                            replay_state = toMovementState(game_world.simulate_character_controller(
-                                g_player_entity, FPSShooter::toCharacterMoveInput(entry.input), fixed_delta));
-                        });
-                }
-                else
-                {
-                    replay_state = g_network.getInputHistory().replayFrom(
-                        server_tick, server_state,
-                        [&](const MovementInput& input, const MovementState& start_state) {
-                            return SharedMovement::simulate(input, start_state, move_config);
-                        });
-                }
-
-                trans.position = replay_state.position;
-                rb.velocity = replay_state.velocity;
-                pc.grounded = replay_state.grounded;
-                pc.ground_normal = replay_state.ground_normal;
-                g_recon_smoothing.onCorrection(old_display_pos, trans.position);
+            Net::PredictionReplayAdapter replay_adapter;
+            if (character_physics.hasController(prediction_pawn)) {
+                replay_adapter.restore_authoritative = [](world& replay_world, EntityRef pawn,
+                                                           const MovementState& state) {
+                    CharacterPhysicsService replay_physics(replay_world);
+                    return replay_physics.writeControllerState(pawn, toCharacterControllerState(state));
+                };
+                replay_adapter.simulate = [fixed_delta](world& replay_world, EntityRef pawn,
+                                                        const MovementInput& input,
+                                                        const MovementState& state) {
+                    CharacterPhysicsService replay_physics(replay_world);
+                    CharacterControllerState controller_state;
+                    if (replay_physics.simulateController(
+                            pawn, FPSShooter::toCharacterMoveInput(input), fixed_delta, controller_state))
+                        return toMovementState(controller_state);
+                    return state;
+                };
+            } else {
+                replay_adapter.simulate = [move_config](world&, EntityRef,
+                                                        const MovementInput& input,
+                                                        const MovementState& state) {
+                    return SharedMovement::simulate(input, state, move_config);
+                };
             }
+            (void)Net::PredictionSystem::reconcile(
+                game_world, prediction_pawn, server_state, server_tick, replay_adapter);
         }
     }
 
@@ -923,19 +932,15 @@ GAME_API bool gardenGameInit(EngineServices* services)
             }
 
             if (g_services && g_services->game_world) {
-                entt::entity entity = g_network.getEntityByNetworkId(msg.entity_id);
-                if (g_services->game_world->registry.valid(entity)) {
-                    auto& registry = g_services->game_world->registry;
-                    if (registry.all_of<CharacterControllerComponent>(entity)) {
-                        g_services->game_world->teleport_character_controller(entity, msg.spawn_position);
-                    }
-                    if (registry.all_of<TransformComponent>(entity)) {
-                        registry.get<TransformComponent>(entity).position = msg.spawn_position;
-                    }
-                    if (registry.all_of<RigidBodyComponent>(entity)) {
-                        registry.get<RigidBodyComponent>(entity).velocity = glm::vec3(0);
-                    }
-                }
+                world& game_world = *g_services->game_world;
+                const EntityRef entity = g_network.getEntityRefByNetworkId(msg.entity_id);
+                CharacterPhysicsService character_physics(game_world);
+                if (character_physics.hasController(entity))
+                    character_physics.teleportController(entity, msg.spawn_position);
+                if (auto* transform = game_world.tryGetComponent<TransformComponent>(entity))
+                    transform->position = msg.spawn_position;
+                if (auto* rigid_body = game_world.tryGetComponent<RigidBodyComponent>(entity))
+                    rigid_body->velocity = glm::vec3(0);
             }
 
             if (msg.client_id == g_network.getClientId()) {
@@ -953,7 +958,7 @@ GAME_API bool gardenGameInit(EngineServices* services)
                 g_local_recoil_index = 0.0f;
                 g_local_time_since_last_shot = 1000.0f;
                 g_local_weapon_spread = 0.0f;
-                g_recon_smoothing.visual_offset = glm::vec3(0.0f);
+                Net::PredictionSystem::reset(*g_services->game_world, g_network.getLocalPlayerEntityRef());
 
                 LOG_ENGINE_INFO("Respawned with {} health", msg.health);
             }
@@ -1016,7 +1021,7 @@ GAME_API void gardenGameShutdown()
         else
             g_world_item_presentation_entities.clear();
         g_world_item_presentation_world = nullptr;
-        setLocalInputOwner(*g_services->game_world, entt::null);
+        setLocalInputOwner(*g_services->game_world, EntityRef{});
     }
     // All presentation rows are gone before releasing their shared render resource.
     resetWorldItemVisualResource();
@@ -1083,8 +1088,8 @@ GAME_API void gardenGameUpdate(float delta_time)
 
     if (g_network.isConnected())
     {
-        entt::entity local_player = g_network.getLocalPlayerEntity();
-        if (game_world->registry.valid(local_player) && local_player != g_player_entity)
+        const EntityRef local_player = g_network.getLocalPlayerEntityRef();
+        if (game_world->isEntityValid(local_player) && local_player != g_player_entity)
         {
             g_player_entity = local_player;
             if (g_player_controller)
@@ -1092,7 +1097,7 @@ GAME_API void gardenGameUpdate(float delta_time)
         }
     }
 
-    const entt::entity script_local_player = g_network.getLocalPlayerEntity();
+    const EntityRef script_local_player = g_network.getLocalPlayerEntityRef();
     FPSShooter::ClientAcceptanceObservation acceptance_observation;
     acceptance_observation.connected = g_network.isConnected();
     acceptance_observation.local_client_id = g_network.getClientId();
@@ -1101,14 +1106,11 @@ GAME_API void gardenGameUpdate(float delta_time)
     acceptance_observation.round_phase = g_comp.phase;
     acceptance_observation.last_round_end_reason = g_comp.last_round_end_reason;
     acceptance_observation.local_team = g_comp.local_team;
-    acceptance_observation.has_local_pawn = game_world->registry.valid(script_local_player);
-    if (acceptance_observation.has_local_pawn &&
-        game_world->registry.all_of<TransformComponent>(script_local_player)) {
-        const TransformComponent& local_transform =
-            game_world->registry.get<TransformComponent>(script_local_player);
+    acceptance_observation.has_local_pawn = game_world->isEntityValid(script_local_player);
+    if (const auto* local_transform = game_world->tryGetComponent<TransformComponent>(script_local_player)) {
         acceptance_observation.has_local_transform = true;
-        acceptance_observation.local_position_x = local_transform.position.x;
-        acceptance_observation.local_position_z = local_transform.position.z;
+        acceptance_observation.local_position_x = local_transform->position.x;
+        acceptance_observation.local_position_z = local_transform->position.z;
     }
     acceptance_observation.has_authoritative_pawn_position = g_has_authoritative_pawn_position;
     acceptance_observation.authoritative_pawn_position_x = g_authoritative_pawn_position.x;
@@ -1235,17 +1237,22 @@ GAME_API void gardenGameUpdate(float delta_time)
         LOG_ENGINE_ERROR("Failed to synchronize FPSShooter modal input context");
     }
 
-    const entt::entity local_input_owner = g_network.isConnected()
-        ? g_network.getLocalPlayerEntity()
+    const EntityRef local_input_owner = g_network.isConnected()
+        ? g_network.getLocalPlayerEntityRef()
         : g_player_entity;
     setLocalInputOwner(*game_world, local_input_owner);
+    const EntityRef movement_pawn = g_network.isConnected()
+        ? g_network.getLocalPlayerEntityRef()
+        : game_world->findEntityByTag("player");
+    Net::PredictionSystem::configureMovement(
+        *game_world, movement_pawn, FPSShooter::kMoveSpeed, FPSShooter::kJumpVelocity);
     if (input_actions)
-        updateLocalPlayerInputs(game_world->registry, *input_actions);
+        updateLocalPlayerInputs(*game_world, *input_actions);
 
-    if (ui_modal && game_world->registry.valid(g_local_input_entity))
+    if (ui_modal && game_world->isEntityValid(g_local_input_entity))
     {
         UiInput::suppressGameplayIntent(
-            game_world->registry.try_get<LocalPlayerInputComponent>(g_local_input_entity));
+            game_world->tryGetComponent<LocalPlayerInputComponent>(g_local_input_entity));
     }
 
     if (g_player_controller && input_manager)
@@ -1288,27 +1295,33 @@ GAME_API void gardenGameUpdate(float delta_time)
         if (g_player_controller && !g_player_controller->isFreecamMode())
         {
             game_world->stepPhysicsSingleStep();
-            game_world->player_collisions(g_player_entity);
+            CharacterPhysicsService character_physics(*game_world);
+            character_physics.refreshController(g_player_entity);
         }
     }
 
     // Visual smoothing is presentation state and deliberately remains
     // frame-rate based even though its corrections are produced by fixed ticks.
-    g_recon_smoothing.update(delta_time);
+    Net::PredictionSystem::updatePresentation(*game_world, g_network.getLocalPlayerEntityRef(), delta_time);
 
     // Update player controller
     if (g_player_controller)
         g_player_controller->update(delta_time);
 
-    // Apply visual smoothing offset to camera position
-    if (g_network.isConnected() && game_world->registry.valid(g_player_entity) &&
-        game_world->registry.all_of<TransformComponent>(g_player_entity))
+    // Apply the prediction system's presentation-only correction to the camera.
+    // Both poses are addressed through the Garden entity API rather than the
+    // ECS storage implementation.
+    if (g_network.isConnected())
     {
-        auto& trans = game_world->registry.get<TransformComponent>(g_player_entity);
-        glm::vec3 display_pos = g_recon_smoothing.getDisplayPosition(trans.position);
-        // Offset camera by the smoothing delta
-        glm::vec3 offset = display_pos - trans.position;
-        game_world->world_camera.position += offset;
+        const EntityRef prediction_pawn = g_network.getLocalPlayerEntityRef();
+        MovementState logical_state;
+        MovementState presentation_state;
+        if (Net::PredictionSystem::getMovementState(*game_world, prediction_pawn, logical_state) &&
+            Net::PredictionSystem::getPresentationState(*game_world, prediction_pawn, presentation_state))
+        {
+            const glm::vec3 offset = presentation_state.position - logical_state.position;
+            game_world->world_camera.position += offset;
+        }
     }
 
     // Interpolation writes only the remote entities' presentation poses.
@@ -1321,22 +1334,23 @@ GAME_API void gardenGameUpdate(float delta_time)
     FPSShooter::updateAnimationParameters(game_world->registry);
 
     // Update player representations
-    update_player_representations(game_world->registry,
+    update_player_representations(*game_world,
         g_player_controller ? g_player_controller->isFreecamMode() : false);
 
     // Fall detection (client-side, for offline mode)
     if (!g_network.isConnected() && g_player_controller && !g_player_controller->isFreecamMode() &&
-        game_world->registry.valid(g_player_entity))
+        game_world->hasComponent<TransformComponent>(g_player_entity))
     {
-        auto& t = game_world->registry.get<TransformComponent>(g_player_entity);
+        auto& t = *game_world->tryGetComponent<TransformComponent>(g_player_entity);
         if (t.position.y < -50)
         {
             const glm::vec3 respawn_pos(0, 5, 0);
-            if (game_world->registry.all_of<CharacterControllerComponent>(g_player_entity))
-                game_world->teleport_character_controller(g_player_entity, respawn_pos);
+            CharacterPhysicsService character_physics(*game_world);
+            if (game_world->hasComponent<CharacterControllerComponent>(g_player_entity))
+                character_physics.teleportController(g_player_entity, respawn_pos);
             t.position = respawn_pos;
-            if (game_world->registry.all_of<RigidBodyComponent>(g_player_entity))
-                game_world->registry.get<RigidBodyComponent>(g_player_entity).velocity = glm::vec3(0);
+            if (game_world->hasComponent<RigidBodyComponent>(g_player_entity))
+                game_world->tryGetComponent<RigidBodyComponent>(g_player_entity)->velocity = glm::vec3(0);
         }
     }
 
@@ -1365,21 +1379,21 @@ GAME_API void gardenGameUpdate(float delta_time)
         float speed = 0.0f;
         float max_speed = 10.0f;
         bool grounded = false;
-        if (game_world->registry.valid(g_player_entity))
+        if (game_world->hasComponent<TransformComponent>(g_player_entity))
         {
-            auto& t = game_world->registry.get<TransformComponent>(g_player_entity);
+            auto& t = *game_world->tryGetComponent<TransformComponent>(g_player_entity);
             pos = t.position;
-            if (game_world->registry.all_of<RigidBodyComponent>(g_player_entity)) {
-                const glm::vec3 velocity = game_world->registry.get<RigidBodyComponent>(g_player_entity).velocity;
+            if (game_world->hasComponent<RigidBodyComponent>(g_player_entity)) {
+                const glm::vec3 velocity = game_world->tryGetComponent<RigidBodyComponent>(g_player_entity)->velocity;
                 speed = std::sqrt(velocity.x * velocity.x + velocity.z * velocity.z);
             }
-            if (game_world->registry.all_of<PlayerComponent>(g_player_entity)) {
-                const auto& player = game_world->registry.get<PlayerComponent>(g_player_entity);
+            if (game_world->hasComponent<PlayerComponent>(g_player_entity)) {
+                const auto& player = *game_world->tryGetComponent<PlayerComponent>(g_player_entity);
                 grounded = player.grounded;
                 max_speed = player.speed;
             }
-            if (game_world->registry.all_of<CharacterControllerComponent>(g_player_entity)) {
-                const auto& controller = game_world->registry.get<CharacterControllerComponent>(g_player_entity);
+            if (game_world->hasComponent<CharacterControllerComponent>(g_player_entity)) {
+                const auto& controller = *game_world->tryGetComponent<CharacterControllerComponent>(g_player_entity);
                 grounded = controller.grounded;
                 max_speed = controller.move_speed;
             }
@@ -1395,9 +1409,9 @@ GAME_API void gardenGameUpdate(float delta_time)
 
         UiLogic::HudSourceState hud_source;
         hud_source.connected = g_network.isConnected();
-        hud_source.has_local_pawn = hud_source.connected && game_world->registry.valid(g_player_entity);
+        hud_source.has_local_pawn = hud_source.connected && game_world->isEntityValid(g_player_entity);
         if (hud_source.has_local_pawn)
-            hud_source.pawn_health = game_world->registry.try_get<FpsHealthComponent>(g_player_entity);
+            hud_source.pawn_health = game_world->tryGetComponent<FpsHealthComponent>(g_player_entity);
         hud_source.has_damage_snapshot = g_has_authoritative_health_snapshot;
         hud_source.damage_snapshot = FpsHealthComponent{g_local_max_health};
         hud_source.damage_snapshot.health = g_local_health;
@@ -1474,29 +1488,25 @@ GAME_API void gardenOnLevelLoaded()
     resetWorldItemVisualResource();
     clearWorldItemAcceptanceReceipts();
     g_world_item_presentation_world = game_world;
-    setLocalInputOwner(*game_world, entt::null);
+    setLocalInputOwner(*game_world, EntityRef{});
 
     // Find player, freecam, and player rep entities
-    g_player_entity = entt::null;
-    g_freecam_entity = entt::null;
+    g_player_entity = game_world->findEntityByTag("player");
+    g_freecam_entity = game_world->findEntityByTag("freecam");
     g_player_rep_entity = entt::null;
 
     auto view = game_world->registry.view<TagComponent>();
     for (auto entity : view)
     {
         // Find by component type
-        if (game_world->registry.all_of<PlayerComponent>(entity) && g_player_entity == entt::null)
-            g_player_entity = entity;
-        if (game_world->registry.all_of<FreecamComponent>(entity) && g_freecam_entity == entt::null)
-            g_freecam_entity = entity;
         if (game_world->registry.all_of<PlayerRepresentationComponent>(entity) && g_player_rep_entity == entt::null)
             g_player_rep_entity = entity;
     }
 
-    const entt::entity local_input_owner = g_network.isConnected()
-        ? g_network.getLocalPlayerEntity()
+    const EntityRef local_input_owner = g_network.isConnected()
+        ? g_network.getLocalPlayerEntityRef()
         : g_player_entity;
-    if (g_network.isConnected() && game_world->registry.valid(local_input_owner))
+    if (g_network.isConnected() && game_world->isEntityValid(local_input_owner))
         g_player_entity = local_input_owner;
     setLocalInputOwner(*game_world, local_input_owner);
 
@@ -1511,9 +1521,9 @@ GAME_API void gardenOnLevelLoaded()
     }
 
     // Set camera to player position
-    if (game_world->registry.valid(g_player_entity))
+    if (game_world->hasComponent<TransformComponent>(g_player_entity))
     {
-        auto& t = game_world->registry.get<TransformComponent>(g_player_entity);
+        auto& t = *game_world->tryGetComponent<TransformComponent>(g_player_entity);
         game_world->world_camera.position = t.position;
         game_world->world_camera.rotation = t.rotation;
     }
@@ -1526,7 +1536,7 @@ GAME_API void gardenOnLevelLoaded()
     g_local_kills = 0;
     g_local_deaths = 0;
     g_death_timer = 0.0f;
-    g_recon_smoothing.visual_offset = glm::vec3(0.0f);
+    Net::PredictionSystem::reset(*game_world, g_network.getLocalPlayerEntityRef());
     g_comp = UiLogic::ClientCompetitiveState{}; g_ui = UiLogic::UiState{}; g_ui_connection = {}; g_owned_items.clear();
     g_competitive_presentation_cache.clear();
     g_radar_map = {};

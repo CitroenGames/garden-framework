@@ -17,6 +17,7 @@ class world;
 namespace GameFramework
 {
 class GameStateBase;
+class GameFrameworkRuntime;
 
 struct ENGINE_API PlayerLoginOptions
 {
@@ -135,6 +136,10 @@ public:
 
     int32_t getNumPlayers() const;
     int32_t getNumSpectators() const;
+
+private:
+    friend class GameFrameworkRuntime;
+    void rebindMovedWorld(world& previous, world& current);
 
 protected:
     virtual void onPostLogin(PlayerControllerEntry& new_player);

@@ -2,16 +2,17 @@
 #include "NetworkInput.hpp"
 #include "NetworkRuntime.hpp"
 #include "NetworkTransport.hpp"
-#include "NetworkHierarchyValidation.hpp"
+#include "ClientNetworkEcsBridge.hpp"
 #include "ReplicationRegistry.hpp"
 #include "SpawnRecipeRegistry.hpp"
+#include "PredictionSystem.hpp"
+#include "Character/CharacterPhysicsService.hpp"
 #include "world.hpp"
 #include "Components/Components.hpp"
 #include "Utils/Log.hpp"
 #include "Console/ConVar.hpp"
 #include "Console/Console.hpp"
 #include <algorithm>
-#include <entt/entt.hpp>
 #include <cstring>
 #include <unordered_set>
 #include <vector>
@@ -20,6 +21,7 @@
 namespace Net {
 
 ClientNetworkManager::ClientNetworkManager()
+    : ecs_bridge(std::make_unique<detail::ClientNetworkEcsBridge>())
 {
 }
 
@@ -140,7 +142,7 @@ void ClientNetworkManager::shutdown()
 
     server_peer = nullptr;
     clearInterpolationHistory();
-    network_id_to_entity.clear();
+    ecs_bridge->clear();
     client_id = 0;
     client_tick = 0;
     last_received_server_tick = 0;
@@ -154,7 +156,8 @@ void ClientNetworkManager::shutdown()
     recent_inputs[2] = {};
     recent_input_count = 0;
     negotiated_capability_flags = 0;
-    local_player_entity = entt::null;
+    ecs_bridge->clearLocal();
+    local_player_ref = {};
     local_player_network_id = 0;
 
     if (runtime_acquired) {
@@ -355,13 +358,10 @@ uint32_t ClientNetworkManager::currentRenderAnchorTick() const
     return last_received_server_tick - INTERP_DELAY_TICKS;
 }
 
-entt::entity ClientNetworkManager::getEntityByNetworkId(uint32_t net_id) const
+EntityRef ClientNetworkManager::getEntityRefByNetworkId(uint32_t net_id) const
 {
-    auto it = network_id_to_entity.find(net_id);
-    if (it != network_id_to_entity.end()) {
-        return it->second;
-    }
-    return entt::null;
+    if (game_world == nullptr) return {};
+    return ecs_bridge->entityRef(game_world, net_id);
 }
 
 void ClientNetworkManager::handleServerConnect(ENetEvent& event)
@@ -391,15 +391,8 @@ void ClientNetworkManager::handleServerDisconnect(ENetEvent& event)
     server_peer = nullptr;
 
     // Clear all networked entities
-    if (game_world != nullptr) {
-        for (auto& [net_id, entity] : network_id_to_entity) {
-            if (game_world->registry.valid(entity)) {
-                game_world->registry.destroy(entity);
-            }
-        }
-    }
-    network_id_to_entity.clear();
-    local_player_entity = entt::null;
+    ecs_bridge->destroyAll(game_world);
+    local_player_ref = {};
     local_player_network_id = 0;
     clearInterpolationHistory();
 
@@ -633,7 +626,7 @@ void ClientNetworkManager::handleWorldStateUpdate(BitReader& reader)
         // For the local player: store authoritative state for reconciliation
         // instead of directly applying position/velocity
         if (update.entity_id == local_player_network_id && local_player_network_id != 0) {
-            if (!isNetworkHierarchyRoot(game_world->registry, local_player_entity)) {
+            if (!ecs_bridge->localIsRoot(*game_world)) {
                 ++stats.hierarchy_root_rejections;
                 LOG_ENGINE_WARN("Network prediction rejected parented local player (network id {})",
                                 update.entity_id);
@@ -654,17 +647,14 @@ void ClientNetworkManager::handleWorldStateUpdate(BitReader& reader)
             last_server_processed_tick = msg.last_processed_input_tick;
             has_authoritative_update = true;
 
-            // Discard acknowledged inputs from prediction history
-            input_history.discardUpTo(msg.last_processed_input_tick);
-            if (!ReplicationRegistry::get().applyEcsEntries(
-                    game_world->registry, local_player_entity, update.ext_entries)) {
+            if (!ecs_bridge->applyLocalExtensions(*game_world, update)) {
                 LOG_ENGINE_ERROR("Validated local ECS extension failed to apply for network id {}", update.entity_id);
             }
         } else {
             // Generic snapshots cannot construct a bare entity. The reliable
             // recipe envelope owns component composition, so retain this
             // validated update until SPAWN_ENTITY initializes the recipe.
-            if (getEntityByNetworkId(update.entity_id) == entt::null) {
+            if (!ecs_bridge->contains(update.entity_id)) {
                 (void)queuePendingSnapshot(update, msg.server_tick);
                 continue;
             }
@@ -681,7 +671,7 @@ void ClientNetworkManager::handleWorldStateUpdate(BitReader& reader)
 
     if (msg.isFullSnapshot()) {
         std::vector<uint32_t> stale_entities;
-        for (const auto& [net_id, entity] : network_id_to_entity) {
+        for (const uint32_t net_id : ecs_bridge->networkIds()) {
             if (full_snapshot_entities.find(net_id) == full_snapshot_entities.end()) {
                 stale_entities.push_back(net_id);
             }
@@ -723,51 +713,20 @@ void ClientNetworkManager::handleSpawnPlayer(BitReader& reader)
     LOG_ENGINE_INFO("Player spawned: client_id={0}, entity_id={1}, pos=({2},{3},{4})",
         msg.client_id, msg.entity_id, msg.position.x, msg.position.y, msg.position.z);
 
-    // Create entity
-    entt::entity entity = game_world->registry.create();
-
-    // Add NetworkedEntity component
-    NetworkedEntity networked;
-    networked.network_id = msg.entity_id;
-    networked.owner_client_id = msg.client_id;
-    networked.is_player = true;
-    game_world->registry.emplace<NetworkedEntity>(entity, networked);
-
-    // Add TransformComponent
-    TransformComponent transform;
-    transform.position = msg.position;
-    // D4 point 5: wire yaw is radians; ECS rotation is degrees.
-    transform.rotation.y = glm::degrees(msg.camera_yaw);
-    game_world->registry.emplace<TransformComponent>(entity, transform);
-
-    RigidBodyComponent rigidbody;
-    rigidbody.mass = 80.0f;
-    rigidbody.apply_gravity = false;
-    game_world->registry.emplace<RigidBodyComponent>(entity, rigidbody);
-
-    PlayerComponent player;
-    player.speed = 10.0f;
-    player.jump_force = 5.0f;
-    player.input_enabled = true;
-    game_world->registry.emplace<PlayerComponent>(entity, player);
-
-    CharacterControllerComponent controller;
-    controller.move_speed = player.speed;
-    controller.jump_velocity = player.jump_force;
-    controller.capsule_half_height = player.capsule_half_height;
-    controller.capsule_radius = player.capsule_radius;
-    controller.mass = rigidbody.mass;
-    controller.input_enabled = player.input_enabled;
-    game_world->registry.emplace<CharacterControllerComponent>(entity, controller);
-
-    // Store in mapping
-    network_id_to_entity[msg.entity_id] = entity;
+    const EntityRef entity_ref = ecs_bridge->spawnPlayer(*game_world, msg, msg.client_id == client_id);
 
     // If this is our player, store it
     if (msg.client_id == client_id) {
-        local_player_entity = entity;
+        local_player_ref = entity_ref;
         local_player_network_id = msg.entity_id;
-        game_world->create_character_controller(entity);
+        if (!PredictionSystem::attachPawn(*game_world, local_player_ref)) {
+            LOG_ENGINE_ERROR("Failed to attach prediction state to local player network id {}",
+                             local_player_network_id);
+        }
+        CharacterPhysicsService character_physics(*game_world);
+        if (!character_physics.createController(local_player_ref))
+            LOG_ENGINE_ERROR("Failed to create character controller for local player network id {}",
+                             local_player_network_id);
         LOG_ENGINE_INFO("Local player entity created");
     } else {
         seedInterpolationState(msg.entity_id, msg.position, msg.camera_yaw);
@@ -790,7 +749,7 @@ void ClientNetworkManager::handleSpawnEntity(BitReader& reader)
         LOG_ENGINE_WARN("Network spawn rejected after prior despawn (network id {})", msg.network_id);
         return;
     }
-    if (network_id_to_entity.contains(msg.network_id)) {
+    if (ecs_bridge->contains(msg.network_id)) {
         LOG_ENGINE_WARN("Network spawn rejected duplicate live network id {}", msg.network_id);
         return;
     }
@@ -810,37 +769,15 @@ void ClientNetworkManager::handleSpawnEntity(BitReader& reader)
         return;
     }
 
-    const entt::entity entity = game_world->registry.create();
-    NetworkedEntity networked;
-    networked.network_id = msg.network_id;
-    networked.owner_client_id = msg.owner_client_id;
-    networked.is_player = false;
-    game_world->registry.emplace<NetworkedEntity>(entity, networked);
-
-    TransformComponent transform;
-    transform.position = msg.position;
-    transform.rotation.y = glm::degrees(msg.rotation_y);
-    game_world->registry.emplace<TransformComponent>(entity, transform);
-
-    // A recipe may add only its template-owned components. Its entity remains
-    // private until both construction and the whole initial ECS batch commit.
-    if (!recipe->construct(game_world->registry, entity, msg) ||
-        !ReplicationRegistry::get().applyEcsEntries(game_world->registry, entity, initial_entries)) {
-        game_world->registry.destroy(entity);
-        LOG_ENGINE_WARN("Network spawn recipe rejected initial construction (network id {})", msg.network_id);
-        return;
-    }
-
     auto pending = pending_snapshots.find(msg.network_id);
-    if (pending != pending_snapshots.end() &&
-        !applyUpdateToEntity(entity, pending->second.update)) {
-        game_world->registry.destroy(entity);
-        pending_snapshots.erase(pending);
-        LOG_ENGINE_WARN("Network spawn rejected held snapshot replay (network id {})", msg.network_id);
+    const EntityUpdateData* held = pending == pending_snapshots.end() ? nullptr : &pending->second.update;
+    const auto spawn_result = ecs_bridge->spawnEntity(*game_world, msg, *recipe, initial_entries, held);
+    if (spawn_result != detail::ClientNetworkEcsBridge::SpawnResult::Spawned) {
+        if (spawn_result == detail::ClientNetworkEcsBridge::SpawnResult::PendingFailed)
+            pending_snapshots.erase(pending);
+        LOG_ENGINE_WARN("Network spawn rejected construction or held snapshot (network id {})", msg.network_id);
         return;
     }
-
-    network_id_to_entity.emplace(msg.network_id, entity);
     seedInterpolationState(msg.network_id, msg.position, msg.rotation_y);
     if (pending != pending_snapshots.end()) {
         const PendingSnapshot replay = std::move(pending->second);
@@ -866,7 +803,8 @@ void ClientNetworkManager::handleDespawnPlayer(BitReader& reader)
 
     // Clear local player if it was ours
     if (msg.entity_id == local_player_network_id) {
-        local_player_entity = entt::null;
+        ecs_bridge->clearLocal();
+        local_player_ref = {};
         local_player_network_id = 0;
     }
 }
@@ -919,66 +857,12 @@ bool ClientNetworkManager::createOrUpdateEntity(const EntityUpdateData& update)
         return false;
     }
 
-    const entt::entity entity = getEntityByNetworkId(update.entity_id);
-    if (entity == entt::null || !game_world->registry.valid(entity)) {
-        // No spawn recipe has initialized this NetId yet. The caller queues
-        // the snapshot instead of exposing a generic bare entity.
-        return false;
-    }
-    if (!isNetworkHierarchyRoot(game_world->registry, entity)) {
+    const auto result = ecs_bridge->applyUpdate(*game_world, update);
+    if (result == detail::ClientNetworkEcsBridge::UpdateResult::Parented) {
         ++stats.hierarchy_root_rejections;
-        LOG_ENGINE_WARN("Network state application rejected parented entity (network id {})",
-                        update.entity_id);
-        return false;
+        LOG_ENGINE_WARN("Network state application rejected parented entity (network id {})", update.entity_id);
     }
-    return applyUpdateToEntity(entity, update);
-}
-
-bool ClientNetworkManager::applyUpdateToEntity(entt::entity entity, const EntityUpdateData& update)
-{
-    if (game_world == nullptr || !game_world->registry.valid(entity)) {
-        return false;
-    }
-
-    if (update.hasTransform()) {
-        if (game_world->registry.all_of<TransformComponent>(entity)) {
-            game_world->registry.get<TransformComponent>(entity).position = update.position;
-        } else {
-            TransformComponent transform;
-            transform.position = update.position;
-            game_world->registry.emplace<TransformComponent>(entity, transform);
-        }
-    }
-    if (update.hasRotation() && game_world->registry.all_of<TransformComponent>(entity)) {
-        game_world->registry.get<TransformComponent>(entity).rotation.y = glm::degrees(update.rotation_y);
-    }
-    if (update.hasVelocity()) {
-        if (game_world->registry.all_of<RigidBodyComponent>(entity)) {
-            game_world->registry.get<RigidBodyComponent>(entity).velocity = update.velocity;
-        } else {
-            RigidBodyComponent body;
-            body.velocity = update.velocity;
-            game_world->registry.emplace<RigidBodyComponent>(entity, body);
-        }
-    }
-    if (update.hasGrounded()) {
-        if (game_world->registry.all_of<PlayerComponent>(entity)) {
-            auto& player = game_world->registry.get<PlayerComponent>(entity);
-            player.grounded = update.grounded != 0;
-            player.ground_normal = update.ground_normal;
-        }
-        if (game_world->registry.all_of<CharacterControllerComponent>(entity)) {
-            auto& controller = game_world->registry.get<CharacterControllerComponent>(entity);
-            controller.grounded = update.grounded != 0;
-            controller.ground_normal = update.ground_normal;
-        }
-    }
-
-    if (!ReplicationRegistry::get().applyEcsEntries(game_world->registry, entity, update.ext_entries)) {
-        LOG_ENGINE_ERROR("Validated ECS extension failed to apply for network id {}", update.entity_id);
-        return false;
-    }
-    return true;
+    return result == detail::ClientNetworkEcsBridge::UpdateResult::Applied;
 }
 
 bool ClientNetworkManager::queuePendingSnapshot(const EntityUpdateData& update, uint32_t server_tick)
@@ -1011,21 +895,8 @@ void ClientNetworkManager::seedInterpolationState(uint32_t network_id,
     // with snapshots from a previous lifetime of the same network id.
     interp_buffers.erase(network_id);
 
-    if (game_world != nullptr) {
-        const auto entity_it = network_id_to_entity.find(network_id);
-        if (entity_it != network_id_to_entity.end() &&
-            game_world->registry.valid(entity_it->second)) {
-            PresentationTransformComponent presentation;
-            if (const auto* transform = game_world->registry.try_get<TransformComponent>(entity_it->second))
-                presentation.rotation = transform->rotation;
-            presentation.position = position;
-            // Network yaw is radians; the presentation component shares the
-            // ECS degrees convention at this boundary.
-            presentation.rotation.y = glm::degrees(rotation_y);
-            game_world->registry.emplace_or_replace<PresentationTransformComponent>(
-                entity_it->second, presentation);
-        }
-    }
+    if (game_world != nullptr)
+        ecs_bridge->seedPresentation(*game_world, network_id, position, rotation_y);
 }
 
 void ClientNetworkManager::mergeInterpolationState(const EntityUpdateData& update,
@@ -1064,13 +935,8 @@ void ClientNetworkManager::pushInterpolationSnapshot(uint32_t network_id, uint32
 
 void ClientNetworkManager::clearInterpolationHistory()
 {
-    if (game_world != nullptr) {
-        for (const auto& [network_id, entity] : network_id_to_entity) {
-            (void)network_id;
-            if (game_world->registry.valid(entity))
-                game_world->registry.remove<PresentationTransformComponent>(entity);
-        }
-    }
+    if (game_world != nullptr)
+        ecs_bridge->clearPresentation(*game_world);
     interp_buffers.clear();
     latest_interp_state.clear();
     pending_snapshots.clear();
@@ -1080,23 +946,15 @@ void ClientNetworkManager::clearInterpolationHistory()
 
 void ClientNetworkManager::deleteEntity(uint32_t network_id)
 {
-    auto it = network_id_to_entity.find(network_id);
-    if (it != network_id_to_entity.end()) {
-        entt::entity entity = it->second;
-        if (game_world != nullptr && game_world->registry.valid(entity)) {
-            game_world->getPhysicsSystem().removeBody(entity);
-            game_world->registry.destroy(entity);
-        }
-        network_id_to_entity.erase(it);
-    } else if (network_id != 0) {
-        // A deletion can arrive on the unreliable channel before reliable
-        // spawn. NetIds are never reused inside this connection generation.
+    if (!ecs_bridge->erase(game_world, network_id) && network_id != 0) {
+        // A deletion can arrive before its reliable spawn.
         pre_spawn_tombstones.insert(network_id);
         pending_snapshots.erase(network_id);
     }
 
     if (network_id == local_player_network_id) {
-        local_player_entity = entt::null;
+        ecs_bridge->clearLocal();
+        local_player_ref = {};
         local_player_network_id = 0;
     }
 
@@ -1236,53 +1094,36 @@ void ClientNetworkManager::interpolateRemoteEntities()
         if (net_id == local_player_network_id)
             continue;
 
-        auto it = network_id_to_entity.find(net_id);
-        if (it == network_id_to_entity.end())
-            continue;
-
-        entt::entity entity = it->second;
-        if (!game_world->registry.valid(entity))
-            continue;
-
-        if (!game_world->registry.all_of<TransformComponent>(entity))
-            continue;
-
-        auto* presentation = game_world->registry.try_get<PresentationTransformComponent>(entity);
-        if (!presentation) {
-            PresentationTransformComponent initial;
-            const auto& transform = game_world->registry.get<TransformComponent>(entity);
-            initial.position = transform.position;
-            initial.rotation = transform.rotation;
-            presentation = &game_world->registry.emplace<PresentationTransformComponent>(entity, initial);
-        }
+        ecs_bridge->ensurePresentation(*game_world, net_id);
 
         glm::vec3 interpolated_pos;
         float interpolated_rot;
         if (buffer.interpolate(render_anchor_tick, render_fraction,
                                interpolated_pos, interpolated_rot)) {
-            presentation->position = interpolated_pos;
-            // D4 point 4 (out): buffer radians -> ECS degrees.
-            presentation->rotation.y = glm::degrees(interpolated_rot);
+            ecs_bridge->setPresentation(*game_world, net_id, interpolated_pos, interpolated_rot);
         }
     }
 }
 
 void ClientNetworkManager::storeInput(uint32_t tick, const MovementInput& input, const MovementState& predicted_state)
 {
-    if (game_world != nullptr && local_player_entity != entt::null &&
-        !isNetworkHierarchyRoot(game_world->registry, local_player_entity)) {
-        ++stats.hierarchy_root_rejections;
-        LOG_ENGINE_WARN("Network prediction rejected parented local player input (network id {})",
+    if (game_world == nullptr || local_player_ref.isNull() ||
+        !PredictionSystem::recordInput(*game_world, local_player_ref,
+                                       tick, input, predicted_state)) {
+        LOG_ENGINE_WARN("Network prediction rejected input without a valid local pawn (network id {})",
                         local_player_network_id);
-        return;
+    }
+}
+
+const InputRingBuffer<128>& ClientNetworkManager::getInputHistory() const
+{
+    static const InputRingBuffer<128> empty_history;
+    if (game_world == nullptr || local_player_ref.isNull()) {
+        return empty_history;
     }
 
-    PredictionEntry entry;
-    entry.tick = tick;
-    entry.input = input;
-    entry.predicted_state = predicted_state;
-    entry.valid = true;
-    input_history.push(entry);
+    const auto* history = PredictionSystem::getInputHistory(*game_world, local_player_ref);
+    return history ? *history : empty_history;
 }
 
 bool ClientNetworkManager::popAuthoritativeUpdate(MovementState& out_state, uint32_t& out_tick)

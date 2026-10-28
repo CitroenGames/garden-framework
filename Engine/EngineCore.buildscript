@@ -9,6 +9,7 @@ sources = {
     src/Components/**/*.cpp
     src/Console/**/*.cpp
     src/Debug/**/*.cpp
+    src/ECS/**/*.cpp
     src/Events/**/*.cpp
     src/GameFramework/**/*.cpp
     src/Gameplay/**/*.cpp
@@ -32,6 +33,11 @@ sources = {
     src/InputManager.cpp
     src/InputActionSystem.cpp
     src/LocalPlayerInputSystem.cpp
+    src/LocalPlayerInputEcsBridge.cpp
+    src/PlayerRepSystem.cpp
+    src/PlayerRepEcsBridge.cpp
+    src/PlayerControllerEcsBridge.cpp
+    src/GameSimulationEcsBridge.cpp
     src/world.cpp
     src/GameSimulation.cpp
     src/PhysicsSystem.cpp

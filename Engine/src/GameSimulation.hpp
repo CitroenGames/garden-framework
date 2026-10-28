@@ -43,7 +43,7 @@ public:
     bool isPaused() const;
     camera& getActiveCamera();
     PlayerController* getPlayerController();
-    entt::entity getPlayerEntity() const  { return m_player_entity; }
+    EntityRef getPlayerEntity() const     { return m_player_entity; }
     entt::entity getFreecamEntity() const { return m_freecam_entity; }
     SystemScheduler* getScheduler() { return m_scheduler.get(); }
 
@@ -60,7 +60,7 @@ private:
     std::unique_ptr<EntityLifecycle> m_lifecycle;
     float m_current_frame_dt = 0.0f;
 
-    entt::entity m_player_entity     = entt::null;
+    EntityRef m_player_entity{};
     entt::entity m_freecam_entity    = entt::null;
     entt::entity m_player_rep_entity = entt::null;
 

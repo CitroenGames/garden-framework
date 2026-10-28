@@ -1,5 +1,7 @@
+#include "Character/CharacterPhysicsService.hpp"
 #include "Assets/TerrainBuilder.hpp"
 #include "Assets/AssetManager.hpp"
+#include "Assets/AssetScanner.hpp"
 #include "Assets/CookedCollisionSerializer.hpp"
 #include "Components/Components.hpp"
 #include "Components/HierarchyComponents.hpp"
@@ -42,6 +44,18 @@
 #include <glm/gtc/constants.hpp>
 
 namespace fs = std::filesystem;
+
+// Test fixture bridge for raw entities created by the legacy physics setup.
+namespace
+{
+    namespace PhysicsTestEcsBridge
+    {
+        EntityRef entityRef(world& test_world, entt::entity entity)
+        {
+            return ensureEntityRef(test_world.registry, entity);
+        }
+    }
+}
 
 static fs::path findRepoRoot()
 {
@@ -768,6 +782,7 @@ static bool testCharacterControllerPhysicalStepsAndSlopes()
     auto run_step_case = [&](float step_height, bool should_climb)
     {
         world w;
+        CharacterPhysicsService character_physics(w);
         w.initializePhysics();
         if (!add_static_box(w, glm::vec3(0.0f, -0.25f, 0.0f),
                             glm::vec3(4.0f, 0.25f, 8.0f), glm::vec3(0.0f)))
@@ -803,8 +818,9 @@ static bool testCharacterControllerPhysicalStepsAndSlopes()
         float furthest_center = 0.0f;
         for (int tick = 0; tick < 300; ++tick)
         {
-            const CharacterControllerState state =
-                w.simulate_character_controller(character, forward, w.fixed_delta);
+            CharacterControllerState state;
+            if (!character_physics.simulateController(PhysicsTestEcsBridge::entityRef(w, character), forward, w.fixed_delta, state))
+                return fail(name, "failed to simulate step case");
             w.stepPhysicsSingleStep();
             furthest_center = (std::max)(furthest_center, state.position.z);
             if (state.position.z >= 1.4f && state.position.z <= 2.8f)
@@ -839,6 +855,7 @@ static bool testCharacterControllerPhysicalStepsAndSlopes()
     auto run_slope_case = [&](float angle_degrees, bool should_ground)
     {
         world w;
+        CharacterPhysicsService character_physics(w);
         w.initializePhysics();
         if (!add_static_box(w, glm::vec3(0.0f, -0.25f, 0.0f),
                             glm::vec3(4.0f, 0.25f, 8.0f), glm::vec3(0.0f)))
@@ -881,9 +898,11 @@ static bool testCharacterControllerPhysicalStepsAndSlopes()
         CharacterControllerState state;
         for (int tick = 0; tick < 8; ++tick)
         {
-            state = w.simulate_character_controller(character, CharacterMoveInput{}, w.fixed_delta);
+            if (!character_physics.simulateController(PhysicsTestEcsBridge::entityRef(w, character), CharacterMoveInput{}, w.fixed_delta, state))
+                return fail(name, "failed to simulate slope case");
             w.stepPhysicsSingleStep();
-            w.player_collisions(character);
+            if (!character_physics.refreshController(PhysicsTestEcsBridge::entityRef(w, character)))
+                return fail(name, "failed to refresh slope contacts");
             if (should_ground)
             {
                 if (state.grounded && !state.on_steep_ground && state.ground_normal.y > 0.65f)
@@ -1033,6 +1052,7 @@ static bool testWaterComponentProvidesSwimmingVolume()
     const std::string name = "water component provides swimming volume";
 
     world w;
+    CharacterPhysicsService character_physics(w);
     w.initializePhysics();
 
     auto water_entity = w.registry.create();
@@ -1055,8 +1075,9 @@ static bool testWaterComponentProvidesSwimmingVolume()
         return fail(name, "failed to create player body");
 
     CharacterMoveInput input;
-    const CharacterControllerState result =
-        w.simulate_character_controller(player, input, w.fixed_delta);
+    CharacterControllerState result;
+    if (!character_physics.simulateController(PhysicsTestEcsBridge::entityRef(w, player), input, w.fixed_delta, result))
+        return fail(name, "failed to simulate character in water");
 
     if (result.water_level < CharacterWaterLevel::Waist)
         return fail(name, "character state did not enter swimming water level");
@@ -1065,8 +1086,9 @@ static bool testWaterComponentProvidesSwimmingVolume()
         return fail(name, "CharacterControllerComponent swimming state was not synced");
 
     water.affects_swimming = false;
-    const CharacterControllerState disabled_result =
-        w.simulate_character_controller(player, input, w.fixed_delta);
+    CharacterControllerState disabled_result;
+    if (!character_physics.simulateController(PhysicsTestEcsBridge::entityRef(w, player), input, w.fixed_delta, disabled_result))
+        return fail(name, "failed to simulate character in water");
     if (disabled_result.water_level != CharacterWaterLevel::None)
         return fail(name, "disabled WaterComponent still affected swimming");
 
@@ -1092,7 +1114,7 @@ static bool testCameraSpringComponentOffsetsCamera()
     w.world_camera.rotation = glm::vec3(0.0f);
 
     PlayerController controller(nullptr, &w);
-    controller.setPossessedPlayer(player);
+    controller.setPossessedPlayer(PhysicsTestEcsBridge::entityRef(w, player));
     controller.setMovementEnabled(false);
     controller.update(1.0f / 60.0f);
 
@@ -1127,8 +1149,8 @@ static bool testPlayerControllerUsesLocalEcsInput()
     w.registry.emplace<FreecamComponent>(freecam);
 
     PlayerController controller(input, &w);
-    controller.setPossessedPlayer(pawn);
-    controller.setPossessedFreecam(freecam);
+    controller.setPossessedPlayer(PhysicsTestEcsBridge::entityRef(w, pawn));
+    controller.setPossessedFreecam(PhysicsTestEcsBridge::entityRef(w, freecam));
     controller.toggleFreecamMode();
 
     const glm::vec3 initial_position = w.world_camera.position;
@@ -1179,7 +1201,7 @@ static bool testPlayerControllerConsumesGamepadLookIntent()
     local_input.look = glm::vec2(1.0f, 1.0f);
 
     PlayerController controller(input, &w);
-    controller.setPossessedPlayer(pawn);
+    controller.setPossessedPlayer(PhysicsTestEcsBridge::entityRef(w, pawn));
     controller.setMovementEnabled(false);
 
     player.input_enabled = false;
@@ -1249,6 +1271,7 @@ static bool testNetworkSpawnedPlayerGroundsOnMesh(const fs::path& repo_root)
     data.entities.push_back(ground);
 
     world w;
+    CharacterPhysicsService character_physics(w);
     w.initializePhysics();
 
     LevelManager level_manager;
@@ -1272,9 +1295,12 @@ static bool testNetworkSpawnedPlayerGroundsOnMesh(const fs::path& repo_root)
     for (int i = 0; i < 90; ++i)
     {
         CharacterMoveInput input;
-        w.simulate_character_controller(player, input, w.fixed_delta);
+        CharacterControllerState state;
+        if (!character_physics.simulateController(PhysicsTestEcsBridge::entityRef(w, player), input, w.fixed_delta, state))
+            return fail(name, "failed to simulate character");
         w.getPhysicsSystem().stepPhysics(w.registry);
-        w.player_collisions(player);
+        if (!character_physics.refreshController(PhysicsTestEcsBridge::entityRef(w, player)))
+            return fail(name, "failed to refresh character contacts");
     }
 
     const auto& transform = w.registry.get<TransformComponent>(player);
@@ -1438,6 +1464,7 @@ static bool testD6CookedMeshAndWaterMaterialExclusion()
         return fail(name, "generated cooked mesh fixture could not be read: " + cache_error);
 
     world w;
+    CharacterPhysicsService character_physics(w);
     w.initializePhysics();
     PhysicsSystem& physics = w.getPhysicsSystem();
 
@@ -1470,10 +1497,14 @@ static bool testD6CookedMeshAndWaterMaterialExclusion()
 
     for (int tick = 0; tick < 90; ++tick)
     {
-        w.simulate_character_controller(character, CharacterMoveInput{}, w.fixed_delta);
+        CharacterControllerState state;
+        if (!character_physics.simulateController(PhysicsTestEcsBridge::entityRef(w, character), CharacterMoveInput{}, w.fixed_delta, state))
+            return fail(name, "failed to simulate character over cooked mesh");
         physics.stepPhysics(w.registry);
     }
-    const CharacterControllerState character_state = w.get_character_controller_state(character);
+    CharacterControllerState character_state;
+    if (!character_physics.readControllerState(PhysicsTestEcsBridge::entityRef(w, character), character_state))
+        return fail(name, "failed to read character state over cooked mesh");
     if (!character_state.grounded || character_state.ground_normal.y < 0.8f)
         return fail(name, "CharacterController did not ground on the cooked solid mesh");
 
@@ -1969,6 +2000,7 @@ static bool testD6KinematicPlatformCarriesCharacter()
 {
     const std::string name = "D6 kinematic platform carries CharacterController";
     world w;
+    CharacterPhysicsService character_physics(w);
     w.initializePhysics();
 
     ColliderComponent platform_collider;
@@ -1996,23 +2028,30 @@ static bool testD6KinematicPlatformCarriesCharacter()
 
     auto step_character = [&]()
     {
-        w.simulate_character_controller(character, CharacterMoveInput{}, w.fixed_delta);
+        CharacterControllerState state;
+        if (!character_physics.simulateController(PhysicsTestEcsBridge::entityRef(w, character), CharacterMoveInput{}, w.fixed_delta, state))
+            return false;
         w.stepPhysicsSingleStep();
-        w.player_collisions(character);
+        return character_physics.refreshController(PhysicsTestEcsBridge::entityRef(w, character));
     };
     for (int tick = 0; tick < 60; ++tick)
-        step_character();
-    if (!w.get_character_controller_state(character).grounded)
+        if (!step_character())
+            return fail(name, "failed to advance character on platform");
+    CharacterControllerState settled_state;
+    if (!character_physics.readControllerState(PhysicsTestEcsBridge::entityRef(w, character), settled_state) || !settled_state.grounded)
         return fail(name, "capsule did not settle on the kinematic platform");
 
     const float start_x = character_transform.position.x;
     for (int tick = 0; tick < 30; ++tick)
     {
         platform_transform.position.x += 0.05f;
-        step_character();
+        if (!step_character())
+            return fail(name, "failed to advance character on platform");
     }
 
-    const CharacterControllerState state = w.get_character_controller_state(character);
+    CharacterControllerState state;
+    if (!character_physics.readControllerState(PhysicsTestEcsBridge::entityRef(w, character), state))
+        return fail(name, "failed to read carried character state");
     if (!state.grounded || state.ground_velocity.x < 0.1f)
         return fail(name, "moving platform did not report non-zero character ground velocity");
     if (character_transform.position.x < start_x + 0.25f)
@@ -2029,6 +2068,7 @@ static bool testHEParentedKinematicPlatformSync()
 {
     const std::string name = "H-E parented kinematic sync composes pose and carries CharacterVirtual";
     world w;
+    CharacterPhysicsService character_physics(w);
     w.initializePhysics();
     EntityLifecycle life(w.registry, 71);
 
@@ -2098,13 +2138,17 @@ static bool testHEParentedKinematicPlatformSync()
 
     auto simulate_occupant = [&]()
     {
-        w.simulate_character_controller(character, CharacterMoveInput{}, w.fixed_delta);
+        CharacterControllerState state;
+        if (!character_physics.simulateController(PhysicsTestEcsBridge::entityRef(w, character), CharacterMoveInput{}, w.fixed_delta, state))
+            return false;
         w.stepPhysicsSingleStep();
-        w.player_collisions(character);
+        return character_physics.refreshController(PhysicsTestEcsBridge::entityRef(w, character));
     };
     for (int tick = 0; tick < 60; ++tick)
-        simulate_occupant();
-    if (!w.get_character_controller_state(character).grounded)
+        if (!simulate_occupant())
+            return fail(name, "failed to advance character on platform");
+    CharacterControllerState settled_state;
+    if (!character_physics.readControllerState(PhysicsTestEcsBridge::entityRef(w, character), settled_state) || !settled_state.grounded)
         return fail(name, "CharacterVirtual did not settle on hierarchy platform");
 
     const float character_start_x = character_transform.position.x;
@@ -2113,7 +2157,8 @@ static bool testHEParentedKinematicPlatformSync()
         // Change only the ancestor. The platform local TRS must stay local.
         parent_transform.position.x += 0.10f;
         parent_transform.rotation.y += 1.0f;
-        simulate_occupant();
+        if (!simulate_occupant())
+            return fail(name, "failed to advance character on platform");
     }
 
     const glm::mat4 expected_world = Hierarchy::computeWorldMatrix(w.registry, platform);
@@ -2125,7 +2170,9 @@ static bool testHEParentedKinematicPlatformSync()
         glm::distance(platform_transform.scale, platform_local_before.scale) > 0.0001f)
         return fail(name, "kinematic world sync overwrote the authored local transform");
 
-    const CharacterControllerState carried_state = w.get_character_controller_state(character);
+    CharacterControllerState carried_state;
+    if (!character_physics.readControllerState(PhysicsTestEcsBridge::entityRef(w, character), carried_state))
+        return fail(name, "failed to read carried character state");
     if (!carried_state.grounded || carried_state.ground_velocity.x < 0.1f ||
         character_transform.position.x < character_start_x + 0.25f)
         return fail(name, "CharacterVirtual occupant was not carried by parent-only platform motion");
@@ -2156,6 +2203,7 @@ static bool testD6CharacterTeleportRefreshesContacts()
 {
     const std::string name = "D6 CharacterController teleport refreshes contacts";
     world w;
+    CharacterPhysicsService character_physics(w);
     w.initializePhysics();
 
     ColliderComponent floor_collider;
@@ -2175,29 +2223,58 @@ static bool testD6CharacterTeleportRefreshesContacts()
     const entt::entity character = w.registry.create();
     auto& transform = w.registry.emplace<TransformComponent>(character, 0.0f, 1.25f, 0.0f);
     w.registry.emplace<CharacterControllerComponent>(character);
-    w.getPhysicsSystem().createCharacterController(w.registry, character);
-    if (!w.getPhysicsSystem().hasCharacterController(character))
+    const EntityRef character_ref = PhysicsTestEcsBridge::entityRef(w, character);
+    if (!w.isEntityValid(character_ref) ||
+        !w.hasComponent<CharacterControllerComponent>(character_ref) ||
+        w.tryGetComponent<TransformComponent>(character_ref) != &transform ||
+        w.tryGetComponent<TransformComponent>(EntityRef{}) != nullptr ||
+        w.hasComponent<TransformComponent>(EntityRef{}))
+        return fail(name, "Garden component lookup failed");
+    if (character_physics.createController(EntityRef{}) ||
+        character_physics.teleportController(EntityRef{}, glm::vec3(1.0f)) ||
+        character_physics.writeControllerState(EntityRef{}, CharacterControllerState{}))
+        return fail(name, "null controller reference accepted");
+    if (!character_physics.createController(character_ref))
         return fail(name, "failed to create CharacterController");
     for (int tick = 0; tick < 8; ++tick)
     {
-        w.simulate_character_controller(character, CharacterMoveInput{}, w.fixed_delta);
+        CharacterControllerState step_state;
+        if (!character_physics.simulateController(character_ref, CharacterMoveInput{}, w.fixed_delta, step_state))
+            return fail(name, "failed to simulate character before teleport");
         w.stepPhysicsSingleStep();
-        w.player_collisions(character);
+        if (!character_physics.refreshController(character_ref))
+            return fail(name, "failed to refresh character contacts");
     }
-    if (!w.get_character_controller_state(character).grounded)
+    CharacterControllerState state;
+    if (!character_physics.readControllerState(character_ref, state) || !state.grounded)
         return fail(name, "character did not establish floor contact before teleport");
 
     const glm::vec3 target(20.0f, 10.0f, 0.0f);
     const glm::vec3 target_rotation(0.0f, 120.0f, 0.0f);
     if (!w.teleport_body(character, target, target_rotation))
         return fail(name, "generic world teleport did not delegate to CharacterVirtual");
-    const CharacterControllerState state = w.get_character_controller_state(character);
+    if (!character_physics.readControllerState(character_ref, state))
+        return fail(name, "failed to read controller after teleport");
     if (glm::distance(state.position, target) > 0.001f || glm::length(state.velocity) > 0.001f)
         return fail(name, "character teleport did not set position and clear velocity");
     if (state.grounded || glm::length(state.ground_velocity) > 0.001f)
         return fail(name, "character teleport did not refresh support contacts");
     if (glm::distance(transform.rotation, target_rotation) > 0.001f)
         return fail(name, "character teleport did not update ECS rotation");
+
+    const glm::vec3 second_target(22.0f, 9.0f, 0.0f);
+    if (!character_physics.teleportController(character_ref, second_target) ||
+        !character_physics.readControllerState(character_ref, state) ||
+        glm::distance(state.position, second_target) > 0.001f)
+        return fail(name, "Garden controller teleport did not move the character");
+
+    w.registry.destroy(character);
+    if (w.isEntityValid(character_ref) ||
+        w.tryGetComponent<TransformComponent>(character_ref) != nullptr ||
+        character_physics.createController(character_ref) ||
+        character_physics.teleportController(character_ref, second_target) ||
+        character_physics.writeControllerState(character_ref, CharacterControllerState{}))
+        return fail(name, "stale controller reference accepted");
 
     return pass(name);
 }
@@ -2275,6 +2352,7 @@ static bool testD6CharacterTriggerLifecycle()
         EventBus::get().sink<TriggerExitedEvent>().connect<&captureTriggerExited>(capture) };
 
     world w;
+    CharacterPhysicsService character_physics(w);
     w.initializePhysics();
 
     auto ground = w.registry.create();
@@ -2302,11 +2380,15 @@ static bool testD6CharacterTriggerLifecycle()
 
     auto step = [&](const CharacterMoveInput& input)
     {
-        w.simulate_character_controller(character, input, w.fixed_delta);
+        CharacterControllerState state;
+        if (!character_physics.simulateController(PhysicsTestEcsBridge::entityRef(w, character), input, w.fixed_delta, state))
+            return false;
         w.stepPhysicsSingleStep();
-        w.player_collisions(character);
+        if (!character_physics.refreshController(PhysicsTestEcsBridge::entityRef(w, character)))
+            return false;
         EventBus::get().flush<TriggerEnteredEvent>();
         EventBus::get().flush<TriggerExitedEvent>();
+        return true;
     };
     auto is_occupant = [&]()
     {
@@ -2330,7 +2412,8 @@ static bool testD6CharacterTriggerLifecycle()
         return true;
     };
 
-    step(CharacterMoveInput{});
+    if (!step(CharacterMoveInput{}))
+        return fail(name, "failed to advance character trigger fixture");
     if (is_occupant() || !check_events(0, 0, "initially outside"))
         return fail(name, "character began inside the trigger or emitted an event");
 
@@ -2339,8 +2422,12 @@ static bool testD6CharacterTriggerLifecycle()
     bool reached_trigger_center = false;
     for (int tick = 0; tick < 120; ++tick)
     {
-        step(forward);
-        if (w.get_character_controller_state(character).position.z >= 4.0f)
+        if (!step(forward))
+            return fail(name, "failed to advance character trigger fixture");
+        CharacterControllerState state;
+        if (!character_physics.readControllerState(PhysicsTestEcsBridge::entityRef(w, character), state))
+            return fail(name, "failed to read trigger fixture character state");
+        if (state.position.z >= 4.0f)
         {
             reached_trigger_center = true;
             break;
@@ -2350,7 +2437,8 @@ static bool testD6CharacterTriggerLifecycle()
         return fail(name, "moving CharacterController did not enter exactly once");
 
     for (int tick = 0; tick < 600; ++tick)
-        step(CharacterMoveInput{});
+        if (!step(CharacterMoveInput{}))
+            return fail(name, "failed to advance character trigger fixture");
     if (!is_occupant() || !check_events(1, 0, "600 idle fixed ticks"))
         return fail(name, "idle CharacterController emitted duplicate edges or left the trigger");
 
@@ -2359,7 +2447,8 @@ static bool testD6CharacterTriggerLifecycle()
     bool left_trigger = false;
     for (int tick = 0; tick < 180; ++tick)
     {
-        step(backward);
+        if (!step(backward))
+            return fail(name, "failed to advance character trigger fixture");
         if (!is_occupant())
         {
             left_trigger = true;
@@ -2369,14 +2458,16 @@ static bool testD6CharacterTriggerLifecycle()
     if (!left_trigger || !check_events(1, 1, "leave by movement"))
         return fail(name, "moving CharacterController did not leave with exactly one exit");
     for (int tick = 0; tick < 10; ++tick)
-        step(CharacterMoveInput{});
+        if (!step(CharacterMoveInput{}))
+            return fail(name, "failed to advance character trigger fixture");
     if (is_occupant() || !check_events(1, 1, "idle outside"))
         return fail(name, "outside idle ticks emitted a duplicate edge");
 
     bool reentered = false;
     for (int tick = 0; tick < 180; ++tick)
     {
-        step(forward);
+        if (!step(forward))
+            return fail(name, "failed to advance character trigger fixture");
         if (is_occupant())
         {
             reentered = true;
@@ -2573,6 +2664,8 @@ static bool testD6SensorNonInterference()
 
     world control_world;
     world sensor_world;
+    CharacterPhysicsService control_physics(control_world);
+    CharacterPhysicsService sensor_physics(sensor_world);
     entt::entity control_player = entt::null;
     entt::entity sensor_player = entt::null;
     entt::entity unused_trigger = entt::null;
@@ -2646,10 +2739,14 @@ static bool testD6SensorNonInterference()
         if (tick >= 90 && tick < 100)
             input.buttons |= CharacterMoveFlags::Jump;
 
-        const CharacterControllerState control_step = control_world.simulate_character_controller(
-            control_player, input, control_world.fixed_delta);
-        const CharacterControllerState sensor_step = sensor_world.simulate_character_controller(
-            sensor_player, input, sensor_world.fixed_delta);
+        CharacterControllerState control_step;
+        if (!control_physics.simulateController(
+                PhysicsTestEcsBridge::entityRef(control_world, control_player), input, control_world.fixed_delta, control_step))
+            return fail(name, "failed to simulate control character");
+        CharacterControllerState sensor_step;
+        if (!sensor_physics.simulateController(
+                PhysicsTestEcsBridge::entityRef(sensor_world, sensor_player), input, sensor_world.fixed_delta, sensor_step))
+            return fail(name, "failed to simulate sensor character");
         if (!same_motion_trace(control_step, sensor_step))
         {
             EventBus::get().clear();
@@ -2659,13 +2756,17 @@ static bool testD6SensorNonInterference()
 
         control_world.getPhysicsSystem().stepPhysics(control_world.registry);
         sensor_world.getPhysicsSystem().stepPhysics(sensor_world.registry);
-        control_world.player_collisions(control_player);
-        sensor_world.player_collisions(sensor_player);
+        if (!control_physics.refreshController(PhysicsTestEcsBridge::entityRef(control_world, control_player)))
+            return fail(name, "failed to refresh control character");
+        if (!sensor_physics.refreshController(PhysicsTestEcsBridge::entityRef(sensor_world, sensor_player)))
+            return fail(name, "failed to refresh sensor character");
 
-        const CharacterControllerState control_state =
-            control_world.get_character_controller_state(control_player);
-        const CharacterControllerState sensor_state =
-            sensor_world.get_character_controller_state(sensor_player);
+        CharacterControllerState control_state;
+        if (!control_physics.readControllerState(PhysicsTestEcsBridge::entityRef(control_world, control_player), control_state))
+            return fail(name, "failed to read control character");
+        CharacterControllerState sensor_state;
+        if (!sensor_physics.readControllerState(PhysicsTestEcsBridge::entityRef(sensor_world, sensor_player), sensor_state))
+            return fail(name, "failed to read sensor character");
         if (!same_motion_trace(control_state, sensor_state))
         {
             EventBus::get().clear();
@@ -2684,6 +2785,107 @@ static bool testD6SensorNonInterference()
     return pass(name);
 }
 
+// Private test bridge for building a collision scene and returning only a Garden handle.
+static EntityRef createMovingJumpFixture(world& w)
+{
+    w.initializePhysics();
+    const entt::entity ground = w.registry.create();
+    w.registry.emplace<TransformComponent>(ground, 0.0f, -0.5f, 0.0f);
+    w.registry.emplace<RigidBodyComponent>(ground);
+    ColliderComponent collider;
+    collider.shape_type = ColliderShapeType::Box;
+    collider.box_half_extents = glm::vec3(50.0f, 0.5f, 50.0f);
+    const auto shape = PhysicsSystem::createShapeFromCollider(collider, glm::vec3(1.0f));
+    if (!shape || w.getPhysicsSystem().createStaticBody(glm::vec3(0.0f, -0.5f, 0.0f),
+            glm::vec3(0.0f), shape, ground).IsInvalid())
+        return {};
+
+    const entt::entity character = w.registry.create();
+    w.registry.emplace<TransformComponent>(character, 0.0f, 1.2f, 0.0f);
+    auto& rigid_body = w.registry.emplace<RigidBodyComponent>(character);
+    rigid_body.apply_gravity = false;
+    auto& player = w.registry.emplace<PlayerComponent>(character);
+    player.speed = 4.0f;
+    player.jump_force = 3.0f;
+    auto& controller = w.registry.emplace<CharacterControllerComponent>(character);
+    controller.move_speed = player.speed;
+    controller.jump_velocity = player.jump_force;
+    const EntityRef ref = PhysicsTestEcsBridge::entityRef(w, character);
+    CharacterPhysicsService character_physics(w);
+    return character_physics.createController(ref) ? ref : EntityRef{};
+}
+
+static bool testCharacterPhysicsServiceControllerAvailability()
+{
+    const std::string name = "character physics service reports runtime controller availability";
+    PhysicsSystemSettings settings;
+    settings.worker_thread_count = 1;
+    world w(settings);
+    const entt::entity entity = w.registry.create();
+    w.registry.emplace<TransformComponent>(entity, 0.0f, 2.0f, 0.0f);
+    w.registry.emplace<CharacterControllerComponent>(entity);
+    const EntityRef ref = PhysicsTestEcsBridge::entityRef(w, entity);
+    CharacterPhysicsService physics(w);
+    CharacterControllerState state;
+    if (physics.hasController(EntityRef{}) || physics.hasController(ref) ||
+        physics.readControllerState(ref, state))
+        return fail(name, "component without runtime controller reported available");
+    if (!physics.createController(ref) || !physics.hasController(ref) ||
+        !physics.readControllerState(ref, state))
+        return fail(name, "created runtime controller was not available");
+    w.registry.remove<TransformComponent>(entity);
+    if (physics.hasController(ref) || physics.readControllerState(ref, state))
+        return fail(name, "controller without required transform reported available");
+    return pass(name);
+}
+
+static bool testPlayerControllerBufferedMovingJump()
+{
+    const std::string name = "player controller consumes buffered moving jump on fixed step";
+    PhysicsSystemSettings settings;
+    settings.worker_thread_count = 1;
+    world w(settings);
+    CharacterPhysicsService character_physics(w);
+    const EntityRef pawn = createMovingJumpFixture(w);
+    if (pawn.isNull())
+        return fail(name, "failed to create character fixture");
+
+    const entt::entity entity = resolveEntityRef(w.registry, pawn);
+    auto& local = w.registry.emplace<LocalPlayerInputComponent>(entity);
+    local.move.y = 1.0f;
+    PlayerController controller(nullptr, &w);
+    controller.setPossessedPlayer(pawn);
+    for (int tick = 0; tick < 30; ++tick)
+        controller.update(w.fixed_delta);
+
+    CharacterControllerState before;
+    if (!character_physics.readControllerState(pawn, before))
+        return fail(name, "failed to read before controller state");
+    if (!before.grounded || glm::length(glm::vec2(before.velocity.x, before.velocity.z)) < 0.1f)
+        return fail(name, "fixture did not reach grounded forward movement");
+
+    // A released tap arrives before a render update too short to simulate.
+    local.jump_held = false;
+    local.jump_press_pending = true;
+    controller.update(w.fixed_delta * 0.5f);
+    CharacterControllerState pending;
+    if (!character_physics.readControllerState(pawn, pending))
+        return fail(name, "failed to read pending controller state");
+    if (!local.jump_press_pending || glm::distance(before.position, pending.position) > 0.0001f)
+        return fail(name, "jump press was consumed before a fixed step");
+
+    controller.update(w.fixed_delta * 0.5f);
+    CharacterControllerState jumped;
+    if (!character_physics.readControllerState(pawn, jumped))
+        return fail(name, "failed to read jumped controller state");
+    if (local.jump_press_pending || jumped.position.y <= before.position.y + 0.02f ||
+        jumped.velocity.y < 1.0f ||
+        glm::length(glm::vec2(jumped.velocity.x, jumped.velocity.z)) < 0.1f)
+        return fail(name, "fixed step did not consume the press and jump while moving");
+
+    return pass(name);
+}
+
 static bool testServerClientCharacterMovementParity()
 {
     const std::string name = "server/client same-build CharacterVirtual movement parity";
@@ -2694,6 +2896,8 @@ static bool testServerClientCharacterMovementParity()
     settings.worker_thread_count = 1;
     world server_world(settings);
     world client_world(settings);
+    CharacterPhysicsService server_physics(server_world);
+    CharacterPhysicsService client_physics(client_world);
     entt::entity server_character = entt::null;
     entt::entity client_character = entt::null;
 
@@ -2734,9 +2938,12 @@ static bool testServerClientCharacterMovementParity()
         if (w.getPhysicsSystem().createCharacterController(w.registry, character).IsInvalid())
             return false;
 
+        CharacterPhysicsService character_physics(w);
         // Both prediction and authority begin with the same resolved contact
         // state, as they would after spawning the pawn into this fixture.
-        const CharacterControllerState initial = w.get_character_controller_state(character);
+        CharacterControllerState initial;
+        if (!character_physics.readControllerState(PhysicsTestEcsBridge::entityRef(w, character), initial))
+            return false;
         player.grounded = initial.grounded;
         player.ground_normal = initial.ground_normal;
         transform.position = initial.position;
@@ -2747,6 +2954,73 @@ static bool testServerClientCharacterMovementParity()
     if (!setup_scene(server_world, server_character) ||
         !setup_scene(client_world, client_character))
         return fail(name, "failed to create matching independent Jolt scenes");
+
+    // Compare actual takeoff, not just agreement between two equally wrong traces.
+    // Exercise forward and diagonal movement on independent authority/prediction scenes.
+    for (float strafe : {0.0f, 1.0f})
+    {
+        world authority(settings);
+        world prediction(settings);
+        CharacterPhysicsService authority_physics(authority);
+        CharacterPhysicsService prediction_physics(prediction);
+        const EntityRef authority_ref = createMovingJumpFixture(authority);
+        const EntityRef prediction_ref = createMovingJumpFixture(prediction);
+        if (authority_ref.isNull() || prediction_ref.isNull())
+            return fail(name, "failed to create moving jump scenes");
+        CharacterMoveInput movement;
+        movement.move_forward = 1.0f;
+        movement.move_right = strafe;
+        for (int tick = 0; tick < 30; ++tick)
+        {
+            CharacterControllerState authority_state;
+            if (!authority_physics.simulateController(authority_ref, movement, authority.fixed_delta, authority_state))
+                return fail(name, "failed to simulate authority moving jump");
+            CharacterControllerState prediction_state;
+            if (!prediction_physics.simulateController(prediction_ref, movement, prediction.fixed_delta, prediction_state))
+                return fail(name, "failed to simulate prediction moving jump");
+        }
+        CharacterControllerState before;
+        if (!authority_physics.readControllerState(authority_ref, before))
+            return fail(name, "failed to read moving jump state");
+        if (!before.grounded)
+            return fail(name, "moving jump fixture did not reach grounded state");
+        movement.buttons = CharacterMoveFlags::Jump;
+        CharacterControllerState jump;
+        if (!authority_physics.simulateController(authority_ref, movement, authority.fixed_delta, jump))
+            return fail(name, "failed to simulate authority moving jump");
+        CharacterControllerState predicted_jump;
+        if (!prediction_physics.simulateController(prediction_ref, movement, prediction.fixed_delta, predicted_jump))
+            return fail(name, "failed to simulate prediction moving jump");
+        if (jump.position.y <= before.position.y + 0.02f || jump.velocity.y < 1.0f ||
+            !jump.jumped || !jump.jump_was_held ||
+            glm::distance(jump.position, predicted_jump.position) > 0.001f)
+            return fail(name, "moving jump did not take off or prediction diverged");
+        float apex = jump.position.y;
+        for (int tick = 0; tick < 20; ++tick)
+        {
+            if (tick == 12)
+                movement.buttons = 0;
+            // Prediction applies the current pose before simulating each input,
+            // preserving the controller's lifecycle fields just as the client does.
+            CharacterControllerState prediction_state;
+            if (!prediction_physics.readControllerState(prediction_ref, prediction_state) ||
+                !prediction_physics.writeControllerState(prediction_ref, prediction_state))
+                return fail(name, "prediction state could not be restored");
+            CharacterControllerState step;
+            if (!authority_physics.simulateController(authority_ref, movement, authority.fixed_delta, step))
+                return fail(name, "failed to simulate authority moving jump");
+            CharacterControllerState predicted;
+            if (!prediction_physics.simulateController(prediction_ref, movement, prediction.fixed_delta, predicted))
+                return fail(name, "failed to simulate prediction moving jump");
+            apex = std::max(apex, step.position.y);
+            if (glm::distance(step.position, predicted.position) > 0.001f ||
+                step.jump_was_held != predicted.jump_was_held ||
+                step.jump_was_held != (tick < 12))
+                return fail(name, "moving jump prediction or held state diverged during flight");
+        }
+        if (apex < before.position.y + 0.2f)
+            return fail(name, "moving jump failed to rise above the ground");
+    }
 
     auto scripted_input = [](int tick)
     {
@@ -2808,19 +3082,20 @@ static bool testServerClientCharacterMovementParity()
         return input;
     };
 
-    auto client_start_state = [](world& w, entt::entity entity)
+    auto client_start_state = [](world& w, entt::entity entity, CharacterControllerState& state)
     {
         const auto& transform = w.registry.get<TransformComponent>(entity);
         const auto& rigid_body = w.registry.get<RigidBodyComponent>(entity);
         const auto& player = w.registry.get<PlayerComponent>(entity);
-        CharacterControllerState state;
+        CharacterPhysicsService character_physics(w);
+        if (!character_physics.readControllerState(PhysicsTestEcsBridge::entityRef(w, entity), state))
+            return false;
         state.position = transform.position;
         state.velocity = rigid_body.velocity;
         state.grounded = player.grounded;
         state.ground_normal = player.ground_normal;
-        // This mirrors the client MovementState conversion: moving-ground
-        // velocity and water state are not carried in that prediction state.
-        return state;
+        // Mirror prediction's pose update while retaining controller history.
+        return true;
     };
 
     auto write_network_state = [](world& w, entt::entity entity, const CharacterControllerState& state)
@@ -2855,18 +3130,24 @@ static bool testServerClientCharacterMovementParity()
         const CharacterMoveInput input = scripted_input(tick);
 
         // ServerNetworkManager advances the existing CharacterVirtual directly.
-        const CharacterControllerState server_state = server_world.simulate_character_controller(
-            server_character, input, server_world.fixed_delta);
+        CharacterControllerState server_state;
+        if (!server_physics.simulateController(
+                PhysicsTestEcsBridge::entityRef(server_world, server_character), input, server_world.fixed_delta, server_state))
+            return fail(name, "failed to simulate server character");
         write_network_state(server_world, server_character, server_state);
 
         // GameModule restores its ECS prediction state before advancing the
         // same CharacterVirtual path for the corresponding input sample.
-        if (!client_world.set_character_controller_state(
-                client_character, client_start_state(client_world, client_character)))
+        CharacterControllerState client_start;
+        if (!client_start_state(client_world, client_character, client_start) ||
+            !client_physics.writeControllerState(
+                PhysicsTestEcsBridge::entityRef(client_world, client_character), client_start))
             return fail(name, "client-side CharacterVirtual state restore failed at tick " +
                 std::to_string(tick));
-        const CharacterControllerState client_state = client_world.simulate_character_controller(
-            client_character, input, client_world.fixed_delta);
+        CharacterControllerState client_state;
+        if (!client_physics.simulateController(
+                PhysicsTestEcsBridge::entityRef(client_world, client_character), input, client_world.fixed_delta, client_state))
+            return fail(name, "failed to simulate client character");
         write_network_state(client_world, client_character, client_state);
 
         if (!measure_divergence(tick))
@@ -2875,8 +3156,10 @@ static bool testServerClientCharacterMovementParity()
 
         server_world.stepPhysicsSingleStep();
         client_world.stepPhysicsSingleStep();
-        server_world.player_collisions(server_character);
-        client_world.player_collisions(client_character);
+        if (!server_physics.refreshController(PhysicsTestEcsBridge::entityRef(server_world, server_character)))
+            return fail(name, "failed to refresh server character");
+        if (!client_physics.refreshController(PhysicsTestEcsBridge::entityRef(client_world, client_character)))
+            return fail(name, "failed to refresh client character");
 
         if (!measure_divergence(tick))
             return fail(name, "position divergence exceeded 0.05 m after the fixed physics step at tick " +
@@ -2893,6 +3176,7 @@ static bool testPredictionReplayPreservesCharacterCollision()
     constexpr int replay_input_count = 90;
 
     world w;
+    CharacterPhysicsService character_physics(w);
     w.initializePhysics();
     auto add_static_box = [](world& target, const glm::vec3& position, const glm::vec3& half_extents)
     {
@@ -2920,10 +3204,12 @@ static bool testPredictionReplayPreservesCharacterCollision()
     if (w.getPhysicsSystem().createCharacterController(w.registry, character).IsInvalid())
         return fail(name, "failed to create replay-test CharacterController");
 
-    CharacterControllerState authoritative = w.get_character_controller_state(character);
+    CharacterControllerState authoritative;
+    if (!character_physics.readControllerState(PhysicsTestEcsBridge::entityRef(w, character), authoritative))
+        return fail(name, "failed to read authoritative character state");
     authoritative.position = glm::vec3(0.0f, 1.2f, 0.0f);
     authoritative.velocity = glm::vec3(0.0f);
-    if (!w.set_character_controller_state(character, authoritative))
+    if (!character_physics.writeControllerState(PhysicsTestEcsBridge::entityRef(w, character), authoritative))
         return fail(name, "failed to restore authoritative CharacterController state");
 
     Net::MovementState shared_state;
@@ -2946,18 +3232,29 @@ static bool testPredictionReplayPreservesCharacterCollision()
         history.push(entry);
     }
 
+    bool replay_succeeded = true;
     history.forEachFrom(0, [&](const Net::PredictionEntry& entry) {
         CharacterMoveInput character_input;
         character_input.move_forward = entry.input.move_forward;
-        w.simulate_character_controller(character, character_input, w.fixed_delta);
+        CharacterControllerState replay_state;
+        if (!character_physics.simulateController(PhysicsTestEcsBridge::entityRef(w, character), character_input, w.fixed_delta, replay_state))
+        {
+            replay_succeeded = false;
+            return;
+        }
         w.stepPhysicsSingleStep();
     });
+    if (!replay_succeeded)
+        return fail(name, "failed to simulate character replay");
     shared_state = history.replayFrom(0, shared_state,
         [&](const Net::MovementInput& input, const Net::MovementState& start_state) {
             return Net::SharedMovement::simulate(input, start_state, shared_config);
         });
 
-    const glm::vec3 controller_position = w.get_character_controller_state(character).position;
+    CharacterControllerState controller_state;
+    if (!character_physics.readControllerState(PhysicsTestEcsBridge::entityRef(w, character), controller_state))
+        return fail(name, "failed to read character replay state");
+    const glm::vec3 controller_position = controller_state.position;
     if (controller_position.z > 1.6f)
         return fail(name, "controller replay passed through the wall to z=" +
             std::to_string(controller_position.z));
@@ -3049,8 +3346,7 @@ static bool testD6LayerRenumberRegression(const fs::path& repo_root)
     const std::string name = "D6-T1 legacy/current character layer comparison";
     const fs::path template_assets = repo_root / "Templates" / "FPSShooter" / "assets";
     const fs::path source_level = template_assets / "levels" / "physics.level.json";
-    const fs::path cooked_cache = template_assets / "models" / "ground_plane.gardenphys";
-    const fs::path round_trip_path = fs::temp_directory_path() / "garden_d6_t1_physics.level.json";
+    const fs::path original_cache = template_assets / "models" / "ground_plane.gardenphys";
 
     auto read_bytes = [](const fs::path& path, std::vector<char>& bytes)
     {
@@ -3060,13 +3356,47 @@ static bool testD6LayerRenumberRegression(const fs::path& repo_root)
         return !in.bad();
     };
 
-    std::vector<char> cooked_before;
-    if (!fs::exists(source_level) || !fs::exists(cooked_cache) || !read_bytes(cooked_cache, cooked_before))
+    std::vector<char> original_cache_before;
+    if (!fs::exists(source_level) || !read_bytes(original_cache, original_cache_before))
         return fail(name, "FPSShooter physics fixture or its cooked ground cache is missing/unreadable");
-    if (cooked_before.empty())
+    if (original_cache_before.empty())
         return fail(name, "cooked ground cache is empty");
 
-    Assets::AssetManager::get().setAssetRoot(template_assets.string());
+    const fs::path fixture_root = fs::temp_directory_path() /
+        ("garden_physics_d6t1_" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::error_code fixture_error;
+    if (!fs::create_directories(fixture_root / "models", fixture_error))
+        return fail(name, "failed to create isolated fixture directory: " + fixture_error.message());
+    struct ScopedDirectoryCleanup
+    {
+        fs::path path;
+        ~ScopedDirectoryCleanup()
+        {
+            std::error_code error;
+            fs::remove_all(path, error);
+        }
+    } cleanup{fixture_root};
+
+    // The authored level is retained, but its model paths resolve to private
+    // copies with metadata and collision cooked by the current contract.
+    Assets::AssetScanner scanner;
+    for (const char* filename : {"ground_plane.obj", "grasscube.obj"})
+    {
+        const fs::path fixture_model = fixture_root / "models" / filename;
+        if (!fs::copy_file(template_assets / "models" / filename, fixture_model,
+                           fs::copy_options::none, fixture_error))
+            return fail(name, "failed to copy fixture model: " + fixture_error.message());
+        if (!scanner.processAsset(fixture_model.string()))
+            return fail(name, "failed to generate current metadata for " + std::string(filename));
+    }
+    const fs::path cooked_cache = fixture_root / "models" / "ground_plane.gardenphys";
+    const fs::path round_trip_path = fixture_root / "physics.level.json";
+    std::vector<char> cooked_before;
+    if (!read_bytes(cooked_cache, cooked_before) || cooked_before.empty())
+        return fail(name, "generated cooked ground cache is missing/unreadable");
+
+    Assets::AssetManager::get().setAssetRoot(fixture_root.string());
     Assets::AssetManager::get().setAssetPrefix("assets");
     HeadlessRenderAPI render_api;
     Assets::AssetManager::get().initialize(&render_api);
@@ -3084,6 +3414,17 @@ static bool testD6LayerRenumberRegression(const fs::path& repo_root)
         return fail(name, "failed to reload the saved physics-level fixture");
     if (round_tripped_data.entities.size() != source_data.entities.size())
         return fail(name, "level save/load changed the serialized entity count");
+    for (size_t i = 0; i < source_data.entities.size(); ++i)
+    {
+        const auto& source = source_data.entities[i];
+        const auto& loaded = round_tripped_data.entities[i];
+        if (loaded.name != source.name || loaded.type != source.type ||
+            loaded.position != source.position || loaded.rotation != source.rotation ||
+            loaded.scale != source.scale || loaded.has_rigidbody != source.has_rigidbody ||
+            loaded.has_collider != source.has_collider || loaded.has_constraint != source.has_constraint ||
+            (source.has_collider && loaded.collider_shape_type != source.collider_shape_type))
+            return fail(name, "level save/load changed authored physics or transform data for '" + source.name + "'");
+    }
 
     struct NamedPosition
     {
@@ -3097,11 +3438,13 @@ static bool testD6LayerRenumberRegression(const fs::path& repo_root)
     CharacterControllerState legacy_character_state;
     CharacterControllerState current_character_state;
 
+    std::string scene_error;
     auto run_scene = [&](bool legacy_mapping,
                          std::vector<NamedPosition>& body_positions,
                          glm::vec3& character_position,
                          CharacterControllerState& character_state)
     {
+        auto scene_fail = [&](const std::string& reason) { scene_error = reason; return false; };
         PhysicsSystemSettings settings;
         // Model the historical CharacterVirtual assignment from 1b051986^:
         // the inner body and its query layer were DynamicProp (1). This uses
@@ -3112,12 +3455,13 @@ static bool testD6LayerRenumberRegression(const fs::path& repo_root)
             settings.layers.character_body = settings.layers.dynamic_body;
 
         world w(settings);
+        CharacterPhysicsService character_physics(w);
         w.initializePhysics();
         LevelManager instance_manager;
         std::vector<entt::entity> level_entities;
         if (!instance_manager.instantiateLevel(round_tripped_data, w, &render_api,
                                                nullptr, nullptr, nullptr, false, &level_entities))
-            return false;
+            return scene_fail("level instantiation failed");
 
         entt::entity ground = entt::null;
         for (entt::entity entity : level_entities)
@@ -3126,25 +3470,26 @@ static bool testD6LayerRenumberRegression(const fs::path& repo_root)
             if (w.registry.get<TagComponent>(entity).name == "ground")
                 ground = entity;
         }
-        if (ground == entt::null || !w.getPhysicsSystem().hasBody(ground) ||
-            !w.registry.all_of<MeshComponent>(ground))
-            return false;
+        if (ground == entt::null) return scene_fail("ground entity missing");
+        if (!w.getPhysicsSystem().hasBody(ground)) return scene_fail("ground physics body missing");
+        if (!w.registry.all_of<MeshComponent>(ground)) return scene_fail("ground mesh component missing");
         const auto& ground_mesh = w.registry.get<MeshComponent>(ground).m_mesh;
-        if (!ground_mesh || ground_mesh->collision_cache_path.empty() ||
-            fs::path(ground_mesh->collision_cache_path).lexically_normal() != cooked_cache.lexically_normal())
-            return false;
+        if (!ground_mesh) return scene_fail("ground mesh missing");
+        if (ground_mesh->collision_cache_path.empty()) return scene_fail("ground collision cache path missing");
+        if (fs::path(ground_mesh->collision_cache_path).lexically_normal() != cooked_cache.lexically_normal())
+            return scene_fail("ground cache path mismatch: " + ground_mesh->collision_cache_path + " expected " + cooked_cache.string());
         JPH::ShapeRefC verified_cooked_shape;
         std::string cache_error;
         if (!Assets::CookedCollisionSerializer::loadShape(
                 ground_mesh->collision_cache_path, ground_mesh->collision_source_hash,
                 ground_mesh->collision_source_file_size, verified_cooked_shape, &cache_error) ||
             !verified_cooked_shape)
-            return false;
+            return scene_fail("cooked shape load failed: " + cache_error);
 
         const auto& layers = w.getPhysicsSystem().layerSettings();
         if (legacy_mapping ? layers.character_body != layers.dynamic_body
                            : layers.character_body == layers.dynamic_body)
-            return false;
+            return scene_fail("character layer configuration mismatch");
 
         const entt::entity character = w.registry.create();
         w.registry.emplace<TransformComponent>(character, 5.0f, 1.2f, 1.0f);
@@ -3152,15 +3497,18 @@ static bool testD6LayerRenumberRegression(const fs::path& repo_root)
         auto& controller = w.registry.emplace<CharacterControllerComponent>(character);
         controller.move_speed = 4.0f;
         if (w.getPhysicsSystem().createCharacterController(w.registry, character).IsInvalid())
-            return false;
+            return scene_fail("character creation failed");
 
         for (int tick = 0; tick < 120; ++tick)
         {
             CharacterMoveInput input;
             if (tick < 80) input.move_forward = 1.0f;
-            w.simulate_character_controller(character, input, w.fixed_delta);
+            CharacterControllerState state;
+            if (!character_physics.simulateController(PhysicsTestEcsBridge::entityRef(w, character), input, w.fixed_delta, state))
+                return scene_fail("character simulation failed at tick " + std::to_string(tick));
             w.getPhysicsSystem().stepPhysics(w.registry);
-            w.player_collisions(character);
+            if (!character_physics.refreshController(PhysicsTestEcsBridge::entityRef(w, character)))
+                return scene_fail("character refresh failed at tick " + std::to_string(tick));
         }
 
         auto view = w.registry.view<TagComponent, TransformComponent>();
@@ -3173,21 +3521,37 @@ static bool testD6LayerRenumberRegression(const fs::path& repo_root)
         std::sort(body_positions.begin(), body_positions.end(),
             [](const NamedPosition& a, const NamedPosition& b) { return a.name < b.name; });
         character_position = w.registry.get<TransformComponent>(character).position;
-        character_state = w.get_character_controller_state(character);
-        return body_positions.size() >= 4;
+        if (!character_physics.readControllerState(PhysicsTestEcsBridge::entityRef(w, character), character_state))
+            return scene_fail("character state read failed");
+        if (body_positions.size() < 4)
+        {
+            std::string details;
+            for (entt::entity entity : level_entities)
+            {
+                if (w.registry.all_of<TagComponent>(entity))
+                    details += " " + w.registry.get<TagComponent>(entity).name +
+                        (w.getPhysicsSystem().hasBody(entity) ? ":body" : ":no-body") +
+                        (w.registry.all_of<TransformComponent>(entity) ? ":transform" : ":no-transform");
+            }
+            return scene_fail("expected at least four bodies, got " + std::to_string(body_positions.size()) + details);
+        }
+        return true;
     };
 
     if (!run_scene(true, legacy_body_positions, legacy_character_position, legacy_character_state))
-        return fail(name, "legacy DynamicProp mapping did not instantiate the level, character, and cooked ground body");
+        return fail(name, "legacy DynamicProp mapping: " + scene_error);
     std::vector<char> cooked_after_legacy;
     if (!read_bytes(cooked_cache, cooked_after_legacy) || cooked_after_legacy != cooked_before)
         return fail(name, "legacy-mapping run changed the cooked ground cache bytes");
 
     if (!run_scene(false, current_body_positions, current_character_position, current_character_state))
-        return fail(name, "dedicated Character mapping did not instantiate the level, character, and cooked ground body");
+        return fail(name, "dedicated Character mapping: " + scene_error);
     std::vector<char> cooked_after_current;
     if (!read_bytes(cooked_cache, cooked_after_current) || cooked_after_current != cooked_before)
         return fail(name, "dedicated-Character run changed the cooked ground cache bytes");
+    std::vector<char> original_cache_after;
+    if (!read_bytes(original_cache, original_cache_after) || original_cache_after != original_cache_before)
+        return fail(name, "fixture runs changed the original cooked ground cache bytes");
 
     auto same_vec3_bits = [](const glm::vec3& a, const glm::vec3& b)
     {
@@ -3407,7 +3771,7 @@ static bool testVRTemplateReferences(const fs::path& repo_root)
                              std::istreambuf_iterator<char>());
     if (source.find("XR/OpenXRSystem.hpp") == std::string::npos)
         return fail(name, "game module does not touch the OpenXR runtime bridge");
-    if (source.find("simulate_character_controller") == std::string::npos)
+    if (source.find("simulateController") == std::string::npos)
         return fail(name, "game module does not drive character-controller locomotion");
 
     return pass(name);
@@ -4052,6 +4416,10 @@ int main()
     ok = testD6TriggerOccupantCapacity() && ok;
     run("D6-T3 sensor non-interference");
     ok = testD6SensorNonInterference() && ok;
+    run("player controller consumes buffered moving jump on fixed step");
+    ok = testPlayerControllerBufferedMovingJump() && ok;
+    run("character physics service reports runtime controller availability");
+    ok = testCharacterPhysicsServiceControllerAvailability() && ok;
     run("server/client same-build CharacterVirtual movement parity");
     ok = testServerClientCharacterMovementParity() && ok;
     run("prediction replay preserves CharacterVirtual wall collision");

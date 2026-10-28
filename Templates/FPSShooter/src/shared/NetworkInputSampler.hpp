@@ -146,7 +146,9 @@ namespace FPSShooter
         if (actions.get("MoveBack").held) state.buttons |= Net::InputFlags::MOVE_BACK;
         if (actions.get("MoveLeft").held) state.buttons |= Net::InputFlags::MOVE_LEFT;
         if (actions.get("MoveRight").held) state.buttons |= Net::InputFlags::MOVE_RIGHT;
-        if (edges.jump) state.buttons |= Net::InputFlags::JUMP;
+        // Preserve a held jump for the controller while also retaining taps
+        // captured on render frames with no fixed command step.
+        if (edges.jump || actions.get("Jump").held) state.buttons |= Net::InputFlags::JUMP;
         if (actions.get("Use").held) state.buttons |= Net::InputFlags::USE;
         if (actions.get("Sprint").held) state.buttons |= Net::InputFlags::SPRINT;
         if (actions.get("Crouch").held) state.buttons |= Net::InputFlags::CROUCH;

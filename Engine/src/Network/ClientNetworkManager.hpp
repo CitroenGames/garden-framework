@@ -6,6 +6,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <functional>
+#include <memory>
 #include <utility>
 #include "EngineExport.h"
 #include "enet.h"
@@ -17,13 +18,15 @@
 #include "NetworkTransport.hpp"
 #include "SharedMovement.hpp"
 #include "PredictionTypes.hpp"
+#include "Components/IdentityComponent.hpp"
 #include "InterpolationBuffer.hpp"
-#include <entt/entt.hpp>
 
 // Forward declarations
 class world;
 
 namespace Net {
+
+namespace detail { class ClientNetworkEcsBridge; }
 
 using ClientCustomMessageHandler = std::function<void(uint8_t message_type, BitReader& reader)>;
 
@@ -54,7 +57,7 @@ private:
     std::string player_name;
 
     // Entity synchronization
-    std::unordered_map<uint32_t, entt::entity> network_id_to_entity;
+    std::unique_ptr<detail::ClientNetworkEcsBridge> ecs_bridge;
     struct PendingSnapshot
     {
         EntityUpdateData update;
@@ -66,7 +69,7 @@ private:
     std::unordered_map<uint32_t, PendingSnapshot> pending_snapshots;
     std::unordered_set<uint32_t> pre_spawn_tombstones;
     static constexpr std::size_t MAX_PENDING_SPAWN_SNAPSHOTS = 256;
-    entt::entity local_player_entity = entt::null;
+    EntityRef local_player_ref{};
     uint32_t local_player_network_id = 0;
 
     // Handshake state (wire v6)
@@ -116,8 +119,8 @@ private:
     InputSample recent_inputs[3] = {};  // Ring: [0]=current, [1]=prev, [2]=prev-prev
     uint8_t recent_input_count = 0;
 
-    // Client-side prediction
-    InputRingBuffer<128> input_history;
+    // Transport receipt for the one locally owned network pawn. Replay
+    // history and presentation correction live on ClientPredictionComponent.
     MovementState last_server_state;           // Authoritative state from server for local player
     uint32_t last_server_processed_tick = 0;   // Which input tick the server last applied
     bool has_authoritative_update = false;     // True when new server state is available
@@ -163,13 +166,13 @@ public:
     bool isConnected() const { return connection_state == ConnectionState::CONNECTED; }
 
     // Entity queries
-    entt::entity getLocalPlayerEntity() const { return local_player_entity; }
-    entt::entity getEntityByNetworkId(uint32_t net_id) const;
+    EntityRef getLocalPlayerEntityRef() const { return getEntityRefByNetworkId(local_player_network_id); }
+    EntityRef getEntityRefByNetworkId(uint32_t net_id) const;
 
     // Client-side prediction
     void storeInput(uint32_t tick, const MovementInput& input, const MovementState& predicted_state);
     bool popAuthoritativeUpdate(MovementState& out_state, uint32_t& out_tick);
-    const InputRingBuffer<128>& getInputHistory() const { return input_history; }
+    const InputRingBuffer<128>& getInputHistory() const;
 
     // Entity interpolation - call before render-dependent representations and
     // rendering to update remote PresentationTransformComponent poses.
@@ -221,7 +224,6 @@ private:
 
     // Entity management
     bool createOrUpdateEntity(const EntityUpdateData& update);
-    bool applyUpdateToEntity(entt::entity entity, const EntityUpdateData& update);
     bool queuePendingSnapshot(const EntityUpdateData& update, uint32_t server_tick);
     void seedInterpolationState(uint32_t network_id, const glm::vec3& position, float rotation_y);
     void mergeInterpolationState(const EntityUpdateData& update, uint32_t server_tick);

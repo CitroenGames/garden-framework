@@ -65,6 +65,8 @@ bool pass(const std::string& name)
     return true;
 }
 
+#include "FrameworkRuntimeTests.hpp"
+
 std::vector<entt::entity> g_recorded_dropped_weapon_removals;
 
 void recordDroppedWeaponRemoval(entt::registry& registry, entt::entity dropped_item)
@@ -4294,6 +4296,8 @@ int main()
 {
     bool ok = true;
     ok = testPlayerStartReflectionRegistered() && ok;
+    ok = testFrameworkRuntimeLifecycle() && ok;
+    ok = testFrameworkWorldMoveLifecycle() && ok;
     ok = testGameModeRegistryCreatesBuiltins() && ok;
     ok = testGameModeUsesPortalPlayerStart() && ok;
     ok = testGameModeUnrealStyleHooks() && ok;
@@ -4317,6 +4321,7 @@ int main()
     ok = testCompetitiveCompositionUsesTeamSpawnPolicy() && ok;
     ok = testCompetitiveMapDataSchema() && ok;
     ok = testPlayerMovementInputContract() && ok;
+    ok = testPlayerMovementTuning() && ok;
     ok = testCompetitiveRoundFsmFullCycleHalftimeClinch() && ok;
     ok = testCompetitiveOvertime() && ok;
     ok = testCompetitiveTimerTargetSavedAndPause() && ok;

@@ -118,7 +118,7 @@ namespace InputFlags
     constexpr uint16_t ATTACK2       = 1 << 0;   // Mouse2 (held)
     constexpr uint16_t ATTACK        = 1 << 1;   // Mouse1 (held)
     constexpr uint16_t USE           = 1 << 2;   // E (held)
-    constexpr uint16_t JUMP          = 1 << 3;   // Space (edge)
+    constexpr uint16_t JUMP          = 1 << 3;   // Space (held, with captured tap pulses)
     constexpr uint16_t MOVE_RIGHT    = 1 << 4;   // D (held)
     constexpr uint16_t MOVE_LEFT     = 1 << 5;   // A (held)
     constexpr uint16_t MOVE_BACK     = 1 << 6;   // S (held)

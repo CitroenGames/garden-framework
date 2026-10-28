@@ -13,6 +13,7 @@
 
 namespace GameFramework
 {
+    class GameFrameworkRuntime;
     class GameModeBase;
     class GameStateBase;
 }
@@ -20,14 +21,16 @@ namespace GameFramework
 class ENGINE_API world
 {
 private:
+    // CharacterPhysicsService implements its Garden handle API through this private seam.
+    friend class CharacterPhysicsService;
     std::unique_ptr<PhysicsSystem> physics_system;
-    std::unique_ptr<GameFramework::GameModeBase> authority_game_mode;
-    std::unique_ptr<GameFramework::GameStateBase> game_state;
+    std::unique_ptr<GameFramework::GameFrameworkRuntime> gameplay_framework;
     Tick::FixedTickAccumulator simulation_ticks;
     uint32_t simulation_tick = 0;
     double simulation_time = 0.0;
-    bool gameplay_framework_initialized = false;
-    bool gameplay_framework_started = false;
+
+    // Private bridge from Garden identity to the ECS runtime.
+    entt::entity resolveEntity(EntityRef entity) const;
 
     void clearRegistryStorage()
     {
@@ -55,36 +58,71 @@ public:
 
     ~world();
 
+    // Creates a Garden entity handle with a stable identity. Gameplay code uses
+    // this handle instead of storage-library entity values.
+    EntityRef createEntity();
+
+    // Returned component pointers may be invalidated by structural changes to
+    // that component type's storage, including adding/removing it on another
+    // entity, or by destroying the owning entity. Invalid handles and absent
+    // components return null. Callers must not retain pointers across such
+    // changes.
+    bool isEntityValid(EntityRef entity) const;
+
+    template<typename T>
+    bool hasComponent(EntityRef entity) const
+    {
+        const auto resolved = resolveEntity(entity);
+        return resolved != entt::null && registry.all_of<T>(resolved);
+    }
+
+    template<typename T>
+    T* tryGetComponent(EntityRef entity)
+    {
+        const auto resolved = resolveEntity(entity);
+        return resolved != entt::null ? registry.try_get<T>(resolved) : nullptr;
+    }
+
+    template<typename T>
+    const T* tryGetComponent(EntityRef entity) const
+    {
+        const auto resolved = resolveEntity(entity);
+        return resolved != entt::null ? registry.try_get<T>(resolved) : nullptr;
+    }
+
+    // Returns the uniquely named entity, or a null handle if absent/ambiguous.
+    EntityRef findEntityByTag(const std::string& name);
+
     void setAuthorityGameMode(std::unique_ptr<GameFramework::GameModeBase> game_mode);
-    GameFramework::GameModeBase* getAuthorityGameMode() { return authority_game_mode.get(); }
-    const GameFramework::GameModeBase* getAuthorityGameMode() const { return authority_game_mode.get(); }
+    GameFramework::GameModeBase* getAuthorityGameMode();
+    const GameFramework::GameModeBase* getAuthorityGameMode() const;
 
     template<typename T>
     T* getAuthorityGameModeAs()
     {
-        return dynamic_cast<T*>(authority_game_mode.get());
+        return dynamic_cast<T*>(getAuthorityGameMode());
     }
 
     template<typename T>
     const T* getAuthorityGameModeAs() const
     {
-        return dynamic_cast<const T*>(authority_game_mode.get());
+        return dynamic_cast<const T*>(getAuthorityGameMode());
     }
 
     void setGameState(std::unique_ptr<GameFramework::GameStateBase> state);
-    GameFramework::GameStateBase* getGameState() { return game_state.get(); }
-    const GameFramework::GameStateBase* getGameState() const { return game_state.get(); }
+    GameFramework::GameStateBase* getGameState();
+    const GameFramework::GameStateBase* getGameState() const;
 
     template<typename T>
     T* getGameStateAs()
     {
-        return dynamic_cast<T*>(game_state.get());
+        return dynamic_cast<T*>(getGameState());
     }
 
     template<typename T>
     const T* getGameStateAs() const
     {
-        return dynamic_cast<const T*>(game_state.get());
+        return dynamic_cast<const T*>(getGameState());
     }
 
     void clearGameplayFramework();
@@ -92,8 +130,8 @@ public:
     void startGameplayFramework();
     void tickGameplayFramework(float delta_time);
     void shutdownGameplayFramework();
-    bool isGameplayFrameworkInitialized() const { return gameplay_framework_initialized; }
-    bool hasGameplayFrameworkStarted() const { return gameplay_framework_started; }
+    bool isGameplayFrameworkInitialized() const;
+    bool hasGameplayFrameworkStarted() const;
 
     // Initialize Jolt physics (call after world construction)
     void initializePhysics()
@@ -146,11 +184,6 @@ public:
 
     float getPhysicsInterpolationAlpha() const { return simulation_ticks.getAlpha(); }
 
-    void player_collisions(entt::entity playerEntity)
-    {
-        physics_system->handlePlayerCollisions(registry, playerEntity);
-    }
-
     // D6 trigger polling (also invoked automatically at end of step_physics;
     // calling again is a no-change diff, so scheduler systems stay exactly-once).
     void update_triggers()
@@ -194,32 +227,6 @@ public:
         const glm::vec3& rotation, const glm::vec3& direction, float maxDistance)
     {
         return physics_system->boxCast(origin, halfExtents, rotation, direction, maxDistance);
-    }
-
-    JPH::BodyID create_character_controller(entt::entity entity)
-    {
-        return physics_system->createCharacterController(registry, entity);
-    }
-
-    CharacterControllerState simulate_character_controller(entt::entity entity,
-        const CharacterMoveInput& input, float delta_time)
-    {
-        return physics_system->simulateCharacterController(registry, entity, input, delta_time);
-    }
-
-    CharacterControllerState get_character_controller_state(entt::entity entity)
-    {
-        return physics_system->getCharacterControllerState(registry, entity);
-    }
-
-    bool set_character_controller_state(entt::entity entity, const CharacterControllerState& state)
-    {
-        return physics_system->setCharacterControllerState(registry, entity, state);
-    }
-
-    bool teleport_character_controller(entt::entity entity, const glm::vec3& position)
-    {
-        return physics_system->teleportCharacterController(registry, entity, position);
     }
 
     bool teleport_body(entt::entity entity, const glm::vec3& position, const glm::vec3& euler_degrees)
