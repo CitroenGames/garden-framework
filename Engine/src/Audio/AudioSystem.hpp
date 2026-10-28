@@ -83,6 +83,7 @@ public:
     size_t activeVoiceCount() const;
     glm::vec3 getSoundPosition(SoundHandle handle) const;
     float getSoundVolume(SoundHandle handle) const;
+    float getSoundPitch(SoundHandle handle) const;
     void stopAllSounds();
     bool isSoundPlaying(SoundHandle handle) const;
 
@@ -99,6 +100,11 @@ public:
     void update();
 
     bool isInitialized() const { return initialized; }
+    // Changes whenever the mixer is successfully started or torn down. ECS
+    // emitters use this to discard handles and clip ids owned by a previous
+    // miniaudio instance rather than treating a restarted mixer as a finished
+    // one-shot.
+    uint64_t lifecycleGeneration() const { return lifecycle_generation; }
     glm::vec3 getListenerPosition() const { return listener_position; }
     bool hasListener() const { return has_listener; }
 
@@ -115,6 +121,7 @@ private:
     std::unique_ptr<Impl> impl;
 
     bool initialized = false;
+    uint64_t lifecycle_generation = 0;
     uint32_t next_clip_id = 1;
     uint32_t next_sound_id = 1;
 

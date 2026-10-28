@@ -19,11 +19,19 @@ struct AudioSourceComponent
     bool spatial = true;
     bool loop = false;
     bool auto_play = false;
+    bool enabled = true;
     AudioGroup group = AudioGroup::SFX;
 
     // Runtime state
     SoundHandle active_handle = INVALID_SOUND;
     bool started = false;
+    AudioClipId active_clip = INVALID_AUDIO_CLIP;
+    std::string resolved_clip_path;
+    bool active_spatial = true;
+    bool active_loop = false;
+    float active_min_distance = 1.0f;
+    float active_max_distance = 50.0f;
+    uint64_t audio_lifecycle_generation = 0;
 
     static void reflect(Reflector<AudioSourceComponent>& r)
     {
@@ -44,6 +52,8 @@ struct AudioSourceComponent
             .tooltip("Loop playback").category("Playback");
         r.field<&AudioSourceComponent::auto_play>("auto_play")
             .tooltip("Start playing on spawn").category("Playback");
+        r.field<&AudioSourceComponent::enabled>("enabled")
+            .tooltip("Enable this source").category("Playback");
         r.field<&AudioSourceComponent::group>("group")
             .tooltip("Audio mixer group")
             .enumValues(audio_group_names, (int)AudioGroup::COUNT)

@@ -681,19 +681,24 @@ namespace
             auto& c = reg.emplace<AudioSourceComponent>(e);
             c.clip_path = "assets/jump.wav"; c.volume = 0.5f; c.pitch = 1.25f;
             c.min_distance = 2.0f; c.max_distance = 80.0f; c.spatial = false;
-            c.loop = true; c.auto_play = true; c.group = AudioGroup::Music;
+            c.loop = true; c.auto_play = true; c.enabled = false; c.group = AudioGroup::Music;
             c.clip = 42; c.active_handle = 99; c.started = true;
+            c.active_clip = 42; c.resolved_clip_path = "runtime.wav";
+            c.audio_lifecycle_generation = 7;
             auto j = ReflectionSerializer::serializeEntity(reg, e, reflection);
             auto cj = j["components"]["AudioSourceComponent"];
-            for (const char* k : {"clip", "active_handle", "started"})
+            for (const char* k : {"clip", "active_handle", "started", "active_clip",
+                                  "resolved_clip_path", "audio_lifecycle_generation"})
                 if (cj.contains(k)) return fail(name, "audio runtime field serialized");
             if (cj["group"] != "Music") return fail(name, "audio group not serialized by name");
             entt::registry reg2; auto e2 = reg2.create();
             ReflectionSerializer::deserializeEntity(reg2, e2, j, reflection);
             const auto& o = reg2.get<AudioSourceComponent>(e2);
             if (o.clip_path != c.clip_path || !approx(o.volume, 0.5f) || !approx(o.pitch, 1.25f) ||
-                o.group != AudioGroup::Music || o.clip != INVALID_AUDIO_CLIP ||
-                o.active_handle != INVALID_SOUND || o.started)
+                o.enabled || o.group != AudioGroup::Music || o.clip != INVALID_AUDIO_CLIP ||
+                o.active_handle != INVALID_SOUND || o.started ||
+                o.active_clip != INVALID_AUDIO_CLIP || !o.resolved_clip_path.empty() ||
+                o.audio_lifecycle_generation != 0)
                 return fail(name, "audio fields mismatch");
         }
         // IK: enabled flag only.

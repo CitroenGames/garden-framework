@@ -96,6 +96,7 @@ bool AudioSystem::initialize(AudioBackendMode mode)
 
     impl->engine_initialized = true;
     initialized = true;
+    ++lifecycle_generation;
 
     LOG_ENGINE_INFO("Audio system initialized (miniaudio)");
     return true;
@@ -133,6 +134,7 @@ void AudioSystem::shutdown()
     }
 
     initialized = false;
+    ++lifecycle_generation;
     LOG_ENGINE_INFO("Audio system shutdown");
 }
 
@@ -388,6 +390,7 @@ bool AudioSystem::setSoundPaused(SoundHandle handle, bool paused)
 size_t AudioSystem::activeVoiceCount() const { size_t n = 0; for (auto& s : impl->sounds) if (s.active) ++n; return n; }
 glm::vec3 AudioSystem::getSoundPosition(SoundHandle handle) const { for (auto& s : impl->sounds) if (s.handle == handle && s.active) return s.position; return glm::vec3(0.0f); }
 float AudioSystem::getSoundVolume(SoundHandle handle) const { for (auto& s : impl->sounds) if (s.handle == handle && s.active) return s.base_volume; return 0.0f; }
+float AudioSystem::getSoundPitch(SoundHandle handle) const { for (auto& s : impl->sounds) if (s.handle == handle && s.active) return s.pitch; return 0.0f; }
 
 void AudioSystem::update()
 {

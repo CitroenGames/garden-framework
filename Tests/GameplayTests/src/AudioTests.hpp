@@ -366,3 +366,131 @@ bool testAudioSourceFollowUsesSimulationHierarchyPose()
     cleanup();
     return pass(name);
 }
+
+bool testAudioSourceLifecycleHardening()
+{
+    const std::string name = "Audio.SourceLifecycle";
+    auto& audio = AudioSystem::get();
+    const bool initialized_here = !audio.isInitialized();
+    entt::registry reg;
+    const auto wav_path = std::filesystem::temp_directory_path() /
+        ("garden_audio_source_lifecycle_" +
+         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".wav");
+    const auto cleanup = [&]() {
+        AudioSourceSystem::shutdown(reg);
+        if (initialized_here && audio.isInitialized()) audio.shutdown();
+        std::error_code error;
+        std::filesystem::remove(wav_path, error);
+    };
+    const auto fail_with_cleanup = [&](const char* reason) {
+        cleanup();
+        return fail(name, reason);
+    };
+
+    if (!writeSilentTestWav(wav_path))
+        return fail_with_cleanup("could not create test clip");
+
+    const entt::entity source_entity = reg.create();
+    reg.emplace<TransformComponent>(source_entity, 1.0f, 2.0f, 3.0f);
+    auto& source = reg.emplace<AudioSourceComponent>(source_entity);
+    source.clip_path = wav_path.string();
+    source.auto_play = true;
+    source.loop = true;
+
+    // A loaded level may contain sources before an audio device is available.
+    // The source must remain pending rather than recording a failed start.
+    AudioSourceSystem::update(reg, 0.016f);
+    if (source.started || source.active_handle != INVALID_SOUND)
+        return fail_with_cleanup("source started before audio initialization");
+    if (initialized_here && !audio.initialize(AudioBackendMode::NoDevice))
+        return fail_with_cleanup("audio backend did not initialize");
+    AudioSourceSystem::update(reg, 0.016f);
+    if (!source.started || source.active_handle == INVALID_SOUND || audio.activeVoiceCount() != 1)
+        return fail_with_cleanup("pending source did not start after audio initialization");
+
+    const SoundHandle first_handle = source.active_handle;
+    source.enabled = false;
+    AudioSourceSystem::update(reg, 0.016f);
+    if (source.started || source.active_handle != INVALID_SOUND || audio.activeVoiceCount() != 0)
+        return fail_with_cleanup("disabling a source did not stop its loop");
+
+    source.enabled = true;
+    AudioSourceSystem::update(reg, 0.016f);
+    if (!source.started || source.active_handle == INVALID_SOUND || source.active_handle == first_handle)
+        return fail_with_cleanup("re-enabling a source did not restart its loop");
+
+    source.volume = 0.25f;
+    source.pitch = 1.5f;
+    reg.get<TransformComponent>(source_entity).position = {7.0f, 8.0f, 9.0f};
+    AudioSourceSystem::update(reg, 0.016f);
+    if (audio.getSoundVolume(source.active_handle) != source.volume ||
+        audio.getSoundPitch(source.active_handle) != source.pitch ||
+        !approxVec3(audio.getSoundPosition(source.active_handle), glm::vec3(7.0f, 8.0f, 9.0f)))
+        return fail_with_cleanup("live source gain, pitch, or position was not applied");
+
+    const SoundHandle loop_handle = source.active_handle;
+    source.loop = false;
+    AudioSourceSystem::update(reg, 0.016f);
+    if (!source.started || source.active_handle == INVALID_SOUND || source.active_handle == loop_handle)
+        return fail_with_cleanup("changing loop mode did not restart the source");
+
+    source.auto_play = false;
+    AudioSourceSystem::update(reg, 0.016f);
+    if (source.started || audio.activeVoiceCount() != 0)
+        return fail_with_cleanup("disabling auto play did not stop the source");
+
+    // Component replacement on the same entity must not leave the old voice
+    // tracked under that entity identifier.
+    reg.remove<AudioSourceComponent>(source_entity);
+    AudioSourceSystem::update(reg, 0.016f);
+    auto& readded = reg.emplace<AudioSourceComponent>(source_entity);
+    readded.clip_path = wav_path.string();
+    readded.auto_play = true;
+    readded.loop = true;
+    AudioSourceSystem::update(reg, 0.016f);
+    if (!readded.started || readded.active_handle == INVALID_SOUND || audio.activeVoiceCount() != 1)
+        return fail_with_cleanup("re-added component did not own exactly one source voice");
+
+    const SoundHandle readded_handle = readded.active_handle;
+    reg.destroy(source_entity);
+    AudioSourceSystem::update(reg, 0.016f);
+    if (audio.activeVoiceCount() != 0 || audio.isSoundPlaying(readded_handle))
+        return fail_with_cleanup("destroyed source did not stop its loop");
+
+    // An unresolved direct clip id is a pending source, not a fake playback.
+    const entt::entity pending_entity = reg.create();
+    reg.emplace<TransformComponent>(pending_entity);
+    auto& pending = reg.emplace<AudioSourceComponent>(pending_entity);
+    pending.clip = 0x7fffffffu;
+    pending.auto_play = true;
+    pending.loop = true;
+    AudioSourceSystem::update(reg, 0.016f);
+    if (pending.started || pending.active_handle != INVALID_SOUND || audio.activeVoiceCount() != 0)
+        return fail_with_cleanup("unready clip started a source voice");
+
+    // Project reload first clears ECS runtime state, then a restarted mixer
+    // must restore the authored source from its path instead of reusing stale
+    // handles or stale clip ids.
+    reg.destroy(pending_entity);
+    const entt::entity reload_entity = reg.create();
+    reg.emplace<TransformComponent>(reload_entity, -2.0f, 0.0f, 4.0f);
+    auto& reload_source = reg.emplace<AudioSourceComponent>(reload_entity);
+    reload_source.clip_path = wav_path.string();
+    reload_source.auto_play = true;
+    reload_source.loop = true;
+    AudioSourceSystem::update(reg, 0.016f);
+    if (!reload_source.started || audio.activeVoiceCount() != 1)
+        return fail_with_cleanup("reload source did not start before project reload");
+    AudioSourceSystem::shutdown(reg);
+    if (reload_source.started || reload_source.active_handle != INVALID_SOUND || audio.activeVoiceCount() != 0)
+        return fail_with_cleanup("project shutdown retained source runtime state");
+    audio.shutdown();
+    if (!audio.initialize(AudioBackendMode::NoDevice))
+        return fail_with_cleanup("audio backend did not reinitialize after project reload");
+    AudioSourceSystem::update(reg, 0.016f);
+    if (!reload_source.started || reload_source.active_handle == INVALID_SOUND || audio.activeVoiceCount() != 1)
+        return fail_with_cleanup("project reload did not restore authored source");
+
+    cleanup();
+    return pass(name);
+}

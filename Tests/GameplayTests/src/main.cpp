@@ -4349,5 +4349,6 @@ int main()
     ok = testAudioDistanceCullingAndLookup() && ok;
     ok = testAudioServerExclusionHeadless() && ok;
     ok = testAudioSourceFollowUsesSimulationHierarchyPose() && ok;
+    ok = testAudioSourceLifecycleHardening() && ok;
     return ok ? 0 : 1;
 }
