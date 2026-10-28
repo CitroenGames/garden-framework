@@ -3,12 +3,16 @@
 #include "Components/Components.hpp"
 #include "Components/camera.hpp"
 #include "EngineExport.h"
+#include "ECS/ComponentStore.hpp"
+#include "ECS/EntityHandle.hpp"
+#include "ECS/ComponentOperations.hpp"
 #include "PhysicsSystem.hpp"
 #include "Tick/TickSystem.hpp"
 #include <cstdint>
 #include <vector>
 #include <memory>
 #include <string>
+#include <utility>
 #include <entt/entt.hpp>
 
 namespace GameFramework
@@ -23,11 +27,38 @@ class ENGINE_API world
 private:
     // CharacterPhysicsService implements its Garden handle API through this private seam.
     friend class CharacterPhysicsService;
+    struct ComponentWorldState;
+    std::unique_ptr<ComponentWorldState> component_state;
     std::unique_ptr<PhysicsSystem> physics_system;
     std::unique_ptr<GameFramework::GameFrameworkRuntime> gameplay_framework;
     Tick::FixedTickAccumulator simulation_ticks;
     uint32_t simulation_tick = 0;
     double simulation_time = 0.0;
+
+    garden::ecs::ComponentStore& componentStore() noexcept;
+    const garden::ecs::ComponentStore& componentStore() const noexcept;
+    garden::ecs::ComponentStoreResult scopedKey(garden::ecs::EntityHandle, garden::ecs::ComponentEntityKey&) const noexcept;
+
+    template<class T>
+    static garden::ecs::ComponentStoreResult resolveType(garden::ecs::ComponentId& id) noexcept
+    {
+        using namespace garden::ecs;
+        constexpr uint32_t capabilities = [] {
+            if constexpr (requires { ComponentType<T>::capabilities; })
+                return static_cast<uint32_t>(ComponentType<T>::capabilities);
+            else return componentCapabilities<T>();
+        }();
+        const auto result = ComponentCatalog::instance().resolveType(ComponentType<T>::key,
+            sizeof(T), alignof(T), capabilities, id);
+        switch (result) {
+        case ComponentCatalogResult::Success: return ComponentStoreResult::Success;
+        case ComponentCatalogResult::NotFound: return ComponentStoreResult::UnregisteredType;
+        case ComponentCatalogResult::Conflict: return ComponentStoreResult::TypeMismatch;
+        case ComponentCatalogResult::ResourceExhausted: return ComponentStoreResult::ResourceExhausted;
+        case ComponentCatalogResult::InternalError: return ComponentStoreResult::InternalError;
+        default: return ComponentStoreResult::StaleComponent;
+        }
+    }
 
     // Private bridge from Garden identity to the ECS runtime.
     entt::entity resolveEntity(EntityRef entity) const;
@@ -61,6 +92,90 @@ public:
     // Creates a Garden entity handle with a stable identity. Gameplay code uses
     // this handle instead of storage-library entity values.
     EntityRef createEntity();
+
+    // Scoped identities move with the world and expire on destruction or reset.
+    // Converting a persisted reference never repairs or assigns its identity.
+    garden::ecs::EntityHandle createScopedEntity();
+    garden::ecs::EntityHandle scopedEntity(EntityRef entity);
+    bool isEntityValid(garden::ecs::EntityHandle entity) const noexcept;
+    garden::ecs::ComponentStoreResult destroyEntity(garden::ecs::EntityHandle entity) noexcept;
+
+    template<class T, class... Args>
+    garden::ecs::ComponentStoreResult add(garden::ecs::EntityHandle entity, Args&&... args)
+    {
+        garden::ecs::ComponentEntityKey key;
+        auto result = scopedKey(entity, key);
+        if (result != garden::ecs::ComponentStoreResult::Success) return result;
+        garden::ecs::ComponentId id;
+        result = resolveType<T>(id);
+        if (result != garden::ecs::ComponentStoreResult::Success) return result;
+        return componentStore().add<T>(id, key, std::forward<Args>(args)...);
+    }
+
+    // Returned pointers are valid until that value is removed, its entity is
+    // destroyed, or the world is reset or destroyed. Externally synchronize access.
+    template<class T>
+    garden::ecs::ComponentStoreResult get(garden::ecs::EntityHandle entity, T*& out)
+    {
+        out = nullptr;
+        garden::ecs::ComponentEntityKey key;
+        auto result = scopedKey(entity, key);
+        if (result != garden::ecs::ComponentStoreResult::Success) return result;
+        garden::ecs::ComponentId id;
+        result = resolveType<T>(id);
+        if (result != garden::ecs::ComponentStoreResult::Success) return result;
+        void* value = nullptr;
+        result = componentStore().get(id, key, value);
+        if (result == garden::ecs::ComponentStoreResult::Success) out = static_cast<T*>(value);
+        return result;
+    }
+
+    template<class T>
+    garden::ecs::ComponentStoreResult get(garden::ecs::EntityHandle entity, const T*& out) const
+    {
+        out = nullptr;
+        garden::ecs::ComponentEntityKey key;
+        auto result = scopedKey(entity, key);
+        if (result != garden::ecs::ComponentStoreResult::Success) return result;
+        garden::ecs::ComponentId id;
+        result = resolveType<T>(id);
+        if (result != garden::ecs::ComponentStoreResult::Success) return result;
+        void* value = nullptr;
+        result = componentStore().get(id, key, value);
+        if (result == garden::ecs::ComponentStoreResult::Success) out = static_cast<const T*>(value);
+        return result;
+    }
+
+    template<class T>
+    garden::ecs::ComponentStoreResult has(garden::ecs::EntityHandle entity, bool& out) const
+    {
+        out = false;
+        garden::ecs::ComponentEntityKey key;
+        auto result = scopedKey(entity, key);
+        if (result != garden::ecs::ComponentStoreResult::Success) return result;
+        garden::ecs::ComponentId id;
+        result = resolveType<T>(id);
+        if (result != garden::ecs::ComponentStoreResult::Success) return result;
+        void* value = nullptr;
+        result = componentStore().get(id, key, value);
+        if (result == garden::ecs::ComponentStoreResult::NotFound)
+            return garden::ecs::ComponentStoreResult::Success;
+        if (result == garden::ecs::ComponentStoreResult::Success)
+            out = true;
+        return result;
+    }
+
+    template<class T>
+    garden::ecs::ComponentStoreResult remove(garden::ecs::EntityHandle entity)
+    {
+        garden::ecs::ComponentEntityKey key;
+        auto result = scopedKey(entity, key);
+        if (result != garden::ecs::ComponentStoreResult::Success) return result;
+        garden::ecs::ComponentId id;
+        result = resolveType<T>(id);
+        if (result != garden::ecs::ComponentStoreResult::Success) return result;
+        return componentStore().remove(id, key);
+    }
 
     // Returned component pointers may be invalidated by structural changes to
     // that component type's storage, including adding/removing it on another

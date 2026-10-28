@@ -115,6 +115,11 @@ public:
     ComponentCatalogResult registerBatch(ComponentOwnerId owner, std::span<const ComponentDescriptor> descriptors,
         std::span<ComponentId> outIds) noexcept;
     ComponentCatalogResult resolve(const ComponentDescriptor&, ComponentId& outId) const noexcept;
+    // Resolve a registered type without needing the host-assigned owner or callbacks.
+    // Matching metadata does not prove C++ ABI or ODR compatibility. The returned
+    // ID is unpinned; acquire a lease before using its descriptor or operations.
+    ComponentCatalogResult resolveType(ComponentKey key, size_t size, size_t alignment,
+        uint32_t capabilities, ComponentId& outId) const noexcept;
     // Atomically retire all of the owner's components, or none if any is pinned.
     ComponentCatalogResult unregisterOwner(ComponentOwnerId ownerId) noexcept;
     // The loader serializes generation attachment with these transitions.

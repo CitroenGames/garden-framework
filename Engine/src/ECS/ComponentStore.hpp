@@ -20,7 +20,7 @@ struct ComponentEntityKey {
 };
 
 enum class ComponentStoreResult {
-    Success, InvalidEntity, StaleEntity, StaleComponent, Duplicate, NotFound,
+    Success, InvalidEntity, StaleEntity, StaleComponent, Duplicate, NotFound, UnregisteredType,
     TypeMismatch, ConstructionFailed, ResourceExhausted, InternalError
 };
 

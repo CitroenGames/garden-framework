@@ -125,6 +125,10 @@ void testBatch() {
     check(catalog.registerBatch(owner, input, ids) == ComponentCatalogResult::Success &&
         ids[0] == existing && ids[1].slot != UINT32_MAX && ids[1] != existing,
         "batch resolves existing provider and injects host owner");
+    ComponentId typed{};
+    check(catalog.resolveType(fresh.key, fresh.size, fresh.alignment, fresh.capabilities, typed) ==
+        ComponentCatalogResult::Success && typed == ids[1],
+        "owner-free lookup resolves host-injected batch descriptor");
     ComponentLease lease;
     check(catalog.acquire(ids[0], ComponentPinKind::Operation, lease) == ComponentCatalogResult::Success &&
         lease.descriptor()->operations.defaultConstruct == construct && lease.descriptor()->ownerId == owner,
@@ -178,6 +182,32 @@ int main() {
     consumer.operations = {};
     check(catalog.resolve(consumer, found) == ComponentCatalogResult::Success && found == id,
         "consumer metadata resolves without owner thunks");
+    check(catalog.resolveType(d.key, d.size, d.alignment, d.capabilities, found) ==
+        ComponentCatalogResult::Success && found == id,
+        "owner-free lookup resolves registered type");
+    auto wrongKey = d.key;
+    ++wrongKey.revision;
+    check(catalog.resolveType(wrongKey, d.size, d.alignment, d.capabilities, found) ==
+        ComponentCatalogResult::Conflict && found == ComponentId{},
+        "owner-free lookup rejects revision mismatch and clears ID");
+    check(catalog.resolveType(d.key, d.size * 2, d.alignment, d.capabilities, found) ==
+        ComponentCatalogResult::Conflict && found == ComponentId{} &&
+        catalog.resolveType(d.key, d.size, 1, d.capabilities, found) == ComponentCatalogResult::Conflict &&
+        found == ComponentId{} &&
+        catalog.resolveType(d.key, d.size, d.alignment, 0, found) == ComponentCatalogResult::Conflict &&
+        found == ComponentId{}, "owner-free lookup rejects size alignment and capability mismatches");
+    found = id;
+    check(catalog.resolveType({"garden.tests.AbsentType", 1}, d.size, d.alignment, d.capabilities, found) ==
+        ComponentCatalogResult::NotFound && found == ComponentId{} &&
+        catalog.resolveType({"garden.tests.AbsentType", 1}, d.size, d.alignment, d.capabilities, found) ==
+        ComponentCatalogResult::NotFound, "owner-free lookup does not register missing types");
+    found = id;
+    check(catalog.resolveType({"bad", 1}, d.size, d.alignment, d.capabilities, found) ==
+        ComponentCatalogResult::InvalidDescriptor && found == ComponentId{} &&
+        catalog.resolveType(d.key, 0, d.alignment, d.capabilities, found) == ComponentCatalogResult::InvalidDescriptor &&
+        catalog.resolveType(d.key, d.size, 3, d.capabilities, found) == ComponentCatalogResult::InvalidDescriptor &&
+        catalog.resolveType(d.key, d.size, d.alignment, 1u << 31, found) == ComponentCatalogResult::InvalidDescriptor,
+        "owner-free lookup rejects malformed metadata");
     auto otherRevision = consumer;
     ++otherRevision.key.revision;
     check(catalog.resolve(otherRevision, found) == ComponentCatalogResult::Conflict,
@@ -353,6 +383,9 @@ int main() {
         "owner retirement makes both ids stale");
     check(catalog.resolve(consumer, found) == ComponentCatalogResult::NotFound,
         "unregistered key no longer resolves");
+    check(catalog.resolveType(d.key, d.size, d.alignment, d.capabilities, found) ==
+        ComponentCatalogResult::NotFound && found == ComponentId{},
+        "owner-free lookup no longer resolves retired type");
     ComponentId replacement{};
     check(catalog.registerComponent(d, replacement) == ComponentCatalogResult::Success &&
         replacement.slot == id.slot && replacement.generation != id.generation,

@@ -4,7 +4,28 @@
 #include "GameFramework/GameModeBase.hpp"
 #include "GameFramework/GameStateBase.hpp"
 
+#include <atomic>
 #include <utility>
+
+namespace {
+std::atomic<uint64_t> nextComponentWorldToken{1};
+struct ScopedEntityMarker {
+    garden::ecs::ComponentStore* store;
+    garden::ecs::ComponentEntityKey key;
+    uint64_t serial;
+};
+void retireScopedEntity(entt::registry& registry, entt::entity entity)
+{
+    const auto& marker = registry.get<ScopedEntityMarker>(entity);
+    (void)marker.store->removeEntity(marker.key);
+}
+}
+
+struct world::ComponentWorldState {
+    garden::ecs::ComponentStore store;
+    uint64_t token = nextComponentWorldToken.fetch_add(1, std::memory_order_relaxed);
+    uint64_t nextSerial = 1;
+};
 
 world::world(const PhysicsSystemSettings& physics_settings)
     : simulation_ticks(physics_settings.fixed_delta)
@@ -16,7 +37,8 @@ world::world(const PhysicsSystemSettings& physics_settings)
 }
 
 world::world(world&& other) noexcept
-    : physics_system(std::move(other.physics_system))
+    : component_state(std::move(other.component_state))
+    , physics_system(std::move(other.physics_system))
     , gameplay_framework(std::move(other.gameplay_framework))
     , simulation_ticks(std::move(other.simulation_ticks))
     , simulation_tick(other.simulation_tick)
@@ -35,6 +57,7 @@ world& world::operator=(world&& other) noexcept
     if (this == &other)
         return *this;
     shutdown();
+    component_state = std::move(other.component_state);
     physics_system = std::move(other.physics_system);
     gameplay_framework = std::move(other.gameplay_framework);
     simulation_ticks = std::move(other.simulation_ticks);
@@ -86,6 +109,7 @@ void world::shutdown()
     if (physics_system)
         physics_system->shutdown();
     clearRegistryStorage();
+    component_state.reset();
     simulation_ticks.reset();
     simulation_tick = 0;
     simulation_time = 0.0;
@@ -128,4 +152,77 @@ EntityRef world::findEntityByTag(const std::string& name) const
         match = entity;
     }
     return entityRefOf(registry, match);
+}
+
+garden::ecs::ComponentStore& world::componentStore() noexcept { return component_state->store; }
+const garden::ecs::ComponentStore& world::componentStore() const noexcept { return component_state->store; }
+
+garden::ecs::ComponentStoreResult world::scopedKey(garden::ecs::EntityHandle handle,
+    garden::ecs::ComponentEntityKey& key) const noexcept
+{
+    using namespace garden::ecs;
+    if (!component_state || !handle.m_world || handle.m_world != component_state->token ||
+        handle.m_entity == UINT32_MAX) return ComponentStoreResult::InvalidEntity;
+    const auto entity = static_cast<entt::entity>(handle.m_entity);
+    if (!registry.valid(entity) || !registry.all_of<ScopedEntityMarker>(entity))
+        return ComponentStoreResult::StaleEntity;
+    const auto& marker = registry.get<ScopedEntityMarker>(entity);
+    if (!handle.m_serial || marker.serial != handle.m_serial) return ComponentStoreResult::StaleEntity;
+    key = marker.key;
+    return ComponentStoreResult::Success;
+}
+
+bool world::isEntityValid(garden::ecs::EntityHandle handle) const noexcept
+{
+    garden::ecs::ComponentEntityKey key;
+    return scopedKey(handle, key) == garden::ecs::ComponentStoreResult::Success;
+}
+
+garden::ecs::EntityHandle world::scopedEntity(EntityRef reference)
+{
+    if (reference.isNull()) return {};
+    entt::entity entity = entt::null;
+    for (auto [candidate, identity] : registry.view<IdentityComponent>().each()) {
+        if (identity.guid != reference.guid) continue;
+        if (entity != entt::null) return {};
+        entity = candidate;
+    }
+    if (entity == entt::null) return {};
+    if (!component_state) component_state = std::make_unique<ComponentWorldState>();
+    // Registry reset drops component storage and its signal. Reconnect exactly
+    // once whenever a new scoped entity is attached, including after a move.
+    auto sink = registry.on_destroy<ScopedEntityMarker>();
+    sink.disconnect<&retireScopedEntity>();
+    sink.connect<&retireScopedEntity>();
+    if (!registry.all_of<ScopedEntityMarker>(entity)) {
+        const garden::ecs::ComponentEntityKey key{
+            static_cast<uint32_t>(entt::to_entity(entity)),
+            static_cast<uint32_t>(entt::to_version(entity)) + 1u};
+        // Refuse reuse if the per-world serial space is exhausted.
+        if (!component_state->nextSerial) return {};
+        registry.emplace<ScopedEntityMarker>(entity, &component_state->store, key, component_state->nextSerial++);
+    }
+    garden::ecs::EntityHandle result;
+    result.m_world = component_state->token;
+    result.m_entity = static_cast<uint32_t>(entt::to_integral(entity));
+    result.m_serial = registry.get<ScopedEntityMarker>(entity).serial;
+    return result;
+}
+
+garden::ecs::EntityHandle world::createScopedEntity()
+{
+    return scopedEntity(createEntity());
+}
+
+garden::ecs::ComponentStoreResult world::destroyEntity(garden::ecs::EntityHandle handle) noexcept
+{
+    garden::ecs::ComponentEntityKey key;
+    const auto result = scopedKey(handle, key);
+    if (result != garden::ecs::ComponentStoreResult::Success) return result;
+    try {
+        registry.destroy(static_cast<entt::entity>(handle.m_entity));
+        return garden::ecs::ComponentStoreResult::Success;
+    } catch (...) {
+        return garden::ecs::ComponentStoreResult::InternalError;
+    }
 }

@@ -1,4 +1,5 @@
 #include "Plugin/GameModuleHostSession.hpp"
+#include "ECS/ComponentStore.hpp"
 #include "Reflection/ReflectionRegistry.hpp"
 #include "GameFramework/GameModeRegistry.hpp"
 
@@ -540,6 +541,64 @@ namespace
         if (!provider.unload() || fs::exists(image) ||
             catalog.resolve(query, id) != ComponentCatalogResult::NotFound)
             return fail(name, "provider did not retire its descriptor after lease release");
+        return pass(name);
+    }
+
+    bool testStoredModuleComponentRetirement()
+    {
+        using namespace garden::ecs;
+        const std::string name = "GameModuleLifecycle_StoredModuleComponentRetirement";
+        for (bool explicitRemoval : {true, false})
+        {
+            ScopedRecorder recorder(explicitRemoval ? "ecs_store_remove" : "ecs_store_destroy");
+            GameModuleLoader provider;
+            if (!provider.load(fixturePath("ecs_provider").string()) ||
+                !provider.registerEcsComponents() || !provider.isComponentProvider())
+                return fail(name, "provider load or registration failed");
+            const fs::path image = provider.getLoadedImagePath();
+            const garden::ecs::ComponentDescriptor query{{"tests.lifecycle.ModuleFixtureComponent", 1},
+                *provider.getComponentOwnerId(), sizeof(int), alignof(int), ComponentDefaultConstruct, {}};
+            ComponentId id;
+            auto& catalog = ComponentCatalog::instance();
+            if (catalog.resolve(query, id) != ComponentCatalogResult::Success)
+                return fail(name, "module descriptor did not resolve");
+#ifdef _WIN32
+            HMODULE handle = LoadLibraryA(image.string().c_str());
+            if (!handle) return fail(name, "could not find provider fixture image");
+            auto add = reinterpret_cast<ComponentStoreResult(*)(ComponentStore*, ComponentId, ComponentEntityKey)>(
+                GetProcAddress(handle, "fixtureStoreAdd"));
+            FreeLibrary(handle);
+#else
+            void* handle = dlopen(image.string().c_str(), RTLD_NOW);
+            if (!handle) return fail(name, "could not find provider fixture image");
+            auto add = reinterpret_cast<ComponentStoreResult(*)(ComponentStore*, ComponentId, ComponentEntityKey)>(
+                dlsym(handle, "fixtureStoreAdd"));
+            dlclose(handle);
+#endif
+            if (!add) return fail(name, "fixture store insertion export missing");
+            const ComponentEntityKey entity{42, 1};
+            {
+                ComponentStore store;
+                void* value = nullptr;
+                if (add(&store, id, entity) != ComponentStoreResult::Success ||
+                    store.get(id, entity, value) != ComponentStoreResult::Success ||
+                    !value || *static_cast<int*>(value) != 73)
+                    return fail(name, "module value was not constructed in the EngineCore store");
+                if (provider.unload() || !provider.isLoaded() || !fs::exists(image) ||
+                    !recorder.events().empty())
+                    return fail(name, "live store value did not retain the provider image");
+                if (explicitRemoval && store.removeEntity(entity) != ComponentStoreResult::Success)
+                    return fail(name, "explicit entity removal failed after unload refusal");
+                if (explicitRemoval && !equals(recorder.events(), {"ecs.component.destroy"}))
+                    return fail(name, "explicit removal did not run the module destructor");
+            }
+            if (!provider.isLoaded() || !fs::exists(image) ||
+                !equals(recorder.events(), {"ecs.component.destroy"}))
+                return fail(name, "module destructor did not run once while the provider remained loaded");
+            if (!provider.unload() || provider.isLoaded() || fs::exists(image) ||
+                catalog.resolve(query, id) != ComponentCatalogResult::NotFound)
+                return fail(name, "provider did not retire after the stored value was destroyed");
+        }
         return pass(name);
     }
 
@@ -1124,6 +1183,7 @@ int main()
     ok = testPostTeardownInitFailureRecovery() && ok;
     ok = testContentIdentity() && ok;
     ok = testModuleComponentRegistration() && ok;
+    ok = testStoredModuleComponentRetirement() && ok;
     ok = testModuleComponentBatchFailures() && ok;
     ok = testProviderRetirement() && ok;
     ok = testCleanupExceptionAfterUnload() && ok;

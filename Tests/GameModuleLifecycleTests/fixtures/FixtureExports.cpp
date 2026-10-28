@@ -2,6 +2,7 @@
 #include "GameFramework/GameModeRegistry.hpp"
 #include "GameFramework/GameModeBase.hpp"
 #include "Events/EventBus.hpp"
+#include "ECS/ComponentStore.hpp"
 
 #include <memory>
 #include <new>
@@ -65,10 +66,13 @@ GAME_API bool gardenGameInit(EngineServices*)
 #endif
 }
 namespace {
-    struct ModuleFixtureComponent { int value; };
+    struct ModuleFixtureComponent {
+        int value = 73;
+        ~ModuleFixtureComponent() noexcept { record("ecs.component.destroy"); }
+    };
     bool constructModuleComponent(void* storage) noexcept
     {
-        ::new (storage) ModuleFixtureComponent{73};
+        ::new (storage) ModuleFixtureComponent{};
         return true;
     }
     void destroyModuleComponent(void* storage) noexcept
@@ -76,6 +80,20 @@ namespace {
         static_cast<ModuleFixtureComponent*>(storage)->~ModuleFixtureComponent();
     }
 }
+
+template<> struct garden::ecs::ComponentType<ModuleFixtureComponent> {
+    static constexpr garden::ecs::ComponentKey key{"tests.lifecycle.ModuleFixtureComponent", 1};
+    static constexpr uint32_t capabilities = garden::ecs::ComponentDefaultConstruct;
+};
+
+#if defined(FIXTURE_ECS_PROVIDER)
+GAME_API garden::ecs::ComponentStoreResult fixtureStoreAdd(
+    garden::ecs::ComponentStore* store, garden::ecs::ComponentId id,
+    garden::ecs::ComponentEntityKey entity)
+{
+    return store->add<ModuleFixtureComponent>(id, entity);
+}
+#endif
 
 GAME_API bool gardenRegisterEcsComponents(ModuleComponentSink* sink)
 {

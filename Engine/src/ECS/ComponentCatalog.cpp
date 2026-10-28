@@ -54,11 +54,14 @@ bool validOwner(const ComponentOwnerId& owner) noexcept {
     return false;
 }
 
-bool validMetadata(const ComponentDescriptor& d) noexcept {
+bool validTypeMetadata(ComponentKey key, size_t size, size_t alignment, uint32_t capabilities) noexcept {
     constexpr uint32_t known = ComponentDefaultConstruct | ComponentCopyConstruct | ComponentSerialize;
-    return validName(d.key.name) && d.key.revision != 0 && validOwner(d.ownerId) && d.size != 0 &&
-        d.alignment != 0 && (d.alignment & (d.alignment - 1)) == 0 && d.size % d.alignment == 0 &&
-        (d.capabilities & ~known) == 0;
+    return validName(key.name) && key.revision != 0 && size != 0 && alignment != 0 &&
+        (alignment & (alignment - 1)) == 0 && size % alignment == 0 && (capabilities & ~known) == 0;
+}
+
+bool validMetadata(const ComponentDescriptor& d) noexcept {
+    return validOwner(d.ownerId) && validTypeMetadata(d.key, d.size, d.alignment, d.capabilities);
 }
 
 bool validDescriptor(const ComponentDescriptor& d) noexcept {
@@ -220,6 +223,30 @@ ComponentCatalogResult ComponentCatalog::resolve(const ComponentDescriptor& d, C
             const auto& e = *m_impl->entries[i];
             if (e.active && e.name == d.key.name) {
                 if (!sameMetadata(e.descriptor, d)) return ComponentCatalogResult::Conflict;
+                outId = {static_cast<uint32_t>(i), e.generation};
+                return ComponentCatalogResult::Success;
+            }
+        }
+        return ComponentCatalogResult::NotFound;
+    } catch (const std::bad_alloc&) {
+        return ComponentCatalogResult::ResourceExhausted;
+    } catch (...) {
+        return ComponentCatalogResult::InternalError;
+    }
+}
+
+ComponentCatalogResult ComponentCatalog::resolveType(ComponentKey key, size_t size, size_t alignment,
+    uint32_t capabilities, ComponentId& outId) const noexcept {
+    outId = {};
+    if (!validTypeMetadata(key, size, alignment, capabilities)) return ComponentCatalogResult::InvalidDescriptor;
+    try {
+        std::lock_guard lock(m_impl->mutex);
+        for (size_t i = 0; i < m_impl->entries.size(); ++i) {
+            const auto& e = *m_impl->entries[i];
+            if (e.active && e.name == key.name) {
+                const auto& d = e.descriptor;
+                if (d.key != key || d.size != size || d.alignment != alignment || d.capabilities != capabilities)
+                    return ComponentCatalogResult::Conflict;
                 outId = {static_cast<uint32_t>(i), e.generation};
                 return ComponentCatalogResult::Success;
             }
