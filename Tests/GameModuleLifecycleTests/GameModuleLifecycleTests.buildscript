@@ -24,3 +24,7 @@ include = fixtures/client_init_fails.buildscript
 include = fixtures/server_init_fails.buildscript
 include = fixtures/owned_teardown_recorder.buildscript
 include = fixtures/owned_teardown_init_fails.buildscript
+include = fixtures/generation_a.buildscript
+include = fixtures/generation_b.buildscript
+include = fixtures/candidate_missing_game_update.buildscript
+include = fixtures/candidate_abi_mismatch.buildscript

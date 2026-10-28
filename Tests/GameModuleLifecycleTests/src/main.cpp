@@ -435,13 +435,86 @@ namespace
         return pass(name);
     }
 
+    bool testCandidatePromotion()
+    {
+        const std::string name = "GameModuleLifecycle_L6_CandidatePromotion";
+        ScopedRecorder recorder("candidate_promotion");
+        HostLedger ledger;
+        ReflectionRegistry reflection;
+        GameModuleHostSession session(ledger.operations());
+
+        if (!session.loadAndRegister(fixturePath("generation_a").string(), reflection) ||
+            !session.initialiseClient(nullptr) || !session.notifyClientLevelLoaded() ||
+            !session.beginPlaying(false))
+            return fail(name, "generation A did not reach Playing");
+
+        const fs::path generation_a_image = session.loader().getLoadedImagePath();
+        session.updateClient(0.016f);
+        if (!session.reloadCandidate(fixturePath("generation_b").string(), reflection, nullptr))
+            return fail(name, "validated generation B did not promote");
+        const fs::path generation_b_image = session.loader().getLoadedImagePath();
+        if (session.phase() != GameModuleHostSession::Phase::Playing ||
+            generation_a_image == generation_b_image || fs::exists(generation_a_image) ||
+            !fs::exists(generation_b_image))
+            return fail(name, "candidate promotion did not atomically exchange the active generation");
+
+        session.updateClient(0.016f);
+        session.stop();
+        if (!equals(recorder.events(), {
+                "A.register_components", "A.client.init", "A.client.level_loaded", "A.client.update",
+                "A.client.shutdown", "B.register_components", "B.client.init", "B.client.level_loaded",
+                "B.client.update", "B.client.shutdown"}))
+            return fail(name, "candidate B received a callback before A teardown or lifecycle registration was duplicated");
+        if (ledger.released_resource_count != 2 || ledger.removed_registration_count != 2 ||
+            session.loader().isLoaded())
+            return fail(name, "candidate promotion did not clean each generation exactly once");
+        return pass(name);
+    }
+
+    bool testCandidateRefusalKeepsActive()
+    {
+        const std::string name = "GameModuleLifecycle_L7_CandidateRefusalKeepsA";
+        for (const std::string& rejected_candidate : {
+                std::string("candidate_missing_game_update"), std::string("candidate_abi_mismatch")})
+        {
+            ScopedRecorder recorder(rejected_candidate);
+            HostLedger ledger;
+            ReflectionRegistry reflection;
+            GameModuleHostSession session(ledger.operations());
+            if (!session.loadAndRegister(fixturePath("generation_a").string(), reflection) ||
+                !session.initialiseClient(nullptr) || !session.notifyClientLevelLoaded() ||
+                !session.beginPlaying(false))
+                return fail(name, "generation A did not reach Playing before " + rejected_candidate);
+
+            const fs::path generation_a_image = session.loader().getLoadedImagePath();
+            session.updateClient(0.016f);
+            if (session.reloadCandidate(fixturePath(rejected_candidate).string(), reflection, nullptr))
+                return fail(name, "rejected candidate was promoted: " + rejected_candidate);
+            if (session.phase() != GameModuleHostSession::Phase::Playing || !session.loader().isLoaded() ||
+                session.loader().getLoadedImagePath() != generation_a_image.string() || !fs::exists(generation_a_image))
+                return fail(name, "candidate refusal changed active generation A: " + rejected_candidate);
+
+            session.updateClient(0.016f);
+            session.stop();
+            if (!equals(recorder.events(), {
+                    "A.register_components", "A.client.init", "A.client.level_loaded", "A.client.update",
+                    "A.client.update", "A.client.shutdown"}))
+                return fail(name, "candidate refusal stopped A or dispatched candidate code: " + rejected_candidate);
+            if (ledger.released_resource_count != 1 || ledger.removed_registration_count != 1)
+                return fail(name, "candidate refusal tore down A before explicit stop: " + rejected_candidate);
+        }
+        return pass(name);
+    }
+
 }
 
 int main()
 {
     for (const std::string& fixture : {std::string("client_recorder"), std::string("server_recorder"),
                                        std::string("client_init_fails"), std::string("server_init_fails"),
-                                       std::string("owned_teardown_recorder"), std::string("owned_teardown_init_fails")})
+                                       std::string("owned_teardown_recorder"), std::string("owned_teardown_init_fails"),
+                                       std::string("generation_a"), std::string("generation_b"),
+                                       std::string("candidate_missing_game_update"), std::string("candidate_abi_mismatch")})
     {
         if (!fs::exists(fixturePath(fixture)))
         {
@@ -458,5 +531,7 @@ int main()
     ok = testEditorFailureFallbackReusesSession() && ok;
     ok = testOwnedTeardownAndNoPostUnloadDispatch() && ok;
     ok = testPostTeardownInitFailureRecovery() && ok;
+    ok = testCandidatePromotion() && ok;
+    ok = testCandidateRefusalKeepsActive() && ok;
     return ok ? 0 : 1;
 }

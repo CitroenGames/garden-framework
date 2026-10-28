@@ -14,6 +14,11 @@ public:
     GameModuleLoader();
     ~GameModuleLoader();
 
+    GameModuleLoader(const GameModuleLoader&) = delete;
+    GameModuleLoader& operator=(const GameModuleLoader&) = delete;
+    GameModuleLoader(GameModuleLoader&& other) noexcept;
+    GameModuleLoader& operator=(GameModuleLoader&& other) noexcept;
+
     // Load a game DLL from disk. The first load uses an owned generation copy
     // when possible, falling back to the source image only when that copy fails.
     bool load(const std::string& dll_path);
@@ -29,6 +34,12 @@ public:
     // Returns false while retaining the active image when candidate validation
     // or generation-copy preparation fails.
     bool reload(const std::string& dll_path);
+
+    // Loads a validated owned candidate without falling back to the source
+    // image.  A host uses this while its current session is still playing,
+    // then moves the candidate in only after quiescing the old session.
+    // The candidate has not registered components or received callbacks.
+    bool loadReloadCandidate(const std::string& dll_path);
 
     bool isLoaded() const { return m_handle != nullptr; }
     // Kept for compatibility: this is the source module path, never a hot copy.
@@ -107,4 +118,5 @@ private:
 
     void clearFunctionPointers();
     bool resolveFunctions();
+    void moveFrom(GameModuleLoader&& other) noexcept;
 };

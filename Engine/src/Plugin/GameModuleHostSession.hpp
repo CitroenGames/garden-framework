@@ -69,6 +69,14 @@ public:
     // never receive the editor-only play notifications.
     bool beginPlaying(bool editor_session);
 
+    // Validates B in a distinct owned generation while A remains dispatchable.
+    // On success it shuts A down, promotes B, and recreates the recorded role
+    // lifecycle.  B never receives a callback before A has fully stopped.
+    // A failed validation leaves A Playing and callable.  A failed B
+    // initialization after promotion leaves this host Idle by design.
+    bool reloadCandidate(const std::string& module_path, ReflectionRegistry& reflection,
+                         EngineServices* services);
+
     // The dispatch helpers become no-ops outside Playing so a host can remove
     // its scheduler callbacks at the same safe point as stop().
     void updateClient(float delta_time);
@@ -92,6 +100,8 @@ public:
 private:
     bool canInitialiseRole() const;
     bool rolesHaveCompletedLevelLoad() const;
+    bool activatePromotedCandidate(ReflectionRegistry& reflection, EngineServices* services,
+                                  bool client_role, bool server_role, bool editor_session);
     void refreshReadyPhase();
     void failAndStop(const char* failure);
 

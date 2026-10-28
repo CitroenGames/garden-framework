@@ -137,6 +137,67 @@ bool GameModuleHostSession::beginPlaying(bool editor_session)
     return true;
 }
 
+bool GameModuleHostSession::reloadCandidate(const std::string& module_path, ReflectionRegistry& reflection,
+                                            EngineServices* services)
+{
+    if (m_phase != Phase::Playing || module_path.empty())
+        return false;
+
+    // Candidate owns a separate generation root and is fully ABI/export
+    // validated before the active image is quiesced. No candidate callback is
+    // legal before this point.
+    GameModuleLoader candidate;
+    if (!candidate.loadReloadCandidate(module_path))
+    {
+        m_last_failure = "module reload candidate validation failed";
+        return false;
+    }
+
+    const bool client_role = m_client_initialised;
+    const bool server_role = m_server_initialised;
+    const bool editor_session = m_editor_session;
+    stop();
+
+    // stop() has released A's registrations and library. Moving transfers
+    // B's handle and ownership lease without exposing an empty active loader
+    // to a host tick.
+    m_loader = std::move(candidate);
+    return activatePromotedCandidate(reflection, services, client_role, server_role, editor_session);
+}
+
+bool GameModuleHostSession::activatePromotedCandidate(ReflectionRegistry& reflection, EngineServices* services,
+                                                       bool client_role, bool server_role, bool editor_session)
+{
+    if (!m_loader.isLoaded())
+        return false;
+
+    m_last_failure.clear();
+    m_reflection = &reflection;
+    m_source_id = m_loader.getGameName();
+    if (m_source_id.empty() || m_source_id == "Unknown")
+    {
+        failAndStop("promoted module did not provide a usable registration source id");
+        return false;
+    }
+
+    m_loader.registerComponents(m_reflection);
+    m_phase = Phase::Registered;
+
+    // Keep server-before-client ordering for listen-server sessions, matching
+    // the existing PIE lifecycle. Each role callback is paired during stop.
+    if ((server_role && !initialiseServer(services)) ||
+        (client_role && !initialiseClient(services)))
+        return false;
+    if ((server_role && !notifyServerLevelLoaded()) ||
+        (client_role && !notifyClientLevelLoaded()) ||
+        !beginPlaying(editor_session))
+    {
+        failAndStop("promoted module lifecycle reconstruction failed");
+        return false;
+    }
+    return true;
+}
+
 void GameModuleHostSession::updateClient(float delta_time)
 {
     if (m_phase == Phase::Playing && m_client_initialised)

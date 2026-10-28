@@ -585,6 +585,78 @@ GameModuleLoader::~GameModuleLoader()
     unload();
 }
 
+GameModuleLoader::GameModuleLoader(GameModuleLoader&& other) noexcept
+{
+    moveFrom(std::move(other));
+}
+
+GameModuleLoader& GameModuleLoader::operator=(GameModuleLoader&& other) noexcept
+{
+    if (this != &other)
+    {
+        unload();
+        moveFrom(std::move(other));
+    }
+    return *this;
+}
+
+void GameModuleLoader::moveFrom(GameModuleLoader&& other) noexcept
+{
+    m_handle = other.m_handle;
+    m_source_path = std::move(other.m_source_path);
+    m_loaded_path = std::move(other.m_loaded_path);
+    m_generation_root = std::move(other.m_generation_root);
+    m_generation_path = std::move(other.m_generation_path);
+    m_owned_generation_files = std::move(other.m_owned_generation_files);
+    m_fnGetAPIVersion = other.m_fnGetAPIVersion;
+    m_fnGetGameName = other.m_fnGetGameName;
+    m_fnGameInit = other.m_fnGameInit;
+    m_fnGameShutdown = other.m_fnGameShutdown;
+    m_fnRegisterComponents = other.m_fnRegisterComponents;
+    m_fnGameUpdate = other.m_fnGameUpdate;
+    m_fnOnLevelLoaded = other.m_fnOnLevelLoaded;
+    m_fnOnPlayStart = other.m_fnOnPlayStart;
+    m_fnOnPlayStop = other.m_fnOnPlayStop;
+    m_fnServerInit = other.m_fnServerInit;
+    m_fnServerShutdown = other.m_fnServerShutdown;
+    m_fnServerPrePhysics = other.m_fnServerPrePhysics;
+    m_fnServerUpdate = other.m_fnServerUpdate;
+    m_fnServerOnLevelLoaded = other.m_fnServerOnLevelLoaded;
+    m_fnServerOnClientConnected = other.m_fnServerOnClientConnected;
+    m_fnServerOnClientDisconnected = other.m_fnServerOnClientDisconnected;
+
+    other.m_handle = nullptr;
+    other.m_source_path.clear();
+    other.m_loaded_path.clear();
+    other.m_generation_path.clear();
+    other.m_owned_generation_files.clear();
+    other.clearFunctionPointers();
+}
+
+bool GameModuleLoader::loadReloadCandidate(const std::string& dll_path)
+{
+    if (m_handle || dll_path.empty()) return false;
+
+    PreparedModule candidate(m_generation_root);
+    if (prepareOwnedCandidate(dll_path, candidate) != CandidatePreparation::Success)
+    {
+        // A reload candidate is never allowed to load the source image in
+        // place: an editor/compiler may still be writing it while A runs.
+        removeEmptyOwnedRoot(m_generation_root);
+        return false;
+    }
+
+    m_handle = candidate.releaseHandle();
+    m_source_path = candidate.source_path.string();
+    m_loaded_path = candidate.loaded_path.string();
+    m_generation_path = candidate.releaseGenerationPath();
+    m_owned_generation_files = candidate.releaseOwnedFiles();
+    if (resolveFunctions()) return true;
+
+    unload();
+    return false;
+}
+
 bool GameModuleLoader::load(const std::string& dll_path)
 {
     if (m_handle)

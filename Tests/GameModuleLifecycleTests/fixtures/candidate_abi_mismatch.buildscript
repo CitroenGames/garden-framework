@@ -1,0 +1,15 @@
+[project:candidate_abi_mismatch]
+type = dll
+outdir = ../../../bin/GameModuleLifecycleFixtures/
+sources = FixtureExports.cpp
+includes = ../../../Engine/src
+target_link_libraries(
+    PRIVATE EngineCore
+)
+defines = FIXTURE_GENERATION_B, FIXTURE_ABI_MISMATCH
+multiprocessor = true
+simd = AdvancedVectorExtensions2
+std = 20
+utf8 = true
+exception_handling = false
+buffer_security_check = false
