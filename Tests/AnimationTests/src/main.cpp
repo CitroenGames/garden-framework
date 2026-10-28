@@ -1,7 +1,7 @@
 #define GLM_ENABLE_EXPERIMENTAL
 
-#include "Animation/AnimationComponentMigration.hpp"
-#include "Animation/AnimationResourceBindingMigration.hpp"
+#include "Animation/AnimationGraph.hpp"
+#include "Animation/AnimationGraphSystem.hpp"
 #include "Assets/AssetManager.hpp"
 #include "Animation/CompiledAnimationSerializer.hpp"
 #include "Animation/GltfAnimationLoader.hpp"
@@ -15,6 +15,8 @@
 #include "Animation/Pose.hpp"
 #include "Animation/Skeleton.hpp"
 #include "Components/AnimPlaybackComponent.hpp"
+#include "Components/AnimGraphComponent.hpp"
+#include "Components/AnimGraphStateComponent.hpp"
 #include "Components/AnimPoseComponent.hpp"
 #include "Components/AnimResourceBindingComponent.hpp"
 #include "Components/IKComponent.hpp"
@@ -811,46 +813,45 @@ bool testCompletionEvent()
     return pass(name);
 }
 
-bool testReflectionAndMigration()
+bool testReflectionHardCutover()
 {
-    const std::string name = "AN-1 migrates authoring data and serializes only SkeletonComponent";
-    ReflectionRegistry reflection; registerEngineReflection(reflection);
+    const std::string name = "animation authoring serializes only the current hard-cutover schema";
+    ReflectionRegistry reflection;
+    registerEngineReflection(reflection);
     if (!reflection.findByName("SkeletonComponent") || reflection.findByName("AnimationComponent"))
-        return fail(name, "reflection did not expose only the migrated authoring component");
+        return fail(name, "reflection did not expose only the current authoring component");
 
-    entt::registry registry; const entt::entity entity = registry.create();
+    entt::registry registry;
+    const entt::entity entity = registry.create();
     auto& binding = registry.emplace<SkeletonComponent>(entity);
-    binding.animation_resource_path = "assets/fixtures/three_bone.canim"; binding.animation_skin_index = 0;
-    binding.default_clip = "idle"; binding.playback_speed = 1.25f; binding.loop = false; binding.auto_play = true;
+    binding.animation_resource_path = "assets/fixtures/three_bone.canim";
+    binding.animation_skin_index = 0;
+    binding.default_clip = "idle";
+    binding.playback_speed = 1.25f;
+    binding.loop = false;
+    binding.auto_play = true;
     registry.emplace<AnimPlaybackComponent>(entity).current_clip = makeChainClip("runtime");
     registry.emplace<AnimPoseComponent>(entity).bone_matrices.assign(3, glm::mat4(2.0f));
+
     const nlohmann::json serialized = ReflectionSerializer::serializeEntity(registry, entity, reflection);
     if (!serialized["components"].contains("SkeletonComponent") || serialized["components"].contains("AnimationComponent"))
         return fail(name, "serializer did not write only SkeletonComponent");
     const auto& component = serialized["components"]["SkeletonComponent"];
     for (const char* field : {"resources", "current_clip", "time", "bone_matrices"})
-        if (component.contains(field)) return fail(name, "transient field was serialized: " + std::string(field));
+        if (component.contains(field))
+            return fail(name, "transient field was serialized: " + std::string(field));
 
-    nlohmann::json legacy_level = {{"format", "garden_reflected"}, {"version", 1}, {"entities", nlohmann::json::array({{{"components", {{"AnimationComponent", component}}}}})}};
-    entt::registry unmigrated_registry;
-    ReflectionSerializer::deserializeLevel(unmigrated_registry, legacy_level, reflection);
-    if (!unmigrated_registry.view<SkeletonComponent>().empty())
-        return fail(name, "new runtime accepted an unmigrated legacy component record");
-
-    std::string error;
-    if (!AnimationComponentMigration::migrateLevel(legacy_level, error) || !error.empty())
-        return fail(name, "one-shot legacy conversion failed: " + error);
-    const auto& migrated = legacy_level["entities"][0]["components"];
-    if (!migrated.contains("SkeletonComponent") || migrated.contains("AnimationComponent"))
-        return fail(name, "conversion retained the deprecated component name");
-
-    nlohmann::json legacy_prefab = {{"format", "garden_prefab"}, {"version", 2}, {"nodes", nlohmann::json::array({{{"components", {{"AnimationComponent", component}}}}})}};
-    if (!AnimationComponentMigration::migratePrefab(legacy_prefab, error) || !error.empty() ||
-        !legacy_prefab["nodes"][0]["components"].contains("SkeletonComponent") ||
-        legacy_prefab["nodes"][0]["components"].contains("AnimationComponent"))
-        return fail(name, "prefab conversion did not replace the legacy component record");
-
-    entt::registry loaded; ReflectionSerializer::deserializeLevel(loaded, legacy_level, reflection);
+    nlohmann::json current_record = {{"components", nlohmann::json::object()}};
+    current_record["components"]["SkeletonComponent"] = component;
+    const nlohmann::json current_level = {
+        {"format", "garden_reflected"},
+        {"version", 1},
+        {"entities", nlohmann::json::array({current_record})}
+    };
+    entt::registry loaded;
+    ReflectionSerializer::deserializeLevel(loaded, current_level, reflection);
+    if (loaded.view<SkeletonComponent>().empty())
+        return fail(name, "current SkeletonComponent payload was rejected");
     const auto loaded_entity = *loaded.view<SkeletonComponent>().begin();
     const auto& out = loaded.get<SkeletonComponent>(loaded_entity);
     if (out.animation_resource_path != binding.animation_resource_path ||
@@ -858,66 +859,186 @@ bool testReflectionAndMigration()
         out.default_clip != binding.default_clip || !near(out.playback_speed, binding.playback_speed) ||
         out.loop != binding.loop || out.auto_play != binding.auto_play ||
         loaded.any_of<AnimPlaybackComponent, AnimPoseComponent>(loaded_entity))
-        return fail(name, "migrated authoring data did not round-trip without runtime state");
+        return fail(name, "current authoring data did not round-trip without runtime state");
+
+    nlohmann::json old_component_record = {{"components", nlohmann::json::object()}};
+    old_component_record["components"]["AnimationComponent"] = component;
+    const nlohmann::json old_component_level = {
+        {"format", "garden_reflected"},
+        {"version", 1},
+        {"entities", nlohmann::json::array({old_component_record})}
+    };
+    entt::registry old_component_registry;
+    ReflectionSerializer::deserializeLevel(old_component_registry, old_component_level, reflection);
+    if (!old_component_registry.view<SkeletonComponent>().empty())
+        return fail(name, "legacy AnimationComponent record was accepted");
+
+    nlohmann::json legacy_fields = component;
+    legacy_fields["skeleton_path"] = "assets/legacy.canim";
+    legacy_fields["clip_names"] = nlohmann::json::array({"idle"});
+    nlohmann::json legacy_fields_entity = {{"components", nlohmann::json::object()}};
+    legacy_fields_entity["components"]["SkeletonComponent"] = std::move(legacy_fields);
+    entt::registry legacy_fields_registry;
+    ReflectionSerializer::deserializeEntity(legacy_fields_registry, legacy_fields_registry.create(),
+        legacy_fields_entity, reflection);
+    if (!legacy_fields_registry.view<SkeletonComponent>().empty())
+        return fail(name, "legacy SkeletonComponent fields were accepted");
+    return pass(name);
+}
+std::shared_ptr<const AnimationClip> makeGraphClip()
+{
+    AnimationClipDefinition definition;
+    definition.name = "graph_move";
+    definition.duration = 1.0f;
+    BoneAnimation root;
+    root.bone_index = 0;
+    root.position_keys = {{0.0f, {0.0f, 0.0f, 0.0f}}, {1.0f, {8.0f, 0.0f, 0.0f}}};
+    definition.channels.push_back(std::move(root));
+    return makeClip(std::move(definition));
+}
+
+std::shared_ptr<const AnimGraph> makeGraphFoundation(
+    const std::shared_ptr<const AnimationResourceSet>& resources)
+{
+    AnimGraphDefinition definition;
+    definition.resource_signature = resources->sourceSignature();
+    definition.parameters = {
+        {"grounded", AnimGraphParameterType::Bool, true},
+        {"mode", AnimGraphParameterType::Int, int32_t{2}},
+        {"speed", AnimGraphParameterType::Float, 3.5f},
+        {"target", AnimGraphParameterType::Vec3, glm::vec3(1.0f, 2.0f, 3.0f)},
+    };
+    definition.states = {{"move", 0, AnimGraphPoseSource::Clip, "graph_move", 1.0f, true}};
+    definition.machines = {{"locomotion", 0}};
+    AnimGraphValidationReport report;
+    return AnimGraphValidation::makeGraph(std::move(definition), resources, report);
+}
+
+bool testGraphFoundationValidation()
+{
+    const std::string name = "AN-3 graph resources validate atomically and stay owner-bound";
+    const auto resources = makeResources(makeRestSkeleton(), {makeGraphClip()});
+    if (!resources) return fail(name, "could not build immutable animation resources");
+
+    AnimGraphDefinition valid;
+    valid.resource_signature = resources->sourceSignature();
+    valid.parameters = {{"ready", AnimGraphParameterType::Bool, false}};
+    valid.states = {{"idle", 0, AnimGraphPoseSource::RestPose, "", 1.0f, true},
+                    {"move", 0, AnimGraphPoseSource::Clip, "graph_move", 1.0f, true}};
+    valid.machines = {{"base", 0}};
+    AnimGraphValidationReport report;
+    const auto graph = AnimGraphValidation::makeGraph(valid, resources, report);
+    if (!graph || !report.valid() || graph->states().size() != 2 ||
+        graph->resourceSet() != resources)
+        return fail(name, "valid definition did not publish one immutable owner-bound graph");
+
+    AnimGraphDefinition invalid = valid;
+    invalid.resource_signature = "other-resource";
+    invalid.parameters.push_back({"ready", AnimGraphParameterType::Float, false});
+    invalid.parameters.push_back({"bad-number", AnimGraphParameterType::Float,
+                                  std::numeric_limits<float>::infinity()});
+    invalid.states[0].clip_name = "not-allowed";
+    invalid.states[1].clip_name = "missing";
+    invalid.states[1].speed = std::numeric_limits<float>::quiet_NaN();
+    invalid.states.push_back({"outside", 9, AnimGraphPoseSource::RestPose, "", 1.0f, true});
+    invalid.machines.push_back({"base", 0});
+    const auto rejected = AnimGraphValidation::makeGraph(std::move(invalid), resources, report);
+    if (rejected || report.valid() || report.errors.size() < 7)
+        return fail(name, "invalid graph was published or did not report all independent defects");
     return pass(name);
 }
 
-bool testResourceBindingMigration()
+bool testGraphFixedTickAndEvaluation()
 {
-    const std::string name = "AN-2 atomically migrates SkeletonComponent resource bindings";
-    nlohmann::json old_binding = {
-        {"skeleton_path", "assets/characters/hero.canim"},
-        {"clip_names", nlohmann::json::array({"idle", "run"})},
-        {"default_clip", "idle"},
-        {"playback_speed", 1.25f},
-        {"loop", false},
-        {"auto_play", true}
-    };
-    nlohmann::json level = {{"format", "garden_reflected"}, {"version", 1},
-        {"entities", nlohmann::json::array({
-            {{"components", {{"SkeletonComponent", old_binding}}}},
-            {{"components", nlohmann::json::object()}}
-        })}};
-    std::string error;
-    if (!AnimationResourceBindingMigration::migrateLevel(level, error) || !error.empty())
-        return fail(name, "level migration failed: " + error);
-    const auto& migrated = level["entities"][0]["components"]["SkeletonComponent"];
-    if (migrated.contains("skeleton_path") || migrated.contains("clip_names") ||
-        migrated.value("animation_resource_path", "") != "assets/characters/hero.canim" ||
-        migrated.value("animation_skin_index", 99u) != 0u ||
-        migrated.value("default_clip", "") != "idle" ||
-        !near(migrated.value("playback_speed", 0.0f), 1.25f) || migrated.value("loop", true) ||
-        !migrated.value("auto_play", false))
-        return fail(name, "migration did not preserve authored defaults or remove AN-1 fields");
+    const std::string name = "AN-3 graph clocks advance on fixed ticks and evaluation is read-only";
+    const auto resources = makeResources(makeRestSkeleton(), {makeGraphClip()});
+    const auto graph = makeGraphFoundation(resources);
+    if (!graph) return fail(name, "could not create validated graph");
 
-    const nlohmann::json migrated_copy = level;
-    if (!AnimationResourceBindingMigration::migrateLevel(level, error) || level != migrated_copy)
-        return fail(name, "new-format migration was not idempotent");
+    entt::registry registry;
+    const entt::entity entity = registry.create();
+    registry.emplace<AnimGraphComponent>(entity).graph = graph;
+    registry.emplace<AnimGraphStateComponent>(entity);
+    AnimGraphSystem::advance(registry, 0.25f);
+    auto& state = registry.get<AnimGraphStateComponent>(entity);
+    if (!state.initialized || state.machines.size() != 1 || state.machines[0].active_state != 0 ||
+        !near(state.machines[0].state_time, 0.25f) || state.parameters.size() != 4 ||
+        !std::get<bool>(state.parameters[0]) || std::get<int32_t>(state.parameters[1]) != 2 ||
+        !near(std::get<float>(state.parameters[2]), 3.5f) ||
+        !nearVec(std::get<glm::vec3>(state.parameters[3]), {1.0f, 2.0f, 3.0f}))
+        return fail(name, "fixed advance did not initialize ECS defaults and state clock");
+    if (AnimGraphSystem::activeState(registry, entity, "locomotion") != 0 ||
+        !AnimGraphSystem::setBool(registry, entity, "grounded", false) ||
+        !AnimGraphSystem::setInt(registry, entity, "mode", 7) ||
+        !AnimGraphSystem::setFloat(registry, entity, "speed", 1.5f) ||
+        !AnimGraphSystem::setVec3(registry, entity, "target", {4.0f, 5.0f, 6.0f}) ||
+        AnimGraphSystem::setFloat(registry, entity, "mode", 1.0f) ||
+        AnimGraphSystem::setFloat(registry, entity, "missing", 1.0f))
+        return fail(name, "typed parameter writes did not retain their strict graph schema");
 
-    nlohmann::json prefab = {{"format", "garden_prefab"}, {"version", 2},
-        {"nodes", nlohmann::json::array({{{"components", {{"SkeletonComponent", old_binding}}}}})}};
-    if (!AnimationResourceBindingMigration::migratePrefab(prefab, error) ||
-        prefab["nodes"][0]["components"]["SkeletonComponent"].contains("clip_names"))
-        return fail(name, "prefab migration did not replace the AN-1 binding");
+    const float before_evaluate = state.machines[0].state_time;
+    AnimGraphSystem::evaluate(registry, true);
+    const auto& pose = registry.get<AnimPoseComponent>(entity);
+    if (!pose.pose_valid || pose.bone_matrices.size() != 3 ||
+        !near(pose.local_pose[0].translation.x, 2.0f) ||
+        !near(state.machines[0].state_time, before_evaluate))
+        return fail(name, "evaluation changed graph state or did not sample the fixed-tick clock");
 
-    const nlohmann::json mixed_binding = {{"skeleton_path", "legacy.canim"},
-        {"animation_resource_path", "mixed.canim"}, {"animation_skin_index", 0}};
-    nlohmann::json invalid = {{"entities", nlohmann::json::array({
-        {{"components", {{"SkeletonComponent", old_binding}}}},
-        {{"components", {{"SkeletonComponent", mixed_binding}}}}
-    })}};
-    const nlohmann::json original_invalid = invalid;
-    if (AnimationResourceBindingMigration::migrateLevel(invalid, error) || error.empty() || invalid != original_invalid)
-        return fail(name, "failed migration was not atomic or did not reject mixed fields");
+    AnimGraphSystem::advance(registry, -0.1f);
+    AnimGraphSystem::advance(registry, std::numeric_limits<float>::infinity());
+    if (!near(state.machines[0].state_time, before_evaluate))
+        return fail(name, "invalid fixed deltas corrupted deterministic state");
+    state.machines[0].state_time = std::numeric_limits<float>::max();
+    AnimGraphSystem::advance(registry, 1.0f);
+    if (!near(state.machines[0].state_time, 0.0f))
+        return fail(name, "overflowing graph clock did not reset safely");
+    return pass(name);
+}
 
-    ReflectionRegistry reflection;
-    registerEngineReflection(reflection);
-    entt::registry runtime;
-    const entt::entity rejected = runtime.create();
-    ReflectionSerializer::deserializeEntity(runtime, rejected,
-        {{"components", {{"SkeletonComponent", old_binding}}}}, reflection);
-    if (runtime.any_of<SkeletonComponent>(rejected))
-        return fail(name, "runtime accepted an unmigrated AN-1 SkeletonComponent payload");
+bool testGraphDeterministicReplayAndReinitialize()
+{
+    const std::string name = "AN-3 graph replay is deterministic and graph replacement resets at tick boundary";
+    const auto resources = makeResources(makeRestSkeleton(), {makeGraphClip()});
+    const auto graph = makeGraphFoundation(resources);
+    if (!graph) return fail(name, "could not create validated graph");
+
+    entt::registry first, second;
+    const entt::entity a = first.create(), b = second.create();
+    first.emplace<AnimGraphComponent>(a).graph = graph;
+    first.emplace<AnimGraphStateComponent>(a);
+    second.emplace<AnimGraphComponent>(b).graph = graph;
+    second.emplace<AnimGraphStateComponent>(b);
+    for (const float dt : {0.1f, 0.2f, 0.15f, 0.3f})
+    {
+        AnimGraphSystem::advance(first, dt);
+        AnimGraphSystem::advance(second, dt);
+        AnimGraphSystem::evaluate(first, false);
+        AnimGraphSystem::evaluate(second, false);
+    }
+    const auto& left = first.get<AnimGraphStateComponent>(a);
+    const auto& right = second.get<AnimGraphStateComponent>(b);
+    if (!near(left.machines[0].state_time, right.machines[0].state_time) ||
+        !nearPose(first.get<AnimPoseComponent>(a).local_pose, second.get<AnimPoseComponent>(b).local_pose))
+        return fail(name, "identical fixed tick replay produced different state or pose");
+
+    AnimGraphDefinition replacement_definition;
+    replacement_definition.resource_signature = resources->sourceSignature();
+    replacement_definition.states = {{"rest", 0, AnimGraphPoseSource::RestPose, "", 1.0f, true}};
+    replacement_definition.machines = {{"locomotion", 0}};
+    AnimGraphValidationReport report;
+    const auto replacement = AnimGraphValidation::makeGraph(std::move(replacement_definition), resources, report);
+    if (!replacement) return fail(name, "could not create replacement graph");
+    first.get<AnimGraphComponent>(a).graph = replacement;
+    const AnimGraph* previous_graph = left.initialized_graph;
+    AnimGraphSystem::evaluate(first, false);
+    if (first.get<AnimGraphStateComponent>(a).initialized_graph != previous_graph ||
+        !near(first.get<AnimPoseComponent>(a).local_pose[0].translation.x, 3.0f))
+        return fail(name, "presentation evaluation applied a replacement schema before a fixed tick");
+    AnimGraphSystem::advance(first, 0.1f);
+    const auto& reset = first.get<AnimGraphStateComponent>(a);
+    if (reset.initialized_graph != replacement.get() || !near(reset.machines[0].state_time, 0.1f) ||
+        !reset.parameters.empty())
+        return fail(name, "graph replacement did not reset runtime schema at a fixed-tick boundary");
     return pass(name);
 }
 } // namespace
@@ -933,7 +1054,9 @@ int main()
     ok = testSystemRestAndInvalidPlayback() && ok;
     ok = testIkOrder() && ok;
     ok = testCompletionEvent() && ok;
-    ok = testReflectionAndMigration() && ok;
-    ok = testResourceBindingMigration() && ok;
+    ok = testReflectionHardCutover() && ok;
+    ok = testGraphFoundationValidation() && ok;
+    ok = testGraphFixedTickAndEvaluation() && ok;
+    ok = testGraphDeterministicReplayAndReinitialize() && ok;
     return ok ? 0 : 1;
 }
