@@ -8,7 +8,7 @@
 #include "Components/HierarchyComponents.hpp"
 #include "Components/IdentityComponent.hpp"
 #include "ECS/Hierarchy.hpp"
-#include "Components/AnimationComponent.hpp"
+#include "Components/SkeletonComponent.hpp"
 #include "Components/AudioSourceComponent.hpp"
 #include "Components/IKComponent.hpp"
 #include "GameFramework/GameFrameworkComponents.hpp"
@@ -642,10 +642,10 @@ namespace
 
     bool testNewComponentRoundTrips()
     {
-        const std::string name = "new component round trips (animation/audio/IK/gameframework/EntityRef)";
+        const std::string name = "new component round trips (skeleton/audio/IK/gameframework/EntityRef)";
         ReflectionRegistry reflection;
         registerEngineReflection(reflection);
-        for (const char* n : {"AnimationComponent", "AudioSourceComponent", "IKComponent",
+        for (const char* n : {"SkeletonComponent", "AudioSourceComponent", "IKComponent",
                               "GameModeComponent", "GameStateComponent", "PlayerStateComponent", "PlayerControllerComponent"})
             if (!reflection.findByName(n)) return fail(name, std::string("missing registration: ") + n);
         if (reflection.count() != 35) return fail(name, "unexpected registered component count");
@@ -659,20 +659,20 @@ namespace
         // Animation: authoring fields only; runtime state absent from JSON.
         {
             entt::registry reg; auto e = reg.create();
-            auto& c = reg.emplace<AnimationComponent>(e);
+            auto& c = reg.emplace<SkeletonComponent>(e);
             c.skeleton_path = "assets/hero.skel"; c.clip_names = {"idle", "run"};
             c.default_clip = "idle"; c.playback_speed = 1.5f; c.loop = false; c.auto_play = true;
-            c.bone_matrices.assign(2, glm::mat4(2.0f));
+            c.resources.reset();
             auto j = ReflectionSerializer::serializeEntity(reg, e, reflection);
-            auto cj = j["components"]["AnimationComponent"];
-            for (const char* k : {"skeleton", "clips", "blender", "bone_matrices"})
+            auto cj = j["components"]["SkeletonComponent"];
+            for (const char* k : {"resources", "blender", "bone_matrices"})
                 if (cj.contains(k)) return fail(name, "animation runtime field serialized");
             entt::registry reg2; auto e2 = reg2.create();
             ReflectionSerializer::deserializeEntity(reg2, e2, j, reflection);
-            const auto& o = reg2.get<AnimationComponent>(e2);
+            const auto& o = reg2.get<SkeletonComponent>(e2);
             if (o.skeleton_path != c.skeleton_path || o.clip_names != c.clip_names ||
                 o.default_clip != c.default_clip || !approx(o.playback_speed, 1.5f) ||
-                o.loop != false || o.auto_play != true || !o.bone_matrices.empty())
+                o.loop != false || o.auto_play != true || o.resources)
                 return fail(name, "animation fields mismatch");
         }
         // Audio: clip_path + tuning; resolved id/handle omitted.

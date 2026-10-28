@@ -4,7 +4,7 @@
 #include "Components/PrefabInstanceComponent.hpp"
 #include "Components/HierarchyComponents.hpp"
 #include "Components/IdentityComponent.hpp"
-#include "Components/AnimationComponent.hpp"
+#include "Components/SkeletonComponent.hpp"
 #include "Components/AudioSourceComponent.hpp"
 #include "Components/IKComponent.hpp"
 #include "GameFramework/GameFrameworkComponents.hpp"
@@ -35,7 +35,7 @@ void registerEngineReflection(ReflectionRegistry& registry)
     // level/prefab sidecar path (mesh path + render flags), not reflected JSON.
     // LocalPlayerInputComponent is runtime input intent and is intentionally
     // not serialized or exposed to reflection.
-    registry.reflect<AnimationComponent>("AnimationComponent");
+    registry.reflect<SkeletonComponent>("SkeletonComponent");
     registry.reflect<AudioSourceComponent>("AudioSourceComponent");
     registry.reflect<IKComponent>("IKComponent");
     registry.reflect<GameFramework::GameModeComponent>("GameModeComponent");
