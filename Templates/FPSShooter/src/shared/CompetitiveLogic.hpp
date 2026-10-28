@@ -831,6 +831,17 @@ public:
         return it == sessions_.end() ? nullptr : &it->second;
     }
 
+    std::vector<uint16_t> clientIds() const {
+        std::vector<uint16_t> ids;
+        ids.reserve(sessions_.size());
+        for (const auto& [client_id, record] : sessions_) {
+            (void)record;
+            ids.push_back(client_id);
+        }
+        std::sort(ids.begin(), ids.end());
+        return ids;
+    }
+
     // The decision does not mutate the session.  A failed spawn recipe must
     // not turn into an active session; only markSpawned after the adapter has
     // constructed and announced the complete pawn.
@@ -1161,6 +1172,14 @@ struct CompetitiveWorldContext {
     std::unordered_map<uint32_t, uint8_t> bomb_prev_weapon;
     bool bomb_sites_authored = false;
     float round_heartbeat = 0.0f;
+    // Presentation is template-owned recipient state.  IDs are match-scoped
+    // aliases, never ECS handles or transport IDs exposed on the UI wire.
+    uint32_t presentation_match_instance_id = 0;
+    uint32_t presentation_revision = 0;
+    uint32_t next_presentation_player_id = 1;
+    float presentation_heartbeat = 0.0f;
+    std::unordered_map<uint16_t, uint32_t> presentation_player_ids;
+    std::unordered_map<uint16_t, std::vector<uint8_t>> presentation_last_content;
 
     CompetitiveWorldContext() : bomb_hooks(&bomb) {
         round.bomb_hooks = &bomb_hooks;
@@ -1169,6 +1188,7 @@ struct CompetitiveWorldContext {
     void configure(const ModeConfig& mode_config, const EconomyConfig& economy_config = EconomyConfig{}) {
         clear();
         enabled = true;
+        presentation_match_instance_id = allocatePresentationMatchInstanceId();
         round.configure(mode_config);
         round.bomb_hooks = &bomb_hooks;
         buy.config = mode_config;
@@ -1309,9 +1329,41 @@ struct CompetitiveWorldContext {
         bomb_prev_weapon.clear();
         bomb_sites_authored = false;
         round_heartbeat = 0.0f;
+        presentation_match_instance_id = 0;
+        presentation_revision = 0;
+        next_presentation_player_id = 1;
+        presentation_heartbeat = 0.0f;
+        presentation_player_ids.clear();
+        presentation_last_content.clear();
+    }
+
+    uint32_t presentationPlayerId(uint16_t owner_client_id) {
+        if (owner_client_id == 0)
+            return 0;
+        const auto it = presentation_player_ids.find(owner_client_id);
+        if (it != presentation_player_ids.end())
+            return it->second;
+        uint32_t allocated = next_presentation_player_id++;
+        if (allocated == 0) {
+            allocated = next_presentation_player_id++;
+        }
+        presentation_player_ids.emplace(owner_client_id, allocated);
+        return allocated;
+    }
+
+    void forgetPresentationRecipient(uint16_t client_id) {
+        presentation_last_content.erase(client_id);
     }
 
 private:
+    static uint32_t allocatePresentationMatchInstanceId() {
+        static uint32_t next_id = 1;
+        uint32_t allocated = next_id++;
+        if (allocated == 0)
+            allocated = next_id++;
+        return allocated;
+    }
+
     void recordEconomyTransition(EconomyTransitionKind kind, int32_t amount) {
         ++economy_transitions.count;
         economy_transitions.last_kind = kind;

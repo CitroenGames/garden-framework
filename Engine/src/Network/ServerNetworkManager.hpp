@@ -90,7 +90,7 @@ private:
     ServerInputSampleHandler input_sample_handler;
     ServerWeaponSelectHandler weapon_select_handler;
 
-    // Handshake state (wire v5)
+    // Handshake state (wire v6)
     uint32_t server_level_hash = 0;
     uint32_t server_capability_flags = CAP_ALL_KNOWN;
 

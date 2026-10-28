@@ -4,9 +4,15 @@
 #include "Network/NetworkProtocol.hpp"
 #include "WeaponTypes.hpp"
 
+#include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <glm/glm.hpp>
+#include <limits>
+#include <string>
+#include <string_view>
+#include <vector>
 
 enum class CombatMessageType : uint8_t
 {
@@ -43,6 +49,177 @@ enum class CombatEventMessageType : uint8_t
 {
     COMBAT_EVENT = Net::CUSTOM_MESSAGE_START + 13 // 77 S->C reliable
 };
+
+// Recipient-specific durable competitive presentation. This is deliberately a
+// template protocol: EngineCore only exact-gates the version that admits it.
+enum class CompetitivePresentationMessageType : uint8_t
+{
+    SNAPSHOT = Net::CUSTOM_MESSAGE_START + 14 // 78 S->C reliable
+};
+
+constexpr uint8_t kCompetitivePresentationSchemaVersion = 1;
+constexpr uint8_t kCompetitivePresentationMaxRows = 10; // current 5v5 capacity
+constexpr uint8_t kCompetitivePresentationMaxRadarRecords = 11;
+constexpr size_t kCompetitivePresentationMaxNameChars = Net::NETWORK_MAX_PLAYER_NAME_CHARS;
+constexpr size_t kCompetitivePresentationMaxPayloadBytes = 1024;
+
+enum class CompetitivePresentationRosterState : uint8_t
+{
+    Awaiting = 0,
+    Alive = 1,
+    Dead = 2,
+    Spectating = 3
+};
+
+enum class CompetitivePresentationRadarKind : uint8_t
+{
+    Self = 0,
+    Teammate = 1,
+    Objective = 2
+};
+
+struct CompetitivePresentationRosterRow
+{
+    uint32_t stable_player_id = 0;
+    std::string display_name;
+    uint8_t team = 0;
+    uint8_t state = static_cast<uint8_t>(CompetitivePresentationRosterState::Awaiting);
+    uint16_t kills = 0;
+    uint16_t deaths = 0;
+    uint8_t is_bot = 0;
+    uint8_t money_visible = 0;
+    int32_t money = 0;
+    uint16_t ping_ms = 0;
+};
+
+struct CompetitivePresentationRadarRecord
+{
+    uint32_t stable_record_id = 0;
+    uint8_t kind = static_cast<uint8_t>(CompetitivePresentationRadarKind::Self);
+    glm::vec3 position = glm::vec3(0.0f);
+};
+
+struct CompetitivePresentationSnapshotMessage
+{
+    uint8_t type = static_cast<uint8_t>(CompetitivePresentationMessageType::SNAPSHOT);
+    uint8_t schema_version = kCompetitivePresentationSchemaVersion;
+    uint32_t match_instance_id = 0;
+    uint32_t presentation_revision = 0;
+    uint32_t source_server_tick = 0;
+    uint8_t recipient_team = 0;
+    uint8_t phase = 0;
+    uint32_t phase_deadline_tick = 0;
+    uint16_t round_number = 0;
+    uint8_t wins_attackers = 0;
+    uint8_t wins_defenders = 0;
+    uint8_t last_reason = 0;
+    uint8_t last_winner = 0;
+    uint8_t objective_state = 0;
+    uint8_t objective_site = 0xff; // no site
+    uint32_t objective_deadline_tick = 0;
+    uint8_t channel_kind = 0; // none, plant, defuse
+    uint32_t channel_actor_stable_id = 0;
+    uint32_t channel_deadline_tick = 0;
+    uint8_t roster_count = 0;
+    std::array<CompetitivePresentationRosterRow, kCompetitivePresentationMaxRows> roster{};
+    uint8_t radar_count = 0;
+    std::array<CompetitivePresentationRadarRecord, kCompetitivePresentationMaxRadarRecords> radar{};
+};
+
+constexpr bool isValidCompetitivePresentationTeam(uint8_t team) { return team <= 3; }
+constexpr bool isValidCompetitivePresentationPhase(uint8_t phase) { return phase <= 6; }
+constexpr bool isValidCompetitivePresentationReason(uint8_t reason) { return reason <= 7; }
+constexpr bool isValidCompetitivePresentationWinner(uint8_t winner) { return winner <= 3; }
+constexpr bool isValidCompetitivePresentationObjectiveState(uint8_t state) { return state <= 7; }
+constexpr bool isValidCompetitivePresentationObjectiveSite(uint8_t site) { return site == 0xff || site <= 7; }
+constexpr bool isValidCompetitivePresentationChannelKind(uint8_t kind) { return kind <= 2; }
+constexpr bool isValidCompetitivePresentationRosterState(uint8_t state) { return state <= static_cast<uint8_t>(CompetitivePresentationRosterState::Spectating); }
+constexpr bool isValidCompetitivePresentationRadarKind(uint8_t kind) { return kind <= static_cast<uint8_t>(CompetitivePresentationRadarKind::Objective); }
+
+// Conservative v1 recipient policy: a playing recipient sees balances and
+// positions only for its own playing side. Spectators get no wallet or radar
+// records until a separate observer policy defines that information.
+constexpr bool competitivePresentationAllowsTeamPrivateData(
+    uint8_t recipient_team, bool recipient_is_spectator, uint8_t subject_team)
+{
+    return !recipient_is_spectator && (recipient_team == 1 || recipient_team == 2) &&
+        subject_team == recipient_team;
+}
+
+// Serial-number ordering for one match instance.  Callers must reject a
+// different instance before asking this helper about the revision.
+constexpr bool isCompetitivePresentationRevisionNewer(uint32_t candidate, uint32_t accepted)
+{
+    return candidate != accepted && static_cast<uint32_t>(candidate - accepted) < 0x80000000u;
+}
+
+inline bool isValidCompetitivePresentationName(std::string_view name)
+{
+    return !name.empty() && name.size() <= kCompetitivePresentationMaxNameChars &&
+        Net::normalizePlayerName(name) == name;
+}
+
+inline bool isFiniteCompetitivePresentationPosition(const glm::vec3& position)
+{
+    return std::isfinite(position.x) && std::isfinite(position.y) && std::isfinite(position.z);
+}
+
+inline bool isValidCompetitivePresentationSnapshot(const CompetitivePresentationSnapshotMessage& message)
+{
+    if (message.type != static_cast<uint8_t>(CompetitivePresentationMessageType::SNAPSHOT) ||
+        message.schema_version != kCompetitivePresentationSchemaVersion ||
+        message.match_instance_id == 0 || message.presentation_revision == 0 ||
+        !isValidCompetitivePresentationTeam(message.recipient_team) ||
+        !isValidCompetitivePresentationPhase(message.phase) ||
+        !isValidCompetitivePresentationReason(message.last_reason) ||
+        !isValidCompetitivePresentationWinner(message.last_winner) ||
+        !isValidCompetitivePresentationObjectiveState(message.objective_state) ||
+        !isValidCompetitivePresentationObjectiveSite(message.objective_site) ||
+        !isValidCompetitivePresentationChannelKind(message.channel_kind) ||
+        message.roster_count > kCompetitivePresentationMaxRows ||
+        message.radar_count > kCompetitivePresentationMaxRadarRecords)
+        return false;
+    if (message.channel_kind == 0 &&
+        (message.channel_actor_stable_id != 0 || message.channel_deadline_tick != 0))
+        return false;
+    if (message.channel_kind != 0 &&
+        (message.channel_actor_stable_id == 0 || message.channel_deadline_tick == 0))
+        return false;
+
+    uint32_t previous_row_id = 0;
+    for (uint8_t index = 0; index < message.roster_count; ++index) {
+        const auto& row = message.roster[index];
+        if (row.stable_player_id == 0 || row.stable_player_id <= previous_row_id ||
+            !isValidCompetitivePresentationName(row.display_name) ||
+            !isValidCompetitivePresentationTeam(row.team) ||
+            !isValidCompetitivePresentationRosterState(row.state) ||
+            row.is_bot > 1 || row.money_visible > 1 || (!row.money_visible && row.money != 0))
+            return false;
+        previous_row_id = row.stable_player_id;
+    }
+
+    uint32_t previous_radar_id = 0;
+    for (uint8_t index = 0; index < message.radar_count; ++index) {
+        const auto& record = message.radar[index];
+        if (record.stable_record_id == 0 || record.stable_record_id <= previous_radar_id ||
+            !isValidCompetitivePresentationRadarKind(record.kind) ||
+            !isFiniteCompetitivePresentationPosition(record.position))
+            return false;
+        const bool is_objective = record.kind == static_cast<uint8_t>(CompetitivePresentationRadarKind::Objective);
+        bool references_roster = false;
+        for (uint8_t row_index = 0; row_index < message.roster_count; ++row_index) {
+            if (message.roster[row_index].stable_player_id == record.stable_record_id) {
+                references_roster = true;
+                break;
+            }
+        }
+        if ((is_objective && record.stable_record_id != std::numeric_limits<uint32_t>::max()) ||
+            (!is_objective && !references_roster))
+            return false;
+        previous_radar_id = record.stable_record_id;
+    }
+    return true;
+}
 
 enum class WorldItemMessageAudience : uint8_t
 {
@@ -589,5 +766,104 @@ namespace CompetitiveSerializer
         if (msg.type != static_cast<uint8_t>(CompetitiveMessageType::TEAM_RESULT)) return false;
         msg.result = reader.readByte(); msg.team = reader.readByte();
         return !reader.hasError();
+    }
+
+    inline bool serialize(Net::BitWriter& writer, const CompetitivePresentationSnapshotMessage& msg) {
+        if (!isValidCompetitivePresentationSnapshot(msg)) return false;
+        writer.writeByte(msg.type);
+        writer.writeByte(msg.schema_version);
+        writer.writeUInt32(msg.match_instance_id);
+        writer.writeUInt32(msg.presentation_revision);
+        writer.writeUInt32(msg.source_server_tick);
+        writer.writeByte(msg.recipient_team);
+        writer.writeByte(msg.phase);
+        writer.writeUInt32(msg.phase_deadline_tick);
+        writer.writeUInt16(msg.round_number);
+        writer.writeByte(msg.wins_attackers);
+        writer.writeByte(msg.wins_defenders);
+        writer.writeByte(msg.last_reason);
+        writer.writeByte(msg.last_winner);
+        writer.writeByte(msg.objective_state);
+        writer.writeByte(msg.objective_site);
+        writer.writeUInt32(msg.objective_deadline_tick);
+        writer.writeByte(msg.channel_kind);
+        writer.writeUInt32(msg.channel_actor_stable_id);
+        writer.writeUInt32(msg.channel_deadline_tick);
+        writer.writeByte(msg.roster_count);
+        for (uint8_t index = 0; index < msg.roster_count; ++index) {
+            const auto& row = msg.roster[index];
+            writer.writeUInt32(row.stable_player_id);
+            writer.writeString(row.display_name.c_str(), kCompetitivePresentationMaxNameChars + 1);
+            writer.writeByte(row.team);
+            writer.writeByte(row.state);
+            writer.writeUInt16(row.kills);
+            writer.writeUInt16(row.deaths);
+            writer.writeByte(row.is_bot);
+            writer.writeByte(row.money_visible);
+            writer.writeUInt32(static_cast<uint32_t>(row.money));
+            writer.writeUInt16(row.ping_ms);
+        }
+        writer.writeByte(msg.radar_count);
+        for (uint8_t index = 0; index < msg.radar_count; ++index) {
+            const auto& record = msg.radar[index];
+            writer.writeUInt32(record.stable_record_id);
+            writer.writeByte(record.kind);
+            writer.writeVector3f(record.position);
+        }
+        return writer.getByteSize() <= kCompetitivePresentationMaxPayloadBytes;
+    }
+
+    inline bool deserialize(Net::BitReader& reader, CompetitivePresentationSnapshotMessage& msg) {
+        if (reader.getBufferSize() == 0 || reader.getBufferSize() > kCompetitivePresentationMaxPayloadBytes)
+            return false;
+        msg = CompetitivePresentationSnapshotMessage{};
+        msg.type = reader.readByte();
+        if (msg.type != static_cast<uint8_t>(CompetitivePresentationMessageType::SNAPSHOT)) return false;
+        msg.schema_version = reader.readByte();
+        if (msg.schema_version != kCompetitivePresentationSchemaVersion) return false;
+        msg.match_instance_id = reader.readUInt32();
+        msg.presentation_revision = reader.readUInt32();
+        msg.source_server_tick = reader.readUInt32();
+        msg.recipient_team = reader.readByte();
+        msg.phase = reader.readByte();
+        msg.phase_deadline_tick = reader.readUInt32();
+        msg.round_number = reader.readUInt16();
+        msg.wins_attackers = reader.readByte();
+        msg.wins_defenders = reader.readByte();
+        msg.last_reason = reader.readByte();
+        msg.last_winner = reader.readByte();
+        msg.objective_state = reader.readByte();
+        msg.objective_site = reader.readByte();
+        msg.objective_deadline_tick = reader.readUInt32();
+        msg.channel_kind = reader.readByte();
+        msg.channel_actor_stable_id = reader.readUInt32();
+        msg.channel_deadline_tick = reader.readUInt32();
+        msg.roster_count = reader.readByte();
+        if (msg.roster_count > kCompetitivePresentationMaxRows) return false;
+        for (uint8_t index = 0; index < msg.roster_count; ++index) {
+            auto& row = msg.roster[index];
+            char name[kCompetitivePresentationMaxNameChars + 1]{};
+            row.stable_player_id = reader.readUInt32();
+            reader.readString(name, sizeof(name));
+            row.display_name = name;
+            row.team = reader.readByte();
+            row.state = reader.readByte();
+            row.kills = reader.readUInt16();
+            row.deaths = reader.readUInt16();
+            row.is_bot = reader.readByte();
+            row.money_visible = reader.readByte();
+            row.money = static_cast<int32_t>(reader.readUInt32());
+            row.ping_ms = reader.readUInt16();
+        }
+        msg.radar_count = reader.readByte();
+        if (msg.radar_count > kCompetitivePresentationMaxRadarRecords) return false;
+        for (uint8_t index = 0; index < msg.radar_count; ++index) {
+            auto& record = msg.radar[index];
+            record.stable_record_id = reader.readUInt32();
+            record.kind = reader.readByte();
+            record.position = reader.readVector3f();
+        }
+        return !reader.hasError() && reader.getBitPosition() == reader.getBufferSize() * 8 &&
+            isValidCompetitivePresentationSnapshot(msg);
     }
 }

@@ -17,6 +17,7 @@
 #include "Network/SharedMovement.hpp"
 #include "shared/SharedComponents.hpp"
 #include "shared/CombatProtocol.hpp"
+#include "shared/CompetitivePresentationCache.hpp"
 #include "shared/FpsCombatFeed.hpp"
 #include "shared/WorldItemPresentation.hpp"
 #include "shared/WeaponTypes.hpp"
@@ -389,8 +390,12 @@ static UiLogic::CombatFeedPresentation g_combat_feed;
 static UiLogic::UiState g_ui;
 static UiLogic::ConnectionLifecycle g_ui_connection;
 static bool g_ui_modal_context_active = false;
+static bool g_ui_input_mode_active = false;
 static UiLogic::ClientCompetitiveState g_comp;
 static std::vector<uint16_t> g_owned_items;
+// P3 publication is cached as one bounded, validated receipt. This package
+// intentionally stops before HUD/RML projection or gameplay authority.
+static CompetitivePresentationSnapshotCache g_competitive_presentation_cache;
 
 // Content has not supplied an authored radar calibration for the current
 // template level.  Keep this explicitly unconfigured instead of deriving a
@@ -645,6 +650,7 @@ GAME_API bool gardenGameInit(EngineServices* services)
     }
     g_services = services;
     g_ui_modal_context_active = false;
+    g_ui_input_mode_active = false;
     g_client_input_cadence.reset();
     g_has_authoritative_pawn_position = false;
     g_authoritative_pawn_position = glm::vec3(0.0f);
@@ -653,6 +659,7 @@ GAME_API bool gardenGameInit(EngineServices* services)
     g_world_item_presentation_entities.clear();
     resetWorldItemVisualResource();
     clearWorldItemAcceptanceReceipts();
+    g_competitive_presentation_cache.clear();
     g_world_item_presentation_world = services->game_world;
     if (!configureFPShooterInput(*services->input_actions))
     {
@@ -683,6 +690,30 @@ GAME_API bool gardenGameInit(EngineServices* services)
     g_acceptance_script.loadFromEnvironment();
 
     g_network.setCustomMessageHandler([](uint8_t message_type, Net::BitReader& reader) {
+        if (message_type == static_cast<uint8_t>(CompetitivePresentationMessageType::SNAPSHOT)) {
+            CompetitivePresentationSnapshotMessage message;
+            if (!CompetitiveSerializer::deserialize(reader, message)) {
+                LOG_ENGINE_WARN("Ignoring malformed COMPETITIVE_PRESENTATION snapshot");
+                return;
+            }
+
+            const CompetitivePresentationSnapshotAcceptResult result =
+                g_competitive_presentation_cache.accept(message);
+            if (result == CompetitivePresentationSnapshotAcceptResult::RejectedInvalid ||
+                result == CompetitivePresentationSnapshotAcceptResult::RejectedStaleRevision ||
+                result == CompetitivePresentationSnapshotAcceptResult::RejectedStaleInstance) {
+                LOG_ENGINE_INFO("Ignoring COMPETITIVE_PRESENTATION instance={} revision={} result={}",
+                    message.match_instance_id, message.presentation_revision,
+                    static_cast<unsigned>(result));
+                return;
+            }
+
+            LOG_ENGINE_INFO("COMPETITIVE_PRESENTATION accepted instance={} revision={} rows={} radar={} result={}",
+                message.match_instance_id, message.presentation_revision,
+                static_cast<unsigned>(message.roster_count), static_cast<unsigned>(message.radar_count),
+                static_cast<unsigned>(result));
+            return;
+        }
         // Competitive messages (69-74): server-authoritative, client renders.
         if (message_type == static_cast<uint8_t>(CompetitiveMessageType::ROUND_STATE)) {
             RoundStateMessage msg; if (!CompetitiveSerializer::deserialize(reader, msg)) return;
@@ -981,14 +1012,23 @@ GAME_API void gardenGameShutdown()
     g_authoritative_pawn_snapshot_generation = 0;
     g_last_authoritative_input_tick = 0;
     clearWorldItemAcceptanceReceipts();
+    g_competitive_presentation_cache.clear();
     g_player_controller.reset();
     g_hud.shutdown();
     if (g_services && g_services->input_actions)
     {
-        g_services->input_actions->popContext(UiInput::ModalContextName);
+        UiInput::synchronizeModalInput(
+            *g_services->input_actions, g_services->input_mode_service, false,
+            g_ui_modal_context_active, g_ui_input_mode_active);
         g_services->input_actions->popContext("Gameplay");
     }
+    else if (g_services)
+    {
+        UiInput::synchronizeModalInputMode(
+            g_services->input_mode_service, false, g_ui_input_mode_active);
+    }
     g_ui_modal_context_active = false;
+    g_ui_input_mode_active = false;
     g_services = nullptr;
 }
 
@@ -1016,7 +1056,8 @@ GAME_API void gardenGameUpdate(float delta_time)
 
     // Network update
     g_network.update(delta_time);
-    UiLogic::observeConnection(g_ui_connection, g_ui, g_network.isConnected());
+    if (UiLogic::observeConnection(g_ui_connection, g_ui, g_network.isConnected()))
+        g_competitive_presentation_cache.clear();
 
     if (g_network.isConnected())
     {
@@ -1165,8 +1206,9 @@ GAME_API void gardenGameUpdate(float delta_time)
     }
 
     const bool ui_modal = UiLogic::cursorWanted(g_ui);
-    if (input_actions && !UiInput::synchronizeModalContext(
-            *input_actions, ui_modal, g_ui_modal_context_active))
+    if (input_actions && !UiInput::synchronizeModalInput(
+            *input_actions, g_services->input_mode_service, ui_modal,
+            g_ui_modal_context_active, g_ui_input_mode_active))
     {
         LOG_ENGINE_ERROR("Failed to synchronize FPSShooter modal input context");
     }
@@ -1477,12 +1519,18 @@ GAME_API void gardenOnLevelLoaded()
     g_death_timer = 0.0f;
     g_recon_smoothing.visual_offset = glm::vec3(0.0f);
     g_comp = UiLogic::ClientCompetitiveState{}; g_ui = UiLogic::UiState{}; g_ui_connection = {}; g_owned_items.clear();
+    g_competitive_presentation_cache.clear();
     g_radar_map = {};
     g_radar_slots.reset();
     g_radar = {};
     g_radar_throttle.reset();
     if (g_services->input_actions)
-        UiInput::synchronizeModalContext(*g_services->input_actions, false, g_ui_modal_context_active);
+        UiInput::synchronizeModalInput(
+            *g_services->input_actions, g_services->input_mode_service, false,
+            g_ui_modal_context_active, g_ui_input_mode_active);
+    else
+        UiInput::synchronizeModalInputMode(
+            g_services->input_mode_service, false, g_ui_input_mode_active);
     g_combat_feed.clear();
 
     const auto& def = getWeaponDef(WeaponType::RIFLE);

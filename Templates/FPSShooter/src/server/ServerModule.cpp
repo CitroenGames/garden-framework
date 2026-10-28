@@ -51,9 +51,12 @@
 #include <cmath>
 #include <fstream>
 #include <iterator>
+#include <limits>
+#include <string>
 #include <string_view>
 #include <glm/gtc/quaternion.hpp>
 #include <utility>
+#include <vector>
 
 static EngineServices* g_server_services = nullptr;
 static Net::ServerNetworkManager g_server_network;
@@ -1711,6 +1714,262 @@ static void broadcastRoundState()
         if (c && c->peer) g_server_network.sendReliableToClient(i, writer);
     }
 }
+
+// Presentation snapshots are a separate template contract.  They never reuse
+// world snapshots or let a receiver infer team, roster, wallet, or radar data
+// from replicated ECS.  The source server reads ECS once, applies the explicit
+// recipient policy below, and serializes a bounded replacement snapshot.
+struct CompetitivePresentationParticipant {
+    uint16_t owner_client_id = 0;
+    uint32_t stable_player_id = 0;
+    std::string display_name;
+    Competitive::FpsTeam team = Competitive::FpsTeam::None;
+    CompetitivePresentationRosterState state = CompetitivePresentationRosterState::Awaiting;
+    uint16_t kills = 0;
+    uint16_t deaths = 0;
+    bool is_bot = false;
+    int32_t money = 0;
+    uint16_t ping_ms = 0;
+    bool has_position = false;
+    glm::vec3 position = glm::vec3(0.0f);
+};
+
+static uint16_t competitivePresentationScoreValue(int32_t value)
+{
+    return static_cast<uint16_t>(std::clamp(value, 0,
+        static_cast<int32_t>(std::numeric_limits<uint16_t>::max())));
+}
+
+static std::string competitivePresentationBotName(const Bots::BotComponent& bot)
+{
+    return Net::normalizePlayerName("BOT " + std::to_string(std::max(0, bot.bot_index)));
+}
+
+static bool collectCompetitivePresentationParticipants(
+    world& w, std::vector<CompetitivePresentationParticipant>& out)
+{
+    out.clear();
+    auto& context = competitiveContext();
+    std::unordered_map<uint16_t, size_t> by_owner;
+    for (uint16_t client_id : g_sessions.clientIds()) {
+        const Competitive::SessionRecord* session = g_sessions.find(client_id);
+        const ClientInfo* client = g_server_network.getClientInfo(client_id);
+        if (!session || !client || !client->peer || !Competitive::isPlayingTeam(session->team))
+            continue;
+        CompetitivePresentationParticipant participant;
+        participant.owner_client_id = client_id;
+        participant.stable_player_id = context.presentationPlayerId(client_id);
+        participant.display_name = client->player_name;
+        participant.team = session->team;
+        participant.state = session->state == Competitive::SessionState::Spectating
+            ? CompetitivePresentationRosterState::Spectating
+            : CompetitivePresentationRosterState::Awaiting;
+        participant.ping_ms = static_cast<uint16_t>(std::clamp(client->ping_ms, 0.0f,
+            static_cast<float>(std::numeric_limits<uint16_t>::max())));
+        by_owner.emplace(client_id, out.size());
+        out.push_back(std::move(participant));
+    }
+
+    auto players = w.registry.view<NetworkedEntity, TeamComponent>();
+    for (const entt::entity entity : players) {
+        const auto& networked = players.get<NetworkedEntity>(entity);
+        if (!networked.is_player || networked.owner_client_id == 0)
+            continue;
+        const Competitive::FpsTeam team = Competitive::teamFromId(players.get<TeamComponent>(entity).team_id);
+        if (!Competitive::isPlayingTeam(team))
+            continue;
+        auto found = by_owner.find(networked.owner_client_id);
+        if (found == by_owner.end()) {
+            // Synthetic bot owners have no transport session, but are durable
+            // match participants and use an opaque match-scoped row identity.
+            CompetitivePresentationParticipant participant;
+            participant.owner_client_id = networked.owner_client_id;
+            participant.stable_player_id = context.presentationPlayerId(networked.owner_client_id);
+            participant.team = team;
+            participant.is_bot = true;
+            if (w.registry.all_of<Bots::BotComponent>(entity))
+                participant.display_name = competitivePresentationBotName(w.registry.get<Bots::BotComponent>(entity));
+            else
+                participant.display_name = "BOT";
+            by_owner.emplace(networked.owner_client_id, out.size());
+            out.push_back(std::move(participant));
+            found = by_owner.find(networked.owner_client_id);
+        }
+        CompetitivePresentationParticipant& participant = out[found->second];
+        participant.team = team;
+        participant.state = CompetitivePresentationRosterState::Alive;
+        if (w.registry.all_of<FpsHealthComponent>(entity) && !w.registry.get<FpsHealthComponent>(entity).alive)
+            participant.state = CompetitivePresentationRosterState::Dead;
+        if (w.registry.all_of<ScoreComponent>(entity)) {
+            const auto& score = w.registry.get<ScoreComponent>(entity);
+            participant.kills = competitivePresentationScoreValue(score.kills);
+            participant.deaths = competitivePresentationScoreValue(score.deaths);
+        }
+        if (w.registry.all_of<Competitive::MoneyComponent>(entity))
+            participant.money = w.registry.get<Competitive::MoneyComponent>(entity).money();
+        if (w.registry.all_of<TransformComponent>(entity)) {
+            const glm::vec3 position = w.registry.get<TransformComponent>(entity).position;
+            participant.has_position = isFiniteCompetitivePresentationPosition(position);
+            participant.position = position;
+        }
+        participant.is_bot = participant.is_bot || w.registry.all_of<Bots::BotComponent>(entity);
+    }
+
+    std::sort(out.begin(), out.end(), [](const auto& left, const auto& right) {
+        return left.stable_player_id < right.stable_player_id;
+    });
+    return out.size() <= kCompetitivePresentationMaxRows;
+}
+
+static uint32_t competitivePresentationObjectiveDeadlineTick(const world& w)
+{
+    if (!g_bomb_system.isPlanted() || g_bomb_system.bomb.timer <= 0.0f)
+        return 0;
+    const float fixed_delta = w.fixed_delta > 0.0f ? w.fixed_delta : (1.0f / 60.0f);
+    const uint32_t remaining_ticks = static_cast<uint32_t>(std::lround(g_bomb_system.bomb.timer / fixed_delta));
+    return g_server_network.getCurrentTick() + remaining_ticks;
+}
+
+static bool buildCompetitivePresentationSnapshot(
+    world& w, uint16_t recipient_client_id, uint32_t revision, uint32_t source_server_tick,
+    CompetitivePresentationSnapshotMessage& message)
+{
+    const Competitive::SessionRecord* recipient_session = g_sessions.find(recipient_client_id);
+    const ClientInfo* recipient_client = g_server_network.getClientInfo(recipient_client_id);
+    if (!recipient_session || !recipient_client || !recipient_client->peer)
+        return false;
+
+    std::vector<CompetitivePresentationParticipant> participants;
+    if (!collectCompetitivePresentationParticipants(w, participants)) {
+        LOG_ENGINE_ERROR("Competitive presentation roster exceeds bounded {} rows", kCompetitivePresentationMaxRows);
+        return false;
+    }
+
+    message = CompetitivePresentationSnapshotMessage{};
+    message.match_instance_id = competitiveContext().presentation_match_instance_id;
+    message.presentation_revision = revision;
+    message.source_server_tick = source_server_tick;
+    message.recipient_team = Competitive::teamId(recipient_session->team);
+    message.phase = static_cast<uint8_t>(g_round_system.state.phase);
+    message.phase_deadline_tick = g_round_system.state.phase_deadline_tick;
+    message.round_number = g_round_system.state.round_number;
+    message.wins_attackers = g_round_system.state.wins_attackers;
+    message.wins_defenders = g_round_system.state.wins_defenders;
+    message.last_reason = static_cast<uint8_t>(g_round_system.state.last_reason);
+    message.last_winner = static_cast<uint8_t>(g_round_system.state.last_winner);
+    message.objective_state = static_cast<uint8_t>(g_bomb_system.bomb.state);
+    message.objective_site = g_bomb_system.isPlanted() ? g_bomb_system.bomb.site : 0xff;
+    message.objective_deadline_tick = competitivePresentationObjectiveDeadlineTick(w);
+    if (g_bomb_system.bomb.state == Competitive::BombState::Planting ||
+        g_bomb_system.bomb.state == Competitive::BombState::Defusing) {
+        const entt::entity actor = g_bomb_system.bomb.state == Competitive::BombState::Planting
+            ? g_bomb_system.bomb.carrier : g_bomb_system.bomb.defuser;
+        if (w.registry.valid(actor) && w.registry.all_of<NetworkedEntity>(actor)) {
+            const uint16_t actor_client_id = w.registry.get<NetworkedEntity>(actor).owner_client_id;
+            message.channel_kind = g_bomb_system.bomb.state == Competitive::BombState::Planting ? 1 : 2;
+            message.channel_actor_stable_id = competitiveContext().presentationPlayerId(actor_client_id);
+            const float duration = message.channel_kind == 1 ? g_bomb_system.config.plant_seconds
+                : g_bomb_system.activeDefuseDuration();
+            const float elapsed = message.channel_kind == 1 ? g_bomb_system.bomb.plant_channel
+                : g_bomb_system.bomb.defuse_channel;
+            const float fixed_delta = w.fixed_delta > 0.0f ? w.fixed_delta : (1.0f / 60.0f);
+            message.channel_deadline_tick = source_server_tick + static_cast<uint32_t>(std::lround(
+                std::max(0.0f, duration - elapsed) / fixed_delta));
+        }
+    }
+
+    const bool recipient_has_team_policy = Competitive::isPlayingTeam(recipient_session->team) &&
+        recipient_session->state != Competitive::SessionState::Spectating;
+    for (const auto& participant : participants) {
+        auto& row = message.roster[message.roster_count++];
+        row.stable_player_id = participant.stable_player_id;
+        row.display_name = participant.display_name;
+        row.team = Competitive::teamId(participant.team);
+        row.state = static_cast<uint8_t>(participant.state);
+        row.kills = participant.kills;
+        row.deaths = participant.deaths;
+        row.is_bot = participant.is_bot ? 1 : 0;
+        // The conservative v1 policy publishes balance only to the receiver's
+        // active playing side. Spectators and opposing rows carry an explicit
+        // hidden marker and zero, never an inferred wallet value.
+        row.money_visible = competitivePresentationAllowsTeamPrivateData(
+            Competitive::teamId(recipient_session->team),
+            recipient_session->state == Competitive::SessionState::Spectating,
+            Competitive::teamId(participant.team)) ? 1 : 0;
+        row.money = row.money_visible ? participant.money : 0;
+        row.ping_ms = participant.ping_ms;
+    }
+
+    if (recipient_has_team_policy) {
+        const uint32_t recipient_stable_id = competitiveContext().presentationPlayerId(recipient_client_id);
+        for (const auto& participant : participants) {
+            if (!participant.has_position || participant.team != recipient_session->team ||
+                participant.state != CompetitivePresentationRosterState::Alive)
+                continue;
+            auto& record = message.radar[message.radar_count++];
+            record.stable_record_id = participant.stable_player_id;
+            record.kind = participant.stable_player_id == recipient_stable_id
+                ? static_cast<uint8_t>(CompetitivePresentationRadarKind::Self)
+                : static_cast<uint8_t>(CompetitivePresentationRadarKind::Teammate);
+            record.position = participant.position;
+        }
+        if (g_bomb_system.isPlanted() &&
+            isFiniteCompetitivePresentationPosition(g_bomb_system.bomb.planted_position)) {
+            auto& record = message.radar[message.radar_count++];
+            record.stable_record_id = std::numeric_limits<uint32_t>::max();
+            record.kind = static_cast<uint8_t>(CompetitivePresentationRadarKind::Objective);
+            record.position = g_bomb_system.bomb.planted_position;
+        }
+    }
+    return isValidCompetitivePresentationSnapshot(message);
+}
+
+static bool publishCompetitivePresentationSnapshots(bool heartbeat)
+{
+    world* w = g_server_services ? g_server_services->game_world : nullptr;
+    if (!w || !g_competitive || !g_competitive_map_ready)
+        return false;
+    auto& context = competitiveContext();
+    struct PendingSnapshot { uint16_t client_id; std::vector<uint8_t> content; };
+    std::vector<PendingSnapshot> pending;
+    for (uint16_t client_id = 1; client_id < g_server_network.getNextClientId(); ++client_id) {
+        CompetitivePresentationSnapshotMessage provisional;
+        if (!buildCompetitivePresentationSnapshot(*w, client_id, 1, 0, provisional))
+            continue;
+        BitWriter fingerprint_writer;
+        if (!CompetitiveSerializer::serialize(fingerprint_writer, provisional))
+            continue;
+        std::vector<uint8_t> content(fingerprint_writer.getData(),
+            fingerprint_writer.getData() + fingerprint_writer.getByteSize());
+        const auto last = context.presentation_last_content.find(client_id);
+        if (heartbeat || last == context.presentation_last_content.end() || last->second != content)
+            pending.push_back(PendingSnapshot{client_id, std::move(content)});
+    }
+    if (pending.empty())
+        return false;
+    ++context.presentation_revision;
+    if (context.presentation_revision == 0)
+        ++context.presentation_revision;
+    const uint32_t source_tick = g_server_network.getCurrentTick();
+    for (auto& pending_snapshot : pending) {
+        CompetitivePresentationSnapshotMessage message;
+        if (!buildCompetitivePresentationSnapshot(*w, pending_snapshot.client_id,
+                                                  context.presentation_revision, source_tick, message))
+            continue;
+        BitWriter writer;
+        if (!CompetitiveSerializer::serialize(writer, message)) {
+            LOG_ENGINE_ERROR("Failed to serialize competitive presentation snapshot recipient={}",
+                pending_snapshot.client_id);
+            continue;
+        }
+        g_server_network.sendReliableToClient(pending_snapshot.client_id, writer);
+        context.presentation_last_content[pending_snapshot.client_id] = std::move(pending_snapshot.content);
+        LOG_ENGINE_INFO("COMPETITIVE_PRESENTATION recipient={} instance={} revision={} rows={} radar={} heartbeat={}",
+            pending_snapshot.client_id, message.match_instance_id, message.presentation_revision,
+            static_cast<unsigned>(message.roster_count), static_cast<unsigned>(message.radar_count), heartbeat ? 1 : 0);
+    }
+    return true;
+}
 static void competitiveFreezeRespawnAll()
 {
     world* w = g_server_services ? g_server_services->game_world : nullptr;
@@ -2824,6 +3083,10 @@ GAME_API bool gardenServerInit(EngineServices* services)
             broadcastRoundState();
             sendAuthoritativeTeamState(client_id, Competitive::FpsTeam::None);
             replayWorldItemsToClient(*g_server_services->game_world, client_id);
+            // The admission snapshot is individualized even before a pawn
+            // exists, so the later client cache has a deterministic empty or
+            // awaiting-team baseline rather than deriving a roster locally.
+            (void)publishCompetitivePresentationSnapshots(true);
             LOG_ENGINE_INFO("Competitive session admitted for client {}; awaiting team selection", client_id);
         }
     });
@@ -2837,6 +3100,7 @@ GAME_API bool gardenServerInit(EngineServices* services)
             // replayable. A disconnect releases the client-id stream for a
             // future connection.
             g_buy_system.clearClient(client_id);
+            competitiveContext().forgetPresentationRecipient(client_id);
             g_sessions.remove(client_id);
         }
     });
@@ -2910,6 +3174,7 @@ GAME_API void gardenServerUpdate(float delta_time)
     // Gameplay.
     g_server_network.advanceSimulationTicks(1);
     updateServerPlayerCollisions(*w);
+    bool competitive_presentation_heartbeat = false;
     if (g_competitive && g_competitive_map_ready) {
         Competitive::RoundTickInput rin;
         auto pv = w->registry.view<NetworkedEntity, TeamComponent, FpsHealthComponent>();
@@ -2939,6 +3204,12 @@ GAME_API void gardenServerUpdate(float delta_time)
         auto& round_heartbeat = competitiveContext().round_heartbeat;
         round_heartbeat += delta_time;
         if (round_heartbeat >= 1.0f) { round_heartbeat = 0.0f; broadcastRoundState(); }
+        auto& presentation_heartbeat = competitiveContext().presentation_heartbeat;
+        presentation_heartbeat += delta_time;
+        if (presentation_heartbeat >= 1.0f) {
+            presentation_heartbeat = 0.0f;
+            competitive_presentation_heartbeat = true;
+        }
     }
     g_game_rules.Update(*w, delta_time);
     {
@@ -2992,6 +3263,10 @@ GAME_API void gardenServerUpdate(float delta_time)
     }
 
     FPSShooter::updateAnimationParameters(w->registry);
+    // Presentation publication intentionally follows all fixed-tick gameplay
+    // resolution and ECS mirror updates, and precedes generic world state.
+    if (g_competitive && g_competitive_map_ready)
+        (void)publishCompetitivePresentationSnapshots(competitive_presentation_heartbeat);
     g_server_network.publishWorldState();
 
     EventBus::get().flush();

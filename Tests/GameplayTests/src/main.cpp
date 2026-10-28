@@ -4265,6 +4265,8 @@ int main()
     ok = testCompetitiveSessionFlow() && ok;
     ok = testCompetitiveBuyZoneOccupancy() && ok;
     ok = testCompetitiveProtocolStatePublication() && ok;
+    ok = testCompetitivePresentationSnapshotProtocol() && ok;
+    ok = testCompetitivePresentationSnapshotCache() && ok;
     ok = testWeaponRosterIntegrity() && ok;
     ok = testWeaponAuthorityTiming() && ok;
     ok = testLagCompensatedShotPoseFallbackAndMissCount() && ok;

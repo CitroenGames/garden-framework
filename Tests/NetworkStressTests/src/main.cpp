@@ -16,6 +16,7 @@
 #include "Utils/Log.hpp"
 #include "world.hpp"
 #include "../../../Templates/FPSShooter/src/shared/FpsCombatFeed.hpp"
+#include "../../../Templates/FPSShooter/src/shared/CombatProtocol.hpp"
 
 #include <SDL3/SDL.h>
 
@@ -572,7 +573,7 @@ static bool runNetworkHierarchyBoundaryTests()
     return true;
 }
 
-static bool runWireV5HandshakeTests()
+static bool runWireV6HandshakeTests()
 {
     TestState state;
     world server_world;
@@ -645,7 +646,13 @@ static bool runWireV5HandshakeTests()
     }
     if (server.getClientCount() != 0) state.addError("level reject allocated a client id");
 
-    // Valid v5 client (real manager, matching hash) connects; caps echo.
+    // The prior v5 custom-message surface must be rejected before allocation.
+    if (rawConnectAttempt(server, port, 5, 0x1234ABCDu, Net::CAP_ALL_KNOWN) != 1) {
+        state.addError("v5 client was not rejected with VersionMismatch (1)");
+    }
+    if (server.getClientCount() != 0) state.addError("v5 reject allocated a client id");
+
+    // Valid v6 client (real manager, matching hash) connects; caps echo.
     {
         world client_world;
         Net::ClientNetworkManager client;
@@ -664,8 +671,8 @@ static bool runWireV5HandshakeTests()
             server.pumpNetworkEvents(kFixedDelta);
             SDL_Delay(1);
         }
-        if (!client.isConnected()) state.addError("valid v5 client did not connect");
-        if (server.getClientCount() != 1) state.addError("valid v5 client was not allocated exactly one id");
+        if (!client.isConnected()) state.addError("valid v6 client did not connect");
+        if (server.getClientCount() != 1) state.addError("valid v6 client was not allocated exactly one id");
         if (client.getNegotiatedCapabilityFlags() != Net::CAP_ALL_KNOWN) {
             state.addError("accept did not echo negotiated capability flags");
         }
@@ -684,7 +691,7 @@ static bool runWireV5HandshakeTests()
         }
         return false;
     }
-    std::cout << "[PASS] WireV5HandshakeTests\n";
+    std::cout << "[PASS] WireV6HandshakeTests\n";
     return true;
 }
 
@@ -787,6 +794,71 @@ static bool runCombatEventProtocolTests()
         return false;
     }
     std::cout << "[PASS] CombatEventProtocolTests\n";
+    return true;
+}
+
+static bool runCompetitivePresentationProtocolTests()
+{
+    TestState state;
+    CompetitivePresentationSnapshotMessage snapshot;
+    snapshot.match_instance_id = 73;
+    snapshot.presentation_revision = 0xfffffffeu;
+    snapshot.source_server_tick = 400;
+    snapshot.recipient_team = 1;
+    snapshot.phase = 3;
+    snapshot.phase_deadline_tick = 800;
+    snapshot.round_number = 12;
+    snapshot.objective_state = 4;
+    snapshot.objective_site = 1;
+    snapshot.objective_deadline_tick = 900;
+    snapshot.roster_count = 2;
+    snapshot.roster[0] = {101, "Alpha", 1, 1, 3, 2, 0, 1, 3100, 12};
+    snapshot.roster[1] = {202, "BOT 1", 2, 2, 1, 4, 1, 0, 0, 0};
+    snapshot.radar_count = 2;
+    snapshot.radar[0] = {101, 0, glm::vec3(1.0f, 0.0f, 2.0f)};
+    snapshot.radar[1] = {std::numeric_limits<uint32_t>::max(), 2, glm::vec3(3.0f, 0.0f, 4.0f)};
+
+    Net::BitWriter writer;
+    if (!CompetitiveSerializer::serialize(writer, snapshot)) {
+        state.addError("valid presentation snapshot did not serialize");
+    } else {
+        CompetitivePresentationSnapshotMessage decoded;
+        Net::BitReader reader(writer.getData(), writer.getByteSize());
+        if (!CompetitiveSerializer::deserialize(reader, decoded) ||
+            decoded.match_instance_id != snapshot.match_instance_id ||
+            decoded.presentation_revision != snapshot.presentation_revision ||
+            decoded.roster[0].money != 3100 || decoded.roster[1].money_visible != 0) {
+            state.addError("presentation snapshot round-trip changed receiver-filtered data");
+        }
+        std::vector<uint8_t> oversized(writer.getData(), writer.getData() + writer.getByteSize());
+        oversized.resize(kCompetitivePresentationMaxPayloadBytes + 1, 0);
+        Net::BitReader oversized_reader(oversized.data(), oversized.size());
+        if (CompetitiveSerializer::deserialize(oversized_reader, decoded))
+            state.addError("oversize presentation payload deserialized");
+        std::vector<uint8_t> unknown_type(writer.getData(), writer.getData() + writer.getByteSize());
+        unknown_type[0] = static_cast<uint8_t>(CompetitivePresentationMessageType::SNAPSHOT) + 1;
+        Net::BitReader unknown_type_reader(unknown_type.data(), unknown_type.size());
+        if (CompetitiveSerializer::deserialize(unknown_type_reader, decoded))
+            state.addError("unknown presentation type deserialized");
+    }
+    CompetitivePresentationSnapshotMessage invalid = snapshot;
+    invalid.type = static_cast<uint8_t>(CompetitivePresentationMessageType::SNAPSHOT) + 1;
+    if (CompetitiveSerializer::serialize(writer, invalid)) state.addError("unknown presentation type serialized");
+    invalid = snapshot;
+    invalid.roster[1].stable_player_id = 101;
+    if (CompetitiveSerializer::serialize(writer, invalid)) state.addError("duplicate presentation row identity serialized");
+    invalid = snapshot;
+    invalid.radar[1].kind = 3;
+    if (CompetitiveSerializer::serialize(writer, invalid)) state.addError("unknown radar policy enum serialized");
+    if (!isCompetitivePresentationRevisionNewer(1u, 0xfffffffeu) ||
+        isCompetitivePresentationRevisionNewer(0xfffffffeu, 1u))
+        state.addError("wrapped presentation revision order changed");
+
+    if (state.error_count != 0) {
+        for (const std::string& error : state.errors) std::cerr << "[FAIL] " << error << "\n";
+        return false;
+    }
+    std::cout << "[PASS] CompetitivePresentationProtocolTests\n";
     return true;
 }
 
@@ -2405,8 +2477,9 @@ int main(int argc, char** argv)
         EE::CLog::GetClientLogger()->set_level(spdlog::level::warn);
         EE::CLog::GetLuaLogger()->set_level(spdlog::level::warn);
     }
-    const bool handshake_ok = runWireV5HandshakeTests();
+    const bool handshake_ok = runWireV6HandshakeTests();
     const bool combat_event_protocol_ok = runCombatEventProtocolTests();
+    const bool competitive_presentation_protocol_ok = runCompetitivePresentationProtocolTests();
     const bool transport_pending_queue_accounting_ok = runTransportPendingQueueAccountingTests();
     const bool custom_ingress_ok = runCustomIngressRejectionTests();
     const bool hierarchy_boundary_ok = runNetworkHierarchyBoundaryTests();
@@ -2424,7 +2497,7 @@ int main(int argc, char** argv)
     const bool input_burst_admission_ok = runInputBurstAdmissionRegressionTest();
     const bool ok = runNetworkStress(config);
     EE::CLog::Shutdown();
-    return (handshake_ok && combat_event_protocol_ok && transport_pending_queue_accounting_ok && custom_ingress_ok && hierarchy_boundary_ok && interpolation_buffer_wrap_ok && interpolation_jitter_ok && lag_history_wrap_ok &&
+    return (handshake_ok && combat_event_protocol_ok && competitive_presentation_protocol_ok && transport_pending_queue_accounting_ok && custom_ingress_ok && hierarchy_boundary_ok && interpolation_buffer_wrap_ok && interpolation_jitter_ok && lag_history_wrap_ok &&
             lag_view_tick_clamp_ok &&
             input_view_tick_protocol_ok && input_view_tick_loopback_ok && interpolation_manager_wrap_ok &&
             raw_interpolation_ok && blocked_input_cursor_ok && unreliable_queue_drain_ok && input_send_credit_ok &&

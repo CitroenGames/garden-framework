@@ -1,9 +1,12 @@
 #pragma once
 
 #include "shared/CombatProtocol.hpp"
+#include "shared/CompetitivePresentationCache.hpp"
 #include "ui/UiLogic.hpp"
 
+#include <limits>
 #include <string>
+#include <vector>
 
 bool testCompetitiveProtocolStatePublication()
 {
@@ -153,5 +156,151 @@ bool testCompetitiveProtocolStatePublication()
     if (CompetitiveSerializer::deserialize(wrong_reader, wrong_type))
         return fail(name, "round handler accepted an owner-only economy message");
 
+    return pass(name);
+}
+
+bool testCompetitivePresentationSnapshotProtocol()
+{
+    const std::string name = "CompetitivePresentationSnapshot_Protocol";
+    CompetitivePresentationSnapshotMessage snapshot;
+    snapshot.match_instance_id = 42;
+    snapshot.presentation_revision = 9;
+    snapshot.source_server_tick = 600;
+    snapshot.recipient_team = Competitive::teamId(Competitive::FpsTeam::Defenders);
+    snapshot.phase = static_cast<uint8_t>(Competitive::RoundPhase::Live);
+    snapshot.phase_deadline_tick = 1200;
+    snapshot.round_number = 7;
+    snapshot.wins_attackers = 3;
+    snapshot.wins_defenders = 4;
+    snapshot.objective_state = static_cast<uint8_t>(Competitive::BombState::Planted);
+    snapshot.objective_site = 1;
+    snapshot.objective_deadline_tick = 900;
+    snapshot.roster_count = 2;
+    snapshot.roster[0] = {10, "alpha", Competitive::teamId(Competitive::FpsTeam::Attackers),
+        static_cast<uint8_t>(CompetitivePresentationRosterState::Alive), 3, 1, 0, 0, 0, 18};
+    snapshot.roster[1] = {20, "BOT 2", Competitive::teamId(Competitive::FpsTeam::Defenders),
+        static_cast<uint8_t>(CompetitivePresentationRosterState::Dead), 1, 4, 1, 1, 4200, 0};
+    snapshot.radar_count = 2;
+    snapshot.radar[0] = {20, static_cast<uint8_t>(CompetitivePresentationRadarKind::Self), glm::vec3(1, 2, 3)};
+    snapshot.radar[1] = {std::numeric_limits<uint32_t>::max(),
+        static_cast<uint8_t>(CompetitivePresentationRadarKind::Objective), glm::vec3(4, 5, 6)};
+
+    Net::BitWriter writer;
+    if (!CompetitiveSerializer::serialize(writer, snapshot) || writer.getByteSize() > kCompetitivePresentationMaxPayloadBytes)
+        return fail(name, "valid bounded snapshot did not serialize");
+    Net::BitReader reader(writer.getData(), writer.getByteSize());
+    CompetitivePresentationSnapshotMessage received;
+    if (!CompetitiveSerializer::deserialize(reader, received) ||
+        received.match_instance_id != snapshot.match_instance_id ||
+        received.presentation_revision != snapshot.presentation_revision ||
+        received.roster_count != 2 || received.roster[1].money != 4200 ||
+        received.radar_count != 2 || received.radar[1].stable_record_id != std::numeric_limits<uint32_t>::max())
+        return fail(name, "valid snapshot round trip lost durable presentation state");
+
+    CompetitivePresentationSnapshotMessage invalid = snapshot;
+    invalid.roster[1].stable_player_id = invalid.roster[0].stable_player_id;
+    Net::BitWriter invalid_writer;
+    if (CompetitiveSerializer::serialize(invalid_writer, invalid))
+        return fail(name, "duplicate stable roster id serialized");
+    invalid = snapshot;
+    invalid.roster[0].display_name = "bad\nname";
+    if (CompetitiveSerializer::serialize(invalid_writer, invalid))
+        return fail(name, "unsafe roster name serialized");
+    invalid = snapshot;
+    invalid.roster[0].money_visible = 0;
+    invalid.roster[0].money = 1;
+    if (CompetitiveSerializer::serialize(invalid_writer, invalid))
+        return fail(name, "hidden money serialized with a value");
+    invalid = snapshot;
+    invalid.radar_count = kCompetitivePresentationMaxRadarRecords + 1;
+    if (CompetitiveSerializer::serialize(invalid_writer, invalid))
+        return fail(name, "oversize radar row count serialized");
+
+    std::vector<uint8_t> malformed(writer.getData(), writer.getData() + writer.getByteSize());
+    malformed[1] = kCompetitivePresentationSchemaVersion + 1;
+    Net::BitReader unknown_version_reader(malformed.data(), malformed.size());
+    if (CompetitiveSerializer::deserialize(unknown_version_reader, received))
+        return fail(name, "unknown presentation schema version deserialized");
+    malformed.assign(writer.getData(), writer.getData() + writer.getByteSize());
+    malformed.push_back(0xff);
+    Net::BitReader trailing_reader(malformed.data(), malformed.size());
+    if (CompetitiveSerializer::deserialize(trailing_reader, received))
+        return fail(name, "trailing presentation payload deserialized");
+
+    if (!isCompetitivePresentationRevisionNewer(1, std::numeric_limits<uint32_t>::max()) ||
+        isCompetitivePresentationRevisionNewer(std::numeric_limits<uint32_t>::max(), 1) ||
+        isCompetitivePresentationRevisionNewer(5, 5))
+        return fail(name, "wrapped presentation revision ordering changed");
+    if (!competitivePresentationAllowsTeamPrivateData(2, false, 2) ||
+        competitivePresentationAllowsTeamPrivateData(2, false, 1) ||
+        competitivePresentationAllowsTeamPrivateData(2, true, 2) ||
+        competitivePresentationAllowsTeamPrivateData(3, false, 2))
+        return fail(name, "recipient wallet and radar privacy policy changed");
+    Competitive::CompetitiveWorldContext first_context;
+    Competitive::CompetitiveWorldContext second_context;
+    first_context.configure(Competitive::ModeConfig{});
+    second_context.configure(Competitive::ModeConfig{});
+    const uint32_t first_player_id = first_context.presentationPlayerId(11);
+    if (first_context.presentation_match_instance_id == 0 ||
+        second_context.presentation_match_instance_id == 0 ||
+        first_context.presentation_match_instance_id == second_context.presentation_match_instance_id ||
+        first_player_id == 0 || first_player_id != first_context.presentationPlayerId(11) ||
+        first_player_id == first_context.presentationPlayerId(12))
+        return fail(name, "match-scoped presentation identities were not stable");
+    return pass(name);
+}
+
+bool testCompetitivePresentationSnapshotCache()
+{
+    const std::string name = "CompetitivePresentationSnapshot_Cache";
+    CompetitivePresentationSnapshotMessage initial;
+    initial.match_instance_id = 9;
+    initial.presentation_revision = 7;
+    initial.recipient_team = Competitive::teamId(Competitive::FpsTeam::Defenders);
+    initial.roster_count = 1;
+    initial.roster[0] = {10, "alpha", Competitive::teamId(Competitive::FpsTeam::Defenders),
+        static_cast<uint8_t>(CompetitivePresentationRosterState::Alive), 0, 0, 0, 1, 800, 0};
+    initial.radar_count = 1;
+    initial.radar[0] = {10, static_cast<uint8_t>(CompetitivePresentationRadarKind::Self), glm::vec3(1, 2, 3)};
+
+    CompetitivePresentationSnapshotCache cache;
+    if (cache.accept(initial) != CompetitivePresentationSnapshotAcceptResult::AcceptedInitial ||
+        !cache.hasSnapshot() || cache.snapshot()->presentation_revision != 7)
+        return fail(name, "initial valid snapshot did not create bounded cache state");
+
+    CompetitivePresentationSnapshotMessage malformed = initial;
+    malformed.roster[0].display_name = "bad\nname";
+    if (cache.accept(malformed) != CompetitivePresentationSnapshotAcceptResult::RejectedInvalid ||
+        cache.snapshot()->presentation_revision != initial.presentation_revision)
+        return fail(name, "malformed snapshot mutated accepted state");
+
+    CompetitivePresentationSnapshotMessage stale = initial;
+    stale.presentation_revision = 6;
+    if (cache.accept(stale) != CompetitivePresentationSnapshotAcceptResult::RejectedStaleRevision ||
+        cache.snapshot()->presentation_revision != initial.presentation_revision)
+        return fail(name, "stale revision replaced accepted snapshot");
+
+    CompetitivePresentationSnapshotMessage newer = initial;
+    newer.presentation_revision = 8;
+    newer.roster_count = 0;
+    newer.radar_count = 0;
+    if (cache.accept(newer) != CompetitivePresentationSnapshotAcceptResult::AcceptedNewerRevision ||
+        cache.snapshot()->roster_count != 0 || cache.snapshot()->radar_count != 0)
+        return fail(name, "new revision did not replace missing roster or radar rows");
+
+    CompetitivePresentationSnapshotMessage new_instance = newer;
+    new_instance.match_instance_id = 10;
+    new_instance.presentation_revision = 1;
+    if (cache.accept(new_instance) != CompetitivePresentationSnapshotAcceptResult::AcceptedNewerInstance ||
+        cache.snapshot()->match_instance_id != new_instance.match_instance_id)
+        return fail(name, "newer instance did not reset prior durable snapshot");
+
+    if (cache.accept(newer) != CompetitivePresentationSnapshotAcceptResult::RejectedStaleInstance ||
+        cache.snapshot()->match_instance_id != new_instance.match_instance_id)
+        return fail(name, "late prior instance resurrected cached data");
+
+    cache.clear();
+    if (cache.hasSnapshot() || cache.snapshot() != nullptr)
+        return fail(name, "teardown clear retained presentation state");
     return pass(name);
 }
