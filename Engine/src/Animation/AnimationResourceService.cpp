@@ -43,6 +43,7 @@ struct AnimationLoadEntry
     std::shared_ptr<const AnimationResourceSet> resource;
     std::optional<AnimationResourceError> error;
     std::future<LoadResult> future;
+    bool unloaded = false;
 };
 
 AnimationResourceService& AnimationResourceService::get()
@@ -144,6 +145,33 @@ AnimationResourceState AnimationResourceService::getState(const AnimationLoadTic
     return ticket.m_entry->state;
 }
 
+bool AnimationResourceService::unload(const AnimationResourceKey& key)
+{
+    AnimationResourceError path_error;
+    const std::string canonical_path = canonicalPackagePath(key, path_error);
+    if (canonical_path.empty()) return false;
+    const std::string cache_key = canonical_path + "#" + std::to_string(key.skin_index);
+
+    std::shared_ptr<AnimationLoadEntry> entry;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        const auto found = m_entries.find(cache_key);
+        if (found == m_entries.end()) return false;
+        entry = found->second;
+        entry->unloaded = true;
+        m_entries.erase(found);
+    }
+
+    if (entry->future.valid()) entry->future.wait();
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        entry->resource.reset();
+        entry->error = AnimationResourceError{"ANIM_RESOURCE_UNLOADED",
+            "animation resource was unloaded: " + canonical_path};
+        entry->state = AnimationResourceState::Failed;
+    }
+    return true;
+}
 void AnimationResourceService::update()
 {
     std::lock_guard<std::mutex> lock(m_mutex);
@@ -154,7 +182,14 @@ void AnimationResourceService::update()
             continue;
 
         LoadResult result = entry->future.get();
-        if (result.resource)
+        if (entry->unloaded)
+        {
+            entry->resource.reset();
+            entry->error = AnimationResourceError{"ANIM_RESOURCE_UNLOADED",
+                "animation resource was unloaded: " + entry->canonical_path};
+            entry->state = AnimationResourceState::Failed;
+        }
+        else if (result.resource)
         {
             entry->resource = std::move(result.resource);
             entry->error.reset();
@@ -174,8 +209,15 @@ void AnimationResourceService::shutdown()
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         entries.swap(m_entries);
+        for (auto& [_, entry] : entries) entry->unloaded = true;
     }
     for (auto& [_, entry] : entries)
-        if (entry->future.valid())
-            entry->future.wait();
+    {
+        if (entry->future.valid()) entry->future.wait();
+        std::lock_guard<std::mutex> lock(m_mutex);
+        entry->resource.reset();
+        entry->error = AnimationResourceError{"ANIM_RESOURCE_UNLOADED",
+            "animation resource service shut down"};
+        entry->state = AnimationResourceState::Failed;
+    }
 }

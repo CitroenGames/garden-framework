@@ -3,6 +3,8 @@
 #include "Audio/SoundEvent.hpp"
 #include "Audio/AudioEventRouter.hpp"
 #include "Audio/SoundEventTable.hpp"
+#include "Audio/SoundEventTableResourceService.hpp"
+#include "Assets/AssetManager.hpp"
 #include "Audio/AudioSourceSystem.hpp"
 #include "Components/AudioSourceComponent.hpp"
 #include "Components/IdentityComponent.hpp"
@@ -15,6 +17,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <thread>
 
 namespace
 {
@@ -200,6 +203,8 @@ bool testAudioEventTableRejectsMalformedDefinitions()
         "{",
         R"({"schema":"garden.sound-events","version":2,"events":[]})",
         R"({"schema":"other","version":1,"events":[]})",
+        R"({"schema":"garden.sound-events","version":1,"events":[],"legacy_events":[]})",
+        R"({"schema":"garden.sound-events","version":1,"events":[{"id":"bad","clips":["clip.wav"],"volume":1,"pitch_min":1,"pitch_max":1,"group":"sfx","min_distance":1,"max_distance":2,"priority":50,"max_voices":1,"loop":false,"legacy_clip":"clip.wav"}]})",
         R"({"schema":"garden.sound-events","version":1,"events":[{"id":"bad","clips":[],"volume":1,"pitch_min":1,"pitch_max":1,"group":"sfx","min_distance":1,"max_distance":2,"priority":50,"max_voices":1,"loop":false}]})",
         R"({"schema":"garden.sound-events","version":1,"events":[{"id":"bad","clips":["clip.wav"],"volume":-1,"pitch_min":1,"pitch_max":1,"group":"sfx","min_distance":1,"max_distance":2,"priority":50,"max_voices":1,"loop":false}]})",
         R"({"schema":"garden.sound-events","version":1,"events":[{"id":"bad","clips":["clip.wav"],"volume":1,"pitch_min":1.1,"pitch_max":1,"group":"sfx","min_distance":1,"max_distance":2,"priority":50,"max_voices":1,"loop":false}]})",
@@ -225,6 +230,107 @@ bool testAudioEventTableRejectsMalformedDefinitions()
     return pass(name);
 }
 
+bool testSoundEventTableResourceService()
+{
+    const std::string name = "AS-3.1 typed sound-event documents publish immutably and unload safely";
+    namespace fs = std::filesystem;
+    const fs::path root = fs::temp_directory_path() /
+        ("garden_sound_event_resource_" +
+         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::error_code ec;
+    fs::create_directories(root, ec);
+    if (ec) return fail(name, "could not create resource fixture directory");
+
+    SoundEventTableResourceService& service = SoundEventTableResourceService::get();
+    const std::string previous_root = Assets::AssetManager::get().getAssetRoot();
+    const auto cleanup = [&]() {
+        service.shutdown();
+        Assets::AssetManager::get().setAssetRoot(previous_root);
+        std::error_code ignored;
+        fs::remove_all(root, ignored);
+    };
+    const auto fail_with_cleanup = [&](const std::string& reason) {
+        cleanup();
+        return fail(name, reason);
+    };
+
+    const std::string valid_document =
+        R"({"schema":"garden.sound-events","version":1,"events":[{"id":"weapon.fire","clips":["assets/audio/fire.wav"],"volume":1,"pitch_min":1,"pitch_max":1,"group":"sfx","min_distance":1,"max_distance":40,"priority":50,"max_voices":4,"loop":false}]})";
+    {
+        std::ofstream output(root / "events.sound.json", std::ios::binary | std::ios::trunc);
+        output << valid_document;
+        if (!output.good()) return fail_with_cleanup("could not write valid document");
+    }
+    {
+        std::ofstream output(root / "bad.sound.json", std::ios::binary | std::ios::trunc);
+        output << "{";
+        if (!output.good()) return fail_with_cleanup("could not write malformed document");
+    }
+
+    service.shutdown();
+    Assets::AssetManager::get().setAssetRoot(root.string());
+    const SoundEventTableResourceKey valid{"events.sound.json"};
+    const SoundEventTableLoadTicket first = service.request(valid);
+    const SoundEventTableLoadTicket duplicate = service.request({"./events.sound.json"});
+    std::shared_ptr<const SoundEventTable> published;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (!published && std::chrono::steady_clock::now() < deadline)
+    {
+        service.update();
+        published = service.tryGetReady(first);
+        std::this_thread::yield();
+    }
+    if (!published || service.tryGetReady(duplicate) != published ||
+        published->definitions().size() != 1 || published->definitions().front().name != "weapon.fire")
+        return fail_with_cleanup("canonical duplicate requests did not share one immutable document");
+
+    const SoundEventTableLoadTicket wrong_type = service.request({"events.canim"});
+    const auto wrong_type_error = service.getError(wrong_type);
+    if (service.getState(wrong_type) != SoundEventTableResourceState::Failed || !wrong_type_error ||
+        wrong_type_error->code != "SOUND_EVENT_DOCUMENT_EXTENSION")
+        return fail_with_cleanup("wrong resource type did not fail with the document extension diagnostic");
+
+    const SoundEventTableLoadTicket malformed = service.request({"bad.sound.json"});
+    const SoundEventTableLoadTicket missing = service.request({"missing.sound.json"});
+    const auto failure_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while ((service.getState(malformed) == SoundEventTableResourceState::Loading ||
+            service.getState(missing) == SoundEventTableResourceState::Loading) &&
+           std::chrono::steady_clock::now() < failure_deadline)
+    {
+        service.update();
+        std::this_thread::yield();
+    }
+    const auto malformed_error = service.getError(malformed);
+    const auto missing_error = service.getError(missing);
+    if (service.getState(malformed) != SoundEventTableResourceState::Failed || !malformed_error ||
+        malformed_error->code != "SOUND_EVENT_DOCUMENT_INVALID" ||
+        service.getState(missing) != SoundEventTableResourceState::Failed || !missing_error ||
+        missing_error->code != "SOUND_EVENT_DOCUMENT_READ")
+        return fail_with_cleanup("malformed or missing documents did not fail before publication");
+
+    if (!service.unload(valid) || service.tryGetReady(first) ||
+        service.getState(first) != SoundEventTableResourceState::Failed)
+        return fail_with_cleanup("unload retained a published table through its ticket");
+    const auto unloaded_error = service.getError(first);
+    if (!unloaded_error || unloaded_error->code != "SOUND_EVENT_DOCUMENT_UNLOADED" ||
+        published->definitions().front().name != "weapon.fire")
+        return fail_with_cleanup("unload did not preserve retained immutable data or name its failure");
+
+    const SoundEventTableLoadTicket reloaded = service.request(valid);
+    std::shared_ptr<const SoundEventTable> reloaded_table;
+    const auto reload_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (!reloaded_table && std::chrono::steady_clock::now() < reload_deadline)
+    {
+        service.update();
+        reloaded_table = service.tryGetReady(reloaded);
+        std::this_thread::yield();
+    }
+    if (!reloaded_table || reloaded_table->definitions().front().name != "weapon.fire")
+        return fail_with_cleanup("unloaded resource could not be requested as a fresh current document");
+
+    cleanup();
+    return pass(name);
+}
 bool testAudioEventTableReplacementKeepsActiveVoices()
 {
     const std::string name = "Audio.EventTableReplacement";

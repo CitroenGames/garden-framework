@@ -4,6 +4,7 @@
 #include <deque>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <functional>
 #include <utility>
 #include "EngineExport.h"
@@ -54,6 +55,17 @@ private:
 
     // Entity synchronization
     std::unordered_map<uint32_t, entt::entity> network_id_to_entity;
+    struct PendingSnapshot
+    {
+        EntityUpdateData update;
+        uint32_t server_tick = 0;
+    };
+    // Reliable SPAWN_ENTITY and unreliable snapshots can reorder. Hold only
+    // one latest validated snapshot per identity; no bare ECS entity is
+    // visible before the template recipe has constructed it.
+    std::unordered_map<uint32_t, PendingSnapshot> pending_snapshots;
+    std::unordered_set<uint32_t> pre_spawn_tombstones;
+    static constexpr std::size_t MAX_PENDING_SPAWN_SNAPSHOTS = 256;
     entt::entity local_player_entity = entt::null;
     uint32_t local_player_network_id = 0;
 
@@ -209,6 +221,8 @@ private:
 
     // Entity management
     bool createOrUpdateEntity(const EntityUpdateData& update);
+    bool applyUpdateToEntity(entt::entity entity, const EntityUpdateData& update);
+    bool queuePendingSnapshot(const EntityUpdateData& update, uint32_t server_tick);
     void seedInterpolationState(uint32_t network_id, const glm::vec3& position, float rotation_y);
     void mergeInterpolationState(const EntityUpdateData& update, uint32_t server_tick);
     void pushInterpolationSnapshot(uint32_t network_id, uint32_t server_tick);

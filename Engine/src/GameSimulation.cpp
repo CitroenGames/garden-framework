@@ -7,6 +7,7 @@
 #include "Timer/TimerSystem.hpp"
 #include "Audio/AudioSystem.hpp"
 #include "Audio/SoundEvent.hpp"
+#include "Audio/SoundEventTableResourceService.hpp"
 #include "Audio/AudioSourceSystem.hpp"
 #include "Animation/AnimationSystem.hpp"
 #include "Animation/AnimationResourceBindingSystem.hpp"
@@ -112,6 +113,8 @@ void GameSimulation::registerSystems()
         d.phase = Phase::Presentation;
         d.run_after = {"engine.player_representation"};
         d.update = [this](entt::registry& reg, const Tick::SimulationTickContext&) {
+            // Both services only publish immutable CPU data at this boundary.
+            SoundEventTableResourceService::get().update();
             AnimationResourceService::get().update();
             AnimationResourceBindingSystem::update(reg);
             AnimationSystem::update(reg, m_current_frame_dt);

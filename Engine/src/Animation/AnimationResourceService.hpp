@@ -62,6 +62,11 @@ public:
     std::optional<AnimationResourceError> getError(const AnimationLoadTicket& ticket) const;
     AnimationResourceState getState(const AnimationLoadTicket& ticket) const;
 
+    // Removes the canonical cache entry at a safe boundary. Existing tickets are
+    // invalidated after any in-flight decode completes; published immutable data
+    // remains owned by callers that already retained it.
+    bool unload(const AnimationResourceKey& key);
+
     // Call at the presentation safe boundary. Worker results become visible
     // together here, only after CompiledAnimationSerializer validated all bytes.
     void update();

@@ -13,6 +13,7 @@
 #include "Network/NetworkTransport.hpp"
 #include "Network/NetworkTypes.hpp"
 #include "Network/ServerNetworkManager.hpp"
+#include "Network/SpawnRecipeRegistry.hpp"
 #include "Utils/Log.hpp"
 #include "world.hpp"
 #include "../../../Templates/FPSShooter/src/shared/FpsCombatFeed.hpp"
@@ -36,6 +37,30 @@ namespace {
 constexpr float kFixedDelta = 1.0f / 60.0f;
 constexpr uint8_t kReliableStressMessage = Net::CUSTOM_MESSAGE_START;
 constexpr uint8_t kUnreliableStressMessage = Net::CUSTOM_MESSAGE_START + 1;
+constexpr uint16_t kGenericStressArchetypeId = 0x7001;
+
+bool validateGenericStressInitialState(const Net::SpawnEntityMessage&,
+                                       const std::vector<Net::ReplicatedExtEntry>& entries)
+{
+    return entries.empty();
+}
+
+bool constructGenericStressEntity(entt::registry&, entt::entity,
+                                  const Net::SpawnEntityMessage&)
+{
+    return true;
+}
+
+bool registerGenericStressRecipe()
+{
+    Net::SpawnRecipeRegistry& recipes = Net::SpawnRecipeRegistry::get();
+    recipes.clear();
+    return recipes.registerRecipe({
+        kGenericStressArchetypeId,
+        &validateGenericStressInitialState,
+        &constructGenericStressEntity
+    });
+}
 
 struct StressConfig
 {
@@ -452,6 +477,25 @@ static bool runNetworkHierarchyBoundaryTests()
         }
         return client.getLastReceivedServerTick() == expected_tick;
     };
+
+    // Generic replicated entities must arrive through the current recipe
+    // envelope before snapshots apply their ECS state.
+    if (state.error_count == 0) {
+        Net::SpawnEntityMessage root_spawn;
+        root_spawn.network_id = kRootNetworkId;
+        root_spawn.archetype_id = kGenericStressArchetypeId;
+        root_spawn.position = glm::vec3(10.0f, 0.0f, 0.0f);
+        server.sendSpawnEntityToClient(client.getClientId(), root_spawn);
+        server.update(0.0f);
+        for (int frame = 0; frame < 120 &&
+             client.getEntityByNetworkId(kRootNetworkId) == entt::null; ++frame) {
+            client.update(0.0f);
+            SDL_Delay(1);
+        }
+        if (client.getEntityByNetworkId(kRootNetworkId) == entt::null) {
+            state.addError("root spawn recipe did not reach client");
+        }
+    }
 
     if (state.error_count == 0 && !sendSnapshot()) {
         state.addError("root snapshot did not reach client");
@@ -1374,6 +1418,181 @@ static bool runInputViewTickLoopbackTest()
     return true;
 }
 
+static bool runArchetypeDispatchReorderTest()
+{
+    TestState state;
+    world server_world;
+    Net::ServerNetworkManager server;
+    if (!server.initialize()) {
+        std::cerr << "[FAIL] ArchetypeDispatchReorderTests could not initialize server\n";
+        return false;
+    }
+    server.setWorld(&server_world);
+    StressConfig config;
+    config.client_count = 1;
+    uint16_t port = 0;
+    if (!startServer(server, config, port)) {
+        std::cerr << "[FAIL] ArchetypeDispatchReorderTests could not start server\n";
+        server.shutdown();
+        return false;
+    }
+
+    world client_world;
+    Net::ClientNetworkManager client;
+    client.setWorld(&client_world);
+    if (!client.initialize() || !client.connectToServer("127.0.0.1", port, "recipe_reorder")) {
+        std::cerr << "[FAIL] ArchetypeDispatchReorderTests could not connect client\n";
+        client.shutdown();
+        server.shutdown();
+        return false;
+    }
+    for (int frame = 0; frame < 600 && !client.isConnected(); ++frame) {
+        client.update(kFixedDelta);
+        server.update(0.0f);
+        client.update(0.0f);
+        SDL_Delay(1);
+    }
+    if (!client.isConnected() || server.getClientCount() != 1) {
+        state.addError("recipe reorder client did not connect");
+    }
+
+    // The server builds the envelope from generic ECS identity and registered
+    // fields; the template supplies only the opaque archetype recipe id.
+    const entt::entity source_entity = server_world.registry.create();
+    const uint32_t source_network_id = server.registerEntity(source_entity);
+    server_world.registry.emplace<Net::NetworkedEntity>(source_entity, source_network_id, 9u, false);
+    TransformComponent source_transform;
+    source_transform.position = glm::vec3(3.0f, 4.0f, 5.0f);
+    source_transform.rotation.y = 30.0f;
+    server_world.registry.emplace<TransformComponent>(source_entity, source_transform);
+    Net::SpawnEntityMessage built_spawn;
+    if (source_network_id == 0 ||
+        !server.buildSpawnEntityMessage(source_entity, kGenericStressArchetypeId, built_spawn) ||
+        built_spawn.network_id != source_network_id ||
+        built_spawn.owner_client_id != 9u ||
+        glm::distance(built_spawn.position, source_transform.position) > 0.001f ||
+        std::abs(built_spawn.rotation_y - glm::radians(source_transform.rotation.y)) > 0.001f) {
+        state.addError("server did not build a current generic spawn envelope from ECS");
+    }
+    server.unregisterEntity(source_entity);
+    server_world.registry.destroy(source_entity);
+
+    constexpr uint32_t kReorderedId = 9101;
+    const auto sendRawSpawn = [&](const Net::SpawnEntityMessage& spawn) {
+        Net::BitWriter writer;
+        Net::NetworkSerializer::serialize(writer, spawn);
+        server.sendReliableToClient(client.getClientId(), writer);
+        server.update(0.0f);
+    };
+    const auto pumpClient = [&] {
+        for (int frame = 0; frame < 120; ++frame) {
+            client.update(0.0f);
+            server.update(0.0f);
+            if (client.getEntityByNetworkId(kReorderedId) != entt::null) return;
+            SDL_Delay(1);
+        }
+    };
+
+    if (state.error_count == 0) {
+        Net::WorldStateUpdateMessage state_message;
+        state_message.server_tick = 1;
+        Net::EntityUpdateData before_spawn;
+        before_spawn.entity_id = kReorderedId;
+        before_spawn.flags = Net::ComponentFlags::TRANSFORM | Net::ComponentFlags::ROTATION;
+        before_spawn.position = glm::vec3(7.0f, 2.0f, -3.0f);
+        before_spawn.rotation_y = 0.25f;
+        Net::BitWriter state_writer;
+        Net::NetworkSerializer::serialize(state_writer, state_message, {before_spawn});
+        server.sendUnreliableToClient(client.getClientId(), state_writer);
+        server.update(0.0f);
+        for (int frame = 0; frame < 120 && client.getLastReceivedServerTick() != 1; ++frame) {
+            client.update(0.0f);
+            SDL_Delay(1);
+        }
+        if (client.getEntityByNetworkId(kReorderedId) != entt::null) {
+            state.addError("snapshot before spawn constructed a bare entity");
+        }
+
+        Net::SpawnEntityMessage spawn;
+        spawn.network_id = kReorderedId;
+        spawn.archetype_id = kGenericStressArchetypeId;
+        spawn.position = glm::vec3(1.0f, 0.0f, 1.0f);
+        sendRawSpawn(spawn);
+        pumpClient();
+        const entt::entity entity = client.getEntityByNetworkId(kReorderedId);
+        if (entity == entt::null || !client_world.registry.valid(entity)) {
+            state.addError("registered recipe did not create reordered entity");
+        } else {
+            const auto& transform = client_world.registry.get<TransformComponent>(entity);
+            if (glm::distance(transform.position, before_spawn.position) > 0.001f ||
+                std::abs(transform.rotation.y - glm::degrees(before_spawn.rotation_y)) > 0.001f) {
+                state.addError("held snapshot was not replayed after recipe initialization");
+            }
+            sendRawSpawn(spawn);
+            for (int frame = 0; frame < 12; ++frame) { client.update(0.0f); server.update(0.0f); }
+            if (client.getEntityByNetworkId(kReorderedId) != entity) {
+                state.addError("duplicate spawn changed the initialized entity");
+            }
+        }
+
+        Net::SpawnEntityMessage unknown;
+        unknown.network_id = 9102;
+        unknown.archetype_id = 0x7002;
+        sendRawSpawn(unknown);
+        for (int frame = 0; frame < 12; ++frame) { client.update(0.0f); server.update(0.0f); }
+        if (client.getEntityByNetworkId(unknown.network_id) != entt::null) {
+            state.addError("unknown recipe created an entity");
+        }
+
+        Net::SpawnEntityMessage malformed;
+        malformed.network_id = 9103;
+        malformed.archetype_id = kGenericStressArchetypeId;
+        malformed.init_ext = {1};
+        sendRawSpawn(malformed);
+        for (int frame = 0; frame < 12; ++frame) { client.update(0.0f); server.update(0.0f); }
+        if (client.getEntityByNetworkId(malformed.network_id) != entt::null) {
+            state.addError("malformed initial state created an entity");
+        }
+
+        Net::WorldStateUpdateMessage delete_message;
+        delete_message.server_tick = 2;
+        Net::EntityUpdateData deletion;
+        deletion.entity_id = 9104;
+        deletion.flags = Net::ComponentFlags::DELETED;
+        Net::BitWriter delete_writer;
+        Net::NetworkSerializer::serialize(delete_writer, delete_message, {deletion});
+        server.sendUnreliableToClient(client.getClientId(), delete_writer);
+        server.update(0.0f);
+        for (int frame = 0; frame < 120 && client.getLastReceivedServerTick() != 2; ++frame) {
+            client.update(0.0f);
+            SDL_Delay(1);
+        }
+        Net::SpawnEntityMessage despawned;
+        despawned.network_id = deletion.entity_id;
+        despawned.archetype_id = kGenericStressArchetypeId;
+        sendRawSpawn(despawned);
+        for (int frame = 0; frame < 12; ++frame) { client.update(0.0f); server.update(0.0f); }
+        if (client.getEntityByNetworkId(despawned.network_id) != entt::null) {
+            state.addError("despawn-before-spawn created an entity");
+        }
+    }
+
+    client.disconnect("archetype dispatch regression complete");
+    for (int frame = 0; frame < 8 && server.getClientCount() != 0; ++frame) {
+        server.update(0.0f);
+        client.update(0.0f);
+        SDL_Delay(1);
+    }
+    client.shutdown();
+    server.shutdown();
+    if (state.error_count != 0) {
+        for (const std::string& error : state.errors) std::cerr << "[FAIL] " << error << "\n";
+        return false;
+    }
+    std::cout << "[PASS] ArchetypeDispatchReorderTests\n";
+    return true;
+}
+
 static bool runInterpolationTickWrapManagerTest()
 {
     TestState state;
@@ -1423,6 +1642,7 @@ static bool runInterpolationTickWrapManagerTest()
     if (state.error_count == 0) {
         Net::SpawnEntityMessage spawn;
         spawn.network_id = kRemoteNetworkId;
+        spawn.archetype_id = kGenericStressArchetypeId;
         spawn.position = glm::vec3(0.0f);
         server.sendSpawnEntityToClient(client.getClientId(), spawn);
         server.update(0.0f);
@@ -1617,6 +1837,7 @@ static bool runRawRemoteInterpolationStateTest()
     if (state.error_count == 0) {
         Net::SpawnEntityMessage spawn;
         spawn.network_id = kRemoteNetworkId;
+        spawn.archetype_id = kGenericStressArchetypeId;
         spawn.position = glm::vec3(0.0f);
         server.sendSpawnEntityToClient(client.getClientId(), spawn);
         server.update(0.0f);
@@ -2764,6 +2985,10 @@ int main(int argc, char** argv)
         EE::CLog::GetClientLogger()->set_level(spdlog::level::warn);
         EE::CLog::GetLuaLogger()->set_level(spdlog::level::warn);
     }
+    const bool generic_recipe_ready = registerGenericStressRecipe();
+    if (!generic_recipe_ready) {
+        std::cerr << "[FAIL] could not register current generic stress spawn recipe\n";
+    }
     const bool handshake_ok = runWireV6HandshakeTests();
     const bool combat_event_protocol_ok = runCombatEventProtocolTests();
     const bool competitive_presentation_protocol_ok = runCompetitivePresentationProtocolTests();
@@ -2776,6 +3001,7 @@ int main(int argc, char** argv)
     const bool lag_view_tick_clamp_ok = runLagViewTickClampTest();
     const bool input_view_tick_protocol_ok = runInputViewTickProtocolTest();
     const bool input_view_tick_loopback_ok = runInputViewTickLoopbackTest();
+    const bool archetype_dispatch_ok = runArchetypeDispatchReorderTest();
     const bool interpolation_manager_wrap_ok = runInterpolationTickWrapManagerTest();
     const bool raw_interpolation_ok = runRawRemoteInterpolationStateTest();
     const bool blocked_input_cursor_ok = runBlockedInputCursorRegressionTest();
@@ -2785,9 +3011,9 @@ int main(int argc, char** argv)
     const bool two_client_input_stall_admission_ok = runTwoClientInputStallAdmissionRegressionTest();
     const bool ok = runNetworkStress(config);
     EE::CLog::Shutdown();
-    return (handshake_ok && combat_event_protocol_ok && competitive_presentation_protocol_ok && transport_pending_queue_accounting_ok && custom_ingress_ok && hierarchy_boundary_ok && interpolation_buffer_wrap_ok && interpolation_jitter_ok && lag_history_wrap_ok &&
+    return (generic_recipe_ready && handshake_ok && combat_event_protocol_ok && competitive_presentation_protocol_ok && transport_pending_queue_accounting_ok && custom_ingress_ok && hierarchy_boundary_ok && interpolation_buffer_wrap_ok && interpolation_jitter_ok && lag_history_wrap_ok &&
             lag_view_tick_clamp_ok &&
-            input_view_tick_protocol_ok && input_view_tick_loopback_ok && interpolation_manager_wrap_ok &&
+            input_view_tick_protocol_ok && input_view_tick_loopback_ok && archetype_dispatch_ok && interpolation_manager_wrap_ok &&
             raw_interpolation_ok && blocked_input_cursor_ok && unreliable_queue_drain_ok && input_send_credit_ok &&
             input_burst_admission_ok && two_client_input_stall_admission_ok && ok) ? 0 : 1;
 }

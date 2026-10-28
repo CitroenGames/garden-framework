@@ -379,6 +379,14 @@ bool testResourceServiceAndBinding()
     }
 
     Assets::AssetManager::get().setAssetRoot(root.string());
+    const auto wrong_type = AnimationResourceService::get().request({"hero.gltf", 0});
+    const auto wrong_type_error = AnimationResourceService::get().getError(wrong_type);
+    if (AnimationResourceService::get().getState(wrong_type) != AnimationResourceState::Failed ||
+        !wrong_type_error || wrong_type_error->code != "ANIM_PACKAGE_EXTENSION")
+    {
+        cleanup();
+        return fail(name, "source glTF was accepted as an animation runtime fallback");
+    }
     const AnimationResourceKey valid{"hero.canim", 0};
     const auto first = AnimationResourceService::get().request(valid);
     const auto duplicate = AnimationResourceService::get().request({"./hero.canim", 0});
@@ -430,6 +438,20 @@ bool testResourceServiceAndBinding()
     {
         cleanup();
         return fail(name, "failed replacement did not retain the valid rest-pose boundary");
+    }
+    if (!AnimationResourceService::get().unload(valid) ||
+        AnimationResourceService::get().tryGetReady(first) ||
+        AnimationResourceService::get().getState(first) != AnimationResourceState::Failed)
+    {
+        cleanup();
+        return fail(name, "service unload retained a cache-owned animation resource");
+    }
+    const auto unloaded_error = AnimationResourceService::get().getError(first);
+    if (!unloaded_error || unloaded_error->code != "ANIM_RESOURCE_UNLOADED" ||
+        !ready->findClip("idle") || binding.active != ready)
+    {
+        cleanup();
+        return fail(name, "service unload did not preserve retained immutable animation data");
     }
     cleanup();
     return pass(name);

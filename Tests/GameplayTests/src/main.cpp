@@ -1,4 +1,8 @@
 #include "Components/Components.hpp"
+#include "Network/BitStream.hpp"
+#include "Network/ReplicationRegistry.hpp"
+#include "Network/NetworkSerializer.hpp"
+#include "Network/SpawnRecipeRegistry.hpp"
 #include "GameFramework/GameFrameworkComponents.hpp"
 #include "GameFramework/GameMode.hpp"
 #include "GameFramework/GameModeRegistry.hpp"
@@ -8,6 +12,7 @@
 #include "Reflection/ReflectionRegistry.hpp"
 #include "world.hpp"
 #include "shared/FpsGameLogic.hpp"
+#include "shared/FpsReplication.hpp"
 #include "shared/BotLogic.hpp"
 #include "shared/PlayerLifecycle.hpp"
 #include "shared/WorldItemLifecycle.hpp"
@@ -664,6 +669,66 @@ bool testGameModeRegistryCreatesBuiltins()
 
     return pass(name);
 }
+}
+
+bool testFpsReplicatedActorRecipeContract()
+{
+    const std::string name = "FpsReplicatedActorRecipeContract";
+    Net::ReplicationRegistry::get().clear();
+    Net::SpawnRecipeRegistry::get().clear();
+    if (!FPSShooter::Replication::registerReplicationComponents()) {
+        return fail(name, "template could not register its current replication recipe");
+    }
+    const auto cleanup = [] {
+        FPSShooter::Replication::unregisterReplicationComponents();
+        Net::ReplicationRegistry::get().clear();
+        Net::SpawnRecipeRegistry::get().clear();
+    };
+
+    entt::registry source;
+    const entt::entity source_entity = source.create();
+    source.emplace<FpsHealthComponent>(source_entity, FpsHealthComponent{75});
+    Net::ReplicatedExtEntry health_entry;
+    if (!FPSShooter::Replication::extractHealth(source, source_entity, health_entry)) {
+        cleanup();
+        return fail(name, "template did not extract its initial health component");
+    }
+
+    Net::SpawnEntityMessage message;
+    message.network_id = 71;
+    message.archetype_id = FPSShooter::Replication::FpsReplicatedActorArchetypeId;
+    Net::BitWriter initial_writer;
+    Net::NetworkSerializer::writeExtEntries(initial_writer, {health_entry});
+    message.init_ext.assign(initial_writer.getData(),
+                            initial_writer.getData() + initial_writer.getByteSize());
+
+    std::vector<Net::ReplicatedExtEntry> initial_entries;
+    Net::SpawnRecipeRegistry& recipes = Net::SpawnRecipeRegistry::get();
+    const Net::SpawnRecipeInfo* recipe = recipes.find(message.archetype_id);
+    if (recipe == nullptr || !recipes.validateSpawn(message, initial_entries) ||
+        initial_entries.size() != 1) {
+        cleanup();
+        return fail(name, "template recipe rejected its complete current initial payload");
+    }
+
+    entt::registry client;
+    const entt::entity client_entity = client.create();
+    if (!recipe->construct(client, client_entity, message) ||
+        !Net::ReplicationRegistry::get().applyEcsEntries(client, client_entity, initial_entries) ||
+        !client.all_of<FpsHealthComponent>(client_entity) ||
+        client.get<FpsHealthComponent>(client_entity).health != 75) {
+        cleanup();
+        return fail(name, "template recipe did not apply initial state atomically");
+    }
+
+    message.init_ext.clear();
+    if (recipes.validateSpawn(message, initial_entries)) {
+        cleanup();
+        return fail(name, "template recipe accepted an incomplete initial payload");
+    }
+
+    cleanup();
+    return pass(name);
 }
 
 bool testFpsSpawnSelectionPerTeamFarthest()
@@ -4238,6 +4303,7 @@ int main()
     ok = testLevelMetadataAppliesGameplaySettings() && ok;
     ok = testProjectDefaultsResolveGameplayClasses() && ok;
     ok = testClientWorldCreatesOnlyGameState() && ok;
+    ok = testFpsReplicatedActorRecipeContract() && ok;
     ok = testFpsSpawnSelectionPerTeamFarthest() && ok;
     ok = testFpsSwitchChangesActiveDef() && ok;
     ok = testFpsDropAndPickup() && ok;
@@ -4343,6 +4409,7 @@ int main()
     ok = testFpsAudioPresentationMappings() && ok;
     ok = testAudioEventTableRoundTrip() && ok;
     ok = testAudioEventTableRejectsMalformedDefinitions() && ok;
+    ok = testSoundEventTableResourceService() && ok;
     ok = testAudioEventTableReplacementKeepsActiveVoices() && ok;
     ok = testFpsAudioEventTableRegistration() && ok;
     ok = testAudioVoiceStealingSelection() && ok;

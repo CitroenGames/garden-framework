@@ -7,6 +7,7 @@
 #include "Network/LagHistory.hpp"
 #include "Network/LevelHash.hpp"
 #include "Network/ReplicationRegistry.hpp"
+#include "Network/SpawnRecipeRegistry.hpp"
 #include "Network/PredictionTypes.hpp"
 #include "Network/InterpolationBuffer.hpp"
 
@@ -727,6 +728,75 @@ int testEcsReplicationBridge()
     return 0;
 }
 
+bool validateRecipeFixture(const Net::SpawnEntityMessage&,
+                           const std::vector<Net::ReplicatedExtEntry>&)
+{
+    return true;
+}
+
+bool constructRecipeFixture(entt::registry&, entt::entity,
+                            const Net::SpawnEntityMessage&)
+{
+    return true;
+}
+
+int testSpawnRecipeRegistry()
+{
+    const char* name = "SpawnRecipeRegistry";
+    Net::ReplicationRegistry& components = Net::ReplicationRegistry::get();
+    Net::SpawnRecipeRegistry& recipes = Net::SpawnRecipeRegistry::get();
+    components.clear();
+    recipes.clear();
+    if (!components.registerComponent({77, {{"value", 0}},
+                                       &extractBridgeFixture, &validateBridgeFixture, &applyBridgeFixture}) ||
+        !recipes.registerRecipe({51, &validateRecipeFixture, &constructRecipeFixture}) ||
+        recipes.registerRecipe({51, &validateRecipeFixture, &constructRecipeFixture})) {
+        return fail(name, "current recipe registration did not reject duplicate descriptor");
+    }
+
+    Net::SpawnEntityMessage message;
+    message.network_id = 61;
+    message.archetype_id = 51;
+    Net::BitWriter initial_writer;
+    initial_writer.writeUInt16(1);
+    initial_writer.writeUInt16(77);
+    initial_writer.writeUInt16(1);
+    initial_writer.writeUInt16(1);
+    initial_writer.writeByte(22);
+    message.init_ext.assign(initial_writer.getData(),
+                            initial_writer.getData() + initial_writer.getByteSize());
+    std::vector<Net::ReplicatedExtEntry> entries;
+    if (!recipes.validateSpawn(message, entries) || entries.size() != 1 ||
+        entries[0].component_id != 77 || entries[0].payload != std::vector<uint8_t>{22}) {
+        return fail(name, "current initial state did not validate exactly");
+    }
+
+    message.archetype_id = 52;
+    if (recipes.validateSpawn(message, entries))
+        return fail(name, "unknown archetype recipe was accepted");
+    message.archetype_id = 51;
+    message.init_ext = {1};
+    if (recipes.validateSpawn(message, entries))
+        return fail(name, "truncated initial state was accepted");
+
+    Net::BitWriter duplicate_writer;
+    duplicate_writer.writeUInt16(2);
+    for (uint8_t value : {uint8_t{22}, uint8_t{23}}) {
+        duplicate_writer.writeUInt16(77);
+        duplicate_writer.writeUInt16(1);
+        duplicate_writer.writeUInt16(1);
+        duplicate_writer.writeByte(value);
+    }
+    message.init_ext.assign(duplicate_writer.getData(),
+                            duplicate_writer.getData() + duplicate_writer.getByteSize());
+    if (recipes.validateSpawn(message, entries))
+        return fail(name, "duplicate initial component was accepted");
+
+    recipes.clear();
+    components.clear();
+    return 0;
+}
+
 int testButtonsAndViewTick()
 {
     const char* name = "ButtonsAndViewTick";
@@ -855,6 +925,7 @@ int main()
     failures += testWireCurrentHandshake();
     failures += testExtRoundTrip();
     failures += testEcsReplicationBridge();
+    failures += testSpawnRecipeRegistry();
     failures += testButtonsAndViewTick();
     failures += testSpawnRadians();
     failures += testTruncatedFuzz();

@@ -148,7 +148,11 @@ public:
     uint32_t getServerCapabilityFlags() const { return server_capability_flags; }
     uint32_t getClientCapabilityFlags(uint16_t client_id) const;
 
-    // Generic replicated spawn (SPAWN_ENTITY, reliable)
+    // Generic replicated spawn (SPAWN_ENTITY, reliable). The game module
+    // selects the opaque recipe id; EngineCore serializes only current ECS
+    // data registered by that module.
+    bool buildSpawnEntityMessage(entt::entity entity, uint16_t archetype_id,
+                                 SpawnEntityMessage& out_message) const;
     void sendSpawnEntityToClient(uint16_t client_id, const SpawnEntityMessage& msg);
     void broadcastSpawnEntity(const SpawnEntityMessage& msg);
 

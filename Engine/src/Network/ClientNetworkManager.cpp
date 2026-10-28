@@ -4,6 +4,7 @@
 #include "NetworkTransport.hpp"
 #include "NetworkHierarchyValidation.hpp"
 #include "ReplicationRegistry.hpp"
+#include "SpawnRecipeRegistry.hpp"
 #include "world.hpp"
 #include "Components/Components.hpp"
 #include "Utils/Log.hpp"
@@ -660,7 +661,13 @@ void ClientNetworkManager::handleWorldStateUpdate(BitReader& reader)
                 LOG_ENGINE_ERROR("Validated local ECS extension failed to apply for network id {}", update.entity_id);
             }
         } else {
-            // Remote entities: ensure entity exists, then push to interpolation buffer
+            // Generic snapshots cannot construct a bare entity. The reliable
+            // recipe envelope owns component composition, so retain this
+            // validated update until SPAWN_ENTITY initializes the recipe.
+            if (getEntityByNetworkId(update.entity_id) == entt::null) {
+                (void)queuePendingSnapshot(update, msg.server_tick);
+                continue;
+            }
             if (!createOrUpdateEntity(update)) {
                 continue;
             }
@@ -681,6 +688,22 @@ void ClientNetworkManager::handleWorldStateUpdate(BitReader& reader)
         }
         for (uint32_t net_id : stale_entities) {
             deleteEntity(net_id);
+        }
+
+        // Full snapshots are authoritative for generic identities too. A
+        // held pre-spawn update omitted from this baseline must not revive a
+        // prior entity when an older reliable spawn is delivered later.
+        std::vector<uint32_t> stale_pending;
+        stale_pending.reserve(pending_snapshots.size());
+        for (const auto& [net_id, pending] : pending_snapshots) {
+            (void)pending;
+            if (!full_snapshot_entities.contains(net_id)) {
+                stale_pending.push_back(net_id);
+            }
+        }
+        for (uint32_t net_id : stale_pending) {
+            pending_snapshots.erase(net_id);
+            pre_spawn_tombstones.insert(net_id);
         }
     }
 }
@@ -763,35 +786,70 @@ void ClientNetworkManager::handleSpawnEntity(BitReader& reader)
         return;
     }
 
-    // Spawn for an id the client already has is a full update, not a dup.
-    entt::entity entity = getEntityByNetworkId(msg.network_id);
-    if (entity != entt::null && !isNetworkHierarchyRoot(game_world->registry, entity)) {
-        ++stats.hierarchy_root_rejections;
-        LOG_ENGINE_WARN("Network spawn rejected parented entity (network id {})", msg.network_id);
+    if (pre_spawn_tombstones.contains(msg.network_id)) {
+        LOG_ENGINE_WARN("Network spawn rejected after prior despawn (network id {})", msg.network_id);
         return;
     }
-    if (entity == entt::null) {
-        entity = game_world->registry.create();
-        NetworkedEntity networked;
-        networked.network_id = msg.network_id;
-        networked.owner_client_id = msg.owner_client_id;
-        networked.is_player = false;
-        game_world->registry.emplace<NetworkedEntity>(entity, networked);
-        network_id_to_entity[msg.network_id] = entity;
+    if (network_id_to_entity.contains(msg.network_id)) {
+        LOG_ENGINE_WARN("Network spawn rejected duplicate live network id {}", msg.network_id);
+        return;
     }
 
-    if (game_world->registry.all_of<TransformComponent>(entity)) {
-        auto& transform = game_world->registry.get<TransformComponent>(entity);
-        transform.position = msg.position;
-        transform.rotation.y = glm::degrees(msg.rotation_y);
-    } else {
-        TransformComponent transform;
-        transform.position = msg.position;
-        transform.rotation.y = glm::degrees(msg.rotation_y);
-        game_world->registry.emplace<TransformComponent>(entity, transform);
+    std::vector<ReplicatedExtEntry> initial_entries;
+    SpawnRecipeRegistry& recipes = SpawnRecipeRegistry::get();
+    if (!recipes.validateSpawn(msg, initial_entries)) {
+        LOG_ENGINE_WARN("Network spawn rejected unknown recipe or malformed initial state (network id {}, archetype {})",
+                        msg.network_id, msg.archetype_id);
+        return;
+    }
+    const SpawnRecipeInfo* recipe = recipes.find(msg.archetype_id);
+    if (recipe == nullptr) {
+        // validateSpawn already guards this. Keep the callback boundary safe
+        // if a module unregisters its recipe from an unexpected re-entrant path.
+        LOG_ENGINE_WARN("Network spawn recipe disappeared during validation (archetype {})", msg.archetype_id);
+        return;
     }
 
+    const entt::entity entity = game_world->registry.create();
+    NetworkedEntity networked;
+    networked.network_id = msg.network_id;
+    networked.owner_client_id = msg.owner_client_id;
+    networked.is_player = false;
+    game_world->registry.emplace<NetworkedEntity>(entity, networked);
+
+    TransformComponent transform;
+    transform.position = msg.position;
+    transform.rotation.y = glm::degrees(msg.rotation_y);
+    game_world->registry.emplace<TransformComponent>(entity, transform);
+
+    // A recipe may add only its template-owned components. Its entity remains
+    // private until both construction and the whole initial ECS batch commit.
+    if (!recipe->construct(game_world->registry, entity, msg) ||
+        !ReplicationRegistry::get().applyEcsEntries(game_world->registry, entity, initial_entries)) {
+        game_world->registry.destroy(entity);
+        LOG_ENGINE_WARN("Network spawn recipe rejected initial construction (network id {})", msg.network_id);
+        return;
+    }
+
+    auto pending = pending_snapshots.find(msg.network_id);
+    if (pending != pending_snapshots.end() &&
+        !applyUpdateToEntity(entity, pending->second.update)) {
+        game_world->registry.destroy(entity);
+        pending_snapshots.erase(pending);
+        LOG_ENGINE_WARN("Network spawn rejected held snapshot replay (network id {})", msg.network_id);
+        return;
+    }
+
+    network_id_to_entity.emplace(msg.network_id, entity);
     seedInterpolationState(msg.network_id, msg.position, msg.rotation_y);
+    if (pending != pending_snapshots.end()) {
+        const PendingSnapshot replay = std::move(pending->second);
+        pending_snapshots.erase(pending);
+        if (replay.update.hasTransform() || replay.update.hasRotation() ||
+            replay.update.hasVelocity() || replay.update.hasGrounded()) {
+            mergeInterpolationState(replay.update, replay.server_tick);
+        }
+    }
 }
 
 void ClientNetworkManager::handleDespawnPlayer(BitReader& reader)
@@ -861,86 +919,80 @@ bool ClientNetworkManager::createOrUpdateEntity(const EntityUpdateData& update)
         return false;
     }
 
-    // Find or create entity
-    entt::entity entity = getEntityByNetworkId(update.entity_id);
-
-    if (entity != entt::null && !isNetworkHierarchyRoot(game_world->registry, entity)) {
+    const entt::entity entity = getEntityByNetworkId(update.entity_id);
+    if (entity == entt::null || !game_world->registry.valid(entity)) {
+        // No spawn recipe has initialized this NetId yet. The caller queues
+        // the snapshot instead of exposing a generic bare entity.
+        return false;
+    }
+    if (!isNetworkHierarchyRoot(game_world->registry, entity)) {
         ++stats.hierarchy_root_rejections;
         LOG_ENGINE_WARN("Network state application rejected parented entity (network id {})",
                         update.entity_id);
         return false;
     }
+    return applyUpdateToEntity(entity, update);
+}
 
-    if (entity == entt::null) {
-        // Create new entity
-        entity = game_world->registry.create();
-
-        // Add NetworkedEntity component
-        NetworkedEntity networked;
-        networked.network_id = update.entity_id;
-        networked.owner_client_id = 0;  // Unknown for now
-        networked.is_player = false;
-        game_world->registry.emplace<NetworkedEntity>(entity, networked);
-
-        // Store in mapping
-        network_id_to_entity[update.entity_id] = entity;
+bool ClientNetworkManager::applyUpdateToEntity(entt::entity entity, const EntityUpdateData& update)
+{
+    if (game_world == nullptr || !game_world->registry.valid(entity)) {
+        return false;
     }
 
-    // Update transform if present
     if (update.hasTransform()) {
         if (game_world->registry.all_of<TransformComponent>(entity)) {
-            auto& transform = game_world->registry.get<TransformComponent>(entity);
-            transform.position = update.position;
+            game_world->registry.get<TransformComponent>(entity).position = update.position;
         } else {
             TransformComponent transform;
             transform.position = update.position;
             game_world->registry.emplace<TransformComponent>(entity, transform);
         }
     }
-
-    // Update rotation if present
-    if (update.hasRotation()) {
-        if (game_world->registry.all_of<TransformComponent>(entity)) {
-            auto& transform = game_world->registry.get<TransformComponent>(entity);
-            // D4 point 3: wire radians -> ECS degrees.
-            transform.rotation.y = glm::degrees(update.rotation_y);
-        }
+    if (update.hasRotation() && game_world->registry.all_of<TransformComponent>(entity)) {
+        game_world->registry.get<TransformComponent>(entity).rotation.y = glm::degrees(update.rotation_y);
     }
-
-    // Update velocity if present
     if (update.hasVelocity()) {
         if (game_world->registry.all_of<RigidBodyComponent>(entity)) {
-            auto& rb = game_world->registry.get<RigidBodyComponent>(entity);
-            rb.velocity = update.velocity;
+            game_world->registry.get<RigidBodyComponent>(entity).velocity = update.velocity;
         } else {
-            RigidBodyComponent rb;
-            rb.velocity = update.velocity;
-            game_world->registry.emplace<RigidBodyComponent>(entity, rb);
+            RigidBodyComponent body;
+            body.velocity = update.velocity;
+            game_world->registry.emplace<RigidBodyComponent>(entity, body);
         }
     }
-
-    // Update grounded state if present
     if (update.hasGrounded()) {
         if (game_world->registry.all_of<PlayerComponent>(entity)) {
             auto& player = game_world->registry.get<PlayerComponent>(entity);
-            player.grounded = (update.grounded != 0);
+            player.grounded = update.grounded != 0;
             player.ground_normal = update.ground_normal;
         }
         if (game_world->registry.all_of<CharacterControllerComponent>(entity)) {
             auto& controller = game_world->registry.get<CharacterControllerComponent>(entity);
-            controller.grounded = (update.grounded != 0);
+            controller.grounded = update.grounded != 0;
             controller.ground_normal = update.ground_normal;
         }
     }
 
-    // All entries were packet-validated before entity creation. apply performs
-    // a second defensive check and commits only after all component entries are
-    // valid, so one malformed extension cannot leave a partial ECS write.
     if (!ReplicationRegistry::get().applyEcsEntries(game_world->registry, entity, update.ext_entries)) {
         LOG_ENGINE_ERROR("Validated ECS extension failed to apply for network id {}", update.entity_id);
         return false;
     }
+    return true;
+}
 
+bool ClientNetworkManager::queuePendingSnapshot(const EntityUpdateData& update, uint32_t server_tick)
+{
+    if (update.entity_id == 0 || pre_spawn_tombstones.contains(update.entity_id)) {
+        return false;
+    }
+    const auto existing = pending_snapshots.find(update.entity_id);
+    if (existing == pending_snapshots.end() &&
+        pending_snapshots.size() >= MAX_PENDING_SPAWN_SNAPSHOTS) {
+        LOG_ENGINE_WARN("Dropping pre-spawn snapshot because pending recipe queue is full");
+        return false;
+    }
+    pending_snapshots.insert_or_assign(update.entity_id, PendingSnapshot{update, server_tick});
     return true;
 }
 
@@ -1021,6 +1073,8 @@ void ClientNetworkManager::clearInterpolationHistory()
     }
     interp_buffers.clear();
     latest_interp_state.clear();
+    pending_snapshots.clear();
+    pre_spawn_tombstones.clear();
     has_received_server_tick = false;
 }
 
@@ -1034,6 +1088,11 @@ void ClientNetworkManager::deleteEntity(uint32_t network_id)
             game_world->registry.destroy(entity);
         }
         network_id_to_entity.erase(it);
+    } else if (network_id != 0) {
+        // A deletion can arrive on the unreliable channel before reliable
+        // spawn. NetIds are never reused inside this connection generation.
+        pre_spawn_tombstones.insert(network_id);
+        pending_snapshots.erase(network_id);
     }
 
     if (network_id == local_player_network_id) {

@@ -3,6 +3,7 @@
 #include "json.hpp"
 
 #include <cmath>
+#include <initializer_list>
 #include <limits>
 #include <unordered_set>
 
@@ -66,11 +67,36 @@ bool readInt(const json& object, const char* key, int& output)
     return true;
 }
 
+bool hasOnlyFields(const json& object, std::initializer_list<const char*> fields)
+{
+    if (!object.is_object()) return false;
+    for (auto it = object.begin(); it != object.end(); ++it)
+    {
+        bool known = false;
+        for (const char* field : fields)
+        {
+            if (it.key() == field)
+            {
+                known = true;
+                break;
+            }
+        }
+        if (!known) return false;
+    }
+    return true;
+}
+
 bool decodeDefinition(const json& value, SoundEventDef& definition, std::string* error)
 {
     if (!value.is_object())
     {
         setError(error, "event definition must be an object");
+        return false;
+    }
+    if (!hasOnlyFields(value, {"id", "clips", "volume", "pitch_min", "pitch_max", "group",
+                               "min_distance", "max_distance", "priority", "max_voices", "loop"}))
+    {
+        setError(error, "event definition has a retired or unknown field");
         return false;
     }
     if (!value.contains("id") || !value.at("id").is_string())
@@ -138,7 +164,8 @@ bool SoundEventTable::deserialize(const std::string& document, SoundEventTable& 
         setError(error, "sound-event document is not a JSON object");
         return false;
     }
-    if (!root.contains("schema") || !root.at("schema").is_string() ||
+    if (!hasOnlyFields(root, {"schema", "version", "events"}) ||
+        !root.contains("schema") || !root.at("schema").is_string() ||
         root.at("schema").get<std::string>() != SchemaName ||
         !root.contains("version") || !root.at("version").is_number_unsigned() ||
         !root.contains("events") || !root.at("events").is_array())

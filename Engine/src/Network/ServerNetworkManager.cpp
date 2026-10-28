@@ -3,6 +3,7 @@
 #include "NetworkTransport.hpp"
 #include "NetworkHierarchyValidation.hpp"
 #include "ReplicationRegistry.hpp"
+#include "SpawnRecipeRegistry.hpp"
 #include "NetworkInput.hpp"
 #include "world.hpp"
 #include "Components/Components.hpp"
@@ -1194,8 +1195,59 @@ uint32_t ServerNetworkManager::getClientCapabilityFlags(uint16_t client_id) cons
     return it == clients.end() ? 0u : it->second.info.capability_flags;
 }
 
+bool ServerNetworkManager::buildSpawnEntityMessage(entt::entity entity, uint16_t archetype_id,
+                                                         SpawnEntityMessage& out_message) const
+{
+    out_message = SpawnEntityMessage{};
+    if (game_world == nullptr || !game_world->registry.valid(entity) ||
+        !isNetworkHierarchyRoot(game_world->registry, entity) ||
+        !game_world->registry.all_of<NetworkedEntity, TransformComponent>(entity)) {
+        return false;
+    }
+
+    const auto mapped = entity_to_net_id.find(entity);
+    if (mapped == entity_to_net_id.end() || mapped->second == 0) {
+        return false;
+    }
+    const auto& networked = game_world->registry.get<NetworkedEntity>(entity);
+    const auto& transform = game_world->registry.get<TransformComponent>(entity);
+    if (networked.network_id != mapped->second ||
+        !std::isfinite(transform.position.x) || !std::isfinite(transform.position.y) ||
+        !std::isfinite(transform.position.z) || !std::isfinite(transform.rotation.y)) {
+        return false;
+    }
+
+    std::vector<ReplicatedExtEntry> initial_entries;
+    if (!ReplicationRegistry::get().extractEntity(game_world->registry, entity, initial_entries)) {
+        return false;
+    }
+    out_message.network_id = mapped->second;
+    out_message.archetype_id = archetype_id;
+    out_message.owner_client_id = networked.owner_client_id;
+    out_message.position = transform.position;
+    out_message.rotation_y = glm::radians(transform.rotation.y);
+    if (!initial_entries.empty()) {
+        BitWriter writer;
+        NetworkSerializer::writeExtEntries(writer, initial_entries);
+        out_message.init_ext.assign(writer.getData(), writer.getData() + writer.getByteSize());
+    }
+
+    std::vector<ReplicatedExtEntry> validated_entries;
+    if (!SpawnRecipeRegistry::get().validateSpawn(out_message, validated_entries)) {
+        out_message = SpawnEntityMessage{};
+        return false;
+    }
+    return true;
+}
+
 void ServerNetworkManager::sendSpawnEntityToClient(uint16_t client_id, const SpawnEntityMessage& msg)
 {
+    std::vector<ReplicatedExtEntry> initial_entries;
+    if (!SpawnRecipeRegistry::get().validateSpawn(msg, initial_entries)) {
+        LOG_ENGINE_WARN("Refusing SPAWN_ENTITY with unknown recipe or malformed initial state (network id {}, archetype {})",
+                        msg.network_id, msg.archetype_id);
+        return;
+    }
     BitWriter writer;
     NetworkSerializer::serialize(writer, msg);
     sendReliableToClient(client_id, writer);
@@ -1203,6 +1255,12 @@ void ServerNetworkManager::sendSpawnEntityToClient(uint16_t client_id, const Spa
 
 void ServerNetworkManager::broadcastSpawnEntity(const SpawnEntityMessage& msg)
 {
+    std::vector<ReplicatedExtEntry> initial_entries;
+    if (!SpawnRecipeRegistry::get().validateSpawn(msg, initial_entries)) {
+        LOG_ENGINE_WARN("Refusing SPAWN_ENTITY broadcast with unknown recipe or malformed initial state (network id {}, archetype {})",
+                        msg.network_id, msg.archetype_id);
+        return;
+    }
     BitWriter writer;
     NetworkSerializer::serialize(writer, msg);
     broadcastReliable(writer);
