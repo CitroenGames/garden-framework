@@ -61,7 +61,7 @@ public:
     static ResolvedRenderPoseMap resolve_render_poses(const entt::registry& registry)
     {
         std::unordered_set<entt::entity> consumers;
-        for (entt::entity entity : registry.view<MeshComponent, TransformComponent>())
+        for (entt::entity entity : registry.view<MeshComponent, TransformComponent, RenderableComponent>())
             consumers.insert(entity);
         for (entt::entity entity : registry.view<PointLightComponent, TransformComponent>())
             consumers.insert(entity);
@@ -679,7 +679,7 @@ public:
                                    RenderCommandBuffer& cmds, int cascade_index,
                                    const Frustum* frustum = nullptr)
     {
-        if (!is_finite_render_pose(model) || !m.visible || !m.casts_shadow) return;
+        if (!is_finite_render_pose(model) || !m.visible) return;
         if (!m.gpu_mesh || !m.gpu_mesh->isUploaded()) return;
 
         // Determine the GPU mesh (LOD selection for shadows). When a LOD is
@@ -785,7 +785,8 @@ public:
         const std::vector<int>& lod_levels,
         bool global_lighting,
         const Frustum* frustum = nullptr,
-        const glm::mat4* view_matrix = nullptr)
+        const glm::mat4* view_matrix = nullptr,
+        const ViewContext& view_context = {})
     {
         // For small entity counts, single-threaded recording is faster
         if (entities.size() < PARALLEL_CHUNK_SIZE)
@@ -797,7 +798,8 @@ public:
                 if (!registry.valid(entities[i])) continue;
                 auto* mc = registry.try_get<MeshComponent>(entities[i]);
                 auto* t = registry.try_get<TransformComponent>(entities[i]);
-                if (!mc || !t || !mc->m_mesh || !mc->m_mesh->visible) continue;
+                auto* renderable = registry.try_get<RenderableComponent>(entities[i]);
+                if (!mc || !t || !renderable || !mc->m_mesh || !mc->m_mesh->visible || !isRenderableVisible(registry, *renderable, view_context)) continue;
                 const glm::mat4* model = find_render_pose(render_poses, entities[i]);
                 if (!model) continue;
                 record_mesh_at_lod(*mc->m_mesh, *model, cmds, global_lighting, lod_levels[i], frustum);
@@ -829,7 +831,8 @@ public:
                         if (!registry.valid(entities[i])) continue;
                         auto* mc = registry.try_get<MeshComponent>(entities[i]);
                         auto* t = registry.try_get<TransformComponent>(entities[i]);
-                        if (!mc || !t || !mc->m_mesh || !mc->m_mesh->visible) continue;
+                        auto* renderable = registry.try_get<RenderableComponent>(entities[i]);
+                        if (!mc || !t || !renderable || !mc->m_mesh || !mc->m_mesh->visible || !isRenderableVisible(registry, *renderable, view_context)) continue;
                         const glm::mat4* model = find_render_pose(render_poses, entities[i]);
                         if (!model) continue;
                         record_mesh_at_lod(*mc->m_mesh, *model,
@@ -878,7 +881,8 @@ public:
                 if (!registry.valid(entity)) continue;
                 auto* mc = registry.try_get<MeshComponent>(entity);
                 auto* t = registry.try_get<TransformComponent>(entity);
-                if (mc && t && mc->m_mesh && mc->m_mesh->visible && mc->m_mesh->casts_shadow) {
+                auto* renderable = registry.try_get<RenderableComponent>(entity);
+                if (mc && t && renderable && mc->m_mesh && mc->m_mesh->visible && isRenderableShadowVisible(*renderable)) {
                     const glm::mat4* model = find_render_pose(render_poses, entity);
                     if (!model) continue;
                     record_shadow_draw(*mc->m_mesh, *model, cmds, cascade_index, frustum);
@@ -907,7 +911,8 @@ public:
                         if (!registry.valid(entities[i])) continue;
                         auto* mc = registry.try_get<MeshComponent>(entities[i]);
                         auto* t = registry.try_get<TransformComponent>(entities[i]);
-                        if (mc && t && mc->m_mesh && mc->m_mesh->visible && mc->m_mesh->casts_shadow) {
+                        auto* renderable = registry.try_get<RenderableComponent>(entities[i]);
+                        if (mc && t && renderable && mc->m_mesh && mc->m_mesh->visible && isRenderableShadowVisible(*renderable)) {
                             const glm::mat4* model = find_render_pose(render_poses, entities[i]);
                             if (!model) continue;
                             record_shadow_draw(*mc->m_mesh, *model, buffers[c], cascade_index, frustum);
@@ -935,7 +940,8 @@ public:
         const std::vector<entt::entity>& entities,
         const ResolvedRenderPoseMap& render_poses,
         const std::vector<int>& lod_levels,
-        const Frustum* frustum = nullptr)
+        const Frustum* frustum = nullptr,
+        const ViewContext& view_context = {})
     {
         if (entities.size() < PARALLEL_CHUNK_SIZE)
         {
@@ -946,7 +952,8 @@ public:
                 if (!registry.valid(entities[i])) continue;
                 auto* mc = registry.try_get<MeshComponent>(entities[i]);
                 auto* t = registry.try_get<TransformComponent>(entities[i]);
-                if (!mc || !t || !mc->m_mesh || !mc->m_mesh->visible) continue;
+                auto* renderable = registry.try_get<RenderableComponent>(entities[i]);
+                if (!mc || !t || !renderable || !mc->m_mesh || !mc->m_mesh->visible || !isRenderableVisible(registry, *renderable, view_context)) continue;
                 const glm::mat4* model = find_render_pose(render_poses, entities[i]);
                 if (!model) continue;
                 record_depth_draw_at_lod(*mc->m_mesh, *model, cmds, lod_levels[i], frustum);
@@ -974,7 +981,8 @@ public:
                         if (!registry.valid(entities[i])) continue;
                         auto* mc = registry.try_get<MeshComponent>(entities[i]);
                         auto* t = registry.try_get<TransformComponent>(entities[i]);
-                        if (!mc || !t || !mc->m_mesh || !mc->m_mesh->visible) continue;
+                        auto* renderable = registry.try_get<RenderableComponent>(entities[i]);
+                        if (!mc || !t || !renderable || !mc->m_mesh || !mc->m_mesh->visible || !isRenderableVisible(registry, *renderable, view_context)) continue;
                         const glm::mat4* model = find_render_pose(render_poses, entities[i]);
                         if (!model) continue;
                         record_depth_draw_at_lod(*mc->m_mesh, *model, buffers[c], lod_levels[i], frustum);
@@ -1176,9 +1184,10 @@ public:
 
     // Shadow-pass LOD: use coarser LODs for farther cascades
     static void render_mesh_shadow_lod(mesh& m, const glm::mat4& model,
-                                        IRenderAPI* api, int cascade_index)
+                                        IRenderAPI* api, int cascade_index,
+                                        const RenderableComponent& renderable)
     {
-        if (!m.visible || !m.casts_shadow || !api) return;
+        if (!m.visible || !isRenderableShadowVisible(renderable) || !api) return;
 
         if (!m.lod_levels.empty())
         {
@@ -1220,7 +1229,8 @@ public:
         RenderToTexture
     };
 
-    void render_frame(entt::registry& registry, camera& c, FrameTarget target)
+    void render_frame(entt::registry& registry, camera& c, FrameTarget target,
+                      const ViewContext& view_context = {})
     {
         if (!render_api)
         {
@@ -1246,7 +1256,7 @@ public:
         last_draw_calls = 0;
 
         const ResolvedRenderPoseMap render_poses = resolve_render_poses(registry);
-        auto view = registry.view<MeshComponent, TransformComponent>();
+        auto mesh_view = registry.view<MeshComponent, TransformComponent, RenderableComponent>();
 
         // Ensure the BVH is built before the shadow pass
         if (bvh_enabled && scene_bvh.needsRebuild())
@@ -1283,10 +1293,11 @@ public:
             else
             {
                 std::vector<entt::entity> all_shadow;
-                for (auto entity : view)
+                for (auto entity : mesh_view)
                 {
-                    auto& mesh_comp = view.get<MeshComponent>(entity);
-                    if (mesh_comp.m_mesh && mesh_comp.m_mesh->visible && mesh_comp.m_mesh->casts_shadow)
+                    auto& mesh_comp = mesh_view.get<MeshComponent>(entity);
+                    const auto* renderable = registry.try_get<RenderableComponent>(entity);
+                    if (mesh_comp.m_mesh && renderable && mesh_comp.m_mesh->visible && isRenderableShadowVisible(*renderable))
                     {
                         prepare_water_mesh(registry, entity, mesh_comp);
                         ensure_mesh_uploaded(*mesh_comp.m_mesh, render_api);
@@ -1339,12 +1350,17 @@ public:
 
             for (auto entity : visible_entities)
             {
-                auto* mesh_comp = registry.try_get<MeshComponent>(entity);
-                if (mesh_comp && mesh_comp->m_mesh && mesh_comp->m_mesh->transparent)
+                const auto* mesh_comp = registry.try_get<MeshComponent>(entity);
+                const auto* renderable = registry.try_get<RenderableComponent>(entity);
+                if (!mesh_comp || !renderable || !mesh_comp->m_mesh ||
+                    !isRenderableVisible(registry, *renderable, view_context))
+                    continue;
+                if (mesh_comp->m_mesh->transparent)
                     transparent_entities.push_back(entity);
                 else
                     opaque_entities.push_back(entity);
             }
+            last_visible_entities = opaque_entities.size() + transparent_entities.size();
 
             // Sort opaques by texture (primary) + distance (secondary)
             sort_entities_by_state(registry, opaque_entities, cam_pos, render_poses);
@@ -1400,7 +1416,7 @@ public:
             if (depth_prepass_enabled && !opaque_entities.empty())
             {
                 RenderCommandBuffer depth_cmds = record_depth_parallel(
-                    registry, opaque_entities, render_poses, opaque_lod, &camera_frustum);
+                    registry, opaque_entities, render_poses, opaque_lod, &camera_frustum, view_context);
 
                 render_api->beginDepthPrepass();
                 render_api->replayCommandBuffer(depth_cmds);
@@ -1412,7 +1428,7 @@ public:
                 const glm::mat4 view_matrix = render_api->getViewMatrix();
                 RenderCommandBuffer opaque_cmds = record_opaque_parallel(
                     registry, opaque_entities, render_poses, opaque_lod,
-                    global_lighting, &camera_frustum, &view_matrix);
+                    global_lighting, &camera_frustum, &view_matrix, view_context);
                 last_draw_calls += opaque_cmds.size();
                 render_api->replayCommandBufferParallel(opaque_cmds);
             }
@@ -1428,7 +1444,8 @@ public:
                     if (!registry.valid(entity)) continue;
                     auto* mesh_comp = registry.try_get<MeshComponent>(entity);
                     auto* t = registry.try_get<TransformComponent>(entity);
-                    if (mesh_comp && t && mesh_comp->m_mesh && mesh_comp->m_mesh->visible)
+                    const auto* renderable = registry.try_get<RenderableComponent>(entity);
+                    if (mesh_comp && t && renderable && mesh_comp->m_mesh && mesh_comp->m_mesh->visible && isRenderableVisible(registry, *renderable, view_context))
                     {
                         const glm::mat4* model = find_render_pose(render_poses, entity);
                         if (!model) continue;
@@ -1449,13 +1466,14 @@ public:
 
             RenderCommandBuffer all_cmds;
 
-            for (auto entity : view)
+            for (auto entity : mesh_view)
             {
-                auto& mesh_comp = view.get<MeshComponent>(entity);
+                auto& mesh_comp = mesh_view.get<MeshComponent>(entity);
                 const glm::mat4* model = find_render_pose(render_poses, entity);
                 if (!model) continue;
 
-                if (mesh_comp.m_mesh && mesh_comp.m_mesh->visible)
+                const auto* renderable = registry.try_get<RenderableComponent>(entity);
+                if (mesh_comp.m_mesh && renderable && mesh_comp.m_mesh->visible && isRenderableVisible(registry, *renderable, view_context))
                 {
                     prepare_water_mesh(registry, entity, mesh_comp);
                     ensure_mesh_uploaded(*mesh_comp.m_mesh, render_api);
@@ -1495,14 +1513,14 @@ public:
         }
     };
 
-    void render_scene(entt::registry& registry, camera& c)
+    void render_scene(entt::registry& registry, camera& c, const ViewContext& view_context = {})
     {
-        render_frame(registry, c, FrameTarget::DirectToSwapchain);
+        render_frame(registry, c, FrameTarget::DirectToSwapchain, view_context);
     }
 
-    void render_scene_to_texture(entt::registry& registry, camera& c)
+    void render_scene_to_texture(entt::registry& registry, camera& c, const ViewContext& view_context = {})
     {
-        render_frame(registry, c, FrameTarget::RenderToTexture);
+        render_frame(registry, c, FrameTarget::RenderToTexture, view_context);
     }
 
     // Access the scene BVH (for ray picking, etc.)

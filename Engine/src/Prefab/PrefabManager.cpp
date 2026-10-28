@@ -312,13 +312,12 @@ bool PrefabManager::savePrefab(
                     sidecar["culling"]      = mc->m_mesh->culling;
                     sidecar["transparent"]  = mc->m_mesh->transparent;
                     sidecar["visible"]      = mc->m_mesh->visible;
-                    sidecar["casts_shadow"] = mc->m_mesh->casts_shadow;
                     sidecar["force_lod"]    = mc->m_mesh->force_lod;
                 }
                 else
                 {
                     sidecar["culling"] = true; sidecar["transparent"] = false;
-                    sidecar["visible"] = true; sidecar["casts_shadow"] = true;
+                    sidecar["visible"] = true;
                     sidecar["force_lod"] = -1;
                 }
             }
@@ -467,7 +466,6 @@ void applySidecar(entt::registry& registry, entt::entity entity, const json& sid
                 if (sidecar.contains("culling"))      mesh_ptr->culling      = sidecar["culling"].get<bool>();
                 if (sidecar.contains("transparent"))  mesh_ptr->transparent  = sidecar["transparent"].get<bool>();
                 if (sidecar.contains("visible"))      mesh_ptr->visible      = sidecar["visible"].get<bool>();
-                if (sidecar.contains("casts_shadow")) mesh_ptr->casts_shadow = sidecar["casts_shadow"].get<bool>();
                 if (sidecar.contains("force_lod"))    mesh_ptr->force_lod    = sidecar["force_lod"].get<int>();
                 if (render_api)
                     mesh_ptr->uploadToGPU(render_api);

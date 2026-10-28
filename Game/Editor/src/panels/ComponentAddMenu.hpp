@@ -32,6 +32,7 @@ namespace EditorComponentAddMenu
             if (ImGui::MenuItem("Mesh"))
             {
                 registry.emplace<MeshComponent>(entity);
+                registry.emplace<RenderableComponent>(entity);
                 on_added();
                 changed = true;
             }

@@ -6,9 +6,13 @@
 #include "Graphics/BVH.hpp"
 #include "Graphics/HeadlessRenderAPI.hpp"
 #include "Graphics/renderer.hpp"
+#include "LevelManager.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -86,6 +90,112 @@ static bool matrixNear(const glm::mat4& actual, const glm::mat4& expected,
     return true;
 }
 
+
+
+static bool testLegacyBinaryLevelVersionIsRejected()
+{
+    const std::string name = "legacy level binary version is rejected before entity read";
+    namespace fs = std::filesystem;
+    const fs::path path = fs::temp_directory_path() / "garden_render_visibility_legacy_level.gardenlevel";
+    std::error_code ignored;
+    fs::remove(path, ignored);
+
+    LevelManager manager;
+    LevelData source;
+    source.metadata.level_name = "RenderVisibilityBinary";
+    if (!manager.saveLevelToBinary(path.string(), source))
+        return fail(name, "could not write current binary fixture");
+
+    constexpr uint32_t retired_version = 6;
+    {
+        std::fstream stream(path, std::ios::binary | std::ios::in | std::ios::out);
+        if (!stream.is_open())
+        {
+            fs::remove(path, ignored);
+            return fail(name, "could not patch the binary version field");
+        }
+        stream.seekp(static_cast<std::streamoff>(sizeof(uint32_t)));
+        stream.write(reinterpret_cast<const char*>(&retired_version), sizeof(retired_version));
+    }
+
+    LevelData loaded;
+    const bool accepted = manager.loadLevelFromBinary(path.string(), loaded);
+    fs::remove(path, ignored);
+    if (accepted)
+        return fail(name, "retired binary record carrying mesh shadow data was accepted");
+    return pass(name);
+}
+
+static bool testPerViewRenderableVisibility()
+{
+    const std::string name = "per-view renderability uses stable owners and owner-neutral shadow policy";
+    entt::registry registry;
+    const entt::entity owner = registry.create();
+    const entt::entity other = registry.create();
+    registry.emplace<IdentityComponent>(owner, IdentityComponent{EntityGuid{1, 1}});
+    registry.emplace<IdentityComponent>(other, IdentityComponent{EntityGuid{2, 2}});
+
+    RenderableComponent renderable;
+    renderable.owner = entityRefOf(registry, owner);
+    const ViewContext owner_view{entityRefOf(registry, owner)};
+    const ViewContext other_view{entityRefOf(registry, other)};
+    const ViewContext editor_view{};
+
+    if (!isRenderableVisible(registry, renderable, owner_view) ||
+        !isRenderableVisible(registry, renderable, other_view) ||
+        !isRenderableVisible(registry, renderable, editor_view))
+        return fail(name, "world layer did not remain visible in every main view");
+
+    renderable.layers = renderLayerMask(RenderLayer::World) |
+                        renderLayerMask(RenderLayer::OwnerOnly);
+    if (!isRenderableVisible(registry, renderable, owner_view) ||
+        isRenderableVisible(registry, renderable, other_view) ||
+        !isRenderableVisible(registry, renderable, editor_view))
+        return fail(name, "owner-only visibility matrix was incorrect");
+
+    renderable.layers = renderLayerMask(RenderLayer::World) |
+                        renderLayerMask(RenderLayer::OwnerHidden);
+    if (isRenderableVisible(registry, renderable, owner_view) ||
+        !isRenderableVisible(registry, renderable, other_view) ||
+        !isRenderableVisible(registry, renderable, editor_view))
+        return fail(name, "owner-hidden visibility matrix was incorrect");
+
+    renderable.layers = renderLayerMask(RenderLayer::World) |
+                        renderLayerMask(RenderLayer::OwnerOnly) |
+                        renderLayerMask(RenderLayer::OwnerHidden);
+    if (isRenderableVisible(registry, renderable, owner_view) ||
+        isRenderableVisible(registry, renderable, other_view) ||
+        !isRenderableVisible(registry, renderable, editor_view))
+        return fail(name, "combined owner flags did not hide every game view");
+
+    renderable.layers = renderLayerMask(RenderLayer::ViewModel) |
+                        renderLayerMask(RenderLayer::OwnerOnly);
+    ViewContext viewmodel_owner = owner_view;
+    viewmodel_owner.is_viewmodel_pass = true;
+    if (!isRenderableVisible(registry, renderable, viewmodel_owner) ||
+        isRenderableVisible(registry, renderable, owner_view))
+        return fail(name, "viewmodel layer selection was incorrect");
+    if (isRenderableShadowVisible(renderable))
+        return fail(name, "viewmodel renderable was admitted to shadows");
+
+    renderable.layers = renderLayerMask(RenderLayer::World) |
+                        renderLayerMask(RenderLayer::OwnerHidden);
+    if (!isRenderableShadowVisible(renderable))
+        return fail(name, "owner-hidden world body did not cast shadows");
+    renderable.casts_shadow = false;
+    if (isRenderableShadowVisible(renderable))
+        return fail(name, "component shadow policy was ignored");
+
+    const EntityRef stale_owner = renderable.owner;
+    registry.destroy(owner);
+    renderable.layers = renderLayerMask(RenderLayer::World) |
+                        renderLayerMask(RenderLayer::OwnerOnly);
+    renderable.owner = stale_owner;
+    if (isRenderableVisible(registry, renderable, other_view))
+        return fail(name, "stale owner reference remained visible as a live owner");
+    return pass(name);
+}
+
 static bool testParentPoseRecordedAndCulledFromSameWorldPose()
 {
     const std::string name = "parented child draw matrix and BVH visibility share the current render pose";
@@ -114,6 +224,7 @@ static bool testParentPoseRecordedAndCulledFromSameWorldPose()
     MeshComponent mesh_component;
     mesh_component.m_mesh = child_mesh;
     registry.emplace<MeshComponent>(child, std::move(mesh_component));
+    registry.emplace<RenderableComponent>(child);
 
     if (!Hierarchy::attach(registry, child, parent))
         return fail(name, "valid parent-child fixture did not attach");
@@ -221,6 +332,7 @@ static bool testRootPresentationCompatibilityThroughOpaqueRecorder()
     MeshComponent mesh_component;
     mesh_component.m_mesh = root_mesh;
     registry.emplace<MeshComponent>(root, std::move(mesh_component));
+    registry.emplace<RenderableComponent>(root);
 
     renderer render_host;
     const auto render_poses = renderer::resolve_render_poses(registry);
@@ -293,6 +405,7 @@ static bool testRenderPoseFeedsLodAndSortConsumers()
     MeshComponent child_mesh_component;
     child_mesh_component.m_mesh = child_mesh;
     registry.emplace<MeshComponent>(child, std::move(child_mesh_component));
+    registry.emplace<RenderableComponent>(child);
 
     const entt::entity other = registry.create();
     TransformComponent other_transform;
@@ -305,6 +418,7 @@ static bool testRenderPoseFeedsLodAndSortConsumers()
     MeshComponent other_mesh_component;
     other_mesh_component.m_mesh = other_mesh;
     registry.emplace<MeshComponent>(other, std::move(other_mesh_component));
+    registry.emplace<RenderableComponent>(other);
 
     if (!Hierarchy::attach(registry, child, parent))
         return fail(name, "valid parent-child fixture did not attach");
@@ -417,6 +531,7 @@ static bool testNonFiniteRenderPosesAreSkipped()
     MeshComponent mesh_component;
     mesh_component.m_mesh = std::move(render_mesh);
     registry.emplace<MeshComponent>(entity, std::move(mesh_component));
+    registry.emplace<RenderableComponent>(entity);
 
     renderer render_host;
     auto resolved = renderer::resolve_render_poses(registry);
@@ -443,6 +558,8 @@ static bool testNonFiniteRenderPosesAreSkipped()
 int main()
 {
     bool ok = true;
+    ok &= testLegacyBinaryLevelVersionIsRejected();
+    ok &= testPerViewRenderableVisibility();
     ok &= testParentPoseRecordedAndCulledFromSameWorldPose();
     ok &= testRootPresentationCompatibilityThroughOpaqueRecorder();
     ok &= testRenderPoseFeedsLodAndSortConsumers();

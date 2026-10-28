@@ -131,7 +131,6 @@ public:
     bool visible;
     bool culling;
     bool transparent;
-    bool casts_shadow;
 
     bool heightmap_displacement = false;
     TextureHandle heightmap_texture = INVALID_TEXTURE;
@@ -208,7 +207,6 @@ public:
         visible = true;
         culling = true;
         transparent = false;
-        casts_shadow = true;
         heightmap_displacement = false;
         heightmap_texture = INVALID_TEXTURE;
         heightmap_height_scale = 1.0f;
@@ -236,7 +234,6 @@ public:
         visible = true;
         culling = true;
         transparent = false;
-        casts_shadow = true;
         heightmap_displacement = false;
         heightmap_texture = INVALID_TEXTURE;
         heightmap_height_scale = 1.0f;
@@ -269,7 +266,6 @@ public:
         visible = true;
         culling = true;
         transparent = false;
-        casts_shadow = true;
         heightmap_displacement = false;
         heightmap_texture = INVALID_TEXTURE;
         heightmap_height_scale = 1.0f;
@@ -304,7 +300,6 @@ public:
         visible = other.visible;
         culling = other.culling;
         transparent = other.transparent;
-        casts_shadow = other.casts_shadow;
         heightmap_displacement = other.heightmap_displacement;
         heightmap_texture = other.heightmap_texture;
         heightmap_height_scale = other.heightmap_height_scale;
@@ -364,8 +359,7 @@ public:
             visible = other.visible;
             culling = other.culling;
             transparent = other.transparent;
-            casts_shadow = other.casts_shadow;
-            heightmap_displacement = other.heightmap_displacement;
+                heightmap_displacement = other.heightmap_displacement;
             heightmap_texture = other.heightmap_texture;
             heightmap_height_scale = other.heightmap_height_scale;
             heightmap_height_offset = other.heightmap_height_offset;

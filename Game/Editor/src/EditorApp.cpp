@@ -476,6 +476,7 @@ namespace
             cloneComponentIfPresent<TagComponent>(play_world->registry, dst_entity, editor_world.registry, src_entity);
             cloneComponentIfPresent<TransformComponent>(play_world->registry, dst_entity, editor_world.registry, src_entity);
             cloneComponentIfPresent<MeshComponent>(play_world->registry, dst_entity, editor_world.registry, src_entity);
+            cloneComponentIfPresent<RenderableComponent>(play_world->registry, dst_entity, editor_world.registry, src_entity);
             cloneComponentIfPresent<TerrainComponent>(play_world->registry, dst_entity, editor_world.registry, src_entity);
             cloneComponentIfPresent<RigidBodyComponent>(play_world->registry, dst_entity, editor_world.registry, src_entity);
             cloneComponentIfPresent<ColliderComponent>(play_world->registry, dst_entity, editor_world.registry, src_entity);
@@ -707,6 +708,7 @@ bool EditorApp::initialize(RenderAPIType api_type)
         m_world.registry.emplace<TagComponent>(entity, entity_name);
         m_world.registry.emplace<TransformComponent>(entity);
         auto& mc = m_world.registry.emplace<MeshComponent>(entity);
+        m_world.registry.emplace<RenderableComponent>(entity);
 
         // Load mesh with materials
         auto mesh_ptr = std::make_shared<mesh>(mesh_path, api);
@@ -3974,7 +3976,6 @@ namespace
                a.culling == b.culling &&
                a.transparent == b.transparent &&
                a.visible == b.visible &&
-               a.casts_shadow == b.casts_shadow &&
                a.force_lod == b.force_lod &&
                a.speed == b.speed &&
                a.jump_force == b.jump_force &&
@@ -4188,7 +4189,6 @@ LevelEntity EditorApp::buildLevelEntityFromECS(entt::entity entity) const
             le.culling      = mc.m_mesh->culling;
             le.transparent  = mc.m_mesh->transparent;
             le.visible      = mc.m_mesh->visible;
-            le.casts_shadow = mc.m_mesh->casts_shadow;
             le.force_lod    = mc.m_mesh->force_lod;
         }
     }
@@ -4345,6 +4345,7 @@ void EditorApp::pasteEntity()
         (le.type == EntityType::Renderable || le.type == EntityType::Physical || le.type == EntityType::PlayerRep))
     {
         auto& mc = m_world.registry.emplace<MeshComponent>(entity);
+        m_world.registry.emplace<RenderableComponent>(entity);
         auto mesh_ptr = std::make_shared<mesh>(m_clipboard_mesh_path, api);
         if (mesh_ptr->is_valid)
         {
@@ -4352,7 +4353,6 @@ void EditorApp::pasteEntity()
             mesh_ptr->culling      = le.culling;
             mesh_ptr->transparent  = le.transparent;
             mesh_ptr->visible      = le.visible;
-            mesh_ptr->casts_shadow = le.casts_shadow;
             mesh_ptr->force_lod    = le.force_lod;
             mc.m_mesh = mesh_ptr;
         }

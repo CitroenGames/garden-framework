@@ -156,7 +156,7 @@ inline EntityRef ensureEntityRef(entt::registry& r, entt::entity e)
 
 // Resolve a GUID ref by scanning IdentityComponents (small registries;
 // EntityLifecycle::resolve is the indexed path when a lifecycle exists).
-inline entt::entity resolveEntityRef(entt::registry& r, EntityRef ref)
+inline entt::entity resolveEntityRef(const entt::registry& r, EntityRef ref)
 {
     if (ref.isNull())
         return entt::null;

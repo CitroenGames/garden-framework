@@ -89,7 +89,6 @@ struct LevelEntity
     bool culling;
     bool transparent;
     bool visible;
-    bool casts_shadow;
     int force_lod;
 
     // Player/Freecam specific
@@ -130,7 +129,6 @@ struct LevelEntity
         , culling(true)
         , transparent(false)
         , visible(true)
-        , casts_shadow(true)
         , force_lod(-1)
         , speed(1.5f)
         , jump_force(3.0f)

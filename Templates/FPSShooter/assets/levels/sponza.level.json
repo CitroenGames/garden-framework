@@ -2,7 +2,6 @@
   "entities": [
     {
       "mesh": {
-        "casts_shadow": true,
         "culling": true,
         "force_lod": -1,
         "path": "assets/models/sponza/Sponza.gltf",
@@ -29,7 +28,14 @@
           "z": 0.019999999552965164
         }
       },
-      "type": "Renderable"
+      "type": "Renderable",
+      "components": {
+        "RenderableComponent": {
+          "layers": 1,
+          "owner": "0000000000000000-0000000000000000",
+          "casts_shadow": true
+        }
+      }
     }
   ],
   "metadata": {

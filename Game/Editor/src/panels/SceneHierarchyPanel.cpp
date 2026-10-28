@@ -53,6 +53,7 @@ void SceneHierarchyPanel::draw(entt::registry& registry, bool* out_dirty, bool* 
             registry.emplace<TagComponent>(e, "New Mesh Entity");
             registry.emplace<TransformComponent>(e);
             registry.emplace<MeshComponent>(e);
+            registry.emplace<RenderableComponent>(e);
             selected_entity = e;
             if (out_dirty) *out_dirty = true;
             if (out_unsaved) *out_unsaved = true;
@@ -379,6 +380,7 @@ entt::entity SceneHierarchyPanel::duplicateEntity(entt::registry& registry, entt
 
     if (auto* mc = registry.try_get<MeshComponent>(source))
         registry.emplace<MeshComponent>(new_entity, *mc);
+        registry.emplace<RenderableComponent>(new_entity);
 
     if (auto* col = registry.try_get<ColliderComponent>(source))
     {

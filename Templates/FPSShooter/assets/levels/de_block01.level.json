@@ -57,6 +57,13 @@
         "transparent": false,
         "visible": true,
         "use_mesh_collision": true
+      },
+      "components": {
+        "RenderableComponent": {
+          "layers": 1,
+          "owner": "0000000000000000-0000000000000000",
+          "casts_shadow": true
+        }
       }
     }
   ]

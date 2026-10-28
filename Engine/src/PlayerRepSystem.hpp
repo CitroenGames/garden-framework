@@ -28,15 +28,14 @@ inline void apply_tracked_render_yaw(const glm::mat4& world_pose,
 
 // Updates player representation entities to follow their tracked player.
 // Called each frame during gameplay simulation.
-inline void update_player_representations(entt::registry& registry, bool is_freecam)
+inline void update_player_representations(entt::registry& registry, bool /*is_freecam*/)
 {
-    auto view = registry.view<PlayerRepresentationComponent, TransformComponent, MeshComponent>();
+    auto view = registry.view<PlayerRepresentationComponent, TransformComponent>();
 
     for (entt::entity entity : view)
     {
         auto& pr    = view.get<PlayerRepresentationComponent>(entity);
         auto& trans  = view.get<TransformComponent>(entity);
-        auto& mesh_comp = view.get<MeshComponent>(entity);
 
         const entt::entity tracked = resolveEntityRef(registry, pr.tracked_player);
         if (tracked != entt::null && registry.valid(tracked) &&
@@ -52,12 +51,6 @@ inline void update_player_representations(entt::registry& registry, bool is_free
                 trans.position = glm::vec3((*target_pose)[3]) + pr.position_offset;
                 apply_tracked_render_yaw(*target_pose, trans);
             }
-        }
-
-        // Visibility
-        if (pr.visible_only_freecam && mesh_comp.m_mesh)
-        {
-            mesh_comp.m_mesh->visible = is_freecam;
         }
     }
 }

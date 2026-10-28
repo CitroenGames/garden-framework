@@ -66,6 +66,13 @@
         },
         "friction": 0.75,
         "restitution": 0.0
+      },
+      "components": {
+        "RenderableComponent": {
+          "layers": 1,
+          "owner": "0000000000000000-0000000000000000",
+          "casts_shadow": true
+        }
       }
     },
     {
@@ -159,6 +166,11 @@
             "z": 0.0
           },
           "visible_only_freecam": false
+        },
+        "RenderableComponent": {
+          "layers": 1,
+          "owner": "0000000000000000-0000000000000000",
+          "casts_shadow": true
         }
       }
     },

@@ -57,6 +57,13 @@
         "transparent": false,
         "visible": true,
         "use_mesh_collision": true
+      },
+      "components": {
+        "RenderableComponent": {
+          "layers": 1,
+          "owner": "0000000000000000-0000000000000000",
+          "casts_shadow": true
+        }
       }
     },
     {
@@ -128,9 +135,20 @@
       },
       "collider": {
         "shape_type": "Box",
-        "box_half_extents": { "x": 0.5, "y": 0.5, "z": 0.5 },
+        "box_half_extents": {
+          "x": 0.5,
+          "y": 0.5,
+          "z": 0.5
+        },
         "friction": 0.5,
         "restitution": 0.3
+      },
+      "components": {
+        "RenderableComponent": {
+          "layers": 1,
+          "owner": "0000000000000000-0000000000000000",
+          "casts_shadow": true
+        }
       }
     },
     {
@@ -219,6 +237,13 @@
           "x": 0.0,
           "y": 0.0,
           "z": 0.0
+        }
+      },
+      "components": {
+        "RenderableComponent": {
+          "layers": 1,
+          "owner": "0000000000000000-0000000000000000",
+          "casts_shadow": true
         }
       }
     }

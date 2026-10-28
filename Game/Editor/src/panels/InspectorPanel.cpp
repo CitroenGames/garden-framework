@@ -212,7 +212,8 @@ bool InspectorPanel::draw(entt::registry& registry, entt::entity selected,
                 if (ImGui::Checkbox("Visible", &mc.m_mesh->visible)) markUnsaved();
                 ImGui::SameLine();
                 if (ImGui::Checkbox("Transparent", &mc.m_mesh->transparent)) markUnsaved();
-                if (ImGui::Checkbox("Casts Shadow", &mc.m_mesh->casts_shadow)) markUnsaved();
+                auto& renderable = registry.get<RenderableComponent>(selected);
+                if (ImGui::Checkbox("Casts Shadow", &renderable.casts_shadow)) markUnsaved();
                 ImGui::SameLine();
                 if (ImGui::Checkbox("Culling", &mc.m_mesh->culling)) markUnsaved();
 

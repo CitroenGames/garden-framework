@@ -34,9 +34,21 @@
       "name": "heightmap_terrain",
       "type": "Static",
       "transform": {
-        "position": { "x": 0.0, "y": 0.0, "z": 0.0 },
-        "rotation": { "x": 0.0, "y": 0.0, "z": 0.0 },
-        "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }
+        "position": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "rotation": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "scale": {
+          "x": 1.0,
+          "y": 1.0,
+          "z": 1.0
+        }
       },
       "components": {
         "TerrainComponent": {
@@ -58,9 +70,21 @@
       "name": "terrain_test_cube_a",
       "type": "Physical",
       "transform": {
-        "position": { "x": -10.0, "y": 9.5, "z": -6.0 },
-        "rotation": { "x": 0.0, "y": 0.0, "z": 0.0 },
-        "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }
+        "position": {
+          "x": -10.0,
+          "y": 9.5,
+          "z": -6.0
+        },
+        "rotation": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "scale": {
+          "x": 1.0,
+          "y": 1.0,
+          "z": 1.0
+        }
       },
       "mesh": {
         "path": "assets/models/grasscube.obj",
@@ -75,18 +99,41 @@
       },
       "collider": {
         "shape_type": "Box",
-        "box_half_extents": { "x": 0.5, "y": 0.5, "z": 0.5 },
+        "box_half_extents": {
+          "x": 0.5,
+          "y": 0.5,
+          "z": 0.5
+        },
         "friction": 0.6,
         "restitution": 0.15
+      },
+      "components": {
+        "RenderableComponent": {
+          "layers": 1,
+          "owner": "0000000000000000-0000000000000000",
+          "casts_shadow": true
+        }
       }
     },
     {
       "name": "terrain_test_cube_b",
       "type": "Physical",
       "transform": {
-        "position": { "x": 10.0, "y": 10.5, "z": 8.0 },
-        "rotation": { "x": 0.0, "y": 0.0, "z": 0.0 },
-        "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }
+        "position": {
+          "x": 10.0,
+          "y": 10.5,
+          "z": 8.0
+        },
+        "rotation": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "scale": {
+          "x": 1.0,
+          "y": 1.0,
+          "z": 1.0
+        }
       },
       "mesh": {
         "path": "assets/models/grasscube.obj",
@@ -101,18 +148,41 @@
       },
       "collider": {
         "shape_type": "Box",
-        "box_half_extents": { "x": 0.5, "y": 0.5, "z": 0.5 },
+        "box_half_extents": {
+          "x": 0.5,
+          "y": 0.5,
+          "z": 0.5
+        },
         "friction": 0.6,
         "restitution": 0.15
+      },
+      "components": {
+        "RenderableComponent": {
+          "layers": 1,
+          "owner": "0000000000000000-0000000000000000",
+          "casts_shadow": true
+        }
       }
     },
     {
       "name": "player",
       "type": "Player",
       "transform": {
-        "position": { "x": 0.0, "y": 8.0, "z": -18.0 },
-        "rotation": { "x": 0.0, "y": 0.0, "z": 0.0 },
-        "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }
+        "position": {
+          "x": 0.0,
+          "y": 8.0,
+          "z": -18.0
+        },
+        "rotation": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "scale": {
+          "x": 1.0,
+          "y": 1.0,
+          "z": 1.0
+        }
       },
       "player_properties": {
         "speed": 4.5,
@@ -125,9 +195,21 @@
       "name": "freecam",
       "type": "Freecam",
       "transform": {
-        "position": { "x": 0.0, "y": 18.0, "z": -36.0 },
-        "rotation": { "x": -18.0, "y": 0.0, "z": 0.0 },
-        "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }
+        "position": {
+          "x": 0.0,
+          "y": 18.0,
+          "z": -36.0
+        },
+        "rotation": {
+          "x": -18.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "scale": {
+          "x": 1.0,
+          "y": 1.0,
+          "z": 1.0
+        }
       },
       "freecam_properties": {
         "movement_speed": 8.0,

@@ -421,6 +421,7 @@ void PrefabEditorManager::drawComponentsPanel(PrefabEditorInstance& inst)
             if (ImGui::MenuItem("Mesh"))
             {
                 inst.registry.emplace<MeshComponent>(inst.entity);
+                inst.registry.emplace<RenderableComponent>(inst.entity);
                 markPrefabPreviewDirty(inst);
             }
         }
@@ -509,7 +510,8 @@ void PrefabEditorManager::drawDetailsPanel(PrefabEditorInstance& inst)
                 if (ImGui::Checkbox("Visible", &mc.m_mesh->visible)) markPrefabPreviewDirty(inst);
                 ImGui::SameLine();
                 if (ImGui::Checkbox("Transparent", &mc.m_mesh->transparent)) markPrefabPreviewDirty(inst);
-                if (ImGui::Checkbox("Casts Shadow", &mc.m_mesh->casts_shadow)) markPrefabPreviewDirty(inst);
+                auto& renderable = inst.registry.get<RenderableComponent>(inst.entity);
+                if (ImGui::Checkbox("Casts Shadow", &renderable.casts_shadow)) markPrefabPreviewDirty(inst);
                 ImGui::SameLine();
                 if (ImGui::Checkbox("Culling", &mc.m_mesh->culling)) markPrefabPreviewDirty(inst);
 

@@ -34,9 +34,21 @@
       "name": "floor",
       "type": "Renderable",
       "transform": {
-        "position": { "x": 0.0, "y": 0.0, "z": 0.0 },
-        "rotation": { "x": 0.0, "y": 0.0, "z": 0.0 },
-        "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }
+        "position": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "rotation": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "scale": {
+          "x": 1.0,
+          "y": 1.0,
+          "z": 1.0
+        }
       },
       "mesh": {
         "path": "assets/models/ground_plane.obj",
@@ -47,18 +59,41 @@
       },
       "collider": {
         "shape_type": "Box",
-        "box_half_extents": { "x": 12.0, "y": 0.08, "z": 12.0 },
+        "box_half_extents": {
+          "x": 12.0,
+          "y": 0.08,
+          "z": 12.0
+        },
         "friction": 0.85,
         "restitution": 0.0
+      },
+      "components": {
+        "RenderableComponent": {
+          "layers": 1,
+          "owner": "0000000000000000-0000000000000000",
+          "casts_shadow": true
+        }
       }
     },
     {
       "name": "wall_north",
       "type": "Renderable",
       "transform": {
-        "position": { "x": 0.0, "y": 1.0, "z": 12.0 },
-        "rotation": { "x": 0.0, "y": 0.0, "z": 0.0 },
-        "scale": { "x": 24.0, "y": 2.0, "z": 0.35 }
+        "position": {
+          "x": 0.0,
+          "y": 1.0,
+          "z": 12.0
+        },
+        "rotation": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "scale": {
+          "x": 24.0,
+          "y": 2.0,
+          "z": 0.35
+        }
       },
       "mesh": {
         "path": "assets/models/unit_cube.obj",
@@ -69,18 +104,41 @@
       },
       "collider": {
         "shape_type": "Box",
-        "box_half_extents": { "x": 0.5, "y": 0.5, "z": 0.5 },
+        "box_half_extents": {
+          "x": 0.5,
+          "y": 0.5,
+          "z": 0.5
+        },
         "friction": 0.8,
         "restitution": 0.0
+      },
+      "components": {
+        "RenderableComponent": {
+          "layers": 1,
+          "owner": "0000000000000000-0000000000000000",
+          "casts_shadow": true
+        }
       }
     },
     {
       "name": "wall_south",
       "type": "Renderable",
       "transform": {
-        "position": { "x": 0.0, "y": 1.0, "z": -12.0 },
-        "rotation": { "x": 0.0, "y": 0.0, "z": 0.0 },
-        "scale": { "x": 24.0, "y": 2.0, "z": 0.35 }
+        "position": {
+          "x": 0.0,
+          "y": 1.0,
+          "z": -12.0
+        },
+        "rotation": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "scale": {
+          "x": 24.0,
+          "y": 2.0,
+          "z": 0.35
+        }
       },
       "mesh": {
         "path": "assets/models/unit_cube.obj",
@@ -91,18 +149,41 @@
       },
       "collider": {
         "shape_type": "Box",
-        "box_half_extents": { "x": 0.5, "y": 0.5, "z": 0.5 },
+        "box_half_extents": {
+          "x": 0.5,
+          "y": 0.5,
+          "z": 0.5
+        },
         "friction": 0.8,
         "restitution": 0.0
+      },
+      "components": {
+        "RenderableComponent": {
+          "layers": 1,
+          "owner": "0000000000000000-0000000000000000",
+          "casts_shadow": true
+        }
       }
     },
     {
       "name": "wall_east",
       "type": "Renderable",
       "transform": {
-        "position": { "x": 12.0, "y": 1.0, "z": 0.0 },
-        "rotation": { "x": 0.0, "y": 0.0, "z": 0.0 },
-        "scale": { "x": 0.35, "y": 2.0, "z": 24.0 }
+        "position": {
+          "x": 12.0,
+          "y": 1.0,
+          "z": 0.0
+        },
+        "rotation": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "scale": {
+          "x": 0.35,
+          "y": 2.0,
+          "z": 24.0
+        }
       },
       "mesh": {
         "path": "assets/models/unit_cube.obj",
@@ -113,18 +194,41 @@
       },
       "collider": {
         "shape_type": "Box",
-        "box_half_extents": { "x": 0.5, "y": 0.5, "z": 0.5 },
+        "box_half_extents": {
+          "x": 0.5,
+          "y": 0.5,
+          "z": 0.5
+        },
         "friction": 0.8,
         "restitution": 0.0
+      },
+      "components": {
+        "RenderableComponent": {
+          "layers": 1,
+          "owner": "0000000000000000-0000000000000000",
+          "casts_shadow": true
+        }
       }
     },
     {
       "name": "wall_west",
       "type": "Renderable",
       "transform": {
-        "position": { "x": -12.0, "y": 1.0, "z": 0.0 },
-        "rotation": { "x": 0.0, "y": 0.0, "z": 0.0 },
-        "scale": { "x": 0.35, "y": 2.0, "z": 24.0 }
+        "position": {
+          "x": -12.0,
+          "y": 1.0,
+          "z": 0.0
+        },
+        "rotation": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "scale": {
+          "x": 0.35,
+          "y": 2.0,
+          "z": 24.0
+        }
       },
       "mesh": {
         "path": "assets/models/unit_cube.obj",
@@ -135,18 +239,41 @@
       },
       "collider": {
         "shape_type": "Box",
-        "box_half_extents": { "x": 0.5, "y": 0.5, "z": 0.5 },
+        "box_half_extents": {
+          "x": 0.5,
+          "y": 0.5,
+          "z": 0.5
+        },
         "friction": 0.8,
         "restitution": 0.0
+      },
+      "components": {
+        "RenderableComponent": {
+          "layers": 1,
+          "owner": "0000000000000000-0000000000000000",
+          "casts_shadow": true
+        }
       }
     },
     {
       "name": "walkaround_block_a",
       "type": "Renderable",
       "transform": {
-        "position": { "x": -3.5, "y": 0.45, "z": 2.0 },
-        "rotation": { "x": 0.0, "y": 18.0, "z": 0.0 },
-        "scale": { "x": 2.5, "y": 0.9, "z": 1.2 }
+        "position": {
+          "x": -3.5,
+          "y": 0.45,
+          "z": 2.0
+        },
+        "rotation": {
+          "x": 0.0,
+          "y": 18.0,
+          "z": 0.0
+        },
+        "scale": {
+          "x": 2.5,
+          "y": 0.9,
+          "z": 1.2
+        }
       },
       "mesh": {
         "path": "assets/models/unit_cube.obj",
@@ -157,18 +284,41 @@
       },
       "collider": {
         "shape_type": "Box",
-        "box_half_extents": { "x": 0.5, "y": 0.5, "z": 0.5 },
+        "box_half_extents": {
+          "x": 0.5,
+          "y": 0.5,
+          "z": 0.5
+        },
         "friction": 0.8,
         "restitution": 0.0
+      },
+      "components": {
+        "RenderableComponent": {
+          "layers": 1,
+          "owner": "0000000000000000-0000000000000000",
+          "casts_shadow": true
+        }
       }
     },
     {
       "name": "walkaround_block_b",
       "type": "Renderable",
       "transform": {
-        "position": { "x": 3.5, "y": 0.75, "z": -2.5 },
-        "rotation": { "x": 0.0, "y": -24.0, "z": 0.0 },
-        "scale": { "x": 1.6, "y": 1.5, "z": 1.6 }
+        "position": {
+          "x": 3.5,
+          "y": 0.75,
+          "z": -2.5
+        },
+        "rotation": {
+          "x": 0.0,
+          "y": -24.0,
+          "z": 0.0
+        },
+        "scale": {
+          "x": 1.6,
+          "y": 1.5,
+          "z": 1.6
+        }
       },
       "mesh": {
         "path": "assets/models/unit_cube.obj",
@@ -179,18 +329,41 @@
       },
       "collider": {
         "shape_type": "Box",
-        "box_half_extents": { "x": 0.5, "y": 0.5, "z": 0.5 },
+        "box_half_extents": {
+          "x": 0.5,
+          "y": 0.5,
+          "z": 0.5
+        },
         "friction": 0.8,
         "restitution": 0.0
+      },
+      "components": {
+        "RenderableComponent": {
+          "layers": 1,
+          "owner": "0000000000000000-0000000000000000",
+          "casts_shadow": true
+        }
       }
     },
     {
       "name": "player",
       "type": "Player",
       "transform": {
-        "position": { "x": 0.0, "y": 1.2, "z": -5.5 },
-        "rotation": { "x": 0.0, "y": 0.0, "z": 0.0 },
-        "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }
+        "position": {
+          "x": 0.0,
+          "y": 1.2,
+          "z": -5.5
+        },
+        "rotation": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "scale": {
+          "x": 1.0,
+          "y": 1.0,
+          "z": 1.0
+        }
       },
       "player_properties": {
         "speed": 3.0,
@@ -225,12 +398,28 @@
       "name": "key_light",
       "type": "PointLight",
       "transform": {
-        "position": { "x": -4.5, "y": 5.5, "z": -4.0 },
-        "rotation": { "x": 0.0, "y": 0.0, "z": 0.0 },
-        "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }
+        "position": {
+          "x": -4.5,
+          "y": 5.5,
+          "z": -4.0
+        },
+        "rotation": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "scale": {
+          "x": 1.0,
+          "y": 1.0,
+          "z": 1.0
+        }
       },
       "point_light": {
-        "color": { "r": 0.95, "g": 0.9, "b": 0.78 },
+        "color": {
+          "r": 0.95,
+          "g": 0.9,
+          "b": 0.78
+        },
         "intensity": 5.0,
         "range": 18.0,
         "constant_attenuation": 1.0,

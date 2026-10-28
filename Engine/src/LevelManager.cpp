@@ -43,10 +43,7 @@
 using json = nlohmann::json;
 
 static constexpr uint32_t LEVEL_BINARY_MAGIC   = 0x47444E4C; // "GDNL"
-static constexpr uint32_t LEVEL_BINARY_VERSION  = 6;
-static constexpr uint32_t LEVEL_BINARY_VERSION_V5 = 5;
-static constexpr uint32_t LEVEL_BINARY_VERSION_V4 = 4;
-static constexpr uint32_t LEVEL_BINARY_VERSION_V3 = 3; // Previous version for backward compat
+static constexpr uint32_t LEVEL_BINARY_VERSION  = 7;
 
 static std::string readOptionValue(const std::string& options, std::initializer_list<const char*> keys)
 {
@@ -1323,7 +1320,6 @@ static void applyLevelMeshProperties(const std::shared_ptr<mesh>& m_ptr, const L
     m_ptr->culling = entity.culling;
     m_ptr->transparent = entity.transparent;
     m_ptr->visible = entity.visible;
-    m_ptr->casts_shadow = entity.casts_shadow;
     m_ptr->force_lod = entity.force_lod;
     m_ptr->updateTransparencyFromMaterials();
 }
@@ -1693,9 +1689,34 @@ bool LevelManager::parseEntityFromJSON(const void* json_ptr, LevelEntity& entity
         }
     }
 
-    // Parse mesh
+    // Renderable sidecars are current-format only: a mesh must carry its
+    // entity-local visibility/shadow policy instead of inheriting mesh flags.
     if (j.contains("mesh"))
     {
+        const auto components = j.find("components");
+        if (components == j.end() || !components->is_object() ||
+            !components->contains("RenderableComponent") ||
+            !(*components)["RenderableComponent"].is_object())
+        {
+            LOG_ENGINE_ERROR("Level entity '{}' has mesh data without RenderableComponent; rejected", entity.name);
+            return false;
+        }
+        const auto& renderable = (*components)["RenderableComponent"];
+        EntityGuid owner_guid{};
+        constexpr uint32_t known_render_layers =
+            renderLayerMask(RenderLayer::World) |
+            renderLayerMask(RenderLayer::ViewModel) |
+            renderLayerMask(RenderLayer::OwnerHidden) |
+            renderLayerMask(RenderLayer::OwnerOnly);
+        if (!renderable.contains("layers") || !renderable["layers"].is_number_unsigned() ||
+            (renderable["layers"].get<uint32_t>() & ~known_render_layers) != 0 ||
+            !renderable.contains("owner") || !renderable["owner"].is_string() ||
+            !guidFromString(renderable["owner"].get<std::string>(), owner_guid) ||
+            !renderable.contains("casts_shadow") || !renderable["casts_shadow"].is_boolean())
+        {
+            LOG_ENGINE_ERROR("Level entity '{}' has an invalid RenderableComponent; rejected", entity.name);
+            return false;
+        }
         const auto& mesh_data = j["mesh"];
         if (mesh_data.contains("path")) entity.mesh_path = mesh_data["path"].get<std::string>();
 
@@ -1710,7 +1731,6 @@ bool LevelManager::parseEntityFromJSON(const void* json_ptr, LevelEntity& entity
         entity.culling = mesh_data.value("culling", true);
         entity.transparent = mesh_data.value("transparent", false);
         entity.visible = mesh_data.value("visible", true);
-        entity.casts_shadow = mesh_data.value("casts_shadow", true);
         entity.force_lod = mesh_data.value("force_lod", -1);
         entity.use_mesh_collision = mesh_data.value("use_mesh_collision", false);
     }
@@ -1924,7 +1944,6 @@ bool LevelManager::saveLevelToJSON(const std::string& json_path, const LevelData
                 e["mesh"]["culling"]           = le.culling;
                 e["mesh"]["transparent"]       = le.transparent;
                 e["mesh"]["visible"]           = le.visible;
-                e["mesh"]["casts_shadow"]      = le.casts_shadow;
                 e["mesh"]["force_lod"]         = le.force_lod;
                 e["mesh"]["use_mesh_collision"]= le.use_mesh_collision;
             }
@@ -1947,7 +1966,6 @@ bool LevelManager::saveLevelToJSON(const std::string& json_path, const LevelData
             e["mesh"]["culling"]           = le.culling;
             e["mesh"]["transparent"]       = le.transparent;
             e["mesh"]["visible"]           = le.visible;
-            e["mesh"]["casts_shadow"]      = le.casts_shadow;
             e["mesh"]["force_lod"]         = le.force_lod;
             e["mesh"]["use_mesh_collision"]= le.use_mesh_collision;
         }
@@ -2221,7 +2239,6 @@ void LevelManager::writeBinaryEntity(std::ofstream& file, const LevelEntity& ent
     uint8_t culling          = entity.culling ? 1 : 0;
     uint8_t transparent      = entity.transparent ? 1 : 0;
     uint8_t visible          = entity.visible ? 1 : 0;
-    uint8_t casts_shadow     = entity.casts_shadow ? 1 : 0;
 
     file.write(reinterpret_cast<const char*>(&has_rigidbody), sizeof(uint8_t));
     file.write(reinterpret_cast<const char*>(&entity.mass), sizeof(float));
@@ -2234,7 +2251,6 @@ void LevelManager::writeBinaryEntity(std::ofstream& file, const LevelEntity& ent
     file.write(reinterpret_cast<const char*>(&culling), sizeof(uint8_t));
     file.write(reinterpret_cast<const char*>(&transparent), sizeof(uint8_t));
     file.write(reinterpret_cast<const char*>(&visible), sizeof(uint8_t));
-    file.write(reinterpret_cast<const char*>(&casts_shadow), sizeof(uint8_t));
 
     int32_t force_lod = entity.force_lod;
     file.write(reinterpret_cast<const char*>(&force_lod), sizeof(int32_t));
@@ -2298,17 +2314,12 @@ bool LevelManager::readBinaryHeader(std::ifstream& file, LevelMetadata& metadata
 
     uint32_t version;
     file.read(reinterpret_cast<char*>(&version), sizeof(uint32_t));
-    if (file.fail() ||
-        (version != LEVEL_BINARY_VERSION &&
-         version != LEVEL_BINARY_VERSION_V5 &&
-         version != LEVEL_BINARY_VERSION_V4 &&
-         version != LEVEL_BINARY_VERSION_V3))
+    if (file.fail() || version != LEVEL_BINARY_VERSION)
     {
-        printf("ERROR: Unsupported binary level version (expected %u, %u, %u, or %u, got %u)\n",
-               LEVEL_BINARY_VERSION, LEVEL_BINARY_VERSION_V5, LEVEL_BINARY_VERSION_V4, LEVEL_BINARY_VERSION_V3, version);
+        printf("ERROR: Unsupported binary level version (expected %u, got %u)\n",
+               LEVEL_BINARY_VERSION, version);
         return false;
     }
-    binary_read_version = version;
 
     if (!readString(file, metadata.level_name)) return false;
     if (!readString(file, metadata.author)) return false;
@@ -2321,21 +2332,18 @@ bool LevelManager::readBinaryHeader(std::ifstream& file, LevelMetadata& metadata
 
     file.read(reinterpret_cast<char*>(&metadata.gravity), sizeof(glm::vec3));
     file.read(reinterpret_cast<char*>(&metadata.fixed_delta), sizeof(float));
-    if (version >= 6)
-    {
-        if (!readString(file, metadata.game_mode_class)) return false;
-        if (!readString(file, metadata.game_state_class)) return false;
-        uint8_t delayed_start = 0;
-        uint8_t start_spectators = 0;
-        uint8_t pauseable = 1;
-        file.read(reinterpret_cast<char*>(&delayed_start), sizeof(uint8_t));
-        file.read(reinterpret_cast<char*>(&start_spectators), sizeof(uint8_t));
-        file.read(reinterpret_cast<char*>(&pauseable), sizeof(uint8_t));
-        file.read(reinterpret_cast<char*>(&metadata.min_respawn_delay), sizeof(float));
-        metadata.delayed_start = delayed_start != 0;
-        metadata.start_players_as_spectators = start_spectators != 0;
-        metadata.pauseable = pauseable != 0;
-    }
+    if (!readString(file, metadata.game_mode_class)) return false;
+    if (!readString(file, metadata.game_state_class)) return false;
+    uint8_t delayed_start = 0;
+    uint8_t start_spectators = 0;
+    uint8_t pauseable = 1;
+    file.read(reinterpret_cast<char*>(&delayed_start), sizeof(uint8_t));
+    file.read(reinterpret_cast<char*>(&start_spectators), sizeof(uint8_t));
+    file.read(reinterpret_cast<char*>(&pauseable), sizeof(uint8_t));
+    file.read(reinterpret_cast<char*>(&metadata.min_respawn_delay), sizeof(float));
+    metadata.delayed_start = delayed_start != 0;
+    metadata.start_players_as_spectators = start_spectators != 0;
+    metadata.pauseable = pauseable != 0;
     file.read(reinterpret_cast<char*>(&metadata.ambient_light), sizeof(glm::vec3));
     file.read(reinterpret_cast<char*>(&metadata.diffuse_light), sizeof(glm::vec3));
     file.read(reinterpret_cast<char*>(&metadata.light_direction), sizeof(glm::vec3));
@@ -2370,7 +2378,7 @@ bool LevelManager::readBinaryEntity(std::ifstream& file, LevelEntity& entity)
     }
 
     uint8_t has_rigidbody, apply_gravity, has_collider, use_mesh_col;
-    uint8_t culling, transparent, visible, casts_shadow;
+    uint8_t culling, transparent, visible;
 
     file.read(reinterpret_cast<char*>(&has_rigidbody), sizeof(uint8_t));
     file.read(reinterpret_cast<char*>(&entity.mass), sizeof(float));
@@ -2383,7 +2391,6 @@ bool LevelManager::readBinaryEntity(std::ifstream& file, LevelEntity& entity)
     file.read(reinterpret_cast<char*>(&culling), sizeof(uint8_t));
     file.read(reinterpret_cast<char*>(&transparent), sizeof(uint8_t));
     file.read(reinterpret_cast<char*>(&visible), sizeof(uint8_t));
-    file.read(reinterpret_cast<char*>(&casts_shadow), sizeof(uint8_t));
     if (file.fail()) return false;
 
     entity.has_rigidbody    = has_rigidbody != 0;
@@ -2393,7 +2400,6 @@ bool LevelManager::readBinaryEntity(std::ifstream& file, LevelEntity& entity)
     entity.culling          = culling != 0;
     entity.transparent      = transparent != 0;
     entity.visible          = visible != 0;
-    entity.casts_shadow     = casts_shadow != 0;
 
     int32_t force_lod;
     file.read(reinterpret_cast<char*>(&force_lod), sizeof(int32_t));
@@ -2420,51 +2426,40 @@ bool LevelManager::readBinaryEntity(std::ifstream& file, LevelEntity& entity)
     file.read(reinterpret_cast<char*>(&entity.light_inner_cone_angle), sizeof(float));
     file.read(reinterpret_cast<char*>(&entity.light_outer_cone_angle), sizeof(float));
 
-    // v4: Motion type and collider shape data
-    if (binary_read_version >= LEVEL_BINARY_VERSION)
+    // Current binary records carry all entity fields and reflected components.
+    if (!readString(file, entity.body_motion_type)) return false;
+    if (!readString(file, entity.collider_shape_type)) return false;
+    file.read(reinterpret_cast<char*>(&entity.collider_box_half_extents), sizeof(glm::vec3));
+    file.read(reinterpret_cast<char*>(&entity.collider_sphere_radius), sizeof(float));
+    file.read(reinterpret_cast<char*>(&entity.collider_capsule_half_height), sizeof(float));
+    file.read(reinterpret_cast<char*>(&entity.collider_capsule_radius), sizeof(float));
+    file.read(reinterpret_cast<char*>(&entity.collider_cylinder_half_height), sizeof(float));
+    file.read(reinterpret_cast<char*>(&entity.collider_cylinder_radius), sizeof(float));
+    file.read(reinterpret_cast<char*>(&entity.collider_friction), sizeof(float));
+    file.read(reinterpret_cast<char*>(&entity.collider_restitution), sizeof(float));
+
+    uint8_t has_constraint;
+    file.read(reinterpret_cast<char*>(&has_constraint), sizeof(uint8_t));
+    entity.has_constraint = has_constraint != 0;
+    if (!readString(file, entity.constraint_type)) return false;
+    if (!readString(file, entity.constraint_target_name)) return false;
+    file.read(reinterpret_cast<char*>(&entity.constraint_anchor_1), sizeof(glm::vec3));
+    file.read(reinterpret_cast<char*>(&entity.constraint_anchor_2), sizeof(glm::vec3));
+    file.read(reinterpret_cast<char*>(&entity.constraint_hinge_axis), sizeof(glm::vec3));
+    file.read(reinterpret_cast<char*>(&entity.constraint_hinge_min), sizeof(float));
+    file.read(reinterpret_cast<char*>(&entity.constraint_hinge_max), sizeof(float));
+    file.read(reinterpret_cast<char*>(&entity.constraint_min_distance), sizeof(float));
+    file.read(reinterpret_cast<char*>(&entity.constraint_max_distance), sizeof(float));
+
+    std::string reflected_json;
+    if (!readString(file, reflected_json)) return false;
+    if (!reflected_json.empty())
     {
-        if (!readString(file, entity.body_motion_type)) return false;
-        if (!readString(file, entity.collider_shape_type)) return false;
-        file.read(reinterpret_cast<char*>(&entity.collider_box_half_extents), sizeof(glm::vec3));
-        file.read(reinterpret_cast<char*>(&entity.collider_sphere_radius), sizeof(float));
-        file.read(reinterpret_cast<char*>(&entity.collider_capsule_half_height), sizeof(float));
-        file.read(reinterpret_cast<char*>(&entity.collider_capsule_radius), sizeof(float));
-        file.read(reinterpret_cast<char*>(&entity.collider_cylinder_half_height), sizeof(float));
-        file.read(reinterpret_cast<char*>(&entity.collider_cylinder_radius), sizeof(float));
-        file.read(reinterpret_cast<char*>(&entity.collider_friction), sizeof(float));
-        file.read(reinterpret_cast<char*>(&entity.collider_restitution), sizeof(float));
-
-        // Constraint data
-        uint8_t has_constraint;
-        file.read(reinterpret_cast<char*>(&has_constraint), sizeof(uint8_t));
-        entity.has_constraint = has_constraint != 0;
-        if (!readString(file, entity.constraint_type)) return false;
-        if (!readString(file, entity.constraint_target_name)) return false;
-        file.read(reinterpret_cast<char*>(&entity.constraint_anchor_1), sizeof(glm::vec3));
-        file.read(reinterpret_cast<char*>(&entity.constraint_anchor_2), sizeof(glm::vec3));
-        file.read(reinterpret_cast<char*>(&entity.constraint_hinge_axis), sizeof(glm::vec3));
-        file.read(reinterpret_cast<char*>(&entity.constraint_hinge_min), sizeof(float));
-        file.read(reinterpret_cast<char*>(&entity.constraint_hinge_max), sizeof(float));
-        file.read(reinterpret_cast<char*>(&entity.constraint_min_distance), sizeof(float));
-        file.read(reinterpret_cast<char*>(&entity.constraint_max_distance), sizeof(float));
-
-        if (binary_read_version >= LEVEL_BINARY_VERSION)
-        {
-            std::string reflected_json;
-            if (!readString(file, reflected_json)) return false;
-            if (!reflected_json.empty())
-            {
-                try
-                {
-                    entity.reflected_components = json::parse(reflected_json);
-                    applyReflectedComponentsToLevelEntity(entity.reflected_components, entity);
-                }
-                catch (const json::exception&)
-                {
-                    entity.reflected_components = json::object();
-                }
-            }
-        }
+        json parsed = json::parse(reflected_json, nullptr, false);
+        if (parsed.is_discarded() || !parsed.is_object())
+            return false;
+        entity.reflected_components = std::move(parsed);
+        applyReflectedComponentsToLevelEntity(entity.reflected_components, entity);
     }
 
     return !file.fail();
@@ -2493,7 +2488,6 @@ std::shared_ptr<mesh> LevelManager::loadMesh(const LevelEntity& entity, IRenderA
                 compiled->culling = entity.culling;
                 compiled->transparent = entity.transparent;
                 compiled->visible = entity.visible;
-                compiled->casts_shadow = entity.casts_shadow;
                 compiled->force_lod = entity.force_lod;
                 compiled->updateTransparencyFromMaterials();
                 return compiled;
@@ -2632,7 +2626,6 @@ std::shared_ptr<mesh> LevelManager::loadMesh(const LevelEntity& entity, IRenderA
         m_ptr->culling = entity.culling;
         m_ptr->transparent = entity.transparent;
         m_ptr->visible = entity.visible;
-        m_ptr->casts_shadow = entity.casts_shadow;
         m_ptr->force_lod = entity.force_lod;
         m_ptr->updateTransparencyFromMaterials();
 
@@ -3311,7 +3304,6 @@ std::shared_ptr<mesh> LevelManager::finalizeCompiledMeshGPU(
     m_ptr->culling = entity.culling;
     m_ptr->transparent = entity.transparent;
     m_ptr->visible = entity.visible;
-    m_ptr->casts_shadow = entity.casts_shadow;
     m_ptr->force_lod = entity.force_lod;
     m_ptr->updateTransparencyFromMaterials();
 
@@ -3446,7 +3438,6 @@ std::shared_ptr<mesh> LevelManager::finalizeMeshGPU(
     m_ptr->culling = entity.culling;
     m_ptr->transparent = entity.transparent;
     m_ptr->visible = entity.visible;
-    m_ptr->casts_shadow = entity.casts_shadow;
     m_ptr->force_lod = entity.force_lod;
     m_ptr->updateTransparencyFromMaterials();
 

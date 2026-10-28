@@ -4,6 +4,7 @@
 #include "Components/PrefabInstanceComponent.hpp"
 #include "Components/HierarchyComponents.hpp"
 #include "Components/IdentityComponent.hpp"
+#include "Components/RenderableComponent.hpp"
 #include "Components/SkeletonComponent.hpp"
 #include "Components/AudioSourceComponent.hpp"
 #include "Components/IKComponent.hpp"
@@ -43,6 +44,7 @@ void registerEngineReflection(ReflectionRegistry& registry)
     registry.reflect<GameFramework::PlayerStateComponent>("PlayerStateComponent");
     registry.reflect<GameFramework::PlayerControllerComponent>("PlayerControllerComponent");
     registry.reflect<IdentityComponent>("IdentityComponent");
+    registry.reflect<RenderableComponent>("RenderableComponent");
     // Hierarchy: ParentComponent is the load-authoritative link;
     // ChildrenComponent (vector<EntityRef>) is reflected/serialized and
     // rebuilt from Parent on load. WorldTransformComponent is derived and

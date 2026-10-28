@@ -158,7 +158,6 @@ namespace
         result->culling = true;
         result->transparent = false;
         result->visible = true;
-        result->casts_shadow = true;
         return result;
     }
 }

@@ -10,6 +10,7 @@
 #include "Character/CharacterController.hpp"
 #include "mesh.hpp"
 #include "Components/IdentityComponent.hpp"
+#include "Components/RenderableComponent.hpp"
 #include "Reflection/Reflector.hpp"
 #include <algorithm>
 #include <vector>
