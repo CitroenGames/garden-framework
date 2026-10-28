@@ -4267,6 +4267,8 @@ int main()
     ok = testCompetitiveProtocolStatePublication() && ok;
     ok = testCompetitivePresentationSnapshotProtocol() && ok;
     ok = testCompetitivePresentationSnapshotCache() && ok;
+    ok = testCompetitivePresentationDurableFingerprint() && ok;
+    ok = testCompetitivePresentationRecipientRevisionPolicy() && ok;
     ok = testWeaponRosterIntegrity() && ok;
     ok = testWeaponAuthorityTiming() && ok;
     ok = testLagCompensatedShotPoseFallbackAndMissCount() && ok;
