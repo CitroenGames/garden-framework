@@ -4298,6 +4298,8 @@ int main()
     ok = testBotSteeringArrivalStuck() && ok;
     ok = testBotNavigationRecoveryValueRules() && ok;
     ok = testBotBoundedPathScheduling() && ok;
+    ok = testBotLocalSeparationDoorwayValues() && ok;
+    ok = testBotLocalSeparationCharacterWorldFixture() && ok;
     ok = testBotInputSynthesisShape() && ok;
     ok = testBotEngageStrafes() && ok;
     ok = testBotBuyPlanByMoney() && ok;
