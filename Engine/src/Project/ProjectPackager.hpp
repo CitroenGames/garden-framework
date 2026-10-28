@@ -3,6 +3,7 @@
 #include "EngineExport.h"
 #include "Graphics/RenderAPI.hpp"
 #include "Assets/AssetCompiler.hpp"
+#include "Project/PackageStructuredDependencyExtractor.hpp"
 #include <string>
 #include <vector>
 #include <atomic>
@@ -25,6 +26,10 @@ struct ENGINE_API PackageConfig
 
     // Ship the dedicated server binary (Server.exe / Server) in the package.
     bool include_dedicated_server = true;
+
+    // Template-owned structured data roots. Each entry selects a narrow,
+    // versioned schema extractor; no module C++ is inspected at package time.
+    std::vector<PackageStructuredDependencyRoot> structured_dependency_roots;
 };
 
 struct ENGINE_API PackageResult

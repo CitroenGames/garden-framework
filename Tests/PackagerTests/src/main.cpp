@@ -1,6 +1,7 @@
 #include "Assets/AssetManager.hpp"
 #include "Navigation/NavMeshSerializer.hpp"
 #include "Project/ProjectPackager.hpp"
+#include "Project/PackageStructuredDependencyExtractor.hpp"
 #include "Project/PackageReceipt.hpp"
 #include "Utils/FileHash.hpp"
 #include "Project/ProjectManager.hpp"
@@ -156,6 +157,49 @@ PackageConfig packageConfig(const fs::path& output_root)
     config.output_directory = output_root.string();
     config.package_name = "package";
     return config;
+}
+
+bool testStructuredDependencyExtractorSchemas()
+{
+    const std::string name = "structured dependency extractors use explicit versioned schemas";
+    TempDirectory temp("structured_extractors");
+    const fs::path table_path = temp.path / "events.sound.json";
+    if (!writeText(table_path,
+        R"({"schema":"garden.sound-events","version":1,"events":[{"id":"weapon.fire","clips":["assets/audio/fire_a.wav","assets/audio/fire_b.wav"],"volume":1,"pitch_min":1,"pitch_max":1,"group":"sfx","min_distance":1,"max_distance":40,"priority":50,"max_voices":4,"loop":false}]})"))
+        return fail(name, "could not write sound-event fixture");
+
+    PackageStructuredDependencyRoot root;
+    root.logical_path = "assets/audio/events.sound.json";
+    root.kind = PackageDependencyKind::StructuredData;
+    root.extractor_id = std::string(PackageStructuredDependencyExtractors::SoundEventTableV1);
+    std::vector<PackageDependencyRequest> children;
+    uint32_t version = 0;
+    std::string error;
+    if (!PackageStructuredDependencyExtractors::extract(root, table_path.string(), children, version, error))
+        return fail(name, "sound-event extraction failed: " + error);
+    if (version != 1 || children.size() != 2 ||
+        children[0].kind != PackageDependencyKind::AudioClip ||
+        children[0].owner_logical_path != root.logical_path ||
+        children[0].extractor_id != root.extractor_id)
+        return fail(name, "sound-event child edges lost their typed owner contract");
+
+    root.kind = PackageDependencyKind::AudioClip;
+    if (PackageStructuredDependencyExtractors::extract(root, table_path.string(), children, version, error) ||
+        error.find("PKG-EXTRACTOR-KIND") == std::string::npos)
+        return fail(name, "sound-event extractor accepted an untyped root");
+
+    root.logical_path = "assets/characters/hero.canim";
+    root.kind = PackageDependencyKind::AnimationClip;
+    root.extractor_id = std::string(PackageStructuredDependencyExtractors::CookedAnimationV1);
+    if (!PackageStructuredDependencyExtractors::extract(root, "not-opened-by-canm-extractor", children, version, error) ||
+        !children.empty())
+        return fail(name, "cooked-animation declaration was not retained as a leaf root");
+
+    root.extractor_id = "template-unknown-v1";
+    if (PackageStructuredDependencyExtractors::extract(root, table_path.string(), children, version, error) ||
+        error.find("PKG-EXTRACTOR-MISSING") == std::string::npos)
+        return fail(name, "unknown structured extractor did not fail closed");
+    return pass(name);
 }
 
 #ifdef _WIN32
@@ -866,6 +910,68 @@ bool testMissingCanmDependencyNamesOwner()
     return pass(name);
 }
 
+bool testDeclaredSoundEventClosure()
+{
+    const std::string name = "packager closes declared sound-event table dependencies";
+    TempDirectory temp("sound_event_closure");
+    ProjectManager project;
+    if (!createProjectFixture(temp.path / "project", project, {"assets"},
+                              R"({"metadata":{"level_name":"Sound Event Closure"},"entities":[]})"))
+        return fail(name, "could not create project fixture");
+    if (!writeText(temp.path / "project" / "assets" / "audio" / "events.sound.json",
+        R"({"schema":"garden.sound-events","version":1,"events":[{"id":"weapon.fire","clips":["assets/audio/fire.wav"],"volume":1,"pitch_min":1,"pitch_max":1,"group":"sfx","min_distance":1,"max_distance":40,"priority":50,"max_voices":4,"loop":false}]})") ||
+        !writeText(temp.path / "project" / "assets" / "audio" / "fire.wav", "audio fixture"))
+        return fail(name, "could not write sound event assets");
+
+    PackageConfig config = packageConfig(temp.path / "out");
+    config.structured_dependency_roots.push_back({"assets/audio/events.sound.json",
+        PackageDependencyKind::StructuredData,
+        std::string(PackageStructuredDependencyExtractors::SoundEventTableV1)});
+    LevelManager levels;
+    const PackageResult result = ProjectPackager::packageProject(project, levels, config);
+    if (!result.success) return fail(name, "package failed: " + result.error_message);
+    PackageReceipt receipt;
+    std::string error;
+    if (!PackageReceiptSerializer::readStaged((temp.path / "out" / "package").string(), receipt, &error))
+        return fail(name, "could not read receipt: " + error);
+    const auto table = std::find_if(receipt.dependencies.begin(), receipt.dependencies.end(), [](const PackageDependency& dependency) {
+        return dependency.logical_path == "assets/audio/events.sound.json" &&
+               dependency.kind == PackageDependencyKind::StructuredData;
+    });
+    const auto clip = std::find_if(receipt.dependencies.begin(), receipt.dependencies.end(), [](const PackageDependency& dependency) {
+        return dependency.logical_path == "assets/audio/fire.wav" &&
+               dependency.kind == PackageDependencyKind::AudioClip;
+    });
+    if (table == receipt.dependencies.end() || table->format_version != 1 ||
+        clip == receipt.dependencies.end() || clip->owner_logical_path != table->logical_path ||
+        clip->extractor_id != PackageStructuredDependencyExtractors::SoundEventTableV1)
+        return fail(name, "receipt did not retain typed sound-event ownership");
+    return pass(name);
+}
+
+bool testDeclaredSoundEventMissingClipNamesOwner()
+{
+    const std::string name = "packager names missing declared sound-event clips";
+    TempDirectory temp("sound_event_missing_clip");
+    ProjectManager project;
+    if (!createProjectFixture(temp.path / "project", project, {"assets"},
+                              R"({"metadata":{"level_name":"Sound Event Missing"},"entities":[]})") ||
+        !writeText(temp.path / "project" / "assets" / "audio" / "events.sound.json",
+        R"({"schema":"garden.sound-events","version":1,"events":[{"id":"weapon.fire","clips":["assets/audio/missing.wav"],"volume":1,"pitch_min":1,"pitch_max":1,"group":"sfx","min_distance":1,"max_distance":40,"priority":50,"max_voices":4,"loop":false}]})"))
+        return fail(name, "could not create sound-event fixture");
+
+    PackageConfig config = packageConfig(temp.path / "out");
+    config.structured_dependency_roots.push_back({"assets/audio/events.sound.json",
+        PackageDependencyKind::StructuredData,
+        std::string(PackageStructuredDependencyExtractors::SoundEventTableV1)});
+    LevelManager levels;
+    const PackageResult result = ProjectPackager::packageProject(project, levels, config);
+    if (result.success) return fail(name, "package accepted missing declared sound clip");
+    if (result.error_message.find("PKG-DEPENDENCY-MISSING: assets/audio/missing.wav required by assets/audio/events.sound.json") == std::string::npos)
+        return fail(name, "missing clip error did not name its table owner: " + result.error_message);
+    return pass(name);
+}
+
 bool testAssetRootRelativeReferencePassesPackaging()
 {
     const std::string name = "packager resolves level assets relative to the configured asset root";
@@ -1135,6 +1241,7 @@ int main()
     ok &= testPackagePathsCannotEscapeRoots();
     ok &= testSelectedLevelArtifactPathNormalization();
     ok &= testPackageDependencyGraphCanonicalization();
+    ok &= testStructuredDependencyExtractorSchemas();
     ok &= testPackageReceiptRoundTripAndStageVerification();
     ok &= testPackageReceiptRejectsNonCanonicalInput();
 
@@ -1153,6 +1260,8 @@ int main()
         ok &= testMissingDefaultLevelOutsideAssetRootsFailsPackaging();
         ok &= testMissingReferencedAssetFailsPackaging();
         ok &= testMissingCanmDependencyNamesOwner();
+        ok &= testDeclaredSoundEventClosure();
+        ok &= testDeclaredSoundEventMissingClipNamesOwner();
         ok &= testAssetRootRelativeReferencePassesPackaging();
         ok &= testCompiledReferenceRequiresCookedOutput();
         ok &= testStagedPackagingReplacesObstructedPriorOutput();

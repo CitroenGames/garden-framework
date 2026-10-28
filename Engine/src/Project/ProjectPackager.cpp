@@ -5,6 +5,7 @@
 #include "Assets/CookedCollisionSerializer.hpp"
 #include "Animation/CompiledAnimationSerializer.hpp"
 #include "Project/PackageDependency.hpp"
+#include "Project/PackageStructuredDependencyExtractor.hpp"
 #include "Project/PackageReceipt.hpp"
 #include "Utils/FileHash.hpp"
 #include "Utils/EnginePaths.hpp"
@@ -265,7 +266,8 @@ bool resolveStaticLogical(const std::string& request, const std::vector<std::str
 
 bool addStaticDependency(PackageDependencyGraph& graph, std::vector<std::string>& errors,
                          const fs::path& project, const fs::path& staged, std::string source,
-                         PackageDependencyKind kind, const std::string& owner, bool compiled_mesh)
+                         PackageDependencyKind kind, const std::string& owner, bool compiled_mesh,
+                         std::string extractor_id = "level-v1", uint32_t declared_format_version = 0)
 {
     fs::path artifact_path(source);
     if (compiled_mesh && isCompiledMeshSource(artifact_path)) artifact_path.replace_extension(".cmesh");
@@ -275,7 +277,8 @@ bool addStaticDependency(PackageDependencyGraph& graph, std::vector<std::string>
     std::error_code ec;
     if (!fs::is_regular_file(staged_file, ec) || ec) { errors.push_back(pkgError("PKG-DEPENDENCY-MISSING", artifact + " required by " + owner)); return false; }
     PackageDependency d;
-    d.logical_path = artifact; d.kind = kind; d.owner_logical_path = owner; d.extractor_id = "level-v1"; d.source_logical_path = std::move(source);
+    d.logical_path = artifact; d.kind = kind; d.owner_logical_path = owner; d.extractor_id = std::move(extractor_id); d.source_logical_path = std::move(source);
+    d.format_version = declared_format_version;
     const fs::path source_file = project / d.source_logical_path;
     if (fs::is_regular_file(source_file, ec) && !ec) d.source_hash_fnv1a64 = Utils::hashFile(source_file.string());
     d.cooked_hash_fnv1a64 = Utils::hashFile(staged_file.string());
@@ -299,6 +302,61 @@ bool addStaticDependency(PackageDependencyGraph& graph, std::vector<std::string>
     std::string graph_error;
     if (!graph.add(d, &graph_error)) { errors.push_back(graph_error); return false; }
     return true;
+}
+
+// Structured roots are intentionally declared by a template/package caller.
+// The packager only dispatches the selected data schema and never executes or
+// scans module C++ in an attempt to discover sound or animation references.
+void discoverDeclaredStructuredDependencies(
+    PackageDependencyGraph& graph, std::vector<std::string>& errors,
+    const fs::path& project, const fs::path& staged, const std::vector<std::string>& roots,
+    std::vector<PackageStructuredDependencyRoot> declared_roots)
+{
+    std::sort(declared_roots.begin(), declared_roots.end(), [](const auto& lhs, const auto& rhs) {
+        if (lhs.logical_path != rhs.logical_path) return lhs.logical_path < rhs.logical_path;
+        if (lhs.kind != rhs.kind) return static_cast<uint8_t>(lhs.kind) < static_cast<uint8_t>(rhs.kind);
+        return lhs.extractor_id < rhs.extractor_id;
+    });
+
+    for (const PackageStructuredDependencyRoot& declared : declared_roots)
+    {
+        std::string source;
+        if (declared.extractor_id.empty() ||
+            !resolveStaticLogical(declared.logical_path, roots, project, staged, source))
+        {
+            errors.push_back(pkgError(declared.extractor_id.empty() ? "PKG-EXTRACTOR-INVALID" : "PKG-PATH-INVALID",
+                                      declared.logical_path));
+            continue;
+        }
+
+        PackageStructuredDependencyRoot root = declared;
+        root.logical_path = source;
+        std::vector<PackageDependencyRequest> children;
+        uint32_t format_version = 0;
+        std::string extract_error;
+        if (!PackageStructuredDependencyExtractors::extract(root, (staged / source).string(),
+                                                            children, format_version, extract_error))
+        {
+            errors.push_back(extract_error);
+            continue;
+        }
+
+        if (!addStaticDependency(graph, errors, project, staged, source, root.kind, "", false,
+                                 root.extractor_id, format_version))
+            continue;
+
+        for (const PackageDependencyRequest& child : children)
+        {
+            std::string child_source;
+            if (!resolveStaticLogical(child.logical_path, roots, project, staged, child_source))
+            {
+                errors.push_back(pkgError("PKG-PATH-INVALID", child.logical_path + " required by " + source));
+                continue;
+            }
+            addStaticDependency(graph, errors, project, staged, child_source, child.kind,
+                                source, false, child.extractor_id);
+        }
+    }
 }
 
 void discoverStaticDependencies(PackageDependencyGraph& graph, std::vector<std::string>& errors,
@@ -729,6 +787,8 @@ PackageResult ProjectPackager::packageProjectInternal(
     discoverStaticDependencies(static_graph, dependency_errors, project_root, output_root,
                                desc.asset_directories, desc.default_level,
                                config.compile_assets && config.compile_config.compile_models);
+    discoverDeclaredStructuredDependencies(static_graph, dependency_errors, project_root, output_root,
+                                           desc.asset_directories, config.structured_dependency_roots);
     const auto discovered_dependencies = static_graph.dependencies();
     result.dependencies_discovered = static_cast<int>(discovered_dependencies.size());
     const auto graph_errors = static_graph.errors();
