@@ -551,26 +551,6 @@ namespace
         return CandidatePreparation::Success;
     }
 
-    bool prepareSourceFallback(const std::string& source_value, PreparedModule& candidate)
-    {
-        candidate.source_path = normalizedAbsolutePath(source_value);
-        candidate.loaded_path = candidate.source_path;
-        candidate.handle = platformLoad(candidate.loaded_path.string());
-        if (!candidate.handle)
-        {
-            fprintf(stderr, "[GameModule] Failed to load source fallback '%s': %s\n",
-                    candidate.loaded_path.string().c_str(), platformGetError());
-            return false;
-        }
-        CandidateExports exports;
-        if (!resolveCandidateExports(candidate.handle, candidate.source_path.string(), exports) ||
-            !validateCandidateVersion(exports, candidate.source_path.string()))
-        {
-            candidate.reset();
-            return false;
-        }
-        return true;
-    }
 }
 
 GameModuleLoader::GameModuleLoader()
@@ -663,28 +643,19 @@ bool GameModuleLoader::load(const std::string& dll_path)
         unload();
 
     PreparedModule candidate(m_generation_root);
-    const CandidatePreparation prepared = prepareOwnedCandidate(dll_path, candidate);
-    if (prepared == CandidatePreparation::Success)
+    if (prepareOwnedCandidate(dll_path, candidate) != CandidatePreparation::Success)
     {
-        m_handle = candidate.releaseHandle();
-        m_source_path = candidate.source_path.string();
-        m_loaded_path = candidate.loaded_path.string();
-        m_generation_path = candidate.releaseGenerationPath();
-        m_owned_generation_files = candidate.releaseOwnedFiles();
-    }
-    else if (prepared == CandidatePreparation::CopyFailed)
-    {
-        fprintf(stderr, "[GameModule] Owned copy unavailable at startup; loading source in place (rebuild while loaded is unavailable): '%s'\n",
+        fprintf(stderr, "[GameModule] Refusing startup load without an owned generation copy: '%s'\n",
                 dll_path.c_str());
-        if (!prepareSourceFallback(dll_path, candidate)) return false;
-        m_handle = candidate.releaseHandle();
-        m_source_path = candidate.source_path.string();
-        m_loaded_path = candidate.loaded_path.string();
-    }
-    else
-    {
+        removeEmptyOwnedRoot(m_generation_root);
         return false;
     }
+
+    m_handle = candidate.releaseHandle();
+    m_source_path = candidate.source_path.string();
+    m_loaded_path = candidate.loaded_path.string();
+    m_generation_path = candidate.releaseGenerationPath();
+    m_owned_generation_files = candidate.releaseOwnedFiles();
 
     if (!resolveFunctions())
     {

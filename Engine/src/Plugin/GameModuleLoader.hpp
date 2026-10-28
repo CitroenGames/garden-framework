@@ -19,8 +19,8 @@ public:
     GameModuleLoader(GameModuleLoader&& other) noexcept;
     GameModuleLoader& operator=(GameModuleLoader&& other) noexcept;
 
-    // Load a game DLL from disk. The first load uses an owned generation copy
-    // when possible, falling back to the source image only when that copy fails.
+    // Load a game DLL from an owned generation copy. Source-image loading is
+    // deliberately unsupported: a failed copy leaves the loader idle.
     bool load(const std::string& dll_path);
 
     // Unload the currently loaded DLL.
@@ -42,7 +42,7 @@ public:
     bool loadReloadCandidate(const std::string& dll_path);
 
     bool isLoaded() const { return m_handle != nullptr; }
-    // Kept for compatibility: this is the source module path, never a hot copy.
+    // This is the canonical source module path, never the owned generation image.
     const std::string& getLoadedPath() const { return m_source_path; }
     const std::string& getLoadedImagePath() const { return m_loaded_path; }
     const std::string& getOwnedGenerationRoot() const { return m_generation_root; }
@@ -73,7 +73,7 @@ public:
 private:
     void* m_handle = nullptr;         // HMODULE or dlopen handle
     std::string m_source_path;        // Original DLL path
-    std::string m_loaded_path;        // Active source image or owned generation image
+    std::string m_loaded_path;        // Active owned generation image
     std::string m_generation_root;    // Private process/session generation root
     std::string m_generation_path;    // Active owned generation directory, if any
     std::vector<std::string> m_owned_generation_files;

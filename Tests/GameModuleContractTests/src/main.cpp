@@ -319,6 +319,81 @@ namespace
         return pass(name);
     }
 
+    bool testSourceImageCopyFailureIsRejected(const ContractPaths& paths)
+    {
+        const std::string name = "GameModuleContract_SourceImageFallbackRetired";
+#ifdef _WIN32
+        const fs::path source = paths.fixture("client_complete");
+        const HANDLE source_lock = CreateFileA(source.string().c_str(), GENERIC_READ, 0, nullptr,
+                                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (source_lock == INVALID_HANDLE_VALUE)
+            return fail(name, "could not create exclusive source-image fixture lock");
+
+        ScopedRecorder recorder("source_copy_failure");
+        GameModuleLoader loader;
+        const fs::path generation_root = loader.getOwnedGenerationRoot();
+        StderrCapture capture;
+        const bool loaded = loader.load(source.string());
+        const std::string error = capture.finish();
+        CloseHandle(source_lock);
+
+        if (loaded || loader.isLoaded())
+            return fail(name, "loader accepted a source image after owned-copy failure");
+        if (!recorder.events().empty())
+            return fail(name, "refused source image executed a module callback");
+        if (!contains(error, "Could not copy module source") ||
+            !contains(error, "Refusing startup load without an owned generation copy") ||
+            !contains(error, source.string()))
+            return fail(name, "copy failure was not reported as an owned-generation rejection: " + error);
+        if (contains(error, "loading source in place") || contains(error, "source fallback"))
+            return fail(name, "retired source-image fallback diagnostic was emitted: " + error);
+        if (!fs::exists(source) || fs::exists(generation_root))
+            return fail(name, "copy failure changed the source fixture or retained an empty generation root");
+
+        GameModuleLoader active_loader;
+        std::string active_load_error;
+        if (!loadAccepted(active_loader, source, active_load_error))
+            return fail(name, "could not prepare the active owned generation: " + active_load_error);
+        const fs::path active_image = active_loader.getLoadedImagePath();
+        active_loader.update(0.016f);
+
+        const HANDLE reload_source_lock = CreateFileA(source.string().c_str(), GENERIC_READ, 0, nullptr,
+                                                      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (reload_source_lock == INVALID_HANDLE_VALUE)
+        {
+            active_loader.unload();
+            return fail(name, "could not lock the source image for candidate-copy refusal");
+        }
+        StderrCapture reload_capture;
+        const bool reloaded = active_loader.reload(source.string());
+        const std::string reload_error = reload_capture.finish();
+        CloseHandle(reload_source_lock);
+
+        if (reloaded || !active_loader.isLoaded() || active_loader.getLoadedImagePath() != active_image.string() ||
+            !fs::exists(active_image))
+        {
+            active_loader.unload();
+            return fail(name, "owned-copy candidate failure changed the active generation");
+        }
+        if (!contains(reload_error, "Could not copy module source") || !contains(reload_error, "Reload deferred") ||
+            contains(reload_error, "loading source in place") || contains(reload_error, "source fallback"))
+        {
+            active_loader.unload();
+            return fail(name, "candidate-copy failure did not preserve the active generation: " + reload_error);
+        }
+        active_loader.update(0.016f);
+        if (!hasExactly(recorder.events(), {"client.update", "client.update"}))
+        {
+            active_loader.unload();
+            return fail(name, "active generation did not remain callable after candidate-copy refusal");
+        }
+        active_loader.unload();
+#else
+        (void)paths;
+#endif
+        return pass(name);
+    }
+
     bool testRequiredExportRejections(const ContractPaths& paths)
     {
         const std::vector<std::pair<std::string, std::string>> cases = {
@@ -502,5 +577,6 @@ int main()
     ok = testReloadCandidateRefusalKeepsActive(paths) && ok;
     ok = testReloadPromotesValidatedGeneration(paths) && ok;
     ok = testOwnedGenerationCycles(paths) && ok;
+    ok = testSourceImageCopyFailureIsRejected(paths) && ok;
     return ok ? 0 : 1;
 }
