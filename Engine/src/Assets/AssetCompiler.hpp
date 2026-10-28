@@ -11,12 +11,14 @@ namespace Assets {
 struct CompileConfig {
     bool compile_models  = true;
     bool compile_textures = true;
+    bool compile_animations = true;
     bool incremental     = true;
     bool generate_mipmaps = true;
     TexCompressionFormat default_color_format = TexCompressionFormat::BC7;
     TexCompressionFormat normal_map_format    = TexCompressionFormat::BC5;
     int  bc7_quality     = 1; // 0 = fast, 1 = balanced, 2 = best
     uint32_t cooker_version = 1; // bump for behavior changes not represented above
+    uint32_t animation_cooker_version = 1; // bump for CANM source-to-package changes
     bool inject_publish_failure = false; // test-only deterministic publish interruption
 };
 
@@ -27,6 +29,7 @@ struct CompileProgress {
     int failed_assets    = 0;
     int models_compiled  = 0;
     int textures_compiled = 0;
+    int animations_compiled = 0;
     std::string current_asset;
     std::vector<std::string> errors;
     std::vector<std::string> warnings;
@@ -47,6 +50,13 @@ public:
 
     // Compile a single model to .cmesh
     static bool compileModel(
+        const std::string& source_path,
+        const std::string& output_path,
+        const CompileConfig& config);
+
+    // Compile a validated glTF animation resource set to a CPU-only .canim package.
+    // A valid animation-free source removes any stale .canim after inspection.
+    static bool compileAnimationSet(
         const std::string& source_path,
         const std::string& output_path,
         const CompileConfig& config);

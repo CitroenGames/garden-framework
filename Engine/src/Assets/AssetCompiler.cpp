@@ -1,4 +1,6 @@
 #include "AssetCompiler.hpp"
+#include "Animation/CompiledAnimationSerializer.hpp"
+#include "Animation/GltfAnimationLoader.hpp"
 #include "CompiledMeshSerializer.hpp"
 #include "CompiledTextureSerializer.hpp"
 #include "CookedCollisionSerializer.hpp"
@@ -26,6 +28,7 @@
 #include <cstring>
 #include <mutex>
 #include <chrono>
+#include <tiny_gltf.h>
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -111,6 +114,35 @@ static uint64_t computeCookFingerprint(uint64_t source_hash, const CompileConfig
         fingerprintAppend(hash, metadata->lod_config.prune_disconnected);
     }
     return hash;
+}
+
+static uint64_t computeAnimationCookFingerprint(uint64_t source_hash, const CompileConfig& config)
+{
+    // Animation packages deliberately have their own identity. Mesh and texture
+    // settings must not invalidate a validated CPU-only CANM package.
+    uint64_t hash = 14695981039346656037ull;
+    constexpr uint32_t fingerprint_schema = 1;
+    fingerprintAppend(hash, fingerprint_schema);
+    fingerprintAppend(hash, source_hash);
+    fingerprintAppend(hash, config.compile_animations);
+    fingerprintAppend(hash, config.animation_cooker_version);
+    fingerprintAppend(hash, CANM_VERSION);
+    return hash;
+}
+
+static bool loadGltfAnimationSource(const std::string& source_path, tinygltf::Model& model,
+                                    std::string& error)
+{
+    tinygltf::TinyGLTF loader;
+    loader.SetImagesAsIs(true);
+    std::string warning;
+    const std::string extension = toLower(fs::path(source_path).extension().string());
+    const bool loaded = extension == ".glb"
+        ? loader.LoadBinaryFromFile(&model, &error, &warning, source_path)
+        : loader.LoadASCIIFromFile(&model, &error, &warning, source_path);
+    if (!warning.empty())
+        LOG_ENGINE_WARN("[AssetCompiler] glTF animation warning for {}: {}", source_path, warning);
+    return loaded;
 }
 
 static std::string makeTemporarySiblingPath(const std::string& output_path)
@@ -462,12 +494,136 @@ bool AssetCompiler::isUpToDate(const std::string& source_path, const std::string
                header.source_hash == source_hash &&
                header.cook_fingerprint == computeCookFingerprint(source_hash, config, normal_map, nullptr);
     }
+    if (ext == ".canim") {
+        CompiledAnimationData animation;
+        AnimationResourceError error;
+        return CompiledAnimationSerializer::load(animation, compiled_path, &error) &&
+               animation.header.source_hash == source_hash &&
+               animation.header.cook_fingerprint == computeAnimationCookFingerprint(source_hash, config);
+    }
     return false;
 }
 
 bool AssetCompiler::isUpToDate(const std::string& source_path, const std::string& compiled_path)
 {
     return isUpToDate(source_path, compiled_path, CompileConfig{});
+}
+
+// ================================================================
+// compileAnimationSet
+// ================================================================
+
+bool AssetCompiler::compileAnimationSet(
+    const std::string& source_path,
+    const std::string& output_path,
+    const CompileConfig& config)
+{
+    const std::string extension = toLower(fs::path(source_path).extension().string());
+    if (extension != ".gltf" && extension != ".glb") {
+        LOG_ENGINE_ERROR("[AssetCompiler] Animation source must be .gltf or .glb: {}", source_path);
+        return false;
+    }
+
+    tinygltf::Model model;
+    std::string parse_error;
+    if (!loadGltfAnimationSource(source_path, model, parse_error)) {
+        LOG_ENGINE_ERROR("[AssetCompiler] Failed to inspect animation source {}: {}", source_path, parse_error);
+        return false;
+    }
+
+    const auto remove_stale_package = [&]() {
+        std::error_code remove_error;
+        fs::remove(output_path, remove_error);
+        if (remove_error) {
+            LOG_ENGINE_ERROR("[AssetCompiler] Failed to remove stale animation package {}: {}",
+                             output_path, remove_error.message());
+            return false;
+        }
+        LOG_ENGINE_INFO("[AssetCompiler] No skeletal clips in {}; removed stale {}", source_path, output_path);
+        return true;
+    };
+    // A model with no animation table cannot produce a usable skeletal clip.
+    // Do not reject an otherwise irrelevant skin while making that classification.
+    if (model.skins.empty() || model.animations.empty())
+        return remove_stale_package();
+
+    CompiledAnimationData package{};
+    package.header.source_hash = Utils::hashFile(source_path);
+    package.header.cook_fingerprint = computeAnimationCookFingerprint(package.header.source_hash, config);
+    const std::string normalized_source = fs::path(source_path).lexically_normal().generic_string();
+
+    for (size_t skin_index = 0; skin_index < model.skins.size(); ++skin_index)
+    {
+        AnimationResourceError error;
+        auto skeleton = GltfAnimationLoader::loadSkeleton(model, static_cast<int>(skin_index), &error);
+        if (!skeleton) {
+            LOG_ENGINE_ERROR("[AssetCompiler] Animation cook rejected {} skin {}: {}: {}",
+                             source_path, skin_index, error.code, error.message);
+            return false;
+        }
+        auto clips = GltfAnimationLoader::loadAnimations(model, *skeleton, static_cast<int>(skin_index), &error);
+        if (!error.code.empty()) {
+            LOG_ENGINE_ERROR("[AssetCompiler] Animation cook rejected {} skin {}: {}: {}",
+                             source_path, skin_index, error.code, error.message);
+            return false;
+        }
+        if (clips.empty())
+            continue;
+
+        CompiledAnimationSkin skin;
+        skin.skin_index = static_cast<uint32_t>(skin_index);
+        skin.skeleton = std::move(skeleton);
+        skin.clips = std::move(clips);
+        skin.source_signature = normalized_source + "#skin=" + std::to_string(skin_index);
+        package.skins.push_back(std::move(skin));
+    }
+
+    // A source without usable skeletal clips is valid, but a former package
+    // would be stale. Inspection succeeded above, so it is now safe to remove it.
+    if (package.skins.empty()) return remove_stale_package();
+
+    if (config.inject_publish_failure) {
+        LOG_ENGINE_ERROR("[AssetCompiler] Publish interruption injected for {}", output_path);
+        return false;
+    }
+
+    std::error_code directory_error;
+    fs::create_directories(fs::path(output_path).parent_path(), directory_error);
+    if (directory_error) {
+        LOG_ENGINE_ERROR("[AssetCompiler] Failed to create output directory for {}: {}",
+                         output_path, directory_error.message());
+        return false;
+    }
+    const std::string temporary_path = makeTemporarySiblingPath(output_path);
+    AnimationResourceError write_error;
+    if (!CompiledAnimationSerializer::save(package, temporary_path, &write_error)) {
+        std::error_code ignored;
+        fs::remove(temporary_path, ignored);
+        LOG_ENGINE_ERROR("[AssetCompiler] Failed to stage animation package {}: {}: {}",
+                         output_path, write_error.code, write_error.message);
+        return false;
+    }
+    CompiledAnimationData staged;
+    AnimationResourceError read_error;
+    if (!CompiledAnimationSerializer::load(staged, temporary_path, &read_error) ||
+        staged.header.source_hash != package.header.source_hash ||
+        staged.header.cook_fingerprint != package.header.cook_fingerprint ||
+        staged.skins.size() != package.skins.size()) {
+        std::error_code ignored;
+        fs::remove(temporary_path, ignored);
+        LOG_ENGINE_ERROR("[AssetCompiler] Staged animation validation failed for {}: {}: {}",
+                         output_path, read_error.code, read_error.message);
+        return false;
+    }
+    if (!publishTemporaryFile(temporary_path, output_path)) {
+        LOG_ENGINE_ERROR("[AssetCompiler] Failed to atomically publish animation package {}", output_path);
+        return false;
+    }
+
+    LOG_ENGINE_INFO("[AssetCompiler] Compiled animation: {} -> {} ({} skins)",
+                    fs::path(source_path).filename().string(), fs::path(output_path).filename().string(),
+                    package.skins.size());
+    return true;
 }
 
 // ================================================================
@@ -950,6 +1106,7 @@ struct SharedCompileProgress {
     std::atomic<int> failed_assets{0};
     std::atomic<int> models_compiled{0};
     std::atomic<int> textures_compiled{0};
+    std::atomic<int> animations_compiled{0};
 
     std::mutex string_mutex;
     std::string current_asset;
@@ -975,6 +1132,7 @@ struct SharedCompileProgress {
         p.failed_assets    = failed_assets.load(std::memory_order_relaxed);
         p.models_compiled  = models_compiled.load(std::memory_order_relaxed);
         p.textures_compiled = textures_compiled.load(std::memory_order_relaxed);
+        p.animations_compiled = animations_compiled.load(std::memory_order_relaxed);
         std::lock_guard<std::mutex> lock(string_mutex);
         p.current_asset = current_asset;
         p.errors   = errors;
@@ -1000,7 +1158,7 @@ struct AssetWorkItem {
     std::string output_path;
     std::string relative_path;
     fs::path    source_fs_path; // original path for copy-as-is
-    enum Type { Model, Texture, Copy } type;
+    enum Type { Model, Animation, Texture, Copy } type;
     bool is_normal_map = false;
 };
 
@@ -1043,9 +1201,10 @@ CompileProgress AssetCompiler::compileAll(
         std::replace(src_path.begin(), src_path.end(), '\\', '/');
 
         AssetWorkItem item;
-        item.source_path   = src_path;
+        item.source_path = src_path;
         item.relative_path = relative.string();
         item.source_fs_path = entry.path();
+        bool queued_compiled_output = false;
 
         if (config.compile_models && isMeshFile(ext)) {
             fs::path out = fs::path(output_root) / relative;
@@ -1054,8 +1213,21 @@ CompileProgress AssetCompiler::compileAll(
             std::replace(item.output_path.begin(), item.output_path.end(), '\\', '/');
             item.type = AssetWorkItem::Model;
             LOG_ENGINE_TRACE("[AssetCompiler] Queued model: {} -> {}", item.relative_path, item.output_path);
+            work_items.push_back(item);
+            queued_compiled_output = true;
         }
-        else if (config.compile_textures && isTextureFile(ext)) {
+        if (config.compile_animations && (ext == ".gltf" || ext == ".glb")) {
+            AssetWorkItem animation = item;
+            fs::path out = fs::path(output_root) / relative;
+            out.replace_extension(".canim");
+            animation.output_path = out.string();
+            std::replace(animation.output_path.begin(), animation.output_path.end(), '\\', '/');
+            animation.type = AssetWorkItem::Animation;
+            LOG_ENGINE_TRACE("[AssetCompiler] Queued animation: {} -> {}", animation.relative_path, animation.output_path);
+            work_items.push_back(std::move(animation));
+            queued_compiled_output = true;
+        }
+        if (config.compile_textures && isTextureFile(ext)) {
             fs::path out = fs::path(output_root) / relative;
             out.replace_extension(".ctex");
             item.output_path = out.string();
@@ -1063,15 +1235,16 @@ CompileProgress AssetCompiler::compileAll(
             item.type = AssetWorkItem::Texture;
             item.is_normal_map = looksLikeNormalMap(src_path);
             LOG_ENGINE_TRACE("[AssetCompiler] Queued texture: {} -> {}", item.relative_path, item.output_path);
+            work_items.push_back(item);
+            queued_compiled_output = true;
         }
-        else {
+        if (!queued_compiled_output) {
             fs::path out = fs::path(output_root) / relative;
             item.output_path = out.string();
             item.type = AssetWorkItem::Copy;
             LOG_ENGINE_TRACE("[AssetCompiler] Queued copy: {} -> {}", item.relative_path, item.output_path);
+            work_items.push_back(item);
         }
-
-        work_items.push_back(std::move(item));
     }
 
     std::sort(work_items.begin(), work_items.end(), [](const AssetWorkItem& lhs, const AssetWorkItem& rhs) {
@@ -1125,6 +1298,25 @@ CompileProgress AssetCompiler::compileAll(
                         LOG_ENGINE_ERROR("[AssetCompiler] FAILED model: {}", item.relative_path);
                         shared->failed_assets.fetch_add(1, std::memory_order_relaxed);
                         shared->addError("Failed to compile model: " + item.relative_path);
+                    }
+                }
+                else if (item.type == AssetWorkItem::Animation) {
+                    if (cfg.incremental && isUpToDate(item.source_path, item.output_path, cfg)) {
+                        LOG_ENGINE_TRACE("[AssetCompiler] Skipped (up-to-date): {}", item.relative_path);
+                        shared->skipped_assets.fetch_add(1, std::memory_order_relaxed);
+                        shared->completed_assets.fetch_add(1, std::memory_order_relaxed);
+                        if (shared->callback) shared->callback(shared->takeSnapshot());
+                        return;
+                    }
+
+                    if (compileAnimationSet(item.source_path, item.output_path, cfg)) {
+                        LOG_ENGINE_INFO("[AssetCompiler] Compiled animation: {}", item.relative_path);
+                        shared->animations_compiled.fetch_add(1, std::memory_order_relaxed);
+                        shared->completed_assets.fetch_add(1, std::memory_order_relaxed);
+                    } else {
+                        LOG_ENGINE_ERROR("[AssetCompiler] FAILED animation: {}", item.relative_path);
+                        shared->failed_assets.fetch_add(1, std::memory_order_relaxed);
+                        shared->addError("Failed to compile animation: " + item.relative_path);
                     }
                 }
                 else if (item.type == AssetWorkItem::Texture) {
@@ -1183,8 +1375,8 @@ CompileProgress AssetCompiler::compileAll(
 
     // --- Return aggregated result ---
     CompileProgress result = shared->takeSnapshot();
-    LOG_ENGINE_INFO("[AssetCompiler] Done: {} completed, {} models, {} textures, {} skipped, {} failed",
-                    result.completed_assets, result.models_compiled, result.textures_compiled,
+    LOG_ENGINE_INFO("[AssetCompiler] Done: {} completed, {} models, {} animations, {} textures, {} skipped, {} failed",
+                    result.completed_assets, result.models_compiled, result.animations_compiled, result.textures_compiled,
                     result.skipped_assets, result.failed_assets);
     return result;
 }

@@ -4,6 +4,7 @@
 #include "Assets/AssetScanner.hpp"
 #include "Assets/CompiledMeshSerializer.hpp"
 #include "Assets/CompiledTextureSerializer.hpp"
+#include "Animation/CompiledAnimationSerializer.hpp"
 #include "Threading/JobSystem.hpp"
 #include "Utils/FileHash.hpp"
 
@@ -88,6 +89,29 @@ bool writeTriangleObj(const fs::path& path)
         "vt 1 0\n"
         "vt 0 1\n"
         "f 1/1 2/2 3/3\n");
+}
+
+bool writeAnimatedGltf(const fs::path& path, bool include_animation = true)
+{
+    // Two scalar times followed by two VEC3 translation keys. The tiny embedded
+    // buffer keeps this a real source-decoder fixture rather than a CANM fixture.
+    const std::string animation = include_animation ? R"json(
+  ,"animations":[{
+    "name":"move",
+    "samplers":[{"input":0,"output":1,"interpolation":"LINEAR"}],
+    "channels":[{"sampler":0,"target":{"node":0,"path":"translation"}}]
+  }])json" : "";
+    return writeText(path, R"json({
+  "asset":{"version":"2.0"},
+  "buffers":[{"uri":"data:application/octet-stream;base64,AAAAAAAAgD8AAAAAAAAAAAAAAAAAAIA/AAAAAAAAAAA=","byteLength":32}],
+  "bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":8},{"buffer":0,"byteOffset":8,"byteLength":24}],
+  "accessors":[
+    {"bufferView":0,"componentType":5126,"count":2,"type":"SCALAR"},
+    {"bufferView":1,"componentType":5126,"count":2,"type":"VEC3"}
+  ],
+  "nodes":[{"name":"root"}],
+  "skins":[{"name":"fixture","joints":[0]}]
+)json" + animation + "\n}\n");
 }
 
 bool writeRgbaTga(const fs::path& path)
@@ -562,6 +586,71 @@ bool testTransactionalDeterministicTextureCooking()
     return pass(name);
 }
 
+bool testTransactionalAnimationCooking()
+{
+    const std::string name = "animation cooking validates glTF, publishes CANM transactionally, and invalidates by animation configuration";
+    TempDirectory temp("transactional_animation_cook");
+    const fs::path source = temp.path / "source" / "animated.gltf";
+    const fs::path output = temp.path / "cooked" / "animated.canim";
+    const fs::path repeat_output = temp.path / "repeat" / "animated.canim";
+    if (!writeAnimatedGltf(source))
+        return fail(name, "could not write an animated glTF source fixture");
+
+    Assets::CompileConfig config;
+    config.compile_models = false;
+    config.compile_textures = false;
+    config.animation_cooker_version = 7;
+    if (!Assets::AssetCompiler::compileAnimationSet(source.string(), output.string(), config))
+        return fail(name, "initial animation cook failed");
+    CompiledAnimationData decoded;
+    AnimationResourceError error;
+    if (!CompiledAnimationSerializer::load(decoded, output.string(), &error) || !error.code.empty() ||
+        decoded.skins.size() != 1 || !decoded.skins[0].resource ||
+        !decoded.skins[0].resource->findClip("move") ||
+        !Assets::AssetCompiler::isUpToDate(source.string(), output.string(), config))
+        return fail(name, "published CANM was not strict-valid and fresh");
+    const auto first = readBytes(output);
+    if (first.empty() || !Assets::AssetCompiler::compileAnimationSet(source.string(), repeat_output.string(), config) ||
+        first != readBytes(repeat_output))
+        return fail(name, "clean animation cooks did not emit deterministic CANM bytes");
+
+    Assets::CompileConfig changed = config;
+    ++changed.animation_cooker_version;
+    if (Assets::AssetCompiler::isUpToDate(source.string(), output.string(), changed))
+        return fail(name, "animation cooker configuration did not invalidate CANM");
+    {
+        std::fstream corrupt(output, std::ios::binary | std::ios::in | std::ios::out);
+        const uint32_t invalid_magic = 0;
+        corrupt.write(reinterpret_cast<const char*>(&invalid_magic), sizeof(invalid_magic));
+    }
+    if (Assets::AssetCompiler::isUpToDate(source.string(), output.string(), config) ||
+        !Assets::AssetCompiler::compileAnimationSet(source.string(), output.string(), config))
+        return fail(name, "corrupt CANM was accepted as fresh or could not be recooked");
+    const auto valid_before_failure = readBytes(output);
+
+    Assets::CompileConfig interrupted = config;
+    interrupted.inject_publish_failure = true;
+    if (Assets::AssetCompiler::compileAnimationSet(source.string(), output.string(), interrupted) ||
+        readBytes(output) != valid_before_failure)
+        return fail(name, "injected animation publish interruption replaced the last good CANM");
+    if (!writeText(source, "malformed glTF source") ||
+        Assets::AssetCompiler::compileAnimationSet(source.string(), output.string(), config) ||
+        readBytes(output) != valid_before_failure)
+        return fail(name, "malformed animation source replaced the last good CANM");
+
+    if (!writeAnimatedGltf(source, false) ||
+        !Assets::AssetCompiler::compileAnimationSet(source.string(), output.string(), config) ||
+        fs::exists(output))
+        return fail(name, "valid animation-free source did not remove stale CANM");
+
+    if (!writeAnimatedGltf(source) ||
+        !(Assets::AssetCompiler::compileAll((temp.path / "source").string(),
+                                            (temp.path / "batch").string(), config).animations_compiled == 1) ||
+        !fs::exists(temp.path / "batch" / "animated.canim"))
+        return fail(name, "compileAll did not schedule an independent CANM work item");
+    return pass(name);
+}
+
 bool testCookedHeaderValidation()
 {
     const std::string name = "cmesh and ctex header readers reject invalid magic and unsupported versions";
@@ -635,6 +724,7 @@ int main()
         testScannerFreshness,
         testTransactionalModelCooking,
         testTransactionalDeterministicTextureCooking,
+        testTransactionalAnimationCooking,
         testCookedHeaderValidation,
     };
 
