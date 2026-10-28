@@ -193,6 +193,11 @@ namespace
         StderrCapture capture;
         const bool loaded = loader.load(fixture.string());
         error = capture.finish();
+        if (loaded && contains(error, "Refusing cleanup of generation with an unexpected entry"))
+        {
+            error = "accepted load reported unexpected generation cleanup: " + error;
+            return false;
+        }
         return loaded;
     }
 
@@ -213,6 +218,105 @@ namespace
         }
         loader.unload();
         return true;
+    }
+
+    size_t directChildCount(const fs::path& directory)
+    {
+        std::error_code ec;
+        size_t count = 0;
+        for (fs::directory_iterator it(directory, ec), end; !ec && it != end; it.increment(ec))
+            ++count;
+        return ec ? static_cast<size_t>(-1) : count;
+    }
+
+    bool testReloadCandidateRefusalKeepsActive(const ContractPaths& paths)
+    {
+        const std::string name = "GameModuleLifecycle_CandidateRefusalKeepsActive";
+        ScopedRecorder recorder("candidate_refusal");
+        GameModuleLoader loader;
+        std::string error;
+        if (!loadAccepted(loader, paths.fixture("client_complete"), error)) return fail(name, error);
+
+        const fs::path active_image = loader.getLoadedImagePath();
+        const fs::path generation_root = loader.getOwnedGenerationRoot();
+        if (!fs::exists(active_image) || active_image.parent_path().parent_path() != generation_root)
+            return fail(name, "initial load did not use a private owned generation");
+
+        loader.update(0.016f);
+        StderrCapture capture;
+        if (loader.reload(paths.fixture("client_missing_game_update").string()))
+            return fail(name, "candidate with a missing required export was promoted");
+        const std::string reload_error = capture.finish();
+        if (!contains(reload_error, "Reload deferred") || !contains(reload_error, "gardenGameUpdate"))
+            return fail(name, "refused candidate did not report a precise deferred reload: " + reload_error);
+        if (!loader.isLoaded() || loader.getLoadedImagePath() != active_image.string() || !fs::exists(active_image))
+            return fail(name, "candidate refusal changed or released the active module image");
+
+        loader.update(0.016f);
+        if (!hasExactly(recorder.events(), {"client.update", "client.update"}))
+            return fail(name, "active module did not continue receiving callbacks after candidate refusal");
+        if (directChildCount(generation_root) != 2)
+            return fail(name, "refused candidate left an owned generation behind");
+
+        loader.unload();
+        if (fs::exists(generation_root)) return fail(name, "normal unload left its private generation root behind");
+        if (!fs::exists(paths.fixture("client_complete"))) return fail(name, "normal unload removed the source module");
+        return pass(name);
+    }
+
+    bool testReloadPromotesValidatedGeneration(const ContractPaths& paths)
+    {
+        const std::string name = "GameModuleLifecycle_CandidatePromotion";
+        ScopedRecorder recorder("candidate_promotion");
+        GameModuleLoader loader;
+        std::string error;
+        if (!loadAccepted(loader, paths.fixture("client_complete"), error)) return fail(name, error);
+        const fs::path previous_image = loader.getLoadedImagePath();
+        const fs::path generation_root = loader.getOwnedGenerationRoot();
+
+        if (!loader.reload(paths.fixture("client_lifecycle_recorder").string()))
+            return fail(name, "valid candidate was not promoted");
+        const fs::path promoted_image = loader.getLoadedImagePath();
+        if (!fs::exists(promoted_image) || promoted_image == previous_image || fs::exists(previous_image))
+            return fail(name, "candidate promotion did not exchange exactly one owned generation");
+        if (directChildCount(generation_root) != 2)
+            return fail(name, "successful promotion retained an inactive owned generation");
+
+        loader.onLevelLoaded();
+        loader.onPlayStart();
+        loader.onPlayStop();
+        if (!hasExactly(recorder.events(), {"client.level_loaded", "client.play_start", "client.play_stop"}))
+            return fail(name, "promoted candidate did not receive its lifecycle callbacks");
+        loader.unload();
+        if (fs::exists(generation_root)) return fail(name, "promoted generation root remained after unload");
+        return pass(name);
+    }
+
+    bool testOwnedGenerationCycles(const ContractPaths& paths)
+    {
+        const std::string name = "GameModuleLifecycle_OwnedGenerationCycles";
+        GameModuleLoader loader;
+        std::string error;
+        if (!loadAccepted(loader, paths.fixture("client_complete"), error)) return fail(name, error);
+        const fs::path source = paths.fixture("client_complete");
+        const fs::path generation_root = loader.getOwnedGenerationRoot();
+        fs::path previous = loader.getLoadedImagePath();
+
+        for (int cycle = 0; cycle != 20; ++cycle)
+        {
+            if (!loader.reload(source.string())) return fail(name, "valid cycle candidate was refused at cycle " + std::to_string(cycle));
+            const fs::path current = loader.getLoadedImagePath();
+            if (current == previous || !fs::exists(current) || fs::exists(previous))
+                return fail(name, "cycle did not release the prior image at cycle " + std::to_string(cycle));
+            if (directChildCount(generation_root) != 2)
+                return fail(name, "owned generation count grew at cycle " + std::to_string(cycle));
+            previous = current;
+        }
+
+        loader.unload();
+        if (fs::exists(generation_root)) return fail(name, "repeat cycle cleanup left a private generation root behind");
+        if (!fs::exists(source)) return fail(name, "repeat cycle cleanup removed the source module");
+        return pass(name);
     }
 
     bool testRequiredExportRejections(const ContractPaths& paths)
@@ -395,5 +499,8 @@ int main()
     ok = testClientOptionalHooks(paths) && ok;
     ok = testClientLifecycleRecorder(paths) && ok;
     ok = testServerShapes(paths) && ok;
+    ok = testReloadCandidateRefusalKeepsActive(paths) && ok;
+    ok = testReloadPromotesValidatedGeneration(paths) && ok;
+    ok = testOwnedGenerationCycles(paths) && ok;
     return ok ? 0 : 1;
 }

@@ -4,27 +4,37 @@
 #include "GameModuleAPI.h"
 #include <string>
 #include <cstdint>
+#include <vector>
 
 // Loads and manages a game module DLL at runtime.
 // Handles hot-reload by copying the DLL before loading (Windows locks loaded DLLs).
 class ENGINE_API GameModuleLoader
 {
 public:
-    GameModuleLoader() = default;
+    GameModuleLoader();
     ~GameModuleLoader();
 
-    // Load a game DLL from disk. On Windows, copies to a temp path first.
+    // Load a game DLL from disk. The first load uses an owned generation copy
+    // when possible, falling back to the source image only when that copy fails.
     bool load(const std::string& dll_path);
 
     // Unload the currently loaded DLL.
     void unload();
 
-    // Hot-reload: unload current, copy new, load copy.
-    // Returns false if the new DLL fails to load (old is already unloaded).
+    // Prepare and validate a distinct candidate before releasing the current
+    // image. This primitive deliberately does not invoke game lifecycle
+    // callbacks: hosts must quiesce callbacks and tear down module-owned
+    // resources before requesting a live reload. Hosts with connected server
+    // clients must refuse the request before calling this function.
+    // Returns false while retaining the active image when candidate validation
+    // or generation-copy preparation fails.
     bool reload(const std::string& dll_path);
 
     bool isLoaded() const { return m_handle != nullptr; }
+    // Kept for compatibility: this is the source module path, never a hot copy.
     const std::string& getLoadedPath() const { return m_source_path; }
+    const std::string& getLoadedImagePath() const { return m_loaded_path; }
+    const std::string& getOwnedGenerationRoot() const { return m_generation_root; }
 
     // ---- Client hooks (first six are required; lifecycle hooks are optional) ----
 
@@ -52,8 +62,10 @@ public:
 private:
     void* m_handle = nullptr;         // HMODULE or dlopen handle
     std::string m_source_path;        // Original DLL path
-    std::string m_loaded_path;        // Temp copy path (for hot-reload)
-    int m_reload_counter = 0;         // Increments each reload for unique temp names
+    std::string m_loaded_path;        // Active source image or owned generation image
+    std::string m_generation_root;    // Private process/session generation root
+    std::string m_generation_path;    // Active owned generation directory, if any
+    std::vector<std::string> m_owned_generation_files;
 
     // Core client pointers are required; lifecycle pointers are optional.
     using FnGetAPIVersion       = int32_t(*)();
@@ -95,5 +107,4 @@ private:
 
     void clearFunctionPointers();
     bool resolveFunctions();
-    std::string makeTempPath(const std::string& original);
 };
