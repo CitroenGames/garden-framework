@@ -44,6 +44,7 @@ private:
     const garden::ecs::ComponentStore& componentStore() const noexcept;
     garden::ecs::ComponentStoreResult scopedKey(garden::ecs::EntityHandle, garden::ecs::ComponentEntityKey&) const noexcept;
     using IdentityCounts = std::unordered_map<EntityGuid, size_t, GuidHash>;
+    const IdentityCounts* query_identity_counts = nullptr;
     garden::ecs::ComponentStoreResult snapshotIdentityCounts(IdentityCounts&) const noexcept;
     garden::ecs::EntityHandle handleForKey(garden::ecs::ComponentEntityKey, const IdentityCounts&) const noexcept;
     static garden::ecs::ComponentStoreResult validateBackend(garden::ecs::ComponentKey, garden::ecs::ComponentId) noexcept;
@@ -112,7 +113,13 @@ public:
     // Scoped identities move with the world and expire on destruction or reset.
     // Converting a persisted reference never repairs or assigns its identity.
     garden::ecs::EntityHandle createScopedEntity();
+    // Restore a unique, non-null persisted identity. Failure returns an invalid
+    // handle; creation is forbidden during a query.
+    garden::ecs::EntityHandle restoreScopedEntity(EntityRef reference);
     garden::ecs::EntityHandle scopedEntity(EntityRef entity);
+    // Returns null for invalid handles or missing, null, or ambiguous identity.
+    // This read does not assign identity or scope and is safe during queries.
+    EntityRef persistedReference(garden::ecs::EntityHandle entity) const;
     bool isEntityValid(garden::ecs::EntityHandle entity) const noexcept;
     garden::ecs::ComponentStoreResult destroyEntity(garden::ecs::EntityHandle entity) noexcept;
 
@@ -248,6 +255,13 @@ public:
             IdentityCounts identityCounts;
             result = snapshotIdentityCounts(identityCounts);
             if (result != ComponentStoreResult::Success) return result;
+            struct IdentitySnapshotGuard {
+                world& owner;
+                const IdentityCounts* previous;
+                IdentitySnapshotGuard(world& w, const IdentityCounts& counts)
+                    : owner(w), previous(w.query_identity_counts) { owner.query_identity_counts = &counts; }
+                ~IdentitySnapshotGuard() { owner.query_identity_counts = previous; }
+            } identityGuard(*this, identityCounts);
             for (const auto key : candidates) {
                 std::array<void*, sizeof...(Ts)> values{};
                 bool match = true;

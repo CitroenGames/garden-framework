@@ -268,7 +268,61 @@ garden::ecs::EntityHandle world::scopedEntity(EntityRef reference)
 garden::ecs::EntityHandle world::createScopedEntity()
 {
     if (active_queries) return {};
-    return scopedEntity(createEntity());
+    EntityRef reference;
+    do {
+        reference.guid = generateEntityGuid();
+    } while (resolveEntityRef(registry, reference) != entt::null);
+    return restoreScopedEntity(reference);
+}
+
+garden::ecs::EntityHandle world::restoreScopedEntity(EntityRef reference)
+{
+    if (active_queries || reference.isNull() || resolveEntityRef(registry, reference) != entt::null)
+        return {};
+
+    entt::entity entity = entt::null;
+    try {
+        if (!component_state) component_state = std::make_unique<ComponentWorldState>();
+        if (!component_state->nextSerial) return {};
+        auto sink = registry.on_destroy<ScopedEntityMarker>();
+        sink.disconnect<&retireScopedEntity>();
+        sink.connect<&retireScopedEntity>();
+        entity = registry.create();
+        const garden::ecs::ComponentEntityKey key{
+            static_cast<uint32_t>(entt::to_entity(entity)),
+            static_cast<uint32_t>(entt::to_version(entity)) + 1u};
+        const uint64_t serial = component_state->nextSerial++;
+        registry.emplace<ScopedEntityMarker>(entity, &component_state->store, key, serial);
+        // Publish the final identity only after scope exists, so identity hooks
+        // observe a fully scoped entity and index the supplied GUID directly.
+        registry.emplace<IdentityComponent>(entity, IdentityComponent{reference.guid});
+        garden::ecs::EntityHandle result;
+        result.m_world = component_state->token;
+        result.m_entity = static_cast<uint32_t>(entt::to_integral(entity));
+        result.m_serial = serial;
+        return result;
+    } catch (...) {
+        if (entity != entt::null && registry.valid(entity)) registry.destroy(entity);
+        return {};
+    }
+}
+
+EntityRef world::persistedReference(garden::ecs::EntityHandle handle) const
+{
+    garden::ecs::ComponentEntityKey key;
+    if (scopedKey(handle, key) != garden::ecs::ComponentStoreResult::Success) return {};
+    const auto entity = static_cast<entt::entity>(handle.m_entity);
+    const auto* identity = registry.try_get<IdentityComponent>(entity);
+    if (!identity || identity->guid.isNull()) return {};
+    const EntityRef reference{identity->guid};
+    if (query_identity_counts) {
+        const auto count = query_identity_counts->find(reference.guid);
+        return count != query_identity_counts->end() && count->second == 1 ? reference : EntityRef{};
+    }
+    for (const auto [candidate, other] : registry.view<IdentityComponent>().each()) {
+        if (candidate != entity && other.guid == reference.guid) return {};
+    }
+    return reference;
 }
 
 garden::ecs::ComponentStoreResult world::destroyEntity(garden::ecs::EntityHandle handle) noexcept

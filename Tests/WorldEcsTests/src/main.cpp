@@ -1,5 +1,6 @@
 #include "world.hpp"
 #include "ECS/ComponentOperations.hpp"
+#include "ECS/EntityLifecycle.hpp"
 
 #include <array>
 #include <iostream>
@@ -82,6 +83,129 @@ void basicAndReuse() {
           a.destroyEntity(entity) == ComponentStoreResult::StaleEntity &&
           a.get<WorldValue>(replacement, value) == ComponentStoreResult::Success && value && value->number == 22,
           "replacement generation remains isolated from stale handle");
+}
+
+void identityBoundary() {
+    world w, other;
+    EntityLifecycle lifecycle(w.registry);
+    const auto fresh = w.createScopedEntity();
+    const world& read = w;
+    const EntityRef freshRef = read.persistedReference(fresh);
+    const auto freshRaw = resolveEntityRef(w.registry, freshRef);
+    check(w.isEntityValid(fresh) && !freshRef.isNull() && freshRaw != entt::null &&
+          w.registry.get<IdentityComponent>(freshRaw).guid == freshRef.guid &&
+          lifecycle.resolve(freshRef) == freshRaw && w.scopedEntity(freshRef) == fresh,
+          "fresh scoped entity has a unique persisted identity");
+
+    const EntityRef requested{{0x123456789abcdef0ull, 0xfedcba9876543210ull}};
+    const auto restored = w.restoreScopedEntity(requested);
+    const auto raw = resolveEntityRef(w.registry, requested);
+    check(w.isEntityValid(restored) && raw != entt::null &&
+          w.registry.get<IdentityComponent>(raw).guid == requested.guid &&
+          lifecycle.resolve(requested) == raw && read.persistedReference(restored) == requested &&
+          w.scopedEntity(requested) == restored,
+          "restore preserves the exact requested identity and indexes it");
+
+    const auto count = w.registry.storage<entt::entity>().free_list();
+    const auto index = lifecycle.index().by_guid;
+    const auto duplicate = w.restoreScopedEntity(requested);
+    const auto nullRestore = w.restoreScopedEntity(EntityRef{});
+    check(!w.isEntityValid(duplicate) && !w.isEntityValid(nullRestore) &&
+          w.registry.storage<entt::entity>().free_list() == count &&
+          lifecycle.index().by_guid == index && lifecycle.resolve(requested) == raw &&
+          w.registry.get<IdentityComponent>(raw).guid == requested.guid,
+          "duplicate and null restoration leave entities and identity index unchanged");
+
+    const auto foreign = other.createScopedEntity();
+    check(read.persistedReference(restored) == requested &&
+          read.persistedReference(EntityHandle{}).isNull() &&
+          read.persistedReference(foreign).isNull() &&
+          other.persistedReference(restored).isNull() &&
+          w.registry.storage<entt::entity>().free_list() == count &&
+          lifecycle.index().by_guid == index,
+          "reference conversion is read-only and rejects null and foreign handles");
+
+    // Corrupt identities directly to verify conversion does not repair them.
+    const auto anonymous = w.registry.create();
+    w.registry.emplace<IdentityComponent>(anonymous, IdentityComponent{requested.guid});
+    const auto ambiguousIndex = lifecycle.index().by_guid;
+    check(read.persistedReference(restored).isNull() &&
+          w.registry.get<IdentityComponent>(anonymous).guid == requested.guid &&
+          lifecycle.index().by_guid == ambiguousIndex,
+          "conversion rejects ambiguous identity without changing the registry");
+    w.registry.destroy(anonymous);
+    w.registry.get<IdentityComponent>(raw).guid = {};
+    check(read.persistedReference(restored).isNull() &&
+          w.registry.get<IdentityComponent>(raw).guid.isNull(),
+          "conversion does not repair a null identity");
+    w.registry.get<IdentityComponent>(raw).guid = requested.guid;
+    w.registry.remove<IdentityComponent>(raw);
+    check(read.persistedReference(restored).isNull() &&
+          !w.registry.all_of<IdentityComponent>(raw),
+          "conversion does not assign a missing identity");
+
+    check(w.destroyEntity(restored) == ComponentStoreResult::Success &&
+          read.persistedReference(restored).isNull(),
+          "conversion rejects a stale handle");
+
+    check(w.add<QueryValue>(fresh, QueryValue{7}) == ComponentStoreResult::Success,
+          "prepare identity query guard");
+    const EntityRef duringQuery{{0x31415926ull, 0x27182818ull}};
+    const auto beforeQueryCount = w.registry.storage<entt::entity>().free_list();
+    const auto beforeQueryIndex = lifecycle.index().by_guid;
+    bool rejected = false;
+    bool readSucceeded = false;
+    const auto queryResult = w.query<QueryValue>([&](EntityHandle entity, QueryValue&) {
+        rejected = !w.isEntityValid(w.restoreScopedEntity(duringQuery));
+        readSucceeded = read.persistedReference(entity) == freshRef;
+    });
+    check(queryResult == ComponentStoreResult::Success && rejected && readSucceeded &&
+          w.registry.storage<entt::entity>().free_list() == beforeQueryCount &&
+          lifecycle.index().by_guid == beforeQueryIndex &&
+          resolveEntityRef(w.registry, duringQuery) == entt::null,
+          "query permits conversion and rejects restoration without mutation");
+
+    const auto ambiguousHandle = w.createScopedEntity();
+    const EntityRef ambiguousRef = read.persistedReference(ambiguousHandle);
+    const auto duplicateRaw = w.registry.create();
+    w.registry.emplace<IdentityComponent>(duplicateRaw, IdentityComponent{ambiguousRef.guid});
+    int outerVisits = 0;
+    int innerVisits = 0;
+    bool snapshotsValid = true;
+    const auto nested = w.query<QueryValue>([&](EntityHandle outer, QueryValue&) {
+        ++outerVisits;
+        snapshotsValid = snapshotsValid && read.persistedReference(outer) == freshRef &&
+                         read.persistedReference(ambiguousHandle).isNull();
+        const auto inner = w.query<const QueryValue>([&](EntityHandle found, const QueryValue&) {
+            ++innerVisits;
+            snapshotsValid = snapshotsValid && read.persistedReference(found) == freshRef &&
+                             read.persistedReference(ambiguousHandle).isNull();
+        });
+        snapshotsValid = snapshotsValid && inner == ComponentStoreResult::Success &&
+                         read.persistedReference(outer) == freshRef &&
+                         read.persistedReference(ambiguousHandle).isNull();
+        const auto throwingInner = w.query<const QueryValue>([&](EntityHandle found, const QueryValue&) {
+            snapshotsValid = snapshotsValid && read.persistedReference(found) == freshRef &&
+                             read.persistedReference(ambiguousHandle).isNull();
+            throw 17;
+        });
+        snapshotsValid = snapshotsValid && throwingInner == ComponentStoreResult::CallbackFailed &&
+                         read.persistedReference(outer) == freshRef &&
+                         read.persistedReference(ambiguousHandle).isNull();
+    });
+    check(nested == ComponentStoreResult::Success && outerVisits == 1 && innerVisits == 1 && snapshotsValid,
+          "nested query conversion rejects ambiguity and restores the outer snapshot after success and exception");
+
+    const auto throwingOuter = w.query<QueryValue>([&](EntityHandle found, QueryValue&) {
+        snapshotsValid = snapshotsValid && read.persistedReference(found) == freshRef &&
+                         read.persistedReference(ambiguousHandle).isNull();
+        throw 17;
+    });
+    w.registry.destroy(duplicateRaw);
+    check(throwingOuter == ComponentStoreResult::CallbackFailed && snapshotsValid &&
+          read.persistedReference(fresh) == freshRef &&
+          read.persistedReference(ambiguousHandle) == ambiguousRef,
+          "throwing outer query releases the snapshot for subsequent identity conversion");
 }
 
 void moves() {
@@ -349,6 +473,7 @@ int main() {
     check(queryRegistration == ComponentCatalogResult::Success, "register query component metadata");
     if (queryRegistration != ComponentCatalogResult::Success) return 1;
     basicAndReuse();
+    identityBoundary();
     moves();
     teardown();
     queries();
