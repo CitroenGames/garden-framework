@@ -815,6 +815,109 @@ namespace
         return ok;
     }
 
+    std::vector<uint16_t> sampleFixedInputFrameShape(uint32_t render_hz)
+    {
+        InputManager input;
+        InputActionSystem actions;
+        actions.registerAction({ "Jump", ActionValueType::Button, false });
+        MappingContext gameplay;
+        gameplay.name = "Gameplay";
+        gameplay.bindings = { { "Jump", InputBinding::Source::Key, SDL_SCANCODE_SPACE } };
+        actions.pushContext(gameplay);
+
+        FPSShooter::FixedNetworkInputCadence cadence;
+        std::vector<uint16_t> commands;
+        commands.reserve(60);
+        for (uint32_t frame = 0; frame < render_hz; ++frame)
+        {
+            input.update();
+            if (frame == 0)
+            {
+                input.process_event(makeKeyEvent(SDL_EVENT_KEY_DOWN, SDL_SCANCODE_SPACE));
+                input.process_event(makeKeyEvent(SDL_EVENT_KEY_UP, SDL_SCANCODE_SPACE));
+            }
+            actions.evaluate(input);
+            cadence.captureFrameEdges(actions);
+            const uint32_t steps = cadence.consumeFrame(1.0f / static_cast<float>(render_hz));
+            for (uint32_t step = 0; step < steps; ++step)
+            {
+                const Net::InputState command = FPSShooter::sampleNetworkInput(
+                    actions, 0.0f, 0.0f, true, false, true, true,
+                    cadence.consumeEdgesForTick());
+                commands.push_back(command.buttons);
+            }
+        }
+        return commands;
+    }
+
+    bool testFixedNetworkInputCadence()
+    {
+        const std::vector<uint16_t> commands_30 = sampleFixedInputFrameShape(30);
+        const std::vector<uint16_t> commands_60 = sampleFixedInputFrameShape(60);
+        const std::vector<uint16_t> commands_144 = sampleFixedInputFrameShape(144);
+
+        bool ok = expect(commands_30.size() == 60 && commands_60.size() == 60 && commands_144.size() == 60,
+            "fixed client cadence emits sixty command ticks for 30/60/144 Hz frame shapes") && ok;
+        ok = expect(commands_30 == commands_60 && commands_60 == commands_144,
+            "fixed client cadence preserves the command sequence across render frame shapes") && ok;
+
+        const auto count_jump_edges = [](const std::vector<uint16_t>& commands) {
+            uint32_t count = 0;
+            for (uint16_t buttons : commands)
+            {
+                if ((buttons & Net::InputFlags::JUMP) != 0)
+                    ++count;
+            }
+            return count;
+        };
+        ok = expect(count_jump_edges(commands_30) == 1 &&
+            (commands_30.empty() || (commands_30.front() & Net::InputFlags::JUMP) != 0),
+            "single jump edge is emitted once on the first fixed command") && ok;
+
+        // A tap can occur before the first fixed step on a high-refresh frame.
+        // Its two physical press transitions must remain distinct and consume on
+        // two later command ticks rather than disappearing or duplicating.
+        InputManager input;
+        InputActionSystem actions;
+        actions.registerAction({ "Jump", ActionValueType::Button, false });
+        MappingContext gameplay;
+        gameplay.name = "Gameplay";
+        gameplay.bindings = { { "Jump", InputBinding::Source::Key, SDL_SCANCODE_SPACE } };
+        actions.pushContext(gameplay);
+        FPSShooter::FixedNetworkInputCadence cadence;
+
+        input.update();
+        input.process_event(makeKeyEvent(SDL_EVENT_KEY_DOWN, SDL_SCANCODE_SPACE));
+        input.process_event(makeKeyEvent(SDL_EVENT_KEY_UP, SDL_SCANCODE_SPACE));
+        input.process_event(makeKeyEvent(SDL_EVENT_KEY_DOWN, SDL_SCANCODE_SPACE));
+        input.process_event(makeKeyEvent(SDL_EVENT_KEY_UP, SDL_SCANCODE_SPACE));
+        actions.evaluate(input);
+        cadence.captureFrameEdges(actions);
+        ok = expect(cadence.consumeFrame(1.0f / 144.0f) == 0,
+            "zero-step high-refresh frame retains pending action edges") && ok;
+
+        std::vector<uint16_t> delayed_commands;
+        for (uint32_t frame = 1; frame < 12; ++frame)
+        {
+            input.update();
+            actions.evaluate(input);
+            cadence.captureFrameEdges(actions);
+            const uint32_t steps = cadence.consumeFrame(1.0f / 144.0f);
+            for (uint32_t step = 0; step < steps; ++step)
+            {
+                const Net::InputState command = FPSShooter::sampleNetworkInput(
+                    actions, 0.0f, 0.0f, true, false, true, true,
+                    cadence.consumeEdgesForTick());
+                delayed_commands.push_back(command.buttons);
+            }
+        }
+        ok = expect(delayed_commands.size() >= 2 && count_jump_edges(delayed_commands) == 2 &&
+            (delayed_commands[0] & Net::InputFlags::JUMP) != 0 &&
+            (delayed_commands[1] & Net::InputFlags::JUMP) != 0,
+            "pending press counts consume once each across later fixed ticks") && ok;
+        return ok;
+    }
+
     bool testInputRingBufferTickWrap()
     {
         Net::InputRingBuffer<4> history;
@@ -1100,6 +1203,7 @@ int main()
     ok = testActionContextPriorityAndModal() && ok;
     ok = testActionRebindCallbacksAndProfile() && ok;
     ok = testNetworkInputSampler() && ok;
+    ok = testFixedNetworkInputCadence() && ok;
     ok = testInputRingBufferTickWrap() && ok;
     ok = testPredictionReplayCarriesAuthoritativeMovementState() && ok;
     ok = testReconciliationSmoothingFrameRateIndependence() && ok;

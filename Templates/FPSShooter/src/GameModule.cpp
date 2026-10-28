@@ -197,6 +197,7 @@ static CharacterControllerState toCharacterControllerState(const MovementState& 
 static EngineServices* g_services = nullptr;
 static std::unique_ptr<PlayerController> g_player_controller;
 static Net::ClientNetworkManager g_network;
+static FPSShooter::FixedNetworkInputCadence g_client_input_cadence;
 static GameHUD g_hud;
 static FPSShooter::ClientAcceptanceScript g_acceptance_script;
 
@@ -283,6 +284,156 @@ static WeaponComponent makeLocalWeaponSnapshot()
     return weapon;
 }
 
+static void tickPredictedLocalWeapon(float fixed_delta)
+{
+    if (g_local_fire_cooldown > 0.0f)
+        g_local_fire_cooldown = std::max(g_local_fire_cooldown - fixed_delta, 0.0f);
+    g_local_time_since_last_shot += std::max(fixed_delta, 0.0f);
+    const auto& local_weapon_def = getWeaponDef(g_local_weapon_type);
+    g_local_accuracy_penalty = WeaponSystem::decayTowardZero(
+        g_local_accuracy_penalty, fixed_delta, local_weapon_def.recovery_time);
+    if (g_local_time_since_last_shot > local_weapon_def.fire_rate * local_weapon_def.recoil_decay_delay)
+        g_local_recoil_index = WeaponSystem::decayTowardZero(
+            g_local_recoil_index, fixed_delta,
+            1.0f / std::max(local_weapon_def.recoil_decay_rate, 0.001f));
+}
+
+// Command minting, sampling, local prediction, and enqueueing stay together
+// on the client fixed timeline. Camera/UI remain in gardenGameUpdate's frame
+// path, so their responsiveness is independent of simulation cadence.
+static void runFixedClientInputStep(world& game_world,
+                                    const InputActionSystem& input_actions,
+                                    bool ui_modal,
+                                    const FPSShooter::NetworkInputEdges& edges,
+                                    float fixed_delta)
+{
+    tickPredictedLocalWeapon(fixed_delta);
+
+    if (!g_network.isConnected())
+    {
+        if (g_player_controller)
+            g_player_controller->setMovementEnabled(
+                FPSShooter::isLocalControllerMovementEnabled(false));
+        return;
+    }
+
+    const uint32_t command_tick = g_network.beginInputCommandTick();
+    if (g_player_controller)
+        g_player_controller->setMovementEnabled(
+            FPSShooter::isLocalControllerMovementEnabled(true));
+
+    const bool movement_locked = g_comp.has_round_state &&
+        FPSShooter::isPawnMovementLocked(g_comp.phase);
+    const bool movement_allowed = FPSShooter::isMovementInputAllowed(
+        g_local_alive, movement_locked);
+    const auto& weapon_def = getWeaponDef(g_local_weapon_type);
+    const bool can_fire = g_local_fire_cooldown <= 0.0f && !g_local_reloading && g_local_ammo > 0;
+    const bool can_reload = !g_local_reloading && g_local_ammo < weapon_def.max_ammo && g_local_reserve_ammo > 0;
+    InputState input_state = FPSShooter::sampleNetworkInput(
+        input_actions,
+        game_world.world_camera.rotation.y,
+        game_world.world_camera.rotation.x,
+        movement_allowed,
+        ui_modal,
+        can_fire,
+        can_reload,
+        edges);
+    if (g_local_alive && !ui_modal)
+        g_acceptance_script.applyInput(input_state, movement_allowed, can_fire, can_reload);
+
+    // Client prediction mirrors the command stream. The server remains
+    // authoritative for ammo, reload, and movement correction.
+    if ((input_state.buttons & InputFlags::ATTACK) != 0)
+    {
+        --g_local_ammo;
+        g_local_fire_cooldown = weapon_def.fire_rate;
+        g_local_accuracy_penalty = std::min(
+            g_local_accuracy_penalty + weapon_def.shot_spread_penalty, weapon_def.max_spread);
+        g_local_recoil_index += 1.0f;
+        g_local_time_since_last_shot = 0.0f;
+        if (g_local_ammo <= 0 && g_local_reserve_ammo > 0)
+            g_local_reloading = true;
+    }
+    if ((input_state.buttons & InputFlags::RELOAD) != 0)
+        g_local_reloading = true;
+
+    if (movement_allowed &&
+        game_world.registry.valid(g_player_entity) &&
+        game_world.registry.all_of<TransformComponent, RigidBodyComponent, PlayerComponent>(g_player_entity))
+    {
+        auto& trans = game_world.registry.get<TransformComponent>(g_player_entity);
+        auto& rb = game_world.registry.get<RigidBodyComponent>(g_player_entity);
+        auto& pc = game_world.registry.get<PlayerComponent>(g_player_entity);
+
+        MovementInput move_input = FPSShooter::toMovementInput(input_state);
+        MovementState move_state;
+        move_state.position = trans.position;
+        move_state.velocity = rb.velocity;
+        move_state.grounded = pc.grounded;
+        move_state.ground_normal = pc.ground_normal;
+
+        MovementConfig move_config;
+        move_config.speed = pc.speed;
+        move_config.jump_force = pc.jump_force;
+        move_config.fixed_delta = fixed_delta;
+
+        auto apply_movement = [&](const MovementInput& input, const MovementState& start_state) {
+            if (game_world.registry.all_of<CharacterControllerComponent>(g_player_entity))
+            {
+                game_world.set_character_controller_state(g_player_entity, toCharacterControllerState(start_state));
+                return toMovementState(game_world.simulate_character_controller(
+                    g_player_entity, FPSShooter::toCharacterMoveInput(input), fixed_delta));
+            }
+            return SharedMovement::simulate(input, start_state, move_config);
+        };
+
+        MovementState result = apply_movement(move_input, move_state);
+        g_network.storeInput(command_tick, move_input, result);
+        trans.position = result.position;
+        rb.velocity = result.velocity;
+        pc.grounded = result.grounded;
+        pc.ground_normal = result.ground_normal;
+
+        MovementState server_state;
+        uint32_t server_tick;
+        if (g_network.popAuthoritativeUpdate(server_state, server_tick))
+        {
+            glm::vec3 old_display_pos = g_recon_smoothing.getDisplayPosition(trans.position);
+            const float pos_error = glm::distance(server_state.position, trans.position);
+            if (pos_error > 0.01f)
+            {
+                MovementState replay_state = server_state;
+                if (game_world.registry.all_of<CharacterControllerComponent>(g_player_entity))
+                {
+                    game_world.set_character_controller_state(
+                        g_player_entity, toCharacterControllerState(server_state));
+                    g_network.getInputHistory().forEachFrom(server_tick,
+                        [&](const PredictionEntry& entry) {
+                            replay_state = toMovementState(game_world.simulate_character_controller(
+                                g_player_entity, FPSShooter::toCharacterMoveInput(entry.input), fixed_delta));
+                        });
+                }
+                else
+                {
+                    replay_state = g_network.getInputHistory().replayFrom(
+                        server_tick, server_state,
+                        [&](const MovementInput& input, const MovementState& start_state) {
+                            return SharedMovement::simulate(input, start_state, move_config);
+                        });
+                }
+
+                trans.position = replay_state.position;
+                rb.velocity = replay_state.velocity;
+                pc.grounded = replay_state.grounded;
+                pc.ground_normal = replay_state.ground_normal;
+                g_recon_smoothing.onCorrection(old_display_pos, trans.position);
+            }
+        }
+    }
+
+    g_network.sendInputCommand(command_tick, input_state);
+}
+
 static void updateRadarPresentation(world& game_world, bool connected, float delta_time)
 {
     if (!g_radar_throttle.shouldUpdate(delta_time))
@@ -337,6 +488,7 @@ GAME_API bool gardenGameInit(EngineServices* services)
     }
     g_services = services;
     g_ui_modal_context_active = false;
+    g_client_input_cadence.reset();
     if (!configureFPShooterInput(*services->input_actions))
     {
         LOG_ENGINE_ERROR("Failed to register FPSShooter input actions");
@@ -560,6 +712,7 @@ GAME_API void gardenGameShutdown()
     AudioSystem::get().shutdown();
     g_network.disconnect("Game closing");
     g_network.shutdown();
+    g_client_input_cadence.reset();
     g_acceptance_script.reset();
     g_player_controller.reset();
     g_hud.shutdown();
@@ -706,173 +859,36 @@ GAME_API void gardenGameUpdate(float delta_time)
         g_death_timer -= delta_time;
     }
 
-    // Update locally predicted weapon cooldown and accuracy recovery.
-    if (g_local_fire_cooldown > 0.0f)
-        g_local_fire_cooldown = std::max(g_local_fire_cooldown - delta_time, 0.0f);
-    g_local_time_since_last_shot += std::max(delta_time, 0.0f);
-    const auto& local_weapon_def = getWeaponDef(g_local_weapon_type);
-    g_local_accuracy_penalty = WeaponSystem::decayTowardZero(
-        g_local_accuracy_penalty, delta_time, local_weapon_def.recovery_time);
-    if (g_local_time_since_last_shot > local_weapon_def.fire_rate * local_weapon_def.recoil_decay_delay)
-        g_local_recoil_index = WeaponSystem::decayTowardZero(
-            g_local_recoil_index, delta_time, 1.0f / std::max(local_weapon_def.recoil_decay_rate, 0.001f));
+    // Camera, HUD, and UI continue on the render cadence above. Only the
+    // command sequence and predicted simulation consume this fixed clock.
+    const float client_fixed_delta = game_world->fixed_delta;
+    g_client_input_cadence.setFixedDelta(client_fixed_delta);
+    if (input_actions)
+        g_client_input_cadence.captureFrameEdges(*input_actions);
 
-    // Send player input to server and run client-side prediction
-    if (g_network.isConnected() && input_actions)
-    {
-        const uint32_t command_tick = g_network.beginInputCommandTick();
-
-        // Disable PlayerController's built-in movement - SharedMovement handles it
+    if (!g_network.isConnected() && g_player_controller)
         g_player_controller->setMovementEnabled(
-            FPSShooter::isLocalControllerMovementEnabled(true));
+            FPSShooter::isLocalControllerMovementEnabled(false));
 
-        const bool movement_locked = g_comp.has_round_state &&
-            FPSShooter::isPawnMovementLocked(g_comp.phase);
-        const bool movement_allowed = FPSShooter::isMovementInputAllowed(
-            g_local_alive, movement_locked);
-        const auto& weapon_def = getWeaponDef(g_local_weapon_type);
-        const bool can_fire = g_local_fire_cooldown <= 0.0f && !g_local_reloading && g_local_ammo > 0;
-        const bool can_reload = !g_local_reloading && g_local_ammo < weapon_def.max_ammo && g_local_reserve_ammo > 0;
-        InputState input_state = FPSShooter::sampleNetworkInput(
-            *input_actions,
-            game_world->world_camera.rotation.y,
-            game_world->world_camera.rotation.x,
-            movement_allowed,
-            ui_modal,
-            can_fire,
-            can_reload);
-        if (g_local_alive && !ui_modal)
-            g_acceptance_script.applyInput(input_state, movement_allowed, can_fire, can_reload);
-
-        // Predict local weapon controls; the server consumes the same input flags authoritatively.
-        if ((input_state.buttons & InputFlags::ATTACK) != 0)
-        {
-            // Consume ammo locally (client prediction)
-            g_local_ammo--;
-            g_local_fire_cooldown = weapon_def.fire_rate;
-            g_local_accuracy_penalty = std::min(
-                g_local_accuracy_penalty + weapon_def.shot_spread_penalty, weapon_def.max_spread);
-            g_local_recoil_index += 1.0f;
-            g_local_time_since_last_shot = 0.0f;
-
-            // Auto-reload
-            if (g_local_ammo <= 0 && g_local_reserve_ammo > 0) {
-                g_local_reloading = true;
-            }
-        }
-
-        // Reload is sampled from the same named action as the network command.
-        if ((input_state.buttons & InputFlags::RELOAD) != 0)
-        {
-            g_local_reloading = true;
-            // Reload timer handled by server, client just shows the state
-        }
-
-        // Client-side prediction for movement
-        if (movement_allowed &&
-            game_world->registry.valid(g_player_entity) &&
-            game_world->registry.all_of<TransformComponent, RigidBodyComponent, PlayerComponent>(g_player_entity))
-        {
-            auto& trans = game_world->registry.get<TransformComponent>(g_player_entity);
-            auto& rb = game_world->registry.get<RigidBodyComponent>(g_player_entity);
-            auto& pc = game_world->registry.get<PlayerComponent>(g_player_entity);
-
-            MovementInput move_input = FPSShooter::toMovementInput(input_state);
-
-            MovementState move_state;
-            move_state.position = trans.position;
-            move_state.velocity = rb.velocity;
-            move_state.grounded = pc.grounded;
-            move_state.ground_normal = pc.ground_normal;
-
-            MovementConfig move_config;
-            move_config.speed = pc.speed;
-            move_config.jump_force = pc.jump_force;
-            move_config.fixed_delta = game_world->fixed_delta;
-
-            auto apply_movement = [&](const MovementInput& input, const MovementState& start_state) {
-                if (game_world->registry.all_of<CharacterControllerComponent>(g_player_entity))
-                {
-                    game_world->set_character_controller_state(g_player_entity, toCharacterControllerState(start_state));
-                    return toMovementState(game_world->simulate_character_controller(
-                        g_player_entity, FPSShooter::toCharacterMoveInput(input), move_config.fixed_delta));
-                }
-                return SharedMovement::simulate(input, start_state, move_config);
-            };
-
-            MovementState result = apply_movement(move_input, move_state);
-
-            g_network.storeInput(command_tick, move_input, result);
-
-            trans.position = result.position;
-            rb.velocity = result.velocity;
-            pc.grounded = result.grounded;
-            pc.ground_normal = result.ground_normal;
-
-            // Server reconciliation with smooth visual correction
-            MovementState server_state;
-            uint32_t server_tick;
-            if (g_network.popAuthoritativeUpdate(server_state, server_tick))
-            {
-                // Save current display position before correction
-                glm::vec3 old_display_pos = g_recon_smoothing.getDisplayPosition(trans.position);
-
-                float pos_error = glm::distance(server_state.position, trans.position);
-                if (pos_error > 0.01f)
-                {
-                    MovementState replay_state = server_state;
-                    if (game_world->registry.all_of<CharacterControllerComponent>(g_player_entity))
-                    {
-                        // Restore the authoritative state once, then let the
-                        // same CharacterVirtual retain its contacts across all
-                        // unacknowledged input steps.
-                        game_world->set_character_controller_state(
-                            g_player_entity, toCharacterControllerState(server_state));
-                        g_network.getInputHistory().forEachFrom(server_tick,
-                            [&](const PredictionEntry& entry) {
-                                replay_state = toMovementState(game_world->simulate_character_controller(
-                                    g_player_entity, FPSShooter::toCharacterMoveInput(entry.input), move_config.fixed_delta));
-                            });
-                    }
-                    else
-                    {
-                        replay_state = g_network.getInputHistory().replayFrom(
-                            server_tick,
-                            server_state,
-                            [&](const MovementInput& input, const MovementState& start_state) {
-                                return SharedMovement::simulate(input, start_state, move_config);
-                            });
-                    }
-
-                    trans.position = replay_state.position;
-                    rb.velocity = replay_state.velocity;
-                    pc.grounded = replay_state.grounded;
-                    pc.ground_normal = replay_state.ground_normal;
-
-                    // Apply smooth visual correction instead of snap
-                    g_recon_smoothing.onCorrection(old_display_pos, trans.position);
-                }
-            }
-
-            // Decay visual smoothing offset each frame
-            g_recon_smoothing.update(delta_time);
-        }
-
-        g_network.sendInputCommand(command_tick, input_state);
-    }
-    else
+    const uint32_t fixed_steps = g_client_input_cadence.consumeFrame(delta_time);
+    for (uint32_t step = 0; step < fixed_steps; ++step)
     {
-        if (g_player_controller)
-            g_player_controller->setMovementEnabled(
-                FPSShooter::isLocalControllerMovementEnabled(false));
+        const FPSShooter::NetworkInputEdges edges = g_client_input_cadence.consumeEdgesForTick();
+        if (input_actions)
+            runFixedClientInputStep(*game_world, *input_actions, ui_modal, edges, client_fixed_delta);
+        else
+            tickPredictedLocalWeapon(client_fixed_delta);
+
+        if (g_player_controller && !g_player_controller->isFreecamMode())
+        {
+            game_world->stepPhysicsSingleStep();
+            game_world->player_collisions(g_player_entity);
+        }
     }
 
-    // Physics and player collisions
-    if (g_player_controller && !g_player_controller->isFreecamMode())
-    {
-        game_world->step_physics(delta_time);
-        game_world->player_collisions(g_player_entity);
-    }
+    // Visual smoothing is presentation state and deliberately remains
+    // frame-rate based even though its corrections are produced by fixed ticks.
+    g_recon_smoothing.update(delta_time);
 
     // Update player controller
     if (g_player_controller)

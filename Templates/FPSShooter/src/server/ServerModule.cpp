@@ -778,6 +778,16 @@ static bool loadBotRouteData()
                 resolved_path, runtime.route_error);
         return false;
     }
+    if (!Bots::authoredRouteLevelMatchesSelectedStem(runtime.route_data, g_selected_level_sidecars.stem)) {
+        const std::string declared_level = runtime.route_data.level;
+        runtime.route_data.clear();
+        runtime.route_status = Bots::RouteDataLoadStatus::Invalid;
+        runtime.route_error = "declares level '" + declared_level + "' instead of selected stem '" +
+            g_selected_level_sidecars.stem + "'";
+        LOG_ENGINE_ERROR("Bots: authored route sidecar {} rejected ({}); using canonical objective fallback",
+            resolved_path, runtime.route_error);
+        return false;
+    }
     if (!validateAuthoredRouteDataOnNavMesh(runtime)) {
         runtime.route_data.clear();
         runtime.route_status = Bots::RouteDataLoadStatus::Invalid;

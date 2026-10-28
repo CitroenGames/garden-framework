@@ -206,6 +206,18 @@ inline bool routeTeamMatches(RouteTeam route_team, Competitive::FpsTeam team)
         (route_team == RouteTeam::Defenders && team == Competitive::FpsTeam::Defenders);
 }
 
+// The sidecar path is selected by the host-provided level stem.  The content
+// declaration repeats only that final level name, so a copied sidecar cannot
+// silently become tactical data for another selected map.
+inline bool authoredRouteLevelMatchesSelectedStem(const AuthoredRouteData& data,
+                                                   std::string_view selected_stem)
+{
+    if (data.level.empty() || selected_stem.empty()) return false;
+    const size_t separator = selected_stem.rfind('/');
+    if (separator == std::string_view::npos || separator + 1 >= selected_stem.size()) return false;
+    return data.level == selected_stem.substr(separator + 1);
+}
+
 // This selection is deliberately fed only public phase/team/site information.
 // It must never be given a carrier, a hidden dropped bomb, an enemy entity, or
 // an enemy location.  Returning the last authored route point lets the normal

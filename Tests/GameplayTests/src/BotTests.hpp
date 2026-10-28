@@ -374,6 +374,9 @@ bool testBotAuthoredRouteData()
         return fail(name, "valid route sidecar rejected: " + error);
     if (data.routes.size() != 2 || data.holds.size() != 1 || data.patrols.size() != 1)
         return fail(name, "valid route collections parsed incorrectly");
+    if (!authoredRouteLevelMatchesSelectedStem(data, "levels/main") ||
+        authoredRouteLevelMatchesSelectedStem(data, "levels/de_block01"))
+        return fail(name, "route sidecar declaration did not bind to its selected level stem");
 
     glm::vec3 target(0.0f);
     if (!selectAuthoredRouteTarget(data, Competitive::FpsTeam::Attackers, 0, 9, false, target) ||

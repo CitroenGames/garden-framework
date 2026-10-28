@@ -8,6 +8,7 @@
 #include "Utils/Log.hpp"
 #include "Console/ConVar.hpp"
 #include "Console/Console.hpp"
+#include <algorithm>
 #include <entt/entt.hpp>
 #include <cstring>
 #include <unordered_set>
@@ -53,9 +54,11 @@ bool ClientNetworkManager::connectToServer(const char* address, uint16_t port, c
     clearInterpolationHistory();
     last_received_server_tick = 0;
     has_received_server_tick = false;
-    pending_input_tick = 0;
-    pending_input_view_server_tick = 0;
-    has_pending_input = false;
+    input_send_timer = 0.0f;
+    queued_input_commands.clear();
+    recent_inputs[0] = {};
+    recent_inputs[1] = {};
+    recent_inputs[2] = {};
     recent_input_count = 0;
 
     // Store player name
@@ -138,12 +141,13 @@ void ClientNetworkManager::shutdown()
     client_tick = 0;
     last_received_server_tick = 0;
     has_received_server_tick = false;
-    pending_input_tick = 0;
-    pending_input_view_server_tick = 0;
-    has_pending_input = false;
+    input_send_timer = 0.0f;
+    queued_input_commands.clear();
+    recent_inputs[0] = {};
+    recent_inputs[1] = {};
+    recent_inputs[2] = {};
     recent_input_count = 0;
     negotiated_capability_flags = 0;
-    pending_weapon_select = 0;
     local_player_entity = entt::null;
     local_player_network_id = 0;
 
@@ -201,38 +205,41 @@ void ClientNetworkManager::update(float delta_time)
         }
     }
 
-    // Rate-limited input sending (60Hz max) with redundant inputs
-    if (connection_state == ConnectionState::CONNECTED && has_pending_input) {
-        input_send_timer += delta_time;
-        if (input_send_timer >= INPUT_SEND_INTERVAL) {
-            input_send_timer = 0.0f;
-            has_pending_input = false;
+    // Rate-limited fixed-command sending (60 Hz) with redundant inputs. A
+    // catch-up render frame may enqueue several already-predicted commands;
+    // drain every elapsed send interval so their tick sequence remains intact.
+    if (connection_state == ConnectionState::CONNECTED && !queued_input_commands.empty()) {
+        input_send_timer += std::max(delta_time, 0.0f);
+        while (input_send_timer >= INPUT_SEND_INTERVAL && !queued_input_commands.empty()) {
+            input_send_timer -= INPUT_SEND_INTERVAL;
+            const QueuedInputCommand command = queued_input_commands.front();
+            queued_input_commands.pop_front();
 
-            // Shift recent inputs history
+            // Shift recent inputs history.
             recent_inputs[2] = recent_inputs[1];
             recent_inputs[1] = recent_inputs[0];
-            recent_inputs[0].tick = pending_input_tick;
-            recent_inputs[0].buttons = last_sent_input.buttons;
-            recent_inputs[0].camera_yaw = last_sent_input.camera_yaw;
-            recent_inputs[0].camera_pitch = last_sent_input.camera_pitch;
-            recent_inputs[0].move_forward = last_sent_input.move_forward;
-            recent_inputs[0].move_right = last_sent_input.move_right;
-            recent_inputs[0].view_server_tick = pending_input_view_server_tick;
+            recent_inputs[0].tick = command.tick;
+            recent_inputs[0].buttons = command.input.buttons;
+            recent_inputs[0].camera_yaw = command.input.camera_yaw;
+            recent_inputs[0].camera_pitch = command.input.camera_pitch;
+            recent_inputs[0].move_forward = command.input.move_forward;
+            recent_inputs[0].move_right = command.input.move_right;
+            recent_inputs[0].view_server_tick = command.view_server_tick;
             if (recent_input_count < 3) recent_input_count++;
 
-            // Create and send input command with redundant older inputs
+            // Create and send input command with redundant older inputs.
             BitWriter writer;
             InputCommandMessage msg;
-            msg.client_tick = pending_input_tick;
+            msg.client_tick = command.tick;
             msg.last_received_tick = last_received_server_tick;
-            msg.buttons = last_sent_input.buttons;
-            msg.camera_yaw = last_sent_input.camera_yaw;
-            msg.camera_pitch = last_sent_input.camera_pitch;
-            msg.move_forward = last_sent_input.move_forward;
-            msg.move_right = last_sent_input.move_right;
+            msg.buttons = command.input.buttons;
+            msg.camera_yaw = command.input.camera_yaw;
+            msg.camera_pitch = command.input.camera_pitch;
+            msg.move_forward = command.input.move_forward;
+            msg.move_right = command.input.move_right;
             msg.view_server_tick = recent_inputs[0].view_server_tick;
 
-            // Include up to 2 older inputs for redundancy, oldest first.
+            // Include up to two older inputs for redundancy, oldest first.
             uint8_t redundant_count = (recent_input_count > 1) ? static_cast<uint8_t>(recent_input_count - 1) : 0;
             if (redundant_count > INPUT_REDUNDANCY_COUNT) redundant_count = INPUT_REDUNDANCY_COUNT;
             InputSample redundant_inputs[INPUT_REDUNDANCY_COUNT] = {};
@@ -242,9 +249,6 @@ void ClientNetworkManager::update(float delta_time)
             const bool include_view_tick = (negotiated_capability_flags & CAP_VIEW_TICK) != 0;
             NetworkSerializer::serialize(writer, msg, redundant_inputs, redundant_count, include_view_tick);
             sendUnreliableMessage(writer);
-            // The packet carrying the pending select has been handed to the
-            // rate limiter; the press is preserved up to this point (D3).
-            pending_weapon_select = 0;
         }
     }
 
@@ -280,26 +284,11 @@ void ClientNetworkManager::sendInputCommand(uint32_t command_tick, const InputSt
         client_tick = command_tick;
     }
 
-    const uint16_t latched_actions = has_pending_input
-        ? static_cast<uint16_t>(last_sent_input.buttons & INPUT_ACTION_LATCH_MASK)
-        : 0;
-
-    // Store input for rate-limited sending. One-shot action buttons are latched
-    // so a high render frame rate cannot overwrite them before the next packet.
-    // WEAPON_SELECT is a value field: kept in pending_weapon_select until the
-    // packet carrying it has been handed to the rate limiter (D3).
-    const uint8_t requested_select = getWeaponSelect(input.buttons);
-    if (requested_select != 0) {
-        pending_weapon_select = requested_select;
-    }
-    pending_input_tick = command_tick;
-    pending_input_view_server_tick = currentRenderAnchorTick();
-    last_sent_input = input;
-    last_sent_input.buttons |= latched_actions;
-    if (pending_weapon_select != 0) {
-        last_sent_input.buttons = withWeaponSelect(last_sent_input.buttons, pending_weapon_select);
-    }
-    has_pending_input = true;
+    QueuedInputCommand command;
+    command.tick = command_tick;
+    command.view_server_tick = currentRenderAnchorTick();
+    command.input = input;
+    queued_input_commands.push_back(command);
 }
 
 uint32_t ClientNetworkManager::beginInputCommandTick()

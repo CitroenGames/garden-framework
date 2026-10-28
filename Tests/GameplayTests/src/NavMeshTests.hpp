@@ -7,6 +7,7 @@
 #include "Navigation/NavMeshSerializer.hpp"
 #include "Project/ProjectManager.hpp"
 #include "shared/BotNavigationRuntime.hpp"
+#include "shared/BotRouteData.hpp"
 #include "shared/CompetitiveLogic.hpp"
 #include "shared/CompetitiveMapData.hpp"
 #include "shared/SelectedLevelSidecars.hpp"
@@ -449,6 +450,21 @@ bool testNavMeshSelectedLevelRouteMatrix()
     if (!Competitive::parseAuthoredBombSites(sites_text, sites, &sites_error) || sites.size() != 2)
         return fail(name, "selected authored A/B sites were rejected: " + sites_error);
 
+    std::ifstream routes_file(sidecars.ai_path, std::ios::binary);
+    if (!routes_file)
+        return fail(name, "selected bot route sidecar is unreadable: " + sidecars.ai_logical_path);
+    const std::string routes_text((std::istreambuf_iterator<char>(routes_file)),
+                                  std::istreambuf_iterator<char>());
+    Bots::AuthoredRouteData route_data;
+    std::string routes_error;
+    if (!Bots::parseAuthoredRouteData(routes_text, route_data, &routes_error))
+        return fail(name, "selected bot route sidecar was rejected: " + routes_error);
+    if (!Bots::authoredRouteLevelMatchesSelectedStem(route_data, sidecars.stem))
+        return fail(name, "selected bot route sidecar declares a different level stem: " +
+            route_data.level + " for " + sidecars.stem);
+    if (route_data.routes.empty() || route_data.holds.empty())
+        return fail(name, "selected bot route sidecar requires attacker routes and defender holds");
+
     const auto describePoint = [](const glm::vec3& point) {
         return "(" + std::to_string(point.x) + ", " + std::to_string(point.y) +
             ", " + std::to_string(point.z) + ")";
@@ -527,5 +543,72 @@ bool testNavMeshSelectedLevelRouteMatrix()
                 return false;
         }
     }
+
+    const auto siteForIndex = [&](uint8_t index) -> const Competitive::BombSite* {
+        for (const Competitive::BombSite& site : sites)
+            if (site.site_index == index)
+                return &site;
+        return nullptr;
+    };
+    const auto verifyTacticalTarget = [&](std::string_view kind, std::string_view id,
+                                          Bots::RouteTeam route_team, uint8_t site_index,
+                                          const glm::vec3& target) {
+        if (site_index == Bots::kAnyRouteSite)
+            return fail(name, "selected tactical " + std::string(kind) + "=" + std::string(id) +
+                " lacks an authored bomb-site index");
+        const Competitive::BombSite* site = siteForIndex(site_index);
+        if (site == nullptr)
+            return fail(name, "selected tactical " + std::string(kind) + "=" + std::string(id) +
+                " references an unknown bomb-site index");
+        for (const FpsContent::CompetitiveTeamSpawn& spawn : competitive_data.team_spawns) {
+            if (!Bots::routeTeamMatches(route_team, spawn.team))
+                continue;
+            if (!verifyRoute("team-spawn-to-tactical", spawn.id, spawn.position, id, target) ||
+                !verifyRoute("tactical-to-site", id, target,
+                             "site-" + std::to_string(site->site_index), site->centre))
+                return false;
+        }
+        return true;
+    };
+
+    // Runtime selection uses ordinary nav queries from the pawn to these
+    // route/hold targets. Verify every target has a complete route from each
+    // eligible spawn and onward to its declared site; target selection cannot
+    // introduce a direct-through-geometry fallback.
+    for (const Bots::AuthoredRoute& route : route_data.routes) {
+        if (!verifyTacticalTarget("route", route.id, route.team, route.site_index,
+                                  route.points.back()))
+            return false;
+    }
+    for (const Bots::AuthoredHold& hold : route_data.holds) {
+        if (!verifyTacticalTarget("hold", hold.id, hold.team, hold.site_index, hold.point))
+            return false;
+    }
+
+    // Attackers select routes and defenders select holds in ServerModule.
+    // Exercise the same deterministic selector and prove each selected target
+    // remains reachable from every spawn on that team.
+    const auto verifySelectedTargets = [&](Competitive::FpsTeam team, bool prefer_hold) {
+        for (const Competitive::BombSite& site : sites) {
+            for (int32_t bot_index = 0; bot_index < 8; ++bot_index) {
+                glm::vec3 target(0.0f);
+                if (!Bots::selectAuthoredRouteTarget(route_data, team, site.site_index,
+                                                     bot_index, prefer_hold, target))
+                    return fail(name, "no selected tactical target for team/site pair");
+                for (const FpsContent::CompetitiveTeamSpawn& spawn : competitive_data.team_spawns) {
+                    if (spawn.team != team)
+                        continue;
+                    if (!verifyRoute("selected-tactical", spawn.id, spawn.position,
+                                     "bot-" + std::to_string(bot_index), target))
+                        return false;
+                }
+            }
+        }
+        return true;
+    };
+    if (!verifySelectedTargets(Competitive::FpsTeam::Attackers, false) ||
+        !verifySelectedTargets(Competitive::FpsTeam::Defenders, true))
+        return false;
+
     return pass(name);
 }

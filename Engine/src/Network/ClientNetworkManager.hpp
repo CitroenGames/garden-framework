@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <deque>
 #include <string>
 #include <unordered_map>
 #include <functional>
@@ -62,7 +63,6 @@ private:
     uint32_t negotiated_capability_flags = 0;
     uint8_t last_reject_code = static_cast<uint8_t>(RejectCode::Unknown);
     std::string last_reject_reason;
-    uint8_t pending_weapon_select = 0; // preserved until its packet is sent
 
     // Connection timeout tracking
     float connection_timeout = 0.0f;
@@ -71,11 +71,16 @@ private:
     // Input rate limiting
     float input_send_timer = 0.0f;
     static constexpr float INPUT_SEND_INTERVAL = 1.0f / 60.0f;  // 60Hz max
-    InputState last_sent_input;
-    uint32_t pending_input_tick = 0;
-    // Render anchor captured when this pending input sample is created.
-    uint32_t pending_input_view_server_tick = 0;
-    bool has_pending_input = false;
+    struct QueuedInputCommand
+    {
+        uint32_t tick = 0;
+        uint32_t view_server_tick = 0;
+        InputState input;
+    };
+    // Game.exe now mints input per consumed fixed step. A FIFO prevents a
+    // 30 Hz render frame with two fixed steps from overwriting its first
+    // command before the transport's 60 Hz send pump runs.
+    std::deque<QueuedInputCommand> queued_input_commands;
 
     // Ping/RTT measurement
     float ping_timer = 0.0f;
