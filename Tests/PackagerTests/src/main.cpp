@@ -800,28 +800,26 @@ bool testNavSidecarSurvivesRawAndCookedPackaging()
     return pass(name);
 }
 
-bool testAssetCopyFailureStopsPackaging()
+bool testMissingDefaultLevelOutsideAssetRootsFailsPackaging()
 {
-    const std::string name = "packager fails on project asset copy errors";
-    TempDirectory temp("asset_copy_failure");
+    const std::string name = "packager rejects a default level omitted from configured asset roots";
+    TempDirectory temp("missing_default_level_root");
     ProjectManager project;
     if (!createProjectFixture(temp.path / "project", project, {"content"},
-                              R"({"metadata":{"level_name":"Copy Failure"},"entities":[]})"))
+                              R"({"metadata":{"level_name":"Root Failure"},"entities":[]})"))
         return fail(name, "could not create project fixture");
 
-    const fs::path output_root = temp.path / "out" / "package";
-    std::error_code ec;
-    fs::create_directories(output_root, ec);
-    if (ec) return fail(name, "could not create package obstruction");
-    if (!writeText(output_root / "content", "file blocks destination directory"))
-        return fail(name, "could not create destination obstruction");
-
+    const fs::path previous_package = temp.path / "out" / "package";
+    if (!writeText(previous_package / "prior.txt", "last-good-package"))
+        return fail(name, "could not create prior package fixture");
     LevelManager levels;
     const PackageResult result = ProjectPackager::packageProject(
         project, levels, packageConfig(temp.path / "out"));
-    if (result.success) return fail(name, "package succeeded after failing to copy project assets");
-    if (result.error_message.find("Failed to create directory") == std::string::npos)
-        return fail(name, "failure did not identify the copy error: " + result.error_message);
+    if (result.success) return fail(name, "package accepted a default level outside configured asset roots");
+    if (result.error_message.find("PKG-DEPENDENCY-MISSING: assets/levels/main.level.json required by ") == std::string::npos)
+        return fail(name, "failure did not name the missing default level: " + result.error_message);
+    if (!fs::exists(previous_package / "prior.txt"))
+        return fail(name, "failed package modified the prior public output");
     return pass(name);
 }
 
@@ -834,12 +832,37 @@ bool testMissingReferencedAssetFailsPackaging()
                               R"({"metadata":{"level_name":"Missing Reference"},"entities":[{"mesh":{"path":"assets/models/missing.gltf"}}]})"))
         return fail(name, "could not create project fixture");
 
+    const fs::path previous_package = temp.path / "out" / "package";
+    if (!writeText(previous_package / "previous.txt", "last-good-package"))
+        return fail(name, "could not create prior package fixture");
+
     LevelManager levels;
     const PackageResult result = ProjectPackager::packageProject(
         project, levels, packageConfig(temp.path / "out"));
     if (result.success) return fail(name, "package succeeded with a missing level asset");
-    if (result.error_message.find("Referenced asset missing from package: assets/models/missing.gltf") == std::string::npos)
-        return fail(name, "failure did not name the missing referenced asset: " + result.error_message);
+    if (result.error_message.find("PKG-DEPENDENCY-MISSING: assets/models/missing.gltf required by assets/levels/main.level.json") == std::string::npos)
+        return fail(name, "failure did not name the missing asset and owner: " + result.error_message);
+    std::vector<char> prior;
+    if (!readBytes(previous_package / "previous.txt", prior) ||
+        std::string(prior.begin(), prior.end()) != "last-good-package")
+        return fail(name, "failed staged package modified the prior package");
+    return pass(name);
+}
+
+bool testMissingCanmDependencyNamesOwner()
+{
+    const std::string name = "packager names a missing CANM dependency and level owner";
+    TempDirectory temp("missing_canm_reference");
+    ProjectManager project;
+    if (!createProjectFixture(temp.path / "project", project, {"assets"},
+        R"({"metadata":{"level_name":"Missing CANM"},"entities":[{"components":{"SkeletonComponent":{"animation_resource_path":"assets/characters/hero.canim"}}}]})"))
+        return fail(name, "could not create project fixture");
+
+    LevelManager levels;
+    const PackageResult result = ProjectPackager::packageProject(project, levels, packageConfig(temp.path / "out"));
+    if (result.success) return fail(name, "package accepted a missing CANM dependency");
+    if (result.error_message.find("PKG-DEPENDENCY-MISSING: assets/characters/hero.canim required by assets/levels/main.level.json") == std::string::npos)
+        return fail(name, "missing CANM did not name its owner: " + result.error_message);
     return pass(name);
 }
 
@@ -865,6 +888,12 @@ bool testAssetRootRelativeReferencePassesPackaging()
         return fail(name, "referenced texture was not copied under the configured asset root");
     if (!fs::exists(temp.path / "out" / "package" / "assets" / "models" / "kept.gltf"))
         return fail(name, "explicit project-relative model was not preserved without a duplicate asset prefix");
+    if (result.dependencies_discovered != 2 || result.dependencies_validated != 2 ||
+        !fs::is_regular_file(temp.path / "out" / "package" / PackageReceiptSerializer::Filename))
+        return fail(name, "static closure receipt did not record the level and mesh dependencies");
+    const auto receipt = PackageReceiptSerializer::verifyStaged((temp.path / "out" / "package").string());
+    if (!receipt.valid)
+        return fail(name, "published closure receipt failed verification");
     return pass(name);
 }
 
@@ -898,7 +927,7 @@ bool testCompiledReferenceRequiresCookedOutput()
 
     if (result.success)
         return fail(name, "package accepted a stale raw model without the required .cmesh artifact");
-    if (result.error_message.find("Referenced asset missing from package: assets/models/stale.gltf") == std::string::npos)
+    if (result.error_message.find("PKG-DEPENDENCY-MISSING: assets/models/stale.cmesh required by assets/levels/main.level.json") == std::string::npos)
         return fail(name, "failure did not identify the missing cooked reference: " + result.error_message);
     if (!fs::exists(stale_raw))
         return fail(name, "test did not retain the stale raw artifact that should not satisfy validation");
@@ -907,13 +936,13 @@ bool testCompiledReferenceRequiresCookedOutput()
     return pass(name);
 }
 
-bool testFailedLevelCompileDoesNotRewriteDefaultLevel()
+bool testStagedPackagingReplacesObstructedPriorOutput()
 {
-    const std::string name = "packager fails level compilation without rewriting the default level";
-    TempDirectory temp("level_compile_failure");
+    const std::string name = "packager stages level compilation before replacing an obstructed prior output";
+    TempDirectory temp("level_compile_stage");
     ProjectManager project;
     if (!createProjectFixture(temp.path / "project", project, {"assets"},
-                              R"({"metadata":{"level_name":"Compile Output Block"},"entities":[]})"))
+                              R"({"metadata":{"level_name":"Compile Output Stage"},"entities":[]})"))
         return fail(name, "could not create project fixture");
 
     PackageConfig config = packageConfig(temp.path / "out");
@@ -921,18 +950,20 @@ bool testFailedLevelCompileDoesNotRewriteDefaultLevel()
     const fs::path package_root = temp.path / "out" / "package";
     std::error_code ec;
     fs::create_directories(package_root / "assets" / "levels" / "main.level", ec);
-    if (ec) return fail(name, "could not block binary level output: " + ec.message());
+    if (ec) return fail(name, "could not create prior output obstruction: " + ec.message());
+    if (!writeText(package_root / "prior.txt", "previous-package"))
+        return fail(name, "could not write prior package marker");
 
     LevelManager levels;
     const PackageResult result = ProjectPackager::packageProject(project, levels, config);
-    if (result.success) return fail(name, "package succeeded after level compilation failed");
-    if (result.error_message.find("Failed to compile level: main.level.json") == std::string::npos)
-        return fail(name, "failure did not name the uncompiled level: " + result.error_message);
-
-    if (fs::exists(package_root / "PackagerRegression.garden"))
-        return fail(name, "manifest was written despite compilation failure");
-    if (!fs::exists(package_root / "assets" / "levels" / "main.level.json"))
-        return fail(name, "source default level was removed after compilation failed");
+    if (!result.success) return fail(name, "staged package failed: " + result.error_message);
+    if (!fs::is_regular_file(package_root / "assets" / "levels" / "main.level"))
+        return fail(name, "binary default level was not published");
+    if (fs::exists(package_root / "prior.txt"))
+        return fail(name, "prior package content leaked into the published stage");
+    if (!fs::is_regular_file(package_root / "PackagerRegression.garden") ||
+        !fs::is_regular_file(package_root / PackageReceiptSerializer::Filename))
+        return fail(name, "staged package did not publish manifest and receipt together");
     return pass(name);
 }
 
@@ -1119,11 +1150,12 @@ int main()
     {
         ok &= testManifestUnknownFieldsRoundTrip();
         ok &= testNavSidecarSurvivesRawAndCookedPackaging();
-        ok &= testAssetCopyFailureStopsPackaging();
+        ok &= testMissingDefaultLevelOutsideAssetRootsFailsPackaging();
         ok &= testMissingReferencedAssetFailsPackaging();
+        ok &= testMissingCanmDependencyNamesOwner();
         ok &= testAssetRootRelativeReferencePassesPackaging();
         ok &= testCompiledReferenceRequiresCookedOutput();
-        ok &= testFailedLevelCompileDoesNotRewriteDefaultLevel();
+        ok &= testStagedPackagingReplacesObstructedPriorOutput();
 #ifdef _WIN32
         ok &= testPackagedServerLaunch();
         ok &= testPackagedDeBlock01CompetitiveServer();

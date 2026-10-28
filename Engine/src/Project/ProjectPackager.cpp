@@ -1,7 +1,12 @@
 #include "ProjectPackager.hpp"
 #include "ProjectManager.hpp"
 #include "LevelManager.hpp"
-#include "Assets/AssetManager.hpp"
+#include "Assets/CompiledMeshSerializer.hpp"
+#include "Assets/CookedCollisionSerializer.hpp"
+#include "Animation/CompiledAnimationSerializer.hpp"
+#include "Project/PackageDependency.hpp"
+#include "Project/PackageReceipt.hpp"
+#include "Utils/FileHash.hpp"
 #include "Utils/EnginePaths.hpp"
 #include "Utils/Log.hpp"
 #include "json.hpp"
@@ -12,6 +17,7 @@
 #include <cctype>
 #include <exception>
 #include <thread>
+#include <chrono>
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
@@ -134,15 +140,6 @@ static bool isCompiledMeshSource(const fs::path& path)
     return extension == ".gltf" || extension == ".glb" || extension == ".obj";
 }
 
-static bool isCompiledTextureSource(const fs::path& path)
-{
-    std::string extension = path.extension().string();
-    std::transform(extension.begin(), extension.end(), extension.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return extension == ".png" || extension == ".jpg" || extension == ".jpeg" ||
-           extension == ".bmp" || extension == ".tga";
-}
-
 static bool startsWithAssetDirectory(const fs::path& asset_path, const fs::path& asset_directory)
 {
     std::string path = asset_path.lexically_normal().generic_string();
@@ -196,49 +193,179 @@ static bool isSameOrBelow(const fs::path& candidate, const fs::path& root)
     return first != relative.end() && *first != "..";
 }
 
-static bool packagedAssetExists(const fs::path& output_root, const std::string& asset_path,
-                                const std::vector<std::string>& asset_directories,
-                                bool compile_assets, const Assets::CompileConfig& compile_config)
+namespace
 {
-    const fs::path reference_path(asset_path);
-    std::vector<fs::path> source_paths{ output_root / reference_path };
-    const bool project_relative = reference_path.is_absolute() ||
-        std::any_of(asset_directories.begin(), asset_directories.end(), [&](const std::string& directory) {
-            return startsWithAssetDirectory(reference_path, fs::path(directory));
-        });
-    if (!project_relative)
-    {
-        for (const auto& directory : asset_directories)
-            source_paths.push_back(output_root / directory / reference_path);
-    }
+std::string pkgError(const char* code, const std::string& detail) { return std::string(code) + ": " + detail; }
+void sortErrors(std::vector<std::string>& errors) { std::sort(errors.begin(), errors.end()); errors.erase(std::unique(errors.begin(), errors.end()), errors.end()); }
 
-    for (const auto& source_path : source_paths)
+class StagingPackage
+{
+public:
+    StagingPackage(fs::path final_path, fs::path stage_path) : final_(std::move(final_path)), stage_(std::move(stage_path)) {}
+    ~StagingPackage() { if (!published_) { std::error_code ec; fs::remove_all(stage_, ec); } }
+    const fs::path& root() const { return stage_; }
+    bool publish(std::string& error)
     {
         std::error_code ec;
-        if (compile_assets && isCompiledMeshSource(source_path) && compile_config.compile_models)
+        if (fs::exists(final_, ec) && !ec)
         {
-            fs::path compiled_path = source_path;
-            compiled_path.replace_extension(".cmesh");
-            if (fs::exists(compiled_path, ec) && !ec)
-                return true;
-            continue;
+            const fs::path backup = final_.parent_path() / ("." + final_.filename().string() + ".backup-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+            fs::rename(final_, backup, ec);
+            if (ec) { error = pkgError("PKG-PUBLISH-FAILED", "cannot preserve previous package: " + ec.message()); return false; }
+            fs::rename(stage_, final_, ec);
+            if (ec)
+            {
+                const std::string publish_error = ec.message();
+                std::error_code restore_ec;
+                fs::rename(backup, final_, restore_ec);
+                error = pkgError("PKG-PUBLISH-FAILED", "cannot publish staged package: " + publish_error + (restore_ec ? "; previous package restore failed: " + restore_ec.message() : ""));
+                return false;
+            }
+            fs::remove_all(backup, ec);
+            if (ec) LOG_ENGINE_WARN("[Packager] Could not remove package backup '{}': {}", backup.string(), ec.message());
         }
-        if (compile_assets && isCompiledTextureSource(source_path) && compile_config.compile_textures)
+        else if (ec) { error = pkgError("PKG-PUBLISH-FAILED", ec.message()); return false; }
+        else
         {
-            fs::path compiled_path = source_path;
-            compiled_path.replace_extension(".ctex");
-            if (fs::exists(compiled_path, ec) && !ec)
-                return true;
-            continue;
+            fs::rename(stage_, final_, ec);
+            if (ec) { error = pkgError("PKG-PUBLISH-FAILED", "cannot publish staged package: " + ec.message()); return false; }
         }
-
-        // Unsupported formats and formats explicitly excluded from compilation
-        // pass through AssetCompiler as raw files.
-        if (fs::exists(source_path, ec) && !ec)
-            return true;
+        published_ = true;
+        return true;
     }
+private:
+    fs::path final_, stage_;
+    bool published_ = false;
+};
 
-    return false;
+bool isLevelJson(const fs::path& path)
+{
+    const std::string filename = path.filename().string();
+    return filename.size() > 11 && filename.ends_with(".level.json");
+}
+
+bool resolveStaticLogical(const std::string& request, const std::vector<std::string>& roots,
+                          const fs::path& project, const fs::path& staged, std::string& out)
+{
+    std::string normalized;
+    if (!normalizePackageLogicalPath(request, normalized)) return false;
+    std::vector<std::string> candidates{normalized};
+    const bool has_root = std::any_of(roots.begin(), roots.end(), [&](const std::string& root) { return startsWithAssetDirectory(fs::path(normalized), fs::path(root)); });
+    if (!has_root) for (const std::string& root : roots) candidates.push_back((fs::path(root) / normalized).generic_string());
+    for (const std::string& candidate : candidates)
+    {
+        std::error_code ec;
+        if (fs::exists(project / candidate, ec) || fs::exists(staged / candidate, ec)) { out = candidate; return true; }
+        fs::path cooked(candidate); cooked.replace_extension(".cmesh");
+        if (fs::exists(staged / cooked, ec)) { out = candidate; return true; }
+    }
+    out = candidates.front();
+    return true;
+}
+
+bool addStaticDependency(PackageDependencyGraph& graph, std::vector<std::string>& errors,
+                         const fs::path& project, const fs::path& staged, std::string source,
+                         PackageDependencyKind kind, const std::string& owner, bool compiled_mesh)
+{
+    fs::path artifact_path(source);
+    if (compiled_mesh && isCompiledMeshSource(artifact_path)) artifact_path.replace_extension(".cmesh");
+    std::string artifact;
+    if (!normalizePackageLogicalPath(artifact_path.generic_string(), artifact)) { errors.push_back(pkgError("PKG-PATH-INVALID", source)); return false; }
+    const fs::path staged_file = staged / artifact;
+    std::error_code ec;
+    if (!fs::is_regular_file(staged_file, ec) || ec) { errors.push_back(pkgError("PKG-DEPENDENCY-MISSING", artifact + " required by " + owner)); return false; }
+    PackageDependency d;
+    d.logical_path = artifact; d.kind = kind; d.owner_logical_path = owner; d.extractor_id = "level-v1"; d.source_logical_path = std::move(source);
+    const fs::path source_file = project / d.source_logical_path;
+    if (fs::is_regular_file(source_file, ec) && !ec) d.source_hash_fnv1a64 = Utils::hashFile(source_file.string());
+    d.cooked_hash_fnv1a64 = Utils::hashFile(staged_file.string());
+    d.byte_size = fs::file_size(staged_file, ec);
+    if (ec) { errors.push_back(pkgError("PKG-DEPENDENCY-STAT", artifact)); return false; }
+    if (kind == PackageDependencyKind::Mesh && compiled_mesh)
+    {
+        Assets::CmeshHeader header{};
+        if (!Assets::CompiledMeshSerializer::loadHeader(header, staged_file.string()) || header.magic != Assets::CMESH_MAGIC || header.version != Assets::CMESH_VERSION)
+        { errors.push_back(pkgError("PKG-MESH-INVALID", artifact + " required by " + owner)); return false; }
+        d.format_version = header.version; d.cook_fingerprint = header.cook_fingerprint;
+    }
+    if (kind == PackageDependencyKind::AnimationClip)
+    {
+        CompiledAnimationData animation; AnimationResourceError animation_error;
+        if (!CompiledAnimationSerializer::load(animation, staged_file.string(), &animation_error))
+        { errors.push_back(pkgError("PKG-CANM-INVALID", artifact + " required by " + owner + ": " + animation_error.code)); return false; }
+        d.format_version = CANM_VERSION;
+    }
+    if (kind == PackageDependencyKind::Collision) d.format_version = Assets::CookedCollisionSerializer::FORMAT_VERSION;
+    std::string graph_error;
+    if (!graph.add(d, &graph_error)) { errors.push_back(graph_error); return false; }
+    return true;
+}
+
+void discoverStaticDependencies(PackageDependencyGraph& graph, std::vector<std::string>& errors,
+                                const fs::path& project, const fs::path& staged,
+                                const std::vector<std::string>& roots, const std::string& default_level,
+                                bool compiled_models)
+{
+    auto addRef = [&](const std::string& requested, PackageDependencyKind kind, const std::string& owner, bool compile_mesh) {
+        std::string source;
+        if (!resolveStaticLogical(requested, roots, project, staged, source)) { errors.push_back(pkgError("PKG-PATH-INVALID", requested + " required by " + owner)); return; }
+        addStaticDependency(graph, errors, project, staged, source, kind, owner, compile_mesh);
+        if (kind == PackageDependencyKind::Mesh && compile_mesh && isCompiledMeshSource(fs::path(source)))
+        {
+            const std::string collision = Assets::CookedCollisionSerializer::defaultPathForAsset(source);
+            addStaticDependency(graph, errors, project, staged, collision, PackageDependencyKind::Collision, source, false);
+        }
+    };
+    addRef(default_level, PackageDependencyKind::Level, "", false);
+    const fs::path levels = staged / "assets" / "levels";
+    std::error_code ec;
+    if (!fs::is_directory(levels, ec) || ec) return;
+    for (fs::recursive_directory_iterator it(levels, ec), end; !ec && it != end; it.increment(ec))
+    {
+        if (!it->is_regular_file(ec) || ec || !isLevelJson(it->path())) continue;
+        const fs::path rel = fs::relative(it->path(), staged, ec);
+        std::string level;
+        if (ec || !normalizePackageLogicalPath(rel.generic_string(), level)) { errors.push_back(pkgError("PKG-LEVEL-PATH", it->path().string())); continue; }
+        addStaticDependency(graph, errors, project, staged, level, PackageDependencyKind::Level, "", false);
+        json document; std::ifstream input(it->path());
+        try { input >> document; } catch (const std::exception& e) { errors.push_back(pkgError("PKG-LEVEL-PARSE", level + ": " + e.what())); continue; }
+        if (!document.contains("entities") || !document["entities"].is_array()) { errors.push_back(pkgError("PKG-LEVEL-PARSE", level + ": entities array is missing")); continue; }
+        for (const json& entity : document["entities"])
+        {
+            if (entity.contains("mesh") && entity["mesh"].is_object() && entity["mesh"].contains("path") && entity["mesh"]["path"].is_string())
+                addRef(entity["mesh"]["path"].get<std::string>(), PackageDependencyKind::Mesh, level, compiled_models);
+            if (entity.contains("collider") && entity["collider"].is_object() && entity["collider"].contains("mesh_path") && entity["collider"]["mesh_path"].is_string())
+            {
+                const std::string path = entity["collider"]["mesh_path"].get<std::string>();
+                const bool collision = fs::path(path).extension() == ".gardenphys";
+                addRef(path, collision ? PackageDependencyKind::Collision : PackageDependencyKind::Mesh, level, !collision && compiled_models);
+            }
+            if (entity.contains("components") && entity["components"].is_object())
+            {
+                const auto found = entity["components"].find("SkeletonComponent");
+                if (found != entity["components"].end() && found->is_object() && found->contains("animation_resource_path") && (*found)["animation_resource_path"].is_string())
+                    addRef((*found)["animation_resource_path"].get<std::string>(), PackageDependencyKind::AnimationClip, level, false);
+            }
+        }
+    }
+    if (ec) errors.push_back(pkgError("PKG-LEVEL-ENUMERATE", ec.message()));
+}
+
+bool finalizeStaticDependencies(const std::vector<PackageDependency>& discovered, const fs::path& staged,
+                                bool compiled_levels, std::vector<PackageDependency>& out, std::vector<std::string>& errors)
+{
+    PackageDependencyGraph graph;
+    for (PackageDependency d : discovered)
+    {
+        if (compiled_levels && d.kind == PackageDependencyKind::Level && d.logical_path.ends_with(".level.json"))
+            d.logical_path = d.logical_path.substr(0, d.logical_path.size() - 11) + ".level";
+        const fs::path path = staged / d.logical_path; std::error_code ec;
+        if (!fs::is_regular_file(path, ec) || ec) { errors.push_back(pkgError("PKG-DEPENDENCY-MISSING", d.logical_path + " required by " + d.owner_logical_path)); continue; }
+        d.byte_size = fs::file_size(path, ec); d.cooked_hash_fnv1a64 = Utils::hashFile(path.string());
+        std::string graph_error; if (!graph.add(d, &graph_error)) errors.push_back(graph_error);
+    }
+    out = graph.dependencies(); return errors.empty();
+}
 }
 
 std::vector<std::string> ProjectPackager::requiredEngineBinaries(bool include_dedicated_server)
@@ -326,7 +453,7 @@ PackageResult ProjectPackager::packageProjectInternal(
 
     const auto& desc = project_manager.getDescriptor();
     const fs::path project_root = project_manager.getProjectRoot();
-    const fs::path output_root = fs::path(config.output_directory) / config.package_name;
+    const fs::path final_output_root = fs::path(config.output_directory) / config.package_name;
 
     for (const auto& asset_dir : desc.asset_directories)
     {
@@ -383,7 +510,7 @@ PackageResult ProjectPackager::packageProjectInternal(
     for (const auto& asset_dir : desc.asset_directories)
     {
         const fs::path abs_asset = fs::absolute(project_root / asset_dir);
-        if (isSameOrBelow(output_root, abs_asset))
+        if (isSameOrBelow(final_output_root, abs_asset))
         {
             result.error_message = "Output directory cannot be inside project asset directory: " + abs_asset.string();
             setPhase(PackageProgress::Phase::Failed);
@@ -391,15 +518,32 @@ PackageResult ProjectPackager::packageProjectInternal(
         }
     }
 
-    LOG_ENGINE_INFO("[Packager] Packaging '{}' to '{}'...", desc.name, output_root.string());
+    LOG_ENGINE_INFO("[Packager] Packaging '{}' to '{}'...", desc.name, final_output_root.string());
 
-    // --- Create output structure ---
+    // --- Create a private output stage ---
     std::error_code ec;
+    const fs::path output_parent = final_output_root.parent_path();
+    fs::create_directories(output_parent, ec);
+    if (ec)
+    {
+        result.error_message = pkgError("PKG-STAGE-CREATE", ec.message());
+        setPhase(PackageProgress::Phase::Failed);
+        return result;
+    }
+    const fs::path staging_root = output_parent / ("." + final_output_root.filename().string() + ".staging-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    if (!fs::create_directory(staging_root, ec) || ec)
+    {
+        result.error_message = pkgError("PKG-STAGE-CREATE", ec ? ec.message() : "staging directory already exists");
+        setPhase(PackageProgress::Phase::Failed);
+        return result;
+    }
+    StagingPackage staged_package(final_output_root, staging_root);
+    const fs::path output_root = staged_package.root();
     fs::create_directories(output_root / "bin", ec);
     fs::create_directories(output_root / "assets", ec);
     if (ec)
     {
-        result.error_message = "Failed to create output directories: " + ec.message();
+        result.error_message = pkgError("PKG-STAGE-CREATE", ec.message());
         setPhase(PackageProgress::Phase::Failed);
         return result;
     }
@@ -578,28 +722,24 @@ PackageResult ProjectPackager::packageProjectInternal(
         }
     }
 
-    // --- Validate referenced assets ---
-    setPhase(PackageProgress::Phase::ValidatingAssets);
+    // --- Discover and validate static closure edges ---
+    setPhase(PackageProgress::Phase::DiscoveringDependencies);
+    PackageDependencyGraph static_graph;
+    std::vector<std::string> dependency_errors;
+    discoverStaticDependencies(static_graph, dependency_errors, project_root, output_root,
+                               desc.asset_directories, desc.default_level,
+                               config.compile_assets && config.compile_config.compile_models);
+    const auto discovered_dependencies = static_graph.dependencies();
+    result.dependencies_discovered = static_cast<int>(discovered_dependencies.size());
+    const auto graph_errors = static_graph.errors();
+    dependency_errors.insert(dependency_errors.end(), graph_errors.begin(), graph_errors.end());
+    sortErrors(dependency_errors);
+    if (!dependency_errors.empty())
     {
-        // Scan all level files in the output to find referenced asset paths
-        fs::path output_levels = output_root / "assets" / "levels";
-        if (fs::exists(output_levels))
-        {
-            auto referenced = Assets::AssetManager::collectLevelAssets(output_levels.string());
-            for (const auto& asset_path : referenced)
-            {
-                if (!packagedAssetExists(output_root, asset_path, desc.asset_directories,
-                                          config.compile_assets, config.compile_config))
-                {
-                    result.error_message = "Referenced asset missing from package: " + asset_path;
-                    LOG_ENGINE_ERROR("[Packager] {}", result.error_message);
-                    setPhase(PackageProgress::Phase::Failed);
-                    return result;
-                }
-            }
-            if (!referenced.empty())
-                LOG_ENGINE_INFO("[Packager] All {} referenced assets validated", referenced.size());
-        }
+        result.errors = dependency_errors;
+        result.error_message = dependency_errors.front();
+        setPhase(PackageProgress::Phase::Failed);
+        return result;
     }
 
     // --- Optionally compile levels to binary ---
@@ -776,9 +916,61 @@ PackageResult ProjectPackager::packageProjectInternal(
     }
     result.files_copied++;
 
+    setPhase(PackageProgress::Phase::ValidatingClosure);
+    std::vector<PackageDependency> final_dependencies;
+    dependency_errors.clear();
+    finalizeStaticDependencies(discovered_dependencies, output_root, config.compile_levels_to_binary,
+                               final_dependencies, dependency_errors);
+    sortErrors(dependency_errors);
+    if (!dependency_errors.empty())
+    {
+        result.errors = dependency_errors;
+        result.error_message = dependency_errors.front();
+        setPhase(PackageProgress::Phase::Failed);
+        return result;
+    }
+    result.dependencies_validated = static_cast<int>(final_dependencies.size());
+
+    setPhase(PackageProgress::Phase::WritingReceipt);
+    PackageReceipt receipt;
+    receipt.package_name = config.package_name;
+    receipt.project_name = desc.name;
+    receipt.engine_version = desc.engine_version;
+    receipt.default_level = default_level;
+    receipt.game_module = desc.game_module;
+    receipt.compile_config = config.compile_config;
+    receipt.dependencies = std::move(final_dependencies);
+    std::string receipt_error;
+    if (!PackageReceiptSerializer::writeStaged(receipt, output_root.string(), &receipt_error))
+    {
+        result.error_message = receipt_error;
+        result.errors = {receipt_error};
+        setPhase(PackageProgress::Phase::Failed);
+        return result;
+    }
+    const auto receipt_verification = PackageReceiptSerializer::verifyStaged(output_root.string());
+    if (!receipt_verification.valid)
+    {
+        result.errors = receipt_verification.errors;
+        result.error_message = result.errors.empty() ? "PKG-RECEIPT-VERIFY" : result.errors.front();
+        setPhase(PackageProgress::Phase::Failed);
+        return result;
+    }
+    result.receipt_path = (final_output_root / PackageReceiptSerializer::Filename).string();
+
+    setPhase(PackageProgress::Phase::Publishing);
+    std::string publish_error;
+    if (!staged_package.publish(publish_error))
+    {
+        result.error_message = publish_error;
+        result.errors = {publish_error};
+        setPhase(PackageProgress::Phase::Failed);
+        return result;
+    }
+
     LOG_ENGINE_INFO("[Packager] Package complete! {} files copied, {} levels compiled.",
                     result.files_copied, result.levels_compiled);
-    LOG_ENGINE_INFO("[Packager] Output: {}", output_root.string());
+    LOG_ENGINE_INFO("[Packager] Output: {}", final_output_root.string());
 
     result.success = true;
     setPhase(PackageProgress::Phase::Complete);

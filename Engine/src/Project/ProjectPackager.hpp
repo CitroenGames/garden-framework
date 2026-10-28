@@ -37,6 +37,10 @@ struct ENGINE_API PackageResult
     int textures_compiled = 0;
     int assets_skipped = 0;
     std::vector<std::string> warnings;
+    std::vector<std::string> errors;
+    int dependencies_discovered = 0;
+    int dependencies_validated = 0;
+    std::string receipt_path;
 };
 
 struct ENGINE_API PackageProgress
@@ -44,9 +48,12 @@ struct ENGINE_API PackageProgress
     enum class Phase {
         CopyingBinaries,
         CompilingAssets,
-        ValidatingAssets,
+        DiscoveringDependencies,
+        ValidatingClosure,
         CompilingLevels,
+        WritingReceipt,
         WritingManifest,
+        Publishing,
         Complete,
         Failed
     };

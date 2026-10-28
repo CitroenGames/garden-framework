@@ -3652,9 +3652,12 @@ void EditorApp::renderPackageDialog()
                 switch (phase) {
                 case PackageProgress::Phase::CopyingBinaries:  phase_name = "Copying engine binaries..."; break;
                 case PackageProgress::Phase::CompilingAssets:   phase_name = "Compiling assets..."; break;
-                case PackageProgress::Phase::ValidatingAssets:  phase_name = "Validating assets..."; break;
+                case PackageProgress::Phase::DiscoveringDependencies: phase_name = "Discovering package dependencies..."; break;
+                case PackageProgress::Phase::ValidatingClosure: phase_name = "Validating package closure..."; break;
                 case PackageProgress::Phase::CompilingLevels:   phase_name = "Compiling levels..."; break;
+                case PackageProgress::Phase::WritingReceipt:    phase_name = "Writing package receipt..."; break;
                 case PackageProgress::Phase::WritingManifest:   phase_name = "Writing project file..."; break;
+                case PackageProgress::Phase::Publishing:        phase_name = "Publishing package..."; break;
                 default: break;
                 }
 
