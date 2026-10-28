@@ -57,7 +57,7 @@ enum class CompetitivePresentationMessageType : uint8_t
     SNAPSHOT = Net::CUSTOM_MESSAGE_START + 14 // 78 S->C reliable
 };
 
-constexpr uint8_t kCompetitivePresentationSchemaVersion = 1;
+constexpr uint8_t kCompetitivePresentationSchemaVersion = 2;
 constexpr uint8_t kCompetitivePresentationMaxRows = 10; // current 5v5 capacity
 constexpr uint8_t kCompetitivePresentationMaxRadarRecords = 11;
 constexpr size_t kCompetitivePresentationMaxNameChars = Net::NETWORK_MAX_PLAYER_NAME_CHARS;
@@ -107,6 +107,10 @@ struct CompetitivePresentationSnapshotMessage
     uint32_t presentation_revision = 0;
     uint32_t source_server_tick = 0;
     uint8_t recipient_team = 0;
+    // The receiving player's match-scoped presentation identity is durable
+    // recipient context. It identifies the local roster row even when the
+    // receiver is dead and therefore has no Self radar record.
+    uint32_t recipient_stable_player_id = 0;
     uint8_t phase = 0;
     uint32_t phase_deadline_tick = 0;
     uint16_t round_number = 0;
@@ -170,6 +174,7 @@ inline bool isValidCompetitivePresentationSnapshot(const CompetitivePresentation
         message.schema_version != kCompetitivePresentationSchemaVersion ||
         message.match_instance_id == 0 || message.presentation_revision == 0 ||
         !isValidCompetitivePresentationTeam(message.recipient_team) ||
+        message.recipient_stable_player_id == 0 ||
         !isValidCompetitivePresentationPhase(message.phase) ||
         !isValidCompetitivePresentationReason(message.last_reason) ||
         !isValidCompetitivePresentationWinner(message.last_winner) ||
@@ -198,6 +203,15 @@ inline bool isValidCompetitivePresentationSnapshot(const CompetitivePresentation
         previous_row_id = row.stable_player_id;
     }
 
+    const auto findRosterRow = [&message](uint32_t stable_player_id)
+        -> const CompetitivePresentationRosterRow* {
+        for (uint8_t row_index = 0; row_index < message.roster_count; ++row_index) {
+            if (message.roster[row_index].stable_player_id == stable_player_id)
+                return &message.roster[row_index];
+        }
+        return nullptr;
+    };
+
     uint32_t previous_radar_id = 0;
     for (uint8_t index = 0; index < message.radar_count; ++index) {
         const auto& record = message.radar[index];
@@ -206,16 +220,23 @@ inline bool isValidCompetitivePresentationSnapshot(const CompetitivePresentation
             !isFiniteCompetitivePresentationPosition(record.position))
             return false;
         const bool is_objective = record.kind == static_cast<uint8_t>(CompetitivePresentationRadarKind::Objective);
-        bool references_roster = false;
-        for (uint8_t row_index = 0; row_index < message.roster_count; ++row_index) {
-            if (message.roster[row_index].stable_player_id == record.stable_record_id) {
-                references_roster = true;
-                break;
-            }
-        }
+        const CompetitivePresentationRosterRow* row = findRosterRow(record.stable_record_id);
+        const bool references_roster = row != nullptr;
         if ((is_objective && record.stable_record_id != std::numeric_limits<uint32_t>::max()) ||
             (!is_objective && !references_roster))
             return false;
+        if (!is_objective) {
+            const bool recipient_is_playing = message.recipient_team == 1 || message.recipient_team == 2;
+            const bool row_is_alive = row->state == static_cast<uint8_t>(CompetitivePresentationRosterState::Alive);
+            if (!recipient_is_playing || !row_is_alive || row->team != message.recipient_team)
+                return false;
+            if (record.kind == static_cast<uint8_t>(CompetitivePresentationRadarKind::Self) &&
+                record.stable_record_id != message.recipient_stable_player_id)
+                return false;
+            if (record.kind == static_cast<uint8_t>(CompetitivePresentationRadarKind::Teammate) &&
+                record.stable_record_id == message.recipient_stable_player_id)
+                return false;
+        }
         previous_radar_id = record.stable_record_id;
     }
     return true;
@@ -776,6 +797,7 @@ namespace CompetitiveSerializer
         writer.writeUInt32(msg.presentation_revision);
         writer.writeUInt32(msg.source_server_tick);
         writer.writeByte(msg.recipient_team);
+        writer.writeUInt32(msg.recipient_stable_player_id);
         writer.writeByte(msg.phase);
         writer.writeUInt32(msg.phase_deadline_tick);
         writer.writeUInt16(msg.round_number);
@@ -825,6 +847,7 @@ namespace CompetitiveSerializer
         msg.presentation_revision = reader.readUInt32();
         msg.source_server_tick = reader.readUInt32();
         msg.recipient_team = reader.readByte();
+        msg.recipient_stable_player_id = reader.readUInt32();
         msg.phase = reader.readByte();
         msg.phase_deadline_tick = reader.readUInt32();
         msg.round_number = reader.readUInt16();

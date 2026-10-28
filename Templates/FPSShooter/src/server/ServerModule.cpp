@@ -25,6 +25,7 @@
 #include "shared/WorldItemReplication.hpp"
 #include "shared/GrenadeEffects.hpp"
 #include "shared/CompetitiveLogic.hpp"
+#include "shared/CompetitivePresentationCache.hpp"
 #include "shared/CompetitiveMapData.hpp"
 #include "shared/SelectedLevelSidecars.hpp"
 #include "shared/BombSiteTriggers.hpp"
@@ -1958,6 +1959,7 @@ static bool buildCompetitivePresentationSnapshot(
     message.presentation_revision = revision;
     message.source_server_tick = source_server_tick;
     message.recipient_team = Competitive::teamId(recipient_session->team);
+    message.recipient_stable_player_id = competitiveContext().presentationPlayerId(recipient_client_id);
     message.phase = static_cast<uint8_t>(g_round_system.state.phase);
     message.phase_deadline_tick = g_round_system.state.phase_deadline_tick;
     message.round_number = g_round_system.state.round_number;
@@ -2009,7 +2011,7 @@ static bool buildCompetitivePresentationSnapshot(
     }
 
     if (recipient_has_team_policy) {
-        const uint32_t recipient_stable_id = competitiveContext().presentationPlayerId(recipient_client_id);
+        const uint32_t recipient_stable_id = message.recipient_stable_player_id;
         for (const auto& participant : participants) {
             if (!participant.has_position || participant.team != recipient_session->team ||
                 participant.state != CompetitivePresentationRosterState::Alive)
@@ -2038,31 +2040,39 @@ static bool publishCompetitivePresentationSnapshots(bool heartbeat)
     if (!w || !g_competitive || !g_competitive_map_ready)
         return false;
     auto& context = competitiveContext();
-    struct PendingSnapshot { uint16_t client_id; std::vector<uint8_t> content; };
+    struct PendingSnapshot {
+        uint16_t client_id;
+        std::vector<uint8_t> durable_content;
+        bool durable_changed = false;
+        uint32_t revision = 0;
+    };
     std::vector<PendingSnapshot> pending;
     for (uint16_t client_id = 1; client_id < g_server_network.getNextClientId(); ++client_id) {
         CompetitivePresentationSnapshotMessage provisional;
         if (!buildCompetitivePresentationSnapshot(*w, client_id, 1, 0, provisional))
             continue;
-        BitWriter fingerprint_writer;
-        if (!CompetitiveSerializer::serialize(fingerprint_writer, provisional))
+        std::vector<uint8_t> durable_content;
+        if (!competitivePresentationDurableFingerprint(provisional, durable_content))
             continue;
-        std::vector<uint8_t> content(fingerprint_writer.getData(),
-            fingerprint_writer.getData() + fingerprint_writer.getByteSize());
         const auto last = context.presentation_last_content.find(client_id);
-        if (heartbeat || last == context.presentation_last_content.end() || last->second != content)
-            pending.push_back(PendingSnapshot{client_id, std::move(content)});
+        const bool durable_changed = last == context.presentation_last_content.end() ||
+            last->second != durable_content;
+        if (durable_changed || heartbeat) {
+            const auto revision = context.presentation_recipient_revisions.find(client_id);
+            const uint32_t current_revision = revision == context.presentation_recipient_revisions.end()
+                ? 0 : revision->second;
+            pending.push_back(PendingSnapshot{
+                client_id, std::move(durable_content), durable_changed,
+                competitivePresentationNextRecipientRevision(current_revision, durable_changed)});
+        }
     }
     if (pending.empty())
         return false;
-    ++context.presentation_revision;
-    if (context.presentation_revision == 0)
-        ++context.presentation_revision;
     const uint32_t source_tick = g_server_network.getCurrentTick();
     for (auto& pending_snapshot : pending) {
         CompetitivePresentationSnapshotMessage message;
         if (!buildCompetitivePresentationSnapshot(*w, pending_snapshot.client_id,
-                                                  context.presentation_revision, source_tick, message))
+                                                  pending_snapshot.revision, source_tick, message))
             continue;
         BitWriter writer;
         if (!CompetitiveSerializer::serialize(writer, message)) {
@@ -2071,7 +2081,10 @@ static bool publishCompetitivePresentationSnapshots(bool heartbeat)
             continue;
         }
         g_server_network.sendReliableToClient(pending_snapshot.client_id, writer);
-        context.presentation_last_content[pending_snapshot.client_id] = std::move(pending_snapshot.content);
+        if (pending_snapshot.durable_changed)
+            context.presentation_last_content[pending_snapshot.client_id] = std::move(pending_snapshot.durable_content);
+        if (pending_snapshot.durable_changed)
+            context.presentation_recipient_revisions[pending_snapshot.client_id] = pending_snapshot.revision;
         LOG_ENGINE_INFO("COMPETITIVE_PRESENTATION recipient={} instance={} revision={} rows={} radar={} heartbeat={}",
             pending_snapshot.client_id, message.match_instance_id, message.presentation_revision,
             static_cast<unsigned>(message.roster_count), static_cast<unsigned>(message.radar_count), heartbeat ? 1 : 0);

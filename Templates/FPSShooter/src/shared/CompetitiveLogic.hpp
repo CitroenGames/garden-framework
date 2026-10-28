@@ -1175,11 +1175,11 @@ struct CompetitiveWorldContext {
     // Presentation is template-owned recipient state.  IDs are match-scoped
     // aliases, never ECS handles or transport IDs exposed on the UI wire.
     uint32_t presentation_match_instance_id = 0;
-    uint32_t presentation_revision = 0;
     uint32_t next_presentation_player_id = 1;
     float presentation_heartbeat = 0.0f;
     std::unordered_map<uint16_t, uint32_t> presentation_player_ids;
     std::unordered_map<uint16_t, std::vector<uint8_t>> presentation_last_content;
+    std::unordered_map<uint16_t, uint32_t> presentation_recipient_revisions;
 
     CompetitiveWorldContext() : bomb_hooks(&bomb) {
         round.bomb_hooks = &bomb_hooks;
@@ -1330,11 +1330,11 @@ struct CompetitiveWorldContext {
         bomb_sites_authored = false;
         round_heartbeat = 0.0f;
         presentation_match_instance_id = 0;
-        presentation_revision = 0;
         next_presentation_player_id = 1;
         presentation_heartbeat = 0.0f;
         presentation_player_ids.clear();
         presentation_last_content.clear();
+        presentation_recipient_revisions.clear();
     }
 
     uint32_t presentationPlayerId(uint16_t owner_client_id) {
@@ -1353,6 +1353,7 @@ struct CompetitiveWorldContext {
 
     void forgetPresentationRecipient(uint16_t client_id) {
         presentation_last_content.erase(client_id);
+        presentation_recipient_revisions.erase(client_id);
     }
 
 private:
