@@ -187,6 +187,13 @@ public:
             prop.array_read_element = [](const void* field, size_t index, void* out) { const auto& v = *static_cast<const Field*>(field); if (index < v.size()) *static_cast<Elem*>(out) = v[index]; };
             prop.array_write_element = [](void* field, size_t index, const void* in) { auto& v = *static_cast<Field*>(field); if (index < v.size()) v[index] = *static_cast<const Elem*>(in); };
         }
+        if constexpr (std::is_trivially_copyable_v<Field>)
+            prop.swap_value = [](void* a, void* b) noexcept {
+                auto* left = static_cast<unsigned char*>(a); auto* right = static_cast<unsigned char*>(b);
+                for (size_t i = 0; i < sizeof(Field); ++i) { auto byte = left[i]; left[i] = right[i]; right[i] = byte; }
+            };
+        else if constexpr (std::is_nothrow_swappable_v<Field>)
+            prop.swap_value = [](void* a, void* b) noexcept { using std::swap; swap(*static_cast<Field*>(a), *static_cast<Field*>(b)); };
         prop.mutable_data = [](void* component) -> void* {
             return static_cast<void*>(&(static_cast<T*>(component)->*Member));
         };

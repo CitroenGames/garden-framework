@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -489,6 +490,100 @@ bool testNested()
         return fail(name, "cyclic nesting produced no subtree");
     return pass(name);
 }
+bool testReflectedFailureRollback()
+{
+    const std::string name = "Prefab reflected failure rollback";
+    PrefabData outer;
+    if (!PrefabManager::loadPrefab(prefabPath("outer.prefab"), outer)) return fail(name, "missing nested fixture");
+    PrefabData inner;
+    if (!PrefabManager::loadPrefab(prefabPath("inner.prefab"), inner)) return fail(name, "missing inner fixture");
+    auto bad_inner = inner.json;
+    bad_inner["nodes"][0]["components"]["TransformComponent"]["position"] = "invalid";
+    writeFile(prefabPath("inner_failure.prefab"), bad_inner.dump(2));
+    auto nested_outer = outer;
+    for (auto& node : nested_outer.json["nodes"])
+        if (node.contains("prefab_instance")) {
+            node["prefab_instance"]["source"] = prefabPath("inner_failure.prefab");
+            node["prefab_instance"]["overrides"] = nlohmann::json::array();
+        }
+    {
+        entt::registry reg;
+        EntityLifecycle life(reg, 10);
+        const auto sentinel = authorTree(reg, life);
+        const auto before = entityCount(reg);
+        const auto root_children = reg.get<ChildrenComponent>(sentinel.root).children;
+        const auto child_children = reg.get<ChildrenComponent>(sentinel.child).children;
+        const auto child_parent = reg.get<ParentComponent>(sentinel.child).parent.guid;
+        const auto grand_parent = reg.get<ParentComponent>(sentinel.grand).parent.guid;
+        const auto sentinel_link = reg.get<PrefabLinkComponent>(sentinel.child);
+        const auto result = PrefabManager::get().instantiate(reg, nested_outer);
+        if (result.success || result.root != entt::null || !result.nodes.empty() || entityCount(reg) != before ||
+            !reg.valid(sentinel.root) || !reg.valid(sentinel.child) || !reg.valid(sentinel.grand) ||
+            !reg.valid(sentinel.external) || reg.get<ChildrenComponent>(sentinel.root).children != root_children ||
+            reg.get<ChildrenComponent>(sentinel.child).children != child_children ||
+            reg.get<ParentComponent>(sentinel.child).parent.guid != child_parent ||
+            reg.get<ParentComponent>(sentinel.grand).parent.guid != grand_parent ||
+            reg.get<PrefabLinkComponent>(sentinel.child).target.guid != sentinel_link.target.guid ||
+            reg.get<PrefabLinkComponent>(sentinel.child).links != sentinel_link.links)
+            return fail(name, "failed inner prefab leaked entities or changed sentinel links");
+    }
+    const auto original_desc = *g_reflection.findByName("PrefabLinkComponent");
+    for (int fault = 0; fault != 3; ++fault)
+    {
+        entt::registry reg;
+        EntityLifecycle life(reg, 11);
+        const auto sentinel = authorTree(reg, life);
+        const auto before = entityCount(reg);
+        const auto children = reg.get<ChildrenComponent>(sentinel.root).children;
+        auto bad = outer;
+        auto& components = bad.json["nodes"][0]["components"];
+        if (fault == 0) components["UnknownComponent"] = nlohmann::json::object();
+        else if (fault == 1) components["TransformComponent"]["position"] = "invalid";
+        else {
+            components["PrefabLinkComponent"] = {{"value", 2.0f}};
+            auto descriptor = original_desc;
+            descriptor.add = [](entt::registry&, entt::entity) { throw std::runtime_error("injected constructor"); };
+            g_reflection.registerComponent(std::move(descriptor));
+        }
+        auto result = PrefabManager::get().instantiate(reg, bad);
+        g_reflection.registerComponent(original_desc);
+        if (result.success || result.root != entt::null || !result.nodes.empty() || entityCount(reg) != before ||
+            reg.get<ChildrenComponent>(sentinel.root).children != children ||
+            !reg.valid(sentinel.child) || !reg.valid(sentinel.grand))
+            return fail(name, "failed nested instantiate leaked entities or changed existing links");
+    }
+
+    if (!saveTreePrefab("revert_failure.prefab")) return fail(name, "could not save revert fixture");
+    PrefabData source;
+    if (!PrefabManager::loadPrefab(prefabPath("revert_failure.prefab"), source)) return fail(name, "could not load revert fixture");
+    entt::registry reg;
+    EntityLifecycle life(reg, 12);
+    auto instance = PrefabManager::get().instantiate(reg, source);
+    if (!instance.success) return fail(name, "could not instantiate revert fixture");
+    reg.get<TransformComponent>(instance.root).position = {77, 78, 79};
+    const auto count = entityCount(reg);
+    const auto links = reg.get<ChildrenComponent>(instance.root).children;
+    for (int fault = 0; fault != 3; ++fault) {
+        auto bad = source.json;
+        auto& components = bad["nodes"][0]["components"];
+        if (fault == 0) components["UnknownComponent"] = nlohmann::json::object();
+        else if (fault == 1) components["TransformComponent"]["position"] = "invalid";
+        else {
+            components["PrefabLinkComponent"] = {{"value", 2.0f}};
+            auto descriptor = original_desc;
+            descriptor.add = [](entt::registry&, entt::entity) { throw std::runtime_error("injected constructor"); };
+            g_reflection.registerComponent(std::move(descriptor));
+        }
+        writeFile(prefabPath("revert_failure.prefab"), bad.dump(2));
+        const bool succeeded = PrefabManager::get().revertOverrides(reg, instance.root);
+        g_reflection.registerComponent(original_desc);
+        if (succeeded || entityCount(reg) != count ||
+            !nearVec(reg.get<TransformComponent>(instance.root).position, {77, 78, 79}) ||
+            reg.get<ChildrenComponent>(instance.root).children != links)
+            return fail(name, "failed revert changed instance state or links");
+    }
+    return pass(name);
+}
 } // namespace
 
 int main()
@@ -508,6 +603,7 @@ int main()
     if (!testLegacyV1Rejected()) ++failures;
     if (!testRejectedFiles()) ++failures;
     if (!testNested()) ++failures;
+    if (!testReflectedFailureRollback()) ++failures;
 
     if (failures == 0)
         std::cout << "All PrefabTests passed" << std::endl;

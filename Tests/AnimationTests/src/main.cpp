@@ -871,7 +871,7 @@ bool testReflectionHardCutover()
         {"entities", nlohmann::json::array({current_record})}
     };
     entt::registry loaded;
-    ReflectionSerializer::deserializeLevel(loaded, current_level, reflection);
+    if (!ReflectionSerializer::deserializeLevel(loaded, current_level, reflection)) return fail(name, "current level rejected");
     if (loaded.view<SkeletonComponent>().empty())
         return fail(name, "current SkeletonComponent payload was rejected");
     const auto loaded_entity = *loaded.view<SkeletonComponent>().begin();
@@ -891,7 +891,7 @@ bool testReflectionHardCutover()
         {"entities", nlohmann::json::array({old_component_record})}
     };
     entt::registry old_component_registry;
-    ReflectionSerializer::deserializeLevel(old_component_registry, old_component_level, reflection);
+    if (ReflectionSerializer::deserializeLevel(old_component_registry, old_component_level, reflection)) return fail(name, "legacy level accepted");
     if (!old_component_registry.view<SkeletonComponent>().empty())
         return fail(name, "legacy AnimationComponent record was accepted");
 
@@ -901,8 +901,8 @@ bool testReflectionHardCutover()
     nlohmann::json legacy_fields_entity = {{"components", nlohmann::json::object()}};
     legacy_fields_entity["components"]["SkeletonComponent"] = std::move(legacy_fields);
     entt::registry legacy_fields_registry;
-    ReflectionSerializer::deserializeEntity(legacy_fields_registry, legacy_fields_registry.create(),
-        legacy_fields_entity, reflection);
+    if (ReflectionSerializer::deserializeEntity(legacy_fields_registry, legacy_fields_registry.create(),
+        legacy_fields_entity, reflection)) return fail(name, "legacy fields accepted");
     if (!legacy_fields_registry.view<SkeletonComponent>().empty())
         return fail(name, "legacy SkeletonComponent fields were accepted");
     return pass(name);

@@ -22,6 +22,7 @@ ComponentDescriptor makeComponentDescriptor(
     desc.source_id = source_id;
     desc.type_id = entt::type_hash<T>::value();
     desc.size = sizeof(T);
+    desc.alignment = alignof(T);
     desc.removable = true;
 
     desc.add = [](entt::registry& r, entt::entity e) {

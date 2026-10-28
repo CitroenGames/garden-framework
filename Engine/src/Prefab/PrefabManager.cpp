@@ -42,7 +42,7 @@ json filteredComponents(const json& components)
 {
     json out = json::object();
     if (!components.is_object())
-        return out;
+        return components;
     for (auto& [name, comp] : components.items())
         if (!isStructuralComponent(name))
             out[name] = comp;
@@ -145,41 +145,50 @@ void remapEntityRefs(entt::registry& registry, entt::entity entity,
     }
 }
 
-void applyOverridesToNodes(entt::registry& registry,
-                           const std::unordered_map<EntityGuid, entt::entity, GuidHash>& nodes,
-                           const std::vector<PropertyOverride>& overrides,
-                           const ReflectionRegistry& reflection)
+// Remap only source values before staging. Overrides are applied afterward,
+// so caller-supplied references retain their destination-world meaning.
+void remapInputRefs(json& input, const ReflectionRegistry& reflection,
+                    const std::unordered_map<EntityGuid, EntityGuid, GuidHash>& guid_map)
+{
+    auto& components = input["components"];
+    if (!components.is_object()) return;
+    for (auto& [name, value] : components.items()) {
+        const auto* desc = reflection.findByName(name.c_str());
+        if (!desc || !value.is_object()) continue;
+        for (const auto& prop : desc->properties) {
+            if (!value.contains(prop.name)) continue;
+            auto remap = [&](json& v) {
+                if (!v.is_string()) return;
+                EntityGuid guid;
+                if (guidFromString(v.get<std::string>(), guid)) v = guidToString(remapGuid(guid, guid_map));
+            };
+            auto& v = value[prop.name];
+            if (prop.type == EPropertyType::EntityRef) remap(v);
+            else if (prop.type == EPropertyType::Array && prop.element_type == EPropertyType::EntityRef && v.is_array())
+                for (auto& element : v) remap(element);
+        }
+    }
+}
+
+void appendOverrides(std::vector<std::pair<entt::entity, json>>& inputs,
+                     const std::unordered_map<EntityGuid, entt::entity, GuidHash>& nodes,
+                     const std::vector<PropertyOverride>& overrides,
+                     const ReflectionRegistry& reflection)
 {
     for (const auto& o : overrides)
     {
         auto it = nodes.find(o.node);
-        if (it == nodes.end() || it->second == entt::null || !registry.valid(it->second))
-        {
-            LOG_ENGINE_WARN("PrefabManager — override targets unknown node, skipping");
-            continue;
+        const auto* desc = reflection.findByName(o.component.c_str());
+        if (it == nodes.end() || !desc) continue;
+        bool known = false;
+        for (const auto& prop : desc->properties) if (prop.name == o.property) known = true;
+        if (!known) continue;
+        auto input = std::find_if(inputs.begin(), inputs.end(), [&](const auto& entry) { return entry.first == it->second; });
+        if (input == inputs.end()) {
+            inputs.emplace_back(it->second, json{{"components", json::object()}});
+            input = std::prev(inputs.end());
         }
-        const ComponentDescriptor* desc = reflection.findByName(o.component.c_str());
-        if (!desc)
-        {
-            LOG_ENGINE_WARN("PrefabManager — override targets unknown component '{}', skipping", o.component);
-            continue;
-        }
-        const PropertyDescriptor* target = nullptr;
-        for (const auto& prop : desc->properties)
-            if (prop.name == o.property)
-                target = &prop;
-        if (!target)
-        {
-            LOG_ENGINE_WARN("PrefabManager — override targets removed property '{}' on '{}', skipping",
-                            o.property, o.component);
-            continue;
-        }
-        if (!desc->has(registry, it->second))
-            desc->add(registry, it->second);
-        void* comp = desc->get(registry, it->second);
-        if (!comp || !ReflectionPropertyOps::deserializeProperty(*target, comp, o.value))
-            LOG_ENGINE_WARN("PrefabManager — override value rejected for '{}.{}', skipping",
-                            o.component, o.property);
+        input->second["components"][o.component][o.property] = o.value;
     }
 }
 } // namespace
@@ -501,13 +510,21 @@ PrefabInstantiateResult PrefabManager::instantiate(
     std::vector<std::string> stack;
     if (!prefab.path.empty())
         stack.push_back(prefab.path);
-    return instantiateInternal(registry, prefab, options, 0, stack);
+    std::vector<entt::entity> created;
+    PrefabInstantiateResult result;
+    try { result = instantiateInternal(registry, prefab, options, 0, stack, created); }
+    catch (...) { result = {}; }
+    if (!result.success) {
+        for (auto it = created.rbegin(); it != created.rend(); ++it)
+            if (registry.valid(*it)) registry.destroy(*it);
+    }
+    return result;
 }
 
 PrefabInstantiateResult PrefabManager::instantiateInternal(
     entt::registry& registry, const PrefabData& prefab,
     const PrefabInstantiateOptions& options, int depth,
-    std::vector<std::string>& source_stack)
+    std::vector<std::string>& source_stack, std::vector<entt::entity>& created)
 {
     PrefabInstantiateResult result;
     if (!m_reflection)
@@ -576,6 +593,7 @@ PrefabInstantiateResult PrefabManager::instantiateInternal(
 
     auto freshEntity = [&](const std::string& tag_name) {
         entt::entity e = registry.create();
+        try { created.push_back(e); } catch (...) { registry.destroy(e); throw; }
         EntityGuid g;
         do { g = generateEntityGuid(); } while (resolveEntityRef(registry, EntityRef{g}) != entt::null);
         registry.emplace<IdentityComponent>(e, IdentityComponent{g});
@@ -616,12 +634,14 @@ PrefabInstantiateResult PrefabManager::instantiateInternal(
                         nested_opts.overrides = parseOverrides(inst["overrides"]);
                     source_stack.push_back(source);
                     PrefabInstantiateResult sub = instantiateInternal(
-                        registry, nested_data, nested_opts, depth + 1, source_stack);
+                        registry, nested_data, nested_opts, depth + 1, source_stack, created);
                     source_stack.pop_back();
                     if (sub.success)
                         grafted = sub.root;
-                    else
-                        LOG_ENGINE_ERROR("PrefabManager — nested prefab failed: {}; placeholder substituted", source);
+                    else {
+                        LOG_ENGINE_ERROR("PrefabManager — nested prefab failed: {}", source);
+                        return result;
+                    }
                 }
             }
             if (grafted == entt::null)
@@ -645,7 +665,8 @@ PrefabInstantiateResult PrefabManager::instantiateInternal(
         json entity_json;
         entity_json["components"] = (info.node->contains("components"))
             ? filteredComponents((*info.node)["components"]) : json::object();
-        ReflectionSerializer::deserializeEntity(registry, e, entity_json, *m_reflection);
+        const auto decoded = ReflectionSerializer::deserializeEntity(registry, e, entity_json, *m_reflection);
+        if (!decoded) { LOG_ENGINE_ERROR("Prefab deserialization failed: {}", decoded.error); return result; }
     }
     for (entt::entity e : local_entities)
         remapEntityRefs(registry, e, *m_reflection, guid_map);
@@ -686,9 +707,12 @@ PrefabInstantiateResult PrefabManager::instantiateInternal(
     }
 
     // Pass 4: overrides — file-stored first, caller-supplied win (file order).
+    std::vector<std::pair<entt::entity, json>> override_inputs;
     if (prefab.json.contains("overrides"))
-        applyOverridesToNodes(registry, ent_map, parseOverrides(prefab.json["overrides"]), *m_reflection);
-    applyOverridesToNodes(registry, ent_map, options.overrides, *m_reflection);
+        appendOverrides(override_inputs, ent_map, parseOverrides(prefab.json["overrides"]), *m_reflection);
+    appendOverrides(override_inputs, ent_map, options.overrides, *m_reflection);
+    const auto override_result = ReflectionSerializer::deserializeEntities(registry, override_inputs, *m_reflection);
+    if (!override_result) { LOG_ENGINE_ERROR("Prefab overrides failed: {}", override_result.error); return result; }
 
     // Spawn transform applies to the root only.
     auto rit = ent_map.find(prefab.root_guid);
@@ -788,11 +812,13 @@ bool PrefabManager::revertOverrides(entt::registry& registry, entt::entity insta
     if (!loadPrefab(root_pic.prefab_path, source))
         return false;
 
+    try {
     std::unordered_map<EntityGuid, EntityGuid, GuidHash> guid_map;
     for (const auto& [src_guid, e] : by_source)
         guid_map[src_guid] = entityRefOf(registry, e).guid;
 
     std::unordered_map<EntityGuid, entt::entity, GuidHash> ent_map;
+    std::vector<std::pair<entt::entity, json>> inputs;
     for (const auto& node : source.json["nodes"])
     {
         EntityGuid src_guid;
@@ -806,12 +832,21 @@ bool PrefabManager::revertOverrides(entt::registry& registry, entt::entity insta
         json entity_json;
         entity_json["components"] = node.contains("components")
             ? filteredComponents(node["components"]) : json::object();
-        ReflectionSerializer::deserializeEntity(registry, e, entity_json, *m_reflection);
-        remapEntityRefs(registry, e, *m_reflection, guid_map);
+        remapInputRefs(entity_json, *m_reflection, guid_map);
+        inputs.emplace_back(e, std::move(entity_json));
     }
     if (source.json.contains("overrides"))
-        applyOverridesToNodes(registry, ent_map, parseOverrides(source.json["overrides"]), *m_reflection);
+        appendOverrides(inputs, ent_map, parseOverrides(source.json["overrides"]), *m_reflection);
+    const auto decoded = ReflectionSerializer::deserializeEntities(registry, inputs, *m_reflection);
+    if (!decoded) { LOG_ENGINE_ERROR("Prefab revert failed: {}", decoded.error); return false; }
     return true;
+    } catch (const std::exception& e) {
+        LOG_ENGINE_ERROR("Prefab revert failed: {}", e.what());
+        return false;
+    } catch (...) {
+        LOG_ENGINE_ERROR("Prefab revert failed with an exception");
+        return false;
+    }
 }
 
 bool PrefabManager::applyOverrides(entt::registry& registry, entt::entity instance_root)

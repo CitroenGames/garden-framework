@@ -24,6 +24,7 @@
 #include <map>
 #include <string>
 #include <type_traits>
+#include <stdexcept>
 
 namespace
 {
@@ -215,7 +216,7 @@ namespace
         entt::registry loaded_registry;
         entt::entity loaded = loaded_registry.create();
         entity_json["components"]["TestComponent"]["mode"] = 1; // legacy import path
-        ReflectionSerializer::deserializeEntity(loaded_registry, loaded, entity_json, reflection);
+        if (!ReflectionSerializer::deserializeEntity(loaded_registry, loaded, entity_json, reflection)) return fail(name, "reflection deserialization failed");
 
         if (!loaded_registry.all_of<TestComponent>(loaded))
             return fail(name, "deserialization did not add reflected component");
@@ -301,7 +302,7 @@ namespace
             {"half_extents", {{"x", 6.0f}, {"y", 2.0f}, {"z", 4.0f}}}
         };
 
-        ReflectionSerializer::deserializeEntity(registry, entity, entity_json, reflection);
+        if (!ReflectionSerializer::deserializeEntity(registry, entity, entity_json, reflection)) return fail(name, "reflection deserialization failed");
 
         auto* water = registry.try_get<WaterComponent>(entity);
         auto* volume = registry.try_get<WaterVolumeComponent>(entity);
@@ -445,7 +446,7 @@ namespace
 
         entt::registry reg2;
         entt::entity e2 = reg2.create();
-        ReflectionSerializer::deserializeEntity(reg2, e2, ej, reflection);
+        if (!ReflectionSerializer::deserializeEntity(reg2, e2, ej, reflection)) return fail(name, "reflection deserialization failed");
         if (!reg2.all_of<VectorComponent>(e2)) return fail(name, "vector component not added");
         const auto& out = reg2.get<VectorComponent>(e2);
         if (!ReflectionPropertyOps::componentPropertiesEqual(*desc, &c, &out)) return fail(name, "equality after round-trip failed");
@@ -468,7 +469,7 @@ namespace
         entt::registry reg3; entt::entity e3 = reg3.create(); reg3.emplace<VectorComponent>(e3);
         nlohmann::json ej3 = ReflectionSerializer::serializeEntity(reg3, e3, reflection);
         entt::registry reg4; entt::entity e4 = reg4.create();
-        ReflectionSerializer::deserializeEntity(reg4, e4, ej3, reflection);
+        if (!ReflectionSerializer::deserializeEntity(reg4, e4, ej3, reflection)) return fail(name, "reflection deserialization failed");
         const auto& out4 = reg4.get<VectorComponent>(e4);
         if (!out4.floats.empty() || !out4.refs.empty() || !out4.strings.empty()) return fail(name, "empty vector round-trip not empty");
 
@@ -541,7 +542,7 @@ namespace
                 ej["components"]["ChildrenComponent"]["children"] = nlohmann::json::array();
 
         entt::registry loaded;
-        ReflectionSerializer::deserializeLevel(loaded, level, reflection);
+        if (!ReflectionSerializer::deserializeLevel(loaded, level, reflection)) return fail(name, "reflection deserialization failed");
         auto find_by_guid = [&](EntityGuid g) -> entt::entity {
             for (auto [e, id] : loaded.view<IdentityComponent>().each()) if (id.guid == g) return e;
             return entt::null;
@@ -610,7 +611,7 @@ namespace
             return fail(name, "first save is missing unique identity GUIDs");
 
         entt::registry loaded;
-        ReflectionSerializer::deserializeLevel(loaded, first_save, reflection);
+        if (!ReflectionSerializer::deserializeLevel(loaded, first_save, reflection)) return fail(name, "reflection deserialization failed");
         const nlohmann::json second_save = ReflectionSerializer::serializeLevel(loaded, reflection);
 
         std::map<std::string, nlohmann::json> second_by_guid;
@@ -687,7 +688,7 @@ namespace
             for (const char* k : {"resources", "blender", "bone_matrices"})
                 if (cj.contains(k)) return fail(name, "animation runtime field serialized");
             entt::registry reg2; auto e2 = reg2.create();
-            ReflectionSerializer::deserializeEntity(reg2, e2, j, reflection);
+            if (!ReflectionSerializer::deserializeEntity(reg2, e2, j, reflection)) return fail(name, "reflection deserialization failed");
             const auto& o = reg2.get<SkeletonComponent>(e2);
             if (o.animation_resource_path != c.animation_resource_path ||
                 o.animation_skin_index != c.animation_skin_index ||
@@ -698,7 +699,7 @@ namespace
             entt::registry legacy_reg; auto legacy_entity = legacy_reg.create();
             auto legacy = j;
             legacy["components"]["SkeletonComponent"]["skeleton_path"] = "assets/legacy.canim";
-            ReflectionSerializer::deserializeEntity(legacy_reg, legacy_entity, legacy, reflection);
+            if (ReflectionSerializer::deserializeEntity(legacy_reg, legacy_entity, legacy, reflection)) return fail(name, "reflection deserialization unexpectedly succeeded");
             if (legacy_reg.any_of<SkeletonComponent>(legacy_entity))
                 return fail(name, "legacy SkeletonComponent fields were not rejected");
         }
@@ -719,7 +720,7 @@ namespace
                 if (cj.contains(k)) return fail(name, "audio runtime field serialized");
             if (cj["group"] != "Music") return fail(name, "audio group not serialized by name");
             entt::registry reg2; auto e2 = reg2.create();
-            ReflectionSerializer::deserializeEntity(reg2, e2, j, reflection);
+            if (!ReflectionSerializer::deserializeEntity(reg2, e2, j, reflection)) return fail(name, "reflection deserialization failed");
             const auto& o = reg2.get<AudioSourceComponent>(e2);
             if (o.clip_path != c.clip_path || !approx(o.volume, 0.5f) || !approx(o.pitch, 1.25f) ||
                 o.enabled || o.group != AudioGroup::Music || o.clip != INVALID_AUDIO_CLIP ||
@@ -736,7 +737,7 @@ namespace
             auto cj = j["components"]["IKComponent"];
             if (cj.size() != 1 || !cj.contains("enabled")) return fail(name, "IK serialized unexpected fields");
             entt::registry reg2; auto e2 = reg2.create();
-            ReflectionSerializer::deserializeEntity(reg2, e2, j, reflection);
+            if (!ReflectionSerializer::deserializeEntity(reg2, e2, j, reflection)) return fail(name, "reflection deserialization failed");
             if (reg2.get<IKComponent>(e2).enabled) return fail(name, "IK enabled mismatch");
         }
         // MeshComponent: exempt from reflection (sidecar-only, see above).
@@ -779,7 +780,7 @@ namespace
                 return fail(name, "migrated EntityRef fields not GUID strings");
 
             entt::registry reg2; auto e2 = reg2.create();
-            ReflectionSerializer::deserializeEntity(reg2, e2, j, reflection);
+            if (!ReflectionSerializer::deserializeEntity(reg2, e2, j, reflection)) return fail(name, "reflection deserialization failed");
             const auto& ogm = reg2.get<GameFramework::GameModeComponent>(e2);
             const auto& ogs = reg2.get<GameFramework::GameStateComponent>(e2);
             const auto& ops = reg2.get<GameFramework::PlayerStateComponent>(e2);
@@ -800,9 +801,59 @@ namespace
         return pass(name);
     }
 
+struct StagingThrowComponent { int value = 0; };
+
+bool testDeserializeFailuresAreAtomic()
+{
+    const std::string name = "reflection failure atomicity";
+    ReflectionRegistry reflection;
+    reflection.reflect<TestComponent>("TestComponent");
+    auto throwing = makeComponentDescriptor<VectorComponent>("ThrowingComponent", "test");
+    throwing.add = [](entt::registry&, entt::entity) { throw std::runtime_error("injected construction failure"); };
+    reflection.registerComponent(std::move(throwing));
+    auto staging_throw = makeComponentDescriptor<StagingThrowComponent>("StagingThrow", "test");
+    staging_throw.construct_default = [](void*) { throw std::runtime_error("injected staging failure"); };
+    reflection.registerComponent(std::move(staging_throw));
+    entt::registry registry;
+    const auto existing = registry.create();
+    registry.emplace<TestComponent>(existing).speed = 4.0f;
+    const auto second = registry.create();
+    const nlohmann::json good = {{"components", {{"TestComponent", {{"speed", 8.0f}}}}}};
+    const nlohmann::json faults[] = {
+        {{"components", {{"Unknown", nlohmann::json::object()}}}},
+        {{"components", {{"TestComponent", {{"speed", "invalid"}}}}}},
+        {{"components", {{"ThrowingComponent", nlohmann::json::object()}}}},
+        {{"components", {{"StagingThrow", nlohmann::json::object()}}}}
+    };
+    for (const auto& fault : faults)
+    {
+        auto entity_fault = good;
+        for (const auto& [component, value] : fault["components"].items())
+            entity_fault["components"][component] = value;
+        if (ReflectionSerializer::deserializeEntity(registry, existing, entity_fault, reflection) ||
+            registry.get<TestComponent>(existing).speed != 4.0f || registry.any_of<VectorComponent>(existing))
+            return fail(name, "entity failure changed existing state");
+        const auto result = ReflectionSerializer::deserializeEntities(registry, {{existing, good}, {second, fault}}, reflection);
+        if (result || result.error.empty() || registry.get<TestComponent>(existing).speed != 4.0f ||
+            registry.any_of<TestComponent, VectorComponent>(second))
+            return fail(name, "cohort failure changed existing state or accepted a fault");
+        const auto level = nlohmann::json{{"entities", nlohmann::json::array({good, fault})}};
+        const auto before = registry.view<entt::entity>().size();
+        if (ReflectionSerializer::deserializeLevel(registry, level, reflection) ||
+            registry.view<entt::entity>().size() != before || registry.get<TestComponent>(existing).speed != 4.0f)
+            return fail(name, "level failure leaked an entity or changed existing state");
+    }
+    const auto* desc = reflection.findByName("TestComponent");
+    auto& component = registry.get<TestComponent>(existing);
+    if (ReflectionSerializer::deserializeComponent(*desc, &component, {{"speed", "bad"}}) || component.speed != 4.0f)
+        return fail(name, "component failure changed existing state");
+    return pass(name);
+}
+
 int main()
 {
     bool ok = true;
+    ok = testDeserializeFailuresAreAtomic() && ok;
     ok = testRegistryAndWidgetResolution() && ok;
     ok = testComponentCopy() && ok;
     ok = testEntitySerializationRoundTrip() && ok;

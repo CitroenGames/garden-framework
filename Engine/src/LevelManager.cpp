@@ -492,12 +492,16 @@ static void deserializeReflectedComponents(ReflectionRegistry* reflection,
                                            entt::entity entity,
                                            const json& components)
 {
-    if (!reflection || !components.is_object() || components.empty())
-        return;
+    if (!components.is_object())
+        throw std::runtime_error("Malformed reflected components");
+    if (components.empty()) return;
+    if (!reflection)
+        throw std::runtime_error("Reflected components require a reflection registry");
 
     json entity_json = json::object();
     entity_json["components"] = components;
-    ReflectionSerializer::deserializeEntity(registry, entity, entity_json, *reflection);
+    const auto result = ReflectionSerializer::deserializeEntity(registry, entity, entity_json, *reflection);
+    if (!result) throw std::runtime_error(result.error);
 }
 
 struct LevelInstantiationPlan
@@ -596,7 +600,10 @@ static bool prepareLevelInstantiation(const LevelData& level_data,
     {
         const json& components = level_data.entities[i].reflected_components;
         if (!components.is_object())
-            continue;
+        {
+            LOG_ENGINE_ERROR("Level instantiation rejected: malformed components for {}", level_data.entities[i].name);
+            return false;
+        }
         auto identity_it = components.find("IdentityComponent");
         if (identity_it == components.end() || identity_it->is_null())
             continue;

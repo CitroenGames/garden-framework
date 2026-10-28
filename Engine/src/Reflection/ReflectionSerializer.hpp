@@ -4,6 +4,14 @@
 #include "ReflectionRegistry.hpp"
 #include <entt/entt.hpp>
 #include "json.hpp"
+#include <string>
+
+struct ReflectionDeserializeResult
+{
+    bool success = true;
+    std::string error;
+    explicit operator bool() const { return success; }
+};
 
 // Serialize/deserialize entities using reflected component metadata.
 // Produces a component-based JSON format that can handle any registered component,
@@ -23,14 +31,20 @@ public:
         const ReflectionRegistry& reflection);
 
     // Deserialize a single entity from JSON, adding components to an existing entity
-    static void deserializeEntity(
+    [[nodiscard]] static ReflectionDeserializeResult deserializeEntity(
         entt::registry& registry,
         entt::entity entity,
         const nlohmann::json& entity_json,
         const ReflectionRegistry& reflection);
 
+    // Atomically apply a cohort of entity payloads.
+    [[nodiscard]] static ReflectionDeserializeResult deserializeEntities(
+        entt::registry& registry,
+        const std::vector<std::pair<entt::entity, nlohmann::json>>& entities,
+        const ReflectionRegistry& reflection);
+
     // Deserialize all entities from a level JSON document
-    static void deserializeLevel(
+    [[nodiscard]] static ReflectionDeserializeResult deserializeLevel(
         entt::registry& registry,
         const nlohmann::json& level_json,
         const ReflectionRegistry& reflection);
@@ -41,7 +55,7 @@ public:
         const void* component);
 
     // Deserialize a single component's properties from JSON
-    static void deserializeComponent(
+    [[nodiscard]] static ReflectionDeserializeResult deserializeComponent(
         const ComponentDescriptor& desc,
         void* component,
         const nlohmann::json& json);

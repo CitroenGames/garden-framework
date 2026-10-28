@@ -4443,7 +4443,7 @@ void EditorApp::pasteEntity()
     IRenderAPI* api = m_app.getRenderAPI();
     if (!api) return;
 
-    m_undo.pushState(buildLevelDataFromECS(), "paste entity");
+    auto paste_undo_state = buildLevelDataFromECS();
 
     const LevelEntity& le = *m_entity_clipboard;
 
@@ -4563,11 +4563,20 @@ void EditorApp::pasteEntity()
         sl.quadratic_attenuation = le.light_quadratic_attenuation;
     }
 
-    if (le.reflected_components.is_object() && !le.reflected_components.empty())
+    if (!le.reflected_components.is_object() || !le.reflected_components.empty())
     {
         nlohmann::json entity_json = nlohmann::json::object();
         entity_json["components"] = le.reflected_components;
-        ReflectionSerializer::deserializeEntity(m_world.registry, entity, entity_json, m_reflection);
+        if (entity_json["components"].is_object())
+            entity_json["components"].erase("IdentityComponent");
+        const auto result = ReflectionSerializer::deserializeEntity(m_world.registry, entity, entity_json, m_reflection);
+        if (!result)
+        {
+            LOG_ENGINE_ERROR("Paste failed: {}", result.error);
+            m_inspector.mesh_path_cache.erase(entity);
+            m_world.registry.destroy(entity);
+            return;
+        }
 
         if (auto* tag = m_world.registry.try_get<TagComponent>(entity))
             tag->name = le.name + " (Pasted)";
@@ -4580,6 +4589,7 @@ void EditorApp::pasteEntity()
     else
         ensureEntityRef(m_world.registry, entity);
 
+    m_undo.pushState(std::move(paste_undo_state), "paste entity");
     m_hierarchy.selected_entity = entity;
     m_state.unsaved_changes = true;
     m_renderer.markBVHDirty();

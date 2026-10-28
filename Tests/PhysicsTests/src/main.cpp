@@ -35,6 +35,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <stdexcept>
 #include <iterator>
 #include <memory>
 #include <string>
@@ -3459,6 +3460,9 @@ static bool testD6LayerRenumberRegression(const fs::path& repo_root)
         CharacterPhysicsService character_physics(w);
         w.initializePhysics();
         LevelManager instance_manager;
+        ReflectionRegistry reflection;
+        registerEngineReflection(reflection);
+        instance_manager.setReflectionRegistry(&reflection);
         std::vector<entt::entity> level_entities;
         if (!instance_manager.instantiateLevel(round_tripped_data, w, &render_api,
                                                nullptr, nullptr, nullptr, false, &level_entities))
@@ -4455,6 +4459,47 @@ static bool testLevelManagerPostCreationRollback()
     return pass(name);
 }
 
+static bool testLevelManagerReflectedFailureRollback()
+{
+    const std::string name = "LevelManager reflected failure rolls back cohort";
+    for (int fault = 0; fault != 3; ++fault)
+    {
+        LevelManager manager;
+        ReflectionRegistry reflection;
+        registerEngineReflection(reflection);
+        if (fault == 2) {
+            auto descriptor = *reflection.findByName("PlayerComponent");
+            descriptor.add = [](entt::registry&, entt::entity) { throw std::runtime_error("injected component construction"); };
+            reflection.registerComponent(std::move(descriptor));
+        }
+        manager.setReflectionRegistry(&reflection);
+        world w;
+        const EntityRef sentinel_ref{EntityGuid{0xAA11, 0xBB11}};
+        auto sentinel = w.restoreScopedEntity(sentinel_ref);
+        const auto old_gravity = w.getGravity();
+        const auto old_delta = w.getFixedDelta();
+        LevelData level;
+        level.metadata.gravity = old_gravity + glm::vec3(1, 2, 3);
+        level.metadata.fixed_delta = old_delta * 2;
+        LevelEntity good;
+        good.reflected_components = {{"PlayerComponent", {{"speed", 4.0f}}}};
+        level.entities.push_back(good);
+        LevelEntity bad;
+        if (fault == 0) bad.reflected_components = {{"UnknownComponent", nlohmann::json::object()}};
+        else if (fault == 1) bad.reflected_components = {{"PlayerComponent", {{"speed", "bad"}}}};
+        else { level.entities.clear(); bad.reflected_components = {{"PlayerComponent", {{"speed", 4.0f}}}}; }
+        level.entities.push_back(bad);
+        entt::entity output = entt::entity{123};
+        std::vector<entt::entity> created{entt::entity{456}};
+        if (manager.instantiateLevel(level, w, nullptr, &output, nullptr, nullptr, false, &created) ||
+            output != entt::entity{123} || created != std::vector<entt::entity>{entt::entity{456}} ||
+            w.getGravity() != old_gravity || w.getFixedDelta() != old_delta ||
+            w.persistedReference(sentinel) != sentinel_ref || w.registry.view<IdentityComponent>().size() != 1)
+            return fail(name, "reflected failure changed world, settings or outputs");
+    }
+    return pass(name);
+}
+
 static bool testLevelManagerScopedRestoreRollback()
 {
     const std::string name = "LevelManager rolls back failed scoped cohort restore";
@@ -4641,6 +4686,7 @@ int main()
     run("LevelManager H-B rejects malformed cohorts before mutation");
     ok = testLevelManagerHBRejectsBeforeRegistryMutation() && ok;
     run("LevelManager rolls back failed scoped cohort restore");
+    ok = testLevelManagerReflectedFailureRollback() && ok;
     ok = testLevelManagerScopedRestoreRollback() && ok;
     ok = testLevelManagerPostCreationRollback() && ok;
     ok = testLevelManagerLargeIdentityCohort() && ok;

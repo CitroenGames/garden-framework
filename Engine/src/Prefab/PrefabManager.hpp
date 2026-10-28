@@ -128,7 +128,8 @@ private:
         const PrefabData& prefab,
         const PrefabInstantiateOptions& options,
         int depth,
-        std::vector<std::string>& source_stack);
+        std::vector<std::string>& source_stack,
+        std::vector<entt::entity>& created);
 
     ReflectionRegistry* m_reflection = nullptr;
     IRenderAPI* m_render_api = nullptr;
