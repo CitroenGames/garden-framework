@@ -93,9 +93,28 @@ inline DroppedWeaponPickupResult tryPickupDroppedWeapon(
 
 // Processes each dropped entity once. A successful first candidate ends that
 // item's search before destruction is deferred, giving one deterministic winner.
+using DroppedWeaponRemovalHandler = void (*)(entt::registry&, entt::entity);
+
+// The server can supply a removal hook to publish a world-item remove before
+// the entity disappears. Standalone gameplay callers retain the direct-destroy
+// default used by the focused lifecycle tests.
+inline void removeDroppedWeapon(
+    entt::registry& registry,
+    entt::entity dropped_item,
+    DroppedWeaponRemovalHandler before_destroy = nullptr)
+{
+    if (!registry.valid(dropped_item))
+        return;
+    if (before_destroy)
+        before_destroy(registry, dropped_item);
+    else
+        registry.destroy(dropped_item);
+}
+
 inline std::vector<DroppedWeaponPickup> processDroppedWeaponPickups(
     entt::registry& registry,
-    float pickup_radius = kDroppedWeaponPickupRadius)
+    float pickup_radius = kDroppedWeaponPickupRadius,
+    DroppedWeaponRemovalHandler before_destroy = nullptr)
 {
     std::vector<DroppedWeaponPickup> pickups;
     auto dropped_view = registry.view<DroppedWeaponComponent, TransformComponent>();
@@ -112,14 +131,15 @@ inline std::vector<DroppedWeaponPickup> processDroppedWeaponPickups(
             }
         }
     }
-    for (const DroppedWeaponPickup& pickup : pickups) {
-        if (registry.valid(pickup.dropped_item))
-            registry.destroy(pickup.dropped_item);
-    }
+    for (const DroppedWeaponPickup& pickup : pickups)
+        removeDroppedWeapon(registry, pickup.dropped_item, before_destroy);
     return pickups;
 }
 
-inline void cleanupDroppedWeapons(entt::registry& registry, float delta_time)
+inline void cleanupDroppedWeapons(
+    entt::registry& registry,
+    float delta_time,
+    DroppedWeaponRemovalHandler before_destroy = nullptr)
 {
     std::vector<entt::entity> expired;
     auto dropped_view = registry.view<DroppedWeaponComponent>();
@@ -132,22 +152,20 @@ inline void cleanupDroppedWeapons(entt::registry& registry, float delta_time)
             dropped.despawn_timer <= 0.0f || !transform || !isDroppedWeaponInWorldBounds(*transform))
             expired.push_back(dropped_item);
     }
-    for (const entt::entity dropped_item : expired) {
-        if (registry.valid(dropped_item))
-            registry.destroy(dropped_item);
-    }
+    for (const entt::entity dropped_item : expired)
+        removeDroppedWeapon(registry, dropped_item, before_destroy);
 }
 
-inline void clearDroppedWeapons(entt::registry& registry)
+inline void clearDroppedWeapons(
+    entt::registry& registry,
+    DroppedWeaponRemovalHandler before_destroy = nullptr)
 {
     std::vector<entt::entity> dropped_items;
     auto dropped_view = registry.view<DroppedWeaponComponent>();
     for (const entt::entity dropped_item : dropped_view)
         dropped_items.push_back(dropped_item);
-    for (const entt::entity dropped_item : dropped_items) {
-        if (registry.valid(dropped_item))
-            registry.destroy(dropped_item);
-    }
+    for (const entt::entity dropped_item : dropped_items)
+        removeDroppedWeapon(registry, dropped_item, before_destroy);
 }
 
 } // namespace FpsLogic

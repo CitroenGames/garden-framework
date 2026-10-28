@@ -8,7 +8,6 @@
 #include "shared/WeaponTypes.hpp"
 #include "shared/FpsGameLogic.hpp"
 #include "shared/FpsCombatFeed.hpp"
-#include "shared/WorldItemLifecycle.hpp"
 #include <vector>
 #include <functional>
 #include "Utils/Log.hpp"
@@ -186,7 +185,6 @@ public:
             auto& h = view.get<FpsHealthComponent>(entity);
             if (h.invulnerable_timer > 0.0f) h.invulnerable_timer -= delta_time;
         }
-        FpsLogic::cleanupDroppedWeapons(game_world.registry, delta_time);
     }
 };
 } // namespace Game

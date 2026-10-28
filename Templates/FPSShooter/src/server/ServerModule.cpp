@@ -22,6 +22,7 @@
 #include "shared/FpsGameLogic.hpp"
 #include "shared/FpsCombatFeed.hpp"
 #include "shared/WorldItemLifecycle.hpp"
+#include "shared/WorldItemReplication.hpp"
 #include "shared/GrenadeEffects.hpp"
 #include "shared/CompetitiveLogic.hpp"
 #include "shared/CompetitiveMapData.hpp"
@@ -152,6 +153,8 @@ static entt::entity findPlayerEntity(world& w, uint16_t client_id); // defined w
 static void sendEconomyState(uint16_t client_id, entt::entity e);
 static void sendAuthoritativeTeamState(uint16_t client_id, Competitive::FpsTeam team);
 static void spawnDroppedWeapon(world& w, const glm::vec3& pos, const FpsLogic::DroppedItem& item, uint16_t by);
+static void removeReplicatedDroppedWeapon(entt::registry& registry, entt::entity dropped_item);
+static void replayWorldItemsToClient(world& w, uint16_t client_id);
 
 using namespace Net;
 
@@ -620,15 +623,114 @@ static WeaponType primaryForClient(uint16_t client_id, uint8_t team_id)
     if (g_game_rules.match.config.mode == FpsLogic::FpsGameMode::Deathmatch && (client_id % 2 == 0)) return WeaponType::SHOTGUN;
     return WeaponType::RIFLE;
 }
+static bool buildWorldItemUpsert(
+    const world& w,
+    entt::entity dropped_item,
+    WorldItemUpsertMessage& out_message)
+{
+    if (!w.registry.valid(dropped_item) ||
+        !w.registry.all_of<TransformComponent, DroppedWeaponComponent, WorldItemReplicationIdComponent>(dropped_item))
+        return false;
+
+    const auto& transform = w.registry.get<TransformComponent>(dropped_item);
+    const auto& dropped = w.registry.get<DroppedWeaponComponent>(dropped_item);
+    const auto& replication_id = w.registry.get<WorldItemReplicationIdComponent>(dropped_item);
+    out_message.world_item_id = replication_id.value;
+    out_message.weapon_type = static_cast<uint8_t>(dropped.weapon_type);
+    out_message.position = transform.position;
+    out_message.yaw = normalizeWorldItemYaw(glm::radians(transform.rotation.y));
+    return isValidWorldItemUpsert(out_message);
+}
+
+static bool sendWorldItemUpsertToClient(world& w, uint16_t client_id, entt::entity dropped_item)
+{
+    const ClientInfo* client = g_server_network.getClientInfo(client_id);
+    if (!client || !client->peer)
+        return false;
+
+    WorldItemUpsertMessage message;
+    if (!buildWorldItemUpsert(w, dropped_item, message))
+        return false;
+
+    BitWriter writer;
+    if (!CombatSerializer::serialize(writer, message))
+        return false;
+    g_server_network.sendReliableToClient(client_id, writer);
+    return true;
+}
+
+static void publishWorldItemToConnectedPeers(world& w, entt::entity dropped_item)
+{
+    for (uint16_t client_id = 1; client_id < g_server_network.getNextClientId(); ++client_id)
+        (void)sendWorldItemUpsertToClient(w, client_id, dropped_item);
+}
+
+static void sendWorldItemRemoveToConnectedPeers(uint32_t world_item_id)
+{
+    WorldItemRemoveMessage message;
+    message.world_item_id = world_item_id;
+    if (!isValidWorldItemRemove(message))
+        return;
+
+    BitWriter writer;
+    if (!CombatSerializer::serialize(writer, message))
+        return;
+    for (uint16_t client_id = 1; client_id < g_server_network.getNextClientId(); ++client_id) {
+        const ClientInfo* client = g_server_network.getClientInfo(client_id);
+        if (client && client->peer)
+            g_server_network.sendReliableToClient(client_id, writer);
+    }
+}
+
+// This is the only server destruction route for published dropped items. It
+// emits the durable remove while the replication ID still exists, then leaves
+// pickup, expiry, bounds, round reset, and teardown semantics unchanged.
+static void removeReplicatedDroppedWeapon(entt::registry& registry, entt::entity dropped_item)
+{
+    if (!registry.valid(dropped_item))
+        return;
+
+    if (registry.all_of<WorldItemReplicationIdComponent>(dropped_item)) {
+        const uint32_t world_item_id = registry.get<WorldItemReplicationIdComponent>(dropped_item).value;
+        sendWorldItemRemoveToConnectedPeers(world_item_id);
+    }
+    registry.destroy(dropped_item);
+}
+
+static void replayWorldItemsToClient(world& w, uint16_t client_id)
+{
+    const ClientInfo* client = g_server_network.getClientInfo(client_id);
+    if (!FpsLogic::isWorldItemReplayEligible(client && client->peer))
+        return;
+
+    for (const entt::entity dropped_item : FpsLogic::collectWorldItemsForReplay(w.registry)) {
+        if (!sendWorldItemUpsertToClient(w, client_id, dropped_item))
+            LOG_ENGINE_WARN("Skipping invalid world-item replay entity for client {}", client_id);
+    }
+}
+
 static void spawnDroppedWeapon(world& w, const glm::vec3& pos, const FpsLogic::DroppedItem& item, uint16_t by)
 {
-    if (static_cast<uint8_t>(item.type) >= static_cast<uint8_t>(WeaponType::COUNT) ||
-        item.type == WeaponType::KNIFE || item.ammo < 0 || item.reserve < 0)
+    if (!isValidWorldItemWeaponType(static_cast<uint8_t>(item.type)) ||
+        !isValidWorldItemPosition(pos) || item.ammo < 0 || item.reserve < 0) {
+        LOG_ENGINE_WARN("Rejected invalid dropped weapon publication for client {}", by);
         return;
-    entt::entity de = w.registry.create();
-    TransformComponent dt; dt.position = pos;
+    }
+
+    const uint32_t world_item_id = FpsLogic::allocateWorldItemReplicationId(w.registry);
+    if (world_item_id == 0) {
+        LOG_ENGINE_ERROR("Dropped weapon publication refused: world-item ID space exhausted");
+        return;
+    }
+
+    const entt::entity de = w.registry.create();
+    TransformComponent dt;
+    dt.position = pos;
     w.registry.emplace<TransformComponent>(de, dt);
     w.registry.emplace<DroppedWeaponComponent>(de, DroppedWeaponComponent{item.type, item.ammo, item.reserve, by, 30.0f});
+    w.registry.emplace<WorldItemReplicationIdComponent>(de, world_item_id);
+    publishWorldItemToConnectedPeers(w, de);
+
     const int32_t bot_index = botIndexForClient(w, by);
     if (bot_index >= 0) {
         LOG_ENGINE_INFO("[BotAcceptance] drop bot={} client={} weapon={} ammo={} reserve={}",
@@ -1378,7 +1480,7 @@ static void competitiveFreezeRespawnAll()
 {
     world* w = g_server_services ? g_server_services->game_world : nullptr;
     if (!w) return;
-    FpsLogic::clearDroppedWeapons(w->registry);
+    FpsLogic::clearDroppedWeapons(w->registry, removeReplicatedDroppedWeapon);
     std::vector<uint16_t> clients;
     auto view = w->registry.view<NetworkedEntity, TeamComponent>();
     for (auto e : view) {
@@ -2166,6 +2268,10 @@ static bool constructPlayerPawnForClient(
         sendAuthoritativeTeamState(client_id, Competitive::teamFromId(team_id));
         sendEconomyState(client_id, player_entity);
     }
+    // Competitive peers replay at admission before team selection. Direct-spawn
+    // modes have no admission phase, so replay after their pawn state is ready.
+    if (!g_competitive)
+        replayWorldItemsToClient(*w, client_id);
     if (g_competitive && g_sessions.contains(client_id)) {
         if (w->registry.get<FpsHealthComponent>(player_entity).alive)
             g_sessions.markSpawned(client_id, Competitive::teamFromId(team_id), g_round_system.state.phase);
@@ -2303,6 +2409,8 @@ GAME_API bool gardenServerInit(EngineServices* services)
 {
     g_server_services = services;
     world* match_world = services->game_world;
+    FpsLogic::clearDroppedWeapons(match_world->registry, removeReplicatedDroppedWeapon);
+    FpsLogic::clearWorldItemReplicationRuntime(match_world->registry);
     const char* mode_env = std::getenv("FPS_GAME_MODE");
     g_mode_composition = FpsLogic::ModeComposition::fromEnvironmentValue(
         mode_env ? std::string_view(mode_env) : std::string_view{});
@@ -2472,6 +2580,7 @@ GAME_API bool gardenServerInit(EngineServices* services)
         if (g_sessions.admit(client_id)) {
             broadcastRoundState();
             sendAuthoritativeTeamState(client_id, Competitive::FpsTeam::None);
+            replayWorldItemsToClient(*g_server_services->game_world, client_id);
             LOG_ENGINE_INFO("Competitive session admitted for client {}; awaiting team selection", client_id);
         }
     });
@@ -2512,9 +2621,10 @@ GAME_API bool gardenServerInit(EngineServices* services)
 
 GAME_API void gardenServerShutdown()
 {
-    g_server_network.shutdown();
     if (g_server_services && g_server_services->game_world) {
         auto& registry = g_server_services->game_world->registry;
+        FpsLogic::clearDroppedWeapons(registry, removeReplicatedDroppedWeapon);
+        FpsLogic::clearWorldItemReplicationRuntime(registry);
         FpsLogic::clearGrenadeEffects(registry);
         Competitive::stopCompetitiveWorldRuntime(registry);
         if (auto* runtime = registry.ctx().find<Bots::BotWorldRuntime>()) {
@@ -2523,6 +2633,7 @@ GAME_API void gardenServerShutdown()
         }
         registry.ctx().erase<AcceptanceMovementTraceRuntime>();
     }
+    g_server_network.shutdown();
     g_server_services = nullptr;
 }
 
@@ -2583,6 +2694,7 @@ GAME_API void gardenServerUpdate(float delta_time)
         if (round_heartbeat >= 1.0f) { round_heartbeat = 0.0f; broadcastRoundState(); }
     }
     g_game_rules.Update(*w, delta_time);
+    FpsLogic::cleanupDroppedWeapons(w->registry, delta_time, removeReplicatedDroppedWeapon);
 
     // Update weapon cooldowns for all players
     auto weapon_view = w->registry.view<WeaponComponent, NetworkedEntity>();
@@ -2615,7 +2727,10 @@ GAME_API void gardenServerUpdate(float delta_time)
     }
 
     if (isWeaponLifecyclePhaseOpen()) {
-        const auto pickups = FpsLogic::processDroppedWeaponPickups(w->registry);
+        const auto pickups = FpsLogic::processDroppedWeaponPickups(
+            w->registry,
+            FpsLogic::kDroppedWeaponPickupRadius,
+            removeReplicatedDroppedWeapon);
         for (const FpsLogic::DroppedWeaponPickup& pickup : pickups) {
             const auto& networked = w->registry.get<NetworkedEntity>(pickup.player);
             const auto& weapon = w->registry.get<WeaponComponent>(pickup.player);
@@ -2637,6 +2752,8 @@ GAME_API void gardenServerOnLevelLoaded()
     // A new level owns a new navigation resource.  This also disables bots
     // until its resolved project asset has been checked, even if the same DLL
     // and registry are reused by a host level transition.
+    FpsLogic::clearDroppedWeapons(game_world.registry, removeReplicatedDroppedWeapon);
+    FpsLogic::clearWorldItemReplicationRuntime(game_world.registry);
     despawnBotsForLevelTransition(game_world);
     resetBotRuntime(game_world);
     // The host hashes Project.default_level and passes the selected artifact.

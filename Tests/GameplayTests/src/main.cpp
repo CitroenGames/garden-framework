@@ -20,6 +20,7 @@
 #include "server/LagCompensation.hpp"
 #include "ClientAcceptanceScript.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -55,6 +56,22 @@ bool pass(const std::string& name)
 {
     std::cout << "[PASS] " << name << std::endl;
     return true;
+}
+
+std::vector<entt::entity> g_recorded_dropped_weapon_removals;
+
+void recordDroppedWeaponRemoval(entt::registry& registry, entt::entity dropped_item)
+{
+    g_recorded_dropped_weapon_removals.push_back(dropped_item);
+    registry.destroy(dropped_item);
+}
+
+size_t recordedDroppedWeaponRemovalCount(entt::entity dropped_item)
+{
+    return static_cast<size_t>(std::count(
+        g_recorded_dropped_weapon_removals.begin(),
+        g_recorded_dropped_weapon_removals.end(),
+        dropped_item));
 }
 
 class ScopedEnvironmentValue
@@ -768,9 +785,15 @@ bool testDroppedWeaponEcsLifecycle()
     registry.emplace<TransformComponent>(dropped, 0.0f, 0.0f, 0.0f);
     registry.emplace<DroppedWeaponComponent>(dropped, WeaponType::SHOTGUN, 8, 32, static_cast<uint16_t>(99), 30.0f);
 
-    const auto pickups = FpsLogic::processDroppedWeaponPickups(registry);
-    if (pickups.size() != 1u || registry.valid(dropped))
-        return fail(name, "simultaneous pickup did not produce one deterministic winner");
+    g_recorded_dropped_weapon_removals.clear();
+    const auto pickups = FpsLogic::processDroppedWeaponPickups(
+        registry,
+        FpsLogic::kDroppedWeaponPickupRadius,
+        recordDroppedWeaponRemoval);
+    if (pickups.size() != 1u || registry.valid(dropped) ||
+        g_recorded_dropped_weapon_removals.size() != 1u ||
+        g_recorded_dropped_weapon_removals.front() != dropped)
+        return fail(name, "simultaneous pickup did not produce one deterministic removal");
     const entt::entity winner = pickups[0].player;
     const entt::entity loser = winner == first ? second : first;
     if (!registry.get<PlayerLoadoutComponent>(winner).slots[(size_t)WeaponSlot::Primary].occupied ||
@@ -812,12 +835,25 @@ bool testDroppedWeaponEcsLifecycle()
     const entt::entity below_floor = registry.create();
     registry.emplace<TransformComponent>(below_floor, 0.0f, FpsLogic::kDroppedWeaponMinimumWorldY - 1.0f, 0.0f);
     registry.emplace<DroppedWeaponComponent>(below_floor, WeaponType::RIFLE, 30, 90, static_cast<uint16_t>(99), 30.0f);
-    FpsLogic::cleanupDroppedWeapons(registry, 0.0f);
-    if (registry.valid(below_floor)) return fail(name, "below-floor item was not cleaned up");
+    const entt::entity expired_drop = registry.create();
+    registry.emplace<TransformComponent>(expired_drop, 0.0f, 0.0f, 0.0f);
+    registry.emplace<DroppedWeaponComponent>(expired_drop, WeaponType::RIFLE, 30, 90, static_cast<uint16_t>(99), 0.0f);
+    g_recorded_dropped_weapon_removals.clear();
+    FpsLogic::cleanupDroppedWeapons(registry, 0.0f, recordDroppedWeaponRemoval);
+    if (registry.valid(below_floor) || registry.valid(expired_drop) ||
+        g_recorded_dropped_weapon_removals.size() != 2u ||
+        recordedDroppedWeaponRemovalCount(below_floor) != 1u ||
+        recordedDroppedWeaponRemovalCount(expired_drop) != 1u)
+        return fail(name, "bounds or expiry cleanup bypassed or duplicated the removal route");
 
-    FpsLogic::clearDroppedWeapons(registry);
-    if (!registry.view<DroppedWeaponComponent>().empty())
-        return fail(name, "round reset left dropped items behind");
+    g_recorded_dropped_weapon_removals.clear();
+    FpsLogic::clearDroppedWeapons(registry, recordDroppedWeaponRemoval);
+    if (!registry.view<DroppedWeaponComponent>().empty() ||
+        g_recorded_dropped_weapon_removals.size() != 3u ||
+        recordedDroppedWeaponRemovalCount(occupied_drop) != 1u ||
+        recordedDroppedWeaponRemovalCount(far_drop) != 1u ||
+        recordedDroppedWeaponRemovalCount(dead_drop) != 1u)
+        return fail(name, "round reset left drops behind or bypassed the exact-once removal route");
     return pass(name);
 }
 bool testWorldItemProtocolAndReplicationIds()
@@ -968,6 +1004,27 @@ bool testWorldItemProtocolAndReplicationIds()
     entt::registry second_world;
     if (FpsLogic::allocateWorldItemReplicationId(second_world) != 1u)
         return fail(name, "new world did not begin a fresh world-item ID epoch");
+
+    auto makeReplayItem = [&](uint32_t id) {
+        const entt::entity item = second_world.create();
+        second_world.emplace<TransformComponent>(item, static_cast<float>(id), 0.0f, 0.0f);
+        second_world.emplace<DroppedWeaponComponent>(item, WeaponType::RIFLE, 30, 90, static_cast<uint16_t>(0), 30.0f);
+        second_world.emplace<WorldItemReplicationIdComponent>(item, id);
+        return item;
+    };
+    const entt::entity replay_id_40 = makeReplayItem(40u);
+    const entt::entity replay_id_7 = makeReplayItem(7u);
+    const entt::entity replay_id_71 = makeReplayItem(71u);
+    const entt::entity incomplete_item = second_world.create();
+    second_world.emplace<WorldItemReplicationIdComponent>(incomplete_item, 3u);
+    const auto replay_items = FpsLogic::collectWorldItemsForReplay(second_world);
+    if (replay_items.size() != 3u || replay_items[0] != replay_id_7 ||
+        replay_items[1] != replay_id_40 || replay_items[2] != replay_id_71)
+        return fail(name, "late-peer replay did not use stable ascending world-item IDs");
+    if (FpsLogic::isWorldItemReplayEligible(false) ||
+        !FpsLogic::isWorldItemReplayEligible(true))
+        return fail(name, "world-item replay peer gate did not distinguish a real peer");
+
     WorldItemReplicationRuntime exhausted;
     exhausted.next_id = (std::numeric_limits<uint32_t>::max)();
     if (exhausted.allocateId() != (std::numeric_limits<uint32_t>::max)() ||

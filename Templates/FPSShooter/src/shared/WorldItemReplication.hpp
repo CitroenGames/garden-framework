@@ -3,8 +3,10 @@
 #include "Components/Components.hpp"
 #include "SharedComponents.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <limits>
+#include <vector>
 
 // The runtime is registry context because it owns per-world allocation state,
 // rather than per-item gameplay data. It intentionally has no transport or
@@ -42,6 +44,31 @@ inline WorldItemReplicationRuntime& worldItemReplicationRuntime(entt::registry& 
 inline uint32_t allocateWorldItemReplicationId(entt::registry& registry)
 {
     return worldItemReplicationRuntime(registry).allocateId();
+}
+
+// World-item messages are delivered only to actual transport peers. Synthetic
+// server bot ownership IDs deliberately have no peer and must never produce a
+// replay or publication send.
+inline bool isWorldItemReplayEligible(bool has_real_peer)
+{
+    return has_real_peer;
+}
+
+// The server owns replay timing, but this collection is shared so its stable
+// ID ordering is explicit and can be covered without a transport fixture.
+inline std::vector<entt::entity> collectWorldItemsForReplay(entt::registry& registry)
+{
+    std::vector<entt::entity> dropped_items;
+    auto item_view = registry.view<TransformComponent, DroppedWeaponComponent,
+                                   WorldItemReplicationIdComponent>();
+    for (const entt::entity dropped_item : item_view)
+        dropped_items.push_back(dropped_item);
+
+    std::sort(dropped_items.begin(), dropped_items.end(), [&registry](entt::entity lhs, entt::entity rhs) {
+        return registry.get<WorldItemReplicationIdComponent>(lhs).value <
+            registry.get<WorldItemReplicationIdComponent>(rhs).value;
+    });
+    return dropped_items;
 }
 
 inline void clearWorldItemReplicationRuntime(entt::registry& registry)
