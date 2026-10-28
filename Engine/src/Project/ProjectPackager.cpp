@@ -241,20 +241,35 @@ private:
     bool published_ = false;
 };
 
+bool isDeclaredAssetPath(const std::string& path, const std::vector<std::string>& roots)
+{
+    return std::any_of(roots.begin(), roots.end(), [&](const std::string& root) {
+        return startsWithAssetDirectory(fs::path(path), fs::path(root));
+    });
+}
+
 bool resolveStaticLogical(const std::string& request, const std::vector<std::string>& roots,
                           const fs::path& project, const fs::path& staged, std::string& out)
 {
     std::string normalized;
     if (!normalizePackageLogicalPath(request, normalized)) return false;
     std::vector<std::string> candidates{normalized};
-    const bool has_root = std::any_of(roots.begin(), roots.end(), [&](const std::string& root) { return startsWithAssetDirectory(fs::path(normalized), fs::path(root)); });
+    const auto containedByDeclaredRoot = [&](const std::string& candidate) {
+        return isDeclaredAssetPath(candidate, roots);
+    };
+    const bool has_root = containedByDeclaredRoot(normalized);
     if (!has_root) for (const std::string& root : roots) candidates.push_back((fs::path(root) / normalized).generic_string());
     for (const std::string& candidate : candidates)
     {
+        // Never allow a structured or level-derived request to pick up a
+        // coincidental project file outside a declared asset root.
+        if (!containedByDeclaredRoot(candidate)) continue;
         std::error_code ec;
         if (fs::exists(project / candidate, ec) || fs::exists(staged / candidate, ec)) { out = candidate; return true; }
     }
-    out = candidates.front();
+    const auto contained = std::find_if(candidates.begin(), candidates.end(), containedByDeclaredRoot);
+    if (contained == candidates.end()) return false;
+    out = *contained;
     return true;
 }
 
@@ -290,7 +305,10 @@ bool addStaticDependency(PackageDependencyGraph& graph, std::vector<std::string>
         CompiledAnimationData animation; AnimationResourceError animation_error;
         if (!CompiledAnimationSerializer::load(animation, staged_file.string(), &animation_error))
         { errors.push_back(pkgError("PKG-CANM-INVALID", artifact + " required by " + owner + ": " + animation_error.code)); return false; }
-        d.format_version = CANM_VERSION;
+        if (animation.header.source_hash == 0 || animation.header.cook_fingerprint == 0)
+        { errors.push_back(pkgError("PKG-CANM-STALE", artifact + " required by " + owner)); return false; }
+        d.format_version = animation.header.version;
+        d.cook_fingerprint = animation.header.cook_fingerprint;
     }
     if (kind == PackageDependencyKind::Collision) d.format_version = Assets::CookedCollisionSerializer::FORMAT_VERSION;
     std::string graph_error;
@@ -359,7 +377,8 @@ void discoverDeclaredStructuredDependencies(
     {
         std::string source;
         if (declared.extractor_id.empty() ||
-            !resolveStaticLogical(declared.logical_path, roots, project, staged, source))
+            !normalizePackageLogicalPath(declared.logical_path, source) ||
+            source != declared.logical_path || !isDeclaredAssetPath(source, roots))
         {
             errors.push_back(pkgError(declared.extractor_id.empty() ? "PKG-EXTRACTOR-INVALID" : "PKG-PATH-INVALID",
                                       declared.logical_path));
@@ -416,9 +435,14 @@ void discoverStaticDependencies(PackageDependencyGraph& graph, std::vector<std::
         return added;
     };
     std::string level;
-    if (!resolveStaticLogical(default_level, roots, project, staged, level))
+    if (!normalizePackageLogicalPath(default_level, level))
     {
         errors.push_back(pkgError("PKG-PATH-INVALID", default_level));
+        return;
+    }
+    if (!isDeclaredAssetPath(level, roots))
+    {
+        errors.push_back(pkgError("PKG-DEPENDENCY-MISSING", level + " required by "));
         return;
     }
     if (!addStaticDependency(graph, errors, project, staged, level,

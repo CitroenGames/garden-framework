@@ -1,4 +1,6 @@
 #include "Assets/AssetManager.hpp"
+#include "Animation/AnimationResourceValidation.hpp"
+#include "Animation/CompiledAnimationSerializer.hpp"
 #include "Navigation/NavMeshSerializer.hpp"
 #include "Project/ProjectPackager.hpp"
 #include "Project/PackageLevelDependencyExtractor.hpp"
@@ -93,6 +95,43 @@ bool writeBytes(const fs::path& path, const std::vector<char>& content)
     if (!out.is_open()) return false;
     out.write(content.data(), static_cast<std::streamsize>(content.size()));
     return out.good();
+}
+
+bool writeCurrentCanimFixture(const fs::path& path)
+{
+    std::error_code directory_error;
+    fs::create_directories(path.parent_path(), directory_error);
+    if (directory_error) return false;
+
+    Bone bone;
+    bone.id = 0;
+    bone.parent_id = -1;
+    bone.name = "root";
+
+    AnimationResourceError error;
+    auto skeleton = AnimationResourceValidation::makeSkeleton({bone}, error);
+    if (!skeleton) return false;
+
+    AnimationClipDefinition definition;
+    definition.name = "idle";
+    definition.duration = 0.0f;
+    BoneAnimation channel;
+    channel.bone_index = 0;
+    channel.position_keys.push_back({0.0f, {0.0f, 0.0f, 0.0f}});
+    definition.channels.push_back(std::move(channel));
+    auto clip = AnimationResourceValidation::makeClip(std::move(definition), 1, error);
+    if (!clip) return false;
+
+    CompiledAnimationData data;
+    data.header.source_hash = 0x8e1d4d8ca5e13b57ull;
+    data.header.cook_fingerprint = 0x4f37c98ab6d201e5ull;
+    CompiledAnimationSkin skin;
+    skin.skin_index = 0;
+    skin.skeleton = std::move(skeleton);
+    skin.clips.push_back(std::move(clip));
+    skin.source_signature = "packager-fixture";
+    data.skins.push_back(std::move(skin));
+    return CompiledAnimationSerializer::save(data, path.string(), &error);
 }
 
 bool readBytes(const fs::path& path, std::vector<char>& content)
@@ -264,17 +303,93 @@ bool testStructuredDependencyExtractorSchemas()
         error.find("PKG-EXTRACTOR-KIND") == std::string::npos)
         return fail(name, "sound-event extractor accepted an untyped root");
 
+    const fs::path canim_path = temp.path / "hero.canim";
+    if (!writeCurrentCanimFixture(canim_path))
+        return fail(name, "could not write current CANM fixture");
+
     root.logical_path = "assets/characters/hero.canim";
     root.kind = PackageDependencyKind::AnimationClip;
     root.extractor_id = std::string(PackageStructuredDependencyExtractors::CookedAnimationV1);
-    if (!PackageStructuredDependencyExtractors::extract(root, "not-opened-by-canm-extractor", children, version, error) ||
-        !children.empty())
-        return fail(name, "cooked-animation declaration was not retained as a leaf root");
+    if (!PackageStructuredDependencyExtractors::extract(root, canim_path.string(), children, version, error) ||
+        !children.empty() || version != CANM_VERSION)
+        return fail(name, "current cooked-animation leaf was not decoded and versioned: " + error);
 
+    CompiledAnimationData stale;
+    AnimationResourceError canim_error;
+    if (!CompiledAnimationSerializer::load(stale, canim_path.string(), &canim_error))
+        return fail(name, "could not reload current CANM fixture: " + canim_error.code);
+    stale.header.cook_fingerprint = 0;
+    if (!CompiledAnimationSerializer::save(stale, canim_path.string(), &canim_error) ||
+        PackageStructuredDependencyExtractors::extract(root, canim_path.string(), children, version, error) ||
+        error.find("PKG-CANM-STALE") == std::string::npos)
+        return fail(name, "stale CANM leaf was accepted: " + error);
+
+    if (!writeCurrentCanimFixture(canim_path))
+        return fail(name, "could not restore current CANM fixture");
+    if (!writeBytes(canim_path, {'C', 'A', 'N', 'M'}) ||
+        PackageStructuredDependencyExtractors::extract(root, canim_path.string(), children, version, error) ||
+        error.find("PKG-CANM-INVALID: assets/characters/hero.canim: CANM_TRUNCATED") == std::string::npos)
+        return fail(name, "corrupt CANM leaf did not fail with its current-contract diagnostic: " + error);
+
+    root.logical_path = "assets/characters/hero.gltf";
+    if (PackageStructuredDependencyExtractors::extract(root, canim_path.string(), children, version, error) ||
+        error.find("PKG-CANM-RETIRED") == std::string::npos)
+        return fail(name, "retired source animation root was accepted: " + error);
+
+    root.logical_path = "assets/audio/events.sound.json";
+    root.kind = PackageDependencyKind::StructuredData;
+    root.extractor_id = std::string(PackageStructuredDependencyExtractors::SoundEventTableV1);
+    if (!writeText(table_path,
+        R"({"schema":"garden.sound-events","version":0,"events":[]})") ||
+        PackageStructuredDependencyExtractors::extract(root, table_path.string(), children, version, error) ||
+        error.find("PKG-SOUND-EVENT-RETIRED") == std::string::npos)
+        return fail(name, "retired sound-event table was accepted: " + error);
+
+    root.logical_path = "assets/audio/../events.sound.json";
+    if (PackageStructuredDependencyExtractors::extract(root, table_path.string(), children, version, error) ||
+        error.find("PKG-EXTRACTOR-PATH") == std::string::npos)
+        return fail(name, "non-canonical structured root was accepted: " + error);
+
+    root.logical_path = "assets/audio/events.sound.json";
     root.extractor_id = "template-unknown-v1";
     if (PackageStructuredDependencyExtractors::extract(root, table_path.string(), children, version, error) ||
         error.find("PKG-EXTRACTOR-MISSING") == std::string::npos)
         return fail(name, "unknown structured extractor did not fail closed");
+    return pass(name);
+}
+
+bool testAnimationReferenceHardCutover()
+{
+    const std::string name = "level animation references require current CANM fields";
+    TempDirectory temp("animation_reference_cutover");
+    const fs::path level_path = temp.path / "assets" / "levels" / "main.level.json";
+    std::vector<PackageDependencyRequest> children;
+    std::string error;
+
+    if (!writeText(level_path,
+        R"({"entities":[{"components":{"SkeletonComponent":{"animation_resource_path":"assets/characters/hero.gltf"}}}]})") ||
+        PackageLevelDependencyExtractor::extract("assets/levels/main.level.json", level_path.string(), children, error) ||
+        error.find("PKG-ANIMATION-RETIRED") == std::string::npos)
+        return fail(name, "source animation reference was accepted: " + error);
+
+    if (!writeText(level_path,
+        R"({"entities":[{"components":{"SkeletonComponent":{"animation_resource_path":"assets/characters/hero.canim","skeleton_path":"assets/characters/hero.gltf"}}}]})") ||
+        PackageLevelDependencyExtractor::extract("assets/levels/main.level.json", level_path.string(), children, error) ||
+        error.find("PKG-ANIMATION-RETIRED") == std::string::npos)
+        return fail(name, "retired SkeletonComponent field was accepted: " + error);
+
+    if (!writeText(level_path,
+        R"({"entities":[{"components":{"AnimationComponent":{"skeleton_path":"assets/characters/hero.gltf"}}}]})") ||
+        PackageLevelDependencyExtractor::extract("assets/levels/main.level.json", level_path.string(), children, error) ||
+        error.find("PKG-ANIMATION-RETIRED") == std::string::npos)
+        return fail(name, "retired AnimationComponent was accepted: " + error);
+
+    if (!writeText(level_path,
+        R"({"entities":[{"components":{"SkeletonComponent":{"animation_resource_path":"assets/characters/hero.canim"}}}]})") ||
+        !PackageLevelDependencyExtractor::extract("assets/levels/main.level.json", level_path.string(), children, error) ||
+        children.size() != 1 || children.front().logical_path != "assets/characters/hero.canim" ||
+        children.front().kind != PackageDependencyKind::AnimationClip)
+        return fail(name, "current CANM reference did not produce a typed edge: " + error);
     return pass(name);
 }
 
@@ -1120,6 +1235,61 @@ bool testDeclaredSoundEventMissingClipNamesOwner()
     return pass(name);
 }
 
+bool testDeclaredCookedAnimationClosure()
+{
+    const std::string name = "packager closes declared current CANM resources";
+    TempDirectory temp("declared_canim_closure");
+    ProjectManager project;
+    if (!createProjectFixture(temp.path / "project", project, {"assets"},
+                              R"({"metadata":{"level_name":"CANM Closure"},"entities":[]})") ||
+        !writeCurrentCanimFixture(temp.path / "project" / "assets" / "characters" / "hero.canim"))
+        return fail(name, "could not create current CANM package fixture");
+
+    PackageConfig config = packageConfig(temp.path / "out");
+    config.structured_dependency_roots.push_back({"assets/characters/hero.canim",
+        PackageDependencyKind::AnimationClip,
+        std::string(PackageStructuredDependencyExtractors::CookedAnimationV1)});
+    LevelManager levels;
+    const PackageResult result = ProjectPackager::packageProject(project, levels, config);
+    if (!result.success) return fail(name, "package failed: " + result.error_message);
+
+    PackageReceipt receipt;
+    std::string error;
+    if (!PackageReceiptSerializer::readStaged((temp.path / "out" / "package").string(), receipt, &error))
+        return fail(name, "could not read receipt: " + error);
+    const auto canim = std::find_if(receipt.dependencies.begin(), receipt.dependencies.end(), [](const PackageDependency& dependency) {
+        return dependency.logical_path == "assets/characters/hero.canim" &&
+               dependency.kind == PackageDependencyKind::AnimationClip;
+    });
+    if (canim == receipt.dependencies.end() || canim->owner_logical_path != "" ||
+        canim->extractor_id != PackageStructuredDependencyExtractors::CookedAnimationV1 ||
+        canim->format_version != CANM_VERSION)
+        return fail(name, "receipt did not preserve current CANM leaf identity");
+    return pass(name);
+}
+
+bool testStructuredRootsStayInsideAssetDirectories()
+{
+    const std::string name = "declared structured roots cannot resolve outside asset directories";
+    TempDirectory temp("structured_root_containment");
+    ProjectManager project;
+    if (!createProjectFixture(temp.path / "project", project, {"assets"},
+                              R"({"metadata":{"level_name":"Root Containment"},"entities":[]})") ||
+        !writeText(temp.path / "project" / "outside" / "events.sound.json",
+            R"({"schema":"garden.sound-events","version":1,"events":[]})"))
+        return fail(name, "could not create containment fixture");
+
+    PackageConfig config = packageConfig(temp.path / "out");
+    config.structured_dependency_roots.push_back({"outside/events.sound.json",
+        PackageDependencyKind::StructuredData,
+        std::string(PackageStructuredDependencyExtractors::SoundEventTableV1)});
+    LevelManager levels;
+    const PackageResult result = ProjectPackager::packageProject(project, levels, config);
+    if (result.success || result.error_message.find("PKG-PATH-INVALID: outside/events.sound.json") == std::string::npos)
+        return fail(name, "structured root outside configured assets was accepted: " + result.error_message);
+    return pass(name);
+}
+
 bool testAssetRootRelativeReferencePassesPackaging()
 {
     const std::string name = "packager resolves level assets relative to the configured asset root";
@@ -1458,6 +1628,7 @@ int main()
     ok &= testSelectedLevelArtifactPathNormalization();
     ok &= testPackageDependencyGraphCanonicalization();
     ok &= testStructuredDependencyExtractorSchemas();
+    ok &= testAnimationReferenceHardCutover();
     ok &= testCookedMeshDependencyExtractorCurrentContract();
     ok &= testLevelDependencyExtractorTypedEdges();
     ok &= testLevelDependencyExtractorNamesMalformedOwner();
@@ -1481,6 +1652,8 @@ int main()
         ok &= testMissingCanmDependencyNamesOwner();
         ok &= testDeclaredSoundEventClosure();
         ok &= testDeclaredSoundEventMissingClipNamesOwner();
+        ok &= testDeclaredCookedAnimationClosure();
+        ok &= testStructuredRootsStayInsideAssetDirectories();
         ok &= testAssetRootRelativeReferencePassesPackaging();
         ok &= testCompiledReferenceRequiresCookedOutput();
         ok &= testCookedMeshClosureNamesMissingLeaf();

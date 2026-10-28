@@ -45,6 +45,13 @@ bool isCookedCollisionPath(const std::string& path)
         });
 }
 
+bool isCurrentCanimPath(const std::string& path)
+{
+    constexpr std::string_view suffix = ".canim";
+    return path.size() >= suffix.size() &&
+           path.compare(path.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
 void appendChild(std::vector<PackageDependencyRequest>& children,
                  std::string logical_path, PackageDependencyKind kind,
                  const std::string& owner)
@@ -184,6 +191,12 @@ bool PackageLevelDependencyExtractor::extract(
                 error = fieldError(level_logical_path, components_location, "an object");
                 return false;
             }
+            if (components->contains("AnimationComponent"))
+            {
+                error = "PKG-ANIMATION-RETIRED: " + level_logical_path + " " +
+                        components_location + ".AnimationComponent is retired; use SkeletonComponent";
+                return false;
+            }
             const auto skeleton = components->find("SkeletonComponent");
             if (skeleton != components->end())
             {
@@ -193,12 +206,27 @@ bool PackageLevelDependencyExtractor::extract(
                     error = fieldError(level_logical_path, skeleton_location, "an object");
                     return false;
                 }
+                for (const char* retired : {"skeleton_path", "clip_names", "resources"})
+                {
+                    if (skeleton->contains(retired))
+                    {
+                        error = "PKG-ANIMATION-RETIRED: " + level_logical_path + " " +
+                                skeleton_location + "." + retired + " is retired";
+                        return false;
+                    }
+                }
                 if (skeleton->contains("animation_resource_path"))
                 {
                     std::string animation_path;
                     if (!readRequiredPath(*skeleton, "animation_resource_path", level_logical_path,
                                           skeleton_location, animation_path, error))
                         return false;
+                    if (!isCurrentCanimPath(animation_path))
+                    {
+                        error = "PKG-ANIMATION-RETIRED: " + level_logical_path + " " +
+                                skeleton_location + ".animation_resource_path must reference current .canim data";
+                        return false;
+                    }
                     appendChild(children, animation_path, PackageDependencyKind::AnimationClip,
                                 level_logical_path);
                 }
