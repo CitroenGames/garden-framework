@@ -14,6 +14,44 @@
 #include <string>
 #include <limits>
 
+bool testWorldTagLookupIdentity()
+{
+    const std::string name = "World_TagLookupIdentity";
+    world game_world;
+    auto& registry = game_world.registry;
+    const entt::entity missing_identity = registry.create();
+    registry.emplace<TagComponent>(missing_identity).name = "bare";
+    const entt::entity null_identity = registry.create();
+    registry.emplace<TagComponent>(null_identity).name = "null";
+    registry.emplace<IdentityComponent>(null_identity, IdentityComponent{});
+    const entt::entity valid = registry.create();
+    registry.emplace<TagComponent>(valid).name = "valid";
+    const EntityGuid guid{1, 2};
+    registry.emplace<IdentityComponent>(valid, IdentityComponent{guid});
+    const entt::entity duplicate = registry.create();
+    registry.emplace<TagComponent>(duplicate).name = "valid";
+
+    const auto count = registry.view<IdentityComponent>().size();
+    const world& read_only_world = game_world;
+    if (!read_only_world.findEntityByTag("").isNull() ||
+        !read_only_world.findEntityByTag("missing").isNull() ||
+        !read_only_world.findEntityByTag("bare").isNull() ||
+        !read_only_world.findEntityByTag("null").isNull() ||
+        !read_only_world.findEntityByTag("valid").isNull() ||
+        registry.view<IdentityComponent>().size() != count ||
+        registry.any_of<IdentityComponent>(missing_identity) ||
+        registry.any_of<IdentityComponent>(duplicate) ||
+        !registry.get<IdentityComponent>(null_identity).guid.isNull())
+        return fail(name, "lookup changed identity storage or accepted an invalid match");
+
+    registry.destroy(duplicate);
+    const EntityRef found = read_only_world.findEntityByTag("valid");
+    if (found.guid != guid || !read_only_world.isEntityValid(found) ||
+        registry.view<IdentityComponent>().size() != count)
+        return fail(name, "lookup did not return the existing valid identity");
+    return pass(name);
+}
+
 
 bool testPlayerMovementTuning()
 {

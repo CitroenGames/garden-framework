@@ -90,8 +90,9 @@ public:
         return resolved != entt::null ? registry.try_get<T>(resolved) : nullptr;
     }
 
-    // Returns the uniquely named entity, or a null handle if absent/ambiguous.
-    EntityRef findEntityByTag(const std::string& name);
+    // Returns the uniquely named entity's existing identity, or a null handle
+    // if the name is empty, absent, ambiguous, or has no non-null identity.
+    EntityRef findEntityByTag(const std::string& name) const;
 
     void setAuthorityGameMode(std::unique_ptr<GameFramework::GameModeBase> game_mode);
     GameFramework::GameModeBase* getAuthorityGameMode();

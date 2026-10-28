@@ -4321,6 +4321,7 @@ int main()
     ok = testCompetitiveCompositionUsesTeamSpawnPolicy() && ok;
     ok = testCompetitiveMapDataSchema() && ok;
     ok = testPlayerMovementInputContract() && ok;
+    ok = testWorldTagLookupIdentity() && ok;
     ok = testPlayerMovementTuning() && ok;
     ok = testCompetitiveRoundFsmFullCycleHalftimeClinch() && ok;
     ok = testCompetitiveOvertime() && ok;

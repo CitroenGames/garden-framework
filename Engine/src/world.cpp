@@ -115,7 +115,7 @@ EntityRef world::createEntity()
     return ensureEntityRef(registry, entity);
 }
 
-EntityRef world::findEntityByTag(const std::string& name)
+EntityRef world::findEntityByTag(const std::string& name) const
 {
     if (name.empty())
         return {};
@@ -128,5 +128,5 @@ EntityRef world::findEntityByTag(const std::string& name)
             return {};
         match = entity;
     }
-    return match == entt::null ? EntityRef{} : ensureEntityRef(registry, match);
+    return entityRefOf(registry, match);
 }
