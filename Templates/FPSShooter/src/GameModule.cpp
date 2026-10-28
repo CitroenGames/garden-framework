@@ -5,6 +5,7 @@
 #include "Application.hpp"
 #include "world.hpp"
 #include "LevelManager.hpp"
+#include "Assets/AssetManager.hpp"
 #include "PlayerController.hpp"
 #include "InputHandler.hpp"
 #include "InputActionSystem.hpp"
@@ -50,6 +51,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <unordered_map>
 #include <utility>
@@ -211,6 +213,90 @@ static uint64_t g_authoritative_pawn_snapshot_generation = 0;
 static uint32_t g_last_authoritative_input_tick = 0;
 static FpsLogic::WorldItemPresentationIndex g_world_item_presentation_entities;
 static world* g_world_item_presentation_world = nullptr;
+// One template-owned mesh is shared by all client-only dropped-item rows. It
+// carries render data only; the server remains the sole world-item authority.
+static std::shared_ptr<mesh> g_world_item_visual_mesh;
+static bool g_world_item_visual_load_attempted = false;
+static constexpr const char* k_world_item_visual_source =
+    "assets/models/items/dropped_weapon_case.gltf";
+
+static void resetWorldItemVisualResource()
+{
+    g_world_item_visual_mesh.reset();
+    g_world_item_visual_load_attempted = false;
+}
+
+static std::shared_ptr<mesh> resolveWorldItemVisualMesh()
+{
+    if (g_world_item_visual_mesh)
+        return g_world_item_visual_mesh;
+    if (g_world_item_visual_load_attempted)
+        return nullptr;
+
+    g_world_item_visual_load_attempted = true;
+    if (!g_services || !g_services->level_manager || !g_services->render_api) {
+        LOG_ENGINE_WARN("WORLD_ITEM_VISUAL unavailable: missing LevelManager or render API");
+        return nullptr;
+    }
+
+    const std::string source_path =
+        Assets::AssetManager::get().resolveAssetPath(k_world_item_visual_source);
+    std::shared_ptr<mesh> loaded_mesh;
+    if (std::filesystem::exists(source_path)) {
+        LevelEntity entity{};
+        entity.name = "dropped_weapon_case_presentation";
+        entity.type = EntityType::Renderable;
+        entity.mesh_path = source_path;
+        entity.culling = true;
+        entity.transparent = false;
+        entity.visible = true;
+        entity.casts_shadow = true;
+        entity.force_lod = -1;
+        loaded_mesh = g_services->level_manager->loadMesh(entity, g_services->render_api);
+    } else {
+        std::filesystem::path cooked_path(source_path);
+        cooked_path.replace_extension(".cmesh");
+        if (!std::filesystem::exists(cooked_path)) {
+            LOG_ENGINE_WARN("WORLD_ITEM_VISUAL unavailable: no source or cooked mesh for {}", source_path);
+            return nullptr;
+        }
+        loaded_mesh = g_services->level_manager->loadCompiledMesh(
+            cooked_path.string(), g_services->render_api);
+    }
+
+    if (!loaded_mesh) {
+        LOG_ENGINE_WARN("WORLD_ITEM_VISUAL unavailable: LevelManager failed to load {}", source_path);
+        return nullptr;
+    }
+    if (!loaded_mesh->is_valid) {
+        LOG_ENGINE_WARN("WORLD_ITEM_VISUAL unavailable: loaded mesh is invalid for {}", source_path);
+        return nullptr;
+    }
+    if (!loaded_mesh->isUploadedToGPU()) {
+        LOG_ENGINE_WARN("WORLD_ITEM_VISUAL unavailable: mesh did not upload for {}", source_path);
+        return nullptr;
+    }
+
+    g_world_item_visual_mesh = std::move(loaded_mesh);
+    LOG_ENGINE_INFO("WORLD_ITEM_VISUAL loaded {}", source_path);
+    return g_world_item_visual_mesh;
+}
+
+static void bindWorldItemVisual(entt::registry& registry, uint32_t world_item_id)
+{
+    const auto entry = g_world_item_presentation_entities.find(world_item_id);
+    if (entry == g_world_item_presentation_entities.end() ||
+        !registry.valid(entry->second) ||
+        !registry.all_of<TransformComponent, DroppedWeaponPresentationComponent>(entry->second)) {
+        return;
+    }
+
+    const std::shared_ptr<mesh> visual_mesh = resolveWorldItemVisualMesh();
+    if (!visual_mesh)
+        return;
+    registry.get_or_emplace<MeshComponent>(entry->second).m_mesh = visual_mesh;
+}
+
 // Acceptance-only receipts mirror successful application to the local
 // presentation index. They never drive gameplay or send a client message.
 static uint64_t g_world_item_receipt_generation = 0;
@@ -529,6 +615,7 @@ GAME_API bool gardenGameInit(EngineServices* services)
     g_authoritative_pawn_snapshot_generation = 0;
     g_last_authoritative_input_tick = 0;
     g_world_item_presentation_entities.clear();
+    resetWorldItemVisualResource();
     clearWorldItemAcceptanceReceipts();
     g_world_item_presentation_world = services->game_world;
     if (!configureFPShooterInput(*services->input_actions))
@@ -619,6 +706,7 @@ GAME_API bool gardenGameInit(EngineServices* services)
                 LOG_ENGINE_WARN("Ignoring invalid WORLD_ITEM_UPSERT id={}", msg.world_item_id);
                 return;
             }
+            bindWorldItemVisual(g_services->game_world->registry, msg.world_item_id);
             g_world_item_upsert_receipts[msg.world_item_id] = ++g_world_item_receipt_generation;
             LOG_ENGINE_INFO(
                 "WORLD_ITEM_UPSERT accepted id={} delivery={} result={} weapon={} pos=({:.2f},{:.2f},{:.2f})",
@@ -809,6 +897,8 @@ GAME_API void gardenGameShutdown()
         g_world_item_presentation_world = nullptr;
         setLocalInputOwner(*g_services->game_world, entt::null);
     }
+    // All presentation rows are gone before releasing their shared render resource.
+    resetWorldItemVisualResource();
     ConVarRegistry::get().saveArchiveCvars("config.cfg");
     AudioSystem::get().shutdown();
     g_network.disconnect("Game closing");
@@ -1205,6 +1295,9 @@ GAME_API void gardenOnLevelLoaded()
             game_world->registry, g_world_item_presentation_entities);
     else
         g_world_item_presentation_entities.clear();
+    // The old rows are clear before the shared visual is released. A later
+    // upsert in this newly loaded level performs one bounded load attempt.
+    resetWorldItemVisualResource();
     clearWorldItemAcceptanceReceipts();
     g_world_item_presentation_world = game_world;
     setLocalInputOwner(*game_world, entt::null);

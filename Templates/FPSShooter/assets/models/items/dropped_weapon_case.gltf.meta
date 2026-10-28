@@ -1,0 +1,50 @@
+{
+  "version": 2,
+  "source": {
+    "path": "dropped_weapon_case.gltf",
+    "hash": 15513587777329145694,
+    "file_size": 2229
+  },
+  "mesh": {
+    "vertex_count": 48,
+    "index_count": 72,
+    "triangle_count": 24,
+    "submesh_count": 1,
+    "aabb_min": [
+      -0.4,
+      0,
+      -0.175
+    ],
+    "aabb_max": [
+      0.4,
+      0.132,
+      0.175
+    ]
+  },
+  "lod": {
+    "enabled": false,
+    "levels": [],
+    "config": {
+      "max_levels": 1,
+      "target_ratios": [
+        1.0
+      ],
+      "error_threshold": 0.05,
+      "lock_borders": false,
+      "allow_attribute_collapse": false,
+      "prune_disconnected": false
+    }
+  },
+  "collision": {
+    "enabled": false,
+    "file": "",
+    "backend": "Jolt",
+    "cook_version": 1,
+    "source_hash": 0,
+    "source_file_size": 0,
+    "jolt_version": 0,
+    "vertices": 0,
+    "triangles": 0
+  },
+  "generated_at": "2026-10-28T00:00:00"
+}

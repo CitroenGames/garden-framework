@@ -1089,6 +1089,22 @@ bool testWorldItemPresentationLifecycle()
         return fail(name, "created presentation entity did not retain the wire pose and type");
     }
 
+    // The module binds its one shared render resource after a successful upsert.
+    // Keep the lifecycle helper renderer-free while proving that a bound mesh
+    // does not alter authority and survives replay updates in place.
+    static vertex visual_vertices[3] = {
+        {0.0f, 0.0f, 0.0f}, {0.1f, 0.0f, 0.0f}, {0.0f, 0.1f, 0.0f}
+    };
+    const auto shared_visual = std::make_shared<mesh>(visual_vertices, 3u);
+    registry.emplace<MeshComponent>(first_entity, MeshComponent{shared_visual});
+    if (!registry.all_of<MeshComponent>(first_entity) ||
+        registry.get<MeshComponent>(first_entity).m_mesh != shared_visual ||
+        registry.all_of<Net::NetworkedEntity>(first_entity) ||
+        registry.all_of<RigidBodyComponent>(first_entity) ||
+        registry.all_of<CharacterControllerComponent>(first_entity)) {
+        return fail(name, "presentation mesh binding changed authority or did not retain its shared resource");
+    }
+
     WorldItemUpsertMessage updated = first;
     updated.weapon_type = static_cast<uint8_t>(WeaponType::AWP);
     updated.position = glm::vec3(-2.0f, 3.0f, 11.0f);
@@ -1103,8 +1119,10 @@ bool testWorldItemPresentationLifecycle()
     const auto& updated_presentation = registry.get<DroppedWeaponPresentationComponent>(first_entity);
     if (!approxVec3(updated_transform.position, updated.position) ||
         !approx(updated_transform.rotation.y, glm::degrees(updated.yaw)) ||
-        updated_presentation.weapon_type != WeaponType::AWP) {
-        return fail(name, "duplicate upsert did not update pose and weapon type");
+        updated_presentation.weapon_type != WeaponType::AWP ||
+        !registry.all_of<MeshComponent>(first_entity) ||
+        registry.get<MeshComponent>(first_entity).m_mesh != shared_visual) {
+        return fail(name, "duplicate upsert changed the shared presentation mesh or did not update pose and type");
     }
 
     WorldItemUpsertMessage second = first;
