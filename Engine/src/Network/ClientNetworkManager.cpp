@@ -233,9 +233,16 @@ void ClientNetworkManager::update(float delta_time)
             // Do not turn elapsed wall time from a stalled frame into credit
             // for an immediate follow-up burst on a zero-delta service pass.
             input_send_timer = 0.0f;
+            const uint32_t budget_before = input_send_budget;
+            const size_t depth_before = queued_input_commands.size();
             --input_send_budget;
             const QueuedInputCommand command = queued_input_commands.front();
             queued_input_commands.pop_front();
+            if (MovementTrace::enabled() && MovementTrace::movementScope())
+                MovementTrace::emit("client_queue_dequeue", "role=client epoch={} input_tick={} buttons={} forward={} right={} queue_before={} queue_after={} budget_before={} budget_after={} server_tick={}",
+                    input_admission_epoch, command.tick, command.input.buttons, command.input.move_forward,
+                    command.input.move_right, depth_before, queued_input_commands.size(), budget_before,
+                    input_send_budget, last_received_server_tick);
 
             // Shift recent inputs history.
             recent_inputs[2] = recent_inputs[1];
@@ -271,7 +278,30 @@ void ClientNetworkManager::update(float delta_time)
             }
             const bool include_view_tick = (negotiated_capability_flags & CAP_VIEW_TICK) != 0;
             NetworkSerializer::serialize(writer, msg, redundant_inputs, redundant_count, include_view_tick);
-            sendUnreliableMessage(writer);
+            const bool trace_packet = MovementTrace::enabled() && MovementTrace::movementScope();
+            static std::atomic<uint64_t> trace_send_counter{0};
+            const uint64_t send_id = trace_packet ? trace_send_counter.fetch_add(1, std::memory_order_relaxed) + 1 : 0;
+            if (trace_packet) {
+                MovementTrace::emit("client_packet_sample", "role=client send_id={} epoch={} wire_index=0 kind=primary input_tick={} buttons={} forward={} right={} view_server_tick={} include_view_tick={}",
+                    send_id, msg.admission_epoch, msg.client_tick, msg.buttons, msg.move_forward, msg.move_right,
+                    msg.view_server_tick, include_view_tick);
+                for (uint8_t i = 0; i < redundant_count; ++i) {
+                    const InputSample& sample = redundant_inputs[i];
+                    MovementTrace::emit("client_packet_sample", "role=client send_id={} epoch={} wire_index={} kind=redundant input_tick={} buttons={} forward={} right={} view_server_tick={} include_view_tick={}",
+                        send_id, msg.admission_epoch, static_cast<unsigned>(i) + 1, sample.tick, sample.buttons,
+                        sample.move_forward, sample.move_right, sample.view_server_tick, include_view_tick);
+                }
+            }
+            const bool queued_for_transport = sendUnreliableMessage(writer);
+            if (trace_packet)
+                MovementTrace::emit("client_packet_send", "role=client send_id={} epoch={} primary_tick={} sample_count={} queued_for_transport={} delivery=unavailable",
+                    send_id, msg.admission_epoch, msg.client_tick, static_cast<unsigned>(redundant_count) + 1, queued_for_transport);
+        } else if (MovementTrace::enabled() && MovementTrace::movementScope()) {
+            const QueuedInputCommand& oldest = queued_input_commands.front();
+            MovementTrace::emit("client_queue_wait", "role=client epoch={} oldest_tick={} oldest_buttons={} queue_depth={} budget={} timer={} interval={} server_tick={} reason={}",
+                input_admission_epoch, oldest.tick, oldest.input.buttons, queued_input_commands.size(), input_send_budget,
+                input_send_timer, INPUT_SEND_INTERVAL, last_received_server_tick,
+                input_send_budget == 0 ? "budget" : "rate_limit");
         }
     }
 
@@ -307,6 +337,10 @@ void ClientNetworkManager::sendInputCommand(const InputState& input)
 void ClientNetworkManager::sendInputCommand(uint32_t command_tick, const InputState& input)
 {
     if (!isConnected() || !input_admission_open || server_peer == nullptr) {
+        if (MovementTrace::enabled() && MovementTrace::movementScope())
+            MovementTrace::emit("client_queue_rejected", "role=client input_tick={} buttons={} epoch={} connected={} admission_open={} peer_present={} queue_depth={}",
+                command_tick, input.buttons, input_admission_epoch, isConnected(), input_admission_open,
+                server_peer != nullptr, queued_input_commands.size());
         return;
     }
 
@@ -321,6 +355,7 @@ void ClientNetworkManager::sendInputCommand(uint32_t command_tick, const InputSt
     command.tick = command_tick;
     command.view_server_tick = currentRenderAnchorTick();
     command.input = input;
+    const size_t depth_before = queued_input_commands.size();
 
     if (queued_input_commands.size() >= MAX_QUEUED_INPUT_COMMANDS) {
         // Input ticks that have not left this client cannot each be applied by
@@ -332,6 +367,10 @@ void ClientNetworkManager::sendInputCommand(uint32_t command_tick, const InputSt
         uint16_t latched_actions = command.input.buttons & INPUT_ACTION_LATCH_MASK;
         uint8_t latest_weapon_select = 0;
         for (const QueuedInputCommand& pending : queued_input_commands) {
+            if (MovementTrace::enabled() && MovementTrace::movementScope())
+                MovementTrace::emit("client_queue_coalesce_input", "role=client epoch={} replacing_tick={} pending_tick={} pending_buttons={} pending_latched={} queue_depth={}",
+                    input_admission_epoch, command.tick, pending.tick, pending.input.buttons,
+                    pending.input.buttons & INPUT_ACTION_LATCH_MASK, depth_before);
             latched_actions |= pending.input.buttons & INPUT_ACTION_LATCH_MASK;
             const uint8_t pending_select = getWeaponSelect(pending.input.buttons);
             if (pending_select != 0)
@@ -342,9 +381,17 @@ void ClientNetworkManager::sendInputCommand(uint32_t command_tick, const InputSt
             latest_weapon_select = requested_select;
         command.input.buttons |= latched_actions;
         command.input.buttons = withWeaponSelect(command.input.buttons, latest_weapon_select);
+        if (MovementTrace::enabled() && MovementTrace::movementScope())
+            MovementTrace::emit("client_queue_coalesce_result", "role=client epoch={} input_tick={} original_buttons={} latched_actions={} result_buttons={} weapon_select={} queue_before={}",
+                input_admission_epoch, command.tick, input.buttons, latched_actions, command.input.buttons,
+                latest_weapon_select, depth_before);
         queued_input_commands.clear();
     }
     queued_input_commands.push_back(command);
+    if (MovementTrace::enabled() && MovementTrace::movementScope())
+        MovementTrace::emit("client_queue_enqueue", "role=client epoch={} input_tick={} original_buttons={} queued_buttons={} forward={} right={} view_server_tick={} queue_before={} queue_after={} budget={}",
+            input_admission_epoch, command.tick, input.buttons, command.input.buttons, command.input.move_forward,
+            command.input.move_right, command.view_server_tick, depth_before, queued_input_commands.size(), input_send_budget);
 }
 
 uint32_t ClientNetworkManager::beginInputCommandTick()

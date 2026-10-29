@@ -71,7 +71,10 @@ namespace MovementTrace
             "action_frame", "client_frame_begin", "client_frame", "client_step_begin",
             "offline_frame_begin", "offline_frame", "offline_suppressed",
             "offline_step_begin", "offline_step", "client_command", "client_prediction",
-            "client_prediction_suppressed", "client_admission", "server_admission",
+            "client_prediction_suppressed", "client_admission", "client_queue_rejected",
+            "client_queue_wait", "client_queue_enqueue", "client_queue_coalesce_input",
+            "client_queue_coalesce_result", "client_queue_dequeue", "client_packet_sample",
+            "client_packet_send", "server_admission",
             "authority_received", "authority_decision", "authority_rejected_state", "authority_step"
         };
         for (const char* candidate : stages)
