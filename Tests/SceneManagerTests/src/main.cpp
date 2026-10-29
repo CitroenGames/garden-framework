@@ -502,23 +502,58 @@ void testShutdownWithPendingTransitionRollback() {
     world game_world;
     SceneManager manager;
     completed(manager.initialize(&game_world, nullptr), name, "initialize failed");
+    const auto query_entity = game_world.createEntity("shutdown-query");
+    check(query_entity.status == ScopedRestoreStatus::Completed &&
+          game_world.add<TransformComponent>(query_entity.entity) == garden::ecs::ComponentStoreResult::Success,
+          name, "could not prepare published query entity");
     FailLifecycleAttempts fault;
     game_world.registry.ctx().emplace<garden::ecs::testing::LifecycleFaultHook>(
         garden::ecs::testing::LifecycleFaultHook{&fault, &failLifecycleAttempts});
 
     const auto pending = manager.transition(level.path.string());
     const auto token = pending.construction.rollback.operation;
-    check(!pending.cleanup_complete && pending.operation_handle.valid() && token.valid(),
+    check(pending.status == SceneStatus::LifecycleFailure && pending.operation == SceneOperation::Transition &&
+          pending.phase == ScenePhase::Rollback && !pending.cleanup_complete &&
+          pending.operation_handle.valid() && token.valid() && pending.lifecycle.operation == token &&
+          pending.lifecycle.kind == LifecycleOperationKind::UnpublishedRollback &&
+          pending.construction.entities.size() == 1,
           name, "transition did not retain pending rollback");
     auto result = manager.shutdown();
     check(result.status == SceneStatus::Busy && !result.cleanup_complete &&
           result.operation_handle == pending.operation_handle && result.lifecycle.operation == token,
           name, "shutdown did not return the pending operation");
+    const auto progress_before = game_world.retirementResult(token);
+    SceneResult refused;
+    size_t query_visits = 0;
+    const auto query_status = game_world.query<TransformComponent>([&](garden::ecs::EntityHandle entity, TransformComponent&) {
+        ++query_visits;
+        check(entity == query_entity.entity, name, "query exposed an unpublished construction member");
+        refused = manager.resume(pending.operation_handle);
+    });
+    const auto progress_after = game_world.retirementResult(token);
+    check(query_status == garden::ecs::ComponentStoreResult::Success && query_visits == 1 &&
+          refused.status == SceneStatus::LifecycleFailure && refused.lifecycle.status == LifecycleStatus::QueryActive &&
+          !refused.cleanup_complete && refused.operation == pending.operation && refused.phase == pending.phase &&
+          refused.scene_id == pending.scene_id && refused.operation_handle == pending.operation_handle &&
+          refused.lifecycle.operation == token && refused.construction.rollback.operation == token &&
+          refused.construction.entities == pending.construction.entities &&
+          refused.construction.status == pending.construction.status &&
+          refused.construction.construction_status == pending.construction.construction_status,
+          name, "active query did not refuse resume while preserving transition ownership");
+    check(progress_before.accepted && progress_after.accepted &&
+          progress_after.operation == token && progress_after.kind == progress_before.kind &&
+          progress_after.status == progress_before.status && progress_after.phase == progress_before.phase &&
+          progress_after.entity == progress_before.entity && progress_after.completed == progress_before.completed,
+          name, "refused resume changed retained lifecycle progress");
     if (result.operation_handle.valid()) result = manager.resume(result.operation_handle);
     check(result.status == SceneStatus::ConstructionFailure && result.cleanup_complete &&
-          result.lifecycle.operation == token &&
+          result.operation_handle == pending.operation_handle && result.lifecycle.operation == token &&
+          result.construction.rollback.operation == token && result.construction.entities == pending.construction.entities &&
           game_world.retirementResult(token).status == LifecycleStatus::UnknownOperation,
           name, "transition rollback was not completed and acknowledged");
+    for (auto handle : pending.construction.entities)
+        check(game_world.classifyEntityHandle(handle) == EntityHandleClassification::RetiredGone,
+              name, "construction member survived rollback retry");
     check(manager.resume(pending.operation_handle).status == SceneStatus::InvalidArgument,
           name, "completed transition was replayed");
     game_world.registry.ctx().erase<garden::ecs::testing::LifecycleFaultHook>();

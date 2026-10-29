@@ -6,9 +6,17 @@
 #include "Events/EngineEvents.hpp"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <exception>
 #include <iostream>
 #include <stdexcept>
+#include <string>
 #include <vector>
+#ifdef _WIN32
+#define NOMINMAX
+#include <Windows.h>
+#endif
 
 struct LifecycleValue { int value = 0; };
 struct ProviderValue { int value = 0; };
@@ -733,10 +741,120 @@ bool resetAndShutdown()
                 "shutdown retires entities and is idempotent");
     return ok;
 }
+
+#ifdef _WIN32
+bool persistentDestructorFault(void*, LifecyclePhase phase) noexcept
+{
+    if (phase != LifecyclePhase::Prepare) return false;
+    std::fputs("destructor-fault-injected\n", stdout);
+    std::fflush(stdout);
+    return true;
 }
 
-int main()
+int destructorFailureChild()
 {
+    std::set_terminate([] {
+        std::fputs("destructor-terminate\n", stdout);
+        std::fflush(stdout);
+        std::_Exit(73);
+    });
+    {
+        world w;
+        const auto entity = createForTest(w).entity;
+        if (!fixture_ok || !w.isEntityValid(entity)) std::_Exit(74);
+        w.registry.ctx().emplace<garden::ecs::testing::LifecycleFaultHook>(
+            garden::ecs::testing::LifecycleFaultHook{nullptr, &persistentDestructorFault});
+        std::fputs("entering-world-destructor\n", stdout);
+        std::fflush(stdout);
+    }
+    return 0;
+}
+
+bool destructorFailsFast()
+{
+    const auto failWindows = [](const char* operation, DWORD error) {
+        std::cerr << "destructor child fixture: " << operation << " failed (error " << error << ")\n";
+        return check(false, "world destructor fails fast on persistent retirement failure");
+    };
+    SECURITY_ATTRIBUTES security{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
+    HANDLE readPipe = nullptr, writePipe = nullptr;
+    if (!CreatePipe(&readPipe, &writePipe, &security, 0))
+        return failWindows("CreatePipe", GetLastError());
+    if (!SetHandleInformation(readPipe, HANDLE_FLAG_INHERIT, 0)) {
+        const DWORD error = GetLastError();
+        CloseHandle(readPipe); CloseHandle(writePipe);
+        return failWindows("SetHandleInformation", error);
+    }
+    std::vector<wchar_t> path(32768);
+    const DWORD length = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
+    if (!length || length >= path.size()) {
+        const DWORD error = GetLastError();
+        CloseHandle(readPipe); CloseHandle(writePipe);
+        return failWindows("GetModuleFileNameW", error);
+    }
+    std::wstring command = L"\"" + std::wstring(path.data(), length) + L"\" --destructor-failure-child";
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    startup.dwFlags = STARTF_USESTDHANDLES;
+    startup.hStdOutput = writePipe;
+    startup.hStdError = writePipe;
+    startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    PROCESS_INFORMATION process{};
+    const BOOL launched = CreateProcessW(path.data(), command.data(), nullptr, nullptr, TRUE,
+                                        CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process);
+    const DWORD launchError = launched ? ERROR_SUCCESS : GetLastError();
+    CloseHandle(writePipe);
+    if (!launched) {
+        CloseHandle(readPipe);
+        return failWindows("CreateProcessW", launchError);
+    }
+    const DWORD wait = WaitForSingleObject(process.hProcess, 20000);
+    if (wait != WAIT_OBJECT_0) {
+        const BOOL terminated = TerminateProcess(process.hProcess, 75);
+        const DWORD terminatedWait = WaitForSingleObject(process.hProcess, 5000);
+        if (!terminated || terminatedWait != WAIT_OBJECT_0) {
+            std::cerr << "destructor child fixture: wait=" << wait << ", TerminateProcess="
+                      << terminated << ", termination wait=" << terminatedWait << '\n';
+            CloseHandle(readPipe);
+            CloseHandle(process.hThread);
+            CloseHandle(process.hProcess);
+            return check(false, "world destructor fails fast on persistent retirement failure");
+        }
+    }
+    DWORD exitCode = 0;
+    const bool gotExitCode = GetExitCodeProcess(process.hProcess, &exitCode) != FALSE;
+    std::string output;
+    char buffer[1024];
+    DWORD available = 0, read = 0;
+    while (PeekNamedPipe(readPipe, nullptr, 0, nullptr, &available, nullptr) && available &&
+           ReadFile(readPipe, buffer, (std::min)(available, static_cast<DWORD>(sizeof(buffer))), &read, nullptr) && read)
+        output.append(buffer, read);
+    CloseHandle(readPipe);
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    // The Windows CRT translates stdout newlines to CRLF when writing to the pipe.
+    for (size_t pos = 0; (pos = output.find("\r\n", pos)) != std::string::npos; ++pos)
+        output.erase(pos, 1);
+    const auto entered = output.find("entering-world-destructor\n");
+    const auto injected = output.find("destructor-fault-injected\n");
+    const auto terminated = output.find("destructor-terminate\n");
+    const bool passed = wait == WAIT_OBJECT_0 && gotExitCode && exitCode == 73 &&
+                        entered != std::string::npos && injected != std::string::npos &&
+                        terminated != std::string::npos && entered < injected && injected < terminated;
+    if (!passed)
+        std::cerr << "destructor child fixture: wait=" << wait << ", got exit code=" << gotExitCode
+                  << ", exit code=" << exitCode << ", output:\n" << output << '\n';
+    return check(passed, "world destructor fails fast on persistent retirement failure");
+}
+#endif
+}
+
+int main(int argc, char** argv)
+{
+#ifdef _WIN32
+    if (argc == 2 && std::string(argv[1]) == "--destructor-failure-child")
+        return destructorFailureChild();
+#endif
     using namespace garden::ecs;
     auto& catalog = ComponentCatalog::instance();
     const auto owner = ComponentOwnerId::engineCore();
@@ -745,7 +863,10 @@ int main()
     ComponentId id{};
     if (catalog.registerComponent(descriptor, id) != ComponentCatalogResult::Success) return 1;
     EventBus::get().sink<EntityDestroyedEvent>().connect<&onDestroyed>();
-    const bool ok = queueAndQuery() & fifoAndObserverRetry() & resetAndShutdown() & rollbackAndCreationEvent() & createdFifoContract() & typedFlushPreservesOtherQueues() & createdCancellationPreservesPublishedEntities() & batchOwnership() & batchFenceAndPartialQueue() & staleQueuedRootRejectsBatch() & singleRootAndHierarchyEffects() & phaseRetryCoverage() & queuedSurvivorIsReparented() & markerlessRollbackToken() & exhaustionBeforeCreation() & providerPinnedDuringRetry() & stagedAllocationFailureRetry();
+    bool ok = queueAndQuery() & fifoAndObserverRetry() & resetAndShutdown() & rollbackAndCreationEvent() & createdFifoContract() & typedFlushPreservesOtherQueues() & createdCancellationPreservesPublishedEntities() & batchOwnership() & batchFenceAndPartialQueue() & staleQueuedRootRejectsBatch() & singleRootAndHierarchyEffects() & phaseRetryCoverage() & queuedSurvivorIsReparented() & markerlessRollbackToken() & exhaustionBeforeCreation() & providerPinnedDuringRetry() & stagedAllocationFailureRetry();
+#ifdef _WIN32
+    ok &= destructorFailsFast();
+#endif
     EventBus::get().sink<EntityDestroyedEvent>().disconnect<&onDestroyed>();
     EventBus::get().clear();
     return ok && fixture_ok ? 0 : 1;

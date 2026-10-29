@@ -794,6 +794,19 @@ namespace
             !session.initialiseClient(nullptr) || !session.notifyClientLevelLoaded() || !session.beginPlaying(false))
             return fail(name, "session did not start");
         const fs::path image = session.loader().getLoadedImagePath();
+        garden::ecs::ComponentDescriptor queryDescriptor{ComponentType<EngineQueryComponent>::key,
+            ComponentOwnerId::engineCore(), sizeof(EngineQueryComponent), alignof(EngineQueryComponent),
+            componentCapabilities<EngineQueryComponent>(), makeComponentOperations<EngineQueryComponent>()};
+        ComponentId queryId{};
+        const auto queryRegistration = ComponentCatalog::instance().registerComponent(queryDescriptor, queryId);
+        if ((queryRegistration != ComponentCatalogResult::Success &&
+             queryRegistration != ComponentCatalogResult::DuplicateKey) ||
+            ComponentCatalog::instance().resolve(queryDescriptor, queryId) != ComponentCatalogResult::Success)
+            return fail(name, "query component registration failed");
+        const auto queryEntity = w.createScopedEntity();
+        if (!settleTestRollback(w, queryEntity.rollback) || queryEntity.status != ScopedRestoreStatus::Completed ||
+            w.add<EngineQueryComponent>(queryEntity.entity, EngineQueryComponent{85}) != ComponentStoreResult::Success)
+            return fail(name, "published query entity creation failed");
         const auto begin = w.beginConstruction();
         guard.transaction = begin.transaction;
         if (begin.status != ConstructionStatus::Completed)
@@ -826,11 +839,29 @@ namespace
             session.stop() || !session.loader().isLoaded() || !fs::exists(image) ||
             recorder.events() != cleaned_events || rollback.operation != token || w.shutdown().cleanupComplete())
             return fail(name, "unacknowledged cleanup did not retain the image without repeating callbacks");
-        if (!w.acknowledgeRetirement(token).cleanupComplete())
+        size_t queryCallbacks = 0;
+        LifecycleResult refusedAck{};
+        bool retainedDuringQuery = false;
+        const auto queryResult = w.query<EngineQueryComponent>([&](EntityHandle entity, EngineQueryComponent& component) {
+            ++queryCallbacks;
+            refusedAck = w.acknowledgeRetirement(token);
+            retainedDuringQuery = entity == queryEntity.entity && component.value == 85 &&
+                refusedAck.status == LifecycleStatus::QueryActive && refusedAck.operation == token &&
+                rollback.operation == token && aborted.captured.size() == 1 &&
+                aborted.captured.front() == staged.captured && !session.stop() &&
+                session.phase() == GameModuleHostSession::Phase::Teardown && session.loader().isLoaded() &&
+                fs::exists(image) && recorder.events() == cleaned_events;
+        });
+        if (queryResult != ComponentStoreResult::Success || queryCallbacks != 1 || !retainedDuringQuery ||
+            rollback.operation != token || !session.loader().isLoaded() || !fs::exists(image))
+            return fail(name, "query-time acknowledgement refusal did not retain host ownership");
+        const auto acknowledged = w.acknowledgeRetirement(token);
+        if (!acknowledged.cleanupComplete() || acknowledged.operation != token ||
+            w.acknowledgeRetirement(token).status != LifecycleStatus::UnknownOperation)
             return fail(name, "rollback acknowledgement failed");
         rollback = {};
         if (!session.stop() || session.loader().isLoaded() || fs::exists(image) ||
-            release_attempts != 3 || recorder.events() != cleaned_events ||
+            release_attempts != 4 || recorder.events() != cleaned_events ||
             std::count(stopped_events.begin(), stopped_events.end(), "client.shutdown") != 1)
             return fail(name, "acknowledged retry did not finish exactly once");
         return pass(name);
