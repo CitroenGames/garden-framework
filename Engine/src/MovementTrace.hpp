@@ -74,7 +74,7 @@ namespace MovementTrace
             "client_prediction_suppressed", "client_admission", "client_queue_rejected",
             "client_queue_wait", "client_queue_enqueue", "client_queue_coalesce_input",
             "client_queue_coalesce_result", "client_queue_dequeue", "client_packet_sample",
-            "client_packet_send", "server_admission",
+            "client_packet_send", "client_rtt", "client_reconciliation", "server_admission",
             "authority_received", "authority_decision", "authority_rejected_state", "authority_step"
         };
         for (const char* candidate : stages)
@@ -106,7 +106,7 @@ namespace MovementTrace
         const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
         if (!manifest_emitted.exchange(true, std::memory_order_relaxed))
-            LOG_ENGINE_INFO("movement_trace schema={} run={} stage=manifest monotonic_ns={} clock=steady_process clock_resolution=unavailable sdl_event_and_step_clock=SDL_GetTicksNS sdl_resolution=unavailable sdl_to_steady_mapping=unavailable client_server_clock_mapping=unavailable cross_process_clock_mapping=unavailable frame_scope=per_stream controller_and_game_frame_ids=independent frame_id_zero=unavailable physical_event_frame=unavailable correction=unavailable replay=unavailable acknowledgement=unavailable stance=unavailable tuning_identity=unavailable view=command_and_authority_radians ground_normal_and_velocity=stage_dependent prior_held_and_timers=offline_only input_tick=stage_dependent fixed_tick=stage_dependent process_identity=external_log_source environment_manifest=external_required scope={} limit={}",
+            LOG_ENGINE_INFO("movement_trace schema={} run={} stage=manifest monotonic_ns={} clock=steady_process clock_resolution=unavailable sdl_event_and_step_clock=SDL_GetTicksNS sdl_resolution=unavailable sdl_to_steady_mapping=unavailable client_server_clock_mapping=unavailable cross_process_clock_mapping=unavailable frame_scope=per_stream controller_and_game_frame_ids=independent frame_id_zero=unavailable physical_event_frame=unavailable correction=mc0_only_client_reconciliation_counter_delta replay=mc0_only_client_replayed_counter_delta acknowledgement=mc0_only_last_processed_cursor_not_proof_of_movement rtt=mc0_only_client_ping_pong_round_trip_when_pong_is_handled stance=unavailable tuning_identity=unavailable view=command_and_authority_radians ground_normal_and_velocity=stage_dependent prior_held_and_timers=offline_only input_tick=stage_dependent fixed_tick=stage_dependent process_identity=external_log_source environment_manifest=external_required scope={} limit={}",
                             schema, runId(), ns, movementScope() ? "mc0" : admissionScope() ? "admission" : "default",
                             movementScope() ? 1000000u : admissionScope() ? 100000u : record_limit);
         const uint32_t limit = movementScope() ? 1000000u : admissionScope() ? 100000u : record_limit;

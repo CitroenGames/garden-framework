@@ -921,6 +921,9 @@ void ClientNetworkManager::handlePong(BitReader& reader)
     // Calculate RTT
     uint32_t current_time = SDL_GetTicks();
     stats.ping_ms = static_cast<float>(current_time - msg.timestamp);
+    if (MovementTrace::enabled() && MovementTrace::movementScope())
+        MovementTrace::emit("client_rtt", "role=client rtt_ms={} ping_timestamp_ms={} pong_handler_timestamp_ms={} timestamp_clock=client_SDL_GetTicks_u32 timestamp_origin=before_ping_serialization echo=server arithmetic=uint32_modulo pong_match_validation=none measurement=ping_pong_round_trip",
+            stats.ping_ms, msg.timestamp, current_time);
     LOG_ENGINE_TRACE("RTT: {0}ms", stats.ping_ms);
 }
 

@@ -619,6 +619,22 @@ static void runFixedClientInputStep(world& game_world,
             g_authoritative_pawn_position = server_state.position;
             ++g_authoritative_pawn_snapshot_generation;
             g_last_authoritative_input_tick = server_tick;
+            // This update carries the server's last-processed input tick, but
+            // not the snapshot server tick; partial snapshot fields may be retained.
+            const bool trace_reconciliation = MovementTrace::enabled() && MovementTrace::movementScope();
+            Net::PredictionDiagnostics trace_before{};
+            bool trace_before_valid = false;
+            bool trace_history_match = false;
+            MovementState trace_comparison = result;
+            if (trace_reconciliation) {
+                trace_before_valid = Net::PredictionSystem::getDiagnostics(game_world, prediction_pawn, trace_before);
+                const auto* history = Net::PredictionSystem::getInputHistory(game_world, prediction_pawn);
+                const auto* entry = history ? history->get(server_tick) : nullptr;
+                if (entry) {
+                    trace_history_match = true;
+                    trace_comparison = entry->predicted_state;
+                }
+            }
             Net::PredictionReplayAdapter replay_adapter;
             if (character_physics.hasController(prediction_pawn)) {
                 replay_adapter.restore_authoritative = [](world& replay_world, EntityRef pawn,
@@ -643,8 +659,34 @@ static void runFixedClientInputStep(world& game_world,
                     return SharedMovement::simulate(input, state, move_config);
                 };
             }
-            (void)Net::PredictionSystem::reconcile(
+            const auto reconcile_result = Net::PredictionSystem::reconcile(
                 game_world, prediction_pawn, server_state, server_tick, replay_adapter);
+            if (trace_reconciliation) {
+                Net::PredictionDiagnostics trace_after{};
+                const bool trace_after_valid = Net::PredictionSystem::getDiagnostics(game_world, prediction_pawn, trace_after);
+                MovementState trace_post{};
+                const bool trace_post_valid = Net::PredictionSystem::getMovementState(game_world, prediction_pawn, trace_post);
+                const char* result_name = reconcile_result == Net::PredictionReconcileResult::Applied ? "applied" :
+                    reconcile_result == Net::PredictionReconcileResult::IgnoredStale ? "ignored_stale" : "rejected";
+                // A rejected replay may still have advanced the replay counter partially.
+                const bool counters_valid = trace_before_valid && trace_after_valid;
+                const uint64_t corrections = counters_valid ? trace_after.correction_count - trace_before.correction_count : 0;
+                const uint64_t replayed = counters_valid ? trace_after.replayed_input_count - trace_before.replayed_input_count : 0;
+                const uint64_t replay_failures = counters_valid ? trace_after.replay_failure_count - trace_before.replay_failure_count : 0;
+                const char* decision = !counters_valid ? "unavailable" : corrections ? "corrected" :
+                    reconcile_result == Net::PredictionReconcileResult::Applied ? "no_correction" : "not_applied";
+                MovementTrace::emit("client_reconciliation", "role=client frame_scope=game_update frame_id={} frame_step={} input_tick={} acknowledged_input_tick={} acknowledgement_semantics=last_processed_cursor_not_proof_of_movement snapshot_server_tick=unavailable receipt=authoritative_update_pop snapshot_fields=possibly_retained auth_pos={},{},{} auth_vel={},{},{} auth_grounded={} comparison_source={} comparison_pos={},{},{} comparison_vel={},{},{} comparison_grounded={} candidate_position_error={} result={} correction_decision={} diagnostics_valid={} history_before={} history_after={} replayed_steps={} replay_failures={} post_state_valid={} post_state_source=ecs_movement_components post_pos={},{},{} post_vel={},{},{} post_grounded={} controller_state_after=unavailable visual_offset=unavailable",
+                    trace_frame_id, trace_step, command_tick, server_tick,
+                    server_state.position.x, server_state.position.y, server_state.position.z,
+                    server_state.velocity.x, server_state.velocity.y, server_state.velocity.z, server_state.grounded,
+                    trace_history_match ? "acknowledged_history" : "current_pose_fallback",
+                    trace_comparison.position.x, trace_comparison.position.y, trace_comparison.position.z,
+                    trace_comparison.velocity.x, trace_comparison.velocity.y, trace_comparison.velocity.z, trace_comparison.grounded,
+                    glm::distance(server_state.position, trace_comparison.position), result_name, decision, counters_valid,
+                    trace_before.input_history_size, trace_after.input_history_size, replayed, replay_failures, trace_post_valid,
+                    trace_post.position.x, trace_post.position.y, trace_post.position.z,
+                    trace_post.velocity.x, trace_post.velocity.y, trace_post.velocity.z, trace_post.grounded);
+            }
         }
     }
     else
