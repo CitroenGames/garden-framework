@@ -8,6 +8,7 @@
 #include <vector>
 
 namespace garden::ecs {
+namespace testing { struct ComponentStoreTestAccess; }
 
 // Each component owner specializes this trait in the shared type declaration.
 // As with catalog registration, matching keys cannot prove C++ ABI compatibility.
@@ -63,6 +64,10 @@ public:
     void clear() noexcept;
 
 private:
+    friend struct testing::ComponentStoreTestAccess;
+    // Fixture-only switch; the next eligible value allocation on this thread fails.
+    static void failNextValueAllocationForTest() noexcept;
+    static void clearValueAllocationFailureForTest() noexcept;
     using Constructor = bool (*)(void*, void*) noexcept;
     ComponentStoreResult addErased(ComponentId, ComponentKey, ComponentEntityKey, size_t, size_t,
         Constructor, void*) noexcept;

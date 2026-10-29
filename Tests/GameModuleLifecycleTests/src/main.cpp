@@ -624,6 +624,79 @@ namespace
         return pass(name);
     }
 
+    bool failStagedProviderCleanupOnce(void* context, LifecyclePhase phase) noexcept
+    {
+        auto& armed = *static_cast<bool*>(context);
+        if (armed && phase == LifecyclePhase::Components) { armed = false; return true; }
+        return false;
+    }
+
+    bool testStagedModuleComponentRollback()
+    {
+        using namespace garden::ecs;
+        const std::string name = "GameModuleLifecycle_StagedModuleComponentRollback";
+        ScopedRecorder recorder("ecs_staged_rollback");
+        GameModuleLoader provider;
+        if (!provider.load(fixturePath("ecs_provider").string()) ||
+            !provider.registerEcsComponents() || !provider.isComponentProvider())
+            return fail(name, "provider load or registration failed");
+        const fs::path image = provider.getLoadedImagePath();
+        {
+            world w;
+            bool armed = false;
+            struct RollbackGuard {
+                world& owner;
+                bool& armed;
+                ConstructionHandle transaction{};
+                LifecycleResult rollback{};
+                ~RollbackGuard() {
+                    armed = false;
+                    if (transaction.valid()) rollback = owner.abortConstruction(transaction).rollback;
+                    if (rollback.operation.valid()) (void)settleTestRollback(owner, rollback);
+                }
+            } guard{w, armed};
+            const auto begin = w.beginConstruction();
+            guard.transaction = begin.transaction;
+            if (begin.status != ConstructionStatus::Completed)
+                return fail(name, "construction did not begin");
+            const auto staged = w.createStagedEntity(begin.transaction);
+            if (staged.status != ConstructionStatus::Completed)
+                return fail(name, "staging failed");
+            const auto added = w.add<ModuleFixtureComponent>(begin.transaction, staged.entity);
+            if (added.transaction_status != ConstructionStatus::Completed ||
+                added.component_status != ComponentStoreResult::Success)
+                return fail(name, "module component staging failed");
+            if (provider.unload() || !provider.isLoaded() || !fs::exists(image) || !recorder.events().empty())
+                return fail(name, "staged component did not pin its provider");
+
+            armed = true;
+            w.registry.ctx().emplace<testing::LifecycleFaultHook>(testing::LifecycleFaultHook{&armed, &failStagedProviderCleanupOnce});
+            const auto aborted = w.abortConstruction(begin.transaction);
+            if (aborted.status == ConstructionStatus::Completed || aborted.rollback.operation.valid())
+                guard.transaction = {};
+            guard.rollback = aborted.rollback;
+            if (aborted.status != ConstructionStatus::Completed || aborted.rollback.status != LifecycleStatus::Partial ||
+                aborted.rollback.phase != LifecyclePhase::Components || !aborted.rollback.operation.valid() ||
+                aborted.captured.size() != 1 || aborted.captured.front() != staged.captured ||
+                provider.unload() || !provider.isLoaded() || !fs::exists(image) || !recorder.events().empty())
+                return fail(name, "partial rollback did not retain the component and provider");
+            guard.rollback = w.resumeRetirement(aborted.rollback.operation);
+            if (!guard.rollback.cleanupComplete() || !provider.isLoaded() || !fs::exists(image) ||
+                !equals(recorder.events(), {"ecs.component.destroy"}) ||
+                aborted.captured.size() != 1 || aborted.captured.front() != staged.captured)
+                return fail(name, "retry did not destroy the component once while its image was loaded");
+            const auto acknowledged = w.acknowledgeRetirement(aborted.rollback.operation);
+            if (acknowledged.cleanupComplete()) guard.rollback = {};
+            if (!acknowledged.cleanupComplete() || !provider.isLoaded() || !fs::exists(image) ||
+                !equals(recorder.events(), {"ecs.component.destroy"}))
+                return fail(name, "rollback acknowledgement lost the loaded provider or repeated destruction");
+        }
+        if (!provider.unload() || provider.isLoaded() || fs::exists(image) ||
+            !equals(recorder.events(), {"ecs.component.destroy"}))
+            return fail(name, "provider did not unload after acknowledged cleanup");
+        return pass(name);
+    }
+
     bool testStoredModuleComponentRetirement()
     {
         using namespace garden::ecs;
@@ -1285,6 +1358,7 @@ int main()
     ok = testContentIdentity() && ok;
     ok = testModuleComponentRegistration() && ok;
     ok = testCrossDllMixedQuery() && ok;
+    ok = testStagedModuleComponentRollback() && ok;
     ok = testStoredModuleComponentRetirement() && ok;
     ok = testModuleComponentBatchFailures() && ok;
     ok = testProviderRetirement() && ok;

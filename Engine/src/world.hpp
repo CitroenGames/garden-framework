@@ -232,6 +232,23 @@ public:
 
     ~world();
 
+    // A join is owner-thread-only and must be destroyed before its world. It
+    // shares the supplied transaction; it is neither a transaction nor a savepoint.
+    class ENGINE_API ConstructionJoinScope {
+    public:
+        ~ConstructionJoinScope() noexcept;
+        ConstructionJoinScope(ConstructionJoinScope&&) noexcept;
+        ConstructionJoinScope& operator=(ConstructionJoinScope&&) = delete;
+        ConstructionJoinScope(const ConstructionJoinScope&) = delete;
+        ConstructionJoinScope& operator=(const ConstructionJoinScope&) = delete;
+        ConstructionStatus status() const noexcept { return status_; }
+    private:
+        friend class world;
+        ConstructionJoinScope(world&, ConstructionHandle) noexcept;
+        world* owner_ = nullptr;
+        ConstructionStatus status_ = ConstructionStatus::InvalidInput;
+    };
+    ConstructionJoinScope joinConstruction(ConstructionHandle) noexcept;
     ConstructionBeginResult beginConstruction() noexcept;
     StagedEntityResult createStagedEntity(ConstructionHandle, std::string_view tag = {});
     StagedEntityResult restoreStagedEntity(ConstructionHandle, EntityRef, std::string_view tag = {});

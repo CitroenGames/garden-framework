@@ -42,11 +42,13 @@ int failures = 0;
 world* reentrantWorld = nullptr;
 ConstructionHandle reentrantHandle{};
 ConstructionStatus reentrantStatus = ConstructionStatus::Completed;
+ConstructionStatus reentrantJoinStatus = ConstructionStatus::Completed;
 bool reentrantCapturesEmpty = false;
 void probeReentrantCommit(entt::registry&, entt::entity) {
     const auto result = reentrantWorld->commitConstruction(reentrantHandle);
     reentrantStatus = result.status;
     reentrantCapturesEmpty = result.captured.empty() && result.entities.empty();
+    reentrantJoinStatus = reentrantWorld->joinConstruction(reentrantHandle).status();
 }
 void corruptStagedIdentity(entt::registry& registry, entt::entity entity) {
     registry.get<IdentityComponent>(entity).guid = {};
@@ -673,11 +675,31 @@ void stagedConstruction(ComponentOwnerId owner) {
     check(threadStatus == ConstructionStatus::WrongThread, "wrong thread rejected");
     const auto first = w.createStagedEntity(begin.transaction, "hidden");
     const EntityRef saved{generateEntityGuid()};
-    const auto second = w.restoreStagedEntity(begin.transaction, saved);
+    StagedEntityResult second{};
+    {
+        auto join = w.joinConstruction(begin.transaction);
+        auto moved = std::move(join);
+        auto nested = w.joinConstruction(begin.transaction);
+        second = w.restoreStagedEntity(begin.transaction, saved);
+        const auto commit = w.commitConstruction(begin.transaction);
+        const auto abort = w.abortConstruction(begin.transaction);
+        check(moved.status() == ConstructionStatus::Completed && join.status() == ConstructionStatus::InvalidInput &&
+              nested.status() == ConstructionStatus::Completed && w.beginConstruction().status == ConstructionStatus::Conflict &&
+              commit.status == ConstructionStatus::Conflict && commit.entities.empty() && commit.captured.empty() &&
+              abort.status == ConstructionStatus::Conflict && abort.captured.empty() && !abort.rollback.operation.valid(),
+              "nested joins share transaction and reject independent begin and terminal operations");
+    }
     check(first.status == ConstructionStatus::Completed && second.status == ConstructionStatus::Completed &&
           w.restoreStagedEntity(begin.transaction, saved).status == ConstructionStatus::Conflict,
           "stage fresh and restored identities and reserve duplicate");
     const auto otherTx = other.beginConstruction();
+    check(w.joinConstruction(otherTx.transaction).status() == ConstructionStatus::WrongWorld &&
+          w.joinConstruction(ConstructionHandle{}).status() == ConstructionStatus::InvalidInput,
+          "join validates foreign and invalid transaction");
+    ConstructionStatus threadJoin = ConstructionStatus::Completed;
+    std::thread wrongJoinThread([&] { threadJoin = w.joinConstruction(begin.transaction).status(); });
+    wrongJoinThread.join();
+    check(threadJoin == ConstructionStatus::WrongThread, "join rejects wrong thread");
     const auto foreignCommit = w.commitConstruction(otherTx.transaction);
     ConstructionCommitResult wrongThreadCommit{};
     std::thread wrongCommitThread([&] { wrongThreadCommit = w.commitConstruction(begin.transaction); });
@@ -703,18 +725,20 @@ void stagedConstruction(ComponentOwnerId owner) {
           w.has<QueryValue>(otherTx.transaction, first.entity, invalidHas).transaction_status != ConstructionStatus::Completed && !invalidHas,
           "foreign capabilities clear lookup outputs");
     ConstructionStatus queryStatus = ConstructionStatus::Completed;
+    ConstructionStatus queryJoinStatus = ConstructionStatus::Completed;
     bool queryCapturesEmpty = false;
     w.query<TransformComponent>([&](EntityHandle, TransformComponent&) {
         const auto rejected = w.commitConstruction(begin.transaction);
         queryStatus = rejected.status; queryCapturesEmpty = rejected.captured.empty();
+        queryJoinStatus = w.joinConstruction(begin.transaction).status();
     });
-    check(queryStatus == ConstructionStatus::QueryActive && queryCapturesEmpty, "active query commit does not expose captures");
+    check(queryStatus == ConstructionStatus::QueryActive && queryCapturesEmpty && queryJoinStatus == ConstructionStatus::QueryActive, "active query rejects commit and join without exposing captures");
     bool hasValue = false;
     reentrantWorld = &w; reentrantHandle = begin.transaction;
     w.registry.on_construct<TransformComponent>().connect<&probeReentrantCommit>();
     const auto added = w.add<TransformComponent>(begin.transaction, first.entity);
     w.registry.on_construct<TransformComponent>().disconnect<&probeReentrantCommit>();
-    check(reentrantStatus == ConstructionStatus::Reentrant && reentrantCapturesEmpty,
+    check(reentrantStatus == ConstructionStatus::Reentrant && reentrantJoinStatus == ConstructionStatus::Reentrant && reentrantCapturesEmpty,
           "reentrant commit does not expose captures");
     const auto has = w.has<TransformComponent>(begin.transaction, first.entity, hasValue);
     TransformComponent* value = nullptr;
@@ -740,6 +764,8 @@ void stagedConstruction(ComponentOwnerId owner) {
           committed.entities[0] == first.captured && committed.entities[1] == second.captured &&
           w.isEntityValid(first.captured) && w.isEntityValid(second.captured), "commit publishes ordered cohort");
     check(w.constructionStatus(begin.transaction) == ConstructionStatus::StaleTransaction, "committed token stale");
+    check(w.joinConstruction(begin.transaction).status() == ConstructionStatus::StaleTransaction,
+          "join rejects stale transaction");
     const auto next = w.beginConstruction();
     const auto abandoned = w.createStagedEntity(next.transaction);
     const auto staleCommit = w.commitConstruction(begin.transaction);
@@ -777,9 +803,20 @@ void stagedConstruction(ComponentOwnerId owner) {
     TransformComponent* staleOut = reinterpret_cast<TransformComponent*>(1);
     check(w.get<TransformComponent>(poisoned.transaction, first.entity, staleOut).transaction_status == ConstructionStatus::Conflict && !staleOut,
           "stale member capability cannot access later transaction");
-    w.registry.on_construct<TransformComponent>().connect<&corruptStagedIdentity>();
-    const auto poisonedAdd = w.add<TransformComponent>(poisoned.transaction, victim.entity);
-    w.registry.on_construct<TransformComponent>().disconnect<&corruptStagedIdentity>();
+    ConstructionComponentResult poisonedAdd{};
+    {
+        auto join = w.joinConstruction(poisoned.transaction);
+        w.registry.on_construct<TransformComponent>().connect<&corruptStagedIdentity>();
+        poisonedAdd = w.add<TransformComponent>(poisoned.transaction, victim.entity);
+        w.registry.on_construct<TransformComponent>().disconnect<&corruptStagedIdentity>();
+        const auto innerCommit = w.commitConstruction(poisoned.transaction);
+        const auto innerAbort = w.abortConstruction(poisoned.transaction);
+        check(join.status() == ConstructionStatus::Completed &&
+              w.constructionStatus(poisoned.transaction) == ConstructionStatus::TransactionFailed &&
+              innerCommit.status == ConstructionStatus::Conflict && innerCommit.captured.empty() &&
+              innerAbort.status == ConstructionStatus::Conflict && innerAbort.captured.empty(),
+              "joined failure propagates and inner terminal operations expose no captures");
+    }
     const auto poisonedCommit = w.commitConstruction(poisoned.transaction);
     check(poisonedAdd.transaction_status == ConstructionStatus::TransactionFailed &&
           poisonedCommit.status == ConstructionStatus::TransactionFailed && poisonedCommit.captured.size() == 1 &&

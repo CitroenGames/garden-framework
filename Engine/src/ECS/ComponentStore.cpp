@@ -7,6 +7,7 @@
 
 namespace garden::ecs {
 namespace {
+thread_local bool failNextValueAllocation = false;
 using Key = std::tuple<uint32_t, uint32_t, uint32_t>;
 Key key(ComponentId id, ComponentEntityKey entity) { return {id.slot, id.generation, entity.slot}; }
 bool valid(ComponentEntityKey entity) { return entity.slot != UINT32_MAX && entity.generation != 0; }
@@ -34,6 +35,8 @@ struct ComponentStore::Impl {
 
 ComponentStore::ComponentStore() : m_impl(new Impl) {}
 ComponentStore::~ComponentStore() { delete m_impl; }
+void ComponentStore::failNextValueAllocationForTest() noexcept { failNextValueAllocation = true; }
+void ComponentStore::clearValueAllocationFailureForTest() noexcept { failNextValueAllocation = false; }
 
 ComponentStoreResult ComponentStore::addErased(ComponentId id, ComponentKey expectedKey, ComponentEntityKey entity,
     size_t size, size_t alignment, Constructor construct, void* context) noexcept {
@@ -50,6 +53,10 @@ ComponentStoreResult ComponentStore::addErased(ComponentId id, ComponentKey expe
     auto existing = m_impl->values.find(key(id, entity));
     if (existing != m_impl->values.end())
         return existing->second->generation == entity.generation ? ComponentStoreResult::Duplicate : ComponentStoreResult::StaleEntity;
+    if (failNextValueAllocation) {
+        failNextValueAllocation = false;
+        return ComponentStoreResult::ResourceExhausted;
+    }
     try {
         auto value = std::make_unique<Impl::Value>();
         value->lease = std::move(lease);

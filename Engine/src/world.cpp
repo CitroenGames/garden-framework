@@ -64,6 +64,7 @@ struct world::ConstructionState {
     struct Member { EntityRef reference; garden::ecs::EntityHandle handle; std::string tag; bool fresh; };
     std::thread::id owner = std::this_thread::get_id();
     uint64_t next_serial = 1, serial = 0;
+    size_t join_depth = 0;
     bool failed = false, transitioning = false, aborted = false;
     std::vector<Member> members;
     std::vector<garden::ecs::EntityHandle> captured;
@@ -421,6 +422,29 @@ ConstructionStatus world::validateConstruction(ConstructionHandle h, bool allow_
     return ConstructionStatus::Completed;
 }
 ConstructionStatus world::constructionStatus(ConstructionHandle h) const noexcept { return validateConstruction(h); }
+world::ConstructionJoinScope::ConstructionJoinScope(world& owner, ConstructionHandle h) noexcept
+    : status_(owner.validateConstruction(h)) {
+    if (status_ != ConstructionStatus::Completed) return;
+    auto& c = *owner.construction_state;
+    if (c.join_depth == SIZE_MAX) { status_ = ConstructionStatus::AllocationFailure; return; }
+    ++c.join_depth;
+    owner_ = &owner;
+}
+world::ConstructionJoinScope::ConstructionJoinScope(ConstructionJoinScope&& other) noexcept
+    : status_(other.status_) {
+    if (other.owner_ && std::this_thread::get_id() != other.owner_->construction_state->owner) std::terminate();
+    owner_ = std::exchange(other.owner_, nullptr);
+    other.status_ = ConstructionStatus::InvalidInput;
+}
+world::ConstructionJoinScope::~ConstructionJoinScope() noexcept {
+    if (!owner_) return;
+    auto& c = *owner_->construction_state;
+    if (std::this_thread::get_id() != c.owner || !c.join_depth) std::terminate();
+    --c.join_depth;
+}
+world::ConstructionJoinScope world::joinConstruction(ConstructionHandle h) noexcept {
+    return ConstructionJoinScope(*this, h);
+}
 ConstructionBeginResult world::beginConstruction() noexcept {
     auto& c = *construction_state;
     if (std::this_thread::get_id() != c.owner) return {ConstructionStatus::WrongThread};
@@ -553,7 +577,10 @@ StagedLookupResult world::resolveStagedReference(ConstructionHandle h, EntityRef
     return {StagedLookupStatus::Found,e};
 }
 ConstructionCommitResult world::commitConstruction(ConstructionHandle h) {
-    auto status = validateConstruction(h);
+    auto status = validateConstruction(h, true);
+    if (status != ConstructionStatus::Completed) return {status};
+    if (construction_state->join_depth) return {ConstructionStatus::Conflict};
+    status = validateConstruction(h);
     if (status != ConstructionStatus::Completed)
         return status == ConstructionStatus::TransactionFailed
             ? ConstructionCommitResult{status, {}, construction_state->captured}
@@ -575,6 +602,7 @@ ConstructionCommitResult world::commitConstruction(ConstructionHandle h) {
 ConstructionAbortResult world::abortConstruction(ConstructionHandle h) noexcept {
     auto status=validateConstruction(h,true); if (status!=ConstructionStatus::Completed) return {status};
     auto& c=*construction_state;
+    if (c.join_depth) return {ConstructionStatus::Conflict};
     if (lifecycle_state->operation.valid()) return {ConstructionStatus::Conflict, operationConflict(), c.captured};
     if (c.rollback.empty()) { c.serial=0; c.members.clear(); c.captured.clear(); return {ConstructionStatus::Completed}; }
     auto& state=*lifecycle_state;

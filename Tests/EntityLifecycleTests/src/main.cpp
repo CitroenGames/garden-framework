@@ -12,17 +12,32 @@
 
 struct LifecycleValue { int value = 0; };
 struct ProviderValue { int value = 0; };
+struct AllocationValue {
+    static inline int constructions = 0;
+    static inline int destructions = 0;
+    explicit AllocationValue(int) { ++constructions; }
+    ~AllocationValue() noexcept { ++destructions; }
+};
 struct EventBusTestAccess {
     static void failNextCreatedBatchAllocation(EventBus& bus) noexcept {
         bus.failNextCreatedBatchAllocation = true;
     }
 };
 namespace garden::ecs {
+namespace testing {
+struct ComponentStoreTestAccess {
+    static void failNextValueAllocation() noexcept { ComponentStore::failNextValueAllocationForTest(); }
+    static void clearValueAllocationFailure() noexcept { ComponentStore::clearValueAllocationFailureForTest(); }
+};
+}
 template<> struct ComponentType<LifecycleValue> {
     static constexpr ComponentKey key{"garden.tests.LifecycleValue", 1};
 };
 template<> struct ComponentType<ProviderValue> {
     static constexpr ComponentKey key{"garden.tests.ProviderValue", 1};
+};
+template<> struct ComponentType<AllocationValue> {
+    static constexpr ComponentKey key{"garden.tests.AllocationValue", 1};
 };
 }
 
@@ -66,6 +81,41 @@ bool finishFixtureRollback(world& w, LifecycleResult rollback) {
     if (!ack.cleanupComplete()) { fixture_ok = check(false, "fixture rollback acknowledgement"); return false; }
     return true;
 }
+struct AllocationFailureGuard {
+    ~AllocationFailureGuard() { garden::ecs::testing::ComponentStoreTestAccess::clearValueAllocationFailure(); }
+};
+
+struct StagedFixtureGuard {
+    world& w;
+    ConstructionHandle transaction;
+    LifecycleOperationHandle operation{};
+    ~StagedFixtureGuard() {
+        w.registry.ctx().erase<garden::ecs::testing::LifecycleFaultHook>();
+        if (operation.valid()) {
+            auto result = w.retirementResult(operation);
+            if (result.status != LifecycleStatus::UnknownOperation)
+                finishFixtureRollback(w, result);
+        }
+        if (transaction.valid()) {
+            const auto status = w.constructionStatus(transaction);
+            if (status != ConstructionStatus::StaleTransaction) {
+                const auto aborted = w.abortConstruction(transaction);
+                if (aborted.status != ConstructionStatus::Completed) {
+                    fixture_ok = check(false, "fixture construction abort");
+                } else {
+                    finishFixtureRollback(w, aborted.rollback);
+                }
+            }
+        }
+    }
+};
+
+bool constructionConflictsForFixture(world& w) {
+    const auto attempt = w.beginConstruction();
+    StagedFixtureGuard guard{w, attempt.transaction};
+    return attempt.status == ConstructionStatus::Conflict;
+}
+
 EntityCreationResult createForTest(world& w, std::string_view tag = {}) {
     auto result = w.createScopedEntity(tag);
     const bool cleanup = finishFixtureRollback(w, result.rollback);
@@ -460,6 +510,73 @@ bool providerPinnedDuringRetry()
     return check(ok, "provider stays pinned across incomplete component retirement");
 }
 
+bool stagedAllocationFailureRetry()
+{
+    using namespace garden::ecs;
+    std::array<uint8_t, 32> digest{}; digest[0] = 0xae;
+    const auto owner = ComponentOwnerId::module(digest, 88);
+    garden::ecs::ComponentDescriptor descriptor{ComponentType<AllocationValue>::key, owner, sizeof(AllocationValue), alignof(AllocationValue),
+        componentCapabilities<AllocationValue>(), makeComponentOperations<AllocationValue>()};
+    auto& catalog = ComponentCatalog::instance();
+    ComponentId id{};
+    if (catalog.registerComponent(descriptor, id) != ComponentCatalogResult::Success)
+        return check(false, "register allocation failure fixture provider");
+    AllocationValue::constructions = AllocationValue::destructions = 0;
+    bool ok = true;
+    {
+        world w;
+        auto begin = w.beginConstruction();
+        StagedFixtureGuard stagedGuard{w, begin.transaction};
+        AllocationFailureGuard allocationGuard;
+        auto first = w.createStagedEntity(begin.transaction);
+        auto second = w.createStagedEntity(begin.transaction);
+        auto added = w.add<AllocationValue>(begin.transaction, first.entity, 1);
+        const bool ready = begin.status == ConstructionStatus::Completed && first.status == ConstructionStatus::Completed &&
+            second.status == ConstructionStatus::Completed && added.component_status == ComponentStoreResult::Success;
+        ok &= ready;
+        if (ready) {
+            testing::ComponentStoreTestAccess::failNextValueAllocation();
+            auto failed = w.add<AllocationValue>(begin.transaction, second.entity, 2);
+            ok &= failed.component_status == ComponentStoreResult::ResourceExhausted &&
+                failed.transaction_status == ConstructionStatus::TransactionFailed &&
+                w.constructionStatus(begin.transaction) == ConstructionStatus::TransactionFailed &&
+                w.commitConstruction(begin.transaction).status == ConstructionStatus::TransactionFailed &&
+                AllocationValue::constructions == 1 && AllocationValue::destructions == 0;
+        }
+        FaultFixture fault{LifecyclePhase::Hierarchy};
+        w.registry.ctx().emplace<testing::LifecycleFaultHook>(testing::LifecycleFaultHook{&fault, &injectOnce});
+        auto aborted = w.abortConstruction(begin.transaction);
+        const auto token = aborted.rollback.operation;
+        stagedGuard.operation = token;
+        ok &= aborted.status == ConstructionStatus::Completed && aborted.rollback.accepted && token.valid() &&
+            aborted.rollback.status == LifecycleStatus::Partial && aborted.rollback.phase == LifecyclePhase::Hierarchy &&
+            fault.fired && catalog.unregisterOwner(owner) == ComponentCatalogResult::InUse &&
+            constructionConflictsForFixture(w) &&
+            AllocationValue::constructions == 1 && AllocationValue::destructions == 0;
+        if (token.valid()) {
+            auto resumed = w.resumeRetirement(token);
+            ok &= resumed.cleanupComplete() && resumed.completed == 2 && AllocationValue::destructions == 1;
+            ok &= constructionConflictsForFixture(w);
+            ok &= w.acknowledgeRetirement(token).cleanupComplete() &&
+                w.retirementResult(token).status == LifecycleStatus::UnknownOperation &&
+                w.acknowledgeRetirement(token).status == LifecycleStatus::UnknownOperation;
+        }
+        w.registry.ctx().erase<testing::LifecycleFaultHook>();
+        auto reuse = w.beginConstruction();
+        StagedFixtureGuard reuseGuard{w, reuse.transaction};
+        auto restored = w.restoreStagedEntity(reuse.transaction, second.reference);
+        ok &= reuse.status == ConstructionStatus::Completed && restored.status == ConstructionStatus::Completed;
+        auto cleanup = w.abortConstruction(reuse.transaction);
+        reuseGuard.operation = cleanup.rollback.operation;
+        ok &= finishFixtureRollback(w, cleanup.rollback);
+    }
+    ok &= AllocationValue::constructions == 1 && AllocationValue::destructions == 1;
+    const auto unregistered = catalog.unregisterOwner(owner);
+    const auto unregisteredAgain = catalog.unregisterOwner(owner);
+    ok &= unregistered == ComponentCatalogResult::Success && unregisteredAgain == ComponentCatalogResult::NotFound;
+    return check(ok, "staged value allocation failure poisons construction and preserves retry ownership");
+}
+
 bool exhaustionBeforeCreation()
 {
     using garden::ecs::testing::LifecycleTestAccess;
@@ -551,7 +668,7 @@ int main()
     ComponentId id{};
     if (catalog.registerComponent(descriptor, id) != ComponentCatalogResult::Success) return 1;
     EventBus::get().sink<EntityDestroyedEvent>().connect<&onDestroyed>();
-    const bool ok = queueAndQuery() & fifoAndObserverRetry() & resetAndShutdown() & rollbackAndCreationEvent() & createdFifoContract() & batchOwnership() & batchFenceAndPartialQueue() & staleQueuedRootRejectsBatch() & singleRootAndHierarchyEffects() & phaseRetryCoverage() & queuedSurvivorIsReparented() & markerlessRollbackToken() & exhaustionBeforeCreation() & providerPinnedDuringRetry();
+    const bool ok = queueAndQuery() & fifoAndObserverRetry() & resetAndShutdown() & rollbackAndCreationEvent() & createdFifoContract() & batchOwnership() & batchFenceAndPartialQueue() & staleQueuedRootRejectsBatch() & singleRootAndHierarchyEffects() & phaseRetryCoverage() & queuedSurvivorIsReparented() & markerlessRollbackToken() & exhaustionBeforeCreation() & providerPinnedDuringRetry() & stagedAllocationFailureRetry();
     EventBus::get().sink<EntityDestroyedEvent>().disconnect<&onDestroyed>();
     EventBus::get().clear();
     return ok && fixture_ok ? 0 : 1;
