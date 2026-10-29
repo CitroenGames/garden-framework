@@ -63,28 +63,29 @@ public:
     template<typename Event>
     void queue(Event&& event)
     {
-        markCurrentModuleUse();
         if constexpr (std::is_same_v<std::remove_cvref_t<Event>, EntityCreatedEvent>)
             createdEvents.emplace_back(std::forward<Event>(event));
-        else
+        else {
+            markCurrentModuleUse();
             dispatcher.enqueue(std::forward<Event>(event));
+        }
     }
 
     // Queue an event constructed in-place
     template<typename Event, typename... Args>
     void emplace(Args&&... args)
     {
-        markCurrentModuleUse();
         if constexpr (std::is_same_v<Event, EntityCreatedEvent>)
             createdEvents.emplace_back(std::forward<Args>(args)...);
-        else
+        else {
+            markCurrentModuleUse();
             dispatcher.enqueue<Event>(std::forward<Args>(args)...);
+        }
     }
 
     // Reserves before moving any payload. On failure both queues are unchanged.
     [[nodiscard]] bool queueEntityCreatedBatch(std::vector<EntityCreatedEvent>&& events) noexcept
     {
-        markCurrentModuleUse();
         static_assert(std::is_nothrow_move_constructible_v<EntityCreatedEvent>);
         if (events.size() > createdEvents.max_size() - createdEvents.size()) return false;
         try {
@@ -113,10 +114,12 @@ public:
     template<typename Event>
     void flush()
     {
-        markCurrentModuleUse();
         FlushGuard guard(*this);
         if constexpr (std::is_same_v<Event, EntityCreatedEvent>) flushCreated();
-        else dispatcher.update<Event>();
+        else {
+            markCurrentModuleUse();
+            dispatcher.update<Event>();
+        }
     }
 
     // Disconnect all listeners for a specific instance
@@ -148,17 +151,8 @@ private:
         EventBus& bus_;
     };
 
-    void flushCreated()
-    {
-        const auto generation = clearGeneration;
-        size_t remaining = createdEvents.size();
-        while (remaining && !createdEvents.empty() && generation == clearGeneration) {
-            EntityCreatedEvent event = std::move(createdEvents.front());
-            createdEvents.erase(createdEvents.begin());
-            --remaining;
-            dispatcher.trigger(std::move(event));
-        }
-    }
+    // Defined in EngineCore so the dispatcher's created-event pool is owned there.
+    void flushCreated();
 
     static void markCurrentModuleUse() noexcept;
     EventBus() = default;

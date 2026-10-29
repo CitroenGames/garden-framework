@@ -132,7 +132,7 @@ int main()
     trace.erase(std::remove(trace.begin(), trace.end(), '\r'), trace.end());
     const auto log_text = readText(output);
     const std::vector<std::string> expected{
-        "server.init\n", "server.quit.requested\n", "scene.fault.hierarchy\n", "scene.hook.removed\n",
+        "server.entity.created\n", "server.init\n", "server.quit.requested\n", "scene.fault.hierarchy\n", "scene.hook.removed\n",
         "server.shutdown\n", "scene.ack.observed\n", "fault.constraints\n",
         "fault.hook.removed\n"};
     size_t position = 0;

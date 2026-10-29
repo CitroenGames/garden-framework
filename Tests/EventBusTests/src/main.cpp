@@ -300,12 +300,23 @@ bool moduleScopeTracking()
     ok &= recordsModuleUse(bus, 4, [&] { bus.queue(ModuleEvent{1}); });
     ok &= recordsModuleUse(bus, 5, [&] { bus.emplace<ModuleEvent>(1); });
     ok &= recordsModuleUse(bus, 6, [&] { bus.flush<ModuleEvent>(); });
+    const auto created_source = owner(7);
     bool batch_accepted = false;
-    ok &= recordsModuleUse(bus, 7, [&] {
+    {
+        EventBus::ModuleSourceScope scope(created_source);
+        bus.queue(EntityCreatedEvent{EntityRef{}, "queue", {}});
+        ok &= EventBus::moduleSourceCanRetire(created_source);
+        bus.emplace<EntityCreatedEvent>(EntityRef{}, "emplace", garden::ecs::EntityHandle{});
+        ok &= EventBus::moduleSourceCanRetire(created_source);
         std::vector<EntityCreatedEvent> batch{{EntityRef{}, "module", {}}};
         batch_accepted = bus.queueEntityCreatedBatch(std::move(batch));
-    });
-    ok &= batch_accepted;
+        ok &= EventBus::moduleSourceCanRetire(created_source);
+        bus.flush<EntityCreatedEvent>();
+        ok &= EventBus::moduleSourceCanRetire(created_source);
+    }
+    ok &= batch_accepted && EventBus::moduleSourceCanRetire(created_source);
+    ok &= recordsModuleUse(bus, 10, [&] { (void)bus.sink<EntityCreatedEvent>(); });
+    ok &= recordsModuleUse(bus, 11, [&] { bus.publish(EntityCreatedEvent{}); });
 
     const auto outer = owner(8);
     const auto inner = owner(9);

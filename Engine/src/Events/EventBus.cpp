@@ -23,6 +23,18 @@ EventBus::ModuleSourceScope::~ModuleSourceScope()
     current_module_source = previous_;
 }
 
+void EventBus::flushCreated()
+{
+    const auto generation = clearGeneration;
+    size_t remaining = createdEvents.size();
+    while (remaining && !createdEvents.empty() && generation == clearGeneration) {
+        EntityCreatedEvent event = std::move(createdEvents.front());
+        createdEvents.erase(createdEvents.begin());
+        --remaining;
+        dispatcher.trigger(std::move(event));
+    }
+}
+
 void EventBus::markCurrentModuleUse() noexcept
 {
     if (!current_module_source) return;

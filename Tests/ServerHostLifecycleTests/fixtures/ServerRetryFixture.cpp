@@ -53,9 +53,14 @@ GAME_API bool gardenServerInit(EngineServices* services)
 {
     if (!services || !services->game_world) return false;
     server_world = services->game_world;
-    // This test-only raw entity is outside the SceneManager cohort. It gives
-    // world shutdown work without publishing an event from the module scope.
-    (void)server_world->registry.create();
+    // This entity is outside the SceneManager cohort and exercises creation
+    // from a module callback before world shutdown retires it.
+    const auto created = server_world->createEntity("module-created");
+    if (created.status != ScopedRestoreStatus::Completed || created.rollback.operation.valid()) {
+        record("server.entity.create.failed");
+        return false;
+    }
+    record("server.entity.created");
     server_world->registry.ctx().emplace<garden::ecs::testing::LifecycleFaultHook>(
         garden::ecs::testing::LifecycleFaultHook{nullptr, &failFirstSceneRetirement});
     record("server.init");
