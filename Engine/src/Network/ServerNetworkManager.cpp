@@ -573,7 +573,14 @@ void ServerNetworkManager::handleInputCommand(uint16_t client_id, BitReader& rea
     // A rejected epoch must never advance the input cursor or spend budget.
     if (!it->second.info.input_admission_open ||
         msg.admission_epoch != it->second.info.input_admission_epoch) {
+        const uint32_t cursor_before = it->second.info.last_input_tick;
+        const uint32_t budget_before = it->second.info.input_tick_budget;
+        const uint32_t budget_tick_before = it->second.info.last_input_budget_server_tick;
         trace_unavailable_pawn("admission_epoch_or_closed");
+        MovementTrace::emit("authority_rejected_state", "role=server packet={} client={} server_tick={} packet_epoch={} admission_epoch={} open={} input_tick={} cursor_before={} cursor_after={} budget_before={} budget_after={} budget_tick_before={} budget_tick_after={}",
+            trace_packet, client_id, current_tick, msg.admission_epoch, it->second.info.input_admission_epoch,
+            it->second.info.input_admission_open, msg.client_tick, cursor_before, it->second.info.last_input_tick,
+            budget_before, it->second.info.input_tick_budget, budget_tick_before, it->second.info.last_input_budget_server_tick);
         return;
     }
 

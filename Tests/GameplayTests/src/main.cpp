@@ -3261,6 +3261,12 @@ bool testClientAcceptanceScriptAuthorityAndInput()
     if (script.active() || script.tick(1.0f, no_authority).kind != FPSShooter::ClientAcceptanceDispatch::Kind::None)
         return fail_with_cleanup("malformed script was not inert");
 
+    if (!writeClientAcceptanceScript(script_path, "epoch_fire_probe 120000\n"))
+        return fail_with_cleanup("could not write epoch probe script");
+    script.loadFromEnvironment();
+    if (!script.active())
+        return fail_with_cleanup("configured epoch probe timeout was rejected");
+
     if (!writeClientAcceptanceScript(script_path,
         "# acceptance fixture\n"
         "team attackers\n"

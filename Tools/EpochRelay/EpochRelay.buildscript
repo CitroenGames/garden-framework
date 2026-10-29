@@ -1,0 +1,18 @@
+[project:EpochRelay]
+type = exe
+outdir = ../../bin/
+if(Windows)
+{
+    subsystem = Console
+}
+sources = src/main.cpp
+includes = src, ../../Engine/src, ../../Engine/Thirdparty/include, ../../Engine, ../../Engine/Thirdparty/bc7enc, ../../Engine/Thirdparty/recastnavigation/Recast/Include, ../../Engine/Thirdparty/recastnavigation/Detour/Include, ../../Engine/Thirdparty/meshoptimizer/src, ../../Engine/Thirdparty/miniaudio, ../../Engine/Thirdparty/JoltPhysics-5.5.0, ../../Engine/Thirdparty/Pakker/src, ../../Engine/Thirdparty/enet/src, ../../Engine/Thirdparty/entt/src, ../../Engine/Thirdparty/spdlog-1.15.3/include, ../../Engine/Thirdparty/tinyobjloader, ../../Engine/Thirdparty/tinygltf-2.9.6, ../../Engine/Thirdparty/glm, ../../Engine/Thirdparty/SDL3-3.4.4/include
+target_link_libraries(
+    PRIVATE EngineCore
+)
+multiprocessor = true
+simd = AdvancedVectorExtensions2
+std = 20
+utf8 = true
+exception_handling = true
+buffer_security_check = false

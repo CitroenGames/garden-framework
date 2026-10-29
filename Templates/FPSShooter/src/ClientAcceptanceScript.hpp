@@ -33,6 +33,7 @@ namespace FPSShooter
         Team,
         Buy,
         Input,
+        EpochFireProbe,
         MoveToLive,
         WaitWorldItemPresent,
         WaitWorldItemRemoved,
@@ -171,7 +172,9 @@ namespace FPSShooter
         // Called after an ordinary forward steering command is queued for
         // transport. It never sends an extra acceptance-only message.
         void noteInputCommandSent(uint32_t command_tick, bool steering_move_emitted,
-                                  uint64_t weapon_state_generation = 0);
+                                  uint64_t weapon_state_generation = 0, uint16_t emitted_buttons = 0);
+        bool probeFireHeld() const { return m_enabled && m_state == State::RunningEpochFireProbe &&
+            (m_probe_stage <= 2 || m_probe_stage == 4); }
         bool isMoveToLiveSteering() const;
 
         // Applies the active scripted INPUT_COMMAND intent after the ordinary
@@ -200,7 +203,7 @@ namespace FPSShooter
             uint32_t source_line = 0;
         };
 
-        enum class State : uint8_t { Ready, WaitingForTeamResult, WaitingForBuyResult, RunningInput,
+        enum class State : uint8_t { Ready, WaitingForTeamResult, WaitingForBuyResult, RunningInput, RunningEpochFireProbe,
             RunningMoveToLive, WaitingForWorldItemPresent, WaitingForWorldItemRemoved,
             RunningMoveToWorldItemLive, RunningSelectSlot, RunningTapDrop,
             WaitingForWeaponState, WaitingForBombPlanted, RunningHoldUseLive,
@@ -248,6 +251,9 @@ namespace FPSShooter
         size_t m_index = 0;
         State m_state = State::Ready;
         bool m_input_interrupted = false;
+        uint8_t m_probe_stage = 0;
+        uint32_t m_probe_fresh_tick = 0;
+        float m_probe_stage_seconds = 0.0f;
         float m_elapsed_seconds = 0.0f;
         float m_move_yaw = 0.0f;
         float m_move_forward = 0.0f;
@@ -392,6 +398,9 @@ namespace FPSShooter
         m_index = 0;
         m_state = State::Ready;
         m_input_interrupted = false;
+        m_probe_stage = 0;
+        m_probe_fresh_tick = 0;
+        m_probe_stage_seconds = 0.0f;
         m_elapsed_seconds = 0.0f;
         m_move_yaw = 0.0f;
         m_move_forward = 0.0f;
@@ -595,6 +604,12 @@ namespace FPSShooter
                     return false;
                 }
                 action.kind = ClientAcceptanceActionKind::HoldUseDefuse;
+            } else if (tokens[0] == "epoch_fire_probe" && tokens.size() == 2) {
+                if (!parseUnsigned(tokens[1], action.duration_ms) || action.duration_ms == 0 || action.duration_ms > 180000) {
+                    error = "client action script disabled: invalid epoch_fire_probe timeout on line " + std::to_string(line_number);
+                    return false;
+                }
+                action.kind = ClientAcceptanceActionKind::EpochFireProbe;
             } else if (tokens[0] == "input" && tokens.size() >= 3) {
                 if (!parseUnsigned(tokens[1], action.duration_ms) || action.duration_ms == 0 || action.duration_ms > kMaxDurationMs) {
                     error = "client action script disabled: invalid input duration on line " + std::to_string(line_number);
@@ -995,6 +1010,14 @@ namespace FPSShooter
                 dispatch.kind = ClientAcceptanceDispatch::Kind::Buy;
                 dispatch.item_id = action.item_id;
                 LOG_ENGINE_INFO("[ACCEPT] buy request sent line={} item={}", action.source_line, action.item_id);
+            } else if (action.kind == ClientAcceptanceActionKind::EpochFireProbe) {
+                if (!canRunLivePawnAction(observation) || !observation.input_admission_open) return dispatch;
+                m_state = State::RunningEpochFireProbe;
+                m_probe_stage = 0;
+                m_probe_fresh_tick = 0;
+                m_probe_stage_seconds = 0.0f;
+                m_elapsed_seconds = 0.0f;
+                LOG_ENGINE_INFO("[ACCEPT] epoch_fire_probe holding line={}", action.source_line);
             } else if (action.kind == ClientAcceptanceActionKind::Input) {
                 if (!canDispatchPawnAction(observation)) return dispatch;
                 m_state = State::RunningInput;
@@ -1188,6 +1211,30 @@ namespace FPSShooter
                 if (!observation.connected || !observation.has_round_state) return dispatch;
                 m_state = State::Waiting;
                 m_elapsed_seconds = 0.0f;
+            }
+            return dispatch;
+        case State::RunningEpochFireProbe:
+            m_elapsed_seconds += std::max(delta_time, 0.0f);
+            m_probe_stage_seconds += std::max(delta_time, 0.0f);
+            if (m_elapsed_seconds * 1000.0f >= static_cast<float>(action.duration_ms)) {
+                disable("client action script stopped: epoch_fire_probe timed out");
+                return dispatch;
+            }
+            if (m_probe_stage == 0 && !observation.input_admission_open) {
+                m_probe_stage = 1; m_probe_stage_seconds = 0.0f;
+                LOG_ENGINE_INFO("[ACCEPT] epoch_fire_probe closed while held");
+            } else if (m_probe_stage == 1 && observation.input_admission_open) {
+                m_probe_stage = 2; m_probe_stage_seconds = 0.0f;
+                LOG_ENGINE_INFO("[ACCEPT] epoch_fire_probe reopened while held");
+            } else if (m_probe_stage == 2 && m_probe_stage_seconds >= 0.5f) {
+                m_probe_stage = 3; m_probe_stage_seconds = 0.0f;
+                LOG_ENGINE_INFO("[ACCEPT] epoch_fire_probe release");
+            } else if (m_probe_stage == 3 && m_probe_stage_seconds >= 0.5f) {
+                m_probe_stage = 4; m_probe_stage_seconds = 0.0f;
+                LOG_ENGINE_INFO("[ACCEPT] epoch_fire_probe fresh press");
+            } else if (m_probe_stage == 5 && m_probe_stage_seconds >= 2.0f && observation.last_authoritative_input_tick >= m_probe_fresh_tick) {
+                LOG_ENGINE_INFO("[ACCEPT] epoch_fire_probe input acknowledged tick={} observed_cursor={}", m_probe_fresh_tick, observation.last_authoritative_input_tick);
+                advanceAction();
             }
             return dispatch;
         case State::RunningInput:
@@ -1489,10 +1536,19 @@ namespace FPSShooter
 
     inline void ClientAcceptanceScript::noteInputCommandSent(uint32_t command_tick,
                                                                bool steering_move_emitted,
-                                                               uint64_t weapon_state_generation)
+                                                               uint64_t weapon_state_generation,
+                                                               uint16_t emitted_buttons)
     {
         if (!m_enabled || m_index >= m_actions.size())
             return;
+        if (m_state == State::RunningEpochFireProbe && m_probe_stage == 4 &&
+            (emitted_buttons & Net::InputFlags::ATTACK)) {
+            m_probe_fresh_tick = command_tick;
+            m_probe_stage = 5;
+            m_probe_stage_seconds = 0.0f;
+            LOG_ENGINE_INFO("[ACCEPT] epoch_fire_probe fresh command tick={}", command_tick);
+            return;
+        }
         if (isMoveToLiveSteering() && steering_move_emitted &&
             m_move_steering_input_tick == 0 && command_tick != 0) {
             m_move_steering_input_tick = command_tick;
@@ -1533,6 +1589,16 @@ namespace FPSShooter
 
         const Action& action = m_actions[m_index];
         using namespace Net::InputFlags;
+        if (m_state == State::RunningEpochFireProbe) {
+            if (probeFireHeld() && movement_allowed && can_fire)
+                state.buttons |= ATTACK;
+            if (m_probe_stage == 0 && movement_allowed) {
+                state.buttons |= MOVE_FORWARD;
+                state.buttons = Net::withWeaponSelect(state.buttons, 2);
+                state.move_forward = 1.0f;
+            }
+            return;
+        }
         if (isMoveToLiveSteering()) {
             if (!movement_allowed)
                 return;

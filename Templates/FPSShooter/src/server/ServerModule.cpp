@@ -42,6 +42,7 @@
 #include "Navigation/NavMeshGenerator.hpp"
 #include <filesystem>
 #include "Network/SharedMovement.hpp"
+#include "MovementTrace.hpp"
 #include "Gameplay/GameplayComponents.hpp"
 #include <cstdlib>
 #include <cstring>
@@ -1003,6 +1004,9 @@ static void processWeaponInput(
         const float shot_spread = WeaponSystem::computeSpread(
             weapon, getWeaponAccuracyContext(*w, player_entity));
         if (WeaponSystem::tryFire(weapon)) {
+            if (MovementTrace::admissionScope())
+                LOG_ENGINE_INFO("[EpochReceipt] shot client={} tick={} weapon={} ammo={} reserve={}",
+                    client_id, input.tick, static_cast<unsigned>(weapon.weapon_type), weapon.ammo, weapon.reserve_ammo);
             const int32_t bot_index = botIndexForEntity(*w, player_entity);
             if (bot_index >= 0) {
                 LOG_ENGINE_INFO("[BotAcceptance] accepted_fire bot={} client={} tick={} weapon={}",
@@ -3484,6 +3488,8 @@ GAME_API bool gardenServerInit(EngineServices* services)
             g_bomb_use_held[client_id] = (input.buttons & InputFlags::USE) != 0;
             g_bomb_last_buttons[client_id] = input.buttons;
         }
+        if (MovementTrace::admissionScope() && (input.buttons & InputFlags::ATTACK))
+            LOG_ENGINE_INFO("[EpochReceipt] attack_callback client={} tick={} buttons={}", client_id, input.tick, input.buttons);
         traceAcceptedHumanMovement(client_id, player_entity, input);
         processWeaponInput(client_id, player_entity, input, client_view_tick);
     });
@@ -3492,7 +3498,8 @@ GAME_API bool gardenServerInit(EngineServices* services)
     // Slot semantics are template data; switching lands with inventory.
     g_server_network.setWeaponSelectHandler([](
         uint16_t client_id, entt::entity player_entity, uint8_t weapon_select, const InputSample& input) {
-        (void)input;
+        if (MovementTrace::admissionScope())
+            LOG_ENGINE_INFO("[EpochReceipt] select_callback client={} tick={} slot={}", client_id, input.tick, weapon_select);
         doWeaponSelect(client_id, player_entity, weapon_select);
     });
 

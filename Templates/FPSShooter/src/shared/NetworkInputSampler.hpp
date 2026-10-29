@@ -133,10 +133,10 @@ namespace FPSShooter
     {
     public:
         void barrier() { fire_blocked = jump_blocked = use_blocked = true; }
-        void observeFrame(const InputActionSystem& actions, bool discard_frame)
+        void observeFrame(const InputActionSystem& actions, bool discard_frame, bool test_fire_held = false)
         {
             if (discard_frame) return;
-            if (!actions.get("Fire").held) fire_blocked = false;
+            if (!actions.get("Fire").held && !test_fire_held) fire_blocked = false;
             if (!actions.get("Jump").held) jump_blocked = false;
             if (!actions.get("Use").held) use_blocked = false;
         }

@@ -656,7 +656,7 @@ static void runFixedClientInputStep(world& game_world,
 
     g_network.sendInputCommand(command_tick, input_state);
     g_acceptance_script.noteInputCommandSent(
-        command_tick, acceptance_steering_move_emitted, g_authoritative_weapon_state_generation);
+        command_tick, acceptance_steering_move_emitted, g_authoritative_weapon_state_generation, input_state.buttons);
 }
 
 static void updateRadarPresentation(bool connected, float delta_time)
@@ -941,6 +941,9 @@ GAME_API bool gardenGameInit(EngineServices* services)
                 g_local_alive = msg.health_remaining > 0;
                 g_has_authoritative_health_snapshot = true;
                 LOG_ENGINE_INFO("Took {} damage! Health: {}", msg.damage, g_local_health);
+                if (MovementTrace::admissionScope())
+                    LOG_ENGINE_INFO("[EpochReceipt] damage attacker={} victim={} generation={} amount={} health={}",
+                        msg.attacker_client_id, msg.victim_client_id, g_combat_receipt_generation, msg.damage, msg.health_remaining);
             }
             break;
         }
@@ -1007,6 +1010,9 @@ GAME_API bool gardenGameInit(EngineServices* services)
             g_local_recoil_index = msg.recoil_index;
             g_has_authoritative_weapon_snapshot = true;
             ++g_authoritative_weapon_state_generation;
+            if (MovementTrace::admissionScope())
+                LOG_ENGINE_INFO("[EpochReceipt] weapon client={} generation={} weapon={} ammo={} reserve={}",
+                    g_network.getClientId(), g_authoritative_weapon_state_generation, msg.weapon_type, msg.ammo, msg.reserve_ammo);
             break;
         }
         default:
@@ -1324,7 +1330,7 @@ GAME_API void gardenGameUpdate(float delta_time)
     g_client_input_cadence.setFixedDelta(client_fixed_delta);
     if (input_actions && g_network.isConnected()) {
         const bool accept_jump = g_admission_action_gate.allowsJump();
-        g_admission_action_gate.observeFrame(*input_actions, g_admission_barrier_this_frame);
+        g_admission_action_gate.observeFrame(*input_actions, g_admission_barrier_this_frame, g_acceptance_script.probeFireHeld());
         if (g_network.isInputAdmissionOpen() && !g_admission_barrier_this_frame)
             g_client_input_cadence.captureFrameEdges(*input_actions, accept_jump);
     }

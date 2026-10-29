@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <utility>
 
@@ -47,8 +48,29 @@ namespace MovementTrace
 
     inline bool enabled() { return runId() != nullptr; }
 
+    // Acceptance-only scoped tracing keeps the epoch/command stream visible
+    // across a long competitive transition without flooding the bounded budget
+    // with render-frame and prediction records.
+    inline bool admissionScope()
+    {
+        static const char* scope = std::getenv("GARDEN_ADMISSION_TRACE");
+        return scope && std::strcmp(scope, "1") == 0;
+    }
+
+    inline bool admissionStage(const char* stage)
+    {
+        return std::strcmp(stage, "client_command") == 0 ||
+               std::strcmp(stage, "client_admission") == 0 ||
+               std::strcmp(stage, "server_admission") == 0 ||
+               std::strcmp(stage, "authority_rejected_state") == 0 ||
+               std::strcmp(stage, "authority_received") == 0 ||
+               std::strcmp(stage, "authority_decision") == 0 ||
+               std::strcmp(stage, "authority_step") == 0;
+    }
+
     inline void emitRecord(const char* stage, const std::string& fields)
     {
+        if (admissionScope() && !admissionStage(stage)) return;
         static Budget budget;
         static std::atomic<bool> manifest_emitted{false};
         const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -56,12 +78,13 @@ namespace MovementTrace
         if (!manifest_emitted.exchange(true, std::memory_order_relaxed))
             LOG_ENGINE_INFO("movement_trace schema={} run={} stage=manifest monotonic_ns={} clock=steady_process clock_resolution=unavailable sdl_event_and_step_clock=SDL_GetTicksNS sdl_resolution=unavailable sdl_to_steady_mapping=unavailable client_server_clock_mapping=unavailable cross_process_clock_mapping=unavailable frame_scope=per_stream controller_and_game_frame_ids=independent frame_id_zero=unavailable physical_event_frame=unavailable correction=unavailable replay=unavailable acknowledgement=unavailable stance=unavailable tuning_identity=unavailable view=command_and_authority_radians ground_normal_and_velocity=stage_dependent prior_held_and_timers=offline_only input_tick=stage_dependent fixed_tick=stage_dependent process_identity=external_log_source environment_manifest=external_required",
                             schema, runId(), ns);
-        const auto decision = budget.next(record_limit);
+        const uint32_t limit = admissionScope() ? 100000u : record_limit;
+        const auto decision = budget.next(limit);
         if (decision == BudgetDecision::Drop) return;
         if (decision == BudgetDecision::Exhausted)
         {
             LOG_ENGINE_INFO("movement_trace schema={} run={} stage=budget_exhausted monotonic_ns={} limit={} further_records=dropped",
-                            schema, runId(), ns, record_limit);
+                            schema, runId(), ns, limit);
             return;
         }
         LOG_ENGINE_INFO("movement_trace schema={} run={} stage={} monotonic_ns={} clock=steady_process {}",
