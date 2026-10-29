@@ -57,6 +57,28 @@ namespace MovementTrace
         return scope && std::strcmp(scope, "1") == 0;
     }
 
+    // Focused physical movement investigation; enable alongside GARDEN_MOVEMENT_TRACE.
+    inline bool movementScope()
+    {
+        static const char* scope = std::getenv("GARDEN_MOVEMENT_TRACE_SCOPE");
+        return scope && std::strcmp(scope, "mc0") == 0;
+    }
+
+    inline bool movementStage(const char* stage)
+    {
+        static constexpr const char* stages[] = {
+            "key_received", "key_routing", "physical_key", "key_state",
+            "action_frame", "client_frame_begin", "client_frame", "client_step_begin",
+            "offline_frame_begin", "offline_frame", "offline_suppressed",
+            "offline_step_begin", "offline_step", "client_command", "client_prediction",
+            "client_prediction_suppressed", "client_admission", "server_admission",
+            "authority_received", "authority_decision", "authority_rejected_state", "authority_step"
+        };
+        for (const char* candidate : stages)
+            if (std::strcmp(stage, candidate) == 0) return true;
+        return false;
+    }
+
     inline bool admissionStage(const char* stage)
     {
         return std::strcmp(stage, "client_command") == 0 ||
@@ -68,17 +90,23 @@ namespace MovementTrace
                std::strcmp(stage, "authority_step") == 0;
     }
 
+    inline bool acceptsStage(const char* stage)
+    {
+        if (movementScope()) return movementStage(stage);
+        return !admissionScope() || admissionStage(stage);
+    }
+
     inline void emitRecord(const char* stage, const std::string& fields)
     {
-        if (admissionScope() && !admissionStage(stage)) return;
         static Budget budget;
         static std::atomic<bool> manifest_emitted{false};
         const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
         if (!manifest_emitted.exchange(true, std::memory_order_relaxed))
-            LOG_ENGINE_INFO("movement_trace schema={} run={} stage=manifest monotonic_ns={} clock=steady_process clock_resolution=unavailable sdl_event_and_step_clock=SDL_GetTicksNS sdl_resolution=unavailable sdl_to_steady_mapping=unavailable client_server_clock_mapping=unavailable cross_process_clock_mapping=unavailable frame_scope=per_stream controller_and_game_frame_ids=independent frame_id_zero=unavailable physical_event_frame=unavailable correction=unavailable replay=unavailable acknowledgement=unavailable stance=unavailable tuning_identity=unavailable view=command_and_authority_radians ground_normal_and_velocity=stage_dependent prior_held_and_timers=offline_only input_tick=stage_dependent fixed_tick=stage_dependent process_identity=external_log_source environment_manifest=external_required",
-                            schema, runId(), ns);
-        const uint32_t limit = admissionScope() ? 100000u : record_limit;
+            LOG_ENGINE_INFO("movement_trace schema={} run={} stage=manifest monotonic_ns={} clock=steady_process clock_resolution=unavailable sdl_event_and_step_clock=SDL_GetTicksNS sdl_resolution=unavailable sdl_to_steady_mapping=unavailable client_server_clock_mapping=unavailable cross_process_clock_mapping=unavailable frame_scope=per_stream controller_and_game_frame_ids=independent frame_id_zero=unavailable physical_event_frame=unavailable correction=unavailable replay=unavailable acknowledgement=unavailable stance=unavailable tuning_identity=unavailable view=command_and_authority_radians ground_normal_and_velocity=stage_dependent prior_held_and_timers=offline_only input_tick=stage_dependent fixed_tick=stage_dependent process_identity=external_log_source environment_manifest=external_required scope={} limit={}",
+                            schema, runId(), ns, movementScope() ? "mc0" : admissionScope() ? "admission" : "default",
+                            movementScope() ? 1000000u : admissionScope() ? 100000u : record_limit);
+        const uint32_t limit = movementScope() ? 1000000u : admissionScope() ? 100000u : record_limit;
         const auto decision = budget.next(limit);
         if (decision == BudgetDecision::Drop) return;
         if (decision == BudgetDecision::Exhausted)
@@ -94,7 +122,7 @@ namespace MovementTrace
     template<typename... Args>
     inline void emit(const char* stage, spdlog::format_string_t<Args...> format, Args&&... args)
     {
-        if (!enabled()) return;
+        if (!enabled() || !acceptsStage(stage)) return;
         emitRecord(stage, spdlog::fmt_lib::format(format, std::forward<Args>(args)...));
     }
 }

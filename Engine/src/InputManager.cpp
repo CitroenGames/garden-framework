@@ -344,6 +344,10 @@ void InputManager::process_event(const SDL_Event& event)
         MovementTrace::emit("physical_key", "role=client frame_id=unavailable scancode={} down={} repeat={} sdl_event_ns={} event_clock=sdl sdl_to_steady_mapping=unavailable",
             static_cast<int>(event.key.scancode), event.type == SDL_EVENT_KEY_DOWN,
             event.key.repeat, event.key.timestamp);
+    const bool trace_key = MovementTrace::enabled() && MovementTrace::movementScope() &&
+        (event.type == SDL_EVENT_KEY_DOWN || event.type == SDL_EVENT_KEY_UP);
+    const bool key_valid = trace_key && is_valid_key(event.key.scancode);
+    const bool key_before = key_valid && is_key_held(event.key.scancode);
     switch (event.type)
     {
     case SDL_EVENT_KEY_DOWN:
@@ -416,6 +420,11 @@ void InputManager::process_event(const SDL_Event& event)
         }
         break;
     }
+    if (trace_key)
+        MovementTrace::emit("key_state", "role=client scancode={} down={} repeat={} sdl_event_ns={} event_clock=sdl valid={} held_before={} held_after={} transition_added={}",
+            static_cast<int>(event.key.scancode), event.type == SDL_EVENT_KEY_DOWN, event.key.repeat,
+            event.key.timestamp, key_valid, key_before, key_valid && is_key_held(event.key.scancode),
+            key_valid && key_before != is_key_held(event.key.scancode));
 }
 
 void InputManager::reset_state()

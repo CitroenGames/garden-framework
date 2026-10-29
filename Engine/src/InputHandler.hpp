@@ -1,6 +1,7 @@
 #pragma once
 
 #include "InputManager.hpp"
+#include "MovementTrace.hpp"
 #include "Input/GameInputModeService.hpp"
 #include "ImGui/ImGuiManager.hpp"
 #include "UI/RmlUiManager.h"
@@ -182,6 +183,13 @@ public:
         SDL_Event event;
         while (SDL_PollEvent(&event))
         {
+            const bool trace_key = MovementTrace::enabled() && MovementTrace::movementScope() &&
+                (event.type == SDL_EVENT_KEY_DOWN || event.type == SDL_EVENT_KEY_UP);
+            if (trace_key)
+                MovementTrace::emit("key_received", "role=client scancode={} down={} repeat={} sdl_event_ns={} event_clock=sdl",
+                    static_cast<int>(event.key.scancode), event.type == SDL_EVENT_KEY_DOWN,
+                    event.key.repeat, event.key.timestamp);
+
             // Let ImGui process events first
             ImGuiManager::get().processEvent(&event);
 
@@ -236,6 +244,10 @@ public:
                 break;
             }
 
+            const bool host_consumed = consumed;
+            bool routed_to_input = false;
+            bool rml_consumed = false;
+
             // UI-pointer mode keeps raw keyboard delivery available to the
             // module's keyboard-first modal commands.  Rml still receives
             // the same event afterwards, preserving its focus/text routing.
@@ -245,13 +257,28 @@ public:
                 (event.type == SDL_EVENT_KEY_DOWN || event.type == SDL_EVENT_KEY_UP) &&
                 should_route_to_game_input(event);
             if (route_keyboard_before_rml)
+            {
                 input_manager->process_event(event);
+                routed_to_input = true;
+            }
 
             if (!consumed && RmlUiManager::get().isInitialized())
+            {
                 consumed = RmlUiManager::get().processEvent(event);
+                rml_consumed = consumed;
+            }
 
             if (!route_keyboard_before_rml && !consumed && should_route_to_game_input(event))
+            {
                 input_manager->process_event(event);
+                routed_to_input = true;
+            }
+            if (trace_key)
+                MovementTrace::emit("key_routing", "role=client scancode={} down={} repeat={} sdl_event_ns={} event_clock=sdl host_consumed={} rml_consumed={} routed={} routed_before_rml={} keyboard_enabled={} imgui_capture_keyboard={}",
+                    static_cast<int>(event.key.scancode), event.type == SDL_EVENT_KEY_DOWN,
+                    event.key.repeat, event.key.timestamp, host_consumed, rml_consumed,
+                    routed_to_input, route_keyboard_before_rml, game_input_mode.keyboardInputEnabled(),
+                    ImGuiManager::get().wantCaptureKeyboard());
         }
 
         refresh_gamepad_input_enabled();
