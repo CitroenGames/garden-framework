@@ -18,6 +18,7 @@
 #include "world.hpp"
 #include "../../../Templates/FPSShooter/src/shared/FpsCombatFeed.hpp"
 #include "../../../Templates/FPSShooter/src/shared/CombatProtocol.hpp"
+#include "../../../Templates/FPSShooter/src/ui/CombatFeedPresentation.hpp"
 
 #include <SDL3/SDL.h>
 
@@ -362,7 +363,8 @@ static entt::entity spawnServerPlayer(world& server_world, Net::ServerNetworkMan
 // Sends one handcrafted CONNECT_REQUEST from a raw ENet peer and returns
 // the CONNECT_REJECT code the server replies with (or -1 on timeout).
 static int rawConnectAttempt(Net::ServerNetworkManager& server, uint16_t port,
-                             uint32_t protocol_version, uint32_t level_hash, uint32_t caps)
+                             uint32_t protocol_version, uint32_t level_hash, uint32_t caps,
+                             bool send_custom_after_request = false)
 {
     ENetHost* raw = enet_host_create(nullptr, 1, Net::NETWORK_CHANNEL_COUNT, 0, 0);
     if (!raw) return -1;
@@ -392,6 +394,11 @@ static int rawConnectAttempt(Net::ServerNetworkManager& server, uint16_t port,
                 }
                 ENetPacket* packet = enet_packet_create(writer.getData(), writer.getByteSize(), ENET_PACKET_FLAG_RELIABLE);
                 enet_peer_send(peer, 0, packet);
+                if (send_custom_after_request) {
+                    const uint8_t retired_type = Net::CUSTOM_MESSAGE_START + 2;
+                    ENetPacket* custom = enet_packet_create(&retired_type, 1, ENET_PACKET_FLAG_RELIABLE);
+                    enet_peer_send(peer, 0, custom);
+                }
                 enet_host_flush(raw);
             } else if (event.type == ENET_EVENT_TYPE_RECEIVE) {
                 if (event.packet->dataLength >= 2 &&
@@ -631,7 +638,7 @@ static bool runNetworkHierarchyBoundaryTests()
     return true;
 }
 
-static bool runWireV6HandshakeTests()
+static bool runWireV7HandshakeTests()
 {
     TestState state;
     world server_world;
@@ -643,6 +650,11 @@ static bool runWireV6HandshakeTests()
     }
     server.setWorld(&server_world);
     server.setLevelHash(0x1234ABCDu);
+    size_t custom_dispatches = 0;
+    server.setCustomMessageHandler([&](uint16_t, uint8_t, Net::BitReader&) {
+        ++custom_dispatches;
+        return true;
+    });
 
     // D1: NetId allocation is server-only, idempotent per entity.
     {
@@ -710,7 +722,13 @@ static bool runWireV6HandshakeTests()
     }
     if (server.getClientCount() != 0) state.addError("v5 reject allocated a client id");
 
-    // Valid v6 client (real manager, matching hash) connects; caps echo.
+    // v6 carried the retired death message; reject it before allocating a client.
+    if (rawConnectAttempt(server, port, 6, 0x1234ABCDu, Net::CAP_ALL_KNOWN, true) != 1)
+        state.addError("v6 client was not rejected with VersionMismatch (1)");
+    if (server.getClientCount() != 0) state.addError("v6 reject allocated a client id");
+    if (custom_dispatches != 0) state.addError("v6 custom message reached dispatch");
+
+    // Valid v7 client (real manager, matching hash) connects; caps echo.
     {
         world client_world;
         Net::ClientNetworkManager client;
@@ -729,8 +747,8 @@ static bool runWireV6HandshakeTests()
             server.pumpNetworkEvents(kFixedDelta);
             SDL_Delay(1);
         }
-        if (!client.isConnected()) state.addError("valid v6 client did not connect");
-        if (server.getClientCount() != 1) state.addError("valid v6 client was not allocated exactly one id");
+        if (!client.isConnected()) state.addError("valid v7 client did not connect");
+        if (server.getClientCount() != 1) state.addError("valid v7 client was not allocated exactly one id");
         if (client.getNegotiatedCapabilityFlags() != Net::CAP_ALL_KNOWN) {
             state.addError("accept did not echo negotiated capability flags");
         }
@@ -749,7 +767,7 @@ static bool runWireV6HandshakeTests()
         }
         return false;
     }
-    std::cout << "[PASS] WireV6HandshakeTests\n";
+    std::cout << "[PASS] WireV7HandshakeTests\n";
     return true;
 }
 
@@ -845,6 +863,45 @@ static bool runCombatEventProtocolTests()
     }
     if (client_cache.count() != 0)
         state.addError("malformed combat event mutated template client cache");
+
+    // Exercise the same client admission path used by the module. Retired ID
+    // 66 and an unknown ID must not read or mutate presentation state.
+    UiLogic::CombatFeedPresentation feed;
+    CombatEventMessage accepted;
+    const auto checkRejected = [&](uint8_t dispatch_type, Net::BitWriter& payload,
+                                   UiLogic::CombatEventReceiveResult expected) {
+        Net::BitReader reader(payload.getData(), payload.getByteSize());
+        const auto before_bits = reader.getBitPosition();
+        const auto result = UiLogic::receiveCombatEvent(dispatch_type, reader, client_cache, feed, accepted);
+        if (result != expected || client_cache.count() != 0 || feed.count() != 0 ||
+            accepted.victim_client_id != 0 ||
+            (expected == UiLogic::CombatEventReceiveResult::NotCombatEvent && reader.getBitPosition() != before_bits))
+            state.addError("retired, unknown, or malformed message changed client combat state");
+    };
+    Net::BitWriter retired;
+    retired.writeByte(Net::CUSTOM_MESSAGE_START + 2);
+    retired.writeUInt16(9);
+    retired.writeUInt16(7);
+    retired.writeVector3f(glm::vec3(1.0f));
+    checkRejected(Net::CUSTOM_MESSAGE_START + 2, retired, UiLogic::CombatEventReceiveResult::NotCombatEvent);
+    Net::BitWriter unknown;
+    unknown.writeByte(255);
+    checkRejected(255, unknown, UiLogic::CombatEventReceiveResult::NotCombatEvent);
+    Net::BitWriter malformed;
+    writeRaw(malformed, 9, static_cast<uint8_t>(WeaponType::RIFLE), 0x80, 1);
+    checkRejected(static_cast<uint8_t>(CombatEventMessageType::COMBAT_EVENT), malformed,
+        UiLogic::CombatEventReceiveResult::Malformed);
+    Net::BitWriter trailing;
+    CombatSerializer::serialize(trailing, valid);
+    trailing.writeByte(0x7f);
+    checkRejected(static_cast<uint8_t>(CombatEventMessageType::COMBAT_EVENT), trailing,
+        UiLogic::CombatEventReceiveResult::Malformed);
+    Net::BitReader valid_reader(valid_writer.getData(), valid_writer.getByteSize());
+    if (UiLogic::receiveCombatEvent(static_cast<uint8_t>(CombatEventMessageType::COMBAT_EVENT), valid_reader,
+            client_cache, feed, accepted) != UiLogic::CombatEventReceiveResult::Accepted ||
+        client_cache.count() != 1 || feed.count() != 1 || accepted.victim_client_id != valid.victim_client_id)
+        state.addError("valid combat event was not admitted to client state");
+
 
     if (state.error_count != 0) {
         for (const std::string& error : state.errors)
@@ -2025,6 +2082,8 @@ static bool runBlockedInputCursorRegressionTest()
 
     bool allow_inputs = false;
     std::vector<uint32_t> applied_ticks;
+    uint16_t applied_buttons = 0;
+    float applied_forward = 0.0f;
     server.setOnClientConnected([&](uint16_t client_id) {
         spawnServerPlayer(server_world, server, client_id);
     });
@@ -2034,6 +2093,8 @@ static bool runBlockedInputCursorRegressionTest()
     server.setInputSampleHandler([&](uint16_t, entt::entity,
                                      const Net::InputSample& sample, uint32_t) {
         applied_ticks.push_back(sample.tick);
+        applied_buttons |= sample.buttons;
+        applied_forward = sample.move_forward;
     });
 
     StressConfig config;
@@ -2120,11 +2181,13 @@ static bool runBlockedInputCursorRegressionTest()
     const Net::ClientInfo* initial_info = server.getClientInfo(raw_client_id);
     const uint32_t initial_budget = initial_info != nullptr ? initial_info->input_tick_budget : 0u;
 
-    auto sendRawInput = [&](uint32_t primary_tick, uint32_t redundant_a, uint32_t redundant_b) {
+    auto sendRawInput = [&](uint32_t primary_tick, uint32_t redundant_a, uint32_t redundant_b,
+                            uint16_t primary_buttons = 0u, uint16_t redundant_buttons = 0u) {
         Net::InputCommandMessage message;
         message.client_tick = primary_tick;
         message.last_received_tick = 0;
         message.move_forward = 1.0f;
+        message.buttons = primary_buttons;
 
         std::array<Net::InputSample, 2> redundant{};
         uint8_t redundant_count = 0;
@@ -2135,6 +2198,7 @@ static bool runBlockedInputCursorRegressionTest()
             Net::InputSample& sample = redundant[redundant_count++];
             sample.tick = tick;
             sample.move_forward = 1.0f;
+            sample.buttons = redundant_buttons;
         };
         appendRedundant(redundant_a);
         appendRedundant(redundant_b);
@@ -2187,6 +2251,12 @@ static bool runBlockedInputCursorRegressionTest()
             break;
         }
     }
+    // Reproduce the traced long gap, including an attack that must not replay.
+    if (observed_all_blocked_inputs &&
+        (!sendRawInput(316u, 4u, 5u, Net::InputFlags::ATTACK) ||
+         !driveRawInputToCursor(316u, "blocked long-gap"))) {
+        observed_all_blocked_inputs = false;
+    }
     if (!applied_ticks.empty()) {
         state.addError("input filter rejection invoked the gameplay sample handler");
     }
@@ -2197,17 +2267,20 @@ static bool runBlockedInputCursorRegressionTest()
 
     allow_inputs = observed_all_blocked_inputs;
     bool observed_all_live_inputs = observed_all_blocked_inputs;
-    // Include rejected ticks in the open packets. The server must skip them
-    // from the advanced cursor and invoke gameplay only for new ticks 6 and 7.
+    // The primary can jump beyond 128 because local ticks are coalesced. The
+    // redundant attacks include both an observed blocked tick and a later,
+    // never-observed tick that could have been generated while blocked.
     if (observed_all_live_inputs &&
-        (!sendRawInput(6u, 4u, 5u) || !driveRawInputToCursor(6u, "live"))) {
+        (!sendRawInput(520u, 316u, 500u, 0u, Net::InputFlags::ATTACK) ||
+         !driveRawInputToCursor(520u, "live long-gap"))) {
         observed_all_live_inputs = false;
     }
     if (observed_all_live_inputs &&
-        (!sendRawInput(7u, 5u, 6u) || !driveRawInputToCursor(7u, "live"))) {
+        (!sendRawInput(521u, 500u, 520u, 0u, Net::InputFlags::ATTACK) ||
+         !driveRawInputToCursor(521u, "live"))) {
         observed_all_live_inputs = false;
     }
-    if (applied_ticks.size() != 2u || applied_ticks[0] != 6u || applied_ticks[1] != 7u) {
+    if (applied_ticks.size() != 2u || applied_ticks[0] != 520u || applied_ticks[1] != 521u) {
         std::string observed_ticks;
         for (const uint32_t applied_tick : applied_ticks) {
             if (!observed_ticks.empty()) {
@@ -2217,6 +2290,38 @@ static bool runBlockedInputCursorRegressionTest()
         }
         state.addError("blocked redundant input replayed or exhausted the live input budget (observed=" +
                        (observed_ticks.empty() ? std::string("none") : observed_ticks) + ')');
+    }
+
+    if ((applied_buttons & Net::InputFlags::ATTACK) != 0u || applied_forward != 1.0f) {
+        state.addError("blocked attack replayed or live forward movement was not applied");
+    }
+
+    // Move in unambiguous serial increments across uint32 wrap while blocked.
+    allow_inputs = false;
+    if (observed_all_live_inputs &&
+        (!sendRawInput(0x7fffffffu, 0u, 0u) || !driveRawInputToCursor(0x7fffffffu, "wrap first") ||
+         !sendRawInput(0xfffffffeu, 0u, 0u) || !driveRawInputToCursor(0xfffffffeu, "wrap second") ||
+         !sendRawInput(2u, 0xfffffffdu, 0xfffffffeu) || !driveRawInputToCursor(2u, "wrap final") ||
+         !sendRawInput(3u, 0xfffffffeu, 2u) || !driveRawInputToCursor(3u, "wrap stale redundancy"))) {
+        state.addError("blocked cursor did not retain serial ordering across wrap");
+    }
+    // A stale-only packet must leave the cursor unchanged, even across wrap.
+    const uint64_t packets_before_stale = server.getStats().packets_received;
+    if (observed_all_live_inputs && sendRawInput(0xfffffffeu, 0u, 0u)) {
+        for (uint32_t frame = 0; frame < 120u &&
+             server.getStats().packets_received == packets_before_stale; ++frame) {
+            server.update(kFixedDelta);
+            serviceRawPeer();
+            SDL_Delay(1);
+        }
+        const Net::ClientInfo* info = server.getClientInfo(raw_client_id);
+        if (server.getStats().packets_received == packets_before_stale ||
+            info == nullptr || info->last_input_tick != 3u) {
+            state.addError("stale wrapped packet was not observed or moved the cursor backward");
+        }
+    }
+    if (applied_ticks.size() != 2u) {
+        state.addError("wrap recovery invoked gameplay while blocked");
     }
 
     enet_peer_disconnect(raw_peer, 0);
@@ -3037,7 +3142,7 @@ int main(int argc, char** argv)
     if (!generic_recipe_ready) {
         std::cerr << "[FAIL] could not register current generic stress spawn recipe\n";
     }
-    const bool handshake_ok = runWireV6HandshakeTests();
+    const bool handshake_ok = runWireV7HandshakeTests();
     const bool combat_event_protocol_ok = runCombatEventProtocolTests();
     const bool competitive_presentation_protocol_ok = runCompetitivePresentationProtocolTests();
     const bool transport_pending_queue_accounting_ok = runTransportPendingQueueAccountingTests();

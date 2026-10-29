@@ -578,14 +578,25 @@ void ServerNetworkManager::handleInputCommand(uint16_t client_id, BitReader& rea
     }
 
     const auto samples = collectInputSamplesChronological(msg, redundant_inputs);
-    for (size_t i = 0; i < samples.size(); ++i) trace_received(samples[i], i);
+    const bool blocked = input_filter && !input_filter(client_id, player_entity);
+    const bool reopening = !blocked && it->second.info.input_filter_was_closed;
+    if (reopening) {
+        for (size_t i = 0; i < redundant_inputs.size(); ++i) {
+            trace_received(redundant_inputs[i], i);
+            trace_decision(redundant_inputs[i], i, "rejected", "filter_transition_redundant");
+        }
+        trace_received(makePrimaryInputSample(msg), redundant_inputs.size());
+    } else {
+        for (size_t i = 0; i < samples.size(); ++i) trace_received(samples[i], i);
+    }
 
     // A game may reject input while a pawn is frozen, dead, or otherwise
     // unable to act. Keep the transport cursor current for valid, monotonic
     // samples without spending the action budget or invoking any gameplay
-    // path. Otherwise their redundant copies become newly eligible when the
-    // filter opens and can consume the first live tick's budget.
-    if (input_filter && !input_filter(client_id, player_entity)) {
+    // path. Serial ordering prevents already observed filtered samples from
+    // becoming newly eligible after the filter opens.
+    if (blocked) {
+        it->second.info.input_filter_was_closed = true;
         for (size_t i = 0; i < samples.size(); ++i) {
             const auto& sample = samples[i];
             if (!isValidInputSample(sample)) {
@@ -595,11 +606,11 @@ void ServerNetworkManager::handleInputCommand(uint16_t client_id, BitReader& rea
                 continue;
             }
 
-            if (shouldAcceptInputTick(sample.tick, it->second.info.last_input_tick)) {
+            if (sample.tick != 0 && isTickNewer(sample.tick, it->second.info.last_input_tick)) {
                 it->second.info.last_input_tick = sample.tick;
                 trace_decision(sample, i, "rejected", "input_filter_cursor_advanced");
             } else {
-                trace_decision(sample, i, "rejected", "input_filter_stale_or_out_of_window");
+                trace_decision(sample, i, "rejected", "input_filter_stale");
             }
         }
         return;
@@ -619,24 +630,29 @@ void ServerNetworkManager::handleInputCommand(uint16_t client_id, BitReader& rea
         it->second.info.last_input_budget_server_tick,
         it->second.info.input_tick_budget);
 
-    for (size_t i = 0; i < samples.size(); ++i) {
-        const auto& sample = samples[i];
+    // No redundant command can be classified as generated after reopening.
+    // Await an admissible primary before returning to normal replay handling.
+    const InputSample primary = makePrimaryInputSample(msg);
+    const size_t live_sample_count = reopening ? 1 : samples.size();
+    for (size_t i = 0; i < live_sample_count; ++i) {
+        const InputSample& sample = reopening ? primary : samples[i];
+        const size_t ordinal = reopening ? redundant_inputs.size() : i;
         if (!isValidInputSample(sample)) {
-            trace_decision(sample, i, "rejected", "invalid");
+            trace_decision(sample, ordinal, "rejected", "invalid");
             LOG_ENGINE_WARN("Client {0} sent invalid input sample at tick {1}", client_id, sample.tick);
             recordDroppedFromPeer(it->second.info.peer, 0);
             continue;
         }
 
         if (!shouldAcceptInputTick(sample.tick, it->second.info.last_input_tick)) {
-            trace_decision(sample, i, "rejected", "stale_or_out_of_window");
+            trace_decision(sample, ordinal, "rejected", "stale");
             continue;
         }
 
         if (!consumeInputTickBudget(it->second.info.input_tick_budget)) {
             LOG_ENGINE_WARN("Client {0} exceeded input tick budget at server tick {1}", client_id, current_tick);
-            for (size_t skipped = i; skipped < samples.size(); ++skipped)
-                trace_decision(samples[skipped], skipped, "rejected", skipped == i ? "budget_exhausted" : "after_budget_break_not_evaluated");
+            for (size_t skipped = i; skipped < live_sample_count; ++skipped)
+                trace_decision(reopening ? primary : samples[skipped], reopening ? redundant_inputs.size() : skipped, "rejected", skipped == i ? "budget_exhausted" : "after_budget_break_not_evaluated");
             break;
         }
 
@@ -682,9 +698,9 @@ void ServerNetworkManager::handleInputCommand(uint16_t client_id, BitReader& rea
         } else {
             result = SharedMovement::simulate(move_input, move_state, movement_config);
         }
-        trace_decision(sample, i, "accepted", trace_simulation_succeeded ? "simulated" : "simulation_failed_cursor_advanced");
+        trace_decision(sample, ordinal, "accepted", trace_simulation_succeeded ? "simulated" : "simulation_failed_cursor_advanced");
         MovementTrace::emit("authority_step", "role=server packet={} sample={} client={} server_tick={} input_tick={} applied_cursor={} result_source={} sdl_step_ns={} sdl_clock=SDL_GetTicksNS fixed_delta={} buttons={} forward={} right={} view_yaw={} view_pitch={} pre_pos={},{},{} pre_vel={},{},{} pre_grounded={} post_pos={},{},{} post_vel={},{},{} post_grounded={} jumped=unavailable landed=unavailable acknowledgement=unavailable",
-            trace_packet, i, client_id, current_tick, sample.tick, sample.tick,
+            trace_packet, ordinal, client_id, current_tick, sample.tick, sample.tick,
             trace_simulation_succeeded ? "simulated" : "simulation_failed_retained_input", trace_sdl_step_ns, movement_config.fixed_delta, sample.buttons,
             sample.move_forward, sample.move_right, sample.camera_yaw, sample.camera_pitch, move_state.position.x, move_state.position.y, move_state.position.z,
             move_state.velocity.x, move_state.velocity.y, move_state.velocity.z, move_state.grounded,
@@ -696,6 +712,7 @@ void ServerNetworkManager::handleInputCommand(uint16_t client_id, BitReader& rea
         player.ground_normal = result.ground_normal;
 
         it->second.info.last_input_tick = sample.tick;
+        it->second.info.input_filter_was_closed = false;
 
         if (input_sample_handler) {
             input_sample_handler(client_id, player_entity, sample, client_view_tick);

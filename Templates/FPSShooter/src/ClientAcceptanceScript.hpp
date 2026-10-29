@@ -218,6 +218,8 @@ namespace FPSShooter
                                       const ClientAcceptanceObservation& observation) const;
         bool hasDeathFromRemoteAfter(uint16_t client_id, uint64_t receipt_generation,
                                      const ClientAcceptanceObservation& observation) const;
+        bool hasLocalKillOfRemoteAfter(uint16_t client_id, uint64_t receipt_generation,
+                                       const ClientAcceptanceObservation& observation) const;
         bool hasArmedTerminalCombatReceipts(const ClientAcceptanceObservation& observation) const;
         bool advanceToArmedCombatReceiptWaits();
         const ClientAcceptanceWorldItem* findWorldItem(
@@ -695,6 +697,17 @@ namespace FPSShooter
             });
     }
 
+    inline bool ClientAcceptanceScript::hasLocalKillOfRemoteAfter(
+        uint16_t client_id, uint64_t receipt_generation,
+        const ClientAcceptanceObservation& observation) const
+    {
+        return std::any_of(observation.death_receipts.begin(), observation.death_receipts.end(),
+            [client_id, receipt_generation, &observation](const ClientAcceptanceDeathReceipt& receipt) {
+                return observation.local_client_id != 0 && receipt.killer_client_id == observation.local_client_id &&
+                    receipt.victim_client_id == client_id && receipt.receipt_generation > receipt_generation;
+            });
+    }
+
     inline const ClientAcceptanceWorldItem* ClientAcceptanceScript::findWorldItem(
         uint32_t world_item_id, const ClientAcceptanceObservation& observation) const
     {
@@ -834,7 +847,10 @@ namespace FPSShooter
         if (distance <= action.tolerance) {
             m_move_forward = 0.0f;
         } else {
-            m_move_forward = std::clamp(distance / kMoveApproachDistance, 0.12f, 1.0f);
+            // Ground stop friction can nearly cancel the acceleration from a
+            // very small axis. Maintain a bounded approach input until the
+            // tolerance is reached, while retaining proportional braking.
+            m_move_forward = std::clamp(distance / kMoveApproachDistance, 0.4f, 1.0f);
         }
     }
 
@@ -949,6 +965,7 @@ namespace FPSShooter
                 if (!remote || !canRunLivePawnAction(observation)) return dispatch;
                 m_state = State::RunningAimFireAtRemoteLive;
                 m_elapsed_seconds = 0.0f;
+                m_combat_receipt_start_generation = observation.combat_receipt_generation;
                 updateRemoteAimYaw(*remote, observation);
                 LOG_ENGINE_INFO("[ACCEPT] aim_fire_at_remote_live begin line={} target_client={} timeout_ms={}",
                     action.source_line, action.remote_client_id, action.duration_ms);
@@ -1275,6 +1292,13 @@ namespace FPSShooter
         }
         case State::RunningAimFireAtRemoteLive: {
             if (!canRunLivePawnAction(observation)) {
+                if (hasLocalKillOfRemoteAfter(action.remote_client_id,
+                                              m_combat_receipt_start_generation, observation)) {
+                    LOG_ENGINE_INFO("[ACCEPT] aim_fire_at_remote_live observed local kill line={} target_client={}",
+                        action.source_line, action.remote_client_id);
+                    advanceAction();
+                    return dispatch;
+                }
                 disable("client action script stopped: aim_fire_at_remote_live lost authoritative Live pawn state on line " +
                     std::to_string(action.source_line));
                 return dispatch;
@@ -1467,7 +1491,7 @@ namespace FPSShooter
             return;
         }
         if (m_state == State::RunningAimFireAtRemoteLive) {
-            if (can_fire) {
+            if (movement_allowed && can_fire) {
                 state.buttons |= ATTACK;
                 state.camera_yaw = m_remote_aim_yaw;
             }
@@ -1509,8 +1533,8 @@ namespace FPSShooter
             if ((movement_bits & MOVE_LEFT) != 0) state.move_right -= 1.0f;
         }
         state.buttons |= scripted & (USE | DROP);
-        if (can_fire) state.buttons |= scripted & ATTACK;
-        if (can_reload) state.buttons |= scripted & RELOAD;
+        if (movement_allowed && can_fire) state.buttons |= scripted & ATTACK;
+        if (movement_allowed && can_reload) state.buttons |= scripted & RELOAD;
         state.move_forward = std::clamp(state.move_forward, -1.0f, 1.0f);
         state.move_right = std::clamp(state.move_right, -1.0f, 1.0f);
     }

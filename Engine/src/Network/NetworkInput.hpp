@@ -11,7 +11,6 @@
 
 namespace Net {
 
-constexpr uint32_t MAX_INPUT_TICK_WINDOW = 128;
 constexpr uint32_t MAX_INPUT_BURST_TICKS = 8;
 constexpr float MAX_INPUT_AXIS_ABS = 1.25f;
 constexpr float MAX_INPUT_VIEW_ANGLE_ABS = 100000.0f;
@@ -93,17 +92,11 @@ inline std::vector<InputSample> collectInputSamplesChronological(
     return samples;
 }
 
-inline bool shouldAcceptInputTick(uint32_t tick, uint32_t last_processed_tick, uint32_t max_window = MAX_INPUT_TICK_WINDOW)
+inline bool shouldAcceptInputTick(uint32_t tick, uint32_t last_processed_tick)
 {
-    if (tick == 0 || !isTickNewer(tick, last_processed_tick)) {
-        return false;
-    }
-
-    if (last_processed_tick != 0 && (tick - last_processed_tick) > max_window) {
-        return false;
-    }
-
-    return true;
+    // Client-local command ticks can skip during coalescing. Serial ordering
+    // rejects replays; the independent server budget bounds simulations.
+    return tick != 0 && isTickNewer(tick, last_processed_tick);
 }
 
 inline void accrueInputTickBudget(

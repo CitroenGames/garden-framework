@@ -314,6 +314,7 @@ struct ClientInfo
     ENetPeer* peer = nullptr;
     uint32_t last_acknowledged_tick = 0;  // Last tick the client acknowledged
     uint32_t last_input_tick = 0;         // Last tick we received input from client
+    bool input_filter_was_closed = false; // Await a primary after a witnessed filter rejection.
     uint32_t last_input_budget_server_tick = 0;
     uint32_t input_tick_budget = INITIAL_INPUT_TICK_BUDGET;
     uint32_t capability_flags = 0; // negotiated CAP_* bits for this client

@@ -448,12 +448,10 @@ static void sendWeaponState(uint16_t client_id, entt::entity player_entity, cons
 }
 
 static bool publishFpsDeathEvent(
-    const FpsCombat::CombatFeedRecord& record,
-    const FpsServer::FpsDeathEvent& legacy_event)
+    const FpsCombat::CombatFeedRecord& record)
 {
-    // Serialize the richer versioned publication before sending any legacy
-    // compatibility notification. A serialization failure never changes the
-    // already-resolved health, score, drop, or round state.
+    // A serialization failure never changes the already-resolved health,
+    // score, drop, or round state.
     const CombatEventMessage combat_event = FpsCombat::makeCombatEventMessage(record);
     BitWriter combat_writer;
     if (!CombatSerializer::serialize(combat_writer, combat_event)) {
@@ -462,21 +460,10 @@ static bool publishFpsDeathEvent(
         return false;
     }
 
-    PlayerDiedMessage death_msg;
-    death_msg.victim_client_id = legacy_event.victim_client_id;
-    death_msg.killer_client_id = legacy_event.attacker_client_id;
-    death_msg.death_position = legacy_event.death_position;
-
-    BitWriter death_writer;
-    CombatSerializer::serialize(death_writer, death_msg);
     for (uint16_t i = 1; i < g_server_network.getNextClientId(); ++i) {
         const ClientInfo* client = g_server_network.getClientInfo(i);
-        if (client && client->peer) {
+        if (client && client->peer)
             g_server_network.sendReliableToClient(i, combat_writer);
-            // Keep PLAYER_DIED published for the scoped P1 migration. v5
-            // clients use COMBAT_EVENT for idempotent feed/count state.
-            g_server_network.sendReliableToClient(i, death_writer);
-        }
     }
     return true;
 }
@@ -526,7 +513,6 @@ static bool resolveFpsDeath(
         static_cast<uint8_t>(weapon_type),
         self_inflicted ? FpsServer::FpsDeathEventSelfInflicted : FpsServer::FpsDeathEventNone,
         transition.death_sequence,
-        death_position,
     };
 
     if (g_competitive && g_bomb_system.bomb.carrier == victim_entity)
@@ -579,7 +565,7 @@ static bool resolveFpsDeath(
         const FpsCombat::CombatFeedComponent& feed = FpsCombat::combatFeed(game_world.registry);
         const FpsCombat::CombatFeedRecord* record = FpsCombat::combatFeedRecordAt(feed, feed.count - 1);
         if (record)
-            (void)publishFpsDeathEvent(*record, death_event);
+            (void)publishFpsDeathEvent(*record);
     } else {
         LOG_ENGINE_ERROR("Failed to record COMBAT_EVENT victim={} sequence={}",
             death_event.victim_client_id, death_event.death_sequence);

@@ -855,33 +855,25 @@ GAME_API bool gardenGameInit(EngineServices* services)
                 result == FpsLogic::WorldItemPresentationRemoveResult::Removed ? "removed" : "unknown_remove");
             return;
         }
-        if (message_type == static_cast<uint8_t>(CombatEventMessageType::COMBAT_EVENT)) {
-            CombatEventMessage msg;
-            if (!CombatSerializer::deserialize(reader, msg)) {
-                LOG_ENGINE_WARN("Ignoring malformed COMBAT_EVENT");
-                return;
-            }
-
-            const FpsCombat::ClientCombatEventAcceptResult result =
-                g_combat_event_identity_cache.accept(msg);
-            if (result != FpsCombat::ClientCombatEventAcceptResult::Accepted) {
-                LOG_ENGINE_INFO("Ignoring COMBAT_EVENT victim={} sequence={} result={}",
-                    msg.victim_client_id, msg.death_sequence, static_cast<unsigned>(result));
+        CombatEventMessage msg;
+        const auto combat_result = UiLogic::receiveCombatEvent(
+            message_type, reader, g_combat_event_identity_cache, g_combat_feed, msg);
+        if (combat_result != UiLogic::CombatEventReceiveResult::NotCombatEvent) {
+            if (combat_result != UiLogic::CombatEventReceiveResult::Accepted) {
+                LOG_ENGINE_WARN("Ignoring COMBAT_EVENT result={}", static_cast<unsigned>(combat_result));
                 return;
             }
             LOG_ENGINE_INFO("COMBAT_EVENT accepted killer={} victim={} weapon={} flags={} death_sequence={} publication_sequence={}",
                 msg.killer_client_id, msg.victim_client_id, msg.weapon_type, msg.flags,
                 msg.death_sequence, msg.publication_sequence);
-            if (!g_combat_feed.recordCombatEvent(msg)) {
-                LOG_ENGINE_WARN("Ignoring COMBAT_EVENT rejected by feed presentation");
-                return;
-            }
 
+            // Every recipient may inspect accepted event values; local victim
+            // effects and victim-scoped receipt predicates remain separate.
+            appendClientAcceptanceCombatReceipt(g_death_acceptance_receipts,
+                FPSShooter::ClientAcceptanceDeathReceipt{
+                    msg.killer_client_id, msg.victim_client_id, ++g_combat_receipt_generation
+                });
             if (msg.victim_client_id == g_network.getClientId()) {
-                appendClientAcceptanceCombatReceipt(g_death_acceptance_receipts,
-                    FPSShooter::ClientAcceptanceDeathReceipt{
-                        msg.killer_client_id, msg.victim_client_id, ++g_combat_receipt_generation
-                    });
                 g_local_alive = false;
                 g_local_health = 0;
                 g_has_authoritative_health_snapshot = true;
@@ -933,17 +925,6 @@ GAME_API bool gardenGameInit(EngineServices* services)
                 g_has_authoritative_health_snapshot = true;
                 LOG_ENGINE_INFO("Took {} damage! Health: {}", msg.damage, g_local_health);
             }
-            break;
-        }
-        case CombatMessageType::PLAYER_DIED: {
-            PlayerDiedMessage msg;
-            if (!CombatSerializer::deserialize(reader, msg)) {
-                LOG_ENGINE_WARN("Failed to deserialize PLAYER_DIED");
-                return;
-            }
-            // P1 retains PLAYER_DIED on the wire for its existing consumers,
-            // but v5 clients derive idempotent presentation, local counts,
-            // and acceptance receipts solely from the preceding COMBAT_EVENT.
             break;
         }
         case CombatMessageType::PLAYER_RESPAWN: {
@@ -1012,7 +993,7 @@ GAME_API bool gardenGameInit(EngineServices* services)
             break;
         }
         default:
-            LOG_ENGINE_WARN("Unhandled combat message type {}", static_cast<int>(message_type));
+            LOG_ENGINE_WARN("Rejecting unknown or retired template message type {}", static_cast<int>(message_type));
             break;
         }
     });

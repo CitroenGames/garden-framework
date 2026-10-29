@@ -18,7 +18,7 @@ enum class CombatMessageType : uint8_t
 {
     SHOOT_RESULT = Net::CUSTOM_MESSAGE_START,
     DAMAGE_EVENT = Net::CUSTOM_MESSAGE_START + 1,
-    PLAYER_DIED = Net::CUSTOM_MESSAGE_START + 2,
+    // CUSTOM_MESSAGE_START + 2 (66) is retired and must not be reused.
     PLAYER_RESPAWN = Net::CUSTOM_MESSAGE_START + 3,
     WEAPON_STATE = Net::CUSTOM_MESSAGE_START + 4
 };
@@ -474,14 +474,6 @@ struct DamageEventMessage
     uint64_t presentation_sequence = 0;
 };
 
-struct PlayerDiedMessage
-{
-    uint8_t type = static_cast<uint8_t>(CombatMessageType::PLAYER_DIED);
-    uint16_t victim_client_id = 0;
-    uint16_t killer_client_id = 0;
-    glm::vec3 death_position = glm::vec3(0);
-};
-
 // A death is identified by the victim's per-life sequence. publication_sequence
 // carries the server's total feed order when multiple victims die in one tick.
 // Score fields are the exact already-applied GameRules deltas; clients display
@@ -629,22 +621,6 @@ namespace CombatSerializer
         msg.health_remaining = static_cast<int32_t>(reader.readUInt32());
         msg.hit_position = reader.readVector3f();
         msg.presentation_sequence = reader.readBits(64);
-        return !reader.hasError();
-    }
-
-    inline void serialize(Net::BitWriter& writer, const PlayerDiedMessage& msg) {
-        writer.writeByte(msg.type);
-        writer.writeUInt16(msg.victim_client_id);
-        writer.writeUInt16(msg.killer_client_id);
-        writer.writeVector3f(msg.death_position);
-    }
-
-    inline bool deserialize(Net::BitReader& reader, PlayerDiedMessage& msg) {
-        msg.type = reader.readByte();
-        if (msg.type != static_cast<uint8_t>(CombatMessageType::PLAYER_DIED)) return false;
-        msg.victim_client_id = reader.readUInt16();
-        msg.killer_client_id = reader.readUInt16();
-        msg.death_position = reader.readVector3f();
         return !reader.hasError();
     }
 

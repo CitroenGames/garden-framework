@@ -162,7 +162,11 @@ int testInputPolicy()
     if (!Net::shouldAcceptInputTick(41, 40)) return fail(name, "new tick rejected");
     if (Net::shouldAcceptInputTick(40, 40)) return fail(name, "duplicate tick accepted");
     if (Net::shouldAcceptInputTick(39, 40)) return fail(name, "old tick accepted");
-    if (Net::shouldAcceptInputTick(170, 40)) return fail(name, "out-of-window tick accepted");
+    if (!Net::shouldAcceptInputTick(170, 40)) return fail(name, "large forward gap rejected");
+    if (Net::shouldAcceptInputTick(0, 40)) return fail(name, "zero tick accepted");
+    if (!Net::shouldAcceptInputTick(1, 0xfffffffeu)) return fail(name, "forward wrapped tick rejected");
+    if (Net::shouldAcceptInputTick(0xfffffffeu, 1)) return fail(name, "stale wrapped tick accepted");
+    if (Net::shouldAcceptInputTick(0, 0xffffffffu)) return fail(name, "wrapped zero tick accepted");
     if (Net::InputFlags::RELOAD == Net::InputFlags::ATTACK2) return fail(name, "reload still aliases attack2");
     if (Net::InputFlags::RELOAD != static_cast<uint16_t>(1 << 11)) return fail(name, "reload bit mismatch");
     if (Net::InputFlags::CROUCH != static_cast<uint16_t>(1 << 8)) return fail(name, "crouch bit mismatch");

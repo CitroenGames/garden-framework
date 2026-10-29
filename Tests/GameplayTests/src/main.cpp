@@ -1,5 +1,6 @@
 #include "../../LifecycleTestUtils.hpp"
 #include "Components/Components.hpp"
+#include "Character/CharacterController.hpp"
 #include "Network/BitStream.hpp"
 #include "Network/ReplicationRegistry.hpp"
 #include "Network/NetworkSerializer.hpp"
@@ -13,6 +14,7 @@
 #include "Reflection/ReflectionRegistry.hpp"
 #include "world.hpp"
 #include "shared/FpsGameLogic.hpp"
+#include "shared/FpsMovementTuning.hpp"
 #include "shared/FpsReplication.hpp"
 #include "shared/BotLogic.hpp"
 #include "shared/PlayerLifecycle.hpp"
@@ -2996,7 +2998,7 @@ bool testFpsDeathLifecycle()
     registry.get<FpsHealthComponent>(self).takeDamage(100);
     const auto self_result = FpsServer::beginFpsDeathTransition(registry, self);
     FpsServer::FpsDeathEvent self_event{7, 7, static_cast<uint8_t>(WeaponType::COUNT),
-        FpsServer::FpsDeathEventSelfInflicted, self_result.death_sequence, glm::vec3(1.0f, 2.0f, 3.0f)};
+        FpsServer::FpsDeathEventSelfInflicted, self_result.death_sequence};
     if (!self_result.transitioned || (self_event.flags & FpsServer::FpsDeathEventSelfInflicted) == 0 ||
         self_event.attacker_client_id != self_event.victim_client_id) {
         return fail(name, "self death attribution was not preserved");
@@ -3004,11 +3006,10 @@ bool testFpsDeathLifecycle()
 
     // Event delivery needs no entity dereference after a disconnect.
     const FpsServer::FpsDeathEvent disconnect_safe_event{12, 13, static_cast<uint8_t>(WeaponType::RIFLE),
-        FpsServer::FpsDeathEventNone, first.death_sequence, glm::vec3(4.0f, 5.0f, 6.0f)};
+        FpsServer::FpsDeathEventNone, first.death_sequence};
     registry.destroy(attacker);
     registry.destroy(victim);
-    if (disconnect_safe_event.attacker_client_id != 12 || disconnect_safe_event.victim_client_id != 13 ||
-        !approxVec3(disconnect_safe_event.death_position, glm::vec3(4.0f, 5.0f, 6.0f))) {
+    if (disconnect_safe_event.attacker_client_id != 12 || disconnect_safe_event.victim_client_id != 13) {
         return fail(name, "disconnect-safe death event lost its value data");
     }
 
@@ -3045,7 +3046,7 @@ bool testFpsCombatFeedContract()
     // rename or disconnect after this point cannot mutate attribution.
     const FpsServer::FpsDeathEvent death_event{
         10, 20, static_cast<uint8_t>(WeaponType::RIFLE),
-        FpsServer::FpsDeathEventNone, 3, glm::vec3(1.0f, 2.0f, 3.0f)};
+        FpsServer::FpsDeathEventNone, 3};
     FpsCombat::CombatFeedEvent first = FpsServer::makeCombatFeedEvent(
         death_event, {1, 1, true});
     FpsCombat::CombatFeedEvent second = first;
@@ -3271,6 +3272,16 @@ bool testClientAcceptanceScriptAuthorityAndInput()
         return fail_with_cleanup("input capability gates or camera preservation failed");
     }
 
+    // Weapon readiness alone must not let the script inject fire or reload
+    // during a phase lock; USE retains its independent script semantics.
+    Net::InputState phase_locked_input;
+    script.applyInput(phase_locked_input, false, true, true);
+    if ((phase_locked_input.buttons & (Net::InputFlags::ATTACK | Net::InputFlags::RELOAD |
+                                      Net::InputFlags::MOVE_FORWARD | Net::InputFlags::MOVE_RIGHT)) != 0 ||
+        (phase_locked_input.buttons & Net::InputFlags::USE) == 0) {
+        return fail_with_cleanup("phase lock allowed scripted combat input or suppressed USE");
+    }
+
     Net::InputState permitted_input;
     permitted_input.move_forward = 0.5f;
     permitted_input.move_right = 0.5f;
@@ -3315,6 +3326,82 @@ bool testClientAcceptanceScriptAuthorityAndInput()
     if (script.active())
         return fail_with_cleanup("post-wait buy result did not complete the valid script");
 
+    cleanup();
+    return pass(name);
+}
+
+bool testClientAcceptanceScriptNearTargetConvergence()
+{
+    const std::string name = "ClientAcceptanceScript.NearTargetConvergence";
+    const auto script_path = std::filesystem::temp_directory_path() /
+        ("garden_client_convergence_" +
+         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".txt");
+    std::error_code remove_error;
+    const auto cleanup = [&]() { std::filesystem::remove(script_path, remove_error); };
+    const auto fail_with_cleanup = [&](const char* reason) { cleanup(); return fail(name, reason); };
+    ScopedEnvironmentValue script_environment("FPS_TEST_ACTION_SCRIPT");
+    if (!writeClientAcceptanceScript(script_path, "move_to_live 0 0 1 12000\nwait 1000\n") ||
+        !script_environment.set(script_path.string().c_str()))
+        return fail_with_cleanup("could not configure convergence script");
+
+    FPSShooter::ClientAcceptanceScript script;
+    script.loadFromEnvironment();
+    FPSShooter::ClientAcceptanceObservation observation;
+    observation.connected = true;
+    observation.has_round_state = true;
+    observation.round_phase = Competitive::RoundPhase::Live;
+    observation.local_team = Competitive::FpsTeam::Attackers;
+    observation.has_local_pawn = true;
+    observation.has_local_transform = true;
+    observation.local_position_x = -1.27f;
+    observation.has_authoritative_pawn_position = true;
+    observation.authoritative_pawn_position_x = -1.27f;
+    observation.authoritative_pawn_snapshot_generation = 1;
+    script.tick(0.0f, observation);
+
+    CharacterController::MovementTuning tuning;
+    tuning.max_speed = FPSShooter::kMoveSpeed;
+    tuning.stop_speed = tuning.max_speed * 0.25f;
+    CharacterControllerState pawn;
+    pawn.position.x = -1.27f;
+    pawn.grounded = true;
+    bool entered_radius = false;
+    for (uint32_t tick = 1; tick <= 180; ++tick) {
+        Net::InputState input;
+        script.applyInput(input, true, true, true);
+        if (tick == 1) script.noteInputCommandSent(tick, true);
+        CharacterMoveInput move;
+        move.move_forward = input.move_forward;
+        move.camera_yaw = input.camera_yaw;
+        pawn = CharacterController::simulateSourceMovement(move, pawn, tuning);
+        pawn.grounded = true; // Flat-ground fixture; no collision scene is involved.
+        if (pawn.position.x > 0.0f)
+            return fail_with_cleanup("approach crossed the target before authoritative arrival");
+        if (tick % 3 == 0) {
+            observation.authoritative_pawn_position_x = pawn.position.x;
+            ++observation.authoritative_pawn_snapshot_generation;
+            script.tick(tuning.fixed_delta * 3.0f, observation);
+            if (std::abs(pawn.position.x) <= 1.0f) {
+                entered_radius = true;
+                break;
+            }
+        }
+    }
+    if (!entered_radius || !script.isMoveToLiveSteering())
+        return fail_with_cleanup("near-target input did not converge while awaiting acknowledgement");
+    Net::InputState neutral;
+    script.applyInput(neutral, true, true, true);
+    if (!approx(neutral.move_forward, 0.0f) || !approx(neutral.move_right, 0.0f))
+        return fail_with_cleanup("inside-radius steering was not neutral before acknowledgement");
+    observation.last_authoritative_input_tick = 1;
+    script.tick(0.0f, observation);
+    if (script.isMoveToLiveSteering())
+        return fail_with_cleanup("fresh authoritative arrival and acknowledgement did not advance");
+    script.tick(0.0f, observation); // Starts the next wait only after acknowledged arrival.
+    Net::InputState after_arrival;
+    script.applyInput(after_arrival, true, true, true);
+    if (after_arrival.buttons != 0)
+        return fail_with_cleanup("acknowledged authoritative arrival did not advance the waypoint");
     cleanup();
     return pass(name);
 }
@@ -3448,7 +3535,7 @@ bool testClientAcceptanceScriptLiveBombActions()
     Net::InputState approach_input;
     script.applyInput(approach_input, true, true, true);
     if (!approx(approach_input.camera_yaw, 1.5707963f, 0.001f) ||
-        !approx(approach_input.move_forward, 0.2f, 0.001f)) {
+        !approx(approach_input.move_forward, 0.4f, 0.001f)) {
         return fail_with_cleanup("move_to_live did not brake while preserving cardinal steering yaw");
     }
 
@@ -4097,6 +4184,13 @@ bool testClientAcceptanceScriptBotCombatActions()
         !approx(aim_input.camera_yaw, 1.5707963f, 0.001f)) {
         return fail_with_cleanup("remote replicated target did not drive ordinary aim/fire input");
     }
+    Net::InputState phase_locked_aim;
+    phase_locked_aim.camera_yaw = -0.5f;
+    script.applyInput(phase_locked_aim, false, true, true);
+    if ((phase_locked_aim.buttons & Net::InputFlags::ATTACK) != 0 ||
+        !approx(phase_locked_aim.camera_yaw, -0.5f))
+        return fail_with_cleanup("remote aim action bypassed phase lock");
+
     // An unavailable fire capability must not fabricate an attack edge.
     Net::InputState blocked_input;
     script.applyInput(blocked_input, true, false, true);
@@ -4123,9 +4217,13 @@ bool testClientAcceptanceScriptBotCombatActions()
     script.tick(0.0f, observation);
     if (!script.active())
         return fail_with_cleanup("stale death receipt completed acceptance");
+    observation.death_receipts = {{40000, 8, 4}};
+    script.tick(0.0f, observation);
+    if (!script.active())
+        return fail_with_cleanup("another victim's death event completed private victim wait");
     observation.death_receipts = {{40000, 7, 4}};
     observation.combat_receipt_generation = 4;
-    // PLAYER_DIED updates the authoritative presentation state in the same
+    // COMBAT_EVENT updates the authoritative presentation state in the same
     // client frame as its death receipt. The fresh matching receipt must close
     // the wait before the regular Live-pawn gate observes that terminal state.
     observation.round_phase = Competitive::RoundPhase::RoundEnd;
@@ -4196,7 +4294,7 @@ bool testClientAcceptanceScriptBotCombatActions()
     if (script.active())
         return fail_with_cleanup("pre-armed receipts received during movement were not consumed by later waits");
 
-    // A terminal PLAYER_DIED update can arrive before a multi-waypoint route
+    // A terminal COMBAT_EVENT update can arrive before a multi-waypoint route
     // reaches its next target. Fresh, matching receipts armed before that
     // route may preserve continuity to the exact later waits, but do not
     // complete either wait until it becomes active.
@@ -4249,6 +4347,49 @@ bool testClientAcceptanceScriptBotCombatActions()
     script.tick(0.0f, observation); // consume death receipt
     if (script.active())
         return fail_with_cleanup("terminal pre-armed route did not finish at later receipt waits");
+
+    // Aim/fire only survives the terminal transition on a fresh accepted
+    // death event for this local killer and the selected remote victim.
+    if (!writeClientAcceptanceScript(script_path,
+        "aim_fire_at_remote_live 40000 1000\nwait 1000\n") ||
+        !script_environment.set(script_path.string().c_str()))
+        return fail_with_cleanup("could not configure local-killer aim script");
+    const auto startKillerAim = [&]() {
+        script.loadFromEnvironment();
+        observation.has_local_pawn = true;
+        observation.has_local_transform = true;
+        observation.round_phase = Competitive::RoundPhase::Live;
+        observation.remote_players = {{40000, 10.0f, 0.0f}};
+        observation.combat_receipt_generation = 30;
+        observation.death_receipts.clear();
+        script.tick(0.0f, observation);
+    };
+    for (const FPSShooter::ClientAcceptanceDeathReceipt& rejected : {
+             FPSShooter::ClientAcceptanceDeathReceipt{7, 40000, 30}, // stale
+             FPSShooter::ClientAcceptanceDeathReceipt{8, 40000, 31}, // wrong killer
+             FPSShooter::ClientAcceptanceDeathReceipt{7, 40001, 31}}) { // wrong victim
+        startKillerAim();
+        observation.death_receipts = {rejected};
+        observation.round_phase = Competitive::RoundPhase::RoundEnd;
+        script.tick(0.0f, observation);
+        if (script.active())
+            return fail_with_cleanup("stale or unmatched death event completed terminal aim");
+    }
+    startKillerAim();
+    Net::InputState terminal_aim;
+    script.applyInput(terminal_aim, true, true, true);
+    if ((terminal_aim.buttons & Net::InputFlags::ATTACK) == 0)
+        return fail_with_cleanup("local-killer aim did not emit ordinary fire");
+    observation.death_receipts = {{7, 40000, 31}};
+    observation.combat_receipt_generation = 31;
+    observation.round_phase = Competitive::RoundPhase::RoundEnd;
+    script.tick(0.0f, observation); // accepted local kill completes aim
+    if (!script.active())
+        return fail_with_cleanup("fresh matching local kill did not advance terminal aim");
+    script.tick(0.0f, observation); // begin following wait
+    script.tick(1.1f, observation);
+    if (script.active())
+        return fail_with_cleanup("fresh local kill did not reach and complete the following action");
 
     // Losing the local Live pawn without that exact armed receipt pair still
     // fails the ordinary waypoint action.
@@ -4359,6 +4500,7 @@ int main()
     ok = testFpsCombatFeedContract() && ok;
     ok = testClientAcceptanceScriptAuthorityAndInput() && ok;
     ok = testClientAcceptanceScriptLiveBombActions() && ok;
+    ok = testClientAcceptanceScriptNearTargetConvergence() && ok;
     ok = testClientAcceptanceScriptWorldItemActions() && ok;
     ok = testClientAcceptanceScriptBotCombatActions() && ok;
     ok = testC4PlantInterrupt() && ok;

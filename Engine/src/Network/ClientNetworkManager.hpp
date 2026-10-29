@@ -72,7 +72,7 @@ private:
     EntityRef local_player_ref{};
     uint32_t local_player_network_id = 0;
 
-    // Handshake state (wire v6)
+    // Handshake state (wire v7)
     uint32_t client_level_hash = 0;
     uint32_t client_capability_flags = CAP_ALL_KNOWN;
     uint32_t negotiated_capability_flags = 0;

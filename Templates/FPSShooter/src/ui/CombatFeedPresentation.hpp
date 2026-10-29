@@ -1,6 +1,7 @@
 #pragma once
 
-#include "shared/CombatProtocol.hpp"
+#include "../shared/CombatProtocol.hpp"
+#include "../shared/FpsCombatFeed.hpp"
 
 #include <array>
 #include <algorithm>
@@ -8,12 +9,6 @@
 #include <cstdint>
 #include <string>
 
-// The current all-client PLAYER_DIED message carries only stable client IDs.
-// This client-side presentation cache deliberately models only those fields.
-// It is not a replica of FpsCombat::CombatFeedComponent: that server-owned
-// feed also has weapon, flags, score deltas, and a publication sequence, none
-// of which are present on the current protocol.  Keep that distinction
-// explicit until a reviewed feed publication message is added.
 namespace UiLogic {
 
 constexpr size_t kCombatFeedPresentationCapacity = 5;
@@ -32,31 +27,6 @@ struct CombatFeedPresentationEntry {
 
 class CombatFeedPresentation {
 public:
-    // PLAYER_DIED cannot identify stale/replayed records, because it has no
-    // sequence.  The local sequence below orders only messages received by
-    // this client and must never drive scoreboard or match decisions.
-    bool recordPlayerDied(uint16_t killer_client_id, uint16_t victim_client_id)
-    {
-        if (victim_client_id == 0)
-            return false;
-
-        const size_t write_index = (m_first + m_count) % kCombatFeedPresentationCapacity;
-        CombatFeedPresentationEntry& entry = m_entries[write_index];
-        entry.killer_client_id = killer_client_id;
-        entry.victim_client_id = victim_client_id;
-        entry.weapon_type = 0;
-        entry.flags = 0;
-        entry.death_sequence = 0;
-        entry.publication_sequence = 0;
-        entry.local_sequence = m_next_sequence++;
-        entry.remaining_seconds = kCombatFeedPresentationLifetime;
-        if (m_count < kCombatFeedPresentationCapacity)
-            ++m_count;
-        else
-            m_first = (m_first + 1) % kCombatFeedPresentationCapacity;
-        return true;
-    }
-
     // Identity acceptance stays in the template client-world cache. This
     // presentation layer only formats a message that has already passed that
     // cache and structural protocol validation.
@@ -150,5 +120,37 @@ private:
     size_t m_count = 0;
     uint64_t m_next_sequence = 1;
 };
+
+enum class CombatEventReceiveResult : uint8_t {
+    NotCombatEvent,
+    Malformed,
+    Duplicate,
+    Older,
+    Accepted,
+};
+
+// Dispatch checks the type before reading. Failed or unrelated messages cannot
+// change the identity cache or presentation feed.
+inline CombatEventReceiveResult receiveCombatEvent(uint8_t message_type, Net::BitReader& reader,
+    FpsCombat::ClientCombatEventIdentityCache& cache, CombatFeedPresentation& feed,
+    CombatEventMessage& accepted_event)
+{
+    if (message_type != static_cast<uint8_t>(CombatEventMessageType::COMBAT_EVENT))
+        return CombatEventReceiveResult::NotCombatEvent;
+    CombatEventMessage event;
+    if (!CombatSerializer::deserialize(reader, event))
+        return CombatEventReceiveResult::Malformed;
+    const auto result = cache.accept(event);
+    if (result == FpsCombat::ClientCombatEventAcceptResult::Duplicate)
+        return CombatEventReceiveResult::Duplicate;
+    if (result == FpsCombat::ClientCombatEventAcceptResult::Older)
+        return CombatEventReceiveResult::Older;
+    if (result != FpsCombat::ClientCombatEventAcceptResult::Accepted)
+        return CombatEventReceiveResult::Malformed;
+    // The same validation precedes both cache and feed insertion.
+    feed.recordCombatEvent(event);
+    accepted_event = event;
+    return CombatEventReceiveResult::Accepted;
+}
 
 } // namespace UiLogic

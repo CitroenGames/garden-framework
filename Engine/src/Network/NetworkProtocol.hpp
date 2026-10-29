@@ -11,13 +11,12 @@
 
 namespace Net {
 
-// Protocol version for compatibility checking (wire v6, exact-match).
+// Protocol version for compatibility checking (wire v7, exact-match).
 //
-// v6 gates the template-owned recipient-filtered presentation schema. Exact
-// matching rejects an older module before any changed custom payload can be
-// dispatched.
-constexpr uint32_t NETWORK_PROTOCOL_VERSION = 6;
-constexpr uint32_t NETWORK_PROTOCOL_MIN_SUPPORTED = 6; // exact-match policy kept
+// v7 is an exact wire revision gating changed custom-message contracts.
+// Matching rejects an older module before changed custom payloads are dispatched.
+constexpr uint32_t NETWORK_PROTOCOL_VERSION = 7;
+constexpr uint32_t NETWORK_PROTOCOL_MIN_SUPPORTED = 7; // exact-match policy kept
 constexpr uint16_t MAX_NETWORKED_ENTITIES = 2048;
 constexpr uint16_t MAX_SYNCED_CVARS = 1024;
 constexpr uint8_t CUSTOM_MESSAGE_START = 64;

@@ -79,7 +79,6 @@ struct FpsDeathEvent {
     uint8_t weapon_type = 0;
     uint8_t flags = FpsDeathEventNone;
     uint32_t death_sequence = 0;
-    glm::vec3 death_position{0.0f};
 };
 
 inline FpsCombat::CombatFeedEvent makeCombatFeedEvent(
