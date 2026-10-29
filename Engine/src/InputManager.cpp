@@ -1,4 +1,5 @@
 #include "InputManager.hpp"
+#include "MovementTrace.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -339,6 +340,10 @@ void InputManager::update()
 
 void InputManager::process_event(const SDL_Event& event)
 {
+    if (event.type == SDL_EVENT_KEY_DOWN || event.type == SDL_EVENT_KEY_UP)
+        MovementTrace::emit("physical_key", "role=client frame_id=unavailable scancode={} down={} repeat={} sdl_event_ns={} event_clock=sdl sdl_to_steady_mapping=unavailable",
+            static_cast<int>(event.key.scancode), event.type == SDL_EVENT_KEY_DOWN,
+            event.key.repeat, event.key.timestamp);
     switch (event.type)
     {
     case SDL_EVENT_KEY_DOWN:

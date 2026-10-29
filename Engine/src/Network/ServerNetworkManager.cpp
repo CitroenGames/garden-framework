@@ -10,9 +10,11 @@
 #include "Components/Components.hpp"
 #include "SharedMovement.hpp"
 #include "Utils/Log.hpp"
+#include "MovementTrace.hpp"
 #include "Console/ConVar.hpp"
 #include "Console/Console.hpp"
 #include <entt/entt.hpp>
+#include <SDL3/SDL.h>
 #include <cstring>
 #include <cerrno>
 #include <cmath>
@@ -527,6 +529,27 @@ void ServerNetworkManager::handleInputCommand(uint16_t client_id, BitReader& rea
         return;
     }
 
+    // Packet and sample ordinals distinguish redundant copies with the same tick.
+    static std::atomic<uint64_t> trace_packet_counter{0};
+    const uint64_t trace_packet = MovementTrace::enabled()
+        ? trace_packet_counter.fetch_add(1, std::memory_order_relaxed) + 1 : 0;
+    const auto trace_received = [&](const InputSample& sample, size_t ordinal) {
+        MovementTrace::emit("authority_received", "role=server packet={} sample={} client={} server_tick={} input_tick={} buttons={} forward={} right={} view_yaw={} view_pitch={}",
+            trace_packet, ordinal, client_id, current_tick, sample.tick, sample.buttons, sample.move_forward, sample.move_right, sample.camera_yaw, sample.camera_pitch);
+    };
+    const auto trace_decision = [&](const InputSample& sample, size_t ordinal, const char* decision, const char* reason) {
+        MovementTrace::emit("authority_decision", "role=server packet={} sample={} client={} server_tick={} input_tick={} decision={} reason={}",
+            trace_packet, ordinal, client_id, current_tick, sample.tick, decision, reason);
+    };
+    const auto trace_unavailable_pawn = [&](const char* reason) {
+        if (!MovementTrace::enabled()) return;
+        const auto trace_samples = collectInputSamplesChronological(msg, redundant_inputs);
+        for (size_t i = 0; i < trace_samples.size(); ++i) {
+            trace_received(trace_samples[i], i);
+            trace_decision(trace_samples[i], i, "rejected", reason);
+        }
+    };
+
     // Update acknowledged tick. Clients may acknowledge 0 before their first world snapshot.
     if (msg.last_received_tick == 0 ||
         (!isTickNewer(msg.last_received_tick, current_tick) &&
@@ -538,20 +561,24 @@ void ServerNetworkManager::handleInputCommand(uint16_t client_id, BitReader& rea
     // Get player entity for this client
     uint32_t player_net_id = it->second.info.player_entity_network_id;
     if (player_net_id == 0) {
+        trace_unavailable_pawn("pawn_not_spawned");
         return;  // Player not spawned yet
     }
 
     entt::entity player_entity = getEntityByNetworkId(player_net_id);
     if (!game_world->registry.valid(player_entity)) {
+        trace_unavailable_pawn("pawn_invalid");
         return;
     }
 
     // Get required components
     if (!game_world->registry.all_of<PlayerComponent, TransformComponent, RigidBodyComponent>(player_entity)) {
+        trace_unavailable_pawn("components_missing");
         return;
     }
 
     const auto samples = collectInputSamplesChronological(msg, redundant_inputs);
+    for (size_t i = 0; i < samples.size(); ++i) trace_received(samples[i], i);
 
     // A game may reject input while a pawn is frozen, dead, or otherwise
     // unable to act. Keep the transport cursor current for valid, monotonic
@@ -559,8 +586,10 @@ void ServerNetworkManager::handleInputCommand(uint16_t client_id, BitReader& rea
     // path. Otherwise their redundant copies become newly eligible when the
     // filter opens and can consume the first live tick's budget.
     if (input_filter && !input_filter(client_id, player_entity)) {
-        for (const auto& sample : samples) {
+        for (size_t i = 0; i < samples.size(); ++i) {
+            const auto& sample = samples[i];
             if (!isValidInputSample(sample)) {
+                trace_decision(sample, i, "rejected", "invalid");
                 LOG_ENGINE_WARN("Client {0} sent invalid input sample at tick {1}", client_id, sample.tick);
                 recordDroppedFromPeer(it->second.info.peer, 0);
                 continue;
@@ -568,6 +597,9 @@ void ServerNetworkManager::handleInputCommand(uint16_t client_id, BitReader& rea
 
             if (shouldAcceptInputTick(sample.tick, it->second.info.last_input_tick)) {
                 it->second.info.last_input_tick = sample.tick;
+                trace_decision(sample, i, "rejected", "input_filter_cursor_advanced");
+            } else {
+                trace_decision(sample, i, "rejected", "input_filter_stale_or_out_of_window");
             }
         }
         return;
@@ -587,19 +619,24 @@ void ServerNetworkManager::handleInputCommand(uint16_t client_id, BitReader& rea
         it->second.info.last_input_budget_server_tick,
         it->second.info.input_tick_budget);
 
-    for (const auto& sample : samples) {
+    for (size_t i = 0; i < samples.size(); ++i) {
+        const auto& sample = samples[i];
         if (!isValidInputSample(sample)) {
+            trace_decision(sample, i, "rejected", "invalid");
             LOG_ENGINE_WARN("Client {0} sent invalid input sample at tick {1}", client_id, sample.tick);
             recordDroppedFromPeer(it->second.info.peer, 0);
             continue;
         }
 
         if (!shouldAcceptInputTick(sample.tick, it->second.info.last_input_tick)) {
+            trace_decision(sample, i, "rejected", "stale_or_out_of_window");
             continue;
         }
 
         if (!consumeInputTickBudget(it->second.info.input_tick_budget)) {
             LOG_ENGINE_WARN("Client {0} exceeded input tick budget at server tick {1}", client_id, current_tick);
+            for (size_t skipped = i; skipped < samples.size(); ++skipped)
+                trace_decision(samples[skipped], skipped, "rejected", skipped == i ? "budget_exhausted" : "after_budget_break_not_evaluated");
             break;
         }
 
@@ -625,7 +662,9 @@ void ServerNetworkManager::handleInputCommand(uint16_t client_id, BitReader& rea
         move_state.grounded = player.grounded;
         move_state.ground_normal = player.ground_normal;
 
+        const uint64_t trace_sdl_step_ns = MovementTrace::enabled() ? SDL_GetTicksNS() : 0;
         MovementState result = move_state;
+        bool trace_simulation_succeeded = true;
         if (game_world->registry.all_of<CharacterControllerComponent>(player_entity)) {
             CharacterPhysicsService character_physics(*game_world);
             CharacterControllerState controller_state;
@@ -637,11 +676,20 @@ void ServerNetworkManager::handleInputCommand(uint16_t client_id, BitReader& rea
                 result.grounded = controller_state.grounded;
                 result.ground_normal = controller_state.ground_normal;
             } else {
+                trace_simulation_succeeded = false;
                 LOG_ENGINE_WARN("Failed to simulate character controller for client {}", client_id);
             }
         } else {
             result = SharedMovement::simulate(move_input, move_state, movement_config);
         }
+        trace_decision(sample, i, "accepted", trace_simulation_succeeded ? "simulated" : "simulation_failed_cursor_advanced");
+        MovementTrace::emit("authority_step", "role=server packet={} sample={} client={} server_tick={} input_tick={} applied_cursor={} result_source={} sdl_step_ns={} sdl_clock=SDL_GetTicksNS fixed_delta={} buttons={} forward={} right={} view_yaw={} view_pitch={} pre_pos={},{},{} pre_vel={},{},{} pre_grounded={} post_pos={},{},{} post_vel={},{},{} post_grounded={} jumped=unavailable landed=unavailable acknowledgement=unavailable",
+            trace_packet, i, client_id, current_tick, sample.tick, sample.tick,
+            trace_simulation_succeeded ? "simulated" : "simulation_failed_retained_input", trace_sdl_step_ns, movement_config.fixed_delta, sample.buttons,
+            sample.move_forward, sample.move_right, sample.camera_yaw, sample.camera_pitch, move_state.position.x, move_state.position.y, move_state.position.z,
+            move_state.velocity.x, move_state.velocity.y, move_state.velocity.z, move_state.grounded,
+            result.position.x, result.position.y, result.position.z, result.velocity.x, result.velocity.y,
+            result.velocity.z, result.grounded);
         transform.position = result.position;
         rigidbody.velocity = result.velocity;
         player.grounded = result.grounded;

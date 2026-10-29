@@ -3,6 +3,7 @@
 #include "InputActionSystem.hpp"
 #include "Input/GameInputModeService.hpp"
 #include "Components/LocalPlayerInputComponent.hpp"
+#include "MovementTrace.hpp"
 #include "Components/ClientPredictionComponent.hpp"
 #include "Components/Components.hpp"
 #include "LocalPlayerInputSystem.hpp"
@@ -1414,6 +1415,18 @@ namespace
 int main()
 {
     bool ok = true;
+    MovementTrace::Budget trace_budget;
+    ok = expect(trace_budget.next(2) == MovementTrace::BudgetDecision::Record &&
+        trace_budget.next(2) == MovementTrace::BudgetDecision::Record &&
+        trace_budget.next(2) == MovementTrace::BudgetDecision::Exhausted &&
+        trace_budget.next(2) == MovementTrace::BudgetDecision::Drop && trace_budget.count.load() == 2,
+        "movement trace reports exhaustion exactly once and remains bounded") && ok;
+    MovementTrace::FrameSummary trace_frame;
+    ok = expect(std::string(trace_frame.category()) == "zero", "movement trace zero-step frame") && ok;
+    trace_frame.step();
+    ok = expect(std::string(trace_frame.category()) == "one", "movement trace one-step frame") && ok;
+    trace_frame.step();
+    ok = expect(std::string(trace_frame.category()) == "multiple", "movement trace multi-step frame") && ok;
     ok = testKeyTransitions() && ok;
     ok = testMouseTransitions() && ok;
     ok = testActionDispatch() && ok;

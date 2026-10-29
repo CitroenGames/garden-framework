@@ -27,6 +27,7 @@
 #include "shared/WeaponTypes.hpp"
 #include "shared/WeaponSystem.hpp"
 #include "shared/NetworkInputSampler.hpp"
+#include "MovementTrace.hpp"
 #include "shared/MovementInputPolicy.hpp"
 #include "shared/FpsMovementTuning.hpp"
 #include "shared/PlayerLifecycle.hpp"
@@ -482,7 +483,7 @@ static void runFixedClientInputStep(world& game_world,
                                     const InputActionSystem& input_actions,
                                     bool ui_modal,
                                     const FPSShooter::NetworkInputEdges& edges,
-                                    float fixed_delta)
+                                    float fixed_delta, uint64_t trace_frame_id, uint32_t trace_step)
 {
     tickPredictedLocalWeapon(fixed_delta);
 
@@ -517,6 +518,9 @@ static void runFixedClientInputStep(world& game_world,
         edges);
     if (g_local_alive && !ui_modal)
         g_acceptance_script.applyInput(input_state, movement_allowed, can_fire, can_reload);
+    MovementTrace::emit("client_command", "role=client frame_scope=game_update frame_id={} frame_step={} input_tick={} fixed_delta={} edge={} held={} buttons={} forward={} right={} view_yaw={} view_pitch={} alive={} phase_locked={} ui_modal={} acknowledgement=unavailable",
+        trace_frame_id, trace_step, command_tick, fixed_delta, edges.jump, input_actions.get("Jump").held, input_state.buttons,
+        input_state.move_forward, input_state.move_right, input_state.camera_yaw, input_state.camera_pitch, g_local_alive, movement_locked, ui_modal);
     const bool acceptance_steering_move_emitted = g_local_alive && !ui_modal && movement_allowed &&
         g_acceptance_script.isMoveToLiveSteering() &&
         (input_state.buttons & InputFlags::MOVE_FORWARD) != 0;
@@ -556,12 +560,15 @@ static void runFixedClientInputStep(world& game_world,
         move_config.fixed_delta = fixed_delta;
 
         CharacterPhysicsService character_physics(game_world);
+        const char* trace_prediction_result = "shared_movement";
         auto apply_movement = [&](const MovementInput& input, const MovementState& start_state) {
             CharacterControllerState controller_state;
             if (character_physics.hasController(prediction_pawn))
             {
-                if (!character_physics.readControllerState(prediction_pawn, controller_state))
+                if (!character_physics.readControllerState(prediction_pawn, controller_state)) {
+                    trace_prediction_result = "controller_read_failed_retained_input";
                     return start_state;
+                }
                 // Keep controller jump history while updating the predicted pose.
                 // Rebuilding the state from the wire-facing movement fields here
                 // discards held-button and jump timer state on every command.
@@ -573,13 +580,22 @@ static void runFixedClientInputStep(world& game_world,
                 if (character_physics.writeControllerState(prediction_pawn, controller_state) &&
                     character_physics.simulateController(
                         prediction_pawn, FPSShooter::toCharacterMoveInput(input), fixed_delta, controller_state))
+                {
+                    trace_prediction_result = "controller_simulated";
                     return toMovementState(controller_state);
+                }
+                trace_prediction_result = "controller_write_or_simulation_failed_retained_input";
                 return start_state;
             }
             return SharedMovement::simulate(input, start_state, move_config);
         };
 
         const MovementState result = apply_movement(move_input, move_state);
+        MovementTrace::emit("client_prediction", "role=client frame_scope=game_update frame_id={} frame_step={} input_tick={} result_source={} view_yaw={} view_pitch={} pre_pos={},{},{} pre_vel={},{},{} pre_grounded={} post_pos={},{},{} post_vel={},{},{} post_grounded={} jumped=unavailable landed=unavailable",
+            trace_frame_id, trace_step, command_tick, trace_prediction_result, input_state.camera_yaw, input_state.camera_pitch, move_state.position.x, move_state.position.y, move_state.position.z,
+            move_state.velocity.x, move_state.velocity.y, move_state.velocity.z, move_state.grounded,
+            result.position.x, result.position.y, result.position.z, result.velocity.x, result.velocity.y,
+            result.velocity.z, result.grounded);
         g_network.storeInput(command_tick, move_input, result);
         trans->position = result.position;
         rb->velocity = result.velocity;
@@ -624,6 +640,12 @@ static void runFixedClientInputStep(world& game_world,
             (void)Net::PredictionSystem::reconcile(
                 game_world, prediction_pawn, server_state, server_tick, replay_adapter);
         }
+    }
+    else
+    {
+        MovementTrace::emit("client_prediction_suppressed", "role=client frame_scope=game_update frame_id={} frame_step={} input_tick={} reason={} transform_present={} rigidbody_present={} player_present={}",
+            trace_frame_id, trace_step, command_tick, !movement_allowed ? "dead_or_phase_locked" : "components_missing",
+            trans != nullptr, rb != nullptr, pc != nullptr);
     }
 
     g_network.sendInputCommand(command_tick, input_state);
@@ -1071,6 +1093,11 @@ GAME_API bool gardenRegisterEcsComponents(ModuleComponentSink*)
 GAME_API void gardenGameUpdate(float delta_time)
 {
     if (!g_services) return;
+    static std::atomic<uint64_t> trace_frame_counter{0};
+    const uint64_t trace_frame_id = MovementTrace::enabled()
+        ? trace_frame_counter.fetch_add(1, std::memory_order_relaxed) + 1 : 0;
+    if (MovementTrace::enabled())
+        MovementTrace::emit("client_frame_begin", "role=client frame_scope=game_update frame_id={} sdl_frame_ns={} sdl_clock=SDL_GetTicksNS", trace_frame_id, SDL_GetTicksNS());
 
     world* game_world = g_services->game_world;
     auto input_manager = g_services->input_manager;
@@ -1255,6 +1282,19 @@ GAME_API void gardenGameUpdate(float delta_time)
     if (input_actions)
         updateLocalPlayerInputs(*game_world, *input_actions);
 
+    if (input_actions && MovementTrace::enabled())
+    {
+        const auto& jump = input_actions->get("Jump");
+        const auto* local = game_world->tryGetComponent<LocalPlayerInputComponent>(g_local_input_entity);
+        const std::string local_fields = local
+            ? spdlog::fmt_lib::format("local_enabled={} pending={} move_x={} move_y={}",
+                local->input_enabled, local->jump_press_pending, local->move.x, local->move.y)
+            : "local_enabled=unavailable pending=unavailable move_x=unavailable move_y=unavailable";
+        MovementTrace::emit("action_frame", "role=client frame_scope=game_update frame_id={} connected={} owner_valid={} ui_modal={} alive={} jump_held={} jump_presses={} jump_releases={} local_present={} {} frame_delta={} fixed_tick=unavailable",
+            trace_frame_id, g_network.isConnected(), game_world->isEntityValid(g_local_input_entity), ui_modal, g_local_alive,
+            jump.held, jump.press_count, jump.release_count, local != nullptr, local_fields, delta_time);
+    }
+
     if (ui_modal && game_world->isEntityValid(g_local_input_entity))
     {
         UiInput::suppressGameplayIntent(
@@ -1290,11 +1330,23 @@ GAME_API void gardenGameUpdate(float delta_time)
             FPSShooter::isLocalControllerMovementEnabled(false));
 
     const uint32_t fixed_steps = g_client_input_cadence.consumeFrame(delta_time);
+    const char* cadence_reason = !g_network.isConnected() ? "offline" :
+        !input_actions ? "input_actions_missing" : fixed_steps == 0 ? "accumulator_below_step" :
+        ui_modal ? "ui_modal" : !g_local_alive ? "dead" :
+        (g_comp.has_round_state && FPSShooter::isPawnMovementLocked(g_comp.phase)) ? "phase_locked" : "none";
+    MovementTrace::FrameSummary cadence_summary;
+    cadence_summary.steps = fixed_steps;
+    MovementTrace::emit("client_frame", "role=client frame_scope=game_update frame_id={} connected={} cadence_steps={} category={} command_steps={} reason={} frame_delta={} fixed_delta={}",
+        trace_frame_id, g_network.isConnected(), fixed_steps, cadence_summary.category(),
+        g_network.isConnected() && input_actions ? fixed_steps : 0, cadence_reason, delta_time, client_fixed_delta);
     for (uint32_t step = 0; step < fixed_steps; ++step)
     {
+        if (MovementTrace::enabled())
+            MovementTrace::emit("client_step_begin", "role=client frame_scope=game_update frame_id={} frame_step={} sdl_step_ns={} sdl_clock=SDL_GetTicksNS connected={}",
+                trace_frame_id, step + 1, SDL_GetTicksNS(), g_network.isConnected());
         const FPSShooter::NetworkInputEdges edges = g_client_input_cadence.consumeEdgesForTick();
         if (input_actions)
-            runFixedClientInputStep(*game_world, *input_actions, ui_modal, edges, client_fixed_delta);
+            runFixedClientInputStep(*game_world, *input_actions, ui_modal, edges, client_fixed_delta, trace_frame_id, step + 1);
         else
             tickPredictedLocalWeapon(client_fixed_delta);
 
@@ -1313,6 +1365,8 @@ GAME_API void gardenGameUpdate(float delta_time)
     // Update player controller
     if (g_player_controller)
         g_player_controller->update(delta_time);
+    else if (!g_network.isConnected())
+        MovementTrace::emit("offline_frame", "role=client frame_scope=game_update frame_id={} steps=0 category=zero reason=controller_missing", trace_frame_id);
 
     // Apply the prediction system's presentation-only correction to the camera.
     // Both poses are addressed through the Garden entity API rather than the
