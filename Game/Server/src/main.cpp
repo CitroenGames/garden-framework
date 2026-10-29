@@ -13,6 +13,8 @@
 #include "Application.hpp"
 #include "world.hpp"
 #include "LevelManager.hpp"
+#include "Scene/SceneManager.hpp"
+#include <vector>
 #include "Plugin/GameModuleHostSession.hpp"
 #include "Project/ProjectManager.hpp"
 #include "Reflection/ReflectionRegistry.hpp"
@@ -39,6 +41,7 @@ static Application app;
 static world _world;
 static ProjectManager project_manager;
 static LevelManager level_manager;
+static SceneManager scene_manager;
 static ReflectionRegistry reflection;
 static bool game_module_resources_released = false;
 static SystemScheduler* active_scheduler = nullptr;
@@ -64,6 +67,25 @@ static GameModuleHostSession game_module(GameModuleHostSession::HostOperations{
 
 static void shutdown_server(int code)
 {
+    auto scene_result = scene_manager.shutdown();
+    bool finishing_other_operation = scene_result.status == SceneStatus::Busy;
+    for (;;) {
+        if (finishing_other_operation && scene_result.cleanup_complete && scene_result.status != SceneStatus::Busy) {
+            finishing_other_operation = false;
+            scene_result = scene_manager.shutdown();
+        }
+        if (scene_result.status == SceneStatus::Completed ||
+            scene_result.status == SceneStatus::CompletedWithObserverFailure ||
+            scene_result.status == SceneStatus::NotInitialized) break;
+        LOG_ENGINE_ERROR("Scene shutdown incomplete (status={}); retrying", static_cast<int>(scene_result.status));
+        SDL_Delay(1);
+        if (scene_result.operation_handle.valid() &&
+            (scene_result.status == SceneStatus::Busy || !scene_result.cleanup_complete)) {
+            scene_result = scene_manager.resume(scene_result.operation_handle);
+        } else {
+            scene_result = scene_manager.shutdown();
+        }
+    }
     // Stop the host session while the world and scheduler-owned state remain
     // valid. The session dispatches server shutdown before unloading the DLL.
     if (!game_module.stop())
@@ -180,6 +202,13 @@ int main(int argc, char* argv[])
 
     registerEngineReflection(reflection);
     level_manager.setReflectionRegistry(&reflection);
+    if (scene_manager.initialize(&_world, render_api).status != SceneStatus::Completed ||
+        scene_manager.setReflectionRegistry(&reflection).status != SceneStatus::Completed ||
+        scene_manager.setGameplayDefaults(project_manager.getDescriptor().default_game_mode,
+                                          project_manager.getDescriptor().default_game_state).status != SceneStatus::Completed) {
+        LOG_ENGINE_FATAL("SceneManager initialization failed");
+        shutdown_server(1);
+    }
 
     // Load game DLL before the level so reflected game components can be imported.
     std::string dll_path = project_manager.getAbsoluteModulePath();
@@ -195,40 +224,45 @@ int main(int argc, char* argv[])
         shutdown_server(1);
     }
 
-    // Load level
-    LevelData level_data;
-    const auto selected_level_artifact = ProjectManager::normalizeSelectedLevelArtifactPath(
-        project_manager.getDescriptor().default_level);
-    if (!project_manager.getDescriptor().default_level.empty() && !selected_level_artifact)
-    {
-        LOG_ENGINE_FATAL("Selected level path is invalid or escapes the project: {}",
-            project_manager.getDescriptor().default_level);
+    // Validate every requested artifact before the first transition.
+    struct SelectedLevel { std::string artifact, resolved; uint32_t hash = 0; };
+    auto selectLevel = [](const std::string& path, SelectedLevel& out) {
+        auto normalized = ProjectManager::normalizeSelectedLevelArtifactPath(path);
+        if (!normalized || normalized->empty()) return false;
+        out.artifact = *normalized;
+        out.resolved = Assets::AssetManager::get().resolveAssetPath(out.artifact);
+        out.hash = Net::computeLevelHashFromFile(out.resolved);
+        return out.hash != 0;
+    };
+    SelectedLevel selected;
+    if (!selectLevel(project_manager.getDescriptor().default_level, selected)) {
+        LOG_ENGINE_FATAL("Invalid or unhashable default level: {}", project_manager.getDescriptor().default_level);
         shutdown_server(1);
     }
-    std::string level_path = selected_level_artifact.value_or("");
-    uint32_t loaded_level_hash = 0;
-    if (!level_path.empty())
-    {
-        level_path = Assets::AssetManager::get().resolveAssetPath(level_path);
-        if (!level_manager.loadLevel(level_path, level_data))
-        {
-            LOG_ENGINE_FATAL("Failed to load level: {}", level_path);
-            shutdown_server(1);
+    std::vector<SelectedLevel> transitions;
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--transition-level") != 0) continue;
+        if (++i >= argc || argv[i][0] == '-') {
+            LOG_ENGINE_FATAL("--transition-level requires a level path"); shutdown_server(1);
         }
-        loaded_level_hash = Net::computeLevelHashFromFile(level_path);
-        if (loaded_level_hash == 0)
-        {
-            LOG_ENGINE_ERROR("Loaded level '{}' could not be hashed for the network handshake", level_path);
-            shutdown_server(1);
+        SelectedLevel candidate;
+        if (!selectLevel(argv[i], candidate)) {
+            LOG_ENGINE_FATAL("Invalid or unhashable transition level: {}", argv[i]); shutdown_server(1);
         }
-
-        if (!level_manager.instantiateLevel(level_data, _world, render_api))
-        {
-            LOG_ENGINE_FATAL("Failed to instantiate level");
-            shutdown_server(1);
-        }
-
-        _world.initializeGameplayFramework(level_data.metadata.level_name, "");
+        transitions.push_back(std::move(candidate));
+    }
+    auto initial = scene_manager.loadScene(selected.resolved);
+    if (initial.status != SceneStatus::Completed) {
+        LOG_ENGINE_FATAL("Failed to load level: {}", selected.resolved); shutdown_server(1);
+    }
+    auto activated = scene_manager.activateScene(initial.scene_id);
+    while (!activated.cleanup_complete && activated.operation_handle.valid())
+        activated = scene_manager.resume(activated.operation_handle);
+    if (activated.status != SceneStatus::Completed && activated.status != SceneStatus::CompletedWithObserverFailure) {
+        LOG_ENGINE_FATAL("Failed to activate level (status={})", static_cast<int>(activated.status)); shutdown_server(1);
+    }
+    if (!_world.initializeGameplayFramework(scene_manager.getActiveScene()->level_data.metadata.level_name, "")) {
+        LOG_ENGINE_FATAL("Gameplay framework initialization failed"); shutdown_server(1);
     }
 
     // Initialize server via DLL
@@ -242,8 +276,8 @@ int main(int argc, char* argv[])
     services.application = &app;
     services.level_manager = &level_manager;
     services.api_version = GARDEN_MODULE_API_VERSION;
-    services.level_hash = loaded_level_hash;
-    services.selected_level_path = selected_level_artifact ? selected_level_artifact->c_str() : nullptr;
+    services.level_hash = selected.hash;
+    services.selected_level_path = selected.artifact.c_str();
     services.listen_port = listen_port;
 
     PrefabManager::get().initialize(&reflection, render_api);
@@ -319,6 +353,8 @@ int main(int argc, char* argv[])
     // Server loop
     Uint64 delta_last = SDL_GetTicks();
     bool running = true;
+    size_t transition_index = 0;
+    SceneOperationHandle pending_transition;
 
     while (running)
     {
@@ -327,6 +363,38 @@ int main(int argc, char* argv[])
         float delta_time = (frame_start - delta_last) / 1000.0f;
         delta_last = frame_start;
 
+        if (transition_index < transitions.size()) {
+            auto& next = transitions[transition_index];
+            auto result = pending_transition.valid() ? scene_manager.resume(pending_transition)
+                                                    : scene_manager.transition(next.resolved);
+            if (!result.cleanup_complete && result.operation_handle.valid()) {
+                pending_transition = result.operation_handle;
+                LOG_ENGINE_ERROR("Level transition incomplete (status={}); retrying", static_cast<int>(result.status));
+                SDL_Event pending_event;
+                while (SDL_PollEvent(&pending_event))
+                    if (pending_event.type == SDL_EVENT_QUIT) running = false;
+                SDL_Delay(1);
+                continue; // The scheduler must not drain a manager-owned token.
+            }
+            pending_transition = {};
+            if (result.status != SceneStatus::Completed && result.status != SceneStatus::CompletedWithObserverFailure) {
+                LOG_ENGINE_ERROR("Level transition failed (status={})", static_cast<int>(result.status));
+                running = false;
+                continue;
+            }
+            selected = next;
+            services.selected_level_path = selected.artifact.c_str();
+            services.level_hash = selected.hash;
+            if (!_world.initializeGameplayFramework(scene_manager.getActiveScene()->level_data.metadata.level_name, "")) {
+                LOG_ENGINE_ERROR("Gameplay framework initialization failed after transition"); running = false; continue;
+            }
+            if (!game_module.notifyServerLevelTransition()) {
+                LOG_ENGINE_ERROR("Server level transition notification failed"); running = false; continue;
+            }
+            _world.startGameplayFramework();
+            LOG_ENGINE_INFO("Server transitioned to '{}' (hash={})", selected.artifact, selected.hash);
+            ++transition_index;
+        }
         server_scheduler.runFrame(_world.registry, delta_time);
         if (!server_scheduler.lastRetirementResult().cleanupComplete()) {
             LOG_ENGINE_ERROR("Server retirement drain failed (status={})", static_cast<int>(server_scheduler.lastRetirementResult().status));

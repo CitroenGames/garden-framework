@@ -2,11 +2,14 @@
 #include "Components/HierarchyComponents.hpp"
 #include "Components/IdentityComponent.hpp"
 #include "world.hpp"
+#include "../../LifecycleTestUtils.hpp"
 #include "ECS/Hierarchy.hpp"
 #include "Events/EventBus.hpp"
+#include "Events/EngineEvents.hpp"
 
 #include <cmath>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -44,7 +47,14 @@ bool resolvesTo(entt::registry& reg, entt::entity entity,
 entt::entity makeEntity(entt::registry& reg, world& owner,
                         const glm::vec3& pos)
 {
-    entt::entity e = resolveEntityRef(reg, owner.persistedReference(owner.createScopedEntity()));
+    const auto created = owner.createScopedEntity();
+    if (!settleTestRollback(owner, created.rollback))
+        throw std::runtime_error("entity rollback acknowledgement failed");
+    if (created.status != ScopedRestoreStatus::Completed)
+        throw std::runtime_error("hierarchy fixture entity creation failed");
+    const entt::entity e = resolveEntityRef(reg, created.reference);
+    if (e == entt::null)
+        throw std::runtime_error("created hierarchy fixture entity did not resolve");
     auto& t = reg.emplace<TransformComponent>(e);
     t.position = pos;
     t.rotation = glm::vec3(0.0f);
@@ -722,6 +732,62 @@ bool testPhysicsAttachmentPolicyRejectsBeforeMutation()
 
     return pass(name);
 }
+bool testRetirementPreflight()
+{
+    const std::string name = "L2 hierarchy retirement preflight";
+    using Status = Hierarchy::RetirementPreflightStatus;
+    entt::registry r;
+    const auto make = [&]() {
+        const auto e = r.create();
+        r.emplace<IdentityComponent>(e, IdentityComponent{generateEntityGuid()});
+        return e;
+    };
+    const auto link = [&](entt::entity parent, entt::entity child) {
+        r.emplace<ParentComponent>(child, ParentComponent{entityRefOf(r, parent)});
+        r.get_or_emplace<ChildrenComponent>(parent).children.push_back(entityRefOf(r, child));
+    };
+    const auto root = make(), child = make(), leaf = make(), other = make();
+    link(root, child); link(child, leaf);
+    r.emplace<HierarchyPolicyComponent>(root, HierarchyPolicyComponent{HierarchyDestroyPolicy::CascadeDestroy});
+    const std::vector<entt::entity> roots{root, child, other, root};
+    const auto before = r.get<ChildrenComponent>(root).children;
+    const auto ok = Hierarchy::preflightRetirementCohort(r, roots);
+    if (ok.status != Status::Completed || ok.cohort != std::vector<entt::entity>{root, child, leaf, other} ||
+        r.get<ChildrenComponent>(root).children != before || !r.valid(leaf))
+        return fail(name, "ordered overlap closure or read-only guarantee failed");
+    const auto invalid = [&]() {
+        const auto result = Hierarchy::preflightRetirementCohort(r, roots);
+        return result.status == Status::InvalidHierarchy && result.cohort.empty();
+    };
+    r.get<ChildrenComponent>(root).children.clear();
+    if (!invalid()) return fail(name, "missing backlink accepted");
+    r.get<ChildrenComponent>(root).children = before;
+    r.get<ChildrenComponent>(root).children.push_back(before.front());
+    if (!invalid()) return fail(name, "duplicate backlink accepted");
+    r.get<ChildrenComponent>(root).children = before;
+    r.get<ParentComponent>(child).parent = EntityRef{generateEntityGuid()};
+    if (!invalid()) return fail(name, "unresolvable parent accepted");
+    r.get<ParentComponent>(child).parent = entityRefOf(r, root);
+    const auto duplicate = make();
+    r.get<IdentityComponent>(duplicate).guid = r.get<IdentityComponent>(child).guid;
+    if (!invalid()) return fail(name, "ambiguous child accepted");
+    r.destroy(duplicate);
+    r.get<HierarchyPolicyComponent>(root).on_parent_destroyed = static_cast<HierarchyDestroyPolicy>(255);
+    if (!invalid()) return fail(name, "invalid policy accepted");
+    r.get<HierarchyPolicyComponent>(root).on_parent_destroyed = HierarchyDestroyPolicy::CascadeDestroy;
+    r.emplace<ParentComponent>(root, ParentComponent{entityRefOf(r, leaf)});
+    r.get_or_emplace<ChildrenComponent>(leaf).children.push_back(entityRefOf(r, root));
+    if (!invalid()) return fail(name, "cycle accepted");
+    r.remove<ParentComponent>(root);
+    r.get<ChildrenComponent>(leaf).children.clear();
+    auto last = leaf;
+    for (int i = 0; i < Hierarchy::kMaxDepth; ++i) {
+        const auto next = make(); link(last, next); last = next;
+    }
+    if (!invalid()) return fail(name, "depth overflow accepted");
+    return pass(name);
+}
+
 bool testRetirementHierarchyFence()
 {
     const std::string name = "L1 hierarchy retirement fence and policy";
@@ -744,29 +810,81 @@ bool testRetirementHierarchyFence()
         return fail(name, "privileged orphan policy failed to preserve the surviving child");
     return pass(name);
 }
+std::vector<EntityRef> queuedRetirementEvents;
+void recordQueuedRetirement(const EntityDestroyedEvent& event)
+{
+    queuedRetirementEvents.push_back(event.ref);
+}
+
+bool testQueuedAncestorAndChildSurviveParentRetirement()
+{
+    const std::string name = "queued ancestor remains a reparent target";
+    world owner;
+    auto& reg = owner.registry;
+    const auto grandparent = makeEntity(reg, owner, {10, 0, 0});
+    const auto parent = makeEntity(reg, owner, {1, 0, 0});
+    const auto child = makeEntity(reg, owner, {0, 2, 0});
+    const EntityRef grandRef{reg.get<IdentityComponent>(grandparent).guid};
+    const EntityRef parentRef{reg.get<IdentityComponent>(parent).guid};
+    const EntityRef childRef{reg.get<IdentityComponent>(child).guid};
+    const auto grandHandle = owner.scopedEntity(grandRef);
+    const auto parentHandle = owner.scopedEntity(parentRef);
+    const auto childHandle = owner.scopedEntity(childRef);
+    if (!Hierarchy::attach(reg, parent, grandparent) || !Hierarchy::attach(reg, child, parent) ||
+        owner.requestRetirement(grandHandle).status != LifecycleStatus::Queued ||
+        owner.requestRetirement(childHandle).status != LifecycleStatus::Queued)
+        return fail(name, "setup or queue submission failed");
+    const auto before = Hierarchy::computeWorldMatrix(reg, child);
+    const auto retired = owner.retireEntity(parentHandle);
+    const auto* children = reg.try_get<ChildrenComponent>(grandparent);
+    if (retired.status != LifecycleStatus::Completed || reg.valid(parent) || !reg.valid(child) ||
+        Hierarchy::parentOf(reg, child) != grandparent || !children || !hasChildRef(*children, childRef) ||
+        !nearMat(before, Hierarchy::computeWorldMatrix(reg, child)) ||
+        owner.retirementState(grandHandle).status != LifecycleStatus::Pending ||
+        owner.retirementState(childHandle).status != LifecycleStatus::Pending)
+        return fail(name, "parent retirement did not preserve the queued survivor link and ownership");
+    queuedRetirementEvents.clear();
+    auto& bus = EventBus::get();
+    bus.sink<EntityDestroyedEvent>().connect<&recordQueuedRetirement>();
+    const auto drained = owner.drainRetirements();
+    bus.sink<EntityDestroyedEvent>().disconnect<&recordQueuedRetirement>();
+    if (drained.status != LifecycleStatus::Completed || drained.completed != 2 ||
+        reg.valid(grandparent) || reg.valid(child) || queuedRetirementEvents.size() != 2 ||
+        queuedRetirementEvents[0] != grandRef || queuedRetirementEvents[1] != childRef)
+        return fail(name, "queued ancestor and child did not retire successfully in FIFO order");
+    return pass(name);
+}
+
 } // namespace
 
 int main()
 {
     int failures = 0;
-    if (!testRetirementHierarchyFence()) ++failures;
-    if (!testRenderWorldPoseResolver()) ++failures;
-    if (!testRenderWorldPoseInvalidParents()) ++failures;
-    if (!testRenderWorldPoseCycle()) ++failures;
-    if (!testIdentityPreconditions()) ++failures;
-    if (!testRejectedReattachPreservesOriginalLink()) ++failures;
-    if (!testAttachPropagate()) ++failures;
-    if (!testRotation()) ++failures;
-    if (!testKeepWorldAttach()) ++failures;
-    if (!testCycleRejected()) ++failures;
-    if (!testDetach()) ++failures;
-    if (!testCascadeDestroy()) ++failures;
-    if (!testOrphanDestroy()) ++failures;
-    if (!testReparentToRoot()) ++failures;
-    if (!testStaleParentAndRebuild()) ++failures;
-    if (!testCohortRebuildPreservesUnrelatedMirrors()) ++failures;
-    if (!testDepthLimit()) ++failures;
-    if (!testPhysicsAttachmentPolicyRejectsBeforeMutation()) ++failures;
+    try {
+        if (!testRetirementPreflight()) ++failures;
+        if (!testRetirementHierarchyFence()) ++failures;
+        if (!testQueuedAncestorAndChildSurviveParentRetirement()) ++failures;
+        if (!testRenderWorldPoseResolver()) ++failures;
+        if (!testRenderWorldPoseInvalidParents()) ++failures;
+        if (!testRenderWorldPoseCycle()) ++failures;
+        if (!testIdentityPreconditions()) ++failures;
+        if (!testRejectedReattachPreservesOriginalLink()) ++failures;
+        if (!testAttachPropagate()) ++failures;
+        if (!testRotation()) ++failures;
+        if (!testKeepWorldAttach()) ++failures;
+        if (!testCycleRejected()) ++failures;
+        if (!testDetach()) ++failures;
+        if (!testCascadeDestroy()) ++failures;
+        if (!testOrphanDestroy()) ++failures;
+        if (!testReparentToRoot()) ++failures;
+        if (!testStaleParentAndRebuild()) ++failures;
+        if (!testCohortRebuildPreservesUnrelatedMirrors()) ++failures;
+        if (!testDepthLimit()) ++failures;
+        if (!testPhysicsAttachmentPolicyRejectsBeforeMutation()) ++failures;
+    } catch (const std::exception& error) {
+        std::cerr << "[FAIL] HierarchyTests fixture: " << error.what() << std::endl;
+        ++failures;
+    }
     if (failures == 0)
         std::cout << "All HierarchyTests passed" << std::endl;
     else

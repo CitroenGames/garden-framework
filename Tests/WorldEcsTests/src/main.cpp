@@ -38,11 +38,47 @@ void check(bool condition, const char* name) {
     if (!condition) ++failures;
 }
 
+
+bool finishFixtureRollback(world& w, LifecycleResult rollback) {
+    if (!rollback.operation.valid()) return true;
+    const auto token = rollback.operation;
+    for (int i = 0; i < 8 && !rollback.cleanupComplete(); ++i)
+        rollback = w.resumeRetirement(token);
+    if (!rollback.cleanupComplete()) { check(false, "fixture rollback completes"); return false; }
+    const auto ack = w.acknowledgeRetirement(token);
+    if (!ack.cleanupComplete()) { check(false, "fixture rollback acknowledgement"); return false; }
+    return true;
+}
+EntityCreationResult createForTest(world& w, std::string_view tag = {}) {
+    auto result = w.createScopedEntity(tag);
+    const bool cleanup = finishFixtureRollback(w, result.rollback);
+    if (result.status != ScopedRestoreStatus::Completed || !cleanup || result.rollback.operation.valid()) {
+        check(false, "fixture entity creation succeeds");
+        return {};
+    }
+    return result;
+}
+EntityCreationResult createRefForTest(world& w) {
+    auto result = w.createEntity();
+    const bool cleanup = finishFixtureRollback(w, result.rollback);
+    if (result.status != ScopedRestoreStatus::Completed || !cleanup || result.rollback.operation.valid()) {
+        check(false, "fixture reference creation succeeds");
+        return {};
+    }
+    return result;
+}
+
+EntityHandle restoreForTest(world& w, EntityRef ref) {
+    auto result = w.restoreScopedEntity(ref);
+    if (!finishFixtureRollback(w, result.rollback)) return {};
+    return result.status == ScopedRestoreStatus::Completed && !result.entities.empty() ? result.entities.front() : EntityHandle{};
+}
+
 void basicAndReuse() {
     world a, b;
-    const EntityRef ref = a.createEntity();
+    const EntityRef ref = createRefForTest(a).reference;
     const auto entity = a.scopedEntity(ref);
-    const auto foreign = b.createScopedEntity();
+    const auto foreign = createForTest(b).entity;
     check(a.isEntityValid(entity) && a.scopedEntity(ref) == entity &&
           !b.isEntityValid(entity) && !a.isEntityValid(foreign) &&
           !a.isEntityValid(a.scopedEntity(EntityRef{})), "scope identity and reject foreign/null handles");
@@ -76,7 +112,7 @@ void basicAndReuse() {
     check(a.add<WorldValue>(entity, 11) == ComponentStoreResult::Success &&
           a.retireEntity(entity).cleanupComplete() && !a.isEntityValid(entity),
           "destroy invalidates entity and clears its value");
-    const auto replacement = a.createScopedEntity();
+    const auto replacement = createForTest(a).entity;
     check(a.isEntityValid(replacement) && replacement != entity &&
           a.add<WorldValue>(replacement, 22) == ComponentStoreResult::Success &&
           a.get<WorldValue>(entity, value) == ComponentStoreResult::StaleEntity && !value &&
@@ -87,7 +123,7 @@ void basicAndReuse() {
 
 void identityBoundary() {
     world w, other;
-    const auto fresh = w.createScopedEntity();
+    const auto fresh = createForTest(w).entity;
     const world& read = w;
     const EntityRef freshRef = read.persistedReference(fresh);
     const auto freshRaw = resolveEntityRef(w.registry, freshRef);
@@ -97,7 +133,7 @@ void identityBoundary() {
           "fresh scoped entity has a unique persisted identity");
 
     const EntityRef requested{{0x123456789abcdef0ull, 0xfedcba9876543210ull}};
-    const auto restored = w.restoreScopedEntity(requested);
+    const auto restored = restoreForTest(w, requested);
     const auto raw = resolveEntityRef(w.registry, requested);
     check(w.isEntityValid(restored) && raw != entt::null &&
           w.registry.get<IdentityComponent>(raw).guid == requested.guid &&
@@ -106,15 +142,15 @@ void identityBoundary() {
           "restore preserves the exact requested identity");
 
     const auto count = w.registry.storage<entt::entity>().free_list();
-    const auto duplicate = w.restoreScopedEntity(requested);
-    const auto nullRestore = w.restoreScopedEntity(EntityRef{});
+    const auto duplicate = restoreForTest(w, requested);
+    const auto nullRestore = restoreForTest(w, EntityRef{});
     check(!w.isEntityValid(duplicate) && !w.isEntityValid(nullRestore) &&
           w.registry.storage<entt::entity>().free_list() == count &&
           resolveEntityRef(w.registry, requested) == raw &&
           w.registry.get<IdentityComponent>(raw).guid == requested.guid,
           "duplicate and null restoration leave identities unchanged");
 
-    const auto foreign = other.createScopedEntity();
+    const auto foreign = createForTest(other).entity;
     check(read.persistedReference(restored) == requested &&
           read.persistedReference(EntityHandle{}).isNull() &&
           read.persistedReference(foreign).isNull() &&
@@ -139,7 +175,9 @@ void identityBoundary() {
           !w.registry.all_of<IdentityComponent>(raw),
           "conversion does not assign a missing identity");
 
-    check(w.retireEntity(restored).cleanupComplete() &&
+    w.registry.emplace<IdentityComponent>(raw, IdentityComponent{requested.guid});
+    const auto retired = w.retireEntity(restored);
+    check(retired.status == LifecycleStatus::Completed &&
           read.persistedReference(restored).isNull(),
           "conversion rejects a stale handle");
 
@@ -150,7 +188,7 @@ void identityBoundary() {
     bool rejected = false;
     bool readSucceeded = false;
     const auto queryResult = w.query<QueryValue>([&](EntityHandle entity, QueryValue&) {
-        rejected = !w.isEntityValid(w.restoreScopedEntity(duringQuery));
+        rejected = !w.isEntityValid(restoreForTest(w, duringQuery));
         readSucceeded = read.persistedReference(entity) == freshRef;
     });
     check(queryResult == ComponentStoreResult::Success && rejected && readSucceeded &&
@@ -158,7 +196,7 @@ void identityBoundary() {
           resolveEntityRef(w.registry, duringQuery) == entt::null,
           "query permits conversion and rejects restoration without mutation");
 
-    const auto ambiguousHandle = w.createScopedEntity();
+    const auto ambiguousHandle = createForTest(w).entity;
     const EntityRef ambiguousRef = read.persistedReference(ambiguousHandle);
     const auto duplicateRaw = w.registry.create();
     w.registry.emplace<IdentityComponent>(duplicateRaw, IdentityComponent{ambiguousRef.guid});
@@ -238,7 +276,7 @@ struct RestoreHookFixture {
 void singleRestoreHooks() {
     world w;
     const EntityRef existingRef{{0xe001, 0xf001}};
-    const auto existing = w.restoreScopedEntity(existingRef);
+    const auto existing = restoreForTest(w, existingRef);
     const bool prepared = w.isEntityValid(existing) &&
         w.add<WorldValue>(existing, 73) == ComponentStoreResult::Success;
     check(prepared, "prepare single restore hook sentinel");
@@ -257,7 +295,7 @@ void singleRestoreHooks() {
         RestoreHookFixture::operation = entt::null;
         RestoreHookFixture::sideEffect = entt::null;
         RestoreHookFixture::replacement = {};
-        return w.restoreScopedEntity(ref);
+        return restoreForTest(w, ref);
     };
     const EntityRef duplicateRef{{0xe002, 0xf002}};
     const auto duplicate = run(RestoreHookFixture::Action::Duplicate, duplicateRef);
@@ -271,7 +309,7 @@ void singleRestoreHooks() {
     const auto secondOwner = w.registry.create();
     w.registry.emplace<IdentityComponent>(secondOwner, IdentityComponent{duplicateRef.guid});
     RestoreHookFixture::fired = false;
-    const auto preexisting = w.restoreScopedEntity(duplicateRef);
+    const auto preexisting = restoreForTest(w, duplicateRef);
     check(!w.isEntityValid(preexisting) && !RestoreHookFixture::fired &&
           w.registry.valid(sideEffect) && w.registry.valid(secondOwner) && sentinelIntact(),
           "preflight rejects an already ambiguous GUID without changing its owners");
@@ -294,8 +332,8 @@ void singleRestoreHooks() {
 void cohortRestore() {
     world w;
     const EntityRef existingRef{{0xc001, 0xd001}};
-    const auto existing = w.restoreScopedEntity(existingRef);
-    const auto companion = w.createScopedEntity();
+    const auto existing = restoreForTest(w, existingRef);
+    const auto companion = createForTest(w).entity;
     const EntityRef companionRef = w.persistedReference(companion);
     const bool prepared = w.isEntityValid(existing) && w.isEntityValid(companion) &&
         !companionRef.isNull() &&
@@ -318,22 +356,28 @@ void cohortRestore() {
             w.get<WorldValue>(companion, second) == ComponentStoreResult::Success && second && second->number == 22;
     };
 
+    const auto restoreCohort = [&](std::initializer_list<EntityRef> refs, std::vector<EntityHandle>& out) {
+        auto result = w.restoreScopedEntities(std::span<const EntityRef>(refs.begin(), refs.size()));
+        if (!finishFixtureRollback(w, result.rollback)) return false;
+        if (result.status != ScopedRestoreStatus::Completed) return false;
+        out = std::move(result.entities); return true;
+    };
     const EntityRef duplicate{{0xc002, 0xd002}};
-    const bool duplicateResult = w.restoreScopedEntities({duplicate, duplicate}, output);
+    const bool duplicateResult = restoreCohort({duplicate, duplicate}, output);
     check(!duplicateResult && output == initialOutput && sentinelsIntact() &&
           !w.isEntityValid(w.scopedEntity(duplicate)),
           "cohort rejects duplicate requested GUID without publishing or changing outputs");
 
     const EntityRef collisionBefore{{0xc003, 0xd003}};
     const EntityRef collisionAfter{{0xc004, 0xd004}};
-    const bool collisionResult = w.restoreScopedEntities({collisionBefore, existingRef, collisionAfter}, output);
+    const bool collisionResult = restoreCohort({collisionBefore, existingRef, collisionAfter}, output);
     check(!collisionResult && output == initialOutput && sentinelsIntact() &&
           !w.isEntityValid(w.scopedEntity(collisionBefore)) &&
           !w.isEntityValid(w.scopedEntity(collisionAfter)),
           "cohort rejects destination collision before publishing any member");
 
     const EntityRef beforeNull{{0xc005, 0xd005}};
-    const bool nullResult = w.restoreScopedEntities({beforeNull, EntityRef{}}, output);
+    const bool nullResult = restoreCohort({beforeNull, EntityRef{}}, output);
     check(!nullResult && output == initialOutput && sentinelsIntact() &&
           !w.isEntityValid(w.scopedEntity(beforeNull)),
           "cohort rejects a null GUID without publishing or changing outputs");
@@ -345,7 +389,7 @@ void cohortRestore() {
         ++queryVisits;
         queryRejected = entity == existing && value.number == 7 &&
             w.persistedReference(entity) == existingRef &&
-            !w.restoreScopedEntities({duringQuery}, output);
+            !restoreCohort({duringQuery}, output);
     });
     check(queryResult == ComponentStoreResult::Success && queryVisits == 1 && queryRejected &&
           output == initialOutput && sentinelsIntact() &&
@@ -354,7 +398,7 @@ void cohortRestore() {
 
     const EntityRef firstRef{{0xc007, 0xd007}};
     const EntityRef secondRef{{0xc008, 0xd008}};
-    const bool success = w.restoreScopedEntities({firstRef, secondRef}, output);
+    const bool success = restoreCohort({firstRef, secondRef}, output);
     const bool ordered = success && output.size() == 2 && output[0] != output[1] &&
         w.isEntityValid(output[0]) && w.isEntityValid(output[1]) &&
         w.persistedReference(output[0]) == firstRef && w.persistedReference(output[1]) == secondRef &&
@@ -368,7 +412,7 @@ static_assert(!std::is_move_constructible_v<world> && !std::is_move_assignable_v
 
 void teardown() {
     world w;
-    auto first = w.createScopedEntity();
+    auto first = createForTest(w).entity;
     const int before = WorldValue::destroyed;
     check(w.add<WorldValue>(first, 1) == ComponentStoreResult::Success, "prepare shutdown");
     w.shutdown();
@@ -376,13 +420,13 @@ void teardown() {
     check(!w.isEntityValid(first) && w.get<WorldValue>(first, expired) == ComponentStoreResult::InvalidEntity &&
           !expired && WorldValue::destroyed == before + 1,
           "shutdown expires handles and destroys values");
-    auto second = w.createScopedEntity();
+    auto second = createForTest(w).entity;
     check(w.isEntityValid(second) && w.add<WorldValue>(second, 2) == ComponentStoreResult::Success,
           "world can be reused after shutdown");
     w.resetWorld();
     check(!w.isEntityValid(second) && !w.isEntityValid(first) && WorldValue::destroyed == before + 2,
           "reset expires handles and destroys values");
-    auto third = w.createScopedEntity();
+    auto third = createForTest(w).entity;
     WorldValue* value = nullptr;
     check(w.isEntityValid(third) && w.get<WorldValue>(third, value) == ComponentStoreResult::NotFound && !value,
           "reset starts with empty component storage");
@@ -390,9 +434,9 @@ void teardown() {
 
 void queries() {
     world w;
-    const auto both = w.createScopedEntity();
-    const auto onlyWorld = w.createScopedEntity();
-    const auto onlyQuery = w.createScopedEntity();
+    const auto both = createForTest(w).entity;
+    const auto onlyWorld = createForTest(w).entity;
+    const auto onlyQuery = createForTest(w).entity;
     check(w.add<WorldValue>(both, 10) == ComponentStoreResult::Success &&
           w.add<QueryValue>(both, QueryValue{3}) == ComponentStoreResult::Success &&
           w.add<WorldValue>(onlyWorld, 20) == ComponentStoreResult::Success &&
@@ -459,8 +503,8 @@ void queries() {
             addResult = w.add<QueryValue>(onlyWorld, QueryValue{9});
             removeResult = w.remove<WorldValue>(entity);
             destroyResult = w.retireEntity(onlyQuery).status;
-            scopedCreationRejected = !w.isEntityValid(w.createScopedEntity());
-            creationRejected = w.createEntity().isNull();
+            scopedCreationRejected = w.createScopedEntity().status == ScopedRestoreStatus::QueryActive;
+            creationRejected = w.createEntity().status == ScopedRestoreStatus::QueryActive;
             shutdownResult = w.shutdown().status;
             resetResult = w.resetWorld().status;
         });
@@ -482,10 +526,10 @@ void queries() {
 
 void engineAdapters() {
     world w, other;
-    const EntityRef ref = w.createEntity();
+    const EntityRef ref = createRefForTest(w).reference;
     const auto entity = w.scopedEntity(ref);
     const auto raw = resolveEntityRef(w.registry, ref);
-    const auto foreign = other.createScopedEntity();
+    const auto foreign = createForTest(other).entity;
     check(raw != entt::null && w.add<TransformComponent>(entity, 2.0f, 3.0f, 4.0f) == ComponentStoreResult::Success &&
           w.add<PlayerComponent>(entity) == ComponentStoreResult::Success,
           "Garden adds engine components to adapter pools");
@@ -510,7 +554,7 @@ void engineAdapters() {
           readTransform->position.x == 8.0f && w.registry.get<PlayerComponent>(raw).speed == 5.0f,
           "const access and registry observe Garden writes");
 
-    const EntityRef secondRef = w.createEntity();
+    const EntityRef secondRef = createRefForTest(w).reference;
     const auto second = w.scopedEntity(secondRef);
     const auto secondRaw = resolveEntityRef(w.registry, secondRef);
     w.registry.emplace<TransformComponent>(secondRaw, 12.0f, 0.0f, 0.0f);

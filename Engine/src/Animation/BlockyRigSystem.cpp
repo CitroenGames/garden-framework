@@ -4,7 +4,7 @@
 
 namespace BlockyRigSystem
 {
-EntityRef createRoot(world& game_world, std::shared_ptr<const BlockyRig> rig,
+BlockyRigResult createRoot(world& game_world, std::shared_ptr<const BlockyRig> rig,
                      std::string_view tag)
 {
     return BlockyRigEcsBridge::createRoot(game_world, std::move(rig), tag);
@@ -15,14 +15,19 @@ bool bind(world& game_world, EntityRef rig_root, std::shared_ptr<const BlockyRig
     return BlockyRigEcsBridge::bind(game_world, rig_root, std::move(rig));
 }
 
-bool spawn(world& game_world, EntityRef rig_root)
+BlockyRigResult spawn(world& game_world, EntityRef rig_root)
 {
     return BlockyRigEcsBridge::spawn(game_world, rig_root);
 }
 
-void update(world& game_world)
+BlockyRigResult update(world& game_world)
 {
-    BlockyRigEcsBridge::update(game_world);
+    return BlockyRigEcsBridge::update(game_world);
+}
+
+bool resumeCleanup(world& game_world, BlockyRigResult& result)
+{
+    return BlockyRigEcsBridge::resumeCleanup(game_world, result);
 }
 
 bool setLocalPose(world& game_world, EntityRef rig_root, const Pose& local_pose,
@@ -47,12 +52,12 @@ std::optional<BlockyRigNodeState> nodeState(const world& game_world, EntityRef n
     return BlockyRigEcsBridge::nodeState(game_world, node);
 }
 
-bool destroyNode(world& game_world, EntityRef node)
+LifecycleResult destroyNode(world& game_world, EntityRef node)
 {
     return BlockyRigEcsBridge::destroyNode(game_world, node);
 }
 
-bool destroyRoot(world& game_world, EntityRef rig_root)
+LifecycleResult destroyRoot(world& game_world, EntityRef rig_root)
 {
     return BlockyRigEcsBridge::destroyRoot(game_world, rig_root);
 }

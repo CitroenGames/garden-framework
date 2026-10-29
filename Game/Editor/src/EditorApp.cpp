@@ -1575,6 +1575,12 @@ void EditorApp::shutdown()
         m_package_progress.reset();
     }
 
+    if (!finishLevelRollback(m_world, m_editor_level_construction) ||
+        !finishLevelRollback(m_server_world, m_server_level_construction)) {
+        LOG_ENGINE_ERROR("Editor shutdown: level rollback is still pending");
+        return;
+    }
+
     // Stop simulation if running
     if (m_state.isSimulationActive())
         stopPlay();
@@ -1647,6 +1653,11 @@ void EditorApp::beginPlay()
 {
     if (m_state.isSimulationActive())
         return; // already playing
+    if (!finishLevelRollback(m_world, m_editor_level_construction) ||
+        !finishLevelRollback(m_server_world, m_server_level_construction)) {
+        LOG_ENGINE_ERROR("PIE: level rollback is still pending");
+        return;
+    }
 
     for (auto& inst : m_pie_clients)
     {
@@ -1723,6 +1734,7 @@ void EditorApp::beginPlay()
             },
             [this]() {
                 Threading::JobSystem::get().barrier();
+                if (!finishLevelRollback(m_server_world, m_server_level_construction)) return false;
                 if (!m_server_world.shutdown().cleanupComplete()) return false;
                 if (m_play_world && !m_play_world->shutdown().cleanupComplete()) return false;
                 m_game_input_manager.reset();
@@ -1789,8 +1801,15 @@ void EditorApp::beginPlay()
             }
 
             // Instantiate level into server world
-            m_level_manager.instantiateLevelParallel(m_play_snapshot, m_server_world,
-                m_app.getRenderAPI(), nullptr, nullptr, nullptr);
+            m_server_level_construction = m_level_manager.instantiateLevelParallel(
+                m_play_snapshot, m_server_world, m_app.getRenderAPI());
+            if (m_server_level_construction.status != LevelInstantiationStatus::Completed) {
+                LOG_ENGINE_ERROR("PIE: Server level construction failed (status {})",
+                                 static_cast<int>(m_server_level_construction.status));
+                if (!finishLevelRollback(m_server_world, m_server_level_construction))
+                    LOG_ENGINE_ERROR("PIE: Server level rollback is still pending");
+                return;
+            }
             m_server_world.initializeGameplayFramework(m_play_snapshot.metadata.level_name, "");
 
             // Set up server EngineServices
@@ -1902,8 +1921,14 @@ void EditorApp::beginPlay()
                                     LOG_ENGINE_ERROR("PIE: Client world reset incomplete");
                                     return;
                                 }
-                                m_level_manager.instantiateLevelParallel(m_play_snapshot, inst->client_world,
-                                    m_app.getRenderAPI(), nullptr, nullptr, nullptr, false);
+                                inst->level_construction = m_level_manager.instantiateLevelParallel(
+                                    m_play_snapshot, inst->client_world, m_app.getRenderAPI(), false);
+                                if (inst->level_construction.status != LevelInstantiationStatus::Completed) {
+                                    LOG_ENGINE_ERROR("PIE: Player {} level construction failed (status {})",
+                                                     i, static_cast<int>(inst->level_construction.status));
+                                    if (!inst->release()) m_pie_clients.push_back(std::move(inst));
+                                    return;
+                                }
                                 inst->client_world.initializeGameplayFramework(
                                     m_play_snapshot.metadata.level_name,
                                     "");
@@ -2092,8 +2117,14 @@ void EditorApp::beginPlay()
                                 LOG_ENGINE_ERROR("PIE: Client world reset incomplete");
                                 return;
                             }
-                            m_level_manager.instantiateLevelParallel(m_play_snapshot, inst->client_world,
-                                m_app.getRenderAPI(), nullptr, nullptr, nullptr, false);
+                            inst->level_construction = m_level_manager.instantiateLevelParallel(
+                                m_play_snapshot, inst->client_world, m_app.getRenderAPI(), false);
+                            if (inst->level_construction.status != LevelInstantiationStatus::Completed) {
+                                LOG_ENGINE_ERROR("PIE: Player {} level construction failed (status {})",
+                                                 i, static_cast<int>(inst->level_construction.status));
+                                if (!inst->release()) m_pie_clients.push_back(std::move(inst));
+                                return;
+                            }
                             inst->client_world.initializeGameplayFramework(
                                 m_play_snapshot.metadata.level_name,
                                 "");
@@ -3957,6 +3988,10 @@ void EditorApp::renderGrid()
 
 void EditorApp::newLevel()
 {
+    if (!finishLevelRollback(m_world, m_editor_level_construction)) {
+        LOG_ENGINE_ERROR("Editor level rollback is still pending");
+        return;
+    }
     if (auto* api = m_app.getRenderAPI())
         api->waitForGPU();
     if (!m_world.resetWorld(m_world.getPhysicsSystem().getSettings()).cleanupComplete()) {
@@ -3989,6 +4024,10 @@ void EditorApp::openLevel(const std::string& path)
         return;
     }
 
+    if (!finishLevelRollback(m_world, m_editor_level_construction)) {
+        LOG_ENGINE_ERROR("Editor level rollback is still pending");
+        return;
+    }
     if (auto* api = m_app.getRenderAPI())
         api->waitForGPU();
     if (!m_world.resetWorld(m_world.getPhysicsSystem().getSettings()).cleanupComplete()) {
@@ -4002,9 +4041,15 @@ void EditorApp::openLevel(const std::string& path)
     m_level_data = std::move(new_data);
     m_level_settings.metadata = &m_level_data.metadata;
 
-    m_level_manager.instantiateLevelParallel(
-        m_level_data, m_world, m_app.getRenderAPI(),
-        nullptr, nullptr, nullptr);
+    m_editor_level_construction = m_level_manager.instantiateLevelParallel(
+        m_level_data, m_world, m_app.getRenderAPI());
+    if (m_editor_level_construction.status != LevelInstantiationStatus::Completed) {
+        LOG_ENGINE_ERROR("Editor level construction failed (status {})",
+                         static_cast<int>(m_editor_level_construction.status));
+        if (!finishLevelRollback(m_world, m_editor_level_construction))
+            LOG_ENGINE_ERROR("Editor level rollback is still pending");
+        return;
+    }
 
     buildMeshPathCache();
 
@@ -4202,6 +4247,10 @@ bool EditorApp::tryRestoreTransformOnlySnapshot(const LevelData& snapshot)
 
 void EditorApp::restoreFromSnapshot(const LevelData& snapshot)
 {
+    if (!finishLevelRollback(m_world, m_editor_level_construction)) {
+        LOG_ENGINE_ERROR("Editor level rollback is still pending");
+        return;
+    }
     if (tryRestoreTransformOnlySnapshot(snapshot))
         return;
 
@@ -4228,9 +4277,15 @@ void EditorApp::restoreFromSnapshot(const LevelData& snapshot)
     m_level_data = snapshot;
     m_level_settings.metadata = &m_level_data.metadata;
 
-    m_level_manager.instantiateLevelParallel(
-        m_level_data, m_world, m_app.getRenderAPI(),
-        nullptr, nullptr, nullptr);
+    m_editor_level_construction = m_level_manager.instantiateLevelParallel(
+        m_level_data, m_world, m_app.getRenderAPI());
+    if (m_editor_level_construction.status != LevelInstantiationStatus::Completed) {
+        LOG_ENGINE_ERROR("Editor level construction failed (status {})",
+                         static_cast<int>(m_editor_level_construction.status));
+        if (!finishLevelRollback(m_world, m_editor_level_construction))
+            LOG_ENGINE_ERROR("Editor level rollback is still pending");
+        return;
+    }
 
     buildMeshPathCache();
     applyLightingFromMetadata();

@@ -572,7 +572,7 @@ static bool parseCanonicalGuid(const json& value, EntityGuid& out)
     return guidFromString(text, out);
 }
 
-static bool prepareLevelInstantiation(const LevelData& level_data,
+static LevelInstantiationStatus prepareLevelInstantiation(const LevelData& level_data,
                                       const entt::registry& registry,
                                       LevelInstantiationPlan& plan)
 {
@@ -602,7 +602,7 @@ static bool prepareLevelInstantiation(const LevelData& level_data,
         if (!components.is_object())
         {
             LOG_ENGINE_ERROR("Level instantiation rejected: malformed components for {}", level_data.entities[i].name);
-            return false;
+            return LevelInstantiationStatus::InvalidInput;
         }
         auto identity_it = components.find("IdentityComponent");
         if (identity_it == components.end() || identity_it->is_null())
@@ -611,7 +611,7 @@ static bool prepareLevelInstantiation(const LevelData& level_data,
         {
             LOG_ENGINE_ERROR("Level instantiation rejected: IdentityComponent for '{}' is malformed",
                              level_data.entities[i].name);
-            return false;
+            return LevelInstantiationStatus::InvalidInput;
         }
 
         auto guid_it = identity_it->find("guid");
@@ -623,7 +623,7 @@ static bool prepareLevelInstantiation(const LevelData& level_data,
         {
             LOG_ENGINE_ERROR("Level instantiation rejected: malformed IdentityComponent GUID for '{}'",
                              level_data.entities[i].name);
-            return false;
+            return LevelInstantiationStatus::InvalidInput;
         }
         if (guid.isNull())
             continue;
@@ -631,13 +631,13 @@ static bool prepareLevelInstantiation(const LevelData& level_data,
         {
             LOG_ENGINE_ERROR("Level instantiation rejected: IdentityComponent GUID collision with destination registry for '{}'",
                              level_data.entities[i].name);
-            return false;
+            return LevelInstantiationStatus::Conflict;
         }
         if (!cohort_guids.insert(guid).second)
         {
             LOG_ENGINE_ERROR("Level instantiation rejected: duplicate IdentityComponent GUID in level cohort for '{}'",
                              level_data.entities[i].name);
-            return false;
+            return LevelInstantiationStatus::InvalidInput;
         }
         plan.identity_guids[i] = guid;
         has_serialized_identity[i] = true;
@@ -685,7 +685,7 @@ static bool prepareLevelInstantiation(const LevelData& level_data,
         {
             LOG_ENGINE_ERROR("Level instantiation rejected: ParentComponent for '{}' is malformed",
                              entity.name);
-            return false;
+            return LevelInstantiationStatus::InvalidInput;
         }
         auto ref_it = parent_it->find("parent");
         if (ref_it == parent_it->end() || ref_it->is_null())
@@ -696,7 +696,7 @@ static bool prepareLevelInstantiation(const LevelData& level_data,
         {
             LOG_ENGINE_ERROR("Level instantiation rejected: malformed ParentComponent GUID for '{}'",
                              entity.name);
-            return false;
+            return LevelInstantiationStatus::InvalidInput;
         }
         if (parent_guid.isNull())
             continue;
@@ -712,7 +712,7 @@ static bool prepareLevelInstantiation(const LevelData& level_data,
         {
             LOG_ENGINE_ERROR("Level instantiation rejected: '{}' is its own hierarchy parent",
                              entity.name);
-            return false;
+            return LevelInstantiationStatus::InvalidInput;
         }
         plan.parent_indices[i] = parent_entity->second;
     }
@@ -735,7 +735,7 @@ static bool prepareLevelInstantiation(const LevelData& level_data,
         if (current != no_parent && visit_state[current] == 1)
         {
             LOG_ENGINE_ERROR("Level instantiation rejected: hierarchy parent links contain a cycle");
-            return false;
+            return LevelInstantiationStatus::InvalidInput;
         }
         for (size_t index : path)
             visit_state[index] = 2;
@@ -766,11 +766,11 @@ static bool prepareLevelInstantiation(const LevelData& level_data,
             LOG_ENGINE_ERROR(
                 "Level instantiation rejected: hierarchy physics policy ({}) for '{}'",
                 static_cast<int>(result), level_data.entities[child_index].name);
-            return false;
+            return LevelInstantiationStatus::InvalidInput;
         }
     }
 
-    return true;
+    return LevelInstantiationStatus::Completed;
 }
 
 static void applyWaterComponentToEntityMesh(entt::registry& registry, entt::entity entity)
@@ -3511,21 +3511,26 @@ std::shared_ptr<mesh> LevelManager::finalizeMeshGPU(
     return m_ptr;
 }
 
-bool LevelManager::instantiateLevelParallel(
-    const LevelData& level_data,
-    world& game_world,
-    IRenderAPI* render_api,
-    entt::entity* out_player_entity,
-    entt::entity* out_freecam_entity,
-    entt::entity* out_player_rep_entity,
-    bool create_authority_game_mode,
-    std::vector<entt::entity>* out_created_entities)
+LevelInstantiationResult LevelManager::instantiateLevelParallel(
+    const LevelData& level_data, world& game_world, IRenderAPI* render_api,
+    bool create_authority_game_mode)
 {
+    LevelInstantiationResult result;
+    world::ConstructionTransaction transaction{&game_world};
+    glm::vec3 previous_gravity{};
+    float previous_delta = 0.0f;
+    bool settings_captured = false;
+    bool settings_modified = false;
+    try {
+    previous_gravity = game_world.getGravity();
+    previous_delta = game_world.getFixedDelta();
+    settings_captured = true;
     LevelInstantiationPlan instantiation_plan;
-    if (!prepareLevelInstantiation(level_data, game_world.registry,
-                                  instantiation_plan))
-        return false;
-
+    result.status = prepareLevelInstantiation(level_data, game_world.registry, instantiation_plan);
+    if (result.status != LevelInstantiationStatus::Completed) {
+        return result;
+    }
+    result.entities.reserve(instantiation_plan.identity_guids.size());
     LOG_ENGINE_INFO("Instantiating level (parallel): {}", level_data.metadata.level_name);
     ScopedLoadTimer timer("Level instantiation");
 
@@ -3561,20 +3566,40 @@ bool LevelManager::instantiateLevelParallel(
         std::vector<Threading::JobHandle> preload_jobs;
         preload_jobs.reserve(preload_cache.size());
 
-        for (auto& [path, preload] : preload_cache)
-        {
-            MeshPreloadData* ptr = preload.get();
-            auto handle = Threading::JobSystem::get().createJob()
-                .setName("PreloadMesh")
-                .setWork([this, ptr]() { preloadMeshCPU(*ptr); })
-                .setPriority(Threading::JobPriority::High)
-                .setContext(Threading::JobContext::Worker)
-                .submit();
-            preload_jobs.push_back(handle);
+        try {
+            for (auto& [path, preload] : preload_cache)
+            {
+                MeshPreloadData* ptr = preload.get();
+                auto handle = Threading::JobSystem::get().createJob()
+                    .setName("PreloadMesh")
+                    .setWork([this, ptr]() { preloadMeshCPU(*ptr); })
+                    .setPriority(Threading::JobPriority::High)
+                    .setContext(Threading::JobContext::Worker)
+                    .submit();
+                if (handle == Threading::INVALID_JOB_HANDLE)
+                    throw std::runtime_error("mesh preload submission failed");
+                preload_jobs.push_back(handle);
+            }
+            Threading::JobSystem::get().waitForJobs(preload_jobs);
+        } catch (...) {
+            // Every submitted job must finish before its referenced cache is destroyed.
+            // A wait may itself execute other work and throw. Keep each
+            // referenced cache entry alive until every submitted job is joined.
+            for (const auto handle : preload_jobs) {
+                for (;;) {
+                    try {
+                        Threading::JobSystem::get().waitForJob(handle);
+                        break;
+                    } catch (...) {
+                        // Retry the same submitted job; its storage is still live.
+                    }
+                }
+            }
+            throw;
         }
-
-        // Wait for all preload jobs to finish
-        Threading::JobSystem::get().waitForJobs(preload_jobs);
+        for (const auto handle : preload_jobs)
+            if (Threading::JobSystem::get().getJobStatus(handle) == Threading::JobStatus::Failed)
+                throw std::runtime_error("mesh preload job failed");
 
         LOG_ENGINE_INFO("Phase 2 complete: all mesh preloads finished");
     }
@@ -3602,20 +3627,32 @@ bool LevelManager::instantiateLevelParallel(
     for (auto& entity : created_entities)
         entity = entt::null;
     std::vector<size_t> identity_occurrences(instantiation_plan.identity_guids.size(), 0);
-    world::ConstructionTransaction transaction{&game_world};
     auto& restored_handles = transaction.entities;
     std::vector<EntityRef> references;
     references.reserve(instantiation_plan.identity_guids.size());
     for (const EntityGuid& guid : instantiation_plan.identity_guids)
         references.push_back(EntityRef{guid});
-    if (!game_world.restoreScopedEntities(references, restored_handles))
-        return false;
+    auto restored = game_world.restoreScopedEntities(references, transaction);
+    if (restored.status != ScopedRestoreStatus::Completed) {
+        result.status = restored.status == ScopedRestoreStatus::AllocationFailure ? LevelInstantiationStatus::AllocationFailure :
+            restored.status == ScopedRestoreStatus::Conflict || restored.status == ScopedRestoreStatus::QueryActive ? LevelInstantiationStatus::Conflict :
+            restored.status == ScopedRestoreStatus::InvalidInput ? LevelInstantiationStatus::InvalidInput : LevelInstantiationStatus::ConstructionFailure;
+        result.entities = std::move(restored.entities);
+        result.rollback = restored.rollback;
+        return result;
+    }
+    result.entities = std::move(restored.entities);
     const size_t restored_count = restored_handles.size();
 
     // Internal legacy bridge: take one snapshot for the level component and
     // physics passes, which still use raw entities. Scoped restore owns identity
     // construction; this lookup does not create or alter identity.
-    bool valid_cohort = restored_count == instantiation_plan.identity_guids.size();
+    bool valid_cohort = restored_count == instantiation_plan.identity_guids.size() &&
+                        result.entities.size() == restored_count;
+    for (size_t i = 0; valid_cohort && i < restored_count; ++i)
+        if (result.entities[i] != restored_handles[i] ||
+            game_world.persistedReference(restored_handles[i]).guid != instantiation_plan.identity_guids[i])
+            valid_cohort = false;
     for (auto [entity, identity] : game_world.registry.view<IdentityComponent>().each())
     {
         const auto it = cohort_indices.find(identity.guid);
@@ -3633,17 +3670,7 @@ bool LevelManager::instantiateLevelParallel(
     }
 
     if (!valid_cohort)
-    {
-        const auto rollback = game_world.abortUnpublished(transaction);
-        if (!rollback.cleanupComplete())
-            LOG_ENGINE_ERROR("Level instantiation: unpublished rollback incomplete at phase {}", static_cast<int>(rollback.phase));
-        LOG_ENGINE_ERROR("Level instantiation rejected: failed to restore scoped identity");
-        return false;
-    }
-
-    const auto previous_gravity = game_world.getGravity();
-    const auto previous_delta = game_world.getFixedDelta();
-    try {
+        throw std::runtime_error("failed to restore scoped identity cohort");
 
     entt::entity player_entity = entt::null;
     entt::entity freecam_entity = entt::null;
@@ -3894,46 +3921,45 @@ bool LevelManager::instantiateLevelParallel(
         }
     }
 
+    settings_modified = true;
     game_world.setGravity(level_data.metadata.gravity);
     game_world.setFixedDelta(level_data.metadata.fixed_delta);
     applyGameplayFrameworkSettings(level_data.metadata, game_world, "", create_authority_game_mode);
 
-    if (out_player_entity) *out_player_entity = player_entity;
-    if (out_freecam_entity) *out_freecam_entity = freecam_entity;
-    if (out_player_rep_entity) *out_player_rep_entity = player_rep_entity;
-    if (out_created_entities) *out_created_entities = std::move(created_entities);
-
+    for (size_t i = 0; i < created_entities.size(); ++i) {
+        if (created_entities[i] == player_entity) result.player = result.entities[i];
+        if (created_entities[i] == freecam_entity) result.freecam = result.entities[i];
+        if (created_entities[i] == player_rep_entity) result.player_rep = result.entities[i];
+    }
     LOG_ENGINE_INFO("Level instantiation complete (parallel): {} entities", level_data.entities.size());
     transaction.committed = true;
-    return true;
+    return result;
+    } catch (const std::bad_alloc&) {
+        result.status = LevelInstantiationStatus::AllocationFailure;
     } catch (...) {
-        const auto rollback = game_world.abortUnpublished(transaction);
-        if (!rollback.cleanupComplete())
-            LOG_ENGINE_ERROR("Level instantiation: unpublished rollback incomplete at phase {}", static_cast<int>(rollback.phase));
-        game_world.setGravity(previous_gravity);
-        game_world.setFixedDelta(previous_delta);
-        LOG_ENGINE_ERROR("Level instantiation failed during construction");
-        return false;
+        result.status = LevelInstantiationStatus::ConstructionFailure;
     }
+    result.player = {};
+    result.freecam = {};
+    result.player_rep = {};
+    if (!transaction.entities.empty()) {
+        result.entities.assign(transaction.entities.begin(), transaction.entities.end());
+        result.rollback = game_world.abortUnpublished(transaction);
+    }
+    if (settings_captured && settings_modified) {
+        try {
+            game_world.setGravity(previous_gravity);
+            game_world.setFixedDelta(previous_delta);
+        } catch (...) {
+            // Preserve the original construction status and rollback result.
+        }
+    }
+    return result;
 }
 
-bool LevelManager::instantiateLevel(
-    const LevelData& level_data,
-    world& game_world,
-    IRenderAPI* render_api,
-    entt::entity* out_player_entity,
-    entt::entity* out_freecam_entity,
-    entt::entity* out_player_rep_entity,
-    bool create_authority_game_mode,
-    std::vector<entt::entity>* out_created_entities)
+LevelInstantiationResult LevelManager::instantiateLevel(
+    const LevelData& level_data, world& game_world, IRenderAPI* render_api,
+    bool create_authority_game_mode)
 {
-    return instantiateLevelParallel(
-        level_data,
-        game_world,
-        render_api,
-        out_player_entity,
-        out_freecam_entity,
-        out_player_rep_entity,
-        create_authority_game_mode,
-        out_created_entities);
+    return instantiateLevelParallel(level_data, game_world, render_api, create_authority_game_mode);
 }

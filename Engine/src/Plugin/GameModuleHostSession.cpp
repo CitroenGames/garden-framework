@@ -125,6 +125,14 @@ bool GameModuleHostSession::notifyServerLevelLoaded()
     return true;
 }
 
+bool GameModuleHostSession::notifyServerLevelTransition()
+{
+    if (!m_server_initialised || !m_server_level_loaded || m_client_initialised ||
+        m_phase != Phase::Playing)
+        return false;
+    m_loader.serverOnLevelLoaded();
+    return true;
+}
 bool GameModuleHostSession::rolesHaveCompletedLevelLoad() const
 {
     return (m_client_initialised || m_server_initialised) &&

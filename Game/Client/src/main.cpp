@@ -46,6 +46,23 @@ static InputHandler input_handler;
 static ProjectManager project_manager;
 static LevelManager level_manager;
 static ReflectionRegistry reflection;
+static LevelInstantiationResult level_construction{};
+
+static bool finishLevelRollback()
+{
+    auto& rollback = level_construction.rollback;
+    if (!rollback.operation.valid()) return rollback.cleanupComplete();
+    if (!rollback.cleanupComplete()) {
+        const auto resumed = _world.resumeRetirement(rollback.operation);
+        if (resumed.operation.valid()) rollback = resumed;
+        else if (!resumed.cleanupComplete()) return false;
+    }
+    if (!rollback.cleanupComplete()) return false;
+    const auto ack = _world.acknowledgeRetirement(rollback.operation);
+    if (!ack.cleanupComplete()) return false;
+    rollback = {};
+    return true;
+}
 static bool game_module_resources_released = false;
 static GameModuleHostSession game_module(GameModuleHostSession::HostOperations{
     {},
@@ -68,6 +85,10 @@ static GameModuleHostSession game_module(GameModuleHostSession::HostOperations{
 static void quit_game(int code)
 {
     ConVarRegistry::get().saveArchiveCvars("config.cfg");
+    if (!finishLevelRollback()) {
+        LOG_ENGINE_ERROR("Level rollback incomplete; preserving world and module until process exit");
+        _exit(1);
+    }
 
     // Stop the host session while the world and host services remain valid.
     // It invokes the module shutdown callback before unloading its image.
@@ -361,15 +382,11 @@ int main(int argc, char* argv[])
             quit_game(1);
         }
 
-        entt::entity player_entity = entt::null;
-        entt::entity freecam_entity = entt::null;
-        entt::entity player_rep_entity = entt::null;
-
-        if (!level_manager.instantiateLevelParallel(level_data, _world, render_api,
-                &player_entity, &freecam_entity, &player_rep_entity,
-                create_authority_game_mode))
+        level_construction = level_manager.instantiateLevelParallel(
+            level_data, _world, render_api, create_authority_game_mode);
+        if (level_construction.status != LevelInstantiationStatus::Completed)
         {
-            LOG_ENGINE_FATAL("Failed to instantiate level");
+            LOG_ENGINE_FATAL("Failed to instantiate level (status {})", static_cast<int>(level_construction.status));
             quit_game(1);
         }
 

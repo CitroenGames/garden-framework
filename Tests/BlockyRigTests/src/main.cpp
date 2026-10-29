@@ -4,6 +4,7 @@
 #include "world.hpp"
 
 #include <cmath>
+#include <cstdlib>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -104,7 +105,12 @@ bool testPoseReachesHierarchyAndRenderMatrix()
     if (!rig) return fail(name, "fixture rig was rejected");
 
     world game_world;
-    const EntityRef root = BlockyRigSystem::createRoot(game_world, rig, "RigRoot");
+    auto root_result = BlockyRigSystem::createRoot(game_world, rig, "RigRoot");
+    if (root_result.status != BlockyRigStatus::Completed) {
+        if (!BlockyRigSystem::resumeCleanup(game_world, root_result)) std::_Exit(EXIT_FAILURE);
+        return fail(name, "root construction failed");
+    }
+    const EntityRef root = root_result.root;
     const BlockyRigTransform root_transform{{0.0f, 0.0f, 0.0f}, {0.0f, 90.0f, 0.0f}, {1.0f, 1.0f, 1.0f}};
     if (root.isNull() || !BlockyRigSystem::setRootTransform(game_world, root, root_transform))
         return fail(name, "root setup failed through world API");
@@ -114,7 +120,13 @@ bool testPoseReachesHierarchyAndRenderMatrix()
     pose[1].rotation = glm::angleAxis(glm::radians(90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
     if (!BlockyRigSystem::setLocalPose(game_world, root, pose))
         return fail(name, "pose setup failed through world API");
-    BlockyRigSystem::update(game_world);
+    {
+        auto update = BlockyRigSystem::update(game_world);
+        if (update.status != BlockyRigStatus::Completed) {
+            if (!BlockyRigSystem::resumeCleanup(game_world, update)) std::_Exit(EXIT_FAILURE);
+            return fail(name, "rig update failed");
+        }
+    }
 
     const auto instance = BlockyRigSystem::instance(game_world, root);
     if (!instance || !instance->spawned || instance->node_entities.size() != 4)
@@ -149,12 +161,23 @@ bool testInvalidPoseAndDestroyedChild()
     if (!rig) return fail(name, "fixture rig was rejected");
 
     world game_world;
-    const EntityRef root = BlockyRigSystem::createRoot(game_world, rig, "RigRoot");
+    auto root_result = BlockyRigSystem::createRoot(game_world, rig, "RigRoot");
+    if (root_result.status != BlockyRigStatus::Completed) {
+        if (!BlockyRigSystem::resumeCleanup(game_world, root_result)) std::_Exit(EXIT_FAILURE);
+        return fail(name, "root construction failed");
+    }
+    const EntityRef root = root_result.root;
     Pose pose;
     pose.resize(4);
     if (root.isNull() || !BlockyRigSystem::setLocalPose(game_world, root, pose))
         return fail(name, "root or pose setup failed through world API");
-    BlockyRigSystem::update(game_world);
+    {
+        auto update = BlockyRigSystem::update(game_world);
+        if (update.status != BlockyRigStatus::Completed) {
+            if (!BlockyRigSystem::resumeCleanup(game_world, update)) std::_Exit(EXIT_FAILURE);
+            return fail(name, "rig update failed");
+        }
+    }
 
     const auto initial = BlockyRigSystem::instance(game_world, root);
     if (!initial || initial->node_entities.size() != 4)
@@ -165,7 +188,13 @@ bool testInvalidPoseAndDestroyedChild()
     pose[1].translation.x = std::numeric_limits<float>::quiet_NaN();
     if (!BlockyRigSystem::setLocalPose(game_world, root, pose))
         return fail(name, "updated pose was rejected");
-    BlockyRigSystem::update(game_world);
+    {
+        auto update = BlockyRigSystem::update(game_world);
+        if (update.status != BlockyRigStatus::Completed) {
+            if (!BlockyRigSystem::resumeCleanup(game_world, update)) std::_Exit(EXIT_FAILURE);
+            return fail(name, "rig update failed");
+        }
+    }
 
     const auto arm_state = BlockyRigSystem::nodeState(game_world, arm);
     const auto other_state = BlockyRigSystem::nodeState(game_world, other);
@@ -174,16 +203,33 @@ bool testInvalidPoseAndDestroyedChild()
     if (!other_state || !nearVec(other_state->local_position, {3.0f, 0.0f, 0.0f}))
         return fail(name, "valid sibling pose was not applied");
 
-    if (!BlockyRigSystem::destroyNode(game_world, arm))
+    auto child_retirement = BlockyRigSystem::destroyNode(game_world, arm);
+    if (!child_retirement.cleanupComplete()) {
+        if (child_retirement.operation.valid()) std::_Exit(EXIT_FAILURE);
         return fail(name, "generated child could not be explicitly destroyed");
-    BlockyRigSystem::update(game_world);
+    }
+    if (child_retirement.operation.valid() &&
+        !game_world.acknowledgeRetirement(child_retirement.operation).cleanupComplete())
+        return fail(name, "generated child retirement acknowledgement failed");
+    {
+        auto update = BlockyRigSystem::update(game_world);
+        if (update.status != BlockyRigStatus::Completed) {
+            if (!BlockyRigSystem::resumeCleanup(game_world, update)) std::_Exit(EXIT_FAILURE);
+            return fail(name, "rig update failed");
+        }
+    }
     const auto after = BlockyRigSystem::instance(game_world, root);
     if (!after || !after->node_entities[1].isNull())
         return fail(name, "destroyed child did not become an empty node mapping");
     if (!BlockyRigSystem::nodeState(game_world, other))
         return fail(name, "destroying one limb destroyed an unrelated sibling");
 
-    if (!BlockyRigSystem::destroyRoot(game_world, root) ||
+    auto root_retirement = BlockyRigSystem::destroyRoot(game_world, root);
+    if (!root_retirement.cleanupComplete() && root_retirement.operation.valid())
+        std::_Exit(EXIT_FAILURE);
+    if (!root_retirement.cleanupComplete() ||
+        (root_retirement.operation.valid() &&
+         !game_world.acknowledgeRetirement(root_retirement.operation).cleanupComplete()) ||
         BlockyRigSystem::instance(game_world, root) ||
         BlockyRigSystem::nodeState(game_world, other))
         return fail(name, "root destruction did not cascade through generated rig subtree");

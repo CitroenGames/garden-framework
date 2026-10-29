@@ -1,3 +1,4 @@
+#include "../../LifecycleTestUtils.hpp"
 #include "Components/Components.hpp"
 #include "Network/BitStream.hpp"
 #include "Network/ReplicationRegistry.hpp"
@@ -543,7 +544,10 @@ bool testLevelMetadataAppliesGameplaySettings()
 
     world game_world;
     LevelManager level_manager;
-    if (!level_manager.instantiateLevelParallel(data, game_world, nullptr))
+    const auto level_result = level_manager.instantiateLevelParallel(data, game_world, nullptr);
+    if (!settleTestRollback(game_world, level_result.rollback))
+        return fail(name, "level rollback acknowledgement failed");
+    if (level_result.status != LevelInstantiationStatus::Completed)
         return fail(name, "empty level instantiation failed");
 
     auto* mode = game_world.getAuthorityGameModeAs<GameFramework::GameMode>();
@@ -599,10 +603,12 @@ bool testProjectDefaultsResolveGameplayClasses()
     LevelManager level_manager;
     level_manager.setGameplayDefaults("TestDefaultGameMode", "TestDefaultGameState");
 
-    const bool instantiated = level_manager.instantiateLevelParallel(data, game_world, nullptr);
+    const auto instantiated = level_manager.instantiateLevelParallel(data, game_world, nullptr);
     registry.unregisterBySource(source_id);
 
-    if (!instantiated)
+    if (!settleTestRollback(game_world, instantiated.rollback))
+        return fail(name, "level rollback acknowledgement failed");
+    if (instantiated.status != LevelInstantiationStatus::Completed)
         return fail(name, "empty level instantiation failed");
 
     auto* mode = game_world.getAuthorityGameMode();
@@ -626,8 +632,10 @@ bool testClientWorldCreatesOnlyGameState()
 
     world game_world;
     LevelManager level_manager;
-    if (!level_manager.instantiateLevelParallel(
-            data, game_world, nullptr, nullptr, nullptr, nullptr, false))
+    const auto level_result = level_manager.instantiateLevelParallel(data, game_world, nullptr, false);
+    if (!settleTestRollback(game_world, level_result.rollback))
+        return fail(name, "level rollback acknowledgement failed");
+    if (level_result.status != LevelInstantiationStatus::Completed)
     {
         return fail(name, "empty client level instantiation failed");
     }

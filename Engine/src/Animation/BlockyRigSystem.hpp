@@ -3,6 +3,7 @@
 #include "Animation/BlockyRig.hpp"
 #include "Components/IdentityComponent.hpp"
 #include "EngineExport.h"
+#include "world.hpp"
 
 #include <glm/glm.hpp>
 
@@ -39,11 +40,24 @@ struct BlockyRigInstance
     bool spawned = false;
 };
 
+// Failure retains all construction ownership until resumeCleanup acknowledges it.
+enum class BlockyRigStatus { Completed, InvalidInput, ConstructionFailure };
+struct BlockyRigResult
+{
+    BlockyRigStatus status = BlockyRigStatus::Completed;
+    EntityRef root{};
+    ScopedRestoreStatus creation_status = ScopedRestoreStatus::Completed;
+    LifecycleResult creation_rollback{};
+    LifecycleResult cleanup{};
+    std::vector<garden::ecs::EntityHandle> captured;
+    bool cleanup_started = false;
+};
+
 namespace BlockyRigSystem
 {
 // Creates a generic root entity and binds exactly one immutable current-format
 // rig resource. Node entities are created only by spawn/update.
-ENGINE_API EntityRef createRoot(world& game_world, std::shared_ptr<const BlockyRig> rig,
+ENGINE_API BlockyRigResult createRoot(world& game_world, std::shared_ptr<const BlockyRig> rig,
                                 std::string_view tag = "BlockyRig");
 
 // Binds a resource before nodes exist. Rebinding a spawned root is refused;
@@ -51,8 +65,10 @@ ENGINE_API EntityRef createRoot(world& game_world, std::shared_ptr<const BlockyR
 ENGINE_API bool bind(world& game_world, EntityRef rig_root,
                      std::shared_ptr<const BlockyRig> rig);
 
-ENGINE_API bool spawn(world& game_world, EntityRef rig_root);
-ENGINE_API void update(world& game_world);
+ENGINE_API BlockyRigResult spawn(world& game_world, EntityRef rig_root);
+ENGINE_API BlockyRigResult update(world& game_world);
+// Retry and acknowledge construction rollback and subsequent cohort cleanup.
+ENGINE_API bool resumeCleanup(world& game_world, BlockyRigResult& result);
 
 // Supplies transient local-pose data for the next update. Invalid pose data
 // is contained by the implementation and falls back to immutable rest data.
@@ -68,6 +84,6 @@ ENGINE_API std::optional<BlockyRigNodeState> nodeState(const world& game_world,
 
 // Explicit lifecycle operations for generated limbs and roots. Destroying one
 // node never recreates it on update; destroying a root cascades its rig tree.
-ENGINE_API bool destroyNode(world& game_world, EntityRef node);
-ENGINE_API bool destroyRoot(world& game_world, EntityRef rig_root);
+ENGINE_API LifecycleResult destroyNode(world& game_world, EntityRef node);
+ENGINE_API LifecycleResult destroyRoot(world& game_world, EntityRef rig_root);
 } // namespace BlockyRigSystem

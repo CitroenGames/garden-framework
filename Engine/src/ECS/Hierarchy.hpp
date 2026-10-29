@@ -17,6 +17,8 @@
 #include <cstdio>
 #include <functional>
 #include <optional>
+#include <span>
+#include <new>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -572,6 +574,135 @@ inline void detach(entt::registry& r, entt::entity child,
     markDirty(r, child);
 }
 
+// Read-only preparation for world retirement. Identity and both sides of every
+// relevant link must be provable before any caller publishes a retirement fence.
+enum class RetirementPreflightStatus { Completed, InvalidHierarchy, AllocationFailure };
+struct RetirementPreflightResult
+{
+    RetirementPreflightStatus status = RetirementPreflightStatus::Completed;
+    std::vector<entt::entity> cohort;
+};
+
+inline RetirementPreflightResult preflightRetirementCohort(
+    const entt::registry& r, std::span<const entt::entity> roots) noexcept
+{
+    RetirementPreflightResult result;
+    try
+    {
+        const auto validIdentity = [&](entt::entity e) {
+            const EntityRef ref = entityRefOf(r, e);
+            return e != entt::null && r.valid(e) && !ref.isNull() &&
+                   resolveEntityRef(r, ref) == e;
+        };
+        // Validate the node's parent and the parent's exact backlink. Walk the
+        // complete chain to catch cycles and depth overflow, including ancestors
+        // outside the requested cohort.
+        const auto validChain = [&](entt::entity start) {
+            std::unordered_set<entt::entity> seen;
+            auto e = start;
+            int depth = 0;
+            while (e != entt::null)
+            {
+                if (depth++ > kMaxDepth || !validIdentity(e) || !seen.insert(e).second)
+                    return false;
+                const auto* parent = r.try_get<ParentComponent>(e);
+                if (!parent || parent->parent.isNull()) break;
+                const auto p = resolveEntityRef(r, parent->parent);
+                if (p == entt::null || !validIdentity(p)) return false;
+                const auto* children = r.try_get<ChildrenComponent>(p);
+                const auto ref = entityRefOf(r, e);
+                if (!children || std::count(children->children.begin(), children->children.end(), ref) != 1)
+                    return false;
+                e = p;
+            }
+            return true;
+        };
+        std::unordered_set<entt::entity> included, expanded;
+        std::function<bool(entt::entity, bool)> visit;
+        visit = [&](entt::entity e, bool inheritedCascade) {
+            if (!validChain(e)) return false;
+            const auto* policy = r.try_get<HierarchyPolicyComponent>(e);
+            const auto mode = policy ? policy->on_parent_destroyed : HierarchyDestroyPolicy::OrphanToParent;
+            if (mode != HierarchyDestroyPolicy::OrphanToParent &&
+                mode != HierarchyDestroyPolicy::CascadeDestroy &&
+                mode != HierarchyDestroyPolicy::ReparentToRoot) return false;
+            if (included.insert(e).second) result.cohort.push_back(e);
+            const bool cascade = inheritedCascade || mode == HierarchyDestroyPolicy::CascadeDestroy;
+            // A previously included root can still require expansion when a
+            // later overlapping root enters it through a cascading ancestor.
+            if (cascade && !expanded.insert(e).second) return true;
+            const auto* children = r.try_get<ChildrenComponent>(e);
+            const EntityRef self = entityRefOf(r, e);
+            std::unordered_set<entt::entity> direct;
+            if (children) for (const auto ref : children->children)
+            {
+                const auto child = resolveEntityRef(r, ref);
+                if (child == entt::null || !validIdentity(child) || !direct.insert(child).second ||
+                    !validChain(child)) return false;
+                const auto* parent = r.try_get<ParentComponent>(child);
+                if (!parent || parent->parent != self) return false;
+                if (cascade && !visit(child, true)) return false;
+            }
+            // Catch missing parent-side mirrors even if no ChildrenComponent
+            // exists or a corrupt list silently omits the child.
+            for (const auto [candidate, parent] : r.view<ParentComponent>().each())
+                if (parent.parent == self && direct.find(candidate) == direct.end()) return false;
+            return true;
+        };
+        for (const auto root : roots)
+            if (!visit(root, false)) {
+                result.status = RetirementPreflightStatus::InvalidHierarchy;
+                result.cohort.clear();
+                return result;
+            }
+        // Reparenting a surviving child uses the same physics predicate as
+        // attach. Validate it against the final cohort, not a partial prefix.
+        for (const auto e : result.cohort)
+        {
+            const auto* policy = r.try_get<HierarchyPolicyComponent>(e);
+            if (policy && policy->on_parent_destroyed != HierarchyDestroyPolicy::OrphanToParent) continue;
+            const auto* parent = r.try_get<ParentComponent>(e);
+            if (!parent || parent->parent.isNull()) continue;
+            const auto grandparent = resolveEntityRef(r, parent->parent);
+            if (included.find(grandparent) != included.end()) continue;
+            const auto* children = r.try_get<ChildrenComponent>(e);
+            if (!children) continue;
+            std::vector<PhysicsAttachmentNode> ancestors;
+            for (auto current = grandparent; current != entt::null; )
+            {
+                ancestors.push_back(detail::physicsAttachmentNodeFor(r, current));
+                const auto* link = r.try_get<ParentComponent>(current);
+                current = link && !link->parent.isNull() ? resolveEntityRef(r, link->parent) : entt::null;
+            }
+            for (const auto ref : children->children)
+            {
+                const auto child = resolveEntityRef(r, ref);
+                if (included.find(child) == included.end() &&
+                    validatePhysicsAttachment(detail::physicsAttachmentNodeFor(r, child), ancestors) !=
+                        PhysicsAttachmentValidationResult::Allowed)
+                {
+                    result.status = RetirementPreflightStatus::InvalidHierarchy;
+                    result.cohort.clear();
+                    return result;
+                }
+            }
+        }
+        return result;
+    }
+    catch (const std::bad_alloc&)
+    {
+        result.cohort.clear();
+        result.status = RetirementPreflightStatus::AllocationFailure;
+        return result;
+    }
+    catch (...)
+    {
+        result.cohort.clear();
+        result.status = RetirementPreflightStatus::InvalidHierarchy;
+        return result;
+    }
+}
+
 // Internal lifecycle policy: cohort children are retired separately. The
 // privileged attach is limited to the reparenting required by this operation.
 inline bool retireEntity(entt::registry& r, entt::entity entity,
@@ -587,11 +718,13 @@ inline bool retireEntity(entt::registry& r, entt::entity entity,
     for (EntityRef ref : snapshot)
     {
         const entt::entity child = detail::resolveRef(r, ref);
-        if (child == entt::null || !r.valid(child) || fence.contains(child) || fence.isPending(child)) continue;
+        // A pending child outside this cohort survives this operation and
+        // still needs its parent link repaired before its own FIFO turn.
+        if (child == entt::null || !r.valid(child) || fence.contains(child)) continue;
         if (policy == HierarchyDestroyPolicy::CascadeDestroy || policy == HierarchyDestroyPolicy::COUNT)
             return false;
         if (policy == HierarchyDestroyPolicy::OrphanToParent && grandparent != entt::null &&
-            !fence.blocks(grandparent))
+            !fence.contains(grandparent))
         {
             if (!detail::attachImpl(r, child, grandparent, true, true)) return false;
         }

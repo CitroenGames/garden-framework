@@ -9,6 +9,7 @@
 #include "PhysicsSystem.hpp"
 #include "Tick/TickSystem.hpp"
 #include <cstdint>
+#include <span>
 #include <array>
 #include <functional>
 #include <type_traits>
@@ -21,14 +22,27 @@
 #include <entt/entt.hpp>
 
 class LevelManager;
+class world;
 struct RetirementFence;
 
 enum class LifecycleStatus {
     Completed, CompletedWithObserverFailure, Queued, AlreadyPending, Alive, Pending,
     Invalid, WrongWorld, Stale, QueryActive, Reentrant, AllocationFailure,
-    ObserverFailure, Partial, InternalFailure
+    ObserverFailure, Partial, InternalFailure, Conflict, UnknownOperation
 };
 enum class LifecyclePhase { None, Prepare, Constraints, Event, Hierarchy, Physics, Components, Identity };
+enum class LifecycleOperationKind { None, PublishedBatch, UnpublishedRollback };
+class LifecycleOperationHandle {
+public:
+    LifecycleOperationHandle() noexcept = default;
+    bool valid() const noexcept { return owner_ && incarnation_ && serial_; }
+    friend bool operator==(const LifecycleOperationHandle&, const LifecycleOperationHandle&) noexcept = default;
+private:
+    friend class world;
+    const world* owner_ = nullptr;
+    uint64_t incarnation_ = 0;
+    uint64_t serial_ = 0;
+};
 // `completed` counts entities retired by this operation, including those
 // completed before an error. `entity` and `phase` identify interrupted work.
 struct LifecycleResult {
@@ -36,10 +50,38 @@ struct LifecycleResult {
     LifecyclePhase phase = LifecyclePhase::None;
     garden::ecs::EntityHandle entity{};
     size_t completed = 0;
+    LifecycleOperationHandle operation{};
+    LifecycleOperationKind kind = LifecycleOperationKind::None;
+    LifecycleOperationHandle blocked_by{};
+    LifecycleOperationKind blocked_by_kind = LifecycleOperationKind::None;
+    bool accepted = false;
     bool cleanupComplete() const noexcept {
         return status == LifecycleStatus::Completed || status == LifecycleStatus::CompletedWithObserverFailure;
     }
 };
+
+// Internal fault-injection context for lifecycle fixtures. Installed only by tests.
+namespace garden::ecs::testing {
+struct LifecycleFaultHook {
+    void* context = nullptr;
+    bool (*fail)(void*, LifecyclePhase) noexcept = nullptr;
+};
+struct LifecycleTestAccess;
+}
+
+enum class ScopedRestoreStatus { Completed, InvalidInput, Conflict, QueryActive, AllocationFailure, ConstructionFailure };
+struct ScopedRestoreResult {
+    ScopedRestoreStatus status = ScopedRestoreStatus::Completed;
+    std::vector<garden::ecs::EntityHandle> entities;
+    LifecycleResult rollback{};
+};
+struct EntityCreationResult {
+    ScopedRestoreStatus status = ScopedRestoreStatus::Completed;
+    EntityRef reference{};
+    garden::ecs::EntityHandle entity{};
+    LifecycleResult rollback{};
+};
+enum class EntityHandleClassification { Alive, Pending, Retiring, RetiredGone, WrongWorld, Unverifiable };
 
 namespace GameFramework
 {
@@ -54,17 +96,25 @@ private:
     // CharacterPhysicsService implements its Garden handle API through this private seam.
     friend class CharacterPhysicsService;
     friend class LevelManager;
+    friend struct garden::ecs::testing::LifecycleTestAccess;
     struct LifecycleState;
     std::unique_ptr<LifecycleState> lifecycle_state;
+    uint64_t incarnation = 0;
+    uint64_t next_operation_serial = 1;
     std::unique_ptr<RetirementFence> retirement_fence;
     struct ConstructionTransaction {
         world* owner;
         std::vector<garden::ecs::EntityHandle> entities;
         bool committed = false;
+        LifecycleOperationHandle rollback_operation{};
     };
     LifecycleResult abortUnpublished(ConstructionTransaction&) noexcept;
+    ScopedRestoreResult restoreScopedEntities(std::span<const EntityRef>, ConstructionTransaction&);
+    LifecycleResult operationConflict() const noexcept;
+    LifecycleResult operationProgress(LifecycleResult) noexcept;
     LifecycleStatus validateLifecycleHandle(garden::ecs::EntityHandle) const noexcept;
     LifecycleResult retireRaw(entt::entity, bool unpublished) noexcept;
+    LifecycleResult retireEntitiesImpl(std::span<const garden::ecs::EntityHandle>, bool external) noexcept;
     LifecycleResult processRetirement() noexcept;
     void markWorldActive() noexcept;
     struct ComponentWorldState;
@@ -142,18 +192,11 @@ public:
 
     // Creates a Garden entity handle with a stable identity. Gameplay code uses
     // this handle instead of storage-library entity values.
-    EntityRef createEntity(std::string_view tag = {});
-
-    // Scoped identities expire on world destruction or reset.
-    // Converting a persisted reference never repairs or assigns its identity.
-    garden::ecs::EntityHandle createScopedEntity(std::string_view tag = {});
-    // Restore a unique, non-null persisted identity. Failure returns an invalid
-    // handle; creation is forbidden during a query.
-    garden::ecs::EntityHandle restoreScopedEntity(EntityRef reference);
-    // Restores a unique cohort after validating the destination in one scan.
-    // On failure no cohort handles are published and restored entities retire.
-    bool restoreScopedEntities(const std::vector<EntityRef>& references,
-                               std::vector<garden::ecs::EntityHandle>& out_handles);
+    EntityCreationResult createEntity(std::string_view tag = {});
+    EntityCreationResult createScopedEntity(std::string_view tag = {});
+    ScopedRestoreResult restoreScopedEntity(EntityRef reference);
+    ScopedRestoreResult restoreScopedEntities(std::span<const EntityRef> references);
+    EntityHandleClassification classifyEntityHandle(garden::ecs::EntityHandle) const noexcept;
     garden::ecs::EntityHandle scopedEntity(EntityRef entity);
     // Returns null for invalid handles or missing, null, or ambiguous identity.
     // This read does not assign identity or scope and is safe during queries.
@@ -164,6 +207,10 @@ public:
     // A failed observer attempt is never replayed on retry.
     LifecycleResult requestRetirement(garden::ecs::EntityHandle entity) noexcept;
     LifecycleResult retireEntity(garden::ecs::EntityHandle entity) noexcept;
+    LifecycleResult retireEntities(std::span<const garden::ecs::EntityHandle>) noexcept;
+    LifecycleResult resumeRetirement(LifecycleOperationHandle) noexcept;
+    LifecycleResult retirementResult(LifecycleOperationHandle) const noexcept;
+    LifecycleResult acknowledgeRetirement(LifecycleOperationHandle) noexcept;
     LifecycleResult drainRetirements() noexcept;
     LifecycleResult retirementState(garden::ecs::EntityHandle entity) const noexcept;
 
@@ -538,3 +585,12 @@ public:
     // Used by the editor to restore pre-play state.
     LifecycleResult resetWorld(const PhysicsSystemSettings& settings = PhysicsSystemSettings{}) noexcept;
 };
+
+// Test access is intentionally separate from world operations. These setters
+// require exclusive control of all worlds and are only for deterministic fixtures.
+namespace garden::ecs::testing {
+struct ENGINE_API LifecycleTestAccess {
+    static uint64_t exchangeWorldAllocator(uint64_t value) noexcept;
+    static uint64_t exchangeEntitySerial(world& owner, uint64_t value) noexcept;
+};
+}

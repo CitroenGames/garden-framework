@@ -1,6 +1,7 @@
 #pragma once
 
 #include "EngineExport.h"
+#include "world.hpp"
 #include <string>
 #include <vector>
 #include <fstream>
@@ -234,6 +235,16 @@ struct MeshPreloadData {
     MeshPreloadData& operator=(const MeshPreloadData&) = delete;
 };
 
+enum class LevelInstantiationStatus { Completed, InvalidInput, Conflict, AllocationFailure, ConstructionFailure };
+struct LevelInstantiationResult {
+    LevelInstantiationStatus status = LevelInstantiationStatus::Completed;
+    std::vector<garden::ecs::EntityHandle> entities;
+    garden::ecs::EntityHandle player{};
+    garden::ecs::EntityHandle freecam{};
+    garden::ecs::EntityHandle player_rep{};
+    LifecycleResult rollback{};
+};
+
 class ENGINE_API LevelManager
 {
 public:
@@ -253,25 +264,10 @@ public:
     bool compileLevel(const std::string& json_path, const std::string& binary_path);
 
     // Instantiation - creates runtime objects from level data
-    bool instantiateLevel(const LevelData& level_data,
-                         world& game_world,
-                         IRenderAPI* render_api,
-                         entt::entity* out_player_entity = nullptr,
-                         entt::entity* out_freecam_entity = nullptr,
-                         entt::entity* out_player_rep_entity = nullptr,
-                         bool create_authority_game_mode = true,
-                         std::vector<entt::entity>* out_created_entities = nullptr);
-
-    // Parallel instantiation - reads all meshes from disk in parallel, then
-    // finalizes GPU uploads and entity creation on the main thread.
-    bool instantiateLevelParallel(const LevelData& level_data,
-                                  world& game_world,
-                                  IRenderAPI* render_api,
-                                  entt::entity* out_player_entity = nullptr,
-                                  entt::entity* out_freecam_entity = nullptr,
-                                  entt::entity* out_player_rep_entity = nullptr,
-                                  bool create_authority_game_mode = true,
-                                  std::vector<entt::entity>* out_created_entities = nullptr);
+    LevelInstantiationResult instantiateLevel(const LevelData& level_data, world& game_world,
+                                              IRenderAPI* render_api, bool create_authority_game_mode = true);
+    LevelInstantiationResult instantiateLevelParallel(const LevelData& level_data, world& game_world,
+                                                      IRenderAPI* render_api, bool create_authority_game_mode = true);
 
     void setReflectionRegistry(ReflectionRegistry* reflection) { m_reflection = reflection; }
     void setGameplayDefaults(std::string game_mode_class, std::string game_state_class);

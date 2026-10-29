@@ -1,3 +1,4 @@
+#include "../../LifecycleTestUtils.hpp"
 #include "Components/Components.hpp"
 #include "Components/HierarchyComponents.hpp"
 #include "Components/IdentityComponent.hpp"
@@ -104,8 +105,9 @@ struct AuthoredTree
 
 entt::entity createTagged(world& w, const char* tag)
 {
-    const auto ref = w.createEntity();
-    const auto entity = resolveEntityRef(w.registry, ref);
+    const auto created = w.createEntity();
+    if (!settleTestRollback(w, created.rollback) || created.status != ScopedRestoreStatus::Completed) return entt::null;
+    const auto entity = resolveEntityRef(w.registry, created.reference);
     if (entity != entt::null) w.registry.emplace<TagComponent>(entity, TagComponent{tag});
     return entity;
 }

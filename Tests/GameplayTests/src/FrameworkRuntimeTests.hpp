@@ -82,7 +82,12 @@ bool testFrameworkWorldResetLifecycle()
     int shutdowns = 0;
     world w;
     world* const address = &w;
-    const auto old_entity = w.createScopedEntity();
+    const auto old_entity_creation = w.createScopedEntity();
+    if (!settleTestRollback(w, old_entity_creation.rollback))
+        return fail(name, "entity rollback acknowledgement failed");
+    if (old_entity_creation.status != ScopedRestoreStatus::Completed)
+        return fail(name, "entity creation failed");
+    const auto old_entity = old_entity_creation.entity;
     w.setGameState(std::make_unique<ResetState>(shutdowns));
     w.startGameplayFramework();
     if (!w.hasGameplayFrameworkStarted())

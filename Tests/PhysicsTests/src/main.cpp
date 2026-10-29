@@ -95,6 +95,97 @@ static bool pass(const std::string& name)
     return true;
 }
 
+// Consume the exact construction rollback operation, including terminal operations.
+static bool finishConstructionRollback(world& w, const LifecycleResult& rollback, size_t captures)
+{
+    if (!rollback.operation.valid())
+        return captures == 0 && !rollback.accepted && rollback.kind == LifecycleOperationKind::None;
+    const auto token = rollback.operation;
+    const auto observed = w.retirementResult(token);
+    const auto resumed = w.resumeRetirement(token);
+    bool valid = captures != 0 && rollback.accepted && rollback.kind == LifecycleOperationKind::UnpublishedRollback &&
+        observed.accepted && observed.operation == token && observed.kind == LifecycleOperationKind::UnpublishedRollback &&
+        resumed.cleanupComplete() && resumed.accepted && resumed.operation == token &&
+        resumed.kind == LifecycleOperationKind::UnpublishedRollback && resumed.completed == captures;
+    if (!resumed.cleanupComplete()) {
+        std::cerr << "[FAIL] construction rollback remains incomplete" << std::endl;
+        return false;
+    }
+    const auto acknowledged = w.acknowledgeRetirement(token);
+    return valid && acknowledged.cleanupComplete() && acknowledged.operation == token &&
+        w.retirementResult(token).status == LifecycleStatus::UnknownOperation;
+}
+
+static bool levelSucceeded(world& w, const LevelInstantiationResult& result)
+{
+    if (result.status != LevelInstantiationStatus::Completed) {
+        if (!finishConstructionRollback(w, result.rollback, result.entities.size()))
+            std::cerr << "[FAIL] unexpected level construction rollback failed" << std::endl;
+        return false;
+    }
+    if (result.rollback.operation.valid() || result.rollback.accepted) {
+        finishConstructionRollback(w, result.rollback, result.entities.size());
+        return false;
+    }
+    return true;
+}
+
+static bool levelFailedAndCleaned(world& w, const LevelInstantiationResult& result)
+{
+    const bool failed = result.status == LevelInstantiationStatus::ConstructionFailure ||
+        result.status == LevelInstantiationStatus::InvalidInput ||
+        result.status == LevelInstantiationStatus::Conflict;
+    const bool cleanup = finishConstructionRollback(w, result.rollback, result.entities.size());
+    if (!failed) std::cerr << "[FAIL] expected construction rejection, received another status" << std::endl;
+    if (!cleanup) std::cerr << "[FAIL] construction rollback verification failed" << std::endl;
+    return failed && cleanup && result.player == garden::ecs::EntityHandle{} &&
+        result.freecam == garden::ecs::EntityHandle{} && result.player_rep == garden::ecs::EntityHandle{};
+}
+
+static garden::ecs::EntityHandle checkedRestore(world& w, EntityRef ref)
+{
+    auto result = w.restoreScopedEntity(ref);
+    if (result.status != ScopedRestoreStatus::Completed) {
+        if (!finishConstructionRollback(w, result.rollback, result.entities.size()))
+            std::cerr << "[FAIL] scoped restore rollback failed" << std::endl;
+        return {};
+    }
+    if (result.rollback.operation.valid() || result.rollback.accepted) {
+        finishConstructionRollback(w, result.rollback, result.entities.size());
+        return {};
+    }
+    if (result.entities.size() != 1) return {};
+    return result.entities.front();
+}
+
+static garden::ecs::EntityHandle checkedCreate(world& w)
+{
+    auto result = w.createScopedEntity();
+    if (result.status != ScopedRestoreStatus::Completed) {
+        if (!finishConstructionRollback(w, result.rollback, result.entity == garden::ecs::EntityHandle{} ? 0 : 1))
+            std::cerr << "[FAIL] scoped creation rollback failed" << std::endl;
+        return {};
+    }
+    if (result.rollback.operation.valid() || result.rollback.accepted) {
+        finishConstructionRollback(w, result.rollback, result.entity == garden::ecs::EntityHandle{} ? 0 : 1);
+        return {};
+    }
+    if (w.persistedReference(result.entity) != result.reference) return {};
+    return result.entity;
+}
+
+static entt::entity rawLevelEntity(world& w, garden::ecs::EntityHandle handle)
+{
+    return resolveEntityRef(w.registry, w.persistedReference(handle));
+}
+
+static std::vector<entt::entity> rawLevelEntities(world& w, const LevelInstantiationResult& result)
+{
+    std::vector<entt::entity> entities;
+    for (auto handle : result.entities) entities.push_back(rawLevelEntity(w, handle));
+    return entities;
+}
+
 static bool testFixedTickAccumulatorCarriesPartialTime()
 {
     const std::string name = "fixed tick accumulator carries partial time";
@@ -1282,7 +1373,7 @@ static bool testNetworkSpawnedPlayerGroundsOnMesh(const fs::path& repo_root)
     w.initializePhysics();
 
     LevelManager level_manager;
-    if (!level_manager.instantiateLevel(data, w, &render_api))
+    if (!levelSucceeded(w, level_manager.instantiateLevel(data, w, &render_api)))
         return fail(name, "instantiateLevel returned false");
 
     auto player = w.registry.create();
@@ -1342,7 +1433,7 @@ static bool testLevelPlayerCreatesCharacterController()
     w.initializePhysics();
 
     LevelManager level_manager;
-    if (!level_manager.instantiateLevel(data, w, nullptr))
+    if (!levelSucceeded(w, level_manager.instantiateLevel(data, w, nullptr)))
         return fail(name, "instantiateLevel returned false");
 
     entt::entity player = entt::null;
@@ -1390,7 +1481,7 @@ static bool testUseMeshCollisionCreatesBody(const fs::path& repo_root)
     w.initializePhysics();
 
     LevelManager level_manager;
-    if (!level_manager.instantiateLevel(data, w, &render_api))
+    if (!levelSucceeded(w, level_manager.instantiateLevel(data, w, &render_api)))
         return fail(name, "instantiateLevel returned false");
 
     entt::entity ground_entity = entt::null;
@@ -1630,7 +1721,7 @@ static bool testLevelTerrainCreatesMeshAndCollision(const fs::path& repo_root)
 
     LevelManager level_manager;
     level_manager.setReflectionRegistry(&reflection);
-    if (!level_manager.instantiateLevel(data, w, &render_api))
+    if (!levelSucceeded(w, level_manager.instantiateLevel(data, w, &render_api)))
         return fail(name, "instantiateLevel returned false");
 
     entt::entity terrain = entt::null;
@@ -2078,11 +2169,13 @@ static bool testHEParentedKinematicPlatformSync()
     CharacterPhysicsService character_physics(w);
     w.initializePhysics();
 
-    const entt::entity parent = resolveEntityRef(w.registry, w.persistedReference(w.createScopedEntity()));
+    const entt::entity parent = resolveEntityRef(w.registry, w.persistedReference(checkedCreate(w)));
+    if (parent == entt::null) return fail(name, "parent creation failed");
     auto& parent_transform = w.registry.emplace<TransformComponent>(parent, 4.0f, 0.0f, -3.0f);
     parent_transform.rotation = {0.0f, 35.0f, 0.0f};
 
-    const entt::entity platform = resolveEntityRef(w.registry, w.persistedReference(w.createScopedEntity()));
+    const entt::entity platform = resolveEntityRef(w.registry, w.persistedReference(checkedCreate(w)));
+    if (platform == entt::null) return fail(name, "platform creation failed");
     auto& platform_transform = w.registry.emplace<TransformComponent>(platform, 1.25f, 0.25f, 0.0f);
     platform_transform.rotation = {0.0f, 20.0f, 0.0f};
     const TransformComponent platform_local_before = platform_transform;
@@ -3336,7 +3429,7 @@ static bool testD6LevelRoundTrip()
     if (loaded.entities.size() != 2) return fail(name, "round-trip entity count changed");
     world w; w.initializePhysics(); w.setGravity(glm::vec3(0.0f, -1.0f, 0.0f));
     LevelManager lm2;
-    if (!lm2.instantiateLevel(loaded, w, nullptr)) return fail(name, "instantiate of round-tripped level failed");
+    if (!levelSucceeded(w, lm2.instantiateLevel(loaded, w, nullptr))) return fail(name, "instantiate of round-tripped level failed");
     for (int i = 0; i < 120; ++i) w.getPhysicsSystem().stepPhysics(w.registry);
     bool rested = false;
     auto view = w.registry.view<TagComponent, TransformComponent>();
@@ -3467,10 +3560,10 @@ static bool testD6LayerRenumberRegression(const fs::path& repo_root)
         ReflectionRegistry reflection;
         registerEngineReflection(reflection);
         instance_manager.setReflectionRegistry(&reflection);
-        std::vector<entt::entity> level_entities;
-        if (!instance_manager.instantiateLevel(round_tripped_data, w, &render_api,
-                                               nullptr, nullptr, nullptr, false, &level_entities))
+        const auto level_result = instance_manager.instantiateLevel(round_tripped_data, w, &render_api, false);
+        if (!levelSucceeded(w, level_result))
             return scene_fail("level instantiation failed");
+        const auto level_entities = rawLevelEntities(w, level_result);
 
         entt::entity ground = entt::null;
         for (entt::entity entity : level_entities)
@@ -3876,9 +3969,8 @@ static bool testHELoadedKinematicChildInitializesAtComposedPose()
     world w;
     w.initializePhysics();
     LevelManager manager;
-    std::vector<entt::entity> created;
-    if (!manager.instantiateLevel(level, w, nullptr, nullptr, nullptr,
-                                  nullptr, false, &created))
+    const auto level_result = manager.instantiateLevel(level, w, nullptr, false);
+    if (!levelSucceeded(w, level_result))
         return fail(name, "valid parented kinematic level was rejected");
 
     const entt::entity loaded_parent = findEntityByTag(w.registry, "he_loaded_parent");
@@ -3933,8 +4025,9 @@ static bool testHEStagedMeshPolicyAndNonPhysicsScale()
     {
         world owner;
         auto& registry = owner.registry;
-        const entt::entity parent = resolveEntityRef(registry, owner.persistedReference(owner.createScopedEntity()));
-        const entt::entity child = resolveEntityRef(registry, owner.persistedReference(owner.createScopedEntity()));
+        const entt::entity parent = resolveEntityRef(registry, owner.persistedReference(checkedCreate(owner)));
+        const entt::entity child = resolveEntityRef(registry, owner.persistedReference(checkedCreate(owner)));
+        if (parent == entt::null || child == entt::null) return fail(name, "hierarchy fixture creation failed");
         registry.emplace<TransformComponent>(parent).scale = {2.0f, 1.0f, 1.0f};
         registry.emplace<TransformComponent>(child);
         if (!Hierarchy::attach(registry, child, parent))
@@ -3975,10 +4068,10 @@ static bool testHEStagedMeshPolicyAndNonPhysicsScale()
         level.entities.push_back(make_child("he_nonphysics_child"));
         world game_world;
         LevelManager manager;
-        std::vector<entt::entity> created;
-        if (!manager.instantiateLevel(level, game_world, nullptr, nullptr,
-                                      nullptr, nullptr, false, &created))
+        const auto level_result = manager.instantiateLevel(level, game_world, nullptr, false);
+        if (!levelSucceeded(game_world, level_result))
             return fail(name, "staged load rejected a non-physics child below a scaled parent");
+        const auto created = rawLevelEntities(game_world, level_result);
         if (created.size() != 2 ||
             Hierarchy::parentOf(game_world.registry, created[1]) != created[0])
             return fail(name, "staged non-physics child link was not restored");
@@ -4006,11 +4099,10 @@ static bool testHEStagedMeshPolicyAndNonPhysicsScale()
         const size_t tag_count_before = game_world.registry.view<TagComponent>().size();
         const size_t identity_count_before = game_world.registry.view<IdentityComponent>().size();
         LevelManager manager;
-        std::vector<entt::entity> created;
-        if (manager.instantiateLevel(level, game_world, nullptr, nullptr,
-                                     nullptr, nullptr, false, &created))
+        const auto level_result = manager.instantiateLevel(level, game_world, nullptr, false);
+        if (!levelFailedAndCleaned(game_world, level_result))
             return fail(name, "staged kinematic mesh child was accepted");
-        if (!created.empty() ||
+        if (!level_result.entities.empty() ||
             game_world.registry.view<TagComponent>().size() != tag_count_before ||
             game_world.registry.view<IdentityComponent>().size() != identity_count_before)
             return fail(name, "staged mesh rejection mutated the registry before body creation");
@@ -4135,10 +4227,10 @@ static bool testLevelManagerHBPersistenceAndCohortRestore()
         const auto saved_outside_mirror =
             game_world.registry.get<ChildrenComponent>(outside_parent).children;
 
-        std::vector<entt::entity> created;
-        if (!manager.instantiateLevel(loaded, game_world, nullptr, nullptr,
-                                      nullptr, nullptr, false, &created))
+        const auto level_result = manager.instantiateLevel(loaded, game_world, nullptr, false);
+        if (!levelSucceeded(game_world, level_result))
             return fail(name, "valid persisted cohort was rejected");
+        const auto created = rawLevelEntities(game_world, level_result);
         if (created.size() != loaded.entities.size())
             return fail(name, "created entity count did not match LevelData order");
 
@@ -4334,7 +4426,7 @@ static bool testLevelManagerHBRejectsBeforeRegistryMutation()
             const auto outside_mirror_before =
                 game_world.registry.get<ChildrenComponent>(existing).children;
             const EntityRef scoped_ref{EntityGuid{0xDD00, 0xEE00}};
-            const auto scoped = game_world.restoreScopedEntity(scoped_ref);
+            const auto scoped = checkedRestore(game_world, scoped_ref);
             if (!game_world.isEntityValid(scoped) ||
                 game_world.add<TransformComponent>(scoped) != garden::ecs::ComponentStoreResult::Success)
                 return fail(name, "could not create existing scoped query sentinel");
@@ -4353,11 +4445,10 @@ static bool testLevelManagerHBRejectsBeforeRegistryMutation()
             // Include the sentinel in the destination counts checked after rejection.
             const size_t scoped_identity_count_before =
                 game_world.registry.view<IdentityComponent>().size();
-            std::vector<entt::entity> created;
-            if (manager.instantiateLevel(loaded, game_world, nullptr, nullptr,
-                                         nullptr, nullptr, false, &created))
+            const auto level_result = manager.instantiateLevel(loaded, game_world, nullptr, false);
+            if (!levelFailedAndCleaned(game_world, level_result))
                 return fail(name, scenario + " cohort was unexpectedly accepted");
-            if (!created.empty() ||
+            if (!level_result.entities.empty() ||
                 game_world.registry.view<IdentityComponent>().size() != scoped_identity_count_before ||
                 game_world.registry.view<TagComponent>().size() != tag_count_before)
                 return fail(name, scenario + " rejection mutated the destination registry");
@@ -4383,7 +4474,7 @@ static bool testLevelManagerLargeIdentityCohort()
     LevelManager manager;
     world w;
     const EntityRef sentinel_ref{EntityGuid{0xCC00, 0xDD00}};
-    const auto sentinel = w.restoreScopedEntity(sentinel_ref);
+    const auto sentinel = checkedRestore(w, sentinel_ref);
     LevelData level;
     constexpr size_t count = 2048;
     for (size_t i = 0; i < count; ++i)
@@ -4394,8 +4485,9 @@ static bool testLevelManagerLargeIdentityCohort()
         });
         level.entities.push_back(std::move(entity));
     }
-    std::vector<entt::entity> created;
-    if (!manager.instantiateLevel(level, w, nullptr, nullptr, nullptr, nullptr, false, &created) ||
+    const auto level_result = manager.instantiateLevel(level, w, nullptr, false);
+    const auto created = rawLevelEntities(w, level_result);
+    if (!levelSucceeded(w, level_result) ||
         created.size() != count || w.persistedReference(sentinel) != sentinel_ref)
         return fail(name, "cohort restore failed or changed sentinel");
     for (size_t i = 0; i < count; ++i)
@@ -4421,7 +4513,7 @@ static bool testLevelManagerPostCreationRollback()
         LevelManager manager;
         world w;
         const EntityRef sentinel_ref{EntityGuid{0xDD01, 0xEE01}};
-        const auto sentinel = w.restoreScopedEntity(sentinel_ref);
+        const auto sentinel = checkedRestore(w, sentinel_ref);
         const auto old_gravity = w.getGravity();
         const auto old_delta = w.getFixedDelta();
         LevelData level;
@@ -4441,13 +4533,10 @@ static bool testLevelManagerPostCreationRollback()
         levelRollbackObserved.clear();
         levelRollbackThrowComponent = component_failure;
         auto connection = w.registry.on_construct<TransformComponent>().connect<&observeLevelRollbackTransform>();
-        entt::entity player = entt::entity{123};
-        std::vector<entt::entity> created{entt::entity{456}};
-        const bool success = manager.instantiateLevel(level, w, nullptr, &player, nullptr, nullptr, false, &created);
+        const auto level_result = manager.instantiateLevel(level, w, nullptr, false);
         connection.release();
         levelRollbackThrowComponent = false;
-        if (success || levelRollbackObserved.size() != 2 || player != entt::entity{123} ||
-            created != std::vector<entt::entity>{entt::entity{456}} ||
+        if (!levelFailedAndCleaned(w, level_result) || level_result.entities.size() != 2 || levelRollbackObserved.size() != 2 ||
             w.getGravity() != old_gravity || w.getFixedDelta() != old_delta ||
             w.persistedReference(sentinel) != sentinel_ref ||
             w.registry.view<IdentityComponent>().size() != 1)
@@ -4480,7 +4569,7 @@ static bool testLevelManagerRequiredCpuMeshRollback(const fs::path& repo_root)
         world w;
         w.initializePhysics();
         const EntityRef sentinel_ref{EntityGuid{0xDC01, 0xEC01}};
-        const auto sentinel = w.restoreScopedEntity(sentinel_ref);
+        const auto sentinel = checkedRestore(w, sentinel_ref);
         entt::entity sentinel_entity = entt::null;
         for (auto [entity, identity] : w.registry.view<IdentityComponent>().each())
             if (identity.guid == sentinel_ref.guid) sentinel_entity = entity;
@@ -4507,14 +4596,10 @@ static bool testLevelManagerRequiredCpuMeshRollback(const fs::path& repo_root)
         meshRollbackWorld = &w;
         meshRollbackPlayerHadController = false;
         auto connection = w.registry.on_construct<TransformComponent>().connect<&observeMeshRollbackTransform>();
-        entt::entity player_out = entt::entity{123}, freecam_out = entt::entity{124}, rep_out = entt::entity{125};
-        std::vector<entt::entity> created{entt::entity{456}};
-        const bool success = manager.instantiateLevel(level, w, nullptr, &player_out, &freecam_out, &rep_out, false, &created);
+        const auto level_result = manager.instantiateLevel(level, w, nullptr, false);
         connection.release();
         meshRollbackWorld = nullptr;
-        if (success || levelRollbackObserved.size() != 2 || !meshRollbackPlayerHadController ||
-            player_out != entt::entity{123} || freecam_out != entt::entity{124} || rep_out != entt::entity{125} ||
-            created != std::vector<entt::entity>{entt::entity{456}} ||
+        if (!levelFailedAndCleaned(w, level_result) || level_result.entities.size() != 2 || levelRollbackObserved.size() != 2 || !meshRollbackPlayerHadController ||
             w.getGravity() != old_gravity || w.getFixedDelta() != old_delta ||
             w.persistedReference(sentinel) != sentinel_ref || !w.registry.valid(sentinel_entity) ||
             !w.getPhysicsSystem().hasBody(sentinel_entity) || w.registry.view<IdentityComponent>().size() != 1)
@@ -4534,8 +4619,9 @@ static bool testLevelManagerRequiredCpuMeshRollback(const fs::path& repo_root)
         entity.mesh_path = "assets/models/ground_plane.obj";
         level.entities.push_back(entity);
     }
-    std::vector<entt::entity> created;
-    if (!manager.instantiateLevel(level, w, nullptr, nullptr, nullptr, nullptr, false, &created) || created.size() != 3)
+    const auto level_result = manager.instantiateLevel(level, w, nullptr, false);
+    const auto created = rawLevelEntities(w, level_result);
+    if (!levelSucceeded(w, level_result) || created.size() != 3)
         return fail(name, "valid CPU mesh failed to load headless");
     for (const auto entity : created)
         if (!w.registry.all_of<MeshComponent>(entity) || !w.registry.get<MeshComponent>(entity).m_mesh)
@@ -4588,7 +4674,7 @@ static bool testLevelManagerRequiredGpuMeshRollback(const fs::path& repo_root)
         world w;
         w.initializePhysics();
         const EntityRef sentinel_ref{EntityGuid{0xDC02, 0xEC02}};
-        const auto sentinel = w.restoreScopedEntity(sentinel_ref);
+        const auto sentinel = checkedRestore(w, sentinel_ref);
         entt::entity sentinel_entity = entt::null;
         for (auto [entity, identity] : w.registry.view<IdentityComponent>().each())
             if (identity.guid == sentinel_ref.guid) sentinel_entity = entity;
@@ -4615,15 +4701,11 @@ static bool testLevelManagerRequiredGpuMeshRollback(const fs::path& repo_root)
         meshRollbackWorld = &w;
         meshRollbackPlayerHadController = false;
         auto connection = w.registry.on_construct<TransformComponent>().connect<&observeMeshRollbackTransform>();
-        entt::entity player_out = entt::entity{123}, freecam_out = entt::entity{124}, rep_out = entt::entity{125};
-        std::vector<entt::entity> created{entt::entity{456}};
-        const bool success = manager.instantiateLevel(level, w, &render_api, &player_out, &freecam_out, &rep_out, false, &created);
+        const auto level_result = manager.instantiateLevel(level, w, &render_api, false);
         connection.release();
         meshRollbackWorld = nullptr;
-        if (success || render_api.create_calls == 0 || render_api.live_meshes != 0 ||
+        if (!levelFailedAndCleaned(w, level_result) || level_result.entities.size() != 2 || render_api.create_calls == 0 || render_api.live_meshes != 0 ||
             levelRollbackObserved.size() != 2 || !meshRollbackPlayerHadController ||
-            player_out != entt::entity{123} || freecam_out != entt::entity{124} || rep_out != entt::entity{125} ||
-            created != std::vector<entt::entity>{entt::entity{456}} ||
             w.getGravity() != old_gravity || w.getFixedDelta() != old_delta ||
             w.persistedReference(sentinel) != sentinel_ref || !w.registry.valid(sentinel_entity) ||
             !w.getPhysicsSystem().hasBody(sentinel_entity) || w.registry.view<IdentityComponent>().size() != 1 ||
@@ -4693,7 +4775,7 @@ static bool testLevelManagerCompiledGpuMeshRollback()
         world w;
         w.initializePhysics();
         const EntityRef sentinel_ref{EntityGuid{0xDC03, 0xEC03}};
-        const auto sentinel = w.restoreScopedEntity(sentinel_ref);
+        const auto sentinel = checkedRestore(w, sentinel_ref);
         entt::entity sentinel_entity = entt::null;
         for (auto [entity, identity] : w.registry.view<IdentityComponent>().each())
             if (identity.guid == sentinel_ref.guid) sentinel_entity = entity;
@@ -4722,19 +4804,15 @@ static bool testLevelManagerCompiledGpuMeshRollback()
         meshRollbackWorld = &w;
         meshRollbackPlayerHadController = false;
         auto connection = w.registry.on_construct<TransformComponent>().connect<&observeMeshRollbackTransform>();
-        entt::entity player_out = entt::entity{123}, freecam_out = entt::entity{124}, rep_out = entt::entity{125};
-        std::vector<entt::entity> created{entt::entity{456}};
-        const bool success = manager.instantiateLevel(level, w, &render_api, &player_out, &freecam_out, &rep_out, false, &created);
+        const auto level_result = manager.instantiateLevel(level, w, &render_api, false);
         connection.release();
         meshRollbackWorld = nullptr;
 
         const bool expected_upload = return_null
             ? render_api.upload_calls == 0
             : render_api.upload_calls == 1 && render_api.uploaded_vertices == 3;
-        if (success || render_api.create_calls != 1 || !expected_upload || render_api.live_meshes != 0 ||
+        if (!levelFailedAndCleaned(w, level_result) || level_result.entities.size() != 2 || render_api.create_calls != 1 || !expected_upload || render_api.live_meshes != 0 ||
             levelRollbackObserved.size() != 2 || !meshRollbackPlayerHadController ||
-            player_out != entt::entity{123} || freecam_out != entt::entity{124} || rep_out != entt::entity{125} ||
-            created != std::vector<entt::entity>{entt::entity{456}} ||
             w.getGravity() != old_gravity || w.getFixedDelta() != old_delta ||
             w.persistedReference(sentinel) != sentinel_ref || !w.registry.valid(sentinel_entity) ||
             !w.getPhysicsSystem().hasBody(sentinel_entity) || w.registry.view<IdentityComponent>().size() != 1 ||
@@ -4819,7 +4897,7 @@ static bool testLevelManagerFrameworkCommitCallbackFailures()
         if (!w.initializeGameplayFramework()) return fail(name, "initial framework failed to initialize");
         w.startGameplayFramework();
         const EntityRef sentinel_ref{EntityGuid{0xDF01, 0xEF02}};
-        const auto sentinel = w.restoreScopedEntity(sentinel_ref);
+        const auto sentinel = checkedRestore(w, sentinel_ref);
         entt::entity sentinel_entity = entt::null;
         auto identities = w.registry.view<IdentityComponent>();
         for (const auto entity : identities)
@@ -4839,11 +4917,11 @@ static bool testLevelManagerFrameworkCommitCallbackFailures()
         level.metadata.fixed_delta = w.getFixedDelta() * 2;
         if (fault == 2) level.metadata.game_mode_class = "BindThrowingLevelMode";
         level.entities.emplace_back();
-        entt::entity player = entt::entity{123}, freecam = entt::entity{124}, rep = entt::entity{125};
-        std::vector<entt::entity> created{entt::entity{456}};
         LevelManager manager;
-        if (!manager.instantiateLevel(level, w, nullptr, &player, &freecam, &rep, fault != 1, &created))
+        const auto level_result = manager.instantiateLevel(level, w, nullptr, fault != 1);
+        if (!levelSucceeded(w, level_result))
             return fail(name, "callback failure reported a failed level");
+        const auto created = rawLevelEntities(w, level_result);
         if ((fault != 2 && !shutdown_called) ||
             (fault == 2 && (detached_syncs == 0 || bound_syncs != 1 ||
                             dynamic_cast<BindThrowingLevelMode*>(w.getAuthorityGameMode()) == nullptr ||
@@ -4857,7 +4935,7 @@ static bool testLevelManagerFrameworkCommitCallbackFailures()
             !w.getPhysicsSystem().hasBody(sentinel_entity) ||
             created.size() != 1 ||
             !w.registry.valid(created[0]) || w.registry.view<IdentityComponent>().size() != 2 ||
-            player != entt::null || freecam != entt::null || rep != entt::null)
+            level_result.player != garden::ecs::EntityHandle{} || level_result.freecam != garden::ecs::EntityHandle{} || level_result.player_rep != garden::ecs::EntityHandle{})
             return fail(name, "replacement, cohort, settings or outputs were not consistently published");
     }
     return pass(name);
@@ -4905,7 +4983,7 @@ static bool testLevelManagerFrameworkFailureRollback()
         auto* old_state = w.getGameState();
         const auto old_time = old_state->getServerWorldTimeSeconds();
         const EntityRef sentinel_ref{EntityGuid{0xDE01, 0xEF01}};
-        const auto sentinel = w.restoreScopedEntity(sentinel_ref);
+        const auto sentinel = checkedRestore(w, sentinel_ref);
         const auto old_gravity = w.getGravity();
         const auto old_delta = w.getFixedDelta();
         LevelData level;
@@ -4918,18 +4996,14 @@ static bool testLevelManagerFrameworkFailureRollback()
         level.entities.push_back(entity);
         levelRollbackObserved.clear();
         auto connection = w.registry.on_construct<TransformComponent>().connect<&observeLevelRollbackTransform>();
-        entt::entity player = entt::entity{123}, freecam = entt::entity{124}, rep = entt::entity{125};
-        std::vector<entt::entity> created{entt::entity{456}};
         LevelManager manager;
-        const bool success = manager.instantiateLevel(level, w, nullptr, &player, &freecam, &rep, fault < 4 || fault == 7, &created);
+        const auto level_result = manager.instantiateLevel(level, w, nullptr, fault < 4 || fault == 7);
         connection.release();
-        if (success || w.getAuthorityGameMode() != old_mode || w.getGameState() != old_state ||
+        if (!levelFailedAndCleaned(w, level_result) || w.getAuthorityGameMode() != old_mode || w.getGameState() != old_state ||
             !w.isGameplayFrameworkInitialized() || !w.hasGameplayFrameworkStarted() ||
             !old_state->hasBegunPlay() || old_mode->getGameState() != old_state ||
             w.getGravity() != old_gravity || w.getFixedDelta() != old_delta ||
-            w.persistedReference(sentinel) != sentinel_ref || w.registry.view<IdentityComponent>().size() != 1 ||
-            player != entt::entity{123} || freecam != entt::entity{124} || rep != entt::entity{125} ||
-            created != std::vector<entt::entity>{entt::entity{456}} || levelRollbackObserved.size() != 1)
+            w.persistedReference(sentinel) != sentinel_ref || w.registry.view<IdentityComponent>().size() != 1 || level_result.entities.size() != 1 || levelRollbackObserved.size() != 1)
             return fail(name, "failure changed framework, world, settings or outputs");
         for (auto e : levelRollbackObserved)
             if (w.registry.valid(e) || w.getPhysicsSystem().hasBody(e))
@@ -4948,7 +5022,7 @@ static bool testLevelManagerFrameworkFailureRollback()
     fallback.metadata.game_state_class = "NullLevelState";
     world w;
     LevelManager manager;
-    if (!manager.instantiateLevel(fallback, w, nullptr) || !w.getAuthorityGameMode() || !w.getGameState())
+    if (!levelSucceeded(w, manager.instantiateLevel(fallback, w, nullptr)) || !w.getAuthorityGameMode() || !w.getGameState())
         return fail(name, "successful fallback was rejected");
     return pass(name);
 }
@@ -4969,7 +5043,7 @@ static bool testLevelManagerReflectedFailureRollback()
         manager.setReflectionRegistry(&reflection);
         world w;
         const EntityRef sentinel_ref{EntityGuid{0xAA11, 0xBB11}};
-        auto sentinel = w.restoreScopedEntity(sentinel_ref);
+        auto sentinel = checkedRestore(w, sentinel_ref);
         const auto old_gravity = w.getGravity();
         const auto old_delta = w.getFixedDelta();
         LevelData level;
@@ -4983,10 +5057,8 @@ static bool testLevelManagerReflectedFailureRollback()
         else if (fault == 1) bad.reflected_components = {{"PlayerComponent", {{"speed", "bad"}}}};
         else { level.entities.clear(); bad.reflected_components = {{"PlayerComponent", {{"speed", 4.0f}}}}; }
         level.entities.push_back(bad);
-        entt::entity output = entt::entity{123};
-        std::vector<entt::entity> created{entt::entity{456}};
-        if (manager.instantiateLevel(level, w, nullptr, &output, nullptr, nullptr, false, &created) ||
-            output != entt::entity{123} || created != std::vector<entt::entity>{entt::entity{456}} ||
+        const auto level_result = manager.instantiateLevel(level, w, nullptr, false);
+        if (!levelFailedAndCleaned(w, level_result) ||
             w.getGravity() != old_gravity || w.getFixedDelta() != old_delta ||
             w.persistedReference(sentinel) != sentinel_ref || w.registry.view<IdentityComponent>().size() != 1)
             return fail(name, "reflected failure changed world, settings or outputs");
@@ -5000,7 +5072,7 @@ static bool testLevelManagerScopedRestoreRollback()
     LevelManager manager;
     world game_world;
     const EntityRef sentinel_ref{EntityGuid{0xDD00, 0xEE00}};
-    const auto sentinel = game_world.restoreScopedEntity(sentinel_ref);
+    const auto sentinel = checkedRestore(game_world, sentinel_ref);
     if (!game_world.isEntityValid(sentinel) ||
         game_world.add<TransformComponent>(sentinel) != garden::ecs::ComponentStoreResult::Success)
         return fail(name, "could not create existing scoped sentinel");
@@ -5021,13 +5093,9 @@ static bool testLevelManagerScopedRestoreRollback()
     }
     auto connection = game_world.registry.on_construct<IdentityComponent>()
         .connect<&failSecondLevelIdentity>();
-    entt::entity player_output = entt::entity{123};
-    std::vector<entt::entity> created{entt::entity{456}};
-    const bool success = manager.instantiateLevel(level, game_world, nullptr, &player_output,
-                                                   nullptr, nullptr, false, &created);
+    const auto level_result = manager.instantiateLevel(level, game_world, nullptr, false);
     connection.release();
-    if (success || player_output != entt::entity{123} ||
-        created != std::vector<entt::entity>{entt::entity{456}} ||
+    if (!levelFailedAndCleaned(game_world, level_result) || level_result.entities.size() != 2 ||
         game_world.fixed_delta != fixed_delta_before ||
         game_world.getGravity() != gravity_before ||
         game_world.registry.view<IdentityComponent>().size() != identities_before ||
@@ -5082,14 +5150,17 @@ static bool testWorldRetirementPhysicsCallbacks()
 {
     const std::string name = "L1 world retirement physics callback ordering";
     world w;
-    const auto root_handle = w.createScopedEntity();
-    const auto child_handle = w.createScopedEntity();
-    const auto outside_handle = w.createScopedEntity();
-    const auto probe_handle = w.createScopedEntity();
+    const auto root_handle = checkedCreate(w);
+    const auto child_handle = checkedCreate(w);
+    const auto outside_handle = checkedCreate(w);
+    const auto probe_handle = checkedCreate(w);
     retirement_root = resolveEntityRef(w.registry, w.persistedReference(root_handle));
     retirement_child = resolveEntityRef(w.registry, w.persistedReference(child_handle));
     retirement_outside = resolveEntityRef(w.registry, w.persistedReference(outside_handle));
     retirement_probe = resolveEntityRef(w.registry, w.persistedReference(probe_handle));
+    if (retirement_root == entt::null || retirement_child == entt::null ||
+        retirement_outside == entt::null || retirement_probe == entt::null)
+        return fail(name, "retirement fixture creation failed");
     retirement_shape = makeBoxShape();
     auto& physics = w.getPhysicsSystem();
     for (auto e : {retirement_root, retirement_child, retirement_outside, retirement_probe})

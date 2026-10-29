@@ -1,3 +1,4 @@
+#include "../../LifecycleTestUtils.hpp"
 #include "InputManager.hpp"
 #include "InputActionSystem.hpp"
 #include "Input/GameInputModeService.hpp"
@@ -1149,7 +1150,10 @@ namespace
     bool testEcsPredictionReconciliation()
     {
         world game_world;
-        const EntityRef pawn = game_world.createEntity();
+        const auto pawn_creation = game_world.createEntity();
+        if (!expect(settleTestRollback(game_world, pawn_creation.rollback), "pawn rollback completed")) return false;
+        if (!expect(pawn_creation.status == ScopedRestoreStatus::Completed, "pawn creation succeeded")) return false;
+        const EntityRef pawn = pawn_creation.reference;
 
         Net::MovementConfig movement_config;
         movement_config.fixed_delta = 1.0f / 60.0f;
@@ -1219,7 +1223,10 @@ namespace
     bool testMovingJumpAcknowledgement()
     {
         world game_world;
-        const EntityRef pawn = game_world.createEntity();
+        const auto pawn_creation = game_world.createEntity();
+        if (!expect(settleTestRollback(game_world, pawn_creation.rollback), "pawn rollback completed")) return false;
+        if (!expect(pawn_creation.status == ScopedRestoreStatus::Completed, "pawn creation succeeded")) return false;
+        const EntityRef pawn = pawn_creation.reference;
         Net::MovementConfig config;
         Net::MovementState start;
         start.grounded = true;
@@ -1378,8 +1385,14 @@ namespace
             "disabled local input clears every derived intent") && ok;
 
         world ownership_world;
-        const EntityRef first_ref = ownership_world.createEntity();
-        const EntityRef second_ref = ownership_world.createEntity();
+        const auto first_creation = ownership_world.createEntity();
+        if (!expect(settleTestRollback(ownership_world, first_creation.rollback), "first ownership rollback completed")) return false;
+        if (!expect(first_creation.status == ScopedRestoreStatus::Completed, "first ownership entity created")) return false;
+        const auto second_creation = ownership_world.createEntity();
+        if (!expect(settleTestRollback(ownership_world, second_creation.rollback), "second ownership rollback completed")) return false;
+        if (!expect(second_creation.status == ScopedRestoreStatus::Completed, "second ownership entity created")) return false;
+        const EntityRef first_ref = first_creation.reference;
+        const EntityRef second_ref = second_creation.reference;
         EntityRef current_owner{};
         setLocalPlayerInputOwner(ownership_world, current_owner, first_ref, names);
         ok = expect(current_owner == first_ref &&

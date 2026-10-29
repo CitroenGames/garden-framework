@@ -1,3 +1,4 @@
+#include "../../LifecycleTestUtils.hpp"
 #include "Plugin/GameModuleHostSession.hpp"
 #include "ECS/ComponentStore.hpp"
 #include "ECS/ComponentOperations.hpp"
@@ -577,8 +578,18 @@ namespace
         // Declared after the loader so every failure destroys values before the DLL is retired.
         {
             world w;
-            const auto both = w.createScopedEntity();
-            const auto engineOnly = w.createScopedEntity();
+            const auto both_creation = w.createScopedEntity();
+            if (!settleTestRollback(w, both_creation.rollback))
+                return fail(name, "entity rollback acknowledgement failed");
+            if (both_creation.status != ScopedRestoreStatus::Completed)
+                return fail(name, "entity creation failed");
+            const auto both = both_creation.entity;
+            const auto engineOnly_creation = w.createScopedEntity();
+            if (!settleTestRollback(w, engineOnly_creation.rollback))
+                return fail(name, "entity rollback acknowledgement failed");
+            if (engineOnly_creation.status != ScopedRestoreStatus::Completed)
+                return fail(name, "entity creation failed");
+            const auto engineOnly = engineOnly_creation.entity;
             if (!w.isEntityValid(both) || !w.isEntityValid(engineOnly) ||
                 w.add<ModuleFixtureComponent>(both) != ComponentStoreResult::Success ||
                 w.add<EngineQueryComponent>(both, EngineQueryComponent{12}) != ComponentStoreResult::Success ||

@@ -57,7 +57,12 @@ bool testPlayerMovementTuning()
 {
     const std::string name = "Player_MovementTuning";
     world game_world;
-    const EntityRef pawn = game_world.createEntity();
+    const auto pawn_creation = game_world.createEntity();
+    if (!settleTestRollback(game_world, pawn_creation.rollback))
+        return fail(name, "entity rollback acknowledgement failed");
+    if (pawn_creation.status != ScopedRestoreStatus::Completed)
+        return fail(name, "pawn creation failed");
+    const EntityRef pawn = pawn_creation.reference;
     const Net::MovementState initial_state;
     if (!Net::PredictionSystem::initializePawn(game_world, pawn, initial_state) ||
         !Net::PredictionSystem::configureMovement(game_world, pawn,
@@ -79,7 +84,10 @@ bool testPlayerMovementTuning()
     CharacterPhysicsService standalone_physics(standalone_world);
     standalone_world.initializePhysics();
     LevelManager level_manager;
-    if (!level_manager.instantiateLevel(level, standalone_world, nullptr))
+    const auto level_result = level_manager.instantiateLevel(level, standalone_world, nullptr);
+    if (!settleTestRollback(standalone_world, level_result.rollback))
+        return fail(name, "level rollback acknowledgement failed");
+    if (level_result.status != LevelInstantiationStatus::Completed)
         return fail(name, "standalone level did not instantiate");
     const EntityRef standalone_pawn = standalone_world.findEntityByTag("player");
     if (standalone_pawn.isNull() ||

@@ -1,3 +1,4 @@
+#include "../../LifecycleTestUtils.hpp"
 #include "Scheduler/SystemScheduler.hpp"
 #include "Scheduler/HierarchyTransformSystem.hpp"
 #include "Components/IdentityComponent.hpp"
@@ -339,7 +340,12 @@ bool testDestroyDrain()
     EventBus::get().sink<EntityDestroyedEvent>().connect<&onDestroyedEvt>();
     EventBus::get().sink<EntityCreatedEvent>().connect<&onCreatedEvt>();
     world w;
-    auto victim = w.createScopedEntity();
+    const auto victim_creation = w.createScopedEntity();
+    if (!settleTestRollback(w, victim_creation.rollback))
+        return fail(name, "entity rollback acknowledgement failed");
+    if (victim_creation.status != ScopedRestoreStatus::Completed)
+        return fail(name, "entity creation failed");
+    const auto victim = victim_creation.entity;
     SystemScheduler sched(false, 1.0f / 60.0f, false);
     sched.bindWorld(&w);
     bool valid_in_transform = false;
@@ -370,19 +376,34 @@ bool testPausedAndZeroStepDrain()
     world w;
     SystemScheduler scheduler(false, 1.0f / 60.0f, false);
     scheduler.bindWorld(&w);
-    auto paused = w.createScopedEntity();
+    const auto paused_creation = w.createScopedEntity();
+    if (!settleTestRollback(w, paused_creation.rollback))
+        return fail(name, "entity rollback acknowledgement failed");
+    if (paused_creation.status != ScopedRestoreStatus::Completed)
+        return fail(name, "entity creation failed");
+    const auto paused = paused_creation.entity;
     w.requestRetirement(paused);
     scheduler.setPaused(true);
     scheduler.runFrame(w.registry, 0.0f);
     if (w.isEntityValid(paused) || !scheduler.lastRetirementResult().cleanupComplete())
         return fail(name, "paused drain failed");
-    auto zero = w.createScopedEntity();
+    const auto zero_creation = w.createScopedEntity();
+    if (!settleTestRollback(w, zero_creation.rollback))
+        return fail(name, "entity rollback acknowledgement failed");
+    if (zero_creation.status != ScopedRestoreStatus::Completed)
+        return fail(name, "entity creation failed");
+    const auto zero = zero_creation.entity;
     w.requestRetirement(zero);
     scheduler.setPaused(false);
     scheduler.runFrame(w.registry, 0.0f);
     if (w.isEntityValid(zero) || !scheduler.lastRetirementResult().cleanupComplete())
         return fail(name, "zero-step drain failed");
-    auto teardown = w.createScopedEntity();
+    const auto teardown_creation = w.createScopedEntity();
+    if (!settleTestRollback(w, teardown_creation.rollback))
+        return fail(name, "entity rollback acknowledgement failed");
+    if (teardown_creation.status != ScopedRestoreStatus::Completed)
+        return fail(name, "entity creation failed");
+    const auto teardown = teardown_creation.entity;
     w.requestRetirement(teardown);
     if (!scheduler.drainRetirements().cleanupComplete() || w.isEntityValid(teardown))
         return fail(name, "explicit teardown drain failed");
@@ -407,7 +428,12 @@ bool testInterruptedFixedStepsRetry()
 {
     const std::string name = "interrupted fixed steps survive retirement observer failure";
     world w;
-    const auto victim = w.createScopedEntity();
+    const auto victim_creation = w.createScopedEntity();
+    if (!settleTestRollback(w, victim_creation.rollback))
+        return fail(name, "entity rollback acknowledgement failed");
+    if (victim_creation.status != ScopedRestoreStatus::Completed)
+        return fail(name, "entity creation failed");
+    const auto victim = victim_creation.entity;
     SystemScheduler scheduler(false, 1.0f / 60.0f, false);
     scheduler.bindWorld(&w);
     scheduler.setManageEventBus(false);

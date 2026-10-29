@@ -1,6 +1,7 @@
 #pragma once
 
 #include "world.hpp"
+#include "LevelManager.hpp"
 #include "Plugin/GameModuleLoader.hpp"
 #include "InputManager.hpp"
 #include "Threading/JobSystem.hpp"
@@ -11,6 +12,23 @@
 #include <cstdlib>
 #include <memory>
 #include <string>
+
+// Retain the construction evidence until its world-owned rollback is acknowledged.
+inline bool finishLevelRollback(world& owner, LevelInstantiationResult& construction)
+{
+    auto& rollback = construction.rollback;
+    if (!rollback.operation.valid()) return rollback.cleanupComplete();
+    if (!rollback.cleanupComplete()) {
+        const auto resumed = owner.resumeRetirement(rollback.operation);
+        if (resumed.operation.valid()) rollback = resumed;
+        else if (!resumed.cleanupComplete()) return false;
+    }
+    if (!rollback.cleanupComplete()) return false;
+    const auto ack = owner.acknowledgeRetirement(rollback.operation);
+    if (!ack.cleanupComplete()) return false;
+    rollback = {};
+    return true;
+}
 
 // Represents one additional PIE client instance (Player 2, 3, 4).
 // Player 1 always uses the editor's main world and DLL load.
@@ -29,6 +47,7 @@ struct PIEClientInstance
 
     int player_index = 0;                             // 2, 3, 4...
     world client_world;                               // isolated ECS + physics
+    LevelInstantiationResult level_construction{};             // retained rollback for this world
     GameModuleLoader game_module;                     // separate DLL copy = isolated statics
     std::shared_ptr<InputManager> input_manager;      // per-client input
     InputActionSystem input_actions;                  // host-owned action state for this client
@@ -45,6 +64,7 @@ struct PIEClientInstance
     // The shared reflection and GameMode registrations belong to the provider.
     [[nodiscard]] bool release()
     {
+        if (!finishLevelRollback(client_world, level_construction)) return false;
         if (initialized)
         {
             game_module.shutdown();

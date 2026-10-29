@@ -19,11 +19,24 @@
 
 namespace {
 std::atomic<uint64_t> nextComponentWorldToken{1};
+uint64_t allocateWorldToken() noexcept {
+    auto value = nextComponentWorldToken.load(std::memory_order_relaxed);
+    while (value && value != UINT64_MAX) {
+        if (nextComponentWorldToken.compare_exchange_weak(value, value + 1, std::memory_order_relaxed)) return value;
+    }
+    return 0;
+}
+struct ScopedStoreBinding { garden::ecs::ComponentStore* store = nullptr; };
 struct ScopedEntityMarker {
     garden::ecs::ComponentStore* store;
     garden::ecs::ComponentEntityKey key;
     uint64_t serial;
 };
+bool injectLifecycleFault(const entt::registry& registry, LifecyclePhase phase) noexcept
+{
+    const auto* hook = registry.ctx().find<garden::ecs::testing::LifecycleFaultHook>();
+    return hook && hook->fail && hook->fail(hook->context, phase);
+}
 bool hasLiveEntities(entt::registry& registry)
 {
     const auto entities = registry.storage<entt::entity>().each();
@@ -32,17 +45,24 @@ bool hasLiveEntities(entt::registry& registry)
 void retireScopedEntity(entt::registry& registry, entt::entity entity)
 {
     const auto& marker = registry.get<ScopedEntityMarker>(entity);
-    (void)marker.store->removeEntity(marker.key);
+    const auto* binding = registry.ctx().find<ScopedStoreBinding>();
+    if (!binding || !binding->store || marker.store != binding->store ||
+        marker.key.slot != static_cast<uint32_t>(entt::to_entity(entity)) ||
+        marker.key.generation != static_cast<uint32_t>(entt::to_version(entity)) + 1u) return;
+    (void)binding->store->removeEntity(marker.key);
 }
 }
 
 struct world::ComponentWorldState {
     garden::ecs::ComponentStore store;
-    uint64_t token = nextComponentWorldToken.fetch_add(1, std::memory_order_relaxed);
+    uint64_t token = 0;
     uint64_t nextSerial = 1;
 };
 
 struct world::LifecycleState {
+    LifecycleOperationHandle operation{};
+    LifecycleOperationKind operation_kind = LifecycleOperationKind::None;
+    LifecycleResult result{};
     struct Member {
         entt::entity entity = entt::null;
         garden::ecs::EntityHandle handle{};
@@ -65,9 +85,18 @@ struct world::LifecycleState {
     bool shutting_down = false;
 };
 
+uint64_t garden::ecs::testing::LifecycleTestAccess::exchangeWorldAllocator(uint64_t value) noexcept
+{ return nextComponentWorldToken.exchange(value, std::memory_order_relaxed); }
+uint64_t garden::ecs::testing::LifecycleTestAccess::exchangeEntitySerial(world& owner, uint64_t value) noexcept
+{
+    if (!owner.component_state) return 0;
+    return std::exchange(owner.component_state->nextSerial, value);
+}
+
 world::world(const PhysicsSystemSettings& physics_settings)
     : simulation_ticks(physics_settings.fixed_delta)
 {
+    incarnation = allocateWorldToken();
     lifecycle_state = std::make_unique<LifecycleState>();
     retirement_fence = std::make_unique<RetirementFence>();
     retirement_fence->rollback_context = lifecycle_state.get();
@@ -78,6 +107,7 @@ world::world(const PhysicsSystemSettings& physics_settings)
         });
     };
     registry.ctx().emplace<RetirementFenceBinding>(retirement_fence.get());
+    registry.ctx().emplace<ScopedStoreBinding>();
     garden::ecs::engine_adapters::registerComponents();
     fixed_delta = physics_settings.fixed_delta;
     physics_system = std::make_unique<PhysicsSystem>(physics_settings);
@@ -126,10 +156,15 @@ bool world::hasGameplayFrameworkStarted() const { return gameplay_framework && g
 
 LifecycleResult world::shutdown() noexcept
 {
+    if (lifecycle_state->operation.valid()) return operationConflict();
     if (active_queries) return {LifecycleStatus::QueryActive};
     if (lifecycle_state->running || lifecycle_state->constructing) return {LifecycleStatus::Reentrant};
-    if (lifecycle_state->shutdown_complete && !hasLiveEntities(registry))
+    const uint64_t next_incarnation = allocateWorldToken();
+    if (!next_incarnation) return {LifecycleStatus::AllocationFailure, LifecyclePhase::Prepare};
+    if (lifecycle_state->shutdown_complete && !hasLiveEntities(registry)) {
+        incarnation = next_incarnation; next_operation_serial = 1;
         return {LifecycleStatus::Completed};
+    }
     lifecycle_state->shutting_down = true;
     auto drained = drainRetirements();
     if (!drained.cleanupComplete()) {
@@ -159,7 +194,10 @@ LifecycleResult world::shutdown() noexcept
         clearGameplayFramework();
         if (physics_system) physics_system->shutdown();
         clearRegistryStorage();
+        registry.ctx().get<ScopedStoreBinding>().store = nullptr;
         component_state.reset();
+        incarnation = next_incarnation;
+        next_operation_serial = 1;
         lifecycle_state->queue.clear();
         retirement_fence->pending.clear();
         simulation_ticks.reset();
@@ -180,6 +218,7 @@ LifecycleResult world::shutdown() noexcept
 
 LifecycleResult world::resetWorld(const PhysicsSystemSettings& settings) noexcept
 {
+    if (lifecycle_state->operation.valid()) return operationConflict();
     if (active_queries) return {LifecycleStatus::QueryActive};
     if (lifecycle_state->running || lifecycle_state->constructing) return {LifecycleStatus::Reentrant};
     try {
@@ -191,7 +230,9 @@ LifecycleResult world::resetWorld(const PhysicsSystemSettings& settings) noexcep
         camera replacement_camera{};
         auto result = shutdown();
         if (!result.cleanupComplete()) return result;
+        replacement_components->token = incarnation;
         component_state = std::move(replacement_components);
+        registry.ctx().get<ScopedStoreBinding>().store = &component_state->store;
         physics_system = std::move(replacement_physics);
         fixed_delta = physics_system->getFixedDelta();
         simulation_ticks.setFixedDelta(fixed_delta);
@@ -215,11 +256,7 @@ bool world::isEntityValid(EntityRef entity) const
     return resolveEntity(entity) != entt::null;
 }
 
-EntityRef world::createEntity(std::string_view tag)
-{
-    const auto handle = createScopedEntity(tag);
-    return persistedReference(handle);
-}
+EntityCreationResult world::createEntity(std::string_view tag) { return createScopedEntity(tag); }
 
 EntityRef world::findEntityByTag(const std::string& name) const
 {
@@ -263,7 +300,9 @@ garden::ecs::ComponentStoreResult world::scopedKey(garden::ecs::EntityHandle han
     if (!registry.valid(entity) || !registry.all_of<ScopedEntityMarker>(entity))
         return ComponentStoreResult::StaleEntity;
     const auto& marker = registry.get<ScopedEntityMarker>(entity);
-    if (!handle.m_serial || marker.serial != handle.m_serial) return ComponentStoreResult::StaleEntity;
+    if (!handle.m_serial || marker.serial != handle.m_serial || marker.store != &component_state->store ||
+        marker.key.slot != static_cast<uint32_t>(entt::to_entity(entity)) ||
+        marker.key.generation != static_cast<uint32_t>(entt::to_version(entity)) + 1u) return ComponentStoreResult::StaleEntity;
     key = marker.key;
     return ComponentStoreResult::Success;
 }
@@ -309,7 +348,7 @@ garden::ecs::EntityHandle world::handleForKey(garden::ecs::ComponentEntityKey ke
 
 garden::ecs::EntityHandle world::scopedEntity(EntityRef reference)
 {
-    if (active_queries) return {};
+    if (active_queries || !incarnation) return {};
     if (reference.isNull()) return {};
     lifecycle_state->shutdown_complete = false;
     entt::entity entity = entt::null;
@@ -319,7 +358,7 @@ garden::ecs::EntityHandle world::scopedEntity(EntityRef reference)
         entity = candidate;
     }
     if (entity == entt::null) return {};
-    if (!component_state) component_state = std::make_unique<ComponentWorldState>();
+    if (!component_state) { component_state = std::make_unique<ComponentWorldState>(); component_state->token = incarnation; registry.ctx().get<ScopedStoreBinding>().store = &component_state->store; }
     // Registry reset drops component storage and its signal. Reconnect exactly
     // once whenever a new scoped entity is attached, including after reset.
     auto sink = registry.on_destroy<ScopedEntityMarker>();
@@ -341,99 +380,102 @@ garden::ecs::EntityHandle world::scopedEntity(EntityRef reference)
     return result;
 }
 
-garden::ecs::EntityHandle world::createScopedEntity(std::string_view tag)
+EntityCreationResult world::createScopedEntity(std::string_view tag)
 {
-    if (active_queries || lifecycle_state->shutting_down || lifecycle_state->running ||
-        !lifecycle_state->cohort.empty() || !lifecycle_state->rollback.empty()) return {};
-    EntityRef reference;
-    do {
-        reference.guid = generateEntityGuid();
-    } while (resolveEntityRef(registry, reference) != entt::null);
-    auto handle = restoreScopedEntity(reference);
-    if (!isEntityValid(handle)) return {};
-    const auto entity = static_cast<entt::entity>(handle.m_entity);
-    if (!tag.empty()) registry.emplace<TagComponent>(entity, TagComponent{std::string(tag)});
-    EventBus::get().queue(EntityCreatedEvent{reference, std::string(tag)});
-    return handle;
-}
-
-garden::ecs::EntityHandle world::restoreScopedEntity(EntityRef reference)
-{
-    std::vector<garden::ecs::EntityHandle> handles;
-    if (!restoreScopedEntities({reference}, handles)) return {};
-    return handles.front();
-}
-
-bool world::restoreScopedEntities(const std::vector<EntityRef>& references,
-                                  std::vector<garden::ecs::EntityHandle>& out_handles)
-{
-    if (active_queries || lifecycle_state->shutting_down || lifecycle_state->running || lifecycle_state->constructing ||
-        !lifecycle_state->cohort.empty() || !lifecycle_state->rollback.empty()) return false;
-    lifecycle_state->shutdown_complete = false;
-    std::vector<entt::entity> entities;
-    std::vector<garden::ecs::EntityHandle> handles;
+    EntityCreationResult result;
+    if (active_queries) { result.status = ScopedRestoreStatus::QueryActive; return result; }
+    if (lifecycle_state->operation.valid() || lifecycle_state->shutting_down || lifecycle_state->running || lifecycle_state->constructing || !lifecycle_state->cohort.empty()) {
+        result.status = ScopedRestoreStatus::Conflict; return result;
+    }
     try {
+        do { result.reference.guid = generateEntityGuid(); } while (resolveEntityRef(registry, result.reference) != entt::null);
+        ConstructionTransaction transaction{this};
+        auto restored = restoreScopedEntities(std::span<const EntityRef>(&result.reference, 1), transaction);
+        result.status = restored.status;
+        result.rollback = restored.rollback;
+        if (!restored.entities.empty()) result.entity = restored.entities.front();
+        if (result.status != ScopedRestoreStatus::Completed) {
+            if (restored.entities.empty()) result.reference = {};
+            return result;
+        }
+        try {
+            const auto raw = static_cast<entt::entity>(result.entity.m_entity);
+            if (!tag.empty()) registry.emplace<TagComponent>(raw, TagComponent{std::string(tag)});
+            EventBus::get().queue(EntityCreatedEvent{result.reference, std::string(tag)});
+            transaction.committed = true;
+        } catch (const std::bad_alloc&) { result.status = ScopedRestoreStatus::AllocationFailure; result.rollback = abortUnpublished(transaction); }
+          catch (...) { result.status = ScopedRestoreStatus::ConstructionFailure; result.rollback = abortUnpublished(transaction); }
+    } catch (const std::bad_alloc&) { result.status = ScopedRestoreStatus::AllocationFailure; result.reference = {}; }
+      catch (...) { result.status = ScopedRestoreStatus::ConstructionFailure; result.reference = {}; }
+    return result;
+}
+
+ScopedRestoreResult world::restoreScopedEntity(EntityRef reference)
+{ return restoreScopedEntities(std::span<const EntityRef>(&reference, 1)); }
+
+ScopedRestoreResult world::restoreScopedEntities(std::span<const EntityRef> references)
+{
+    ConstructionTransaction transaction{this};
+    auto result = restoreScopedEntities(references, transaction);
+    if (result.status == ScopedRestoreStatus::Completed) transaction.committed = true;
+    return result;
+}
+
+ScopedRestoreResult world::restoreScopedEntities(std::span<const EntityRef> references, ConstructionTransaction& transaction)
+{
+    ScopedRestoreResult result;
+    if (active_queries) { result.status = ScopedRestoreStatus::QueryActive; return result; }
+    if (transaction.owner != this || transaction.committed || lifecycle_state->operation.valid() || lifecycle_state->shutting_down || lifecycle_state->running || lifecycle_state->constructing || !lifecycle_state->cohort.empty()) {
+        result.status = ScopedRestoreStatus::Conflict; return result;
+    }
+    try {
+        if (!incarnation) { result.status = ScopedRestoreStatus::AllocationFailure; return result; }
         std::unordered_set<EntityGuid, GuidHash> requested;
         requested.reserve(references.size());
-        for (const auto& ref : references)
-            if (ref.isNull() || !requested.insert(ref.guid).second) return false;
+        for (const auto& ref : references) if (ref.isNull() || !requested.insert(ref.guid).second) { result.status = ScopedRestoreStatus::InvalidInput; return result; }
         for (const auto [entity, identity] : registry.view<IdentityComponent>().each()) {
-            (void)entity;
-            if (requested.count(identity.guid)) return false;
+            (void)entity; if (requested.count(identity.guid)) { result.status = ScopedRestoreStatus::InvalidInput; return result; }
         }
-        entities.reserve(references.size());
-        handles.reserve(references.size());
-        if (!component_state) component_state = std::make_unique<ComponentWorldState>();
+        result.entities.reserve(references.size());
+        transaction.entities.reserve(transaction.entities.size() + references.size());
+        if (!references.empty() && !transaction.rollback_operation.valid()) {
+            if (!next_operation_serial) { result.status = ScopedRestoreStatus::AllocationFailure; return result; }
+            transaction.rollback_operation.owner_ = this;
+            transaction.rollback_operation.incarnation_ = incarnation;
+            transaction.rollback_operation.serial_ = next_operation_serial++;
+        }
+        if (!component_state) { component_state = std::make_unique<ComponentWorldState>(); component_state->token = incarnation; registry.ctx().get<ScopedStoreBinding>().store = &component_state->store; }
+        // Reserve the whole serial range before any raw entity or hook is created.
+        if (!references.empty() && (!component_state->nextSerial ||
+            references.size() - 1 > UINT64_MAX - component_state->nextSerial)) {
+            result.status = ScopedRestoreStatus::AllocationFailure; return result;
+        }
         auto sink = registry.on_destroy<ScopedEntityMarker>();
-        sink.disconnect<&retireScopedEntity>();
-        sink.connect<&retireScopedEntity>();
+        sink.disconnect<&retireScopedEntity>(); sink.connect<&retireScopedEntity>();
         lifecycle_state->constructing = true;
         for (const auto& ref : references) {
-            if (!component_state->nextSerial) throw 0;
-            const entt::entity entity = registry.create();
-            entities.push_back(entity);
-            const garden::ecs::ComponentEntityKey key{
-                static_cast<uint32_t>(entt::to_entity(entity)),
-                static_cast<uint32_t>(entt::to_version(entity)) + 1u};
-            const uint64_t serial = component_state->nextSerial++;
+            if (!component_state->nextSerial) throw std::bad_alloc{};
+            const auto raw = registry.create();
             garden::ecs::EntityHandle handle;
-            handle.m_owner = reinterpret_cast<uintptr_t>(this);
-            handle.m_world = component_state->token;
-            handle.m_entity = static_cast<uint32_t>(entt::to_integral(entity));
-            handle.m_serial = serial;
-            // Ownership must precede construction hooks, including marker hooks.
-            handles.push_back(handle);
-            registry.emplace<ScopedEntityMarker>(entity, &component_state->store, key, serial);
-            registry.emplace<IdentityComponent>(entity, IdentityComponent{ref.guid});
-            if (!registry.valid(entity) || !registry.all_of<ScopedEntityMarker, IdentityComponent>(entity) ||
-                registry.get<IdentityComponent>(entity).guid != ref.guid)
-                throw 0;
+            handle.m_owner = reinterpret_cast<uintptr_t>(this); handle.m_world = incarnation;
+            handle.m_entity = static_cast<uint32_t>(entt::to_integral(raw)); handle.m_serial = component_state->nextSerial++;
+            transaction.entities.push_back(handle); result.entities.push_back(handle);
+            const garden::ecs::ComponentEntityKey key{static_cast<uint32_t>(entt::to_entity(raw)), static_cast<uint32_t>(entt::to_version(raw)) + 1u};
+            registry.emplace<ScopedEntityMarker>(raw, &component_state->store, key, handle.m_serial);
+            registry.emplace<IdentityComponent>(raw, IdentityComponent{ref.guid});
         }
-        // Hooks may have modified identities or created colliding entities.
-        std::unordered_map<EntityGuid, size_t, GuidHash> counts;
-        counts.reserve(references.size());
-        for (const auto [entity, identity] : registry.view<IdentityComponent>().each()) {
-            (void)entity;
-            if (requested.count(identity.guid)) ++counts[identity.guid];
+        for (size_t i = 0; i < references.size(); ++i) {
+            const auto h = result.entities[i];
+            if (persistedReference(h).guid != references[i].guid || classifyEntityHandle(h) != EntityHandleClassification::Alive) throw 0;
         }
-        for (size_t i = 0; i < references.size(); ++i)
-            if (!registry.valid(entities[i]) ||
-                !registry.all_of<ScopedEntityMarker, IdentityComponent>(entities[i]) ||
-                registry.get<ScopedEntityMarker>(entities[i]).serial != handles[i].m_serial ||
-                registry.get<ScopedEntityMarker>(entities[i]).store != &component_state->store ||
-                registry.get<ScopedEntityMarker>(entities[i]).key.slot != static_cast<uint32_t>(entt::to_entity(entities[i])) ||
-                registry.get<ScopedEntityMarker>(entities[i]).key.generation != static_cast<uint32_t>(entt::to_version(entities[i])) + 1u ||
-                registry.get<IdentityComponent>(entities[i]).guid != references[i].guid ||
-                counts[references[i].guid] != 1) throw 0;
         lifecycle_state->constructing = false;
-        out_handles = std::move(handles);
-        return true;
-    } catch (...) {
-        lifecycle_state->constructing = false;
-        ConstructionTransaction transaction{this, std::move(handles)};
-        (void)abortUnpublished(transaction);
-        return false;
-    }
+        lifecycle_state->shutdown_complete = false;
+        return result;
+    } catch (const std::bad_alloc&) { result.status = ScopedRestoreStatus::AllocationFailure; }
+      catch (...) { result.status = ScopedRestoreStatus::ConstructionFailure; }
+    lifecycle_state->constructing = false;
+    if (!transaction.entities.empty()) result.rollback = abortUnpublished(transaction);
+    return result;
 }
 
 EntityRef world::persistedReference(garden::ecs::EntityHandle handle) const
@@ -465,6 +507,157 @@ LifecycleStatus world::validateLifecycleHandle(garden::ecs::EntityHandle handle)
         ? LifecycleStatus::Alive : LifecycleStatus::Stale;
 }
 
+EntityHandleClassification world::classifyEntityHandle(garden::ecs::EntityHandle h) const noexcept
+{
+    if (!h.m_owner || !h.m_world || h.m_entity == UINT32_MAX || !h.m_serial) return EntityHandleClassification::Unverifiable;
+    if (h.m_owner != reinterpret_cast<uintptr_t>(this)) return EntityHandleClassification::WrongWorld;
+    if (h.m_world != incarnation) return EntityHandleClassification::RetiredGone;
+    const auto raw = static_cast<entt::entity>(h.m_entity);
+    if (!registry.valid(raw)) return EntityHandleClassification::RetiredGone;
+    const auto* marker = registry.try_get<ScopedEntityMarker>(raw);
+    if (!marker || !marker->serial || !component_state || marker->store != &component_state->store ||
+        marker->key.slot != static_cast<uint32_t>(entt::to_entity(raw)) || marker->key.generation != static_cast<uint32_t>(entt::to_version(raw)) + 1u)
+        return EntityHandleClassification::Unverifiable;
+    if (marker->serial != h.m_serial) return EntityHandleClassification::RetiredGone;
+    if (persistedReference(h).isNull()) return EntityHandleClassification::Unverifiable;
+    if (retirement_fence->contains(raw)) return EntityHandleClassification::Retiring;
+    if (retirement_fence->isPending(raw)) return EntityHandleClassification::Pending;
+    return EntityHandleClassification::Alive;
+}
+
+LifecycleResult world::operationConflict() const noexcept
+{
+    LifecycleResult r{LifecycleStatus::Conflict};
+    r.blocked_by = lifecycle_state->operation; r.blocked_by_kind = lifecycle_state->operation_kind;
+    return r;
+}
+LifecycleResult world::operationProgress(LifecycleResult r) noexcept
+{
+    r.operation = lifecycle_state->operation; r.kind = lifecycle_state->operation_kind; r.accepted = true;
+    lifecycle_state->result = r; return r;
+}
+LifecycleResult world::retirementResult(LifecycleOperationHandle op) const noexcept
+{
+    if (!op.valid() || op != lifecycle_state->operation || op.owner_ != this || op.incarnation_ != incarnation)
+        return {LifecycleStatus::UnknownOperation};
+    return lifecycle_state->result;
+}
+LifecycleResult world::resumeRetirement(LifecycleOperationHandle op) noexcept
+{
+    auto r = retirementResult(op);
+    if (!r.accepted || r.cleanupComplete()) return r;
+    if (active_queries) { auto blocked = r; blocked.status = LifecycleStatus::QueryActive; return blocked; }
+    if (lifecycle_state->running || lifecycle_state->constructing) { auto blocked = r; blocked.status = LifecycleStatus::Reentrant; return blocked; }
+    if (lifecycle_state->cohort.empty() && lifecycle_state->operation_kind == LifecycleOperationKind::UnpublishedRollback && !lifecycle_state->rollback.empty())
+        return operationProgress(retireRaw(static_cast<entt::entity>(lifecycle_state->rollback.back().m_entity), true));
+    return operationProgress(processRetirement());
+}
+LifecycleResult world::acknowledgeRetirement(LifecycleOperationHandle op) noexcept
+{
+    auto r = retirementResult(op);
+    if (!r.accepted) return r;
+    if (!r.cleanupComplete()) { r.status = LifecycleStatus::Conflict; return r; }
+    lifecycle_state->operation = {}; lifecycle_state->operation_kind = LifecycleOperationKind::None;
+    lifecycle_state->result = {};
+    return r;
+}
+
+LifecycleResult world::retireEntities(std::span<const garden::ecs::EntityHandle> handles) noexcept
+{ return retireEntitiesImpl(handles, true); }
+
+LifecycleResult world::retireEntitiesImpl(std::span<const garden::ecs::EntityHandle> handles, bool external) noexcept
+{
+    auto& state = *lifecycle_state;
+    if (state.operation.valid()) return operationConflict();
+    if (active_queries) return {LifecycleStatus::QueryActive};
+    if (state.running || state.constructing || !state.cohort.empty() || !state.rollback.empty()) return {LifecycleStatus::Reentrant};
+    if (handles.empty()) return {};
+    if (!incarnation || (external && !next_operation_serial) || injectLifecycleFault(registry, LifecyclePhase::Prepare))
+        return {LifecycleStatus::AllocationFailure, LifecyclePhase::Prepare};
+    try {
+        std::vector<entt::entity> roots;
+        roots.reserve(handles.size());
+        for (auto h : handles) {
+            const auto cls = classifyEntityHandle(h);
+            if (cls != EntityHandleClassification::Alive && cls != EntityHandleClassification::Pending)
+                return {cls == EntityHandleClassification::WrongWorld ? LifecycleStatus::WrongWorld : LifecycleStatus::Invalid, LifecyclePhase::Prepare, h};
+            const auto raw = static_cast<entt::entity>(h.m_entity);
+            if (std::find(roots.begin(), roots.end(), raw) == roots.end()) roots.push_back(raw);
+        }
+        auto preflight = Hierarchy::preflightRetirementCohort(registry, roots);
+        if (preflight.status != Hierarchy::RetirementPreflightStatus::Completed)
+            return {preflight.status == Hierarchy::RetirementPreflightStatus::AllocationFailure ? LifecycleStatus::AllocationFailure : LifecycleStatus::Invalid, LifecyclePhase::Prepare};
+        std::vector<LifecycleState::Member> cohort;
+        cohort.reserve(preflight.cohort.size());
+        for (const auto raw : preflight.cohort) {
+            const auto* marker = registry.try_get<ScopedEntityMarker>(raw);
+            if (!marker) return {LifecycleStatus::Invalid, LifecyclePhase::Prepare};
+            garden::ecs::EntityHandle h; h.m_owner = reinterpret_cast<uintptr_t>(this); h.m_world = incarnation;
+            h.m_entity = static_cast<uint32_t>(entt::to_integral(raw)); h.m_serial = marker->serial;
+            const auto cls = classifyEntityHandle(h);
+            if (cls != EntityHandleClassification::Alive && cls != EntityHandleClassification::Pending) return {LifecycleStatus::Invalid, LifecyclePhase::Prepare, h};
+            LifecycleState::Member member; member.entity = raw; member.handle = h; cohort.push_back(member);
+        }
+        std::vector<entt::entity> absorbed;
+        for (const auto& request : state.queue) {
+            const auto requestClass = classifyEntityHandle(request.handle);
+            if (requestClass != EntityHandleClassification::Pending && requestClass != EntityHandleClassification::Alive)
+                return {LifecycleStatus::Invalid, LifecyclePhase::Prepare, request.handle};
+            const auto raw = static_cast<entt::entity>(request.handle.m_entity);
+            auto q = Hierarchy::preflightRetirementCohort(registry, std::span<const entt::entity>(&raw, 1));
+            if (q.status != Hierarchy::RetirementPreflightStatus::Completed)
+                return {q.status == Hierarchy::RetirementPreflightStatus::AllocationFailure ? LifecycleStatus::AllocationFailure : LifecycleStatus::Invalid, LifecyclePhase::Prepare};
+            size_t inside = 0;
+            for (auto member : q.cohort) {
+                const auto* marker = registry.try_get<ScopedEntityMarker>(member);
+                if (!marker) return {LifecycleStatus::Invalid, LifecyclePhase::Prepare};
+                garden::ecs::EntityHandle h;
+                h.m_owner = reinterpret_cast<uintptr_t>(this); h.m_world = incarnation;
+                h.m_entity = static_cast<uint32_t>(entt::to_integral(member)); h.m_serial = marker->serial;
+                const auto cls = classifyEntityHandle(h);
+                if (cls != EntityHandleClassification::Alive && cls != EntityHandleClassification::Pending)
+                    return {LifecycleStatus::Invalid, LifecyclePhase::Prepare, h};
+                if (std::find(preflight.cohort.begin(), preflight.cohort.end(), member) != preflight.cohort.end()) ++inside;
+            }
+            if (inside && inside != q.cohort.size()) return {LifecycleStatus::Conflict, LifecyclePhase::Prepare};
+            if (inside) {
+                // A queued operation must have the same survivor effects when
+                // subsumed by the complete frozen fence.
+                for (const auto member : q.cohort) {
+                    const auto* children = registry.try_get<ChildrenComponent>(member);
+                    if (!children) continue;
+                    const auto* policy = registry.try_get<HierarchyPolicyComponent>(member);
+                    const auto mode = policy ? policy->on_parent_destroyed : HierarchyDestroyPolicy::OrphanToParent;
+                    const auto* parent = registry.try_get<ParentComponent>(member);
+                    const auto grandparent = parent && !parent->parent.isNull() ? resolveEntityRef(registry, parent->parent) : entt::null;
+                    const bool parentInBatchOnly = grandparent != entt::null &&
+                        std::find(preflight.cohort.begin(), preflight.cohort.end(), grandparent) != preflight.cohort.end() &&
+                        std::find(q.cohort.begin(), q.cohort.end(), grandparent) == q.cohort.end();
+                    for (const auto ref : children->children) {
+                        const auto child = resolveEntityRef(registry, ref);
+                        if (std::find(q.cohort.begin(), q.cohort.end(), child) != q.cohort.end()) continue;
+                        if (std::find(preflight.cohort.begin(), preflight.cohort.end(), child) != preflight.cohort.end() ||
+                            (mode == HierarchyDestroyPolicy::OrphanToParent && parentInBatchOnly))
+                            return {LifecycleStatus::Conflict, LifecyclePhase::Prepare};
+                    }
+                }
+                absorbed.push_back(raw);
+            }
+        }
+        if (external) {
+            state.operation.owner_ = this; state.operation.incarnation_ = incarnation; state.operation.serial_ = next_operation_serial++;
+            state.operation_kind = LifecycleOperationKind::PublishedBatch;
+        }
+        retirement_fence->entities.swap(preflight.cohort); state.cohort.swap(cohort);
+        state.current = state.completed = 0; state.unpublished = false; state.constraints_ready = false; state.observer_failure = false;
+        for (auto raw : absorbed) { state.queue.remove_if([&](const auto& q) { return q.handle.m_entity == static_cast<uint32_t>(entt::to_integral(raw)); }); retirement_fence->pending.erase(raw); }
+        if (!external) return processRetirement();
+        operationProgress({LifecycleStatus::Partial, LifecyclePhase::Prepare});
+        return operationProgress(processRetirement());
+    } catch (const std::bad_alloc&) { return {LifecycleStatus::AllocationFailure, LifecyclePhase::Prepare}; }
+      catch (...) { return {LifecycleStatus::InternalFailure, LifecyclePhase::Prepare}; }
+}
+
 LifecycleResult world::retirementState(garden::ecs::EntityHandle handle) const noexcept
 {
     // An unpublished entity can lose its marker in a construct hook yet still
@@ -490,6 +683,11 @@ LifecycleResult world::requestRetirement(garden::ecs::EntityHandle handle) noexc
     if (state.status != LifecycleStatus::Alive) return state;
     try {
         const auto raw = static_cast<entt::entity>(handle.m_entity);
+        if (!retirement_fence->entities.empty()) {
+            auto closure = Hierarchy::preflightRetirementCohort(registry, std::span<const entt::entity>(&raw, 1));
+            if (closure.status != Hierarchy::RetirementPreflightStatus::Completed) return {LifecycleStatus::Invalid, LifecyclePhase::Prepare, handle};
+            for (auto candidate : closure.cohort) if (retirement_fence->contains(candidate)) return {LifecycleStatus::Conflict, LifecyclePhase::Prepare, handle};
+        }
         retirement_fence->pending.insert(raw);
         try { lifecycle_state->queue.push_back({handle, false}); }
         catch (...) { retirement_fence->pending.erase(raw); throw; }
@@ -501,6 +699,7 @@ LifecycleResult world::requestRetirement(garden::ecs::EntityHandle handle) noexc
 
 LifecycleResult world::retireEntity(garden::ecs::EntityHandle handle) noexcept
 {
+    if (lifecycle_state->operation.valid()) return operationConflict();
     if (active_queries) return {LifecycleStatus::QueryActive, LifecyclePhase::None, handle};
     if (lifecycle_state->running) return {LifecycleStatus::Reentrant, LifecyclePhase::None, handle};
     const auto status = validateLifecycleHandle(handle);
@@ -510,13 +709,23 @@ LifecycleResult world::retireEntity(garden::ecs::EntityHandle handle) noexcept
             return {LifecycleStatus::Reentrant, LifecyclePhase::None, handle};
         return processRetirement();
     }
-    return retireRaw(static_cast<entt::entity>(handle.m_entity), false);
+    return retireEntitiesImpl(std::span<const garden::ecs::EntityHandle>(&handle, 1), false);
 }
 
 LifecycleResult world::retireRaw(entt::entity entity, bool unpublished) noexcept
 {
     if (active_queries) return {LifecycleStatus::QueryActive};
     if (lifecycle_state->running || !lifecycle_state->cohort.empty()) return {LifecycleStatus::Reentrant};
+    if (unpublished && !registry.valid(entity)) {
+        const auto found = std::find_if(lifecycle_state->rollback.rbegin(), lifecycle_state->rollback.rend(),
+            [&](const auto h) { return registry.valid(static_cast<entt::entity>(h.m_entity)); });
+        if (found == lifecycle_state->rollback.rend()) {
+            const auto completed = lifecycle_state->rollback.size();
+            lifecycle_state->rollback.clear();
+            return {LifecycleStatus::Completed, LifecyclePhase::None, {}, completed};
+        }
+        entity = static_cast<entt::entity>(found->m_entity);
+    }
     if (entity == entt::null || !registry.valid(entity)) return {LifecycleStatus::Stale};
     garden::ecs::EntityHandle current;
     if (component_state) if (const auto* marker = registry.try_get<ScopedEntityMarker>(entity)) {
@@ -525,6 +734,8 @@ LifecycleResult world::retireRaw(entt::entity entity, bool unpublished) noexcept
         current.m_entity = static_cast<uint32_t>(entt::to_integral(entity));
         current.m_serial = marker->serial;
     }
+    if (!unpublished && current.m_serial)
+        return retireEntitiesImpl(std::span<const garden::ecs::EntityHandle>(&current, 1), false);
     try {
         std::vector<entt::entity> entities;
         if (unpublished && !lifecycle_state->rollback.empty()) {
@@ -534,23 +745,19 @@ LifecycleResult world::retireRaw(entt::entity entity, bool unpublished) noexcept
                     entities.push_back(static_cast<entt::entity>(it->m_entity));
             }
         } else entities.push_back(entity);
-        const auto* policy = registry.try_get<HierarchyPolicyComponent>(entity);
-        const bool cascade = !unpublished && policy && policy->on_parent_destroyed == HierarchyDestroyPolicy::CascadeDestroy;
-        if (cascade) {
-            // Explicit stack preserves the authored child-list pre-order.
-            std::vector<entt::entity> stack{entity};
-            while (!stack.empty()) {
-                const auto parent = stack.back(); stack.pop_back();
-                if (parent != entity) entities.push_back(parent);
-                const auto* children = registry.try_get<ChildrenComponent>(parent);
-                if (!children) continue;
-                for (auto it = children->children.rbegin(); it != children->children.rend(); ++it) {
-                    const auto child = resolveEntityRef(registry, *it);
-                    if (child != entt::null && registry.valid(child) &&
-                        std::find(entities.begin(), entities.end(), child) == entities.end() &&
-                        std::find(stack.begin(), stack.end(), child) == stack.end())
-                        stack.push_back(child);
-                }
+        if (!unpublished && current.m_serial) {
+            auto preflight = Hierarchy::preflightRetirementCohort(registry, std::span<const entt::entity>(&entity, 1));
+            if (preflight.status != Hierarchy::RetirementPreflightStatus::Completed)
+                return {preflight.status == Hierarchy::RetirementPreflightStatus::AllocationFailure ? LifecycleStatus::AllocationFailure : LifecycleStatus::Invalid, LifecyclePhase::Prepare, current};
+            entities = std::move(preflight.cohort);
+            for (const auto raw : entities) {
+                const auto* marker = registry.try_get<ScopedEntityMarker>(raw);
+                if (!marker) return {LifecycleStatus::Invalid, LifecyclePhase::Prepare, current};
+                garden::ecs::EntityHandle h; h.m_owner = reinterpret_cast<uintptr_t>(this); h.m_world = incarnation;
+                h.m_entity = static_cast<uint32_t>(entt::to_integral(raw)); h.m_serial = marker->serial;
+                const auto cls = classifyEntityHandle(h);
+                if (cls != EntityHandleClassification::Alive && cls != EntityHandleClassification::Pending)
+                    return {LifecycleStatus::Invalid, LifecyclePhase::Prepare, h};
             }
         }
         std::vector<LifecycleState::Member> cohort;
@@ -563,6 +770,9 @@ LifecycleResult world::retireRaw(entt::entity entity, bool unpublished) noexcept
                 member.handle.m_world = component_state->token;
                 member.handle.m_entity = static_cast<uint32_t>(entt::to_integral(candidate));
                 member.handle.m_serial = marker->serial;
+            }
+            if (unpublished) {
+                for (const auto h : lifecycle_state->rollback) if (h.m_entity == static_cast<uint32_t>(entt::to_integral(candidate))) { member.handle = h; break; }
             }
             cohort.push_back(member);
         }
@@ -588,6 +798,8 @@ LifecycleResult world::processRetirement() noexcept
     if (state.running) return {LifecycleStatus::Reentrant};
     struct Guard { bool& running; explicit Guard(bool& value) : running(value) { running = true; } ~Guard() { running = false; } } guard(state.running);
     if (!state.constraints_ready) {
+        if (injectLifecycleFault(registry, LifecyclePhase::Constraints))
+            return {LifecycleStatus::Partial, LifecyclePhase::Constraints, state.cohort.front().handle, state.completed};
         try { physics_system->removeConstraintsTouching(retirement_fence->entities); }
         catch (...) { return {LifecycleStatus::Partial, LifecyclePhase::Constraints, state.cohort.front().handle, state.completed}; }
         state.constraints_ready = true;
@@ -621,6 +833,8 @@ LifecycleResult world::processRetirement() noexcept
             } else member.phase = LifecyclePhase::Hierarchy;
         }
         if (member.phase == LifecyclePhase::Hierarchy) {
+            if (injectLifecycleFault(registry, LifecyclePhase::Hierarchy))
+                return {LifecycleStatus::Partial, LifecyclePhase::Hierarchy, member.handle, state.completed};
             try {
                 if (!Hierarchy::retireEntity(registry, entity, *retirement_fence))
                     return {LifecycleStatus::Partial, LifecyclePhase::Hierarchy, member.handle, state.completed};
@@ -628,6 +842,8 @@ LifecycleResult world::processRetirement() noexcept
             } catch (...) { return {LifecycleStatus::Partial, LifecyclePhase::Hierarchy, member.handle, state.completed}; }
         }
         if (member.phase == LifecyclePhase::Physics) {
+            if (injectLifecycleFault(registry, LifecyclePhase::Physics))
+                return {LifecycleStatus::Partial, LifecyclePhase::Physics, member.handle, state.completed};
             try {
                 physics_system->removeConstraintsTouching(retirement_fence->entities);
                 physics_system->removeBody(entity);
@@ -635,14 +851,20 @@ LifecycleResult world::processRetirement() noexcept
             } catch (...) { return {LifecycleStatus::Partial, LifecyclePhase::Physics, member.handle, state.completed}; }
         }
         if (member.phase == LifecyclePhase::Components) {
-            if (const auto* marker = registry.try_get<ScopedEntityMarker>(entity)) {
-                const auto removed = marker->store->removeEntity(marker->key);
+            if (injectLifecycleFault(registry, LifecyclePhase::Components))
+                return {LifecycleStatus::Partial, LifecyclePhase::Components, member.handle, state.completed};
+            if (component_state && member.handle.m_serial) {
+                const garden::ecs::ComponentEntityKey key{static_cast<uint32_t>(entt::to_entity(entity)),
+                    static_cast<uint32_t>(entt::to_version(entity)) + 1u};
+                const auto removed = component_state->store.removeEntity(key);
                 if (removed != garden::ecs::ComponentStoreResult::Success && removed != garden::ecs::ComponentStoreResult::NotFound)
                     return {LifecycleStatus::Partial, LifecyclePhase::Components, member.handle, state.completed};
             }
             member.phase = LifecyclePhase::Identity;
         }
         if (member.phase == LifecyclePhase::Identity) {
+            if (injectLifecycleFault(registry, LifecyclePhase::Identity))
+                return {LifecycleStatus::Partial, LifecyclePhase::Identity, member.handle, state.completed};
             try { registry.destroy(entity); }
             catch (...) { return {LifecycleStatus::Partial, LifecyclePhase::Identity, member.handle, state.completed}; }
             state.queue.remove_if([&](const auto& request) { return request.handle == member.handle; });
@@ -672,6 +894,7 @@ LifecycleResult world::processRetirement() noexcept
 
 LifecycleResult world::drainRetirements() noexcept
 {
+    if (lifecycle_state->operation.valid()) return operationConflict();
     if (active_queries) return {LifecycleStatus::QueryActive};
     if (lifecycle_state->running || lifecycle_state->constructing) return {LifecycleStatus::Reentrant};
     size_t completed = 0;
@@ -715,26 +938,17 @@ LifecycleResult world::drainRetirements() noexcept
 
 LifecycleResult world::abortUnpublished(ConstructionTransaction& transaction) noexcept
 {
-    if (transaction.owner != this || transaction.committed)
-        return {LifecycleStatus::Invalid};
+    if (transaction.owner != this || transaction.committed) return {LifecycleStatus::Invalid};
+    if (lifecycle_state->operation.valid()) return operationConflict();
     if (active_queries) return {LifecycleStatus::QueryActive};
-    if (lifecycle_state->running || !lifecycle_state->rollback.empty())
-        return {LifecycleStatus::Reentrant};
-    // Move the transaction's already allocated capability into the world.
-    // Retry remains possible even if later cohort preparation cannot allocate.
-    lifecycle_state->rollback = std::move(transaction.entities);
-    transaction.committed = true;
-    for (const auto& handle : lifecycle_state->rollback)
-        lifecycle_state->queue.remove_if([&](const auto& queued) { return queued.handle == handle; });
-    while (!lifecycle_state->rollback.empty() &&
-           !registry.valid(static_cast<entt::entity>(lifecycle_state->rollback.back().m_entity))) {
-        retirement_fence->pending.erase(static_cast<entt::entity>(lifecycle_state->rollback.back().m_entity));
-        lifecycle_state->rollback.pop_back();
-    }
-    if (lifecycle_state->rollback.empty()) return {LifecycleStatus::Completed};
-    // A construct hook may have left an earlier cohort partially retired. The
-    // retained rollback remains fenced while that cohort is resumed by drain.
-    if (!lifecycle_state->cohort.empty())
-        return {LifecycleStatus::Partial, LifecyclePhase::Prepare};
-    return retireRaw(static_cast<entt::entity>(lifecycle_state->rollback.back().m_entity), true);
+    if (lifecycle_state->running || !lifecycle_state->rollback.empty() || !lifecycle_state->cohort.empty()) return {LifecycleStatus::Reentrant};
+    if (transaction.entities.empty()) { transaction.committed = true; return {}; }
+    if (!transaction.rollback_operation.valid() || transaction.rollback_operation.owner_ != this ||
+        transaction.rollback_operation.incarnation_ != incarnation) return {LifecycleStatus::Invalid, LifecyclePhase::Prepare};
+    auto& state = *lifecycle_state;
+    state.rollback = std::move(transaction.entities); transaction.committed = true;
+    state.operation = transaction.rollback_operation;
+    state.operation_kind = LifecycleOperationKind::UnpublishedRollback;
+    operationProgress({LifecycleStatus::Partial, LifecyclePhase::Prepare});
+    return operationProgress(retireRaw(static_cast<entt::entity>(state.rollback.back().m_entity), true));
 }

@@ -60,6 +60,8 @@ private:
     // Core systems
     Application  m_app;
     world        m_world;
+    LevelInstantiationResult m_editor_level_construction{};
+    LevelInstantiationResult m_server_level_construction{};
     LevelManager m_level_manager;
     LevelData    m_level_data;   // kept alive for round-trip serialization fidelity
     renderer     m_renderer;

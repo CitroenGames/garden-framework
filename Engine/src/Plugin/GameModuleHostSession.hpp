@@ -85,6 +85,8 @@ public:
 
     bool notifyClientLevelLoaded();
     bool notifyServerLevelLoaded();
+    // Notify a running dedicated server after its host has replaced the level.
+    bool notifyServerLevelTransition();
 
     // Editor sessions pass true after all initialized roles have completed
     // their level callback.  Standalone Game/Server pass false and therefore
