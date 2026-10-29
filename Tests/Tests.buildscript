@@ -27,6 +27,7 @@ include = EntityLifecycleTests/EntityLifecycleTests.buildscript
 include = HierarchyTests/HierarchyTests.buildscript
 include = PrefabTests/PrefabTests.buildscript
 include = SchedulerTests/SchedulerTests.buildscript
+include = EventBusTests/EventBusTests.buildscript
 include = GameplayPrimitivesTests/GameplayPrimitivesTests.buildscript
 include = SceneManagerTests/SceneManagerTests.buildscript
 include = ServerHostLifecycleTests/ServerHostLifecycleTests.buildscript

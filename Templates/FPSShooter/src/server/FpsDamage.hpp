@@ -3,6 +3,7 @@
 #include "Gameplay/GameplayComponents.hpp"
 #include "shared/CompetitiveLogic.hpp"
 #include "shared/FpsCombatFeed.hpp"
+#include "shared/FpsGameLogic.hpp"
 #include "shared/SharedComponents.hpp"
 
 #include <cstdint>
@@ -38,6 +39,23 @@ struct DamagePolicy {
     Competitive::RoundPhase phase = Competitive::RoundPhase::Live;
     bool require_opposing_teams = false;
 };
+
+// A score-mode world does not own competitive round state. Keep phase lookup
+// lazy so the server shot path never asks that world for a missing context.
+template<typename PhaseProvider>
+inline DamagePolicy makeShotDamagePolicy(
+    bool competitive,
+    FpsLogic::FpsGameMode score_mode,
+    PhaseProvider&& competitive_phase)
+{
+    DamagePolicy policy;
+    policy.require_live_phase = competitive;
+    if (competitive)
+        policy.phase = competitive_phase();
+    policy.require_opposing_teams = competitive ||
+        score_mode == FpsLogic::FpsGameMode::TeamDeathmatch;
+    return policy;
+}
 
 struct DamageResult {
     DamageRejectReason reject_reason = DamageRejectReason::None;

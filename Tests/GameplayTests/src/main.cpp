@@ -4300,6 +4300,7 @@ bool testClientAcceptanceScriptBotCombatActions()
 #include "PlayerMovementTests.hpp"
 #include "CompetitiveProtocolTests.hpp"
 #include "CompetitiveMapDataTests.hpp"
+#include "ShotDamagePolicyTests.hpp"
 int main()
 {
     bool ok = true;
@@ -4353,6 +4354,7 @@ int main()
     ok = testWeaponAuthorityTiming() && ok;
     ok = testLagCompensatedShotPoseFallbackAndMissCount() && ok;
     ok = testFpsDamageContract() && ok;
+    ok = testShotDamagePolicyModeIsolation() && ok;
     ok = testFpsDeathLifecycle() && ok;
     ok = testFpsCombatFeedContract() && ok;
     ok = testClientAcceptanceScriptAuthorityAndInput() && ok;

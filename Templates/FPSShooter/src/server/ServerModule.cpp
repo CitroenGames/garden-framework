@@ -676,11 +676,9 @@ static void fireServerShot(
     }
     for (auto& kv : pellet_hits) {
         entt::entity victim_ent = kv.first;
-        FpsServer::DamagePolicy damage_policy;
-        damage_policy.require_live_phase = g_competitive;
-        damage_policy.phase = g_round_system.state.phase;
-        damage_policy.require_opposing_teams = g_competitive ||
-            g_game_rules.match.config.mode == FpsLogic::FpsGameMode::TeamDeathmatch;
+        const auto damage_policy = FpsServer::makeShotDamagePolicy(
+            g_competitive, g_game_rules.match.config.mode,
+            [] { return g_round_system.state.phase; });
         int32_t total_damage = weapon_def.damage * kv.second;
         const FpsServer::DamageResult damage_result = FpsServer::applyFpsDamage(
             w->registry,
