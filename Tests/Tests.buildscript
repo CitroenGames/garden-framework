@@ -5,6 +5,7 @@ include = NetworkStressTests/NetworkStressTests.buildscript
 include = ReflectionTests/ReflectionTests.buildscript
 include = InputTests/InputTests.buildscript
 include = GameplayTests/GameplayTests.buildscript
+include = ServerShotAdapterTests/ServerShotAdapterTests.buildscript
 include = PackagerTests/PackagerTests.buildscript
 include = AssetPipelineTests/AssetPipelineTests.buildscript
 include = GameModuleContractTests/GameModuleContractTests.buildscript

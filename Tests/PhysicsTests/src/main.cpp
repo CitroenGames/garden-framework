@@ -20,7 +20,6 @@
 #include "Physics/PhysicsSettings.hpp"
 #include "Network/PredictionTypes.hpp"
 #include "PlayerController.hpp"
-#include "Character/FpsCharacter.hpp"
 #include "Reflection/EngineReflection.hpp"
 #include "Reflection/ReflectionRegistry.hpp"
 #include "Reflection/ReflectionSerializer.hpp"

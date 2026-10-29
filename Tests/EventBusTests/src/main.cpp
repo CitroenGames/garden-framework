@@ -178,6 +178,41 @@ bool singleListenerDisconnect()
     return report("EventBus single listener self-disconnect", receiver.first == 1 && receiver.second == 0);
 }
 
+bool independentListenersAndDisconnect()
+{
+    auto& bus = EventBus::get();
+    bus.clear();
+    Recorder first;
+    Recorder second;
+    ListenerGuard first_guard{bus, first};
+    ListenerGuard second_guard{bus, second};
+    bus.sink<FirstEvent>().connect<&Recorder::onFirst>(first);
+    bus.sink<FirstEvent>().connect<&Recorder::onFirst>(second);
+    bus.sink<SecondEvent>().connect<&Recorder::onSecond>(first);
+    bus.sink<SecondEvent>().connect<&Recorder::onSecond>(second);
+
+    bus.publish(FirstEvent{1});
+    bus.queue(FirstEvent{2});
+    bus.queue(FirstEvent{3});
+    bus.flush<FirstEvent>();
+    bool ok = first.first == std::vector<int>({1, 2, 3}) &&
+              second.first == std::vector<int>({1, 2, 3});
+
+    // Disconnect outside dispatch, including from a second event type, after
+    // enqueue but before delivery. No listener invocation order is assumed.
+    bus.queue(FirstEvent{4});
+    bus.queue(SecondEvent{5});
+    bus.disconnect(&first);
+    bus.flush<FirstEvent>();
+    bus.flush<SecondEvent>();
+    bus.publish(FirstEvent{6});
+    bus.publish(SecondEvent{7});
+    ok &= first.first == std::vector<int>({1, 2, 3}) && first.second.empty() &&
+          second.first == std::vector<int>({1, 2, 3, 4, 6}) &&
+          second.second == std::vector<int>({5, 7});
+    return report("EventBus independent listeners and explicit disconnect", ok);
+}
+
 bool clearQueuedEvents()
 {
     auto& bus = EventBus::get();
@@ -301,6 +336,7 @@ int main()
     ok = createdQueueMutationAndFlushGuard() && ok;
     ok = queueOtherTypeDuringTypedFlush() && ok;
     ok = singleListenerDisconnect() && ok;
+    ok = independentListenersAndDisconnect() && ok;
     ok = clearQueuedEvents() && ok;
     ok = ordinaryQueueExceptionObservation() && ok;
     ok = moduleScopeTracking() && ok;

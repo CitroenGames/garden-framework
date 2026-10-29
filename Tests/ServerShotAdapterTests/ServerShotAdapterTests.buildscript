@@ -1,0 +1,19 @@
+[project:ServerShotAdapterTests]
+type = exe
+outdir = ../../bin/
+if(Windows)
+{
+    subsystem = Console
+}
+sources = src/main.cpp
+includes = src, ../../Templates/FPSShooter/src
+target_link_libraries(
+    PRIVATE EngineSDK
+)
+defines = FPS_SERVER_SHOT_ADAPTER_TEST
+multiprocessor = true
+simd = AdvancedVectorExtensions2
+std = 20
+utf8 = true
+exception_handling = true
+buffer_security_check = false

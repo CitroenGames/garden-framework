@@ -730,6 +730,22 @@ static void fireServerShot(
     }
 }
 
+#if defined(FPS_SERVER_SHOT_ADAPTER_TEST)
+// This entry exists only in the dedicated fixture translation unit. It calls
+// the production adapter with its normal services and without substituting a
+// phase, trace, damage, or publication implementation.
+static void fireServerShotForTest(EngineServices& services,
+    FpsLogic::ServerMode mode, entt::entity shooter, const InputSample& input)
+{
+    g_server_services = &services;
+    g_mode_composition = FpsLogic::ModeComposition{mode};
+    g_game_rules.configureMode(g_mode_composition);
+    const WeaponComponent weapon{WeaponType::RIFLE};
+    fireServerShot(1, shooter, input, 0, weapon, 0.0f);
+    g_server_services = nullptr;
+}
+#endif
+
 
 static WeaponType primaryForClient(uint16_t client_id, uint8_t team_id)
 {
