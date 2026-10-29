@@ -757,6 +757,85 @@ namespace
         return pass(name);
     }
 
+    bool testHostRollbackAcknowledgementRetry()
+    {
+        using namespace garden::ecs;
+        const std::string name = "GameModuleLifecycle_HostRollbackAcknowledgementRetry";
+        ScopedRecorder recorder("host_rollback_ack");
+        ReflectionRegistry reflection;
+        world w;
+        LifecycleResult rollback{};
+        bool armed = false;
+        size_t release_attempts = 0;
+        HostLedger ledger;
+        auto operations = ledger.operations();
+        operations.release_module_resources = [&]() {
+            ++release_attempts;
+            // The caller owns acknowledgement; world shutdown must not consume
+            // or replace its retained operation, even after cleanup completes.
+            if (rollback.operation.valid()) return false;
+            return w.shutdown().cleanupComplete();
+        };
+        GameModuleHostSession session(std::move(operations));
+        struct CleanupGuard {
+            world& owner;
+            bool& armed;
+            LifecycleResult& rollback;
+            ConstructionHandle transaction{};
+            ~CleanupGuard() {
+                armed = false;
+                if (transaction.valid()) rollback = owner.abortConstruction(transaction).rollback;
+                if (rollback.operation.valid()) (void)settleTestRollback(owner, rollback);
+                rollback = {};
+            }
+        } guard{w, armed, rollback};
+
+        if (!session.loadAndRegister(fixturePath("ecs_provider").string(), reflection) ||
+            !session.initialiseClient(nullptr) || !session.notifyClientLevelLoaded() || !session.beginPlaying(false))
+            return fail(name, "session did not start");
+        const fs::path image = session.loader().getLoadedImagePath();
+        const auto begin = w.beginConstruction();
+        guard.transaction = begin.transaction;
+        if (begin.status != ConstructionStatus::Completed)
+            return fail(name, "construction did not begin");
+        const auto staged = w.createStagedEntity(begin.transaction);
+        if (staged.status != ConstructionStatus::Completed ||
+            w.add<ModuleFixtureComponent>(begin.transaction, staged.entity).component_status != ComponentStoreResult::Success)
+            return fail(name, "module component staging failed");
+        armed = true;
+        w.registry.ctx().emplace<testing::LifecycleFaultHook>(testing::LifecycleFaultHook{&armed, &failStagedProviderCleanupOnce});
+        const auto aborted = w.abortConstruction(begin.transaction);
+        if (aborted.status == ConstructionStatus::Completed || aborted.rollback.operation.valid()) guard.transaction = {};
+        rollback = aborted.rollback;
+        if (rollback.status != LifecycleStatus::Partial || !rollback.operation.valid() ||
+            aborted.captured.size() != 1 || aborted.captured.front() != staged.captured)
+            return fail(name, "rollback did not retain its token and captured entity");
+        const auto token = rollback.operation;
+        if (session.stop() || session.phase() != GameModuleHostSession::Phase::Teardown ||
+            !session.loader().isLoaded() || !fs::exists(image) || rollback.operation != token ||
+            w.shutdown().cleanupComplete())
+            return fail(name, "partial rollback did not refuse teardown while retaining the image");
+        const auto stopped_events = recorder.events();
+        rollback = w.resumeRetirement(token);
+        if (!rollback.cleanupComplete() || rollback.operation != token ||
+            aborted.captured.size() != 1 || aborted.captured.front() != staged.captured)
+            return fail(name, "rollback retry lost its token or capture");
+        const auto cleaned_events = recorder.events();
+        if (std::count(cleaned_events.begin(), cleaned_events.end(), "client.shutdown") != 1 ||
+            std::count(cleaned_events.begin(), cleaned_events.end(), "ecs.component.destroy") != 1 ||
+            session.stop() || !session.loader().isLoaded() || !fs::exists(image) ||
+            recorder.events() != cleaned_events || rollback.operation != token || w.shutdown().cleanupComplete())
+            return fail(name, "unacknowledged cleanup did not retain the image without repeating callbacks");
+        if (!w.acknowledgeRetirement(token).cleanupComplete())
+            return fail(name, "rollback acknowledgement failed");
+        rollback = {};
+        if (!session.stop() || session.loader().isLoaded() || fs::exists(image) ||
+            release_attempts != 3 || recorder.events() != cleaned_events ||
+            std::count(stopped_events.begin(), stopped_events.end(), "client.shutdown") != 1)
+            return fail(name, "acknowledged retry did not finish exactly once");
+        return pass(name);
+    }
+
     bool testCommittedModuleComponentRetirement()
     {
         using namespace garden::ecs;
@@ -1500,6 +1579,7 @@ int main()
     ok = testModuleDuplicateKeepsFirstProvider() && ok;
     ok = testCrossDllMixedQuery() && ok;
     ok = testStagedModuleComponentRollback() && ok;
+    ok = testHostRollbackAcknowledgementRetry() && ok;
     ok = testCommittedModuleComponentRetirement() && ok;
     ok = testStoredModuleComponentRetirement() && ok;
     ok = testModuleComponentBatchFailures() && ok;

@@ -1581,12 +1581,11 @@ void EditorApp::shutdown()
         return;
     }
 
-    // Stop simulation if running
-    if (m_state.isSimulationActive())
-        stopPlay();
+    // A failed PIE start can retain cleanup before simulation becomes active.
+    stopPlay();
 
     if (m_state.isSimulationActive() || !m_pie_clients.empty() ||
-        (m_game_module_session && !m_game_module_session->stop()))
+        m_game_module_session || m_play_world || m_game_sim)
     {
         LOG_ENGINE_ERROR("Editor shutdown: game module retirement is still pending");
         return;
@@ -2392,11 +2391,20 @@ void EditorApp::applyPIESpawnLocation()
 
 void EditorApp::stopPlay()
 {
-    if (!m_state.isSimulationActive())
-        return; // not playing
+    if (!finishLevelRollback(m_world, m_editor_level_construction) ||
+        !finishLevelRollback(m_server_world, m_server_level_construction)) {
+        LOG_ENGINE_ERROR("PIE: level rollback is still pending");
+        return;
+    }
+
+    if (!m_state.isSimulationActive() && !m_external_pie_active &&
+        !m_game_module_active && !m_network_pie_active && !m_game_module_session &&
+        m_pie_clients.empty() && !m_play_world && !m_game_sim)
+        return;
 
     LOG_ENGINE_INFO("--- PIE: Stopping play mode ---");
     // No further game callbacks may be dispatched if retirement needs a retry.
+    const bool had_game_module = m_game_module_active;
     m_game_module_active = false;
     XR::OpenXRSystem::get().endPIE();
 
@@ -2408,7 +2416,7 @@ void EditorApp::stopPlay()
     }
 
     // 1. Tear down project DLL PIE or standalone simulation
-    if (m_game_module_active || m_game_module_session)
+    if (had_game_module || m_network_pie_active || m_game_module_session || !m_pie_clients.empty())
     {
         if (m_network_pie_active || !m_pie_clients.empty())
         {
@@ -2618,10 +2626,11 @@ void EditorApp::processEvents()
         {
         case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
         case SDL_EVENT_QUIT:
-            if (m_state.isSimulationActive())
-                stopPlay();
+            stopPlay();
             if (!m_state.isSimulationActive() && m_pie_clients.empty() &&
-                (!m_game_module_session || m_game_module_session->stop()))
+                !m_game_module_session && !m_play_world && !m_game_sim &&
+                !m_editor_level_construction.rollback.operation.valid() &&
+                !m_server_level_construction.rollback.operation.valid())
                 m_running = false;
             else
                 LOG_ENGINE_ERROR("Editor close refused: game module retirement is still pending");
@@ -3179,10 +3188,11 @@ void EditorApp::renderMenuBar()
 
             if (ImGui::MenuItem("Quit"))
             {
-                if (m_state.isSimulationActive())
-                    stopPlay();
+                stopPlay();
                 if (!m_state.isSimulationActive() && m_pie_clients.empty() &&
-                    (!m_game_module_session || m_game_module_session->stop()))
+                    !m_game_module_session && !m_play_world && !m_game_sim &&
+                    !m_editor_level_construction.rollback.operation.valid() &&
+                    !m_server_level_construction.rollback.operation.valid())
                     m_running = false;
                 else
                     LOG_ENGINE_ERROR("Editor close refused: game module retirement is still pending");

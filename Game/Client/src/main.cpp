@@ -68,6 +68,10 @@ static GameModuleHostSession game_module(GameModuleHostSession::HostOperations{
     {},
     []() {
         Threading::JobSystem::get().barrier();
+        // stop() can also be entered by a failed module initialization, before
+        // quit_game gets control. Keep the world and image until rollback is
+        // complete and its owning result has been acknowledged.
+        if (!finishLevelRollback()) return false;
         if (!_world.shutdown().cleanupComplete()) return false;
         game_module_resources_released = true;
         Threading::JobSystem::get().shutdown();

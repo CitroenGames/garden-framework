@@ -493,6 +493,39 @@ void testTransitionConstructionRollbackAndRetry() {
     EventBus::get().clear();
 }
 
+void testShutdownWithPendingTransitionRollback() {
+    const std::string name = "server shutdown settles pending transition before shutdown";
+    TempLevel level("shutdown-transition-fault");
+    if (!level.write(R"({"metadata":{"level_name":"rollback"},"entities":[{"name":"broken","type":"Renderable","mesh":{"path":"missing_level_transaction_mesh.obj"},"components":{"RenderableComponent":{"layers":1,"owner":"0000000000000000-0000000000000000","casts_shadow":true}}}]})")) {
+        check(false, name, "could not write fixture"); return;
+    }
+    world game_world;
+    SceneManager manager;
+    completed(manager.initialize(&game_world, nullptr), name, "initialize failed");
+    FailLifecycleAttempts fault;
+    game_world.registry.ctx().emplace<garden::ecs::testing::LifecycleFaultHook>(
+        garden::ecs::testing::LifecycleFaultHook{&fault, &failLifecycleAttempts});
+
+    const auto pending = manager.transition(level.path.string());
+    const auto token = pending.construction.rollback.operation;
+    check(!pending.cleanup_complete && pending.operation_handle.valid() && token.valid(),
+          name, "transition did not retain pending rollback");
+    auto result = manager.shutdown();
+    check(result.status == SceneStatus::Busy && !result.cleanup_complete &&
+          result.operation_handle == pending.operation_handle && result.lifecycle.operation == token,
+          name, "shutdown did not return the pending operation");
+    if (result.operation_handle.valid()) result = manager.resume(result.operation_handle);
+    check(result.status == SceneStatus::ConstructionFailure && result.cleanup_complete &&
+          result.lifecycle.operation == token &&
+          game_world.retirementResult(token).status == LifecycleStatus::UnknownOperation,
+          name, "transition rollback was not completed and acknowledged");
+    check(manager.resume(pending.operation_handle).status == SceneStatus::InvalidArgument,
+          name, "completed transition was replayed");
+    game_world.registry.ctx().erase<garden::ecs::testing::LifecycleFaultHook>();
+    completed(manager.shutdown(), name, "shutdown after transition cleanup failed");
+    check(game_world.shutdown().cleanupComplete(), name, "world remained blocked after scene shutdown");
+}
+
 void testBinaryTransitionConstructionRollbackAndRetry() {
     const std::string name = "binary transition retains rollback and retries mixed identity cohort";
     TempLevel level("binary-transition-fault");
@@ -740,6 +773,7 @@ int main()
     testDirectFrameworkInstallFailure();
     testLevelTransactionIdentityAndAbort();
     testTransitionConstructionRollbackAndRetry();
+    testShutdownWithPendingTransitionRollback();
     testBinaryTransitionConstructionRollbackAndRetry();
     testThrowingUnloadObserver();
     testIncompleteShutdownDiagnostic();
