@@ -12,6 +12,7 @@
 #include "Network/NetworkSerializer.hpp"
 #include "Network/NetworkTransport.hpp"
 #include "Network/NetworkTypes.hpp"
+#include "Network/ReplicationRegistry.hpp"
 #include "Network/ServerNetworkManager.hpp"
 #include "Network/SpawnRecipeRegistry.hpp"
 #include "Utils/Log.hpp"
@@ -46,6 +47,14 @@ namespace NetworkTestEcsBridge
     entt::entity resolve(world& test_world, EntityRef entity)
     {
         return resolveEntityRef(test_world.registry, entity);
+    }
+
+    bool extractReplicatedExtensions(world& test_world, EntityRef entity,
+                                     std::vector<Net::ReplicatedExtEntry>& out)
+    {
+        const auto raw = resolve(test_world, entity);
+        return raw != entt::null &&
+            Net::ReplicationRegistry::get().extractEntity(test_world.registry, raw, out);
     }
 }
 
@@ -2619,6 +2628,217 @@ static bool runUnreliableQueueDrainRegressionTest()
     return true;
 }
 
+// After a full snapshot is acknowledged, an unchanged world must still
+// publish progress. Otherwise the client's bounded send credit can run out
+// permanently even while the server simulation advances.
+static bool runIdleWorldProgressRegressionTest()
+{
+    TestState state;
+    world server_world;
+    server_world.setFixedDelta(kFixedDelta);
+    Net::ServerNetworkManager server;
+    if (!server.initialize()) {
+        std::cerr << "[FAIL] IdleWorldProgressRegressionTests could not initialize server\n";
+        return false;
+    }
+    server.setWorld(&server_world);
+    uint16_t connected_id = 0;
+    uint32_t highest_applied = 0;
+    float later_forward = 0.0f;
+    EntityRef pawn;
+    uint32_t pawn_network_id = 0;
+    glm::vec3 initial_position{}, initial_rotation{}, initial_velocity{}, initial_ground_normal{};
+    bool initial_grounded = false;
+    server.setOnClientConnected([&](uint16_t id) {
+        connected_id = id;
+        const auto entity = spawnServerPlayer(server_world, server, id);
+        pawn = NetworkTestEcsBridge::entityRef(server_world, entity);
+        pawn_network_id = server.getNetworkIdByEntity(entity);
+        const auto* transform = server_world.tryGetComponent<TransformComponent>(pawn);
+        const auto* rb = server_world.tryGetComponent<RigidBodyComponent>(pawn);
+        const auto* player = server_world.tryGetComponent<PlayerComponent>(pawn);
+        if (!transform || !rb || !player) {
+            state.addError("idle-progress fixture pawn missing movement components");
+        } else {
+            initial_position = transform->position;
+            initial_rotation = transform->rotation;
+            initial_velocity = rb->velocity;
+            initial_grounded = player->grounded;
+            initial_ground_normal = player->ground_normal;
+        }
+        server.setInputAdmission(id, true, Net::InputAdmissionChange::Policy);
+    });
+    server.setInputSampleHandler([&](uint16_t, entt::entity,
+                                     const Net::InputSample& sample, uint32_t) {
+        // Input processing runs movement before this callback, including gravity.
+        // Restore every built-in snapshot field so the published world is static
+        // even after the held forward sample has been applied.
+        auto* transform = server_world.tryGetComponent<TransformComponent>(pawn);
+        auto* rb = server_world.tryGetComponent<RigidBodyComponent>(pawn);
+        auto* player = server_world.tryGetComponent<PlayerComponent>(pawn);
+        if (!transform || !rb || !player) {
+            state.addError("idle-progress fixture could not restore pawn state");
+        } else {
+            transform->position = initial_position;
+            transform->rotation = initial_rotation;
+            rb->velocity = initial_velocity;
+            player->grounded = initial_grounded;
+            player->ground_normal = initial_ground_normal;
+        }
+        highest_applied = (std::max)(highest_applied, sample.tick);
+        if (sample.tick == Net::INITIAL_INPUT_TICK_BUDGET + 1u)
+            later_forward = sample.move_forward;
+    });
+    StressConfig config;
+    config.client_count = 1;
+    uint16_t port = 0;
+    if (!startServer(server, config, port)) {
+        std::cerr << "[FAIL] IdleWorldProgressRegressionTests could not start server\n";
+        server.shutdown();
+        return false;
+    }
+    world client_world;
+    Net::ClientNetworkManager client;
+    client.setWorld(&client_world);
+    if (!client.initialize() || !client.connectToServer("127.0.0.1", port, "idle_progress")) {
+        std::cerr << "[FAIL] IdleWorldProgressRegressionTests could not connect client\n";
+        client.shutdown();
+        server.shutdown();
+        return false;
+    }
+    // Pump without advancing simulation so the initial safe burst is known.
+    for (uint32_t i = 0; i < config.connect_frame_budget &&
+         (!client.isConnected() || !client.isInputAdmissionOpen()); ++i) {
+        client.update(0.0f);
+        server.update(0.0f);
+        client.update(0.0f);
+        SDL_Delay(1);
+    }
+    if (!client.isConnected() || !client.isInputAdmissionOpen() || connected_id == 0)
+        state.addError("idle-progress loopback did not connect with admission open");
+
+    // A single published tick-3 full snapshot is the static baseline.
+    server.advanceSimulationTicks(3);
+    server.publishWorldState();
+    for (uint32_t i = 0; i < 120u && client.getLastReceivedServerTick() != 3u; ++i) {
+        client.update(0.0f);
+        server.update(0.0f);
+        SDL_Delay(1);
+    }
+    if (client.getLastReceivedServerTick() != 3u)
+        state.addError("initial full snapshot did not arrive");
+
+    Net::ComponentSnapshot baseline;
+    const bool have_baseline = pawn_network_id != 0 &&
+        server.sampleLagCompensatedEntity(pawn_network_id, 3u, baseline);
+    if (!have_baseline)
+        state.addError("could not inspect the tick-3 baseline snapshot");
+    std::vector<Net::ReplicatedExtEntry> baseline_extensions;
+    if (!NetworkTestEcsBridge::extractReplicatedExtensions(server_world, pawn, baseline_extensions))
+        state.addError("could not inspect baseline replicated extensions");
+
+    // Consume all safe credit without advancing the server. The first input
+    // acknowledges tick 3, establishing a retained delta baseline.
+    for (uint32_t tick = 1; tick <= Net::INITIAL_INPUT_TICK_BUDGET; ++tick) {
+        client.sendInputCommand(tick, Net::InputState{});
+        client.update(kFixedDelta);
+        for (uint32_t i = 0; i < 120u && highest_applied < tick; ++i) {
+            server.update(0.0f);
+            client.update(0.0f);
+            SDL_Delay(1);
+        }
+        if (highest_applied != tick) {
+            state.addError("initial safe input credit did not reach authority");
+            break;
+        }
+    }
+    const auto* info = server.getClientInfo(connected_id);
+    if (!info || info->last_acknowledged_tick != 3u ||
+        info->last_input_tick != Net::INITIAL_INPUT_TICK_BUDGET)
+        state.addError("initial snapshot baseline or input cursor was not acknowledged");
+
+    const uint32_t later_tick = Net::INITIAL_INPUT_TICK_BUDGET + 1u;
+    Net::InputState later_input;
+    later_input.move_forward = 1.0f;
+    client.sendInputCommand(later_tick, later_input);
+    for (uint32_t i = 0; i < 12u; ++i) {
+        client.update(kFixedDelta);
+        server.update(0.0f);
+        client.update(0.0f);
+        SDL_Delay(1);
+    }
+    if (highest_applied != Net::INITIAL_INPUT_TICK_BUDGET)
+        state.addError("later primary reached authority without server progress");
+
+    // No entity values change. Each cadence advances the snapshot tick; the
+    // existing protocol's empty delta supplies credit for the queued input.
+    uint32_t previous_received = client.getLastReceivedServerTick();
+    for (uint32_t cycle = 0; cycle < 3u; ++cycle) {
+        server.advanceSimulationTicks(3);
+        server.publishWorldState();
+        const uint32_t expected_tick = server.getCurrentTick();
+        Net::ComponentSnapshot current;
+        const bool have_current = server.sampleLagCompensatedEntity(pawn_network_id, expected_tick, current);
+        std::vector<Net::ReplicatedExtEntry> current_extensions;
+        const bool have_extensions = NetworkTestEcsBridge::extractReplicatedExtensions(
+            server_world, pawn, current_extensions);
+        bool same_extensions = have_extensions && baseline_extensions.size() == current_extensions.size();
+        for (size_t i = 0; same_extensions && i < baseline_extensions.size(); ++i) {
+            const auto& a = baseline_extensions[i];
+            const auto& b = current_extensions[i];
+            same_extensions = a.component_id == b.component_id && a.field_mask == b.field_mask &&
+                a.payload == b.payload;
+        }
+        // Exact equality, stricter than the delta epsilon, checks all fields
+        // that this fixture's only replicated entity contributes to snapshots.
+        if (!have_baseline || !have_current || !same_extensions ||
+            glm::distance(baseline.position, current.position) != 0.0f ||
+            glm::distance(baseline.velocity, current.velocity) != 0.0f ||
+            baseline.grounded != current.grounded ||
+            glm::distance(baseline.ground_normal, current.ground_normal) != 0.0f ||
+            baseline.rotation_y != current.rotation_y)
+            state.addError("static-world snapshot differs from the acknowledged baseline");
+        for (uint32_t i = 0; i < 120u && client.getLastReceivedServerTick() != expected_tick; ++i) {
+            client.update(0.0f);
+            server.update(0.0f);
+            SDL_Delay(1);
+        }
+        if (client.getLastReceivedServerTick() != expected_tick || expected_tick <= previous_received)
+            state.addError("static-world snapshot tick did not advance at publication cadence");
+        previous_received = client.getLastReceivedServerTick();
+        client.update(kFixedDelta);
+        for (uint32_t i = 0; i < 120u && highest_applied < later_tick; ++i) {
+            server.update(0.0f);
+            client.update(0.0f);
+            SDL_Delay(1);
+        }
+    }
+    info = server.getClientInfo(connected_id);
+    if (highest_applied != later_tick || later_forward != 1.0f ||
+        !info || info->last_input_tick != later_tick)
+        state.addError("later queued primary was not applied at the server input cursor");
+    if (!client.isConnected() || server.getClientCount() != 1u)
+        state.addError("idle-progress connection did not remain live");
+
+    client.disconnect("idle-progress regression complete");
+    for (uint32_t i = 0; i < 120u && server.getClientCount() != 0u; ++i) {
+        client.update(0.0f);
+        server.update(0.0f);
+        SDL_Delay(1);
+    }
+    if (server.getClientCount() != 0u)
+        state.addError("idle-progress client did not disconnect");
+    client.shutdown();
+    server.shutdown();
+    if (state.error_count != 0) {
+        for (const std::string& error : state.errors)
+            std::cerr << "[FAIL] " << error << "\n";
+        return false;
+    }
+    std::cout << "[PASS] IdleWorldProgressRegressionTests\n";
+    return true;
+}
+
 // A long update may drain a short fixed-command FIFO. The unused part of that
 // update must not become credit for an input queued later while the client is
 // idle, or the next command bypasses the 60 Hz send interval.
@@ -3289,6 +3509,7 @@ int main(int argc, char** argv)
     const bool blocked_input_cursor_ok = runBlockedInputCursorRegressionTest();
     const bool unreliable_queue_drain_ok = runUnreliableQueueDrainRegressionTest();
     const bool input_send_credit_ok = runInputSendCreditRegressionTest();
+    const bool idle_world_progress_ok = runIdleWorldProgressRegressionTest();
     const bool client_admission_barrier_ok = runClientAdmissionBarrierTest();
     const bool client_admission_wire_barrier_ok = runClientAdmissionWireBarrierTest();
     const bool input_burst_admission_ok = runInputBurstAdmissionRegressionTest();
@@ -3298,6 +3519,6 @@ int main(int argc, char** argv)
     return (generic_recipe_ready && handshake_ok && combat_event_protocol_ok && competitive_presentation_protocol_ok && transport_pending_queue_accounting_ok && custom_ingress_ok && hierarchy_boundary_ok && interpolation_buffer_wrap_ok && interpolation_jitter_ok && lag_history_wrap_ok &&
             lag_view_tick_clamp_ok &&
             input_view_tick_protocol_ok && input_view_tick_loopback_ok && archetype_dispatch_ok && interpolation_manager_wrap_ok &&
-            raw_interpolation_ok && blocked_input_cursor_ok && unreliable_queue_drain_ok && input_send_credit_ok &&
+            raw_interpolation_ok && blocked_input_cursor_ok && unreliable_queue_drain_ok && input_send_credit_ok && idle_world_progress_ok &&
             client_admission_barrier_ok && client_admission_wire_barrier_ok && input_burst_admission_ok && two_client_input_stall_admission_ok && ok) ? 0 : 1;
 }

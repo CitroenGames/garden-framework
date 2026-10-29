@@ -965,8 +965,11 @@ void ServerNetworkManager::sendWorldStateToClient(uint16_t client_id, const Worl
     // Generate delta update
     std::vector<EntityUpdateData> updates = generateDeltaUpdate(snapshot, baseline, full_snapshot);
 
-    if (updates.empty() && !full_snapshot) {
-        return;  // Nothing changed
+    // An empty delta with a retained baseline still carries server progress and
+    // the client's processed-input cursor at the normal snapshot cadence.
+    // Preserve the existing baseline-miss behavior when no baseline is usable.
+    if (updates.empty() && !full_snapshot && !has_baseline) {
+        return;
     }
 
     // Serialize

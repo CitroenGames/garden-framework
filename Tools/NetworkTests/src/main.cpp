@@ -371,6 +371,33 @@ int testWorldStateSerialization()
     return 0;
 }
 
+int testEmptyWorldStateHeartbeatSerialization()
+{
+    const char* name = "EmptyWorldStateHeartbeatSerialization";
+    Net::WorldStateUpdateMessage msg;
+    msg.server_tick = 101;
+    msg.delta_from_tick = 99;
+    msg.snapshot_flags = Net::SnapshotFlags::NONE;
+    msg.last_processed_input_tick = 87;
+    const std::vector<Net::EntityUpdateData> updates;
+
+    Net::BitWriter writer;
+    Net::NetworkSerializer::serialize(writer, msg, updates);
+    Net::BitReader reader(writer.getData(), writer.getByteSize());
+    Net::WorldStateUpdateMessage out;
+    std::vector<Net::EntityUpdateData> out_updates(1);
+    if (!Net::NetworkSerializer::deserialize(reader, out, out_updates))
+        return fail(name, "heartbeat deserialize failed");
+    if (out.type != Net::MessageType::WORLD_STATE_UPDATE ||
+        out.server_tick != msg.server_tick || out.delta_from_tick != msg.delta_from_tick ||
+        out.snapshot_flags != msg.snapshot_flags || out.isFullSnapshot() ||
+        out.last_processed_input_tick != msg.last_processed_input_tick)
+        return fail(name, "heartbeat header did not round-trip");
+    if (out.num_entities != 0 || !out_updates.empty())
+        return fail(name, "heartbeat did not preserve zero entities");
+    return 0;
+}
+
 int testNetworkTransportPolicy()
 {
     const char* name = "NetworkTransportPolicy";
@@ -962,6 +989,7 @@ int main()
     failures += testInputActionLatchPolicy();
     failures += testSharedMovementSourceRules();
     failures += testWorldStateSerialization();
+    failures += testEmptyWorldStateHeartbeatSerialization();
     failures += testNetworkTransportPolicy();
     failures += testCVarSerialization();
     failures += testNetworkStats();
