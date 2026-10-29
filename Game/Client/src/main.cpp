@@ -52,17 +52,60 @@ static bool finishLevelRollback()
 {
     auto& rollback = level_construction.rollback;
     if (!rollback.operation.valid()) return rollback.cleanupComplete();
+    if (!rollback.accepted) return false;
+    const auto token = rollback.operation;
     if (!rollback.cleanupComplete()) {
-        const auto resumed = _world.resumeRetirement(rollback.operation);
-        if (resumed.operation.valid()) rollback = resumed;
-        else if (!resumed.cleanupComplete()) return false;
+        const auto resumed = _world.resumeRetirement(token);
+        if (!resumed.accepted || resumed.operation != token) return false;
+        rollback = resumed;
     }
     if (!rollback.cleanupComplete()) return false;
-    const auto ack = _world.acknowledgeRetirement(rollback.operation);
-    if (!ack.cleanupComplete()) return false;
+    const auto ack = _world.acknowledgeRetirement(token);
+    if (!ack.accepted || !ack.cleanupComplete() || ack.operation != token) return false;
     rollback = {};
     return true;
 }
+
+// An accepted operation remains owned by this host until its exact token has
+// completed and been acknowledged. A blocked_by token belongs to another
+// caller and must not be acknowledged here.
+static bool settleOwnedRetirement(LifecycleResult& result)
+{
+    if (result.accepted && result.operation.valid()) {
+        const auto token = result.operation;
+        if (!result.cleanupComplete()) {
+            const auto resumed = _world.resumeRetirement(token);
+            if (!resumed.accepted || resumed.operation != token) return false;
+            result = resumed;
+        }
+        if (!result.cleanupComplete()) return false;
+        const auto ack = _world.acknowledgeRetirement(token);
+        if (!ack.accepted || !ack.cleanupComplete() || ack.operation != token) return false;
+        result = {};
+    }
+    return true;
+}
+
+static LifecycleResult world_reset{};
+static bool world_reset_pending = false;
+static bool finishWorldReset()
+{
+    if (!world_reset_pending) return true;
+    if (!settleOwnedRetirement(world_reset)) return false;
+    world_reset = _world.resetWorld();
+    if (world_reset.operation.valid() || !world_reset.cleanupComplete()) return false;
+    world_reset_pending = false;
+    return true;
+}
+
+static LifecycleResult world_shutdown{};
+static bool finishWorldShutdown()
+{
+    if (!settleOwnedRetirement(world_shutdown)) return false;
+    world_shutdown = _world.shutdown();
+    return !world_shutdown.operation.valid() && world_shutdown.cleanupComplete();
+}
+
 static bool game_module_resources_released = false;
 static GameModuleHostSession game_module(GameModuleHostSession::HostOperations{
     {},
@@ -72,7 +115,8 @@ static GameModuleHostSession game_module(GameModuleHostSession::HostOperations{
         // quit_game gets control. Keep the world and image until rollback is
         // complete and its owning result has been acknowledged.
         if (!finishLevelRollback()) return false;
-        if (!_world.shutdown().cleanupComplete()) return false;
+        if (!finishWorldReset()) return false;
+        if (!finishWorldShutdown()) return false;
         game_module_resources_released = true;
         Threading::JobSystem::get().shutdown();
         AudioSystem::get().shutdown();
@@ -86,31 +130,58 @@ static GameModuleHostSession game_module(GameModuleHostSession::HostOperations{
                EventBus::moduleSourceCanRetire(owner);
     }});
 
+// Retry on the owner thread while the world and module remain alive. Do not
+// dispatch more host events after shutdown has begun.
+static void waitForShutdownRetry()
+{
+    SDL_Delay(100);
+}
+
 static void quit_game(int code)
 {
     ConVarRegistry::get().saveArchiveCvars("config.cfg");
-    if (!finishLevelRollback()) {
-        LOG_ENGINE_ERROR("Level rollback incomplete; preserving world and module until process exit");
-        _exit(1);
-    }
-
-    // Stop the host session while the world and host services remain valid.
-    // It invokes the module shutdown callback before unloading its image.
-    if (!game_module.stop())
-    {
-        LOG_ENGINE_ERROR("Game module retirement refused: {}", game_module.lastFailure());
-        _exit(1);
-    }
-    // The session can be idle if startup failed before loading a module.
-    if (!game_module_resources_released)
-    {
-        if (!_world.shutdown().cleanupComplete()) {
-            LOG_ENGINE_ERROR("World shutdown incomplete");
-            _exit(1);
+    enum class PendingCleanup { None, LevelRollback, WorldReset, ModuleStop, WorldShutdown };
+    PendingCleanup pending = PendingCleanup::None;
+    for (;;) {
+        if (!finishLevelRollback()) {
+            if (pending != PendingCleanup::LevelRollback)
+                LOG_ENGINE_ERROR("Level rollback incomplete; retaining world and module for retry");
+            pending = PendingCleanup::LevelRollback;
+            waitForShutdownRetry();
+            continue;
         }
-        Threading::JobSystem::get().shutdown();
-        AudioSystem::get().shutdown();
-        Assets::AssetManager::get().shutdown();
+        if (!finishWorldReset()) {
+            if (pending != PendingCleanup::WorldReset)
+                LOG_ENGINE_ERROR("World reset incomplete; retaining world and module for retry");
+            pending = PendingCleanup::WorldReset;
+            waitForShutdownRetry();
+            continue;
+        }
+
+        // stop() retains its teardown progress and image on refusal. Do not
+        // discard the world or exit while that cleanup can be retried.
+        if (!game_module.stop()) {
+            if (pending != PendingCleanup::ModuleStop)
+                LOG_ENGINE_ERROR("Game module retirement refused; retrying: {}", game_module.lastFailure());
+            pending = PendingCleanup::ModuleStop;
+            waitForShutdownRetry();
+            continue;
+        }
+
+        // The session can be idle if startup failed before loading a module.
+        if (!game_module_resources_released) {
+            if (!finishWorldShutdown()) {
+                if (pending != PendingCleanup::WorldShutdown)
+                    LOG_ENGINE_ERROR("World shutdown incomplete; retaining world for retry");
+                pending = PendingCleanup::WorldShutdown;
+                waitForShutdownRetry();
+                continue;
+            }
+            Threading::JobSystem::get().shutdown();
+            AudioSystem::get().shutdown();
+            Assets::AssetManager::get().shutdown();
+        }
+        break;
     }
     RmlUiManager::get().shutdown();
     ImGuiManager::get().shutdown();
@@ -347,7 +418,9 @@ int main(int argc, char* argv[])
 
     // Initialize world and physics
     // The client host supplies its initial view; a generic world starts at the origin.
-    if (!_world.resetWorld().cleanupComplete()) {
+    world_reset = _world.resetWorld();
+    if (world_reset.operation.valid() || !world_reset.cleanupComplete()) {
+        world_reset_pending = true;
         LOG_ENGINE_FATAL("World reset incomplete");
         quit_game(1);
     }

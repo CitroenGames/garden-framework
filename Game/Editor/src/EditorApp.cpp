@@ -28,6 +28,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -1132,11 +1133,11 @@ void EditorApp::run()
         m_undo.beginFrame();
 
         processEvents();
-        if (m_game_input_manager)
+        if (!m_pie_teardown_pending && m_game_input_manager)
             m_game_input_actions.evaluate(*m_game_input_manager, m_delta_time);
         for (auto& inst : m_pie_clients)
         {
-            if (inst && inst->initialized && inst->input_manager)
+            if (!m_pie_teardown_pending && inst && inst->initialized && inst->input_manager)
             {
                 inst->input_manager->update();
                 inst->input_actions.evaluate(*inst->input_manager, m_delta_time);
@@ -1158,7 +1159,7 @@ void EditorApp::run()
         // --- Simulation tick (when active and running) ---
         {
             EditorPerformanceMonitor::ScopedTimer timer(m_perf_monitor, EditorPerfSeries::CpuSimulation);
-            if (m_state.isSimulationRunning())
+            if (m_state.isSimulationRunning() && !m_pie_teardown_pending)
             {
                 if (m_game_module_active)
                 {
@@ -1564,6 +1565,41 @@ void EditorApp::reloadLODsForMesh(const std::string& mesh_path)
     }
 }
 
+bool EditorApp::settleEditorReset()
+{
+    // A failed editor reset must be retried by the level operation that will
+    // also replace the editor's level data and selection, not by Stop or Quit.
+    if (!m_editor_reset_result.cleanupComplete()) return false;
+    if (!finishOwnedRetirement(m_world, m_editor_reset_result)) return false;
+    m_editor_reset_result = {};
+    return true;
+}
+
+bool EditorApp::settleServerReset()
+{
+    const bool retry_cleanup = !m_server_reset_result.cleanupComplete();
+    if (!finishOwnedRetirement(m_server_world, m_server_reset_result)) return false;
+    if (retry_cleanup) {
+        m_server_reset_result = m_server_world.shutdown();
+        if (!m_server_reset_result.cleanupComplete() ||
+            !finishOwnedRetirement(m_server_world, m_server_reset_result)) return false;
+    }
+    m_server_reset_result = {};
+    return true;
+}
+
+bool EditorApp::settlePlayShutdown()
+{
+    if (!m_play_world)
+        return m_play_retirement_result.cleanupComplete() && !m_play_retirement_result.operation.valid();
+    if (!finishOwnedRetirement(*m_play_world, m_play_retirement_result)) return false;
+    m_play_retirement_result = m_play_world->shutdown();
+    if (!m_play_retirement_result.cleanupComplete() ||
+        !finishOwnedRetirement(*m_play_world, m_play_retirement_result)) return false;
+    m_play_retirement_result = {};
+    return true;
+}
+
 void EditorApp::shutdown()
 {
     // Wait for any in-flight packaging to complete before tearing down
@@ -1576,19 +1612,20 @@ void EditorApp::shutdown()
     }
 
     if (!finishLevelRollback(m_world, m_editor_level_construction) ||
-        !finishLevelRollback(m_server_world, m_server_level_construction)) {
-        LOG_ENGINE_ERROR("Editor shutdown: level rollback is still pending");
-        return;
+        !finishLevelRollback(m_server_world, m_server_level_construction) ||
+        !settleEditorReset() || !settleServerReset()) {
+        LOG_ENGINE_ERROR("Editor shutdown: cleanup is still pending; terminating without destroying its owner");
+        std::_Exit(EXIT_FAILURE);
     }
 
     // A failed PIE start can retain cleanup before simulation becomes active.
     stopPlay();
 
-    if (m_state.isSimulationActive() || !m_pie_clients.empty() ||
+    if (m_pie_teardown_pending || m_state.isSimulationActive() || !m_pie_clients.empty() ||
         m_game_module_session || m_play_world || m_game_sim)
     {
-        LOG_ENGINE_ERROR("Editor shutdown: game module retirement is still pending");
-        return;
+        LOG_ENGINE_ERROR("Editor shutdown: game module retirement is still pending; terminating without destroying its owner");
+        std::_Exit(EXIT_FAILURE);
     }
 
     // Save window geometry to config
@@ -1632,8 +1669,8 @@ void EditorApp::shutdown()
     }
     m_main_viewport.reset();
     if (!m_world.shutdown().cleanupComplete()) {
-        LOG_ENGINE_ERROR("Editor world shutdown incomplete");
-        return;
+        LOG_ENGINE_ERROR("Editor world shutdown incomplete; terminating without destroying its owner");
+        std::_Exit(EXIT_FAILURE);
     }
     Threading::JobSystem::get().shutdown();
     Console::get().shutdown();
@@ -1650,6 +1687,10 @@ void EditorApp::shutdown()
 
 void EditorApp::beginPlay()
 {
+    if (m_pie_teardown_pending) {
+        stopPlay();
+        if (m_pie_teardown_pending) return;
+    }
     if (m_state.isSimulationActive())
         return; // already playing
     if (m_editor_level_construction.status == LevelInstantiationStatus::FrameworkInstallFailure) {
@@ -1657,8 +1698,9 @@ void EditorApp::beginPlay()
         return;
     }
     if (!finishLevelRollback(m_world, m_editor_level_construction) ||
-        !finishLevelRollback(m_server_world, m_server_level_construction)) {
-        LOG_ENGINE_ERROR("PIE: level rollback is still pending");
+        !finishLevelRollback(m_server_world, m_server_level_construction) ||
+        !settleEditorReset() || !settleServerReset()) {
+        LOG_ENGINE_ERROR("PIE: level or reset cleanup is still pending");
         return;
     }
 
@@ -1667,6 +1709,7 @@ void EditorApp::beginPlay()
         if (inst && !inst->release())
         {
             LOG_ENGINE_ERROR("PIE: Player {} module retirement is still pending", inst->player_index);
+            m_pie_teardown_pending = true;
             return;
         }
     }
@@ -1674,6 +1717,7 @@ void EditorApp::beginPlay()
     if (m_game_module_session && !m_game_module_session->stop())
     {
         LOG_ENGINE_ERROR("PIE: Previous game module retirement is still pending");
+        m_pie_teardown_pending = true;
         return;
     }
     m_game_module_session.reset();
@@ -1683,6 +1727,22 @@ void EditorApp::beginPlay()
     {
         beginExternalPlay();
         return;
+    }
+
+    // Reserve durable ownership before any additional client can construct a
+    // world or acquire a module image. A failed cleanup must never require an
+    // allocation in order to retain that client for a later stop attempt.
+    if (m_state.pie_launch_mode != PIELaunchMode::Simulate &&
+        m_state.network_pie.net_mode != PIENetMode::Standalone &&
+        m_state.network_pie.run_mode == PIERunMode::InEditor &&
+        m_state.network_pie.num_players > 1)
+    {
+        try {
+            m_pie_clients.reserve(static_cast<size_t>(m_state.network_pie.num_players - 1));
+        } catch (...) {
+            LOG_ENGINE_ERROR("PIE: Unable to reserve additional client ownership");
+            return;
+        }
     }
 
     // Guard: nothing to play
@@ -1737,9 +1797,16 @@ void EditorApp::beginPlay()
             },
             [this]() {
                 Threading::JobSystem::get().barrier();
-                if (!finishLevelRollback(m_server_world, m_server_level_construction)) return false;
-                if (!m_server_world.shutdown().cleanupComplete()) return false;
-                if (m_play_world && !m_play_world->shutdown().cleanupComplete()) return false;
+                if (!finishLevelRollback(m_server_world, m_server_level_construction) ||
+                    !finishOwnedRetirement(m_server_world, m_server_reset_result)) return false;
+                const auto server_shutdown = m_server_world.shutdown();
+                if (!server_shutdown.cleanupComplete() || server_shutdown.operation.valid()) {
+                    m_server_reset_result = server_shutdown;
+                    if (!server_shutdown.cleanupComplete() ||
+                        !finishOwnedRetirement(m_server_world, m_server_reset_result)) return false;
+                }
+                m_server_reset_result = {};
+                if (!settlePlayShutdown()) return false;
                 m_game_input_manager.reset();
                 m_play_world.reset();
                 return true;
@@ -1798,10 +1865,13 @@ void EditorApp::beginPlay()
             uint16_t port = m_state.network_pie.server_port;
 
             // Initialize a separate server world
-            if (!m_server_world.resetWorld().cleanupComplete()) {
+            m_server_reset_result = m_server_world.resetWorld();
+            if (!m_server_reset_result.cleanupComplete() ||
+                !finishOwnedRetirement(m_server_world, m_server_reset_result)) {
                 LOG_ENGINE_ERROR("PIE: Server world reset incomplete");
                 return;
             }
+            m_server_reset_result = {};
 
             // Instantiate level into server world
             m_server_level_construction = m_level_manager.instantiateLevelParallel(
@@ -1914,23 +1984,31 @@ void EditorApp::beginPlay()
                         if (m_state.network_pie.run_mode == PIERunMode::InEditor)
                         {
                             // In-Editor mode: load DLL copies for each additional client
+                            try {
                             for (int i = 2; i <= m_state.network_pie.num_players; i++)
                             {
-                                auto inst = std::make_unique<PIEClientInstance>();
+                                m_pie_clients.push_back(std::make_unique<PIEClientInstance>());
+                                auto& inst = m_pie_clients.back();
                                 inst->player_index = i;
                                 inst->window_title = "Player " + std::to_string(i);
 
                                 // Create isolated world
-                                if (!inst->client_world.resetWorld().cleanupComplete()) {
+                                inst->reset_result = inst->client_world.resetWorld();
+                                if (!inst->reset_result.cleanupComplete() ||
+                                    !finishOwnedRetirement(inst->client_world, inst->reset_result)) {
                                     LOG_ENGINE_ERROR("PIE: Client world reset incomplete");
+                                    if (inst->release()) m_pie_clients.pop_back();
+                                    if (!m_pie_clients.empty()) m_pie_teardown_pending = true;
                                     return;
                                 }
+                                inst->reset_result = {};
                                 inst->level_construction = m_level_manager.instantiateLevelParallel(
                                     m_play_snapshot, inst->client_world, m_app.getRenderAPI(), false);
                                 if (inst->level_construction.status != LevelInstantiationStatus::Completed) {
                                     LOG_ENGINE_ERROR("PIE: Player {} level construction failed (status {})",
                                                      i, static_cast<int>(inst->level_construction.status));
-                                    if (!inst->release()) m_pie_clients.push_back(std::move(inst));
+                                    if (inst->release()) m_pie_clients.pop_back();
+                                    if (!m_pie_clients.empty()) m_pie_teardown_pending = true;
                                     return;
                                 }
                                 inst->client_world.initializeGameplayFramework(
@@ -1941,16 +2019,16 @@ void EditorApp::beginPlay()
                                 if (!inst->game_module.load(dll_path))
                                 {
                                     LOG_ENGINE_WARN("Failed to load DLL copy for Player {}", i);
-                                    if (!inst->release())
-                                        m_pie_clients.push_back(std::move(inst));
+                                    if (!inst->release()) { m_pie_teardown_pending = true; return; }
+                                    m_pie_clients.pop_back();
                                     continue;
                                 }
 
                                 if (!inst->game_module.registerEcsComponents())
                                 {
                                     LOG_ENGINE_WARN("ECS component registration failed for Player {}", i);
-                                    if (!inst->release())
-                                        m_pie_clients.push_back(std::move(inst));
+                                    if (!inst->release()) { m_pie_teardown_pending = true; return; }
+                                    m_pie_clients.pop_back();
                                     continue;
                                 }
 
@@ -1959,8 +2037,8 @@ void EditorApp::beginPlay()
                                 if (!inst->viewport)
                                 {
                                     LOG_ENGINE_WARN("Failed to create PIE viewport for Player {}", i);
-                                    if (!inst->release())
-                                        m_pie_clients.push_back(std::move(inst));
+                                    if (!inst->release()) { m_pie_teardown_pending = true; return; }
+                                    m_pie_clients.pop_back();
                                     continue;
                                 }
 
@@ -1994,17 +2072,20 @@ void EditorApp::beginPlay()
                                 {
                                     LOG_ENGINE_WARN("Client init failed for Player {}", i);
                                     inst->viewport.reset();
-                                    if (!inst->release())
-                                        m_pie_clients.push_back(std::move(inst));
+                                    if (!inst->release()) { m_pie_teardown_pending = true; return; }
+                                    m_pie_clients.pop_back();
                                     continue;
                                 }
 
+                                inst->initialized = true;
                                 inst->game_module.onLevelLoaded();
                                 inst->client_world.startGameplayFramework();
-                                inst->initialized = true;
                                 LOG_ENGINE_INFO("PIE: Player {} initialized in-editor", i);
-
-                                m_pie_clients.push_back(std::move(inst));
+                            }
+                            } catch (...) {
+                                LOG_ENGINE_ERROR("PIE: Additional client startup failed; retaining clients for teardown");
+                                if (!m_pie_clients.empty()) m_pie_teardown_pending = true;
+                                return;
                             }
                         }
                         else
@@ -2112,21 +2193,29 @@ void EditorApp::beginPlay()
                 {
                     if (m_state.network_pie.run_mode == PIERunMode::InEditor)
                     {
+                        try {
                         for (int i = 2; i <= m_state.network_pie.num_players; i++)
                         {
-                            auto inst = std::make_unique<PIEClientInstance>();
+                            m_pie_clients.push_back(std::make_unique<PIEClientInstance>());
+                            auto& inst = m_pie_clients.back();
                             inst->player_index = i;
                             inst->window_title = "Player " + std::to_string(i);
-                            if (!inst->client_world.resetWorld().cleanupComplete()) {
+                            inst->reset_result = inst->client_world.resetWorld();
+                            if (!inst->reset_result.cleanupComplete() ||
+                                !finishOwnedRetirement(inst->client_world, inst->reset_result)) {
                                 LOG_ENGINE_ERROR("PIE: Client world reset incomplete");
+                                if (inst->release()) m_pie_clients.pop_back();
+                                if (!m_pie_clients.empty()) m_pie_teardown_pending = true;
                                 return;
                             }
+                            inst->reset_result = {};
                             inst->level_construction = m_level_manager.instantiateLevelParallel(
                                 m_play_snapshot, inst->client_world, m_app.getRenderAPI(), false);
                             if (inst->level_construction.status != LevelInstantiationStatus::Completed) {
                                 LOG_ENGINE_ERROR("PIE: Player {} level construction failed (status {})",
                                                  i, static_cast<int>(inst->level_construction.status));
-                                if (!inst->release()) m_pie_clients.push_back(std::move(inst));
+                                if (inst->release()) m_pie_clients.pop_back();
+                                if (!m_pie_clients.empty()) m_pie_teardown_pending = true;
                                 return;
                             }
                             inst->client_world.initializeGameplayFramework(
@@ -2136,16 +2225,16 @@ void EditorApp::beginPlay()
                             if (!inst->game_module.load(dll_path))
                             {
                                 LOG_ENGINE_WARN("Failed to load DLL copy for Player {}", i);
-                                if (!inst->release())
-                                    m_pie_clients.push_back(std::move(inst));
+                                if (!inst->release()) { m_pie_teardown_pending = true; return; }
+                                m_pie_clients.pop_back();
                                 continue;
                             }
 
                             if (!inst->game_module.registerEcsComponents())
                             {
                                 LOG_ENGINE_WARN("ECS component registration failed for Player {}", i);
-                                if (!inst->release())
-                                    m_pie_clients.push_back(std::move(inst));
+                                if (!inst->release()) { m_pie_teardown_pending = true; return; }
+                                m_pie_clients.pop_back();
                                 continue;
                             }
 
@@ -2153,8 +2242,8 @@ void EditorApp::beginPlay()
                             if (!inst->viewport)
                             {
                                 LOG_ENGINE_WARN("Failed to create PIE viewport for Player {}", i);
-                                if (!inst->release())
-                                    m_pie_clients.push_back(std::move(inst));
+                                if (!inst->release()) { m_pie_teardown_pending = true; return; }
+                                m_pie_clients.pop_back();
                                 continue;
                             }
 
@@ -2187,16 +2276,20 @@ void EditorApp::beginPlay()
                             {
                                 LOG_ENGINE_WARN("Client init failed for Player {}", i);
                                 inst->viewport.reset();
-                                if (!inst->release())
-                                    m_pie_clients.push_back(std::move(inst));
+                                if (!inst->release()) { m_pie_teardown_pending = true; return; }
+                                m_pie_clients.pop_back();
                                 continue;
                             }
 
+                            inst->initialized = true;
                             inst->game_module.onLevelLoaded();
                             inst->client_world.startGameplayFramework();
-                            inst->initialized = true;
                             LOG_ENGINE_INFO("PIE: Player {} initialized in-editor", i);
-                            m_pie_clients.push_back(std::move(inst));
+                        }
+                        } catch (...) {
+                            LOG_ENGINE_ERROR("PIE: Additional client startup failed; retaining clients for teardown");
+                            if (!m_pie_clients.empty()) m_pie_teardown_pending = true;
+                            return;
                         }
                     }
                     else
@@ -2391,16 +2484,23 @@ void EditorApp::applyPIESpawnLocation()
 
 void EditorApp::stopPlay()
 {
+    if (m_state.isSimulationActive() || m_external_pie_active || m_game_module_active ||
+        m_network_pie_active || m_game_module_session || !m_pie_clients.empty() ||
+        m_play_world || m_game_sim)
+        m_pie_teardown_pending = true;
     if (!finishLevelRollback(m_world, m_editor_level_construction) ||
-        !finishLevelRollback(m_server_world, m_server_level_construction)) {
-        LOG_ENGINE_ERROR("PIE: level rollback is still pending");
+        !finishLevelRollback(m_server_world, m_server_level_construction) ||
+        !settleEditorReset() || !settleServerReset()) {
+        LOG_ENGINE_ERROR("PIE: level or reset cleanup is still pending");
         return;
     }
 
     if (!m_state.isSimulationActive() && !m_external_pie_active &&
         !m_game_module_active && !m_network_pie_active && !m_game_module_session &&
-        m_pie_clients.empty() && !m_play_world && !m_game_sim)
+        m_pie_clients.empty() && !m_play_world && !m_game_sim) {
+        m_pie_teardown_pending = false;
         return;
+    }
 
     LOG_ENGINE_INFO("--- PIE: Stopping play mode ---");
     // No further game callbacks may be dispatched if retirement needs a retry.
@@ -2414,6 +2514,26 @@ void EditorApp::stopPlay()
         m_external_pie_active = false;
         m_state.external_pie_active = false;
     }
+
+    // A standalone fallback can retain an idle module session as well as a
+    // GameSimulation. Drain and detach its scheduler while the world is alive.
+    if (m_game_sim && m_game_sim->getScheduler()) {
+        auto* scheduler = m_game_sim->getScheduler();
+        if (!m_play_world || scheduler->boundWorld() != m_play_world.get() ||
+            !finishOwnedRetirement(*m_play_world, m_play_retirement_result)) {
+            LOG_ENGINE_ERROR("PIE: Scheduler retirement owner is unavailable");
+            return;
+        }
+        m_play_retirement_result = scheduler->drainRetirements();
+        if (!m_play_retirement_result.cleanupComplete() ||
+            !finishOwnedRetirement(*m_play_world, m_play_retirement_result)) {
+            LOG_ENGINE_ERROR("PIE: Scheduler retirement drain incomplete");
+            return;
+        }
+        m_play_retirement_result = {};
+        scheduler->bindWorld(nullptr);
+    }
+    m_game_sim.reset();
 
     // 1. Tear down project DLL PIE or standalone simulation
     if (had_game_module || m_network_pie_active || m_game_module_session || !m_pie_clients.empty())
@@ -2460,24 +2580,11 @@ void EditorApp::stopPlay()
 
         LOG_ENGINE_INFO("Project DLL PIE shutdown complete");
     }
-    else
-    {
-        if (m_game_sim && m_game_sim->getScheduler()) {
-            auto* scheduler = m_game_sim->getScheduler();
-            if (!scheduler->drainRetirements().cleanupComplete()) {
-                LOG_ENGINE_ERROR("PIE: Scheduler retirement drain incomplete");
-                return;
-            }
-            scheduler->bindWorld(nullptr);
-        }
-        m_game_sim.reset();
-        m_game_input_manager.reset();
-    }
-
-    if (m_play_world && !m_play_world->shutdown().cleanupComplete()) {
+    if (!settlePlayShutdown()) {
         LOG_ENGINE_ERROR("PIE: World shutdown incomplete");
         return;
     }
+    m_game_input_manager.reset();
 
     // 2. Drop the isolated runtime world. The editor scene stayed resident,
     // so returning to Scene View does not need a full level reload.
@@ -2488,6 +2595,7 @@ void EditorApp::stopPlay()
 
     // 4. Restore state
     m_state.play_mode = PlayMode::Editing;
+    m_pie_teardown_pending = false;
     m_state.external_pie_active = false;
     m_mouse_captured_for_game = false;
     SDL_SetWindowRelativeMouseMode(m_app.getWindow(), false);
@@ -2500,6 +2608,7 @@ void EditorApp::stopPlay()
 
 void EditorApp::pausePlay()
 {
+    if (m_pie_teardown_pending) return;
     if (m_state.play_mode != PlayMode::Playing)
         return;
 
@@ -2522,6 +2631,7 @@ void EditorApp::pausePlay()
 
 void EditorApp::resumePlay()
 {
+    if (m_pie_teardown_pending) return;
     if (m_state.play_mode != PlayMode::Paused)
         return;
 
@@ -2536,6 +2646,7 @@ void EditorApp::resumePlay()
 
 void EditorApp::ejectFromPlay()
 {
+    if (m_pie_teardown_pending) return;
     if (m_state.play_mode != PlayMode::Playing)
         return;
 
@@ -2555,6 +2666,7 @@ void EditorApp::ejectFromPlay()
 
 void EditorApp::returnToPlay()
 {
+    if (m_pie_teardown_pending) return;
     if (m_state.play_mode != PlayMode::Ejected)
         return;
 
@@ -2627,10 +2739,12 @@ void EditorApp::processEvents()
         case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
         case SDL_EVENT_QUIT:
             stopPlay();
-            if (!m_state.isSimulationActive() && m_pie_clients.empty() &&
+            if (!m_pie_teardown_pending && !m_state.isSimulationActive() && m_pie_clients.empty() &&
                 !m_game_module_session && !m_play_world && !m_game_sim &&
                 !m_editor_level_construction.rollback.operation.valid() &&
-                !m_server_level_construction.rollback.operation.valid())
+                !m_server_level_construction.rollback.operation.valid() &&
+                m_editor_reset_result.cleanupComplete() && !m_editor_reset_result.operation.valid() &&
+                m_server_reset_result.cleanupComplete() && !m_server_reset_result.operation.valid())
                 m_running = false;
             else
                 LOG_ENGINE_ERROR("Editor close refused: game module retirement is still pending");
@@ -3189,10 +3303,12 @@ void EditorApp::renderMenuBar()
             if (ImGui::MenuItem("Quit"))
             {
                 stopPlay();
-                if (!m_state.isSimulationActive() && m_pie_clients.empty() &&
+                if (!m_pie_teardown_pending && !m_state.isSimulationActive() && m_pie_clients.empty() &&
                     !m_game_module_session && !m_play_world && !m_game_sim &&
                     !m_editor_level_construction.rollback.operation.valid() &&
-                    !m_server_level_construction.rollback.operation.valid())
+                    !m_server_level_construction.rollback.operation.valid() &&
+                    m_editor_reset_result.cleanupComplete() && !m_editor_reset_result.operation.valid() &&
+                    m_server_reset_result.cleanupComplete() && !m_server_reset_result.operation.valid())
                     m_running = false;
                 else
                     LOG_ENGINE_ERROR("Editor close refused: game module retirement is still pending");
@@ -4003,16 +4119,20 @@ void EditorApp::renderGrid()
 
 void EditorApp::newLevel()
 {
-    if (!finishLevelRollback(m_world, m_editor_level_construction)) {
-        LOG_ENGINE_ERROR("Editor level rollback is still pending");
+    if (!finishLevelRollback(m_world, m_editor_level_construction) ||
+        !finishOwnedRetirement(m_world, m_editor_reset_result)) {
+        LOG_ENGINE_ERROR("Editor level or reset cleanup is still pending");
         return;
     }
     if (auto* api = m_app.getRenderAPI())
         api->waitForGPU();
-    if (!m_world.resetWorld(m_world.getPhysicsSystem().getSettings()).cleanupComplete()) {
+    m_editor_reset_result = m_world.resetWorld(m_world.getPhysicsSystem().getSettings());
+    if (!m_editor_reset_result.cleanupComplete() ||
+        !finishOwnedRetirement(m_world, m_editor_reset_result)) {
         LOG_ENGINE_ERROR("Editor world reset incomplete");
         return;
     }
+    m_editor_reset_result = {};
     m_level_manager.cleanup();
     m_inspector.mesh_path_cache.clear();
     m_hierarchy.selected_entity = entt::null;
@@ -4039,16 +4159,20 @@ void EditorApp::openLevel(const std::string& path)
         return;
     }
 
-    if (!finishLevelRollback(m_world, m_editor_level_construction)) {
-        LOG_ENGINE_ERROR("Editor level rollback is still pending");
+    if (!finishLevelRollback(m_world, m_editor_level_construction) ||
+        !finishOwnedRetirement(m_world, m_editor_reset_result)) {
+        LOG_ENGINE_ERROR("Editor level or reset cleanup is still pending");
         return;
     }
     if (auto* api = m_app.getRenderAPI())
         api->waitForGPU();
-    if (!m_world.resetWorld(m_world.getPhysicsSystem().getSettings()).cleanupComplete()) {
+    m_editor_reset_result = m_world.resetWorld(m_world.getPhysicsSystem().getSettings());
+    if (!m_editor_reset_result.cleanupComplete() ||
+        !finishOwnedRetirement(m_world, m_editor_reset_result)) {
         LOG_ENGINE_ERROR("Editor world reset incomplete");
         return;
     }
+    m_editor_reset_result = {};
     m_level_manager.cleanup();
     m_inspector.mesh_path_cache.clear();
     m_hierarchy.selected_entity = entt::null;
@@ -4262,11 +4386,13 @@ bool EditorApp::tryRestoreTransformOnlySnapshot(const LevelData& snapshot)
 
 void EditorApp::restoreFromSnapshot(const LevelData& snapshot)
 {
-    if (!finishLevelRollback(m_world, m_editor_level_construction)) {
-        LOG_ENGINE_ERROR("Editor level rollback is still pending");
+    const bool retry_reset = !m_editor_reset_result.cleanupComplete();
+    if (!finishLevelRollback(m_world, m_editor_level_construction) ||
+        !finishOwnedRetirement(m_world, m_editor_reset_result)) {
+        LOG_ENGINE_ERROR("Editor level or reset cleanup is still pending");
         return;
     }
-    if (tryRestoreTransformOnlySnapshot(snapshot))
+    if (!retry_reset && tryRestoreTransformOnlySnapshot(snapshot))
         return;
 
     // Save selected entity name for best-effort re-selection
@@ -4281,10 +4407,13 @@ void EditorApp::restoreFromSnapshot(const LevelData& snapshot)
     // Clear and restore
     if (auto* api = m_app.getRenderAPI())
         api->waitForGPU();
-    if (!m_world.resetWorld(m_world.getPhysicsSystem().getSettings()).cleanupComplete()) {
+    m_editor_reset_result = m_world.resetWorld(m_world.getPhysicsSystem().getSettings());
+    if (!m_editor_reset_result.cleanupComplete() ||
+        !finishOwnedRetirement(m_world, m_editor_reset_result)) {
         LOG_ENGINE_ERROR("Editor world reset incomplete");
         return;
     }
+    m_editor_reset_result = {};
     m_level_manager.cleanup();
     m_inspector.mesh_path_cache.clear();
     m_hierarchy.selected_entity = entt::null;

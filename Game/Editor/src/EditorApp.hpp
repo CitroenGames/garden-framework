@@ -62,6 +62,8 @@ private:
     world        m_world;
     LevelInstantiationResult m_editor_level_construction{};
     LevelInstantiationResult m_server_level_construction{};
+    LifecycleResult m_editor_reset_result{};
+    LifecycleResult m_server_reset_result{};
     LevelManager m_level_manager;
     LevelData    m_level_data;   // kept alive for round-trip serialization fidelity
     renderer     m_renderer;
@@ -168,6 +170,8 @@ private:
     std::unique_ptr<GameSimulation> m_game_sim;
     std::shared_ptr<InputManager>   m_game_input_manager;
     std::unique_ptr<world>          m_play_world; // isolated runtime world for Player 1 PIE
+    LifecycleResult                 m_play_retirement_result{};
+    bool                            m_pie_teardown_pending = false;
 
     // Snapshot data (saved on Play, restored on Stop)
     LevelData   m_play_snapshot;
@@ -190,6 +194,9 @@ private:
     // PIE state transitions
     void beginPlay();
     void stopPlay();
+    bool settleEditorReset();
+    bool settleServerReset();
+    bool settlePlayShutdown();
     void pausePlay();
     void resumePlay();
     void ejectFromPlay();

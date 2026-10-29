@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <string>
 
 #define SDL_MAIN_HANDLED
 #include <SDL3/SDL.h>
@@ -45,19 +46,50 @@ static SceneManager scene_manager;
 static ReflectionRegistry reflection;
 static bool game_module_resources_released = false;
 static SystemScheduler* active_scheduler = nullptr;
+static LifecycleResult server_cleanup_result{};
+
+// Preserve an operation returned by a host cleanup step until it is complete
+// and acknowledged. A blocked_by token belongs to another operation and must
+// not be resumed or acknowledged by this host cleanup path.
+static bool settleServerCleanupOperation()
+{
+    const auto operation = server_cleanup_result.operation;
+    if (!operation.valid()) return true;
+    if (!server_cleanup_result.cleanupComplete()) {
+        const auto resumed = _world.resumeRetirement(operation);
+        if (resumed.operation != operation) return false;
+        server_cleanup_result = resumed;
+    }
+    if (!server_cleanup_result.cleanupComplete()) return false;
+    const auto acknowledged = _world.acknowledgeRetirement(operation);
+    if (!acknowledged.cleanupComplete() || acknowledged.operation != operation) {
+        if (acknowledged.operation == operation) server_cleanup_result = acknowledged;
+        return false;
+    }
+    server_cleanup_result = {};
+    return true;
+}
+
+static bool releaseServerResources()
+{
+    if (!settleServerCleanupOperation()) return false;
+    if (active_scheduler) {
+        server_cleanup_result = active_scheduler->drainRetirements();
+        if (!server_cleanup_result.cleanupComplete() || server_cleanup_result.operation.valid()) return false;
+        active_scheduler->bindWorld(nullptr);
+        active_scheduler = nullptr;
+    }
+    server_cleanup_result = _world.shutdown();
+    if (!server_cleanup_result.cleanupComplete() || server_cleanup_result.operation.valid()) return false;
+    server_cleanup_result = {};
+    game_module_resources_released = true;
+    Assets::AssetManager::get().shutdown();
+    return true;
+}
+
 static GameModuleHostSession game_module(GameModuleHostSession::HostOperations{
     {},
-    []() {
-        if (active_scheduler) {
-            if (!active_scheduler->drainRetirements().cleanupComplete()) return false;
-            active_scheduler->bindWorld(nullptr);
-            active_scheduler = nullptr;
-        }
-        if (!_world.shutdown().cleanupComplete()) return false;
-        game_module_resources_released = true;
-        Assets::AssetManager::get().shutdown();
-        return true;
-    },
+    []() { return releaseServerResources(); },
     {}, {}, {},
     [](const garden::ecs::ComponentOwnerId& owner) {
         Threading::JobSystem::get().barrier();
@@ -88,23 +120,29 @@ static void shutdown_server(int code)
     }
     // Stop the host session while the world and scheduler-owned state remain
     // valid. The session dispatches server shutdown before unloading the DLL.
-    if (!game_module.stop())
+    std::string last_module_failure;
+    bool reported_module_failure = false;
+    while (!game_module.stop())
     {
-        LOG_ENGINE_ERROR("Game module retirement refused: {}", game_module.lastFailure());
-        std::_Exit(1);
+        if (!reported_module_failure || game_module.lastFailure() != last_module_failure) {
+            last_module_failure = game_module.lastFailure();
+            reported_module_failure = true;
+            LOG_ENGINE_ERROR("Game module retirement refused; retrying: {}", last_module_failure);
+        }
+        SDL_Delay(10);
     }
     if (!game_module_resources_released)
     {
-        if (active_scheduler) {
-            if (!active_scheduler->drainRetirements().cleanupComplete()) std::_Exit(1);
-            active_scheduler->bindWorld(nullptr);
-            active_scheduler = nullptr;
+        auto last_status = LifecycleStatus::Completed;
+        bool reported = false;
+        while (!releaseServerResources()) {
+            if (!reported || server_cleanup_result.status != last_status) {
+                last_status = server_cleanup_result.status;
+                reported = true;
+                LOG_ENGINE_ERROR("Server resource cleanup incomplete (status={}); retrying", static_cast<int>(last_status));
+            }
+            SDL_Delay(10);
         }
-        if (!_world.shutdown().cleanupComplete()) {
-            LOG_ENGINE_ERROR("World shutdown incomplete");
-            std::_Exit(1);
-        }
-        Assets::AssetManager::get().shutdown();
     }
     app.shutdown();
     EE::CLog::Shutdown();
@@ -195,10 +233,12 @@ int main(int argc, char* argv[])
     }
 
     // Initialize world and physics
-    if (!_world.resetWorld().cleanupComplete()) {
+    server_cleanup_result = _world.resetWorld();
+    if (!server_cleanup_result.cleanupComplete() || server_cleanup_result.operation.valid()) {
         LOG_ENGINE_FATAL("World reset incomplete");
         shutdown_server(1);
     }
+    server_cleanup_result = {};
 
     registerEngineReflection(reflection);
     level_manager.setReflectionRegistry(&reflection);
