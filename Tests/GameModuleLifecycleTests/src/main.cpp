@@ -550,6 +550,66 @@ namespace
         return pass(name);
     }
 
+    bool duplicateFixtureConstruct(void* storage) noexcept
+    {
+        ::new (storage) int(19);
+        return true;
+    }
+
+    void duplicateFixtureDestroy(void*) noexcept {}
+
+    bool testModuleDuplicateKeepsFirstProvider()
+    {
+        using namespace garden::ecs;
+        const std::string name = "GameModuleLifecycle_DuplicateKeepsFirstProvider";
+        ScopedRecorder recorder("ecs_duplicate_provider");
+        GameModuleLoader provider, borrower;
+        if (!provider.load(fixturePath("ecs_provider").string()) ||
+            !borrower.load(fixturePath("ecs_provider").string()) ||
+            !provider.isComponentProvider() || borrower.isComponentProvider() ||
+            !provider.registerEcsComponents() || !borrower.registerEcsComponents())
+            return fail(name, "provider and borrower registration failed");
+
+        const auto owner = *provider.getComponentOwnerId();
+        const auto image = provider.getLoadedImagePath();
+        auto& catalog = ComponentCatalog::instance();
+        garden::ecs::ComponentDescriptor duplicate{{"tests.lifecycle.ModuleFixtureComponent", 1}, owner,
+            sizeof(int), alignof(int), ComponentDefaultConstruct,
+            {&duplicateFixtureConstruct, &duplicateFixtureDestroy, nullptr, nullptr}};
+        ComponentId original, duplicateId;
+        if (catalog.resolve(duplicate, original) != ComponentCatalogResult::Success ||
+            catalog.registerComponent(duplicate, duplicateId) != ComponentCatalogResult::DuplicateKey ||
+            duplicateId != original)
+            return fail(name, "compatible duplicate did not borrow the existing ID");
+
+        ComponentLease first;
+        if (catalog.acquire(duplicateId, ComponentPinKind::Operation, first) != ComponentCatalogResult::Success ||
+            !first.descriptor() || first.descriptor()->ownerId != owner ||
+            first.descriptor()->operations.defaultConstruct == &duplicateFixtureConstruct ||
+            first.descriptor()->operations.destroy == &duplicateFixtureDestroy)
+            return fail(name, "duplicate replaced the DLL provider operations or owner");
+        ComponentLease moved(std::move(first));
+        if (first.descriptor() || !moved.descriptor() || moved.descriptor()->ownerId != owner)
+            return fail(name, "operation lease did not transfer its provider");
+        alignas(int) unsigned char storage[sizeof(int)];
+        if (!moved.descriptor()->operations.defaultConstruct(storage) || *reinterpret_cast<int*>(storage) != 73)
+            return fail(name, "duplicate did not retain the DLL constructor");
+        moved.descriptor()->operations.destroy(storage);
+        if (!equals(recorder.events(), {"ecs.component.destroy"}))
+            return fail(name, "duplicate did not retain the DLL destructor");
+
+        if (provider.unload() || !provider.isLoaded() || !fs::exists(image) ||
+            !borrower.unload() || provider.unload() || !provider.isLoaded() || !fs::exists(image))
+            return fail(name, "borrower or moved lease failed to pin the provider image");
+        moved.reset();
+        ComponentLease stale;
+        if (!provider.unload() || provider.isLoaded() || fs::exists(image) ||
+            catalog.acquire(original, ComponentPinKind::Operation, stale) != ComponentCatalogResult::StaleId ||
+            catalog.resolve(duplicate, duplicateId) != ComponentCatalogResult::NotFound)
+            return fail(name, "provider or catalog entry survived lease release and unload");
+        return pass(name);
+    }
+
     bool testCrossDllMixedQuery()
     {
         using namespace garden::ecs;
@@ -1437,6 +1497,7 @@ int main()
     ok = testPostTeardownInitFailureRecovery() && ok;
     ok = testContentIdentity() && ok;
     ok = testModuleComponentRegistration() && ok;
+    ok = testModuleDuplicateKeepsFirstProvider() && ok;
     ok = testCrossDllMixedQuery() && ok;
     ok = testStagedModuleComponentRollback() && ok;
     ok = testCommittedModuleComponentRetirement() && ok;

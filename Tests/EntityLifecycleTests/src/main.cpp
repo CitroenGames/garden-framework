@@ -294,6 +294,56 @@ bool typedFlushPreservesOtherQueues()
     bus.clear();
     return check(ok, "typed flush preserves other event queues");
 }
+
+struct CreatedCancellationListener {
+    std::vector<std::string> tags;
+    bool clearOnFirst = false;
+    void onCreated(const EntityCreatedEvent& event) {
+        tags.push_back(event.tag);
+        if (clearOnFirst) {
+            clearOnFirst = false;
+            EventBus::get().clear();
+        }
+    }
+};
+
+struct CreatedListenerGuard {
+    EventBus& bus;
+    CreatedCancellationListener& first;
+    CreatedCancellationListener& second;
+    ~CreatedListenerGuard() {
+        bus.disconnect(&first);
+        bus.disconnect(&second);
+        bus.clear();
+    }
+};
+
+bool createdCancellationPreservesPublishedEntities()
+{
+    auto& bus = EventBus::get();
+    bus.clear();
+    world w;
+    CreatedCancellationListener first, second;
+    CreatedListenerGuard guard{bus, first, second};
+    first.clearOnFirst = true;
+    bus.sink<EntityCreatedEvent>().connect<&CreatedCancellationListener::onCreated>(first);
+    bus.sink<EntityCreatedEvent>().connect<&CreatedCancellationListener::onCreated>(second);
+
+    const auto a = createForTest(w, "first");
+    const auto b = createForTest(w, "cancelled");
+    bus.flush<EntityCreatedEvent>();
+    bool ok = first.tags == std::vector<std::string>{"first"} &&
+        second.tags == std::vector<std::string>{"first"} &&
+        w.isEntityValid(a.entity) && w.isEntityValid(b.entity);
+
+    bus.disconnect(&first);
+    const auto c = createForTest(w, "later");
+    bus.flush<EntityCreatedEvent>();
+    ok &= first.tags == std::vector<std::string>{"first"} &&
+        second.tags == std::vector<std::string>{"first", "later"} &&
+        w.isEntityValid(a.entity) && w.isEntityValid(b.entity) && w.isEntityValid(c.entity);
+    return check(ok, "creation cancellation preserves published entities and listener disconnection");
+}
 void onRestoreConstruct(entt::registry& registry, entt::entity entity)
 {
     failed_restore_raw = entity;
@@ -695,7 +745,7 @@ int main()
     ComponentId id{};
     if (catalog.registerComponent(descriptor, id) != ComponentCatalogResult::Success) return 1;
     EventBus::get().sink<EntityDestroyedEvent>().connect<&onDestroyed>();
-    const bool ok = queueAndQuery() & fifoAndObserverRetry() & resetAndShutdown() & rollbackAndCreationEvent() & createdFifoContract() & typedFlushPreservesOtherQueues() & batchOwnership() & batchFenceAndPartialQueue() & staleQueuedRootRejectsBatch() & singleRootAndHierarchyEffects() & phaseRetryCoverage() & queuedSurvivorIsReparented() & markerlessRollbackToken() & exhaustionBeforeCreation() & providerPinnedDuringRetry() & stagedAllocationFailureRetry();
+    const bool ok = queueAndQuery() & fifoAndObserverRetry() & resetAndShutdown() & rollbackAndCreationEvent() & createdFifoContract() & typedFlushPreservesOtherQueues() & createdCancellationPreservesPublishedEntities() & batchOwnership() & batchFenceAndPartialQueue() & staleQueuedRootRejectsBatch() & singleRootAndHierarchyEffects() & phaseRetryCoverage() & queuedSurvivorIsReparented() & markerlessRollbackToken() & exhaustionBeforeCreation() & providerPinnedDuringRetry() & stagedAllocationFailureRetry();
     EventBus::get().sink<EntityDestroyedEvent>().disconnect<&onDestroyed>();
     EventBus::get().clear();
     return ok && fixture_ok ? 0 : 1;

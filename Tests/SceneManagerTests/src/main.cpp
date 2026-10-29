@@ -493,6 +493,109 @@ void testTransitionConstructionRollbackAndRetry() {
     EventBus::get().clear();
 }
 
+void testBinaryTransitionConstructionRollbackAndRetry() {
+    const std::string name = "binary transition retains rollback and retries mixed identity cohort";
+    TempLevel level("binary-transition-fault");
+    level.path.replace_extension(); // .level selects the binary reader.
+    LevelData source;
+    LevelEntity fresh;
+    fresh.name = "binary-fresh";
+    LevelEntity restored;
+    restored.name = "binary-restored";
+    restored.type = EntityType::Renderable;
+    restored.mesh_path = "missing_binary_transaction_mesh.obj";
+    restored.reflected_components = nlohmann::json::parse(
+        R"({"IdentityComponent":{"guid":"0123456789abcdef-fedcba9876543210"}})");
+    source.entities.push_back(fresh);
+    source.entities.push_back(restored);
+    LevelManager writer;
+    if (!writer.saveLevelToBinary(level.path.string(), source)) {
+        check(false, name, "could not write binary fixture"); return;
+    }
+
+    EventBus::get().clear();
+    EventBus::get().sink<EntityCreatedEvent>().connect<&recordEntityCreated>();
+    EventBus::get().sink<LevelLoadedEvent>().connect<&recordLevelLoaded>();
+    g_created_events.clear();
+    g_level_loaded_count = 0;
+    world game_world;
+    SceneManager manager;
+    completed(manager.initialize(&game_world, nullptr), name, "initialize failed");
+    const auto unrelated = game_world.registry.create();
+    FailLifecycleAttempts fault;
+    game_world.registry.ctx().emplace<garden::ecs::testing::LifecycleFaultHook>(
+        garden::ecs::testing::LifecycleFaultHook{&fault, &failLifecycleAttempts});
+
+    auto partial = manager.transition(level.path.string());
+    const auto token = partial.construction.rollback.operation;
+    const LevelInstantiationResult empty_output;
+    auto* scene = manager.getScene(partial.scene_id);
+    check(fault.remaining == 0 && partial.status == SceneStatus::LifecycleFailure &&
+          !partial.cleanup_complete && partial.operation_handle.valid() && token.valid() &&
+          partial.lifecycle.operation == token && partial.lifecycle.kind == LifecycleOperationKind::UnpublishedRollback &&
+          partial.construction.status == LevelInstantiationStatus::ConstructionFailure &&
+          partial.construction.construction_status == ConstructionStatus::ComponentFailure &&
+          partial.construction.entities.size() == 2 && partial.construction.player == empty_output.player &&
+          partial.construction.freecam == empty_output.freecam && partial.construction.player_rep == empty_output.player_rep,
+          name, "binary construction did not retain its captured cohort, outputs, and rollback token");
+    check(scene && scene->state == SceneLoadState::Loaded && scene->owned_entities.empty() &&
+          scene->owned_references.empty() && scene->level_data.entities.size() == 2 &&
+          scene->level_data.entities[1].reflected_components == restored.reflected_components &&
+          !manager.getActiveScene(), name, "binary scene or its ownership changed during failed construction");
+    EventBus::get().flush<EntityCreatedEvent>();
+    check(g_created_events.empty() && g_level_loaded_count == 0, name, "failed cohort published events");
+    auto busy = manager.clear();
+    check(busy.status == SceneStatus::Busy && busy.operation_handle == partial.operation_handle &&
+          busy.construction.rollback.operation == token && busy.lifecycle.operation == token &&
+          busy.construction.entities == partial.construction.entities && !busy.cleanup_complete,
+          name, "competing operation changed the captured result");
+
+    auto done = manager.resume(partial.operation_handle);
+    check(done.status == SceneStatus::ConstructionFailure && done.cleanup_complete &&
+          done.construction.rollback.operation == token && done.lifecycle.operation == token &&
+          done.construction.entities == partial.construction.entities &&
+          done.construction.player == partial.construction.player &&
+          done.construction.freecam == partial.construction.freecam &&
+          done.construction.player_rep == partial.construction.player_rep,
+          name, "resume changed the rollback token or caller outputs");
+    check(game_world.retirementResult(token).status == LifecycleStatus::UnknownOperation &&
+          game_world.registry.valid(unrelated), name, "rollback was not acknowledged or affected unrelated state");
+    for (auto handle : partial.construction.entities)
+        check(game_world.classifyEntityHandle(handle) == EntityHandleClassification::RetiredGone,
+              name, "captured binary entity survived rollback");
+    check(manager.resume(partial.operation_handle).status == SceneStatus::InvalidArgument,
+          name, "completed operation resumed again");
+    game_world.registry.ctx().erase<garden::ecs::testing::LifecycleFaultHook>();
+    scene = manager.getScene(partial.scene_id);
+    if (scene && scene->level_data.entities.size() == 2) {
+        scene->level_data.entities[1].mesh_path.clear();
+        scene->level_data.entities[1].type = EntityType::Static;
+        auto retry = manager.activateScene(partial.scene_id);
+        check(completed(retry, name, "binary retry failed") && retry.construction.entities.size() == 2 &&
+              scene->owned_entities == retry.construction.entities && g_level_loaded_count == 1,
+              name, "binary retry did not publish the cohort once");
+        if (retry.construction.entities.size() == 2) {
+            const EntityRef expected_restored{{0x0123456789abcdefull, 0xfedcba9876543210ull}};
+            const auto fresh_ref = game_world.persistedReference(retry.construction.entities[0]);
+            const auto restored_ref = game_world.persistedReference(retry.construction.entities[1]);
+            check(!fresh_ref.isNull() && fresh_ref != expected_restored && restored_ref == expected_restored,
+                  name, "retry did not preserve the serialized and fresh identities");
+        } else {
+            check(false, name, "retry did not return both identity handles");
+        }
+        EventBus::get().flush<EntityCreatedEvent>();
+        check(g_created_events.size() == 1 && retry.construction.entities.size() == 2 &&
+              g_created_events[0].handle == retry.construction.entities[0],
+              name, "retry did not preserve fresh and restored event provenance");
+    } else {
+        check(false, name, "binary scene was unavailable for retry");
+    }
+    completed(manager.shutdown(), name, "shutdown failed");
+    EventBus::get().sink<EntityCreatedEvent>().disconnect<&recordEntityCreated>();
+    EventBus::get().sink<LevelLoadedEvent>().disconnect<&recordLevelLoaded>();
+    EventBus::get().clear();
+}
+
 void testThrowingUnloadObserver() {
     const std::string name = "throwing unload observer is attempted once";
     TempLevel level("observer");
@@ -637,6 +740,7 @@ int main()
     testDirectFrameworkInstallFailure();
     testLevelTransactionIdentityAndAbort();
     testTransitionConstructionRollbackAndRetry();
+    testBinaryTransitionConstructionRollbackAndRetry();
     testThrowingUnloadObserver();
     testIncompleteShutdownDiagnostic();
 
