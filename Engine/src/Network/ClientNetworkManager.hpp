@@ -28,6 +28,7 @@ namespace Net {
 
 namespace detail { class ClientNetworkEcsBridge; }
 
+using ClientInputAdmissionHandler = std::function<void(uint64_t epoch, bool open)>;
 using ClientCustomMessageHandler = std::function<void(uint8_t message_type, BitReader& reader)>;
 
 // Connection state
@@ -49,6 +50,8 @@ private:
     world* game_world = nullptr;
 
     // Client state
+    uint64_t input_admission_epoch = 0;
+    bool input_admission_open = false;
     uint16_t client_id = 0;
     uint32_t client_tick = 0;
     uint32_t last_received_server_tick = 0;
@@ -72,7 +75,7 @@ private:
     EntityRef local_player_ref{};
     uint32_t local_player_network_id = 0;
 
-    // Handshake state (wire v7)
+    // Handshake state (wire v8)
     uint32_t client_level_hash = 0;
     uint32_t client_capability_flags = CAP_ALL_KNOWN;
     uint32_t negotiated_capability_flags = 0;
@@ -113,6 +116,7 @@ private:
     // Callbacks
     std::function<void()> on_disconnected;
     ClientCustomMessageHandler on_custom_message;
+    ClientInputAdmissionHandler on_input_admission_changed;
 
     // Input redundancy: store last few inputs to resend
     static constexpr int INPUT_REDUNDANCY_COUNT = 2; // Send current + 2 older
@@ -163,6 +167,8 @@ public:
     uint16_t getClientId() const { return client_id; }
     uint32_t getClientTick() const { return client_tick; }
     uint32_t getLastReceivedServerTick() const { return last_received_server_tick; }
+    bool isInputAdmissionOpen() const { return input_admission_open; }
+    uint64_t getInputAdmissionEpoch() const { return input_admission_epoch; }
     bool isConnected() const { return connection_state == ConnectionState::CONNECTED; }
 
     // Entity queries
@@ -196,6 +202,7 @@ public:
     void setOnDisconnected(std::function<void()> callback) {
         on_disconnected = callback;
     }
+    void setOnInputAdmissionChanged(ClientInputAdmissionHandler callback) { on_input_admission_changed = std::move(callback); }
     void setCustomMessageHandler(ClientCustomMessageHandler callback) {
         on_custom_message = std::move(callback);
     }
@@ -209,6 +216,8 @@ private:
     void handleServerMessage(ENetEvent& event);
 
     // Message handlers
+    void applyInputAdmission(uint64_t epoch, bool open);
+    void handleInputAdmissionState(BitReader& reader);
     void handleConnectAccept(BitReader& reader);
     void handleConnectReject(BitReader& reader);
     void handleWorldStateUpdate(BitReader& reader);

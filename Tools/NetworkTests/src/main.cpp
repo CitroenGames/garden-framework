@@ -110,6 +110,7 @@ int testInputSerialization()
 {
     const char* name = "InputSerialization";
     Net::InputCommandMessage msg;
+    msg.admission_epoch = 0x123456789abcdef0ull;
     msg.client_tick = 42;
     msg.last_received_tick = 39;
     msg.buttons = Net::InputFlags::MOVE_FORWARD | Net::InputFlags::JUMP;
@@ -133,9 +134,44 @@ int testInputSerialization()
     if (!Net::NetworkSerializer::deserialize(reader, out, out_redundant)) {
         return fail(name, "deserialize failed");
     }
+    if (out.admission_epoch != msg.admission_epoch) return fail(name, "input epoch round-trip mismatch");
     if (out.client_tick != 42 || out.input_count != 3) return fail(name, "header mismatch");
     if (out_redundant.size() != 2) return fail(name, "redundant input count mismatch");
     if (out_redundant[0].tick != 41 || out_redundant[1].tick != 40) return fail(name, "redundant input order mismatch");
+    return 0;
+}
+
+int testInputAdmissionStateWire()
+{
+    const char* name = "InputAdmissionStateWire";
+    Net::InputAdmissionStateMessage msg;
+    msg.epoch = 0x123456789abcdef0ull;
+    msg.open = true;
+    Net::BitWriter writer;
+    Net::NetworkSerializer::serialize(writer, msg);
+    Net::BitReader reader(writer.getData(), writer.getByteSize());
+    Net::InputAdmissionStateMessage out;
+    if (!Net::NetworkSerializer::deserialize(reader, out) || out.epoch != msg.epoch || !out.open)
+        return fail(name, "state round-trip failed");
+    if (writer.getByteSize() != 10) return fail(name, "unexpected state wire size");
+    std::vector<uint8_t> bytes(writer.getData(), writer.getData() + writer.getByteSize());
+    const auto accepts = [&](const std::vector<uint8_t>& value) {
+        Net::BitReader r(value.data(), value.size());
+        Net::InputAdmissionStateMessage state;
+        return Net::NetworkSerializer::deserialize(r, state);
+    };
+    auto bad = bytes;
+    bad.pop_back();
+    if (accepts(bad)) return fail(name, "truncated state accepted");
+    bad = bytes; bad.push_back(0);
+    if (accepts(bad)) return fail(name, "trailing state bytes accepted");
+    bad = bytes; bad[0] = 0;
+    if (accepts(bad)) return fail(name, "wrong state type accepted");
+    bad = bytes; bad[9] = 2;
+    if (accepts(bad)) return fail(name, "illegal open value accepted");
+    bad = bytes;
+    for (size_t i = 1; i < 9; ++i) bad[i] = 0;
+    if (accepts(bad)) return fail(name, "zero epoch accepted");
     return 0;
 }
 
@@ -143,6 +179,7 @@ int testInputPolicy()
 {
     const char* name = "InputPolicy";
     Net::InputCommandMessage msg;
+    msg.admission_epoch = 0x123456789abcdef0ull;
     msg.client_tick = 43;
     msg.buttons = Net::InputFlags::MOVE_FORWARD;
 
@@ -490,7 +527,9 @@ int testWireCurrentHandshake()
 {
     const char* name = "WireCurrentHandshake";
     const uint32_t current_protocol = Net::NETWORK_PROTOCOL_VERSION;
-    if (current_protocol == 0) return fail(name, "current protocol version is zero");
+    if (current_protocol != 8) return fail(name, "protocol must be exactly v8");
+    if (static_cast<uint8_t>(Net::MessageType::INPUT_ADMISSION_STATE) != 12)
+        return fail(name, "input admission state wire ID changed");
     if (Net::NETWORK_PROTOCOL_MIN_SUPPORTED != current_protocol)
         return fail(name, "protocol no longer uses exact current-version admission");
 
@@ -805,6 +844,7 @@ int testButtonsAndViewTick()
 {
     const char* name = "ButtonsAndViewTick";
     Net::InputCommandMessage msg;
+    msg.admission_epoch = 0x123456789abcdef0ull;
     msg.client_tick = 100;
     msg.last_received_tick = 90;
     msg.buttons = Net::withWeaponSelect(
@@ -818,7 +858,7 @@ int testButtonsAndViewTick()
 
     Net::BitWriter writer;
     Net::NetworkSerializer::serialize(writer, msg, redundant, 1, true);
-    if (writer.getByteSize() != 58) return fail(name, "v3 input packet size mismatch (view tick)");
+    if (writer.getByteSize() != 66) return fail(name, "v8 input packet size mismatch (view tick)");
     Net::BitReader reader(writer.getData(), writer.getByteSize());
     Net::InputCommandMessage out;
     std::vector<Net::InputSample> out_red;
@@ -834,7 +874,7 @@ int testButtonsAndViewTick()
     // Without CAP_VIEW_TICK the field is omitted and defaults to ack tick.
     Net::BitWriter nw;
     Net::NetworkSerializer::serialize(nw, msg, redundant, 1, false);
-    if (nw.getByteSize() != 50) return fail(name, "no-view-tick packet size mismatch");
+    if (nw.getByteSize() != 58) return fail(name, "v8 input packet size mismatch (no view tick)");
     Net::BitReader nr(nw.getData(), nw.getByteSize());
     Net::InputCommandMessage nout;
     std::vector<Net::InputSample> nred;
@@ -917,6 +957,7 @@ int main()
     int failures = 0;
     failures += testBitStream();
     failures += testInputSerialization();
+    failures += testInputAdmissionStateWire();
     failures += testInputPolicy();
     failures += testInputActionLatchPolicy();
     failures += testSharedMovementSourceRules();

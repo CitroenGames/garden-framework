@@ -15,6 +15,7 @@
 #include "world.hpp"
 #include "shared/FpsGameLogic.hpp"
 #include "shared/FpsMovementTuning.hpp"
+#include "shared/NetworkInputSampler.hpp"
 #include "shared/FpsReplication.hpp"
 #include "shared/BotLogic.hpp"
 #include "shared/PlayerLifecycle.hpp"
@@ -31,6 +32,8 @@
 #include "ClientAcceptanceScript.hpp"
 
 #include <algorithm>
+#include <array>
+#include <utility>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -3165,6 +3168,68 @@ bool testFpsCombatFeedContract()
     return pass(name);
 }
 
+bool testAdmissionInputBarrier()
+{
+    const std::string name = "Input.AdmissionBarrier";
+    InputManager input;
+    InputActionSystem actions;
+    MappingContext context;
+    context.name = "AdmissionTest";
+    const std::array<std::pair<const char*, SDL_Scancode>, 5> keys = {{
+        {"Fire", SDL_SCANCODE_F}, {"Jump", SDL_SCANCODE_SPACE},
+        {"Drop", SDL_SCANCODE_G}, {"Reload", SDL_SCANCODE_R}, {"WeaponSlot2", SDL_SCANCODE_2}
+    }};
+    for (const auto& key : keys) {
+        actions.registerAction({key.first, ActionValueType::Button, false});
+        context.bindings.push_back({key.first, InputBinding::Source::Key, key.second});
+    }
+    if (!actions.registerContext(context) || !actions.pushContext("AdmissionTest"))
+        return fail(name, "could not register actions");
+    auto event = [&](SDL_Scancode key, Uint32 type) {
+        SDL_Event e{}; e.type = type; e.key.scancode = key; input.process_event(e);
+    };
+    FPSShooter::FixedNetworkInputCadence cadence;
+    FPSShooter::AdmissionActionGate gate;
+    input.update();
+    for (const auto& key : keys) event(key.second, SDL_EVENT_KEY_DOWN);
+    actions.evaluate(input);
+    cadence.captureFrameEdges(actions);
+    if (cadence.consumeFrame(1.0f / 120.0f) != 0) return fail(name, "fixture did not produce zero-step frame");
+    gate.barrier();
+    cadence.clearPendingEdges();
+    gate.observeFrame(actions, true);
+    auto edges = cadence.consumeEdgesForTick();
+    if (edges.jump || edges.drop || edges.reload || edges.weapon_select)
+        return fail(name, "barrier retained pending action edges");
+    if (cadence.consumeFrame(1.0f / 120.0f) != 1)
+        return fail(name, "clearing edges reset the fixed cadence accumulator");
+    Net::InputState held;
+    held.buttons = Net::InputFlags::ATTACK | Net::InputFlags::JUMP;
+    gate.filter(held);
+    if (held.buttons) return fail(name, "held attack or jump crossed barrier");
+    input.update();
+    for (const auto& key : keys) event(key.second, SDL_EVENT_KEY_UP);
+    actions.evaluate(input);
+    gate.observeFrame(actions, true); // A release collected before the barrier cannot unlock.
+    held.buttons = Net::InputFlags::ATTACK | Net::InputFlags::JUMP;
+    gate.filter(held);
+    if (held.buttons) return fail(name, "discarded frame unlocked held actions");
+    input.update(); actions.evaluate(input); gate.observeFrame(actions, false);
+    input.update();
+    for (const auto& key : keys) event(key.second, SDL_EVENT_KEY_DOWN);
+    actions.evaluate(input); gate.observeFrame(actions, false); cadence.captureFrameEdges(actions);
+    edges = cadence.consumeEdgesForTick();
+    held.buttons = Net::InputFlags::ATTACK | Net::InputFlags::JUMP;
+    gate.filter(held);
+    if (held.buttons != (Net::InputFlags::ATTACK | Net::InputFlags::JUMP) ||
+        !edges.jump || !edges.drop || !edges.reload || edges.weapon_select != 2)
+        return fail(name, "fresh press after release did not restore actions");
+    edges = cadence.consumeEdgesForTick();
+    if (edges.jump || edges.drop || edges.reload || edges.weapon_select)
+        return fail(name, "fresh action edge repeated");
+    return pass(name);
+}
+
 bool testClientAcceptanceScriptAuthorityAndInput()
 {
     const std::string name = "ClientAcceptanceScript.AuthorityAndInput";
@@ -3326,6 +3391,21 @@ bool testClientAcceptanceScriptAuthorityAndInput()
     if (script.active())
         return fail_with_cleanup("post-wait buy result did not complete the valid script");
 
+    if (!writeClientAcceptanceScript(script_path, "input 100 forward fire reload\n"))
+        return fail_with_cleanup("could not write barrier script");
+    script.loadFromEnvironment();
+    script.tick(0.0f, pawn_observation);
+    Net::InputState scripted;
+    script.applyInput(scripted, true, true, true);
+    if ((scripted.buttons & Net::InputFlags::ATTACK) == 0)
+        return fail_with_cleanup("barrier fixture did not latch scripted fire");
+    script.clearPendingInput();
+    pawn_observation.input_admission_open = false;
+    script.tick(0.0f, pawn_observation);
+    scripted = {};
+    script.applyInput(scripted, true, true, true);
+    if (scripted.buttons || scripted.move_forward != 0.0f)
+        return fail_with_cleanup("script actions survived admission barrier");
     cleanup();
     return pass(name);
 }
@@ -4310,6 +4390,7 @@ bool testClientAcceptanceScriptBotCombatActions()
         return fail_with_cleanup("could not configure terminal pre-armed bot combat script");
     }
     script.loadFromEnvironment();
+    observation.input_admission_open = true;
     observation.has_local_pawn = true;
     observation.has_local_transform = true;
     observation.round_phase = Competitive::RoundPhase::Live;
@@ -4328,6 +4409,12 @@ bool testClientAcceptanceScriptBotCombatActions()
     if ((terminal_move_input.buttons & Net::InputFlags::MOVE_FORWARD) == 0)
         return fail_with_cleanup("terminal pre-armed script did not begin ordinary movement");
     script.noteInputCommandSent(45, true);
+    script.clearPendingInput();
+    observation.input_admission_open = false;
+    Net::InputState interrupted_move_input;
+    script.applyInput(interrupted_move_input, true, true, true);
+    if (interrupted_move_input.buttons != 0 || script.isMoveToLiveSteering())
+        return fail_with_cleanup("admission barrier replayed interrupted movement");
     observation.damage_receipts = {{40000, 7, 21}};
     observation.death_receipts = {{40000, 7, 22}};
     observation.combat_receipt_generation = 22;
@@ -4356,6 +4443,7 @@ bool testClientAcceptanceScriptBotCombatActions()
         return fail_with_cleanup("could not configure local-killer aim script");
     const auto startKillerAim = [&]() {
         script.loadFromEnvironment();
+        observation.input_admission_open = true;
         observation.has_local_pawn = true;
         observation.has_local_transform = true;
         observation.round_phase = Competitive::RoundPhase::Live;
@@ -4380,16 +4468,61 @@ bool testClientAcceptanceScriptBotCombatActions()
     script.applyInput(terminal_aim, true, true, true);
     if ((terminal_aim.buttons & Net::InputFlags::ATTACK) == 0)
         return fail_with_cleanup("local-killer aim did not emit ordinary fire");
+    script.clearPendingInput();
+    observation.input_admission_open = false;
+    Net::InputState interrupted_aim;
+    script.applyInput(interrupted_aim, true, true, true);
+    if (interrupted_aim.buttons != 0)
+        return fail_with_cleanup("admission barrier replayed interrupted aim");
     observation.death_receipts = {{7, 40000, 31}};
     observation.combat_receipt_generation = 31;
     observation.round_phase = Competitive::RoundPhase::RoundEnd;
     script.tick(0.0f, observation); // accepted local kill completes aim
     if (!script.active())
         return fail_with_cleanup("fresh matching local kill did not advance terminal aim");
+    Net::InputState after_kill;
+    script.applyInput(after_kill, true, true, true);
+    if (after_kill.buttons != 0)
+        return fail_with_cleanup("completed interrupted aim restarted fire");
     script.tick(0.0f, observation); // begin following wait
     script.tick(1.1f, observation);
     if (script.active())
         return fail_with_cleanup("fresh local kill did not reach and complete the following action");
+
+    // An unmatched receipt cannot rescue an interrupted aim. The action stays
+    // suppressed until its timeout and must never emit its old attack again.
+    startKillerAim();
+    script.clearPendingInput();
+    observation.input_admission_open = false;
+    observation.death_receipts = {{8, 40000, 31}};
+    script.tick(0.5f, observation);
+    Net::InputState unmatched_aim;
+    script.applyInput(unmatched_aim, true, true, true);
+    if (!script.active() || unmatched_aim.buttons != 0)
+        return fail_with_cleanup("unmatched barrier interruption replayed or prematurely completed aim");
+    script.tick(0.5f, observation);
+    if (script.active())
+        return fail_with_cleanup("unmatched barrier interruption did not fail at timeout");
+
+    if (!writeClientAcceptanceScript(script_path, "tap_drop 100\n") ||
+        !script_environment.set(script_path.string().c_str()))
+        return fail_with_cleanup("could not configure interrupted one-shot script");
+    script.loadFromEnvironment();
+    observation.input_admission_open = true;
+    script.tick(0.0f, observation);
+    Net::InputState drop_before_barrier;
+    script.applyInput(drop_before_barrier, true, true, true);
+    if ((drop_before_barrier.buttons & Net::InputFlags::DROP) == 0)
+        return fail_with_cleanup("one-shot fixture did not arm drop");
+    script.clearPendingInput();
+    observation.input_admission_open = false;
+    Net::InputState drop_after_barrier;
+    script.applyInput(drop_after_barrier, true, true, true);
+    if (drop_after_barrier.buttons != 0)
+        return fail_with_cleanup("admission barrier replayed stale drop");
+    script.tick(0.0f, observation);
+    if (script.active())
+        return fail_with_cleanup("interrupted one-shot did not fail");
 
     // Losing the local Live pawn without that exact armed receipt pair still
     // fails the ordinary waypoint action.
@@ -4398,6 +4531,7 @@ bool testClientAcceptanceScriptBotCombatActions()
         return fail_with_cleanup("could not configure unarmed terminal movement script");
     }
     script.loadFromEnvironment();
+    observation.input_admission_open = true;
     observation.has_local_pawn = true;
     observation.has_local_transform = true;
     observation.round_phase = Competitive::RoundPhase::Live;
@@ -4471,6 +4605,7 @@ int main()
     ok = testCompetitiveCompositionUsesTeamSpawnPolicy() && ok;
     ok = testCompetitiveMapDataSchema() && ok;
     ok = testPlayerMovementInputContract() && ok;
+    ok = testAdmissionInputBarrier() && ok;
     ok = testWorldTagLookupIdentity() && ok;
     ok = testPlayerMovementTuning() && ok;
     ok = testCompetitiveRoundFsmFullCycleHalftimeClinch() && ok;

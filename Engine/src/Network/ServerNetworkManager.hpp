@@ -26,7 +26,7 @@ namespace Net {
 // message. False makes the generic transport account the packet as an
 // incoming rejection without giving EngineCore any game-message knowledge.
 using ServerCustomMessageHandler = std::function<bool(uint16_t client_id, uint8_t message_type, BitReader& reader)>;
-using ServerInputFilter = std::function<bool(uint16_t client_id, entt::entity player_entity)>;
+enum class InputAdmissionChange : uint8_t { Policy, PawnLifetime };
 // The final argument is the effective view tick: CAP_VIEW_TICK is passed
 // through per sample, while legacy acknowledgements receive the default delay.
 using ServerInputSampleHandler = std::function<void(
@@ -46,6 +46,10 @@ struct ClientConnection
     ClientInfo info;
     NetworkStatsRateSampler stats_sampler;
     uint32_t last_sent_tick = 0;
+    // Failure closes admission immediately; cleanup is deferred until the
+    // network pump regains control from any game callback.
+    bool admission_disconnect_pending = false;
+    const char* admission_disconnect_reason = nullptr;
 
     ClientConnection() = default;
     ClientConnection(const ClientInfo& client_info) : info(client_info) {}
@@ -86,11 +90,10 @@ private:
     std::function<void(uint16_t)> on_client_connected;
     std::function<void(uint16_t)> on_client_disconnected;
     ServerCustomMessageHandler on_custom_message;
-    ServerInputFilter input_filter;
     ServerInputSampleHandler input_sample_handler;
     ServerWeaponSelectHandler weapon_select_handler;
 
-    // Handshake state (wire v7)
+    // Handshake state (wire v8)
     uint32_t server_level_hash = 0;
     uint32_t server_capability_flags = CAP_ALL_KNOWN;
 
@@ -137,7 +140,8 @@ public:
     }
 
     void setCustomMessageHandler(ServerCustomMessageHandler callback) { on_custom_message = std::move(callback); }
-    void setInputFilter(ServerInputFilter callback) { input_filter = std::move(callback); }
+    // Called synchronously on the network/simulation owner thread.
+    bool setInputAdmission(uint16_t client_id, bool open, InputAdmissionChange change = InputAdmissionChange::Policy);
     void setInputSampleHandler(ServerInputSampleHandler callback) { input_sample_handler = std::move(callback); }
     void setWeaponSelectHandler(ServerWeaponSelectHandler callback) { weapon_select_handler = std::move(callback); }
 
@@ -207,6 +211,7 @@ private:
     void recordDroppedToPeer(ENetPeer* peer, std::size_t byte_count);
     bool shouldAcceptClientMessage(ENetPeer* peer, uint8_t message_type) const;
     void disconnectClient(uint16_t client_id, const char* reason);
+    void drainAdmissionDisconnects();
     void sendConnectReject(ENetPeer* peer, RejectCode code, const char* reason);
 };
 

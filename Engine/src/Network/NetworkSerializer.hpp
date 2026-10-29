@@ -261,12 +261,30 @@ namespace NetworkSerializer
         return !reader.hasError();
     }
 
+    inline void serialize(BitWriter& writer, const InputAdmissionStateMessage& msg) {
+        writer.writeByte(static_cast<uint8_t>(msg.type));
+        writer.writeBits(msg.epoch, 64);
+        writer.writeByte(msg.open ? 1 : 0);
+    }
+
+    inline bool deserialize(BitReader& reader, InputAdmissionStateMessage& msg) {
+        if (reader.getBufferSize() != 10) return false;
+        msg.type = static_cast<MessageType>(reader.readByte());
+        msg.epoch = reader.readBits(64);
+        const uint8_t open = reader.readByte();
+        if (reader.hasError() || msg.type != MessageType::INPUT_ADMISSION_STATE ||
+            msg.epoch == 0 || open > 1) return false;
+        msg.open = open != 0;
+        return true;
+    }
+
     // Serialize InputCommandMessage (uint16 buttons; view tick after
     // move_right per sample, only when CAP_VIEW_TICK was negotiated)
     inline void serialize(BitWriter& writer, const InputCommandMessage& msg,
                           const InputSample* redundant_inputs, uint8_t redundant_count,
                           bool include_view_tick) {
         writer.writeByte(static_cast<uint8_t>(msg.type));
+        writer.writeBits(msg.admission_epoch, 64);
         writer.writeUInt32(msg.client_tick);
         writer.writeUInt32(msg.last_received_tick);
         if (redundant_inputs == nullptr) {
@@ -303,6 +321,8 @@ namespace NetworkSerializer
         if (!reader.canRead(8)) return false;
         msg.type = static_cast<MessageType>(reader.readByte());
         if (msg.type != MessageType::INPUT_COMMAND) return false;
+        msg.admission_epoch = reader.readBits(64);
+        if (reader.hasError() || msg.admission_epoch == 0) return false;
         msg.client_tick = reader.readUInt32();
         msg.last_received_tick = reader.readUInt32();
         msg.input_count = reader.readByte();
@@ -340,7 +360,7 @@ namespace NetworkSerializer
             }
             redundant_inputs.push_back(sample);
         }
-        return !reader.hasError();
+        return !reader.hasError() && reader.getBitPosition() == reader.getBufferSize() * 8;
     }
 
     inline bool deserialize(BitReader& reader, InputCommandMessage& msg,

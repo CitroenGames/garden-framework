@@ -1,5 +1,6 @@
 #include "ClientNetworkManager.hpp"
 #include "NetworkInput.hpp"
+#include "MovementTrace.hpp"
 #include "NetworkRuntime.hpp"
 #include "NetworkTransport.hpp"
 #include "ClientNetworkEcsBridge.hpp"
@@ -55,6 +56,7 @@ bool ClientNetworkManager::connectToServer(const char* address, uint16_t port, c
         return false;
     }
 
+    applyInputAdmission(0, false);
     clearInterpolationHistory();
     last_received_server_tick = 0;
     has_received_server_tick = false;
@@ -219,7 +221,7 @@ void ClientNetworkManager::update(float delta_time)
     // bounds the client to progress it has observed from the authoritative
     // simulation: a server hitch therefore coalesces pending input locally
     // instead of making its next event pump receive a burst of new ticks.
-    if (connection_state == ConnectionState::CONNECTED && !queued_input_commands.empty()) {
+    if (connection_state == ConnectionState::CONNECTED && input_admission_open && !queued_input_commands.empty()) {
         if (input_send_budget == 0) {
             // Local wall time is only a rate limiter. It is not permission to
             // send while the server has stopped advancing.
@@ -250,6 +252,7 @@ void ClientNetworkManager::update(float delta_time)
             // Create and send input command with redundant older inputs.
             BitWriter writer;
             InputCommandMessage msg;
+            msg.admission_epoch = input_admission_epoch;
             msg.client_tick = command.tick;
             msg.last_received_tick = last_received_server_tick;
             msg.buttons = command.input.buttons;
@@ -297,12 +300,13 @@ void ClientNetworkManager::update(float delta_time)
 
 void ClientNetworkManager::sendInputCommand(const InputState& input)
 {
+    if (!isConnected() || !input_admission_open || server_peer == nullptr) return;
     sendInputCommand(beginInputCommandTick(), input);
 }
 
 void ClientNetworkManager::sendInputCommand(uint32_t command_tick, const InputState& input)
 {
-    if (!isConnected() || server_peer == nullptr) {
+    if (!isConnected() || !input_admission_open || server_peer == nullptr) {
         return;
     }
 
@@ -440,6 +444,15 @@ void ClientNetworkManager::handleServerMessage(ENetEvent& event)
             handleConnectReject(reader);
             break;
 
+        case MessageType::INPUT_ADMISSION_STATE:
+            if (event.channelID != static_cast<uint8_t>(NetworkChannel::RELIABLE_ORDERED) ||
+                (event.packet->flags & ENET_PACKET_FLAG_RELIABLE) == 0) {
+                LOG_ENGINE_WARN("Rejected unreliable input admission state");
+                break;
+            }
+            handleInputAdmissionState(reader);
+            break;
+
         case MessageType::WORLD_STATE_UPDATE:
             handleWorldStateUpdate(reader);
             break;
@@ -480,6 +493,33 @@ void ClientNetworkManager::handleServerMessage(ENetEvent& event)
             }
             break;
     }
+}
+
+void ClientNetworkManager::applyInputAdmission(uint64_t epoch, bool open)
+{
+    MovementTrace::emit("client_admission", "role=client previous_epoch={} previous_open={} epoch={} open={} server_tick={}",
+        input_admission_epoch, input_admission_open, epoch, open, last_received_server_tick);
+    input_admission_epoch = epoch;
+    input_admission_open = open;
+    queued_input_commands.clear();
+    for (auto& sample : recent_inputs) sample = {};
+    recent_input_count = 0;
+    input_send_timer = 0.0f;
+    has_authoritative_update = false;
+    if (game_world != nullptr && !local_player_ref.isNull())
+        PredictionSystem::reset(*game_world, local_player_ref);
+    if (on_input_admission_changed) on_input_admission_changed(epoch, open);
+}
+
+void ClientNetworkManager::handleInputAdmissionState(BitReader& reader)
+{
+    InputAdmissionStateMessage msg;
+    if (!NetworkSerializer::deserialize(reader, msg)) {
+        LOG_ENGINE_WARN("Failed to deserialize INPUT_ADMISSION_STATE message");
+        return;
+    }
+    if (msg.epoch <= input_admission_epoch) return;
+    applyInputAdmission(msg.epoch, msg.open);
 }
 
 void ClientNetworkManager::handleConnectAccept(BitReader& reader)
@@ -1013,6 +1053,7 @@ bool ClientNetworkManager::shouldAcceptServerMessage(uint8_t message_type) const
         case MessageType::DESPAWN_PLAYER:
         case MessageType::SPAWN_ENTITY:
         case MessageType::WORLD_STATE_UPDATE:
+        case MessageType::INPUT_ADMISSION_STATE:
         case MessageType::PONG:
         case MessageType::CVAR_SYNC:
         case MessageType::CVAR_INITIAL_SYNC:
@@ -1026,6 +1067,7 @@ void ClientNetworkManager::setConnectionState(ConnectionState new_state)
 {
     if (connection_state != new_state) {
         connection_state = new_state;
+        if (new_state == ConnectionState::DISCONNECTED) applyInputAdmission(0, false);
 
         const char* state_names[] = { "DISCONNECTED", "CONNECTING", "CONNECTED" };
         LOG_ENGINE_INFO("Connection state changed: {0}", state_names[static_cast<int>(new_state)]);
@@ -1107,6 +1149,7 @@ void ClientNetworkManager::interpolateRemoteEntities()
 
 void ClientNetworkManager::storeInput(uint32_t tick, const MovementInput& input, const MovementState& predicted_state)
 {
+    if (!input_admission_open) return;
     if (game_world == nullptr || local_player_ref.isNull() ||
         !PredictionSystem::recordInput(*game_world, local_player_ref,
                                        tick, input, predicted_state)) {

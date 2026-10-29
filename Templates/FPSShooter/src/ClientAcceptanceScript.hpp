@@ -112,6 +112,7 @@ namespace FPSShooter
     struct ClientAcceptanceObservation
     {
         bool connected = false;
+        bool input_admission_open = true;
         uint16_t local_client_id = 0;
         bool has_round_state = false;
         // ROUND_STATE is received on the existing reliable competitive channel.
@@ -161,6 +162,7 @@ namespace FPSShooter
         // or invalid file leaves this object inert and never changes gameplay.
         void loadFromEnvironment();
         void reset();
+        void clearPendingInput();
 
         ClientAcceptanceDispatch tick(float delta_time, const ClientAcceptanceObservation& observation);
         void observeTeamResult(bool accepted, Competitive::FpsTeam assigned);
@@ -245,6 +247,7 @@ namespace FPSShooter
         std::vector<Action> m_actions;
         size_t m_index = 0;
         State m_state = State::Ready;
+        bool m_input_interrupted = false;
         float m_elapsed_seconds = 0.0f;
         float m_move_yaw = 0.0f;
         float m_move_forward = 0.0f;
@@ -388,6 +391,7 @@ namespace FPSShooter
         m_actions.clear();
         m_index = 0;
         m_state = State::Ready;
+        m_input_interrupted = false;
         m_elapsed_seconds = 0.0f;
         m_move_yaw = 0.0f;
         m_move_forward = 0.0f;
@@ -897,6 +901,7 @@ namespace FPSShooter
             }
         }
         m_state = State::Ready;
+        m_input_interrupted = false;
         m_elapsed_seconds = 0.0f;
         m_move_yaw = 0.0f;
         m_move_forward = 0.0f;
@@ -914,6 +919,22 @@ namespace FPSShooter
         }
     }
 
+    inline void ClientAcceptanceScript::clearPendingInput()
+    {
+        switch (m_state) {
+        case State::RunningInput: case State::RunningMoveToLive:
+        case State::RunningMoveToWorldItemLive: case State::RunningSelectSlot:
+        case State::RunningTapDrop: case State::RunningHoldUseLive:
+        case State::RunningHoldUseDefuse: case State::RunningAimFireAtRemoteLive:
+            // Keep receipt boundaries until tick can inspect terminal evidence,
+            // but never replay any input from the old admission epoch.
+            m_input_interrupted = true;
+            m_move_forward = 0.0f;
+            break;
+        default: break;
+        }
+    }
+
     inline ClientAcceptanceDispatch ClientAcceptanceScript::tick(float delta_time, const ClientAcceptanceObservation& observation)
     {
         ClientAcceptanceDispatch dispatch;
@@ -921,6 +942,40 @@ namespace FPSShooter
             return dispatch;
 
         Action& action = m_actions[m_index];
+        if (m_input_interrupted) {
+            if (m_state == State::RunningMoveToLive &&
+                hasArmedTerminalCombatReceipts(observation) &&
+                advanceToArmedCombatReceiptWaits()) {
+                LOG_ENGINE_INFO("[ACCEPT] move_to_live interrupted by armed terminal combat receipts line={}",
+                    action.source_line);
+                return dispatch;
+            }
+            if (m_state == State::RunningAimFireAtRemoteLive &&
+                hasLocalKillOfRemoteAfter(action.remote_client_id, m_combat_receipt_start_generation, observation)) {
+                LOG_ENGINE_INFO("[ACCEPT] aim_fire_at_remote_live interrupted by local kill line={} target_client={}",
+                    action.source_line, action.remote_client_id);
+                advanceAction();
+                return dispatch;
+            }
+            if (m_state == State::RunningMoveToLive || m_state == State::RunningAimFireAtRemoteLive) {
+                m_elapsed_seconds += std::max(delta_time, 0.0f);
+                if (m_elapsed_seconds * 1000.0f < static_cast<float>(action.duration_ms))
+                    return dispatch;
+            }
+            disable("client action script stopped: input action interrupted by admission barrier on line " +
+                std::to_string(action.source_line));
+            return dispatch;
+        }
+        if (!observation.input_admission_open &&
+            (action.kind == ClientAcceptanceActionKind::Input ||
+             action.kind == ClientAcceptanceActionKind::MoveToLive ||
+             action.kind == ClientAcceptanceActionKind::MoveToWorldItemLive ||
+             action.kind == ClientAcceptanceActionKind::SelectSlot ||
+             action.kind == ClientAcceptanceActionKind::TapDrop ||
+             action.kind == ClientAcceptanceActionKind::HoldUseLive ||
+             action.kind == ClientAcceptanceActionKind::HoldUseDefuse ||
+             action.kind == ClientAcceptanceActionKind::AimFireAtRemoteLive))
+            return dispatch;
         switch (m_state) {
         case State::Ready:
             if (action.kind == ClientAcceptanceActionKind::Team) {
@@ -1333,7 +1388,8 @@ namespace FPSShooter
                 advanceAction();
                 return dispatch;
             }
-            if (!canRunLivePawnAction(observation)) {
+            if (!canRunLivePawnAction(observation) &&
+                (observation.input_admission_open || !observation.connected)) {
                 disable("client action script stopped: combat receipt wait lost authoritative Live pawn state on line " +
                     std::to_string(action.source_line));
                 return dispatch;
@@ -1427,8 +1483,8 @@ namespace FPSShooter
 
     inline bool ClientAcceptanceScript::isMoveToLiveSteering() const
     {
-        return m_state == State::RunningMoveToLive ||
-            m_state == State::RunningMoveToWorldItemLive;
+        return !m_input_interrupted && (m_state == State::RunningMoveToLive ||
+            m_state == State::RunningMoveToWorldItemLive);
     }
 
     inline void ClientAcceptanceScript::noteInputCommandSent(uint32_t command_tick,
@@ -1472,7 +1528,7 @@ namespace FPSShooter
 
     inline void ClientAcceptanceScript::applyInput(Net::InputState& state, bool movement_allowed, bool can_fire, bool can_reload) const
     {
-        if (!m_enabled || m_index >= m_actions.size())
+        if (!m_enabled || m_index >= m_actions.size() || m_input_interrupted)
             return;
 
         const Action& action = m_actions[m_index];

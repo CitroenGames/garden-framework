@@ -41,6 +41,11 @@ namespace FPSShooter
         void reset()
         {
             ticks.reset();
+            clearPendingEdges();
+        }
+
+        void clearPendingEdges()
+        {
             jump_presses = 0;
             drop_presses = 0;
             reload_presses = 0;
@@ -51,9 +56,9 @@ namespace FPSShooter
         // frame. Press counts, rather than wasPressed(), preserve a tap that
         // arrives on a zero-step frame and distribute repeated edges across
         // later fixed command ticks.
-        void captureFrameEdges(const InputActionSystem& actions)
+        void captureFrameEdges(const InputActionSystem& actions, bool accept_jump = true)
         {
-            add(jump_presses, actions.get("Jump").press_count);
+            if (accept_jump) add(jump_presses, actions.get("Jump").press_count);
             add(drop_presses, actions.get("Drop").press_count);
             add(reload_presses, actions.get("Reload").press_count);
             for (uint8_t slot = 1; slot <= 5; ++slot)
@@ -120,6 +125,30 @@ namespace FPSShooter
         uint32_t drop_presses = 0;
         uint32_t reload_presses = 0;
         std::array<uint32_t, 6> weapon_select_presses{};
+    };
+
+    // A barrier requires release after the barrier before held one-shot actions
+    // can be used again. The frame in which it arrived predates the network pump.
+    class AdmissionActionGate
+    {
+    public:
+        void barrier() { fire_blocked = jump_blocked = use_blocked = true; }
+        void observeFrame(const InputActionSystem& actions, bool discard_frame)
+        {
+            if (discard_frame) return;
+            if (!actions.get("Fire").held) fire_blocked = false;
+            if (!actions.get("Jump").held) jump_blocked = false;
+            if (!actions.get("Use").held) use_blocked = false;
+        }
+        bool allowsJump() const { return !jump_blocked; }
+        void filter(Net::InputState& input) const
+        {
+            if (fire_blocked) input.buttons &= static_cast<uint16_t>(~Net::InputFlags::ATTACK);
+            if (jump_blocked) input.buttons &= static_cast<uint16_t>(~Net::InputFlags::JUMP);
+            if (use_blocked) input.buttons &= static_cast<uint16_t>(~Net::InputFlags::USE);
+        }
+    private:
+        bool fire_blocked = false, jump_blocked = false, use_blocked = false;
     };
 
     // Converts the game module's named actions into the existing network input

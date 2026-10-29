@@ -212,6 +212,9 @@ void ServerNetworkManager::pumpNetworkEvents(float delta_time)
         return;
     }
 
+    // This owner-thread boundary runs after any preceding game transition.
+    drainAdmissionDisconnects();
+
     // Process network events (bounded to prevent flood-induced stalls)
     ENetEvent event;
     NetworkEventBudget event_budget("Server");
@@ -249,6 +252,9 @@ void ServerNetworkManager::pumpNetworkEvents(float delta_time)
             case ENET_EVENT_TYPE_NONE:
                 break;
         }
+        // Input and connection callbacks have returned; cleanup cannot
+        // invalidate a game transition still on the callback stack.
+        drainAdmissionDisconnects();
     }
 
     refreshStats(delta_time);
@@ -506,7 +512,21 @@ void ServerNetworkManager::handleConnectRequest(ENetPeer* peer, BitReader& reade
     accept.level_hash = server_level_hash;
     accept.capability_flags = msg.capability_flags & server_capability_flags;
     NetworkSerializer::serialize(writer, accept);
-    sendReliableMessage(peer, writer);
+    if (!sendReliableMessage(peer, writer)) {
+        disconnectClient(client_id, "Connect acceptance publication failed");
+        return;
+    }
+    InputAdmissionStateMessage initial;
+    initial.epoch = 1;
+    BitWriter admission_writer;
+    NetworkSerializer::serialize(admission_writer, initial);
+    const bool initial_published = sendReliableMessage(peer, admission_writer);
+    MovementTrace::emit("server_admission", "role=server client={} server_tick={} epoch={} open={} change=initial published={}",
+        client_id, current_tick, initial.epoch, initial.open, initial_published);
+    if (!initial_published) {
+        disconnectClient(client_id, "Input admission publication failed");
+        return;
+    }
 
     // Notify callback
     if (on_client_connected) {
@@ -534,8 +554,8 @@ void ServerNetworkManager::handleInputCommand(uint16_t client_id, BitReader& rea
     const uint64_t trace_packet = MovementTrace::enabled()
         ? trace_packet_counter.fetch_add(1, std::memory_order_relaxed) + 1 : 0;
     const auto trace_received = [&](const InputSample& sample, size_t ordinal) {
-        MovementTrace::emit("authority_received", "role=server packet={} sample={} client={} server_tick={} input_tick={} buttons={} forward={} right={} view_yaw={} view_pitch={}",
-            trace_packet, ordinal, client_id, current_tick, sample.tick, sample.buttons, sample.move_forward, sample.move_right, sample.camera_yaw, sample.camera_pitch);
+        MovementTrace::emit("authority_received", "role=server packet={} sample={} client={} server_tick={} input_tick={} epoch={} buttons={} forward={} right={} view_yaw={} view_pitch={}",
+            trace_packet, ordinal, client_id, current_tick, sample.tick, msg.admission_epoch, sample.buttons, sample.move_forward, sample.move_right, sample.camera_yaw, sample.camera_pitch);
     };
     const auto trace_decision = [&](const InputSample& sample, size_t ordinal, const char* decision, const char* reason) {
         MovementTrace::emit("authority_decision", "role=server packet={} sample={} client={} server_tick={} input_tick={} decision={} reason={}",
@@ -549,6 +569,13 @@ void ServerNetworkManager::handleInputCommand(uint16_t client_id, BitReader& rea
             trace_decision(trace_samples[i], i, "rejected", reason);
         }
     };
+
+    // A rejected epoch must never advance the input cursor or spend budget.
+    if (!it->second.info.input_admission_open ||
+        msg.admission_epoch != it->second.info.input_admission_epoch) {
+        trace_unavailable_pawn("admission_epoch_or_closed");
+        return;
+    }
 
     // Update acknowledged tick. Clients may acknowledge 0 before their first world snapshot.
     if (msg.last_received_tick == 0 ||
@@ -578,43 +605,7 @@ void ServerNetworkManager::handleInputCommand(uint16_t client_id, BitReader& rea
     }
 
     const auto samples = collectInputSamplesChronological(msg, redundant_inputs);
-    const bool blocked = input_filter && !input_filter(client_id, player_entity);
-    const bool reopening = !blocked && it->second.info.input_filter_was_closed;
-    if (reopening) {
-        for (size_t i = 0; i < redundant_inputs.size(); ++i) {
-            trace_received(redundant_inputs[i], i);
-            trace_decision(redundant_inputs[i], i, "rejected", "filter_transition_redundant");
-        }
-        trace_received(makePrimaryInputSample(msg), redundant_inputs.size());
-    } else {
-        for (size_t i = 0; i < samples.size(); ++i) trace_received(samples[i], i);
-    }
-
-    // A game may reject input while a pawn is frozen, dead, or otherwise
-    // unable to act. Keep the transport cursor current for valid, monotonic
-    // samples without spending the action budget or invoking any gameplay
-    // path. Serial ordering prevents already observed filtered samples from
-    // becoming newly eligible after the filter opens.
-    if (blocked) {
-        it->second.info.input_filter_was_closed = true;
-        for (size_t i = 0; i < samples.size(); ++i) {
-            const auto& sample = samples[i];
-            if (!isValidInputSample(sample)) {
-                trace_decision(sample, i, "rejected", "invalid");
-                LOG_ENGINE_WARN("Client {0} sent invalid input sample at tick {1}", client_id, sample.tick);
-                recordDroppedFromPeer(it->second.info.peer, 0);
-                continue;
-            }
-
-            if (sample.tick != 0 && isTickNewer(sample.tick, it->second.info.last_input_tick)) {
-                it->second.info.last_input_tick = sample.tick;
-                trace_decision(sample, i, "rejected", "input_filter_cursor_advanced");
-            } else {
-                trace_decision(sample, i, "rejected", "input_filter_stale");
-            }
-        }
-        return;
-    }
+    for (size_t i = 0; i < samples.size(); ++i) trace_received(samples[i], i);
 
     auto& player = game_world->registry.get<PlayerComponent>(player_entity);
     auto& transform = game_world->registry.get<TransformComponent>(player_entity);
@@ -630,13 +621,9 @@ void ServerNetworkManager::handleInputCommand(uint16_t client_id, BitReader& rea
         it->second.info.last_input_budget_server_tick,
         it->second.info.input_tick_budget);
 
-    // No redundant command can be classified as generated after reopening.
-    // Await an admissible primary before returning to normal replay handling.
-    const InputSample primary = makePrimaryInputSample(msg);
-    const size_t live_sample_count = reopening ? 1 : samples.size();
-    for (size_t i = 0; i < live_sample_count; ++i) {
-        const InputSample& sample = reopening ? primary : samples[i];
-        const size_t ordinal = reopening ? redundant_inputs.size() : i;
+    for (size_t i = 0; i < samples.size(); ++i) {
+        const InputSample& sample = samples[i];
+        const size_t ordinal = i;
         if (!isValidInputSample(sample)) {
             trace_decision(sample, ordinal, "rejected", "invalid");
             LOG_ENGINE_WARN("Client {0} sent invalid input sample at tick {1}", client_id, sample.tick);
@@ -651,8 +638,8 @@ void ServerNetworkManager::handleInputCommand(uint16_t client_id, BitReader& rea
 
         if (!consumeInputTickBudget(it->second.info.input_tick_budget)) {
             LOG_ENGINE_WARN("Client {0} exceeded input tick budget at server tick {1}", client_id, current_tick);
-            for (size_t skipped = i; skipped < live_sample_count; ++skipped)
-                trace_decision(reopening ? primary : samples[skipped], reopening ? redundant_inputs.size() : skipped, "rejected", skipped == i ? "budget_exhausted" : "after_budget_break_not_evaluated");
+            for (size_t skipped = i; skipped < samples.size(); ++skipped)
+                trace_decision(samples[skipped], skipped, "rejected", skipped == i ? "budget_exhausted" : "after_budget_break_not_evaluated");
             break;
         }
 
@@ -712,11 +699,16 @@ void ServerNetworkManager::handleInputCommand(uint16_t client_id, BitReader& rea
         player.ground_normal = result.ground_normal;
 
         it->second.info.last_input_tick = sample.tick;
-        it->second.info.input_filter_was_closed = false;
 
         if (input_sample_handler) {
             input_sample_handler(client_id, player_entity, sample, client_view_tick);
         }
+
+        // Gameplay can synchronously close admission, replace the pawn, or
+        // disconnect. Never retain an iterator/reference across that callback.
+        it = clients.find(client_id);
+        if (it == clients.end() || !it->second.info.input_admission_open ||
+            it->second.info.input_admission_epoch != msg.admission_epoch) return;
 
         // WEAPON_SELECT edge: fire only when the value changes vs the last
         // applied sample for this client (chronological order guaranteed).
@@ -724,6 +716,9 @@ void ServerNetworkManager::handleInputCommand(uint16_t client_id, BitReader& rea
         if (weapon_select != it->second.info.last_weapon_select) {
             if (weapon_select != 0 && weapon_select_handler) {
                 weapon_select_handler(client_id, player_entity, weapon_select, sample);
+                it = clients.find(client_id);
+                if (it == clients.end() || !it->second.info.input_admission_open ||
+                    it->second.info.input_admission_epoch != msg.admission_epoch) return;
             }
             it->second.info.last_weapon_select = weapon_select;
         }
@@ -1157,6 +1152,7 @@ bool ServerNetworkManager::shouldAcceptClientMessage(ENetPeer* peer, uint8_t mes
         case MessageType::DESPAWN_PLAYER:
         case MessageType::SPAWN_ENTITY:
         case MessageType::WORLD_STATE_UPDATE:
+        case MessageType::INPUT_ADMISSION_STATE:
         case MessageType::PONG:
         case MessageType::CVAR_SYNC:
         case MessageType::CVAR_INITIAL_SYNC:
@@ -1199,6 +1195,60 @@ void ServerNetworkManager::disconnectClient(uint16_t client_id, const char* reas
     if (on_client_disconnected) {
         on_client_disconnected(client_id);
     }
+}
+
+void ServerNetworkManager::drainAdmissionDisconnects()
+{
+    // Snapshot IDs because the disconnect callback can change other clients.
+    std::vector<uint16_t> pending;
+    for (const auto& [client_id, connection] : clients) {
+        if (connection.admission_disconnect_pending) pending.push_back(client_id);
+    }
+    for (uint16_t client_id : pending) {
+        auto it = clients.find(client_id);
+        if (it != clients.end() && it->second.admission_disconnect_pending)
+            disconnectClient(client_id, it->second.admission_disconnect_reason);
+    }
+}
+
+bool ServerNetworkManager::setInputAdmission(uint16_t client_id, bool open, InputAdmissionChange change)
+{
+    auto it = clients.find(client_id);
+    if (it == clients.end()) return false;
+    auto& connection = it->second;
+    auto& info = connection.info;
+    if (connection.admission_disconnect_pending) return false;
+    if (change == InputAdmissionChange::Policy && info.input_admission_open == open) return true;
+    if (info.input_admission_epoch == UINT64_MAX) {
+        info.input_admission_open = false;
+        connection.admission_disconnect_pending = true;
+        connection.admission_disconnect_reason = "Input admission epoch exhausted";
+        MovementTrace::emit("server_admission", "role=server client={} server_tick={} epoch={} open={} change=exhausted published=false",
+            client_id, current_tick, info.input_admission_epoch, info.input_admission_open);
+        return false;
+    }
+    ++info.input_admission_epoch;
+    info.input_admission_open = open;
+    info.last_weapon_select = 0;
+    InputAdmissionStateMessage msg;
+    msg.epoch = info.input_admission_epoch;
+    msg.open = open;
+    BitWriter writer;
+    NetworkSerializer::serialize(writer, msg);
+    const bool published = sendReliableMessage(info.peer, writer);
+    if (!published) {
+        info.input_admission_open = false;
+        MovementTrace::emit("server_admission", "role=server client={} server_tick={} epoch={} requested_open={} open={} change={} published=false",
+            client_id, current_tick, info.input_admission_epoch, open, info.input_admission_open,
+            static_cast<int>(change));
+        connection.admission_disconnect_pending = true;
+        connection.admission_disconnect_reason = "Input admission publication failed";
+        return false;
+    }
+    MovementTrace::emit("server_admission", "role=server client={} server_tick={} epoch={} requested_open={} open={} change={} published=true",
+        client_id, current_tick, info.input_admission_epoch, open, info.input_admission_open,
+        static_cast<int>(change));
+    return true;
 }
 
 void ServerNetworkManager::setClientPlayerEntity(uint16_t client_id, uint32_t network_id)

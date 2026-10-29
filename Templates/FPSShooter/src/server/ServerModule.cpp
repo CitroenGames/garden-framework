@@ -213,6 +213,34 @@ static bool publishAuthoritativeNoise(Bots::BotHeardNoiseCategory category,
 
 static bool spawnPlayerForClient(uint16_t client_id, uint8_t requested_team = FpsLogic::kTeamNone); // defined with player spawning below
 static void despawnPlayerForClient(uint16_t client_id); // defined with player spawning below
+// Admission follows the authoritative session state in competitive play.
+// Score modes publish their pawn lifetime boundaries directly.
+static void setPawnInputAdmission(uint16_t client_id, bool open, Net::InputAdmissionChange change)
+{
+    const Net::ClientInfo* client = g_server_network.getClientInfo(client_id);
+    if (!client || !client->peer) return;
+    if (!open && g_competitive) {
+        g_bomb_use_held.erase(client_id);
+        g_bomb_last_buttons.erase(client_id);
+    }
+    g_server_network.setInputAdmission(client_id, open, change);
+}
+
+static void publishCompetitiveInputAdmission(uint16_t client_id, Net::InputAdmissionChange change)
+{
+    const Competitive::SessionRecord* session = g_sessions.find(client_id);
+    const bool open = session && session->state == Competitive::SessionState::Active &&
+        Competitive::isPlayingTeam(session->team) &&
+        !FPSShooter::isPawnMovementLocked(g_round_system.state.phase);
+    setPawnInputAdmission(client_id, open, change);
+}
+
+static void publishAllPawnInputAdmissions()
+{
+    for (uint16_t client_id : g_sessions.clientIds())
+        publishCompetitiveInputAdmission(client_id, Net::InputAdmissionChange::Policy);
+}
+
 static int32_t botCountFromEnv() { const char* v = std::getenv("FPS_BOTS"); return v ? std::max(0, std::atoi(v)) : 0; }
 static uint8_t botDifficultyFromEnv() { const char* v = std::getenv("FPS_BOT_DIFFICULTY"); return Bots::clampDifficulty(v ? std::atoi(v) : 1); }
 // AI debug v1 (bots.md s10): env switches (FPS_BOTS-style; ConVar plumbing would need
@@ -503,6 +531,8 @@ static bool resolveFpsDeath(
     FpsServer::stopFpsWeaponActions(game_world.registry, victim_entity);
     const auto& victim_network = game_world.registry.get<NetworkedEntity>(victim_entity);
     const uint16_t victim_client_id = victim_network.owner_client_id;
+    if (g_competitive) g_sessions.markAwaitingSpawn(victim_client_id);
+    setPawnInputAdmission(victim_client_id, false, InputAdmissionChange::Policy);
     const glm::vec3 death_position = game_world.registry.get<TransformComponent>(victim_entity).position;
     const bool self_inflicted = attacker_client_id == victim_client_id;
     const int32_t attacker_bot_index = botIndexForClient(game_world, attacker_client_id);
@@ -998,6 +1028,8 @@ static void respawnPlayer(uint16_t client_id, const glm::vec3& spawn_pos)
         if (net.owner_client_id == client_id && net.is_player) {
             auto& trans = view.get<TransformComponent>(entity);
             auto& health = view.get<FpsHealthComponent>(entity);
+            if (g_competitive) g_sessions.markAwaitingSpawn(client_id);
+            setPawnInputAdmission(client_id, false, InputAdmissionChange::PawnLifetime);
 
             // Restore the entire template pawn state at this respawn boundary.
             // Position, physics, and replication continue below as server
@@ -1039,6 +1071,12 @@ static void respawnPlayer(uint16_t client_id, const glm::vec3& spawn_pos)
                     g_server_network.sendReliableToClient(i, writer);
             }
 
+            if (g_competitive) {
+                g_sessions.markSpawned(client_id, Competitive::teamFromId(team2), g_round_system.state.phase);
+                publishCompetitiveInputAdmission(client_id, InputAdmissionChange::Policy);
+            } else {
+                setPawnInputAdmission(client_id, true, InputAdmissionChange::Policy);
+            }
             LOG_ENGINE_INFO("Player {} respawned at ({},{},{})", client_id, spawn_pos.x, spawn_pos.y, spawn_pos.z);
             break;
         }
@@ -2872,6 +2910,7 @@ static void competitivePeriodReset(bool overtime)
     // Pawnless late joiners hold their side in the session coordinator until
     // Freeze creates their ECS pawn, so mirror the authoritative side swap.
     g_sessions.swapPlayingTeams();
+    publishAllPawnInputAdmissions();
     LOG_ENGINE_INFO("Competitive period reset (overtime={}): teams swapped, money reset", overtime);
 }
 static void competitiveRoundEndAwards(Competitive::RoundWinner winner, Competitive::RoundEndReason reason)
@@ -3028,17 +3067,19 @@ static bool handleCompetitiveTeamSelect(uint16_t client_id, BitReader& reader)
                     res = rejection.result;
                     out = rejection.team;
                 } else if (g_sessions.assignTeam(client_id, out, g_round_system.state.phase)) {
+                    publishCompetitiveInputAdmission(client_id, InputAdmissionChange::Policy);
                     w->registry.get<TeamComponent>(e).team_id = Competitive::teamId(out);
                     // A permitted switch is an explicit new spawn: health, loadout,
                     // physics position, and the reliable respawn announcement all
                     // change together at the phase boundary.
                     respawnPlayer(client_id, spawn_pos);
-                    g_sessions.markSpawned(client_id, out, g_round_system.state.phase);
                 }
             }
             LOG_ENGINE_INFO("Competitive team select client={} team {}->{}", client_id, (int)old, (int)Competitive::teamId(out));
         }
     }
+    if (res == Competitive::TeamSelectResult::Ok)
+        publishCompetitiveInputAdmission(client_id, InputAdmissionChange::Policy);
     TeamResultMessage reply;
     reply.result = static_cast<uint8_t>(res);
     reply.team = static_cast<uint8_t>(out);
@@ -3169,6 +3210,10 @@ static bool constructPlayerPawnForClient(
         else
             g_sessions.markAwaitingSpawn(client_id);
     }
+    if (g_competitive)
+        publishCompetitiveInputAdmission(client_id, InputAdmissionChange::PawnLifetime);
+    else
+        setPawnInputAdmission(client_id, true, InputAdmissionChange::PawnLifetime);
     LOG_ENGINE_INFO("Spawned player (net_id={}) for client {} at ({},{},{})",
         network_id, client_id, spawn_pos.x, spawn_pos.y, spawn_pos.z);
     return true;
@@ -3252,6 +3297,8 @@ static void despawnPlayerForClient(uint16_t client_id)
     for (auto entity : view) {
         auto& networked = view.get<NetworkedEntity>(entity);
         if (networked.owner_client_id == client_id && networked.is_player) {
+            if (g_competitive) g_sessions.markAwaitingSpawn(client_id);
+            setPawnInputAdmission(client_id, false, InputAdmissionChange::PawnLifetime);
             if (g_competitive && g_bomb_system.bomb.carrier == entity && w->registry.all_of<TransformComponent>(entity))
                 g_bomb_system.onCarrierDisconnect(w->registry.get<TransformComponent>(entity).position);
             if (g_competitive) {
@@ -3385,6 +3432,7 @@ GAME_API bool gardenServerInit(EngineServices* services)
                     competitivePhaseName(ph), g_round_system.state.round_number,
                     (int)g_round_system.state.wins_attackers, (int)g_round_system.state.wins_defenders,
                     g_round_system.state.phase_deadline_tick);
+                publishAllPawnInputAdmissions();
                 if (ph == Competitive::RoundPhase::Freeze) {
                     FpsCombat::clearCombatFeed(g_server_services->game_world->registry);
                     competitiveFreezeRespawnAll();
@@ -3427,34 +3475,6 @@ GAME_API bool gardenServerInit(EngineServices* services)
 
     g_server_network.setWorld(services->game_world);
 
-    g_server_network.setInputFilter([](uint16_t, entt::entity player_entity) {
-        world* w = g_server_services ? g_server_services->game_world : nullptr;
-        if (!w || !w->registry.valid(player_entity)) {
-            return false;
-        }
-        if (!w->registry.all_of<FpsHealthComponent>(player_entity)) {
-            return true;
-        }
-        const auto& health = w->registry.get<FpsHealthComponent>(player_entity);
-        if (!health.alive) {
-            return false;
-        }
-        // Deathmatch and team deathmatch do not compose a competitive world
-        // context.  Their movement gate is the pawn's authoritative alive
-        // state, so do not evaluate the competitive round phase here.
-        if (!g_competitive) {
-            return true;
-        }
-        if (!w->registry.all_of<TeamComponent>(player_entity)) {
-            return false;
-        }
-        return FPSShooter::isPawnMovementAllowed(
-            health,
-            w->registry.get<TeamComponent>(player_entity),
-            true,
-            g_round_system.state.phase);
-    });
-
     g_server_network.setInputSampleHandler([](
         uint16_t client_id,
         entt::entity player_entity,
@@ -3477,6 +3497,7 @@ GAME_API bool gardenServerInit(EngineServices* services)
     });
 
     g_server_network.setOnClientConnected([](uint16_t client_id) {
+        setPawnInputAdmission(client_id, false, InputAdmissionChange::Policy);
         if (!g_competitive) {
             (void)spawnPlayerForClient(client_id);
             return;
@@ -3667,6 +3688,8 @@ GAME_API void gardenServerUpdate(float delta_time)
 
         if (health.alive && trans.position.y < -50.0f) {
             // Kill the player (suicide)
+            if (g_competitive) g_sessions.markAwaitingSpawn(net.owner_client_id);
+            setPawnInputAdmission(net.owner_client_id, false, InputAdmissionChange::Policy);
             health.alive = false;
             health.health = 0;
             resolveFpsDeath(*w, net.owner_client_id, entity, WeaponType::COUNT);

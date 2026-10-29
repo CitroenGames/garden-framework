@@ -11,12 +11,12 @@
 
 namespace Net {
 
-// Protocol version for compatibility checking (wire v7, exact-match).
+// Protocol version for compatibility checking (wire v8, exact-match).
 //
-// v7 is an exact wire revision gating changed custom-message contracts.
+// v8 is an exact wire revision gating changed custom-message contracts.
 // Matching rejects an older module before changed custom payloads are dispatched.
-constexpr uint32_t NETWORK_PROTOCOL_VERSION = 7;
-constexpr uint32_t NETWORK_PROTOCOL_MIN_SUPPORTED = 7; // exact-match policy kept
+constexpr uint32_t NETWORK_PROTOCOL_VERSION = 8;
+constexpr uint32_t NETWORK_PROTOCOL_MIN_SUPPORTED = 8; // exact-match policy kept
 constexpr uint16_t MAX_NETWORKED_ENTITIES = 2048;
 constexpr uint16_t MAX_SYNCED_CVARS = 1024;
 constexpr uint8_t CUSTOM_MESSAGE_START = 64;
@@ -92,6 +92,7 @@ enum class MessageType : uint8_t
     // Input & Simulation (Unreliable)
     INPUT_COMMAND = 10,       // Client -> Server
     WORLD_STATE_UPDATE = 11,  // Server -> Clients
+    INPUT_ADMISSION_STATE = 12, // Server -> owning client (reliable)
     // Debugging
     PING = 20,
     PONG = 21,
@@ -226,9 +227,17 @@ struct InputSample
     uint32_t view_server_tick = 0; // server tick the client was viewing (CAP_VIEW_TICK)
 };
 
+struct InputAdmissionStateMessage
+{
+    MessageType type = MessageType::INPUT_ADMISSION_STATE;
+    uint64_t epoch = 0;
+    bool open = false;
+};
+
 struct InputCommandMessage
 {
     MessageType type = MessageType::INPUT_COMMAND;
+    uint64_t admission_epoch = 0;
     uint32_t client_tick = 0;         // Latest tick in this packet
     uint32_t last_received_tick = 0;  // Acknowledge server tick
     uint8_t input_count = 1;          // Number of inputs (1-3 for redundancy)

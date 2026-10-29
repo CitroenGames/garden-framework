@@ -213,6 +213,8 @@ static EngineServices* g_services = nullptr;
 static std::unique_ptr<PlayerController> g_player_controller;
 static Net::ClientNetworkManager g_network;
 static FPSShooter::FixedNetworkInputCadence g_client_input_cadence;
+static FPSShooter::AdmissionActionGate g_admission_action_gate;
+static bool g_admission_barrier_this_frame = false;
 static GameHUD g_hud;
 static FPSShooter::ClientAcceptanceScript g_acceptance_script;
 // Latches supplied by the ordinary client reconciliation path. The acceptance
@@ -495,6 +497,9 @@ static void runFixedClientInputStep(world& game_world,
         return;
     }
 
+    if (!g_network.isInputAdmissionOpen() || g_admission_barrier_this_frame)
+        return;
+
     const uint32_t command_tick = g_network.beginInputCommandTick();
     if (g_player_controller)
         g_player_controller->setMovementEnabled(
@@ -518,8 +523,9 @@ static void runFixedClientInputStep(world& game_world,
         edges);
     if (g_local_alive && !ui_modal)
         g_acceptance_script.applyInput(input_state, movement_allowed, can_fire, can_reload);
-    MovementTrace::emit("client_command", "role=client frame_scope=game_update frame_id={} frame_step={} input_tick={} fixed_delta={} edge={} held={} buttons={} forward={} right={} view_yaw={} view_pitch={} alive={} phase_locked={} ui_modal={} acknowledgement=unavailable",
-        trace_frame_id, trace_step, command_tick, fixed_delta, edges.jump, input_actions.get("Jump").held, input_state.buttons,
+    g_admission_action_gate.filter(input_state);
+    MovementTrace::emit("client_command", "role=client frame_scope=game_update frame_id={} frame_step={} input_tick={} epoch={} fixed_delta={} edge={} held={} buttons={} forward={} right={} view_yaw={} view_pitch={} alive={} phase_locked={} ui_modal={} acknowledgement=unavailable",
+        trace_frame_id, trace_step, command_tick, g_network.getInputAdmissionEpoch(), fixed_delta, edges.jump, input_actions.get("Jump").held, input_state.buttons,
         input_state.move_forward, input_state.move_right, input_state.camera_yaw, input_state.camera_pitch, g_local_alive, movement_locked, ui_modal);
     const bool acceptance_steering_move_emitted = g_local_alive && !ui_modal && movement_allowed &&
         g_acceptance_script.isMoveToLiveSteering() &&
@@ -716,6 +722,17 @@ GAME_API bool gardenGameInit(EngineServices* services)
         g_services = nullptr;
         return false;
     }
+
+    g_admission_action_gate.barrier();
+    g_network.setOnInputAdmissionChanged([](uint64_t, bool) {
+        g_admission_barrier_this_frame = true;
+        g_client_input_cadence.clearPendingEdges();
+        g_admission_action_gate.barrier();
+        g_acceptance_script.clearPendingInput();
+        g_local_reloading = false;
+        if (g_services && g_services->game_world)
+            Net::PredictionSystem::reset(*g_services->game_world, g_network.getLocalPlayerEntityRef());
+    });
 
     const char* address = (services->connect_address && services->connect_address[0])
                           ? services->connect_address : "127.0.0.1";
@@ -1093,7 +1110,8 @@ GAME_API void gardenGameUpdate(float delta_time)
     // Update debug draw
     DebugDraw::get().update(delta_time);
 
-    // Network update
+    // Input actions were evaluated before this pump; any barrier invalidates this entire frame.
+    g_admission_barrier_this_frame = false;
     g_network.update(delta_time);
     if (UiLogic::observeConnection(g_ui_connection, g_ui, g_network.isConnected())) {
         g_competitive_presentation_cache.clear();
@@ -1114,6 +1132,7 @@ GAME_API void gardenGameUpdate(float delta_time)
     const EntityRef script_local_player = g_network.getLocalPlayerEntityRef();
     FPSShooter::ClientAcceptanceObservation acceptance_observation;
     acceptance_observation.connected = g_network.isConnected();
+    acceptance_observation.input_admission_open = g_network.isInputAdmissionOpen() && !g_admission_barrier_this_frame;
     acceptance_observation.local_client_id = g_network.getClientId();
     acceptance_observation.has_round_state = g_comp.has_round_state;
     acceptance_observation.bomb_planted = g_comp.bomb_planted;
@@ -1303,8 +1322,12 @@ GAME_API void gardenGameUpdate(float delta_time)
     // command sequence and predicted simulation consume this fixed clock.
     const float client_fixed_delta = game_world->fixed_delta;
     g_client_input_cadence.setFixedDelta(client_fixed_delta);
-    if (input_actions)
-        g_client_input_cadence.captureFrameEdges(*input_actions);
+    if (input_actions && g_network.isConnected()) {
+        const bool accept_jump = g_admission_action_gate.allowsJump();
+        g_admission_action_gate.observeFrame(*input_actions, g_admission_barrier_this_frame);
+        if (g_network.isInputAdmissionOpen() && !g_admission_barrier_this_frame)
+            g_client_input_cadence.captureFrameEdges(*input_actions, accept_jump);
+    }
 
     if (!g_network.isConnected() && g_player_controller)
         g_player_controller->setMovementEnabled(
